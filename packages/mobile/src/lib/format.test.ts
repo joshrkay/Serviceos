@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+  deriveDurationSeconds,
+  formatDuration,
   formatMoneyCents,
   formatMoneyShort,
-  formatRelativeTime,
   formatShortDate,
   formatWeekdayDate,
 } from './format';
@@ -54,28 +55,29 @@ describe('formatShortDate', () => {
   });
 });
 
-describe('formatRelativeTime', () => {
-  const NOW = Date.UTC(2026, 5, 24, 12, 0, 0);
-  const at = (ms: number) => new Date(NOW - ms).toISOString();
+describe('formatDuration', () => {
+  it('renders minutes and seconds or seconds only', () => {
+    expect(formatDuration(null)).toBe('—');
+    expect(formatDuration(45)).toBe('45s');
+    expect(formatDuration(125)).toBe('2m 5s');
+  });
+});
 
-  it('renders compact buckets up to a week', () => {
-    expect(formatRelativeTime(at(10_000), NOW)).toBe('now'); // < 45s
-    expect(formatRelativeTime(at(9 * 60_000), NOW)).toBe('9m');
-    expect(formatRelativeTime(at(3 * 3_600_000), NOW)).toBe('3h');
-    expect(formatRelativeTime(at(2 * 86_400_000), NOW)).toBe('2d');
+describe('deriveDurationSeconds', () => {
+  it('prefers server-provided durationSeconds', () => {
+    expect(deriveDurationSeconds(90, '2026-06-20T10:00:00Z', '2026-06-20T10:05:00Z')).toBe(90);
   });
 
-  it('falls back to a short date once older than a week', () => {
-    expect(formatRelativeTime('2026-06-10T12:00:00Z', NOW, 'UTC')).toBe('Jun 10, 2026');
+  it('derives from startedAt and endedAt when durationSeconds is null', () => {
+    expect(
+      deriveDurationSeconds(null, '2026-06-20T10:00:00Z', '2026-06-20T10:05:30Z'),
+    ).toBe(330);
   });
 
-  it('treats slight clock skew (future) as "now", but a genuine future date as a date', () => {
-    expect(formatRelativeTime(at(-5_000), NOW)).toBe('now'); // 5s future → skew
-    expect(formatRelativeTime('2026-06-27T12:00:00Z', NOW, 'UTC')).toBe('Jun 27, 2026'); // 3d future
-  });
-
-  it('is empty for invalid input', () => {
-    expect(formatRelativeTime(null, NOW)).toBe('');
-    expect(formatRelativeTime('not-a-date', NOW)).toBe('');
+  it('returns null when timestamps are missing or invalid', () => {
+    expect(deriveDurationSeconds(null, '2026-06-20T10:00:00Z', null)).toBeNull();
+    expect(deriveDurationSeconds(null, null, '2026-06-20T10:05:00Z')).toBeNull();
+    expect(deriveDurationSeconds(null, 'bad', '2026-06-20T10:05:00Z')).toBeNull();
+    expect(deriveDurationSeconds(null, '2026-06-20T10:05:00Z', '2026-06-20T10:00:00Z')).toBeNull();
   });
 });

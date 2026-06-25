@@ -22,7 +22,7 @@ function jsonResponse(body: unknown): Response {
 }
 
 describe('PortalDashboard — tenant-neutral class contract', () => {
-  beforeEach(() => vi.unstubAllGlobals());
+  beforeEach(() => { vi.unstubAllGlobals(); });
 
   it('renders no raw palette and no ServiceOS brand blue', async () => {
     vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => {

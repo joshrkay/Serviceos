@@ -10,7 +10,6 @@ interface Customer {
   lastName?: string;
   primaryPhone?: string;
   email?: string;
-  accountType?: 'residential' | 'b2b' | 'property_manager';
 }
 
 const h = vi.hoisted(() => ({
@@ -36,7 +35,7 @@ vi.mock('../hooks/useListQuery', () => ({
 }));
 
 // eslint-disable-next-line import/first
-import Customers from '../../app/customers';
+import Customers from '../../app/(tabs)/customers';
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -48,12 +47,13 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe('Customers screen', () => {
-  it('Back is a >=44px tap target and returns to the prior screen', () => {
-    const { getByText } = render(createElement(Customers));
-    const back = getByText('‹ Back').closest('button')!;
-    expect(back.className).toMatch(/\bmin-h-11\b/);
-    fireEvent.click(back);
-    expect(h.back).toHaveBeenCalledTimes(1);
+  it('renders search and add controls on the tab screen', () => {
+    const { getByPlaceholderText, getByText } = render(createElement(Customers));
+    expect(getByPlaceholderText('Search customers…')).toBeTruthy();
+    const add = getByText('+ Add').closest('button')!;
+    expect(add.className).toMatch(/\bmin-h-11\b/);
+    fireEvent.click(add);
+    expect(h.push).toHaveBeenCalledWith('/customers/new');
   });
 
   it('shows the empty state when there are no customers', () => {
@@ -71,9 +71,6 @@ describe('Customers screen', () => {
     expect(getByText('Beta Builders')).toBeTruthy(); // derived from first/last name
     expect(getByText('555-0100')).toBeTruthy(); // primaryPhone preferred as secondary
     expect(getByText('beta@example.com')).toBeTruthy(); // email fallback
-    // Leading avatar initials (first + last word).
-    expect(getByText('AP')).toBeTruthy();
-    expect(getByText('BB')).toBeTruthy();
 
     const row = getByText('Acme Plumbing').closest('button')!;
     expect(row.className).toMatch(/\bmin-h-11\b/);
@@ -90,19 +87,6 @@ describe('Customers screen', () => {
     h.data = [{ id: 'c3' }];
     const { getByText } = render(createElement(Customers));
     expect(getByText('Unnamed customer')).toBeTruthy();
-  });
-
-  it('tags non-residential accounts and leaves residential clean', () => {
-    h.data = [
-      { id: 'b', displayName: 'Globex Corp', accountType: 'b2b' },
-      { id: 'p', displayName: 'Hill Property Mgmt', accountType: 'property_manager' },
-      { id: 'r', displayName: 'Jane Doe', accountType: 'residential' },
-    ];
-    const { getByText, queryAllByText } = render(createElement(Customers));
-    expect(getByText('Business')).toBeTruthy();
-    expect(getByText('Property mgr')).toBeTruthy();
-    // Residential carries no segment tag.
-    expect(queryAllByText('Business')).toHaveLength(1);
   });
 
   it('surfaces a fetch error', () => {

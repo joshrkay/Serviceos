@@ -32,7 +32,80 @@ export interface ReviewProposal {
   explanation?: string;
   confidenceScore?: number;
   payload?: Record<string, unknown>;
+  sourceContext?: Record<string, unknown>;
   approvedAt?: string | null;
+}
+
+export interface EntityCandidate {
+  id: string;
+  label: string;
+  hint?: string;
+  score?: number;
+}
+
+export interface CatalogCandidate {
+  id: string;
+  name: string;
+  unitPriceCents: number;
+  score: number;
+}
+
+export interface AmbiguousCatalogLine {
+  lineIndex: number;
+  description: string;
+  candidates: CatalogCandidate[];
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return v !== null && typeof v === 'object';
+}
+
+/** P8 entity disambiguation candidates on a voice_clarification payload. */
+export function entityCandidatesFromPayload(
+  payload: Record<string, unknown> | undefined,
+): EntityCandidate[] {
+  const raw = payload?.entityCandidates;
+  if (!Array.isArray(raw)) return [];
+  const out: EntityCandidate[] = [];
+  for (const item of raw) {
+    if (!isRecord(item)) continue;
+    const id = typeof item.id === 'string' ? item.id : '';
+    const label = typeof item.label === 'string' ? item.label : '';
+    if (!id || !label) continue;
+    out.push({
+      id,
+      label,
+      hint: typeof item.hint === 'string' ? item.hint : undefined,
+      score: typeof item.score === 'number' ? item.score : undefined,
+    });
+  }
+  return out;
+}
+
+/** Ambiguous catalog lines that need a one-tap resolve-line pick. */
+export function ambiguousCatalogLines(
+  payload: Record<string, unknown> | undefined,
+  sourceContext: Record<string, unknown> | undefined,
+): AmbiguousCatalogLine[] {
+  const lineItems = payload?.lineItems;
+  if (!Array.isArray(lineItems)) return [];
+  const catalogResolution = isRecord(sourceContext?.catalogResolution)
+    ? (sourceContext.catalogResolution as Record<string, CatalogCandidate[]>)
+    : {};
+  const lines: AmbiguousCatalogLine[] = [];
+  for (let idx = 0; idx < lineItems.length; idx++) {
+    const li = lineItems[idx];
+    if (!isRecord(li)) continue;
+    if (li.pricingSource !== 'ambiguous') continue;
+    const candidates = catalogResolution[String(idx)];
+    if (!Array.isArray(candidates) || candidates.length === 0) continue;
+    const description =
+      typeof li.description === 'string' && li.description.length > 0
+        ? li.description
+        : `Line ${idx + 1}`;
+    lines.push({ lineIndex: idx, description, candidates });
+  }
+  return lines;
 }
 
 export interface ReviewRow {

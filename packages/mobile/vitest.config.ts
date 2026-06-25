@@ -39,6 +39,18 @@ export default defineConfig({
         'src/calls/callbackStorage.ts',
         'src/theme/tokens.d.ts',
         'app/_layout.tsx',
+        // Thin stub routes (no logic to assert).
+        'app/(onboarding)/**',
+        'app/(tabs)/_layout.tsx',
+        'app/(tabs)/settings/_layout.tsx',
+        'app/(tabs)/settings/billing.tsx',
+        'app/(tabs)/settings/brand-voice.tsx',
+        'app/(tabs)/settings/lanes.tsx',
+        'app/(tabs)/settings/lead-sources.tsx',
+        'app/(tabs)/settings/voice.tsx',
+        'app/notifications.tsx',
+        'app/reviews.tsx',
+        'app/jobs/\\[id\\]/photos.tsx',
       ],
       // Floors sit a few points under current coverage (stmts/lines ~96%,
       // funcs ~93%, branches ~76%) so routine churn passes but dropped tests

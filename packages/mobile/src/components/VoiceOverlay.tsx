@@ -1,118 +1,106 @@
-import { useState } from 'react';
-import { ActivityIndicator, Pressable, Text, View } from 'react-native';
 import { useRouter } from 'expo-router';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useState } from 'react';
+import { ActivityIndicator, Modal, Pressable, Text, View } from 'react-native';
+import { usePendingProposals } from '../hooks/usePendingProposals';
 import { useVoiceCapture } from '../voice/useVoiceCapture';
 
-// The contextual voice affordance the prototype puts on top of every screen
-// (handoff README §"Voice capture"): a small mic at the top-center that opens a
-// hold-to-talk sheet over the current route. The capture/transcribe logic is
-// unchanged (`useVoiceCapture`); this only wires the launch affordance into the
-// shared shell so the assistant is reachable without leaving the screen.
+/** Top-center mic affordance on tab screens — hold to capture in an overlay. */
 export function VoiceOverlay() {
-  const [open, setOpen] = useState(false);
-  const insets = useSafeAreaInsets();
-
-  return (
-    <>
-      {/* Sit below the notch / status bar; keep a min when there's no inset. */}
-      <View
-        className="absolute left-0 right-0 items-center"
-        style={{ top: Math.max(insets.top, 8) }}
-      >
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Voice assistant"
-          onPress={() => setOpen(true)}
-          className="min-h-11 min-w-11 items-center justify-center rounded-full bg-primary px-4 py-2"
-        >
-          <Text className="text-sm font-semibold text-primaryForeground">Talk</Text>
-        </Pressable>
-      </View>
-      {/* The sheet only mounts when open so `useVoiceCapture` (and its audio
-          recorder) is created on demand, not for every screen. */}
-      {open ? <VoiceSheet onClose={() => setOpen(false)} /> : null}
-    </>
-  );
-}
-
-function VoiceSheet({ onClose }: { onClose: () => void }) {
   const router = useRouter();
-  const { phase, transcript, error, startRecording, stopAndTranscribe } = useVoiceCapture();
+  const { refresh } = usePendingProposals();
+  const { phase, transcript, error, startRecording, stopAndTranscribe, reset } = useVoiceCapture();
+  const [open, setOpen] = useState(false);
   const listening = phase === 'listening';
   const busy = phase === 'transcribing';
 
+  const close = () => {
+    setOpen(false);
+    reset();
+  };
+
+  const onRelease = async () => {
+    await stopAndTranscribe();
+    void refresh();
+  };
+
   return (
-    <View className="absolute bottom-0 left-0 right-0 top-0">
-      {/* Backdrop — tap to dismiss. */}
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel="Close voice assistant"
-        onPress={onClose}
-        className="absolute bottom-0 left-0 right-0 top-0 bg-black/50"
-      />
-      <View className="absolute bottom-0 left-0 right-0 rounded-t-xl bg-card px-6 pb-8 pt-4">
-        <View className="flex-row items-center justify-between">
-          <Text className="text-base font-semibold text-foreground">Assistant</Text>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Close"
-            onPress={onClose}
-            className="min-h-11 min-w-11 items-center justify-center"
-          >
-            <Text className="text-base text-mutedForeground">Close</Text>
-          </Pressable>
-        </View>
-
-        {phase === 'transcript' ? (
-          <View className="mt-4">
-            <Text className="text-base text-foreground">{transcript}</Text>
-            <Text className="mt-2 text-sm text-mutedForeground">
-              We&apos;re drafting it — it&apos;ll appear in approvals for your tap.
-            </Text>
-            <Pressable
-              accessibilityRole="button"
-              onPress={() => {
-                onClose();
-                router.push('/approvals');
-              }}
-              className="mt-4 min-h-11 items-center justify-center rounded-md bg-primary px-4 py-3"
-            >
-              <Text className="text-base font-semibold text-primaryForeground">View approvals</Text>
-            </Pressable>
-          </View>
-        ) : (
-          <View className="mt-4 items-center">
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Hold to record"
-              onPressIn={() => {
-                void startRecording();
-              }}
-              onPressOut={() => {
-                void stopAndTranscribe();
-              }}
-              disabled={busy}
-              className={`h-20 w-20 items-center justify-center rounded-full ${
-                listening ? 'bg-destructive' : 'bg-primary'
-              }`}
-            >
-              {busy ? (
-                <ActivityIndicator color="#ffffff" />
-              ) : (
-                <Text className="text-sm font-semibold text-primaryForeground">
-                  {listening ? 'Listening' : 'Hold'}
-                </Text>
-              )}
-            </Pressable>
-            <Text className="mt-3 text-sm text-mutedForeground">
-              {busy ? 'Uploading & transcribing…' : 'Hold to speak · release to send'}
-            </Text>
-          </View>
-        )}
-
-        {error ? <Text className="mt-3 text-sm text-destructive">{error}</Text> : null}
+    <>
+      <View pointerEvents="box-none" className="absolute left-0 right-0 top-12 z-10 items-center">
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Hold to speak"
+          onPress={() => setOpen(true)}
+          className="min-h-11 min-w-11 items-center justify-center rounded-full bg-primary px-4 shadow-sm"
+        >
+          <Text className="text-sm font-semibold text-primaryForeground">Mic</Text>
+        </Pressable>
       </View>
-    </View>
+
+      <Modal visible={open} animationType="slide" transparent onRequestClose={close}>
+        <View className="flex-1 justify-end bg-black/40">
+          <View className="rounded-t-2xl bg-background px-6 pb-10 pt-6">
+            <Text className="font-heading text-xl font-semibold text-foreground">Speak an action</Text>
+            <Text className="mt-1 text-base text-mutedForeground">
+              Hold the mic, say what happened, release. We&apos;ll draft it for your approval.
+            </Text>
+
+            <View className="my-8 items-center">
+              {phase === 'transcript' ? (
+                <View className="w-full">
+                  <Text className="text-base text-mutedForeground">Heard</Text>
+                  <Text className="mt-1 text-lg text-foreground">{transcript}</Text>
+                  <Text className="mt-3 text-base text-mutedForeground">
+                    Drafting — check Approvals for your proposal.
+                  </Text>
+                  <Pressable
+                    accessibilityRole="button"
+                    onPress={() => {
+                      close();
+                      router.push('/approvals');
+                    }}
+                    className="mt-4 min-h-11 items-center justify-center rounded-md bg-primary px-4 py-3"
+                  >
+                    <Text className="text-base font-semibold text-primaryForeground">View approvals</Text>
+                  </Pressable>
+                </View>
+              ) : (
+                <>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Hold to record"
+                    onPressIn={() => void startRecording()}
+                    onPressOut={() => void onRelease()}
+                    disabled={busy}
+                    className={`h-44 w-44 items-center justify-center rounded-full ${
+                      listening ? 'bg-destructive' : 'bg-primary'
+                    }`}
+                  >
+                    {busy ? (
+                      <ActivityIndicator color="#ffffff" />
+                    ) : (
+                      <Text className="text-lg font-semibold text-primaryForeground">
+                        {listening ? 'Listening…' : 'Hold'}
+                      </Text>
+                    )}
+                  </Pressable>
+                  <Text className="mt-4 text-base text-mutedForeground">
+                    {busy ? 'Uploading & transcribing…' : 'Hold to speak · release to send'}
+                  </Text>
+                </>
+              )}
+              {error ? <Text className="mt-4 text-base text-destructive">{error}</Text> : null}
+            </View>
+
+            <Pressable
+              accessibilityRole="button"
+              onPress={close}
+              className="min-h-11 items-center justify-center rounded-md border border-border px-4 py-3"
+            >
+              <Text className="text-base text-foreground">Close</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
+    </>
   );
 }

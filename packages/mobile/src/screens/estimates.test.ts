@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render } from '@testing-library/react';
+import { cleanup, fireEvent, render } from '@testing-library/react';
 import { createElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -8,17 +8,17 @@ interface Estimate {
   estimateNumber?: string;
   totals?: { totalCents?: number };
   status?: string;
-  lineItems?: { description?: string }[];
 }
 
 const h = vi.hoisted(() => ({
+  push: vi.fn(),
   data: [] as Estimate[],
   isLoading: false,
   error: null as string | null,
 }));
 
 vi.mock('expo-router', () => ({
-  useRouter: () => ({ push: vi.fn(), back: vi.fn(), replace: vi.fn() }),
+  useRouter: () => ({ push: h.push, back: vi.fn(), replace: vi.fn() }),
 }));
 vi.mock('../hooks/useListQuery', () => ({
   useListQuery: () => ({
@@ -43,33 +43,45 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe('Estimates screen', () => {
-  it('leads with the work, then the number, amount, and a status badge', () => {
-    h.data = [
-      {
-        id: 'e1',
-        estimateNumber: 'EST-1001',
-        totals: { totalCents: 493000 },
-        status: 'sent',
-        lineItems: [{ description: 'Furnace replacement' }],
-      },
-    ];
-    const { getByText } = render(createElement(Estimates));
-    expect(getByText('Furnace replacement')).toBeTruthy(); // primary = first line item
-    expect(getByText('EST-1001')).toBeTruthy(); // secondary = number
-    expect(getByText('$4,930.00')).toBeTruthy(); // trailing amount (integer cents)
-    expect(getByText('Sent')).toBeTruthy(); // status badge
-  });
-
-  it('falls back to the number when there are no line items', () => {
-    h.data = [{ id: 'e2', estimateNumber: 'EST-2', totals: { totalCents: 0 }, status: 'draft' }];
-    const { getAllByText, getByText } = render(createElement(Estimates));
-    // Number is both the primary (no line item) and the secondary.
-    expect(getAllByText('EST-2').length).toBe(2);
-    expect(getByText('Draft')).toBeTruthy();
+  it('renders search and a >=44px new-estimate control', () => {
+    const { getByPlaceholderText, getByText } = render(createElement(Estimates));
+    expect(getByPlaceholderText('Search estimates…')).toBeTruthy();
+    const add = getByText('+ New').closest('button')!;
+    expect(add.className).toMatch(/\bmin-h-11\b/);
+    fireEvent.click(add);
+    expect(h.push).toHaveBeenCalledWith('/estimates/new');
   });
 
   it('shows the empty state when there are no estimates', () => {
     const { getByText } = render(createElement(Estimates));
     expect(getByText('No estimates yet.')).toBeTruthy();
+  });
+
+  it('renders estimate rows with formatted totals', () => {
+    h.data = [
+      { id: 'e1', estimateNumber: 'EST-100', totals: { totalCents: 50000 }, status: 'sent' },
+    ];
+    const { getByText } = render(createElement(Estimates));
+    expect(getByText('EST-100 · $500.00')).toBeTruthy();
+    expect(getByText('sent')).toBeTruthy();
+  });
+
+  it('filters estimates by search query', () => {
+    h.data = [
+      { id: 'e1', estimateNumber: 'EST-100', status: 'sent' },
+      { id: 'e2', estimateNumber: 'EST-200', status: 'draft' },
+    ];
+    const { getByPlaceholderText, getByText, queryByText } = render(createElement(Estimates));
+    fireEvent.change(getByPlaceholderText('Search estimates…'), { target: { value: '200' } });
+    expect(queryByText('EST-100')).toBeNull();
+    expect(getByText(/EST-200/)).toBeTruthy();
+  });
+
+  it('routes draft estimates to the new wizard', () => {
+    h.data = [{ id: 'e1', estimateNumber: 'EST-D', status: 'draft' }];
+    const { getByText } = render(createElement(Estimates));
+    expect(getByText('draft · tap to edit')).toBeTruthy();
+    fireEvent.click(getByText(/EST-D/).closest('button')!);
+    expect(h.push).toHaveBeenCalledWith('/estimates/new');
   });
 });

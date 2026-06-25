@@ -5,7 +5,6 @@ import { cleanup, fireEvent, render, waitFor } from '@testing-library/react';
 import { createElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MoneySummary } from '../hooks/useMoneyDashboard';
-import type { PendingProposalSummary } from '../proposals/proposalEvents';
 
 const h = vi.hoisted(() => ({
   push: vi.fn(),
@@ -27,7 +26,7 @@ const h = vi.hoisted(() => ({
   error: null as Error | null,
   // approvals
   approvalsCount: 0,
-  proposals: [] as PendingProposalSummary[],
+  approvalsLoading: false,
   // money
   summary: {
     month: '2026-06',
@@ -61,8 +60,8 @@ vi.mock('../hooks/useMe', () => ({
 vi.mock('../hooks/usePendingProposals', () => ({
   usePendingProposals: () => ({
     count: h.approvalsCount,
-    proposals: h.proposals,
-    isLoading: false,
+    proposals: [],
+    isLoading: h.approvalsLoading,
     error: null,
     refresh: vi.fn(),
   }),
@@ -77,7 +76,7 @@ vi.mock('../hooks/useMoneyDashboard', () => ({
 }));
 
 // eslint-disable-next-line import/first
-import Home from '../../app/index';
+import Home from '../../app/(tabs)/index';
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -85,7 +84,7 @@ beforeEach(() => {
   h.error = null;
   h.switchMode = vi.fn().mockResolvedValue(undefined);
   h.approvalsCount = 0;
-  h.proposals = [];
+  h.approvalsLoading = false;
   h.summary = {
     month: '2026-06',
     revenueCents: 1_250_000,
@@ -109,7 +108,7 @@ describe('Home / Today dashboard', () => {
   it('renders every tap target at the >=44px contract (min-h-11)', () => {
     const { container } = render(createElement(Home));
     const buttons = Array.from(container.querySelectorAll('button'));
-    // speak + approval-inbox + money + 3 modes + 4 quick links
+    // speak + approvals + money + 3 modes + 6 quick links
     expect(buttons.length).toBeGreaterThanOrEqual(8);
     for (const b of buttons) {
       expect(b.className).toMatch(/\bmin-h-11\b/);
@@ -128,33 +127,6 @@ describe('Home / Today dashboard', () => {
     expect(getByText('3')).toBeTruthy(); // badge
     fireEvent.click(getByText('Approval inbox').closest('button')!);
     expect(h.push).toHaveBeenCalledWith('/approvals');
-  });
-
-  it('previews the top of the queue and opens a proposal for review', () => {
-    h.approvalsCount = 2;
-    h.proposals = [
-      { id: 'p1', summary: 'Invoice · Smith $197', proposalType: 'send_invoice', createdAt: '2026-06-20T00:00:00Z' },
-      { id: 'p2', summary: 'Job · Mrs. Lee tune-up', proposalType: 'create_appointment', createdAt: '2026-06-20T00:00:00Z' },
-    ];
-    const { getByText, getAllByText } = render(createElement(Home));
-    expect(getByText('Invoice · Smith $197')).toBeTruthy();
-    expect(getByText('Job · Mrs. Lee tune-up')).toBeTruthy();
-    expect(getAllByText('Review').length).toBe(2);
-    fireEvent.click(getByText('Invoice · Smith $197').closest('button')!);
-    expect(h.push).toHaveBeenCalledWith('/proposals/p1');
-  });
-
-  it('caps the preview at three rows even when more are pending', () => {
-    h.approvalsCount = 5;
-    h.proposals = Array.from({ length: 5 }, (_, i) => ({
-      id: `p${i}`,
-      summary: `Proposal ${i}`,
-      proposalType: 'add_note',
-      createdAt: '2026-06-20T00:00:00Z',
-    }));
-    const { getAllByText, queryByText } = render(createElement(Home));
-    expect(getAllByText('Review').length).toBe(3);
-    expect(queryByText('Proposal 4')).toBeNull();
   });
 
   it('shows the caught-up state with no badge when nothing is waiting', () => {
@@ -191,12 +163,12 @@ describe('Home / Today dashboard', () => {
     expect(getByText(/Couldn.t load money summary/)).toBeTruthy();
   });
 
-  it('navigates to the quick-link read screens not on the tab bar', () => {
+  it('navigates to quick links from the dashboard', () => {
     const { getByText } = render(createElement(Home));
-    fireEvent.click(getByText('Schedule').closest('button')!);
-    expect(h.push).toHaveBeenCalledWith('/schedule');
-    fireEvent.click(getByText('Estimates').closest('button')!);
-    expect(h.push).toHaveBeenCalledWith('/estimates');
+    fireEvent.click(getByText('Messages').closest('button')!);
+    expect(h.push).toHaveBeenCalledWith('/messages');
+    fireEvent.click(getByText('Approvals').closest('button')!);
+    expect(h.push).toHaveBeenCalledWith('/approvals');
   });
 
   it('shows a loading spinner and no actions while /api/me is loading', () => {

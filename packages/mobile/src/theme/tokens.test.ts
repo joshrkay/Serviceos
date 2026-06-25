@@ -21,16 +21,18 @@ describe('mobile design tokens', () => {
     }
   });
 
-  it('carries the web --radius scale (0.625rem = 10px) as numbers', () => {
-    expect(radii).toEqual({ sm: 6, md: 8, lg: 10, xl: 14 });
+  it('carries the prototype radius scale (cards 18px) as numbers', () => {
+    expect(radii).toEqual({ sm: 10, md: 12, lg: 18, xl: 22 });
   });
 
   it('pins the >=44px tap-target minimum (CLAUDE.md mobile rule)', () => {
     expect(tapTarget).toBe(44);
   });
 
-  it('keeps the brand primary in sync with the web theme (#1f5fd6)', () => {
-    expect(light.primary).toBe('#1f5fd6');
+  it('keeps the brand primary in sync with the prototype palette (#1F5FD6)', () => {
+    expect(light.primary).toBe('#1F5FD6');
+    expect(light.background).toBe('#F6F4EF');
+    expect(light.foreground).toBe('#16202E');
   });
 
   it('differs between light and dark for the core surfaces (dark mode is real)', () => {

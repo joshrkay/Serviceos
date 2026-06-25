@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render } from '@testing-library/react';
 import { createElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PendingProposalSummary } from '../proposals/proposalEvents';
@@ -8,9 +8,6 @@ const h = vi.hoisted(() => ({
   back: vi.fn(),
   push: vi.fn(),
   refresh: vi.fn(),
-  approveBatch: vi.fn().mockResolvedValue({ approved: [], failed: [] }),
-  showToast: vi.fn(),
-  showErrorToast: vi.fn(),
   proposals: [] as PendingProposalSummary[],
   count: 0,
   isLoading: false,
@@ -29,25 +26,12 @@ vi.mock('../hooks/usePendingProposals', () => ({
     refresh: h.refresh,
   }),
 }));
-vi.mock('../proposals/useApproveBatch', () => ({ useApproveBatch: () => h.approveBatch }));
-vi.mock('../components/Toast', () => ({
-  useToast: () => ({ showToast: h.showToast, showErrorToast: h.showErrorToast, hideToast: vi.fn() }),
-}));
 
 // eslint-disable-next-line import/first
 import Approvals from '../../app/approvals';
 
-const elig = (id: string): PendingProposalSummary => ({
-  id,
-  summary: `Invoice ${id}`,
-  proposalType: 'draft_invoice', // capture-class
-  createdAt: '2026-06-20T00:00:00Z',
-  confidenceScore: 0.95, // high
-});
-
 beforeEach(() => {
   vi.clearAllMocks();
-  h.approveBatch = vi.fn().mockResolvedValue({ approved: [], failed: [] });
   h.proposals = [];
   h.count = 0;
   h.isLoading = false;
@@ -86,43 +70,6 @@ describe('Approvals screen', () => {
     expect(getByText('Payment')).toBeTruthy();
   });
 
-  it('badges each card with its confidence band and time-to-expiry', () => {
-    h.proposals = [
-      {
-        id: 'a',
-        summary: 'Invoice #12 for Acme',
-        proposalType: 'draft_invoice',
-        createdAt: '2026-06-20T00:00:00Z',
-        confidenceScore: 0.92,
-        expiresAt: new Date(Date.now() + 5 * 3_600_000).toISOString(),
-      },
-      {
-        id: 'b',
-        summary: 'Record $200 payment',
-        proposalType: 'record_payment',
-        createdAt: '2026-06-20T00:00:00Z',
-        confidenceScore: 0.45,
-      },
-    ];
-    h.count = 2;
-    const { getByText, getAllByText } = render(createElement(Approvals));
-    expect(getByText('High')).toBeTruthy(); // 0.92 → high
-    expect(getByText('Low')).toBeTruthy(); // 0.45 → low
-    // The first card carries a "<n>h" countdown; the second (no expiry) does not.
-    expect(getAllByText(/^\d+h$/).length).toBe(1);
-  });
-
-  it('omits the confidence badge when a proposal has no score', () => {
-    h.proposals = [
-      { id: 'a', summary: 'No score', proposalType: 'add_note', createdAt: '2026-06-20T00:00:00Z' },
-    ];
-    h.count = 1;
-    const { queryByText } = render(createElement(Approvals));
-    expect(queryByText('High')).toBeNull();
-    expect(queryByText('Medium')).toBeNull();
-    expect(queryByText('Low')).toBeNull();
-  });
-
   it('opens the review screen when a proposal card is tapped', () => {
     h.proposals = [
       { id: 'prop-1', summary: 'Invoice #12 for Acme', proposalType: 'draft_invoice', createdAt: '2026-06-20T00:00:00Z' },
@@ -133,94 +80,7 @@ describe('Approvals screen', () => {
     expect(card.className).toMatch(/\bmin-h-11\b/);
     fireEvent.click(card);
     expect(h.push).toHaveBeenCalledWith('/proposals/prop-1');
-    // No eligible bar for an unscored proposal: Back + one card button only.
+    // The Back control plus one card button.
     expect(container.querySelectorAll('button')).toHaveLength(2);
-  });
-
-  it('offers one-tap "Approve all" only for high-confidence capture proposals', () => {
-    // One eligible (capture + high) and one excluded (money, even at high conf).
-    h.proposals = [
-      elig('elig'),
-      { id: 'money', summary: 'Record $500', proposalType: 'record_payment', createdAt: '2026-06-20T00:00:00Z', confidenceScore: 0.99 },
-    ];
-    h.count = 2;
-    const { getByText } = render(createElement(Approvals));
-    expect(getByText('1 high-confidence eligible for one-tap approval')).toBeTruthy();
-    fireEvent.click(getByText('Approve all').closest('button')!);
-    expect(getByText('Approve 1 high-confidence?')).toBeTruthy();
-  });
-
-  it('batch-approves only the eligible ids, toasts the result, and refreshes', async () => {
-    h.approveBatch = vi.fn().mockResolvedValue({ approved: ['elig'], failed: [] });
-    h.proposals = [
-      elig('elig'),
-      { id: 'money', summary: 'Record $500', proposalType: 'record_payment', createdAt: '2026-06-20T00:00:00Z', confidenceScore: 0.99 },
-    ];
-    h.count = 2;
-    const { getByText } = render(createElement(Approvals));
-    fireEvent.click(getByText('Approve all').closest('button')!);
-    fireEvent.click(getByText('Approve 1 eligible').closest('button')!);
-
-    await waitFor(() => expect(h.approveBatch).toHaveBeenCalledWith(['elig']));
-    await waitFor(() => expect(h.showToast).toHaveBeenCalled());
-    expect(h.refresh).toHaveBeenCalled();
-    // The money-class proposal was never in the batch.
-    expect(h.approveBatch.mock.calls[0][0]).not.toContain('money');
-  });
-
-  it('reports partial batch failures in the toast body', async () => {
-    h.approveBatch = vi.fn().mockResolvedValue({
-      approved: ['elig'],
-      failed: [{ id: 'elig2', reason: 'VALIDATION_ERROR' }],
-    });
-    h.proposals = [elig('elig'), elig('elig2')];
-    h.count = 2;
-    const { getByText } = render(createElement(Approvals));
-    fireEvent.click(getByText('Approve all').closest('button')!);
-    fireEvent.click(getByText('Approve 2 eligible').closest('button')!);
-    await waitFor(() =>
-      expect(h.showToast).toHaveBeenCalledWith(
-        expect.objectContaining({ body: expect.stringMatching(/couldn.t be approved/i) }),
-      ),
-    );
-  });
-
-  it('flips the toast to "No proposals approved" (error) when the whole batch fails', async () => {
-    h.approveBatch = vi.fn().mockResolvedValue({
-      approved: [],
-      failed: [{ id: 'elig', reason: 'VALIDATION_ERROR' }],
-    });
-    h.proposals = [elig('elig')];
-    h.count = 1;
-    const { getByText } = render(createElement(Approvals));
-    fireEvent.click(getByText('Approve all').closest('button')!);
-    fireEvent.click(getByText('Approve 1 eligible').closest('button')!);
-    await waitFor(() =>
-      expect(h.showToast).toHaveBeenCalledWith(
-        expect.objectContaining({ title: 'No proposals approved', tone: 'error' }),
-      ),
-    );
-  });
-
-  it('keeps the sheet open and surfaces an error when the batch call fails', async () => {
-    h.approveBatch = vi.fn().mockRejectedValue(new Error('HTTP 500'));
-    h.proposals = [elig('elig')];
-    h.count = 1;
-    const { getByText } = render(createElement(Approvals));
-    fireEvent.click(getByText('Approve all').closest('button')!);
-    fireEvent.click(getByText('Approve 1 eligible').closest('button')!);
-    await waitFor(() => expect(h.showErrorToast).toHaveBeenCalled());
-    expect(h.refresh).not.toHaveBeenCalled();
-    // Sheet is still open for a retry.
-    expect(getByText('Approve 1 high-confidence?')).toBeTruthy();
-  });
-
-  it('hides the Approve-all bar when nothing is eligible', () => {
-    h.proposals = [
-      { id: 'low', summary: 'Low conf', proposalType: 'draft_invoice', createdAt: '2026-06-20T00:00:00Z', confidenceScore: 0.5 },
-    ];
-    h.count = 1;
-    const { queryByText } = render(createElement(Approvals));
-    expect(queryByText(/eligible for one-tap/)).toBeNull();
   });
 });

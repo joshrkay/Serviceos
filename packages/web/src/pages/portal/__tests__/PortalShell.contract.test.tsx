@@ -24,7 +24,7 @@ function jsonResponse(body: unknown): Response {
 }
 
 describe('PortalShell — tenant-neutral class contract', () => {
-  beforeEach(() => vi.unstubAllGlobals());
+  beforeEach(() => { vi.unstubAllGlobals(); });
 
   it('renders the shell chrome with no raw palette and no ServiceOS brand blue', async () => {
     vi.spyOn(portalApi, 'customer').mockResolvedValue(customer);

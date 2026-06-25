@@ -12,6 +12,9 @@ const h = vi.hoisted(() => ({
   error: null as string | null,
 }));
 
+vi.mock('expo-router', () => ({
+  useRouter: () => ({ push: vi.fn(), back: vi.fn(), replace: vi.fn() }),
+}));
 vi.mock('../voice/useVoiceCapture', () => ({
   useVoiceCapture: () => ({
     phase: h.phase,
@@ -24,7 +27,7 @@ vi.mock('../voice/useVoiceCapture', () => ({
 }));
 
 // eslint-disable-next-line import/first
-import VoiceScreen from '../../app/voice';
+import VoiceScreen from '../../app/(tabs)/voice';
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -67,7 +70,7 @@ describe('Voice screen', () => {
     expect(getByText('reschedule the Tuesday job')).toBeTruthy();
     const again = getByText('Speak again').closest('button')!;
     expect(again.className).toMatch(/\bmin-h-11\b/);
-    expect(container.querySelectorAll('button')).toHaveLength(1);
+    expect(container.querySelectorAll('button')).toHaveLength(2);
   });
 
   it('surfaces an error with a >=44px retry target', () => {

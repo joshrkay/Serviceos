@@ -130,6 +130,24 @@ export default function CustomerDetail() {
                   </View>
                 ))}
             </View>
+
+            <View className="mt-6 flex-row flex-wrap gap-2">
+              {[
+                { label: 'New job', route: `/jobs/new?customerId=${id}` as const },
+                { label: 'New estimate', route: `/estimates/new?customerId=${id}` as const },
+                { label: 'New invoice', route: `/invoices/new?customerId=${id}` as const },
+                { label: 'Edit', route: `/customers/${id}/edit` as const },
+              ].map((action) => (
+                <Pressable
+                  key={action.label}
+                  accessibilityRole="button"
+                  onPress={() => router.push(action.route)}
+                  className="min-h-11 items-center justify-center rounded-md border border-border px-4 py-3"
+                >
+                  <Text className="text-base text-foreground">{action.label}</Text>
+                </Pressable>
+              ))}
+            </View>
           </View>
         ) : null}
       </ScrollView>

@@ -34,7 +34,7 @@ describe('IntakeFormPage — tenant-neutral class contract', () => {
     vi.mocked(fetchIntakeTenantInfo).mockResolvedValue(TENANT_INFO);
     window.history.pushState({}, '', `/intake?t=${TENANT_ID}`);
   });
-  afterEach(() => vi.clearAllMocks());
+  afterEach(() => { vi.clearAllMocks(); });
 
   it('stays neutral across every wizard step', async () => {
     const { container } = render(<IntakeFormPage />);

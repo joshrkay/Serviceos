@@ -16,7 +16,7 @@ import { expectTenantNeutral } from '../../../components/customer/tenantNeutralC
 const ISO = '2026-06-01T12:00:00.000Z';
 
 describe('Portal list pages — tenant-neutral class contract', () => {
-  beforeEach(() => vi.restoreAllMocks());
+  beforeEach(() => { vi.restoreAllMocks(); });
 
   it('PortalInvoiceList stays neutral', async () => {
     vi.spyOn(portalApi, 'invoices').mockResolvedValue({

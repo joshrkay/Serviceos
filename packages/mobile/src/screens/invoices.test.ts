@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render } from '@testing-library/react';
+import { cleanup, fireEvent, render } from '@testing-library/react';
 import { createElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -9,17 +9,17 @@ interface Invoice {
   totals?: { totalCents?: number };
   status?: string;
   dueDate?: string;
-  lineItems?: { description?: string }[];
 }
 
 const h = vi.hoisted(() => ({
+  push: vi.fn(),
   data: [] as Invoice[],
   isLoading: false,
   error: null as string | null,
 }));
 
 vi.mock('expo-router', () => ({
-  useRouter: () => ({ push: vi.fn(), back: vi.fn(), replace: vi.fn() }),
+  useRouter: () => ({ push: h.push, back: vi.fn(), replace: vi.fn() }),
 }));
 vi.mock('../hooks/useListQuery', () => ({
   useListQuery: () => ({
@@ -44,39 +44,14 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe('Invoices screen', () => {
-  it('leads with the work; number + due in the subline; amount trailing; status badge', () => {
+  it('renders integer cents from totals.totalCents with a thousands separator', () => {
     h.data = [
-      {
-        id: 'i1',
-        invoiceNumber: 'INV-1042',
-        totals: { totalCents: 123456 },
-        status: 'open',
-        dueDate: '2099-07-01T00:00:00Z', // far future → not overdue, run-date-independent
-        lineItems: [{ description: 'AC tune-up' }],
-      },
+      { id: 'i1', invoiceNumber: 'INV-1042', totals: { totalCents: 123456 }, status: 'open', dueDate: '2026-07-01T00:00:00Z' },
     ];
     const { getByText } = render(createElement(Invoices));
-    expect(getByText('AC tune-up')).toBeTruthy(); // primary = first line item
-    // Number + due date in the subline (exact day is tz-dependent).
-    expect(getByText(/^INV-1042 · due \w+ \d{1,2}, \d{4}$/)).toBeTruthy();
-    // 123456 cents → $1,234.56 (never float math), shown as the trailing amount.
-    expect(getByText('$1,234.56')).toBeTruthy();
-    expect(getByText('Open')).toBeTruthy(); // status badge (future due → not overdue)
-  });
-
-  it('marks a past-due open invoice Overdue', () => {
-    h.data = [
-      {
-        id: 'i3',
-        invoiceNumber: 'INV-9',
-        totals: { totalCents: 89000 },
-        status: 'open',
-        dueDate: '2020-01-01T00:00:00Z', // long past
-        lineItems: [{ description: 'Capacitor' }],
-      },
-    ];
-    const { getByText } = render(createElement(Invoices));
-    expect(getByText('Overdue')).toBeTruthy();
+    // 123456 cents → $1,234.56 (never float math).
+    expect(getByText('INV-1042 · $1,234.56')).toBeTruthy();
+    expect(getByText('open')).toBeTruthy();
   });
 
   it('defaults a missing total to $0.00', () => {
@@ -88,5 +63,25 @@ describe('Invoices screen', () => {
   it('shows the empty state when there are no invoices', () => {
     const { getByText } = render(createElement(Invoices));
     expect(getByText('No invoices yet.')).toBeTruthy();
+  });
+
+  it('filters invoices by search query and opens detail rows', () => {
+    h.data = [
+      { id: 'i1', invoiceNumber: 'INV-100', totals: { totalCents: 1000 }, status: 'open' },
+      { id: 'i2', invoiceNumber: 'INV-200', totals: { totalCents: 2000 }, status: 'draft' },
+    ];
+    const { getByPlaceholderText, getByText, queryByText } = render(createElement(Invoices));
+    fireEvent.change(getByPlaceholderText('Search invoices…'), { target: { value: '200' } });
+    expect(queryByText(/INV-100/)).toBeNull();
+    fireEvent.click(getByText(/INV-200/).closest('button')!);
+    expect(h.push).toHaveBeenCalledWith('/invoices/i2');
+  });
+
+  it('renders a >=44px new-invoice control', () => {
+    const { getByText } = render(createElement(Invoices));
+    const add = getByText('+ New').closest('button')!;
+    expect(add.className).toMatch(/\bmin-h-11\b/);
+    fireEvent.click(add);
+    expect(h.push).toHaveBeenCalledWith('/invoices/new');
   });
 });
