@@ -5,6 +5,8 @@ import {
 } from 'lucide-react';
 import { submitIntakeLead, fetchIntakeTenantInfo, type IntakeTenantInfo } from '../../api/public-intake';
 import { businessInitial } from '../../utils/business-initial';
+import { Input, Textarea, Field } from '../ui';
+import { NEUTRAL_FIELD } from './portalNeutral';
 
 /**
  * Marketing-attribution params we capture from the URL on mount and ship
@@ -96,9 +98,9 @@ function presentationForVertical(
 }
 
 const URGENCY_OPTIONS: { value: Urgency; label: string; desc: string; color: string }[] = [
-  { value: 'Emergency', label: '🚨 Emergency',    desc: 'Need someone today',                   color: 'border-red-300    bg-red-50    text-red-700'    },
-  { value: 'ASAP',      label: '⚡ Soon',          desc: 'Within the next few days',             color: 'border-amber-300  bg-amber-50  text-amber-700'  },
-  { value: 'Flexible',  label: '📅 Flexible',     desc: 'I can schedule around your availability', color: 'border-green-300 bg-green-50 text-green-700' },
+  { value: 'Emergency', label: '🚨 Emergency',    desc: 'Need someone today',                   color: 'border-destructive/30    bg-destructive/10    text-destructive'    },
+  { value: 'ASAP',      label: '⚡ Soon',          desc: 'Within the next few days',             color: 'border-warning/30  bg-warning/10  text-warning'  },
+  { value: 'Flexible',  label: '📅 Flexible',     desc: 'I can schedule around your availability', color: 'border-success/30 bg-success/10 text-success' },
 ];
 
 const STEPS_LABEL: Record<Exclude<Step, 'done'>, string> = {
@@ -240,18 +242,18 @@ export function IntakeFormPage() {
     : null;
 
   return (
-    <div className="min-h-screen bg-slate-50 flex flex-col">
+    <div className="min-h-screen bg-muted flex flex-col">
       {/* Business header */}
-      <div className="bg-white border-b border-slate-100 px-5 py-4 flex items-center gap-3">
+      <div className="bg-card border-b border-border px-5 py-4 flex items-center gap-3">
         <div
-          className="flex size-9 items-center justify-center rounded-xl bg-slate-900 shrink-0 text-sm font-medium text-white"
+          className="flex size-9 items-center justify-center rounded-xl bg-foreground shrink-0 text-sm font-medium text-white"
           aria-hidden
         >
           {businessInitial(tenantInfo?.businessName)}
         </div>
         <div>
-          <p className="text-slate-900">{tenantInfo?.businessName ?? 'Service Request'}</p>
-          <p className="text-xs text-slate-400 mt-0.5">
+          <p className="text-foreground">{tenantInfo?.businessName ?? 'Service Request'}</p>
+          <p className="text-xs text-muted-foreground mt-0.5">
             {tenantInfo?.intakeTagline
               ?? (tenantInfo?.reviewCount && tenantInfo.averageRating
                 ? `${tenantInfo.averageRating} · ${tenantInfo.reviewCount} reviews`
@@ -269,18 +271,18 @@ export function IntakeFormPage() {
               <div
                 key={s}
                 className={`h-1.5 flex-1 rounded-full transition-all duration-300 ${
-                  (step as number) >= s ? 'bg-slate-900' : 'bg-slate-200'
+                  (step as number) >= s ? 'bg-foreground' : 'bg-border'
                 }`}
               />
             ))}
           </div>
           <div className="flex items-center justify-between px-5 pt-2">
             {(step as number) > 1 ? (
-              <button onClick={back} className="flex items-center gap-1 text-xs text-slate-400 hover:text-slate-600 transition-colors">
+              <button onClick={back} className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors">
                 <ArrowLeft size={12} /> Back
               </button>
             ) : <span />}
-            <p className="text-xs text-slate-400">Step {step} of 4</p>
+            <p className="text-xs text-muted-foreground">Step {step} of 4</p>
           </div>
         </>
       )}
@@ -291,17 +293,17 @@ export function IntakeFormPage() {
         {step === 1 && (
           <div className="flex flex-col gap-5 flex-1">
             <div>
-              <h1 className="text-slate-900" style={{ fontSize: '1.3rem', lineHeight: 1.3 }}>
+              <h1 className="text-foreground" style={{ fontSize: '1.3rem', lineHeight: 1.3 }}>
                 What can we help you with?
               </h1>
-              <p className="text-slate-500 mt-1.5">Select the type of service you need</p>
+              <p className="text-muted-foreground mt-1.5">Select the type of service you need</p>
             </div>
             <div className="flex flex-col gap-3">
               {tenantInfo === null && (
-                <p className="text-sm text-slate-400">Loading services…</p>
+                <p className="text-sm text-muted-foreground">Loading services…</p>
               )}
               {tenantInfo !== null && serviceOptions.length === 0 && (
-                <p className="text-sm text-slate-400">
+                <p className="text-sm text-muted-foreground">
                   This business hasn't set up online intake yet. Please call to book.
                 </p>
               )}
@@ -314,17 +316,17 @@ export function IntakeFormPage() {
                     onClick={() => update({ serviceType: opt.verticalType })}
                     className={`flex items-center gap-4 rounded-2xl border-2 px-5 py-4 text-left transition-all ${
                       selected
-                        ? 'border-slate-900 bg-slate-900 text-white'
-                        : 'border-slate-200 bg-white hover:border-slate-300'
+                        ? 'border-foreground bg-foreground text-white'
+                        : 'border-border bg-card hover:border-foreground/30'
                     }`}
                   >
                     <span className="text-2xl shrink-0">{opt.emoji}</span>
                     <div className="flex-1">
-                      <p className={selected ? 'text-white' : 'text-slate-900'}>{opt.label}</p>
-                      <p className={`text-xs mt-0.5 ${selected ? 'text-white/60' : 'text-slate-400'}`}>{opt.desc}</p>
+                      <p className={selected ? 'text-white' : 'text-foreground'}>{opt.label}</p>
+                      <p className={`text-xs mt-0.5 ${selected ? 'text-white/60' : 'text-muted-foreground'}`}>{opt.desc}</p>
                     </div>
-                    <div className={`flex size-5 shrink-0 items-center justify-center rounded-full border-2 ${selected ? 'bg-white border-white' : 'border-slate-300'}`}>
-                      {selected && <Check size={11} className="text-slate-900" />}
+                    <div className={`flex size-5 shrink-0 items-center justify-center rounded-full border-2 ${selected ? 'bg-card border-white' : 'border-border'}`}>
+                      {selected && <Check size={11} className="text-foreground" />}
                     </div>
                   </button>
                 );
@@ -339,16 +341,16 @@ export function IntakeFormPage() {
             <div>
               <div className="flex items-center gap-2 mb-1">
                 {svc && <span className="text-xl">{svc.emoji}</span>}
-                <h1 className="text-slate-900" style={{ fontSize: '1.3rem', lineHeight: 1.3 }}>
+                <h1 className="text-foreground" style={{ fontSize: '1.3rem', lineHeight: 1.3 }}>
                   Tell us about the issue
                 </h1>
               </div>
-              <p className="text-slate-500">Help us understand what you need so we can prepare</p>
+              <p className="text-muted-foreground">Help us understand what you need so we can prepare</p>
             </div>
 
             <div>
-              <label className="text-xs text-slate-500 mb-1.5 block">Describe the problem *</label>
-              <textarea
+              <label className="text-xs text-muted-foreground mb-1.5 block">Describe the problem *</label>
+              <Textarea
                 data-testid="intake-description"
                 value={data.description}
                 onChange={e => update({ description: e.target.value })}
@@ -358,29 +360,29 @@ export function IntakeFormPage() {
                     : FALLBACK_PLACEHOLDER
                 }
                 rows={5}
-                className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-800 placeholder-slate-400 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100 transition-all resize-none"
+                className={`${NEUTRAL_FIELD} resize-none`}
               />
               {data.description.length > 0 && data.description.length < 10 && (
-                <p className="text-xs text-amber-600 mt-1.5 flex items-center gap-1">
+                <p className="text-xs text-warning mt-1.5 flex items-center gap-1">
                   <AlertCircle size={11} /> Add a little more detail to help us help you
                 </p>
               )}
             </div>
 
             <div>
-              <label className="text-xs text-slate-500 mb-2 block">How urgent is this? *</label>
+              <label className="text-xs text-muted-foreground mb-2 block">How urgent is this? *</label>
               <div className="flex flex-col gap-2">
                 {URGENCY_OPTIONS.map(opt => (
                   <button
                     key={opt.value}
                     onClick={() => update({ urgency: opt.value })}
                     className={`flex items-center gap-4 rounded-xl border-2 px-4 py-3 text-left transition-all ${
-                      data.urgency === opt.value ? opt.color + ' border-current' : 'border-slate-200 bg-white hover:border-slate-300'
+                      data.urgency === opt.value ? opt.color + ' border-current' : 'border-border bg-card hover:border-foreground/30'
                     }`}
                   >
                     <div className="flex-1">
                       <p className="text-sm">{opt.label}</p>
-                      <p className="text-xs text-slate-400 mt-0.5">{opt.desc}</p>
+                      <p className="text-xs text-muted-foreground mt-0.5">{opt.desc}</p>
                     </div>
                     {data.urgency === opt.value && <Check size={14} className="shrink-0" />}
                   </button>
@@ -389,17 +391,17 @@ export function IntakeFormPage() {
             </div>
 
             <div>
-              <label className="text-xs text-slate-500 mb-1.5 block">Preferred dates or times <span className="text-slate-300">(optional)</span></label>
-              <input
+              <label className="text-xs text-muted-foreground mb-1.5 block">Preferred dates or times <span className="text-muted-foreground">(optional)</span></label>
+              <Input
                 value={data.preferredDates}
                 onChange={e => update({ preferredDates: e.target.value })}
                 placeholder="e.g. Weekday mornings, or Mar 14–16"
-                className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-800 placeholder-slate-400 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100 transition-all"
+                className={NEUTRAL_FIELD}
               />
             </div>
 
-            <div className="rounded-xl bg-slate-50 border border-slate-100 px-4 py-3">
-              <p className="text-xs text-slate-500 flex items-center gap-1.5">
+            <div className="rounded-xl bg-muted border border-border px-4 py-3">
+              <p className="text-xs text-muted-foreground flex items-center gap-1.5">
                 <Camera size={12} className="shrink-0" />
                 Once we're in touch, you can easily send photos to help us diagnose the issue faster.
               </p>
@@ -411,10 +413,10 @@ export function IntakeFormPage() {
         {step === 3 && (
           <div className="flex flex-col gap-5 flex-1">
             <div>
-              <h1 className="text-slate-900" style={{ fontSize: '1.3rem', lineHeight: 1.3 }}>
+              <h1 className="text-foreground" style={{ fontSize: '1.3rem', lineHeight: 1.3 }}>
                 Your contact info
               </h1>
-              <p className="text-slate-500 mt-1.5">So we can confirm your appointment and reach you</p>
+              <p className="text-muted-foreground mt-1.5">So we can confirm your appointment and reach you</p>
             </div>
 
             {[
@@ -424,20 +426,20 @@ export function IntakeFormPage() {
               { icon: MapPin, label: 'Service address',     key: 'address', placeholder: 'Street, city, state',    type: 'text' },
             ].map(({ label, key, placeholder, type }) => (
               <div key={key}>
-                <label className="text-xs text-slate-500 mb-1.5 block">{label}</label>
-                <input
+                <label className="text-xs text-muted-foreground mb-1.5 block">{label}</label>
+                <Input
                   data-testid={`intake-field-${key}`}
                   value={data[key as keyof FormData] as string}
                   onChange={e => update({ [key]: e.target.value })}
                   placeholder={placeholder}
                   type={type}
                   required={label.includes('*')}
-                  className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-800 placeholder-slate-400 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100 transition-all"
+                  className={NEUTRAL_FIELD}
                 />
               </div>
             ))}
 
-            <p className="text-xs text-slate-400">
+            <p className="text-xs text-muted-foreground">
               We'll only use your info to contact you about this service request. No spam.
             </p>
           </div>
@@ -447,54 +449,54 @@ export function IntakeFormPage() {
         {step === 4 && (
           <div className="flex flex-col gap-5 flex-1">
             <div>
-              <h1 className="text-slate-900" style={{ fontSize: '1.3rem', lineHeight: 1.3 }}>
+              <h1 className="text-foreground" style={{ fontSize: '1.3rem', lineHeight: 1.3 }}>
                 Review your request
               </h1>
-              <p className="text-slate-500 mt-1.5">Looks good? Submit to send us your request.</p>
+              <p className="text-muted-foreground mt-1.5">Looks good? Submit to send us your request.</p>
             </div>
 
             <div className="flex flex-col gap-3">
-              <div className="rounded-xl bg-white border border-slate-200 overflow-hidden">
-                <div className="bg-slate-50 border-b border-slate-100 px-4 py-2.5">
-                  <p className="text-xs text-slate-500">Service Request</p>
+              <div className="rounded-xl bg-card border border-border overflow-hidden">
+                <div className="bg-muted border-b border-border px-4 py-2.5">
+                  <p className="text-xs text-muted-foreground">Service Request</p>
                 </div>
                 <div className="px-4 py-4 flex flex-col gap-3">
                   <div className="flex items-center gap-3">
                     <span className="text-xl">{svc?.emoji}</span>
                     <div>
-                      <p className="text-sm text-slate-900">{svc?.label}</p>
-                      <p className="text-xs text-slate-400">{data.urgency}</p>
+                      <p className="text-sm text-foreground">{svc?.label}</p>
+                      <p className="text-xs text-muted-foreground">{data.urgency}</p>
                     </div>
                   </div>
-                  <p className="text-sm text-slate-600 leading-relaxed">{data.description}</p>
+                  <p className="text-sm text-foreground leading-relaxed">{data.description}</p>
                   {data.preferredDates && (
-                    <p className="text-xs text-slate-400">
-                      <span className="text-slate-600">Preferred: </span>{data.preferredDates}
+                    <p className="text-xs text-muted-foreground">
+                      <span className="text-foreground">Preferred: </span>{data.preferredDates}
                     </p>
                   )}
                 </div>
               </div>
 
-              <div className="rounded-xl bg-white border border-slate-200 overflow-hidden">
-                <div className="bg-slate-50 border-b border-slate-100 px-4 py-2.5">
-                  <p className="text-xs text-slate-500">Contact</p>
+              <div className="rounded-xl bg-card border border-border overflow-hidden">
+                <div className="bg-muted border-b border-border px-4 py-2.5">
+                  <p className="text-xs text-muted-foreground">Contact</p>
                 </div>
                 <div className="px-4 py-4 flex flex-col gap-2">
-                  <p className="text-sm text-slate-900">{data.name}</p>
-                  <p className="text-sm text-slate-600">{data.phone}</p>
-                  {data.email   && <p className="text-sm text-slate-600">{data.email}</p>}
-                  {data.address && <p className="text-sm text-slate-600">{data.address}</p>}
+                  <p className="text-sm text-foreground">{data.name}</p>
+                  <p className="text-sm text-foreground">{data.phone}</p>
+                  {data.email   && <p className="text-sm text-foreground">{data.email}</p>}
+                  {data.address && <p className="text-sm text-foreground">{data.address}</p>}
                 </div>
               </div>
 
               {tenantInfo?.businessHoursSummary && (
-                <div className="rounded-xl bg-blue-50 border border-blue-100 px-4 py-3.5">
+                <div className="rounded-xl bg-secondary border border-border px-4 py-3.5">
                   <div className="flex items-start gap-2.5">
-                    <Clock size={13} className="text-blue-500 shrink-0 mt-0.5" />
-                    <p className="text-xs text-blue-700">
+                    <Clock size={13} className="text-muted-foreground shrink-0 mt-0.5" />
+                    <p className="text-xs text-foreground">
                       We respond during business hours:
                       {' '}
-                      <span className="text-blue-900">{tenantInfo.businessHoursSummary}</span>
+                      <span className="text-foreground">{tenantInfo.businessHoursSummary}</span>
                     </p>
                   </div>
                 </div>
@@ -506,14 +508,14 @@ export function IntakeFormPage() {
         {/* ── Success ── */}
         {step === 'done' && (
           <div className="flex flex-col items-center text-center pt-10 gap-6 flex-1">
-            <div className="flex size-20 items-center justify-center rounded-full bg-green-100">
-              <Check size={36} className="text-green-600" />
+            <div className="flex size-20 items-center justify-center rounded-full bg-success/15">
+              <Check size={36} className="text-success" />
             </div>
             <div>
-              <h1 className="text-slate-900" style={{ fontSize: '1.4rem', lineHeight: 1.3 }}>
+              <h1 className="text-foreground" style={{ fontSize: '1.4rem', lineHeight: 1.3 }}>
                 Request submitted!
               </h1>
-              <p className="text-slate-500 mt-2 leading-relaxed">
+              <p className="text-muted-foreground mt-2 leading-relaxed">
                 Thanks {data.name.split(' ')[0] || 'for reaching out'}. We've received your {svc?.label?.toLowerCase()} request and will be in touch shortly.
               </p>
             </div>
@@ -538,12 +540,12 @@ export function IntakeFormPage() {
               ].map(({ icon: Icon, label, sub, href }) => {
                 const content = (
                   <>
-                    <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-slate-100">
-                      <Icon size={15} className="text-slate-500" />
+                    <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-secondary">
+                      <Icon size={15} className="text-muted-foreground" />
                     </span>
                     <div className="text-left">
-                      <p className="text-sm text-slate-800">{label}</p>
-                      <p className={`text-xs mt-0.5 ${href ? 'text-blue-600' : 'text-slate-400'}`}>{sub}</p>
+                      <p className="text-sm text-foreground">{label}</p>
+                      <p className={`text-xs mt-0.5 ${href ? 'text-foreground' : 'text-muted-foreground'}`}>{sub}</p>
                     </div>
                   </>
                 );
@@ -551,12 +553,12 @@ export function IntakeFormPage() {
                   <a
                     key={label}
                     href={href}
-                    className="flex items-center gap-4 rounded-xl bg-white border border-slate-200 px-4 py-3.5 hover:border-blue-300"
+                    className="flex items-center gap-4 rounded-xl bg-card border border-border px-4 py-3.5 hover:border-foreground/30"
                   >
                     {content}
                   </a>
                 ) : (
-                  <div key={label} className="flex items-center gap-4 rounded-xl bg-white border border-slate-200 px-4 py-3.5">
+                  <div key={label} className="flex items-center gap-4 rounded-xl bg-card border border-border px-4 py-3.5">
                     {content}
                   </div>
                 );
@@ -569,8 +571,8 @@ export function IntakeFormPage() {
         {step !== 'done' && (
           <div className="mt-auto pt-6">
             {submitError && (
-              <div className="mb-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3">
-                <p className="text-xs text-red-700 flex items-center gap-1.5">
+              <div className="mb-3 rounded-xl border border-destructive/20 bg-destructive/10 px-4 py-3">
+                <p className="text-xs text-destructive flex items-center gap-1.5">
                   <AlertCircle size={12} className="shrink-0" />
                   {submitError}
                 </p>
@@ -580,7 +582,7 @@ export function IntakeFormPage() {
               data-testid="intake-cta"
               onClick={next}
               disabled={!canAdvance || submitting}
-              className="w-full flex items-center justify-center gap-2 rounded-xl bg-slate-900 py-4 text-sm text-white hover:bg-slate-800 active:scale-[0.98] transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+              className="w-full flex items-center justify-center gap-2 rounded-xl bg-foreground py-4 text-sm text-white hover:bg-foreground/90 active:scale-[0.98] transition-all disabled:opacity-40 disabled:cursor-not-allowed"
             >
               {submitting ? (
                 <span className="animate-spin size-4 border-2 border-white/30 border-t-white rounded-full" />
