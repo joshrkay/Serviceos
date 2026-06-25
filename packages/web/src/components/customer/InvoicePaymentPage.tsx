@@ -150,40 +150,40 @@ function PaidScreen({ customerName, invoiceNumber, totalCents, businessPhone, pa
       })
     : null;
   return (
-    <div className="min-h-screen bg-white flex flex-col items-center justify-center px-6 text-center">
+    <div className="min-h-screen bg-background flex flex-col items-center justify-center px-6 text-center">
       <div className="flex flex-col items-center gap-5 max-w-xs" style={{ animation: 'popIn 0.5s cubic-bezier(0.34,1.56,0.64,1) both' }}>
-        <div className="flex size-20 items-center justify-center rounded-full bg-green-500 shadow-xl shadow-green-200">
+        <div className="flex size-20 items-center justify-center rounded-full bg-success shadow-xl shadow-success/20">
           <CheckCircle2 size={40} className="text-white" />
         </div>
         <div>
-          <h1 className="text-slate-900" style={{ fontSize: '1.6rem', lineHeight: 1.2 }}>Payment received!</h1>
-          <p className="text-slate-500 mt-2 leading-relaxed text-sm">
+          <h1 className="text-foreground" style={{ fontSize: '1.6rem', lineHeight: 1.2 }}>Payment received!</h1>
+          <p className="text-muted-foreground mt-2 leading-relaxed text-sm">
             Thank you, {(customerName || 'there').split(' ')[0] || 'there'}! Your payment of{' '}
             <strong>${formatMoney(totalCents)}</strong> for {invoiceNumber} has been processed.
           </p>
         </div>
-        <div className="w-full rounded-2xl bg-slate-50 border border-slate-200 px-5 py-4 flex flex-col gap-2">
+        <div className="w-full rounded-2xl bg-muted border border-border px-5 py-4 flex flex-col gap-2">
           <div className="flex justify-between text-sm">
-            <span className="text-slate-500">Invoice</span>
-            <span className="text-slate-800">{invoiceNumber}</span>
+            <span className="text-muted-foreground">Invoice</span>
+            <span className="text-foreground">{invoiceNumber}</span>
           </div>
           <div className="flex justify-between text-sm">
-            <span className="text-slate-500">Amount</span>
-            <span className="text-slate-800">${formatMoney(totalCents)}</span>
+            <span className="text-muted-foreground">Amount</span>
+            <span className="text-foreground">${formatMoney(totalCents)}</span>
           </div>
           {paidAtLabel && (
             <div className="flex justify-between text-sm">
-              <span className="text-slate-500">Paid on</span>
-              <span className="text-slate-800">{paidAtLabel}</span>
+              <span className="text-muted-foreground">Paid on</span>
+              <span className="text-foreground">{paidAtLabel}</span>
             </div>
           )}
           <div className="flex justify-between text-sm">
-            <span className="text-slate-500">Status</span>
-            <span className="text-green-700 flex items-center gap-1"><Check size={12} /> Paid</span>
+            <span className="text-muted-foreground">Status</span>
+            <span className="text-success flex items-center gap-1"><Check size={12} /> Paid</span>
           </div>
         </div>
         {businessPhone && (
-          <p className="text-xs text-slate-400">A receipt has been sent. Questions? {businessPhone}</p>
+          <p className="text-xs text-muted-foreground">A receipt has been sent. Questions? {businessPhone}</p>
         )}
       </div>
       <style>{`@keyframes popIn { 0%{opacity:0;transform:scale(0.8);}70%{transform:scale(1.05);}100%{opacity:1;transform:scale(1);} }`}</style>
@@ -286,9 +286,9 @@ function PaymentForm({
     return (
       <div
         role="status"
-        className="bg-white rounded-2xl border border-slate-200 px-5 py-5 mb-5"
+        className="bg-card rounded-2xl border border-border px-5 py-5 mb-5"
       >
-        <p className="text-sm text-slate-700">
+        <p className="text-sm text-foreground">
           We've received your payment instructions and they're processing
           with your bank. You'll get a confirmation email when the funds
           settle. You can close this window.
@@ -298,11 +298,11 @@ function PaymentForm({
   }
 
   return (
-    <form onSubmit={handleSubmit} className="bg-white rounded-2xl border border-slate-200 px-5 py-5 mb-5">
+    <form onSubmit={handleSubmit} className="bg-card rounded-2xl border border-border px-5 py-5 mb-5">
       {errorMessage && (
         <div
           role="alert"
-          className="mb-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700"
+          className="mb-3 rounded-xl border border-destructive/20 bg-destructive/10 px-3 py-2 text-xs text-destructive"
         >
           {errorMessage}
         </div>
@@ -321,16 +321,16 @@ function PaymentForm({
         disabled={disabled}
         className={`w-full flex items-center justify-center gap-2 rounded-2xl py-4 text-sm transition-all ${
           disabled
-            ? 'bg-slate-100 text-slate-400 cursor-not-allowed'
-            : 'bg-slate-900 text-white hover:bg-slate-700 active:scale-[0.98] shadow-lg shadow-slate-900/20'
+            ? 'bg-secondary text-muted-foreground cursor-not-allowed'
+            : 'bg-foreground text-white hover:bg-foreground/80 active:scale-[0.98] shadow-lg shadow-foreground/20'
         }`}
       >
         {status === 'processing'
-          ? <><span className="size-4 rounded-full border-2 border-slate-300 border-t-slate-600 animate-spin" /> Processing payment…</>
+          ? <><span className="size-4 rounded-full border-2 border-border border-t-foreground animate-spin" /> Processing payment…</>
           : <><Lock size={14} /> Pay ${formatMoney(amountCents)} securely</>
         }
       </button>
-      <p className="text-xs text-slate-400 text-center mt-3">
+      <p className="text-xs text-muted-foreground text-center mt-3">
         Powered by Stripe · Your card details never touch our servers
       </p>
     </form>
@@ -418,6 +418,11 @@ export function InvoicePaymentPage() {
     return () => { cancelled = true; };
   }, [invoice, token, paymentSucceeded, stripeNotConfigured]);
 
+  // The Stripe payment surface is left on the default `stripe` theme on
+  // purpose (U13): it's already a tenant-neutral surface, and theming it would
+  // couple us to the Stripe `appearance` API with no tenant-color input to feed
+  // it. The Tailwind chrome around the PaymentElement carries the Path A
+  // neutral recolor; the iframe stays as-is.
   const elementsOptions = useMemo(
     () => (clientSecret ? { clientSecret, appearance: { theme: 'stripe' as const } } : undefined),
     [clientSecret],
@@ -443,18 +448,18 @@ export function InvoicePaymentPage() {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-white flex items-center justify-center">
-        <span className="size-8 rounded-full border-2 border-slate-200 border-t-slate-900 animate-spin" />
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <span className="size-8 rounded-full border-2 border-border border-t-foreground animate-spin" />
       </div>
     );
   }
 
   if (error && !invoice) {
     return (
-      <div className="min-h-screen bg-white flex flex-col items-center justify-center px-6 text-center gap-4">
-        <AlertCircle size={40} className="text-slate-300" />
-        <h1 className="text-slate-900">Invoice not found</h1>
-        <p className="text-sm text-slate-500">This payment link may have expired or been removed.</p>
+      <div className="min-h-screen bg-background flex flex-col items-center justify-center px-6 text-center gap-4">
+        <AlertCircle size={40} className="text-muted-foreground" />
+        <h1 className="text-foreground">Invoice not found</h1>
+        <p className="text-sm text-muted-foreground">This payment link may have expired or been removed.</p>
       </div>
     );
   }
@@ -483,27 +488,27 @@ export function InvoicePaymentPage() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-50">
+    <div className="min-h-screen bg-muted">
       {/* Header */}
-      <div className="bg-white border-b border-slate-200 px-5 py-4">
+      <div className="bg-card border-b border-border px-5 py-4">
         <div className="max-w-lg mx-auto flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <div className="flex size-8 items-center justify-center rounded-xl bg-slate-900">
+            <div className="flex size-8 items-center justify-center rounded-xl bg-foreground">
               <span className="text-white" style={{ fontSize: 13 }}>S</span>
             </div>
             <div>
-              <p className="text-sm text-slate-800">{inv.businessName}</p>
+              <p className="text-sm text-foreground">{inv.businessName}</p>
             </div>
           </div>
           <div className="flex items-center gap-3">
             {inv.businessPhone && (
-              <a href={`tel:${inv.businessPhone}`} className="flex size-8 items-center justify-center rounded-full bg-slate-100 hover:bg-slate-200 transition-colors">
-                <Phone size={14} className="text-slate-600" />
+              <a href={`tel:${inv.businessPhone}`} className="flex size-8 items-center justify-center rounded-full bg-secondary hover:bg-border transition-colors">
+                <Phone size={14} className="text-foreground" />
               </a>
             )}
             {inv.businessEmail && (
-              <a href={`mailto:${inv.businessEmail}`} className="flex size-8 items-center justify-center rounded-full bg-slate-100 hover:bg-slate-200 transition-colors">
-                <Mail size={14} className="text-slate-600" />
+              <a href={`mailto:${inv.businessEmail}`} className="flex size-8 items-center justify-center rounded-full bg-secondary hover:bg-border transition-colors">
+                <Mail size={14} className="text-foreground" />
               </a>
             )}
           </div>
@@ -513,32 +518,32 @@ export function InvoicePaymentPage() {
       <div className="max-w-lg mx-auto px-5 py-6">
         {/* Overdue banner */}
         {isOverdue && (
-          <div className="flex items-start gap-3 rounded-2xl bg-red-50 border border-red-200 px-4 py-3.5 mb-5">
-            <AlertCircle size={16} className="text-red-500 shrink-0 mt-0.5" />
+          <div className="flex items-start gap-3 rounded-2xl bg-destructive/10 border border-destructive/20 px-4 py-3.5 mb-5">
+            <AlertCircle size={16} className="text-destructive shrink-0 mt-0.5" />
             <div>
-              <p className="text-sm text-red-800">This invoice is overdue</p>
-              <p className="text-xs text-red-600 mt-0.5">Was due {formatDate(inv.dueDate)}. Please pay as soon as possible.</p>
+              <p className="text-sm text-destructive">This invoice is overdue</p>
+              <p className="text-xs text-destructive mt-0.5">Was due {formatDate(inv.dueDate)}. Please pay as soon as possible.</p>
             </div>
           </div>
         )}
 
         {/* Invoice header */}
         <div className="flex items-center justify-between mb-1">
-          <span className="text-xs text-slate-500 uppercase tracking-widest">Invoice</span>
-          <span className="text-xs text-slate-500">{inv.invoiceNumber}</span>
+          <span className="text-xs text-muted-foreground uppercase tracking-widest">Invoice</span>
+          <span className="text-xs text-muted-foreground">{inv.invoiceNumber}</span>
         </div>
-        <h1 className="text-slate-900 mb-0.5" style={{ fontSize: '1.4rem', lineHeight: 1.2 }}>
+        <h1 className="text-foreground mb-0.5" style={{ fontSize: '1.4rem', lineHeight: 1.2 }}>
           Hi, {(inv.customerName || 'there').split(' ')[0] || 'there'}!
         </h1>
         {inv.dueDate && (
-          <p className={`text-sm mb-5 ${isOverdue ? 'text-red-500' : 'text-slate-500'}`}>
+          <p className={`text-sm mb-5 ${isOverdue ? 'text-destructive' : 'text-muted-foreground'}`}>
             {isOverdue ? (
               <>Was due {formatDate(inv.dueDate)}</>
             ) : (
               <>
                 Due {formatDate(inv.dueDate)}
                 {dueInPhrase(inv.dueDate) && (
-                  <span className="text-slate-400"> · {dueInPhrase(inv.dueDate)}</span>
+                  <span className="text-muted-foreground"> · {dueInPhrase(inv.dueDate)}</span>
                 )}
               </>
             )}
@@ -547,67 +552,67 @@ export function InvoicePaymentPage() {
 
         {/* Customer message */}
         {inv.customerMessage && (
-          <div className="bg-white rounded-2xl border border-slate-200 px-5 py-4 mb-4">
-            <p className="text-xs text-slate-400 mb-1">Message from {inv.businessName}</p>
-            <p className="text-sm text-slate-700">{inv.customerMessage}</p>
+          <div className="bg-card rounded-2xl border border-border px-5 py-4 mb-4">
+            <p className="text-xs text-muted-foreground mb-1">Message from {inv.businessName}</p>
+            <p className="text-sm text-foreground">{inv.customerMessage}</p>
           </div>
         )}
 
         {/* Line items */}
-        <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden mb-4">
-          <div className="grid grid-cols-[1fr_40px_72px_72px] gap-x-2 px-5 py-2.5 bg-slate-50 border-b border-slate-100">
-            <p className="text-xs text-slate-400">Item</p>
-            <p className="text-xs text-slate-400 text-right">Qty</p>
-            <p className="text-xs text-slate-400 text-right">Rate</p>
-            <p className="text-xs text-slate-400 text-right">Total</p>
+        <div className="bg-card rounded-2xl border border-border overflow-hidden mb-4">
+          <div className="grid grid-cols-[1fr_40px_72px_72px] gap-x-2 px-5 py-2.5 bg-muted border-b border-border">
+            <p className="text-xs text-muted-foreground">Item</p>
+            <p className="text-xs text-muted-foreground text-right">Qty</p>
+            <p className="text-xs text-muted-foreground text-right">Rate</p>
+            <p className="text-xs text-muted-foreground text-right">Total</p>
           </div>
-          <div className="divide-y divide-slate-50">
+          <div className="divide-y divide-border">
             {visItems.map((item, i) => (
               <div key={i} className="grid grid-cols-[1fr_40px_72px_72px] gap-x-2 px-5 py-3 items-start">
-                <p className="text-sm text-slate-800">{item.description}</p>
-                <p className="text-sm text-slate-500 text-right">{item.quantity}</p>
-                <p className="text-sm text-slate-500 text-right">${formatMoney(item.unitPriceCents)}</p>
-                <p className="text-sm text-slate-800 text-right">${formatMoney(item.totalCents)}</p>
+                <p className="text-sm text-foreground">{item.description}</p>
+                <p className="text-sm text-muted-foreground text-right">{item.quantity}</p>
+                <p className="text-sm text-muted-foreground text-right">${formatMoney(item.unitPriceCents)}</p>
+                <p className="text-sm text-foreground text-right">${formatMoney(item.totalCents)}</p>
               </div>
             ))}
           </div>
           {inv.lineItems.length > 3 && (
             <button
               onClick={() => setShowAll(v => !v)}
-              className="flex items-center justify-center gap-1 w-full py-2.5 text-xs text-slate-400 hover:text-slate-600 border-t border-slate-100 transition-colors"
+              className="flex items-center justify-center gap-1 w-full py-2.5 text-xs text-muted-foreground hover:text-foreground border-t border-border transition-colors"
             >
               {showAll ? <><ChevronUp size={12} /> Show less</> : <><ChevronDown size={12} /> {inv.lineItems.length - 3} more items</>}
             </button>
           )}
           {/* Totals */}
           {inv.discountCents > 0 && (
-            <div className="flex justify-between px-5 py-2 border-t border-slate-100">
-              <span className="text-sm text-slate-500">Discount</span>
-              <span className="text-sm text-slate-500">-${formatMoney(inv.discountCents)}</span>
+            <div className="flex justify-between px-5 py-2 border-t border-border">
+              <span className="text-sm text-muted-foreground">Discount</span>
+              <span className="text-sm text-muted-foreground">-${formatMoney(inv.discountCents)}</span>
             </div>
           )}
           {inv.taxCents > 0 && (
-            <div className="flex justify-between px-5 py-2 border-t border-slate-100">
-              <span className="text-sm text-slate-500">Tax</span>
-              <span className="text-sm text-slate-500">${formatMoney(inv.taxCents)}</span>
+            <div className="flex justify-between px-5 py-2 border-t border-border">
+              <span className="text-sm text-muted-foreground">Tax</span>
+              <span className="text-sm text-muted-foreground">${formatMoney(inv.taxCents)}</span>
             </div>
           )}
           {(inv.processingFeeCents ?? 0) > 0 && (
             <div
               data-testid="invoice-processing-fee-row"
-              className="flex justify-between px-5 py-2 border-t border-slate-100"
+              className="flex justify-between px-5 py-2 border-t border-border"
             >
-              <span className="text-sm text-slate-500">Processing fee</span>
-              <span className="text-sm text-slate-500">${formatMoney(inv.processingFeeCents ?? 0)}</span>
+              <span className="text-sm text-muted-foreground">Processing fee</span>
+              <span className="text-sm text-muted-foreground">${formatMoney(inv.processingFeeCents ?? 0)}</span>
             </div>
           )}
           {(inv.depositCreditCents ?? 0) > 0 && (
             <div
               data-testid="invoice-deposit-credit-row"
-              className="flex justify-between px-5 py-2 border-t border-slate-100"
+              className="flex justify-between px-5 py-2 border-t border-border"
             >
-              <span className="text-sm text-slate-500">Deposit credit</span>
-              <span className="text-sm text-green-600">
+              <span className="text-sm text-muted-foreground">Deposit credit</span>
+              <span className="text-sm text-success">
                 -${formatMoney(inv.depositCreditCents ?? 0)}
               </span>
             </div>
@@ -620,15 +625,15 @@ export function InvoicePaymentPage() {
             row collapses to 0 and we hide it.
           */}
           {inv.amountPaidCents - (inv.depositCreditCents ?? 0) > 0 && (
-            <div className="flex justify-between px-5 py-2 border-t border-slate-100">
-              <span className="text-sm text-slate-500">Paid</span>
-              <span className="text-sm text-green-600">
+            <div className="flex justify-between px-5 py-2 border-t border-border">
+              <span className="text-sm text-muted-foreground">Paid</span>
+              <span className="text-sm text-success">
                 -${formatMoney(inv.amountPaidCents - (inv.depositCreditCents ?? 0))}
               </span>
             </div>
           )}
-          <div className="flex items-center justify-between px-5 py-4 bg-slate-900 rounded-b-2xl">
-            <p className="text-sm text-slate-300">Amount due</p>
+          <div className="flex items-center justify-between px-5 py-4 bg-foreground rounded-b-2xl">
+            <p className="text-sm text-muted-foreground">Amount due</p>
             <p className="text-white" style={{ fontSize: '1.25rem' }}>${formatMoney(inv.amountDueCents)}</p>
           </div>
         </div>
@@ -637,25 +642,25 @@ export function InvoicePaymentPage() {
         {stripeNotConfigured ? (
           <div
             data-testid="stripe-not-configured"
-            className="rounded-2xl bg-amber-50 border border-amber-200 px-4 py-4 mb-5 text-sm text-amber-800"
+            className="rounded-2xl bg-warning/10 border border-warning/20 px-4 py-4 mb-5 text-sm text-warning"
           >
             <p className="mb-1">Online payment is temporarily unavailable.</p>
-            <p className="text-xs text-amber-700">
+            <p className="text-xs text-warning">
               Please contact {inv.businessName} {inv.businessPhone ? `at ${inv.businessPhone}` : ''} to settle this invoice.
             </p>
           </div>
         ) : intentError ? (
           <div
             role="alert"
-            className="rounded-2xl bg-red-50 border border-red-200 px-4 py-4 mb-5 text-sm text-red-700"
+            className="rounded-2xl bg-destructive/10 border border-destructive/20 px-4 py-4 mb-5 text-sm text-destructive"
           >
             {intentError}
           </div>
         ) : !clientSecret || !elementsOptions ? (
-          <div className="bg-white rounded-2xl border border-slate-200 px-5 py-8 mb-5 flex items-center justify-center">
+          <div className="bg-card rounded-2xl border border-border px-5 py-8 mb-5 flex items-center justify-center">
             <span
               data-testid="payment-form-loading"
-              className="size-5 rounded-full border-2 border-slate-200 border-t-slate-900 animate-spin"
+              className="size-5 rounded-full border-2 border-border border-t-foreground animate-spin"
             />
           </div>
         ) : (
@@ -670,11 +675,11 @@ export function InvoicePaymentPage() {
 
         {/* Trust signals */}
         <div className="flex flex-col items-center gap-2 pb-8">
-          <div className="flex items-center gap-4 text-xs text-slate-400">
+          <div className="flex items-center gap-4 text-xs text-muted-foreground">
             <span className="flex items-center gap-1"><Lock size={10} /> 256-bit SSL</span>
             <span className="flex items-center gap-1"><Shield size={10} /> Powered by Stripe</span>
           </div>
-          <p className="text-xs text-slate-400">No account required · Your card data is never stored by us</p>
+          <p className="text-xs text-muted-foreground">No account required · Your card data is never stored by us</p>
         </div>
       </div>
     </div>
