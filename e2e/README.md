@@ -76,34 +76,24 @@ When `E2E_BASE_URL` is set, Playwright does NOT start local servers.
 
 ## Full matrix / runbook
 
-The smoke suite above is the lightweight gate. The full beta-verification
-runbook chains DB seeding, HMAC token minting, qa-runner stages (§1–17), and
-the Playwright QA matrix (tenant isolation). It requires operator-provided
-secrets — without them `npm run qa:doctor` correctly reports blocked checks.
+The smoke suite above is the lightweight gate. Matrix and full beta runbook
+execution require operator-provided Railway secrets — without them
+`npm run qa:doctor` correctly reports blocked checks.
 
-**Required env vars** (see `scripts/qa-runbook-run.sh` for where to obtain each):
-
-| Variable | Purpose |
-|----------|---------|
-| `E2E_DB_URL_READWRITE` | Postgres URL for seeding Tenant A + B |
-| `E2E_DB_URL_READONLY` | Read-only Postgres URL (defaults to READWRITE) |
-| `E2E_CLERK_HMAC_SECRET` | API `CLERK_SECRET_KEY` for HMAC JWT mint |
-
-**Deployed API flag:** `CLERK_DEV_HMAC_TOKENS=true` on the target API service
-(Railway → Variables). Without it, minted tokens return 401 even when the
-secret matches.
-
-**Run the full runbook:**
+**Canonical guide:** [docs/runbooks/qa-full-matrix-unblock.md](../docs/runbooks/qa-full-matrix-unblock.md)
 
 ```bash
-E2E_DB_URL_READWRITE='postgres://…' \
-E2E_DB_URL_READONLY='postgres://…' \
-E2E_CLERK_HMAC_SECRET='sk_test_…' \
-  npm run qa:runbook
+cp .env.qa.example .env.qa   # fill Railway URLs, DB URLs, CLERK_SECRET_KEY
+source .env.qa
+npm run qa:setup             # seed both fixture sets → mint → doctor
+
+npm run qa:matrix:run        # matrix only (~30–60 min)
+# OR
+npm run qa:runbook           # qa-runner §1–17 + matrix (~90–120 min)
 ```
 
-Optional overrides: `E2E_BASE_URL`, `E2E_API_URL` (default to Railway dev).
-Reports land in `qa-runner/reports/` and `playwright-report/`.
+**Deployed API flag:** `CLERK_DEV_HMAC_TOKENS=true` (Railway → API Variables).
+CI secrets manifest: [docs/runbooks/qa-github-secrets.md](../docs/runbooks/qa-github-secrets.md).
 
 ## Why most journeys are skipped
 
