@@ -29,10 +29,10 @@ const SESSION_COLUMNS = `
   vs.started_at, vs.ended_at, vs.ended_reason, vs.cost_cents,
   vs.transcript, vs.customer_id,
   c.display_name AS customer_display_name,
-  l.address_line1 AS customer_address
+  l.street1 AS customer_address
 FROM voice_sessions vs
 LEFT JOIN customers c ON c.id = vs.customer_id AND c.tenant_id = vs.tenant_id
-LEFT JOIN locations l ON l.customer_id = c.id AND l.tenant_id = vs.tenant_id`;
+LEFT JOIN service_locations l ON l.customer_id = c.id AND l.tenant_id = vs.tenant_id`;
 
 export function createInteractionsRouter(deps: InteractionsRouterDeps): Router {
   const { pool } = deps;
@@ -60,7 +60,7 @@ export function createInteractionsRouter(deps: InteractionsRouterDeps): Router {
       await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
 
       const [countResult, dataResult] = await Promise.all([
-        client.query(`SELECT COUNT(*) FROM voice_sessions WHERE tenant_id = $1`, [tenantId]),
+        client.query(`SELECT COUNT(*) AS total FROM voice_sessions WHERE tenant_id = $1`, [tenantId]),
         client.query(
           `SELECT ${SESSION_COLUMNS} WHERE vs.tenant_id = $1 ORDER BY vs.started_at DESC LIMIT $2 OFFSET $3`,
           [tenantId, limit, offset],

@@ -347,6 +347,12 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['213_tenant_settings_reminder_offsets_default', '451325d4c247a81f0b0d60b015b7af26329f38918bde6b579d40bb94e3a26668'],
   // PRD US-345 — 24h post-completion review-request sweep columns + backfill.
   ['214_review_request_sweep', '3a843fa5148f8a2ce89fd5ea37647c2e29f0c0fa9d74d821c3f1b5a1afc37fc2'],
+  // Beta-verify fix — proposals.claimed_by UUID→TEXT (worker label, not a uuid);
+  // the type mismatch broke proposal execution entirely.
+  ['215_proposals_claimed_by_text', '35ffa973504fd016a63c3ef2e333de24070808889cf2c7159b34ee3c09857afa'],
+  // Beta-verify fix — create the missing delay_notice_state table the wired
+  // PgDelayNoticeStateRepository depends on (running-late SMS idempotency).
+  ['216_create_delay_notice_state', 'bad2c6a2b2b80e3bfc18beaf43b48a59b0064f031794a3400d2db8dc02d4c3d3'],
 ];
 
 function hashMigration(value: string): string {

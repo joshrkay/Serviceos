@@ -5241,6 +5241,46 @@ export const MIGRATIONS = {
       ON jobs (tenant_id, completed_at)
       WHERE review_request_sent_at IS NULL AND completed_at IS NOT NULL;
   `,
+  // proposals.claimed_by stored the execution-worker identifier, but the
+  // column was created as UUID (migration that added it) while the worker
+  // passes a string label ('execution-worker'). Every claimForExecution
+  // therefore threw `invalid input syntax for type uuid`, so NO approved
+  // proposal ever reached 'executing'/'executed' — proposal execution was
+  // silently broken in production. The value is a worker label, not a user
+  // id; align the type with executed_by/created_by (both TEXT).
+  '215_proposals_claimed_by_text': `
+    ALTER TABLE proposals ALTER COLUMN claimed_by TYPE TEXT USING claimed_by::text;
+  `,
+  // delay_notice_state backs the running-late SMS idempotency guard, but the
+  // table was never created — PgDelayNoticeStateRepository.upsert() (wired in
+  // production via the pool) INSERTs into a nonexistent relation, throws, and
+  // the route swallows the error and returns {queued:true}. Net effect: the
+  // "tech is running late" SMS to the next customer is silently dropped and
+  // the idempotency guard can never engage. Create the table the repo expects.
+  // PK is idempotency_key so retries upsert in place (mirrors the InMemory Map).
+  '216_create_delay_notice_state': `
+    CREATE TABLE IF NOT EXISTS delay_notice_state (
+      idempotency_key TEXT PRIMARY KEY,
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      appointment_id UUID NOT NULL,
+      delay_version INTEGER NOT NULL,
+      status TEXT NOT NULL,
+      channel TEXT NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      max_attempts INTEGER NOT NULL,
+      last_error TEXT,
+      provider_message_id TEXT,
+      trigger_context JSONB,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_delay_notice_state_tenant ON delay_notice_state (tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_delay_notice_state_appointment ON delay_notice_state (tenant_id, appointment_id);
+    ALTER TABLE delay_notice_state ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE delay_notice_state FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_delay_notice_state ON delay_notice_state;
+    CREATE POLICY tenant_isolation_delay_notice_state ON delay_notice_state
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
