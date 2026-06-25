@@ -343,6 +343,10 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['211_tenant_settings_reminder_offsets', '7043e4a221b59d530abd0a9d74ac8dd1a7f13379eeefb9b1749cc2b98368442a'],
   // Epic 12.6 — weekly feedback email opt-out (renumbered 204→207→212; body unchanged → hash preserved).
   ['212_tenant_settings_weekly_feedback', '3e78d143c8b22d97a2db02d551166f3ffaa23e12bb8c15b90dbc79340b6ef70f'],
+  // PRD US-340+US-341 — reminder cadence column default → [24, 2].
+  ['213_tenant_settings_reminder_offsets_default', '451325d4c247a81f0b0d60b015b7af26329f38918bde6b579d40bb94e3a26668'],
+  // PRD US-345 — 24h post-completion review-request sweep columns + backfill.
+  ['214_review_request_sweep', '3a843fa5148f8a2ce89fd5ea37647c2e29f0c0fa9d74d821c3f1b5a1afc37fc2'],
 ];
 
 function hashMigration(value: string): string {
