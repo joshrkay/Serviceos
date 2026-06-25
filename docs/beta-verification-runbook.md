@@ -562,13 +562,13 @@ Run each of the following as Tenant B using their authenticated session token.
 
 Run as Tenant C (Technician role, same tenant as A).
 
-- [ ] **17.18** `GET /api/estimates` → **200**. Technicians have `estimates:view` permission and can list estimates (read-only).
-- [ ] **17.19** `GET /api/invoices` → **200**. Technicians have `invoices:view` permission and can list invoices (read-only).
+- [ ] **17.18** `GET /api/estimates` → **403**. Technicians do **not** hold `estimates:view` — office/billing surfaces are intentionally withheld (`packages/api/src/auth/rbac.ts`, `technician` role).
+- [ ] **17.19** `GET /api/invoices` → **403**. Technicians do **not** hold `invoices:view` (same rationale as 17.18).
 - [ ] **17.20** `GET /api/settings` → **403**. Technicians cannot read tenant settings.
 - [ ] **17.21** `POST /api/users/invitations` → **403**. Technicians cannot invite other users.
-- [ ] **17.22** `GET /api/jobs` → **200**. Technicians can read jobs.
-- [ ] **17.23** `PATCH /api/jobs/<tenant-a-job-id>` with `{ status: 'in_progress' }` → **200**. Technicians can update job status.
-- [ ] **17.24** `DELETE /api/jobs/<tenant-a-job-id>` → **403**. Technicians cannot delete jobs.
+- [ ] **17.22** `GET /api/jobs` → **200**. Technicians hold `jobs:view`.
+- [ ] **17.23** `POST /api/jobs/<tenant-a-job-id>/transition` with `{ status: 'in_progress' }` → **200**. Technicians hold `jobs:update` and update status via the `/transition` route (there is no `PATCH /api/jobs/:id`).
+- [ ] **17.24** Technicians cannot delete jobs. There is no `DELETE /api/jobs/:id` route (jobs expose only `PUT /:id` + `POST /:id/transition`), and the `technician` role lacks `jobs:delete`, so the surface does not exist for them.
 
 ### 17E — Public token isolation
 
