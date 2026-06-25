@@ -3,7 +3,11 @@
 - **Status:** ready to execute
 - **Parent plan:** `docs/plans/2026-06-24-001-feat-web-redesign-path-a-plan.md` → unit **U13** (B9), OQ1 RESOLVED → tenant-neutral
 - **Depends on:** U2 (tokens + kit primitives — already shipped; `index.css` tokens + `components/ui/*` exist)
-- **Scope:** `packages/web/src/components/customer/{EstimateApprovalPage,InvoicePaymentPage,BookingPage,IntakeFormPage,FeedbackPage}.tsx` + `components/customer/PortalCard.tsx`, plus a new shared `portalNeutral.ts` and co-located tests. **No API/contract/data changes.** Presentational + form-primitive migration only.
+- **Scope (two clusters — per the master plan's U13 `Files:` line, which lists both `components/customer/*` AND `pages/portal/*`):**
+  - **Cluster A — public customer pages:** `packages/web/src/components/customer/{EstimateApprovalPage,InvoicePaymentPage,BookingPage,IntakeFormPage,FeedbackPage}.tsx` (the blue/indigo-heavy ones needing the brandmap override).
+  - **Cluster B — authenticated portal:** `components/portal/PortalCard.tsx` + `pages/portal/{PortalShell,PortalDashboard,PortalInvoiceList,PortalEstimateList,PortalAgreementList,PortalJobList,PortalPaymentMethods,PortalRequestService,PortalBookAppointment,PortalSlotPicker}.tsx` + `pages/portal/__tests__/*`. **Verified: 0 blue/indigo across all of Cluster B** — these are already slate+semantic, so they need slate→neutral + semantic + kit-form migration only, NO blue→neutral override. Money via canonical `formatPortalCents`. `PortalPaymentMethods` has a Stripe SetupIntent seam → same "leave Stripe surface untouched" decision as §3.
+  - Plus a new shared `portalNeutral.ts`. **No API/contract/data changes.** Presentational + form-primitive migration only.
+  - **Scope-correction note:** an earlier draft of this plan enumerated only Cluster A (the Explore pass mis-pathed `PortalCard` and skipped `pages/portal/*`). The master plan's U13 `Files:` line includes `pages/portal/*`; shipping only Cluster A would be U13 ~60% done. Both clusters are executed here.
 
 ---
 
@@ -129,10 +133,12 @@ focused test asserting a round-dollar tier renders `"$X.00"`.
 > **Order:** U13a first (others import `portalNeutral`). U13b–U13f are independent of each other.
 
 ### U13a — Foundation: `portalNeutral.ts` + `PortalCard.tsx` recolor
-- **Files:** new `components/customer/portalNeutral.ts`; `components/customer/PortalCard.tsx`
+- **Files:** new `components/customer/portalNeutral.ts`; `components/portal/PortalCard.tsx` (the shared
+  card primitive used across Cluster B — **path is `components/portal/`, not `components/customer/`**)
   (+ `portalNeutral.test.tsx` smoke).
 - **Do:** create the three constants (§2.2). Recolor `PortalCard` slate→neutral tokens
-  (`slate-200/300→border`, `slate-500→muted-foreground`, `slate-700/900→foreground`). No behavior.
+  (`bg-white→bg-card`, `border-slate-200/300→border-border`, `text-slate-500→text-muted-foreground`,
+  `text-slate-700/900→text-foreground`). No behavior.
 - **Verify:** grep `PortalCard.tsx` raw-palette-clean; tsc build; a 3-line `portalNeutral.test.tsx`
   asserting the constants contain no `primary`/`ring-ring`/`accent` substring (locks tenant-neutrality
   of the shared constants themselves).
@@ -196,6 +202,43 @@ focused test asserting a round-dollar tier renders `"$X.00"`.
   Star buttons keep `p-1`, submit keeps `py-4` (≥44px). CTAs neutral.
 - **Tests:** keep `FeedbackPage.test.tsx` green (star-rating testid, public-review CTA gating ≥4,
   tap targets). **Add** class-contract guard (mount the rating state and the post-submit state).
+
+---
+
+## 5b. Units — Cluster B (authenticated portal; **0 blue/indigo → no override, just neutral+semantic+kit**)
+
+> All Cluster B pages already use slate + semantic + canonical `formatPortalCents`. They need the
+> standard neutral/semantic recolor (NO blue→neutral override — there's no blue to remap), the kit
+> form migration with `NEUTRAL_FIELD`, and the §6 guard. Existing tests in `pages/portal/__tests__/`
+> stay green. Depends on U13a (`portalNeutral`, `PortalCard`).
+
+### U13g — `PortalShell.tsx` + `PortalDashboard.tsx`
+- **Do:** recolor the shell frame (nav/header/tab chrome) and dashboard slate→neutrals;
+  due-amount/status tints→semantic. Keep the "tenant brand shows through" comment honest — it's
+  accurate (businessName flows through); leave it. CTAs → `NEUTRAL_CTA`/`NEUTRAL_BTN`. Dashboard
+  money via `formatPortalCents` — leave.
+- **Tests:** keep `PortalDashboard.test.tsx` green. **Add** class-contract guard for both
+  (PortalShell has no test → guard is its only coverage; render its mounted chrome).
+
+### U13h — Portal list pages: `PortalInvoiceList`, `PortalEstimateList`, `PortalAgreementList`, `PortalJobList`
+- **Do:** recolor each (low leak counts: 5–10). Status pills→semantic; money via `formatPortalCents`
+  (leave). These render `PortalCard` (recolored in U13a) — verify the composed result is neutral.
+- **Tests:** keep `PortalInvoiceList/PortalEstimateList/PortalAgreementList.test.tsx` green
+  (`PortalJobList` has no test → guard-only). **Add** class-contract guard per file.
+
+### U13i — Portal form pages: `PortalRequestService`, `PortalBookAppointment`, `PortalSlotPicker`
+- **Do:** recolor; kit-migrate the controls (RequestService 4, BookAppointment 1, SlotPicker 2) →
+  Field+Input/Textarea/Select, `aria-label` keys preserved, `NEUTRAL_FIELD`, `min-h-11`. Slot buttons
+  keep `min-h-11`. CTAs neutral.
+- **Tests:** keep `PortalRequestService.test.tsx` green (BookAppointment/SlotPicker have no test →
+  guard-only). **Add** class-contract guard per file (walk multi-step/slot states).
+
+### U13j — `PortalPaymentMethods.tsx` (Stripe SetupIntent seam)
+- **Do:** recolor Tailwind chrome only (16 leaks). **Leave the Stripe `<Elements>`/`appearance`
+  surface untouched** (same rationale as §3) + add the one-line deliberate-choice comment. Add-card /
+  save CTAs → `NEUTRAL_CTA`.
+- **Tests:** keep `PortalPaymentMethods.test.tsx` green. **Add** class-contract guard (mount the
+  saved-cards list + the add-card states reachable without a live Stripe).
 
 ---
 
