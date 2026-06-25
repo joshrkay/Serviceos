@@ -45,11 +45,26 @@ broken core flow:**
 | Mobile typecheck — `tsc --noEmit` | ✅ PASS (exit 0) |
 | **API unit/component tests** | ✅ **8,487 passed**, 4 skipped, 43 todo (821 files) |
 | **Web unit/component tests** | ✅ **1,396 passed** (216 files) |
-| Integration / RLS tests (Docker-gated) | ⚠️ **Not runnable here** — testcontainers images (`pgvector`, `ryuk`) are unreachable under this sandbox's network policy. **Run in PR CI** (`pr-checks.yml` runs them on testcontainers Postgres). |
+| **Multi-tenant isolation (DB-level, real Postgres 16)** | ✅ **84 passed** — `rls-tenant-isolation` (12) + `tenant-isolation.leak` RV-003 (46, 13 repos) + `entity-resolution` (10) + `customers` (11) + `invoices` (5). testcontainers images are network-blocked in this sandbox, so these ran via the `EXTERNAL_TEST_DB_URL` escape hatch against a locally-installed Postgres 16 + pgvector. |
 
 The "no bugs" bar is strong for everything the unit/component suites cover. The
 critical-path bug hunt (money / auth / tenant-isolation / proposal execution)
 found **no reproducible defect**.
+
+### Multi-tenant isolation — verified
+
+Cross-tenant isolation was tested at the **database layer**, not just by code
+review. Connecting as an unprivileged `NOBYPASSRLS` role (the correct production
+posture — superusers bypass RLS), the suite proves: a tenant reads only its own
+rows; switching tenant context flips visibility with no bleed; an unknown tenant
+sees nothing; cross-tenant `UPDATE` affects 0 rows; a forged-`tenant_id` `INSERT`
+is rejected by the `WITH CHECK` policy; provisioning secrets (Twilio number,
+`vapi_assistant_id`) are isolated; a missing `app.current_tenant_id` GUC
+**fails closed** (errors, not zero-rows); and every `tenant_id` table has RLS
+enabled (2 documented exemptions). FORCE RLS (verified in `db/schema.ts`:
+104 FORCE) is the backstop for the owner-connection case. _Remaining
+prod check: ensure the runtime connects as a non-owner role, or rely on FORCE._
+
 
 ---
 
