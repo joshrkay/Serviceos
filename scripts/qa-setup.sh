@@ -19,6 +19,9 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
+QA_REPO_ROOT="$REPO_ROOT"
+# shellcheck disable=SC1091
+source "$REPO_ROOT/scripts/qa-env.sh"
 
 section() {
   echo ""
@@ -27,37 +30,14 @@ section() {
   echo "=========================================================="
 }
 
-require_env() {
-  local name="$1"
-  if [ -z "${!name:-}" ]; then
-    echo "ERROR: required env var '$name' is not set." >&2
-    echo "       Fill it in .env.qa (see .env.qa.example) and source the file." >&2
-    echo "       Runbook: docs/runbooks/qa-full-matrix-unblock.md" >&2
-    exit 1
-  fi
-}
+load_qa_env
+apply_qa_defaults
 
-# ── 0. Load .env.qa if present ───────────────────────────────────────────
-if [ -f .env.qa ]; then
-  echo "Sourcing .env.qa"
-  set -a
-  # shellcheck disable=SC1091
-  . .env.qa
-  set +a
-else
-  echo "WARNING: .env.qa not found — using env vars already exported in your shell." >&2
-  echo "         Recommended: cp .env.qa.example .env.qa && fill && source .env.qa" >&2
-fi
-
-export E2E_BASE_URL="${E2E_BASE_URL:-https://serviceosweb-development.up.railway.app}"
-export E2E_API_URL="${E2E_API_URL:-https://serviceosapi-development.up.railway.app}"
-export E2E_DB_URL_READONLY="${E2E_DB_URL_READONLY:-${E2E_DB_URL_READWRITE:-}}"
-
-require_env E2E_DB_URL_READWRITE
-require_env E2E_DB_URL_READONLY
-require_env E2E_CLERK_HMAC_SECRET
-require_env E2E_BASE_URL
-require_env E2E_API_URL
+require_qa_env E2E_DB_URL_READWRITE
+require_qa_env E2E_DB_URL_READONLY
+require_qa_env E2E_CLERK_HMAC_SECRET
+require_qa_env E2E_BASE_URL
+require_qa_env E2E_API_URL
 
 # ── 1. Bootstrap doctor (URLs + DB + HMAC before seed) ─────────────────────
 section "Step 1/6 — bootstrap doctor (URLs + DB + HMAC secret)"
@@ -83,6 +63,7 @@ section "Step 3/6 — seed matrix fixtures (E2E_TENANT_*)"
 MATRIX_EXPORTS="$(npx tsx e2e/qa-matrix/fixtures/seed.ts | grep '^export E2E_')"
 # shellcheck disable=SC2086
 eval "$MATRIX_EXPORTS"
+write_qa_local_env "$MATRIX_EXPORTS"
 
 # ── 4. Mint HMAC tokens (journey tenant IDs for qa-runner) ───────────────
 section "Step 4/6 — mint HMAC JWTs"

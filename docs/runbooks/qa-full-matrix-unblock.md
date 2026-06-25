@@ -22,15 +22,17 @@ Optional deploy flags for voice/matrix rows: `AI_PROVIDER_API_KEY`, execution wo
 
 ```bash
 cp .env.qa.example .env.qa
-# Fill E2E_BASE_URL, E2E_API_URL, E2E_DB_URL_*, E2E_CLERK_HMAC_SECRET in .env.qa
+# Uncomment and fill E2E_DB_URL_READWRITE + E2E_CLERK_HMAC_SECRET in .env.qa
 
-source .env.qa
-npm run qa:setup          # seed → mint → HMAC probe → full doctor
+npm run qa:setup          # auto-sources .env.qa; seed → mint → doctor
 
-npm run qa:matrix:run     # matrix only
+npm run qa:matrix:run     # auto-sources .env.qa + .env.qa.local
 # OR
-npm run qa:runbook        # journey seed + qa-runner §1–17 + matrix
+npm run qa:runbook
 ```
+
+`npm run` scripts auto-source `.env.qa` — no need to `source .env.qa` first.
+After `qa:setup`, matrix tenant UUIDs are written to `.env.qa.local`.
 
 Mid-bootstrap (secrets filled, tenants not seeded yet):
 
@@ -73,6 +75,19 @@ All checked by `scripts/qa-matrix-doctor.ts`:
 Bootstrap mode (`npm run qa:doctor:bootstrap`) checks only the first five.
 
 ## Troubleshooting
+
+### `E2E_DB_URL_READWRITE` empty or not set
+
+`.env.qa` still has commented-out placeholders from `.env.qa.example`.
+Uncomment and paste real Railway values:
+
+```bash
+export E2E_DB_URL_READWRITE="postgres://…@shinkansen.proxy.rlwy.net:…/railway"
+export E2E_CLERK_HMAC_SECRET="sk_test_…"
+```
+
+Do **not** use `export VAR=""` — empty strings block URL defaults and fail
+with a confusing "not set" error.
 
 ### HMAC probe returns 401
 
