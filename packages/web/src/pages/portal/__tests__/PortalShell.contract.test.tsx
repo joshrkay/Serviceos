@@ -3,7 +3,7 @@ import { describe, it, vi, beforeEach } from 'vitest';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import { PortalShell } from '../PortalShell';
 import { portalApi, type PortalCustomer } from '../../../api/portal';
-import { expectTenantNeutral } from '../../../components/customer/tenantNeutralContract';
+import { expectNoRawPalette } from '../../../components/customer/rawPaletteContract';
 
 /**
  * Tenant-neutral class contract for the portal shell chrome (U13g) — the
@@ -23,10 +23,10 @@ function jsonResponse(body: unknown): Response {
   return { ok: true, status: 200, json: async () => body } as unknown as Response;
 }
 
-describe('PortalShell — tenant-neutral class contract', () => {
+describe('PortalShell — no-raw-palette class contract', () => {
   beforeEach(() => { vi.unstubAllGlobals(); });
 
-  it('renders the shell chrome with no raw palette and no ServiceOS brand blue', async () => {
+  it('renders the shell chrome with no raw palette', async () => {
     vi.spyOn(portalApi, 'customer').mockResolvedValue(customer);
     // The default dashboard tab fetches a snapshot — return empty collections
     // (not bare {}) so it settles cleanly instead of throwing on undefined.
@@ -46,6 +46,6 @@ describe('PortalShell — tenant-neutral class contract', () => {
     );
 
     await waitFor(() => screen.getByText(/Welcome, Pat/));
-    expectTenantNeutral(container.innerHTML);
+    expectNoRawPalette(container.innerHTML);
   });
 });

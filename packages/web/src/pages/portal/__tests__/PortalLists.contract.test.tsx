@@ -5,7 +5,7 @@ import { PortalEstimateList } from '../PortalEstimateList';
 import { PortalAgreementList } from '../PortalAgreementList';
 import { PortalJobList } from '../PortalJobList';
 import { portalApi } from '../../../api/portal';
-import { expectTenantNeutral } from '../../../components/customer/tenantNeutralContract';
+import { expectNoRawPalette } from '../../../components/customer/rawPaletteContract';
 
 /**
  * Tenant-neutral class contract for the four portal list pages (U13h).
@@ -15,10 +15,10 @@ import { expectTenantNeutral } from '../../../components/customer/tenantNeutralC
  */
 const ISO = '2026-06-01T12:00:00.000Z';
 
-describe('Portal list pages — tenant-neutral class contract', () => {
+describe('Portal list pages — no-raw-palette class contract', () => {
   beforeEach(() => { vi.restoreAllMocks(); });
 
-  it('PortalInvoiceList stays neutral', async () => {
+  it('PortalInvoiceList renders no raw palette', async () => {
     vi.spyOn(portalApi, 'invoices').mockResolvedValue({
       invoices: [{
         id: 'inv-1', invoiceNumber: 'INV-2000', status: 'open', totalCents: 10000,
@@ -28,10 +28,10 @@ describe('Portal list pages — tenant-neutral class contract', () => {
     });
     const { container } = render(<PortalInvoiceList token="tok-1" />);
     await waitFor(() => screen.getByText('INV-2000'));
-    expectTenantNeutral(container.innerHTML);
+    expectNoRawPalette(container.innerHTML);
   });
 
-  it('PortalEstimateList stays neutral', async () => {
+  it('PortalEstimateList renders no raw palette', async () => {
     vi.spyOn(portalApi, 'estimates').mockResolvedValue({
       estimates: [{
         id: 'est-1', estimateNumber: 'EST-1', status: 'sent', totalCents: 5000,
@@ -41,10 +41,10 @@ describe('Portal list pages — tenant-neutral class contract', () => {
     });
     const { container } = render(<PortalEstimateList token="tok-1" />);
     await waitFor(() => screen.getByText('EST-1'));
-    expectTenantNeutral(container.innerHTML);
+    expectNoRawPalette(container.innerHTML);
   });
 
-  it('PortalAgreementList stays neutral', async () => {
+  it('PortalAgreementList renders no raw palette', async () => {
     vi.spyOn(portalApi, 'agreements').mockResolvedValue({
       agreements: [{
         id: 'agr-1', name: 'Quarterly HVAC', status: 'active', priceCents: 9900,
@@ -53,10 +53,10 @@ describe('Portal list pages — tenant-neutral class contract', () => {
     });
     const { container } = render(<PortalAgreementList token="tok-1" />);
     await waitFor(() => screen.getByText('Quarterly HVAC'));
-    expectTenantNeutral(container.innerHTML);
+    expectNoRawPalette(container.innerHTML);
   });
 
-  it('PortalJobList stays neutral', async () => {
+  it('PortalJobList renders no raw palette', async () => {
     vi.spyOn(portalApi, 'jobs').mockResolvedValue({
       jobs: [{
         id: 'job-1', jobNumber: 'JOB-1', summary: 'AC repair', status: 'scheduled',
@@ -65,6 +65,6 @@ describe('Portal list pages — tenant-neutral class contract', () => {
     });
     const { container } = render(<PortalJobList token="tok-1" />);
     await waitFor(() => screen.getByText(/JOB-1|AC repair/));
-    expectTenantNeutral(container.innerHTML);
+    expectNoRawPalette(container.innerHTML);
   });
 });

@@ -120,7 +120,7 @@ export function PortalShell() {
                   className={
                     'whitespace-nowrap py-2 px-1 text-sm border-b-2 ' +
                     (active
-                      ? 'border-foreground text-foreground font-medium'
+                      ? 'border-primary text-foreground font-medium'
                       : 'border-transparent text-muted-foreground hover:text-foreground')
                   }
                 >

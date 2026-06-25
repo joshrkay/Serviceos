@@ -24,7 +24,7 @@ export function PortalCard({ title, subtitle, children, trailing, onClick }: Por
       onClick={onClick}
       className={
         'w-full text-left bg-card rounded-2xl border border-border p-4 shadow-sm ' +
-        (onClick ? 'hover:border-foreground/30 transition-colors cursor-pointer' : '')
+        (onClick ? 'hover:border-primary/30 transition-colors cursor-pointer' : '')
       }
     >
       <div className="flex items-start justify-between gap-3">

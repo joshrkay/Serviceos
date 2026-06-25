@@ -2,7 +2,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import { describe, it, vi, beforeEach } from 'vitest';
 import { PortalDashboard } from '../PortalDashboard';
 import type { PortalCustomer } from '../../../api/portal';
-import { expectTenantNeutral } from '../../../components/customer/tenantNeutralContract';
+import { expectNoRawPalette } from '../../../components/customer/rawPaletteContract';
 
 /**
  * Tenant-neutral class contract for the authenticated portal dashboard (U13g).
@@ -21,10 +21,10 @@ function jsonResponse(body: unknown): Response {
   return { ok: true, status: 200, json: async () => body } as unknown as Response;
 }
 
-describe('PortalDashboard — tenant-neutral class contract', () => {
+describe('PortalDashboard — no-raw-palette class contract', () => {
   beforeEach(() => { vi.unstubAllGlobals(); });
 
-  it('renders no raw palette and no ServiceOS brand blue', async () => {
+  it('renders no raw palette', async () => {
     vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => {
       if (url.includes('/invoices')) {
         return Promise.resolve(jsonResponse({
@@ -49,6 +49,6 @@ describe('PortalDashboard — tenant-neutral class contract', () => {
 
     const { container } = render(<PortalDashboard token="tok-1" customer={customer} />);
     await waitFor(() => screen.getByText(/Amount due/));
-    expectTenantNeutral(container.innerHTML);
+    expectNoRawPalette(container.innerHTML);
   });
 });

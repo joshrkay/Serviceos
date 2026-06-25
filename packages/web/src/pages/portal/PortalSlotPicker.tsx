@@ -10,7 +10,7 @@
 import { FormEvent, useState } from 'react';
 import { portalApi, PortalSlot } from '../../api/portal';
 import { Input } from '../../components/ui';
-import { NEUTRAL_FIELD } from '../../components/customer/portalNeutral';
+import { PORTAL_FIELD } from '../../components/customer/portalField';
 
 function addDays(date: Date, days: number): Date {
   const d = new Date(date);
@@ -136,7 +136,7 @@ export function PortalSlotPicker({
             type="date"
             value={from}
             onChange={(e) => setFrom(e.target.value)}
-            className={`mt-1 ${NEUTRAL_FIELD}`}
+            className={`mt-1 ${PORTAL_FIELD}`}
           />
         </div>
         <div>
@@ -146,13 +146,13 @@ export function PortalSlotPicker({
             type="date"
             value={to}
             onChange={(e) => setTo(e.target.value)}
-            className={`mt-1 ${NEUTRAL_FIELD}`}
+            className={`mt-1 ${PORTAL_FIELD}`}
           />
         </div>
         <button
           type="submit"
           disabled={loadingSlots}
-          className="rounded-lg bg-foreground hover:bg-foreground/90 disabled:opacity-50 text-white font-medium px-4 py-2 text-sm"
+          className="rounded-lg bg-primary hover:bg-primary/90 disabled:opacity-50 text-white font-medium px-4 py-2 text-sm"
         >
           {loadingSlots ? 'Finding times…' : 'Find times'}
         </button>
@@ -178,8 +178,8 @@ export function PortalSlotPicker({
                   className={
                     'rounded-lg border px-3 py-2 text-sm ' +
                     (isSelected
-                      ? 'border-foreground bg-foreground text-white'
-                      : 'border-border text-foreground hover:border-foreground/30')
+                      ? 'border-primary bg-primary text-white'
+                      : 'border-border text-foreground hover:border-primary/30')
                   }
                 >
                   {formatSlot(slot, timezone)}

@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { useParams } from 'react-router';
 import { Star, CheckCircle2 } from 'lucide-react';
 import { Textarea } from '../ui';
-import { NEUTRAL_FIELD } from './portalNeutral';
+import { PORTAL_FIELD } from './portalField';
 
 type Status = 'loading' | 'rating' | 'submitting' | 'submitted' | 'already_submitted' | 'expired' | 'invalid_link' | 'error';
 
@@ -159,7 +159,7 @@ export function FeedbackPage() {
                   href={reviewUrls.google}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="flex items-center justify-center gap-2 rounded-2xl bg-foreground text-white py-3.5 hover:bg-foreground/80 active:scale-[0.98] transition"
+                  className="flex items-center justify-center gap-2 rounded-2xl bg-primary text-white py-3.5 hover:bg-primary/80 active:scale-[0.98] transition"
                 >
                   Leave a Google review
                 </a>
@@ -218,7 +218,7 @@ export function FeedbackPage() {
               maxLength={1000}
               rows={4}
               placeholder="Tell us about your experience…"
-              className={`mt-2 ${NEUTRAL_FIELD} resize-none`}
+              className={`mt-2 ${PORTAL_FIELD} resize-none`}
             />
           </label>
 
@@ -230,7 +230,7 @@ export function FeedbackPage() {
             type="button"
             onClick={submit}
             disabled={rating === 0 || status === 'submitting'}
-            className="mt-5 w-full flex items-center justify-center gap-2 rounded-2xl bg-foreground text-white py-4 hover:bg-foreground/80 active:scale-[0.98] transition disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100"
+            className="mt-5 w-full flex items-center justify-center gap-2 rounded-2xl bg-primary text-white py-4 hover:bg-primary/80 active:scale-[0.98] transition disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100"
           >
             {status === 'submitting' ? 'Submitting…' : 'Submit feedback'}
           </button>

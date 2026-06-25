@@ -9,7 +9,7 @@
 import { FormEvent, useState } from 'react';
 import { portalApi } from '../../api/portal';
 import { Input, Textarea } from '../../components/ui';
-import { NEUTRAL_FIELD } from '../../components/customer/portalNeutral';
+import { PORTAL_FIELD } from '../../components/customer/portalField';
 
 interface FormState {
   summary: string;
@@ -81,7 +81,7 @@ export function PortalRequestService({ token }: { token: string }) {
           rows={3}
           value={form.summary}
           onChange={(e) => update('summary', e.target.value)}
-          className={`mt-1 ${NEUTRAL_FIELD}`}
+          className={`mt-1 ${PORTAL_FIELD}`}
           placeholder="e.g. The water heater is leaking under the stairs."
         />
       </div>
@@ -95,7 +95,7 @@ export function PortalRequestService({ token }: { token: string }) {
           rows={2}
           value={form.notes}
           onChange={(e) => update('notes', e.target.value)}
-          className={`mt-1 ${NEUTRAL_FIELD}`}
+          className={`mt-1 ${PORTAL_FIELD}`}
         />
       </div>
 
@@ -109,7 +109,7 @@ export function PortalRequestService({ token }: { token: string }) {
             type="tel"
             value={form.primaryPhone}
             onChange={(e) => update('primaryPhone', e.target.value)}
-            className={`mt-1 ${NEUTRAL_FIELD}`}
+            className={`mt-1 ${PORTAL_FIELD}`}
           />
         </div>
         <div>
@@ -121,7 +121,7 @@ export function PortalRequestService({ token }: { token: string }) {
             type="email"
             value={form.email}
             onChange={(e) => update('email', e.target.value)}
-            className={`mt-1 ${NEUTRAL_FIELD}`}
+            className={`mt-1 ${PORTAL_FIELD}`}
           />
         </div>
       </div>
@@ -131,7 +131,7 @@ export function PortalRequestService({ token }: { token: string }) {
       <button
         type="submit"
         disabled={submitting}
-        className="w-full sm:w-auto rounded-lg bg-foreground hover:bg-foreground/90 disabled:opacity-50 text-white font-medium px-4 py-2 text-sm"
+        className="w-full sm:w-auto rounded-lg bg-primary hover:bg-primary/90 disabled:opacity-50 text-white font-medium px-4 py-2 text-sm"
       >
         {submitting ? 'Sending…' : 'Send request'}
       </button>

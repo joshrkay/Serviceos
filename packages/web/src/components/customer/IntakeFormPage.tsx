@@ -6,7 +6,7 @@ import {
 import { submitIntakeLead, fetchIntakeTenantInfo, type IntakeTenantInfo } from '../../api/public-intake';
 import { businessInitial } from '../../utils/business-initial';
 import { Input, Textarea, Field } from '../ui';
-import { NEUTRAL_FIELD } from './portalNeutral';
+import { PORTAL_FIELD } from './portalField';
 
 /**
  * Marketing-attribution params we capture from the URL on mount and ship
@@ -246,7 +246,7 @@ export function IntakeFormPage() {
       {/* Business header */}
       <div className="bg-card border-b border-border px-5 py-4 flex items-center gap-3">
         <div
-          className="flex size-9 items-center justify-center rounded-xl bg-foreground shrink-0 text-sm font-medium text-white"
+          className="flex size-9 items-center justify-center rounded-xl bg-primary shrink-0 text-sm font-medium text-white"
           aria-hidden
         >
           {businessInitial(tenantInfo?.businessName)}
@@ -271,7 +271,7 @@ export function IntakeFormPage() {
               <div
                 key={s}
                 className={`h-1.5 flex-1 rounded-full transition-all duration-300 ${
-                  (step as number) >= s ? 'bg-foreground' : 'bg-border'
+                  (step as number) >= s ? 'bg-primary' : 'bg-border'
                 }`}
               />
             ))}
@@ -316,8 +316,8 @@ export function IntakeFormPage() {
                     onClick={() => update({ serviceType: opt.verticalType })}
                     className={`flex items-center gap-4 rounded-2xl border-2 px-5 py-4 text-left transition-all ${
                       selected
-                        ? 'border-foreground bg-foreground text-white'
-                        : 'border-border bg-card hover:border-foreground/30'
+                        ? 'border-primary bg-primary text-white'
+                        : 'border-border bg-card hover:border-primary/30'
                     }`}
                   >
                     <span className="text-2xl shrink-0">{opt.emoji}</span>
@@ -360,7 +360,7 @@ export function IntakeFormPage() {
                     : FALLBACK_PLACEHOLDER
                 }
                 rows={5}
-                className={`${NEUTRAL_FIELD} resize-none`}
+                className={`${PORTAL_FIELD} resize-none`}
               />
               {data.description.length > 0 && data.description.length < 10 && (
                 <p className="text-xs text-warning mt-1.5 flex items-center gap-1">
@@ -377,7 +377,7 @@ export function IntakeFormPage() {
                     key={opt.value}
                     onClick={() => update({ urgency: opt.value })}
                     className={`flex items-center gap-4 rounded-xl border-2 px-4 py-3 text-left transition-all ${
-                      data.urgency === opt.value ? opt.color + ' border-current' : 'border-border bg-card hover:border-foreground/30'
+                      data.urgency === opt.value ? opt.color + ' border-current' : 'border-border bg-card hover:border-primary/30'
                     }`}
                   >
                     <div className="flex-1">
@@ -396,7 +396,7 @@ export function IntakeFormPage() {
                 value={data.preferredDates}
                 onChange={e => update({ preferredDates: e.target.value })}
                 placeholder="e.g. Weekday mornings, or Mar 14–16"
-                className={NEUTRAL_FIELD}
+                className={PORTAL_FIELD}
               />
             </div>
 
@@ -434,7 +434,7 @@ export function IntakeFormPage() {
                   placeholder={placeholder}
                   type={type}
                   required={label.includes('*')}
-                  className={NEUTRAL_FIELD}
+                  className={PORTAL_FIELD}
                 />
               </div>
             ))}
@@ -553,7 +553,7 @@ export function IntakeFormPage() {
                   <a
                     key={label}
                     href={href}
-                    className="flex items-center gap-4 rounded-xl bg-card border border-border px-4 py-3.5 hover:border-foreground/30"
+                    className="flex items-center gap-4 rounded-xl bg-card border border-border px-4 py-3.5 hover:border-primary/30"
                   >
                     {content}
                   </a>
@@ -582,7 +582,7 @@ export function IntakeFormPage() {
               data-testid="intake-cta"
               onClick={next}
               disabled={!canAdvance || submitting}
-              className="w-full flex items-center justify-center gap-2 rounded-xl bg-foreground py-4 text-sm text-white hover:bg-foreground/90 active:scale-[0.98] transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+              className="w-full flex items-center justify-center gap-2 rounded-xl bg-primary py-4 text-sm text-white hover:bg-primary/90 active:scale-[0.98] transition-all disabled:opacity-40 disabled:cursor-not-allowed"
             >
               {submitting ? (
                 <span className="animate-spin size-4 border-2 border-white/30 border-t-white rounded-full" />

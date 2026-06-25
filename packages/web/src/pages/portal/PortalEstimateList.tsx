@@ -83,7 +83,7 @@ export function PortalEstimateList({ token }: { token: string }) {
                   rel="noreferrer"
                   className={
                     e.depositPayable
-                      ? 'inline-flex min-h-11 items-center rounded-lg bg-foreground px-3 text-sm font-medium text-white hover:bg-foreground/90'
+                      ? 'inline-flex min-h-11 items-center rounded-lg bg-primary px-3 text-sm font-medium text-white hover:bg-primary/90'
                       : 'inline-flex min-h-11 items-center text-sm font-medium text-foreground underline'
                   }
                 >

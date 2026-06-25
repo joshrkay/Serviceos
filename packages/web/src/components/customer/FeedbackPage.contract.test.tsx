@@ -9,7 +9,7 @@ import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import { describe, it, vi } from 'vitest';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import { FeedbackPage } from './FeedbackPage';
-import { expectTenantNeutral } from './tenantNeutralContract';
+import { expectNoRawPalette } from './rawPaletteContract';
 
 const TOKEN = 'abc-token-123';
 
@@ -21,8 +21,8 @@ function renderPage() {
   );
 }
 
-describe('FeedbackPage — tenant-neutral class contract', () => {
-  it('stays neutral in the rating state and the submitted state', async () => {
+describe('FeedbackPage — no-raw-palette class contract', () => {
+  it('renders no raw palette in the rating state and the submitted state', async () => {
     vi.stubGlobal('fetch', vi.fn((_url: string, init?: RequestInit) =>
       Promise.resolve({
         ok: true,
@@ -37,11 +37,11 @@ describe('FeedbackPage — tenant-neutral class contract', () => {
     // Rating state: stars (SVG fill) + kit comment textarea.
     await waitFor(() => screen.getByTestId('star-rating'));
     fireEvent.click(screen.getByRole('button', { name: '5 stars' }));
-    expectTenantNeutral(container.innerHTML);
+    expectNoRawPalette(container.innerHTML);
 
     // Submitted state.
     fireEvent.click(screen.getByRole('button', { name: /submit feedback/i }));
     await screen.findByRole('link', { name: /leave a google review/i });
-    expectTenantNeutral(container.innerHTML);
+    expectNoRawPalette(container.innerHTML);
   });
 });

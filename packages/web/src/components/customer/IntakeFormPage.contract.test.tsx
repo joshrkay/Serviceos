@@ -10,7 +10,7 @@
 import React from 'react';
 import { describe, it, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
-import { expectTenantNeutral } from './tenantNeutralContract';
+import { expectNoRawPalette } from './rawPaletteContract';
 
 vi.mock('../../api/public-intake', () => ({
   submitIntakeLead: vi.fn(),
@@ -28,7 +28,7 @@ const TENANT_INFO = {
   serviceTypes: [{ verticalType: 'hvac', displayName: 'HVAC Services' }],
 };
 
-describe('IntakeFormPage — tenant-neutral class contract', () => {
+describe('IntakeFormPage — no-raw-palette class contract', () => {
   beforeEach(() => {
     vi.mocked(submitIntakeLead).mockResolvedValue({ ok: true, leadId: 'lead-1' });
     vi.mocked(fetchIntakeTenantInfo).mockResolvedValue(TENANT_INFO);
@@ -36,12 +36,12 @@ describe('IntakeFormPage — tenant-neutral class contract', () => {
   });
   afterEach(() => { vi.clearAllMocks(); });
 
-  it('stays neutral across every wizard step', async () => {
+  it('renders no raw palette across every wizard step', async () => {
     const { container } = render(<IntakeFormPage />);
 
     // Step 1 — service select.
     fireEvent.click(await screen.findByTestId('intake-service-hvac'));
-    expectTenantNeutral(container.innerHTML);
+    expectNoRawPalette(container.innerHTML);
     fireEvent.click(screen.getByTestId('intake-cta'));
 
     // Step 2 — description (kit Textarea), urgency severity, business-hours hint.
@@ -49,16 +49,16 @@ describe('IntakeFormPage — tenant-neutral class contract', () => {
       target: { value: 'AC stopped blowing cold air yesterday.' },
     });
     fireEvent.click(screen.getByText('🚨 Emergency'));
-    expectTenantNeutral(container.innerHTML);
+    expectNoRawPalette(container.innerHTML);
     fireEvent.click(screen.getByTestId('intake-cta'));
 
     // Step 3 — contact (kit Inputs).
     fireEvent.change(screen.getByTestId('intake-field-name'), { target: { value: 'Sandra Wu' } });
     fireEvent.change(screen.getByTestId('intake-field-phone'), { target: { value: '(512) 555-0191' } });
-    expectTenantNeutral(container.innerHTML);
+    expectNoRawPalette(container.innerHTML);
     fireEvent.click(screen.getByTestId('intake-cta'));
 
     // Step 4 — review.
-    expectTenantNeutral(container.innerHTML);
+    expectNoRawPalette(container.innerHTML);
   });
 });

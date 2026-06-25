@@ -38,12 +38,12 @@ function AddCardForm({ onSaved }: { onSaved: () => void }): JSX.Element {
   return (
     <div className="space-y-3" data-testid="add-card-form">
       <PaymentElement />
-      {error && <p className="text-sm text-rose-600">{error}</p>}
+      {error && <p className="text-sm text-destructive">{error}</p>}
       <button
         type="button"
         onClick={submit}
         disabled={!stripe || submitting}
-        className="rounded-lg bg-slate-900 text-white px-4 py-2 text-sm disabled:opacity-50"
+        className="rounded-lg bg-primary text-white px-4 py-2 text-sm disabled:opacity-50"
       >
         {submitting ? 'Saving…' : 'Save card'}
       </button>
@@ -99,16 +99,16 @@ export function PortalPaymentMethods({ token }: { token: string }): JSX.Element 
   };
 
   return (
-    <div className="bg-white rounded-2xl border border-slate-200 p-5 space-y-4">
-      <div className="text-lg font-semibold text-slate-900">Payment methods</div>
-      <p className="text-sm text-slate-500">
+    <div className="bg-card rounded-2xl border border-border p-5 space-y-4">
+      <div className="text-lg font-semibold text-foreground">Payment methods</div>
+      <p className="text-sm text-muted-foreground">
         Save a card so membership dues can be charged automatically.
       </p>
-      {error && <p className="text-sm text-rose-600">{error}</p>}
+      {error && <p className="text-sm text-destructive">{error}</p>}
 
-      {cards === null && !error && <p className="text-sm text-slate-500">Loading…</p>}
+      {cards === null && !error && <p className="text-sm text-muted-foreground">Loading…</p>}
       {cards !== null && cards.length === 0 && (
-        <p className="text-sm text-slate-500" data-testid="no-cards">
+        <p className="text-sm text-muted-foreground" data-testid="no-cards">
           No card on file yet.
         </p>
       )}
@@ -117,14 +117,14 @@ export function PortalPaymentMethods({ token }: { token: string }): JSX.Element 
           <li
             key={c.id}
             data-testid="saved-card"
-            className="flex items-center justify-between rounded-lg border border-slate-200 px-3 py-2 text-sm"
+            className="flex items-center justify-between rounded-lg border border-border px-3 py-2 text-sm"
           >
-            <span className="text-slate-800">
+            <span className="text-foreground">
               {c.brand ?? 'Card'} •••• {c.last4 ?? '????'}
               {c.expMonth && c.expYear ? ` · ${c.expMonth}/${c.expYear}` : ''}
             </span>
             {c.isDefault && (
-              <span className="text-xs rounded-full bg-slate-100 px-2 py-0.5 text-slate-600">
+              <span className="text-xs rounded-full bg-secondary px-2 py-0.5 text-foreground">
                 Default
               </span>
             )}
@@ -133,7 +133,7 @@ export function PortalPaymentMethods({ token }: { token: string }): JSX.Element 
       </ul>
 
       {savedNotice && !clientSecret && (
-        <p className="text-sm text-green-600" data-testid="card-saved-notice">
+        <p className="text-sm text-success" data-testid="card-saved-notice">
           Card saved — it&apos;ll appear here once confirmed.
         </p>
       )}
@@ -148,7 +148,7 @@ export function PortalPaymentMethods({ token }: { token: string }): JSX.Element 
           onClick={startAddCard}
           disabled={starting}
           data-testid="add-card-button"
-          className="rounded-lg border border-slate-300 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+          className="rounded-lg border border-border px-4 py-2 text-sm text-foreground hover:bg-muted disabled:opacity-50"
         >
           {starting ? 'Starting…' : 'Add a card'}
         </button>

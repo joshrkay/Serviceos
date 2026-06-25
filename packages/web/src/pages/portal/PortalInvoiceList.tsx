@@ -74,7 +74,7 @@ export function PortalInvoiceList({ token }: { token: string }) {
                 href={inv.payNowUrl}
                 target="_blank"
                 rel="noreferrer"
-                className="inline-flex min-h-11 items-center rounded-lg bg-foreground px-3 text-sm font-medium text-white hover:bg-foreground/90"
+                className="inline-flex min-h-11 items-center rounded-lg bg-primary px-3 text-sm font-medium text-white hover:bg-primary/90"
               >
                 Pay now
               </a>

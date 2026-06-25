@@ -10,7 +10,7 @@ import { useState } from 'react';
 import { portalApi, PortalSlot } from '../../api/portal';
 import { PortalSlotPicker, SlotPickerOutcome } from './PortalSlotPicker';
 import { Textarea } from '../../components/ui';
-import { NEUTRAL_FIELD } from '../../components/customer/portalNeutral';
+import { PORTAL_FIELD } from '../../components/customer/portalField';
 
 export function PortalBookAppointment({ token }: { token: string }) {
   const [summary, setSummary] = useState('');
@@ -55,7 +55,7 @@ export function PortalBookAppointment({ token }: { token: string }) {
           rows={2}
           value={summary}
           onChange={(e) => setSummary(e.target.value)}
-          className={`mt-1 ${NEUTRAL_FIELD}`}
+          className={`mt-1 ${PORTAL_FIELD}`}
           placeholder="e.g. Annual furnace tune-up"
         />
       </div>
