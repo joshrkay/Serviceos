@@ -7,6 +7,7 @@ import { openApiSpec } from './swagger/spec';
 import { createHealthRouter, HealthCheck } from './health/health';
 import { toErrorResponse } from './shared/errors';
 import { createPool } from './db/pool';
+import { verifyRlsRuntimeRole } from './db/rls-runtime-role';
 import { loadConfig } from './shared/config';
 import { createWebhookRouter } from './webhooks/routes';
 import { createIntegrationResolver } from './webhooks/integration-resolver';
@@ -720,6 +721,18 @@ export function createApp(): express.Express {
   // In production, in-memory repositories lose all data on restart — crash fast.
   if (!pool && (config.NODE_ENV === 'prod' || config.NODE_ENV === 'staging')) {
     throw new Error('DATABASE_URL is required in production and staging environments');
+  }
+
+  // RLS runtime-role guard: when RLS_RUNTIME_ROLE=true, refuse to run unless the
+  // rls_app_runtime role is actually assumable — never serve with the flag on but
+  // enforcement silently absent. No-op when the flag is off.
+  if (pool) {
+    void verifyRlsRuntimeRole(pool).catch((err) => {
+      process.stderr.write(
+        `FATAL ${err instanceof Error ? err.message : String(err)}\n`
+      );
+      process.exit(1);
+    });
   }
 
   // Health checks — no auth required. Reuse the main pool (no duplicate connections).

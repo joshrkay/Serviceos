@@ -2,7 +2,7 @@ import { WorkerHandler, QueueMessage } from '../queues/queue';
 import { Logger } from '../logging/logger';
 import { Pool, QueryResult, QueryResultRow } from 'pg';
 import { encrypt, decrypt } from '../integrations/crypto';
-import { setTenantContext } from '../db/schema';
+import { applyTenantContext } from '../db/rls-runtime-role';
 import {
   createTwilioSubaccountWithCreds,
   createMessagingService,
@@ -32,7 +32,7 @@ async function tenantQuery<R extends QueryResultRow = QueryResultRow>(
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    await client.query(setTenantContext(tenantId));
+    await applyTenantContext(client, tenantId, { transactional: true });
     const result = await client.query<R>(sql, params);
     await client.query('COMMIT');
     return result;

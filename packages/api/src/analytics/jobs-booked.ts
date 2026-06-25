@@ -1,5 +1,5 @@
 import type { Pool } from 'pg';
-import { setTenantContext } from '../db/schema';
+import { applyTenantContext, clearTenantContext } from '../db/rls-runtime-role';
 
 /**
  * Epic 12.4 — Jobs-booked KPI.
@@ -67,7 +67,7 @@ export class PgJobsBookedReporter implements JobsBookedReporter {
     const { thisStart, thisEnd, priorStart } = monthWindows(month);
     const client = await this.pool.connect();
     try {
-      await client.query(setTenantContext(tenantId));
+      await applyTenantContext(client, tenantId);
       const result = await client.query<{ this_count: number; prior_count: number }>(
         `SELECT
            COUNT(*) FILTER (WHERE created_at >= $2 AND created_at < $3)::int AS this_count,
@@ -79,7 +79,7 @@ export class PgJobsBookedReporter implements JobsBookedReporter {
       const row = result.rows[0] ?? { this_count: 0, prior_count: 0 };
       return summarizeJobsBooked(month, row.this_count ?? 0, row.prior_count ?? 0);
     } finally {
-      await client.query('RESET app.current_tenant_id').catch(() => {});
+      await clearTenantContext(client);
       client.release();
     }
   }

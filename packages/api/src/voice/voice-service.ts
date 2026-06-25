@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto';
 import type { Pool } from 'pg';
-import { setTenantContext } from '../db/schema';
+import { applyTenantContext } from '../db/rls-runtime-role';
 
 export type TranscriptionStatus = 'pending' | 'processing' | 'completed' | 'failed';
 
@@ -327,7 +327,7 @@ export async function recordInboundCall(
     // is partial / advisory today; the transaction is what enforces
     // atomicity here.
     await client.query('BEGIN');
-    await client.query(setTenantContext(input.tenantId));
+    await applyTenantContext(client, input.tenantId, { transactional: true });
     const existing = await client.query<{ id: string }>(
       `SELECT id FROM voice_recordings
        WHERE tenant_id = $1 AND call_sid = $2 AND source = 'inbound_call'

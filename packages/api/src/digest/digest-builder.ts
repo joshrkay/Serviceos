@@ -7,7 +7,7 @@
  * the caller provides them pre-computed via luxon.
  */
 import type { Pool } from 'pg';
-import { setTenantContext } from '../db/schema';
+import { applyTenantContext, clearTenantContext } from '../db/rls-runtime-role';
 import type { DigestSection, DigestSourceData } from './digest-types';
 import { formatUsd } from './digest-service';
 
@@ -39,7 +39,7 @@ export async function buildDigestData(
 ): Promise<BuildDigestDataResult> {
   const client = await pool.connect();
   try {
-    await client.query(setTenantContext(tenantId));
+    await applyTenantContext(client, tenantId);
 
   // Section 1: Completed jobs
   const completedJobsResult = await client.query<{ id: string }>(
@@ -216,7 +216,7 @@ export async function buildDigestData(
 
   return { sections, sourceData };
   } finally {
-    await client.query('RESET app.current_tenant_id').catch(() => {});
+    await clearTenantContext(client);
     client.release();
   }
 }
