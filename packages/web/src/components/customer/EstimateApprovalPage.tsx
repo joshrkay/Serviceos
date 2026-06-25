@@ -6,6 +6,8 @@ import {
 } from 'lucide-react';
 import { apiFetch } from '../../utils/api-fetch';
 import { printEstimateDocument } from '../../lib/estimatePdf';
+import { Input, Textarea, Field } from '../ui';
+import { NEUTRAL_FIELD } from './portalNeutral';
 
 /**
  * Format a USD dollar amount with exactly two fraction digits. A bare
@@ -182,7 +184,7 @@ function SignatureCanvas({ onChange, canvasRef: externalRef }: {
   }
 
   return (
-    <div className="relative rounded-xl border-2 border-dashed border-slate-300 bg-white overflow-hidden" style={{ height: 96 }}>
+    <div className="relative rounded-xl border-2 border-dashed border-border bg-card overflow-hidden" style={{ height: 96 }}>
       <canvas
         ref={canvasRef}
         style={{ width: '100%', height: '100%', display: 'block', touchAction: 'none' }}
@@ -190,14 +192,14 @@ function SignatureCanvas({ onChange, canvasRef: externalRef }: {
         onTouchStart={onStart} onTouchMove={onMove} onTouchEnd={onEnd}
       />
       {!hasSig && (
-        <p className="absolute inset-0 flex items-center justify-center text-sm text-slate-400 pointer-events-none">
+        <p className="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground pointer-events-none">
           Draw your signature here
         </p>
       )}
       {hasSig && (
         <button
           onClick={clear}
-          className="absolute top-2 right-2 flex items-center gap-1 bg-white border border-slate-200 rounded-lg px-2 py-1 text-xs text-slate-500 hover:text-slate-700 shadow-sm"
+          className="absolute top-2 right-2 flex items-center gap-1 bg-card border border-border rounded-lg px-2 py-1 text-xs text-muted-foreground hover:text-foreground shadow-sm"
         >
           <X size={10} /> Clear
         </button>
@@ -273,56 +275,57 @@ function ApprovalSheet({
   return (
     <div className="fixed inset-0 z-50 flex flex-col justify-end" onClick={onClose}>
       <div
-        className="bg-white rounded-t-3xl shadow-2xl overflow-y-auto max-h-[92vh]"
+        className="bg-card rounded-t-3xl shadow-2xl overflow-y-auto max-h-[92vh]"
         onClick={e => e.stopPropagation()}
         style={{ animation: 'sheetUp 0.3s cubic-bezier(0.32,0.72,0,1)' }}
       >
         {/* Drag handle */}
         <div className="flex justify-center pt-3 pb-1">
-          <div className="w-10 h-1 rounded-full bg-slate-200" />
+          <div className="w-10 h-1 rounded-full bg-border" />
         </div>
 
         <div className="px-6 pb-8 pt-2">
           {/* Header */}
           <div className="flex items-start justify-between mb-5">
             <div>
-              <p className="text-sm text-slate-400 mb-0.5">Accepting</p>
-              <h2 className="text-slate-900" style={{ fontSize: '1.15rem' }}>{estimateNumber}</h2>
+              <p className="text-sm text-muted-foreground mb-0.5">Accepting</p>
+              <h2 className="text-foreground" style={{ fontSize: '1.15rem' }}>{estimateNumber}</h2>
             </div>
             <div className="text-right">
-              <p className="text-xs text-slate-400 mb-0.5">Total</p>
-              <p className="text-slate-900" style={{ fontSize: '1.3rem' }}>${fmtUsd(total)}</p>
+              <p className="text-xs text-muted-foreground mb-0.5">Total</p>
+              <p className="text-foreground" style={{ fontSize: '1.3rem' }}>${fmtUsd(total)}</p>
             </div>
           </div>
 
           {/* Legal note */}
-          <p className="text-xs text-slate-500 leading-relaxed bg-slate-50 rounded-xl px-4 py-3 mb-5">
+          <p className="text-xs text-muted-foreground leading-relaxed bg-muted rounded-xl px-4 py-3 mb-5">
             By accepting this estimate you're agreeing to the scope and pricing above. Work will be scheduled after acceptance.
           </p>
 
           {/* Name */}
           <div className="mb-4">
-            <label className="block text-xs text-slate-500 mb-1.5">Full name</label>
-            <input
-              value={name}
-              onChange={e => setName(e.target.value)}
-              className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm text-slate-800 focus:outline-none focus:border-indigo-400 transition-colors"
-              placeholder="Your full name"
-            />
+            <Field label="Full name">
+              <Input
+                value={name}
+                onChange={e => setName(e.target.value)}
+                placeholder="Your full name"
+                className={NEUTRAL_FIELD}
+              />
+            </Field>
           </div>
 
           {/* Signature */}
           <div className="mb-6">
-            <label className="block text-xs text-slate-500 mb-1.5">Signature</label>
+            <label className="block text-xs text-muted-foreground mb-1.5">Signature</label>
             <SignatureCanvas onChange={setHasSig} canvasRef={sigRef} />
           </div>
 
           {error && (
-            <p className="text-xs text-red-600 mb-3 bg-red-50 rounded-lg px-3 py-2">{error}</p>
+            <p className="text-xs text-destructive mb-3 bg-destructive/10 rounded-lg px-3 py-2">{error}</p>
           )}
 
           {/* Date */}
-          <div className="flex items-center justify-between text-xs text-slate-400 mb-6">
+          <div className="flex items-center justify-between text-xs text-muted-foreground mb-6">
             <span>Accepted on</span>
             <span>March 10, 2026</span>
           </div>
@@ -333,10 +336,10 @@ function ApprovalSheet({
             disabled={!name.trim() || !hasSig || loading}
             className={`w-full flex items-center justify-center gap-2 rounded-2xl py-4 text-sm transition-all ${
               !name.trim() || !hasSig
-                ? 'bg-slate-100 text-slate-400 cursor-not-allowed'
+                ? 'bg-secondary text-muted-foreground cursor-not-allowed'
                 : loading
-                ? 'bg-green-400 text-white'
-                : 'bg-slate-900 text-white hover:bg-slate-700 active:scale-[0.98]'
+                ? 'bg-success text-white'
+                : 'bg-foreground text-white hover:bg-foreground/80 active:scale-[0.98]'
             }`}
           >
             {loading ? (
@@ -376,22 +379,22 @@ function SuccessScreen({
   const firstName = customer.split(' ')[0];
 
   return (
-    <div className="min-h-screen bg-slate-50">
+    <div className="min-h-screen bg-muted">
       {/* Branded header */}
-      <div className="bg-white border-b border-slate-200 px-5 py-4">
+      <div className="bg-card border-b border-border px-5 py-4">
         <div className="max-w-lg mx-auto flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <div className="flex size-8 items-center justify-center rounded-xl bg-slate-900">
+            <div className="flex size-8 items-center justify-center rounded-xl bg-foreground">
               <span className="text-white" style={{ fontSize: 13 }}>F</span>
             </div>
             <div>
-              <p className="text-sm text-slate-800">Fieldly Pro Services</p>
-              <p className="text-xs text-slate-400">Austin, TX</p>
+              <p className="text-sm text-foreground">Fieldly Pro Services</p>
+              <p className="text-xs text-muted-foreground">Austin, TX</p>
             </div>
           </div>
           <div className="flex items-center gap-3">
-            <a href="tel:5125550000" className="flex size-8 items-center justify-center rounded-full bg-slate-100 hover:bg-slate-200 transition-colors">
-              <Phone size={14} className="text-slate-600" />
+            <a href="tel:5125550000" className="flex size-8 items-center justify-center rounded-full bg-secondary hover:bg-border transition-colors">
+              <Phone size={14} className="text-foreground" />
             </a>
           </div>
         </div>
@@ -402,14 +405,14 @@ function SuccessScreen({
         {/* Hero confirmation */}
         <div className="flex flex-col items-center text-center gap-4 mb-8"
           style={{ animation: 'popIn 0.5s cubic-bezier(0.34,1.56,0.64,1) both' }}>
-          <div className="flex size-20 items-center justify-center rounded-full bg-green-500 shadow-xl shadow-green-200">
+          <div className="flex size-20 items-center justify-center rounded-full bg-success shadow-xl shadow-success/20">
             <CheckCircle2 size={40} className="text-white" />
           </div>
           <div>
-            <h1 className="text-slate-900" style={{ fontSize: '1.6rem', lineHeight: 1.2 }}>
+            <h1 className="text-foreground" style={{ fontSize: '1.6rem', lineHeight: 1.2 }}>
               Estimate accepted!
             </h1>
-            <p className="text-slate-500 mt-2 text-sm leading-relaxed">
+            <p className="text-muted-foreground mt-2 text-sm leading-relaxed">
               Thanks, {firstName}! Your job has been created and our team will be in touch shortly to confirm your appointment.
             </p>
           </div>
@@ -423,15 +426,15 @@ function SuccessScreen({
         {depositPayable && token && (
           <div
             data-testid="success-deposit-prompt"
-            className="rounded-2xl border border-amber-200 bg-amber-50 px-5 py-4 mb-4"
+            className="rounded-2xl border border-warning/20 bg-warning/10 px-5 py-4 mb-4"
             style={{ animation: 'fadeUp 0.4s ease 0.25s both' }}
           >
-            <p className="text-sm text-amber-900">
+            <p className="text-sm text-warning">
               {depositDueCents > 0
                 ? `Pay your $${fmtUsd(depositDueCents / 100)} deposit to confirm scheduling`
                 : 'Pay your deposit to confirm scheduling'}
             </p>
-            <p className="text-xs text-amber-800 mt-1 mb-3">
+            <p className="text-xs text-warning mt-1 mb-3">
               We&apos;ll hold your spot as soon as the deposit is received.
             </p>
             <PayDepositButton
@@ -444,77 +447,77 @@ function SuccessScreen({
         {depositPaid && (
           <div
             data-testid="success-deposit-paid"
-            className="rounded-2xl border border-green-200 bg-green-50 px-5 py-3 mb-4 flex items-center gap-2"
+            className="rounded-2xl border border-success/20 bg-success/10 px-5 py-3 mb-4 flex items-center gap-2"
           >
-            <CheckCircle2 size={16} className="text-green-600 shrink-0" />
-            <p className="text-sm text-green-800">Deposit paid — thank you!</p>
+            <CheckCircle2 size={16} className="text-success shrink-0" />
+            <p className="text-sm text-success">Deposit paid — thank you!</p>
           </div>
         )}
 
         {/* Job card */}
-        <div className="rounded-2xl border border-slate-200 overflow-hidden bg-white mb-4"
+        <div className="rounded-2xl border border-border overflow-hidden bg-card mb-4"
           style={{ animation: 'fadeUp 0.4s ease 0.2s both' }}>
           {/* Dark header */}
-          <div className="bg-slate-900 px-5 py-4">
+          <div className="bg-foreground px-5 py-4">
             <div className="flex items-center justify-between mb-2">
               <div className="flex items-center gap-2">
-                <div className="size-6 rounded-lg bg-white/10 flex items-center justify-center">
+                <div className="size-6 rounded-lg bg-card/10 flex items-center justify-center">
                   <span className="text-white" style={{ fontSize: 11 }}>F</span>
                 </div>
                 <p className="text-sm text-white">Fieldly Pro Services</p>
               </div>
               <div className="flex items-center gap-1.5">
-                <span className="size-2 rounded-full bg-green-400 animate-pulse" />
-                <span className="text-xs text-green-400">Job created</span>
+                <span className="size-2 rounded-full bg-success animate-pulse" />
+                <span className="text-xs text-success">Job created</span>
               </div>
             </div>
-            <p className="text-xs text-slate-400 mb-1">{description}</p>
+            <p className="text-xs text-muted-foreground mb-1">{description}</p>
             <p className="text-white" style={{ fontSize: '1.5rem', lineHeight: 1 }}>
               ${fmtUsd(total)}
             </p>
-            <p className="text-xs text-slate-500 mt-1">{jobNumber}</p>
+            <p className="text-xs text-muted-foreground mt-1">{jobNumber}</p>
           </div>
 
           {/* Detail rows */}
-          <div className="divide-y divide-slate-50">
+          <div className="divide-y divide-border">
             <div className="flex items-start gap-3 px-5 py-3.5">
-              <User size={14} className="text-slate-400 shrink-0 mt-0.5" />
+              <User size={14} className="text-muted-foreground shrink-0 mt-0.5" />
               <div className="flex-1 min-w-0">
-                <p className="text-xs text-slate-400 mb-0.5">Customer</p>
-                <p className="text-sm text-slate-800">{customer}</p>
+                <p className="text-xs text-muted-foreground mb-0.5">Customer</p>
+                <p className="text-sm text-foreground">{customer}</p>
               </div>
             </div>
 
             <div className="flex items-start gap-3 px-5 py-3.5">
-              <MapPin size={14} className="text-slate-400 shrink-0 mt-0.5" />
+              <MapPin size={14} className="text-muted-foreground shrink-0 mt-0.5" />
               <div className="flex-1 min-w-0">
-                <p className="text-xs text-slate-400 mb-0.5">Service address</p>
-                <p className="text-sm text-slate-800">{address}</p>
+                <p className="text-xs text-muted-foreground mb-0.5">Service address</p>
+                <p className="text-sm text-foreground">{address}</p>
               </div>
             </div>
 
             <div className="flex items-center gap-3 px-5 py-3.5">
-              <Check size={14} className="text-green-500 shrink-0" />
+              <Check size={14} className="text-success shrink-0" />
               <div className="flex-1">
-                <p className="text-xs text-slate-400 mb-0.5">Accepted</p>
-                <p className="text-sm text-slate-800">March 10, 2026 · Estimate approved</p>
+                <p className="text-xs text-muted-foreground mb-0.5">Accepted</p>
+                <p className="text-sm text-foreground">March 10, 2026 · Estimate approved</p>
               </div>
             </div>
 
             <div className="flex items-center gap-3 px-5 py-3.5">
-              <FileText size={14} className="text-slate-400 shrink-0" />
+              <FileText size={14} className="text-muted-foreground shrink-0" />
               <div className="flex-1">
-                <p className="text-xs text-slate-400 mb-0.5">From estimate</p>
-                <p className="text-sm text-slate-500">{estimateNumber}</p>
+                <p className="text-xs text-muted-foreground mb-0.5">From estimate</p>
+                <p className="text-sm text-muted-foreground">{estimateNumber}</p>
               </div>
             </div>
           </div>
         </div>
 
         {/* What happens next */}
-        <div className="rounded-2xl bg-white border border-slate-200 px-5 py-4 mb-4"
+        <div className="rounded-2xl bg-card border border-border px-5 py-4 mb-4"
           style={{ animation: 'fadeUp 0.4s ease 0.35s both' }}>
-          <p className="text-sm text-slate-800 mb-4">What happens next</p>
+          <p className="text-sm text-foreground mb-4">What happens next</p>
           <div className="flex flex-col gap-4">
             {[
               {
@@ -522,21 +525,21 @@ function SuccessScreen({
                 icon: Calendar,
                 title: 'We schedule your job',
                 desc: 'Our team will call or text you within 1 business day to confirm a date and time that works.',
-                color: 'bg-blue-100 text-blue-600',
+                color: 'bg-secondary text-foreground',
               },
               {
                 step: 2,
                 icon: Clock,
                 title: 'Day-before reminder',
                 desc: 'We\'ll send you a reminder the evening before your appointment with your tech\'s name and arrival window.',
-                color: 'bg-violet-100 text-violet-600',
+                color: 'bg-secondary text-foreground',
               },
               {
                 step: 3,
                 icon: CheckCircle2,
                 title: 'Work done, invoice follows',
                 desc: 'After the job is complete you\'ll receive a final invoice reflecting any on-site adjustments.',
-                color: 'bg-green-100 text-green-600',
+                color: 'bg-success/15 text-success',
               },
             ].map(({ step, icon: Icon, title, desc, color }) => (
               <div key={step} className="flex items-start gap-3.5">
@@ -544,8 +547,8 @@ function SuccessScreen({
                   <Icon size={16} />
                 </div>
                 <div className="flex-1 pt-0.5">
-                  <p className="text-sm text-slate-800">{title}</p>
-                  <p className="text-xs text-slate-400 mt-0.5 leading-relaxed">{desc}</p>
+                  <p className="text-sm text-foreground">{title}</p>
+                  <p className="text-xs text-muted-foreground mt-0.5 leading-relaxed">{desc}</p>
                 </div>
               </div>
             ))}
@@ -555,17 +558,17 @@ function SuccessScreen({
         {/* Contact footer */}
         <div className="flex flex-col items-center gap-3 text-center"
           style={{ animation: 'fadeUp 0.4s ease 0.5s both' }}>
-          <p className="text-xs text-slate-400">
+          <p className="text-xs text-muted-foreground">
             Questions? Reach us any time.
           </p>
           <div className="flex items-center gap-3">
             <a href="tel:5125550000"
-              className="flex items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-2 text-sm text-slate-700 hover:border-slate-300 hover:bg-slate-50 transition-colors">
-              <Phone size={13} className="text-slate-500" /> (512) 555-0000
+              className="flex items-center gap-2 rounded-full border border-border bg-card px-4 py-2 text-sm text-foreground hover:border-foreground/30 hover:bg-muted transition-colors">
+              <Phone size={13} className="text-muted-foreground" /> (512) 555-0000
             </a>
             <a href="mailto:info@fieldly.pro"
-              className="flex items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-2 text-sm text-slate-700 hover:border-slate-300 hover:bg-slate-50 transition-colors">
-              <Mail size={13} className="text-slate-500" /> Email us
+              className="flex items-center gap-2 rounded-full border border-border bg-card px-4 py-2 text-sm text-foreground hover:border-foreground/30 hover:bg-muted transition-colors">
+              <Mail size={13} className="text-muted-foreground" /> Email us
             </a>
           </div>
         </div>
@@ -730,8 +733,8 @@ export function EstimateApprovalPage() {
 
   if (apiLoading) {
     return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center">
-        <div className="size-8 rounded-full border-2 border-slate-200 border-t-slate-900 animate-spin" />
+      <div className="min-h-screen bg-muted flex items-center justify-center">
+        <div className="size-8 rounded-full border-2 border-border border-t-foreground animate-spin" />
       </div>
     );
   }
@@ -746,14 +749,14 @@ export function EstimateApprovalPage() {
       ? 'This estimate link is invalid or has been revoked. Please contact the business that sent it.'
       : 'We couldn’t load this estimate — check the link or contact the business that sent it.';
     return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center px-6">
+      <div className="min-h-screen bg-muted flex items-center justify-center px-6">
         <div className="max-w-md text-center">
-          <h1 className="text-slate-900 mb-2" style={{ fontSize: '1.4rem' }}>{heading}</h1>
-          <p className="text-sm text-slate-500">{detail}</p>
+          <h1 className="text-foreground mb-2" style={{ fontSize: '1.4rem' }}>{heading}</h1>
+          <p className="text-sm text-muted-foreground">{detail}</p>
           {apiError && (
             <button
               onClick={() => setRetryCount(c => c + 1)}
-              className="mt-5 inline-flex items-center justify-center rounded-2xl bg-slate-900 text-white px-6 py-3 text-sm hover:bg-slate-700 active:scale-[0.98] transition-all"
+              className="mt-5 inline-flex items-center justify-center rounded-2xl bg-foreground text-white px-6 py-3 text-sm hover:bg-foreground/80 active:scale-[0.98] transition-all"
             >
               Try again
             </button>
@@ -865,30 +868,30 @@ export function EstimateApprovalPage() {
 
   return (
     <>
-      <div className="min-h-screen bg-slate-50">
+      <div className="min-h-screen bg-muted">
         {revised && (
-          <div className="bg-amber-50 border-b border-amber-200 px-5 py-3 text-center">
-            <p className="text-sm text-amber-800 max-w-lg mx-auto">
+          <div className="bg-warning/10 border-b border-warning/20 px-5 py-3 text-center">
+            <p className="text-sm text-warning max-w-lg mx-auto">
               This estimate was updated by the business. The latest pricing is shown below — please review before accepting.
             </p>
           </div>
         )}
         {/* Branded header */}
-        <div className="bg-white border-b border-slate-200 px-5 py-4">
+        <div className="bg-card border-b border-border px-5 py-4">
           <div className="max-w-lg mx-auto flex items-center justify-between">
             <div className="flex items-center gap-2">
-              <div className="flex size-8 items-center justify-center rounded-xl bg-slate-900">
+              <div className="flex size-8 items-center justify-center rounded-xl bg-foreground">
                 <span className="text-white" style={{ fontSize: 13 }}>{businessName.charAt(0).toUpperCase()}</span>
               </div>
               <div>
-                <p className="text-sm text-slate-800">{businessName}</p>
-                {businessPhone && <p className="text-xs text-slate-400">{businessPhone}</p>}
+                <p className="text-sm text-foreground">{businessName}</p>
+                {businessPhone && <p className="text-xs text-muted-foreground">{businessPhone}</p>}
               </div>
             </div>
             <div className="flex items-center gap-3">
               {businessPhone && (
-                <a href={`tel:${businessPhone.replace(/\D/g, '')}`} className="flex size-8 items-center justify-center rounded-full bg-slate-100 hover:bg-slate-200 transition-colors">
-                  <Phone size={14} className="text-slate-600" />
+                <a href={`tel:${businessPhone.replace(/\D/g, '')}`} className="flex size-8 items-center justify-center rounded-full bg-secondary hover:bg-border transition-colors">
+                  <Phone size={14} className="text-foreground" />
                 </a>
               )}
             </div>
@@ -898,24 +901,24 @@ export function EstimateApprovalPage() {
         <div className="max-w-lg mx-auto px-5 py-6 pb-32">
           {/* Estimate badge */}
           <div className="flex items-center justify-between mb-1">
-            <span className="text-xs text-slate-500 uppercase tracking-widest">{estimateLabel}</span>
-            <span className="text-xs text-slate-500">{estimateNumber}</span>
+            <span className="text-xs text-muted-foreground uppercase tracking-widest">{estimateLabel}</span>
+            <span className="text-xs text-muted-foreground">{estimateNumber}</span>
           </div>
 
           {/* Customer */}
-          <h1 className="text-slate-900 mb-0.5" style={{ fontSize: '1.4rem', lineHeight: 1.2 }}>
+          <h1 className="text-foreground mb-0.5" style={{ fontSize: '1.4rem', lineHeight: 1.2 }}>
             Hi, {customerName.split(' ')[0]}!
           </h1>
           {customerAddress && (
-            <p className="text-sm text-slate-500 mb-5">
+            <p className="text-sm text-muted-foreground mb-5">
               {customerAddress}
             </p>
           )}
 
           {isExpired && (
-            <div className="mb-5 rounded-xl bg-amber-50 border border-amber-200 px-4 py-3">
-              <p className="text-sm text-amber-900">This estimate has expired.</p>
-              <p className="text-xs text-amber-700 mt-0.5">Please contact the business for an updated quote.</p>
+            <div className="mb-5 rounded-xl bg-warning/10 border border-warning/20 px-4 py-3">
+              <p className="text-sm text-warning">This estimate has expired.</p>
+              <p className="text-xs text-warning mt-0.5">Please contact the business for an updated quote.</p>
             </div>
           )}
 
@@ -929,11 +932,11 @@ export function EstimateApprovalPage() {
               data-testid="estimate-validity-banner"
               className={`mb-5 flex items-center gap-2.5 rounded-xl border px-4 py-3 ${
                 validUntilDays <= 3
-                  ? 'bg-amber-50 border-amber-200 text-amber-900'
-                  : 'bg-slate-50 border-slate-200 text-slate-700'
+                  ? 'bg-warning/10 border-warning/20 text-warning'
+                  : 'bg-muted border-border text-foreground'
               }`}
             >
-              <Clock size={15} className={validUntilDays <= 3 ? 'text-amber-500 shrink-0' : 'text-slate-400 shrink-0'} />
+              <Clock size={15} className={validUntilDays <= 3 ? 'text-warning shrink-0' : 'text-muted-foreground shrink-0'} />
               <p className="text-sm">
                 {validUntilDays <= 0
                   ? 'This price expires today.'
@@ -946,19 +949,19 @@ export function EstimateApprovalPage() {
             </div>
           )}
           {isAlreadyDeclined && (
-            <div className="mb-5 rounded-xl bg-slate-100 border border-slate-200 px-4 py-3">
-              <p className="text-sm text-slate-800">You declined this estimate.</p>
-              {apiView?.rejectedReason && <p className="text-xs text-slate-500 mt-0.5">{apiView.rejectedReason}</p>}
+            <div className="mb-5 rounded-xl bg-secondary border border-border px-4 py-3">
+              <p className="text-sm text-foreground">You declined this estimate.</p>
+              {apiView?.rejectedReason && <p className="text-xs text-muted-foreground mt-0.5">{apiView.rejectedReason}</p>}
             </div>
           )}
 
           {/* Service description */}
-          <div className="bg-white rounded-2xl border border-slate-200 px-5 py-4 mb-4">
-            <p className="text-xs text-slate-400 mb-1">Service</p>
-            <p className="text-sm text-slate-800">{description}</p>
+          <div className="bg-card rounded-2xl border border-border px-5 py-4 mb-4">
+            <p className="text-xs text-muted-foreground mb-1">Service</p>
+            <p className="text-sm text-foreground">{description}</p>
             {validUntilText && (
-              <p className="text-xs text-slate-400 mt-2 flex items-center gap-1">
-                <span className="size-1.5 rounded-full bg-amber-400 inline-block" />
+              <p className="text-xs text-muted-foreground mt-2 flex items-center gap-1">
+                <span className="size-1.5 rounded-full bg-warning inline-block" />
                 Valid until {validUntilText}
               </p>
             )}
@@ -970,11 +973,11 @@ export function EstimateApprovalPage() {
           {hasSelectable && (
             <div className="mb-4 flex flex-col gap-4">
               {[...tierGroups.entries()].map(([groupKey, group]) => (
-                <div key={groupKey} className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
-                  <div className="px-5 py-2.5 bg-slate-50 border-b border-slate-100">
-                    <p className="text-xs text-slate-500">{group.label} · choose one</p>
+                <div key={groupKey} className="bg-card rounded-2xl border border-border overflow-hidden">
+                  <div className="px-5 py-2.5 bg-muted border-b border-border">
+                    <p className="text-xs text-muted-foreground">{group.label} · choose one</p>
                   </div>
-                  <div className="divide-y divide-slate-50">
+                  <div className="divide-y divide-border">
                     {group.items.map(item => {
                       const isSel = chosen.has(item.id);
                       return (
@@ -982,15 +985,15 @@ export function EstimateApprovalPage() {
                           key={item.id}
                           type="button"
                           onClick={() => selectTier(groupKey, item.id)}
-                          className={`flex min-h-11 w-full items-center justify-between gap-3 px-5 py-3.5 text-left transition-colors ${isSel ? 'bg-blue-50' : 'hover:bg-slate-50'}`}
+                          className={`flex min-h-11 w-full items-center justify-between gap-3 px-5 py-3.5 text-left transition-colors ${isSel ? 'bg-secondary' : 'hover:bg-muted'}`}
                         >
                           <span className="flex items-center gap-3 min-w-0">
-                            <span className={`flex size-4 shrink-0 items-center justify-center rounded-full border ${isSel ? 'border-blue-600 bg-blue-600' : 'border-slate-300'}`}>
-                              {isSel && <span className="size-1.5 rounded-full bg-white" />}
+                            <span className={`flex size-4 shrink-0 items-center justify-center rounded-full border ${isSel ? 'border-foreground bg-foreground' : 'border-border'}`}>
+                              {isSel && <span className="size-1.5 rounded-full bg-card" />}
                             </span>
-                            <span className="text-sm text-slate-800 truncate">{item.description}</span>
+                            <span className="text-sm text-foreground truncate">{item.description}</span>
                           </span>
-                          <span className="text-sm text-slate-900 shrink-0">${(item.totalCents / 100).toLocaleString()}</span>
+                          <span className="text-sm text-foreground shrink-0">${fmtUsd(item.totalCents / 100)}</span>
                         </button>
                       );
                     })}
@@ -999,11 +1002,11 @@ export function EstimateApprovalPage() {
               ))}
 
               {addOns.length > 0 && (
-                <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
-                  <div className="px-5 py-2.5 bg-slate-50 border-b border-slate-100">
-                    <p className="text-xs text-slate-500">Optional add-ons</p>
+                <div className="bg-card rounded-2xl border border-border overflow-hidden">
+                  <div className="px-5 py-2.5 bg-muted border-b border-border">
+                    <p className="text-xs text-muted-foreground">Optional add-ons</p>
                   </div>
-                  <div className="divide-y divide-slate-50">
+                  <div className="divide-y divide-border">
                     {addOns.map(item => {
                       const isSel = chosen.has(item.id);
                       return (
@@ -1011,15 +1014,15 @@ export function EstimateApprovalPage() {
                           key={item.id}
                           type="button"
                           onClick={() => toggleAddOn(item.id)}
-                          className={`flex min-h-11 w-full items-center justify-between gap-3 px-5 py-3.5 text-left transition-colors ${isSel ? 'bg-blue-50' : 'hover:bg-slate-50'}`}
+                          className={`flex min-h-11 w-full items-center justify-between gap-3 px-5 py-3.5 text-left transition-colors ${isSel ? 'bg-secondary' : 'hover:bg-muted'}`}
                         >
                           <span className="flex items-center gap-3 min-w-0">
-                            <span className={`flex size-4 shrink-0 items-center justify-center rounded border ${isSel ? 'border-blue-600 bg-blue-600' : 'border-slate-300'}`}>
+                            <span className={`flex size-4 shrink-0 items-center justify-center rounded border ${isSel ? 'border-foreground bg-foreground' : 'border-border'}`}>
                               {isSel && <Check size={11} className="text-white" />}
                             </span>
-                            <span className="text-sm text-slate-800 truncate">{item.description}</span>
+                            <span className="text-sm text-foreground truncate">{item.description}</span>
                           </span>
-                          <span className="text-sm text-slate-900 shrink-0">+${(item.totalCents / 100).toLocaleString()}</span>
+                          <span className="text-sm text-foreground shrink-0">+${fmtUsd(item.totalCents / 100)}</span>
                         </button>
                       );
                     })}
@@ -1030,38 +1033,38 @@ export function EstimateApprovalPage() {
           )}
 
           {/* Line items */}
-          <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden mb-4">
+          <div className="bg-card rounded-2xl border border-border overflow-hidden mb-4">
             {/* minmax(0,1fr) lets the description track shrink below its
                 content width (grid items default to min-width:auto, which
                 forced horizontal overflow on ≤390px phones). Narrower fixed
                 columns below the sm breakpoint; tabular-nums keeps money
                 digits stable and right-aligned. */}
-            <div className="grid grid-cols-[minmax(0,1fr)_2rem_4rem_4.5rem] sm:grid-cols-[minmax(0,1fr)_40px_72px_72px] gap-x-2 px-5 py-2.5 bg-slate-50 border-b border-slate-100">
-              <p className="text-xs text-slate-400">Item</p>
-              <p className="text-xs text-slate-400 text-right">Qty</p>
-              <p className="text-xs text-slate-400 text-right">Rate</p>
-              <p className="text-xs text-slate-400 text-right">Total</p>
+            <div className="grid grid-cols-[minmax(0,1fr)_2rem_4rem_4.5rem] sm:grid-cols-[minmax(0,1fr)_40px_72px_72px] gap-x-2 px-5 py-2.5 bg-muted border-b border-border">
+              <p className="text-xs text-muted-foreground">Item</p>
+              <p className="text-xs text-muted-foreground text-right">Qty</p>
+              <p className="text-xs text-muted-foreground text-right">Rate</p>
+              <p className="text-xs text-muted-foreground text-right">Total</p>
             </div>
-            <div className="divide-y divide-slate-50">
+            <div className="divide-y divide-border">
               {visItems.map((item, i) => (
                 <div key={i} className="grid grid-cols-[minmax(0,1fr)_2rem_4rem_4.5rem] sm:grid-cols-[minmax(0,1fr)_40px_72px_72px] gap-x-2 px-5 py-3 items-start">
-                  <p className="text-sm text-slate-800 min-w-0 break-words">{item.description}</p>
-                  <p className="text-sm text-slate-500 text-right tabular-nums">{item.qty}</p>
-                  <p className="text-sm text-slate-500 text-right tabular-nums">${fmtUsd(item.rate)}</p>
-                  <p className="text-sm text-slate-800 text-right tabular-nums">${fmtUsd(item.qty * item.rate)}</p>
+                  <p className="text-sm text-foreground min-w-0 break-words">{item.description}</p>
+                  <p className="text-sm text-muted-foreground text-right tabular-nums">{item.qty}</p>
+                  <p className="text-sm text-muted-foreground text-right tabular-nums">${fmtUsd(item.rate)}</p>
+                  <p className="text-sm text-foreground text-right tabular-nums">${fmtUsd(item.qty * item.rate)}</p>
                 </div>
               ))}
             </div>
             {lineItems.length > 3 && (
               <button
                 onClick={() => setAll(v => !v)}
-                className="flex min-h-11 items-center justify-center gap-1 w-full py-2.5 text-xs text-slate-400 hover:text-slate-600 border-t border-slate-100 transition-colors"
+                className="flex min-h-11 items-center justify-center gap-1 w-full py-2.5 text-xs text-muted-foreground hover:text-foreground border-t border-border transition-colors"
               >
                 {showAllItems ? <><ChevronUp size={12} /> Show less</> : <><ChevronDown size={12} /> {lineItems.length - 3} more items</>}
               </button>
             )}
-            <div className="flex items-center justify-between px-5 py-4 bg-slate-900 rounded-b-2xl">
-              <p className="text-sm text-slate-300">Estimate total</p>
+            <div className="flex items-center justify-between px-5 py-4 bg-foreground rounded-b-2xl">
+              <p className="text-sm text-muted-foreground">Estimate total</p>
               <p className="text-white" style={{ fontSize: '1.15rem' }}>${fmtUsd(total)}</p>
             </div>
           </div>
@@ -1077,7 +1080,7 @@ export function EstimateApprovalPage() {
               lineItems: lineItems.map((i) => ({ description: i.description, qty: i.qty, rate: i.rate })),
               totalDollars: total,
             })}
-            className="mb-4 flex min-h-11 items-center justify-center gap-1.5 w-full rounded-xl border border-slate-200 bg-white py-2.5 text-xs text-slate-500 hover:bg-slate-50 transition-colors"
+            className="mb-4 flex min-h-11 items-center justify-center gap-1.5 w-full rounded-xl border border-border bg-card py-2.5 text-xs text-muted-foreground hover:bg-muted transition-colors"
           >
             <Download size={12} /> Download PDF
           </button>
@@ -1090,9 +1093,9 @@ export function EstimateApprovalPage() {
           {apiView && (apiView.depositRequiredCents ?? 0) > 0 && (
             <div
               data-testid="estimate-deposit-notice"
-              className="mb-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3"
+              className="mb-4 rounded-2xl border border-warning/20 bg-warning/10 px-4 py-3"
             >
-              <p className="text-sm text-amber-900">
+              <p className="text-sm text-warning">
                 Deposit required to confirm:{' '}
                 <span className="font-medium">
                   ${((apiView.depositRequiredCents ?? 0) / 100).toLocaleString(undefined, {
@@ -1101,12 +1104,12 @@ export function EstimateApprovalPage() {
                   })}
                 </span>
                 {apiView.depositStatus === 'paid' && (
-                  <span className="ml-2 inline-flex items-center rounded-full bg-green-100 text-green-800 px-2 py-0.5 text-xs">
+                  <span className="ml-2 inline-flex items-center rounded-full bg-success/15 text-success px-2 py-0.5 text-xs">
                     Paid
                   </span>
                 )}
               </p>
-              <p className="text-xs text-amber-800 mt-1">
+              <p className="text-xs text-warning mt-1">
                 {apiView.depositStatus === 'paid'
                   ? 'Thanks — your deposit is on file. We\'ll be in touch to schedule the work.'
                   : apiView.depositTimingPolicy === 'before_approval'
@@ -1117,7 +1120,7 @@ export function EstimateApprovalPage() {
           )}
 
           {/* Notes */}
-          <p className="text-xs text-slate-400 text-center px-4 mb-6 leading-relaxed">
+          <p className="text-xs text-muted-foreground text-center px-4 mb-6 leading-relaxed">
             {validUntilText
               ? `This estimate is valid until ${validUntilText}. `
               : ''}
@@ -1137,7 +1140,7 @@ export function EstimateApprovalPage() {
           // case is handled on the success screen, not here.
           if (apiView?.depositPayable && id) {
             return (
-              <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 px-5 pb-safe pt-3">
+              <div className="fixed bottom-0 left-0 right-0 bg-card border-t border-border px-5 pb-safe pt-3">
                 <div className="max-w-lg mx-auto">
                   <PayDepositButton
                     token={id}
@@ -1150,7 +1153,7 @@ export function EstimateApprovalPage() {
                       onDeclined={(view) => setApiView(view)}
                     />
                   )}
-                  <p className="text-center text-xs text-slate-400 mt-2 pb-1">
+                  <p className="text-center text-xs text-muted-foreground mt-2 pb-1">
                     No account needed · {businessName}
                   </p>
                 </div>
@@ -1161,11 +1164,11 @@ export function EstimateApprovalPage() {
           if (apiView?.isActionable === false) return null;
 
           return (
-            <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 px-5 pb-safe pt-3">
+            <div className="fixed bottom-0 left-0 right-0 bg-card border-t border-border px-5 pb-safe pt-3">
               <div className="max-w-lg mx-auto">
                 <button
                   onClick={() => setAppr(true)}
-                  className="w-full flex items-center justify-center gap-2 rounded-2xl bg-slate-900 text-white py-4 text-sm hover:bg-slate-700 active:scale-[0.98] transition-all shadow-xl shadow-slate-900/20"
+                  className="w-full flex items-center justify-center gap-2 rounded-2xl bg-foreground text-white py-4 text-sm hover:bg-foreground/80 active:scale-[0.98] transition-all shadow-xl shadow-foreground/20"
                 >
                   <Check size={16} /> Accept this {estimateLabel.toLowerCase()}
                 </button>
@@ -1175,7 +1178,7 @@ export function EstimateApprovalPage() {
                     onDeclined={(view) => setApiView(view)}
                   />
                 )}
-                <p className="text-center text-xs text-slate-400 mt-2 pb-1">
+                <p className="text-center text-xs text-muted-foreground mt-2 pb-1">
                   No account needed · {businessName}
                 </p>
               </div>
@@ -1254,17 +1257,17 @@ function PayDepositButton({ token, initialUrl, expiresAt }: {
         data-testid="estimate-pay-deposit-cta"
         onClick={go}
         disabled={submitting}
-        className="w-full flex items-center justify-center gap-2 rounded-2xl bg-amber-500 text-white py-4 text-sm hover:bg-amber-600 disabled:opacity-60 active:scale-[0.98] transition-all shadow-xl shadow-amber-500/20"
+        className="w-full flex items-center justify-center gap-2 rounded-2xl bg-warning text-white py-4 text-sm hover:bg-warning/90 disabled:opacity-60 active:scale-[0.98] transition-all shadow-xl shadow-warning/20"
       >
         {submitting ? 'Redirecting…' : 'Pay deposit to continue'}
       </button>
       {error && (
-        <p className="text-center text-xs text-red-600 mt-2" role="alert">
+        <p className="text-center text-xs text-destructive mt-2" role="alert">
           {error}
         </p>
       )}
       {!error && expiresAt && depositDays !== null && depositDays > 0 && (
-        <p className="text-center text-xs text-slate-400 mt-2">
+        <p className="text-center text-xs text-muted-foreground mt-2">
           {depositDays === 1
             ? 'Pay by tomorrow to hold your spot'
             : `Pay by ${fmtFriendlyDate(expiresAt)} to hold your spot`}
@@ -1309,7 +1312,7 @@ function DeclineButton({ token, onDeclined }: {
     return (
       <button
         onClick={() => setConfirming(true)}
-        className="block mx-auto mt-2 text-xs text-slate-500 hover:text-slate-700 underline underline-offset-2"
+        className="block mx-auto mt-2 text-xs text-muted-foreground hover:text-foreground underline underline-offset-2"
       >
         Decline this estimate
       </button>
@@ -1317,28 +1320,28 @@ function DeclineButton({ token, onDeclined }: {
   }
 
   return (
-    <div className="mt-3 rounded-xl bg-slate-50 border border-slate-200 px-3 py-3">
-      <p className="text-xs text-slate-600 mb-2">Decline this estimate? You can include a brief reason (optional).</p>
-      <textarea
+    <div className="mt-3 rounded-xl bg-muted border border-border px-3 py-3">
+      <p className="text-xs text-foreground mb-2">Decline this estimate? You can include a brief reason (optional).</p>
+      <Textarea
         value={reason}
         onChange={(e) => setReason(e.target.value)}
         rows={2}
         placeholder="e.g. Going with another quote"
-        className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:outline-none focus:border-slate-400 bg-white resize-none"
+        className={`${NEUTRAL_FIELD} resize-none`}
       />
-      {error && <p className="text-xs text-red-600 mt-2">{error}</p>}
+      {error && <p className="text-xs text-destructive mt-2">{error}</p>}
       <div className="flex gap-2 mt-2">
         <button
           onClick={() => setConfirming(false)}
           disabled={submitting}
-          className="flex-1 rounded-lg border border-slate-200 bg-white py-2 text-xs text-slate-700 hover:bg-slate-50"
+          className="flex-1 rounded-lg border border-border bg-card py-2 text-xs text-foreground hover:bg-muted"
         >
           Cancel
         </button>
         <button
           onClick={submit}
           disabled={submitting}
-          className="flex-1 rounded-lg bg-slate-700 text-white py-2 text-xs hover:bg-slate-800 disabled:opacity-60"
+          className="flex-1 rounded-lg bg-foreground text-white py-2 text-xs hover:bg-foreground/90 disabled:opacity-60"
         >
           {submitting ? 'Declining…' : 'Confirm decline'}
         </button>
