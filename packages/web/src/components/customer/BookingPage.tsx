@@ -7,6 +7,8 @@ import {
 } from '../../api/public-booking';
 import { fetchIntakeTenantInfo, type IntakeTenantInfo } from '../../api/public-intake';
 import { businessInitial } from '../../utils/business-initial';
+import { Input, Textarea, Field } from '../ui';
+import { NEUTRAL_FIELD } from './portalNeutral';
 
 /**
  * Public online booking — the prospect-facing self-scheduling page
@@ -169,18 +171,18 @@ export function BookingPage() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-50 flex flex-col">
+    <div className="min-h-screen bg-muted flex flex-col">
       {/* Business header */}
-      <div className="bg-white border-b border-slate-100 px-5 py-4 flex items-center gap-3">
+      <div className="bg-card border-b border-border px-5 py-4 flex items-center gap-3">
         <div
-          className="flex size-9 items-center justify-center rounded-xl bg-slate-900 shrink-0 text-sm font-medium text-white"
+          className="flex size-9 items-center justify-center rounded-xl bg-foreground shrink-0 text-sm font-medium text-white"
           aria-hidden
         >
           {businessInitial(tenantInfo?.businessName)}
         </div>
         <div>
-          <p className="text-slate-900">{tenantInfo?.businessName ?? 'Book an appointment'}</p>
-          <p className="text-xs text-slate-400 mt-0.5">
+          <p className="text-foreground">{tenantInfo?.businessName ?? 'Book an appointment'}</p>
+          <p className="text-xs text-muted-foreground mt-0.5">
             {tenantInfo?.businessHoursSummary ?? 'Pick a time that works for you'}
             {tenantInfo?.businessPhone ? ` · ${tenantInfo.businessPhone}` : ''}
           </p>
@@ -192,32 +194,32 @@ export function BookingPage() {
         {step === 'slot' && (
           <div className="flex flex-col gap-5 flex-1">
             <div>
-              <h1 className="text-slate-900" style={{ fontSize: '1.3rem', lineHeight: 1.3 }}>
+              <h1 className="text-foreground" style={{ fontSize: '1.3rem', lineHeight: 1.3 }}>
                 Choose a time
               </h1>
-              <p className="text-slate-500 mt-1.5">Times shown in {timezone.replace('_', ' ')}</p>
+              <p className="text-muted-foreground mt-1.5">Times shown in {timezone.replace('_', ' ')}</p>
             </div>
 
             {loadError && (
-              <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3">
-                <p className="text-xs text-red-700 flex items-center gap-1.5">
+              <div className="rounded-xl border border-destructive/20 bg-destructive/10 px-4 py-3">
+                <p className="text-xs text-destructive flex items-center gap-1.5">
                   <AlertCircle size={12} className="shrink-0" /> {loadError}
                 </p>
               </div>
             )}
             {submitError && (
-              <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
-                <p className="text-xs text-amber-700 flex items-center gap-1.5">
+              <div className="rounded-xl border border-warning/20 bg-warning/10 px-4 py-3">
+                <p className="text-xs text-warning flex items-center gap-1.5">
                   <AlertCircle size={12} className="shrink-0" /> {submitError}
                 </p>
               </div>
             )}
 
             {slots === null && !loadError && (
-              <p className="text-sm text-slate-400">Loading available times…</p>
+              <p className="text-sm text-muted-foreground">Loading available times…</p>
             )}
             {slots !== null && slots.length === 0 && (
-              <p className="text-sm text-slate-400">
+              <p className="text-sm text-muted-foreground">
                 No online slots are open right now. Please call us to book.
               </p>
             )}
@@ -225,7 +227,7 @@ export function BookingPage() {
             <div className="flex flex-col gap-4">
               {grouped.map((g) => (
                 <div key={g.day}>
-                  <p className="text-xs text-slate-500 mb-2 flex items-center gap-1.5">
+                  <p className="text-xs text-muted-foreground mb-2 flex items-center gap-1.5">
                     <Calendar size={12} /> {g.day}
                   </p>
                   <div className="grid grid-cols-3 gap-2">
@@ -238,8 +240,8 @@ export function BookingPage() {
                           onClick={() => setSelected(s)}
                           className={`flex min-h-11 items-center justify-center rounded-xl border-2 px-2 py-2.5 text-sm transition-all ${
                             isSel
-                              ? 'border-slate-900 bg-slate-900 text-white'
-                              : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300'
+                              ? 'border-foreground bg-foreground text-white'
+                              : 'border-border bg-card text-foreground hover:border-foreground/30'
                           }`}
                         >
                           {fmtTime.format(new Date(s.start))}
@@ -258,16 +260,16 @@ export function BookingPage() {
           <div className="flex flex-col gap-5 flex-1">
             <button
               onClick={() => setStep('slot')}
-              className="flex min-h-11 items-center gap-1 text-xs text-slate-400 hover:text-slate-600 self-start"
+              className="flex min-h-11 items-center gap-1 text-xs text-muted-foreground hover:text-foreground self-start"
             >
               <ArrowLeft size={12} /> Back to times
             </button>
             <div>
-              <h1 className="text-slate-900" style={{ fontSize: '1.3rem', lineHeight: 1.3 }}>
+              <h1 className="text-foreground" style={{ fontSize: '1.3rem', lineHeight: 1.3 }}>
                 Your details
               </h1>
               {selected && (
-                <p className="text-slate-500 mt-1.5 flex items-center gap-1.5">
+                <p className="text-muted-foreground mt-1.5 flex items-center gap-1.5">
                   <Clock size={13} /> {fmtTime.format(new Date(selected.start))} ·{' '}
                   {new Intl.DateTimeFormat('en-US', {
                     weekday: 'long',
@@ -288,43 +290,41 @@ export function BookingPage() {
               { key: 'state', label: 'State *', placeholder: 'State', type: 'text' },
               { key: 'postalCode', label: 'ZIP *', placeholder: 'ZIP', type: 'text' },
             ] as const).map(({ key, label, placeholder, type }) => (
-              <div key={key}>
-                <label className="text-xs text-slate-500 mb-1.5 block">{label}</label>
-                <input
+              <Field key={key} label={label}>
+                <Input
                   data-testid={`booking-field-${key}`}
                   value={details[key]}
                   onChange={(e) => update({ [key]: e.target.value })}
                   placeholder={placeholder}
                   type={type}
-                  className="w-full min-h-11 rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-800 placeholder-slate-400 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100 transition-all"
+                  className={NEUTRAL_FIELD}
                 />
-              </div>
+              </Field>
             ))}
-            <div>
-              <label className="text-xs text-slate-500 mb-1.5 block">What do you need? *</label>
-              <textarea
+            <Field label="What do you need? *">
+              <Textarea
                 data-testid="booking-field-summary"
                 value={details.summary}
                 onChange={(e) => update({ summary: e.target.value })}
                 placeholder='e.g. "AC not cooling — needs a diagnostic."'
                 rows={3}
-                className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-800 placeholder-slate-400 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100 transition-all resize-none"
+                className={`${NEUTRAL_FIELD} resize-none`}
               />
-            </div>
+            </Field>
           </div>
         )}
 
         {/* ── Success ── */}
         {step === 'done' && (
           <div className="flex flex-col items-center text-center pt-10 gap-6 flex-1">
-            <div className="flex size-20 items-center justify-center rounded-full bg-green-100">
-              <Check size={36} className="text-green-600" />
+            <div className="flex size-20 items-center justify-center rounded-full bg-success/15">
+              <Check size={36} className="text-success" />
             </div>
             <div>
-              <h1 className="text-slate-900" style={{ fontSize: '1.4rem', lineHeight: 1.3 }}>
+              <h1 className="text-foreground" style={{ fontSize: '1.4rem', lineHeight: 1.3 }}>
                 Request received!
               </h1>
-              <p className="text-slate-500 mt-2 leading-relaxed">
+              <p className="text-muted-foreground mt-2 leading-relaxed">
                 Thanks {details.name.split(' ')[0] || 'for reaching out'}. We've reserved your
                 requested time and will confirm shortly.
               </p>
@@ -332,14 +332,14 @@ export function BookingPage() {
             {tenantInfo?.businessPhone && (
               <a
                 href={`tel:${tenantInfo.businessPhone.replace(/\s/g, '')}`}
-                className="flex min-h-11 items-center gap-4 rounded-xl bg-white border border-slate-200 px-4 py-3.5 w-full hover:border-blue-300"
+                className="flex min-h-11 items-center gap-4 rounded-xl bg-card border border-border px-4 py-3.5 w-full hover:border-foreground/30"
               >
-                <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-slate-100">
-                  <Phone size={15} className="text-slate-500" />
+                <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-secondary">
+                  <Phone size={15} className="text-muted-foreground" />
                 </span>
                 <div className="text-left">
-                  <p className="text-sm text-slate-800">Need to reach us sooner?</p>
-                  <p className="text-xs mt-0.5 text-blue-600">{tenantInfo.businessPhone}</p>
+                  <p className="text-sm text-foreground">Need to reach us sooner?</p>
+                  <p className="text-xs mt-0.5 text-foreground">{tenantInfo.businessPhone}</p>
                 </div>
               </a>
             )}
@@ -350,8 +350,8 @@ export function BookingPage() {
         {step !== 'done' && (
           <div className="mt-auto pt-6">
             {step === 'details' && submitError && (
-              <div className="mb-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3">
-                <p className="text-xs text-red-700 flex items-center gap-1.5">
+              <div className="mb-3 rounded-xl border border-destructive/20 bg-destructive/10 px-4 py-3">
+                <p className="text-xs text-destructive flex items-center gap-1.5">
                   <AlertCircle size={12} className="shrink-0" /> {submitError}
                 </p>
               </div>
@@ -363,7 +363,7 @@ export function BookingPage() {
                 (step === 'slot' && !selected) ||
                 (step === 'details' && (!canSubmit || submitting))
               }
-              className="w-full flex min-h-11 items-center justify-center gap-2 rounded-xl bg-slate-900 py-4 text-sm text-white hover:bg-slate-800 active:scale-[0.98] transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+              className="w-full flex min-h-11 items-center justify-center gap-2 rounded-xl bg-foreground py-4 text-sm text-white hover:bg-foreground/90 active:scale-[0.98] transition-all disabled:opacity-40 disabled:cursor-not-allowed"
             >
               {submitting ? (
                 <span className="animate-spin size-4 border-2 border-white/30 border-t-white rounded-full" />
