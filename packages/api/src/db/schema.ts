@@ -5311,19 +5311,21 @@ export const MIGRATIONS = {
     END
     $rls$;
   `,
-  // Close the two tenant tables that carry tenant_id but had no RLS policy, so
-  // the rls_app_runtime role enforces isolation across the whole tenant surface.
-  //   - oauth_states: always accessed via withTenant (the OAuth callback is
-  //     Clerk-authenticated, so a tenant GUC is set) — add the standard policy.
-  //   - platform_deprovision_log: an intentional exemption (ops/audit log, no
-  //     tenant FK, written via the privileged connection, must survive a tenant
-  //     purge). Record the exemption durably as a table comment rather than a policy.
+  // The two tenant tables that carry tenant_id but have NO RLS policy are BOTH
+  // intentional exemptions (pinned by RLS_EXEMPT_TABLES in test/db/schema.test.ts).
+  // Record the rationale durably as table comments — do NOT add policies:
+  //   - oauth_states: short-lived OAuth state nonces. The provider /callback
+  //     reads the row to DISCOVER its tenant — CalendarOauthStateRepository.consume()
+  //     runs `pool.query(UPDATE oauth_states ... WHERE id=$1 RETURNING tenant_id)`
+  //     with NO tenant context, because the callback doesn't know the tenant yet
+  //     (the unguessable nonce id IS the capability). An RLS policy keyed on
+  //     app.current_tenant_id would break every OAuth callback under a non-bypass
+  //     role. (Earlier in this branch this migration wrongly FORCE-RLSed it.)
+  //   - platform_deprovision_log: ops/audit log with no tenant FK, written via the
+  //     privileged connection, must survive a tenant purge.
   '218_rls_coverage_oauth_states': `
-    ALTER TABLE oauth_states ENABLE ROW LEVEL SECURITY;
-    ALTER TABLE oauth_states FORCE ROW LEVEL SECURITY;
-    DROP POLICY IF EXISTS tenant_isolation_oauth_states ON oauth_states;
-    CREATE POLICY tenant_isolation_oauth_states ON oauth_states
-      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+    COMMENT ON TABLE oauth_states IS
+      'Intentionally NOT under RLS: OAuth state nonces consumed by the provider /callback BEFORE tenant context exists (consume() recovers tenant_id from the row by its unguessable id). An app.current_tenant_id RLS policy would break OAuth callbacks under a non-bypass role. Exempt by design — see test/db/schema.test.ts RLS_EXEMPT_TABLES.';
     COMMENT ON TABLE platform_deprovision_log IS
       'Intentionally NOT under RLS: ops/audit log with no tenant FK, written via the privileged connection (withClient/pool.query), and must survive a tenant purge. Do not add a tenant_isolation policy.';
   `,

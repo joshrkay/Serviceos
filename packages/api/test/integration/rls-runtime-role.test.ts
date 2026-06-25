@@ -37,16 +37,6 @@ async function seedCustomer(tenantId: string, userId: string): Promise<string> {
   return id;
 }
 
-async function seedOauthState(tenantId: string, userId: string): Promise<string> {
-  const id = crypto.randomUUID();
-  await pool.query(
-    `INSERT INTO oauth_states (id, tenant_id, user_id, provider, redirect_after)
-     VALUES ($1, $2, $3, 'google', '/settings')`,
-    [id, tenantId, userId]
-  );
-  return id;
-}
-
 describe('RLS runtime-role enforcement (real Postgres, RLS_RUNTIME_ROLE=true)', () => {
   let tracked: PoolClient[] = [];
   afterEach(async () => {
@@ -74,18 +64,6 @@ describe('RLS runtime-role enforcement (real Postgres, RLS_RUNTIME_ROLE=true)', 
     // A's customer is invisible even by direct id.
     const direct = await client.query('SELECT id FROM customers WHERE id = $1', [aCustomer]);
     expect(direct.rowCount).toBe(0);
-  });
-
-  it('R1: the oauth_states gap (U2) is now enforced too', async () => {
-    const a = await createTestTenant(pool);
-    const b = await createTestTenant(pool);
-    const aState = await seedOauthState(a.tenantId, a.userId);
-
-    const client = await pool.connect();
-    tracked.push(client);
-    await applyTenantContext(client, b.tenantId);
-    const res = await client.query('SELECT id FROM oauth_states WHERE id = $1', [aState]);
-    expect(res.rowCount).toBe(0);
   });
 
   it('R2: an unset tenant GUC under the role fails closed (not all rows)', async () => {

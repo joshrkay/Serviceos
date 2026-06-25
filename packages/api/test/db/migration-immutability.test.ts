@@ -355,8 +355,9 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['216_create_delay_notice_state', 'bad2c6a2b2b80e3bfc18beaf43b48a59b0064f031794a3400d2db8dc02d4c3d3'],
   // RLS runtime-role enforcement — provision the least-privilege rls_app_runtime role.
   ['217_create_rls_app_runtime_role', '15f26f56c0515ebce37164d9c4757fc5017c242a8b331b73018d870d9ebc3b78'],
-  // RLS runtime-role enforcement — close the oauth_states gap (+ document the log exemption).
-  ['218_rls_coverage_oauth_states', '5c37512618a166baca14bf7bcd38ea56f4e787aaf83c885192a6690cfa3b9d6c'],
+  // RLS runtime-role enforcement — document the two RLS exemptions (oauth_states,
+  // platform_deprovision_log) as table comments; both are intentionally policy-free.
+  ['218_rls_coverage_oauth_states', '44a800f4db0502f69e57ff66c865e9a63ddaac669d5d3026a683d7bb4f3fc7f9'],
 ];
 
 function hashMigration(value: string): string {
