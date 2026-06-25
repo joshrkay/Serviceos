@@ -4,6 +4,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { StoreBadges } from './StoreBadges';
 import { MarketingCTA } from './MarketingCTA';
 import { MarketingHeader } from './MarketingHeader';
+import { PricingPage } from './PricingPage';
 
 vi.mock('../../lib/analytics', () => ({
   track: vi.fn(),
@@ -63,5 +64,18 @@ describe('marketing CTA tap-target contract', () => {
     );
     expect(screen.getByRole('button', { name: /log in/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /start free trial/i })).toBeInTheDocument();
+  });
+
+  it('the pricing card primary CTA is pinned and uses the lg button (h-12 ≥ 44px)', () => {
+    render(
+      <MemoryRouter>
+        <PricingPage />
+      </MemoryRouter>,
+    );
+    const ctaLink = screen.getByTestId('pricing-primary-cta');
+    expect(ctaLink).toHaveAttribute('href', '/signup');
+    const ctaButton = screen.getByRole('button', { name: /start free trial/i });
+    expect(ctaLink).toContainElement(ctaButton);
+    expect(ctaButton.className).toContain('h-12');
   });
 });
