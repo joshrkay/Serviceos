@@ -99,6 +99,7 @@ export function PricingPage() {
               </ul>
               <Link
                 to="/signup"
+                data-testid="pricing-primary-cta"
                 className="mt-7 block"
                 onClick={() => track('pricing_cta_clicked', { location: 'pricing_page' })}
               >

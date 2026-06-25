@@ -71,7 +71,7 @@ function buildCustomerCompat(api: JobDetailResponse['customer']): Customer | und
   };
 }
 import { StatusBadge } from '../shared/StatusBadge';
-import { Spinner, EmptyState } from '../ui';
+import { Spinner, EmptyState, Input, Select } from '../ui';
 import { ErrorState } from '../ErrorState';
 import { ActivityTimeline } from './ActivityTimeline';
 import { AddEntrySheet } from './AddEntrySheet';
@@ -84,9 +84,9 @@ import { SuppliersSheet } from './SuppliersSheet';
 
 const SERVICE_ICON: Record<string, string> = { HVAC: '❄️', Plumbing: '🔧', Painting: '🎨' };
 const SERVICE_COLOR: Record<string, { bg: string; text: string }> = {
-  HVAC:     { bg: 'bg-blue-100',   text: 'text-blue-700' },
-  Plumbing: { bg: 'bg-cyan-100',   text: 'text-cyan-700' },
-  Painting: { bg: 'bg-purple-100', text: 'text-purple-700' },
+  HVAC:     { bg: 'bg-primary/15',   text: 'text-primary' },
+  Plumbing: { bg: 'bg-primary/15',   text: 'text-primary' },
+  Painting: { bg: 'bg-primary/15', text: 'text-primary' },
 };
 
 type Modal = 'call' | 'text' | 'estimate' | 'invoice' | 'addEntry' | 'materials' | 'cancel' | 'suppliers' | null;
@@ -118,11 +118,11 @@ function StatusStepper({ job }: { job: Job }) {
   const isIssue    = isCanceled || isNoShow;
 
   return (
-    <div className="rounded-xl bg-white border border-slate-200 px-4 py-4">
+    <div className="rounded-xl bg-card border border-border px-4 py-4">
       <div className="flex items-center justify-between mb-4">
-        <h4 className="text-slate-700">Job Progress</h4>
+        <h4 className="text-foreground">Job Progress</h4>
         {isIssue && (
-          <span className={`text-xs rounded-full px-2.5 py-1 ${isCanceled ? 'bg-red-100 text-red-700' : 'bg-orange-100 text-orange-700'}`}>
+          <span className={`text-xs rounded-full px-2.5 py-1 ${isCanceled ? 'bg-destructive/15 text-destructive' : 'bg-warning/15 text-warning'}`}>
             {job.status}
           </span>
         )}
@@ -130,11 +130,11 @@ function StatusStepper({ job }: { job: Job }) {
 
       <div className="relative flex items-start">
         {/* Background line */}
-        <div className="absolute top-3 left-3 right-3 h-px bg-slate-200 z-0" />
+        <div className="absolute top-3 left-3 right-3 h-px bg-border z-0" />
         {/* Progress fill */}
         {!isIssue && currentIdx > 0 && (
           <div
-            className="absolute top-3 left-3 h-px bg-green-400 z-0 transition-all duration-500"
+            className="absolute top-3 left-3 h-px bg-success z-0 transition-all duration-500"
             style={{
               width: `${(currentIdx / (STEPS.length - 1)) * 100}%`,
               maxWidth: 'calc(100% - 24px)',
@@ -151,25 +151,25 @@ function StatusStepper({ job }: { job: Job }) {
           return (
             <div key={step.key} className="flex-1 flex flex-col items-center relative z-10">
               <div className={`flex size-6 items-center justify-center rounded-full border-2 transition-all ${
-                done    ? 'bg-green-500 border-green-500' :
-                current ? 'bg-white border-blue-500 shadow-sm' :
-                isIssue && i <= currentIdx ? 'bg-slate-300 border-slate-300' :
-                'bg-white border-slate-200'
+                done    ? 'bg-success border-success' :
+                current ? 'bg-card border-primary shadow-sm' :
+                isIssue && i <= currentIdx ? 'bg-muted border-border' :
+                'bg-card border-border'
               }`}>
-                {done    && <CheckCircle2 size={14} className="text-white" />}
-                {current && <div className="size-2 rounded-full bg-blue-500" />}
-                {!done && !current && <Circle size={10} className="text-slate-300" />}
+                {done    && <CheckCircle2 size={14} className="text-primary-foreground" />}
+                {current && <div className="size-2 rounded-full bg-primary" />}
+                {!done && !current && <Circle size={10} className="text-muted-foreground" />}
               </div>
               <p
-                className={`mt-1.5 text-center hidden md:block ${done ? 'text-green-700' : current ? 'text-blue-700' : 'text-slate-400'}`}
+                className={`mt-1.5 text-center hidden md:block ${done ? 'text-success' : current ? 'text-primary' : 'text-muted-foreground'}`}
                 style={{ fontSize: 10 }}
               >{step.label}</p>
               <p
-                className={`mt-1.5 text-center md:hidden ${done ? 'text-green-700' : current ? 'text-blue-700' : 'text-slate-400'}`}
+                className={`mt-1.5 text-center md:hidden ${done ? 'text-success' : current ? 'text-primary' : 'text-muted-foreground'}`}
                 style={{ fontSize: 10 }}
               >{step.short}</p>
               {historyEntry && (
-                <p className="text-center text-slate-400 hidden md:block mt-0.5" style={{ fontSize: 9 }}>
+                <p className="text-center text-muted-foreground hidden md:block mt-0.5" style={{ fontSize: 9 }}>
                   {historyEntry.time.split(' ').slice(-2).join(' ')}
                 </p>
               )}
@@ -179,18 +179,18 @@ function StatusStepper({ job }: { job: Job }) {
       </div>
 
       {job.statusHistory.length > 0 && (
-        <div className="flex flex-col gap-1 mt-4 border-t border-slate-100 pt-3">
+        <div className="flex flex-col gap-1 mt-4 border-t border-border pt-3">
           {job.statusHistory.map((entry, i) => (
             <div key={i} className="flex items-center gap-2 text-xs">
               <span className={`size-1.5 rounded-full shrink-0 ${
-                entry.status === 'Completed' ? 'bg-green-500' :
-                entry.status === 'Canceled'  ? 'bg-red-400'   :
-                entry.status === 'No Show'   ? 'bg-orange-400' : 'bg-slate-400'
+                entry.status === 'Completed' ? 'bg-success' :
+                entry.status === 'Canceled'  ? 'bg-destructive'   :
+                entry.status === 'No Show'   ? 'bg-warning' : 'bg-muted-foreground'
               }`} />
-              <span className="text-slate-600">{entry.status}</span>
-              <span className="text-slate-400 ml-auto shrink-0">{entry.time}</span>
+              <span className="text-foreground">{entry.status}</span>
+              <span className="text-muted-foreground ml-auto shrink-0">{entry.time}</span>
               {entry.note && (
-                <span className="text-slate-400 italic truncate ml-1 max-w-[140px]">· {entry.note}</span>
+                <span className="text-muted-foreground italic truncate ml-1 max-w-[140px]">· {entry.note}</span>
               )}
             </div>
           ))}
@@ -211,11 +211,11 @@ function CustomerCard({ customer, job, onCall, onText, onViewCustomer }: {
                    customer.notes?.toLowerCase().includes('contract');
 
   return (
-    <div className="rounded-xl bg-white border border-slate-200 overflow-hidden">
+    <div className="rounded-xl bg-card border border-border overflow-hidden">
       <div className="flex items-start gap-3 px-4 pt-4 pb-3">
         <div className="relative shrink-0">
           <div
-            className="flex size-12 items-center justify-center rounded-full bg-slate-900 text-white"
+            className="flex size-12 items-center justify-center rounded-full bg-primary text-primary-foreground"
             style={{ fontSize: 16 }}
           >{initials}</div>
           <span className="absolute -bottom-1 -right-1 text-base">{SERVICE_ICON[job.serviceType]}</span>
@@ -226,58 +226,58 @@ function CustomerCard({ customer, job, onCall, onText, onViewCustomer }: {
             onClick={onViewCustomer}
             className="flex items-center gap-1.5 group text-left"
           >
-            <p className="text-sm text-slate-900 truncate group-hover:text-blue-600 transition-colors">
+            <p className="text-sm text-foreground truncate group-hover:text-primary transition-colors">
               {customer.name}
             </p>
-            <ExternalLink size={11} className="text-slate-300 group-hover:text-blue-500 transition-colors shrink-0" />
+            <ExternalLink size={11} className="text-muted-foreground group-hover:text-primary transition-colors shrink-0" />
           </button>
           <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
             <span className={`text-xs rounded-full px-1.5 py-0.5 ${svcCfg.bg} ${svcCfg.text}`}>
               {customer.serviceType}
             </span>
             {customer.jobCount > 1 && (
-              <span className="text-xs text-slate-400">
+              <span className="text-xs text-muted-foreground">
                 {customer.jobCount} jobs · {customer.lastService}
               </span>
             )}
             {isVIP && (
-              <span className="flex items-center gap-0.5 text-xs rounded-full bg-amber-100 text-amber-700 px-1.5 py-0.5">
-                <Star size={9} className="fill-amber-500 text-amber-500" /> VIP
+              <span className="flex items-center gap-0.5 text-xs rounded-full bg-warning/15 text-warning px-1.5 py-0.5">
+                <Star size={9} className="fill-warning text-warning" /> VIP
               </span>
             )}
           </div>
           {customer.notes && (
-            <div className="mt-2 rounded-lg bg-amber-50 border border-amber-100 px-2.5 py-1.5">
-              <p className="text-xs text-amber-700">{customer.notes}</p>
+            <div className="mt-2 rounded-lg bg-warning/10 border border-warning/20 px-2.5 py-1.5">
+              <p className="text-xs text-warning">{customer.notes}</p>
             </div>
           )}
         </div>
       </div>
 
-      <div className="grid grid-cols-2 border-t border-slate-100 divide-x divide-slate-100">
+      <div className="grid grid-cols-2 border-t border-border divide-x divide-border">
         <button
           onClick={onCall}
-          className="flex items-center gap-2 px-3 py-3 hover:bg-green-50 transition-colors group text-left"
+          className="flex items-center gap-2 px-3 py-3 hover:bg-success/10 transition-colors group text-left"
         >
-          <span className="flex size-7 items-center justify-center rounded-full bg-green-100 shrink-0 group-hover:bg-green-200 transition-colors">
-            <Phone size={13} className="text-green-600" />
+          <span className="flex size-7 items-center justify-center rounded-full bg-success/15 shrink-0 group-hover:bg-success/15 transition-colors">
+            <Phone size={13} className="text-success" />
           </span>
           <div className="min-w-0">
-            <p className="text-xs text-slate-400">Phone</p>
-            <p className="text-sm text-slate-700 truncate">{customer.phone}</p>
+            <p className="text-xs text-muted-foreground">Phone</p>
+            <p className="text-sm text-foreground truncate">{customer.phone}</p>
           </div>
         </button>
 
         <button
           onClick={onText}
-          className="flex items-center gap-2 px-3 py-3 hover:bg-blue-50 transition-colors group text-left"
+          className="flex items-center gap-2 px-3 py-3 hover:bg-primary/10 transition-colors group text-left"
         >
-          <span className="flex size-7 items-center justify-center rounded-full bg-blue-100 shrink-0 group-hover:bg-blue-200 transition-colors">
-            <MessageSquare size={13} className="text-blue-600" />
+          <span className="flex size-7 items-center justify-center rounded-full bg-primary/15 shrink-0 group-hover:bg-primary/15 transition-colors">
+            <MessageSquare size={13} className="text-primary" />
           </span>
           <div className="min-w-0">
-            <p className="text-xs text-slate-400">Text</p>
-            <p className="text-sm text-slate-700 truncate">{customer.phone}</p>
+            <p className="text-xs text-muted-foreground">Text</p>
+            <p className="text-sm text-foreground truncate">{customer.phone}</p>
           </div>
         </button>
 
@@ -285,27 +285,27 @@ function CustomerCard({ customer, job, onCall, onText, onViewCustomer }: {
           href={mapsUrl}
           target="_blank"
           rel="noreferrer"
-          className="col-span-2 flex items-center gap-2 px-3 py-3 hover:bg-violet-50 transition-colors group"
+          className="col-span-2 flex items-center gap-2 px-3 py-3 hover:bg-primary/10 transition-colors group"
         >
-          <span className="flex size-7 items-center justify-center rounded-full bg-violet-100 shrink-0 group-hover:bg-violet-200 transition-colors">
-            <MapPin size={13} className="text-violet-600" />
+          <span className="flex size-7 items-center justify-center rounded-full bg-primary/15 shrink-0 group-hover:bg-primary/15 transition-colors">
+            <MapPin size={13} className="text-primary" />
           </span>
           <div className="min-w-0 flex-1">
-            <p className="text-xs text-slate-400">Address</p>
-            <p className="text-sm text-slate-700 truncate">{customer.address}</p>
+            <p className="text-xs text-muted-foreground">Address</p>
+            <p className="text-sm text-foreground truncate">{customer.address}</p>
           </div>
-          <Navigation size={12} className="text-violet-400 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity" />
+          <Navigation size={12} className="text-primary shrink-0 opacity-0 group-hover:opacity-100 transition-opacity" />
         </a>
 
         {customer.email && (
           <a
             href={`mailto:${customer.email}`}
-            className="col-span-2 flex items-center gap-2 px-3 py-3 hover:bg-slate-50 transition-colors border-t border-slate-100"
+            className="col-span-2 flex items-center gap-2 px-3 py-3 hover:bg-secondary transition-colors border-t border-border"
           >
-            <span className="flex size-7 items-center justify-center rounded-full bg-slate-100 shrink-0">
-              <Mail size={13} className="text-slate-500" />
+            <span className="flex size-7 items-center justify-center rounded-full bg-secondary shrink-0">
+              <Mail size={13} className="text-muted-foreground" />
             </span>
-            <p className="text-sm text-slate-600 truncate">{customer.email}</p>
+            <p className="text-sm text-foreground truncate">{customer.email}</p>
           </a>
         )}
       </div>
@@ -323,57 +323,57 @@ function ScheduleTechCard({ job, tech, onCallTech, workerTerm }: {
     job.status === 'Completed' ? 'Job complete' : '';
 
   return (
-    <div className="rounded-xl bg-white border border-slate-200 overflow-hidden">
-      <div className="grid grid-cols-2 divide-x divide-slate-100">
+    <div className="rounded-xl bg-card border border-border overflow-hidden">
+      <div className="grid grid-cols-2 divide-x divide-border">
         <div className="px-4 py-4">
           <div className="flex items-center gap-1.5 mb-3">
-            <Calendar size={13} className="text-slate-400" />
-            <p className="text-xs text-slate-400">Schedule</p>
+            <Calendar size={13} className="text-muted-foreground" />
+            <p className="text-xs text-muted-foreground">Schedule</p>
           </div>
           {job.scheduledDate ? (
             <>
-              <p className="text-slate-700 mb-0.5">{job.scheduledDate}</p>
+              <p className="text-foreground mb-0.5">{job.scheduledDate}</p>
               {job.scheduledTime && (
-                <p className="text-2xl text-slate-900 leading-none">{job.scheduledTime}</p>
+                <p className="text-2xl text-foreground leading-none">{job.scheduledTime}</p>
               )}
-              <p className="text-xs text-slate-400 mt-2">Est. 2–3 hours</p>
+              <p className="text-xs text-muted-foreground mt-2">Est. 2–3 hours</p>
             </>
           ) : (
             <div>
-              <p className="text-sm text-slate-400 italic">Not scheduled</p>
-              <button className="text-xs text-blue-600 hover:underline mt-1">Schedule now →</button>
+              <p className="text-sm text-muted-foreground italic">Not scheduled</p>
+              <button className="text-xs text-primary hover:underline mt-1">Schedule now →</button>
             </div>
           )}
         </div>
 
         <div className="px-4 py-4">
           <div className="flex items-center gap-1.5 mb-3">
-            <User size={13} className="text-slate-400" />
-            <p className="text-xs text-slate-400">{workerTerm}</p>
+            <User size={13} className="text-muted-foreground" />
+            <p className="text-xs text-muted-foreground">{workerTerm}</p>
           </div>
           {tech ? (
             <>
               <div className="flex items-center gap-2 mb-2">
                 <span
-                  className="flex size-9 shrink-0 items-center justify-center rounded-full text-white"
+                  className="flex size-9 shrink-0 items-center justify-center rounded-full text-primary-foreground"
                   style={{ background: tech.color, fontSize: 12 }}
                 >{tech.initials}</span>
                 <div>
-                  <p className="text-sm text-slate-900">{tech.name}</p>
+                  <p className="text-sm text-foreground">{tech.name}</p>
                   {techStatusLabel && (
-                    <p className="text-xs text-green-600">{techStatusLabel}</p>
+                    <p className="text-xs text-success">{techStatusLabel}</p>
                   )}
                 </div>
               </div>
               <button
                 onClick={onCallTech}
-                className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-green-700 transition-colors"
+                className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-success transition-colors"
               >
                 <Phone size={11} /> {tech.phone}
               </button>
             </>
           ) : (
-            <button className="flex items-center gap-1.5 text-sm text-blue-600 hover:text-blue-700 transition-colors">
+            <button className="flex items-center gap-1.5 text-sm text-primary hover:text-primary transition-colors">
               <Plus size={13} /> Assign {workerTerm.toLowerCase()}
             </button>
           )}
@@ -386,21 +386,21 @@ function ScheduleTechCard({ job, tech, onCallTech, workerTerm }: {
 // ─── Description Card ─────────────────────────────────────────────────────
 function DescriptionCard({ job }: { job: Job }) {
   return (
-    <div className="rounded-xl bg-white border border-slate-200 overflow-hidden">
+    <div className="rounded-xl bg-card border border-border overflow-hidden">
       <div className="px-4 py-4">
         <div className="flex items-center gap-2 mb-2">
-          <FileText size={13} className="text-slate-400" />
-          <h4 className="text-slate-700">Description</h4>
+          <FileText size={13} className="text-muted-foreground" />
+          <h4 className="text-foreground">Description</h4>
         </div>
-        <p className="text-sm text-slate-600 leading-relaxed">{job.description}</p>
+        <p className="text-sm text-foreground leading-relaxed">{job.description}</p>
       </div>
       {job.notes && (
-        <div className="border-t border-amber-100 bg-amber-50 px-4 py-3">
+        <div className="border-t border-warning/20 bg-warning/10 px-4 py-3">
           <div className="flex items-center gap-1.5 mb-1">
-            <Zap size={12} className="text-amber-600" />
-            <p className="text-xs text-amber-700">Access Notes</p>
+            <Zap size={12} className="text-warning" />
+            <p className="text-xs text-warning">Access Notes</p>
           </div>
-          <p className="text-sm text-amber-800 leading-relaxed">{job.notes}</p>
+          <p className="text-sm text-warning leading-relaxed">{job.notes}</p>
         </div>
       )}
     </div>
@@ -447,21 +447,21 @@ function EstimateScopeCard({ estimateId, onOpen }: { estimateId: string; onOpen:
   const total = calcEstimateTotalFromLines(estimate.lineItems);
 
   return (
-    <div className="rounded-xl bg-white border border-slate-200 overflow-hidden">
-      <div className="flex items-center justify-between px-4 py-3.5 border-b border-slate-100">
+    <div className="rounded-xl bg-card border border-border overflow-hidden">
+      <div className="flex items-center justify-between px-4 py-3.5 border-b border-border">
         <div className="flex items-center gap-2 flex-wrap">
-          <FileText size={14} className="text-indigo-500 shrink-0" />
-          <h4 className="text-slate-700">Estimate Scope</h4>
-          <span className="text-xs bg-indigo-50 text-indigo-700 border border-indigo-100 rounded-full px-2 py-0.5">
+          <FileText size={14} className="text-primary shrink-0" />
+          <h4 className="text-foreground">Estimate Scope</h4>
+          <span className="text-xs bg-primary/10 text-primary border border-primary/20 rounded-full px-2 py-0.5">
             {estimate.estimateNumber}
           </span>
           <StatusBadge status={estimate.status as 'Draft'} size="sm" />
         </div>
         <div className="flex items-center gap-2 shrink-0">
-          <button onClick={onOpen} className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 transition-colors">
+          <button onClick={onOpen} className="flex items-center gap-1 text-xs text-primary hover:text-primary transition-colors">
             <Eye size={11} /> Full view
           </button>
-          <button onClick={() => setOpen(v => !v)} className="text-slate-400 hover:text-slate-600 transition-colors">
+          <button onClick={() => setOpen(v => !v)} className="text-muted-foreground hover:text-foreground transition-colors">
             <ChevronDown size={14} className={`transition-transform ${open ? '' : '-rotate-90'}`} />
           </button>
         </div>
@@ -470,27 +470,27 @@ function EstimateScopeCard({ estimateId, onOpen }: { estimateId: string; onOpen:
       {open && (
         <>
           {/* Column headers */}
-          <div className="grid grid-cols-[1fr_40px_70px_70px] gap-x-2 px-4 py-2 bg-slate-50 border-b border-slate-100">
-            <p className="text-xs text-slate-400">Item</p>
-            <p className="text-xs text-slate-400 text-right">Qty</p>
-            <p className="text-xs text-slate-400 text-right">Rate</p>
-            <p className="text-xs text-slate-400 text-right">Total</p>
+          <div className="grid grid-cols-[1fr_40px_70px_70px] gap-x-2 px-4 py-2 bg-secondary border-b border-border">
+            <p className="text-xs text-muted-foreground">Item</p>
+            <p className="text-xs text-muted-foreground text-right">Qty</p>
+            <p className="text-xs text-muted-foreground text-right">Rate</p>
+            <p className="text-xs text-muted-foreground text-right">Total</p>
           </div>
 
-          <div className="divide-y divide-slate-50">
+          <div className="divide-y divide-border">
             {estimate.lineItems.map((item, i) => (
               <div key={i} className="grid grid-cols-[1fr_40px_70px_70px] gap-x-2 px-4 py-2.5 items-center">
-                <p className="text-sm text-slate-800 leading-snug">{item.description}</p>
-                <p className="text-sm text-slate-500 text-right">{item.qty}</p>
-                <p className="text-sm text-slate-500 text-right">${item.rate.toLocaleString()}</p>
-                <p className="text-sm text-slate-800 text-right">${(item.qty * item.rate).toLocaleString()}</p>
+                <p className="text-sm text-foreground leading-snug">{item.description}</p>
+                <p className="text-sm text-muted-foreground text-right">{item.qty}</p>
+                <p className="text-sm text-muted-foreground text-right">${item.rate.toLocaleString()}</p>
+                <p className="text-sm text-foreground text-right">${(item.qty * item.rate).toLocaleString()}</p>
               </div>
             ))}
           </div>
 
-          <div className="flex items-center justify-between px-4 py-3.5 border-t border-slate-100 bg-slate-900 rounded-b-xl">
-            <p className="text-sm text-slate-300">Agreed total</p>
-            <p className="text-white">${total.toLocaleString()}</p>
+          <div className="flex items-center justify-between px-4 py-3.5 border-t border-border bg-primary rounded-b-xl">
+            <p className="text-sm text-muted-foreground">Agreed total</p>
+            <p className="text-primary-foreground">${total.toLocaleString()}</p>
           </div>
         </>
       )}
@@ -500,10 +500,10 @@ function EstimateScopeCard({ estimateId, onOpen }: { estimateId: string; onOpen:
 
 // ─── Materials Table ──────────────────────────────────────────────────────
 const CAT_CONFIG: Record<MaterialItem['category'], { label: string; dot: string; text: string; bg: string }> = {
-  Part:      { label: 'Parts',     dot: 'bg-blue-500',   text: 'text-blue-700',   bg: 'bg-blue-50'   },
-  Material:  { label: 'Materials', dot: 'bg-green-500',  text: 'text-green-700',  bg: 'bg-green-50'  },
-  Labor:     { label: 'Labor',     dot: 'bg-violet-500', text: 'text-violet-700', bg: 'bg-violet-50' },
-  Equipment: { label: 'Equipment', dot: 'bg-amber-500',  text: 'text-amber-700',  bg: 'bg-amber-50'  },
+  Part:      { label: 'Parts',     dot: 'bg-primary',   text: 'text-primary',   bg: 'bg-primary/10'   },
+  Material:  { label: 'Materials', dot: 'bg-success',  text: 'text-success',  bg: 'bg-success/10'  },
+  Labor:     { label: 'Labor',     dot: 'bg-primary', text: 'text-primary', bg: 'bg-primary/10' },
+  Equipment: { label: 'Equipment', dot: 'bg-warning',  text: 'text-warning',  bg: 'bg-warning/10'  },
 };
 
 function MaterialsTable({ materials, onEdit, onSuppliers }: { materials: MaterialItem[]; onEdit: () => void; onSuppliers: () => void; }) {
@@ -516,56 +516,56 @@ function MaterialsTable({ materials, onEdit, onSuppliers }: { materials: Materia
 
   if (materials.length === 0) {
     return (
-      <div className="rounded-xl bg-white border border-slate-200 px-4 py-4">
+      <div className="rounded-xl bg-card border border-border px-4 py-4">
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-2">
-            <Package size={14} className="text-amber-500" />
-            <h4 className="text-slate-700">Materials & Parts</h4>
+            <Package size={14} className="text-warning" />
+            <h4 className="text-foreground">Materials & Parts</h4>
           </div>
           <div className="flex items-center gap-2">
-            <button onClick={onSuppliers} className="flex items-center gap-1 text-xs text-slate-500 hover:text-slate-700 transition-colors">
+            <button onClick={onSuppliers} className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors">
               <MapPin size={12} /> Find parts
             </button>
-            <button onClick={onEdit} className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 transition-colors">
+            <button onClick={onEdit} className="flex items-center gap-1 text-xs text-primary hover:text-primary transition-colors">
               <Plus size={12} /> Add parts
             </button>
           </div>
         </div>
         <button
           onClick={onEdit}
-          className="flex flex-col items-center gap-2 py-8 w-full rounded-xl border-2 border-dashed border-slate-200 hover:border-amber-300 hover:bg-amber-50/50 transition-colors"
+          className="flex flex-col items-center gap-2 py-8 w-full rounded-xl border-2 border-dashed border-border hover:border-warning/30 hover:bg-warning/10 transition-colors"
         >
-          <Package size={24} className="text-slate-300" />
-          <p className="text-sm text-slate-400">No materials logged yet</p>
-          <p className="text-xs text-slate-300">Tap to add parts & materials used</p>
+          <Package size={24} className="text-muted-foreground" />
+          <p className="text-sm text-muted-foreground">No materials logged yet</p>
+          <p className="text-xs text-muted-foreground">Tap to add parts & materials used</p>
         </button>
       </div>
     );
   }
 
   return (
-    <div className="rounded-xl bg-white border border-slate-200 overflow-hidden">
-      <div className="flex items-center justify-between px-4 py-3.5 border-b border-slate-100">
+    <div className="rounded-xl bg-card border border-border overflow-hidden">
+      <div className="flex items-center justify-between px-4 py-3.5 border-b border-border">
         <div className="flex items-center gap-2">
-          <Package size={14} className="text-amber-500" />
-          <h4 className="text-slate-700">Materials & Parts</h4>
-          <span className="text-xs bg-slate-100 text-slate-500 rounded-full px-2 py-0.5">{materials.length}</span>
+          <Package size={14} className="text-warning" />
+          <h4 className="text-foreground">Materials & Parts</h4>
+          <span className="text-xs bg-secondary text-muted-foreground rounded-full px-2 py-0.5">{materials.length}</span>
         </div>
         <div className="flex items-center gap-2">
-          <button onClick={onSuppliers} className="flex items-center gap-1 text-xs text-slate-500 hover:text-slate-700 transition-colors">
+          <button onClick={onSuppliers} className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors">
             <MapPin size={12} /> Find parts
           </button>
-          <button onClick={onEdit} className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 transition-colors">
+          <button onClick={onEdit} className="flex items-center gap-1 text-xs text-primary hover:text-primary transition-colors">
             <Plus size={12} /> Edit
           </button>
         </div>
       </div>
 
-      <div className="hidden md:grid grid-cols-[1fr_auto_auto_auto] gap-x-4 px-4 py-2 bg-slate-50 border-b border-slate-100">
-        <p className="text-xs text-slate-400">Item / Part #</p>
-        <p className="text-xs text-slate-400 text-right w-8">Qty</p>
-        <p className="text-xs text-slate-400 text-right w-20">Unit cost</p>
-        <p className="text-xs text-slate-400 text-right w-20">Total</p>
+      <div className="hidden md:grid grid-cols-[1fr_auto_auto_auto] gap-x-4 px-4 py-2 bg-secondary border-b border-border">
+        <p className="text-xs text-muted-foreground">Item / Part #</p>
+        <p className="text-xs text-muted-foreground text-right w-8">Qty</p>
+        <p className="text-xs text-muted-foreground text-right w-20">Unit cost</p>
+        <p className="text-xs text-muted-foreground text-right w-20">Total</p>
       </div>
 
       {(Object.entries(grouped) as [MaterialItem['category'], MaterialItem[]][]).map(([cat, items]) => {
@@ -581,25 +581,25 @@ function MaterialsTable({ materials, onEdit, onSuppliers }: { materials: Materia
               <span className={`text-xs ${cfg.text}`}>${catTotal.toFixed(2)}</span>
             </div>
             {items.map((m, i) => (
-              <div key={m.id} className={`px-4 py-3 ${i < items.length - 1 ? 'border-b border-slate-50' : ''}`}>
+              <div key={m.id} className={`px-4 py-3 ${i < items.length - 1 ? 'border-b border-border' : ''}`}>
                 <div className="flex items-center justify-between gap-2 md:hidden">
                   <div className="min-w-0">
-                    <p className="text-sm text-slate-800 truncate">{m.name}</p>
-                    {m.partNumber && <p className="text-xs text-slate-400">{m.partNumber}</p>}
+                    <p className="text-sm text-foreground truncate">{m.name}</p>
+                    {m.partNumber && <p className="text-xs text-muted-foreground">{m.partNumber}</p>}
                   </div>
                   <div className="text-right shrink-0">
-                    <p className="text-xs text-slate-400">×{m.qty} @ ${m.unitCost}/ea</p>
-                    <p className="text-sm text-slate-800">${(m.qty * m.unitCost).toFixed(2)}</p>
+                    <p className="text-xs text-muted-foreground">×{m.qty} @ ${m.unitCost}/ea</p>
+                    <p className="text-sm text-foreground">${(m.qty * m.unitCost).toFixed(2)}</p>
                   </div>
                 </div>
                 <div className="hidden md:grid grid-cols-[1fr_auto_auto_auto] gap-x-4 items-center">
                   <div className="min-w-0">
-                    <p className="text-sm text-slate-800 truncate">{m.name}</p>
-                    {m.partNumber && <p className="text-xs text-slate-400 mt-0.5">{m.partNumber}</p>}
+                    <p className="text-sm text-foreground truncate">{m.name}</p>
+                    {m.partNumber && <p className="text-xs text-muted-foreground mt-0.5">{m.partNumber}</p>}
                   </div>
-                  <p className="text-sm text-slate-500 text-right w-8">×{m.qty}</p>
-                  <p className="text-sm text-slate-500 text-right w-20">${m.unitCost.toFixed(2)}</p>
-                  <p className="text-sm text-slate-800 text-right w-20">${(m.qty * m.unitCost).toFixed(2)}</p>
+                  <p className="text-sm text-muted-foreground text-right w-8">×{m.qty}</p>
+                  <p className="text-sm text-muted-foreground text-right w-20">${m.unitCost.toFixed(2)}</p>
+                  <p className="text-sm text-foreground text-right w-20">${(m.qty * m.unitCost).toFixed(2)}</p>
                 </div>
               </div>
             ))}
@@ -607,7 +607,7 @@ function MaterialsTable({ materials, onEdit, onSuppliers }: { materials: Materia
         );
       })}
 
-      <div className="flex items-center justify-between px-4 py-3.5 bg-slate-900 text-white">
+      <div className="flex items-center justify-between px-4 py-3.5 bg-primary text-primary-foreground">
         <p className="text-sm">Total materials cost</p>
         <p className="text-sm">${total.toFixed(2)}</p>
       </div>
@@ -624,23 +624,23 @@ function SiteMedia({ media, onAdd, onLightbox }: {
   const [showDocs, setShowDocs] = useState(false);
 
   return (
-    <div className="rounded-xl bg-white border border-slate-200 overflow-hidden">
-      <div className="flex items-center justify-between px-4 py-3.5 border-b border-slate-100">
+    <div className="rounded-xl bg-card border border-border overflow-hidden">
+      <div className="flex items-center justify-between px-4 py-3.5 border-b border-border">
         <div className="flex items-center gap-2">
-          <Camera size={14} className="text-slate-500" />
-          <h4 className="text-slate-700">Site Media</h4>
+          <Camera size={14} className="text-muted-foreground" />
+          <h4 className="text-foreground">Site Media</h4>
           {media.length > 0 && (
-            <span className="text-xs bg-slate-100 text-slate-500 rounded-full px-2 py-0.5">{media.length}</span>
+            <span className="text-xs bg-secondary text-muted-foreground rounded-full px-2 py-0.5">{media.length}</span>
           )}
         </div>
         <div className="flex items-center gap-2">
           <button
             onClick={() => setShowDocs(v => !v)}
-            className={`flex items-center gap-1 text-xs transition-colors ${showDocs ? 'text-blue-600' : 'text-slate-400 hover:text-slate-600'}`}
+            className={`flex items-center gap-1 text-xs transition-colors ${showDocs ? 'text-primary' : 'text-muted-foreground hover:text-foreground'}`}
           >
             <FileText size={12} /> Docs ({MOCK_DOCUMENTS.length})
           </button>
-          <button onClick={onAdd} className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 transition-colors">
+          <button onClick={onAdd} className="flex items-center gap-1 text-xs text-primary hover:text-primary transition-colors">
             <Camera size={12} /> Add
           </button>
         </div>
@@ -652,18 +652,18 @@ function SiteMedia({ media, onAdd, onLightbox }: {
             <button
               key={item.id}
               onClick={() => onLightbox(i)}
-              className="relative aspect-square rounded-xl overflow-hidden bg-slate-100 hover:opacity-90 active:scale-95 transition-all"
+              className="relative aspect-square rounded-xl overflow-hidden bg-secondary hover:opacity-90 active:scale-95 transition-all"
             >
               {item.type === 'photo'
                 ? <img src={item.url} className="w-full h-full object-cover" alt="" />
                 : <>
                     {item.thumb
                       ? <img src={item.thumb} className="w-full h-full object-cover" alt="" />
-                      : <div className="w-full h-full bg-slate-800 flex items-center justify-center"><Video size={18} className="text-white/60" /></div>
+                      : <div className="w-full h-full bg-primary flex items-center justify-center"><Video size={18} className="text-primary-foreground/60" /></div>
                     }
                     <div className="absolute inset-0 flex items-center justify-center bg-black/25">
                       <span className="flex size-8 items-center justify-center rounded-full bg-black/50">
-                        <Play size={13} className="text-white ml-0.5" />
+                        <Play size={13} className="text-primary-foreground ml-0.5" />
                       </span>
                     </div>
                   </>
@@ -672,42 +672,42 @@ function SiteMedia({ media, onAdd, onLightbox }: {
           ))}
           <button
             onClick={onAdd}
-            className="aspect-square rounded-xl border-2 border-dashed border-slate-200 flex flex-col items-center justify-center gap-1 hover:border-blue-300 hover:bg-blue-50/50 transition-colors"
+            className="aspect-square rounded-xl border-2 border-dashed border-border flex flex-col items-center justify-center gap-1 hover:border-primary/30 hover:bg-primary/10 transition-colors"
           >
-            <Plus size={16} className="text-slate-300" />
-            <span className="text-xs text-slate-300">Add</span>
+            <Plus size={16} className="text-muted-foreground" />
+            <span className="text-xs text-muted-foreground">Add</span>
           </button>
         </div>
       ) : (
         <button
           onClick={onAdd}
-          className="flex flex-col items-center gap-3 py-10 px-4 w-full hover:bg-slate-50 transition-colors"
+          className="flex flex-col items-center gap-3 py-10 px-4 w-full hover:bg-secondary transition-colors"
         >
-          <div className="flex size-14 items-center justify-center rounded-full bg-slate-100">
-            <Camera size={20} className="text-slate-400" />
+          <div className="flex size-14 items-center justify-center rounded-full bg-secondary">
+            <Camera size={20} className="text-muted-foreground" />
           </div>
           <div className="text-center">
-            <p className="text-sm text-slate-600">Add site photos</p>
-            <p className="text-xs text-slate-400 mt-0.5">Capture before/after and site conditions</p>
+            <p className="text-sm text-foreground">Add site photos</p>
+            <p className="text-xs text-muted-foreground mt-0.5">Capture before/after and site conditions</p>
           </div>
         </button>
       )}
 
       {showDocs && (
-        <div className="border-t border-slate-100">
+        <div className="border-t border-border">
           {MOCK_DOCUMENTS.map(doc => (
-            <div key={doc.id} className="flex items-center gap-3 px-4 py-2.5 hover:bg-slate-50 border-b border-slate-50 last:border-0 transition-colors">
-              <div className="flex size-8 items-center justify-center rounded-lg bg-red-50 shrink-0">
-                <FileText size={14} className="text-red-500" />
+            <div key={doc.id} className="flex items-center gap-3 px-4 py-2.5 hover:bg-secondary border-b border-border last:border-0 transition-colors">
+              <div className="flex size-8 items-center justify-center rounded-lg bg-destructive/10 shrink-0">
+                <FileText size={14} className="text-destructive" />
               </div>
               <div className="flex-1 min-w-0">
-                <p className="text-sm text-slate-700 truncate">{doc.name}</p>
-                <p className="text-xs text-slate-400">{doc.size} · {doc.date}</p>
+                <p className="text-sm text-foreground truncate">{doc.name}</p>
+                <p className="text-xs text-muted-foreground">{doc.size} · {doc.date}</p>
               </div>
-              <button className="text-xs text-blue-600 hover:text-blue-700 shrink-0">View</button>
+              <button className="text-xs text-primary hover:text-primary shrink-0">View</button>
             </div>
           ))}
-          <button className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-600 px-4 py-2.5 transition-colors">
+          <button className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground px-4 py-2.5 transition-colors">
             <Plus size={11} /> Attach document
           </button>
         </div>
@@ -765,22 +765,22 @@ function getAIHints(job: Job, materials: MaterialItem[], customer: Customer | un
 }
 
 const HINT_CFG: Record<string, { bg: string; icon: string; btn: string }> = {
-  amber:  { bg: 'bg-amber-50',  icon: 'text-amber-600',  btn: 'bg-amber-600  hover:bg-amber-700'  },
-  blue:   { bg: 'bg-blue-50',   icon: 'text-blue-600',   btn: 'bg-blue-600   hover:bg-blue-700'   },
-  violet: { bg: 'bg-violet-50', icon: 'text-violet-600', btn: 'bg-violet-600 hover:bg-violet-700' },
-  indigo: { bg: 'bg-indigo-50', icon: 'text-indigo-600', btn: 'bg-indigo-600 hover:bg-indigo-700' },
-  green:  { bg: 'bg-green-50',  icon: 'text-green-600',  btn: 'bg-green-600  hover:bg-green-700'  },
+  amber:  { bg: 'bg-warning/10',  icon: 'text-warning',  btn: 'bg-warning  hover:bg-warning/90'  },
+  blue:   { bg: 'bg-primary/10',   icon: 'text-primary',   btn: 'bg-primary   hover:bg-primary/90'   },
+  violet: { bg: 'bg-primary/10', icon: 'text-primary', btn: 'bg-primary hover:bg-primary/90' },
+  indigo: { bg: 'bg-primary/10', icon: 'text-primary', btn: 'bg-primary hover:bg-primary/90' },
+  green:  { bg: 'bg-success/10',  icon: 'text-success',  btn: 'bg-success  hover:bg-success/90'  },
 };
 
 function AIHintsPanel({ hints, onAction }: { hints: AIHint[]; onAction: (a: Modal) => void }) {
   if (!hints.length) return null;
   return (
-    <div className="rounded-xl border border-slate-200 bg-white overflow-hidden">
-      <div className="flex items-center gap-2 px-4 py-3 border-b border-slate-100">
-        <Zap size={13} className="text-indigo-500" />
-        <p className="text-sm text-slate-700">AI Suggestions</p>
+    <div className="rounded-xl border border-border bg-card overflow-hidden">
+      <div className="flex items-center gap-2 px-4 py-3 border-b border-border">
+        <Zap size={13} className="text-primary" />
+        <p className="text-sm text-foreground">AI Suggestions</p>
       </div>
-      <div className="flex flex-col divide-y divide-slate-100">
+      <div className="flex flex-col divide-y divide-border">
         {hints.map(hint => {
           const cfg  = HINT_CFG[hint.color] ?? HINT_CFG.blue;
           const Icon = hint.icon;
@@ -790,13 +790,13 @@ function AIHintsPanel({ hints, onAction }: { hints: AIHint[]; onAction: (a: Moda
                 <Icon size={13} className={cfg.icon} />
               </span>
               <div className="flex-1 min-w-0">
-                <p className="text-sm text-slate-800">{hint.label}</p>
-                <p className="text-xs text-slate-400 mt-0.5">{hint.desc}</p>
+                <p className="text-sm text-foreground">{hint.label}</p>
+                <p className="text-xs text-muted-foreground mt-0.5">{hint.desc}</p>
               </div>
               {hint.action && (
                 <button
                   onClick={() => onAction(hint.action)}
-                  className={`shrink-0 rounded-lg px-2.5 py-1.5 text-xs text-white transition-colors ${cfg.btn}`}
+                  className={`shrink-0 rounded-lg px-2.5 py-1.5 text-xs text-primary-foreground transition-colors ${cfg.btn}`}
                 >
                   Go
                 </button>
@@ -814,25 +814,25 @@ function DuplicateBanner({ warning, onDismiss }: {
   warning: NonNullable<Job['duplicateWarning']>; onDismiss: () => void;
 }) {
   return (
-    <div className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3.5">
+    <div className="rounded-xl border border-warning/30 bg-warning/10 px-4 py-3.5">
       <div className="flex items-start gap-3">
-        <AlertTriangle size={16} className="text-amber-600 shrink-0 mt-0.5" />
+        <AlertTriangle size={16} className="text-warning shrink-0 mt-0.5" />
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 mb-1">
-            <p className="text-sm text-amber-900">Possible duplicate detected</p>
-            <span className="text-xs bg-amber-200 text-amber-800 rounded-full px-2 py-0.5">{warning.similarity}% match</span>
+            <p className="text-sm text-warning">Possible duplicate detected</p>
+            <span className="text-xs bg-warning/15 text-warning rounded-full px-2 py-0.5">{warning.similarity}% match</span>
           </div>
-          <p className="text-xs text-amber-700">{warning.reason}</p>
+          <p className="text-xs text-warning">{warning.reason}</p>
           <div className="flex items-center gap-3 mt-2.5">
-            <button className="flex items-center gap-1 text-xs text-amber-800 hover:text-amber-900 underline underline-offset-2">
+            <button className="flex items-center gap-1 text-xs text-warning hover:text-warning underline underline-offset-2">
               <ExternalLink size={11} /> View Job #{warning.matchJobNumber}
             </button>
-            <button onClick={onDismiss} className="text-xs text-amber-600 hover:text-amber-800 transition-colors">
+            <button onClick={onDismiss} className="text-xs text-warning hover:text-warning transition-colors">
               Continue as new
             </button>
           </div>
         </div>
-        <button onClick={onDismiss} className="text-amber-400 hover:text-amber-600"><X size={14} /></button>
+        <button onClick={onDismiss} className="text-warning hover:text-warning"><X size={14} /></button>
       </div>
     </div>
   );
@@ -842,24 +842,24 @@ function IssueBanner({ job, onText }: { job: Job; onText: () => void }) {
   if (job.status !== 'Canceled' && job.status !== 'No Show') return null;
   const isCanceled = job.status === 'Canceled';
   return (
-    <div className={`rounded-xl border px-4 py-3.5 ${isCanceled ? 'border-red-200 bg-red-50' : 'border-orange-200 bg-orange-50'}`}>
+    <div className={`rounded-xl border px-4 py-3.5 ${isCanceled ? 'border-destructive/30 bg-destructive/10' : 'border-warning/30 bg-warning/10'}`}>
       <div className="flex items-start gap-3">
         {isCanceled
-          ? <X size={16} className="text-red-500 shrink-0 mt-0.5" />
-          : <AlertCircle size={16} className="text-orange-500 shrink-0 mt-0.5" />
+          ? <X size={16} className="text-destructive shrink-0 mt-0.5" />
+          : <AlertCircle size={16} className="text-warning shrink-0 mt-0.5" />
         }
         <div>
-          <p className={`text-sm ${isCanceled ? 'text-red-800' : 'text-orange-800'}`}>
+          <p className={`text-sm ${isCanceled ? 'text-destructive' : 'text-warning'}`}>
             {isCanceled ? 'Job canceled' : 'No-show recorded'}
           </p>
-          <p className={`text-xs mt-0.5 ${isCanceled ? 'text-red-600' : 'text-orange-600'}`}>
+          <p className={`text-xs mt-0.5 ${isCanceled ? 'text-destructive' : 'text-warning'}`}>
             {job.cancelReason ?? job.noShowNotes}
           </p>
           <div className="flex gap-3 mt-2.5">
-            <button className={`text-xs underline underline-offset-2 ${isCanceled ? 'text-red-700' : 'text-orange-700'}`}>
+            <button className={`text-xs underline underline-offset-2 ${isCanceled ? 'text-destructive' : 'text-warning'}`}>
               Reschedule
             </button>
-            <button onClick={onText} className={`text-xs underline underline-offset-2 ${isCanceled ? 'text-red-700' : 'text-orange-700'}`}>
+            <button onClick={onText} className={`text-xs underline underline-offset-2 ${isCanceled ? 'text-destructive' : 'text-warning'}`}>
               Text customer
             </button>
           </div>
@@ -883,11 +883,11 @@ function MediaLightbox({ media, index, onIndexChange, onDelete, onClose }: {
         onClick={e => e.stopPropagation()}
       >
         <button onClick={onClose} className="flex size-9 items-center justify-center rounded-full bg-black/40">
-          <X size={18} className="text-white" />
+          <X size={18} className="text-primary-foreground" />
         </button>
-        <span className="text-sm text-white/70">{index + 1} / {media.length}</span>
-        <button onClick={() => onDelete(current.id)} className="flex size-9 items-center justify-center rounded-full bg-red-500/80">
-          <Trash2 size={15} className="text-white" />
+        <span className="text-sm text-primary-foreground/70">{index + 1} / {media.length}</span>
+        <button onClick={() => onDelete(current.id)} className="flex size-9 items-center justify-center rounded-full bg-destructive/80">
+          <Trash2 size={15} className="text-primary-foreground" />
         </button>
       </div>
 
@@ -899,10 +899,10 @@ function MediaLightbox({ media, index, onIndexChange, onDelete, onClose }: {
         {media.length > 1 && (
           <>
             <button onClick={() => onIndexChange((index - 1 + media.length) % media.length)} className="absolute left-3 flex size-10 items-center justify-center rounded-full bg-black/40">
-              <ChevronLeft size={20} className="text-white" />
+              <ChevronLeft size={20} className="text-primary-foreground" />
             </button>
             <button onClick={() => onIndexChange((index + 1) % media.length)} className="absolute right-3 flex size-10 items-center justify-center rounded-full bg-black/40">
-              <ChevronRight size={20} className="text-white" />
+              <ChevronRight size={20} className="text-primary-foreground" />
             </button>
           </>
         )}
@@ -913,7 +913,7 @@ function MediaLightbox({ media, index, onIndexChange, onDelete, onClose }: {
         style={{ background: 'linear-gradient(to top, rgba(0,0,0,0.7) 0%, transparent 100%)' }}
         onClick={e => e.stopPropagation()}
       >
-        <p className="text-center text-xs text-white/50 mb-3">
+        <p className="text-center text-xs text-primary-foreground/50 mb-3">
           {current.type === 'video' ? '🎬 Video' : '📷 Photo'} · {new Date(current.capturedAt).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}
         </p>
         {media.length > 1 && (
@@ -927,7 +927,7 @@ function MediaLightbox({ media, index, onIndexChange, onDelete, onClose }: {
               >
                 {item.type === 'photo'
                   ? <img src={item.url} className="w-full h-full object-cover" alt="" />
-                  : <div className="w-full h-full bg-slate-700 flex items-center justify-center"><Play size={12} className="text-white" /></div>
+                  : <div className="w-full h-full bg-primary flex items-center justify-center"><Play size={12} className="text-primary-foreground" /></div>
                 }
               </button>
             ))}
@@ -1041,7 +1041,7 @@ export function JobDetailView({ id }: { id: string }) {
   if (isLoading) {
     return (
       <div className="h-full flex items-center justify-center">
-        <Spinner size="md" className="text-slate-900" label="Loading job" />
+        <Spinner size="md" className="text-foreground" label="Loading job" />
       </div>
     );
   }
@@ -1049,7 +1049,7 @@ export function JobDetailView({ id }: { id: string }) {
   if (error) {
     return (
       <div className="h-full overflow-y-auto pb-20 p-6">
-        <button onClick={() => navigate('/jobs')} className="flex items-center gap-2 text-sm text-slate-500 mb-4">
+        <button onClick={() => navigate('/jobs')} className="flex items-center gap-2 text-sm text-muted-foreground mb-4">
           <ArrowLeft size={14} /> Back
         </button>
         <ErrorState message="Failed to load job." onRetry={refetchJob} />
@@ -1060,7 +1060,7 @@ export function JobDetailView({ id }: { id: string }) {
   if (!job) {
     return (
       <div className="h-full overflow-y-auto pb-20 p-6">
-        <button onClick={() => navigate('/jobs')} className="flex items-center gap-2 text-sm text-slate-500 mb-4">
+        <button onClick={() => navigate('/jobs')} className="flex items-center gap-2 text-sm text-muted-foreground mb-4">
           <ArrowLeft size={14} /> Back
         </button>
         <EmptyState
@@ -1144,59 +1144,59 @@ export function JobDetailView({ id }: { id: string }) {
       <MaterialsTable materials={materials} onEdit={() => setModal('materials')} onSuppliers={() => setModal('suppliers')} />
 
       {/* ── Time Entries ── */}
-      <div className="rounded-xl bg-white border border-slate-200 overflow-hidden">
-        <div className="flex items-center justify-between px-4 py-3.5 border-b border-slate-100">
+      <div className="rounded-xl bg-card border border-border overflow-hidden">
+        <div className="flex items-center justify-between px-4 py-3.5 border-b border-border">
           <div className="flex items-center gap-2">
-            <Clock size={14} className="text-slate-500" />
-            <h4 className="text-slate-700">Time Tracking</h4>
+            <Clock size={14} className="text-muted-foreground" />
+            <h4 className="text-foreground">Time Tracking</h4>
           </div>
           <div className="flex items-center gap-2">
             {timeEntries.length > 0 && (
-              <span className="text-xs text-slate-400">
+              <span className="text-xs text-muted-foreground">
                 Total: {Math.floor(timeEntries.reduce((s, e) => s + (e.durationMinutes ?? 0), 0) / 60)}h{' '}
                 {timeEntries.reduce((s, e) => s + (e.durationMinutes ?? 0), 0) % 60}m
               </span>
             )}
             <button
               onClick={() => setShowTimeForm(p => !p)}
-              className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700"
+              className="flex items-center gap-1 text-xs text-primary hover:text-primary"
             >
               <Plus size={12} /> Add entry
             </button>
           </div>
         </div>
         {showTimeForm && (
-          <div className="px-4 py-3 border-b border-slate-100 bg-slate-50 flex flex-wrap items-end gap-3">
-            <label className="flex flex-col gap-1 text-xs text-slate-500">
+          <div className="px-4 py-3 border-b border-border bg-secondary flex flex-wrap items-end gap-3">
+            <label className="flex flex-col gap-1 text-xs text-muted-foreground">
               Start time
-              <input type="time" value={timeFormStart} onChange={e => setTimeFormStart(e.target.value)}
-                className="rounded border border-slate-200 px-2 py-1 text-sm" />
+              <Input type="time" value={timeFormStart} onChange={e => setTimeFormStart(e.target.value)}
+                className="min-h-11" />
             </label>
-            <label className="flex flex-col gap-1 text-xs text-slate-500">
+            <label className="flex flex-col gap-1 text-xs text-muted-foreground">
               End time
-              <input type="time" value={timeFormEnd} onChange={e => setTimeFormEnd(e.target.value)}
-                className="rounded border border-slate-200 px-2 py-1 text-sm" />
+              <Input type="time" value={timeFormEnd} onChange={e => setTimeFormEnd(e.target.value)}
+                className="min-h-11" />
             </label>
-            <label className="flex flex-col gap-1 text-xs text-slate-500">
+            <label className="flex flex-col gap-1 text-xs text-muted-foreground">
               Type
-              <select value={timeFormType} onChange={e => setTimeFormType(e.target.value as 'job' | 'drive')}
-                className="rounded border border-slate-200 px-2 py-1 text-sm">
+              <Select value={timeFormType} onChange={e => setTimeFormType(e.target.value as 'job' | 'drive')}
+                className="min-h-11">
                 <option value="job">Job work</option>
                 <option value="drive">Travel / Drive</option>
-              </select>
+              </Select>
             </label>
             <button onClick={saveTimeEntry} disabled={timeFormSaving}
-              className="rounded-lg bg-slate-900 text-white text-xs px-3 py-1.5 disabled:opacity-50">
+              className="rounded-lg bg-primary text-primary-foreground text-xs px-3 py-1.5 disabled:opacity-50">
               {timeFormSaving ? 'Saving...' : 'Save'}
             </button>
-            <button onClick={() => setShowTimeForm(false)} className="text-xs text-slate-400 hover:text-slate-600">
+            <button onClick={() => setShowTimeForm(false)} className="text-xs text-muted-foreground hover:text-foreground">
               Cancel
             </button>
           </div>
         )}
-        <div className="divide-y divide-slate-100">
+        <div className="divide-y divide-border">
           {timeEntries.length === 0 && !showTimeForm && (
-            <p className="px-4 py-3 text-xs text-slate-400 italic">No time entries yet</p>
+            <p className="px-4 py-3 text-xs text-muted-foreground italic">No time entries yet</p>
           )}
           {timeEntries.map(entry => {
             const start = new Date(entry.clockedInAt);
@@ -1206,14 +1206,14 @@ export function JobDetailView({ id }: { id: string }) {
             return (
               <div key={entry.id} className="flex items-center justify-between px-4 py-2.5">
                 <div>
-                  <p className="text-sm text-slate-700">{label}</p>
-                  <p className="text-xs text-slate-400">
+                  <p className="text-sm text-foreground">{label}</p>
+                  <p className="text-xs text-muted-foreground">
                     {start.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
                     {end ? ` – ${end.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}` : ' (in progress)'}
                   </p>
                 </div>
                 {mins > 0 && (
-                  <span className="text-sm text-slate-600 font-medium">
+                  <span className="text-sm text-foreground font-medium">
                     {Math.floor(mins / 60)}h {mins % 60}m
                   </span>
                 )}
@@ -1233,12 +1233,12 @@ export function JobDetailView({ id }: { id: string }) {
 
   const RightRail = () => (
     <div className="flex flex-col gap-4">
-      <div className="rounded-xl bg-white border border-slate-200 overflow-hidden">
-        <div className="flex items-center justify-between px-4 py-3.5 border-b border-slate-100">
-          <h4 className="text-slate-700">Activity Log</h4>
+      <div className="rounded-xl bg-card border border-border overflow-hidden">
+        <div className="flex items-center justify-between px-4 py-3.5 border-b border-border">
+          <h4 className="text-foreground">Activity Log</h4>
           <button
             onClick={() => setModal('addEntry')}
-            className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 transition-colors"
+            className="flex items-center gap-1 text-xs text-primary hover:text-primary transition-colors"
           >
             <Plus size={12} /> Add entry
           </button>
@@ -1260,14 +1260,14 @@ export function JobDetailView({ id }: { id: string }) {
           <div className="flex items-center justify-between mb-5">
             <button
               onClick={() => navigate('/jobs')}
-              className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-700 transition-colors"
+              className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
             >
               <ArrowLeft size={14} /> Back to Jobs
             </button>
             {tech && (
               <button
                 onClick={() => navigate(`/jobs/${job.id}?view=tech`)}
-                className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-600 hover:border-blue-300 hover:bg-blue-50 hover:text-blue-700 transition-colors"
+                className="flex items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-1.5 text-xs text-foreground hover:border-primary/30 hover:bg-primary/10 hover:text-primary transition-colors"
               >
                 <Cpu size={12} /> Tech View
               </button>
@@ -1285,14 +1285,14 @@ export function JobDetailView({ id }: { id: string }) {
           {/* Page header */}
           <div className="flex items-start justify-between gap-3 mb-5">
             <div className="flex items-center gap-3">
-              <div className="flex size-12 items-center justify-center rounded-2xl bg-slate-100 text-2xl shrink-0">
+              <div className="flex size-12 items-center justify-center rounded-2xl bg-secondary text-2xl shrink-0">
                 {SERVICE_ICON[job.serviceType]}
               </div>
               <div>
-                <h1 className="text-slate-900" style={{ fontSize: '1.15rem', lineHeight: 1.2 }}>
+                <h1 className="text-foreground" style={{ fontSize: '1.15rem', lineHeight: 1.2 }}>
                   {job.customer}
                 </h1>
-                <p className="text-sm text-slate-400 mt-0.5">
+                <p className="text-sm text-muted-foreground mt-0.5">
                   Job #{job.jobNumber} · {job.serviceType}
                 </p>
               </div>
@@ -1303,7 +1303,7 @@ export function JobDetailView({ id }: { id: string }) {
               {/* Status transition control */}
               {job.status !== 'Completed' && job.status !== 'Canceled' && (
                 <select
-                  className="text-xs rounded-lg border border-slate-200 px-2 py-1 text-slate-600 bg-white cursor-pointer hover:border-slate-300"
+                  className="text-xs rounded-lg border border-border px-2 py-1 text-foreground bg-card cursor-pointer hover:border-border"
                   value=""
                   onChange={async (e) => {
                     const newStatus = e.target.value;
@@ -1336,19 +1336,19 @@ export function JobDetailView({ id }: { id: string }) {
           {/* Primary actions */}
           <div className="grid grid-cols-3 gap-2 mb-4">
             {[
-              { icon: Phone,         label: 'Call',       sub: customerPhone.split(' ')[0],  onClick: () => setModal('call'),              bg: 'bg-green-600  hover:bg-green-700'  },
-              { icon: MessageSquare, label: 'Text',       sub: 'Send message',                onClick: () => setModal('text'),              bg: 'bg-blue-600   hover:bg-blue-700'   },
-              { icon: Navigation,    label: 'Directions', sub: job.address.split(',')[0],     onClick: () => window.open(mapsUrl, '_blank'), bg: 'bg-violet-600 hover:bg-violet-700' },
+              { icon: Phone,         label: 'Call',       sub: customerPhone.split(' ')[0],  onClick: () => setModal('call'),              bg: 'bg-success  hover:bg-success/90'  },
+              { icon: MessageSquare, label: 'Text',       sub: 'Send message',                onClick: () => setModal('text'),              bg: 'bg-primary   hover:bg-primary/90'   },
+              { icon: Navigation,    label: 'Directions', sub: job.address.split(',')[0],     onClick: () => window.open(mapsUrl, '_blank'), bg: 'bg-primary hover:bg-primary/90' },
             ].map(({ icon: Icon, label, sub, onClick, bg }) => (
               <button
                 key={label}
                 onClick={onClick}
-                className={`flex flex-col items-center gap-2 rounded-xl py-4 text-white transition-colors active:scale-95 ${bg}`}
+                className={`flex flex-col items-center gap-2 rounded-xl py-4 text-primary-foreground transition-colors active:scale-95 ${bg}`}
               >
                 <Icon size={20} />
                 <div className="text-center">
                   <p className="text-sm">{label}</p>
-                  {sub && <p className="text-xs text-white/70 truncate max-w-[80px]">{sub}</p>}
+                  {sub && <p className="text-xs text-primary-foreground/70 truncate max-w-[80px]">{sub}</p>}
                 </div>
               </button>
             ))}
@@ -1361,12 +1361,12 @@ export function JobDetailView({ id }: { id: string }) {
                 key={key}
                 onClick={() => onSecondaryAction(key)}
                 disabled={disabled}
-                className={`relative flex shrink-0 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-600 hover:border-slate-300 hover:bg-slate-50 transition-colors ${disabled ? 'opacity-40 cursor-not-allowed' : ''}`}
+                className={`relative flex shrink-0 items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-2 text-sm text-foreground hover:border-border hover:bg-secondary transition-colors ${disabled ? 'opacity-40 cursor-not-allowed' : ''}`}
               >
-                <Icon size={14} className="text-slate-500" />
+                <Icon size={14} className="text-muted-foreground" />
                 {label}
                 {badge > 0 && (
-                  <span className="absolute -top-1.5 -right-1.5 flex size-4 items-center justify-center rounded-full bg-blue-500 text-white border-2 border-white" style={{ fontSize: 8 }}>
+                  <span className="absolute -top-1.5 -right-1.5 flex size-4 items-center justify-center rounded-full bg-primary text-primary-foreground border-2 border-primary-foreground" style={{ fontSize: 8 }}>
                     {badge}
                   </span>
                 )}
@@ -1378,23 +1378,23 @@ export function JobDetailView({ id }: { id: string }) {
           {hints.length > 0 && (
             <div className="md:hidden flex flex-col gap-2 mb-5">
               <div className="flex items-center gap-2 px-1">
-                <Zap size={12} className="text-indigo-500" />
-                <p className="text-xs text-slate-500">Suggested actions</p>
+                <Zap size={12} className="text-primary" />
+                <p className="text-xs text-muted-foreground">Suggested actions</p>
               </div>
               {hints.map(h => {
                 const cfg   = HINT_CFG[h.color] ?? HINT_CFG.blue;
                 const HIcon = h.icon;
                 return (
-                  <div key={h.id} className={`flex items-center gap-3 rounded-xl border border-slate-200 px-3 py-3 ${cfg.bg}`}>
+                  <div key={h.id} className={`flex items-center gap-3 rounded-xl border border-border px-3 py-3 ${cfg.bg}`}>
                     <HIcon size={15} className={cfg.icon} />
                     <div className="flex-1 min-w-0">
-                      <p className="text-sm text-slate-800">{h.label}</p>
-                      <p className="text-xs text-slate-500 mt-0.5">{h.desc}</p>
+                      <p className="text-sm text-foreground">{h.label}</p>
+                      <p className="text-xs text-muted-foreground mt-0.5">{h.desc}</p>
                     </div>
                     {h.action && (
                       <button
                         onClick={() => setModal(h.action)}
-                        className={`shrink-0 rounded-lg px-3 py-1.5 text-xs text-white transition-colors ${cfg.btn}`}
+                        className={`shrink-0 rounded-lg px-3 py-1.5 text-xs text-primary-foreground transition-colors ${cfg.btn}`}
                       >
                         Go
                       </button>
@@ -1416,12 +1416,12 @@ export function JobDetailView({ id }: { id: string }) {
           {/* Mobile single column */}
           <div className="md:hidden flex flex-col gap-4">
             <LeftContent />
-            <div className="rounded-xl bg-white border border-slate-200 overflow-hidden">
-              <div className="flex items-center justify-between px-4 py-3.5 border-b border-slate-100">
-                <h4 className="text-slate-700">Activity Log</h4>
+            <div className="rounded-xl bg-card border border-border overflow-hidden">
+              <div className="flex items-center justify-between px-4 py-3.5 border-b border-border">
+                <h4 className="text-foreground">Activity Log</h4>
                 <button
                   onClick={() => setModal('addEntry')}
-                  className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 transition-colors"
+                  className="flex items-center gap-1 text-xs text-primary hover:text-primary transition-colors"
                 >
                   <Plus size={12} /> Add
                 </button>

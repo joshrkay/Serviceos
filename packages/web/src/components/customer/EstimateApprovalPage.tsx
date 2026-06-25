@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { useParams } from 'react-router';
 import {
-  Check, Phone, Mail, ChevronDown, ChevronUp, CheckCircle2, X,
+  Check, Phone, ChevronDown, ChevronUp, CheckCircle2, X,
   MapPin, FileText, Calendar, Clock, User, Download,
 } from 'lucide-react';
 import { apiFetch } from '../../utils/api-fetch';
@@ -321,10 +321,10 @@ function ApprovalSheet({
             <p className="text-xs text-red-600 mb-3 bg-red-50 rounded-lg px-3 py-2">{error}</p>
           )}
 
-          {/* Date */}
+          {/* Date — the customer is signing now, so this is today. */}
           <div className="flex items-center justify-between text-xs text-slate-400 mb-6">
             <span>Accepted on</span>
-            <span>March 10, 2026</span>
+            <span>{fmtFriendlyDate(new Date().toISOString())}</span>
           </div>
 
           {/* Button */}
@@ -354,15 +354,20 @@ function ApprovalSheet({
 
 // ─── Success screen ────────────────────────────────────────────────────────
 function SuccessScreen({
-  customer, estimateNumber, description, address, total,
+  customer, businessName, businessPhone,
+  estimateNumber, description, address, total, acceptedAt,
   token, depositPayable, depositDueCents = 0, depositPaid = false,
   depositCheckoutUrl, depositCheckoutExpiresAt,
 }: {
   customer: string;
+  businessName: string;
+  businessPhone?: string;
   estimateNumber: string;
   description: string;
   address: string;
   total: number;
+  /** ISO timestamp the estimate was accepted; drives the "Accepted" date row. */
+  acceptedAt?: string;
   /** Token + deposit context so an after_approval deposit can be paid here. */
   token?: string;
   depositPayable?: boolean;
@@ -371,9 +376,8 @@ function SuccessScreen({
   depositCheckoutUrl?: string;
   depositCheckoutExpiresAt?: string;
 }) {
-  // Mock auto-created job number
-  const jobNumber = 'JOB-1053';
   const firstName = customer.split(' ')[0];
+  const acceptedOn = fmtFriendlyDate(acceptedAt);
 
   return (
     <div className="min-h-screen bg-background">
@@ -382,17 +386,19 @@ function SuccessScreen({
         <div className="max-w-lg mx-auto flex items-center justify-between">
           <div className="flex items-center gap-2">
             <div className="flex size-8 items-center justify-center rounded-xl bg-slate-900">
-              <span className="text-white" style={{ fontSize: 13 }}>F</span>
+              <span className="text-white" style={{ fontSize: 13 }}>{businessName.charAt(0).toUpperCase()}</span>
             </div>
             <div>
-              <p className="text-sm text-slate-800">Fieldly Pro Services</p>
-              <p className="text-xs text-slate-400">Austin, TX</p>
+              <p className="text-sm text-slate-800">{businessName}</p>
+              {businessPhone && <p className="text-xs text-slate-400">{businessPhone}</p>}
             </div>
           </div>
           <div className="flex items-center gap-3">
-            <a href="tel:5125550000" className="flex size-8 items-center justify-center rounded-full bg-slate-100 hover:bg-slate-200 transition-colors">
-              <Phone size={14} className="text-slate-600" />
-            </a>
+            {businessPhone && (
+              <a href={`tel:${businessPhone.replace(/\D/g, '')}`} className="flex size-8 items-center justify-center rounded-full bg-slate-100 hover:bg-slate-200 transition-colors">
+                <Phone size={14} className="text-slate-600" />
+              </a>
+            )}
           </div>
         </div>
       </div>
@@ -459,9 +465,9 @@ function SuccessScreen({
             <div className="flex items-center justify-between mb-2">
               <div className="flex items-center gap-2">
                 <div className="size-6 rounded-lg bg-white/10 flex items-center justify-center">
-                  <span className="text-white" style={{ fontSize: 11 }}>F</span>
+                  <span className="text-white" style={{ fontSize: 11 }}>{businessName.charAt(0).toUpperCase()}</span>
                 </div>
-                <p className="text-sm text-white">Fieldly Pro Services</p>
+                <p className="text-sm text-white">{businessName}</p>
               </div>
               <div className="flex items-center gap-1.5">
                 <span className="size-2 rounded-full bg-green-400 animate-pulse" />
@@ -472,7 +478,6 @@ function SuccessScreen({
             <p className="text-white" style={{ fontSize: '1.5rem', lineHeight: 1 }}>
               ${fmtUsd(total)}
             </p>
-            <p className="text-xs text-slate-500 mt-1">{jobNumber}</p>
           </div>
 
           {/* Detail rows */}
@@ -497,7 +502,9 @@ function SuccessScreen({
               <Check size={14} className="text-green-500 shrink-0" />
               <div className="flex-1">
                 <p className="text-xs text-slate-400 mb-0.5">Accepted</p>
-                <p className="text-sm text-slate-800">March 10, 2026 · Estimate approved</p>
+                <p className="text-sm text-slate-800">
+                  {acceptedOn ? `${acceptedOn} · Estimate approved` : 'Estimate approved'}
+                </p>
               </div>
             </div>
 
@@ -552,23 +559,22 @@ function SuccessScreen({
           </div>
         </div>
 
-        {/* Contact footer */}
-        <div className="flex flex-col items-center gap-3 text-center"
-          style={{ animation: 'fadeUp 0.4s ease 0.5s both' }}>
-          <p className="text-xs text-slate-400">
-            Questions? Reach us any time.
-          </p>
-          <div className="flex items-center gap-3">
-            <a href="tel:5125550000"
-              className="flex items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-2 text-sm text-slate-700 hover:border-slate-300 hover:bg-slate-50 transition-colors">
-              <Phone size={13} className="text-slate-500" /> (512) 555-0000
-            </a>
-            <a href="mailto:info@fieldly.pro"
-              className="flex items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-2 text-sm text-slate-700 hover:border-slate-300 hover:bg-slate-50 transition-colors">
-              <Mail size={13} className="text-slate-500" /> Email us
-            </a>
+        {/* Contact footer — shown only when the tenant has a reachable phone.
+            No tenant email is exposed by the API, so we don't render one. */}
+        {businessPhone && (
+          <div className="flex flex-col items-center gap-3 text-center"
+            style={{ animation: 'fadeUp 0.4s ease 0.5s both' }}>
+            <p className="text-xs text-slate-400">
+              Questions? Reach us any time.
+            </p>
+            <div className="flex items-center gap-3">
+              <a href={`tel:${businessPhone.replace(/\D/g, '')}`}
+                className="flex items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-2 text-sm text-slate-700 hover:border-slate-300 hover:bg-slate-50 transition-colors">
+                <Phone size={13} className="text-slate-500" /> {businessPhone}
+              </a>
+            </div>
           </div>
-        </div>
+        )}
 
       </div>
 
@@ -845,6 +851,9 @@ export function EstimateApprovalPage() {
   if (accepted) return (
     <SuccessScreen
       customer={customerName}
+      businessName={businessName}
+      businessPhone={businessPhone}
+      acceptedAt={apiView.acceptedAt}
       estimateNumber={estimateNumber}
       description={description}
       address={customerAddress}

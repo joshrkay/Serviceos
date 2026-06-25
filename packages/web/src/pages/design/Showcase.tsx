@@ -49,9 +49,9 @@ function Section({
   return (
     <section className="flex flex-col gap-3">
       <div>
-        <h2 className="text-slate-900">{title}</h2>
+        <h2 className="text-foreground">{title}</h2>
         {description && (
-          <p className="text-sm text-slate-400">{description}</p>
+          <p className="text-sm text-muted-foreground">{description}</p>
         )}
       </div>
       <Card>
@@ -76,11 +76,11 @@ export function Showcase() {
     <div className="h-full overflow-y-auto pb-20 md:pb-6">
       <div className="mx-auto flex max-w-3xl flex-col gap-8 px-4 md:px-6 pt-5">
         <header>
-          <h1 className="text-slate-900">Design system</h1>
-          <p className="mt-1 text-sm text-slate-400">
+          <h1 className="text-foreground">Design system</h1>
+          <p className="mt-1 text-sm text-muted-foreground">
             Rivet UI primitives — token-driven, dependency-free building
             blocks. Import from{' '}
-            <code className="rounded bg-slate-100 px-1 py-0.5 text-xs">
+            <code className="rounded bg-secondary px-1 py-0.5 text-xs">
               components/ui
             </code>
             .
@@ -170,7 +170,7 @@ export function Showcase() {
               <Badge variant="info">2 locations</Badge>
             </CardHeader>
             <CardContent>
-              <p className="text-sm text-slate-600">
+              <p className="text-sm text-muted-foreground">
                 123 Main St · Austin, TX 78701
               </p>
             </CardContent>
@@ -188,9 +188,9 @@ export function Showcase() {
           description="Spinners, skeletons, and toasts."
         >
           <div className="flex items-center gap-4">
-            <Spinner size="sm" className="text-slate-400" />
-            <Spinner size="md" className="text-slate-400" />
-            <Spinner size="lg" className="text-slate-400" />
+            <Spinner size="sm" className="text-muted-foreground" />
+            <Spinner size="md" className="text-muted-foreground" />
+            <Spinner size="lg" className="text-muted-foreground" />
           </div>
           <div className="flex flex-col gap-2">
             <Skeleton className="h-4 w-48" />
@@ -239,7 +239,7 @@ export function Showcase() {
             </Button>
           </div>
           {error && (
-            <p role="alert" className="text-sm text-red-600">
+            <p role="alert" className="text-sm text-destructive">
               {error}
             </p>
           )}

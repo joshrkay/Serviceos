@@ -336,25 +336,25 @@ export function CustomerDetail({
           content: (
             <dl className="flex flex-col gap-2 text-sm">
               <div className="flex justify-between gap-4">
-                <dt className="text-slate-400">Email</dt>
-                <dd className="text-slate-800">{data.email || '—'}</dd>
+                <dt className="text-muted-foreground">Email</dt>
+                <dd className="text-foreground">{data.email || '—'}</dd>
               </div>
               <div className="flex justify-between gap-4">
-                <dt className="text-slate-400">Phone</dt>
-                <dd className="text-slate-800">{data.primaryPhone || '—'}</dd>
+                <dt className="text-muted-foreground">Phone</dt>
+                <dd className="text-foreground">{data.primaryPhone || '—'}</dd>
               </div>
               <div className="flex justify-between gap-4">
-                <dt className="text-slate-400">Secondary</dt>
-                <dd className="text-slate-800">{data.secondaryPhone || '—'}</dd>
+                <dt className="text-muted-foreground">Secondary</dt>
+                <dd className="text-foreground">{data.secondaryPhone || '—'}</dd>
               </div>
               <div className="flex justify-between gap-4">
-                <dt className="text-slate-400">Preferred channel</dt>
-                <dd className="text-slate-800 capitalize">
+                <dt className="text-muted-foreground">Preferred channel</dt>
+                <dd className="text-foreground capitalize">
                   {data.preferredChannel}
                 </dd>
               </div>
               <div className="flex items-center justify-between gap-4">
-                <dt className="text-slate-400">Messaging</dt>
+                <dt className="text-muted-foreground">Messaging</dt>
                 <dd>
                   {data.consentStatus === 'revoked' ? (
                     <Badge variant="danger">Opted out</Badge>
@@ -366,15 +366,15 @@ export function CustomerDetail({
                 </dd>
               </div>
               <div className="flex justify-between gap-4">
-                <dt className="text-slate-400">Source</dt>
-                <dd className="text-slate-800">
+                <dt className="text-muted-foreground">Source</dt>
+                <dd className="text-foreground">
                   {data.source ? toTitleCase(data.source) : '—'}
                 </dd>
               </div>
               {/* P11-002: spoken-language preference, now persisted on change
                   so dispatchers can route Spanish callers correctly. */}
               <div className="flex items-center justify-between gap-4 pt-1">
-                <dt className="flex items-center gap-2 text-slate-400">
+                <dt className="flex items-center gap-2 text-muted-foreground">
                   Language
                   <LanguageBadge
                     language={(language || null) as 'en' | 'es' | null}
@@ -405,11 +405,11 @@ export function CustomerDetail({
           content: (
             <div className="flex flex-col gap-3">
               {note.trim() ? (
-                <p className="whitespace-pre-wrap text-sm text-slate-700">
+                <p className="whitespace-pre-wrap text-sm text-foreground">
                   {note}
                 </p>
               ) : (
-                <p className="text-sm text-slate-400">No customer notes yet.</p>
+                <p className="text-sm text-muted-foreground">No customer notes yet.</p>
               )}
               <Field label="Edit customer notes" error={noteError}>
                 <Textarea
@@ -455,7 +455,7 @@ export function CustomerDetail({
           content: (
             <div className="flex flex-col gap-4">
               {locationsError && (
-                <p role="alert" className="text-sm text-red-600">
+                <p role="alert" className="text-sm text-destructive">
                   {locationsError}
                 </p>
               )}
@@ -463,11 +463,11 @@ export function CustomerDetail({
                 {locations.map((location) => (
                   <div
                     key={location.id}
-                    className="rounded-xl border border-slate-200 p-3"
+                    className="rounded-xl border border-border p-3"
                   >
                     <div className="flex flex-wrap items-center gap-2">
-                      <MapPin size={13} className="shrink-0 text-slate-400" />
-                      <p className="text-sm text-slate-900">
+                      <MapPin size={13} className="shrink-0 text-muted-foreground" />
+                      <p className="text-sm text-foreground">
                         {location.label || 'Service location'}
                       </p>
                       {location.isPrimary && (
@@ -489,18 +489,18 @@ export function CustomerDetail({
                           </Button>
                         )}
                     </div>
-                    <p className="mt-1 pl-5 text-sm text-slate-600">
+                    <p className="mt-1 pl-5 text-sm text-foreground">
                       {formatLocation(location)}
                     </p>
                     {location.accessNotes && (
-                      <p className="mt-1 pl-5 text-xs text-amber-700">
+                      <p className="mt-1 pl-5 text-xs text-warning">
                         {location.accessNotes}
                       </p>
                     )}
                   </div>
                 ))}
                 {locations.length === 0 && (
-                  <p className="text-sm text-slate-400">
+                  <p className="text-sm text-muted-foreground">
                     No service locations yet.
                   </p>
                 )}
@@ -587,11 +587,11 @@ export function CustomerDetail({
           content: (
             <div className="space-y-3">
               {data.originatingLeadId ? (
-                <p className="text-sm text-slate-700">
+                <p className="text-sm text-foreground">
                   Converted from lead{' '}
                   <Link
                     to={`/leads/${data.originatingLeadId}`}
-                    className="text-blue-600 hover:underline"
+                    className="text-primary hover:underline"
                   >
                     {data.originatingLeadId}
                   </Link>

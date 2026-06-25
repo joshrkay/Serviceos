@@ -100,10 +100,12 @@ interface ManualItem {
 }
 
 // ─── Style constants ──────────────────────────────────────────────────────────
+// Service type is a category, not a status — Path A keeps the chip neutral; the
+// emoji (SVC_ICON) + label carry the per-type distinction.
 const SVC_CHIP: Record<ServiceType, string> = {
-  HVAC:     'bg-blue-50 text-blue-700 border-blue-100',
-  Plumbing: 'bg-green-50 text-green-700 border-green-100',
-  Painting: 'bg-violet-50 text-violet-700 border-violet-100',
+  HVAC:     'bg-secondary text-foreground border-border',
+  Plumbing: 'bg-secondary text-foreground border-border',
+  Painting: 'bg-secondary text-foreground border-border',
 };
 const SVC_ICON: Record<ServiceType, string> = { HVAC: '❄️', Plumbing: '🔧', Painting: '🎨' };
 
@@ -316,7 +318,7 @@ function Waveform({ active }: { active: boolean }) {
     <div className="flex items-center justify-center gap-[3px] h-8">
       {Array.from({ length: 22 }).map((_, i) => (
         <div key={i}
-          className={`w-[3px] rounded-full ${active ? 'bg-red-400' : 'bg-slate-300'}`}
+          className={`w-[3px] rounded-full ${active ? 'bg-destructive' : 'bg-muted'}`}
           style={{
             animation: active ? 'waveBar 0.7s ease-in-out infinite' : 'none',
             animationDelay: `${i * 0.035}s`, height: '100%',
@@ -350,80 +352,80 @@ function AIResultCard({ result, editable, onToggleEdit, onUpdateItems }: {
   return (
     <div className="flex flex-col gap-3" style={{ animation: 'fadeUp 0.3s ease' }}>
       <div className="flex items-start gap-2.5">
-        <div className="flex size-7 items-center justify-center rounded-full bg-indigo-600 shrink-0 mt-0.5">
-          <Sparkles size={12} className="text-white" />
+        <div className="flex size-7 items-center justify-center rounded-full bg-primary shrink-0 mt-0.5">
+          <Sparkles size={12} className="text-primary-foreground" />
         </div>
-        <div className="flex-1 bg-indigo-50 border border-indigo-100 rounded-2xl rounded-tl-sm px-4 py-3">
-          <p className="text-xs text-indigo-400 mb-1">Rivet AI</p>
-          <p className="text-sm text-indigo-900 leading-relaxed">{result.explanation}</p>
+        <div className="flex-1 bg-primary/10 border border-primary/20 rounded-2xl rounded-tl-sm px-4 py-3">
+          <p className="text-xs text-primary mb-1">Rivet AI</p>
+          <p className="text-sm text-primary leading-relaxed">{result.explanation}</p>
         </div>
       </div>
 
-      <div className="rounded-xl border border-slate-200 overflow-hidden bg-white">
-        <div className="flex items-center justify-between px-4 py-3 border-b border-slate-100">
-          <p className="text-xs text-slate-500">
-            {result.items.length} items · <span className="text-slate-800">{result.description}</span>
+      <div className="rounded-xl border border-border overflow-hidden bg-card">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+          <p className="text-xs text-muted-foreground">
+            {result.items.length} items · <span className="text-foreground">{result.description}</span>
           </p>
           {!editable ? (
             <button onClick={onToggleEdit}
-              className="flex items-center gap-1 text-xs text-slate-500 hover:text-slate-700 border border-slate-200 rounded-lg px-2.5 py-1 hover:bg-slate-50 transition-colors">
+              className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground border border-border rounded-lg px-2.5 py-1 hover:bg-secondary transition-colors">
               <Pencil size={10} /> Edit
             </button>
           ) : (
             <div className="flex gap-1.5">
-              <button onClick={save} className="flex items-center gap-1 text-xs text-white bg-slate-900 rounded-lg px-2.5 py-1">
+              <button onClick={save} className="flex items-center gap-1 text-xs text-primary-foreground bg-primary rounded-lg px-2.5 py-1">
                 <Check size={10} /> Save
               </button>
-              <button onClick={cancel} className="text-xs text-slate-500 border border-slate-200 rounded-lg px-2.5 py-1 hover:bg-slate-50">
+              <button onClick={cancel} className="text-xs text-muted-foreground border border-border rounded-lg px-2.5 py-1 hover:bg-secondary">
                 Cancel
               </button>
             </div>
           )}
         </div>
 
-        <div className="grid grid-cols-[1fr_40px_70px_70px] gap-x-2 px-4 py-2 bg-slate-50 border-b border-slate-100">
-          <p className="text-xs text-slate-400">Item</p>
-          <p className="text-xs text-slate-400 text-right">Qty</p>
-          <p className="text-xs text-slate-400 text-right">Rate</p>
-          <p className="text-xs text-slate-400 text-right">Total</p>
+        <div className="grid grid-cols-[1fr_40px_70px_70px] gap-x-2 px-4 py-2 bg-secondary border-b border-border">
+          <p className="text-xs text-muted-foreground">Item</p>
+          <p className="text-xs text-muted-foreground text-right">Qty</p>
+          <p className="text-xs text-muted-foreground text-right">Rate</p>
+          <p className="text-xs text-muted-foreground text-right">Total</p>
         </div>
 
-        <div className="divide-y divide-slate-50">
+        <div className="divide-y divide-border">
           {(editable ? draft : result.items).map((item, i) => (
             <div key={i}>
               {editable ? (
                 <div className="grid grid-cols-[1fr_40px_70px_70px_16px] gap-x-2 px-4 py-2.5 items-center">
                   <input value={item.description} onChange={e => update(i, 'description', e.target.value)}
-                    className="text-sm border border-slate-200 rounded-lg px-2 py-1 focus:outline-none focus:border-blue-400 w-full" />
+                    className="text-sm border border-border rounded-lg px-2 py-1 focus:outline-none focus:border-primary w-full" />
                   <input value={item.qty || ''} onChange={e => update(i, 'qty', e.target.value)}
                     type="number" min="1"
-                    className="text-sm border border-slate-200 rounded-lg px-1 py-1 text-right focus:outline-none focus:border-blue-400 w-full" />
+                    className="text-sm border border-border rounded-lg px-1 py-1 text-right focus:outline-none focus:border-primary w-full" />
                   <input value={item.rate || ''} onChange={e => update(i, 'rate', e.target.value)}
                     type="number" min="0"
-                    className="text-sm border border-slate-200 rounded-lg px-1 py-1 text-right focus:outline-none focus:border-blue-400 w-full" />
-                  <p className="text-sm text-slate-800 text-right">${(item.qty * item.rate).toLocaleString()}</p>
+                    className="text-sm border border-border rounded-lg px-1 py-1 text-right focus:outline-none focus:border-primary w-full" />
+                  <p className="text-sm text-foreground text-right">${(item.qty * item.rate).toLocaleString()}</p>
                   <button onClick={() => setDraft(p => p.filter((_, j) => j !== i))}
-                    className="text-slate-300 hover:text-red-400 transition-colors">
+                    className="text-muted-foreground hover:text-destructive transition-colors">
                     <Trash2 size={12} />
                   </button>
                 </div>
               ) : (
                 <>
                   <button onClick={() => item.note ? setOpenIdx(openIdx === i ? null : i) : undefined}
-                    className={`w-full grid grid-cols-[1fr_40px_70px_70px_16px] gap-x-2 px-4 py-2.5 items-center text-left ${item.note ? 'hover:bg-slate-50 cursor-pointer' : 'cursor-default'} transition-colors`}>
-                    <p className="text-sm text-slate-800 leading-snug">{item.description}</p>
-                    <p className="text-sm text-slate-500 text-right">{item.qty}</p>
-                    <p className="text-sm text-slate-500 text-right">${item.rate.toLocaleString()}</p>
-                    <p className="text-sm text-slate-800 text-right">${(item.qty * item.rate).toLocaleString()}</p>
+                    className={`w-full grid grid-cols-[1fr_40px_70px_70px_16px] gap-x-2 px-4 py-2.5 items-center text-left ${item.note ? 'hover:bg-secondary cursor-pointer' : 'cursor-default'} transition-colors`}>
+                    <p className="text-sm text-foreground leading-snug">{item.description}</p>
+                    <p className="text-sm text-muted-foreground text-right">{item.qty}</p>
+                    <p className="text-sm text-muted-foreground text-right">${item.rate.toLocaleString()}</p>
+                    <p className="text-sm text-foreground text-right">${(item.qty * item.rate).toLocaleString()}</p>
                     {item.note
-                      ? <ChevronDown size={12} className={`text-slate-400 transition-transform shrink-0 ${openIdx === i ? 'rotate-180' : ''}`} />
+                      ? <ChevronDown size={12} className={`text-muted-foreground transition-transform shrink-0 ${openIdx === i ? 'rotate-180' : ''}`} />
                       : <span />
                     }
                   </button>
                   {item.note && openIdx === i && (
-                    <div className="px-4 pb-3 pt-1 bg-indigo-50/50 border-t border-indigo-100/60"
+                    <div className="px-4 pb-3 pt-1 bg-primary/10 border-t border-primary/20"
                       style={{ animation: 'fadeUp 0.15s ease' }}>
-                      <p className="text-xs text-indigo-700 leading-relaxed">{item.note}</p>
+                      <p className="text-xs text-primary leading-relaxed">{item.note}</p>
                     </div>
                   )}
                 </>
@@ -434,14 +436,14 @@ function AIResultCard({ result, editable, onToggleEdit, onUpdateItems }: {
 
         {editable && (
           <button onClick={() => setDraft(p => [...p, { description: '', qty: 1, rate: 0 }])}
-            className="flex items-center gap-1.5 px-4 py-2.5 text-xs text-blue-600 hover:bg-blue-50/50 w-full border-t border-slate-50">
+            className="flex items-center gap-1.5 px-4 py-2.5 text-xs text-primary hover:bg-primary/10 w-full border-t border-border">
             <Plus size={11} /> Add line item
           </button>
         )}
 
-        <div className="flex items-center justify-between px-4 py-3.5 border-t border-slate-100 bg-slate-50">
-          <p className="text-sm text-slate-600">Total</p>
-          <p className="text-slate-900">${(editable ? draftTotal : total).toLocaleString()}</p>
+        <div className="flex items-center justify-between px-4 py-3.5 border-t border-border bg-secondary">
+          <p className="text-sm text-foreground">Total</p>
+          <p className="text-foreground">${(editable ? draftTotal : total).toLocaleString()}</p>
         </div>
       </div>
     </div>
@@ -529,15 +531,15 @@ function VoiceInput({ svcType, onResult }: { svcType?: ServiceType; onResult: (r
 
   if (phase === 'idle') return (
     <div className="flex flex-col items-center gap-5 py-6">
-      <p className="text-sm text-slate-500 text-center px-4 leading-relaxed">
+      <p className="text-sm text-muted-foreground text-center px-4 leading-relaxed">
         Describe what needs to be done — parts, problems, scope. AI builds the estimate from your words.
       </p>
       <button onClick={start} className="group flex flex-col items-center gap-3">
-        <div className="relative flex size-20 items-center justify-center rounded-full bg-slate-900 shadow-xl shadow-slate-900/20 hover:bg-slate-700 active:scale-95 transition-all">
-          <Mic size={28} className="text-white" />
-          <div className="absolute inset-0 rounded-full border-2 border-slate-900/20 scale-110 group-hover:scale-125 transition-transform" />
+        <div className="relative flex size-20 items-center justify-center rounded-full bg-primary shadow-xl shadow-border/20 hover:bg-primary/90 active:scale-95 transition-all">
+          <Mic size={28} className="text-primary-foreground" />
+          <div className="absolute inset-0 rounded-full border-2 border-primary/20 scale-110 group-hover:scale-125 transition-transform" />
         </div>
-        <p className="text-sm text-slate-700">Tap to start recording</p>
+        <p className="text-sm text-foreground">Tap to start recording</p>
       </button>
     </div>
   );
@@ -545,23 +547,23 @@ function VoiceInput({ svcType, onResult }: { svcType?: ServiceType; onResult: (r
   if (phase === 'recording') return (
     <div className="flex flex-col items-center gap-4 py-6">
       <div className="flex items-center gap-2">
-        <span className="size-2 rounded-full bg-red-500 animate-pulse" />
-        <p className="text-sm text-red-600">{fmt(seconds)} · Recording…</p>
+        <span className="size-2 rounded-full bg-destructive animate-pulse" />
+        <p className="text-sm text-destructive">{fmt(seconds)} · Recording…</p>
       </div>
       <Waveform active />
       <button onClick={stop}
-        className="flex items-center gap-2 rounded-xl bg-red-500 text-white px-6 py-3 text-sm hover:bg-red-600 active:scale-95 transition-all shadow-lg shadow-red-500/30">
+        className="flex items-center gap-2 rounded-xl bg-destructive text-primary-foreground px-6 py-3 text-sm hover:bg-destructive active:scale-95 transition-all shadow-lg shadow-destructive/30">
         <StopCircle size={16} /> Tap to stop
       </button>
-      <p className="text-xs text-slate-400">Auto-stops at 10s</p>
+      <p className="text-xs text-muted-foreground">Auto-stops at 10s</p>
     </div>
   );
 
   if (phase === 'processing') return (
     <div className="flex flex-col items-center gap-3 py-10">
       <Waveform active={false} />
-      <div className="flex items-center gap-2 text-sm text-slate-500">
-        <span className="size-4 rounded-full border-2 border-slate-200 border-t-slate-600 animate-spin" />
+      <div className="flex items-center gap-2 text-sm text-muted-foreground">
+        <span className="size-4 rounded-full border-2 border-border border-t-border animate-spin" />
         Transcribing…
       </div>
     </div>
@@ -570,21 +572,21 @@ function VoiceInput({ svcType, onResult }: { svcType?: ServiceType; onResult: (r
   if (phase === 'transcribed') return (
     <div className="flex flex-col gap-4 py-2">
       <div className="flex items-start gap-2.5">
-        <div className="flex size-7 items-center justify-center rounded-full bg-slate-900 shrink-0 mt-0.5">
-          <Mic size={12} className="text-white" />
+        <div className="flex size-7 items-center justify-center rounded-full bg-primary shrink-0 mt-0.5">
+          <Mic size={12} className="text-primary-foreground" />
         </div>
-        <div className="flex-1 bg-slate-100 rounded-2xl rounded-tl-sm px-4 py-3">
-          <p className="text-xs text-slate-400 mb-1">Your recording</p>
-          <p className="text-sm text-slate-800 leading-relaxed italic">"{transcript}"</p>
+        <div className="flex-1 bg-secondary rounded-2xl rounded-tl-sm px-4 py-3">
+          <p className="text-xs text-muted-foreground mb-1">Your recording</p>
+          <p className="text-sm text-foreground leading-relaxed italic">"{transcript}"</p>
         </div>
       </div>
       <div className="flex gap-2">
         <button onClick={() => { setPhase('idle'); setTranscript(''); }}
-          className="flex items-center gap-1.5 rounded-xl border border-slate-200 px-3 py-2.5 text-sm text-slate-600 hover:bg-slate-50 transition-colors">
+          className="flex items-center gap-1.5 rounded-xl border border-border px-3 py-2.5 text-sm text-foreground hover:bg-secondary transition-colors">
           <RotateCcw size={13} /> Re-record
         </button>
         <button onClick={build}
-          className="flex-1 flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 text-white py-2.5 text-sm hover:bg-indigo-700 transition-colors">
+          className="flex-1 flex items-center justify-center gap-1.5 rounded-xl bg-primary text-primary-foreground py-2.5 text-sm hover:bg-primary transition-colors">
           <Sparkles size={14} /> Build estimate
         </button>
       </div>
@@ -593,12 +595,12 @@ function VoiceInput({ svcType, onResult }: { svcType?: ServiceType; onResult: (r
 
   if (phase === 'generating') return (
     <div className="flex flex-col items-center gap-4 py-10">
-      <div className="flex size-12 items-center justify-center rounded-full bg-indigo-100">
-        <Sparkles size={20} className="text-indigo-600 animate-pulse" />
+      <div className="flex size-12 items-center justify-center rounded-full bg-primary/15">
+        <Sparkles size={20} className="text-primary animate-pulse" />
       </div>
       <div className="text-center">
-        <p className="text-sm text-slate-700">Building your estimate…</p>
-        <p className="text-xs text-slate-400 mt-1">Matching parts to Austin market rates</p>
+        <p className="text-sm text-foreground">Building your estimate…</p>
+        <p className="text-xs text-muted-foreground mt-1">Matching parts to Austin market rates</p>
       </div>
     </div>
   );
@@ -607,18 +609,20 @@ function VoiceInput({ svcType, onResult }: { svcType?: ServiceType; onResult: (r
 }
 
 // ─── Manual catalog build input ───────────────────────────────────────────────
+// Line-item category is a label, not a status — collapse to one neutral chip;
+// the category text itself differentiates the rows (Path A stays calm).
 const CATEGORY_COLOR: Record<string, string> = {
-  Service:     'bg-blue-100 text-blue-700',
-  Labor:       'bg-violet-100 text-violet-700',
+  Service:     'bg-secondary text-muted-foreground',
+  Labor:       'bg-secondary text-muted-foreground',
   // The live catalog API (CatalogCategory) returns plural 'Parts' / 'Materials';
   // the bundled MANUAL_CATALOG uses the singular forms. Key on both so real
-  // Price Book items don't fall through to the default gray chip.
-  Part:        'bg-amber-100 text-amber-700',
-  Parts:       'bg-amber-100 text-amber-700',
-  Material:    'bg-green-100 text-green-700',
-  Materials:   'bg-green-100 text-green-700',
-  Equipment:   'bg-slate-100 text-slate-600',
-  'Parts+Labor':'bg-indigo-100 text-indigo-700',
+  // Price Book items don't fall through to the default chip.
+  Part:        'bg-secondary text-muted-foreground',
+  Parts:       'bg-secondary text-muted-foreground',
+  Material:    'bg-secondary text-muted-foreground',
+  Materials:   'bg-secondary text-muted-foreground',
+  Equipment:   'bg-secondary text-muted-foreground',
+  'Parts+Labor':'bg-secondary text-muted-foreground',
 };
 
 // Shape of a catalog item from GET /api/catalog/items, mapped into the
@@ -719,14 +723,14 @@ function ManualBuildInput({ svcType: initialSvc, onResult }: {
 
       {/* Service type selector */}
       <div>
-        <p className="text-xs text-slate-500 mb-2">Service type</p>
+        <p className="text-xs text-muted-foreground mb-2">Service type</p>
         <div className="flex gap-2">
           {(['HVAC', 'Plumbing', 'Painting'] as ServiceType[]).map(s => (
             <button key={s} onClick={() => { setSvcType(s); setSelected([]); }}
               className={`flex-1 flex items-center justify-center gap-1.5 rounded-full border py-2 text-sm transition-all ${
                 svcType === s
                   ? `${SVC_CHIP[s]} border-current shadow-sm`
-                  : 'border-slate-200 text-slate-500 hover:border-slate-300 bg-white'
+                  : 'border-border text-muted-foreground hover:border-border bg-card'
               }`}>
               {SVC_ICON[s]} {s}
             </button>
@@ -736,10 +740,10 @@ function ManualBuildInput({ svcType: initialSvc, onResult }: {
 
       {/* Catalog list */}
       <div>
-        <p className="text-xs text-slate-500 mb-2">Tap items to add — prices pre-filled &amp; editable</p>
+        <p className="text-xs text-muted-foreground mb-2">Tap items to add — prices pre-filled &amp; editable</p>
         <div className="flex flex-col gap-1.5">
           {catalogLoading && catalog.length === 0 && (
-            <p className="text-xs text-slate-400">Loading your price book…</p>
+            <p className="text-xs text-muted-foreground">Loading your price book…</p>
           )}
           {catalog.map(item => {
             const isSel = !!selected.find(s => s.id === item.id);
@@ -747,27 +751,27 @@ function ManualBuildInput({ svcType: initialSvc, onResult }: {
               <button key={item.id} onClick={() => toggleItem(item)}
                 className={`flex items-center gap-3 rounded-xl border px-3.5 py-3 text-left transition-all ${
                   isSel
-                    ? 'border-indigo-300 bg-indigo-50 shadow-sm'
-                    : 'border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50/70'
+                    ? 'border-primary/30 bg-primary/10 shadow-sm'
+                    : 'border-border bg-card hover:border-border hover:bg-secondary'
                 }`}>
                 {/* Checkbox */}
                 <div className={`flex size-5 items-center justify-center rounded-full border-2 transition-all shrink-0 ${
-                  isSel ? 'border-indigo-500 bg-indigo-500' : 'border-slate-300'
+                  isSel ? 'border-primary bg-primary' : 'border-border'
                 }`}>
-                  {isSel && <Check size={11} className="text-white" />}
+                  {isSel && <Check size={11} className="text-primary-foreground" />}
                 </div>
                 {/* Name + category */}
                 <div className="flex-1 min-w-0">
-                  <p className={`text-sm ${isSel ? 'text-indigo-900' : 'text-slate-800'}`}>{item.name}</p>
+                  <p className={`text-sm ${isSel ? 'text-primary' : 'text-foreground'}`}>{item.name}</p>
                   <div className="flex items-center gap-2 mt-0.5">
-                    <span className={`text-xs rounded-full px-1.5 py-0.5 ${CATEGORY_COLOR[item.category] ?? 'bg-slate-100 text-slate-500'}`}>
+                    <span className={`text-xs rounded-full px-1.5 py-0.5 ${CATEGORY_COLOR[item.category] ?? 'bg-secondary text-muted-foreground'}`}>
                       {item.category}
                     </span>
-                    {item.unit && <span className="text-xs text-slate-400">{item.unit}</span>}
+                    {item.unit && <span className="text-xs text-muted-foreground">{item.unit}</span>}
                   </div>
                 </div>
                 {/* Pre-populated price */}
-                <p className={`text-sm shrink-0 ${isSel ? 'text-indigo-700' : 'text-slate-500'}`}>
+                <p className={`text-sm shrink-0 ${isSel ? 'text-primary' : 'text-muted-foreground'}`}>
                   ${item.defaultRate % 1 === 0 ? item.defaultRate.toLocaleString() : item.defaultRate.toFixed(2)}
                 </p>
               </button>
@@ -777,41 +781,41 @@ function ManualBuildInput({ svcType: initialSvc, onResult }: {
           {/* Other — custom row */}
           {!showCustom ? (
             <button onClick={() => setShowCustom(true)}
-              className="flex items-center gap-3 rounded-xl border-2 border-dashed border-slate-200 px-3.5 py-3 hover:border-indigo-300 hover:bg-indigo-50/40 transition-all">
-              <div className="flex size-5 items-center justify-center rounded-full border-2 border-slate-300 shrink-0">
-                <Plus size={10} className="text-slate-400" />
+              className="flex items-center gap-3 rounded-xl border-2 border-dashed border-border px-3.5 py-3 hover:border-primary/30 hover:bg-primary/10 transition-all">
+              <div className="flex size-5 items-center justify-center rounded-full border-2 border-border shrink-0">
+                <Plus size={10} className="text-muted-foreground" />
               </div>
-              <p className="text-sm text-slate-400">Other — add custom item</p>
+              <p className="text-sm text-muted-foreground">Other — add custom item</p>
             </button>
           ) : (
-            <div className="rounded-xl border-2 border-indigo-200 bg-indigo-50/40 p-3 flex flex-col gap-2.5"
+            <div className="rounded-xl border-2 border-primary/30 bg-primary/10 p-3 flex flex-col gap-2.5"
               style={{ animation: 'fadeUp 0.15s ease' }}>
               <input
                 autoFocus
                 value={customDraft.desc}
                 onChange={e => setCustom(d => ({ ...d, desc: e.target.value }))}
                 placeholder="Item description"
-                className="w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm focus:outline-none focus:border-indigo-400 transition-colors"
+                className="w-full rounded-xl border border-border bg-card px-3.5 py-2.5 text-sm focus:outline-none focus:border-primary transition-colors"
               />
               <div className="flex gap-2 items-center">
                 <div className="flex flex-col gap-0.5">
-                  <p className="text-xs text-slate-400 px-0.5">Qty</p>
+                  <p className="text-xs text-muted-foreground px-0.5">Qty</p>
                   <input
                     value={customDraft.qty}
                     onChange={e => setCustom(d => ({ ...d, qty: e.target.value }))}
                     type="number" min="1"
-                    className="w-14 rounded-xl border border-slate-200 bg-white px-2 py-2.5 text-sm text-center focus:outline-none focus:border-indigo-400"
+                    className="w-14 rounded-xl border border-border bg-card px-2 py-2.5 text-sm text-center focus:outline-none focus:border-primary"
                   />
                 </div>
                 <div className="flex-1 flex flex-col gap-0.5">
-                  <p className="text-xs text-slate-400 px-0.5">Unit price</p>
+                  <p className="text-xs text-muted-foreground px-0.5">Unit price</p>
                   <div className="relative">
-                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-sm">$</span>
+                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground text-sm">$</span>
                     <input
                       value={customDraft.rate}
                       onChange={e => setCustom(d => ({ ...d, rate: e.target.value }))}
                       type="number" min="0" placeholder="0.00"
-                      className="w-full rounded-xl border border-slate-200 bg-white pl-7 pr-3 py-2.5 text-sm focus:outline-none focus:border-indigo-400"
+                      className="w-full rounded-xl border border-border bg-card pl-7 pr-3 py-2.5 text-sm focus:outline-none focus:border-primary"
                     />
                   </div>
                 </div>
@@ -819,12 +823,12 @@ function ManualBuildInput({ svcType: initialSvc, onResult }: {
                   <button
                     onClick={addCustom}
                     disabled={!customDraft.desc.trim() || !customDraft.rate}
-                    className="flex items-center gap-1 rounded-xl bg-slate-900 text-white px-3.5 py-2.5 text-sm disabled:opacity-40 hover:bg-slate-700 transition-colors">
+                    className="flex items-center gap-1 rounded-xl bg-primary text-primary-foreground px-3.5 py-2.5 text-sm disabled:opacity-40 hover:bg-primary/90 transition-colors">
                     <Plus size={13} /> Add
                   </button>
                   <button onClick={() => { setShowCustom(false); setCustom({ desc: '', qty: '1', rate: '' }); }}
-                    className="flex size-10 items-center justify-center rounded-xl border border-slate-200 bg-white">
-                    <X size={14} className="text-slate-400" />
+                    className="flex size-10 items-center justify-center rounded-xl border border-border bg-card">
+                    <X size={14} className="text-muted-foreground" />
                   </button>
                 </div>
               </div>
@@ -835,55 +839,55 @@ function ManualBuildInput({ svcType: initialSvc, onResult }: {
 
       {/* Selected items cart */}
       {selected.length > 0 && (
-        <div className="rounded-2xl border border-slate-200 overflow-hidden bg-white"
+        <div className="rounded-2xl border border-border overflow-hidden bg-card"
           style={{ animation: 'fadeUp 0.2s ease' }}>
-          <div className="flex items-center justify-between px-4 py-2.5 bg-slate-50 border-b border-slate-100">
-            <p className="text-xs text-slate-500">{selected.length} item{selected.length !== 1 ? 's' : ''} — edit qty &amp; price</p>
-            <p className="text-sm text-slate-800">${total % 1 === 0 ? total.toLocaleString() : total.toFixed(2)}</p>
+          <div className="flex items-center justify-between px-4 py-2.5 bg-secondary border-b border-border">
+            <p className="text-xs text-muted-foreground">{selected.length} item{selected.length !== 1 ? 's' : ''} — edit qty &amp; price</p>
+            <p className="text-sm text-foreground">${total % 1 === 0 ? total.toLocaleString() : total.toFixed(2)}</p>
           </div>
-          <div className="divide-y divide-slate-50">
+          <div className="divide-y divide-border">
             {selected.map(item => (
               <div key={item.id} className="flex items-center gap-2 px-4 py-3">
-                <p className="flex-1 text-sm text-slate-700 truncate pr-1">{item.description}</p>
+                <p className="flex-1 text-sm text-foreground truncate pr-1">{item.description}</p>
                 {/* Qty stepper */}
                 <div className="flex items-center gap-1 shrink-0">
                   <button onClick={() => updateItem(item.id, 'qty', String(item.qty - 1))}
-                    className="flex size-7 items-center justify-center rounded-lg border border-slate-200 hover:bg-slate-100 active:scale-90 transition-all">
-                    <Minus size={10} className="text-slate-500" />
+                    className="flex size-7 items-center justify-center rounded-lg border border-border hover:bg-secondary active:scale-90 transition-all">
+                    <Minus size={10} className="text-muted-foreground" />
                   </button>
-                  <span className="w-6 text-center text-sm text-slate-700">{item.qty}</span>
+                  <span className="w-6 text-center text-sm text-foreground">{item.qty}</span>
                   <button onClick={() => updateItem(item.id, 'qty', String(item.qty + 1))}
-                    className="flex size-7 items-center justify-center rounded-lg border border-slate-200 hover:bg-slate-100 active:scale-90 transition-all">
-                    <Plus size={10} className="text-slate-500" />
+                    className="flex size-7 items-center justify-center rounded-lg border border-border hover:bg-secondary active:scale-90 transition-all">
+                    <Plus size={10} className="text-muted-foreground" />
                   </button>
                 </div>
                 {/* Price (editable) */}
                 <div className="relative w-[72px] shrink-0">
-                  <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 text-xs">$</span>
+                  <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground text-xs">$</span>
                   <input
                     value={item.rate || ''}
                     onChange={e => updateItem(item.id, 'rate', e.target.value)}
                     type="number" min="0"
-                    className="w-full rounded-lg border border-slate-200 pl-5 pr-1.5 py-1.5 text-sm text-right focus:outline-none focus:border-indigo-400 transition-colors"
+                    className="w-full rounded-lg border border-border pl-5 pr-1.5 py-1.5 text-sm text-right focus:outline-none focus:border-primary transition-colors"
                   />
                 </div>
                 <button onClick={() => setSelected(p => p.filter(s => s.id !== item.id))}
-                  className="text-slate-300 hover:text-red-400 transition-colors shrink-0">
+                  className="text-muted-foreground hover:text-destructive transition-colors shrink-0">
                   <X size={13} />
                 </button>
               </div>
             ))}
           </div>
-          <div className="flex items-center justify-between px-4 py-3 border-t border-slate-100 bg-slate-50">
-            <p className="text-xs text-slate-500">Estimated total</p>
-            <p className="text-sm text-slate-900">${total % 1 === 0 ? total.toLocaleString() : total.toFixed(2)}</p>
+          <div className="flex items-center justify-between px-4 py-3 border-t border-border bg-secondary">
+            <p className="text-xs text-muted-foreground">Estimated total</p>
+            <p className="text-sm text-foreground">${total % 1 === 0 ? total.toLocaleString() : total.toFixed(2)}</p>
           </div>
         </div>
       )}
 
       {selected.length > 0 && (
         <button onClick={build}
-          className="flex items-center justify-center gap-2 w-full rounded-xl bg-slate-900 text-white py-3.5 text-sm hover:bg-slate-700 transition-colors">
+          className="flex items-center justify-center gap-2 w-full rounded-xl bg-primary text-primary-foreground py-3.5 text-sm hover:bg-primary/90 transition-colors">
           <Check size={14} /> Review estimate · ${total % 1 === 0 ? total.toLocaleString() : total.toFixed(2)}
         </button>
       )}
@@ -896,7 +900,7 @@ function PhotoInput({ svcType, onResult }: { svcType?: ServiceType; onResult: (r
   const [phase,  setPhase]  = useState<PhotoPhase>('idle');
   const [photos, setPhotos] = useState<{ id: number; label: string }[]>([]);
   const svc    = svcType ?? 'HVAC';
-  const COLORS = ['bg-slate-700', 'bg-slate-600', 'bg-slate-800', 'bg-slate-500'];
+  const COLORS = ['bg-primary', 'bg-muted-foreground', 'bg-primary', 'bg-muted-foreground'];
 
   function add() {
     if (photos.length >= 4) return;
@@ -913,48 +917,48 @@ function PhotoInput({ svcType, onResult }: { svcType?: ServiceType; onResult: (r
 
   if (phase === 'idle' || phase === 'analyzing') return (
     <div className="flex flex-col gap-4 py-2">
-      <p className="text-sm text-slate-500">Add photos of the job site or damaged equipment. AI identifies what's needed.</p>
+      <p className="text-sm text-muted-foreground">Add photos of the job site or damaged equipment. AI identifies what's needed.</p>
       {photos.length > 0 && (
         <div className="grid grid-cols-2 gap-2">
           {photos.map((ph, i) => (
             <div key={ph.id} className={`relative rounded-xl overflow-hidden ${COLORS[i]} aspect-video flex items-center justify-center`}
               style={{ animation: 'fadeUp 0.2s ease' }}>
               <div className="flex flex-col items-center gap-1">
-                <Image size={20} className="text-white/60" />
-                <p className="text-xs text-white/60">{ph.label}</p>
+                <Image size={20} className="text-primary-foreground/60" />
+                <p className="text-xs text-primary-foreground/60">{ph.label}</p>
               </div>
               <button onClick={() => setPhotos(p => p.filter(x => x.id !== ph.id))}
                 className="absolute top-2 right-2 flex size-5 items-center justify-center rounded-full bg-black/40">
-                <X size={10} className="text-white" />
+                <X size={10} className="text-primary-foreground" />
               </button>
             </div>
           ))}
           {photos.length < 4 && (
-            <button onClick={add} className="rounded-xl border-2 border-dashed border-slate-200 aspect-video flex flex-col items-center justify-center gap-1.5 hover:border-slate-300 hover:bg-slate-50 transition-colors">
-              <Plus size={18} className="text-slate-400" />
-              <p className="text-xs text-slate-400">Add photo</p>
+            <button onClick={add} className="rounded-xl border-2 border-dashed border-border aspect-video flex flex-col items-center justify-center gap-1.5 hover:border-border hover:bg-secondary transition-colors">
+              <Plus size={18} className="text-muted-foreground" />
+              <p className="text-xs text-muted-foreground">Add photo</p>
             </button>
           )}
         </div>
       )}
       {photos.length === 0 ? (
-        <button onClick={add} className="flex flex-col items-center gap-3 rounded-2xl border-2 border-dashed border-slate-200 py-10 hover:border-slate-300 hover:bg-slate-50 transition-colors">
-          <div className="flex size-14 items-center justify-center rounded-full bg-slate-100">
-            <Camera size={24} className="text-slate-400" />
+        <button onClick={add} className="flex flex-col items-center gap-3 rounded-2xl border-2 border-dashed border-border py-10 hover:border-border hover:bg-secondary transition-colors">
+          <div className="flex size-14 items-center justify-center rounded-full bg-secondary">
+            <Camera size={24} className="text-muted-foreground" />
           </div>
           <div className="text-center">
-            <p className="text-sm text-slate-700">Take or upload a photo</p>
-            <p className="text-xs text-slate-400 mt-0.5">Up to 4 photos</p>
+            <p className="text-sm text-foreground">Take or upload a photo</p>
+            <p className="text-xs text-muted-foreground mt-0.5">Up to 4 photos</p>
           </div>
         </button>
       ) : (
         phase === 'analyzing' ? (
           <div className="flex items-center justify-center gap-2 py-4">
-            <span className="size-4 rounded-full border-2 border-indigo-200 border-t-indigo-600 animate-spin" />
-            <p className="text-sm text-slate-600">Analyzing {photos.length} photo{photos.length > 1 ? 's' : ''}…</p>
+            <span className="size-4 rounded-full border-2 border-primary/30 border-t-primary animate-spin" />
+            <p className="text-sm text-foreground">Analyzing {photos.length} photo{photos.length > 1 ? 's' : ''}…</p>
           </div>
         ) : (
-          <button onClick={analyze} className="flex items-center justify-center gap-1.5 w-full rounded-xl bg-indigo-600 text-white py-3 text-sm hover:bg-indigo-700 transition-colors">
+          <button onClick={analyze} className="flex items-center justify-center gap-1.5 w-full rounded-xl bg-primary text-primary-foreground py-3 text-sm hover:bg-primary transition-colors">
             <Sparkles size={14} /> Analyze photos &amp; build estimate
           </button>
         )
@@ -976,26 +980,26 @@ function InlineCustomerPicker({ selectedId, onSelect, customers }: {
     : customers;
 
   return (
-    <div className="rounded-xl border border-amber-200 bg-amber-50 overflow-hidden">
-      <div className="flex items-center gap-2 px-3 py-2 border-b border-amber-200 bg-amber-100/50">
-        <p className="text-xs text-amber-800">Who is this estimate for?</p>
+    <div className="rounded-xl border border-warning/30 bg-warning/10 overflow-hidden">
+      <div className="flex items-center gap-2 px-3 py-2 border-b border-warning/30 bg-warning/10">
+        <p className="text-xs text-warning">Who is this estimate for?</p>
       </div>
       <div className="px-3 py-2">
-        <div className="flex items-center gap-2 rounded-lg bg-white border border-amber-200 px-3 py-1.5 mb-2">
-          <Search size={12} className="text-amber-400 shrink-0" />
+        <div className="flex items-center gap-2 rounded-lg bg-card border border-warning/30 px-3 py-1.5 mb-2">
+          <Search size={12} className="text-warning shrink-0" />
           <input value={search} onChange={e => setSearch(e.target.value)}
             placeholder="Search…"
-            className="flex-1 bg-transparent text-sm text-slate-700 placeholder-amber-400/70 outline-none" />
+            className="flex-1 bg-transparent text-sm text-foreground placeholder-warning/70 outline-none" />
         </div>
         <div className="flex flex-wrap gap-1.5">
           {filtered.map(c => (
             <button key={c.id} onClick={() => onSelect(c.id)}
               className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1.5 text-xs transition-all ${
                 selectedId === c.id
-                  ? 'bg-slate-900 border-slate-900 text-white'
-                  : 'bg-white border-slate-200 text-slate-700 hover:border-slate-400'
+                  ? 'bg-primary border-primary text-primary-foreground'
+                  : 'bg-card border-border text-foreground hover:border-border'
               }`}>
-              <span className="size-4 flex items-center justify-center rounded-full bg-slate-100 text-slate-600" style={{ fontSize: 9 }}>
+              <span className="size-4 flex items-center justify-center rounded-full bg-secondary text-foreground" style={{ fontSize: 9 }}>
                 {c.name[0]}
               </span>
               {c.name.split(' ')[0]}
@@ -1117,15 +1121,15 @@ export function NewEstimateFlow({ onClose, onCreated, preSelectedCustomerId }: {
   return (
     <div className="fixed inset-0 z-50 flex flex-col bg-black/50 md:items-center md:justify-center" onClick={onClose}>
       <div
-        className="mt-auto md:mt-0 bg-white rounded-t-3xl md:rounded-2xl w-full md:max-w-lg max-h-[94vh] overflow-hidden flex flex-col shadow-2xl"
+        className="mt-auto md:mt-0 bg-card rounded-t-3xl md:rounded-2xl w-full md:max-w-lg max-h-[94vh] overflow-hidden flex flex-col shadow-2xl"
         style={{ animation: 'sheetUp 0.28s cubic-bezier(0.32,0.72,0,1)' }}
         onClick={e => e.stopPropagation()}
       >
         {/* ── Header ── */}
-        <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100 shrink-0">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-border shrink-0">
           <div className="flex items-center gap-3">
             {step !== 'start' && (
-              <button onClick={goBack} className="text-slate-400 hover:text-slate-600 transition-colors">
+              <button onClick={goBack} className="text-muted-foreground hover:text-foreground transition-colors">
                 <ArrowLeft size={16} />
               </button>
             )}
@@ -1133,20 +1137,20 @@ export function NewEstimateFlow({ onClose, onCreated, preSelectedCustomerId }: {
               <div className="flex gap-1.5">
                 {stepOrder.map((_, i) => (
                   <div key={i} className={`rounded-full transition-all duration-200 ${
-                    i < dotIndex   ? 'w-2 h-2 bg-blue-400' :
-                    i === dotIndex ? 'w-5 h-2 bg-slate-900' : 'w-2 h-2 bg-slate-200'
+                    i < dotIndex   ? 'w-2 h-2 bg-primary' :
+                    i === dotIndex ? 'w-5 h-2 bg-primary' : 'w-2 h-2 bg-border'
                   }`} />
                 ))}
               </div>
             )}
-            <p className="text-sm text-slate-600">
+            <p className="text-sm text-foreground">
               {step === 'start'    ? `New ${estimateTerm.toLowerCase()}` :
                step === 'describe' ? 'Describe the job' :
                step === 'send'     ? `Send ${estimateTerm.toLowerCase()}` : 'Review & send'}
             </p>
           </div>
-          <button onClick={onClose} className="flex size-7 items-center justify-center rounded-full hover:bg-slate-100 transition-colors">
-            <X size={15} className="text-slate-500" />
+          <button onClick={onClose} className="flex size-7 items-center justify-center rounded-full hover:bg-secondary transition-colors">
+            <X size={15} className="text-muted-foreground" />
           </button>
         </div>
 
@@ -1158,29 +1162,29 @@ export function NewEstimateFlow({ onClose, onCreated, preSelectedCustomerId }: {
             <div className="p-5 flex flex-col gap-3">
               {/* Customer chip if pre-selected */}
               {preSelectedCustomerId && customer && (
-                <div className="flex items-center gap-2.5 rounded-xl bg-green-50 border border-green-200 px-3.5 py-2.5 mb-1">
-                  <div className="flex size-7 items-center justify-center rounded-full bg-green-100 shrink-0">
-                    <Check size={12} className="text-green-600" />
+                <div className="flex items-center gap-2.5 rounded-xl bg-success/10 border border-success/30 px-3.5 py-2.5 mb-1">
+                  <div className="flex size-7 items-center justify-center rounded-full bg-success/15 shrink-0">
+                    <Check size={12} className="text-success" />
                   </div>
                   <div className="flex-1 min-w-0">
-                    <p className="text-sm text-slate-800">{customer.name}</p>
-                    <p className="text-xs text-slate-400 truncate">{address || customer.address}</p>
+                    <p className="text-sm text-foreground">{customer.name}</p>
+                    <p className="text-xs text-muted-foreground truncate">{address || customer.address}</p>
                   </div>
                 </div>
               )}
 
-              <p className="text-sm text-slate-500 mb-1">How would you like to build this {estimateTerm.toLowerCase()}?</p>
+              <p className="text-sm text-muted-foreground mb-1">How would you like to build this {estimateTerm.toLowerCase()}?</p>
 
               {/* Speak it */}
               <button
                 onClick={() => { setStartMode('voice'); setInputMode('voice'); setStep('describe'); }}
-                className="flex items-start gap-4 rounded-2xl border-2 border-slate-200 bg-white px-5 py-4 text-left hover:border-indigo-300 hover:shadow-sm active:bg-slate-50 transition-all group">
-                <div className="flex size-11 items-center justify-center rounded-2xl bg-slate-900 shrink-0 group-hover:bg-indigo-600 transition-colors">
-                  <Mic size={20} className="text-white" />
+                className="flex items-start gap-4 rounded-2xl border-2 border-border bg-card px-5 py-4 text-left hover:border-primary/30 hover:shadow-sm active:bg-secondary transition-all group">
+                <div className="flex size-11 items-center justify-center rounded-2xl bg-primary shrink-0 group-hover:bg-primary transition-colors">
+                  <Mic size={20} className="text-primary-foreground" />
                 </div>
                 <div>
-                  <p className="text-slate-900">Speak it</p>
-                  <p className="text-xs text-slate-400 mt-1 leading-relaxed">
+                  <p className="text-foreground">Speak it</p>
+                  <p className="text-xs text-muted-foreground mt-1 leading-relaxed">
                     Describe the job out loud — AI builds the estimate from your voice. Fastest for the field.
                   </p>
                 </div>
@@ -1189,13 +1193,13 @@ export function NewEstimateFlow({ onClose, onCreated, preSelectedCustomerId }: {
               {/* Start new (manual catalog) */}
               <button
                 onClick={() => { setStartMode('manual'); setInputMode('manual'); setStep('describe'); }}
-                className="flex items-start gap-4 rounded-2xl border-2 border-slate-200 bg-white px-5 py-4 text-left hover:border-blue-300 hover:shadow-sm active:bg-slate-50 transition-all group">
-                <div className="flex size-11 items-center justify-center rounded-2xl bg-slate-100 shrink-0 group-hover:bg-blue-50 transition-colors">
-                  <ListChecks size={20} className="text-slate-600 group-hover:text-blue-600 transition-colors" />
+                className="flex items-start gap-4 rounded-2xl border-2 border-border bg-card px-5 py-4 text-left hover:border-primary/30 hover:shadow-sm active:bg-secondary transition-all group">
+                <div className="flex size-11 items-center justify-center rounded-2xl bg-secondary shrink-0 group-hover:bg-primary/10 transition-colors">
+                  <ListChecks size={20} className="text-foreground group-hover:text-primary transition-colors" />
                 </div>
                 <div>
-                  <p className="text-slate-900">Start new</p>
-                  <p className="text-xs text-slate-400 mt-1 leading-relaxed">
+                  <p className="text-foreground">Start new</p>
+                  <p className="text-xs text-muted-foreground mt-1 leading-relaxed">
                     Pick items from your catalog — costs are pre-filled and fully editable. Add custom items too.
                   </p>
                 </div>
@@ -1209,17 +1213,17 @@ export function NewEstimateFlow({ onClose, onCreated, preSelectedCustomerId }: {
 
               {/* Customer chip / inline picker */}
               {customer ? (
-                <div className="flex items-center gap-2.5 mx-5 mt-4 rounded-xl bg-slate-50 border border-slate-200 px-3.5 py-2.5">
-                  <span className="flex size-7 items-center justify-center rounded-full bg-slate-200 text-xs text-slate-600 shrink-0">
+                <div className="flex items-center gap-2.5 mx-5 mt-4 rounded-xl bg-secondary border border-border px-3.5 py-2.5">
+                  <span className="flex size-7 items-center justify-center rounded-full bg-border text-xs text-foreground shrink-0">
                     {customer.name.split(' ').map(n => n[0]).join('')}
                   </span>
                   <div className="flex-1 min-w-0">
-                    <p className="text-sm text-slate-800">{customer.name}</p>
-                    <p className="text-xs text-slate-400 truncate">{address}</p>
+                    <p className="text-sm text-foreground">{customer.name}</p>
+                    <p className="text-xs text-muted-foreground truncate">{address}</p>
                   </div>
                   {!preSelectedCustomerId && (
                     <button onClick={() => { setCustId(null); setLocId(null); }}
-                      className="text-xs text-blue-600 hover:underline shrink-0">Change</button>
+                      className="text-xs text-primary hover:underline shrink-0">Change</button>
                   )}
                 </div>
               ) : (
@@ -1234,14 +1238,14 @@ export function NewEstimateFlow({ onClose, onCreated, preSelectedCustomerId }: {
               {/* Multi-location picker */}
               {customerId && multiLoc && !locationId && (
                 <div className="mx-5 mt-3 flex flex-col gap-2">
-                  <p className="text-xs text-slate-500">Select service location</p>
+                  <p className="text-xs text-muted-foreground">Select service location</p>
                   {customer?.locations.map(loc => (
                     <button key={loc.id} onClick={() => setLocId(loc.id)}
-                      className="flex items-center gap-3 rounded-xl px-4 py-3 text-left border border-slate-200 bg-white hover:border-blue-300 hover:bg-blue-50 transition-all">
-                      <MapPin size={14} className="text-slate-400 shrink-0" />
+                      className="flex items-center gap-3 rounded-xl px-4 py-3 text-left border border-border bg-card hover:border-primary/30 hover:bg-primary/10 transition-all">
+                      <MapPin size={14} className="text-muted-foreground shrink-0" />
                       <div className="flex-1 min-w-0">
-                        <p className="text-sm text-slate-800">{loc.nickname}</p>
-                        <p className="text-xs text-slate-400 mt-0.5 truncate">{loc.address}</p>
+                        <p className="text-sm text-foreground">{loc.nickname}</p>
+                        <p className="text-xs text-muted-foreground mt-0.5 truncate">{loc.address}</p>
                       </div>
                     </button>
                   ))}
@@ -1249,11 +1253,11 @@ export function NewEstimateFlow({ onClose, onCreated, preSelectedCustomerId }: {
               )}
 
               {/* Mode tabs */}
-              <div className="flex mx-5 mt-3 rounded-xl bg-slate-100 p-1 gap-1">
+              <div className="flex mx-5 mt-3 rounded-xl bg-secondary p-1 gap-1">
                 {MODE_TABS.map(({ key, icon: Icon, label }) => (
                   <button key={key} onClick={() => switchMode(key)}
                     className={`flex-1 flex items-center justify-center gap-1.5 rounded-lg py-2 text-sm transition-all ${
-                      inputMode === key ? 'bg-white shadow-sm text-slate-900' : 'text-slate-500 hover:text-slate-700'
+                      inputMode === key ? 'bg-card shadow-sm text-foreground' : 'text-muted-foreground hover:text-foreground'
                     }`}>
                     <Icon size={14} /> {label}
                   </button>
@@ -1284,7 +1288,7 @@ export function NewEstimateFlow({ onClose, onCreated, preSelectedCustomerId }: {
                       onUpdateItems={items => setAiResult(r => r ? { ...r, items } : r)}
                     />
                     <button onClick={() => { setAiResult(null); setEditMode(false); }}
-                      className="flex items-center justify-center gap-1.5 text-xs text-slate-400 hover:text-slate-600 transition-colors py-1">
+                      className="flex items-center justify-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors py-1">
                       <RotateCcw size={11} /> Start over
                     </button>
                   </div>
@@ -1296,70 +1300,70 @@ export function NewEstimateFlow({ onClose, onCreated, preSelectedCustomerId }: {
           {/* ── Review step ── */}
           {step === 'review' && (
             <div className="p-5 flex flex-col gap-4">
-              <div className="rounded-2xl border border-slate-200 overflow-hidden">
-                <div className="bg-slate-900 px-5 py-4">
+              <div className="rounded-2xl border border-border overflow-hidden">
+                <div className="bg-primary px-5 py-4">
                   <div className="flex items-center justify-between mb-2">
                     <div className="flex items-center gap-2">
-                      <div className="size-6 rounded-lg bg-white/10 flex items-center justify-center">
-                        <span className="text-white" style={{ fontSize: 11 }}>F</span>
+                      <div className="size-6 rounded-lg bg-card/10 flex items-center justify-center">
+                        <span className="text-primary-foreground" style={{ fontSize: 11 }}>F</span>
                       </div>
-                      <p className="text-sm text-white">Rivet Pro</p>
+                      <p className="text-sm text-primary-foreground">Rivet Pro</p>
                     </div>
-                    <span className="text-xs text-slate-400">{estNum}</span>
+                    <span className="text-xs text-muted-foreground">{estNum}</span>
                   </div>
-                  <p className="text-xs text-slate-400 mb-1">{aiResult?.description}</p>
-                  <p className="text-2xl text-white">${total.toLocaleString()}</p>
+                  <p className="text-xs text-muted-foreground mb-1">{aiResult?.description}</p>
+                  <p className="text-2xl text-primary-foreground">${total.toLocaleString()}</p>
                 </div>
-                <div className="px-5 py-3 bg-white flex justify-between items-start">
+                <div className="px-5 py-3 bg-card flex justify-between items-start">
                   <div>
-                    <p className="text-xs text-slate-400">Prepared for</p>
-                    <p className="text-sm text-slate-800 mt-0.5">{customer?.name ?? '—'}</p>
-                    <p className="text-xs text-slate-400 mt-0.5 truncate max-w-[200px]">{address}</p>
+                    <p className="text-xs text-muted-foreground">Prepared for</p>
+                    <p className="text-sm text-foreground mt-0.5">{customer?.name ?? '—'}</p>
+                    <p className="text-xs text-muted-foreground mt-0.5 truncate max-w-[200px]">{address}</p>
                   </div>
                   <div className="text-right shrink-0">
-                    <p className="text-xs text-slate-400">Items</p>
-                    <p className="text-sm text-slate-800 mt-0.5">{lineItems.length}</p>
+                    <p className="text-xs text-muted-foreground">Items</p>
+                    <p className="text-sm text-foreground mt-0.5">{lineItems.length}</p>
                   </div>
                 </div>
-                <div className="divide-y divide-slate-50 border-t border-slate-100">
+                <div className="divide-y divide-border border-t border-border">
                   {lineItems.map((item, i) => (
                     <div key={i} className="flex items-center justify-between px-5 py-2">
-                      <p className="text-xs text-slate-600 flex-1 truncate pr-3">{item.description}</p>
-                      <p className="text-xs text-slate-800 shrink-0">
-                        {item.qty > 1 && <span className="text-slate-400">{item.qty}× </span>}
+                      <p className="text-xs text-foreground flex-1 truncate pr-3">{item.description}</p>
+                      <p className="text-xs text-foreground shrink-0">
+                        {item.qty > 1 && <span className="text-muted-foreground">{item.qty}× </span>}
                         ${(item.qty * item.rate).toLocaleString()}
                       </p>
                     </div>
                   ))}
                 </div>
-                <div className="flex items-center justify-between px-5 py-3 bg-slate-50 border-t border-slate-100">
-                  <p className="text-sm text-slate-600">Total</p>
-                  <p className="text-sm text-slate-900">${total.toLocaleString()}</p>
+                <div className="flex items-center justify-between px-5 py-3 bg-secondary border-t border-border">
+                  <p className="text-sm text-foreground">Total</p>
+                  <p className="text-sm text-foreground">${total.toLocaleString()}</p>
                 </div>
               </div>
 
               <div>
-                <label className="block text-xs text-slate-500 mb-1.5">Valid until</label>
+                <label className="block text-xs text-muted-foreground mb-1.5">Valid until</label>
                 <input value={validUntil} onChange={e => setValidUntil(e.target.value)}
-                  className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm focus:outline-none focus:border-blue-400 transition-colors" />
+                  className="w-full rounded-xl border border-border px-4 py-3 text-sm focus:outline-none focus:border-primary transition-colors" />
               </div>
 
               {savedDraft ? (
                 <div className="flex flex-col items-center py-8 gap-3" style={{ animation: 'fadeUp 0.2s ease' }}>
-                  <div className="flex size-12 items-center justify-center rounded-full bg-green-100">
-                    <Check size={20} className="text-green-600" />
+                  <div className="flex size-12 items-center justify-center rounded-full bg-success/15">
+                    <Check size={20} className="text-success" />
                   </div>
-                  <p className="text-slate-800">Draft saved</p>
-                  <p className="text-xs text-slate-400">{estNum} · {customer?.name}</p>
+                  <p className="text-foreground">Draft saved</p>
+                  <p className="text-xs text-muted-foreground">{estNum} · {customer?.name}</p>
                 </div>
               ) : (
                 <div className="flex flex-col gap-2">
                   <button onClick={() => setStep('send')}
-                    className="flex items-center justify-center gap-2 w-full rounded-xl bg-slate-900 text-white py-3.5 text-sm hover:bg-slate-700 transition-colors">
+                    className="flex items-center justify-center gap-2 w-full rounded-xl bg-primary text-primary-foreground py-3.5 text-sm hover:bg-primary/90 transition-colors">
                     <Send size={14} /> Send to customer
                   </button>
                   <button onClick={saveAsDraft}
-                    className="w-full rounded-xl border border-slate-200 py-3 text-sm text-slate-600 hover:bg-slate-50 transition-colors">
+                    className="w-full rounded-xl border border-border py-3 text-sm text-foreground hover:bg-secondary transition-colors">
                     Save as draft
                   </button>
                 </div>
@@ -1371,11 +1375,11 @@ export function NewEstimateFlow({ onClose, onCreated, preSelectedCustomerId }: {
           {step === 'send' && (
             <div className="p-5 flex flex-col gap-4">
               {/* Channel picker */}
-              <div className="flex rounded-xl bg-slate-100 p-1 gap-1">
+              <div className="flex rounded-xl bg-secondary p-1 gap-1">
                 {([{ key: 'sms', icon: Phone, label: 'Text' }, { key: 'email', icon: Mail, label: 'Email' }] as const).map(({ key, icon: Icon, label }) => (
                   <button key={key} onClick={() => setChannel(key)}
                     className={`flex-1 flex items-center justify-center gap-1.5 rounded-lg py-2 text-sm transition-all ${
-                      channel === key ? 'bg-white shadow-sm text-slate-900' : 'text-slate-500 hover:text-slate-700'
+                      channel === key ? 'bg-card shadow-sm text-foreground' : 'text-muted-foreground hover:text-foreground'
                     }`}>
                     <Icon size={14} /> {label}
                   </button>
@@ -1383,26 +1387,26 @@ export function NewEstimateFlow({ onClose, onCreated, preSelectedCustomerId }: {
               </div>
 
               {/* Preview */}
-              <div className="rounded-xl bg-slate-50 border border-slate-200 px-4 py-3">
-                <p className="text-xs text-slate-400 mb-1">{channel === 'sms' ? `To: ${customer?.phone ?? '—'}` : `To: ${customer?.email ?? '—'}`}</p>
-                <pre className="text-sm text-slate-700 whitespace-pre-wrap leading-relaxed font-sans">
+              <div className="rounded-xl bg-secondary border border-border px-4 py-3">
+                <p className="text-xs text-muted-foreground mb-1">{channel === 'sms' ? `To: ${customer?.phone ?? '—'}` : `To: ${customer?.email ?? '—'}`}</p>
+                <pre className="text-sm text-foreground whitespace-pre-wrap leading-relaxed font-sans">
                   {channel === 'sms' ? smsMsg : emailMsg}
                 </pre>
               </div>
 
               {sent ? (
                 <div className="flex flex-col items-center py-6 gap-3" style={{ animation: 'fadeUp 0.2s ease' }}>
-                  <div className="flex size-12 items-center justify-center rounded-full bg-green-100">
-                    <Check size={20} className="text-green-600" />
+                  <div className="flex size-12 items-center justify-center rounded-full bg-success/15">
+                    <Check size={20} className="text-success" />
                   </div>
-                  <p className="text-slate-800">{estimateTerm} sent!</p>
-                  <p className="text-xs text-slate-400">{estNum} · {customer?.name}</p>
+                  <p className="text-foreground">{estimateTerm} sent!</p>
+                  <p className="text-xs text-muted-foreground">{estNum} · {customer?.name}</p>
                 </div>
               ) : (
                 <button onClick={handleSend} disabled={sending}
-                  className="flex items-center justify-center gap-2 w-full rounded-xl bg-slate-900 text-white py-3.5 text-sm disabled:opacity-70 hover:bg-slate-700 transition-colors">
+                  className="flex items-center justify-center gap-2 w-full rounded-xl bg-primary text-primary-foreground py-3.5 text-sm disabled:opacity-70 hover:bg-primary/90 transition-colors">
                   {sending
-                    ? <><span className="size-4 rounded-full border-2 border-white/30 border-t-white animate-spin" /> Sending…</>
+                    ? <><span className="size-4 rounded-full border-2 border-primary-foreground/30 border-t-white animate-spin" /> Sending…</>
                     : <><Send size={14} /> Send via {channel === 'sms' ? 'SMS' : 'Email'}</>
                   }
                 </button>
@@ -1414,14 +1418,14 @@ export function NewEstimateFlow({ onClose, onCreated, preSelectedCustomerId }: {
 
         {/* ── Footer CTA (describe step) ── */}
         {step === 'describe' && aiResult && (
-          <div className="shrink-0 px-5 py-4 border-t border-slate-100 bg-white">
+          <div className="shrink-0 px-5 py-4 border-t border-border bg-card">
             {!customerId ? (
-              <p className="text-xs text-slate-400 text-center pb-1">Select a customer above to continue</p>
+              <p className="text-xs text-muted-foreground text-center pb-1">Select a customer above to continue</p>
             ) : null}
             <button
               onClick={() => setStep('review')}
               disabled={!canReview}
-              className="flex items-center justify-center gap-2 w-full rounded-xl bg-slate-900 text-white py-3.5 text-sm disabled:opacity-40 hover:bg-slate-700 transition-colors">
+              className="flex items-center justify-center gap-2 w-full rounded-xl bg-primary text-primary-foreground py-3.5 text-sm disabled:opacity-40 hover:bg-primary/90 transition-colors">
               <FileText size={14} /> Review estimate →
             </button>
           </div>

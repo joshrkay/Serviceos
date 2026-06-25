@@ -53,7 +53,7 @@ export function Avatar({
       aria-label={name}
       className={cn(
         'inline-flex shrink-0 items-center justify-center overflow-hidden rounded-full font-medium',
-        !showImage && !color && 'bg-slate-100 text-slate-600',
+        !showImage && !color && 'bg-secondary text-muted-foreground',
         SIZE_CLASSES[size],
         className,
       )}

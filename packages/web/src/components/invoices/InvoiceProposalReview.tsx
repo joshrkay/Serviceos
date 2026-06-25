@@ -67,18 +67,18 @@ export interface InvoiceProposalData {
 // P2-035 (U2) — 4-tier overall-confidence chip styling sourced from
 // `meta.overallConfidence`. Mirrors AIProposalCard's CONFIDENCE_LEVEL_CONFIG.
 const CONFIDENCE_LEVEL_LABEL: Record<InvoiceConfidenceLevel, { label: string; classes: string }> = {
-  high:     { label: 'High confidence',     classes: 'bg-green-50 text-green-700 border-green-200' },
-  medium:   { label: 'Review recommended',  classes: 'bg-amber-50 text-amber-800 border-amber-200' },
-  low:      { label: 'Low confidence',      classes: 'bg-orange-50 text-orange-700 border-orange-200' },
-  very_low: { label: 'Very low confidence', classes: 'bg-red-50 text-red-700 border-red-200' },
+  high:     { label: 'High confidence',     classes: 'bg-success/10 text-success border-success/30' },
+  medium:   { label: 'Review recommended',  classes: 'bg-warning/10 text-warning border-warning/30' },
+  low:      { label: 'Low confidence',      classes: 'bg-warning/10 text-warning border-warning/30' },
+  very_low: { label: 'Very low confidence', classes: 'bg-destructive/10 text-destructive border-destructive/30' },
 };
 
 // P2-035 (U2) — per-line catalog-grounding badge styling. 'manual' is
 // operator-entered, so it carries no badge (not a key here).
 const PRICING_SOURCE_BADGE: Record<'catalog' | 'ambiguous' | 'uncatalogued', { label: string; classes: string }> = {
-  catalog:      { label: 'From catalog',  classes: 'bg-green-50 text-green-700 border-green-200' },
-  ambiguous:    { label: 'Needs a pick',  classes: 'bg-amber-50 text-amber-800 border-amber-200' },
-  uncatalogued: { label: 'AI-estimated',  classes: 'bg-orange-50 text-orange-700 border-orange-200' },
+  catalog:      { label: 'From catalog',  classes: 'bg-success/10 text-success border-success/30' },
+  ambiguous:    { label: 'Needs a pick',  classes: 'bg-warning/10 text-warning border-warning/30' },
+  uncatalogued: { label: 'AI-estimated',  classes: 'bg-warning/10 text-warning border-warning/30' },
 };
 
 export interface InvoiceProposalReviewProps {
@@ -132,13 +132,13 @@ export function InvoiceProposalReview({
           ambiguous catalog match) so the operator knows what to check. */}
       {proposal.meta?.markers && proposal.meta.markers.length > 0 && (
         <div
-          className="confidence-markers mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2"
+          className="confidence-markers mt-2 rounded-lg border border-warning/30 bg-warning/10 px-3 py-2"
           data-testid="confidence-markers"
         >
-          <p className="text-xs font-medium text-amber-900">What I wasn’t sure about</p>
+          <p className="text-xs font-medium text-warning">What I wasn’t sure about</p>
           <ul className="mt-1 flex flex-col gap-1">
             {proposal.meta.markers.map((m, i) => (
-              <li key={`${m.path}-${i}`} className="text-xs text-amber-800">
+              <li key={`${m.path}-${i}`} className="text-xs text-warning">
                 {m.reason}
               </li>
             ))}

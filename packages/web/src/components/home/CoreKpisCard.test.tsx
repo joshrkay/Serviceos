@@ -52,7 +52,7 @@ describe('CoreKpisCard', () => {
     expect(await screen.findByText('$12,500.00')).toBeInTheDocument();
     const trend = screen.getByTestId('kpi-revenue-trend');
     expect(trend).toHaveTextContent('+25% vs last month');
-    expect(trend.className).toContain('text-green-600');
+    expect(trend.className).toContain('text-success');
     expect(screen.getByText('$3,200.00')).toBeInTheDocument();
     expect(screen.getByText('$800.00 overdue')).toBeInTheDocument();
   });
@@ -62,7 +62,7 @@ describe('CoreKpisCard', () => {
     render(<CoreKpisCard />);
     const trend = await screen.findByTestId('kpi-revenue-trend');
     expect(trend).toHaveTextContent('-20% vs last month');
-    expect(trend.className).toContain('text-red-600');
+    expect(trend.className).toContain('text-destructive');
   });
 
   it('falls back to a neutral label with no prior-month baseline', async () => {

@@ -102,8 +102,8 @@ export function MergeCustomerPanel({
 
   return (
     <div className="flex flex-col gap-3" data-testid="merge-customer-panel">
-      <p className="text-sm text-slate-500">
-        Find a duplicate to fold into <span className="text-slate-700">{survivingName}</span>.
+      <p className="text-sm text-muted-foreground">
+        Find a duplicate to fold into <span className="text-foreground">{survivingName}</span>.
         Their jobs, invoices and conversations move here, and the duplicate is
         archived.
       </p>
@@ -122,26 +122,26 @@ export function MergeCustomerPanel({
       </form>
 
       {error && (
-        <p role="alert" className="text-sm text-red-600">
+        <p role="alert" className="text-sm text-destructive">
           {error}
         </p>
       )}
 
       {searched && results.length === 0 && !searching && (
-        <p className="text-sm text-slate-400">No other matching customers.</p>
+        <p className="text-sm text-muted-foreground">No other matching customers.</p>
       )}
 
       <div className="flex flex-col gap-2">
         {results.map((c) => (
           <div
             key={c.id}
-            className="rounded-xl border border-slate-200 p-3"
+            className="rounded-xl border border-border p-3"
             data-testid={`merge-candidate-${c.id}`}
           >
             <div className="flex items-center gap-3">
               <div className="flex-1 min-w-0">
-                <p className="text-sm text-slate-900">{candidateName(c)}</p>
-                <p className="text-xs text-slate-400 truncate">
+                <p className="text-sm text-foreground">{candidateName(c)}</p>
+                <p className="text-xs text-muted-foreground truncate">
                   {c.primaryPhone || c.email || '—'}
                 </p>
               </div>
@@ -157,10 +157,10 @@ export function MergeCustomerPanel({
             </div>
 
             {confirmId === c.id && (
-              <div className="mt-3 flex flex-col gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3">
+              <div className="mt-3 flex flex-col gap-2 rounded-lg border border-warning/30 bg-warning/10 p-3">
                 <div className="flex items-start gap-2">
-                  <AlertTriangle size={14} className="mt-0.5 shrink-0 text-amber-600" />
-                  <p className="text-xs text-amber-800">
+                  <AlertTriangle size={14} className="mt-0.5 shrink-0 text-warning" />
+                  <p className="text-xs text-warning">
                     Move all history from <strong>{candidateName(c)}</strong> into{' '}
                     <strong>{survivingName}</strong> and archive {candidateName(c)}? The
                     duplicate is archived, not deleted.

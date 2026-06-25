@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Search, Plus, Minus, Trash2, X, Check, Package } from 'lucide-react';
 import { SheetOverlay } from './JobSheets';
+import { Input } from '../ui';
 import type { MaterialItem, ServiceType } from '../../data/mock-data';
 
 const CATALOG: Record<ServiceType, Omit<MaterialItem, 'id' | 'qty'>[]> = {
@@ -37,10 +38,10 @@ const CATALOG: Record<ServiceType, Omit<MaterialItem, 'id' | 'qty'>[]> = {
 };
 
 const CATEGORY_COLORS: Record<MaterialItem['category'], string> = {
-  Part:      'bg-blue-100 text-blue-700',
-  Material:  'bg-green-100 text-green-700',
-  Labor:     'bg-violet-100 text-violet-700',
-  Equipment: 'bg-amber-100 text-amber-700',
+  Part:      'bg-primary/15 text-primary',
+  Material:  'bg-success/15 text-success',
+  Labor:     'bg-primary/15 text-primary',
+  Equipment: 'bg-warning/15 text-warning',
 };
 
 interface Props {
@@ -99,28 +100,28 @@ export function MaterialsSheet({ serviceType, existing, onClose }: Props) {
     <SheetOverlay onClose={() => onClose(items)} maxH="92vh">
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-2">
-          <Package size={16} className="text-amber-500" />
-          <p className="text-sm text-slate-900">Materials & Parts</p>
+          <Package size={16} className="text-warning" />
+          <p className="text-sm text-foreground">Materials & Parts</p>
         </div>
-        <button onClick={() => onClose(items)} className="p-1.5 rounded-lg hover:bg-slate-100">
-          <X size={16} className="text-slate-400" />
+        <button onClick={() => onClose(items)} className="p-1.5 rounded-lg hover:bg-secondary">
+          <X size={16} className="text-muted-foreground" />
         </button>
       </div>
 
       {/* Search */}
-      <div className="flex items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 mb-3">
-        <Search size={14} className="text-slate-400 shrink-0" />
-        <input
+      <div className="mb-3">
+        <Input
+          leftIcon={<Search size={14} />}
           value={search}
           onChange={e => setSearch(e.target.value)}
           placeholder="Search parts catalog…"
-          className="flex-1 text-sm text-slate-700 placeholder-slate-400 outline-none bg-transparent"
+          className="min-h-11"
         />
       </div>
 
       {/* Catalog */}
       <div className="mb-4">
-        <p className="text-xs text-slate-400 mb-2">{serviceType} catalog</p>
+        <p className="text-xs text-muted-foreground mb-2">{serviceType} catalog</p>
         <div className="flex flex-col gap-1 max-h-48 overflow-y-auto pr-1">
           {filtered.map((c, i) => {
             const inCart = items.find(it => it.name === c.name);
@@ -129,21 +130,21 @@ export function MaterialsSheet({ serviceType, existing, onClose }: Props) {
                 key={i}
                 onClick={() => addFromCatalog(c)}
                 className={`flex items-center justify-between rounded-lg px-3 py-2.5 text-left transition-colors ${
-                  inCart ? 'bg-green-50 border border-green-200' : 'bg-white border border-slate-200 hover:border-slate-300 hover:bg-slate-50'
+                  inCart ? 'bg-success/10 border border-success/30' : 'bg-card border border-border hover:border-border hover:bg-secondary'
                 }`}
               >
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">
-                    <p className="text-sm text-slate-800 truncate">{c.name}</p>
+                    <p className="text-sm text-foreground truncate">{c.name}</p>
                     <span className={`text-xs rounded-full px-1.5 py-0.5 shrink-0 ${CATEGORY_COLORS[c.category]}`}>
                       {c.category}
                     </span>
                   </div>
-                  {c.partNumber && <p className="text-xs text-slate-400 mt-0.5">{c.partNumber}</p>}
+                  {c.partNumber && <p className="text-xs text-muted-foreground mt-0.5">{c.partNumber}</p>}
                 </div>
                 <div className="text-right ml-2 shrink-0">
-                  <p className="text-sm text-slate-700">${c.unitCost.toFixed(2)}</p>
-                  {inCart && <span className="text-xs text-green-600">×{inCart.qty}</span>}
+                  <p className="text-sm text-foreground">${c.unitCost.toFixed(2)}</p>
+                  {inCart && <span className="text-xs text-success">×{inCart.qty}</span>}
                 </div>
               </button>
             );
@@ -154,24 +155,24 @@ export function MaterialsSheet({ serviceType, existing, onClose }: Props) {
       {/* Current items */}
       {items.length > 0 && (
         <div className="mb-4">
-          <p className="text-xs text-slate-400 mb-2">Added to job</p>
+          <p className="text-xs text-muted-foreground mb-2">Added to job</p>
           <div className="flex flex-col gap-1.5">
             {items.map(item => (
-              <div key={item.id} className="flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2.5 bg-white">
+              <div key={item.id} className="flex items-center gap-2 rounded-lg border border-border px-3 py-2.5 bg-card">
                 <div className="flex-1 min-w-0">
-                  <p className="text-sm text-slate-800 truncate">{item.name}</p>
-                  <p className="text-xs text-slate-400">${item.unitCost.toFixed(2)} each</p>
+                  <p className="text-sm text-foreground truncate">{item.name}</p>
+                  <p className="text-xs text-muted-foreground">${item.unitCost.toFixed(2)} each</p>
                 </div>
                 <div className="flex items-center gap-1.5 shrink-0">
-                  <button onClick={() => updateQty(item.id, -1)} className="flex size-6 items-center justify-center rounded-full border border-slate-200 hover:bg-slate-100 transition-colors">
-                    <Minus size={11} className="text-slate-600" />
+                  <button onClick={() => updateQty(item.id, -1)} className="flex size-6 items-center justify-center rounded-full border border-border hover:bg-secondary transition-colors">
+                    <Minus size={11} className="text-foreground" />
                   </button>
-                  <span className="w-5 text-center text-sm text-slate-700">{item.qty}</span>
-                  <button onClick={() => updateQty(item.id, 1)} className="flex size-6 items-center justify-center rounded-full border border-slate-200 hover:bg-slate-100 transition-colors">
-                    <Plus size={11} className="text-slate-600" />
+                  <span className="w-5 text-center text-sm text-foreground">{item.qty}</span>
+                  <button onClick={() => updateQty(item.id, 1)} className="flex size-6 items-center justify-center rounded-full border border-border hover:bg-secondary transition-colors">
+                    <Plus size={11} className="text-foreground" />
                   </button>
-                  <span className="w-14 text-right text-sm text-slate-700">${(item.qty * item.unitCost).toFixed(2)}</span>
-                  <button onClick={() => removeItem(item.id)} className="ml-1 text-slate-300 hover:text-red-400 transition-colors">
+                  <span className="w-14 text-right text-sm text-foreground">${(item.qty * item.unitCost).toFixed(2)}</span>
+                  <button onClick={() => removeItem(item.id)} className="ml-1 text-muted-foreground hover:text-destructive transition-colors">
                     <Trash2 size={13} />
                   </button>
                 </div>
@@ -185,48 +186,48 @@ export function MaterialsSheet({ serviceType, existing, onClose }: Props) {
       {!showCustom ? (
         <button
           onClick={() => setCustom(true)}
-          className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-slate-700 mb-4 transition-colors"
+          className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground mb-4 transition-colors"
         >
           <Plus size={12} /> Add custom item
         </button>
       ) : (
-        <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 mb-4">
-          <p className="text-xs text-slate-500 mb-2">Custom item</p>
+        <div className="rounded-xl border border-border bg-secondary p-3 mb-4">
+          <p className="text-xs text-muted-foreground mb-2">Custom item</p>
           <div className="flex flex-col gap-2">
-            <input
+            <Input
               value={customName}
               onChange={e => setCustomName(e.target.value)}
               placeholder="Item name"
-              className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 placeholder-slate-400 outline-none focus:border-blue-400"
+              className="min-h-11"
             />
             <div className="flex gap-2">
-              <input
+              <Input
                 value={customCost}
                 onChange={e => setCustomCost(e.target.value)}
                 placeholder="Unit cost ($)"
                 type="number"
-                className="flex-1 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 placeholder-slate-400 outline-none focus:border-blue-400"
+                className="flex-1 min-h-11"
               />
-              <input
+              <Input
                 value={customQty}
                 onChange={e => setCustomQty(e.target.value)}
                 placeholder="Qty"
                 type="number"
                 min="1"
-                className="w-16 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 placeholder-slate-400 outline-none focus:border-blue-400"
+                className="w-16 min-h-11"
               />
             </div>
             <div className="flex gap-2">
               <button
                 onClick={addCustomItem}
                 disabled={!customName.trim() || !customCost}
-                className="flex-1 rounded-lg bg-slate-900 text-white text-sm py-2 hover:bg-slate-700 transition-colors disabled:opacity-40"
+                className="flex-1 rounded-lg bg-primary text-primary-foreground text-sm py-2 hover:bg-primary/90 transition-colors disabled:opacity-40"
               >
                 Add
               </button>
               <button
                 onClick={() => setCustom(false)}
-                className="px-4 rounded-lg border border-slate-200 text-sm text-slate-600 hover:bg-slate-100 transition-colors"
+                className="px-4 rounded-lg border border-border text-sm text-foreground hover:bg-secondary transition-colors"
               >
                 Cancel
               </button>
@@ -236,16 +237,16 @@ export function MaterialsSheet({ serviceType, existing, onClose }: Props) {
       )}
 
       {/* Total + confirm */}
-      <div className="rounded-xl bg-slate-900 text-white px-4 py-3.5 flex items-center justify-between">
+      <div className="rounded-xl bg-primary text-primary-foreground px-4 py-3.5 flex items-center justify-between">
         <div>
-          <p className="text-xs text-slate-400">{items.length} item{items.length !== 1 ? 's' : ''}</p>
+          <p className="text-xs text-muted-foreground">{items.length} item{items.length !== 1 ? 's' : ''}</p>
           <p className="text-sm">Materials total</p>
         </div>
         <div className="flex items-center gap-3">
           <p className="text-lg">${total.toFixed(2)}</p>
           <button
             onClick={() => onClose(items)}
-            className="flex items-center gap-1.5 rounded-lg bg-white text-slate-900 px-3 py-2 text-sm hover:bg-slate-100 transition-colors"
+            className="flex items-center gap-1.5 rounded-lg bg-card text-foreground px-3 py-2 text-sm hover:bg-secondary transition-colors"
           >
             <Check size={14} /> Save
           </button>

@@ -129,4 +129,12 @@ describe('JobDetailView', () => {
     renderPage('j1');
     expect(vi.mocked(useDetailQuery)).toHaveBeenCalledWith('/api/jobs', 'j1');
   });
+
+  // U10b — Path A class contract: the largest jobs file renders on brand tokens.
+  it('renders on Path A tokens — no raw Tailwind palette leaks', () => {
+    const { container } = renderPage();
+    expect(container.innerHTML).not.toMatch(
+      /(bg|text|border|border-l|placeholder|ring|divide)-(slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)-\d{2,3}/,
+    );
+  });
 });

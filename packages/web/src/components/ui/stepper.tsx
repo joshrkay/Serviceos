@@ -42,9 +42,9 @@ export function Stepper({ steps, current, className }: StepperProps) {
               <span
                 className={cn(
                   'flex size-6 shrink-0 items-center justify-center rounded-full text-xs font-medium',
-                  complete && 'bg-slate-900 text-white',
-                  active && 'border-2 border-slate-900 bg-white text-slate-900',
-                  !complete && !active && 'border border-slate-200 bg-white text-slate-400',
+                  complete && 'bg-primary text-primary-foreground',
+                  active && 'border-2 border-primary bg-card text-foreground',
+                  !complete && !active && 'border border-border bg-card text-muted-foreground',
                 )}
               >
                 {complete ? <Check size={14} /> : index + 1}
@@ -52,7 +52,7 @@ export function Stepper({ steps, current, className }: StepperProps) {
               <span
                 className={cn(
                   'whitespace-nowrap text-sm',
-                  active ? 'font-medium text-slate-900' : 'text-slate-500',
+                  active ? 'font-medium text-foreground' : 'text-muted-foreground',
                 )}
               >
                 {step.label}
@@ -63,7 +63,7 @@ export function Stepper({ steps, current, className }: StepperProps) {
                 aria-hidden="true"
                 className={cn(
                   'mx-3 h-px flex-1',
-                  complete ? 'bg-slate-900' : 'bg-slate-200',
+                  complete ? 'bg-primary' : 'bg-border',
                 )}
               />
             )}

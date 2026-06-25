@@ -253,4 +253,13 @@ describe('EstimatesPage', () => {
     fireEvent.click(screen.getByRole('button', { name: /add photo/i }));
     await waitFor(() => expect(screen.getByTestId('mock-capture-sheet')).toBeInTheDocument());
   });
+
+  // U8a — Path A class contract: the list renders on brand tokens only (the
+  // hint styles collapse to the semantic tones), no raw Tailwind palette leaks.
+  it('renders on Path A tokens — no raw Tailwind palette leaks', () => {
+    const { container } = renderPage();
+    expect(container.innerHTML).not.toMatch(
+      /(bg|text|border|ring|divide)-(slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)-\d{2,3}/,
+    );
+  });
 });

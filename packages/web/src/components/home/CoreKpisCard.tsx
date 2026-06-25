@@ -104,12 +104,12 @@ export function CoreKpisCard() {
       : `${up ? '+' : ''}${pct}% vs last month`;
 
   return (
-    <section data-testid="core-kpis" className="px-4 md:px-6 py-5 border-b border-slate-100">
+    <section data-testid="core-kpis" className="px-4 md:px-6 py-5 border-b border-border">
       <div className="mb-2.5 flex items-center justify-between">
-        <p className="text-sm text-slate-700">Your numbers this month</p>
+        <p className="text-sm text-foreground">Your numbers this month</p>
         <button
           onClick={() => navigate('/reports/money')}
-          className="flex items-center gap-0.5 text-xs text-blue-600 transition-colors hover:text-blue-700"
+          className="flex items-center gap-0.5 text-xs text-primary transition-colors hover:text-primary"
         >
           Money dashboard <ArrowRight size={11} />
         </button>
@@ -119,7 +119,7 @@ export function CoreKpisCard() {
         <button
           type="button"
           onClick={() => navigate('/reports/money')}
-          className="rounded-2xl text-left transition-shadow hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40"
+          className="rounded-2xl text-left transition-shadow hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
         >
           <StatCard
             className="h-full"
@@ -130,7 +130,7 @@ export function CoreKpisCard() {
               <span
                 data-testid="kpi-revenue-trend"
                 className={`flex items-center gap-1 ${
-                  flat ? 'text-slate-400' : up ? 'text-green-600' : 'text-red-600'
+                  flat ? 'text-muted-foreground' : up ? 'text-success' : 'text-destructive'
                 }`}
               >
                 <TrendIcon size={11} /> {trendText}
@@ -143,7 +143,7 @@ export function CoreKpisCard() {
           type="button"
           onClick={() => navigate('/reports/money')}
           data-testid="kpi-outstanding"
-          className="rounded-2xl text-left transition-shadow hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40"
+          className="rounded-2xl text-left transition-shadow hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
         >
           <StatCard
             className="h-full"
@@ -159,7 +159,7 @@ export function CoreKpisCard() {
             type="button"
             onClick={() => navigate('/jobs')}
             data-testid="kpi-jobs-booked"
-            className="rounded-2xl text-left transition-shadow hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40"
+            className="rounded-2xl text-left transition-shadow hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
           >
             <StatCard
               className="h-full"

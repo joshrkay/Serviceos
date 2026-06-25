@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { apiFetch } from '../../utils/api-fetch';
 import { CustomerPicker, CustomerOption } from '../forms/CustomerPicker';
+import { Input, Textarea, Select, Field, Button } from '../ui';
 
 const PRIORITIES = ['low', 'normal', 'high', 'urgent'] as const;
 
@@ -34,8 +35,6 @@ const initial: State = {
   problemDescription: '',
   priority: 'normal',
 };
-
-const inputCls = 'w-full rounded-lg border border-slate-200 px-3 py-2 text-sm';
 
 export function JobForm({ onCreated, onCancel }: JobFormProps) {
   const [form, setForm] = useState<State>(initial);
@@ -127,34 +126,34 @@ export function JobForm({ onCreated, onCancel }: JobFormProps) {
 
   return (
     <form onSubmit={handleSubmit} className="p-4 md:p-6 max-w-2xl mx-auto">
-      <h1 className="text-lg text-slate-900 mb-4">New Job</h1>
+      <h1 className="text-lg text-foreground mb-4">New Job</h1>
       {error && (
         <div
           role="alert"
-          className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700"
+          className="mb-3 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive"
         >
           {error}
         </div>
       )}
 
       <div className="grid grid-cols-1 gap-3">
-        <div>
-          <label className="text-xs text-slate-500">Customer *</label>
+        {/* Customer is a composite control, so it carries its own label
+            rather than a Field-injected id. */}
+        <div className="flex flex-col gap-1.5">
+          <label className="text-xs font-medium text-muted-foreground">Customer *</label>
           <CustomerPicker
             value={form.customer}
             onChange={(c) => setForm((p) => ({ ...p, customer: c, locationId: '' }))}
             required
           />
         </div>
-        <label className="text-xs text-slate-500">
-          Service location *
-          <select
+
+        <Field label="Service location *">
+          <Select
             value={form.locationId}
-            onChange={(e) =>
-              setForm((p) => ({ ...p, locationId: e.target.value }))
-            }
+            onChange={(e) => setForm((p) => ({ ...p, locationId: e.target.value }))}
             disabled={!form.customer || locationsLoading}
-            className={inputCls}
+            className="min-h-11"
           >
             <option value="">
               {locationsLoading ? 'Loading locations...' : 'Select a service location'}
@@ -165,30 +164,30 @@ export function JobForm({ onCreated, onCancel }: JobFormProps) {
                 {location.isPrimary ? ' (Primary)' : ''} - {location.street1}, {location.city}, {location.state} {location.postalCode}
               </option>
             ))}
-          </select>
-        </label>
-        <label className="text-xs text-slate-500">
-          Summary *
-          <input
+          </Select>
+        </Field>
+
+        <Field label="Summary *">
+          <Input
             value={form.summary}
             onChange={(e) => setForm((p) => ({ ...p, summary: e.target.value }))}
-            className={inputCls}
+            className="min-h-11"
           />
-        </label>
-        <label className="text-xs text-slate-500">
-          Problem description
-          <textarea
+        </Field>
+
+        <Field label="Problem description">
+          <Textarea
             value={form.problemDescription}
             onChange={(e) =>
               setForm((p) => ({ ...p, problemDescription: e.target.value }))
             }
             rows={4}
-            className={inputCls}
+            className="min-h-11"
           />
-        </label>
-        <label className="text-xs text-slate-500">
-          Priority
-          <select
+        </Field>
+
+        <Field label="Priority">
+          <Select
             value={form.priority}
             onChange={(e) =>
               setForm((p) => ({
@@ -196,32 +195,24 @@ export function JobForm({ onCreated, onCancel }: JobFormProps) {
                 priority: e.target.value as State['priority'],
               }))
             }
-            className={inputCls}
+            className="min-h-11"
           >
             {PRIORITIES.map((p) => (
               <option key={p} value={p}>
                 {p}
               </option>
             ))}
-          </select>
-        </label>
+          </Select>
+        </Field>
       </div>
 
       <div className="mt-4 flex gap-2">
-        <button
-          type="submit"
-          disabled={submitting}
-          className="rounded-lg bg-slate-900 text-white text-sm px-4 py-2 hover:bg-slate-800 disabled:opacity-50"
-        >
+        <Button type="submit" disabled={submitting} className="min-h-11">
           {submitting ? 'Creating...' : 'Create job'}
-        </button>
-        <button
-          type="button"
-          onClick={onCancel}
-          className="rounded-lg border border-slate-200 text-slate-700 text-sm px-4 py-2 hover:bg-slate-50"
-        >
+        </Button>
+        <Button type="button" variant="outline" onClick={onCancel} className="min-h-11">
           Cancel
-        </button>
+        </Button>
       </div>
     </form>
   );

@@ -172,9 +172,9 @@ function deriveAISuggestions(items: LineItem[]): AISuggestion[] {
 }
 
 const HINT_STYLE = {
-  ok:   { bg: 'bg-green-50  border-green-200',  icon: 'text-green-600',  dot: 'bg-green-500'  },
-  tip:  { bg: 'bg-blue-50   border-blue-200',   icon: 'text-blue-600',   dot: 'bg-blue-500'   },
-  warn: { bg: 'bg-amber-50  border-amber-200',  icon: 'text-amber-600',  dot: 'bg-amber-500'  },
+  ok:   { bg: 'bg-success/10  border-success/30',  icon: 'text-success',  dot: 'bg-success'  },
+  tip:  { bg: 'bg-primary/10   border-primary/30',   icon: 'text-primary',   dot: 'bg-primary'   },
+  warn: { bg: 'bg-warning/10  border-warning/30',  icon: 'text-warning',  dot: 'bg-warning'  },
 };
 const HINT_ICON = { ok: CheckCircle2, tip: TrendingUp, warn: AlertTriangle };
 
@@ -189,28 +189,28 @@ function ApprovalStepper({ est }: { est: EstCompat }) {
   const currentIdx = steps.reduce((last, s, i) => s.done ? i : last, 0);
 
   return (
-    <div className="rounded-xl bg-white border border-slate-200 px-4 py-4">
-      <p className="text-xs text-slate-400 mb-3">Approval tracking</p>
+    <div className="rounded-xl bg-card border border-border px-4 py-4">
+      <p className="text-xs text-muted-foreground mb-3">Approval tracking</p>
       <div className="relative flex items-start">
-        <div className="absolute top-3 left-3 right-3 h-px bg-slate-200 z-0" />
+        <div className="absolute top-3 left-3 right-3 h-px bg-border z-0" />
         <div
-          className="absolute top-3 left-3 h-px bg-blue-400 z-0 transition-all"
+          className="absolute top-3 left-3 h-px bg-primary z-0 transition-all"
           style={{ width: `${(currentIdx / (steps.length - 1)) * 100}%`, maxWidth: 'calc(100% - 24px)' }}
         />
         {steps.map((step, i) => (
           <div key={step.label} className="flex-1 flex flex-col items-center relative z-10">
             <div className={`flex size-6 items-center justify-center rounded-full border-2 transition-all ${
               step.done
-                ? 'bg-blue-600 border-blue-600'
+                ? 'bg-primary border-primary'
                 : i === currentIdx + 1
-                ? 'bg-white border-blue-400'
-                : 'bg-white border-slate-200'
+                ? 'bg-card border-primary'
+                : 'bg-card border-border'
             }`}>
-              {step.done && <Check size={12} className="text-white" />}
+              {step.done && <Check size={12} className="text-primary-foreground" />}
             </div>
-            <p className="text-xs text-slate-600 mt-1.5 text-center" style={{ fontSize: 10 }}>{step.label}</p>
+            <p className="text-xs text-foreground mt-1.5 text-center" style={{ fontSize: 10 }}>{step.label}</p>
             {step.date && (
-              <p className="text-center text-slate-400 mt-0.5" style={{ fontSize: 9 }}>{step.date}</p>
+              <p className="text-center text-muted-foreground mt-0.5" style={{ fontSize: 9 }}>{step.date}</p>
             )}
           </div>
         ))}
@@ -284,20 +284,20 @@ function AIPricingSuggestions({ estimateId, items, onLineItemAccepted }: {
     return (
       <button
         onClick={triggerSuggestions}
-        className="flex items-center gap-2 rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-3 text-sm text-indigo-700 hover:bg-indigo-100 transition-colors w-full"
+        className="flex items-center gap-2 rounded-xl border border-primary/30 bg-primary/10 px-4 py-3 text-sm text-primary hover:bg-primary/15 transition-colors w-full"
       >
-        <Sparkles size={13} className="text-indigo-500 shrink-0" />
+        <Sparkles size={13} className="text-primary shrink-0" />
         Get AI line-item suggestions
-        <span className="ml-auto text-xs text-indigo-400">~5s</span>
+        <span className="ml-auto text-xs text-primary">~5s</span>
       </button>
     );
   }
 
   if (loading) {
     return (
-      <div className="flex items-center gap-2 rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-3">
-        <Sparkles size={13} className="text-indigo-500 animate-pulse shrink-0" />
-        <p className="text-sm text-indigo-700">Analyzing line items…</p>
+      <div className="flex items-center gap-2 rounded-xl border border-primary/30 bg-primary/10 px-4 py-3">
+        <Sparkles size={13} className="text-primary animate-pulse shrink-0" />
+        <p className="text-sm text-primary">Analyzing line items…</p>
       </div>
     );
   }
@@ -305,13 +305,13 @@ function AIPricingSuggestions({ estimateId, items, onLineItemAccepted }: {
   if (!hints.length) return null;
 
   return (
-    <div className="rounded-xl border border-slate-200 bg-white overflow-hidden">
-      <div className="flex items-center gap-2 px-4 py-3 border-b border-slate-100">
-        <Sparkles size={13} className="text-indigo-500" />
-        <p className="text-sm text-slate-700">AI pricing suggestions</p>
-        <span className="ml-auto text-xs text-slate-400">{hints.length} suggestions</span>
+    <div className="rounded-xl border border-border bg-card overflow-hidden">
+      <div className="flex items-center gap-2 px-4 py-3 border-b border-border">
+        <Sparkles size={13} className="text-primary" />
+        <p className="text-sm text-foreground">AI pricing suggestions</p>
+        <span className="ml-auto text-xs text-muted-foreground">{hints.length} suggestions</span>
       </div>
-      <div className="flex flex-col divide-y divide-slate-50">
+      <div className="flex flex-col divide-y divide-border">
         {hints.map(h => {
           const style = HINT_STYLE[h.type];
           const Icon  = HINT_ICON[h.type];
@@ -322,18 +322,18 @@ function AIPricingSuggestions({ estimateId, items, onLineItemAccepted }: {
               <span className={`flex size-6 shrink-0 items-center justify-center rounded-full mt-0.5 ${style.bg.split(' ')[0]}`}>
                 <Icon size={11} className={style.icon} />
               </span>
-              <p className="flex-1 text-sm text-slate-700 leading-snug">{h.text}</p>
+              <p className="flex-1 text-sm text-foreground leading-snug">{h.text}</p>
               {h.lineItem && !isAccepted && (
                 <button
                   onClick={() => acceptSuggestion(h)}
                   disabled={isAccepting}
-                  className="shrink-0 text-xs text-green-700 bg-green-50 border border-green-200 rounded-lg px-2.5 py-1 hover:bg-green-100 transition-colors disabled:opacity-50"
+                  className="shrink-0 text-xs text-success bg-success/10 border border-success/30 rounded-lg px-2.5 py-1 hover:bg-success/15 transition-colors disabled:opacity-50"
                 >
                   {isAccepting ? '…' : `+ ${h.lineItem.description}`}
                 </button>
               )}
               {isAccepted && (
-                <span className="shrink-0 text-xs text-green-600 flex items-center gap-1">
+                <span className="shrink-0 text-xs text-success flex items-center gap-1">
                   <Check size={10} /> Added
                 </span>
               )}
@@ -368,13 +368,13 @@ function LineItemsEditor({ items, editable, onChange, onAddRow }: {
   function cancel() { setDraft(items); setEditing(false); }
 
   return (
-    <div className="rounded-xl bg-white border border-slate-200 overflow-hidden">
-      <div className="flex items-center justify-between px-4 py-3.5 border-b border-slate-100">
-        <h4 className="text-slate-700">Line items</h4>
+    <div className="rounded-xl bg-card border border-border overflow-hidden">
+      <div className="flex items-center justify-between px-4 py-3.5 border-b border-border">
+        <h4 className="text-foreground">Line items</h4>
         {editable && !editing && (
           <button
             onClick={() => setEditing(true)}
-            className="flex items-center gap-1 text-xs text-slate-500 hover:text-slate-700 border border-slate-200 rounded-lg px-2.5 py-1.5 hover:bg-slate-50 transition-colors"
+            className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground border border-border rounded-lg px-2.5 py-1.5 hover:bg-secondary transition-colors"
           >
             <Pencil size={11} /> Edit
           </button>
@@ -382,15 +382,15 @@ function LineItemsEditor({ items, editable, onChange, onAddRow }: {
       </div>
 
       {/* Column headers */}
-      <div className="grid grid-cols-[1fr_52px_80px_80px] gap-x-2 px-4 py-2 bg-slate-50 border-b border-slate-100">
-        <p className="text-xs text-slate-400">Description</p>
-        <p className="text-xs text-slate-400 text-right">Qty</p>
-        <p className="text-xs text-slate-400 text-right">Rate</p>
-        <p className="text-xs text-slate-400 text-right">Total</p>
+      <div className="grid grid-cols-[1fr_52px_80px_80px] gap-x-2 px-4 py-2 bg-secondary border-b border-border">
+        <p className="text-xs text-muted-foreground">Description</p>
+        <p className="text-xs text-muted-foreground text-right">Qty</p>
+        <p className="text-xs text-muted-foreground text-right">Rate</p>
+        <p className="text-xs text-muted-foreground text-right">Total</p>
       </div>
 
       {/* Rows */}
-      <div className="divide-y divide-slate-50">
+      <div className="divide-y divide-border">
         {(editing ? draft : items).map((item, i) => (
           <div key={i} className={`grid gap-x-2 px-4 py-2.5 items-center ${editing ? 'grid-cols-[1fr_52px_80px_80px_20px]' : 'grid-cols-[1fr_52px_80px_80px]'}`}>
             {editing ? (
@@ -398,34 +398,34 @@ function LineItemsEditor({ items, editable, onChange, onAddRow }: {
                 <input
                   value={item.description}
                   onChange={e => update(i, 'description', e.target.value)}
-                  className="text-sm text-slate-800 border border-slate-200 rounded-lg px-2 py-1.5 focus:outline-none focus:border-blue-400 w-full"
+                  className="text-sm text-foreground border border-border rounded-lg px-2 py-1.5 focus:outline-none focus:border-primary w-full"
                   placeholder="Description"
                 />
                 <input
                   value={item.qty}
                   onChange={e => update(i, 'qty', e.target.value)}
                   type="number" min="0"
-                  className="text-sm text-slate-700 border border-slate-200 rounded-lg px-2 py-1.5 text-right focus:outline-none focus:border-blue-400 w-full"
+                  className="text-sm text-foreground border border-border rounded-lg px-2 py-1.5 text-right focus:outline-none focus:border-primary w-full"
                 />
                 <input
                   value={item.rate}
                   onChange={e => update(i, 'rate', e.target.value)}
                   type="number" min="0" step="0.01"
-                  className="text-sm text-slate-700 border border-slate-200 rounded-lg px-2 py-1.5 text-right focus:outline-none focus:border-blue-400 w-full"
+                  className="text-sm text-foreground border border-border rounded-lg px-2 py-1.5 text-right focus:outline-none focus:border-primary w-full"
                 />
-                <p className="text-sm text-slate-800 text-right">${(item.qty * item.rate).toFixed(2)}</p>
-                <button onClick={() => removeRow(i)} className="text-slate-300 hover:text-red-400 transition-colors">
+                <p className="text-sm text-foreground text-right">${(item.qty * item.rate).toFixed(2)}</p>
+                <button onClick={() => removeRow(i)} className="text-muted-foreground hover:text-destructive transition-colors">
                   <Trash2 size={13} />
                 </button>
               </>
             ) : (
               <>
                 <div className="min-w-0">
-                  <p className="text-sm text-slate-800 truncate">{item.description}</p>
+                  <p className="text-sm text-foreground truncate">{item.description}</p>
                 </div>
-                <p className="text-sm text-slate-500 text-right">{item.qty}</p>
-                <p className="text-sm text-slate-500 text-right">${item.rate.toLocaleString()}</p>
-                <p className="text-sm text-slate-800 text-right">${(item.qty * item.rate).toLocaleString()}</p>
+                <p className="text-sm text-muted-foreground text-right">{item.qty}</p>
+                <p className="text-sm text-muted-foreground text-right">${item.rate.toLocaleString()}</p>
+                <p className="text-sm text-foreground text-right">${(item.qty * item.rate).toLocaleString()}</p>
               </>
             )}
           </div>
@@ -436,30 +436,30 @@ function LineItemsEditor({ items, editable, onChange, onAddRow }: {
       {editing && (
         <button
           onClick={addRow}
-          className="flex items-center gap-1.5 px-4 py-2.5 text-xs text-blue-600 hover:text-blue-700 hover:bg-blue-50/50 w-full transition-colors border-t border-slate-50"
+          className="flex items-center gap-1.5 px-4 py-2.5 text-xs text-primary hover:text-primary hover:bg-primary/10 w-full transition-colors border-t border-border"
         >
           <Plus size={11} /> Add line item
         </button>
       )}
 
       {/* Totals */}
-      <div className="px-4 py-3.5 border-t border-slate-100 bg-slate-50 flex items-center justify-between">
-        <p className="text-sm text-slate-600">Total</p>
-        <p className="text-sm text-slate-900">${(editing ? draftTotal : total).toLocaleString()}</p>
+      <div className="px-4 py-3.5 border-t border-border bg-secondary flex items-center justify-between">
+        <p className="text-sm text-foreground">Total</p>
+        <p className="text-sm text-foreground">${(editing ? draftTotal : total).toLocaleString()}</p>
       </div>
 
       {/* Edit actions */}
       {editing && (
-        <div className="flex gap-2 px-4 py-3 border-t border-slate-100 bg-white">
+        <div className="flex gap-2 px-4 py-3 border-t border-border bg-card">
           <button
             onClick={save}
-            className="flex-1 flex items-center justify-center gap-1.5 rounded-lg bg-slate-900 text-white py-2 text-sm hover:bg-slate-700 transition-colors"
+            className="flex-1 flex items-center justify-center gap-1.5 rounded-lg bg-primary text-primary-foreground py-2 text-sm hover:bg-primary/90 transition-colors"
           >
             <Check size={13} /> Save changes
           </button>
           <button
             onClick={cancel}
-            className="flex items-center justify-center gap-1.5 rounded-lg border border-slate-200 px-4 py-2 text-sm text-slate-600 hover:bg-slate-50 transition-colors"
+            className="flex items-center justify-center gap-1.5 rounded-lg border border-border px-4 py-2 text-sm text-foreground hover:bg-secondary transition-colors"
           >
             Cancel
           </button>
@@ -481,14 +481,14 @@ function EstimateDocPreview({ est, lineItems, onClose }: {
   return (
     <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-end md:items-center justify-center p-4" onClick={onClose}>
       <div
-        className="bg-white rounded-2xl w-full max-w-md max-h-[92vh] overflow-y-auto shadow-2xl"
+        className="bg-card rounded-2xl w-full max-w-md max-h-[92vh] overflow-y-auto shadow-2xl"
         onClick={e => e.stopPropagation()}
       >
         {/* Modal header */}
-        <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-border">
           <div>
-            <p className="text-sm text-slate-700">Customer preview</p>
-            <p className="text-xs text-slate-400">What {est.customer.split(' ')[0]} sees when they open the link</p>
+            <p className="text-sm text-foreground">Customer preview</p>
+            <p className="text-xs text-muted-foreground">What {est.customer.split(' ')[0]} sees when they open the link</p>
           </div>
           <div className="flex items-center gap-1">
             <button
@@ -502,12 +502,12 @@ function EstimateDocPreview({ est, lineItems, onClose }: {
                 documentLabel: estimateTerm,
                 lineItems: lineItems.map((i) => ({ description: i.description, qty: i.qty, rate: i.rate })),
               })}
-              className="flex items-center gap-1.5 rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs text-slate-600 hover:bg-slate-50 transition-colors"
+              className="flex items-center gap-1.5 rounded-lg border border-border px-2.5 py-1.5 text-xs text-foreground hover:bg-secondary transition-colors"
             >
               <Download size={12} /> PDF
             </button>
-            <button onClick={onClose} className="flex size-7 items-center justify-center rounded-full hover:bg-slate-100 transition-colors">
-              <X size={15} className="text-slate-500" />
+            <button onClick={onClose} className="flex size-7 items-center justify-center rounded-full hover:bg-secondary transition-colors">
+              <X size={15} className="text-muted-foreground" />
             </button>
           </div>
         </div>
@@ -518,64 +518,64 @@ function EstimateDocPreview({ est, lineItems, onClose }: {
           <div className="flex items-start justify-between mb-6">
             <div>
               <div className="flex items-center gap-2 mb-1">
-                <div className="flex size-8 items-center justify-center rounded-lg bg-slate-900 text-white" style={{ fontSize: 12 }}>F</div>
-                <p className="text-sm text-slate-900">Rivet Pro Services</p>
+                <div className="flex size-8 items-center justify-center rounded-lg bg-primary text-primary-foreground" style={{ fontSize: 12 }}>F</div>
+                <p className="text-sm text-foreground">Rivet Pro Services</p>
               </div>
-              <p className="text-xs text-slate-400">Austin, TX · (512) 555-0000</p>
+              <p className="text-xs text-muted-foreground">Austin, TX · (512) 555-0000</p>
             </div>
             <div className="text-right">
-              <p className="text-xs text-slate-400">{estimateTerm}</p>
-              <p className="text-sm text-slate-900">{est.estimateNumber}</p>
-              {est.validUntil && <p className="text-xs text-slate-400 mt-0.5">Valid until {est.validUntil}</p>}
+              <p className="text-xs text-muted-foreground">{estimateTerm}</p>
+              <p className="text-sm text-foreground">{est.estimateNumber}</p>
+              {est.validUntil && <p className="text-xs text-muted-foreground mt-0.5">Valid until {est.validUntil}</p>}
             </div>
           </div>
 
           {/* Bill to */}
           <div className="mb-5">
-            <p className="text-xs text-slate-400 mb-1">Prepared for</p>
-            <p className="text-sm text-slate-900">{est.customer}</p>
+            <p className="text-xs text-muted-foreground mb-1">Prepared for</p>
+            <p className="text-sm text-foreground">{est.customer}</p>
           </div>
 
-          <p className="text-xs text-slate-600 mb-4 italic">{est.description}</p>
+          <p className="text-xs text-foreground mb-4 italic">{est.description}</p>
 
           {/* Line items table */}
-          <div className="rounded-xl border border-slate-100 overflow-hidden mb-4">
-            <div className="grid grid-cols-[1fr_32px_72px_72px] gap-x-2 px-3 py-2 bg-slate-50">
-              <p className="text-xs text-slate-400">Description</p>
-              <p className="text-xs text-slate-400 text-right">Qty</p>
-              <p className="text-xs text-slate-400 text-right">Rate</p>
-              <p className="text-xs text-slate-400 text-right">Total</p>
+          <div className="rounded-xl border border-border overflow-hidden mb-4">
+            <div className="grid grid-cols-[1fr_32px_72px_72px] gap-x-2 px-3 py-2 bg-secondary">
+              <p className="text-xs text-muted-foreground">Description</p>
+              <p className="text-xs text-muted-foreground text-right">Qty</p>
+              <p className="text-xs text-muted-foreground text-right">Rate</p>
+              <p className="text-xs text-muted-foreground text-right">Total</p>
             </div>
-            <div className="divide-y divide-slate-50">
+            <div className="divide-y divide-border">
               {lineItems.map((item, i) => (
                 <div key={i} className="grid grid-cols-[1fr_32px_72px_72px] gap-x-2 px-3 py-2.5 items-center">
-                  <p className="text-sm text-slate-700">{item.description}</p>
-                  <p className="text-sm text-slate-500 text-right">{item.qty}</p>
-                  <p className="text-sm text-slate-500 text-right">${item.rate.toLocaleString()}</p>
-                  <p className="text-sm text-slate-800 text-right">${(item.qty * item.rate).toLocaleString()}</p>
+                  <p className="text-sm text-foreground">{item.description}</p>
+                  <p className="text-sm text-muted-foreground text-right">{item.qty}</p>
+                  <p className="text-sm text-muted-foreground text-right">${item.rate.toLocaleString()}</p>
+                  <p className="text-sm text-foreground text-right">${(item.qty * item.rate).toLocaleString()}</p>
                 </div>
               ))}
             </div>
           </div>
 
           {/* Total */}
-          <div className="flex items-center justify-between px-3 py-3 rounded-xl bg-slate-900 text-white mb-5">
+          <div className="flex items-center justify-between px-3 py-3 rounded-xl bg-primary text-primary-foreground mb-5">
             <p className="text-sm">Total</p>
             <p className="text-sm">${total.toLocaleString()}</p>
           </div>
 
           {/* CTA */}
-          <div className="rounded-xl bg-blue-600 px-4 py-4 text-center mb-4">
-            <p className="text-white text-sm">Accept this {estimateTerm.toLowerCase()}</p>
-            <p className="text-white/60 text-xs mt-0.5">{link}</p>
+          <div className="rounded-xl bg-primary px-4 py-4 text-center mb-4">
+            <p className="text-primary-foreground text-sm">Accept this {estimateTerm.toLowerCase()}</p>
+            <p className="text-primary-foreground/60 text-xs mt-0.5">{link}</p>
           </div>
 
           {/* Link copy */}
-          <div className="flex items-center gap-2 rounded-lg bg-slate-50 border border-slate-200 px-3 py-2.5">
-            <p className="flex-1 text-xs text-slate-500 truncate">{link}</p>
+          <div className="flex items-center gap-2 rounded-lg bg-secondary border border-border px-3 py-2.5">
+            <p className="flex-1 text-xs text-muted-foreground truncate">{link}</p>
             <button
               onClick={() => { navigator.clipboard?.writeText(link); setCopied(true); setTimeout(() => setCopied(false), 2000); }}
-              className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 transition-colors shrink-0"
+              className="flex items-center gap-1 text-xs text-primary hover:text-primary transition-colors shrink-0"
             >
               {copied ? <><Check size={11} /> Copied</> : <><Copy size={11} /> Copy</>}
             </button>
@@ -639,30 +639,30 @@ function SendEstimateSheet({ est, total, onClose, onSent, apiId }: {
 
   return (
     <div className="fixed inset-0 z-50 flex flex-col justify-end" onClick={onClose}>
-      <div className="bg-white rounded-t-2xl max-h-[90vh] overflow-y-auto shadow-2xl" onClick={e => e.stopPropagation()}>
-        <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100">
+      <div className="bg-card rounded-t-2xl max-h-[90vh] overflow-y-auto shadow-2xl" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-5 py-4 border-b border-border">
           <div>
-            <p className="text-sm text-slate-900">Send {estimateTerm.toLowerCase()}</p>
-            <p className="text-xs text-slate-400">{est.estimateNumber} · {est.customer}</p>
+            <p className="text-sm text-foreground">Send {estimateTerm.toLowerCase()}</p>
+            <p className="text-xs text-muted-foreground">{est.estimateNumber} · {est.customer}</p>
           </div>
-          <button onClick={onClose} className="flex size-7 items-center justify-center rounded-full hover:bg-slate-100">
-            <X size={15} className="text-slate-500" />
+          <button onClick={onClose} className="flex size-7 items-center justify-center rounded-full hover:bg-secondary">
+            <X size={15} className="text-muted-foreground" />
           </button>
         </div>
 
         <div className="px-5 py-4 flex flex-col gap-4">
           {/* Estimate summary */}
-          <div className="flex items-center justify-between rounded-xl bg-slate-50 border border-slate-200 px-4 py-3">
+          <div className="flex items-center justify-between rounded-xl bg-secondary border border-border px-4 py-3">
             <div>
-              <p className="text-sm text-slate-800">{est.description}</p>
-              <p className="text-xs text-slate-400">{est.estimateNumber} · {est.lineItems.length} line items</p>
+              <p className="text-sm text-foreground">{est.description}</p>
+              <p className="text-xs text-muted-foreground">{est.estimateNumber} · {est.lineItems.length} line items</p>
             </div>
-            <p className="text-sm text-slate-900">${total.toLocaleString()}</p>
+            <p className="text-sm text-foreground">${total.toLocaleString()}</p>
           </div>
 
           {/* Channel toggle */}
           <div>
-            <p className="text-xs text-slate-500 mb-2">Send via</p>
+            <p className="text-xs text-muted-foreground mb-2">Send via</p>
             <div className="flex gap-2">
               {(['sms', 'email'] as const).map(c => (
                 <button
@@ -672,7 +672,7 @@ function SendEstimateSheet({ est, total, onClose, onSent, apiId }: {
                     if (c !== channel) setRecipient('');
                   }}
                   className={`flex items-center gap-1.5 rounded-lg border px-4 py-2 text-sm transition-colors ${
-                    channel === c ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
+                    channel === c ? 'bg-primary text-primary-foreground border-primary' : 'bg-card text-foreground border-border hover:bg-secondary'
                   }`}
                 >
                   {c === 'sms' ? <><Phone size={13} /> SMS</> : <><Mail size={13} /> Email</>}
@@ -683,35 +683,35 @@ function SendEstimateSheet({ est, total, onClose, onSent, apiId }: {
 
           {/* Recipient */}
           <div>
-            <p className="text-xs text-slate-500 mb-1.5">{channel === 'sms' ? 'Phone number' : 'Email address'}</p>
+            <p className="text-xs text-muted-foreground mb-1.5">{channel === 'sms' ? 'Phone number' : 'Email address'}</p>
             <input
               value={recipient}
               onChange={(e) => setRecipient(e.target.value)}
-              className="w-full rounded-lg border border-slate-200 px-3 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-blue-400 bg-white"
+              className="w-full rounded-lg border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary bg-card"
             />
           </div>
 
           {/* Personal note */}
           <div>
-            <p className="text-xs text-slate-500 mb-1.5">Personal note <span className="text-slate-400">(optional)</span></p>
+            <p className="text-xs text-muted-foreground mb-1.5">Personal note <span className="text-muted-foreground">(optional)</span></p>
             <textarea
               value={msg}
               onChange={e => setMsg(e.target.value)}
               rows={3}
               placeholder="Add a personal note to your customer..."
-              className="w-full rounded-lg border border-slate-200 px-3 py-2.5 text-sm text-slate-700 focus:outline-none focus:border-blue-400 bg-white resize-none leading-relaxed"
+              className="w-full rounded-lg border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary bg-card resize-none leading-relaxed"
             />
           </div>
 
           {/* Valid until */}
           {est.validUntil && (
-            <p className="text-xs text-slate-400 flex items-center gap-1.5">
+            <p className="text-xs text-muted-foreground flex items-center gap-1.5">
               <Clock size={11} /> {estimateTerm} valid until {est.validUntil}
             </p>
           )}
 
           {sendError && (
-            <p className="text-xs text-red-600 -mt-2">Send failed: {sendError}</p>
+            <p className="text-xs text-destructive -mt-2">Send failed: {sendError}</p>
           )}
 
           {/* Send button */}
@@ -719,9 +719,9 @@ function SendEstimateSheet({ est, total, onClose, onSent, apiId }: {
             onClick={handleSend}
             disabled={sending || sent}
             className={`flex items-center justify-center gap-2 w-full rounded-xl py-3.5 text-sm transition-all ${
-              sent    ? 'bg-green-600 text-white' :
-              sending ? 'bg-blue-400  text-white' :
-                        'bg-blue-600  text-white hover:bg-blue-700'
+              sent    ? 'bg-success text-primary-foreground' :
+              sending ? 'bg-primary  text-primary-foreground' :
+                        'bg-primary  text-primary-foreground hover:bg-primary'
             }`}
           >
             {sent ? <><Check size={15} /> Sent!</> : sending ? 'Sending…' : <><Send size={15} /> Send {estimateTerm.toLowerCase()}</>}
@@ -762,35 +762,35 @@ function SaveAsTemplateSheet({ estimateId, estimateNumber, onClose, onSaved }: {
 
   return (
     <div className="fixed inset-0 z-50 flex flex-col justify-end" onClick={onClose}>
-      <div className="bg-white rounded-t-2xl max-h-[90vh] overflow-y-auto shadow-2xl" onClick={e => e.stopPropagation()}>
-        <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100">
+      <div className="bg-card rounded-t-2xl max-h-[90vh] overflow-y-auto shadow-2xl" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-5 py-4 border-b border-border">
           <div>
-            <p className="text-sm text-slate-900">Save as template</p>
-            <p className="text-xs text-slate-400">Reuse {estimateNumber}’s lines on future estimates</p>
+            <p className="text-sm text-foreground">Save as template</p>
+            <p className="text-xs text-muted-foreground">Reuse {estimateNumber}’s lines on future estimates</p>
           </div>
-          <button onClick={onClose} className="flex size-7 items-center justify-center rounded-full hover:bg-slate-100">
-            <X size={15} className="text-slate-500" />
+          <button onClick={onClose} className="flex size-7 items-center justify-center rounded-full hover:bg-secondary">
+            <X size={15} className="text-muted-foreground" />
           </button>
         </div>
 
         <div className="px-5 py-4 flex flex-col gap-4">
           <div>
-            <p className="text-xs text-slate-500 mb-1.5">Template name</p>
+            <p className="text-xs text-muted-foreground mb-1.5">Template name</p>
             <input
               value={name}
               onChange={e => setName(e.target.value)}
               aria-label="Template name"
               placeholder="e.g. Standard AC tune-up"
-              className="w-full rounded-lg border border-slate-200 px-3 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-blue-400 bg-white"
+              className="w-full rounded-lg border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary bg-card"
             />
           </div>
           <div>
-            <p className="text-xs text-slate-500 mb-1.5">Trade</p>
+            <p className="text-xs text-muted-foreground mb-1.5">Trade</p>
             <select
               value={verticalType}
               onChange={e => setVerticalType(e.target.value as typeof verticalType)}
               aria-label="Template trade"
-              className="w-full rounded-lg border border-slate-200 px-3 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-blue-400 bg-white"
+              className="w-full rounded-lg border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary bg-card"
             >
               <option value="hvac">HVAC</option>
               <option value="plumbing">Plumbing</option>
@@ -799,22 +799,22 @@ function SaveAsTemplateSheet({ estimateId, estimateNumber, onClose, onSaved }: {
             </select>
           </div>
           <div>
-            <p className="text-xs text-slate-500 mb-1.5">Category</p>
+            <p className="text-xs text-muted-foreground mb-1.5">Category</p>
             <input
               value={categoryId}
               onChange={e => setCategoryId(e.target.value)}
               aria-label="Template category"
               placeholder="e.g. ac-repair"
-              className="w-full rounded-lg border border-slate-200 px-3 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-blue-400 bg-white"
+              className="w-full rounded-lg border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary bg-card"
             />
           </div>
 
-          {error && <p className="text-xs text-red-600 -mt-1">{error}</p>}
+          {error && <p className="text-xs text-destructive -mt-1">{error}</p>}
 
           <button
             onClick={handleSave}
             disabled={saving || !name.trim() || !categoryId.trim()}
-            className="flex items-center justify-center gap-2 w-full rounded-xl bg-slate-900 text-white py-3.5 text-sm hover:bg-slate-700 disabled:opacity-50 transition-colors"
+            className="flex items-center justify-center gap-2 w-full rounded-xl bg-primary text-primary-foreground py-3.5 text-sm hover:bg-primary/90 disabled:opacity-50 transition-colors"
           >
             {saving ? 'Saving…' : <><FileText size={15} /> Save as template</>}
           </button>
@@ -981,7 +981,7 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
   if (isLoading) {
     return (
       <div className="h-full flex items-center justify-center">
-        <Spinner size="md" className="text-slate-900" label={`Loading ${estimateTerm.toLowerCase()}`} />
+        <Spinner size="md" className="text-foreground" label={`Loading ${estimateTerm.toLowerCase()}`} />
       </div>
     );
   }
@@ -989,8 +989,8 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
   if (error || !est) {
     return (
       <div className="h-full flex flex-col items-center justify-center gap-3">
-        <p className="text-sm text-red-500">Failed to load {estimateTerm.toLowerCase()}</p>
-        <button onClick={onBack} className="text-xs text-blue-500 hover:underline">Go back</button>
+        <p className="text-sm text-destructive">Failed to load {estimateTerm.toLowerCase()}</p>
+        <button onClick={onBack} className="text-xs text-primary hover:underline">Go back</button>
       </div>
     );
   }
@@ -1019,24 +1019,24 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
       <div className="h-full overflow-y-auto pb-24 md:pb-6">
         <div className="max-w-5xl mx-auto px-4 md:px-6 py-4 md:py-6">
           {/* Back */}
-          <button onClick={onBack} className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-700 transition-colors mb-5">
+          <button onClick={onBack} className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors mb-5">
             <ArrowLeft size={14} /> Back to {estimateTerm}s
           </button>
 
           {/* Header */}
           <div className="flex items-start justify-between gap-3 mb-5">
             <div>
-              <h1 className="text-slate-900" style={{ fontSize: '1.15rem', lineHeight: 1.2 }}>{estCompat.customer}</h1>
-              <p className="text-sm text-slate-400 mt-0.5">{est.estimateNumber} · {estCompat.description}</p>
+              <h1 className="text-foreground" style={{ fontSize: '1.15rem', lineHeight: 1.2 }}>{estCompat.customer}</h1>
+              <p className="text-sm text-muted-foreground mt-0.5">{est.estimateNumber} · {estCompat.description}</p>
               {est.validUntil && (
-                <p className="text-xs text-slate-400 mt-1 flex items-center gap-1">
+                <p className="text-xs text-muted-foreground mt-1 flex items-center gap-1">
                   <Clock size={10} /> Valid until {est.validUntil}
                 </p>
               )}
             </div>
             <div className="flex items-center gap-2 shrink-0">
               <StatusBadge status={status} />
-              <p className="text-sm text-slate-900">${total.toLocaleString()}</p>
+              <p className="text-sm text-foreground">${total.toLocaleString()}</p>
             </div>
           </div>
 
@@ -1078,34 +1078,34 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
               <AttachmentSection entityType="estimate" entityId={estimateId} />
 
               {/* Notes section */}
-              <div className="rounded-xl bg-white border border-slate-200 overflow-hidden">
-                <div className="flex items-center gap-2 px-4 py-3 border-b border-slate-100">
-                  <MessageSquare size={13} className="text-slate-400" />
-                  <p className="text-sm text-slate-700">Notes</p>
-                  <span className="ml-auto text-xs text-slate-400">{notes.length}</span>
+              <div className="rounded-xl bg-card border border-border overflow-hidden">
+                <div className="flex items-center gap-2 px-4 py-3 border-b border-border">
+                  <MessageSquare size={13} className="text-muted-foreground" />
+                  <p className="text-sm text-foreground">Notes</p>
+                  <span className="ml-auto text-xs text-muted-foreground">{notes.length}</span>
                 </div>
                 {notesLoaded && notes.length > 0 && (
-                  <div className="divide-y divide-slate-50">
+                  <div className="divide-y divide-border">
                     {notes.map(n => (
                       <div key={n.id} className="px-4 py-3">
-                        <p className="text-sm text-slate-700 leading-snug">{n.content}</p>
-                        <p className="text-xs text-slate-400 mt-1">{formatDateTimeInTenantTz(n.createdAt, tz)}</p>
+                        <p className="text-sm text-foreground leading-snug">{n.content}</p>
+                        <p className="text-xs text-muted-foreground mt-1">{formatDateTimeInTenantTz(n.createdAt, tz)}</p>
                       </div>
                     ))}
                   </div>
                 )}
-                <div className="px-4 py-3 border-t border-slate-50 flex flex-col gap-2">
+                <div className="px-4 py-3 border-t border-border flex flex-col gap-2">
                   <textarea
                     value={noteText}
                     onChange={e => setNoteText(e.target.value)}
                     rows={2}
                     placeholder="Add a note…"
-                    className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm resize-none focus:outline-none focus:border-blue-400 transition-colors"
+                    className="w-full rounded-lg border border-border px-3 py-2 text-sm resize-none focus:outline-none focus:border-primary transition-colors"
                   />
                   <button
                     onClick={saveNote}
                     disabled={savingNote || !noteText.trim()}
-                    className="self-end rounded-lg bg-slate-900 text-white text-xs px-3 py-1.5 hover:bg-slate-700 disabled:opacity-50 transition-colors"
+                    className="self-end rounded-lg bg-primary text-primary-foreground text-xs px-3 py-1.5 hover:bg-primary/90 disabled:opacity-50 transition-colors"
                   >
                     {savingNote ? 'Saving…' : 'Save note'}
                   </button>
@@ -1114,17 +1114,17 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
 
               {/* Change history (7.10) */}
               {history.length > 0 && (
-                <div className="rounded-xl bg-white border border-slate-200 overflow-hidden">
-                  <div className="flex items-center gap-2 px-4 py-3 border-b border-slate-100">
-                    <Clock size={13} className="text-slate-400" />
-                    <p className="text-sm text-slate-700">Change history</p>
-                    <span className="ml-auto text-xs text-slate-400">{history.length}</span>
+                <div className="rounded-xl bg-card border border-border overflow-hidden">
+                  <div className="flex items-center gap-2 px-4 py-3 border-b border-border">
+                    <Clock size={13} className="text-muted-foreground" />
+                    <p className="text-sm text-foreground">Change history</p>
+                    <span className="ml-auto text-xs text-muted-foreground">{history.length}</span>
                   </div>
-                  <div className="divide-y divide-slate-50">
+                  <div className="divide-y divide-border">
                     {history.map(h => (
                       <div key={h.id} className="px-4 py-3">
-                        <p className="text-sm text-slate-700 leading-snug">{h.summary}</p>
-                        <p className="text-xs text-slate-400 mt-1">{formatDateTimeInTenantTz(h.createdAt, tz)}</p>
+                        <p className="text-sm text-foreground leading-snug">{h.summary}</p>
+                        <p className="text-xs text-muted-foreground mt-1">{formatDateTimeInTenantTz(h.createdAt, tz)}</p>
                       </div>
                     ))}
                   </div>
@@ -1140,37 +1140,37 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
               {est.jobId && (
                 <button
                   onClick={() => navigate(`/jobs/${est.jobId}`)}
-                  className="flex items-center gap-2 rounded-xl bg-white border border-slate-200 px-4 py-3 hover:border-slate-300 hover:bg-slate-50 transition-colors text-left"
+                  className="flex items-center gap-2 rounded-xl bg-card border border-border px-4 py-3 hover:border-border hover:bg-secondary transition-colors text-left"
                 >
-                  <Briefcase size={13} className="text-slate-400 shrink-0" />
-                  <p className="text-sm text-slate-700 flex-1">View linked job</p>
-                  <ChevronRight size={13} className="text-slate-300" />
+                  <Briefcase size={13} className="text-muted-foreground shrink-0" />
+                  <p className="text-sm text-foreground flex-1">View linked job</p>
+                  <ChevronRight size={13} className="text-muted-foreground" />
                 </button>
               )}
 
               {/* Customer card */}
               {(customer || enrichedCustomer) && (
-                <div className="rounded-xl bg-white border border-slate-200 px-4 py-4">
-                  <p className="text-xs text-slate-400 mb-2">Customer</p>
+                <div className="rounded-xl bg-card border border-border px-4 py-4">
+                  <p className="text-xs text-muted-foreground mb-2">Customer</p>
                   <button
                     onClick={() => estCompat.customerId && navigate(`/customers/${estCompat.customerId}`)}
-                    className="text-sm text-slate-900 hover:text-blue-600 transition-colors text-left"
+                    className="text-sm text-foreground hover:text-primary transition-colors text-left"
                   >
                     {estCompat.customer}
                   </button>
                   {enrichedLocation && (
-                    <p className="text-xs text-slate-400 mt-1 flex items-center gap-1">
+                    <p className="text-xs text-muted-foreground mt-1 flex items-center gap-1">
                       <MapPin size={10} /> {enrichedLocation}
                     </p>
                   )}
                   <div className="flex flex-col gap-1.5 mt-2">
                     {(enrichedCustomer?.phone ?? customer?.primaryPhone) && (
-                      <a href={`tel:${enrichedCustomer?.phone ?? customer?.primaryPhone}`} className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-green-700 transition-colors">
+                      <a href={`tel:${enrichedCustomer?.phone ?? customer?.primaryPhone}`} className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-success transition-colors">
                         <Phone size={11} /> {enrichedCustomer?.phone ?? customer?.primaryPhone}
                       </a>
                     )}
                     {(enrichedCustomer?.email ?? customer?.email) && (
-                      <a href={`mailto:${enrichedCustomer?.email ?? customer?.email}`} className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-blue-700 transition-colors">
+                      <a href={`mailto:${enrichedCustomer?.email ?? customer?.email}`} className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-primary transition-colors">
                         <Mail size={11} /> {enrichedCustomer?.email ?? customer?.email}
                       </a>
                     )}
@@ -1179,13 +1179,13 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
               )}
 
               {/* Price summary */}
-              <div className="rounded-xl bg-slate-900 text-white px-4 py-4">
+              <div className="rounded-xl bg-primary text-primary-foreground px-4 py-4">
                 <div className="flex items-center justify-between mb-3">
-                  <p className="text-sm text-white/60">Estimate total</p>
-                  <p className="text-sm text-white/60">{uiLineItems.length} items</p>
+                  <p className="text-sm text-primary-foreground/60">Estimate total</p>
+                  <p className="text-sm text-primary-foreground/60">{uiLineItems.length} items</p>
                 </div>
-                <p className="text-3xl text-white mb-1">${total.toLocaleString()}</p>
-                {est.validUntil && <p className="text-xs text-white/40">Valid until {est.validUntil}</p>}
+                <p className="text-3xl text-primary-foreground mb-1">${total.toLocaleString()}</p>
+                {est.validUntil && <p className="text-xs text-primary-foreground/40">Valid until {est.validUntil}</p>}
               </div>
 
               {/* Action buttons */}
@@ -1193,7 +1193,7 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
                 {(status === 'Draft' || status === 'Sent' || status === 'Viewed') && (
                   <button
                     onClick={() => setSendOpen(true)}
-                    className="flex items-center justify-center gap-2 rounded-xl bg-blue-600 text-white py-3 text-sm hover:bg-blue-700 transition-colors"
+                    className="flex items-center justify-center gap-2 rounded-xl bg-primary text-primary-foreground py-3 text-sm hover:bg-primary transition-colors"
                   >
                     <Send size={14} />
                     {status === 'Draft' ? 'Send to customer' :
@@ -1203,7 +1203,7 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
                 {(status === 'Sent' || status === 'Viewed') && est.jobId && (
                   <button
                     onClick={() => setConvertJobOpen(true)}
-                    className="flex items-center justify-center gap-2 rounded-xl bg-slate-900 text-white py-3 text-sm hover:bg-slate-800 transition-colors"
+                    className="flex items-center justify-center gap-2 rounded-xl bg-primary text-primary-foreground py-3 text-sm hover:bg-primary/90 transition-colors"
                   >
                     <Briefcase size={14} /> Convert to job
                   </button>
@@ -1211,7 +1211,7 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
                 {status === 'Approved' && (
                   <button
                     onClick={() => setConvertOpen(true)}
-                    className="flex items-center justify-center gap-2 rounded-xl bg-green-600 text-white py-3 text-sm hover:bg-green-700 transition-colors"
+                    className="flex items-center justify-center gap-2 rounded-xl bg-success text-primary-foreground py-3 text-sm hover:bg-success transition-colors"
                   >
                     <FileText size={14} /> Convert to invoice
                   </button>
@@ -1220,20 +1220,20 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
                   <button
                     onClick={() => void handleReopen()}
                     disabled={actionBusy}
-                    className="flex items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white text-slate-700 py-3 text-sm hover:bg-slate-50 transition-colors disabled:opacity-50"
+                    className="flex items-center justify-center gap-2 rounded-xl border border-border bg-card text-foreground py-3 text-sm hover:bg-secondary transition-colors disabled:opacity-50"
                   >
                     <RotateCcw size={14} /> Reopen as draft
                   </button>
                 )}
                 <button
                   onClick={() => setPreviewOpen(true)}
-                  className="flex items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white text-slate-700 py-3 text-sm hover:bg-slate-50 transition-colors"
+                  className="flex items-center justify-center gap-2 rounded-xl border border-border bg-card text-foreground py-3 text-sm hover:bg-secondary transition-colors"
                 >
                   <Eye size={14} /> Preview document
                 </button>
                 <button
                   onClick={() => setTemplateOpen(true)}
-                  className="flex items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white text-slate-700 py-3 text-sm hover:bg-slate-50 transition-colors"
+                  className="flex items-center justify-center gap-2 rounded-xl border border-border bg-card text-foreground py-3 text-sm hover:bg-secondary transition-colors"
                 >
                   <FileText size={14} /> Save as template
                 </button>
@@ -1241,7 +1241,7 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
                   <button
                     onClick={() => void handleClone()}
                     disabled={actionBusy}
-                    className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white text-slate-700 py-3 text-sm hover:bg-slate-50 transition-colors disabled:opacity-50"
+                    className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-border bg-card text-foreground py-3 text-sm hover:bg-secondary transition-colors disabled:opacity-50"
                   >
                     <Copy size={14} /> Duplicate
                   </button>
@@ -1249,39 +1249,39 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
                     <button
                       onClick={() => void handleDelete()}
                       disabled={actionBusy}
-                      className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-red-200 bg-white text-red-600 py-3 text-sm hover:bg-red-50 transition-colors disabled:opacity-50"
+                      className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-destructive/30 bg-card text-destructive py-3 text-sm hover:bg-destructive/10 transition-colors disabled:opacity-50"
                     >
                       <Trash2 size={14} /> Delete
                     </button>
                   )}
                 </div>
-                {actionError && <p className="text-xs text-red-600">{actionError}</p>}
+                {actionError && <p className="text-xs text-destructive">{actionError}</p>}
               </div>
 
               {/* Follow-up note for viewed/sent */}
               {(status === 'Sent' || status === 'Viewed') && (
-                <div className={`rounded-xl border px-4 py-3 ${status === 'Viewed' ? 'bg-violet-50 border-violet-200' : 'bg-amber-50 border-amber-200'}`}>
+                <div className={`rounded-xl border px-4 py-3 ${status === 'Viewed' ? 'bg-primary/10 border-primary/30' : 'bg-warning/10 border-warning/30'}`}>
                   <div className="flex items-center gap-2 mb-1">
-                    {status === 'Viewed' ? <Eye size={12} className="text-violet-600" /> : <Clock size={12} className="text-amber-600" />}
-                    <p className={`text-xs ${status === 'Viewed' ? 'text-violet-700' : 'text-amber-700'}`}>
+                    {status === 'Viewed' ? <Eye size={12} className="text-primary" /> : <Clock size={12} className="text-warning" />}
+                    <p className={`text-xs ${status === 'Viewed' ? 'text-primary' : 'text-warning'}`}>
                       {status === 'Viewed' ? `${estCompat.customer.split(' ')[0]} viewed this estimate` : 'Awaiting customer review'}
                     </p>
                   </div>
-                  <p className={`text-xs ${status === 'Viewed' ? 'text-violet-600' : 'text-amber-600'}`}>
+                  <p className={`text-xs ${status === 'Viewed' ? 'text-primary' : 'text-warning'}`}>
                     {status === 'Viewed' ? 'Follow up if they have questions' : 'Awaiting response'}
                   </p>
                 </div>
               )}
 
               {(status === 'Expired' || status === 'Declined') && (
-                <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
+                <div className="rounded-xl border border-border bg-secondary px-4 py-3">
                   <div className="flex items-center gap-2 mb-1">
-                    <Clock size={12} className="text-slate-500" />
-                    <p className="text-xs text-slate-600">
+                    <Clock size={12} className="text-muted-foreground" />
+                    <p className="text-xs text-foreground">
                       {status === 'Expired' ? 'This estimate expired' : 'Customer declined this estimate'}
                     </p>
                   </div>
-                  <p className="text-xs text-slate-500">
+                  <p className="text-xs text-muted-foreground">
                     Reopen it as a draft to revise and resend.
                   </p>
                 </div>
@@ -1437,10 +1437,10 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
     <div className="h-full overflow-y-auto pb-20 md:pb-0">
       <div className="px-4 md:px-6 py-4 md:py-6 max-w-3xl mx-auto">
         <div className="flex items-center justify-between mb-5">
-          <h1 className="text-slate-900">{estimateTermPlural}</h1>
+          <h1 className="text-foreground">{estimateTermPlural}</h1>
           <button
             onClick={() => setNewEstimate(true)}
-            className="flex items-center gap-1.5 rounded-lg bg-slate-900 text-white px-3 py-2 text-sm hover:bg-slate-700 transition-colors"
+            className="flex items-center gap-1.5 rounded-lg bg-primary text-primary-foreground px-3 py-2 text-sm hover:bg-primary/90 transition-colors"
           >
             <Plus size={14} /> New {estimateTerm.toLowerCase()}
           </button>
@@ -1449,9 +1449,9 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
         {/* Summary cards */}
         <div className="grid grid-cols-3 gap-3 mb-5">
           {[
-            { label: 'Pending review', value: pendingCount,                 color: 'text-amber-700', bg: 'bg-amber-50 border-amber-100' },
-            { label: 'Approved',       value: approvedCount,                color: 'text-green-700', bg: 'bg-green-50 border-green-100' },
-            { label: 'Total value',    value: centsToDisplay(totalValue),   color: 'text-blue-700',  bg: 'bg-blue-50 border-blue-100'   },
+            { label: 'Pending review', value: pendingCount,                 color: 'text-warning', bg: 'bg-warning/10 border-warning/20' },
+            { label: 'Approved',       value: approvedCount,                color: 'text-success', bg: 'bg-success/10 border-success/20' },
+            { label: 'Total value',    value: centsToDisplay(totalValue),   color: 'text-primary',  bg: 'bg-primary/10 border-primary/20'   },
           ].map(({ label, value, color, bg }) => (
             <div key={label} className={`rounded-xl border px-3 py-3 ${bg}`}>
               <p className={`text-xs mb-0.5 ${color}`}>{label}</p>
@@ -1467,7 +1467,7 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
               aria-label="Filter by customer"
               value={customerFilter}
               onChange={e => setCustomerFilter(e.target.value)}
-              className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:outline-none focus:border-blue-400"
+              className="w-full rounded-lg border border-border bg-card px-3 py-2 text-sm text-foreground focus:outline-none focus:border-primary"
             >
               <option value="all">All customers</option>
               {customerOptions.map(c => (
@@ -1492,7 +1492,7 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
                 }
               }}
               className={`shrink-0 rounded-lg px-3 py-1.5 text-sm transition-colors ${
-                tab === t.value ? 'bg-slate-900 text-white' : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50'
+                tab === t.value ? 'bg-primary text-primary-foreground' : 'bg-card border border-border text-foreground hover:bg-secondary'
               }`}
             >{t.label}</button>
           ))}
@@ -1501,7 +1501,7 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
         {/* Loading / Error */}
         {isLoading && (
           <div className="flex items-center justify-center py-16">
-            <Spinner size="md" className="text-slate-900" label={`Loading ${estimateTermPlural.toLowerCase()}`} />
+            <Spinner size="md" className="text-foreground" label={`Loading ${estimateTermPlural.toLowerCase()}`} />
           </div>
         )}
         {error && (
@@ -1520,39 +1520,39 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
                 <button
                   key={est.id}
                   onClick={() => setSelected(est.id)}
-                  className="flex items-center gap-3 rounded-xl bg-white border border-slate-200 px-4 py-4 text-left hover:border-slate-300 hover:shadow-sm transition-all group"
+                  className="flex items-center gap-3 rounded-xl bg-card border border-border px-4 py-4 text-left hover:border-border hover:shadow-sm transition-all group"
                 >
                   <span className={`flex size-9 shrink-0 items-center justify-center rounded-xl ${
-                    status === 'Approved' ? 'bg-green-50' :
-                    status === 'Viewed'   ? 'bg-violet-50' :
-                    status === 'Sent'     ? 'bg-blue-50' : 'bg-slate-100'
+                    status === 'Approved' ? 'bg-success/10' :
+                    status === 'Viewed'   ? 'bg-primary/10' :
+                    status === 'Sent'     ? 'bg-primary/10' : 'bg-secondary'
                   }`}>
                     <FileText size={16} className={
-                      status === 'Approved' ? 'text-green-500' :
-                      status === 'Viewed'   ? 'text-violet-500' :
-                      status === 'Sent'     ? 'text-blue-500' : 'text-slate-400'
+                      status === 'Approved' ? 'text-success' :
+                      status === 'Viewed'   ? 'text-primary' :
+                      status === 'Sent'     ? 'text-primary' : 'text-muted-foreground'
                     } />
                   </span>
                   <div className="flex-1 min-w-0">
                     <div className="flex items-start justify-between gap-2">
                       <div className="min-w-0">
-                        <p className="text-sm text-slate-900">{customerName}</p>
-                        <p className="text-xs text-slate-400 mt-0.5 truncate">{est.estimateNumber}</p>
+                        <p className="text-sm text-foreground">{customerName}</p>
+                        <p className="text-xs text-muted-foreground mt-0.5 truncate">{est.estimateNumber}</p>
                       </div>
                       <div className="flex flex-col items-end gap-1 shrink-0">
-                        <p className="text-sm text-slate-800">{centsToDisplay(est.totals.totalCents)}</p>
+                        <p className="text-sm text-foreground">{centsToDisplay(est.totals.totalCents)}</p>
                         <StatusBadge status={status} size="sm" />
                       </div>
                     </div>
                     {est.createdAt && (
                       <div className="flex items-center gap-3 mt-2">
-                        <span className="flex items-center gap-1 text-xs text-slate-400">
+                        <span className="flex items-center gap-1 text-xs text-muted-foreground">
                           <Clock size={10} /> {formatDateInTenantTz(est.createdAt, tz)}
                         </span>
                       </div>
                     )}
                   </div>
-                  <ChevronRight size={14} className="shrink-0 text-slate-300 group-hover:text-slate-400 transition-colors" />
+                  <ChevronRight size={14} className="shrink-0 text-muted-foreground group-hover:text-muted-foreground transition-colors" />
                 </button>
               );
             })}

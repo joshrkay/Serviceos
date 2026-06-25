@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { isCaptureProposalType } from '@ai-service-os/shared';
 import { useApiClient } from '../../lib/apiClient';
 import { emitProposalsChanged } from '../../lib/proposal-events';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
@@ -29,10 +30,10 @@ interface ProposalMeta {
 // AIProposalCard) is where customer-MMS drafts are reviewed, so the urgency
 // marker must surface here too. Mirrors the assistant-card badge.
 const SEVERITY_CONFIG: Record<ProposalSeverity, { label: string; classes: string }> = {
-  TIER_1_EVACUATE:           { label: 'Evacuate',        classes: 'border-red-300 bg-red-100 text-red-800' },
-  TIER_2_EMERGENCY_DISPATCH: { label: 'Emergency',       classes: 'border-red-200 bg-red-50 text-red-700' },
-  TIER_3_SAME_DAY_URGENT:    { label: 'Same-day urgent', classes: 'border-amber-200 bg-amber-50 text-amber-700' },
-  TIER_4_SCHEDULE:           { label: 'Routine',         classes: 'border-slate-200 bg-slate-100 text-slate-600' },
+  TIER_1_EVACUATE:           { label: 'Evacuate',        classes: 'border-destructive/40 bg-destructive/10 text-destructive' },
+  TIER_2_EMERGENCY_DISPATCH: { label: 'Emergency',       classes: 'border-destructive/30 bg-destructive/10 text-destructive' },
+  TIER_3_SAME_DAY_URGENT:    { label: 'Same-day urgent', classes: 'border-warning/30 bg-warning/10 text-warning' },
+  TIER_4_SCHEDULE:           { label: 'Routine',         classes: 'border-border bg-secondary text-muted-foreground' },
 };
 
 interface LineItemView {
@@ -49,6 +50,10 @@ interface InboxProposalRow {
     status: string;
     createdAt: string;
     expiresAt?: string;
+    // Top-level 0–1 AI confidence (api proposal.ts:121). Drives the
+    // "approve all eligible" gate; preferred over the rarely-stamped
+    // payload._meta.overallConfidence string.
+    confidenceScore?: number;
     // Multi-action chaining: present on proposals decomposed from one
     // utterance. The inbox serializes the full proposal, so these ride
     // through without an API change.
@@ -73,17 +78,17 @@ const CONFIDENCE_CONFIG: Record<
   ConfidenceLevel,
   { label: string; bar: string; track: string; width: string; labelColor: string }
 > = {
-  high: { label: 'High confidence', bar: 'bg-green-500', track: 'bg-green-100', width: 'w-full', labelColor: 'text-green-700' },
-  medium: { label: 'Review recommended', bar: 'bg-amber-400', track: 'bg-amber-100', width: 'w-3/5', labelColor: 'text-amber-700' },
-  low: { label: 'Low confidence', bar: 'bg-orange-500', track: 'bg-orange-100', width: 'w-2/5', labelColor: 'text-orange-700' },
-  very_low: { label: 'Very low — needs review', bar: 'bg-red-500', track: 'bg-red-100', width: 'w-1/5', labelColor: 'text-red-700' },
+  high: { label: 'High confidence', bar: 'bg-success', track: 'bg-success/10', width: 'w-full', labelColor: 'text-success' },
+  medium: { label: 'Review recommended', bar: 'bg-warning', track: 'bg-warning/10', width: 'w-3/5', labelColor: 'text-warning' },
+  low: { label: 'Low confidence', bar: 'bg-warning', track: 'bg-warning/10', width: 'w-2/5', labelColor: 'text-warning' },
+  very_low: { label: 'Very low — needs review', bar: 'bg-destructive', track: 'bg-destructive/10', width: 'w-1/5', labelColor: 'text-destructive' },
 };
 
 const PRICING_SOURCE_BADGE: Record<PricingSource, { label: string; classes: string }> = {
-  catalog: { label: 'Catalog price', classes: 'bg-green-50 text-green-700 border-green-200' },
-  ambiguous: { label: 'Needs a pick', classes: 'bg-amber-50 text-amber-800 border-amber-200' },
-  uncatalogued: { label: 'Not in catalog', classes: 'bg-orange-50 text-orange-700 border-orange-200' },
-  manual: { label: 'Manual price', classes: 'bg-slate-50 text-slate-600 border-slate-200' },
+  catalog: { label: 'Catalog price', classes: 'bg-success/10 text-success border-success/30' },
+  ambiguous: { label: 'Needs a pick', classes: 'bg-warning/10 text-warning border-warning/30' },
+  uncatalogued: { label: 'Not in catalog', classes: 'bg-warning/10 text-warning border-warning/30' },
+  manual: { label: 'Manual price', classes: 'bg-secondary text-muted-foreground border-border' },
 };
 
 /**
@@ -168,11 +173,48 @@ interface InboxResponse {
   expired?: ExpiredCard[];
 }
 
+/** Per-id outcome of POST /api/proposals/approve-batch (mirrors the API's
+ *  BatchApproveResult). The server re-validates each id, so an ineligible or
+ *  blocked proposal lands in `failed` instead of failing the whole batch. */
+interface BatchApproveResult {
+  approved: string[];
+  failed: { id: string; reason: string }[];
+}
+
+/**
+ * Numeric confidence used by the "approve all eligible" gate. Prefer the
+ * top-level `confidenceScore` (api proposal.ts:121); fall back to the
+ * coarse `_meta.overallConfidence` string ONLY when there's no numeric score
+ * (an explicit 'high' means the model graded it ≥0.8). Absent confidence is
+ * treated as 0 — never swept into a bulk approval.
+ */
+function batchConfidence(proposal: InboxProposalRow['proposal']): number {
+  return (
+    proposal.confidenceScore ??
+    (proposal.payload?._meta?.overallConfidence === 'high' ? 1 : 0)
+  );
+}
+
+/**
+ * One-tap "approve all eligible" gate: capture-class action lane AND numeric
+ * confidence ≥0.8 (matches the API's getConfidenceLevel 'high' boundary).
+ * Money / customer-comms / irreversible proposals — and anything below 0.8 —
+ * are excluded; they must be reviewed individually (CLAUDE.md "Never
+ * auto-execute"). The server re-checks every id on approve, so this is the
+ * client-side affordance, not the authority.
+ */
+function isBatchEligibleRow(row: InboxProposalRow): boolean {
+  return (
+    isCaptureProposalType(row.proposal.proposalType) &&
+    batchConfidence(row.proposal) >= 0.8
+  );
+}
+
 const URGENCY_BADGE: Record<Urgency, { label: string; classes: string }> = {
-  critical: { label: 'Critical', classes: 'bg-red-100 text-red-800 border-red-200' },
-  high: { label: 'High', classes: 'bg-amber-100 text-amber-800 border-amber-200' },
-  normal: { label: 'Normal', classes: 'bg-slate-100 text-slate-700 border-slate-200' },
-  low: { label: 'Low', classes: 'bg-slate-50 text-slate-500 border-slate-200' },
+  critical: { label: 'Critical', classes: 'bg-destructive/10 text-destructive border-destructive/30' },
+  high: { label: 'High', classes: 'bg-warning/10 text-warning border-warning/30' },
+  normal: { label: 'Normal', classes: 'bg-secondary text-foreground border-border' },
+  low: { label: 'Low', classes: 'bg-secondary text-muted-foreground border-border' },
 };
 
 /**
@@ -240,7 +282,7 @@ function ProposalMarkers({
       )}
 
       {markers.map((m, i) => (
-        <p key={`${m.path}-${i}`} className="text-xs text-slate-500">
+        <p key={`${m.path}-${i}`} className="text-xs text-muted-foreground">
           {m.reason}
         </p>
       ))}
@@ -387,6 +429,46 @@ export function InboxPage() {
   }
 
   /**
+   * "Approve all eligible" — one POST to the batch endpoint for every
+   * capture-class, high-confidence proposal. Unlike `approveChain`, this reads
+   * the per-id `{ approved, failed }` result: a partial failure restores ONLY
+   * the still-pending (failed) rows and leaves the approved ones gone, so a
+   * single blocked proposal doesn't bounce the whole batch back into the feed.
+   * A transport error (non-2xx) restores everything, like the per-row path.
+   */
+  async function approveEligible(ids: string[]): Promise<void> {
+    if (ids.length === 0) return;
+    const idSet = new Set(ids);
+    const removed = rows.filter((r) => idSet.has(r.proposal.id));
+    setRows((prev) => prev.filter((r) => !idSet.has(r.proposal.id)));
+    try {
+      const res = await apiFetch('/api/proposals/approve-batch', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ proposalIds: ids }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const result = (await res.json()) as BatchApproveResult;
+      const failedIds = new Set(result.failed.map((f) => f.id));
+      if (failedIds.size > 0) {
+        const restore = removed.filter((r) => failedIds.has(r.proposal.id));
+        setRows((prev) => [...restore, ...prev]);
+        setError(
+          `${failedIds.size} couldn't be approved and ${
+            failedIds.size === 1 ? 'is' : 'are'
+          } still waiting.`,
+        );
+      } else {
+        setError(null);
+      }
+      emitProposalsChanged();
+    } catch (err) {
+      if (removed.length > 0) setRows((prev) => [...removed, ...prev]);
+      setError(err instanceof Error ? err.message : 'Approve all failed');
+    }
+  }
+
+  /**
    * Reject every member of a chain. There is no batch-reject endpoint —
    * a chain that shouldn't proceed is rejected member-by-member. Done
    * sequentially so a mid-chain failure surfaces and the rest are still
@@ -400,17 +482,18 @@ export function InboxPage() {
   }
 
   const feed = groupIntoFeed(rows);
+  const eligible = rows.filter(isBatchEligibleRow);
 
   return (
     <div className="h-full overflow-y-auto">
       <div className="max-w-4xl mx-auto px-4 md:px-6 py-6 md:py-8">
         <div className="mb-6">
-          <h1 className="text-xl font-semibold text-slate-900">Inbox</h1>
-          <p className="text-sm text-slate-500">
+          <h1 className="text-xl font-semibold text-foreground">Inbox</h1>
+          <p className="text-sm text-muted-foreground">
             Proposals waiting for your approval, urgency-sorted.
           </p>
           {summary && summary.totalCount > 0 && (
-            <p className="text-xs text-slate-500 mt-1">
+            <p className="text-xs text-muted-foreground mt-1">
               {summary.totalCount} waiting
               {summary.criticalCount > 0 && ` · ${summary.criticalCount} urgent`}
               {summary.truncated && ' (showing first 100)'}
@@ -418,15 +501,41 @@ export function InboxPage() {
           )}
         </div>
 
-        {isLoading && <p className="text-sm text-slate-500">Loading…</p>}
-        {error && <p className="text-sm text-red-600">{error}</p>}
+        {isLoading && <p className="text-sm text-muted-foreground">Loading…</p>}
+        {error && <p className="text-sm text-destructive">{error}</p>}
 
         {!isLoading && !error && rows.length === 0 && expired.length === 0 && (
-          <div className="rounded-xl border border-slate-200 bg-white px-6 py-12 text-center">
-            <p className="text-sm text-slate-700 font-medium">Nothing waiting.</p>
-            <p className="text-xs text-slate-500 mt-1">
+          <div className="rounded-xl border border-border bg-card px-6 py-12 text-center">
+            <p className="text-sm text-foreground font-medium">Nothing waiting.</p>
+            <p className="text-xs text-muted-foreground mt-1">
               When the voice agent or the system needs your approval, it'll show up here.
             </p>
+          </div>
+        )}
+
+        {/* One-tap "approve all eligible" — only the capture-class,
+            high-confidence lane. Money / comms / irreversible and
+            anything below high confidence are deliberately excluded and
+            still require an individual tap (CLAUDE.md "Never auto-execute"). */}
+        {eligible.length > 0 && (
+          <div
+            data-testid="approve-all-eligible"
+            className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-primary/30 bg-primary/5 px-4 py-3"
+          >
+            <p className="text-xs text-muted-foreground">
+              <span className="font-medium text-foreground">
+                {eligible.length} high-confidence
+              </span>{' '}
+              eligible for one-tap approval. Money, messages, and irreversible
+              actions are excluded.
+            </p>
+            <button
+              type="button"
+              onClick={() => approveEligible(eligible.map((r) => r.proposal.id))}
+              className="min-h-11 shrink-0 rounded-lg bg-primary px-4 py-1.5 text-sm font-semibold text-primary-foreground hover:bg-primary/90"
+            >
+              Approve all {eligible.length}
+            </button>
           </div>
         )}
 
@@ -448,7 +557,7 @@ export function InboxPage() {
               <li
                 key={row.proposal.id}
                 data-testid="inbox-row"
-                className="rounded-xl border border-slate-200 bg-white px-4 py-3"
+                className="rounded-xl border border-border bg-card px-4 py-3"
               >
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0 flex-1">
@@ -456,27 +565,27 @@ export function InboxPage() {
                       <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded border ${badge.classes}`}>
                         {badge.label}
                       </span>
-                      <span className="text-xs text-slate-500">{row.proposal.proposalType}</span>
+                      <span className="text-xs text-muted-foreground">{row.proposal.proposalType}</span>
                     </div>
-                    <p className="text-sm text-slate-900 font-medium truncate">{row.proposal.summary}</p>
+                    <p className="text-sm text-foreground font-medium truncate">{row.proposal.summary}</p>
                     {holdExpiryLine(row, tz) && (
-                      <p className="text-xs text-amber-700 mt-0.5">{holdExpiryLine(row, tz)}</p>
+                      <p className="text-xs text-warning mt-0.5">{holdExpiryLine(row, tz)}</p>
                     )}
-                    {row.reason && <p className="text-xs text-slate-500 mt-0.5">{row.reason}</p>}
+                    {row.reason && <p className="text-xs text-muted-foreground mt-0.5">{row.reason}</p>}
                     <ProposalMarkers row={row} onResolveLine={resolveLine} />
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
                     <button
                       type="button"
                       onClick={() => actOnProposal(row.proposal.id, 'reject')}
-                      className="rounded-lg border border-slate-200 bg-white text-slate-700 text-sm px-3 py-1.5 hover:bg-slate-50"
+                      className="rounded-lg border border-border bg-card text-foreground text-sm px-3 py-1.5 hover:bg-secondary"
                     >
                       Reject
                     </button>
                     <button
                       type="button"
                       onClick={() => actOnProposal(row.proposal.id, 'approve')}
-                      className="rounded-lg bg-slate-900 text-white text-sm px-3 py-1.5 hover:bg-slate-700"
+                      className="rounded-lg bg-primary text-primary-foreground text-sm px-3 py-1.5 hover:bg-primary/90"
                     >
                       Approve
                     </button>
@@ -490,28 +599,28 @@ export function InboxPage() {
         {/* §5.5 — expired schedule proposal cards, clearly marked and re-proposable. */}
         {expired.length > 0 && (
           <div className="mt-8" data-testid="expired-section">
-            <h2 className="text-sm font-semibold text-slate-700 mb-2">Expired schedule proposals</h2>
+            <h2 className="text-sm font-semibold text-foreground mb-2">Expired schedule proposals</h2>
             <ul className="space-y-2">
               {expired.map((card) => (
                 <li
                   key={card.id}
                   data-testid="expired-row"
-                  className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3"
+                  className="rounded-xl border border-border bg-secondary px-4 py-3"
                 >
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2 mb-1">
-                        <span className="text-[10px] font-medium px-1.5 py-0.5 rounded border bg-slate-100 text-slate-500 border-slate-200">
+                        <span className="text-[10px] font-medium px-1.5 py-0.5 rounded border bg-secondary text-muted-foreground border-border">
                           Expired
                         </span>
-                        <span className="text-xs text-slate-500">{card.proposalType}</span>
+                        <span className="text-xs text-muted-foreground">{card.proposalType}</span>
                       </div>
-                      <p className="text-sm text-slate-700 font-medium truncate">{card.summary}</p>
+                      <p className="text-sm text-foreground font-medium truncate">{card.summary}</p>
                     </div>
                     <button
                       type="button"
                       onClick={() => repropose(card.id)}
-                      className="rounded-lg border border-slate-300 bg-white text-slate-700 text-sm px-3 py-1.5 hover:bg-slate-50 shrink-0"
+                      className="rounded-lg border border-border bg-card text-foreground text-sm px-3 py-1.5 hover:bg-secondary shrink-0"
                     >
                       Re-propose
                     </button>

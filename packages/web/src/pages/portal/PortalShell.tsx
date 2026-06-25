@@ -76,21 +76,21 @@ export function PortalShell() {
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-50">
-        <div className="text-slate-500">Loading your portal…</div>
+      <div className="min-h-screen flex items-center justify-center bg-background">
+        <div className="text-muted-foreground">Loading your portal…</div>
       </div>
     );
   }
 
   if (error || !customer) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-50 p-6">
-        <div className="max-w-md w-full bg-white rounded-2xl border border-rose-200 p-6 text-center">
-          <div className="text-lg font-semibold text-slate-900">Portal unavailable</div>
-          <div className="mt-2 text-sm text-slate-600">
+      <div className="min-h-screen flex items-center justify-center bg-background p-6">
+        <div className="max-w-md w-full bg-card rounded-2xl border border-destructive/20 p-6 text-center">
+          <div className="text-lg font-semibold text-foreground">Portal unavailable</div>
+          <div className="mt-2 text-sm text-foreground">
             {error ?? 'This portal link is invalid or has expired.'}
           </div>
-          <div className="mt-4 text-xs text-slate-400">
+          <div className="mt-4 text-xs text-muted-foreground">
             If you received this link from your service provider, please reach out
             to them for a fresh link.
           </div>
@@ -100,11 +100,11 @@ export function PortalShell() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-50">
-      <header className="bg-white border-b border-slate-200">
+    <div className="min-h-screen bg-background">
+      <header className="bg-card border-b border-border">
         <div className="max-w-3xl mx-auto px-4 sm:px-6 py-4">
-          <div className="text-xs text-slate-500">Customer Portal</div>
-          <div className="text-xl font-semibold text-slate-900">
+          <div className="text-xs text-muted-foreground">Customer Portal</div>
+          <div className="text-xl font-semibold text-foreground">
             Welcome, {greeting}
           </div>
         </div>
@@ -120,8 +120,8 @@ export function PortalShell() {
                   className={
                     'whitespace-nowrap py-2 px-1 text-sm border-b-2 ' +
                     (active
-                      ? 'border-slate-900 text-slate-900 font-medium'
-                      : 'border-transparent text-slate-500 hover:text-slate-700')
+                      ? 'border-primary text-foreground font-medium'
+                      : 'border-transparent text-muted-foreground hover:text-foreground')
                   }
                 >
                   {t.label}

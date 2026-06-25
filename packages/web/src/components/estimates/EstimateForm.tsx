@@ -235,28 +235,28 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
 
   return (
     <form onSubmit={handleSubmit} className="p-4 md:p-6 max-w-3xl mx-auto">
-      <h1 className="text-slate-900 mb-4">New Estimate</h1>
+      <h1 className="text-foreground mb-4">New Estimate</h1>
       {error && (
         <div
           role="alert"
-          className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700"
+          className="mb-3 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive"
         >
           {error}
         </div>
       )}
       {activeContract && (
-        <div className="mb-4 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3">
-          <p className="text-sm text-blue-800">
+        <div className="mb-4 rounded-lg border border-primary/30 bg-primary/10 px-4 py-3">
+          <p className="text-sm text-primary">
             <strong>Active maintenance contract:</strong> {activeContract.name}
             {activeContract.recurrenceRule && (
-              <span className="text-blue-600 ml-1">
+              <span className="text-primary ml-1">
                 ({activeContract.recurrenceRule.includes('MONTHLY') ? 'Monthly' :
                   activeContract.recurrenceRule.includes('QUARTERLY') ? 'Quarterly' :
                   activeContract.recurrenceRule.includes('YEARLY') ? 'Yearly' : activeContract.recurrenceRule})
               </span>
             )}
           </p>
-          <p className="text-xs text-blue-600 mt-1">
+          <p className="text-xs text-primary mt-1">
             Service call fee may be waived under this plan. Consider adding a plan-specific line item.
           </p>
         </div>
@@ -281,15 +281,15 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
 
         {/* Customer & service location (auto-populated) */}
         {selectedJob && (
-          <div className="md:col-span-2 rounded-lg bg-slate-50 border border-slate-200 px-3 py-2.5 text-sm text-slate-700 space-y-0.5">
+          <div className="md:col-span-2 rounded-lg bg-secondary border border-border px-3 py-2.5 text-sm text-foreground space-y-0.5">
             {customerName && (
-              <p><span className="text-xs text-slate-500">Customer:</span> {customerName}</p>
+              <p><span className="text-xs text-muted-foreground">Customer:</span> {customerName}</p>
             )}
             {serviceAddress && (
-              <p><span className="text-xs text-slate-500">Service address:</span> {serviceAddress}</p>
+              <p><span className="text-xs text-muted-foreground">Service address:</span> {serviceAddress}</p>
             )}
             {!serviceAddress && (
-              <p className="text-xs text-amber-600">⚠ No service location linked to this job</p>
+              <p className="text-xs text-warning">⚠ No service location linked to this job</p>
             )}
           </div>
         )}
@@ -321,7 +321,7 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
 
       <div className="mt-4">
         <div className="flex items-center justify-between mb-2">
-          <span className="text-xs text-slate-500 font-medium">Line items</span>
+          <span className="text-xs text-muted-foreground font-medium">Line items</span>
           <Button
             type="button"
             size="sm"
@@ -329,7 +329,7 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
             loading={aiLoading}
             disabled={aiLoading || aiUsed}
             leftIcon={<Sparkles size={12} />}
-            className="bg-violet-600 hover:bg-violet-700"
+            className="bg-primary hover:bg-primary"
           >
             {aiLoading ? 'Generating...' : aiUsed ? 'Suggestions added' : 'AI Suggestions'}
           </Button>
@@ -342,7 +342,7 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
         />
         {total > 0 && (
           <div className="mt-3 flex justify-end">
-            <p className="text-sm font-medium text-slate-900">
+            <p className="text-sm font-medium text-foreground">
               Total: <span className="text-lg">{totalDisplay}</span>
             </p>
           </div>

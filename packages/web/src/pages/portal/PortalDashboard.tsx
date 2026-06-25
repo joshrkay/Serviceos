@@ -103,10 +103,10 @@ export function PortalDashboard({ token, customer }: Props) {
   }, [token]);
 
   if (!snap.loaded) {
-    return <div className="text-slate-500">Loading…</div>;
+    return <div className="text-muted-foreground">Loading…</div>;
   }
   if (snap.error) {
-    return <div className="text-rose-600 text-sm">{snap.error}</div>;
+    return <div className="text-destructive text-sm">{snap.error}</div>;
   }
 
   const dueInvoices = snap.invoices.filter((i) => i.amountDueCents > 0);
@@ -121,7 +121,7 @@ export function PortalDashboard({ token, customer }: Props) {
       <PortalCard
         title="Amount due"
         trailing={
-          <span className="text-lg font-semibold text-slate-900">
+          <span className="text-lg font-semibold text-foreground">
             {formatPortalCents(totalDueCents)}
           </span>
         }
@@ -133,7 +133,7 @@ export function PortalDashboard({ token, customer }: Props) {
 
       <PortalCard
         title="Open estimates"
-        trailing={<span className="text-lg font-semibold text-slate-900">{openEstimates.length}</span>}
+        trailing={<span className="text-lg font-semibold text-foreground">{openEstimates.length}</span>}
       >
         {openEstimates.length === 0
           ? 'No estimates pending review.'
@@ -144,7 +144,7 @@ export function PortalDashboard({ token, customer }: Props) {
         title="Next appointment"
         trailing={
           nextAppt ? (
-            <span className="text-sm text-slate-700">
+            <span className="text-sm text-foreground">
               {new Date(nextAppt.scheduledStart).toLocaleString()}
             </span>
           ) : null
@@ -157,7 +157,7 @@ export function PortalDashboard({ token, customer }: Props) {
           <div className="mt-3 space-y-3">
             {showReschedule ? (
               <div className="space-y-3">
-                <div className="text-sm font-medium text-slate-700">
+                <div className="text-sm font-medium text-foreground">
                   Pick a new time
                 </div>
                 <PortalSlotPicker
@@ -168,7 +168,7 @@ export function PortalDashboard({ token, customer }: Props) {
                 <button
                   type="button"
                   onClick={() => setShowReschedule(false)}
-                  className="text-sm text-slate-500 hover:underline"
+                  className="text-sm text-muted-foreground hover:underline"
                 >
                   Never mind
                 </button>
@@ -178,7 +178,7 @@ export function PortalDashboard({ token, customer }: Props) {
                 <button
                   type="button"
                   onClick={() => setShowReschedule(true)}
-                  className="text-sm text-slate-700 hover:underline"
+                  className="text-sm text-foreground hover:underline"
                 >
                   Reschedule
                 </button>
@@ -186,22 +186,22 @@ export function PortalDashboard({ token, customer }: Props) {
                   type="button"
                   disabled={cancelling}
                   onClick={() => void cancelAppointment(nextAppt.id)}
-                  className="text-sm text-rose-600 hover:underline disabled:opacity-50"
+                  className="text-sm text-destructive hover:underline disabled:opacity-50"
                 >
                   {cancelling ? 'Requesting…' : 'Cancel this appointment'}
                 </button>
               </div>
             )}
-            {cancelErr ? <div className="text-xs text-rose-600">{cancelErr}</div> : null}
+            {cancelErr ? <div className="text-xs text-destructive">{cancelErr}</div> : null}
           </div>
         ) : null}
-        {cancelMsg ? <div className="mt-3 text-sm text-emerald-700">{cancelMsg}</div> : null}
+        {cancelMsg ? <div className="mt-3 text-sm text-success">{cancelMsg}</div> : null}
         {rescheduleMsg ? (
-          <div className="mt-3 text-sm text-emerald-700">{rescheduleMsg}</div>
+          <div className="mt-3 text-sm text-success">{rescheduleMsg}</div>
         ) : null}
       </PortalCard>
 
-      <div className="text-xs text-slate-400 pt-2">
+      <div className="text-xs text-muted-foreground pt-2">
         Logged in as {customer.email ?? customer.displayName}
       </div>
     </div>

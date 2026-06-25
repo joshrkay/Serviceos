@@ -64,7 +64,7 @@ export function CustomFieldsPanel({ customerId }: { customerId: string }) {
 
   if (fields.length === 0) {
     return (
-      <p className="text-sm text-slate-400">
+      <p className="text-sm text-muted-foreground">
         {error ?? 'No custom fields defined. Add them in settings to track extra details.'}
       </p>
     );
@@ -73,7 +73,7 @@ export function CustomFieldsPanel({ customerId }: { customerId: string }) {
   return (
     <div className="flex flex-col gap-3">
       {error && (
-        <p role="alert" className="text-sm text-red-600">
+        <p role="alert" className="text-sm text-destructive">
           {error}
         </p>
       )}

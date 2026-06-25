@@ -31,10 +31,10 @@ export function PortalInvoiceList({ token }: { token: string }) {
     };
   }, [token]);
 
-  if (!loaded) return <div className="text-slate-500">Loading invoices…</div>;
-  if (error) return <div className="text-rose-600 text-sm">{error}</div>;
+  if (!loaded) return <div className="text-muted-foreground">Loading invoices…</div>;
+  if (error) return <div className="text-destructive text-sm">{error}</div>;
   if (invoices.length === 0) {
-    return <div className="text-slate-500 text-sm">No invoices yet.</div>;
+    return <div className="text-muted-foreground text-sm">No invoices yet.</div>;
   }
 
   return (
@@ -46,21 +46,21 @@ export function PortalInvoiceList({ token }: { token: string }) {
           subtitle={`Status: ${inv.status.replace(/_/g, ' ')}`}
           trailing={
             <div className="text-right">
-              <div className="text-base font-semibold text-slate-900">
+              <div className="text-base font-semibold text-foreground">
                 {formatPortalCents(inv.totalCents)}
               </div>
               {inv.amountDueCents > 0 ? (
-                <div className="text-xs text-rose-600">
+                <div className="text-xs text-destructive">
                   {formatPortalCents(inv.amountDueCents)} due
                 </div>
               ) : (
-                <div className="text-xs text-emerald-600">Paid</div>
+                <div className="text-xs text-success">Paid</div>
               )}
             </div>
           }
         >
           <div className="flex items-center justify-between gap-2">
-            <div className="text-xs text-slate-500">
+            <div className="text-xs text-muted-foreground">
               {inv.dueDate
                 ? `Due ${new Date(inv.dueDate).toLocaleDateString()}`
                 : `Issued ${
@@ -74,7 +74,7 @@ export function PortalInvoiceList({ token }: { token: string }) {
                 href={inv.payNowUrl}
                 target="_blank"
                 rel="noreferrer"
-                className="inline-flex min-h-11 items-center rounded-lg bg-slate-900 px-3 text-sm font-medium text-white hover:bg-slate-800"
+                className="inline-flex min-h-11 items-center rounded-lg bg-primary px-3 text-sm font-medium text-white hover:bg-primary/90"
               >
                 Pay now
               </a>

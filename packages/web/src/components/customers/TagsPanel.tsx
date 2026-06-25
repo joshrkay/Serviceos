@@ -74,7 +74,7 @@ export function TagsPanel({ customerId }: { customerId: string }) {
   return (
     <div className="flex flex-col gap-3">
       {error && (
-        <p role="alert" className="text-sm text-red-600">
+        <p role="alert" className="text-sm text-destructive">
           {error}
         </p>
       )}
@@ -83,20 +83,20 @@ export function TagsPanel({ customerId }: { customerId: string }) {
         {tags.map((tag) => (
           <span
             key={tag}
-            className="inline-flex items-center gap-1 rounded-full bg-slate-100 py-1 pl-3 pr-1 text-sm text-slate-700"
+            className="inline-flex items-center gap-1 rounded-full bg-secondary py-1 pl-3 pr-1 text-sm text-foreground"
           >
             {tag}
             <button
               type="button"
               aria-label={`Remove tag ${tag}`}
               onClick={() => handleRemove(tag)}
-              className="flex h-6 w-6 items-center justify-center rounded-full text-slate-400 hover:bg-slate-200 hover:text-slate-700"
+              className="flex h-6 w-6 items-center justify-center rounded-full text-muted-foreground hover:bg-secondary hover:text-foreground"
             >
               <X size={13} />
             </button>
           </span>
         ))}
-        {tags.length === 0 && <p className="text-sm text-slate-400">No tags yet.</p>}
+        {tags.length === 0 && <p className="text-sm text-muted-foreground">No tags yet.</p>}
       </div>
 
       <form onSubmit={handleAdd} className="flex items-center gap-2">

@@ -4,6 +4,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { StoreBadges } from './StoreBadges';
 import { MarketingCTA } from './MarketingCTA';
 import { MarketingHeader } from './MarketingHeader';
+import { PricingPage } from './PricingPage';
 
 vi.mock('../../lib/analytics', () => ({
   track: vi.fn(),
@@ -44,6 +45,21 @@ describe('marketing CTA tap-target contract', () => {
     );
     const cta = screen.getByRole('button', { name: /start free trial/i });
     expect(cta.className).toContain('h-12');
+  });
+
+  it('the pricing card CTA is pinned by testid and wraps the lg button (h-12)', () => {
+    render(
+      <MemoryRouter>
+        <PricingPage />
+      </MemoryRouter>,
+    );
+    // PricingPage's card CTA is its own inline Link+Button (not <MarketingCTA>),
+    // so the E2E glove-target test locates it by this testid to avoid matching
+    // the header's smaller size="sm" CTA first. Pin both here so the contract
+    // regresses in jsdom without needing Playwright.
+    const cta = screen.getByTestId('pricing-primary-cta');
+    expect(cta).toHaveAttribute('href', '/signup');
+    expect(cta.querySelector('button')?.className).toContain('h-12');
   });
 
   it('the header keeps the logo, nav routes, and both auth CTAs', () => {

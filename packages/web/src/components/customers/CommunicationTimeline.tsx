@@ -218,7 +218,7 @@ export function CommunicationTimeline({
 
   if (isLoading) {
     return (
-      <div className="text-sm text-gray-500" data-testid="timeline-loading">
+      <div className="text-sm text-muted-foreground" data-testid="timeline-loading">
         Loading activity...
       </div>
     );
@@ -226,7 +226,7 @@ export function CommunicationTimeline({
 
   if (error) {
     return (
-      <div className="text-sm text-red-600" role="alert" data-testid="timeline-error">
+      <div className="text-sm text-destructive" role="alert" data-testid="timeline-error">
         {error}
       </div>
     );
@@ -234,7 +234,7 @@ export function CommunicationTimeline({
 
   if (events.length === 0) {
     return (
-      <div className="text-sm text-gray-500" data-testid="timeline-empty">
+      <div className="text-sm text-muted-foreground" data-testid="timeline-empty">
         No activity yet.
       </div>
     );
@@ -257,8 +257,8 @@ export function CommunicationTimeline({
                 className={
                   'px-2 py-1 text-xs rounded-full border ' +
                   (active
-                    ? 'bg-blue-600 text-white border-blue-600'
-                    : 'bg-white text-gray-700 border-gray-300')
+                    ? 'bg-primary text-primary-foreground border-primary'
+                    : 'bg-card text-foreground border-border')
                 }
                 data-testid={`timeline-filter-${kind}`}
               >
@@ -269,7 +269,7 @@ export function CommunicationTimeline({
         </div>
       )}
 
-      <ol className="relative border-l border-gray-200 ml-2">
+      <ol className="relative border-l border-border ml-2">
         {filteredEvents.map((ev) => {
           const occurredAt = new Date(ev.occurredAt);
           const href = sourceHref(ev);
@@ -281,13 +281,13 @@ export function CommunicationTimeline({
               data-kind={ev.kind}
             >
               <span
-                className="absolute -left-3 flex items-center justify-center w-6 h-6 rounded-full bg-gray-100 text-gray-700"
+                className="absolute -left-3 flex items-center justify-center w-6 h-6 rounded-full bg-secondary text-foreground"
                 data-testid={`timeline-icon-${ev.kind}`}
               >
                 {iconForKind(ev.kind)}
               </span>
               <div className="flex flex-col">
-                <div className="flex items-center gap-2 text-xs text-gray-500">
+                <div className="flex items-center gap-2 text-xs text-muted-foreground">
                   <time
                     dateTime={ev.occurredAt}
                     title={formatDateTimeInTenantTz(occurredAt, tz)}
@@ -296,11 +296,11 @@ export function CommunicationTimeline({
                   </time>
                   <span className="uppercase tracking-wide">{KIND_LABELS[ev.kind]}</span>
                 </div>
-                <div className="text-sm text-gray-900">{ev.summary}</div>
+                <div className="text-sm text-foreground">{ev.summary}</div>
                 {href && (
                   <a
                     href={href}
-                    className="text-xs text-blue-600 hover:underline mt-1"
+                    className="text-xs text-primary hover:underline mt-1"
                     data-testid="timeline-source-link"
                   >
                     View source
@@ -318,7 +318,7 @@ export function CommunicationTimeline({
             type="button"
             onClick={loadOlder}
             disabled={isLoadingMore}
-            className="text-xs text-blue-600 hover:underline disabled:opacity-50"
+            className="text-xs text-primary hover:underline disabled:opacity-50"
             data-testid="timeline-load-older"
           >
             {isLoadingMore ? 'Loading...' : 'Load older'}

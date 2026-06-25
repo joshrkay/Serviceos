@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent, within } from '@testing-library/react';
 import { InboxPage } from './InboxPage';
 
 const apiFetch = vi.fn();
@@ -268,5 +268,166 @@ describe('InboxPage', () => {
       '/api/proposals/p-2/reject',
       expect.objectContaining({ method: 'POST' }),
     );
+  });
+
+  // ── U6: "approve all eligible" (capture-class + high-confidence only) ──
+  describe('approve all eligible (U6)', () => {
+    interface RowOpts {
+      id: string;
+      proposalType: string;
+      summary: string;
+      confidenceScore?: number;
+      overallConfidence?: 'high' | 'medium' | 'low' | 'very_low';
+    }
+
+    function row(opts: RowOpts) {
+      const proposal: Record<string, unknown> = {
+        id: opts.id,
+        proposalType: opts.proposalType,
+        summary: opts.summary,
+        status: 'ready_for_review',
+        createdAt: new Date().toISOString(),
+      };
+      if (opts.confidenceScore !== undefined) proposal.confidenceScore = opts.confidenceScore;
+      if (opts.overallConfidence) proposal.payload = { _meta: { overallConfidence: opts.overallConfidence } };
+      return { proposal, urgency: 'normal', reason: 'Awaiting review' };
+    }
+
+    function inbox(rows: ReturnType<typeof row>[]) {
+      return jsonResponse({
+        data: rows,
+        summary: { totalCount: rows.length, criticalCount: 0, highCount: 0, normalCount: rows.length, lowCount: 0, truncated: false },
+      });
+    }
+
+    it('counts only capture-class, ≥0.8-confidence rows as eligible — incl. the no-_meta numeric path, and excludes money/comms/irreversible', async () => {
+      apiFetch.mockResolvedValueOnce(
+        inbox([
+          // eligible: capture + explicit _meta:'high' (no numeric score)
+          row({ id: 'cap-meta-high', proposalType: 'add_note', summary: 'Note: gate code is 4821', overallConfidence: 'high' }),
+          // eligible: capture + numeric 0.9, NO _meta (the common path a string-only gate would miss)
+          row({ id: 'cap-num-high', proposalType: 'create_customer', summary: 'New customer: Dana Lee', confidenceScore: 0.9 }),
+          // excluded: capture but only 0.6
+          row({ id: 'cap-mid', proposalType: 'draft_estimate', summary: 'Estimate for the Park job', confidenceScore: 0.6 }),
+          // excluded: non-capture (money) even at 0.95
+          row({ id: 'money', proposalType: 'record_payment', summary: 'Record $200 cash', confidenceScore: 0.95 }),
+          // excluded: non-capture (comms) even at _meta:'high'
+          row({ id: 'comms', proposalType: 'send_invoice', summary: 'Send invoice to the Ruiz job', overallConfidence: 'high' }),
+          // excluded: non-capture (irreversible) even at 0.99
+          row({ id: 'irrev', proposalType: 'cancel_appointment', summary: 'Cancel Tuesday 2pm', confidenceScore: 0.99 }),
+        ]),
+      );
+      apiFetch.mockResolvedValueOnce(jsonResponse({ approved: ['cap-meta-high', 'cap-num-high'], failed: [] }));
+
+      render(<InboxPage />);
+      await waitFor(() => screen.getByText('Note: gate code is 4821'));
+
+      const hero = screen.getByTestId('approve-all-eligible');
+      // Exactly the two capture-class high-confidence rows are counted.
+      expect(within(hero).getByRole('button')).toHaveTextContent('Approve all 2');
+
+      fireEvent.click(within(hero).getByRole('button'));
+
+      await waitFor(() => {
+        expect(apiFetch).toHaveBeenCalledWith(
+          '/api/proposals/approve-batch',
+          expect.objectContaining({
+            method: 'POST',
+            body: JSON.stringify({ proposalIds: ['cap-meta-high', 'cap-num-high'] }),
+          }),
+        );
+      });
+      // The two eligible rows are removed; the four excluded ones remain.
+      await waitFor(() => {
+        expect(screen.queryByText('Note: gate code is 4821')).not.toBeInTheDocument();
+      });
+      expect(screen.getByText('Record $200 cash')).toBeInTheDocument();
+      expect(screen.getByText('Send invoice to the Ruiz job')).toBeInTheDocument();
+      expect(screen.getByText('Cancel Tuesday 2pm')).toBeInTheDocument();
+    });
+
+    it('does not show the hero when nothing is eligible', async () => {
+      apiFetch.mockResolvedValueOnce(
+        inbox([
+          row({ id: 'money', proposalType: 'record_payment', summary: 'Record $200 cash', confidenceScore: 0.95 }),
+          row({ id: 'cap-mid', proposalType: 'draft_estimate', summary: 'Estimate for the Park job', confidenceScore: 0.6 }),
+        ]),
+      );
+      render(<InboxPage />);
+      await waitFor(() => screen.getByText('Record $200 cash'));
+      expect(screen.queryByTestId('approve-all-eligible')).not.toBeInTheDocument();
+    });
+
+    it('partial failure restores ONLY the failed row and leaves the approved one gone', async () => {
+      apiFetch.mockResolvedValueOnce(
+        inbox([
+          row({ id: 'a', proposalType: 'add_note', summary: 'Note A', overallConfidence: 'high' }),
+          row({ id: 'b', proposalType: 'create_customer', summary: 'Customer B', confidenceScore: 0.9 }),
+        ]),
+      );
+      // Server approved a but rejected b (e.g. a concurrent state change).
+      apiFetch.mockResolvedValueOnce(
+        jsonResponse({ approved: ['a'], failed: [{ id: 'b', reason: 'no longer pending' }] }),
+      );
+
+      render(<InboxPage />);
+      await waitFor(() => screen.getByText('Note A'));
+      fireEvent.click(within(screen.getByTestId('approve-all-eligible')).getByRole('button'));
+
+      await waitFor(() => {
+        // a is approved → gone; b failed → restored and still visible.
+        expect(screen.queryByText('Note A')).not.toBeInTheDocument();
+        expect(screen.getByText('Customer B')).toBeInTheDocument();
+      });
+      expect(screen.getByText(/1 couldn't be approved.*still waiting/i)).toBeInTheDocument();
+    });
+
+    it('a transport error restores the whole batch', async () => {
+      apiFetch.mockResolvedValueOnce(
+        inbox([row({ id: 'a', proposalType: 'add_note', summary: 'Note A', overallConfidence: 'high' })]),
+      );
+      apiFetch.mockResolvedValueOnce(jsonResponse({ message: 'boom' }, { status: 500 }));
+
+      render(<InboxPage />);
+      await waitFor(() => screen.getByText('Note A'));
+      fireEvent.click(within(screen.getByTestId('approve-all-eligible')).getByRole('button'));
+
+      // Optimistically removed, then restored when the POST fails.
+      await waitFor(() => {
+        expect(screen.getByText('Note A')).toBeInTheDocument();
+        expect(screen.getByText(/HTTP 500/)).toBeInTheDocument();
+      });
+    });
+
+    it('per-chain "Approve all" still batch-approves a chain (unaffected by the hero)', async () => {
+      apiFetch.mockResolvedValueOnce(
+        jsonResponse({
+          data: [
+            { proposal: { id: 'c1', proposalType: 'create_customer', summary: 'Create customer Pat', status: 'draft', createdAt: new Date().toISOString(), chainId: 'chain-1', sourceContext: { chainIndex: 0 } }, urgency: 'normal' },
+            { proposal: { id: 'c2', proposalType: 'draft_estimate', summary: 'Estimate for Pat', status: 'draft', createdAt: new Date().toISOString(), chainId: 'chain-1', sourceContext: { chainIndex: 1, dependsOnChainIndices: [0] } }, urgency: 'normal' },
+          ],
+          summary: { totalCount: 2, criticalCount: 0, highCount: 0, normalCount: 2, lowCount: 0, truncated: false },
+        }),
+      );
+      apiFetch.mockResolvedValueOnce(jsonResponse({ approved: ['c1', 'c2'], failed: [] }));
+
+      render(<InboxPage />);
+      await waitFor(() => screen.getByTestId('inbox-chain'));
+      // No confidence on the chain members → no hero affordance.
+      expect(screen.queryByTestId('approve-all-eligible')).not.toBeInTheDocument();
+
+      fireEvent.click(within(screen.getByTestId('inbox-chain')).getByRole('button', { name: /approve all/i }));
+
+      await waitFor(() => {
+        expect(apiFetch).toHaveBeenCalledWith(
+          '/api/proposals/approve-batch',
+          expect.objectContaining({
+            method: 'POST',
+            body: JSON.stringify({ proposalIds: ['c1', 'c2'] }),
+          }),
+        );
+      });
+      await waitFor(() => expect(screen.queryByTestId('inbox-chain')).not.toBeInTheDocument());
+    });
   });
 });

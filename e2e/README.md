@@ -23,9 +23,12 @@ First run downloads Chromium (~90MB). Cached after that.
 ## What's covered today
 
 ### Smoke (`smoke.spec.ts`)
-- `/login` page renders without errors
-- `/signup` page renders without errors
-- Unauthenticated visit to `/` redirects to `/login`
+- `/login` renders Rivet chrome (header + `© 2026 Rivet` footer) and the Clerk
+  sign-in widget, without page errors
+- `/signup` renders Rivet chrome and the Clerk sign-up widget
+- Signed-out `/` shows the public marketing landing page (`ProtectedRoute`
+  renders `LandingPage` at `/` — it does **not** redirect)
+- Signed-out `/jobs` (any protected route) redirects to `/login`
 - API `/health` endpoint responds 200
 
 These always run. If any fail, something basic is broken in the stack.
@@ -72,6 +75,36 @@ npm run e2e
 ```
 
 When `E2E_BASE_URL` is set, Playwright does NOT start local servers.
+
+## Full matrix / runbook (operator-only)
+
+The end-to-end beta-verification runbook (`scripts/qa-runbook-run.sh`, also
+`npm run qa:runbook`) seeds two tenants, mints HMAC session tokens, and drives
+all three harnesses (qa-runner stages, Playwright smoke, and the §16/§17 QA
+matrix) against deployed dev. It needs three operator-provided secrets — until
+they are set, the matrix / tenant-isolation rows report **blocked**, which is
+the correct state, not a failure:
+
+| Env var | Where to get it |
+|---------|-----------------|
+| `E2E_DB_URL_READWRITE` | Railway → Postgres → Connect (service-role URL) |
+| `E2E_DB_URL_READONLY` | read-only role URL; defaults to `E2E_DB_URL_READWRITE` if unset |
+| `E2E_CLERK_HMAC_SECRET` | the API's `CLERK_SECRET_KEY` (Railway → serviceosapi-development → Variables) |
+
+One-time setup on the deployed API (Railway → Variables): set
+`CLERK_DEV_HMAC_TOKENS=true`. The HMAC verifier path
+(`packages/api/src/auth/clerk.ts`) is gated by this flag — without it every
+minted token returns 401 even when the secret matches. It is refused when
+`NODE_ENV=production`, so this path targets dev/staging only.
+
+```bash
+E2E_DB_URL_READWRITE='postgres://…' \
+E2E_CLERK_HMAC_SECRET='sk_test_…' \
+  npm run qa:runbook
+```
+
+`E2E_BASE_URL` / `E2E_API_URL` default to Railway dev; override to target
+another environment.
 
 ## Why most journeys are skipped
 
