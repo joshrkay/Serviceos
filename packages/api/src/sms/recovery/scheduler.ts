@@ -393,9 +393,10 @@ export class PgDroppedCallRecoveryRepository
 
   async findDue(now: Date, limit: number): Promise<DroppedCallRecoveryRow[]> {
     // Cross-tenant drain: the worker is a system process, so we read across
-    // tenants via withClient and rely on the per-row tenant_id for the
-    // subsequent tenant-scoped send/stamp. Documented use of withClient.
-    return this.withClient(async (client) => {
+    // tenants via withCrossTenantSweep (named rls_cross_tenant role when
+    // enforcement is on) and rely on the per-row tenant_id for the subsequent
+    // tenant-scoped send/stamp.
+    return this.withCrossTenantSweep(async (client) => {
       const { rows } = await client.query(
         `SELECT id, tenant_id, voice_session_id, caller_e164,
                 scheduled_for, sent_at, suppressed_reason,
