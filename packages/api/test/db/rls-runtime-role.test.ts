@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Pool, PoolClient } from 'pg';
 import {
   applyTenantContext,
+  applyCrossTenantRole,
   clearTenantContext,
   isRlsRuntimeRoleEnabled,
   verifyRlsRuntimeRole,
@@ -109,6 +110,21 @@ describe('rls-runtime-role helper (U3)', () => {
     });
   });
 
+  describe('applyCrossTenantRole', () => {
+    it('flag OFF: issues no SET ROLE (runs as the connection principal)', async () => {
+      const { client, calls } = fakeClient();
+      await applyCrossTenantRole(client);
+      expect(calls).toHaveLength(0);
+    });
+
+    it('flag ON: SET ROLE rls_cross_tenant', async () => {
+      process.env.RLS_RUNTIME_ROLE = 'true';
+      const { client, calls } = fakeClient();
+      await applyCrossTenantRole(client);
+      expect(calls.map((c) => c.sql)).toEqual(['SET ROLE rls_cross_tenant']);
+    });
+  });
+
   describe('verifyRlsRuntimeRole', () => {
     it('is a no-op when the flag is off (never touches the pool)', async () => {
       const connect = vi.fn();
@@ -137,6 +153,23 @@ describe('rls-runtime-role helper (U3)', () => {
       } as unknown as PoolClient;
       const pool = { connect: vi.fn(async () => client) } as unknown as Pool;
       await expect(verifyRlsRuntimeRole(pool)).rejects.toThrow(/not assumable/);
+      expect(release).toHaveBeenCalled();
+    });
+
+    it('probes BOTH roles — throws naming rls_cross_tenant when only it is unassumable', async () => {
+      process.env.RLS_RUNTIME_ROLE = 'true';
+      const release = vi.fn();
+      const client = {
+        query: vi.fn(async (sql: string) => {
+          if (/SET ROLE rls_cross_tenant/.test(sql)) {
+            throw new Error('permission denied to set role "rls_cross_tenant"');
+          }
+          return { rows: [] }; // rls_app_runtime + RESET ROLE succeed
+        }),
+        release,
+      } as unknown as PoolClient;
+      const pool = { connect: vi.fn(async () => client) } as unknown as Pool;
+      await expect(verifyRlsRuntimeRole(pool)).rejects.toThrow(/rls_cross_tenant.*not assumable/);
       expect(release).toHaveBeenCalled();
     });
   });

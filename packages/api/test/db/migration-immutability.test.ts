@@ -360,6 +360,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['218_rls_coverage_oauth_states', '44a800f4db0502f69e57ff66c865e9a63ddaac669d5d3026a683d7bb4f3fc7f9'],
   // RLS hardening — revoke rls_app_runtime grants on tenant_id tables that lack RLS.
   ['219_rls_app_runtime_revoke_exempt', '0d19b84a142cd9f69d5f90d3bd8b1125969163026fd3a323cde2442dad915ecf'],
+  // RLS hardening — named rls_cross_tenant (BYPASSRLS) role for auditable cross-tenant sweeps.
+  ['220_create_rls_cross_tenant_role', 'ff8057f1f7cad211e77e7655b7a1204cbaffe2f263a823e8e5fc759b0fc37a28'],
 ];
 
 function hashMigration(value: string): string {

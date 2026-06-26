@@ -5360,6 +5360,33 @@ export const MIGRATIONS = {
     END
     $revoke$;
   `,
+  // Named role for INTENTIONAL cross-tenant access (proposal execution sweep,
+  // findAllActive cursors). BYPASSRLS so it can read/write across tenants on
+  // FORCE-RLS tables — same capability as the connection principal, so this is
+  // auditability (an explicit, attributable role) not privilege reduction. The
+  // app SET ROLEs into it via withCrossTenantSweep when RLS_RUNTIME_ROLE is on.
+  // Self-degrading: CREATE ROLE ... BYPASSRLS needs SUPERUSER, so a non-super
+  // migrate principal logs a NOTICE and the sweeps fall back to the connection
+  // principal (correct, just unattributed).
+  '220_create_rls_cross_tenant_role': `
+    DO $cross$
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'rls_cross_tenant') THEN
+        CREATE ROLE rls_cross_tenant NOLOGIN BYPASSRLS;
+      END IF;
+      GRANT USAGE ON SCHEMA public TO rls_cross_tenant;
+      GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO rls_cross_tenant;
+      GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO rls_cross_tenant;
+      ALTER DEFAULT PRIVILEGES IN SCHEMA public
+        GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO rls_cross_tenant;
+      ALTER DEFAULT PRIVILEGES IN SCHEMA public
+        GRANT USAGE, SELECT ON SEQUENCES TO rls_cross_tenant;
+      EXECUTE format('GRANT rls_cross_tenant TO %I', current_user);
+    EXCEPTION WHEN insufficient_privilege THEN
+      RAISE NOTICE 'rls_cross_tenant not provisioned (insufficient privilege; BYPASSRLS needs SUPERUSER); cross-tenant sweeps fall back to the connection principal';
+    END
+    $cross$;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

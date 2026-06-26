@@ -15,6 +15,12 @@ import { setTenantContext } from './schema';
  */
 
 const RLS_ROLE = 'rls_app_runtime';
+// Named role for INTENTIONAL cross-tenant access (the proposal execution sweep,
+// findAllActive cursors). BYPASSRLS — same capability as the connection
+// principal — so this is auditability, not privilege reduction: cross-tenant
+// access becomes an explicit, attributable role instead of an anonymous
+// privileged query. Provisioned by migration 220. (docs/plans/2026-06-25-006-...)
+const CROSS_TENANT_ROLE = 'rls_cross_tenant';
 
 export function isRlsRuntimeRoleEnabled(): boolean {
   return process.env.RLS_RUNTIME_ROLE === 'true';
@@ -53,6 +59,19 @@ export async function applyTenantContext(
 }
 
 /**
+ * Drop to the named cross-tenant sweep role for INTENTIONAL cross-tenant access
+ * (no `app.current_tenant_id` is set — the whole point is to span tenants).
+ * Session-level `SET ROLE`; the caller MUST `clearTenantContext(client)` before
+ * release (reuses the same RESET ROLE path). No-op when the flag is off, so the
+ * sweep runs as the connection principal exactly like today.
+ */
+export async function applyCrossTenantRole(client: PoolClient): Promise<void> {
+  if (isRlsRuntimeRoleEnabled()) {
+    await client.query(`SET ROLE ${CROSS_TENANT_ROLE}`);
+  }
+}
+
+/**
  * Reset session-level tenant context + role before returning a client to the
  * pool. Tolerant of broken connections (pg discards them on error). Resets the
  * role first (back to the connection principal), then the GUC.
@@ -80,15 +99,20 @@ export async function verifyRlsRuntimeRole(pool: Pool): Promise<void> {
   if (!isRlsRuntimeRoleEnabled()) return;
   const client = await pool.connect();
   try {
-    await client.query(`SET ROLE ${RLS_ROLE}`);
-    await client.query('RESET ROLE');
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    throw new Error(
-      `RLS_RUNTIME_ROLE=true but the '${RLS_ROLE}' role is not assumable (${msg}). ` +
-        `Provision it (migration 217 runs CREATE ROLE + GRANT) and grant membership to the ` +
-        `app's DB principal, or unset RLS_RUNTIME_ROLE.`
-    );
+    for (const role of [RLS_ROLE, CROSS_TENANT_ROLE]) {
+      try {
+        await client.query(`SET ROLE ${role}`);
+        await client.query('RESET ROLE');
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        throw new Error(
+          `RLS_RUNTIME_ROLE=true but the '${role}' role is not assumable (${msg}). ` +
+            `Provision it (migrations 217/220 run CREATE ROLE + GRANT; rls_cross_tenant needs ` +
+            `SUPERUSER to create as BYPASSRLS) and grant membership to the app's DB principal, ` +
+            `or unset RLS_RUNTIME_ROLE.`
+        );
+      }
+    }
   } finally {
     client.release();
   }
