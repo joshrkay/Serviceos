@@ -85,6 +85,24 @@ describe('runtime RLS audit — live pg catalog', () => {
     expect(missing, `tenant tables with NO RLS policy: ${missing.join(', ')}`).toEqual([]);
   });
 
+  it('rls_app_runtime holds no grant on any tenant_id table that lacks RLS (deny-list, migration 219)', async () => {
+    // The exempt tables carry tenant_id but have no policy to scope them, so the
+    // RLS-subject role must not be able to reach them at all — otherwise a
+    // tenant-path query under the role would read EVERY tenant's rows.
+    const pool = await getSharedTestDb();
+    const res = await pool.query(
+      `SELECT table_name, privilege_type
+       FROM information_schema.role_table_grants
+       WHERE grantee = 'rls_app_runtime' AND table_schema = 'public'
+         AND table_name = ANY($1)`,
+      [EXEMPT_TABLES],
+    );
+    expect(
+      res.rows.map((r: { table_name: string; privilege_type: string }) => `${r.table_name}:${r.privilege_type}`),
+      `rls_app_runtime must hold NO grant on the tenant_id-without-RLS tables, found: ${JSON.stringify(res.rows)}`,
+    ).toEqual([]);
+  });
+
   it('cross-tenant SELECT through the tenant GUC returns zero rows for a non-superuser', async () => {
     // The test pool connects as a superuser, and superusers bypass RLS
     // entirely (FORCE does not apply to them) — querying directly here

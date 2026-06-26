@@ -358,6 +358,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // RLS runtime-role enforcement — document the two RLS exemptions (oauth_states,
   // platform_deprovision_log) as table comments; both are intentionally policy-free.
   ['218_rls_coverage_oauth_states', '44a800f4db0502f69e57ff66c865e9a63ddaac669d5d3026a683d7bb4f3fc7f9'],
+  // RLS hardening — revoke rls_app_runtime grants on tenant_id tables that lack RLS.
+  ['219_rls_app_runtime_revoke_exempt', '0d19b84a142cd9f69d5f90d3bd8b1125969163026fd3a323cde2442dad915ecf'],
 ];
 
 function hashMigration(value: string): string {

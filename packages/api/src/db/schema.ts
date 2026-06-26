@@ -5329,6 +5329,37 @@ export const MIGRATIONS = {
     COMMENT ON TABLE platform_deprovision_log IS
       'Intentionally NOT under RLS: ops/audit log with no tenant FK, written via the privileged connection (withClient/pool.query), and must survive a tenant purge. Do not add a tenant_isolation policy.';
   `,
+  // Least-privilege: rls_app_runtime must hold NO grant on a table that carries
+  // tenant_id but has no RLS policy. Such a table (the deliberate exemptions
+  // oauth_states, platform_deprovision_log) has nothing to scope it, so under
+  // the RLS-subject role a tenant-path query would read EVERY tenant's rows —
+  // a cross-tenant leak with no backstop. Revoke so the role simply can't reach
+  // them (they are only ever accessed via the privileged connection anyway).
+  // Dynamic + self-maintaining: any future tenant_id-without-RLS table is
+  // revoked too. Idempotent (REVOKE of an absent grant is a no-op). Graceful if
+  // the role was never provisioned.
+  '219_rls_app_runtime_revoke_exempt': `
+    DO $revoke$
+    DECLARE t text;
+    BEGIN
+      FOR t IN
+        SELECT c.relname
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'public'
+        JOIN information_schema.columns col
+          ON col.table_schema = 'public' AND col.table_name = c.relname AND col.column_name = 'tenant_id'
+        WHERE c.relkind = 'r' AND NOT c.relrowsecurity
+      LOOP
+        EXECUTE format('REVOKE ALL ON public.%I FROM rls_app_runtime', t);
+      END LOOP;
+    EXCEPTION
+      WHEN undefined_object THEN
+        RAISE NOTICE 'rls_app_runtime role absent; nothing to revoke';
+      WHEN insufficient_privilege THEN
+        RAISE NOTICE 'insufficient privilege to REVOKE from rls_app_runtime; skipping';
+    END
+    $revoke$;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
