@@ -51,9 +51,13 @@ deploy still succeeds — but enforcement then stays off until the role exists.
 
 4. **Also provision the cross-tenant role** (`rls_cross_tenant`). Migration 220
    creates it, but `BYPASSRLS` requires **SUPERUSER**, which managed Postgres
-   often withholds — so this one frequently needs the admin fallback. When the
-   flag is on, the boot probe verifies BOTH roles and refuses to start if either
-   is missing.
+   often withholds — so this one frequently needs the admin fallback. Unlike
+   `rls_app_runtime`, this role is **optional**: it's BYPASSRLS (same capability
+   as the connection principal), so it buys auditability, not enforcement. If
+   it's absent the boot probe **warns and continues**, and the intentional
+   cross-tenant sweeps fall back to the connection principal (correct, just
+   unattributed) — provisioning it later restores attributable access without a
+   redeploy of the enforcement path.
    ```sql
    -- run as a superuser:
    CREATE ROLE rls_cross_tenant NOLOGIN BYPASSRLS;
@@ -66,7 +70,8 @@ deploy still succeeds — but enforcement then stays off until the role exists.
    ```
    If it can't be provisioned, the intentional cross-tenant sweeps (proposal
    execution, recovery/retention drains) fall back to the connection principal —
-   correct, just unattributed.
+   correct, just unattributed. (The boot probe still **requires**
+   `rls_app_runtime`; only `rls_cross_tenant` degrades gracefully.)
 
 ### The three runtime access modes (with the flag on)
 - **Per-tenant** → `rls_app_runtime` (RLS-enforced; migration 219 revokes its
@@ -109,9 +114,13 @@ The app immediately reverts to today's behavior (GUC set, no role drop). No
 migration, no data change. The `rls_app_runtime` role can be left provisioned.
 
 ## Notes / known scope
-- The privileged cross-tenant sweeps (`findReadyForExecution`, admin tenant
-  tooling) use `withClient` and intentionally stay on the connection principal —
-  they continue to see all tenants by design.
+- The intentional cross-tenant sweeps (`findReadyForExecution` and the
+  recovery/retention drains) now run through `withCrossTenantSweep`, which
+  assumes the named `rls_cross_tenant` role when the flag is on (falling back to
+  the connection principal when that role is absent — see step 4). They continue
+  to see all tenants by design. A few privileged paths that span tenants by a
+  different mechanism remain on the connection principal — accounting
+  `findAllActive` (its own `app.system_lookup` GUC) and admin tenant tooling.
 - The public estimate/invoice pages use `SECURITY DEFINER` token-lookup
   functions (migration 119) that run as the function owner, so they are
   unaffected by the role drop.

@@ -123,6 +123,22 @@ describe('rls-runtime-role helper (U3)', () => {
       await applyCrossTenantRole(client);
       expect(calls.map((c) => c.sql)).toEqual(['SET ROLE rls_cross_tenant']);
     });
+
+    it('flag ON but role unprovisioned: SET ROLE fails → degrades to the principal (no throw)', async () => {
+      // rls_cross_tenant is BYPASSRLS (needs SUPERUSER), so on managed Postgres
+      // it may be absent. The sweep must fall back to the connection principal,
+      // not crash. SET ROLE fails before any work and opens no transaction.
+      process.env.RLS_RUNTIME_ROLE = 'true';
+      const client = {
+        query: vi.fn(async (sql: string) => {
+          if (/SET ROLE/i.test(sql)) {
+            throw new Error('role "rls_cross_tenant" does not exist');
+          }
+          return { rows: [], rowCount: 0 };
+        }),
+      } as unknown as PoolClient;
+      await expect(applyCrossTenantRole(client)).resolves.toBeUndefined();
+    });
   });
 
   describe('verifyRlsRuntimeRole', () => {
@@ -156,8 +172,12 @@ describe('rls-runtime-role helper (U3)', () => {
       expect(release).toHaveBeenCalled();
     });
 
-    it('probes BOTH roles — throws naming rls_cross_tenant when only it is unassumable', async () => {
+    it('rls_cross_tenant is OPTIONAL — warns (does not throw) when only it is unassumable', async () => {
+      // It's BYPASSRLS (== the connection principal's capability); blocking the
+      // real RLS-enforcement rollout on an audit-only role would be the wrong
+      // trade. The sweeps fall back to the connection principal at runtime.
       process.env.RLS_RUNTIME_ROLE = 'true';
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       const release = vi.fn();
       const client = {
         query: vi.fn(async (sql: string) => {
@@ -169,7 +189,29 @@ describe('rls-runtime-role helper (U3)', () => {
         release,
       } as unknown as PoolClient;
       const pool = { connect: vi.fn(async () => client) } as unknown as Pool;
-      await expect(verifyRlsRuntimeRole(pool)).rejects.toThrow(/rls_cross_tenant.*not assumable/);
+      await expect(verifyRlsRuntimeRole(pool)).resolves.toBeUndefined();
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringMatching(/rls_cross_tenant.*not assumable/),
+      );
+      expect(release).toHaveBeenCalled();
+    });
+
+    it('rls_app_runtime stays REQUIRED — throws when it is the unassumable role', async () => {
+      process.env.RLS_RUNTIME_ROLE = 'true';
+      const release = vi.fn();
+      const client = {
+        query: vi.fn(async (sql: string) => {
+          if (/SET ROLE rls_app_runtime/.test(sql)) {
+            throw new Error('permission denied to set role "rls_app_runtime"');
+          }
+          return { rows: [] };
+        }),
+        release,
+      } as unknown as PoolClient;
+      const pool = { connect: vi.fn(async () => client) } as unknown as Pool;
+      await expect(verifyRlsRuntimeRole(pool)).rejects.toThrow(
+        /rls_app_runtime.*not assumable/,
+      );
       expect(release).toHaveBeenCalled();
     });
   });

@@ -114,13 +114,14 @@ export class PgBaseRepository {
   }
 
   /**
-   * Execute an INTENTIONAL cross-tenant sweep (the proposal execution sweep,
-   * findAllActive cursors) over tenant-scoped tables. Like `withClient`, but
-   * when `RLS_RUNTIME_ROLE` is on it runs as the named, auditable
+   * Execute an INTENTIONAL cross-tenant sweep (the proposal execution sweep and
+   * the recovery/retention drains) over tenant-scoped tables. Like `withClient`,
+   * but when `RLS_RUNTIME_ROLE` is on it runs as the named, auditable
    * `rls_cross_tenant` (BYPASSRLS) role so the cross-tenant access is explicit
    * and attributable rather than an anonymous privileged query. Resets the role
    * on release (same pool-leak discipline as the tenant path). No-op vs.
-   * `withClient` when the flag is off.
+   * `withClient` when the flag is off (or when the role is unprovisioned — see
+   * applyCrossTenantRole's documented fallback to the connection principal).
    */
   protected async withCrossTenantSweep<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
     const client = await this.pool.connect();

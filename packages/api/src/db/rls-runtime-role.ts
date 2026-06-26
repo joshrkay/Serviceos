@@ -15,11 +15,12 @@ import { setTenantContext } from './schema';
  */
 
 const RLS_ROLE = 'rls_app_runtime';
-// Named role for INTENTIONAL cross-tenant access (the proposal execution sweep,
-// findAllActive cursors). BYPASSRLS — same capability as the connection
-// principal — so this is auditability, not privilege reduction: cross-tenant
-// access becomes an explicit, attributable role instead of an anonymous
-// privileged query. Provisioned by migration 220. (docs/plans/2026-06-25-006-...)
+// Named role for INTENTIONAL cross-tenant access (the proposal execution sweep
+// and the recovery/retention drains — see withCrossTenantSweep callers).
+// BYPASSRLS — same capability as the connection principal — so this is
+// auditability, not privilege reduction: cross-tenant access becomes an
+// explicit, attributable role instead of an anonymous privileged query.
+// Provisioned by migration 220. (docs/plans/2026-06-25-006-...)
 const CROSS_TENANT_ROLE = 'rls_cross_tenant';
 
 export function isRlsRuntimeRoleEnabled(): boolean {
@@ -64,10 +65,22 @@ export async function applyTenantContext(
  * Session-level `SET ROLE`; the caller MUST `clearTenantContext(client)` before
  * release (reuses the same RESET ROLE path). No-op when the flag is off, so the
  * sweep runs as the connection principal exactly like today.
+ *
+ * Graceful degradation: `rls_cross_tenant` is BYPASSRLS, which needs SUPERUSER
+ * to create — managed Postgres often withholds it, so the role may be absent
+ * even with the flag on. If `SET ROLE` fails we fall back to the connection
+ * principal (same BYPASSRLS capability, just unattributed in DB audit logs).
+ * `SET ROLE` fails before any statement runs and opens no transaction, so the
+ * client is safe to reuse as the principal. `verifyRlsRuntimeRole` warns about
+ * the absence once at boot so the unattributed access is never a surprise.
  */
 export async function applyCrossTenantRole(client: PoolClient): Promise<void> {
-  if (isRlsRuntimeRoleEnabled()) {
+  if (!isRlsRuntimeRoleEnabled()) return;
+  try {
     await client.query(`SET ROLE ${CROSS_TENANT_ROLE}`);
+  } catch {
+    // Role unprovisioned/ungranted → run as the connection principal (the
+    // documented fallback). See JSDoc above.
   }
 }
 
@@ -90,30 +103,58 @@ export async function clearTenantContext(client: PoolClient): Promise<void> {
 }
 
 /**
- * Boot-time guard. When `RLS_RUNTIME_ROLE=true`, verify the role is actually
- * assumable and **throw** (refuse to boot) if not — so the app never runs with
- * the flag on while enforcement is silently absent (a false sense of security).
+ * Boot-time guard. When `RLS_RUNTIME_ROLE=true`:
+ *
+ * - `rls_app_runtime` (the enforcement role) MUST be assumable — **throw**
+ *   (refuse to boot) if not, so the app never runs with the flag on while
+ *   enforcement is silently absent (a false sense of security).
+ * - `rls_cross_tenant` (the auditability-only sweep role) is OPTIONAL — it's
+ *   BYPASSRLS (same capability as the connection principal), and creating it
+ *   needs SUPERUSER, which managed Postgres often withholds. If it's absent we
+ *   **warn and continue**: the intentional sweeps fall back to the connection
+ *   principal (correct, just unattributed). Blocking the real RLS-enforcement
+ *   rollout on an audit-only role would be the wrong trade.
+ *
  * No-op when the flag is off.
  */
 export async function verifyRlsRuntimeRole(pool: Pool): Promise<void> {
   if (!isRlsRuntimeRoleEnabled()) return;
   const client = await pool.connect();
   try {
-    for (const role of [RLS_ROLE, CROSS_TENANT_ROLE]) {
-      try {
-        await client.query(`SET ROLE ${role}`);
-        await client.query('RESET ROLE');
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        throw new Error(
-          `RLS_RUNTIME_ROLE=true but the '${role}' role is not assumable (${msg}). ` +
-            `Provision it (migrations 217/220 run CREATE ROLE + GRANT; rls_cross_tenant needs ` +
-            `SUPERUSER to create as BYPASSRLS) and grant membership to the app's DB principal, ` +
-            `or unset RLS_RUNTIME_ROLE.`
-        );
-      }
-    }
+    await probeRoleAssumable(client, RLS_ROLE, { required: true });
+    await probeRoleAssumable(client, CROSS_TENANT_ROLE, { required: false });
   } finally {
     client.release();
+  }
+}
+
+/**
+ * Probe whether `role` is assumable by the current principal (SET ROLE then
+ * RESET). A `required` role that isn't assumable throws; an optional one warns
+ * and resolves so boot continues with the documented degraded behavior.
+ */
+async function probeRoleAssumable(
+  client: PoolClient,
+  role: string,
+  opts: { required: boolean }
+): Promise<void> {
+  try {
+    await client.query(`SET ROLE ${role}`);
+    await client.query('RESET ROLE');
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (opts.required) {
+      throw new Error(
+        `RLS_RUNTIME_ROLE=true but the '${role}' role is not assumable (${msg}). ` +
+          `Provision it (migration 217 runs CREATE ROLE + GRANT) and grant membership ` +
+          `to the app's DB principal, or unset RLS_RUNTIME_ROLE.`
+      );
+    }
+    console.warn(
+      `[rls] RLS_RUNTIME_ROLE=true but the optional '${role}' role is not assumable ` +
+        `(${msg}); intentional cross-tenant sweeps will run as the connection principal ` +
+        `(correct, just unattributed). Provision it as a SUPERUSER (migration 220 / runbook) ` +
+        `to restore attributable access.`
+    );
   }
 }

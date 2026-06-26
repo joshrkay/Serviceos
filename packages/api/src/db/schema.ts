@@ -5361,7 +5361,7 @@ export const MIGRATIONS = {
     $revoke$;
   `,
   // Named role for INTENTIONAL cross-tenant access (proposal execution sweep,
-  // findAllActive cursors). BYPASSRLS so it can read/write across tenants on
+  // recovery/retention drains). BYPASSRLS so it can read/write across tenants on
   // FORCE-RLS tables — same capability as the connection principal, so this is
   // auditability (an explicit, attributable role) not privilege reduction. The
   // app SET ROLEs into it via withCrossTenantSweep when RLS_RUNTIME_ROLE is on.
