@@ -29,10 +29,21 @@ const SESSION_COLUMNS = `
   vs.started_at, vs.ended_at, vs.ended_reason, vs.cost_cents,
   vs.transcript, vs.customer_id,
   c.display_name AS customer_display_name,
-  l.street1 AS customer_address
+  -- One address per session. A LEFT JOIN to service_locations fans each session
+  -- into N rows for a customer with N locations, which duplicated interactions
+  -- and broke LIMIT/OFFSET pagination (it paginates the fanned-out rows, while
+  -- the total counts distinct sessions). A correlated scalar subquery returns
+  -- exactly one row, preferring the primary address (same ordering as
+  -- pg-location.ts / resolveBillingLocation).
+  (
+    SELECT l.street1
+    FROM service_locations l
+    WHERE l.customer_id = c.id AND l.tenant_id = vs.tenant_id
+    ORDER BY l.is_primary DESC, l.created_at ASC
+    LIMIT 1
+  ) AS customer_address
 FROM voice_sessions vs
-LEFT JOIN customers c ON c.id = vs.customer_id AND c.tenant_id = vs.tenant_id
-LEFT JOIN service_locations l ON l.customer_id = c.id AND l.tenant_id = vs.tenant_id`;
+LEFT JOIN customers c ON c.id = vs.customer_id AND c.tenant_id = vs.tenant_id`;
 
 export function createInteractionsRouter(deps: InteractionsRouterDeps): Router {
   const { pool } = deps;
