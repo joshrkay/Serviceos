@@ -49,6 +49,33 @@ deploy still succeeds — but enforcement then stays off until the role exists.
    (This is exactly what migration 217 attempts; running it as an admin is the
    fallback when the migrate principal can't.)
 
+4. **Also provision the cross-tenant role** (`rls_cross_tenant`). Migration 220
+   creates it, but `BYPASSRLS` requires **SUPERUSER**, which managed Postgres
+   often withholds — so this one frequently needs the admin fallback. When the
+   flag is on, the boot probe verifies BOTH roles and refuses to start if either
+   is missing.
+   ```sql
+   -- run as a superuser:
+   CREATE ROLE rls_cross_tenant NOLOGIN BYPASSRLS;
+   GRANT USAGE ON SCHEMA public TO rls_cross_tenant;
+   GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO rls_cross_tenant;
+   GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO rls_cross_tenant;
+   ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO rls_cross_tenant;
+   ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO rls_cross_tenant;
+   GRANT rls_cross_tenant TO <the app's DB user>;
+   ```
+   If it can't be provisioned, the intentional cross-tenant sweeps (proposal
+   execution, recovery/retention drains) fall back to the connection principal —
+   correct, just unattributed.
+
+### The three runtime access modes (with the flag on)
+- **Per-tenant** → `rls_app_runtime` (RLS-enforced; migration 219 revokes its
+  grants on the RLS-exempt tables so it can't read them cross-tenant).
+- **Intentional cross-tenant sweeps** → `rls_cross_tenant` (BYPASSRLS; named so
+  the access is attributable in DB audit logs).
+- **Migrations / view-token `SECURITY DEFINER` functions / global-table reads**
+  → the connection principal (unchanged).
+
 ## Rollout
 
 1. **Staging first.** Set `RLS_RUNTIME_ROLE=true` in staging and restart.
