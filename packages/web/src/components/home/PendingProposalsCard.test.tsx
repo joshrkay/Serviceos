@@ -46,17 +46,28 @@ describe('PendingProposalsCard', () => {
   });
 
   it('lists proposal cards with a humanized type and an expiry countdown', () => {
-    const inThreeHours = new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString();
-    hookState = {
-      proposals: [proposal({ id: 'a', summary: 'Book Jane', expiresAt: inThreeHours })],
-      count: 1,
-      isLoading: false,
-    };
-    render(<PendingProposalsCard />);
-    expect(screen.getByTestId('pending-proposals')).toBeInTheDocument();
-    expect(screen.getByText('Create booking')).toBeInTheDocument();
-    expect(screen.getByText('Book Jane')).toBeInTheDocument();
-    expect(screen.getByText(/Expires in 2h/)).toBeInTheDocument();
+    // Freeze the clock so the countdown is deterministic. With real timers the
+    // component's `Date.now()` runs a hair after the test computes `expiresAt`,
+    // so an exact-hour offset floors to either "3h 0m" (0ms elapsed) or
+    // "2h 59m" (>0ms) — a same-millisecond flake that turned CI red. A frozen
+    // clock + a non-boundary offset pins one label.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-21T10:00:00.000Z'));
+    try {
+      const expiresAt = new Date(Date.now() + (2 * 60 + 30) * 60 * 1000).toISOString(); // +2h30m
+      hookState = {
+        proposals: [proposal({ id: 'a', summary: 'Book Jane', expiresAt })],
+        count: 1,
+        isLoading: false,
+      };
+      render(<PendingProposalsCard />);
+      expect(screen.getByTestId('pending-proposals')).toBeInTheDocument();
+      expect(screen.getByText('Create booking')).toBeInTheDocument();
+      expect(screen.getByText('Book Jane')).toBeInTheDocument();
+      expect(screen.getByText('Expires in 2h 30m')).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('approves inline, hides the row, and notifies + refreshes', async () => {

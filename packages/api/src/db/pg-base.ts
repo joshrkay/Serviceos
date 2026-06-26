@@ -1,5 +1,5 @@
 import { Pool, PoolClient } from 'pg';
-import { setTenantContext } from './schema';
+import { applyTenantContext, applyCrossTenantRole, clearTenantContext } from './rls-runtime-role';
 import { tenantContextStore } from '../middleware/tenant-context';
 
 /**
@@ -36,19 +36,14 @@ export class PgBaseRepository {
     }
     const client = await this.pool.connect();
     try {
-      await client.query(setTenantContext(tenantId));
+      await applyTenantContext(client, tenantId);
       return await fn(client);
     } finally {
-      // GUC leak fix: plain `SET` persists on the underlying connection
-      // past COMMIT/ROLLBACK. Clear it explicitly before release so the
-      // next pool checkout doesn't inherit this tenant's context. Tolerant
-      // of mocks that return non-promises and of broken connections.
-      try {
-        await client.query('RESET app.current_tenant_id');
-      } catch {
-        // ignore — the connection is being released; a broken client
-        // will be discarded by pg itself when it sees the error.
-      }
+      // GUC/role leak fix: session-level `SET` persists on the underlying
+      // connection past COMMIT/ROLLBACK. Clear the GUC AND the RLS runtime
+      // role explicitly before release so the next pool checkout doesn't
+      // inherit this tenant's context or run as the restricted role.
+      await clearTenantContext(client);
       client.release();
     }
   }
@@ -84,7 +79,9 @@ export class PgBaseRepository {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
-      await client.query(setTenantContext(tenantId));
+      // Transactional context: SET LOCAL config + role auto-reset at
+      // COMMIT/ROLLBACK, so no leak survives the transaction.
+      await applyTenantContext(client, tenantId, { transactional: true });
       const result = await fn(client);
       await client.query('COMMIT');
       return result;
@@ -96,19 +93,10 @@ export class PgBaseRepository {
       }
       throw err;
     } finally {
-      // GUC leak fix: plain `SET` persists past COMMIT/ROLLBACK on the
-      // underlying connection. Clear it explicitly before release so the
-      // next pool checkout doesn't inherit this tenant's context.
-      // GUC leak fix: plain `SET` persists on the underlying connection
-      // past COMMIT/ROLLBACK. Clear it explicitly before release so the
-      // next pool checkout doesn't inherit this tenant's context. Tolerant
-      // of mocks that return non-promises and of broken connections.
-      try {
-        await client.query('RESET app.current_tenant_id');
-      } catch {
-        // ignore — the connection is being released; a broken client
-        // will be discarded by pg itself when it sees the error.
-      }
+      // Belt-and-suspenders: the SET LOCAL above auto-resets at COMMIT/
+      // ROLLBACK, but clear explicitly too so a broken/edge state can't leak
+      // the GUC or the restricted role to the next pool checkout.
+      await clearTenantContext(client);
       client.release();
     }
   }
@@ -121,6 +109,27 @@ export class PgBaseRepository {
     try {
       return await fn(client);
     } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Execute an INTENTIONAL cross-tenant sweep (the proposal execution sweep and
+   * the recovery/retention drains) over tenant-scoped tables. Like `withClient`,
+   * but when `RLS_RUNTIME_ROLE` is on it runs as the named, auditable
+   * `rls_cross_tenant` (BYPASSRLS) role so the cross-tenant access is explicit
+   * and attributable rather than an anonymous privileged query. Resets the role
+   * on release (same pool-leak discipline as the tenant path). No-op vs.
+   * `withClient` when the flag is off (or when the role is unprovisioned — see
+   * applyCrossTenantRole's documented fallback to the connection principal).
+   */
+  protected async withCrossTenantSweep<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
+    const client = await this.pool.connect();
+    try {
+      await applyCrossTenantRole(client);
+      return await fn(client);
+    } finally {
+      await clearTenantContext(client);
       client.release();
     }
   }

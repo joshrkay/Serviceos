@@ -343,6 +343,25 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['211_tenant_settings_reminder_offsets', '7043e4a221b59d530abd0a9d74ac8dd1a7f13379eeefb9b1749cc2b98368442a'],
   // Epic 12.6 — weekly feedback email opt-out (renumbered 204→207→212; body unchanged → hash preserved).
   ['212_tenant_settings_weekly_feedback', '3e78d143c8b22d97a2db02d551166f3ffaa23e12bb8c15b90dbc79340b6ef70f'],
+  // PRD US-340+US-341 — reminder cadence column default → [24, 2].
+  ['213_tenant_settings_reminder_offsets_default', '451325d4c247a81f0b0d60b015b7af26329f38918bde6b579d40bb94e3a26668'],
+  // PRD US-345 — 24h post-completion review-request sweep columns + backfill.
+  ['214_review_request_sweep', '3a843fa5148f8a2ce89fd5ea37647c2e29f0c0fa9d74d821c3f1b5a1afc37fc2'],
+  // Beta-verify fix — proposals.claimed_by UUID→TEXT (worker label, not a uuid);
+  // the type mismatch broke proposal execution entirely.
+  ['215_proposals_claimed_by_text', '35ffa973504fd016a63c3ef2e333de24070808889cf2c7159b34ee3c09857afa'],
+  // Beta-verify fix — create the missing delay_notice_state table the wired
+  // PgDelayNoticeStateRepository depends on (running-late SMS idempotency).
+  ['216_create_delay_notice_state', 'bad2c6a2b2b80e3bfc18beaf43b48a59b0064f031794a3400d2db8dc02d4c3d3'],
+  // RLS runtime-role enforcement — provision the least-privilege rls_app_runtime role.
+  ['217_create_rls_app_runtime_role', '15f26f56c0515ebce37164d9c4757fc5017c242a8b331b73018d870d9ebc3b78'],
+  // RLS runtime-role enforcement — document the two RLS exemptions (oauth_states,
+  // platform_deprovision_log) as table comments; both are intentionally policy-free.
+  ['218_rls_coverage_oauth_states', '44a800f4db0502f69e57ff66c865e9a63ddaac669d5d3026a683d7bb4f3fc7f9'],
+  // RLS hardening — revoke rls_app_runtime grants on tenant_id tables that lack RLS.
+  ['219_rls_app_runtime_revoke_exempt', '0d19b84a142cd9f69d5f90d3bd8b1125969163026fd3a323cde2442dad915ecf'],
+  // RLS hardening — named rls_cross_tenant (BYPASSRLS) role for auditable cross-tenant sweeps.
+  ['220_create_rls_cross_tenant_role', 'ff8057f1f7cad211e77e7655b7a1204cbaffe2f263a823e8e5fc759b0fc37a28'],
 ];
 
 function hashMigration(value: string): string {

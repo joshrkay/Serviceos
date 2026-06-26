@@ -32,6 +32,7 @@ import type { Request, Response, NextFunction } from 'express';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Pool, PoolClient } from 'pg';
 import type { AuthenticatedRequest } from '../auth/clerk';
+import { applyTenantContext } from '../db/rls-runtime-role';
 
 export interface TenantContext {
   client: PoolClient;
@@ -88,14 +89,11 @@ export function withTenantTransaction(pool: Pool) {
 
     try {
       await client.query('BEGIN');
-      // Parameterized so a malicious tenantId can't break out of the
-      // SQL string. SET LOCAL is required: without it the GUC would
-      // outlive the transaction and leak to the next request that
-      // checked out this pooled connection.
-      await client.query(
-        "SELECT set_config('app.current_tenant_id', $1, true)",
-        [tenantId],
-      );
+      // Parameterized so a malicious tenantId can't break out of the SQL
+      // string. SET LOCAL (config + RLS runtime role, when enabled) is
+      // required: without it the GUC/role would outlive the transaction and
+      // leak to the next request that checked out this pooled connection.
+      await applyTenantContext(client, tenantId, { transactional: true });
     } catch (err) {
       // BEGIN or SET failed — roll back (best effort) and release.
       try {

@@ -1,6 +1,6 @@
 import { Pool } from 'pg';
 import { isOutboundAllowed, type OutboundCheck } from './outbound-allowlist';
-import { setTenantContext } from '../db/schema';
+import { applyTenantContext } from '../db/rls-runtime-role';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 
 /**
@@ -97,7 +97,7 @@ export async function checkOutboundConsent(
   const client = await deps.pool.connect();
   try {
     await client.query('BEGIN');
-    await client.query(setTenantContext(ctx.tenantId));
+    await applyTenantContext(client, ctx.tenantId, { transactional: true });
 
     // DNC overrides consent. A number on the list cannot receive a call
     // even if a customer record has `consent_status = 'granted'`.
@@ -230,7 +230,7 @@ export async function recordCustomerConsent(
   let previous: string | null = null;
   try {
     await client.query('BEGIN');
-    await client.query(setTenantContext(input.tenantId));
+    await applyTenantContext(client, input.tenantId, { transactional: true });
 
     const before = await client.query<{ consent_status: string }>(
       `SELECT consent_status FROM customers

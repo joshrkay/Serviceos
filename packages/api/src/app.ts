@@ -7,6 +7,7 @@ import { openApiSpec } from './swagger/spec';
 import { createHealthRouter, HealthCheck } from './health/health';
 import { toErrorResponse } from './shared/errors';
 import { createPool } from './db/pool';
+import { verifyRlsRuntimeRole } from './db/rls-runtime-role';
 import { loadConfig } from './shared/config';
 import { createWebhookRouter } from './webhooks/routes';
 import { createIntegrationResolver } from './webhooks/integration-resolver';
@@ -365,6 +366,7 @@ import {
 } from './metrics/hfcr-weekly-send';
 import { runGoogleReviewsSweep } from './workers/google-reviews';
 import { runThankYouSmsSweep } from './workers/thank-you-sms-worker';
+import { runReviewRequestSweep } from './workers/review-request-worker';
 import { createLifecycleEmailWorker } from './workers/lifecycle-email-worker';
 import { runSetupReminderSweep } from './workers/setup-reminder-sweep';
 import { runTrialReminderSweep } from './workers/trial-reminder-sweep';
@@ -719,6 +721,18 @@ export function createApp(): express.Express {
   // In production, in-memory repositories lose all data on restart — crash fast.
   if (!pool && (config.NODE_ENV === 'prod' || config.NODE_ENV === 'staging')) {
     throw new Error('DATABASE_URL is required in production and staging environments');
+  }
+
+  // RLS runtime-role guard: when RLS_RUNTIME_ROLE=true, refuse to run unless the
+  // rls_app_runtime role is actually assumable — never serve with the flag on but
+  // enforcement silently absent. No-op when the flag is off.
+  if (pool) {
+    void verifyRlsRuntimeRole(pool).catch((err) => {
+      process.stderr.write(
+        `FATAL ${err instanceof Error ? err.message : String(err)}\n`
+      );
+      process.exit(1);
+    });
   }
 
   // Health checks — no auth required. Reuse the main pool (no duplicate connections).
@@ -1874,6 +1888,8 @@ export function createApp(): express.Express {
     proposalExpiry: 590019,
     // Epic 12.6 — weekly feedback email sweep (590019 taken by proposalExpiry on main).
     weeklyFeedback: 590020,
+    // PRD US-345 — 24h post-completion review-request sweep.
+    reviewRequest: 590021,
   } as const;
   const runAsLeader = async (lockKey: number, work: () => Promise<void>): Promise<void> => {
     if (shuttingDown) return;
@@ -3663,6 +3679,7 @@ export function createApp(): express.Express {
       locationRepo,
       enRouteCoordinator: delayNotificationCoordinator,
       proposalRepo,
+      userRepo,
       boardEventsDeps: {
         authUserIdFromRequest: async (req) =>
           (req as { auth?: { userId?: string } }).auth?.userId ?? null,
@@ -4930,6 +4947,28 @@ export function createApp(): express.Express {
       });
     }).catch((err) => {
       thankYouSmsLogger.error('Thank-you SMS sweep failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }, 10 * 60_000));
+
+  // Post-job review request (PRD US-345) — fires 24h after completion via the
+  // same P0-009 leader-locked sweep idiom; reuses the feedback_send worker for
+  // gated delivery (the immediate on-completion enqueue was removed).
+  const reviewRequestLogger = createLogger({
+    service: 'review-request-worker',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  registerInterval(setInterval(() => {
+    void runAsLeader(SWEEP_LOCK.reviewRequest, async () => {
+      await runReviewRequestSweep({
+        pool: pool ?? null,
+        jobRepo,
+        queue,
+        logger: reviewRequestLogger,
+      });
+    }).catch((err) => {
+      reviewRequestLogger.error('Review-request sweep failed', {
         error: err instanceof Error ? err.message : String(err),
       });
     });

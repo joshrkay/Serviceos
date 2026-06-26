@@ -234,6 +234,34 @@ export function createInvoiceRouter(
           return;
         }
 
+        // Customer filter (US-069). Invoices carry only job_id, so translate a
+        // customerId into the customer's jobIds and return invoices for those
+        // jobs. Uses existing repo methods (findByCustomer + findByJobs) — no
+        // new SQL. Returns the bare-array shape like the legacy jobId lookup;
+        // the CustomerDetail records panel consumes it directly. Optional
+        // status filter is applied in-memory; results sorted newest-first.
+        const customerId = typeof req.query.customerId === 'string' ? req.query.customerId : undefined;
+        if (customerId) {
+          if (!jobRepo?.findByCustomer) {
+            res.status(400).json({
+              error: 'VALIDATION_ERROR',
+              message: 'Customer filtering is not available in this environment',
+            });
+            return;
+          }
+          const customerJobs = await jobRepo.findByCustomer(req.auth!.tenantId, customerId);
+          const jobIds = customerJobs.map((j) => j.id);
+          if (jobIds.length === 0) {
+            res.json([]);
+            return;
+          }
+          let invoices = await invoiceRepo.findByJobs(req.auth!.tenantId, jobIds);
+          if (status) invoices = invoices.filter((inv) => inv.status === status);
+          invoices.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+          res.json(invoices);
+          return;
+        }
+
         // Legacy single-job lookup still returns the bare array shape so
         // existing UI code continues to work without an opt-in.
         if (jobId && req.query.paginated !== 'true' && req.query.limit === undefined && req.query.offset === undefined) {

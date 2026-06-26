@@ -5206,6 +5206,187 @@ export const MIGRATIONS = {
     ALTER TABLE tenant_settings
       ADD COLUMN IF NOT EXISTS weekly_feedback_enabled BOOLEAN NOT NULL DEFAULT true;
   `,
+
+  // PRD US-340 + US-341 — default the reminder cadence to T-24h AND T-2h.
+  // Migration 211 created the column with DEFAULT '[24]' (the legacy single
+  // reminder); this changes the column default for NEW tenant_settings rows to
+  // '[24, 2]'. Existing rows are left untouched — a tenant's explicit cadence
+  // is never overwritten. Idempotent (SET DEFAULT re-runs safely).
+  '213_tenant_settings_reminder_offsets_default': `
+    ALTER TABLE tenant_settings
+      ALTER COLUMN appointment_reminder_offsets_hours SET DEFAULT '[24, 2]'::jsonb;
+  `,
+
+  // PRD US-345 — auto review request 24h after job completion. Mirrors the
+  // thank-you-SMS pattern (migration 194):
+  //   - jobs.review_request_sent_at: per-job idempotency stamp. The 24h sweep
+  //     enqueues feedback_send (the existing gated review/feedback delivery)
+  //     once per job, then stamps this; suppressed reasons stamp it too so the
+  //     sweep never re-checks the row.
+  //   - tenant_settings.send_review_request: opt-out per tenant. Default ON to
+  //     match the PRD's auto_send_review_request default + preserve the current
+  //     "every completed job gets a request" audience (just at 24h, not
+  //     immediately — the immediate enqueue in routes/jobs.ts is removed).
+  // Backfill: pre-existing 'completed' jobs get review_request_sent_at =
+  // COALESCE(completed_at, updated_at) so the first sweep after deploy doesn't
+  // blast customers for jobs finished long ago.
+  '214_review_request_sweep': `
+    ALTER TABLE jobs ADD COLUMN IF NOT EXISTS review_request_sent_at TIMESTAMPTZ;
+    ALTER TABLE tenant_settings ADD COLUMN IF NOT EXISTS send_review_request BOOLEAN NOT NULL DEFAULT TRUE;
+    UPDATE jobs
+      SET review_request_sent_at = COALESCE(completed_at, updated_at)
+      WHERE status = 'completed'
+        AND review_request_sent_at IS NULL;
+    CREATE INDEX IF NOT EXISTS idx_jobs_review_request_eligibility
+      ON jobs (tenant_id, completed_at)
+      WHERE review_request_sent_at IS NULL AND completed_at IS NOT NULL;
+  `,
+  // proposals.claimed_by stored the execution-worker identifier, but the
+  // column was created as UUID (migration that added it) while the worker
+  // passes a string label ('execution-worker'). Every claimForExecution
+  // therefore threw `invalid input syntax for type uuid`, so NO approved
+  // proposal ever reached 'executing'/'executed' — proposal execution was
+  // silently broken in production. The value is a worker label, not a user
+  // id; align the type with executed_by/created_by (both TEXT).
+  '215_proposals_claimed_by_text': `
+    ALTER TABLE proposals ALTER COLUMN claimed_by TYPE TEXT USING claimed_by::text;
+  `,
+  // delay_notice_state backs the running-late SMS idempotency guard, but the
+  // table was never created — PgDelayNoticeStateRepository.upsert() (wired in
+  // production via the pool) INSERTs into a nonexistent relation, throws, and
+  // the route swallows the error and returns {queued:true}. Net effect: the
+  // "tech is running late" SMS to the next customer is silently dropped and
+  // the idempotency guard can never engage. Create the table the repo expects.
+  // PK is idempotency_key so retries upsert in place (mirrors the InMemory Map).
+  '216_create_delay_notice_state': `
+    CREATE TABLE IF NOT EXISTS delay_notice_state (
+      idempotency_key TEXT PRIMARY KEY,
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      appointment_id UUID NOT NULL,
+      delay_version INTEGER NOT NULL,
+      status TEXT NOT NULL,
+      channel TEXT NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      max_attempts INTEGER NOT NULL,
+      last_error TEXT,
+      provider_message_id TEXT,
+      trigger_context JSONB,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_delay_notice_state_tenant ON delay_notice_state (tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_delay_notice_state_appointment ON delay_notice_state (tenant_id, appointment_id);
+    ALTER TABLE delay_notice_state ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE delay_notice_state FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_delay_notice_state ON delay_notice_state;
+    CREATE POLICY tenant_isolation_delay_notice_state ON delay_notice_state
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+  // Least-privilege runtime role for RLS enforcement. The app connects as a
+  // privileged principal (needs to run migrations + own the view-token
+  // SECURITY DEFINER functions), so RLS is a runtime no-op today. This role is
+  // RLS-SUBJECT (NOT superuser, NOT BYPASSRLS, never a table owner): when the
+  // app `SET ROLE`s into it for tenant-scoped queries (gated by RLS_RUNTIME_ROLE),
+  // every policy actually enforces. Grants are broad (ALL TABLES + future via
+  // ALTER DEFAULT PRIVILEGES) so RLS — not the grant — is what isolates tenants;
+  // a narrow grant list would 500 a query the day someone adds a table.
+  // Self-degrading: a deploy principal without CREATEROLE/GRANT logs a NOTICE
+  // and continues (enforcement simply stays off until the role is provisioned).
+  '217_create_rls_app_runtime_role': `
+    DO $rls$
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'rls_app_runtime') THEN
+        CREATE ROLE rls_app_runtime NOLOGIN;
+      END IF;
+      GRANT USAGE ON SCHEMA public TO rls_app_runtime;
+      GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO rls_app_runtime;
+      GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO rls_app_runtime;
+      ALTER DEFAULT PRIVILEGES IN SCHEMA public
+        GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO rls_app_runtime;
+      ALTER DEFAULT PRIVILEGES IN SCHEMA public
+        GRANT USAGE, SELECT ON SEQUENCES TO rls_app_runtime;
+      -- Let the app's connection principal assume the role.
+      EXECUTE format('GRANT rls_app_runtime TO %I', current_user);
+    EXCEPTION WHEN insufficient_privilege THEN
+      RAISE NOTICE 'rls_app_runtime not provisioned (insufficient privilege); RLS runtime role stays disabled until provisioned by an admin';
+    END
+    $rls$;
+  `,
+  // The two tenant tables that carry tenant_id but have NO RLS policy are BOTH
+  // intentional exemptions (pinned by RLS_EXEMPT_TABLES in test/db/schema.test.ts).
+  // Record the rationale durably as table comments — do NOT add policies:
+  //   - oauth_states: short-lived OAuth state nonces. The provider /callback
+  //     reads the row to DISCOVER its tenant — CalendarOauthStateRepository.consume()
+  //     runs `pool.query(UPDATE oauth_states ... WHERE id=$1 RETURNING tenant_id)`
+  //     with NO tenant context, because the callback doesn't know the tenant yet
+  //     (the unguessable nonce id IS the capability). An RLS policy keyed on
+  //     app.current_tenant_id would break every OAuth callback under a non-bypass
+  //     role. (Earlier in this branch this migration wrongly FORCE-RLSed it.)
+  //   - platform_deprovision_log: ops/audit log with no tenant FK, written via the
+  //     privileged connection, must survive a tenant purge.
+  '218_rls_coverage_oauth_states': `
+    COMMENT ON TABLE oauth_states IS
+      'Intentionally NOT under RLS: OAuth state nonces consumed by the provider /callback BEFORE tenant context exists (consume() recovers tenant_id from the row by its unguessable id). An app.current_tenant_id RLS policy would break OAuth callbacks under a non-bypass role. Exempt by design — see test/db/schema.test.ts RLS_EXEMPT_TABLES.';
+    COMMENT ON TABLE platform_deprovision_log IS
+      'Intentionally NOT under RLS: ops/audit log with no tenant FK, written via the privileged connection (withClient/pool.query), and must survive a tenant purge. Do not add a tenant_isolation policy.';
+  `,
+  // Least-privilege: rls_app_runtime must hold NO grant on a table that carries
+  // tenant_id but has no RLS policy. Such a table (the deliberate exemptions
+  // oauth_states, platform_deprovision_log) has nothing to scope it, so under
+  // the RLS-subject role a tenant-path query would read EVERY tenant's rows —
+  // a cross-tenant leak with no backstop. Revoke so the role simply can't reach
+  // them (they are only ever accessed via the privileged connection anyway).
+  // Dynamic + self-maintaining: any future tenant_id-without-RLS table is
+  // revoked too. Idempotent (REVOKE of an absent grant is a no-op). Graceful if
+  // the role was never provisioned.
+  '219_rls_app_runtime_revoke_exempt': `
+    DO $revoke$
+    DECLARE t text;
+    BEGIN
+      FOR t IN
+        SELECT c.relname
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'public'
+        JOIN information_schema.columns col
+          ON col.table_schema = 'public' AND col.table_name = c.relname AND col.column_name = 'tenant_id'
+        WHERE c.relkind = 'r' AND NOT c.relrowsecurity
+      LOOP
+        EXECUTE format('REVOKE ALL ON public.%I FROM rls_app_runtime', t);
+      END LOOP;
+    EXCEPTION
+      WHEN undefined_object THEN
+        RAISE NOTICE 'rls_app_runtime role absent; nothing to revoke';
+      WHEN insufficient_privilege THEN
+        RAISE NOTICE 'insufficient privilege to REVOKE from rls_app_runtime; skipping';
+    END
+    $revoke$;
+  `,
+  // Named role for INTENTIONAL cross-tenant access (proposal execution sweep,
+  // recovery/retention drains). BYPASSRLS so it can read/write across tenants on
+  // FORCE-RLS tables — same capability as the connection principal, so this is
+  // auditability (an explicit, attributable role) not privilege reduction. The
+  // app SET ROLEs into it via withCrossTenantSweep when RLS_RUNTIME_ROLE is on.
+  // Self-degrading: CREATE ROLE ... BYPASSRLS needs SUPERUSER, so a non-super
+  // migrate principal logs a NOTICE and the sweeps fall back to the connection
+  // principal (correct, just unattributed).
+  '220_create_rls_cross_tenant_role': `
+    DO $cross$
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'rls_cross_tenant') THEN
+        CREATE ROLE rls_cross_tenant NOLOGIN BYPASSRLS;
+      END IF;
+      GRANT USAGE ON SCHEMA public TO rls_cross_tenant;
+      GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO rls_cross_tenant;
+      GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO rls_cross_tenant;
+      ALTER DEFAULT PRIVILEGES IN SCHEMA public
+        GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO rls_cross_tenant;
+      ALTER DEFAULT PRIVILEGES IN SCHEMA public
+        GRANT USAGE, SELECT ON SEQUENCES TO rls_cross_tenant;
+      EXECUTE format('GRANT rls_cross_tenant TO %I', current_user);
+    EXCEPTION WHEN insufficient_privilege THEN
+      RAISE NOTICE 'rls_cross_tenant not provisioned (insufficient privilege; BYPASSRLS needs SUPERUSER); cross-tenant sweeps fall back to the connection principal';
+    END
+    $cross$;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

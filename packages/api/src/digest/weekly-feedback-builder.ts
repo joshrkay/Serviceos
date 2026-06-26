@@ -7,7 +7,7 @@
  * integer cents throughout.
  */
 import type { Pool } from 'pg';
-import { setTenantContext } from '../db/schema';
+import { applyTenantContext, clearTenantContext } from '../db/rls-runtime-role';
 import type { WeeklyFeedbackSnapshot } from './weekly-feedback';
 
 export async function buildWeeklyFeedbackSnapshot(
@@ -19,7 +19,7 @@ export async function buildWeeklyFeedbackSnapshot(
   const priorStart = new Date(weekStart.getTime() - (weekEnd.getTime() - weekStart.getTime()));
   const client = await pool.connect();
   try {
-    await client.query(setTenantContext(tenantId));
+    await applyTenantContext(client, tenantId);
 
     // Every query filters by tenant_id explicitly in ADDITION to the RLS GUC
     // set above — defense-in-depth (matches the money-dashboard repo). RLS
@@ -102,7 +102,7 @@ export async function buildWeeklyFeedbackSnapshot(
       outstandingCents: num(outstanding.rows[0]?.outstanding),
     };
   } finally {
-    await client.query('RESET app.current_tenant_id').catch(() => {});
+    await clearTenantContext(client);
     client.release();
   }
 }

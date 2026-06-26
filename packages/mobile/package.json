@@ -1,6 +1,6 @@
 {
   "name": "@serviceos/mobile",
-  "version": "0.0.1",
+  "version": "1.0.0",
   "private": true,
   "main": "expo-router/entry",
   "//": "Isolated Expo project — intentionally NOT a root npm workspace. The root Dockerfile runs `npm ci` over packages/api|web|shared only; adding mobile to the root workspaces would either break that `npm ci` (missing workspace in the image) or pull the Expo/RN tree into the api image. Metro resolves @ai-service-os/shared from ../shared/src (see metro.config.js).",

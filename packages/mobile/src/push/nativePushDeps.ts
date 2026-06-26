@@ -1,8 +1,27 @@
 // Native bindings for the push pipeline (expo-notifications + Platform). Kept
 // thin and RN-coupled so registerForPush.ts stays pure and testable.
 import * as Notifications from 'expo-notifications';
+import Constants from 'expo-constants';
 import { Platform } from 'react-native';
 import { classifyExpoTokenError, type ExpoTokenResult, type PushPermission } from './registerForPush';
+
+/**
+ * Resolve the EAS projectId for push-token minting. In a standalone / production
+ * EAS build there is no dev-client to auto-resolve it, so
+ * `getExpoPushTokenAsync` must be passed the projectId explicitly or it throws —
+ * which would latch EVERY production user out of push. `eas init` writes it into
+ * app.json (`expo.extra.eas.projectId`); an `EAS_PROJECT_ID` env override is
+ * also honored. Returns undefined in dev before `eas init`, where the
+ * dev-client resolves the id on its own (so the bare call still works locally).
+ */
+function resolveProjectId(): string | undefined {
+  const fromConfig = (
+    Constants.expoConfig?.extra as { eas?: { projectId?: string } } | undefined
+  )?.eas?.projectId;
+  const fromEnv = process.env.EAS_PROJECT_ID;
+  const id = fromConfig || fromEnv;
+  return id && id.length > 0 ? id : undefined;
+}
 
 export async function getPermission(): Promise<PushPermission> {
   const p = await Notifications.getPermissionsAsync();
@@ -29,7 +48,12 @@ export async function ensureAndroidChannel(): Promise<void> {
 
 export async function getExpoPushToken(): Promise<ExpoTokenResult> {
   try {
-    const token = await Notifications.getExpoPushTokenAsync();
+    // Pass the projectId explicitly so standalone/production builds (no
+    // dev-client) can mint a token; omit it in dev where Expo auto-resolves.
+    const projectId = resolveProjectId();
+    const token = projectId
+      ? await Notifications.getExpoPushTokenAsync({ projectId })
+      : await Notifications.getExpoPushTokenAsync();
     return token.data ? { status: 'ok', token: token.data } : { status: 'unsupported' };
   } catch (err) {
     // expo-notifications throws on simulators / devices without push hardware

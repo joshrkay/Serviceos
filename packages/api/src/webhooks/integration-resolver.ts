@@ -32,7 +32,7 @@ export function createIntegrationResolver(pool: Pool): IntegrationResolver {
     // can't reach setTenantContext's throw on a checked-out client.
     if (!isValidTenantId(tenantId)) return null;
     const { decrypt } = await import('../integrations/crypto');
-    const { setTenantContext } = await import('../db/schema');
+    const { applyTenantContext } = await import('../db/rls-runtime-role');
     const encKey = process.env.TENANT_ENCRYPTION_KEY;
 
     const client = await pool.connect();
@@ -44,7 +44,7 @@ export function createIntegrationResolver(pool: Pool): IntegrationResolver {
     }> = [];
     try {
       await client.query('BEGIN');
-      await client.query(setTenantContext(tenantId));
+      await applyTenantContext(client, tenantId, { transactional: true });
       const result = await client.query<{
         subaccount_sid: string | null;
         auth_token_primary_enc: string | null;
