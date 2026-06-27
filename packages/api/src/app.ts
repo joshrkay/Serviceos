@@ -4177,7 +4177,7 @@ export function createApp(): express.Express {
     ),
   );
   if (pool) {
-    app.use('/api/interactions', createInteractionsRouter({ pool }));
+    app.use('/api/interactions', createInteractionsRouter({ pool, dispatchRepo }));
   }
 
   // ── Service agreements (P9-003) ─────────────────────────────────────────

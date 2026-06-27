@@ -17,6 +17,7 @@ import type { Pool } from 'pg';
 import { closeSharedTestDb, createTestTenant, getSharedTestDb } from './shared';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
 import { createInteractionsRouter } from '../../src/routes/interactions';
+import { InMemoryDispatchRepository } from '../../src/notifications/dispatch-repository';
 
 let pool: Pool;
 
@@ -39,7 +40,7 @@ function buildApp(tenantId: string) {
     };
     next();
   });
-  app.use('/api/interactions', createInteractionsRouter({ pool }));
+  app.use('/api/interactions', createInteractionsRouter({ pool, dispatchRepo: new InMemoryDispatchRepository() }));
   return app;
 }
 
