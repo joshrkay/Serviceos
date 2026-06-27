@@ -1,4 +1,37 @@
-# Voice Capacity
+# Capacity
+
+Per-instance ceilings for the two load paths — HTTP/API and concurrent Twilio
+Media Streams voice — feeding the replica math in the scale-to-1000 plan
+(`docs/plans/2026-06-27-001-feat-scale-to-1000-concurrent-users-plan.md`).
+
+## HTTP / API capacity baseline (scale-to-1000 U1)
+
+Driven by the dependency-free harness in `loadtest/` (see `loadtest/README.md`).
+"Max concurrent" is the highest VU count at which HTTP **p95 < 2000 ms** AND
+**error rate < 1%** over a 5-minute hold.
+
+| Run date | Target | DB pool (`DB_MAX_CONNECTIONS`) | Max concurrent VUs | p95 (ms) | First bottleneck | Notes |
+|----------|--------|-------------------------------|--------------------|----------|------------------|-------|
+| TBD      | local compose | 20 (shipping default) |        |          | expected: DB pool exhaustion | baseline before any change |
+
+Fill this row by running the local topology and ramping `--max` until the knee:
+
+```bash
+docker compose -f loadtest/docker-compose.loadtest.yml up --build -d
+# mint a DEV_AUTH_BYPASS token (loadtest/README.md step 2) → $TOKEN
+npx tsx loadtest/http-load.ts --url http://localhost:3000 --token "$TOKEN" \
+  --max 200 --ramp 60 --hold 300 --rampdown 30 --out loadtest/report.json
+```
+
+The expected first bottleneck is the DB connection pool (default `max:20`,
+held per-request by the RLS middleware) — visible as `connectionTimeout`
+errors in API logs and, after U2, the pool-saturation metric. Re-run after each
+scaling phase and add a row; the multi-replica curve (U5) multiplies this
+per-instance number.
+
+Harness health (no app boot, proves the tooling): `npm run loadtest:http:selfcheck`.
+
+## Voice capacity
 
 Per-instance ceiling for concurrent Twilio Media Streams calls, derived from
 running the §11 H5 voice load test against staging.

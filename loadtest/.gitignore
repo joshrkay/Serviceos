@@ -1,0 +1,3 @@
+# Generated load-test reports (artifacts of a run, not source).
+report*.json
+voice-load-report.json
