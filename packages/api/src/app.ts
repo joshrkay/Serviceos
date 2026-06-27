@@ -458,6 +458,7 @@ import {
   shutdownCacheStores,
 } from './ai/gateway/factory';
 import * as gatewayFactory from './ai/gateway/factory';
+import { shutdownRedisClients } from './redis/redis-client';
 import { createAiHealthRouter } from './routes/ai-health';
 import { InMemoryAiRunRepository } from './ai/ai-run';
 import { PgAiRunRepository } from './ai/pg-ai-run';
@@ -5286,6 +5287,10 @@ export function createApp(): express.Express {
       // Disconnect Redis cache store(s) before draining the DB pool so Railway
       // shutdown is not slowed by lingering Redis connections.
       await shutdownCacheStores();
+      // scale-to-1000 U3a — close shared Redis clients (WS connection cap, voice
+      // fan-out, quota, and the refactored cache) after the cache flush and
+      // BEFORE the pg pool drains, in the same shutdown slot as the cache.
+      await shutdownRedisClients();
       if (pool) {
         await Promise.race([
           pool.end(),
