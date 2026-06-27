@@ -19,6 +19,7 @@ import { createUserPhoneDispatcherResolver, createBusinessPhoneFallback } from '
 import { PgPhoneNumberRepository } from './integrations/twilio/phone-number-repository';
 import { attachMediaStreamServer } from './telephony/media-streams';
 import { attachClientGateway, setChannelGate } from './ws/client-gateway';
+import { createConnectionRegistry } from './ws/connection-registry';
 import {
   decodeClerkToken,
   verifyRs256Token,
@@ -725,6 +726,9 @@ export function createApp(): express.Express {
   // DATABASE_DIRECT_URL is unset, so we fall back to the main pool — identical
   // behavior to before for dev / any deployment without PgBouncer.
   const directPool = pool ? (createDirectPool() ?? pool) : undefined;
+  // U3b — WS per-tenant connection cap: cluster-wide via Redis when REDIS_URL is
+  // set (lease-TTL so a crashed replica's slots self-expire), else process-local.
+  const connectionRegistry = createConnectionRegistry(process.env.REDIS_URL);
 
   // In production, in-memory repositories lose all data on restart — crash fast.
   if (!pool && (config.NODE_ENV === 'prod' || config.NODE_ENV === 'staging')) {
@@ -3291,6 +3295,7 @@ export function createApp(): express.Express {
           server,
           {
             store: voiceSessionStore,
+            connectionRegistry,
             streamingProvider,
             ...(sharedTtsProvider ? { ttsProvider: sharedTtsProvider } : {}),
             terminologyProvider,
@@ -3383,6 +3388,7 @@ export function createApp(): express.Express {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const server = (origListen as any)(...args);
       attachClientGateway(server, {
+        registry: connectionRegistry,
         // Runtime kill switch: consult the persisted feature flag on
         // every upgrade so flipping ws.client_gateway_enabled off
         // immediately disables /api/ws without redeploy. The env-var

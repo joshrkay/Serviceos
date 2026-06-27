@@ -24,6 +24,7 @@ import { BoundedSendQueue, type Priority } from './bounded-send-queue';
 import {
   globalConnectionRegistry,
   ConnectionRegistry,
+  ConnectionLease,
 } from './connection-registry';
 import {
   ReconnectGuard,
@@ -100,7 +101,7 @@ export class ClientGatewayConnection {
   constructor(
     private readonly ws: WebSocket,
     auth: AuthResult,
-    private readonly registry: ConnectionRegistry,
+    private readonly lease: ConnectionLease,
     cfg: {
       heartbeatIntervalMs: number;
       idleTimeoutMs: number;
@@ -135,6 +136,9 @@ export class ClientGatewayConnection {
 
     this.heartbeatTimer = setInterval(() => {
       if (this.closed) return;
+      // U3b — re-up the connection-cap lease so a long-lived connection isn't
+      // reclaimed by its TTL on the Redis registry; no-op for the in-memory one.
+      void this.lease.refresh().catch(() => {});
       this.send({
         kind: 'heartbeat',
         serverTimeMs: Date.now(),
@@ -324,7 +328,8 @@ export class ClientGatewayConnection {
     this.idleTimer = null;
     this.subscriptions.clear();
     this.queue.clear();
-    this.registry.release(SURFACE, this.tenantId, this.tenantTier);
+    // Fire-and-forget: socket teardown can't await; idempotent + TTL backstop.
+    void this.lease.release().catch(() => {});
     wsDisconnectTotal.inc({ surface: SURFACE, reason });
   }
 
@@ -441,7 +446,7 @@ export function attachClientGateway(
       'unknown';
 
     Promise.resolve(deps.auth.authenticate(req))
-      .then((auth) => {
+      .then(async (auth) => {
         if (!auth) {
           rejectUpgrade(socket, 401);
           return;
@@ -457,13 +462,14 @@ export function attachClientGateway(
           return;
         }
 
-        if (!registry.tryAcquire(SURFACE, auth.tenantId, auth.tenantTier ?? 'standard')) {
+        const lease = await registry.acquire(SURFACE, auth.tenantId, auth.tenantTier ?? 'standard');
+        if (!lease) {
           rejectUpgrade(socket, 429, 1_000);
           return;
         }
 
         wss.handleUpgrade(req, socket, head, (ws) => {
-          const conn = new ClientGatewayConnection(ws, auth, registry, cfg);
+          const conn = new ClientGatewayConnection(ws, auth, lease, cfg);
           conns.add(conn);
           let bucket = byTenant.get(auth.tenantId);
           if (!bucket) {

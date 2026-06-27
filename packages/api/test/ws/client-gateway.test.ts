@@ -16,7 +16,7 @@ import {
   CLIENT_GATEWAY_PATH,
 } from '../../src/ws/client-gateway';
 import { ReconnectGuard } from '../../src/ws/reconnect-guard';
-import type { ConnectionRegistry } from '../../src/ws/connection-registry';
+import type { ConnectionRegistry, ConnectionLease } from '../../src/ws/connection-registry';
 import type { AuthResult } from '../../src/ws/client-gateway';
 
 const AUTH: AuthResult = { tenantId: 'tenant-1', userId: 'user-1', tenantTier: 'standard' };
@@ -32,15 +32,28 @@ class FakeWs extends EventEmitter {
   }
 }
 
+// U3b — the registry API is now async + lease-based: acquire() returns a
+// ConnectionLease (release/refresh) or null when at the cap.
+function makeLease() {
+  const raw = {
+    release: vi.fn(async () => {}),
+    refresh: vi.fn(async () => {}),
+  };
+  return { lease: raw as unknown as ConnectionLease, raw };
+}
+
 function makeRegistry(acquire = true) {
-  const released: string[] = [];
+  const leases: Array<{ release: ReturnType<typeof vi.fn>; refresh: ReturnType<typeof vi.fn> }> = [];
   const registry = {
-    tryAcquire: vi.fn(() => acquire),
-    release: vi.fn((surface: string, tenantId: string) => {
-      released.push(`${surface}:${tenantId}`);
+    acquire: vi.fn(async () => {
+      if (!acquire) return null;
+      const l = { release: vi.fn(async () => {}), refresh: vi.fn(async () => {}) };
+      leases.push(l);
+      return l;
     }),
+    count: vi.fn(async () => 0),
   } as unknown as ConnectionRegistry;
-  return { registry, released };
+  return { registry, leases };
 }
 
 const cfg = {
@@ -52,8 +65,8 @@ const cfg = {
 
 const tick = () => new Promise((r) => setImmediate(r));
 
-function makeConn(ws: FakeWs, registry: ConnectionRegistry, auth: AuthResult = AUTH, cfgOverride = {}) {
-  return new ClientGatewayConnection(ws as never, auth, registry, { ...cfg, ...cfgOverride });
+function makeConn(ws: FakeWs, lease: ConnectionLease, auth: AuthResult = AUTH, cfgOverride = {}) {
+  return new ClientGatewayConnection(ws as never, auth, lease, { ...cfg, ...cfgOverride });
 }
 
 function emitFrame(ws: FakeWs, frame: Record<string, unknown>) {
@@ -63,14 +76,14 @@ function emitFrame(ws: FakeWs, frame: Record<string, unknown>) {
 describe('ClientGatewayConnection', () => {
   it('sends a hello frame on construction', async () => {
     const ws = new FakeWs();
-    makeConn(ws, makeRegistry().registry);
+    makeConn(ws, makeLease().lease);
     await tick();
     expect(ws.sent.some((f) => f.kind === 'hello')).toBe(true);
   });
 
   it('authorizes an assistant subscription to the authenticated user', async () => {
     const ws = new FakeWs();
-    const conn = makeConn(ws, makeRegistry().registry);
+    const conn = makeConn(ws, makeLease().lease);
     emitFrame(ws, { kind: 'subscribe', channel: 'assistant', targetId: 'user-1' });
     await tick();
     expect(ws.sent.some((f) => f.kind === 'subscribed' && f.channel === 'assistant')).toBe(true);
@@ -81,7 +94,7 @@ describe('ClientGatewayConnection', () => {
 
   it('refuses an assistant subscription without a targetId', async () => {
     const ws = new FakeWs();
-    makeConn(ws, makeRegistry().registry);
+    makeConn(ws, makeLease().lease);
     emitFrame(ws, { kind: 'subscribe', channel: 'assistant' });
     await tick();
     expect(ws.sent.some((f) => f.kind === 'error' && f.code === 'SUBSCRIBE_FORBIDDEN')).toBe(true);
@@ -89,7 +102,7 @@ describe('ClientGatewayConnection', () => {
 
   it('refuses an assistant subscription targeting another user', async () => {
     const ws = new FakeWs();
-    const conn = makeConn(ws, makeRegistry().registry);
+    const conn = makeConn(ws, makeLease().lease);
     emitFrame(ws, { kind: 'subscribe', channel: 'assistant', targetId: 'someone-else' });
     await tick();
     expect(ws.sent.some((f) => f.kind === 'error' && f.code === 'SUBSCRIBE_FORBIDDEN')).toBe(true);
@@ -98,7 +111,7 @@ describe('ClientGatewayConnection', () => {
 
   it('refuses a voice subscription without a session id but allows one with it', async () => {
     const ws = new FakeWs();
-    const conn = makeConn(ws, makeRegistry().registry);
+    const conn = makeConn(ws, makeLease().lease);
     emitFrame(ws, { kind: 'subscribe', channel: 'voice' });
     await tick();
     expect(ws.sent.some((f) => f.kind === 'error' && f.code === 'SUBSCRIBE_FORBIDDEN')).toBe(true);
@@ -110,7 +123,7 @@ describe('ClientGatewayConnection', () => {
 
   it('responds to ping with a heartbeat', async () => {
     const ws = new FakeWs();
-    makeConn(ws, makeRegistry().registry);
+    makeConn(ws, makeLease().lease);
     ws.sent.length = 0;
     emitFrame(ws, { kind: 'ping' });
     await tick();
@@ -119,7 +132,7 @@ describe('ClientGatewayConnection', () => {
 
   it('emits a PROTOCOL_ERROR on malformed JSON and on a schema-invalid frame', async () => {
     const ws = new FakeWs();
-    makeConn(ws, makeRegistry().registry);
+    makeConn(ws, makeLease().lease);
     ws.sent.length = 0;
     ws.emit('message', 'not json{');
     await tick();
@@ -133,30 +146,28 @@ describe('ClientGatewayConnection', () => {
 
   it('releases the registry slot exactly once on terminate and refuses sends afterward', async () => {
     const ws = new FakeWs();
-    const { registry, released } = makeRegistry();
-    const conn = makeConn(ws, registry);
+    const { lease, raw } = makeLease();
+    const conn = makeConn(ws, lease);
     conn.terminate('test_reason');
     expect(conn.isClosed()).toBe(true);
-    expect(released).toEqual(['client_gateway:tenant-1']);
+    expect(raw.release).toHaveBeenCalledTimes(1);
     expect(ws.closes).toHaveLength(1);
     // send-after-close is a no-op returning false
     expect(conn.send({ kind: 'heartbeat', serverTimeMs: 1 } as never)).toBe(false);
-    // a second terminate does not double-release
+    // a second terminate does not double-release (onClose is guarded by `closed`)
     conn.terminate('again');
-    expect(registry.release).toHaveBeenCalledTimes(1);
+    expect(raw.release).toHaveBeenCalledTimes(1);
   });
 
   it('terminates on idle timeout', async () => {
     vi.useFakeTimers();
     try {
       const ws = new FakeWs();
-      const { released } = makeRegistry();
-      const reg = makeRegistry();
-      const conn = makeConn(ws, reg.registry, AUTH, { idleTimeoutMs: 1000 });
+      const { lease, raw } = makeLease();
+      const conn = makeConn(ws, lease, AUTH, { idleTimeoutMs: 1000 });
       vi.advanceTimersByTime(1001);
       expect(conn.isClosed()).toBe(true);
-      expect(reg.released).toEqual(['client_gateway:tenant-1']);
-      void released;
+      expect(raw.release).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
     }
