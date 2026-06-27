@@ -6,7 +6,7 @@ import swaggerUi from 'swagger-ui-express';
 import { openApiSpec } from './swagger/spec';
 import { createHealthRouter, HealthCheck } from './health/health';
 import { toErrorResponse } from './shared/errors';
-import { createPool } from './db/pool';
+import { createPool, createDirectPool } from './db/pool';
 import { verifyRlsRuntimeRole } from './db/rls-runtime-role';
 import { loadConfig } from './shared/config';
 import { createWebhookRouter } from './webhooks/routes';
@@ -717,6 +717,12 @@ export function createApp(): express.Express {
   // Initialize repositories — use Postgres when DATABASE_URL is set, otherwise
   // fall back to in-memory for local development without a database.
   const pool = process.env.DATABASE_URL ? createPool() : undefined;
+  // Direct (session-mode) pool for state that is unsafe under PgBouncer
+  // transaction pooling — session advisory locks (leader election, the proposal
+  // idempotency lock) and LISTEN/NOTIFY. `createDirectPool()` returns null when
+  // DATABASE_DIRECT_URL is unset, so we fall back to the main pool — identical
+  // behavior to before for dev / any deployment without PgBouncer.
+  const directPool = pool ? (createDirectPool() ?? pool) : undefined;
 
   // In production, in-memory repositories lose all data on restart — crash fast.
   if (!pool && (config.NODE_ENV === 'prod' || config.NODE_ENV === 'staging')) {
@@ -1607,7 +1613,7 @@ export function createApp(): express.Express {
     ? new PgReviewPollStateRepository(pool)
     : null;
   const googleReviewsCredResolver = pool
-    ? createCredentialResolver({ pool })
+    ? createCredentialResolver({ pool, directPool })
     : null;
   const serviceCreditRepo = pool ? new PgServiceCreditRepository(pool) : undefined;
   const googleReplyResolver =
@@ -1681,7 +1687,7 @@ export function createApp(): express.Express {
   // §11 H1: IdempotencyGuard + advisory lock per (tenant, key). Keys
   // default to `proposal-run:{tenant}:{id}` when callers omit one.
   const proposalIdempotencyLock = pool
-    ? new PgIdempotencyLockProvider(pool)
+    ? new PgIdempotencyLockProvider(directPool ?? pool)
     : new NoOpIdempotencyLockProvider();
   const proposalIdempotencyGuard = new IdempotencyGuard(
     proposalExecutionRepo,
@@ -1898,7 +1904,10 @@ export function createApp(): express.Express {
       await work();
       return;
     }
-    const client = await pool.connect();
+    // Leader election holds a SESSION advisory lock across work(), so it must
+    // run on a direct (non-PgBouncer) connection — see createDirectPool. `pool`
+    // is non-null here (guarded above), so `directPool ?? pool` is defined.
+    const client = await (directPool ?? pool).connect();
     try {
       const res = await client.query<{ locked: boolean }>(
         'SELECT pg_try_advisory_lock($1) AS locked',
@@ -5260,6 +5269,14 @@ export function createApp(): express.Express {
       if (pool) {
         await Promise.race([
           pool.end(),
+          new Promise((resolve) => setTimeout(resolve, 5000)),
+        ]);
+      }
+      // Close the direct pool too when it's a SEPARATE pool (DATABASE_DIRECT_URL
+      // set). When it falls back to the main pool it was already drained above.
+      if (directPool && directPool !== pool) {
+        await Promise.race([
+          directPool.end(),
           new Promise((resolve) => setTimeout(resolve, 5000)),
         ]);
       }
