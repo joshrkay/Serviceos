@@ -78,12 +78,25 @@ export function JobPhotoGallery({
               data-testid={`job-photo-card-${photo.id}`}
               className="border rounded overflow-hidden bg-card"
             >
-              <img
-                src={photo.downloadUrl}
-                alt={photo.notes ?? `${photo.category} photo`}
-                loading="lazy"
-                className="w-full h-32 object-cover"
-              />
+              {photo.contentType.startsWith('video/') ? (
+                <video
+                  data-testid={`job-photo-video-${photo.id}`}
+                  src={photo.downloadUrl}
+                  controls
+                  preload="metadata"
+                  aria-label={photo.notes ?? `${photo.category} video`}
+                  className="w-full h-32 object-cover bg-black"
+                >
+                  Your browser does not support the video tag.
+                </video>
+              ) : (
+                <img
+                  src={photo.downloadUrl}
+                  alt={photo.notes ?? `${photo.category} photo`}
+                  loading="lazy"
+                  className="w-full h-32 object-cover"
+                />
+              )}
               <figcaption className="p-2 text-xs text-foreground">
                 <div className="font-medium">{CATEGORY_LABELS[photo.category]}</div>
                 {photo.notes ? <div className="truncate">{photo.notes}</div> : null}

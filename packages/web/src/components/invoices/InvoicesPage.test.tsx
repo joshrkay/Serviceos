@@ -329,6 +329,122 @@ describe('InvoicesPage', () => {
     fireEvent.click(screen.getByRole('button', { name: /add photo/i }));
     await waitFor(() => expect(screen.getByTestId('mock-capture-sheet')).toBeInTheDocument());
   });
+
+  // ── U4 (E4) — detail amount due/paid from SERVER totals, not a float
+  //    line-item recompute. The taxed fixture below has a `totals.totalCents`
+  //    that does NOT equal Σ(qty*rate); the page must show totalCents.
+  function renderTaxedDetail(over: Record<string, unknown> = {}) {
+    const totals = {
+      subtotalCents: 100000,
+      discountCents: 0,
+      taxRateBps: 825,
+      taxableSubtotalCents: 100000,
+      taxCents: 8250,
+      totalCents: 108250, // ≠ Σ(qty*rate) = 100000
+    };
+    vi.mocked(useDetailQuery).mockReturnValue({
+      data: {
+        id: 'i-tax',
+        invoiceNumber: 'INV-TAX',
+        status: 'open',
+        dueDate: '2099-12-31',
+        lineItems: [
+          {
+            id: 'li-1',
+            description: 'Labor',
+            quantity: 1,
+            unitPriceCents: 100000,
+            totalCents: 100000,
+            category: 'labor',
+            sortOrder: 0,
+            taxable: true,
+          },
+        ],
+        totals,
+        amountPaidCents: 0,
+        amountDueCents: 108250,
+        customer: { id: 'c1', displayName: 'Taxed Customer' },
+        ...over,
+      },
+      isLoading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    return render(
+      <MemoryRouter>
+        <InvoicesPage defaultSelectedId="i-tax" />
+      </MemoryRouter>,
+    );
+  }
+
+  it('U4: shows the server totals.totalCents (tax included), not Σ(qty*rate)', () => {
+    renderTaxedDetail();
+    // The taxed total ($1,082.50) is shown; the raw line-item subtotal
+    // ($1,000.00) must NOT be the headline amount-due.
+    expect(screen.getAllByText('$1,082.50').length).toBeGreaterThan(0);
+  });
+
+  it('U4: partial payment shows remaining amountDueCents + a Paid line', () => {
+    renderTaxedDetail({
+      amountPaidCents: 50000, // $500 collected
+      amountDueCents: 58250, // $582.50 remaining
+    });
+    // Headline amount due is the remaining balance, not the full total.
+    expect(screen.getAllByText('$582.50').length).toBeGreaterThan(0);
+    // Separate "Paid" line surfaces the collected amount of the full total.
+    expect(screen.getByText(/Paid \$500\.00 of \$1,082\.50/)).toBeInTheDocument();
+  });
+
+  // ── U12 (E14) — Mark-as-paid is gated to payable statuses.
+  function renderStatusDetail(status: string, over: Record<string, unknown> = {}) {
+    vi.mocked(useDetailQuery).mockReturnValue({
+      data: {
+        id: 'i-mp',
+        invoiceNumber: 'INV-MP',
+        status,
+        dueDate: '2099-12-31',
+        lineItems: [],
+        totals: totalsOf(120000),
+        amountPaidCents: 0,
+        amountDueCents: 120000,
+        customer: { id: 'c1', displayName: 'Mark Paid Customer' },
+        ...over,
+      },
+      isLoading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    return render(
+      <MemoryRouter>
+        <InvoicesPage defaultSelectedId="i-mp" />
+      </MemoryRouter>,
+    );
+  }
+
+  it('U12: hides "Mark as paid" for a draft invoice', () => {
+    renderStatusDetail('draft');
+    expect(screen.queryByRole('button', { name: /mark as paid/i })).not.toBeInTheDocument();
+  });
+
+  it('U12: shows "Mark as paid" for an open invoice', () => {
+    renderStatusDetail('open');
+    expect(screen.getByRole('button', { name: /mark as paid/i })).toBeInTheDocument();
+  });
+
+  it('U12: shows "Mark as paid" for a partially_paid invoice', () => {
+    renderStatusDetail('partially_paid', { amountPaidCents: 50000, amountDueCents: 70000 });
+    expect(screen.getByRole('button', { name: /mark as paid/i })).toBeInTheDocument();
+  });
+
+  it('U12: hides "Mark as paid" for a paid invoice', () => {
+    renderStatusDetail('paid', { amountPaidCents: 120000, amountDueCents: 0 });
+    expect(screen.queryByRole('button', { name: /mark as paid/i })).not.toBeInTheDocument();
+  });
+
+  it('U12: hides "Mark as paid" for a void invoice', () => {
+    renderStatusDetail('void');
+    expect(screen.queryByRole('button', { name: /mark as paid/i })).not.toBeInTheDocument();
+  });
 });
 
 describe('P5-018 InvoicesPage — payment confirmation reflection', () => {

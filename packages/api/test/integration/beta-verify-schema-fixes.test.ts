@@ -25,6 +25,7 @@ import { closeSharedTestDb, createTestTenant, getSharedTestDb } from './shared';
 import { PgProposalRepository } from '../../src/proposals/pg-proposal';
 import { PgDelayNoticeStateRepository } from '../../src/notifications/pg-delay-notice-state';
 import { createInteractionsRouter } from '../../src/routes/interactions';
+import { InMemoryDispatchRepository } from '../../src/notifications/dispatch-repository';
 
 let pool: Pool;
 beforeAll(async () => {
@@ -125,7 +126,7 @@ describe('beta-verify schema fixes (real Postgres)', () => {
       };
       next();
     });
-    app.use('/api/interactions', createInteractionsRouter({ pool }));
+    app.use('/api/interactions', createInteractionsRouter({ pool, dispatchRepo: new InMemoryDispatchRepository() }));
 
     const res = await request(app).get('/api/interactions?limit=10');
     expect(res.status).toBe(200);

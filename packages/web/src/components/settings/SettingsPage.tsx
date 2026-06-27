@@ -45,13 +45,21 @@ export function SettingsPage() {
   const [spanishMode, setSpanishMode] = useState(false);
   const [businessName, setBusinessName] = useState<string | null>(null);
   const [voiceAgentLive, setVoiceAgentLive] = useState<boolean | null>(null);
+  // Surface a failure to load the main /api/settings document instead of
+  // silently swallowing it (which left the page showing stale defaults with
+  // no signal that the user's real preferences never loaded).
+  const [settingsLoadError, setSettingsLoadError] = useState(false);
+  const [settingsReloadNonce, setSettingsReloadNonce] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
         const res = await apiFetch('/api/settings');
-        if (cancelled || !res.ok) return;
+        if (cancelled) return;
+        if (!res.ok) {
+          throw new Error(`GET /api/settings ${res.status}`);
+        }
         const data = (await res.json()) as {
           autoApplyInternalUpdates?: boolean;
           autoSendAppointmentReminders?: boolean;
@@ -74,8 +82,16 @@ export function SettingsPage() {
         if (typeof data.yelpReviewUrl === 'string') {
           setYelpReviewUrl(data.yelpReviewUrl);
         }
+        setSettingsLoadError(false);
       } catch {
-        /* network hiccup — defaults remain */
+        if (cancelled) return;
+        setSettingsLoadError(true);
+        toast.error('Could not load your settings', {
+          action: {
+            label: 'Retry',
+            onClick: () => setSettingsReloadNonce((n) => n + 1),
+          },
+        });
       }
       try {
         const statusRes = await apiFetch('/api/onboarding/status');
@@ -107,7 +123,7 @@ export function SettingsPage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [settingsReloadNonce]);
 
   async function refreshQuickBooksIntegration() {
     try {
@@ -442,6 +458,26 @@ export function SettingsPage() {
     <div className="h-full overflow-y-auto pb-20 md:pb-0" style={{ scrollbarWidth: 'thin' }}>
       <div className="p-4 md:p-6 max-w-2xl mx-auto">
         <h1 className="text-slate-900 mb-6">Settings</h1>
+
+        {settingsLoadError && (
+          <div
+            data-testid="settings-load-error"
+            role="alert"
+            className="mb-5 flex items-center justify-between gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3.5"
+          >
+            <p className="text-sm text-red-700">
+              We couldn’t load your settings. Your current preferences may not be shown.
+            </p>
+            <button
+              type="button"
+              onClick={() => setSettingsReloadNonce((n) => n + 1)}
+              data-testid="settings-load-retry"
+              className="shrink-0 rounded-lg bg-red-600 px-3 py-2 text-sm text-white hover:bg-red-700"
+            >
+              Retry
+            </button>
+          </div>
+        )}
 
         {/* Onboarding re-run banner */}
         <button

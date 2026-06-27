@@ -82,6 +82,88 @@ describe('TechJobView delay acknowledgement prompt', () => {
     expect(chip20).not.toHaveClass('bg-primary');
   });
 
+  it('deletes a photo behind a confirm: calls deletePhoto and removes it from the gallery', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const photo = {
+      id: 'p-del',
+      tenantId: 't1',
+      jobId: 'j1',
+      uploadedByUserId: 'u1',
+      fileId: 'f-del',
+      category: 'before' as const,
+      createdAt: '2026-06-27T10:00:00.000Z',
+      downloadUrl: 'https://cdn.example/p-del.jpg',
+      filename: 'p-del.jpg',
+      contentType: 'image/jpeg',
+      sizeBytes: 10,
+    };
+    const deletePhoto = vi.fn().mockResolvedValue(undefined);
+    const fetchPhotos = vi.fn().mockResolvedValue([photo]);
+
+    render(
+      <MemoryRouter>
+        <TechJobView
+          id="j1"
+          fetchPhotos={fetchPhotos as never}
+          deletePhoto={deletePhoto as never}
+        />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByTestId('job-photo-card-p-del')).toBeInTheDocument(),
+    );
+
+    fireEvent.click(screen.getByTestId('job-photo-delete-p-del'));
+
+    await waitFor(() => expect(deletePhoto).toHaveBeenCalledWith('j1', 'p-del'));
+    await waitFor(() =>
+      expect(screen.queryByTestId('job-photo-card-p-del')).not.toBeInTheDocument(),
+    );
+    confirmSpy.mockRestore();
+  });
+
+  it('surfaces a delete error and keeps the photo (no phantom removal)', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const photo = {
+      id: 'p-err',
+      tenantId: 't1',
+      jobId: 'j1',
+      uploadedByUserId: 'u1',
+      fileId: 'f-err',
+      category: 'before' as const,
+      createdAt: '2026-06-27T10:00:00.000Z',
+      downloadUrl: 'https://cdn.example/p-err.jpg',
+      filename: 'p-err.jpg',
+      contentType: 'image/jpeg',
+      sizeBytes: 10,
+    };
+    const deletePhoto = vi.fn().mockRejectedValue(new Error('Delete failed: 403'));
+    const fetchPhotos = vi.fn().mockResolvedValue([photo]);
+
+    render(
+      <MemoryRouter>
+        <TechJobView
+          id="j1"
+          fetchPhotos={fetchPhotos as never}
+          deletePhoto={deletePhoto as never}
+        />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByTestId('job-photo-card-p-err')).toBeInTheDocument(),
+    );
+
+    fireEvent.click(screen.getByTestId('job-photo-delete-p-err'));
+
+    await waitFor(() =>
+      expect(screen.getByTestId('tech-photo-error')).toHaveTextContent('Delete failed: 403'),
+    );
+    expect(screen.getByTestId('job-photo-card-p-err')).toBeInTheDocument();
+    confirmSpy.mockRestore();
+  });
+
   // U10c — Path A class contract: the tech view renders on brand tokens only.
   it('renders on Path A tokens — no raw Tailwind palette leaks', async () => {
     const { container } = render(

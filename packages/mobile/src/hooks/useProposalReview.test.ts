@@ -224,4 +224,65 @@ describe('useProposalReview', () => {
     expect(result.current.phase).toBe('error');
     expect(result.current.error).toBe('Bad catalog pick');
   });
+
+  it('resolve-entity POSTs the candidate and merges the re-drafted proposal (review stays open, never approves)', async () => {
+    h.api.mockImplementation((url: string, opts?: { method?: string; body?: string }) => {
+      if (url === '/api/proposals/p1/resolve-entity' && opts?.method === 'POST') {
+        expect(JSON.parse(opts.body ?? '{}')).toEqual({ candidateId: 'cust-b' });
+        return Promise.resolve(
+          okJson(
+            proposal({
+              proposalType: 'voice_clarification',
+              status: 'ready_for_review',
+              payload: { customerId: 'cust-b' },
+            }),
+          ),
+        );
+      }
+      return Promise.resolve(
+        okJson(
+          proposal({
+            proposalType: 'voice_clarification',
+            status: 'draft',
+            payload: {
+              reason: 'ambiguous_entity',
+              entityCandidates: [
+                { id: 'cust-a', label: 'Bob Smith' },
+                { id: 'cust-b', label: 'Bob Jones' },
+              ],
+            },
+          }),
+        ),
+      );
+    });
+
+    const { result } = renderHook(() => useProposalReview('p1'));
+    await settle();
+    await act(async () => {
+      await result.current.resolveEntity('cust-b');
+    });
+    expect(result.current.phase).toBe('review'); // ready_for_review → review, NOT approved
+    expect(result.current.proposal?.status).toBe('ready_for_review');
+    expect(h.api).toHaveBeenCalledWith(
+      '/api/proposals/p1/resolve-entity',
+      expect.objectContaining({ method: 'POST' }),
+    );
+  });
+
+  it('surfaces resolve-entity failures in the error phase', async () => {
+    h.api.mockImplementation((url: string, opts?: { method?: string }) => {
+      if (url === '/api/proposals/p1/resolve-entity' && opts?.method === 'POST') {
+        return Promise.resolve(err(400, { error: 'VALIDATION_ERROR', message: 'Bad candidate' }));
+      }
+      return Promise.resolve(okJson(proposal()));
+    });
+
+    const { result } = renderHook(() => useProposalReview('p1'));
+    await settle();
+    await act(async () => {
+      await result.current.resolveEntity('nope');
+    });
+    expect(result.current.phase).toBe('error');
+    expect(result.current.error).toBe('Bad candidate');
+  });
 });

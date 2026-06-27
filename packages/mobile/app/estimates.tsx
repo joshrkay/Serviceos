@@ -36,8 +36,12 @@ export default function Estimates() {
         secondary: e.status === 'draft' ? `${e.status} · tap to edit` : e.status,
       })}
       onPressRow={(e) => {
-        if (e.status === 'draft') router.push('/estimates/new');
-        else router.push(`/estimates/${e.id}`);
+        if (e.status === 'draft') {
+          // Drafts open the editor for that estimate, not a blank new form.
+          router.push({ pathname: '/estimates/new', params: { id: e.id } });
+        } else {
+          router.push(`/estimates/${e.id}`);
+        }
       }}
       emptyText="No estimates yet."
       searchQuery={search}

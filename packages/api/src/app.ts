@@ -133,6 +133,7 @@ import {
 } from './db/onboarding-session-repository';
 import { createAssistantRouter } from './routes/assistant';
 import { createProposalsRouter } from './routes/proposals';
+import { createRedraftHandlerFactory } from './proposals/redraft-handler-factory';
 import { createTechnicianLocationRouter } from './routes/technician-location';
 import { createCatalogItemsRouter } from './routes/catalog-items';
 import { createFilesRouter, createDevStorageRouter } from './routes/files';
@@ -4174,10 +4175,16 @@ export function createApp(): express.Express {
       // Story 3.9 — editing a proposal logs each changed field to the
       // corrections training table (intent + field + before/after).
       correctionRepo,
+      // U1 (E9) — re-draft handler factory: resolving an entity-disambiguation
+      // clarification re-runs the original task handler (catalog-grounded for
+      // invoice/estimate) with the chosen id and replaces the voice_clarification
+      // with the drafted, executable proposal. Same gateway + catalog the voice
+      // router uses, so grounding/summary/confidence stay identical.
+      createRedraftHandlerFactory({ gateway: llmGateway, catalogRepo }),
     ),
   );
   if (pool) {
-    app.use('/api/interactions', createInteractionsRouter({ pool }));
+    app.use('/api/interactions', createInteractionsRouter({ pool, dispatchRepo }));
   }
 
   // ── Service agreements (P9-003) ─────────────────────────────────────────

@@ -57,7 +57,7 @@ export function DispatchLogPage() {
     let cancelled = false;
     setLoading(true);
     setError(null);
-    apiFetch('/api/interactions?limit=50')
+    apiFetch('/api/interactions/dispatches?limit=50')
       .then(async (res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
