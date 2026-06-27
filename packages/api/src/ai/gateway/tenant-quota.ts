@@ -87,10 +87,27 @@ function nowMs(): number {
 }
 
 export interface QuotaLease {
-  release(actualInputTokens?: number, actualOutputTokens?: number): void;
+  /** Release the slot + reconcile tokens against actual usage. Idempotent. */
+  release(actualInputTokens?: number, actualOutputTokens?: number): Promise<void>;
 }
 
-export class TenantQuotaRegistry {
+/**
+ * Async quota seam (scale-to-1000 U3c). Both the process-local
+ * `TenantQuotaRegistry` (default) and the cluster-wide `RedisTenantQuotaStore`
+ * implement this so the resilience wrapper is impl-agnostic. `acquire` throws
+ * `TenantConcurrencyExceededError` / `TenantTokenBudgetExceededError` on
+ * rejection (unchanged envelope); on success it resolves a lease the caller
+ * MUST `release()` in a finally.
+ */
+export interface QuotaStore {
+  acquire(opts: {
+    tenantId: string;
+    tenantTier?: TenantTier;
+    estimatedTokens: number;
+  }): Promise<QuotaLease>;
+}
+
+export class TenantQuotaRegistry implements QuotaStore {
   private states: Map<string, TenantState> = new Map();
 
   constructor(
@@ -152,11 +169,11 @@ export class TenantQuotaRegistry {
    * Reserve a slot + estimated tokens. Throws on rejection. Returns a lease
    * that the caller MUST `release()` (in a finally block).
    */
-  acquire(opts: {
+  async acquire(opts: {
     tenantId: string;
     tenantTier?: TenantTier;
     estimatedTokens: number;
-  }): QuotaLease {
+  }): Promise<QuotaLease> {
     const { tenantId, tenantTier, estimatedTokens } = opts;
     const cfg = this.cfgFor(tenantTier);
     const state = this.stateFor(tenantId, cfg);
@@ -187,7 +204,7 @@ export class TenantQuotaRegistry {
 
     let released = false;
     return {
-      release: (actualInput?: number, actualOutput?: number) => {
+      release: async (actualInput?: number, actualOutput?: number) => {
         if (released) return;
         released = true;
         state.inFlight = Math.max(0, state.inFlight - 1);
@@ -223,4 +240,52 @@ export class TenantQuotaRegistry {
 /** Rough token estimator — char count / 4. Cheap; provider returns true count. */
 export function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
+}
+
+/**
+ * Delegating quota store that starts in-memory and swaps to the cluster-wide
+ * Redis store once connected — mirrors the connection-registry's sync-return +
+ * async-upgrade so the (synchronous) gateway factory stays unchanged. Acquires
+ * during the brief boot window are per-replica; once swapped they are
+ * cluster-wide. The quota is a fairness cap, so a sub-second per-replica window
+ * at boot is acceptable.
+ */
+class SwappableQuotaStore implements QuotaStore {
+  private impl: QuotaStore;
+  constructor(tiers: Record<string, TenantQuotaTierConfig>) {
+    this.impl = new TenantQuotaRegistry(tiers);
+  }
+  swap(next: QuotaStore): void {
+    this.impl = next;
+  }
+  acquire(opts: {
+    tenantId: string;
+    tenantTier?: TenantTier;
+    estimatedTokens: number;
+  }): Promise<QuotaLease> {
+    return this.impl.acquire(opts);
+  }
+}
+
+/**
+ * Select the quota store by REDIS_URL. Returns SYNCHRONOUSLY (in-memory) and,
+ * when REDIS_URL is set, upgrades to the cluster-wide Redis store in the
+ * background (falling back to in-memory if the connect fails). Byte-identical to
+ * the in-memory registry when REDIS_URL is unset.
+ */
+export function createTenantQuotaStore(
+  redisUrl?: string,
+  tiers: Record<string, TenantQuotaTierConfig> = DEFAULT_TIER_CONFIG,
+): QuotaStore {
+  if (!redisUrl) return new TenantQuotaRegistry(tiers);
+  const store = new SwappableQuotaStore(tiers);
+  void import('./redis-tenant-quota')
+    .then(({ createRedisTenantQuotaStore }) => createRedisTenantQuotaStore(redisUrl, tiers))
+    .then((redisStore) => {
+      if (redisStore) store.swap(redisStore);
+    })
+    .catch(() => {
+      // Redis unavailable — stay in-memory (per-replica quota).
+    });
+  return store;
 }

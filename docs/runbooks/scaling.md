@@ -94,7 +94,14 @@ single-instance).
   and additive: the in-process EventEmitter remains the synchronous same-replica
   path, self-originated echoes are dropped (no double-fire), and an unset/failed
   Redis is byte-identical to single-replica behavior.
-- **LLM quotas** follow in U3c, behind the same `REDIS_URL` gate.
+- **LLM per-tenant quotas** (U3c): the concurrency semaphore + token bucket move
+  to Redis when `REDIS_URL` is set, so per-tenant fairness caps hold cluster-wide
+  instead of per-replica. A single atomic Lua (purge → concurrency → refill →
+  token-budget → hard-bound → reserve) prevents the lost-update race; the clock is
+  Redis `TIME`. Concurrency slots carry a lease-TTL so a crashed replica's
+  in-flight slots self-expire; the token bucket self-heals via refill (no reclaim
+  needed). Same fail-open-to-local stance as the WS cap. No call-site change — the
+  gateway factory swaps the store in asynchronously.
 
 ## Measuring
 
