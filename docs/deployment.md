@@ -111,3 +111,79 @@ Validation should include at least one request path that logs through transport 
 | `ELEVENLABS_API_KEY` | TTS |
 | `DEEPGRAM_API_KEY` | STT + keyword boost |
 | `DATABASE_URL` | Required in prod |
+
+## Production readiness (scale-to-1000)
+
+The scale-to-1000 work — PgBouncer two-DSN routing, Redis-backed shared state
+(WS caps, voice fan-out, LLM quotas, rate limiting), queue batch concurrency,
+and graceful SIGTERM drain — is merged. This section covers the in-repo
+artifacts that make the pooled topology reproducible and the operator-only
+steps that must be applied in the Railway account. For the rationale and
+rollout sequence see [`docs/runbooks/scaling.md`](runbooks/scaling.md)
+(§ Provisioning & rollout); for the actual 1000-concurrent validation run see
+[`docs/runbooks/phase5-validation-handoff.md`](runbooks/phase5-validation-handoff.md).
+
+> The **Horizontal scaling note** above predates this work. Its blockers are
+> now addressed: the in-process sweeps are gated by `runAsLeader` (a Postgres
+> advisory lock, so exactly one instance runs each tick) and SIGTERM triggers a
+> graceful drain (`/ready` → 503, new WS upgrades rejected, active voice calls
+> drained). Scaling past one instance is safe once Redis + PgBouncer are
+> provisioned (below) — provision Redis **before** raising `numReplicas`.
+
+### In-repo deploy artifacts
+
+| Artifact | Purpose |
+|---|---|
+| `deploy/pgbouncer/pgbouncer.ini` | Transaction-mode pooler config: `pool_mode=transaction`, `max_client_conn=1000`, `default_pool_size=25`, `ignore_startup_parameters=extra_float_digits`, SCRAM auth (`auth_file`, with a documented least-privilege `auth_query` alternative). |
+| `deploy/pgbouncer/userlist.txt` | Secret-free SCRAM userlist **template** + generation instructions. |
+| `deploy/docker-compose.prod.yml` | The full pooled topology — postgres + pgbouncer + redis + one-shot migrate + scalable api + nginx LB — in one `docker compose up`. For a non-Railway target and local 1000-concurrent validation. |
+| `deploy/nginx/api-lb.conf` | nginx LB that round-robins the scaled `api` replicas via Docker DNS, carries WebSocket upgrades, and never caches `/api/*`. |
+
+Local pooled validation (mirrors `scaling.md` § Measuring):
+
+```bash
+cp .env.production.example deploy/.env      # then fill the boot-fail secrets
+docker compose -f deploy/docker-compose.prod.yml --env-file deploy/.env up -d --build --scale api=4
+npx tsx loadtest/http-load.ts --url http://localhost:3000 --token "$TOKEN" \
+  --max 400 --ramp 60 --hold 300
+```
+
+> **Not yet smoke-tested:** Docker was unavailable in the session that authored
+> these artifacts, so the live `docker build` + `compose up` run (API healthy,
+> `/health` 200, migrate succeeds) is an **operator step**. The configs are
+> statically validated only (compose schema + YAML, pgbouncer INI parse, nginx
+> brace/directive check).
+
+### Build/deploy defect fixes in this change
+
+- **Test files no longer leak into the prod image** — `packages/api/tsconfig.build.json` now excludes `src/**/__tests__/**`, `src/**/*.test.ts`, `src/**/*.spec.ts`. 12 non-executed placeholder tests were compiling into `dist/` and dragging a `vitest` (devDependency) reference into the production build.
+- **Single-image SPA path resolves in dev *and* prod** — `app.ts` serves `web/dist` via `resolveWebDistDir(__dirname)` (anchored on the `packages/api` path boundary) instead of a fixed `../../web/dist` hop that pointed at a non-existent path in the built image. Railway still serves the SPA from the separate `web` service; this only affects single-image serving.
+- **`packages/web/nginx.conf`** now documents that its hardcoded `proxy_pass http://api:3000` is **compose/single-host only**; the Railway web service builds `packages/web/nginx.conf.template`, which proxies `/api/` to the API's public URL via `${API_URL}` and listens on `${PORT}`. **Follow-up:** the two files differ on the `/api` trailing slash (`nginx.conf` strips the `/api` prefix; `.template` preserves it) — reconcile against how the API mounts routes before relying on the compose `web` edge.
+
+### Filler call audio (C1)
+
+Filler `.pcm` are gitignored deploy-time artifacts (rendered by `scripts/render-fillers.ts` via ElevenLabs). To **ship** them in the API image, pass the ElevenLabs key as a build arg so the `api-build` stage renders and copies them into `dist`:
+
+```bash
+# Plain build arg (key confined to the intermediate api-build stage; visible in build logs/cache):
+docker build --target api --build-arg ELEVENLABS_API_KEY="$ELEVENLABS_API_KEY" -t serviceos-api .
+
+# Hardened (key never lands in a layer or log) — switch the api-build RUN to a BuildKit secret mount,
+# `RUN --mount=type=secret,id=elevenlabs_api_key ...`, then:
+DOCKER_BUILDKIT=1 docker build --target api \
+  --secret id=elevenlabs_api_key,env=ELEVENLABS_API_KEY -t serviceos-api .
+```
+
+Omit the key and the build **skips** rendering — unchanged behavior: `FillerAudioCache.load()` warns and callers hear no filler (graceful, not a crash). Rendering calls ElevenLabs at build time, so each build spends TTS quota — render on tagged release builds, not every CI build.
+
+### Operator-only Railway actions
+
+Code/config is in-repo; these are applied in the Railway account. Order matters — see `scaling.md` § Provisioning & rollout.
+
+1. **Redis** — add the Railway Redis plugin, set `REDIS_URL` on the API service, and set `VOICE_FANOUT_ENABLED=true`. Makes WS caps, LLM quotas, voice fan-out, and rate limits cluster-wide. Set it **before** raising `numReplicas`.
+2. **PgBouncer** — add a PgBouncer service (`pool_mode=transaction`, from `deploy/pgbouncer/pgbouncer.ini`) in front of the Postgres plugin. Point `DATABASE_URL` at PgBouncer (`:6432`) and `DATABASE_DIRECT_URL` at the Postgres plugin's direct URL (`:5432`) — session-scoped advisory locks + LISTEN/NOTIFY bypass PgBouncer. Size `DB_MAX_CONNECTIONS` per replica and PgBouncer `default_pool_size` against Postgres `max_connections`.
+3. **Autoscale + drain** — set autoscale min/max in the Railway service settings (no `railway.toml` key): min from steady load, max from the Phase 5 per-instance ceiling. Ensure the **stop grace period ≥ 35s** so a draining replica finishes live calls (`overlapSeconds = 35` in `railway.toml`; drain waits `DRAIN_TIMEOUT_MS` 25s with a `SHUTDOWN_FORCE_EXIT_MS` 30s backstop).
+
+### Boot env
+
+Every variable that throws at boot in production — the TIER 0 set (`DATABASE_URL`, `CLERK_SECRET_KEY`, `CLERK_PUBLISHABLE_KEY`, `CLERK_WEBHOOK_SECRET`, `CORS_ORIGIN`, Stripe) — is covered by `.env.production.example`. The scale-to-1000 vars (`REDIS_URL`, `DATABASE_DIRECT_URL`, `VOICE_FANOUT_ENABLED`, `DB_MAX_CONNECTIONS`, …) are safe to omit (single-instance / in-memory fallback). `deploy/docker-compose.prod.yml` wires the boot-fail secrets via `${VAR:?}` so a missing value fails fast.
