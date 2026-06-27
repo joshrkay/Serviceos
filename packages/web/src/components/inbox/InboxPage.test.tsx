@@ -246,6 +246,69 @@ describe('InboxPage', () => {
     });
   });
 
+  it('resolving an ambiguous entity ("which Bob?") POSTs resolve-entity and merges the re-drafted proposal (U8/E9)', async () => {
+    apiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        data: [
+          {
+            proposal: {
+              id: 'p-bob',
+              proposalType: 'voice_clarification',
+              summary: 'Which customer? "Bob" matched 2 records',
+              status: 'draft',
+              createdAt: new Date().toISOString(),
+              payload: {
+                reason: 'ambiguous_entity',
+                entityReference: 'Bob',
+                entityCandidates: [
+                  { id: 'cust-a', label: 'Bob Smith', hint: '555-0100', score: 0.82 },
+                  { id: 'cust-b', label: 'Bob Jones', score: 0.81 },
+                ],
+              },
+              sourceContext: { entityKind: 'customer', entityReference: 'Bob' },
+            },
+            urgency: 'normal',
+            reason: 'Awaiting review',
+          },
+        ],
+        summary: { totalCount: 1, criticalCount: 0, highCount: 0, normalCount: 1, lowCount: 0, truncated: false },
+      }),
+    );
+    // resolve-entity returns the re-drafted proposal: chosen id stamped, no
+    // candidates left, surfaced for review (never approved).
+    apiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        id: 'p-bob',
+        proposalType: 'voice_clarification',
+        summary: 'Which customer? "Bob" matched 2 records',
+        status: 'ready_for_review',
+        createdAt: new Date().toISOString(),
+        payload: { customerId: 'cust-b' },
+        sourceContext: { resolvedEntity: { id: 'cust-b', kind: 'customer' } },
+      }),
+    );
+
+    render(<InboxPage />);
+    await waitFor(() => screen.getByText('Bob Jones'));
+    // The picker surfaces both candidates by label (no price column).
+    expect(screen.getAllByTestId('ambiguity-option')).toHaveLength(2);
+    fireEvent.click(screen.getByText('Bob Jones'));
+
+    await waitFor(() => {
+      expect(apiFetch).toHaveBeenCalledWith(
+        '/api/proposals/p-bob/resolve-entity',
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({ candidateId: 'cust-b' }),
+        }),
+      );
+    });
+    // After resolution the picker is gone (the reference is resolved).
+    await waitFor(() => {
+      expect(screen.queryByTestId('ambiguity-picker')).not.toBeInTheDocument();
+    });
+  });
+
   it('rejects a proposal and removes it from the list', async () => {
     apiFetch.mockResolvedValueOnce(
       jsonResponse({

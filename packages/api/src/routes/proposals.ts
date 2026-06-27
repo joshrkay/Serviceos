@@ -22,6 +22,7 @@ import {
   type UndoCorrectionLoopDeps,
 } from '../proposals/actions';
 import { resolveProposalLine } from '../proposals/resolve-line';
+import { resolveProposalEntity } from '../proposals/resolve-entity';
 import {
   proposalFilterSchema,
   rejectProposalBodySchema,
@@ -53,6 +54,13 @@ const EXPIRED_INBOX_LIMIT = 20;
 const resolveLineBodySchema = z.object({
   lineIndex: z.number().int().min(0),
   catalogItemId: z.string().min(1),
+});
+
+// U8 (E9) — resolve an ambiguous entity reference ("which Bob?") by picking
+// one of the proposal's surfaced candidates. Re-drafts the original action with
+// the chosen id; never approves (D-004).
+const resolveEntityBodySchema = z.object({
+  candidateId: z.string().min(1),
 });
 
 export function createProposalsRouter(
@@ -278,6 +286,27 @@ export function createProposalsRouter(
           proposalId: req.params.id,
           lineIndex: parsed.lineIndex,
           catalogItemId: parsed.catalogItemId,
+          actorId: req.auth!.userId,
+          actorRole: req.auth!.role as Role,
+        },
+        { proposalRepo, ...(auditRepo ? { auditRepo } : {}) },
+      );
+      res.json(result);
+    })
+  );
+
+  router.post(
+    '/:id/resolve-entity',
+    requireAuth,
+    requireTenant,
+    requirePermission('proposals:approve'),
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const parsed = validate(resolveEntityBodySchema, req.body);
+      const result = await resolveProposalEntity(
+        {
+          tenantId: req.auth!.tenantId,
+          proposalId: req.params.id,
+          candidateId: parsed.candidateId,
           actorId: req.auth!.userId,
           actorRole: req.auth!.role as Role,
         },

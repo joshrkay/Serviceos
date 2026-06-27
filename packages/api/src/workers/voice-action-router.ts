@@ -876,6 +876,24 @@ async function emitClarification(
       transcript: transcript.trim(),
       ...(conversationId ? { conversationId } : {}),
       ...(recordingId ? { recordingId } : {}),
+      // U8 (E9) — when an entity reference was ambiguous, persist the
+      // structured re-draft context so the resolve-entity endpoint can stamp
+      // the chosen candidate onto the original action (which field it fills is
+      // keyed off entityKind). The candidates ride here too (with their kind)
+      // so resolution doesn't depend on the payload copy.
+      ...(input.entityAmbiguity
+        ? {
+            entityKind: input.entityAmbiguity.entityKind,
+            entityReference: input.entityAmbiguity.reference,
+            entityCandidates: input.entityAmbiguity.candidates.map((c) => ({
+              id: c.id,
+              kind: c.kind,
+              label: c.label,
+              ...(c.hint ? { hint: c.hint } : {}),
+              score: c.score,
+            })),
+          }
+        : {}),
     },
     // Same deterministic key as the single-action task path so a redelivered
     // message dedups atomically regardless of which proposal type it produced.
