@@ -9,8 +9,9 @@
 import request from 'supertest';
 import express, { Request, Response, NextFunction } from 'express';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { createAssistantRouter } from '../../src/routes/assistant';
+import { createAssistantRouter, proposalSignals } from '../../src/routes/assistant';
 import { InMemoryProposalRepository } from '../../src/proposals/proposal';
+import type { CatalogItem, CatalogItemRepository } from '../../src/catalog/catalog-item';
 import { InMemoryConversationRepository } from '../../src/conversations/conversation-service';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
@@ -364,5 +365,158 @@ describe('Story 3.11/3.12 — assistant chat persistence + correlation id', () =
       .send({ messages: [{ role: 'user', content: 'summarize my day' }] });
     expect(res.status).toBe(200);
     expect(res.body.correlationId).toBeTruthy();
+  });
+});
+
+// ─── E10 (U7): assistant chat card surfaces pricing/confidence/missing-field
+// signals so the operator approves an informed proposal (and Approve is blocked
+// on an unresolved line). The signals already ride to the persisted proposal;
+// the bug was the route's schema + mappers dropping them. ─────────────────────
+
+describe('U7 — proposalSignals helper (pure mapper passthrough)', () => {
+  it('surfaces an uncatalogued line + meta from the payload', () => {
+    const out = proposalSignals(
+      {
+        lineItems: [
+          { id: 'l1', description: 'Custom fabrication', unitPriceCents: 25000, pricingSource: 'uncatalogued' },
+        ],
+        _meta: {
+          overallConfidence: 'low',
+          markers: [{ path: 'lineItems[0].unitPriceCents', reason: 'AI-estimated price — not in catalog' }],
+        },
+      },
+      undefined,
+    );
+    expect(out.lineItems).toEqual([
+      { description: 'Custom fabrication', pricingSource: 'uncatalogued' },
+    ]);
+    expect(out.meta?.overallConfidence).toBe('low');
+    expect(out.meta?.markers).toEqual([
+      { path: 'lineItems[0].unitPriceCents', reason: 'AI-estimated price — not in catalog' },
+    ]);
+  });
+
+  it('reads estimate lines (unitPrice) the same as invoice lines (unitPriceCents) — price-field-agnostic', () => {
+    const out = proposalSignals(
+      { lineItems: [{ description: 'Flush valve', unitPrice: 8200, pricingSource: 'ambiguous' }] },
+      undefined,
+    );
+    expect(out.lineItems).toEqual([{ description: 'Flush valve', pricingSource: 'ambiguous' }]);
+  });
+
+  it('surfaces missingFields from sourceContext (blocks Approve on the card)', () => {
+    const out = proposalSignals(
+      { lineItems: [{ description: 'valve', pricingSource: 'ambiguous' }] },
+      { missingFields: ['lineItems[0].catalogItemId'] },
+    );
+    expect(out.missingFields).toEqual(['lineItems[0].catalogItemId']);
+  });
+
+  it('returns an empty object for a fully-grounded complete proposal (no regression)', () => {
+    const out = proposalSignals(
+      {
+        lineItems: [{ description: 'Service call', unitPriceCents: 9900, pricingSource: 'catalog' }],
+        _meta: { overallConfidence: 'high' },
+        totalCents: 9900,
+      },
+      { conversationId: 'c1' },
+    );
+    // catalog lines still surface their source (the card badges them "From
+    // catalog"); but there's no missingFields and no warning marker.
+    expect(out.missingFields).toBeUndefined();
+    expect(out.meta?.markers).toBeUndefined();
+    expect(out.meta?.overallConfidence).toBe('high');
+  });
+});
+
+describe('U7 — POST /api/assistant/chat surfaces pricing signals on the card', () => {
+  function catalogRepo(items: CatalogItem[]): CatalogItemRepository {
+    return {
+      listByTenant: vi.fn(async () => items),
+    } as unknown as CatalogItemRepository;
+  }
+
+  function catalogItem(name: string): CatalogItem {
+    return {
+      id: `cat-${name}`,
+      tenantId: TEST_TENANT,
+      name,
+      description: name,
+      category: 'labor',
+      unit: 'each',
+      unitPriceCents: 5000,
+      productServiceType: 'service',
+      archivedAt: null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    } as unknown as CatalogItem;
+  }
+
+  function buildAppWithCatalog(gateway: LLMGateway, repo: InMemoryProposalRepository, catalog: CatalogItemRepository) {
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: TEST_USER,
+        sessionId: 'sess-1',
+        tenantId: TEST_TENANT,
+        role: 'owner',
+      };
+      next();
+    });
+    app.use('/api/assistant', createAssistantRouter({ gateway, proposalRepo: repo, catalogRepo: catalog }));
+    return app;
+  }
+
+  it("maps an uncatalogued line's pricingSource + confidence meta onto the card", async () => {
+    // classifier → create_invoice; then the invoice task LLM emits a line whose
+    // description matches nothing in the tenant catalog → 'uncatalogued'.
+    const gateway = scriptedGateway([
+      JSON.stringify({ intentType: 'create_invoice', confidence: 0.9, extractedEntities: {} }),
+      JSON.stringify({
+        lineItems: [{ description: 'Bespoke widget install', quantity: 1, unitPrice: 25000 }],
+        confidence_score: 0.9,
+      }),
+    ]);
+    const repo = new InMemoryProposalRepository();
+    const app = buildAppWithCatalog(gateway, repo, catalogRepo([catalogItem('Drain cleaning')]));
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'invoice them for a bespoke widget install' }] });
+
+    expect(res.status).toBe(200);
+    const proposal = res.body?.message?.proposal;
+    expect(proposal).toBeTruthy();
+    expect(proposal.type).toBe('Invoice');
+    // The "AI-estimated" badge on the card keys off lineItems[].pricingSource.
+    expect(proposal.lineItems?.[0]?.pricingSource).toBe('uncatalogued');
+    // The 4-tier confidence bar keys off meta.overallConfidence.
+    expect(proposal.meta?.overallConfidence).toBeTruthy();
+  });
+
+  it('a normal complete proposal still maps with legacy fields and no spurious envelope', async () => {
+    const gateway = scriptedGateway([
+      JSON.stringify({
+        intentType: 'create_customer',
+        confidence: 0.93,
+        extractedEntities: { displayName: 'Alex', email: 'alex@example.com', phone: '555-0100' },
+      }),
+    ]);
+    const repo = new InMemoryProposalRepository();
+    const app = buildApp(gateway, repo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'add customer Alex 555-0100 alex@example.com' }] });
+
+    expect(res.status).toBe(200);
+    const proposal = res.body?.message?.proposal;
+    expect(proposal.type).toBe('Customer');
+    expect(proposal.status).toBe('Pending');
+    expect(proposal.title).toBe('New customer: Alex');
+    // No fabricated warning signals on a complete proposal.
+    expect(proposal.missingFields ?? null).toBeNull();
+    expect(proposal.meta ?? null).toBeNull();
   });
 });
