@@ -1,7 +1,8 @@
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
-import rateLimit from 'express-rate-limit';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
+import { createRateLimitStore } from './middleware/rate-limit-store';
 import swaggerUi from 'swagger-ui-express';
 import { openApiSpec } from './swagger/spec';
 import { createHealthRouter, HealthCheck } from './health/health';
@@ -22,8 +23,7 @@ import { attachClientGateway, setChannelGate } from './ws/client-gateway';
 import { createConnectionRegistry } from './ws/connection-registry';
 import {
   decodeClerkToken,
-  verifyRs256Token,
-} from './auth/clerk';
+  verifyRs256Token, type AuthenticatedRequest } from './auth/clerk';
 import { RESILIENCE_FLAG_NAMES } from './flags/resilience-flags';
 import { DeepgramStreamingProvider } from './voice/transcription-providers';
 import { PgTenantRepository } from './auth/pg-tenant';
@@ -694,22 +694,28 @@ export function createApp(): express.Express {
   // Rate limiting — applied before auth to protect all routes
   // In dev mode, use a much higher limit to allow QA testing
   const isDev = process.env.NODE_ENV === 'dev' || process.env.NODE_ENV === 'development';
+  const redisUrl = process.env.REDIS_URL;
   app.use('/api', rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
     max: isDev ? 10000 : 100, // per IP — relaxed in dev for QA testing
     standardHeaders: true,
     legacyHeaders: false,
     skip: () => isDev && process.env.DEV_AUTH_BYPASS === 'true',
+    // P3/U-P3c: shared Redis counter so the per-IP cap is cluster-wide (else N
+    // replicas = N× the limit). undefined ⇒ default per-process MemoryStore.
+    store: createRateLimitStore(redisUrl, 'api:'),
   }));
   app.use('/webhooks', rateLimit({
     windowMs: 60 * 1000,      // 1 minute
     max: 30,
+    store: createRateLimitStore(redisUrl, 'webhooks:'),
   }));
   // Public invoice/estimate pages are unauthenticated but token-gated.
   // Limit aggressively to slow token brute-force and view-count inflation.
   app.use('/public', rateLimit({
     windowMs: 60 * 1000,      // 1 minute
     max: 30,                  // per IP
+    store: createRateLimitStore(redisUrl, 'public:'),
   }));
 
   const requestLogger = createLogger({
@@ -3507,6 +3513,27 @@ export function createApp(): express.Express {
   // to opt into the per-route gate. The decisions test suite guards this
   // invariant in packages/api/test/decisions/decisions.test.ts (D6).
   app.use('/api', requireAuth);
+
+  // P3/U-P3c: per-tenant fairness limiter. The pre-auth /api limiter above is a
+  // coarse per-IP DoS guard; this one runs AFTER requireAuth (so req.auth is
+  // populated) and caps requests PER TENANT cluster-wide, so one tenant's
+  // dashboards/integrations can't monopolize a replica's capacity. Keyed by
+  // tenantId (fallback userId, then the IPv6-safe client IP for the rare
+  // authenticated-but-tenantless request). Shared Redis store; per-process
+  // MemoryStore when REDIS_URL is unset.
+  const tenantRateMax = Math.max(1, Number(process.env.API_TENANT_RATE_LIMIT_MAX) || 1000);
+  app.use('/api', rateLimit({
+    windowMs: 60 * 1000, // 1 minute
+    max: isDev ? 100_000 : tenantRateMax,
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req) => {
+      const auth = (req as AuthenticatedRequest).auth;
+      return auth?.tenantId ?? auth?.userId ?? ipKeyGenerator(req.ip ?? '');
+    },
+    skip: () => isDev && process.env.DEV_AUTH_BYPASS === 'true',
+    store: createRateLimitStore(process.env.REDIS_URL, 'tenant:'),
+  }));
 
   // P0-024: open a request-scoped transaction with `app.current_tenant_id`
   // set LOCAL so every query in the request reuses the same client and

@@ -103,6 +103,25 @@ single-instance).
   needed). Same fail-open-to-local stance as the WS cap. No call-site change — the
   gateway factory swaps the store in asynchronously.
 
+## Throughput (Phase 3)
+
+- **Hot query** (U-P3a): the supervisor-review sweep now reads a 24h window
+  (`findByStatusSince`) backed by `idx_proposals_status_created`
+  `(tenant_id, status, created_at DESC)` instead of loading every
+  `ready_for_review` proposal and filtering by time in memory.
+- **Queue concurrency** (U-P3b): the poll loop claims `QUEUE_POLL_BATCH_SIZE`
+  (default 10) messages per 250ms tick and processes them concurrently, lifting
+  the per-process ceiling from ~4 msg/s to ~batch×4/s. `FOR UPDATE SKIP LOCKED`
+  keeps concurrent ticks/replicas on disjoint sets, so total throughput also
+  scales with replica count.
+- **Rate limiting** (U-P3c): the per-IP `/api`, `/webhooks`, `/public` limiters
+  and a per-tenant `/api` limiter (`API_TENANT_RATE_LIMIT_MAX`/min, keyed by
+  `tenantId`) share counters via Redis when `REDIS_URL` is set, so a limit is
+  cluster-wide rather than per-replica (else N replicas = N× the limit). Atomic
+  INCR + first-hit PEXPIRE; fail-open-to-local (per-replica MemoryStore) on a
+  Redis error; byte-identical to the prior in-memory limiters when `REDIS_URL`
+  is unset.
+
 ## Measuring
 
 Stand up the local pooled topology and drive load:
