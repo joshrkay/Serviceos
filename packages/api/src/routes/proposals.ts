@@ -23,6 +23,7 @@ import {
 } from '../proposals/actions';
 import { resolveProposalLine } from '../proposals/resolve-line';
 import { resolveProposalEntity } from '../proposals/resolve-entity';
+import type { RedraftHandlerFactory } from '../proposals/redraft-handler-factory';
 import {
   proposalFilterSchema,
   rejectProposalBodySchema,
@@ -74,6 +75,11 @@ export function createProposalsRouter(
   // Story 3.9 — when supplied, editing a proposal logs each changed field
   // (intent + field + before/after) to the corrections training table.
   correctionRepo?: CorrectionRepository,
+  // U1 (E9) — when supplied, resolving an entity-disambiguation clarification
+  // re-runs the ORIGINAL task handler with the chosen id and replaces the
+  // (non-executable) voice_clarification with the drafted, executable proposal.
+  // Absent → resolution falls back to the annotate-only behavior.
+  redraftHandlerFactory?: RedraftHandlerFactory,
 ): Router {
   const router = Router();
 
@@ -310,7 +316,11 @@ export function createProposalsRouter(
           actorId: req.auth!.userId,
           actorRole: req.auth!.role as Role,
         },
-        { proposalRepo, ...(auditRepo ? { auditRepo } : {}) },
+        {
+          proposalRepo,
+          ...(auditRepo ? { auditRepo } : {}),
+          ...(redraftHandlerFactory ? { redraftHandlerFactory } : {}),
+        },
       );
       res.json(result);
     })

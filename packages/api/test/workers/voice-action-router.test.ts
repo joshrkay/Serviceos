@@ -1151,6 +1151,59 @@ describe('voice-action-router entity resolution', () => {
     ]);
     // Classifier call only — the expensive drafting call was skipped.
     expect(gateway.complete).toHaveBeenCalledTimes(1);
+
+    // U1 (E9) — the producer persists the ORIGINAL intent so resolveProposalEntity
+    // can re-run the real handler with the chosen id and replace the
+    // (non-executable) voice_clarification with the drafted, executable proposal.
+    const ctx = proposals[0].sourceContext as Record<string, unknown>;
+    expect(ctx.originalIntent).toEqual({
+      intentType: 'create_invoice',
+      extractedEntities: { customerName: 'Bob' },
+    });
+  });
+
+  it('U1 (E9): emitClarification on the ambiguity path persists sanitized originalIntent', async () => {
+    // The classifier extracts several entity fields; the producer must persist
+    // them (sanitized) under sourceContext.originalIntent.
+    const classifierWithEntities = JSON.stringify({
+      intentType: 'create_invoice',
+      confidence: 0.9,
+      extractedEntities: {
+        customerName: 'Bob',
+        // A control-char-laden value must be stripped on persist (same
+        // treatment as classifierReasoning) — the tab becomes a space.
+        jobReference: `water${String.fromCharCode(9)}heater`,
+        amount: 45000,
+        lineItemDescriptions: ['pipe', 'valve'],
+      },
+    } satisfies IntentClassification);
+    const gateway = gatewayReturning([classifierWithEntities, invoiceJson]);
+    const resolver = fakeResolver(async () => ({
+      kind: 'ambiguous',
+      candidates: [
+        { id: 'c-1', kind: 'customer', label: 'Bob Smith', score: 0.9 },
+        { id: 'c-2', kind: 'customer', label: 'Bob Stone', score: 0.88 },
+      ],
+    }));
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo, entityResolver: resolver });
+
+    await worker.handle(
+      msg({ tenantId: 't-1', userId: 'u-1', transcript: 'Invoice Bob for the water heater' }),
+      silentLogger(),
+    );
+
+    const proposals = await proposalRepo.findByTenant('t-1');
+    expect(proposals).toHaveLength(1);
+    const ctx = proposals[0].sourceContext as Record<string, unknown>;
+    const orig = ctx.originalIntent as Record<string, unknown>;
+    expect(orig.intentType).toBe('create_invoice');
+    const ee = orig.extractedEntities as Record<string, unknown>;
+    expect(ee.customerName).toBe('Bob');
+    // Control char stripped (sanitizeReasoning replaces it with a space).
+    expect(ee.jobReference).toBe('water heater');
+    // Numbers pass through; string arrays sanitized element-wise.
+    expect(ee.amount).toBe(45000);
+    expect(ee.lineItemDescriptions).toEqual(['pipe', 'valve']);
   });
 
   it('not_found reference → proposal persists with sourceContext.pendingReference', async () => {

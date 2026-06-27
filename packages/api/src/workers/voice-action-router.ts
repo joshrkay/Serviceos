@@ -737,6 +737,45 @@ export function sanitizeReasoning(raw: string): string {
 }
 
 /**
+ * U1 (E9) — sanitize the classifier's `extractedEntities` before persisting
+ * them on `sourceContext.originalIntent` for later re-draft. These are
+ * LLM-generated, transcript-derived strings (semi-untrusted), so each string
+ * value is control-stripped and length-bounded with the SAME treatment
+ * `sanitizeReasoning` applies to `classifierReasoning`. Numbers (integer-cents
+ * amounts, delayMinutes, …) and booleans pass through; string arrays
+ * (lineItemDescriptions) are sanitized element-wise. Anything else is dropped
+ * — the re-draft never needs nested objects, and dropping them keeps the
+ * persisted shape flat and predictable.
+ */
+const EXTRACTED_ENTITY_MAX_VALUES = 32;
+export function sanitizeExtractedEntities(
+  entities: ExtractedEntities | undefined,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (!entities) return out;
+  let count = 0;
+  for (const [key, value] of Object.entries(entities)) {
+    if (value === undefined || value === null) continue;
+    if (count >= EXTRACTED_ENTITY_MAX_VALUES) break;
+    if (typeof value === 'string') {
+      out[key] = sanitizeReasoning(value);
+      count++;
+    } else if (typeof value === 'number' || typeof value === 'boolean') {
+      out[key] = value;
+      count++;
+    } else if (Array.isArray(value)) {
+      out[key] = value
+        .filter((v): v is string => typeof v === 'string')
+        .slice(0, EXTRACTED_ENTITY_MAX_VALUES)
+        .map((v) => sanitizeReasoning(v));
+      count++;
+    }
+    // Other shapes (nested objects) are intentionally dropped.
+  }
+  return out;
+}
+
+/**
  * Build a short, operator-friendly summary for a clarification card.
  * Keeps the transcript prefix short so the summary fits in the feed
  * row without truncation.
@@ -892,6 +931,16 @@ async function emitClarification(
               ...(c.hint ? { hint: c.hint } : {}),
               score: c.score,
             })),
+            // U1 (E9) — persist the ORIGINAL intent so resolveProposalEntity can
+            // re-run the real task handler with the chosen id and replace this
+            // (non-executable) voice_clarification with the drafted, executable
+            // proposal. Without this the original command is unrecoverable and
+            // approving the resolved clarification is a no-op (HANDLER_NOT_FOUND).
+            // extractedEntities are sanitized like classifierReasoning above.
+            originalIntent: {
+              intentType: classification.intentType,
+              extractedEntities: sanitizeExtractedEntities(classification.extractedEntities),
+            },
           }
         : {}),
     },
