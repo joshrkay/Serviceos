@@ -2,6 +2,10 @@
 import { cleanup, fireEvent, render, waitFor } from '@testing-library/react';
 import { createElement, forwardRef, useImperativeHandle } from 'react';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+// Test-only helper lives on the stub; `react-native` is vitest-aliased to it at
+// runtime (same module instance), but tsc resolves the real RN types, so import
+// the helper from the stub path directly.
+import { __setLinkingOpenURL } from '../../test/stubs/react-native';
 import type { CapturedPhoto, JobPhoto } from '../jobs/uploadJobPhoto';
 
 // The screen-test block (below) mocks ../jobs/uploadJobPhoto so the screen
@@ -10,12 +14,14 @@ import type { CapturedPhoto, JobPhoto } from '../jobs/uploadJobPhoto';
 // the top level so the typecheck lane's module target stays happy).
 let uploadJobPhoto: typeof import('../jobs/uploadJobPhoto').uploadJobPhoto;
 let listJobPhotos: typeof import('../jobs/uploadJobPhoto').listJobPhotos;
+let deleteJobPhoto: typeof import('../jobs/uploadJobPhoto').deleteJobPhoto;
 beforeAll(async () => {
   const real = await vi.importActual<typeof import('../jobs/uploadJobPhoto')>(
     '../jobs/uploadJobPhoto',
   );
   uploadJobPhoto = real.uploadJobPhoto;
   listJobPhotos = real.listJobPhotos;
+  deleteJobPhoto = real.deleteJobPhoto;
 });
 
 // ── Shared fixtures ──────────────────────────────────────────────────────────
@@ -125,6 +131,17 @@ describe('uploadJobPhoto (logic)', () => {
     const list = await listJobPhotos('j1', api);
     expect(list.map((p) => p.id)).toEqual(['p1', 'p2']);
   });
+
+  it('deleteJobPhoto issues a DELETE to the photo route', async () => {
+    const api = vi.fn(async () => new Response(null, { status: 204 }));
+    await deleteJobPhoto('j1', 'p1', api);
+    expect(api).toHaveBeenCalledWith('/api/jobs/j1/photos/p1', { method: 'DELETE' });
+  });
+
+  it('deleteJobPhoto throws when the server rejects', async () => {
+    const api = vi.fn(async () => jsonRes({}, 403));
+    await expect(deleteJobPhoto('j1', 'p1', api)).rejects.toThrow(/delete/i);
+  });
 });
 
 // ── Screen: capture → upload → refetch shows photo; error surfaced ───────────
@@ -132,11 +149,13 @@ const h = vi.hoisted(() => ({
   api: vi.fn(),
   uploadJobPhoto: vi.fn(),
   listJobPhotos: vi.fn(),
+  deleteJobPhoto: vi.fn(),
   uploadFile: vi.fn(),
   takePicture: vi.fn(),
   granted: true,
   requestPermission: vi.fn(),
   getInfoAsync: vi.fn(),
+  openURL: vi.fn(),
 }));
 
 vi.mock('expo-router', () => ({
@@ -156,6 +175,7 @@ vi.mock('../jobs/uploadJobPhoto', async () => {
     ...real,
     uploadJobPhoto: (...a: unknown[]) => h.uploadJobPhoto(...a),
     listJobPhotos: (...a: unknown[]) => h.listJobPhotos(...a),
+    deleteJobPhoto: (...a: unknown[]) => h.deleteJobPhoto(...a),
   };
 });
 vi.mock('expo-camera', () => ({
@@ -180,6 +200,7 @@ beforeEach(() => {
   h.takePicture.mockResolvedValue({ uri: 'file:///cap.jpg' });
   h.listJobPhotos.mockResolvedValue([]);
   h.uploadJobPhoto.mockResolvedValue(makePhoto('p-new'));
+  h.deleteJobPhoto.mockResolvedValue(undefined);
 });
 
 afterEach(() => cleanup());
@@ -244,5 +265,63 @@ describe('Job photos screen', () => {
     await waitFor(() => {
       expect(container.querySelector('img[src="https://cdn.example/p-existing.jpg"]')).not.toBeNull();
     });
+  });
+
+  it('deletes a photo: the delete affordance calls deleteJobPhoto and refetches', async () => {
+    // Loaded with the photo, then empty after the delete refetch.
+    h.listJobPhotos
+      .mockResolvedValueOnce([makePhoto('p-del')])
+      .mockResolvedValue([]);
+
+    const { getByText, container } = render(createElement(JobPhotosScreen));
+    await waitFor(() => {
+      expect(container.querySelector('img[src="https://cdn.example/p-del.jpg"]')).not.toBeNull();
+    });
+
+    fireEvent.click(getByText('Delete'));
+
+    await waitFor(() => expect(h.deleteJobPhoto).toHaveBeenCalledWith('j1', 'p-del', h.api));
+    // Refetch ran (second listJobPhotos call) and the photo is gone.
+    await waitFor(() => {
+      expect(container.querySelector('img[src="https://cdn.example/p-del.jpg"]')).toBeNull();
+    });
+  });
+
+  it('surfaces a delete error and keeps the photo (no phantom removal)', async () => {
+    h.listJobPhotos.mockResolvedValue([makePhoto('p-err')]);
+    h.deleteJobPhoto.mockRejectedValue(new Error('Could not delete this photo.'));
+
+    const { getByText, findByText, container } = render(createElement(JobPhotosScreen));
+    await waitFor(() => {
+      expect(container.querySelector('img[src="https://cdn.example/p-err.jpg"]')).not.toBeNull();
+    });
+
+    fireEvent.click(getByText('Delete'));
+
+    expect(await findByText('Could not delete this photo.')).toBeTruthy();
+    // The photo is still present — the failed delete did not remove it.
+    expect(container.querySelector('img[src="https://cdn.example/p-err.jpg"]')).not.toBeNull();
+  });
+
+  it('renders a video/* item as a play affordance (not an <Image>) and opens the URL', async () => {
+    const openURL = vi.fn(async () => undefined);
+    __setLinkingOpenURL(openURL);
+    h.listJobPhotos.mockResolvedValue([
+      {
+        ...makePhoto('v1'),
+        category: 'other' as const,
+        contentType: 'video/webm',
+        downloadUrl: 'https://cdn.example/v1.webm',
+        filename: 'v1.webm',
+      },
+    ]);
+
+    const { getByText, container } = render(createElement(JobPhotosScreen));
+    await waitFor(() => expect(getByText('Video')).toBeTruthy());
+    // No <img> rendered for the video tile.
+    expect(container.querySelector('img[src="https://cdn.example/v1.webm"]')).toBeNull();
+
+    fireEvent.click(getByText('▶'));
+    expect(openURL).toHaveBeenCalledWith('https://cdn.example/v1.webm');
   });
 });

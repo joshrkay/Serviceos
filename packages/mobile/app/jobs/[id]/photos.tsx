@@ -2,13 +2,14 @@ import { useLocalSearchParams } from 'expo-router';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as FileSystem from 'expo-file-system';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Image, Pressable, Text, View } from 'react-native';
+import { ActivityIndicator, Image, Linking, Pressable, Text, View } from 'react-native';
 import { ScreenShell } from '../../../src/components/ScreenShell';
 import { useApiClient } from '../../../src/lib/useApiClient';
 import { uploadFile } from '../../../src/jobs/nativeJobPhotoDeps';
 import {
   uploadJobPhoto,
   listJobPhotos,
+  deleteJobPhoto,
   type JobPhoto,
   type JobPhotoCategory,
 } from '../../../src/jobs/uploadJobPhoto';
@@ -40,6 +41,23 @@ export default function JobPhotos() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  // U2 (E9 follow-up): delete a wrong photo/video. The DELETE endpoint audits +
+  // gates server-side; on success we refetch, on failure we surface the error
+  // (no phantom removal).
+  const remove = useCallback(
+    async (photoId: string) => {
+      if (!id) return;
+      setError(null);
+      try {
+        await deleteJobPhoto(id, photoId, api);
+        await refresh();
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to delete photo');
+      }
+    },
+    [api, id, refresh],
+  );
 
   const capture = useCallback(async () => {
     if (!id || saving) return;
@@ -134,11 +152,32 @@ export default function JobPhotos() {
         <View className="flex-row flex-wrap gap-2">
           {photos.map((p) => (
             <View key={p.id} className="overflow-hidden rounded-xl border border-border">
-              <Image
-                source={{ uri: p.downloadUrl }}
-                accessibilityLabel={p.notes ?? `${p.category} photo`}
-                style={{ width: 104, height: 104 }}
-              />
+              {p.contentType?.startsWith('video/') ? (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={p.notes ?? `Play ${p.category} video`}
+                  onPress={() => void Linking.openURL(p.downloadUrl)}
+                  style={{ width: 104, height: 104 }}
+                  className="items-center justify-center bg-card"
+                >
+                  <Text className="text-2xl text-foreground">▶</Text>
+                  <Text className="text-xs text-mutedForeground">Video</Text>
+                </Pressable>
+              ) : (
+                <Image
+                  source={{ uri: p.downloadUrl }}
+                  accessibilityLabel={p.notes ?? `${p.category} photo`}
+                  style={{ width: 104, height: 104 }}
+                />
+              )}
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`Delete ${p.category} photo`}
+                onPress={() => void remove(p.id)}
+                className="min-h-11 items-center justify-center bg-card"
+              >
+                <Text className="text-sm text-destructive">Delete</Text>
+              </Pressable>
             </View>
           ))}
         </View>

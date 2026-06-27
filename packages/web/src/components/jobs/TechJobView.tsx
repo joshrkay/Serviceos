@@ -19,6 +19,7 @@ import { JobPhotoGallery } from './JobPhotoGallery';
 import {
   uploadJobPhoto as uploadJobPhotoApi,
   listJobPhotos as listJobPhotosApi,
+  deleteJobPhoto as deleteJobPhotoApi,
   type JobPhoto,
   type JobPhotoCategory,
 } from '../../api/job-photos';
@@ -472,6 +473,7 @@ function PhotosSection({
   category,
   onCategoryChange,
   onAdd,
+  onDelete,
   saving,
   error,
 }: {
@@ -479,6 +481,7 @@ function PhotosSection({
   category: JobPhotoCategory | 'all';
   onCategoryChange: (next: JobPhotoCategory | 'all') => void;
   onAdd: () => void;
+  onDelete: (photo: JobPhoto) => void;
   saving: boolean;
   error: string | null;
 }) {
@@ -517,6 +520,7 @@ function PhotosSection({
             photos={photos}
             activeCategory={category}
             onCategoryChange={onCategoryChange}
+            onDelete={onDelete}
           />
         </div>
       )}
@@ -633,12 +637,14 @@ export interface TechJobViewProps {
     takenAt?: string,
   ) => Promise<JobPhoto>;
   fetchPhotos?: (jobId: string) => Promise<JobPhoto[]>;
+  deletePhoto?: (jobId: string, photoId: string) => Promise<void>;
 }
 
 export function TechJobView({
   id,
   uploadPhoto = uploadJobPhotoApi,
   fetchPhotos = listJobPhotosApi,
+  deletePhoto = deleteJobPhotoApi,
 }: TechJobViewProps) {
   const navigate = useNavigate();
   const apiFetch = useApiClient();
@@ -702,6 +708,24 @@ export function TechJobView({
       setPhotoError(err instanceof Error ? err.message : 'Failed to load photos');
     }
   }, [fetchPhotos, id]);
+
+  // U2 (E9 follow-up): delete a wrong photo/video behind a confirm. On success
+  // drop the row from local state; on failure surface the error and keep the
+  // photo (no phantom removal). The DELETE endpoint audits + gates server-side.
+  const handleDeletePhoto = useCallback(
+    async (photo: JobPhoto) => {
+      if (!id) return;
+      if (!window.confirm('Delete this photo? This cannot be undone.')) return;
+      setPhotoError(null);
+      try {
+        await deletePhoto(id, photo.id);
+        setPhotos((prev) => prev.filter((p) => p.id !== photo.id));
+      } catch (err) {
+        setPhotoError(err instanceof Error ? err.message : 'Failed to delete photo');
+      }
+    },
+    [id, deletePhoto],
+  );
 
   useEffect(() => {
     void loadJob();
@@ -1072,6 +1096,7 @@ export function TechJobView({
                 category={photoCategory}
                 onCategoryChange={setPhotoCategory}
                 onAdd={() => setCam(true)}
+                onDelete={handleDeletePhoto}
                 saving={photoSaving}
                 error={photoError}
               />

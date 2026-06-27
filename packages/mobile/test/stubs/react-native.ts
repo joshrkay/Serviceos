@@ -100,3 +100,15 @@ export function __emitAppState(state: string): void {
   AppState.currentState = state;
   for (const cb of listeners) cb(state);
 }
+
+// Minimal Linking: screens open video download URLs through it. Tests spy on
+// openURL via __setLinkingOpenURL; the default is a resolved no-op.
+let openURLImpl: (url: string) => Promise<unknown> = async () => undefined;
+export const Linking = {
+  openURL: (url: string) => openURLImpl(url),
+};
+
+/** Test-only: swap the Linking.openURL implementation (e.g. a vi.fn spy). */
+export function __setLinkingOpenURL(fn: (url: string) => Promise<unknown>): void {
+  openURLImpl = fn;
+}

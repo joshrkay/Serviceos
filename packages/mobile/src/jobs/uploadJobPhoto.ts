@@ -119,3 +119,20 @@ export async function listJobPhotos(jobId: string, api: ApiFetch): Promise<JobPh
   const data = (await res.json()) as JobPhoto[];
   return Array.isArray(data) ? data : [];
 }
+
+/**
+ * Delete a persisted job photo. The DELETE endpoint audits + permission-gates
+ * server-side; the screen refetches on success and surfaces the error on
+ * failure (never a phantom removal).
+ */
+export async function deleteJobPhoto(
+  jobId: string,
+  photoId: string,
+  api: ApiFetch,
+): Promise<void> {
+  const res = await api(
+    `/api/jobs/${encodeURIComponent(jobId)}/photos/${encodeURIComponent(photoId)}`,
+    { method: 'DELETE' },
+  );
+  if (!res.ok && res.status !== 204) throw new Error('Could not delete this photo.');
+}
