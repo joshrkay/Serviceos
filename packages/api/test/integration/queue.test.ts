@@ -105,4 +105,29 @@ describe('Postgres integration — PgQueue', () => {
     const dlq = await queue.listDeadLetter();
     expect(dlq.filter((d) => d.messageId === msg!.id)).toHaveLength(1);
   });
+
+  it('receiveBatch claims up to N oldest messages, disjointly (P3)', async () => {
+    for (let i = 0; i < 5; i++) await queue.send('batch.job', { i }, `b-${i}`);
+
+    const first = await queue.receiveBatch<{ i: number }>(3);
+    expect(first.map((m) => m.payload.i)).toEqual([0, 1, 2]); // oldest-first
+
+    // The remaining batch is disjoint — no message is delivered twice.
+    const second = await queue.receiveBatch<{ i: number }>(3);
+    expect(second.map((m) => m.payload.i)).toEqual([3, 4]);
+    const ids = new Set([...first, ...second].map((m) => m.id));
+    expect(ids.size).toBe(5);
+
+    expect(await queue.receiveBatch(3)).toEqual([]); // all claimed (now invisible)
+  });
+
+  it('two concurrent receiveBatch calls split the work with no overlap (SKIP LOCKED)', async () => {
+    for (let i = 0; i < 6; i++) await queue.send('concurrent.job', { i });
+
+    // Two batches racing on one table must partition the rows, never double-claim.
+    const [a, b] = await Promise.all([queue.receiveBatch(6), queue.receiveBatch(6)]);
+    const ids = [...a, ...b].map((m) => m.id);
+    expect(ids.length).toBe(6);
+    expect(new Set(ids).size).toBe(6); // disjoint
+  });
 });

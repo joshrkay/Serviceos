@@ -89,6 +89,14 @@ export interface DeadLetterEntry {
 export interface Queue {
   send<T>(type: string, payload: T, idempotencyKey?: string): Promise<string>;
   receive<T>(): Promise<QueueMessage<T> | null>;
+  /**
+   * Scale-to-1000 (P3): atomically claim up to `max` visible messages in one
+   * round-trip (oldest first), so the poll loop can process a batch concurrently
+   * per tick instead of one message per tick. Same claim semantics as receive()
+   * — each message is claimed by exactly one consumer (FOR UPDATE SKIP LOCKED in
+   * PgQueue), attempts incremented, visibility extended. Returns [] when idle.
+   */
+  receiveBatch<T>(max: number): Promise<QueueMessage<T>[]>;
   delete(messageId: string): Promise<void>;
   moveToDeadLetter(message: QueueMessage, error: string): Promise<void>;
   listDeadLetter(): Promise<DeadLetterEntry[]>;
@@ -136,13 +144,22 @@ export class InMemoryQueue implements Queue {
   }
 
   async receive<T>(): Promise<QueueMessage<T> | null> {
-    if (this.receiving) return null;
+    const [msg] = await this.receiveBatch<T>(1);
+    return msg ?? null;
+  }
+
+  async receiveBatch<T>(max: number): Promise<QueueMessage<T>[]> {
+    if (max <= 0 || this.receiving) return [];
     this.receiving = true;
     try {
-      const msg = this.messages.shift();
-      if (!msg) return null;
-      msg.attempts++;
-      return msg as QueueMessage<T>;
+      const out: QueueMessage<T>[] = [];
+      for (let i = 0; i < max; i++) {
+        const msg = this.messages.shift();
+        if (!msg) break;
+        msg.attempts++;
+        out.push(msg as QueueMessage<T>);
+      }
+      return out;
     } finally {
       this.receiving = false;
     }

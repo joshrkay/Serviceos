@@ -240,7 +240,7 @@ import {
   InMemoryTechnicianLocationAuthorizer,
   PgTechnicianLocationAuthorizer,
 } from './telemetry/technician-location-authz';
-import { InMemoryQueue, processMessage } from './queues/queue';
+import { InMemoryQueue, processMessage, type QueueMessage } from './queues/queue';
 import { createProvisionTwilioWorker, PROVISION_TWILIO_JOB_TYPE } from './workers/provision-twilio';
 import { createDeprovisionTenantWorker } from './workers/deprovision-tenant';
 import { createVerifyAiWorker } from './workers/verify-ai';
@@ -2104,13 +2104,21 @@ export function createApp(): express.Express {
   // (e.g. the image pipeline holding large in-memory buffers) can stack up
   // unbounded concurrent ticks → OOM. The boolean flag ensures at most one
   // tick body runs at a time; overlapping ticks are silently skipped.
-  let pollInFlight = false;
-  registerInterval(setInterval(async () => {
-    if (pollInFlight) return;
-    pollInFlight = true;
+  //
+  // Scale-to-1000 (P3): claim a BATCH of up to QUEUE_POLL_BATCH_SIZE messages per
+  // tick and process them CONCURRENTLY, lifting the single-process ceiling from
+  // ~1 msg/250ms (~4/s) to ~batch/250ms while staying multi-replica-safe (each
+  // tick claims a disjoint set via FOR UPDATE SKIP LOCKED). The pollInFlight
+  // guard still serializes ticks, so peak in-flight work is bounded by the batch
+  // size — backpressure unchanged, just wider per tick.
+  const QUEUE_POLL_BATCH_SIZE = Math.max(
+    1,
+    Number(process.env.QUEUE_POLL_BATCH_SIZE) || 10,
+  );
+  // Process one claimed message end-to-end. Self-contained error handling so one
+  // message's failure never rejects the batch (Promise.all below stays settled).
+  const handleQueueMessage = async (message: QueueMessage): Promise<void> => {
     try {
-      const message = await queue.receive();
-      if (!message) return;
       const handler = workerRegistry.get(message.type);
       if (!handler) {
         workerLogger.warn('No worker registered for message type', { type: message.type });
@@ -2128,6 +2136,22 @@ export function createApp(): express.Express {
           attempts: message.attempts,
         });
       }
+    } catch (err) {
+      workerLogger.error('Queue message processing failed', {
+        messageId: message.id,
+        type: message.type,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+  let pollInFlight = false;
+  registerInterval(setInterval(async () => {
+    if (pollInFlight) return;
+    pollInFlight = true;
+    try {
+      const messages = await queue.receiveBatch(QUEUE_POLL_BATCH_SIZE);
+      if (messages.length === 0) return;
+      await Promise.all(messages.map((message) => handleQueueMessage(message)));
     } catch (err) {
       workerLogger.error('Queue poll failed', {
         error: err instanceof Error ? err.message : String(err),
