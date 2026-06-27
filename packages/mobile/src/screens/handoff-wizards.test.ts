@@ -7,6 +7,7 @@ const h = vi.hoisted(() => ({
   replace: vi.fn(),
   api: vi.fn(),
   customers: [] as Array<{ id: string; displayName?: string; firstName?: string; lastName?: string }>,
+  jobs: [] as Array<{ id: string; jobNumber?: string; summary?: string; status?: string }>,
   isLoading: false,
   listError: null as string | null,
   phase: 'idle' as 'idle' | 'saving' | 'saved' | 'error',
@@ -15,17 +16,21 @@ const h = vi.hoisted(() => ({
 }));
 
 vi.mock('expo-router', () => ({
+  useLocalSearchParams: () => ({}),
   useRouter: () => ({ replace: h.replace, push: vi.fn(), back: vi.fn() }),
 }));
 vi.mock('../lib/useApiClient', () => ({ useApiClient: () => h.api }));
 vi.mock('../hooks/useListQuery', () => ({
-  useListQuery: () => ({
-    data: h.customers,
-    total: h.customers.length,
-    isLoading: h.isLoading,
-    error: h.listError,
-    refetch: vi.fn(),
-  }),
+  useListQuery: (endpoint: string) =>
+    endpoint === '/api/jobs'
+      ? { data: h.jobs, total: h.jobs.length, isLoading: false, error: null, refetch: vi.fn() }
+      : {
+          data: h.customers,
+          total: h.customers.length,
+          isLoading: h.isLoading,
+          error: h.listError,
+          refetch: vi.fn(),
+        },
 }));
 vi.mock('../hooks/useSavePhase', () => ({
   useSavePhase: () => ({
@@ -83,6 +88,7 @@ import NewJob from '../../app/jobs/new';
 beforeEach(() => {
   vi.clearAllMocks();
   h.customers = [{ id: 'c1', displayName: 'Acme Plumbing' }];
+  h.jobs = [{ id: 'job-1', jobNumber: 'JOB-1', summary: 'Service call', status: 'scheduled' }];
   h.isLoading = false;
   h.listError = null;
   h.phase = 'idle';
@@ -99,6 +105,8 @@ describe('Handoff wizard screens', () => {
     h.customers = [{ id: 'c2', firstName: 'Beta', lastName: 'Builders' }];
     const { getByText } = render(createElement(NewEstimate));
     fireEvent.click(getByText('Beta Builders').closest('button')!);
+    fireEvent.click(getByText('Next: job').closest('button')!);
+    fireEvent.click(getByText(/Service call/).closest('button')!);
     fireEvent.click(getByText('Next: line items').closest('button')!);
     fireEvent.click(getByText('Add line item').closest('button')!);
     fireEvent.click(getByText('Mock add item'));
@@ -111,6 +119,8 @@ describe('Handoff wizard screens', () => {
   it('NewInvoice walks through the wizard steps', async () => {
     const { getByText } = render(createElement(NewInvoice));
     fireEvent.click(getByText('Acme Plumbing').closest('button')!);
+    fireEvent.click(getByText('Next: job').closest('button')!);
+    fireEvent.click(getByText(/Service call/).closest('button')!);
     fireEvent.click(getByText('Next: line items').closest('button')!);
     fireEvent.click(getByText('Add line item').closest('button')!);
     fireEvent.click(getByText('Mock add item'));

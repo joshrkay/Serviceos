@@ -1,8 +1,9 @@
-import { useRouter } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useMemo, useState } from 'react';
 import { Pressable, Text, View } from 'react-native';
 import { createEstimate, sendEstimate } from '../../src/api/estimates';
 import { PrimaryButton, SecondaryButton } from '../../src/components/Buttons';
+import { JobPicker } from '../../src/components/JobPicker';
 import {
   LineItemList,
   LineItemSheet,
@@ -33,10 +34,13 @@ function lineTotal(items: LineItem[]): number {
 export default function NewEstimate() {
   const router = useRouter();
   const api = useApiClient();
+  const params = useLocalSearchParams<{ customerId?: string }>();
+  const preCustomerId = Array.isArray(params.customerId) ? params.customerId[0] : params.customerId;
   const { data: customers } = useListQuery<Customer>('/api/customers');
   const { phase, error, run } = useSavePhase();
-  const [step, setStep] = useState<1 | 2 | 3>(1);
-  const [customerId, setCustomerId] = useState('');
+  const [step, setStep] = useState<1 | 2 | 3 | 4>(1);
+  const [customerId, setCustomerId] = useState(preCustomerId ?? '');
+  const [jobId, setJobId] = useState('');
   const [lineItems, setLineItems] = useState<LineItem[]>([]);
   const [sheetOpen, setSheetOpen] = useState(false);
 
@@ -47,9 +51,9 @@ export default function NewEstimate() {
   const totalCents = lineTotal(lineItems);
 
   const onCreateAndSend = () => {
-    if (!customerId || lineItems.length === 0) return;
+    if (!jobId || lineItems.length === 0) return;
     void run(async () => {
-      const { id } = await createEstimate(api, { customerId, lineItems });
+      const { id } = await createEstimate(api, { jobId, lineItems });
       await sendEstimate(api, id);
       router.replace('/estimates');
     });
@@ -57,7 +61,7 @@ export default function NewEstimate() {
 
   return (
     <ScreenShell title="New estimate" backLabel="‹ Estimates">
-      <Text className="mb-4 text-sm text-mutedForeground">Step {step} of 3</Text>
+      <Text className="mb-4 text-sm text-mutedForeground">Step {step} of 4</Text>
 
       {step === 1 ? (
         <View>
@@ -66,7 +70,10 @@ export default function NewEstimate() {
             <Pressable
               key={c.id}
               accessibilityRole="button"
-              onPress={() => setCustomerId(c.id)}
+              onPress={() => {
+                if (c.id !== customerId) setJobId('');
+                setCustomerId(c.id);
+              }}
               className={`mb-2 min-h-11 rounded-md border px-4 py-3 ${
                 customerId === c.id ? 'border-primary bg-primary/10' : 'border-border bg-card'
               }`}
@@ -75,7 +82,7 @@ export default function NewEstimate() {
             </Pressable>
           ))}
           <PrimaryButton
-            label="Next: line items"
+            label="Next: job"
             onPress={() => setStep(2)}
             disabled={!customerId}
             className="mt-4"
@@ -85,18 +92,13 @@ export default function NewEstimate() {
 
       {step === 2 ? (
         <View>
-          <Text className="mb-2 text-base font-medium text-foreground">Line items</Text>
-          <LineItemList
-            items={lineItems}
-            onRemove={(index) => setLineItems((items) => items.filter((_, i) => i !== index))}
-          />
-          <PrimaryButton label="Add line item" onPress={() => setSheetOpen(true)} className="mt-4" />
+          <JobPicker customerId={customerId || null} selectedJobId={jobId} onSelect={setJobId} />
           <View className="mt-4 flex-row gap-2">
             <SecondaryButton label="Back" onPress={() => setStep(1)} className="flex-1" />
             <PrimaryButton
-              label="Review"
+              label="Next: line items"
               onPress={() => setStep(3)}
-              disabled={lineItems.length === 0}
+              disabled={!jobId}
               className="flex-1"
             />
           </View>
@@ -104,6 +106,26 @@ export default function NewEstimate() {
       ) : null}
 
       {step === 3 ? (
+        <View>
+          <Text className="mb-2 text-base font-medium text-foreground">Line items</Text>
+          <LineItemList
+            items={lineItems}
+            onRemove={(index) => setLineItems((items) => items.filter((_, i) => i !== index))}
+          />
+          <PrimaryButton label="Add line item" onPress={() => setSheetOpen(true)} className="mt-4" />
+          <View className="mt-4 flex-row gap-2">
+            <SecondaryButton label="Back" onPress={() => setStep(2)} className="flex-1" />
+            <PrimaryButton
+              label="Review"
+              onPress={() => setStep(4)}
+              disabled={lineItems.length === 0}
+              className="flex-1"
+            />
+          </View>
+        </View>
+      ) : null}
+
+      {step === 4 ? (
         <View>
           <Text className="mb-2 text-base font-medium text-foreground">Review</Text>
           <Text className="text-base text-mutedForeground">
@@ -113,7 +135,7 @@ export default function NewEstimate() {
             {lineItems.length} line item{lineItems.length === 1 ? '' : 's'} · {formatMoneyCents(totalCents)}
           </Text>
           <View className="mt-4 flex-row gap-2">
-            <SecondaryButton label="Back" onPress={() => setStep(2)} className="flex-1" />
+            <SecondaryButton label="Back" onPress={() => setStep(3)} className="flex-1" />
             <View className="flex-1">
               <SavePhaseButton
                 phase={phase}
@@ -122,7 +144,7 @@ export default function NewEstimate() {
                 savingLabel="Sending…"
                 savedLabel="Sent"
                 onPress={onCreateAndSend}
-                disabled={lineItems.length === 0}
+                disabled={!jobId || lineItems.length === 0}
               />
             </View>
           </View>

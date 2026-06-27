@@ -2,9 +2,11 @@ import type { LineItem } from '../components/LineItemSheet';
 import type { AuthedFetch } from './me';
 
 export interface CreateEstimateInput {
-  customerId: string;
+  jobId: string;
   lineItems: LineItem[];
-  notes?: string;
+  discountCents?: number;
+  taxRateBps?: number;
+  customerMessage?: string;
 }
 
 export async function createEstimate(client: AuthedFetch, input: CreateEstimateInput): Promise<{ id: string }> {
@@ -12,14 +14,16 @@ export async function createEstimate(client: AuthedFetch, input: CreateEstimateI
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      customerId: input.customerId,
+      jobId: input.jobId,
       lineItems: input.lineItems.map((li) => ({
         description: li.description,
         quantity: li.quantity,
         unitPriceCents: li.unitPriceCents,
         catalogItemId: li.catalogItemId,
       })),
-      notes: input.notes,
+      discountCents: input.discountCents,
+      taxRateBps: input.taxRateBps,
+      customerMessage: input.customerMessage,
     }),
   });
   if (!res.ok) throw new Error(`createEstimate: ${res.status}`);
