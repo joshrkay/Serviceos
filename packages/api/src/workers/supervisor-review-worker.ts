@@ -58,7 +58,7 @@ export interface AnnotatorGateway {
 
 export interface SupervisorAnnotationSweepDeps {
   listTenantIds: () => Promise<string[]>;
-  proposalRepo: Pick<ProposalRepository, 'findByStatus' | 'findById' | 'update'>;
+  proposalRepo: Pick<ProposalRepository, 'findByStatus' | 'findByStatusSince' | 'findById' | 'update'>;
   gateway: AnnotatorGateway;
   /** Per-tenant 'supervisor_agent' flag gate; absent → all tenants swept. */
   isEnabledForTenant?: (tenantId: string) => Promise<boolean>;
@@ -143,8 +143,6 @@ async function annotateProposal(
   // concurrent annotation writes can still collide in that small window.
   // Future fix: push the merge to the repo layer via a server-side
   // jsonb_set / _meta-merge so the DB handles atomicity.
-  // TODO: revisit findByStatus full-load with a created_at-filtered query
-  // (e.g. WHERE created_at >= now() - interval '24h') when queues grow.
   //
   // Stale-status guard: if the proposal has left ready_for_review between
   // our sweep-read and now, skip the annotation write. A status change is
@@ -192,7 +190,14 @@ export async function runSupervisorAnnotationSweep(
         continue;
       }
       result.tenantsSwept += 1;
-      const pending = await deps.proposalRepo.findByStatus(tenantId, 'ready_for_review');
+      // Scale-to-1000 (P3): bound the working set in the DB to the recent window
+      // (uses idx_proposals_status_created) instead of loading every
+      // ready_for_review proposal and filtering by time in memory. Falls back to
+      // the full scan when the windowed method is unavailable (legacy fakes).
+      const since = new Date(now.getTime() - recentWindowMs);
+      const pending = deps.proposalRepo.findByStatusSince
+        ? await deps.proposalRepo.findByStatusSince(tenantId, 'ready_for_review', since)
+        : await deps.proposalRepo.findByStatus(tenantId, 'ready_for_review');
       const candidates = pending
         .filter((p) => now.getTime() - p.createdAt.getTime() <= recentWindowMs)
         .filter((p) => !hasSupervisorAnnotation(p.payload))

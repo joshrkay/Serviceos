@@ -504,6 +504,20 @@ export interface ProposalRepository {
   findByTenant(tenantId: string): Promise<Proposal[]>;
   findByStatus(tenantId: string, status: ProposalStatus): Promise<Proposal[]>;
   /**
+   * Scale-to-1000 (P3): proposals of `status` created on/after `since`, newest
+   * first, optionally capped at `limit`. Bounds a recurring sweep's working set
+   * in the DB (WHERE created_at >= $3 + the (tenant_id, status, created_at)
+   * index) instead of loading every row of that status and filtering by time in
+   * memory — the supervisor-review sweep's hot path. Optional so legacy fakes
+   * still satisfy the interface; callers fall back to findByStatus when absent.
+   */
+  findByStatusSince?(
+    tenantId: string,
+    status: ProposalStatus,
+    since: Date,
+    limit?: number,
+  ): Promise<Proposal[]>;
+  /**
    * §5.5 — expired proposals of the given types that lapsed on/after `since`,
    * newest first, capped at `limit`. Bounds the inbox's re-proposable list in
    * the DB (WHERE + ORDER BY + LIMIT) instead of fetching every expired row and
@@ -790,6 +804,24 @@ export class InMemoryProposalRepository implements ProposalRepository {
     return Array.from(this.proposals.values())
       .filter((p) => p.tenantId === tenantId && p.status === status)
       .map((p) => ({ ...p }));
+  }
+
+  async findByStatusSince(
+    tenantId: string,
+    status: ProposalStatus,
+    since: Date,
+    limit?: number,
+  ): Promise<Proposal[]> {
+    const rows = Array.from(this.proposals.values())
+      .filter(
+        (p) =>
+          p.tenantId === tenantId &&
+          p.status === status &&
+          p.createdAt.getTime() >= since.getTime(),
+      )
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+      .map((p) => ({ ...p }));
+    return typeof limit === 'number' ? rows.slice(0, limit) : rows;
   }
 
   async findExpiredScheduleProposals(

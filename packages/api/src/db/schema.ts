@@ -728,7 +728,13 @@ export const MIGRATIONS = {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
     CREATE INDEX IF NOT EXISTS idx_proposals_tenant ON proposals(tenant_id);
-    CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(tenant_id, status);
+    -- (tenant_id, status, created_at DESC) serves both findByStatus (filter +
+    -- ORDER BY created_at DESC) and the windowed findByStatusSince (created_at
+    -- range), e.g. the supervisor-review sweep. Supersedes the old
+    -- (tenant_id, status) index — every (tenant_id, status[, created_at]) access
+    -- is a prefix of this one — which is dropped to avoid double write-amplification.
+    CREATE INDEX IF NOT EXISTS idx_proposals_status_created ON proposals(tenant_id, status, created_at DESC);
+    DROP INDEX IF EXISTS idx_proposals_status;
     CREATE INDEX IF NOT EXISTS idx_proposals_type ON proposals(tenant_id, proposal_type);
     CREATE INDEX IF NOT EXISTS idx_proposals_ai_run ON proposals(ai_run_id);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_proposals_idempotency ON proposals(tenant_id, idempotency_key);

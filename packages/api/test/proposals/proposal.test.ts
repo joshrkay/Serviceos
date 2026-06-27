@@ -128,6 +128,30 @@ describe('P2-001 — Proposal entity and core schema', () => {
     expect(patched).toBeNull();
   });
 
+  it('findByStatusSince — windows by created_at, newest-first, honours limit (P3)', async () => {
+    const repo = new InMemoryProposalRepository();
+    const now = Date.now();
+    const mk = (over: Partial<Proposal>): Proposal => ({
+      ...createProposal({ ...validInput, idempotencyKey: undefined }),
+      ...over,
+    });
+    await repo.create(mk({ id: 'p-recent', status: 'ready_for_review', createdAt: new Date(now - 10 * 60_000) }));
+    await repo.create(mk({ id: 'p-2h', status: 'ready_for_review', createdAt: new Date(now - 2 * 3_600_000) }));
+    await repo.create(mk({ id: 'p-48h', status: 'ready_for_review', createdAt: new Date(now - 48 * 3_600_000) }));
+    await repo.create(mk({ id: 'p-draft', status: 'draft', createdAt: new Date(now - 10 * 60_000) }));
+
+    const since = new Date(now - 24 * 3_600_000);
+    const within = await repo.findByStatusSince('tenant-1', 'ready_for_review', since);
+    // 48h row is outside the window; the draft is a different status. Newest first.
+    expect(within.map((p) => p.id)).toEqual(['p-recent', 'p-2h']);
+
+    const limited = await repo.findByStatusSince('tenant-1', 'ready_for_review', since, 1);
+    expect(limited.map((p) => p.id)).toEqual(['p-recent']);
+
+    // Tenant-scoped.
+    expect(await repo.findByStatusSince('other-tenant', 'ready_for_review', since)).toHaveLength(0);
+  });
+
   it('createMany persists every member and is atomic on idempotency conflict', async () => {
     const repo = new InMemoryProposalRepository();
     // Chain members carry no idempotency key (they dedupe by recordingId
