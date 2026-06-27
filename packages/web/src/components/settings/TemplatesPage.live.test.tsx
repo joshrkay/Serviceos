@@ -15,8 +15,12 @@ vi.mock('../../utils/api-fetch', () => ({
   apiFetch: (...args: unknown[]) => apiFetchMock(...args),
 }));
 
-// useMe controls the owner gate; default to owner unless a test overrides.
-const meRef: { current: { role: string } | null } = { current: { role: 'owner' } };
+// useMe controls the edit gate. The gate is permission-based
+// (estimates:update), not role === 'owner', so dispatchers can edit. Default
+// to a permission-holder unless a test overrides.
+const meRef: { current: { role: string; permissions: string[] } | null } = {
+  current: { role: 'owner', permissions: ['estimates:update'] },
+};
 vi.mock('../../hooks/useMe', () => ({
   useMe: () => ({ me: meRef.current, isLoading: false, error: null, switchMode: vi.fn(), refetch: vi.fn() }),
 }));
@@ -82,7 +86,7 @@ const plumbingTemplate = {
 
 beforeEach(() => {
   apiFetchMock.mockReset();
-  meRef.current = { role: 'owner' };
+  meRef.current = { role: 'owner', permissions: ['estimates:update'] };
 });
 
 describe('LiveTemplatesSection — fetch + filter by active vertical packs', () => {
@@ -175,7 +179,7 @@ describe('LiveTemplateDetailModal — preview + wording edit', () => {
     const textarea = screen.getByLabelText(/Customer message/i) as HTMLTextAreaElement;
     expect(textarea.disabled).toBe(true);
     expect(screen.queryByRole('button', { name: /Save wording/i })).not.toBeInTheDocument();
-    expect(screen.getByText(/Only owners can edit/i)).toBeInTheDocument();
+    expect(screen.getByText(/don’t have permission to edit/i)).toBeInTheDocument();
   });
 
   it('PUTs /api/templates/:id with the edited wording and calls onSaved + onClose', async () => {
@@ -229,9 +233,9 @@ describe('LiveTemplateDetailModal — preview + wording edit', () => {
   });
 });
 
-describe('LiveTemplatesSection — non-owner viewing a live template', () => {
-  it('opens the modal in read-only mode when role is not owner', async () => {
-    meRef.current = { role: 'technician' };
+describe('LiveTemplatesSection — permission-gated editing', () => {
+  it('opens the modal in read-only mode for a technician (no estimates:update)', async () => {
+    meRef.current = { role: 'technician', permissions: ['jobs:view'] };
     apiFetchMock
       .mockResolvedValueOnce(jsonResponse({ activeVerticalPacks: ['hvac'] }))
       .mockResolvedValueOnce(jsonResponse([hvacTemplate]));
@@ -242,5 +246,19 @@ describe('LiveTemplatesSection — non-owner viewing a live template', () => {
     const textarea = screen.getByLabelText(/Customer message/i) as HTMLTextAreaElement;
     expect(textarea.disabled).toBe(true);
     expect(screen.queryByRole('button', { name: /Save wording/i })).not.toBeInTheDocument();
+  });
+
+  it('lets a dispatcher (estimates:update, not owner) edit template wording', async () => {
+    meRef.current = { role: 'dispatcher', permissions: ['estimates:update'] };
+    apiFetchMock
+      .mockResolvedValueOnce(jsonResponse({ activeVerticalPacks: ['hvac'] }))
+      .mockResolvedValueOnce(jsonResponse([hvacTemplate]));
+
+    render(<LiveTemplatesSection />);
+    fireEvent.click(await screen.findByText('AC Tune-Up'));
+
+    const textarea = screen.getByLabelText(/Customer message/i) as HTMLTextAreaElement;
+    expect(textarea.disabled).toBe(false);
+    expect(screen.getByRole('button', { name: /Save wording/i })).toBeInTheDocument();
   });
 });
