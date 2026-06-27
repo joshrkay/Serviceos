@@ -63,6 +63,32 @@ describe('JobPhotoGallery (P12-001)', () => {
     expect(onChange).toHaveBeenCalledWith('after');
   });
 
+  it('renders a <video> for video/* content (not an <img>)', () => {
+    const photos = [
+      makePhoto({
+        id: 'v1',
+        category: 'other',
+        contentType: 'video/webm',
+        downloadUrl: 'https://cdn.example/v1.webm',
+        filename: 'v1.webm',
+      }),
+    ];
+    const { container } = render(<JobPhotoGallery photos={photos} />);
+    const video = screen.getByTestId('job-photo-video-v1') as HTMLVideoElement;
+    expect(video.tagName.toLowerCase()).toBe('video');
+    expect(video).toHaveAttribute('src', 'https://cdn.example/v1.webm');
+    expect(video.controls).toBe(true);
+    // No <img> is rendered for the video tile.
+    expect(container.querySelector('img')).toBeNull();
+  });
+
+  it('still renders an <img> for image/* content', () => {
+    const photos = [makePhoto({ id: 'p1', contentType: 'image/jpeg' })];
+    render(<JobPhotoGallery photos={photos} />);
+    expect(screen.getByRole('img')).toBeInTheDocument();
+    expect(screen.queryByTestId('job-photo-video-p1')).not.toBeInTheDocument();
+  });
+
   it('invokes onDelete when the delete button is clicked', () => {
     const onDelete = vi.fn();
     const photo = makePhoto({ id: 'p1' });

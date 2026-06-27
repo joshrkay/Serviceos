@@ -60,6 +60,40 @@ const assistantProposalSchema = z.object({
   // (live: "LLM completion failed ... expected string, received null").
   relatedId: z.string().nullish().transform((v) => v ?? undefined),
   impact: z.string().nullish().transform((v) => v ?? undefined),
+  // E10 (U7) — pass-through of the trust signals AIProposalCard already
+  // renders: the 4-tier confidence + severity badge + "what I wasn't sure
+  // about" markers (`_meta`), the per-line catalog-grounding source
+  // (`lineItems[].pricingSource`), and the unfilled-required-field prompt
+  // (`missingFields`) that blocks Approve. Every field is `.nullish()` so a
+  // normal complete proposal — and the QA-2026-06-05 null-coercion / status
+  // -preprocess envelope — still validates unchanged.
+  meta: z
+    .object({
+      overallConfidence: z.enum(['high', 'medium', 'low', 'very_low']).nullish().transform((v) => v ?? undefined),
+      severity: z
+        .enum(['TIER_1_EVACUATE', 'TIER_2_EMERGENCY_DISPATCH', 'TIER_3_SAME_DAY_URGENT', 'TIER_4_SCHEDULE'])
+        .nullish()
+        .transform((v) => v ?? undefined),
+      markers: z
+        .array(z.object({ path: z.string(), reason: z.string() }))
+        .nullish()
+        .transform((v) => v ?? undefined),
+    })
+    .nullish()
+    .transform((v) => v ?? undefined),
+  lineItems: z
+    .array(
+      z.object({
+        description: z.string().nullish().transform((v) => v ?? undefined),
+        pricingSource: z
+          .enum(['catalog', 'ambiguous', 'uncatalogued', 'manual'])
+          .nullish()
+          .transform((v) => v ?? undefined),
+      }),
+    )
+    .nullish()
+    .transform((v) => v ?? undefined),
+  missingFields: z.array(z.string()).nullish().transform((v) => v ?? undefined),
 });
 
 const assistantReplySchema = z.object({
@@ -170,6 +204,89 @@ export interface AssistantRouterDeps {
 type AssistantProposal = z.infer<typeof assistantProposalSchema>;
 
 /**
+ * E10 (U7) — lift the trust signals AIProposalCard renders out of a persisted
+ * proposal's `payload._meta` / `payload.lineItems` / `sourceContext.missingFields`
+ * onto the UI card shape. Without this the assistant chat card dropped them and
+ * an operator could approve an AI-estimated/ambiguous/missing-field proposal
+ * into a server rejection.
+ *
+ * Price-field-agnostic: it reads only `description` + `pricingSource` from each
+ * line, so it works for estimates (lines priced in `unitPrice`) and invoices
+ * (priced in `unitPriceCents`) alike — it never touches a price field.
+ * Every returned key is optional; a fully-grounded complete proposal yields an
+ * empty object and the card renders exactly as before.
+ */
+export function proposalSignals(
+  payload: Record<string, unknown> | undefined,
+  sourceContext: Record<string, unknown> | undefined,
+): Pick<AssistantProposal, 'meta' | 'lineItems' | 'missingFields'> {
+  const out: Pick<AssistantProposal, 'meta' | 'lineItems' | 'missingFields'> = {};
+
+  const rawMeta = payload?._meta;
+  if (rawMeta !== null && typeof rawMeta === 'object') {
+    const m = rawMeta as Record<string, unknown>;
+    const meta: NonNullable<AssistantProposal['meta']> = {};
+    if (
+      m.overallConfidence === 'high' ||
+      m.overallConfidence === 'medium' ||
+      m.overallConfidence === 'low' ||
+      m.overallConfidence === 'very_low'
+    ) {
+      meta.overallConfidence = m.overallConfidence;
+    }
+    if (
+      m.severity === 'TIER_1_EVACUATE' ||
+      m.severity === 'TIER_2_EMERGENCY_DISPATCH' ||
+      m.severity === 'TIER_3_SAME_DAY_URGENT' ||
+      m.severity === 'TIER_4_SCHEDULE'
+    ) {
+      meta.severity = m.severity;
+    }
+    if (Array.isArray(m.markers)) {
+      const markers = m.markers
+        .filter((mk): mk is Record<string, unknown> => mk !== null && typeof mk === 'object')
+        .filter((mk) => typeof mk.path === 'string' && typeof mk.reason === 'string')
+        .map((mk) => ({ path: mk.path as string, reason: mk.reason as string }));
+      if (markers.length > 0) meta.markers = markers;
+    }
+    if (meta.overallConfidence || meta.severity || meta.markers) out.meta = meta;
+  }
+
+  const rawLines = payload?.lineItems;
+  if (Array.isArray(rawLines)) {
+    const lineItems = rawLines
+      .filter((li): li is Record<string, unknown> => li !== null && typeof li === 'object')
+      .map((li) => {
+        const item: {
+          description?: string;
+          pricingSource?: 'catalog' | 'ambiguous' | 'uncatalogued' | 'manual';
+        } = {};
+        if (typeof li.description === 'string') item.description = li.description;
+        if (
+          li.pricingSource === 'catalog' ||
+          li.pricingSource === 'ambiguous' ||
+          li.pricingSource === 'uncatalogued' ||
+          li.pricingSource === 'manual'
+        ) {
+          item.pricingSource = li.pricingSource;
+        }
+        return item;
+      });
+    if (lineItems.length > 0) out.lineItems = lineItems;
+  }
+
+  // missingFields lives on sourceContext (createProposal stamps it there to
+  // avoid a DB schema change; the catalog resolver appends to it too).
+  const rawMissing = sourceContext?.missingFields;
+  if (Array.isArray(rawMissing)) {
+    const missingFields = rawMissing.filter((f): f is string => typeof f === 'string');
+    if (missingFields.length > 0) out.missingFields = missingFields;
+  }
+
+  return out;
+}
+
+/**
  * Map the server-side create_customer Proposal to the UI card shape.
  * Reads `name` / `email` / `phone` out of the payload (the router
  * translates classifier `displayName` → contract `name` in AST-01).
@@ -178,7 +295,8 @@ function customerProposalToUI(
   proposalId: string,
   payload: Record<string, unknown>,
   sourceMessage: string,
-  confidenceScore: number
+  confidenceScore: number,
+  sourceContext?: Record<string, unknown>
 ): AssistantProposal {
   const name = typeof payload.name === 'string' && payload.name.length > 0 ? payload.name : undefined;
   const email = typeof payload.email === 'string' ? payload.email : undefined;
@@ -206,6 +324,9 @@ function customerProposalToUI(
     confidence: confidenceScore >= 0.85 ? 'High' : 'Medium',
     type: 'Customer',
     status: 'Pending',
+    // E10 (U7) — surface any missing-field / confidence signals (a
+    // create_customer with only a name carries missingFields).
+    ...proposalSignals(payload, sourceContext),
   };
 }
 
@@ -235,7 +356,14 @@ function dropUnverifiedIds(
  * shape — estimates/invoices were previously unpersisted LLM JSON.
  */
 function proposalToUI(
-  proposal: { id: string; proposalType: string; summary: string; payload: Record<string, unknown>; confidenceScore?: number },
+  proposal: {
+    id: string;
+    proposalType: string;
+    summary: string;
+    payload: Record<string, unknown>;
+    sourceContext?: Record<string, unknown>;
+    confidenceScore?: number;
+  },
   sourceMessage: string
 ): AssistantProposal {
   const typeMap: Record<string, AssistantProposal['type']> = {
@@ -258,6 +386,9 @@ function proposalToUI(
     confidence: (proposal.confidenceScore ?? 0) >= 0.85 ? 'High' : 'Medium',
     type: cardType,
     status: 'Pending',
+    // E10 (U7) — surface AI-pricing / confidence / missing-field warnings so
+    // the card can render them and block Approve on unresolved lines.
+    ...proposalSignals(proposal.payload, proposal.sourceContext),
   };
 }
 
@@ -500,7 +631,8 @@ async function generateAssistantReply(
           proposal.id,
           proposal.payload,
           lastUserText,
-          classification.confidence
+          classification.confidence,
+          proposal.sourceContext
         );
 
         return {

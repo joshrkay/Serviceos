@@ -4,7 +4,7 @@ import { useUser } from '@clerk/clerk-react';
 import {
   ArrowLeft, Phone, MessageSquare, Navigation,
   MapPin, AlertCircle, AlertTriangle, Package,
-  Play, Video, ChevronLeft, ChevronRight, X, Trash2, ExternalLink,
+  X, ExternalLink,
   Plus, Cpu, Camera, Receipt, Eye, FileText, Mail, Star,
   CheckCircle2, Circle, MoreHorizontal, Zap, Calendar, User, Clock,
   ChevronDown,
@@ -81,6 +81,15 @@ import { CallScreen, TextSheet, EstimateSheet, InvoiceSheet } from './JobSheets'
 import { CameraCapture } from '../shared/CameraCapture';
 import type { CapturedMedia } from '../shared/CameraCapture';
 import { SuppliersSheet } from './SuppliersSheet';
+import { JobPhotoGallery } from './JobPhotoGallery';
+import {
+  uploadJobPhoto as uploadJobPhotoApi,
+  listJobPhotos as listJobPhotosApi,
+  deleteJobPhoto as deleteJobPhotoApi,
+  type JobPhoto,
+  type JobPhotoCategory,
+} from '../../api/job-photos';
+import { capturedMediaToFile } from './capturedMediaToFile';
 
 const SERVICE_ICON: Record<string, string> = { HVAC: '❄️', Plumbing: '🔧', Painting: '🎨' };
 const SERVICE_COLOR: Record<string, { bg: string; text: string }> = {
@@ -615,106 +624,6 @@ function MaterialsTable({ materials, onEdit, onSuppliers }: { materials: Materia
   );
 }
 
-// ─── Site Media ───────────────────────────────────────────────────────────
-const MOCK_DOCUMENTS: Array<{ id: string; name: string; size: string; date: string }> = [];
-
-function SiteMedia({ media, onAdd, onLightbox }: {
-  media: CapturedMedia[]; onAdd: () => void; onLightbox: (i: number) => void;
-}) {
-  const [showDocs, setShowDocs] = useState(false);
-
-  return (
-    <div className="rounded-xl bg-card border border-border overflow-hidden">
-      <div className="flex items-center justify-between px-4 py-3.5 border-b border-border">
-        <div className="flex items-center gap-2">
-          <Camera size={14} className="text-muted-foreground" />
-          <h4 className="text-foreground">Site Media</h4>
-          {media.length > 0 && (
-            <span className="text-xs bg-secondary text-muted-foreground rounded-full px-2 py-0.5">{media.length}</span>
-          )}
-        </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => setShowDocs(v => !v)}
-            className={`flex items-center gap-1 text-xs transition-colors ${showDocs ? 'text-primary' : 'text-muted-foreground hover:text-foreground'}`}
-          >
-            <FileText size={12} /> Docs ({MOCK_DOCUMENTS.length})
-          </button>
-          <button onClick={onAdd} className="flex items-center gap-1 text-xs text-primary hover:text-primary transition-colors">
-            <Camera size={12} /> Add
-          </button>
-        </div>
-      </div>
-
-      {media.length > 0 ? (
-        <div className="p-3 grid grid-cols-3 md:grid-cols-4 gap-2">
-          {media.map((item, i) => (
-            <button
-              key={item.id}
-              onClick={() => onLightbox(i)}
-              className="relative aspect-square rounded-xl overflow-hidden bg-secondary hover:opacity-90 active:scale-95 transition-all"
-            >
-              {item.type === 'photo'
-                ? <img src={item.url} className="w-full h-full object-cover" alt="" />
-                : <>
-                    {item.thumb
-                      ? <img src={item.thumb} className="w-full h-full object-cover" alt="" />
-                      : <div className="w-full h-full bg-primary flex items-center justify-center"><Video size={18} className="text-primary-foreground/60" /></div>
-                    }
-                    <div className="absolute inset-0 flex items-center justify-center bg-black/25">
-                      <span className="flex size-8 items-center justify-center rounded-full bg-black/50">
-                        <Play size={13} className="text-primary-foreground ml-0.5" />
-                      </span>
-                    </div>
-                  </>
-              }
-            </button>
-          ))}
-          <button
-            onClick={onAdd}
-            className="aspect-square rounded-xl border-2 border-dashed border-border flex flex-col items-center justify-center gap-1 hover:border-primary/30 hover:bg-primary/10 transition-colors"
-          >
-            <Plus size={16} className="text-muted-foreground" />
-            <span className="text-xs text-muted-foreground">Add</span>
-          </button>
-        </div>
-      ) : (
-        <button
-          onClick={onAdd}
-          className="flex flex-col items-center gap-3 py-10 px-4 w-full hover:bg-secondary transition-colors"
-        >
-          <div className="flex size-14 items-center justify-center rounded-full bg-secondary">
-            <Camera size={20} className="text-muted-foreground" />
-          </div>
-          <div className="text-center">
-            <p className="text-sm text-foreground">Add site photos</p>
-            <p className="text-xs text-muted-foreground mt-0.5">Capture before/after and site conditions</p>
-          </div>
-        </button>
-      )}
-
-      {showDocs && (
-        <div className="border-t border-border">
-          {MOCK_DOCUMENTS.map(doc => (
-            <div key={doc.id} className="flex items-center gap-3 px-4 py-2.5 hover:bg-secondary border-b border-border last:border-0 transition-colors">
-              <div className="flex size-8 items-center justify-center rounded-lg bg-destructive/10 shrink-0">
-                <FileText size={14} className="text-destructive" />
-              </div>
-              <div className="flex-1 min-w-0">
-                <p className="text-sm text-foreground truncate">{doc.name}</p>
-                <p className="text-xs text-muted-foreground">{doc.size} · {doc.date}</p>
-              </div>
-              <button className="text-xs text-primary hover:text-primary shrink-0">View</button>
-            </div>
-          ))}
-          <button className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground px-4 py-2.5 transition-colors">
-            <Plus size={11} /> Attach document
-          </button>
-        </div>
-      )}
-    </div>
-  );
-}
 
 // ─── AI Hints ─────────────────────────────────────────────────────────────
 interface AIHint {
@@ -869,77 +778,27 @@ function IssueBanner({ job, onText }: { job: Job; onText: () => void }) {
   );
 }
 
-// ─── Media Lightbox ───────────────────────────────────────────────────────
-function MediaLightbox({ media, index, onIndexChange, onDelete, onClose }: {
-  media: CapturedMedia[]; index: number;
-  onIndexChange: (i: number) => void; onDelete: (id: string) => void; onClose: () => void;
-}) {
-  const current = media[index];
-  return (
-    <div className="fixed inset-0 z-50 bg-black flex flex-col" onClick={onClose}>
-      <div
-        className="absolute top-0 left-0 right-0 z-10 flex items-center justify-between px-4 pt-5 pb-8"
-        style={{ background: 'linear-gradient(to bottom, rgba(0,0,0,0.7) 0%, transparent 100%)' }}
-        onClick={e => e.stopPropagation()}
-      >
-        <button onClick={onClose} className="flex size-9 items-center justify-center rounded-full bg-black/40">
-          <X size={18} className="text-primary-foreground" />
-        </button>
-        <span className="text-sm text-primary-foreground/70">{index + 1} / {media.length}</span>
-        <button onClick={() => onDelete(current.id)} className="flex size-9 items-center justify-center rounded-full bg-destructive/80">
-          <Trash2 size={15} className="text-primary-foreground" />
-        </button>
-      </div>
-
-      <div className="flex-1 flex items-center justify-center relative" onClick={e => e.stopPropagation()}>
-        {current.type === 'photo'
-          ? <img key={current.id} src={current.url} className="max-w-full object-contain" style={{ maxHeight: 'calc(100vh - 160px)' }} alt="" />
-          : <video key={current.id} src={current.url} className="max-w-full" style={{ maxHeight: 'calc(100vh - 160px)' }} controls autoPlay />
-        }
-        {media.length > 1 && (
-          <>
-            <button onClick={() => onIndexChange((index - 1 + media.length) % media.length)} className="absolute left-3 flex size-10 items-center justify-center rounded-full bg-black/40">
-              <ChevronLeft size={20} className="text-primary-foreground" />
-            </button>
-            <button onClick={() => onIndexChange((index + 1) % media.length)} className="absolute right-3 flex size-10 items-center justify-center rounded-full bg-black/40">
-              <ChevronRight size={20} className="text-primary-foreground" />
-            </button>
-          </>
-        )}
-      </div>
-
-      <div
-        className="shrink-0 px-4 pb-8 pt-4"
-        style={{ background: 'linear-gradient(to top, rgba(0,0,0,0.7) 0%, transparent 100%)' }}
-        onClick={e => e.stopPropagation()}
-      >
-        <p className="text-center text-xs text-primary-foreground/50 mb-3">
-          {current.type === 'video' ? '🎬 Video' : '📷 Photo'} · {new Date(current.capturedAt).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}
-        </p>
-        {media.length > 1 && (
-          <div className="flex gap-1.5 justify-center overflow-x-auto" style={{ scrollbarWidth: 'none' }}>
-            {media.map((item, i) => (
-              <button
-                key={item.id}
-                onClick={() => onIndexChange(i)}
-                className={`shrink-0 rounded-lg overflow-hidden transition-all ${i === index ? 'ring-2 ring-white scale-105' : 'opacity-50 hover:opacity-80'}`}
-                style={{ width: 48, height: 48 }}
-              >
-                {item.type === 'photo'
-                  ? <img src={item.url} className="w-full h-full object-cover" alt="" />
-                  : <div className="w-full h-full bg-primary flex items-center justify-center"><Play size={12} className="text-primary-foreground" /></div>
-                }
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
-    </div>
-  );
+// ─── Main Component ───────────────────────────────────────────────────────
+export interface JobDetailViewProps {
+  id: string;
+  /** Test seams for the persisted photo pipeline (default to the real API). */
+  uploadPhoto?: (
+    jobId: string,
+    file: File,
+    category: JobPhotoCategory,
+    notes?: string,
+    takenAt?: string,
+  ) => Promise<JobPhoto>;
+  fetchPhotos?: (jobId: string) => Promise<JobPhoto[]>;
+  deletePhoto?: (jobId: string, photoId: string) => Promise<void>;
 }
 
-// ─── Main Component ───────────────────────────────────────────────────────
-export function JobDetailView({ id }: { id: string }) {
+export function JobDetailView({
+  id,
+  uploadPhoto = uploadJobPhotoApi,
+  fetchPhotos = listJobPhotosApi,
+  deletePhoto = deleteJobPhotoApi,
+}: JobDetailViewProps) {
   const navigate = useNavigate();
   const apiFetch = useApiClient();
   const workerTerm = useWorkerTerm();
@@ -962,8 +821,13 @@ export function JobDetailView({ id }: { id: string }) {
 
   const [modal,         setModal]         = useState<Modal>(null);
   const [cameraOpen,    setCameraOpen]    = useState(false);
-  const [jobMedia,      setJobMedia]      = useState<CapturedMedia[]>([]);
-  const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
+  // U9 (E7): captured photos persist to the backend (presign→PUT→attach) and
+  // are rendered from the server, so they survive reloads and are visible to
+  // every user/session on this job.
+  const [photos,        setPhotos]        = useState<JobPhoto[]>([]);
+  const [photoCategory, setPhotoCategory] = useState<JobPhotoCategory | 'all'>('all');
+  const [photoError,    setPhotoError]    = useState<string | null>(null);
+  const [photoSaving,   setPhotoSaving]   = useState(false);
   const [activities,    setActivities]    = useState<JobActivity[]>([]);
   const [materials,     setMaterials]     = useState<MaterialItem[]>([]);
   const [showDuplicate, setShowDuplicate] = useState(false);
@@ -990,6 +854,60 @@ export function JobDetailView({ id }: { id: string }) {
   }, [id]);
 
   useEffect(() => { loadTimeEntries(); }, [loadTimeEntries]);
+
+  // U9 (E7): load persisted job photos; refetch after each capture so the
+  // gallery reflects the server, not transient local state.
+  const loadPhotos = useCallback(async () => {
+    if (!id) return;
+    try {
+      setPhotos(await fetchPhotos(id));
+    } catch (err) {
+      setPhotoError(err instanceof Error ? err.message : 'Failed to load photos');
+    }
+  }, [id, fetchPhotos]);
+
+  useEffect(() => { void loadPhotos(); }, [loadPhotos]);
+
+  // Convert each captured data-URL into a File and persist it through the
+  // job-photos pipeline. Surfaces any failure instead of claiming success.
+  const persistCapturedMedia = useCallback(
+    async (captured: CapturedMedia[]) => {
+      if (!id || captured.length === 0) return;
+      setPhotoSaving(true);
+      setPhotoError(null);
+      for (const item of captured) {
+        try {
+          const file = capturedMediaToFile(item);
+          const category: JobPhotoCategory = item.type === 'video' ? 'other' : 'before';
+          await uploadPhoto(id, file, category, undefined, item.capturedAt);
+        } catch (err) {
+          // Surface the failure; the loop continues so other captures still upload.
+          setPhotoError(err instanceof Error ? err.message : 'Photo upload failed');
+        }
+      }
+      await loadPhotos();
+      setPhotoSaving(false);
+    },
+    [id, uploadPhoto, loadPhotos],
+  );
+
+  // U2 (E9 follow-up): delete a wrong photo/video behind a confirm. On success
+  // drop the row from local state; on failure surface the error and keep the
+  // photo (no phantom removal). The DELETE endpoint audits + gates server-side.
+  const handleDeletePhoto = useCallback(
+    async (photo: JobPhoto) => {
+      if (!id) return;
+      if (!window.confirm('Delete this photo? This cannot be undone.')) return;
+      setPhotoError(null);
+      try {
+        await deletePhoto(id, photo.id);
+        setPhotos((prev) => prev.filter((p) => p.id !== photo.id));
+      } catch (err) {
+        setPhotoError(err instanceof Error ? err.message : 'Failed to delete photo');
+      }
+    },
+    [id, deletePhoto],
+  );
 
   async function saveTimeEntry() {
     if (!timeFormStart || !timeFormEnd) return;
@@ -1104,7 +1022,7 @@ export function JobDetailView({ id }: { id: string }) {
   }
 
   const secondaryActions = [
-    { key: 'camera',   icon: Camera,        label: 'Photos',   badge: jobMedia.length, disabled: false },
+    { key: 'camera',   icon: Camera,        label: 'Photos',   badge: photos.length, disabled: false },
     { key: 'estimate', icon: Eye,           label: 'Estimate', badge: 0,               disabled: !job.estimateId },
     { key: 'invoice',  icon: Receipt,       label: 'Invoice',  badge: 0,               disabled: false },
     { key: 'addEntry', icon: FileText,      label: 'Note',     badge: 0,               disabled: false },
@@ -1223,11 +1141,38 @@ export function JobDetailView({ id }: { id: string }) {
         </div>
       </div>
 
-      <SiteMedia
-        media={jobMedia}
-        onAdd={() => setCameraOpen(true)}
-        onLightbox={i => setLightboxIndex(i)}
-      />
+      <div className="rounded-xl bg-card border border-border overflow-hidden">
+        <div className="flex items-center justify-between px-4 py-3.5 border-b border-border">
+          <div className="flex items-center gap-2">
+            <Camera size={14} className="text-muted-foreground" />
+            <h4 className="text-foreground">Site Media</h4>
+            {photos.length > 0 && (
+              <span className="text-xs bg-secondary text-muted-foreground rounded-full px-2 py-0.5">{photos.length}</span>
+            )}
+          </div>
+          <button
+            data-testid="site-media-add"
+            onClick={() => setCameraOpen(true)}
+            disabled={photoSaving}
+            className="flex items-center gap-1 min-h-11 px-2 text-xs text-primary hover:text-primary transition-colors disabled:opacity-50"
+          >
+            <Camera size={12} /> {photoSaving ? 'Saving…' : 'Add'}
+          </button>
+        </div>
+        <div className="p-3">
+          {photoError && (
+            <p data-testid="job-photo-error" role="alert" className="mb-2 text-sm text-destructive">
+              {photoError}
+            </p>
+          )}
+          <JobPhotoGallery
+            photos={photos}
+            activeCategory={photoCategory}
+            onCategoryChange={setPhotoCategory}
+            onDelete={handleDeletePhoto}
+          />
+        </div>
+      </div>
     </div>
   );
 
@@ -1486,19 +1431,9 @@ export function JobDetailView({ id }: { id: string }) {
       {cameraOpen && (
         <CameraCapture
           onClose={newMedia => {
-            if (newMedia.length) setJobMedia(prev => [...prev, ...newMedia]);
             setCameraOpen(false);
+            void persistCapturedMedia(newMedia);
           }}
-        />
-      )}
-
-      {lightboxIndex !== null && jobMedia.length > 0 && (
-        <MediaLightbox
-          media={jobMedia}
-          index={lightboxIndex}
-          onIndexChange={setLightboxIndex}
-          onDelete={did => { setJobMedia(prev => prev.filter(m => m.id !== did)); setLightboxIndex(null); }}
-          onClose={() => setLightboxIndex(null)}
         />
       )}
     </>

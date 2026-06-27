@@ -67,7 +67,7 @@ function getNav(mode: Mode): NavItem[] {
         { to: '/customers',      label: 'Customers', icon: Users    },
         { to: '/comms-inbox',    label: 'Messages',  icon: Mail     },
         { to: '/inbox',          label: 'Inbox',     icon: Bell     },
-        { to: '/settings',       label: 'Settings',  icon: Settings },
+        { to: '/settings',       label: 'Settings',  icon: Settings, requires: 'settings:view' },
       ];
     case 'both':
       // Supervisor + field-tech power view. Trimmed to the calm core
@@ -81,7 +81,7 @@ function getNav(mode: Mode): NavItem[] {
         { to: '/customers',      label: 'Customers',    icon: Users         },
         { to: '/estimates',      label: 'Estimates',    icon: FileText, requires: 'estimates:view' },
         { to: '/invoices',       label: 'Invoices',     icon: Receipt, requires: 'invoices:view' },
-        { to: '/settings',       label: 'Settings',     icon: Settings      },
+        { to: '/settings',       label: 'Settings',     icon: Settings, requires: 'settings:view' },
       ];
     case 'supervisor':
     default:
@@ -101,7 +101,7 @@ function getNav(mode: Mode): NavItem[] {
         { to: '/estimates',     label: 'Estimates',    icon: FileText, requires: 'estimates:view' },
         { to: '/invoices',      label: 'Invoices',     icon: Receipt, requires: 'invoices:view' },
         { to: '/interactions',  label: 'Interactions', icon: Layers        },
-        { to: '/settings',      label: 'Settings',     icon: Settings      },
+        { to: '/settings',      label: 'Settings',     icon: Settings, requires: 'settings:view' },
       ];
   }
 }

@@ -77,11 +77,18 @@ describe('Estimates screen', () => {
     expect(getByText(/EST-200/)).toBeTruthy();
   });
 
-  it('routes draft estimates to the new wizard', () => {
+  it('routes draft estimates to the editor for that id, not a blank form', () => {
     h.data = [{ id: 'e1', estimateNumber: 'EST-D', status: 'draft' }];
     const { getByText } = render(createElement(Estimates));
     expect(getByText('draft · tap to edit')).toBeTruthy();
     fireEvent.click(getByText(/EST-D/).closest('button')!);
-    expect(h.push).toHaveBeenCalledWith('/estimates/new');
+    expect(h.push).toHaveBeenCalledWith({ pathname: '/estimates/new', params: { id: 'e1' } });
+  });
+
+  it('routes a sent estimate to its detail screen', () => {
+    h.data = [{ id: 'e9', estimateNumber: 'EST-S', status: 'sent' }];
+    const { getByText } = render(createElement(Estimates));
+    fireEvent.click(getByText(/EST-S/).closest('button')!);
+    expect(h.push).toHaveBeenCalledWith('/estimates/e9');
   });
 });

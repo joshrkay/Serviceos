@@ -25,6 +25,7 @@ export interface UseProposalReviewResult {
   approve: () => Promise<void>;
   reject: (reason: string, details?: string) => Promise<void>;
   resolveLine: (lineIndex: number, catalogItemId: string) => Promise<void>;
+  resolveEntity: (candidateId: string) => Promise<void>;
   undo: () => Promise<void>;
   reload: () => Promise<void>;
 }
@@ -181,6 +182,32 @@ export function useProposalReview(id: string): UseProposalReviewResult {
     [api, id],
   );
 
+  // U8 (E9) — resolve an ambiguous entity reference ("which Bob?") by picking
+  // one of the surfaced candidates. POSTs to the resolve-entity endpoint, which
+  // re-drafts the original action with the chosen id and may move it to
+  // ready_for_review — but NEVER approves (D-004). Replaces the old
+  // reject('entity_selected', id) dead-end that discarded the command.
+  const resolveEntity = useCallback(
+    async (candidateId: string) => {
+      setError(null);
+      try {
+        const res = await api(`/api/proposals/${id}/resolve-entity`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ candidateId }),
+        });
+        if (!res.ok) throw new Error((await decodeError(res)).message);
+        const p = normalize(await res.json());
+        setProposal(p);
+        setPhase(phaseForStatus(p.status, p.approvedAt ?? null));
+      } catch (e) {
+        setError(message(e));
+        setPhase('error');
+      }
+    },
+    [api, id],
+  );
+
   const undo = useCallback(async () => {
     setPhase('undoing');
     setError(null);
@@ -215,5 +242,5 @@ export function useProposalReview(id: string): UseProposalReviewResult {
     return () => clearInterval(interval);
   }, [phase]);
 
-  return { proposal, phase, error, secondsLeft, approve, reject, resolveLine, undo, reload };
+  return { proposal, phase, error, secondsLeft, approve, reject, resolveLine, resolveEntity, undo, reload };
 }

@@ -71,6 +71,14 @@ function mapApiCustomers(apiCustomers: ApiCustomer[]): EstimateCustomer[] {
   });
 }
 
+// A job belonging to the selected customer, as returned by GET /api/jobs.
+interface ApiJob {
+  id: string;
+  jobNumber?: string;
+  summary?: string;
+  customerId?: string;
+}
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 type LineItem   = { description: string; qty: number; rate: number };
 type AILineItem = LineItem & { note?: string };
@@ -1062,6 +1070,74 @@ export function NewEstimateFlow({ onClose, onCreated, preSelectedCustomerId }: {
   const [manualKey,  setManualKey] = useState(0);
   const [photoKey,   setPhotoKey]  = useState(0);
 
+  // U1 (E1) — a real estimate requires a jobId (createEstimateSchema is
+  // strict; the money/job graph hangs off it). We fetch the chosen
+  // customer's jobs for a picker, and offer "create a job for this
+  // customer" when there are none, so a jobId always exists before create.
+  const [jobs,        setJobs]        = useState<ApiJob[]>([]);
+  const [jobsLoaded,  setJobsLoaded]  = useState(false);
+  const [jobId,       setJobId]       = useState<string | null>(null);
+  const [creatingJob, setCreatingJob] = useState(false);
+  // Surfaced API error from the create/send flow (no silent mock success).
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  // viewUrl returned by POST /api/estimates/:id/send — used for the real
+  // share link in the SMS/email preview (replaces the fake rivet.ai link).
+  const [viewUrl,     setViewUrl]     = useState<string | null>(null);
+
+  // Fetch the selected customer's jobs whenever the customer changes.
+  useEffect(() => {
+    if (!customerId) { setJobs([]); setJobsLoaded(false); setJobId(null); return; }
+    let alive = true;
+    setJobsLoaded(false);
+    setJobId(null);
+    apiFetch(`/api/jobs?customerId=${encodeURIComponent(customerId)}`)
+      .then(r => (r.ok ? r.json() : []))
+      .then((data: ApiJob[] | { data?: ApiJob[] }) => {
+        if (!alive) return;
+        const list = Array.isArray(data) ? data : (data?.data ?? []);
+        setJobs(list);
+        // Auto-select when the customer has exactly one job.
+        if (list.length === 1) setJobId(list[0].id);
+        setJobsLoaded(true);
+      })
+      .catch(() => { if (alive) { setJobs([]); setJobsLoaded(true); } });
+    return () => { alive = false; };
+  }, [customerId]);
+
+  async function createJobForCustomer(): Promise<string | null> {
+    if (!customerId) return null;
+    const locId = locationId ?? primaryLoc?.id ?? customer?.locations[0]?.id;
+    if (!locId) {
+      setSubmitError('This customer has no service location — add one before creating a job.');
+      return null;
+    }
+    setCreatingJob(true);
+    setSubmitError(null);
+    try {
+      const res = await apiFetch('/api/jobs', {
+        method: 'POST',
+        body: JSON.stringify({
+          customerId,
+          locationId: locId,
+          summary: aiResult?.description || 'New job',
+        }),
+      });
+      if (!res.ok) {
+        const json = await res.json().catch(() => ({}));
+        throw new Error((json as { message?: string })?.message ?? `HTTP ${res.status}`);
+      }
+      const created = await res.json() as ApiJob;
+      setJobs(prev => [created, ...prev]);
+      setJobId(created.id);
+      return created.id;
+    } catch (err) {
+      setSubmitError(err instanceof Error ? err.message : 'Failed to create job');
+      return null;
+    } finally {
+      setCreatingJob(false);
+    }
+  }
+
   const customer   = customers.find(c => c.id === customerId);
   const multiLoc   = (customer?.locations.length ?? 0) > 1;
   const location   = customer?.locations.find(l => l.id === locationId);
@@ -1106,14 +1182,95 @@ export function NewEstimateFlow({ onClose, onCreated, preSelectedCustomerId }: {
   const senderLine = businessName
     ? `${ownerFirstName}, ${businessName}`
     : ownerFirstName;
-  const smsMsg   = `Hi ${firstName},\n\nEstimate for ${aiResult?.description ?? 'your job'} is ready.\n\nTotal: $${total.toLocaleString()}\n\nReview here:\nrivet.ai/e/${estNum.toLowerCase().replace('-','')}\n\n– ${senderLine}`;
-  const emailMsg = `Hi ${firstName},\n\n${estNum} is ready for your review.\n\nService: ${aiResult?.description}\nTotal: $${total.toLocaleString()}\n\nrivet.ai/e/${estNum.toLowerCase().replace('-','')}\n\nThank you,\n${ownerFirstName}\n${businessName || 'Your team'}`;
+  // The share link is the real `viewUrl` returned by the send endpoint.
+  // Before the estimate is sent we show a neutral placeholder rather than a
+  // fabricated rivet.ai/… string (which never resolved to anything).
+  const shareLink = viewUrl ?? 'Link generated when you send';
+  const smsMsg   = `Hi ${firstName},\n\nEstimate for ${aiResult?.description ?? 'your job'} is ready.\n\nTotal: $${total.toLocaleString()}\n\nReview here:\n${shareLink}\n\n– ${senderLine}`;
+  const emailMsg = `Hi ${firstName},\n\n${estNum} is ready for your review.\n\nService: ${aiResult?.description}\nTotal: $${total.toLocaleString()}\n\n${shareLink}\n\nThank you,\n${ownerFirstName}\n${businessName || 'Your team'}`;
 
-  function handleSend() {
-    setSending(true);
-    setTimeout(() => { setSending(false); setSent(true); setTimeout(() => { onCreated(); onClose(); }, 1200); }, 1500);
+  // Map the wizard's dollar-based line items to the strict create contract
+  // (integer cents — never qty*rate/100 for the stored price).
+  function buildLineItemsPayload() {
+    return lineItems.map((it, i) => {
+      const unitPriceCents = Math.round(it.rate * 100);
+      return {
+        id: `li-${i}-${Date.now().toString(36)}`,
+        description: it.description.trim(),
+        quantity: it.qty,
+        unitPriceCents,
+        totalCents: Math.round(it.rate * 100 * it.qty),
+        sortOrder: i,
+        taxable: false,
+      };
+    });
   }
-  function saveAsDraft() {
+
+  // Ensure a jobId exists (auto-create one for the customer if none chosen),
+  // then POST /api/estimates. Returns the new estimate id, or null on error
+  // (error surfaced via submitError; the caller must not claim success).
+  async function createEstimate(): Promise<string | null> {
+    setSubmitError(null);
+    let useJobId = jobId;
+    if (!useJobId) {
+      useJobId = await createJobForCustomer();
+      if (!useJobId) return null;
+    }
+    let validUntilIso: string | undefined;
+    if (validUntil.trim()) {
+      const d = new Date(validUntil);
+      if (!Number.isNaN(d.getTime())) validUntilIso = d.toISOString();
+    }
+    try {
+      const res = await apiFetch('/api/estimates', {
+        method: 'POST',
+        body: JSON.stringify({
+          jobId: useJobId,
+          lineItems: buildLineItemsPayload(),
+          validUntil: validUntilIso,
+        }),
+      });
+      if (!res.ok) {
+        const json = await res.json().catch(() => ({}));
+        throw new Error((json as { message?: string })?.message ?? `HTTP ${res.status}`);
+      }
+      const created = await res.json() as { id: string };
+      return created.id;
+    } catch (err) {
+      setSubmitError(err instanceof Error ? err.message : 'Failed to create estimate');
+      return null;
+    }
+  }
+
+  async function handleSend() {
+    setSending(true);
+    setSubmitError(null);
+    const id = await createEstimate();
+    if (!id) { setSending(false); return; }
+    try {
+      const res = await apiFetch(`/api/estimates/${id}/send`, {
+        method: 'POST',
+        body: JSON.stringify({ channel }),
+      });
+      if (!res.ok) {
+        const json = await res.json().catch(() => ({}));
+        throw new Error((json as { message?: string })?.message ?? `HTTP ${res.status}`);
+      }
+      const result = await res.json() as { viewUrl?: string };
+      if (result.viewUrl) setViewUrl(result.viewUrl);
+      setSending(false);
+      setSent(true);
+      setTimeout(() => { onCreated(); onClose(); }, 1200);
+    } catch (err) {
+      setSending(false);
+      setSubmitError(err instanceof Error ? err.message : 'Send failed');
+    }
+  }
+
+  async function saveAsDraft() {
+    setSubmitError(null);
+    const id = await createEstimate();
+    if (!id) return;
     setSaved(true);
     setTimeout(() => { onCreated(); onClose(); }, 1100);
   }
@@ -1342,11 +1499,53 @@ export function NewEstimateFlow({ onClose, onCreated, preSelectedCustomerId }: {
                 </div>
               </div>
 
+              {/* Job selection — a real estimate must hang off a job. */}
+              <div>
+                <label className="block text-xs text-muted-foreground mb-1.5">Job</label>
+                {!jobsLoaded ? (
+                  <p className="text-xs text-muted-foreground">Loading jobs…</p>
+                ) : jobs.length > 0 ? (
+                  <div className="flex flex-col gap-1.5">
+                    {jobs.map(j => (
+                      <button key={j.id} onClick={() => setJobId(j.id)}
+                        className={`flex items-center gap-2 rounded-xl border px-3.5 py-2.5 text-left text-sm transition-all ${
+                          jobId === j.id
+                            ? 'border-primary bg-primary/10 text-primary'
+                            : 'border-border bg-card text-foreground hover:bg-secondary'
+                        }`}>
+                        <div className={`flex size-4 items-center justify-center rounded-full border-2 shrink-0 ${
+                          jobId === j.id ? 'border-primary bg-primary' : 'border-border'
+                        }`}>
+                          {jobId === j.id && <Check size={9} className="text-primary-foreground" />}
+                        </div>
+                        <span className="truncate">{j.jobNumber ? `${j.jobNumber} — ` : ''}{j.summary || 'Job'}</span>
+                      </button>
+                    ))}
+                    <button onClick={() => void createJobForCustomer()} disabled={creatingJob}
+                      className="flex items-center gap-1.5 text-xs text-primary hover:underline disabled:opacity-50 mt-0.5">
+                      <Plus size={11} /> {creatingJob ? 'Creating job…' : 'Create a new job for this customer'}
+                    </button>
+                  </div>
+                ) : (
+                  <div className="rounded-xl border border-border bg-secondary px-3.5 py-3 flex flex-col gap-2">
+                    <p className="text-xs text-muted-foreground">No job for this customer yet — create one to attach this {estimateTerm.toLowerCase()}.</p>
+                    <button onClick={() => void createJobForCustomer()} disabled={creatingJob}
+                      className="flex items-center justify-center gap-1.5 rounded-lg bg-primary text-primary-foreground py-2 text-sm hover:bg-primary/90 disabled:opacity-50 transition-colors">
+                      <Plus size={13} /> {creatingJob ? 'Creating job…' : 'Create a job for this customer'}
+                    </button>
+                  </div>
+                )}
+              </div>
+
               <div>
                 <label className="block text-xs text-muted-foreground mb-1.5">Valid until</label>
                 <input value={validUntil} onChange={e => setValidUntil(e.target.value)}
                   className="w-full rounded-xl border border-border px-4 py-3 text-sm focus:outline-none focus:border-primary transition-colors" />
               </div>
+
+              {submitError && (
+                <p role="alert" className="text-xs text-destructive">{submitError}</p>
+              )}
 
               {savedDraft ? (
                 <div className="flex flex-col items-center py-8 gap-3" style={{ animation: 'fadeUp 0.2s ease' }}>
@@ -1358,14 +1557,17 @@ export function NewEstimateFlow({ onClose, onCreated, preSelectedCustomerId }: {
                 </div>
               ) : (
                 <div className="flex flex-col gap-2">
-                  <button onClick={() => setStep('send')}
-                    className="flex items-center justify-center gap-2 w-full rounded-xl bg-primary text-primary-foreground py-3.5 text-sm hover:bg-primary/90 transition-colors">
+                  <button onClick={() => setStep('send')} disabled={!jobId || creatingJob}
+                    className="flex items-center justify-center gap-2 w-full rounded-xl bg-primary text-primary-foreground py-3.5 text-sm disabled:opacity-40 hover:bg-primary/90 transition-colors">
                     <Send size={14} /> Send to customer
                   </button>
-                  <button onClick={saveAsDraft}
-                    className="w-full rounded-xl border border-border py-3 text-sm text-foreground hover:bg-secondary transition-colors">
+                  <button onClick={() => void saveAsDraft()} disabled={!jobId || creatingJob}
+                    className="w-full rounded-xl border border-border py-3 text-sm text-foreground disabled:opacity-40 hover:bg-secondary transition-colors">
                     Save as draft
                   </button>
+                  {!jobId && (
+                    <p className="text-xs text-muted-foreground text-center">Select or create a job to continue</p>
+                  )}
                 </div>
               )}
             </div>
@@ -1394,6 +1596,10 @@ export function NewEstimateFlow({ onClose, onCreated, preSelectedCustomerId }: {
                 </pre>
               </div>
 
+              {submitError && (
+                <p role="alert" className="text-xs text-destructive">{submitError}</p>
+              )}
+
               {sent ? (
                 <div className="flex flex-col items-center py-6 gap-3" style={{ animation: 'fadeUp 0.2s ease' }}>
                   <div className="flex size-12 items-center justify-center rounded-full bg-success/15">
@@ -1403,7 +1609,7 @@ export function NewEstimateFlow({ onClose, onCreated, preSelectedCustomerId }: {
                   <p className="text-xs text-muted-foreground">{estNum} · {customer?.name}</p>
                 </div>
               ) : (
-                <button onClick={handleSend} disabled={sending}
+                <button onClick={() => void handleSend()} disabled={sending}
                   className="flex items-center justify-center gap-2 w-full rounded-xl bg-primary text-primary-foreground py-3.5 text-sm disabled:opacity-70 hover:bg-primary/90 transition-colors">
                   {sending
                     ? <><span className="size-4 rounded-full border-2 border-primary-foreground/30 border-t-white animate-spin" /> Sending…</>

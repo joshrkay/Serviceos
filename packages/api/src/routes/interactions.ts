@@ -2,10 +2,12 @@ import { Pool } from 'pg';
 import { Router, Response } from 'express';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { asyncRoute } from '../middleware/async-route';
-import { requireAuth, requireTenant } from '../middleware/auth';
+import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
+import type { DispatchRepository } from '../notifications/dispatch-repository';
 
 export interface InteractionsRouterDeps {
   pool: Pool;
+  dispatchRepo: DispatchRepository;
 }
 
 function toExcerpt(transcript: string[] | null): string {
@@ -46,7 +48,7 @@ FROM voice_sessions vs
 LEFT JOIN customers c ON c.id = vs.customer_id AND c.tenant_id = vs.tenant_id`;
 
 export function createInteractionsRouter(deps: InteractionsRouterDeps): Router {
-  const { pool } = deps;
+  const { pool, dispatchRepo } = deps;
   const router = Router();
 
   router.get('/', requireAuth, requireTenant, asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
@@ -110,6 +112,36 @@ export function createInteractionsRouter(deps: InteractionsRouterDeps): Router {
     } finally {
       client.release();
     }
+  }));
+
+  /**
+   * GET /api/interactions/dispatches?limit=&offset=
+   *
+   * Outbound message dispatch log (SMS / email) — appointment
+   * confirmations, delay notices, estimate / invoice deliveries. Backs
+   * the web DispatchLogPage. Gated by `dispatch:view` (owner + dispatcher;
+   * technicians get a 403 — they have no billing/comms surface). Registered
+   * before `/:id` so "dispatches" isn't matched as an interaction id.
+   */
+  router.get('/dispatches', requireAuth, requireTenant, requirePermission('dispatch:view'), asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+    const rawLimit = req.query.limit as string | undefined;
+    const rawOffset = req.query.offset as string | undefined;
+    const limit = rawLimit !== undefined ? parseInt(rawLimit, 10) : 50;
+    const offset = rawOffset !== undefined ? parseInt(rawOffset, 10) : 0;
+
+    if (Number.isNaN(limit) || limit < 1 || limit > 200) {
+      res.status(400).json({ error: 'VALIDATION_ERROR', message: 'limit must be between 1 and 200' });
+      return;
+    }
+    if (Number.isNaN(offset) || offset < 0) {
+      res.status(400).json({ error: 'VALIDATION_ERROR', message: 'offset must be a non-negative integer' });
+      return;
+    }
+
+    const tenantId = req.auth!.tenantId;
+    const { dispatches, total } = await dispatchRepo.listByTenant(tenantId, { limit, offset });
+
+    res.json({ dispatches, total, limit, offset });
   }));
 
   router.get('/:id', requireAuth, requireTenant, asyncRoute(async (req: AuthenticatedRequest, res: Response) => {

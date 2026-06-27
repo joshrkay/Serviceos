@@ -22,6 +22,8 @@ import {
   type UndoCorrectionLoopDeps,
 } from '../proposals/actions';
 import { resolveProposalLine } from '../proposals/resolve-line';
+import { resolveProposalEntity } from '../proposals/resolve-entity';
+import type { RedraftHandlerFactory } from '../proposals/redraft-handler-factory';
 import {
   proposalFilterSchema,
   rejectProposalBodySchema,
@@ -55,6 +57,13 @@ const resolveLineBodySchema = z.object({
   catalogItemId: z.string().min(1),
 });
 
+// U8 (E9) — resolve an ambiguous entity reference ("which Bob?") by picking
+// one of the proposal's surfaced candidates. Re-drafts the original action with
+// the chosen id; never approves (D-004).
+const resolveEntityBodySchema = z.object({
+  candidateId: z.string().min(1),
+});
+
 export function createProposalsRouter(
   proposalRepo: ProposalRepository,
   appointmentRepo?: AppointmentRepository,
@@ -66,6 +75,11 @@ export function createProposalsRouter(
   // Story 3.9 — when supplied, editing a proposal logs each changed field
   // (intent + field + before/after) to the corrections training table.
   correctionRepo?: CorrectionRepository,
+  // U1 (E9) — when supplied, resolving an entity-disambiguation clarification
+  // re-runs the ORIGINAL task handler with the chosen id and replaces the
+  // (non-executable) voice_clarification with the drafted, executable proposal.
+  // Absent → resolution falls back to the annotate-only behavior.
+  redraftHandlerFactory?: RedraftHandlerFactory,
 ): Router {
   const router = Router();
 
@@ -282,6 +296,31 @@ export function createProposalsRouter(
           actorRole: req.auth!.role as Role,
         },
         { proposalRepo, ...(auditRepo ? { auditRepo } : {}) },
+      );
+      res.json(result);
+    })
+  );
+
+  router.post(
+    '/:id/resolve-entity',
+    requireAuth,
+    requireTenant,
+    requirePermission('proposals:approve'),
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const parsed = validate(resolveEntityBodySchema, req.body);
+      const result = await resolveProposalEntity(
+        {
+          tenantId: req.auth!.tenantId,
+          proposalId: req.params.id,
+          candidateId: parsed.candidateId,
+          actorId: req.auth!.userId,
+          actorRole: req.auth!.role as Role,
+        },
+        {
+          proposalRepo,
+          ...(auditRepo ? { auditRepo } : {}),
+          ...(redraftHandlerFactory ? { redraftHandlerFactory } : {}),
+        },
       );
       res.json(result);
     })
