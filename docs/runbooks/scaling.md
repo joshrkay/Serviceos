@@ -122,6 +122,49 @@ single-instance).
   Redis error; byte-identical to the prior in-memory limiters when `REDIS_URL`
   is unset.
 
+## Provisioning & rollout (Phase 4)
+
+Code/config are in the repo; these steps are applied in the Railway account.
+
+1. **Redis** — add a Railway Redis plugin and set `REDIS_URL` on the API service.
+   This is the switch that makes the WS caps, LLM quotas, voice fan-out, and rate
+   limits cluster-wide. Also set `VOICE_FANOUT_ENABLED=true` for multi-replica
+   voice. Without `REDIS_URL`, every shared store stays per-replica — so set it
+   **before** raising `numReplicas`.
+2. **PgBouncer** — add a PgBouncer service (`pool_mode=transaction`) in front of
+   the Postgres plugin. Point the API's `DATABASE_URL` at PgBouncer and
+   `DATABASE_DIRECT_URL` at the Postgres plugin's direct URL (session-scoped
+   advisory locks + LISTEN/NOTIFY bypass PgBouncer — see U2a). Size
+   `DB_MAX_CONNECTIONS` per replica and PgBouncer's `DEFAULT_POOL_SIZE` against
+   Postgres `max_connections`.
+3. **Replicas + autoscale** — raise `numReplicas` in `railway.toml` (or the
+   service settings). Configure metric-based autoscaling (CPU/memory/request
+   triggers, min/max replicas) in the Railway service settings — there is no
+   `railway.toml` key for it. Set the **min** from the steady load and the
+   **max** from the Phase 5 per-instance ceiling.
+4. **Graceful drain** — ensure Railway's stop grace period exceeds
+   `SHUTDOWN_FORCE_EXIT_MS` (default 30s) so a draining replica can finish live
+   calls. The app flips `/ready` → 503 and rejects new WS upgrades on SIGTERM,
+   waits `DRAIN_TIMEOUT_MS` (25s) for active voice sessions, then tears down. The
+   `overlapSeconds = 35` in `railway.toml` keeps the old replica serving during a
+   rolling deploy until the new one is healthy.
+
+### CDN (static assets)
+
+The web image (`packages/web/nginx.conf`) already emits CDN-correct cache
+headers: content-hashed `/assets/*` are `public, max-age=31536000, immutable`
+(safe to cache forever — a redeploy emits new filenames), while `index.html` and
+`env.js` are `no-cache` (revalidate so a deploy's new asset hashes load at once).
+To put Cloudflare (or any CDN) in front of the Railway web edge:
+
+- Proxy the web hostname through the CDN; origin = the Railway web service.
+- Respect origin `Cache-Control` (don't override) so `/assets/*` cache at the
+  edge and `index.html`/`env.js` revalidate.
+- **Bypass the cache for `/api/*` and WebSocket upgrades** (the gateway +
+  `/voice/twilio` media streams) — dynamic + per-tenant, never cacheable.
+- Keep `X-Forwarded-For` intact (the API has `trust proxy` set) so per-IP rate
+  limits and `req.ip` resolve to the real client.
+
 ## Measuring
 
 Stand up the local pooled topology and drive load:
