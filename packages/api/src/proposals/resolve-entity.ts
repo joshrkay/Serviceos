@@ -25,8 +25,14 @@
  *    (applyCatalogPricing), never a hand-rolled payload.
  *  - No auto-execute (D-004): resolution caps at `ready_for_review`; it never
  *    approves or executes. The re-drafted action still needs a deliberate tap.
- *  - Zod-valid: the re-drafted payload is validated for its NEW type before
- *    persisting (assertValidProposalPayload).
+ *  - Mirrors the canonical voice path (voice-action-router): the re-draft runs
+ *    the SAME grounded TaskHandler, maps entities with `entitiesForProposal`,
+ *    and tracks an incomplete-but-typed draft via `sourceContext.missingFields`
+ *    (NOT a hard per-type Zod throw). A customer-name ambiguity drafting a
+ *    draft_invoice has no jobId and CreateJobVoiceTaskHandler never stamps
+ *    customerId — those are required-but-missing fields, so the canonical path
+ *    persists the draft and lets the approval gate (missingFieldsFor) block it.
+ *    A hard validation throw here would 400 exactly those common cases.
  *  - Audited: every resolution emits `proposal.entity_resolved` (and records the
  *    type transition).
  *  - Tenant-scoped: every read/write goes through the tenant-scoped repo.
@@ -34,10 +40,11 @@
 import { Role, hasPermission } from '../auth/rbac';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { ForbiddenError, NotFoundError, ValidationError } from '../shared/errors';
-import { Proposal, ProposalRepository } from './proposal';
-import { assertValidProposalPayload } from './contracts';
+import { Proposal, ProposalRepository, missingFieldsFor } from './proposal';
+import { validateProposalPayload } from './contracts';
 import type { IntentType } from '../ai/orchestration/intent-classifier';
 import type { TaskContext } from '../ai/tasks/task-handlers';
+import { entitiesForProposal } from '../workers/voice-action-router';
 import type { RedraftHandlerFactory } from './redraft-handler-factory';
 
 interface EntityCandidate {
@@ -78,6 +85,35 @@ interface OriginalIntent {
 
 function asRecord(v: unknown): Record<string, unknown> {
   return v !== null && typeof v === 'object' ? (v as Record<string, unknown>) : {};
+}
+
+/**
+ * Derive the top-level required fields the drafted payload is still missing for
+ * its NEW type, WITHOUT throwing. Mirrors the canonical voice path: an
+ * incomplete-but-typed draft (e.g. a draft_invoice with no jobId because the
+ * ambiguity was a customer name) is persisted and gated via
+ * `sourceContext.missingFields`, not rejected with a 400. We read the validator
+ * (non-throwing) and map each error's top-level path segment to a missing
+ * field; the approval gate (missingFieldsFor → approveProposal) then blocks
+ * execution until the operator fills it. Errors with no field path (whole-object
+ * refinements) are ignored here — they don't name a single fillable field.
+ */
+function missingRequiredFieldsForDraft(
+  proposalType: string,
+  payload: unknown,
+): string[] {
+  const result = validateProposalPayload(proposalType, payload);
+  if (result.valid || !result.errors) return [];
+  const fields = new Set<string>();
+  for (const err of result.errors) {
+    const field = err.split(':', 1)[0].trim();
+    // Top-level fields only (e.g. `jobId`); skip nested paths
+    // (`lineItems.0.unitPriceCents`) and pathless refinements.
+    if (field.length > 0 && !field.includes('.')) {
+      fields.add(field);
+    }
+  }
+  return [...fields];
 }
 
 /**
@@ -327,10 +363,22 @@ async function redraftResolvedProposal(args: {
   } = args;
 
   // Reconstruct the resolved id into existingEntities EXACTLY as the voice
-  // router does on the non-ambiguous path: the original extracted entities,
-  // plus the verified id stamped under the field its kind fills.
+  // router does on the non-ambiguous path: map the original extracted entities
+  // through `entitiesForProposal` (so e.g. a create_customer's displayName
+  // becomes `name`, matching the Zod contract) FIRST, then stamp the verified
+  // id under the field its kind fills. Passing raw extractedEntities would
+  // diverge from the canonical drafting and feed handlers the wrong keys.
+  const mappedEntities =
+    originalIntent.intentType === 'unknown'
+      ? { ...originalIntent.extractedEntities }
+      : {
+          ...(entitiesForProposal(
+            originalIntent.intentType,
+            originalIntent.extractedEntities as never,
+          ) ?? {}),
+        };
   const existingEntities: Record<string, unknown> = {
-    ...originalIntent.extractedEntities,
+    ...mappedEntities,
     [field]: chosen.id,
   };
   // The ambiguous free-text reference is now resolved — don't carry it forward
@@ -358,9 +406,21 @@ async function redraftResolvedProposal(args: {
 
   const { proposal: drafted } = await handler.handle(context);
 
-  // Zod-validate the re-drafted payload for its NEW type BEFORE persisting —
-  // the type transition must satisfy the contract for the drafted type.
-  assertValidProposalPayload(drafted.proposalType, drafted.payload);
+  // Mirror the canonical voice path: do NOT hard-throw on a typed draft that is
+  // merely INCOMPLETE. A customer-name ambiguity drafting a draft_invoice has no
+  // jobId; CreateJobVoiceTaskHandler never stamps customerId — both are
+  // required-but-missing fields the canonical path tracks via missingFields and
+  // the approval gate blocks on, rather than 400-ing the resolution.
+  //
+  // Carry the handler's own reported missingFields (it persists them on its
+  // proposal's sourceContext) AND union in any top-level required fields the
+  // drafted payload is still missing for its new type, so an incomplete-but-
+  // typed draft can never be approved (missingFieldsFor → approveProposal) with
+  // an invalid payload. This is the resolution-time analogue of the canonical
+  // drafting's missingFields gating — not a throw.
+  const handlerMissing = missingFieldsFor(drafted);
+  const schemaMissing = missingRequiredFieldsForDraft(drafted.proposalType, drafted.payload);
+  const missingFields = [...new Set([...handlerMissing, ...schemaMissing])];
 
   // Build the next sourceContext: keep the re-draft trace + chain edges, drop
   // the now-resolved ambiguity markers.
@@ -374,13 +434,23 @@ async function redraftResolvedProposal(args: {
     ...(entityKind ? { kind: entityKind } : {}),
     ...(chosen.label ? { label: chosen.label } : {}),
   };
-  // Merge any sourceContext the drafting handler produced (e.g. missingFields),
-  // but keep the clarification's conversation/recording trace which the
-  // handler doesn't know about.
+  // Merge any sourceContext the drafting handler produced (e.g. catalogResolution
+  // ambiguity candidates), but keep the clarification's conversation/recording
+  // trace which the handler doesn't know about. missingFields is set explicitly
+  // below (unioned), so skip the handler's copy here to avoid clobbering it.
   const draftedCtx = asRecord(drafted.sourceContext);
   for (const [k, v] of Object.entries(draftedCtx)) {
     if (k === 'conversationId') continue; // already carried above
+    if (k === 'missingFields') continue; // unioned and set below
     nextSourceContext[k] = v;
+  }
+  // Carry incompleteness forward so approveProposal blocks an incomplete draft
+  // (missingFieldsFor reads sourceContext.missingFields). Drop the key entirely
+  // when complete so a fully-resolved draft is approvable.
+  if (missingFields.length > 0) {
+    nextSourceContext.missingFields = missingFields;
+  } else {
+    delete nextSourceContext.missingFields;
   }
 
   // D-004: NEVER approve/execute during resolution. The drafted handler may

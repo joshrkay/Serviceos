@@ -620,7 +620,7 @@ async function createDeduped(
  * here — at the router boundary — so the task handler stays a dumb
  * passthrough and every downstream payload matches the Zod schema.
  */
-function entitiesForProposal(
+export function entitiesForProposal(
   intent: Exclude<IntentType, 'unknown'>,
   entities: ExtractedEntities | undefined
 ): Record<string, unknown> | undefined {
