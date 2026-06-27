@@ -173,6 +173,7 @@ export function createDispatchRoutes(deps: {
               scheduledEnd: appt.scheduledEnd.toISOString(),
               status: appt.status,
               jobSummary,
+              updatedAt: appt.updatedAt.toISOString(),
             };
           }),
         );
