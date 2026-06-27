@@ -1,4 +1,5 @@
 import type { LineItem } from '../components/LineItemSheet';
+import { toServerLineItems } from './lineItems';
 import type { AuthedFetch } from './me';
 
 export interface CreateInvoiceInput {
@@ -16,12 +17,7 @@ export async function createInvoice(client: AuthedFetch, input: CreateInvoiceInp
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       jobId: input.jobId,
-      lineItems: input.lineItems.map((li) => ({
-        description: li.description,
-        quantity: li.quantity,
-        unitPriceCents: li.unitPriceCents,
-        catalogItemId: li.catalogItemId,
-      })),
+      lineItems: toServerLineItems(input.lineItems),
       discountCents: input.discountCents,
       taxRateBps: input.taxRateBps,
       processingFeeBps: input.processingFeeBps,

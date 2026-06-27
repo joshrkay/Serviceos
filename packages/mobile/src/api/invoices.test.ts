@@ -19,11 +19,17 @@ describe('createInvoice', () => {
     const body = JSON.parse(init.body as string) as Record<string, unknown>;
     expect(body.jobId).toBe('j1');
     expect(body).not.toHaveProperty('customerId');
+    // Full server lineItemSchema shape — id/totalCents/sortOrder/taxable are
+    // required by contracts.ts; omitting them 400s (the original bug).
     expect(body.lineItems).toEqual([
       {
+        id: 'li-1',
         description: 'Service call',
         quantity: 1,
         unitPriceCents: 9900,
+        totalCents: 9900,
+        sortOrder: 0,
+        taxable: false,
         catalogItemId: 'cat-2',
       },
     ]);

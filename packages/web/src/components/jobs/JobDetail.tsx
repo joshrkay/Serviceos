@@ -872,20 +872,18 @@ export function JobDetailView({
       if (!id || captured.length === 0) return;
       setPhotoSaving(true);
       setPhotoError(null);
-      let failed = 0;
       for (const item of captured) {
         try {
           const file = capturedMediaToFile(item);
           const category: JobPhotoCategory = item.type === 'video' ? 'other' : 'before';
           await uploadPhoto(id, file, category, undefined, item.capturedAt);
         } catch (err) {
-          failed += 1;
+          // Surface the failure; the loop continues so other captures still upload.
           setPhotoError(err instanceof Error ? err.message : 'Photo upload failed');
         }
       }
       await loadPhotos();
       setPhotoSaving(false);
-      void failed; // per-item errors already surfaced via setPhotoError
     },
     [id, uploadPhoto, loadPhotos],
   );
