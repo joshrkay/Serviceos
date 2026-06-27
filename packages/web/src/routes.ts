@@ -49,6 +49,7 @@ import { Showcase } from './pages/design/Showcase';
 import { InvoiceCreate } from './pages/invoices/InvoiceCreate';
 import { EstimateCreate } from './pages/estimates/EstimateCreate';
 import { JobCreate } from './pages/jobs/JobCreate';
+import { JobPhotos } from './pages/jobs/JobPhotos';
 import { CustomerEdit } from './pages/customers/CustomerEdit';
 import { AppointmentEdit } from './pages/appointments/AppointmentEdit';
 import { useParams, useNavigate } from 'react-router';
@@ -114,6 +115,14 @@ function AppointmentEditRoute() {
     appointmentId: params.id,
     onBack: () => navigate(-1),
   });
+}
+
+// U9 (E7) — surface the per-job photo page so the persisted-photo pipeline
+// (presign → PUT → attach → gallery) is reachable via `jobs/:id/photos`.
+function JobPhotosRoute() {
+  const params = useParams<{ id: string }>();
+  if (!params.id) return null;
+  return React.createElement(JobPhotos, { jobId: params.id });
 }
 
 // Wrap EstimatesPage to pre-select the estimate from the URL param.
@@ -185,6 +194,7 @@ export const router = createBrowserRouter([
       { path: 'jobs',           Component: JobsPage        },
       { path: 'jobs/new',       Component: JobCreate       },
       { path: 'jobs/:id',       Component: JobsPage        },
+      { path: 'jobs/:id/photos', Component: JobPhotosRoute },
       { path: 'schedule',       Component: SchedulePage    },
       { path: 'dispatch',       Component: DispatchBoard   },
       { path: 'customers',      Component: CustomersPage   },

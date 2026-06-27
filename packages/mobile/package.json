@@ -25,6 +25,7 @@
     "expo": "~52.0.0",
     "expo-asset": "~11.0.5",
     "expo-audio": "~0.3.5",
+    "expo-camera": "~16.0.18",
     "expo-constants": "~17.0.0",
     "expo-crypto": "~14.0.2",
     "expo-file-system": "~18.0.12",

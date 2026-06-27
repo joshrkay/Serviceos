@@ -1,5 +1,5 @@
 import React from 'react';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { MemoryRouter } from 'react-router';
 import { JobDetailView } from './JobDetail';
@@ -21,7 +21,23 @@ vi.mock('./JobSheets', () => ({
   EstimateSheet: () => null,
   InvoiceSheet: () => null,
 }));
-vi.mock('../shared/CameraCapture', () => ({ CameraCapture: () => null }));
+// U9 (E7): a controllable CameraCapture mock. The button fires onClose with a
+// preset captured-photo set so we can drive the persist pipeline in jsdom.
+const CAPTURED = [
+  {
+    id: 'cap-1',
+    type: 'photo' as const,
+    url: 'data:image/jpeg;base64,/9j/4AAQSkZJRg==',
+    capturedAt: '2026-06-27T10:00:00.000Z',
+  },
+];
+vi.mock('../shared/CameraCapture', () => ({
+  CameraCapture: ({ onClose }: { onClose: (m: typeof CAPTURED) => void }) => (
+    <button data-testid="mock-finish-capture" onClick={() => onClose(CAPTURED)}>
+      finish
+    </button>
+  ),
+}));
 vi.mock('./SuppliersSheet', () => ({ SuppliersSheet: () => null }));
 
 import { useDetailQuery } from '../../hooks/useDetailQuery';
@@ -128,6 +144,99 @@ describe('JobDetailView', () => {
   it('uses /api/jobs endpoint with correct id', () => {
     renderPage('j1');
     expect(vi.mocked(useDetailQuery)).toHaveBeenCalledWith('/api/jobs', 'j1');
+  });
+
+  // U9 (E7) — captured photos persist to the backend and render from the server.
+  describe('photo persistence', () => {
+    function makePhoto(id: string, category: 'before' | 'after' = 'before') {
+      return {
+        id,
+        tenantId: 't1',
+        jobId: 'j1',
+        uploadedByUserId: 'u1',
+        fileId: `f-${id}`,
+        category,
+        createdAt: '2026-06-27T10:00:00.000Z',
+        downloadUrl: `https://cdn.example/${id}.jpg`,
+        filename: `${id}.jpg`,
+        contentType: 'image/jpeg',
+        sizeBytes: 10,
+      };
+    }
+
+    function renderWithPhotos(opts: {
+      uploadPhoto: ReturnType<typeof vi.fn>;
+      fetchPhotos: ReturnType<typeof vi.fn>;
+    }) {
+      return render(
+        <MemoryRouter>
+          <JobDetailView
+            id="j1"
+            uploadPhoto={opts.uploadPhoto as never}
+            fetchPhotos={opts.fetchPhotos as never}
+          />
+        </MemoryRouter>,
+      );
+    }
+
+    it('uploads each captured photo via uploadJobPhoto with jobId + category, then shows it in the gallery', async () => {
+      const uploaded = makePhoto('p-new');
+      const uploadPhoto = vi.fn().mockResolvedValue(uploaded);
+      // First load: empty. After upload: the persisted photo.
+      const fetchPhotos = vi
+        .fn()
+        .mockResolvedValueOnce([])
+        .mockResolvedValue([uploaded]);
+
+      renderWithPhotos({ uploadPhoto, fetchPhotos });
+
+      fireEvent.click(screen.getAllByTestId('site-media-add')[0]);
+      fireEvent.click(screen.getAllByTestId('mock-finish-capture')[0]);
+
+      await waitFor(() => expect(uploadPhoto).toHaveBeenCalledTimes(1));
+      expect(uploadPhoto).toHaveBeenCalledWith(
+        'j1',
+        expect.any(File),
+        'before',
+        undefined,
+        '2026-06-27T10:00:00.000Z',
+      );
+
+      // Persisted photo is rendered from the server-backed gallery.
+      await waitFor(() =>
+        expect(screen.getAllByTestId('job-photo-card-p-new').length).toBeGreaterThan(0),
+      );
+    });
+
+    it('surfaces an upload error and does not show a phantom persisted photo', async () => {
+      const uploadPhoto = vi.fn().mockRejectedValue(new Error('S3 PUT failed: 500'));
+      const fetchPhotos = vi.fn().mockResolvedValue([]); // server still has nothing
+
+      renderWithPhotos({ uploadPhoto, fetchPhotos });
+
+      fireEvent.click(screen.getAllByTestId('site-media-add')[0]);
+      fireEvent.click(screen.getAllByTestId('mock-finish-capture')[0]);
+
+      await waitFor(() =>
+        expect(screen.getAllByTestId('job-photo-error')[0]).toHaveTextContent('S3 PUT failed: 500'),
+      );
+      // No photo card appears — the failed capture was not faked into the gallery.
+      expect(screen.queryByTestId('job-photo-card-p-new')).not.toBeInTheDocument();
+      expect(screen.getAllByTestId('job-photo-empty').length).toBeGreaterThan(0);
+    });
+
+    it('renders photos already persisted on load', async () => {
+      const existing = makePhoto('p-existing');
+      const uploadPhoto = vi.fn();
+      const fetchPhotos = vi.fn().mockResolvedValue([existing]);
+
+      renderWithPhotos({ uploadPhoto, fetchPhotos });
+
+      await waitFor(() =>
+        expect(screen.getAllByTestId('job-photo-card-p-existing').length).toBeGreaterThan(0),
+      );
+      expect(uploadPhoto).not.toHaveBeenCalled();
+    });
   });
 
   // U10b — Path A class contract: the largest jobs file renders on brand tokens.

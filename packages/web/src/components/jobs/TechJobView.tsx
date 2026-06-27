@@ -15,6 +15,14 @@ import { CameraCapture } from '../shared/CameraCapture';
 import type { CapturedMedia } from '../shared/CameraCapture';
 import { useApiClient } from '../../lib/apiClient';
 import type { JobActivity, MaterialItem, ServiceType } from '../../data/mock-data';
+import { JobPhotoGallery } from './JobPhotoGallery';
+import {
+  uploadJobPhoto as uploadJobPhotoApi,
+  listJobPhotos as listJobPhotosApi,
+  type JobPhoto,
+  type JobPhotoCategory,
+} from '../../api/job-photos';
+import { capturedMediaToFile } from './capturedMediaToFile';
 
 // ─── API types ─────────────────────────────────────────────────────────────────
 interface ApiJobDetail {
@@ -459,60 +467,57 @@ function NotesSection({ notes, onAdd }: {
 }
 
 // ─── Photos section ────────────────────────────────────────────────────────────
-const PHOTO_COLORS = [
-  'bg-primary', 'bg-muted-foreground', 'bg-muted-foreground', 'bg-primary',
-  'bg-primary',  'bg-primary', 'bg-primary', 'bg-primary',
-];
-const PHOTO_LABELS = ['Before – overview', 'Equipment close-up', 'Problem area', 'After – overview',
-                      'Parts removed',     'Access point',       'Customer sig.', 'Detail shot'];
-
-function PhotosSection({ media, onAdd }: {
-  media: { id: string; label: string; color: string; isReal?: boolean; url?: string }[];
+function PhotosSection({
+  photos,
+  category,
+  onCategoryChange,
+  onAdd,
+  saving,
+  error,
+}: {
+  photos: JobPhoto[];
+  category: JobPhotoCategory | 'all';
+  onCategoryChange: (next: JobPhotoCategory | 'all') => void;
   onAdd: () => void;
+  saving: boolean;
+  error: string | null;
 }) {
   const [open, setOpen] = useState(true);
 
   return (
     <div className="rounded-2xl bg-card border border-border overflow-hidden">
       <button onClick={() => setOpen(o => !o)}
-        className="w-full flex items-center gap-3 px-4 py-3.5 text-left hover:bg-secondary transition-colors">
+        className="w-full flex items-center gap-3 px-4 py-3.5 text-left hover:bg-secondary transition-colors min-h-11">
         <div className="flex size-7 items-center justify-center rounded-lg bg-primary/15 shrink-0">
           <Camera size={13} className="text-primary" />
         </div>
         <p className="flex-1 text-sm text-foreground">Photos</p>
-        {media.length > 0 && (
-          <span className="text-xs bg-primary/15 text-primary rounded-full px-2 py-0.5">{media.length}</span>
+        {photos.length > 0 && (
+          <span className="text-xs bg-primary/15 text-primary rounded-full px-2 py-0.5">{photos.length}</span>
         )}
         {open ? <ChevronUp size={14} className="text-muted-foreground shrink-0" /> : <ChevronDown size={14} className="text-muted-foreground shrink-0" />}
       </button>
 
       {open && (
         <div className="border-t border-border p-3">
-          <div className="grid grid-cols-3 gap-2">
-            {media.map(ph => (
-              <div key={ph.id}
-                className={`relative aspect-square rounded-xl overflow-hidden flex flex-col items-center justify-center ${ph.color}`}
-                style={{ animation: 'fadeUp 0.2s ease' }}>
-                {ph.isReal && ph.url
-                  ? <img src={ph.url} className="w-full h-full object-cover" alt="" />
-                  : <>
-                      <Camera size={16} className="text-primary-foreground/50" />
-                      <p className="text-primary-foreground/50 mt-1" style={{ fontSize: 9 }}>{ph.label}</p>
-                    </>
-                }
-              </div>
-            ))}
-            {media.length < 8 && (
-              <button onClick={onAdd}
-                className="aspect-square rounded-xl border-2 border-dashed border-border flex flex-col items-center justify-center gap-1 hover:border-primary hover:bg-primary/10 active:bg-primary/15 transition-colors">
-                <Camera size={18} className="text-muted-foreground" />
-                <p className="text-xs text-muted-foreground">Add</p>
-              </button>
-            )}
-          </div>
-          {media.length === 0 && (
-            <p className="text-xs text-muted-foreground text-center mt-2">No photos yet</p>
+          {error && (
+            <p data-testid="tech-photo-error" role="alert" className="mb-2 text-sm text-destructive">
+              {error}
+            </p>
           )}
+          <button
+            onClick={onAdd}
+            disabled={saving}
+            className="mb-3 w-full min-h-11 rounded-xl border-2 border-dashed border-border flex items-center justify-center gap-2 hover:border-primary hover:bg-primary/10 active:bg-primary/15 transition-colors disabled:opacity-50"
+          >
+            <Camera size={16} className="text-muted-foreground" />
+            <span className="text-sm text-muted-foreground">{saving ? 'Saving…' : 'Add photo'}</span>
+          </button>
+          <JobPhotoGallery
+            photos={photos}
+            activeCategory={category}
+            onCategoryChange={onCategoryChange}
+          />
         </div>
       )}
     </div>
@@ -617,7 +622,24 @@ const DELAY_OPTIONS = [10, 15, 20, 60] as const;
 type DelayOption = (typeof DELAY_OPTIONS)[number];
 
 // ─── Main page ──────────────────────────────────────────────────────────────────
-export function TechJobView({ id }: { id: string }) {
+export interface TechJobViewProps {
+  id: string;
+  /** Test seams for the persisted photo pipeline (default to the real API). */
+  uploadPhoto?: (
+    jobId: string,
+    file: File,
+    category: JobPhotoCategory,
+    notes?: string,
+    takenAt?: string,
+  ) => Promise<JobPhoto>;
+  fetchPhotos?: (jobId: string) => Promise<JobPhoto[]>;
+}
+
+export function TechJobView({
+  id,
+  uploadPhoto = uploadJobPhotoApi,
+  fetchPhotos = listJobPhotosApi,
+}: TechJobViewProps) {
   const navigate = useNavigate();
   const apiFetch = useApiClient();
 
@@ -628,7 +650,11 @@ export function TechJobView({ id }: { id: string }) {
   const [sheet,      setSheet]      = useState<TechSheet>(null);
   const [activities, setActivities] = useState<JobActivity[]>([]);
   const [materials,  setMaterials]  = useState<MaterialItem[]>([]);
-  const [photos,     setPhotos]     = useState<{ id: string; label: string; color: string; isReal?: boolean; url?: string }[]>([]);
+  // U9 (E7): persisted photos load from the backend and refetch after capture.
+  const [photos,       setPhotos]       = useState<JobPhoto[]>([]);
+  const [photoCategory, setPhotoCategory] = useState<JobPhotoCategory | 'all'>('all');
+  const [photoError,   setPhotoError]   = useState<string | null>(null);
+  const [photoSaving,  setPhotoSaving]  = useState(false);
   const [notes,   setNotes]   = useState<FieldNote[]>([]);
   const [cameraOpen, setCam] = useState(false);
   const [isRunningBehind, setIsRunningBehind] = useState<boolean | null>(null);
@@ -668,10 +694,20 @@ export function TechJobView({ id }: { id: string }) {
     }
   }, [apiFetch, id]);
 
+  // U9 (E7): load persisted job photos; refetch after each capture.
+  const loadPhotos = useCallback(async () => {
+    try {
+      setPhotos(await fetchPhotos(id));
+    } catch (err) {
+      setPhotoError(err instanceof Error ? err.message : 'Failed to load photos');
+    }
+  }, [fetchPhotos, id]);
+
   useEffect(() => {
     void loadJob();
     void loadNotes();
-  }, [loadJob, loadNotes]);
+    void loadPhotos();
+  }, [loadJob, loadNotes, loadPhotos]);
 
   if (isLoading) {
     return (
@@ -798,23 +834,33 @@ export function TechJobView({ id }: { id: string }) {
     }]);
   }
 
-  function handleCameraClose(media: CapturedMedia[]) {
-    if (media.length) {
-      const newPhotos = media.map((m, i) => ({
-        id: m.id, label: PHOTO_LABELS[(photos.length + i) % PHOTO_LABELS.length],
-        color: PHOTO_COLORS[(photos.length + i) % PHOTO_COLORS.length],
-        isReal: m.type === 'photo', url: m.url,
-      }));
-      setPhotos(prev => [...prev, ...newPhotos]);
+  async function handleCameraClose(media: CapturedMedia[]) {
+    setCam(false);
+    if (media.length === 0) return;
+    setPhotoSaving(true);
+    setPhotoError(null);
+    let saved = 0;
+    for (const m of media) {
+      try {
+        const file = capturedMediaToFile(m);
+        const category: JobPhotoCategory = m.type === 'video' ? 'other' : 'before';
+        await uploadPhoto(id, file, category, undefined, m.capturedAt);
+        saved += 1;
+      } catch (err) {
+        setPhotoError(err instanceof Error ? err.message : 'Photo upload failed');
+      }
+    }
+    await loadPhotos();
+    setPhotoSaving(false);
+    if (saved > 0) {
       setActivities(prev => [...prev, {
         id: `ph-${Date.now()}`, type: 'photo',
-        content: `${media.length} photo${media.length > 1 ? 's' : ''} added`,
+        content: `${saved} photo${saved > 1 ? 's' : ''} added`,
         time: now(), author: techName,
         authorInitials: techInitials,
         authorColor: techColor,
       }]);
     }
-    setCam(false);
   }
 
   return (
@@ -1021,7 +1067,14 @@ export function TechJobView({ id }: { id: string }) {
             {/* ── Inline sections ── */}
             <div className="px-4 mt-4 flex flex-col gap-3 pb-4">
               <NotesSection notes={notes} onAdd={(text) => void addNote(text)} />
-              <PhotosSection media={photos} onAdd={() => setCam(true)} />
+              <PhotosSection
+                photos={photos}
+                category={photoCategory}
+                onCategoryChange={setPhotoCategory}
+                onAdd={() => setCam(true)}
+                saving={photoSaving}
+                error={photoError}
+              />
               <MaterialsSection materials={materials} onUpdate={setMaterials} />
 
               {activities.length > 0 && (
@@ -1075,7 +1128,7 @@ export function TechJobView({ id }: { id: string }) {
       {sheet === 'text' && (
         <TextSheet name={customerName} phone={customerPhone} onClose={() => setSheet(null)} />
       )}
-      {cameraOpen && <CameraCapture onClose={handleCameraClose} />}
+      {cameraOpen && <CameraCapture onClose={media => void handleCameraClose(media)} />}
 
       <style>{`
         @keyframes fadeUp { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:translateY(0)} }

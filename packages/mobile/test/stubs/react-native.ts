@@ -21,6 +21,18 @@ export const ScrollView = host('div');
 export const ActivityIndicator = host('div');
 export const RefreshControl = host('div');
 
+// Maps an RN <Image source={{ uri }}/> to an <img src> so screen tests can
+// assert the persisted gallery renders the server download URL.
+export const Image = ({ source, accessibilityLabel, className }: Props) => {
+  const uri =
+    source && typeof source === 'object' ? (source as { uri?: string }).uri : undefined;
+  return createElement('img', {
+    className,
+    src: uri,
+    alt: (accessibilityLabel as string) ?? '',
+  });
+};
+
 // Surfaces `behavior` as a data attribute so screen tests can assert the
 // composer is wrapped in a keyboard-avoiding container with the right
 // platform behavior (the native runtime can't be exercised under jsdom).
