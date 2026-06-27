@@ -10,6 +10,7 @@ import { toErrorResponse } from './shared/errors';
 import { createPool, createDirectPool } from './db/pool';
 import { verifyRlsRuntimeRole } from './db/rls-runtime-role';
 import { loadConfig } from './shared/config';
+import { resolveWebDistDir } from './web-static-path';
 import { createWebhookRouter } from './webhooks/routes';
 import { createIntegrationResolver } from './webhooks/integration-resolver';
 import { createTelephonyRouter } from './routes/telephony';
@@ -666,8 +667,11 @@ export function createApp(): express.Express {
   // Body parsing for all other routes
   app.use(express.json());
 
-  // Serve static frontend files from the built React app
-  const frontendPath = require('path').join(__dirname, '../../web/dist');
+  // Serve static frontend files from the built React app.
+  // resolveWebDistDir anchors on the packages/api boundary so it points at
+  // <repoRoot>/packages/web/dist in both dev (__dirname=.../api/src) and the
+  // built image (__dirname=.../api/dist/src). See web-static-path.ts.
+  const frontendPath = resolveWebDistDir(__dirname);
   app.use(express.static(frontendPath));
 
   // Load validated config — must happen before CORS so validateProductionConfig()
@@ -5331,7 +5335,7 @@ export function createApp(): express.Express {
   // Catch-all route for client-side routing — serves index.html for all non-API routes
   // This allows the React SPA to handle routing on the client side
   app.get('*', (req, res) => {
-    const frontendPath = require('path').join(__dirname, '../../web/dist');
+    const frontendPath = resolveWebDistDir(__dirname);
     const indexPath = require('path').join(frontendPath, 'index.html');
     res.sendFile(indexPath);
   });
