@@ -54,7 +54,7 @@ describe('P7-026 PgServiceCreditRepository', () => {
     expect(result.reviewId).toBeNull();
 
     // Tenant context MUST be set before the data SQL runs (RLS).
-    const setIdx = queries.findIndex((q) => q.startsWith('SET app.current_tenant_id'));
+    const setIdx = queries.findIndex((q) => q.includes('set_config')); // U2b-2: SET LOCAL txn
     const insertIdx = queries.findIndex((q) => q.includes('INSERT INTO service_credits'));
     expect(setIdx).toBeGreaterThanOrEqual(0);
     expect(insertIdx).toBeGreaterThan(setIdx);
@@ -113,7 +113,7 @@ describe('P7-026 PgServiceCreditRepository', () => {
     });
     const repo = new PgServiceCreditRepository(makeMockPool(queryFn));
     await repo.sumIssuedInLast12Months(TENANT, CUSTOMER);
-    const setIdx = queries.findIndex((q) => q.startsWith('SET app.current_tenant_id'));
+    const setIdx = queries.findIndex((q) => q.includes('set_config')); // U2b-2: SET LOCAL txn
     const sumIdx = queries.findIndex((q) => q.includes('FROM service_credits'));
     expect(setIdx).toBeGreaterThanOrEqual(0);
     expect(sumIdx).toBeGreaterThan(setIdx);

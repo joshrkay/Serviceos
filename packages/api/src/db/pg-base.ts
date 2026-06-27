@@ -27,34 +27,14 @@ export class PgBaseRepository {
    * unscoped query until something else overwrites the GUC.
    */
   protected async withTenant<T>(tenantId: string, fn: (client: PoolClient) => Promise<T>): Promise<T> {
-    const ctx = tenantContextStore.getStore();
-    if (ctx && ctx.tenantId === tenantId) {
-      // Request-scoped client — already inside a transaction with
-      // app.current_tenant_id set LOCAL. Don't re-set, don't re-connect,
-      // don't release (the middleware owns the lifecycle).
-      return fn(ctx.client);
-    }
-    // FOLLOW-UP (scale-to-1000 U2b-2): the standalone path below uses a plain
-    // session `SET` (via applyTenantContext non-transactional), which is unsafe
-    // under PgBouncer transaction pooling when RLS_RUNTIME_ROLE is ON — the SET
-    // and the queries can land on different backends. Converting this to a
-    // SET LOCAL transaction (like withTenantTransaction) shifts the observable
-    // query sequence and requires coordinated updates to ~15 repo-invariant
-    // test files, so it is tracked separately. No production exposure today:
-    // RLS is off by default and in-request reads reuse the request transaction
-    // above. MUST land before enabling RLS_RUNTIME_ROLE in production.
-    const client = await this.pool.connect();
-    try {
-      await applyTenantContext(client, tenantId);
-      return await fn(client);
-    } finally {
-      // GUC/role leak fix: session-level `SET` persists on the underlying
-      // connection past COMMIT/ROLLBACK. Clear the GUC AND the RLS runtime
-      // role explicitly before release so the next pool checkout doesn't
-      // inherit this tenant's context or run as the restricted role.
-      await clearTenantContext(client);
-      client.release();
-    }
+    // U2b-2: the standalone path is now a SET LOCAL transaction — identical to
+    // withTenantTransaction — so it is PgBouncer transaction-pooling safe (the
+    // GUC/role and the queries can no longer land on different backends). The
+    // request-scoped reuse shortcut lives in withTenantTransaction too, so
+    // delegating keeps one code path. Multi-statement callbacks are now atomic
+    // (a strict improvement; standalone withTenant callbacks are single-statement
+    // CRUD or already-safe-to-atomize). All ~400 call sites are unchanged.
+    return this.withTenantTransaction(tenantId, fn);
   }
 
   /**
@@ -133,16 +113,28 @@ export class PgBaseRepository {
    * applyCrossTenantRole's documented fallback to the connection principal).
    */
   protected async withCrossTenantSweep<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
-    // FOLLOW-UP (scale-to-1000 U2b-2): like withTenant's standalone path, the
-    // session `SET ROLE` here is unsafe under PgBouncer transaction pooling when
-    // RLS_RUNTIME_ROLE is ON. Converting to a SET LOCAL ROLE transaction is
-    // tracked with the withTenant conversion (shifts query sequence in sweep
-    // tests). No exposure today (RLS off by default).
+    // U2b-2: SET LOCAL ROLE inside a transaction (PgBouncer transaction-pooling
+    // safe — the role and the sweep queries can no longer land on different
+    // backends), mirroring withTenantTransaction. applyCrossTenantRole is a
+    // graceful no-op when the flag is off or the role is unprovisioned, so this
+    // is byte-equivalent to withClient in those cases (just wrapped in a txn).
     const client = await this.pool.connect();
     try {
-      await applyCrossTenantRole(client);
-      return await fn(client);
+      await client.query('BEGIN');
+      await applyCrossTenantRole(client, { transactional: true });
+      const result = await fn(client);
+      await client.query('COMMIT');
+      return result;
+    } catch (err) {
+      try {
+        await client.query('ROLLBACK');
+      } catch {
+        // best-effort rollback
+      }
+      throw err;
     } finally {
+      // Belt-and-suspenders: SET LOCAL ROLE auto-resets at COMMIT/ROLLBACK, but
+      // clear explicitly too so a broken/edge state can't leak the role.
       await clearTenantContext(client);
       client.release();
     }

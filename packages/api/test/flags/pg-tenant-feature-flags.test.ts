@@ -128,7 +128,7 @@ describe('PgTenantFeatureFlagRepository.isEnabledForTenant', () => {
     await repo.isEnabledForTenant(TENANT, 'my-flag');
     const contextCall = calls.find((c) => c.sql.includes('app.current_tenant_id'));
     expect(contextCall).toBeDefined();
-    expect(contextCall!.sql).toContain(TENANT);
+    expect(contextCall!.params).toContain(TENANT); // U2b-2: tenant is a set_config param
   });
 
   it('RV-001-07: uses composite PK lookup for tenant override read (tenant_id = $1 AND flag_key = $2)', async () => {

@@ -85,10 +85,18 @@ describe('rls-runtime-role helper (U3)', () => {
     });
   });
 
-  describe('applyTenantContext rejects a malformed tenant id (session path validates UUID)', () => {
-    it('throws before issuing any query', async () => {
+  describe('applyTenantContext rejects a malformed tenant id (both paths validate UUID)', () => {
+    it('session path throws before issuing any query', async () => {
       const { client, calls } = fakeClient();
       await expect(applyTenantContext(client, 'not-a-uuid')).rejects.toThrow();
+      expect(calls).toHaveLength(0);
+    });
+
+    it('transactional path also validates (U2b-2: withTenant routes through it)', async () => {
+      const { client, calls } = fakeClient();
+      await expect(
+        applyTenantContext(client, 'not-a-uuid', { transactional: true }),
+      ).rejects.toThrow(/Invalid tenant ID/);
       expect(calls).toHaveLength(0);
     });
   });
@@ -122,6 +130,13 @@ describe('rls-runtime-role helper (U3)', () => {
       const { client, calls } = fakeClient();
       await applyCrossTenantRole(client);
       expect(calls.map((c) => c.sql)).toEqual(['SET ROLE rls_cross_tenant']);
+    });
+
+    it('flag ON + transactional: SET LOCAL ROLE rls_cross_tenant (U2b-2)', async () => {
+      process.env.RLS_RUNTIME_ROLE = 'true';
+      const { client, calls } = fakeClient();
+      await applyCrossTenantRole(client, { transactional: true });
+      expect(calls.map((c) => c.sql)).toEqual(['SET LOCAL ROLE rls_cross_tenant']);
     });
 
     it('flag ON but role unprovisioned: SET ROLE fails → degrades to the principal (no throw)', async () => {

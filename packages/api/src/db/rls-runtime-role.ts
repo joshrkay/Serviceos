@@ -1,5 +1,5 @@
 import { Pool, PoolClient } from 'pg';
-import { setTenantContext } from './schema';
+import { setTenantContext, isValidTenantId } from './schema';
 
 /**
  * RLS runtime-role enforcement (see docs/plans/2026-06-25-005-...).
@@ -46,6 +46,13 @@ export async function applyTenantContext(
 ): Promise<void> {
   const roleEnabled = isRlsRuntimeRoleEnabled();
   if (opts.transactional) {
+    // The session path validates via setTenantContext; the transactional path
+    // parameterizes the GUC so we must validate the UUID here too — otherwise a
+    // malformed tenant id silently becomes a GUC string instead of throwing
+    // (U2b-2: withTenant now routes through this path).
+    if (!isValidTenantId(tenantId)) {
+      throw new Error('Invalid tenant ID format: must be a valid UUID');
+    }
     await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
     if (roleEnabled) {
       await client.query(`SET LOCAL ROLE ${RLS_ROLE}`);
@@ -74,10 +81,18 @@ export async function applyTenantContext(
  * client is safe to reuse as the principal. `verifyRlsRuntimeRole` warns about
  * the absence once at boot so the unattributed access is never a surprise.
  */
-export async function applyCrossTenantRole(client: PoolClient): Promise<void> {
+export async function applyCrossTenantRole(
+  client: PoolClient,
+  opts: { transactional?: boolean } = {},
+): Promise<void> {
   if (!isRlsRuntimeRoleEnabled()) return;
+  // SET LOCAL ROLE auto-resets at COMMIT/ROLLBACK (PgBouncer transaction-pooling
+  // safe); plain SET ROLE is session-level and needs clearTenantContext.
+  const stmt = opts.transactional
+    ? `SET LOCAL ROLE ${CROSS_TENANT_ROLE}`
+    : `SET ROLE ${CROSS_TENANT_ROLE}`;
   try {
-    await client.query(`SET ROLE ${CROSS_TENANT_ROLE}`);
+    await client.query(stmt);
   } catch {
     // Role unprovisioned/ungranted → run as the connection principal (the
     // documented fallback). See JSDoc above.
