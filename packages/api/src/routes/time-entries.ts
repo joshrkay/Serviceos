@@ -144,9 +144,14 @@ export function createTimeEntriesRouter(
 
   /**
    * GET /api/time-entries?userId=&weekOf=YYYY-MM-DD&tz=America/Los_Angeles
+   * GET /api/time-entries?jobId=<uuid>
    *
-   * When `weekOf` is supplied we return the rollup for that week. When it
-   * isn't, we return the raw list (userId-scoped, default 100 most recent).
+   * When `jobId` is supplied we return every entry logged against that
+   * job (any user, any entry type) — this backs the JobDetail time panel,
+   * which must show the job's entries rather than the caller's entries
+   * across all jobs. When `weekOf` is supplied we return the rollup for
+   * that week. Otherwise we return the raw list (userId-scoped, default
+   * 100 most recent).
    */
   router.get(
     '/',
@@ -154,6 +159,16 @@ export function createTimeEntriesRouter(
     requireTenant,
     async (req: AuthenticatedRequest, res: Response) => {
       try {
+        const jobId = req.query.jobId as string | undefined;
+        if (jobId) {
+          // Job-scoped read: tenant-isolated, returns entries for any user
+          // on the job. No per-user `canActOnBehalf` guard — the panel is a
+          // job-level view, gated by tenant scope (RLS) only.
+          const entries = await repo.findByJob(req.auth!.tenantId, jobId);
+          res.json(entries);
+          return;
+        }
+
         const userId = (req.query.userId as string | undefined) ?? req.auth!.userId;
         if (!canActOnBehalf(req, userId)) {
           res.status(403).json({
