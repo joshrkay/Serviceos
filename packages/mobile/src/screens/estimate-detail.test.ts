@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render } from '@testing-library/react';
+import { cleanup, fireEvent, render } from '@testing-library/react';
 import { createElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -9,7 +9,7 @@ interface EstimateDetail {
   status?: string;
   validUntil?: string;
   totals?: { totalCents?: number; subtotalCents?: number; taxCents?: number };
-  customer?: { displayName?: string; email?: string };
+  customer?: { displayName?: string; firstName?: string; lastName?: string; email?: string };
 }
 
 const h = vi.hoisted(() => ({
@@ -76,5 +76,22 @@ describe('Estimate detail screen', () => {
     h.error = 'Network down';
     const { getByText } = render(createElement(EstimateDetailScreen));
     expect(getByText(/Try again/)).toBeTruthy();
+  });
+
+  it('refetches when Try again is pressed', () => {
+    h.error = 'Network down';
+    const { getByText } = render(createElement(EstimateDetailScreen));
+    fireEvent.click(getByText(/Try again/).closest('button')!);
+    expect(h.refetch).toHaveBeenCalled();
+  });
+
+  it('composes the customer name from first/last when displayName is absent', () => {
+    h.data = {
+      id: 'est-1',
+      status: 'sent',
+      customer: { firstName: 'Jane', lastName: 'Doe' },
+    } as EstimateDetail;
+    const { getByText } = render(createElement(EstimateDetailScreen));
+    expect(getByText('Jane Doe')).toBeTruthy();
   });
 });

@@ -34,6 +34,7 @@ export default defineConfig({
         'src/voice/nativeVoiceDeps.ts',
         'src/push/nativePushDeps.ts',
         'src/push/nativeNotificationDeps.ts',
+        'src/jobs/nativeJobPhotoDeps.ts',
         'src/lib/env.ts',
         'src/lib/tokenCache.ts',
         'src/calls/callbackStorage.ts',

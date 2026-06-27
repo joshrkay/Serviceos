@@ -164,6 +164,12 @@ describe('Estimate edit screen — draft hydration', () => {
     expect(getByText(/a deposit has already been paid/)).toBeTruthy();
   });
 
+  it('surfaces a hydrate error when the draft fails to load', async () => {
+    h.getEstimate.mockRejectedValueOnce(new Error('Draft not found'));
+    const { getByText } = render(createElement(NewEstimate));
+    await waitFor(() => expect(getByText('Draft not found')).toBeTruthy());
+  });
+
   it('opens a blank create form (no GET) when no id param is present', () => {
     h.params = {};
     const { getByText } = render(createElement(NewEstimate));
