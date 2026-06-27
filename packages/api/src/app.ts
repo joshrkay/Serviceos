@@ -469,6 +469,7 @@ import { InMemoryShadowComparisonStore } from './ai/evaluation/shadow-comparison
 import { createTtsProvider } from './ai/tts/tts-provider';
 import { InAppVoiceAdapter } from './ai/agents/customer-calling/inapp-adapter';
 import { VoiceSessionStore } from './ai/agents/customer-calling/voice-session-store';
+import { createVoiceEventTransport } from './ai/agents/customer-calling/voice-event-transport';
 import { createVoiceSessionsRouter } from './routes/voice-sessions';
 import { escalationOutcomeRouter } from './escalations/outcome-route';
 import { escalationEventsRouter } from './escalations/events-route';
@@ -2441,7 +2442,14 @@ export function createApp(): express.Express {
   // Single shared voice session store: in-app and telephony both create
   // sessions in the same VoiceSessionStore so the FSM/cost-tracker pool
   // is uniform across channels. Process-local; idle-reaped via setInterval.
-  const voiceSessionStore = new VoiceSessionStore();
+  // U3d — voice event fan-out across replicas. Double-gated: REDIS_URL must be
+  // set AND VOICE_FANOUT_ENABLED=true (dark-launch switch); otherwise a no-op
+  // transport preserves single-replica behavior. Additive + best-effort: the
+  // in-process EventEmitter stays the synchronous same-replica path.
+  const voiceEventTransport = createVoiceEventTransport(
+    process.env.VOICE_FANOUT_ENABLED === 'true' ? process.env.REDIS_URL : undefined,
+  );
+  const voiceSessionStore = new VoiceSessionStore({ transport: voiceEventTransport });
   // F6b: Process-local whisper TwiML cache. Shared between:
   //   - whisperRouter (serves TwiML to Twilio when dispatcher answers)
   //   - MediaStreamAdapter (stores whisper text after escalation_started)

@@ -82,8 +82,19 @@ single-instance).
   replica keeping its own `InMemoryCacheStore` (which is now FIFO size-bounded as
   a memory safety net, default 5000 entries). Zero call-site change — the wrapper
   swaps in Redis asynchronously.
-- WS connection caps, LLM quotas, and voice fan-out follow in U3b/U3c/U3d, each
-  behind the same `REDIS_URL` gate.
+- **WS connection caps** (U3b): per-tenant connection counters move to Redis when
+  `REDIS_URL` is set, so the cap is cluster-wide instead of per-replica. Leases
+  carry a TTL so a crashed replica's slots are reclaimed; the path fails open to a
+  local count if Redis is unreachable. Zero call-site change.
+- **Voice event fan-out** (U3d): a live `VoiceSession` stays in-process on the
+  replica Twilio pinned the media-stream to; only the small `VoiceSessionEvent`
+  stream is mirrored over Redis pub/sub so the escalation/supervisor wall and the
+  client WS gateway on OTHER replicas can observe a call they don't own.
+  Double-gated — set `REDIS_URL` **and** `VOICE_FANOUT_ENABLED=true`. Best-effort
+  and additive: the in-process EventEmitter remains the synchronous same-replica
+  path, self-originated echoes are dropped (no double-fire), and an unset/failed
+  Redis is byte-identical to single-replica behavior.
+- **LLM quotas** follow in U3c, behind the same `REDIS_URL` gate.
 
 ## Measuring
 

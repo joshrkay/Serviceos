@@ -13,6 +13,11 @@
 
 import { EventEmitter } from 'events';
 import { v4 as uuidv4 } from 'uuid';
+import {
+  REPLICA_ID,
+  type VoiceEventTransport,
+  type VoiceEventEnvelope,
+} from './voice-event-transport';
 import { CallingAgentStateMachine } from './state-machine';
 import type {
   CallingAgentChannel,
@@ -260,6 +265,17 @@ export interface VoiceSessionStoreOptions {
   /** When false, do not start the cleanup interval (for tests that
    *  drive cleanup manually via reapIdle()). Defaults to true. */
   startInterval?: boolean;
+  /** U3d — this store's replica identity for cross-instance self-origin dedup.
+   *  Defaults to the per-process REPLICA_ID; tests override it to simulate
+   *  multiple replicas within one process. */
+  replicaId?: string;
+  /**
+   * U3d — cross-instance voice-event transport. When provided (and not the no-op
+   * InProcess one), local events are mirrored to other replicas and remote
+   * events are injected into this store's global + gateway sinks. Omitted ⇒ no
+   * mirror (single-replica behavior unchanged).
+   */
+  transport?: VoiceEventTransport;
 }
 
 export class VoiceSessionStore {
@@ -292,10 +308,13 @@ export class VoiceSessionStore {
    */
   private readonly locks = new Map<string, Promise<void>>();
   private readonly idleTtlMs: number;
+  private readonly transport?: VoiceEventTransport;
+  private readonly replicaId: string;
   private readonly sweepHandle: ReturnType<typeof setInterval> | null;
 
   constructor(options: VoiceSessionStoreOptions = {}) {
     this.idleTtlMs = options.idleTtlMs ?? DEFAULT_IDLE_TTL_MS;
+    this.replicaId = options.replicaId ?? REPLICA_ID;
     const sweepIntervalMs = options.sweepIntervalMs ?? DEFAULT_SWEEP_INTERVAL_MS;
     const startInterval = options.startInterval ?? true;
     this.sweepHandle = startInterval
@@ -305,6 +324,65 @@ export class VoiceSessionStore {
     if (this.sweepHandle && typeof this.sweepHandle.unref === 'function') {
       this.sweepHandle.unref();
     }
+
+    this.transport = options.transport;
+    if (this.transport) {
+      const transport = this.transport;
+      // Mirror every local session event to the transport for cross-instance
+      // fan-out; attach to each new session (and any already present).
+      const attachMirror = (session: VoiceSession): void => {
+        session.events.on(STORE_VOICE_EVENT_CHANNEL, (evt: VoiceSessionEvent) => {
+          transport.publish({
+            replicaId: this.replicaId,
+            tenantId: session.tenantId,
+            sessionId: session.id,
+            callSid: session.callSid,
+            event: evt,
+          });
+        });
+      };
+      this.sessionCreatedListeners.add(attachMirror);
+      for (const session of this.sessions.values()) attachMirror(session);
+      // Inject events published by OTHER replicas into this store's sinks.
+      transport.subscribe((env) => {
+        if (env.replicaId === this.replicaId) return; // drop our own (no double-fire)
+        this.injectRemoteEvent(env);
+      });
+    }
+  }
+
+  /**
+   * Inject an event published by another replica into the local sinks: the
+   * global subscribers (escalation / supervisor wall via subscribeGlobal) and
+   * the client WS gateway (so a dashboard watching this voice session on a
+   * NON-owning replica still receives frames). Best-effort — one failing sink
+   * must not starve the others, and the gateway publish is a no-op when disabled.
+   */
+  private injectRemoteEvent(env: VoiceEventEnvelope): void {
+    for (const listener of this.globalListeners) {
+      try {
+        listener(env.event);
+      } catch {
+        /* one bad sink mustn't block the rest */
+      }
+    }
+    void import('../../../ws/client-gateway')
+      .then(({ publish }) => {
+        publish(
+          'voice',
+          env.sessionId,
+          {
+            kind: 'voice.event',
+            channel: 'voice',
+            sessionId: env.sessionId,
+            event: env.event.type,
+            state: 'state' in env.event ? (env.event as { state?: string }).state : undefined,
+            payload: env.event as unknown as Record<string, unknown>,
+          },
+          env.tenantId,
+        );
+      })
+      .catch(() => {});
   }
 
   /** Create a new session and return it. */
@@ -584,6 +662,7 @@ export class VoiceSessionStore {
    */
   dispose(): void {
     if (this.sweepHandle) clearInterval(this.sweepHandle);
+    void this.transport?.close().catch(() => {});
     for (const session of this.sessions.values()) {
       session.events.removeAllListeners();
     }
