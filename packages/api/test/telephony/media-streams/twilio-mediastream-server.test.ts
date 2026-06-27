@@ -10,6 +10,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { setDraining } from '../../../src/ws/drain-state';
 import http from 'http';
 import { AddressInfo } from 'net';
 import twilio from 'twilio';
@@ -253,6 +254,27 @@ describe('P8-012 attachMediaStreamServer', () => {
 
       const res = await sendUpgrade(port, MEDIA_STREAM_PATH, undefined, `127.0.0.1:${port}`);
       expect(res.statusCode).toBe(101);
+    });
+
+    it('P4 — rejects the upgrade with 503 while the replica is draining', async () => {
+      const result = attachMediaStreamServer(server, {
+        store: new VoiceSessionStore({ startInterval: false }),
+        streamingProvider: makeStreamingProvider(),
+        speechTurn: async () => [],
+        authTokenGetter: () => AUTH_TOKEN,
+        publicBaseUrl: `http://127.0.0.1:${port}`,
+        authTestMode: true, // would otherwise accept (101); the drain gate runs first
+      });
+      dispose = result.dispose;
+
+      setDraining(true);
+      try {
+        const res = await sendUpgrade(port, MEDIA_STREAM_PATH, undefined, `127.0.0.1:${port}`);
+        expect(res.statusCode === 503 || res.closed).toBe(true);
+        expect(res.statusCode).not.toBe(101);
+      } finally {
+        setDraining(false);
+      }
     });
 
     it('VQ2-007 — authTestMode: true → properly-signed upgrade still works (permissive override)', async () => {

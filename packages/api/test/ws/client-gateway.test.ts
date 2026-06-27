@@ -8,6 +8,7 @@
  *      / 503 rejection paths and path matching.
  */
 import http from 'http';
+import { setDraining } from '../../src/ws/drain-state';
 import { EventEmitter } from 'events';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
@@ -230,6 +231,20 @@ describe('attachClientGateway upgrade handler', () => {
     const socket = new FakeSocket();
     await upgrade(makeReq(CLIENT_GATEWAY_PATH, socket), socket);
     expect(socket.written[0]).toContain('503');
+  });
+
+  it('rejects with 503 + Retry-After while the replica is draining (P4)', async () => {
+    attach({ auth: { authenticate: async () => AUTH }, registry: makeRegistry().registry });
+    setDraining(true);
+    try {
+      const socket = new FakeSocket();
+      await upgrade(makeReq(CLIENT_GATEWAY_PATH, socket), socket);
+      expect(socket.written[0]).toContain('503');
+      expect(socket.written[0]).toContain('Retry-After');
+      expect(socket.destroyed).toBe(true);
+    } finally {
+      setDraining(false);
+    }
   });
 
   it('rejects with 429 when the registry is full', async () => {

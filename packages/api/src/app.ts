@@ -20,6 +20,7 @@ import { createUserPhoneDispatcherResolver, createBusinessPhoneFallback } from '
 import { PgPhoneNumberRepository } from './integrations/twilio/phone-number-repository';
 import { attachMediaStreamServer } from './telephony/media-streams';
 import { attachClientGateway, setChannelGate } from './ws/client-gateway';
+import { setDraining, isDraining as isDrainingFlag } from './ws/drain-state';
 import { createConnectionRegistry } from './ws/connection-registry';
 import {
   decodeClerkToken,
@@ -771,6 +772,13 @@ export function createApp(): express.Express {
       },
     });
   }
+  // P4/U-P4a: while draining for shutdown, /ready (which fails on any `down`
+  // check) returns 503 so the load balancer stops routing NEW traffic here while
+  // active calls finish. /health (liveness) is unaffected.
+  checks.push({
+    name: 'drain',
+    check: async () => (isDrainingFlag() ? { status: 'down', message: 'draining' } : { status: 'ok' }),
+  });
   const healthRouter = createHealthRouter('1.0.0', process.env.NODE_ENV || 'development', checks);
   app.use('/', healthRouter);
 
@@ -5331,6 +5339,18 @@ export function createApp(): express.Express {
     try {
       // eslint-disable-next-line no-console
       console.log(`[app] ${signal} received — stopping background loops, closing voice sessions and pg pool`);
+      // P4/U-P4a — DRAIN FIRST. Flip the drain flag so /ready 503s and new WS
+      // upgrades (dashboards + Twilio media streams) are rejected, then wait
+      // (bounded) for in-flight voice sessions to finish before tearing down the
+      // pool/Redis/sessions. The window must be shorter than index.ts's
+      // force-exit and Railway's stop grace period; calls still live at the
+      // deadline are closed by the teardown below (Twilio ends the call).
+      setDraining(true);
+      const drainDeadline = Date.now() + (Number(process.env.DRAIN_TIMEOUT_MS) || 25_000);
+      while (voiceSessionStore.size() > 0 && Date.now() < drainDeadline) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+      console.log(`[app] drain complete — ${voiceSessionStore.size()} session(s) still active at teardown`);
       // Blocker 5 — stop all background setInterval loops (sweeps, queue poll,
       // execution worker) BEFORE the pg pool drains. `shuttingDown` also
       // prevents an already-scheduled leader-gated sweep tick from starting

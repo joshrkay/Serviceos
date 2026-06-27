@@ -17,6 +17,7 @@
  * flags. The web client opts in based on a runtime flag.
  */
 import type { IncomingMessage, Server as HttpServer } from 'http';
+import { isDraining } from './drain-state';
 import type { Socket } from 'net';
 import { WebSocketServer, WebSocket, type RawData } from 'ws';
 import { createLogger } from '../logging/logger';
@@ -431,6 +432,14 @@ export function attachClientGateway(
     const url = req.url ?? '';
     const pathOnly = url.split('?')[0];
     if (pathOnly !== CLIENT_GATEWAY_PATH) return;
+
+    // P4/U-P4a: while this replica is draining for shutdown, reject new upgrades
+    // with Retry-After so the client reconnects to a live replica instead of
+    // attaching to one that's about to exit.
+    if (isDraining()) {
+      rejectUpgrade(socket, 503, 5_000);
+      return;
+    }
 
     // Runtime kill switch: if the operator has flipped
     // ws.client_gateway_enabled off, reject the upgrade. We still own
