@@ -34,6 +34,15 @@ export class PgBaseRepository {
       // don't release (the middleware owns the lifecycle).
       return fn(ctx.client);
     }
+    // FOLLOW-UP (scale-to-1000 U2b-2): the standalone path below uses a plain
+    // session `SET` (via applyTenantContext non-transactional), which is unsafe
+    // under PgBouncer transaction pooling when RLS_RUNTIME_ROLE is ON — the SET
+    // and the queries can land on different backends. Converting this to a
+    // SET LOCAL transaction (like withTenantTransaction) shifts the observable
+    // query sequence and requires coordinated updates to ~15 repo-invariant
+    // test files, so it is tracked separately. No production exposure today:
+    // RLS is off by default and in-request reads reuse the request transaction
+    // above. MUST land before enabling RLS_RUNTIME_ROLE in production.
     const client = await this.pool.connect();
     try {
       await applyTenantContext(client, tenantId);
@@ -124,6 +133,11 @@ export class PgBaseRepository {
    * applyCrossTenantRole's documented fallback to the connection principal).
    */
   protected async withCrossTenantSweep<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
+    // FOLLOW-UP (scale-to-1000 U2b-2): like withTenant's standalone path, the
+    // session `SET ROLE` here is unsafe under PgBouncer transaction pooling when
+    // RLS_RUNTIME_ROLE is ON. Converting to a SET LOCAL ROLE transaction is
+    // tracked with the withTenant conversion (shifts query sequence in sweep
+    // tests). No exposure today (RLS off by default).
     const client = await this.pool.connect();
     try {
       await applyCrossTenantRole(client);

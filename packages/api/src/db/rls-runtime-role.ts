@@ -103,6 +103,40 @@ export async function clearTenantContext(client: PoolClient): Promise<void> {
 }
 
 /**
+ * Pooling-safe ad-hoc tenant-scoped work: connect, `BEGIN`, set tenant context
+ * with `SET LOCAL`, run `fn`, `COMMIT` (`ROLLBACK` on throw), release. Use this
+ * for tenant-scoped work that manages its OWN pool connection (analytics /
+ * digest builders) instead of the plain-`SET` + `clearTenantContext` pattern,
+ * which is UNSAFE under PgBouncer transaction pooling — the `SET` and the
+ * queries are separate implicit transactions that can land on different
+ * backends, dropping the tenant GUC/role. Mirrors
+ * `PgBaseRepository.withTenantTransaction` for non-repository callers.
+ */
+export async function withTenantSession<T>(
+  pool: Pool,
+  tenantId: string,
+  fn: (client: PoolClient) => Promise<T>,
+): Promise<T> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await applyTenantContext(client, tenantId, { transactional: true });
+    const result = await fn(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (err) {
+    try {
+      await client.query('ROLLBACK');
+    } catch {
+      // best-effort rollback
+    }
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/**
  * Boot-time guard. When `RLS_RUNTIME_ROLE=true`:
  *
  * - `rls_app_runtime` (the enforcement role) MUST be assumable — **throw**
