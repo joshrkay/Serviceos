@@ -1,0 +1,191 @@
+# ──────────────────────────────────────────────────────────────────────────
+# Production-shape, POOLED topology for the scale-to-1000 plan.
+#
+# One `docker compose up` stands up the real shape — N API replicas behind an
+# nginx load balancer, fronting Postgres through a transaction-mode PgBouncer,
+# with Redis for cross-replica shared state — instead of hand-editing env on the
+# single-instance loadtest compose. Use it for a non-Railway deploy target and
+# for local 1000-concurrent validation. See docs/runbooks/scaling.md.
+#
+# Quick start:
+#   cp ../.env.production.example deploy/.env   # then fill the boot-fail secrets
+#   docker compose -f deploy/docker-compose.prod.yml --env-file deploy/.env up --build -d
+#   docker compose -f deploy/docker-compose.prod.yml --env-file deploy/.env up -d --scale api=4
+#   npx tsx loadtest/http-load.ts --url http://localhost:3000 --token "$TOKEN" \
+#     --max 400 --ramp 60 --hold 300
+#
+# The serving API boots in NODE_ENV=production, so validateProductionConfig
+# requires the CLERK_*, CORS_ORIGIN and STRIPE secrets — they are wired via
+# ${VAR:?} below and fail fast with guidance if your --env-file omits them.
+#
+# NOTE: Docker was not available in the authoring environment, so the live
+# `docker build` / `compose up` smoke test is an operator step (see D1). The
+# file is statically validated (compose schema + YAML).
+# ──────────────────────────────────────────────────────────────────────────
+
+name: serviceos-prod
+
+x-api-image: &api-image
+  build:
+    context: ..
+    dockerfile: Dockerfile
+    target: api
+  image: serviceos-api:prod # built once, reused by `migrate` and `api`
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-serviceos}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-serviceos}
+      POSTGRES_DB: ${POSTGRES_DB:-serviceos}
+    # Headroom well above PgBouncer's server-side budget (default_pool_size=25)
+    # + the direct pool + migrate, so the DB ceiling isn't the bottleneck.
+    command: ['postgres', '-c', 'max_connections=200']
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-serviceos} -d ${POSTGRES_DB:-serviceos}']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    # ports: ['5432:5432']   # uncomment to inspect Postgres directly
+
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # The mounted pgbouncer.ini (B1) is the source of truth for pool sizing +
+    # the two-DSN rationale. The env below MIRRORS those values so the pool is
+    # correct regardless of whether this image consumes the mounted file or
+    # regenerates from env, and it lets the image bootstrap the SCRAM userlist
+    # for the app role from the shared Postgres creds — so the bundled stack
+    # authenticates WITHOUT committing a verifier. (userlist.txt stays the
+    # secret-free reference template for hand-rolled / Railway PgBouncer.)
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-serviceos}:${POSTGRES_PASSWORD:-serviceos}@postgres:5432/${POSTGRES_DB:-serviceos}
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: '1000'
+      DEFAULT_POOL_SIZE: '25'
+      AUTH_TYPE: scram-sha-256
+      IGNORE_STARTUP_PARAMETERS: extra_float_digits
+    volumes:
+      - ./pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
+    # ports: ['6432:6432']   # uncomment to point a psql client at the pooler
+
+  redis:
+    image: redis:7-alpine
+    # Ephemeral shared-state cache — no persistence needed for the load shape.
+    command: ['redis-server', '--save', '', '--appendonly', 'no']
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    # ports: ['6379:6379']
+
+  # One-shot release step: run migrations BEFORE the API serves. migrate.js
+  # reads DATABASE_URL, so we point it straight at Postgres (:5432), BYPASSING
+  # PgBouncer — DDL + advisory migration locks are not transaction-pooling safe.
+  migrate:
+    <<: *api-image
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://${POSTGRES_USER:-serviceos}:${POSTGRES_PASSWORD:-serviceos}@postgres:5432/${POSTGRES_DB:-serviceos}
+      DB_SSL: 'false'
+    command: ['node', 'packages/api/dist/src/db/migrate.js']
+    restart: 'no'
+
+  # The API replicas. NO host port mapping → `docker compose up --scale api=N`
+  # works; the nginx edge fans traffic across them via Docker DNS.
+  api:
+    <<: *api-image
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      pgbouncer:
+        condition: service_started
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: '3000'
+      # Request hot path → PgBouncer (transaction-pooled, multiplexed).
+      DATABASE_URL: postgres://${POSTGRES_USER:-serviceos}:${POSTGRES_PASSWORD:-serviceos}@pgbouncer:6432/${POSTGRES_DB:-serviceos}
+      # Session-scoped work (leader advisory locks, proposal idempotency lock,
+      # LISTEN/NOTIFY) → Postgres directly, BYPASSING PgBouncer.
+      DATABASE_DIRECT_URL: postgres://${POSTGRES_USER:-serviceos}:${POSTGRES_PASSWORD:-serviceos}@postgres:5432/${POSTGRES_DB:-serviceos}
+      DB_SSL: 'false'
+      # Per-replica pool = the PgBouncer CLIENT side (vCPU*4 rule of thumb).
+      # PgBouncer's default_pool_size (25) bounds the real Postgres cost.
+      DB_MAX_CONNECTIONS: ${DB_MAX_CONNECTIONS:-20}
+      DB_DIRECT_MAX_CONNECTIONS: ${DB_DIRECT_MAX_CONNECTIONS:-10}
+      # Cross-replica shared state: WS caps, LLM quotas, voice fan-out, rate limits.
+      REDIS_URL: redis://redis:6379
+      VOICE_FANOUT_ENABLED: 'true'
+      QUEUE_POLL_BATCH_SIZE: ${QUEUE_POLL_BATCH_SIZE:-10}
+      API_TENANT_RATE_LIMIT_MAX: ${API_TENANT_RATE_LIMIT_MAX:-1000}
+      # ── Boot-fail secrets (validateProductionConfig + createPaymentLinkProvider).
+      #    Put them in deploy/.env (cp ../.env.production.example). `:?` makes
+      #    compose fail fast with guidance if any is missing. ──────────────────
+      CLERK_SECRET_KEY: ${CLERK_SECRET_KEY:?set in deploy/.env — see .env.production.example}
+      CLERK_PUBLISHABLE_KEY: ${CLERK_PUBLISHABLE_KEY:?set in deploy/.env — see .env.production.example}
+      CLERK_WEBHOOK_SECRET: ${CLERK_WEBHOOK_SECRET:?set in deploy/.env — see .env.production.example}
+      CORS_ORIGIN: ${CORS_ORIGIN:?set in deploy/.env — exact web origin, no wildcard}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:?set in deploy/.env — see .env.production.example}
+      # AI pipeline is an inert mock without this (not boot-fail).
+      AI_PROVIDER_API_KEY: ${AI_PROVIDER_API_KEY:-}
+    expose:
+      - '3000'
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:3000/health >/dev/null 2>&1 || exit 1']
+      interval: 5s
+      timeout: 4s
+      retries: 12
+      start_period: 20s
+    # Must exceed SHUTDOWN_FORCE_EXIT_MS (30s) so SIGTERM drain finishes — the
+    # app flips /ready to 503, rejects new WS, waits DRAIN_TIMEOUT_MS (25s) for
+    # live voice calls, then exits. Mirrors railway.toml overlapSeconds=35.
+    stop_grace_period: 40s
+
+  # API edge / load balancer. Round-robins across the scaled `api` replicas via
+  # Docker DNS (see deploy/nginx/api-lb.conf), carries WS upgrades, never caches.
+  # Published on :3000 so the loadtest scripts (`--url http://localhost:3000`)
+  # hit it unchanged.
+  nginx:
+    image: nginx:alpine
+    depends_on:
+      api:
+        condition: service_healthy
+    volumes:
+      - ./nginx/api-lb.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - '${API_EDGE_PORT:-3000}:80'
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1/health >/dev/null 2>&1 || exit 1']
+      interval: 5s
+      timeout: 4s
+      retries: 12
+
+  # ── Optional SPA edge (full Railway-topology mirror) ───────────────────────
+  # On Railway the SPA is a SEPARATE service (Dockerfile `web` target +
+  # packages/web/nginx.conf). This stack's job is the scaled API + pooled DB, so
+  # web is off by default. Uncomment to serve the SPA too; its nginx proxies
+  # /api → the api replicas (set WEB_API_UPSTREAM, see packages/web/nginx.conf).
+  # web:
+  #   build:
+  #     context: ..
+  #     dockerfile: Dockerfile
+  #     target: web
+  #   depends_on:
+  #     nginx:
+  #       condition: service_started
+  #   ports:
+  #     - '8080:80'
+
+volumes:
+  pgdata:
