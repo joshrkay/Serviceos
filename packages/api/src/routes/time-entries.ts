@@ -34,9 +34,17 @@ const clockOutSchema = z.object({
   clockedOutAt: z.string().datetime().optional(),
 });
 
-function canActOnBehalf(req: AuthenticatedRequest, targetUserId: string): boolean {
+/**
+ * Owners and dispatchers are office roles trusted with cross-user
+ * scheduling/time concerns; everyone else (technician) is scoped to self.
+ */
+function isOfficeRole(req: AuthenticatedRequest): boolean {
   const role = req.auth?.role;
-  if (role === 'owner' || role === 'dispatcher') return true;
+  return role === 'owner' || role === 'dispatcher';
+}
+
+function canActOnBehalf(req: AuthenticatedRequest, targetUserId: string): boolean {
+  if (isOfficeRole(req)) return true;
   return req.auth?.userId === targetUserId;
 }
 
@@ -161,11 +169,15 @@ export function createTimeEntriesRouter(
       try {
         const jobId = req.query.jobId as string | undefined;
         if (jobId) {
-          // Job-scoped read: tenant-isolated, returns entries for any user
-          // on the job. No per-user `canActOnBehalf` guard — the panel is a
-          // job-level view, gated by tenant scope (RLS) only.
+          // Job-scoped read: tenant-isolated (RLS) returns entries for any
+          // user on the job. Owners/dispatchers see the full multi-user panel;
+          // a technician is self-scoped to their own rows so coworkers' hours
+          // aren't exposed (no new permission — self-scope per product call).
           const entries = await repo.findByJob(req.auth!.tenantId, jobId);
-          res.json(entries);
+          const scoped = isOfficeRole(req)
+            ? entries
+            : entries.filter((e) => e.userId === req.auth!.userId);
+          res.json(scoped);
           return;
         }
 

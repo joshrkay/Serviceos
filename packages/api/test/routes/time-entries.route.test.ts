@@ -71,8 +71,8 @@ describe('GET /api/time-entries?jobId=', () => {
     await repo.create(makeEntry({ id: 'b1', jobId: JOB_B, userId: 'user-1' }));
   });
 
-  it('returns only the requested job\'s entries (any user)', async () => {
-    const app = buildApp(repo);
+  it('owner sees every user\'s entries on the requested job', async () => {
+    const app = buildApp(repo, { userId: 'user-1', role: 'owner' });
     const res = await request(app).get(`/api/time-entries?jobId=${JOB_A}`);
 
     expect(res.status).toBe(200);
@@ -80,9 +80,9 @@ describe('GET /api/time-entries?jobId=', () => {
     expect(ids).toEqual(['a1', 'a2']);
   });
 
-  it('does not restrict to the caller\'s own userId on the job path', async () => {
+  it('dispatcher (office role) also sees all users\' entries on the job', async () => {
     // Caller is user-1 but job A also has user-2's entry — both come back.
-    const app = buildApp(repo, { userId: 'user-1' });
+    const app = buildApp(repo, { userId: 'user-1', role: 'dispatcher' });
     const res = await request(app).get(`/api/time-entries?jobId=${JOB_A}`);
 
     const userIds = new Set((res.body as Array<{ userId: string }>).map((e) => e.userId));
@@ -90,9 +90,31 @@ describe('GET /api/time-entries?jobId=', () => {
     expect(userIds.has('user-2')).toBe(true);
   });
 
-  it('isolates by tenant — another tenant\'s job returns nothing', async () => {
+  it('technician sees only their own entries on the job (peers hidden)', async () => {
+    // Caller is technician user-1; job A also has user-2's entry, which must
+    // not be exposed. Self-scope, not a 403 — the panel stays useful.
+    const app = buildApp(repo, { userId: 'user-1', role: 'technician' });
+    const res = await request(app).get(`/api/time-entries?jobId=${JOB_A}`);
+
+    expect(res.status).toBe(200);
+    const ids = (res.body as Array<{ id: string }>).map((e) => e.id).sort();
+    expect(ids).toEqual(['a1']);
+    const userIds = new Set((res.body as Array<{ userId: string }>).map((e) => e.userId));
+    expect(userIds).toEqual(new Set(['user-1']));
+  });
+
+  it('technician viewing a job where they have no entries gets an empty list', async () => {
+    // user-2 has an entry on JOB_A (a2) but user-3 does not.
+    const app = buildApp(repo, { userId: 'user-3', role: 'technician' });
+    const res = await request(app).get(`/api/time-entries?jobId=${JOB_A}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual([]);
+  });
+
+  it('isolates by tenant — another tenant\'s job returns nothing (owner)', async () => {
     await repo.create(makeEntry({ id: 'other', jobId: JOB_A, tenantId: OTHER_TENANT }));
-    const app = buildApp(repo, { tenantId: OTHER_TENANT });
+    const app = buildApp(repo, { tenantId: OTHER_TENANT, role: 'owner' });
     const res = await request(app).get(`/api/time-entries?jobId=${JOB_A}`);
 
     expect(res.status).toBe(200);
@@ -100,8 +122,20 @@ describe('GET /api/time-entries?jobId=', () => {
     expect(ids).toEqual(['other']);
   });
 
+  it('tenant isolation holds for a technician too — only their own tenant rows', async () => {
+    // Seed an other-tenant entry for the same userId on the same jobId; the
+    // tenant scope (RLS) must exclude it before the self-filter runs.
+    await repo.create(makeEntry({ id: 'other', jobId: JOB_A, userId: 'user-1', tenantId: OTHER_TENANT }));
+    const app = buildApp(repo, { userId: 'user-1', role: 'technician', tenantId: TENANT });
+    const res = await request(app).get(`/api/time-entries?jobId=${JOB_A}`);
+
+    expect(res.status).toBe(200);
+    const ids = (res.body as Array<{ id: string }>).map((e) => e.id);
+    expect(ids).toEqual(['a1']);
+  });
+
   it('returns an empty list for a job with no entries', async () => {
-    const app = buildApp(repo);
+    const app = buildApp(repo, { role: 'owner' });
     const res = await request(app).get('/api/time-entries?jobId=33333333-3333-3333-3333-333333333333');
     expect(res.status).toBe(200);
     expect(res.body).toEqual([]);

@@ -28,7 +28,7 @@ describe('Postgres integration — GET /api/time-entries?jobId=', () => {
   const JOB_A = crypto.randomUUID();
   const JOB_B = crypto.randomUUID();
 
-  function buildApp(tenantId: string, userId: string) {
+  function buildApp(tenantId: string, userId: string, role: 'owner' | 'dispatcher' | 'technician' = 'owner') {
     const app = express();
     app.use(express.json());
     app.use((req: Request, _res: Response, next: NextFunction) => {
@@ -36,7 +36,7 @@ describe('Postgres integration — GET /api/time-entries?jobId=', () => {
         userId,
         sessionId: 'sess-1',
         tenantId,
-        role: 'owner',
+        role,
       };
       next();
     });
@@ -122,5 +122,20 @@ describe('Postgres integration — GET /api/time-entries?jobId=', () => {
     const entries = res.body as Array<{ durationMinutes: number }>;
     expect(entries).toHaveLength(1);
     expect(entries[0].durationMinutes).toBe(99);
+  });
+
+  it('technician caller is self-scoped on job A (only their own rows)', async () => {
+    // tech-1 has the 60-min entry on JOB_A; tech-2's 30-min entry is a peer's
+    // and must be filtered out after the tenant-scoped findByJob SELECT.
+    const app = buildApp(tenantA.tenantId, 'tech-1', 'technician');
+    const res = await request(app).get(`/api/time-entries?jobId=${JOB_A}`);
+
+    expect(res.status).toBe(200);
+    const entries = res.body as Array<{ jobId: string; userId: string; durationMinutes: number }>;
+    expect(entries).toHaveLength(1);
+    expect(entries[0].userId).toBe('tech-1');
+    expect(entries[0].jobId).toBe(JOB_A);
+    // Real column round-trips through mapRow even on the self-scoped path.
+    expect(entries[0].durationMinutes).toBe(60);
   });
 });
