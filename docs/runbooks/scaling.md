@@ -69,6 +69,22 @@ waiting). **Saturation signal:** `state="waiting"` persistently > 0 while
   externalized to Redis (plan Phase 2/U3) **before** running > 1 replica in
   production.
 
+## Shared state across replicas (Redis)
+
+In-process state must be externalized to Redis before running > 1 replica.
+Foundation: `createRedisClient()` / `shutdownRedisClients()`
+(`packages/api/src/redis/redis-client.ts`) — every shared store reuses it and
+returns its InMemory implementation when `REDIS_URL` is unset (byte-identical to
+single-instance).
+
+- **Gateway response cache** (already Redis-capable): set `REDIS_URL` **and**
+  `AI_CACHE_ENABLED=true` so the LLM cache is shared cluster-wide instead of each
+  replica keeping its own `InMemoryCacheStore` (which is now FIFO size-bounded as
+  a memory safety net, default 5000 entries). Zero call-site change — the wrapper
+  swaps in Redis asynchronously.
+- WS connection caps, LLM quotas, and voice fan-out follow in U3b/U3c/U3d, each
+  behind the same `REDIS_URL` gate.
+
 ## Measuring
 
 Stand up the local pooled topology and drive load:
