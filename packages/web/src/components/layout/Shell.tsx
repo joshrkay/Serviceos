@@ -1,5 +1,5 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
-import { NavLink, Outlet, useLocation, useNavigate } from 'react-router';
+import { useState, useEffect, useRef, useCallback, useContext } from 'react';
+import { NavLink, Outlet, useLocation, useNavigate, UNSAFE_DataRouterStateContext } from 'react-router';
 import {
   Home, MessageSquare, Briefcase, Calendar,
   Users, FileText, Receipt, Settings, Zap, Bell, Layers, TrendingUp, LogOut,
@@ -250,6 +250,12 @@ export function Shell() {
 
 function ShellInner() {
   const location = useLocation();
+  // Route-level lazy() holds the transition while a page's chunk loads; the
+  // data-router navigation state reports 'loading' during that window. Read it
+  // from context (not useNavigation()) so Shell still renders when mounted in a
+  // plain MemoryRouter — as component tests do — instead of throwing.
+  const dataRouterState = useContext(UNSAFE_DataRouterStateContext);
+  const isNavigating = dataRouterState?.navigation?.state === 'loading';
   const [cameraOpen, setCameraOpen] = useState(false);
   const voiceBarRef = useRef<VoiceBarHandle>(null);
   const isExact = (to: string) =>
@@ -578,7 +584,16 @@ function ShellInner() {
         {currentMode === 'both' && <CompressedSessionStrip />}
 
         {/* Page (fills remaining space, scrolls internally) */}
-        <div className="flex-1 overflow-hidden">
+        <div className="relative flex-1 overflow-hidden">
+          {/* Lazy-route chunk is fetching — a thin top bar signals progress
+              while the router keeps the prior page visible. */}
+          {isNavigating && (
+            <div
+              className="absolute inset-x-0 top-0 z-20 h-0.5 animate-pulse bg-primary"
+              role="status"
+              aria-label="Loading page"
+            />
+          )}
           <Outlet />
         </div>
 
