@@ -171,6 +171,7 @@ import { PgMoneyDashboardRepository } from './reports/pg-money-dashboard';
 import { createFeedbackResponsesRouter } from './routes/feedback';
 import { createInteractionsRouter } from './routes/interactions';
 import { initSentry, setSentryClient } from './monitoring/sentry';
+import { dbPoolConnections } from './monitoring/metrics';
 
 // In-memory repositories (fallback for dev without DATABASE_URL)
 import { InMemoryCustomerRepository } from './customers/customer';
@@ -1867,6 +1868,25 @@ export function createApp(): express.Express {
     backgroundIntervals.push(handle);
     return handle;
   };
+
+  // scale-to-1000 U2c — sample Postgres pool occupancy into /metrics so the
+  // saturation signal (waiting climbing while total is pinned at the pool max)
+  // is observable. Reads cheap counters off pg.Pool every 5s; cleared on
+  // shutdown via registerInterval.
+  if (pool) {
+    const samplePoolMetrics = () => {
+      dbPoolConnections.set({ pool: 'main', state: 'total' }, pool.totalCount);
+      dbPoolConnections.set({ pool: 'main', state: 'idle' }, pool.idleCount);
+      dbPoolConnections.set({ pool: 'main', state: 'waiting' }, pool.waitingCount);
+      if (directPool && directPool !== pool) {
+        dbPoolConnections.set({ pool: 'direct', state: 'total' }, directPool.totalCount);
+        dbPoolConnections.set({ pool: 'direct', state: 'idle' }, directPool.idleCount);
+        dbPoolConnections.set({ pool: 'direct', state: 'waiting' }, directPool.waitingCount);
+      }
+    };
+    samplePoolMetrics();
+    registerInterval(setInterval(samplePoolMetrics, 5000));
+  }
   const SWEEP_LOCK = {
     recurringAgreements: 590001,
     overdueInvoice: 590002,

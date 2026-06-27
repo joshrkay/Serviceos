@@ -22,3 +22,11 @@ restartPolicyMaxRetries = 3
 # see docs/verification-runs/beta-verification-2026-05-13.md. Leaving it
 # unset keeps the listen port and the edge target in lockstep regardless of
 # the service's PORT value.
+
+# Scaling to N replicas (scale-to-1000): add a PgBouncer service in transaction
+# mode (pool_mode=transaction) in front of the Postgres plugin, point this
+# service's DATABASE_URL at PgBouncer, and set DATABASE_DIRECT_URL to the
+# Postgres plugin's direct URL (session-scoped locks + LISTEN/NOTIFY bypass
+# PgBouncer — see .env.production.example and docs/runbooks/scaling.md). Set
+# replica count + autoscaling in the Railway service settings. The app drains
+# the pg pool(s) on SIGTERM (app.ts shutdown handler).

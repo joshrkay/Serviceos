@@ -26,6 +26,25 @@ export const gatewayRequestsTotal = new Counter({
   registers: [metricsRegistry],
 });
 
+// ---------- Database connection pool (scale-to-1000 U2c) ----------
+
+/**
+ * Postgres pool occupancy, sampled from the pg.Pool. `state`:
+ *  - total   — open connections (≤ pool max)
+ *  - idle    — open and idle (immediately available)
+ *  - waiting — callers blocked in `pool.connect()` awaiting a free connection
+ *
+ * A persistently non-zero `waiting` while `total` is pinned at the pool max is
+ * the saturation signal — the hard ceiling this phase targets. `pool` labels the
+ * main (request / PgBouncer) pool vs. the direct (session) pool.
+ */
+export const dbPoolConnections = new Gauge({
+  name: 'db_pool_connections',
+  help: 'Postgres connection-pool occupancy sampled from pg.Pool',
+  labelNames: ['pool', 'state'],
+  registers: [metricsRegistry],
+});
+
 // ---------- Voice gates (§10 onboarding — trial fraud guardrails) ----------
 
 export const voiceBlocksTotal = new Counter({

@@ -50,6 +50,11 @@ services:
       # REDIS_URL intentionally unset for the baseline (in-memory state path).
       # U3/U5: uncomment the redis service below and set:
       # REDIS_URL: redis://redis:6379
+      # PgBouncer (transaction-pooled) topology — the pgbouncer service below is
+      # enabled; to route request traffic through it (while session-scoped locks
+      # + LISTEN keep a direct backend), override:
+      #   DATABASE_URL: postgres://serviceos:serviceos@pgbouncer:6432/serviceos_load
+      #   DATABASE_DIRECT_URL: postgres://serviceos:serviceos@postgres:5432/serviceos_load
     command: sh -c "node packages/api/dist/src/db/migrate.js && node packages/api/dist/src/index.js"
     ports:
       - '3000:3000'
@@ -63,15 +68,18 @@ services:
   #   image: redis:7-alpine
   #   ports: ['6379:6379']
   #
-  # pgbouncer:                   # U2 — transaction-mode pooling in front of PG
-  #   image: edoburu/pgbouncer:latest
-  #   environment:
-  #     DATABASE_URL: postgres://serviceos:serviceos@postgres:5432/serviceos_load
-  #     POOL_MODE: transaction
-  #     MAX_CLIENT_CONN: '1000'
-  #     DEFAULT_POOL_SIZE: '25'
-  #   ports: ['6432:6432']
-  #   depends_on: { postgres: { condition: service_healthy } }
+  pgbouncer: # U2c — transaction-mode pooling in front of Postgres
+    image: edoburu/pgbouncer:latest
+    environment:
+      DATABASE_URL: postgres://serviceos:serviceos@postgres:5432/serviceos_load
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: '1000'
+      DEFAULT_POOL_SIZE: '25'
+    ports:
+      - '6432:6432'
+    depends_on:
+      postgres:
+        condition: service_healthy
   #
   # lb:                          # U5 — fan traffic across `--scale api=N`
   #   image: nginx:alpine
