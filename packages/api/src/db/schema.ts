@@ -5450,6 +5450,40 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_job_form_submissions ON job_form_submissions
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  '222_create_recurring_jobs': `
+    -- R-JOB (Jobber parity) — recurring job series. Jobber's recurring jobs
+    -- repeat on a schedule (weekly lawn care, monthly HVAC maintenance). This
+    -- table models the schedule: a customer, a title, an anchor date, and a
+    -- recurrence rule (JSONB). Upcoming visit dates are computed from the rule
+    -- in app code (src/recurring-jobs/recurrence.ts), not stored. Read/written
+    -- by src/recurring-jobs/pg-recurring-job.ts. Tenant-scoped with FORCE RLS.
+    --
+    -- rule shape: { frequency: 'daily'|'weekly'|'biweekly'|'monthly',
+    --               interval: int>=1, count?: int, until?: 'YYYY-MM-DD' }
+    -- kept in lockstep with recurrenceRuleSchema (src/shared/contracts.ts).
+    CREATE TABLE IF NOT EXISTS recurring_jobs (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      customer_id UUID NOT NULL REFERENCES customers(id),
+      title TEXT NOT NULL,
+      anchor_date DATE NOT NULL,
+      rule JSONB NOT NULL DEFAULT '{}'::jsonb,
+      notes TEXT,
+      is_archived BOOLEAN NOT NULL DEFAULT false,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_recurring_jobs_tenant
+      ON recurring_jobs(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_recurring_jobs_customer
+      ON recurring_jobs(tenant_id, customer_id);
+    ALTER TABLE recurring_jobs ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE recurring_jobs FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_recurring_jobs ON recurring_jobs;
+    CREATE POLICY tenant_isolation_recurring_jobs ON recurring_jobs
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

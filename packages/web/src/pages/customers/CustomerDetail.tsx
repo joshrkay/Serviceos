@@ -11,6 +11,7 @@ import { LanguageBadge } from '../../components/customers/LanguageBadge';
 import { ContactsPanel } from '../../components/customers/ContactsPanel';
 import { TagsPanel } from '../../components/customers/TagsPanel';
 import { CustomFieldsPanel } from '../../components/customers/CustomFieldsPanel';
+import { RecurringJobsPanel } from '../../components/customers/RecurringJobsPanel';
 import { CustomerRecordsPanel } from '../../components/customers/CustomerRecordsPanel';
 import { MergeCustomerPanel } from '../../components/customers/MergeCustomerPanel';
 import { apiFetch } from '../../utils/api-fetch';
@@ -441,6 +442,10 @@ export function CustomerDetail({
         {
           title: 'Tags',
           content: <TagsPanel customerId={customerId} />,
+        },
+        {
+          title: 'Recurring Jobs',
+          content: <RecurringJobsPanel customerId={customerId} />,
         },
         {
           title: 'Custom Fields',

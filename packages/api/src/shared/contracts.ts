@@ -564,3 +564,35 @@ export const updateJobFormSubmissionSchema = z.object({
   answers: z.array(jobFormAnswerSchema).optional(),
   complete: z.boolean().optional(),
 });
+
+// R-JOB (Jobber parity) — recurring job series. Kept in lockstep with
+// RECURRENCE_FREQUENCIES (packages/api/src/recurring-jobs/recurrence.ts).
+const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'must be a date (YYYY-MM-DD)');
+
+export const recurrenceRuleSchema = z
+  .object({
+    frequency: z.enum(['daily', 'weekly', 'biweekly', 'monthly']),
+    interval: z.number().int().min(1).max(365).default(1),
+    count: z.number().int().min(1).max(1000).optional(),
+    until: isoDate.optional(),
+  })
+  .refine((r) => !(r.count !== undefined && r.until !== undefined), {
+    message: 'set either count or until, not both',
+  });
+
+export const createRecurringJobSchema = z.object({
+  customerId: z.string().min(1),
+  title: z.string().min(1).max(200),
+  anchorDate: isoDate,
+  rule: recurrenceRuleSchema,
+  notes: z.string().max(2000).nullable().optional(),
+});
+
+export const updateRecurringJobSchema = z
+  .object({
+    title: z.string().min(1).max(200).optional(),
+    anchorDate: isoDate.optional(),
+    rule: recurrenceRuleSchema.optional(),
+    notes: z.string().max(2000).nullable().optional(),
+  })
+  .refine((v) => Object.keys(v).length > 0, { message: 'no fields to update' });
