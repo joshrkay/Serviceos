@@ -7,6 +7,7 @@ import {
   type RecurringJob,
   archiveRecurringJob as archiveApi,
   createRecurringJob as createApi,
+  generateRecurringJobVisits as generateApi,
   getRecurringJobOccurrences as occurrencesApi,
   listRecurringJobs as listApi,
 } from '../../api/recurring-jobs';
@@ -23,6 +24,7 @@ export interface RecurringJobsPanelApi {
   create: typeof createApi;
   archive: typeof archiveApi;
   occurrences: typeof occurrencesApi;
+  generate: typeof generateApi;
 }
 
 const DEFAULT_API: RecurringJobsPanelApi = {
@@ -30,6 +32,7 @@ const DEFAULT_API: RecurringJobsPanelApi = {
   create: createApi,
   archive: archiveApi,
   occurrences: occurrencesApi,
+  generate: generateApi,
 };
 
 const FREQUENCIES: { value: RecurrenceFrequency; label: string }[] = [
@@ -105,6 +108,30 @@ export function RecurringJobsPanel({
     }
   }, [api, customerId, title, anchorDate, frequency, interval, load]);
 
+  const [generatingId, setGeneratingId] = useState<string | null>(null);
+  const generate = useCallback(
+    async (job: RecurringJob) => {
+      setGeneratingId(job.id);
+      try {
+        const result = await api.generate(job.id);
+        if (result.skippedReason === 'no_location') {
+          toast.error('Add a service address for this customer first');
+        } else if (result.generated.length === 0) {
+          toast.info('No new visits to schedule yet');
+        } else {
+          toast.success(
+            `Scheduled ${result.generated.length} visit${result.generated.length === 1 ? '' : 's'}`,
+          );
+        }
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : 'Failed to schedule visits');
+      } finally {
+        setGeneratingId(null);
+      }
+    },
+    [api],
+  );
+
   const archive = useCallback(
     async (job: RecurringJob) => {
       try {
@@ -146,14 +173,24 @@ export function RecurringJobsPanel({
                 </p>
               )}
             </div>
-            <button
-              type="button"
-              aria-label={`Stop ${job.title}`}
-              onClick={() => archive(job)}
-              className="flex items-center justify-center min-h-11 px-2 rounded-lg text-muted-foreground hover:text-destructive shrink-0"
-            >
-              <Trash2 size={14} />
-            </button>
+            <div className="flex items-center gap-1 shrink-0">
+              <button
+                type="button"
+                onClick={() => generate(job)}
+                disabled={generatingId === job.id}
+                className="min-h-11 px-2 rounded-lg border border-border text-xs text-primary disabled:opacity-50"
+              >
+                {generatingId === job.id ? 'Scheduling…' : 'Schedule visits'}
+              </button>
+              <button
+                type="button"
+                aria-label={`Stop ${job.title}`}
+                onClick={() => archive(job)}
+                className="flex items-center justify-center min-h-11 px-2 rounded-lg text-muted-foreground hover:text-destructive"
+              >
+                <Trash2 size={14} />
+              </button>
+            </div>
           </div>
         </div>
       ))}

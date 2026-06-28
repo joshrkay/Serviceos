@@ -1,8 +1,12 @@
 import { Router, Response } from 'express';
+import { DateTime } from 'luxon';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { AuditRepository } from '../audit/audit';
+import { JobRepository } from '../jobs/job';
+import { AppointmentRepository } from '../appointments/appointment';
+import { LocationRepository } from '../locations/location';
 import {
   RecurringJobRepository,
   archiveRecurringJob,
@@ -10,8 +14,18 @@ import {
   updateRecurringJob,
   upcomingOccurrences,
 } from '../recurring-jobs/recurring-job';
+import { materializeRecurringJob } from '../recurring-jobs/materialize';
 import { describeRecurrence } from '../recurring-jobs/recurrence';
 import { createRecurringJobSchema, updateRecurringJobSchema } from '../shared/contracts';
+
+/** Extra deps for materializing a series into real jobs + appointments. */
+export interface RecurringJobMaterializeDeps {
+  jobRepo: JobRepository;
+  appointmentRepo: AppointmentRepository;
+  locationRepo: LocationRepository;
+  /** Resolve the tenant's IANA timezone (falls back to a default upstream). */
+  resolveTimezone: (tenantId: string) => Promise<string>;
+}
 
 /**
  * R-JOB (Jobber parity) — recurring job series.
@@ -22,7 +36,8 @@ import { createRecurringJobSchema, updateRecurringJobSchema } from '../shared/co
  */
 export function createRecurringJobRouter(
   repo: RecurringJobRepository,
-  auditRepo: AuditRepository
+  auditRepo: AuditRepository,
+  materializeDeps: RecurringJobMaterializeDeps
 ): Router {
   const router = Router();
 
@@ -132,6 +147,39 @@ export function createRecurringJobRouter(
         return;
       }
       res.json(archived);
+    })
+  );
+
+  // Materialize due occurrences (within an optional horizon) into real jobs +
+  // appointments. Idempotent — already-generated occurrences are skipped.
+  router.post(
+    '/:id/generate',
+    requireAuth,
+    requireTenant,
+    requirePermission('jobs:create'),
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const job = await repo.findById(req.auth!.tenantId, req.params.id);
+      if (!job) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Recurring job not found' });
+        return;
+      }
+      const tz = await materializeDeps.resolveTimezone(req.auth!.tenantId);
+      const today = DateTime.now().setZone(tz).toISODate() ?? new Date().toISOString().slice(0, 10);
+      const rawHorizon = Number(req.body?.horizonDays);
+      const horizonDays =
+        Number.isInteger(rawHorizon) && rawHorizon > 0 ? Math.min(rawHorizon, 365) : 30;
+      const result = await materializeRecurringJob(
+        job,
+        { today, horizonDays, timezone: tz, actorId: req.auth!.userId },
+        {
+          recurringJobRepo: repo,
+          jobRepo: materializeDeps.jobRepo,
+          appointmentRepo: materializeDeps.appointmentRepo,
+          locationRepo: materializeDeps.locationRepo,
+          auditRepo,
+        }
+      );
+      res.json(result);
     })
   );
 

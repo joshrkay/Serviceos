@@ -5484,6 +5484,52 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_recurring_jobs ON recurring_jobs
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  '223_recurring_job_materialization': `
+    -- R-JOB (Jobber parity) — materialize recurring series into real jobs +
+    -- appointments. Adds the per-visit scheduling intent (time-of-day,
+    -- duration, visit kind) to the series and a ledger that makes generation
+    -- idempotent: one visit per (series, occurrence date). Read/written by
+    -- src/recurring-jobs/pg-recurring-job.ts + materialize.ts.
+
+    ALTER TABLE recurring_jobs
+      ADD COLUMN IF NOT EXISTS anchor_time TEXT NOT NULL DEFAULT '09:00';
+    ALTER TABLE recurring_jobs
+      ADD COLUMN IF NOT EXISTS duration_minutes INTEGER NOT NULL DEFAULT 60;
+    ALTER TABLE recurring_jobs
+      ADD COLUMN IF NOT EXISTS appointment_type TEXT;
+    -- appointment_type mirrors the appointments CHECK taxonomy (kept in lockstep
+    -- with appointmentTypeSchema). Named ADD CONSTRAINT so the getMigrationSQL
+    -- DROP-CONSTRAINT rewriter keeps re-runs safe. NULL = unspecified.
+    ALTER TABLE recurring_jobs
+      ADD CONSTRAINT recurring_jobs_appointment_type_check
+      CHECK (appointment_type IS NULL OR appointment_type IN
+        ('estimate', 'repair', 'install', 'maintenance', 'diagnostic'));
+
+    -- Materialization ledger: one row per generated occurrence. The UNIQUE
+    -- constraint is the idempotency guarantee (claimOccurrence does an
+    -- ON CONFLICT DO NOTHING insert). job_id / appointment_id are filled in
+    -- after the visit is created (linkOccurrence).
+    CREATE TABLE IF NOT EXISTS recurring_job_occurrences (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      recurring_job_id UUID NOT NULL REFERENCES recurring_jobs(id),
+      occurrence_date DATE NOT NULL,
+      job_id UUID REFERENCES jobs(id),
+      appointment_id UUID REFERENCES appointments(id),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    ALTER TABLE recurring_job_occurrences
+      ADD CONSTRAINT recurring_job_occurrences_unique
+      UNIQUE (tenant_id, recurring_job_id, occurrence_date);
+    CREATE INDEX IF NOT EXISTS idx_recurring_job_occurrences_series
+      ON recurring_job_occurrences(tenant_id, recurring_job_id);
+    ALTER TABLE recurring_job_occurrences ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE recurring_job_occurrences FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_recurring_job_occurrences ON recurring_job_occurrences;
+    CREATE POLICY tenant_isolation_recurring_job_occurrences ON recurring_job_occurrences
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

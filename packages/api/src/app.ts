@@ -3489,7 +3489,18 @@ export function createApp(): express.Express {
     createCustomerCustomFieldRouter(customerCustomFieldRepo, auditRepo)
   );
   app.use('/api/job-forms', createJobFormRouter(jobFormRepo, auditRepo));
-  app.use('/api/recurring-jobs', createRecurringJobRouter(recurringJobRepo, auditRepo));
+  app.use(
+    '/api/recurring-jobs',
+    createRecurringJobRouter(recurringJobRepo, auditRepo, {
+      jobRepo,
+      appointmentRepo,
+      locationRepo,
+      resolveTimezone: async (tenantId: string) => {
+        const s = await settingsRepo.findByTenant(tenantId);
+        return s?.timezone ?? 'America/New_York';
+      },
+    })
+  );
   app.use('/api/time-entries', createTimeEntriesRouter(timeEntryRepo, auditRepo));
   // P10-001: portal session creation/revocation. Mounted at
   // `/api/portal-sessions` (NOT `/api/customers/:id/portal-session`)

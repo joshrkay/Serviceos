@@ -67,6 +67,29 @@ export async function archiveRecurringJob(id: string): Promise<void> {
   if (!res.ok) throw new Error(`Failed to archive recurring job: ${res.status}`);
 }
 
+export interface GeneratedVisit {
+  occurrenceDate: string;
+  jobId: string;
+  appointmentId: string;
+}
+
+export interface GenerateVisitsResult {
+  generated: GeneratedVisit[];
+  skippedReason?: 'no_location';
+}
+
+/** Materialize due occurrences into real jobs + appointments (idempotent). */
+export async function generateRecurringJobVisits(
+  id: string,
+  horizonDays?: number,
+): Promise<GenerateVisitsResult> {
+  const res = await apiFetch(`/api/recurring-jobs/${encodeURIComponent(id)}/generate`, {
+    method: 'POST',
+    body: JSON.stringify(horizonDays ? { horizonDays } : {}),
+  });
+  return readJsonOrThrow<GenerateVisitsResult>(res, 'generate visits');
+}
+
 export async function getRecurringJobOccurrences(
   id: string,
   opts: { from?: string; limit?: number } = {},

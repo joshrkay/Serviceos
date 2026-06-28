@@ -580,10 +580,16 @@ export const recurrenceRuleSchema = z
     message: 'set either count or until, not both',
   });
 
+const timeOfDay = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'must be HH:MM (24-hour)');
+const appointmentTypeValue = z.enum(['estimate', 'repair', 'install', 'maintenance', 'diagnostic']);
+
 export const createRecurringJobSchema = z.object({
   customerId: z.string().min(1),
   title: z.string().min(1).max(200),
   anchorDate: isoDate,
+  anchorTime: timeOfDay.optional(),
+  durationMinutes: z.number().int().min(15).max(480).optional(),
+  appointmentType: appointmentTypeValue.nullable().optional(),
   rule: recurrenceRuleSchema,
   notes: z.string().max(2000).nullable().optional(),
 });
@@ -592,6 +598,9 @@ export const updateRecurringJobSchema = z
   .object({
     title: z.string().min(1).max(200).optional(),
     anchorDate: isoDate.optional(),
+    anchorTime: timeOfDay.optional(),
+    durationMinutes: z.number().int().min(15).max(480).optional(),
+    appointmentType: appointmentTypeValue.nullable().optional(),
     rule: recurrenceRuleSchema.optional(),
     notes: z.string().max(2000).nullable().optional(),
   })

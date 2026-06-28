@@ -1,4 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
+import { APPOINTMENT_TYPES, AppointmentTypeValue } from '@ai-service-os/shared';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import {
   RecurrenceRule,
@@ -7,6 +8,12 @@ import {
   isValidDateString,
   validateRecurrenceRule,
 } from './recurrence';
+
+/** 24-hour 'HH:MM' local time-of-day for the visit. */
+const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+export function isValidTimeOfDay(value: unknown): value is string {
+  return typeof value === 'string' && TIME_RE.test(value);
+}
 
 /**
  * R-JOB (Jobber parity) — recurring job series.
@@ -28,6 +35,12 @@ export interface RecurringJob {
   title: string;
   /** First service date ('YYYY-MM-DD'); the recurrence is anchored here. */
   anchorDate: string;
+  /** Local time-of-day ('HH:MM', tenant timezone) each visit starts. */
+  anchorTime: string;
+  /** Visit length in minutes; with anchorTime it sizes the materialized appointment. */
+  durationMinutes: number;
+  /** Visit kind stamped on generated appointments; null = unspecified. */
+  appointmentType: AppointmentTypeValue | null;
   rule: RecurrenceRule;
   notes: string | null;
   isArchived: boolean;
@@ -40,6 +53,9 @@ export interface CreateRecurringJobInput {
   customerId: string;
   title: string;
   anchorDate: string;
+  anchorTime?: string;
+  durationMinutes?: number;
+  appointmentType?: AppointmentTypeValue | null;
   rule: RecurrenceRule;
   notes?: string | null;
   createdBy: string;
@@ -49,8 +65,21 @@ export interface CreateRecurringJobInput {
 export interface UpdateRecurringJobInput {
   title?: string;
   anchorDate?: string;
+  anchorTime?: string;
+  durationMinutes?: number;
+  appointmentType?: AppointmentTypeValue | null;
   rule?: RecurrenceRule;
   notes?: string | null;
+}
+
+/** A materialization ledger row: which occurrence dates became real visits. */
+export interface RecurringJobOccurrence {
+  id: string;
+  tenantId: string;
+  recurringJobId: string;
+  occurrenceDate: string;
+  jobId: string | null;
+  appointmentId: string | null;
 }
 
 export interface RecurringJobRepository {
@@ -59,12 +88,27 @@ export interface RecurringJobRepository {
   list(tenantId: string, opts?: { customerId?: string; includeArchived?: boolean }): Promise<RecurringJob[]>;
   update(job: RecurringJob): Promise<RecurringJob>;
   archive(tenantId: string, id: string): Promise<RecurringJob | null>;
+
+  /**
+   * Atomically claim an occurrence date for materialization. Returns a new
+   * ledger id if this caller won the claim, or null if the date was already
+   * claimed (idempotency: the UNIQUE(tenant, series, date) guarantees one
+   * visit per occurrence even under concurrent generation).
+   */
+  claimOccurrence(tenantId: string, recurringJobId: string, occurrenceDate: string): Promise<string | null>;
+  /** Link a claimed ledger row to the job + appointment it produced. */
+  linkOccurrence(tenantId: string, ledgerId: string, jobId: string, appointmentId: string): Promise<void>;
+  /** Occurrence dates already materialized for a series (for preview/skip). */
+  listMaterializedDates(tenantId: string, recurringJobId: string): Promise<string[]>;
 }
 
 export function validateRecurringJobInput(input: {
   title?: string;
   customerId?: string;
   anchorDate?: string;
+  anchorTime?: string;
+  durationMinutes?: number;
+  appointmentType?: AppointmentTypeValue | null;
   rule?: Parameters<typeof validateRecurrenceRule>[0];
 }): string[] {
   const errors: string[] = [];
@@ -75,6 +119,26 @@ export function validateRecurringJobInput(input: {
   }
   if (!input.rule) errors.push('rule is required');
   else errors.push(...validateRecurrenceRule(input.rule));
+  if (input.anchorTime !== undefined && !isValidTimeOfDay(input.anchorTime)) {
+    errors.push('anchorTime must be HH:MM (24-hour)');
+  }
+  if (input.durationMinutes !== undefined) {
+    if (
+      typeof input.durationMinutes !== 'number' ||
+      !Number.isInteger(input.durationMinutes) ||
+      input.durationMinutes < 15 ||
+      input.durationMinutes > 480
+    ) {
+      errors.push('durationMinutes must be an integer between 15 and 480');
+    }
+  }
+  if (
+    input.appointmentType !== undefined &&
+    input.appointmentType !== null &&
+    !APPOINTMENT_TYPES.includes(input.appointmentType as AppointmentTypeValue)
+  ) {
+    errors.push('invalid appointmentType');
+  }
   return errors;
 }
 
@@ -105,6 +169,9 @@ export async function createRecurringJob(
     customerId: input.customerId,
     title: input.title.trim(),
     anchorDate: input.anchorDate,
+    anchorTime: input.anchorTime ?? '09:00',
+    durationMinutes: input.durationMinutes ?? 60,
+    appointmentType: input.appointmentType ?? 'maintenance',
     rule: normalizeRule(input.rule),
     notes: input.notes?.trim() || null,
     isArchived: false,
@@ -148,6 +215,9 @@ export async function updateRecurringJob(
     title: input.title ?? existing.title,
     customerId: existing.customerId,
     anchorDate: input.anchorDate ?? existing.anchorDate,
+    anchorTime: input.anchorTime ?? existing.anchorTime,
+    durationMinutes: input.durationMinutes ?? existing.durationMinutes,
+    appointmentType: input.appointmentType !== undefined ? input.appointmentType : existing.appointmentType,
     rule: input.rule ?? existing.rule,
   };
   const errors = validateRecurringJobInput(merged);
@@ -157,6 +227,9 @@ export async function updateRecurringJob(
     ...existing,
     title: merged.title.trim(),
     anchorDate: merged.anchorDate,
+    anchorTime: merged.anchorTime,
+    durationMinutes: merged.durationMinutes,
+    appointmentType: merged.appointmentType,
     rule: normalizeRule(merged.rule),
     notes: input.notes !== undefined ? input.notes?.trim() || null : existing.notes,
     updatedAt: new Date(),
@@ -216,6 +289,7 @@ function normalizeRule(rule: RecurrenceRule): RecurrenceRule {
 
 export class InMemoryRecurringJobRepository implements RecurringJobRepository {
   private jobs: Map<string, RecurringJob> = new Map();
+  private occurrences: RecurringJobOccurrence[] = [];
 
   async create(job: RecurringJob): Promise<RecurringJob> {
     this.jobs.set(job.id, clone(job));
@@ -254,6 +328,50 @@ export class InMemoryRecurringJobRepository implements RecurringJobRepository {
     const updated = { ...j, isArchived: true, updatedAt: new Date() };
     this.jobs.set(id, updated);
     return clone(updated);
+  }
+
+  async claimOccurrence(
+    tenantId: string,
+    recurringJobId: string,
+    occurrenceDate: string
+  ): Promise<string | null> {
+    const exists = this.occurrences.some(
+      (o) =>
+        o.tenantId === tenantId &&
+        o.recurringJobId === recurringJobId &&
+        o.occurrenceDate === occurrenceDate
+    );
+    if (exists) return null;
+    const id = uuidv4();
+    this.occurrences.push({
+      id,
+      tenantId,
+      recurringJobId,
+      occurrenceDate,
+      jobId: null,
+      appointmentId: null,
+    });
+    return id;
+  }
+
+  async linkOccurrence(
+    tenantId: string,
+    ledgerId: string,
+    jobId: string,
+    appointmentId: string
+  ): Promise<void> {
+    const row = this.occurrences.find((o) => o.id === ledgerId && o.tenantId === tenantId);
+    if (row) {
+      row.jobId = jobId;
+      row.appointmentId = appointmentId;
+    }
+  }
+
+  async listMaterializedDates(tenantId: string, recurringJobId: string): Promise<string[]> {
+    return this.occurrences
+      .filter((o) => o.tenantId === tenantId && o.recurringJobId === recurringJobId)
+      .map((o) => o.occurrenceDate)
+      .sort();
   }
 }
 

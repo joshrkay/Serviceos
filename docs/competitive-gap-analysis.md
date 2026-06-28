@@ -262,6 +262,14 @@ integration tests and a production `tsc` build gate.
   Pure recurrence engine (daily/weekly/biweekly/monthly, interval, count/until,
   month-end clamping) + series CRUD + computed visit-date preview. Backend:
   `packages/api/src/recurring-jobs/`, migration 222, `/api/recurring-jobs`.
-  Web: `RecurringJobsPanel` on the customer detail. **Follow-up:** auto-
-  materialize each occurrence into a job + appointment (worker), and surface
+  Web: `RecurringJobsPanel` on the customer detail.
+- **Recurring-job materialization** (completes the above to full parity).
+  Series now carry per-visit scheduling intent (time-of-day, duration, visit
+  kind). `materializeRecurringJob` (`recurring-jobs/materialize.ts`) generates
+  a real Job + Appointment for each due occurrence in a horizon, placing the
+  time-of-day in the tenant timezone (luxon, DST-correct) at the customer's
+  primary service location. Idempotent via a `recurring_job_occurrences` ledger
+  (UNIQUE per series+date, claim-before-create), migration 223,
+  `POST /api/recurring-jobs/:id/generate` + a "Schedule visits" action on the
+  panel. **Follow-up:** a scheduled worker to auto-run generation, and surface
   the upcoming series on the dispatch calendar.

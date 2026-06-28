@@ -1,4 +1,5 @@
 import { Pool } from 'pg';
+import { AppointmentTypeValue } from '@ai-service-os/shared';
 import { PgBaseRepository } from '../db/pg-base';
 import { RecurrenceRule } from './recurrence';
 import { RecurringJob, RecurringJobRepository } from './recurring-job';
@@ -17,6 +18,9 @@ function mapRow(row: Record<string, unknown>): RecurringJob {
     customerId: row.customer_id as string,
     title: row.title as string,
     anchorDate: toDateString(row.anchor_date),
+    anchorTime: (row.anchor_time as string) ?? '09:00',
+    durationMinutes: (row.duration_minutes as number) ?? 60,
+    appointmentType: (row.appointment_type as AppointmentTypeValue | null) ?? null,
     rule: (row.rule as RecurrenceRule) ?? { frequency: 'monthly', interval: 1 },
     notes: (row.notes as string | null) ?? null,
     isArchived: row.is_archived as boolean,
@@ -46,9 +50,10 @@ export class PgRecurringJobRepository extends PgBaseRepository implements Recurr
     return this.withTenant(job.tenantId, async (client) => {
       const result = await client.query(
         `INSERT INTO recurring_jobs (
-          id, tenant_id, customer_id, title, anchor_date, rule, notes,
+          id, tenant_id, customer_id, title, anchor_date, anchor_time,
+          duration_minutes, appointment_type, rule, notes,
           is_archived, created_at, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10)
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12, $13)
         RETURNING *`,
         [
           job.id,
@@ -56,6 +61,9 @@ export class PgRecurringJobRepository extends PgBaseRepository implements Recurr
           job.customerId,
           job.title,
           job.anchorDate,
+          job.anchorTime,
+          job.durationMinutes,
+          job.appointmentType,
           JSON.stringify(job.rule),
           job.notes,
           job.isArchived,
@@ -103,8 +111,9 @@ export class PgRecurringJobRepository extends PgBaseRepository implements Recurr
     return this.withTenant(job.tenantId, async (client) => {
       const result = await client.query(
         `UPDATE recurring_jobs
-         SET title = $3, anchor_date = $4, rule = $5::jsonb, notes = $6,
-             is_archived = $7, updated_at = $8
+         SET title = $3, anchor_date = $4, anchor_time = $5, duration_minutes = $6,
+             appointment_type = $7, rule = $8::jsonb, notes = $9,
+             is_archived = $10, updated_at = $11
          WHERE tenant_id = $1 AND id = $2
          RETURNING *`,
         [
@@ -112,6 +121,9 @@ export class PgRecurringJobRepository extends PgBaseRepository implements Recurr
           job.id,
           job.title,
           job.anchorDate,
+          job.anchorTime,
+          job.durationMinutes,
+          job.appointmentType,
           JSON.stringify(job.rule),
           job.notes,
           job.isArchived,
@@ -133,6 +145,61 @@ export class PgRecurringJobRepository extends PgBaseRepository implements Recurr
         [tenantId, id]
       );
       return result.rows.length > 0 ? mapRow(result.rows[0]) : null;
+    });
+  }
+
+  async claimOccurrence(
+    tenantId: string,
+    recurringJobId: string,
+    occurrenceDate: string
+  ): Promise<string | null> {
+    return this.withTenant(tenantId, async (client) => {
+      // ON CONFLICT DO NOTHING on the UNIQUE(tenant, series, date) makes the
+      // claim atomic: a losing concurrent caller gets zero rows back.
+      const result = await client.query(
+        `INSERT INTO recurring_job_occurrences (tenant_id, recurring_job_id, occurrence_date)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (tenant_id, recurring_job_id, occurrence_date) DO NOTHING
+         RETURNING id`,
+        [tenantId, recurringJobId, occurrenceDate]
+      );
+      return result.rows.length > 0 ? (result.rows[0].id as string) : null;
+    });
+  }
+
+  async linkOccurrence(
+    tenantId: string,
+    ledgerId: string,
+    jobId: string,
+    appointmentId: string
+  ): Promise<void> {
+    await this.withTenant(tenantId, async (client) => {
+      await client.query(
+        `UPDATE recurring_job_occurrences
+         SET job_id = $3, appointment_id = $4
+         WHERE tenant_id = $1 AND id = $2`,
+        [tenantId, ledgerId, jobId, appointmentId]
+      );
+    });
+  }
+
+  async listMaterializedDates(tenantId: string, recurringJobId: string): Promise<string[]> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT occurrence_date FROM recurring_job_occurrences
+         WHERE tenant_id = $1 AND recurring_job_id = $2
+         ORDER BY occurrence_date ASC`,
+        [tenantId, recurringJobId]
+      );
+      return result.rows.map((r) => {
+        const v = r.occurrence_date;
+        if (typeof v === 'string') return v.slice(0, 10);
+        const d = v as Date;
+        const y = d.getUTCFullYear();
+        const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+        const day = String(d.getUTCDate()).padStart(2, '0');
+        return `${y}-${m}-${day}`;
+      });
     });
   }
 }

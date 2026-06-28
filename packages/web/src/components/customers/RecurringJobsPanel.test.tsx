@@ -28,6 +28,7 @@ function mockApi(over: Partial<RecurringJobsPanelApi> = {}): RecurringJobsPanelA
     create: vi.fn().mockResolvedValue(job()),
     archive: vi.fn().mockResolvedValue(undefined),
     occurrences: vi.fn().mockResolvedValue([]),
+    generate: vi.fn().mockResolvedValue({ generated: [] }),
     ...over,
   };
 }
@@ -92,5 +93,17 @@ describe('RecurringJobsPanel (R-JOB)', () => {
     render(<RecurringJobsPanel customerId="c1" api={api} />);
     fireEvent.click(await screen.findByLabelText('Stop Monthly filter change'));
     await waitFor(() => expect(api.archive).toHaveBeenCalledWith('r1'));
+  });
+
+  it('generates visits for a series', async () => {
+    const api = mockApi({
+      list: vi.fn().mockResolvedValue([job()]),
+      generate: vi.fn().mockResolvedValue({
+        generated: [{ occurrenceDate: '2026-06-01', jobId: 'j1', appointmentId: 'a1' }],
+      }),
+    });
+    render(<RecurringJobsPanel customerId="c1" api={api} />);
+    fireEvent.click(await screen.findByText('Schedule visits'));
+    await waitFor(() => expect(api.generate).toHaveBeenCalledWith('r1'));
   });
 });
