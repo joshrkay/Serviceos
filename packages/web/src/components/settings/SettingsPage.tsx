@@ -5,7 +5,7 @@ import {
   ChevronRight, Building2, Users, Shield, Bell, Globe, Clock,
   CreditCard, Link, Zap, FileText, Sparkles, Copy, ExternalLink,
   MapPin, Check, Store, RefreshCw, TrendingUp, Mail, BookOpen, Star, Phone,
-  Calendar, ClipboardList, SlidersHorizontal,
+  Calendar, ClipboardList, SlidersHorizontal, Megaphone,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { QuickBooksIntegrationSheet } from './QuickBooksIntegrationSheet';
@@ -19,6 +19,7 @@ import { TechnicianPhoneSheet } from './TechnicianPhoneSheet';
 import { TerminologySheet } from './TerminologySheet';
 import { JobFormTemplatesSheet } from './JobFormTemplatesSheet';
 import { JobCustomFieldsSheet } from './JobCustomFieldsSheet';
+import { MarketingCampaignsSheet } from './MarketingCampaignsSheet';
 import { AIApprovalRulesSheet } from './AIApprovalRulesSheet';
 import { DepositRulesSheet } from './DepositRulesSheet';
 import { DiscountPolicySheet } from './DiscountPolicySheet';
@@ -186,6 +187,7 @@ export function SettingsPage() {
   const [terminologyOpen, setTerminologyOpen] = useState(false);
   const [jobFormsOpen, setJobFormsOpen] = useState(false);
   const [jobCustomFieldsOpen, setJobCustomFieldsOpen] = useState(false);
+  const [marketingOpen, setMarketingOpen] = useState(false);
   const [aiRulesOpen, setAiRulesOpen] = useState(false);
   const [depositRulesOpen, setDepositRulesOpen] = useState(false);
   const [discountPolicyOpen, setDiscountPolicyOpen] = useState(false);
@@ -419,6 +421,7 @@ export function SettingsPage() {
       title: 'Customer experience',
       items: [
         { icon: Star, label: 'Feedback & reviews', description: 'Average rating, distribution, and recent comments', action: () => navigate('/settings/feedback') },
+        { icon: Megaphone, label: 'Email campaigns', description: 'Send promos & announcements to customer segments', action: () => setMarketingOpen(true) },
       ],
     },
     {
@@ -879,6 +882,9 @@ export function SettingsPage() {
       )}
       {jobCustomFieldsOpen && (
         <JobCustomFieldsSheet onClose={() => setJobCustomFieldsOpen(false)} />
+      )}
+      {marketingOpen && (
+        <MarketingCampaignsSheet onClose={() => setMarketingOpen(false)} />
       )}
       {terminologyOpen && (
         <TerminologySheet onClose={() => setTerminologyOpen(false)} />

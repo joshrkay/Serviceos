@@ -5607,6 +5607,36 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_financing_applications ON financing_applications
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  '226_create_marketing_campaigns': `
+    -- MKT (Jobber parity) — customer email campaigns. Compose once, target all
+    -- active customers or a tag segment, send via the delivery provider.
+    -- Read/written by src/marketing/pg-campaign.ts. FORCE RLS.
+    CREATE TABLE IF NOT EXISTS marketing_campaigns (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      name TEXT NOT NULL,
+      subject TEXT NOT NULL,
+      body_text TEXT NOT NULL,
+      body_html TEXT,
+      segment_tag TEXT,
+      status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'sent')),
+      recipient_count INTEGER NOT NULL DEFAULT 0,
+      sent_count INTEGER NOT NULL DEFAULT 0,
+      failed_count INTEGER NOT NULL DEFAULT 0,
+      created_by TEXT NOT NULL,
+      sent_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_marketing_campaigns_tenant
+      ON marketing_campaigns(tenant_id);
+    ALTER TABLE marketing_campaigns ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE marketing_campaigns FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_marketing_campaigns ON marketing_campaigns;
+    CREATE POLICY tenant_isolation_marketing_campaigns ON marketing_campaigns
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

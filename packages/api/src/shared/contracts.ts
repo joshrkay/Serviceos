@@ -565,6 +565,15 @@ export const updateJobFormSubmissionSchema = z.object({
   complete: z.boolean().optional(),
 });
 
+// MKT (Jobber parity) — customer email campaigns.
+export const createCampaignSchema = z.object({
+  name: z.string().min(1).max(200),
+  subject: z.string().min(1).max(300),
+  bodyText: z.string().min(1).max(20000),
+  bodyHtml: z.string().max(50000).nullable().optional(),
+  segmentTag: z.string().min(1).max(50).nullable().optional(),
+});
+
 // FIN (Jobber parity) — consumer financing on invoices.
 export const offerFinancingSchema = z.object({
   // Defaults to the invoice's amount due when omitted.

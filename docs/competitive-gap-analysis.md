@@ -294,3 +294,10 @@ integration tests and a production `tsc` build gate.
   all orchestration + the client's request/response shaping are unit-tested
   against a mocked fetch (the partner sandbox needs credentials to exercise
   live).
+- **Customer email campaigns** (Jobber's marketing suite). Compose a message,
+  target all active customers or a tag segment, and send via the existing
+  delivery provider. Recipient resolution is a pure, tested function
+  (drops archived / no-email, de-dupes); sending fans out per-recipient with
+  failure counts and is campaign-level idempotent (no double-send). Backend:
+  `marketing/campaign.ts` + `pg-campaign.ts`, migration 226, `/api/marketing`.
+  Web: an "Email campaigns" manager in Settings → Customer experience.
