@@ -280,3 +280,17 @@ integration tests and a production `tsc` build gate.
   generic field-type validators (`jobs/job-custom-field.ts`), migration 224,
   `/api/job-custom-fields`. Web: values panel on the job detail +
   definition manager in Settings → AI & Automation → "Job custom fields".
+- **Consumer financing** (Jobber bundles Wisetack "buy now / pay over time").
+  A FinancingApplication tied to an invoice, created through a provider
+  abstraction (`financing/financing-provider.ts`): a live, env-gated
+  `WisetackFinancingProvider` (HTTP, fetch-injectable, idempotency key, cents→
+  dollars, status mapping) and a `ManualFinancingProvider` fallback when no
+  key is configured. Orchestration (`financing/financing.ts`) is provider-
+  agnostic with an amount floor and monotonic status transitions; a signed
+  provider webhook (`/webhooks/wisetack`, raw-body HMAC, carries tenant +
+  application id) drives the application to its terminal state. migration 225,
+  `/api/financing`, "Offer financing" panel on the invoice detail. The live
+  Wisetack leg ships behind `WISETACK_API_KEY` / `WISETACK_WEBHOOK_SECRET`;
+  all orchestration + the client's request/response shaping are unit-tested
+  against a mocked fetch (the partner sandbox needs credentials to exercise
+  live).

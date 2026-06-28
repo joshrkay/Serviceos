@@ -7,6 +7,12 @@ vi.mock('../../hooks/useDetailQuery', () => ({
   useDetailQuery: vi.fn(),
 }));
 
+// The financing panel fires its own fetch on mount; mock it so this suite's
+// global-fetch call counts (payment POST) stay deterministic.
+vi.mock('../../components/invoices/InvoiceFinancingPanel', () => ({
+  InvoiceFinancingPanel: () => <div>InvoiceFinancingPanel</div>,
+}));
+
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 
 describe('InvoiceDetail', () => {

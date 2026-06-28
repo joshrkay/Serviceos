@@ -193,6 +193,10 @@ import { createRecurringJobRouter } from './routes/recurring-jobs';
 import { InMemoryJobCustomFieldRepository } from './jobs/job-custom-field';
 import { PgJobCustomFieldRepository } from './jobs/pg-job-custom-field';
 import { createJobCustomFieldRouter } from './routes/job-custom-fields';
+import { InMemoryFinancingRepository } from './financing/financing';
+import { PgFinancingRepository } from './financing/pg-financing';
+import { createFinancingProvider } from './financing/financing-provider';
+import { createFinancingRouter, createFinancingWebhookRouter } from './routes/financing';
 import { InMemoryLeadRepository } from './leads/lead';
 import { InMemoryLocationRepository } from './locations/location';
 import { InMemoryJobRepository } from './jobs/job';
@@ -667,6 +671,11 @@ export function createApp(): express.Express {
   // req.body fields (used for signature verification + AccountSid match).
   app.use('/webhooks/twilio', express.urlencoded({ extended: false }));
 
+  // FIN — Wisetack financing webhook needs the raw body for HMAC verification.
+  // Register the raw parser BEFORE global express.json() (like Stripe); the
+  // handler router is mounted later once repos are constructed.
+  app.use('/webhooks/wisetack', express.raw({ type: '*/*' }));
+
   // Body parsing for all other routes
   app.use(express.json());
 
@@ -948,6 +957,8 @@ export function createApp(): express.Express {
   const jobFormRepo = pool ? new PgJobFormRepository(pool) : new InMemoryJobFormRepository();
   const recurringJobRepo = pool ? new PgRecurringJobRepository(pool) : new InMemoryRecurringJobRepository();
   const jobCustomFieldRepo = pool ? new PgJobCustomFieldRepository(pool) : new InMemoryJobCustomFieldRepository();
+  const financingRepo = pool ? new PgFinancingRepository(pool) : new InMemoryFinancingRepository();
+  const financingProvider = createFinancingProvider();
   // Story 4.6 — customer merge. Pg re-parents child rows + archives the loser
   // in one transaction; the no-DB dev path only archives (no child tables).
   const customerMergeRepo = pool
@@ -3494,6 +3505,25 @@ export function createApp(): express.Express {
   );
   app.use('/api/job-forms', createJobFormRouter(jobFormRepo, auditRepo));
   app.use('/api/job-custom-fields', createJobCustomFieldRouter(jobCustomFieldRepo, auditRepo));
+  app.use(
+    '/api/financing',
+    createFinancingRouter({
+      financingRepo,
+      invoiceRepo,
+      jobRepo,
+      customerRepo,
+      provider: financingProvider,
+      auditRepo,
+    })
+  );
+  app.use(
+    '/webhooks/wisetack',
+    createFinancingWebhookRouter({
+      financingRepo,
+      auditRepo,
+      webhookSecret: process.env.WISETACK_WEBHOOK_SECRET,
+    })
+  );
   app.use(
     '/api/recurring-jobs',
     createRecurringJobRouter(recurringJobRepo, auditRepo, {

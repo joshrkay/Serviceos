@@ -5577,6 +5577,36 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_job_cfv ON job_custom_field_values
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  '225_create_financing_applications': `
+    -- FIN (Jobber parity) — consumer financing on invoices (Wisetack-style
+    -- "buy now / pay over time"). One application per offer on an invoice;
+    -- the provider drives status via a signed webhook. Read/written by
+    -- src/financing/pg-financing.ts. amount_cents is integer cents. FORCE RLS.
+    CREATE TABLE IF NOT EXISTS financing_applications (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      invoice_id UUID NOT NULL REFERENCES invoices(id),
+      customer_id UUID REFERENCES customers(id),
+      amount_cents BIGINT NOT NULL CHECK (amount_cents > 0),
+      provider TEXT NOT NULL CHECK (provider IN ('wisetack', 'manual')),
+      external_id TEXT,
+      application_url TEXT,
+      status TEXT NOT NULL DEFAULT 'offered'
+        CHECK (status IN ('offered', 'prequalified', 'approved', 'declined', 'funded', 'expired', 'canceled')),
+      status_reason TEXT,
+      created_by TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_financing_applications_invoice
+      ON financing_applications(tenant_id, invoice_id);
+    ALTER TABLE financing_applications ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE financing_applications FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_financing_applications ON financing_applications;
+    CREATE POLICY tenant_isolation_financing_applications ON financing_applications
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
