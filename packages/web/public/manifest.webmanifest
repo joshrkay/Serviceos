@@ -1,0 +1,19 @@
+{
+  "name": "Rivet — Your AI dispatcher",
+  "short_name": "Rivet",
+  "description": "Run your service business by voice — booking, quoting, invoicing, and the back office, done for you.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#0b1220",
+  "theme_color": "#0b1220",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
