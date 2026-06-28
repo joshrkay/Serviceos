@@ -5387,6 +5387,69 @@ export const MIGRATIONS = {
     END
     $cross$;
   `,
+
+  '221_create_job_forms': `
+    -- J-FORM (Jobber parity) — job forms & checklists. Jobber lets a shop
+    -- define reusable form/checklist templates that technicians fill out per
+    -- job; we mirror that with templates + per-job submissions. Read/written by
+    -- src/job-forms/pg-job-form.ts. Both tables are tenant-scoped with FORCE RLS.
+    --
+    -- field_type is kept in lockstep with jobFormFieldTypeSchema
+    -- (packages/api/src/shared/contracts.ts) and JOB_FORM_FIELD_TYPES; the
+    -- enum lives in the JSONB field blobs, not a column CHECK, so it is
+    -- validated in app code (job-form.ts) rather than the DB.
+
+    -- Templates: an ordered list of typed fields stored as a JSONB array,
+    -- always read/written together with the template.
+    CREATE TABLE IF NOT EXISTS job_form_templates (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      name TEXT NOT NULL,
+      description TEXT,
+      fields JSONB NOT NULL DEFAULT '[]'::jsonb,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      is_archived BOOLEAN NOT NULL DEFAULT false,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_job_form_templates_tenant
+      ON job_form_templates(tenant_id);
+    ALTER TABLE job_form_templates ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE job_form_templates FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_job_form_templates ON job_form_templates;
+    CREATE POLICY tenant_isolation_job_form_templates ON job_form_templates
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    -- Submissions: a filled instance attached to a job. template_name + fields
+    -- are SNAPSHOT at creation so a completed record is immutable history even
+    -- if the template is later edited or archived. answers is a JSONB array of
+    -- { fieldId, value }. completed_by holds the actor id (Clerk/user id) and
+    -- is a free-text actor reference, not an FK, to mirror the audit actor model.
+    CREATE TABLE IF NOT EXISTS job_form_submissions (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      job_id UUID NOT NULL REFERENCES jobs(id),
+      template_id UUID NOT NULL REFERENCES job_form_templates(id),
+      template_name TEXT NOT NULL,
+      fields JSONB NOT NULL DEFAULT '[]'::jsonb,
+      answers JSONB NOT NULL DEFAULT '[]'::jsonb,
+      status TEXT NOT NULL DEFAULT 'draft'
+        CHECK (status IN ('draft', 'completed')),
+      completed_by TEXT,
+      completed_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_job_form_submissions_job
+      ON job_form_submissions(tenant_id, job_id);
+    CREATE INDEX IF NOT EXISTS idx_job_form_submissions_template
+      ON job_form_submissions(tenant_id, template_id);
+    ALTER TABLE job_form_submissions ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE job_form_submissions FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_job_form_submissions ON job_form_submissions;
+    CREATE POLICY tenant_isolation_job_form_submissions ON job_form_submissions
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

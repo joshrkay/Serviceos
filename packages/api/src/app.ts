@@ -184,6 +184,9 @@ import { PgCustomFieldRepository } from './customers/pg-custom-field';
 import { InMemoryCustomerMergeRepository } from './customers/merge';
 import { PgCustomerMergeRepository } from './customers/pg-merge';
 import { createCustomerCustomFieldRouter } from './routes/customer-custom-fields';
+import { InMemoryJobFormRepository } from './job-forms/job-form';
+import { PgJobFormRepository } from './job-forms/pg-job-form';
+import { createJobFormRouter } from './routes/job-forms';
 import { InMemoryLeadRepository } from './leads/lead';
 import { InMemoryLocationRepository } from './locations/location';
 import { InMemoryJobRepository } from './jobs/job';
@@ -936,6 +939,7 @@ export function createApp(): express.Express {
   // U2 (CRM Jobber parity) — customer tags + tenant-defined custom fields.
   const customerTagRepo     = pool ? new PgTagRepository(pool)           : new InMemoryTagRepository();
   const customerCustomFieldRepo = pool ? new PgCustomFieldRepository(pool) : new InMemoryCustomFieldRepository();
+  const jobFormRepo = pool ? new PgJobFormRepository(pool) : new InMemoryJobFormRepository();
   // Story 4.6 — customer merge. Pg re-parents child rows + archives the loser
   // in one transaction; the no-DB dev path only archives (no child tables).
   const customerMergeRepo = pool
@@ -3480,6 +3484,7 @@ export function createApp(): express.Express {
     '/api/customer-custom-fields',
     createCustomerCustomFieldRouter(customerCustomFieldRepo, auditRepo)
   );
+  app.use('/api/job-forms', createJobFormRouter(jobFormRepo, auditRepo));
   app.use('/api/time-entries', createTimeEntriesRouter(timeEntryRepo, auditRepo));
   // P10-001: portal session creation/revocation. Mounted at
   // `/api/portal-sessions` (NOT `/api/customers/:id/portal-session`)

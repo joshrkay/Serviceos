@@ -513,3 +513,54 @@ export const createWordingPreferenceSchema = z.object({
   avoidWordings: z.array(z.string().min(1)).optional(),
   context: z.string().max(500).optional(),
 });
+
+// J-FORM (Jobber parity) — job forms & checklists. Kept in lockstep with
+// JOB_FORM_FIELD_TYPES (packages/api/src/job-forms/job-form.ts).
+export const jobFormFieldTypeSchema = z.enum([
+  'text',
+  'textarea',
+  'number',
+  'date',
+  'checkbox',
+  'select',
+]);
+
+export const jobFormFieldInputSchema = z.object({
+  id: z.string().max(100).optional(),
+  label: z.string().min(1).max(200),
+  fieldType: jobFormFieldTypeSchema.optional(),
+  options: z.array(z.string().min(1).max(200)).optional(),
+  required: z.boolean().optional(),
+});
+
+export const createJobFormTemplateSchema = z.object({
+  name: z.string().min(1).max(200),
+  description: z.string().max(2000).nullable().optional(),
+  fields: z.array(jobFormFieldInputSchema).min(1),
+  sortOrder: z.number().int().optional(),
+});
+
+export const updateJobFormTemplateSchema = z
+  .object({
+    name: z.string().min(1).max(200).optional(),
+    description: z.string().max(2000).nullable().optional(),
+    fields: z.array(jobFormFieldInputSchema).min(1).optional(),
+    sortOrder: z.number().int().optional(),
+  })
+  .refine((v) => Object.keys(v).length > 0, { message: 'no fields to update' });
+
+export const jobFormAnswerSchema = z.object({
+  fieldId: z.string().min(1).max(100),
+  value: z.string().max(10000).nullable(),
+});
+
+export const createJobFormSubmissionSchema = z.object({
+  templateId: z.string().min(1),
+  answers: z.array(jobFormAnswerSchema).optional(),
+  complete: z.boolean().optional(),
+});
+
+export const updateJobFormSubmissionSchema = z.object({
+  answers: z.array(jobFormAnswerSchema).optional(),
+  complete: z.boolean().optional(),
+});
