@@ -5350,26 +5350,29 @@ export function createApp(): express.Express {
     try {
       // eslint-disable-next-line no-console
       console.log(`[app] ${signal} received — stopping background loops, closing voice sessions and pg pool`);
-      // P4/U-P4a — DRAIN FIRST. Flip the drain flag so /ready 503s and new WS
-      // upgrades (dashboards + Twilio media streams) are rejected, then wait
-      // (bounded) for in-flight voice sessions to finish before tearing down the
-      // pool/Redis/sessions. The window must be shorter than index.ts's
-      // force-exit and Railway's stop grace period; calls still live at the
-      // deadline are closed by the teardown below (Twilio ends the call).
+      // P4/U-P4a — flip the drain flag so /ready 503s and new WS upgrades
+      // (dashboards + Twilio media streams) are rejected.
       setDraining(true);
+      // Blocker 5 — stop all background setInterval loops (sweeps, queue poll,
+      // execution worker) and set `shuttingDown` IMMEDIATELY, BEFORE the voice
+      // drain wait below. The drain wait can run for the full DRAIN_TIMEOUT_MS
+      // (~25s); if the queue poller and leader-gated sweeps kept ticking through
+      // it they would claim fresh DB/Redis work right up to the deadline, then
+      // get torn down with jobs in flight. `shuttingDown` also prevents an
+      // already-scheduled leader sweep tick from starting new work. Voice
+      // sessions are in-memory FSMs and don't depend on these loops, so halting
+      // them first does not impede the drain. (Codex review on PR #628.)
+      shuttingDown = true;
+      for (const handle of backgroundIntervals) clearInterval(handle);
+      // Now DRAIN: wait (bounded) for in-flight voice sessions to finish before
+      // tearing down the pool/Redis/sessions. The window must be shorter than
+      // index.ts's force-exit and Railway's stop grace period; calls still live
+      // at the deadline are closed by the teardown below (Twilio ends the call).
       const drainDeadline = Date.now() + (Number(process.env.DRAIN_TIMEOUT_MS) || 25_000);
       while (voiceSessionStore.size() > 0 && Date.now() < drainDeadline) {
         await new Promise((resolve) => setTimeout(resolve, 500));
       }
       console.log(`[app] drain complete — ${voiceSessionStore.size()} session(s) still active at teardown`);
-      // Blocker 5 — stop all background setInterval loops (sweeps, queue poll,
-      // execution worker) BEFORE the pg pool drains. `shuttingDown` also
-      // prevents an already-scheduled leader-gated sweep tick from starting
-      // new work. Without this, a tick fires mid-teardown and throws on a
-      // closed pool. In-flight queue jobs are bounded by the pool-drain race
-      // below.
-      shuttingDown = true;
-      for (const handle of backgroundIntervals) clearInterval(handle);
       // Stop the voice-session-store reaper interval so the process can
       // exit cleanly even when no DB pool is wired (dev / in-memory mode).
       voiceSessionStore.dispose();
