@@ -82,6 +82,7 @@ import { CameraCapture } from '../shared/CameraCapture';
 import type { CapturedMedia } from '../shared/CameraCapture';
 import { SuppliersSheet } from './SuppliersSheet';
 import { JobPhotoGallery } from './JobPhotoGallery';
+import { JobFormsPanel } from './JobFormsPanel';
 import {
   uploadJobPhoto as uploadJobPhotoApi,
   listJobPhotos as listJobPhotosApi,
@@ -1173,6 +1174,8 @@ export function JobDetailView({
           />
         </div>
       </div>
+
+      <JobFormsPanel jobId={id} />
     </div>
   );
 
