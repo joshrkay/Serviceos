@@ -238,3 +238,30 @@ with write access via proposals.
 Two vulnerabilities to manage: the native-app gap (the PWA buys time, not
 parity) and the trust deficit of being new — which is why approval + undo +
 audit belongs front-and-center in marketing, not buried in docs.
+
+---
+
+## 6. Shipped since this analysis (Jobber-parity pass, 2026-06-28)
+
+Closing named Jobber gaps. Each landed full-stack with unit + Docker-gated
+integration tests and a production `tsc` build gate.
+
+- **Job Forms & Checklists** (was Tier 3 "custom forms builder", de-prioritized
+  in §2 — now built, not just canned checklists). Tenant-defined form/checklist
+  templates + per-job submissions that snapshot the template so a completed
+  record is immutable history. Backend: `packages/api/src/job-forms/`,
+  migration 221, `/api/job-forms`. Web: template builder in Settings →
+  AI & Automation → "Forms & checklists" (`JobFormTemplatesSheet`) + a
+  fill/complete panel on the job detail (`JobFormsPanel`).
+- **Installable PWA + offline app shell** (R4 — the native-mobile gap in §5
+  "Where Jobber still wins"). `packages/web/public/manifest.webmanifest` +
+  `sw.js` (network-first navigations → offline fallback; `/api` always
+  bypasses cache) + `src/pwa/register-sw.ts`. Buys time on native, not parity.
+- **Recurring jobs** (Jobber flagship for maintenance/cleaning/lawn shops;
+  previously only a `maintenance_contracts` record with a free-text cadence).
+  Pure recurrence engine (daily/weekly/biweekly/monthly, interval, count/until,
+  month-end clamping) + series CRUD + computed visit-date preview. Backend:
+  `packages/api/src/recurring-jobs/`, migration 222, `/api/recurring-jobs`.
+  Web: `RecurringJobsPanel` on the customer detail. **Follow-up:** auto-
+  materialize each occurrence into a job + appointment (worker), and surface
+  the upcoming series on the dispatch calendar.
