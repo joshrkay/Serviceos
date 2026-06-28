@@ -5530,6 +5530,53 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_recurring_job_occurrences ON recurring_job_occurrences
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  '224_create_job_custom_fields': `
+    -- J-CF (Jobber parity) — tenant-defined custom fields on jobs (the
+    -- job-scoped twin of customer custom fields, migration 187). Structured,
+    -- reportable attributes on the job record (PO #, permit #, gate code).
+    -- Read/written by src/jobs/pg-job-custom-field.ts. FORCE RLS on both tables.
+    -- field_type kept in lockstep with customerCustomFieldTypeSchema.
+    CREATE TABLE IF NOT EXISTS job_custom_field_defs (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      key TEXT NOT NULL,
+      label TEXT NOT NULL,
+      field_type TEXT NOT NULL DEFAULT 'text'
+        CHECK (field_type IN ('text', 'number', 'date', 'select')),
+      options JSONB NOT NULL DEFAULT '[]'::jsonb,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      is_archived BOOLEAN NOT NULL DEFAULT false,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    ALTER TABLE job_custom_field_defs
+      ADD CONSTRAINT job_custom_field_defs_key_unique UNIQUE (tenant_id, key);
+    CREATE INDEX IF NOT EXISTS idx_job_cfd_tenant ON job_custom_field_defs(tenant_id);
+    ALTER TABLE job_custom_field_defs ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE job_custom_field_defs FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_job_cfd ON job_custom_field_defs;
+    CREATE POLICY tenant_isolation_job_cfd ON job_custom_field_defs
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    CREATE TABLE IF NOT EXISTS job_custom_field_values (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      job_id UUID NOT NULL REFERENCES jobs(id),
+      field_def_id UUID NOT NULL REFERENCES job_custom_field_defs(id),
+      value TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    ALTER TABLE job_custom_field_values
+      ADD CONSTRAINT job_cfv_unique UNIQUE (tenant_id, job_id, field_def_id);
+    CREATE INDEX IF NOT EXISTS idx_job_cfv_job ON job_custom_field_values(tenant_id, job_id);
+    ALTER TABLE job_custom_field_values ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE job_custom_field_values FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_job_cfv ON job_custom_field_values;
+    CREATE POLICY tenant_isolation_job_cfv ON job_custom_field_values
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

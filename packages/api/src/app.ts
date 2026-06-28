@@ -190,6 +190,9 @@ import { createJobFormRouter } from './routes/job-forms';
 import { InMemoryRecurringJobRepository } from './recurring-jobs/recurring-job';
 import { PgRecurringJobRepository } from './recurring-jobs/pg-recurring-job';
 import { createRecurringJobRouter } from './routes/recurring-jobs';
+import { InMemoryJobCustomFieldRepository } from './jobs/job-custom-field';
+import { PgJobCustomFieldRepository } from './jobs/pg-job-custom-field';
+import { createJobCustomFieldRouter } from './routes/job-custom-fields';
 import { InMemoryLeadRepository } from './leads/lead';
 import { InMemoryLocationRepository } from './locations/location';
 import { InMemoryJobRepository } from './jobs/job';
@@ -944,6 +947,7 @@ export function createApp(): express.Express {
   const customerCustomFieldRepo = pool ? new PgCustomFieldRepository(pool) : new InMemoryCustomFieldRepository();
   const jobFormRepo = pool ? new PgJobFormRepository(pool) : new InMemoryJobFormRepository();
   const recurringJobRepo = pool ? new PgRecurringJobRepository(pool) : new InMemoryRecurringJobRepository();
+  const jobCustomFieldRepo = pool ? new PgJobCustomFieldRepository(pool) : new InMemoryJobCustomFieldRepository();
   // Story 4.6 — customer merge. Pg re-parents child rows + archives the loser
   // in one transaction; the no-DB dev path only archives (no child tables).
   const customerMergeRepo = pool
@@ -3489,6 +3493,7 @@ export function createApp(): express.Express {
     createCustomerCustomFieldRouter(customerCustomFieldRepo, auditRepo)
   );
   app.use('/api/job-forms', createJobFormRouter(jobFormRepo, auditRepo));
+  app.use('/api/job-custom-fields', createJobCustomFieldRouter(jobCustomFieldRepo, auditRepo));
   app.use(
     '/api/recurring-jobs',
     createRecurringJobRouter(recurringJobRepo, auditRepo, {

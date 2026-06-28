@@ -273,3 +273,10 @@ integration tests and a production `tsc` build gate.
   `POST /api/recurring-jobs/:id/generate` + a "Schedule visits" action on the
   panel. **Follow-up:** a scheduled worker to auto-run generation, and surface
   the upcoming series on the dispatch calendar.
+- **Job custom fields** (multi-entity custom fields — Jobber supports custom
+  fields on jobs/quotes/clients; we had clients only). Tenant-defined,
+  structured/reportable fields on the job record (PO #, permit #, gate code),
+  distinct from Job Forms (fillable per-visit checklists). Backend reuses the
+  generic field-type validators (`jobs/job-custom-field.ts`), migration 224,
+  `/api/job-custom-fields`. Web: values panel on the job detail +
+  definition manager in Settings → AI & Automation → "Job custom fields".
