@@ -406,6 +406,50 @@ describe('P0-024 — tenant-context middleware (withTenantTransaction)', () => {
     expect(connectCount).toBe(0);
   });
 
+  it('SSE skip (Codex P1) — Accept: text/event-stream holds no request transaction', async () => {
+    // A long-lived SSE stream must NOT pin a pooled connection / PgBouncer
+    // backend for its whole life. The middleware enforces tenant presence but
+    // skips the BEGIN..COMMIT transaction for `text/event-stream` requests.
+    const { pool, calls } = makeMockPool();
+    let sawTenant: string | undefined;
+    const app = buildApp(pool, (req, res) => {
+      sawTenant = req.auth?.tenantId;
+      res.json({ ok: true });
+    });
+
+    const response = await request(app)
+      .get('/protected/echo')
+      .set('x-test-tenant', TENANT_A)
+      .set('Accept', 'text/event-stream');
+
+    expect(response.status).toBe(200);
+    // Tenant is still enforced/available to the handler …
+    expect(sawTenant).toBe(TENANT_A);
+    // … but no connection was checked out and no BEGIN was issued.
+    const connectCount = (pool.connect as unknown as ReturnType<typeof vi.fn>).mock.calls
+      .length;
+    expect(connectCount).toBe(0);
+    expect(calls.some((c) => /^\s*BEGIN/i.test(c.sql))).toBe(false);
+  });
+
+  it('SSE skip is opt-in by Accept — a normal request still opens the transaction', async () => {
+    // Guard against over-broad skipping: without the event-stream Accept the
+    // request takes the normal transactional path (BEGIN issued).
+    const { pool, calls } = makeMockPool();
+    const app = buildApp(pool, (_req, res) => res.json({ ok: true }));
+
+    const response = await request(app)
+      .get('/protected/echo')
+      .set('x-test-tenant', TENANT_A)
+      .set('Accept', 'application/json');
+
+    expect(response.status).toBe(200);
+    const connectCount = (pool.connect as unknown as ReturnType<typeof vi.fn>).mock.calls
+      .length;
+    expect(connectCount).toBe(1);
+    expect(calls.some((c) => /^\s*BEGIN/i.test(c.sql))).toBe(true);
+  });
+
   it('rollback on response close before finish', async () => {
     // Simulate a client disconnect: emit `close` without `finish`.
     const { pool, calls } = makeMockPool();

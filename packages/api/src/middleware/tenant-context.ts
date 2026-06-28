@@ -72,6 +72,26 @@ export function withTenantTransaction(pool: Pool) {
       return;
     }
 
+    // SSE / long-lived streams: a `text/event-stream` response keeps the HTTP
+    // request open indefinitely (heartbeats), and `res.finish` — which commits
+    // and releases the transaction below — does not fire until the stream
+    // closes. Holding a BEGIN open that long pins one pooled connection, and
+    // under PgBouncer transaction pooling one Postgres server backend, for the
+    // entire stream; ~`default_pool_size` idle dashboards would exhaust the
+    // pool and stall normal /api requests. The streaming routes (dispatch
+    // board / escalation / voice-session event streams) only subscribe to
+    // in-process event buses and read `req.auth`, so they need no request
+    // transaction; any incidental DB read self-manages a short `withTenant`
+    // transaction (pooling-safe since U2b-2) using the tenantId its caller
+    // passes explicitly — the request store only supplies connection reuse,
+    // never the tenant scope. Enforce tenant presence (above) but skip the
+    // long-held transaction. The web SSE hooks all send
+    // `Accept: text/event-stream`. (Codex P1, PR #628.)
+    if ((req.headers?.accept ?? '').includes('text/event-stream')) {
+      next();
+      return;
+    }
+
     let client: PoolClient;
     try {
       client = await pool.connect();
