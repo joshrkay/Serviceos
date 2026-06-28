@@ -187,3 +187,31 @@ Code/config is in-repo; these are applied in the Railway account. Order matters 
 ### Boot env
 
 Every variable that throws at boot in production — the TIER 0 set (`DATABASE_URL`, `CLERK_SECRET_KEY`, `CLERK_PUBLISHABLE_KEY`, `CLERK_WEBHOOK_SECRET`, `CORS_ORIGIN`, Stripe) — is covered by `.env.production.example`. The scale-to-1000 vars (`REDIS_URL`, `DATABASE_DIRECT_URL`, `VOICE_FANOUT_ENABLED`, `DB_MAX_CONNECTIONS`, …) are safe to omit (single-instance / in-memory fallback). `deploy/docker-compose.prod.yml` wires the boot-fail secrets via `${VAR:?}` so a missing value fails fast.
+
+### Validated local multi-tenant run (Docker)
+
+The pooled topology was stood up end-to-end and exercised with concurrent
+multi-tenant logins on 2026-06-27 (Colima / Docker 29, Ubuntu 24.04 guest):
+
+```bash
+cp deploy/.env.example deploy/.env
+docker compose -f deploy/docker-compose.prod.yml \
+  -f deploy/docker-compose.dev-auth.yml --env-file deploy/.env up -d --build
+curl http://localhost:3000/health        # -> 200 {"status":"ok","checks":{"database":{"status":"ok"}}}
+```
+
+`deploy/docker-compose.dev-auth.yml` flips the api/migrate to
+`NODE_ENV=development` + `DEV_AUTH_BYPASS=true` so the stack boots without real
+Clerk/Stripe and accepts per-tenant dev tokens (the bypass decodes the JWT
+`sub` and bootstraps an RLS-scoped tenant per user), and exposes Postgres on
+`:5433` for host tooling.
+
+**Verified:**
+
+- All 6 services healthy; `migrate` exited 0 ("Migrations completed successfully") running DDL against the **direct** DSN (bypassing PgBouncer).
+- `/health` 200 (database ok) through the nginx LB → api → **PgBouncer :6432 (transaction pool)** → Postgres; Redis up.
+- 3 tenants logged in and created a customer **concurrently** (HTTP 201 each, distinct ids); 3 rows persisted.
+- **Tenant isolation: 9/9** — each tenant reads its own customer (200), every cross-tenant read is denied (404), and each list returns only the caller's rows. RLS holds under concurrency.
+
+This is a load-shape smoke test, not the full Phase 5 ramp/soak — for the
+1000-concurrent run see `docs/runbooks/phase5-validation-handoff.md`.
