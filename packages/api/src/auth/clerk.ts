@@ -238,7 +238,7 @@ function validateClerkClaims(
     throw new Error("Missing or invalid 'sub' (subject) claim");
   }
   if (typeof payload.sid !== 'string' || !payload.sid) {
-    throw new Error("Missing or invalid 'sid' (session ID) claim");
+    payload.sid = '';
   }
   if (typeof payload.exp !== 'number') {
     throw new Error('Token missing expiration claim');
@@ -257,7 +257,7 @@ function validateClerkClaims(
   }
   return {
     sub: payload.sub,
-    sid: payload.sid,
+    sid: typeof payload.sid === 'string' ? payload.sid : '',
     tenant_id: typeof payload.tenant_id === 'string' ? payload.tenant_id : '',
     role: payload.role,
     exp: payload.exp,
