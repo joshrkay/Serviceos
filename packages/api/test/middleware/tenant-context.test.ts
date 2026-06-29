@@ -406,21 +406,27 @@ describe('P0-024 — tenant-context middleware (withTenantTransaction)', () => {
     expect(connectCount).toBe(0);
   });
 
-  it('SSE skip (Codex P1) — Accept: text/event-stream holds no request transaction', async () => {
+  it('SSE bypass (Codex P1) — a known SSE GET route holds no request transaction', async () => {
     // A long-lived SSE stream must NOT pin a pooled connection / PgBouncer
-    // backend for its whole life. The middleware enforces tenant presence but
-    // skips the BEGIN..COMMIT transaction for `text/event-stream` requests.
+    // backend for its whole life; the middleware skips the BEGIN..COMMIT
+    // transaction for the explicit SSE route allowlist.
     const { pool, calls } = makeMockPool();
     let sawTenant: string | undefined;
-    const app = buildApp(pool, (req, res) => {
-      sawTenant = req.auth?.tenantId;
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: 'u1', sessionId: 's1', tenantId: TENANT_A, role: 'owner',
+      };
+      next();
+    });
+    app.use('/api', withTenantTransaction(pool));
+    app.get('/api/escalations/events', (req, res) => {
+      sawTenant = (req as AuthenticatedRequest).auth?.tenantId;
       res.json({ ok: true });
     });
 
-    const response = await request(app)
-      .get('/protected/echo')
-      .set('x-test-tenant', TENANT_A)
-      .set('Accept', 'text/event-stream');
+    const response = await request(app).get('/api/escalations/events');
 
     expect(response.status).toBe(200);
     // Tenant is still enforced/available to the handler …
@@ -432,18 +438,30 @@ describe('P0-024 — tenant-context middleware (withTenantTransaction)', () => {
     expect(calls.some((c) => /^\s*BEGIN/i.test(c.sql))).toBe(false);
   });
 
-  it('SSE skip is opt-in by Accept — a normal request still opens the transaction', async () => {
-    // Guard against over-broad skipping: without the event-stream Accept the
-    // request takes the normal transactional path (BEGIN issued).
+  it('SSE bypass is route-restricted (Codex P2) — a mutating route with Accept: text/event-stream still opens the transaction', async () => {
+    // The bypass must be keyed off the route allowlist, NOT the client-supplied
+    // Accept header — otherwise any caller could send `text/event-stream` to a
+    // mutating route and skip the request transaction, losing multi-write
+    // atomicity (e.g. job + audit committing separately).
     const { pool, calls } = makeMockPool();
-    const app = buildApp(pool, (_req, res) => res.json({ ok: true }));
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: 'u1', sessionId: 's1', tenantId: TENANT_A, role: 'owner',
+      };
+      next();
+    });
+    app.use('/api', withTenantTransaction(pool));
+    app.post('/api/jobs', (_req, res) => res.json({ created: true }));
 
     const response = await request(app)
-      .get('/protected/echo')
-      .set('x-test-tenant', TENANT_A)
-      .set('Accept', 'application/json');
+      .post('/api/jobs')
+      .set('Accept', 'text/event-stream')
+      .send({ title: 'x' });
 
     expect(response.status).toBe(200);
+    // Transaction was NOT skipped: one checkout + a BEGIN.
     const connectCount = (pool.connect as unknown as ReturnType<typeof vi.fn>).mock.calls
       .length;
     expect(connectCount).toBe(1);
