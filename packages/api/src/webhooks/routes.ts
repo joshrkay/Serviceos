@@ -629,7 +629,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                   'Content-Type': 'application/json',
                 },
                 body: JSON.stringify({
-                  public_metadata: { tenant_id: result.tenantId },
+                  public_metadata: { tenant_id: result.tenantId, role: 'owner' },
                 }),
               });
               if (!clerkRes.ok) {
