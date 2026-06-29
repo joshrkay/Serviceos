@@ -279,6 +279,20 @@ describe('job forms & checklists (J-FORM) — pure domain', () => {
     ).rejects.toThrow(/not found/);
   });
 
+  it('rejects a new submission against an archived template', async () => {
+    const tpl = await createJobFormTemplate(
+      { tenantId: TENANT, name: 'Retired', fields: [{ label: 'A' }], createdBy: ACTOR },
+      repo
+    );
+    await archiveJobFormTemplate(TENANT, tpl.id, repo, ACTOR);
+    await expect(
+      createJobFormSubmission(
+        { tenantId: TENANT, jobId: JOB, templateId: tpl.id, createdBy: ACTOR },
+        repo
+      )
+    ).rejects.toThrow(/archived/);
+  });
+
   it('isolates templates and submissions by tenant', async () => {
     const tpl = await createJobFormTemplate(
       { tenantId: TENANT, name: 'T', fields: [{ label: 'A' }], createdBy: ACTOR },

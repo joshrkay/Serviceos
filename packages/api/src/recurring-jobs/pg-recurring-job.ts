@@ -183,6 +183,18 @@ export class PgRecurringJobRepository extends PgBaseRepository implements Recurr
     });
   }
 
+  async releaseOccurrence(tenantId: string, ledgerId: string): Promise<void> {
+    await this.withTenant(tenantId, async (client) => {
+      // Guard on job_id IS NULL so a successfully-linked visit can never be
+      // deleted — only an orphaned claim from a failed run is released.
+      await client.query(
+        `DELETE FROM recurring_job_occurrences
+         WHERE tenant_id = $1 AND id = $2 AND job_id IS NULL`,
+        [tenantId, ledgerId]
+      );
+    });
+  }
+
   async listMaterializedDates(tenantId: string, recurringJobId: string): Promise<string[]> {
     return this.withTenant(tenantId, async (client) => {
       const result = await client.query(

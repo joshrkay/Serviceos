@@ -3,7 +3,7 @@ import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { AppointmentRepository, createAppointment } from '../appointments/appointment';
 import { JobRepository, createJob } from '../jobs/job';
 import { LocationRepository } from '../locations/location';
-import { computeOccurrences } from './recurrence';
+import { RecurrenceRule, computeOccurrences } from './recurrence';
 import { RecurringJob, RecurringJobRepository, isValidTimeOfDay } from './recurring-job';
 
 /**
@@ -96,8 +96,21 @@ export function dueOccurrenceDates(
   const horizonEnd = addDays(opts.today, opts.horizonDays);
   const done = new Set(opts.materialized);
   // Generate from the anchor up to the horizon, then keep only the window we
-  // actually materialize (today..horizonEnd) that isn't already done.
-  const all = computeOccurrences(job.anchorDate, { ...job.rule, until: horizonEnd }, 5000);
+  // actually materialize (today..horizonEnd) that isn't already done. We must
+  // honor the series' own bound (count OR until — never both, which
+  // computeOccurrences rejects) rather than overwriting it: for a count rule,
+  // count caps the total occurrences and the window filter below trims to
+  // [today, horizonEnd]; for an until rule (or none), clamp the upper edge to
+  // the earlier of the user's `until` and the horizon so we never schedule past
+  // the series' end date.
+  const ruleForWindow: RecurrenceRule =
+    job.rule.count !== undefined
+      ? job.rule
+      : {
+          ...job.rule,
+          until: job.rule.until && job.rule.until < horizonEnd ? job.rule.until : horizonEnd,
+        };
+  const all = computeOccurrences(job.anchorDate, ruleForWindow, 5000);
   return all.filter((d) => d >= opts.today && d <= horizonEnd && !done.has(d));
 }
 
@@ -125,59 +138,67 @@ export async function materializeRecurringJob(
     const ledgerId = await deps.recurringJobRepo.claimOccurrence(job.tenantId, job.id, date);
     if (!ledgerId) continue; // already claimed elsewhere
 
-    const createdJob = await createJob(
-      {
-        tenantId: job.tenantId,
-        customerId: job.customerId,
-        locationId: location.id,
-        summary: job.title,
-        priority: 'normal',
-        createdBy: actorId,
-        actorRole: 'system',
-      },
-      deps.jobRepo,
-      deps.auditRepo
-    );
-
-    const { start, end } = visitWindowUtc(date, job.anchorTime, job.durationMinutes, opts.timezone);
-    const appointment = await createAppointment(
-      {
-        tenantId: job.tenantId,
-        jobId: createdJob.id,
-        scheduledStart: start,
-        scheduledEnd: end,
-        timezone: opts.timezone,
-        appointmentType: job.appointmentType ?? undefined,
-        notes: job.notes ?? undefined,
-        createdBy: actorId,
-      },
-      deps.appointmentRepo,
-      undefined,
-      deps.auditRepo,
-      'system'
-    );
-
-    await deps.recurringJobRepo.linkOccurrence(job.tenantId, ledgerId, createdJob.id, appointment.id);
-
-    if (deps.auditRepo) {
-      await deps.auditRepo.create(
-        createAuditEvent({
+    // If anything below throws, release the claim so the ledger doesn't mark
+    // this date materialized — otherwise the failed occurrence would be skipped
+    // forever and that scheduled visit would silently never exist.
+    try {
+      const createdJob = await createJob(
+        {
           tenantId: job.tenantId,
-          actorId,
+          customerId: job.customerId,
+          locationId: location.id,
+          summary: job.title,
+          priority: 'normal',
+          createdBy: actorId,
           actorRole: 'system',
-          eventType: 'recurring_job.visit_generated',
-          entityType: 'recurring_job',
-          entityId: job.id,
-          metadata: {
-            occurrenceDate: date,
-            jobId: createdJob.id,
-            appointmentId: appointment.id,
-          },
-        })
+        },
+        deps.jobRepo,
+        deps.auditRepo
       );
-    }
 
-    generated.push({ occurrenceDate: date, jobId: createdJob.id, appointmentId: appointment.id });
+      const { start, end } = visitWindowUtc(date, job.anchorTime, job.durationMinutes, opts.timezone);
+      const appointment = await createAppointment(
+        {
+          tenantId: job.tenantId,
+          jobId: createdJob.id,
+          scheduledStart: start,
+          scheduledEnd: end,
+          timezone: opts.timezone,
+          appointmentType: job.appointmentType ?? undefined,
+          notes: job.notes ?? undefined,
+          createdBy: actorId,
+        },
+        deps.appointmentRepo,
+        undefined,
+        deps.auditRepo,
+        'system'
+      );
+
+      await deps.recurringJobRepo.linkOccurrence(job.tenantId, ledgerId, createdJob.id, appointment.id);
+
+      if (deps.auditRepo) {
+        await deps.auditRepo.create(
+          createAuditEvent({
+            tenantId: job.tenantId,
+            actorId,
+            actorRole: 'system',
+            eventType: 'recurring_job.visit_generated',
+            entityType: 'recurring_job',
+            entityId: job.id,
+            metadata: {
+              occurrenceDate: date,
+              jobId: createdJob.id,
+              appointmentId: appointment.id,
+            },
+          })
+        );
+      }
+
+      generated.push({ occurrenceDate: date, jobId: createdJob.id, appointmentId: appointment.id });
+    } catch (err) {
+      await deps.recurringJobRepo.releaseOccurrence(job.tenantId, ledgerId);
+      throw err;
+    }
   }
 
   return { generated };

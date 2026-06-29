@@ -406,6 +406,12 @@ export async function createJobFormSubmission(
 ): Promise<JobFormSubmission> {
   const template = await repository.findTemplateById(input.tenantId, input.templateId);
   if (!template) throw new NotFoundError('Job form template', input.templateId);
+  // Archiving a template stops future use while preserving existing submission
+  // history; a stale tab or direct API call must not snapshot an archived
+  // template into a brand-new submission.
+  if (template.isArchived) {
+    throw new ConflictError('This form template has been archived and can no longer be used for new submissions');
+  }
 
   const answers = normalizeAnswers(input.answers ?? []);
   const requireComplete = input.complete === true;

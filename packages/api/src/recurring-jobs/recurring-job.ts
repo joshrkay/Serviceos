@@ -99,6 +99,13 @@ export interface RecurringJobRepository {
   claimOccurrence(tenantId: string, recurringJobId: string, occurrenceDate: string): Promise<string | null>;
   /** Link a claimed ledger row to the job + appointment it produced. */
   linkOccurrence(tenantId: string, ledgerId: string, jobId: string, appointmentId: string): Promise<void>;
+  /**
+   * Release a claimed-but-unlinked ledger row (delete it) so a later run can
+   * retry that occurrence. Called when visit creation fails after the claim, so
+   * a transient error doesn't permanently mark the date materialized and skip
+   * it forever. Never deletes a row that already produced a visit (job_id set).
+   */
+  releaseOccurrence(tenantId: string, ledgerId: string): Promise<void>;
   /** Occurrence dates already materialized for a series (for preview/skip). */
   listMaterializedDates(tenantId: string, recurringJobId: string): Promise<string[]>;
 }
@@ -366,6 +373,12 @@ export class InMemoryRecurringJobRepository implements RecurringJobRepository {
       row.jobId = jobId;
       row.appointmentId = appointmentId;
     }
+  }
+
+  async releaseOccurrence(tenantId: string, ledgerId: string): Promise<void> {
+    this.occurrences = this.occurrences.filter(
+      (o) => !(o.id === ledgerId && o.tenantId === tenantId && o.jobId === null)
+    );
   }
 
   async listMaterializedDates(tenantId: string, recurringJobId: string): Promise<string[]> {

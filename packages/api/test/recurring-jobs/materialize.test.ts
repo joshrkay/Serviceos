@@ -81,6 +81,24 @@ describe('dueOccurrenceDates (R-JOB)', () => {
       dueOccurrenceDates(job, { today: '2026-06-10', horizonDays: 14, materialized: [] }),
     ).toEqual(['2026-06-15', '2026-06-22']);
   });
+
+  it('honors a count-bounded rule without throwing (no count+until clash)', () => {
+    const counted = { anchorDate: '2026-06-01', rule: { frequency: 'weekly' as const, interval: 1, count: 3 } };
+    // Horizon spans well past the 3rd occurrence; count must cap the total.
+    expect(
+      dueOccurrenceDates(counted, { today: '2026-06-01', horizonDays: 90, materialized: [] }),
+    ).toEqual(['2026-06-01', '2026-06-08', '2026-06-15']);
+  });
+
+  it('does not generate past an until-bounded rule even when the horizon is longer', () => {
+    const bounded = {
+      anchorDate: '2026-06-01',
+      rule: { frequency: 'weekly' as const, interval: 1, until: '2026-06-10' },
+    };
+    expect(
+      dueOccurrenceDates(bounded, { today: '2026-06-01', horizonDays: 90, materialized: [] }),
+    ).toEqual(['2026-06-01', '2026-06-08']);
+  });
 });
 
 describe('materializeRecurringJob (R-JOB)', () => {
@@ -180,6 +198,29 @@ describe('materializeRecurringJob (R-JOB)', () => {
     );
     expect(result.generated).toHaveLength(0);
     expect(result.skippedReason).toBe('no_location');
+  });
+
+  it('releases the claim when visit creation fails, so a retry regenerates it', async () => {
+    const job = await series();
+    const opts = { today: '2026-06-01', horizonDays: 1, timezone: 'America/New_York', actorId: ACTOR };
+    // Force the appointment write to fail after the occurrence has been claimed.
+    const realCreate = appointmentRepo.create.bind(appointmentRepo);
+    let shouldFail = true;
+    appointmentRepo.create = async (appt) => {
+      if (shouldFail) throw new Error('db down');
+      return realCreate(appt);
+    };
+
+    await expect(materializeRecurringJob(job, opts, deps())).rejects.toThrow(/db down/);
+    // The failed occurrence must NOT be marked materialized — otherwise it would
+    // be skipped forever and that visit would silently never exist.
+    expect(await recurringJobRepo.listMaterializedDates(TENANT, job.id)).toHaveLength(0);
+
+    // A later run (write now succeeds) regenerates the released occurrence.
+    shouldFail = false;
+    const retry = await materializeRecurringJob(job, opts, deps());
+    expect(retry.generated.map((g) => g.occurrenceDate)).toEqual(['2026-06-01']);
+    expect(await recurringJobRepo.listMaterializedDates(TENANT, job.id)).toEqual(['2026-06-01']);
   });
 
   it('emits a visit_generated audit event per occurrence', async () => {
