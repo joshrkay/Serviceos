@@ -20,6 +20,7 @@ import { TerminologySheet } from './TerminologySheet';
 import { JobFormTemplatesSheet } from './JobFormTemplatesSheet';
 import { JobCustomFieldsSheet } from './JobCustomFieldsSheet';
 import { MarketingCampaignsSheet } from './MarketingCampaignsSheet';
+import { CustomerGroupsSheet } from './CustomerGroupsSheet';
 import { AIApprovalRulesSheet } from './AIApprovalRulesSheet';
 import { DepositRulesSheet } from './DepositRulesSheet';
 import { DiscountPolicySheet } from './DiscountPolicySheet';
@@ -188,6 +189,7 @@ export function SettingsPage() {
   const [jobFormsOpen, setJobFormsOpen] = useState(false);
   const [jobCustomFieldsOpen, setJobCustomFieldsOpen] = useState(false);
   const [marketingOpen, setMarketingOpen] = useState(false);
+  const [customerGroupsOpen, setCustomerGroupsOpen] = useState(false);
   const [aiRulesOpen, setAiRulesOpen] = useState(false);
   const [depositRulesOpen, setDepositRulesOpen] = useState(false);
   const [discountPolicyOpen, setDiscountPolicyOpen] = useState(false);
@@ -369,6 +371,7 @@ export function SettingsPage() {
         { icon: Phone,     label: 'On-call phone',       description: 'The number escalations ring when you are on call',     action: () => setTechnicianPhoneOpen(true) },
         { icon: Globe,     label: 'Language & region',   description: 'English / Español · Voice + customer messages', action: () => navigate('/settings/language') },
         { icon: FileText,  label: 'Terminology',         description: 'Customize labels (e.g. "Quote" vs "Estimate")',    action: () => setTerminologyOpen(true) },
+        { icon: Users,     label: 'Customer groups',     description: 'Named segments you can target with campaigns',     action: () => setCustomerGroupsOpen(true) },
         { icon: BookOpen,  label: 'Price book',          description: 'Services, parts & materials with set prices',          action: () => navigate('/settings/price-book') },
         { icon: Zap,       label: 'Vertical packs',      description: 'Activate HVAC, Plumbing, or other service verticals',  action: () => setVerticalPacksOpen(true) },
       ],
@@ -885,6 +888,9 @@ export function SettingsPage() {
       )}
       {marketingOpen && (
         <MarketingCampaignsSheet onClose={() => setMarketingOpen(false)} />
+      )}
+      {customerGroupsOpen && (
+        <CustomerGroupsSheet onClose={() => setCustomerGroupsOpen(false)} />
       )}
       {terminologyOpen && (
         <TerminologySheet onClose={() => setTerminologyOpen(false)} />

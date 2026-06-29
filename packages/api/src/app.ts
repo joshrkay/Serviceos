@@ -200,6 +200,9 @@ import { createFinancingRouter, createFinancingWebhookRouter } from './routes/fi
 import { InMemoryCampaignRepository } from './marketing/campaign';
 import { PgCampaignRepository } from './marketing/pg-campaign';
 import { createMarketingRouter } from './routes/marketing';
+import { InMemoryCustomerGroupRepository } from './customers/customer-group';
+import { PgCustomerGroupRepository } from './customers/pg-customer-group';
+import { createCustomerGroupRouter } from './routes/customer-groups';
 import { InMemoryLeadRepository } from './leads/lead';
 import { InMemoryLocationRepository } from './locations/location';
 import { InMemoryJobRepository } from './jobs/job';
@@ -963,6 +966,7 @@ export function createApp(): express.Express {
   const financingRepo = pool ? new PgFinancingRepository(pool) : new InMemoryFinancingRepository();
   const financingProvider = createFinancingProvider();
   const campaignRepo = pool ? new PgCampaignRepository(pool) : new InMemoryCampaignRepository();
+  const customerGroupRepo = pool ? new PgCustomerGroupRepository(pool) : new InMemoryCustomerGroupRepository();
   // Story 4.6 — customer merge. Pg re-parents child rows + archives the loser
   // in one transaction; the no-DB dev path only archives (no child tables).
   const customerMergeRepo = pool
@@ -3509,6 +3513,7 @@ export function createApp(): express.Express {
   );
   app.use('/api/job-forms', createJobFormRouter(jobFormRepo, auditRepo));
   app.use('/api/job-custom-fields', createJobCustomFieldRouter(jobCustomFieldRepo, auditRepo));
+  app.use('/api/customer-groups', createCustomerGroupRouter(customerGroupRepo, auditRepo));
   app.use(
     '/api/marketing',
     createMarketingRouter({
@@ -3516,6 +3521,7 @@ export function createApp(): express.Express {
       customerRepo,
       tagRepo: customerTagRepo,
       delivery: messageDelivery,
+      groupMemberIds: (tid, gid) => customerGroupRepo.listMemberIds(tid, gid),
       auditRepo,
     })
   );

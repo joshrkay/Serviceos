@@ -5637,6 +5637,63 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_marketing_campaigns ON marketing_campaigns
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  '227_create_customer_groups': `
+    -- U8 (CRM Jobber parity) — customer groups / segmentation. A first-class,
+    -- named segment with explicit membership (distinct from free-form
+    -- customer_tags). Read/written by src/customers/pg-customer-group.ts.
+    -- Both tables tenant-scoped with FORCE RLS.
+    CREATE TABLE IF NOT EXISTS customer_groups (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      name TEXT NOT NULL,
+      description TEXT,
+      color TEXT,
+      is_archived BOOLEAN NOT NULL DEFAULT false,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    -- Case-insensitive, partial unique: names are unique among ACTIVE groups
+    -- only, so archiving a group frees its name for reuse (matches the app-level
+    -- dedup in createCustomerGroup, which intentionally ignores archived rows).
+    -- LOWER() keeps it in lockstep with findGroupByName's case-insensitive match.
+    CREATE UNIQUE INDEX IF NOT EXISTS customer_groups_name_unique
+      ON customer_groups (tenant_id, LOWER(name)) WHERE is_archived = false;
+    CREATE INDEX IF NOT EXISTS idx_customer_groups_tenant ON customer_groups(tenant_id);
+    ALTER TABLE customer_groups ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE customer_groups FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_customer_groups ON customer_groups;
+    CREATE POLICY tenant_isolation_customer_groups ON customer_groups
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    -- Membership join: one row per (group, customer), idempotent via the
+    -- unique constraint (addMember does ON CONFLICT DO NOTHING).
+    CREATE TABLE IF NOT EXISTS customer_group_members (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      group_id UUID NOT NULL REFERENCES customer_groups(id),
+      customer_id UUID NOT NULL REFERENCES customers(id),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    ALTER TABLE customer_group_members
+      ADD CONSTRAINT customer_group_members_unique UNIQUE (tenant_id, group_id, customer_id);
+    CREATE INDEX IF NOT EXISTS idx_customer_group_members_group
+      ON customer_group_members(tenant_id, group_id);
+    CREATE INDEX IF NOT EXISTS idx_customer_group_members_customer
+      ON customer_group_members(tenant_id, customer_id);
+    ALTER TABLE customer_group_members ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE customer_group_members FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_customer_group_members ON customer_group_members;
+    CREATE POLICY tenant_isolation_customer_group_members ON customer_group_members
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '228_marketing_campaign_segment_group': `
+    -- U8 / MKT — let an email campaign target a customer group (in addition to
+    -- a tag). Nullable; null preserves the existing all-customers / tag behavior.
+    ALTER TABLE marketing_campaigns
+      ADD COLUMN IF NOT EXISTS segment_group_id UUID REFERENCES customer_groups(id);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

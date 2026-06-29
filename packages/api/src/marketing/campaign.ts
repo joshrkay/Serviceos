@@ -25,6 +25,8 @@ export interface Campaign {
   bodyHtml: string | null;
   /** null = all active customers; otherwise customers carrying this tag. */
   segmentTag: string | null;
+  /** Target a named customer group instead of a tag (takes precedence). */
+  segmentGroupId: string | null;
   status: CampaignStatus;
   recipientCount: number;
   sentCount: number;
@@ -42,6 +44,7 @@ export interface CreateCampaignInput {
   bodyText: string;
   bodyHtml?: string | null;
   segmentTag?: string | null;
+  segmentGroupId?: string | null;
   createdBy: string;
   actorRole?: string;
 }
@@ -114,6 +117,7 @@ export async function createCampaign(
     bodyText: input.bodyText,
     bodyHtml: input.bodyHtml?.trim() || null,
     segmentTag: input.segmentTag?.trim() || null,
+    segmentGroupId: input.segmentGroupId?.trim() || null,
     status: 'draft',
     recipientCount: 0,
     sentCount: 0,
@@ -146,6 +150,8 @@ export interface SendCampaignDeps {
   customerRepo: CustomerRepository;
   tagRepo: TagRepository;
   delivery: MessageDeliveryProvider;
+  /** Resolve a customer group's member ids — required to send group-targeted campaigns. */
+  groupMemberIds?: (tenantId: string, groupId: string) => Promise<string[]>;
   auditRepo?: AuditRepository;
 }
 
@@ -166,10 +172,15 @@ export async function sendCampaign(
   if (campaign.status === 'sent') return campaign;
 
   const customers = await deps.customerRepo.findByTenant(tenantId);
-  const tagMembers = campaign.segmentTag
-    ? new Set(await deps.tagRepo.listCustomerIdsByTag(tenantId, campaign.segmentTag))
-    : null;
-  const recipients = resolveRecipients(customers, tagMembers);
+  // A group segment takes precedence over a tag segment; null = all customers.
+  let memberIds: Set<string> | null = null;
+  if (campaign.segmentGroupId) {
+    if (!deps.groupMemberIds) throw new Error('Group targeting is not available');
+    memberIds = new Set(await deps.groupMemberIds(tenantId, campaign.segmentGroupId));
+  } else if (campaign.segmentTag) {
+    memberIds = new Set(await deps.tagRepo.listCustomerIdsByTag(tenantId, campaign.segmentTag));
+  }
+  const recipients = resolveRecipients(customers, memberIds);
 
   let sent = 0;
   let failed = 0;

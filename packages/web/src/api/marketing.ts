@@ -15,6 +15,7 @@ export interface Campaign {
   bodyText: string;
   bodyHtml: string | null;
   segmentTag: string | null;
+  segmentGroupId: string | null;
   status: CampaignStatus;
   recipientCount: number;
   sentCount: number;
@@ -30,6 +31,7 @@ export interface CampaignInput {
   bodyText: string;
   bodyHtml?: string | null;
   segmentTag?: string | null;
+  segmentGroupId?: string | null;
 }
 
 async function readJsonOrThrow<T>(res: Response, action: string): Promise<T> {

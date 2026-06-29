@@ -565,14 +565,36 @@ export const updateJobFormSubmissionSchema = z.object({
   complete: z.boolean().optional(),
 });
 
-// MKT (Jobber parity) — customer email campaigns.
-export const createCampaignSchema = z.object({
-  name: z.string().min(1).max(200),
-  subject: z.string().min(1).max(300),
-  bodyText: z.string().min(1).max(20000),
-  bodyHtml: z.string().max(50000).nullable().optional(),
-  segmentTag: z.string().min(1).max(50).nullable().optional(),
+// U8 (CRM Jobber parity) — customer groups / segmentation.
+const hexColor = z.string().regex(/^#[0-9a-fA-F]{6}$/, 'color must be a hex value like #3b82f6');
+
+export const createCustomerGroupSchema = z.object({
+  name: z.string().min(1).max(100),
+  description: z.string().max(2000).nullable().optional(),
+  color: hexColor.nullable().optional(),
 });
+
+export const updateCustomerGroupSchema = z
+  .object({
+    name: z.string().min(1).max(100).optional(),
+    description: z.string().max(2000).nullable().optional(),
+    color: hexColor.nullable().optional(),
+  })
+  .refine((v) => Object.keys(v).length > 0, { message: 'no fields to update' });
+
+// MKT (Jobber parity) — customer email campaigns.
+export const createCampaignSchema = z
+  .object({
+    name: z.string().min(1).max(200),
+    subject: z.string().min(1).max(300),
+    bodyText: z.string().min(1).max(20000),
+    bodyHtml: z.string().max(50000).nullable().optional(),
+    segmentTag: z.string().min(1).max(50).nullable().optional(),
+    segmentGroupId: z.string().uuid().nullable().optional(),
+  })
+  .refine((v) => !(v.segmentTag && v.segmentGroupId), {
+    message: 'target a tag or a group, not both',
+  });
 
 // FIN (Jobber parity) — consumer financing on invoices.
 export const offerFinancingSchema = z.object({

@@ -131,6 +131,20 @@ describe('marketing campaigns (MKT) — orchestration', () => {
     expect(sendEmail).toHaveBeenCalledWith(expect.objectContaining({ to: 'b@x.com', subject: 'Hi' }));
   });
 
+  it('targets a customer group via the group-member resolver', async () => {
+    await customerRepo.create(customer({ id: 'a', email: 'a@x.com' }));
+    await customerRepo.create(customer({ id: 'b', email: 'b@x.com' }));
+    const groupMemberIds = vi.fn().mockResolvedValue(['a']);
+    const c = await createCampaign(
+      { tenantId: TENANT, name: 'Grp', subject: 'Hi', bodyText: 'Body', segmentGroupId: 'g1', createdBy: ACTOR },
+      campaignRepo,
+    );
+    const sent = await sendCampaign(TENANT, c.id, { ...deps(), groupMemberIds }, ACTOR);
+    expect(groupMemberIds).toHaveBeenCalledWith(TENANT, 'g1');
+    expect(sent.recipientCount).toBe(1);
+    expect(sendEmail).toHaveBeenCalledWith(expect.objectContaining({ to: 'a@x.com' }));
+  });
+
   it('counts per-recipient failures without aborting', async () => {
     await customerRepo.create(customer({ id: 'a', email: 'a@x.com' }));
     await customerRepo.create(customer({ id: 'b', email: 'b@x.com' }));

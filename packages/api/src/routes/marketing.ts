@@ -19,6 +19,8 @@ export interface MarketingRouterDeps {
   tagRepo: TagRepository;
   /** Null when no delivery provider is configured — send returns 503. */
   delivery: MessageDeliveryProvider | null;
+  /** Resolve a customer group's member ids (for group-targeted campaigns). */
+  groupMemberIds: (tenantId: string, groupId: string) => Promise<string[]>;
   auditRepo: AuditRepository;
 }
 
@@ -81,6 +83,7 @@ export function createMarketingRouter(deps: MarketingRouterDeps): Router {
           customerRepo: deps.customerRepo,
           tagRepo: deps.tagRepo,
           delivery: deps.delivery,
+          groupMemberIds: deps.groupMemberIds,
           auditRepo: deps.auditRepo,
         },
         req.auth!.userId

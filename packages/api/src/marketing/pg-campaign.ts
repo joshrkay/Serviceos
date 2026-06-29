@@ -17,6 +17,7 @@ function mapRow(row: Record<string, unknown>): Campaign {
     bodyText: row.body_text as string,
     bodyHtml: (row.body_html as string | null) ?? null,
     segmentTag: (row.segment_tag as string | null) ?? null,
+    segmentGroupId: (row.segment_group_id as string | null) ?? null,
     status: row.status as CampaignStatus,
     recipientCount: Number(row.recipient_count),
     sentCount: Number(row.sent_count),
@@ -38,9 +39,9 @@ export class PgCampaignRepository extends PgBaseRepository implements CampaignRe
       const result = await client.query(
         `INSERT INTO marketing_campaigns (
           id, tenant_id, name, subject, body_text, body_html, segment_tag,
-          status, recipient_count, sent_count, failed_count, created_by,
-          sent_at, created_at, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+          segment_group_id, status, recipient_count, sent_count, failed_count,
+          created_by, sent_at, created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
         RETURNING *`,
         [
           campaign.id,
@@ -50,6 +51,7 @@ export class PgCampaignRepository extends PgBaseRepository implements CampaignRe
           campaign.bodyText,
           campaign.bodyHtml,
           campaign.segmentTag,
+          campaign.segmentGroupId,
           campaign.status,
           campaign.recipientCount,
           campaign.sentCount,
@@ -89,8 +91,8 @@ export class PgCampaignRepository extends PgBaseRepository implements CampaignRe
       const result = await client.query(
         `UPDATE marketing_campaigns
          SET name = $3, subject = $4, body_text = $5, body_html = $6, segment_tag = $7,
-             status = $8, recipient_count = $9, sent_count = $10, failed_count = $11,
-             sent_at = $12, updated_at = $13
+             segment_group_id = $8, status = $9, recipient_count = $10, sent_count = $11,
+             failed_count = $12, sent_at = $13, updated_at = $14
          WHERE tenant_id = $1 AND id = $2
          RETURNING *`,
         [
@@ -101,6 +103,7 @@ export class PgCampaignRepository extends PgBaseRepository implements CampaignRe
           campaign.bodyText,
           campaign.bodyHtml,
           campaign.segmentTag,
+          campaign.segmentGroupId,
           campaign.status,
           campaign.recipientCount,
           campaign.sentCount,

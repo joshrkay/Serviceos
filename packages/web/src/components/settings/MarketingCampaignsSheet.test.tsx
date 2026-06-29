@@ -15,6 +15,7 @@ const campaign = (over: Partial<Campaign> = {}): Campaign => ({
   bodyText: 'Book now',
   bodyHtml: null,
   segmentTag: null,
+  segmentGroupId: null,
   status: 'draft',
   recipientCount: 0,
   sentCount: 0,
@@ -30,6 +31,7 @@ function mockApi(over: Partial<MarketingCampaignsSheetApi> = {}): MarketingCampa
     list: vi.fn().mockResolvedValue([]),
     create: vi.fn().mockResolvedValue(campaign()),
     send: vi.fn().mockResolvedValue(campaign({ status: 'sent', sentCount: 3 })),
+    listGroups: vi.fn().mockResolvedValue([]),
     ...over,
   };
 }
@@ -63,7 +65,41 @@ describe('MarketingCampaignsSheet (MKT)', () => {
         name: 'Summer',
         subject: 'Hot deals',
         bodyText: 'Body copy',
+        segmentGroupId: null,
         segmentTag: 'vip',
+      }),
+    );
+  });
+
+  it('targets a customer group (group takes precedence over tag)', async () => {
+    const api = mockApi({
+      listGroups: vi.fn().mockResolvedValue([
+        {
+          id: 'g1',
+          tenantId: 'tn',
+          name: 'VIP',
+          description: null,
+          color: null,
+          isArchived: false,
+          memberCount: 4,
+          createdAt: '2026-01-01T00:00:00Z',
+          updatedAt: '2026-01-01T00:00:00Z',
+        },
+      ]),
+    });
+    render(<MarketingCampaignsSheet onClose={() => {}} api={api} />);
+    fireEvent.change(await screen.findByLabelText('Campaign name'), { target: { value: 'Grp' } });
+    fireEvent.change(screen.getByLabelText('Email subject'), { target: { value: 'Hi' } });
+    fireEvent.change(screen.getByLabelText('Message'), { target: { value: 'Body' } });
+    fireEvent.change(screen.getByLabelText('Target group'), { target: { value: 'g1' } });
+    fireEvent.click(screen.getByText('Create campaign'));
+    await waitFor(() =>
+      expect(api.create).toHaveBeenCalledWith({
+        name: 'Grp',
+        subject: 'Hi',
+        bodyText: 'Body',
+        segmentGroupId: 'g1',
+        segmentTag: null,
       }),
     );
   });

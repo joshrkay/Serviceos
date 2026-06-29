@@ -8,21 +8,31 @@
 import { useCallback, useEffect, useState } from 'react';
 import { X, Megaphone, Send } from 'lucide-react';
 import { toast } from 'sonner';
-import { Input, Textarea } from '../ui';
+import { Input, Select, Textarea } from '../ui';
 import {
   type Campaign,
   createCampaign as createApi,
   listCampaigns as listApi,
   sendCampaign as sendApi,
 } from '../../api/marketing';
+import {
+  type CustomerGroupWithCount,
+  listCustomerGroups as listGroupsApi,
+} from '../../api/customer-groups';
 
 export interface MarketingCampaignsSheetApi {
   list: typeof listApi;
   create: typeof createApi;
   send: typeof sendApi;
+  listGroups: typeof listGroupsApi;
 }
 
-const DEFAULT_API: MarketingCampaignsSheetApi = { list: listApi, create: createApi, send: sendApi };
+const DEFAULT_API: MarketingCampaignsSheetApi = {
+  list: listApi,
+  create: createApi,
+  send: sendApi,
+  listGroups: listGroupsApi,
+};
 
 export function MarketingCampaignsSheet({
   onClose,
@@ -36,13 +46,17 @@ export function MarketingCampaignsSheet({
   const [subject, setSubject] = useState('');
   const [body, setBody] = useState('');
   const [segmentTag, setSegmentTag] = useState('');
+  const [segmentGroupId, setSegmentGroupId] = useState('');
+  const [groups, setGroups] = useState<CustomerGroupWithCount[]>([]);
   const [saving, setSaving] = useState(false);
   const [sendingId, setSendingId] = useState<string | null>(null);
   const [error, setError] = useState('');
 
   const load = useCallback(async () => {
     try {
-      setCampaigns(await api.list());
+      const [list, grps] = await Promise.all([api.list(), api.listGroups()]);
+      setCampaigns(list);
+      setGroups(grps);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load campaigns');
     }
@@ -60,16 +74,19 @@ export function MarketingCampaignsSheet({
     }
     setSaving(true);
     try {
+      // A group target takes precedence over a free-form tag.
       await api.create({
         name: name.trim(),
         subject: subject.trim(),
         bodyText: body,
-        segmentTag: segmentTag.trim() || null,
+        segmentGroupId: segmentGroupId || null,
+        segmentTag: segmentGroupId ? null : segmentTag.trim() || null,
       });
       setName('');
       setSubject('');
       setBody('');
       setSegmentTag('');
+      setSegmentGroupId('');
       await load();
       toast.success('Campaign created');
     } catch (err) {
@@ -185,9 +202,25 @@ export function MarketingCampaignsSheet({
               onChange={(e) => setBody(e.target.value)}
               placeholder="Your message…"
             />
+            {groups.length > 0 && (
+              <Select
+                aria-label="Target group"
+                value={segmentGroupId}
+                onChange={(e) => setSegmentGroupId(e.target.value)}
+                className="min-h-11"
+              >
+                <option value="">All customers (or use a tag below)</option>
+                {groups.map((g) => (
+                  <option key={g.id} value={g.id}>
+                    Group: {g.name} ({g.memberCount})
+                  </option>
+                ))}
+              </Select>
+            )}
             <Input
               aria-label="Segment tag"
               value={segmentTag}
+              disabled={!!segmentGroupId}
               onChange={(e) => setSegmentTag(e.target.value)}
               className="min-h-11"
               placeholder="Customer tag to target (blank = all customers)"
