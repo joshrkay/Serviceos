@@ -20,7 +20,7 @@ import {
   recordProcessingPayment,
   settleProcessingPayment,
 } from '../payments/payment-service';
-import { randomUUID } from 'crypto';
+import { randomUUID, createHmac, timingSafeEqual } from 'crypto';
 import { CustomerPaymentMethodRepository } from '../payments/customer-payment-method';
 import { retrievePaymentMethod } from '../payments/stripe-saved-card';
 import { StripeFetch } from '../payments/stripe-payment-intent';
@@ -260,7 +260,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
     const secret = Buffer.from(signingSecret.replace(/^whsec_/, ''), 'base64');
 
     const isValid = signatures.some((sig) =>
-      verifyWebhookSignature(signedContent, `t=${svixTimestamp},v1=${sig}`, secret.toString('hex'))
+      (() => { const e = createHmac('sha256', secret).update(signedContent).digest('base64'); const a = Buffer.from(sig); const b = Buffer.from(e); return a.length === b.length && timingSafeEqual(a, b); })()
     );
 
     if (!isValid) {
