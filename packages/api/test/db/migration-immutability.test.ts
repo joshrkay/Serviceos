@@ -362,6 +362,16 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['219_rls_app_runtime_revoke_exempt', '0d19b84a142cd9f69d5f90d3bd8b1125969163026fd3a323cde2442dad915ecf'],
   // RLS hardening — named rls_cross_tenant (BYPASSRLS) role for auditable cross-tenant sweeps.
   ['220_create_rls_cross_tenant_role', 'ff8057f1f7cad211e77e7655b7a1204cbaffe2f263a823e8e5fc759b0fc37a28'],
+  // Jobber-parity pass — job forms, recurring jobs (+materialization), job custom
+  // fields, consumer financing, marketing campaigns, customer groups.
+  ['221_create_job_forms', '813a7e1bfd1c7140a91fbc6ca54cf381b74a5b36b9959385d0630cc42b1f528d'],
+  ['222_create_recurring_jobs', '2ce277b37d9b12b7ae00a7b4b87debb4887b7d26a9ff4accb9464e13685dccbc'],
+  ['223_recurring_job_materialization', '5c4b2253a9abac06b2f78b6150435cc77cd477522ddcba43c575d12ced5f9d33'],
+  ['224_create_job_custom_fields', '65412cbeca763526715dabb0877a86879584b68b273ccfc71f44f2ccb2719e21'],
+  ['225_create_financing_applications', '17a9f061c2728f957ae3256a9c624ad073a7ea1ec834d3f76d894ef3efeea5c4'],
+  ['226_create_marketing_campaigns', '731467814951e56ebe330c61334c70db40ad08a43a1d996f62705abe0d275e45'],
+  ['227_create_customer_groups', 'b130abe18b855d3f4d24e4781c9f36221489d22f0b8149b4c2ebe466c66d1ab5'],
+  ['228_marketing_campaign_segment_group', '8e795768b41848627679a6cc34d2dd89f6a5ce88355a3c732988aeadf44ce48f'],
 ];
 
 function hashMigration(value: string): string {

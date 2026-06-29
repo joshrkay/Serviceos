@@ -513,3 +513,133 @@ export const createWordingPreferenceSchema = z.object({
   avoidWordings: z.array(z.string().min(1)).optional(),
   context: z.string().max(500).optional(),
 });
+
+// J-FORM (Jobber parity) — job forms & checklists. Kept in lockstep with
+// JOB_FORM_FIELD_TYPES (packages/api/src/job-forms/job-form.ts).
+export const jobFormFieldTypeSchema = z.enum([
+  'text',
+  'textarea',
+  'number',
+  'date',
+  'checkbox',
+  'select',
+]);
+
+export const jobFormFieldInputSchema = z.object({
+  id: z.string().max(100).optional(),
+  label: z.string().min(1).max(200),
+  fieldType: jobFormFieldTypeSchema.optional(),
+  options: z.array(z.string().min(1).max(200)).optional(),
+  required: z.boolean().optional(),
+});
+
+export const createJobFormTemplateSchema = z.object({
+  name: z.string().min(1).max(200),
+  description: z.string().max(2000).nullable().optional(),
+  fields: z.array(jobFormFieldInputSchema).min(1),
+  sortOrder: z.number().int().optional(),
+});
+
+export const updateJobFormTemplateSchema = z
+  .object({
+    name: z.string().min(1).max(200).optional(),
+    description: z.string().max(2000).nullable().optional(),
+    fields: z.array(jobFormFieldInputSchema).min(1).optional(),
+    sortOrder: z.number().int().optional(),
+  })
+  .refine((v) => Object.keys(v).length > 0, { message: 'no fields to update' });
+
+export const jobFormAnswerSchema = z.object({
+  fieldId: z.string().min(1).max(100),
+  value: z.string().max(10000).nullable(),
+});
+
+export const createJobFormSubmissionSchema = z.object({
+  templateId: z.string().min(1),
+  answers: z.array(jobFormAnswerSchema).optional(),
+  complete: z.boolean().optional(),
+});
+
+export const updateJobFormSubmissionSchema = z.object({
+  answers: z.array(jobFormAnswerSchema).optional(),
+  complete: z.boolean().optional(),
+});
+
+// U8 (CRM Jobber parity) — customer groups / segmentation.
+const hexColor = z.string().regex(/^#[0-9a-fA-F]{6}$/, 'color must be a hex value like #3b82f6');
+
+export const createCustomerGroupSchema = z.object({
+  name: z.string().min(1).max(100),
+  description: z.string().max(2000).nullable().optional(),
+  color: hexColor.nullable().optional(),
+});
+
+export const updateCustomerGroupSchema = z
+  .object({
+    name: z.string().min(1).max(100).optional(),
+    description: z.string().max(2000).nullable().optional(),
+    color: hexColor.nullable().optional(),
+  })
+  .refine((v) => Object.keys(v).length > 0, { message: 'no fields to update' });
+
+// MKT (Jobber parity) — customer email campaigns.
+export const createCampaignSchema = z
+  .object({
+    name: z.string().min(1).max(200),
+    subject: z.string().min(1).max(300),
+    bodyText: z.string().min(1).max(20000),
+    bodyHtml: z.string().max(50000).nullable().optional(),
+    segmentTag: z.string().min(1).max(50).nullable().optional(),
+    segmentGroupId: z.string().uuid().nullable().optional(),
+  })
+  .refine((v) => !(v.segmentTag && v.segmentGroupId), {
+    message: 'target a tag or a group, not both',
+  });
+
+// FIN (Jobber parity) — consumer financing on invoices.
+export const offerFinancingSchema = z.object({
+  // Defaults to the invoice's amount due when omitted.
+  amountCents: z.number().int().positive().optional(),
+  returnUrl: z.string().url().max(2000).optional(),
+});
+
+// R-JOB (Jobber parity) — recurring job series. Kept in lockstep with
+// RECURRENCE_FREQUENCIES (packages/api/src/recurring-jobs/recurrence.ts).
+const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'must be a date (YYYY-MM-DD)');
+
+export const recurrenceRuleSchema = z
+  .object({
+    frequency: z.enum(['daily', 'weekly', 'biweekly', 'monthly']),
+    interval: z.number().int().min(1).max(365).default(1),
+    count: z.number().int().min(1).max(1000).optional(),
+    until: isoDate.optional(),
+  })
+  .refine((r) => !(r.count !== undefined && r.until !== undefined), {
+    message: 'set either count or until, not both',
+  });
+
+const timeOfDay = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'must be HH:MM (24-hour)');
+const appointmentTypeValue = z.enum(['estimate', 'repair', 'install', 'maintenance', 'diagnostic']);
+
+export const createRecurringJobSchema = z.object({
+  customerId: z.string().min(1),
+  title: z.string().min(1).max(200),
+  anchorDate: isoDate,
+  anchorTime: timeOfDay.optional(),
+  durationMinutes: z.number().int().min(15).max(480).optional(),
+  appointmentType: appointmentTypeValue.nullable().optional(),
+  rule: recurrenceRuleSchema,
+  notes: z.string().max(2000).nullable().optional(),
+});
+
+export const updateRecurringJobSchema = z
+  .object({
+    title: z.string().min(1).max(200).optional(),
+    anchorDate: isoDate.optional(),
+    anchorTime: timeOfDay.optional(),
+    durationMinutes: z.number().int().min(15).max(480).optional(),
+    appointmentType: appointmentTypeValue.nullable().optional(),
+    rule: recurrenceRuleSchema.optional(),
+    notes: z.string().max(2000).nullable().optional(),
+  })
+  .refine((v) => Object.keys(v).length > 0, { message: 'no fields to update' });
