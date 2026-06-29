@@ -19,6 +19,9 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
+QA_REPO_ROOT="$REPO_ROOT"
+# shellcheck disable=SC1091
+source "$REPO_ROOT/scripts/qa-env.sh"
 
 section() {
   echo ""
@@ -26,6 +29,9 @@ section() {
   echo "  $1"
   echo "=========================================================="
 }
+
+load_qa_env
+apply_qa_defaults
 
 section "Step 1/5 — qa-matrix doctor (env + reachability)"
 npx tsx --no-warnings scripts/qa-matrix-doctor.ts

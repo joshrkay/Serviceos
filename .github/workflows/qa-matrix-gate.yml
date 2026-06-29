@@ -1,3 +1,16 @@
+# Nightly + manual QA matrix gate against Railway dev.
+#
+# Required repository secrets (11) — manifest:
+#   docs/runbooks/qa-github-secrets.md
+#   E2E_BASE_URL, E2E_API_URL
+#   E2E_DB_URL_READONLY, E2E_DB_URL_READWRITE
+#   E2E_CLERK_HMAC_SECRET
+#   E2E_TENANT_A_ID, E2E_TENANT_A_CUSTOMER_ID, E2E_TENANT_A_JOB_ID
+#   E2E_TENANT_B_ID, E2E_TENANT_B_CUSTOMER_ID, E2E_TENANT_B_JOB_ID
+#
+# Deploy-side (Railway API): CLERK_DEV_HMAC_TOKENS=true
+# Manual rerun: Actions → QA Matrix Gate → Run workflow
+
 name: QA Matrix Gate
 
 on:

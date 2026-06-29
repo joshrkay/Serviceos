@@ -41,34 +41,23 @@ test.describe('smoke — ui', () => {
 
     await page.goto('/login');
 
-    // App-owned chrome (LoginPage.tsx) is the rebrand signal we control —
-    // unlike Clerk's widget title, which is set in the Clerk dashboard.
-    await expect(page.getByText('Rivet').first()).toBeVisible();
+    await expect(page.getByText('Rivet', { exact: true })).toBeVisible();
     await expect(page.getByText(/© 2026 Rivet/)).toBeVisible();
-    // Prove the Clerk widget actually mounted via its email field — a form
-    // control is more stable than the dashboard-configurable heading copy.
-    // 15s mirrors the journey spec (signup-to-first-estimate.spec.ts): Clerk
-    // mounts its widget async and Playwright's default 5s was already found
-    // insufficient there.
-    await expect(page.getByLabel(/email/i).first()).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole('heading', { name: /sign in/i })).toBeVisible();
     expect(consoleErrors).toEqual([]);
   });
 
   test('signup page renders', async ({ page }) => {
     await page.goto('/signup');
-    await expect(page.getByText('Rivet').first()).toBeVisible();
-    // 15s: Clerk's <SignUp> mounts async — see the login test's note.
-    await expect(page.getByLabel(/email/i).first()).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByText('Rivet', { exact: true })).toBeVisible();
+    await expect(page.getByText(/© 2026 Rivet/)).toBeVisible();
+    await expect(page.getByRole('heading', { name: /sign up|create/i })).toBeVisible();
   });
 
   test('signed-out root shows the public landing page', async ({ page }) => {
-    // ProtectedRoute renders the marketing LandingPage at "/" for signed-out
-    // visitors — it no longer bounces to /login (see ProtectedRoute.tsx).
     await page.goto('/');
-    await expect(page).toHaveURL(/\/$/);
-    await expect(
-      page.getByRole('heading', { name: /your ai dispatcher/i }),
-    ).toBeVisible();
+    await expect(page).toHaveURL('/');
+    await expect(page.getByRole('heading', { name: /your ai dispatcher/i })).toBeVisible();
   });
 
   test('signed-out app route redirects to login', async ({ page }) => {

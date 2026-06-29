@@ -43,8 +43,6 @@ test.describe('marketing site — mobile layout', () => {
 
     test('the primary trial CTA is a ≥44px glove target', async ({ page }) => {
       await page.goto('/pricing');
-      // Target the pricing CARD CTA by testid — a bare role+name `.first()`
-      // matches the sticky header's smaller size="sm" (h-8) CTA first.
       const cta = page.getByTestId('pricing-primary-cta');
       await expect(cta).toBeVisible();
       const box = await cta.boundingBox();
