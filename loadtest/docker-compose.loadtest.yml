@@ -1,0 +1,90 @@
+# Local load-test topology (U1 — scale-to-1000 plan).
+#
+# Stands up the CURRENT production shape — a single API instance in front of a
+# real Postgres — so a load run reproduces the real first bottleneck (the DB
+# connection pool, default max:20). This is the BASELINE target; later phases
+# add the pieces that lift the ceiling:
+#   • U2 — PgBouncer in front of Postgres (transaction mode).
+#   • U3/U5 — a `redis` service + REDIS_URL for shared state.
+#   • U5 — an nginx load balancer + `docker compose up --scale api=N` to measure
+#     the multi-replica curve.
+# Those services are stubbed (commented) below so U5 turns them on in place.
+#
+# Run:
+#   docker compose -f loadtest/docker-compose.loadtest.yml up --build -d
+#   # then drive load — see loadtest/README.md
+#   docker compose -f loadtest/docker-compose.loadtest.yml down -v
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: serviceos
+      POSTGRES_PASSWORD: serviceos
+      POSTGRES_DB: serviceos_load
+    ports:
+      - '5433:5432'
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U serviceos -d serviceos_load']
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    tmpfs:
+      - /var/lib/postgresql/data # ephemeral — load DB is throwaway
+
+  api:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: api
+    environment:
+      NODE_ENV: dev
+      # Load tests authenticate via unsigned synthetic tokens — see README.
+      DEV_AUTH_BYPASS: 'true'
+      PORT: '3000'
+      DATABASE_URL: postgres://serviceos:serviceos@postgres:5432/serviceos_load
+      DB_SSL: 'false'
+      # Baseline keeps the SHIPPING default so the run reproduces the real
+      # ceiling. U2 raises this (and points DATABASE_URL at pgbouncer).
+      DB_MAX_CONNECTIONS: '20'
+      # REDIS_URL intentionally unset for the baseline (in-memory state path).
+      # U3/U5: uncomment the redis service below and set:
+      # REDIS_URL: redis://redis:6379
+      # PgBouncer (transaction-pooled) topology — the pgbouncer service below is
+      # enabled; to route request traffic through it (while session-scoped locks
+      # + LISTEN keep a direct backend), override:
+      #   DATABASE_URL: postgres://serviceos:serviceos@pgbouncer:6432/serviceos_load
+      #   DATABASE_DIRECT_URL: postgres://serviceos:serviceos@postgres:5432/serviceos_load
+    command: sh -c "node packages/api/dist/src/db/migrate.js && node packages/api/dist/src/index.js"
+    ports:
+      - '3000:3000'
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ── Enabled in later phases (kept here so U2/U3/U5 flip them on in place) ──
+  #
+  # redis:                       # U3/U5 — shared state (registry, quota, fan-out)
+  #   image: redis:7-alpine
+  #   ports: ['6379:6379']
+  #
+  pgbouncer: # U2c — transaction-mode pooling in front of Postgres
+    image: edoburu/pgbouncer:latest
+    environment:
+      DATABASE_URL: postgres://serviceos:serviceos@postgres:5432/serviceos_load
+      # edoburu/pgbouncer defaults LISTEN_PORT to 5432 when no .ini is mounted;
+      # the API DSN + the published port both target 6432, so pin the listener
+      # to 6432 or every pooled DB connection is refused.
+      LISTEN_PORT: '6432'
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: '1000'
+      DEFAULT_POOL_SIZE: '25'
+    ports:
+      - '6432:6432'
+    depends_on:
+      postgres:
+        condition: service_healthy
+  #
+  # lb:                          # U5 — fan traffic across `--scale api=N`
+  #   image: nginx:alpine
+  #   # upstream → api:3000 (round-robin); run: docker compose ... up --scale api=4

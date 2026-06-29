@@ -158,6 +158,34 @@ describe('runSupervisorAnnotationSweep', () => {
     expect(deps.complete).not.toHaveBeenCalled();
   });
 
+  it('P3: bounds the working set in the DB via findByStatusSince (now - 24h), not a full scan', async () => {
+    const repo = new InMemoryProposalRepository();
+    await seedReadyProposal(repo, TENANT_A, { createdAt: new Date(NOW.getTime() - 60_000) });
+    const sinceCalls: Array<{ status: string; since: Date }> = [];
+    let fullScans = 0;
+    const deps = makeDeps(repo, {
+      proposalRepo: {
+        findByStatus: async (tid, status) => {
+          fullScans += 1;
+          return repo.findByStatus(tid, status);
+        },
+        findByStatusSince: async (tid, status, since, limit) => {
+          sinceCalls.push({ status, since });
+          return repo.findByStatusSince(tid, status, since, limit);
+        },
+        findById: (tid, id) => repo.findById(tid, id),
+        update: (tid, id, u) => repo.update(tid, id, u),
+      },
+    });
+
+    await runSupervisorAnnotationSweep(deps);
+
+    expect(fullScans).toBe(0); // never the unbounded findByStatus path
+    expect(sinceCalls).toHaveLength(1);
+    expect(sinceCalls[0].status).toBe('ready_for_review');
+    expect(sinceCalls[0].since.getTime()).toBe(NOW.getTime() - 24 * 60 * 60 * 1000);
+  });
+
   it('LLM failure skips silently — proposal intact, sweep continues to siblings', async () => {
     const repo = new InMemoryProposalRepository();
     const first = await seedReadyProposal(repo, TENANT_A, {

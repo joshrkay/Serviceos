@@ -29,17 +29,26 @@ function mockClient(): { client: PoolClient; release: ReturnType<typeof vi.fn>; 
 }
 
 describe('PgBaseRepository — GUC leak fix (RESET on release)', () => {
-  it('withTenant: issues RESET app.current_tenant_id before releasing the connection', async () => {
+  it('withTenant: wraps the standalone path in a SET LOCAL transaction and RESETs before release (U2b-2)', async () => {
     const m = mockClient();
     const pool = { connect: vi.fn(async () => m.client) } as unknown as Pool;
     const repo = new TestRepo(pool);
 
     await repo.runWithTenant(TENANT, async () => 'ok');
 
-    const setIdx = m.calls.findIndex((c) => c.includes("SET app.current_tenant_id"));
+    // U2b-2: the standalone path is now BEGIN → set_config (SET LOCAL GUC) →
+    // COMMIT → RESET (belt-and-suspenders) → release, so it is PgBouncer
+    // transaction-pooling safe. (Note "RESET app.current_tenant_id" contains the
+    // substring "SET app.current_tenant_id", so we match the GUC set via
+    // `set_config` to avoid a false hit on the RESET line.)
+    const beginIdx = m.calls.findIndex((c) => c === 'BEGIN');
+    const setIdx = m.calls.findIndex((c) => c.includes('set_config'));
+    const commitIdx = m.calls.findIndex((c) => c === 'COMMIT');
     const resetIdx = m.calls.findIndex((c) => c.includes('RESET app.current_tenant_id'));
-    expect(setIdx).toBeGreaterThanOrEqual(0);
-    expect(resetIdx).toBeGreaterThan(setIdx);
+    expect(beginIdx).toBe(0);
+    expect(setIdx).toBeGreaterThan(beginIdx);
+    expect(commitIdx).toBeGreaterThan(setIdx);
+    expect(resetIdx).toBeGreaterThan(commitIdx);
     expect(m.release).toHaveBeenCalledTimes(1);
   });
 

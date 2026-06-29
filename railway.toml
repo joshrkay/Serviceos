@@ -14,6 +14,19 @@ healthcheckPath = "/health"
 healthcheckTimeout = 60
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3
+# Horizontal scale (scale-to-1000 P4). Raise once REDIS_URL is set (so the WS
+# caps / LLM quotas / voice fan-out / rate limits are cluster-wide) and a
+# PgBouncer service fronts Postgres (so N pools multiplex onto a bounded
+# max_connections). Metric-based autoscaling (CPU/mem/req triggers, min/max) is
+# configured in the Railway service settings, not here. See docs/runbooks/scaling.md.
+numReplicas = 1
+# Zero-downtime rollout: keep the old replica serving until the new one is
+# healthy. The app drains live voice/WS calls on SIGTERM (U-P4a) — it flips
+# /ready to 503, rejects new WS upgrades, then waits DRAIN_TIMEOUT_MS (25s) for
+# active calls before tearing down, with a SHUTDOWN_FORCE_EXIT_MS (30s) backstop.
+# Railway's stop grace period must exceed the backstop (>= 35s) or live calls are
+# SIGKILLed mid-drain.
+overlapSeconds = 35
 # Port routing is intentionally NOT pinned here. The app honors Railway's
 # injected PORT (packages/api/src/index.ts: `process.env.PORT || 3000`) and
 # listens on it, so Railway's edge routes to that same port automatically.
@@ -22,3 +35,11 @@ restartPolicyMaxRetries = 3
 # see docs/verification-runs/beta-verification-2026-05-13.md. Leaving it
 # unset keeps the listen port and the edge target in lockstep regardless of
 # the service's PORT value.
+
+# Scaling to N replicas (scale-to-1000): add a PgBouncer service in transaction
+# mode (pool_mode=transaction) in front of the Postgres plugin, point this
+# service's DATABASE_URL at PgBouncer, and set DATABASE_DIRECT_URL to the
+# Postgres plugin's direct URL (session-scoped locks + LISTEN/NOTIFY bypass
+# PgBouncer — see .env.production.example and docs/runbooks/scaling.md). Set
+# replica count + autoscaling in the Railway service settings. The app drains
+# the pg pool(s) on SIGTERM (app.ts shutdown handler).

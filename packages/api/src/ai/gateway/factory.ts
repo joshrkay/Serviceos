@@ -11,7 +11,7 @@ import {
 import type { AppConfig } from '../../shared/config';
 import type { AiRunRepository } from '../ai-run';
 import { CircuitBreakerRegistry, DEFAULT_BREAKER } from './breaker';
-import { TenantQuotaRegistry, DEFAULT_TIER_CONFIG } from './tenant-quota';
+import { createTenantQuotaStore, DEFAULT_TIER_CONFIG } from './tenant-quota';
 import { composeResilienceStack, type ResilienceStackOptions } from './compose-resilience';
 import {
   CachingGatewayWrapper,
@@ -131,7 +131,11 @@ export function createLLMGateway(
   // The breaker registry is shared and exported for the /api/health/ai endpoint.
   const breakerRegistry = opts.resilience?.breakers ??
     new CircuitBreakerRegistry(opts.resilience?.breakerConfig ?? DEFAULT_BREAKER);
-  const quotaRegistry = opts.resilience?.quota ?? new TenantQuotaRegistry(DEFAULT_TIER_CONFIG);
+  // U3c — cluster-wide per-tenant quota when REDIS_URL is set (sync-return +
+  // async Redis upgrade); per-replica in-memory registry otherwise. Identical
+  // semantics; the seam is the same as the WS cap / gateway cache.
+  const quotaRegistry =
+    opts.resilience?.quota ?? createTenantQuotaStore(process.env.REDIS_URL, DEFAULT_TIER_CONFIG);
 
   // Publish the breaker registry for the health endpoint.
   sharedBreakerRegistry = breakerRegistry;

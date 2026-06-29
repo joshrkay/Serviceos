@@ -10,12 +10,8 @@ import type { JobRepository } from '../jobs/job';
 import type { GetJobProfitDeps } from '../jobs/job-profit';
 import {
   aggregateJobProfits,
-  type JobProfitLine,
   type JobProfitRollup,
 } from './job-profit-rollup';
-
-/** @deprecated alias — use JobProfitLine. Kept for existing importers. */
-export type CustomerJobProfit = JobProfitLine;
 
 export interface CustomerProfit extends JobProfitRollup {
   customerId: string;

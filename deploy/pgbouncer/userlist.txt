@@ -1,0 +1,24 @@
+;; PgBouncer auth_file (userlist) — TEMPLATE, SECRET-FREE. DO NOT COMMIT REAL VERIFIERS.
+;;
+;; Format: one double-quoted line per role —
+;;   "rolename" "SCRAM-SHA-256$<iterations>:<salt>$<StoredKey>:<ServerKey>"
+;; The second field is the SCRAM *verifier* (pg_authid.rolpassword), never the
+;; plaintext password.
+;;
+;; Populate at deploy time from the live Postgres role (uses the DIRECT DSN so
+;; it bypasses PgBouncer):
+;;
+;;   psql "$DATABASE_DIRECT_URL" -tAc \
+;;     "SELECT '\"'||rolname||'\" \"'||rolpassword||'\"' \
+;;        FROM pg_authid WHERE rolname = 'serviceos';" \
+;;     > deploy/pgbouncer/userlist.txt
+;;
+;; Alternatives that avoid editing this file:
+;;   • auth_query (production-preferred) — see pgbouncer.ini → Auth, option 2.
+;;   • docker-compose.prod.yml — the `pgbouncer` service can regenerate this
+;;     list at container start from the shared POSTGRES_PASSWORD (see its
+;;     comments), so the bundled stack is runnable without hand-editing.
+;;
+;; The line below is structurally valid but NON-FUNCTIONAL so PgBouncer can
+;; parse the file; replace it before serving real traffic.
+"serviceos" "SCRAM-SHA-256$4096:REPLACE_WITH_REAL_SALT$REPLACE_WITH_STORED_KEY:REPLACE_WITH_SERVER_KEY"

@@ -44,6 +44,7 @@ import { BoundedSendQueue, type Priority } from '../../ws/bounded-send-queue';
 import { wsDisconnectTotal } from '../../monitoring/metrics';
 import {
   ConnectionRegistry,
+  ConnectionLease,
   globalConnectionRegistry,
 } from '../../ws/connection-registry';
 import {
@@ -304,6 +305,9 @@ export interface MediaStreamAdapterDeps {
 }
 
 const TWILIO_SURFACE = 'twilio_media_streams';
+/** Connection-cap lease TTL for telephony — no registry heartbeat, so it must
+ *  exceed any call's duration; it only serves as the crashed-replica backstop. */
+const TELEPHONY_LEASE_TTL_MS = 2 * 60 * 60 * 1000;
 
 // Skip the LLM sentiment call once the session has consumed this fraction of
 // its cost cap, so frustration classification can't blow a tenant's budget.
@@ -344,6 +348,8 @@ interface RuntimeState {
   slowConsumerTimer: NodeJS.Timeout | null;
   /** True after we've released our slot in the connection registry. */
   registryReleased: boolean;
+  /** Connection-cap lease (U3b); released on teardown, refreshed by no loop. */
+  connectionLease: ConnectionLease | null;
   /** Guards against calling ws.close() more than once. */
   wsCloseInitiated: boolean;
   /**
@@ -474,6 +480,7 @@ export class TwilioMediaStreamAdapter {
       unackedMarks: 0,
       slowConsumerTimer: null,
       registryReleased: true,
+      connectionLease: null,
       wsCloseInitiated: false,
       pendingFinalizeEffects: [],
       awaitingFirstAudioFrame: false,
@@ -566,7 +573,16 @@ export class TwilioMediaStreamAdapter {
 
     // Per-tenant connection cap.
     const registry = this.deps.connectionRegistry ?? globalConnectionRegistry;
-    if (!registry.tryAcquire(TWILIO_SURFACE, session.tenantId)) {
+    // Telephony has no registry heartbeat loop, so use a long lease TTL that
+    // covers any call; the slot is released on teardown and the TTL is only the
+    // crashed-replica backstop. (Gateway connections refresh on their heartbeat.)
+    const lease = await registry.acquire(
+      TWILIO_SURFACE,
+      session.tenantId,
+      'standard',
+      TELEPHONY_LEASE_TTL_MS,
+    );
+    if (!lease) {
       this.logSecurityEvent('tenant_connection_cap_exceeded', {
         callSid,
         tenantId: session.tenantId,
@@ -574,6 +590,7 @@ export class TwilioMediaStreamAdapter {
       this.closeWs(1013, 'tenant_connection_cap');
       return;
     }
+    this.state.connectionLease = lease;
     this.state.registryReleased = false;
 
     this.state.streamSid = frame.start.streamSid;
@@ -1386,9 +1403,10 @@ export class TwilioMediaStreamAdapter {
       /* swallow */
     }
     this.state.deepgram = null;
-    if (!this.state.registryReleased && this.state.tenantId) {
-      const registry = this.deps.connectionRegistry ?? globalConnectionRegistry;
-      registry.release(TWILIO_SURFACE, this.state.tenantId);
+    if (!this.state.registryReleased && this.state.connectionLease) {
+      // Fire-and-forget: teardown can't await; idempotent + TTL backstop.
+      void this.state.connectionLease.release().catch(() => {});
+      this.state.connectionLease = null;
       this.state.registryReleased = true;
     }
     wsDisconnectTotal.inc({ surface: TWILIO_SURFACE, reason });

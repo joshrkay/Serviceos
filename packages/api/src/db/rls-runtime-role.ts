@@ -1,5 +1,5 @@
 import { Pool, PoolClient } from 'pg';
-import { setTenantContext } from './schema';
+import { setTenantContext, isValidTenantId } from './schema';
 
 /**
  * RLS runtime-role enforcement (see docs/plans/2026-06-25-005-...).
@@ -46,6 +46,13 @@ export async function applyTenantContext(
 ): Promise<void> {
   const roleEnabled = isRlsRuntimeRoleEnabled();
   if (opts.transactional) {
+    // The session path validates via setTenantContext; the transactional path
+    // parameterizes the GUC so we must validate the UUID here too — otherwise a
+    // malformed tenant id silently becomes a GUC string instead of throwing
+    // (U2b-2: withTenant now routes through this path).
+    if (!isValidTenantId(tenantId)) {
+      throw new Error('Invalid tenant ID format: must be a valid UUID');
+    }
     await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
     if (roleEnabled) {
       await client.query(`SET LOCAL ROLE ${RLS_ROLE}`);
@@ -74,8 +81,35 @@ export async function applyTenantContext(
  * client is safe to reuse as the principal. `verifyRlsRuntimeRole` warns about
  * the absence once at boot so the unattributed access is never a surprise.
  */
-export async function applyCrossTenantRole(client: PoolClient): Promise<void> {
+export async function applyCrossTenantRole(
+  client: PoolClient,
+  opts: { transactional?: boolean } = {},
+): Promise<void> {
   if (!isRlsRuntimeRoleEnabled()) return;
+  // SET LOCAL ROLE auto-resets at COMMIT/ROLLBACK (PgBouncer transaction-pooling
+  // safe); plain SET ROLE is session-level and needs clearTenantContext.
+  if (opts.transactional) {
+    // Inside the caller's BEGIN, a failed `SET LOCAL ROLE` (role unprovisioned
+    // or ungranted) ABORTS the whole transaction (25P02), so the caller's
+    // subsequent sweep queries would fail with "current transaction is aborted"
+    // — a bare try/catch can't recover that. Guard with a SAVEPOINT so a failure
+    // rolls back ONLY the SET and the surrounding transaction stays usable,
+    // degrading to the connection principal (the documented fallback).
+    // (Codex P1, PR #628.)
+    await client.query('SAVEPOINT cross_tenant_role');
+    try {
+      await client.query(`SET LOCAL ROLE ${CROSS_TENANT_ROLE}`);
+      await client.query('RELEASE SAVEPOINT cross_tenant_role');
+    } catch {
+      await client.query('ROLLBACK TO SAVEPOINT cross_tenant_role');
+      await client
+        .query('RELEASE SAVEPOINT cross_tenant_role')
+        .catch(() => undefined);
+    }
+    return;
+  }
+  // Session path (no surrounding transaction): a failed SET ROLE is isolated,
+  // so the plain try/catch fallback is safe.
   try {
     await client.query(`SET ROLE ${CROSS_TENANT_ROLE}`);
   } catch {
@@ -99,6 +133,40 @@ export async function clearTenantContext(client: PoolClient): Promise<void> {
     await client.query('RESET app.current_tenant_id');
   } catch {
     // ignore — see above.
+  }
+}
+
+/**
+ * Pooling-safe ad-hoc tenant-scoped work: connect, `BEGIN`, set tenant context
+ * with `SET LOCAL`, run `fn`, `COMMIT` (`ROLLBACK` on throw), release. Use this
+ * for tenant-scoped work that manages its OWN pool connection (analytics /
+ * digest builders) instead of the plain-`SET` + `clearTenantContext` pattern,
+ * which is UNSAFE under PgBouncer transaction pooling — the `SET` and the
+ * queries are separate implicit transactions that can land on different
+ * backends, dropping the tenant GUC/role. Mirrors
+ * `PgBaseRepository.withTenantTransaction` for non-repository callers.
+ */
+export async function withTenantSession<T>(
+  pool: Pool,
+  tenantId: string,
+  fn: (client: PoolClient) => Promise<T>,
+): Promise<T> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await applyTenantContext(client, tenantId, { transactional: true });
+    const result = await fn(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (err) {
+    try {
+      await client.query('ROLLBACK');
+    } catch {
+      // best-effort rollback
+    }
+    throw err;
+  } finally {
+    client.release();
   }
 }
 

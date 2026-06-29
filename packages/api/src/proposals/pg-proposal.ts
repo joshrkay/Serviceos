@@ -178,6 +178,24 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
     });
   }
 
+  async findByStatusSince(
+    tenantId: string,
+    status: ProposalStatus,
+    since: Date,
+    limit?: number,
+  ): Promise<Proposal[]> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT * FROM proposals
+           WHERE tenant_id = $1 AND status = $2 AND created_at >= $3
+           ORDER BY created_at DESC
+           ${typeof limit === 'number' ? 'LIMIT $4' : ''}`,
+        typeof limit === 'number' ? [tenantId, status, since, limit] : [tenantId, status, since]
+      );
+      return result.rows.map(mapRow);
+    });
+  }
+
   async findExpiredScheduleProposals(
     tenantId: string,
     proposalTypes: readonly ProposalType[],

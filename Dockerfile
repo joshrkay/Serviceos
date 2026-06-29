@@ -26,8 +26,43 @@ RUN cd packages/web && npx vite build
 # Build API
 FROM shared-build AS api-build
 COPY packages/api/ packages/api/
+# C1 — root deploy-time script that synthesizes the filler audio library.
+COPY scripts/render-fillers.ts scripts/render-fillers.ts
 ARG RAILWAY_GIT_COMMIT_SHA=unknown
 RUN echo "build: $RAILWAY_GIT_COMMIT_SHA" && cd packages/api && npx tsc --project tsconfig.build.json
+# C1 — optionally SHIP filler audio in the image. Pass ELEVENLABS_API_KEY as a
+# build arg to synthesize FILLER_LIBRARY -> .pcm and copy them into dist/ so the
+# prod image serves filler audio. Omit it and this step SKIPS: the build is
+# byte-for-byte unchanged and the runtime degrades gracefully (callers just
+# hear no filler — FillerAudioCache.load() warns on the missing files). The key
+# lives ONLY in this intermediate stage, never the final `api` image; in CI
+# prefer a BuildKit secret over a plain --build-arg (see docs/deployment.md).
+# The final `api` stage already COPYs this whole dist, so the .pcm ship with it.
+#
+# BEST-EFFORT: rendering calls the live ElevenLabs API. Railway injects the
+# service's ELEVENLABS_API_KEY into this declared ARG, so the render runs during
+# the build — and a build sandbox can't always reach api.elevenlabs.io (egress
+# limits, quota, transient 5xx). A render failure must NOT abort the deploy: the
+# render+copy run inside an `if` so the failure is swallowed (set -e ignores a
+# failing condition), and we fall back to shipping the image WITHOUT prerendered
+# fillers — identical to the unset-key path the runtime already degrades to.
+ARG ELEVENLABS_API_KEY=""
+ARG ELEVENLABS_VOICE_ID=""
+RUN set -e; \
+    if [ -n "$ELEVENLABS_API_KEY" ]; then \
+      echo "C1: rendering filler audio via ElevenLabs..."; \
+      if [ -z "$ELEVENLABS_VOICE_ID" ]; then unset ELEVENLABS_VOICE_ID; fi; \
+      if ELEVENLABS_API_KEY="$ELEVENLABS_API_KEY" npx tsx scripts/render-fillers.ts \
+         && mkdir -p packages/api/dist/src/ai/agents/customer-calling/fillers \
+         && cp packages/api/src/ai/agents/customer-calling/fillers/*.pcm \
+               packages/api/dist/src/ai/agents/customer-calling/fillers/; then \
+        echo "C1: shipped $(ls packages/api/dist/src/ai/agents/customer-calling/fillers/*.pcm | wc -l | tr -d ' ') filler .pcm into dist"; \
+      else \
+        echo "C1: WARNING — filler render/copy failed; shipping image without prerendered fillers (runtime degrades gracefully)"; \
+      fi; \
+    else \
+      echo "C1: ELEVENLABS_API_KEY build arg unset — skipping filler render (runtime degrades gracefully)"; \
+    fi
 
 # Web static files (served by nginx) — used by @serviceos/web
 FROM nginx:alpine AS web

@@ -5388,6 +5388,18 @@ export const MIGRATIONS = {
     $cross$;
   `,
 
+  // Scale-to-1000 (P3): (tenant_id, status, created_at DESC) serves both
+  // findByStatus (filter + ORDER BY created_at DESC) and the windowed
+  // findByStatusSince (created_at range) used by the supervisor-review sweep,
+  // returning rows pre-sorted. It is a prefix-superset of the old
+  // (tenant_id, status) index — every (tenant_id, status[, created_at]) access
+  // uses it — so the old one is dropped to avoid double write-amplification.
+  // Added as a NEW migration (027_create_proposals already shipped; editing it
+  // would be a no-op on existing DBs under CREATE ... IF NOT EXISTS).
+  '221_proposals_status_created_index': `
+    CREATE INDEX IF NOT EXISTS idx_proposals_status_created ON proposals(tenant_id, status, created_at DESC);
+    DROP INDEX IF EXISTS idx_proposals_status;
+  `,
   '221_create_job_forms': `
     -- J-FORM (Jobber parity) — job forms & checklists. Jobber lets a shop
     -- define reusable form/checklist templates that technicians fill out per

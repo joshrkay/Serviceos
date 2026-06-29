@@ -362,6 +362,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['219_rls_app_runtime_revoke_exempt', '0d19b84a142cd9f69d5f90d3bd8b1125969163026fd3a323cde2442dad915ecf'],
   // RLS hardening — named rls_cross_tenant (BYPASSRLS) role for auditable cross-tenant sweeps.
   ['220_create_rls_cross_tenant_role', 'ff8057f1f7cad211e77e7655b7a1204cbaffe2f263a823e8e5fc759b0fc37a28'],
+  ['221_proposals_status_created_index', '6af8a977d5a649844c58f97c3e8aa68e5beb1d51b9a499a913b0170e99508ddf'],
   // Jobber-parity pass — job forms, recurring jobs (+materialization), job custom
   // fields, consumer financing, marketing campaigns, customer groups.
   ['221_create_job_forms', '813a7e1bfd1c7140a91fbc6ca54cf381b74a5b36b9959385d0630cc42b1f528d'],

@@ -17,6 +17,7 @@
  */
 
 import type { IncomingMessage } from 'http';
+import { isDraining } from '../../ws/drain-state';
 import type { Server as HttpServer } from 'http';
 import type { Socket } from 'net';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -121,6 +122,13 @@ export function attachMediaStreamServer(
       return;
     }
 
+    // P4/U-P4a: reject new media streams while draining so Twilio establishes the
+    // call's stream on a live replica (this one is finishing its active calls).
+    if (isDraining()) {
+      rejectUpgrade(socket, 503);
+      return;
+    }
+
     // 2. Signature verification. Twilio signs the WS upgrade URL the
     //    same way it signs HTTP webhooks — auth_token + URL + (no
     //    params for upgrades) → HMAC-SHA1 → base64. Reject 403 on miss.
@@ -219,9 +227,15 @@ function reconstructUpgradeUrl(req: IncomingMessage, publicBaseUrl?: string): st
   return `${scheme}://${host}${url}`;
 }
 
-function rejectUpgrade(socket: Socket, code: 401 | 403 | 500): void {
+function rejectUpgrade(socket: Socket, code: 401 | 403 | 500 | 503): void {
   const reason =
-    code === 401 ? 'Unauthorized' : code === 403 ? 'Forbidden' : 'Internal Server Error';
+    code === 401
+      ? 'Unauthorized'
+      : code === 403
+        ? 'Forbidden'
+        : code === 503
+          ? 'Service Unavailable'
+          : 'Internal Server Error';
   socket.write(`HTTP/1.1 ${code} ${reason}\r\nConnection: close\r\n\r\n`);
   try {
     socket.destroy();

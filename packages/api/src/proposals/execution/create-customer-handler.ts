@@ -1,9 +1,8 @@
 /**
  * P18-001 — `create_customer` execution handler.
  *
- * Replaces the stub `CreateCustomerExecutionHandler` from
- * `proposals/execution/handlers.ts` via `createExecutionHandlerRegistry`
- * when `customerRepo` is wired. On approval, this handler:
+ * Wired as the `create_customer` handler via `createExecutionHandlerRegistry`
+ * when `customerRepo` is present. On approval, this handler:
  *
  *   1. Splits the proposal `name` into firstName/lastName the same
  *      way the customer routes do.

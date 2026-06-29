@@ -16,14 +16,15 @@ describe('PgAppointmentRepository — DB conflict mapping', () => {
   function buildErrorPool(err: unknown) {
     const releases: number[] = [];
     const client: Partial<PoolClient> = {
-      query: vi
-        .fn()
-        // SET app.current_tenant_id — succeeds
-        .mockResolvedValueOnce({ rows: [], rowCount: 0 } as unknown as QueryResult)
-        // UPDATE — rejects with the supplied pg error
-        .mockRejectedValueOnce(err)
-        // RESET app.current_tenant_id (finally) — succeeds
-        .mockResolvedValueOnce({ rows: [], rowCount: 0 } as unknown as QueryResult),
+      // U2b-2: reject the BUSINESS statement (UPDATE) by content — the SET LOCAL
+      // transaction now frames it with BEGIN/set_config/COMMIT/RESET, so a
+      // positional mock would throw on the wrong call.
+      query: vi.fn(async (sql: string) => {
+        if (/^\s*(BEGIN|COMMIT|ROLLBACK|RESET\b|SET\s+(LOCAL\s+)?ROLE\b|SELECT set_config)/i.test(sql)) {
+          return { rows: [], rowCount: 0 } as unknown as QueryResult;
+        }
+        throw err;
+      }) as unknown as PoolClient['query'],
       release: vi.fn(() => {
         releases.push(1);
       }) as unknown as PoolClient['release'],
