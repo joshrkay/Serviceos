@@ -31,6 +31,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <ClerkProvider
       publishableKey={CLERK_PUBLISHABLE_KEY}
+      clerkJSVersion="5.127.0"
       signInUrl="/login"
       signUpUrl="/signup"
       afterSignOutUrl="/login"
