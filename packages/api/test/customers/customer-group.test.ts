@@ -9,6 +9,7 @@ import {
   validateCustomerGroupInput,
 } from '../../src/customers/customer-group';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
+import { ConflictError, NotFoundError } from '../../src/shared/errors';
 
 const TENANT = '11111111-1111-1111-1111-111111111111';
 const C1 = 'cccccccc-0000-0000-0000-000000000001';
@@ -42,9 +43,10 @@ describe('customer groups (U8) — pure domain', () => {
     const events = await audit.findByEntity(TENANT, 'customer_group', g.id);
     expect(events[0].eventType).toBe('customer_group.created');
 
+    // Typed as ConflictError so the route maps it to 409 (not a 500).
     await expect(
       createCustomerGroup({ tenantId: TENANT, name: 'service plan members', createdBy: ACTOR }, repo),
-    ).rejects.toThrow(/already exists/);
+    ).rejects.toBeInstanceOf(ConflictError);
   });
 
   it('adds and removes members idempotently with counts', async () => {

@@ -71,7 +71,7 @@ export function createRecurringJobRouter(
         repo,
         auditRepo
       );
-      res.status(201).json(job);
+      res.status(201).json({ ...job, scheduleSummary: describeRecurrence(job.rule) });
     })
   );
 

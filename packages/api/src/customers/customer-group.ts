@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { ConflictError, NotFoundError, ValidationError } from '../shared/errors';
 
 /**
  * U8 (CRM Jobber parity) — customer groups / segmentation.
@@ -79,12 +80,12 @@ export async function createCustomerGroup(
   auditRepo?: AuditRepository
 ): Promise<CustomerGroup> {
   const errors = validateCustomerGroupInput(input);
-  if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
+  if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
 
   const name = input.name.trim();
   const existing = await repository.findGroupByName(input.tenantId, name);
   if (existing && !existing.isArchived) {
-    throw new Error(`A customer group named "${name}" already exists`);
+    throw new ConflictError(`A customer group named "${name}" already exists`);
   }
 
   const now = new Date();
@@ -126,19 +127,19 @@ export async function updateCustomerGroup(
   actorRole?: string
 ): Promise<CustomerGroup> {
   const existing = await repository.findGroupById(tenantId, id);
-  if (!existing) throw new Error('Customer group not found');
+  if (!existing) throw new NotFoundError('Customer group', id);
 
   const merged = {
     name: input.name !== undefined ? input.name : existing.name,
     color: input.color !== undefined ? input.color : existing.color,
   };
   const errors = validateCustomerGroupInput(merged);
-  if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
+  if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
 
   if (input.name !== undefined && input.name.trim() !== existing.name) {
     const clash = await repository.findGroupByName(tenantId, input.name.trim());
     if (clash && clash.id !== id && !clash.isArchived) {
-      throw new Error(`A customer group named "${input.name.trim()}" already exists`);
+      throw new ConflictError(`A customer group named "${input.name.trim()}" already exists`);
     }
   }
 
@@ -202,8 +203,8 @@ export async function addCustomerToGroup(
   auditRepo?: AuditRepository
 ): Promise<boolean> {
   const group = await repository.findGroupById(tenantId, groupId);
-  if (!group) throw new Error('Customer group not found');
-  if (group.isArchived) throw new Error('Cannot add members to an archived group');
+  if (!group) throw new NotFoundError('Customer group', groupId);
+  if (group.isArchived) throw new ConflictError('Cannot add members to an archived group');
 
   const added = await repository.addMember(tenantId, groupId, customerId);
   if (added && auditRepo && actorId) {
