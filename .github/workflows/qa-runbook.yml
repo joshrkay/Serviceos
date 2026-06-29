@@ -1,0 +1,77 @@
+# Full beta runbook — manual workflow_dispatch only.
+#
+# Runs npm run qa:runbook (journey seed + qa-runner §1–17 + QA matrix).
+# NOT a required PR check — secrets-heavy, ~90–120 min runtime.
+#
+# Required repository secrets (11): see docs/runbooks/qa-github-secrets.md
+#   E2E_BASE_URL, E2E_API_URL
+#   E2E_DB_URL_READONLY, E2E_DB_URL_READWRITE
+#   E2E_CLERK_HMAC_SECRET
+#   E2E_TENANT_A_ID, E2E_TENANT_A_CUSTOMER_ID, E2E_TENANT_A_JOB_ID
+#   E2E_TENANT_B_ID, E2E_TENANT_B_CUSTOMER_ID, E2E_TENANT_B_JOB_ID
+#
+# Deploy-side (Railway API, not GitHub): CLERK_DEV_HMAC_TOKENS=true
+
+name: QA Runbook
+
+on:
+  workflow_dispatch:
+
+jobs:
+  qa-runbook:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install chromium --with-deps
+
+      - name: Run full QA runbook
+        env:
+          E2E_BASE_URL: ${{ secrets.E2E_BASE_URL }}
+          E2E_API_URL: ${{ secrets.E2E_API_URL }}
+          E2E_DB_URL_READONLY: ${{ secrets.E2E_DB_URL_READONLY }}
+          E2E_DB_URL_READWRITE: ${{ secrets.E2E_DB_URL_READWRITE }}
+          E2E_CLERK_HMAC_SECRET: ${{ secrets.E2E_CLERK_HMAC_SECRET }}
+          E2E_TENANT_A_ID: ${{ secrets.E2E_TENANT_A_ID }}
+          E2E_TENANT_A_CUSTOMER_ID: ${{ secrets.E2E_TENANT_A_CUSTOMER_ID }}
+          E2E_TENANT_A_JOB_ID: ${{ secrets.E2E_TENANT_A_JOB_ID }}
+          E2E_TENANT_B_ID: ${{ secrets.E2E_TENANT_B_ID }}
+          E2E_TENANT_B_CUSTOMER_ID: ${{ secrets.E2E_TENANT_B_CUSTOMER_ID }}
+          E2E_TENANT_B_JOB_ID: ${{ secrets.E2E_TENANT_B_JOB_ID }}
+          BASE_URL: ${{ secrets.E2E_BASE_URL }}
+          API_URL: ${{ secrets.E2E_API_URL }}
+        run: npm run qa:runbook
+
+      - name: Upload qa-runner reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-runbook-runner-${{ github.run_id }}
+          path: qa-runner/reports/
+          retention-days: 30
+
+      - name: Upload QA matrix reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-runbook-matrix-${{ github.run_id }}
+          path: qa/reports/
+          retention-days: 30
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-runbook-playwright-${{ github.run_id }}
+          path: playwright-report/
+          retention-days: 14
