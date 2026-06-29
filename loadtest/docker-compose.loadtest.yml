@@ -72,6 +72,10 @@ services:
     image: edoburu/pgbouncer:latest
     environment:
       DATABASE_URL: postgres://serviceos:serviceos@postgres:5432/serviceos_load
+      # edoburu/pgbouncer defaults LISTEN_PORT to 5432 when no .ini is mounted;
+      # the API DSN + the published port both target 6432, so pin the listener
+      # to 6432 or every pooled DB connection is refused.
+      LISTEN_PORT: '6432'
       POOL_MODE: transaction
       MAX_CLIENT_CONN: '1000'
       DEFAULT_POOL_SIZE: '25'

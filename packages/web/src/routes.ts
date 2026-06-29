@@ -11,112 +11,13 @@ import { RouteErrorElement } from './components/layout/RouteErrorElement';
 import { RouteFallback } from './components/layout/RouteFallback';
 import { RoleHome } from './components/home/RoleHome';
 import { ProtectedRoute } from './components/auth/ProtectedRoute';
-import { MarketingLayout } from './components/marketing/MarketingLayout';
-import { FeaturesPage } from './components/marketing/FeaturesPage';
-import { PricingPage } from './components/marketing/PricingPage';
-import { AboutPage } from './components/marketing/AboutPage';
-import { DownloadPage } from './components/marketing/DownloadPage';
-import { PrivacyPage } from './components/marketing/PrivacyPage';
-import { TermsPage } from './components/marketing/TermsPage';
-import { TechnicianDayPage } from './components/technician/TechnicianDayPage';
-import { MaintenanceContractsPage } from './components/contracts/MaintenanceContractsPage';
-import { ContractDetailPage } from './components/contracts/ContractDetailPage';
-import { MoneyDashboardPage } from './components/reports/MoneyDashboardPage';
-import { DigestPage } from './pages/digest/DigestPage';
-import { RevenueBySourcePage } from './components/reports/RevenueBySourcePage';
-import { InboxPage } from './components/inbox/InboxPage';
-import { CommsInboxPage } from './pages/conversations/CommsInboxPage';
-import { PortalShell } from './pages/portal/PortalShell';
-import { Showcase } from './pages/design/Showcase';
-import { InvoiceCreate } from './pages/invoices/InvoiceCreate';
-import { EstimateCreate } from './pages/estimates/EstimateCreate';
-import { JobCreate } from './pages/jobs/JobCreate';
-import { JobPhotos } from './pages/jobs/JobPhotos';
-import { CustomerEdit } from './pages/customers/CustomerEdit';
-import { AppointmentEdit } from './pages/appointments/AppointmentEdit';
-import { useParams, useNavigate } from 'react-router';
-import React from 'react';
+import { LoginPage } from './components/auth/LoginPage';
 
-// P11-007 — wrappers that pull `:id` from the route and forward it to
-// the typed edit components.
-function CustomerEditRoute() {
-  const params = useParams<{ id: string }>();
-  const navigate = useNavigate();
-  if (!params.id) return null;
-  return React.createElement(CustomerEdit, {
-    customerId: params.id,
-    onSaved: (id: string) => navigate(`/customers/${id}`),
-    onCancel: () => navigate(-1),
-  });
-}
-
-function CustomerDetailRoute() {
-  const params = useParams<{ id: string }>();
-  const navigate = useNavigate();
-  if (!params.id) return null;
-  return React.createElement(CustomerDetail, {
-    customerId: params.id,
-    onBack: () => navigate('/customers'),
-    onEdit: () => navigate(`/customers/${params.id}/edit`),
-    onArchived: () => navigate('/customers'),
-  });
-}
-
-function LeadListRoute() {
-  const navigate = useNavigate();
-  return React.createElement(LeadList, {
-    onSelectLead: (id: string) => navigate(`/leads/${id}`),
-    onNewLead: () => navigate('/leads/new'),
-  });
-}
-
-function LeadDetailRoute() {
-  const params = useParams<{ id: string }>();
-  const navigate = useNavigate();
-  if (!params.id) return null;
-  return React.createElement(LeadDetail, {
-    leadId: params.id,
-    onBack: () => navigate('/leads'),
-    onConverted: (customerId: string) => navigate(`/customers/${customerId}`),
-  });
-}
-
-function LeadCreateRoute() {
-  const navigate = useNavigate();
-  return React.createElement(LeadCreate, {
-    onCreated: (id: string) => navigate(`/leads/${id}`),
-    onCancel: () => navigate('/leads'),
-  });
-}
-
-function AppointmentEditRoute() {
-  const params = useParams<{ id: string }>();
-  const navigate = useNavigate();
-  if (!params.id) return null;
-  return React.createElement(AppointmentEdit, {
-    appointmentId: params.id,
-    onBack: () => navigate(-1),
-  });
-}
-
-// U9 (E7) — surface the per-job photo page so the persisted-photo pipeline
-// (presign → PUT → attach → gallery) is reachable via `jobs/:id/photos`.
-function JobPhotosRoute() {
-  const params = useParams<{ id: string }>();
-  if (!params.id) return null;
-  return React.createElement(JobPhotos, { jobId: params.id });
-}
-
-// Wrap EstimatesPage to pre-select the estimate from the URL param.
-function EstimateDetailRoute() {
-  const params = useParams<{ id: string }>();
-  if (!params.id) return null;
-  return React.createElement(EstimatesPage as React.ComponentType<{ defaultSelectedId?: string }>, { defaultSelectedId: params.id });
-}
-
-// The param-wrapper routes read `:id`/params and forward typed props to a heavy
-// page. Defining the wrapper *inside* the lazy loader keeps the heavy page out
-// of the eager graph while the tiny wrapper logic loads with its chunk.
+// The param-wrapper routes (`:id` → typed props) are defined *inside* their
+// lazy loaders below, so each heavy page stays out of the eager graph while the
+// tiny wrapper logic loads with its own chunk. Shared hydrate fallback element
+// for cold deep-links into those lazy chunks.
+const routeFallback = React.createElement(RouteFallback);
 
 export const router = createBrowserRouter([
   // ── Auth (fullscreen, no Shell) ───────────────────────────────────────────
@@ -178,6 +79,20 @@ export const router = createBrowserRouter([
       { path: 'jobs',           lazy: async () => ({ Component: (await import('./components/jobs/JobsPage')).JobsPage }) },
       { path: 'jobs/new',       lazy: async () => ({ Component: (await import('./pages/jobs/JobCreate')).JobCreate }) },
       { path: 'jobs/:id',       lazy: async () => ({ Component: (await import('./components/jobs/JobsPage')).JobsPage }) },
+      // U9 (E7) — per-job photo page so the persisted-photo pipeline
+      // (presign → PUT → attach → gallery) is reachable via `jobs/:id/photos`.
+      {
+        path: 'jobs/:id/photos',
+        lazy: async () => {
+          const { JobPhotos } = await import('./pages/jobs/JobPhotos');
+          function JobPhotosRoute() {
+            const params = useParams<{ id: string }>();
+            if (!params.id) return null;
+            return React.createElement(JobPhotos, { jobId: params.id });
+          }
+          return { Component: JobPhotosRoute };
+        },
+      },
       { path: 'schedule',       lazy: async () => ({ Component: (await import('./components/schedule/SchedulePage')).SchedulePage }) },
       { path: 'dispatch',       lazy: async () => ({ Component: (await import('./pages/dispatch/DispatchBoard')).DispatchBoard }) },
       { path: 'customers',      lazy: async () => ({ Component: (await import('./components/customers/CustomersPage')).CustomersPage }) },

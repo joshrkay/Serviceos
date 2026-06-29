@@ -623,6 +623,19 @@ export class VoiceSessionStore {
   }
 
   /**
+   * Number of LIVE (non-ended) sessions. Ended telephony sessions are retained
+   * in the map for post-call lookups until the idle reaper removes them, so
+   * `size()` overcounts for shutdown purposes. The SIGTERM drain waits on THIS
+   * so a deploy with no live call tears down immediately instead of burning the
+   * full DRAIN_TIMEOUT_MS on already-ended sessions. (Codex P2, PR #628.)
+   */
+  liveCount(): number {
+    let n = 0;
+    for (const session of this.sessions.values()) if (!session.ended) n += 1;
+    return n;
+  }
+
+  /**
    * X10/PR#398 — supervisor wall discovery. Returns non-ended sessions
    * for the given tenant so the wall can seed its local state and send
    * per-session WS `subscribe` frames (the gateway rejects voice subs

@@ -188,6 +188,25 @@ import { PgCustomFieldRepository } from './customers/pg-custom-field';
 import { InMemoryCustomerMergeRepository } from './customers/merge';
 import { PgCustomerMergeRepository } from './customers/pg-merge';
 import { createCustomerCustomFieldRouter } from './routes/customer-custom-fields';
+import { InMemoryJobFormRepository } from './job-forms/job-form';
+import { PgJobFormRepository } from './job-forms/pg-job-form';
+import { createJobFormRouter } from './routes/job-forms';
+import { InMemoryRecurringJobRepository } from './recurring-jobs/recurring-job';
+import { PgRecurringJobRepository } from './recurring-jobs/pg-recurring-job';
+import { createRecurringJobRouter } from './routes/recurring-jobs';
+import { InMemoryJobCustomFieldRepository } from './jobs/job-custom-field';
+import { PgJobCustomFieldRepository } from './jobs/pg-job-custom-field';
+import { createJobCustomFieldRouter } from './routes/job-custom-fields';
+import { InMemoryFinancingRepository } from './financing/financing';
+import { PgFinancingRepository } from './financing/pg-financing';
+import { createFinancingProvider } from './financing/financing-provider';
+import { createFinancingRouter, createFinancingWebhookRouter } from './routes/financing';
+import { InMemoryCampaignRepository } from './marketing/campaign';
+import { PgCampaignRepository } from './marketing/pg-campaign';
+import { createMarketingRouter } from './routes/marketing';
+import { InMemoryCustomerGroupRepository } from './customers/customer-group';
+import { PgCustomerGroupRepository } from './customers/pg-customer-group';
+import { createCustomerGroupRouter } from './routes/customer-groups';
 import { InMemoryLeadRepository } from './leads/lead';
 import { InMemoryLocationRepository } from './locations/location';
 import { InMemoryJobRepository } from './jobs/job';
@@ -665,6 +684,11 @@ export function createApp(): express.Express {
   // req.body fields (used for signature verification + AccountSid match).
   app.use('/webhooks/twilio', express.urlencoded({ extended: false }));
 
+  // FIN — Wisetack financing webhook needs the raw body for HMAC verification.
+  // Register the raw parser BEFORE global express.json() (like Stripe); the
+  // handler router is mounted later once repos are constructed.
+  app.use('/webhooks/wisetack', express.raw({ type: '*/*' }));
+
   // Body parsing for all other routes
   app.use(express.json());
 
@@ -969,6 +993,13 @@ export function createApp(): express.Express {
   // U2 (CRM Jobber parity) — customer tags + tenant-defined custom fields.
   const customerTagRepo     = pool ? new PgTagRepository(pool)           : new InMemoryTagRepository();
   const customerCustomFieldRepo = pool ? new PgCustomFieldRepository(pool) : new InMemoryCustomFieldRepository();
+  const jobFormRepo = pool ? new PgJobFormRepository(pool) : new InMemoryJobFormRepository();
+  const recurringJobRepo = pool ? new PgRecurringJobRepository(pool) : new InMemoryRecurringJobRepository();
+  const jobCustomFieldRepo = pool ? new PgJobCustomFieldRepository(pool) : new InMemoryJobCustomFieldRepository();
+  const financingRepo = pool ? new PgFinancingRepository(pool) : new InMemoryFinancingRepository();
+  const financingProvider = createFinancingProvider();
+  const campaignRepo = pool ? new PgCampaignRepository(pool) : new InMemoryCampaignRepository();
+  const customerGroupRepo = pool ? new PgCustomerGroupRepository(pool) : new InMemoryCustomerGroupRepository();
   // Story 4.6 — customer merge. Pg re-parents child rows + archives the loser
   // in one transaction; the no-DB dev path only archives (no child tables).
   const customerMergeRepo = pool
@@ -3589,6 +3620,52 @@ export function createApp(): express.Express {
     '/api/customer-custom-fields',
     createCustomerCustomFieldRouter(customerCustomFieldRepo, auditRepo)
   );
+  app.use('/api/job-forms', createJobFormRouter(jobFormRepo, auditRepo, jobRepo));
+  app.use('/api/job-custom-fields', createJobCustomFieldRouter(jobCustomFieldRepo, auditRepo, jobRepo));
+  app.use('/api/customer-groups', createCustomerGroupRouter(customerGroupRepo, auditRepo));
+  app.use(
+    '/api/marketing',
+    createMarketingRouter({
+      campaignRepo,
+      customerRepo,
+      tagRepo: customerTagRepo,
+      delivery: messageDelivery,
+      groupMemberIds: (tid, gid) => customerGroupRepo.listMemberIds(tid, gid),
+      auditRepo,
+    })
+  );
+  app.use(
+    '/api/financing',
+    createFinancingRouter({
+      financingRepo,
+      invoiceRepo,
+      jobRepo,
+      customerRepo,
+      provider: financingProvider,
+      auditRepo,
+    })
+  );
+  app.use(
+    '/webhooks/wisetack',
+    createFinancingWebhookRouter({
+      financingRepo,
+      auditRepo,
+      webhookSecret: process.env.WISETACK_WEBHOOK_SECRET,
+    })
+  );
+  app.use(
+    '/api/recurring-jobs',
+    createRecurringJobRouter(recurringJobRepo, auditRepo, {
+      jobRepo,
+      appointmentRepo,
+      locationRepo,
+      resolveTimezone: async (tenantId: string) => {
+        const s = await settingsRepo.findByTenant(tenantId);
+        return s?.timezone ?? 'America/New_York';
+      },
+    },
+    customerRepo)
+  );
   app.use('/api/time-entries', createTimeEntriesRouter(timeEntryRepo, auditRepo));
   // P10-001: portal session creation/revocation. Mounted at
   // `/api/portal-sessions` (NOT `/api/customers/:id/portal-session`)
@@ -5352,26 +5429,29 @@ export function createApp(): express.Express {
     try {
       // eslint-disable-next-line no-console
       console.log(`[app] ${signal} received — stopping background loops, closing voice sessions and pg pool`);
-      // P4/U-P4a — DRAIN FIRST. Flip the drain flag so /ready 503s and new WS
-      // upgrades (dashboards + Twilio media streams) are rejected, then wait
-      // (bounded) for in-flight voice sessions to finish before tearing down the
-      // pool/Redis/sessions. The window must be shorter than index.ts's
-      // force-exit and Railway's stop grace period; calls still live at the
-      // deadline are closed by the teardown below (Twilio ends the call).
+      // P4/U-P4a — flip the drain flag so /ready 503s and new WS upgrades
+      // (dashboards + Twilio media streams) are rejected.
       setDraining(true);
-      const drainDeadline = Date.now() + (Number(process.env.DRAIN_TIMEOUT_MS) || 25_000);
-      while (voiceSessionStore.size() > 0 && Date.now() < drainDeadline) {
-        await new Promise((resolve) => setTimeout(resolve, 500));
-      }
-      console.log(`[app] drain complete — ${voiceSessionStore.size()} session(s) still active at teardown`);
       // Blocker 5 — stop all background setInterval loops (sweeps, queue poll,
-      // execution worker) BEFORE the pg pool drains. `shuttingDown` also
-      // prevents an already-scheduled leader-gated sweep tick from starting
-      // new work. Without this, a tick fires mid-teardown and throws on a
-      // closed pool. In-flight queue jobs are bounded by the pool-drain race
-      // below.
+      // execution worker) and set `shuttingDown` IMMEDIATELY, BEFORE the voice
+      // drain wait below. The drain wait can run for the full DRAIN_TIMEOUT_MS
+      // (~25s); if the queue poller and leader-gated sweeps kept ticking through
+      // it they would claim fresh DB/Redis work right up to the deadline, then
+      // get torn down with jobs in flight. `shuttingDown` also prevents an
+      // already-scheduled leader sweep tick from starting new work. Voice
+      // sessions are in-memory FSMs and don't depend on these loops, so halting
+      // them first does not impede the drain. (Codex review on PR #628.)
       shuttingDown = true;
       for (const handle of backgroundIntervals) clearInterval(handle);
+      // Now DRAIN: wait (bounded) for in-flight voice sessions to finish before
+      // tearing down the pool/Redis/sessions. The window must be shorter than
+      // index.ts's force-exit and Railway's stop grace period; calls still live
+      // at the deadline are closed by the teardown below (Twilio ends the call).
+      const drainDeadline = Date.now() + (Number(process.env.DRAIN_TIMEOUT_MS) || 25_000);
+      while (voiceSessionStore.liveCount() > 0 && Date.now() < drainDeadline) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+      console.log(`[app] drain complete — ${voiceSessionStore.liveCount()} live session(s) still active at teardown`);
       // Stop the voice-session-store reaper interval so the process can
       // exit cleanly even when no DB pool is wired (dev / in-memory mode).
       voiceSessionStore.dispose();

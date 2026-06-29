@@ -28,12 +28,11 @@ const WEBHOOK_SECRET = 'whsec_dGVzdC1zZWNyZXQ=';
 function signPayload(body: object, svixId: string, svixTimestamp: string) {
   const rawBody = JSON.stringify(body);
   const secretBytes = Buffer.from(WEBHOOK_SECRET.replace(/^whsec_/, ''), 'base64');
-  const hexKey = secretBytes.toString('hex');
   const signedContent = `${svixId}.${svixTimestamp}.${rawBody}`;
   const sig = crypto
-    .createHmac('sha256', hexKey)
-    .update(`${svixTimestamp}.${signedContent}`)
-    .digest('hex');
+    .createHmac('sha256', secretBytes)
+    .update(signedContent)
+    .digest('base64');
   return { rawBody, signature: `v1,${sig}` };
 }
 

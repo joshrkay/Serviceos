@@ -24,7 +24,7 @@ booking + intake, time tracking, expenses, Google reviews, financial reporting,
 | 5 | Tip collection at checkout | Payments | S | todo |
 | 6 | Maintenance contracts DB persistence (graduate stub) | Jobs | M | ✅ done |
 | 7 | Payment plan / installment support (expose milestone schedules) | Payments | M | todo |
-| 8 | Customer groups / segmentation | CRM | M | todo |
+| 8 | Customer groups / segmentation | CRM | M | ✅ done |
 | 9 | ACH bank payments | Payments | M | todo |
 | 10 | Route optimization / TSP (needs external solver) | Dispatch | M | todo |
 | 11 | Multi-platform review aggregation (Yelp/Facebook, needs OAuth) | Reviews | M-L | todo |
@@ -53,6 +53,15 @@ fully testable in CI.
   nullable invoice columns; threaded through the invoice model/repo/route +
   createInvoiceSchema; rendered on the invoice detail + public pay page.
   Cents-exact billing tests + integration round-trip + web row tests.
+- Iteration 6: #8 Customer groups / segmentation — first-class named segments
+  with explicit membership (distinct from free-form tags). Domain + in-memory +
+  Pg repo (migration 227: customer_groups + customer_group_members, FORCE RLS,
+  case-insensitive partial unique on active names) + /api/customer-groups CRUD +
+  membership routes. Wired into marketing campaigns (campaigns can target a
+  group via segmentGroupId, migration 228; group takes precedence over tag).
+  Web: groups manager (settings), membership panel on the customer detail, and
+  a group selector in the campaign composer. Unit + Docker-gated integration
+  (incl. archived-name reuse) + web tests; audit events on every mutation.
 - Iteration 5: #6 Maintenance contracts persistence — graduated the in-memory
   route stub to a real tenant-scoped table (migration 203) + domain module +
   PgMaintenanceContractRepository (with an InMemory double) + router rewrite +

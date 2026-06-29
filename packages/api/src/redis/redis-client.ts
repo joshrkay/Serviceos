@@ -52,6 +52,14 @@ export async function createRedisClient(
   try {
     const { default: Redis } = await import('ioredis');
     const client = new Redis(redisUrl, PROVEN_OPTIONS);
+    // ioredis extends EventEmitter: an 'error' event with NO listener throws
+    // an uncaught exception and crashes the process. Background/transient Redis
+    // errors after boot (reconnects, command timeouts) must degrade gracefully —
+    // every store fails open to its InMemory path — not take down the API.
+    // Attach BEFORE connect() so a handshake error is caught here too.
+    client.on('error', (err: Error) => {
+      process.stderr.write(`Redis client error: ${err.message}\n`);
+    });
     await client.connect();
     return client;
   } catch {

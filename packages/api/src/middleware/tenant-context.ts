@@ -57,6 +57,27 @@ export const tenantContextStore = new AsyncLocalStorage<TenantContext>();
  * after auth on routes that require a tenant), but we'd rather emit 403
  * than crash the database with a missing GUC.
  */
+/**
+ * Authenticated GET endpoints whose responses are long-lived SSE event streams
+ * (dispatch board / escalation / voice-session events). The request-transaction
+ * bypass in `withTenantTransaction` is restricted to these — NOT keyed off the
+ * client-controlled `Accept` header — so a caller can't send
+ * `Accept: text/event-stream` to a mutating route to skip the transaction and
+ * lose multi-write atomicity (Codex P2). Suffix-anchored so they match whether
+ * or not the `/api` mount prefix has been stripped from `req.path`. Adding a
+ * new SSE route? add its matcher here; until then it keeps the (safe)
+ * transactional path.
+ */
+const SSE_STREAM_ROUTES: readonly RegExp[] = [
+  /\/escalations\/events$/,
+  /\/dispatch\/board\/events$/,
+  /\/voice\/sessions\/[^/]+\/events$/,
+];
+
+function isSseStreamRoute(req: { method: string; path: string }): boolean {
+  return req.method === 'GET' && SSE_STREAM_ROUTES.some((re) => re.test(req.path));
+}
+
 export function withTenantTransaction(pool: Pool) {
   return async (
     req: AuthenticatedRequest,
@@ -69,6 +90,25 @@ export function withTenantTransaction(pool: Pool) {
         error: 'FORBIDDEN',
         message: 'Tenant context required',
       });
+      return;
+    }
+
+    // SSE / long-lived streams: a `text/event-stream` response keeps the HTTP
+    // request open indefinitely (heartbeats), and `res.finish` — which commits
+    // and releases the transaction below — does not fire until the stream
+    // closes. Holding a BEGIN open that long pins one pooled connection, and
+    // under PgBouncer transaction pooling one Postgres server backend, for the
+    // entire stream; ~`default_pool_size` idle dashboards would exhaust the
+    // pool and stall normal /api requests. The streaming endpoints only
+    // subscribe to in-process event buses and read `req.auth`, so they need no
+    // request transaction; any incidental DB read self-manages a short,
+    // pooling-safe `withTenant` transaction (U2b-2) using the tenantId its
+    // caller passes explicitly — the request store only supplies connection
+    // reuse, never the tenant scope. Enforce tenant presence (above) but skip
+    // the long-held transaction for the explicit SSE allowlist (NOT a generic
+    // Accept header — see SSE_STREAM_ROUTES). (Codex P1/P2, PR #628.)
+    if (isSseStreamRoute(req)) {
+      next();
       return;
     }
 

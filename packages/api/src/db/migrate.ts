@@ -1,4 +1,4 @@
-import { createPool } from './pool';
+import { createPool, createDirectPool } from './pool';
 import { getMigrationSQL } from './schema';
 
 interface PgLikeError {
@@ -18,7 +18,15 @@ async function runMigrations(): Promise<void> {
     console.log('DATABASE_URL not set — skipping migrations');
     return;
   }
-  const pool = createPool();
+  // Migrations issue session-scoped `SET lock_timeout` / `SET statement_timeout`
+  // and then DDL. Under the PgBouncer topology `DATABASE_URL` points at
+  // transaction-mode PgBouncer, where those session settings can land on a
+  // DIFFERENT backend than the DDL that follows. Prefer the DIRECT (session)
+  // DSN when configured — the same bypass runAsLeader / the idempotency lock /
+  // LISTEN-NOTIFY use — and fall back to DATABASE_URL when no direct DSN is set
+  // (single-instance / no PgBouncer; identical to prior behavior).
+  // (Codex P1, PR #628.)
+  const pool = createDirectPool() ?? createPool();
   const client = await pool.connect();
   try {
     // Prevent DDL lock waits from stalling startup: ALTER TABLE ENABLE RLS

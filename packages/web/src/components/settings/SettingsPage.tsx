@@ -5,7 +5,7 @@ import {
   ChevronRight, Building2, Users, Shield, Bell, Globe, Clock,
   CreditCard, Link, Zap, FileText, Sparkles, Copy, ExternalLink,
   MapPin, Check, Store, RefreshCw, TrendingUp, Mail, BookOpen, Star, Phone,
-  Calendar,
+  Calendar, ClipboardList, SlidersHorizontal, Megaphone,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { QuickBooksIntegrationSheet } from './QuickBooksIntegrationSheet';
@@ -17,6 +17,10 @@ import { SupervisorBackupSection } from './SupervisorBackupSection';
 import { BusinessProfileSheet } from './BusinessProfileSheet';
 import { TechnicianPhoneSheet } from './TechnicianPhoneSheet';
 import { TerminologySheet } from './TerminologySheet';
+import { JobFormTemplatesSheet } from './JobFormTemplatesSheet';
+import { JobCustomFieldsSheet } from './JobCustomFieldsSheet';
+import { MarketingCampaignsSheet } from './MarketingCampaignsSheet';
+import { CustomerGroupsSheet } from './CustomerGroupsSheet';
 import { AIApprovalRulesSheet } from './AIApprovalRulesSheet';
 import { DepositRulesSheet } from './DepositRulesSheet';
 import { DiscountPolicySheet } from './DiscountPolicySheet';
@@ -182,6 +186,10 @@ export function SettingsPage() {
   const [businessProfileOpen, setBusinessProfileOpen] = useState(false);
   const [technicianPhoneOpen, setTechnicianPhoneOpen] = useState(false);
   const [terminologyOpen, setTerminologyOpen] = useState(false);
+  const [jobFormsOpen, setJobFormsOpen] = useState(false);
+  const [jobCustomFieldsOpen, setJobCustomFieldsOpen] = useState(false);
+  const [marketingOpen, setMarketingOpen] = useState(false);
+  const [customerGroupsOpen, setCustomerGroupsOpen] = useState(false);
   const [aiRulesOpen, setAiRulesOpen] = useState(false);
   const [depositRulesOpen, setDepositRulesOpen] = useState(false);
   const [discountPolicyOpen, setDiscountPolicyOpen] = useState(false);
@@ -363,6 +371,7 @@ export function SettingsPage() {
         { icon: Phone,     label: 'On-call phone',       description: 'The number escalations ring when you are on call',     action: () => setTechnicianPhoneOpen(true) },
         { icon: Globe,     label: 'Language & region',   description: 'English / Español · Voice + customer messages', action: () => navigate('/settings/language') },
         { icon: FileText,  label: 'Terminology',         description: 'Customize labels (e.g. "Quote" vs "Estimate")',    action: () => setTerminologyOpen(true) },
+        { icon: Users,     label: 'Customer groups',     description: 'Named segments you can target with campaigns',     action: () => setCustomerGroupsOpen(true) },
         { icon: BookOpen,  label: 'Price book',          description: 'Services, parts & materials with set prices',          action: () => navigate('/settings/price-book') },
         { icon: Zap,       label: 'Vertical packs',      description: 'Activate HVAC, Plumbing, or other service verticals',  action: () => setVerticalPacksOpen(true) },
       ],
@@ -404,6 +413,8 @@ export function SettingsPage() {
         { icon: Zap,      label: 'AI approval rules',               description: 'Set what the AI can apply automatically',    action: () => setAiRulesOpen(true) },
         { icon: Bell,     label: 'Reminders & follow-ups',          description: 'Auto-send thresholds and timing',             action: () => toast.info('Coming soon') },
         { icon: FileText, label: 'Estimate & invoice templates',    description: 'Default line items, terms, expiry',           action: () => navigate('/settings/templates') },
+        { icon: ClipboardList, label: 'Forms & checklists',         description: 'Reusable job forms your team fills out on site', action: () => setJobFormsOpen(true) },
+        { icon: SlidersHorizontal, label: 'Job custom fields',      description: 'Extra fields on every job (PO #, permit #, gate code)', action: () => setJobCustomFieldsOpen(true) },
         { icon: Clock,    label: 'Operator hours',                  description: 'Business hours for after-hours call routing', action: () => setOperatorHoursOpen(true) },
         { icon: Zap,      label: 'Call routing & handoff',          description: 'Channels, triggers, and after-hours behavior', action: () => setCallRoutingOpen(true) },
         { icon: Zap,      label: 'Do-Not-Call list',                description: 'Numbers blocked from outbound calls (TCPA / DNC)', action: () => setDncListOpen(true) },
@@ -413,6 +424,7 @@ export function SettingsPage() {
       title: 'Customer experience',
       items: [
         { icon: Star, label: 'Feedback & reviews', description: 'Average rating, distribution, and recent comments', action: () => navigate('/settings/feedback') },
+        { icon: Megaphone, label: 'Email campaigns', description: 'Send promos & announcements to customer segments', action: () => setMarketingOpen(true) },
       ],
     },
     {
@@ -868,6 +880,18 @@ export function SettingsPage() {
       )}
 
       {/* Terminology sheet — entity-label overrides (Quote vs Estimate, etc.) */}
+      {jobFormsOpen && (
+        <JobFormTemplatesSheet onClose={() => setJobFormsOpen(false)} />
+      )}
+      {jobCustomFieldsOpen && (
+        <JobCustomFieldsSheet onClose={() => setJobCustomFieldsOpen(false)} />
+      )}
+      {marketingOpen && (
+        <MarketingCampaignsSheet onClose={() => setMarketingOpen(false)} />
+      )}
+      {customerGroupsOpen && (
+        <CustomerGroupsSheet onClose={() => setCustomerGroupsOpen(false)} />
+      )}
       {terminologyOpen && (
         <TerminologySheet onClose={() => setTerminologyOpen(false)} />
       )}

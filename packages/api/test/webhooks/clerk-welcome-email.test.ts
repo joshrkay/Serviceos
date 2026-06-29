@@ -51,12 +51,12 @@ function fakeQueue(sent: SentJob[]) {
 
 function signSvixPayload(body: object, svixId: string, svixTimestamp: string, secret: string) {
   const rawBody = JSON.stringify(body);
-  const hexKey = Buffer.from(secret.replace(/^whsec_/, ''), 'base64').toString('hex');
+  const secretBytes = Buffer.from(secret.replace(/^whsec_/, ''), 'base64');
   const signedContent = `${svixId}.${svixTimestamp}.${rawBody}`;
   const sig = crypto
-    .createHmac('sha256', hexKey)
-    .update(`${svixTimestamp}.${signedContent}`)
-    .digest('hex');
+    .createHmac('sha256', secretBytes)
+    .update(signedContent)
+    .digest('base64');
   return { rawBody, signature: `v1,${sig}` };
 }
 

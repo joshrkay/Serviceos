@@ -5400,6 +5400,312 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_proposals_status_created ON proposals(tenant_id, status, created_at DESC);
     DROP INDEX IF EXISTS idx_proposals_status;
   `,
+  '221_create_job_forms': `
+    -- J-FORM (Jobber parity) — job forms & checklists. Jobber lets a shop
+    -- define reusable form/checklist templates that technicians fill out per
+    -- job; we mirror that with templates + per-job submissions. Read/written by
+    -- src/job-forms/pg-job-form.ts. Both tables are tenant-scoped with FORCE RLS.
+    --
+    -- field_type is kept in lockstep with jobFormFieldTypeSchema
+    -- (packages/api/src/shared/contracts.ts) and JOB_FORM_FIELD_TYPES; the
+    -- enum lives in the JSONB field blobs, not a column CHECK, so it is
+    -- validated in app code (job-form.ts) rather than the DB.
+
+    -- Templates: an ordered list of typed fields stored as a JSONB array,
+    -- always read/written together with the template.
+    CREATE TABLE IF NOT EXISTS job_form_templates (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      name TEXT NOT NULL,
+      description TEXT,
+      fields JSONB NOT NULL DEFAULT '[]'::jsonb,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      is_archived BOOLEAN NOT NULL DEFAULT false,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_job_form_templates_tenant
+      ON job_form_templates(tenant_id);
+    ALTER TABLE job_form_templates ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE job_form_templates FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_job_form_templates ON job_form_templates;
+    CREATE POLICY tenant_isolation_job_form_templates ON job_form_templates
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    -- Submissions: a filled instance attached to a job. template_name + fields
+    -- are SNAPSHOT at creation so a completed record is immutable history even
+    -- if the template is later edited or archived. answers is a JSONB array of
+    -- { fieldId, value }. completed_by holds the actor id (Clerk/user id) and
+    -- is a free-text actor reference, not an FK, to mirror the audit actor model.
+    CREATE TABLE IF NOT EXISTS job_form_submissions (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      job_id UUID NOT NULL REFERENCES jobs(id),
+      template_id UUID NOT NULL REFERENCES job_form_templates(id),
+      template_name TEXT NOT NULL,
+      fields JSONB NOT NULL DEFAULT '[]'::jsonb,
+      answers JSONB NOT NULL DEFAULT '[]'::jsonb,
+      status TEXT NOT NULL DEFAULT 'draft'
+        CHECK (status IN ('draft', 'completed')),
+      completed_by TEXT,
+      completed_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_job_form_submissions_job
+      ON job_form_submissions(tenant_id, job_id);
+    CREATE INDEX IF NOT EXISTS idx_job_form_submissions_template
+      ON job_form_submissions(tenant_id, template_id);
+    ALTER TABLE job_form_submissions ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE job_form_submissions FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_job_form_submissions ON job_form_submissions;
+    CREATE POLICY tenant_isolation_job_form_submissions ON job_form_submissions
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '222_create_recurring_jobs': `
+    -- R-JOB (Jobber parity) — recurring job series. Jobber's recurring jobs
+    -- repeat on a schedule (weekly lawn care, monthly HVAC maintenance). This
+    -- table models the schedule: a customer, a title, an anchor date, and a
+    -- recurrence rule (JSONB). Upcoming visit dates are computed from the rule
+    -- in app code (src/recurring-jobs/recurrence.ts), not stored. Read/written
+    -- by src/recurring-jobs/pg-recurring-job.ts. Tenant-scoped with FORCE RLS.
+    --
+    -- rule shape: { frequency: 'daily'|'weekly'|'biweekly'|'monthly',
+    --               interval: int>=1, count?: int, until?: 'YYYY-MM-DD' }
+    -- kept in lockstep with recurrenceRuleSchema (src/shared/contracts.ts).
+    CREATE TABLE IF NOT EXISTS recurring_jobs (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      customer_id UUID NOT NULL REFERENCES customers(id),
+      title TEXT NOT NULL,
+      anchor_date DATE NOT NULL,
+      rule JSONB NOT NULL DEFAULT '{}'::jsonb,
+      notes TEXT,
+      is_archived BOOLEAN NOT NULL DEFAULT false,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_recurring_jobs_tenant
+      ON recurring_jobs(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_recurring_jobs_customer
+      ON recurring_jobs(tenant_id, customer_id);
+    ALTER TABLE recurring_jobs ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE recurring_jobs FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_recurring_jobs ON recurring_jobs;
+    CREATE POLICY tenant_isolation_recurring_jobs ON recurring_jobs
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '223_recurring_job_materialization': `
+    -- R-JOB (Jobber parity) — materialize recurring series into real jobs +
+    -- appointments. Adds the per-visit scheduling intent (time-of-day,
+    -- duration, visit kind) to the series and a ledger that makes generation
+    -- idempotent: one visit per (series, occurrence date). Read/written by
+    -- src/recurring-jobs/pg-recurring-job.ts + materialize.ts.
+
+    ALTER TABLE recurring_jobs
+      ADD COLUMN IF NOT EXISTS anchor_time TEXT NOT NULL DEFAULT '09:00';
+    ALTER TABLE recurring_jobs
+      ADD COLUMN IF NOT EXISTS duration_minutes INTEGER NOT NULL DEFAULT 60;
+    ALTER TABLE recurring_jobs
+      ADD COLUMN IF NOT EXISTS appointment_type TEXT;
+    -- appointment_type mirrors the appointments CHECK taxonomy (kept in lockstep
+    -- with appointmentTypeSchema). Named ADD CONSTRAINT so the getMigrationSQL
+    -- DROP-CONSTRAINT rewriter keeps re-runs safe. NULL = unspecified.
+    ALTER TABLE recurring_jobs
+      ADD CONSTRAINT recurring_jobs_appointment_type_check
+      CHECK (appointment_type IS NULL OR appointment_type IN
+        ('estimate', 'repair', 'install', 'maintenance', 'diagnostic'));
+
+    -- Materialization ledger: one row per generated occurrence. The UNIQUE
+    -- constraint is the idempotency guarantee (claimOccurrence does an
+    -- ON CONFLICT DO NOTHING insert). job_id / appointment_id are filled in
+    -- after the visit is created (linkOccurrence).
+    CREATE TABLE IF NOT EXISTS recurring_job_occurrences (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      recurring_job_id UUID NOT NULL REFERENCES recurring_jobs(id),
+      occurrence_date DATE NOT NULL,
+      job_id UUID REFERENCES jobs(id),
+      appointment_id UUID REFERENCES appointments(id),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    ALTER TABLE recurring_job_occurrences
+      ADD CONSTRAINT recurring_job_occurrences_unique
+      UNIQUE (tenant_id, recurring_job_id, occurrence_date);
+    CREATE INDEX IF NOT EXISTS idx_recurring_job_occurrences_series
+      ON recurring_job_occurrences(tenant_id, recurring_job_id);
+    ALTER TABLE recurring_job_occurrences ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE recurring_job_occurrences FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_recurring_job_occurrences ON recurring_job_occurrences;
+    CREATE POLICY tenant_isolation_recurring_job_occurrences ON recurring_job_occurrences
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '224_create_job_custom_fields': `
+    -- J-CF (Jobber parity) — tenant-defined custom fields on jobs (the
+    -- job-scoped twin of customer custom fields, migration 187). Structured,
+    -- reportable attributes on the job record (PO #, permit #, gate code).
+    -- Read/written by src/jobs/pg-job-custom-field.ts. FORCE RLS on both tables.
+    -- field_type kept in lockstep with customerCustomFieldTypeSchema.
+    CREATE TABLE IF NOT EXISTS job_custom_field_defs (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      key TEXT NOT NULL,
+      label TEXT NOT NULL,
+      field_type TEXT NOT NULL DEFAULT 'text'
+        CHECK (field_type IN ('text', 'number', 'date', 'select')),
+      options JSONB NOT NULL DEFAULT '[]'::jsonb,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      is_archived BOOLEAN NOT NULL DEFAULT false,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    ALTER TABLE job_custom_field_defs
+      ADD CONSTRAINT job_custom_field_defs_key_unique UNIQUE (tenant_id, key);
+    CREATE INDEX IF NOT EXISTS idx_job_cfd_tenant ON job_custom_field_defs(tenant_id);
+    ALTER TABLE job_custom_field_defs ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE job_custom_field_defs FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_job_cfd ON job_custom_field_defs;
+    CREATE POLICY tenant_isolation_job_cfd ON job_custom_field_defs
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    CREATE TABLE IF NOT EXISTS job_custom_field_values (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      job_id UUID NOT NULL REFERENCES jobs(id),
+      field_def_id UUID NOT NULL REFERENCES job_custom_field_defs(id),
+      value TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    ALTER TABLE job_custom_field_values
+      ADD CONSTRAINT job_cfv_unique UNIQUE (tenant_id, job_id, field_def_id);
+    CREATE INDEX IF NOT EXISTS idx_job_cfv_job ON job_custom_field_values(tenant_id, job_id);
+    ALTER TABLE job_custom_field_values ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE job_custom_field_values FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_job_cfv ON job_custom_field_values;
+    CREATE POLICY tenant_isolation_job_cfv ON job_custom_field_values
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '225_create_financing_applications': `
+    -- FIN (Jobber parity) — consumer financing on invoices (Wisetack-style
+    -- "buy now / pay over time"). One application per offer on an invoice;
+    -- the provider drives status via a signed webhook. Read/written by
+    -- src/financing/pg-financing.ts. amount_cents is integer cents. FORCE RLS.
+    CREATE TABLE IF NOT EXISTS financing_applications (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      invoice_id UUID NOT NULL REFERENCES invoices(id),
+      customer_id UUID REFERENCES customers(id),
+      amount_cents BIGINT NOT NULL CHECK (amount_cents > 0),
+      provider TEXT NOT NULL CHECK (provider IN ('wisetack', 'manual')),
+      external_id TEXT,
+      application_url TEXT,
+      status TEXT NOT NULL DEFAULT 'offered'
+        CHECK (status IN ('offered', 'prequalified', 'approved', 'declined', 'funded', 'expired', 'canceled')),
+      status_reason TEXT,
+      created_by TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_financing_applications_invoice
+      ON financing_applications(tenant_id, invoice_id);
+    ALTER TABLE financing_applications ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE financing_applications FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_financing_applications ON financing_applications;
+    CREATE POLICY tenant_isolation_financing_applications ON financing_applications
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '226_create_marketing_campaigns': `
+    -- MKT (Jobber parity) — customer email campaigns. Compose once, target all
+    -- active customers or a tag segment, send via the delivery provider.
+    -- Read/written by src/marketing/pg-campaign.ts. FORCE RLS.
+    CREATE TABLE IF NOT EXISTS marketing_campaigns (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      name TEXT NOT NULL,
+      subject TEXT NOT NULL,
+      body_text TEXT NOT NULL,
+      body_html TEXT,
+      segment_tag TEXT,
+      status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'sent')),
+      recipient_count INTEGER NOT NULL DEFAULT 0,
+      sent_count INTEGER NOT NULL DEFAULT 0,
+      failed_count INTEGER NOT NULL DEFAULT 0,
+      created_by TEXT NOT NULL,
+      sent_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_marketing_campaigns_tenant
+      ON marketing_campaigns(tenant_id);
+    ALTER TABLE marketing_campaigns ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE marketing_campaigns FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_marketing_campaigns ON marketing_campaigns;
+    CREATE POLICY tenant_isolation_marketing_campaigns ON marketing_campaigns
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '227_create_customer_groups': `
+    -- U8 (CRM Jobber parity) — customer groups / segmentation. A first-class,
+    -- named segment with explicit membership (distinct from free-form
+    -- customer_tags). Read/written by src/customers/pg-customer-group.ts.
+    -- Both tables tenant-scoped with FORCE RLS.
+    CREATE TABLE IF NOT EXISTS customer_groups (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      name TEXT NOT NULL,
+      description TEXT,
+      color TEXT,
+      is_archived BOOLEAN NOT NULL DEFAULT false,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    -- Case-insensitive, partial unique: names are unique among ACTIVE groups
+    -- only, so archiving a group frees its name for reuse (matches the app-level
+    -- dedup in createCustomerGroup, which intentionally ignores archived rows).
+    -- LOWER() keeps it in lockstep with findGroupByName's case-insensitive match.
+    CREATE UNIQUE INDEX IF NOT EXISTS customer_groups_name_unique
+      ON customer_groups (tenant_id, LOWER(name)) WHERE is_archived = false;
+    CREATE INDEX IF NOT EXISTS idx_customer_groups_tenant ON customer_groups(tenant_id);
+    ALTER TABLE customer_groups ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE customer_groups FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_customer_groups ON customer_groups;
+    CREATE POLICY tenant_isolation_customer_groups ON customer_groups
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    -- Membership join: one row per (group, customer), idempotent via the
+    -- unique constraint (addMember does ON CONFLICT DO NOTHING).
+    CREATE TABLE IF NOT EXISTS customer_group_members (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      group_id UUID NOT NULL REFERENCES customer_groups(id),
+      customer_id UUID NOT NULL REFERENCES customers(id),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    ALTER TABLE customer_group_members
+      ADD CONSTRAINT customer_group_members_unique UNIQUE (tenant_id, group_id, customer_id);
+    CREATE INDEX IF NOT EXISTS idx_customer_group_members_group
+      ON customer_group_members(tenant_id, group_id);
+    CREATE INDEX IF NOT EXISTS idx_customer_group_members_customer
+      ON customer_group_members(tenant_id, customer_id);
+    ALTER TABLE customer_group_members ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE customer_group_members FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_customer_group_members ON customer_group_members;
+    CREATE POLICY tenant_isolation_customer_group_members ON customer_group_members
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '228_marketing_campaign_segment_group': `
+    -- U8 / MKT — let an email campaign target a customer group (in addition to
+    -- a tag). Nullable; null preserves the existing all-customers / tag behavior.
+    ALTER TABLE marketing_campaigns
+      ADD COLUMN IF NOT EXISTS segment_group_id UUID REFERENCES customer_groups(id);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
