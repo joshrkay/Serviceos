@@ -34,6 +34,18 @@ const h = vi.hoisted(() => {
       this.connected = false;
       return 'OK';
     }
+    listeners: Record<string, Array<(...a: unknown[]) => void>> = {};
+    on(event: string, cb: (...a: unknown[]) => void): this {
+      (this.listeners[event] ??= []).push(cb);
+      return this;
+    }
+    emit(event: string, ...args: unknown[]): boolean {
+      const ls = this.listeners[event] ?? [];
+      // Mirror Node EventEmitter: an 'error' with no listener throws.
+      if (event === 'error' && ls.length === 0) throw args[0];
+      ls.forEach((l) => l(...args));
+      return ls.length > 0;
+    }
   }
   return { FakeRedis, instances };
 });
@@ -72,6 +84,20 @@ describe('createRedisClient', () => {
 
   it('returns null (does not throw) when the connect fails', async () => {
     expect(await createRedisClient('redis://unreachable:6379')).toBeNull();
+  });
+
+  it('attaches an error listener so a background Redis error does not crash the process', async () => {
+    const client = await createRedisClient('redis://localhost:6379');
+    expect(client).not.toBeNull();
+    // Without a registered 'error' listener this emit would throw (Node
+    // EventEmitter semantics) and take down the process; the listener makes
+    // it a no-op the stores can survive.
+    expect(() =>
+      (client as unknown as { emit: (e: string, x: unknown) => boolean }).emit(
+        'error',
+        new Error('ECONNRESET'),
+      ),
+    ).not.toThrow();
   });
 });
 
