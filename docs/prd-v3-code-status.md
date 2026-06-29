@@ -1,10 +1,11 @@
 # Rivet PRD v3.x ⇄ Code — Current Status
 
-**Date:** 2026-06-20
+**Date:** 2026-06-22
 **Baseline:** `docs/PRD-v3.md` (v3.2, reconciled 2026-06-14) — the canonical, code-aligned,
-actively-maintained PRD. This **supersedes** the uploaded *AI Service OS v4.1* lineage (pre-rebrand
-vision doc) as the comparison baseline; the story-level evidence in `docs/prd-v4.1-feature-diff.md`
-remains valid but was measured against the wrong (older) doc.
+actively-maintained PRD. Behavioral layer: `docs/interaction-model-v3.md` (v3.0). This **supersedes**
+the uploaded *AI Service OS v4.1* lineage (pre-rebrand vision doc) as the comparison baseline; the
+story-level evidence in `docs/prd-v4.1-feature-diff.md` remains valid but was measured against the
+wrong (older) doc.
 
 ## Why this exists
 We re-ran the comparison against the **most recent** PRD (v3.x), not the original upload. Two
@@ -62,7 +63,10 @@ Per §5 (reconciled 2026-06-14) **plus two corrections from today's check**:
 | Brand-voice configurator (P4-015) | validation works; full onboarding config UI pending | §8 P3 |
 | Vulnerability-aware triage (N-008) | detection present; full elevation flow pending | §8 P3 |
 | Native mobile | PWA built; **Capacitor native on roadmap** | §5 |
-| 48h proposal-expiry default | `expiresAt` field + check exist; **no creation path sets the TTL** | §6.14 |
+| 48h schedule-proposal expiry | `defaultProposalExpiry` wired in `createProposal`; expiry worker runs | interaction-model §11; was mis-reported as unwired |
+| Standing instructions (interaction-model v3) | **not built** — booking rules are config fragments, no mandate list UI | `interaction-model-v3-code-alignment.md` |
+| Bandwidth-aware deferral | **not built** — clarifications do not defer to EOD by moment | interaction-model §3, §10 |
+| Leverage metrics (actions per direction) | **not built** — `chainId` exists, no product metric | interaction-model §8, §19 |
 
 ### Specced — not built (Phase 3 depth)
 | Item | Story |

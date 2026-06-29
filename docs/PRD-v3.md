@@ -13,6 +13,8 @@
 
 | Document | Purpose |
 |----------|---------|
+| `docs/interaction-model-v3.md` | **Behavioral reference** — how the owner directs the assistant; execution lanes, standing instructions, voice/call loops. Wins on behavior when stories or screens disagree. |
+| `docs/interaction-model-v3-code-alignment.md` | Current build mapped to interaction-model v3 acceptance criteria |
 | `docs/strategy/day-in-the-life.md` | Emotional and operational spine; the personas; the bad-day failure modes |
 | `docs/strategy/parity-jobs-invoicing.md` | Jobs/invoicing Jobber parity roadmap (P20–P27) |
 | `docs/competitive-gap-analysis.md` | Verified competitive gap map with sequenced plan |
