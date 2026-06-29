@@ -5399,6 +5399,7 @@ export const MIGRATIONS = {
   '221_proposals_status_created_index': `
     CREATE INDEX IF NOT EXISTS idx_proposals_status_created ON proposals(tenant_id, status, created_at DESC);
     DROP INDEX IF EXISTS idx_proposals_status;
+  `,
   '221_create_job_forms': `
     -- J-FORM (Jobber parity) — job forms & checklists. Jobber lets a shop
     -- define reusable form/checklist templates that technicians fill out per
