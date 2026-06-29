@@ -132,11 +132,43 @@ describe('rls-runtime-role helper (U3)', () => {
       expect(calls.map((c) => c.sql)).toEqual(['SET ROLE rls_cross_tenant']);
     });
 
-    it('flag ON + transactional: SET LOCAL ROLE rls_cross_tenant (U2b-2)', async () => {
+    it('flag ON + transactional: SAVEPOINT-guarded SET LOCAL ROLE rls_cross_tenant (U2b-2)', async () => {
       process.env.RLS_RUNTIME_ROLE = 'true';
       const { client, calls } = fakeClient();
       await applyCrossTenantRole(client, { transactional: true });
-      expect(calls.map((c) => c.sql)).toEqual(['SET LOCAL ROLE rls_cross_tenant']);
+      expect(calls.map((c) => c.sql)).toEqual([
+        'SAVEPOINT cross_tenant_role',
+        'SET LOCAL ROLE rls_cross_tenant',
+        'RELEASE SAVEPOINT cross_tenant_role',
+      ]);
+    });
+
+    it('flag ON + transactional, role unprovisioned (Codex P1): rolls back to the SAVEPOINT so the transaction survives', async () => {
+      // A failed SET LOCAL ROLE inside a BEGIN aborts the whole transaction
+      // (25P02); the SAVEPOINT lets the sweep continue as the connection
+      // principal instead of every subsequent query failing.
+      process.env.RLS_RUNTIME_ROLE = 'true';
+      const calls: Array<{ sql: string }> = [];
+      const client = {
+        query: vi.fn(async (sqlOrCfg: string | { text: string }) => {
+          const sql = typeof sqlOrCfg === 'string' ? sqlOrCfg : sqlOrCfg.text;
+          calls.push({ sql });
+          if (/SET LOCAL ROLE/i.test(sql)) {
+            throw new Error('role "rls_cross_tenant" does not exist');
+          }
+          return { rows: [], rowCount: 0 };
+        }),
+      } as unknown as PoolClient;
+
+      await expect(
+        applyCrossTenantRole(client, { transactional: true }),
+      ).resolves.toBeUndefined();
+      expect(calls.map((c) => c.sql)).toEqual([
+        'SAVEPOINT cross_tenant_role',
+        'SET LOCAL ROLE rls_cross_tenant',
+        'ROLLBACK TO SAVEPOINT cross_tenant_role',
+        'RELEASE SAVEPOINT cross_tenant_role',
+      ]);
     });
 
     it('flag ON but role unprovisioned: SET ROLE fails → degrades to the principal (no throw)', async () => {

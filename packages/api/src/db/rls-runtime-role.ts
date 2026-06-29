@@ -88,11 +88,30 @@ export async function applyCrossTenantRole(
   if (!isRlsRuntimeRoleEnabled()) return;
   // SET LOCAL ROLE auto-resets at COMMIT/ROLLBACK (PgBouncer transaction-pooling
   // safe); plain SET ROLE is session-level and needs clearTenantContext.
-  const stmt = opts.transactional
-    ? `SET LOCAL ROLE ${CROSS_TENANT_ROLE}`
-    : `SET ROLE ${CROSS_TENANT_ROLE}`;
+  if (opts.transactional) {
+    // Inside the caller's BEGIN, a failed `SET LOCAL ROLE` (role unprovisioned
+    // or ungranted) ABORTS the whole transaction (25P02), so the caller's
+    // subsequent sweep queries would fail with "current transaction is aborted"
+    // — a bare try/catch can't recover that. Guard with a SAVEPOINT so a failure
+    // rolls back ONLY the SET and the surrounding transaction stays usable,
+    // degrading to the connection principal (the documented fallback).
+    // (Codex P1, PR #628.)
+    await client.query('SAVEPOINT cross_tenant_role');
+    try {
+      await client.query(`SET LOCAL ROLE ${CROSS_TENANT_ROLE}`);
+      await client.query('RELEASE SAVEPOINT cross_tenant_role');
+    } catch {
+      await client.query('ROLLBACK TO SAVEPOINT cross_tenant_role');
+      await client
+        .query('RELEASE SAVEPOINT cross_tenant_role')
+        .catch(() => undefined);
+    }
+    return;
+  }
+  // Session path (no surrounding transaction): a failed SET ROLE is isolated,
+  // so the plain try/catch fallback is safe.
   try {
-    await client.query(stmt);
+    await client.query(`SET ROLE ${CROSS_TENANT_ROLE}`);
   } catch {
     // Role unprovisioned/ungranted → run as the connection principal (the
     // documented fallback). See JSDoc above.
