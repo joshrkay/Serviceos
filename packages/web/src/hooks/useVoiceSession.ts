@@ -17,6 +17,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useApiClient } from '../lib/apiClient';
 import { useAuth } from '@clerk/clerk-react';
 
+const PENDO_AGENT_ID = 'QqL8kYRqTigq-GYw5ga0ibEjhKs';
+
 interface VoiceSessionEventMessage {
   type: string;
   state?: string;
@@ -183,6 +185,14 @@ export function useVoiceSession(): UseVoiceSession {
         const blob = base64ToBlob(body.greetingAudio);
         if (blob) playAudio(blob);
       }
+      if (body.greetingText && typeof pendo !== 'undefined') {
+        pendo.trackAgent('agent_response', {
+          agentId: PENDO_AGENT_ID,
+          conversationId: body.sessionId,
+          messageId: `agent_response_${Date.now()}`,
+          content: body.greetingText,
+        });
+      }
       void subscribeToEvents(body.sessionId);
     } finally {
       setIsStarting(false);
@@ -193,6 +203,15 @@ export function useVoiceSession(): UseVoiceSession {
     async (text: string) => {
       if (!sessionId || ended || !text.trim()) return;
       setIsSending(true);
+      const promptMessageId = crypto.randomUUID();
+      if (typeof pendo !== 'undefined') {
+        pendo.trackAgent('prompt', {
+          agentId: PENDO_AGENT_ID,
+          conversationId: sessionId,
+          messageId: promptMessageId,
+          content: text,
+        });
+      }
       try {
         const res = await api(`/api/voice/sessions/${sessionId}/input`, {
           method: 'POST',
@@ -214,6 +233,14 @@ export function useVoiceSession(): UseVoiceSession {
         }
         if (Array.isArray(body.proposalIds)) setProposalIds(body.proposalIds);
         if (body.ended) setEnded(true);
+        if (body.ttsText && typeof pendo !== 'undefined') {
+          pendo.trackAgent('agent_response', {
+            agentId: PENDO_AGENT_ID,
+            conversationId: sessionId,
+            messageId: `agent_response_${Date.now()}`,
+            content: body.ttsText,
+          });
+        }
       } finally {
         setIsSending(false);
       }
