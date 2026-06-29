@@ -85,12 +85,12 @@ function signSvixPayload(body: object, svixId: string, svixTimestamp: string, se
   // hex string of the decoded bytes as the HMAC key. Mirror that here so the test
   // signature round-trips through verifyWebhookSignature exactly.
   const secretBytes = Buffer.from(secret.replace(/^whsec_/, ''), 'base64');
-  const hexKey = secretBytes.toString('hex');
+  
   const signedContent = `${svixId}.${svixTimestamp}.${rawBody}`;
   const sig = crypto
-    .createHmac('sha256', hexKey)
-    .update(`${svixTimestamp}.${signedContent}`)
-    .digest('hex');
+    .createHmac('sha256', secretBytes)
+    .update(signedContent)
+    .digest('base64');
   return { rawBody, signature: `v1,${sig}` };
 }
 
@@ -168,9 +168,9 @@ describe('EXP-3 — Clerk webhook → tenant bootstrap integration', () => {
     const secretBytes = Buffer.from(WEBHOOK_SECRET.replace(/^whsec_/, ''), 'base64');
     const signedContent = `${svixId}.${svixTimestamp}.${rawBody}`;
     const sig = crypto
-      .createHmac('sha256', secretBytes.toString('hex'))
-      .update(`${svixTimestamp}.${signedContent}`)
-      .digest('hex');
+      .createHmac('sha256', secretBytes)
+      .update(signedContent)
+      .digest('base64');
 
     const res = await request(rawApp)
       .post('/webhooks/clerk')

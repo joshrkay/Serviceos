@@ -653,6 +653,7 @@ export function createApp(): express.Express {
   // svix signed, instead of re-serializing the parsed object (key order /
   // whitespace differences would fail legit webhooks and break tenant bootstrap).
   app.use('/webhooks/clerk', express.raw({ type: 'application/json' }));
+  app.use('/api/webhooks/clerk', express.raw({ type: 'application/json' }));
 
   // Vapi signs its server messages (serverUrlSecret). Capture the raw Buffer
   // here so the HMAC verification in handleVapiCallEvent sees the exact bytes
@@ -952,6 +953,7 @@ export function createApp(): express.Express {
       : undefined,
   };
   app.use('/webhooks', createWebhookRouter(config, webhookRouterDeps));
+  app.use('/api/webhooks', createWebhookRouter(config, webhookRouterDeps));
 
   // Dev-only storage PUT receiver for DevStorageProvider upload URLs.
   // Mounted before /api Clerk auth so unauthenticated presigned-style PUTs
