@@ -603,13 +603,6 @@ export const offerFinancingSchema = z.object({
   returnUrl: z.string().url().max(2000).optional(),
 });
 
-export const financingWebhookSchema = z.object({
-  tenantId: z.string().uuid(),
-  applicationId: z.string().uuid(),
-  status: z.string().min(1).max(50),
-  statusReason: z.string().max(500).nullable().optional(),
-});
-
 // R-JOB (Jobber parity) — recurring job series. Kept in lockstep with
 // RECURRENCE_FREQUENCIES (packages/api/src/recurring-jobs/recurrence.ts).
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'must be a date (YYYY-MM-DD)');

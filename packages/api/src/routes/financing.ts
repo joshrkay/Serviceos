@@ -13,7 +13,7 @@ import {
   offerFinancing,
 } from '../financing/financing';
 import { FinancingProviderClient, mapWisetackStatus } from '../financing/financing-provider';
-import { offerFinancingSchema, financingWebhookSchema } from '../shared/contracts';
+import { offerFinancingSchema } from '../shared/contracts';
 
 export interface FinancingRouterDeps {
   financingRepo: FinancingRepository;
@@ -127,9 +127,11 @@ export interface FinancingWebhookDeps {
 
 /**
  * Provider status webhook. Mount at /webhooks/wisetack with express.raw()
- * BEFORE the global express.json() so req.body is the exact signed Buffer. The
- * signed payload carries our tenantId + applicationId so we resolve the row
- * without a cross-tenant scan.
+ * BEFORE the global express.json() so req.body is the exact signed Buffer.
+ *
+ * Wisetack echoes the `external_reference` we set at creation
+ * (`"${tenantId}:${applicationId}"`), so we resolve the row from that rather
+ * than expecting top-level tenant/application fields the provider never sends.
  */
 export function createFinancingWebhookRouter(deps: FinancingWebhookDeps): Router {
   const router = Router();
@@ -146,20 +148,25 @@ export function createFinancingWebhookRouter(deps: FinancingWebhookDeps): Router
         res.status(401).json({ error: 'BAD_SIGNATURE' });
         return;
       }
-      let body: unknown;
+      let body: { external_reference?: string; status?: string; status_reason?: string };
       try {
         body = JSON.parse(rawBody);
       } catch {
         res.status(400).json({ error: 'BAD_JSON' });
         return;
       }
-      const parsed = financingWebhookSchema.parse(body);
-      const status = mapWisetackStatus(parsed.status);
+      // external_reference is "tenantId:applicationId" (set in createApplication).
+      const [tenantId, applicationId] = (body.external_reference ?? '').split(':');
+      if (!tenantId || !applicationId) {
+        res.status(400).json({ error: 'INVALID_REFERENCE' });
+        return;
+      }
+      const status = mapWisetackStatus(body.status ?? '');
       const updated = await applyFinancingStatusUpdate(
-        parsed.tenantId,
-        parsed.applicationId,
+        tenantId,
+        applicationId,
         status,
-        parsed.statusReason ?? null,
+        body.status_reason ?? null,
         deps.financingRepo,
         deps.auditRepo
       );

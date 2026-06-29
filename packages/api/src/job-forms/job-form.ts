@@ -131,6 +131,18 @@ export interface JobFormRepository {
 // Pure validation / normalization
 // ---------------------------------------------------------------------------
 
+/**
+ * Strict 'YYYY-MM-DD' check: rejects rolled-over calendar dates (e.g.
+ * 2026-02-30, which Date.parse would silently accept as March 2) by formatting
+ * the parsed UTC date back and comparing.
+ */
+function isStrictIsoDate(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const [y, m, d] = value.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d;
+}
+
 /** Validate a single field definition. Returns error messages (empty = ok). */
 export function validateJobFormField(field: JobFormFieldInput): string[] {
   const errors: string[] = [];
@@ -190,9 +202,7 @@ export function validateAnswerValue(field: JobFormField, value: string | null): 
     case 'number':
       return Number.isFinite(Number(value)) ? null : `"${field.label}" must be a number`;
     case 'date':
-      return /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(value))
-        ? null
-        : `"${field.label}" must be a date (YYYY-MM-DD)`;
+      return isStrictIsoDate(value) ? null : `"${field.label}" must be a date (YYYY-MM-DD)`;
     case 'checkbox':
       return value === 'true' || value === 'false' ? null : `"${field.label}" must be true or false`;
     case 'select':
@@ -453,22 +463,27 @@ export async function updateJobFormSubmission(
 ): Promise<JobFormSubmission> {
   const existing = await repository.findSubmissionById(tenantId, submissionId);
   if (!existing) throw new Error('Job form submission not found');
+  // A completed submission is locked history — reject further edits so a stale
+  // client can't overwrite a signed-off checklist (the feature's promise).
+  if (existing.status === 'completed') {
+    throw new Error('This form is completed and can no longer be edited');
+  }
 
+  // `existing` is guaranteed draft here (completed submissions threw above).
   const answers =
     input.answers !== undefined ? normalizeAnswers(input.answers) : existing.answers;
-  const willComplete = input.complete === true || existing.status === 'completed';
+  const completing = input.complete === true;
   const errors = validateSubmissionAnswers(existing.fields, answers, {
-    requireComplete: input.complete === true,
+    requireComplete: completing,
   });
   if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
 
-  const justCompleted = input.complete === true && existing.status !== 'completed';
   const updated: JobFormSubmission = {
     ...existing,
     answers,
-    status: willComplete ? 'completed' : 'draft',
-    completedBy: justCompleted ? actorId ?? existing.completedBy : existing.completedBy,
-    completedAt: justCompleted ? new Date() : existing.completedAt,
+    status: completing ? 'completed' : 'draft',
+    completedBy: completing ? actorId ?? existing.completedBy : existing.completedBy,
+    completedAt: completing ? new Date() : existing.completedAt,
     updatedAt: new Date(),
   };
   const saved = await repository.updateSubmission(updated);
@@ -479,7 +494,7 @@ export async function updateJobFormSubmission(
         tenantId,
         actorId,
         actorRole: actorRole ?? 'unknown',
-        eventType: justCompleted
+        eventType: completing
           ? 'job_form_submission.completed'
           : 'job_form_submission.updated',
         entityType: 'job',

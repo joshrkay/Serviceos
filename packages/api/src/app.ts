@@ -3511,8 +3511,8 @@ export function createApp(): express.Express {
     '/api/customer-custom-fields',
     createCustomerCustomFieldRouter(customerCustomFieldRepo, auditRepo)
   );
-  app.use('/api/job-forms', createJobFormRouter(jobFormRepo, auditRepo));
-  app.use('/api/job-custom-fields', createJobCustomFieldRouter(jobCustomFieldRepo, auditRepo));
+  app.use('/api/job-forms', createJobFormRouter(jobFormRepo, auditRepo, jobRepo));
+  app.use('/api/job-custom-fields', createJobCustomFieldRouter(jobCustomFieldRepo, auditRepo, jobRepo));
   app.use('/api/customer-groups', createCustomerGroupRouter(customerGroupRepo, auditRepo));
   app.use(
     '/api/marketing',

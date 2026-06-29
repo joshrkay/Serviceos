@@ -54,6 +54,13 @@ export interface CampaignRepository {
   findById(tenantId: string, id: string): Promise<Campaign | null>;
   list(tenantId: string): Promise<Campaign[]>;
   update(campaign: Campaign): Promise<Campaign>;
+  /**
+   * Atomically transition draft → sent (stamping sentAt) and return the claimed
+   * campaign, or null if it wasn't a draft (already sent / claimed by a
+   * concurrent request / missing). This is the single-flight guard that stops a
+   * double-send when two requests or retries race.
+   */
+  claimForSending(tenantId: string, id: string): Promise<Campaign | null>;
 }
 
 export function validateCampaignInput(input: {
@@ -167,9 +174,14 @@ export async function sendCampaign(
   deps: SendCampaignDeps,
   actorId?: string
 ): Promise<Campaign> {
-  const campaign = await deps.campaignRepo.findById(tenantId, campaignId);
-  if (!campaign) throw new Error('Campaign not found');
-  if (campaign.status === 'sent') return campaign;
+  // Single-flight: atomically claim the draft before any email goes out, so two
+  // concurrent sends can't both blast the recipient list.
+  const campaign = await deps.campaignRepo.claimForSending(tenantId, campaignId);
+  if (!campaign) {
+    const existing = await deps.campaignRepo.findById(tenantId, campaignId);
+    if (!existing) throw new Error('Campaign not found');
+    return existing; // already sent or claimed by another request — no double-send
+  }
 
   const customers = await deps.customerRepo.findByTenant(tenantId);
   // A group segment takes precedence over a tag segment; null = all customers.
@@ -204,7 +216,7 @@ export async function sendCampaign(
     recipientCount: recipients.length,
     sentCount: sent,
     failedCount: failed,
-    sentAt: new Date(),
+    // sentAt was stamped by the claim; keep it.
     updatedAt: new Date(),
   };
   const saved = await deps.campaignRepo.update(updated);
@@ -249,5 +261,13 @@ export class InMemoryCampaignRepository implements CampaignRepository {
   async update(campaign: Campaign): Promise<Campaign> {
     this.campaigns.set(campaign.id, { ...campaign });
     return { ...campaign };
+  }
+
+  async claimForSending(tenantId: string, id: string): Promise<Campaign | null> {
+    const c = this.campaigns.get(id);
+    if (!c || c.tenantId !== tenantId || c.status !== 'draft') return null;
+    const claimed: Campaign = { ...c, status: 'sent', sentAt: new Date(), updatedAt: new Date() };
+    this.campaigns.set(id, claimed);
+    return { ...claimed };
   }
 }

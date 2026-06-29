@@ -17,7 +17,9 @@ const CACHE_VERSION = 'rivet-v1';
 const PRECACHE = `${CACHE_VERSION}-precache`;
 const RUNTIME = `${CACHE_VERSION}-runtime`;
 
-const PRECACHE_URLS = ['/', '/offline.html', '/manifest.webmanifest', '/icon.svg'];
+// /env.js carries runtime config (Clerk key etc.) the app needs at boot; it is
+// precached + served network-first so an offline launch still boots.
+const PRECACHE_URLS = ['/', '/offline.html', '/manifest.webmanifest', '/icon.svg', '/env.js'];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -49,7 +51,7 @@ self.addEventListener('message', (event) => {
 });
 
 function isApiRequest(url) {
-  return url.pathname.startsWith('/api/') || url.pathname === '/env.js';
+  return url.pathname.startsWith('/api/');
 }
 
 self.addEventListener('fetch', (event) => {
@@ -57,8 +59,27 @@ self.addEventListener('fetch', (event) => {
   if (request.method !== 'GET') return;
 
   const url = new URL(request.url);
-  // Same-origin only; never intercept API or runtime config.
+  // Same-origin only; never intercept authenticated API responses.
   if (url.origin !== self.location.origin || isApiRequest(url)) return;
+
+  // Runtime config: network-first so online users get fresh config, with a
+  // cached fallback so an offline boot doesn't throw on an empty __APP_CONFIG__.
+  if (url.pathname === '/env.js') {
+    event.respondWith(
+      fetch(request)
+        .then((response) => {
+          const copy = response.clone();
+          caches.open(RUNTIME).then((cache) => cache.put('/env.js', copy));
+          return response;
+        })
+        .catch(async () => {
+          const runtime = await caches.open(RUNTIME);
+          const precache = await caches.open(PRECACHE);
+          return (await runtime.match('/env.js')) || (await precache.match('/env.js'));
+        }),
+    );
+    return;
+  }
 
   if (request.mode === 'navigate') {
     event.respondWith(

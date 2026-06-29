@@ -3,6 +3,7 @@ import { AuthenticatedRequest } from '../auth/clerk';
 import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { AuditRepository } from '../audit/audit';
+import { JobRepository } from '../jobs/job';
 import {
   JobCustomFieldRepository,
   createJobCustomFieldDef,
@@ -21,7 +22,8 @@ import { createCustomFieldDefSchema, setCustomFieldValueSchema } from '../shared
  */
 export function createJobCustomFieldRouter(
   repo: JobCustomFieldRepository,
-  auditRepo: AuditRepository
+  auditRepo: AuditRepository,
+  jobRepo: JobRepository
 ): Router {
   const router = Router();
 
@@ -89,6 +91,13 @@ export function createJobCustomFieldRouter(
     requirePermission('jobs:update'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const parsed = setCustomFieldValueSchema.parse(req.body);
+      // Confirm the job belongs to this tenant before writing a value — the
+      // job_id FK isn't tenant-scoped, so guard against cross-tenant writes.
+      const job = await jobRepo.findById(req.auth!.tenantId, req.params.jobId);
+      if (!job) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Job not found' });
+        return;
+      }
       await setJobCustomFieldValue(
         req.auth!.tenantId,
         req.params.jobId,

@@ -162,6 +162,19 @@ describe('marketing campaigns (MKT) — orchestration', () => {
     expect(sent.failedCount).toBe(1);
   });
 
+  it('atomically claims before sending — a lost concurrent claim sends nothing', async () => {
+    await customerRepo.create(customer({ id: 'a', email: 'a@x.com' }));
+    const c = await createCampaign(
+      { tenantId: TENANT, name: 'Race', subject: 'Hi', bodyText: 'Body', createdBy: ACTOR },
+      campaignRepo,
+    );
+    // Simulate the other request having already claimed (draft → sent).
+    await campaignRepo.claimForSending(TENANT, c.id);
+    const result = await sendCampaign(TENANT, c.id, deps(), ACTOR);
+    expect(result.status).toBe('sent');
+    expect(sendEmail).not.toHaveBeenCalled(); // lost the claim → no blast
+  });
+
   it('does not re-send an already-sent campaign', async () => {
     await customerRepo.create(customer({ id: 'a', email: 'a@x.com' }));
     const c = await createCampaign(

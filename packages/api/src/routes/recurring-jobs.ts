@@ -163,6 +163,12 @@ export function createRecurringJobRouter(
         res.status(404).json({ error: 'NOT_FOUND', message: 'Recurring job not found' });
         return;
       }
+      // A stopped/archived series must not generate new visits — guard against a
+      // stale tab or direct API call after the owner archived it.
+      if (job.isArchived) {
+        res.status(409).json({ error: 'ARCHIVED', message: 'This recurring job is stopped' });
+        return;
+      }
       const tz = await materializeDeps.resolveTimezone(req.auth!.tenantId);
       const today = DateTime.now().setZone(tz).toISODate() ?? new Date().toISOString().slice(0, 10);
       const rawHorizon = Number(req.body?.horizonDays);

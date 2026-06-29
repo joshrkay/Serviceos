@@ -3,6 +3,7 @@ import { AuthenticatedRequest } from '../auth/clerk';
 import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { AuditRepository } from '../audit/audit';
+import { JobRepository } from '../jobs/job';
 import {
   JobFormRepository,
   archiveJobFormTemplate,
@@ -28,7 +29,8 @@ import {
  */
 export function createJobFormRouter(
   jobFormRepo: JobFormRepository,
-  auditRepo: AuditRepository
+  auditRepo: AuditRepository,
+  jobRepo: JobRepository
 ): Router {
   const router = Router();
 
@@ -147,6 +149,13 @@ export function createJobFormRouter(
     requirePermission('jobs:update'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const parsed = createJobFormSubmissionSchema.parse(req.body);
+      // Confirm the job belongs to this tenant before attaching a submission —
+      // the job_id FK isn't tenant-scoped, so guard against cross-tenant injection.
+      const job = await jobRepo.findById(req.auth!.tenantId, req.params.jobId);
+      if (!job) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Job not found' });
+        return;
+      }
       const submission = await createJobFormSubmission(
         {
           ...parsed,

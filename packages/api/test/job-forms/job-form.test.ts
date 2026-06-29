@@ -240,6 +240,36 @@ describe('job forms & checklists (J-FORM) — pure domain', () => {
     expect(events.some((e) => e.eventType === 'job_form_submission.completed')).toBe(true);
   });
 
+  it('rejects rolled-over calendar dates (strict YYYY-MM-DD)', () => {
+    const dateField = field({ id: 'd', label: 'Service date', fieldType: 'date' });
+    expect(validateAnswerValue(dateField, '2026-02-30')).toMatch(/must be a date/); // rolls over
+    expect(validateAnswerValue(dateField, '2026-02-28')).toBeNull();
+    expect(validateAnswerValue(dateField, '2028-02-29')).toBeNull(); // leap year
+  });
+
+  it('locks a completed submission against further edits', async () => {
+    const tpl = await createJobFormTemplate(
+      { tenantId: TENANT, name: 'Lock', fields: [{ label: 'Note' }], createdBy: ACTOR },
+      repo
+    );
+    const fieldId = tpl.fields[0].id;
+    const sub = await createJobFormSubmission(
+      {
+        tenantId: TENANT,
+        jobId: JOB,
+        templateId: tpl.id,
+        answers: [{ fieldId, value: 'done' }],
+        complete: true,
+        createdBy: ACTOR,
+      },
+      repo
+    );
+    expect(sub.status).toBe('completed');
+    await expect(
+      updateJobFormSubmission(TENANT, sub.id, { answers: [{ fieldId, value: 'tampered' }] }, repo, ACTOR)
+    ).rejects.toThrow(/completed and can no longer be edited/);
+  });
+
   it('rejects a submission for a template that does not exist', async () => {
     await expect(
       createJobFormSubmission(

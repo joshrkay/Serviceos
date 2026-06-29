@@ -116,4 +116,19 @@ export class PgCampaignRepository extends PgBaseRepository implements CampaignRe
       return mapRow(result.rows[0]);
     });
   }
+
+  async claimForSending(tenantId: string, id: string): Promise<Campaign | null> {
+    return this.withTenant(tenantId, async (client) => {
+      // Atomic draft → sent claim: the WHERE status='draft' guarantees only one
+      // concurrent caller wins, so the recipient list is never blasted twice.
+      const result = await client.query(
+        `UPDATE marketing_campaigns
+         SET status = 'sent', sent_at = NOW(), updated_at = NOW()
+         WHERE tenant_id = $1 AND id = $2 AND status = 'draft'
+         RETURNING *`,
+        [tenantId, id]
+      );
+      return result.rows.length > 0 ? mapRow(result.rows[0]) : null;
+    });
+  }
 }
