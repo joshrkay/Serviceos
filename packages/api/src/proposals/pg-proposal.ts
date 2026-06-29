@@ -178,6 +178,24 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
     });
   }
 
+  async findByStatusSince(
+    tenantId: string,
+    status: ProposalStatus,
+    since: Date,
+    limit?: number,
+  ): Promise<Proposal[]> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT * FROM proposals
+           WHERE tenant_id = $1 AND status = $2 AND created_at >= $3
+           ORDER BY created_at DESC
+           ${typeof limit === 'number' ? 'LIMIT $4' : ''}`,
+        typeof limit === 'number' ? [tenantId, status, since, limit] : [tenantId, status, since]
+      );
+      return result.rows.map(mapRow);
+    });
+  }
+
   async findExpiredScheduleProposals(
     tenantId: string,
     proposalTypes: readonly ProposalType[],
@@ -372,10 +390,11 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
   }
 
   async findReadyForExecution(windowMs: number): Promise<Proposal[]> {
-    // Privileged cross-tenant sweep — uses withClient() intentionally.
-    // withTenant() would arm RLS and silently filter to a single tenant,
-    // causing the auto-delivery worker to miss proposals from all others.
-    return this.withClient(async (client) => {
+    // Intentional cross-tenant sweep — withCrossTenantSweep() runs it under the
+    // named, auditable rls_cross_tenant role when enforcement is on. withTenant()
+    // would arm RLS and silently filter to a single tenant, causing the
+    // auto-delivery worker to miss proposals from all others.
+    return this.withCrossTenantSweep(async (client) => {
       const result = await client.query(
         `SELECT * FROM proposals
          WHERE status = 'approved'
@@ -391,7 +410,7 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
   }
 
   async claimForExecution(proposalId: string, workerId: string): Promise<Proposal | null> {
-    return this.withClient(async (client) => {
+    return this.withCrossTenantSweep(async (client) => {
       const result = await client.query(
         `UPDATE proposals
          SET status = 'executing', claimed_by = $2, claimed_at = NOW(), updated_at = NOW()
@@ -407,7 +426,7 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
     staleMinutes: number,
     maxRetries: number
   ): Promise<{ resetToApproved: number; movedToFailed: number }> {
-    return this.withClient(async (client) => {
+    return this.withCrossTenantSweep(async (client) => {
       const failed = await client.query(
         `UPDATE proposals
          SET status = 'execution_failed', updated_at = NOW()

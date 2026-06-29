@@ -1,13 +1,16 @@
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
-import rateLimit from 'express-rate-limit';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
+import { createRateLimitStore } from './middleware/rate-limit-store';
 import swaggerUi from 'swagger-ui-express';
 import { openApiSpec } from './swagger/spec';
 import { createHealthRouter, HealthCheck } from './health/health';
 import { toErrorResponse } from './shared/errors';
-import { createPool } from './db/pool';
+import { createPool, createDirectPool } from './db/pool';
+import { verifyRlsRuntimeRole } from './db/rls-runtime-role';
 import { loadConfig } from './shared/config';
+import { resolveWebDistDir } from './web-static-path';
 import { createWebhookRouter } from './webhooks/routes';
 import { createIntegrationResolver } from './webhooks/integration-resolver';
 import { createTelephonyRouter } from './routes/telephony';
@@ -18,10 +21,11 @@ import { createUserPhoneDispatcherResolver, createBusinessPhoneFallback } from '
 import { PgPhoneNumberRepository } from './integrations/twilio/phone-number-repository';
 import { attachMediaStreamServer } from './telephony/media-streams';
 import { attachClientGateway, setChannelGate } from './ws/client-gateway';
+import { setDraining, isDraining as isDrainingFlag } from './ws/drain-state';
+import { createConnectionRegistry } from './ws/connection-registry';
 import {
   decodeClerkToken,
-  verifyRs256Token,
-} from './auth/clerk';
+  verifyRs256Token, type AuthenticatedRequest } from './auth/clerk';
 import { RESILIENCE_FLAG_NAMES } from './flags/resilience-flags';
 import { DeepgramStreamingProvider } from './voice/transcription-providers';
 import { PgTenantRepository } from './auth/pg-tenant';
@@ -132,6 +136,7 @@ import {
 } from './db/onboarding-session-repository';
 import { createAssistantRouter } from './routes/assistant';
 import { createProposalsRouter } from './routes/proposals';
+import { createRedraftHandlerFactory } from './proposals/redraft-handler-factory';
 import { createTechnicianLocationRouter } from './routes/technician-location';
 import { createCatalogItemsRouter } from './routes/catalog-items';
 import { createFilesRouter, createDevStorageRouter } from './routes/files';
@@ -170,6 +175,7 @@ import { PgMoneyDashboardRepository } from './reports/pg-money-dashboard';
 import { createFeedbackResponsesRouter } from './routes/feedback';
 import { createInteractionsRouter } from './routes/interactions';
 import { initSentry, setSentryClient } from './monitoring/sentry';
+import { dbPoolConnections } from './monitoring/metrics';
 
 // In-memory repositories (fallback for dev without DATABASE_URL)
 import { InMemoryCustomerRepository } from './customers/customer';
@@ -182,6 +188,25 @@ import { PgCustomFieldRepository } from './customers/pg-custom-field';
 import { InMemoryCustomerMergeRepository } from './customers/merge';
 import { PgCustomerMergeRepository } from './customers/pg-merge';
 import { createCustomerCustomFieldRouter } from './routes/customer-custom-fields';
+import { InMemoryJobFormRepository } from './job-forms/job-form';
+import { PgJobFormRepository } from './job-forms/pg-job-form';
+import { createJobFormRouter } from './routes/job-forms';
+import { InMemoryRecurringJobRepository } from './recurring-jobs/recurring-job';
+import { PgRecurringJobRepository } from './recurring-jobs/pg-recurring-job';
+import { createRecurringJobRouter } from './routes/recurring-jobs';
+import { InMemoryJobCustomFieldRepository } from './jobs/job-custom-field';
+import { PgJobCustomFieldRepository } from './jobs/pg-job-custom-field';
+import { createJobCustomFieldRouter } from './routes/job-custom-fields';
+import { InMemoryFinancingRepository } from './financing/financing';
+import { PgFinancingRepository } from './financing/pg-financing';
+import { createFinancingProvider } from './financing/financing-provider';
+import { createFinancingRouter, createFinancingWebhookRouter } from './routes/financing';
+import { InMemoryCampaignRepository } from './marketing/campaign';
+import { PgCampaignRepository } from './marketing/pg-campaign';
+import { createMarketingRouter } from './routes/marketing';
+import { InMemoryCustomerGroupRepository } from './customers/customer-group';
+import { PgCustomerGroupRepository } from './customers/pg-customer-group';
+import { createCustomerGroupRouter } from './routes/customer-groups';
 import { InMemoryLeadRepository } from './leads/lead';
 import { InMemoryLocationRepository } from './locations/location';
 import { InMemoryJobRepository } from './jobs/job';
@@ -237,7 +262,7 @@ import {
   InMemoryTechnicianLocationAuthorizer,
   PgTechnicianLocationAuthorizer,
 } from './telemetry/technician-location-authz';
-import { InMemoryQueue, processMessage } from './queues/queue';
+import { InMemoryQueue, processMessage, type QueueMessage } from './queues/queue';
 import { createProvisionTwilioWorker, PROVISION_TWILIO_JOB_TYPE } from './workers/provision-twilio';
 import { createDeprovisionTenantWorker } from './workers/deprovision-tenant';
 import { createVerifyAiWorker } from './workers/verify-ai';
@@ -365,6 +390,7 @@ import {
 } from './metrics/hfcr-weekly-send';
 import { runGoogleReviewsSweep } from './workers/google-reviews';
 import { runThankYouSmsSweep } from './workers/thank-you-sms-worker';
+import { runReviewRequestSweep } from './workers/review-request-worker';
 import { createLifecycleEmailWorker } from './workers/lifecycle-email-worker';
 import { runSetupReminderSweep } from './workers/setup-reminder-sweep';
 import { runTrialReminderSweep } from './workers/trial-reminder-sweep';
@@ -455,6 +481,7 @@ import {
   shutdownCacheStores,
 } from './ai/gateway/factory';
 import * as gatewayFactory from './ai/gateway/factory';
+import { shutdownRedisClients } from './redis/redis-client';
 import { createAiHealthRouter } from './routes/ai-health';
 import { InMemoryAiRunRepository } from './ai/ai-run';
 import { PgAiRunRepository } from './ai/pg-ai-run';
@@ -464,6 +491,7 @@ import { InMemoryShadowComparisonStore } from './ai/evaluation/shadow-comparison
 import { createTtsProvider } from './ai/tts/tts-provider';
 import { InAppVoiceAdapter } from './ai/agents/customer-calling/inapp-adapter';
 import { VoiceSessionStore } from './ai/agents/customer-calling/voice-session-store';
+import { createVoiceEventTransport } from './ai/agents/customer-calling/voice-event-transport';
 import { createVoiceSessionsRouter } from './routes/voice-sessions';
 import { escalationOutcomeRouter } from './escalations/outcome-route';
 import { escalationEventsRouter } from './escalations/events-route';
@@ -644,6 +672,7 @@ export function createApp(): express.Express {
   // svix signed, instead of re-serializing the parsed object (key order /
   // whitespace differences would fail legit webhooks and break tenant bootstrap).
   app.use('/webhooks/clerk', express.raw({ type: 'application/json' }));
+  app.use('/api/webhooks/clerk', express.raw({ type: 'application/json' }));
 
   // Vapi signs its server messages (serverUrlSecret). Capture the raw Buffer
   // here so the HMAC verification in handleVapiCallEvent sees the exact bytes
@@ -655,11 +684,19 @@ export function createApp(): express.Express {
   // req.body fields (used for signature verification + AccountSid match).
   app.use('/webhooks/twilio', express.urlencoded({ extended: false }));
 
+  // FIN — Wisetack financing webhook needs the raw body for HMAC verification.
+  // Register the raw parser BEFORE global express.json() (like Stripe); the
+  // handler router is mounted later once repos are constructed.
+  app.use('/webhooks/wisetack', express.raw({ type: '*/*' }));
+
   // Body parsing for all other routes
   app.use(express.json());
 
-  // Serve static frontend files from the built React app
-  const frontendPath = require('path').join(__dirname, '../../web/dist');
+  // Serve static frontend files from the built React app.
+  // resolveWebDistDir anchors on the packages/api boundary so it points at
+  // <repoRoot>/packages/web/dist in both dev (__dirname=.../api/src) and the
+  // built image (__dirname=.../api/dist/src). See web-static-path.ts.
+  const frontendPath = resolveWebDistDir(__dirname);
   app.use(express.static(frontendPath));
 
   // Load validated config — must happen before CORS so validateProductionConfig()
@@ -688,22 +725,28 @@ export function createApp(): express.Express {
   // Rate limiting — applied before auth to protect all routes
   // In dev mode, use a much higher limit to allow QA testing
   const isDev = process.env.NODE_ENV === 'dev' || process.env.NODE_ENV === 'development';
+  const redisUrl = process.env.REDIS_URL;
   app.use('/api', rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
     max: isDev ? 10000 : 100, // per IP — relaxed in dev for QA testing
     standardHeaders: true,
     legacyHeaders: false,
     skip: () => isDev && process.env.DEV_AUTH_BYPASS === 'true',
+    // P3/U-P3c: shared Redis counter so the per-IP cap is cluster-wide (else N
+    // replicas = N× the limit). undefined ⇒ default per-process MemoryStore.
+    store: createRateLimitStore(redisUrl, 'api:'),
   }));
   app.use('/webhooks', rateLimit({
     windowMs: 60 * 1000,      // 1 minute
     max: 30,
+    store: createRateLimitStore(redisUrl, 'webhooks:'),
   }));
   // Public invoice/estimate pages are unauthenticated but token-gated.
   // Limit aggressively to slow token brute-force and view-count inflation.
   app.use('/public', rateLimit({
     windowMs: 60 * 1000,      // 1 minute
     max: 30,                  // per IP
+    store: createRateLimitStore(redisUrl, 'public:'),
   }));
 
   const requestLogger = createLogger({
@@ -715,10 +758,31 @@ export function createApp(): express.Express {
   // Initialize repositories — use Postgres when DATABASE_URL is set, otherwise
   // fall back to in-memory for local development without a database.
   const pool = process.env.DATABASE_URL ? createPool() : undefined;
+  // Direct (session-mode) pool for state that is unsafe under PgBouncer
+  // transaction pooling — session advisory locks (leader election, the proposal
+  // idempotency lock) and LISTEN/NOTIFY. `createDirectPool()` returns null when
+  // DATABASE_DIRECT_URL is unset, so we fall back to the main pool — identical
+  // behavior to before for dev / any deployment without PgBouncer.
+  const directPool = pool ? (createDirectPool() ?? pool) : undefined;
+  // U3b — WS per-tenant connection cap: cluster-wide via Redis when REDIS_URL is
+  // set (lease-TTL so a crashed replica's slots self-expire), else process-local.
+  const connectionRegistry = createConnectionRegistry(process.env.REDIS_URL);
 
   // In production, in-memory repositories lose all data on restart — crash fast.
   if (!pool && (config.NODE_ENV === 'prod' || config.NODE_ENV === 'staging')) {
     throw new Error('DATABASE_URL is required in production and staging environments');
+  }
+
+  // RLS runtime-role guard: when RLS_RUNTIME_ROLE=true, refuse to run unless the
+  // rls_app_runtime role is actually assumable — never serve with the flag on but
+  // enforcement silently absent. No-op when the flag is off.
+  if (pool) {
+    void verifyRlsRuntimeRole(pool).catch((err) => {
+      process.stderr.write(
+        `FATAL ${err instanceof Error ? err.message : String(err)}\n`
+      );
+      process.exit(1);
+    });
   }
 
   // Health checks — no auth required. Reuse the main pool (no duplicate connections).
@@ -738,6 +802,13 @@ export function createApp(): express.Express {
       },
     });
   }
+  // P4/U-P4a: while draining for shutdown, /ready (which fails on any `down`
+  // check) returns 503 so the load balancer stops routing NEW traffic here while
+  // active calls finish. /health (liveness) is unaffected.
+  checks.push({
+    name: 'drain',
+    check: async () => (isDrainingFlag() ? { status: 'down', message: 'draining' } : { status: 'ok' }),
+  });
   const healthRouter = createHealthRouter('1.0.0', process.env.NODE_ENV || 'development', checks);
   app.use('/', healthRouter);
 
@@ -906,6 +977,7 @@ export function createApp(): express.Express {
       : undefined,
   };
   app.use('/webhooks', createWebhookRouter(config, webhookRouterDeps));
+  app.use('/api/webhooks', createWebhookRouter(config, webhookRouterDeps));
 
   // Dev-only storage PUT receiver for DevStorageProvider upload URLs.
   // Mounted before /api Clerk auth so unauthenticated presigned-style PUTs
@@ -921,6 +993,13 @@ export function createApp(): express.Express {
   // U2 (CRM Jobber parity) — customer tags + tenant-defined custom fields.
   const customerTagRepo     = pool ? new PgTagRepository(pool)           : new InMemoryTagRepository();
   const customerCustomFieldRepo = pool ? new PgCustomFieldRepository(pool) : new InMemoryCustomFieldRepository();
+  const jobFormRepo = pool ? new PgJobFormRepository(pool) : new InMemoryJobFormRepository();
+  const recurringJobRepo = pool ? new PgRecurringJobRepository(pool) : new InMemoryRecurringJobRepository();
+  const jobCustomFieldRepo = pool ? new PgJobCustomFieldRepository(pool) : new InMemoryJobCustomFieldRepository();
+  const financingRepo = pool ? new PgFinancingRepository(pool) : new InMemoryFinancingRepository();
+  const financingProvider = createFinancingProvider();
+  const campaignRepo = pool ? new PgCampaignRepository(pool) : new InMemoryCampaignRepository();
+  const customerGroupRepo = pool ? new PgCustomerGroupRepository(pool) : new InMemoryCustomerGroupRepository();
   // Story 4.6 — customer merge. Pg re-parents child rows + archives the loser
   // in one transaction; the no-DB dev path only archives (no child tables).
   const customerMergeRepo = pool
@@ -1593,7 +1672,7 @@ export function createApp(): express.Express {
     ? new PgReviewPollStateRepository(pool)
     : null;
   const googleReviewsCredResolver = pool
-    ? createCredentialResolver({ pool })
+    ? createCredentialResolver({ pool, directPool })
     : null;
   const serviceCreditRepo = pool ? new PgServiceCreditRepository(pool) : undefined;
   const googleReplyResolver =
@@ -1667,7 +1746,7 @@ export function createApp(): express.Express {
   // §11 H1: IdempotencyGuard + advisory lock per (tenant, key). Keys
   // default to `proposal-run:{tenant}:{id}` when callers omit one.
   const proposalIdempotencyLock = pool
-    ? new PgIdempotencyLockProvider(pool)
+    ? new PgIdempotencyLockProvider(directPool ?? pool)
     : new NoOpIdempotencyLockProvider();
   const proposalIdempotencyGuard = new IdempotencyGuard(
     proposalExecutionRepo,
@@ -1847,6 +1926,25 @@ export function createApp(): express.Express {
     backgroundIntervals.push(handle);
     return handle;
   };
+
+  // scale-to-1000 U2c — sample Postgres pool occupancy into /metrics so the
+  // saturation signal (waiting climbing while total is pinned at the pool max)
+  // is observable. Reads cheap counters off pg.Pool every 5s; cleared on
+  // shutdown via registerInterval.
+  if (pool) {
+    const samplePoolMetrics = () => {
+      dbPoolConnections.set({ pool: 'main', state: 'total' }, pool.totalCount);
+      dbPoolConnections.set({ pool: 'main', state: 'idle' }, pool.idleCount);
+      dbPoolConnections.set({ pool: 'main', state: 'waiting' }, pool.waitingCount);
+      if (directPool && directPool !== pool) {
+        dbPoolConnections.set({ pool: 'direct', state: 'total' }, directPool.totalCount);
+        dbPoolConnections.set({ pool: 'direct', state: 'idle' }, directPool.idleCount);
+        dbPoolConnections.set({ pool: 'direct', state: 'waiting' }, directPool.waitingCount);
+      }
+    };
+    samplePoolMetrics();
+    registerInterval(setInterval(samplePoolMetrics, 5000));
+  }
   const SWEEP_LOCK = {
     recurringAgreements: 590001,
     overdueInvoice: 590002,
@@ -1874,6 +1972,8 @@ export function createApp(): express.Express {
     proposalExpiry: 590019,
     // Epic 12.6 — weekly feedback email sweep (590019 taken by proposalExpiry on main).
     weeklyFeedback: 590020,
+    // PRD US-345 — 24h post-completion review-request sweep.
+    reviewRequest: 590021,
   } as const;
   const runAsLeader = async (lockKey: number, work: () => Promise<void>): Promise<void> => {
     if (shuttingDown) return;
@@ -1882,7 +1982,10 @@ export function createApp(): express.Express {
       await work();
       return;
     }
-    const client = await pool.connect();
+    // Leader election holds a SESSION advisory lock across work(), so it must
+    // run on a direct (non-PgBouncer) connection — see createDirectPool. `pool`
+    // is non-null here (guarded above), so `directPool ?? pool` is defined.
+    const client = await (directPool ?? pool).connect();
     try {
       const res = await client.query<{ locked: boolean }>(
         'SELECT pg_try_advisory_lock($1) AS locked',
@@ -2053,13 +2156,21 @@ export function createApp(): express.Express {
   // (e.g. the image pipeline holding large in-memory buffers) can stack up
   // unbounded concurrent ticks → OOM. The boolean flag ensures at most one
   // tick body runs at a time; overlapping ticks are silently skipped.
-  let pollInFlight = false;
-  registerInterval(setInterval(async () => {
-    if (pollInFlight) return;
-    pollInFlight = true;
+  //
+  // Scale-to-1000 (P3): claim a BATCH of up to QUEUE_POLL_BATCH_SIZE messages per
+  // tick and process them CONCURRENTLY, lifting the single-process ceiling from
+  // ~1 msg/250ms (~4/s) to ~batch/250ms while staying multi-replica-safe (each
+  // tick claims a disjoint set via FOR UPDATE SKIP LOCKED). The pollInFlight
+  // guard still serializes ticks, so peak in-flight work is bounded by the batch
+  // size — backpressure unchanged, just wider per tick.
+  const QUEUE_POLL_BATCH_SIZE = Math.max(
+    1,
+    Number(process.env.QUEUE_POLL_BATCH_SIZE) || 10,
+  );
+  // Process one claimed message end-to-end. Self-contained error handling so one
+  // message's failure never rejects the batch (Promise.all below stays settled).
+  const handleQueueMessage = async (message: QueueMessage): Promise<void> => {
     try {
-      const message = await queue.receive();
-      if (!message) return;
       const handler = workerRegistry.get(message.type);
       if (!handler) {
         workerLogger.warn('No worker registered for message type', { type: message.type });
@@ -2077,6 +2188,22 @@ export function createApp(): express.Express {
           attempts: message.attempts,
         });
       }
+    } catch (err) {
+      workerLogger.error('Queue message processing failed', {
+        messageId: message.id,
+        type: message.type,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+  let pollInFlight = false;
+  registerInterval(setInterval(async () => {
+    if (pollInFlight) return;
+    pollInFlight = true;
+    try {
+      const messages = await queue.receiveBatch(QUEUE_POLL_BATCH_SIZE);
+      if (messages.length === 0) return;
+      await Promise.all(messages.map((message) => handleQueueMessage(message)));
     } catch (err) {
       workerLogger.error('Queue poll failed', {
         error: err instanceof Error ? err.message : String(err),
@@ -2391,7 +2518,14 @@ export function createApp(): express.Express {
   // Single shared voice session store: in-app and telephony both create
   // sessions in the same VoiceSessionStore so the FSM/cost-tracker pool
   // is uniform across channels. Process-local; idle-reaped via setInterval.
-  const voiceSessionStore = new VoiceSessionStore();
+  // U3d — voice event fan-out across replicas. Double-gated: REDIS_URL must be
+  // set AND VOICE_FANOUT_ENABLED=true (dark-launch switch); otherwise a no-op
+  // transport preserves single-replica behavior. Additive + best-effort: the
+  // in-process EventEmitter stays the synchronous same-replica path.
+  const voiceEventTransport = createVoiceEventTransport(
+    process.env.VOICE_FANOUT_ENABLED === 'true' ? process.env.REDIS_URL : undefined,
+  );
+  const voiceSessionStore = new VoiceSessionStore({ transport: voiceEventTransport });
   // F6b: Process-local whisper TwiML cache. Shared between:
   //   - whisperRouter (serves TwiML to Twilio when dispatcher answers)
   //   - MediaStreamAdapter (stores whisper text after escalation_started)
@@ -3245,6 +3379,7 @@ export function createApp(): express.Express {
           server,
           {
             store: voiceSessionStore,
+            connectionRegistry,
             streamingProvider,
             ...(sharedTtsProvider ? { ttsProvider: sharedTtsProvider } : {}),
             terminologyProvider,
@@ -3337,6 +3472,7 @@ export function createApp(): express.Express {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const server = (origListen as any)(...args);
       attachClientGateway(server, {
+        registry: connectionRegistry,
         // Runtime kill switch: consult the persisted feature flag on
         // every upgrade so flipping ws.client_gateway_enabled off
         // immediately disables /api/ws without redeploy. The env-var
@@ -3424,6 +3560,27 @@ export function createApp(): express.Express {
   // invariant in packages/api/test/decisions/decisions.test.ts (D6).
   app.use('/api', requireAuth);
 
+  // P3/U-P3c: per-tenant fairness limiter. The pre-auth /api limiter above is a
+  // coarse per-IP DoS guard; this one runs AFTER requireAuth (so req.auth is
+  // populated) and caps requests PER TENANT cluster-wide, so one tenant's
+  // dashboards/integrations can't monopolize a replica's capacity. Keyed by
+  // tenantId (fallback userId, then the IPv6-safe client IP for the rare
+  // authenticated-but-tenantless request). Shared Redis store; per-process
+  // MemoryStore when REDIS_URL is unset.
+  const tenantRateMax = Math.max(1, Number(process.env.API_TENANT_RATE_LIMIT_MAX) || 1000);
+  app.use('/api', rateLimit({
+    windowMs: 60 * 1000, // 1 minute
+    max: isDev ? 100_000 : tenantRateMax,
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req) => {
+      const auth = (req as AuthenticatedRequest).auth;
+      return auth?.tenantId ?? auth?.userId ?? ipKeyGenerator(req.ip ?? '');
+    },
+    skip: () => isDev && process.env.DEV_AUTH_BYPASS === 'true',
+    store: createRateLimitStore(process.env.REDIS_URL, 'tenant:'),
+  }));
+
   // P0-024: open a request-scoped transaction with `app.current_tenant_id`
   // set LOCAL so every query in the request reuses the same client and
   // RLS fires automatically. Public routes (health, /public/*, and
@@ -3462,6 +3619,52 @@ export function createApp(): express.Express {
   app.use(
     '/api/customer-custom-fields',
     createCustomerCustomFieldRouter(customerCustomFieldRepo, auditRepo)
+  );
+  app.use('/api/job-forms', createJobFormRouter(jobFormRepo, auditRepo, jobRepo));
+  app.use('/api/job-custom-fields', createJobCustomFieldRouter(jobCustomFieldRepo, auditRepo, jobRepo));
+  app.use('/api/customer-groups', createCustomerGroupRouter(customerGroupRepo, auditRepo));
+  app.use(
+    '/api/marketing',
+    createMarketingRouter({
+      campaignRepo,
+      customerRepo,
+      tagRepo: customerTagRepo,
+      delivery: messageDelivery,
+      groupMemberIds: (tid, gid) => customerGroupRepo.listMemberIds(tid, gid),
+      auditRepo,
+    })
+  );
+  app.use(
+    '/api/financing',
+    createFinancingRouter({
+      financingRepo,
+      invoiceRepo,
+      jobRepo,
+      customerRepo,
+      provider: financingProvider,
+      auditRepo,
+    })
+  );
+  app.use(
+    '/webhooks/wisetack',
+    createFinancingWebhookRouter({
+      financingRepo,
+      auditRepo,
+      webhookSecret: process.env.WISETACK_WEBHOOK_SECRET,
+    })
+  );
+  app.use(
+    '/api/recurring-jobs',
+    createRecurringJobRouter(recurringJobRepo, auditRepo, {
+      jobRepo,
+      appointmentRepo,
+      locationRepo,
+      resolveTimezone: async (tenantId: string) => {
+        const s = await settingsRepo.findByTenant(tenantId);
+        return s?.timezone ?? 'America/New_York';
+      },
+    },
+    customerRepo)
   );
   app.use('/api/time-entries', createTimeEntriesRouter(timeEntryRepo, auditRepo));
   // P10-001: portal session creation/revocation. Mounted at
@@ -3663,6 +3866,7 @@ export function createApp(): express.Express {
       locationRepo,
       enRouteCoordinator: delayNotificationCoordinator,
       proposalRepo,
+      userRepo,
       boardEventsDeps: {
         authUserIdFromRequest: async (req) =>
           (req as { auth?: { userId?: string } }).auth?.userId ?? null,
@@ -4157,10 +4361,16 @@ export function createApp(): express.Express {
       // Story 3.9 — editing a proposal logs each changed field to the
       // corrections training table (intent + field + before/after).
       correctionRepo,
+      // U1 (E9) — re-draft handler factory: resolving an entity-disambiguation
+      // clarification re-runs the original task handler (catalog-grounded for
+      // invoice/estimate) with the chosen id and replaces the voice_clarification
+      // with the drafted, executable proposal. Same gateway + catalog the voice
+      // router uses, so grounding/summary/confidence stay identical.
+      createRedraftHandlerFactory({ gateway: llmGateway, catalogRepo }),
     ),
   );
   if (pool) {
-    app.use('/api/interactions', createInteractionsRouter({ pool }));
+    app.use('/api/interactions', createInteractionsRouter({ pool, dispatchRepo }));
   }
 
   // ── Service agreements (P9-003) ─────────────────────────────────────────
@@ -4935,6 +5145,28 @@ export function createApp(): express.Express {
     });
   }, 10 * 60_000));
 
+  // Post-job review request (PRD US-345) — fires 24h after completion via the
+  // same P0-009 leader-locked sweep idiom; reuses the feedback_send worker for
+  // gated delivery (the immediate on-completion enqueue was removed).
+  const reviewRequestLogger = createLogger({
+    service: 'review-request-worker',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  registerInterval(setInterval(() => {
+    void runAsLeader(SWEEP_LOCK.reviewRequest, async () => {
+      await runReviewRequestSweep({
+        pool: pool ?? null,
+        jobRepo,
+        queue,
+        logger: reviewRequestLogger,
+      });
+    }).catch((err) => {
+      reviewRequestLogger.error('Review-request sweep failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }, 10 * 60_000));
+
   // Onboarding lifecycle email sweeps (setup reminder + trial-ending). Same
   // P0-009 sweep idiom; the pool guard inside each no-ops when running
   // in-memory, and each send claims the lifecycle_emails ledger so a re-tick
@@ -5182,7 +5414,7 @@ export function createApp(): express.Express {
   // Catch-all route for client-side routing — serves index.html for all non-API routes
   // This allows the React SPA to handle routing on the client side
   app.get('*', (req, res) => {
-    const frontendPath = require('path').join(__dirname, '../../web/dist');
+    const frontendPath = resolveWebDistDir(__dirname);
     const indexPath = require('path').join(frontendPath, 'index.html');
     res.sendFile(indexPath);
   });
@@ -5197,14 +5429,29 @@ export function createApp(): express.Express {
     try {
       // eslint-disable-next-line no-console
       console.log(`[app] ${signal} received — stopping background loops, closing voice sessions and pg pool`);
+      // P4/U-P4a — flip the drain flag so /ready 503s and new WS upgrades
+      // (dashboards + Twilio media streams) are rejected.
+      setDraining(true);
       // Blocker 5 — stop all background setInterval loops (sweeps, queue poll,
-      // execution worker) BEFORE the pg pool drains. `shuttingDown` also
-      // prevents an already-scheduled leader-gated sweep tick from starting
-      // new work. Without this, a tick fires mid-teardown and throws on a
-      // closed pool. In-flight queue jobs are bounded by the pool-drain race
-      // below.
+      // execution worker) and set `shuttingDown` IMMEDIATELY, BEFORE the voice
+      // drain wait below. The drain wait can run for the full DRAIN_TIMEOUT_MS
+      // (~25s); if the queue poller and leader-gated sweeps kept ticking through
+      // it they would claim fresh DB/Redis work right up to the deadline, then
+      // get torn down with jobs in flight. `shuttingDown` also prevents an
+      // already-scheduled leader sweep tick from starting new work. Voice
+      // sessions are in-memory FSMs and don't depend on these loops, so halting
+      // them first does not impede the drain. (Codex review on PR #628.)
       shuttingDown = true;
       for (const handle of backgroundIntervals) clearInterval(handle);
+      // Now DRAIN: wait (bounded) for in-flight voice sessions to finish before
+      // tearing down the pool/Redis/sessions. The window must be shorter than
+      // index.ts's force-exit and Railway's stop grace period; calls still live
+      // at the deadline are closed by the teardown below (Twilio ends the call).
+      const drainDeadline = Date.now() + (Number(process.env.DRAIN_TIMEOUT_MS) || 25_000);
+      while (voiceSessionStore.liveCount() > 0 && Date.now() < drainDeadline) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+      console.log(`[app] drain complete — ${voiceSessionStore.liveCount()} live session(s) still active at teardown`);
       // Stop the voice-session-store reaper interval so the process can
       // exit cleanly even when no DB pool is wired (dev / in-memory mode).
       voiceSessionStore.dispose();
@@ -5218,9 +5465,21 @@ export function createApp(): express.Express {
       // Disconnect Redis cache store(s) before draining the DB pool so Railway
       // shutdown is not slowed by lingering Redis connections.
       await shutdownCacheStores();
+      // scale-to-1000 U3a — close shared Redis clients (WS connection cap, voice
+      // fan-out, quota, and the refactored cache) after the cache flush and
+      // BEFORE the pg pool drains, in the same shutdown slot as the cache.
+      await shutdownRedisClients();
       if (pool) {
         await Promise.race([
           pool.end(),
+          new Promise((resolve) => setTimeout(resolve, 5000)),
+        ]);
+      }
+      // Close the direct pool too when it's a SEPARATE pool (DATABASE_DIRECT_URL
+      // set). When it falls back to the main pool it was already drained above.
+      if (directPool && directPool !== pool) {
+        await Promise.race([
+          directPool.end(),
           new Promise((resolve) => setTimeout(resolve, 5000)),
         ]);
       }

@@ -41,17 +41,21 @@ server.on('error', (err: NodeJS.ErrnoException) => {
   process.exit(1);
 });
 
-// Blocker 5 — graceful shutdown. On a stop signal, stop accepting new
-// connections so in-flight requests can finish; createApp's own SIGTERM
-// handler concurrently stops the background loops and drains the pg pool.
-// A hard-timeout fallback (unref'd so it never keeps the process alive)
-// force-exits if draining stalls, well within Railway's stop grace period.
+// Blocker 5 / P4 U-P4a — graceful shutdown. On a stop signal, stop accepting
+// new HTTP connections so in-flight requests can finish; createApp's own SIGTERM
+// handler concurrently DRAINS live voice/WS calls (rejects new upgrades via the
+// drain flag, waits up to DRAIN_TIMEOUT_MS for active sessions) before tearing
+// down sessions/Redis/pool. The hard-timeout fallback (unref'd so it never keeps
+// the process alive) force-exits if draining stalls — set longer than
+// DRAIN_TIMEOUT_MS (default 25s) and shorter than Railway's stop grace period
+// (set RAILWAY stop grace ≥ 35s; see docs/runbooks/scaling.md).
+const FORCE_EXIT_MS = Number(process.env.SHUTDOWN_FORCE_EXIT_MS) || 30_000;
 const gracefulExit = (signal: NodeJS.Signals) => {
   process.stdout.write(`[shutdown] ${signal} received — closing HTTP server\n`);
   server.close(() => {
     process.stdout.write('[shutdown] HTTP server closed\n');
   });
-  setTimeout(() => process.exit(0), 10_000).unref();
+  setTimeout(() => process.exit(0), FORCE_EXIT_MS).unref();
 };
 process.once('SIGTERM', gracefulExit);
 process.once('SIGINT', gracefulExit);

@@ -5206,6 +5206,506 @@ export const MIGRATIONS = {
     ALTER TABLE tenant_settings
       ADD COLUMN IF NOT EXISTS weekly_feedback_enabled BOOLEAN NOT NULL DEFAULT true;
   `,
+
+  // PRD US-340 + US-341 — default the reminder cadence to T-24h AND T-2h.
+  // Migration 211 created the column with DEFAULT '[24]' (the legacy single
+  // reminder); this changes the column default for NEW tenant_settings rows to
+  // '[24, 2]'. Existing rows are left untouched — a tenant's explicit cadence
+  // is never overwritten. Idempotent (SET DEFAULT re-runs safely).
+  '213_tenant_settings_reminder_offsets_default': `
+    ALTER TABLE tenant_settings
+      ALTER COLUMN appointment_reminder_offsets_hours SET DEFAULT '[24, 2]'::jsonb;
+  `,
+
+  // PRD US-345 — auto review request 24h after job completion. Mirrors the
+  // thank-you-SMS pattern (migration 194):
+  //   - jobs.review_request_sent_at: per-job idempotency stamp. The 24h sweep
+  //     enqueues feedback_send (the existing gated review/feedback delivery)
+  //     once per job, then stamps this; suppressed reasons stamp it too so the
+  //     sweep never re-checks the row.
+  //   - tenant_settings.send_review_request: opt-out per tenant. Default ON to
+  //     match the PRD's auto_send_review_request default + preserve the current
+  //     "every completed job gets a request" audience (just at 24h, not
+  //     immediately — the immediate enqueue in routes/jobs.ts is removed).
+  // Backfill: pre-existing 'completed' jobs get review_request_sent_at =
+  // COALESCE(completed_at, updated_at) so the first sweep after deploy doesn't
+  // blast customers for jobs finished long ago.
+  '214_review_request_sweep': `
+    ALTER TABLE jobs ADD COLUMN IF NOT EXISTS review_request_sent_at TIMESTAMPTZ;
+    ALTER TABLE tenant_settings ADD COLUMN IF NOT EXISTS send_review_request BOOLEAN NOT NULL DEFAULT TRUE;
+    UPDATE jobs
+      SET review_request_sent_at = COALESCE(completed_at, updated_at)
+      WHERE status = 'completed'
+        AND review_request_sent_at IS NULL;
+    CREATE INDEX IF NOT EXISTS idx_jobs_review_request_eligibility
+      ON jobs (tenant_id, completed_at)
+      WHERE review_request_sent_at IS NULL AND completed_at IS NOT NULL;
+  `,
+  // proposals.claimed_by stored the execution-worker identifier, but the
+  // column was created as UUID (migration that added it) while the worker
+  // passes a string label ('execution-worker'). Every claimForExecution
+  // therefore threw `invalid input syntax for type uuid`, so NO approved
+  // proposal ever reached 'executing'/'executed' — proposal execution was
+  // silently broken in production. The value is a worker label, not a user
+  // id; align the type with executed_by/created_by (both TEXT).
+  '215_proposals_claimed_by_text': `
+    ALTER TABLE proposals ALTER COLUMN claimed_by TYPE TEXT USING claimed_by::text;
+  `,
+  // delay_notice_state backs the running-late SMS idempotency guard, but the
+  // table was never created — PgDelayNoticeStateRepository.upsert() (wired in
+  // production via the pool) INSERTs into a nonexistent relation, throws, and
+  // the route swallows the error and returns {queued:true}. Net effect: the
+  // "tech is running late" SMS to the next customer is silently dropped and
+  // the idempotency guard can never engage. Create the table the repo expects.
+  // PK is idempotency_key so retries upsert in place (mirrors the InMemory Map).
+  '216_create_delay_notice_state': `
+    CREATE TABLE IF NOT EXISTS delay_notice_state (
+      idempotency_key TEXT PRIMARY KEY,
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      appointment_id UUID NOT NULL,
+      delay_version INTEGER NOT NULL,
+      status TEXT NOT NULL,
+      channel TEXT NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      max_attempts INTEGER NOT NULL,
+      last_error TEXT,
+      provider_message_id TEXT,
+      trigger_context JSONB,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_delay_notice_state_tenant ON delay_notice_state (tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_delay_notice_state_appointment ON delay_notice_state (tenant_id, appointment_id);
+    ALTER TABLE delay_notice_state ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE delay_notice_state FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_delay_notice_state ON delay_notice_state;
+    CREATE POLICY tenant_isolation_delay_notice_state ON delay_notice_state
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+  // Least-privilege runtime role for RLS enforcement. The app connects as a
+  // privileged principal (needs to run migrations + own the view-token
+  // SECURITY DEFINER functions), so RLS is a runtime no-op today. This role is
+  // RLS-SUBJECT (NOT superuser, NOT BYPASSRLS, never a table owner): when the
+  // app `SET ROLE`s into it for tenant-scoped queries (gated by RLS_RUNTIME_ROLE),
+  // every policy actually enforces. Grants are broad (ALL TABLES + future via
+  // ALTER DEFAULT PRIVILEGES) so RLS — not the grant — is what isolates tenants;
+  // a narrow grant list would 500 a query the day someone adds a table.
+  // Self-degrading: a deploy principal without CREATEROLE/GRANT logs a NOTICE
+  // and continues (enforcement simply stays off until the role is provisioned).
+  '217_create_rls_app_runtime_role': `
+    DO $rls$
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'rls_app_runtime') THEN
+        CREATE ROLE rls_app_runtime NOLOGIN;
+      END IF;
+      GRANT USAGE ON SCHEMA public TO rls_app_runtime;
+      GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO rls_app_runtime;
+      GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO rls_app_runtime;
+      ALTER DEFAULT PRIVILEGES IN SCHEMA public
+        GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO rls_app_runtime;
+      ALTER DEFAULT PRIVILEGES IN SCHEMA public
+        GRANT USAGE, SELECT ON SEQUENCES TO rls_app_runtime;
+      -- Let the app's connection principal assume the role.
+      EXECUTE format('GRANT rls_app_runtime TO %I', current_user);
+    EXCEPTION WHEN insufficient_privilege THEN
+      RAISE NOTICE 'rls_app_runtime not provisioned (insufficient privilege); RLS runtime role stays disabled until provisioned by an admin';
+    END
+    $rls$;
+  `,
+  // The two tenant tables that carry tenant_id but have NO RLS policy are BOTH
+  // intentional exemptions (pinned by RLS_EXEMPT_TABLES in test/db/schema.test.ts).
+  // Record the rationale durably as table comments — do NOT add policies:
+  //   - oauth_states: short-lived OAuth state nonces. The provider /callback
+  //     reads the row to DISCOVER its tenant — CalendarOauthStateRepository.consume()
+  //     runs `pool.query(UPDATE oauth_states ... WHERE id=$1 RETURNING tenant_id)`
+  //     with NO tenant context, because the callback doesn't know the tenant yet
+  //     (the unguessable nonce id IS the capability). An RLS policy keyed on
+  //     app.current_tenant_id would break every OAuth callback under a non-bypass
+  //     role. (Earlier in this branch this migration wrongly FORCE-RLSed it.)
+  //   - platform_deprovision_log: ops/audit log with no tenant FK, written via the
+  //     privileged connection, must survive a tenant purge.
+  '218_rls_coverage_oauth_states': `
+    COMMENT ON TABLE oauth_states IS
+      'Intentionally NOT under RLS: OAuth state nonces consumed by the provider /callback BEFORE tenant context exists (consume() recovers tenant_id from the row by its unguessable id). An app.current_tenant_id RLS policy would break OAuth callbacks under a non-bypass role. Exempt by design — see test/db/schema.test.ts RLS_EXEMPT_TABLES.';
+    COMMENT ON TABLE platform_deprovision_log IS
+      'Intentionally NOT under RLS: ops/audit log with no tenant FK, written via the privileged connection (withClient/pool.query), and must survive a tenant purge. Do not add a tenant_isolation policy.';
+  `,
+  // Least-privilege: rls_app_runtime must hold NO grant on a table that carries
+  // tenant_id but has no RLS policy. Such a table (the deliberate exemptions
+  // oauth_states, platform_deprovision_log) has nothing to scope it, so under
+  // the RLS-subject role a tenant-path query would read EVERY tenant's rows —
+  // a cross-tenant leak with no backstop. Revoke so the role simply can't reach
+  // them (they are only ever accessed via the privileged connection anyway).
+  // Dynamic + self-maintaining: any future tenant_id-without-RLS table is
+  // revoked too. Idempotent (REVOKE of an absent grant is a no-op). Graceful if
+  // the role was never provisioned.
+  '219_rls_app_runtime_revoke_exempt': `
+    DO $revoke$
+    DECLARE t text;
+    BEGIN
+      FOR t IN
+        SELECT c.relname
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'public'
+        JOIN information_schema.columns col
+          ON col.table_schema = 'public' AND col.table_name = c.relname AND col.column_name = 'tenant_id'
+        WHERE c.relkind = 'r' AND NOT c.relrowsecurity
+      LOOP
+        EXECUTE format('REVOKE ALL ON public.%I FROM rls_app_runtime', t);
+      END LOOP;
+    EXCEPTION
+      WHEN undefined_object THEN
+        RAISE NOTICE 'rls_app_runtime role absent; nothing to revoke';
+      WHEN insufficient_privilege THEN
+        RAISE NOTICE 'insufficient privilege to REVOKE from rls_app_runtime; skipping';
+    END
+    $revoke$;
+  `,
+  // Named role for INTENTIONAL cross-tenant access (proposal execution sweep,
+  // recovery/retention drains). BYPASSRLS so it can read/write across tenants on
+  // FORCE-RLS tables — same capability as the connection principal, so this is
+  // auditability (an explicit, attributable role) not privilege reduction. The
+  // app SET ROLEs into it via withCrossTenantSweep when RLS_RUNTIME_ROLE is on.
+  // Self-degrading: CREATE ROLE ... BYPASSRLS needs SUPERUSER, so a non-super
+  // migrate principal logs a NOTICE and the sweeps fall back to the connection
+  // principal (correct, just unattributed).
+  '220_create_rls_cross_tenant_role': `
+    DO $cross$
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'rls_cross_tenant') THEN
+        CREATE ROLE rls_cross_tenant NOLOGIN BYPASSRLS;
+      END IF;
+      GRANT USAGE ON SCHEMA public TO rls_cross_tenant;
+      GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO rls_cross_tenant;
+      GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO rls_cross_tenant;
+      ALTER DEFAULT PRIVILEGES IN SCHEMA public
+        GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO rls_cross_tenant;
+      ALTER DEFAULT PRIVILEGES IN SCHEMA public
+        GRANT USAGE, SELECT ON SEQUENCES TO rls_cross_tenant;
+      EXECUTE format('GRANT rls_cross_tenant TO %I', current_user);
+    EXCEPTION WHEN insufficient_privilege THEN
+      RAISE NOTICE 'rls_cross_tenant not provisioned (insufficient privilege; BYPASSRLS needs SUPERUSER); cross-tenant sweeps fall back to the connection principal';
+    END
+    $cross$;
+  `,
+
+  // Scale-to-1000 (P3): (tenant_id, status, created_at DESC) serves both
+  // findByStatus (filter + ORDER BY created_at DESC) and the windowed
+  // findByStatusSince (created_at range) used by the supervisor-review sweep,
+  // returning rows pre-sorted. It is a prefix-superset of the old
+  // (tenant_id, status) index — every (tenant_id, status[, created_at]) access
+  // uses it — so the old one is dropped to avoid double write-amplification.
+  // Added as a NEW migration (027_create_proposals already shipped; editing it
+  // would be a no-op on existing DBs under CREATE ... IF NOT EXISTS).
+  '221_proposals_status_created_index': `
+    CREATE INDEX IF NOT EXISTS idx_proposals_status_created ON proposals(tenant_id, status, created_at DESC);
+    DROP INDEX IF EXISTS idx_proposals_status;
+  `,
+  '221_create_job_forms': `
+    -- J-FORM (Jobber parity) — job forms & checklists. Jobber lets a shop
+    -- define reusable form/checklist templates that technicians fill out per
+    -- job; we mirror that with templates + per-job submissions. Read/written by
+    -- src/job-forms/pg-job-form.ts. Both tables are tenant-scoped with FORCE RLS.
+    --
+    -- field_type is kept in lockstep with jobFormFieldTypeSchema
+    -- (packages/api/src/shared/contracts.ts) and JOB_FORM_FIELD_TYPES; the
+    -- enum lives in the JSONB field blobs, not a column CHECK, so it is
+    -- validated in app code (job-form.ts) rather than the DB.
+
+    -- Templates: an ordered list of typed fields stored as a JSONB array,
+    -- always read/written together with the template.
+    CREATE TABLE IF NOT EXISTS job_form_templates (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      name TEXT NOT NULL,
+      description TEXT,
+      fields JSONB NOT NULL DEFAULT '[]'::jsonb,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      is_archived BOOLEAN NOT NULL DEFAULT false,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_job_form_templates_tenant
+      ON job_form_templates(tenant_id);
+    ALTER TABLE job_form_templates ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE job_form_templates FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_job_form_templates ON job_form_templates;
+    CREATE POLICY tenant_isolation_job_form_templates ON job_form_templates
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    -- Submissions: a filled instance attached to a job. template_name + fields
+    -- are SNAPSHOT at creation so a completed record is immutable history even
+    -- if the template is later edited or archived. answers is a JSONB array of
+    -- { fieldId, value }. completed_by holds the actor id (Clerk/user id) and
+    -- is a free-text actor reference, not an FK, to mirror the audit actor model.
+    CREATE TABLE IF NOT EXISTS job_form_submissions (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      job_id UUID NOT NULL REFERENCES jobs(id),
+      template_id UUID NOT NULL REFERENCES job_form_templates(id),
+      template_name TEXT NOT NULL,
+      fields JSONB NOT NULL DEFAULT '[]'::jsonb,
+      answers JSONB NOT NULL DEFAULT '[]'::jsonb,
+      status TEXT NOT NULL DEFAULT 'draft'
+        CHECK (status IN ('draft', 'completed')),
+      completed_by TEXT,
+      completed_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_job_form_submissions_job
+      ON job_form_submissions(tenant_id, job_id);
+    CREATE INDEX IF NOT EXISTS idx_job_form_submissions_template
+      ON job_form_submissions(tenant_id, template_id);
+    ALTER TABLE job_form_submissions ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE job_form_submissions FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_job_form_submissions ON job_form_submissions;
+    CREATE POLICY tenant_isolation_job_form_submissions ON job_form_submissions
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '222_create_recurring_jobs': `
+    -- R-JOB (Jobber parity) — recurring job series. Jobber's recurring jobs
+    -- repeat on a schedule (weekly lawn care, monthly HVAC maintenance). This
+    -- table models the schedule: a customer, a title, an anchor date, and a
+    -- recurrence rule (JSONB). Upcoming visit dates are computed from the rule
+    -- in app code (src/recurring-jobs/recurrence.ts), not stored. Read/written
+    -- by src/recurring-jobs/pg-recurring-job.ts. Tenant-scoped with FORCE RLS.
+    --
+    -- rule shape: { frequency: 'daily'|'weekly'|'biweekly'|'monthly',
+    --               interval: int>=1, count?: int, until?: 'YYYY-MM-DD' }
+    -- kept in lockstep with recurrenceRuleSchema (src/shared/contracts.ts).
+    CREATE TABLE IF NOT EXISTS recurring_jobs (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      customer_id UUID NOT NULL REFERENCES customers(id),
+      title TEXT NOT NULL,
+      anchor_date DATE NOT NULL,
+      rule JSONB NOT NULL DEFAULT '{}'::jsonb,
+      notes TEXT,
+      is_archived BOOLEAN NOT NULL DEFAULT false,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_recurring_jobs_tenant
+      ON recurring_jobs(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_recurring_jobs_customer
+      ON recurring_jobs(tenant_id, customer_id);
+    ALTER TABLE recurring_jobs ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE recurring_jobs FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_recurring_jobs ON recurring_jobs;
+    CREATE POLICY tenant_isolation_recurring_jobs ON recurring_jobs
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '223_recurring_job_materialization': `
+    -- R-JOB (Jobber parity) — materialize recurring series into real jobs +
+    -- appointments. Adds the per-visit scheduling intent (time-of-day,
+    -- duration, visit kind) to the series and a ledger that makes generation
+    -- idempotent: one visit per (series, occurrence date). Read/written by
+    -- src/recurring-jobs/pg-recurring-job.ts + materialize.ts.
+
+    ALTER TABLE recurring_jobs
+      ADD COLUMN IF NOT EXISTS anchor_time TEXT NOT NULL DEFAULT '09:00';
+    ALTER TABLE recurring_jobs
+      ADD COLUMN IF NOT EXISTS duration_minutes INTEGER NOT NULL DEFAULT 60;
+    ALTER TABLE recurring_jobs
+      ADD COLUMN IF NOT EXISTS appointment_type TEXT;
+    -- appointment_type mirrors the appointments CHECK taxonomy (kept in lockstep
+    -- with appointmentTypeSchema). Named ADD CONSTRAINT so the getMigrationSQL
+    -- DROP-CONSTRAINT rewriter keeps re-runs safe. NULL = unspecified.
+    ALTER TABLE recurring_jobs
+      ADD CONSTRAINT recurring_jobs_appointment_type_check
+      CHECK (appointment_type IS NULL OR appointment_type IN
+        ('estimate', 'repair', 'install', 'maintenance', 'diagnostic'));
+
+    -- Materialization ledger: one row per generated occurrence. The UNIQUE
+    -- constraint is the idempotency guarantee (claimOccurrence does an
+    -- ON CONFLICT DO NOTHING insert). job_id / appointment_id are filled in
+    -- after the visit is created (linkOccurrence).
+    CREATE TABLE IF NOT EXISTS recurring_job_occurrences (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      recurring_job_id UUID NOT NULL REFERENCES recurring_jobs(id),
+      occurrence_date DATE NOT NULL,
+      job_id UUID REFERENCES jobs(id),
+      appointment_id UUID REFERENCES appointments(id),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    ALTER TABLE recurring_job_occurrences
+      ADD CONSTRAINT recurring_job_occurrences_unique
+      UNIQUE (tenant_id, recurring_job_id, occurrence_date);
+    CREATE INDEX IF NOT EXISTS idx_recurring_job_occurrences_series
+      ON recurring_job_occurrences(tenant_id, recurring_job_id);
+    ALTER TABLE recurring_job_occurrences ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE recurring_job_occurrences FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_recurring_job_occurrences ON recurring_job_occurrences;
+    CREATE POLICY tenant_isolation_recurring_job_occurrences ON recurring_job_occurrences
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '224_create_job_custom_fields': `
+    -- J-CF (Jobber parity) — tenant-defined custom fields on jobs (the
+    -- job-scoped twin of customer custom fields, migration 187). Structured,
+    -- reportable attributes on the job record (PO #, permit #, gate code).
+    -- Read/written by src/jobs/pg-job-custom-field.ts. FORCE RLS on both tables.
+    -- field_type kept in lockstep with customerCustomFieldTypeSchema.
+    CREATE TABLE IF NOT EXISTS job_custom_field_defs (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      key TEXT NOT NULL,
+      label TEXT NOT NULL,
+      field_type TEXT NOT NULL DEFAULT 'text'
+        CHECK (field_type IN ('text', 'number', 'date', 'select')),
+      options JSONB NOT NULL DEFAULT '[]'::jsonb,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      is_archived BOOLEAN NOT NULL DEFAULT false,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    ALTER TABLE job_custom_field_defs
+      ADD CONSTRAINT job_custom_field_defs_key_unique UNIQUE (tenant_id, key);
+    CREATE INDEX IF NOT EXISTS idx_job_cfd_tenant ON job_custom_field_defs(tenant_id);
+    ALTER TABLE job_custom_field_defs ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE job_custom_field_defs FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_job_cfd ON job_custom_field_defs;
+    CREATE POLICY tenant_isolation_job_cfd ON job_custom_field_defs
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    CREATE TABLE IF NOT EXISTS job_custom_field_values (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      job_id UUID NOT NULL REFERENCES jobs(id),
+      field_def_id UUID NOT NULL REFERENCES job_custom_field_defs(id),
+      value TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    ALTER TABLE job_custom_field_values
+      ADD CONSTRAINT job_cfv_unique UNIQUE (tenant_id, job_id, field_def_id);
+    CREATE INDEX IF NOT EXISTS idx_job_cfv_job ON job_custom_field_values(tenant_id, job_id);
+    ALTER TABLE job_custom_field_values ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE job_custom_field_values FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_job_cfv ON job_custom_field_values;
+    CREATE POLICY tenant_isolation_job_cfv ON job_custom_field_values
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '225_create_financing_applications': `
+    -- FIN (Jobber parity) — consumer financing on invoices (Wisetack-style
+    -- "buy now / pay over time"). One application per offer on an invoice;
+    -- the provider drives status via a signed webhook. Read/written by
+    -- src/financing/pg-financing.ts. amount_cents is integer cents. FORCE RLS.
+    CREATE TABLE IF NOT EXISTS financing_applications (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      invoice_id UUID NOT NULL REFERENCES invoices(id),
+      customer_id UUID REFERENCES customers(id),
+      amount_cents BIGINT NOT NULL CHECK (amount_cents > 0),
+      provider TEXT NOT NULL CHECK (provider IN ('wisetack', 'manual')),
+      external_id TEXT,
+      application_url TEXT,
+      status TEXT NOT NULL DEFAULT 'offered'
+        CHECK (status IN ('offered', 'prequalified', 'approved', 'declined', 'funded', 'expired', 'canceled')),
+      status_reason TEXT,
+      created_by TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_financing_applications_invoice
+      ON financing_applications(tenant_id, invoice_id);
+    ALTER TABLE financing_applications ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE financing_applications FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_financing_applications ON financing_applications;
+    CREATE POLICY tenant_isolation_financing_applications ON financing_applications
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '226_create_marketing_campaigns': `
+    -- MKT (Jobber parity) — customer email campaigns. Compose once, target all
+    -- active customers or a tag segment, send via the delivery provider.
+    -- Read/written by src/marketing/pg-campaign.ts. FORCE RLS.
+    CREATE TABLE IF NOT EXISTS marketing_campaigns (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      name TEXT NOT NULL,
+      subject TEXT NOT NULL,
+      body_text TEXT NOT NULL,
+      body_html TEXT,
+      segment_tag TEXT,
+      status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'sent')),
+      recipient_count INTEGER NOT NULL DEFAULT 0,
+      sent_count INTEGER NOT NULL DEFAULT 0,
+      failed_count INTEGER NOT NULL DEFAULT 0,
+      created_by TEXT NOT NULL,
+      sent_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_marketing_campaigns_tenant
+      ON marketing_campaigns(tenant_id);
+    ALTER TABLE marketing_campaigns ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE marketing_campaigns FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_marketing_campaigns ON marketing_campaigns;
+    CREATE POLICY tenant_isolation_marketing_campaigns ON marketing_campaigns
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '227_create_customer_groups': `
+    -- U8 (CRM Jobber parity) — customer groups / segmentation. A first-class,
+    -- named segment with explicit membership (distinct from free-form
+    -- customer_tags). Read/written by src/customers/pg-customer-group.ts.
+    -- Both tables tenant-scoped with FORCE RLS.
+    CREATE TABLE IF NOT EXISTS customer_groups (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      name TEXT NOT NULL,
+      description TEXT,
+      color TEXT,
+      is_archived BOOLEAN NOT NULL DEFAULT false,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    -- Case-insensitive, partial unique: names are unique among ACTIVE groups
+    -- only, so archiving a group frees its name for reuse (matches the app-level
+    -- dedup in createCustomerGroup, which intentionally ignores archived rows).
+    -- LOWER() keeps it in lockstep with findGroupByName's case-insensitive match.
+    CREATE UNIQUE INDEX IF NOT EXISTS customer_groups_name_unique
+      ON customer_groups (tenant_id, LOWER(name)) WHERE is_archived = false;
+    CREATE INDEX IF NOT EXISTS idx_customer_groups_tenant ON customer_groups(tenant_id);
+    ALTER TABLE customer_groups ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE customer_groups FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_customer_groups ON customer_groups;
+    CREATE POLICY tenant_isolation_customer_groups ON customer_groups
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    -- Membership join: one row per (group, customer), idempotent via the
+    -- unique constraint (addMember does ON CONFLICT DO NOTHING).
+    CREATE TABLE IF NOT EXISTS customer_group_members (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      group_id UUID NOT NULL REFERENCES customer_groups(id),
+      customer_id UUID NOT NULL REFERENCES customers(id),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    ALTER TABLE customer_group_members
+      ADD CONSTRAINT customer_group_members_unique UNIQUE (tenant_id, group_id, customer_id);
+    CREATE INDEX IF NOT EXISTS idx_customer_group_members_group
+      ON customer_group_members(tenant_id, group_id);
+    CREATE INDEX IF NOT EXISTS idx_customer_group_members_customer
+      ON customer_group_members(tenant_id, customer_id);
+    ALTER TABLE customer_group_members ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE customer_group_members FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_customer_group_members ON customer_group_members;
+    CREATE POLICY tenant_isolation_customer_group_members ON customer_group_members
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '228_marketing_campaign_segment_group': `
+    -- U8 / MKT — let an email campaign target a customer group (in addition to
+    -- a tag). Nullable; null preserves the existing all-customers / tag behavior.
+    ALTER TABLE marketing_campaigns
+      ADD COLUMN IF NOT EXISTS segment_group_id UUID REFERENCES customer_groups(id);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

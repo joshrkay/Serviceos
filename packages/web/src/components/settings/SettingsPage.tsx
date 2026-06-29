@@ -5,7 +5,7 @@ import {
   ChevronRight, Building2, Users, Shield, Bell, Globe, Clock,
   CreditCard, Link, Zap, FileText, Sparkles, Copy, ExternalLink,
   MapPin, Check, Store, RefreshCw, TrendingUp, Mail, BookOpen, Star, Phone,
-  Calendar,
+  Calendar, ClipboardList, SlidersHorizontal, Megaphone,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { QuickBooksIntegrationSheet } from './QuickBooksIntegrationSheet';
@@ -17,6 +17,10 @@ import { SupervisorBackupSection } from './SupervisorBackupSection';
 import { BusinessProfileSheet } from './BusinessProfileSheet';
 import { TechnicianPhoneSheet } from './TechnicianPhoneSheet';
 import { TerminologySheet } from './TerminologySheet';
+import { JobFormTemplatesSheet } from './JobFormTemplatesSheet';
+import { JobCustomFieldsSheet } from './JobCustomFieldsSheet';
+import { MarketingCampaignsSheet } from './MarketingCampaignsSheet';
+import { CustomerGroupsSheet } from './CustomerGroupsSheet';
 import { AIApprovalRulesSheet } from './AIApprovalRulesSheet';
 import { DepositRulesSheet } from './DepositRulesSheet';
 import { DiscountPolicySheet } from './DiscountPolicySheet';
@@ -45,13 +49,21 @@ export function SettingsPage() {
   const [spanishMode, setSpanishMode] = useState(false);
   const [businessName, setBusinessName] = useState<string | null>(null);
   const [voiceAgentLive, setVoiceAgentLive] = useState<boolean | null>(null);
+  // Surface a failure to load the main /api/settings document instead of
+  // silently swallowing it (which left the page showing stale defaults with
+  // no signal that the user's real preferences never loaded).
+  const [settingsLoadError, setSettingsLoadError] = useState(false);
+  const [settingsReloadNonce, setSettingsReloadNonce] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
         const res = await apiFetch('/api/settings');
-        if (cancelled || !res.ok) return;
+        if (cancelled) return;
+        if (!res.ok) {
+          throw new Error(`GET /api/settings ${res.status}`);
+        }
         const data = (await res.json()) as {
           autoApplyInternalUpdates?: boolean;
           autoSendAppointmentReminders?: boolean;
@@ -74,8 +86,16 @@ export function SettingsPage() {
         if (typeof data.yelpReviewUrl === 'string') {
           setYelpReviewUrl(data.yelpReviewUrl);
         }
+        setSettingsLoadError(false);
       } catch {
-        /* network hiccup — defaults remain */
+        if (cancelled) return;
+        setSettingsLoadError(true);
+        toast.error('Could not load your settings', {
+          action: {
+            label: 'Retry',
+            onClick: () => setSettingsReloadNonce((n) => n + 1),
+          },
+        });
       }
       try {
         const statusRes = await apiFetch('/api/onboarding/status');
@@ -107,7 +127,7 @@ export function SettingsPage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [settingsReloadNonce]);
 
   async function refreshQuickBooksIntegration() {
     try {
@@ -166,6 +186,10 @@ export function SettingsPage() {
   const [businessProfileOpen, setBusinessProfileOpen] = useState(false);
   const [technicianPhoneOpen, setTechnicianPhoneOpen] = useState(false);
   const [terminologyOpen, setTerminologyOpen] = useState(false);
+  const [jobFormsOpen, setJobFormsOpen] = useState(false);
+  const [jobCustomFieldsOpen, setJobCustomFieldsOpen] = useState(false);
+  const [marketingOpen, setMarketingOpen] = useState(false);
+  const [customerGroupsOpen, setCustomerGroupsOpen] = useState(false);
   const [aiRulesOpen, setAiRulesOpen] = useState(false);
   const [depositRulesOpen, setDepositRulesOpen] = useState(false);
   const [discountPolicyOpen, setDiscountPolicyOpen] = useState(false);
@@ -347,6 +371,7 @@ export function SettingsPage() {
         { icon: Phone,     label: 'On-call phone',       description: 'The number escalations ring when you are on call',     action: () => setTechnicianPhoneOpen(true) },
         { icon: Globe,     label: 'Language & region',   description: 'English / Español · Voice + customer messages', action: () => navigate('/settings/language') },
         { icon: FileText,  label: 'Terminology',         description: 'Customize labels (e.g. "Quote" vs "Estimate")',    action: () => setTerminologyOpen(true) },
+        { icon: Users,     label: 'Customer groups',     description: 'Named segments you can target with campaigns',     action: () => setCustomerGroupsOpen(true) },
         { icon: BookOpen,  label: 'Price book',          description: 'Services, parts & materials with set prices',          action: () => navigate('/settings/price-book') },
         { icon: Zap,       label: 'Vertical packs',      description: 'Activate HVAC, Plumbing, or other service verticals',  action: () => setVerticalPacksOpen(true) },
       ],
@@ -388,6 +413,8 @@ export function SettingsPage() {
         { icon: Zap,      label: 'AI approval rules',               description: 'Set what the AI can apply automatically',    action: () => setAiRulesOpen(true) },
         { icon: Bell,     label: 'Reminders & follow-ups',          description: 'Auto-send thresholds and timing',             action: () => toast.info('Coming soon') },
         { icon: FileText, label: 'Estimate & invoice templates',    description: 'Default line items, terms, expiry',           action: () => navigate('/settings/templates') },
+        { icon: ClipboardList, label: 'Forms & checklists',         description: 'Reusable job forms your team fills out on site', action: () => setJobFormsOpen(true) },
+        { icon: SlidersHorizontal, label: 'Job custom fields',      description: 'Extra fields on every job (PO #, permit #, gate code)', action: () => setJobCustomFieldsOpen(true) },
         { icon: Clock,    label: 'Operator hours',                  description: 'Business hours for after-hours call routing', action: () => setOperatorHoursOpen(true) },
         { icon: Zap,      label: 'Call routing & handoff',          description: 'Channels, triggers, and after-hours behavior', action: () => setCallRoutingOpen(true) },
         { icon: Zap,      label: 'Do-Not-Call list',                description: 'Numbers blocked from outbound calls (TCPA / DNC)', action: () => setDncListOpen(true) },
@@ -397,6 +424,7 @@ export function SettingsPage() {
       title: 'Customer experience',
       items: [
         { icon: Star, label: 'Feedback & reviews', description: 'Average rating, distribution, and recent comments', action: () => navigate('/settings/feedback') },
+        { icon: Megaphone, label: 'Email campaigns', description: 'Send promos & announcements to customer segments', action: () => setMarketingOpen(true) },
       ],
     },
     {
@@ -442,6 +470,26 @@ export function SettingsPage() {
     <div className="h-full overflow-y-auto pb-20 md:pb-0" style={{ scrollbarWidth: 'thin' }}>
       <div className="p-4 md:p-6 max-w-2xl mx-auto">
         <h1 className="text-slate-900 mb-6">Settings</h1>
+
+        {settingsLoadError && (
+          <div
+            data-testid="settings-load-error"
+            role="alert"
+            className="mb-5 flex items-center justify-between gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3.5"
+          >
+            <p className="text-sm text-red-700">
+              We couldn’t load your settings. Your current preferences may not be shown.
+            </p>
+            <button
+              type="button"
+              onClick={() => setSettingsReloadNonce((n) => n + 1)}
+              data-testid="settings-load-retry"
+              className="shrink-0 rounded-lg bg-red-600 px-3 py-2 text-sm text-white hover:bg-red-700"
+            >
+              Retry
+            </button>
+          </div>
+        )}
 
         {/* Onboarding re-run banner */}
         <button
@@ -832,6 +880,18 @@ export function SettingsPage() {
       )}
 
       {/* Terminology sheet — entity-label overrides (Quote vs Estimate, etc.) */}
+      {jobFormsOpen && (
+        <JobFormTemplatesSheet onClose={() => setJobFormsOpen(false)} />
+      )}
+      {jobCustomFieldsOpen && (
+        <JobCustomFieldsSheet onClose={() => setJobCustomFieldsOpen(false)} />
+      )}
+      {marketingOpen && (
+        <MarketingCampaignsSheet onClose={() => setMarketingOpen(false)} />
+      )}
+      {customerGroupsOpen && (
+        <CustomerGroupsSheet onClose={() => setCustomerGroupsOpen(false)} />
+      )}
       {terminologyOpen && (
         <TerminologySheet onClose={() => setTerminologyOpen(false)} />
       )}

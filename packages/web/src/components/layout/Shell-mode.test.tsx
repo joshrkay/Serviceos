@@ -61,7 +61,7 @@ function buildMe(overrides: Partial<MeResponse> = {}): MeResponse {
     // Default to an owner who holds the billing/office view permissions so
     // the permission-gated nav (Invoices/Estimates/Money) renders. Per-case
     // overrides drop these to exercise the technician path.
-    permissions: ['invoices:view', 'estimates:view', 'payments:view'],
+    permissions: ['invoices:view', 'estimates:view', 'payments:view', 'settings:view'],
     backup_supervisor_user_id: null,
     unsupervised_proposal_routing: 'queue_and_sms',
     ...overrides,
@@ -177,6 +177,28 @@ describe('P12-002 — Shell mode-aware nav + toggle visibility', () => {
     expect(screen.queryByText('Money')).toBeNull();
     expect(screen.queryByText('Bills')).toBeNull();
     expect(screen.queryByText('Quotes')).toBeNull();
+  });
+
+  it('hides the Settings nav from a technician without settings:view', () => {
+    mockMe(
+      buildMe({
+        role: 'technician',
+        can_field_serve: false,
+        current_mode: 'tech',
+        permissions: ['jobs:view', 'customers:view', 'appointments:view', 'notes:view'],
+      }),
+    );
+    renderShell();
+    // The Settings nav entry must not render when the user lacks settings:view.
+    const sidebarLinks = Array.from(document.querySelectorAll('aside nav a'));
+    expect(sidebarLinks.some((a) => a.getAttribute('href') === '/settings')).toBe(false);
+  });
+
+  it('shows the Settings nav for an owner with settings:view', () => {
+    mockMe(buildMe({ role: 'owner', current_mode: 'supervisor' }));
+    renderShell();
+    const sidebarLinks = Array.from(document.querySelectorAll('aside nav a'));
+    expect(sidebarLinks.some((a) => a.getAttribute('href') === '/settings')).toBe(true);
   });
 
   it('renders both-mode nav (Assistant + Today + My jobs together)', () => {

@@ -343,6 +343,36 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['211_tenant_settings_reminder_offsets', '7043e4a221b59d530abd0a9d74ac8dd1a7f13379eeefb9b1749cc2b98368442a'],
   // Epic 12.6 — weekly feedback email opt-out (renumbered 204→207→212; body unchanged → hash preserved).
   ['212_tenant_settings_weekly_feedback', '3e78d143c8b22d97a2db02d551166f3ffaa23e12bb8c15b90dbc79340b6ef70f'],
+  // PRD US-340+US-341 — reminder cadence column default → [24, 2].
+  ['213_tenant_settings_reminder_offsets_default', '451325d4c247a81f0b0d60b015b7af26329f38918bde6b579d40bb94e3a26668'],
+  // PRD US-345 — 24h post-completion review-request sweep columns + backfill.
+  ['214_review_request_sweep', '3a843fa5148f8a2ce89fd5ea37647c2e29f0c0fa9d74d821c3f1b5a1afc37fc2'],
+  // Beta-verify fix — proposals.claimed_by UUID→TEXT (worker label, not a uuid);
+  // the type mismatch broke proposal execution entirely.
+  ['215_proposals_claimed_by_text', '35ffa973504fd016a63c3ef2e333de24070808889cf2c7159b34ee3c09857afa'],
+  // Beta-verify fix — create the missing delay_notice_state table the wired
+  // PgDelayNoticeStateRepository depends on (running-late SMS idempotency).
+  ['216_create_delay_notice_state', 'bad2c6a2b2b80e3bfc18beaf43b48a59b0064f031794a3400d2db8dc02d4c3d3'],
+  // RLS runtime-role enforcement — provision the least-privilege rls_app_runtime role.
+  ['217_create_rls_app_runtime_role', '15f26f56c0515ebce37164d9c4757fc5017c242a8b331b73018d870d9ebc3b78'],
+  // RLS runtime-role enforcement — document the two RLS exemptions (oauth_states,
+  // platform_deprovision_log) as table comments; both are intentionally policy-free.
+  ['218_rls_coverage_oauth_states', '44a800f4db0502f69e57ff66c865e9a63ddaac669d5d3026a683d7bb4f3fc7f9'],
+  // RLS hardening — revoke rls_app_runtime grants on tenant_id tables that lack RLS.
+  ['219_rls_app_runtime_revoke_exempt', '0d19b84a142cd9f69d5f90d3bd8b1125969163026fd3a323cde2442dad915ecf'],
+  // RLS hardening — named rls_cross_tenant (BYPASSRLS) role for auditable cross-tenant sweeps.
+  ['220_create_rls_cross_tenant_role', 'ff8057f1f7cad211e77e7655b7a1204cbaffe2f263a823e8e5fc759b0fc37a28'],
+  ['221_proposals_status_created_index', '6af8a977d5a649844c58f97c3e8aa68e5beb1d51b9a499a913b0170e99508ddf'],
+  // Jobber-parity pass — job forms, recurring jobs (+materialization), job custom
+  // fields, consumer financing, marketing campaigns, customer groups.
+  ['221_create_job_forms', '813a7e1bfd1c7140a91fbc6ca54cf381b74a5b36b9959385d0630cc42b1f528d'],
+  ['222_create_recurring_jobs', '2ce277b37d9b12b7ae00a7b4b87debb4887b7d26a9ff4accb9464e13685dccbc'],
+  ['223_recurring_job_materialization', '5c4b2253a9abac06b2f78b6150435cc77cd477522ddcba43c575d12ced5f9d33'],
+  ['224_create_job_custom_fields', '65412cbeca763526715dabb0877a86879584b68b273ccfc71f44f2ccb2719e21'],
+  ['225_create_financing_applications', '17a9f061c2728f957ae3256a9c624ad073a7ea1ec834d3f76d894ef3efeea5c4'],
+  ['226_create_marketing_campaigns', '731467814951e56ebe330c61334c70db40ad08a43a1d996f62705abe0d275e45'],
+  ['227_create_customer_groups', 'b130abe18b855d3f4d24e4781c9f36221489d22f0b8149b4c2ebe466c66d1ab5'],
+  ['228_marketing_campaign_segment_group', '8e795768b41848627679a6cc34d2dd89f6a5ce88355a3c732988aeadf44ce48f'],
 ];
 
 function hashMigration(value: string): string {

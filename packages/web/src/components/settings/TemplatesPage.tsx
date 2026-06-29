@@ -1,12 +1,12 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router';
 import { useUser } from '@clerk/clerk-react';
 import { formatCurrency as formatCents } from '../../utils/currency';
 import {
   ArrowLeft, Sparkles, Check, X, ChevronRight, RefreshCw,
   FileText, MessageSquare, Receipt, Briefcase, Users, Zap,
-  TrendingUp, Mail, Clock, Edit3, RotateCcw, ArrowRight,
-  Star, AlertCircle, BarChart2, Globe, CheckCircle2, Info,
+  TrendingUp, Mail, Clock, RotateCcw, ArrowRight,
+  Star, AlertCircle, BarChart2, Globe, CheckCircle2,
 } from 'lucide-react';
 import { apiFetch } from '../../utils/api-fetch';
 import { useMe } from '../../hooks/useMe';
@@ -288,12 +288,10 @@ function LoopDiagram() {
 function SuggestionCard({
   suggestion,
   onAccept,
-  onCustomize,
   onSkip,
 }: {
   suggestion: AISuggestion;
   onAccept: () => void;
-  onCustomize: () => void;
   onSkip: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
@@ -374,173 +372,12 @@ function SuggestionCard({
           <Check size={12} /> Apply
         </button>
         <button
-          onClick={onCustomize}
-          className="flex-1 flex items-center justify-center gap-1.5 py-3 text-xs text-blue-600 hover:bg-blue-50 transition-colors"
-        >
-          <Edit3 size={12} /> Customize
-        </button>
-        <button
           onClick={onSkip}
           className="flex-1 flex items-center justify-center gap-1.5 py-3 text-xs text-slate-400 hover:bg-slate-50 transition-colors"
         >
           <X size={12} /> Skip
         </button>
       </div>
-    </div>
-  );
-}
-
-function TemplateCard({
-  template,
-  hasPending,
-  onClick,
-}: {
-  template: Template;
-  hasPending: boolean;
-  onClick: () => void;
-}) {
-  const Icon = template.icon;
-  return (
-    <button
-      onClick={onClick}
-      className="w-full text-left rounded-xl border border-slate-200 bg-white hover:border-slate-300 hover:shadow-sm transition-all overflow-hidden group"
-    >
-      <div className="px-4 py-4">
-        <div className="flex items-start gap-3 mb-2.5">
-          <span className={`flex size-8 shrink-0 items-center justify-center rounded-lg ${template.iconBg}`}>
-            <Icon size={15} className={template.iconColor} />
-          </span>
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2">
-              <p className="text-sm text-slate-900">{template.label}</p>
-              {hasPending && (
-                <span className="flex size-2 rounded-full bg-blue-500 shrink-0 animate-pulse" />
-              )}
-            </div>
-            <p className="text-xs text-slate-400 mt-0.5">{template.description}</p>
-          </div>
-          <ChevronRight size={14} className="text-slate-300 group-hover:text-slate-500 transition-colors shrink-0 mt-0.5" />
-        </div>
-
-        <div className="rounded-lg bg-slate-50 border border-slate-100 px-3 py-2 text-xs text-slate-500 leading-relaxed">
-          {template.preview}
-        </div>
-      </div>
-
-      <div className="flex items-center justify-between px-4 py-2.5 bg-slate-50 border-t border-slate-100">
-        <div className="flex items-center gap-3">
-          <span className="flex items-center gap-1 text-xs text-slate-400">
-            <Sparkles size={10} className="text-indigo-400" />
-            Seeded from {template.seededFrom}
-          </span>
-        </div>
-        <div className="flex items-center gap-3">
-          <span className="text-xs text-slate-400">
-            {template.refinementCount > 0
-              ? `${template.refinementCount} refinements`
-              : 'Not yet refined'}
-          </span>
-          <span className="text-xs text-slate-400">{template.lastRefined}</span>
-        </div>
-      </div>
-    </button>
-  );
-}
-
-function TemplateDetailModal({ template, onClose }: { template: Template; onClose: () => void }) {
-  const [fields, setFields] = useState(template.fields);
-  const [saved, setSaved]   = useState(false);
-
-  function handleSave() {
-    setSaved(true);
-    setTimeout(() => { setSaved(false); onClose(); }, 1000);
-  }
-
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-end md:items-center justify-center bg-black/50 px-4 pb-0 md:pb-4"
-      onClick={onClose}
-    >
-      <div
-        className="w-full max-w-lg bg-white rounded-t-3xl md:rounded-2xl shadow-2xl max-h-[85vh] overflow-y-auto"
-        style={{ animation: 'sheetUp 0.25s ease' }}
-        onClick={e => e.stopPropagation()}
-      >
-        <div className="flex items-center gap-3 px-5 pt-5 pb-4 border-b border-slate-100 sticky top-0 bg-white z-10">
-          <span className={`flex size-8 shrink-0 items-center justify-center rounded-lg ${template.iconBg}`}>
-            <template.icon size={14} className={template.iconColor} />
-          </span>
-          <div className="flex-1">
-            <p className="text-slate-900">{template.label}</p>
-            <p className="text-xs text-slate-400 mt-0.5">Seeded from {template.seededFrom}</p>
-          </div>
-          <button onClick={onClose} className="flex size-8 items-center justify-center rounded-full hover:bg-slate-100 transition-colors">
-            <X size={15} className="text-slate-500" />
-          </button>
-        </div>
-
-        <div className="px-5 py-5 flex flex-col gap-4">
-          <div className="rounded-xl bg-indigo-50 border border-indigo-100 px-4 py-3">
-            <div className="flex items-start gap-2">
-              <Info size={13} className="text-indigo-500 shrink-0 mt-0.5" />
-              <p className="text-xs text-indigo-700 leading-relaxed">
-                These values were set during onboarding and refined by Rivet based on your usage.
-                Edits here update your live templates immediately — the AI will use them as the new baseline.
-              </p>
-            </div>
-          </div>
-
-          {fields.map((field, i) => (
-            <div key={field.label}>
-              <label className="text-xs text-slate-500 mb-1.5 block">{field.label}</label>
-              {field.value.length > 60 ? (
-                <textarea
-                  value={field.value}
-                  onChange={e => {
-                    const next = [...fields];
-                    next[i] = { ...field, value: e.target.value };
-                    setFields(next);
-                  }}
-                  rows={3}
-                  className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-800 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100 transition-all resize-none"
-                />
-              ) : (
-                <input
-                  value={field.value}
-                  onChange={e => {
-                    const next = [...fields];
-                    next[i] = { ...field, value: e.target.value };
-                    setFields(next);
-                  }}
-                  className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-800 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100 transition-all"
-                />
-              )}
-            </div>
-          ))}
-
-          <div className="rounded-xl border border-dashed border-slate-200 px-4 py-3.5 flex items-center gap-3">
-            <RotateCcw size={13} className="text-slate-400 shrink-0" />
-            <p className="text-xs text-slate-500 flex-1">
-              After saving, Rivet will use these as the new baseline in the refinement loop.
-            </p>
-            <button className="text-xs text-slate-400 hover:text-slate-600 transition-colors shrink-0">
-              Reset to defaults
-            </button>
-          </div>
-        </div>
-
-        <div className="px-5 pb-5 pt-0">
-          <button
-            onClick={handleSave}
-            className={`w-full flex items-center justify-center gap-2 rounded-xl py-3.5 text-sm transition-all ${
-              saved ? 'bg-green-600 text-white' : 'bg-slate-900 hover:bg-slate-800 text-white'
-            }`}
-          >
-            {saved ? <><Check size={14} /> Saved</> : 'Save template'}
-          </button>
-        </div>
-      </div>
-      <style>{`@keyframes sheetUp { from { transform: translateY(40px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }`}</style>
     </div>
   );
 }
@@ -874,7 +711,7 @@ export function LiveTemplateDetailModal({
             />
             {!canEdit && (
               <p className="text-xs text-slate-400 mt-1.5">
-                Only owners can edit template wording.
+                You don’t have permission to edit template wording.
               </p>
             )}
           </div>
@@ -904,7 +741,10 @@ export function LiveTemplateDetailModal({
 
 export function LiveTemplatesSection() {
   const { me } = useMe();
-  const canEdit = me?.role === 'owner';
+  // Gate template-wording edits on the real backend permission (estimates:update),
+  // not on role === 'owner'. Dispatchers hold estimates:update and must be able
+  // to edit template copy; technicians do not and stay read-only.
+  const canEdit = (me?.permissions ?? []).includes('estimates:update');
   const [templates, setTemplates] = useState<LiveEstimateTemplate[] | null>(null);
   const [activePacks, setActivePacks] = useState<string[] | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -1066,11 +906,8 @@ export function LiveTemplatesSection() {
 // ─── Main Page ────────────────────────────────────────────────────────────────
 export function TemplatesPage() {
   const navigate = useNavigate();
-  const { user } = useUser();
   const [suggestions, setSuggestions] = useState<AISuggestion[]>(INITIAL_SUGGESTIONS);
-  const [selectedTemplate, setSelectedTemplate] = useState<Template | null>(null);
   const [digestOpen, setDigestOpen] = useState(false);
-  const [businessName, setBusinessName] = useState<string | null>(null);
   const [digest, setDigest] = useState<DigestSettings>({
     enabled: true,
     day: 'Monday',
@@ -1078,40 +915,6 @@ export function TemplatesPage() {
     includeAiSuggestions: true,
     includeCommunityTips: true,
   });
-
-  useEffect(() => {
-    let alive = true;
-    (async () => {
-      try {
-        const res = await apiFetch('/api/settings');
-        if (!res.ok || !alive) return;
-        const data = (await res.json()) as { businessName?: string };
-        if (typeof data.businessName === 'string' && data.businessName.trim()) {
-          setBusinessName(data.businessName.trim());
-        }
-      } catch {
-        /* preview-only */
-      }
-    })();
-    return () => { alive = false; };
-  }, []);
-
-  const templates = useMemo(() => {
-    const owner = firstNameFromUser(
-      user?.fullName,
-      user?.primaryEmailAddress?.emailAddress,
-    );
-    const signature = businessName ? `— ${owner} @ ${businessName}` : `— ${owner}`;
-    return TEMPLATES.map((t) => {
-      if (t.key !== 'comms_tone') return t;
-      return {
-        ...t,
-        fields: t.fields.map((f) =>
-          f.label === 'Signature' ? { ...f, value: signature } : f,
-        ),
-      };
-    });
-  }, [user?.fullName, user?.primaryEmailAddress?.emailAddress, businessName]);
 
   const pendingCount = suggestions.filter(s => s.status === 'pending').length;
   const jobsProcessed = 47;
@@ -1123,16 +926,6 @@ export function TemplatesPage() {
   function skip(id: string) {
     setSuggestions(prev => prev.map(s => s.id === id ? { ...s, status: 'skipped' } : s));
   }
-  function customize(id: string) {
-    const s = suggestions.find(x => x.id === id);
-    if (s) {
-      const t = templates.find(t => t.key === s.templateKey);
-      if (t) setSelectedTemplate(t);
-    }
-  }
-
-  const pendingByTemplate = (key: TemplateKey) =>
-    suggestions.some(s => s.templateKey === key && s.status === 'pending');
 
   return (
     <div className="h-full overflow-y-auto pb-24 md:pb-8" style={{ scrollbarWidth: 'thin' }}>
@@ -1225,7 +1018,6 @@ export function TemplatesPage() {
                   key={s.id}
                   suggestion={s}
                   onAccept={() => accept(s.id)}
-                  onCustomize={() => customize(s.id)}
                   onSkip={() => skip(s.id)}
                 />
               ))}
@@ -1233,31 +1025,11 @@ export function TemplatesPage() {
           )}
         </div>
 
-        {/* ── P4-014 — Live templates (backend-backed) ── */}
+        {/* ── P4-014 — Live templates (backend-backed). This is the real,
+            backend-persisted template editor; the prior mock "Your templates"
+            section + TemplateDetailModal (which falsely claimed edits went
+            live while making no API call) were removed in favor of it. ── */}
         <LiveTemplatesSection />
-
-        {/* ── Your Templates ── */}
-        <div className="mb-6">
-          <div className="flex items-center justify-between mb-3">
-            <p className="text-sm text-slate-700">Your templates</p>
-            <button
-              onClick={() => navigate('/onboarding')}
-              className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 transition-colors"
-            >
-              <RotateCcw size={11} /> Re-run onboarding
-            </button>
-          </div>
-          <div className="flex flex-col gap-3">
-            {templates.map(t => (
-              <TemplateCard
-                key={t.key}
-                template={t}
-                hasPending={pendingByTemplate(t.key)}
-                onClick={() => setSelectedTemplate(t)}
-              />
-            ))}
-          </div>
-        </div>
 
         {/* ── Community Insights ── */}
         <div className="mb-6">
@@ -1345,9 +1117,6 @@ export function TemplatesPage() {
       </div>
 
       {/* Modals */}
-      {selectedTemplate && (
-        <TemplateDetailModal template={selectedTemplate} onClose={() => setSelectedTemplate(null)} />
-      )}
       {digestOpen && (
         <DigestModal settings={digest} onChange={setDigest} onClose={() => setDigestOpen(false)} />
       )}

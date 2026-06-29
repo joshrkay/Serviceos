@@ -42,6 +42,17 @@ interface LineItemView {
   pricingSource?: PricingSource;
 }
 
+// U8 (E9) — a candidate for an ambiguous entity reference ("which Bob?"). The
+// voice clarification serializes these on the proposal; picking one re-drafts
+// the original action with the chosen id.
+interface EntityCandidateView {
+  id: string;
+  label?: string;
+  hint?: string;
+  kind?: string;
+  score?: number;
+}
+
 interface InboxProposalRow {
   proposal: {
     id: string;
@@ -64,10 +75,13 @@ interface InboxProposalRow {
     payload?: {
       _meta?: ProposalMeta;
       lineItems?: LineItemView[];
+      // U8 (E9) — ambiguous entity candidates on a voice_clarification card.
+      entityCandidates?: EntityCandidateView[];
     };
     sourceContext?: {
       catalogResolution?: Record<string, AmbiguityCandidate[]>;
       missingFields?: string[];
+      entityCandidates?: EntityCandidateView[];
     } & Record<string, unknown>;
   };
   urgency: Urgency;
@@ -227,9 +241,11 @@ const URGENCY_BADGE: Record<Urgency, { label: string; classes: string }> = {
 function ProposalMarkers({
   row,
   onResolveLine,
+  onResolveEntity,
 }: {
   row: InboxProposalRow;
   onResolveLine: (proposalId: string, lineIndex: number, catalogItemId: string) => Promise<void>;
+  onResolveEntity: (proposalId: string, candidateId: string) => Promise<void>;
 }) {
   const meta = row.proposal.payload?._meta;
   const conf = meta?.overallConfidence ? CONFIDENCE_CONFIG[meta.overallConfidence] : null;
@@ -241,7 +257,24 @@ function ProposalMarkers({
     .map((li, idx) => ({ li, idx }))
     .filter(({ li }) => li.pricingSource && li.pricingSource !== 'catalog');
 
-  if (!conf && flagged.length === 0 && markers.length === 0 && !severity) return null;
+  // U8 (E9) — ambiguous entity candidates ("which Bob?") on a
+  // voice_clarification card. Read from the payload (where the voice emitter
+  // writes them), falling back to sourceContext.
+  const entityCandidates: EntityCandidateView[] =
+    row.proposal.proposalType === 'voice_clarification'
+      ? (row.proposal.payload?.entityCandidates ??
+          row.proposal.sourceContext?.entityCandidates ??
+          [])
+      : [];
+
+  if (
+    !conf &&
+    flagged.length === 0 &&
+    markers.length === 0 &&
+    !severity &&
+    entityCandidates.length === 0
+  )
+    return null;
 
   return (
     <div className="mt-2 space-y-1.5" data-testid="proposal-markers">
@@ -301,6 +334,25 @@ function ProposalMarkers({
             onPick={(catalogItemId) => onResolveLine(row.proposal.id, idx, catalogItemId)}
           />
         ))}
+
+      {/* U8 (E9) — entity disambiguation picker. Picking a candidate re-drafts
+          the original action with the chosen id instead of discarding it. */}
+      {entityCandidates.length > 0 && (
+        <AmbiguityPicker
+          lineDescription={
+            typeof row.proposal.sourceContext?.entityReference === 'string'
+              ? (row.proposal.sourceContext.entityReference as string)
+              : 'the reference'
+          }
+          candidates={entityCandidates.map((c) => ({
+            id: c.id,
+            label: c.label ?? c.id,
+            ...(c.hint ? { hint: c.hint } : {}),
+            score: c.score ?? 0,
+          }))}
+          onPick={(candidateId) => onResolveEntity(row.proposal.id, candidateId)}
+        />
+      )}
     </div>
   );
 }
@@ -394,6 +446,35 @@ export function InboxPage() {
     }
     const updated = (await res.json()) as InboxProposalRow['proposal'];
     setError(null); // a prior failure shouldn't keep showing after a success
+    setRows((prev) =>
+      prev.map((r) =>
+        r.proposal.id === proposalId
+          ? { ...r, proposal: { ...r.proposal, ...updated } }
+          : r,
+      ),
+    );
+    emitProposalsChanged();
+  }
+
+  /**
+   * U8 (E9) — resolve an ambiguous entity reference ("which Bob?") to one of
+   * its candidates. POSTs to the resolve-entity endpoint (which re-drafts the
+   * original action with the chosen id and moves it to ready_for_review, but
+   * NEVER approves), then merges the returned proposal so the picker disappears
+   * and the re-drafted action surfaces for review.
+   */
+  async function resolveEntity(proposalId: string, candidateId: string): Promise<void> {
+    const res = await apiFetch(`/api/proposals/${proposalId}/resolve-entity`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ candidateId }),
+    });
+    if (!res.ok) {
+      setError(`Couldn't resolve that reference (HTTP ${res.status})`);
+      throw new Error(`HTTP ${res.status}`);
+    }
+    const updated = (await res.json()) as InboxProposalRow['proposal'];
+    setError(null);
     setRows((prev) =>
       prev.map((r) =>
         r.proposal.id === proposalId
@@ -572,7 +653,7 @@ export function InboxPage() {
                       <p className="text-xs text-warning mt-0.5">{holdExpiryLine(row, tz)}</p>
                     )}
                     {row.reason && <p className="text-xs text-muted-foreground mt-0.5">{row.reason}</p>}
-                    <ProposalMarkers row={row} onResolveLine={resolveLine} />
+                    <ProposalMarkers row={row} onResolveLine={resolveLine} onResolveEntity={resolveEntity} />
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
                     <button

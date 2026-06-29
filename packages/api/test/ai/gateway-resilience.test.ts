@@ -396,7 +396,7 @@ describe('ProviderTenantQuotaWrapper', () => {
     const wrapped = new ProviderTenantQuotaWrapper(inner, reg);
 
     // Manually hold a lease to saturate concurrency
-    reg.acquire({ tenantId: 'tenant-1', tenantTier: 'standard', estimatedTokens: 10 });
+    await reg.acquire({ tenantId: 'tenant-1', tenantTier: 'standard', estimatedTokens: 10 });
 
     await expect(
       wrapped.complete(makeRequest({ tenantId: 'tenant-1', tenantTier: 'standard' })),

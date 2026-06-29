@@ -81,16 +81,23 @@ export function reminderStepKey(step: ReminderStep): string {
 export const LATE_FEE_ONE_TIME_KEY = 'initial';
 
 /**
- * A tenant with no configured cadence gets this conservative default: a
- * single 3-day SMS nudge and no late fee. The overdue sweep falls back to
- * it so dunning is never silently off for an overdue invoice.
+ * A tenant with no configured cadence gets this default: SMS reminders at
+ * 3, 7, and 14 days overdue (PRD US-370), no late fee. Every step is raised
+ * as an owner-approved `send_payment_reminder` proposal (the overdue sweep's
+ * proposal-first design), so the day-14 reminder is already owner-reviewed
+ * per US-372 — no separate auto-send path is introduced. The overdue sweep
+ * falls back to this so dunning is never silently off for an overdue invoice.
  */
 export function defaultDunningConfig(tenantId: string, now: Date = new Date()): DunningConfig {
   return {
     id: uuidv4(),
     tenantId,
     enabled: true,
-    reminderSteps: [{ offsetDays: 3, channel: 'sms' }],
+    reminderSteps: [
+      { offsetDays: 3, channel: 'sms' },
+      { offsetDays: 7, channel: 'sms' },
+      { offsetDays: 14, channel: 'sms' },
+    ],
     lateFeeType: 'none',
     lateFeeValueCents: 0,
     lateFeeGraceDays: 0,

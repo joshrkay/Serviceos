@@ -23,6 +23,9 @@ import type {
 
 vi.mock('../../src/db/schema', () => ({
   setTenantContext: (tenantId: string) => `SET app.current_tenant_id = '${tenantId}'`,
+  // U2b-2: the transactional tenant path validates via isValidTenantId; these
+  // tests use simple ids (not UUIDs) on purpose, so accept them.
+  isValidTenantId: () => true,
 }));
 
 function makeAsset(overrides: Partial<VerticalTrainingAsset> = {}): VerticalTrainingAsset {
@@ -116,6 +119,23 @@ class FakeTrainingAssetClient {
     if (normalizedSql.startsWith('SET app.current_tenant_id')) {
       const tenantId = normalizedSql.match(/'([^']+)'/)?.[1];
       if (tenantId) this.tenantContexts.push(tenantId);
+      return { rows: [] };
+    }
+
+    // U2b-2: the tenant path is now a SET LOCAL transaction. Treat the framing
+    // (BEGIN/COMMIT/ROLLBACK/RESET) as no-ops and capture the tenant from the
+    // set_config param (it moved out of the SQL string into $1).
+    if (
+      normalizedSql === 'BEGIN' ||
+      normalizedSql === 'COMMIT' ||
+      normalizedSql === 'ROLLBACK' ||
+      normalizedSql.startsWith('RESET')
+    ) {
+      return { rows: [] };
+    }
+    if (normalizedSql.startsWith('SELECT set_config')) {
+      const tenantId = values[0];
+      if (typeof tenantId === 'string') this.tenantContexts.push(tenantId);
       return { rows: [] };
     }
 
@@ -446,7 +466,7 @@ describe('TrainingAssetRepository', () => {
       'tenant-1',
     ]);
     const selectValues = pool.client.queries
-      .filter((query) => query.sql.startsWith('SELECT') && !query.sql.startsWith('SELECT 1'))
+      .filter((query) => query.sql.startsWith('SELECT') && !query.sql.startsWith('SELECT 1') && !query.sql.startsWith('SELECT set_config'))
       .map((query) => query.values);
     expect(selectValues).toEqual([
       ['tenant-1', 'hvac'],

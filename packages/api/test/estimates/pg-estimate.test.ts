@@ -148,8 +148,9 @@ describe('PgEstimateRepository.findById', () => {
     expect(result?.lineItems).toHaveLength(1);
     expect(result?.lineItems[0].unitPriceCents).toBe(5000);
 
-    const ctx = calls[0];
-    expect(ctx.sql).toContain('app.current_tenant_id');
+    // U2b-2: context is now set_config under a SET LOCAL transaction (calls[0] is BEGIN).
+    const ctx = calls.find((c) => c.sql.includes('app.current_tenant_id'));
+    expect(ctx).toBeDefined();
     const select = calls.find((c) => c.sql.includes('SELECT * FROM estimates'))!;
     expect(select.sql).toMatch(/WHERE\s+id\s*=\s*\$1\s+AND\s+tenant_id\s*=\s*\$2/);
     expect(select.sql).not.toContain(TENANT);

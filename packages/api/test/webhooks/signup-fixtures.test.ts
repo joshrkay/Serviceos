@@ -51,7 +51,7 @@ function sign(body: object, svixId: string, svixTimestamp: string) {
   const rawBody = JSON.stringify(body);
   const secretBytes = Buffer.from(WEBHOOK_SECRET.replace(/^whsec_/, ''), 'base64');
   const signedContent = `${svixId}.${svixTimestamp}.${rawBody}`;
-  const sig = crypto.createHmac('sha256', secretBytes.toString('hex')).update(`${svixTimestamp}.${signedContent}`).digest('hex');
+  const sig = crypto.createHmac('sha256', secretBytes).update(signedContent).digest('base64');
   return `v1,${sig}`;
 }
 

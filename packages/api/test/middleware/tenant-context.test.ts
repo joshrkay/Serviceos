@@ -406,6 +406,68 @@ describe('P0-024 — tenant-context middleware (withTenantTransaction)', () => {
     expect(connectCount).toBe(0);
   });
 
+  it('SSE bypass (Codex P1) — a known SSE GET route holds no request transaction', async () => {
+    // A long-lived SSE stream must NOT pin a pooled connection / PgBouncer
+    // backend for its whole life; the middleware skips the BEGIN..COMMIT
+    // transaction for the explicit SSE route allowlist.
+    const { pool, calls } = makeMockPool();
+    let sawTenant: string | undefined;
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: 'u1', sessionId: 's1', tenantId: TENANT_A, role: 'owner',
+      };
+      next();
+    });
+    app.use('/api', withTenantTransaction(pool));
+    app.get('/api/escalations/events', (req, res) => {
+      sawTenant = (req as AuthenticatedRequest).auth?.tenantId;
+      res.json({ ok: true });
+    });
+
+    const response = await request(app).get('/api/escalations/events');
+
+    expect(response.status).toBe(200);
+    // Tenant is still enforced/available to the handler …
+    expect(sawTenant).toBe(TENANT_A);
+    // … but no connection was checked out and no BEGIN was issued.
+    const connectCount = (pool.connect as unknown as ReturnType<typeof vi.fn>).mock.calls
+      .length;
+    expect(connectCount).toBe(0);
+    expect(calls.some((c) => /^\s*BEGIN/i.test(c.sql))).toBe(false);
+  });
+
+  it('SSE bypass is route-restricted (Codex P2) — a mutating route with Accept: text/event-stream still opens the transaction', async () => {
+    // The bypass must be keyed off the route allowlist, NOT the client-supplied
+    // Accept header — otherwise any caller could send `text/event-stream` to a
+    // mutating route and skip the request transaction, losing multi-write
+    // atomicity (e.g. job + audit committing separately).
+    const { pool, calls } = makeMockPool();
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: 'u1', sessionId: 's1', tenantId: TENANT_A, role: 'owner',
+      };
+      next();
+    });
+    app.use('/api', withTenantTransaction(pool));
+    app.post('/api/jobs', (_req, res) => res.json({ created: true }));
+
+    const response = await request(app)
+      .post('/api/jobs')
+      .set('Accept', 'text/event-stream')
+      .send({ title: 'x' });
+
+    expect(response.status).toBe(200);
+    // Transaction was NOT skipped: one checkout + a BEGIN.
+    const connectCount = (pool.connect as unknown as ReturnType<typeof vi.fn>).mock.calls
+      .length;
+    expect(connectCount).toBe(1);
+    expect(calls.some((c) => /^\s*BEGIN/i.test(c.sql))).toBe(true);
+  });
+
   it('rollback on response close before finish', async () => {
     // Simulate a client disconnect: emit `close` without `finish`.
     const { pool, calls } = makeMockPool();

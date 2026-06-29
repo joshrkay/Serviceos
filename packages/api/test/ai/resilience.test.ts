@@ -177,7 +177,7 @@ describe('CircuitBreakerRegistry', () => {
 });
 
 describe('TenantQuotaRegistry', () => {
-  it('rejects when concurrency cap is full', () => {
+  it('rejects when concurrency cap is full', async () => {
     const reg = new TenantQuotaRegistry({
       standard: {
         maxConcurrency: 1,
@@ -186,13 +186,13 @@ describe('TenantQuotaRegistry', () => {
         hardUpperBoundTokens: 1000,
       },
     });
-    reg.acquire({ tenantId: 't1', estimatedTokens: 10 });
-    expect(() => reg.acquire({ tenantId: 't1', estimatedTokens: 10 })).toThrow(
+    await reg.acquire({ tenantId: 't1', estimatedTokens: 10 });
+    await expect(reg.acquire({ tenantId: 't1', estimatedTokens: 10 })).rejects.toBeInstanceOf(
       TenantConcurrencyExceededError,
     );
   });
 
-  it('rejects when token bucket is empty', () => {
+  it('rejects when token bucket is empty', async () => {
     const reg = new TenantQuotaRegistry({
       standard: {
         maxConcurrency: 5,
@@ -201,12 +201,12 @@ describe('TenantQuotaRegistry', () => {
         hardUpperBoundTokens: 1000,
       },
     });
-    expect(() =>
+    await expect(
       reg.acquire({ tenantId: 't2', estimatedTokens: 100 }),
-    ).toThrow(TenantTokenBudgetExceededError);
+    ).rejects.toBeInstanceOf(TenantTokenBudgetExceededError);
   });
 
-  it('refunds unused tokens on release', () => {
+  it('refunds unused tokens on release', async () => {
     const reg = new TenantQuotaRegistry({
       standard: {
         maxConcurrency: 5,
@@ -215,11 +215,11 @@ describe('TenantQuotaRegistry', () => {
         hardUpperBoundTokens: 1000,
       },
     });
-    const lease = reg.acquire({ tenantId: 't3', estimatedTokens: 50 });
-    lease.release(10, 5); // actual = 15, refund 35
+    const lease = await reg.acquire({ tenantId: 't3', estimatedTokens: 50 });
+    await lease.release(10, 5); // actual = 15, refund 35
     // Should be able to acquire another 80 tokens now.
-    const lease2 = reg.acquire({ tenantId: 't3', estimatedTokens: 80 });
-    lease2.release();
+    const lease2 = await reg.acquire({ tenantId: 't3', estimatedTokens: 80 });
+    await lease2.release();
   });
 });
 

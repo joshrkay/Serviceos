@@ -26,11 +26,10 @@ export default function ProposalReviewScreen() {
   const params = useLocalSearchParams<{ id: string }>();
   const id = Array.isArray(params.id) ? params.id[0] : (params.id ?? '');
   const router = useRouter();
-  const { proposal, phase, error, secondsLeft, approve, reject, resolveLine, undo, reload } =
+  const { proposal, phase, error, secondsLeft, approve, reject, resolveLine, resolveEntity, undo, reload } =
     useProposalReview(id);
   const [showRejectForm, setShowRejectForm] = useState(false);
   const [rejectReason, setRejectReason] = useState('');
-  const [entityPickLabel, setEntityPickLabel] = useState<string | null>(null);
 
   const entityCandidates =
     proposal?.proposalType === 'voice_clarification'
@@ -99,8 +98,10 @@ export default function ProposalReviewScreen() {
                     description: c.hint,
                   }))}
                   onSelect={(option) => {
-                    setEntityPickLabel(option.label);
-                    void reject('entity_selected', option.id);
+                    // U8 (E9) — re-draft the original action with the chosen
+                    // entity instead of discarding the command (the old
+                    // reject('entity_selected', …) dead-end).
+                    void resolveEntity(option.id);
                   }}
                 />
               </View>
@@ -243,18 +244,12 @@ export default function ProposalReviewScreen() {
             {phase === 'undone' ? (
               <View className="mt-8">
                 <Text className="text-base text-foreground">
-                  {entityPickLabel
-                    ? `✓ Recorded: ${entityPickLabel}`
-                    : proposal.status === 'rejected'
-                      ? '✓ Rejected'
-                      : '✓ Undone'}
+                  {proposal.status === 'rejected' ? '✓ Rejected' : '✓ Undone'}
                 </Text>
                 <Text className="mt-1 text-base text-mutedForeground">
-                  {entityPickLabel
-                    ? 'Speak your request again — we will use that match next time.'
-                    : proposal.status === 'rejected'
-                      ? 'Nothing was executed. Your feedback helps the AI improve.'
-                      : 'Nothing was executed. You can speak a new action anytime.'}
+                  {proposal.status === 'rejected'
+                    ? 'Nothing was executed. Your feedback helps the AI improve.'
+                    : 'Nothing was executed. You can speak a new action anytime.'}
                 </Text>
                 <Pressable
                   accessibilityRole="button"

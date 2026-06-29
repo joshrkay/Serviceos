@@ -6,6 +6,7 @@ import { JobRepository } from '../jobs/job';
 import { CustomerRepository } from '../customers/customer';
 import { LocationRepository } from '../locations/location';
 import { ProposalRepository } from '../proposals/proposal';
+import { UserRepository } from '../users/user';
 import { resolvePendingChangeRequests } from './pending-changes';
 import { requireAuth, requireTenant } from '../middleware/auth';
 import { AuthenticatedRequest } from '../auth/clerk';
@@ -21,6 +22,22 @@ export interface EnRouteEnqueuer {
   }): Promise<string | null>;
 }
 
+/**
+ * Resolve a technician's `users.id` to a human display name for the board.
+ * Prefers "First Last", then email, then the raw id when no user row exists
+ * (deactivated tech still referenced by a past assignment).
+ */
+export async function resolveTechnicianName(
+  userRepo: UserRepository,
+  tenantId: string,
+  technicianId: string
+): Promise<string> {
+  const user = await userRepo.findById(tenantId, technicianId);
+  if (!user) return technicianId;
+  const fullName = [user.firstName, user.lastName].filter(Boolean).join(' ').trim();
+  return fullName || user.email || technicianId;
+}
+
 export function createDispatchRoutes(deps: {
   appointmentRepo: AppointmentRepository;
   assignmentRepo: AssignmentRepository;
@@ -30,6 +47,7 @@ export function createDispatchRoutes(deps: {
   boardEventsDeps?: BoardEventsRouteDeps;
   enRouteCoordinator?: EnRouteEnqueuer;
   proposalRepo?: ProposalRepository;
+  userRepo?: UserRepository;
 }): Router {
   const router = Router();
 
@@ -50,6 +68,7 @@ export function createDispatchRoutes(deps: {
       const timezone = req.query.timezone as string | undefined;
 
       const proposalRepo = deps.proposalRepo;
+      const userRepo = deps.userRepo;
       const boardDeps: BoardQueryDependencies = {
         appointmentRepo: deps.appointmentRepo,
         assignmentRepo: deps.assignmentRepo,
@@ -58,6 +77,15 @@ export function createDispatchRoutes(deps: {
           ? {
               getPendingChangeRequests: (appointmentIds: string[]) =>
                 resolvePendingChangeRequests(proposalRepo, tenantId, appointmentIds),
+            }
+          : {}),
+        // Resolve technician UUIDs to display names so the board shows people,
+        // not bare ids. Falls back to the id (in board-query) when the lookup
+        // returns nothing — e.g. a deactivated tech still on a past assignment.
+        ...(userRepo
+          ? {
+              getTechnicianName: (technicianId: string) =>
+                resolveTechnicianName(userRepo, tenantId, technicianId),
             }
           : {}),
       };
@@ -145,6 +173,7 @@ export function createDispatchRoutes(deps: {
               scheduledEnd: appt.scheduledEnd.toISOString(),
               status: appt.status,
               jobSummary,
+              updatedAt: appt.updatedAt.toISOString(),
             };
           }),
         );

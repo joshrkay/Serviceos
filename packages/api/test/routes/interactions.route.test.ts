@@ -13,8 +13,11 @@ import request from 'supertest';
 import type { Pool, QueryResult } from 'pg';
 import { AuthenticatedRequest } from '../../src/auth/clerk';
 import { createInteractionsRouter } from '../../src/routes/interactions';
+import { InMemoryDispatchRepository } from '../../src/notifications/dispatch-repository';
+import type { Role } from '../../src/auth/rbac';
 
 const TENANT = 'a1b2c3d4-e5f6-7890-abcd-ef1234567890';
+const OTHER_TENANT = 'f0e1d2c3-b4a5-6789-0123-456789abcdef';
 
 /** Fake client returned by pool.connect() */
 function makeClient(rowsForQuery: Record<string, unknown>[][], countRow: { total: string }[] = [{ total: '1' }]) {
@@ -48,7 +51,11 @@ function makePool(
   } as unknown as Pool;
 }
 
-function buildApp(pool: Pool) {
+function buildApp(
+  pool: Pool,
+  opts: { dispatchRepo?: InMemoryDispatchRepository; role?: Role; tenantId?: string } = {},
+) {
+  const dispatchRepo = opts.dispatchRepo ?? new InMemoryDispatchRepository();
   const app = express();
   app.use(express.json());
   // Inject auth so requireAuth/requireTenant don't bounce.
@@ -56,12 +63,12 @@ function buildApp(pool: Pool) {
     (req as AuthenticatedRequest).auth = {
       userId: 'user-1',
       sessionId: 'sess-1',
-      tenantId: TENANT,
-      role: 'owner',
+      tenantId: opts.tenantId ?? TENANT,
+      role: opts.role ?? 'owner',
     };
     next();
   });
-  app.use('/api/interactions', createInteractionsRouter({ pool }));
+  app.use('/api/interactions', createInteractionsRouter({ pool, dispatchRepo }));
   return app;
 }
 
@@ -170,6 +177,115 @@ describe('GET /api/interactions', () => {
     const res = await request(app).get('/api/interactions');
 
     expect(res.body.data[0].transcriptTurnCount).toBe(2);
+  });
+});
+
+// ─── Dispatch log tests (U6 / E8) ──────────────────────────────────────────
+
+describe('GET /api/interactions/dispatches', () => {
+  async function seedDispatch(repo: InMemoryDispatchRepository, tenantId: string, recipient: string) {
+    return repo.create({
+      tenantId,
+      entityType: 'estimate',
+      entityId: 'e1111111-1111-1111-1111-111111111111',
+      channel: 'sms',
+      recipient,
+      provider: 'twilio',
+      providerMessageId: 'SM-abc',
+      status: 'sent',
+    });
+  }
+
+  it('returns dispatches + total + limit + offset for the tenant', async () => {
+    const pool = makePool([[]]);
+    const dispatchRepo = new InMemoryDispatchRepository();
+    await seedDispatch(dispatchRepo, TENANT, '+15551234567');
+    const app = buildApp(pool, { dispatchRepo });
+
+    const res = await request(app).get('/api/interactions/dispatches');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ total: 1, limit: 50, offset: 0 });
+    expect(res.body.dispatches).toHaveLength(1);
+    expect(res.body.dispatches[0].recipient).toBe('+15551234567');
+  });
+
+  it('is not shadowed by GET /:id (registered first)', async () => {
+    const pool = makePool([[]]);
+    const dispatchRepo = new InMemoryDispatchRepository();
+    const app = buildApp(pool, { dispatchRepo });
+
+    const res = await request(app).get('/api/interactions/dispatches');
+
+    // If /:id had matched, the fake pool would 404 with NOT_FOUND.
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty('dispatches');
+  });
+
+  it('returns empty list for a tenant with no dispatches', async () => {
+    const pool = makePool([[]]);
+    const app = buildApp(pool, { dispatchRepo: new InMemoryDispatchRepository() });
+
+    const res = await request(app).get('/api/interactions/dispatches');
+
+    expect(res.status).toBe(200);
+    expect(res.body.dispatches).toEqual([]);
+    expect(res.body.total).toBe(0);
+  });
+
+  it('excludes another tenant\'s dispatches (isolation)', async () => {
+    const pool = makePool([[]]);
+    const dispatchRepo = new InMemoryDispatchRepository();
+    await seedDispatch(dispatchRepo, OTHER_TENANT, '+15559999999');
+    const app = buildApp(pool, { dispatchRepo });
+
+    const res = await request(app).get('/api/interactions/dispatches');
+
+    expect(res.status).toBe(200);
+    expect(res.body.dispatches).toEqual([]);
+    expect(res.body.total).toBe(0);
+  });
+
+  it('honors limit / offset', async () => {
+    const pool = makePool([[]]);
+    const app = buildApp(pool, { dispatchRepo: new InMemoryDispatchRepository() });
+
+    const res = await request(app).get('/api/interactions/dispatches?limit=5&offset=10');
+
+    expect(res.status).toBe(200);
+    expect(res.body.limit).toBe(5);
+    expect(res.body.offset).toBe(10);
+  });
+
+  it('rejects an out-of-range limit with 400', async () => {
+    const pool = makePool([[]]);
+    const app = buildApp(pool, { dispatchRepo: new InMemoryDispatchRepository() });
+
+    const res = await request(app).get('/api/interactions/dispatches?limit=500');
+
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({ error: 'VALIDATION_ERROR' });
+  });
+
+  it('owner can view', async () => {
+    const pool = makePool([[]]);
+    const app = buildApp(pool, { dispatchRepo: new InMemoryDispatchRepository(), role: 'owner' });
+    const res = await request(app).get('/api/interactions/dispatches');
+    expect(res.status).toBe(200);
+  });
+
+  it('dispatcher can view (dispatch:view)', async () => {
+    const pool = makePool([[]]);
+    const app = buildApp(pool, { dispatchRepo: new InMemoryDispatchRepository(), role: 'dispatcher' });
+    const res = await request(app).get('/api/interactions/dispatches');
+    expect(res.status).toBe(200);
+  });
+
+  it('technician gets 403 (no dispatch:view)', async () => {
+    const pool = makePool([[]]);
+    const app = buildApp(pool, { dispatchRepo: new InMemoryDispatchRepository(), role: 'technician' });
+    const res = await request(app).get('/api/interactions/dispatches');
+    expect(res.status).toBe(403);
   });
 });
 

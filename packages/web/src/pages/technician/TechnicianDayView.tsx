@@ -14,6 +14,7 @@ export interface TechnicianAppointment {
   scheduledEnd: string;
   status: string;
   jobSummary?: string;
+  updatedAt?: string;
 }
 
 export interface TechnicianDayViewProps {
@@ -46,6 +47,13 @@ interface ReliabilityDecision {
   confidence: number;
   reason: string;
   sampleCount: number;
+}
+
+function generateIdempotencyKey(): string {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
+    return crypto.randomUUID();
+  }
+  return `tech-day-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 function formatTime(iso: string): string {
@@ -178,6 +186,8 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
   const [editedStart, setEditedStart] = useState<string>('');
   const [editedEnd, setEditedEnd] = useState<string>('');
   const [savingAppointmentId, setSavingAppointmentId] = useState<string | null>(null);
+  const [staleAppointmentId, setStaleAppointmentId] = useState<string | null>(null);
+  const [refetchNonce, setRefetchNonce] = useState(0);
   const [gpsError, setGpsError] = useState<string | null>(null);
   const [positionHistory, setPositionHistory] = useState<Coordinates[]>([]);
   const [activeAppointmentId, setActiveAppointmentId] = useState<string | null>(null);
@@ -213,7 +223,7 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
     }
 
     fetchAppointments();
-  }, [technicianId, selectedDate]);
+  }, [technicianId, selectedDate, refetchNonce]);
 
   useEffect(() => {
     if (typeof navigator === 'undefined' || !navigator.geolocation) {
@@ -345,10 +355,10 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
     if (decision.shouldAutoNotify && decision.confidence >= MIN_CONFIDENCE_FOR_CUSTOMER_NOTIFY) {
       setDelayPromptAcknowledged(true);
       setShowDelayPrompt(false);
-      void apiFetch(`/api/appointments/${active.id}`, {
-        method: 'PUT',
-        body: JSON.stringify({ status: 'running_late', confidence: decision.confidence }),
-      });
+      // running_late is a status signal (no new time) — not expressible as a
+      // reschedule_appointment proposal. Keep the status call, but surface
+      // failures instead of dropping them with a fire-and-forget void apiFetch.
+      void markRunningLate(active.id, decision.confidence);
       return;
     }
 
@@ -418,32 +428,59 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
       return;
     }
 
+    const appointment = appointments.find((appt) => appt.id === appointmentId);
+    const appointmentVersion = appointment?.updatedAt;
+    const newScheduledStart = new Date(editedStart).toISOString();
+    const newScheduledEnd = new Date(editedEnd).toISOString();
+
     try {
       setSavingAppointmentId(appointmentId);
-      const response = await apiFetch(`/api/appointments/${appointmentId}`, {
-        method: 'PUT',
+      setError(null);
+      setStaleAppointmentId(null);
+
+      // Techs do not hold `appointments:update`; route the edit through the
+      // human-approval-gated proposal path (mirrors the dispatch board) rather
+      // than a direct PUT /api/appointments/:id.
+      const response = await apiFetch('/api/proposals', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(appointmentVersion ? { 'If-Match': appointmentVersion } : {}),
+        },
         body: JSON.stringify({
-          scheduledStart: new Date(editedStart).toISOString(),
-          scheduledEnd: new Date(editedEnd).toISOString(),
+          proposalType: 'reschedule_appointment',
+          payload: {
+            appointmentId,
+            newScheduledStart,
+            newScheduledEnd,
+            reason: 'Rescheduled by technician from the day view',
+          },
+          summary: 'Reschedule appointment requested by technician',
+          idempotencyKey: generateIdempotencyKey(),
+          ...(appointmentVersion ? { appointmentVersion } : {}),
         }),
       });
 
       if (!response.ok) {
-        throw new Error('Failed to save appointment changes');
+        if (response.status === 409) {
+          setStaleAppointmentId(appointmentId);
+          setError('This appointment changed since you opened it. Refresh and try again.');
+          return;
+        }
+        if (response.status === 422) {
+          const body = (await response.json().catch(() => ({}))) as {
+            blocking?: Array<{ message?: string }>;
+          };
+          const reason = body.blocking?.[0]?.message ?? 'feasibility check failed';
+          setError(`Cannot reschedule: ${reason}`);
+          return;
+        }
+        throw new Error('Failed to submit reschedule request');
       }
 
-      setAppointments((current) => current.map((appt) => (
-        appt.id === appointmentId
-          ? {
-            ...appt,
-            scheduledStart: new Date(editedStart).toISOString(),
-            scheduledEnd: new Date(editedEnd).toISOString(),
-          }
-          : appt
-      )));
       setEditingAppointmentId(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to save appointment changes');
+      setError(err instanceof Error ? err.message : 'Failed to submit reschedule request');
     } finally {
       setSavingAppointmentId(null);
     }
@@ -476,6 +513,24 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
     }
   }
 
+  async function markRunningLate(appointmentId: string, confidence: number): Promise<boolean> {
+    try {
+      const response = await apiFetch(`/api/appointments/${appointmentId}`, {
+        method: 'PUT',
+        body: JSON.stringify({ status: 'running_late', confidence }),
+      });
+      if (!response.ok) {
+        throw new Error('Failed to send running-late notice');
+      }
+      return true;
+    } catch (err) {
+      // Previously this was a fire-and-forget `void apiFetch` with no .catch,
+      // so failures were silently dropped. Surface them to the technician.
+      setError(err instanceof Error ? err.message : 'Failed to send running-late notice');
+      return false;
+    }
+  }
+
   async function sendDelayNotification(accepted: boolean) {
     setShowDelayPrompt(false);
     setDelayPromptAcknowledged(true);
@@ -484,10 +539,10 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
       return;
     }
 
-    await apiFetch(`/api/appointments/${activeAppointmentId}`, {
-      method: 'PUT',
-      body: JSON.stringify({ status: 'running_late', confidence: promptConfidence }),
-    });
+    const notified = await markRunningLate(activeAppointmentId, promptConfidence);
+    if (!notified) {
+      return;
+    }
     await apiFetch('/api/dispatch/delay-prompt-audits', {
       method: 'POST',
       body: JSON.stringify({
@@ -582,6 +637,21 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
       {error && (
         <div className="technician-day-view__error" data-testid="technician-day-error">
           {error}
+          {staleAppointmentId && (
+            <button
+              type="button"
+              onClick={() => {
+                setStaleAppointmentId(null);
+                setEditingAppointmentId(null);
+                setError(null);
+                setRefetchNonce((value) => value + 1);
+              }}
+              data-testid="technician-day-refresh"
+              className="ml-2 underline"
+            >
+              Refresh
+            </button>
+          )}
         </div>
       )}
 

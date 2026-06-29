@@ -27,6 +27,21 @@ vi.mock('../../components/customers/TagsPanel', () => ({
 vi.mock('../../components/customers/CustomFieldsPanel', () => ({
   CustomFieldsPanel: () => <div>CustomFieldsPanel</div>,
 }));
+// Recurring jobs panel fires its own apiFetch calls on mount; mock it like the
+// other self-contained panels so this suite's one-shot location mocks survive.
+vi.mock('../../components/customers/RecurringJobsPanel', () => ({
+  RecurringJobsPanel: () => <div>RecurringJobsPanel</div>,
+}));
+vi.mock('../../components/customers/CustomerGroupsPanel', () => ({
+  CustomerGroupsPanel: () => <div>CustomerGroupsPanel</div>,
+}));
+// US-069 Records panel fires its own apiFetch calls on mount (revenue +
+// records). As a child its effects run before CustomerDetail's loadLocations,
+// so leaving it real would let it swallow this suite's one-shot location mocks.
+// Mock it like the other self-contained panels to keep the locations fetch order intact.
+vi.mock('../../components/customers/CustomerRecordsPanel', () => ({
+  CustomerRecordsPanel: () => <div>CustomerRecordsPanel</div>,
+}));
 vi.mock('../../components/customers/MergeCustomerPanel', () => ({
   MergeCustomerPanel: () => <div>MergeCustomerPanel</div>,
 }));

@@ -109,13 +109,6 @@ export interface ExecutionHandler {
   isFullyWired?(): boolean;
 }
 
-/**
- * @deprecated Use {@link CreateCustomerVoiceExecutionHandler}. Kept as an
- * alias so legacy imports/tests keep compiling; registry always wires the
- * voice handler.
- */
-export class CreateCustomerExecutionHandler extends CreateCustomerVoiceExecutionHandler {}
-
 export class UpdateCustomerExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'update_customer';
 

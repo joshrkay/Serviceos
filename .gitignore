@@ -18,6 +18,7 @@ voice-load-report.json
 .env.*
 !.env.example
 !.env.qa.example
+!.env.production.example
 *.tsbuildinfo
 coverage/
 

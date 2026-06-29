@@ -34,6 +34,7 @@ export default defineConfig({
         'src/voice/nativeVoiceDeps.ts',
         'src/push/nativePushDeps.ts',
         'src/push/nativeNotificationDeps.ts',
+        'src/jobs/nativeJobPhotoDeps.ts',
         'src/lib/env.ts',
         'src/lib/tokenCache.ts',
         'src/calls/callbackStorage.ts',
@@ -77,6 +78,7 @@ export default defineConfig({
       // that don't resolve under the jsdom env the hook test uses. They are
       // mocked per test, so alias them to resolve-time stubs.
       'expo-audio': path.resolve(__dirname, './test/stubs/expo-audio.ts'),
+      'expo-camera': path.resolve(__dirname, './test/stubs/expo-camera.ts'),
       'expo-file-system': path.resolve(__dirname, './test/stubs/expo-file-system.ts'),
       'expo-secure-store': path.resolve(__dirname, './test/stubs/expo-secure-store.ts'),
       '@clerk/clerk-expo': path.resolve(__dirname, './test/stubs/clerk-clerk-expo.ts'),

@@ -1,5 +1,5 @@
 import { Pool, PoolClient } from 'pg';
-import { setTenantContext } from './schema';
+import { applyTenantContext, applyCrossTenantRole, clearTenantContext } from './rls-runtime-role';
 import { tenantContextStore } from '../middleware/tenant-context';
 
 /**
@@ -27,30 +27,14 @@ export class PgBaseRepository {
    * unscoped query until something else overwrites the GUC.
    */
   protected async withTenant<T>(tenantId: string, fn: (client: PoolClient) => Promise<T>): Promise<T> {
-    const ctx = tenantContextStore.getStore();
-    if (ctx && ctx.tenantId === tenantId) {
-      // Request-scoped client — already inside a transaction with
-      // app.current_tenant_id set LOCAL. Don't re-set, don't re-connect,
-      // don't release (the middleware owns the lifecycle).
-      return fn(ctx.client);
-    }
-    const client = await this.pool.connect();
-    try {
-      await client.query(setTenantContext(tenantId));
-      return await fn(client);
-    } finally {
-      // GUC leak fix: plain `SET` persists on the underlying connection
-      // past COMMIT/ROLLBACK. Clear it explicitly before release so the
-      // next pool checkout doesn't inherit this tenant's context. Tolerant
-      // of mocks that return non-promises and of broken connections.
-      try {
-        await client.query('RESET app.current_tenant_id');
-      } catch {
-        // ignore — the connection is being released; a broken client
-        // will be discarded by pg itself when it sees the error.
-      }
-      client.release();
-    }
+    // U2b-2: the standalone path is now a SET LOCAL transaction — identical to
+    // withTenantTransaction — so it is PgBouncer transaction-pooling safe (the
+    // GUC/role and the queries can no longer land on different backends). The
+    // request-scoped reuse shortcut lives in withTenantTransaction too, so
+    // delegating keeps one code path. Multi-statement callbacks are now atomic
+    // (a strict improvement; standalone withTenant callbacks are single-statement
+    // CRUD or already-safe-to-atomize). All ~400 call sites are unchanged.
+    return this.withTenantTransaction(tenantId, fn);
   }
 
   /**
@@ -84,7 +68,9 @@ export class PgBaseRepository {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
-      await client.query(setTenantContext(tenantId));
+      // Transactional context: SET LOCAL config + role auto-reset at
+      // COMMIT/ROLLBACK, so no leak survives the transaction.
+      await applyTenantContext(client, tenantId, { transactional: true });
       const result = await fn(client);
       await client.query('COMMIT');
       return result;
@@ -96,19 +82,10 @@ export class PgBaseRepository {
       }
       throw err;
     } finally {
-      // GUC leak fix: plain `SET` persists past COMMIT/ROLLBACK on the
-      // underlying connection. Clear it explicitly before release so the
-      // next pool checkout doesn't inherit this tenant's context.
-      // GUC leak fix: plain `SET` persists on the underlying connection
-      // past COMMIT/ROLLBACK. Clear it explicitly before release so the
-      // next pool checkout doesn't inherit this tenant's context. Tolerant
-      // of mocks that return non-promises and of broken connections.
-      try {
-        await client.query('RESET app.current_tenant_id');
-      } catch {
-        // ignore — the connection is being released; a broken client
-        // will be discarded by pg itself when it sees the error.
-      }
+      // Belt-and-suspenders: the SET LOCAL above auto-resets at COMMIT/
+      // ROLLBACK, but clear explicitly too so a broken/edge state can't leak
+      // the GUC or the restricted role to the next pool checkout.
+      await clearTenantContext(client);
       client.release();
     }
   }
@@ -121,6 +98,44 @@ export class PgBaseRepository {
     try {
       return await fn(client);
     } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Execute an INTENTIONAL cross-tenant sweep (the proposal execution sweep and
+   * the recovery/retention drains) over tenant-scoped tables. Like `withClient`,
+   * but when `RLS_RUNTIME_ROLE` is on it runs as the named, auditable
+   * `rls_cross_tenant` (BYPASSRLS) role so the cross-tenant access is explicit
+   * and attributable rather than an anonymous privileged query. Resets the role
+   * on release (same pool-leak discipline as the tenant path). No-op vs.
+   * `withClient` when the flag is off (or when the role is unprovisioned — see
+   * applyCrossTenantRole's documented fallback to the connection principal).
+   */
+  protected async withCrossTenantSweep<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
+    // U2b-2: SET LOCAL ROLE inside a transaction (PgBouncer transaction-pooling
+    // safe — the role and the sweep queries can no longer land on different
+    // backends), mirroring withTenantTransaction. applyCrossTenantRole is a
+    // graceful no-op when the flag is off or the role is unprovisioned, so this
+    // is byte-equivalent to withClient in those cases (just wrapped in a txn).
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await applyCrossTenantRole(client, { transactional: true });
+      const result = await fn(client);
+      await client.query('COMMIT');
+      return result;
+    } catch (err) {
+      try {
+        await client.query('ROLLBACK');
+      } catch {
+        // best-effort rollback
+      }
+      throw err;
+    } finally {
+      // Belt-and-suspenders: SET LOCAL ROLE auto-resets at COMMIT/ROLLBACK, but
+      // clear explicitly too so a broken/edge state can't leak the role.
+      await clearTenantContext(client);
       client.release();
     }
   }

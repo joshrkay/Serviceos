@@ -59,10 +59,10 @@ export class PgRecordingRetentionRepository
   }
 
   async findDue(now: Date, limit: number): Promise<PurgeableRecording[]> {
-    // Cross-tenant drain: documented use of withClient (same convention as
-    // PgDroppedCallRecoveryRepository.findDue); the subsequent tombstone is
-    // tenant-scoped.
-    return this.withClient(async (client) => {
+    // Cross-tenant drain: withCrossTenantSweep (named rls_cross_tenant role when
+    // enforcement is on; same convention as PgDroppedCallRecoveryRepository.findDue);
+    // the subsequent tombstone is tenant-scoped.
+    return this.withCrossTenantSweep(async (client) => {
       const { rows } = await client.query(
         `SELECT vr.id, vr.tenant_id, vr.call_sid,
                 f.s3_bucket, f.s3_key, vr.created_at

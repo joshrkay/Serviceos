@@ -302,8 +302,8 @@ function InvoiceLineItems({ items, editable, onChange }: {
 }
 
 // ─── Send Payment Sheet ────────────────────────────────────────────────────
-function SendPaymentSheet({ inv, total, paymentLink, onClose, onSent, apiId }: {
-  inv: InvCompat; total: number; paymentLink: string;
+function SendPaymentSheet({ inv, amountDueCents, paymentLink, onClose, onSent, apiId }: {
+  inv: InvCompat; amountDueCents: number; paymentLink: string;
   onClose: () => void; onSent: () => void;
   /** When set, the sheet calls the real /api/invoices/:id/send endpoint. */
   apiId?: string;
@@ -379,7 +379,7 @@ function SendPaymentSheet({ inv, total, paymentLink, onClose, onSent, apiId }: {
                 </p>
               </div>
               <div className="text-right">
-                <p className={`text-lg ${isOverdue ? 'text-destructive' : 'text-foreground'}`}>${formatDollars(total)}</p>
+                <p className={`text-lg ${isOverdue ? 'text-destructive' : 'text-foreground'}`}>{centsToDisplay(amountDueCents)}</p>
                 {isOverdue && <p className="text-xs text-destructive">Overdue</p>}
               </div>
             </div>
@@ -485,14 +485,12 @@ function MarkPaidSheet({
   invoiceId,
   amountDueCents,
   inv,
-  total,
   onClose,
   onPaid,
 }: {
   invoiceId: string;
   amountDueCents: number;
   inv: InvCompat;
-  total: number;
   onClose: () => void;
   onPaid: () => void | Promise<void>;
 }) {
@@ -508,7 +506,7 @@ function MarkPaidSheet({
   ] as const;
 
   async function handleSave() {
-    const amountCents = amountDueCents > 0 ? amountDueCents : Math.round(total * 100);
+    const amountCents = amountDueCents;
     if (amountCents <= 0) {
       setError('Nothing due on this invoice.');
       return;
@@ -555,7 +553,7 @@ function MarkPaidSheet({
               <p className="text-sm text-success">{inv.description}</p>
               <p className="text-xs text-success mt-0.5">{inv.invoiceNumber}</p>
             </div>
-            <p className="text-lg text-success">${formatDollars(total)}</p>
+            <p className="text-lg text-success">{centsToDisplay(amountDueCents)}</p>
           </div>
 
           <div>
@@ -697,11 +695,24 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
   const apiLineItems = inv.lineItems ?? [];
   const uiLineItems = lineItems.length > 0 ? lineItems : apiLineItems.map(apiLineToUi);
 
-  const total      = uiLineItems.reduce((s, i) => s + i.qty * i.rate, 0);
+  // U4 (E4) — money comes from server totals (integer cents), never a
+  // float line-item recompute. `totals.totalCents` is the true invoice
+  // total (tax/discount/fee applied); `amountDueCents` is the outstanding
+  // balance after any partial payments; `amountPaidCents` is what's been
+  // collected so far. No `qty*rate/100` and no `?? Math.round(...)` fallback.
+  const totalCents      = inv.totals.totalCents;
+  const amountPaidCents = inv.amountPaidCents;
+  const amountDueCents  = inv.amountDueCents;
   const customer   = inv.customer;
   const status: InvoiceStatus = uiStatus;
   const editable   = status === 'Draft';
   const paymentLink = `pay.rivet.ai/${inv.invoiceNumber.toLowerCase()}`;
+  // U12 (E14) — only offer "Mark as paid" when the backend can actually
+  // accept a payment (PAYABLE_STATUSES = open / partially_paid). Drafts,
+  // paid, and void/canceled invoices hide it. We read the *normalized* API
+  // status (deriveInvoiceUiStatus folds 'open'/'partially_paid' → 'Unpaid'
+  // and may surface 'Overdue'), all of which map back to a payable invoice.
+  const canMarkPaid = status === 'Unpaid' || status === 'Overdue';
 
   return (
     <>
@@ -728,7 +739,7 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
             </div>
             <div className="flex items-center gap-2 shrink-0">
               <StatusBadge status={status} />
-              <p className="text-sm text-foreground">${formatDollars(total)}</p>
+              <p className="text-sm text-foreground">{centsToDisplay(totalCents)}</p>
             </div>
           </div>
 
@@ -740,7 +751,7 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
               </div>
               <div>
                 <p className="text-sm text-success">Payment received</p>
-                <p className="text-xs text-success mt-0.5">{paid ? 'Just now' : ''} · ${formatDollars(total)}</p>
+                <p className="text-xs text-success mt-0.5">{paid ? 'Just now' : ''} · {centsToDisplay(totalCents)}</p>
               </div>
             </div>
           )}
@@ -749,7 +760,7 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
               <AlertCircle size={18} className="text-destructive shrink-0 mt-0.5" />
               <div className="flex-1">
                 <p className="text-sm text-destructive">Payment overdue</p>
-                <p className="text-xs text-destructive mt-0.5">Due {inv.dueDate} · ${formatDollars(total)} outstanding</p>
+                <p className="text-xs text-destructive mt-0.5">Due {inv.dueDate} · {centsToDisplay(amountDueCents)} outstanding</p>
               </div>
               <button
                 onClick={() => setSendOpen(true)}
@@ -869,12 +880,20 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
                 </div>
               )}
 
-              {/* Amount due */}
+              {/* Amount due — server totals, integer cents. For a partially
+                  paid invoice the headline is the remaining balance
+                  (amountDueCents) and we surface the collected amount on a
+                  separate "Paid" line. */}
               <div className={`rounded-xl px-4 py-4 ${status === 'Paid' ? 'bg-success' : status === 'Overdue' ? 'bg-destructive' : 'bg-primary'} text-primary-foreground`}>
                 <p className="text-sm text-primary-foreground/60 mb-1">
                   {status === 'Paid' ? 'Amount paid' : 'Amount due'}
                 </p>
-                <p className="text-3xl text-primary-foreground mb-1">${formatDollars(total)}</p>
+                <p className="text-3xl text-primary-foreground mb-1">
+                  {status === 'Paid' ? centsToDisplay(totalCents) : centsToDisplay(amountDueCents)}
+                </p>
+                {status !== 'Paid' && amountPaidCents > 0 && (
+                  <p className="text-xs text-primary-foreground/60">Paid {centsToDisplay(amountPaidCents)} of {centsToDisplay(totalCents)}</p>
+                )}
                 {inv.dueDate && status !== 'Paid' && (
                   <p className={`text-xs ${status === 'Overdue' ? 'text-destructive' : 'text-primary-foreground/40'}`}>
                     {status === 'Overdue' ? 'Overdue since' : 'Due'} {inv.dueDate}
@@ -899,7 +918,7 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
                      status === 'Overdue' ? 'Send reminder'     : 'Resend payment link'}
                   </button>
                 )}
-                {status !== 'Paid' && (
+                {canMarkPaid && (
                   <button
                     onClick={() => setMarkOpen(true)}
                     className="flex items-center justify-center gap-2 rounded-xl border border-border bg-card text-foreground py-3 text-sm hover:bg-secondary transition-colors"
@@ -921,7 +940,7 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
       {sendOpen && (
         <SendPaymentSheet
           inv={invCompat}
-          total={total}
+          amountDueCents={amountDueCents}
           paymentLink={paymentLink}
           apiId={inv?.id}
           onClose={() => setSendOpen(false)}
@@ -931,9 +950,8 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
       {markOpen && (
         <MarkPaidSheet
           invoiceId={inv.id}
-          amountDueCents={inv.amountDueCents ?? Math.round(total * 100)}
+          amountDueCents={amountDueCents}
           inv={invCompat}
-          total={total}
           onClose={() => setMarkOpen(false)}
           onPaid={async () => {
             setPaid(true);

@@ -51,6 +51,9 @@ function mapRow(row: Record<string, unknown>): Job {
     thankYouSmsSentAt: row.thank_you_sms_sent_at
       ? new Date(row.thank_you_sms_sent_at as string)
       : undefined,
+    reviewRequestSentAt: row.review_request_sent_at
+      ? new Date(row.review_request_sent_at as string)
+      : undefined,
     createdBy: row.created_by as string,
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
@@ -242,6 +245,9 @@ export class PgJobRepository extends PgBaseRepository implements JobRepository {
         // sweep worker once the SMS has been handled (sent or suppressed).
         completedAt: 'completed_at',
         thankYouSmsSentAt: 'thank_you_sms_sent_at',
+        // Migration 214 — stamped by the review-request sweep once the 24h
+        // review request has been handled (enqueued or suppressed).
+        reviewRequestSentAt: 'review_request_sent_at',
         updatedAt: 'updated_at',
       };
 

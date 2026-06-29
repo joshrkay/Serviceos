@@ -10,6 +10,7 @@ import {
   LineItemDraft,
   toLineItemPayload,
 } from '../../components/forms/LineItemEditor';
+import { InvoiceFinancingPanel } from '../../components/invoices/InvoiceFinancingPanel';
 import { apiFetch } from '../../utils/api-fetch';
 import { formatCurrency as formatCents } from '../../utils/currency';
 import { toTitleCase } from '../../utils/string';
@@ -294,6 +295,10 @@ export function InvoiceDetail({ invoiceId, onBack }: InvoiceDetailProps) {
               <p><strong>Amount Due: {formatCents(data.amountDueCents)}</strong></p>
             </div>
           ),
+        },
+        {
+          title: 'Financing',
+          content: <InvoiceFinancingPanel invoiceId={data.id} />,
         },
         {
           title: 'Payments',

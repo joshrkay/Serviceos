@@ -40,8 +40,19 @@ export function createCacheKey(request: LLMRequest, tenantId: string): string {
   return createHash('sha256').update(JSON.stringify(keyData)).digest('hex');
 }
 
+/**
+ * Default size bound for the in-process cache fallback. U3e — without this the
+ * Map grows unbounded (sha256-keyed) across a long-lived replica. It's only a
+ * memory safety net: the wrapper (CachingGatewayWrapper.complete) remains the
+ * SOLE authority on logical TTL/expiry; eviction here is FIFO (insertion order),
+ * never touching get(), so cache semantics are unchanged below the bound.
+ */
+export const DEFAULT_INMEMORY_CACHE_MAX_ENTRIES = 5000;
+
 export class InMemoryCacheStore implements CacheStore {
   private store: Map<string, CacheEntry> = new Map();
+
+  constructor(private readonly maxEntries: number = DEFAULT_INMEMORY_CACHE_MAX_ENTRIES) {}
 
   async get(key: string): Promise<CacheEntry | null> {
     const entry = this.store.get(key);
@@ -53,6 +64,12 @@ export class InMemoryCacheStore implements CacheStore {
     if (entry.ttlMs <= 0) {
       // No-op: zero/negative TTL would expire immediately — consistent with RedisCacheStore.
       return;
+    }
+    // Bound the map: evict the oldest entry when inserting a NEW key at capacity.
+    // Re-setting an existing key never evicts (keeps its insertion slot).
+    if (!this.store.has(key) && this.store.size >= this.maxEntries) {
+      const oldest = this.store.keys().next().value;
+      if (oldest !== undefined) this.store.delete(oldest);
     }
     this.store.set(key, entry);
   }

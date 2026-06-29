@@ -35,6 +35,7 @@ describe('P6-019 — Technician day-of assigned-work view', () => {
       scheduledEnd: '2026-03-14T11:00:00Z',
       status: 'confirmed',
       jobSummary: 'HVAC Repair',
+      updatedAt: '2026-03-13T08:00:00Z',
     },
   ];
 
@@ -103,7 +104,7 @@ describe('P6-019 — Technician day-of assigned-work view', () => {
     expect(await screen.findByTestId('technician-day-ai-answer')).toHaveTextContent('Jane Doe');
   });
 
-  it('allows editing appointment time', async () => {
+  it('routes an edit through a reschedule_appointment proposal, not a direct PUT', async () => {
     render(<TechnicianDayView technicianId="tech-1" />);
 
     await screen.findByText('Jane Doe');
@@ -115,11 +116,108 @@ describe('P6-019 — Technician day-of assigned-work view', () => {
 
     await waitFor(() => {
       expect(global.fetch).toHaveBeenCalledWith(
-        expect.stringContaining('/api/appointments/appt-1'),
-        expect.objectContaining({ method: 'PUT' })
+        expect.stringContaining('/api/proposals'),
+        expect.objectContaining({ method: 'POST' })
       );
     });
+
+    const proposalCall = (global.fetch as ReturnType<typeof vi.fn>).mock.calls.find(
+      (call) => typeof call[0] === 'string' && call[0].includes('/api/proposals')
+    );
+    expect(proposalCall).toBeTruthy();
+    const init = proposalCall![1] as RequestInit;
+    const body = JSON.parse(init.body as string);
+    expect(body.proposalType).toBe('reschedule_appointment');
+    expect(body.payload.appointmentId).toBe('appt-1');
+    expect(body.payload.newScheduledStart).toBe(new Date('2026-03-14T10:30').toISOString());
+    expect(body.payload.newScheduledEnd).toBe(new Date('2026-03-14T12:30').toISOString());
+    expect(body.appointmentVersion).toBe('2026-03-13T08:00:00Z');
+    expect((init.headers as Record<string, string>)['If-Match']).toBe('2026-03-13T08:00:00Z');
+
+    // Never falls back to the appointments:update PUT path (which would 403 for a tech).
+    const putCall = (global.fetch as ReturnType<typeof vi.fn>).mock.calls.find(
+      (call) =>
+        typeof call[0] === 'string' &&
+        call[0].includes('/api/appointments/appt-1') &&
+        (call[1] as RequestInit)?.method === 'PUT'
+    );
+    expect(putCall).toBeUndefined();
   });
+
+  it('surfaces a proposal submission failure', async () => {
+    global.fetch = vi.fn().mockImplementation((url: string) => {
+      if (typeof url === 'string' && url.includes('/api/proposals')) {
+        return Promise.resolve({ ok: false, status: 500, text: () => Promise.resolve('boom') } as never);
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ appointments: mockAppointments }) } as never);
+    });
+
+    render(<TechnicianDayView technicianId="tech-1" />);
+    await screen.findByText('Jane Doe');
+    fireEvent.click(screen.getAllByTestId('technician-day-edit')[0]);
+    fireEvent.change(screen.getByTestId('technician-day-edit-start'), { target: { value: '2026-03-14T10:30' } });
+    fireEvent.change(screen.getByTestId('technician-day-edit-end'), { target: { value: '2026-03-14T12:30' } });
+    fireEvent.click(screen.getByTestId('technician-day-save'));
+
+    expect(await screen.findByTestId('technician-day-error')).toBeInTheDocument();
+  });
+
+  it('offers a refresh affordance on a 409 conflict', async () => {
+    global.fetch = vi.fn().mockImplementation((url: string) => {
+      if (typeof url === 'string' && url.includes('/api/proposals')) {
+        return Promise.resolve({ ok: false, status: 409, json: () => Promise.resolve({}) } as never);
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ appointments: mockAppointments }) } as never);
+    });
+
+    render(<TechnicianDayView technicianId="tech-1" />);
+    await screen.findByText('Jane Doe');
+    fireEvent.click(screen.getAllByTestId('technician-day-edit')[0]);
+    fireEvent.change(screen.getByTestId('technician-day-edit-start'), { target: { value: '2026-03-14T10:30' } });
+    fireEvent.change(screen.getByTestId('technician-day-edit-end'), { target: { value: '2026-03-14T12:30' } });
+    fireEvent.click(screen.getByTestId('technician-day-save'));
+
+    expect(await screen.findByTestId('technician-day-refresh')).toBeInTheDocument();
+    expect(screen.getByTestId('technician-day-error')).toBeInTheDocument();
+  });
+
+  it('catches a running-late notification failure instead of dropping it', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date('2026-03-14T11:20:00Z'));
+
+    global.fetch = vi.fn().mockImplementation((url: string) => {
+      if (typeof url === 'string' && url.includes('/api/appointments/') ) {
+        return Promise.reject(new Error('network down'));
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ appointments: mockAppointments }) } as never);
+    });
+
+    render(<TechnicianDayView technicianId="tech-1" />);
+    await screen.findByText('Jane Doe');
+
+    const staleBaseTime = Date.now() - (20 * 60 * 1000);
+    for (let i = 0; i < 5; i += 1) {
+      onPositionSuccess?.({
+        coords: {
+          latitude: 40.7128,
+          longitude: -74.0060,
+          accuracy: 20,
+        } as GeolocationCoordinates,
+        timestamp: staleBaseTime + (i * 1000),
+      } as GeolocationPosition);
+    }
+
+    // The delay prompt requires a technician decision; accepting triggers the
+    // running_late status call, whose failure must be caught and surfaced.
+    const prompt = await screen.findByTestId('technician-day-delay-prompt');
+    expect(prompt).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('technician-day-delay-accept'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('technician-day-error')).toBeInTheDocument();
+    });
+    vi.useRealTimers();
+  }, 15000);
 
   it('shows error state on fetch failure', async () => {
     global.fetch = vi.fn().mockResolvedValue({

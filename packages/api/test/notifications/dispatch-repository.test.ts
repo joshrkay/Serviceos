@@ -135,7 +135,8 @@ describe('PgDispatchRepository (mocked pool)', () => {
       provider: 'twilio',
     });
     expect(result.providerMessageId).toBeUndefined();
-    expect(calls[0].sql).toContain('app.current_tenant_id');
+    // U2b-2: context is now set_config under a SET LOCAL transaction (calls[0] is BEGIN).
+    expect(calls.some((c) => c.sql.includes('app.current_tenant_id'))).toBe(true);
     const insert = calls.find((c) => c.sql.includes('INSERT INTO message_dispatches'))!;
     expect(insert.sql).not.toContain(TENANT);
     expect(insert.params[1]).toBe(TENANT);

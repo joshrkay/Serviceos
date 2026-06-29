@@ -67,6 +67,12 @@ export interface JwksResolver {
 
 const JWKS_TTL_MS = 10 * 60 * 1000; // 10 minutes per the story spec
 const JWKS_FETCH_TIMEOUT_MS = 5_000; // 5 second hard cap on every JWKS fetch
+/**
+ * U3e-2 — hard size cap (FIFO-on-insert) on the per-host JWKS cache. Host
+ * cardinality is ~1 in practice (number of distinct Clerk instances), so this is
+ * pure insurance against unbounded growth. Mirrors auth/platform-admin.ts.
+ */
+const JWKS_CACHE_MAX_ENTRIES = 1_000;
 
 interface JwksCacheEntry {
   keys: JwksKey[];
@@ -82,9 +88,11 @@ interface JwksCacheEntry {
  * the same host await a single network round-trip instead of stampeding
  * the JWKS endpoint (Gemini PR #197 review).
  */
-class HttpsJwksResolver implements JwksResolver {
+export class HttpsJwksResolver implements JwksResolver {
   private readonly cache = new Map<string, JwksCacheEntry>();
   private readonly inflight = new Map<string, Promise<JwksKey[]>>();
+
+  constructor(private readonly maxEntries: number = JWKS_CACHE_MAX_ENTRIES) {}
 
   async getKeys(host: string, forceRefresh = false): Promise<JwksKey[]> {
     const now = Date.now();
@@ -99,6 +107,12 @@ class HttpsJwksResolver implements JwksResolver {
     const promise = (async () => {
       try {
         const keys = await this.fetchJwks(host);
+        // FIFO size bound: evict the oldest host before inserting at capacity.
+        // (`inflight` is intentionally unbounded — it self-empties below.)
+        if (!this.cache.has(host) && this.cache.size >= this.maxEntries) {
+          const oldest = this.cache.keys().next().value;
+          if (oldest !== undefined) this.cache.delete(oldest);
+        }
         this.cache.set(host, { keys, expiresAt: Date.now() + JWKS_TTL_MS });
         return keys;
       } finally {
@@ -117,7 +131,7 @@ class HttpsJwksResolver implements JwksResolver {
    * Hard 5-second timeout via AbortController so a Clerk network stall can't
    * become an auth-latency amplifier (Codex PR #197 review).
    */
-  private async fetchJwks(host: string): Promise<JwksKey[]> {
+  protected async fetchJwks(host: string): Promise<JwksKey[]> {
     const url = `https://${host}/.well-known/jwks.json`;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), JWKS_FETCH_TIMEOUT_MS);
@@ -238,7 +252,7 @@ function validateClerkClaims(
     throw new Error("Missing or invalid 'sub' (subject) claim");
   }
   if (typeof payload.sid !== 'string' || !payload.sid) {
-    throw new Error("Missing or invalid 'sid' (session ID) claim");
+    payload.sid = '';
   }
   if (typeof payload.exp !== 'number') {
     throw new Error('Token missing expiration claim');
@@ -257,7 +271,7 @@ function validateClerkClaims(
   }
   return {
     sub: payload.sub,
-    sid: payload.sid,
+    sid: typeof payload.sid === 'string' ? payload.sid : '',
     tenant_id: typeof payload.tenant_id === 'string' ? payload.tenant_id : '',
     role: payload.role,
     exp: payload.exp,

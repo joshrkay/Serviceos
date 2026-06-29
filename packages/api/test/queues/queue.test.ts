@@ -25,6 +25,28 @@ describe('P0-009 — Async job processing with SQS', () => {
     expect(msg).toBeNull();
   });
 
+  it('receiveBatch — claims up to max, oldest-first, increments attempts (P3)', async () => {
+    await queue.send('test.job', { n: 1 });
+    await queue.send('test.job', { n: 2 });
+    await queue.send('test.job', { n: 3 });
+
+    const first = await queue.receiveBatch<{ n: number }>(2);
+    expect(first.map((m) => m.payload.n)).toEqual([1, 2]); // FIFO claim order
+    expect(first.every((m) => m.attempts === 1)).toBe(true);
+
+    // A second batch claims the remainder — no message is returned twice.
+    const second = await queue.receiveBatch<{ n: number }>(2);
+    expect(second.map((m) => m.payload.n)).toEqual([3]);
+
+    expect(await queue.receiveBatch(5)).toEqual([]); // drained
+  });
+
+  it('receiveBatch — returns [] for max <= 0 and when empty', async () => {
+    expect(await queue.receiveBatch(0)).toEqual([]);
+    expect(await queue.receiveBatch(-1)).toEqual([]);
+    expect(await queue.receiveBatch(5)).toEqual([]);
+  });
+
   it('happy path — processMessage calls handler', async () => {
     const handled: string[] = [];
     const handler: WorkerHandler<{ key: string }> = {

@@ -8,14 +8,16 @@ import { isValidTimezone } from '../shared/timezone';
  *  settings→ai module dependency. */
 export type Language = 'en' | 'es';
 
-/** Story 10.2 — default reminder cadence: a single reminder 24h before. */
-export const DEFAULT_REMINDER_OFFSETS_HOURS: readonly number[] = [24];
+/** Story 10.2 / PRD US-340+US-341 — default reminder cadence: 24h AND 2h
+ *  before the appointment. normalizeReminderOffsets sorts descending, so the
+ *  soonest (2h) fires last. Tenants can override the cadence in settings. */
+export const DEFAULT_REMINDER_OFFSETS_HOURS: readonly number[] = [24, 2];
 
 /**
  * Story 10.2 — sanitize tenant-supplied reminder offsets into a safe,
  * deterministic list: integer hours in [1, 720], deduped, sorted descending
  * (soonest-configured reminder fires last), capped at 5. Anything invalid or
- * empty falls back to the conservative default [24]. Used on both the write
+ * empty falls back to the default [24, 2]. Used on both the write
  * path (before persist) and the read path (defensive), so the worker never
  * sees garbage.
  */
@@ -245,6 +247,13 @@ export interface TenantSettings {
    * demo moment).
    */
   sendThankYouSms?: boolean;
+  /**
+   * Post-job review request: when true (default), a review/feedback request is
+   * auto-sent 24h after a job completes (PRD US-345). Idempotent on
+   * `jobs.review_request_sent_at`. Reuses the gated feedback-send delivery
+   * (4★+ customers are shown the configured Google/Yelp review link).
+   */
+  sendReviewRequest?: boolean;
   /**
    * Feature (launch) — when true, an auto-drafted invoice recomputes its labor
    * line from ACTUAL logged time entries instead of the estimated hours.
@@ -530,6 +539,8 @@ export interface UpdateSettingsInput {
   autoInvoiceOnCompletion?: boolean;
   /** Post-job 2hr thank-you SMS. Default true. */
   sendThankYouSms?: boolean;
+  /** Post-job 24h review request (PRD US-345). Default true. */
+  sendReviewRequest?: boolean;
   /** Feature (launch) — recompute auto-invoice labor from actual time entries. */
   billLaborFromTimeEntries?: boolean;
   /** P21-003 — opt into the daily batch-invoice proposal sweep. */

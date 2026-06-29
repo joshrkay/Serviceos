@@ -8,6 +8,7 @@ const h = vi.hoisted(() => ({
   approve: vi.fn(),
   reject: vi.fn().mockResolvedValue(undefined),
   resolveLine: vi.fn().mockResolvedValue(undefined),
+  resolveEntity: vi.fn().mockResolvedValue(undefined),
   undo: vi.fn(),
   reload: vi.fn(),
   back: vi.fn(),
@@ -39,6 +40,7 @@ vi.mock('../hooks/useProposalReview', () => ({
     approve: h.approve,
     reject: h.reject,
     resolveLine: h.resolveLine,
+    resolveEntity: h.resolveEntity,
     undo: h.undo,
     reload: h.reload,
   }),
@@ -137,7 +139,10 @@ describe('Proposal review screen', () => {
     expect(getByText('Bob Smith')).toBeTruthy();
     expect(queryByText('Approve')).toBeNull();
     fireEvent.click(getByText('Bob Smith').closest('button')!);
-    expect(h.reject).toHaveBeenCalledWith('entity_selected', 'c1');
+    // U8 (E9) — picking a candidate re-drafts the original action via
+    // resolveEntity instead of discarding it through reject('entity_selected').
+    expect(h.resolveEntity).toHaveBeenCalledWith('c1');
+    expect(h.reject).not.toHaveBeenCalled();
   });
 
   it('renders catalog resolve-line picker for ambiguous line items', () => {

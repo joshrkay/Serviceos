@@ -620,7 +620,7 @@ async function createDeduped(
  * here — at the router boundary — so the task handler stays a dumb
  * passthrough and every downstream payload matches the Zod schema.
  */
-function entitiesForProposal(
+export function entitiesForProposal(
   intent: Exclude<IntentType, 'unknown'>,
   entities: ExtractedEntities | undefined
 ): Record<string, unknown> | undefined {
@@ -734,6 +734,45 @@ export function sanitizeReasoning(raw: string): string {
   const stripped = raw.replace(CONTROL_CHAR_REGEX, ' ').trim();
   if (stripped.length <= CLASSIFIER_REASONING_MAX_CHARS) return stripped;
   return `${stripped.slice(0, CLASSIFIER_REASONING_MAX_CHARS - 1)}…`;
+}
+
+/**
+ * U1 (E9) — sanitize the classifier's `extractedEntities` before persisting
+ * them on `sourceContext.originalIntent` for later re-draft. These are
+ * LLM-generated, transcript-derived strings (semi-untrusted), so each string
+ * value is control-stripped and length-bounded with the SAME treatment
+ * `sanitizeReasoning` applies to `classifierReasoning`. Numbers (integer-cents
+ * amounts, delayMinutes, …) and booleans pass through; string arrays
+ * (lineItemDescriptions) are sanitized element-wise. Anything else is dropped
+ * — the re-draft never needs nested objects, and dropping them keeps the
+ * persisted shape flat and predictable.
+ */
+const EXTRACTED_ENTITY_MAX_VALUES = 32;
+export function sanitizeExtractedEntities(
+  entities: ExtractedEntities | undefined,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (!entities) return out;
+  let count = 0;
+  for (const [key, value] of Object.entries(entities)) {
+    if (value === undefined || value === null) continue;
+    if (count >= EXTRACTED_ENTITY_MAX_VALUES) break;
+    if (typeof value === 'string') {
+      out[key] = sanitizeReasoning(value);
+      count++;
+    } else if (typeof value === 'number' || typeof value === 'boolean') {
+      out[key] = value;
+      count++;
+    } else if (Array.isArray(value)) {
+      out[key] = value
+        .filter((v): v is string => typeof v === 'string')
+        .slice(0, EXTRACTED_ENTITY_MAX_VALUES)
+        .map((v) => sanitizeReasoning(v));
+      count++;
+    }
+    // Other shapes (nested objects) are intentionally dropped.
+  }
+  return out;
 }
 
 /**
@@ -876,6 +915,34 @@ async function emitClarification(
       transcript: transcript.trim(),
       ...(conversationId ? { conversationId } : {}),
       ...(recordingId ? { recordingId } : {}),
+      // U8 (E9) — when an entity reference was ambiguous, persist the
+      // structured re-draft context so the resolve-entity endpoint can stamp
+      // the chosen candidate onto the original action (which field it fills is
+      // keyed off entityKind). The candidates ride here too (with their kind)
+      // so resolution doesn't depend on the payload copy.
+      ...(input.entityAmbiguity
+        ? {
+            entityKind: input.entityAmbiguity.entityKind,
+            entityReference: input.entityAmbiguity.reference,
+            entityCandidates: input.entityAmbiguity.candidates.map((c) => ({
+              id: c.id,
+              kind: c.kind,
+              label: c.label,
+              ...(c.hint ? { hint: c.hint } : {}),
+              score: c.score,
+            })),
+            // U1 (E9) — persist the ORIGINAL intent so resolveProposalEntity can
+            // re-run the real task handler with the chosen id and replace this
+            // (non-executable) voice_clarification with the drafted, executable
+            // proposal. Without this the original command is unrecoverable and
+            // approving the resolved clarification is a no-op (HANDLER_NOT_FOUND).
+            // extractedEntities are sanitized like classifierReasoning above.
+            originalIntent: {
+              intentType: classification.intentType,
+              extractedEntities: sanitizeExtractedEntities(classification.extractedEntities),
+            },
+          }
+        : {}),
     },
     // Same deterministic key as the single-action task path so a redelivered
     // message dedups atomically regardless of which proposal type it produced.

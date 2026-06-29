@@ -1,159 +1,48 @@
-import { createBrowserRouter } from 'react-router';
+import { createBrowserRouter, useParams, useNavigate } from 'react-router';
+import React from 'react';
+// First-paint-critical shells stay eagerly imported so the most common entry
+// paths (`/` home, `/login`) render without an extra round-trip. Every other
+// route is split into its own chunk via `lazy:` below, so the initial download
+// no longer pulls the JS for pages the user hasn't navigated to (BUG-6
+// follow-up: manual vendor chunks shrank vendors; this splits the app's own
+// page code too).
 import { Shell } from './components/layout/Shell';
 import { RouteErrorElement } from './components/layout/RouteErrorElement';
+import { RouteFallback } from './components/layout/RouteFallback';
 import { RoleHome } from './components/home/RoleHome';
-import { AssistantPage } from './components/assistant/AssistantPage';
-import { JobsPage } from './components/jobs/JobsPage';
-import { SchedulePage } from './components/schedule/SchedulePage';
-import { CustomersPage } from './components/customers/CustomersPage';
-import { CustomerDetail } from './pages/customers/CustomerDetail';
-import { EstimatesPage } from './components/estimates/EstimatesPage';
-import { InvoicesPage } from './components/invoices/InvoicesPage';
-import { SettingsPage } from './components/settings/SettingsPage';
-import { TemplatesPage } from './components/settings/TemplatesPage';
-import { PriceBookPage } from './components/settings/PriceBookPage';
-import { FeedbackDashboard } from './components/settings/FeedbackDashboard';
-import { LanguageSettingsPage } from './pages/settings/LanguageSettings';
-import { OnboardingShell } from './components/onboarding/v2/OnboardingShell';
-import { EstimateApprovalPage } from './components/customer/EstimateApprovalPage';
-import { InvoicePaymentPage } from './components/customer/InvoicePaymentPage';
-import { IntakeFormPage } from './components/customer/IntakeFormPage';
-import { BookingPage } from './components/customer/BookingPage';
-import { FeedbackPage } from './components/customer/FeedbackPage';
-import { InteractionsPage } from './components/interactions/InteractionsPage';
-import { DispatchLogPage } from './components/interactions/DispatchLogPage';
-import { DispatchBoard } from './pages/dispatch/DispatchBoard';
-import { LeadList } from './pages/leads/LeadList';
-import { LeadDetail } from './pages/leads/LeadDetail';
-import { LeadCreate } from './pages/leads/LeadCreate';
-import { LoginPage } from './components/auth/LoginPage';
-import { SignupPage } from './components/auth/SignupPage';
 import { ProtectedRoute } from './components/auth/ProtectedRoute';
-import { MarketingLayout } from './components/marketing/MarketingLayout';
-import { FeaturesPage } from './components/marketing/FeaturesPage';
-import { PricingPage } from './components/marketing/PricingPage';
-import { AboutPage } from './components/marketing/AboutPage';
-import { DownloadPage } from './components/marketing/DownloadPage';
-import { PrivacyPage } from './components/marketing/PrivacyPage';
-import { TermsPage } from './components/marketing/TermsPage';
-import { TechnicianDayPage } from './components/technician/TechnicianDayPage';
-import { MaintenanceContractsPage } from './components/contracts/MaintenanceContractsPage';
-import { ContractDetailPage } from './components/contracts/ContractDetailPage';
-import { MoneyDashboardPage } from './components/reports/MoneyDashboardPage';
-import { DigestPage } from './pages/digest/DigestPage';
-import { RevenueBySourcePage } from './components/reports/RevenueBySourcePage';
-import { InboxPage } from './components/inbox/InboxPage';
-import { CommsInboxPage } from './pages/conversations/CommsInboxPage';
-import { PortalShell } from './pages/portal/PortalShell';
-import { Showcase } from './pages/design/Showcase';
-import { InvoiceCreate } from './pages/invoices/InvoiceCreate';
-import { EstimateCreate } from './pages/estimates/EstimateCreate';
-import { JobCreate } from './pages/jobs/JobCreate';
-import { CustomerEdit } from './pages/customers/CustomerEdit';
-import { AppointmentEdit } from './pages/appointments/AppointmentEdit';
-import { useParams, useNavigate } from 'react-router';
-import React from 'react';
+import { LoginPage } from './components/auth/LoginPage';
 
-// P11-007 — wrappers that pull `:id` from the route and forward it to
-// the typed edit components.
-function CustomerEditRoute() {
-  const params = useParams<{ id: string }>();
-  const navigate = useNavigate();
-  if (!params.id) return null;
-  return React.createElement(CustomerEdit, {
-    customerId: params.id,
-    onSaved: (id: string) => navigate(`/customers/${id}`),
-    onCancel: () => navigate(-1),
-  });
-}
+// The param-wrapper routes (`:id` → typed props) are defined *inside* their
+// lazy loaders below, so each heavy page stays out of the eager graph while the
+// tiny wrapper logic loads with its own chunk. Shared hydrate fallback element
+// for cold deep-links into those lazy chunks.
+const routeFallback = React.createElement(RouteFallback);
 
-function CustomerDetailRoute() {
-  const params = useParams<{ id: string }>();
-  const navigate = useNavigate();
-  if (!params.id) return null;
-  return React.createElement(CustomerDetail, {
-    customerId: params.id,
-    onBack: () => navigate('/customers'),
-    onEdit: () => navigate(`/customers/${params.id}/edit`),
-    onArchived: () => navigate('/customers'),
-  });
-}
-
-function LeadListRoute() {
-  const navigate = useNavigate();
-  return React.createElement(LeadList, {
-    onSelectLead: (id: string) => navigate(`/leads/${id}`),
-    onNewLead: () => navigate('/leads/new'),
-  });
-}
-
-function LeadDetailRoute() {
-  const params = useParams<{ id: string }>();
-  const navigate = useNavigate();
-  if (!params.id) return null;
-  return React.createElement(LeadDetail, {
-    leadId: params.id,
-    onBack: () => navigate('/leads'),
-    onConverted: (customerId: string) => navigate(`/customers/${customerId}`),
-  });
-}
-
-function LeadCreateRoute() {
-  const navigate = useNavigate();
-  return React.createElement(LeadCreate, {
-    onCreated: (id: string) => navigate(`/leads/${id}`),
-    onCancel: () => navigate('/leads'),
-  });
-}
-
-function AppointmentEditRoute() {
-  const params = useParams<{ id: string }>();
-  const navigate = useNavigate();
-  if (!params.id) return null;
-  return React.createElement(AppointmentEdit, {
-    appointmentId: params.id,
-    onBack: () => navigate(-1),
-  });
-}
-
-// Wrap EstimatesPage to pre-select the estimate from the URL param.
-function EstimateDetailRoute() {
-  const params = useParams<{ id: string }>();
-  if (!params.id) return null;
-  return React.createElement(EstimatesPage as React.ComponentType<{ defaultSelectedId?: string }>, { defaultSelectedId: params.id });
-}
-
-// Wrap InvoicesPage to pre-select the invoice from the URL param.
-function InvoiceDetailRoute() {
-  const params = useParams<{ id: string }>();
-  if (!params.id) return null;
-  return React.createElement(InvoicesPage as React.ComponentType<{ defaultSelectedId?: string }>, { defaultSelectedId: params.id });
-}
-
-// Every top-level route gets `ErrorBoundary: RouteErrorElement` so an
-// uncaught render/loader error renders the user-friendly fallback (with
-// "Try again" / "Go back") instead of a blank white page. Errors thrown
-// deeper in a subtree bubble up to the nearest route with an ErrorBoundary,
-// so attaching it once at the outermost layer of the authenticated branch
-// covers every nested page below.
 export const router = createBrowserRouter([
   // ── Auth (fullscreen, no Shell) ───────────────────────────────────────────
   { path: '/login',  Component: LoginPage,  ErrorBoundary: RouteErrorElement },
-  { path: '/signup', Component: SignupPage, ErrorBoundary: RouteErrorElement },
+  {
+    path: '/signup',
+    lazy: async () => ({ Component: (await import('./components/auth/SignupPage')).SignupPage }),
+    ErrorBoundary: RouteErrorElement,
+    hydrateFallbackElement: routeFallback,
+  },
 
   // ── Public marketing site (shared header/footer, no auth) ──────────────
   // Standalone pages the LandingPage (at "/") and footers link to. Public so
   // they render signed-out and signed-in; "/" itself stays on ProtectedRoute.
   {
-    Component: MarketingLayout,
+    lazy: async () => ({ Component: (await import('./components/marketing/MarketingLayout')).MarketingLayout }),
     ErrorBoundary: RouteErrorElement,
+    hydrateFallbackElement: routeFallback,
     children: [
-      { path: '/features', Component: FeaturesPage },
-      { path: '/pricing',  Component: PricingPage  },
-      { path: '/about',    Component: AboutPage    },
-      { path: '/download', Component: DownloadPage },
-      { path: '/privacy',  Component: PrivacyPage  },
-      { path: '/terms',    Component: TermsPage    },
+      { path: '/features', lazy: async () => ({ Component: (await import('./components/marketing/FeaturesPage')).FeaturesPage }) },
+      { path: '/pricing',  lazy: async () => ({ Component: (await import('./components/marketing/PricingPage')).PricingPage }) },
+      { path: '/about',    lazy: async () => ({ Component: (await import('./components/marketing/AboutPage')).AboutPage }) },
+      { path: '/download', lazy: async () => ({ Component: (await import('./components/marketing/DownloadPage')).DownloadPage }) },
+      { path: '/privacy',  lazy: async () => ({ Component: (await import('./components/marketing/PrivacyPage')).PrivacyPage }) },
+      { path: '/terms',    lazy: async () => ({ Component: (await import('./components/marketing/TermsPage')).TermsPage }) },
     ],
   },
 
@@ -161,15 +50,16 @@ export const router = createBrowserRouter([
   // §10 onboarding — v2 sidebar shell (the legacy v1 wizard was retired).
   {
     path: '/onboarding',
-    Component: OnboardingShell,
+    lazy: async () => ({ Component: (await import('./components/onboarding/v2/OnboardingShell')).OnboardingShell }),
     ErrorBoundary: RouteErrorElement,
+    hydrateFallbackElement: routeFallback,
   },
-  { path: '/e/:id',      Component: EstimateApprovalPage, ErrorBoundary: RouteErrorElement },
-  { path: '/pay/:id',    Component: InvoicePaymentPage,   ErrorBoundary: RouteErrorElement },
-  { path: '/intake',     Component: IntakeFormPage,       ErrorBoundary: RouteErrorElement },
-  { path: '/book',       Component: BookingPage,          ErrorBoundary: RouteErrorElement },
-  { path: '/public/feedback/:token', Component: FeedbackPage, ErrorBoundary: RouteErrorElement },
-  { path: '/portal/:token',          Component: PortalShell,  ErrorBoundary: RouteErrorElement },
+  { path: '/e/:id',      lazy: async () => ({ Component: (await import('./components/customer/EstimateApprovalPage')).EstimateApprovalPage }), ErrorBoundary: RouteErrorElement, hydrateFallbackElement: routeFallback },
+  { path: '/pay/:id',    lazy: async () => ({ Component: (await import('./components/customer/InvoicePaymentPage')).InvoicePaymentPage }),   ErrorBoundary: RouteErrorElement, hydrateFallbackElement: routeFallback },
+  { path: '/intake',     lazy: async () => ({ Component: (await import('./components/customer/IntakeFormPage')).IntakeFormPage }),           ErrorBoundary: RouteErrorElement, hydrateFallbackElement: routeFallback },
+  { path: '/book',       lazy: async () => ({ Component: (await import('./components/customer/BookingPage')).BookingPage }),                 ErrorBoundary: RouteErrorElement, hydrateFallbackElement: routeFallback },
+  { path: '/public/feedback/:token', lazy: async () => ({ Component: (await import('./components/customer/FeedbackPage')).FeedbackPage }),  ErrorBoundary: RouteErrorElement, hydrateFallbackElement: routeFallback },
+  { path: '/portal/:token',          lazy: async () => ({ Component: (await import('./pages/portal/PortalShell')).PortalShell }),           ErrorBoundary: RouteErrorElement, hydrateFallbackElement: routeFallback },
 
   // ── App (with Shell nav, auth-gated) ───────────────────────────────────
   {
@@ -179,46 +69,182 @@ export const router = createBrowserRouter([
     children: [{
       path: '/',
       Component: Shell,
+      // Covers cold deep-links to any lazy app page below (chain:
+      // ProtectedRoute → Shell → <lazy page>).
+      hydrateFallbackElement: routeFallback,
       children: [
+      // The index (home) renders on the hottest path — keep it eager.
       { index: true,            Component: RoleHome        },
-      { path: 'assistant',      Component: AssistantPage   },
-      { path: 'jobs',           Component: JobsPage        },
-      { path: 'jobs/new',       Component: JobCreate       },
-      { path: 'jobs/:id',       Component: JobsPage        },
-      { path: 'schedule',       Component: SchedulePage    },
-      { path: 'dispatch',       Component: DispatchBoard   },
-      { path: 'customers',      Component: CustomersPage   },
-      { path: 'customers/:id',  Component: CustomerDetailRoute },
-      { path: 'customers/:id/edit', Component: CustomerEditRoute },
-      { path: 'appointments/:id/edit', Component: AppointmentEditRoute },
-      { path: 'leads',          Component: LeadListRoute       },
-      { path: 'leads/new',      Component: LeadCreateRoute     },
-      { path: 'leads/:id',      Component: LeadDetailRoute     },
-      { path: 'estimates',      Component: EstimatesPage   },
-      { path: 'estimates/new',  Component: EstimateCreate  },
-      { path: 'estimates/:id',  Component: EstimateDetailRoute },
-      { path: 'invoices',       Component: InvoicesPage    },
-      { path: 'invoices/new',   Component: InvoiceCreate   },
-      { path: 'invoices/:id',   Component: InvoiceDetailRoute },
-      { path: 'contracts',      Component: MaintenanceContractsPage },
-      { path: 'contracts/:id',  Component: ContractDetailPage },
-      { path: 'inbox',          Component: InboxPage        },
-      { path: 'comms-inbox',    Component: CommsInboxPage   },
-      { path: 'interactions',   Component: InteractionsPage },
-      { path: 'interactions/dispatch', Component: DispatchLogPage },
-      { path: 'settings',       Component: SettingsPage    },
-      { path: 'settings/templates', Component: TemplatesPage   },
-      { path: 'settings/price-book', Component: PriceBookPage },
-      { path: 'settings/feedback', Component: FeedbackDashboard },
-      { path: 'settings/language', Component: LanguageSettingsPage },
-      { path: 'reports/money', Component: MoneyDashboardPage },
+      { path: 'assistant',      lazy: async () => ({ Component: (await import('./components/assistant/AssistantPage')).AssistantPage }) },
+      { path: 'jobs',           lazy: async () => ({ Component: (await import('./components/jobs/JobsPage')).JobsPage }) },
+      { path: 'jobs/new',       lazy: async () => ({ Component: (await import('./pages/jobs/JobCreate')).JobCreate }) },
+      { path: 'jobs/:id',       lazy: async () => ({ Component: (await import('./components/jobs/JobsPage')).JobsPage }) },
+      // U9 (E7) — per-job photo page so the persisted-photo pipeline
+      // (presign → PUT → attach → gallery) is reachable via `jobs/:id/photos`.
+      {
+        path: 'jobs/:id/photos',
+        lazy: async () => {
+          const { JobPhotos } = await import('./pages/jobs/JobPhotos');
+          function JobPhotosRoute() {
+            const params = useParams<{ id: string }>();
+            if (!params.id) return null;
+            return React.createElement(JobPhotos, { jobId: params.id });
+          }
+          return { Component: JobPhotosRoute };
+        },
+      },
+      { path: 'schedule',       lazy: async () => ({ Component: (await import('./components/schedule/SchedulePage')).SchedulePage }) },
+      { path: 'dispatch',       lazy: async () => ({ Component: (await import('./pages/dispatch/DispatchBoard')).DispatchBoard }) },
+      { path: 'customers',      lazy: async () => ({ Component: (await import('./components/customers/CustomersPage')).CustomersPage }) },
+      {
+        path: 'customers/:id',
+        lazy: async () => {
+          const { CustomerDetail } = await import('./pages/customers/CustomerDetail');
+          function CustomerDetailRoute() {
+            const params = useParams<{ id: string }>();
+            const navigate = useNavigate();
+            if (!params.id) return null;
+            return React.createElement(CustomerDetail, {
+              customerId: params.id,
+              onBack: () => navigate('/customers'),
+              onEdit: () => navigate(`/customers/${params.id}/edit`),
+              onArchived: () => navigate('/customers'),
+            });
+          }
+          return { Component: CustomerDetailRoute };
+        },
+      },
+      {
+        path: 'customers/:id/edit',
+        lazy: async () => {
+          const { CustomerEdit } = await import('./pages/customers/CustomerEdit');
+          function CustomerEditRoute() {
+            const params = useParams<{ id: string }>();
+            const navigate = useNavigate();
+            if (!params.id) return null;
+            return React.createElement(CustomerEdit, {
+              customerId: params.id,
+              onSaved: (id: string) => navigate(`/customers/${id}`),
+              onCancel: () => navigate(-1),
+            });
+          }
+          return { Component: CustomerEditRoute };
+        },
+      },
+      {
+        path: 'appointments/:id/edit',
+        lazy: async () => {
+          const { AppointmentEdit } = await import('./pages/appointments/AppointmentEdit');
+          function AppointmentEditRoute() {
+            const params = useParams<{ id: string }>();
+            const navigate = useNavigate();
+            if (!params.id) return null;
+            return React.createElement(AppointmentEdit, {
+              appointmentId: params.id,
+              onBack: () => navigate(-1),
+            });
+          }
+          return { Component: AppointmentEditRoute };
+        },
+      },
+      {
+        path: 'leads',
+        lazy: async () => {
+          const { LeadList } = await import('./pages/leads/LeadList');
+          function LeadListRoute() {
+            const navigate = useNavigate();
+            return React.createElement(LeadList, {
+              onSelectLead: (id: string) => navigate(`/leads/${id}`),
+              onNewLead: () => navigate('/leads/new'),
+            });
+          }
+          return { Component: LeadListRoute };
+        },
+      },
+      {
+        path: 'leads/new',
+        lazy: async () => {
+          const { LeadCreate } = await import('./pages/leads/LeadCreate');
+          function LeadCreateRoute() {
+            const navigate = useNavigate();
+            return React.createElement(LeadCreate, {
+              onCreated: (id: string) => navigate(`/leads/${id}`),
+              onCancel: () => navigate('/leads'),
+            });
+          }
+          return { Component: LeadCreateRoute };
+        },
+      },
+      {
+        path: 'leads/:id',
+        lazy: async () => {
+          const { LeadDetail } = await import('./pages/leads/LeadDetail');
+          function LeadDetailRoute() {
+            const params = useParams<{ id: string }>();
+            const navigate = useNavigate();
+            if (!params.id) return null;
+            return React.createElement(LeadDetail, {
+              leadId: params.id,
+              onBack: () => navigate('/leads'),
+              onConverted: (customerId: string) => navigate(`/customers/${customerId}`),
+            });
+          }
+          return { Component: LeadDetailRoute };
+        },
+      },
+      { path: 'estimates',      lazy: async () => ({ Component: (await import('./components/estimates/EstimatesPage')).EstimatesPage }) },
+      { path: 'estimates/new',  lazy: async () => ({ Component: (await import('./pages/estimates/EstimateCreate')).EstimateCreate }) },
+      {
+        path: 'estimates/:id',
+        lazy: async () => {
+          const { EstimatesPage } = await import('./components/estimates/EstimatesPage');
+          function EstimateDetailRoute() {
+            const params = useParams<{ id: string }>();
+            if (!params.id) return null;
+            return React.createElement(
+              EstimatesPage as React.ComponentType<{ defaultSelectedId?: string }>,
+              { defaultSelectedId: params.id },
+            );
+          }
+          return { Component: EstimateDetailRoute };
+        },
+      },
+      { path: 'invoices',       lazy: async () => ({ Component: (await import('./components/invoices/InvoicesPage')).InvoicesPage }) },
+      { path: 'invoices/new',   lazy: async () => ({ Component: (await import('./pages/invoices/InvoiceCreate')).InvoiceCreate }) },
+      {
+        path: 'invoices/:id',
+        lazy: async () => {
+          const { InvoicesPage } = await import('./components/invoices/InvoicesPage');
+          function InvoiceDetailRoute() {
+            const params = useParams<{ id: string }>();
+            if (!params.id) return null;
+            return React.createElement(
+              InvoicesPage as React.ComponentType<{ defaultSelectedId?: string }>,
+              { defaultSelectedId: params.id },
+            );
+          }
+          return { Component: InvoiceDetailRoute };
+        },
+      },
+      { path: 'contracts',      lazy: async () => ({ Component: (await import('./components/contracts/MaintenanceContractsPage')).MaintenanceContractsPage }) },
+      { path: 'contracts/:id',  lazy: async () => ({ Component: (await import('./components/contracts/ContractDetailPage')).ContractDetailPage }) },
+      { path: 'inbox',          lazy: async () => ({ Component: (await import('./components/inbox/InboxPage')).InboxPage }) },
+      { path: 'comms-inbox',    lazy: async () => ({ Component: (await import('./pages/conversations/CommsInboxPage')).CommsInboxPage }) },
+      { path: 'interactions',   lazy: async () => ({ Component: (await import('./components/interactions/InteractionsPage')).InteractionsPage }) },
+      { path: 'interactions/dispatch', lazy: async () => ({ Component: (await import('./components/interactions/DispatchLogPage')).DispatchLogPage }) },
+      { path: 'settings',       lazy: async () => ({ Component: (await import('./components/settings/SettingsPage')).SettingsPage }) },
+      { path: 'settings/templates', lazy: async () => ({ Component: (await import('./components/settings/TemplatesPage')).TemplatesPage }) },
+      { path: 'settings/price-book', lazy: async () => ({ Component: (await import('./components/settings/PriceBookPage')).PriceBookPage }) },
+      { path: 'settings/feedback', lazy: async () => ({ Component: (await import('./components/settings/FeedbackDashboard')).FeedbackDashboard }) },
+      { path: 'settings/language', lazy: async () => ({ Component: (await import('./pages/settings/LanguageSettings')).LanguageSettingsPage }) },
+      { path: 'reports/money', lazy: async () => ({ Component: (await import('./components/reports/MoneyDashboardPage')).MoneyDashboardPage }) },
       // RV-062 — end-of-day digest web view (SMS deep link `/digest/<date>`;
       // no param / `latest` resolve to the most recent digest).
-      { path: 'digest',         Component: DigestPage },
-      { path: 'digest/:date',   Component: DigestPage },
-      { path: 'reports/revenue-by-source', Component: RevenueBySourcePage },
-      { path: 'technician/day', Component: TechnicianDayPage },
-      { path: 'design',         Component: Showcase },
+      { path: 'digest',         lazy: async () => ({ Component: (await import('./pages/digest/DigestPage')).DigestPage }) },
+      { path: 'digest/:date',   lazy: async () => ({ Component: (await import('./pages/digest/DigestPage')).DigestPage }) },
+      { path: 'reports/revenue-by-source', lazy: async () => ({ Component: (await import('./components/reports/RevenueBySourcePage')).RevenueBySourcePage }) },
+      { path: 'technician/day', lazy: async () => ({ Component: (await import('./components/technician/TechnicianDayPage')).TechnicianDayPage }) },
+      { path: 'design',         lazy: async () => ({ Component: (await import('./pages/design/Showcase')).Showcase }) },
     ],
     }],
   },

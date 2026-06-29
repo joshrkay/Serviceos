@@ -78,42 +78,52 @@ export class PgQueue extends PgBaseRepository implements Queue {
   }
 
   async receive<T>(): Promise<QueueMessage<T> | null> {
+    const [msg] = await this.receiveBatch<T>(1);
+    return msg ?? null;
+  }
+
+  async receiveBatch<T>(max: number): Promise<QueueMessage<T>[]> {
+    if (max <= 0) return [];
     return this.withClient(async (client) => {
       await this.ensureTable(client);
 
       await client.query('BEGIN');
       try {
+        // Claim up to `max` oldest visible messages atomically. FOR UPDATE SKIP
+        // LOCKED means concurrent ticks/replicas each grab a DISJOINT set — no
+        // message is processed twice. attempts++ / visible_at extend exactly as
+        // the single-row receive() did.
         const result = await client.query(
           `UPDATE _queue_messages
            SET attempts = attempts + 1,
                visible_at = NOW() + ($1 || ' seconds')::interval
-           WHERE id = (
+           WHERE id IN (
              SELECT id FROM _queue_messages
              WHERE visible_at <= NOW()
                AND attempts < max_attempts
              ORDER BY created_at ASC
              FOR UPDATE SKIP LOCKED
-             LIMIT 1
+             LIMIT $2
            )
            RETURNING *`,
-          [String(this.config.visibilityTimeout)]
+          [String(this.config.visibilityTimeout), max]
         );
         await client.query('COMMIT');
 
-        if (result.rows.length === 0) return null;
-
-        const row = result.rows[0];
-        return {
-          id: row.id as string,
-          type: row.type as string,
-          payload: (typeof row.payload === 'string'
-            ? JSON.parse(row.payload)
-            : row.payload) as T,
-          attempts: Number(row.attempts),
-          maxAttempts: Number(row.max_attempts),
-          idempotencyKey: row.idempotency_key as string,
-          createdAt: (row.created_at as Date).toISOString(),
-        };
+        return result.rows
+          .map((row) => ({
+            id: row.id as string,
+            type: row.type as string,
+            payload: (typeof row.payload === 'string'
+              ? JSON.parse(row.payload)
+              : row.payload) as T,
+            attempts: Number(row.attempts),
+            maxAttempts: Number(row.max_attempts),
+            idempotencyKey: row.idempotency_key as string,
+            createdAt: (row.created_at as Date).toISOString(),
+          }))
+          // RETURNING order is unspecified; restore oldest-first claim order.
+          .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
       } catch (err) {
         await client.query('ROLLBACK');
         throw err;

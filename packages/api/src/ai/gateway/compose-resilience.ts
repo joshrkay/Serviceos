@@ -48,6 +48,7 @@ import {
   estimateTokens,
   DEFAULT_TIER_CONFIG,
   type TenantTier,
+  type QuotaStore,
 } from './tenant-quota';
 import {
   gatewayRetryAttemptsTotal,
@@ -253,7 +254,7 @@ export class ProviderTenantQuotaWrapper implements LLMProvider {
 
   constructor(
     private readonly inner: LLMProvider,
-    private readonly registry: TenantQuotaRegistry,
+    private readonly registry: QuotaStore,
   ) {
     this.name = inner.name;
   }
@@ -268,13 +269,13 @@ export class ProviderTenantQuotaWrapper implements LLMProvider {
       0,
     );
 
-    const lease = this.registry.acquire({ tenantId, tenantTier, estimatedTokens });
+    const lease = await this.registry.acquire({ tenantId, tenantTier, estimatedTokens });
     try {
       const response = await this.inner.complete(request);
-      lease.release(response.tokenUsage.input, response.tokenUsage.output);
+      await lease.release(response.tokenUsage.input, response.tokenUsage.output);
       return response;
     } catch (err) {
-      lease.release();
+      await lease.release();
       throw err;
     }
   }
@@ -294,8 +295,8 @@ export interface ResilienceStackOptions {
   breakers?: CircuitBreakerRegistry;
   breakerConfig?: BreakerConfig;
 
-  /** Per-tenant quota registry. */
-  quota?: TenantQuotaRegistry;
+  /** Per-tenant quota store (in-memory registry or the cluster-wide Redis store). */
+  quota?: QuotaStore;
 
   /** Retry policy override. */
   retryPolicy?: RetryPolicy;

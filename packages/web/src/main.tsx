@@ -8,6 +8,7 @@ import { AnalyticsIdentityBridge } from './components/auth/AnalyticsIdentityBrid
 import { TenantTimezoneProvider } from './hooks/useTenantTimezone';
 import { getRuntimeConfigValue } from './lib/runtimeConfig';
 import { initAnalytics } from './lib/analytics';
+import { registerServiceWorker } from './pwa/register-sw';
 import './index.css';
 
 const CLERK_PUBLISHABLE_KEY = getRuntimeConfigValue(
@@ -30,6 +31,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <ClerkProvider
       publishableKey={CLERK_PUBLISHABLE_KEY}
+      clerkJSVersion="5.127.0"
       signInUrl="/login"
       signUpUrl="/signup"
       afterSignOutUrl="/login"
@@ -42,3 +44,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     </ClerkProvider>
   </React.StrictMode>
 );
+
+// R4 (native-mobile parity): register the service worker after boot so Rivet
+// is installable and opens offline. No-ops in dev / unsupported browsers.
+void registerServiceWorker();

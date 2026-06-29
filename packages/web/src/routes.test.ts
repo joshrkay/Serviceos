@@ -7,11 +7,48 @@ function flattenRoutes(routes: RouteObject[]): RouteObject[] {
   return routes.flatMap(route => [route, ...(route.children ? flattenRoutes(route.children) : [])]);
 }
 
+/** True when the route renders eagerly (a statically-imported component). */
+function isEager(route: RouteObject): boolean {
+  return (
+    (route as { Component?: unknown }).Component !== undefined ||
+    (route as { element?: unknown }).element !== undefined
+  );
+}
+
 describe('router', () => {
   it('includes settings/price-book route', () => {
     const allRoutes = flattenRoutes(router.routes as RouteObject[]);
 
     expect(allRoutes.some(route => route.path === 'settings/price-book')).toBe(true);
+  });
+
+  // Code-splitting contract: non-critical pages must load via `lazy` (their own
+  // chunk), while the hottest entry paths (`/` home index, `/login`) stay eager
+  // so first paint doesn't pay an extra round-trip. A regression that re-adds an
+  // eager `Component:` import for a heavy page would silently re-bloat the entry
+  // bundle — this guards against that.
+  it('non-critical pages are code-split via lazy()', () => {
+    const allRoutes = flattenRoutes(router.routes as RouteObject[]);
+    // A representative spread: list page, detail wrapper, settings, reports.
+    for (const path of ['estimates', 'invoices', 'estimates/:id', 'settings', 'reports/money']) {
+      const route = allRoutes.find(r => r.path === path);
+      expect(route, `expected a route for ${path}`).toBeDefined();
+      expect(typeof (route as { lazy?: unknown }).lazy, `${path} should be lazy`).toBe('function');
+      expect(isEager(route!), `${path} should not be eagerly imported`).toBe(false);
+    }
+  });
+
+  it('keeps the hottest entry paths eager (home index + /login)', () => {
+    const allRoutes = flattenRoutes(router.routes as RouteObject[]);
+    const indexHome = allRoutes.find(r => (r as { index?: boolean }).index === true);
+    expect(indexHome, 'expected an index (home) route').toBeDefined();
+    expect(isEager(indexHome!), 'home index should be eager').toBe(true);
+    expect((indexHome as { lazy?: unknown }).lazy).toBeUndefined();
+
+    const login = (router.routes as RouteObject[]).find(r => r.path === '/login');
+    expect(login, 'expected /login top-level route').toBeDefined();
+    expect(isEager(login!), '/login should be eager').toBe(true);
+    expect((login as { lazy?: unknown }).lazy).toBeUndefined();
   });
 
   // Every top-level route needs an ErrorBoundary so an uncaught loader/render

@@ -140,25 +140,35 @@ type ListenerClient = Pick<Client, 'connect' | 'end' | 'on' | 'off' | 'query'>;
 
 type CreateCredentialResolverDeps = {
   pool: Pool;
+  /**
+   * Direct (non-PgBouncer) pool for the LISTEN/NOTIFY connection. LISTEN is
+   * session-scoped and breaks under PgBouncer transaction pooling, so the
+   * listener must connect straight to Postgres. Falls back to `pool` when unset
+   * (dev / no PgBouncer). Credential SELECTs keep using `pool`.
+   */
+  directPool?: Pool;
   createListener?: (config: string | PoolConfig) => ListenerClient;
   sleep?: (ms: number) => Promise<void>;
 };
 
 export function createCredentialResolver({
   pool,
+  directPool,
   createListener = (config) => new Client(config),
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 }: CreateCredentialResolverDeps): CredentialResolver {
   const cache = new Map<string, CredentialRow | null>();
   const keyOf = (tenantId: string, provider: string): string => `${tenantId}:${provider}`;
 
-  const listenerConfig = pool.options.connectionString ?? {
-    host: pool.options.host,
-    port: pool.options.port,
-    user: pool.options.user,
-    password: pool.options.password,
-    database: pool.options.database,
-    ssl: pool.options.ssl,
+  // LISTEN must run on a direct (non-PgBouncer) connection — see directPool.
+  const listenerSource = directPool ?? pool;
+  const listenerConfig = listenerSource.options.connectionString ?? {
+    host: listenerSource.options.host,
+    port: listenerSource.options.port,
+    user: listenerSource.options.user,
+    password: listenerSource.options.password,
+    database: listenerSource.options.database,
+    ssl: listenerSource.options.ssl,
   };
 
   const listener = createListener(listenerConfig);

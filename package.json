@@ -63,7 +63,9 @@
     "corpus:dedup": "tsx scripts/data-pipeline/dedup-utterances.ts",
     "corpus:verify": "npm run corpus:vocab && npm run corpus:behaviors && npm run corpus:coverage && npm run corpus:utterances && npm run corpus:dedup",
     "voice-eval:intent": "tsx packages/voice-eval/run-intent-eval.ts",
-    "voice-eval:slot": "tsx packages/voice-eval/run-slot-eval.ts"
+    "voice-eval:slot": "tsx packages/voice-eval/run-slot-eval.ts",
+    "loadtest:http": "tsx loadtest/http-load.ts",
+    "loadtest:http:selfcheck": "tsx loadtest/http-load-selfcheck.ts"
   },
   "devDependencies": {
     "@clerk/testing": "^2.0.27",
