@@ -46,6 +46,14 @@ PgBouncer config: `pool_mode = transaction`, `max_client_conn` high (e.g. 1000),
   (don't `await` long LLM/HTTP calls inside the RLS transaction) so PgBouncer
   actually multiplexes — a request with an open transaction pins a server
   backend for its whole life.
+  > ⚠️ **Known offender — `/api/assistant/chat`.** `withTenantTransaction` is
+  > mounted before the protected `/api` routes, and the assistant handler
+  > `await`s `generateAssistantReply()` (the LLM call) *inside* that request
+  > transaction, so each concurrent chat pins a PgBouncer server backend for the
+  > whole call. At `default_pool_size=25`, ~25 slow chats can stall unrelated
+  > API traffic. Move the LLM call outside the request transaction (or bracket
+  > only its DB sections) before enabling the PgBouncer topology. Tracked in
+  > `docs/runbooks/scale-review-followups.md`. (Codex P2.)
 - Direct pool: `DB_DIRECT_MAX_CONNECTIONS` small (default 10) — only lock holders
   + the LISTEN client use it.
 - Postgres ceiling = PgBouncer `default_pool_size` (server side), independent of

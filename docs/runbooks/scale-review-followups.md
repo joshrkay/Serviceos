@@ -60,6 +60,15 @@ leases until they drain):
   `voice-session-store.ts:~373` — mirror remote session presence into discovery, or
   emit a tenant-scoped discovery frame first.
 
+## P2 — long external calls inside the request transaction
+- **Move `/api/assistant/chat`'s LLM call out of the RLS transaction.**
+  `app.ts` mounts `withTenantTransaction` before protected `/api` routes, and the
+  assistant handler `await`s `generateAssistantReply()` while that transaction is
+  open, pinning a PgBouncer server backend for the whole LLM call (~25 slow chats
+  exhaust `default_pool_size`). Bracket only the DB sections, or run the LLM call
+  outside the request transaction. (Codex P2; runbook caveat added in
+  `scaling.md` "Pool sizing".)
+
 ## P2 — readiness
 - **Probe the direct pool in `/ready`.** `app.ts:~742` — when `DATABASE_DIRECT_URL`
   is set, `/ready` only checks the main pool, so a bad direct DSN still admits
