@@ -10,6 +10,7 @@ import {
   removeCustomerFromGroup,
 } from '../../src/customers/customer-group';
 import type { Customer } from '../../src/customers/customer';
+import { ConflictError } from '../../src/shared/errors';
 
 describe('Postgres integration — customer groups (migration 227)', () => {
   let pool: Pool;
@@ -104,6 +105,16 @@ describe('Postgres integration — customer groups (migration 227)', () => {
     );
     expect(second.id).not.toBe(first.id);
     expect(second.name).toBe('Seasonal');
+
+    // With an archived row AND an active row sharing the name, findGroupByName
+    // must prefer the active one so the duplicate check fires (rather than
+    // returning the archived row and 500-ing on the partial unique index).
+    const conflict = await repo.findGroupByName(tenant.tenantId, 'seasonal');
+    expect(conflict?.id).toBe(second.id);
+    expect(conflict?.isArchived).toBe(false);
+    await expect(
+      createCustomerGroup({ tenantId: tenant.tenantId, name: 'Seasonal', createdBy: tenant.userId }, repo),
+    ).rejects.toBeInstanceOf(ConflictError);
   });
 
   it('does not leak groups or membership across tenants (RLS)', async () => {

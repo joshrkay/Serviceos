@@ -100,6 +100,21 @@ describe('financing (FIN) — offer + status orchestration', () => {
     expect(after?.status).toBe('declined'); // terminal, unchanged
   });
 
+  it('ignores a stale lower-ranked update once the application has advanced', async () => {
+    const app = await offerFinancing(baseInput(), repo, new ManualFinancingProvider());
+    await applyFinancingStatusUpdate(TENANT, app.id, 'approved', null, repo);
+    // Retried/out-of-order older webhooks (or unknown statuses mapped to
+    // 'offered') must not move an approved application backwards.
+    expect((await applyFinancingStatusUpdate(TENANT, app.id, 'prequalified', null, repo))?.status).toBe(
+      'approved',
+    );
+    expect((await applyFinancingStatusUpdate(TENANT, app.id, 'offered', null, repo))?.status).toBe(
+      'approved',
+    );
+    // A terminal transition still lands.
+    expect((await applyFinancingStatusUpdate(TENANT, app.id, 'funded', null, repo))?.status).toBe('funded');
+  });
+
   it('is tenant-isolated', async () => {
     const app = await offerFinancing(baseInput(), repo, new ManualFinancingProvider());
     expect(await repo.findById('99999999-9999-9999-9999-999999999999', app.id)).toBeNull();

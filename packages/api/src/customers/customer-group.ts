@@ -264,10 +264,14 @@ export class InMemoryCustomerGroupRepository implements CustomerGroupRepository 
   }
 
   async findGroupByName(tenantId: string, name: string): Promise<CustomerGroup | null> {
-    for (const g of this.groups.values()) {
-      if (g.tenantId === tenantId && g.name.toLowerCase() === name.toLowerCase()) return { ...g };
-    }
-    return null;
+    // Prefer the active row so the duplicate check sees it (an archived group of
+    // the same name must not mask an active one — see pg-customer-group.ts).
+    const matches = Array.from(this.groups.values()).filter(
+      (g) => g.tenantId === tenantId && g.name.toLowerCase() === name.toLowerCase()
+    );
+    if (matches.length === 0) return null;
+    const active = matches.find((g) => !g.isArchived);
+    return { ...(active ?? matches[0]) };
   }
 
   async listGroups(tenantId: string, includeArchived = false): Promise<CustomerGroupWithCount[]> {

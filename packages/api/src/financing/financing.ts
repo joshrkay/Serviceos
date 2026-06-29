@@ -39,6 +39,24 @@ export const FINANCING_STATUSES: readonly FinancingStatus[] = [
 /** Terminal states never transition further. */
 export const FINANCING_TERMINAL: readonly FinancingStatus[] = ['funded', 'declined', 'expired', 'canceled'];
 
+/**
+ * Forward-progress rank for the non-terminal lifecycle. A status update may only
+ * advance a non-terminal application; an out-of-order/retried older webhook (or
+ * an unknown provider status that maps to 'offered') with a rank <= the current
+ * one is ignored so the record never moves backwards. Terminal transitions
+ * bypass this — they're always allowed to land from a non-terminal state.
+ */
+const FINANCING_NONTERMINAL_RANK: Record<FinancingStatus, number> = {
+  offered: 0,
+  prequalified: 1,
+  approved: 2,
+  // Terminal states are gated by FINANCING_TERMINAL, not by rank.
+  funded: 3,
+  declined: 3,
+  expired: 3,
+  canceled: 3,
+};
+
 export interface FinancingApplication {
   id: string;
   tenantId: string;
@@ -180,6 +198,14 @@ export async function applyFinancingStatusUpdate(
   const existing = await repository.findById(tenantId, applicationId);
   if (!existing) return null;
   if (FINANCING_TERMINAL.includes(existing.status)) return existing; // already settled
+
+  // Ignore stale/out-of-order non-terminal updates that would move the
+  // application backwards (a retried older webhook, or an unknown status mapped
+  // to 'offered'). Terminal transitions are always allowed to land.
+  const isTerminal = FINANCING_TERMINAL.includes(status);
+  if (!isTerminal && FINANCING_NONTERMINAL_RANK[status] <= FINANCING_NONTERMINAL_RANK[existing.status]) {
+    return existing;
+  }
 
   const updated = await repository.updateStatus(tenantId, applicationId, status, statusReason);
   if (updated && auditRepo) {

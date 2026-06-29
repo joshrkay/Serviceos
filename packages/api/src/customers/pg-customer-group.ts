@@ -65,8 +65,15 @@ export class PgCustomerGroupRepository extends PgBaseRepository implements Custo
 
   async findGroupByName(tenantId: string, name: string): Promise<CustomerGroup | null> {
     return this.withTenant(tenantId, async (client) => {
+      // Prefer the active row: a name can have one active group plus any number
+      // of archived ones (the unique index is partial on is_archived = false).
+      // Returning an archived row would defeat the caller's duplicate check and
+      // either 500 on the partial index or create a second active duplicate.
       const result = await client.query(
-        'SELECT * FROM customer_groups WHERE tenant_id = $1 AND LOWER(name) = LOWER($2)',
+        `SELECT * FROM customer_groups
+          WHERE tenant_id = $1 AND LOWER(name) = LOWER($2)
+          ORDER BY is_archived ASC, created_at DESC
+          LIMIT 1`,
         [tenantId, name]
       );
       return result.rows.length > 0 ? mapGroup(result.rows[0]) : null;

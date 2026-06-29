@@ -4,6 +4,7 @@ import { AuthenticatedRequest } from '../auth/clerk';
 import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { AuditRepository } from '../audit/audit';
+import { CustomerRepository } from '../customers/customer';
 import { JobRepository } from '../jobs/job';
 import { AppointmentRepository } from '../appointments/appointment';
 import { LocationRepository } from '../locations/location';
@@ -37,7 +38,8 @@ export interface RecurringJobMaterializeDeps {
 export function createRecurringJobRouter(
   repo: RecurringJobRepository,
   auditRepo: AuditRepository,
-  materializeDeps: RecurringJobMaterializeDeps
+  materializeDeps: RecurringJobMaterializeDeps,
+  customerRepo: CustomerRepository
 ): Router {
   const router = Router();
 
@@ -61,6 +63,14 @@ export function createRecurringJobRouter(
     requirePermission('jobs:create'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const parsed = createRecurringJobSchema.parse(req.body);
+      // The customer FK is not tenant-scoped, so a guessed/foreign customerId
+      // would otherwise attach a series to another tenant's customer. Verify
+      // ownership under the caller's tenant before creating.
+      const customer = await customerRepo.findById(req.auth!.tenantId, parsed.customerId);
+      if (!customer) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Customer not found' });
+        return;
+      }
       const job = await createRecurringJob(
         {
           ...parsed,

@@ -49,6 +49,22 @@ describe('customer groups (U8) — pure domain', () => {
     ).rejects.toBeInstanceOf(ConflictError);
   });
 
+  it('allows reusing an archived name, then re-rejects once a live group holds it', async () => {
+    const first = await createCustomerGroup({ tenantId: TENANT, name: 'Seasonal', createdBy: ACTOR }, repo);
+    await archiveCustomerGroup(TENANT, first.id, repo, ACTOR);
+    // Same name is free again while only the archived row holds it.
+    const replacement = await createCustomerGroup(
+      { tenantId: TENANT, name: 'Seasonal', createdBy: ACTOR },
+      repo,
+    );
+    expect(replacement.isArchived).toBe(false);
+    // With an active row now present (alongside the archived one), the name
+    // lookup must prefer the active row so the duplicate check fires again.
+    await expect(
+      createCustomerGroup({ tenantId: TENANT, name: 'seasonal', createdBy: ACTOR }, repo),
+    ).rejects.toBeInstanceOf(ConflictError);
+  });
+
   it('adds and removes members idempotently with counts', async () => {
     const g = await createCustomerGroup({ tenantId: TENANT, name: 'VIP', createdBy: ACTOR }, repo);
     expect(await addCustomerToGroup(TENANT, g.id, C1, repo, ACTOR, audit)).toBe(true);

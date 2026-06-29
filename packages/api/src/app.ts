@@ -3556,7 +3556,8 @@ export function createApp(): express.Express {
         const s = await settingsRepo.findByTenant(tenantId);
         return s?.timezone ?? 'America/New_York';
       },
-    })
+    },
+    customerRepo)
   );
   app.use('/api/time-entries', createTimeEntriesRouter(timeEntryRepo, auditRepo));
   // P10-001: portal session creation/revocation. Mounted at
