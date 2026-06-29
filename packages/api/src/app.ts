@@ -5448,10 +5448,10 @@ export function createApp(): express.Express {
       // index.ts's force-exit and Railway's stop grace period; calls still live
       // at the deadline are closed by the teardown below (Twilio ends the call).
       const drainDeadline = Date.now() + (Number(process.env.DRAIN_TIMEOUT_MS) || 25_000);
-      while (voiceSessionStore.size() > 0 && Date.now() < drainDeadline) {
+      while (voiceSessionStore.liveCount() > 0 && Date.now() < drainDeadline) {
         await new Promise((resolve) => setTimeout(resolve, 500));
       }
-      console.log(`[app] drain complete — ${voiceSessionStore.size()} session(s) still active at teardown`);
+      console.log(`[app] drain complete — ${voiceSessionStore.liveCount()} live session(s) still active at teardown`);
       // Stop the voice-session-store reaper interval so the process can
       // exit cleanly even when no DB pool is wired (dev / in-memory mode).
       voiceSessionStore.dispose();
