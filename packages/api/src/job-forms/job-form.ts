@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { ConflictError, NotFoundError, ValidationError } from '../shared/errors';
 
 /**
  * J-FORM (Jobber parity) — tenant-defined job forms & checklists.
@@ -276,7 +277,7 @@ export async function createJobFormTemplate(
   auditRepo?: AuditRepository
 ): Promise<JobFormTemplate> {
   const errors = validateJobFormTemplateInput(input);
-  if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
+  if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
 
   const now = new Date();
   const template: JobFormTemplate = {
@@ -318,7 +319,7 @@ export async function updateJobFormTemplate(
   actorRole?: string
 ): Promise<JobFormTemplate> {
   const existing = await repository.findTemplateById(tenantId, templateId);
-  if (!existing) throw new Error('Job form template not found');
+  if (!existing) throw new NotFoundError('Job form template', templateId);
 
   const merged = {
     name: input.name ?? existing.name,
@@ -334,7 +335,7 @@ export async function updateJobFormTemplate(
       if (e !== 'name is required' || input.name !== undefined) errors.push(e);
     }
   }
-  if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
+  if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
 
   const updated: JobFormTemplate = {
     ...existing,
@@ -404,12 +405,12 @@ export async function createJobFormSubmission(
   auditRepo?: AuditRepository
 ): Promise<JobFormSubmission> {
   const template = await repository.findTemplateById(input.tenantId, input.templateId);
-  if (!template) throw new Error('Job form template not found');
+  if (!template) throw new NotFoundError('Job form template', input.templateId);
 
   const answers = normalizeAnswers(input.answers ?? []);
   const requireComplete = input.complete === true;
   const errors = validateSubmissionAnswers(template.fields, answers, { requireComplete });
-  if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
+  if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
 
   const now = new Date();
   const submission: JobFormSubmission = {
@@ -462,11 +463,11 @@ export async function updateJobFormSubmission(
   actorRole?: string
 ): Promise<JobFormSubmission> {
   const existing = await repository.findSubmissionById(tenantId, submissionId);
-  if (!existing) throw new Error('Job form submission not found');
+  if (!existing) throw new NotFoundError('Job form submission', submissionId);
   // A completed submission is locked history — reject further edits so a stale
   // client can't overwrite a signed-off checklist (the feature's promise).
   if (existing.status === 'completed') {
-    throw new Error('This form is completed and can no longer be edited');
+    throw new ConflictError('This form is completed and can no longer be edited');
   }
 
   // `existing` is guaranteed draft here (completed submissions threw above).
@@ -476,7 +477,7 @@ export async function updateJobFormSubmission(
   const errors = validateSubmissionAnswers(existing.fields, answers, {
     requireComplete: completing,
   });
-  if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
+  if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
 
   const updated: JobFormSubmission = {
     ...existing,

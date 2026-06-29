@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { APPOINTMENT_TYPES, AppointmentTypeValue } from '@ai-service-os/shared';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { ConflictError, NotFoundError, ValidationError } from '../shared/errors';
 import {
   RecurrenceRule,
   computeOccurrences,
@@ -160,7 +161,7 @@ export async function createRecurringJob(
   auditRepo?: AuditRepository
 ): Promise<RecurringJob> {
   const errors = validateRecurringJobInput(input);
-  if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
+  if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
 
   const now = new Date();
   const job: RecurringJob = {
@@ -209,7 +210,7 @@ export async function updateRecurringJob(
   actorRole?: string
 ): Promise<RecurringJob> {
   const existing = await repository.findById(tenantId, id);
-  if (!existing) throw new Error('Recurring job not found');
+  if (!existing) throw new NotFoundError('Recurring job', id);
 
   const merged = {
     title: input.title ?? existing.title,
@@ -221,7 +222,7 @@ export async function updateRecurringJob(
     rule: input.rule ?? existing.rule,
   };
   const errors = validateRecurringJobInput(merged);
-  if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
+  if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
 
   const updated: RecurringJob = {
     ...existing,

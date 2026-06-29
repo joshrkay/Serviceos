@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { ConflictError, NotFoundError, ValidationError } from '../shared/errors';
 import { FinancingProviderClient } from './financing-provider';
 
 /**
@@ -106,7 +107,7 @@ export async function offerFinancing(
   auditRepo?: AuditRepository
 ): Promise<FinancingApplication> {
   const errors = validateOfferFinancing(input);
-  if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
+  if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
 
   const id = uuidv4();
   // The provider echoes our applicationId back on its webhook so we can resolve

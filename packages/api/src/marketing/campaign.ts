@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { ConflictError, NotFoundError, ValidationError } from '../shared/errors';
 import { Customer, CustomerRepository } from '../customers/customer';
 import { TagRepository } from '../customers/tag';
 import { MessageDeliveryProvider } from '../notifications/delivery-provider';
@@ -113,7 +114,7 @@ export async function createCampaign(
   auditRepo?: AuditRepository
 ): Promise<Campaign> {
   const errors = validateCampaignInput(input);
-  if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
+  if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
 
   const now = new Date();
   const campaign: Campaign = {
@@ -179,7 +180,7 @@ export async function sendCampaign(
   const campaign = await deps.campaignRepo.claimForSending(tenantId, campaignId);
   if (!campaign) {
     const existing = await deps.campaignRepo.findById(tenantId, campaignId);
-    if (!existing) throw new Error('Campaign not found');
+    if (!existing) throw new NotFoundError('Campaign', campaignId);
     return existing; // already sent or claimed by another request — no double-send
   }
 

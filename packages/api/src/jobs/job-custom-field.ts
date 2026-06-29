@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { ConflictError, NotFoundError, ValidationError } from '../shared/errors';
 import {
   CustomFieldType,
   isValidFieldKey,
@@ -77,11 +78,11 @@ export async function createJobCustomFieldDef(
   auditRepo?: AuditRepository
 ): Promise<JobCustomFieldDef> {
   const errors = validateCustomFieldDef(input);
-  if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
-  if (!isValidFieldKey(input.key)) throw new Error('Validation failed: invalid key');
+  if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
+  if (!isValidFieldKey(input.key)) throw new ValidationError('Validation failed: invalid key');
 
   const existing = await repository.findDefByKey(input.tenantId, input.key);
-  if (existing) throw new Error(`A job custom field with key "${input.key}" already exists`);
+  if (existing) throw new ConflictError(`A job custom field with key "${input.key}" already exists`);
 
   const now = new Date();
   const def: JobCustomFieldDef = {
@@ -124,11 +125,11 @@ export async function setJobCustomFieldValue(
   auditRepo?: AuditRepository
 ): Promise<void> {
   const def = await repository.findDefById(tenantId, fieldDefId);
-  if (!def) throw new Error('Job custom field definition not found');
-  if (def.isArchived) throw new Error('Cannot set a value on an archived custom field');
+  if (!def) throw new NotFoundError('Job custom field', fieldDefId);
+  if (def.isArchived) throw new ConflictError('Cannot set a value on an archived custom field');
 
   const validationError = validateCustomFieldValue(def, value);
-  if (validationError) throw new Error(`Validation failed: ${validationError}`);
+  if (validationError) throw new ValidationError(`Validation failed: ${validationError}`);
 
   const normalized = value === null || value.trim() === '' ? null : value.trim();
   await repository.setValue(tenantId, jobId, fieldDefId, normalized);
