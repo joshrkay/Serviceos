@@ -86,6 +86,43 @@ describe('recurring job series (R-JOB) — pure domain', () => {
     ]);
   });
 
+  it('finds upcoming visits even when the anchor is long before `from`', async () => {
+    // Daily series anchored ~90 days before the `from` date: the early window
+    // is entirely in the past, so a fixed cap would filter everything out.
+    const job = await createRecurringJob(
+      {
+        tenantId: TENANT,
+        customerId: CUSTOMER,
+        title: 'Daily check',
+        anchorDate: '2026-01-01',
+        rule: { frequency: 'daily', interval: 1 },
+        createdBy: ACTOR,
+      },
+      repo,
+    );
+    expect(upcomingOccurrences(job, '2026-04-01', 3)).toEqual([
+      '2026-04-01',
+      '2026-04-02',
+      '2026-04-03',
+    ]);
+  });
+
+  it('returns only the remaining tail of a count-bounded series past `from`', async () => {
+    const job = await createRecurringJob(
+      {
+        tenantId: TENANT,
+        customerId: CUSTOMER,
+        title: 'Five visits',
+        anchorDate: '2026-06-01',
+        rule: { frequency: 'weekly', interval: 1, count: 5 },
+        createdBy: ACTOR,
+      },
+      repo,
+    );
+    // Anchor Jun 1; visits Jun 1/8/15/22/29. From Jun 20 only the last two remain.
+    expect(upcomingOccurrences(job, '2026-06-20', 10)).toEqual(['2026-06-22', '2026-06-29']);
+  });
+
   it('updates a series and re-validates the merged rule', async () => {
     const job = await createRecurringJob(
       {

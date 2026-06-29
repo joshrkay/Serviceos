@@ -155,11 +155,23 @@ export function validateRecurringJobInput(input: {
  * past dates; `limit` caps the count. Returns 'YYYY-MM-DD' strings ascending.
  */
 export function upcomingOccurrences(job: RecurringJob, from: string | undefined, limit: number): string[] {
-  // Generate a generous window from the anchor, then filter to `from` so a
-  // count-bounded rule still reports the right remaining visits.
-  const window = computeOccurrences(job.anchorDate, job.rule, Math.max(limit * 4, limit + 50));
-  const filtered = from && isValidDateString(from) ? window.filter((d) => d >= from) : window;
-  return filtered.slice(0, limit);
+  if (limit <= 0) return [];
+  const start = from && isValidDateString(from) ? from : undefined;
+  // Grow the computed window until we have `limit` dates at/after `from`, or the
+  // rule is exhausted (window shorter than the cap = a bounded count/until
+  // series ran out). A fixed window would under-fill for a long-running series
+  // anchored far before `from` — e.g. a daily series anchored 90 days back with
+  // limit=3 has all its early dates filtered out and returns nothing.
+  let cap = Math.max(limit * 4, limit + 50);
+  const HARD_CAP = 20_000;
+  for (;;) {
+    const window = computeOccurrences(job.anchorDate, job.rule, cap);
+    const filtered = start ? window.filter((d) => d >= start) : window;
+    if (filtered.length >= limit || window.length < cap || cap >= HARD_CAP) {
+      return filtered.slice(0, limit);
+    }
+    cap = Math.min(cap * 2, HARD_CAP);
+  }
 }
 
 export async function createRecurringJob(

@@ -101,7 +101,12 @@ export function createRecurringJobRouter(
         res.status(404).json({ error: 'NOT_FOUND', message: 'Recurring job not found' });
         return;
       }
-      const from = typeof req.query.from === 'string' ? req.query.from : undefined;
+      // Default the window start to today (tenant-local) so the panel shows
+      // *upcoming* visits, not historical ones from the series anchor. Callers
+      // can still pass an explicit `from` to see past occurrences.
+      const tz = await materializeDeps.resolveTimezone(req.auth!.tenantId);
+      const today = DateTime.now().setZone(tz).toISODate() ?? new Date().toISOString().slice(0, 10);
+      const from = typeof req.query.from === 'string' ? req.query.from : today;
       const rawLimit = Number(req.query.limit);
       const limit = Number.isInteger(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 100) : 10;
       res.json({ occurrences: upcomingOccurrences(job, from, limit) });
