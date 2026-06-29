@@ -2,8 +2,8 @@
 /**
  * qa-matrix-doctor — pre-flight checker for the 4-agent QA matrix harness.
  *
- * Walks every env var the matrix needs (see e2e/qa-matrix/README.md), and for
- * each one that is set, runs a smoke probe to confirm it actually works:
+ * Walks every env var the matrix needs (see qa/README.md), and for each one
+ * that is set, runs a smoke probe to confirm it actually works:
  *   - E2E_BASE_URL          -> HTTP GET, expect 200
  *   - E2E_API_URL           -> HTTP GET /health, expect 200
  *   - E2E_DB_URL_READONLY   -> connect + SELECT 1
@@ -11,32 +11,39 @@
  *   - E2E_CLERK_HMAC_SECRET -> non-empty + minimum length
  *   - E2E_TENANT_*          -> non-empty UUID-shaped string
  *
- * Prints a checklist with [OK] / [FAIL] / [skip] per var. Exits 1 if any
- * REQUIRED var is missing or any probe fails (so this is safe to chain into
- * `npm run e2e:qa-matrix`).
+ * Full mode (default): all 11 vars required; optional HMAC /api/me probe when
+ * tenant IDs are present.
+ *
+ * Bootstrap mode (`--bootstrap`): only URLs + DB + HMAC secret required;
+ * tenant UUID vars may be unset (run `npm run qa:setup` first).
  *
  * Usage:
  *   npx tsx scripts/qa-matrix-doctor.ts
  *   npm run qa:doctor
+ *   npm run qa:doctor:bootstrap
  */
 
 import { Client } from 'pg';
+import { mintHmacJwt } from './qa-hmac-mint';
 
 type Status = 'OK' | 'FAIL' | 'skip';
 
-interface CheckResult {
+export interface CheckResult {
   name: string;
   status: Status;
   detail: string;
   required: boolean;
 }
 
-const REQUIRED_VARS = [
+export const BOOTSTRAP_REQUIRED_VARS = [
   'E2E_BASE_URL',
   'E2E_API_URL',
   'E2E_DB_URL_READONLY',
   'E2E_DB_URL_READWRITE',
   'E2E_CLERK_HMAC_SECRET',
+] as const;
+
+export const TENANT_VARS = [
   'E2E_TENANT_A_ID',
   'E2E_TENANT_A_CUSTOMER_ID',
   'E2E_TENANT_A_JOB_ID',
@@ -45,20 +52,37 @@ const REQUIRED_VARS = [
   'E2E_TENANT_B_JOB_ID',
 ] as const;
 
+export const FULL_REQUIRED_VARS = [
+  ...BOOTSTRAP_REQUIRED_VARS,
+  ...TENANT_VARS,
+] as const;
+
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const PLACEHOLDER_RE = /<.+>/;
 const HTTP_TIMEOUT_MS = 8_000;
 const DB_TIMEOUT_MS = 10_000;
 
+const HMAC_PROBE_HINT =
+  'Likely causes: (1) CLERK_DEV_HMAC_TOKENS=true not set on the deployed API, ' +
+  '(2) E2E_CLERK_HMAC_SECRET drifted from CLERK_SECRET_KEY, ' +
+  '(3) NODE_ENV=production on the API (HMAC path refused).';
+
+export function parseBootstrapFlag(argv: string[] = process.argv): boolean {
+  return argv.includes('--bootstrap');
+}
+
+export function requiredVarSet(bootstrap: boolean): ReadonlySet<string> {
+  return new Set(bootstrap ? BOOTSTRAP_REQUIRED_VARS : FULL_REQUIRED_VARS);
+}
+
+export function allCheckedVars(): readonly string[] {
+  return FULL_REQUIRED_VARS;
+}
+
 function symbol(status: Status): string {
   if (status === 'OK') return '[OK]  ';
   if (status === 'FAIL') return '[FAIL]';
   return '[skip]';
-}
-
-function present(name: string): boolean {
-  const v = process.env[name];
-  return typeof v === 'string' && v.length > 0;
 }
 
 function looksPlaceholder(value: string): boolean {
@@ -110,11 +134,22 @@ async function probeDb(connStr: string): Promise<{ ok: boolean; detail: string }
   }
 }
 
-async function checkEnvVar(name: string): Promise<CheckResult> {
-  const required = (REQUIRED_VARS as readonly string[]).includes(name);
+export async function checkEnvVar(
+  name: string,
+  required: boolean,
+  bootstrap: boolean,
+): Promise<CheckResult> {
   const value = process.env[name];
 
   if (!value) {
+    if (!required && bootstrap && (TENANT_VARS as readonly string[]).includes(name)) {
+      return {
+        name,
+        status: 'skip',
+        detail: 'not set (run npm run qa:setup first)',
+        required: false,
+      };
+    }
     return {
       name,
       status: required ? 'FAIL' : 'skip',
@@ -132,7 +167,6 @@ async function checkEnvVar(name: string): Promise<CheckResult> {
     };
   }
 
-  // URL checks
   if (name === 'E2E_BASE_URL') {
     try {
       new URL(value);
@@ -163,7 +197,6 @@ async function checkEnvVar(name: string): Promise<CheckResult> {
     };
   }
 
-  // DB checks
   if (name === 'E2E_DB_URL_READONLY' || name === 'E2E_DB_URL_READWRITE') {
     if (!value.startsWith('postgres://') && !value.startsWith('postgresql://')) {
       return {
@@ -182,7 +215,6 @@ async function checkEnvVar(name: string): Promise<CheckResult> {
     };
   }
 
-  // HMAC secret
   if (name === 'E2E_CLERK_HMAC_SECRET') {
     if (value.length < 16) {
       return {
@@ -200,7 +232,6 @@ async function checkEnvVar(name: string): Promise<CheckResult> {
     };
   }
 
-  // Tenant / customer / job ids: must be UUIDs (matches seed.ts which uses randomUUID()).
   if (name.startsWith('E2E_TENANT_')) {
     if (!UUID_RE.test(value)) {
       return {
@@ -216,18 +247,82 @@ async function checkEnvVar(name: string): Promise<CheckResult> {
   return { name, status: 'OK', detail: `set (${value.length} chars)`, required };
 }
 
-async function main(): Promise<void> {
-  console.log('qa-matrix doctor — pre-flight checks for the 4-agent QA matrix\n');
+export async function probeHmacAuth(): Promise<CheckResult> {
+  const secret = process.env.E2E_CLERK_HMAC_SECRET;
+  const tenantA = process.env.E2E_TENANT_A_ID;
+  const apiUrl = process.env.E2E_API_URL;
 
-  const allVars = [...REQUIRED_VARS];
+  if (!secret || !tenantA || !apiUrl) {
+    return {
+      name: 'HMAC_AUTH_PROBE',
+      status: 'skip',
+      detail: 'skipped (need E2E_CLERK_HMAC_SECRET, E2E_TENANT_A_ID, E2E_API_URL)',
+      required: false,
+    };
+  }
+
+  const token = mintHmacJwt(secret, tenantA, 'doctor-probe');
+  const target = `${apiUrl.replace(/\/$/, '')}/api/me`;
+  try {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), HTTP_TIMEOUT_MS);
+    const res = await fetch(target, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${token}` },
+      signal: ac.signal,
+    });
+    clearTimeout(timer);
+    if (res.status === 200) {
+      return {
+        name: 'HMAC_AUTH_PROBE',
+        status: 'OK',
+        detail: `200 OK from ${target}`,
+        required: true,
+      };
+    }
+    return {
+      name: 'HMAC_AUTH_PROBE',
+      status: 'FAIL',
+      detail: `GET ${target} returned ${res.status}. ${HMAC_PROBE_HINT}`,
+      required: true,
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      name: 'HMAC_AUTH_PROBE',
+      status: 'FAIL',
+      detail: `fetch failed for ${target}: ${msg}`,
+      required: true,
+    };
+  }
+}
+
+export async function runDoctor(opts: { bootstrap?: boolean } = {}): Promise<CheckResult[]> {
+  const bootstrap = opts.bootstrap ?? parseBootstrapFlag();
+  const required = requiredVarSet(bootstrap);
   const results: CheckResult[] = [];
 
-  for (const name of allVars) {
-    // Probes that touch network/DB take a few seconds each; we keep them serial
-    // so the output renders top-to-bottom in env-order rather than racing.
+  for (const name of allCheckedVars()) {
     // eslint-disable-next-line no-await-in-loop
-    const r = await checkEnvVar(name);
+    const r = await checkEnvVar(name, required.has(name), bootstrap);
     results.push(r);
+  }
+
+  if (!bootstrap) {
+    results.push(await probeHmacAuth());
+  }
+
+  return results;
+}
+
+async function main(): Promise<void> {
+  const bootstrap = parseBootstrapFlag();
+  const modeLabel = bootstrap ? 'bootstrap (URLs + DB + HMAC secret)' : 'full matrix';
+  console.log(`qa-matrix doctor — pre-flight checks for the 4-agent QA matrix (${modeLabel})\n`);
+
+  const results = await runDoctor({ bootstrap });
+
+  for (const r of results) {
     console.log(`${symbol(r.status)} ${r.name.padEnd(30)} ${r.detail}`);
   }
 
@@ -245,15 +340,26 @@ async function main(): Promise<void> {
       console.log(`  - ${f.name}: ${f.detail}`);
     }
     console.log('');
-    console.log('See qa/reports/2026-05-11/qa-matrix-live-runbook.md for setup instructions.');
+    console.log('See docs/runbooks/qa-full-matrix-unblock.md for setup instructions.');
     process.exit(1);
   }
 
   console.log('');
-  console.log('All required env vars set and reachable. Ready for: npm run e2e:qa-matrix');
+  if (bootstrap) {
+    console.log('Bootstrap checks passed. Run: npm run qa:setup');
+  } else {
+    console.log('All required env vars set and reachable. Ready for: npm run e2e:qa-matrix');
+  }
 }
 
-main().catch((err) => {
-  console.error('qa-matrix doctor crashed:', err);
-  process.exit(2);
-});
+const isMain =
+  typeof process.argv[1] === 'string' &&
+  (process.argv[1].endsWith('qa-matrix-doctor.ts') ||
+    process.argv[1].endsWith('qa-matrix-doctor'));
+
+if (isMain) {
+  main().catch((err) => {
+    console.error('qa-matrix doctor crashed:', err);
+    process.exit(2);
+  });
+}
