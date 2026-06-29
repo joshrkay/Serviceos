@@ -473,11 +473,11 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
               await webhookRepo.updateStatus(webhookEvent.id, 'processed');
               return res.status(200).json({ received: true, joined: pending.tenantId });
             } catch (joinErr) {
-              logger.error('Invitee join failed; falling back to bootstrap', {
+              logger.error('Invitee join failed; failing webhook for Clerk retry', {
                 userId, email: primaryEmail, tenantId: pending.tenantId,
                 error: joinErr instanceof Error ? joinErr.message : String(joinErr),
               });
-              // Fall through to the bootstrap path below; the
+              await webhookRepo.updateStatus(webhookEvent.id, 'failed'); return res.status(500).json({ error: 'Invitee join failed' });
               // operator can manually clean up if needed.
             }
           }
