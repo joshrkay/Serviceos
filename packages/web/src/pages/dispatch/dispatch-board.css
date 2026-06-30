@@ -28,18 +28,24 @@
 .technician-lane__appointments{display:flex;flex-direction:column;gap:.5rem;padding:.5rem;overflow-y:auto;}
 .technician-lane__appointment-row{display:flex;align-items:stretch;gap:.375rem;}
 .technician-lane__appointment-row>:first-child{flex:1;min-width:0;}
-.technician-lane__reorder-controls,.lane-reorder-controls{display:inline-flex;flex-direction:column;gap:2px;justify-content:center;}
-.lane-reorder-up,.lane-reorder-down{display:inline-flex;align-items:center;justify-content:center;width:1.25rem;height:1rem;border:1px solid var(--border);border-radius:4px;background:var(--card);color:var(--muted-foreground);font-size:.625rem;cursor:pointer;}
-.lane-reorder-up:hover,.lane-reorder-down:hover{background:var(--muted);}
-.lane-reorder-up:disabled,.lane-reorder-down:disabled{opacity:.4;cursor:not-allowed;}
-.appointment-card{display:flex;flex-direction:column;gap:.25rem;padding:.625rem .75rem;background:var(--card);border:1px solid var(--border);border-radius:var(--radius);box-shadow:0 1px 2px rgba(0,0,0,.04);cursor:pointer;transition:box-shadow .15s ease,border-color .15s ease;}
+.technician-lane__reorder-controls,[data-testid="lane-reorder-controls"]{display:inline-flex;flex-direction:column;gap:2px;justify-content:center;}
+[data-testid="lane-reorder-up"],[data-testid="lane-reorder-down"]{display:inline-flex;align-items:center;justify-content:center;width:1.25rem;height:1rem;border:1px solid var(--border);border-radius:4px;background:var(--card);color:var(--muted-foreground);font-size:.625rem;cursor:pointer;}
+[data-testid="lane-reorder-up"]:hover,[data-testid="lane-reorder-down"]:hover{background:var(--muted);}
+[data-testid="lane-reorder-up"]:disabled,[data-testid="lane-reorder-down"]:disabled{opacity:.4;cursor:not-allowed;}
+:where(.appointment-card){display:flex;flex-direction:column;gap:.25rem;padding:.625rem .75rem;background:var(--card);border:1px solid var(--border);border-radius:var(--radius);box-shadow:0 1px 2px rgba(0,0,0,.04);cursor:pointer;transition:box-shadow .15s ease,border-color .15s ease;}
 .appointment-card:hover{border-color:var(--accent);box-shadow:0 2px 6px rgba(0,0,0,.08);}
 .appointment-card__header{display:flex;align-items:center;justify-content:space-between;gap:.5rem;}
 .appointment-card__time{font-size:.875rem;font-weight:600;}
-.appointment-card__badge{display:inline-flex;align-items:center;gap:.25rem;padding:.0625rem .375rem;border-radius:999px;background:var(--muted);color:var(--muted-foreground);font-size:.6875rem;font-weight:600;}
+:where(.appointment-card__badge){display:inline-flex;align-items:center;gap:.25rem;padding:.0625rem .375rem;border-radius:999px;background:var(--muted);color:var(--muted-foreground);font-size:.6875rem;font-weight:600;}
 .appointment-card__badge--conflict{background:color-mix(in srgb,var(--destructive) 14%,transparent);color:var(--destructive);}
 .appointment-card__customer{font-size:.875rem;font-weight:600;}
 .appointment-card__summary{font-size:.8125rem;color:var(--foreground);}
 .appointment-card__location,.appointment-card__technician,.appointment-card__arrival,.appointment-card__payment{font-size:.8125rem;color:var(--muted-foreground);}
 .dispatch-board__loading,.dispatch-board__error,.dispatch-board__empty{display:flex;flex:1;flex-direction:column;align-items:center;justify-content:center;gap:.5rem;padding:3rem 1rem;text-align:center;color:var(--muted-foreground);}
 .dispatch-board__error{color:var(--destructive);}
+.technician-lane__gap{transition:background-color .15s ease;}
+.technician-lane__gap--active{background:var(--primary);opacity:.5;}
+.technician-lane--drag-over,.unassigned-queue--drag-over{border-color:var(--primary);box-shadow:0 0 0 2px var(--primary);}
+.drop-zone--blocking{border-color:var(--destructive);background:color-mix(in srgb,var(--destructive) 10%,transparent);}
+.drop-zone--warning{border-color:#f59e0b;background:color-mix(in srgb,#f59e0b 10%,transparent);}
+.drop-zone--ok{border-color:#10b981;background:color-mix(in srgb,#10b981 10%,transparent);}
