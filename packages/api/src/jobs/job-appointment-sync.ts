@@ -23,6 +23,7 @@
 import {
   Appointment,
   AppointmentRepository,
+  AppointmentStatus,
   CreateAppointmentInput,
   createAppointment,
   validateAppointmentInput,
@@ -38,10 +39,18 @@ import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { ConflictError, NotFoundError, ValidationError } from '../shared/errors';
 import { UserRepository } from '../users/user';
 import { Job, JobRepository, getJob } from './job';
-import { JobTimelineRepository, transitionJobStatus } from './job-lifecycle';
+import { JobTimelineRepository, isPostCompletionStatus, transitionJobStatus } from './job-lifecycle';
 
 const DEFAULT_DURATION_MIN = 60;
 const DEFAULT_TIMEZONE = 'UTC';
+
+// The direct-schedule path only manages an appointment that has not yet started
+// — once it's in_progress / completed / no_show / canceled it is owned by the
+// appointment lifecycle, not this projection, and must never be force-mutated.
+const SCHEDULABLE_STATUSES: ReadonlySet<AppointmentStatus> = new Set<AppointmentStatus>([
+  'scheduled',
+  'confirmed',
+]);
 
 /** Stable, tech/slot-independent idempotency key for a job's canonical schedule. */
 export function jobScheduleKey(jobId: string): string {
@@ -108,7 +117,10 @@ async function findCanonicalAppointment(
 ): Promise<Appointment | undefined> {
   const key = jobScheduleKey(jobId);
   const all = await deps.appointmentRepo.findByJob(tenantId, jobId);
-  return all.find((a) => a.idempotencyKey === key && a.status !== 'canceled');
+  // Only a not-yet-started appointment (scheduled/confirmed) is reschedulable
+  // or cancelable here. An in_progress/completed/no_show visit under the same
+  // key is left to the appointment lifecycle — never force-mutated.
+  return all.find((a) => a.idempotencyKey === key && SCHEDULABLE_STATUSES.has(a.status));
 }
 
 /**
@@ -257,6 +269,15 @@ export async function syncJobSchedule(
         deps.auditRepo,
         actorRole,
       );
+      // createAppointment dedupes on the canonical key (ON CONFLICT). If the
+      // key was already held by a started/finished visit (a concurrent insert,
+      // or a completed appointment whose key wasn't released), the returned row
+      // is NOT a fresh scheduled one — refuse rather than re-stamp its time.
+      if (!SCHEDULABLE_STATUSES.has(appointment.status)) {
+        throw new ConflictError(
+          'Job already has an active appointment that cannot be rescheduled here',
+        );
+      }
     }
 
     // Technician is optional on schedule — only touch the assignment when one
@@ -287,7 +308,8 @@ export async function syncJobSchedule(
       appointmentId: existing.id,
       technicianId: input.technicianId,
     });
-    return { appointment: existing, previousScheduledStart: existing.scheduledStart };
+    // Reassign keeps the slot, so there is no "previous day" to also notify.
+    return { appointment: existing };
   }
 
   // unschedule | cancelForJob — both cancel the canonical appointment.
@@ -322,9 +344,13 @@ export async function syncJobSchedule(
   await syncJobAssignment(tenantId, jobId, existing.id, deps.assignmentRepo, deps.jobRepo);
 
   if (input.operation === 'unschedule') {
-    // Structural revert scheduled → new (system-authorized backward move).
-    // Only when currently scheduled; canceling a job is handled by the caller.
-    if (job.status === 'scheduled') {
+    // Structural revert to new (system-authorized backward move). Covers any
+    // forward, pre-completion status the job reached while scheduled
+    // (scheduled / dispatched / in_progress) — not just 'scheduled' — so a
+    // dispatched job that's unscheduled doesn't strand in a forward status
+    // with no appointment. Post-completion (completed/invoiced/closed) and
+    // canceled are left alone (and transitionJobStatus would refuse them).
+    if (job.status !== 'new' && job.status !== 'canceled' && !isPostCompletionStatus(job.status)) {
       await transitionJobStatus(
         tenantId,
         jobId,

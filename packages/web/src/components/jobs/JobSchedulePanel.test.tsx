@@ -10,6 +10,15 @@ const APPT = {
   scheduledStart: '2030-07-01T15:00:00.000Z',
   scheduledEnd: '2030-07-01T16:00:00.000Z',
   status: 'scheduled',
+  idempotencyKey: 'job-schedule:job-1',
+};
+
+const ESTIMATE_APPT = {
+  id: 'appt-est',
+  scheduledStart: '2030-08-01T10:00:00.000Z',
+  scheduledEnd: '2030-08-01T11:00:00.000Z',
+  status: 'scheduled',
+  idempotencyKey: 'from-estimate:est-1:auto:auto',
 };
 
 function mockApi(appointments: unknown[]) {
@@ -105,5 +114,34 @@ describe('JobSchedulePanel (U8)', () => {
 
     await waitFor(() => expect(postTo('/schedule')).toBeTruthy());
     expect(postBody('/schedule').scheduledStart).toMatch(/Z$/);
+  });
+
+  it('scopes to the canonical job-schedule appointment, ignoring an estimate appointment', async () => {
+    // Estimate appointment comes first in the list; the panel must skip it and
+    // show the canonical job-schedule row.
+    mockApi([ESTIMATE_APPT, APPT]);
+    render(<JobSchedulePanel jobId="job-1" />);
+    const current = await screen.findByTestId('current-schedule');
+    // Canonical APPT is 2030-07-01, estimate is 2030-08-01 — must reflect the canonical one.
+    expect(current).toHaveTextContent(/Scheduled for/);
+    expect(current.textContent).not.toMatch(/8\/1\/2030|2030-08/);
+  });
+
+  it('treats a job with only an estimate appointment as not directly scheduled', async () => {
+    mockApi([ESTIMATE_APPT]);
+    render(<JobSchedulePanel jobId="job-1" />);
+    expect(await screen.findByTestId('current-schedule')).toHaveTextContent(/Not scheduled/);
+    expect(screen.queryByRole('button', { name: 'Unschedule' })).toBeNull();
+  });
+
+  it('clears the technician dropdown when the job tech becomes undefined', async () => {
+    mockApi([APPT]);
+    const { rerender } = render(<JobSchedulePanel jobId="job-1" assignedTechnicianId="tech-9" />);
+    await screen.findByTestId('current-schedule');
+    expect((screen.getByLabelText(/Technician/) as HTMLSelectElement).value).toBe('tech-9');
+
+    // After a reassign-to-Unassigned + parent refetch, the prop clears.
+    rerender(<JobSchedulePanel jobId="job-1" assignedTechnicianId={undefined} />);
+    expect((screen.getByLabelText(/Technician/) as HTMLSelectElement).value).toBe('');
   });
 });

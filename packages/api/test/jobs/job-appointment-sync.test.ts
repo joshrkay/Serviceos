@@ -14,7 +14,7 @@ import {
 } from '../../src/appointments/appointment';
 import { InMemoryAssignmentRepository } from '../../src/appointments/assignment';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
-import { InMemoryJobTimelineRepository } from '../../src/jobs/job-lifecycle';
+import { InMemoryJobTimelineRepository, transitionJobStatus } from '../../src/jobs/job-lifecycle';
 import { User, UserRepository } from '../../src/users/user';
 import { ConflictError, ValidationError } from '../../src/shared/errors';
 import {
@@ -269,5 +269,38 @@ describe('U2 — syncJobSchedule', () => {
     });
     expect(res.appointment).toBeNull();
     expect((await getJob(TENANT, job.id, jobRepo))!.status).toBe('new');
+  });
+
+  it('unschedule reverts a job that progressed past scheduled (dispatched → new)', async () => {
+    const job = await newJob();
+    await syncJobSchedule(deps([tech(TECH_1)]), scheduleInput(job.id));
+    // Dispatch the job (forward) while its appointment is still 'scheduled'.
+    await transitionJobStatus(TENANT, job.id, 'dispatched', 'owner-1', 'owner', jobRepo, timelineRepo);
+    expect((await getJob(TENANT, job.id, jobRepo))!.status).toBe('dispatched');
+
+    await syncJobSchedule(deps([tech(TECH_1)]), {
+      operation: 'unschedule', tenantId: TENANT, jobId: job.id, actorId: 'owner-1', actorRole: 'owner',
+    });
+
+    // Reverted to new (not stranded in 'dispatched' with no appointment).
+    expect((await getJob(TENANT, job.id, jobRepo))!.status).toBe('new');
+    expect(await activeAppointments(job.id)).toHaveLength(0);
+  });
+
+  it('never force-cancels a started/finished appointment (completed canonical row is left alone)', async () => {
+    const job = await newJob();
+    const scheduled = await syncJobSchedule(deps([tech(TECH_1)]), scheduleInput(job.id));
+    // The visit completes via the appointment lifecycle (a different path).
+    await appointmentRepo.update(TENANT, scheduled.appointment!.id, { status: 'completed' });
+
+    const res = await syncJobSchedule(deps([tech(TECH_1)]), {
+      operation: 'unschedule', tenantId: TENANT, jobId: job.id, actorId: 'owner-1', actorRole: 'owner',
+    });
+
+    // No schedulable canonical appointment → no-op; the completed visit is NOT
+    // flipped to canceled behind the lifecycle's back.
+    expect(res.appointment).toBeNull();
+    const appt = await appointmentRepo.findById(TENANT, scheduled.appointment!.id);
+    expect(appt!.status).toBe('completed');
   });
 });

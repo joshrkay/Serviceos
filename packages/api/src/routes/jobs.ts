@@ -153,6 +153,18 @@ export function createJobRouter(
         // ignores them; the sync projects them onto an appointment below.
         const { scheduledStart, technicianId, durationMin, timezone, ...jobFields } = parsed;
 
+        // Resolve scheduling deps BEFORE creating the job, so a scheduling
+        // request against an unconfigured deployment fails closed (503) rather
+        // than leaving an orphan unscheduled job behind.
+        const scheduleDeps = scheduledStart ? buildScheduleSyncDeps() : null;
+        if (scheduledStart && !scheduleDeps) {
+          res.status(503).json({
+            error: 'NOT_CONFIGURED',
+            message: 'Job scheduling is not configured',
+          });
+          return;
+        }
+
         const result = await createJob(
           {
             ...jobFields,
@@ -168,16 +180,8 @@ export function createJobRouter(
         // Schedule-on-create: project the schedule intent onto a linked
         // appointment in the SAME request transaction (atomic — a conflict
         // 409s and rolls the job back). Board notify only on success.
-        if (scheduledStart) {
-          const syncDeps = buildScheduleSyncDeps();
-          if (!syncDeps) {
-            res.status(503).json({
-              error: 'NOT_CONFIGURED',
-              message: 'Job scheduling is not configured',
-            });
-            return;
-          }
-          const { appointment } = await syncJobSchedule(syncDeps, {
+        if (scheduledStart && scheduleDeps) {
+          const { appointment } = await syncJobSchedule(scheduleDeps, {
             operation: 'schedule',
             tenantId: req.auth!.tenantId,
             jobId: result.id,

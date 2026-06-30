@@ -8,6 +8,7 @@ interface Appointment {
   scheduledStart: string;
   scheduledEnd: string;
   status: string;
+  idempotencyKey?: string | null;
 }
 
 export interface JobSchedulePanelProps {
@@ -48,7 +49,13 @@ export function JobSchedulePanel({ jobId, assignedTechnicianId, onChanged }: Job
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const json = await res.json();
       const list: Appointment[] = Array.isArray(json) ? json : Array.isArray(json?.data) ? json.data : [];
-      const active = list.find((a) => a.status !== 'canceled') ?? null;
+      // Scope to THIS path's canonical appointment (key `job-schedule:<jobId>`),
+      // not just any non-canceled one — a job may also carry an estimate
+      // appointment (`from-estimate:…`), which this panel must not display or
+      // mutate (the schedule/reschedule/unschedule endpoints target the
+      // canonical row server-side).
+      const key = `job-schedule:${jobId}`;
+      const active = list.find((a) => a.idempotencyKey === key && a.status !== 'canceled') ?? null;
       setAppointment(active);
       if (active) setStart(toLocalInput(active.scheduledStart));
     } catch (err) {
@@ -62,8 +69,11 @@ export function JobSchedulePanel({ jobId, assignedTechnicianId, onChanged }: Job
     void load();
   }, [load]);
 
+  // Mirror the job's denormalized primary tech — including clearing back to
+  // "Unassigned" when it becomes undefined (e.g. after a reassign-to-null),
+  // so a subsequent reschedule never re-sends a technician the user removed.
   useEffect(() => {
-    if (assignedTechnicianId) setTechnicianId(assignedTechnicianId);
+    setTechnicianId(assignedTechnicianId ?? '');
   }, [assignedTechnicianId]);
 
   const call = useCallback(
