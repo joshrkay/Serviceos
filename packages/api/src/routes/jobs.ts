@@ -577,6 +577,27 @@ export function createJobRouter(
           }
         }
 
+        // Cancel propagation: a canceled job must not leave a live appointment
+        // on the dispatch board. Runs in the same request transaction as the
+        // status change (NOT best-effort) so the two stay consistent — a
+        // failed cancel rolls the transition back. No-op when nothing is
+        // scheduled or scheduling isn't wired.
+        if (status === 'canceled') {
+          const syncDeps = buildScheduleSyncDeps();
+          if (syncDeps) {
+            const sync = await syncJobSchedule(syncDeps, {
+              operation: 'cancelForJob',
+              tenantId: req.auth!.tenantId,
+              jobId: req.params.id,
+              actorId: req.auth!.userId,
+              actorRole: req.auth!.role,
+            });
+            if (sync.previousScheduledStart) {
+              notifyDispatchBoardChanged(req.auth!.tenantId, sync.previousScheduledStart);
+            }
+          }
+        }
+
         res.json(result);
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);

@@ -234,3 +234,29 @@ describe('job scheduling lifecycle endpoints (U4)', () => {
     expect(res.status).toBe(404);
   });
 });
+
+describe('job cancellation propagates to the appointment (U5)', () => {
+  it('canceling a scheduled job cancels its appointment and clears the active board', async () => {
+    const { app, board } = build();
+    const created = await request(app).post('/api/jobs').send(baseJob);
+    const jobId = created.body.id as string;
+    await request(app).post(`/api/jobs/${jobId}/schedule`).send({ scheduledStart: START_ISO, technicianId: TECH_1 });
+    expect(boardAppointments(await board()).filter((a) => a.jobId === jobId && a.status !== 'canceled')).toHaveLength(1);
+
+    const res = await request(app).post(`/api/jobs/${jobId}/transition`).send({ status: 'canceled' });
+    expect(res.status).toBe(200);
+    expect(res.body.job.status).toBe('canceled');
+
+    const active = boardAppointments(await board()).filter((a) => a.jobId === jobId && a.status !== 'canceled');
+    expect(active).toHaveLength(0);
+  });
+
+  it('canceling an unscheduled job is a clean no-op for scheduling', async () => {
+    const { app } = build();
+    const created = await request(app).post('/api/jobs').send(baseJob);
+    const jobId = created.body.id as string;
+    const res = await request(app).post(`/api/jobs/${jobId}/transition`).send({ status: 'canceled' });
+    expect(res.status).toBe(200);
+    expect(res.body.job.status).toBe('canceled');
+  });
+});
