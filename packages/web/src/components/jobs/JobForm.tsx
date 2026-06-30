@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { apiFetch } from '../../utils/api-fetch';
 import { CustomerPicker, CustomerOption } from '../forms/CustomerPicker';
 import { Input, Textarea, Select, Field, Button } from '../ui';
+import { useTechnicianRoster } from '../../hooks/useTechnicianRoster';
 
 const PRIORITIES = ['low', 'normal', 'high', 'urgent'] as const;
 
@@ -16,6 +17,10 @@ interface State {
   summary: string;
   problemDescription: string;
   priority: typeof PRIORITIES[number];
+  /** datetime-local value; when set, the job is scheduled on create. */
+  scheduledStart: string;
+  technicianId: string;
+  durationMin: string;
 }
 
 interface ServiceLocationOption {
@@ -34,6 +39,9 @@ const initial: State = {
   summary: '',
   problemDescription: '',
   priority: 'normal',
+  scheduledStart: '',
+  technicianId: '',
+  durationMin: '60',
 };
 
 export function JobForm({ onCreated, onCancel }: JobFormProps) {
@@ -42,6 +50,7 @@ export function JobForm({ onCreated, onCancel }: JobFormProps) {
   const [locationsLoading, setLocationsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const { technicians } = useTechnicianRoster();
 
   useEffect(() => {
     let cancelled = false;
@@ -95,13 +104,23 @@ export function JobForm({ onCreated, onCancel }: JobFormProps) {
         return;
       }
 
-      const body = {
+      const body: Record<string, unknown> = {
         customerId: form.customer.id,
         locationId: form.locationId.trim(),
         summary: form.summary.trim(),
         problemDescription: form.problemDescription.trim() || undefined,
         priority: form.priority,
       };
+
+      // Optional schedule-on-create. Only sent when a start time is set; the
+      // API creates a linked appointment so the job reaches the dispatch board.
+      if (form.scheduledStart) {
+        body.scheduledStart = new Date(form.scheduledStart).toISOString();
+        body.timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+        const dur = parseInt(form.durationMin, 10);
+        if (!Number.isNaN(dur) && dur > 0) body.durationMin = dur;
+        if (form.technicianId) body.technicianId = form.technicianId;
+      }
 
       setSubmitting(true);
       try {
@@ -204,6 +223,50 @@ export function JobForm({ onCreated, onCancel }: JobFormProps) {
             ))}
           </Select>
         </Field>
+
+        {/* Optional scheduling — when a start time is set, the job is placed
+            on the dispatch board on create. */}
+        <fieldset className="rounded-lg border border-border p-3 flex flex-col gap-3">
+          <legend className="px-1 text-xs font-medium text-muted-foreground">Schedule (optional)</legend>
+
+          <Field label="Start time">
+            <Input
+              type="datetime-local"
+              value={form.scheduledStart}
+              onChange={(e) => setForm((p) => ({ ...p, scheduledStart: e.target.value }))}
+              className="min-h-11"
+            />
+          </Field>
+
+          {form.scheduledStart && (
+            <>
+              <Field label="Technician">
+                <Select
+                  value={form.technicianId}
+                  onChange={(e) => setForm((p) => ({ ...p, technicianId: e.target.value }))}
+                  className="min-h-11"
+                >
+                  <option value="">Unassigned</option>
+                  {technicians.map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.name}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+
+              <Field label="Duration (minutes)">
+                <Input
+                  type="number"
+                  min={1}
+                  value={form.durationMin}
+                  onChange={(e) => setForm((p) => ({ ...p, durationMin: e.target.value }))}
+                  className="min-h-11"
+                />
+              </Field>
+            </>
+          )}
+        </fieldset>
       </div>
 
       <div className="mt-4 flex gap-2">
