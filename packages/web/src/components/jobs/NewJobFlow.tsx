@@ -10,6 +10,8 @@ import { Input, Textarea } from '../ui';
 import { useMutation } from '../../hooks/useMutation';
 import { useListQuery } from '../../hooks/useListQuery';
 import { useTechnicianRoster } from '../../hooks/useTechnicianRoster';
+import { useTenantTimezone } from '../../hooks/useTenantTimezone';
+import { resolveScheduleSlot } from './resolve-schedule-slot';
 
 type ServiceType = 'HVAC' | 'Plumbing' | 'Painting';
 
@@ -363,6 +365,7 @@ export function NewJobFlow({
   const [newCustomerError, setNewCustomerError] = useState('');
   const [addressConflictNote, setAddressConflictNote] = useState('');
   const { data: apiCustomers } = useListQuery<ApiCustomer>('/api/customers');
+  const tenantTz = useTenantTimezone();
   const { mutate: createJobMutation } = useMutation<CreateJobRequest, CreateJobResponse>('POST', '/api/jobs');
   const { mutate: createCustomerMutation } = useMutation<Record<string, unknown>, CreateCustomerResponse>('POST', '/api/customers');
   const { mutate: createLocationMutation } = useMutation<Record<string, unknown>, CreateLocationResponse>('POST', '/api/locations');
@@ -709,6 +712,27 @@ export function NewJobFlow({
         problemDescription: draft.notes.trim() || undefined,
         priority: draft.priority === 'Urgent' ? 'urgent' : 'normal',
       });
+
+      // Issue 2 — when a concrete date + time was picked, create the appointment
+      // so the job lands on the dispatch board (unassigned queue). Placeholder
+      // date chips with no real calendar date resolve to null → job stays
+      // unscheduled, exactly as before.
+      const slot = resolveScheduleSlot(draft.scheduledDate, draft.scheduledTime);
+      if (slot) {
+        const res = await apiFetch(`/api/jobs/${created.id}/schedule`, {
+          method: 'POST',
+          body: JSON.stringify({ ...slot, timezone: tenantTz }),
+        });
+        if (!res.ok) {
+          // The job was created; only scheduling failed. Surface it without
+          // discarding the job — the dispatcher can schedule from the board.
+          setJobNum(created.jobNumber);
+          setStep('done');
+          setCreateError('Job created, but scheduling it failed — schedule it from the dispatch board.');
+          return;
+        }
+      }
+
       setJobNum(created.jobNumber);
       setStep('done');
     } catch {
@@ -1294,6 +1318,10 @@ export function NewJobFlow({
                   <p className="text-sm text-muted-foreground mt-0.5">{customer?.name}</p>
                 </div>
               </div>
+
+              {createError && (
+                <p className="text-xs text-destructive text-center">{createError}</p>
+              )}
 
               {/* Summary card */}
               <div className="rounded-2xl border border-border overflow-hidden bg-card">
