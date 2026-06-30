@@ -1,3 +1,4 @@
+import './dispatch-board.css';
 import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import { toast } from 'sonner';
 import { useAuth, useUser } from '@clerk/clerk-react';
