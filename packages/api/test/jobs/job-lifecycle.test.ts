@@ -243,6 +243,26 @@ describe('P1-006 / §5.8 — Backward status moves', () => {
     });
   });
 
+  it('permits a system-authorized backward move (scheduled → new on unschedule)', async () => {
+    const job = await createJob(
+      { tenantId: 'tenant-1', customerId: 'c-1', locationId: 'l-1', summary: 'Unschedule revert', createdBy: 'u-1' },
+      jobRepo,
+    );
+    await transitionJobStatus('tenant-1', job.id, 'scheduled', 'owner-1', 'owner', jobRepo, timelineRepo);
+
+    // The job-appointment sync reverts scheduled → new with actorRole 'system'
+    // — a structural revert, not a manual owner fix. 'system' is unreachable
+    // as a real req.auth.role, so it can't be spoofed by a user.
+    const { job: reverted, timelineEntry } = await transitionJobStatus(
+      'tenant-1', job.id, 'new', 'u-1', 'system', jobRepo, timelineRepo, auditRepo, 'Schedule cleared',
+    );
+
+    expect(reverted.status).toBe('new');
+    expect(timelineEntry.metadata).toMatchObject({ backward: true, reason: 'Schedule cleared' });
+    const events = await auditRepo.findByEntity('tenant-1', 'job', job.id);
+    expect(events.some((e) => e.eventType === 'job.status_changed' && e.metadata?.toStatus === 'new')).toBe(true);
+  });
+
   it('rejects a backward move from a non-owner (dispatcher / technician)', async () => {
     const job = await seedInProgressJob();
 

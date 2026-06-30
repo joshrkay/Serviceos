@@ -83,8 +83,16 @@ export const JOB_STATUS_ORDER: Record<Exclude<JobStatus, 'canceled'>, number> = 
  * §5.8 Roles permitted to move a job backward in status. The live stack's
  * RBAC has no separate `admin` role — `owner` is the privileged equivalent
  * the story's "owner or admin" maps onto.
+ *
+ * `'system'` authorizes STRUCTURAL backward reverts initiated by internal
+ * code (never a user) — specifically the scheduled → new revert when a job
+ * is unscheduled (the inverse of the automatic new → scheduled advance). A
+ * real caller's `req.auth.role` is validated against
+ * ['owner','dispatcher','technician'] at token verification, so `'system'`
+ * is unreachable as a user-supplied role; only the job-appointment sync
+ * passes it, hard-coded.
  */
-export const BACKWARD_MOVE_ROLES: readonly string[] = ['owner'];
+export const BACKWARD_MOVE_ROLES: readonly string[] = ['owner', 'system'];
 
 /**
  * §5.1 Statuses at or past Complete whose forward entry fires irreversible
