@@ -2,8 +2,18 @@ import { Router, Response } from 'express';
 import { z } from 'zod';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
-import { createJobSchema } from '../shared/contracts';
+import {
+  createJobSchema,
+  scheduleJobSchema,
+  reassignJobSchema,
+  unscheduleJobSchema,
+} from '../shared/contracts';
 import { toErrorResponse, ValidationError } from '../shared/errors';
+import { syncJobSchedule, JobAppointmentSyncDeps } from '../jobs/job-appointment-sync';
+import { notifyDispatchBoardChanged } from '../dispatch/board-notify';
+import { AppointmentRepository } from '../appointments/appointment';
+import { AssignmentRepository } from '../appointments/assignment';
+import { UserRepository } from '../users/user';
 import {
   convertEstimateToScheduledJob,
   ConvertEstimateToScheduledJobDeps,
@@ -62,8 +72,34 @@ export function createJobRouter(
    * route returns 503 NOT_CONFIGURED when absent).
    */
   fromEstimateDeps?: ConvertEstimateToScheduledJobDeps,
+  /**
+   * Direct job scheduling — when present, enables schedule-on-create and the
+   * POST /:id/schedule, /reassign, /unschedule endpoints. Supplies the
+   * appointment/assignment/technician repos the sync needs;
+   * jobRepo/timelineRepo/auditRepo are reused from the router's own params.
+   * Optional so callers that don't wire scheduling stay valid (schedule
+   * fields are ignored on create and the endpoints return 503 NOT_CONFIGURED).
+   */
+  scheduleSyncDeps?: {
+    appointmentRepo: AppointmentRepository;
+    assignmentRepo: AssignmentRepository;
+    userRepo: UserRepository;
+  },
 ): Router {
   const router = Router();
+
+  // Assemble the full sync deps from the router's repos + the scheduling repos.
+  const buildScheduleSyncDeps = (): JobAppointmentSyncDeps | null => {
+    if (!scheduleSyncDeps) return null;
+    return {
+      jobRepo,
+      timelineRepo,
+      auditRepo,
+      appointmentRepo: scheduleSyncDeps.appointmentRepo,
+      assignmentRepo: scheduleSyncDeps.assignmentRepo,
+      userRepo: scheduleSyncDeps.userRepo,
+    };
+  };
 
   const fromEstimateBodySchema = z
     .object({
@@ -113,9 +149,13 @@ export function createJobRouter(
           originatingLeadId = customer?.originatingLeadId;
         }
 
+        // Split the optional schedule block off the job fields — createJob
+        // ignores them; the sync projects them onto an appointment below.
+        const { scheduledStart, technicianId, durationMin, timezone, ...jobFields } = parsed;
+
         const result = await createJob(
           {
-            ...parsed,
+            ...jobFields,
             originatingLeadId,
             tenantId: req.auth!.tenantId,
             createdBy: req.auth!.userId,
@@ -124,6 +164,36 @@ export function createJobRouter(
           jobRepo,
           auditRepo
         );
+
+        // Schedule-on-create: project the schedule intent onto a linked
+        // appointment in the SAME request transaction (atomic — a conflict
+        // 409s and rolls the job back). Board notify only on success.
+        if (scheduledStart) {
+          const syncDeps = buildScheduleSyncDeps();
+          if (!syncDeps) {
+            res.status(503).json({
+              error: 'NOT_CONFIGURED',
+              message: 'Job scheduling is not configured',
+            });
+            return;
+          }
+          const { appointment } = await syncJobSchedule(syncDeps, {
+            operation: 'schedule',
+            tenantId: req.auth!.tenantId,
+            jobId: result.id,
+            actorId: req.auth!.userId,
+            actorRole: req.auth!.role,
+            scheduledStart: new Date(scheduledStart),
+            technicianId,
+            durationMin,
+            timezone,
+          });
+          if (appointment) notifyDispatchBoardChanged(req.auth!.tenantId, appointment.scheduledStart);
+          const scheduledJob = await getJob(req.auth!.tenantId, result.id, jobRepo);
+          res.status(201).json(scheduledJob ?? result);
+          return;
+        }
+
         res.status(201).json(result);
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
