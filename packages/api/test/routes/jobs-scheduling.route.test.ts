@@ -152,3 +152,85 @@ describe('POST /api/jobs — schedule on create (U3)', () => {
     expect(res.status).toBe(400);
   });
 });
+
+describe('job scheduling lifecycle endpoints (U4)', () => {
+  async function createUnscheduledJob(app: express.Express): Promise<string> {
+    const res = await request(app).post('/api/jobs').send(baseJob);
+    return res.body.id as string;
+  }
+
+  it('POST /:id/schedule schedules an existing job onto the board', async () => {
+    const { app, board } = build();
+    const jobId = await createUnscheduledJob(app);
+    const res = await request(app).post(`/api/jobs/${jobId}/schedule`).send({ scheduledStart: START_ISO, technicianId: TECH_1 });
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('scheduled');
+    const lane = (await board()).technicianLanes.find((l) => l.technicianId === TECH_1);
+    expect(lane!.appointments.some((a) => a.jobId === jobId)).toBe(true);
+  });
+
+  it('reschedules the same appointment to a new day (old day cleared)', async () => {
+    const { app, board } = build();
+    const jobId = await createUnscheduledJob(app);
+    await request(app).post(`/api/jobs/${jobId}/schedule`).send({ scheduledStart: START_ISO, technicianId: TECH_1 });
+
+    const NEW_ISO = '2030-07-05T16:00:00.000Z';
+    const res = await request(app).post(`/api/jobs/${jobId}/schedule`).send({ scheduledStart: NEW_ISO, technicianId: TECH_1 });
+    expect(res.status).toBe(200);
+    expect(boardAppointments(await board('2030-07-01'))).toHaveLength(0);
+    expect(boardAppointments(await board('2030-07-05')).some((a) => a.jobId === jobId)).toBe(true);
+  });
+
+  it('reassigns to another technician, then clears to unassigned', async () => {
+    const { app, board } = build();
+    const jobId = await createUnscheduledJob(app);
+    await request(app).post(`/api/jobs/${jobId}/schedule`).send({ scheduledStart: START_ISO, technicianId: TECH_1 });
+
+    const re = await request(app).post(`/api/jobs/${jobId}/reassign`).send({ technicianId: TECH_2 });
+    expect(re.status).toBe(200);
+    expect(re.body.assignedTechnicianId).toBe(TECH_2);
+    let b = await board();
+    expect(b.technicianLanes.find((l) => l.technicianId === TECH_2)!.appointments.some((a) => a.jobId === jobId)).toBe(true);
+    expect(b.technicianLanes.find((l) => l.technicianId === TECH_1)?.appointments.some((a) => a.jobId === jobId) ?? false).toBe(false);
+
+    const clear = await request(app).post(`/api/jobs/${jobId}/reassign`).send({ technicianId: null });
+    expect(clear.status).toBe(200);
+    b = await board();
+    expect(b.unassignedAppointments.some((a) => a.jobId === jobId)).toBe(true);
+  });
+
+  it('unschedules: appointment off the board, job reverts to new', async () => {
+    const { app, board } = build();
+    const jobId = await createUnscheduledJob(app);
+    await request(app).post(`/api/jobs/${jobId}/schedule`).send({ scheduledStart: START_ISO, technicianId: TECH_1 });
+
+    const res = await request(app).post(`/api/jobs/${jobId}/unschedule`).send({ reason: 'customer canceled' });
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('new');
+    // The appointment is canceled (the board keeps canceled cards by existing
+    // design), so the job has no ACTIVE appointment on the board anymore.
+    const active = boardAppointments(await board()).filter((a) => a.status !== 'canceled' && a.jobId === jobId);
+    expect(active).toHaveLength(0);
+  });
+
+  it('unschedule is a 200 no-op when the job has no appointment', async () => {
+    const { app } = build();
+    const jobId = await createUnscheduledJob(app);
+    const res = await request(app).post(`/api/jobs/${jobId}/unschedule`).send({});
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('new');
+  });
+
+  it('reassign 409s when the job has no scheduled appointment', async () => {
+    const { app } = build();
+    const jobId = await createUnscheduledJob(app);
+    const res = await request(app).post(`/api/jobs/${jobId}/reassign`).send({ technicianId: TECH_1 });
+    expect(res.status).toBe(409);
+  });
+
+  it('schedule 404s for an unknown job', async () => {
+    const { app } = build();
+    const res = await request(app).post(`/api/jobs/${uuidv4()}/schedule`).send({ scheduledStart: START_ISO });
+    expect(res.status).toBe(404);
+  });
+});
