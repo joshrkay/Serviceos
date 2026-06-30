@@ -29,9 +29,10 @@ partly wrong):
 - The board comes from `GET /api/dispatch/board` →
   `packages/api/src/dispatch/board-query.ts` (`getDispatchBoardData`),
   which reads `appointments` via `appointmentRepo.findByDateRange`, groups
-  each by its **primary** `appointment_assignments` row into technician
-  lanes, and drops the rest into an **unassigned queue**
-  (`board-query.ts:200-213`). It never reads `jobs`.
+  each by its **primary** `appointment_assignments` row
+  (`assignments.find(a => a.isPrimary)`, `board-query.ts:204`) into
+  technician lanes, and drops the rest into an **unassigned queue**
+  (`board-query.ts:202-212`). It never reads `jobs`.
 - **`jobs` has no `scheduled_at` column** (migration `016`,
   `schema.ts:366-391`); the comment in `from-estimate.ts:12` states this
   outright. `createJobSchema` (`packages/api/src/shared/contracts.ts:196`)
@@ -114,6 +115,20 @@ the source of truth for "what's scheduled."
   lets the next schedule create a fresh appointment cleanly. (Alternative —
   "revive" the canceled row like from-estimate — rejected for clarity; a
   canceled appointment should stay canceled.)
+  **⚠ This is a BLOCKER prerequisite, not a one-liner** (deepening review,
+  Finding 2): `PgAppointmentRepository.update`'s `fieldMap`
+  (`pg-appointment.ts:241-253`) has **no `idempotencyKey` entry**, so a
+  `update({ idempotencyKey: null })` is silently dropped and the NULL never
+  reaches SQL; the type `Appointment.idempotencyKey` is `string | undefined`
+  and `UpdateAppointmentInput` omits it entirely, so it won't even
+  type-check. Releasing the key requires **three coordinated changes**
+  (widen `Appointment.idempotencyKey` to `string | null` in
+  `appointments/appointment.ts`; add it to `UpdateAppointmentInput`; add
+  `idempotencyKey: 'idempotency_key'` to the pg `update` fieldMap) plus a
+  unit test asserting the SET clause is emitted. The DB column is already
+  nullable with the partial unique index `WHERE idempotency_key IS NOT NULL`
+  (migration 135) — only the app layer can't write it today. Tracked in U1
+  (types/contract) + U2 (fieldMap + test), not deferred.
 - **Scope strictly to OUR key, never "any appointment for this job"** — a
   job may already carry an estimate-created appointment (different key). The
   sync must only ever touch the `job-schedule:` row, or it would hijack an
@@ -122,11 +137,22 @@ the source of truth for "what's scheduled."
 - **Same-request transaction for atomicity** — `/api` is wrapped by
   `withTenantTransaction`, and every Pg repo call reuses the request-scoped
   client (`db/pg-base.ts`), so the job row + appointment + assignment +
-  audit all commit or roll back together. The DB EXCLUDE
+  audit all commit or roll back together (confirmed across `pg-job`,
+  `pg-appointment`, `pg-assignment`, `pg-audit` — all extend
+  `PgBaseRepository.withTenant`; deepening review Finding 1). The DB EXCLUDE
   `no_double_booking` (migration 131) aborts the whole operation → 409
-  (R7). **`notifyDispatchBoardChanged` runs *after* the orchestration
-  returns** (effectively post-commit), so a rolled-back write never bumps
-  the board revision; reschedule notifies **both** the old and new day.
+  (R7). **`notifyDispatchBoardChanged` is reached only on the success
+  branch** — after `await syncJobSchedule(...)` returns and before
+  `res.json`, **never in a `finally`**. Note (deepening review Finding 4):
+  the `/api` `withTenantTransaction` middleware COMMITs on
+  `res.once('finish')` *after* `res.json` flushes (`tenant-context.ts:178-189`),
+  so this notify is technically *pre-commit*. That is safe **only** because
+  it sits on the success path: a 409 throws past it (no spurious revision
+  bump), and on success the bump is harmless because clients re-fetch after
+  the commit lands. Do **not** describe it as "post-commit." (If a strict
+  post-commit guarantee is later wanted, move it to a `res.on('finish')`
+  hook gated on `res.statusCode < 400`.) Reschedule notifies **both** the
+  old and new day, so the sync must return `previousScheduledStart`.
 - **Scheduling is operator-direct, not an AI proposal** — like
   `from-estimate.ts`, this is a human-initiated mutation, so it does **not**
   go through the Zod-proposal / human-approval gate (that gate governs
@@ -245,6 +271,11 @@ appointment field.
     `durationMin` (positive int), `timezone` (min 1); add
     `scheduleJobSchema`, `reassignJobSchema` (`technicianId: uuid | null`),
     and `unscheduleJobSchema` request schemas, `.strict()`).
+  - `packages/api/src/appointments/appointment.ts` (BLOCKER prerequisite,
+    Finding 2 — widen `Appointment.idempotencyKey` to `string | null` and
+    add `idempotencyKey` to `UpdateAppointmentInput` so the cancel branch
+    can clear the key; the pg `update` fieldMap entry + its test land in
+    U2).
   - `packages/api/src/jobs/job-appointment-sync.ts` (new — declare the
     `SyncJobScheduleInput` / `SyncJobScheduleDeps` types only in this unit;
     logic lands in U2).
@@ -254,7 +285,9 @@ appointment field.
   `scheduledStart` present ⇒ schedule on create; absent ⇒ today's behavior
   (no appointment). For reassign, model "clear technician" as explicit
   `null` (distinct from absent). Do **not** add a `scheduledAt` column to
-  `jobs` and do **not** touch `UpdateJobInput`.
+  `jobs` and do **not** touch `UpdateJobInput`. The appointment-type
+  widening is a typed prerequisite for U2's key-release; verify it doesn't
+  break existing `createAppointment` callers (the field stays optional).
 - **Patterns to follow:** the `fromEstimateBodySchema` in `routes/jobs.ts`
   (strict zod body), and existing `create*Schema` shapes in
   `shared/contracts.ts`.
@@ -279,8 +312,15 @@ appointment field.
   - `packages/api/src/jobs/job-appointment-sync.ts` (implement).
   - `packages/api/src/jobs/job-lifecycle.ts` (extend `BACKWARD_MOVE_ROLES`
     to include `'system'` for the structural `scheduled → new` revert).
+  - `packages/api/src/appointments/pg-appointment.ts` (BLOCKER, Finding 2 —
+    add `idempotencyKey: 'idempotency_key'` to the `update` `fieldMap` so
+    the cancel branch can write SQL `NULL`; today the field is silently
+    dropped).
   - `packages/api/test/jobs/job-appointment-sync.test.ts` — **test file**
     (in-memory repos).
+  - `packages/api/test/appointments/pg-appointment.test.ts` (extend — assert
+    `update({ idempotencyKey: null })` emits an `idempotency_key = NULL` SET
+    clause) — **test file**.
   - `packages/api/test/jobs/job-lifecycle.test.ts` (extend — system
     backward-move authorization).
 - **Approach:** One entry point with an `operation` discriminator —
@@ -293,24 +333,49 @@ appointment field.
      `createAppointment({ jobId, scheduledStart, scheduledEnd, timezone,
      idempotencyKey })`. Validate via `validateAppointmentInput` +
      `validateAppointmentTimes` first (mirror `from-estimate.ts:264-279`).
-     If a `technicianId` is given, `assignTechnician` (primary) with
-     compensation on `ConflictError` (cancel the just-created appointment;
-     **release its key**); let the 409 propagate.
-  3. reassign: `unassignTechnician` the current primary; if a new
-     `technicianId` is given, `assignTechnician` primary. Keep the time.
-  4. unschedule / cancelForJob: `appointmentRepo.update` →
-     `{ status: 'canceled', idempotencyKey: null }` (release the key);
-     drop the primary assignment.
+     If a `technicianId` is given, `assignTechnician` (primary).
+     **Conflict handling differs by path (deepening review Finding 6) —
+     this is the key trap:**
+     - *create→assign* (a fresh appointment was just created): on
+       `ConflictError`, compensate by canceling the just-created appointment
+       **and releasing its key** — but wrap that compensating write in
+       `withRequestSavepoint` (pattern: `invoices/schedule-completion.ts:79`)
+       so it survives a poisoned transaction; or skip compensation and rely
+       purely on whole-request rollback. Let the 409 propagate.
+     - *reschedule / assign-into-conflict on an EXISTING appointment*: the
+       409 surfaces as SQLSTATE `23P01` from the
+       `trg_appointments_sync_to_assignments` trigger
+       (`schema.ts:3357-3376`) re-stamping the assignment window — which
+       leaves the request transaction in **aborted** state. Do **NOT**
+       attempt any follow-up write (it would throw "current transaction is
+       aborted" and mask the original `ConflictError`). Just let the
+       `ConflictError` propagate; whole-request rollback restores the prior
+       time. (`from-estimate`'s compensation only works because its conflict
+       normally fires from the application-layer `detectOverlappingAppointments`
+       pre-flight *before* any DB write — our reschedule has no such
+       pre-flight, so the constraint is the first signal.)
+  3. reassign: `unassignTechnician` the current primary (a real row
+     `DELETE`, confirmed `assignment.ts:213` → `pg-assignment.ts:156`); if a
+     new `technicianId` is given, `assignTechnician` primary. Keep the time.
+  4. unschedule / cancelForJob: use the **repo** `appointmentRepo.update`
+     (not the `updateAppointment` wrapper, which enforces
+     `assertValidAppointmentTransition`/audit — mirror `from-estimate.ts:304`)
+     → `{ status: 'canceled', idempotencyKey: null }` (release the key —
+     requires the U1+U2 fieldMap changes); drop the primary assignment.
   5. `syncJobAssignment(tenantId, jobId, appointmentId, ...)` after any
-     assignment change to keep `assignedTechnicianId` correct (clears it
-     on reassign-to-none).
+     assignment change to keep `assignedTechnicianId` correct (clears it to
+     NULL on reassign-to-none — `syncJobAssignment` writes `undefined` and
+     pg `update` maps it to SQL NULL, `pg-job.ts:258-262`).
   6. Status: on first schedule when `job.status === 'new'`, forward
      `transitionJobStatus → 'scheduled'`; on unschedule when
      `'scheduled'`, backward `transitionJobStatus('new', actorRole:
-     'system', reason: 'Schedule cleared')`; on `cancelForJob` the
-     caller's `→ canceled` transition already ran (U5) — here just cancel
-     the appointment. Idempotent re-saves of an already-`scheduled` job do
-     **not** re-transition.
+     'system', reason: 'Schedule cleared')`. The `'system'` literal MUST be
+     hard-coded here, **never** sourced from `req.auth.role` (which is
+     validated against `['owner','dispatcher','technician']`, so `'system'`
+     is unreachable as a real role — keep it that way; Finding 3). On
+     `cancelForJob` the caller's `→ canceled` transition already ran (U5) —
+     here just cancel the appointment. Idempotent re-saves of an
+     already-`scheduled` job do **not** re-transition.
   7. Emit a `job.scheduled` / `job.unscheduled` / `job.reassigned` audit;
      return `{ appointment, previousScheduledStart? }` so the route can
      board-notify the right day(s).
@@ -337,10 +402,18 @@ appointment field.
     appointment (not a revived canceled one).
   - Status idempotence: re-saving an already-`scheduled` job does not
     re-emit a status transition.
-  - Error/failure: double-booked tech → `ConflictError` bubbles; the
-    just-created appointment is compensated (canceled, key released).
+  - Error/failure (create→assign): double-booked tech on a *fresh* schedule
+    → `ConflictError` bubbles; the just-created appointment is compensated
+    (canceled, key released), compensation wrapped so it can't double-throw.
+  - Error/failure (reschedule): conflict on an *existing* appointment → the
+    `ConflictError` propagates with **no** follow-up write attempted (the
+    real poisoned-transaction behavior is pinned in U6, not here).
+  - Repo SET-clause (BLOCKER pin, Finding 2): unit-assert
+    `PgAppointmentRepository.update({ idempotencyKey: null })` emits an
+    `idempotency_key = NULL` SET clause (today it is silently dropped).
 - **Verification:** all unit scenarios green against in-memory repos; the
-  service has no HTTP/Express dependency.
+  service has no HTTP/Express dependency; the key-release SET clause is
+  proven at the repo layer (and end-to-end in U6).
 
 ### U3. Wire the create path (schedule-on-create)
 - **Goal:** `POST /api/jobs` schedules atomically when schedule fields are
@@ -350,7 +423,9 @@ appointment field.
 - **Files:**
   - `packages/api/src/routes/jobs.ts` (`POST /`: after `createJob`, when
     `parsed.scheduledStart` present, call `syncJobSchedule({operation:
-    'schedule'})`; `notifyDispatchBoardChanged` after the handler body).
+    'schedule'})`; `notifyDispatchBoardChanged` **on the success branch
+    only** — after the sync resolves, before `res.json`, never in a
+    `finally`, so a 409 skips the bump).
   - `packages/api/src/app.ts` (pass the sync deps — `appointmentRepo`,
     `assignmentRepo`, `userRepo` already constructed near the jobs-router
     wiring — into `createJobRouter`).
@@ -458,9 +533,15 @@ appointment field.
     non-canceled `job-schedule:` appointment row (unique index enforced).
   - Concurrent create race: two simultaneous schedules of the same job →
     one insert wins, one dedupes; single row.
-  - `no_double_booking`: reschedule/assign into a slot the tech already
-    holds → 409 (`23P01` → `ConflictError`), and **both** job-time and
-    appointment-time unchanged (transaction rollback).
+  - `no_double_booking` (Finding 6 — the poisoned-txn trap): reschedule an
+    existing appointment into a slot the tech already holds → the
+    `trg_appointments_sync_to_assignments` trigger trips `23P01`; assert the
+    route returns **409, not 500** (no secondary compensating write masks
+    the `ConflictError`), and **both** job-time and appointment-time are
+    unchanged (whole-request rollback).
+  - Concurrent reschedule-vs-cancel: a reschedule and an unschedule of the
+    same job racing → a single coherent terminal state (no orphan
+    appointment, no duplicate), exercising the unique index + rollback.
   - Board reflects schedule: after scheduling, `getDispatchBoardData` for
     that day shows the appointment in the tech lane; reassign-to-none moves
     it to `unassignedAppointments` and out of the old lane.
@@ -539,15 +620,25 @@ appointment field.
   unchanged; converging or removing PUT's tech field is **deferred** and
   listed above. Tests must assert lane membership via the **board query**,
   not the job row, so this divergence can't hide.
-- **Idempotency key reuse after cancel.** Mitigated by releasing
-  `idempotency_key = NULL` on cancel (U2); the integration test
-  (schedule → unschedule → schedule) pins it. Confirm
-  `appointmentRepo.update` can write NULL to `idempotency_key` (see Open
-  Questions).
-- **Board notify outside the transaction.** Must run after the
-  orchestration; if placed before commit and the txn rolls back, clients
-  refetch stale data under a new revision. Pinned by the conflict-atomicity
-  tests asserting the revision is **not** bumped on 409.
+- **Idempotency key reuse after cancel (BLOCKER, Finding 2).** The
+  appointment repo cannot write `idempotency_key = NULL` today (no fieldMap
+  entry; type omits it), so the "fresh appointment after cancel" behavior is
+  *broken until* the three coordinated changes in U1 (type/contract) + U2
+  (pg fieldMap) land. Pinned by a repo-layer SET-clause unit test (U2) and
+  the schedule→unschedule→schedule integration test (U6).
+- **Compensation inside a poisoned transaction (Finding 6).** A reschedule
+  conflict is a DB-trigger `23P01` that aborts the request transaction; any
+  follow-up compensating write then throws "current transaction is aborted"
+  and masks the original `ConflictError` (→ 500 instead of 409). The sync
+  must compensate **only** on the create→assign path (savepoint-wrapped via
+  `withRequestSavepoint`, or not at all) and never on the reschedule path.
+  Pinned by a U6 test asserting reschedule-conflict returns **409, not 500**,
+  with the appointment time unchanged.
+- **Board notify is pre-commit, not post-commit (Finding 4).** Under the
+  `/api` middleware, COMMIT fires on `res.finish` *after* `res.json`, so the
+  notify in the handler body runs before commit. Safe only because it sits
+  on the success branch (a 409 throws past it). Pinned by the
+  conflict-atomicity tests asserting the revision is **not** bumped on 409.
 - **Two appointment-creation paths now exist** (operator-direct here, AI
   proposal elsewhere). Intended; documented under invariants. The sync's
   strict key-scoping keeps them from colliding on the same job.
@@ -561,10 +652,9 @@ appointment field.
   If owner-only is required, unschedule must either 403 for non-owners or
   cancel the appointment while leaving status `scheduled` (and the UI must
   reflect that).
-- **`appointmentRepo.update` nulling `idempotency_key`.** Verify the Pg
-  repo's `update` maps a null/cleared `idempotencyKey` to a SQL `NULL`
-  write (it may need a one-line tweak); the integration re-schedule test is
-  the proof.
+  *(Resolved — formerly an open question on whether `appointmentRepo.update`
+  can null `idempotency_key`. The deepening review confirmed it CANNOT today;
+  the fix is now a required BLOCKER sub-task in U1+U2, not an open question.)*
 - **Default `durationMin`.** `from-estimate.ts` uses 60. Confirm the same
   default here, or whether the create/schedule UI should require a duration.
 - **Appointment `appointmentType` on direct schedule.** Whether a
@@ -585,3 +675,11 @@ appointment field.
 - Canonical pattern mirrored: `packages/api/src/jobs/from-estimate.ts`
   (appointment + primary assignment + `syncJobAssignment` + idempotency +
   compensation + audit).
+- **Adversarial deepening review (2026-06-30)** verified the 7 riskiest
+  claims against source. Folded back: 1 BLOCKER (key-release needs a 3-part
+  repo/contract change, not a one-liner — U1+U2), and SHOULD-FIX
+  corrections to board-notify timing (pre-commit, success-branch only) and
+  conflict compensation (savepoint-wrapped / per-operation, to avoid a
+  poisoned-transaction double-throw). Confirmed sound: same-request-txn
+  atomicity, the `'system'` backward-move (incl. the privilege-hole check),
+  and reassign-to-none → unassigned lane.
