@@ -10,6 +10,8 @@ import { Input, Textarea } from '../ui';
 import { useMutation } from '../../hooks/useMutation';
 import { useListQuery } from '../../hooks/useListQuery';
 import { useTechnicianRoster } from '../../hooks/useTechnicianRoster';
+import { useTenantTimezone } from '../../hooks/useTenantTimezone';
+import { resolveScheduleSlot, nextWeekdayIso } from './resolve-schedule-slot';
 
 type ServiceType = 'HVAC' | 'Plumbing' | 'Painting';
 
@@ -180,11 +182,11 @@ function parseVoice(
   const scheduledDate =
     /today|this (morning|afternoon|evening)/.test(t) ? 'Today' :
     /tomorrow/.test(t)  ? 'Tomorrow' :
-    /monday/.test(t)    ? 'Mon Mar 16' :
-    /tuesday/.test(t)   ? 'Tue Mar 11' :
-    /wednesday/.test(t) ? 'Wed Mar 12' :
-    /thursday/.test(t)  ? 'Thu Mar 13' :
-    /friday/.test(t)    ? 'Fri Mar 14' : '';
+    /monday/.test(t)    ? nextWeekdayIso(1) :
+    /tuesday/.test(t)   ? nextWeekdayIso(2) :
+    /wednesday/.test(t) ? nextWeekdayIso(3) :
+    /thursday/.test(t)  ? nextWeekdayIso(4) :
+    /friday/.test(t)    ? nextWeekdayIso(5) : '';
 
   const timeMatch = t.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)/);
   const scheduledTime = timeMatch
@@ -355,6 +357,9 @@ export function NewJobFlow({
   const [creating, setCreating] = useState(false);
   const [jobNum,   setJobNum]   = useState('');
   const [createError, setCreateError] = useState('');
+  // Whether the just-created job actually got an appointment (drives which
+  // parent list — New vs Scheduled — to route to after creation).
+  const [createdScheduled, setCreatedScheduled] = useState(false);
   const [showNewCustomerForm, setShowNewCustomerForm] = useState(false);
   const [newCustomerName, setNewCustomerName] = useState('');
   const [newCustomerPhone, setNewCustomerPhone] = useState('');
@@ -363,6 +368,7 @@ export function NewJobFlow({
   const [newCustomerError, setNewCustomerError] = useState('');
   const [addressConflictNote, setAddressConflictNote] = useState('');
   const { data: apiCustomers } = useListQuery<ApiCustomer>('/api/customers');
+  const tenantTz = useTenantTimezone();
   const { mutate: createJobMutation } = useMutation<CreateJobRequest, CreateJobResponse>('POST', '/api/jobs');
   const { mutate: createCustomerMutation } = useMutation<Record<string, unknown>, CreateCustomerResponse>('POST', '/api/customers');
   const { mutate: createLocationMutation } = useMutation<Record<string, unknown>, CreateLocationResponse>('POST', '/api/locations');
@@ -709,6 +715,37 @@ export function NewJobFlow({
         problemDescription: draft.notes.trim() || undefined,
         priority: draft.priority === 'Urgent' ? 'urgent' : 'normal',
       });
+
+      // Issue 2 — when a concrete date + time was picked, create the appointment
+      // so the job lands on the dispatch board (unassigned queue). A date with
+      // no time (or an unresolvable value) yields null → job stays unscheduled.
+      const slot = resolveScheduleSlot(draft.scheduledDate, draft.scheduledTime);
+      if (slot) {
+        // The job already exists, so a scheduling failure — whether a non-OK
+        // response OR a thrown network/auth error — must NOT fall through to the
+        // outer catch (which would leave the user on the form to retry and
+        // create a duplicate job). Treat both as "job created, scheduling
+        // failed" and land on the success screen with a note.
+        let scheduled = false;
+        try {
+          const res = await apiFetch(`/api/jobs/${created.id}/schedule`, {
+            method: 'POST',
+            body: JSON.stringify({ ...slot, timezone: tenantTz }),
+          });
+          scheduled = res.ok;
+        } catch {
+          scheduled = false;
+        }
+        setCreatedScheduled(scheduled);
+        setJobNum(created.jobNumber);
+        setStep('done');
+        if (!scheduled) {
+          setCreateError('Job created, but scheduling it failed — schedule it from the dispatch board.');
+        }
+        return;
+      }
+
+      setCreatedScheduled(false);
       setJobNum(created.jobNumber);
       setStep('done');
     } catch {
@@ -718,7 +755,11 @@ export function NewJobFlow({
     }
   }
 
-  const createdJobFilter: 'New' | 'Scheduled' = draft.scheduledDate ? 'Scheduled' : 'New';
+  // Reflects the ACTUAL creation outcome (did an appointment get created?), not
+  // just the draft selection — so a scheduling failure keeps the job in the New
+  // filter instead of routing the parent to Scheduled, where the still-`new`
+  // job would be hidden.
+  const createdJobFilter: 'New' | 'Scheduled' = createdScheduled ? 'Scheduled' : 'New';
 
   const canCreate = !!draft.customerId && !!draft.locationId && !!draft.serviceType && !!draft.description.trim();
 
@@ -736,14 +777,23 @@ export function NewJobFlow({
   const fmt = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 
   // ── Date quick-picks ──
+  // Today/Tomorrow plus the next few concrete calendar dates, each carrying a
+  // real ISO value so resolveScheduleSlot turns it into an appointment. (No
+  // placeholder chips — those looked scheduled but silently dropped the
+  // schedule, creating the job as New with a misleading "Scheduled" label.)
+  const dateChipNow = new Date();
+  const isoDayChip = (offset: number) => {
+    const d = new Date(dateChipNow.getFullYear(), dateChipNow.getMonth(), dateChipNow.getDate() + offset);
+    const value = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    return { label: d.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric' }), value };
+  };
   const DATE_CHIPS = [
-    { label: 'Today',     value: 'Today'       },
-    { label: 'Tomorrow',  value: 'Tomorrow'    },
-    { label: 'Tue 11',    value: 'Tue Mar 11'  },
-    { label: 'Wed 12',    value: 'Wed Mar 12'  },
-    { label: 'Thu 13',    value: 'Thu Mar 13'  },
-    { label: 'Fri 14',    value: 'Fri Mar 14'  },
-    { label: 'Later',     value: '__custom'    },
+    { label: 'Today',     value: 'Today'    },
+    { label: 'Tomorrow',  value: 'Tomorrow' },
+    isoDayChip(2),
+    isoDayChip(3),
+    isoDayChip(4),
+    { label: 'Later',     value: '__custom' },
   ];
   const [customDate, setCustomDate] = useState('');
 
@@ -1294,6 +1344,10 @@ export function NewJobFlow({
                   <p className="text-sm text-muted-foreground mt-0.5">{customer?.name}</p>
                 </div>
               </div>
+
+              {createError && (
+                <p className="text-xs text-destructive text-center">{createError}</p>
+              )}
 
               {/* Summary card */}
               <div className="rounded-2xl border border-border overflow-hidden bg-card">

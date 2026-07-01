@@ -24,6 +24,8 @@ import {
   transitionJobStatus,
   JobTimelineRepository,
 } from '../jobs/job-lifecycle';
+import { scheduleJob } from '../jobs/schedule-job';
+import { AppointmentRepository } from '../appointments/appointment';
 import { AuditRepository } from '../audit/audit';
 import { Queue } from '../queues/queue';
 import { FeedbackDispatcher } from '../feedback/dispatcher';
@@ -62,8 +64,25 @@ export function createJobRouter(
    * route returns 503 NOT_CONFIGURED when absent).
    */
   fromEstimateDeps?: ConvertEstimateToScheduledJobDeps,
+  /**
+   * Issue 2 (dispatch board) — when present, enables POST /:id/schedule to
+   * create an appointment for a job (so it shows on the dispatch board) and
+   * move the job to `scheduled`. Optional so callers/tests that don't wire an
+   * appointment repo stay valid (the route returns 503 NOT_CONFIGURED).
+   */
+  appointmentRepo?: AppointmentRepository,
 ): Router {
   const router = Router();
+
+  const scheduleJobBodySchema = z
+    .object({
+      scheduledStart: z.string().datetime(),
+      scheduledEnd: z.string().datetime().optional(),
+      durationMin: z.number().int().positive().max(24 * 60).optional(),
+      timezone: z.string().min(1).optional(),
+      notes: z.string().optional(),
+    })
+    .strict();
 
   const fromEstimateBodySchema = z
     .object({
@@ -159,6 +178,57 @@ export function createJobRouter(
           scheduledStart: body.scheduledStart ? new Date(body.scheduledStart) : undefined,
           timezone: body.timezone,
         });
+        res.status(201).json(result);
+      } catch (err) {
+        if (err instanceof z.ZodError) {
+          const { statusCode, body } = toErrorResponse(
+            new ValidationError(`Validation failed: ${err.issues.map((i) => i.message).join(', ')}`),
+          );
+          res.status(statusCode).json(body);
+          return;
+        }
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    }
+  );
+
+  // Issue 2 (dispatch board) — schedule an existing job: create an appointment
+  // (so it appears on the board) and move the job to `scheduled`. The
+  // appointment is created unassigned; the dispatcher assigns it on the board.
+  router.post(
+    '/:id/schedule',
+    requireAuth,
+    requireTenant,
+    // Creating the appointment is the privileged half of this route, so gate it
+    // on appointments:create (as the dedicated appointment route does) rather
+    // than jobs:update — technicians hold jobs:update but must not create
+    // appointments (RBAC withholds appointments:create from them).
+    requirePermission('appointments:create'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!appointmentRepo) {
+          res.status(503).json({
+            error: 'NOT_CONFIGURED',
+            message: 'Job scheduling is not configured',
+          });
+          return;
+        }
+        const body = scheduleJobBodySchema.parse(req.body ?? {});
+        const result = await scheduleJob(
+          { jobRepo, appointmentRepo, timelineRepo, auditRepo },
+          {
+            tenantId: req.auth!.tenantId,
+            jobId: req.params.id,
+            scheduledStart: new Date(body.scheduledStart),
+            scheduledEnd: body.scheduledEnd ? new Date(body.scheduledEnd) : undefined,
+            durationMin: body.durationMin,
+            timezone: body.timezone,
+            notes: body.notes,
+            actorId: req.auth!.userId,
+            actorRole: req.auth!.role,
+          },
+        );
         res.status(201).json(result);
       } catch (err) {
         if (err instanceof z.ZodError) {
