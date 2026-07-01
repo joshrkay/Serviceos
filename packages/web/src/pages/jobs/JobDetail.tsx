@@ -1,7 +1,6 @@
 import React from 'react';
 import { DetailPage } from '../../components/DetailPage';
 import { PhotoBucket } from '../../components/jobs/PhotoBucket';
-import { JobSchedulePanel } from '../../components/jobs/JobSchedulePanel';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 
 interface Job {
@@ -11,7 +10,6 @@ interface Job {
   problemDescription?: string;
   status: string;
   priority: string;
-  assignedTechnicianId?: string;
 }
 
 interface JobDetailProps {
@@ -35,16 +33,6 @@ export function JobDetail({ jobId, onBack }: JobDetailProps) {
       onBack={onBack}
       onRetry={refetch}
       sections={[
-        {
-          title: 'Schedule',
-          content: (
-            <JobSchedulePanel
-              jobId={jobId}
-              assignedTechnicianId={data.assignedTechnicianId}
-              onChanged={refetch}
-            />
-          ),
-        },
         {
           title: 'Details',
           content: (
