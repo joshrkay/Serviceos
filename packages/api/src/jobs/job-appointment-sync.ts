@@ -222,10 +222,8 @@ export async function syncJobSchedule(
   const existing = await findCanonicalAppointment(deps, tenantId, jobId);
 
   if (input.operation === 'schedule') {
-    const durationMin = input.durationMin ?? DEFAULT_DURATION_MIN;
     const timezone = input.timezone ?? DEFAULT_TIMEZONE;
     const scheduledStart = input.scheduledStart;
-    const scheduledEnd = new Date(scheduledStart.getTime() + durationMin * 60_000);
 
     let appointment: Appointment;
     let previousScheduledStart: Date | undefined;
@@ -235,7 +233,16 @@ export async function syncJobSchedule(
       // trigger re-stamps the assignment window; a conflict surfaces as a
       // ConflictError (23P01) and rolls the whole request back — no follow-up
       // write is attempted on the poisoned transaction.
+      //
+      // PRESERVE the existing slot length unless the caller explicitly passes a
+      // new durationMin — moving only the start time must not silently resize
+      // the appointment (a 90-min visit rescheduled must stay 90 min).
       previousScheduledStart = existing.scheduledStart;
+      const durationMs =
+        input.durationMin !== undefined
+          ? input.durationMin * 60_000
+          : existing.scheduledEnd.getTime() - existing.scheduledStart.getTime();
+      const scheduledEnd = new Date(scheduledStart.getTime() + durationMs);
       const errs = validateAppointmentTimes({ scheduledStart, scheduledEnd }).errors;
       if (errs.length > 0) throw new ValidationError(`Invalid appointment: ${errs.join(', ')}`);
       const updated = await deps.appointmentRepo.update(tenantId, existing.id, {
@@ -246,6 +253,8 @@ export async function syncJobSchedule(
       if (!updated) throw new NotFoundError('Appointment', existing.id);
       appointment = updated;
     } else {
+      const durationMin = input.durationMin ?? DEFAULT_DURATION_MIN;
+      const scheduledEnd = new Date(scheduledStart.getTime() + durationMin * 60_000);
       const createInput: CreateAppointmentInput = {
         tenantId,
         jobId,

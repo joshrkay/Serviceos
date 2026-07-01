@@ -138,6 +138,22 @@ describe('U2 — syncJobSchedule', () => {
     expect(await activeAppointments(job.id)).toHaveLength(1);
   });
 
+  it('reschedule preserves the existing slot length when no duration is given', async () => {
+    const job = await newJob();
+    await syncJobSchedule(deps([tech(TECH_1)]), {
+      operation: 'schedule', tenantId: TENANT, jobId: job.id, actorId: 'owner-1', actorRole: 'owner',
+      scheduledStart: START, technicianId: TECH_1, durationMin: 90,
+    });
+    // Reschedule the start WITHOUT specifying a duration.
+    const res = await syncJobSchedule(deps([tech(TECH_1)]), {
+      operation: 'schedule', tenantId: TENANT, jobId: job.id, actorId: 'owner-1', actorRole: 'owner',
+      scheduledStart: NEW_START,
+    });
+    const minutes = (res.appointment!.scheduledEnd.getTime() - res.appointment!.scheduledStart.getTime()) / 60000;
+    expect(minutes).toBe(90);
+    expect(res.appointment!.scheduledStart.toISOString()).toBe(NEW_START.toISOString());
+  });
+
   it('never hijacks an estimate-created appointment (different idempotency key)', async () => {
     const job = await newJob();
     const estAppt = await createAppointment(

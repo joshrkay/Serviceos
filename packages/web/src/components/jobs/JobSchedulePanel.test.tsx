@@ -81,6 +81,18 @@ describe('JobSchedulePanel (U8)', () => {
     expect(body.technicianId).toBe('tech-9');
   });
 
+  it('reschedule does not send durationMin (server preserves the slot length)', async () => {
+    mockApi([APPT]);
+    render(<JobSchedulePanel jobId="job-1" assignedTechnicianId="tech-9" />);
+    await screen.findByTestId('current-schedule');
+
+    fireEvent.change(screen.getByLabelText(/Reschedule start/), { target: { value: '2030-07-02T09:30' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Reschedule' }));
+
+    await waitFor(() => expect(postTo('/schedule')).toBeTruthy());
+    expect(postBody('/schedule')).not.toHaveProperty('durationMin');
+  });
+
   it('reassign to Unassigned sends technicianId null', async () => {
     mockApi([APPT]);
     render(<JobSchedulePanel jobId="job-1" assignedTechnicianId="tech-9" />);

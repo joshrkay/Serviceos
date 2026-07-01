@@ -106,10 +106,14 @@ export function JobSchedulePanel({ jobId, assignedTechnicianId, onChanged }: Job
       return;
     }
     const dur = parseInt(durationMin, 10);
+    // Duration is only picked on the INITIAL schedule; on a reschedule the
+    // Duration field is hidden and the server preserves the existing slot
+    // length, so we must not send a stale durationMin that would resize it.
+    const includeDuration = !appointment && Number.isFinite(dur) && dur > 0;
     void call('/schedule', {
       scheduledStart: new Date(start).toISOString(),
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-      ...(Number.isFinite(dur) && dur > 0 ? { durationMin: dur } : {}),
+      ...(includeDuration ? { durationMin: dur } : {}),
       ...(technicianId ? { technicianId } : {}),
     });
   };
