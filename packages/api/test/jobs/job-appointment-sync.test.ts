@@ -269,6 +269,16 @@ describe('U2 — syncJobSchedule', () => {
     ).rejects.toBeInstanceOf(ValidationError);
   });
 
+  it('rejects scheduling a terminal job so canceled/completed work never returns to the board', async () => {
+    const job = await newJob();
+    await transitionJobStatus(TENANT, job.id, 'canceled', 'owner-1', 'owner', jobRepo, timelineRepo);
+    await expect(
+      syncJobSchedule(deps([tech(TECH_1)]), scheduleInput(job.id)),
+    ).rejects.toBeInstanceOf(ConflictError);
+    // No appointment was created for the canceled job.
+    expect(await activeAppointments(job.id)).toHaveLength(0);
+  });
+
   it('rejects reassign when the job has no scheduled appointment (ConflictError)', async () => {
     const job = await newJob();
     await expect(

@@ -55,7 +55,14 @@ export function JobSchedulePanel({ jobId, assignedTechnicianId, onChanged }: Job
       // mutate (the schedule/reschedule/unschedule endpoints target the
       // canonical row server-side).
       const key = `job-schedule:${jobId}`;
-      const active = list.find((a) => a.idempotencyKey === key && a.status !== 'canceled') ?? null;
+      // Match the server's schedulable set (scheduled/confirmed) — a started or
+      // finished visit (in_progress/completed/no_show) is owned by the
+      // appointment lifecycle, so it must not be presented here as an editable
+      // schedule (its reschedule/reassign/unschedule calls would conflict/no-op).
+      const active =
+        list.find(
+          (a) => a.idempotencyKey === key && (a.status === 'scheduled' || a.status === 'confirmed'),
+        ) ?? null;
       setAppointment(active);
       if (active) setStart(toLocalInput(active.scheduledStart));
     } catch (err) {

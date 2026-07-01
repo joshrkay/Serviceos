@@ -139,6 +139,14 @@ describe('JobSchedulePanel (U8)', () => {
     expect(current.textContent).not.toMatch(/8\/1\/2030|2030-08/);
   });
 
+  it('does not present a started/finished canonical appointment as editable', async () => {
+    mockApi([{ ...APPT, status: 'completed' }]);
+    render(<JobSchedulePanel jobId="job-1" />);
+    expect(await screen.findByTestId('current-schedule')).toHaveTextContent(/Not scheduled/);
+    expect(screen.queryByRole('button', { name: 'Reschedule' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Unschedule' })).toBeNull();
+  });
+
   it('treats a job with only an estimate appointment as not directly scheduled', async () => {
     mockApi([ESTIMATE_APPT]);
     render(<JobSchedulePanel jobId="job-1" />);

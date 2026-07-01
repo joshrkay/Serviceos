@@ -222,6 +222,14 @@ export async function syncJobSchedule(
   const existing = await findCanonicalAppointment(deps, tenantId, jobId);
 
   if (input.operation === 'schedule') {
+    // A terminal job must not be put back on the board by creating a live
+    // appointment: maybeAdvanceToScheduled only moves 'new' jobs, so a
+    // canceled/completed/invoiced/closed job would keep its terminal status
+    // while a fresh appointment appears on the (status-blind) date-based board.
+    if (job.status === 'canceled' || isPostCompletionStatus(job.status)) {
+      throw new ConflictError(`Cannot schedule a ${job.status} job`);
+    }
+
     const timezone = input.timezone ?? DEFAULT_TIMEZONE;
     const scheduledStart = input.scheduledStart;
 
