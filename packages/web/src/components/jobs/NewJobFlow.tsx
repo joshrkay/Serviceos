@@ -714,23 +714,31 @@ export function NewJobFlow({
       });
 
       // Issue 2 — when a concrete date + time was picked, create the appointment
-      // so the job lands on the dispatch board (unassigned queue). Placeholder
-      // date chips with no real calendar date resolve to null → job stays
-      // unscheduled, exactly as before.
+      // so the job lands on the dispatch board (unassigned queue). A date with
+      // no time (or an unresolvable value) yields null → job stays unscheduled.
       const slot = resolveScheduleSlot(draft.scheduledDate, draft.scheduledTime);
       if (slot) {
-        const res = await apiFetch(`/api/jobs/${created.id}/schedule`, {
-          method: 'POST',
-          body: JSON.stringify({ ...slot, timezone: tenantTz }),
-        });
-        if (!res.ok) {
-          // The job was created; only scheduling failed. Surface it without
-          // discarding the job — the dispatcher can schedule from the board.
-          setJobNum(created.jobNumber);
-          setStep('done');
-          setCreateError('Job created, but scheduling it failed — schedule it from the dispatch board.');
-          return;
+        // The job already exists, so a scheduling failure — whether a non-OK
+        // response OR a thrown network/auth error — must NOT fall through to the
+        // outer catch (which would leave the user on the form to retry and
+        // create a duplicate job). Treat both as "job created, scheduling
+        // failed" and land on the success screen with a note.
+        let scheduled = false;
+        try {
+          const res = await apiFetch(`/api/jobs/${created.id}/schedule`, {
+            method: 'POST',
+            body: JSON.stringify({ ...slot, timezone: tenantTz }),
+          });
+          scheduled = res.ok;
+        } catch {
+          scheduled = false;
         }
+        setJobNum(created.jobNumber);
+        setStep('done');
+        if (!scheduled) {
+          setCreateError('Job created, but scheduling it failed — schedule it from the dispatch board.');
+        }
+        return;
       }
 
       setJobNum(created.jobNumber);
@@ -742,7 +750,11 @@ export function NewJobFlow({
     }
   }
 
-  const createdJobFilter: 'New' | 'Scheduled' = draft.scheduledDate ? 'Scheduled' : 'New';
+  // "Scheduled" only when a real appointment slot resolves (concrete date +
+  // time) — otherwise the job is created as New. Keeps the post-create filter
+  // honest: a date chip alone (no time) doesn't claim the job is scheduled.
+  const createdJobFilter: 'New' | 'Scheduled' =
+    resolveScheduleSlot(draft.scheduledDate, draft.scheduledTime) ? 'Scheduled' : 'New';
 
   const canCreate = !!draft.customerId && !!draft.locationId && !!draft.serviceType && !!draft.description.trim();
 
@@ -760,14 +772,23 @@ export function NewJobFlow({
   const fmt = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 
   // ── Date quick-picks ──
+  // Today/Tomorrow plus the next few concrete calendar dates, each carrying a
+  // real ISO value so resolveScheduleSlot turns it into an appointment. (No
+  // placeholder chips — those looked scheduled but silently dropped the
+  // schedule, creating the job as New with a misleading "Scheduled" label.)
+  const dateChipNow = new Date();
+  const isoDayChip = (offset: number) => {
+    const d = new Date(dateChipNow.getFullYear(), dateChipNow.getMonth(), dateChipNow.getDate() + offset);
+    const value = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    return { label: d.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric' }), value };
+  };
   const DATE_CHIPS = [
-    { label: 'Today',     value: 'Today'       },
-    { label: 'Tomorrow',  value: 'Tomorrow'    },
-    { label: 'Tue 11',    value: 'Tue Mar 11'  },
-    { label: 'Wed 12',    value: 'Wed Mar 12'  },
-    { label: 'Thu 13',    value: 'Thu Mar 13'  },
-    { label: 'Fri 14',    value: 'Fri Mar 14'  },
-    { label: 'Later',     value: '__custom'    },
+    { label: 'Today',     value: 'Today'    },
+    { label: 'Tomorrow',  value: 'Tomorrow' },
+    isoDayChip(2),
+    isoDayChip(3),
+    isoDayChip(4),
+    { label: 'Later',     value: '__custom' },
   ];
   const [customDate, setCustomDate] = useState('');
 
