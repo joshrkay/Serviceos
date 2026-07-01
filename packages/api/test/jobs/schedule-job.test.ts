@@ -101,6 +101,20 @@ describe('scheduleJob — dispatch board Issue 2 (job → appointment)', () => {
     expect(await appointmentRepo.findByJob(TENANT, job.id)).toHaveLength(2);
   });
 
+  it('dedupes a retried identical request (same job + slot) to one appointment', async () => {
+    const job = await newJob();
+    const args = {
+      tenantId: TENANT, jobId: job.id, scheduledStart: START, scheduledEnd: new Date('2026-07-01T16:00:00.000Z'),
+      actorId: 'u-1',
+    };
+
+    const first = await scheduleJob(deps, args);
+    const second = await scheduleJob(deps, args); // simulates a retry after a lost response
+
+    expect(second.appointment.id).toBe(first.appointment.id);
+    expect(await appointmentRepo.findByJob(TENANT, job.id)).toHaveLength(1);
+  });
+
   it('rejects scheduling a job in a terminal status and creates no appointment', async () => {
     const job = await newJob();
     await jobRepo.update(TENANT, job.id, { status: 'completed' });

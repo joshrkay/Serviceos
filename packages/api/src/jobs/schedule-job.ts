@@ -90,6 +90,15 @@ export async function scheduleJob(
     input.scheduledEnd ??
     new Date(input.scheduledStart.getTime() + (input.durationMin ?? DEFAULT_DURATION_MIN) * 60_000);
 
+  // Idempotency key derived from the request (job + exact slot) so a retry
+  // after a lost response — the client treats a thrown schedule call as a
+  // partial success — dedupes back to the same appointment instead of inserting
+  // a duplicate dispatch-board card. Identical job+slot dedupes; a different
+  // time is a distinct (re)schedule with its own key. Enforced by the unique
+  // (tenant_id, idempotency_key) index (migration 135).
+  const idempotencyKey =
+    `schedule-job:${jobId}:${input.scheduledStart.toISOString()}:${scheduledEnd.toISOString()}`;
+
   const appointmentInput: CreateAppointmentInput = {
     tenantId,
     jobId,
@@ -97,6 +106,7 @@ export async function scheduleJob(
     scheduledEnd,
     timezone: input.timezone ?? DEFAULT_TIMEZONE,
     notes: input.notes,
+    idempotencyKey,
     createdBy: actorId,
   };
 
