@@ -64,6 +64,46 @@ interface CreateJobRequest {
   summary: string;
   problemDescription?: string;
   priority?: 'low' | 'normal' | 'high' | 'urgent';
+  /** Optional schedule-on-create — when present the API books the appointment. */
+  scheduledStart?: string;
+  technicianId?: string;
+  timezone?: string;
+}
+
+/**
+ * Resolve NewJobFlow's schedule draft into an ISO instant, or undefined when a
+ * concrete timestamp can't be built. Only the reliably-resolvable date forms
+ * schedule the job: 'Today', 'Tomorrow', or an explicit custom `YYYY-MM-DD`.
+ * The hard-coded relative chips ('Tue Mar 11', …) are demo placeholders with no
+ * year, so they're intentionally NOT booked (better unscheduled than wrong).
+ */
+export function deriveScheduledStartISO(
+  scheduledDate: string,
+  scheduledTime: string,
+  now: Date = new Date(),
+): string | undefined {
+  let base: Date | undefined;
+  if (scheduledDate === 'Today') {
+    base = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  } else if (scheduledDate === 'Tomorrow') {
+    base = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+  } else if (/^\d{4}-\d{2}-\d{2}$/.test(scheduledDate)) {
+    const [y, m, d] = scheduledDate.split('-').map(Number);
+    base = new Date(y, m - 1, d);
+  } else {
+    return undefined;
+  }
+  // Parse a "3:00 PM" style time; default to 8:00 AM (the first offered slot).
+  let hours = 8;
+  let minutes = 0;
+  const tm = scheduledTime.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+  if (tm) {
+    hours = parseInt(tm[1], 10) % 12;
+    if (/pm/i.test(tm[3])) hours += 12;
+    minutes = parseInt(tm[2], 10);
+  }
+  base.setHours(hours, minutes, 0, 0);
+  return base.toISOString();
 }
 
 interface CreateJobResponse {
@@ -702,12 +742,22 @@ export function NewJobFlow({
     setCreateError('');
     setCreating(true);
     try {
+      // Schedule-on-create: when the draft carries a resolvable date, book the
+      // appointment so the job reaches the dispatch board (technician optional).
+      const scheduledStart = deriveScheduledStartISO(draft.scheduledDate, draft.scheduledTime);
       const created = await createJobMutation({
         customerId: draft.customerId,
         locationId: draft.locationId,
         summary: draft.description.trim(),
         problemDescription: draft.notes.trim() || undefined,
         priority: draft.priority === 'Urgent' ? 'urgent' : 'normal',
+        ...(scheduledStart
+          ? {
+              scheduledStart,
+              timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+              ...(tech?.id ? { technicianId: tech.id } : {}),
+            }
+          : {}),
       });
       setJobNum(created.jobNumber);
       setStep('done');
