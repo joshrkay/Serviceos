@@ -200,7 +200,11 @@ export function createJobRouter(
     '/:id/schedule',
     requireAuth,
     requireTenant,
-    requirePermission('jobs:update'),
+    // Creating the appointment is the privileged half of this route, so gate it
+    // on appointments:create (as the dedicated appointment route does) rather
+    // than jobs:update — technicians hold jobs:update but must not create
+    // appointments (RBAC withholds appointments:create from them).
+    requirePermission('appointments:create'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         if (!appointmentRepo) {
