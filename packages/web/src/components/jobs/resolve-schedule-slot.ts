@@ -25,6 +25,18 @@ function toYmd(d: Date): string {
   return `${y}-${m}-${day}`;
 }
 
+/**
+ * Nearest upcoming date for a weekday (today counts), as ISO `YYYY-MM-DD`.
+ * Lets voice-parsed weekdays ("Friday at 10am") resolve to a real appointment
+ * the same way the date chips do, rather than a placeholder label that silently
+ * drops the schedule. Weekday index is JS-native: Sun=0 … Sat=6.
+ */
+export function nextWeekdayIso(targetDow: number, from: Date = new Date()): string {
+  const d = new Date(from.getFullYear(), from.getMonth(), from.getDate());
+  d.setDate(d.getDate() + ((targetDow - d.getDay() + 7) % 7));
+  return toYmd(d);
+}
+
 /** Resolve a date chip value to a `YYYY-MM-DD` local date, or null. */
 function resolveYmd(scheduledDate: string, now: Date): string | null {
   const value = scheduledDate.trim();

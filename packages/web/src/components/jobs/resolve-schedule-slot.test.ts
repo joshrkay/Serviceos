@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { resolveScheduleSlot } from './resolve-schedule-slot';
+import { resolveScheduleSlot, nextWeekdayIso } from './resolve-schedule-slot';
 
 // A fixed local-noon "now" keeps date math deterministic regardless of the
 // runner's clock (but still subject to its timezone, which is fine: the helper
@@ -66,5 +66,33 @@ describe('resolveScheduleSlot', () => {
   it('returns null for a malformed time', () => {
     expect(resolveScheduleSlot('Today', '25:00 PM', NOW)).toBeNull();
     expect(resolveScheduleSlot('Today', 'noon', NOW)).toBeNull();
+  });
+});
+
+describe('nextWeekdayIso', () => {
+  // NOW (2026-06-30) is a Tuesday (JS dow 2).
+  it('returns today when the target weekday is today (today counts)', () => {
+    expect(nextWeekdayIso(2, NOW)).toBe('2026-06-30');
+  });
+
+  it('returns the next day for tomorrow’s weekday', () => {
+    expect(nextWeekdayIso(3, NOW)).toBe('2026-07-01'); // Wednesday
+  });
+
+  it('resolves a later weekday this week', () => {
+    expect(nextWeekdayIso(5, NOW)).toBe('2026-07-03'); // Friday
+  });
+
+  it('wraps to next week for an earlier weekday', () => {
+    expect(nextWeekdayIso(1, NOW)).toBe('2026-07-06'); // Monday
+  });
+
+  it('produces a value resolveScheduleSlot can schedule', () => {
+    const slot = resolveScheduleSlot(nextWeekdayIso(5, NOW), '10:00 AM', NOW);
+    expect(slot).not.toBeNull();
+    const start = new Date(slot!.scheduledStart);
+    expect(start.getMonth()).toBe(6);
+    expect(start.getDate()).toBe(3);
+    expect(start.getHours()).toBe(10);
   });
 });

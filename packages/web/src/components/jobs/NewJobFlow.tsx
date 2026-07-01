@@ -11,7 +11,7 @@ import { useMutation } from '../../hooks/useMutation';
 import { useListQuery } from '../../hooks/useListQuery';
 import { useTechnicianRoster } from '../../hooks/useTechnicianRoster';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
-import { resolveScheduleSlot } from './resolve-schedule-slot';
+import { resolveScheduleSlot, nextWeekdayIso } from './resolve-schedule-slot';
 
 type ServiceType = 'HVAC' | 'Plumbing' | 'Painting';
 
@@ -182,11 +182,11 @@ function parseVoice(
   const scheduledDate =
     /today|this (morning|afternoon|evening)/.test(t) ? 'Today' :
     /tomorrow/.test(t)  ? 'Tomorrow' :
-    /monday/.test(t)    ? 'Mon Mar 16' :
-    /tuesday/.test(t)   ? 'Tue Mar 11' :
-    /wednesday/.test(t) ? 'Wed Mar 12' :
-    /thursday/.test(t)  ? 'Thu Mar 13' :
-    /friday/.test(t)    ? 'Fri Mar 14' : '';
+    /monday/.test(t)    ? nextWeekdayIso(1) :
+    /tuesday/.test(t)   ? nextWeekdayIso(2) :
+    /wednesday/.test(t) ? nextWeekdayIso(3) :
+    /thursday/.test(t)  ? nextWeekdayIso(4) :
+    /friday/.test(t)    ? nextWeekdayIso(5) : '';
 
   const timeMatch = t.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)/);
   const scheduledTime = timeMatch
@@ -357,6 +357,9 @@ export function NewJobFlow({
   const [creating, setCreating] = useState(false);
   const [jobNum,   setJobNum]   = useState('');
   const [createError, setCreateError] = useState('');
+  // Whether the just-created job actually got an appointment (drives which
+  // parent list — New vs Scheduled — to route to after creation).
+  const [createdScheduled, setCreatedScheduled] = useState(false);
   const [showNewCustomerForm, setShowNewCustomerForm] = useState(false);
   const [newCustomerName, setNewCustomerName] = useState('');
   const [newCustomerPhone, setNewCustomerPhone] = useState('');
@@ -733,6 +736,7 @@ export function NewJobFlow({
         } catch {
           scheduled = false;
         }
+        setCreatedScheduled(scheduled);
         setJobNum(created.jobNumber);
         setStep('done');
         if (!scheduled) {
@@ -741,6 +745,7 @@ export function NewJobFlow({
         return;
       }
 
+      setCreatedScheduled(false);
       setJobNum(created.jobNumber);
       setStep('done');
     } catch {
@@ -750,11 +755,11 @@ export function NewJobFlow({
     }
   }
 
-  // "Scheduled" only when a real appointment slot resolves (concrete date +
-  // time) — otherwise the job is created as New. Keeps the post-create filter
-  // honest: a date chip alone (no time) doesn't claim the job is scheduled.
-  const createdJobFilter: 'New' | 'Scheduled' =
-    resolveScheduleSlot(draft.scheduledDate, draft.scheduledTime) ? 'Scheduled' : 'New';
+  // Reflects the ACTUAL creation outcome (did an appointment get created?), not
+  // just the draft selection — so a scheduling failure keeps the job in the New
+  // filter instead of routing the parent to Scheduled, where the still-`new`
+  // job would be hidden.
+  const createdJobFilter: 'New' | 'Scheduled' = createdScheduled ? 'Scheduled' : 'New';
 
   const canCreate = !!draft.customerId && !!draft.locationId && !!draft.serviceType && !!draft.description.trim();
 
