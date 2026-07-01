@@ -3696,6 +3696,10 @@ export function createApp(): express.Express {
     userRepo,
     invoiceRepo,
     auditRepo,
+  }, {
+    appointmentRepo,
+    assignmentRepo,
+    userRepo,
   }));
   app.use(
     '/api/jobs',

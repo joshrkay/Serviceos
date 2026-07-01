@@ -80,7 +80,7 @@ describe('Clerk user.created — invitee join with pool not wired (PR 319 P2)', 
     );
   });
 
-  it('does not mark the invitation accepted and falls through to bootstrap', async () => {
+  it('fails the webhook for Clerk retry without consuming the invitation or bootstrapping', async () => {
     const payload = {
       type: 'user.created',
       data: { id: 'user_new', email_addresses: [{ email_address: 'invitee@example.com' }] },
@@ -97,11 +97,14 @@ describe('Clerk user.created — invitee join with pool not wired (PR 319 P2)', 
       .set('content-type', 'application/json')
       .send(payload);
 
-    // The join failed (no pool) but was caught and fell through to bootstrap.
-    expect(res.status).toBe(200);
+    // Pool not wired → the invitee join can't complete. The handler FAILS the
+    // webhook (500) so Clerk re-delivers once the pool is available (see
+    // webhooks/routes.ts "failing webhook for Clerk retry"), rather than
+    // consuming the invitation or bootstrapping a separate tenant.
+    expect(res.status).toBe(500);
     // Critical invariant: the invitation was NOT consumed.
     expect(markAccepted).not.toHaveBeenCalled();
-    // Fell through to the bootstrap path (a tenant was created for the user).
-    expect(tenantRepo.created).toHaveLength(1);
+    // Did NOT bootstrap a (wrong) standalone tenant for the invited user.
+    expect(tenantRepo.created).toHaveLength(0);
   });
 });

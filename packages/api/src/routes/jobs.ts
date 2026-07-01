@@ -2,8 +2,18 @@ import { Router, Response } from 'express';
 import { z } from 'zod';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
-import { createJobSchema } from '../shared/contracts';
+import {
+  createJobSchema,
+  scheduleJobSchema,
+  reassignJobSchema,
+  unscheduleJobSchema,
+} from '../shared/contracts';
 import { toErrorResponse, ValidationError } from '../shared/errors';
+import { syncJobSchedule, JobAppointmentSyncDeps } from '../jobs/job-appointment-sync';
+import { notifyDispatchBoardChanged } from '../dispatch/board-notify';
+import { AppointmentRepository } from '../appointments/appointment';
+import { AssignmentRepository } from '../appointments/assignment';
+import { UserRepository } from '../users/user';
 import {
   convertEstimateToScheduledJob,
   ConvertEstimateToScheduledJobDeps,
@@ -62,8 +72,34 @@ export function createJobRouter(
    * route returns 503 NOT_CONFIGURED when absent).
    */
   fromEstimateDeps?: ConvertEstimateToScheduledJobDeps,
+  /**
+   * Direct job scheduling — when present, enables schedule-on-create and the
+   * POST /:id/schedule, /reassign, /unschedule endpoints. Supplies the
+   * appointment/assignment/technician repos the sync needs;
+   * jobRepo/timelineRepo/auditRepo are reused from the router's own params.
+   * Optional so callers that don't wire scheduling stay valid (schedule
+   * fields are ignored on create and the endpoints return 503 NOT_CONFIGURED).
+   */
+  scheduleSyncDeps?: {
+    appointmentRepo: AppointmentRepository;
+    assignmentRepo: AssignmentRepository;
+    userRepo: UserRepository;
+  },
 ): Router {
   const router = Router();
+
+  // Assemble the full sync deps from the router's repos + the scheduling repos.
+  const buildScheduleSyncDeps = (): JobAppointmentSyncDeps | null => {
+    if (!scheduleSyncDeps) return null;
+    return {
+      jobRepo,
+      timelineRepo,
+      auditRepo,
+      appointmentRepo: scheduleSyncDeps.appointmentRepo,
+      assignmentRepo: scheduleSyncDeps.assignmentRepo,
+      userRepo: scheduleSyncDeps.userRepo,
+    };
+  };
 
   const fromEstimateBodySchema = z
     .object({
@@ -113,9 +149,25 @@ export function createJobRouter(
           originatingLeadId = customer?.originatingLeadId;
         }
 
+        // Split the optional schedule block off the job fields — createJob
+        // ignores them; the sync projects them onto an appointment below.
+        const { scheduledStart, technicianId, durationMin, timezone, ...jobFields } = parsed;
+
+        // Resolve scheduling deps BEFORE creating the job, so a scheduling
+        // request against an unconfigured deployment fails closed (503) rather
+        // than leaving an orphan unscheduled job behind.
+        const scheduleDeps = scheduledStart ? buildScheduleSyncDeps() : null;
+        if (scheduledStart && !scheduleDeps) {
+          res.status(503).json({
+            error: 'NOT_CONFIGURED',
+            message: 'Job scheduling is not configured',
+          });
+          return;
+        }
+
         const result = await createJob(
           {
-            ...parsed,
+            ...jobFields,
             originatingLeadId,
             tenantId: req.auth!.tenantId,
             createdBy: req.auth!.userId,
@@ -124,6 +176,28 @@ export function createJobRouter(
           jobRepo,
           auditRepo
         );
+
+        // Schedule-on-create: project the schedule intent onto a linked
+        // appointment in the SAME request transaction (atomic — a conflict
+        // 409s and rolls the job back). Board notify only on success.
+        if (scheduledStart && scheduleDeps) {
+          const { appointment } = await syncJobSchedule(scheduleDeps, {
+            operation: 'schedule',
+            tenantId: req.auth!.tenantId,
+            jobId: result.id,
+            actorId: req.auth!.userId,
+            actorRole: req.auth!.role,
+            scheduledStart: new Date(scheduledStart),
+            technicianId,
+            durationMin,
+            timezone,
+          });
+          if (appointment) notifyDispatchBoardChanged(req.auth!.tenantId, appointment.scheduledStart);
+          const scheduledJob = await getJob(req.auth!.tenantId, result.id, jobRepo);
+          res.status(201).json(scheduledJob ?? result);
+          return;
+        }
+
         res.status(201).json(result);
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
@@ -172,6 +246,123 @@ export function createJobRouter(
         res.status(statusCode).json(body);
       }
     }
+  );
+
+  // Direct job scheduling lifecycle. /:id/schedule covers the initial
+  // schedule AND a reschedule (idempotent upsert of the canonical
+  // job-schedule appointment); /:id/reassign changes or clears (null) the
+  // primary technician; /:id/unschedule cancels the appointment and reverts
+  // the job scheduled → new. All run inside the request transaction, so a
+  // double-booking 409s atomically with no partial writes.
+  const handleScheduleError = (res: Response, err: unknown): void => {
+    if (err instanceof z.ZodError) {
+      const { statusCode, body } = toErrorResponse(
+        new ValidationError(`Validation failed: ${err.issues.map((i) => i.message).join(', ')}`),
+      );
+      res.status(statusCode).json(body);
+      return;
+    }
+    const { statusCode, body } = toErrorResponse(err);
+    res.status(statusCode).json(body);
+  };
+
+  router.post(
+    '/:id/schedule',
+    requireAuth,
+    requireTenant,
+    requirePermission('jobs:update'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const syncDeps = buildScheduleSyncDeps();
+        if (!syncDeps) {
+          res.status(503).json({ error: 'NOT_CONFIGURED', message: 'Job scheduling is not configured' });
+          return;
+        }
+        const body = scheduleJobSchema.parse(req.body ?? {});
+        const result = await syncJobSchedule(syncDeps, {
+          operation: 'schedule',
+          tenantId: req.auth!.tenantId,
+          jobId: req.params.id,
+          actorId: req.auth!.userId,
+          actorRole: req.auth!.role,
+          scheduledStart: new Date(body.scheduledStart),
+          technicianId: body.technicianId,
+          durationMin: body.durationMin,
+          timezone: body.timezone,
+        });
+        // New day always; the old day too on a reschedule.
+        if (result.appointment) notifyDispatchBoardChanged(req.auth!.tenantId, result.appointment.scheduledStart);
+        if (result.previousScheduledStart) {
+          notifyDispatchBoardChanged(req.auth!.tenantId, result.previousScheduledStart);
+        }
+        const job = await getJob(req.auth!.tenantId, req.params.id, jobRepo);
+        res.status(200).json(job);
+      } catch (err) {
+        handleScheduleError(res, err);
+      }
+    },
+  );
+
+  router.post(
+    '/:id/reassign',
+    requireAuth,
+    requireTenant,
+    requirePermission('jobs:update'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const syncDeps = buildScheduleSyncDeps();
+        if (!syncDeps) {
+          res.status(503).json({ error: 'NOT_CONFIGURED', message: 'Job scheduling is not configured' });
+          return;
+        }
+        const body = reassignJobSchema.parse(req.body ?? {});
+        const result = await syncJobSchedule(syncDeps, {
+          operation: 'reassign',
+          tenantId: req.auth!.tenantId,
+          jobId: req.params.id,
+          actorId: req.auth!.userId,
+          actorRole: req.auth!.role,
+          technicianId: body.technicianId,
+        });
+        if (result.appointment) notifyDispatchBoardChanged(req.auth!.tenantId, result.appointment.scheduledStart);
+        const job = await getJob(req.auth!.tenantId, req.params.id, jobRepo);
+        res.status(200).json(job);
+      } catch (err) {
+        handleScheduleError(res, err);
+      }
+    },
+  );
+
+  router.post(
+    '/:id/unschedule',
+    requireAuth,
+    requireTenant,
+    requirePermission('jobs:update'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const syncDeps = buildScheduleSyncDeps();
+        if (!syncDeps) {
+          res.status(503).json({ error: 'NOT_CONFIGURED', message: 'Job scheduling is not configured' });
+          return;
+        }
+        const body = unscheduleJobSchema.parse(req.body ?? {});
+        const result = await syncJobSchedule(syncDeps, {
+          operation: 'unschedule',
+          tenantId: req.auth!.tenantId,
+          jobId: req.params.id,
+          actorId: req.auth!.userId,
+          actorRole: req.auth!.role,
+          reason: body.reason,
+        });
+        if (result.previousScheduledStart) {
+          notifyDispatchBoardChanged(req.auth!.tenantId, result.previousScheduledStart);
+        }
+        const job = await getJob(req.auth!.tenantId, req.params.id, jobRepo);
+        res.status(200).json(job);
+      } catch (err) {
+        handleScheduleError(res, err);
+      }
+    },
   );
 
   router.get(
@@ -386,6 +577,27 @@ export function createJobRouter(
                 jobId: req.params.id,
                 error: milestoneErr instanceof Error ? milestoneErr.message : String(milestoneErr),
               });
+            }
+          }
+        }
+
+        // Cancel propagation: a canceled job must not leave a live appointment
+        // on the dispatch board. Runs in the same request transaction as the
+        // status change (NOT best-effort) so the two stay consistent — a
+        // failed cancel rolls the transition back. No-op when nothing is
+        // scheduled or scheduling isn't wired.
+        if (status === 'canceled') {
+          const syncDeps = buildScheduleSyncDeps();
+          if (syncDeps) {
+            const sync = await syncJobSchedule(syncDeps, {
+              operation: 'cancelForJob',
+              tenantId: req.auth!.tenantId,
+              jobId: req.params.id,
+              actorId: req.auth!.userId,
+              actorRole: req.auth!.role,
+            });
+            if (sync.previousScheduledStart) {
+              notifyDispatchBoardChanged(req.auth!.tenantId, sync.previousScheduledStart);
             }
           }
         }

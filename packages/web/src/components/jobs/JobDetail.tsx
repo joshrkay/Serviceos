@@ -13,6 +13,7 @@ import type { Job, JobActivity, MaterialItem, Customer, Technician } from '../..
 import type { JobDetailResponse } from '@ai-service-os/shared';
 import { calcMaterialsTotal, calcEstimateTotalFromLines } from '../../utils/job-ui-math';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
+import { JobSchedulePanel } from './JobSchedulePanel';
 import { useMutation } from '../../hooks/useMutation';
 import { useApiClient } from '../../lib/apiClient';
 import { useWorkerTerm } from '../../hooks/useWorkerTerm';
@@ -1054,6 +1055,14 @@ export function JobDetailView({
       )}
       <StatusStepper job={job} />
       <ScheduleTechCard job={job} tech={tech} onCallTech={() => setModal('call')} workerTerm={workerTerm} />
+      <div className="rounded-xl bg-card border border-border p-4">
+        <p className="text-sm font-medium text-foreground mb-3">Manage schedule</p>
+        <JobSchedulePanel
+          jobId={id}
+          assignedTechnicianId={apiJob?.assignedTechnicianId ?? apiJob?.technician?.id}
+          onChanged={refetchJob}
+        />
+      </div>
       <DescriptionCard job={job} />
       {job.estimateId && (
         <EstimateScopeCard

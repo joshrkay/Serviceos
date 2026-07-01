@@ -117,3 +117,71 @@ describe('JobForm (characterization, pre-kit-migration)', () => {
     );
   });
 });
+
+describe('JobForm — schedule on create (U7)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(apiFetch).mockImplementation(async (url: RequestInfo | URL, opts?: RequestInit) => {
+      const u = String(url);
+      if (u.startsWith('/api/customers')) {
+        return { ok: true, status: 200, json: async () => ({ data: [customer] }) } as unknown as Response;
+      }
+      if (u.startsWith('/api/locations')) {
+        return { ok: true, status: 200, json: async () => locations } as unknown as Response;
+      }
+      if (u.startsWith('/api/users')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ data: [{ id: 'tech-9', firstName: 'Tess', lastName: 'Tech' }] }),
+        } as unknown as Response;
+      }
+      if (u === '/api/jobs' && opts?.method === 'POST') {
+        return { ok: true, status: 201, json: async () => ({ id: 'job-123' }) } as unknown as Response;
+      }
+      return { ok: true, status: 200, json: async () => ({}) } as unknown as Response;
+    });
+  });
+
+  it('schedule controls meet the ≥44px tap-target bar', async () => {
+    render(<JobForm />);
+    const start = screen.getByLabelText(/Start time/);
+    expect(start).toHaveClass('min-h-11');
+
+    fireEvent.change(start, { target: { value: '2030-07-01T15:00' } });
+    expect(await screen.findByLabelText(/Technician/)).toHaveClass('min-h-11');
+    expect(screen.getByLabelText(/Duration/)).toHaveClass('min-h-11');
+  });
+
+  it('includes the schedule block (ISO start, timezone, duration) in the POST body', async () => {
+    const onCreated = vi.fn();
+    render(<JobForm onCreated={onCreated} />);
+    await pickCustomer();
+    fireEvent.change(screen.getByLabelText(/Summary/), { target: { value: 'Tune-up' } });
+    fireEvent.change(screen.getByLabelText(/Start time/), { target: { value: '2030-07-01T15:00' } });
+    fireEvent.change(screen.getByLabelText(/Duration/), { target: { value: '90' } });
+
+    fireEvent.click(screen.getByRole('button', { name: /create job/i }));
+    await waitFor(() => expect(onCreated).toHaveBeenCalledWith('job-123'));
+
+    const body = jobsPostBody();
+    expect(typeof body.scheduledStart).toBe('string');
+    expect(body.scheduledStart).toMatch(/Z$/);
+    expect(body.durationMin).toBe(90);
+    expect(typeof body.timezone).toBe('string');
+  });
+
+  it('sends the chosen technician id', async () => {
+    const onCreated = vi.fn();
+    render(<JobForm onCreated={onCreated} />);
+    await pickCustomer();
+    fireEvent.change(screen.getByLabelText(/Summary/), { target: { value: 'Install' } });
+    fireEvent.change(screen.getByLabelText(/Start time/), { target: { value: '2030-07-01T15:00' } });
+    // The roster option loads from GET /api/users; select it once present.
+    fireEvent.change(await screen.findByLabelText(/Technician/), { target: { value: 'tech-9' } });
+
+    fireEvent.click(screen.getByRole('button', { name: /create job/i }));
+    await waitFor(() => expect(onCreated).toHaveBeenCalled());
+    expect(jobsPostBody().technicianId).toBe('tech-9');
+  });
+});
