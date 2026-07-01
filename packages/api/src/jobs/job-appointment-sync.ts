@@ -246,6 +246,15 @@ export async function syncJobSchedule(
       // new durationMin — moving only the start time must not silently resize
       // the appointment (a 90-min visit rescheduled must stay 90 min).
       previousScheduledStart = existing.scheduledStart;
+      // Switch the technician BEFORE moving the time. The appointment-time
+      // UPDATE re-stamps the CURRENT primary assignment's window via the DB
+      // trigger, so moving the time first (while the old tech is still
+      // attached) makes a valid move to a FREE tech 409 whenever the old tech
+      // is busy at the new time. Reassigning first detaches the old tech, so
+      // only the target tech is checked against the new window.
+      if (input.technicianId !== undefined) {
+        await ensurePrimaryTechnician(deps, tenantId, existing.id, input.technicianId, actorId, actorRole);
+      }
       const durationMs =
         input.durationMin !== undefined
           ? input.durationMin * 60_000
@@ -295,14 +304,13 @@ export async function syncJobSchedule(
           'Job already has an active appointment that cannot be rescheduled here',
         );
       }
+      // A fresh appointment must exist before it can carry an assignment.
+      // (Technician is optional — undefined leaves it unassigned.)
+      if (input.technicianId !== undefined) {
+        await ensurePrimaryTechnician(deps, tenantId, appointment.id, input.technicianId, actorId, actorRole);
+      }
     }
 
-    // Technician is optional on schedule — only touch the assignment when one
-    // was provided (undefined ⇒ leave as-is; a fresh appointment stays
-    // unassigned).
-    if (input.technicianId !== undefined) {
-      await ensurePrimaryTechnician(deps, tenantId, appointment.id, input.technicianId, actorId, actorRole);
-    }
     await syncJobAssignment(tenantId, jobId, appointment.id, deps.assignmentRepo, deps.jobRepo);
 
     await maybeAdvanceToScheduled(deps, job, actorId, actorRole);

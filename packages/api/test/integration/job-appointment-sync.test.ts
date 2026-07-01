@@ -5,7 +5,7 @@
  * surfacing as a 409 via the reschedule trigger, and the dispatch board
  * reading through real RLS-scoped reads.
  */
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterEach } from 'vitest';
 import { Pool } from 'pg';
 import { getSharedTestDb, createTestTenant } from './shared';
 import { PgJobRepository } from '../../src/jobs/pg-job';
@@ -80,6 +80,15 @@ describe('Postgres integration — job-appointment sync', () => {
     });
   });
 
+  // Isolate cases: the tenant + technician are shared across tests, so clear
+  // the scheduling rows between them — otherwise appointments accumulate in the
+  // real DB and reusing the same technician/slot in a later test trips the
+  // no_double_booking guard.
+  afterEach(async () => {
+    await pool.query('DELETE FROM appointment_assignments WHERE tenant_id = $1', [tenantId]);
+    await pool.query('DELETE FROM appointments WHERE tenant_id = $1', [tenantId]);
+  });
+
   async function newJob(summary = 'Integration job'): Promise<string> {
     const id = crypto.randomUUID();
     await jobRepo.create({
@@ -88,6 +97,15 @@ describe('Postgres integration — job-appointment sync', () => {
       depositRequiredCents: 0, depositPaidCents: 0, depositStatus: 'not_required', moneyState: 'no_estimate',
       createdBy: ownerId, createdAt: new Date(), updatedAt: new Date(),
     });
+    return id;
+  }
+
+  async function newTech(): Promise<string> {
+    const id = crypto.randomUUID();
+    await pool.query(
+      `INSERT INTO users (id, tenant_id, clerk_user_id, email, role) VALUES ($1, $2, $3, $4, $5)`,
+      [id, tenantId, id, `tech-${id}@example.com`, 'technician'],
+    );
     return id;
   }
 
@@ -199,5 +217,29 @@ describe('Postgres integration — job-appointment sync', () => {
 
     expect(await activeAppointments(jobId)).toHaveLength(0);
     expect(activeOnBoard(await board(), jobId)).toHaveLength(0);
+  });
+
+  it('reschedule + switch to a FREE tech succeeds even when the old tech is busy at the new time', async () => {
+    const techB = await newTech();
+
+    // The old tech (techId) is busy at T14 (the target slot) on another job.
+    const busyJob = await newJob('old tech busy at T14');
+    await syncJobSchedule(deps, scheduleInput(busyJob, T14, techId));
+
+    // This job starts with the old tech at T10, then reschedules to T14 AND
+    // switches to the free techB. Moving the time BEFORE switching would
+    // re-stamp the old tech onto T14 and 409 against busyJob; switching first
+    // must let this valid move succeed.
+    const jobId = await newJob('move to free tech');
+    await syncJobSchedule(deps, scheduleInput(jobId, T10, techId));
+
+    const res = await syncJobSchedule(deps, {
+      operation: 'schedule', tenantId, jobId, actorId: ownerId, actorRole: 'owner',
+      scheduledStart: new Date(T14), technicianId: techB,
+    });
+
+    expect(res.appointment!.scheduledStart.toISOString()).toBe(new Date(T14).toISOString());
+    const primaries = (await assignmentRepo.findByAppointment(tenantId, res.appointment!.id)).filter((a) => a.isPrimary);
+    expect(primaries.map((a) => a.technicianId)).toEqual([techB]);
   });
 });

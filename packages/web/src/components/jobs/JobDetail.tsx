@@ -1059,7 +1059,7 @@ export function JobDetailView({
         <p className="text-sm font-medium text-foreground mb-3">Manage schedule</p>
         <JobSchedulePanel
           jobId={id}
-          assignedTechnicianId={apiJob?.technician?.id}
+          assignedTechnicianId={apiJob?.assignedTechnicianId ?? apiJob?.technician?.id}
           onChanged={refetchJob}
         />
       </div>

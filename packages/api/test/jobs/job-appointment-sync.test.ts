@@ -178,6 +178,19 @@ describe('U2 — syncJobSchedule', () => {
     expect((await appointmentRepo.findByJob(TENANT, job.id))).toHaveLength(2);
   });
 
+  it('reschedule that also switches technician moves the slot and the primary tech', async () => {
+    const job = await newJob();
+    await syncJobSchedule(deps([tech(TECH_1), tech(TECH_2)]), scheduleInput(job.id)); // TECH_1 @ START
+    const res = await syncJobSchedule(deps([tech(TECH_1), tech(TECH_2)]), {
+      operation: 'schedule', tenantId: TENANT, jobId: job.id, actorId: 'owner-1', actorRole: 'owner',
+      scheduledStart: NEW_START, technicianId: TECH_2,
+    });
+    const primaries = (await assignmentRepo.findByAppointment(TENANT, res.appointment!.id)).filter((a) => a.isPrimary);
+    expect(primaries.map((a) => a.technicianId)).toEqual([TECH_2]);
+    expect(res.appointment!.scheduledStart.toISOString()).toBe(NEW_START.toISOString());
+    expect((await getJob(TENANT, job.id, jobRepo))!.assignedTechnicianId).toBe(TECH_2);
+  });
+
   it('reassign to a different technician moves the lane; to null clears it (unassigned)', async () => {
     const job = await newJob();
     const scheduled = await syncJobSchedule(deps([tech(TECH_1), tech(TECH_2)]), scheduleInput(job.id));
