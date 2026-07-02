@@ -215,7 +215,13 @@ export class MmsEstimateTaskHandler {
       'unitPrice',
     );
     const meta: ProposalConfidenceMeta = {
-      overallConfidence: getConfidenceLevel(confidenceScore),
+      // Hard-block auto-approval for any ungrounded (LLM-priced) line via the
+      // RV-007 confidence-marker guard — independent of the numeric score AND
+      // of any tenant `auto_approve_threshold` override. An uncatalogued price
+      // must always reach a human.
+      overallConfidence: catalogOutcome?.anyUncatalogued
+        ? 'low'
+        : getConfidenceLevel(confidenceScore),
       ...(severity ? { severity } : {}),
       ...(Object.keys(signals.fieldConfidence).length > 0
         ? { fieldConfidence: signals.fieldConfidence }

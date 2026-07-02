@@ -210,7 +210,14 @@ export class InvoiceTaskHandler implements TaskHandler {
       'unitPriceCents',
     );
     const meta: ProposalConfidenceMeta = {
-      overallConfidence: getConfidenceLevel(confidenceScore),
+      // Hard-block auto-approval for any ungrounded (LLM-priced) line via the
+      // RV-007 confidence-marker guard — independent of the numeric score AND
+      // of any tenant `auto_approve_threshold` override (a threshold ≤ the 0.85
+      // uncatalogued cap would otherwise still auto-approve an AI-invented
+      // price). An uncatalogued price must always reach a human.
+      overallConfidence: catalogOutcome?.anyUncatalogued
+        ? 'low'
+        : getConfidenceLevel(confidenceScore),
       ...(Object.keys(signals.fieldConfidence).length > 0
         ? { fieldConfidence: signals.fieldConfidence }
         : {}),

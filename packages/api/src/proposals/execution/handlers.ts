@@ -76,6 +76,7 @@ import { TimeEntryService } from '../../time-tracking/time-entry-service';
 import { FeedbackRequestRepository } from '../../feedback/feedback-request';
 import { DelayNotificationService } from '../../notifications/delay-notifications';
 import { LineItem, LineItemCategory, buildLineItem } from '../../shared/billing-engine';
+import type { PricingSource } from '../../ai/resolution/catalog-resolver';
 import {
   EmergencyDispatchExecutionHandler,
   EmergencySmsSender,
@@ -494,6 +495,17 @@ const VALID_LINE_ITEM_CATEGORIES: readonly LineItemCategory[] = [
   'other',
 ];
 
+const VALID_PRICING_SOURCES: readonly PricingSource[] = [
+  'catalog',
+  'ambiguous',
+  'uncatalogued',
+  'manual',
+];
+
+function isPricingSource(value: unknown): value is PricingSource {
+  return typeof value === 'string' && (VALID_PRICING_SOURCES as readonly string[]).includes(value);
+}
+
 /**
  * Normalize a draft_estimate payload's line items into the billing engine's
  * `LineItem` shape.
@@ -529,7 +541,7 @@ export function normalizeEstimateLineItems(
       ? (rawCategory as LineItemCategory)
       : undefined;
     const id = typeof li.id === 'string' && li.id ? li.id : uuidv4();
-    return buildLineItem(
+    const base = buildLineItem(
       id,
       typeof li.description === 'string' && li.description ? li.description : 'Service',
       quantity,
@@ -540,6 +552,20 @@ export function normalizeEstimateLineItems(
       typeof li.taxable === 'boolean' ? li.taxable : false,
       category,
     );
+    // Preserve catalog-grounding + tier metadata that buildLineItem doesn't
+    // set. Dropping `pricingSource` would make a catalog-priced AI estimate
+    // persist as ungrounded (isEstimateCatalogGrounded treats null as NOT
+    // grounded), forcing the manual discount-negotiation path.
+    return {
+      ...base,
+      ...(isPricingSource(li.pricingSource) ? { pricingSource: li.pricingSource } : {}),
+      ...(typeof li.groupKey === 'string' ? { groupKey: li.groupKey } : {}),
+      ...(typeof li.groupLabel === 'string' ? { groupLabel: li.groupLabel } : {}),
+      ...(typeof li.isOptional === 'boolean' ? { isOptional: li.isOptional } : {}),
+      ...(typeof li.isDefaultSelected === 'boolean'
+        ? { isDefaultSelected: li.isDefaultSelected }
+        : {}),
+    };
   });
 }
 

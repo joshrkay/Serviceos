@@ -146,7 +146,7 @@ describe('Postgres integration — apply_late_fee idempotency across reload', ()
     expect(second.success).toBe(true);
 
     const reloaded = await invoiceRepo.findById(tenant.tenantId, invoiceId);
-    const feeLines = reloaded!.lineItems.filter((li) => li.id === lateFeeLineId('initial'));
+    const feeLines = reloaded!.lineItems.filter((li) => li.id === lateFeeLineId(invoiceId, 'initial'));
     expect(feeLines).toHaveLength(1);
     // 15000 base + 2500 fee once — never 20000.
     expect(reloaded!.amountDueCents).toBe(17500);

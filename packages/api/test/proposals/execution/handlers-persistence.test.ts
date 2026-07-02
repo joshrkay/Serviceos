@@ -11,7 +11,10 @@ import {
 } from '../../../src/customers/customer';
 import { InMemoryLocationRepository, createLocation } from '../../../src/locations/location';
 import { InMemoryJobRepository } from '../../../src/jobs/job';
-import { InMemoryEstimateRepository } from '../../../src/estimates/estimate';
+import {
+  InMemoryEstimateRepository,
+  isEstimateCatalogGrounded,
+} from '../../../src/estimates/estimate';
 import { InMemorySettingsRepository } from '../../../src/settings/settings';
 import { LineItem } from '../../../src/shared/billing-engine';
 import { v4 as uuidv4 } from 'uuid';
@@ -221,6 +224,37 @@ describe('DraftEstimateExecutionHandler persistence', () => {
     expect(line.totalCents).toBe(90000); // 2 × 45000, not NaN
     expect(estimate!.totals.subtotalCents).toBe(90000);
     expect(Number.isNaN(estimate!.totals.totalCents)).toBe(false);
+  });
+
+  it('preserves catalog pricingSource so the estimate stays catalog-grounded', async () => {
+    // Regression: normalizing via buildLineItem dropped pricingSource, so a
+    // catalog-priced AI estimate persisted as ungrounded (null) and later took
+    // the manual discount-negotiation path.
+    const estimateRepo = new InMemoryEstimateRepository();
+    const settingsRepo = new InMemorySettingsRepository();
+    const handler = new DraftEstimateExecutionHandler(estimateRepo, settingsRepo);
+
+    const result = await handler.execute(
+      makeProposal('draft_estimate', {
+        customerId,
+        jobId,
+        lineItems: [
+          {
+            description: 'Water heater install',
+            quantity: 1,
+            unitPrice: 185000,
+            category: 'labor',
+            pricingSource: 'catalog',
+          },
+        ],
+      }),
+      CONTEXT,
+    );
+
+    expect(result.success).toBe(true);
+    const estimate = await estimateRepo.findById(TENANT, result.resultEntityId!);
+    expect(estimate!.lineItems[0].pricingSource).toBe('catalog');
+    expect(isEstimateCatalogGrounded(estimate!)).toBe(true);
   });
 
   it('rejects a line item with no price rather than persisting NaN', async () => {

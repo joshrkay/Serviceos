@@ -445,7 +445,10 @@ describe('RV-007 — InvoiceTaskHandler populates payload._meta', () => {
       markers?: Array<{ path: string; reason: string }>;
     };
     expect(meta).toBeDefined();
-    expect(meta.overallConfidence).toBe('high'); // 0.85 ≥ 0.8
+    // Any uncatalogued line forces overall 'low' so the RV-007 marker guard
+    // hard-blocks auto-approval regardless of the numeric score or a tenant
+    // threshold override (not just the 0.85 numeric cap).
+    expect(meta.overallConfidence).toBe('low');
     // No catalog to ground against → both LLM-priced lines flagged low.
     expect(meta.fieldConfidence).toEqual({
       'lineItems[0].unitPriceCents': 'low',
@@ -514,7 +517,8 @@ describe('RV-007 — InvoiceTaskHandler populates payload._meta', () => {
       fieldConfidence?: Record<string, string>;
       markers?: Array<{ path: string; reason: string }>;
     };
-    expect(meta.overallConfidence).toBe('high');
+    // Surviving line is uncatalogued → overall 'low' hard-blocks auto-approve.
+    expect(meta.overallConfidence).toBe('low');
     // Empty catalog → the surviving priced line is uncatalogued, and its
     // marker path indexes the FINAL array (index 0), NOT the pre-drop index 1.
     expect(meta.fieldConfidence).toEqual({ 'lineItems[0].unitPriceCents': 'low' });

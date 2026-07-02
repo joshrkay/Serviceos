@@ -472,11 +472,13 @@ describe('RV-007 — EstimateTaskHandler populates payload._meta', () => {
     stub.setResponse({
       content: JSON.stringify({
         customerId: '550e8400-e29b-41d4-a716-446655440000',
-        lineItems: [{ description: 'Something', quantity: 1, unitPrice: 50 }],
+        // Catalog-grounded (see groundedCatalog) so the score→level mapping is
+        // what's under test — an uncatalogued line would force 'low'.
+        lineItems: [{ description: 'Labor', quantity: 1, unitPrice: 50 }],
         confidence_score: 0.6,
       }),
     });
-    const handler = new EstimateTaskHandler(makeGateway(stub));
+    const handler = new EstimateTaskHandler(makeGateway(stub), await groundedCatalog());
 
     const { proposal } = await handler.handle(makeContext());
 

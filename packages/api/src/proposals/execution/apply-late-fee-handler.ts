@@ -23,9 +23,17 @@ import { v5 as uuidv5 } from 'uuid';
  */
 const LATE_FEE_ID_NAMESPACE = 'b6c9e0a2-5f3d-4b1e-9c8a-1d2e3f4a5b6c';
 
-/** Deterministic, persistence-stable id for the late-fee line of `stepKey`. */
-export function lateFeeLineId(stepKey: string): string {
-  return uuidv5(`late-fee:${stepKey}`, LATE_FEE_ID_NAMESPACE);
+/**
+ * Deterministic, persistence-stable id for the late-fee line of `stepKey` on a
+ * SPECIFIC invoice. `invoice_line_items.id` is a global primary key and the
+ * dunning worker uses the same step (e.g. 'initial') for every invoice, so the
+ * id MUST include the invoice id — otherwise the second invoice's 'initial'
+ * fee would collide on the same UUID and the insert would fail with a
+ * duplicate key instead of applying the fee. Keying on (invoiceId, stepKey)
+ * keeps idempotency per-invoice while staying globally unique.
+ */
+export function lateFeeLineId(invoiceId: string, stepKey: string): string {
+  return uuidv5(`${invoiceId}:late-fee:${stepKey}`, LATE_FEE_ID_NAMESPACE);
 }
 
 /**
@@ -89,7 +97,7 @@ export class ApplyLateFeeExecutionHandler implements ExecutionHandler {
     // success (re-execution or a duplicate proposal must not double-charge).
     // The id is a deterministic UUID so it survives the invoice repo's insert
     // (which rewrites non-UUID ids) and still matches on reload.
-    const feeLineId = lateFeeLineId(stepKey);
+    const feeLineId = lateFeeLineId(invoice.id, stepKey);
     if (invoice.lineItems.some((li) => li.id === feeLineId)) {
       return { success: true, resultEntityId: invoice.id };
     }

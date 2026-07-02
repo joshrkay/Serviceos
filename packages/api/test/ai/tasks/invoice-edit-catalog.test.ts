@@ -366,6 +366,31 @@ describe('P22-001 invoice-edit-catalog', () => {
       expect(payload._meta?.overallConfidence).toBeDefined();
     });
 
+    it('does not auto-approve an uncatalogued draft even when the tenant threshold is below the 0.85 cap', async () => {
+      // Codex P2: the numeric cap alone left a hole — a tenant with
+      // auto_approve_threshold ≤ 0.85 could still auto-approve a fully
+      // LLM-priced draft. The uncatalogued line now forces _meta.overallConfidence
+      // to 'low', which hard-blocks auto-approval before threshold resolution.
+      const gateway = mockGateway(
+        draftResponse([{ description: 'trip fee', quantity: 1, unitPrice: 7500 }]),
+      );
+      const handler = new InvoiceTaskHandler(gateway, {
+        catalogRepo: new InMemoryCatalogItemRepository(),
+      });
+      const result = await handler.handle({
+        tenantId: TENANT,
+        userId: 'u-1',
+        message: 'invoice it',
+        supervisorPresent: true,
+        supervisorMode: 'supervisor',
+        tenantThresholdOverride: { supervisor: 0.5 }, // below the 0.85 cap
+      });
+
+      expect(result.proposal.status).not.toBe('approved');
+      const meta = result.proposal.payload._meta as { overallConfidence?: string };
+      expect(meta.overallConfidence).toBe('low');
+    });
+
     it('caps confidence and flags uncatalogued when no catalog repo is wired', async () => {
       const gateway = mockGateway(
         draftResponse([{ description: 'trip fee', quantity: 1, unitPrice: 7500 }]),
