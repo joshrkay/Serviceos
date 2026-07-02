@@ -244,6 +244,39 @@ export function createJobRouter(
     }
   );
 
+  /**
+   * Journey QA 2026-07-02 (bug 5) — the list previously returned bare Job
+   * rows, so the UI rendered the literal fallback "Customer" on every card.
+   * Attach the same customer summary the detail route embeds, resolved with
+   * ONE deduplicated batch of lookups per page (bounded by the page size).
+   * Best-effort: a missing repo or customer leaves the row unenriched.
+   */
+  const attachCustomerSummaries = async <T extends { customerId?: string }>(
+    tenantId: string,
+    jobs: T[],
+  ): Promise<Array<T & { customer?: Record<string, unknown> }>> => {
+    if (!customerRepo || jobs.length === 0) return jobs;
+    const ids = [...new Set(jobs.map((j) => j.customerId).filter((id): id is string => !!id))];
+    const found = await Promise.all(
+      ids.map((id) => customerRepo.findById(tenantId, id).catch(() => null)),
+    );
+    const byId = new Map(found.filter((c): c is Customer => c !== null).map((c) => [c.id, c]));
+    return jobs.map((j) => {
+      const c = j.customerId ? byId.get(j.customerId) : undefined;
+      return c
+        ? {
+            ...j,
+            customer: {
+              id: c.id,
+              displayName: c.displayName,
+              firstName: c.firstName,
+              lastName: c.lastName,
+            },
+          }
+        : j;
+    });
+  };
+
   router.get(
     '/',
     requireAuth,
