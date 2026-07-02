@@ -23,21 +23,28 @@ import { loadConfig } from '../../src/shared/config';
 import { createLLMGateway } from '../../src/ai/gateway/factory';
 import { MmsEstimateTaskHandler } from '../../src/ai/tasks/mms-estimate-task';
 
-const ENABLED = process.env.MMS_VISION_SMOKE === '1' && !!process.env.AI_PROVIDER_API_KEY;
+const MMS_VISION_SMOKE = process.env.MMS_VISION_SMOKE === '1';
+const HAS_API_KEY = !!process.env.AI_PROVIDER_API_KEY;
 const IMAGE_PATH = process.env.MMS_VISION_SMOKE_IMAGE ?? 'test/fixtures/mms-smoke.jpg';
 const HAS_IMAGE = existsSync(IMAGE_PATH);
 
-// Gated AND fixture-gated: with no committed repair photo the suite SKIPS (the
-// daily workflow goes green/neutral) instead of failing in imageDataUri before
-// it can reach the model. Commit a real photo at IMAGE_PATH (or set
-// MMS_VISION_SMOKE_IMAGE) to actually exercise vision.
-if (ENABLED && !HAS_IMAGE) {
-  // eslint-disable-next-line no-console
-  console.warn(
-    `[mms-vision-smoke] skipped: no fixture at ${IMAGE_PATH}. ` +
-      `Commit a real repair photo or set MMS_VISION_SMOKE_IMAGE.`,
+// Fail-hard: when MMS_VISION_SMOKE=1 (the workflow sets this), missing API key
+// or fixture is a FAILURE, not a skip. Skipped tests do not constitute a green
+// gate — the workflow must fail loudly when misconfigured.
+if (MMS_VISION_SMOKE && !HAS_API_KEY) {
+  throw new Error(
+    '[mms-vision-smoke] FATAL: MMS_VISION_SMOKE=1 but AI_PROVIDER_API_KEY is empty. ' +
+      'This workflow cannot pass without a real API key.',
   );
 }
+if (MMS_VISION_SMOKE && !HAS_IMAGE) {
+  throw new Error(
+    `[mms-vision-smoke] FATAL: MMS_VISION_SMOKE=1 but no fixture at ${IMAGE_PATH}. ` +
+      'Commit a real repair photo or set MMS_VISION_SMOKE_IMAGE.',
+  );
+}
+
+const ENABLED = MMS_VISION_SMOKE && HAS_API_KEY;
 
 function imageDataUri(): string {
   const bytes = readFileSync(IMAGE_PATH);
