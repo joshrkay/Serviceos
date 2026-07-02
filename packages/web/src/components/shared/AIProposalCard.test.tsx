@@ -129,6 +129,36 @@ describe('P2-035 (U2) AIProposalCard confidence markers', () => {
     );
     expect(screen.queryByTestId('pricing-source-badges')).toBeNull();
   });
+
+  // UB-A3 — "Standing instruction applied" chips from
+  // `_meta.appliedStandingInstructions` (server-side intersected ids).
+  it('renders a "Standing instruction applied" chip per applied instruction (UB-A3)', () => {
+    render(
+      <AIProposalCard
+        proposal={makeProposal({
+          meta: {
+            overallConfidence: 'high',
+            appliedStandingInstructions: [
+              { id: 'si-1', text: 'Always add a $50 trip fee' },
+              { id: 'si-2', text: 'Mention the referral discount' },
+            ],
+          },
+        })}
+      />,
+    );
+
+    const chips = screen.getAllByTestId('standing-instruction-chip');
+    expect(chips).toHaveLength(2);
+    expect(chips[0]).toHaveTextContent('Standing instruction applied: Always add a $50 trip fee');
+    expect(chips[1]).toHaveTextContent('Standing instruction applied: Mention the referral discount');
+  });
+
+  it('omits the standing-instruction chips when _meta carries none (UB-A3)', () => {
+    render(
+      <AIProposalCard proposal={makeProposal({ meta: { overallConfidence: 'high' } })} />,
+    );
+    expect(screen.queryByTestId('standing-instruction-chips')).toBeNull();
+  });
 });
 
 describe('Story 3.11 — approved proposal deep-links to the created entity', () => {

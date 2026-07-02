@@ -355,6 +355,103 @@ describe('voice-action-router worker', () => {
     expect(byTenant[0].proposalType).toBe('draft_estimate');
   });
 
+  // ── UB-A3 — standing instructions threaded into drafting prompts ──
+  it('injects resolver-supplied standing instructions into the drafting prompt and stamps the intersected marker', async () => {
+    const gateway = gatewayReturning([
+      JSON.stringify({ intentType: 'draft_estimate', confidence: 0.9 }),
+      JSON.stringify({
+        customerId: 'cust-1',
+        lineItems: [{ description: 'Install water heater', quantity: 1, unitPrice: 120000 }],
+        confidence_score: 0.9,
+        appliedStandingInstructions: ['si-fee', 'si-invented'],
+      }),
+    ]);
+
+    const base = {
+      tenantId: 't-1',
+      scope: {},
+      active: true,
+      source: 'settings' as const,
+      createdBy: 'u-1',
+      createdAt: new Date('2026-06-01T00:00:00Z'),
+      updatedAt: new Date('2026-06-01T00:00:00Z'),
+      deactivatedAt: null,
+      deactivatedBy: null,
+    };
+    const worker = createVoiceActionRouterWorker({
+      gateway,
+      proposalRepo,
+      standingInstructionsResolver: async () => [
+        { ...base, id: 'si-fee', instruction: 'Always add a $50 trip fee line item' },
+        // Scoped to a different intent — must NOT reach the estimate prompt.
+        { ...base, id: 'si-invoice', instruction: 'Invoice-only rule', scope: { intents: ['create_invoice'] } },
+      ],
+    });
+
+    await worker.handle(
+      msg({
+        tenantId: 't-1',
+        userId: 'u-1',
+        transcript: 'Draft an estimate for the Johnson water heater job',
+      }),
+      silentLogger()
+    );
+
+    const draftingRequest = (gateway.complete as ReturnType<typeof vi.fn>).mock
+      .calls[1][0] as { messages: Array<{ role: string; content: string }> };
+    const injected = draftingRequest.messages.filter(
+      (m) => m.role === 'system' && m.content.includes('OWNER STANDING INSTRUCTIONS')
+    );
+    expect(injected).toHaveLength(1);
+    expect(injected[0].content).toContain('- [SI:si-fee] Always add a $50 trip fee line item');
+    expect(injected[0].content).not.toContain('Invoice-only rule');
+
+    const byTenant = await proposalRepo.findByTenant('t-1');
+    expect(byTenant).toHaveLength(1);
+    const meta = (byTenant[0].payload as { _meta: Record<string, unknown> })._meta;
+    // Model-invented id intersected away; only the injected id survives.
+    expect(meta.appliedStandingInstructions).toEqual([
+      { id: 'si-fee', text: 'Always add a $50 trip fee line item' },
+    ]);
+  });
+
+  it('standing-instructions resolver failure is soft — the task drafts without them', async () => {
+    const gateway = gatewayReturning([
+      JSON.stringify({ intentType: 'draft_estimate', confidence: 0.9 }),
+      JSON.stringify({
+        customerId: 'cust-1',
+        lineItems: [{ description: 'Install water heater', quantity: 1, unitPrice: 120000 }],
+        confidence_score: 0.9,
+      }),
+    ]);
+
+    const worker = createVoiceActionRouterWorker({
+      gateway,
+      proposalRepo,
+      standingInstructionsResolver: async () => {
+        throw new Error('db down');
+      },
+    });
+
+    await worker.handle(
+      msg({
+        tenantId: 't-1',
+        userId: 'u-1',
+        transcript: 'Draft an estimate for the Johnson water heater job',
+      }),
+      silentLogger()
+    );
+
+    const byTenant = await proposalRepo.findByTenant('t-1');
+    expect(byTenant).toHaveLength(1);
+    expect(byTenant[0].proposalType).toBe('draft_estimate');
+    const draftingRequest = (gateway.complete as ReturnType<typeof vi.fn>).mock
+      .calls[1][0] as { messages: Array<{ role: string; content: string }> };
+    expect(
+      draftingRequest.messages.some((m) => m.content.includes('OWNER STANDING INSTRUCTIONS'))
+    ).toBe(false);
+  });
+
   it('classifies "create customer" and persists a create_customer proposal with mapped name', async () => {
     const gateway = gatewayReturning([
       JSON.stringify({

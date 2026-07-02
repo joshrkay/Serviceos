@@ -18,6 +18,11 @@ import { AuditRepository } from '../audit/audit';
 import { LLMGateway } from '../ai/gateway/gateway';
 import { SettingsRepository } from '../settings/settings';
 import { SuggestReplyTask } from '../ai/tasks/suggest-reply-task';
+import type { StandingInstructionRepository } from '../instructions/standing-instructions';
+import {
+  selectInjectedStandingInstructions,
+  type InjectedStandingInstruction,
+} from '../ai/standing-instructions-context';
 import type { CustomerRepository } from '../customers/customer';
 import type { LeadRepository } from '../leads/lead';
 import type { DncRepository } from '../compliance/dnc';
@@ -28,6 +33,12 @@ export interface ConversationRouterAiDeps {
   /** When present, enables POST /:id/suggest-reply (AI draft replies). */
   gateway?: LLMGateway;
   settingsRepo?: SettingsRepository;
+  /**
+   * UB-A3 — owner standing instructions injected into suggested replies
+   * (keyed on the 'suggest_reply' intent). Optional and failure-soft: a
+   * repo error drafts without instructions.
+   */
+  standingInstructionRepo?: Pick<StandingInstructionRepository, 'listActive'>;
 }
 
 /**
@@ -263,6 +274,18 @@ export function createConversationRouter(
       const messages = await conversationRepo.getMessages(tenantId, req.params.id);
       const settings = await aiDeps.settingsRepo?.findByTenant(tenantId);
 
+      // UB-A3 — owner standing instructions applicable to suggested replies,
+      // resolved best-effort (a repo failure never blocks the draft).
+      let standingInstructions: InjectedStandingInstruction[] | undefined;
+      if (aiDeps.standingInstructionRepo) {
+        try {
+          const active = await aiDeps.standingInstructionRepo.listActive(tenantId);
+          standingInstructions = selectInjectedStandingInstructions(active, 'suggest_reply');
+        } catch {
+          standingInstructions = undefined;
+        }
+      }
+
       const task = new SuggestReplyTask(aiDeps.gateway);
       const { draft } = await task.suggest({
         messages: messages
@@ -271,6 +294,7 @@ export function createConversationRouter(
         brandVoice: settings?.brandVoice,
         businessName: settings?.businessName,
         tenantId,
+        ...(standingInstructions ? { standingInstructions } : {}),
       });
 
       res.status(200).json({ draft });

@@ -1580,8 +1580,9 @@ export function createApp(): express.Express {
         customerRepo,
         // Brand-voice customer SMS drafts route through the shared LLM gateway
         // (CLAUDE.md: all AI calls go through the gateway); tone is read from
-        // tenant_settings via settingsRepo.
-        brandVoiceDeps: { gateway: llmGateway, settingsRepo },
+        // tenant_settings via settingsRepo. UB-A3: owner standing instructions
+        // (keyed on the brand-voice intent) adjust draft content.
+        brandVoiceDeps: { gateway: llmGateway, settingsRepo, standingInstructionRepo },
       },
     },
     { overwrite: true },
@@ -2102,6 +2103,11 @@ export function createApp(): express.Express {
     // constructed, `operatorVerticalPromptResolver` is assigned and the
     // shim starts returning live data on the next classifier call.
     verticalPromptResolver: operatorVerticalResolverShim,
+    // UB-A3 — owner standing instructions injected into drafting prompts.
+    // Active list resolved once per request; selection per classified intent
+    // happens inside the router. Failure-soft (a repo error drafts without).
+    standingInstructionsResolver: (tenantId: string) =>
+      standingInstructionRepo.listActive(tenantId),
     extendedIntentsEnabled: voiceExtendedIntentsFlagShim,
     // U3 — respond_to_review on-ramp: recent-review lookup + the SAME
     // build-proposal dep bundle the google-reviews polling worker wires, so
@@ -4294,6 +4300,8 @@ export function createApp(): express.Express {
       {
         gateway: llmGateway,
         settingsRepo,
+        // UB-A3 — owner standing instructions injected into suggested replies.
+        standingInstructionRepo,
       },
       // U6 — owner reply send path. Only wired when a delivery provider exists
       // (prod/dev with creds); otherwise POST /:id/reply returns 503.
@@ -4415,6 +4423,10 @@ export function createApp(): express.Express {
       // shim with the voice-action-router so the same vertical context
       // reaches both text and voice classification paths.
       verticalPromptResolver: operatorVerticalResolverShim,
+      // UB-A3 — owner standing instructions injected into assistant-drafted
+      // estimates/invoices (same resolver contract as the voice router).
+      standingInstructionsResolver: (tenantId: string) =>
+        standingInstructionRepo.listActive(tenantId),
       // Story 3.11 — persist each chat turn so the running conversation
       // survives reload and is searchable.
       conversationRepo,
@@ -4757,7 +4769,9 @@ export function createApp(): express.Express {
                     },
                     maxChars: 420,
                   },
-                  { gateway: llmGateway, settingsRepo },
+                  // UB-A3 — owner standing instructions (keyed on the
+                  // digest_narrative intent) adjust the narrative content.
+                  { gateway: llmGateway, settingsRepo, standingInstructionRepo },
                 );
                 return result.text;
               },

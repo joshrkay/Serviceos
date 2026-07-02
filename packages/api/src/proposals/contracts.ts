@@ -80,6 +80,21 @@ export const proposalConfidenceMetaSchema = z.object({
       }),
     )
     .optional(),
+  /**
+   * UB-A3 — owner standing instructions the drafting model reported applying,
+   * intersected by the handler with what was actually injected (a model-
+   * invented id can never land here). Presentation-only: the review UI renders
+   * a "Standing instruction applied" chip; `decideInitialStatus` ignores it
+   * (guard-tested byte-identical with/without). Omitted entirely when empty.
+   */
+  appliedStandingInstructions: z
+    .array(
+      z.object({
+        id: z.string().min(1),
+        text: z.string().min(1),
+      }),
+    )
+    .optional(),
 });
 
 export type ProposalConfidenceMeta = z.infer<typeof proposalConfidenceMetaSchema>;

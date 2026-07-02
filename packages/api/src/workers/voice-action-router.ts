@@ -56,6 +56,8 @@ import {
 import { InvoiceEditTaskHandler } from '../ai/tasks/invoice-edit-task';
 import { EstimateEditTaskHandler } from '../ai/tasks/estimate-edit-task';
 import { CreateCustomerTaskHandler, TaskHandler, TaskContext, TaskResult } from '../ai/tasks/task-handlers';
+import type { StandingInstruction } from '../instructions/standing-instructions';
+import { selectInjectedStandingInstructions } from '../ai/standing-instructions-context';
 import {
   RescheduleAppointmentTaskHandler,
   CancelAppointmentTaskHandler,
@@ -237,6 +239,15 @@ export interface VoiceActionRouterDeps {
    * `buildVerticalPromptResolver(...)` from `verticals/resolve-active-pack.ts`.
    */
   verticalPromptResolver?: (tenantId: string) => Promise<string | undefined>;
+  /**
+   * UB-A3 — resolves the tenant's ACTIVE standing instructions once per
+   * request (production wires `standingInstructionRepo.listActive`).
+   * `selectApplicableInstructions` (≤5) then narrows per classified intent
+   * inside processSegment and the slice rides TaskContext into the drafting
+   * handlers. Mirrors `verticalPromptResolver`: optional, failure-soft — a
+   * resolver error drafts without instructions, never blocks the task.
+   */
+  standingInstructionsResolver?: (tenantId: string) => Promise<StandingInstruction[]>;
   /**
    * Resolves the tenant's scheduling context (IANA timezone) once per
    * request from tenant_settings, mirroring `thresholdResolver`. Threaded
@@ -1022,6 +1033,12 @@ interface SegmentParams {
   recordingId?: string;
   customerId?: string;
   verticalPromptSection?: string;
+  /**
+   * UB-A3 — the tenant's ACTIVE standing instructions, resolved once per
+   * request (failure-soft). processSegment narrows them per classified
+   * intent via `selectApplicableInstructions` (≤5) before drafting.
+   */
+  activeStandingInstructions?: StandingInstruction[];
   /** Phase-2 Track A — tenant opted in to the extended operator intents. */
   extendedIntents?: boolean;
   /**
@@ -1285,11 +1302,20 @@ async function processSegment(
     }).length;
   }
 
+  // UB-A3 — narrow the request-resolved active instructions to the ones
+  // applicable to THIS classified intent (≤5). Pure selection; undefined
+  // when nothing applies so untouched contexts stay byte-identical.
+  const standingInstructions = selectInjectedStandingInstructions(
+    params.activeStandingInstructions,
+    classification.intentType,
+  );
+
   const context: TaskContext = {
     tenantId,
     userId,
     message: segmentText,
     conversationId,
+    ...(standingInstructions ? { standingInstructions } : {}),
     ...(handler.taskType === 'draft_estimate' ? { clarificationCount } : {}),
     existingEntities: {
       ...entitiesForProposal(classification.intentType, classification.extractedEntities),
@@ -1651,6 +1677,21 @@ export function createVoiceActionRouterWorker(
         }
       }
 
+      // UB-A3 — resolve the tenant's active standing instructions once per
+      // request (mirrors verticalPromptResolver). Non-fatal: a resolver
+      // failure drafts without owner instructions rather than blocking.
+      let activeStandingInstructions: StandingInstruction[] | undefined;
+      if (deps.standingInstructionsResolver) {
+        try {
+          activeStandingInstructions = await deps.standingInstructionsResolver(tenantId);
+        } catch (err) {
+          const error = err instanceof Error ? err : new Error(String(err));
+          log.warn('voice-action-router: standingInstructionsResolver failed, continuing without standing instructions', {
+            error: error.message,
+          });
+        }
+      }
+
       // Phase-2 Track A — resolve the extended-intents opt-in once per
       // message (mirrors multiActionEnabled). Non-fatal: a resolver error
       // degrades to the pre-Track-A classifier prompt.
@@ -1715,6 +1756,7 @@ export function createVoiceActionRouterWorker(
               recordingId,
               customerId,
               verticalPromptSection,
+              ...(activeStandingInstructions ? { activeStandingInstructions } : {}),
               ...(extendedIntents ? { extendedIntents: true } : {}),
             },
             log,
@@ -1734,6 +1776,7 @@ export function createVoiceActionRouterWorker(
           recordingId,
           customerId,
           verticalPromptSection,
+          ...(activeStandingInstructions ? { activeStandingInstructions } : {}),
           ...(extendedIntents ? { extendedIntents: true } : {}),
           // Single-action path: apply the per-recording dedup keys.
           applyDedup: true,
