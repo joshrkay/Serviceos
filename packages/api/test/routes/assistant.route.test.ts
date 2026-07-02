@@ -9,8 +9,9 @@
 import request from 'supertest';
 import express, { Request, Response, NextFunction } from 'express';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { createAssistantRouter, proposalSignals } from '../../src/routes/assistant';
+import { createAssistantRouter, proposalSignals, VOICE_APPROVAL_REFUSAL } from '../../src/routes/assistant';
 import { InMemoryProposalRepository } from '../../src/proposals/proposal';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
 import type { CatalogItem, CatalogItemRepository } from '../../src/catalog/catalog-item';
 import { InMemoryConversationRepository } from '../../src/conversations/conversation-service';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
@@ -518,6 +519,93 @@ describe('U7 — POST /api/assistant/chat surfaces pricing signals on the card',
     // No fabricated warning signals on a complete proposal.
     expect(proposal.missingFields ?? null).toBeNull();
     expect(proposal.meta ?? null).toBeNull();
+  });
+});
+
+// ─── UB-B3: voice-mode approval guard ─────────────────────────────────────────
+// approve/reject/edit_proposal are not routed by the chat handler; before the
+// guard they fell to the generic LLM path. A voice-mode turn (inputMode:
+// 'voice') that classifies as an approval intent must get a deterministic
+// refusal — never an approval action, never an LLM improvisation — while
+// text-mode behavior stays byte-identical (LLM fallback).
+
+describe('UB-B3 — voice-mode approval intents are refused deterministically', () => {
+  function buildAppWithAudit(gateway: LLMGateway, proposalRepo: InMemoryProposalRepository, auditRepo: InMemoryAuditRepository) {
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: TEST_USER,
+        sessionId: 'sess-1',
+        tenantId: TEST_TENANT,
+        role: 'owner',
+      };
+      next();
+    });
+    app.use('/api/assistant', createAssistantRouter({ gateway, proposalRepo, auditRepo }));
+    return app;
+  }
+
+  it.each(['approve_proposal', 'reject_proposal', 'edit_proposal'])(
+    'voice-mode %s → refusal copy + audit event + no proposal mutation + no LLM fallback',
+    async (intentType) => {
+      const gateway = scriptedGateway([
+        JSON.stringify({ intentType, confidence: 0.95, extractedEntities: {} }),
+        // If the guard ever leaks to the LLM fallback, this reply would surface.
+        JSON.stringify({ content: 'LLM improvised an approval reply.' }),
+      ]);
+      const proposalRepo = new InMemoryProposalRepository();
+      const auditRepo = new InMemoryAuditRepository();
+      const app = buildAppWithAudit(gateway, proposalRepo, auditRepo);
+
+      const res = await request(app)
+        .post('/api/assistant/chat')
+        .send({
+          messages: [{ role: 'user', content: 'approve the pending estimate' }],
+          inputMode: 'voice',
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body.message.content).toBe(VOICE_APPROVAL_REFUSAL);
+      expect(res.body.message.proposal ?? null).toBeNull();
+      expect(res.body.taskType).toBe('assistant.voice_approval_refused');
+
+      // Audited, attributed, and carrying the refused intent.
+      const refusals = auditRepo
+        .getAll()
+        .filter((e) => e.eventType === 'assistant.voice_approval_refused');
+      expect(refusals).toHaveLength(1);
+      expect(refusals[0].tenantId).toBe(TEST_TENANT);
+      expect(refusals[0].metadata).toMatchObject({ intentType });
+
+      // No proposal was created or mutated, and the LLM fallback never ran:
+      // the gateway was called exactly once (the classifier).
+      expect(await proposalRepo.findByTenant(TEST_TENANT)).toHaveLength(0);
+      expect(gateway.complete).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('text-mode approval intent keeps the existing behavior (falls to the LLM reply)', async () => {
+    const gateway = scriptedGateway([
+      JSON.stringify({ intentType: 'approve_proposal', confidence: 0.95, extractedEntities: {} }),
+      JSON.stringify({ content: 'You can approve it from the proposals inbox.' }),
+    ]);
+    const proposalRepo = new InMemoryProposalRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const app = buildAppWithAudit(gateway, proposalRepo, auditRepo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'approve the pending estimate' }] });
+
+    expect(res.status).toBe(200);
+    // Unchanged: unrouted intent falls through to the generic LLM path.
+    expect(res.body.message.content).toBe('You can approve it from the proposals inbox.');
+    expect(gateway.complete).toHaveBeenCalledTimes(2);
+    // No refusal audit on the text path.
+    expect(
+      auditRepo.getAll().filter((e) => e.eventType === 'assistant.voice_approval_refused'),
+    ).toHaveLength(0);
   });
 });
 

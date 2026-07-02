@@ -1,6 +1,8 @@
 import { Router, Request, Response } from 'express';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import type { Pool } from 'pg';
 import { AuthenticatedRequest } from '../auth/clerk';
+import { createRateLimitStore } from '../middleware/rate-limit-store';
 import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import {
@@ -70,6 +72,34 @@ export function createVoiceRouter(
 ): Router {
   const router = Router();
 
+  // UB-B1 — dedicated per-tenant mint limiter. The global /api per-tenant
+  // limiter (1000 req/min, app.ts) still applies; conversation mode mints a
+  // token per session start, far more often than dictation, so token minting
+  // gets its own tighter bucket. Same store/keying conventions as the global
+  // limiter (Redis-backed when REDIS_URL is set, per-process MemoryStore
+  // otherwise).
+  const mintLimitPerMin = Math.max(
+    1,
+    Number(process.env.VOICE_STREAM_TOKEN_MINTS_PER_MIN) || 30,
+  );
+  const mintLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: mintLimitPerMin,
+    standardHeaders: true,
+    legacyHeaders: false,
+    // requireTenant runs first, so auth.tenantId is always present; the IP
+    // fallback mirrors the global per-tenant limiter's defensive keying.
+    keyGenerator: (req) =>
+      (req as AuthenticatedRequest).auth?.tenantId ?? ipKeyGenerator(req.ip ?? ''),
+    handler: (_req, res) => {
+      res.status(429).json({
+        error: 'RATE_LIMITED',
+        message: 'Too many live-transcription starts. Please wait a minute and try again.',
+      });
+    },
+    store: createRateLimitStore(process.env.REDIS_URL, 'voice-mint:'),
+  });
+
   /**
    * POST /stream-token — Story 3.2: mint a 30s Deepgram grant token for the
    * browser dictation client. The long-lived DEEPGRAM_API_KEY never leaves the
@@ -80,9 +110,34 @@ export function createVoiceRouter(
     '/stream-token',
     requireAuth,
     requireTenant,
-    asyncRoute(async (_req: Request, res: Response) => {
+    mintLimiter,
+    asyncRoute(async (req: Request, res: Response) => {
+      const authReq = req as AuthenticatedRequest;
       try {
         const minted = await mintDeepgramStreamToken({ apiKey: process.env.DEEPGRAM_API_KEY });
+        // UB-B1 — audit trail for every mint (mirrors the
+        // voice.transcription.completed emission below): conversation mode
+        // makes token minting a high-frequency surface, so mints must be
+        // attributable per tenant/actor. Failure-soft: audit errors never
+        // block the mint.
+        if (auditRepo) {
+          try {
+            await auditRepo.create(createAuditEvent({
+              tenantId: authReq.auth?.tenantId ?? 'unknown',
+              actorId: authReq.auth?.userId ?? 'unknown',
+              actorRole: 'user',
+              eventType: 'voice.stream_token_minted',
+              entityType: 'voice_stream_token',
+              entityId: `mint-${Date.now()}`,
+              metadata: {
+                model: minted.model,
+                expiresInSeconds: minted.expiresInSeconds,
+              },
+            }));
+          } catch {
+            // Audit failures should not block token minting
+          }
+        }
         res.json({
           token: minted.token,
           expiresIn: minted.expiresInSeconds,

@@ -6,12 +6,16 @@ import { requireAuth, requireTenant, requirePermission } from '../middleware/aut
 import { toErrorResponse } from '../shared/errors';
 import { LLMGateway } from '../ai/gateway/gateway';
 import { ProposalRepository } from '../proposals/proposal';
-import type { AuditRepository } from '../audit/audit';
+import { createAuditEvent, type AuditRepository } from '../audit/audit';
 import {
   recordAssistantTurn,
   type ConversationRepository,
 } from '../conversations/conversation-service';
-import { classifyIntent } from '../ai/orchestration/intent-classifier';
+import {
+  classifyIntent,
+  isVoiceApprovalIntent,
+  isVoiceEditIntent,
+} from '../ai/orchestration/intent-classifier';
 import { CreateCustomerTaskHandler } from '../ai/tasks/task-handlers';
 import type { TaskHandler } from '../ai/tasks/task-handlers';
 import { EstimateTaskHandler } from '../ai/tasks/estimate-task';
@@ -116,7 +120,16 @@ const assistantChatRequestSchema = z.object({
   // Story 3.11 — the client pins the running conversation so each turn persists
   // to the same thread; omitted on the first turn (server opens a new one).
   conversationId: z.string().optional(),
+  // UB-B3 — how the operator produced this message. 'voice' turns (conversation
+  // mode / PTT transcripts) are refused approval/reject/edit intents: in-app
+  // voice approval stays deferred (RV-071/RV-225 posture — approvals are a
+  // screen tap here).
+  inputMode: z.enum(['voice', 'text']).optional(),
 });
+
+/** UB-B3 — deterministic refusal copy for voice-mode approval intents. */
+export const VOICE_APPROVAL_REFUSAL =
+  "Tap the card to approve — I don't take approvals by voice here yet.";
 
 function inferTaskType(text: string): string {
   const t = text.toLowerCase();
@@ -446,6 +459,7 @@ async function generateAssistantReply(
   userId: string,
   deps: AssistantRouterDeps,
   correlationId: string,
+  inputMode?: 'voice' | 'text',
 ) {
   const lastUser = [...messages].reverse().find((m) => m.role === 'user');
   const lastUserText = lastUser?.content ?? '';
@@ -500,6 +514,46 @@ async function generateAssistantReply(
         { tenantId, ...(verticalPromptSection ? { verticalPromptSection } : {}) },
         deps.gateway,
       );
+
+      // UB-B3 — voice-mode approval guard. approve/reject/edit_proposal are
+      // NOT routed in this chat handler; before this guard they fell through
+      // to the generic LLM path, so a spoken "approve it" got a free-form LLM
+      // reply. Intercept HERE — before the chain/handler/LLM paths — so a
+      // voice turn gets a deterministic refusal, never an approval action and
+      // never an LLM improvisation. In-app voice approval stays deferred
+      // (RV-071/RV-225: approve/reject/edit by voice is owner-telephony only).
+      if (
+        inputMode === 'voice' &&
+        (isVoiceApprovalIntent(classification.intentType) ||
+          isVoiceEditIntent(classification.intentType))
+      ) {
+        if (deps.auditRepo) {
+          try {
+            await deps.auditRepo.create(createAuditEvent({
+              tenantId,
+              actorId: userId,
+              actorRole: 'user',
+              eventType: 'assistant.voice_approval_refused',
+              entityType: 'assistant_chat',
+              entityId: correlationId,
+              metadata: { intentType: classification.intentType },
+            }));
+          } catch {
+            // Audit failures must not block the refusal reply.
+          }
+        }
+        return {
+          taskType: 'assistant.voice_approval_refused',
+          model: 'policy-guard',
+          usage: { input: 0, output: 0, total: 0 },
+          message: {
+            role: 'assistant' as const,
+            content: VOICE_APPROVAL_REFUSAL,
+            reasoning:
+              'Voice approvals are not enabled on this surface; approvals require a screen tap.',
+          },
+        };
+      }
 
       // QA-2026-06-05 (AST-07, scoped): multi-step asks ("…, then …") are
       // decomposed into SEQUENTIAL linked proposals sharing a chainId in
@@ -789,6 +843,7 @@ export function createAssistantRouter(deps: AssistantRouterDeps): Router {
           req.auth!.userId,
           deps,
           correlationId,
+          parsed.inputMode,
         );
 
         // Story 3.11 — persist the turn so the conversation survives reload and
