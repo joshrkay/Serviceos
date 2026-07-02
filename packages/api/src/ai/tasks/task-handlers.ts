@@ -66,6 +66,30 @@ export interface TaskContext {
    */
   clarificationCount?: number;
   /**
+   * Tenant business-hours schedule (tenant_settings.business_hours),
+   * resolved once per request by the entry-point alongside `timezone`
+   * (voice-action-router's tenantSchedulingResolver). The held-slot booking
+   * path uses it to decide whether the proposed slot falls inside business
+   * hours for the autonomous lane (UB-D). Absent/empty is treated as "no
+   * schedule configured" — fail-open, per D-015.
+   */
+  businessHours?: Record<string, { open: string; close: string } | null> | null;
+  /**
+   * UB-D / D-015 — autonomous booking lane inputs, threaded by the
+   * entry-point ONLY for booking-classified segments (never a settings read
+   * on other intents). `inboundReceptionistSource` is true ONLY when the
+   * request originated from an inbound customer call with a verified caller
+   * (caller-ID match); owner memos and assistant chat are always false, so
+   * the lane can never engage for them. `pendingReferenceCount` carries the
+   * router's unresolved free-text reference count (annotation
+   * .pendingReferences) — any pending reference blocks the lane.
+   */
+  autonomousBooking?: {
+    settings: { enabled: boolean; threshold?: number };
+    inboundReceptionistSource: boolean;
+    pendingReferenceCount: number;
+  };
+  /**
    * UB-A3 — owner standing instructions applicable to this task, resolved
    * best-effort ONCE per request by the entry point (voice-action-router /
    * assistant chat) via `listActive` → `selectApplicableInstructions` (≤5)

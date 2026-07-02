@@ -192,6 +192,16 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     // Epic 12.6 — migration 204. Opt-out: column defaults true, so a
     // pre-migration row reads as enabled.
     weeklyFeedbackEnabled: (row.weekly_feedback_enabled as boolean | null) ?? true,
+    // UB-D / D-015 — migration 231. enabled is NOT NULL DEFAULT FALSE so
+    // legacy rows read false. threshold is NUMERIC(3,2), which node-pg
+    // returns as a STRING (the only fractional NUMERIC column on this
+    // table) — convert explicitly instead of the bare int-column casts
+    // used elsewhere in this mapper.
+    autonomousBookingEnabled: (row.autonomous_booking_enabled as boolean | null) ?? false,
+    autonomousBookingThreshold:
+      row.autonomous_booking_threshold != null
+        ? Number(row.autonomous_booking_threshold)
+        : undefined,
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
   };
@@ -380,6 +390,11 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         digestChannel: 'digest_channel',
         // Epic 12.6 — migration 204.
         weeklyFeedbackEnabled: 'weekly_feedback_enabled',
+        // UB-D / D-015 — migration 231. Both NOT NULL with column defaults;
+        // route validation (Zod + validateCommonSettingsFields) never passes
+        // null through, so the generic `value ?? null` handler is safe.
+        autonomousBookingEnabled: 'autonomous_booking_enabled',
+        autonomousBookingThreshold: 'autonomous_booking_threshold',
         updatedAt: 'updated_at',
       };
 

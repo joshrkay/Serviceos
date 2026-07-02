@@ -470,6 +470,22 @@ export interface TenantSettings {
    * `?? true`.
    */
   weeklyFeedbackEnabled?: boolean;
+  /**
+   * UB-D / D-015 — autonomous booking lane. Opt-in (column defaults FALSE,
+   * migration 231): when true, inbound-receptionist booking proposals
+   * (create_appointment / create_booking, capture class only) may
+   * auto-approve with no supervisor present, judged against
+   * `autonomousBookingThreshold`. Optional on the type so pre-migration
+   * rows / legacy fixtures read as "off" via `?? false`.
+   */
+  autonomousBookingEnabled?: boolean;
+  /**
+   * UB-D / D-015 — the lane's dedicated confidence threshold. NUMERIC(3,2)
+   * with DB CHECK 0.90–0.99 (default 0.95); the evaluator
+   * (proposals/autonomous-lane.ts) re-clamps to the 0.90 floor in code as
+   * defense in depth.
+   */
+  autonomousBookingThreshold?: number;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -599,6 +615,10 @@ export interface UpdateSettingsInput {
   digestChannel?: DigestChannel;
   /** Epic 12.6 — opt out of the weekly feedback email (column default true). */
   weeklyFeedbackEnabled?: boolean;
+  /** UB-D / D-015 — opt into the autonomous booking lane (column default false). */
+  autonomousBookingEnabled?: boolean;
+  /** UB-D / D-015 — lane confidence threshold, 0.90–0.99 (column default 0.95). */
+  autonomousBookingThreshold?: number;
 }
 
 export interface SettingsRepository {
@@ -677,6 +697,7 @@ function validateCommonSettingsFields(
     discountMaxBps?: number | null;
     discountFloorCents?: number | null;
     laborRateCentsPerHour?: number | null;
+    autonomousBookingThreshold?: number | null;
   }
 ): string[] {
   const errors: string[] = [];
@@ -729,6 +750,19 @@ function validateCommonSettingsFields(
     if (!Number.isInteger(rate) || rate < 0) {
       errors.push('laborRateCentsPerHour must be a non-negative integer of cents');
     }
+  }
+  // UB-D / D-015 — autonomous booking threshold mirrors the migration-231
+  // CHECK (NUMERIC(3,2) in [0.90, 0.99]). Fractional by design (a confidence
+  // score, not money); the evaluator (proposals/autonomous-lane.ts) re-clamps
+  // to the 0.90 floor at read time as defense in depth.
+  if (
+    input.autonomousBookingThreshold !== undefined &&
+    input.autonomousBookingThreshold !== null &&
+    (!Number.isFinite(input.autonomousBookingThreshold) ||
+      input.autonomousBookingThreshold < 0.9 ||
+      input.autonomousBookingThreshold > 0.99)
+  ) {
+    errors.push('autonomousBookingThreshold must be between 0.90 and 0.99');
   }
   return errors;
 }

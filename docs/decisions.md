@@ -184,3 +184,30 @@ internal consistency in a later pass.
 **Rationale:** [Why this choice over alternatives]
 **Story:** [Which story triggered this decision]
 **Alternatives rejected:** [What else was considered]
+
+### D-015: Autonomous booking lane — scoped exception to the unsupervised auto-approve block
+**Date:** 2026-07-02
+**Decision:** Per-tenant, default-OFF setting (tenant_settings.autonomous_booking_enabled)
+allowing create_appointment/create_booking proposals from the inbound receptionist to
+auto-approve while no supervisor is present, when ALL of: confidence >=
+autonomous_booking_threshold (default 0.95, floor 0.90 enforced in code), entity resolution
+clean (no pending references / missing fields, verified customer), a live held slot within
+business hours, and no vulnerability/emergency/negotiation flag on the session. The customer
+receives the standard confirmation after the existing 5-second undo window; the owner
+receives an immediate SMS with a one-tap signed UNDO that cancels the appointment and sends
+a fixed-template apology. Money-, comms-, and irreversible-class proposals are structurally
+unaffected (actionClassForProposalType unchanged; proposals/auto-approve.ts unchanged).
+**Rationale:** D-004 established proposal-first because trust is the product; Phase 12
+hard-blocked unsupervised auto-approval. For a solo owner-operator on a roof, every booking
+waiting for a tap is a lost booking — the highest-value calls arrive precisely when no one
+is watching the wall. This lane trades a bounded, reversible, capture-class action (a
+booking with a compensating cancellation path) for call conversion, under explicit tenant
+opt-in and a stricter dedicated threshold. It is an amendment scoped to two proposal types,
+not a change to D-004's posture.
+**Story:** UB-D (agent wave plan, docs/plans/2026-07-02-001-feat-rivet-jobber-agent-wave-plan.md)
+**Alternatives rejected:**
+- (a) Global threshold lowering — touches every proposal type.
+- (b) A silent grace window before customer confirmation — degrades the core value while
+  still requiring the cancellation path.
+- (c) Treating supervisorPresent as true when the flag is on — would leak permissiveness
+  into all capture types.

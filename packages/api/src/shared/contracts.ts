@@ -445,6 +445,10 @@ export const updateSettingsSchema = z.object({
     .regex(/^([01]\d|2[0-3]):[0-5]\d$/, "digestTime must be 'HH:MM' (24-hour)")
     .optional(),
   digestChannel: z.enum(['sms', 'none']).optional(),
+  // UB-D / D-015 — autonomous booking lane (migration 231). Threshold bounds
+  // mirror the DB CHECK (NUMERIC(3,2) in [0.90, 0.99]).
+  autonomousBookingEnabled: z.boolean().optional(),
+  autonomousBookingThreshold: z.number().min(0.9).max(0.99).optional(),
 }).superRefine((val, ctx) => {
   if (val.depositStrategy === 'percentage') {
     if (val.depositPercentageBps == null) {

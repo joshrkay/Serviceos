@@ -5,6 +5,12 @@ import { Proposal, ProposalRepository, createProposal, CreateProposalInput, Prop
 import { assertValidProposalPayload } from '../proposals/contracts';
 import { isSupervisorPresent } from '../ai/supervisor-presence';
 import { routeUnsupervisedProposal, confidenceMetaBlocksAutoApprove } from '../proposals/auto-approve';
+import {
+  AUTONOMOUS_LANE_PROPOSAL_TYPES,
+  autonomousLaneEvaluationFor,
+} from '../proposals/autonomous-lane';
+import { createOneTapUndoToken } from '../proposals/one-tap-undo';
+import { createAuditEvent } from '../audit/audit';
 import { renderProposalSms, renderChainSms } from '../proposals/sms/render';
 import type { OutboundAnchorKind } from '../proposals/sms/sms-event';
 import type { RouteUnsupervisedProposalDeps } from '../proposals/auto-approve';
@@ -162,6 +168,13 @@ export interface UnsupervisedRoutingDeps extends RouteUnsupervisedProposalDeps {
     body: string;
     kind: OutboundAnchorKind;
   }) => Promise<void>;
+  /**
+   * UB-D / D3 — builds the public one-tap UNDO URL for a lane-approved
+   * booking's owner SMS (mirrors `buildApproveUrl`; production wires
+   * `/public/proposals/one-tap-undo?token=…`). The undo token is minted
+   * with the same `secret` the approve tokens use.
+   */
+  buildUndoUrl?: (token: string) => string;
 }
 
 export interface VoiceActionRouterDeps {
@@ -258,7 +271,29 @@ export interface VoiceActionRouterDeps {
    */
   tenantSchedulingResolver?: (
     tenantId: string,
-  ) => Promise<{ timezone?: string } | undefined>;
+  ) => Promise<
+    | {
+        timezone?: string;
+        /**
+         * UB-D — tenant_settings.business_hours, threaded so the held-slot
+         * booking path can gate the autonomous lane on "slot inside business
+         * hours". Optional/absent ⇒ fail-open (no schedule configured).
+         */
+        businessHours?: Record<string, { open: string; close: string } | null> | null;
+      }
+    | undefined
+  >;
+  /**
+   * UB-D / D-015 — resolves the tenant's autonomous booking lane settings
+   * (tenant_settings.autonomous_booking_enabled / _threshold). Consulted
+   * once per segment and ONLY when the classified intent maps to
+   * create_appointment, so non-booking segments never pay a settings read.
+   * Optional, best-effort: absent or failing resolver ⇒ the lane never
+   * engages (proposals keep the pre-lane unsupervised behavior).
+   */
+  autonomousBookingResolver?: (
+    tenantId: string,
+  ) => Promise<{ enabled: boolean; threshold?: number } | undefined>;
   /**
    * Injectable clock for the scheduling handlers' relative-date resolution
    * ("tomorrow", "next Tuesday"). Defaults to `new Date()` in production;
@@ -1268,6 +1303,14 @@ async function processSegment(
     ? await deps.tenantSchedulingResolver(tenantId).catch(() => undefined)
     : undefined;
 
+  // UB-D / D-015 — resolve the autonomous booking lane settings ONLY for
+  // booking-classified segments (never a settings read on other intents).
+  // Best-effort: a resolver failure means the lane simply doesn't engage.
+  const autonomousBookingSettings =
+    deps.autonomousBookingResolver && handler.taskType === 'create_appointment'
+      ? await deps.autonomousBookingResolver(tenantId).catch(() => undefined)
+      : undefined;
+
   // Phase 12 supervisor gate. Resolve presence once per request and thread
   // it onto the context so an autonomous, capture-class proposal (today:
   // create_appointment / create_booking) can only auto-approve when a
@@ -1329,8 +1372,26 @@ async function processSegment(
         : {}),
     },
     timezone: scheduling?.timezone ?? DEFAULT_TENANT_TIMEZONE,
+    ...(scheduling?.businessHours !== undefined
+      ? { businessHours: scheduling.businessHours }
+      : {}),
     now: deps.now ? deps.now() : new Date(),
     supervisorPresent,
+    // UB-D / D-015 — lane inputs for the held-slot booking path.
+    // `inboundReceptionistSource` is true ONLY when this job carried a
+    // verified inbound-caller identity (payload.customerId = caller-ID
+    // match). The production transcription-worker path (owner memos) never
+    // sets it, so the lane is structurally inert there today; inbound-call
+    // drivers (the live-call FSM site, PR4) thread it.
+    ...(autonomousBookingSettings
+      ? {
+          autonomousBooking: {
+            settings: autonomousBookingSettings,
+            inboundReceptionistSource: Boolean(customerId),
+            pendingReferenceCount: annotation.pendingReferences.length,
+          },
+        }
+      : {}),
     // Verified caller-ID identity wins; a resolver hit fills it only
     // when caller-ID didn't establish one.
     ...((customerId ?? annotation.resolved.customerId)
@@ -1356,6 +1417,37 @@ async function processSegment(
           },
         }
       : proposal;
+  // UB-D / D-015 — audit every lane evaluation (pass or fail) so the trail
+  // records why a booking did or did not take the lane. Best-effort: an
+  // audit hiccup never blocks the proposal.
+  const laneEvaluation = autonomousLaneEvaluationFor(annotated);
+  if (laneEvaluation && deps.auditRepo) {
+    try {
+      await deps.auditRepo.create(
+        createAuditEvent({
+          tenantId,
+          actorId: userId,
+          actorRole: 'system',
+          eventType: 'autonomous_booking_lane_evaluated',
+          entityType: 'proposal',
+          entityId: annotated.id,
+          metadata: {
+            proposalType: annotated.proposalType,
+            eligible: laneEvaluation.eligible,
+            ...(laneEvaluation.eligible
+              ? { threshold: laneEvaluation.threshold }
+              : { reason: laneEvaluation.reason }),
+          },
+        }),
+      );
+    } catch (err) {
+      log.warn('voice-action-router: autonomous lane audit failed', {
+        proposalId: annotated.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   // Chokepoint backstop for the "never auto-execute when unsupervised"
   // invariant. Every task handler forwards supervisorPresent into its
   // CreateProposalInput, but this is the single place every voice-sourced
@@ -1375,9 +1467,21 @@ async function processSegment(
  * Downgrade an auto-approved proposal to the review queue when the tenant is
  * unsupervised. Pure — returns the proposal unchanged unless it would
  * auto-execute (status 'approved') with no supervisor present.
+ *
+ * Exported for the chokepoint tests (lane-approved booking survives; a
+ * forged stamp on a non-booking type still downgrades).
  */
-function holdIfUnsupervised(proposal: Proposal, supervisorPresent: boolean): Proposal {
+export function holdIfUnsupervised(proposal: Proposal, supervisorPresent: boolean): Proposal {
   if (supervisorPresent || proposal.status !== 'approved') return proposal;
+  // UB-D / D-015 — the SINGLE scoped exception to the unsupervised
+  // downgrade: a booking proposal whose autonomous-lane evaluation passed
+  // every gate keeps its 'approved' status. The proposal type is re-checked
+  // against the lane's locked type list here (defense in depth): a forged
+  // "eligible" stamp on any non-booking proposal type still downgrades.
+  const lane = autonomousLaneEvaluationFor(proposal);
+  if (lane?.eligible && AUTONOMOUS_LANE_PROPOSAL_TYPES.includes(proposal.proposalType)) {
+    return proposal;
+  }
   return { ...proposal, status: 'ready_for_review', approvedAt: undefined };
 }
 
@@ -1868,6 +1972,51 @@ export function createVoiceActionRouterWorker(
             );
           } catch (err) {
             log.warn('voice-action-router: unsupervised routing failed', {
+              proposalId: outcome.proposal.id,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
+
+        // UB-D / D3 — owner one-tap UNDO SMS for a lane auto-approved
+        // booking (status 'approved' with no supervisor present can ONLY
+        // come out of the autonomous lane — holdIfUnsupervised downgrades
+        // everything else). Mutually exclusive with the routing block above
+        // (which handles 'ready_for_review'). Best-effort: an SMS failure
+        // never fails the already-persisted proposal.
+        if (
+          deps.unsupervisedRouting &&
+          !outcome.supervisorPresent &&
+          outcome.proposal.status === 'approved' &&
+          autonomousLaneEvaluationFor(outcome.proposal)?.eligible === true
+        ) {
+          const ur = deps.unsupervisedRouting;
+          try {
+            if (ur.sendSms && ur.secret && ur.buildUndoUrl) {
+              const ownerPhone = await ur.resolveOwnerPhone?.(tenantId);
+              if (ownerPhone) {
+                const { token } = createOneTapUndoToken({
+                  proposalId: outcome.proposal.id,
+                  tenantId,
+                  secret: ur.secret,
+                });
+                // The summary is buildResolvedSummary's "{work} — {resolved
+                // time} ({arrival window})" — customer/what + when in one
+                // line. No recordSmsEvent: this SMS is not a reply anchor
+                // (the UNDO is the link, not a Y/N), and OutboundAnchorKind
+                // is a DB-CHECKed union that a new kind would re-migrate.
+                await ur.sendSms(
+                  ownerPhone,
+                  `Rivet booked: ${outcome.proposal.summary}. Tap to UNDO: ${ur.buildUndoUrl(token)}`,
+                );
+              } else {
+                log.warn('voice-action-router: lane-approved booking has no owner phone for UNDO SMS', {
+                  proposalId: outcome.proposal.id,
+                });
+              }
+            }
+          } catch (err) {
+            log.warn('voice-action-router: autonomous lane undo SMS failed', {
               proposalId: outcome.proposal.id,
               error: err instanceof Error ? err.message : String(err),
             });

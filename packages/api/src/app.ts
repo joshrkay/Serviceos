@@ -383,6 +383,7 @@ import { PublicInvoiceService } from './invoices/public-invoice-service';
 import { createPublicInvoicesRouter } from './routes/public-invoices';
 import { createPublicPaymentsRouter } from './routes/public-payments';
 import { createOneTapApproveRouter } from './routes/one-tap-approve';
+import { createOneTapUndoRouter } from './routes/one-tap-undo';
 import { createFeedbackSendWorker } from './workers/feedback-send';
 import { runRecurringAgreementsSweep } from './workers/recurring-agreements-worker';
 import { runDailyDigestSweep, DIGEST_SWEEP_INTERVAL_MS } from './workers/daily-digest-worker';
@@ -1087,14 +1088,26 @@ export function createApp(): express.Express {
   // of a hardcoded one. A 60s cache mirrors thresholdResolver/voicePersona
   // so a multi-segment chain doesn't re-query settings per segment. Best-
   // effort: the router falls back to the product default when undefined.
-  const schedulingTzCache = new Map<string, { timezone?: string; expiresAt: number }>();
+  const schedulingTzCache = new Map<
+    string,
+    {
+      timezone?: string;
+      businessHours?: Record<string, { open: string; close: string } | null> | null;
+      expiresAt: number;
+    }
+  >();
   const tenantSchedulingResolver = async (tenantId: string) => {
     const hit = schedulingTzCache.get(tenantId);
-    if (hit && hit.expiresAt > Date.now()) return { timezone: hit.timezone };
+    if (hit && hit.expiresAt > Date.now()) {
+      return { timezone: hit.timezone, businessHours: hit.businessHours };
+    }
     const settings = await settingsRepo.findByTenant(tenantId);
     const timezone = settings?.timezone;
-    schedulingTzCache.set(tenantId, { timezone, expiresAt: Date.now() + 60_000 });
-    return { timezone };
+    // UB-D — business hours ride the same cached read so the autonomous
+    // booking lane's in-hours gate costs no extra settings query.
+    const businessHours = settings?.businessHours;
+    schedulingTzCache.set(tenantId, { timezone, businessHours, expiresAt: Date.now() + 60_000 });
+    return { timezone, businessHours };
   };
   // B1 — per-tenant voice persona. 60-second LRU cache; shared by
   // both the Twilio and in-app adapters.
@@ -1378,6 +1391,17 @@ export function createApp(): express.Express {
       'one_tap_approve',
       nonce,
       'one_tap_approve_nonce',
+      {},
+    );
+    return receipt.inserted;
+  };
+  // UB-D / D3 — same durable receipt store, DISTINCT source: undo nonces
+  // and approve nonces can never collide or cross-consume.
+  const consumeOneTapUndoNonce = async (nonce: string): Promise<boolean> => {
+    const receipt = await webhookEventRepo.recordReceipt(
+      'one_tap_undo',
+      nonce,
+      'one_tap_undo_nonce',
       {},
     );
     return receipt.inserted;
@@ -2084,6 +2108,21 @@ export function createApp(): express.Express {
     availabilityFinder,
     thresholdResolver,
     tenantSchedulingResolver,
+    // UB-D / D-015 — best-effort sink for `autonomous_booking_lane_evaluated`
+    // (also serves the U5b negotiation discount audit when that path engages).
+    auditRepo,
+    // UB-D / D-015 — lane settings; the router consults this ONLY for
+    // booking-classified segments.
+    autonomousBookingResolver: async (tenantId: string) => {
+      const s = await settingsRepo.findByTenant(tenantId);
+      if (!s) return undefined;
+      return {
+        enabled: s.autonomousBookingEnabled ?? false,
+        ...(s.autonomousBookingThreshold !== undefined
+          ? { threshold: s.autonomousBookingThreshold }
+          : {}),
+      };
+    },
     appointmentRepo,
     // RV-042 — lets update_estimate proposals stamp the acceptance-void
     // marker at creation when they target a currently accepted estimate.
@@ -2145,6 +2184,10 @@ export function createApp(): express.Express {
       ...(oneTapSecret ? { secret: oneTapSecret } : {}),
       buildApproveUrl: (token: string) =>
         `${oneTapApiBaseUrl}/public/proposals/one-tap-approve?token=${encodeURIComponent(token)}`,
+      // UB-D / D3 — one-tap UNDO link for lane auto-approved bookings
+      // (minted with the same one-tap secret).
+      buildUndoUrl: (token: string) =>
+        `${oneTapApiBaseUrl}/public/proposals/one-tap-undo?token=${encodeURIComponent(token)}`,
       resolveOwnerPhone: resolveUnsupervisedOwnerPhone,
       resolveRouting: async (tenantId: string) =>
         (await settingsRepo.findByTenant(tenantId))?.unsupervisedProposalRouting,
@@ -2343,6 +2386,32 @@ export function createApp(): express.Express {
       // for the bound job (batch-invoice eligibility machinery), then
       // redirect into the standard approve flow.
       invoiceMintDeps: { jobRepo, invoiceRepo, estimateRepo },
+    }),
+  );
+
+  // UB-D / D3 — public one-tap UNDO for autonomous-lane bookings. Same
+  // token-gated posture as the approve route above; still-approved
+  // proposals go through undoProposal, executed ones get a compensating
+  // cancel + fixed-template, consent/DNC-gated customer apology SMS.
+  app.use(
+    '/public/proposals',
+    createOneTapUndoRouter({
+      proposalRepo,
+      appointmentRepo,
+      auditRepo,
+      ...(oneTapSecret ? { secret: oneTapSecret } : {}),
+      consumeNonce: consumeOneTapUndoNonce,
+      jobRepo,
+      customerRepo,
+      ...(messageDelivery
+        ? {
+            customerMessageDeps: {
+              delivery: messageDelivery,
+              dispatchRepo,
+              dncRepo,
+            },
+          }
+        : {}),
     }),
   );
 

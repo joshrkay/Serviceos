@@ -5752,6 +5752,21 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_users_fullname_trgm
       ON users USING GIN ((TRIM(COALESCE(first_name,'') || ' ' || COALESCE(last_name,''))) gin_trgm_ops);
   `,
+
+  '231_tenant_settings_autonomous_booking': `
+    -- UB-D / D-015 (agent wave) — autonomous booking lane. Per-tenant opt-in
+    -- (default OFF) letting inbound-receptionist booking proposals
+    -- (create_appointment / create_booking, capture class only) auto-approve
+    -- while unsupervised, judged against a dedicated stricter threshold
+    -- (default 0.95; DB CHECK 0.90–0.99, floor also enforced in code —
+    -- src/proposals/autonomous-lane.ts). Inline CHECK rides the ADD COLUMN so
+    -- the boot-time re-run (IF NOT EXISTS) never re-validates existing rows.
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS autonomous_booking_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS autonomous_booking_threshold NUMERIC(3,2) NOT NULL DEFAULT 0.95
+        CHECK (autonomous_booking_threshold >= 0.90 AND autonomous_booking_threshold <= 0.99);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

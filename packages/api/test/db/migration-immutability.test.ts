@@ -376,6 +376,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['229_create_standing_instructions', '21d0ee846bbf78ddfbdb78b061b41ae30f2ec289e89472aea60f4025c45d8bac'],
   // U1 (agent wave): trigram index for the technician entity-resolver kind.
   ['230_users_fullname_trgm_index', '8e9b0477e3a4700b45fc73a3a24d2680176df263d2cc5a05d02a0b2397011fff'],
+  ['231_tenant_settings_autonomous_booking', '1a9b505aeabfeda419fb0d3e579f42815463ec80d02abd36dd6c5bb6863e24ef'],
 ];
 
 function hashMigration(value: string): string {
