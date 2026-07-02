@@ -13,6 +13,48 @@ function isUniqueViolation(err: unknown): boolean {
 }
 
 /**
+ * Recompute an invoice's paid balance from its payment ledger and repair the
+ * invoice ONLY if it is under-credited. Used by the duplicate-payment backstop:
+ * paymentRepo.create and invoiceRepo.update commit in separate transactions on
+ * the webhook path, so a crash after the payment row committed but before the
+ * invoice update would leave the invoice underpaid; every later retry then hits
+ * the unique constraint and must not silently return without applying the
+ * missing credit.
+ *
+ * Guarded to only ever INCREASE amountPaidCents (never reduce): the ledger sum
+ * is the source of truth for "how much has been paid", and only repairing an
+ * under-credit can't corrupt a correctly-credited invoice even if a credit type
+ * is undercounted here.
+ */
+async function reconcileInvoiceFromPayments(
+  tenantId: string,
+  invoiceId: string,
+  invoiceRepo: InvoiceRepository,
+  paymentRepo: PaymentRepository,
+  fallback: Invoice,
+): Promise<Invoice> {
+  const invoice = (await invoiceRepo.findById(tenantId, invoiceId)) ?? fallback;
+  const payments = await paymentRepo.findByInvoice(tenantId, invoiceId);
+  const paidCents = payments
+    .filter((p) => (p.status === 'completed' || p.status === 'processing') && !p.reversedAt)
+    .reduce((sum, p) => sum + (p.amountCents - (p.refundedAmountCents ?? 0)), 0);
+
+  // Already consistent (or over-counted by another concurrent writer) → leave
+  // it; we only repair the under-credit the crash-mid-write case produces.
+  if (paidCents <= invoice.amountPaidCents) return invoice;
+
+  const amountDueCents = Math.max(0, invoice.totals.totalCents - paidCents);
+  const status = amountDueCents === 0 ? 'paid' : 'partially_paid';
+  const repaired = await invoiceRepo.update(tenantId, invoiceId, {
+    amountPaidCents: paidCents,
+    amountDueCents,
+    status,
+    updatedAt: new Date(),
+  });
+  return repaired ?? invoice;
+}
+
+/**
  * U6 — resolve the customer's display name for the owner `payment_received`
  * push. Best-effort: callers that don't wire it (or can't resolve a name) get
  * a generic label so the push still goes out without blocking the payment.
@@ -351,9 +393,18 @@ export async function recordPayment(
         input.providerReference,
       );
       if (existing) {
-        const currentInvoice =
-          (await invoiceRepo.findById(input.tenantId, input.invoiceId)) ?? invoice;
-        return { payment: existing, invoice: currentInvoice };
+        // Repair the invoice from the payment ledger before returning: the
+        // winning attempt may have committed the payment row but crashed
+        // before crediting the invoice (separate transactions), and a bare
+        // idempotent return would leave the invoice permanently underpaid.
+        const reconciled = await reconcileInvoiceFromPayments(
+          input.tenantId,
+          input.invoiceId,
+          invoiceRepo,
+          paymentRepo,
+          invoice,
+        );
+        return { payment: existing, invoice: reconciled };
       }
     }
     throw err;

@@ -139,6 +139,7 @@ describe('P1-013 — Payment entity + partial payments', () => {
         return inner.create(p);
       },
       findByProviderReference: (t: string, r: string) => inner.findByProviderReference(t, r),
+      findByInvoice: (t: string, i: string) => inner.findByInvoice(t, i),
     } as unknown as PaymentRepository;
 
     const inv = await createInvoice(
@@ -171,6 +172,68 @@ describe('P1-013 — Payment entity + partial payments', () => {
     expect(rows).toHaveLength(1); // no duplicate payment row
     const reloaded = await localInvoiceRepo.findById('tenant-1', inv.id);
     expect(reloaded!.amountPaidCents).toBe(10000); // credited once, not 20000
+  });
+
+  it('duplicate-payment backstop — reconciles an invoice under-credited by a crashed prior attempt', async () => {
+    // The winning attempt committed the payment row but crashed before crediting
+    // the invoice (payment.create and invoice.update are separate transactions
+    // on the webhook path). A bare idempotent return would leave the invoice
+    // permanently underpaid; the 23505 branch must repair it from the ledger.
+    const localInvoiceRepo = new InMemoryInvoiceRepository();
+    const inner = new InMemoryPaymentRepository();
+    const seen = new Set<string>();
+    const racingRepo: PaymentRepository = {
+      create: async (p: Payment) => {
+        if (p.providerReference && (p.method === 'credit_card' || p.method === 'bank_transfer')) {
+          const key = `${p.tenantId}:${p.providerReference}`;
+          if (seen.has(key)) throw Object.assign(new Error('duplicate key'), { code: '23505' });
+          seen.add(key);
+        }
+        return inner.create(p);
+      },
+      findByProviderReference: (t: string, r: string) => inner.findByProviderReference(t, r),
+      findByInvoice: (t: string, i: string) => inner.findByInvoice(t, i),
+    } as unknown as PaymentRepository;
+
+    const inv = await createInvoice(
+      {
+        tenantId: 'tenant-1',
+        jobId: 'job-1',
+        invoiceNumber: 'INV-CRASH',
+        lineItems: [buildLineItem('1', 'Service', 1, 20000, 1, true)],
+        createdBy: 'u-1',
+      },
+      localInvoiceRepo,
+    );
+    await issueInvoice('tenant-1', inv.id, 30, localInvoiceRepo);
+
+    const ref = 'pi_crash_1';
+    await recordPayment(
+      { tenantId: 'tenant-1', invoiceId: inv.id, amountCents: 10000, method: 'credit_card', providerReference: ref, processedBy: 'stripe_webhook' },
+      localInvoiceRepo,
+      racingRepo,
+    );
+    // Simulate the crash: payment row is committed, but the invoice credit was
+    // lost (rolled back / never applied).
+    await localInvoiceRepo.update('tenant-1', inv.id, {
+      amountPaidCents: 0,
+      amountDueCents: 20000,
+      status: 'open',
+      updatedAt: new Date(),
+    });
+
+    // Retry the same intent → create hits 23505 → reconcile repairs the invoice.
+    const retry = await recordPayment(
+      { tenantId: 'tenant-1', invoiceId: inv.id, amountCents: 10000, method: 'credit_card', providerReference: ref, processedBy: 'stripe_webhook' },
+      localInvoiceRepo,
+      racingRepo,
+    );
+
+    expect(retry.invoice.amountPaidCents).toBe(10000);
+    expect(retry.invoice.amountDueCents).toBe(10000);
+    expect(retry.invoice.status).toBe('partially_paid');
+    // Still exactly one payment row.
+    expect(await getPaymentsByInvoice('tenant-1', inv.id, inner)).toHaveLength(1);
   });
 
   it('validation — rejects overpayment', async () => {

@@ -5715,6 +5715,26 @@ export const MIGRATIONS = {
     -- and insert two 'completed' rows — double-counting revenue and letting a
     -- later charge.refunded resolve against only one row.
     --
+    -- Preflight: any tenant that already hit this race can have duplicate
+    -- (tenant_id, reference_number) rows, which would abort CREATE UNIQUE INDEX
+    -- and crash the boot-time migration runner. Non-destructively quarantine
+    -- the extras first — keep the earliest row per (tenant_id, reference_number)
+    -- and suffix the reference on the rest so they remain queryable for manual
+    -- reconciliation but no longer collide. Idempotent: re-runs find no
+    -- collisions among the already-suffixed rows.
+    UPDATE payments p
+       SET reference_number = p.reference_number || ':dup:' || p.id::text
+     WHERE p.reference_number IS NOT NULL
+       AND p.payment_method IN ('credit_card', 'bank_transfer')
+       AND EXISTS (
+         SELECT 1 FROM payments q
+          WHERE q.tenant_id = p.tenant_id
+            AND q.reference_number = p.reference_number
+            AND q.payment_method IN ('credit_card', 'bank_transfer')
+            AND (q.created_at < p.created_at
+                 OR (q.created_at = p.created_at AND q.id < p.id))
+       );
+
     -- Scoped to Stripe methods (credit_card / bank_transfer): manual cash/check
     -- reference numbers can legitimately repeat across invoices, and the
     -- 'deposit_credit' sentinel (payment_method='other') must not be uniqued.
