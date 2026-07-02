@@ -67,6 +67,75 @@ export function formatTimeInTenantTz(
   });
 }
 
+/**
+ * INVERSE of the formatters above: interpret a wall-clock date + time as
+ * TENANT-local and return the UTC instant.
+ *
+ * CLAUDE.md core pattern, input side: "stored UTC, rendered in tenant
+ * timezone" also means times ENTERED in the UI are tenant-local wall clock.
+ * `new Date('YYYY-MM-DDTHH:mm')` interprets the string in the BROWSER's
+ * timezone, so a dispatcher in a different zone (or a UTC CI browser)
+ * posted the wrong instant — journey QA 2026-07-02 bug 4: 14:00 entered
+ * on the schedule page was stored as 14:00 UTC and rendered as 10:00 AM
+ * tenant time.
+ *
+ * Implementation: no tz database in the browser beyond Intl, so we invert
+ * `Intl.DateTimeFormat` numerically — guess the instant as if the wall
+ * clock were UTC, measure the tenant-zone offset at that guess, adjust,
+ * and re-measure once (the second pass converges across DST boundaries).
+ * For a nonexistent wall-clock time (spring-forward gap) this lands on a
+ * nearby valid instant rather than throwing.
+ */
+export function tenantWallClockToUtc(
+  date: string, // 'YYYY-MM-DD'
+  time: string, // 'HH:mm' (seconds optional)
+  timezone: string,
+): Date {
+  const [y, mo, d] = date.split('-').map(Number);
+  const [h = 0, mi = 0, s = 0] = time.split(':').map(Number);
+  if (
+    [y, mo, d, h, mi, s].some((n) => Number.isNaN(n)) ||
+    y === undefined || mo === undefined || d === undefined
+  ) {
+    return new Date(NaN);
+  }
+
+  const wallClockAsUtc = Date.UTC(y, mo - 1, d, h, mi, s);
+
+  // Offset (ms) of `timezone` from UTC at the given instant: render the
+  // instant in the zone and re-read the rendered wall clock as UTC.
+  const offsetAt = (ts: number): number => {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    }).formatToParts(new Date(ts));
+    const get = (type: string): number =>
+      Number(parts.find((p) => p.type === type)?.value ?? NaN);
+    const rendered = Date.UTC(
+      get('year'),
+      get('month') - 1,
+      get('day'),
+      // Intl renders midnight as '24' with hour12:false in some engines.
+      get('hour') % 24,
+      get('minute'),
+      get('second'),
+    );
+    return rendered - ts;
+  };
+
+  let ts = wallClockAsUtc - offsetAt(wallClockAsUtc);
+  // Second pass: if the first guess crossed a DST transition, the offset at
+  // the corrected instant may differ — re-derive against it.
+  ts = wallClockAsUtc - offsetAt(ts);
+  return new Date(ts);
+}
+
 /** Convenience: "Apr 28, 2026, 1:30 PM". */
 export function formatDateTimeInTenantTz(
   value: Date | string | number,

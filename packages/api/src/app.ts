@@ -4099,6 +4099,7 @@ export function createApp(): express.Express {
       paymentRepo,
       agreementRepo,
       templateRepo,
+      customerRepo,
     ),
   );
   app.use(

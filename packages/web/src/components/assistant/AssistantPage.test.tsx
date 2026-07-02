@@ -147,6 +147,98 @@ describe('AssistantPage', () => {
   });
 });
 
+// ─── Journey QA 2026-07-02 (bug 11): thread must survive the post-turn refetch ─
+
+describe('journey QA bug 11 — reply survives the post-turn refetch', () => {
+  async function sendFirstTurn() {
+    mockedApiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        message: { content: 'Focus on the two waiting estimates.' },
+        conversationId: 'conv-9',
+      }),
+    );
+    const view = renderPage();
+    await waitFor(() => {
+      expect(screen.getByText(/I'm your AI assistant/)).toBeInTheDocument();
+    });
+    const input = screen.getByPlaceholderText('Ask anything or give a command…');
+    fireEvent.change(input, { target: { value: 'What should I focus on today?' } });
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+    await waitFor(() => {
+      expect(screen.getByText('Focus on the two waiting estimates.')).toBeInTheDocument();
+    });
+    return view;
+  }
+
+  it('keeps the local bubbles when the refetched conversation carries NO messages', async () => {
+    const view = await sendFirstTurn();
+
+    // The reply pinned conversationId → useDetailQuery refetches. Simulate the
+    // regression the journey hit: a conversation row without a messages array.
+    vi.mocked(useDetailQuery).mockReturnValue({
+      ...defaultDetailResult,
+      data: { id: 'conv-9' },
+    });
+    view.rerender(
+      <MemoryRouter>
+        <AssistantPage />
+      </MemoryRouter>,
+    );
+
+    // The thread must NOT reset to (only) the welcome bubble: both turn
+    // bubbles survive the refetch. (The welcome bubble itself may remain —
+    // it was already on screen before the turn.)
+    expect(screen.getByText('What should I focus on today?')).toBeInTheDocument();
+    expect(screen.getByText('Focus on the two waiting estimates.')).toBeInTheDocument();
+  });
+
+  it('keeps the local bubbles when the refetched thread is PARTIAL (fewer messages than local)', async () => {
+    const view = await sendFirstTurn();
+
+    vi.mocked(useDetailQuery).mockReturnValue({
+      ...defaultDetailResult,
+      data: {
+        id: 'conv-9',
+        messages: [
+          { id: 'm1', role: 'user', content: 'What should I focus on today?', createdAt: '2026-07-02T14:00:00Z' },
+        ],
+      },
+    });
+    view.rerender(
+      <MemoryRouter>
+        <AssistantPage />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByText('Focus on the two waiting estimates.')).toBeInTheDocument();
+  });
+
+  it('adopts the server thread when it is AHEAD of local (reload / other-device case)', async () => {
+    const view = await sendFirstTurn();
+
+    vi.mocked(useDetailQuery).mockReturnValue({
+      ...defaultDetailResult,
+      data: {
+        id: 'conv-9',
+        messages: [
+          { id: 'm1', role: 'user', content: 'What should I focus on today?', createdAt: '2026-07-02T14:00:00Z' },
+          { id: 'm2', role: 'assistant', content: 'Focus on the two waiting estimates.', createdAt: '2026-07-02T14:00:05Z' },
+          { id: 'm3', role: 'assistant', content: 'Also: one invoice is overdue.', createdAt: '2026-07-02T14:00:09Z' },
+        ],
+      },
+    });
+    view.rerender(
+      <MemoryRouter>
+        <AssistantPage />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('Also: one invoice is overdue.')).toBeInTheDocument();
+    });
+  });
+});
+
 // ─── P20-005: Accurate AI failure messaging ──────────────────────────────────
 
 describe('P20-005 — AI failure messaging', () => {

@@ -216,7 +216,20 @@ export function createConversationRouter(
         res.status(404).json({ error: 'NOT_FOUND', message: 'Conversation not found' });
         return;
       }
-      res.json(result);
+      // Journey QA 2026-07-02 (bug 11) — the detail response must carry the
+      // thread's messages: the assistant page reseeds its local state from
+      // this endpoint after every turn, so a bare conversation row wiped the
+      // visible thread back to the welcome bubble even though the messages
+      // were persisted. `role` is derived from senderRole for the UI's
+      // user/assistant bubble split (senderRole itself also rides along).
+      const messages = await conversationRepo.getMessages(req.auth!.tenantId, req.params.id);
+      res.json({
+        ...result,
+        messages: messages.map((m) => ({
+          ...m,
+          role: m.senderRole === 'assistant' ? 'assistant' : 'user',
+        })),
+      });
     })
   );
 

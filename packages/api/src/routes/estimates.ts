@@ -42,6 +42,7 @@ import { RefreshJobMoneyStateDeps, refreshJobMoneyStateSafe } from '../jobs/job-
 import { applyBps } from '../shared/billing-engine';
 import { AgreementRepository } from '../agreements/agreement';
 import { getCustomerMemberDiscountBps } from '../agreements/member-pricing';
+import { Customer, CustomerRepository } from '../customers/customer';
 import { createLogger } from '../logging/logger';
 
 const logger = createLogger({
@@ -102,10 +103,58 @@ export function createEstimateRouter(
   // which turns an existing estimate into a reusable, tenant-scoped template.
   // Optional so legacy harnesses build (the route returns 503 when absent).
   templateRepo?: EstimateTemplateRepository,
+  // Journey QA 2026-07-02 (bug 5) — list rows carry a customer summary
+  // (resolved estimate → job → customer) so the UI stops rendering the
+  // literal "Customer" fallback. Optional so legacy harnesses build.
+  customerRepo?: CustomerRepository,
 ): Router {
   const router = Router();
 
   const jobRepo = moneyStateDeps?.jobRepo;
+
+  /**
+   * Journey QA 2026-07-02 (bug 5) — attach a customer summary to each list
+   * row. Estimates carry only job_id, so this resolves estimate → job →
+   * customer with deduplicated, page-bounded batches of lookups. Best-effort:
+   * missing repos or rows leave the estimate unenriched.
+   */
+  const attachCustomerSummaries = async <T extends { jobId: string }>(
+    tenantId: string,
+    estimates: T[],
+  ): Promise<Array<T & { customer?: Record<string, unknown> }>> => {
+    if (!jobRepo || !customerRepo || estimates.length === 0) return estimates;
+    const jobIds = [...new Set(estimates.map((e) => e.jobId).filter(Boolean))];
+    const jobs = await Promise.all(
+      jobIds.map((id) => jobRepo.findById(tenantId, id).catch(() => null)),
+    );
+    const jobById = new Map(jobs.filter((j) => j !== null).map((j) => [j!.id, j!]));
+    const customerIds = [
+      ...new Set(
+        [...jobById.values()].map((j) => j.customerId).filter((id): id is string => !!id),
+      ),
+    ];
+    const customers = await Promise.all(
+      customerIds.map((id) => customerRepo.findById(tenantId, id).catch(() => null)),
+    );
+    const customerById = new Map(
+      customers.filter((c): c is Customer => c !== null).map((c) => [c.id, c]),
+    );
+    return estimates.map((e) => {
+      const job = jobById.get(e.jobId);
+      const c = job?.customerId ? customerById.get(job.customerId) : undefined;
+      return c
+        ? {
+            ...e,
+            customer: {
+              id: c.id,
+              displayName: c.displayName,
+              firstName: c.firstName,
+              lastName: c.lastName,
+            },
+          }
+        : e;
+    });
+  };
 
   // Build the per-request mutation deps (audit + revision history + the
   // deposit lock). The deposit-paid amount comes from the linked job so
@@ -249,7 +298,7 @@ export function createEstimateRouter(
           req.query.offset === undefined
         ) {
           const result = await estimateRepo.findByJob(req.auth!.tenantId, jobId);
-          res.json(result);
+          res.json(await attachCustomerSummaries(req.auth!.tenantId, result));
           return;
         }
 
@@ -307,12 +356,15 @@ export function createEstimateRouter(
             limit,
             offset,
           });
-          res.json(result);
+          res.json({
+            ...result,
+            data: await attachCustomerSummaries(req.auth!.tenantId, result.data),
+          });
           return;
         }
 
         const result = await listEstimates(req.auth!.tenantId, estimateRepo, baseOptions);
-        res.json(result);
+        res.json(await attachCustomerSummaries(req.auth!.tenantId, result));
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);

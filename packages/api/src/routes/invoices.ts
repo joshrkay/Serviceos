@@ -504,11 +504,15 @@ export function createInvoiceRouter(
             });
           return;
         }
+        // ''→undefined mirrors the estimates send route: the send sheet posts
+        // empty strings for untouched fields, and SendService must fall back
+        // to the customer's contact on file instead of failing on ''
+        // (journey QA 2026-07-02, bug 2).
         const parsed = z.object({
           channel: z.enum(['sms', 'email', 'both']).default('sms'),
-          recipientPhone: z.string().optional(),
-          recipientEmail: z.string().optional(),
-          customMessage: z.string().optional(),
+          recipientPhone: z.string().optional().transform(v => v || undefined),
+          recipientEmail: z.string().optional().transform(v => v || undefined),
+          customMessage: z.string().optional().transform(v => v || undefined),
         }).safeParse(req.body ?? {});
         if (!parsed.success) {
           res.status(400).json({ error: 'VALIDATION_ERROR', message: parsed.error.issues[0]?.message ?? 'Invalid request body' });

@@ -50,6 +50,12 @@ const approveBatchBodySchema = z.object({
 const EXPIRED_INBOX_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 const EXPIRED_INBOX_LIMIT = 20;
 
+// Journey QA 2026-07-02 (bug 10) — surface recently execution-failed proposals
+// so an approval that later failed to execute doesn't just vanish from the
+// inbox with no trace. Same bounding rationale as the expired section.
+const FAILED_INBOX_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+const FAILED_INBOX_LIMIT = 20;
+
 // U2 (P2-035) — resolve an ambiguous catalog line by picking one of the
 // line's surfaced candidates. Patches the draft; never approves (D-004).
 const resolveLineBodySchema = z.object({
@@ -183,10 +189,24 @@ export function createProposalsRouter(
         // as expired history accumulates; operators re-propose recent lapses, not
         // ancient ones. Falls back to an in-memory trim for repos that predate
         // the bounded query.
+        // Journey QA 2026-07-02 (bug 10) — approved proposals whose execution
+        // FAILED previously disappeared without a trace (the inbox only served
+        // draft/ready/expired). Surface recent failures with their
+        // executionError so the operator learns the approval didn't land.
+        // 'execution_failed' is terminal and has no dedicated failure
+        // timestamp, so updatedAt approximates the failure time (the same
+        // convention inbox.ts overnightEvents uses).
         const since = new Date(Date.now() - EXPIRED_INBOX_WINDOW_MS);
-        const [drafts, ready, expiredRows] = await Promise.all([
+        const failedSince = new Date(Date.now() - FAILED_INBOX_WINDOW_MS);
+        const [drafts, ready, failedRows, expiredRows] = await Promise.all([
           proposalRepo.findByStatus(req.auth!.tenantId, 'draft'),
           proposalRepo.findByStatus(req.auth!.tenantId, 'ready_for_review'),
+          proposalRepo.findByStatus(req.auth!.tenantId, 'execution_failed').then((all) =>
+            all
+              .filter((p) => p.updatedAt.getTime() >= failedSince.getTime())
+              .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())
+              .slice(0, FAILED_INBOX_LIMIT),
+          ),
           proposalRepo.findExpiredScheduleProposals
             ? proposalRepo.findExpiredScheduleProposals(
                 req.auth!.tenantId,
@@ -214,7 +234,15 @@ export function createProposalsRouter(
           expiresAt: p.expiresAt?.toISOString(),
           createdAt: p.createdAt.toISOString(),
         }));
-        res.json({ ...inbox, expired });
+        const failed = failedRows.map((p) => ({
+          id: p.id,
+          proposalType: p.proposalType,
+          summary: p.summary,
+          status: p.status,
+          executionError: p.executionError,
+          failedAt: p.updatedAt.toISOString(),
+        }));
+        res.json({ ...inbox, expired, failed });
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);

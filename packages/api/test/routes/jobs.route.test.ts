@@ -17,7 +17,7 @@ import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemoryQueue } from '../../src/queues/queue';
 import { NoopFeedbackDispatcher } from '../../src/feedback/dispatcher';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
-import { Customer, InMemoryCustomerRepository } from '../../src/customers/customer';
+import { Customer, InMemoryCustomerRepository, createCustomer } from '../../src/customers/customer';
 import { InMemoryLocationRepository, ServiceLocation } from '../../src/locations/location';
 import type { TenantOwnership } from '../../src/shared/tenant-ownership';
 
@@ -101,6 +101,57 @@ describe('GET /api/jobs', () => {
     expect(res.status).toBe(200);
     expect(res.body).toHaveLength(1);
     expect(res.body[0].summary).toContain('condenser');
+  });
+});
+
+describe('journey QA bug 5 — GET /api/jobs carries a customer summary', () => {
+  it('bare-array list rows embed { customer: { displayName, firstName, lastName } }', async () => {
+    const { app, customerRepo } = await buildTestApp();
+    const customer = await createCustomer(
+      { tenantId: TEST_TENANT_ID, firstName: 'Sarah', lastName: 'Henderson', createdBy: TEST_USER_ID },
+      customerRepo,
+    );
+
+    await request(app).post('/api/jobs').send({
+      customerId: customer.id,
+      locationId: 'loc-1',
+      summary: 'Water heater install',
+    });
+
+    const res = await request(app).get('/api/jobs');
+    expect(res.status).toBe(200);
+    expect(res.body[0].customer).toMatchObject({
+      id: customer.id,
+      displayName: 'Sarah Henderson',
+      firstName: 'Sarah',
+      lastName: 'Henderson',
+    });
+  });
+
+  it('paginated list rows embed the same summary; unknown customers stay unenriched', async () => {
+    const { app, customerRepo } = await buildTestApp();
+    const dana = await createCustomer(
+      { tenantId: TEST_TENANT_ID, firstName: 'Dana', lastName: 'Lee', createdBy: TEST_USER_ID },
+      customerRepo,
+    );
+
+    await request(app).post('/api/jobs').send({
+      customerId: dana.id,
+      locationId: 'loc-1',
+      summary: 'Known customer job',
+    });
+    await request(app).post('/api/jobs').send({
+      customerId: 'cust-ghost',
+      locationId: 'loc-1',
+      summary: 'Orphaned customer job',
+    });
+
+    const res = await request(app).get('/api/jobs?paginated=true');
+    expect(res.status).toBe(200);
+    const known = res.body.data.find((j: { summary: string }) => j.summary === 'Known customer job');
+    const ghost = res.body.data.find((j: { summary: string }) => j.summary === 'Orphaned customer job');
+    expect(known.customer.displayName).toBe('Dana Lee');
+    expect(ghost.customer).toBeUndefined();
   });
 });
 

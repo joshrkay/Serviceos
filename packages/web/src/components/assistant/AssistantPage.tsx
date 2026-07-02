@@ -767,20 +767,30 @@ export function AssistantPage() {
   const { data: conversation, isLoading: convLoading, error: convError } =
     useDetailQuery<ApiConversation>('/api/conversations', conversationId);
 
-  // Seed messages from API — show empty state if no conversation exists yet
+  // Seed messages from API — show the welcome bubble if no conversation
+  // exists yet. Journey QA 2026-07-02 (bug 11): this effect re-runs right
+  // after every turn (the reply pins newConversationId → refetch), and it
+  // used to REPLACE local state unconditionally — a server response with an
+  // empty/partial thread wiped the reply the user was reading. Defensive
+  // rule (belt-and-braces with the API fix that now returns `messages`):
+  // only adopt the server thread when it is AHEAD of what's on screen;
+  // never downgrade local messages to an emptier server copy.
   useEffect(() => {
     if (convLoading) return;
-    if (conversation?.messages?.length) {
-      setMessages(conversation.messages.map(mapApiMessage));
-    } else {
-      // No mock data — start with an empty conversation or a welcome message
-      setMessages([{
+    const serverMessages = conversation?.messages ?? [];
+    setMessages((prev) => {
+      const localTurns = prev.filter((m) => m.id !== 'welcome');
+      if (serverMessages.length > localTurns.length) {
+        return serverMessages.map(mapApiMessage);
+      }
+      if (localTurns.length > 0) return prev;
+      return [{
         id: 'welcome',
         role: 'assistant' as const,
         content: welcomeMessage,
         time: new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }),
-      }]);
-    }
+      }];
+    });
   }, [convLoading, conversation, convError, welcomeMessage]);
 
   // Auto-submit from voice bar ?q= param

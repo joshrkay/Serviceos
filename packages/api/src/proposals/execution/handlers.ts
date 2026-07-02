@@ -75,7 +75,7 @@ import {
 import { TimeEntryService } from '../../time-tracking/time-entry-service';
 import { FeedbackRequestRepository } from '../../feedback/feedback-request';
 import { DelayNotificationService } from '../../notifications/delay-notifications';
-import { LineItem } from '../../shared/billing-engine';
+import { LineItem, LineItemCategory, PricingSource } from '../../shared/billing-engine';
 import {
   EmergencyDispatchExecutionHandler,
   EmergencySmsSender,
@@ -489,27 +489,135 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
   }
 }
 
+const LINE_ITEM_CATEGORIES: readonly LineItemCategory[] = ['labor', 'material', 'equipment', 'other'];
+const PRICING_SOURCES: readonly PricingSource[] = ['catalog', 'ambiguous', 'uncatalogued', 'manual'];
+
+/**
+ * Normalize AI-drafted line items (contracts.ts `lineItemSchema`:
+ * `{description, quantity, unitPrice? | unitPriceCents?, …}` — no `totalCents`,
+ * no `id`/`sortOrder`/`taxable`) into the billing engine's `LineItem` shape.
+ *
+ * Journey QA 2026-07-02 (bug 10): the executor previously blind-cast the
+ * payload to `LineItem[]`, so a drafted line without `totalCents` produced
+ * NaN totals and the approved proposal died in Postgres with
+ * `invalid input syntax for type integer: "NaN"`.
+ *
+ * - `totalCents` is derived from `quantity × unitPriceCents` when absent.
+ * - `unitPrice` (the estimate-draft emitter's field, integer cents) is
+ *   accepted as a fallback for `unitPriceCents`.
+ * - A line that cannot be priced/parsed is reported in `malformed` with a
+ *   human-readable reason — callers fail the execution with that reason
+ *   instead of silently dropping money lines or writing NaN.
+ */
+export function normalizeDraftLineItems(raw: unknown[]): {
+  lineItems: LineItem[];
+  malformed: string[];
+} {
+  const lineItems: LineItem[] = [];
+  const malformed: string[] = [];
+
+  raw.forEach((entry, index) => {
+    const label = `Line ${index + 1}`;
+    if (typeof entry !== 'object' || entry === null) {
+      malformed.push(`${label} is not an object`);
+      return;
+    }
+    const li = entry as Record<string, unknown>;
+    const description = typeof li.description === 'string' ? li.description.trim() : '';
+    if (!description) {
+      malformed.push(`${label} is missing a description`);
+      return;
+    }
+    const quantity =
+      typeof li.quantity === 'number' && Number.isFinite(li.quantity) && li.quantity > 0
+        ? li.quantity
+        : undefined;
+    if (quantity === undefined) {
+      malformed.push(`${label} ("${description}") has no valid quantity`);
+      return;
+    }
+    const rawPrice =
+      typeof li.unitPriceCents === 'number' && Number.isFinite(li.unitPriceCents)
+        ? li.unitPriceCents
+        : typeof li.unitPrice === 'number' && Number.isFinite(li.unitPrice)
+          ? li.unitPrice
+          : undefined;
+    if (rawPrice === undefined || rawPrice < 0) {
+      malformed.push(`${label} ("${description}") has no usable unit price`);
+      return;
+    }
+    const unitPriceCents = Math.round(rawPrice);
+    const totalCents =
+      typeof li.totalCents === 'number' && Number.isFinite(li.totalCents)
+        ? Math.round(li.totalCents)
+        : Math.round(quantity * unitPriceCents);
+
+    lineItems.push({
+      id: typeof li.id === 'string' && li.id.length > 0 ? li.id : uuidv4(),
+      description,
+      quantity,
+      unitPriceCents,
+      totalCents,
+      sortOrder: lineItems.length,
+      taxable: typeof li.taxable === 'boolean' ? li.taxable : true,
+      ...(LINE_ITEM_CATEGORIES.includes(li.category as LineItemCategory)
+        ? { category: li.category as LineItemCategory }
+        : {}),
+      ...(PRICING_SOURCES.includes(li.pricingSource as PricingSource)
+        ? { pricingSource: li.pricingSource as PricingSource }
+        : {}),
+    });
+  });
+
+  return { lineItems, malformed };
+}
+
 export class DraftEstimateExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'draft_estimate';
 
   constructor(
     private readonly estimateRepo?: EstimateRepository,
     private readonly settingsRepo?: SettingsRepository,
+    // Journey QA 2026-07-02 (bug 10) — voice/assistant-drafted payloads carry a
+    // customerId but often no jobId (jobId is optional in
+    // draftEstimatePayloadSchema), while the estimate domain requires a job
+    // container. When these two repos are wired the handler opens a job for
+    // the customer (mirroring CreateJobExecutionHandler's location fallback)
+    // instead of refusing the canonical drafted payload.
+    private readonly jobRepo?: JobRepository,
+    private readonly locationRepo?: LocationRepository,
+    private readonly auditRepo?: AuditRepository,
   ) {}
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const { payload } = proposal;
-    if (!payload.customerId || typeof payload.customerId !== 'string') {
-      return { success: false, error: 'Payload must include a valid customerId' };
-    }
-    if (!payload.jobId || typeof payload.jobId !== 'string') {
+    const customerId =
+      typeof payload.customerId === 'string' && payload.customerId.length > 0
+        ? payload.customerId
+        : undefined;
+    let jobId =
+      typeof payload.jobId === 'string' && payload.jobId.length > 0 ? payload.jobId : undefined;
+    if (!customerId && !jobId) {
       return {
         success: false,
-        error: 'Estimate requires a jobId — pick a job before drafting',
+        error:
+          'Estimate draft has neither a customerId nor a jobId — link a customer before approving',
       };
     }
     if (!Array.isArray(payload.lineItems) || payload.lineItems.length === 0) {
       return { success: false, error: 'Payload must include at least one lineItem' };
+    }
+    const { lineItems, malformed } = normalizeDraftLineItems(payload.lineItems);
+    if (malformed.length > 0) {
+      return {
+        success: false,
+        error: `Estimate draft has line items that can't be priced: ${malformed.join('; ')}`,
+      };
+    }
+    const validUntil =
+      typeof payload.validUntil === 'string' ? new Date(payload.validUntil) : undefined;
+    if (validUntil && isNaN(validUntil.getTime())) {
+      return { success: false, error: 'Payload contains an invalid validUntil date' };
     }
 
     if (proposal.resultEntityId) {
@@ -521,18 +629,50 @@ export class DraftEstimateExecutionHandler implements ExecutionHandler {
     }
 
     try {
-      const estimateNumber = await getNextEstimateNumber(context.tenantId, this.settingsRepo);
-      const validUntil =
-        typeof payload.validUntil === 'string' ? new Date(payload.validUntil) : undefined;
-      if (validUntil && isNaN(validUntil.getTime())) {
-        return { success: false, error: 'Payload contains an invalid validUntil date' };
+      // Estimates require a job container (estimate.ts validateEstimateInput).
+      // A drafted payload without one gets a job opened for the customer.
+      if (!jobId) {
+        if (!this.jobRepo || !this.locationRepo) {
+          return {
+            success: false,
+            error:
+              'Estimate draft has no jobId and job auto-creation is not configured — pick a job before approving',
+          };
+        }
+        const locations = await this.locationRepo.findByCustomer(context.tenantId, customerId!);
+        const location =
+          locations.find((loc) => loc.isPrimary && !loc.isArchived) ??
+          locations.find((loc) => !loc.isArchived);
+        if (!location) {
+          return {
+            success: false,
+            error: 'Customer has no service location — add one before approving this estimate',
+          };
+        }
+        const job = await createJob(
+          {
+            tenantId: context.tenantId,
+            customerId: customerId!,
+            locationId: location.id,
+            summary:
+              typeof payload.summary === 'string' && payload.summary.trim().length > 0
+                ? payload.summary.trim()
+                : proposal.summary || lineItems[0].description,
+            createdBy: context.executedBy,
+          },
+          this.jobRepo,
+          this.auditRepo,
+        );
+        jobId = job.id;
       }
+
+      const estimateNumber = await getNextEstimateNumber(context.tenantId, this.settingsRepo);
 
       const input: CreateEstimateInput = {
         tenantId: context.tenantId,
-        jobId: payload.jobId,
+        jobId,
         estimateNumber,
-        lineItems: payload.lineItems as LineItem[],
+        lineItems,
         discountCents:
           typeof payload.discountCents === 'number' ? payload.discountCents : undefined,
         taxRateBps: typeof payload.taxRateBps === 'number' ? payload.taxRateBps : undefined,
@@ -547,7 +687,7 @@ export class DraftEstimateExecutionHandler implements ExecutionHandler {
               : undefined,
         createdBy: context.executedBy,
       };
-      const estimate = await createEstimate(input, this.estimateRepo);
+      const estimate = await createEstimate(input, this.estimateRepo, this.auditRepo);
       return { success: true, resultEntityId: estimate.id };
     } catch (err) {
       return {
@@ -766,7 +906,13 @@ export function createExecutionHandlerRegistry(deps?: {
     new CreateJobExecutionHandler(deps?.jobRepo, deps?.locationRepo, deps?.auditRepo),
     new CreateAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.schedulingNotifier, deps?.auditRepo, deps?.jobRepo),
     new CreateBookingExecutionHandler(deps?.appointmentRepo, deps?.auditRepo),
-    new DraftEstimateExecutionHandler(deps?.estimateRepo, deps?.settingsRepo),
+    new DraftEstimateExecutionHandler(
+      deps?.estimateRepo,
+      deps?.settingsRepo,
+      deps?.jobRepo,
+      deps?.locationRepo,
+      deps?.auditRepo,
+    ),
     new CreateInvoiceExecutionHandler(deps?.invoiceRepo, deps?.settingsRepo, deps?.auditRepo),
     new CreateInvoiceScheduleExecutionHandler(deps?.scheduleRepo, deps?.invoiceRepo, deps?.settingsRepo, deps?.estimateRepo),
     new BatchInvoiceExecutionHandler(deps?.proposalRepo),

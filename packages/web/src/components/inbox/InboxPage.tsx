@@ -193,10 +193,24 @@ interface ExpiredCard {
   createdAt: string;
 }
 
+// Journey QA 2026-07-02 (bug 10) — an approved proposal whose execution
+// failed. Previously these vanished from the inbox with no trace; the card
+// surfaces the server's executionError so the operator knows the approval
+// didn't land.
+interface FailedCard {
+  id: string;
+  proposalType: string;
+  summary: string;
+  status: string;
+  executionError?: string;
+  failedAt?: string;
+}
+
 interface InboxResponse {
   data: InboxProposalRow[];
   summary: InboxSummary;
   expired?: ExpiredCard[];
+  failed?: FailedCard[];
 }
 
 /** Per-id outcome of POST /api/proposals/approve-batch (mirrors the API's
@@ -393,6 +407,7 @@ export function InboxPage() {
   const [rows, setRows] = useState<InboxProposalRow[]>([]);
   const [summary, setSummary] = useState<InboxSummary | null>(null);
   const [expired, setExpired] = useState<ExpiredCard[]>([]);
+  const [failed, setFailed] = useState<FailedCard[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -408,6 +423,7 @@ export function InboxPage() {
           setRows(body.data);
           setSummary(body.summary);
           setExpired(body.expired ?? []);
+          setFailed(body.failed ?? []);
         }
       })
       .catch((err) => {
@@ -615,7 +631,7 @@ export function InboxPage() {
         {isLoading && <p className="text-sm text-muted-foreground">Loading…</p>}
         {error && <p className="text-sm text-destructive">{error}</p>}
 
-        {!isLoading && !error && rows.length === 0 && expired.length === 0 && (
+        {!isLoading && !error && rows.length === 0 && expired.length === 0 && failed.length === 0 && (
           <div className="rounded-xl border border-border bg-card px-6 py-12 text-center">
             <p className="text-sm text-foreground font-medium">Nothing waiting.</p>
             <p className="text-xs text-muted-foreground mt-1">
@@ -706,6 +722,41 @@ export function InboxPage() {
             );
           })}
         </ul>
+
+        {/* Journey QA 2026-07-02 (bug 10) — approvals that failed to execute.
+            Without this section an approved-then-failed proposal silently
+            vanished; the card shows the server's executionError. */}
+        {failed.length > 0 && (
+          <div className="mt-8" data-testid="failed-section">
+            <h2 className="text-sm font-semibold text-foreground mb-2">
+              Approved but failed to execute
+            </h2>
+            <ul className="space-y-2">
+              {failed.map((card) => (
+                <li
+                  key={card.id}
+                  data-testid="failed-row"
+                  className="rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3"
+                >
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="text-[10px] font-medium px-1.5 py-0.5 rounded border border-destructive/30 bg-destructive/10 text-destructive">
+                      Failed
+                    </span>
+                    <span className="text-xs text-muted-foreground">
+                      {humanizeProposalType(card.proposalType)}
+                    </span>
+                  </div>
+                  <p className="text-sm text-foreground font-medium truncate">{card.summary}</p>
+                  {card.executionError && (
+                    <p className="text-xs text-destructive mt-0.5" data-testid="execution-error">
+                      {card.executionError}
+                    </p>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
 
         {/* §5.5 — expired schedule proposal cards, clearly marked and re-proposable. */}
         {expired.length > 0 && (

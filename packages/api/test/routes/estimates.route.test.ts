@@ -8,6 +8,7 @@
 import request from 'supertest';
 import { describe, it, expect, beforeEach } from 'vitest';
 import { buildTestApp, TEST_TENANT_ID, TEST_USER_ID } from './test-app';
+import { createCustomer } from '../../src/customers/customer';
 import type { Express } from 'express';
 
 const SAMPLE_LINE_ITEMS = [
@@ -255,6 +256,41 @@ describe('GET /api/estimates', () => {
     expect(res.status).toBe(200);
     expect(res.body).toHaveLength(1);
     expect(res.body[0].jobId).toBe('job-1');
+  });
+
+  it('journey QA bug 5 — list rows carry a customer summary resolved via the linked job', async () => {
+    const { app: freshApp, customerRepo } = await buildTestApp();
+    const customer = await createCustomer(
+      { tenantId: TEST_TENANT_ID, firstName: 'Sarah', lastName: 'Henderson', createdBy: TEST_USER_ID },
+      customerRepo,
+    );
+    const jobRes = await request(freshApp).post('/api/jobs').send({
+      customerId: customer.id,
+      locationId: 'loc-1',
+      summary: 'Water heater install',
+    });
+    await createEstimate(freshApp, { jobId: jobRes.body.id });
+
+    // Bare-array shape
+    const bare = await request(freshApp).get('/api/estimates');
+    expect(bare.status).toBe(200);
+    expect(bare.body[0].customer).toMatchObject({
+      id: customer.id,
+      displayName: 'Sarah Henderson',
+      firstName: 'Sarah',
+      lastName: 'Henderson',
+    });
+
+    // Paginated shape
+    const paged = await request(freshApp).get('/api/estimates?paginated=true');
+    expect(paged.status).toBe(200);
+    expect(paged.body.data[0].customer.displayName).toBe('Sarah Henderson');
+
+    // An estimate on a job with no resolvable customer stays unenriched.
+    await createEstimate(freshApp, { jobId: 'job-orphan' });
+    const all = await request(freshApp).get('/api/estimates');
+    const orphan = all.body.find((e: { jobId: string }) => e.jobId === 'job-orphan');
+    expect(orphan.customer).toBeUndefined();
   });
 });
 
