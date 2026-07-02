@@ -16,6 +16,10 @@ import { createIntegrationResolver } from './webhooks/integration-resolver';
 import { createTelephonyRouter } from './routes/telephony';
 import { createCallsRouter, createCallBridgeRouter } from './routes/calls';
 import { TwilioGatherAdapter } from './telephony/twilio-adapter';
+import {
+  createEmergencyPageWorker,
+  createEmergencyPageResolvedCheck,
+} from './telephony/emergency-page-retry';
 import { DefaultTwilioCallControl } from './telephony/twilio-call-control';
 import { createUserPhoneDispatcherResolver, createBusinessPhoneFallback } from './telephony/dispatcher-phone-resolver';
 import { PgPhoneNumberRepository } from './integrations/twilio/phone-number-repository';
@@ -2846,6 +2850,10 @@ export function createApp(): express.Express {
       : {}),
     // RV-143 — durable tail for the emergency page-retry ladder.
     callMeBackRepo,
+    // UC-5a — the ladder itself is durable: each page is a delayed job on
+    // the shared queue, consumed by the telephony.emergency_page worker
+    // registered below.
+    queue,
     // RV-115 — FSM context snapshot into dropped_call_recoveries.context.
     droppedCallScheduler,
     // RV-130 — consent ledger + live recording pause on objection.
@@ -2934,6 +2942,41 @@ export function createApp(): express.Express {
         }
       : {}),
   });
+
+  // UC-5a — consumer half of the durable emergency page-retry ladder: the
+  // adapter above enqueues delayed `telephony.emergency_page` jobs; this
+  // worker (dispatched by the unified queue poll loop) re-checks resolution
+  // against the live store and then the persisted voice_sessions row (so a
+  // transfer answered on another replica still cancels the ladder), pages
+  // the owner, and lands the durable call_me_back tail on exhaustion.
+  // Registered only when an SMS provider exists — the adapter's arm gate
+  // mirrors this, so no job is ever enqueued without its consumer.
+  if (messageDelivery) {
+    const emergencyPageWorker = createEmergencyPageWorker({
+      queue,
+      sendSms: (args: { to: string; body: string }) =>
+        messageDelivery.sendSms({ to: args.to, body: args.body }),
+      resolvePagePhone: async (tenantId: string) => {
+        try {
+          const settings = await settingsRepo.findByTenant(tenantId);
+          return settings?.ownerPhone ?? settings?.transferNumber ?? null;
+        } catch {
+          return null;
+        }
+      },
+      isResolved: createEmergencyPageResolvedCheck({
+        store: voiceSessionStore,
+        voiceSessionRepo,
+      }),
+      callMeBackRepo,
+      auditRepo,
+    });
+    workerRegistry.set(
+      emergencyPageWorker.type,
+      emergencyPageWorker as import('./queues/queue').WorkerHandler<unknown>,
+    );
+  }
+
   // P8-012: feature flag the Media Streams (live audio) path. Default
   // off — when off, the existing Gather adapter remains the only
   // telephony surface. When on, /voice returns a <Connect><Stream/>

@@ -75,6 +75,17 @@ export interface QueueConfig {
   visibilityTimeout: number;
 }
 
+/** Optional per-message send options. */
+export interface SendOptions {
+  /**
+   * Delayed delivery: the message stays invisible to receive/receiveBatch
+   * until `delaySeconds` from now (UC-5: durable timers — e.g. the emergency
+   * page-retry ladder's 2-minute steps are delayed enqueues, not setTimeout).
+   * PgQueue maps this onto `visible_at`; fractional seconds are honored.
+   */
+  delaySeconds?: number;
+}
+
 export interface DeadLetterEntry {
   messageId: string;
   type: string;
@@ -87,7 +98,12 @@ export interface DeadLetterEntry {
 }
 
 export interface Queue {
-  send<T>(type: string, payload: T, idempotencyKey?: string): Promise<string>;
+  send<T>(
+    type: string,
+    payload: T,
+    idempotencyKey?: string,
+    options?: SendOptions,
+  ): Promise<string>;
   receive<T>(): Promise<QueueMessage<T> | null>;
   /**
    * Scale-to-1000 (P3): atomically claim up to `max` visible messages in one
@@ -116,7 +132,7 @@ export function createQueueConfig(env: string): QueueConfig {
  * queue service required since Railway Postgres is already provisioned.
  */
 export class InMemoryQueue implements Queue {
-  private messages: QueueMessage[] = [];
+  private messages: Array<QueueMessage & { visibleAt: number }> = [];
   private dlq: DeadLetterEntry[] = [];
   private config: QueueConfig;
   private receiving = false;
@@ -129,8 +145,23 @@ export class InMemoryQueue implements Queue {
     };
   }
 
-  async send<T>(type: string, payload: T, idempotencyKey?: string): Promise<string> {
+  async send<T>(
+    type: string,
+    payload: T,
+    idempotencyKey?: string,
+    options?: SendOptions,
+  ): Promise<string> {
     const id = randomUUID();
+    // Mirror PgQueue's ON CONFLICT (idempotency_key) DO NOTHING: an explicit
+    // duplicate key against a still-pending message is a silent no-op (the
+    // returned id is unconditionally fresh in PgQueue too).
+    if (
+      idempotencyKey &&
+      this.messages.some((m) => m.idempotencyKey === idempotencyKey)
+    ) {
+      return id;
+    }
+    const delayMs = Math.max(0, options?.delaySeconds ?? 0) * 1000;
     this.messages.push({
       id,
       type,
@@ -139,6 +170,7 @@ export class InMemoryQueue implements Queue {
       maxAttempts: this.config.maxRetries,
       idempotencyKey: idempotencyKey || id,
       createdAt: new Date().toISOString(),
+      visibleAt: Date.now() + delayMs,
     });
     return id;
   }
@@ -152,12 +184,20 @@ export class InMemoryQueue implements Queue {
     if (max <= 0 || this.receiving) return [];
     this.receiving = true;
     try {
+      const now = Date.now();
       const out: QueueMessage<T>[] = [];
-      for (let i = 0; i < max; i++) {
-        const msg = this.messages.shift();
-        if (!msg) break;
-        msg.attempts++;
-        out.push(msg as QueueMessage<T>);
+      // Claim oldest-first among VISIBLE messages; delayed messages stay
+      // queued until their visibleAt passes (PgQueue's visible_at semantics).
+      for (let i = 0; i < this.messages.length && out.length < max; ) {
+        const msg = this.messages[i];
+        if (msg.visibleAt <= now) {
+          this.messages.splice(i, 1);
+          msg.attempts++;
+          const { visibleAt: _visibleAt, ...delivered } = msg;
+          out.push(delivered as QueueMessage<T>);
+        } else {
+          i++;
+        }
       }
       return out;
     } finally {
