@@ -5739,6 +5739,19 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_standing_instructions ON standing_instructions
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  '230_users_fullname_trgm_index': `
+    -- U1 (agent wave) — voice technician resolution. GIN trigram expression
+    -- index over the users full-name expression that PgEntityResolver's
+    -- 'technician' kind queries ("give the Davis job to Carlos"). The
+    -- expression must stay byte-identical to the SQL in
+    -- src/ai/resolution/pg-entity-resolver.ts (resolveTechnician) for the
+    -- planner to serve it from this index. Mirrors migration 051's trgm-index
+    -- pattern (051 already created the pg_trgm extension). Index-only — no
+    -- RLS or column change.
+    CREATE INDEX IF NOT EXISTS idx_users_fullname_trgm
+      ON users USING GIN ((TRIM(COALESCE(first_name,'') || ' ' || COALESCE(last_name,''))) gin_trgm_ops);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

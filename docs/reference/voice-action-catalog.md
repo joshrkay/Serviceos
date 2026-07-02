@@ -26,7 +26,7 @@ exist today.
 
 ## A) Speakable today — intent + proposal + execution handler all exist
 
-These 31 actions can be spoken, drafted as a proposal, approved, and executed.
+These 34 actions can be spoken, drafted as a proposal, approved, and executed.
 "Persistence proof" = a Docker-gated integration test that proves the row +
 audit event actually land in Postgres (vs. mocked-DB-only coverage, which cannot
 catch schema drift or a missing dependency).
@@ -64,6 +64,35 @@ catch schema drift or a missing dependency).
 | "Clock 2 hours on the Patel job" | `log_time_entry` | `log_time_entry` | capture | unit |
 | "Text the Garcia customer I'm 20 min late" | `notify_delay` | `notify_delay` | comms | unit |
 | "Ask the Smith customer for a review" | `request_feedback` | `request_feedback` | comms | unit |
+| "Set up 50% deposit, 50% on completion for the Hendersons" | `create_invoice_schedule` | `create_invoice_schedule` | capture | unit + handler-level (schedule execution: `proposals/invoice-schedule-handler.test.ts`) |
+| "Respond to that 1-star review" | `respond_to_review` | `review_response_proposal` | comms | unit |
+| "From now on always add a $79 diagnostic fee to AC calls" | `create_standing_instruction` | `create_standing_instruction` | capture | unit (table: integration via UB-A1 `integration/standing-instructions.test.ts`) |
+
+> **Voice technician resolution (U1, taxonomy 1.2.0):** `reassign_appointment`,
+> `add_crew_member`, and `remove_crew_member` now resolve the spoken technician
+> name via the entity resolver (`kind: 'technician'`, pg_trgm over the `users`
+> full-name expression, roles technician/dispatcher/owner, τ_ent 0.8). A unique
+> match lands on the payload as a verified `toTechnicianId` / `technicianId`;
+> an ambiguous name ("two Carloses") becomes a one-tap `voice_clarification`
+> picker; an unmatched name keeps the pre-U1 behavior — the id stays in
+> `missingFields` and the review UI resolves it before approval.
+
+Notes on the taxonomy-1.2.0 rows:
+
+- `create_invoice_schedule` — the spoken milestone sentence is parsed by a
+  deterministic grammar (`invoices/milestone-sentence-parser.ts`), never the
+  LLM; an unparseable plan holds in draft with the verbatim sentence preserved
+  for the reviewer. Milestone maths mirror `validateMilestones` (integer
+  cents, bps, exactly one remainder).
+- `respond_to_review` — resolves "that 1-star review" against recent
+  `google_reviews` rows (stated star count, else rating ≤ 3, last 14 days):
+  zero matches → clarification; several → candidate picker; a pending draft
+  already auto-created by the polling worker → "already in your inbox"
+  clarification (never a duplicate). Comms class — never auto-approves.
+- `create_standing_instruction` — v1 rule: the task handler omits
+  `sourceTrustTier`, so the instruction itself ALWAYS lands for human review
+  even though the type is capture-class. On approval the execution handler
+  inserts a `standing_instructions` row (source `proposal`, UB-A1 table).
 
 Two further intents are special-cased in the router (they reuse existing
 proposal types and live outside `INTENT_TO_PROPOSAL_TYPE`):
@@ -85,9 +114,10 @@ migration).
 
 | Spoken example a tradesperson would expect to work | Proposal type | Class | Plan |
 |---|---|---|---|
-| "Set up 50% deposit, 50% on completion for Garcia" | `create_invoice_schedule` | capture | deferred (complex payload) |
-| "Respond to that 1-star review" | `review_response_proposal` | comms | deferred (review-monitoring driven) |
 | "Book this caller for Thursday" | `create_booking` | capture | deferred (customer-call FSM path) |
+
+(`create_invoice_schedule` and `review_response_proposal` graduated to
+section A in taxonomy 1.2.0 — U2/U3 of the agent build wave.)
 
 ## C) Not completable from speech yet — no proposal type/handler (white-space)
 
@@ -148,11 +178,12 @@ approves by screen/SMS tap).
     { "intent": "add_service_location", "proposalType": "add_service_location", "actionClass": "capture" },
     { "intent": "log_time_entry", "proposalType": "log_time_entry", "actionClass": "capture" },
     { "intent": "notify_delay", "proposalType": "notify_delay", "actionClass": "comms" },
-    { "intent": "request_feedback", "proposalType": "request_feedback", "actionClass": "comms" }
+    { "intent": "request_feedback", "proposalType": "request_feedback", "actionClass": "comms" },
+    { "intent": "create_invoice_schedule", "proposalType": "create_invoice_schedule", "actionClass": "capture" },
+    { "intent": "respond_to_review", "proposalType": "review_response_proposal", "actionClass": "comms" },
+    { "intent": "create_standing_instruction", "proposalType": "create_standing_instruction", "actionClass": "capture" }
   ],
   "handlerNoOnramp": [
-    "create_invoice_schedule",
-    "review_response_proposal",
     "create_booking"
   ],
   "gated": ["approve_proposal", "reject_proposal", "edit_proposal"]

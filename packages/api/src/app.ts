@@ -1682,6 +1682,12 @@ export function createApp(): express.Express {
     ? createCredentialResolver({ pool, directPool })
     : null;
   const serviceCreditRepo = pool ? new PgServiceCreditRepository(pool) : undefined;
+  // Reviewer→customer matcher + brand voice for review-response drafting.
+  // Hoisted here (was next to the polling worker at the bottom of createApp)
+  // because the voice-action-router's respond_to_review on-ramp (U3) needs
+  // the same instances; the polling worker below reuses them.
+  const googleReviewsCustomerLoader = pool ? new PgCustomerLoader(pool) : null;
+  const googleReviewsBrandVoiceLoader = new NoopBrandVoiceLoader();
   const googleReplyResolver =
     googleReviewsReviewRepo && googleReviewsCredResolver
       ? new PgGoogleBusinessReplyResolver(
@@ -1740,6 +1746,9 @@ export function createApp(): express.Express {
     // path; message_dispatches backs the 48h cooldown.
     ...(sendService ? { sendService } : {}),
     dispatchRepo,
+    // UB-A2 — create_standing_instruction inserts via the UB-A1 repo
+    // (in-memory fallback when no pool, same as the routes above).
+    standingInstructionRepo,
   });
   // U5 — fail boot loudly if a voice-reachable persist handler is degraded
   // (would return success without saving). Only the persist-critical
@@ -2089,6 +2098,20 @@ export function createApp(): express.Express {
     // shim starts returning live data on the next classifier call.
     verticalPromptResolver: operatorVerticalResolverShim,
     extendedIntentsEnabled: voiceExtendedIntentsFlagShim,
+    // U3 — respond_to_review on-ramp: recent-review lookup + the SAME
+    // build-proposal dep bundle the google-reviews polling worker wires, so
+    // voice-initiated drafts are identical to poll-initiated ones.
+    ...(googleReviewsReviewRepo ? { reviewRepo: googleReviewsReviewRepo } : {}),
+    ...(serviceCreditRepo && googleReviewsCustomerLoader
+      ? {
+          reviewResponseDraftDeps: {
+            llmGateway,
+            customerLoader: googleReviewsCustomerLoader,
+            brandVoiceLoader: googleReviewsBrandVoiceLoader,
+            serviceCreditRepo,
+          },
+        }
+      : {}),
     // P12-004 — unsupervised proposal routing: when no supervisor is
     // present and the tenant routing is queue_and_sms (default), send the
     // owner a one-tap approve SMS with a signed single-use link. Audit
@@ -5076,8 +5099,8 @@ export function createApp(): express.Express {
   // immediately produce a draft review_response_proposal. When any are
   // missing, we log a one-shot warning so ops can see "ingestion only,
   // no proposals being created" without grepping the per-tick logs.
-  const googleReviewsCustomerLoader = pool ? new PgCustomerLoader(pool) : null;
-  const googleReviewsBrandVoiceLoader = new NoopBrandVoiceLoader();
+  // (Loader instances are constructed next to serviceCreditRepo above and
+  // shared with the voice respond_to_review on-ramp — U3.)
   const googleReviewsProposalEmission =
     serviceCreditRepo && googleReviewsCustomerLoader
       ? {

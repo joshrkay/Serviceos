@@ -1017,3 +1017,93 @@ describe('Story 3.4 — "log inventory" maps to expense logging', () => {
     expect(result.extractedEntities?.amount).toBe(4000);
   });
 });
+
+// ─── Taxonomy 1.2.0 (agent wave, Track A) ──────────────────────────────────
+//
+// The three new proposal-driving intents parse with their flat entity fields
+// (scheduleDescription / reviewReference / instructionText / scopeIntentHint)
+// and the version stamp reflects the coordinated bump.
+describe('taxonomy 1.2.0 — new intents + entities', () => {
+  it('bumped the taxonomy version to 1.2.0', () => {
+    expect(INTENT_TAXONOMY_VERSION).toBe('1.2.0');
+  });
+
+  it('parses create_invoice_schedule with the verbatim milestone sentence', () => {
+    const result = parseClassifierJson(
+      JSON.stringify({
+        intentType: 'create_invoice_schedule',
+        confidence: 0.9,
+        extractedEntities: {
+          jobReference: 'the Hendersons',
+          scheduleDescription: '50% deposit, 50% on completion',
+          amount: 400000,
+        },
+      }),
+    );
+    expect(result?.intentType).toBe('create_invoice_schedule');
+    expect(result?.extractedEntities?.scheduleDescription).toBe('50% deposit, 50% on completion');
+    expect(result?.extractedEntities?.jobReference).toBe('the Hendersons');
+    expect(result?.extractedEntities?.amount).toBe(400000);
+  });
+
+  it('parses respond_to_review with the free-text review reference', () => {
+    const result = parseClassifierJson(
+      JSON.stringify({
+        intentType: 'respond_to_review',
+        confidence: 0.9,
+        extractedEntities: { reviewReference: 'the 1-star from yesterday' },
+      }),
+    );
+    expect(result?.intentType).toBe('respond_to_review');
+    expect(result?.extractedEntities?.reviewReference).toBe('the 1-star from yesterday');
+  });
+
+  it('parses create_standing_instruction with instructionText + scopeIntentHint', () => {
+    const result = parseClassifierJson(
+      JSON.stringify({
+        intentType: 'create_standing_instruction',
+        confidence: 0.95,
+        extractedEntities: {
+          instructionText: 'from now on always add a $79 diagnostic fee to AC calls',
+          scopeIntentHint: 'invoices',
+          amount: 7900,
+        },
+      }),
+    );
+    expect(result?.intentType).toBe('create_standing_instruction');
+    expect(result?.extractedEntities?.instructionText).toBe(
+      'from now on always add a $79 diagnostic fee to AC calls',
+    );
+    expect(result?.extractedEntities?.scopeIntentHint).toBe('invoices');
+  });
+
+  it('non-string values for the new fields are dropped (flat strings only)', () => {
+    const result = parseClassifierJson(
+      JSON.stringify({
+        intentType: 'create_invoice_schedule',
+        confidence: 0.9,
+        extractedEntities: {
+          scheduleDescription: { milestones: [] }, // nested object → dropped
+          reviewReference: 42,
+          instructionText: null,
+        },
+      }),
+    );
+    expect(result?.extractedEntities?.scheduleDescription).toBeUndefined();
+    expect(result?.extractedEntities?.reviewReference).toBeUndefined();
+    expect(result?.extractedEntities?.instructionText).toBeUndefined();
+  });
+
+  it('classifyIntent stamps 1.2.0 on a new-intent classification end-to-end', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({
+        intentType: 'respond_to_review',
+        confidence: 0.9,
+        extractedEntities: { reviewReference: 'that bad review' },
+      }),
+    );
+    const result = await classifyIntent('Respond to that bad review', { tenantId: 't-1' }, gateway);
+    expect(result.intentType).toBe('respond_to_review');
+    expect(result.taxonomyVersion).toBe('1.2.0');
+  });
+});
