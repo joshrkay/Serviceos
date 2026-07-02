@@ -1,9 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import { resolveScheduleSlot, nextWeekdayIso } from './resolve-schedule-slot';
 
-// A fixed local-noon "now" keeps date-label resolution (Today/Tomorrow)
-// deterministic regardless of the runner's clock.
-const NOW = new Date(2026, 5, 30, 9, 0, 0); // 2026-06-30 09:00 local
+// A fixed UTC instant for "now". Today/Tomorrow resolve from the calendar day
+// in the TENANT tz, so a fixed instant keeps them deterministic regardless of
+// the runner's clock. 2026-06-30 13:00Z is 09:00 ET on Jun 30 (a Tuesday).
+const NOW = new Date('2026-06-30T13:00:00Z');
 // All test dates (Jun 30 – Aug 15 2026) fall in EDT, so ET = UTC-4. Asserting
 // on the UTC ISO instant is deterministic regardless of the runner's timezone.
 const ET = 'America/New_York';
@@ -28,6 +29,16 @@ describe('resolveScheduleSlot', () => {
   it('resolves Tomorrow to the next calendar day', () => {
     const slot = resolveScheduleSlot('Tomorrow', '8:00 AM', ET, NOW);
     expect(slot!.scheduledStart).toBe('2026-07-01T12:00:00.000Z'); // 8 AM ET
+  });
+
+  it('resolves Today/Tomorrow from the TENANT calendar day, not the browser day', () => {
+    // 02:00Z on Jun 30 is still Jun 29 (22:00) in ET. "Today" for an ET tenant
+    // must be Jun 29, not the browser/UTC Jun 30.
+    const lateNight = new Date('2026-06-30T02:00:00Z');
+    expect(resolveScheduleSlot('Today', '2:00 PM', ET, lateNight)!.scheduledStart)
+      .toBe('2026-06-29T18:00:00.000Z'); // 2 PM ET on Jun 29
+    expect(resolveScheduleSlot('Tomorrow', '2:00 PM', ET, lateNight)!.scheduledStart)
+      .toBe('2026-06-30T18:00:00.000Z'); // 2 PM ET on Jun 30
   });
 
   it('resolves a real ISO date from the custom date input', () => {

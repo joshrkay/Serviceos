@@ -39,16 +39,42 @@ export function nextWeekdayIso(targetDow: number, from: Date = new Date()): stri
   return toYmd(d);
 }
 
-/** Resolve a date chip value to a `YYYY-MM-DD` local date, or null. */
-function resolveYmd(scheduledDate: string, now: Date): string | null {
+/** Today's calendar date in the given timezone, as [y, month(1-12), day], or null. */
+function tenantYmdParts(now: Date, timezone: string): [number, number, number] | null {
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit',
+    }).formatToParts(now);
+    const get = (t: string): number => Number(parts.find((p) => p.type === t)?.value);
+    const [y, mo, d] = [get('year'), get('month'), get('day')];
+    return [y, mo, d].some(Number.isNaN) ? null : [y, mo, d];
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolve a date chip value to a `YYYY-MM-DD` date, or null.
+ *
+ * Today/Tomorrow are resolved from the calendar day in the TENANT timezone (not
+ * the dispatcher's browser day): a Pacific dispatcher after 9 PM booking an
+ * Eastern tenant means the tenant is already "tomorrow", so "Today" must be the
+ * tenant's date — otherwise the appointment lands on the wrong (past) board day.
+ */
+function resolveYmd(scheduledDate: string, now: Date, timezone: string): string | null {
   const value = scheduledDate.trim();
   if (!value) return null;
-  if (/^today$/i.test(value)) return toYmd(now);
-  if (/^tomorrow$/i.test(value)) {
-    return toYmd(new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1));
-  }
   // A real date input (`type=date`) yields an ISO calendar date.
   if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+  if (/^today$/i.test(value) || /^tomorrow$/i.test(value)) {
+    const today = tenantYmdParts(now, timezone);
+    if (!today) return null;
+    const [y, mo, d] = today;
+    // Date.UTC normalizes month/year rollover; read back the calendar date.
+    return new Date(Date.UTC(y, mo - 1, d + (/^tomorrow$/i.test(value) ? 1 : 0)))
+      .toISOString()
+      .slice(0, 10);
+  }
   // Placeholder/demo labels ("Tue Mar 11", "Custom", "__custom") aren't
   // concretely schedulable.
   return null;
@@ -74,7 +100,7 @@ export function resolveScheduleSlot(
   now: Date = new Date(),
   durationMin: number = DEFAULT_DURATION_MIN,
 ): ScheduleSlot | null {
-  const ymd = resolveYmd(scheduledDate, now);
+  const ymd = resolveYmd(scheduledDate, now, timezone);
   if (!ymd) return null;
   const hm = resolveHm(scheduledTime);
   if (!hm) return null;
