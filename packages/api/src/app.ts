@@ -150,6 +150,9 @@ import { AttachmentService } from './attachments/attachment-service';
 import { InMemoryAttachmentRepository } from './attachments/attachment';
 import { PgAttachmentRepository } from './attachments/pg-attachment';
 import { createDispatchRoutes } from './dispatch/routes';
+import { initDispatchPresenceStore } from './dispatch/presence-store';
+import { initDispatchBoardFanout } from './dispatch/board-event-bus';
+import { createDispatchPresenceGatewayDeps } from './dispatch/presence-gateway';
 import { createPublicFeedbackRouter } from './routes/public-feedback';
 import { createPublicIntakeRouter } from './routes/public-intake';
 import { createPublicBookingRouter } from './routes/public-booking';
@@ -3552,6 +3555,9 @@ export function createApp(): express.Express {
       const server = (origListen as any)(...args);
       attachClientGateway(server, {
         registry: connectionRegistry,
+        // UC-3 — dispatch presence heartbeats/reads ride this socket
+        // instead of a 5s HTTP PUT per board user.
+        dispatchPresence: createDispatchPresenceGatewayDeps(),
         // Runtime kill switch: consult the persisted feature flag on
         // every upgrade so flipping ws.client_gateway_enabled off
         // immediately disables /api/ws without redeploy. The env-var
@@ -3938,6 +3944,15 @@ export function createApp(): express.Express {
     createAppointmentRouter(appointmentRepo, ownership, jobRepo, timelineRepo, {
       delayNotificationCoordinator,
     }, auditRepo)
+  );
+  // UC-3 — presence store goes cluster-wide when REDIS_URL is set (in-memory
+  // and byte-identical to single-replica behavior otherwise).
+  initDispatchPresenceStore(process.env.REDIS_URL);
+  // UC-4 — dispatch-board event/revision fan-out across replicas. Double-gated
+  // like the voice fan-out (U3d): REDIS_URL must be set AND
+  // DISPATCH_FANOUT_ENABLED=true; otherwise the bus stays process-local.
+  initDispatchBoardFanout(
+    process.env.DISPATCH_FANOUT_ENABLED === 'true' ? process.env.REDIS_URL : undefined,
   );
   app.use(
     '/api/dispatch',

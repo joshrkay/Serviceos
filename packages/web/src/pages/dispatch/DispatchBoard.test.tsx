@@ -26,7 +26,7 @@ vi.mock('../../hooks/useDispatchBoardStream', () => ({
 }));
 
 vi.mock('../../hooks/useDispatchPresence', () => ({
-  useDispatchPresence: vi.fn(),
+  useDispatchPresence: vi.fn(() => ({ peers: [], transport: 'http' })),
 }));
 
 vi.mock('../../components/dispatch/useFeasibilityPreview', () => ({

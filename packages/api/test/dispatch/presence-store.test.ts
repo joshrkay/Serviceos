@@ -1,20 +1,24 @@
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   upsertDispatchPresence,
   listDispatchPresence,
   clearDispatchPresence,
-  getEditingOnAppointment,
+  findEditingOnAppointment,
+  resetDispatchPresenceStoreForTests,
+  type PresenceEntry,
 } from '../../src/dispatch/presence-store';
 
 describe('presence-store', () => {
+  beforeEach(() => {
+    resetDispatchPresenceStoreForTests();
+  });
   afterEach(() => {
-    clearDispatchPresence('t1', '2026-05-20', 'u1');
-    clearDispatchPresence('t1', '2026-05-20', 'u2');
+    resetDispatchPresenceStoreForTests();
   });
 
-  it('lists active presence and expires stale entries', () => {
+  it('lists active presence and expires stale entries', async () => {
     vi.useFakeTimers();
-    upsertDispatchPresence({
+    await upsertDispatchPresence({
       tenantId: 't1',
       date: '2026-05-20',
       userId: 'u1',
@@ -23,14 +27,14 @@ describe('presence-store', () => {
       mode: 'dragging',
       ttlMs: 1000,
     });
-    expect(listDispatchPresence('t1', '2026-05-20')).toHaveLength(1);
+    expect(await listDispatchPresence('t1', '2026-05-20')).toHaveLength(1);
     vi.advanceTimersByTime(1500);
-    expect(listDispatchPresence('t1', '2026-05-20')).toHaveLength(0);
+    expect(await listDispatchPresence('t1', '2026-05-20')).toHaveLength(0);
     vi.useRealTimers();
   });
 
-  it('returns editing user on appointment', () => {
-    upsertDispatchPresence({
+  it('finds the editing user on an appointment from a presence list', async () => {
+    await upsertDispatchPresence({
       tenantId: 't1',
       date: '2026-05-20',
       userId: 'u2',
@@ -38,8 +42,74 @@ describe('presence-store', () => {
       appointmentId: 'appt-9',
       mode: 'dragging',
     });
-    const editing = getEditingOnAppointment('t1', '2026-05-20', 'appt-9', 'u1');
+    const entries = await listDispatchPresence('t1', '2026-05-20');
+    const editing = findEditingOnAppointment(entries, 'appt-9', 'u1');
     expect(editing?.displayName).toBe('Sam');
-    expect(getEditingOnAppointment('t1', '2026-05-20', 'appt-9', 'u2')).toBeNull();
+    expect(findEditingOnAppointment(entries, 'appt-9', 'u2')).toBeNull();
+  });
+
+  it('ignores viewing-mode entries in the editing lookup', () => {
+    const entries: PresenceEntry[] = [
+      {
+        tenantId: 't1',
+        date: '2026-05-20',
+        userId: 'u3',
+        displayName: 'Vee',
+        appointmentId: 'appt-9',
+        mode: 'viewing',
+        expiresAt: Date.now() + 10_000,
+      },
+    ];
+    expect(findEditingOnAppointment(entries, 'appt-9')).toBeNull();
+  });
+
+  it('upsert reports change only when the visible state changed (not TTL refresh)', async () => {
+    const base = {
+      tenantId: 't1',
+      date: '2026-05-20',
+      userId: 'u1',
+      displayName: 'Alex',
+      appointmentId: null,
+      mode: 'viewing' as const,
+    };
+    expect(await upsertDispatchPresence(base)).toBe(true); // new entry
+    expect(await upsertDispatchPresence(base)).toBe(false); // heartbeat refresh
+    expect(
+      await upsertDispatchPresence({ ...base, mode: 'dragging', appointmentId: 'appt-1' }),
+    ).toBe(true); // mode + appointment changed
+    expect(await upsertDispatchPresence({ ...base, mode: 'dragging', appointmentId: 'appt-1' })).toBe(
+      false,
+    );
+  });
+
+  it('upsert after expiry counts as a change again', async () => {
+    vi.useFakeTimers();
+    const base = {
+      tenantId: 't1',
+      date: '2026-05-20',
+      userId: 'u1',
+      displayName: 'Alex',
+      appointmentId: null,
+      mode: 'viewing' as const,
+      ttlMs: 1000,
+    };
+    expect(await upsertDispatchPresence(base)).toBe(true);
+    vi.advanceTimersByTime(1500);
+    // Entry lapsed — other viewers saw it disappear, so re-appearing is a change.
+    expect(await upsertDispatchPresence(base)).toBe(true);
+    vi.useRealTimers();
+  });
+
+  it('clear reports whether an entry existed', async () => {
+    await upsertDispatchPresence({
+      tenantId: 't1',
+      date: '2026-05-20',
+      userId: 'u1',
+      displayName: 'Alex',
+      appointmentId: null,
+      mode: 'viewing',
+    });
+    expect(await clearDispatchPresence('t1', '2026-05-20', 'u1')).toBe(true);
+    expect(await clearDispatchPresence('t1', '2026-05-20', 'u1')).toBe(false);
   });
 });

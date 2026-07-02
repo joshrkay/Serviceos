@@ -112,8 +112,15 @@ export function DispatchBoard() {
   const [crewDialogAppointmentId, setCrewDialogAppointmentId] = useState<string | null>(null);
   const { removeCrew } = useCreateCrewProposal();
 
-  useDispatchBoardStream(dateParam, data?.boardRevision, refetch);
-  useDispatchPresence(selectedDate, dragSource?.appointmentId ?? null);
+  const { peers: presencePeers, transport: presenceTransport } = useDispatchPresence(
+    selectedDate,
+    dragSource?.appointmentId ?? null,
+  );
+  useDispatchBoardStream(dateParam, data?.boardRevision, refetch, {
+    // Presence pushes arrive over the WS gateway; skip the SSE-triggered
+    // full-board refetch for presence-only changes in that mode.
+    presenceViaWs: presenceTransport === 'ws',
+  });
 
   useEffect(() => {
     const onVisible = () => {
@@ -636,11 +643,27 @@ export function DispatchBoard() {
         }
       : undefined;
 
-  const presenceWarning =
+  // Prefer live WS presence (fresher than the board snapshot); fall back to
+  // the `editing` field embedded in the board payload (HTTP-fallback mode).
+  const pendingDropApptId = pendingDrop?.appointment?.id;
+  const livePeerEditing = pendingDropApptId
+    ? presencePeers.find(
+        (peer) =>
+          peer.mode === 'dragging' &&
+          peer.appointmentId === pendingDropApptId &&
+          peer.userId !== currentUserId,
+      )
+    : undefined;
+  const snapshotEditing =
     pendingDrop?.appointment?.editing &&
     pendingDrop.appointment.editing.userId !== currentUserId
-      ? `${pendingDrop.appointment.editing.displayName} may be editing this appointment.`
+      ? pendingDrop.appointment.editing
       : undefined;
+  const editingPeer =
+    presenceTransport === 'ws' ? livePeerEditing : (livePeerEditing ?? snapshotEditing);
+  const presenceWarning = editingPeer
+    ? `${editingPeer.displayName} may be editing this appointment.`
+    : undefined;
 
   const dialogFeasibility: FeasibilityResult | null =
     confirmFeasibilityPreview ?? (pendingDrop ? feasibilityPreview : null);
