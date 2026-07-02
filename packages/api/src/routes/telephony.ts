@@ -234,6 +234,10 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
         pool: deps.pool,
         leadRepo: deps.leadRepo,
         auditRepo: deps.auditRepo,
+        // Public Twilio callback — mounts its own urlencoded parser +
+        // signature check (it sits before the shared middleware below).
+        authTokenGetter: deps.authTokenGetter,
+        ...(deps.publicBaseUrl ? { publicBaseUrl: deps.publicBaseUrl } : {}),
       }),
     );
   }
