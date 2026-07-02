@@ -154,17 +154,25 @@ describe('P1-013 — Payment entity + partial payments', () => {
     );
     await issueInvoice('tenant-1', inv.id, 30, localInvoiceRepo);
 
+    // Count customer receipts — a pure duplicate must NOT fire a second one.
+    let receipts = 0;
+    const notifier = { notifyPaymentReceived: async () => { receipts += 1; } };
+
     const ref = 'pi_race_123';
     const first = await recordPayment(
       { tenantId: 'tenant-1', invoiceId: inv.id, amountCents: 10000, method: 'credit_card', providerReference: ref, processedBy: 'stripe_webhook' },
       localInvoiceRepo,
       racingRepo,
+      undefined,
+      notifier,
     );
     // Second event for the SAME intent → create hits 23505 → idempotent return.
     const second = await recordPayment(
       { tenantId: 'tenant-1', invoiceId: inv.id, amountCents: 10000, method: 'credit_card', providerReference: ref, processedBy: 'stripe_webhook' },
       localInvoiceRepo,
       racingRepo,
+      undefined,
+      notifier,
     );
 
     expect(second.payment.id).toBe(first.payment.id); // same row, not a new one
@@ -172,6 +180,7 @@ describe('P1-013 — Payment entity + partial payments', () => {
     expect(rows).toHaveLength(1); // no duplicate payment row
     const reloaded = await localInvoiceRepo.findById('tenant-1', inv.id);
     expect(reloaded!.amountPaidCents).toBe(10000); // credited once, not 20000
+    expect(receipts).toBe(1); // receipt fired once, NOT on the duplicate
   });
 
   it('duplicate-payment backstop — reconciles an invoice under-credited by a crashed prior attempt', async () => {
@@ -207,12 +216,24 @@ describe('P1-013 — Payment entity + partial payments', () => {
     );
     await issueInvoice('tenant-1', inv.id, 30, localInvoiceRepo);
 
+    // Spy on the post-payment side effects — they must RE-RUN on the repair
+    // (the crashed attempt never reached them), unlike a pure duplicate.
+    let receipts = 0;
+    const notifier = { notifyPaymentReceived: async () => { receipts += 1; } };
+    let auditEvents = 0;
+    const auditSpy = { create: async () => { auditEvents += 1; } };
+
     const ref = 'pi_crash_1';
     await recordPayment(
       { tenantId: 'tenant-1', invoiceId: inv.id, amountCents: 10000, method: 'credit_card', providerReference: ref, processedBy: 'stripe_webhook' },
       localInvoiceRepo,
       racingRepo,
+      undefined,
+      notifier,
+      auditSpy as never,
     );
+    const receiptsAfterFirst = receipts;
+    const auditAfterFirst = auditEvents;
     // Simulate the crash: payment row is committed, but the invoice credit was
     // lost (rolled back / never applied).
     await localInvoiceRepo.update('tenant-1', inv.id, {
@@ -227,6 +248,9 @@ describe('P1-013 — Payment entity + partial payments', () => {
       { tenantId: 'tenant-1', invoiceId: inv.id, amountCents: 10000, method: 'credit_card', providerReference: ref, processedBy: 'stripe_webhook' },
       localInvoiceRepo,
       racingRepo,
+      undefined,
+      notifier,
+      auditSpy as never,
     );
 
     expect(retry.invoice.amountPaidCents).toBe(10000);
@@ -234,6 +258,9 @@ describe('P1-013 — Payment entity + partial payments', () => {
     expect(retry.invoice.status).toBe('partially_paid');
     // Still exactly one payment row.
     expect(await getPaymentsByInvoice('tenant-1', inv.id, inner)).toHaveLength(1);
+    // The repair re-ran the receipt + audit the crashed attempt never reached.
+    expect(receipts).toBe(receiptsAfterFirst + 1);
+    expect(auditEvents).toBeGreaterThan(auditAfterFirst);
   });
 
   it('duplicate-payment backstop — a reference reused on a DIFFERENT invoice is a conflict, not idempotent', async () => {
