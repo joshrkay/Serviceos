@@ -48,27 +48,51 @@ export function dictationSupported(): boolean {
   );
 }
 
-function buildStreamUrl(model: string): string {
+function buildStreamUrl(model: string, utteranceEndMs?: number): string {
   const params = new URLSearchParams({
     model: model || 'nova-3',
     interim_results: 'true',
     punctuate: 'true',
     smart_format: 'true',
   });
+  // UB-B2 — conversation mode: ask Deepgram to emit UtteranceEnd events after
+  // this much trailing silence so per-utterance finals fire while the mic
+  // stays open (requires interim_results, which is already pinned above).
+  if (utteranceEndMs !== undefined) {
+    params.set('utterance_end_ms', String(utteranceEndMs));
+    params.set('vad_events', 'true');
+  }
   return `${DEEPGRAM_WS_BASE}?${params.toString()}`;
 }
 
 export function useDeepgramDictation(opts: {
   onPartial?: (text: string) => void;
   onFinal?: (text: string) => void;
+  /**
+   * UB-B2 — continuous conversation mode. When set, each utterance's final
+   * text is delivered HERE as it completes (Deepgram `speech_final` /
+   * `UtteranceEnd`) while the mic stays open; the accumulated-finals buffer
+   * resets per utterance. Existing stop-to-finalize callers are untouched:
+   * without this option the hook behaves exactly as before.
+   */
+  onUtteranceEnd?: (text: string) => void;
+  /** Trailing-silence window (ms) for UtteranceEnd events. Default 1000. */
+  utteranceEndMs?: number;
 }): UseDeepgramDictation {
   // Keep the latest callbacks in refs so `start`/`stop` keep a stable identity
   // even when the caller passes a fresh `opts` object literal on every render
   // (otherwise they'd churn and defeat memoization in consumers/effects).
   const onPartialRef = useRef(opts.onPartial);
   const onFinalRef = useRef(opts.onFinal);
+  const onUtteranceEndRef = useRef(opts.onUtteranceEnd);
   onPartialRef.current = opts.onPartial;
   onFinalRef.current = opts.onFinal;
+  onUtteranceEndRef.current = opts.onUtteranceEnd;
+  // Mirrored into refs so the stable `start` callback sees the live values.
+  const continuousRef = useRef(false);
+  const utteranceEndMsRef = useRef<number | undefined>(undefined);
+  continuousRef.current = opts.onUtteranceEnd !== undefined;
+  utteranceEndMsRef.current = continuousRef.current ? (opts.utteranceEndMs ?? 1000) : undefined;
 
   const [isRecording, setIsRecording] = useState(false);
   const [partial, setPartial] = useState('');
@@ -101,6 +125,17 @@ export function useDeepgramDictation(opts: {
     () => [...finalsRef.current, interimRef.current].join(' ').replace(/\s+/g, ' ').trim(),
     [],
   );
+
+  // UB-B2 — continuous mode: deliver the utterance accumulated so far and
+  // reset the buffers so the next utterance starts clean while the mic stays
+  // open. No-op when nothing final has been committed yet.
+  const flushUtterance = useCallback(() => {
+    const text = finalsRef.current.join(' ').replace(/\s+/g, ' ').trim();
+    finalsRef.current = [];
+    interimRef.current = '';
+    setPartial('');
+    if (text) onUtteranceEndRef.current?.(text);
+  }, []);
 
   const stop = useCallback(() => {
     if (!recorderRef.current && !wsRef.current) return;
@@ -148,7 +183,7 @@ export function useDeepgramDictation(opts: {
 
       // Deepgram browser auth: pass the short-lived token via the `bearer`
       // WebSocket subprotocol (browsers can't set Authorization headers on WS).
-      const ws = new WebSocket(buildStreamUrl(model), ['bearer', token]);
+      const ws = new WebSocket(buildStreamUrl(model, utteranceEndMsRef.current), ['bearer', token]);
       wsRef.current = ws;
 
       ws.onopen = () => {
@@ -169,14 +204,30 @@ export function useDeepgramDictation(opts: {
           return;
         }
         const d = data as {
+          type?: string;
           channel?: { alternatives?: Array<{ transcript?: string }> };
           is_final?: boolean;
+          speech_final?: boolean;
         };
+        // UB-B2 — Deepgram's UtteranceEnd event (only requested in continuous
+        // mode): the trailing-silence window elapsed, so whatever finals have
+        // accumulated form a complete utterance.
+        if (continuousRef.current && d.type === 'UtteranceEnd') {
+          flushUtterance();
+          return;
+        }
         const transcript = d.channel?.alternatives?.[0]?.transcript ?? '';
         if (!transcript) return;
         if (d.is_final) {
           finalsRef.current.push(transcript);
           interimRef.current = '';
+          // speech_final marks Deepgram's endpointing decision — the fast
+          // path for a completed utterance (UtteranceEnd is the fallback for
+          // finals that arrive without it).
+          if (continuousRef.current && d.speech_final) {
+            flushUtterance();
+            return;
+          }
         } else {
           interimRef.current = transcript;
           onPartialRef.current?.(transcript);
@@ -199,7 +250,7 @@ export function useDeepgramDictation(opts: {
       cleanup();
       setIsRecording(false);
     }
-  }, [isRecording, cleanup, composed]);
+  }, [isRecording, cleanup, composed, flushUtterance]);
 
   // Tear down on unmount so a mic/WS never leaks past the component.
   useEffect(() => () => cleanup(), [cleanup]);
