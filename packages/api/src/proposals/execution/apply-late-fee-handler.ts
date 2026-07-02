@@ -11,6 +11,22 @@ import {
 } from '../../jobs/job-money-state';
 import { AuditRepository, createAuditEvent } from '../../audit/audit';
 import { applyLateFeePayloadSchema } from '../contracts/apply-late-fee';
+import { v5 as uuidv5 } from 'uuid';
+
+/**
+ * Fixed namespace so a late-fee line's id is a DETERMINISTIC, valid UUID
+ * derived from the accrual step. It must be a real UUID — not the human-
+ * readable `late-fee:<stepKey>` — because the invoice repo replaces any
+ * non-UUID line-item id with a random one on insert (pg-invoice
+ * insertLineItems), which silently defeated the idempotency guard on reload
+ * and allowed a retried proposal to append a SECOND late-fee line.
+ */
+const LATE_FEE_ID_NAMESPACE = 'b6c9e0a2-5f3d-4b1e-9c8a-1d2e3f4a5b6c';
+
+/** Deterministic, persistence-stable id for the late-fee line of `stepKey`. */
+export function lateFeeLineId(stepKey: string): string {
+  return uuidv5(`late-fee:${stepKey}`, LATE_FEE_ID_NAMESPACE);
+}
 
 /**
  * Executes an approved `apply_late_fee` proposal (collections cadence).
@@ -23,9 +39,10 @@ import { applyLateFeePayloadSchema } from '../contracts/apply-late-fee';
  *
  * Money-class: this only ever runs after explicit owner approval (money
  * proposals never auto-approve). Guards:
- * - Idempotent: the fee line carries a deterministic id (`late-fee:<stepKey>`)
- *   so re-executing the same proposal — or a duplicate — is a no-op success
- *   rather than a double charge.
+ * - Idempotent: the fee line carries a deterministic UUID derived from
+ *   `late-fee:<stepKey>` (see lateFeeLineId), so re-executing the same
+ *   proposal — or a duplicate — is a no-op success rather than a double
+ *   charge, even after the invoice is reloaded from the DB.
  * - Only applies to invoices still owed (`open` / `partially_paid`). If the
  *   customer paid (or the invoice was voided) between proposal creation and
  *   approval, the fee is NOT applied and a clear failure is returned.
@@ -70,7 +87,9 @@ export class ApplyLateFeeExecutionHandler implements ExecutionHandler {
 
     // Idempotency: a fee line for this accrual step already exists → no-op
     // success (re-execution or a duplicate proposal must not double-charge).
-    const feeLineId = `late-fee:${stepKey}`;
+    // The id is a deterministic UUID so it survives the invoice repo's insert
+    // (which rewrites non-UUID ids) and still matches on reload.
+    const feeLineId = lateFeeLineId(stepKey);
     if (invoice.lineItems.some((li) => li.id === feeLineId)) {
       return { success: true, resultEntityId: invoice.id };
     }
