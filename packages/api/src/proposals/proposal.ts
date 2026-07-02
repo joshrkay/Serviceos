@@ -227,6 +227,13 @@ export interface CreateProposalInput {
   supervisorMode?: Mode;
   supervisorPresent?: boolean;
   tenantThresholdOverride?: ResolveThresholdInput['tenantOverride'];
+  /**
+   * UB-D / D-015 — autonomous booking lane result, set ONLY by the
+   * inbound-receptionist booking call sites after
+   * `evaluateAutonomousBookingLane` (proposals/autonomous-lane.ts) passed
+   * every gate. See `decideInitialStatus.autonomousLane`.
+   */
+  autonomousLane?: { eligible: true; threshold: number };
 }
 
 /**
@@ -446,6 +453,20 @@ export function decideInitialStatus(input: {
    * that don't thread the payload) keep pre-RV-007 behavior exactly.
    */
   payload?: unknown;
+  /**
+   * UB-D / D-015 — autonomous booking lane. Set ONLY by the
+   * inbound-receptionist booking call sites after
+   * `evaluateAutonomousBookingLane` passed every gate (tenant opt-in,
+   * booking capture types only, clean resolution, live held slot in
+   * business hours, no session flags). When present-and-eligible AND the
+   * tenant is unsupervised (threshold resolution returned null), the lane's
+   * dedicated (stricter) threshold is used instead of categorically
+   * blocking. Absent input ⇒ behavior byte-identical to pre-lane code for
+   * every proposal type × trust tier × supervisorPresent combination
+   * (pinned by test). Money/comms/irreversible classes never reach this
+   * branch (it lives inside the `autonomous + capture` arm).
+   */
+  autonomousLane?: { eligible: true; threshold: number };
 }): ProposalStatus {
   // Missing required fields always land in 'draft' — a partial payload
   // can't be auto-approved even by an autonomous agent with high
@@ -482,6 +503,18 @@ export function decideInitialStatus(input: {
     });
 
     if (threshold === null) {
+      // UB-D / D-015 — the autonomous booking lane is the single, scoped
+      // exception to the unsupervised block: booking capture proposals
+      // from the inbound receptionist, tenant opted in, every lane gate
+      // passed (evaluated by the call site), judged against the lane's
+      // dedicated stricter threshold. Anything below it falls through to
+      // the normal unsupervised routing.
+      if (
+        input.autonomousLane?.eligible &&
+        shouldAutoApprove(input.confidenceScore, input.autonomousLane.threshold)
+      ) {
+        return 'approved';
+      }
       // Unsupervised. The proposal would have auto-approved if a
       // supervisor were present — surface it in the queue (rather than
       // 'draft') so the unsupervised-routing path picks it up. The
@@ -674,6 +707,11 @@ export function createProposal(input: CreateProposalInput): Proposal {
     // through createProposal → decideInitialStatus, so this is the
     // single wiring point.
     payload: input.payload,
+    // UB-D / D-015: the autonomous booking lane input, set only by the
+    // inbound-receptionist booking call sites after every lane gate
+    // passed. The supervisor hook below still runs and can only
+    // downgrade — a policy block/force_review beats the lane.
+    autonomousLane: input.autonomousLane,
   });
   // Supervisor verdict application:
   //   'block'        → 'draft' (decideInitialStatus result discarded);
