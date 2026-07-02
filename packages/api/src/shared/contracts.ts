@@ -114,6 +114,11 @@ const lineItemSchema = z.object({
   totalCents: z.number().int().nonnegative(),
   sortOrder: z.number().int(),
   taxable: z.boolean(),
+  // Catalog-grounding signal (estimates). Must be declared here or Zod strips
+  // it on update/revise, making a catalog-priced estimate look ungrounded
+  // (PgEstimateRepository persists pricingSource; isEstimateCatalogGrounded
+  // treats null as NOT grounded).
+  pricingSource: z.enum(['catalog', 'ambiguous', 'uncatalogued', 'manual']).optional(),
   // Good-better-best tiers + optional add-ons (estimates only).
   groupKey: z.string().min(1).max(120).optional(),
   groupLabel: z.string().min(1).max(200).optional(),
@@ -227,6 +232,39 @@ export const createInvoiceSchema = z.object({
   taxRateBps: z.number().int().min(0).max(10000).optional(),
   processingFeeBps: z.number().int().min(0).max(10000).optional(),
   customerMessage: z.string().optional(),
+});
+
+// Update/revise payloads — the PUT/PATCH routes previously passed req.body
+// straight to updateInvoice/updateEstimate with NO validation (create routes
+// validate). That let a caller persist negative discounts, fractional cents,
+// or an out-of-range tax rate, corrupting the stored money. These mirror the
+// create schemas but make every field optional (partial update) and, being
+// plain z.object, strip unknown keys so `status`/`tenantId`/etc. can't be
+// injected via the body.
+export const updateInvoiceSchema = z.object({
+  lineItems: z.array(lineItemSchema).min(1).optional(),
+  discountCents: z.number().int().nonnegative().optional(),
+  taxRateBps: z.number().int().min(0).max(10000).optional(),
+  processingFeeBps: z.number().int().min(0).max(10000).optional(),
+  customerMessage: z.string().max(2000).optional(),
+});
+
+export const updateEstimateSchema = z.object({
+  lineItems: z.array(lineItemSchema).min(1).optional(),
+  discountCents: z.number().int().nonnegative().optional(),
+  taxRateBps: z.number().int().min(0).max(10000).optional(),
+  // Accept an ISO string (JSON has no Date) and coerce to the Date that
+  // UpdateEstimateInput expects. Preprocess null → undefined FIRST: a bare
+  // z.coerce.date() turns null into Date(0) (1970-01-01), which updateEstimate
+  // would persist as valid_until and silently expire the estimate. Treating
+  // null as absent preserves the prior `?? existing.validUntil` no-op.
+  validUntil: z.preprocess(
+    (v) => (v === null ? undefined : v),
+    z.coerce.date().optional(),
+  ),
+  customerMessage: z.string().max(2000).optional(),
+  internalNotes: z.string().max(5000).optional(),
+  expectedVersion: z.number().int().positive().optional(),
 });
 
 export const recordPaymentSchema = z.object({

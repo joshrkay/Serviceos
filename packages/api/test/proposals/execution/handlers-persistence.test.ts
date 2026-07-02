@@ -11,7 +11,10 @@ import {
 } from '../../../src/customers/customer';
 import { InMemoryLocationRepository, createLocation } from '../../../src/locations/location';
 import { InMemoryJobRepository } from '../../../src/jobs/job';
-import { InMemoryEstimateRepository } from '../../../src/estimates/estimate';
+import {
+  InMemoryEstimateRepository,
+  isEstimateCatalogGrounded,
+} from '../../../src/estimates/estimate';
 import { InMemorySettingsRepository } from '../../../src/settings/settings';
 import { LineItem } from '../../../src/shared/billing-engine';
 import { v4 as uuidv4 } from 'uuid';
@@ -190,6 +193,85 @@ describe('DraftEstimateExecutionHandler persistence', () => {
     expect(estimate!.jobId).toBe(jobId);
     expect(estimate!.lineItems).toHaveLength(1);
     expect(estimate!.estimateNumber).toMatch(/^EST-/);
+  });
+
+  it('normalizes the estimate task shape (unitPrice, no totalCents) instead of failing', async () => {
+    // Regression: the estimate task emits the contract's `unitPrice` field and
+    // no `unitPriceCents`/`totalCents`. The handler used to blind-cast, so
+    // totals came back NaN and the NOT NULL insert failed — every AI estimate
+    // broke. sampleLineItems above hides this by pre-normalizing (the mock-
+    // shape trap), so use the REAL task shape here.
+    const estimateRepo = new InMemoryEstimateRepository();
+    const settingsRepo = new InMemorySettingsRepository();
+    const handler = new DraftEstimateExecutionHandler(estimateRepo, settingsRepo);
+
+    const result = await handler.execute(
+      makeProposal('draft_estimate', {
+        customerId,
+        jobId,
+        lineItems: [
+          { description: 'Water heater install', quantity: 2, unitPrice: 45000, category: 'labor' },
+        ],
+      }),
+      CONTEXT,
+    );
+
+    expect(result.success).toBe(true);
+    const estimate = await estimateRepo.findById(TENANT, result.resultEntityId!);
+    expect(estimate).not.toBeNull();
+    const line = estimate!.lineItems[0];
+    expect(line.unitPriceCents).toBe(45000);
+    expect(line.totalCents).toBe(90000); // 2 × 45000, not NaN
+    expect(estimate!.totals.subtotalCents).toBe(90000);
+    expect(Number.isNaN(estimate!.totals.totalCents)).toBe(false);
+  });
+
+  it('preserves catalog pricingSource so the estimate stays catalog-grounded', async () => {
+    // Regression: normalizing via buildLineItem dropped pricingSource, so a
+    // catalog-priced AI estimate persisted as ungrounded (null) and later took
+    // the manual discount-negotiation path.
+    const estimateRepo = new InMemoryEstimateRepository();
+    const settingsRepo = new InMemorySettingsRepository();
+    const handler = new DraftEstimateExecutionHandler(estimateRepo, settingsRepo);
+
+    const result = await handler.execute(
+      makeProposal('draft_estimate', {
+        customerId,
+        jobId,
+        lineItems: [
+          {
+            description: 'Water heater install',
+            quantity: 1,
+            unitPrice: 185000,
+            category: 'labor',
+            pricingSource: 'catalog',
+          },
+        ],
+      }),
+      CONTEXT,
+    );
+
+    expect(result.success).toBe(true);
+    const estimate = await estimateRepo.findById(TENANT, result.resultEntityId!);
+    expect(estimate!.lineItems[0].pricingSource).toBe('catalog');
+    expect(isEstimateCatalogGrounded(estimate!)).toBe(true);
+  });
+
+  it('rejects a line item with no price rather than persisting NaN', async () => {
+    const handler = new DraftEstimateExecutionHandler(
+      new InMemoryEstimateRepository(),
+      new InMemorySettingsRepository(),
+    );
+    const result = await handler.execute(
+      makeProposal('draft_estimate', {
+        customerId,
+        jobId,
+        lineItems: [{ description: 'Mystery work', quantity: 1 }],
+      }),
+      CONTEXT,
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/price/i);
   });
 
   it('fails when validUntil is not a parseable date', async () => {

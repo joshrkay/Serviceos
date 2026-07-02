@@ -7,6 +7,162 @@ import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { notifyOwner } from '../notifications/owner-notifications-instance';
 import { resolveInvoiceCustomerName } from '../notifications/owner-notification-name-resolver';
 
+/** Postgres unique-violation (SQLSTATE 23505) — used for the duplicate-payment backstop. */
+function isUniqueViolation(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && (err as { code?: string }).code === '23505';
+}
+
+/**
+ * Recompute an invoice's paid balance from its payment ledger and repair the
+ * invoice ONLY if it is under-credited. Used by the duplicate-payment backstop:
+ * paymentRepo.create and invoiceRepo.update commit in separate transactions on
+ * the webhook path, so a crash after the payment row committed but before the
+ * invoice update would leave the invoice underpaid; every later retry then hits
+ * the unique constraint and must not silently return without applying the
+ * missing credit.
+ *
+ * Guarded to only ever INCREASE amountPaidCents (never reduce): the ledger sum
+ * is the source of truth for "how much has been paid", and only repairing an
+ * under-credit can't corrupt a correctly-credited invoice even if a credit type
+ * is undercounted here.
+ */
+async function reconcileInvoiceFromPayments(
+  tenantId: string,
+  invoiceId: string,
+  invoiceRepo: InvoiceRepository,
+  paymentRepo: PaymentRepository,
+  fallback: Invoice,
+): Promise<{ invoice: Invoice; repaired: boolean; previousStatus: string }> {
+  const invoice = (await invoiceRepo.findById(tenantId, invoiceId)) ?? fallback;
+  const payments = await paymentRepo.findByInvoice(tenantId, invoiceId);
+  const paidCents = payments
+    .filter((p) => (p.status === 'completed' || p.status === 'processing') && !p.reversedAt)
+    .reduce((sum, p) => sum + (p.amountCents - (p.refundedAmountCents ?? 0)), 0);
+
+  // Already consistent (or over-counted by another concurrent writer) → leave
+  // it; we only repair the under-credit the crash-mid-write case produces.
+  // `repaired: false` tells the caller this was a pure duplicate, so the
+  // post-payment side effects (audit / rollup / receipts) must NOT re-run.
+  if (paidCents <= invoice.amountPaidCents) {
+    return { invoice, repaired: false, previousStatus: invoice.status };
+  }
+
+  const amountDueCents = Math.max(0, invoice.totals.totalCents - paidCents);
+  const status = amountDueCents === 0 ? 'paid' : 'partially_paid';
+  const updated = await invoiceRepo.update(tenantId, invoiceId, {
+    amountPaidCents: paidCents,
+    amountDueCents,
+    status,
+    updatedAt: new Date(),
+  });
+  return { invoice: updated ?? invoice, repaired: true, previousStatus: invoice.status };
+}
+
+/**
+ * Post-payment side effects shared by the normal record path and the
+ * crash-recovery repair path: the audit trail (CLAUDE.md "all mutations emit
+ * audit events"), the §6 Time-to-Cash job money-state rollup, and the customer
+ * receipt + owner push. Kept in one place so a repaired payment (whose original
+ * attempt crashed before these ran) gets the exact same treatment — while a
+ * pure duplicate skips it (no second receipt).
+ */
+async function applyPostPaymentSideEffects(params: {
+  input: RecordPaymentInput;
+  payment: Payment;
+  previousStatus: string;
+  updatedInvoice: Invoice | null;
+  auditRepo?: AuditRepository;
+  auditContext?: RecordPaymentAuditContext;
+  moneyStateDeps?: RefreshJobMoneyStateDeps;
+  paymentReceiptNotifier?: PaymentReceiptNotifier;
+  customerNameResolver?: PaymentCustomerNameResolver;
+}): Promise<void> {
+  const {
+    input,
+    payment,
+    previousStatus,
+    updatedInvoice,
+    auditRepo,
+    auditContext,
+    moneyStateDeps,
+    paymentReceiptNotifier,
+    customerNameResolver,
+  } = params;
+
+  if (auditRepo) {
+    const actorRole = auditContext?.actorRole ?? 'system';
+    const correlationId = auditContext?.correlationId;
+    await auditRepo.create(
+      createAuditEvent({
+        tenantId: input.tenantId,
+        actorId: input.processedBy,
+        actorRole,
+        eventType: 'payment.recorded',
+        entityType: 'invoice',
+        entityId: input.invoiceId,
+        correlationId,
+        metadata: {
+          paymentId: payment.id,
+          amountCents: payment.amountCents,
+          method: payment.method,
+          providerReference: payment.providerReference ?? null,
+          newInvoiceStatus: updatedInvoice?.status ?? previousStatus,
+        },
+      }),
+    );
+
+    if (updatedInvoice && updatedInvoice.status !== previousStatus) {
+      await auditRepo.create(
+        createAuditEvent({
+          tenantId: input.tenantId,
+          actorId: input.processedBy,
+          actorRole,
+          eventType: 'invoice.status_changed',
+          entityType: 'invoice',
+          entityId: input.invoiceId,
+          correlationId,
+          metadata: {
+            oldStatus: previousStatus,
+            newStatus: updatedInvoice.status,
+            paymentId: payment.id,
+          },
+        }),
+      );
+    }
+  }
+
+  // §6 Time-to-Cash. Roll the job's money-state forward (best-effort — the
+  // payment + invoice writes already succeeded; a rollup failure must not
+  // bounce them). No-op when the caller didn't wire the deps.
+  if (updatedInvoice && moneyStateDeps) {
+    await refreshJobMoneyStateSafe(
+      input.tenantId,
+      updatedInvoice.jobId,
+      input.processedBy,
+      moneyStateDeps,
+    );
+  }
+
+  if (updatedInvoice && paymentReceiptNotifier) {
+    await paymentReceiptNotifier.notifyPaymentReceived(
+      input.tenantId,
+      input.invoiceId,
+      payment.amountCents,
+    );
+  }
+
+  // U6 — owner `payment_received` push alongside the customer receipt.
+  // Best-effort and failure-isolated; never blocks the recorded payment.
+  if (updatedInvoice) {
+    await notifyOwnerPaymentReceived(
+      input.tenantId,
+      input.invoiceId,
+      payment.amountCents,
+      customerNameResolver,
+    );
+  }
+}
+
 /**
  * U6 — resolve the customer's display name for the owner `payment_received`
  * push. Best-effort: callers that don't wire it (or can't resolve a name) get
@@ -331,7 +487,65 @@ export async function recordPayment(
     reversalReason: null,
   };
 
-  await paymentRepo.create(payment);
+  try {
+    await paymentRepo.create(payment);
+  } catch (err) {
+    // Concurrency backstop for the Stripe webhook race: two events for the
+    // same intent (or a retry with a distinct event id) can both clear the
+    // check-then-insert dedup before either commits. The DB unique index
+    // (migration 229) rejects the second insert with 23505; treat that as an
+    // idempotent no-op — return the row the winner recorded WITHOUT crediting
+    // the invoice a second time.
+    if (isUniqueViolation(err) && input.providerReference) {
+      const existing = await paymentRepo.findByProviderReference(
+        input.tenantId,
+        input.providerReference,
+      );
+      // Only a retry for the SAME invoice is idempotent. If the reference is
+      // already recorded on a DIFFERENT invoice (the authenticated route lets a
+      // user type any providerReference), returning that payment would credit
+      // the wrong invoice and leave the requested one unpaid — surface a
+      // conflict instead.
+      if (existing && existing.invoiceId !== input.invoiceId) {
+        throw new ValidationError(
+          `A payment with reference "${input.providerReference}" is already recorded on a different invoice`,
+        );
+      }
+      if (existing) {
+        // Repair the invoice from the payment ledger before returning: the
+        // winning attempt may have committed the payment row but crashed
+        // before crediting the invoice (separate transactions), and a bare
+        // idempotent return would leave the invoice permanently underpaid.
+        const { invoice: reconciled, repaired, previousStatus } =
+          await reconcileInvoiceFromPayments(
+            input.tenantId,
+            input.invoiceId,
+            invoiceRepo,
+            paymentRepo,
+            invoice,
+          );
+        // Only the crash-recovery case (the invoice was actually under-credited
+        // and we just repaired it) runs the post-payment side effects the
+        // original attempt never reached. A pure duplicate leaves them alone so
+        // the customer doesn't get a second receipt.
+        if (repaired) {
+          await applyPostPaymentSideEffects({
+            input,
+            payment: existing,
+            previousStatus,
+            updatedInvoice: reconciled,
+            auditRepo,
+            auditContext,
+            moneyStateDeps,
+            paymentReceiptNotifier,
+            customerNameResolver,
+          });
+        }
+        return { payment: existing, invoice: reconciled };
+      }
+    }
+    throw err;
+  }
 
   // Update invoice balances
   const newAmountPaid = invoice.amountPaidCents + input.amountCents;
@@ -351,84 +565,23 @@ export async function recordPayment(
     updatedAt: new Date(),
   });
 
-  // Audit trail (CLAUDE.md: "All mutations: emit audit events"). Emitted
-  // before the best-effort money-state rollup so that — on authenticated
-  // /api routes, which run inside the request-scoped transaction — the
-  // audit row commits or rolls back atomically with the payment + invoice
-  // writes. A failure here intentionally bubbles: a payment with no audit
-  // record is not an acceptable committed state.
-  if (auditRepo) {
-    const actorRole = auditContext?.actorRole ?? 'system';
-    const correlationId = auditContext?.correlationId;
-    await auditRepo.create(
-      createAuditEvent({
-        tenantId: input.tenantId,
-        actorId: input.processedBy,
-        actorRole,
-        eventType: 'payment.recorded',
-        entityType: 'invoice',
-        entityId: input.invoiceId,
-        correlationId,
-        metadata: {
-          paymentId: payment.id,
-          amountCents: payment.amountCents,
-          method: payment.method,
-          providerReference: payment.providerReference ?? null,
-          newInvoiceStatus: (updatedInvoice ?? invoice).status,
-        },
-      }),
-    );
-
-    if (updatedInvoice && updatedInvoice.status !== invoice.status) {
-      await auditRepo.create(
-        createAuditEvent({
-          tenantId: input.tenantId,
-          actorId: input.processedBy,
-          actorRole,
-          eventType: 'invoice.status_changed',
-          entityType: 'invoice',
-          entityId: input.invoiceId,
-          correlationId,
-          metadata: {
-            oldStatus: invoice.status,
-            newStatus: updatedInvoice.status,
-            paymentId: payment.id,
-          },
-        }),
-      );
-    }
-  }
-
-  // §6 Time-to-Cash. Roll the job's money-state forward (best-effort —
-  // the payment + invoice writes already succeeded; a rollup failure
-  // must not bounce them). No-op when the caller didn't wire the deps.
-  if (updatedInvoice && moneyStateDeps) {
-    await refreshJobMoneyStateSafe(
-      input.tenantId,
-      updatedInvoice.jobId,
-      input.processedBy,
-      moneyStateDeps,
-    );
-  }
-
-  if (updatedInvoice && paymentReceiptNotifier) {
-    await paymentReceiptNotifier.notifyPaymentReceived(
-      input.tenantId,
-      input.invoiceId,
-      input.amountCents,
-    );
-  }
-
-  // U6 — owner `payment_received` push alongside the customer receipt.
-  // Best-effort and failure-isolated; never blocks the recorded payment.
-  if (updatedInvoice) {
-    await notifyOwnerPaymentReceived(
-      input.tenantId,
-      input.invoiceId,
-      input.amountCents,
-      customerNameResolver,
-    );
-  }
+  // Audit trail + money-state rollup + receipt/owner push. The audit write is
+  // emitted before the best-effort rollup so that — on authenticated /api
+  // routes, which run inside the request-scoped transaction — the audit row
+  // commits or rolls back atomically with the payment + invoice writes. A
+  // failure there intentionally bubbles: a payment with no audit record is not
+  // an acceptable committed state.
+  await applyPostPaymentSideEffects({
+    input,
+    payment,
+    previousStatus: invoice.status,
+    updatedInvoice,
+    auditRepo,
+    auditContext,
+    moneyStateDeps,
+    paymentReceiptNotifier,
+    customerNameResolver,
+  });
 
   return { payment, invoice: updatedInvoice! };
 }

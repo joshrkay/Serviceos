@@ -16,6 +16,7 @@ import {
   CatalogItem,
 } from '../../../src/catalog/catalog-item';
 import { updateInvoicePayloadSchema } from '../../../src/proposals/contracts';
+import { UNCATALOGUED_CONFIDENCE_CAP } from '../../../src/ai/resolution/catalog-resolver';
 
 const TENANT = 'tenant-1';
 const OTHER_TENANT = 'tenant-2';
@@ -335,17 +336,96 @@ describe('P22-001 invoice-edit-catalog', () => {
       expect(payload.lineItems[0].catalogItemId).toBeUndefined();
     });
 
-    it('keeps current free-text behavior with an empty catalog (no flags)', async () => {
+    // Money-safety regression (bug: empty/unwired/erroring catalog silently
+    // skipped the uncatalogued confidence cap, letting a fully LLM-priced
+    // draft auto-approve at the autonomous tier). Every "no catalog to ground
+    // against" path must now flag the line uncatalogued AND cap confidence
+    // below the 0.9 auto-approve threshold. Unit tests mocked the catalog, so
+    // an empty catalog was the common untested case for real (new) tenants.
+    it('caps confidence and flags uncatalogued when the catalog is empty', async () => {
       const gateway = mockGateway(
         draftResponse([{ description: 'trip fee', quantity: 1, unitPrice: 7500 }]),
       );
       const handler = new InvoiceTaskHandler(gateway, { catalogRepo: new InMemoryCatalogItemRepository() });
       const result = await handler.handle({ tenantId: TENANT, userId: 'u-1', message: 'invoice it' });
 
+      const payload = result.proposal.payload as {
+        lineItems: Array<Record<string, unknown>>;
+        _meta?: { overallConfidence?: string; markers?: unknown[] };
+      };
+      // LLM price is kept (there's no catalog to override it)…
+      expect(payload.lineItems[0].unitPriceCents).toBe(7500);
+      expect(payload.lineItems[0].catalogItemId).toBeUndefined();
+      // …but flagged uncatalogued and capped so a human always reviews it.
+      expect(payload.lineItems[0].pricingSource).toBe('uncatalogued');
+      expect(payload.lineItems[0].needsPricing).toBe(true);
+      // LLM self-reported 0.9 (≥ the 0.9 auto-approve threshold); the cap must
+      // pull it below so the draft cannot auto-approve.
+      expect(result.proposal.confidenceScore).toBeLessThanOrEqual(UNCATALOGUED_CONFIDENCE_CAP);
+      expect(result.proposal.status).not.toBe('approved');
+      expect(payload._meta?.overallConfidence).toBeDefined();
+    });
+
+    it('does not auto-approve an uncatalogued draft even when the tenant threshold is below the 0.85 cap', async () => {
+      // Codex P2: the numeric cap alone left a hole — a tenant with
+      // auto_approve_threshold ≤ 0.85 could still auto-approve a fully
+      // LLM-priced draft. The uncatalogued line now forces _meta.overallConfidence
+      // to 'low', which hard-blocks auto-approval before threshold resolution.
+      const gateway = mockGateway(
+        draftResponse([{ description: 'trip fee', quantity: 1, unitPrice: 7500 }]),
+      );
+      const handler = new InvoiceTaskHandler(gateway, {
+        catalogRepo: new InMemoryCatalogItemRepository(),
+      });
+      const result = await handler.handle({
+        tenantId: TENANT,
+        userId: 'u-1',
+        message: 'invoice it',
+        supervisorPresent: true,
+        supervisorMode: 'supervisor',
+        tenantThresholdOverride: { supervisor: 0.5 }, // below the 0.85 cap
+      });
+
+      expect(result.proposal.status).not.toBe('approved');
+      const meta = result.proposal.payload._meta as { overallConfidence?: string };
+      expect(meta.overallConfidence).toBe('low');
+    });
+
+    it('caps confidence and flags uncatalogued when no catalog repo is wired', async () => {
+      const gateway = mockGateway(
+        draftResponse([{ description: 'trip fee', quantity: 1, unitPrice: 7500 }]),
+      );
+      // No catalog deps at all — the pre-fix path left the outcome undefined
+      // and skipped the cap entirely.
+      const handler = new InvoiceTaskHandler(gateway);
+      const result = await handler.handle({ tenantId: TENANT, userId: 'u-1', message: 'invoice it' });
+
       const payload = result.proposal.payload as { lineItems: Array<Record<string, unknown>> };
       expect(payload.lineItems[0].unitPriceCents).toBe(7500);
-      expect(payload.lineItems[0]).not.toHaveProperty('needsPricing');
-      expect(payload.lineItems[0]).not.toHaveProperty('catalogItemId');
+      expect(payload.lineItems[0].pricingSource).toBe('uncatalogued');
+      expect(result.proposal.confidenceScore).toBeLessThanOrEqual(UNCATALOGUED_CONFIDENCE_CAP);
+      expect(result.proposal.status).not.toBe('approved');
+    });
+
+    it('caps confidence and flags uncatalogued when the catalog read throws', async () => {
+      const throwingRepo = {
+        listByTenant: vi.fn(async () => {
+          throw new Error('db down');
+        }),
+      } as unknown as InMemoryCatalogItemRepository;
+      const gateway = mockGateway(
+        draftResponse([{ description: 'trip fee', quantity: 1, unitPrice: 7500 }]),
+      );
+      const handler = new InvoiceTaskHandler(gateway, { catalogRepo: throwingRepo });
+      const result = await handler.handle({ tenantId: TENANT, userId: 'u-1', message: 'invoice it' });
+
+      const payload = result.proposal.payload as { lineItems: Array<Record<string, unknown>> };
+      // A catalog read failure must never block drafting…
+      expect(payload.lineItems[0].unitPriceCents).toBe(7500);
+      // …but it also must not silently let an ungrounded price auto-approve.
+      expect(payload.lineItems[0].pricingSource).toBe('uncatalogued');
+      expect(result.proposal.confidenceScore).toBeLessThanOrEqual(UNCATALOGUED_CONFIDENCE_CAP);
+      expect(result.proposal.status).not.toBe('approved');
     });
   });
 });

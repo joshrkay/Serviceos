@@ -426,6 +426,72 @@ export function applyCatalogPricing(
 }
 
 /**
+ * Stamp every priced line as `uncatalogued` — used when there is no catalog
+ * to ground against at all (repo unwired, empty catalog, or a read error). An
+ * LLM-invented price that was NEVER checked against a catalog is exactly as
+ * uncertain as an explicit 'none' match, so it must flip `anyUncatalogued`
+ * (→ confidence cap) and stamp `pricingSource` (→ `_meta` low-confidence
+ * markers). A line with no numeric price carries no money risk and is left
+ * untouched (the handler drops it downstream).
+ */
+function markAllUncatalogued(
+  lineItems: Array<Record<string, unknown>>,
+  priceField: 'unitPriceCents' | 'unitPrice',
+): CatalogPricingOutcome {
+  let anyUncatalogued = false;
+  const out = lineItems.map((li) => {
+    if (typeof li[priceField] === 'number') {
+      anyUncatalogued = true;
+      return { ...li, pricingSource: 'uncatalogued' satisfies PricingSource, needsPricing: true };
+    }
+    return li;
+  });
+  return { lineItems: out, missingFields: [], anyUncatalogued, anyCatalogPriced: false };
+}
+
+/**
+ * Ground drafted line items against the tenant catalog, ALWAYS returning a
+ * `CatalogPricingOutcome`. This is the single grounding entry point for the
+ * invoice / estimate / MMS-estimate task handlers.
+ *
+ * The bug this closes: the handlers previously left the outcome `undefined`
+ * whenever the catalog could not be consulted — repo unwired, a `listByTenant`
+ * error, or (the common case) an EMPTY catalog on a brand-new tenant — and an
+ * undefined outcome silently skipped the uncatalogued confidence cap, letting a
+ * draft priced entirely by the LLM auto-approve at the autonomous tier. Here
+ * every such case funnels through `markAllUncatalogued`, so an ungrounded price
+ * always caps confidence and surfaces to a human, per the module contract.
+ *
+ * Pass `loadActiveCatalog = null` when no catalog repo is wired.
+ */
+export async function groundLineItemPricing(
+  lineItems: Array<Record<string, unknown>>,
+  priceField: 'unitPriceCents' | 'unitPrice',
+  loadActiveCatalog: (() => Promise<CatalogItem[]>) | null,
+): Promise<CatalogPricingOutcome> {
+  if (lineItems.length === 0) {
+    return { lineItems, missingFields: [], anyUncatalogued: false, anyCatalogPriced: false };
+  }
+  if (!loadActiveCatalog) return markAllUncatalogued(lineItems, priceField);
+
+  let activeItems: CatalogItem[] = [];
+  try {
+    // A catalog read failure must never block drafting — degrade to
+    // treating every line as uncatalogued (capped, human-reviewed).
+    activeItems = (await loadActiveCatalog()).filter((i) => i.archivedAt === null);
+  } catch {
+    return markAllUncatalogued(lineItems, priceField);
+  }
+  if (activeItems.length === 0) return markAllUncatalogued(lineItems, priceField);
+
+  const resolutions = resolveLineItems(
+    lineItems.map((li) => String(li.description ?? '')),
+    activeItems,
+  );
+  return applyCatalogPricing(lineItems, resolutions, priceField);
+}
+
+/**
  * RV-007 (F-4) — translate per-line `pricingSource` outcomes into the
  * payload `_meta` per-field confidence signals. NOT a new confidence
  * computation: it only re-expresses what `applyCatalogPricing` already

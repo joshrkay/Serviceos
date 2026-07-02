@@ -1,10 +1,11 @@
 /**
  * Pins the PR 319 (P2) guard in the Clerk `user.created` invitee-join path:
  * when a pending invitation matches but `deps.pool` is not wired, the join must
- * NOT consume the invitation (no markAccepted). The handler logs the failure and
- * falls through to the normal bootstrap path, so the invitee can be retried once
- * the pool is configured — rather than being left with an accepted-but-unjoined
- * invitation and no access.
+ * NOT consume the invitation (no markAccepted) and must NOT bootstrap a
+ * separate ("rogue") tenant for an invitee. Instead the handler fails the
+ * webhook with 500 so Clerk retries once the pool is configured (see
+ * 04a98f5 "fix(webhooks): fail invitee-join errors instead of bootstrapping a
+ * rogue tenant"), leaving the invitation intact for a clean retry.
  */
 import express from 'express';
 import request from 'supertest';
@@ -80,7 +81,7 @@ describe('Clerk user.created — invitee join with pool not wired (PR 319 P2)', 
     );
   });
 
-  it('does not mark the invitation accepted and falls through to bootstrap', async () => {
+  it('does not mark the invitation accepted and fails the webhook for Clerk retry', async () => {
     const payload = {
       type: 'user.created',
       data: { id: 'user_new', email_addresses: [{ email_address: 'invitee@example.com' }] },
@@ -97,11 +98,12 @@ describe('Clerk user.created — invitee join with pool not wired (PR 319 P2)', 
       .set('content-type', 'application/json')
       .send(payload);
 
-    // The join failed (no pool) but was caught and fell through to bootstrap.
-    expect(res.status).toBe(200);
+    // The join failed (no pool) → the webhook fails so Clerk retries, rather
+    // than bootstrapping a rogue tenant for the invitee.
+    expect(res.status).toBe(500);
     // Critical invariant: the invitation was NOT consumed.
     expect(markAccepted).not.toHaveBeenCalled();
-    // Fell through to the bootstrap path (a tenant was created for the user).
-    expect(tenantRepo.created).toHaveLength(1);
+    // And NO separate tenant was bootstrapped for the invitee.
+    expect(tenantRepo.created).toHaveLength(0);
   });
 });
