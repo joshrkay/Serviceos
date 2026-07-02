@@ -33,11 +33,14 @@ export class PgUserRepository extends PgBaseRepository implements UserRepository
 
   async findByTenant(tenantId: string, options?: UserListOptions): Promise<User[]> {
     return this.withTenant(tenantId, async (client) => {
-      const params: unknown[] = [];
-      let where = '';
+      // Explicit tenant scoping: RLS is a runtime no-op unless
+      // RLS_RUNTIME_ROLE is enabled (see db/rls-runtime-role.ts), so the
+      // tenant_id predicate — not withTenant's GUC — is what isolates tenants.
+      const params: unknown[] = [tenantId];
+      let where = 'WHERE tenant_id = $1';
       if (options?.role) {
         params.push(options.role);
-        where = `WHERE role = $${params.length}`;
+        where += ` AND role = $${params.length}`;
       }
       const result = await client.query(
         `SELECT id, tenant_id, clerk_user_id, email, role, first_name, last_name,

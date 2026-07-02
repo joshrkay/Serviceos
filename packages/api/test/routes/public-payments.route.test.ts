@@ -154,6 +154,34 @@ describe('P5-016 routes/public-payments — POST /create-payment-intent', () => 
     expect(res.body.error).toBe('NOT_FOUND');
   });
 
+  it('404s when the view token is expired (route enforces expiry, not the SQL fn)', async () => {
+    // The real find_invoice_by_view_token SECURITY DEFINER fn does NOT filter
+    // on expiry (only view_token), so the route must. InMemoryInvoiceRepository
+    // filters expiry itself and would mask this — use a repo stub that mimics
+    // the real DB (returns the expired invoice).
+    const expired = makeInvoice({
+      viewTokenExpiresAt: new Date(Date.now() - 60_000),
+    });
+    const app = express();
+    app.use(express.json());
+    app.use(
+      '/api/public-payments',
+      createPublicPaymentsRouter({
+        invoiceRepo: {
+          findByViewToken: async () => expired,
+        } as unknown as InMemoryInvoiceRepository,
+        stripeConfig: { apiKey: 'sk_test' },
+        stripeFetch: makeStripeFetch(),
+      }),
+    );
+
+    const res = await request(app)
+      .post('/api/public-payments/create-payment-intent')
+      .send({ invoiceId: expired.id, viewToken: VIEW_TOKEN });
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('NOT_FOUND');
+  });
+
   it('409s when the invoice is already paid', async () => {
     const { app, invoice } = await build({
       invoiceOverrides: { status: 'paid', amountDueCents: 0 },

@@ -373,6 +373,10 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['226_create_marketing_campaigns', '731467814951e56ebe330c61334c70db40ad08a43a1d996f62705abe0d275e45'],
   ['227_create_customer_groups', 'b130abe18b855d3f4d24e4781c9f36221489d22f0b8149b4c2ebe466c66d1ab5'],
   ['228_marketing_campaign_segment_group', '8e795768b41848627679a6cc34d2dd89f6a5ce88355a3c732988aeadf44ce48f'],
+  // Duplicate-Stripe-payment backstop: partial unique index on
+  // (tenant_id, reference_number) for credit_card/bank_transfer, with a
+  // non-destructive preflight that quarantines pre-existing duplicates.
+  ['229_payments_stripe_reference_unique', 'e04f90015062af2dc152c0298799291f58f84d39b80621543cb09330c1d9c6ab'],
 ];
 
 function hashMigration(value: string): string {

@@ -33,7 +33,7 @@ import { NoteRepository } from '../../notes/note';
 import { PaymentRepository } from '../../invoices/payment';
 import { ExpenseRepository } from '../../expenses/expense';
 import { AuditRepository, createAuditEvent } from '../../audit/audit';
-import { ConflictError } from '../../shared/errors';
+import { ConflictError, ValidationError } from '../../shared/errors';
 import { JobRepository, createJob } from '../../jobs/job';
 import { RefreshJobMoneyStateDeps } from '../../jobs/job-money-state';
 import { AppointmentRepository, createAppointment } from '../../appointments/appointment';
@@ -75,7 +75,8 @@ import {
 import { TimeEntryService } from '../../time-tracking/time-entry-service';
 import { FeedbackRequestRepository } from '../../feedback/feedback-request';
 import { DelayNotificationService } from '../../notifications/delay-notifications';
-import { LineItem } from '../../shared/billing-engine';
+import { LineItem, LineItemCategory, buildLineItem } from '../../shared/billing-engine';
+import type { PricingSource } from '../../ai/resolution/catalog-resolver';
 import {
   EmergencyDispatchExecutionHandler,
   EmergencySmsSender,
@@ -487,6 +488,87 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
   }
 }
 
+const VALID_LINE_ITEM_CATEGORIES: readonly LineItemCategory[] = [
+  'labor',
+  'material',
+  'equipment',
+  'other',
+];
+
+const VALID_PRICING_SOURCES: readonly PricingSource[] = [
+  'catalog',
+  'ambiguous',
+  'uncatalogued',
+  'manual',
+];
+
+function isPricingSource(value: unknown): value is PricingSource {
+  return typeof value === 'string' && (VALID_PRICING_SOURCES as readonly string[]).includes(value);
+}
+
+/**
+ * Normalize a draft_estimate payload's line items into the billing engine's
+ * `LineItem` shape.
+ *
+ * The estimate task emits the contract's `unitPrice` field (integer cents) and
+ * does NOT set `unitPriceCents`, `totalCents`, `sortOrder`, or `taxable`.
+ * Blind-casting `payload.lineItems as LineItem[]` therefore produced items with
+ * `unitPriceCents`/`totalCents` = undefined, which made `calculateDocumentTotals`
+ * return NaN and the estimate INSERT fail its NOT NULL columns — every approved
+ * AI estimate broke at execution. Map each field explicitly here (mirrors the
+ * invoice task, which already normalizes to `unitPriceCents` upstream).
+ */
+export function normalizeEstimateLineItems(
+  rawLineItems: Array<Record<string, unknown>>,
+): LineItem[] {
+  return rawLineItems.map((li, idx) => {
+    const quantity = typeof li.quantity === 'number' && li.quantity > 0 ? li.quantity : 1;
+    // Prefer an already-normalized `unitPriceCents`; fall back to the estimate
+    // contract's `unitPrice` (also integer cents).
+    const rawPrice =
+      typeof li.unitPriceCents === 'number'
+        ? li.unitPriceCents
+        : typeof li.unitPrice === 'number'
+          ? li.unitPrice
+          : NaN;
+    if (!Number.isFinite(rawPrice) || rawPrice < 0) {
+      throw new ValidationError(
+        `Line item "${String(li.description ?? '')}" is missing a valid price`,
+      );
+    }
+    const rawCategory = typeof li.category === 'string' ? li.category.toLowerCase() : '';
+    const category = VALID_LINE_ITEM_CATEGORIES.includes(rawCategory as LineItemCategory)
+      ? (rawCategory as LineItemCategory)
+      : undefined;
+    const id = typeof li.id === 'string' && li.id ? li.id : uuidv4();
+    const base = buildLineItem(
+      id,
+      typeof li.description === 'string' && li.description ? li.description : 'Service',
+      quantity,
+      Math.round(rawPrice),
+      idx,
+      // Estimate line items carry no `taxable` flag; default to non-taxable
+      // (matches the invoice draft path). The human reviewer sets tax on approve.
+      typeof li.taxable === 'boolean' ? li.taxable : false,
+      category,
+    );
+    // Preserve catalog-grounding + tier metadata that buildLineItem doesn't
+    // set. Dropping `pricingSource` would make a catalog-priced AI estimate
+    // persist as ungrounded (isEstimateCatalogGrounded treats null as NOT
+    // grounded), forcing the manual discount-negotiation path.
+    return {
+      ...base,
+      ...(isPricingSource(li.pricingSource) ? { pricingSource: li.pricingSource } : {}),
+      ...(typeof li.groupKey === 'string' ? { groupKey: li.groupKey } : {}),
+      ...(typeof li.groupLabel === 'string' ? { groupLabel: li.groupLabel } : {}),
+      ...(typeof li.isOptional === 'boolean' ? { isOptional: li.isOptional } : {}),
+      ...(typeof li.isDefaultSelected === 'boolean'
+        ? { isDefaultSelected: li.isDefaultSelected }
+        : {}),
+    };
+  });
+}
+
 export class DraftEstimateExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'draft_estimate';
 
@@ -530,7 +612,12 @@ export class DraftEstimateExecutionHandler implements ExecutionHandler {
         tenantId: context.tenantId,
         jobId: payload.jobId,
         estimateNumber,
-        lineItems: payload.lineItems as LineItem[],
+        // Normalize `unitPrice` → `unitPriceCents` + compute `totalCents`/
+        // `sortOrder`/`taxable`; a blind cast left these undefined and broke
+        // total computation + the NOT NULL insert.
+        lineItems: normalizeEstimateLineItems(
+          payload.lineItems as Array<Record<string, unknown>>,
+        ),
         discountCents:
           typeof payload.discountCents === 'number' ? payload.discountCents : undefined,
         taxRateBps: typeof payload.taxRateBps === 'number' ? payload.taxRateBps : undefined,
