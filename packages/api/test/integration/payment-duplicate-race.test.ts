@@ -133,6 +133,33 @@ describe('Postgres integration — duplicate Stripe payment is rejected + handle
     expect(reloaded!.amountDueCents).toBe(10000);
   });
 
+  it('a failed attempt does not block the later successful retry of the same intent', async () => {
+    // recordFailedPaymentAttempt stamps the PI id as reference on a
+    // status='failed' credit_card row. The index is scoped to crediting
+    // statuses, so a subsequent success for that intent must still insert +
+    // credit (not be swallowed as an idempotent duplicate).
+    const ref = 'pi_failed_then_ok';
+    await pool.query(
+      `INSERT INTO payments (id, tenant_id, invoice_id, amount_cents, status, payment_method, reference_number, created_by)
+       VALUES ($1,$2,$3,$4,'failed','credit_card',$5,'test')`,
+      [crypto.randomUUID(), tenant.tenantId, invoiceId, 10000, ref],
+    );
+
+    const before = await invoiceRepo.findById(tenant.tenantId, invoiceId);
+    const paidBefore = before!.amountPaidCents;
+
+    const res = await recordPayment(
+      { tenantId: tenant.tenantId, invoiceId, amountCents: 10000, method: 'credit_card', providerReference: ref, processedBy: 'stripe_webhook' },
+      invoiceRepo,
+      paymentRepo,
+    );
+
+    // The success recorded a NEW completed row (not the failed one).
+    expect(res.payment.status).toBe('completed');
+    const after = await invoiceRepo.findById(tenant.tenantId, invoiceId);
+    expect(after!.amountPaidCents).toBe(paidBefore + 10000); // invoice credited
+  });
+
   it('the raw duplicate INSERT is rejected by the partial unique index (23505)', async () => {
     // Direct insert of a second credit_card row with the same reference must
     // violate idx_payments_stripe_reference_unique.

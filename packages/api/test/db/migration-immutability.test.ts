@@ -376,7 +376,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // Duplicate-Stripe-payment backstop: partial unique index on
   // (tenant_id, reference_number) for credit_card/bank_transfer, with a
   // non-destructive preflight that quarantines pre-existing duplicates.
-  ['229_payments_stripe_reference_unique', 'b78e475683eef661b8309e2df353c463f128c314b2ed0eeaeab05a0d67382a9c'],
+  ['229_payments_stripe_reference_unique', 'e04f90015062af2dc152c0298799291f58f84d39b80621543cb09330c1d9c6ab'],
 ];
 
 function hashMigration(value: string): string {
