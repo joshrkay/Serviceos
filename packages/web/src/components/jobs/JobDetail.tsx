@@ -82,6 +82,7 @@ import { CameraCapture } from '../shared/CameraCapture';
 import type { CapturedMedia } from '../shared/CameraCapture';
 import { SuppliersSheet } from './SuppliersSheet';
 import { JobPhotoGallery } from './JobPhotoGallery';
+import { JobProfitCard } from './JobProfitCard';
 import { JobFormsPanel } from './JobFormsPanel';
 import { JobCustomFieldsPanel } from './JobCustomFieldsPanel';
 import {
@@ -1062,6 +1063,10 @@ export function JobDetailView({
         />
       )}
       <MaterialsTable materials={materials} onEdit={() => setModal('materials')} onSuppliers={() => setModal('suppliers')} />
+
+      {/* Sweep-2 S4 — job P&L rollup (invoices:view-gated; hides itself
+          when the report is unavailable or the viewer lacks access). */}
+      <JobProfitCard jobId={job.id} />
 
       {/* ── Time Entries ── */}
       <div className="rounded-xl bg-card border border-border overflow-hidden">

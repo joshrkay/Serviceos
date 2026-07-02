@@ -911,13 +911,21 @@ export async function updateSettings(
   repository: SettingsRepository,
   options?: ActiveVerticalPackValidationOptions
 ): Promise<TenantSettings | null> {
-  const normalizedInput: UpdateSettingsInput = {
-    ...input,
-    activeVerticalPacks: normalizeActiveVerticalPacks(
+  // Sweep-2 S1: only touch `activeVerticalPacks` when the caller actually
+  // provided a value. Unconditionally spreading a normalized `undefined`
+  // inserted the KEY into every update, which the Pg repo read as an
+  // explicit clear ("key present" semantics) — so ANY unrelated settings
+  // save silently wiped the tenant's active vertical packs. `undefined`
+  // means "untouched"; an explicit clear is `[]`.
+  const normalizedInput: UpdateSettingsInput = { ...input };
+  if (input.activeVerticalPacks === undefined) {
+    delete normalizedInput.activeVerticalPacks;
+  } else {
+    normalizedInput.activeVerticalPacks = normalizeActiveVerticalPacks(
       input.activeVerticalPacks,
       options?.normalizePackId ?? normalizePackId
-    ),
-  };
+    );
+  }
   const errors = validateUpdateSettingsInput(normalizedInput, options);
   if (errors.length > 0) {
     throw new Error(`Validation failed: ${errors.join('; ')}`);
@@ -1099,6 +1107,11 @@ export class InMemorySettingsRepository implements SettingsRepository {
     const s = this.settings.get(tenantId);
     if (!s) return null;
     const { id: _id, tenantId: _tid, createdAt: _ca, ...safeUpdates } = updates;
+    // Sweep-2 S1 parity with PgSettingsRepository: an undefined VALUE means
+    // "untouched" — never let it clobber a stored value via spread.
+    for (const key of Object.keys(safeUpdates) as (keyof typeof safeUpdates)[]) {
+      if (safeUpdates[key] === undefined) delete safeUpdates[key];
+    }
     const updated = { ...s, ...safeUpdates };
     this.settings.set(tenantId, updated);
     return { ...updated };

@@ -4253,7 +4253,7 @@ export function createApp(): express.Express {
           // downstream callers (the API surface) stay aligned with
           // the auth-layer identity.
           const r = await pool.query(
-            `SELECT clerk_user_id, tenant_id, role,
+            `SELECT id, clerk_user_id, tenant_id, role,
                     COALESCE(can_field_serve, false) AS can_field_serve,
                     COALESCE(current_mode, 'supervisor') AS current_mode,
                     mode_changed_at
@@ -4266,6 +4266,10 @@ export function createApp(): express.Express {
           const row = r.rows[0] as Record<string, unknown>;
           const rec: MeUserRecord = {
             user_id: String(row.clerk_user_id),
+            // Sweep-2 S5 — internal users.id UUID; this is what
+            // appointment_assignments.technician_id references, so the
+            // web technician surfaces resolve THIS, not the Clerk sub.
+            internal_user_id: String(row.id),
             tenant_id: String(row.tenant_id),
             role: String(row.role),
             can_field_serve: Boolean(row.can_field_serve),

@@ -38,6 +38,17 @@ export interface MeUserRecord {
   can_field_serve: boolean;
   current_mode: Mode;
   mode_changed_at: Date | null;
+  /**
+   * Sweep-2 S5 — the internal `users.id` UUID for this principal.
+   * `user_id` above is the AUTH identity (Clerk sub, e.g. `user_2abc…`,
+   * never a UUID in production); everything that references people in
+   * the schema (appointment_assignments.technician_id, audit actors,
+   * job assignments) stores `users.id`. Surfaced additively on
+   * `GET /api/me` (like `timezone` was) so the web client can resolve
+   * "which technician am I" without guessing. Null when no users row
+   * exists for the principal (fresh tenant, dev-bypass owner).
+   */
+  internal_user_id?: string | null;
 }
 
 export interface MeTenantSettings {
@@ -118,6 +129,10 @@ export function createMeRouter(
 
         res.json({
           user_id: auth.userId,
+          // Sweep-2 S5 — internal users.id UUID (see MeUserRecord doc).
+          // Null when the principal has no users row; consumers must
+          // treat that as "no technician profile", not an error.
+          internal_user_id: user?.internal_user_id ?? null,
           tenant_id: auth.tenantId,
           role,
           can_field_serve: canFieldServe,

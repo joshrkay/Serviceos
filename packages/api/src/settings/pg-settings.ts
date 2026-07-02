@@ -290,9 +290,15 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
 
   async update(tenantId: string, updates: Partial<TenantSettings>): Promise<TenantSettings | null> {
     return this.withTenantTransaction(tenantId, async (client) => {
-      // If terminology or packs are being updated, we need to merge with existing
-      const needsTerminologyMerge =
-        'terminologyPreferences' in updates || 'activeVerticalPacks' in updates;
+      // If terminology or packs are being updated, we need to merge with existing.
+      // Sweep-2 S1: an `undefined` VALUE means "untouched", never "clear" —
+      // the contract types these keys as `string[]` / `Record<string,string>`
+      // (no null), so an explicit clear is `[]` / `{}`. Keying off `'x' in
+      // updates` let a stray `activeVerticalPacks: undefined` wipe the
+      // tenant's packs on every unrelated save.
+      const touchesTerms = updates.terminologyPreferences !== undefined;
+      const touchesPacks = updates.activeVerticalPacks !== undefined;
+      const needsTerminologyMerge = touchesTerms || touchesPacks;
 
       let terminologyJson: Record<string, unknown> | null | undefined;
 
@@ -306,11 +312,11 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         const currentRaw = existing.rows[0].terminology_preferences as Record<string, unknown> | null;
         const { _activeVerticalPacks: currentPacks, ...currentTerms } = currentRaw ?? {};
 
-        const newTerms = 'terminologyPreferences' in updates
+        const newTerms = touchesTerms
           ? updates.terminologyPreferences
           : (Object.keys(currentTerms).length > 0 ? currentTerms as Record<string, string> : undefined);
 
-        const newPacks = 'activeVerticalPacks' in updates
+        const newPacks = touchesPacks
           ? updates.activeVerticalPacks
           : (Array.isArray(currentPacks) ? currentPacks as string[] : undefined);
 

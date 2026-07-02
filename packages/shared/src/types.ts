@@ -34,6 +34,16 @@ export type Mode = 'supervisor' | 'tech' | 'both';
  */
 export interface MeResponse {
   user_id: string;
+  /**
+   * Internal `users.id` UUID for the signed-in principal — the id that
+   * appointment assignments, audit actors, and technician surfaces
+   * reference. `user_id` above is the AUTH identity (Clerk sub, e.g.
+   * `user_2abc…`, never a UUID in production). Null when the principal
+   * has no users row yet (fresh tenant bootstrap, dev-bypass account);
+   * consumers must treat that as "no technician profile", not an error.
+   * Optional so existing fixtures without it stay valid.
+   */
+  internal_user_id?: string | null;
   tenant_id: string;
   role: string;
   can_field_serve: boolean;

@@ -5,10 +5,15 @@ import { useMe } from '../../hooks/useMe';
 export function TechnicianDayPage() {
   const { me, isLoading } = useMe();
 
-  // Technicians are `users` rows, so the authenticated user's id IS the
-  // technician id. The old hardcoded 'tech-1' fallback sent a fake id to
-  // the API on every fresh session (400/500s — QA 2026-07-02). The
-  // localStorage override remains for QA/dispatcher impersonation.
+  // Sweep-2 S5 — technicians are `users` rows and appointment
+  // assignments store `users.id` (UUID). `me.user_id` is the AUTH
+  // identity (Clerk sub like `user_2abc…`, non-UUID in production, and
+  // `user_demo_owner` under the dev bypass) — sending it to
+  // /api/dispatch/technician/:id/appointments always 400'd on the UUID
+  // guard. Use the additively-exposed `internal_user_id` instead; when
+  // it's null the account simply has no technician profile, so show the
+  // designed empty state rather than "Failed to load appointments".
+  // The localStorage override remains for QA/dispatcher impersonation.
   const technicianId = useMemo(() => {
     if (typeof window !== 'undefined') {
       const fromStorage = window.localStorage.getItem('serviceos.technicianId');
@@ -16,8 +21,8 @@ export function TechnicianDayPage() {
         return fromStorage;
       }
     }
-    return me?.user_id ?? null;
-  }, [me?.user_id]);
+    return me?.internal_user_id ?? null;
+  }, [me?.internal_user_id]);
 
   if (!technicianId) {
     return (
