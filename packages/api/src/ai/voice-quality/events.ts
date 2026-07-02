@@ -164,6 +164,39 @@ export const repairTemplateFiredEvent = (opts: {
   ts: opts.ts ?? Date.now(),
 });
 
+// ─── UB-C1 — Spanish streaming-path language telemetry ───────────────────────
+
+/**
+ * UB-C1 — emitted by the media-stream adapter when the live Deepgram
+ * session is finished + reopened in a new language (first-utterance
+ * detection, an explicit caller request, or a classified
+ * `language_switch` intent). `switchCount` is the per-call running
+ * total so dashboards can spot flapping (the adapter hard-caps at 2).
+ */
+export interface LanguageSwitchedEvent {
+  type: 'language_switched';
+  from: 'en' | 'es';
+  to: 'en' | 'es';
+  trigger: 'first_utterance' | 'explicit_request' | 'classified_intent';
+  switchCount: number;
+  ts: number;
+}
+
+export const languageSwitchedEvent = (opts: {
+  from: 'en' | 'es';
+  to: 'en' | 'es';
+  trigger: LanguageSwitchedEvent['trigger'];
+  switchCount: number;
+  ts?: number;
+}): LanguageSwitchedEvent => ({
+  type: 'language_switched',
+  from: opts.from,
+  to: opts.to,
+  trigger: opts.trigger,
+  switchCount: opts.switchCount,
+  ts: opts.ts ?? Date.now(),
+});
+
 /**
  * VQ2-followup: emitted by the agent driver after each turn's outbound
  * speech has been finalized. Layer 2 emits the Whisper-recovered

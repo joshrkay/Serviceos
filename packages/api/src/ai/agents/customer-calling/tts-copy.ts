@@ -112,6 +112,39 @@ const SENTENCE_CATALOG_ES: Record<string, string> = {
     'Si alguien está en peligro inmediato, cuelgue y llame al 911.',
   "This sounds like an emergency. I'm connecting you with our on-call dispatcher immediately.":
     'Esto parece una emergencia. Le comunico de inmediato con nuestro despachador de guardia.',
+  // UB-C2 — remaining fixed FSM sentences (audit against transitions.ts's
+  // ttsPlay literals; a Spanish call must never flip to English mid-flow).
+  "I wasn't able to find the record you're referring to. Let me connect you with a team member.":
+    'No pude encontrar el registro al que se refiere. Le comunico con un miembro del equipo.',
+  "I'm having trouble understanding your request. Let me connect you with a team member.":
+    'Tengo dificultades para entender su solicitud. Le comunico con un miembro del equipo.',
+  "I'm having trouble verifying your identity. Let me connect you with a team member.":
+    'Tengo dificultades para verificar su identidad. Le comunico con un miembro del equipo.',
+  "I'm sorry, I couldn't find your account. Can you please provide your full name and service address?":
+    'Lo siento, no pude encontrar su cuenta. ¿Me puede dar su nombre completo y la dirección de servicio?',
+  'Let me make sure I understand — what would you like to do?':
+    'Permítame asegurarme de entender — ¿qué le gustaría hacer?',
+  'My apologies — let me try again. What would you like to do?':
+    'Mis disculpas — intentemos de nuevo. ¿Qué le gustaría hacer?',
+  'Of course! What else can I help you with?':
+    '¡Por supuesto! ¿En qué más puedo ayudarle?',
+  'This call has been terminated due to policy violations.':
+    'Esta llamada ha sido terminada por violaciones a nuestras políticas.',
+  "I'm still having trouble understanding. Could you describe what you need in a few words?":
+    'Sigo teniendo dificultades para entenderle. ¿Podría describir en pocas palabras lo que necesita?',
+  'I can help with scheduling and service questions. What do you need help with today?':
+    'Puedo ayudarle con citas y preguntas de servicio. ¿En qué necesita ayuda hoy?',
+};
+
+/**
+ * UB-C1 — spoken acknowledgment after the media-stream adapter flips the
+ * live call language on an explicit caller request ("hablo español" /
+ * "switch to english"). Always spoken in the language being switched TO —
+ * the caller just told us that's the one they understand.
+ */
+export const LANGUAGE_SWITCH_ACK: Record<SessionLanguage, string> = {
+  en: "Okay, let's continue in English. How can I help you?",
+  es: 'De acuerdo, continuemos en español. ¿En qué puedo ayudarle?',
 };
 
 export function renderTtsText(
