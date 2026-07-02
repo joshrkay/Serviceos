@@ -102,6 +102,20 @@ single-instance).
   and additive: the in-process EventEmitter remains the synchronous same-replica
   path, self-originated echoes are dropped (no double-fire), and an unset/failed
   Redis is byte-identical to single-replica behavior.
+- **Dispatch presence** (UC-3): the dispatch-board presence store moves to Redis
+  when `REDIS_URL` is set (one hash per tenant+board-date, per-entry expiry
+  lease), so "who's viewing/dragging" is consistent across replicas. Fails open
+  to a per-replica in-memory store on a Redis error; byte-identical in-memory
+  behavior when `REDIS_URL` is unset. The heartbeat itself rides the client WS
+  gateway (`presence.update` frames) with a ≥30s HTTP PUT fallback — not the
+  old 5s PUT-per-user amplifier.
+- **Dispatch board fan-out** (UC-4): `board_updated`/`presence_updated` events
+  and board revision tokens mirror across replicas over Redis pub/sub
+  (mirroring the U3d voice fan-out: additive, best-effort, self-echo dropped).
+  Double-gated — set `REDIS_URL` **and** `DISPATCH_FANOUT_ENABLED=true`.
+  Revision tokens become totally ordered (`ts.seq.replicaId`) and merge
+  max-wins so concurrent bumps on two replicas converge with no refetch
+  flapping; unset/failed Redis keeps today's process-local bus + UUID tokens.
 - **LLM per-tenant quotas** (U3c): the concurrency semaphore + token bucket move
   to Redis when `REDIS_URL` is set, so per-tenant fairness caps hold cluster-wide
   instead of per-replica. A single atomic Lua (purge → concurrency → refill →
@@ -135,10 +149,11 @@ single-instance).
 Code/config are in the repo; these steps are applied in the Railway account.
 
 1. **Redis** — add a Railway Redis plugin and set `REDIS_URL` on the API service.
-   This is the switch that makes the WS caps, LLM quotas, voice fan-out, and rate
-   limits cluster-wide. Also set `VOICE_FANOUT_ENABLED=true` for multi-replica
-   voice. Without `REDIS_URL`, every shared store stays per-replica — so set it
-   **before** raising `numReplicas`.
+   This is the switch that makes the WS caps, LLM quotas, voice fan-out, dispatch
+   presence, and rate limits cluster-wide. Also set `VOICE_FANOUT_ENABLED=true`
+   for multi-replica voice and `DISPATCH_FANOUT_ENABLED=true` for multi-replica
+   dispatch boards (UC-4). Without `REDIS_URL`, every shared store stays
+   per-replica — so set it **before** raising `numReplicas`.
 2. **PgBouncer** — add a PgBouncer service (`pool_mode=transaction`) in front of
    the Postgres plugin. Point the API's `DATABASE_URL` at PgBouncer and
    `DATABASE_DIRECT_URL` at the Postgres plugin's direct URL (session-scoped
