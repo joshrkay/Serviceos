@@ -5706,6 +5706,25 @@ export const MIGRATIONS = {
     ALTER TABLE marketing_campaigns
       ADD COLUMN IF NOT EXISTS segment_group_id UUID REFERENCES customer_groups(id);
   `,
+
+  '229_payments_stripe_reference_unique': `
+    -- Prevent duplicate Stripe payment rows for the same intent. Two Stripe
+    -- events (checkout.session.completed + payment_intent.succeeded) for one
+    -- intent, or a webhook retry with a distinct event id, both pass the
+    -- check-then-insert dedup (findByProviderReference) before either commits
+    -- and insert two 'completed' rows — double-counting revenue and letting a
+    -- later charge.refunded resolve against only one row.
+    --
+    -- Scoped to Stripe methods (credit_card / bank_transfer): manual cash/check
+    -- reference numbers can legitimately repeat across invoices, and the
+    -- 'deposit_credit' sentinel (payment_method='other') must not be uniqued.
+    -- recordPayment catches the resulting 23505 and returns the existing
+    -- payment idempotently instead of double-crediting the invoice.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_stripe_reference_unique
+      ON payments (tenant_id, reference_number)
+      WHERE reference_number IS NOT NULL
+        AND payment_method IN ('credit_card', 'bank_transfer');
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

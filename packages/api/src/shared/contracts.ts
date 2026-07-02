@@ -114,6 +114,11 @@ const lineItemSchema = z.object({
   totalCents: z.number().int().nonnegative(),
   sortOrder: z.number().int(),
   taxable: z.boolean(),
+  // Catalog-grounding signal (estimates). Must be declared here or Zod strips
+  // it on update/revise, making a catalog-priced estimate look ungrounded
+  // (PgEstimateRepository persists pricingSource; isEstimateCatalogGrounded
+  // treats null as NOT grounded).
+  pricingSource: z.enum(['catalog', 'ambiguous', 'uncatalogued', 'manual']).optional(),
   // Good-better-best tiers + optional add-ons (estimates only).
   groupKey: z.string().min(1).max(120).optional(),
   groupLabel: z.string().min(1).max(200).optional(),
@@ -249,8 +254,14 @@ export const updateEstimateSchema = z.object({
   discountCents: z.number().int().nonnegative().optional(),
   taxRateBps: z.number().int().min(0).max(10000).optional(),
   // Accept an ISO string (JSON has no Date) and coerce to the Date that
-  // UpdateEstimateInput expects.
-  validUntil: z.coerce.date().optional(),
+  // UpdateEstimateInput expects. Preprocess null → undefined FIRST: a bare
+  // z.coerce.date() turns null into Date(0) (1970-01-01), which updateEstimate
+  // would persist as valid_until and silently expire the estimate. Treating
+  // null as absent preserves the prior `?? existing.validUntil` no-op.
+  validUntil: z.preprocess(
+    (v) => (v === null ? undefined : v),
+    z.coerce.date().optional(),
+  ),
   customerMessage: z.string().max(2000).optional(),
   internalNotes: z.string().max(5000).optional(),
   expectedVersion: z.number().int().positive().optional(),

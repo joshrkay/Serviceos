@@ -3,6 +3,8 @@ import {
   getPaymentsByInvoice,
   validatePaymentInput,
   InMemoryPaymentRepository,
+  type Payment,
+  type PaymentRepository,
 } from '../../src/invoices/payment';
 import {
   createInvoice,
@@ -115,6 +117,60 @@ describe('P1-013 — Payment entity + partial payments', () => {
 
     const payments = await getPaymentsByInvoice('tenant-1', invoiceId, paymentRepo);
     expect(payments).toHaveLength(2);
+  });
+
+  it('duplicate-payment race backstop — a 23505 on the same Stripe reference is idempotent (no double credit)', async () => {
+    // Simulate migration 229's partial unique index: a second Stripe payment
+    // row for the same (tenant, reference) is rejected with SQLSTATE 23505.
+    // The InMemory repo preserves all rows and can't reproduce the constraint
+    // (mocked-DB trap), so wrap it. Invoice is $200 so a second $100 payment is
+    // still payable — mirroring two concurrent webhook events that both read
+    // the invoice as still-open before either commits.
+    const localInvoiceRepo = new InMemoryInvoiceRepository();
+    const inner = new InMemoryPaymentRepository();
+    const seen = new Set<string>();
+    const racingRepo: PaymentRepository = {
+      create: async (p: Payment) => {
+        if (p.providerReference && (p.method === 'credit_card' || p.method === 'bank_transfer')) {
+          const key = `${p.tenantId}:${p.providerReference}`;
+          if (seen.has(key)) throw Object.assign(new Error('duplicate key'), { code: '23505' });
+          seen.add(key);
+        }
+        return inner.create(p);
+      },
+      findByProviderReference: (t: string, r: string) => inner.findByProviderReference(t, r),
+    } as unknown as PaymentRepository;
+
+    const inv = await createInvoice(
+      {
+        tenantId: 'tenant-1',
+        jobId: 'job-1',
+        invoiceNumber: 'INV-DUP',
+        lineItems: [buildLineItem('1', 'Service', 1, 20000, 1, true)],
+        createdBy: 'u-1',
+      },
+      localInvoiceRepo,
+    );
+    await issueInvoice('tenant-1', inv.id, 30, localInvoiceRepo);
+
+    const ref = 'pi_race_123';
+    const first = await recordPayment(
+      { tenantId: 'tenant-1', invoiceId: inv.id, amountCents: 10000, method: 'credit_card', providerReference: ref, processedBy: 'stripe_webhook' },
+      localInvoiceRepo,
+      racingRepo,
+    );
+    // Second event for the SAME intent → create hits 23505 → idempotent return.
+    const second = await recordPayment(
+      { tenantId: 'tenant-1', invoiceId: inv.id, amountCents: 10000, method: 'credit_card', providerReference: ref, processedBy: 'stripe_webhook' },
+      localInvoiceRepo,
+      racingRepo,
+    );
+
+    expect(second.payment.id).toBe(first.payment.id); // same row, not a new one
+    const rows = await getPaymentsByInvoice('tenant-1', inv.id, inner);
+    expect(rows).toHaveLength(1); // no duplicate payment row
+    const reloaded = await localInvoiceRepo.findById('tenant-1', inv.id);
+    expect(reloaded!.amountPaidCents).toBe(10000); // credited once, not 20000
   });
 
   it('validation — rejects overpayment', async () => {

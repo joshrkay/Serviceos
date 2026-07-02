@@ -7,6 +7,11 @@ import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { notifyOwner } from '../notifications/owner-notifications-instance';
 import { resolveInvoiceCustomerName } from '../notifications/owner-notification-name-resolver';
 
+/** Postgres unique-violation (SQLSTATE 23505) — used for the duplicate-payment backstop. */
+function isUniqueViolation(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && (err as { code?: string }).code === '23505';
+}
+
 /**
  * U6 — resolve the customer's display name for the owner `payment_received`
  * push. Best-effort: callers that don't wire it (or can't resolve a name) get
@@ -331,7 +336,28 @@ export async function recordPayment(
     reversalReason: null,
   };
 
-  await paymentRepo.create(payment);
+  try {
+    await paymentRepo.create(payment);
+  } catch (err) {
+    // Concurrency backstop for the Stripe webhook race: two events for the
+    // same intent (or a retry with a distinct event id) can both clear the
+    // check-then-insert dedup before either commits. The DB unique index
+    // (migration 229) rejects the second insert with 23505; treat that as an
+    // idempotent no-op — return the row the winner recorded WITHOUT crediting
+    // the invoice a second time.
+    if (isUniqueViolation(err) && input.providerReference) {
+      const existing = await paymentRepo.findByProviderReference(
+        input.tenantId,
+        input.providerReference,
+      );
+      if (existing) {
+        const currentInvoice =
+          (await invoiceRepo.findById(input.tenantId, input.invoiceId)) ?? invoice;
+        return { payment: existing, invoice: currentInvoice };
+      }
+    }
+    throw err;
+  }
 
   // Update invoice balances
   const newAmountPaid = invoice.amountPaidCents + input.amountCents;

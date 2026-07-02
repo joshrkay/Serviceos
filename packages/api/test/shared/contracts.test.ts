@@ -8,6 +8,8 @@ import {
   createMessageSchema,
   delayAcknowledgmentSchema,
   updateSettingsSchema,
+  updateInvoiceSchema,
+  updateEstimateSchema,
 } from '../../src/shared/contracts';
 import { validate } from '../../src/shared/validation';
 import { AppError, ValidationError, toErrorResponse } from '../../src/shared/errors';
@@ -196,5 +198,46 @@ describe('P0-005 — Backend service skeleton and shared contracts', () => {
       delayMinutes: 10,
     });
     expect(result.success).toBe(false);
+  });
+});
+
+describe('updateInvoiceSchema / updateEstimateSchema — money validation + field preservation', () => {
+  const line = {
+    id: 'li-1',
+    description: 'Water heater',
+    quantity: 1,
+    unitPriceCents: 45000,
+    totalCents: 45000,
+    sortOrder: 0,
+    taxable: true,
+  };
+
+  it('rejects a negative discount and an out-of-range tax rate on invoice update', () => {
+    expect(updateInvoiceSchema.safeParse({ discountCents: -100 }).success).toBe(false);
+    expect(updateInvoiceSchema.safeParse({ taxRateBps: 250000 }).success).toBe(false);
+    expect(updateInvoiceSchema.safeParse({ discountCents: 500 }).success).toBe(true);
+  });
+
+  it('strips unknown keys (status/tenantId cannot be injected via the body)', () => {
+    const parsed = updateInvoiceSchema.parse({ discountCents: 0, status: 'paid', tenantId: 'x' });
+    expect(parsed).not.toHaveProperty('status');
+    expect(parsed).not.toHaveProperty('tenantId');
+  });
+
+  it('preserves pricingSource on estimate line items (keeps catalog grounding)', () => {
+    const parsed = updateEstimateSchema.parse({
+      lineItems: [{ ...line, pricingSource: 'catalog' }],
+    });
+    expect(parsed.lineItems?.[0].pricingSource).toBe('catalog');
+  });
+
+  it('treats validUntil: null as absent (no 1970 epoch) and coerces an ISO string', () => {
+    // null → undefined so updateEstimate keeps the existing validUntil.
+    const asNull = updateEstimateSchema.parse({ validUntil: null });
+    expect(asNull.validUntil).toBeUndefined();
+    // ISO string → Date.
+    const asStr = updateEstimateSchema.parse({ validUntil: '2026-09-01T00:00:00.000Z' });
+    expect(asStr.validUntil).toBeInstanceOf(Date);
+    expect(asStr.validUntil?.getUTCFullYear()).toBe(2026);
   });
 });
