@@ -31,6 +31,31 @@ per-instance number.
 
 Harness health (no app boot, proves the tooling): `npm run loadtest:http:selfcheck`.
 
+## Mixed 1000-user validation (scale-to-1000 U6)
+
+Driven by `loadtest/mixed-1000.ts` (see `loadtest/README.md` → "Mixed 1000-user
+harness"). Each simulated user = proposals poll (30 s) + held client-gateway WS;
+20% add a dispatch-board SSE + presence PUTs (5 s), 10% an escalations SSE.
+"Pass" = HTTP error rate < 1% AND every connection class (WS, dispatch SSE,
+escalations SSE) fails ≤ 5% of attempts over the hold (the harness exits
+non-zero otherwise).
+
+| Run date | Target | Topology (replicas / PgBouncer / Redis) | Users | Voice calls | Steady-state RPS | Proposals p95 (ms) | WS connect success | First bottleneck | Notes |
+|----------|--------|------------------------------------------|-------|-------------|------------------|--------------------|--------------------|------------------|-------|
+| TBD      |        |                                          | 1000  |             |                  |                    |                    |                  | U6 certification run |
+
+Fill this row with (see the README for the full command):
+
+```bash
+ulimit -n 8192
+npx tsx loadtest/mixed-1000.ts \
+  --url http://localhost:3000 --token "$TOKEN" \
+  --users 1000 --ramp 120 --hold 300 --rampdown 30 \
+  --out loadtest/mixed-report.json
+```
+
+Harness health (no app boot, proves the tooling): `npm run loadtest:mixed:selfcheck`.
+
 ## Voice capacity
 
 Per-instance ceiling for concurrent Twilio Media Streams calls, derived from
