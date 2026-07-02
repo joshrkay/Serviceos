@@ -5,6 +5,35 @@ scale-to-1000 plan
 (`docs/plans/2026-06-27-001-feat-scale-to-1000-concurrent-users-plan.md`) and the
 capacity baseline in `docs/runbooks/voice-capacity.md`.
 
+## Go-live checklist: ≥1000 concurrent users
+
+Current production state (verified 2026-07-02): **one process, one replica, no
+Redis, no PgBouncer, capacity tables `TBD`.** The order below matters — doing
+step 3 before steps 1–2 silently multiplies every rate limit/quota by N and
+exhausts Postgres connections.
+
+1. **Provision Redis first** (Phase 4 §1 below): set `REDIS_URL` **and**
+   `VOICE_FANOUT_ENABLED=true` (and `AI_CACHE_ENABLED=true` for a shared LLM
+   cache). Until this is set, WS caps, LLM quotas, rate limits, and voice
+   fan-out are all per-replica.
+2. **Provision PgBouncer** (Phase 4 §2): `DATABASE_URL`→bouncer,
+   `DATABASE_DIRECT_URL`→Postgres direct. Before enabling, confirm the known
+   transaction-pinning offender is fixed: `/api/assistant/chat` must not hold
+   the request transaction across the LLM call (UC-2 in
+   `docs/plans/2026-07-02-001-feat-rivet-jobber-agent-wave-plan.md`).
+3. **Raise replicas** (Phase 4 §3) with stop grace ≥ 35s (Phase 4 §4).
+   Multi-replica correctness prerequisites, tracked in the same plan:
+   dispatch-board event bus/presence/revision externalized (UC-3/UC-4) and
+   telephony timers made durable (UC-5 — the in-memory emergency page retry
+   ladder is the highest-risk item: a deploy can drop an emergency escalation).
+4. **Measure before claiming the number** (Phase 5 / "Measuring" below): run
+   the mixed 1000-user harness (`loadtest/mixed-1000.js`, UC-6) against the
+   pooled topology and replace the `TBD` rows in
+   `docs/runbooks/voice-capacity.md` with real ceilings. Frontend load model
+   for the harness: each dashboard user ≈ 2 req/min baseline
+   (`usePendingProposals` 30s) + 1 WS + up to 2 SSE; dispatch-board users add a
+   presence heartbeat (12 req/min until UC-3 moves it onto the WS).
+
 ## The connection-pool ceiling
 
 The RLS middleware holds one Postgres connection for the whole request, so a
