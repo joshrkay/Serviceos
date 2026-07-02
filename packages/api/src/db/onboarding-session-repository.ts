@@ -145,7 +145,13 @@ export class PgOnboardingSessionRepository
 
   async findById(tenantId: string, id: string): Promise<OnboardingSession | null> {
     return this.withTenant(tenantId, async (client) => {
-      const result = await client.query(`SELECT * FROM onboarding_session WHERE id = $1`, [id]);
+      // Explicit tenant scoping: RLS is a runtime no-op unless
+      // RLS_RUNTIME_ROLE is enabled (see db/rls-runtime-role.ts), so the
+      // tenant_id predicate is what prevents cross-tenant reads.
+      const result = await client.query(
+        `SELECT * FROM onboarding_session WHERE id = $1 AND tenant_id = $2`,
+        [id, tenantId],
+      );
       return result.rows.length > 0 ? mapRow(result.rows[0]) : null;
     });
   }
@@ -188,11 +194,15 @@ export class PgOnboardingSessionRepository
         // Only updated_at; no-op early-exit.
         return this.findById(tenantId, id);
       }
+      // Explicit tenant scoping: RLS is a runtime no-op unless
+      // RLS_RUNTIME_ROLE is enabled (see db/rls-runtime-role.ts), so the
+      // tenant_id predicate is what prevents cross-tenant tampering.
       params.push(id);
+      params.push(tenantId);
       const result = await client.query(
         `UPDATE onboarding_session
             SET ${setClauses.join(', ')}
-          WHERE id = $${paramIndex}
+          WHERE id = $${paramIndex} AND tenant_id = $${paramIndex + 1}
           RETURNING *`,
         params,
       );
