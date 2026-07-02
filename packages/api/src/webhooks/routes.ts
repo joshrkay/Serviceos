@@ -46,7 +46,6 @@ import { createAuditEvent, AuditRepository } from '../audit/audit';
 import { EstimateRepository } from '../estimates/estimate';
 import { RefreshJobMoneyStateDeps } from '../jobs/job-money-state';
 import { dispatchInboundSms } from '../sms/inbound-dispatch';
-import { lookupDroppedCallSession } from '../telephony/dropped-call-session-bridge';
 
 const logger = createLogger({ service: 'webhooks', environment: process.env.NODE_ENV || 'dev' });
 
@@ -2158,34 +2157,12 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
         });
         dispatchResult = { handled: false, reason: 'handler_error' };
       }
-      if (!dispatchResult.handled) {
-        const voiceSessionId = lookupDroppedCallSession(tenantId, fromE164);
-        if (voiceSessionId) {
-          dispatchResult = {
-            handled: true,
-            handler: 'dropped_call_resume',
-            reason: 'voice_session_linked',
-          };
-          if (deps.auditRepo) {
-            await deps.auditRepo.create(
-              createAuditEvent({
-                tenantId,
-                actorId: 'system:twilio_inbound_sms',
-                actorRole: 'system',
-                eventType: 'sms.dropped_call_resume',
-                entityType: 'voice_session',
-                entityId: voiceSessionId,
-                metadata: {
-                  messageSid: eventId,
-                  fromE164,
-                  bodyLength: body.length,
-                },
-              }),
-            );
-          }
-        }
-      }
-
+      // UC-5b — dropped-call resume matching is handled INSIDE the
+      // dispatcher by the RV-116 resume handler, which matches the caller
+      // against the durable dropped_call_recoveries table (works on any
+      // replica / after a restart). The old in-memory phone→session bridge
+      // fallback that used to run here was deleted with the superseded B5
+      // MVP (telephony/dropped-call-session-bridge.ts).
       if (deps.auditRepo) {
         await deps.auditRepo.create(
           createAuditEvent({
