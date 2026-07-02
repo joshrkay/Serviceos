@@ -36,11 +36,19 @@
       {
         "id": "inv_11_es_open_1",
         "tenantId": "t_11_es_switchback",
-        "customerId": "cust_11_es_lucia",
-        "status": "sent",
-        "totalCents": 18500,
-        "balanceDueCents": 18500,
+        "jobId": "job_11_es_lucia_1",
+        "estimateId": null,
+        "invoiceNumber": "INV-ES-001",
+        "status": "open",
+        "lineItems": [
+          { "description": "Servicio de HVAC", "quantity": 1, "unitPriceCents": 18500 }
+        ],
+        "totals": { "subtotalCents": 18500, "discountCents": 0, "taxCents": 0, "totalCents": 18500 },
+        "amountPaidCents": 0,
+        "amountDueCents": 18500,
         "issuedAt": "2026-06-01T10:00:00.000Z",
+        "dueDate": "2026-07-01T10:00:00.000Z",
+        "customerMessage": null,
         "createdBy": "user_seed",
         "createdAt": "2026-06-01T10:00:00.000Z",
         "updatedAt": "2026-06-01T10:00:00.000Z"
