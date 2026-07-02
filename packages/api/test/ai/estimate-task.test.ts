@@ -40,6 +40,29 @@ const validEstimateJson = JSON.stringify({
   confidence_score: 0.85,
 });
 
+/**
+ * A catalog that grounds the line descriptions used in these tests. Grounding
+ * is now REQUIRED for an estimate to flow at full confidence / auto-approve:
+ * an LLM-invented price with no catalog to check against is treated as
+ * uncatalogued (confidence capped + clarification), so the "happy path" and
+ * "auto-approve" cases must supply a real catalog to be genuinely grounded.
+ */
+async function groundedCatalog(): Promise<InMemoryCatalogItemRepository> {
+  const repo = new InMemoryCatalogItemRepository();
+  for (const name of ['Pipe repair', 'Labor', 'AC repair']) {
+    await repo.create(
+      createCatalogItem({
+        tenantId: 'tenant-1',
+        name,
+        category: name === 'Labor' ? 'Labor' : 'Parts',
+        unit: 'each',
+        unitPriceCents: 7500,
+      }),
+    );
+  }
+  return repo;
+}
+
 describe('P2-016 — Estimate draft proposal generation', () => {
   it('happy path — generates estimate proposal from context', async () => {
     const stub = new StubProvider('stub');
@@ -63,11 +86,13 @@ describe('P2-016 — Estimate draft proposal generation', () => {
     expect(payload.notes).toBe('Estimate for kitchen plumbing');
   });
 
-  it('happy path — sets confidence from AI response', async () => {
+  it('happy path — sets confidence from AI response (catalog-grounded)', async () => {
     const stub = new StubProvider('stub');
     stub.setResponse({ content: validEstimateJson });
     const gateway = makeGateway(stub);
-    const handler = new EstimateTaskHandler(gateway);
+    // Grounded against a catalog so the LLM price is trusted and the model's
+    // confidence flows through uncapped.
+    const handler = new EstimateTaskHandler(gateway, await groundedCatalog());
 
     const result = await handler.handle(makeContext());
 
@@ -175,13 +200,41 @@ describe('P2-016 — Estimate draft proposal generation', () => {
       }),
     });
     const gateway = makeGateway(stub);
-    const handler = new EstimateTaskHandler(gateway);
+    // Auto-approve now REQUIRES catalog-grounded pricing — an all-LLM-priced
+    // estimate is uncatalogued and capped, so it could never reach 'approved'.
+    const handler = new EstimateTaskHandler(gateway, await groundedCatalog());
 
     const result = await handler.handle(makeContext());
 
     expect(result.proposal.proposalType).toBe('draft_estimate');
     expect(result.proposal.confidenceScore).toBe(0.95);
     expect(result.proposal.status).toBe('approved');
+  });
+
+  it('D3: no-catalog estimate is capped + clarified, cannot auto-approve (money-safety)', async () => {
+    // Regression: an empty/unwired catalog previously skipped the uncatalogued
+    // cap entirely, letting a fully LLM-priced estimate auto-approve at ≥0.9.
+    const stub = new StubProvider('stub');
+    stub.setResponse({
+      content: JSON.stringify({
+        customerId: '550e8400-e29b-41d4-a716-446655440000',
+        jobId: '660e8400-e29b-41d4-a716-446655440000',
+        lineItems: [{ description: 'Pipe repair', quantity: 1, unitPrice: 75.0 }],
+        confidence_score: 0.95,
+      }),
+    });
+    const handler = new EstimateTaskHandler(makeGateway(stub)); // no catalog
+
+    const result = await handler.handle(makeContext());
+
+    const line = (result.proposal.payload.lineItems as Array<Record<string, unknown>>)[0];
+    expect(line.pricingSource).toBe('uncatalogued');
+    expect(result.proposal.confidenceFactors).toContain('uncatalogued_line_item');
+    // Escalated to clarification and well below the 0.9 auto-approve threshold.
+    expect(result.proposal.confidenceScore).toBeLessThan(0.9);
+    expect(result.proposal.status).not.toBe('approved');
+    const clar = result.proposal.payload.clarification as { needed: boolean };
+    expect(clar.needed).toBe(true);
   });
 
   it('D3: low-confidence draft_estimate still lands in draft for review', async () => {
@@ -215,7 +268,9 @@ describe('7.2 — EstimateTaskHandler clarification policy', () => {
   it('a grounded estimate needs no clarification', async () => {
     const stub = new StubProvider('stub');
     stub.setResponse({ content: validEstimateJson });
-    const handler = new EstimateTaskHandler(makeGateway(stub));
+    // Genuinely grounded: catalog matches every line, so no uncatalogued_price
+    // clarification is raised.
+    const handler = new EstimateTaskHandler(makeGateway(stub), await groundedCatalog());
 
     const { proposal } = await handler.handle(makeContext());
 
@@ -360,7 +415,7 @@ describe('P22 — EstimateTaskHandler catalog grounding', () => {
     expect(proposal.confidenceFactors).toContain('uncatalogued_line_item');
   });
 
-  it('without a catalog repo, behavior is unchanged (regression pin)', async () => {
+  it('without a catalog repo, LLM price is kept but flagged uncatalogued + capped', async () => {
     const stub = new StubProvider('stub');
     stub.setResponse({
       content: estimateJson([{ description: 'Water Heater Install', quantity: 1, unitPrice: 999 }]),
@@ -370,8 +425,13 @@ describe('P22 — EstimateTaskHandler catalog grounding', () => {
     const { proposal } = await handler.handle(makeContext());
 
     const line = (proposal.payload.lineItems as Array<Record<string, unknown>>)[0];
+    // LLM price is kept (nothing to override it)…
     expect(line.unitPrice).toBe(999);
-    expect(line).not.toHaveProperty('pricingSource');
+    // …but with no catalog to ground against it is uncatalogued + capped,
+    // never silently auto-approvable (previously left unflagged).
+    expect(line.pricingSource).toBe('uncatalogued');
+    expect(proposal.confidenceScore).toBeLessThanOrEqual(0.85);
+    expect(proposal.confidenceFactors).toContain('uncatalogued_line_item');
   });
 });
 
@@ -394,7 +454,9 @@ describe('RV-007 — EstimateTaskHandler populates payload._meta', () => {
   it('sets overallConfidence from the task confidence score (no per-field signal → overall-only)', async () => {
     const stub = new StubProvider('stub');
     stub.setResponse({ content: validEstimateJson }); // confidence_score 0.85
-    const handler = new EstimateTaskHandler(makeGateway(stub));
+    // Grounded so no line carries a low-certainty pricing source — the whole
+    // point of this case is "overall-only, no per-field signals".
+    const handler = new EstimateTaskHandler(makeGateway(stub), await groundedCatalog());
 
     const { proposal } = await handler.handle(makeContext());
 

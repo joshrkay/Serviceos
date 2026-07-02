@@ -5,10 +5,9 @@ import { assessConfidence, getConfidenceLevel } from '../guardrails/confidence';
 import type { ProposalConfidenceMeta } from '../../proposals/contracts';
 import type { CatalogItem, CatalogItemRepository } from '../../catalog/catalog-item';
 import {
-  applyCatalogPricing,
   CatalogPricingOutcome,
+  groundLineItemPricing,
   lineItemConfidenceSignals,
-  resolveLineItems,
   UNCATALOGUED_CONFIDENCE_CAP,
 } from '../resolution/catalog-resolver';
 import { buildCatalogPromptSection } from './catalog-resolution';
@@ -165,22 +164,17 @@ export class InvoiceTaskHandler implements TaskHandler {
     // (which the proposal gate still reviews).
     let catalogOutcome: CatalogPricingOutcome | undefined;
     const lineItems = payload.lineItems as Array<Record<string, unknown>>;
-    if (this.catalogRepo && Array.isArray(lineItems) && lineItems.length > 0) {
-      try {
-        const items = (await this.catalogRepo.listByTenant(context.tenantId)).filter(
-          (i) => i.archivedAt === null,
-        );
-        if (items.length > 0) {
-          const resolutions = resolveLineItems(
-            lineItems.map((li) => String(li.description ?? '')),
-            items,
-          );
-          catalogOutcome = applyCatalogPricing(lineItems, resolutions, 'unitPriceCents');
-          payload.lineItems = catalogOutcome.lineItems;
-        }
-      } catch {
-        catalogOutcome = undefined;
-      }
+    if (Array.isArray(lineItems) && lineItems.length > 0) {
+      // Always resolve to an outcome — even with no catalog wired, an empty
+      // catalog, or a read error, every LLM price is treated as uncatalogued
+      // so the confidence cap below still fires (previously an undefined
+      // outcome silently skipped the cap for new/empty-catalog tenants).
+      catalogOutcome = await groundLineItemPricing(
+        lineItems,
+        'unitPriceCents',
+        this.catalogRepo ? () => this.catalogRepo!.listByTenant(context.tenantId) : null,
+      );
+      payload.lineItems = catalogOutcome.lineItems;
     }
 
     // Drop lines still lacking a valid price (LLM emitted garbage and the
