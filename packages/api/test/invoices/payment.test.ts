@@ -236,6 +236,65 @@ describe('P1-013 — Payment entity + partial payments', () => {
     expect(await getPaymentsByInvoice('tenant-1', inv.id, inner)).toHaveLength(1);
   });
 
+  it('duplicate-payment backstop — a reference reused on a DIFFERENT invoice is a conflict, not idempotent', async () => {
+    // The 23505 backstop must only short-circuit for the same invoice. If the
+    // same reference lands on another invoice, returning the first invoice's
+    // payment would leave the requested invoice unpaid — surface a conflict.
+    const localInvoiceRepo = new InMemoryInvoiceRepository();
+    const inner = new InMemoryPaymentRepository();
+    const seen = new Set<string>();
+    const racingRepo: PaymentRepository = {
+      create: async (p: Payment) => {
+        if (p.providerReference && (p.method === 'credit_card' || p.method === 'bank_transfer')) {
+          // Index is on (tenant, reference) — NOT scoped to invoice.
+          const key = `${p.tenantId}:${p.providerReference}`;
+          if (seen.has(key)) throw Object.assign(new Error('duplicate key'), { code: '23505' });
+          seen.add(key);
+        }
+        return inner.create(p);
+      },
+      findByProviderReference: (t: string, r: string) => inner.findByProviderReference(t, r),
+      findByInvoice: (t: string, i: string) => inner.findByInvoice(t, i),
+    } as unknown as PaymentRepository;
+
+    const mkInvoice = async (num: string) => {
+      const i = await createInvoice(
+        {
+          tenantId: 'tenant-1',
+          jobId: 'job-1',
+          invoiceNumber: num,
+          lineItems: [buildLineItem('1', 'Service', 1, 10000, 1, true)],
+          createdBy: 'u-1',
+        },
+        localInvoiceRepo,
+      );
+      await issueInvoice('tenant-1', i.id, 30, localInvoiceRepo);
+      return i;
+    };
+    const invA = await mkInvoice('INV-A');
+    const invB = await mkInvoice('INV-B');
+
+    const ref = 'pi_shared_ref';
+    await recordPayment(
+      { tenantId: 'tenant-1', invoiceId: invA.id, amountCents: 10000, method: 'credit_card', providerReference: ref, processedBy: 'u-1' },
+      localInvoiceRepo,
+      racingRepo,
+    );
+
+    // Same reference, DIFFERENT invoice → conflict, not a silent idempotent return.
+    await expect(
+      recordPayment(
+        { tenantId: 'tenant-1', invoiceId: invB.id, amountCents: 10000, method: 'credit_card', providerReference: ref, processedBy: 'u-1' },
+        localInvoiceRepo,
+        racingRepo,
+      ),
+    ).rejects.toThrow(/different invoice/i);
+
+    // Invoice B stays unpaid (not silently marked paid via A's payment).
+    const b = await localInvoiceRepo.findById('tenant-1', invB.id);
+    expect(b!.amountPaidCents).toBe(0);
+  });
+
   it('validation — rejects overpayment', async () => {
     await expect(
       recordPayment(

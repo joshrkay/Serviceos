@@ -392,6 +392,16 @@ export async function recordPayment(
         input.tenantId,
         input.providerReference,
       );
+      // Only a retry for the SAME invoice is idempotent. If the reference is
+      // already recorded on a DIFFERENT invoice (the authenticated route lets a
+      // user type any providerReference), returning that payment would credit
+      // the wrong invoice and leave the requested one unpaid — surface a
+      // conflict instead.
+      if (existing && existing.invoiceId !== input.invoiceId) {
+        throw new ValidationError(
+          `A payment with reference "${input.providerReference}" is already recorded on a different invoice`,
+        );
+      }
       if (existing) {
         // Repair the invoice from the payment ledger before returning: the
         // winning attempt may have committed the payment row but crashed
