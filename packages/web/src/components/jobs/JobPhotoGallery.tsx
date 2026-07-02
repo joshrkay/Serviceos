@@ -78,7 +78,21 @@ export function JobPhotoGallery({
               data-testid={`job-photo-card-${photo.id}`}
               className="border rounded overflow-hidden bg-card"
             >
-              {photo.contentType.startsWith('video/') ? (
+              {/* Sweep-2 S2: never dereference contentType blindly — an
+                  optimistically-appended row from an older/partial API
+                  response (or an orphaned file placeholder from the list
+                  endpoint) may lack contentType/downloadUrl. Fall back to a
+                  generic tile instead of crashing the whole page. */}
+              {!photo.downloadUrl ? (
+                <div
+                  data-testid={`job-photo-placeholder-${photo.id}`}
+                  aria-label={photo.notes ?? `${photo.category} attachment`}
+                  className="flex w-full h-32 items-center justify-center bg-muted text-xs text-muted-foreground"
+                >
+                  Preview unavailable
+                </div>
+              ) : typeof photo.contentType === 'string' &&
+                photo.contentType.startsWith('video/') ? (
                 <video
                   data-testid={`job-photo-video-${photo.id}`}
                   src={photo.downloadUrl}

@@ -1,6 +1,7 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { TenantTimezoneProvider, useTenantTimezone, useTenantTimezoneState } from './useTenantTimezone';
+import { _resetMeCacheForTests } from './useMe';
 
 const fetchMock = vi.fn();
 
@@ -24,6 +25,7 @@ function Consumer() {
 }
 
 beforeEach(() => {
+  _resetMeCacheForTests();
   fetchMock.mockReset();
 });
 

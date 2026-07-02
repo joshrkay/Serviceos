@@ -187,6 +187,138 @@ describe('Postgres integration — entity resolution (P8)', () => {
     expect(result.kind).toBe('not_found');
   });
 
+  // U1 — technician kind: pins the REAL users columns (first_name/last_name/
+  // role/deleted_at) + the trigram expression migration 230 indexes. The unit
+  // suite mocks the Pool, which is exactly how column drift ships (see the
+  // header comment), so these assertions run against the live schema.
+  describe('technician kind (U1)', () => {
+    async function seedUser(
+      tenantId: string,
+      firstName: string,
+      lastName: string,
+      role: 'owner' | 'dispatcher' | 'technician',
+      opts: { deleted?: boolean } = {},
+    ): Promise<string> {
+      const id = crypto.randomUUID();
+      await pool.query(
+        `INSERT INTO users (id, tenant_id, clerk_user_id, email, role, first_name, last_name, deleted_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [
+          id,
+          tenantId,
+          `clerk-${id}`,
+          `${firstName}.${lastName}.${id.slice(0, 8)}@example.com`.toLowerCase(),
+          role,
+          firstName,
+          lastName,
+          opts.deleted ? new Date() : null,
+        ],
+      );
+      return id;
+    }
+
+    it('exact full-name match resolves with role hint', async () => {
+      const carlosId = await seedUser(tenant.tenantId, 'Carlos', 'Rodriguez', 'technician');
+      const result = await resolver.resolve({
+        tenantId: tenant.tenantId,
+        reference: 'Carlos Rodriguez',
+        kind: 'technician',
+      });
+      expect(result.kind).toBe('resolved');
+      if (result.kind === 'resolved') {
+        expect(result.candidate.id).toBe(carlosId);
+        expect(result.candidate.label).toBe('Carlos Rodriguez');
+        expect(result.candidate.hint).toBe('technician');
+        expect(result.candidate.score).toBe(1);
+      }
+    });
+
+    it('transcription typo resolves via trigram similarity', async () => {
+      const mikeId = await seedUser(tenant.tenantId, 'Mikhail', 'Petrovsky', 'dispatcher');
+      const result = await resolver.resolve({
+        tenantId: tenant.tenantId,
+        reference: 'Mikhail Petrovski', // trailing-vowel typo
+        kind: 'technician',
+      });
+      expect(result.kind).toBe('resolved');
+      if (result.kind === 'resolved') {
+        expect(result.candidate.id).toBe(mikeId);
+        expect(result.candidate.score).toBeGreaterThanOrEqual(0.8);
+        expect(result.candidate.score).toBeLessThan(1);
+      }
+    });
+
+    it('two technicians with the same name → ambiguous with both candidates', async () => {
+      const a = await seedUser(tenant.tenantId, 'Dana', 'Whitfield', 'technician');
+      const b = await seedUser(tenant.tenantId, 'Dana', 'Whitfield', 'dispatcher');
+      const result = await resolver.resolve({
+        tenantId: tenant.tenantId,
+        reference: 'Dana Whitfield',
+        kind: 'technician',
+      });
+      expect(result.kind).toBe('ambiguous');
+      if (result.kind === 'ambiguous') {
+        const ids = result.candidates.map((c) => c.id);
+        expect(ids).toContain(a);
+        expect(ids).toContain(b);
+      }
+    });
+
+    it('soft-deleted users never resolve', async () => {
+      await seedUser(tenant.tenantId, 'Ghost', 'Departed', 'technician', { deleted: true });
+      const result = await resolver.resolve({
+        tenantId: tenant.tenantId,
+        reference: 'Ghost Departed',
+        kind: 'technician',
+      });
+      expect(result.kind).toBe('not_found');
+    });
+
+    it('never resolves across tenants', async () => {
+      await seedUser(tenant.tenantId, 'Priya', 'Natarajan', 'technician');
+      const result = await resolver.resolve({
+        tenantId: other.tenantId,
+        reference: 'Priya Natarajan',
+        kind: 'technician',
+      });
+      expect(result.kind).toBe('not_found');
+    });
+
+    it('router end-to-end: spoken technician name lands as a verified toTechnicianId', async () => {
+      const felixId = await seedUser(tenant.tenantId, 'Felix', 'Okonkwo', 'technician');
+      const proposalRepo = new InMemoryProposalRepository();
+      const gateway = gatewayReturning([
+        JSON.stringify({
+          intentType: 'reassign_appointment',
+          confidence: 0.9,
+          extractedEntities: {
+            appointmentReference: "Tuesday's Davis job",
+            targetTechnicianName: 'Felix Okonkwo',
+          },
+        }),
+      ]);
+      const worker = createVoiceActionRouterWorker({
+        gateway,
+        proposalRepo,
+        entityResolver: resolver,
+      });
+
+      await worker.handle(
+        msg({
+          tenantId: tenant.tenantId,
+          userId: tenant.userId,
+          transcript: "Give Tuesday's Davis job to Felix Okonkwo",
+        }),
+        silentLogger(),
+      );
+
+      const proposals = await proposalRepo.findByTenant(tenant.tenantId);
+      expect(proposals).toHaveLength(1);
+      expect(proposals[0].proposalType).toBe('reassign_appointment');
+      expect(proposals[0].payload.toTechnicianId).toBe(felixId);
+    });
+  });
+
   it('resolves jobs by summary (schema column, not the nonexistent title)', async () => {
     const locationRepo = new PgLocationRepository(pool);
     const jobRepo = new PgJobRepository(pool);

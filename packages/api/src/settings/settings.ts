@@ -470,6 +470,22 @@ export interface TenantSettings {
    * `?? true`.
    */
   weeklyFeedbackEnabled?: boolean;
+  /**
+   * UB-D / D-015 — autonomous booking lane. Opt-in (column defaults FALSE,
+   * migration 231): when true, inbound-receptionist booking proposals
+   * (create_appointment / create_booking, capture class only) may
+   * auto-approve with no supervisor present, judged against
+   * `autonomousBookingThreshold`. Optional on the type so pre-migration
+   * rows / legacy fixtures read as "off" via `?? false`.
+   */
+  autonomousBookingEnabled?: boolean;
+  /**
+   * UB-D / D-015 — the lane's dedicated confidence threshold. NUMERIC(3,2)
+   * with DB CHECK 0.90–0.99 (default 0.95); the evaluator
+   * (proposals/autonomous-lane.ts) re-clamps to the 0.90 floor in code as
+   * defense in depth.
+   */
+  autonomousBookingThreshold?: number;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -599,6 +615,10 @@ export interface UpdateSettingsInput {
   digestChannel?: DigestChannel;
   /** Epic 12.6 — opt out of the weekly feedback email (column default true). */
   weeklyFeedbackEnabled?: boolean;
+  /** UB-D / D-015 — opt into the autonomous booking lane (column default false). */
+  autonomousBookingEnabled?: boolean;
+  /** UB-D / D-015 — lane confidence threshold, 0.90–0.99 (column default 0.95). */
+  autonomousBookingThreshold?: number;
 }
 
 export interface SettingsRepository {
@@ -677,6 +697,7 @@ function validateCommonSettingsFields(
     discountMaxBps?: number | null;
     discountFloorCents?: number | null;
     laborRateCentsPerHour?: number | null;
+    autonomousBookingThreshold?: number | null;
   }
 ): string[] {
   const errors: string[] = [];
@@ -729,6 +750,19 @@ function validateCommonSettingsFields(
     if (!Number.isInteger(rate) || rate < 0) {
       errors.push('laborRateCentsPerHour must be a non-negative integer of cents');
     }
+  }
+  // UB-D / D-015 — autonomous booking threshold mirrors the migration-231
+  // CHECK (NUMERIC(3,2) in [0.90, 0.99]). Fractional by design (a confidence
+  // score, not money); the evaluator (proposals/autonomous-lane.ts) re-clamps
+  // to the 0.90 floor at read time as defense in depth.
+  if (
+    input.autonomousBookingThreshold !== undefined &&
+    input.autonomousBookingThreshold !== null &&
+    (!Number.isFinite(input.autonomousBookingThreshold) ||
+      input.autonomousBookingThreshold < 0.9 ||
+      input.autonomousBookingThreshold > 0.99)
+  ) {
+    errors.push('autonomousBookingThreshold must be between 0.90 and 0.99');
   }
   return errors;
 }
@@ -877,13 +911,21 @@ export async function updateSettings(
   repository: SettingsRepository,
   options?: ActiveVerticalPackValidationOptions
 ): Promise<TenantSettings | null> {
-  const normalizedInput: UpdateSettingsInput = {
-    ...input,
-    activeVerticalPacks: normalizeActiveVerticalPacks(
+  // Sweep-2 S1: only touch `activeVerticalPacks` when the caller actually
+  // provided a value. Unconditionally spreading a normalized `undefined`
+  // inserted the KEY into every update, which the Pg repo read as an
+  // explicit clear ("key present" semantics) — so ANY unrelated settings
+  // save silently wiped the tenant's active vertical packs. `undefined`
+  // means "untouched"; an explicit clear is `[]`.
+  const normalizedInput: UpdateSettingsInput = { ...input };
+  if (input.activeVerticalPacks === undefined) {
+    delete normalizedInput.activeVerticalPacks;
+  } else {
+    normalizedInput.activeVerticalPacks = normalizeActiveVerticalPacks(
       input.activeVerticalPacks,
       options?.normalizePackId ?? normalizePackId
-    ),
-  };
+    );
+  }
   const errors = validateUpdateSettingsInput(normalizedInput, options);
   if (errors.length > 0) {
     throw new Error(`Validation failed: ${errors.join('; ')}`);
@@ -1065,6 +1107,11 @@ export class InMemorySettingsRepository implements SettingsRepository {
     const s = this.settings.get(tenantId);
     if (!s) return null;
     const { id: _id, tenantId: _tid, createdAt: _ca, ...safeUpdates } = updates;
+    // Sweep-2 S1 parity with PgSettingsRepository: an undefined VALUE means
+    // "untouched" — never let it clobber a stored value via spread.
+    for (const key of Object.keys(safeUpdates) as (keyof typeof safeUpdates)[]) {
+      if (safeUpdates[key] === undefined) delete safeUpdates[key];
+    }
     const updated = { ...s, ...safeUpdates };
     this.settings.set(tenantId, updated);
     return { ...updated };

@@ -28,7 +28,12 @@ export type EntityKind =
   | 'estimate'
   // RV-072 — a proposal awaiting review (status draft / ready_for_review),
   // resolved by the voice approval channel ("approve the Henderson estimate").
-  | 'pending_proposal';
+  | 'pending_proposal'
+  // U1 (agent wave) — a tenant team member spoken by name ("give it to
+  // Carlos"). Resolved against users (role technician/dispatcher/owner) so
+  // reassign/add-crew/remove-crew proposals carry a verified technician id
+  // instead of stalling in draft on a free-text name.
+  | 'technician';
 
 /**
  * Confidence threshold above which a match is considered "resolved"

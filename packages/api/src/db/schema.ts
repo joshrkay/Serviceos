@@ -5707,7 +5707,68 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS segment_group_id UUID REFERENCES customer_groups(id);
   `,
 
-  '229_payments_stripe_reference_unique': `
+  '229_create_standing_instructions': `
+    -- UB-A1 (agent wave) — standing instructions: persistent tenant-scoped
+    -- directives the AI agents apply when drafting (e.g. "always add a fuel
+    -- surcharge", "never discount emergency calls"). scope is app-side
+    -- Zod-validated JSONB ({intents?, tradeCategories?, customerSegment?,
+    -- amountCents?} — see src/instructions/standing-instructions.ts).
+    -- Deactivation is soft (active=false + deactivated_*) so instructions that
+    -- influenced past drafts stay auditable. Read/written by
+    -- src/instructions/pg-standing-instructions.ts (20-active-per-tenant cap
+    -- enforced there, inside the insert transaction). FORCE RLS mirrors
+    -- 227_create_customer_groups.
+    CREATE TABLE IF NOT EXISTS standing_instructions (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      instruction TEXT NOT NULL,
+      scope JSONB NOT NULL DEFAULT '{}',
+      active BOOLEAN NOT NULL DEFAULT true,
+      source TEXT NOT NULL CHECK (source IN ('proposal','settings')),
+      created_by TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      deactivated_at TIMESTAMPTZ,
+      deactivated_by TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_standing_instructions_tenant_active
+      ON standing_instructions(tenant_id, active);
+    ALTER TABLE standing_instructions ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE standing_instructions FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_standing_instructions ON standing_instructions;
+    CREATE POLICY tenant_isolation_standing_instructions ON standing_instructions
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '230_users_fullname_trgm_index': `
+    -- U1 (agent wave) — voice technician resolution. GIN trigram expression
+    -- index over the users full-name expression that PgEntityResolver's
+    -- 'technician' kind queries ("give the Davis job to Carlos"). The
+    -- expression must stay byte-identical to the SQL in
+    -- src/ai/resolution/pg-entity-resolver.ts (resolveTechnician) for the
+    -- planner to serve it from this index. Mirrors migration 051's trgm-index
+    -- pattern (051 already created the pg_trgm extension). Index-only — no
+    -- RLS or column change.
+    CREATE INDEX IF NOT EXISTS idx_users_fullname_trgm
+      ON users USING GIN ((TRIM(COALESCE(first_name,'') || ' ' || COALESCE(last_name,''))) gin_trgm_ops);
+  `,
+
+  '231_tenant_settings_autonomous_booking': `
+    -- UB-D / D-015 (agent wave) — autonomous booking lane. Per-tenant opt-in
+    -- (default OFF) letting inbound-receptionist booking proposals
+    -- (create_appointment / create_booking, capture class only) auto-approve
+    -- while unsupervised, judged against a dedicated stricter threshold
+    -- (default 0.95; DB CHECK 0.90–0.99, floor also enforced in code —
+    -- src/proposals/autonomous-lane.ts). Inline CHECK rides the ADD COLUMN so
+    -- the boot-time re-run (IF NOT EXISTS) never re-validates existing rows.
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS autonomous_booking_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS autonomous_booking_threshold NUMERIC(3,2) NOT NULL DEFAULT 0.95
+        CHECK (autonomous_booking_threshold >= 0.90 AND autonomous_booking_threshold <= 0.99);
+  `,
+
+  '232_payments_stripe_reference_unique': `
     -- Prevent duplicate Stripe payment rows for the same intent. Two Stripe
     -- events (checkout.session.completed + payment_intent.succeeded) for one
     -- intent, or a webhook retry with a distinct event id, both pass the

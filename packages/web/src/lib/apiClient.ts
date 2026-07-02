@@ -100,10 +100,7 @@ export function useApiClient(): ApiFetch {
       // Build a plain Record<string,string>. RequestInit['headers']
       // can be a plain object, a Headers instance, or a string[][].
       // The naive spread approach silently dropped Headers / array
-      // forms (Gemini PR #208 review). Handle each shape; keep the
-      // plain-object case preserving caller's key casing so that
-      // injecting `'Content-Type'` below doesn't collide with a
-      // caller-supplied `'content-type'`.
+      // forms (Gemini PR #208 review).
       const headers: Record<string, string> = {};
       if (init.headers instanceof Headers) {
         init.headers.forEach((value, key) => {
@@ -120,7 +117,17 @@ export function useApiClient(): ApiFetch {
       // URLSearchParams, Blob, and ArrayBuffer; setting
       // application/json on those would corrupt the request
       // (Gemini PR #208 review).
-      if (typeof init.body === 'string' && !headers['Content-Type']) {
+      //
+      // HTTP header names are case-insensitive, so the presence check MUST
+      // be too: a caller-supplied lowercase 'content-type' previously did
+      // not suppress the injected 'Content-Type', fetch merged the duplicate
+      // keys into "application/json, application/json", and Express's JSON
+      // parser dropped the body — every inbox batch approval 400'd
+      // (journey QA 2026-07-02, bug 1).
+      const hasContentType = Object.keys(headers).some(
+        (key) => key.toLowerCase() === 'content-type',
+      );
+      if (typeof init.body === 'string' && !hasContentType) {
         headers['Content-Type'] = 'application/json';
       }
 

@@ -6,12 +6,16 @@ import { requireAuth, requireTenant, requirePermission } from '../middleware/aut
 import { toErrorResponse } from '../shared/errors';
 import { LLMGateway } from '../ai/gateway/gateway';
 import { ProposalRepository } from '../proposals/proposal';
-import type { AuditRepository } from '../audit/audit';
+import { createAuditEvent, type AuditRepository } from '../audit/audit';
 import {
   recordAssistantTurn,
   type ConversationRepository,
 } from '../conversations/conversation-service';
-import { classifyIntent } from '../ai/orchestration/intent-classifier';
+import {
+  classifyIntent,
+  isVoiceApprovalIntent,
+  isVoiceEditIntent,
+} from '../ai/orchestration/intent-classifier';
 import { CreateCustomerTaskHandler } from '../ai/tasks/task-handlers';
 import type { TaskHandler } from '../ai/tasks/task-handlers';
 import { EstimateTaskHandler } from '../ai/tasks/estimate-task';
@@ -20,6 +24,8 @@ import { InvoiceTaskHandler } from '../ai/tasks/invoice-task';
 import type { InvoiceRepository } from '../invoices/invoice';
 import type { CatalogItemRepository } from '../catalog/catalog-item';
 import type { EstimateRepository } from '../estimates/estimate';
+import type { StandingInstruction } from '../instructions/standing-instructions';
+import { selectInjectedStandingInstructions } from '../ai/standing-instructions-context';
 import { createLogger } from '../logging/logger';
 
 const logger = createLogger({
@@ -78,6 +84,11 @@ const assistantProposalSchema = z.object({
         .array(z.object({ path: z.string(), reason: z.string() }))
         .nullish()
         .transform((v) => v ?? undefined),
+      // UB-A3 — "Standing instruction applied" chips on the assistant card.
+      appliedStandingInstructions: z
+        .array(z.object({ id: z.string(), text: z.string() }))
+        .nullish()
+        .transform((v) => v ?? undefined),
     })
     .nullish()
     .transform((v) => v ?? undefined),
@@ -109,7 +120,16 @@ const assistantChatRequestSchema = z.object({
   // Story 3.11 — the client pins the running conversation so each turn persists
   // to the same thread; omitted on the first turn (server opens a new one).
   conversationId: z.string().optional(),
+  // UB-B3 — how the operator produced this message. 'voice' turns (conversation
+  // mode / PTT transcripts) are refused approval/reject/edit intents: in-app
+  // voice approval stays deferred (RV-071/RV-225 posture — approvals are a
+  // screen tap here).
+  inputMode: z.enum(['voice', 'text']).optional(),
 });
+
+/** UB-B3 — deterministic refusal copy for voice-mode approval intents. */
+export const VOICE_APPROVAL_REFUSAL =
+  "Tap the card to approve — I don't take approvals by voice here yet.";
 
 function inferTaskType(text: string): string {
   const t = text.toLowerCase();
@@ -178,6 +198,14 @@ export interface AssistantRouterDeps {
    * can omit it.
    */
   verticalPromptResolver?: (tenantId: string) => Promise<string | undefined>;
+  /**
+   * UB-A3 — resolves the tenant's ACTIVE standing instructions once per
+   * chat turn (production wires `standingInstructionRepo.listActive`).
+   * `selectApplicableInstructions` (≤5) narrows per classified intent
+   * before drafting. Mirrors `verticalPromptResolver`: optional,
+   * failure-soft — a resolver error drafts without owner instructions.
+   */
+  standingInstructionsResolver?: (tenantId: string) => Promise<StandingInstruction[]>;
   /**
    * P22 — catalog grounding for assistant-drafted invoices/estimates:
    * line items get priced from the tenant's catalog instead of trusting
@@ -249,7 +277,18 @@ export function proposalSignals(
         .map((mk) => ({ path: mk.path as string, reason: mk.reason as string }));
       if (markers.length > 0) meta.markers = markers;
     }
-    if (meta.overallConfidence || meta.severity || meta.markers) out.meta = meta;
+    // UB-A3 — lift the applied-standing-instruction marker so the assistant
+    // card can render its "Standing instruction applied" chips.
+    if (Array.isArray(m.appliedStandingInstructions)) {
+      const applied = m.appliedStandingInstructions
+        .filter((si): si is Record<string, unknown> => si !== null && typeof si === 'object')
+        .filter((si) => typeof si.id === 'string' && typeof si.text === 'string')
+        .map((si) => ({ id: si.id as string, text: si.text as string }));
+      if (applied.length > 0) meta.appliedStandingInstructions = applied;
+    }
+    if (meta.overallConfidence || meta.severity || meta.markers || meta.appliedStandingInstructions) {
+      out.meta = meta;
+    }
   }
 
   const rawLines = payload?.lineItems;
@@ -420,6 +459,7 @@ async function generateAssistantReply(
   userId: string,
   deps: AssistantRouterDeps,
   correlationId: string,
+  inputMode?: 'voice' | 'text',
 ) {
   const lastUser = [...messages].reverse().find((m) => m.role === 'user');
   const lastUserText = lastUser?.content ?? '';
@@ -444,6 +484,18 @@ async function generateAssistantReply(
         }
       }
 
+      // UB-A3 — resolve the tenant's active standing instructions once per
+      // turn (mirrors verticalPromptResolver). Failure-soft: drafting
+      // proceeds without owner instructions rather than breaking the chat.
+      let activeStandingInstructions: StandingInstruction[] | undefined;
+      if (deps.standingInstructionsResolver) {
+        try {
+          activeStandingInstructions = await deps.standingInstructionsResolver(tenantId);
+        } catch {
+          activeStandingInstructions = undefined;
+        }
+      }
+
       // QA-2026-06-05 (AST-05): deterministic read-only query — answer from
       // data, never propose. Runs before classification so phrasing variance
       // in the classifier can't turn a question into a mutation proposal.
@@ -462,6 +514,46 @@ async function generateAssistantReply(
         { tenantId, ...(verticalPromptSection ? { verticalPromptSection } : {}) },
         deps.gateway,
       );
+
+      // UB-B3 — voice-mode approval guard. approve/reject/edit_proposal are
+      // NOT routed in this chat handler; before this guard they fell through
+      // to the generic LLM path, so a spoken "approve it" got a free-form LLM
+      // reply. Intercept HERE — before the chain/handler/LLM paths — so a
+      // voice turn gets a deterministic refusal, never an approval action and
+      // never an LLM improvisation. In-app voice approval stays deferred
+      // (RV-071/RV-225: approve/reject/edit by voice is owner-telephony only).
+      if (
+        inputMode === 'voice' &&
+        (isVoiceApprovalIntent(classification.intentType) ||
+          isVoiceEditIntent(classification.intentType))
+      ) {
+        if (deps.auditRepo) {
+          try {
+            await deps.auditRepo.create(createAuditEvent({
+              tenantId,
+              actorId: userId,
+              actorRole: 'user',
+              eventType: 'assistant.voice_approval_refused',
+              entityType: 'assistant_chat',
+              entityId: correlationId,
+              metadata: { intentType: classification.intentType },
+            }));
+          } catch {
+            // Audit failures must not block the refusal reply.
+          }
+        }
+        return {
+          taskType: 'assistant.voice_approval_refused',
+          model: 'policy-guard',
+          usage: { input: 0, output: 0, total: 0 },
+          message: {
+            role: 'assistant' as const,
+            content: VOICE_APPROVAL_REFUSAL,
+            reasoning:
+              'Voice approvals are not enabled on this surface; approvals require a screen tap.',
+          },
+        };
+      }
 
       // QA-2026-06-05 (AST-07, scoped): multi-step asks ("…, then …") are
       // decomposed into SEQUENTIAL linked proposals sharing a chainId in
@@ -501,11 +593,20 @@ async function generateAssistantReply(
           if (segClass.intentType === 'create_customer' && segEntities.displayName && !segEntities.name) {
             segEntities.name = segEntities.displayName;
           }
+          // UB-A3 — thread the applicable standing instructions (≤5, keyed
+          // on this segment's classified intent) into the drafting handler.
+          const segStandingInstructions = selectInjectedStandingInstructions(
+            activeStandingInstructions,
+            segClass.intentType,
+          );
           const { proposal } = await factory().handle({
             tenantId,
             userId,
             message: segment,
             existingEntities: segEntities,
+            ...(segStandingInstructions
+              ? { standingInstructions: segStandingInstructions }
+              : {}),
           });
           if (!proposal) continue;
           dropUnverifiedIds(proposal.payload, segment, segEntities);
@@ -574,11 +675,18 @@ async function generateAssistantReply(
       const handlerFactory = proposalHandlers[classification.intentType];
       if (handlerFactory) {
         const handler = handlerFactory();
+        // UB-A3 — thread the applicable standing instructions (≤5, keyed on
+        // the classified intent) into the drafting handler.
+        const standingInstructions = selectInjectedStandingInstructions(
+          activeStandingInstructions,
+          classification.intentType,
+        );
         const { proposal } = await handler.handle({
           tenantId,
           userId,
           message: lastUserText,
           existingEntities: { ...(classification.extractedEntities ?? {}) },
+          ...(standingInstructions ? { standingInstructions } : {}),
         });
         dropUnverifiedIds(proposal.payload, lastUserText, { ...(classification.extractedEntities ?? {}) });
         await deps.proposalRepo.create(proposal);
@@ -735,6 +843,7 @@ export function createAssistantRouter(deps: AssistantRouterDeps): Router {
           req.auth!.userId,
           deps,
           correlationId,
+          parsed.inputMode,
         );
 
         // Story 3.11 — persist the turn so the conversation survives reload and

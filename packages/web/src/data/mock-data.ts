@@ -189,6 +189,11 @@ export interface ProposalConfidenceMeta {
   severity?: ProposalSeverity;
   /** "What I wasn't sure about" callouts the card surfaces. */
   markers?: { path: string; reason: string }[];
+  /**
+   * UB-A3 — owner standing instructions the drafting AI applied (server-side
+   * intersected with what was injected; ids are never model-invented).
+   */
+  appliedStandingInstructions?: { id: string; text: string }[];
 }
 
 /**

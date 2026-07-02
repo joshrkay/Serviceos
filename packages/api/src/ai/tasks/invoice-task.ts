@@ -11,6 +11,10 @@ import {
   UNCATALOGUED_CONFIDENCE_CAP,
 } from '../resolution/catalog-resolver';
 import { buildCatalogPromptSection } from './catalog-resolution';
+import {
+  buildStandingInstructionsSection,
+  intersectAppliedStandingInstructions,
+} from '../standing-instructions-context';
 
 const INVOICE_SYSTEM_PROMPT = `You are an invoice generation assistant for a field service company.
 Given the job context, customer information, and completed work details, generate a structured invoice.
@@ -109,12 +113,26 @@ export class InvoiceTaskHandler implements TaskHandler {
     const catalogItems = await this.fetchCatalog(context.tenantId);
     const userMessage = this.buildUserMessage(context, catalogItems);
 
+    // UB-A3 — owner standing instructions ride a SEPARATE, delimited system
+    // message (mirroring the classifier's vertical-context injection) so the
+    // base prompt stays byte-identical when none apply. Content-only: the
+    // section itself forbids approval/confidence/schema/pricing overrides.
+    const systemMessages: Array<{ role: 'system'; content: string }> = [
+      { role: 'system', content: INVOICE_SYSTEM_PROMPT },
+    ];
+    const injectedInstructions = context.standingInstructions ?? [];
+    if (injectedInstructions.length > 0) {
+      systemMessages.push({
+        role: 'system',
+        content: buildStandingInstructionsSection(injectedInstructions, {
+          requestAppliedIds: true,
+        }),
+      });
+    }
+
     const llmResponse = await this.gateway.complete({
       taskType: 'draft_invoice',
-      messages: [
-        { role: 'system', content: INVOICE_SYSTEM_PROMPT },
-        { role: 'user', content: userMessage },
-      ],
+      messages: [...systemMessages, { role: 'user', content: userMessage }],
       responseFormat: 'json',
     });
 
@@ -209,6 +227,13 @@ export class InvoiceTaskHandler implements TaskHandler {
         : [],
       'unitPriceCents',
     );
+    // UB-A3 — applied-instruction marker: the model's claimed ids are
+    // INTERSECTED with what was injected (never trust invented ids) and the
+    // field is dropped entirely when empty.
+    const appliedStandingInstructions = intersectAppliedStandingInstructions(
+      parsed?.appliedStandingInstructions,
+      injectedInstructions,
+    );
     const meta: ProposalConfidenceMeta = {
       // Hard-block auto-approval for any ungrounded (LLM-priced) line via the
       // RV-007 confidence-marker guard — independent of the numeric score AND
@@ -222,6 +247,7 @@ export class InvoiceTaskHandler implements TaskHandler {
         ? { fieldConfidence: signals.fieldConfidence }
         : {}),
       ...(signals.markers.length > 0 ? { markers: signals.markers } : {}),
+      ...(appliedStandingInstructions.length > 0 ? { appliedStandingInstructions } : {}),
     };
     payload._meta = meta;
 

@@ -15,6 +15,10 @@ import {
   decideEstimateClarification,
   EstimateDraftSignals,
 } from '../clarification/estimate-clarification';
+import {
+  buildStandingInstructionsSection,
+  intersectAppliedStandingInstructions,
+} from '../standing-instructions-context';
 
 /**
  * Story 7.2 — confidence ceiling for a draft that still has open clarifications
@@ -98,12 +102,26 @@ export class EstimateTaskHandler implements TaskHandler {
   async handle(context: TaskContext): Promise<TaskResult> {
     const userMessage = this.buildUserMessage(context);
 
+    // UB-A3 — owner standing instructions ride a SEPARATE, delimited system
+    // message (mirroring the classifier's vertical-context injection) so the
+    // base prompt stays byte-identical when none apply. Content-only: the
+    // section itself forbids approval/confidence/schema/pricing overrides.
+    const systemMessages: Array<{ role: 'system'; content: string }> = [
+      { role: 'system', content: ESTIMATE_SYSTEM_PROMPT },
+    ];
+    const injectedInstructions = context.standingInstructions ?? [];
+    if (injectedInstructions.length > 0) {
+      systemMessages.push({
+        role: 'system',
+        content: buildStandingInstructionsSection(injectedInstructions, {
+          requestAppliedIds: true,
+        }),
+      });
+    }
+
     const llmResponse = await this.gateway.complete({
       taskType: 'draft_estimate',
-      messages: [
-        { role: 'system', content: ESTIMATE_SYSTEM_PROMPT },
-        { role: 'user', content: userMessage },
-      ],
+      messages: [...systemMessages, { role: 'user', content: userMessage }],
       responseFormat: 'json',
     });
 
@@ -199,6 +217,13 @@ export class EstimateTaskHandler implements TaskHandler {
         : [],
       'unitPrice',
     );
+    // UB-A3 — applied-instruction marker: the model's claimed ids are
+    // INTERSECTED with what was injected (never trust invented ids) and the
+    // field is dropped entirely when empty.
+    const appliedStandingInstructions = intersectAppliedStandingInstructions(
+      parsed?.appliedStandingInstructions,
+      injectedInstructions,
+    );
     const meta: ProposalConfidenceMeta = {
       // Hard-block auto-approval for any ungrounded (LLM-priced) line via the
       // RV-007 confidence-marker guard — independent of the numeric score AND
@@ -212,6 +237,7 @@ export class EstimateTaskHandler implements TaskHandler {
         ? { fieldConfidence: signals.fieldConfidence }
         : {}),
       ...(signals.markers.length > 0 ? { markers: signals.markers } : {}),
+      ...(appliedStandingInstructions.length > 0 ? { appliedStandingInstructions } : {}),
     };
     payload._meta = meta;
 

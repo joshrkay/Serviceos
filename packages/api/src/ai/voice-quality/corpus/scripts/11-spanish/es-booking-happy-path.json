@@ -1,0 +1,57 @@
+{
+  "id": "es-booking-happy-path",
+  "bucket": "11-spanish",
+  "callerId": "+15555551101",
+  "callerIdBlocked": false,
+  "fixtures": {
+    "tenant": {
+      "id": "t_11_es_booking",
+      "display_name": "Test HVAC Co",
+      "timezone": "America/Los_Angeles",
+      "default_language": "es",
+      "supported_languages": ["en", "es"]
+    },
+    "customers": [
+      {
+        "id": "cust_11_es_maria",
+        "tenantId": "t_11_es_booking",
+        "firstName": "María",
+        "lastName": "González",
+        "displayName": "María González",
+        "companyName": null,
+        "primaryPhone": "+15555551101",
+        "secondaryPhone": null,
+        "email": "maria.gonzalez@example.com",
+        "preferredChannel": "phone",
+        "preferredLanguage": "es",
+        "smsConsent": false,
+        "communicationNotes": null,
+        "isArchived": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-02-01T10:00:00.000Z",
+        "updatedAt": "2026-04-01T10:00:00.000Z"
+      }
+    ]
+  },
+  "turns": [
+    {
+      "caller": "Hola, buenas tardes, habla María González. Quisiera agendar una cita de servicio para el martes a las dos de la tarde, por favor.",
+      "expected": {
+        "intent": "create_appointment",
+        "proposalType": "create_appointment",
+        "slots": {
+          "customerId": "cust_11_es_maria",
+          "scheduledStart": "2026-05-12T21:00:00.000Z"
+        },
+        "spokenAnswerMatches": "He preparado una cita de servicio para el martes 12 de mayo a las 2 de la tarde; un operador la confirmará antes de reservarla.",
+        "escalates": false
+      },
+      "hangupAfter": false
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 3, 4, 5, 6, 7, 8],
+    "appliesDisposition": [9, 10, 11, 12]
+  },
+  "layer2Eligible": false
+}

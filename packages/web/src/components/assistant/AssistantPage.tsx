@@ -14,6 +14,7 @@ import { type Message, type AIProposal } from '../../data/mock-data';
 import { AIProposalCard } from '../shared/AIProposalCard';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useTTS } from '../../hooks/useTTS';
+import { useConversationVoice } from '../../hooks/useConversationVoice';
 
 interface ApiMessage {
   id: string;
@@ -65,6 +66,7 @@ async function sendToConversationAPI(
   conversationId: string | null,
   text: string,
   history: Array<{ role: 'user' | 'assistant'; content: string }>,
+  inputMode?: 'voice',
 ): Promise<{ content: string; reasoning?: string; proposal?: AIProposal; autoApplied?: boolean; newConversationId?: string; failed?: boolean }> {
   try {
     // AST-01b: chat → /api/assistant/chat. The server runs intent
@@ -73,12 +75,15 @@ async function sendToConversationAPI(
     // text. Everything else falls through to the generic LLM reply.
     // Story 3.11 — pin the running conversation so each turn persists to the
     // same thread (server opens one on the first turn and echoes its id).
+    // UB-B3 — voice-originating turns carry inputMode so the server can
+    // refuse voice approval intents deterministically.
     const res = await apiFetch('/api/assistant/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         messages: [...history, { role: 'user', content: text }],
         ...(conversationId ? { conversationId } : {}),
+        ...(inputMode ? { inputMode } : {}),
       }),
     });
 
@@ -747,6 +752,10 @@ export function AssistantPage() {
   const [ttsEnabled, setTtsEnabled]   = useState(() => localStorage.getItem('rivet:tts-enabled') === 'true');
   const { speak, stop: stopTTS, isSpeaking } = useTTS({ rate: 1.0 });
   const lastInputWasVoiceRef = useRef(false);
+  // UB-B2 — conversation mode. Populated after `send` is defined (the hook
+  // needs `send`; `send` needs the session to speak replies through the
+  // conversation's TTS so barge-in can cut them off).
+  const conversationRef = useRef<{ active: boolean; speak: (text: string) => void } | null>(null);
 
   const endRef    = useRef<HTMLDivElement>(null);
   const inputRef  = useRef<HTMLTextAreaElement>(null);
@@ -758,20 +767,30 @@ export function AssistantPage() {
   const { data: conversation, isLoading: convLoading, error: convError } =
     useDetailQuery<ApiConversation>('/api/conversations', conversationId);
 
-  // Seed messages from API — show empty state if no conversation exists yet
+  // Seed messages from API — show the welcome bubble if no conversation
+  // exists yet. Journey QA 2026-07-02 (bug 11): this effect re-runs right
+  // after every turn (the reply pins newConversationId → refetch), and it
+  // used to REPLACE local state unconditionally — a server response with an
+  // empty/partial thread wiped the reply the user was reading. Defensive
+  // rule (belt-and-braces with the API fix that now returns `messages`):
+  // only adopt the server thread when it is AHEAD of what's on screen;
+  // never downgrade local messages to an emptier server copy.
   useEffect(() => {
     if (convLoading) return;
-    if (conversation?.messages?.length) {
-      setMessages(conversation.messages.map(mapApiMessage));
-    } else {
-      // No mock data — start with an empty conversation or a welcome message
-      setMessages([{
+    const serverMessages = conversation?.messages ?? [];
+    setMessages((prev) => {
+      const localTurns = prev.filter((m) => m.id !== 'welcome');
+      if (serverMessages.length > localTurns.length) {
+        return serverMessages.map(mapApiMessage);
+      }
+      if (localTurns.length > 0) return prev;
+      return [{
         id: 'welcome',
         role: 'assistant' as const,
         content: welcomeMessage,
         time: new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }),
-      }]);
-    }
+      }];
+    });
   }, [convLoading, conversation, convError, welcomeMessage]);
 
   // Auto-submit from voice bar ?q= param
@@ -825,7 +844,12 @@ export function AssistantPage() {
     setTypingReason('Thinking…');
 
     try {
-      const reply = await sendToConversationAPI(conversationId, text, history);
+      const reply = await sendToConversationAPI(
+        conversationId,
+        text,
+        history,
+        opts?.inputMode === 'voice' ? 'voice' : undefined,
+      );
 
       // Story 3.11 — pin the server's conversation id so the next turn appends
       // to the same persisted thread (and survives reload).
@@ -850,8 +874,12 @@ export function AssistantPage() {
         setFailedSend({ text, opts });
       }
 
-      // Speak the response if TTS enabled or input was via voice
-      if ((ttsEnabled || lastInputWasVoiceRef.current) && reply.content) {
+      // Speak the response. In conversation mode the reply goes through the
+      // session's TTS (markdown stripped, barge-in interruptible); otherwise
+      // keep the existing behavior (TTS toggle or voice-note input).
+      if (conversationRef.current?.active && reply.content) {
+        conversationRef.current.speak(reply.content);
+      } else if ((ttsEnabled || lastInputWasVoiceRef.current) && reply.content) {
         speak(reply.content);
       }
     } catch {
@@ -869,6 +897,15 @@ export function AssistantPage() {
       setTypingReason('');
     }
   }, [conversationId, ttsEnabled, speak]);
+
+  // UB-B2 — conversational voice session: continuous STT, per-utterance
+  // auto-submit through the SAME chat path as typed input (inputMode: 'voice'
+  // rides the request so the server's voice-approval guard applies), spoken
+  // replies, barge-in, 60s silence timeout.
+  const voiceConversation = useConversationVoice({
+    onSubmit: (text) => { void send(text, { inputMode: 'voice' }); },
+  });
+  conversationRef.current = voiceConversation;
 
   const retryFailed = useCallback(() => {
     if (!failedSend) return;
@@ -946,6 +983,21 @@ export function AssistantPage() {
             >
               {ttsEnabled ? <Volume2 size={12} /> : <VolumeX size={12} />}
               {isSpeaking && <span className="size-1.5 rounded-full bg-indigo-400 animate-pulse" />}
+            </button>
+            {/* UB-B2 — conversation-mode toggle (≥44px tap target) */}
+            <button
+              onClick={() => (voiceConversation.active ? voiceConversation.stop() : void voiceConversation.start())}
+              title={voiceConversation.active ? 'End conversation mode' : 'Start conversation mode'}
+              aria-pressed={voiceConversation.active}
+              disabled={!voiceConversation.supported}
+              className={`flex items-center gap-1.5 min-h-11 rounded-lg border px-3 text-xs transition-colors disabled:opacity-40 ${
+                voiceConversation.active
+                  ? 'border-green-300 bg-green-50 text-green-700'
+                  : 'border-slate-200 bg-white text-slate-500 hover:bg-slate-50'
+              }`}
+            >
+              <Mic size={12} /> {voiceConversation.active ? 'Listening' : 'Conversation'}
+              {voiceConversation.active && <span className="size-1.5 rounded-full bg-green-500 animate-pulse" />}
             </button>
             <button
               onClick={() => setLiveSessionOpen(v => !v)}
@@ -1061,6 +1113,24 @@ export function AssistantPage() {
       ) : (
         <div className="shrink-0 bg-white border-t border-slate-100 px-4 md:px-6 py-3">
           <div className="max-w-3xl mx-auto">
+
+            {/* UB-B2 — live partial transcript while conversation mode listens */}
+            {voiceConversation.active && (
+              <div
+                data-testid="conversation-live-partial"
+                className="flex items-center gap-2 mb-2 rounded-xl border border-green-200 bg-green-50 px-3 py-2.5"
+              >
+                <Mic size={13} className="text-green-600 shrink-0" />
+                <span className="text-sm text-green-800 italic truncate">
+                  {voiceConversation.partial || 'Listening…'}
+                </span>
+                {voiceConversation.isSpeaking && (
+                  <span className="ml-auto flex items-center gap-1 text-xs text-green-600 shrink-0">
+                    <Volume2 size={12} /> Speaking — talk to interrupt
+                  </span>
+                )}
+              </div>
+            )}
 
             {/* Pending attachment preview */}
             {pendingAttachment && pendingAttachment.length > 0 && (

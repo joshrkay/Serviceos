@@ -84,6 +84,8 @@ import {
 import { dispatchEstimateNudge } from '../../estimates/estimate-nudge';
 import type { SendService } from '../../notifications/send-service';
 import type { DispatchRepository } from '../../notifications/dispatch-repository';
+import { CreateStandingInstructionExecutionHandler } from './standing-instruction-handler';
+import type { StandingInstructionRepository } from '../../instructions/standing-instructions';
 
 export interface ExecutionContext {
   tenantId: string;
@@ -507,57 +509,80 @@ function isPricingSource(value: unknown): value is PricingSource {
 }
 
 /**
- * Normalize a draft_estimate payload's line items into the billing engine's
- * `LineItem` shape.
+ * Normalize AI-drafted line items (contracts.ts `lineItemSchema`:
+ * `{description, quantity, unitPrice? | unitPriceCents?, …}` — no `totalCents`,
+ * no `id`/`sortOrder`/`taxable`) into the billing engine's `LineItem` shape.
  *
- * The estimate task emits the contract's `unitPrice` field (integer cents) and
- * does NOT set `unitPriceCents`, `totalCents`, `sortOrder`, or `taxable`.
- * Blind-casting `payload.lineItems as LineItem[]` therefore produced items with
- * `unitPriceCents`/`totalCents` = undefined, which made `calculateDocumentTotals`
- * return NaN and the estimate INSERT fail its NOT NULL columns — every approved
- * AI estimate broke at execution. Map each field explicitly here (mirrors the
- * invoice task, which already normalizes to `unitPriceCents` upstream).
+ * Journey QA 2026-07-02 (bug 10): the executor previously blind-cast the
+ * payload to `LineItem[]`, so a drafted line without `totalCents` produced
+ * NaN totals and the approved proposal died in Postgres with
+ * `invalid input syntax for type integer: "NaN"`.
+ *
+ * - `totalCents` is derived from `quantity × unitPriceCents` when absent.
+ * - `unitPrice` (the estimate-draft emitter's field, integer cents) is
+ *   accepted as a fallback for `unitPriceCents`.
+ * - A line that cannot be priced/parsed is reported in `malformed` with a
+ *   human-readable reason — callers fail the execution with that reason
+ *   instead of silently dropping money lines or writing NaN.
+ * - Preserves catalog-grounding + tier metadata (pricingSource, groupKey,
+ *   groupLabel, isOptional, isDefaultSelected) from main's normalizeEstimateLineItems.
  */
-export function normalizeEstimateLineItems(
-  rawLineItems: Array<Record<string, unknown>>,
-): LineItem[] {
-  return rawLineItems.map((li, idx) => {
-    const quantity = typeof li.quantity === 'number' && li.quantity > 0 ? li.quantity : 1;
-    // Prefer an already-normalized `unitPriceCents`; fall back to the estimate
-    // contract's `unitPrice` (also integer cents).
-    const rawPrice =
-      typeof li.unitPriceCents === 'number'
-        ? li.unitPriceCents
-        : typeof li.unitPrice === 'number'
-          ? li.unitPrice
-          : NaN;
-    if (!Number.isFinite(rawPrice) || rawPrice < 0) {
-      throw new ValidationError(
-        `Line item "${String(li.description ?? '')}" is missing a valid price`,
-      );
+export function normalizeDraftLineItems(raw: unknown[]): {
+  lineItems: LineItem[];
+  malformed: string[];
+} {
+  const lineItems: LineItem[] = [];
+  const malformed: string[] = [];
+
+  raw.forEach((entry, index) => {
+    const label = `Line ${index + 1}`;
+    if (typeof entry !== 'object' || entry === null) {
+      malformed.push(`${label} is not an object`);
+      return;
     }
+    const li = entry as Record<string, unknown>;
+    const description = typeof li.description === 'string' ? li.description.trim() : '';
+    if (!description) {
+      malformed.push(`${label} is missing a description`);
+      return;
+    }
+    const quantity =
+      typeof li.quantity === 'number' && Number.isFinite(li.quantity) && li.quantity > 0
+        ? li.quantity
+        : undefined;
+    if (quantity === undefined) {
+      malformed.push(`${label} ("${description}") has no valid quantity`);
+      return;
+    }
+    const rawPrice =
+      typeof li.unitPriceCents === 'number' && Number.isFinite(li.unitPriceCents)
+        ? li.unitPriceCents
+        : typeof li.unitPrice === 'number' && Number.isFinite(li.unitPrice)
+          ? li.unitPrice
+          : undefined;
+    if (rawPrice === undefined || rawPrice < 0) {
+      malformed.push(`${label} ("${description}") has no usable unit price`);
+      return;
+    }
+    const unitPriceCents = Math.round(rawPrice);
+    const totalCents =
+      typeof li.totalCents === 'number' && Number.isFinite(li.totalCents)
+        ? Math.round(li.totalCents)
+        : Math.round(quantity * unitPriceCents);
+
     const rawCategory = typeof li.category === 'string' ? li.category.toLowerCase() : '';
-    const category = VALID_LINE_ITEM_CATEGORIES.includes(rawCategory as LineItemCategory)
-      ? (rawCategory as LineItemCategory)
-      : undefined;
-    const id = typeof li.id === 'string' && li.id ? li.id : uuidv4();
-    const base = buildLineItem(
-      id,
-      typeof li.description === 'string' && li.description ? li.description : 'Service',
+
+    lineItems.push({
+      id: typeof li.id === 'string' && li.id.length > 0 ? li.id : uuidv4(),
+      description,
       quantity,
-      Math.round(rawPrice),
-      idx,
-      // Estimate line items carry no `taxable` flag; default to non-taxable
-      // (matches the invoice draft path). The human reviewer sets tax on approve.
-      typeof li.taxable === 'boolean' ? li.taxable : false,
-      category,
-    );
-    // Preserve catalog-grounding + tier metadata that buildLineItem doesn't
-    // set. Dropping `pricingSource` would make a catalog-priced AI estimate
-    // persist as ungrounded (isEstimateCatalogGrounded treats null as NOT
-    // grounded), forcing the manual discount-negotiation path.
-    return {
-      ...base,
+      unitPriceCents,
+      totalCents,
+      sortOrder: lineItems.length,
+      taxable: typeof li.taxable === 'boolean' ? li.taxable : true,
+      ...(VALID_LINE_ITEM_CATEGORIES.includes(rawCategory as LineItemCategory)
+        ? { category: rawCategory as LineItemCategory }
+        : {}),
       ...(isPricingSource(li.pricingSource) ? { pricingSource: li.pricingSource } : {}),
       ...(typeof li.groupKey === 'string' ? { groupKey: li.groupKey } : {}),
       ...(typeof li.groupLabel === 'string' ? { groupLabel: li.groupLabel } : {}),
@@ -565,8 +590,10 @@ export function normalizeEstimateLineItems(
       ...(typeof li.isDefaultSelected === 'boolean'
         ? { isDefaultSelected: li.isDefaultSelected }
         : {}),
-    };
+    });
   });
+
+  return { lineItems, malformed };
 }
 
 export class DraftEstimateExecutionHandler implements ExecutionHandler {
@@ -575,21 +602,46 @@ export class DraftEstimateExecutionHandler implements ExecutionHandler {
   constructor(
     private readonly estimateRepo?: EstimateRepository,
     private readonly settingsRepo?: SettingsRepository,
+    // Journey QA 2026-07-02 (bug 10) — voice/assistant-drafted payloads carry a
+    // customerId but often no jobId (jobId is optional in
+    // draftEstimatePayloadSchema), while the estimate domain requires a job
+    // container. When these two repos are wired the handler opens a job for
+    // the customer (mirroring CreateJobExecutionHandler's location fallback)
+    // instead of refusing the canonical drafted payload.
+    private readonly jobRepo?: JobRepository,
+    private readonly locationRepo?: LocationRepository,
+    private readonly auditRepo?: AuditRepository,
   ) {}
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const { payload } = proposal;
-    if (!payload.customerId || typeof payload.customerId !== 'string') {
-      return { success: false, error: 'Payload must include a valid customerId' };
-    }
-    if (!payload.jobId || typeof payload.jobId !== 'string') {
+    const customerId =
+      typeof payload.customerId === 'string' && payload.customerId.length > 0
+        ? payload.customerId
+        : undefined;
+    let jobId =
+      typeof payload.jobId === 'string' && payload.jobId.length > 0 ? payload.jobId : undefined;
+    if (!customerId && !jobId) {
       return {
         success: false,
-        error: 'Estimate requires a jobId — pick a job before drafting',
+        error:
+          'Estimate draft has neither a customerId nor a jobId — link a customer before approving',
       };
     }
     if (!Array.isArray(payload.lineItems) || payload.lineItems.length === 0) {
       return { success: false, error: 'Payload must include at least one lineItem' };
+    }
+    const { lineItems, malformed } = normalizeDraftLineItems(payload.lineItems);
+    if (malformed.length > 0) {
+      return {
+        success: false,
+        error: `Estimate draft has line items that can't be priced: ${malformed.join('; ')}`,
+      };
+    }
+    const validUntil =
+      typeof payload.validUntil === 'string' ? new Date(payload.validUntil) : undefined;
+    if (validUntil && isNaN(validUntil.getTime())) {
+      return { success: false, error: 'Payload contains an invalid validUntil date' };
     }
 
     if (proposal.resultEntityId) {
@@ -601,23 +653,50 @@ export class DraftEstimateExecutionHandler implements ExecutionHandler {
     }
 
     try {
-      const estimateNumber = await getNextEstimateNumber(context.tenantId, this.settingsRepo);
-      const validUntil =
-        typeof payload.validUntil === 'string' ? new Date(payload.validUntil) : undefined;
-      if (validUntil && isNaN(validUntil.getTime())) {
-        return { success: false, error: 'Payload contains an invalid validUntil date' };
+      // Estimates require a job container (estimate.ts validateEstimateInput).
+      // A drafted payload without one gets a job opened for the customer.
+      if (!jobId) {
+        if (!this.jobRepo || !this.locationRepo) {
+          return {
+            success: false,
+            error:
+              'Estimate draft has no jobId and job auto-creation is not configured — pick a job before approving',
+          };
+        }
+        const locations = await this.locationRepo.findByCustomer(context.tenantId, customerId!);
+        const location =
+          locations.find((loc) => loc.isPrimary && !loc.isArchived) ??
+          locations.find((loc) => !loc.isArchived);
+        if (!location) {
+          return {
+            success: false,
+            error: 'Customer has no service location — add one before approving this estimate',
+          };
+        }
+        const job = await createJob(
+          {
+            tenantId: context.tenantId,
+            customerId: customerId!,
+            locationId: location.id,
+            summary:
+              typeof payload.summary === 'string' && payload.summary.trim().length > 0
+                ? payload.summary.trim()
+                : proposal.summary || lineItems[0].description,
+            createdBy: context.executedBy,
+          },
+          this.jobRepo,
+          this.auditRepo,
+        );
+        jobId = job.id;
       }
+
+      const estimateNumber = await getNextEstimateNumber(context.tenantId, this.settingsRepo);
 
       const input: CreateEstimateInput = {
         tenantId: context.tenantId,
-        jobId: payload.jobId,
+        jobId,
         estimateNumber,
-        // Normalize `unitPrice` → `unitPriceCents` + compute `totalCents`/
-        // `sortOrder`/`taxable`; a blind cast left these undefined and broke
-        // total computation + the NOT NULL insert.
-        lineItems: normalizeEstimateLineItems(
-          payload.lineItems as Array<Record<string, unknown>>,
-        ),
+        lineItems,
         discountCents:
           typeof payload.discountCents === 'number' ? payload.discountCents : undefined,
         taxRateBps: typeof payload.taxRateBps === 'number' ? payload.taxRateBps : undefined,
@@ -632,7 +711,7 @@ export class DraftEstimateExecutionHandler implements ExecutionHandler {
               : undefined,
         createdBy: context.executedBy,
       };
-      const estimate = await createEstimate(input, this.estimateRepo);
+      const estimate = await createEstimate(input, this.estimateRepo, this.auditRepo);
       return { success: true, resultEntityId: estimate.id };
     } catch (err) {
       return {
@@ -824,6 +903,9 @@ export function createExecutionHandlerRegistry(deps?: {
   // documented on the handler.
   sendService?: Pick<SendService, 'sendEstimate'>;
   dispatchRepo?: DispatchRepository;
+  // UB-A2 — create_standing_instruction inserts via the UB-A1 repo.
+  // Absent → the handler degrades to a synthetic-id passthrough.
+  standingInstructionRepo?: StandingInstructionRepository;
 }): Map<ProposalType, ExecutionHandler> {
   // §6 Time-to-Cash. Built once; passed to the handlers that call the
   // widened money-mutation domain functions (recordPayment, issueInvoice).
@@ -848,7 +930,13 @@ export function createExecutionHandlerRegistry(deps?: {
     new CreateJobExecutionHandler(deps?.jobRepo, deps?.locationRepo, deps?.auditRepo),
     new CreateAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.schedulingNotifier, deps?.auditRepo, deps?.jobRepo),
     new CreateBookingExecutionHandler(deps?.appointmentRepo, deps?.auditRepo),
-    new DraftEstimateExecutionHandler(deps?.estimateRepo, deps?.settingsRepo),
+    new DraftEstimateExecutionHandler(
+      deps?.estimateRepo,
+      deps?.settingsRepo,
+      deps?.jobRepo,
+      deps?.locationRepo,
+      deps?.auditRepo,
+    ),
     new CreateInvoiceExecutionHandler(deps?.invoiceRepo, deps?.settingsRepo, deps?.auditRepo),
     new CreateInvoiceScheduleExecutionHandler(deps?.scheduleRepo, deps?.invoiceRepo, deps?.settingsRepo, deps?.estimateRepo),
     new BatchInvoiceExecutionHandler(deps?.proposalRepo),
@@ -932,6 +1020,14 @@ export function createExecutionHandlerRegistry(deps?: {
     // path; degrades to a synthetic-id passthrough when comms is absent.
     new SendPaymentReminderExecutionHandler(
       deps?.transactionalComms,
+      deps?.auditRepo,
+    ),
+    // UB-A2 — create_standing_instruction: inserts the approved directive via
+    // the UB-A1 domain service (500-char cap, scope validation, 20-active
+    // cap, standing_instruction.created audit). Capture-class, but the voice
+    // task never passes a trust tier, so it only ever runs after a human tap.
+    new CreateStandingInstructionExecutionHandler(
+      deps?.standingInstructionRepo,
       deps?.auditRepo,
     ),
   ];

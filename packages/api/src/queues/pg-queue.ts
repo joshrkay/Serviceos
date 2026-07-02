@@ -1,6 +1,6 @@
 import { Pool } from 'pg';
 import { PgBaseRepository } from '../db/pg-base';
-import { Queue, QueueConfig, QueueMessage, DeadLetterEntry, redactForSink, toEnvelopeMeta } from './queue';
+import { Queue, QueueConfig, QueueMessage, DeadLetterEntry, SendOptions, redactForSink, toEnvelopeMeta } from './queue';
 import { randomUUID } from 'crypto';
 
 /**
@@ -62,16 +62,25 @@ export class PgQueue extends PgBaseRepository implements Queue {
     }
   }
 
-  async send<T>(type: string, payload: T, idempotencyKey?: string): Promise<string> {
+  async send<T>(
+    type: string,
+    payload: T,
+    idempotencyKey?: string,
+    options?: SendOptions,
+  ): Promise<string> {
     return this.withClient(async (client) => {
       await this.ensureTable(client);
       const id = randomUUID();
       const key = idempotencyKey ?? id;
+      // Delayed delivery (UC-5 durable timers): visible_at = NOW() + delay so
+      // receive/receiveBatch skip the row until the delay elapses. Delay 0 is
+      // the pre-existing immediate path.
+      const delaySeconds = Math.max(0, options?.delaySeconds ?? 0);
       await client.query(
         `INSERT INTO _queue_messages (id, type, payload, attempts, max_attempts, idempotency_key, visible_at, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
+         VALUES ($1, $2, $3, $4, $5, $6, NOW() + ($7 || ' seconds')::interval, NOW())
          ON CONFLICT (idempotency_key) DO NOTHING`,
-        [id, type, JSON.stringify(payload), 0, this.config.maxRetries, key]
+        [id, type, JSON.stringify(payload), 0, this.config.maxRetries, key, String(delaySeconds)]
       );
       return id;
     });

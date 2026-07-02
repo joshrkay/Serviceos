@@ -67,6 +67,15 @@ export function _resetMeCacheForTests(): void {
   cachedMePromise = null;
 }
 
+/**
+ * Shared cached /api/me read for non-hook consumers (e.g. the
+ * TenantTimezoneProvider) so they piggyback on the same module cache
+ * instead of issuing their own duplicate GET /api/me per mount.
+ */
+export function fetchMeShared(client: AuthedFetch): Promise<MeResponse> {
+  return loadOrReuse(client);
+}
+
 export function useMe(): UseMeResult {
   const client = useApiClient() as AuthedFetch;
   const [me, setMe] = useState<MeResponse | null>(null);

@@ -130,4 +130,26 @@ export class PgReviewRepository
       return result.rows.length > 0 ? mapRow(result.rows[0]) : null;
     });
   }
+
+  async findRecent(
+    tenantId: string,
+    opts: { maxRating?: number; limit: number; since?: Date },
+  ): Promise<Review[]> {
+    // U3 — bounded in SQL (WHERE + ORDER BY review_create_time DESC + LIMIT)
+    // so the voice path never pulls a tenant's full review history. The
+    // optional filters compose via "param IS NULL OR …" so one statement
+    // covers every shape (stated star count / default low-rating window).
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query<ReviewRow>(
+        `SELECT * FROM google_reviews
+          WHERE tenant_id = $1
+            AND ($2::int IS NULL OR rating <= $2)
+            AND ($3::timestamptz IS NULL OR review_create_time >= $3)
+          ORDER BY review_create_time DESC
+          LIMIT $4`,
+        [tenantId, opts.maxRating ?? null, opts.since ?? null, opts.limit],
+      );
+      return result.rows.map(mapRow);
+    });
+  }
 }

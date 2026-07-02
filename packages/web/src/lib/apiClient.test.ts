@@ -74,6 +74,68 @@ async function triggerRedirect(): Promise<string> {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * Journey QA 2026-07-02 (bug 1) — Content-Type injection must be
+ * case-insensitive. A caller passing lowercase 'content-type' previously got
+ * BOTH keys; fetch merged them into "application/json, application/json" and
+ * Express dropped the JSON body, so inbox batch approvals always 400'd.
+ */
+describe('useApiClient — single Content-Type on outgoing requests', () => {
+  /** Fire a request through the hook and return the headers fetch received. */
+  async function capturedHeaders(init: RequestInit): Promise<Record<string, string>> {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue({ ok: true, status: 200 } as Response);
+    const { result } = renderHook(() => useApiClient());
+    await waitFor(() => expect(result.current).toBeDefined());
+    await result.current('/api/proposals/approve-batch', init);
+    const headers = fetchSpy.mock.calls[0]?.[1]?.headers as Record<string, string>;
+    return headers ?? {};
+  }
+
+  function contentTypeKeys(headers: Record<string, string>): string[] {
+    return Object.keys(headers).filter((k) => k.toLowerCase() === 'content-type');
+  }
+
+  it('lowercase caller header: does NOT add a duplicate Content-Type', async () => {
+    const headers = await capturedHeaders({
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ proposalIds: ['p-1'] }),
+    });
+    expect(contentTypeKeys(headers)).toEqual(['content-type']);
+    expect(headers['content-type']).toBe('application/json');
+  });
+
+  it('canonical-case caller header: keeps exactly one Content-Type', async () => {
+    const headers = await capturedHeaders({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ proposalIds: ['p-1'] }),
+    });
+    expect(contentTypeKeys(headers)).toEqual(['Content-Type']);
+    expect(headers['Content-Type']).toBe('application/json');
+  });
+
+  it('mixed-case caller header (CONTENT-TYPE) also suppresses injection', async () => {
+    const headers = await capturedHeaders({
+      method: 'POST',
+      headers: { 'CONTENT-TYPE': 'application/json' },
+      body: '{"a":1}',
+    });
+    expect(contentTypeKeys(headers)).toEqual(['CONTENT-TYPE']);
+  });
+
+  it('no caller header + string body: injects application/json once', async () => {
+    const headers = await capturedHeaders({
+      method: 'POST',
+      body: '{"a":1}',
+    });
+    expect(contentTypeKeys(headers)).toEqual(['Content-Type']);
+    expect(headers['Content-Type']).toBe('application/json');
+  });
+});
+
 describe('P20-003 redirectToLogin — URL construction', () => {
   it(
     'P20-003 (a): preserves pathname + query string in the redirect param',

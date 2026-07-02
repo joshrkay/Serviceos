@@ -468,6 +468,69 @@ describe('P0-024 — tenant-context middleware (withTenantTransaction)', () => {
     expect(calls.some((c) => /^\s*BEGIN/i.test(c.sql))).toBe(true);
   });
 
+  it('UC-2 LLM-long-call bypass — POST /assistant/chat holds no request transaction and stashes no ALS client', async () => {
+    // The assistant chat handler awaits the LLM gateway call; holding the
+    // request transaction across it pins a pooled connection (and under
+    // PgBouncer a server backend) for the whole call. The middleware skips
+    // the transaction for the explicit method+path allowlist; repos on this
+    // route self-manage short SET LOCAL transactions (U2b-2) with an
+    // explicit tenantId — the same contract as the voice worker path.
+    const { pool, calls } = makeMockPool();
+    let sawTenant: string | undefined;
+    let storeAtHandler: unknown = 'unset';
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: 'u1', sessionId: 's1', tenantId: TENANT_A, role: 'owner',
+      };
+      next();
+    });
+    app.use('/api', withTenantTransaction(pool));
+    app.post('/api/assistant/chat', (req, res) => {
+      sawTenant = (req as AuthenticatedRequest).auth?.tenantId;
+      // What a repo would see mid-"LLM call": no request-scoped client.
+      storeAtHandler = currentTenantContext();
+      res.json({ ok: true });
+    });
+
+    const response = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'hi' }] });
+
+    expect(response.status).toBe(200);
+    // Tenant still enforced/available to the handler …
+    expect(sawTenant).toBe(TENANT_A);
+    // … but no ALS client is stashed, no connection checked out, no BEGIN.
+    expect(storeAtHandler).toBeUndefined();
+    const connectCount = (pool.connect as unknown as ReturnType<typeof vi.fn>).mock.calls
+      .length;
+    expect(connectCount).toBe(0);
+    expect(calls.some((c) => /^\s*BEGIN/i.test(c.sql))).toBe(false);
+  });
+
+  it('UC-2 bypass is method-anchored — GET /assistant/chat still opens the transaction', async () => {
+    const { pool, calls } = makeMockPool();
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: 'u1', sessionId: 's1', tenantId: TENANT_A, role: 'owner',
+      };
+      next();
+    });
+    app.use('/api', withTenantTransaction(pool));
+    app.get('/api/assistant/chat', (_req, res) => res.json({ ok: true }));
+
+    const response = await request(app).get('/api/assistant/chat');
+
+    expect(response.status).toBe(200);
+    const connectCount = (pool.connect as unknown as ReturnType<typeof vi.fn>).mock.calls
+      .length;
+    expect(connectCount).toBe(1);
+    expect(calls.some((c) => /^\s*BEGIN/i.test(c.sql))).toBe(true);
+  });
+
   it('rollback on response close before finish', async () => {
     // Simulate a client disconnect: emit `close` without `finish`.
     const { pool, calls } = makeMockPool();

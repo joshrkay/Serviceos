@@ -333,3 +333,47 @@ describe('SchedulePage', () => {
     expect(screen.queryByText(/Couldn't load/)).not.toBeInTheDocument();
   });
 });
+
+// ─── Journey QA 2026-07-02 (bug 4): appointment times post in TENANT tz ──────
+
+import { TenantTimezoneProvider } from '../../hooks/useTenantTimezone';
+
+describe('journey QA bug 4 — new appointment posts tenant-tz-converted UTC', () => {
+  it('14:00 entered for a New-York tenant posts 18:00Z (EDT), not 14:00Z', async () => {
+    render(
+      <MemoryRouter>
+        <TenantTimezoneProvider overrideTimezone="America/New_York">
+          <SchedulePage />
+        </TenantTimezoneProvider>
+      </MemoryRouter>,
+    );
+    await screen.findByText('Alice Smith');
+
+    fireEvent.click(screen.getByRole('button', { name: /new appointment/i }));
+    fireEvent.change(screen.getByPlaceholderText('paste job UUID'), {
+      target: { value: 'j1' },
+    });
+    const timeInputs = document.querySelectorAll('input[type="time"]');
+    fireEvent.change(timeInputs[0], { target: { value: '14:00' } });
+    fireEvent.change(timeInputs[1], { target: { value: '16:00' } });
+    fireEvent.click(screen.getByRole('button', { name: /create appointment/i }));
+
+    await waitFor(() => {
+      expect(
+        vi
+          .mocked(apiFetch)
+          .mock.calls.some(([url, init]) => url === '/api/appointments' && init?.method === 'POST'),
+      ).toBe(true);
+    });
+    const [, init] = vi
+      .mocked(apiFetch)
+      .mock.calls.find(([url, i]) => url === '/api/appointments' && i?.method === 'POST')!;
+    const body = JSON.parse(String(init!.body));
+
+    // May 2025 is EDT (UTC-4): 14:00 tenant wall clock = 18:00Z.
+    expect(new Date(body.scheduledStart).getUTCHours()).toBe(18);
+    expect(new Date(body.scheduledEnd).getUTCHours()).toBe(20);
+    // The appointment's tz field carries the TENANT tz, not the browser's.
+    expect(body.timezone).toBe('America/New_York');
+  });
+});

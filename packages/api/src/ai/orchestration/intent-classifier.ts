@@ -50,6 +50,26 @@ export type IntentType =
   | 'log_time_entry'
   | 'notify_delay'
   | 'request_feedback'
+  // Taxonomy 1.2.0 (agent wave, Track A) — three proposal-driving on-ramps:
+  //   create_invoice_schedule    — U2: milestone/progress billing plan for a
+  //                                job; the verbatim milestone sentence rides
+  //                                extractedEntities.scheduleDescription and a
+  //                                deterministic parser (invoices/
+  //                                milestone-sentence-parser.ts) turns it into
+  //                                typed milestones — never the LLM.
+  //   respond_to_review          — U3: owner asks to reply to a customer
+  //                                review; the free-text review reference rides
+  //                                extractedEntities.reviewReference and is
+  //                                resolved against recent google_reviews rows
+  //                                (ambiguity → voice_clarification).
+  //   create_standing_instruction — UB-A2: "from now on…"/"always…" persistent
+  //                                directives; extractedEntities.instructionText
+  //                                carries the verbatim rule. The instruction
+  //                                itself ALWAYS lands for review (the task
+  //                                handler omits sourceTrustTier).
+  | 'create_invoice_schedule'
+  | 'respond_to_review'
+  | 'create_standing_instruction'
   // P11-001: voice lookup-skill family. Read-only intents — the
   // adapter routes these straight to the `lookup_*` skill instead
   // of the proposal-draft path.
@@ -158,6 +178,9 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
   'log_time_entry',
   'notify_delay',
   'request_feedback',
+  'create_invoice_schedule',
+  'respond_to_review',
+  'create_standing_instruction',
   'lookup_appointments',
   'lookup_invoices',
   'lookup_balance',
@@ -201,8 +224,13 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
  *   1.0.0 — initial versioned taxonomy.
  *   1.1.0 — "log inventory" phrasings recognized and mapped to log_expense
  *           (no inventory domain; see isInventoryLoggingPhrasing).
+ *   1.2.0 — agent-wave Track A on-ramps (additive): create_invoice_schedule
+ *           (U2, milestone billing), respond_to_review (U3, review reply
+ *           drafting), create_standing_instruction (UB-A2, persistent
+ *           directives). One coordinated bump — see
+ *           docs/reference/voice-action-catalog.md.
  */
-export const INTENT_TAXONOMY_VERSION = '1.1.0';
+export const INTENT_TAXONOMY_VERSION = '1.2.0';
 
 /**
  * P11-001: convenience predicate the FSM adapter uses to route
@@ -333,6 +361,22 @@ export interface ExtractedEntities {
   // $50 off?", "throw in the trip fee", "refund or I'll leave a 1-star"). The
   // guardrail handler refines it into a specific ask type deterministically.
   negotiationAsk?: string;
+  // create_invoice_schedule (U2): the VERBATIM milestone/billing-plan sentence
+  // ("50% deposit, rest on completion"). Flat string by design —
+  // sanitizeExtractedEntities drops nested objects, so the deterministic
+  // milestone-sentence-parser (never the LLM) turns this into typed milestones.
+  scheduleDescription?: string;
+  // respond_to_review (U3): the owner's words identifying WHICH review ("the
+  // 1-star from yesterday"). Resolved downstream against recent
+  // google_reviews rows — never trusted as an id.
+  reviewReference?: string;
+  // create_standing_instruction (UB-A2): the verbatim persistent directive
+  // ("from now on always add a $79 diagnostic fee to AC calls").
+  instructionText?: string;
+  // create_standing_instruction: the intent the rule applies to, when the
+  // speaker scoped it (e.g. "on invoices" → create_invoice). Free text — the
+  // task handler normalizes it into the structured scope.
+  scopeIntentHint?: string;
 }
 
 /**
@@ -717,6 +761,44 @@ Supported intents (return exactly ONE):
                            Examples: "Send a feedback request for the Johnson job"
                                      "Ask Sarah to leave a review"
                                      "Request feedback on the completed Miller work"
+- "create_invoice_schedule" — user wants to set up a MILESTONE / PROGRESS
+                           billing plan for a job: a deposit up front and the
+                           rest later, or a percentage split across stages.
+                           Extract jobReference (the job or customer the plan
+                           is for), put the VERBATIM milestone sentence in
+                           scheduleDescription (do NOT compute amounts or
+                           restate it), and amount (integer cents) only when
+                           an explicit job total is stated. Distinct from
+                           create_invoice (one bill now) and update_invoice
+                           (edit an existing bill).
+                           Examples: "Set up 50% deposit, 50% on completion for the Hendersons"
+                                     "Bill the Garcia install 30/30/40"
+                                     "Take a $500 deposit up front on the Miller job, rest when we finish"
+                                     "Progress-bill the Patel remodel — half to start, balance on completion"
+- "respond_to_review"   — owner/operator wants to REPLY to a customer review
+                           (e.g. a Google review). Put the words identifying
+                           WHICH review in reviewReference, verbatim ("the
+                           1-star from yesterday", "that review Maria left").
+                           Distinct from request_feedback (asking a customer
+                           to leave a review).
+                           Examples: "Respond to that 1-star review"
+                                     "Reply to the bad review from yesterday"
+                                     "Answer the review Maria Alvarez left us"
+- "create_standing_instruction" — user states a PERSISTENT rule for how the
+                           business should run from now on, not a one-off
+                           command. Trigger phrasings: "from now on…",
+                           "always…", "never…", "whenever…", "every time…".
+                           Put the full spoken directive VERBATIM in
+                           instructionText, the kind of work it applies to (if
+                           stated) in scopeIntentHint, and a stated dollar
+                           amount in amount (integer cents).
+                           Examples: "From now on always add a $79 diagnostic fee to AC calls"
+                                     "Always include a fuel surcharge on invoices"
+                                     "Whenever we quote a water heater, include a permit line"
+                                     "Never offer weekend slots to new customers"
+                           NOT create_standing_instruction: a one-off edit
+                           ("add a $79 fee to the Smith invoice" =
+                           update_invoice).
 - "operator_request"   — caller explicitly asks to speak with a person,
                           dispatcher, owner, or asks to leave the AI agent.
                           Skip normal intent confirmation — escalate
@@ -909,7 +991,11 @@ Return valid JSON with exactly this shape (no prose, no markdown fences):
     "lostReason": "<string, optional — why the lead was lost on mark_lead_lost>",
     "serviceAddress": "<string, optional — full address on add_service_location>",
     "timeEntryType": "<job|drive|break|admin, optional — on log_time_entry>",
-    "delayMinutes": <integer minutes, optional — on notify_delay>
+    "delayMinutes": <integer minutes, optional — on notify_delay>,
+    "scheduleDescription": "<string, optional — VERBATIM milestone sentence on create_invoice_schedule>",
+    "reviewReference": "<string, optional — which review, verbatim, on respond_to_review>",
+    "instructionText": "<string, optional — verbatim standing rule on create_standing_instruction>",
+    "scopeIntentHint": "<string, optional — what work the standing rule applies to>"
   }
 }
 
@@ -1235,6 +1321,13 @@ export function parseClassifierJson(content: string): IntentClassification | nul
     if (typeof ee.editInstruction === 'string') extracted.editInstruction = ee.editInstruction;
     // negotiation fields (N-003)
     if (typeof ee.negotiationAsk === 'string') extracted.negotiationAsk = ee.negotiationAsk;
+    // create_invoice_schedule fields (U2)
+    if (typeof ee.scheduleDescription === 'string') extracted.scheduleDescription = ee.scheduleDescription;
+    // respond_to_review fields (U3)
+    if (typeof ee.reviewReference === 'string') extracted.reviewReference = ee.reviewReference;
+    // create_standing_instruction fields (UB-A2)
+    if (typeof ee.instructionText === 'string') extracted.instructionText = ee.instructionText;
+    if (typeof ee.scopeIntentHint === 'string') extracted.scopeIntentHint = ee.scopeIntentHint;
     if (Object.keys(extracted).length > 0) {
       result.extractedEntities = extracted;
     }

@@ -26,7 +26,7 @@ export type ProposalStatus =
   // or re-executed. If the operator wants to proceed after undoing,
   // they draft a new proposal. Decision 9 ("5-second undo window").
   | 'undone';
-export type ProposalType = 'create_customer' | 'update_customer' | 'create_job' | 'create_appointment' | 'create_booking' | 'callback' | 'draft_estimate' | 'update_estimate' | 'draft_invoice' | 'update_invoice' | 'issue_invoice' | 'create_invoice_schedule' | 'batch_invoice' | 'reassign_appointment' | 'reschedule_appointment' | 'add_crew_member' | 'remove_crew_member' | 'cancel_appointment' | 'voice_clarification' | 'add_note' | 'send_invoice' | 'send_estimate' | 'send_estimate_nudge' | 'record_payment' | 'log_expense' | 'convert_lead' | 'confirm_appointment' | 'mark_lead_lost' | 'add_service_location' | 'log_time_entry' | 'notify_delay' | 'request_feedback' | 'emergency_dispatch' | 'onboarding_tenant_settings' | 'onboarding_service_category' | 'onboarding_estimate_template' | 'onboarding_team_member' | 'onboarding_schedule' | 'review_response_proposal' | 'send_payment_reminder' | 'apply_late_fee';
+export type ProposalType = 'create_customer' | 'update_customer' | 'create_job' | 'create_appointment' | 'create_booking' | 'callback' | 'draft_estimate' | 'update_estimate' | 'draft_invoice' | 'update_invoice' | 'issue_invoice' | 'create_invoice_schedule' | 'batch_invoice' | 'reassign_appointment' | 'reschedule_appointment' | 'add_crew_member' | 'remove_crew_member' | 'cancel_appointment' | 'voice_clarification' | 'add_note' | 'send_invoice' | 'send_estimate' | 'send_estimate_nudge' | 'record_payment' | 'log_expense' | 'convert_lead' | 'confirm_appointment' | 'mark_lead_lost' | 'add_service_location' | 'log_time_entry' | 'notify_delay' | 'request_feedback' | 'emergency_dispatch' | 'onboarding_tenant_settings' | 'onboarding_service_category' | 'onboarding_estimate_template' | 'onboarding_team_member' | 'onboarding_schedule' | 'review_response_proposal' | 'send_payment_reminder' | 'apply_late_fee' | 'create_standing_instruction';
 
 export const VALID_PROPOSAL_TYPES: ProposalType[] = [
   'create_customer',
@@ -70,6 +70,7 @@ export const VALID_PROPOSAL_TYPES: ProposalType[] = [
   'review_response_proposal',
   'send_payment_reminder',
   'apply_late_fee',
+  'create_standing_instruction',
 ];
 
 /**
@@ -226,6 +227,13 @@ export interface CreateProposalInput {
   supervisorMode?: Mode;
   supervisorPresent?: boolean;
   tenantThresholdOverride?: ResolveThresholdInput['tenantOverride'];
+  /**
+   * UB-D / D-015 — autonomous booking lane result, set ONLY by the
+   * inbound-receptionist booking call sites after
+   * `evaluateAutonomousBookingLane` (proposals/autonomous-lane.ts) passed
+   * every gate. See `decideInitialStatus.autonomousLane`.
+   */
+  autonomousLane?: { eligible: true; threshold: number };
 }
 
 /**
@@ -316,6 +324,12 @@ export function actionClassForProposalType(type: ProposalType): ActionClass {
     case 'mark_lead_lost':
     case 'add_service_location':
     case 'log_time_entry':
+    // UB-A2 — capturing a standing instruction WRITES a directive row, moves
+    // no money and contacts no customer; the instruction only ever shapes
+    // future DRAFTS (which are themselves reviewed). Capture-class, but the
+    // voice task handler deliberately omits sourceTrustTier, so the
+    // instruction itself always lands for human review in v1.
+    case 'create_standing_instruction':
       return 'capture';
     // Delay notices and feedback requests are outbound customer-facing
     // messages — comms-class so they never auto-approve regardless of
@@ -439,6 +453,20 @@ export function decideInitialStatus(input: {
    * that don't thread the payload) keep pre-RV-007 behavior exactly.
    */
   payload?: unknown;
+  /**
+   * UB-D / D-015 — autonomous booking lane. Set ONLY by the
+   * inbound-receptionist booking call sites after
+   * `evaluateAutonomousBookingLane` passed every gate (tenant opt-in,
+   * booking capture types only, clean resolution, live held slot in
+   * business hours, no session flags). When present-and-eligible AND the
+   * tenant is unsupervised (threshold resolution returned null), the lane's
+   * dedicated (stricter) threshold is used instead of categorically
+   * blocking. Absent input ⇒ behavior byte-identical to pre-lane code for
+   * every proposal type × trust tier × supervisorPresent combination
+   * (pinned by test). Money/comms/irreversible classes never reach this
+   * branch (it lives inside the `autonomous + capture` arm).
+   */
+  autonomousLane?: { eligible: true; threshold: number };
 }): ProposalStatus {
   // Missing required fields always land in 'draft' — a partial payload
   // can't be auto-approved even by an autonomous agent with high
@@ -475,6 +503,18 @@ export function decideInitialStatus(input: {
     });
 
     if (threshold === null) {
+      // UB-D / D-015 — the autonomous booking lane is the single, scoped
+      // exception to the unsupervised block: booking capture proposals
+      // from the inbound receptionist, tenant opted in, every lane gate
+      // passed (evaluated by the call site), judged against the lane's
+      // dedicated stricter threshold. Anything below it falls through to
+      // the normal unsupervised routing.
+      if (
+        input.autonomousLane?.eligible &&
+        shouldAutoApprove(input.confidenceScore, input.autonomousLane.threshold)
+      ) {
+        return 'approved';
+      }
       // Unsupervised. The proposal would have auto-approved if a
       // supervisor were present — surface it in the queue (rather than
       // 'draft') so the unsupervised-routing path picks it up. The
@@ -667,6 +707,11 @@ export function createProposal(input: CreateProposalInput): Proposal {
     // through createProposal → decideInitialStatus, so this is the
     // single wiring point.
     payload: input.payload,
+    // UB-D / D-015: the autonomous booking lane input, set only by the
+    // inbound-receptionist booking call sites after every lane gate
+    // passed. The supervisor hook below still runs and can only
+    // downgrade — a policy block/force_review beats the lane.
+    autonomousLane: input.autonomousLane,
   });
   // Supervisor verdict application:
   //   'block'        → 'draft' (decideInitialStatus result discarded);

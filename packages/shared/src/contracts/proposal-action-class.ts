@@ -46,6 +46,10 @@ export const CAPTURE_PROPOSAL_TYPES: ReadonlySet<string> = new Set<string>([
   ProposalType.ADD_SERVICE_LOCATION,
   ProposalType.LOG_TIME_ENTRY,
   ProposalType.VOICE_CLARIFICATION,
+  // UB-A2 — writes a tenant directive row; no money, no customer contact.
+  // The voice task handler omits sourceTrustTier, so despite being
+  // capture-class the instruction proposal always lands for review in v1.
+  ProposalType.CREATE_STANDING_INSTRUCTION,
 ]);
 
 /**

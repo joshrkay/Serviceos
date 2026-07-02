@@ -116,6 +116,32 @@ describe('InboxPage', () => {
     );
   });
 
+  it('journey QA bug 10 — surfaces execution-failed proposals with their executionError', async () => {
+    apiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        data: [],
+        summary: { totalCount: 0, criticalCount: 0, highCount: 0, normalCount: 0, lowCount: 0, truncated: false },
+        failed: [
+          {
+            id: 'p-fail',
+            proposalType: 'draft_estimate',
+            summary: 'Estimate for Dana — $424.00',
+            status: 'execution_failed',
+            executionError: 'Estimate draft has no jobId and job auto-creation is not configured — pick a job before approving',
+            failedAt: new Date().toISOString(),
+          },
+        ],
+      }),
+    );
+
+    render(<InboxPage />);
+    await waitFor(() => screen.getByTestId('failed-section'));
+    expect(screen.getByText('Estimate for Dana — $424.00')).toBeInTheDocument();
+    expect(screen.getByTestId('execution-error')).toHaveTextContent(/no jobId/);
+    // A failed card means something needs attention — not the empty state.
+    expect(screen.queryByText(/nothing waiting/i)).not.toBeInTheDocument();
+  });
+
   it('renders confidence + pricing-source markers and a one-tap picker for an ambiguous line (U2)', async () => {
     apiFetch.mockResolvedValueOnce(
       jsonResponse({
@@ -189,6 +215,72 @@ describe('InboxPage', () => {
     await waitFor(() => screen.getByText('Photo quote for the Ruiz job'));
     // The urgency badge must appear where MMS drafts are actually reviewed.
     expect(screen.getByTestId('severity-badge')).toHaveTextContent('Emergency');
+  });
+
+  it('renders a "Standing instruction applied" chip per applied instruction (UB-A3)', async () => {
+    apiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        data: [
+          {
+            proposal: {
+              id: 'p-si',
+              proposalType: 'draft_estimate',
+              summary: 'Estimate for the Nguyen job',
+              status: 'draft',
+              createdAt: new Date().toISOString(),
+              payload: {
+                _meta: {
+                  overallConfidence: 'high',
+                  appliedStandingInstructions: [
+                    { id: 'si-1', text: 'Always add a $50 trip fee' },
+                    { id: 'si-2', text: 'Mention the referral discount' },
+                  ],
+                },
+                lineItems: [{ id: 'l1', description: 'Water heater install', pricingSource: 'catalog' }],
+              },
+            },
+            urgency: 'normal',
+            reason: 'Awaiting review',
+          },
+        ],
+        summary: { totalCount: 1, criticalCount: 0, highCount: 0, normalCount: 1, lowCount: 0, truncated: false },
+      }),
+    );
+
+    render(<InboxPage />);
+
+    await waitFor(() => screen.getByText('Estimate for the Nguyen job'));
+    const chips = screen.getAllByTestId('standing-instruction-chip');
+    expect(chips).toHaveLength(2);
+    expect(chips[0]).toHaveTextContent('Standing instruction applied: Always add a $50 trip fee');
+    expect(chips[1]).toHaveTextContent('Standing instruction applied: Mention the referral discount');
+  });
+
+  it('renders no standing-instruction chip when _meta carries none (UB-A3)', async () => {
+    apiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        data: [
+          {
+            proposal: {
+              id: 'p-no-si',
+              proposalType: 'draft_estimate',
+              summary: 'Estimate without instructions',
+              status: 'draft',
+              createdAt: new Date().toISOString(),
+              payload: { _meta: { overallConfidence: 'high' } },
+            },
+            urgency: 'normal',
+            reason: 'Awaiting review',
+          },
+        ],
+        summary: { totalCount: 1, criticalCount: 0, highCount: 0, normalCount: 1, lowCount: 0, truncated: false },
+      }),
+    );
+
+    render(<InboxPage />);
+
+    await waitFor(() => screen.getByText('Estimate without instructions'));
+    expect(screen.queryByTestId('standing-instruction-chip')).not.toBeInTheDocument();
   });
 
   it('resolving an ambiguous line POSTs resolve-line and merges the returned proposal (U2)', async () => {
@@ -443,6 +535,29 @@ describe('InboxPage', () => {
         expect(screen.getByText('Customer B')).toBeInTheDocument();
       });
       expect(screen.getByText(/1 couldn't be approved.*still waiting/i)).toBeInTheDocument();
+    });
+
+    it('a 400 (the journey-QA duplicate-header repro) restores the whole batch and shows an error', async () => {
+      apiFetch.mockResolvedValueOnce(
+        inbox([
+          row({ id: 'a', proposalType: 'add_note', summary: 'Note A', overallConfidence: 'high' }),
+          row({ id: 'b', proposalType: 'create_customer', summary: 'Customer B', confidenceScore: 0.9 }),
+        ]),
+      );
+      apiFetch.mockResolvedValueOnce(
+        jsonResponse({ error: 'VALIDATION_ERROR', message: 'proposalIds Required' }, { status: 400 }),
+      );
+
+      render(<InboxPage />);
+      await waitFor(() => screen.getByText('Note A'));
+      fireEvent.click(within(screen.getByTestId('approve-all-eligible')).getByRole('button'));
+
+      // Both optimistically-removed rows come back, with a visible error.
+      await waitFor(() => {
+        expect(screen.getByText('Note A')).toBeInTheDocument();
+        expect(screen.getByText('Customer B')).toBeInTheDocument();
+        expect(screen.getByText(/HTTP 400/)).toBeInTheDocument();
+      });
     });
 
     it('a transport error restores the whole batch', async () => {

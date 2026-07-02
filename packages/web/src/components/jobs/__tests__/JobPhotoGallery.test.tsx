@@ -101,4 +101,34 @@ describe('JobPhotoGallery (P12-001)', () => {
     render(<JobPhotoGallery photos={[]} loading />);
     expect(screen.getByTestId('job-photo-loading')).toBeInTheDocument();
   });
+
+  // Sweep-2 S2 — a photo without contentType (e.g. an optimistic append of
+  // a partial API response) must render a card, never throw. The old code
+  // dereferenced photo.contentType.startsWith(...) → TypeError → the whole
+  // page fell into the error boundary right after a successful upload.
+  describe('Sweep-2 S2 — missing contentType never crashes the gallery', () => {
+    it('renders an <img> tile when contentType is missing but downloadUrl exists', () => {
+      const photo = makePhoto({ id: 'p1' });
+      delete (photo as Partial<JobPhoto>).contentType;
+      expect(() => render(<JobPhotoGallery photos={[photo]} />)).not.toThrow();
+      expect(screen.getByTestId('job-photo-card-p1')).toBeInTheDocument();
+      expect(screen.getByRole('img')).toBeInTheDocument();
+      expect(screen.queryByTestId('job-photo-video-p1')).not.toBeInTheDocument();
+    });
+
+    it('renders a generic placeholder tile when downloadUrl is missing too', () => {
+      const photo = makePhoto({ id: 'p1', downloadUrl: '' });
+      delete (photo as Partial<JobPhoto>).contentType;
+      expect(() => render(<JobPhotoGallery photos={[photo]} />)).not.toThrow();
+      expect(screen.getByTestId('job-photo-card-p1')).toBeInTheDocument();
+      expect(screen.getByTestId('job-photo-placeholder-p1')).toBeInTheDocument();
+      expect(screen.queryByRole('img')).not.toBeInTheDocument();
+    });
+
+    it('empty-string contentType (orphaned-file placeholder from list) renders as image tile', () => {
+      const photo = makePhoto({ id: 'p1', contentType: '' });
+      expect(() => render(<JobPhotoGallery photos={[photo]} />)).not.toThrow();
+      expect(screen.getByRole('img')).toBeInTheDocument();
+    });
+  });
 });

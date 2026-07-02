@@ -4,7 +4,11 @@ import { WorkingHoursRepository } from '../availability/working-hours';
 import { UnavailableBlockRepository } from '../availability/unavailable-block';
 import { DispatchLatenessResult } from './lateness';
 import { getDispatchBoardRevision } from './board-revision';
-import { getEditingOnAppointment } from './presence-store';
+import {
+  findEditingOnAppointment,
+  listDispatchPresence,
+  type PresenceEntry,
+} from './presence-store';
 
 export interface BoardAppointmentEditing {
   userId: string;
@@ -121,14 +125,16 @@ function toBoardAppointment(
   technicianId?: string,
   technicianName?: string,
   lateness?: DispatchLatenessResult,
-  boardDate?: string,
+  presenceEntries?: PresenceEntry[],
   viewingUserId?: string,
   coAssignees?: BoardCoAssignee[],
   pendingChange?: PendingChangeKind,
 ): BoardAppointment {
-  const editing = boardDate
-    ? getEditingOnAppointment(appointment.tenantId, boardDate, appointment.id, viewingUserId)
-    : null;
+  const editing = findEditingOnAppointment(
+    presenceEntries ?? [],
+    appointment.id,
+    viewingUserId,
+  );
   return {
     id: appointment.id,
     jobId: appointment.jobId,
@@ -181,6 +187,10 @@ export async function getDispatchBoardData(
   timezone?: string,
 ): Promise<DispatchBoardData> {
   const { start, end } = getDayBoundaries(dateStr, timezone);
+
+  // One presence read per board query (the store may be Redis-backed);
+  // per-appointment `editing` is derived from this list synchronously.
+  const presenceEntries = await listDispatchPresence(tenantId, dateStr);
 
   const appointments = await deps.appointmentRepo.findByDateRange(tenantId, start, end);
 
@@ -270,7 +280,7 @@ export async function getDispatchBoardData(
       undefined,
       undefined,
       unassignedLatenessMap.get(appt.id),
-      dateStr,
+      presenceEntries,
       deps.viewingUserId,
       coAssigneesFor(appt.id),
       pendingChangeMap.get(appt.id),
@@ -299,7 +309,7 @@ export async function getDispatchBoardData(
         techId,
         techName,
         latenessByApptId.get(appointment.id),
-        dateStr,
+        presenceEntries,
         deps.viewingUserId,
         coAssigneesFor(appointment.id),
         pendingChangeMap.get(appointment.id),

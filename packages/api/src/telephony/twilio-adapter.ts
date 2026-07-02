@@ -127,6 +127,7 @@ import {
 } from '../compliance/consent-events';
 import type { RecordingControl } from './recording-control';
 import { armEmergencyPageLadder } from './emergency-page-retry';
+import type { Queue } from '../queues/queue';
 import type { CallMeBackRepository } from '../voice/call-me-back/call-me-back';
 import type {
   DroppedCallRecoveryRepository,
@@ -369,6 +370,14 @@ export interface TwilioAdapterDeps {
    * without it the ladder still pages but has no durable tail.
    */
   callMeBackRepo?: CallMeBackRepository;
+  /**
+   * UC-5a — the shared durable queue (PgQueue in production) backing the
+   * emergency page-retry ladder. Each ladder step is a delayed job, so a
+   * restart or a replica race can neither drop nor double-fire a page.
+   * Optional for test fixtures; without it (or without a deliveryProvider)
+   * the ladder is not armed.
+   */
+  queue?: Queue;
   /**
    * RV-115 — durable dropped-call recovery scheduler. When wired, every
    * telephony termination runs through it with the FSM context snapshot;
@@ -843,15 +852,24 @@ export class TwilioGatherAdapter {
    */
   private async resolveTenantLanguage(
     tenantId: string,
+    /**
+     * UB-C1 — a language already pinned on the session by the media-stream
+     * adapter's initialLanguageResolver (customer preferredLanguage +
+     * supported_languages gate, resolved BEFORE Deepgram opened). When set
+     * it wins over the tenant default so the greeting/TTS voice match the
+     * language the STT socket is actually listening in.
+     */
+    pinned?: Language,
   ): Promise<{ language: Language; ttsVoice?: string; supportedLanguages?: Language[] }> {
-    if (!this.deps.settingsRepo) return { language: 'en' };
+    if (!this.deps.settingsRepo) return { language: pinned ?? 'en' };
     try {
       const settings = await this.deps.settingsRepo.findByTenant(tenantId);
       // The tenant's explicit default_language is always honored — it IS the
       // tenant's opt-in. The supported_languages stack gates CALLER auto-
       // detection (a Spanish-speaking caller on an English-only tenant), not
       // the tenant's own configured greeting language.
-      const language: Language = settings?.defaultLanguage === 'es' ? 'es' : 'en';
+      const language: Language =
+        pinned ?? (settings?.defaultLanguage === 'es' ? 'es' : 'en');
       const ttsVoice =
         (language === 'es' ? settings?.ttsVoiceEs : settings?.ttsVoiceEn) ?? undefined;
       // Thread the opt-in stack for the auto-detect gate, always including the
@@ -862,7 +880,7 @@ export class TwilioGatherAdapter {
         : [...baseStack, language];
       return { language, ttsVoice, supportedLanguages };
     } catch {
-      return { language: 'en' };
+      return { language: pinned ?? 'en' };
     }
   }
 
@@ -960,7 +978,15 @@ export class TwilioGatherAdapter {
     const from = this.callerIdBySession.get(session.id) ?? '';
 
     // P11-002: resolve + pin the spoken language + TTS voice (tenant default).
-    const { language, ttsVoice, supportedLanguages } = await this.resolveTenantLanguage(opts.tenantId);
+    // UB-C1 — when the media-stream adapter already pinned session.language
+    // (customer preferredLanguage resolved before Deepgram opened), honor it
+    // instead of overwriting with the tenant default.
+    const pinnedLanguage =
+      session.language === 'en' || session.language === 'es' ? session.language : undefined;
+    const { language, ttsVoice, supportedLanguages } = await this.resolveTenantLanguage(
+      opts.tenantId,
+      pinnedLanguage,
+    );
     session.language = language;
     session.ttsVoice = ttsVoice;
     if (supportedLanguages) session.supportedLanguages = supportedLanguages;
@@ -1302,23 +1328,28 @@ export class TwilioGatherAdapter {
   }
 
   /**
-   * RV-143 — arm the owner page-retry ladder the moment an emergency
-   * escalation starts. Each tick (2-minute intervals, ×3) re-checks whether
-   * the transfer was answered (the /dial-result success branch stamps
-   * `terminalReason === 'transferred'`); unanswered ticks page the owner
-   * and the exhausted ladder lands a durable URGENT call_me_back task.
-   * No-op without an SMS provider.
+   * RV-143 / UC-5a — arm the owner page-retry ladder the moment an
+   * emergency escalation starts. Each step (2-minute intervals, ×3) is a
+   * DELAYED job on the shared durable queue: the registered
+   * `telephony.emergency_page` worker (app.ts) re-checks whether the
+   * transfer was answered (live store, then the persisted
+   * voice_sessions.ended_reason the /dial-result success branch stamps),
+   * pages the owner when not, and the exhausted ladder lands a durable
+   * URGENT call_me_back task. Arming is idempotent per (tenant, session)
+   * via the attempt-1 idempotency key, so a re-dispatched scan or a second
+   * replica can't double-arm. No-op without an SMS provider or a queue
+   * (mirrors the legacy in-memory gate).
    */
   private armEmergencyPageLadder(
     session: VoiceSession,
     utterance: string,
     tenantId: string,
   ): void {
-    const deliveryProvider = this.deps.deliveryProvider;
-    if (!deliveryProvider) return;
+    const queue = this.deps.queue;
+    if (!this.deps.deliveryProvider || !queue) return;
     const callerPhone = this.callerIdBySession.get(session.id) || undefined;
     const sessionId = session.id;
-    armEmergencyPageLadder(
+    void armEmergencyPageLadder(
       {
         tenantId,
         sessionId,
@@ -1327,29 +1358,15 @@ export class TwilioGatherAdapter {
         emergencyDescription: utterance.slice(0, 160),
         businessName: this.deps.businessName,
       },
-      {
-        sendSms: (args) => deliveryProvider.sendSms(args),
-        resolvePagePhone: async () => {
-          if (!this.deps.settingsRepo) return null;
-          try {
-            const settings = await this.deps.settingsRepo.findByTenant(tenantId);
-            return settings?.ownerPhone ?? settings?.transferNumber ?? null;
-          } catch {
-            return null;
-          }
-        },
-        // Resolved when the dispatcher transfer was ANSWERED. A reaped /
-        // missing session is treated as unresolved — bias toward paging on
-        // an emergency.
-        isResolved: () => {
-          const live = this.deps.store.peek(sessionId);
-          if (!live) return false;
-          return live.terminalReason === 'transferred';
-        },
-        ...(this.deps.callMeBackRepo ? { callMeBackRepo: this.deps.callMeBackRepo } : {}),
-        ...(this.deps.auditRepo ? { auditRepo: this.deps.auditRepo } : {}),
-      },
-    );
+      { queue },
+    ).catch((err) => {
+      // Loud: a failed arm means no pages will fire for this escalation.
+      logger.error('failed to arm durable emergency page ladder', {
+        tenantId,
+        sessionId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
   }
 
   async processCallerUtterance(opts: {
