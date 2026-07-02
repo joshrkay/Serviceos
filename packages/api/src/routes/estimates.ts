@@ -2,7 +2,11 @@ import { Router, Response } from 'express';
 import { z } from 'zod';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
-import { createEstimateSchema, verticalTypeSchema } from '../shared/contracts';
+import {
+  createEstimateSchema,
+  updateEstimateSchema,
+  verticalTypeSchema,
+} from '../shared/contracts';
 import {
   EstimateTemplateRepository,
   createTemplate,
@@ -431,10 +435,11 @@ export function createEstimateRouter(
   const updateHandler = async (req: AuthenticatedRequest, res: Response) => {
     try {
       const mutationDeps = await buildMutationDeps(req.auth!.tenantId, req.params.id, req);
+      const input = updateEstimateSchema.parse(req.body);
       const result = await updateEstimate(
         req.auth!.tenantId,
         req.params.id,
-        { ...req.body, expectedVersion: parseExpectedVersion(req) },
+        { ...input, expectedVersion: parseExpectedVersion(req) },
         estimateRepo,
         mutationDeps,
       );
@@ -478,10 +483,11 @@ export function createEstimateRouter(
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const mutationDeps = await buildMutationDeps(req.auth!.tenantId, req.params.id, req);
+        const input = updateEstimateSchema.parse(req.body);
         const result = await reviseEstimate(
           req.auth!.tenantId,
           req.params.id,
-          { ...req.body, expectedVersion: parseExpectedVersion(req) },
+          { ...input, expectedVersion: parseExpectedVersion(req) },
           estimateRepo,
           mutationDeps,
         );

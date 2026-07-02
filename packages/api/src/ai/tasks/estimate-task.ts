@@ -5,10 +5,9 @@ import { assessConfidence, getConfidenceLevel } from '../guardrails/confidence';
 import type { ProposalConfidenceMeta } from '../../proposals/contracts';
 import { CatalogItemRepository } from '../../catalog/catalog-item';
 import {
-  applyCatalogPricing,
   CatalogPricingOutcome,
+  groundLineItemPricing,
   lineItemConfidenceSignals,
-  resolveLineItems,
   UNCATALOGUED_CONFIDENCE_CAP,
 } from '../resolution/catalog-resolver';
 import {
@@ -135,22 +134,17 @@ export class EstimateTaskHandler implements TaskHandler {
     // (still human-reviewed via the proposal gate).
     let catalogOutcome: CatalogPricingOutcome | undefined;
     const lineItems = payload.lineItems as Array<Record<string, unknown>>;
-    if (this.catalogRepo && Array.isArray(lineItems) && lineItems.length > 0) {
-      try {
-        const items = (await this.catalogRepo.listByTenant(context.tenantId)).filter(
-          (i) => i.archivedAt === null,
-        );
-        if (items.length > 0) {
-          const resolutions = resolveLineItems(
-            lineItems.map((li) => String(li.description ?? '')),
-            items,
-          );
-          catalogOutcome = applyCatalogPricing(lineItems, resolutions, 'unitPrice');
-          payload.lineItems = catalogOutcome.lineItems;
-        }
-      } catch {
-        catalogOutcome = undefined;
-      }
+    if (Array.isArray(lineItems) && lineItems.length > 0) {
+      // Always resolve to an outcome — even with no catalog wired, an empty
+      // catalog, or a read error, every LLM price is treated as uncatalogued
+      // so the confidence cap below still fires (previously an undefined
+      // outcome silently skipped the cap for new/empty-catalog tenants).
+      catalogOutcome = await groundLineItemPricing(
+        lineItems,
+        'unitPrice',
+        this.catalogRepo ? () => this.catalogRepo!.listByTenant(context.tenantId) : null,
+      );
+      payload.lineItems = catalogOutcome.lineItems;
     }
 
     const confidence = assessConfidence(parsed ?? {});
@@ -231,7 +225,14 @@ export class EstimateTaskHandler implements TaskHandler {
       injectedInstructions,
     );
     const meta: ProposalConfidenceMeta = {
-      overallConfidence: getConfidenceLevel(confidenceScore),
+      // Hard-block auto-approval for any ungrounded (LLM-priced) line via the
+      // RV-007 confidence-marker guard — independent of the numeric score AND
+      // of any tenant `auto_approve_threshold` override (a threshold ≤ the 0.85
+      // uncatalogued cap / 0.5 clarify cap would otherwise still auto-approve
+      // an AI-invented price). An uncatalogued price must always reach a human.
+      overallConfidence: catalogOutcome?.anyUncatalogued
+        ? 'low'
+        : getConfidenceLevel(confidenceScore),
       ...(Object.keys(signals.fieldConfidence).length > 0
         ? { fieldConfidence: signals.fieldConfidence }
         : {}),

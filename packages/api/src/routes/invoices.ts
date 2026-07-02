@@ -2,7 +2,7 @@ import { Router, Response } from 'express';
 import { z } from 'zod';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
-import { createInvoiceSchema } from '../shared/contracts';
+import { createInvoiceSchema, updateInvoiceSchema } from '../shared/contracts';
 import { toErrorResponse } from '../shared/errors';
 import { TenantOwnership } from '../shared/tenant-ownership';
 import {
@@ -337,7 +337,8 @@ export function createInvoiceRouter(
 
   const updateHandler = async (req: AuthenticatedRequest, res: Response) => {
     try {
-      const result = await updateInvoice(req.auth!.tenantId, req.params.id, req.body, invoiceRepo);
+      const input = updateInvoiceSchema.parse(req.body);
+      const result = await updateInvoice(req.auth!.tenantId, req.params.id, input, invoiceRepo);
       if (!result) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Invoice not found' });
         return;

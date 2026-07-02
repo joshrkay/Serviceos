@@ -19,6 +19,7 @@ import {
   type OnCallEntry,
 } from '../../src/oncall/rotation';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
+import { InMemoryLeadRepository } from '../../src/leads/in-memory-lead';
 import { InMemoryProposalRepository } from '../../src/proposals/proposal';
 import { InMemoryVoiceSessionRepository } from '../../src/voice/voice-session';
 
@@ -732,5 +733,99 @@ describe('POST /api/telephony/recording (P8-014 record_call)', () => {
         RecordingDuration: '0',
       });
     expect(res.status).toBe(403);
+  });
+});
+
+// ─── B4: POST /api/telephony/voicemail-status auth + body parsing ─────────────
+describe('POST /api/telephony/voicemail-status (voicemail → lead)', () => {
+  const TENANT_UUID = '00000000-0000-0000-0000-000000000bbb';
+
+  function buildVoicemailHarness() {
+    const store = new VoiceSessionStore();
+    store.create(TENANT_UUID, 'telephony', { callSid: 'CA-vm-1' });
+    const leadRepo = new InMemoryLeadRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const adapter = new TwilioGatherAdapter({
+      store,
+      gateway: makeGateway('{"intentType":"unknown","confidence":0,"reasoning":"x"}'),
+      businessName: 'Test Co',
+      publicBaseUrl: PUBLIC_BASE_URL,
+    });
+    const app = express();
+    app.use(
+      '/api/telephony',
+      createTelephonyRouter({
+        adapter,
+        authTokenGetter: () => AUTH_TOKEN,
+        publicBaseUrl: PUBLIC_BASE_URL,
+        resolveTenantId: () => TENANT_UUID,
+        leadRepo,
+        auditRepo,
+        // Presence of `recording.store` is what mounts the voicemail-status
+        // sub-router; storage is never exercised by this path.
+        recording: {
+          store,
+          storage: {
+            generateUploadUrl: async () => 'https://s3.fake/u',
+            generateDownloadUrl: async () => 'https://s3.fake/d',
+            getObjectMetadata: async () => null,
+            deleteObject: async () => undefined,
+          },
+          storageBucket: 'test-bucket',
+        },
+      }),
+    );
+    return { app, leadRepo, auditRepo };
+  }
+
+  const params = {
+    CallSid: 'CA-vm-1',
+    RecordingSid: 'RE-vm-1',
+    From: '+15125550123',
+    RecordingUrl: 'https://api.twilio.com/2010-04-01/RE-vm-1',
+  };
+
+  it('parses the urlencoded body and creates a lead on a signed delivery', async () => {
+    const { app, leadRepo } = buildVoicemailHarness();
+    const path = '/api/telephony/voicemail-status';
+    const sig = twilio.getExpectedTwilioSignature(AUTH_TOKEN, `${PUBLIC_BASE_URL}${path}`, params);
+
+    const res = await request(app)
+      .post(path)
+      .set('X-Twilio-Signature', sig)
+      .type('form')
+      .send(params);
+
+    expect(res.status).toBe(200);
+    // Regression: the body parser now runs, so CallSid resolves and a lead is
+    // created (previously req.body was empty → silent no-op / lost voicemail).
+    const leads = await leadRepo.findByTenant(TENANT_UUID);
+    expect(leads).toHaveLength(1);
+    expect(leads[0].primaryPhone).toBe('+15125550123');
+  });
+
+  it('returns 403 and creates no lead for an unsigned delivery', async () => {
+    const { app, leadRepo } = buildVoicemailHarness();
+    const res = await request(app)
+      .post('/api/telephony/voicemail-status')
+      .type('form')
+      .send(params);
+
+    expect(res.status).toBe(403);
+    expect(await leadRepo.findByTenant(TENANT_UUID)).toHaveLength(0);
+  });
+
+  it('returns 403 for a forged JSON delivery (no valid Twilio signature)', async () => {
+    const { app, leadRepo } = buildVoicemailHarness();
+    // The pre-fix exploit: POST application/json (parsed by the global
+    // express.json) with a known CallSid to forge a lead. The signature
+    // check now rejects it before the handler runs.
+    const res = await request(app)
+      .post('/api/telephony/voicemail-status')
+      .set('Content-Type', 'application/json')
+      .send(JSON.stringify(params));
+
+    expect(res.status).toBe(403);
+    expect(await leadRepo.findByTenant(TENANT_UUID)).toHaveLength(0);
   });
 });

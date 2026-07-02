@@ -377,6 +377,11 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // U1 (agent wave): trigram index for the technician entity-resolver kind.
   ['230_users_fullname_trgm_index', '8e9b0477e3a4700b45fc73a3a24d2680176df263d2cc5a05d02a0b2397011fff'],
   ['231_tenant_settings_autonomous_booking', '1a9b505aeabfeda419fb0d3e579f42815463ec80d02abd36dd6c5bb6863e24ef'],
+  // Duplicate-Stripe-payment backstop: partial unique index on
+  // (tenant_id, reference_number) for credit_card/bank_transfer, with a
+  // non-destructive preflight that quarantines pre-existing duplicates.
+  // Renumbered 229→232 to follow this branch's 229-231 migrations.
+  ['232_payments_stripe_reference_unique', 'e04f90015062af2dc152c0298799291f58f84d39b80621543cb09330c1d9c6ab'],
 ];
 
 function hashMigration(value: string): string {

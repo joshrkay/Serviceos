@@ -62,9 +62,16 @@ export function createPublicPaymentsRouter(deps: PublicPaymentsDeps): Router {
     }
 
     const invoice = await deps.invoiceRepo.findByViewToken(viewToken);
-    // Constant-ish behavior: same 404 for "no invoice" and "wrong invoice id"
-    // so the endpoint can't be used to enumerate ids by probing.
-    if (!invoice || invoice.id !== invoiceId) {
+    // Constant-ish behavior: same 404 for "no invoice", "wrong invoice id",
+    // and "token expired" so the endpoint can't be used to enumerate ids by
+    // probing. findByViewToken's SECURITY DEFINER function does NOT filter on
+    // expiry, so enforce it here (mirrors PublicInvoiceService.lookupByToken) —
+    // otherwise an expired pay link keeps minting Stripe payment intents.
+    if (
+      !invoice ||
+      invoice.id !== invoiceId ||
+      (invoice.viewTokenExpiresAt && invoice.viewTokenExpiresAt < new Date())
+    ) {
       res.status(404).json({
         error: 'NOT_FOUND',
         message: 'Invoice not found',
@@ -146,10 +153,15 @@ export function createPublicPaymentsRouter(deps: PublicPaymentsDeps): Router {
     }
 
     const invoice = await deps.invoiceRepo.findByViewToken(viewToken);
-    // Same opacity model as create-payment-intent: a token mismatch
-    // and an id mismatch return identical 404s so the endpoint can't
-    // be used to enumerate ids.
-    if (!invoice || invoice.id !== invoiceId) {
+    // Same opacity model as create-payment-intent: a token mismatch, an id
+    // mismatch, and an expired token all return identical 404s so the
+    // endpoint can't be used to enumerate ids. findByViewToken does not
+    // enforce expiry, so check it here too.
+    if (
+      !invoice ||
+      invoice.id !== invoiceId ||
+      (invoice.viewTokenExpiresAt && invoice.viewTokenExpiresAt < new Date())
+    ) {
       res.status(404).json({
         error: 'NOT_FOUND',
         message: 'Invoice not found',

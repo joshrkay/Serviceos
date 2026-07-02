@@ -13,6 +13,7 @@ import {
   createCatalogItem,
   InMemoryCatalogItemRepository,
 } from '../../../src/catalog/catalog-item';
+import { UNCATALOGUED_CONFIDENCE_CAP } from '../../../src/ai/resolution/catalog-resolver';
 
 function createMockGateway(responseContent: string): LLMGateway {
   return {
@@ -391,7 +392,7 @@ describe('P22 — InvoiceTaskHandler catalog grounding', () => {
     expect(lines[0].description).toBe('Water Heater Install');
   });
 
-  it('degrades to LLM pricing when the catalog read throws', async () => {
+  it('degrades to LLM pricing but flags uncatalogued + caps when the catalog read throws', async () => {
     const failingRepo = {
       listByTenant: vi.fn().mockRejectedValue(new Error('db down')),
     } as unknown as CatalogItemRepository;
@@ -403,12 +404,16 @@ describe('P22 — InvoiceTaskHandler catalog grounding', () => {
     const { proposal } = await handler.handle(baseContext);
 
     const line = (proposal.payload.lineItems as Array<Record<string, unknown>>)[0];
+    // A read failure must not block drafting — the LLM price is kept…
     expect(line.unitPriceCents).toBe(99_900);
-    expect(line.pricingSource).toBeUndefined();
-    expect(proposal.confidenceFactors).not.toContain('uncatalogued_line_item');
+    // …but an ungrounded price must still be flagged + capped, never silently
+    // auto-approvable (money-safety regression).
+    expect(line.pricingSource).toBe('uncatalogued');
+    expect(proposal.confidenceFactors).toContain('uncatalogued_line_item');
+    expect(proposal.confidenceScore).toBeLessThanOrEqual(UNCATALOGUED_CONFIDENCE_CAP);
   });
 
-  it('without a catalog repo, behavior is unchanged (regression pin)', async () => {
+  it('without a catalog repo, LLM price is kept but flagged uncatalogued + capped', async () => {
     const gateway = createMockGateway(
       aiOutput([{ description: 'Water Heater Install', quantity: 1, unitPrice: 99_900 }]),
     );
@@ -418,24 +423,38 @@ describe('P22 — InvoiceTaskHandler catalog grounding', () => {
 
     const line = (proposal.payload.lineItems as Array<Record<string, unknown>>)[0];
     expect(line.unitPriceCents).toBe(99_900);
-    expect(line).not.toHaveProperty('pricingSource');
+    // No catalog to ground against → uncatalogued, capped, human-reviewed.
+    // (Previously the outcome was left undefined and the cap was skipped.)
+    expect(line.pricingSource).toBe('uncatalogued');
     expect(line).not.toHaveProperty('catalogItemId');
+    expect(proposal.confidenceScore).toBeLessThanOrEqual(UNCATALOGUED_CONFIDENCE_CAP);
   });
 });
 
 // ─── RV-007 (F-4): Confidence Marker `_meta` ─────────────────────────────
 describe('RV-007 — InvoiceTaskHandler populates payload._meta', () => {
-  it('sets overallConfidence from the task confidence score (overall-only without catalog signals)', async () => {
-    const gateway = createMockGateway(JSON.stringify(validAiOutput)); // 0.85
+  it('with no catalog wired, every priced line is flagged uncatalogued in _meta', async () => {
+    const gateway = createMockGateway(JSON.stringify(validAiOutput)); // 0.85, 2 lines
     const handler = new InvoiceTaskHandler(gateway);
 
     const { proposal } = await handler.handle(baseContext);
 
-    const meta = proposal.payload._meta as Record<string, unknown>;
+    const meta = proposal.payload._meta as {
+      overallConfidence: string;
+      fieldConfidence?: Record<string, string>;
+      markers?: Array<{ path: string; reason: string }>;
+    };
     expect(meta).toBeDefined();
-    expect(meta.overallConfidence).toBe('high'); // 0.85 ≥ 0.8
-    expect(meta.fieldConfidence).toBeUndefined();
-    expect(meta.markers).toBeUndefined();
+    // Any uncatalogued line forces overall 'low' so the RV-007 marker guard
+    // hard-blocks auto-approval regardless of the numeric score or a tenant
+    // threshold override (not just the 0.85 numeric cap).
+    expect(meta.overallConfidence).toBe('low');
+    // No catalog to ground against → both LLM-priced lines flagged low.
+    expect(meta.fieldConfidence).toEqual({
+      'lineItems[0].unitPriceCents': 'low',
+      'lineItems[1].unitPriceCents': 'low',
+    });
+    expect(meta.markers).toHaveLength(2);
   });
 
   it('uncatalogued line → fieldConfidence low on its unitPriceCents + a marker with reason', async () => {
@@ -493,10 +512,17 @@ describe('RV-007 — InvoiceTaskHandler populates payload._meta', () => {
 
     const lines = proposal.payload.lineItems as Array<Record<string, unknown>>;
     expect(lines).toHaveLength(1); // unpriced line dropped
-    const meta = proposal.payload._meta as Record<string, unknown>;
-    // Empty catalog → no pricingSource stamped → overall-only meta, and
-    // crucially no marker pointing at a dropped index.
-    expect(meta.overallConfidence).toBe('high');
-    expect(meta.fieldConfidence).toBeUndefined();
+    const meta = proposal.payload._meta as {
+      overallConfidence: string;
+      fieldConfidence?: Record<string, string>;
+      markers?: Array<{ path: string; reason: string }>;
+    };
+    // Surviving line is uncatalogued → overall 'low' hard-blocks auto-approve.
+    expect(meta.overallConfidence).toBe('low');
+    // Empty catalog → the surviving priced line is uncatalogued, and its
+    // marker path indexes the FINAL array (index 0), NOT the pre-drop index 1.
+    expect(meta.fieldConfidence).toEqual({ 'lineItems[0].unitPriceCents': 'low' });
+    expect(meta.markers).toHaveLength(1);
+    expect(meta.markers![0].path).toBe('lineItems[0].unitPriceCents');
   });
 });

@@ -33,7 +33,7 @@ import { NoteRepository } from '../../notes/note';
 import { PaymentRepository } from '../../invoices/payment';
 import { ExpenseRepository } from '../../expenses/expense';
 import { AuditRepository, createAuditEvent } from '../../audit/audit';
-import { ConflictError } from '../../shared/errors';
+import { ConflictError, ValidationError } from '../../shared/errors';
 import { JobRepository, createJob } from '../../jobs/job';
 import { RefreshJobMoneyStateDeps } from '../../jobs/job-money-state';
 import { AppointmentRepository, createAppointment } from '../../appointments/appointment';
@@ -75,7 +75,8 @@ import {
 import { TimeEntryService } from '../../time-tracking/time-entry-service';
 import { FeedbackRequestRepository } from '../../feedback/feedback-request';
 import { DelayNotificationService } from '../../notifications/delay-notifications';
-import { LineItem, LineItemCategory, PricingSource } from '../../shared/billing-engine';
+import { LineItem, LineItemCategory, buildLineItem } from '../../shared/billing-engine';
+import type { PricingSource } from '../../ai/resolution/catalog-resolver';
 import {
   EmergencyDispatchExecutionHandler,
   EmergencySmsSender,
@@ -489,8 +490,23 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
   }
 }
 
-const LINE_ITEM_CATEGORIES: readonly LineItemCategory[] = ['labor', 'material', 'equipment', 'other'];
-const PRICING_SOURCES: readonly PricingSource[] = ['catalog', 'ambiguous', 'uncatalogued', 'manual'];
+const VALID_LINE_ITEM_CATEGORIES: readonly LineItemCategory[] = [
+  'labor',
+  'material',
+  'equipment',
+  'other',
+];
+
+const VALID_PRICING_SOURCES: readonly PricingSource[] = [
+  'catalog',
+  'ambiguous',
+  'uncatalogued',
+  'manual',
+];
+
+function isPricingSource(value: unknown): value is PricingSource {
+  return typeof value === 'string' && (VALID_PRICING_SOURCES as readonly string[]).includes(value);
+}
 
 /**
  * Normalize AI-drafted line items (contracts.ts `lineItemSchema`:
@@ -508,6 +524,8 @@ const PRICING_SOURCES: readonly PricingSource[] = ['catalog', 'ambiguous', 'unca
  * - A line that cannot be priced/parsed is reported in `malformed` with a
  *   human-readable reason — callers fail the execution with that reason
  *   instead of silently dropping money lines or writing NaN.
+ * - Preserves catalog-grounding + tier metadata (pricingSource, groupKey,
+ *   groupLabel, isOptional, isDefaultSelected) from main's normalizeEstimateLineItems.
  */
 export function normalizeDraftLineItems(raw: unknown[]): {
   lineItems: LineItem[];
@@ -552,6 +570,8 @@ export function normalizeDraftLineItems(raw: unknown[]): {
         ? Math.round(li.totalCents)
         : Math.round(quantity * unitPriceCents);
 
+    const rawCategory = typeof li.category === 'string' ? li.category.toLowerCase() : '';
+
     lineItems.push({
       id: typeof li.id === 'string' && li.id.length > 0 ? li.id : uuidv4(),
       description,
@@ -560,11 +580,15 @@ export function normalizeDraftLineItems(raw: unknown[]): {
       totalCents,
       sortOrder: lineItems.length,
       taxable: typeof li.taxable === 'boolean' ? li.taxable : true,
-      ...(LINE_ITEM_CATEGORIES.includes(li.category as LineItemCategory)
-        ? { category: li.category as LineItemCategory }
+      ...(VALID_LINE_ITEM_CATEGORIES.includes(rawCategory as LineItemCategory)
+        ? { category: rawCategory as LineItemCategory }
         : {}),
-      ...(PRICING_SOURCES.includes(li.pricingSource as PricingSource)
-        ? { pricingSource: li.pricingSource as PricingSource }
+      ...(isPricingSource(li.pricingSource) ? { pricingSource: li.pricingSource } : {}),
+      ...(typeof li.groupKey === 'string' ? { groupKey: li.groupKey } : {}),
+      ...(typeof li.groupLabel === 'string' ? { groupLabel: li.groupLabel } : {}),
+      ...(typeof li.isOptional === 'boolean' ? { isOptional: li.isOptional } : {}),
+      ...(typeof li.isDefaultSelected === 'boolean'
+        ? { isDefaultSelected: li.isDefaultSelected }
         : {}),
     });
   });
