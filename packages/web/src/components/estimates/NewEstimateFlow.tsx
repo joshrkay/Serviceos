@@ -1061,7 +1061,13 @@ export function NewEstimateFlow({ onClose, onCreated, preSelectedCustomerId }: {
   const [inputMode,  setInputMode] = useState<InputMode>('voice');
   const [aiResult,   setAiResult]  = useState<AIResult | null>(null);
   const [editMode,   setEditMode]  = useState(false);
-  const [validUntil, setValidUntil]= useState('Apr 10, 2026');
+  // Default validity: 30 days out. (Was a frozen literal date, which
+  // persisted already-expired estimates once the calendar passed it.)
+  const [validUntil, setValidUntil]= useState(() =>
+    new Date(Date.now() + 30 * 86_400_000).toLocaleDateString('en-US', {
+      month: 'short', day: 'numeric', year: 'numeric',
+    }),
+  );
   const [channel,    setChannel]   = useState<'sms' | 'email'>('sms');
   const [sending,    setSending]   = useState(false);
   const [sent,       setSent]      = useState(false);

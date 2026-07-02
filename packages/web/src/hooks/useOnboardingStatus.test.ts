@@ -1,9 +1,10 @@
 import { renderHook, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { useOnboardingStatus } from './useOnboardingStatus';
+import { useOnboardingStatus, _resetOnboardingStatusCacheForTests } from './useOnboardingStatus';
 
 describe('useOnboardingStatus', () => {
   beforeEach(() => {
+    _resetOnboardingStatusCacheForTests();
     vi.restoreAllMocks();
   });
 

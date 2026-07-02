@@ -123,6 +123,15 @@ type FeedItem =
  * first-seen index as the chain's sort key. Standalone rows pass through
  * untouched, so the flag-off / single-action experience is unchanged.
  */
+/**
+ * Human label for an internal proposal-type id. The raw snake_case id
+ * (`draft_estimate`) leaked into the card header verbatim (QA 2026-07-02).
+ */
+function humanizeProposalType(proposalType: string): string {
+  const words = proposalType.replace(/_/g, ' ');
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
 function groupIntoFeed(rows: InboxProposalRow[]): FeedItem[] {
   const items: FeedItem[] = [];
   const chainItemByid = new Map<string, Extract<FeedItem, { kind: 'chain' }>>();
@@ -667,7 +676,7 @@ export function InboxPage() {
                       <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded border ${badge.classes}`}>
                         {badge.label}
                       </span>
-                      <span className="text-xs text-muted-foreground">{row.proposal.proposalType}</span>
+                      <span className="text-xs text-muted-foreground">{humanizeProposalType(row.proposal.proposalType)}</span>
                     </div>
                     <p className="text-sm text-foreground font-medium truncate">{row.proposal.summary}</p>
                     {holdExpiryLine(row, tz) && (
@@ -715,7 +724,7 @@ export function InboxPage() {
                         <span className="text-[10px] font-medium px-1.5 py-0.5 rounded border bg-secondary text-muted-foreground border-border">
                           Expired
                         </span>
-                        <span className="text-xs text-muted-foreground">{card.proposalType}</span>
+                        <span className="text-xs text-muted-foreground">{humanizeProposalType(card.proposalType)}</span>
                       </div>
                       <p className="text-sm text-foreground font-medium truncate">{card.summary}</p>
                     </div>

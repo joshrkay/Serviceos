@@ -395,7 +395,7 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
             <Mic size={14} className="text-white" />
           </span>
           <span className="flex-1 min-w-0">
-            <span className="block text-sm text-slate-400">Ask Rivet AI anything…</span>
+            <span className="block text-sm text-slate-400 truncate">Ask Rivet AI anything…</span>
             {/* U7 — rotating speakable-action example; tap anywhere to speak. */}
             <span
               data-testid="voice-example-hint"
@@ -406,7 +406,9 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
               Try: “{examples[exampleIndex].example}”
             </span>
           </span>
-          <span className="text-xs text-slate-300 shrink-0">tap to speak</span>
+          {/* The affix crushed the label into one-word-per-line wrapping in
+              the narrow desktop sidebar (QA 2026-07-02) — mobile only. */}
+          {!isDesktop && <span className="text-xs text-slate-300 shrink-0">tap to speak</span>}
         </button>
       )}
 

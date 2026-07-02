@@ -49,6 +49,45 @@ export interface UsePendingProposalsResult {
 const DEFAULT_POLL_MS = 30_000;
 
 /**
+ * Module-level network coalescing (QA 2026-07-02). The hook is mounted by
+ * the Shell badge on every page plus per-page cards (home mounts three
+ * instances), and each instance fired its own identical GET. The RESPONSE
+ * is shared; each instance still runs its own baseline/toast diffing over
+ * it. `refresh()` (post-approve) bypasses the TTL but still shares any
+ * in-flight request.
+ */
+const PENDING_CACHE_TTL_MS = 2000;
+type PendingFetch = (path: string) => Promise<Response>;
+let inflightPending: Promise<unknown> | null = null;
+let lastPending: { body: unknown; at: number } | null = null;
+
+async function fetchPendingCoalesced(apiFetch: PendingFetch, force: boolean): Promise<unknown> {
+  if (!force && lastPending && Date.now() - lastPending.at < PENDING_CACHE_TTL_MS) {
+    return lastPending.body;
+  }
+  if (!inflightPending) {
+    inflightPending = (async () => {
+      try {
+        const res = await apiFetch('/api/proposals?status=ready_for_review&limit=100');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const body = (await res.json()) as unknown;
+        lastPending = { body, at: Date.now() };
+        return body;
+      } finally {
+        inflightPending = null;
+      }
+    })();
+  }
+  return inflightPending;
+}
+
+/** Test-only: drop the module cache so test cases don't bleed into each other. */
+export function _resetPendingProposalsCacheForTests(): void {
+  inflightPending = null;
+  lastPending = null;
+}
+
+/**
  * P2-033 — Polls `/api/proposals?status=ready_for_review` for badge
  * counts + new-proposal notifications.
  *
@@ -98,14 +137,15 @@ export function usePendingProposals(
     apiFetchRef.current = apiFetch;
   }, [apiFetch]);
 
-  const fetchOnce = useCallback(async (): Promise<void> => {
+  const fetchOnce = useCallback(async (force = false): Promise<void> => {
     if (!enabled) return;
     setIsLoading(true);
     setError(null);
     try {
-      const res = await apiFetchRef.current('/api/proposals?status=ready_for_review&limit=100');
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const body = (await res.json()) as ListProposalsResponse & {
+      const body = (await fetchPendingCoalesced(
+        (path) => apiFetchRef.current(path),
+        force,
+      )) as ListProposalsResponse & {
         data?: Array<PendingProposalSummary & { expiresAt?: string | Date }>;
       };
       const list: PendingProposalSummary[] = (body.data ?? []).map((p) => ({
@@ -196,11 +236,13 @@ export function usePendingProposals(
     };
   }, [enabled, fetchOnce, pollIntervalMs]);
 
+  const refresh = useCallback(() => fetchOnce(true), [fetchOnce]);
+
   return {
     count: proposals.length,
     proposals,
     isLoading,
     error,
-    refresh: fetchOnce,
+    refresh,
   };
 }

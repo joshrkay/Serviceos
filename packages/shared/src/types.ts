@@ -41,6 +41,12 @@ export interface MeResponse {
   mode_changed_at: string | null;
   permissions: string[];
   backup_supervisor_user_id: string | null;
+  /**
+   * IANA business timezone from tenant_settings (the API always includes
+   * it, defaulting server-side when unset). Optional here so existing
+   * fixtures without it stay valid; consumers must handle absence.
+   */
+  timezone?: string;
   unsupervised_proposal_routing:
     | 'queue_and_sms'
     | 'queue_only'

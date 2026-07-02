@@ -83,7 +83,9 @@ export function JobsList() {
         <div className="flex items-center justify-between mb-4">
           <div>
             <h1 className="text-foreground">Jobs</h1>
-            <p className="text-xs text-muted-foreground mt-0.5">Mar 10, 2026</p>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              {new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+            </p>
           </div>
           <button
             onClick={() => setShowNew(true)}
