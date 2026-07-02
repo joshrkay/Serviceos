@@ -1,11 +1,15 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import { isCaptureProposalType } from '@ai-service-os/shared';
+import { Undo2, X } from 'lucide-react';
 import { useApiClient } from '../../lib/apiClient';
 import { emitProposalsChanged } from '../../lib/proposal-events';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
 import { formatInTenantTz } from '../../utils/formatInTenantTz';
 import { ProposalChainCard, ChainRow } from './ProposalChainCard';
 import { AmbiguityPicker, type AmbiguityCandidate } from './AmbiguityPicker';
+
+// D5: 5-second undo window for approvals (matches execution layer UNDO_WINDOW_MS)
+const UNDO_WINDOW_MS = 5000;
 
 type Urgency = 'critical' | 'high' | 'normal' | 'low';
 
@@ -411,6 +415,64 @@ export function InboxPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // D5: Undo toast state — shows after approve for 5 seconds
+  const [undoToast, setUndoToast] = useState<{
+    proposalId: string;
+    summary: string;
+    timeLeft: number;
+  } | null>(null);
+  const undoTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Clear undo timer on unmount
+  useEffect(() => {
+    return () => {
+      if (undoTimerRef.current) clearInterval(undoTimerRef.current);
+    };
+  }, []);
+
+  // Start the undo countdown
+  const startUndoToast = useCallback((proposalId: string, summary: string) => {
+    if (undoTimerRef.current) clearInterval(undoTimerRef.current);
+    setUndoToast({ proposalId, summary, timeLeft: UNDO_WINDOW_MS });
+    undoTimerRef.current = setInterval(() => {
+      setUndoToast((prev) => {
+        if (!prev) return null;
+        const newTimeLeft = prev.timeLeft - 100;
+        if (newTimeLeft <= 0) {
+          if (undoTimerRef.current) clearInterval(undoTimerRef.current);
+          return null;
+        }
+        return { ...prev, timeLeft: newTimeLeft };
+      });
+    }, 100);
+  }, []);
+
+  // D5: Undo an approved proposal
+  const undoApproval = useCallback(async (proposalId: string) => {
+    if (undoTimerRef.current) clearInterval(undoTimerRef.current);
+    setUndoToast(null);
+    try {
+      const res = await apiFetch(`/api/proposals/${proposalId}/undo`, { method: 'POST' });
+      if (!res.ok) {
+        const json = await res.json().catch(() => ({}));
+        throw new Error(json?.message ?? `HTTP ${res.status}`);
+      }
+      // Refresh the inbox to show the undone proposal
+      emitProposalsChanged();
+      // Trigger a re-fetch
+      const refreshRes = await apiFetch('/api/proposals/inbox');
+      if (refreshRes.ok) {
+        const body = (await refreshRes.json()) as InboxResponse;
+        setRows(body.data);
+        setSummary(body.summary);
+        setExpired(body.expired ?? []);
+        setFailed(body.failed ?? []);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Undo failed');
+    }
+  }, [apiFetch]);
+
   useEffect(() => {
     let cancelled = false;
     setIsLoading(true);
@@ -444,6 +506,10 @@ export function InboxPage() {
       const res = await apiFetch(`/api/proposals/${id}/${action}`, { method: 'POST' });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       emitProposalsChanged();
+      // D5: Show undo toast for approvals (5s window matching execution layer)
+      if (action === 'approve' && removed) {
+        startUndoToast(id, removed.proposal.summary);
+      }
     } catch (err) {
       if (removed) setRows((prev) => [removed, ...prev]);
       setError(err instanceof Error ? err.message : `${action} failed`);
@@ -793,6 +859,47 @@ export function InboxPage() {
           </div>
         )}
       </div>
+
+      {/* D5: Undo toast — shows for 5s after approval, matching execution layer undo window */}
+      {undoToast && (
+        <div
+          data-testid="undo-toast"
+          className="fixed bottom-20 md:bottom-6 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 rounded-xl border border-border bg-card shadow-lg px-4 py-3 min-w-[280px] max-w-[90vw]"
+          style={{ animation: 'slideUp 0.2s ease-out' }}
+        >
+          {/* Progress bar */}
+          <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-secondary rounded-b-xl overflow-hidden">
+            <div
+              className="h-full bg-warning transition-all ease-linear"
+              style={{ width: `${(undoToast.timeLeft / UNDO_WINDOW_MS) * 100}%`, transitionDuration: '100ms' }}
+            />
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-sm text-foreground truncate">{undoToast.summary}</p>
+            <p className="text-xs text-muted-foreground">
+              Approved · {Math.ceil(undoToast.timeLeft / 1000)}s to undo
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => undoApproval(undoToast.proposalId)}
+            className="flex items-center gap-1.5 rounded-lg bg-warning text-primary-foreground px-3 py-1.5 text-sm font-medium hover:bg-warning/90 shrink-0"
+          >
+            <Undo2 size={14} /> Undo
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              if (undoTimerRef.current) clearInterval(undoTimerRef.current);
+              setUndoToast(null);
+            }}
+            className="text-muted-foreground hover:text-foreground shrink-0"
+            aria-label="Dismiss"
+          >
+            <X size={14} />
+          </button>
+        </div>
+      )}
     </div>
   );
 }

@@ -3,10 +3,13 @@ import {
   X, Check, Send, Receipt,
   Phone, MessageSquare, Eye,
   MicOff, Mic, Volume2, PhoneOff,
+  AlertCircle,
 } from 'lucide-react';
+import { useNavigate } from 'react-router';
 import { estimates, invoices, calcEstimateTotal, calcInvoiceTotal } from '../../data/mock-data';
 import { StatusBadge } from '../shared/StatusBadge';
 import { EmptyState, Textarea } from '../ui';
+import { apiFetch } from '../../utils/api-fetch';
 
 // ─── Sheet Overlay ───────────────────────────────────────────────
 export function SheetOverlay({
@@ -30,27 +33,34 @@ export function SheetOverlay({
 }
 
 // ─── Call Screen ─────────────────────────────────────────────────
-export function CallScreen({ name, phone, initials, color, onEnd }: {
-  name: string; phone: string; initials: string; color: string; onEnd: () => void;
+// D1: Wire to real tel: link that opens native dialer and logs comms touch.
+export function CallScreen({ name, phone, initials, color, customerId, onEnd }: {
+  name: string; phone: string; initials: string; color: string; customerId?: string; onEnd: () => void;
 }) {
-  const [phase, setPhase] = useState<'calling' | 'active'>('calling');
-  const [seconds, setSeconds] = useState(0);
-  const [muted, setMuted] = useState(false);
-  const [speaker, setSpeaker] = useState(false);
+  const [phase, setPhase] = useState<'confirm' | 'calling'>('confirm');
+  const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    const t = setTimeout(() => setPhase('active'), 2200);
-    return () => clearTimeout(t);
-  }, []);
+  // Log a comms-timeline touch when call is initiated (best-effort)
+  async function logCallTouch() {
+    if (!customerId) return;
+    try {
+      await apiFetch(`/api/customers/${customerId}/timeline/touch`, {
+        method: 'POST',
+        body: JSON.stringify({ kind: 'call_outbound', phone }),
+      });
+    } catch {
+      // Best-effort — don't block the call
+    }
+  }
 
-  useEffect(() => {
-    if (phase !== 'active') return;
-    const t = setInterval(() => setSeconds(s => s + 1), 1000);
-    return () => clearInterval(t);
-  }, [phase]);
-
-  const fmt = (s: number) =>
-    `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+  function handleCallNow() {
+    setPhase('calling');
+    void logCallTouch();
+    // Use tel: to open native dialer
+    window.location.href = `tel:${phone.replace(/\D/g, '')}`;
+    // Auto-close after a short delay (user is now in phone app)
+    setTimeout(onEnd, 1500);
+  }
 
   return (
     <div
@@ -59,9 +69,8 @@ export function CallScreen({ name, phone, initials, color, onEnd }: {
     >
       <div className="flex flex-col items-center gap-1">
         <p className="text-muted-foreground text-sm tracking-widest uppercase" style={{ fontSize: 11 }}>
-          {phase === 'calling' ? 'Calling…' : 'Active call'}
+          {phase === 'confirm' ? 'Call customer' : 'Opening dialer…'}
         </p>
-        {phase === 'active' && <p className="text-primary-foreground text-sm tabular-nums">{fmt(seconds)}</p>}
       </div>
 
       <div className="flex flex-col items-center gap-4">
@@ -75,28 +84,41 @@ export function CallScreen({ name, phone, initials, color, onEnd }: {
           <p className="text-primary-foreground" style={{ fontSize: '1.4rem' }}>{name}</p>
           <p className="text-muted-foreground text-sm mt-1">{phone}</p>
         </div>
-        {phase === 'calling' && (
-          <div className="flex gap-1 mt-2">
-            {[0, 1, 2].map(i => (
-              <span key={i} className="w-2 h-2 rounded-full bg-primary"
-                style={{ animation: `callPulse 1.2s ease-in-out ${i * 0.3}s infinite` }} />
-            ))}
-          </div>
-        )}
       </div>
 
       <div className="w-full max-w-xs">
-        <div className="grid grid-cols-3 gap-4 mb-8">
-          <CallBtn icon={muted ? MicOff : Mic} label={muted ? 'Unmute' : 'Mute'} active={muted} onPress={() => setMuted(m => !m)} />
-          <CallBtn icon={Volume2} label="Speaker" active={speaker} onPress={() => setSpeaker(s => !s)} />
-          <CallBtn icon={MessageSquare} label="Keypad" onPress={() => {}} />
-        </div>
-        <button
-          onClick={onEnd}
-          className="flex items-center justify-center gap-2 w-full py-4 rounded-full bg-destructive text-primary-foreground hover:bg-destructive/90 transition-colors"
-        >
-          <PhoneOff size={22} /><span className="text-sm">End call</span>
-        </button>
+        {error && (
+          <div className="flex items-center gap-2 bg-destructive/20 border border-destructive/30 rounded-lg px-3 py-2 mb-4">
+            <AlertCircle size={14} className="text-destructive" />
+            <p className="text-xs text-destructive">{error}</p>
+          </div>
+        )}
+        {phase === 'confirm' ? (
+          <>
+            <button
+              onClick={handleCallNow}
+              className="flex items-center justify-center gap-2 w-full py-4 rounded-full bg-success text-primary-foreground hover:bg-success/90 transition-colors mb-3"
+            >
+              <Phone size={22} /><span className="text-sm">Call now</span>
+            </button>
+            <button
+              onClick={onEnd}
+              className="flex items-center justify-center gap-2 w-full py-3 rounded-full bg-card/10 text-muted-foreground hover:bg-card/20 transition-colors"
+            >
+              <span className="text-sm">Cancel</span>
+            </button>
+          </>
+        ) : (
+          <div className="flex flex-col items-center gap-3 py-4">
+            <div className="flex gap-1">
+              {[0, 1, 2].map(i => (
+                <span key={i} className="w-2 h-2 rounded-full bg-primary"
+                  style={{ animation: `callPulse 1.2s ease-in-out ${i * 0.3}s infinite` }} />
+              ))}
+            </div>
+            <p className="text-xs text-muted-foreground">Opening your phone app…</p>
+          </div>
+        )}
       </div>
 
       <style>{`@keyframes callPulse { 0%,100%{opacity:.3;transform:scale(.8)} 50%{opacity:1;transform:scale(1.2)} }`}</style>
@@ -104,25 +126,15 @@ export function CallScreen({ name, phone, initials, color, onEnd }: {
   );
 }
 
-function CallBtn({ icon: Icon, label, active, onPress }: {
-  icon: React.ElementType; label: string; active?: boolean; onPress: () => void;
-}) {
-  return (
-    <button onClick={onPress} className="flex flex-col items-center gap-2">
-      <span
-        className={`flex items-center justify-center rounded-full transition-colors ${active ? 'bg-card' : 'bg-card/10 hover:bg-card/20'}`}
-        style={{ width: 56, height: 56 }}
-      >
-        <Icon size={22} className={active ? 'text-foreground' : 'text-primary-foreground'} />
-      </span>
-      <span className="text-xs text-muted-foreground">{label}</span>
-    </button>
-  );
-}
-
 // ─── Text Sheet ──────────────────────────────────────────────────
-export function TextSheet({ name, phone, onClose }: { name: string; phone: string; onClose: () => void }) {
+// D1: Wire to open comms compose for the customer thread via real API
+export function TextSheet({ name, phone, customerId, onClose }: {
+  name: string; phone: string; customerId?: string; onClose: () => void;
+}) {
+  const navigate = useNavigate();
   const [message, setMessage] = useState('');
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [sent, setSent] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
   const first = name.split(' ')[0];
@@ -133,6 +145,56 @@ export function TextSheet({ name, phone, onClose }: { name: string; phone: strin
     `Hi ${first}, just confirming your appointment today.`,
   ];
 
+  async function handleSend() {
+    if (!message.trim()) return;
+    if (!customerId) {
+      setError('No customer linked to this job');
+      return;
+    }
+
+    setError(null);
+    setSending(true);
+
+    try {
+      // Get or create the customer conversation thread
+      const threadRes = await apiFetch(`/api/conversations/customer/${customerId}`, {
+        method: 'POST',
+      });
+      if (!threadRes.ok) {
+        const json = await threadRes.json().catch(() => ({}));
+        throw new Error(json?.message ?? `Failed to open thread: HTTP ${threadRes.status}`);
+      }
+      const { conversation } = await threadRes.json();
+
+      // Send the message via the reply endpoint
+      const replyRes = await apiFetch(`/api/conversations/${conversation.id}/reply`, {
+        method: 'POST',
+        body: JSON.stringify({ body: message.trim(), channel: 'sms' }),
+      });
+      if (!replyRes.ok) {
+        const json = await replyRes.json().catch(() => ({}));
+        throw new Error(json?.message ?? `Failed to send: HTTP ${replyRes.status}`);
+      }
+
+      setSent(true);
+      setTimeout(onClose, 1500);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to send message');
+    } finally {
+      setSending(false);
+    }
+  }
+
+  function handleOpenComms() {
+    if (!customerId) {
+      setError('No customer linked to this job');
+      return;
+    }
+    // Navigate to comms inbox filtered to this customer
+    navigate(`/inbox?customerId=${customerId}`);
+    onClose();
+  }
+
   return (
     <SheetOverlay onClose={onClose}>
       <div className="flex items-center justify-between mb-4">
@@ -142,6 +204,13 @@ export function TextSheet({ name, phone, onClose }: { name: string; phone: strin
         </div>
         <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-secondary"><X size={16} className="text-muted-foreground" /></button>
       </div>
+
+      {error && (
+        <div className="flex items-center gap-2 bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2 mb-4">
+          <AlertCircle size={14} className="text-destructive shrink-0" />
+          <p className="text-xs text-destructive">{error}</p>
+        </div>
+      )}
 
       {!sent ? (
         <>
@@ -165,11 +234,17 @@ export function TextSheet({ name, phone, onClose }: { name: string; phone: strin
             className="min-h-11 resize-none mb-3"
           />
           <button
-            onClick={() => { if (!message.trim()) return; setSent(true); setTimeout(onClose, 1500); }}
-            disabled={!message.trim()}
+            onClick={() => void handleSend()}
+            disabled={!message.trim() || sending}
             className="flex items-center justify-center gap-2 w-full py-3 rounded-xl bg-primary text-primary-foreground text-sm hover:bg-primary/90 transition-colors disabled:opacity-40"
           >
-            <Send size={14} /> Send message
+            <Send size={14} /> {sending ? 'Sending…' : 'Send message'}
+          </button>
+          <button
+            onClick={handleOpenComms}
+            className="flex items-center justify-center gap-2 w-full py-2.5 mt-2 rounded-xl border border-border text-foreground text-xs hover:bg-secondary transition-colors"
+          >
+            <MessageSquare size={12} /> Open full conversation
           </button>
         </>
       ) : (

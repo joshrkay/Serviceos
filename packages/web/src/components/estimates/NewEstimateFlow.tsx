@@ -157,18 +157,40 @@ const MANUAL_CATALOG: Record<ServiceType, CatalogItem[]> = {
   ],
 };
 
+// ─── AI suggestion error type ────────────────────────────────────────────────
+// D3: Fail-closed — on AI failure, return an error result instead of silently
+// falling back to mock prices. No invented prices on failure.
+interface AIResultSuccess {
+  success: true;
+  description: string;
+  items: AILineItem[];
+  explanation: string;
+  proposalId?: string;
+}
+interface AIResultError {
+  success: false;
+  error: string;
+}
+type SuggestEstimateResult = AIResultSuccess | AIResultError;
+
 // ─── AI suggestion call ──────────────────────────────────────────────────────
-// Posts to the real /api/estimates/suggest endpoint, which invokes
-// EstimateTaskHandler on the API and persists a draft_estimate proposal.
-// On any failure (no auth, 503 not-configured, network), falls back to
-// the local mock generator so the wizard remains usable in dev/demo.
-async function suggestEstimate(input: string, svcHint?: ServiceType): Promise<AIResult> {
+// D3: Posts to the real /api/estimates/suggest endpoint, which invokes
+// EstimateTaskHandler on the API. On ANY failure, returns an error result
+// so the UI can display a visible error state. No silent mock fallback —
+// all suggestions must be catalog-grounded.
+async function suggestEstimate(input: string, svcHint?: ServiceType): Promise<SuggestEstimateResult> {
   try {
     const res = await apiFetch('/api/estimates/suggest', {
       method: 'POST',
       body: JSON.stringify({ description: input, ...(svcHint ? { serviceType: svcHint } : {}) }),
     });
-    if (!res.ok) return generateEstimate(input, svcHint);
+    if (!res.ok) {
+      const json = await res.json().catch(() => ({}));
+      return {
+        success: false,
+        error: json?.message ?? `AI suggestion failed (${res.status})`,
+      };
+    }
     const data = (await res.json()) as {
       proposalId?: string;
       lineItems?: Array<{ description: string; quantity: number; unitPrice: number; category?: string }>;
@@ -180,15 +202,24 @@ async function suggestEstimate(input: string, svcHint?: ServiceType): Promise<AI
       rate: li.unitPrice,
       ...(li.category ? { note: li.category } : {}),
     }));
-    if (items.length === 0) return generateEstimate(input, svcHint);
+    if (items.length === 0) {
+      return {
+        success: false,
+        error: 'AI returned no line items. Try a more detailed description or build the estimate manually.',
+      };
+    }
     return {
+      success: true,
       description: input.length > 60 ? input.slice(0, 60) + '…' : input || 'Service',
       explanation: data.notes ?? '',
       items,
       ...(data.proposalId ? { proposalId: data.proposalId } : {}),
     };
-  } catch {
-    return generateEstimate(input, svcHint);
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : 'AI suggestion failed. Try building the estimate manually.',
+    };
   }
 }
 
@@ -459,10 +490,16 @@ function AIResultCard({ result, editable, onToggleEdit, onUpdateItems }: {
 }
 
 // ─── Voice input ──────────────────────────────────────────────────────────────
-function VoiceInput({ svcType, onResult }: { svcType?: ServiceType; onResult: (r: AIResult) => void }) {
+// D3: Updated to handle AI suggestion errors with visible error state
+function VoiceInput({ svcType, onResult, onError }: {
+  svcType?: ServiceType;
+  onResult: (r: AIResult) => void;
+  onError?: (error: string) => void;
+}) {
   const [phase,      setPhase]      = useState<VoicePhase>('idle');
   const [seconds,    setSeconds]    = useState(0);
   const [transcript, setTranscript] = useState('');
+  const [error,      setError]      = useState<string | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
@@ -529,9 +566,17 @@ function VoiceInput({ svcType, onResult }: { svcType?: ServiceType; onResult: (r
 
   function build() {
     setPhase('generating');
+    setError(null);
     void suggestEstimate(transcript, svcType).then(result => {
-      onResult(result);
-      setPhase('done');
+      if (result.success) {
+        onResult(result);
+        setPhase('done');
+      } else {
+        // D3: Show visible error state on AI failure — no invented prices
+        setError(result.error);
+        setPhase('transcribed'); // Go back to transcribed state to let user retry or go manual
+        onError?.(result.error);
+      }
     });
   }
 
@@ -579,6 +624,18 @@ function VoiceInput({ svcType, onResult }: { svcType?: ServiceType; onResult: (r
 
   if (phase === 'transcribed') return (
     <div className="flex flex-col gap-4 py-2">
+      {/* D3: Show visible error state on AI failure */}
+      {error && (
+        <div className="flex items-start gap-2.5 bg-destructive/10 border border-destructive/20 rounded-xl px-3 py-3">
+          <div className="flex size-6 items-center justify-center rounded-full bg-destructive/20 shrink-0 mt-0.5">
+            <X size={12} className="text-destructive" />
+          </div>
+          <div className="flex-1">
+            <p className="text-xs text-destructive mb-0.5">AI suggestion failed</p>
+            <p className="text-xs text-muted-foreground">{error}</p>
+          </div>
+        </div>
+      )}
       <div className="flex items-start gap-2.5">
         <div className="flex size-7 items-center justify-center rounded-full bg-primary shrink-0 mt-0.5">
           <Mic size={12} className="text-primary-foreground" />
@@ -589,13 +646,13 @@ function VoiceInput({ svcType, onResult }: { svcType?: ServiceType; onResult: (r
         </div>
       </div>
       <div className="flex gap-2">
-        <button onClick={() => { setPhase('idle'); setTranscript(''); }}
+        <button onClick={() => { setPhase('idle'); setTranscript(''); setError(null); }}
           className="flex items-center gap-1.5 rounded-xl border border-border px-3 py-2.5 text-sm text-foreground hover:bg-secondary transition-colors">
           <RotateCcw size={13} /> Re-record
         </button>
         <button onClick={build}
           className="flex-1 flex items-center justify-center gap-1.5 rounded-xl bg-primary text-primary-foreground py-2.5 text-sm hover:bg-primary transition-colors">
-          <Sparkles size={14} /> Build estimate
+          <Sparkles size={14} /> {error ? 'Retry' : 'Build estimate'}
         </button>
       </div>
     </div>
@@ -904,9 +961,15 @@ function ManualBuildInput({ svcType: initialSvc, onResult }: {
 }
 
 // ─── Photo input ──────────────────────────────────────────────────────────────
-function PhotoInput({ svcType, onResult }: { svcType?: ServiceType; onResult: (r: AIResult) => void }) {
+// D3: Updated to handle AI suggestion errors with visible error state
+function PhotoInput({ svcType, onResult, onError }: {
+  svcType?: ServiceType;
+  onResult: (r: AIResult) => void;
+  onError?: (error: string) => void;
+}) {
   const [phase,  setPhase]  = useState<PhotoPhase>('idle');
   const [photos, setPhotos] = useState<{ id: number; label: string }[]>([]);
+  const [error,  setError]  = useState<string | null>(null);
   const svc    = svcType ?? 'HVAC';
   const COLORS = ['bg-primary', 'bg-muted-foreground', 'bg-primary', 'bg-muted-foreground'];
 
@@ -917,15 +980,35 @@ function PhotoInput({ svcType, onResult }: { svcType?: ServiceType; onResult: (r
   }
   function analyze() {
     setPhase('analyzing');
+    setError(null);
     void suggestEstimate(PHOTO_PROMPTS[svc], svc).then(result => {
-      onResult(result);
-      setPhase('done');
+      if (result.success) {
+        onResult(result);
+        setPhase('done');
+      } else {
+        // D3: Show visible error state on AI failure — no invented prices
+        setError(result.error);
+        setPhase('idle');
+        onError?.(result.error);
+      }
     });
   }
 
   if (phase === 'idle' || phase === 'analyzing') return (
     <div className="flex flex-col gap-4 py-2">
       <p className="text-sm text-muted-foreground">Add photos of the job site or damaged equipment. AI identifies what's needed.</p>
+      {/* D3: Show visible error state on AI failure */}
+      {error && (
+        <div className="flex items-start gap-2.5 bg-destructive/10 border border-destructive/20 rounded-xl px-3 py-3">
+          <div className="flex size-6 items-center justify-center rounded-full bg-destructive/20 shrink-0 mt-0.5">
+            <X size={12} className="text-destructive" />
+          </div>
+          <div className="flex-1">
+            <p className="text-xs text-destructive mb-0.5">AI suggestion failed</p>
+            <p className="text-xs text-muted-foreground">{error}</p>
+          </div>
+        </div>
+      )}
       {photos.length > 0 && (
         <div className="grid grid-cols-2 gap-2">
           {photos.map((ph, i) => (

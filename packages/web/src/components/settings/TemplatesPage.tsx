@@ -904,9 +904,11 @@ export function LiveTemplatesSection() {
 }
 
 // ─── Main Page ────────────────────────────────────────────────────────────────
+// D2: Removed fabricated AI suggestions, stats, and community insights.
+// Only the LiveTemplatesSection (backend-backed) is shown. Other sections
+// are marked "coming soon" until real data pipelines are integrated.
 export function TemplatesPage() {
   const navigate = useNavigate();
-  const [suggestions, setSuggestions] = useState<AISuggestion[]>(INITIAL_SUGGESTIONS);
   const [digestOpen, setDigestOpen] = useState(false);
   const [digest, setDigest] = useState<DigestSettings>({
     enabled: true,
@@ -915,17 +917,6 @@ export function TemplatesPage() {
     includeAiSuggestions: true,
     includeCommunityTips: true,
   });
-
-  const pendingCount = suggestions.filter(s => s.status === 'pending').length;
-  const jobsProcessed = 47;
-  const nextRefinementJobs = 5;
-
-  function accept(id: string) {
-    setSuggestions(prev => prev.map(s => s.id === id ? { ...s, status: 'accepted' } : s));
-  }
-  function skip(id: string) {
-    setSuggestions(prev => prev.map(s => s.id === id ? { ...s, status: 'skipped' } : s));
-  }
 
   return (
     <div className="h-full overflow-y-auto pb-24 md:pb-8" style={{ scrollbarWidth: 'thin' }}>
@@ -943,123 +934,44 @@ export function TemplatesPage() {
         <div className="mb-6">
           <h1 className="text-slate-900" style={{ fontSize: '1.2rem' }}>Templates & Customization</h1>
           <p className="text-sm text-slate-400 mt-1">
-            Your templates are alive — they grow with your business.
+            Configure your business templates for estimates, invoices, and communications.
           </p>
         </div>
 
-        {/* ── How the loop works ── */}
-        <div className="rounded-2xl bg-white border border-slate-200 overflow-hidden mb-5">
-          <div className="px-5 pt-5 pb-4">
-            <div className="flex items-center gap-2 mb-3">
-              <RefreshCw size={14} className="text-indigo-500" />
-              <p className="text-sm text-slate-800">How your templates improve over time</p>
-            </div>
-            <LoopDiagram />
+        {/* ── P4-014 — Live templates (backend-backed). This is the real,
+            backend-persisted template editor. ── */}
+        <LiveTemplatesSection />
+
+        {/* ── AI Suggestions — Coming Soon ── */}
+        <div className="mb-6">
+          <div className="flex items-center gap-2 mb-3">
+            <Sparkles size={14} className="text-slate-400" />
+            <p className="text-sm text-slate-700">AI-powered suggestions</p>
+            <span className="text-xs text-amber-600 bg-amber-100 rounded-full px-2 py-0.5">Coming soon</span>
           </div>
-          <div className="border-t border-slate-100 px-5 py-3 bg-slate-50 flex items-center justify-between">
-            <div className="flex items-center gap-4">
-              <div className="flex items-center gap-1.5">
-                <span className="size-2 rounded-full bg-green-500" />
-                <p className="text-xs text-slate-500">{jobsProcessed} jobs processed</p>
-              </div>
-              <div className="flex items-center gap-1.5">
-                <Sparkles size={11} className="text-indigo-400" />
-                <p className="text-xs text-slate-500">{pendingCount} suggestions waiting</p>
-              </div>
-            </div>
-            <p className="text-xs text-slate-400">
-              Next check after {nextRefinementJobs} more jobs
+          <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-8 text-center">
+            <Sparkles size={24} className="text-slate-300 mx-auto mb-2" />
+            <p className="text-sm text-slate-600">Template refinement suggestions</p>
+            <p className="text-xs text-slate-400 mt-1 max-w-sm mx-auto">
+              Once you've processed more jobs, Rivet will analyze your usage patterns and suggest template improvements.
             </p>
           </div>
         </div>
 
-        {/* ── AI Learning Status ── */}
-        <div className="grid grid-cols-3 gap-3 mb-5">
-          {[
-            { icon: Sparkles, label: 'Onboarding',   value: 'Complete',        color: 'text-green-600',  bg: 'bg-green-50  border-green-100'  },
-            { icon: BarChart2, label: 'Jobs learned', value: `${jobsProcessed}`, color: 'text-blue-600',  bg: 'bg-blue-50   border-blue-100'   },
-            { icon: Star,      label: 'Refinements',  value: `${TEMPLATES.reduce((s,t)=>s+t.refinementCount,0)}`, color: 'text-violet-600', bg: 'bg-violet-50 border-violet-100' },
-          ].map(({ icon: Icon, label, value, color, bg }) => (
-            <div key={label} className={`rounded-xl border px-3 py-3.5 ${bg}`}>
-              <Icon size={13} className={`${color} mb-1.5`} />
-              <p className={`${color}`}>{value}</p>
-              <p className="text-xs text-slate-400 mt-0.5">{label}</p>
-            </div>
-          ))}
-        </div>
-
-        {/* ── Pending AI Suggestions ── */}
-        <div className="mb-6">
-          <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-2">
-              <p className="text-sm text-slate-700">Suggested refinements</p>
-              {pendingCount > 0 && (
-                <span className="flex size-5 items-center justify-center rounded-full bg-blue-600 text-white" style={{ fontSize: 10 }}>
-                  {pendingCount}
-                </span>
-              )}
-            </div>
-            <div className="flex items-center gap-3">
-              <span className="text-xs text-blue-600 bg-blue-100 rounded-full px-2 py-0.5">From usage</span>
-              <span className="text-xs text-amber-600 bg-amber-100 rounded-full px-2 py-0.5">From community</span>
-            </div>
-          </div>
-
-          {pendingCount === 0 ? (
-            <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-8 text-center">
-              <CheckCircle2 size={24} className="text-green-400 mx-auto mb-2" />
-              <p className="text-sm text-slate-600">All caught up</p>
-              <p className="text-xs text-slate-400 mt-1">New suggestions appear after {nextRefinementJobs} more jobs</p>
-            </div>
-          ) : (
-            <div className="flex flex-col gap-3">
-              {suggestions.map(s => (
-                <SuggestionCard
-                  key={s.id}
-                  suggestion={s}
-                  onAccept={() => accept(s.id)}
-                  onSkip={() => skip(s.id)}
-                />
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* ── P4-014 — Live templates (backend-backed). This is the real,
-            backend-persisted template editor; the prior mock "Your templates"
-            section + TemplateDetailModal (which falsely claimed edits went
-            live while making no API call) were removed in favor of it. ── */}
-        <LiveTemplatesSection />
-
-        {/* ── Community Insights ── */}
+        {/* ── Community Insights — Coming Soon ── */}
         <div className="mb-6">
           <div className="flex items-center gap-2 mb-3">
             <Globe size={14} className="text-slate-400" />
-            <p className="text-sm text-slate-700">From businesses like yours</p>
-            <span className="text-xs text-slate-400 bg-slate-100 rounded-full px-2 py-0.5">Anonymous · aggregated</span>
+            <p className="text-sm text-slate-700">Community insights</p>
+            <span className="text-xs text-amber-600 bg-amber-100 rounded-full px-2 py-0.5">Coming soon</span>
           </div>
-          <div className="flex flex-col gap-3">
-            {COMMUNITY_INSIGHTS.map((insight, i) => (
-              <div key={i} className={`rounded-xl border px-4 py-4 ${insight.color}`}>
-                <div className="flex items-start gap-3">
-                  <span className="text-xl shrink-0 mt-0.5">{insight.icon}</span>
-                  <div className="flex-1">
-                    <div className="flex items-center gap-2 mb-1">
-                      <span className={`text-xs rounded-full bg-white/70 px-2 py-0.5 ${insight.textColor}`}>{insight.trade}</span>
-                      <span className={`${insight.textColor}`}>{insight.stat}</span>
-                    </div>
-                    <p className="text-xs text-slate-600 leading-relaxed">{insight.text}</p>
-                    <button className={`mt-2 text-xs ${insight.textColor} hover:underline`}>
-                      {insight.action} →
-                    </button>
-                  </div>
-                </div>
-              </div>
-            ))}
+          <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-8 text-center">
+            <Users size={24} className="text-slate-300 mx-auto mb-2" />
+            <p className="text-sm text-slate-600">Insights from similar businesses</p>
+            <p className="text-xs text-slate-400 mt-1 max-w-sm mx-auto">
+              See what's working for other businesses in your trade — anonymized and aggregated.
+            </p>
           </div>
-          <p className="text-xs text-slate-400 mt-2 px-1">
-            Insights are shared anonymously across Rivet tenants in the same trade. No identifying information is shared.
-          </p>
         </div>
 
         {/* ── Weekly Digest ── */}

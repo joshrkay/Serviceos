@@ -72,6 +72,8 @@ function AddCustomerSheet({ onClose, onNewEstimate, onNewJob, existingCustomers,
     name: '', phone: '', email: '', source: '',
     locNickname: 'Home', locAddress: '', locServiceTypes: [] as ServiceType[],
     locNotes: '', locAccessCode: '',
+    // D4: SMS consent capture
+    smsConsent: false,
   });
   const [dismissedDupe, setDismissedDupe] = useState(false);
 
@@ -343,6 +345,23 @@ function AddCustomerSheet({ onClose, onNewEstimate, onNewJob, existingCustomers,
                 />
               </div>
 
+              {/* D4: SMS consent checkbox */}
+              <div className="flex items-start gap-3 rounded-xl border border-border bg-secondary/30 p-3">
+                <input
+                  type="checkbox"
+                  id="smsConsentCreate"
+                  checked={form.smsConsent}
+                  onChange={(e) => setForm(f => ({ ...f, smsConsent: e.target.checked }))}
+                  className="mt-0.5 h-4 w-4 rounded border-border text-primary focus:ring-primary"
+                />
+                <label htmlFor="smsConsentCreate" className="flex-1 cursor-pointer">
+                  <span className="text-sm text-foreground">SMS consent</span>
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    Customer agrees to receive text messages for appointments, estimates, and invoices.
+                  </p>
+                </label>
+              </div>
+
               <button
                 onClick={async () => {
                   const nameParts = form.name.trim().split(' ');
@@ -352,6 +371,8 @@ function AddCustomerSheet({ onClose, onNewEstimate, onNewJob, existingCustomers,
                     primaryPhone: form.phone || undefined,
                     email: form.email || undefined,
                     source: form.source || undefined,
+                    // D4: Include SMS consent in create
+                    smsConsent: form.smsConsent,
                   });
                   const address = splitAddress(form.locAddress);
                   await createLocation({
