@@ -146,6 +146,18 @@ describe('scheduleJob — dispatch board Issue 2 (job → appointment)', () => {
     expect(await appointmentRepo.findByJob(TENANT, job.id)).toHaveLength(0);
   });
 
+  it('accepts any valid IANA timezone the tenant may be configured with', async () => {
+    // Settings validates tenant tz via isValidIanaTimezone, so a tenant can be on
+    // a zone outside the appointment module's dropdown list (e.g. America/Adak).
+    // Scheduling must still create the appointment rather than silently drop it.
+    const job = await newJob();
+    const { appointment } = await scheduleJob(deps, {
+      tenantId: TENANT, jobId: job.id, scheduledStart: START, timezone: 'America/Adak', actorId: 'u-1',
+    });
+    expect(appointment.timezone).toBe('America/Adak');
+    expect(await appointmentRepo.findByJob(TENANT, job.id)).toHaveLength(1);
+  });
+
   it('rejects an end at or before the start', async () => {
     const job = await newJob();
     await expect(
