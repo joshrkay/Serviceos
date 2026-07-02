@@ -65,7 +65,9 @@
     "voice-eval:intent": "tsx packages/voice-eval/run-intent-eval.ts",
     "voice-eval:slot": "tsx packages/voice-eval/run-slot-eval.ts",
     "loadtest:http": "tsx loadtest/http-load.ts",
-    "loadtest:http:selfcheck": "tsx loadtest/http-load-selfcheck.ts"
+    "loadtest:http:selfcheck": "tsx loadtest/http-load-selfcheck.ts",
+    "loadtest:mixed": "tsx loadtest/mixed-1000.ts",
+    "loadtest:mixed:selfcheck": "tsx loadtest/mixed-1000-selfcheck.ts"
   },
   "devDependencies": {
     "@clerk/testing": "^2.0.27",

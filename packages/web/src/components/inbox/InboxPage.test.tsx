@@ -191,6 +191,72 @@ describe('InboxPage', () => {
     expect(screen.getByTestId('severity-badge')).toHaveTextContent('Emergency');
   });
 
+  it('renders a "Standing instruction applied" chip per applied instruction (UB-A3)', async () => {
+    apiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        data: [
+          {
+            proposal: {
+              id: 'p-si',
+              proposalType: 'draft_estimate',
+              summary: 'Estimate for the Nguyen job',
+              status: 'draft',
+              createdAt: new Date().toISOString(),
+              payload: {
+                _meta: {
+                  overallConfidence: 'high',
+                  appliedStandingInstructions: [
+                    { id: 'si-1', text: 'Always add a $50 trip fee' },
+                    { id: 'si-2', text: 'Mention the referral discount' },
+                  ],
+                },
+                lineItems: [{ id: 'l1', description: 'Water heater install', pricingSource: 'catalog' }],
+              },
+            },
+            urgency: 'normal',
+            reason: 'Awaiting review',
+          },
+        ],
+        summary: { totalCount: 1, criticalCount: 0, highCount: 0, normalCount: 1, lowCount: 0, truncated: false },
+      }),
+    );
+
+    render(<InboxPage />);
+
+    await waitFor(() => screen.getByText('Estimate for the Nguyen job'));
+    const chips = screen.getAllByTestId('standing-instruction-chip');
+    expect(chips).toHaveLength(2);
+    expect(chips[0]).toHaveTextContent('Standing instruction applied: Always add a $50 trip fee');
+    expect(chips[1]).toHaveTextContent('Standing instruction applied: Mention the referral discount');
+  });
+
+  it('renders no standing-instruction chip when _meta carries none (UB-A3)', async () => {
+    apiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        data: [
+          {
+            proposal: {
+              id: 'p-no-si',
+              proposalType: 'draft_estimate',
+              summary: 'Estimate without instructions',
+              status: 'draft',
+              createdAt: new Date().toISOString(),
+              payload: { _meta: { overallConfidence: 'high' } },
+            },
+            urgency: 'normal',
+            reason: 'Awaiting review',
+          },
+        ],
+        summary: { totalCount: 1, criticalCount: 0, highCount: 0, normalCount: 1, lowCount: 0, truncated: false },
+      }),
+    );
+
+    render(<InboxPage />);
+
+    await waitFor(() => screen.getByText('Estimate without instructions'));
+    expect(screen.queryByTestId('standing-instruction-chip')).not.toBeInTheDocument();
+  });
+
   it('resolving an ambiguous line POSTs resolve-line and merges the returned proposal (U2)', async () => {
     apiFetch.mockResolvedValueOnce(
       jsonResponse({

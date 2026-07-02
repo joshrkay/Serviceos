@@ -83,6 +83,8 @@ import {
 import { dispatchEstimateNudge } from '../../estimates/estimate-nudge';
 import type { SendService } from '../../notifications/send-service';
 import type { DispatchRepository } from '../../notifications/dispatch-repository';
+import { CreateStandingInstructionExecutionHandler } from './standing-instruction-handler';
+import type { StandingInstructionRepository } from '../../instructions/standing-instructions';
 
 export interface ExecutionContext {
   tenantId: string;
@@ -737,6 +739,9 @@ export function createExecutionHandlerRegistry(deps?: {
   // documented on the handler.
   sendService?: Pick<SendService, 'sendEstimate'>;
   dispatchRepo?: DispatchRepository;
+  // UB-A2 — create_standing_instruction inserts via the UB-A1 repo.
+  // Absent → the handler degrades to a synthetic-id passthrough.
+  standingInstructionRepo?: StandingInstructionRepository;
 }): Map<ProposalType, ExecutionHandler> {
   // §6 Time-to-Cash. Built once; passed to the handlers that call the
   // widened money-mutation domain functions (recordPayment, issueInvoice).
@@ -845,6 +850,14 @@ export function createExecutionHandlerRegistry(deps?: {
     // path; degrades to a synthetic-id passthrough when comms is absent.
     new SendPaymentReminderExecutionHandler(
       deps?.transactionalComms,
+      deps?.auditRepo,
+    ),
+    // UB-A2 — create_standing_instruction: inserts the approved directive via
+    // the UB-A1 domain service (500-char cap, scope validation, 20-active
+    // cap, standing_instruction.created audit). Capture-class, but the voice
+    // task never passes a trust tier, so it only ever runs after a human tap.
+    new CreateStandingInstructionExecutionHandler(
+      deps?.standingInstructionRepo,
       deps?.auditRepo,
     ),
   ];

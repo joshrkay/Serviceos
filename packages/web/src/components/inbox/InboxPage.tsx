@@ -24,6 +24,9 @@ interface ProposalMeta {
   overallConfidence?: ConfidenceLevel;
   severity?: ProposalSeverity;
   markers?: Array<{ path: string; reason: string }>;
+  // UB-A3 — owner standing instructions the drafting AI applied (server-side
+  // intersected with what was injected; ids are never model-invented).
+  appliedStandingInstructions?: Array<{ id: string; text: string }>;
 }
 
 // §6.4-B (U5) — compact severity badge for the inbox review row. The inbox (not
@@ -253,6 +256,8 @@ function ProposalMarkers({
   const catalogResolution = row.proposal.sourceContext?.catalogResolution ?? {};
   const markers = meta?.markers ?? [];
   const severity = meta?.severity;
+  // UB-A3 — "Standing instruction applied" chips.
+  const appliedInstructions = meta?.appliedStandingInstructions ?? [];
   const flagged = lineItems
     .map((li, idx) => ({ li, idx }))
     .filter(({ li }) => li.pricingSource && li.pricingSource !== 'catalog');
@@ -272,6 +277,7 @@ function ProposalMarkers({
     flagged.length === 0 &&
     markers.length === 0 &&
     !severity &&
+    appliedInstructions.length === 0 &&
     entityCandidates.length === 0
   )
     return null;
@@ -319,6 +325,21 @@ function ProposalMarkers({
           {m.reason}
         </p>
       ))}
+
+      {/* UB-A3 — passive chip per owner standing instruction the draft applied. */}
+      {appliedInstructions.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {appliedInstructions.map((si) => (
+            <span
+              key={si.id}
+              data-testid="standing-instruction-chip"
+              className="inline-flex max-w-full items-center truncate rounded-full border border-border bg-secondary px-2 py-0.5 text-[10px] text-muted-foreground"
+            >
+              Standing instruction applied: {si.text}
+            </span>
+          ))}
+        </div>
+      )}
 
       {flagged
         .filter(

@@ -90,6 +90,9 @@ const TYPE_PRIORITY: Record<ProposalType, number> = {
   // Same tier as record_payment / send_invoice.
   send_payment_reminder: 1,
   apply_late_fee: 1,
+  // UB-A2 — standing instructions are back-office policy capture; they gate
+  // no same-day work. Same low tier as notes.
+  create_standing_instruction: 5,
 };
 
 export function getUrgency(proposal: Proposal): { urgency: PrioritizedProposal['urgency']; reason: string } {

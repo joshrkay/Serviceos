@@ -1,5 +1,5 @@
 {
-  "description": "Voice-parity — 10 Spanish (es) inbound-CSR fixtures spanning the booking/capture intents an SMB HVAC/plumbing CSR handles. Each fixture is a single-turn call: the caller speaks Spanish, the (scripted) classifier returns the canned intent + entities, and the agent should draft a proposal (a 'booking/capture') and respond in Spanish. Consumed by packages/api/test/voice/spanish-booking-rate.test.ts.",
+  "description": "Voice-parity — 12 Spanish (es) inbound-CSR fixtures spanning the booking/capture intents an SMB HVAC/plumbing CSR handles. Each fixture is a single-turn call: the caller speaks Spanish, the (scripted) classifier returns the canned intent + entities, and the agent should draft a proposal (a 'booking/capture') and respond in Spanish. Consumed by packages/api/test/voice/spanish-booking-rate.test.ts.",
   "fixtures": [
     {
       "id": "es-create-appointment-water-heater",
@@ -128,7 +128,9 @@
         "confidence": 0.88,
         "extractedEntities": {
           "customerName": "Diego Flores",
-          "lineItemDescriptions": ["instalación de termostato inteligente"]
+          "lineItemDescriptions": [
+            "instalación de termostato inteligente"
+          ]
         }
       }
     },
@@ -143,6 +145,35 @@
         "extractedEntities": {
           "customerName": "Valeria Castro",
           "address": "742 Calle Roble, Austin"
+        }
+      }
+    },
+    {
+      "id": "es-create-appointment-mini-split",
+      "intent": "create_appointment",
+      "expectsBooking": true,
+      "callerUtterance": "Buenas tardes, quiero reservar una visita para instalar un mini split en la sala. ¿Tienen espacio el viernes por la mañana?",
+      "classifier": {
+        "intentType": "create_appointment",
+        "confidence": 0.92,
+        "extractedEntities": {
+          "customerName": "Ana Torres",
+          "dateTimeDescription": "el viernes por la mañana",
+          "service": "instalación de mini split"
+        }
+      }
+    },
+    {
+      "id": "es-draft-estimate-water-softener",
+      "intent": "draft_estimate",
+      "expectsBooking": true,
+      "callerUtterance": "Necesito un presupuesto para instalar un ablandador de agua en mi casa. ¿Cuánto costaría más o menos?",
+      "classifier": {
+        "intentType": "draft_estimate",
+        "confidence": 0.9,
+        "extractedEntities": {
+          "customerName": "Miguel Ángel Soto",
+          "service": "instalación de ablandador de agua"
         }
       }
     }

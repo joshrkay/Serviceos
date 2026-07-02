@@ -35,9 +35,8 @@ export interface EndpointSpec {
   method?: 'GET';
 }
 
-export interface LoadOptions {
-  url: string;
-  token?: string;
+/** Ramp → hold → ramp-down schedule, shared with the mixed harness (mixed-1000.ts). */
+export interface Schedule {
   /** Peak concurrent VUs. */
   max: number;
   /** Ramp-up seconds (0 → max). */
@@ -46,6 +45,11 @@ export interface LoadOptions {
   holdSeconds: number;
   /** Ramp-down seconds (max → 0). */
   rampdownSeconds: number;
+}
+
+export interface LoadOptions extends Schedule {
+  url: string;
+  token?: string;
   endpoints: EndpointSpec[];
   /** Status codes that do NOT count as errors (besides 2xx). E.g. 401 when unauthenticated is expected. */
   allowStatuses: number[];
@@ -90,7 +94,7 @@ export interface LoadReport {
   thresholds: { p95Under2000: boolean; errorUnder1pct: boolean; passed: boolean };
 }
 
-function percentile(sortedAsc: number[], p: number): number {
+export function percentile(sortedAsc: number[], p: number): number {
   if (sortedAsc.length === 0) return 0;
   const idx = Math.min(sortedAsc.length - 1, Math.ceil((p / 100) * sortedAsc.length) - 1);
   return sortedAsc[Math.max(0, idx)];
@@ -152,7 +156,7 @@ function request(
 }
 
 /** Target number of active VUs at elapsed time `t` (seconds) given the schedule. */
-export function targetConcurrency(t: number, o: LoadOptions): number {
+export function targetConcurrency(t: number, o: Schedule): number {
   const { max, rampSeconds, holdSeconds, rampdownSeconds } = o;
   if (t < rampSeconds) return rampSeconds === 0 ? max : Math.ceil((t / rampSeconds) * max);
   if (t < rampSeconds + holdSeconds) return max;

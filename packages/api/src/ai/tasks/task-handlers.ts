@@ -1,4 +1,5 @@
 import { Proposal, CreateProposalInput, createProposal, ProposalType } from '../../proposals/proposal';
+import type { InjectedStandingInstruction } from '../standing-instructions-context';
 
 export interface TaskContext {
   tenantId: string;
@@ -64,6 +65,16 @@ export interface TaskContext {
    * (undefined) → treated as 0 (first pass).
    */
   clarificationCount?: number;
+  /**
+   * UB-A3 — owner standing instructions applicable to this task, resolved
+   * best-effort ONCE per request by the entry point (voice-action-router /
+   * assistant chat) via `listActive` → `selectApplicableInstructions` (≤5)
+   * keyed on the classified intent. Drafting handlers inject them as a
+   * delimited system-message section that adjusts draft CONTENT only —
+   * never approvals, confidence, or pricing grounding. Resolver failure
+   * leaves this undefined and never blocks the task.
+   */
+  standingInstructions?: InjectedStandingInstruction[];
 }
 
 export interface TaskResult {

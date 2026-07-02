@@ -1,0 +1,84 @@
+{
+  "id": "es-explicit-switch-back-en",
+  "bucket": "11-spanish",
+  "callerId": "+15555551103",
+  "callerIdBlocked": false,
+  "fixtures": {
+    "tenant": {
+      "id": "t_11_es_switchback",
+      "display_name": "Test HVAC Co",
+      "timezone": "America/Los_Angeles",
+      "default_language": "es",
+      "supported_languages": ["en", "es"]
+    },
+    "customers": [
+      {
+        "id": "cust_11_es_lucia",
+        "tenantId": "t_11_es_switchback",
+        "firstName": "Lucía",
+        "lastName": "Fernández",
+        "displayName": "Lucía Fernández",
+        "companyName": null,
+        "primaryPhone": "+15555551103",
+        "secondaryPhone": null,
+        "email": "lucia.fernandez@example.com",
+        "preferredChannel": "phone",
+        "preferredLanguage": "es",
+        "smsConsent": false,
+        "communicationNotes": null,
+        "isArchived": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-02-01T10:00:00.000Z",
+        "updatedAt": "2026-04-01T10:00:00.000Z"
+      }
+    ],
+    "invoices": [
+      {
+        "id": "inv_11_es_open_1",
+        "tenantId": "t_11_es_switchback",
+        "customerId": "cust_11_es_lucia",
+        "status": "sent",
+        "totalCents": 18500,
+        "balanceDueCents": 18500,
+        "issuedAt": "2026-06-01T10:00:00.000Z",
+        "createdBy": "user_seed",
+        "createdAt": "2026-06-01T10:00:00.000Z",
+        "updatedAt": "2026-06-01T10:00:00.000Z"
+      }
+    ]
+  },
+  "turns": [
+    {
+      "caller": "Hola, ¿cuánto debo en mi cuenta actualmente?",
+      "expected": {
+        "intent": "lookup_invoices",
+        "spokenAnswerMatches": "Actualmente debe 185 dólares en una factura abierta.",
+        "escalates": false
+      },
+      "hangupAfter": false
+    },
+    {
+      "caller": "Actually, can we switch to english please?",
+      "expected": {
+        "intent": "language_switch",
+        "spokenAnswerMatches": "Okay, let's continue in English. How can I help you?",
+        "escalates": false
+      },
+      "hangupAfter": false
+    },
+    {
+      "caller": "Great — when is that invoice due?",
+      "expected": {
+        "intent": "lookup_invoices",
+        "spokenAnswerMatches": "You have one open invoice for 185 dollars.",
+        "escalates": false
+      },
+      "hangupAfter": true
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 3, 4, 5],
+    "appliesDisposition": [9, 12]
+  },
+  "layer2Eligible": false
+}

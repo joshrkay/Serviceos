@@ -16,6 +16,10 @@ import {
 } from '../scheduling/resolve-datetime';
 import { voiceHoldIdempotencyKey } from '../../voice/voice-audit';
 import { appointmentTypeSchema, type AppointmentTypeValue } from '@ai-service-os/shared';
+import {
+  buildStandingInstructionsSection,
+  intersectAppliedStandingInstructions,
+} from '../standing-instructions-context';
 
 /**
  * LLM-backed CreateAppointmentTaskHandler.
@@ -318,12 +322,26 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
     const timezone = context.timezone ?? DEFAULT_TENANT_TIMEZONE;
     const now = context.now ?? new Date();
 
+    // UB-A3 — owner standing instructions ride a SEPARATE, delimited system
+    // message (mirroring the classifier's vertical-context injection) so the
+    // base prompt stays byte-identical when none apply. Content-only: the
+    // section itself forbids approval/confidence/schema/pricing overrides.
+    const systemMessages: Array<{ role: 'system'; content: string }> = [
+      { role: 'system', content: APPOINTMENT_SYSTEM_PROMPT },
+    ];
+    const injectedInstructions = context.standingInstructions ?? [];
+    if (injectedInstructions.length > 0) {
+      systemMessages.push({
+        role: 'system',
+        content: buildStandingInstructionsSection(injectedInstructions, {
+          requestAppliedIds: true,
+        }),
+      });
+    }
+
     const llmResponse = await this.gateway.complete({
       taskType: 'create_appointment',
-      messages: [
-        { role: 'system', content: APPOINTMENT_SYSTEM_PROMPT },
-        { role: 'user', content: this.buildUserMessage(context) },
-      ],
+      messages: [...systemMessages, { role: 'user', content: this.buildUserMessage(context) }],
       responseFormat: 'json',
     });
 
@@ -367,8 +385,17 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
     // RV-007 — Confidence Marker `_meta`: the task confidence score
     // mapped onto the shared level vocabulary. This handler has no
     // per-field certainty signal, so overall-only is correct.
+    // UB-A3 — applied-instruction marker: the model's claimed ids are
+    // INTERSECTED with what was injected (never trust invented ids) and the
+    // field is dropped entirely when empty. The held-slot create_booking
+    // path below reuses this same meta object, so the marker rides both.
+    const appliedStandingInstructions = intersectAppliedStandingInstructions(
+      parsed?.appliedStandingInstructions,
+      injectedInstructions,
+    );
     const meta: ProposalConfidenceMeta = {
       overallConfidence: getConfidenceLevel(confidence.score),
+      ...(appliedStandingInstructions.length > 0 ? { appliedStandingInstructions } : {}),
     };
     payload._meta = meta;
 

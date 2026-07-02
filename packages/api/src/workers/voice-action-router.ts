@@ -56,6 +56,8 @@ import {
 import { InvoiceEditTaskHandler } from '../ai/tasks/invoice-edit-task';
 import { EstimateEditTaskHandler } from '../ai/tasks/estimate-edit-task';
 import { CreateCustomerTaskHandler, TaskHandler, TaskContext, TaskResult } from '../ai/tasks/task-handlers';
+import type { StandingInstruction } from '../instructions/standing-instructions';
+import { selectInjectedStandingInstructions } from '../ai/standing-instructions-context';
 import {
   RescheduleAppointmentTaskHandler,
   CancelAppointmentTaskHandler,
@@ -81,7 +83,12 @@ import {
   NotifyDelayTaskHandler,
   RequestFeedbackTaskHandler,
   BatchInvoiceTaskHandler,
+  CreateInvoiceScheduleTaskHandler,
 } from '../ai/tasks/voice-extended-tasks';
+import { RespondToReviewTaskHandler } from '../ai/tasks/review-response-task';
+import { CreateStandingInstructionTaskHandler } from '../ai/tasks/standing-instruction-task';
+import type { ReviewRepository } from '../reputation/review';
+import type { BuildReviewResponseProposalDeps } from '../reputation/build-proposal';
 import { instrument } from '../monitoring/instrumentation';
 import {
   ComplaintTaskHandler,
@@ -233,6 +240,15 @@ export interface VoiceActionRouterDeps {
    */
   verticalPromptResolver?: (tenantId: string) => Promise<string | undefined>;
   /**
+   * UB-A3 — resolves the tenant's ACTIVE standing instructions once per
+   * request (production wires `standingInstructionRepo.listActive`).
+   * `selectApplicableInstructions` (≤5) then narrows per classified intent
+   * inside processSegment and the slice rides TaskContext into the drafting
+   * handlers. Mirrors `verticalPromptResolver`: optional, failure-soft — a
+   * resolver error drafts without instructions, never blocks the task.
+   */
+  standingInstructionsResolver?: (tenantId: string) => Promise<StandingInstruction[]>;
+  /**
    * Resolves the tenant's scheduling context (IANA timezone) once per
    * request from tenant_settings, mirroring `thresholdResolver`. Threaded
    * onto the TaskContext so the create/reschedule appointment handlers
@@ -318,6 +334,19 @@ export interface VoiceActionRouterDeps {
    * non-fatal on resolver error.
    */
   extendedIntentsEnabled?: (tenantId: string) => Promise<boolean>;
+  /**
+   * U3 — respond_to_review on-ramp: recent-review lookup for resolving "that
+   * 1-star review" to a concrete google_reviews row. Optional: absent → the
+   * handler emits a clarification instead of drafting.
+   */
+  reviewRepo?: Pick<ReviewRepository, 'findRecent'>;
+  /**
+   * U3 — the SAME dep bundle the google-reviews polling worker hands
+   * `buildReviewResponseProposal` (llmGateway, customer loader, brand-voice
+   * loader, service-credit repo), so a voice-initiated draft is identical to
+   * a poll-initiated one. Optional: absent → clarification instead of draft.
+   */
+  reviewResponseDraftDeps?: BuildReviewResponseProposalDeps;
 }
 
 // P11-001: lookup_* intents are READ-ONLY and never produce a
@@ -356,6 +385,12 @@ export const INTENT_TO_PROPOSAL_TYPE: Partial<Record<Exclude<IntentType, 'unknow
   log_time_entry: 'log_time_entry',
   notify_delay: 'notify_delay',
   request_feedback: 'request_feedback',
+  // Taxonomy 1.2.0 (agent wave, Track A) — the on-ramp trio. Each rides an
+  // existing (U2/U3) or new-in-this-train (UB-A2) proposal type + execution
+  // handler; the catalog contract test pins all three legs.
+  create_invoice_schedule: 'create_invoice_schedule',
+  respond_to_review: 'review_response_proposal',
+  create_standing_instruction: 'create_standing_instruction',
 };
 
 /**
@@ -479,6 +514,18 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
   handlers.set('notify_delay', new NotifyDelayTaskHandler(deps.appointmentRepo, deps.jobRepo));
   handlers.set('request_feedback', new RequestFeedbackTaskHandler());
   handlers.set('batch_invoice', new BatchInvoiceTaskHandler(deps.invoicingDeps));
+  // U2 — milestone billing plan from a spoken sentence (deterministic
+  // parser; no LLM drafting call).
+  handlers.set('create_invoice_schedule', new CreateInvoiceScheduleTaskHandler());
+  // U3 — "respond to that 1-star review": resolve the review, dedup against
+  // the polling worker's auto-draft, else draft with the same deps it uses.
+  handlers.set(
+    'review_response_proposal',
+    new RespondToReviewTaskHandler(deps.proposalRepo, deps.reviewRepo, deps.reviewResponseDraftDeps),
+  );
+  // UB-A2 — persistent directives ("from now on…"); normalized via the LLM
+  // gateway, ALWAYS drafts for review (no sourceTrustTier).
+  handlers.set('create_standing_instruction', new CreateStandingInstructionTaskHandler(deps.gateway));
   // RV-080 — complaint uses 'add_note' proposal type but needs its own
   // handler (pinned-prefix note + companion callback). Registered under
   // a synthetic key ('_complaint') so it doesn't collide with the plain
@@ -637,7 +684,7 @@ export function entitiesForProposal(
 /** Resolved-entity annotation for one utterance (see annotateResolvedEntities). */
 interface EntityAnnotation {
   kind: 'ok';
-  resolved: { customerId?: string; jobId?: string };
+  resolved: { customerId?: string; jobId?: string; technicianId?: string };
   pendingReferences: Array<{ kind: EntityKind; reference: string }>;
 }
 /** An ambiguous reference that must be clarified before drafting. */
@@ -671,12 +718,18 @@ async function annotateResolvedEntities(
   const ok: EntityAnnotation = { kind: 'ok', resolved: {}, pendingReferences: [] };
   if (!resolver || !params.entities) return ok;
 
-  const lookups: Array<{ kind: 'customer' | 'job'; reference: string }> = [];
+  const lookups: Array<{ kind: 'customer' | 'job' | 'technician'; reference: string }> = [];
   if (params.entities.customerName && !params.verifiedCustomerId) {
     lookups.push({ kind: 'customer', reference: params.entities.customerName });
   }
   if (params.entities.jobReference) {
     lookups.push({ kind: 'job', reference: params.entities.jobReference });
+  }
+  // U1 — spoken technician names on reassign / add-crew / remove-crew
+  // resolve against the tenant's team members ("give it to Carlos"), so
+  // those proposals carry a verified UUID instead of stalling in draft.
+  if (params.entities.targetTechnicianName) {
+    lookups.push({ kind: 'technician', reference: params.entities.targetTechnicianName });
   }
 
   for (const lookup of lookups) {
@@ -698,6 +751,7 @@ async function annotateResolvedEntities(
     switch (result.kind) {
       case 'resolved':
         if (lookup.kind === 'customer') ok.resolved.customerId = result.candidate.id;
+        else if (lookup.kind === 'technician') ok.resolved.technicianId = result.candidate.id;
         else ok.resolved.jobId = result.candidate.id;
         break;
       case 'ambiguous':
@@ -979,6 +1033,12 @@ interface SegmentParams {
   recordingId?: string;
   customerId?: string;
   verticalPromptSection?: string;
+  /**
+   * UB-A3 — the tenant's ACTIVE standing instructions, resolved once per
+   * request (failure-soft). processSegment narrows them per classified
+   * intent via `selectApplicableInstructions` (≤5) before drafting.
+   */
+  activeStandingInstructions?: StandingInstruction[];
   /** Phase-2 Track A — tenant opted in to the extended operator intents. */
   extendedIntents?: boolean;
   /**
@@ -1242,11 +1302,20 @@ async function processSegment(
     }).length;
   }
 
+  // UB-A3 — narrow the request-resolved active instructions to the ones
+  // applicable to THIS classified intent (≤5). Pure selection; undefined
+  // when nothing applies so untouched contexts stay byte-identical.
+  const standingInstructions = selectInjectedStandingInstructions(
+    params.activeStandingInstructions,
+    classification.intentType,
+  );
+
   const context: TaskContext = {
     tenantId,
     userId,
     message: segmentText,
     conversationId,
+    ...(standingInstructions ? { standingInstructions } : {}),
     ...(handler.taskType === 'draft_estimate' ? { clarificationCount } : {}),
     existingEntities: {
       ...entitiesForProposal(classification.intentType, classification.extractedEntities),
@@ -1254,6 +1323,10 @@ async function processSegment(
       // (and passthrough handlers) get verified UUIDs instead of free text.
       ...(annotation.resolved.customerId ? { customerId: annotation.resolved.customerId } : {}),
       ...(annotation.resolved.jobId ? { jobId: annotation.resolved.jobId } : {}),
+      // U1 — verified technician UUID for reassign / add-crew / remove-crew.
+      ...(annotation.resolved.technicianId
+        ? { technicianId: annotation.resolved.technicianId }
+        : {}),
     },
     timezone: scheduling?.timezone ?? DEFAULT_TENANT_TIMEZONE,
     now: deps.now ? deps.now() : new Date(),
@@ -1604,6 +1677,21 @@ export function createVoiceActionRouterWorker(
         }
       }
 
+      // UB-A3 — resolve the tenant's active standing instructions once per
+      // request (mirrors verticalPromptResolver). Non-fatal: a resolver
+      // failure drafts without owner instructions rather than blocking.
+      let activeStandingInstructions: StandingInstruction[] | undefined;
+      if (deps.standingInstructionsResolver) {
+        try {
+          activeStandingInstructions = await deps.standingInstructionsResolver(tenantId);
+        } catch (err) {
+          const error = err instanceof Error ? err : new Error(String(err));
+          log.warn('voice-action-router: standingInstructionsResolver failed, continuing without standing instructions', {
+            error: error.message,
+          });
+        }
+      }
+
       // Phase-2 Track A — resolve the extended-intents opt-in once per
       // message (mirrors multiActionEnabled). Non-fatal: a resolver error
       // degrades to the pre-Track-A classifier prompt.
@@ -1668,6 +1756,7 @@ export function createVoiceActionRouterWorker(
               recordingId,
               customerId,
               verticalPromptSection,
+              ...(activeStandingInstructions ? { activeStandingInstructions } : {}),
               ...(extendedIntents ? { extendedIntents: true } : {}),
             },
             log,
@@ -1687,6 +1776,7 @@ export function createVoiceActionRouterWorker(
           recordingId,
           customerId,
           verticalPromptSection,
+          ...(activeStandingInstructions ? { activeStandingInstructions } : {}),
           ...(extendedIntents ? { extendedIntents: true } : {}),
           // Single-action path: apply the per-recording dedup keys.
           applyDedup: true,
