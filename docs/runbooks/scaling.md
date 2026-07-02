@@ -75,14 +75,16 @@ PgBouncer config: `pool_mode = transaction`, `max_client_conn` high (e.g. 1000),
   (don't `await` long LLM/HTTP calls inside the RLS transaction) so PgBouncer
   actually multiplexes — a request with an open transaction pins a server
   backend for its whole life.
-  > ⚠️ **Known offender — `/api/assistant/chat`.** `withTenantTransaction` is
-  > mounted before the protected `/api` routes, and the assistant handler
-  > `await`s `generateAssistantReply()` (the LLM call) *inside* that request
-  > transaction, so each concurrent chat pins a PgBouncer server backend for the
-  > whole call. At `default_pool_size=25`, ~25 slow chats can stall unrelated
-  > API traffic. Move the LLM call outside the request transaction (or bracket
-  > only its DB sections) before enabling the PgBouncer topology. Tracked in
-  > `docs/runbooks/scale-review-followups.md`. (Codex P2.)
+  > ✅ **Fixed (UC-2) — `/api/assistant/chat`.** The former known offender no
+  > longer holds the request transaction across the LLM call: the middleware
+  > bypasses `POST /assistant/chat` via the method+path-anchored
+  > `LLM_LONG_CALL_ROUTES` allowlist (`packages/api/src/middleware/
+  > tenant-context.ts`), and every DB touch on that route self-manages a
+  > short `SET LOCAL` transaction with an explicit tenantId (U2b-2 standalone
+  > repo path — the same contract the voice worker uses). Pinned by the
+  > middleware bypass tests and a route-level probe test asserting no pooled
+  > client exists at gateway time. Adding another LLM-heavy route? add it to
+  > `LLM_LONG_CALL_ROUTES` and keep its DB work repo-scoped.
 - Direct pool: `DB_DIRECT_MAX_CONNECTIONS` small (default 10) — only lock holders
   + the LISTEN client use it.
 - Postgres ceiling = PgBouncer `default_pool_size` (server side), independent of

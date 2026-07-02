@@ -520,3 +520,66 @@ describe('U7 — POST /api/assistant/chat surfaces pricing signals on the card',
     expect(proposal.meta ?? null).toBeNull();
   });
 });
+
+describe('UC-2 — chat holds no request transaction across the LLM call', () => {
+  it('probe: at gateway time there is no ALS client and no pool checkout', async () => {
+    // Regression pin for the PgBouncer known-offender: with the middleware
+    // mounted the way app.ts mounts it (before the /api routers), the chat
+    // handler must reach the gateway with NO request-scoped transaction —
+    // otherwise every concurrent slow chat pins a server backend for the
+    // whole LLM call. The middleware bypasses POST /assistant/chat; repos on
+    // this route open their own short SET LOCAL transactions instead.
+    const { withTenantTransaction, currentTenantContext } = await import(
+      '../../src/middleware/tenant-context'
+    );
+    const connect = vi.fn(async () => {
+      throw new Error('pool must not be touched by the chat request transaction');
+    });
+    const pool = { connect } as unknown as import('pg').Pool;
+
+    const probed: { store: unknown; connects: number }[] = [];
+    const gateway = {
+      complete: vi.fn(async () => {
+        probed.push({ store: currentTenantContext(), connects: connect.mock.calls.length });
+        return {
+          content: JSON.stringify({ intentType: 'unknown', confidence: 0.2 }),
+          model: 'mock',
+          provider: 'mock',
+          tokenUsage: { input: 1, output: 1, total: 2 },
+          latencyMs: 1,
+        } satisfies LLMResponse;
+      }),
+    } as unknown as LLMGateway;
+
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: TEST_USER,
+        sessionId: 'sess-1',
+        tenantId: TEST_TENANT,
+        role: 'owner',
+      };
+      next();
+    });
+    app.use('/api', withTenantTransaction(pool));
+    app.use(
+      '/api/assistant',
+      createAssistantRouter({ gateway, proposalRepo: new InMemoryProposalRepository() }),
+    );
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'what should I do next?' }] });
+
+    expect(res.status).toBe(200);
+    // The gateway was reached (classifier and/or fallback path) …
+    expect(probed.length).toBeGreaterThan(0);
+    // … and at EVERY gateway call there was no request-scoped client and the
+    // request transaction never checked out a connection.
+    for (const p of probed) {
+      expect(p.store).toBeUndefined();
+      expect(p.connects).toBe(0);
+    }
+  });
+});
