@@ -92,9 +92,19 @@ function buildHeaders(init: RequestInit): Record<string, string> {
   // Set default Content-Type only for string bodies. fetch() already
   // infers it for FormData / URLSearchParams / Blob / ArrayBuffer, and
   // forcing JSON onto those would corrupt the request.
-  if (typeof init.body === 'string' && !headers['Content-Type']) {
+  //
+  // HTTP header names are case-insensitive, so the presence check MUST be
+  // too (sweep-2 comms-reply bug, same root cause as journey QA bug 1 in
+  // lib/apiClient.ts): a caller-supplied lowercase 'content-type' did not
+  // suppress the injected 'Content-Type', fetch merged the duplicate keys
+  // into "application/json, application/json", and Express's JSON parser
+  // dropped the body — every conversation reply / suggest-reply 400'd.
+  const hasContentType = Object.keys(headers).some(
+    (key) => key.toLowerCase() === 'content-type',
+  );
+  if (typeof init.body === 'string' && !hasContentType) {
     headers['Content-Type'] = 'application/json';
-  } else if (init.body && !(init.body instanceof FormData) && typeof init.body !== 'string' && !headers['Content-Type']) {
+  } else if (init.body && !(init.body instanceof FormData) && typeof init.body !== 'string' && !hasContentType) {
     // Legacy behavior: caller-supplied non-string, non-FormData bodies
     // historically defaulted to JSON via the previous apiFetch
     // implementation. Preserve that to avoid surprising existing

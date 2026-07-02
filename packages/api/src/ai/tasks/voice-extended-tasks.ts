@@ -29,6 +29,7 @@ import type { JobRepository } from '../../jobs/job';
 import type { LLMGateway } from '../gateway/gateway';
 import { resolveDateTime, DEFAULT_TENANT_TIMEZONE } from '../scheduling/resolve-datetime';
 import { findJobsRequiringInvoicing, InvoicingQueueDeps } from '../../invoices/invoicing-queue';
+import { parseMilestoneSentence } from '../../invoices/milestone-sentence-parser';
 
 function entitiesFrom(context: TaskContext): ExtractedEntities {
   return (context.existingEntities ?? {}) as ExtractedEntities;
@@ -304,10 +305,15 @@ export class CancelAppointmentTaskHandler implements TaskHandler {
 
 // ───────────── reassign_appointment ─────────────
 //
-// The classifier returns a TECHNICIAN NAME, never a UUID. The
-// execution handler needs a concrete `toTechnicianId`. We always
-// list `toTechnicianId` as missing so the review UI resolves the
-// name to an ID before approval is allowed.
+// The classifier returns a TECHNICIAN NAME, never a UUID. The execution
+// handler needs a concrete `toTechnicianId`. U1: the router's entity
+// resolver (kind 'technician', pg_trgm over users) resolves the spoken
+// name BEFORE this handler runs — a unique match rides
+// `context.existingEntities.technicianId` as a verified UUID and lands
+// on the payload; an AMBIGUOUS name never reaches here (the router
+// short-circuits to a voice_clarification picker). Only when the name
+// stayed unresolved (not_found / no resolver) do we keep the legacy
+// missing-marker so the review UI resolves it before approval.
 export class ReassignAppointmentTaskHandler implements TaskHandler {
   readonly taskType = 'reassign_appointment' as const;
 
@@ -316,13 +322,22 @@ export class ReassignAppointmentTaskHandler implements TaskHandler {
     const payload: Record<string, unknown> = {};
     const missing: string[] = [];
 
+    // The execution handler acts only on a concrete appointmentId (uuid), so
+    // a free-text reference always flags the id for review-time resolution.
+    // Pre-U1 this was masked by the always-missing toTechnicianId; now that
+    // the technician can resolve, the appointment gate must stand on its own.
     if (ee.appointmentReference) payload.appointmentReference = ee.appointmentReference;
-    else missing.push('appointmentId');
+    missing.push('appointmentId');
 
     if (ee.targetTechnicianName) payload.targetTechnicianName = ee.targetTechnicianName;
-    // Always list toTechnicianId as missing — even when a name was
-    // given, we need a resolved UUID before the mutation can run.
-    missing.push('toTechnicianId');
+    const resolvedTechnicianId = resolvedTechnicianIdFrom(context);
+    if (resolvedTechnicianId) {
+      payload.toTechnicianId = resolvedTechnicianId;
+    } else {
+      // Unresolved name (or no resolver wired) — the review UI resolves
+      // the reference to a UUID before approval is allowed.
+      missing.push('toTechnicianId');
+    }
 
     return {
       proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
@@ -331,24 +346,39 @@ export class ReassignAppointmentTaskHandler implements TaskHandler {
   }
 }
 
+/**
+ * U1 — verified technician UUID the router's entity resolver annotated onto
+ * the task context (same seam customerId/jobId ride). Undefined when the
+ * spoken name did not uniquely resolve.
+ */
+function resolvedTechnicianIdFrom(context: TaskContext): string | undefined {
+  const id = context.existingEntities?.technicianId;
+  return typeof id === 'string' && id.length > 0 ? id : undefined;
+}
+
 // ───────────── add_crew_member / remove_crew_member ─────────────
 //
 // Crew add/remove attach or detach a NON-PRIMARY technician on an existing
 // appointment. The classifier returns a technician NAME and an appointment
-// REFERENCE, never UUIDs — so we always list appointmentId + technicianId as
-// missing and let the review UI resolve both before the mutation can run (the
-// same contract as reassign_appointment). Capture-class, but the always-missing
-// ids keep the proposal in draft until an operator resolves them.
+// REFERENCE, never UUIDs. U1: the router's technician resolver fills
+// `context.existingEntities.technicianId` when the spoken name uniquely
+// matches a team member, so only the appointmentId still needs review-time
+// resolution; an unresolved name keeps the legacy technicianId
+// missing-marker. Capture-class, but the missing appointmentId keeps the
+// proposal in draft until an operator resolves it.
 export class AddCrewMemberTaskHandler implements TaskHandler {
   readonly taskType = 'add_crew_member' as const;
 
   async handle(context: TaskContext): Promise<TaskResult> {
     const ee = entitiesFrom(context);
     const payload: Record<string, unknown> = {};
-    const missing: string[] = ['appointmentId', 'technicianId'];
+    const missing: string[] = ['appointmentId'];
 
     if (ee.appointmentReference) payload.appointmentReference = ee.appointmentReference;
     if (ee.targetTechnicianName) payload.targetTechnicianName = ee.targetTechnicianName;
+    const resolvedTechnicianId = resolvedTechnicianIdFrom(context);
+    if (resolvedTechnicianId) payload.technicianId = resolvedTechnicianId;
+    else missing.push('technicianId');
 
     return {
       proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
@@ -363,10 +393,13 @@ export class RemoveCrewMemberTaskHandler implements TaskHandler {
   async handle(context: TaskContext): Promise<TaskResult> {
     const ee = entitiesFrom(context);
     const payload: Record<string, unknown> = {};
-    const missing: string[] = ['appointmentId', 'technicianId'];
+    const missing: string[] = ['appointmentId'];
 
     if (ee.appointmentReference) payload.appointmentReference = ee.appointmentReference;
     if (ee.targetTechnicianName) payload.targetTechnicianName = ee.targetTechnicianName;
+    const resolvedTechnicianId = resolvedTechnicianIdFrom(context);
+    if (resolvedTechnicianId) payload.technicianId = resolvedTechnicianId;
+    else missing.push('technicianId');
 
     return {
       proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
@@ -611,6 +644,60 @@ export class BatchInvoiceTaskHandler implements TaskHandler {
         createdBy: context.userId,
       }),
       taskType: 'voice_clarification',
+    };
+  }
+}
+
+// ───────────── create_invoice_schedule (U2) ─────────────
+//
+// "Set up 50% deposit, 50% on completion for the Hendersons" — the voice
+// on-ramp for the EXISTING create_invoice_schedule proposal type + execution
+// handler (P21-002). The classifier extracts the VERBATIM milestone sentence
+// (scheduleDescription); the deterministic milestone-sentence parser — never
+// the LLM — turns it into typed milestones that satisfy validateMilestones.
+// jobReference rides the router's entity annotation: a unique job match lands
+// as a verified payload.jobId; otherwise jobId is flagged missing for the
+// review UI. An unparseable sentence flags `milestones` missing and preserves
+// the raw sentence on the payload so the reviewer sees exactly what was said.
+// Capture-class; no sourceTrustTier is passed, so it always drafts for review.
+export class CreateInvoiceScheduleTaskHandler implements TaskHandler {
+  readonly taskType = 'create_invoice_schedule' as const;
+
+  async handle(context: TaskContext): Promise<TaskResult> {
+    const ee = entitiesFrom(context);
+    const payload: Record<string, unknown> = {};
+    const missing: string[] = [];
+
+    // P8 — verified jobId resolved by the router from the spoken reference.
+    const resolvedJobId =
+      typeof context.existingEntities?.jobId === 'string'
+        ? context.existingEntities.jobId
+        : undefined;
+    if (resolvedJobId) payload.jobId = resolvedJobId;
+    if (ee.jobReference) payload.jobReference = ee.jobReference;
+    if (!resolvedJobId) missing.push('jobId');
+
+    const sentence =
+      typeof ee.scheduleDescription === 'string' ? ee.scheduleDescription.trim() : '';
+    if (sentence) payload.scheduleDescription = sentence;
+    const milestones = sentence ? parseMilestoneSentence(sentence) : null;
+    if (milestones) {
+      payload.milestones = milestones;
+    } else {
+      // Unparseable (or absent) plan — hold in draft; the raw sentence above
+      // gives the reviewer the exact words to build the plan from.
+      missing.push('milestones');
+    }
+
+    // Spoken job total, when stated. Optional on the contract — the executor
+    // derives the total from the estimate when omitted.
+    if (typeof ee.amount === 'number' && ee.amount > 0) {
+      payload.totalAmountCents = ee.amount;
+    }
+
+    return {
+      proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      taskType: this.taskType,
     };
   }
 }

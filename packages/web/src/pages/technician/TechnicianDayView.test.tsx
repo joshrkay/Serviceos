@@ -292,4 +292,51 @@ describe('P6-019 — Technician day-of assigned-work view', () => {
     });
     vi.useRealTimers();
   }, 15000);
+
+  // Sweep-2 S3 — the view used to ship BEM class names with no stylesheet
+  // (inert in this Tailwind app): unstyled text, fused buttons, tap targets
+  // far below the repo's ≥44px mobile rule. Class-contract pin per
+  // CLAUDE.md (pattern: EstimateApprovalPage.layout.test.tsx).
+  describe('mobile styling contract (sweep-2 S3)', () => {
+    it('all interactive controls meet the 44px tap target (min-h-11)', async () => {
+      render(<TechnicianDayView technicianId="tech-1" />);
+      await screen.findByText('Jane Doe');
+
+      const buttons = [
+        screen.getByTestId('technician-day-prev'),
+        screen.getByTestId('technician-day-next'),
+        screen.getByTestId('technician-day-ask-ai'),
+        ...screen.getAllByTestId('technician-day-view-job'),
+        ...screen.getAllByTestId('technician-day-on-my-way'),
+        ...screen.getAllByTestId('technician-day-edit'),
+      ];
+      expect(buttons.length).toBeGreaterThanOrEqual(6);
+      for (const button of buttons) {
+        expect(button.className).toContain('min-h-11');
+      }
+    });
+
+    it('edit-form inputs and actions meet the 44px tap target too', async () => {
+      render(<TechnicianDayView technicianId="tech-1" />);
+      await screen.findByText('Jane Doe');
+
+      fireEvent.click(screen.getAllByTestId('technician-day-edit')[0]);
+
+      expect(screen.getByTestId('technician-day-edit-start').className).toContain('min-h-11');
+      expect(screen.getByTestId('technician-day-edit-end').className).toContain('min-h-11');
+      expect(screen.getByTestId('technician-day-save').className).toContain('min-h-11');
+      expect(screen.getByTestId('technician-day-cancel').className).toContain('min-h-11');
+    });
+
+    it('appointments render as styled cards (no inert BEM classes anywhere)', async () => {
+      const { container } = render(<TechnicianDayView technicianId="tech-1" />);
+      await screen.findByText('Jane Doe');
+
+      const card = screen.getAllByTestId('technician-day-appointment')[0];
+      expect(card.className).toContain('rounded-2xl');
+      expect(card.className).toContain('border');
+      // No leftover technician-day-view__* BEM classes (they had no stylesheet).
+      expect(container.querySelector('[class*="technician-day-view__"]')).toBeNull();
+    });
+  });
 });

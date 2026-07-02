@@ -7,7 +7,7 @@ import { Link, useNavigate } from 'react-router';
 import { apiFetch } from '../../utils/api-fetch';
 import { useTechnicianRoster } from '../../hooks/useTechnicianRoster';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
-import { formatInTenantTz, formatTimeInTenantTz } from '../../utils/formatInTenantTz';
+import { formatInTenantTz, formatTimeInTenantTz, tenantWallClockToUtc } from '../../utils/formatInTenantTz';
 
 const SERVICE_ICON: Record<string, string> = { HVAC: '❄️', Plumbing: '🔧', Painting: '🎨' };
 
@@ -141,6 +141,7 @@ function NewAppointmentForm({ selectedDate, onCreated, onClose, technicians }: {
   onClose: () => void;
   technicians: { id: string; name: string }[];
 }) {
+  const tz = useTenantTimezone();
   const [jobId,    setJobId]    = useState('');
   const [techId,   setTechId]   = useState('');
   useEffect(() => {
@@ -174,8 +175,12 @@ function NewAppointmentForm({ selectedDate, onCreated, onClose, technicians }: {
     setSaving(true);
     setError(null);
     try {
-      const start = new Date(`${selectedDate}T${startTime}:00`);
-      const end   = new Date(`${selectedDate}T${endTime}:00`);
+      // Journey QA 2026-07-02 (bug 4): the entered wall-clock time is
+      // TENANT-local (core pattern: stored UTC, rendered in tenant tz), so
+      // convert tenant tz → UTC. `new Date('YYYY-MM-DDTHH:mm')` used the
+      // BROWSER tz, storing the wrong instant whenever the two differ.
+      const start = tenantWallClockToUtc(selectedDate, startTime, tz);
+      const end   = tenantWallClockToUtc(selectedDate, endTime, tz);
       if (end <= start) { setError('End time must be after start time'); setSaving(false); return; }
 
       // Create the appointment
@@ -185,7 +190,7 @@ function NewAppointmentForm({ selectedDate, onCreated, onClose, technicians }: {
           jobId: jobId.trim(),
           scheduledStart: start.toISOString(),
           scheduledEnd: end.toISOString(),
-          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'America/Chicago',
+          timezone: tz,
         }),
       });
       if (!apptRes.ok) {

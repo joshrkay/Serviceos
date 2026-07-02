@@ -2,7 +2,7 @@ import { Router, Response } from 'express';
 import { z } from 'zod';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
-import { createInvoiceSchema } from '../shared/contracts';
+import { createInvoiceSchema, updateInvoiceSchema } from '../shared/contracts';
 import { toErrorResponse } from '../shared/errors';
 import { TenantOwnership } from '../shared/tenant-ownership';
 import {
@@ -337,7 +337,8 @@ export function createInvoiceRouter(
 
   const updateHandler = async (req: AuthenticatedRequest, res: Response) => {
     try {
-      const result = await updateInvoice(req.auth!.tenantId, req.params.id, req.body, invoiceRepo);
+      const input = updateInvoiceSchema.parse(req.body);
+      const result = await updateInvoice(req.auth!.tenantId, req.params.id, input, invoiceRepo);
       if (!result) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Invoice not found' });
         return;
@@ -504,11 +505,15 @@ export function createInvoiceRouter(
             });
           return;
         }
+        // ''→undefined mirrors the estimates send route: the send sheet posts
+        // empty strings for untouched fields, and SendService must fall back
+        // to the customer's contact on file instead of failing on ''
+        // (journey QA 2026-07-02, bug 2).
         const parsed = z.object({
           channel: z.enum(['sms', 'email', 'both']).default('sms'),
-          recipientPhone: z.string().optional(),
-          recipientEmail: z.string().optional(),
-          customMessage: z.string().optional(),
+          recipientPhone: z.string().optional().transform(v => v || undefined),
+          recipientEmail: z.string().optional().transform(v => v || undefined),
+          customMessage: z.string().optional().transform(v => v || undefined),
         }).safeParse(req.body ?? {});
         if (!parsed.success) {
           res.status(400).json({ error: 'VALIDATION_ERROR', message: parsed.error.issues[0]?.message ?? 'Invalid request body' });

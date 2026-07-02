@@ -13,6 +13,10 @@
  */
 import { LLMGateway } from '../gateway/gateway';
 import type { BrandVoiceSettings } from '../../settings/settings';
+import {
+  buildStandingInstructionsSection,
+  type InjectedStandingInstruction,
+} from '../standing-instructions-context';
 
 /** A thread message, trimmed to what the prompt needs. */
 export interface SuggestReplyMessage {
@@ -29,6 +33,13 @@ export interface SuggestReplyInput {
   tenantId?: string;
   /** Soft character cap for the draft (SMS-friendly default). */
   maxChars?: number;
+  /**
+   * UB-A3 — owner standing instructions applicable to this reply, resolved
+   * best-effort by the route (never blocking the draft). Injected as a
+   * delimited system-message section that adjusts CONTENT only. No applied-id
+   * ask here: the task returns plain text, and an id list would corrupt it.
+   */
+  standingInstructions?: InjectedStandingInstruction[];
 }
 
 export interface SuggestReplyResult {
@@ -87,11 +98,25 @@ export class SuggestReplyTask {
       throw new Error('No conversation content to reply to');
     }
 
+    // UB-A3 — standing instructions ride a separate, delimited system message
+    // so the base prompt stays byte-identical when none apply.
+    const systemMessages: Array<{ role: 'system'; content: string }> = [
+      { role: 'system', content: buildSystemPrompt(input) },
+    ];
+    if (input.standingInstructions && input.standingInstructions.length > 0) {
+      systemMessages.push({
+        role: 'system',
+        content: buildStandingInstructionsSection(input.standingInstructions, {
+          requestAppliedIds: false,
+        }),
+      });
+    }
+
     const response = await this.gateway.complete({
       taskType: this.taskType,
       ...(input.tenantId ? { tenantId: input.tenantId } : {}),
       messages: [
-        { role: 'system', content: buildSystemPrompt(input) },
+        ...systemMessages,
         {
           role: 'user',
           content: `Here is the conversation so far:\n\n${transcript}\n\nDraft the shop's next reply.`,

@@ -56,7 +56,11 @@ async function main(): Promise<void> {
         },
         body: JSON.stringify({
           text: filler.text,
-          model_id: 'eleven_turbo_v2_5',
+          // UB-C2 — Spanish clips need the multilingual model; turbo v2.5
+          // mangles Spanish prosody. Mirrors ElevenLabsTtsProvider's
+          // language routing in packages/api/src/ai/tts/tts-provider.ts.
+          model_id:
+            filler.language === 'es' ? 'eleven_multilingual_v2' : 'eleven_turbo_v2_5',
           voice_settings: { stability: 0.5, similarity_boost: 0.75 },
         }),
       },

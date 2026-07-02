@@ -1139,6 +1139,7 @@ export function TechJobView({
           job={{ id, jobNumber: jobData.jobNumber, customer: customerName, customerId: jobData.customerId ?? '', address, serviceType: svcType, status: 'Active', priority: 'Normal', assignedTech: techName, description: jobData.summary, statusHistory: [], activity: [], materials: [] }}
           customerName={customerName}
           customerPhone={customerPhone}
+          customerId={jobData.customerId}
           onClose={() => setSheet(null)}
         />
       )}
@@ -1147,11 +1148,12 @@ export function TechJobView({
           name={customerName} phone={customerPhone}
           initials={customerName.split(' ').map((n: string) => n[0]).join('')}
           color={techColor}
+          customerId={jobData.customerId}
           onEnd={() => setSheet(null)}
         />
       )}
       {sheet === 'text' && (
-        <TextSheet name={customerName} phone={customerPhone} onClose={() => setSheet(null)} />
+        <TextSheet name={customerName} phone={customerPhone} customerId={jobData.customerId} onClose={() => setSheet(null)} />
       )}
       {cameraOpen && <CameraCapture onClose={media => void handleCameraClose(media)} />}
 

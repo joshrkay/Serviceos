@@ -54,6 +54,8 @@ export class PgEntityResolver implements EntityResolver {
       case 'estimate':
         // No trigram index defined for estimates in migration 051; skip.
         return { kind: 'skipped' };
+      case 'technician':
+        return this.resolveTechnician(tenantId, reference);
       default:
         return { kind: 'skipped' };
     }
@@ -219,6 +221,53 @@ export class PgEntityResolver implements EntityResolver {
       return { kind: 'resolved', candidate: candidates[0] };
     }
     return { kind: 'ambiguous', candidates };
+  }
+
+  private async resolveTechnician(
+    tenantId: string,
+    reference: string,
+  ): Promise<EntityResolverResult> {
+    // U1 — spoken team-member names ("Carlos", "Mike R") resolve against the
+    // users full-name expression. The expression must stay byte-identical to
+    // migration 230's GIN trigram index expression so Postgres can serve it
+    // from the index. Role filter: anyone assignable to an appointment
+    // (technician/dispatcher/owner — the full users role CHECK today, kept
+    // explicit so a future non-field role never becomes a reassign target).
+    // Soft-deleted users (migration 093) are excluded — they must not become
+    // assignment targets. Label = full name, hint = role.
+    const rows = await withTenantConnection(this.pool, tenantId, (client) =>
+      client
+        .query<{
+          id: string;
+          full_name: string;
+          role: string | null;
+          score: number;
+        }>(
+          `SELECT id,
+                  TRIM(COALESCE(first_name,'') || ' ' || COALESCE(last_name,'')) AS full_name,
+                  role,
+                  similarity(TRIM(COALESCE(first_name,'') || ' ' || COALESCE(last_name,'')), $2) AS score
+             FROM users
+            WHERE tenant_id = $1
+              AND role IN ('technician','dispatcher','owner')
+              AND deleted_at IS NULL
+              AND similarity(TRIM(COALESCE(first_name,'') || ' ' || COALESCE(last_name,'')), $2) > $3
+            ORDER BY score DESC
+            LIMIT 5`,
+          [tenantId, reference, SIMILARITY_PREFILTER],
+        )
+        .then((r) => r.rows),
+    );
+
+    const candidates: EntityCandidate[] = rows.map((row) => ({
+      id: row.id,
+      kind: 'technician' as EntityKind,
+      label: row.full_name,
+      hint: row.role ?? undefined,
+      score: Number(row.score),
+    }));
+
+    return this.toResult(candidates, reference);
   }
 
   // ---------------------------------------------------------------------------

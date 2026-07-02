@@ -118,6 +118,12 @@ export function createDispatchRoutes(deps: {
       try {
         const tenantId = req.auth!.tenantId;
         const technicianId = req.params.id;
+        // Guard before the query: a non-UUID id (e.g. a stale client's
+        // hardcoded 'tech-1') previously reached Postgres and 500'd on the
+        // uuid cast (QA 2026-07-02). Bad input is the caller's error.
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(technicianId)) {
+          return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'technician id must be a UUID' });
+        }
 
         const dateStr = req.query.date as string | undefined;
         if (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {

@@ -138,6 +138,81 @@ describe('AIApprovalRulesSheet — Tier 4 stub closure (PR A: data plane only)',
     expect(putCalls).toHaveLength(0);
   });
 
+  // UB-D / D-015 — autonomous booking lane toggle.
+  it('renders the autonomous booking switch OFF by default with the consequence copy', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({}));
+    render(<AIApprovalRulesSheet onClose={() => {}} />);
+
+    const toggle = await screen.findByRole('switch', {
+      name: /Autonomous booking \(no supervisor\)/i,
+    });
+    expect(toggle.getAttribute('aria-checked')).toBe('false');
+    // ≥44px tap target (mobile UI rule) — class contract.
+    expect(toggle.className).toContain('min-h-11');
+    expect(
+      screen.getByText(/confirm instantly with no one watching/i),
+    ).toBeTruthy();
+    expect(screen.getByText(/one-tap UNDO/i)).toBeTruthy();
+    // Threshold input only appears once the lane is enabled.
+    expect(screen.queryByLabelText(/Confidence threshold/i)).toBeNull();
+  });
+
+  it('hydrates the switch + threshold from GET /api/settings', async () => {
+    apiFetchMock.mockResolvedValueOnce(
+      jsonResponse({ autonomousBookingEnabled: true, autonomousBookingThreshold: 0.97 }),
+    );
+    render(<AIApprovalRulesSheet onClose={() => {}} />);
+
+    const toggle = await screen.findByRole('switch', {
+      name: /Autonomous booking \(no supervisor\)/i,
+    });
+    expect(toggle.getAttribute('aria-checked')).toBe('true');
+    const input = (await screen.findByLabelText(/Confidence threshold/i)) as HTMLInputElement;
+    expect(input.value).toBe('0.97');
+  });
+
+  it('saves the lane opt-in + threshold via PUT /api/settings', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({}));
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({}));
+    const onClose = vi.fn();
+    render(<AIApprovalRulesSheet onClose={onClose} />);
+
+    const toggle = await screen.findByRole('switch', {
+      name: /Autonomous booking \(no supervisor\)/i,
+    });
+    fireEvent.click(toggle);
+    const input = (await screen.findByLabelText(/Confidence threshold/i)) as HTMLInputElement;
+    fireEvent.change(input, { target: { value: '0.96' } });
+    fireEvent.click(screen.getByText('Save'));
+
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+    const putCall = apiFetchMock.mock.calls.find(
+      (c) => c[1] && (c[1] as RequestInit).method === 'PUT',
+    );
+    const body = JSON.parse((putCall![1] as RequestInit).body as string);
+    expect(body.autonomousBookingEnabled).toBe(true);
+    expect(body.autonomousBookingThreshold).toBe(0.96);
+  });
+
+  it('rejects an out-of-bounds autonomous threshold inline (0.90–0.99)', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({}));
+    render(<AIApprovalRulesSheet onClose={() => {}} />);
+
+    const toggle = await screen.findByRole('switch', {
+      name: /Autonomous booking \(no supervisor\)/i,
+    });
+    fireEvent.click(toggle);
+    const input = (await screen.findByLabelText(/Confidence threshold/i)) as HTMLInputElement;
+    fireEvent.change(input, { target: { value: '0.85' } });
+    fireEvent.click(screen.getByText('Save'));
+
+    await screen.findByText(/Autonomous booking threshold must be between 0.9 and 0.99/i);
+    const putCalls = apiFetchMock.mock.calls.filter(
+      (c) => c[1] && (c[1] as RequestInit).method === 'PUT',
+    );
+    expect(putCalls).toHaveLength(0);
+  });
+
   it('surfaces a toast + inline error when the PUT fails', async () => {
     apiFetchMock.mockResolvedValueOnce(jsonResponse({}));
     apiFetchMock.mockResolvedValueOnce(

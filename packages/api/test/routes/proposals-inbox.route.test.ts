@@ -152,6 +152,65 @@ describe('GET /api/proposals/inbox', () => {
     expect(res.status).toBe(200);
     expect(res.body.expired).toHaveLength(0);
   });
+  it('journey QA bug 10 — surfaces recent execution_failed proposals with executionError under `failed`', async () => {
+    const { app, proposalRepo } = buildApp();
+    const broke = createProposal({
+      tenantId: 'tenant-i1',
+      proposalType: 'draft_estimate',
+      payload: {},
+      summary: 'Estimate for Dana — $424.00',
+      createdBy: 'user-i1',
+    });
+    await proposalRepo.create({
+      ...broke,
+      status: 'execution_failed',
+      executionError: 'invalid input syntax for type integer: "NaN"',
+    });
+    // an old failure (outside the window) must NOT surface
+    const ancient = createProposal({
+      tenantId: 'tenant-i1',
+      proposalType: 'draft_estimate',
+      payload: {},
+      summary: 'Ancient failure',
+      createdBy: 'user-i1',
+    });
+    const longAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
+    await proposalRepo.create({
+      ...ancient,
+      status: 'execution_failed',
+      executionError: 'boom',
+      updatedAt: longAgo,
+    });
+
+    const res = await request(app).get('/api/proposals/inbox');
+    expect(res.status).toBe(200);
+    // failed rows are informational — never in the approvable feed
+    expect(res.body.data).toHaveLength(0);
+    expect(res.body.failed).toHaveLength(1);
+    expect(res.body.failed[0]).toMatchObject({
+      summary: 'Estimate for Dana — $424.00',
+      proposalType: 'draft_estimate',
+      status: 'execution_failed',
+      executionError: 'invalid input syntax for type integer: "NaN"',
+    });
+    expect(res.body.failed[0].failedAt).toBeTruthy();
+  });
+
+  it('journey QA bug 10 — does not leak execution_failed proposals from other tenants', async () => {
+    const { app, proposalRepo } = buildApp();
+    const other = createProposal({
+      tenantId: 'tenant-other',
+      proposalType: 'draft_estimate',
+      payload: {},
+      summary: 'Other tenant failure',
+      createdBy: 'user-x',
+    });
+    await proposalRepo.create({ ...other, status: 'execution_failed', executionError: 'x' });
+
+    const res = await request(app).get('/api/proposals/inbox');
+    expect(res.status).toBe(200);
+    expect(res.body.failed).toHaveLength(0);
+  });
 });
 
 describe('POST /api/proposals/:id/re-propose (§5.5)', () => {

@@ -185,4 +185,77 @@ describe('Postgres integration — settings', () => {
       expect(updated!.speedToLeadTemplate).toBe('Hi {first_name}, {business_name} here.');
     });
   });
+
+  // Sweep-2 S1 — every unrelated update used to wipe _activeVerticalPacks
+  // from terminology_preferences because the repo keyed "clear" off the
+  // presence of the activeVerticalPacks KEY (which updateSettings injected
+  // with value undefined on every call).
+  describe('Sweep-2 S1 — active vertical packs survive unrelated updates (real column)', () => {
+    async function seedTenantWithPacks() {
+      const tenant = await createTestTenant(pool);
+      const now = new Date();
+      await settingsRepo.create({
+        id: crypto.randomUUID(),
+        tenantId: tenant.tenantId,
+        businessName: 'Pack Co',
+        timezone: 'America/New_York',
+        estimatePrefix: 'EST',
+        invoicePrefix: 'INV',
+        nextEstimateNumber: 1,
+        nextInvoiceNumber: 1,
+        defaultPaymentTermDays: 30,
+        terminologyPreferences: { technician: 'tech' },
+        activeVerticalPacks: ['hvac'],
+        createdAt: now,
+        updatedAt: now,
+      });
+      return tenant;
+    }
+
+    it('an unrelated update (digestEnabled) leaves packs + terminology untouched', async () => {
+      const tenant = await seedTenantWithPacks();
+
+      await settingsRepo.update(tenant.tenantId, { digestEnabled: true });
+
+      const after = await settingsRepo.findByTenant(tenant.tenantId);
+      expect(after!.digestEnabled).toBe(true);
+      expect(after!.activeVerticalPacks).toEqual(['hvac']);
+      expect(after!.terminologyPreferences).toEqual({ technician: 'tech' });
+    });
+
+    it('an undefined VALUE on the key is "untouched", not a clear', async () => {
+      const tenant = await seedTenantWithPacks();
+
+      await settingsRepo.update(tenant.tenantId, {
+        businessName: 'Renamed Co',
+        activeVerticalPacks: undefined,
+      });
+
+      const after = await settingsRepo.findByTenant(tenant.tenantId);
+      expect(after!.businessName).toBe('Renamed Co');
+      expect(after!.activeVerticalPacks).toEqual(['hvac']);
+    });
+
+    it('an explicit packs update still works, and terminology survives it', async () => {
+      const tenant = await seedTenantWithPacks();
+
+      await settingsRepo.update(tenant.tenantId, {
+        activeVerticalPacks: ['hvac', 'plumbing'],
+      });
+
+      const after = await settingsRepo.findByTenant(tenant.tenantId);
+      expect(after!.activeVerticalPacks).toEqual(['hvac', 'plumbing']);
+      expect(after!.terminologyPreferences).toEqual({ technician: 'tech' });
+    });
+
+    it('an explicit empty array clears packs (intentional clear path)', async () => {
+      const tenant = await seedTenantWithPacks();
+
+      await settingsRepo.update(tenant.tenantId, { activeVerticalPacks: [] });
+
+      const after = await settingsRepo.findByTenant(tenant.tenantId);
+      expect(after!.activeVerticalPacks).toBeUndefined();
+      expect(after!.terminologyPreferences).toEqual({ technician: 'tech' });
+    });
+  });
 });

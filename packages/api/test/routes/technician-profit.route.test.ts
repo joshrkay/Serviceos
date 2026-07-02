@@ -90,20 +90,29 @@ async function buildApp(opts: { wireDeps: boolean }) {
   return { app, jobRepo, invoiceRepo };
 }
 
+const TECH_ID = '11111111-2222-3333-4444-555555555555';
+
 describe('GET /api/reports/technician-profit/:technicianId', () => {
+  it('400s on a non-UUID technician id (QA 2026-07-02 guard)', async () => {
+    const { app } = await buildApp({ wireDeps: true });
+    const res = await request(app).get('/api/reports/technician-profit/tech-1');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+  });
+
   it('returns the aggregated technician profit under data', async () => {
     const { app, jobRepo, invoiceRepo } = await buildApp({ wireDeps: true });
-    await jobRepo.create(job('j1', 'tech-1'));
-    await jobRepo.create(job('j2', 'tech-1'));
+    await jobRepo.create(job('j1', TECH_ID));
+    await jobRepo.create(job('j2', TECH_ID));
     await jobRepo.create(job('j9', 'tech-2'));
     await invoiceRepo.create(paidInvoice('j1', 70000));
     await invoiceRepo.create(paidInvoice('j2', 30000));
     await invoiceRepo.create(paidInvoice('j9', 50000));
 
-    const res = await request(app).get('/api/reports/technician-profit/tech-1');
+    const res = await request(app).get(`/api/reports/technician-profit/${TECH_ID}`);
     expect(res.status).toBe(200);
     expect(res.body.data).toMatchObject({
-      technicianId: 'tech-1',
+      technicianId: TECH_ID,
       jobCount: 2,
       revenueCents: 100000, // tech-2's job excluded
     });
@@ -112,14 +121,14 @@ describe('GET /api/reports/technician-profit/:technicianId', () => {
 
   it('returns a zero report for a technician with no jobs', async () => {
     const { app } = await buildApp({ wireDeps: true });
-    const res = await request(app).get('/api/reports/technician-profit/nobody');
+    const res = await request(app).get('/api/reports/technician-profit/99999999-9999-4999-8999-999999999999');
     expect(res.status).toBe(200);
     expect(res.body.data).toMatchObject({ jobCount: 0, revenueCents: 0, marginPct: null });
   });
 
   it('503s when the profit deps are not configured', async () => {
     const { app } = await buildApp({ wireDeps: false });
-    const res = await request(app).get('/api/reports/technician-profit/tech-1');
+    const res = await request(app).get(`/api/reports/technician-profit/${TECH_ID}`);
     expect(res.status).toBe(503);
     expect(res.body.error).toBe('NOT_CONFIGURED');
   });

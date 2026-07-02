@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
 import { apiFetch } from '../utils/api-fetch';
+import { fetchMeShared } from './useMe';
 
 /**
  * Tenant timezone context.
@@ -32,10 +33,6 @@ const TenantTimezoneContext = createContext<TenantTimezoneContextValue>({
   loading: true,
 });
 
-interface MeResponse {
-  timezone?: string;
-}
-
 export interface TenantTimezoneProviderProps {
   children: ReactNode;
   /**
@@ -60,10 +57,11 @@ export function TenantTimezoneProvider({
       return;
     }
     let cancelled = false;
-    apiFetch('/api/me')
-      .then(async (res) => {
-        if (!res.ok) throw new Error(`/api/me returned ${res.status}`);
-        const body = (await res.json()) as MeResponse;
+    // Piggyback on useMe's module cache — this provider previously issued
+    // its own GET /api/me on every mount, duplicating the useMe fetch on
+    // every page load (QA sweep 2026-07-02).
+    fetchMeShared(apiFetch)
+      .then((body) => {
         if (!cancelled && typeof body.timezone === 'string' && body.timezone) {
           setTimezone(body.timezone);
         }

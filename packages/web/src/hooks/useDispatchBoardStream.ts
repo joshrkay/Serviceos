@@ -7,15 +7,29 @@ export interface DispatchBoardStreamEvent {
   boardRevision?: string;
 }
 
+export interface DispatchBoardStreamOptions {
+  /**
+   * UC-3 — when presence rides the WS gateway (useDispatchPresence transport
+   * === 'ws'), presence state arrives as dispatch.presence pushes, so a
+   * presence_updated SSE event doesn't need a full board refetch here.
+   * board_updated always refetches.
+   */
+  presenceViaWs?: boolean;
+}
+
 export function useDispatchBoardStream(
   dateParam: string,
   currentRevision: string | undefined,
   onStale: () => void,
+  options: DispatchBoardStreamOptions = {},
 ): void {
   const { getToken } = useAuth();
   const lastRevisionRef = useRef(currentRevision);
   const sseFailedAtRef = useRef<number | null>(null);
   const sseAbortRef = useRef<AbortController | null>(null);
+  // Ref-backed so toggling the flag never tears down the SSE connection.
+  const presenceViaWsRef = useRef(options.presenceViaWs ?? false);
+  presenceViaWsRef.current = options.presenceViaWs ?? false;
 
   useEffect(() => {
     lastRevisionRef.current = currentRevision;
@@ -34,7 +48,7 @@ export function useDispatchBoardStream(
         }
         lastRevisionRef.current = evt.boardRevision;
       }
-      if (evt.type === 'presence_updated') {
+      if (evt.type === 'presence_updated' && !presenceViaWsRef.current) {
         onStale();
       }
     };

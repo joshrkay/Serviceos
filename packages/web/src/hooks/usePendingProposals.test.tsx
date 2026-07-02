@@ -16,7 +16,7 @@
  */
 import { renderHook, waitFor, act } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { usePendingProposals } from './usePendingProposals';
+import { usePendingProposals, _resetPendingProposalsCacheForTests } from './usePendingProposals';
 
 interface ProposalRow {
   id: string;
@@ -51,6 +51,7 @@ function setDocumentHidden(hidden: boolean) {
 
 describe('P2-033 — usePendingProposals', () => {
   beforeEach(() => {
+    _resetPendingProposalsCacheForTests();
     vi.restoreAllMocks();
     setDocumentHidden(false);
   });

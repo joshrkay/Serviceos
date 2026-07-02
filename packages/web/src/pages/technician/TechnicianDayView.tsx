@@ -556,16 +556,27 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
     });
   }
 
+  // Sweep-2 S3 — this view previously used BEM class names with no
+  // stylesheet (inert in this Tailwind app), rendering as raw unstyled
+  // text. Restyled with the repo's mobile conventions: card patterns
+  // mirroring TechJobView and ≥44px (min-h-11) tap targets per the
+  // CLAUDE.md mobile rule. All behavior and data-testids are unchanged.
+  const secondaryButtonClass =
+    'flex min-h-11 items-center justify-center rounded-xl border border-border bg-card px-4 text-sm text-foreground hover:bg-secondary active:bg-secondary transition-colors disabled:opacity-50';
+  const primaryButtonClass =
+    'flex min-h-11 items-center justify-center rounded-xl bg-primary px-4 text-sm text-primary-foreground hover:bg-primary/90 active:bg-primary/80 transition-colors disabled:opacity-50';
+
   return (
-    <div className="technician-day-view" data-testid="technician-day-view">
-      <div className="technician-day-view__header" data-testid="technician-day-header">
-        <div>
-          <h2>My Schedule</h2>
-          <span className="technician-day-view__date">{today}</span>
+    <div className="mx-auto w-full max-w-lg space-y-4 px-4 py-4" data-testid="technician-day-view">
+      <div className="flex items-start justify-between gap-3" data-testid="technician-day-header">
+        <div className="min-w-0">
+          <h2 className="text-xl font-semibold text-foreground">My Schedule</h2>
+          <span className="text-sm text-muted-foreground">{today}</span>
         </div>
-        <div className="technician-day-view__date-nav">
+        <div className="flex shrink-0 gap-2">
           <button
             type="button"
+            className={secondaryButtonClass}
             onClick={() => setSelectedDate((value) => new Date(value.getFullYear(), value.getMonth(), value.getDate() - 1))}
             data-testid="technician-day-prev"
           >
@@ -573,6 +584,7 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
           </button>
           <button
             type="button"
+            className={secondaryButtonClass}
             onClick={() => setSelectedDate((value) => new Date(value.getFullYear(), value.getMonth(), value.getDate() + 1))}
             data-testid="technician-day-next"
           >
@@ -585,57 +597,104 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
       <TechnicianProfitCard technicianId={technicianId} />
 
       {nextAppointment && (
-        <div className="technician-day-view__next" data-testid="technician-day-next-appointment">
+        <div
+          className="rounded-2xl border border-primary/20 bg-primary/10 px-4 py-3 text-sm text-foreground"
+          data-testid="technician-day-next-appointment"
+        >
           <strong>Next appointment:</strong> {nextAppointment.customerName} at {formatTime(nextAppointment.scheduledStart)}
           {' '}
-          <a href={buildMapsHref(nextAppointment.locationAddress)} target="_blank" rel="noreferrer" data-testid="technician-day-next-map-link">
+          <a
+            href={buildMapsHref(nextAppointment.locationAddress)}
+            target="_blank"
+            rel="noreferrer"
+            className="text-primary underline"
+            data-testid="technician-day-next-map-link"
+          >
             Open in maps
           </a>
         </div>
       )}
 
-      <div className="technician-day-view__assistant" data-testid="technician-day-assistant">
-        <label htmlFor="tech-schedule-question">Ask AI about your schedule</label>
-        <div>
+      <div
+        className="space-y-2 rounded-2xl border border-border bg-card p-4"
+        data-testid="technician-day-assistant"
+      >
+        <label htmlFor="tech-schedule-question" className="text-sm font-medium text-foreground">
+          Ask AI about your schedule
+        </label>
+        <div className="flex gap-2">
           <input
             id="tech-schedule-question"
+            className="min-h-11 w-full min-w-0 flex-1 rounded-xl border border-border bg-background px-3 text-sm text-foreground"
             value={aiQuestion}
             onChange={(event) => setAiQuestion(event.target.value)}
           />
           <button
             type="button"
+            className={`${primaryButtonClass} shrink-0`}
             onClick={() => setAiAnswer(answerScheduleQuestion(aiQuestion, sortedAppointments, new Date()))}
             data-testid="technician-day-ask-ai"
           >
             Ask
           </button>
         </div>
-        {aiAnswer && <p data-testid="technician-day-ai-answer">{aiAnswer}</p>}
+        {aiAnswer && (
+          <p className="text-sm text-muted-foreground" data-testid="technician-day-ai-answer">
+            {aiAnswer}
+          </p>
+        )}
       </div>
 
-      {gpsError && <div data-testid="technician-day-gps-error">{gpsError}</div>}
+      {gpsError && (
+        <div
+          className="rounded-xl border border-border bg-secondary px-4 py-3 text-xs text-muted-foreground"
+          data-testid="technician-day-gps-error"
+        >
+          {gpsError}
+        </div>
+      )}
 
       {showDelayPrompt && (
-        <div className="technician-day-view__delay-prompt" data-testid="technician-day-delay-prompt">
+        <div
+          className="space-y-3 rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-foreground"
+          data-testid="technician-day-delay-prompt"
+        >
           You appear to still be on-site and running 15-20 minutes behind. Notify upcoming customers?
-          <div data-testid="technician-day-delay-confidence">
+          <div className="text-xs text-muted-foreground" data-testid="technician-day-delay-confidence">
             Reliability confidence: {Math.round(promptConfidence * 100)}%
           </div>
-          <div>
-            <button type="button" onClick={() => void sendDelayNotification(true)} data-testid="technician-day-delay-accept">Accept</button>
-            <button type="button" onClick={() => void sendDelayNotification(false)} data-testid="technician-day-delay-decline">Decline</button>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              className={`${primaryButtonClass} flex-1`}
+              onClick={() => void sendDelayNotification(true)}
+              data-testid="technician-day-delay-accept"
+            >
+              Accept
+            </button>
+            <button
+              type="button"
+              className={`${secondaryButtonClass} flex-1`}
+              onClick={() => void sendDelayNotification(false)}
+              data-testid="technician-day-delay-decline"
+            >
+              Decline
+            </button>
           </div>
         </div>
       )}
 
       {isLoading && (
-        <div className="technician-day-view__loading" data-testid="technician-day-loading">
+        <div className="py-8 text-center text-sm text-muted-foreground" data-testid="technician-day-loading">
           Loading schedule...
         </div>
       )}
 
       {error && (
-        <div className="technician-day-view__error" data-testid="technician-day-error">
+        <div
+          className="rounded-xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive"
+          data-testid="technician-day-error"
+        >
           {error}
           {staleAppointmentId && (
             <button
@@ -647,7 +706,7 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
                 setRefetchNonce((value) => value + 1);
               }}
               data-testid="technician-day-refresh"
-              className="ml-2 underline"
+              className="ml-2 min-h-11 underline"
             >
               Refresh
             </button>
@@ -656,9 +715,12 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
       )}
 
       {!isLoading && !error && (
-        <div className="technician-day-view__list" data-testid="technician-day-list">
+        <div className="space-y-3" data-testid="technician-day-list">
           {sortedAppointments.length === 0 ? (
-            <div className="technician-day-view__empty" data-testid="technician-day-empty">
+            <div
+              className="rounded-2xl border border-dashed border-border bg-card px-4 py-8 text-center text-sm text-muted-foreground"
+              data-testid="technician-day-empty"
+            >
               No appointments scheduled for today
             </div>
           ) : (
@@ -668,96 +730,116 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
               return (
                 <div
                   key={appt.id}
-                  className="technician-day-view__appointment"
+                  className="space-y-2 rounded-2xl border border-border bg-card p-4"
                   data-testid="technician-day-appointment"
                 >
-                  <div className="technician-day-view__time" data-testid="technician-day-time">
-                    {formatTime(appt.scheduledStart)} - {formatTime(appt.scheduledEnd)}
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="text-sm font-semibold text-foreground" data-testid="technician-day-time">
+                      {formatTime(appt.scheduledStart)} - {formatTime(appt.scheduledEnd)}
+                    </div>
+                    <div
+                      className="inline-flex rounded-full bg-secondary px-2.5 py-0.5 text-xs capitalize text-foreground"
+                      data-testid="technician-day-status"
+                    >
+                      {getStatusLabel(appt.status)}
+                    </div>
                   </div>
-                  <div className="technician-day-view__customer" data-testid="technician-day-customer">
+                  <div className="text-base font-medium text-foreground" data-testid="technician-day-customer">
                     {appt.customerName}
                   </div>
-                  <div className="technician-day-view__location" data-testid="technician-day-location">
-                    <a href={buildMapsHref(appt.locationAddress)} target="_blank" rel="noreferrer">
+                  <div className="text-sm" data-testid="technician-day-location">
+                    <a
+                      href={buildMapsHref(appt.locationAddress)}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="break-words text-primary underline"
+                    >
                       {appt.locationAddress}
                     </a>
                   </div>
                   {appt.jobSummary && (
-                    <div className="technician-day-view__summary">
+                    <div className="break-words text-sm text-muted-foreground">
                       {appt.jobSummary}
                     </div>
                   )}
-                  <div className="technician-day-view__status" data-testid="technician-day-status">
-                    {getStatusLabel(appt.status)}
+
+                  <div className="flex flex-col gap-2 pt-1">
+                    {appt.jobId && (
+                      <button
+                        type="button"
+                        data-testid="technician-day-view-job"
+                        onClick={() => navigate(`/jobs/${appt.jobId}?view=tech`)}
+                        className={`${secondaryButtonClass} w-full`}
+                      >
+                        View job →
+                      </button>
+                    )}
+
+                    <button
+                      type="button"
+                      className={`${primaryButtonClass} w-full`}
+                      data-testid="technician-day-on-my-way"
+                      disabled={onMyWaySending === appt.id || onMyWayNotified[appt.id]}
+                      onClick={() => void sendOnMyWay(appt.id)}
+                    >
+                      {onMyWayNotified[appt.id]
+                        ? 'Customer notified ✓'
+                        : onMyWaySending === appt.id
+                          ? 'Sending…'
+                          : 'On my way'}
+                    </button>
+
+                    {!isEditing ? (
+                      <button
+                        type="button"
+                        className={`${secondaryButtonClass} w-full`}
+                        data-testid="technician-day-edit"
+                        onClick={() => {
+                          setEditingAppointmentId(appt.id);
+                          setEditedStart(toDateTimeInputValue(appt.scheduledStart));
+                          setEditedEnd(toDateTimeInputValue(appt.scheduledEnd));
+                        }}
+                      >
+                        Edit time
+                      </button>
+                    ) : (
+                      <div className="space-y-2" data-testid="technician-day-edit-form">
+                        <input
+                          type="datetime-local"
+                          className="min-h-11 w-full rounded-xl border border-border bg-background px-3 text-sm text-foreground"
+                          value={editedStart}
+                          onChange={(event) => setEditedStart(event.target.value)}
+                          data-testid="technician-day-edit-start"
+                        />
+                        <input
+                          type="datetime-local"
+                          className="min-h-11 w-full rounded-xl border border-border bg-background px-3 text-sm text-foreground"
+                          value={editedEnd}
+                          onChange={(event) => setEditedEnd(event.target.value)}
+                          data-testid="technician-day-edit-end"
+                        />
+                        <div className="flex gap-2">
+                          <button
+                            type="button"
+                            className={`${primaryButtonClass} flex-1`}
+                            disabled={savingAppointmentId === appt.id}
+                            onClick={() => void saveAppointmentTimes(appt.id)}
+                            data-testid="technician-day-save"
+                          >
+                            Save
+                          </button>
+                          <button
+                            type="button"
+                            className={`${secondaryButtonClass} flex-1`}
+                            onClick={() => setEditingAppointmentId(null)}
+                            data-testid="technician-day-cancel"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
-
-                  {appt.jobId && (
-                    <button
-                      type="button"
-                      data-testid="technician-day-view-job"
-                      onClick={() => navigate(`/jobs/${appt.jobId}?view=tech`)}
-                      className="mt-1 text-xs text-blue-600 hover:underline"
-                    >
-                      View job →
-                    </button>
-                  )}
-
-                  <button
-                    type="button"
-                    data-testid="technician-day-on-my-way"
-                    disabled={onMyWaySending === appt.id || onMyWayNotified[appt.id]}
-                    onClick={() => void sendOnMyWay(appt.id)}
-                  >
-                    {onMyWayNotified[appt.id]
-                      ? 'Customer notified ✓'
-                      : onMyWaySending === appt.id
-                        ? 'Sending…'
-                        : 'On my way'}
-                  </button>
-
-                  {!isEditing ? (
-                    <button
-                      type="button"
-                      data-testid="technician-day-edit"
-                      onClick={() => {
-                        setEditingAppointmentId(appt.id);
-                        setEditedStart(toDateTimeInputValue(appt.scheduledStart));
-                        setEditedEnd(toDateTimeInputValue(appt.scheduledEnd));
-                      }}
-                    >
-                      Edit time
-                    </button>
-                  ) : (
-                    <div data-testid="technician-day-edit-form">
-                      <input
-                        type="datetime-local"
-                        value={editedStart}
-                        onChange={(event) => setEditedStart(event.target.value)}
-                        data-testid="technician-day-edit-start"
-                      />
-                      <input
-                        type="datetime-local"
-                        value={editedEnd}
-                        onChange={(event) => setEditedEnd(event.target.value)}
-                        data-testid="technician-day-edit-end"
-                      />
-                      <button
-                        type="button"
-                        disabled={savingAppointmentId === appt.id}
-                        onClick={() => void saveAppointmentTimes(appt.id)}
-                        data-testid="technician-day-save"
-                      >
-                        Save
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setEditingAppointmentId(null)}
-                        data-testid="technician-day-cancel"
-                      >
-                        Cancel
-                      </button>
-                    </div>
-                  )}
                 </div>
               );
             })

@@ -449,4 +449,61 @@ describe('Google Reviews worker — integration', () => {
     expect(externalIdsUnderB).toContain('accounts/789/locations/012/reviews/iso_b');
     expect(externalIdsUnderB).not.toContain('accounts/123/locations/456/reviews/iso_a');
   });
+
+  // U3 — findRecent pins the REAL columns (rating, review_create_time) and
+  // the SQL filters/order the respond_to_review voice path relies on. The
+  // in-memory repo covers the semantics; this proves the Pg statement.
+  it('findRecent: rating + since filters, newest-first order, LIMIT — against real columns', async () => {
+    const now = new Date('2026-07-02T12:00:00Z');
+    const day = 24 * 60 * 60 * 1000;
+    const seed = async (
+      suffix: string,
+      rating: number,
+      createTime: Date,
+    ): Promise<string> => {
+      const { review } = await reviewRepo.upsert({
+        id: crypto.randomUUID(),
+        tenantId: tenantA.tenantId,
+        externalReviewId: `accounts/123/locations/456/reviews/recent_${suffix}`,
+        locationId: 'accounts/123/locations/456',
+        reviewerDisplayName: `Reviewer ${suffix}`,
+        reviewerProfileUrl: null,
+        rating,
+        commentText: 'text',
+        createTime,
+        updateTime: null,
+        firstFetchedAt: now,
+        lastFetchedAt: now,
+      });
+      return review.id;
+    };
+
+    const r1 = await seed('one_star', 1, new Date(now.getTime() - 3 * day));
+    const r2 = await seed('two_star', 2, new Date(now.getTime() - 1 * day));
+    await seed('five_star', 5, new Date(now.getTime() - 1 * day)); // rating-filtered
+    await seed('stale', 1, new Date(now.getTime() - 30 * day)); // window-filtered
+
+    const found = await reviewRepo.findRecent(tenantA.tenantId, {
+      maxRating: 3,
+      since: new Date(now.getTime() - 14 * day),
+      limit: 5,
+    });
+    expect(found.map((r) => r.id)).toEqual([r2, r1]);
+
+    // LIMIT is applied in SQL.
+    const capped = await reviewRepo.findRecent(tenantA.tenantId, {
+      maxRating: 3,
+      since: new Date(now.getTime() - 14 * day),
+      limit: 1,
+    });
+    expect(capped.map((r) => r.id)).toEqual([r2]);
+
+    // Optional filters omitted → all four rows, newest first.
+    const all = await reviewRepo.findRecent(tenantA.tenantId, { limit: 10 });
+    expect(all).toHaveLength(4);
+
+    // Tenant-scoped.
+    const tenantB = await createTestTenant(pool);
+    expect(await reviewRepo.findRecent(tenantB.tenantId, { limit: 10 })).toEqual([]);
+  });
 });

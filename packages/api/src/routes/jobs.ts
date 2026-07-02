@@ -293,12 +293,15 @@ export function createJobRouter(
             limit,
             offset,
           });
-          res.json(result);
+          res.json({
+            ...result,
+            data: await attachCustomerSummaries(req.auth!.tenantId, result.data),
+          });
           return;
         }
 
         const result = await listJobs(req.auth!.tenantId, jobRepo, baseOptions);
-        res.json(result);
+        res.json(await attachCustomerSummaries(req.auth!.tenantId, result));
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);

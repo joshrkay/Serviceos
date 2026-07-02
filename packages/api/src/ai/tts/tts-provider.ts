@@ -188,11 +188,19 @@ export class ElevenLabsTtsProvider implements TtsProvider {
 export function createTtsProvider(env: {
   TTS_PROVIDER?: string;
   ELEVENLABS_API_KEY?: string;
+  ELEVENLABS_VOICE_ID?: string;
   AI_PROVIDER_API_KEY?: string;
 }): TtsProvider | undefined {
   if (env.TTS_PROVIDER === 'elevenlabs') {
     if (!env.ELEVENLABS_API_KEY) return undefined;
-    return new ElevenLabsTtsProvider(env.ELEVENLABS_API_KEY);
+    // UB-C2 — honor the same ELEVENLABS_VOICE_ID that scripts/render-fillers.ts
+    // uses, so pre-rendered filler clips and live TTS speak with ONE voice.
+    // (Per-tenant voice selection on the streaming path is a known gap:
+    // settings.ttsVoiceEn/Es are Twilio <Say> Polly voices for the Gather
+    // path — no per-tenant ElevenLabs voice mapping exists yet.)
+    return env.ELEVENLABS_VOICE_ID
+      ? new ElevenLabsTtsProvider(env.ELEVENLABS_API_KEY, env.ELEVENLABS_VOICE_ID)
+      : new ElevenLabsTtsProvider(env.ELEVENLABS_API_KEY);
   }
   if (env.AI_PROVIDER_API_KEY) {
     return new OpenAiTtsProvider(env.AI_PROVIDER_API_KEY);

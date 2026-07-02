@@ -2,8 +2,9 @@
  * P8-015 — Dropped-call recovery scheduler.
  *
  * The DURABLE "queue" for the 60-second deferred recovery SMS. Rather than a
- * `setTimeout` (which is lost on restart — see the superseded B5 MVP in
- * telephony/dropped-call-recovery.ts), recovery is enqueued by inserting a row
+ * `setTimeout` (which is lost on restart — the superseded in-process B5 MVP,
+ * telephony/dropped-call-recovery.ts, was deleted in UC-5b), recovery is
+ * enqueued by inserting a row
  * into `dropped_call_recoveries` with `scheduled_for = now + 60s`. The
  * `dropped-call-worker` polls that table and sends due rows, so a server
  * restart between schedule (T=0) and send (T=60s) never drops a recovery.

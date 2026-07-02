@@ -19,6 +19,8 @@ interface FormState {
   email: string;
   preferredChannel: typeof CHANNELS[number];
   communicationNotes: string;
+  // D4: SMS consent capture
+  smsConsent: boolean;
 }
 
 const empty: FormState = {
@@ -30,6 +32,7 @@ const empty: FormState = {
   email: '',
   preferredChannel: 'email',
   communicationNotes: '',
+  smsConsent: false,
 };
 
 /**
@@ -73,6 +76,7 @@ export function CustomerEdit({ customerId, onSaved, onCancel }: CustomerEditProp
             ? data.preferredChannel
             : 'email') as FormState['preferredChannel'],
           communicationNotes: data.communicationNotes ?? '',
+          smsConsent: data.smsConsent ?? false,
         });
       } catch (err) {
         if (!cancelled) {
@@ -106,6 +110,8 @@ export function CustomerEdit({ customerId, onSaved, onCancel }: CustomerEditProp
         email: form.email.trim() || undefined,
         preferredChannel: form.preferredChannel,
         communicationNotes: form.communicationNotes.trim() || '',
+        // D4: Include SMS consent in update
+        smsConsent: form.smsConsent,
       };
 
       setSubmitting(true);
@@ -208,6 +214,22 @@ export function CustomerEdit({ customerId, onSaved, onCancel }: CustomerEditProp
             ))}
           </Select>
         </Field>
+        {/* D4: SMS consent checkbox */}
+        <div className="md:col-span-2 flex items-start gap-3 rounded-lg border border-border bg-secondary/30 p-3">
+          <input
+            type="checkbox"
+            id="smsConsent"
+            checked={form.smsConsent}
+            onChange={(e) => setField('smsConsent', e.target.checked)}
+            className="mt-0.5 h-4 w-4 rounded border-border text-primary focus:ring-primary"
+          />
+          <label htmlFor="smsConsent" className="flex-1 cursor-pointer">
+            <span className="text-sm text-foreground">SMS messaging consent</span>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              Customer has consented to receive SMS messages including appointment reminders, estimates, and invoices.
+            </p>
+          </label>
+        </div>
         <Field label="Customer notes" className="md:col-span-2">
           <Textarea
             aria-label="communicationNotes"

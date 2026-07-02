@@ -248,4 +248,50 @@ describe('P1-017 — Tenant business settings and numbering preferences', () => 
       expect(second.aiModel).toBe('tenant-pinned-model');
     });
   });
+
+  // Sweep-2 S1 — updateSettings used to unconditionally spread a normalized
+  // `activeVerticalPacks: undefined` into every repo update, which the Pg
+  // repo's "key present" semantics read as an explicit clear → any unrelated
+  // PUT /api/settings silently wiped the tenant's active vertical packs.
+  describe('Sweep-2 S1 — unrelated updates never touch activeVerticalPacks', () => {
+    beforeEach(async () => {
+      await createSettings(
+        { tenantId: 'tenant-packs', businessName: 'Packed Co', activeVerticalPacks: ['hvac'] },
+        repo,
+      );
+    });
+
+    it('never passes the activeVerticalPacks key to the repo when the caller omitted it', async () => {
+      const updateSpy = vi.spyOn(repo, 'update');
+      await updateSettings('tenant-packs', { digestEnabled: true }, repo);
+
+      expect(updateSpy).toHaveBeenCalledTimes(1);
+      const passed = updateSpy.mock.calls[0][1];
+      expect('activeVerticalPacks' in passed).toBe(false);
+      updateSpy.mockRestore();
+    });
+
+    it('packs survive an unrelated digestEnabled-only update', async () => {
+      const updated = await updateSettings('tenant-packs', { digestEnabled: true }, repo);
+      expect(updated?.digestEnabled).toBe(true);
+      expect(updated?.activeVerticalPacks).toEqual(['hvac']);
+
+      const reread = await getSettings('tenant-packs', repo);
+      expect(reread?.activeVerticalPacks).toEqual(['hvac']);
+    });
+
+    it('an explicit packs update still persists (with normalization)', async () => {
+      const updated = await updateSettings(
+        'tenant-packs',
+        { activeVerticalPacks: [' HVAC ', 'plumbing'] },
+        repo,
+      );
+      expect(updated?.activeVerticalPacks).toEqual(['hvac', 'plumbing']);
+    });
+
+    it('an explicit empty array is an intentional clear', async () => {
+      const updated = await updateSettings('tenant-packs', { activeVerticalPacks: [] }, repo);
+      expect(updated?.activeVerticalPacks).toEqual([]);
+    });
+  });
 });

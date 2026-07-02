@@ -196,6 +196,8 @@ export function AIProposalCard({ proposal, onApprove, onReject }: Props) {
     );
   const markers = proposal.meta?.markers ?? [];
   const severity = proposal.meta?.severity;
+  // UB-A3 — "Standing instruction applied" chips.
+  const appliedInstructions = proposal.meta?.appliedStandingInstructions ?? [];
 
   // ── Approved ──────────────────────────────────────────────────
   if (status === 'Approved') {
@@ -340,6 +342,23 @@ export function AIProposalCard({ proposal, onApprove, onReject }: Props) {
                     </span>
                   );
                 })}
+              </div>
+            )}
+
+            {/* UB-A3 — passive chip per owner standing instruction the
+                draft applied (from `_meta.appliedStandingInstructions`,
+                server-side intersected with what was injected). */}
+            {appliedInstructions.length > 0 && (
+              <div className="mt-2 flex flex-wrap gap-1.5" data-testid="standing-instruction-chips">
+                {appliedInstructions.map((si) => (
+                  <span
+                    key={si.id}
+                    data-testid="standing-instruction-chip"
+                    className="inline-flex max-w-full items-center truncate rounded-full border border-border bg-secondary px-2 py-0.5 text-[10px] font-medium text-muted-foreground"
+                  >
+                    Standing instruction applied: {si.text}
+                  </span>
+                ))}
               </div>
             )}
 

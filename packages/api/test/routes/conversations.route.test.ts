@@ -110,6 +110,67 @@ describe('POST /api/conversations/:id/suggest-reply', () => {
   });
 });
 
+describe('GET /api/conversations/:id — journey QA bug 11 (thread self-wipe)', () => {
+  it('returns the conversation WITH its messages (role derived from senderRole)', async () => {
+    const { app, conversationRepo } = buildApp({ withGateway: false });
+    const conv = await conversationRepo.createConversation({
+      tenantId: TENANT_ID,
+      title: 'What should I focus on today?',
+      createdBy: USER_ID,
+    });
+    await conversationRepo.addMessage({
+      tenantId: TENANT_ID,
+      conversationId: conv.id,
+      messageType: 'text',
+      content: 'What should I focus on today?',
+      senderId: USER_ID,
+      senderRole: 'user',
+      source: 'assistant',
+    });
+    await conversationRepo.addMessage({
+      tenantId: TENANT_ID,
+      conversationId: conv.id,
+      messageType: 'text',
+      content: 'Two estimates are waiting on approval.',
+      senderId: 'assistant',
+      senderRole: 'assistant',
+      source: 'assistant',
+    });
+
+    const res = await request(app).get(`/api/conversations/${conv.id}`);
+    expect(res.status).toBe(200);
+    expect(res.body.id).toBe(conv.id);
+    expect(res.body.messages).toHaveLength(2);
+    expect(res.body.messages[0]).toMatchObject({
+      role: 'user',
+      content: 'What should I focus on today?',
+    });
+    expect(res.body.messages[1]).toMatchObject({
+      role: 'assistant',
+      content: 'Two estimates are waiting on approval.',
+    });
+    // The UI reads createdAt for the bubble timestamp.
+    expect(res.body.messages[0].createdAt).toBeTruthy();
+  });
+
+  it('returns an empty messages array (not undefined) for a thread with no messages', async () => {
+    const { app, conversationRepo } = buildApp({ withGateway: false });
+    const conv = await conversationRepo.createConversation({
+      tenantId: TENANT_ID,
+      createdBy: USER_ID,
+    });
+    const res = await request(app).get(`/api/conversations/${conv.id}`);
+    expect(res.status).toBe(200);
+    expect(res.body.messages).toEqual([]);
+  });
+
+  it('still 404s for an unknown conversation', async () => {
+    const { app } = buildApp({ withGateway: false });
+    const res = await request(app).get('/api/conversations/nope');
+    expect(res.status).toBe(404);
+  });
+});
+
 describe('GET /api/conversations/search — Story 3.11 history search', () => {
   async function seedLinked(repo: InMemoryConversationRepository) {
     const custConv = await repo.createConversation({

@@ -88,6 +88,36 @@ describe('P12-001 — /api/me', () => {
     expect(res.body.permissions).toEqual(getPermissions('owner'));
   });
 
+  // Sweep-2 S5 — /api/me additively exposes the internal users.id UUID.
+  // `user_id` is the AUTH identity (Clerk sub, non-UUID in production);
+  // appointment assignments store users.id, so technician surfaces need
+  // this field to resolve "which technician am I".
+  it('GET /api/me returns internal_user_id when the users row carries one', async () => {
+    const { app, service } = buildApp({ userId: 'user_2clerkSub', role: 'technician' });
+    service.upsertUser({
+      user_id: 'user_2clerkSub',
+      internal_user_id: '7e0d3f0a-2b1c-4a5d-9e8f-3c6b7a1d2e4f',
+      tenant_id: TENANT,
+      role: 'technician',
+      can_field_serve: true,
+      current_mode: 'tech',
+      mode_changed_at: null,
+    });
+
+    const res = await request(app).get('/api/me');
+    expect(res.status).toBe(200);
+    expect(res.body.user_id).toBe('user_2clerkSub');
+    expect(res.body.internal_user_id).toBe('7e0d3f0a-2b1c-4a5d-9e8f-3c6b7a1d2e4f');
+  });
+
+  it('GET /api/me returns internal_user_id: null when no users row exists (no technician mapping)', async () => {
+    const { app } = buildApp({ userId: 'user_demo_owner', role: 'owner' });
+    // No upsertUser — fresh tenant / dev-bypass principal.
+    const res = await request(app).get('/api/me');
+    expect(res.status).toBe(200);
+    expect(res.body.internal_user_id).toBeNull();
+  });
+
   it("POST /api/me/mode accepts 'tech' for an owner and writes an audit row", async () => {
     const { app, service, audit } = buildApp({
       userId: 'user-owner',

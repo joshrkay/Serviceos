@@ -7,6 +7,7 @@ import {
   Proposal,
   decideInitialStatus,
   actionClassForProposalType,
+  VALID_PROPOSAL_TYPES,
 } from '../../src/proposals/proposal';
 import { ConflictError } from '../../src/shared/errors';
 
@@ -468,6 +469,73 @@ describe('decideInitialStatus — D3 trust-tier decision', () => {
         missingFields: [],
       })
     ).toBe('approved');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// UB-A3 guard — `_meta.appliedStandingInstructions` is a PRESENTATION-ONLY
+// marker. It must be invisible to decideInitialStatus: for every input the
+// function can see, the output with the marker present is byte-identical to
+// the output without it. If this test ever fails, someone has wired standing
+// instructions into approval decisions — which the feature contract forbids
+// ("they adjust CONTENT only, never approvals").
+// ─────────────────────────────────────────────────────────────────────────
+describe('decideInitialStatus — UB-A3 appliedStandingInstructions marker is inert', () => {
+  const MARKER = [
+    { id: 'si-1', text: 'Always add a fuel surcharge line' },
+    { id: 'si-2', text: 'Mention the referral discount' },
+  ];
+
+  const TIERS = [undefined, 'autonomous', 'graduates_fast', 'graduates_slowly', 'always_asks'] as const;
+  const CONFIDENCES = [undefined, 0.5, 0.89, 0.95] as const;
+  const SUPERVISOR_PRESENT = [undefined, true, false] as const;
+  const OVERALL = [undefined, 'high', 'low'] as const;
+
+  it('output is byte-identical with/without the marker across the full input matrix', () => {
+    for (const proposalType of VALID_PROPOSAL_TYPES) {
+      for (const sourceTrustTier of TIERS) {
+        for (const confidenceScore of CONFIDENCES) {
+          for (const supervisorPresent of SUPERVISOR_PRESENT) {
+            for (const overallConfidence of OVERALL) {
+              const baseMeta = overallConfidence ? { overallConfidence } : {};
+              const without = decideInitialStatus({
+                proposalType,
+                sourceTrustTier,
+                confidenceScore,
+                supervisorPresent,
+                payload: { _meta: baseMeta },
+              });
+              const withMarker = decideInitialStatus({
+                proposalType,
+                sourceTrustTier,
+                confidenceScore,
+                supervisorPresent,
+                payload: { _meta: { ...baseMeta, appliedStandingInstructions: MARKER } },
+              });
+              expect(withMarker).toBe(without);
+            }
+          }
+        }
+      }
+    }
+  });
+
+  it('marker alone (no other _meta keys, payload otherwise empty) never changes the no-_meta result', () => {
+    for (const proposalType of VALID_PROPOSAL_TYPES) {
+      const without = decideInitialStatus({
+        proposalType,
+        sourceTrustTier: 'autonomous',
+        confidenceScore: 0.95,
+        payload: {},
+      });
+      const withMarker = decideInitialStatus({
+        proposalType,
+        sourceTrustTier: 'autonomous',
+        confidenceScore: 0.95,
+        payload: { _meta: { appliedStandingInstructions: MARKER } },
+      });
+      expect(withMarker).toBe(without);
+    }
   });
 });
 

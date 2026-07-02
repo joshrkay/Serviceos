@@ -192,6 +192,16 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     // Epic 12.6 — migration 204. Opt-out: column defaults true, so a
     // pre-migration row reads as enabled.
     weeklyFeedbackEnabled: (row.weekly_feedback_enabled as boolean | null) ?? true,
+    // UB-D / D-015 — migration 231. enabled is NOT NULL DEFAULT FALSE so
+    // legacy rows read false. threshold is NUMERIC(3,2), which node-pg
+    // returns as a STRING (the only fractional NUMERIC column on this
+    // table) — convert explicitly instead of the bare int-column casts
+    // used elsewhere in this mapper.
+    autonomousBookingEnabled: (row.autonomous_booking_enabled as boolean | null) ?? false,
+    autonomousBookingThreshold:
+      row.autonomous_booking_threshold != null
+        ? Number(row.autonomous_booking_threshold)
+        : undefined,
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
   };
@@ -280,9 +290,15 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
 
   async update(tenantId: string, updates: Partial<TenantSettings>): Promise<TenantSettings | null> {
     return this.withTenantTransaction(tenantId, async (client) => {
-      // If terminology or packs are being updated, we need to merge with existing
-      const needsTerminologyMerge =
-        'terminologyPreferences' in updates || 'activeVerticalPacks' in updates;
+      // If terminology or packs are being updated, we need to merge with existing.
+      // Sweep-2 S1: an `undefined` VALUE means "untouched", never "clear" —
+      // the contract types these keys as `string[]` / `Record<string,string>`
+      // (no null), so an explicit clear is `[]` / `{}`. Keying off `'x' in
+      // updates` let a stray `activeVerticalPacks: undefined` wipe the
+      // tenant's packs on every unrelated save.
+      const touchesTerms = updates.terminologyPreferences !== undefined;
+      const touchesPacks = updates.activeVerticalPacks !== undefined;
+      const needsTerminologyMerge = touchesTerms || touchesPacks;
 
       let terminologyJson: Record<string, unknown> | null | undefined;
 
@@ -296,11 +312,11 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         const currentRaw = existing.rows[0].terminology_preferences as Record<string, unknown> | null;
         const { _activeVerticalPacks: currentPacks, ...currentTerms } = currentRaw ?? {};
 
-        const newTerms = 'terminologyPreferences' in updates
+        const newTerms = touchesTerms
           ? updates.terminologyPreferences
           : (Object.keys(currentTerms).length > 0 ? currentTerms as Record<string, string> : undefined);
 
-        const newPacks = 'activeVerticalPacks' in updates
+        const newPacks = touchesPacks
           ? updates.activeVerticalPacks
           : (Array.isArray(currentPacks) ? currentPacks as string[] : undefined);
 
@@ -380,6 +396,11 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         digestChannel: 'digest_channel',
         // Epic 12.6 — migration 204.
         weeklyFeedbackEnabled: 'weekly_feedback_enabled',
+        // UB-D / D-015 — migration 231. Both NOT NULL with column defaults;
+        // route validation (Zod + validateCommonSettingsFields) never passes
+        // null through, so the generic `value ?? null` handler is safe.
+        autonomousBookingEnabled: 'autonomous_booking_enabled',
+        autonomousBookingThreshold: 'autonomous_booking_threshold',
         updatedAt: 'updated_at',
       };
 
