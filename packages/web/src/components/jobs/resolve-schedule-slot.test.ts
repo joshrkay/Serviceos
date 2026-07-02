@@ -1,71 +1,69 @@
 import { describe, it, expect } from 'vitest';
 import { resolveScheduleSlot, nextWeekdayIso } from './resolve-schedule-slot';
 
-// A fixed local-noon "now" keeps date math deterministic regardless of the
-// runner's clock (but still subject to its timezone, which is fine: the helper
-// is browser-local by design).
+// A fixed local-noon "now" keeps date-label resolution (Today/Tomorrow)
+// deterministic regardless of the runner's clock.
 const NOW = new Date(2026, 5, 30, 9, 0, 0); // 2026-06-30 09:00 local
+// All test dates (Jun 30 – Aug 15 2026) fall in EDT, so ET = UTC-4. Asserting
+// on the UTC ISO instant is deterministic regardless of the runner's timezone.
+const ET = 'America/New_York';
 
 describe('resolveScheduleSlot', () => {
-  it('resolves Today + a time to a one-hour instant range', () => {
-    const slot = resolveScheduleSlot('Today', '2:00 PM', NOW);
+  it('resolves Today + a time to a one-hour instant range in the tenant tz', () => {
+    const slot = resolveScheduleSlot('Today', '2:00 PM', ET, NOW);
     expect(slot).not.toBeNull();
-    const start = new Date(slot!.scheduledStart);
-    expect(start.getFullYear()).toBe(2026);
-    expect(start.getMonth()).toBe(5);
-    expect(start.getDate()).toBe(30);
-    expect(start.getHours()).toBe(14);
-    expect(start.getMinutes()).toBe(0);
-    // Default 60-minute duration.
-    expect(new Date(slot!.scheduledEnd).getTime() - start.getTime()).toBe(60 * 60_000);
+    // 2 PM ET on 2026-06-30 → 18:00Z.
+    expect(slot!.scheduledStart).toBe('2026-06-30T18:00:00.000Z');
+    expect(slot!.scheduledEnd).toBe('2026-06-30T19:00:00.000Z');
+  });
+
+  it('interprets the wall clock in the TENANT tz, not the browser tz', () => {
+    // Same wall clock, different tenant zones → different UTC instants.
+    const et = resolveScheduleSlot('Today', '2:00 PM', 'America/New_York', NOW);
+    const pt = resolveScheduleSlot('Today', '2:00 PM', 'America/Los_Angeles', NOW);
+    expect(et!.scheduledStart).toBe('2026-06-30T18:00:00.000Z'); // 2 PM EDT
+    expect(pt!.scheduledStart).toBe('2026-06-30T21:00:00.000Z'); // 2 PM PDT
   });
 
   it('resolves Tomorrow to the next calendar day', () => {
-    const slot = resolveScheduleSlot('Tomorrow', '8:00 AM', NOW);
-    const start = new Date(slot!.scheduledStart);
-    expect(start.getDate()).toBe(1); // rolls 06-30 -> 07-01
-    expect(start.getMonth()).toBe(6);
-    expect(start.getHours()).toBe(8);
+    const slot = resolveScheduleSlot('Tomorrow', '8:00 AM', ET, NOW);
+    expect(slot!.scheduledStart).toBe('2026-07-01T12:00:00.000Z'); // 8 AM ET
   });
 
   it('resolves a real ISO date from the custom date input', () => {
-    const slot = resolveScheduleSlot('2026-08-15', '10:00 AM', NOW);
-    const start = new Date(slot!.scheduledStart);
-    expect(start.getFullYear()).toBe(2026);
-    expect(start.getMonth()).toBe(7);
-    expect(start.getDate()).toBe(15);
-    expect(start.getHours()).toBe(10);
+    const slot = resolveScheduleSlot('2026-08-15', '10:00 AM', ET, NOW);
+    expect(slot!.scheduledStart).toBe('2026-08-15T14:00:00.000Z'); // 10 AM ET
   });
 
   it('handles 12-hour boundaries (12 PM = noon, 12 AM = midnight)', () => {
-    expect(new Date(resolveScheduleSlot('Today', '12:00 PM', NOW)!.scheduledStart).getHours()).toBe(12);
-    expect(new Date(resolveScheduleSlot('Today', '12:00 AM', NOW)!.scheduledStart).getHours()).toBe(0);
+    expect(resolveScheduleSlot('Today', '12:00 PM', ET, NOW)!.scheduledStart).toBe('2026-06-30T16:00:00.000Z');
+    expect(resolveScheduleSlot('Today', '12:00 AM', ET, NOW)!.scheduledStart).toBe('2026-06-30T04:00:00.000Z');
   });
 
   it('honors a custom duration', () => {
-    const slot = resolveScheduleSlot('Today', '9:00 AM', NOW, 90);
+    const slot = resolveScheduleSlot('Today', '9:00 AM', ET, NOW, 90);
     expect(
       new Date(slot!.scheduledEnd).getTime() - new Date(slot!.scheduledStart).getTime(),
     ).toBe(90 * 60_000);
   });
 
   it('returns null when no time is selected', () => {
-    expect(resolveScheduleSlot('Today', '', NOW)).toBeNull();
+    expect(resolveScheduleSlot('Today', '', ET, NOW)).toBeNull();
   });
 
   it('returns null when no date is selected', () => {
-    expect(resolveScheduleSlot('', '2:00 PM', NOW)).toBeNull();
+    expect(resolveScheduleSlot('', '2:00 PM', ET, NOW)).toBeNull();
   });
 
   it('returns null for placeholder/demo date labels (no real calendar date)', () => {
-    expect(resolveScheduleSlot('Tue Mar 11', '2:00 PM', NOW)).toBeNull();
-    expect(resolveScheduleSlot('Custom', '2:00 PM', NOW)).toBeNull();
-    expect(resolveScheduleSlot('__custom', '2:00 PM', NOW)).toBeNull();
+    expect(resolveScheduleSlot('Tue Mar 11', '2:00 PM', ET, NOW)).toBeNull();
+    expect(resolveScheduleSlot('Custom', '2:00 PM', ET, NOW)).toBeNull();
+    expect(resolveScheduleSlot('__custom', '2:00 PM', ET, NOW)).toBeNull();
   });
 
   it('returns null for a malformed time', () => {
-    expect(resolveScheduleSlot('Today', '25:00 PM', NOW)).toBeNull();
-    expect(resolveScheduleSlot('Today', 'noon', NOW)).toBeNull();
+    expect(resolveScheduleSlot('Today', '25:00 PM', ET, NOW)).toBeNull();
+    expect(resolveScheduleSlot('Today', 'noon', ET, NOW)).toBeNull();
   });
 });
 
@@ -88,11 +86,7 @@ describe('nextWeekdayIso', () => {
   });
 
   it('produces a value resolveScheduleSlot can schedule', () => {
-    const slot = resolveScheduleSlot(nextWeekdayIso(5, NOW), '10:00 AM', NOW);
-    expect(slot).not.toBeNull();
-    const start = new Date(slot!.scheduledStart);
-    expect(start.getMonth()).toBe(6);
-    expect(start.getDate()).toBe(3);
-    expect(start.getHours()).toBe(10);
+    const slot = resolveScheduleSlot(nextWeekdayIso(5, NOW), '10:00 AM', ET, NOW);
+    expect(slot!.scheduledStart).toBe('2026-07-03T14:00:00.000Z'); // 10 AM ET, Fri Jul 3
   });
 });

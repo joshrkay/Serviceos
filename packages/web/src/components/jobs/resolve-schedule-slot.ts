@@ -7,9 +7,11 @@
  * picked, or a demo/placeholder date label ("Tue Mar 11", "Custom") that has no
  * real calendar date. Null ⇒ create the job unscheduled (prior behavior).
  *
- * The date is interpreted in browser-local time and serialized to a UTC ISO
- * instant, matching how SchedulePage builds the appointments it already POSTs.
+ * The picked wall-clock date+time is interpreted in the TENANT timezone and
+ * serialized to a UTC ISO instant (via tenantWallClockToUtc), matching how
+ * SchedulePage builds the appointments it POSTs.
  */
+import { tenantWallClockToUtc } from '../../utils/formatInTenantTz';
 
 const DEFAULT_DURATION_MIN = 60;
 
@@ -68,6 +70,7 @@ function resolveHm(scheduledTime: string): string | null {
 export function resolveScheduleSlot(
   scheduledDate: string,
   scheduledTime: string,
+  timezone: string,
   now: Date = new Date(),
   durationMin: number = DEFAULT_DURATION_MIN,
 ): ScheduleSlot | null {
@@ -76,7 +79,10 @@ export function resolveScheduleSlot(
   const hm = resolveHm(scheduledTime);
   if (!hm) return null;
 
-  const start = new Date(`${ymd}T${hm}:00`);
+  // Interpret the wall-clock date+time in the TENANT timezone, not the
+  // dispatcher's browser tz — so a Pacific dispatcher scheduling a New York
+  // tenant for 2 PM stores 2 PM ET, and the board/tech views render it at 2 PM.
+  const start = tenantWallClockToUtc(ymd, hm, timezone);
   if (Number.isNaN(start.getTime())) return null;
   const end = new Date(start.getTime() + durationMin * 60_000);
   return { scheduledStart: start.toISOString(), scheduledEnd: end.toISOString() };

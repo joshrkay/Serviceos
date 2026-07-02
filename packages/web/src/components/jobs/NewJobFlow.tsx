@@ -719,7 +719,7 @@ export function NewJobFlow({
       // Issue 2 — when a concrete date + time was picked, create the appointment
       // so the job lands on the dispatch board (unassigned queue). A date with
       // no time (or an unresolvable value) yields null → job stays unscheduled.
-      const slot = resolveScheduleSlot(draft.scheduledDate, draft.scheduledTime);
+      const slot = resolveScheduleSlot(draft.scheduledDate, draft.scheduledTime, tenantTz);
       if (slot) {
         // The job already exists, so a scheduling failure — whether a non-OK
         // response OR a thrown network/auth error — must NOT fall through to the
