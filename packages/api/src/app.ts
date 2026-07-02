@@ -461,6 +461,11 @@ import type { RetrieveAdapter } from './ai/orchestration/context-builder';
 // future channel adapters) can resolve a session's language from the
 // customer override + tenant default + STT hint.
 export { detectLanguage } from './ai/orchestration/language-detector';
+// UB-C1 — the media-stream adapter's initialLanguageResolver composes the
+// identified caller's preferredLanguage with the tenant's language settings
+// through detectLanguage (which applies the supported_languages gate).
+import { detectLanguage as detectInitialCallLanguage } from './ai/orchestration/language-detector';
+import { identifyCaller } from './ai/skills/identify-caller';
 import {
   PgKnowledgeChunkRepository,
   InMemoryKnowledgeChunkRepository,
@@ -3209,6 +3214,9 @@ export function createApp(): express.Express {
     const sharedTtsProvider = createTtsProvider({
       TTS_PROVIDER: process.env.TTS_PROVIDER,
       ELEVENLABS_API_KEY: process.env.ELEVENLABS_API_KEY,
+      // UB-C2 — same voice id scripts/render-fillers.ts renders with, so
+      // filler clips and live TTS speak with one voice.
+      ELEVENLABS_VOICE_ID: process.env.ELEVENLABS_VOICE_ID,
       AI_PROVIDER_API_KEY: config.AI_PROVIDER_API_KEY,
     });
     const streamingProvider = deepgramKey
@@ -3413,6 +3421,41 @@ export function createApp(): express.Express {
             streamingProvider,
             ...(sharedTtsProvider ? { ttsProvider: sharedTtsProvider } : {}),
             terminologyProvider,
+            // UB-C1 — resolve the language the call OPENS in, before the
+            // Deepgram socket is created: identified caller's
+            // preferredLanguage > tenant default, both gated by the
+            // tenant's supported_languages opt-in (detectLanguage applies
+            // the gate internally). Failure-soft: any error falls back to
+            // the tenant default / English rather than blocking audio.
+            initialLanguageResolver: async (
+              tenantId: string,
+              ctx: { callSid: string; sessionId: string },
+            ) => {
+              const settings = await settingsRepo.findByTenant(tenantId).catch(() => null);
+              let customerPreferred: 'en' | 'es' | null = null;
+              const callerPhone = twilioAdapter.getCallerPhone(ctx.sessionId);
+              if (pool && callerPhone) {
+                try {
+                  const identified = await identifyCaller({
+                    tenantId,
+                    fromPhone: callerPhone,
+                    pool,
+                  });
+                  if (identified.status === 'matched') {
+                    const customer = await customerRepo.findById(tenantId, identified.customerId);
+                    const pref = customer?.preferredLanguage;
+                    if (pref === 'en' || pref === 'es') customerPreferred = pref;
+                  }
+                } catch {
+                  /* failure-soft — fall through to the tenant default */
+                }
+              }
+              return detectInitialCallLanguage({
+                customerPreferredLanguage: customerPreferred,
+                tenantDefaultLanguage: settings?.defaultLanguage === 'es' ? 'es' : 'en',
+                supportedLanguages: settings?.supportedLanguages ?? ['en'],
+              });
+            },
             fillerEngine,
             fillerCache,
             speechTurn: async ({ session, speechResult, callSid, tenantId }) =>
@@ -5256,6 +5299,7 @@ export function createApp(): express.Express {
   const ttsProvider = createTtsProvider({
     TTS_PROVIDER: process.env.TTS_PROVIDER,
     ELEVENLABS_API_KEY: process.env.ELEVENLABS_API_KEY,
+    ELEVENLABS_VOICE_ID: process.env.ELEVENLABS_VOICE_ID,
     AI_PROVIDER_API_KEY: config.AI_PROVIDER_API_KEY,
   });
   const inAppVoiceAdapter = new InAppVoiceAdapter({

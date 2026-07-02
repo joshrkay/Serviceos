@@ -55,7 +55,20 @@ import {
   fillerCancelledEvent,
   escalationStartedEvent,
   escalationSummaryBuiltEvent,
+  languageSwitchedEvent,
+  type LanguageSwitchedEvent,
 } from '../../ai/voice-quality/events';
+import {
+  detectLanguageFromTranscript,
+  detectLanguageSwitchIntent,
+  isLanguageSupported,
+} from '../../ai/orchestration/language-detector';
+import {
+  renderTtsText,
+  LANGUAGE_SWITCH_ACK,
+  type SessionLanguage,
+} from '../../ai/agents/customer-calling/tts-copy';
+import { detectEmergency } from '../../ai/agents/customer-calling/emergency-detector';
 import { VOICE_EVENT_CHANNEL } from '../../ai/voice-quality/event-bus';
 import type { WhisperCache } from '../whisper-cache';
 import type { TwilioCallControl } from '../twilio-call-control';
@@ -189,10 +202,27 @@ export interface MediaStreamAdapterDeps {
   /**
    * Resolves Deepgram keyword-boost tokens for the tenant. Optional —
    * when omitted, Deepgram opens without keyword boost.
+   *
+   * UB-C1 — the boost list is suppressed whenever the live STT language
+   * is 'es': the tokens are English trade terms and degrade Nova-3's
+   * Spanish recognition. It is re-applied on a switch back to 'en'.
    */
   terminologyProvider?: {
     getKeywords(tenantId: string): Promise<ReadonlyArray<string>>;
   };
+  /**
+   * UB-C1 — resolves the language the call OPENS in, before the Deepgram
+   * session is created. Composed in app.ts from the identified caller's
+   * `customer.preferredLanguage` + `tenant_settings.default_language` /
+   * `supported_languages` via `detectLanguage` (which applies the
+   * tenant's opt-in gate internally). Optional — when omitted the call
+   * opens with the provider's default language (English), preserving
+   * pre-UB-C behavior.
+   */
+  initialLanguageResolver?: (
+    tenantId: string,
+    callContext: { callSid: string; sessionId: string },
+  ) => Promise<'en' | 'es'>;
   /**
    * Optional filler engine + cache. When both are present, the adapter
    * wraps each `tts_play` turn with a 250ms timer: if the real TTS has
@@ -200,7 +230,7 @@ export interface MediaStreamAdapterDeps {
    * cache. Omitting either turns the feature off entirely.
    */
   fillerEngine?: {
-    selectNext(ctx?: { skipFillers?: boolean }): { id: string; text: string; approxDurationMs: number } | undefined;
+    selectNext(ctx?: { skipFillers?: boolean; language?: 'en' | 'es' }): { id: string; text: string; approxDurationMs: number } | undefined;
   };
   fillerCache?: {
     get(id: string): Buffer | undefined;
@@ -313,6 +343,14 @@ const TELEPHONY_LEASE_TTL_MS = 2 * 60 * 60 * 1000;
 // its cost cap, so frustration classification can't blow a tenant's budget.
 const SENTIMENT_MAX_BUDGET_RATIO = 0.8;
 
+/**
+ * UB-C1 — flap guard: maximum Deepgram finish+reopen cycles per call.
+ * Two covers the legitimate shapes (wrong opening language → correct one,
+ * plus one explicit switch back); anything more is flapping on the
+ * revenue path and is refused.
+ */
+const MAX_LANGUAGE_SWITCHES_PER_CALL = 2;
+
 interface RuntimeState {
   ws: WsLike;
   streamSid: string | null;
@@ -400,6 +438,28 @@ interface RuntimeState {
    * round-trips on subsequent interims.
    */
   interimEmergencyFired: boolean;
+  /**
+   * UB-C1 — the language the LIVE Deepgram session is listening in.
+   * Distinct from `session.language` (the spoken/TTS language, which the
+   * host may also set from tenant defaults): this field tracks what the
+   * STT socket was actually opened with, so the switch triggers compare
+   * against reality. `switchLanguage` keeps both in sync.
+   */
+  language: 'en' | 'es';
+  /**
+   * UB-C1 — keyword-boost tokens resolved at `start`. Kept so a
+   * language switch back to 'en' can re-apply them ('es' suppresses
+   * them — English trade terms degrade Nova-3 on Spanish).
+   */
+  sttKeywords: ReadonlyArray<string>;
+  /** UB-C1 — flap guard. Hard cap on Deepgram reopen cycles per call. */
+  languageSwitchCount: number;
+  /**
+   * UB-C1 — set once the first FINAL transcript has been through the
+   * one-shot language-detection trigger, so utterance #2+ can only
+   * switch via the explicit-request path.
+   */
+  firstFinalLanguageChecked: boolean;
 }
 
 const TWILIO_QUEUE_MAX_MSGS = 200;
@@ -488,6 +548,10 @@ export class TwilioMediaStreamAdapter {
       pendingTransferTwiml: null,
       resolvedEscalationSettings: null,
       interimEmergencyFired: false,
+      language: 'en',
+      sttKeywords: [],
+      languageSwitchCount: 0,
+      firstFinalLanguageChecked: false,
     };
   }
 
@@ -616,6 +680,33 @@ export class TwilioMediaStreamAdapter {
     const keywords = this.deps.terminologyProvider
       ? await this.deps.terminologyProvider.getKeywords(session.tenantId).catch(() => [])
       : [];
+    this.state.sttKeywords = keywords;
+
+    // UB-C1 — resolve the language the call opens in (customer
+    // preferredLanguage + tenant supported_languages, composed in app.ts).
+    // Failure-soft: a resolver error opens the call in English rather than
+    // blocking audio. Only pin session.language when a resolver is wired so
+    // the host's own tenant-default resolution keeps pre-UB-C behavior in
+    // test/dev fixtures that don't inject one.
+    let initialLanguage: 'en' | 'es' | undefined;
+    if (this.deps.initialLanguageResolver) {
+      try {
+        initialLanguage = await this.deps.initialLanguageResolver(session.tenantId, {
+          callSid,
+          sessionId: session.id,
+        });
+      } catch (err) {
+        logger.warn('mediastream: initialLanguageResolver failed — opening in English', {
+          tenantId: session.tenantId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        initialLanguage = 'en';
+      }
+      this.state.language = initialLanguage;
+      // Pin the spoken language too — initializeStreamSession honors a
+      // pre-pinned session.language (greeting/disclosure/TTS all follow it).
+      session.language = initialLanguage;
+    }
 
     try {
       this.state.deepgram = await this.deps.streamingProvider.openSession(
@@ -633,8 +724,9 @@ export class TwilioMediaStreamAdapter {
           // Deepgram closed independently — we can still drain Twilio
           // until it sends `stop`. No-op.
         },
-        undefined, // language defaults
-        keywords.length > 0 ? { keywords } : undefined
+        initialLanguage, // undefined → provider default (English)
+        // UB-C1 — suppress the English trade-term boost on Spanish opens.
+        this.deepgramKeywordOptions(initialLanguage ?? 'en')
       );
     } catch (err) {
       logger.error('mediastream: failed to open Deepgram session', {
@@ -730,6 +822,23 @@ export class TwilioMediaStreamAdapter {
     const tenantId = this.state.tenantId;
     if (!session || !callSid || !tenantId) return;
 
+    // UB-C1 trigger (b) — explicit language request ("hablo español" /
+    // "switch to english"). Deterministic pre-scan; when it performs a
+    // switch it CONSUMES the turn with a localized acknowledgment (the
+    // recording-objection pattern) — "hablo español" is not a booking
+    // utterance. Emergency keywords always win the turn: an utterance
+    // that contains both is never consumed here.
+    if (await this.maybeHandleExplicitLanguageSwitch(event.transcript)) {
+      return;
+    }
+
+    // UB-C1 trigger (a) — one-shot first-final detection. If the caller's
+    // first utterance disagrees with the language Deepgram opened in
+    // (gated by the tenant's supported_languages opt-in), switch BEFORE
+    // dispatching the turn so the agent's reply renders in the caller's
+    // language. Does NOT consume the turn.
+    await this.maybeRunFirstFinalLanguageDetection(event.transcript);
+
     // VQ2-004: TTFA-start. Stamp the moment the STT provider returned a
     // final transcript on the session bus and arm the per-turn
     // first-frame guard so the next outbound chunk emits
@@ -757,6 +866,28 @@ export class TwilioMediaStreamAdapter {
     }
 
     await this.emitSideEffects(sideEffects);
+
+    // UB-C1 trigger (b), classifier fallback — the LLM classifier caught a
+    // `language_switch` intent the deterministic pre-scan missed (e.g.
+    // "¿Puedo continuar en español?"). Classified intents flow back to the
+    // adapter via the turn's audit_log side effect (same channel the
+    // sentiment hook reads). The target is the utterance's requested
+    // language when the heuristic can extract it, else the other language
+    // of the en/es pair. Gated + flap-guarded inside switchLanguage; the
+    // FSM's own effects for this turn were already rendered above.
+    const classifiedIntent = (
+      sideEffects.find((fx) => fx.type === 'audit_log')?.payload as
+        | { intentType?: string }
+        | undefined
+    )?.intentType;
+    if (classifiedIntent === 'language_switch') {
+      const target =
+        detectLanguageSwitchIntent(event.transcript) ??
+        (this.state.language === 'es' ? 'en' : 'es');
+      if (isLanguageSupported(target, session.supportedLanguages ?? null)) {
+        await this.switchLanguage(target, 'classified_intent');
+      }
+    }
 
     // B3.3 — async LLM sentiment classifier. Gated by per-tenant settings.
     // Fire-and-forget so it never blocks the audio response path.
@@ -861,6 +992,215 @@ export class TwilioMediaStreamAdapter {
 
     this.state.interimEmergencyFired = true;
     await this.emitSideEffects(effects);
+  }
+
+  // ─── UB-C1 — live language switching ───────────────────────────────────────
+
+  /**
+   * Keyword-boost options for a Deepgram open/reopen in `lang`. The boost
+   * list is English trade terminology — it degrades Nova-3's Spanish
+   * recognition, so it is only sent on English sessions.
+   */
+  private deepgramKeywordOptions(
+    lang: 'en' | 'es',
+  ): { keywords: ReadonlyArray<string> } | undefined {
+    if (lang === 'es') return undefined;
+    return this.state.sttKeywords.length > 0
+      ? { keywords: this.state.sttKeywords }
+      : undefined;
+  }
+
+  /**
+   * The language the agent SPEAKS in. Prefers `session.language` (which
+   * the host may pin from tenant defaults even when no
+   * initialLanguageResolver is wired) over the adapter's STT language.
+   */
+  private currentSpokenLanguage(): SessionLanguage {
+    const sessionLang = this.state.session?.language;
+    if (sessionLang === 'en' || sessionLang === 'es') return sessionLang;
+    return this.state.language;
+  }
+
+  /**
+   * UB-C1 trigger (b) — deterministic explicit-switch scan on a final
+   * transcript. Returns true when the turn was CONSUMED (a switch actually
+   * happened and the localized ack was spoken); false lets the caller's
+   * words flow into the normal turn pipeline. Never consumes when:
+   *   - the utterance carries an emergency keyword (life-safety wins),
+   *   - the requested language is already active,
+   *   - the tenant hasn't opted into the target language,
+   *   - the flap guard has been exhausted (switchLanguage refuses).
+   */
+  private async maybeHandleExplicitLanguageSwitch(transcript: string): Promise<boolean> {
+    const session = this.state.session;
+    if (!session) return false;
+    const target = detectLanguageSwitchIntent(transcript);
+    if (!target) return false;
+    if (target === this.state.language) {
+      // STT already listens in `target`; the SPOKEN language can still
+      // disagree when the host pinned a different tenant default (no
+      // resolver wired). Align TTS without burning a reopen/flap-budget
+      // slot — and don't consume the turn.
+      if (
+        (session.language === 'en' || session.language === 'es') &&
+        session.language !== target
+      ) {
+        session.language = target;
+      }
+      return false;
+    }
+    // detectLanguageSwitchIntent is an ungated heuristic — the tenant
+    // opt-in gate is applied here (only detectLanguage gates internally).
+    if (!isLanguageSupported(target, session.supportedLanguages ?? null)) return false;
+    // Life-safety first: "hay una fuga de gas, en español por favor" must
+    // run the emergency pipeline, not be consumed by a language ack.
+    if (detectEmergency(transcript).matched) return false;
+
+    const switched = await this.switchLanguage(target, 'explicit_request');
+    if (!switched) return false;
+
+    // The consumed turn bypasses processCallerUtterance (which normally
+    // appends the caller line) — keep the transcript faithful ourselves.
+    this.deps.store.appendTranscript(session.id, {
+      speaker: 'caller',
+      text: transcript,
+      ts: Date.now(),
+    });
+    const ack = LANGUAGE_SWITCH_ACK[target];
+    await this.emitSideEffects([{ type: 'tts_play', payload: { text: ack } }]);
+    this.deps.store.appendTranscript(session.id, {
+      speaker: 'agent',
+      text: ack,
+      ts: Date.now(),
+    });
+    return true;
+  }
+
+  /**
+   * UB-C1 trigger (a) — one-shot detection on the FIRST final transcript.
+   * When the caller's opening words disagree with the language Deepgram
+   * opened in (and the tenant opted into the detected language), switch
+   * once before the turn is dispatched. `detectLanguageFromTranscript` is
+   * an ungated heuristic — the supported-languages gate is applied here.
+   */
+  private async maybeRunFirstFinalLanguageDetection(transcript: string): Promise<void> {
+    if (this.state.firstFinalLanguageChecked) return;
+    this.state.firstFinalLanguageChecked = true;
+    const session = this.state.session;
+    if (!session) return;
+    const detected = detectLanguageFromTranscript(transcript);
+    if (!detected || detected === this.state.language) return;
+    if (!isLanguageSupported(detected, session.supportedLanguages ?? null)) return;
+    await this.switchLanguage(detected, 'first_utterance');
+  }
+
+  /**
+   * UB-C1 — finish + reopen the live Deepgram session in `target`.
+   *
+   * Serialized under the SAME per-session lock the speech-turn dispatch
+   * uses (`store.withSessionLock`) so a reopen can never interleave with
+   * an in-flight FSM turn. NOTE the lock is a non-reentrant promise chain
+   * — this method must never be called from inside another lock body.
+   *
+   * Flap guard: hard cap of {@link MAX_LANGUAGE_SWITCHES_PER_CALL}
+   * reopen cycles per call; the 3rd request is refused (audio keeps
+   * flowing in the current language).
+   *
+   * Media frames that arrive during the reopen window are dropped
+   * (state.deepgram is null) — the gap is one WS round-trip.
+   *
+   * Returns true when the switch happened.
+   */
+  async switchLanguage(
+    target: 'en' | 'es',
+    trigger: LanguageSwitchedEvent['trigger'],
+  ): Promise<boolean> {
+    const session = this.state.session;
+    if (!session || this.state.closed) return false;
+    return this.deps.store.withSessionLock(session.id, async () => {
+      // Re-validate under the lock — a queued concurrent switch may have
+      // already flipped the language or spent the flap budget.
+      if (this.state.closed) return false;
+      if (target === this.state.language) return false;
+      if (this.state.languageSwitchCount >= MAX_LANGUAGE_SWITCHES_PER_CALL) {
+        logger.info('mediastream: language switch refused — flap guard', {
+          callSid: this.state.callSid,
+          target,
+          switchCount: this.state.languageSwitchCount,
+        });
+        return false;
+      }
+
+      const from = this.state.language;
+      const old = this.state.deepgram;
+      // Null out first so handleMedia drops frames instead of feeding a
+      // finishing socket.
+      this.state.deepgram = null;
+      try {
+        old?.finish();
+      } catch {
+        /* swallow — the old session is being discarded either way */
+      }
+
+      const openWith = async (lang: 'en' | 'es') =>
+        this.deps.streamingProvider.openSession(
+          (event) => {
+            this.onTranscriptEvent(event).catch((err) => {
+              logger.warn('mediastream transcript handler threw', {
+                error: err instanceof Error ? err.message : String(err),
+              });
+            });
+          },
+          (err) => {
+            logger.warn('mediastream deepgram error', { error: err.message });
+          },
+          () => {
+            // Deepgram closed independently — drain Twilio until `stop`.
+          },
+          lang,
+          this.deepgramKeywordOptions(lang),
+        );
+
+      try {
+        this.state.deepgram = await openWith(target);
+      } catch (err) {
+        logger.error('mediastream: Deepgram reopen failed on language switch', {
+          callSid: this.state.callSid,
+          target,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        // Recovery: try to restore STT in the previous language. A call
+        // with no STT at all is dead air — tear down if that fails too.
+        try {
+          this.state.deepgram = await openWith(from);
+          return false;
+        } catch {
+          this.handleClose('deepgram_reopen_failed');
+          return false;
+        }
+      }
+
+      this.state.language = target;
+      session.language = target;
+      this.state.languageSwitchCount++;
+      session.events.emit(
+        VOICE_EVENT_CHANNEL,
+        languageSwitchedEvent({
+          from,
+          to: target,
+          trigger,
+          switchCount: this.state.languageSwitchCount,
+        }),
+      );
+      logger.info('mediastream: language switched', {
+        callSid: this.state.callSid,
+        from,
+        to: target,
+        trigger,
+        switchCount: this.state.languageSwitchCount,
+      });
+      return true;
+    });
   }
 
   /**
@@ -974,14 +1314,35 @@ export class TwilioMediaStreamAdapter {
         continue;
       }
       if (fx.type !== 'tts_play') continue;
-      const text = typeof fx.payload.text === 'string' ? fx.payload.text : '';
-      if (!text) continue;
+      const rawText = typeof fx.payload.text === 'string' ? fx.payload.text : '';
+      if (!rawText) continue;
+      // UB-C2 — render template keys + the fixed-sentence es catalog with
+      // the session language before synthesis (parity with the in-app
+      // adapter, which routes every spoken line through renderTtsText).
+      //
+      // Greeting exception: initializeStreamSession SUBSTITUTES the
+      // 'greeting' placeholder with the real greeting + the RECORDING
+      // DISCLOSURE legal copy (already localized). Re-rendering via the
+      // surviving `template` hint would replace that with the generic
+      // template line and silently drop the disclosure — so the hint is
+      // stripped once the text is no longer the placeholder. The
+      // 'confirm_intent' hint stays: its payload carries `intent`, making
+      // the re-render lossless (and it's what localizes the confirm).
+      const lang = this.currentSpokenLanguage();
+      const templateHint = (fx.payload as { template?: unknown }).template;
+      const isSubstitutedGreeting =
+        (templateHint === 'greeting' || templateHint === 'greeting_with_disclosure') &&
+        rawText !== 'greeting';
+      const renderPayload = isSubstitutedGreeting
+        ? { ...(fx.payload as Record<string, unknown>), template: undefined }
+        : (fx.payload as Record<string, unknown>);
+      const text = renderTtsText(rawText, renderPayload, lang);
       let turnId = ++this.state.outboundTurnId;
       this.state.agentSpeaking = true;
       try {
         // runTurnWithFiller returns the final turnId — it may have been
         // bumped if a filler was preempted by the real TTS arrival.
-        turnId = await this.runTurnWithFiller(ttsProvider, text, turnId);
+        turnId = await this.runTurnWithFiller(ttsProvider, text, turnId, lang);
       } catch (err) {
         logger.warn('mediastream: TTS turn failed', {
           error: err instanceof Error ? err.message : String(err),
@@ -1125,6 +1486,14 @@ export class TwilioMediaStreamAdapter {
     ttsProvider: TtsProvider,
     text: string,
     turnIdIn: number,
+    /**
+     * UB-C2 — session language for this turn. Threads into the synth call
+     * (es → eleven_multilingual_v2 in the provider) and keys filler
+     * selection so a Spanish call never hears an English filler. When the
+     * selected clip is missing from the cache the turn simply gets no
+     * filler (silence) — never a clip from the other language.
+     */
+    lang: SessionLanguage = 'en',
   ): Promise<number> {
     const delayMs = this.deps.fillerDelayMs ?? 250;
     const engine = this.deps.fillerEngine;
@@ -1159,9 +1528,12 @@ export class TwilioMediaStreamAdapter {
           if (realStarted || turnId !== this.state.outboundTurnId || !this.state.agentSpeaking) {
             return;
           }
-          const filler = engine.selectNext();
+          const filler = engine.selectNext({ language: lang });
           if (!filler) return;
           const pcm = cache.get(filler.id);
+          // Missing clip (e.g. Spanish clips not yet rendered at deploy
+          // time) → SILENCE for this turn. Never substitute a clip from
+          // the other language.
           if (!pcm) return;
           // Mark filler as active BEFORE starting the stream so that the
           // real-TTS first-chunk handler can see the flag synchronously.
@@ -1185,6 +1557,7 @@ export class TwilioMediaStreamAdapter {
           text,
           tenantId: this.state.tenantId ?? undefined,
           signal: controller.signal,
+          language: lang,
         });
         let first = true;
         for await (const chunk of stream) {
@@ -1210,6 +1583,7 @@ export class TwilioMediaStreamAdapter {
         const result = await ttsProvider.synthesize({
           text,
           tenantId: this.state.tenantId ?? undefined,
+          language: lang,
         });
         realStarted = true;
         if (fillerTimer) clearTimeout(fillerTimer);
@@ -1511,12 +1885,16 @@ export class TwilioMediaStreamAdapter {
     agentSpeaking: boolean;
     outboundTurnId: number;
     closed: boolean;
+    language: 'en' | 'es';
+    languageSwitchCount: number;
   }> {
     return {
       streamSid: this.state.streamSid,
       agentSpeaking: this.state.agentSpeaking,
       outboundTurnId: this.state.outboundTurnId,
       closed: this.state.closed,
+      language: this.state.language,
+      languageSwitchCount: this.state.languageSwitchCount,
     };
   }
 }

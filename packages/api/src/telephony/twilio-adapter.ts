@@ -843,15 +843,24 @@ export class TwilioGatherAdapter {
    */
   private async resolveTenantLanguage(
     tenantId: string,
+    /**
+     * UB-C1 — a language already pinned on the session by the media-stream
+     * adapter's initialLanguageResolver (customer preferredLanguage +
+     * supported_languages gate, resolved BEFORE Deepgram opened). When set
+     * it wins over the tenant default so the greeting/TTS voice match the
+     * language the STT socket is actually listening in.
+     */
+    pinned?: Language,
   ): Promise<{ language: Language; ttsVoice?: string; supportedLanguages?: Language[] }> {
-    if (!this.deps.settingsRepo) return { language: 'en' };
+    if (!this.deps.settingsRepo) return { language: pinned ?? 'en' };
     try {
       const settings = await this.deps.settingsRepo.findByTenant(tenantId);
       // The tenant's explicit default_language is always honored — it IS the
       // tenant's opt-in. The supported_languages stack gates CALLER auto-
       // detection (a Spanish-speaking caller on an English-only tenant), not
       // the tenant's own configured greeting language.
-      const language: Language = settings?.defaultLanguage === 'es' ? 'es' : 'en';
+      const language: Language =
+        pinned ?? (settings?.defaultLanguage === 'es' ? 'es' : 'en');
       const ttsVoice =
         (language === 'es' ? settings?.ttsVoiceEs : settings?.ttsVoiceEn) ?? undefined;
       // Thread the opt-in stack for the auto-detect gate, always including the
@@ -862,7 +871,7 @@ export class TwilioGatherAdapter {
         : [...baseStack, language];
       return { language, ttsVoice, supportedLanguages };
     } catch {
-      return { language: 'en' };
+      return { language: pinned ?? 'en' };
     }
   }
 
@@ -960,7 +969,15 @@ export class TwilioGatherAdapter {
     const from = this.callerIdBySession.get(session.id) ?? '';
 
     // P11-002: resolve + pin the spoken language + TTS voice (tenant default).
-    const { language, ttsVoice, supportedLanguages } = await this.resolveTenantLanguage(opts.tenantId);
+    // UB-C1 — when the media-stream adapter already pinned session.language
+    // (customer preferredLanguage resolved before Deepgram opened), honor it
+    // instead of overwriting with the tenant default.
+    const pinnedLanguage =
+      session.language === 'en' || session.language === 'es' ? session.language : undefined;
+    const { language, ttsVoice, supportedLanguages } = await this.resolveTenantLanguage(
+      opts.tenantId,
+      pinnedLanguage,
+    );
     session.language = language;
     session.ttsVoice = ttsVoice;
     if (supportedLanguages) session.supportedLanguages = supportedLanguages;
