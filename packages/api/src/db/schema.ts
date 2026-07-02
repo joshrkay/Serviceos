@@ -5706,6 +5706,39 @@ export const MIGRATIONS = {
     ALTER TABLE marketing_campaigns
       ADD COLUMN IF NOT EXISTS segment_group_id UUID REFERENCES customer_groups(id);
   `,
+
+  '229_create_standing_instructions': `
+    -- UB-A1 (agent wave) — standing instructions: persistent tenant-scoped
+    -- directives the AI agents apply when drafting (e.g. "always add a fuel
+    -- surcharge", "never discount emergency calls"). scope is app-side
+    -- Zod-validated JSONB ({intents?, tradeCategories?, customerSegment?,
+    -- amountCents?} — see src/instructions/standing-instructions.ts).
+    -- Deactivation is soft (active=false + deactivated_*) so instructions that
+    -- influenced past drafts stay auditable. Read/written by
+    -- src/instructions/pg-standing-instructions.ts (20-active-per-tenant cap
+    -- enforced there, inside the insert transaction). FORCE RLS mirrors
+    -- 227_create_customer_groups.
+    CREATE TABLE IF NOT EXISTS standing_instructions (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      instruction TEXT NOT NULL,
+      scope JSONB NOT NULL DEFAULT '{}',
+      active BOOLEAN NOT NULL DEFAULT true,
+      source TEXT NOT NULL CHECK (source IN ('proposal','settings')),
+      created_by TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      deactivated_at TIMESTAMPTZ,
+      deactivated_by TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_standing_instructions_tenant_active
+      ON standing_instructions(tenant_id, active);
+    ALTER TABLE standing_instructions ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE standing_instructions FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_standing_instructions ON standing_instructions;
+    CREATE POLICY tenant_isolation_standing_instructions ON standing_instructions
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

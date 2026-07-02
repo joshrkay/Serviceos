@@ -373,6 +373,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['226_create_marketing_campaigns', '731467814951e56ebe330c61334c70db40ad08a43a1d996f62705abe0d275e45'],
   ['227_create_customer_groups', 'b130abe18b855d3f4d24e4781c9f36221489d22f0b8149b4c2ebe466c66d1ab5'],
   ['228_marketing_campaign_segment_group', '8e795768b41848627679a6cc34d2dd89f6a5ce88355a3c732988aeadf44ce48f'],
+  ['229_create_standing_instructions', '21d0ee846bbf78ddfbdb78b061b41ae30f2ec289e89472aea60f4025c45d8bac'],
 ];
 
 function hashMigration(value: string): string {

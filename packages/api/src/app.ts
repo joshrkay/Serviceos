@@ -207,6 +207,9 @@ import { createMarketingRouter } from './routes/marketing';
 import { InMemoryCustomerGroupRepository } from './customers/customer-group';
 import { PgCustomerGroupRepository } from './customers/pg-customer-group';
 import { createCustomerGroupRouter } from './routes/customer-groups';
+import { InMemoryStandingInstructionRepository } from './instructions/standing-instructions';
+import { PgStandingInstructionRepository } from './instructions/pg-standing-instructions';
+import { createStandingInstructionRouter } from './routes/standing-instructions';
 import { InMemoryLeadRepository } from './leads/lead';
 import { InMemoryLocationRepository } from './locations/location';
 import { InMemoryJobRepository } from './jobs/job';
@@ -1000,6 +1003,10 @@ export function createApp(): express.Express {
   const financingProvider = createFinancingProvider();
   const campaignRepo = pool ? new PgCampaignRepository(pool) : new InMemoryCampaignRepository();
   const customerGroupRepo = pool ? new PgCustomerGroupRepository(pool) : new InMemoryCustomerGroupRepository();
+  // UB-A1 — standing instructions the AI agents apply when drafting.
+  const standingInstructionRepo = pool
+    ? new PgStandingInstructionRepository(pool)
+    : new InMemoryStandingInstructionRepository();
   // Story 4.6 — customer merge. Pg re-parents child rows + archives the loser
   // in one transaction; the no-DB dev path only archives (no child tables).
   const customerMergeRepo = pool
@@ -3623,6 +3630,10 @@ export function createApp(): express.Express {
   app.use('/api/job-forms', createJobFormRouter(jobFormRepo, auditRepo, jobRepo));
   app.use('/api/job-custom-fields', createJobCustomFieldRouter(jobCustomFieldRepo, auditRepo, jobRepo));
   app.use('/api/customer-groups', createCustomerGroupRouter(customerGroupRepo, auditRepo));
+  app.use(
+    '/api/standing-instructions',
+    createStandingInstructionRouter(standingInstructionRepo, auditRepo)
+  );
   app.use(
     '/api/marketing',
     createMarketingRouter({
