@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { resolveScheduleSlot, nextWeekdayIso } from './resolve-schedule-slot';
+import { resolveScheduleSlot, nextWeekdayIso, tenantDateIso } from './resolve-schedule-slot';
 
 // A fixed UTC instant for "now". Today/Tomorrow resolve from the calendar day
 // in the TENANT tz, so a fixed instant keeps them deterministic regardless of
@@ -78,26 +78,46 @@ describe('resolveScheduleSlot', () => {
   });
 });
 
+describe('tenantDateIso', () => {
+  it('returns the tenant calendar date for an offset', () => {
+    expect(tenantDateIso(0, ET, NOW)).toBe('2026-06-30');
+    expect(tenantDateIso(1, ET, NOW)).toBe('2026-07-01');
+    expect(tenantDateIso(4, ET, NOW)).toBe('2026-07-04');
+  });
+
+  it('uses the tenant day, not the browser day, near midnight', () => {
+    const lateNight = new Date('2026-06-30T02:00:00Z'); // still Jun 29 in ET
+    expect(tenantDateIso(0, ET, lateNight)).toBe('2026-06-29');
+    expect(tenantDateIso(2, ET, lateNight)).toBe('2026-07-01');
+  });
+});
+
 describe('nextWeekdayIso', () => {
-  // NOW (2026-06-30) is a Tuesday (JS dow 2).
+  // NOW (2026-06-30, evaluated in ET) is a Tuesday (JS dow 2).
   it('returns today when the target weekday is today (today counts)', () => {
-    expect(nextWeekdayIso(2, NOW)).toBe('2026-06-30');
+    expect(nextWeekdayIso(2, ET, NOW)).toBe('2026-06-30');
   });
 
   it('returns the next day for tomorrow’s weekday', () => {
-    expect(nextWeekdayIso(3, NOW)).toBe('2026-07-01'); // Wednesday
+    expect(nextWeekdayIso(3, ET, NOW)).toBe('2026-07-01'); // Wednesday
   });
 
   it('resolves a later weekday this week', () => {
-    expect(nextWeekdayIso(5, NOW)).toBe('2026-07-03'); // Friday
+    expect(nextWeekdayIso(5, ET, NOW)).toBe('2026-07-03'); // Friday
   });
 
   it('wraps to next week for an earlier weekday', () => {
-    expect(nextWeekdayIso(1, NOW)).toBe('2026-07-06'); // Monday
+    expect(nextWeekdayIso(1, ET, NOW)).toBe('2026-07-06'); // Monday
+  });
+
+  it('anchors to the tenant day (not the browser day) near midnight', () => {
+    // 02:00Z is still Jun 29 (Monday) in ET, so "Monday" is that day.
+    const lateNight = new Date('2026-06-30T02:00:00Z');
+    expect(nextWeekdayIso(1, ET, lateNight)).toBe('2026-06-29'); // Monday, tenant-side
   });
 
   it('produces a value resolveScheduleSlot can schedule', () => {
-    const slot = resolveScheduleSlot(nextWeekdayIso(5, NOW), '10:00 AM', ET, NOW);
+    const slot = resolveScheduleSlot(nextWeekdayIso(5, ET, NOW), '10:00 AM', ET, NOW);
     expect(slot!.scheduledStart).toBe('2026-07-03T14:00:00.000Z'); // 10 AM ET, Fri Jul 3
   });
 });

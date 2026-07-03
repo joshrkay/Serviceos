@@ -11,7 +11,7 @@ import { useMutation } from '../../hooks/useMutation';
 import { useListQuery } from '../../hooks/useListQuery';
 import { useTechnicianRoster } from '../../hooks/useTechnicianRoster';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
-import { resolveScheduleSlot, nextWeekdayIso } from './resolve-schedule-slot';
+import { resolveScheduleSlot, nextWeekdayIso, tenantDateIso } from './resolve-schedule-slot';
 
 type ServiceType = 'HVAC' | 'Plumbing' | 'Painting';
 
@@ -162,6 +162,7 @@ function parseVoice(
   input: string,
   customerPool: Customer[],
   techRoster: { id: string; name: string }[],
+  tenantTz: string,
 ): ParsedJob {
   const t = input.toLowerCase();
 
@@ -182,11 +183,11 @@ function parseVoice(
   const scheduledDate =
     /today|this (morning|afternoon|evening)/.test(t) ? 'Today' :
     /tomorrow/.test(t)  ? 'Tomorrow' :
-    /monday/.test(t)    ? nextWeekdayIso(1) :
-    /tuesday/.test(t)   ? nextWeekdayIso(2) :
-    /wednesday/.test(t) ? nextWeekdayIso(3) :
-    /thursday/.test(t)  ? nextWeekdayIso(4) :
-    /friday/.test(t)    ? nextWeekdayIso(5) : '';
+    /monday/.test(t)    ? nextWeekdayIso(1, tenantTz) :
+    /tuesday/.test(t)   ? nextWeekdayIso(2, tenantTz) :
+    /wednesday/.test(t) ? nextWeekdayIso(3, tenantTz) :
+    /thursday/.test(t)  ? nextWeekdayIso(4, tenantTz) :
+    /friday/.test(t)    ? nextWeekdayIso(5, tenantTz) : '';
 
   const timeMatch = t.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)/);
   const scheduledTime = timeMatch
@@ -476,7 +477,7 @@ export function NewJobFlow({
     recorder.stop();
   }
   function buildFromVoice() {
-    const result = parseVoice(vTranscript, customerOptions, techRoster);
+    const result = parseVoice(vTranscript, customerOptions, techRoster, tenantTz);
     setParsed(result);
     setDraft(d => ({
       ...d,
@@ -781,11 +782,16 @@ export function NewJobFlow({
   // real ISO value so resolveScheduleSlot turns it into an appointment. (No
   // placeholder chips — those looked scheduled but silently dropped the
   // schedule, creating the job as New with a misleading "Scheduled" label.)
-  const dateChipNow = new Date();
   const isoDayChip = (offset: number) => {
-    const d = new Date(dateChipNow.getFullYear(), dateChipNow.getMonth(), dateChipNow.getDate() + offset);
-    const value = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-    return { label: d.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric' }), value };
+    // Value is the tenant-timezone calendar date (matches how Today/Tomorrow
+    // resolve), so a dispatcher in another zone doesn't schedule the wrong day.
+    const value = tenantDateIso(offset, tenantTz);
+    // Label the pure calendar date — format at UTC noon so the weekday/day don't
+    // shift under the runner's local tz.
+    const label = new Date(`${value}T12:00:00Z`).toLocaleDateString(undefined, {
+      weekday: 'short', day: 'numeric', timeZone: 'UTC',
+    });
+    return { label, value };
   };
   const DATE_CHIPS = [
     { label: 'Today',     value: 'Today'    },

@@ -20,25 +20,6 @@ export interface ScheduleSlot {
   scheduledEnd: string;
 }
 
-function toYmd(d: Date): string {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
-}
-
-/**
- * Nearest upcoming date for a weekday (today counts), as ISO `YYYY-MM-DD`.
- * Lets voice-parsed weekdays ("Friday at 10am") resolve to a real appointment
- * the same way the date chips do, rather than a placeholder label that silently
- * drops the schedule. Weekday index is JS-native: Sun=0 … Sat=6.
- */
-export function nextWeekdayIso(targetDow: number, from: Date = new Date()): string {
-  const d = new Date(from.getFullYear(), from.getMonth(), from.getDate());
-  d.setDate(d.getDate() + ((targetDow - d.getDay() + 7) % 7));
-  return toYmd(d);
-}
-
 /** Today's calendar date in the given timezone, as [y, month(1-12), day], or null. */
 function tenantYmdParts(now: Date, timezone: string): [number, number, number] | null {
   try {
@@ -51,6 +32,29 @@ function tenantYmdParts(now: Date, timezone: string): [number, number, number] |
   } catch {
     return null;
   }
+}
+
+/** `now` + `offset` days, evaluated in the TENANT timezone, as ISO `YYYY-MM-DD`. */
+export function tenantDateIso(offset: number, timezone: string, now: Date = new Date()): string {
+  const [y, mo, d] =
+    tenantYmdParts(now, timezone) ?? [now.getFullYear(), now.getMonth() + 1, now.getDate()];
+  // Date.UTC normalizes month/year rollover; read back the pure calendar date.
+  return new Date(Date.UTC(y, mo - 1, d + offset)).toISOString().slice(0, 10);
+}
+
+/**
+ * Nearest upcoming date for a weekday (today counts), as ISO `YYYY-MM-DD`,
+ * evaluated from the TENANT calendar day. Lets voice-parsed weekdays ("Friday
+ * at 10am") resolve to a real appointment the same way the date chips do,
+ * rather than a placeholder label that silently drops the schedule — and, like
+ * Today/Tomorrow, anchored to the tenant's day so a dispatcher in another zone
+ * doesn't land on the wrong week. Weekday index is JS-native: Sun=0 … Sat=6.
+ */
+export function nextWeekdayIso(targetDow: number, timezone: string, from: Date = new Date()): string {
+  const [y, mo, d] =
+    tenantYmdParts(from, timezone) ?? [from.getFullYear(), from.getMonth() + 1, from.getDate()];
+  const baseDow = new Date(Date.UTC(y, mo - 1, d)).getUTCDay();
+  return tenantDateIso((targetDow - baseDow + 7) % 7, timezone, from);
 }
 
 /**
@@ -66,15 +70,8 @@ function resolveYmd(scheduledDate: string, now: Date, timezone: string): string 
   if (!value) return null;
   // A real date input (`type=date`) yields an ISO calendar date.
   if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
-  if (/^today$/i.test(value) || /^tomorrow$/i.test(value)) {
-    const today = tenantYmdParts(now, timezone);
-    if (!today) return null;
-    const [y, mo, d] = today;
-    // Date.UTC normalizes month/year rollover; read back the calendar date.
-    return new Date(Date.UTC(y, mo - 1, d + (/^tomorrow$/i.test(value) ? 1 : 0)))
-      .toISOString()
-      .slice(0, 10);
-  }
+  if (/^today$/i.test(value)) return tenantDateIso(0, timezone, now);
+  if (/^tomorrow$/i.test(value)) return tenantDateIso(1, timezone, now);
   // Placeholder/demo labels ("Tue Mar 11", "Custom", "__custom") aren't
   // concretely schedulable.
   return null;
