@@ -124,13 +124,26 @@ export async function scheduleJob(
   // Create the board-critical artifact FIRST. If the status transition below
   // somehow fails, the job stays `new` but the appointment still exists, so it
   // renders on the board — the safer failure mode for the bug we're fixing.
-  const appointment = await createAppointment(
+  let appointment = await createAppointment(
     appointmentInput,
     deps.appointmentRepo,
     undefined,
     deps.auditRepo,
     input.actorRole,
   );
+
+  // The idempotency key is deterministic on job+slot, so rebooking the same
+  // job into the same slot AFTER a prior appointment there was canceled dedupes
+  // back to that canceled row. Revive it to `scheduled` (mirrors from-estimate)
+  // so a legitimate rebook produces an active board card instead of silently
+  // returning the canceled appointment. A live-scheduled dedupe (a retry) is
+  // already `scheduled`, so this is a no-op there.
+  if (appointment.status === 'canceled') {
+    const revived = await deps.appointmentRepo.update(tenantId, appointment.id, {
+      status: 'scheduled',
+    });
+    if (revived) appointment = revived;
+  }
 
   // Move `new -> scheduled`. A job already `scheduled` (a reschedule / second
   // appointment) keeps its status; transitioning scheduled->scheduled is a

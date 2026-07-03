@@ -115,6 +115,27 @@ describe('scheduleJob — dispatch board Issue 2 (job → appointment)', () => {
     expect(await appointmentRepo.findByJob(TENANT, job.id)).toHaveLength(1);
   });
 
+  it('revives a canceled appointment when rebooking the same job + slot', async () => {
+    const job = await newJob();
+    const args = {
+      tenantId: TENANT, jobId: job.id, scheduledStart: START, scheduledEnd: new Date('2026-07-01T16:00:00.000Z'),
+      actorId: 'u-1',
+    };
+
+    const first = await scheduleJob(deps, args);
+    // Cancel it, then rebook the identical job + slot.
+    await appointmentRepo.update(TENANT, first.appointment.id, { status: 'canceled' });
+
+    const rebooked = await scheduleJob(deps, args);
+
+    // Same row (deduped by key) but revived to an active board card, not left canceled.
+    expect(rebooked.appointment.id).toBe(first.appointment.id);
+    expect(rebooked.appointment.status).toBe('scheduled');
+    const rows = await appointmentRepo.findByJob(TENANT, job.id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe('scheduled');
+  });
+
   it('rejects scheduling a job in a terminal status and creates no appointment', async () => {
     const job = await newJob();
     await jobRepo.update(TENANT, job.id, { status: 'completed' });
