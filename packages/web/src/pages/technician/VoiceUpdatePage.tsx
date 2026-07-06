@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { VoiceUpdate, JobContext } from './VoiceUpdate';
 import { TranscriptionStatus } from '../../types/conversation';
+import { apiFetch } from '../../utils/api-fetch';
 
 export interface VoiceUpdatePageProps {
   jobContext: JobContext | null;
@@ -59,13 +60,19 @@ export function VoiceUpdatePage({ jobContext, onTranscribed }: VoiceUpdatePagePr
   const beginPolling = (id: string) => {
     clearPoll();
     pollCancelled.current = false;
+    // Give up after ~2 minutes of consecutive failures instead of polling
+    // an unreachable/rejecting endpoint every 2s forever with a
+    // "processing" spinner that can never resolve.
+    let consecutiveFailures = 0;
+    const MAX_CONSECUTIVE_FAILURES = 60;
 
     const tick = async () => {
       if (pollCancelled.current) return;
       try {
-        const res = await fetch(`/api/voice/recordings/${id}`);
+        const res = await apiFetch(`/api/voice/recordings/${id}`);
         if (pollCancelled.current) return;
         if (res.ok) {
+          consecutiveFailures = 0;
           const r = (await res.json()) as RecordingResponse;
           if (pollCancelled.current) return;
           if (r.status) setTranscriptionStatus(r.status);
@@ -83,9 +90,18 @@ export function VoiceUpdatePage({ jobContext, onTranscribed }: VoiceUpdatePagePr
             clearPoll();
             return;
           }
+        } else {
+          consecutiveFailures += 1;
         }
       } catch {
-        // Transient poll failures are ignored — the next tick retries.
+        // Transient poll failures are retried up to the cutoff below.
+        consecutiveFailures += 1;
+      }
+      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        clearPoll();
+        setTranscriptionStatus('failed');
+        setTranscriptionError('Status check kept failing — tap retry to try again.');
+        return;
       }
       if (!pollCancelled.current) {
         pollTimer.current = setTimeout(tick, POLL_INTERVAL_MS);
@@ -101,7 +117,7 @@ export function VoiceUpdatePage({ jobContext, onTranscribed }: VoiceUpdatePagePr
       form.append('file', blob, 'recording.webm');
       form.append('jobId', jobId);
 
-      const res = await fetch('/api/voice/recordings', {
+      const res = await apiFetch('/api/voice/recordings', {
         method: 'POST',
         body: form,
       });
@@ -122,7 +138,16 @@ export function VoiceUpdatePage({ jobContext, onTranscribed }: VoiceUpdatePagePr
   const retryTranscription = useCallback(async (id: string) => {
     setTranscriptionError(undefined);
     setTranscriptionStatus('processing');
-    await fetch(`/api/voice/recordings/${id}/retry`, { method: 'POST' });
+    try {
+      const res = await apiFetch(`/api/voice/recordings/${id}/retry`, { method: 'POST' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    } catch (err) {
+      setTranscriptionStatus('failed');
+      setTranscriptionError(
+        err instanceof Error ? err.message : 'Retry request failed',
+      );
+      return;
+    }
     beginPolling(id);
   }, []);
 

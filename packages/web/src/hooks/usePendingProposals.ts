@@ -108,7 +108,7 @@ export function usePendingProposals(
   const { pollIntervalMs = DEFAULT_POLL_MS, onNewProposal, onCriticalProposal, enabled = true } = options;
   const apiFetch = useApiClient();
   const [proposals, setProposals] = useState<PendingProposalSummary[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
+  const [isLoading, setIsLoading] = useState(enabled);
   const [error, setError] = useState<string | null>(null);
 
   // `null` means "no baseline yet"; on the first successful response we
@@ -137,9 +137,24 @@ export function usePendingProposals(
     apiFetchRef.current = apiFetch;
   }, [apiFetch]);
 
+  // Error backoff: after consecutive failures the poll interval keeps
+  // firing but ticks are skipped until the backoff window elapses
+  // (doubling per failure, capped at 5 min). Without this a persistently
+  // failing endpoint (e.g. server-side auth outage) was re-hit at full
+  // rate forever from every mounted instance.
+  const consecutiveFailuresRef = useRef(0);
+  const nextAttemptAtRef = useRef(0);
+  const BACKOFF_CAP_MS = 5 * 60_000;
+
   const fetchOnce = useCallback(async (force = false): Promise<void> => {
     if (!enabled) return;
-    setIsLoading(true);
+    if (!force && Date.now() < nextAttemptAtRef.current) return;
+    // Only the initial load (no baseline yet) or an explicit refresh
+    // surfaces the loading flag: flipping it on every 30s background tick
+    // made badge/card consumers flash a spinner per poll.
+    if (knownIdsRef.current === null || force) {
+      setIsLoading(true);
+    }
     setError(null);
     try {
       const body = (await fetchPendingCoalesced(
@@ -183,16 +198,21 @@ export function usePendingProposals(
       }
       knownIdsRef.current = new Set(list.map((p) => p.id));
       setProposals(list);
+      consecutiveFailuresRef.current = 0;
+      nextAttemptAtRef.current = 0;
     } catch (err) {
       // Mid sign-out the api client throws an AbortError. That's not a
       // user-visible failure — swallow it and let the next render
       // retry once auth settles.
       if (err instanceof DOMException && err.name === 'AbortError') return;
+      const failures = ++consecutiveFailuresRef.current;
+      nextAttemptAtRef.current =
+        Date.now() + Math.min(pollIntervalMs * 2 ** failures, BACKOFF_CAP_MS);
       setError(err instanceof Error ? err.message : 'Unknown error');
     } finally {
       setIsLoading(false);
     }
-  }, [enabled]);
+  }, [enabled, pollIntervalMs]);
 
   useEffect(() => {
     if (!enabled) return;

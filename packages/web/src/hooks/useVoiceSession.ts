@@ -111,7 +111,7 @@ export function useVoiceSession(): UseVoiceSession {
       const controller = new AbortController();
       sseAbortRef.current = controller;
 
-      const token = await getToken();
+      const token = await getToken({ template: 'serviceos' });
       const headers: Record<string, string> = { Accept: 'text/event-stream' };
       if (token) headers.Authorization = `Bearer ${token}`;
 

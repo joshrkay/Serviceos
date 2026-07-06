@@ -70,34 +70,57 @@ export function useOnboardingStatus(
   const [error, setError] = useState<string | null>(null);
   const requestVersionRef = useRef(0);
 
-  const refetch = useCallback(async () => {
-    const myVersion = ++requestVersionRef.current;
-    try {
-      const body = await fetchStatusCoalesced(apiFetch);
-      if (myVersion !== requestVersionRef.current) return;
-      setData(body);
-      setError(null);
-    } catch (err) {
-      if (myVersion !== requestVersionRef.current) return;
-      if (err instanceof DOMException && err.name === 'AbortError') return;
-      setError(err instanceof Error ? err.message : 'Unknown error');
-    } finally {
-      if (myVersion === requestVersionRef.current) setIsLoading(false);
-    }
-  }, [apiFetch]);
+  // Error backoff: the interval keeps ticking, but after consecutive
+  // failures ticks are skipped until the backoff window (doubling per
+  // failure, capped at 5 min) elapses. This hook is mounted by the route
+  // guard on every authed page — without the backoff a persistently
+  // failing endpoint (e.g. server-side auth outage) was re-hit at full
+  // rate forever, each tick costing a 401 + forced-refresh retry.
+  const consecutiveFailuresRef = useRef(0);
+  const nextAttemptAtRef = useRef(0);
+  const BACKOFF_CAP_MS = 5 * 60_000;
+
+  const load = useCallback(
+    async (force: boolean) => {
+      if (!force && Date.now() < nextAttemptAtRef.current) return;
+      const myVersion = ++requestVersionRef.current;
+      try {
+        const body = await fetchStatusCoalesced(apiFetch);
+        if (myVersion !== requestVersionRef.current) return;
+        consecutiveFailuresRef.current = 0;
+        nextAttemptAtRef.current = 0;
+        setData(body);
+        setError(null);
+      } catch (err) {
+        if (myVersion !== requestVersionRef.current) return;
+        if (err instanceof DOMException && err.name === 'AbortError') return;
+        const failures = ++consecutiveFailuresRef.current;
+        nextAttemptAtRef.current =
+          Date.now() + Math.min(Math.max(pollIntervalMs, 1000) * 2 ** failures, BACKOFF_CAP_MS);
+        setError(err instanceof Error ? err.message : 'Unknown error');
+      } finally {
+        if (myVersion === requestVersionRef.current) setIsLoading(false);
+      }
+    },
+    [apiFetch, pollIntervalMs],
+  );
+
+  // Public refetch bypasses the backoff window — an explicit caller action
+  // (retry button, post-mutation refresh) should always hit the server.
+  const refetch = useCallback(() => load(true), [load]);
 
   useEffect(() => {
     if (!enabled) {
       setIsLoading(false);
       return;
     }
-    void refetch();
+    void load(true);
     if (pollIntervalMs <= 0) return;
     const id = setInterval(() => {
-      void refetch();
+      void load(false);
     }, pollIntervalMs);
     return () => clearInterval(id);
-  }, [refetch, pollIntervalMs, enabled]);
+  }, [load, pollIntervalMs, enabled]);
 
   return { data, isLoading, error, refetch };
 }

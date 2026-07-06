@@ -60,7 +60,7 @@ export function useDispatchBoardStream(
       sseAbortRef.current = controller;
 
       try {
-        const token = await getToken();
+        const token = await getToken({ template: 'serviceos' });
         const headers: Record<string, string> = { Accept: 'text/event-stream' };
         if (token) headers.Authorization = `Bearer ${token}`;
 
