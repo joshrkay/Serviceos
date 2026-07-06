@@ -41,6 +41,26 @@ const hasWebApp =
  */
 const isApiUrl = (url: URL) => url.pathname.startsWith('/api/');
 
+/**
+ * Hermetic mode: abort every request that leaves the app's own origin
+ * (third-party analytics like the pendo agent in index.html, fonts, CDNs).
+ * Two reasons:
+ *   1. Determinism — page.goto waits for the window `load` event, and a
+ *      hanging external script (sandboxed/proxied CI runners) stalls it
+ *      past the navigation timeout. This suite is about app behavior, not
+ *      third-party availability.
+ *   2. It doubles as a regression check for the "blocked analytics must
+ *      never white-screen the app" guard (main.tsx pendo try/catch) — the
+ *      zero-pageerror assertions run with every third party hard-down.
+ */
+async function blockExternalHosts(page: Page, baseURL: string): Promise<void> {
+  const appOrigin = new URL(baseURL).origin;
+  await page.route(
+    (url) => url.origin !== appOrigin,
+    (route) => route.abort(),
+  );
+}
+
 /** Per-path hit counter over all /api/* requests, fulfilled with a 401. */
 async function intercept401s(page: Page): Promise<Map<string, number>> {
   const hits = new Map<string, number>();
@@ -70,8 +90,10 @@ test.describe('401 resilience — no redirect storm', () => {
 
   test('persistent 401s: one latched sign-out, one soft landing on /login, then silence', async ({
     page,
+    baseURL,
   }) => {
     await installClerkStub(page, { signedIn: true });
+    await blockExternalHosts(page, baseURL!);
     const hits = await intercept401s(page);
 
     let documentLoads = 0;
@@ -128,8 +150,10 @@ test.describe('401 resilience — no redirect storm', () => {
 
   test('signed-out /login: identity bridges stay quiet — zero /api traffic, no loop', async ({
     page,
+    baseURL,
   }) => {
     await installClerkStub(page, { signedIn: false });
+    await blockExternalHosts(page, baseURL!);
     const hits = await intercept401s(page);
 
     let documentLoads = 0;
@@ -157,8 +181,10 @@ test.describe('401 resilience — no redirect storm', () => {
 
   test('healthy API control: signed-in stays on the app, sign-out never fires', async ({
     page,
+    baseURL,
   }) => {
     await installClerkStub(page, { signedIn: true });
+    await blockExternalHosts(page, baseURL!);
 
     // Control for the storm test: with the API answering 200s, the exact
     // same signed-in boot must NOT trip the auth-failure exit. This proves
