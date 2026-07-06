@@ -22,7 +22,11 @@ export function useDetailQuery<T>(
 ): DetailQueryResult<T> {
   const apiFetch = useApiClient();
   const [data, setData] = useState<T | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
+  // Loading from the first render when an id is present: initializing to
+  // false made consumers paint their error/empty branch before the fetch
+  // effect ran (InvoiceDetail flashed "Failed to load invoice" on every
+  // open).
+  const [isLoading, setIsLoading] = useState(id !== null);
   const [error, setError] = useState<string | null>(null);
   // Monotonic request id. New fetches increment it; in-flight fetches bail
   // out before committing if a newer request has started, so an out-of-order
@@ -30,7 +34,14 @@ export function useDetailQuery<T>(
   const requestVersionRef = useRef(0);
 
   const refetch = useCallback(async () => {
-    if (!id) return;
+    if (!id) {
+      // id cleared (selection closed): drop the previous entity's state so
+      // the "no selection" render doesn't show stale data or errors.
+      setData(null);
+      setError(null);
+      setIsLoading(false);
+      return;
+    }
     // Clear any previously-loaded entity so the consumer doesn't keep
     // rendering the prior id's data while the new fetch is in flight (and
     // so a 404 on the new id surfaces as not-found instead of leaving the

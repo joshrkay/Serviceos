@@ -25,7 +25,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
  */
 import { renderHook } from '@testing-library/react';
 import { waitFor } from '@testing-library/react';
-import { useApiClient } from './apiClient';
+import { clearSignOutHandler, useApiClient } from './apiClient';
 
 // ── Clerk mock ───────────────────────────────────────────────────────────────
 const mockGetToken = vi.fn(async () => 'tok-test');
@@ -37,6 +37,9 @@ vi.mock('@clerk/clerk-react', () => ({
 afterEach(() => {
   vi.restoreAllMocks();
   mockGetToken.mockImplementation(async () => 'tok-test');
+  // Reset the persistent-401 latch (handleAuthFailure coalesces concurrent
+  // 401s into a single navigation) so each test observes its own redirect.
+  clearSignOutHandler();
 });
 
 /**
@@ -176,7 +179,7 @@ describe('P20-003 redirectToLogin — URL construction', () => {
   );
 
   it(
-    'P20-003 (c): being on /login falls back to redirect=%2F (no loop)',
+    'P20-003 (c): being on /login does not navigate at all (no loop)',
     async () => {
       Object.defineProperty(window, 'location', {
         configurable: true,
@@ -189,13 +192,15 @@ describe('P20-003 redirectToLogin — URL construction', () => {
       });
 
       const href = await triggerRedirect();
-      // Must fall back to '/' — not encode /login… into the redirect param.
-      expect(href).toBe('/login?redirect=' + encodeURIComponent('/'));
+      // A 401 while already on /login must be a no-op: reloading /login
+      // restarts every root-mounted fetch and loops the login page into
+      // itself (dev-env outage 2026-07-06).
+      expect(href).toBe('');
     }
   );
 
   it(
-    'P20-003 (c-variant): /login/sso sub-path also falls back to redirect=%2F',
+    'P20-003 (c-variant): /login/sso sub-path is also a no-op',
     async () => {
       Object.defineProperty(window, 'location', {
         configurable: true,
@@ -208,7 +213,7 @@ describe('P20-003 redirectToLogin — URL construction', () => {
       });
 
       const href = await triggerRedirect();
-      expect(href).toBe('/login?redirect=' + encodeURIComponent('/'));
+      expect(href).toBe('');
     }
   );
 

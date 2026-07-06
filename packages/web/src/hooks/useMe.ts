@@ -68,6 +68,16 @@ export function _resetMeCacheForTests(): void {
 }
 
 /**
+ * Drop the cached identity so the next read hits the server. Call on any
+ * Clerk auth transition (sign-out, sign-in as a different user, org/tenant
+ * switch) — otherwise a soft navigation without a full page reload keeps
+ * serving the previous user's identity, role, and permissions.
+ */
+export function invalidateMeCache(): void {
+  cachedMePromise = null;
+}
+
+/**
  * Shared cached /api/me read for non-hook consumers (e.g. the
  * TenantTimezoneProvider) so they piggyback on the same module cache
  * instead of issuing their own duplicate GET /api/me per mount.
@@ -76,10 +86,21 @@ export function fetchMeShared(client: AuthedFetch): Promise<MeResponse> {
   return loadOrReuse(client);
 }
 
-export function useMe(): UseMeResult {
+export interface UseMeOptions {
+  /**
+   * When false, the hook does not fetch (isLoading settles to false,
+   * me stays null). Lets root-mounted consumers (AnalyticsIdentityBridge)
+   * defer the authenticated GET /api/me until Clerk reports a signed-in
+   * session, instead of firing it on /login and feeding the 401 storm.
+   */
+  enabled?: boolean;
+}
+
+export function useMe(options: UseMeOptions = {}): UseMeResult {
+  const enabled = options.enabled !== false;
   const client = useApiClient() as AuthedFetch;
   const [me, setMe] = useState<MeResponse | null>(null);
-  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [isLoading, setIsLoading] = useState<boolean>(enabled);
   const [error, setError] = useState<Error | null>(null);
 
   const load = useCallback(
@@ -93,6 +114,12 @@ export function useMe(): UseMeResult {
         const response = await loadOrReuse(client);
         setMe(response);
       } catch (err) {
+        // A deliberately cancelled request (no auth token — sign-out
+        // transition) is not a user-facing error; mirrors the sibling
+        // hooks (useOnboardingStatus, useListQuery).
+        if (err instanceof DOMException && err.name === 'AbortError') {
+          return;
+        }
         setError(err instanceof Error ? err : new Error(String(err)));
       } finally {
         setIsLoading(false);
@@ -102,8 +129,12 @@ export function useMe(): UseMeResult {
   );
 
   useEffect(() => {
+    if (!enabled) {
+      setIsLoading(false);
+      return;
+    }
     void load();
-  }, [load]);
+  }, [load, enabled]);
 
   const switchMode = useCallback(
     async (next: Mode) => {

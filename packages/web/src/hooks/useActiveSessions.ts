@@ -204,14 +204,26 @@ function useActiveSessionsInternal(): UseActiveSessionsResult {
   useEffect(() => {
     if (!isAuthorized) return;
     let cancelled = false;
+    // Error backoff: skip ticks (doubling per consecutive failure, capped
+    // at 5 min) instead of re-hitting a persistently failing endpoint at
+    // full rate forever with the error silently swallowed.
+    let consecutiveFailures = 0;
+    let nextAttemptAt = 0;
+    const BACKOFF_CAP_MS = 5 * 60_000;
     const poll = async () => {
+      if (Date.now() < nextAttemptAt) return;
       const fresh = await refreshToken();
       if (cancelled || !fresh) return;
       try {
         const list = await fetchActiveSessions(fresh);
         if (!cancelled) reconcileSessions(list);
+        consecutiveFailures = 0;
+        nextAttemptAt = 0;
       } catch {
-        // Network blip / expired token — next tick refreshes + retries.
+        // Network blip / expired token — retried after the backoff window.
+        consecutiveFailures += 1;
+        nextAttemptAt =
+          Date.now() + Math.min(DISCOVERY_POLL_MS * 2 ** consecutiveFailures, BACKOFF_CAP_MS);
       }
     };
     void poll();

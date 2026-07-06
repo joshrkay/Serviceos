@@ -21,7 +21,7 @@ describe('P11-007 CancelDialog', () => {
     expect(vi.mocked(apiFetch)).not.toHaveBeenCalled();
   });
 
-  it('PUTs status=cancelled with the reason on submit', async () => {
+  it('PUTs canonical status=canceled with the reason as notes on submit', async () => {
     vi.mocked(apiFetch).mockResolvedValueOnce({
       ok: true,
       status: 200,
@@ -42,8 +42,9 @@ describe('P11-007 CancelDialog', () => {
     expect(call[0]).toBe('/api/appointments/a-1');
     expect(call[1]?.method).toBe('PUT');
     const body = JSON.parse(call[1]?.body as string);
-    expect(body.status).toBe('cancelled');
-    expect(body.cancelReason).toBe('Customer rescheduled');
+    // Canonical API status is 'canceled' (single L); reason persists via notes.
+    expect(body.status).toBe('canceled');
+    expect(body.notes).toBe('Customer rescheduled');
   });
 
   it('calls onCancel when the back button is clicked', () => {

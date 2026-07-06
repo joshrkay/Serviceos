@@ -56,7 +56,12 @@ export function useInvoiceStatus(
 ): UseInvoiceStatusResult {
   const intervalMs = options.intervalMs ?? 5_000;
   const enabled = options.enabled ?? true;
-  const fetcher = options.fetcher ?? fetch;
+  // Wrap the default: calling the bare fetch reference through
+  // `fetcherRef.current(...)` binds `this` to the ref object, and browsers
+  // throw "Illegal invocation" when window.fetch runs with a foreign
+  // `this` — which killed every tick of this poll.
+  const fetcher: typeof fetch =
+    options.fetcher ?? ((...args: Parameters<typeof fetch>) => fetch(...args));
 
   const [status, setStatus] = useState<InvoiceStatusSnapshot | null>(null);
   const [error, setError] = useState<Error | null>(null);

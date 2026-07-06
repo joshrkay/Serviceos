@@ -43,26 +43,49 @@ export function useEscalationStream(): UseEscalationStream {
     let cancelled = false;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
+    // Backoff floor for a persistent auth rejection — slower than the
+    // ordinary reconnect so a wrong/expired token doesn't hammer the API,
+    // but NOT permanent (the previous code gave up for the page lifetime on
+    // a single 401, silently killing escalations for the dispatcher).
+    const AUTH_RETRY_MS = 60_000;
+    const backoff = (attempt: number) => Math.min(1000 * Math.pow(2, attempt), 30_000);
+
     const subscribe = async (attempt = 0): Promise<void> => {
       if (cancelled) return;
       sseAbortRef.current?.abort();
       const controller = new AbortController();
       sseAbortRef.current = controller;
 
-      try {
-        const token = await getToken();
-        const headers: Record<string, string> = { Accept: 'text/event-stream' };
-        if (token) headers.Authorization = `Bearer ${token}`;
-
-        const response = await fetch('/api/escalations/events', {
+      const openStream = async (skipCache: boolean): Promise<Response | null> => {
+        const token = await getToken({ template: 'serviceos', skipCache });
+        // Never send an unauthenticated request — a null token means Clerk is
+        // mid-refresh or signing out; the caller retries after a short delay.
+        if (!token) return null;
+        return fetch('/api/escalations/events', {
           method: 'GET',
-          headers,
+          headers: { Accept: 'text/event-stream', Authorization: `Bearer ${token}` },
           signal: controller.signal,
         });
+      };
+
+      try {
+        let response = await openStream(false);
+        if (cancelled) return;
+        if (!response) {
+          // No token yet — retry shortly rather than firing without auth.
+          reconnectTimer = setTimeout(() => void subscribe(attempt + 1), backoff(attempt));
+          return;
+        }
 
         if (response.status === 401 || response.status === 403) {
-          // Auth failure — don't keep retrying.
-          return;
+          // Token rejected — retry once with a force-refreshed token before
+          // backing off, mirroring the fetch clients' 401 handling.
+          response = await openStream(true);
+          if (cancelled) return;
+          if (!response || response.status === 401 || response.status === 403) {
+            reconnectTimer = setTimeout(() => void subscribe(attempt + 1), AUTH_RETRY_MS);
+            return;
+          }
         }
         if (!response.ok || !response.body) {
           throw new Error(`SSE failed: ${response.status}`);
@@ -98,15 +121,15 @@ export function useEscalationStream(): UseEscalationStream {
           // aborted or stream broken — fall through to reconnect
         }
 
-        // Stream closed cleanly — reconnect with backoff.
+        // Stream closed after a SUCCESSFUL connection — reset the backoff so
+        // routine server-side stream recycling reconnects fast, instead of
+        // creeping toward the 30s cap over a long-lived session.
         if (!cancelled) {
-          const delay = Math.min(1000 * Math.pow(2, attempt), 30_000);
-          reconnectTimer = setTimeout(() => void subscribe(attempt + 1), delay);
+          reconnectTimer = setTimeout(() => void subscribe(0), backoff(0));
         }
       } catch {
         if (cancelled) return;
-        const delay = Math.min(1000 * Math.pow(2, attempt), 30_000);
-        reconnectTimer = setTimeout(() => void subscribe(attempt + 1), delay);
+        reconnectTimer = setTimeout(() => void subscribe(attempt + 1), backoff(attempt));
       }
     };
 

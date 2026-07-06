@@ -25,7 +25,15 @@ initAnalytics();
 // Boot Pendo SDK with an anonymous visitor. The SDK resolves the previous
 // visitor from cookies/localStorage if available, otherwise falls back to
 // a new anonymous visitor. Called exactly once per page lifecycle.
-pendo.initialize({ visitor: { id: '' } });
+// Guarded: the snippet is a third-party script that ad blockers commonly
+// block — analytics must never prevent the app from rendering.
+try {
+  if (typeof pendo !== 'undefined' && pendo) {
+    pendo.initialize({ visitor: { id: '' } });
+  }
+} catch {
+  // Pendo unavailable — proceed without product analytics.
+}
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>

@@ -263,13 +263,28 @@ function MessageBubble({ msg, isLast }: { msg: Message; isLast: boolean }) {
           <div className="mt-2">
             <AIProposalCard
               proposal={msg.proposal}
-              onApprove={async () => {
+              onApprove={async (edits) => {
+                const proposalId = msg.proposal!.id;
+                // If the operator edited fields in the card, persist them
+                // first via the edit endpoint — the approve endpoint takes
+                // no payload and applies the proposal as stored, so without
+                // this the edits are silently discarded. Throw on failure so
+                // AIProposalCard reverts its optimistic "Approved" state.
+                if (edits && Object.keys(edits).length > 0) {
+                  const editRes = await apiFetch(`/api/proposals/${proposalId}`, {
+                    method: 'PUT',
+                    body: JSON.stringify({ edits }),
+                  });
+                  if (!editRes.ok) {
+                    throw new Error(`Saving edits failed: ${editRes.status} ${editRes.statusText}`);
+                  }
+                }
                 // Use apiFetch so the Clerk bearer token is attached — a
                 // bare fetch() sends no Authorization header and the
                 // backend rejects it with 401. Throw on a non-OK response
                 // so AIProposalCard reverts its optimistic "Approved"
                 // state and shows an error instead of faking success.
-                const response = await apiFetch(`/api/proposals/${msg.proposal!.id}/approve`, {
+                const response = await apiFetch(`/api/proposals/${proposalId}/approve`, {
                   method: 'POST',
                 });
                 if (!response.ok) {
@@ -734,6 +749,12 @@ export function AssistantPage() {
   );
 
   const [messages, setMessages]       = useState<Message[]>([]);
+  // Keep the latest messages in a ref so the memoized `send` callback reads
+  // the current history, not the snapshot from the render that created it —
+  // otherwise from the third turn on, the history POSTed to the assistant is
+  // stale and the model loses recent context.
+  const messagesRef = useRef<Message[]>([]);
+  useEffect(() => { messagesRef.current = messages; }, [messages]);
   const [input, setInput]             = useState('');
   const [typing, setTyping]           = useState(false);
   const [typingReason, setTypingReason] = useState('');
@@ -833,8 +854,10 @@ export function AssistantPage() {
 
     // Snapshot prior chat (before the new user message) to send as
     // context — the server expects the current message appended at
-    // the end of `messages`, not duplicated.
-    const history = messages.map((m) => ({ role: m.role, content: m.content }));
+    // the end of `messages`, not duplicated. Read from the ref so the
+    // history is current even when this memoized callback was created
+    // several turns ago.
+    const history = messagesRef.current.map((m) => ({ role: m.role, content: m.content }));
 
     setMessages(prev => [...prev, userMsg]);
     setInput('');

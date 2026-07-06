@@ -9,6 +9,12 @@ vi.mock('../utils/api-fetch', () => ({
   apiFetch: (...args: unknown[]) => fetchMock(...args),
 }));
 
+// The provider gates its fetch on Clerk auth state; these tests exercise
+// the signed-in path.
+vi.mock('@clerk/clerk-react', () => ({
+  useAuth: () => ({ isLoaded: true, isSignedIn: true }),
+}));
+
 function jsonResponse(body: Record<string, unknown>, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 }

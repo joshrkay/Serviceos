@@ -84,7 +84,20 @@ export function useMutation<TBody, TResult>(
         err.status = response.status;
         throw err;
       }
-      const data = await response.json() as TResult;
+      // Tolerate empty success bodies (204 No Content, or 200 with no
+      // payload): unconditional response.json() threw a parse error and
+      // reported the SUCCESSFUL mutation as a failure — error toast, error
+      // state, rejected promise.
+      let data: TResult;
+      if (response.status === 204 || response.status === 205) {
+        data = undefined as TResult;
+      } else {
+        try {
+          data = (await response.json()) as TResult;
+        } catch {
+          data = undefined as TResult;
+        }
+      }
 
       // Success toast (configurable; suppress with `false`)
       if (options.successMessage !== false && options.successMessage) {

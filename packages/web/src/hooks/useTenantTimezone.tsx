@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
+import { useAuth } from '@clerk/clerk-react';
 import { apiFetch } from '../utils/api-fetch';
 import { fetchMeShared } from './useMe';
 
@@ -47,12 +48,24 @@ export function TenantTimezoneProvider({
   children,
   overrideTimezone,
 }: TenantTimezoneProviderProps): React.ReactElement {
+  const { isLoaded, isSignedIn } = useAuth();
   const [timezone, setTimezone] = useState<string>(overrideTimezone ?? FALLBACK_TZ);
   const [loading, setLoading] = useState<boolean>(!overrideTimezone);
 
   useEffect(() => {
     if (overrideTimezone) {
       setTimezone(overrideTimezone);
+      setLoading(false);
+      return;
+    }
+    // This provider mounts outside the router (main.tsx), so an ungated
+    // fetch fires on /login too — feeding the 401 loop when the API is
+    // rejecting tokens. Wait for Clerk to settle, skip while signed out,
+    // and re-run when isSignedIn flips true so a session that starts on
+    // /login still picks up the tenant timezone after login (previously
+    // it kept the America/New_York fallback for the whole session).
+    if (!isLoaded) return;
+    if (!isSignedIn) {
       setLoading(false);
       return;
     }
@@ -78,7 +91,7 @@ export function TenantTimezoneProvider({
     return () => {
       cancelled = true;
     };
-  }, [overrideTimezone]);
+  }, [overrideTimezone, isLoaded, isSignedIn]);
 
   return (
     <TenantTimezoneContext.Provider value={{ timezone, loading }}>
