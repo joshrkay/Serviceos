@@ -68,6 +68,16 @@ export function _resetMeCacheForTests(): void {
 }
 
 /**
+ * Drop the cached identity so the next read hits the server. Call on any
+ * Clerk auth transition (sign-out, sign-in as a different user, org/tenant
+ * switch) — otherwise a soft navigation without a full page reload keeps
+ * serving the previous user's identity, role, and permissions.
+ */
+export function invalidateMeCache(): void {
+  cachedMePromise = null;
+}
+
+/**
  * Shared cached /api/me read for non-hook consumers (e.g. the
  * TenantTimezoneProvider) so they piggyback on the same module cache
  * instead of issuing their own duplicate GET /api/me per mount.

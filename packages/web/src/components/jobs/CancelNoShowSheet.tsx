@@ -98,8 +98,11 @@ export function CancelNoShowSheet({ job, appointmentId, customerName, customerPh
         const res = await apiFetch(`/api/appointments/${appointmentId}`, {
           method: 'PUT',
           body: JSON.stringify({
-            status: 'cancelled',
-            cancelReason,
+            // API canonical status is 'canceled' (single L); 'cancelled'
+            // failed validation on every submit. cancelReason is not an
+            // updatable field — persist the reason via the supported `notes`.
+            status: 'canceled',
+            notes: cancelReason,
           }),
         });
         if (!res.ok) {

@@ -866,7 +866,7 @@ export function TechJobView({
     let saved = 0;
     for (const m of media) {
       try {
-        const file = capturedMediaToFile(m);
+        const file = await capturedMediaToFile(m);
         const category: JobPhotoCategory = m.type === 'video' ? 'other' : 'before';
         await uploadPhoto(id, file, category, undefined, m.capturedAt);
         saved += 1;

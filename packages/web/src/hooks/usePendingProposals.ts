@@ -87,6 +87,12 @@ export function _resetPendingProposalsCacheForTests(): void {
   lastPending = null;
 }
 
+/** Drop the cached proposals on auth transitions (sign-out / tenant switch). */
+export function invalidatePendingProposalsCache(): void {
+  inflightPending = null;
+  lastPending = null;
+}
+
 /**
  * P2-033 — Polls `/api/proposals?status=ready_for_review` for badge
  * counts + new-proposal notifications.

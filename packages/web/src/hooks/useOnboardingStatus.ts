@@ -60,6 +60,12 @@ export function _resetOnboardingStatusCacheForTests(): void {
   lastStatus = null;
 }
 
+/** Drop the cached onboarding status on auth transitions (sign-out / tenant switch). */
+export function invalidateOnboardingStatusCache(): void {
+  inflightStatus = null;
+  lastStatus = null;
+}
+
 export function useOnboardingStatus(
   pollIntervalMs = 3000,
   enabled = true,
