@@ -189,8 +189,16 @@ test.describe('401 resilience — no redirect storm', () => {
     // Control for the storm test: with the API answering 200s, the exact
     // same signed-in boot must NOT trip the auth-failure exit. This proves
     // the storm test's sign-out came from the 401s, not from the harness.
-    // Responses are shape-minimal; the assertions here are about routing
-    // and the latch, not rendering.
+    // Responses are shape-minimal, but list endpoints MUST be list-shaped —
+    // useListQuery consumers call data.map(...), so a bare `{}` for /api/jobs
+    // would crash JobsList and (without the pageerror assertion below) let
+    // this control pass vacuously on a white screen. (PR #650 review.)
+    const LIST_ENDPOINTS = new Set([
+      '/api/jobs',
+      '/api/estimates',
+      '/api/invoices',
+      '/api/proposals',
+    ]);
     await page.route(isApiUrl, async (route: Route) => {
       const path = new URL(route.request().url()).pathname;
       const body =
@@ -209,7 +217,9 @@ test.describe('401 resilience — no redirect storm', () => {
               tenantId: '00000000-0000-0000-0000-0000000000e2',
               subscriptionStatus: null,
             }
-          : {};
+          : LIST_ENDPOINTS.has(path)
+            ? { data: [], total: 0 }
+            : {};
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -221,6 +231,8 @@ test.describe('401 resilience — no redirect storm', () => {
     page.on('load', () => {
       documentLoads += 1;
     });
+    const pageErrors: string[] = [];
+    page.on('pageerror', (err) => pageErrors.push(err.message));
 
     await page.goto('/jobs');
     await page.waitForTimeout(3_000);
@@ -231,5 +243,6 @@ test.describe('401 resilience — no redirect storm', () => {
     const counters = await readClerkStubCounters(page);
     expect(counters.signOutCalls, 'no sign-out on a healthy API').toBe(0);
     expect(documentLoads).toBe(1);
+    expect(pageErrors, 'no uncaught page errors on a healthy signed-in boot').toEqual([]);
   });
 });
