@@ -40,6 +40,40 @@
 import { test as base, expect, Page, Route } from '@playwright/test';
 import { installClerkStub, readClerkStubCounters, ClerkStubCounters } from './clerk-stub';
 import { installShellMocks } from './api-mocks/shell';
+// Pure data module (constants + latestReleaseId, no React/browser imports) —
+// safe to import Node-side. Importing the real value keeps the walkthrough
+// seed drift-proof: adding a release automatically updates the seed.
+import { WHATS_NEW_SEEN_KEY, latestReleaseId } from '../../packages/web/src/components/walkthrough/whatsNew';
+
+// WelcomeWalkthrough's dismissal key. Its source lives in a .tsx (React) so we
+// mirror the stable v1 string here rather than importing that module Node-side.
+// Source: packages/web/src/components/walkthrough/WelcomeWalkthrough.ts (WELCOME_SEEN_KEY).
+const WELCOME_SEEN_KEY = 'walkthrough.welcome.v1';
+
+/**
+ * Seed localStorage so the first-run walkthroughs (WelcomeWalkthrough +
+ * WhatsNewModal, both mounted in Shell) never open. On a fresh browser
+ * context these modals overlay the app and intercept clicks — they'd break
+ * every offline interaction spec, and they aren't what any offline spec is
+ * testing. Runs before app scripts via addInitScript.
+ */
+async function suppressWalkthroughs(page: Page): Promise<void> {
+  await page.addInitScript(
+    ({ welcomeKey, whatsNewKey, whatsNewVal }) => {
+      try {
+        window.localStorage.setItem(welcomeKey, new Date(0).toISOString());
+        if (whatsNewVal) window.localStorage.setItem(whatsNewKey, whatsNewVal);
+      } catch {
+        /* storage disabled — the modals will show; specs that click will surface it */
+      }
+    },
+    {
+      welcomeKey: WELCOME_SEEN_KEY,
+      whatsNewKey: WHATS_NEW_SEEN_KEY,
+      whatsNewVal: latestReleaseId(),
+    },
+  );
+}
 
 /**
  * True only for real API calls. A glob like `**\/api\/**` would also match
@@ -48,6 +82,17 @@ import { installShellMocks } from './api-mocks/shell';
  */
 export const isApiUrl = (url: URL) => url.pathname.startsWith('/api/');
 
+/**
+ * Timeout for the FIRST data-visible assertion after navigating to a route.
+ * The Vite dev server compiles a route's chunk on first hit (JIT), and heavy
+ * pages (jobs/estimates/invoices detail pull in large trees) can push that
+ * cold compile past Playwright's default 5s `expect` timeout — intermittently,
+ * right at the boundary. Product render itself is fast and deterministic once
+ * compiled; this headroom only absorbs the one-time dev-server compile, so it
+ * belongs on the first paint of each navigation, not on later interactions.
+ */
+export const DATA_TIMEOUT = 20_000;
+
 /** Abort every request that leaves the app's own origin. See header (2). */
 export async function blockExternalHosts(page: Page, baseURL: string): Promise<void> {
   const appOrigin = new URL(baseURL).origin;
@@ -55,6 +100,20 @@ export async function blockExternalHosts(page: Page, baseURL: string): Promise<v
     (url) => url.origin !== appOrigin,
     (route) => route.abort(),
   );
+}
+
+/**
+ * One intercepted API request, as recorded by a domain mock's tracker.
+ * Mutation assertions read these (exact), GET entries exist only for
+ * "the last list request carried filter X" checks — never count GETs
+ * (StrictMode + pollers refire them).
+ */
+export interface ApiTrackerEntry {
+  method: string;
+  path: string;
+  /** Parsed JSON body for mutations; query-string map for GETs. */
+  body?: unknown;
+  query?: Record<string, string>;
 }
 
 export interface OfflineApp {
@@ -88,6 +147,7 @@ export const offlineTest = base.extend<OfflineFixtures>({
       page.on('pageerror', (err) => pageErrors.push(err.message));
 
       await installClerkStub(page, { signedIn: true });
+      await suppressWalkthroughs(page);
       await blockExternalHosts(page, baseURL!);
 
       // Catch-all /api recorder — layer 3 (see header).
@@ -111,7 +171,11 @@ export const offlineTest = base.extend<OfflineFixtures>({
         expect(pageErrors, 'no uncaught page errors during the test').toEqual([]);
       }
     },
-    { auto: false },
+    // auto: the harness (Clerk stub + external abort + catch-all recorder +
+    // baseline shell mocks + skip gate + pageerror audit) MUST run for every
+    // offline spec, whether or not the test destructures `offlineApp`. A test
+    // that only takes `{ page }` still needs the app to boot signed-in.
+    { auto: true },
   ],
 });
 
