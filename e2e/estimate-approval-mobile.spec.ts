@@ -1,4 +1,5 @@
 import { test, expect, Page } from '@playwright/test';
+import { hasRealClerk } from './helpers/clerk-env';
 
 /**
  * Mobile/glove hardening for the public estimate approval page (/e/:id).
@@ -16,9 +17,10 @@ import { test, expect, Page } from '@playwright/test';
  * Clerk journey secrets are needed beyond the UI bundle booting.
  */
 
-// Same gate as smoke — ui: the app's main.tsx throws at module load
-// without a Clerk publishable key (P0-026 startup guard).
-const hasClerk = !!process.env.E2E_BASE_URL || !!process.env.VITE_CLERK_PUBLISHABLE_KEY;
+// Gate on a REAL Clerk instance (or deployed base). The offline placeholder
+// key CI uses to boot the app for the offline suite must not un-skip this
+// spec — keeps its current CI-skip behavior unchanged. (helpers/clerk-env.ts.)
+const hasClerk = hasRealClerk();
 
 const LONG_DESCRIPTION =
   'TanklessWaterHeaterModelRTGH95DVLN2SerialAB0123456789XYZ Replacement with recirculation pump';

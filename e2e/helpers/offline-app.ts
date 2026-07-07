@@ -40,6 +40,7 @@
 import { test as base, expect, Page, Route } from '@playwright/test';
 import { installClerkStub, readClerkStubCounters, ClerkStubCounters } from './clerk-stub';
 import { installShellMocks } from './api-mocks/shell';
+import { webAppCanBoot } from './clerk-env';
 // Pure data module (constants + latestReleaseId, no React/browser imports) —
 // safe to import Node-side. Importing the real value keeps the walkthrough
 // seed drift-proof: adding a release automatically updates the seed.
@@ -130,15 +131,15 @@ interface OfflineFixtures {
   expectCleanPageErrors: boolean;
 }
 
-const hasWebApp = !!process.env.E2E_BASE_URL || !!process.env.VITE_CLERK_PUBLISHABLE_KEY;
-
 export const offlineTest = base.extend<OfflineFixtures>({
   expectCleanPageErrors: [true, { option: true }],
 
   offlineApp: [
     async ({ page, baseURL, expectCleanPageErrors }, use, testInfo) => {
+      // Only needs the app to BOOT — the offline placeholder key is enough,
+      // since window.Clerk is stubbed and never talks to a real instance.
       testInfo.skip(
-        !hasWebApp,
+        !webAppCanBoot(),
         'Set VITE_CLERK_PUBLISHABLE_KEY locally or E2E_BASE_URL to run UI E2E tests',
       );
 

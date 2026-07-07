@@ -1,5 +1,6 @@
 import { test, expect, Page, Route } from '@playwright/test';
 import { installClerkStub, readClerkStubCounters } from './helpers/clerk-stub';
+import { webAppCanBoot } from './helpers/clerk-env';
 
 /**
  * 401-storm regression suite — real-browser proof for the 2026-07-06 fix
@@ -31,8 +32,7 @@ import { installClerkStub, readClerkStubCounters } from './helpers/clerk-stub';
  * in-page), so it works in sandboxes and PR CI alike.
  */
 
-const hasWebApp =
-  !!process.env.E2E_BASE_URL || !!process.env.VITE_CLERK_PUBLISHABLE_KEY;
+const hasWebApp = webAppCanBoot();
 
 /**
  * True only for real API calls. A glob like `**\/api\/**` would also match

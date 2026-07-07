@@ -58,9 +58,15 @@ jobs:
           # tests. See qa/reports/2026-05-11/clerk-testing-tokens-runbook.md.
           E2E_CLERK_PUBLISHABLE_KEY: ${{ secrets.E2E_CLERK_PUBLISHABLE_KEY }}
           E2E_CLERK_SECRET_KEY: ${{ secrets.E2E_CLERK_SECRET_KEY }}
-          # The Vite dev server needs the same pk_test_ value at boot
-          # (main.tsx throws without it). Reuse the same secret.
-          VITE_CLERK_PUBLISHABLE_KEY: ${{ secrets.E2E_CLERK_PUBLISHABLE_KEY }}
+          # The Vite dev server needs a syntactically valid pk_test_ value at
+          # boot (main.tsx throws without it). Use the real secret when present,
+          # else the offline placeholder so the offline suite (e2e/offline/* +
+          # no-401-storm) runs on every PR. The placeholder MUST stay
+          # byte-identical to PLACEHOLDER_CLERK_KEY in e2e/helpers/clerk-env.ts —
+          # the offline specs boot with it (they stub window.Clerk), while
+          # real-Clerk specs (smoke-ui, mobile layout) detect the sentinel and
+          # skip, so a placeholder never turns their green skips into failures.
+          VITE_CLERK_PUBLISHABLE_KEY: ${{ secrets.E2E_CLERK_PUBLISHABLE_KEY || 'pk_test_b2ZmbGluZS1zdHViLmNsZXJrLmFjY291bnRzLmRldiQ' }}
           # §10 onboarding v2 — OnboardingShell + guard (e2e/journeys/onboarding-v2.spec.ts).
           # Enabled only when Clerk E2E secrets are configured (journey skips otherwise).
           VITE_ONBOARDING_V2_ENABLED: ${{ secrets.E2E_CLERK_SECRET_KEY != '' && 'true' || 'false' }}

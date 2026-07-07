@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { hasRealClerk } from './helpers/clerk-env';
 
 /**
  * Smoke tests — prove the Playwright harness itself is working.
@@ -26,13 +27,11 @@ test.describe('smoke — ui', () => {
   // When E2E_BASE_URL is set (pointing at deployed env), Clerk is configured
   // there so we always run. Locally we run only if a Clerk pk is exported
   // into the dev server's environment.
-  const hasClerk =
-    !!process.env.E2E_BASE_URL ||
-    !!process.env.VITE_CLERK_PUBLISHABLE_KEY;
-
+  // Requires a REAL Clerk instance — these render the live sign-in/up widget.
+  // The offline placeholder key (CI without secrets) must NOT un-skip them.
   test.skip(
-    !hasClerk,
-    'Set VITE_CLERK_PUBLISHABLE_KEY locally or E2E_BASE_URL to run UI smoke tests'
+    !hasRealClerk(),
+    'Set a real VITE_CLERK_PUBLISHABLE_KEY locally or E2E_BASE_URL to run UI smoke tests'
   );
 
   test('login page renders', async ({ page }) => {

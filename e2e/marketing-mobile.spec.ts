@@ -1,4 +1,5 @@
 import { test, expect, Page } from '@playwright/test';
+import { hasRealClerk } from './helpers/clerk-env';
 
 /**
  * Mobile hardening for the public marketing site (/features, /pricing,
@@ -14,7 +15,10 @@ import { test, expect, Page } from '@playwright/test';
  * (P0-026 startup guard), same as the other UI specs.
  */
 
-const hasClerk = !!process.env.E2E_BASE_URL || !!process.env.VITE_CLERK_PUBLISHABLE_KEY;
+// Gate on a REAL Clerk instance (or deployed base). The offline placeholder
+// key CI uses to boot the app for the offline suite must not un-skip this
+// spec — keeps its current CI-skip behavior unchanged. (helpers/clerk-env.ts.)
+const hasClerk = hasRealClerk();
 
 const MARKETING_ROUTES = ['/features', '/pricing', '/download'] as const;
 
