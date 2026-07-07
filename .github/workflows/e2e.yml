@@ -34,6 +34,13 @@ jobs:
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
 
+      # Pure-logic unit tests for the E2E harness helpers (the clerk-env gate
+      # that decides which suites run). Fast, no browser — fail early if the
+      # gate logic regresses. e2e/ is outside the npm workspaces, so it needs
+      # its own vitest project.
+      - name: E2E helper unit tests
+        run: npm run test:e2e-helpers
+
       # GitHub Actions forbids `secrets` in step-level `if:` — gate in-shell instead.
       - name: Onboarding API integration (migration 098)
         run: |
