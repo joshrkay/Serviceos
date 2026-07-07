@@ -418,7 +418,12 @@ export class CircuitBreakerRegistry {
    */
   async run<T>(parts: BreakerKeyParts, op: () => Promise<T>): Promise<T> {
     const cell = this.cell(parts);
-    if (!cell.canPass()) {
+    // tryReserve, not canPass: the read-only check lets every concurrent
+    // half-open caller see `probes < N` and pass at once, stampeding a
+    // still-recovering provider. The reservation is returned by onResult()
+    // on either outcome, or by releaseReservation() on the
+    // permanent-client-error path below.
+    if (!cell.tryReserve()) {
       throw new BreakerOpenError(breakerKey(parts), cell.retryAfterMs());
     }
     try {

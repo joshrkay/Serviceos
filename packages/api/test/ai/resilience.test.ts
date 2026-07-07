@@ -174,6 +174,51 @@ describe('CircuitBreakerRegistry', () => {
     expect(ok2).toBe('ok');
     expect(reg.cell(parts).getState()).toBe('closed');
   });
+
+  it('caps CONCURRENT half-open probes at halfOpenProbeCount (no stampede)', async () => {
+    const reg = new CircuitBreakerRegistry({
+      ...DEFAULT_BREAKER,
+      consecutiveFailureThreshold: 2,
+      cooldownMs: 20,
+      halfOpenProbeCount: 2,
+      halfOpenSuccessRatio: 0.5,
+    });
+    const parts = { provider: 'p3', modelFamily: 'm' };
+    for (let i = 0; i < 2; i++) {
+      await expect(
+        reg.run(parts, async () => {
+          throw new Error('e');
+        }),
+      ).rejects.toThrow();
+    }
+    await new Promise((r) => setTimeout(r, 30));
+    expect(reg.cell(parts).getState()).toBe('half-open');
+
+    // Fire 5 requests at once while half-open, each op held open until we
+    // release it. run() must reserve a probe slot atomically — only 2 ops
+    // may start; the rest reject with BreakerOpenError instead of flooding
+    // the recovering provider.
+    let started = 0;
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const results = await Promise.allSettled(
+      Array.from({ length: 5 }, () =>
+        reg.run(parts, async () => {
+          started++;
+          await gate;
+          return 'ok';
+        }).finally(() => release()),
+      ),
+    );
+    expect(started).toBe(2);
+    const rejected = results.filter((r) => r.status === 'rejected');
+    expect(rejected).toHaveLength(3);
+    for (const r of rejected) {
+      expect((r as PromiseRejectedResult).reason).toBeInstanceOf(BreakerOpenError);
+    }
+  });
 });
 
 describe('TenantQuotaRegistry', () => {

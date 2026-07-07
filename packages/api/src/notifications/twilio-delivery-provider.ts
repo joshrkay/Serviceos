@@ -114,6 +114,10 @@ function classifySendgridError(response: Response, providerBody: string): Normal
   };
 }
 
+// fetch has NO default timeout — a Twilio/SendGrid latency spike would hang
+// every notification send and delivery worker with no upper bound.
+const DELIVERY_REQUEST_TIMEOUT_MS = 15_000;
+
 export class TwilioDeliveryProvider implements MessageDeliveryProvider {
   private readonly sms: Required<
     Omit<TwilioSmsConfig, "fetchImpl" | "secondaryAuthToken">
@@ -178,12 +182,13 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
       headers["Idempotency-Key"] = message.idempotencyKey;
     }
 
-    let response = await this.sms.fetchImpl(
+    const response = await this.sms.fetchImpl(
       `${this.sms.apiBaseUrl}/Accounts/${this.sms.accountSid}/Messages.json`,
       {
         method: "POST",
         headers,
         body: body.toString(),
+        signal: AbortSignal.timeout(DELIVERY_REQUEST_TIMEOUT_MS),
       },
     );
 
@@ -192,15 +197,6 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
       const providerBody = text.slice(0, 300);
       const failure = classifyTwilioError(response, providerBody);
       throw new DeliveryError(failure.code, failure.message, failure);
-    }
-
-    if (!response.ok) {
-      const text = await response.text().catch(() => '');
-      const detail = '(' + response.status + '): ' + text.slice(0, 300);
-      if (response.status === 401) {
-        throw new Error('DELIVERY_AUTH_FAILED ' + detail);
-      }
-      throw new Error('DELIVERY_PROVIDER_FAILED ' + detail);
     }
 
     const data = (await response.json()) as TwilioMessageResponse;
@@ -259,6 +255,7 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
         method: "POST",
         headers,
         body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(DELIVERY_REQUEST_TIMEOUT_MS),
       },
     );
 

@@ -109,7 +109,13 @@ export class PerTenantTwilioDeliveryProvider implements MessageDeliveryProvider 
 
     const response = await this.fetchImpl(
       `${this.apiBaseUrl}/Accounts/${creds.accountSid}/Messages.json`,
-      { method: 'POST', headers, body: body.toString() },
+      {
+        method: 'POST',
+        headers,
+        body: body.toString(),
+        // fetch has NO default timeout — a Twilio stall would hang the send.
+        signal: AbortSignal.timeout(15_000),
+      },
     );
 
     if (!response.ok) {

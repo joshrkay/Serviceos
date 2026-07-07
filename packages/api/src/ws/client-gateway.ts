@@ -574,6 +574,13 @@ export function attachClientGateway(
     const pathOnly = url.split('?')[0];
     if (pathOnly !== CLIENT_GATEWAY_PATH) return;
 
+    // On 'upgrade' Node hands over a raw net.Socket and stops managing its
+    // errors. Until handleUpgrade attaches ws-level handling, a peer reset
+    // during the async auth/lease window below would emit 'error' with no
+    // listener → uncaughtException → process exit. Swallow it; the
+    // rejection/cleanup paths handle the dead socket.
+    socket.on('error', () => {});
+
     // P4/U-P4a: while this replica is draining for shutdown, reject new upgrades
     // with Retry-After so the client reconnects to a live replica instead of
     // attaching to one that's about to exit.

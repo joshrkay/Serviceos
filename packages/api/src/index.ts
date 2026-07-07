@@ -36,6 +36,18 @@ const server = app.listen(PORT, () => {
   console.log(`Health check at http://localhost:${PORT}/health`);
 });
 
+// Behind Railway's edge proxy, Node's default keepAliveTimeout (5s) is
+// shorter than the proxy's keep-alive, causing the classic race where the
+// proxy reuses a socket Node just closed → intermittent 502s. Keep
+// keepAliveTimeout above the proxy idle window and headersTimeout above
+// keepAliveTimeout (Node requires the gap to avoid ERR_HTTP_REQUEST_TIMEOUT
+// on reused sockets). requestTimeout bounds how long a client may take to
+// deliver a request (headers+body) — it does NOT cap long-lived responses,
+// so SSE streams are unaffected.
+server.keepAliveTimeout = 65_000;
+server.headersTimeout = 66_000;
+server.requestTimeout = 60_000;
+
 server.on('error', (err: NodeJS.ErrnoException) => {
   process.stdout.write(`FATAL server listen error: ${err.stack ?? err.message}\n`);
   process.exit(1);

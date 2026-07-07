@@ -1,12 +1,11 @@
 import { v4 as uuidv4 } from 'uuid';
 import { Proposal, ProposalType } from '../proposal';
-import { ExecutionHandler, ExecutionContext, ExecutionResult } from './handlers';
+import { ExecutionHandler, ExecutionContext, ExecutionResult, normalizeDraftLineItems } from './handlers';
 import {
   createInvoiceWithNextNumber,
   InvoiceRepository,
   CreateInvoiceInput,
 } from '../../invoices/invoice';
-import { LineItem } from '../../shared/billing-engine';
 import { SettingsRepository } from '../../settings/settings';
 import { AuditRepository } from '../../audit/audit';
 
@@ -52,6 +51,18 @@ export class CreateInvoiceExecutionHandler implements ExecutionHandler {
       return { success: false, error: 'Payload must include at least one lineItem' };
     }
 
+    // Same hardening as the draft_estimate handler: never blind-cast LLM/
+    // client-shaped line items into money math. A line missing an integer
+    // totalCents would flow NaN into calculateDocumentTotals and Postgres
+    // ("invalid input syntax for type integer: NaN").
+    const { lineItems, malformed } = normalizeDraftLineItems(payload.lineItems);
+    if (malformed.length > 0) {
+      return {
+        success: false,
+        error: `Invoice draft has line items that can't be priced: ${malformed.join('; ')}`,
+      };
+    }
+
     // Idempotency — a second execution of the same proposal returns the id
     // that was produced on the first run. Works for both the persisting and
     // the synthetic-id paths.
@@ -68,7 +79,7 @@ export class CreateInvoiceExecutionHandler implements ExecutionHandler {
         tenantId: context.tenantId,
         jobId: payload.jobId,
         estimateId: typeof payload.estimateId === 'string' ? payload.estimateId : undefined,
-        lineItems: payload.lineItems as LineItem[],
+        lineItems,
         discountCents:
           typeof payload.discountCents === 'number' ? payload.discountCents : undefined,
         taxRateBps:

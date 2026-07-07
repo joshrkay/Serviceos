@@ -177,6 +177,10 @@ export function createTranscribeAudioFn(apiKey?: string): TranscribeAudioFn {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${apiKey}` },
         body: fd,
+        // Bounded like the WhisperTranscriptionProvider in
+        // voice/transcription-providers.ts (60s) — fetch has no default
+        // timeout and a stalled STT upstream would hang the voice pipeline.
+        signal: AbortSignal.timeout(60_000),
       });
       if (!res.ok) {
         const errBody = await res.text();

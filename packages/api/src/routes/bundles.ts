@@ -2,7 +2,7 @@ import { Router, Response } from 'express';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
-import { createBundleSchema, verticalTypeSchema } from '../shared/contracts';
+import { createBundleSchema, updateBundleSchema, verticalTypeSchema } from '../shared/contracts';
 import {
   ServiceBundleRepository,
   createBundle,
@@ -107,7 +107,10 @@ export function createBundleRouter(
     requireTenant,
     requirePermission('estimates:update'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      const { name, description, categoryIds, lineItemTemplates, triggerKeywords, isActive } = req.body;
+      // Validated like POST — raw req.body persisted unvalidated money in
+      // lineItemTemplates straight to the bundles table.
+      const { name, description, categoryIds, lineItemTemplates, triggerKeywords, isActive } =
+        updateBundleSchema.parse(req.body);
       const result = await updateBundle(
         bundleRepo,
         req.auth!.tenantId,

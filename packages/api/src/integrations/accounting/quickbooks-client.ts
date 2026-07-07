@@ -27,6 +27,10 @@ interface QboEntityResponse {
 
 const MAX_RETRIES = 3;
 
+// fetch has no default timeout — a stalled QBO API would hang the
+// accounting-sync worker indefinitely.
+const QBO_REQUEST_TIMEOUT_MS = 20_000;
+
 async function sleep(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -64,13 +68,16 @@ export class QuickBooksClient {
         method,
         headers,
         body: body ? JSON.stringify(body) : undefined,
+        signal: AbortSignal.timeout(QBO_REQUEST_TIMEOUT_MS),
       });
       if (res.status === 429 && attempt < MAX_RETRIES) {
         const retryAfter = Number(res.headers.get('retry-after') ?? '2');
         await sleep(Math.max(1, retryAfter) * 1000 * attempt);
         continue;
       }
-      const json = (await res.json()) as QboEntityResponse;
+      // Guarded parse: an edge proxy can answer 502/503 with HTML, where a
+      // bare res.json() throws a SyntaxError and masks the real HTTP failure.
+      const json = (await res.json().catch(() => ({}))) as QboEntityResponse;
       if (!res.ok) {
         const msg =
           json.Fault?.Error?.[0]?.Detail ??
@@ -103,26 +110,38 @@ export class QuickBooksClient {
     input: QboSalesReceiptInput,
     idempotencyKey: string,
   ): Promise<QboCreateResult> {
-    const totalDollars = input.totalCents / 100;
+    // Split in INTEGER CENTS with remainder distribution, converting to
+    // dollars only at the end. Splitting in floating dollars produced
+    // unrounded per-line amounts (e.g. $100 / 3 = 33.333…): QBO rounds each
+    // line to 2dp, the lines then don't sum to TotalAmt, and the receipt is
+    // rejected ("Transaction total does not equal sum of lines") — or worse,
+    // silently mis-booked.
     const lineCount = Math.max(1, input.lineDescriptions.length);
-    const perLine = totalDollars / lineCount;
+    const baseCents = Math.floor(input.totalCents / lineCount);
+    const remainderCents = input.totalCents - baseCents * lineCount;
     const lines = (input.lineDescriptions.length ? input.lineDescriptions : ['Services']).map(
-      (desc) => ({
-        Amount: perLine,
-        DetailType: 'SalesItemLineDetail',
-        Description: desc,
-        SalesItemLineDetail: {
-          Qty: 1,
-          UnitPrice: perLine,
-        },
-      }),
+      (desc, i) => {
+        // First `remainderCents` lines absorb one extra cent so the lines
+        // sum exactly to totalCents.
+        const lineCents = baseCents + (i < remainderCents ? 1 : 0);
+        const lineDollars = lineCents / 100;
+        return {
+          Amount: lineDollars,
+          DetailType: 'SalesItemLineDetail',
+          Description: desc,
+          SalesItemLineDetail: {
+            Qty: 1,
+            UnitPrice: lineDollars,
+          },
+        };
+      },
     );
     const payload = {
       DocNumber: input.docNumber,
       TxnDate: input.txnDate,
       CustomerRef: { value: input.customerRefId },
       Line: lines,
-      TotalAmt: totalDollars,
+      TotalAmt: input.totalCents / 100,
     };
     const json = await this.request('POST', '/salesreceipt', payload, idempotencyKey);
     const id = json.SalesReceipt?.Id;

@@ -25,6 +25,11 @@ const PROVEN_OPTIONS = {
   enableReadyCheck: false,
   // Fail fast on connect — Redis unavailability must never stall boot.
   connectTimeout: 3000,
+  // Hard per-command budget: a connected-but-unresponsive Redis (overloaded,
+  // blocked on a slow command) would otherwise hang awaited commands on the
+  // LLM request path (cache get, quota eval) until socket teardown. A fast
+  // error here lets the fail-open-to-local paths engage promptly.
+  commandTimeout: 1000,
   lazyConnect: true,
 } as const;
 
