@@ -31,6 +31,8 @@ import {
   RECOVERY_DELAY_MS,
 } from '../../src/sms/recovery/scheduler';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
+import { PhoneRateLimiter } from '../../src/shared/rate-limit/phone-rate-limit';
+import { createRecoveryRateLimiter } from '../../src/sms/recovery/recovery-rate-limiter';
 import { createLogger } from '../../src/logging/logger';
 import type {
   DroppedCallHandlerDeps,
@@ -444,5 +446,69 @@ describe('dropped-call recovery worker — integration', () => {
       [tenantA.tenantId, voiceSessionId],
     );
     expect(rows[0].n).toBe(1);
+  });
+});
+
+/**
+ * P8-015 production adapter — RecoveryRateLimiter over the REAL
+ * phone_rate_limits table. The adapter's unit tests pin the delegation
+ * mapping against a stub; only real Postgres can prove the semantics the
+ * check/record split exists for: checks record nothing, one send records
+ * one bucket, and the advisory-xact-lock keeps concurrent consumes exact.
+ */
+describe('recovery rate-limiter — integration (phone_rate_limits)', () => {
+  let pool: Pool;
+  let tenant: { tenantId: string };
+  let adapter: ReturnType<typeof createRecoveryRateLimiter>;
+
+  beforeAll(async () => {
+    pool = await getSharedTestDb();
+    adapter = createRecoveryRateLimiter(new PhoneRateLimiter(pool), logger);
+  });
+
+  beforeEach(async () => {
+    tenant = await createTestTenant(pool);
+  });
+
+  afterAll(async () => {
+    await closeSharedTestDb();
+  });
+
+  async function bucketCount(tenantId: string): Promise<number> {
+    const { rows } = await pool.query(
+      `SELECT COALESCE(SUM(count), 0)::int AS total
+         FROM phone_rate_limits WHERE tenant_id = $1 AND scope = 'sms_recovery'`,
+      [tenantId],
+    );
+    return rows[0].total;
+  }
+
+  it('check() is non-consuming: N checks leave zero rows and stay allowed', async () => {
+    const caller = '+15552220001';
+    for (let i = 0; i < 5; i++) {
+      expect(await adapter.check(tenant.tenantId, caller)).toBe(true);
+    }
+    expect(await bucketCount(tenant.tenantId)).toBe(0);
+  });
+
+  it('record() after a send consumes exactly one token; the next check is denied', async () => {
+    const caller = '+15552220002';
+    expect(await adapter.check(tenant.tenantId, caller)).toBe(true);
+    await adapter.record(tenant.tenantId, caller);
+
+    expect(await bucketCount(tenant.tenantId)).toBe(1);
+    // RECOVERY_RATE_LIMIT_MAX = 1: the caller's single 5-minute token is gone.
+    expect(await adapter.check(tenant.tenantId, caller)).toBe(false);
+  });
+
+  it('concurrent record()s for one caller admit exactly the limit (advisory-lock atomicity)', async () => {
+    const caller = '+15552220003';
+    await Promise.all(
+      Array.from({ length: 5 }, () => adapter.record(tenant.tenantId, caller)),
+    );
+    // tryConsume's transaction-scoped advisory lock serializes the
+    // read-decide-write: exactly RECOVERY_RATE_LIMIT_MAX (1) is recorded no
+    // matter how many racers; the rest hit the cap (logged, not thrown).
+    expect(await bucketCount(tenant.tenantId)).toBe(1);
   });
 });
