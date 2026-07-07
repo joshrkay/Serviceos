@@ -99,9 +99,15 @@ test.describe('offline — jobs flow', () => {
     expect(mutation?.path).toBe(`/api/jobs/${JOB_A_ID}/transition`);
     expect(mutation?.body).toEqual({ status: 'scheduled' });
 
-    // The post-mutation refetch renders the MUTATED mock state — proving
-    // the UI reflects the server's answer, not an optimistic guess.
-    await expect(page.getByText(/scheduled/i).first()).toBeVisible();
+    // The post-mutation refetch renders the MUTATED mock state — proving the
+    // UI reflects the server's answer, not an optimistic guess. Anchor on the
+    // StatusBadge's exact "Scheduled" text: a loose /scheduled/i would also
+    // match the always-present "Not scheduled" schedule-card copy (the fixture
+    // has no scheduledStart), making the assertion pass even if the refetch
+    // never updated the badge from "New".
+    await expect(page.getByText('Scheduled', { exact: true }).first()).toBeVisible({
+      timeout: DATA_TIMEOUT,
+    });
   });
 
   test('list 500 renders the error state without an auth exit or page errors', async ({
