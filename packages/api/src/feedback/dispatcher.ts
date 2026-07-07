@@ -30,7 +30,7 @@ export class SmsProviderFeedbackDispatcher implements FeedbackDispatcher {
     this.accountSid = options.accountSid;
     this.authToken = options.authToken;
     this.fromNumber = options.fromNumber;
-    this.apiBaseUrl = options.apiBaseUrl ?? 'https://api.TWILIO.com/2010-04-01';
+    this.apiBaseUrl = options.apiBaseUrl ?? 'https://api.twilio.com/2010-04-01';
   }
 
   async send(input: FeedbackDispatchInput): Promise<void> {
@@ -50,6 +50,8 @@ export class SmsProviderFeedbackDispatcher implements FeedbackDispatcher {
           'Content-Type': 'application/x-www-form-urlencoded',
         },
         body: body.toString(),
+        // fetch has no default timeout — never hang the feedback send.
+        signal: AbortSignal.timeout(15_000),
       }
     );
 

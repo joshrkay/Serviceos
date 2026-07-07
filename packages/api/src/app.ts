@@ -705,8 +705,11 @@ export function createApp(): express.Express {
   // handler router is mounted later once repos are constructed.
   app.use('/webhooks/wisetack', express.raw({ type: '*/*' }));
 
-  // Body parsing for all other routes
-  app.use(express.json());
+  // Body parsing for all other routes. Explicit ceiling (default is an
+  // implicit 100kb): large-but-bounded so no client can buffer unbounded
+  // JSON into the process, and the limit is visible here rather than
+  // buried in body-parser defaults.
+  app.use(express.json({ limit: '1mb' }));
 
   // Serve static frontend files from the built React app.
   // resolveWebDistDir anchors on the packages/api boundary so it points at
@@ -2059,7 +2062,13 @@ export function createApp(): express.Express {
     service: 'execution-worker',
     environment: process.env.NODE_ENV || 'development',
   });
+  // In-flight guard (same shape as the queue poll loop's pollInFlight): on a
+  // 1s cadence a slow executor otherwise stacks overlapping sweeps, each
+  // re-running resetStaleExecuting against the same rows.
+  let executionSweepInFlight = false;
   registerInterval(setInterval(async () => {
+    if (executionSweepInFlight) return;
+    executionSweepInFlight = true;
     try {
       await runExecutionSweep({
         proposalRepo,
@@ -2070,6 +2079,8 @@ export function createApp(): express.Express {
       executionWorkerLogger.error('Execution sweep failed', {
         error: err instanceof Error ? err.message : String(err),
       });
+    } finally {
+      executionSweepInFlight = false;
     }
   }, 1000));
 
@@ -3085,6 +3096,12 @@ export function createApp(): express.Express {
         await client.query('COMMIT');
         const enc = result.rows[0]?.auth_token_primary_enc;
         return enc ? decrypt(enc, encKey) : process.env.TWILIO_AUTH_TOKEN;
+      } catch (err) {
+        // Roll back before release: the outer catch swallows the error to a
+        // fallback, so without this the connection would silently return to
+        // the pool with the transaction (and system_lookup GUC) still open.
+        await client.query('ROLLBACK').catch(() => {});
+        throw err;
       } finally {
         client.release();
       }
@@ -3111,6 +3128,10 @@ export function createApp(): express.Express {
         );
         await client.query('COMMIT');
         return result.rows[0]?.tenant_id ?? process.env.TWILIO_DEFAULT_TENANT_ID;
+      } catch (err) {
+        // Same dirty-connection guard as resolveTwilioAuthTokenForSubaccount.
+        await client.query('ROLLBACK').catch(() => {});
+        throw err;
       } finally {
         client.release();
       }
@@ -5636,11 +5657,18 @@ export function createApp(): express.Express {
   });
 
   // Catch-all route for client-side routing — serves index.html for all non-API routes
-  // This allows the React SPA to handle routing on the client side
+  // This allows the React SPA to handle routing on the client side.
+  // This route sits AFTER the global error handler, so sendFile's next(err)
+  // would fall through to Express's default handler (stack trace in dev) —
+  // handle the error in the callback instead.
   app.get('*', (req, res) => {
     const frontendPath = resolveWebDistDir(__dirname);
     const indexPath = require('path').join(frontendPath, 'index.html');
-    res.sendFile(indexPath);
+    res.sendFile(indexPath, (err) => {
+      if (err && !res.headersSent) {
+        res.status(500).json({ error: 'INTERNAL_ERROR', message: 'Frontend assets unavailable' });
+      }
+    });
   });
 
   // P0-023: Graceful shutdown — close the Postgres pool on SIGTERM/SIGINT so

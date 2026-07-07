@@ -109,6 +109,12 @@ export function createInteractionsRouter(deps: InteractionsRouterDeps): Router {
       });
 
       res.json({ data, total, limit, offset });
+    } catch (err) {
+      // Without this, an error mid-transaction releases the client with the
+      // transaction (and tenant GUC) still open — the next checkout gets a
+      // dirty connection. Best-effort rollback, then rethrow for asyncRoute.
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
     } finally {
       client.release();
     }
@@ -180,6 +186,10 @@ export function createInteractionsRouter(deps: InteractionsRouterDeps): Router {
         transcript,
         customer: toCustomer(row as Record<string, unknown>),
       });
+    } catch (err) {
+      // Same dirty-connection guard as the list route above.
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
     } finally {
       client.release();
     }

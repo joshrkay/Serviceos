@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router';
 import { Sparkles, Send, Mic, Square, ArrowRight, MessageSquare } from 'lucide-react';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useDeepgramDictation } from '../../hooks/useDeepgramDictation';
+import { getLocalFlag } from '../../lib/uiFlags';
 
 /**
  * Story 3.1 — conversation thread panel on HomePage.
@@ -40,9 +41,7 @@ export function HomeConversationPanel() {
   // Same active-conversation handle the AssistantPage uses, so the preview and
   // the composer act on the one running thread. Lazy useState initializer so the
   // localStorage read runs once on mount, not on every render.
-  const [conversationId] = useState<string | null>(() =>
-    typeof localStorage !== 'undefined' ? localStorage.getItem('conversationId') : null,
-  );
+  const [conversationId] = useState<string | null>(() => getLocalFlag('conversationId'));
   // useDetailQuery with a null id does not fetch — empty state renders cleanly.
   const { data: conversation } = useDetailQuery<ApiConversation>(
     '/api/conversations',

@@ -401,7 +401,23 @@ export function createInvoiceRouter(
     requirePermission('invoices:update'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
-        const paymentTermDays = req.body.paymentTermDays ?? 30;
+        // Guarded: a non-numeric value flows into calculateDueDate's
+        // setDate(NaN) and persists an Invalid Date due_date, which then
+        // breaks the overdue/late-fee sweeps.
+        const rawTermDays = req.body?.paymentTermDays;
+        const paymentTermDays =
+          rawTermDays === undefined || rawTermDays === null ? 30 : Number(rawTermDays);
+        if (
+          !Number.isInteger(paymentTermDays) ||
+          paymentTermDays < 0 ||
+          paymentTermDays > 365
+        ) {
+          res.status(400).json({
+            error: 'VALIDATION_ERROR',
+            message: 'paymentTermDays must be an integer between 0 and 365',
+          });
+          return;
+        }
         const result = await issueInvoice(
           req.auth!.tenantId,
           req.params.id,

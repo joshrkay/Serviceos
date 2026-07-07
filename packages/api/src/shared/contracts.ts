@@ -538,6 +538,14 @@ export const createTemplateSchema = z.object({
   defaultCustomerMessage: z.string().max(2000).optional(),
 });
 
+// PUT payloads: same field rules as create (money stays integer cents,
+// taxRateBps bounded), everything optional. Without these the update routes
+// persisted raw req.body — float/negative money straight to the DB.
+export const updateTemplateSchema = createTemplateSchema
+  .omit({ verticalType: true, categoryId: true })
+  .partial()
+  .extend({ isActive: z.boolean().optional() });
+
 export const createBundleSchema = z.object({
   verticalType: verticalTypeSchema,
   name: z.string().min(1).max(255),
@@ -546,6 +554,11 @@ export const createBundleSchema = z.object({
   lineItemTemplates: z.array(lineItemTemplateSchema).min(1),
   triggerKeywords: z.array(z.string().min(1)).min(1),
 });
+
+export const updateBundleSchema = createBundleSchema
+  .omit({ verticalType: true })
+  .partial()
+  .extend({ isActive: z.boolean().optional() });
 
 export const createWordingPreferenceSchema = z.object({
   verticalType: verticalTypeSchema.optional(),
