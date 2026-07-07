@@ -25,7 +25,10 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { Pool, PoolClient } from 'pg';
 import { v4 as uuidv4 } from 'uuid';
 import { closeSharedTestDb, createTestTenant, getSharedTestDb } from './shared';
-import { runDroppedCallRecoverySweep } from '../../src/workers/dropped-call-worker';
+import {
+  runDroppedCallRecoverySweep,
+  DROPPED_CALL_RECOVERY_FLAG,
+} from '../../src/workers/dropped-call-worker';
 import {
   PgDroppedCallRecoveryRepository,
   RECOVERY_DELAY_MS,
@@ -35,7 +38,12 @@ import { PhoneRateLimiter } from '../../src/shared/rate-limit/phone-rate-limit';
 import { createRecoveryRateLimiter } from '../../src/sms/recovery/recovery-rate-limiter';
 import { createDroppedCallResolvedSince } from '../../src/sms/recovery/resolved-since';
 import { createRecoveryThreader } from '../../src/sms/recovery/recovery-threader';
+import { createRecoveryComposer } from '../../src/sms/recovery/recovery-composer';
 import { createInboundCaptureHandler } from '../../src/sms/inbound-capture';
+import { PgFeatureFlagRepository } from '../../src/flags/pg-feature-flags';
+import { PgTenantFeatureFlagRepository } from '../../src/flags/pg-tenant-feature-flags';
+import { PgDncRepository } from '../../src/compliance/dnc';
+import { PgSettingsRepository } from '../../src/settings/pg-settings';
 import { PgConversationRepository } from '../../src/conversations/pg-conversation';
 import { PgConversationLinkRepository } from '../../src/conversations/pg-conversation-link';
 import { PgCustomerRepository } from '../../src/customers/pg-customer';
@@ -604,6 +612,219 @@ describe('resolved-since checker — integration (voice_sessions / proposals)', 
 
     expect(result.sent).toBe(1);
     expect(harness.smsCalls).toHaveLength(1);
+  });
+});
+
+/**
+ * P8-015 — end-to-end wiring shape (U7): the sweep with FULL production
+ * adapters (resolved-since, rate limit, DNC gate, threader over real
+ * Postgres; deterministic composer; captured send) plus the per-tenant
+ * flag gate resolved through the REAL tenant_feature_flags → _feature_flags
+ * order — the SQL resolution unit tests cannot pin.
+ */
+describe('dropped-call recovery — end-to-end wiring (flag gate + production adapters)', () => {
+  let pool: Pool;
+  let repo: PgDroppedCallRecoveryRepository;
+  let audit: PgAuditRepository;
+  let tenant: { tenantId: string; userId: string };
+  let platformFlags: PgFeatureFlagRepository;
+
+  beforeAll(async () => {
+    pool = await getSharedTestDb();
+    repo = new PgDroppedCallRecoveryRepository(pool);
+    audit = new PgAuditRepository(pool);
+    platformFlags = new PgFeatureFlagRepository(pool);
+    // _feature_flags is lazily created by the repo — force it into existence
+    // so the beforeEach reset below can DELETE from it.
+    await platformFlags.list();
+  });
+
+  beforeEach(async () => {
+    tenant = await createTestTenant(pool);
+    await pool.query(
+      `DELETE FROM dropped_call_recoveries WHERE sent_at IS NULL AND suppressed_reason IS NULL`,
+    );
+    // Platform flag state is global — reset between tests.
+    await pool.query(`DELETE FROM _feature_flags WHERE name = $1`, [
+      DROPPED_CALL_RECOVERY_FLAG,
+    ]);
+  });
+
+  afterAll(async () => {
+    await closeSharedTestDb();
+  });
+
+  /** Fresh resolver per call — PgTenantFeatureFlagRepository caches 30s per instance. */
+  function flagGate(): (tenantId: string) => Promise<boolean> {
+    const tenantFlags = new PgTenantFeatureFlagRepository(pool, platformFlags);
+    return (tenantId) => tenantFlags.isEnabledForTenant(tenantId, DROPPED_CALL_RECOVERY_FLAG);
+  }
+
+  function productionDeps(smsCalls: CapturedSms[]): Omit<DroppedCallHandlerDeps, 'repo'> {
+    return {
+      audit,
+      logger,
+      rateLimit: createRecoveryRateLimiter(new PhoneRateLimiter(pool), logger),
+      resolvedSince: createDroppedCallResolvedSince({
+        voiceSessionRepo: new PgVoiceSessionRepository(pool),
+        proposalRepo: new PgProposalRepository(pool),
+        logger,
+      }),
+      preSendSuppress: async (row) =>
+        (await new PgDncRepository(pool).isOnDnc(
+          row.tenantId,
+          row.callerE164.replace(/\D/g, ''),
+        ))
+          ? 'opted_out'
+          : null,
+      compose: createRecoveryComposer({
+        composerDeps: {
+          gateway: { complete: async () => ({ content: 'unused', model: 'x', provider: 'x', tokenUsage: { input: 0, output: 0, total: 0 }, latencyMs: 0 }) } as never,
+          settingsRepo: new PgSettingsRepository(pool),
+        },
+        businessName: 'Itest Shop',
+        aiEnabled: false, // deterministic template — no LLM in integration
+        logger,
+      }),
+      sendSms: async (input) => {
+        smsCalls.push({
+          tenantId: input.tenantId,
+          to: input.to,
+          body: input.body,
+          idempotencyKey: input.idempotencyKey,
+        });
+        return `SM_e2e_${smsCalls.length}`;
+      },
+      thread: createRecoveryThreader({
+        conversationRepo: new PgConversationRepository(pool),
+        conversationLinkRepo: new PgConversationLinkRepository(pool),
+        customerRepo: new PgCustomerRepository(pool),
+        auditRepo: audit,
+        logger,
+      }),
+      now: () => DUE_AT,
+    };
+  }
+
+  it('flag off everywhere → row skipped and left pending; tenant override on → sends', async () => {
+    const voiceSessionId = await scheduleRow(pool, tenant.tenantId, '+15556660001');
+    const smsCalls: CapturedSms[] = [];
+    const deps = productionDeps(smsCalls);
+
+    // 1. No platform flag, no tenant override → skipped, still pending.
+    const first = await runDroppedCallRecoverySweep({
+      repo,
+      handlerDeps: deps,
+      logger,
+      isEnabledForTenant: flagGate(),
+      now: () => DUE_AT,
+    });
+    expect(first.skipped).toBe(1);
+    expect(first.sent).toBe(0);
+    const { rows: pending } = await pool.query(
+      `SELECT sent_at, suppressed_reason FROM dropped_call_recoveries WHERE voice_session_id = $1`,
+      [voiceSessionId],
+    );
+    expect(pending[0].sent_at).toBeNull();
+    expect(pending[0].suppressed_reason).toBeNull();
+
+    // 2. Tenant override on → the SAME row sends on the next sweep.
+    const tenantFlags = new PgTenantFeatureFlagRepository(pool, platformFlags);
+    await tenantFlags.setTenantFlag(tenant.tenantId, DROPPED_CALL_RECOVERY_FLAG, true);
+    const second = await runDroppedCallRecoverySweep({
+      repo,
+      handlerDeps: deps,
+      logger,
+      isEnabledForTenant: flagGate(),
+      now: () => DUE_AT,
+    });
+    expect(second.sent).toBe(1);
+    expect(smsCalls).toHaveLength(1);
+    // The production sendSms contract: tenantId for subaccount routing and
+    // the row-derived idempotency key for Twilio-side dedupe.
+    expect(smsCalls[0].tenantId).toBe(tenant.tenantId);
+    expect(smsCalls[0].idempotencyKey).toMatch(/^dropped_call_recovery:/);
+    expect(smsCalls[0].body).toContain('Itest Shop');
+  });
+
+  it('tenant override OFF wins over an enabled platform flag (kill switch)', async () => {
+    await scheduleRow(pool, tenant.tenantId, '+15556660002');
+    await platformFlags.upsert({
+      name: DROPPED_CALL_RECOVERY_FLAG,
+      enabled: true,
+      description: 'test',
+    });
+    const tenantFlags = new PgTenantFeatureFlagRepository(pool, platformFlags);
+    await tenantFlags.setTenantFlag(tenant.tenantId, DROPPED_CALL_RECOVERY_FLAG, false);
+
+    const smsCalls: CapturedSms[] = [];
+    const result = await runDroppedCallRecoverySweep({
+      repo,
+      handlerDeps: productionDeps(smsCalls),
+      logger,
+      isEnabledForTenant: flagGate(),
+      now: () => DUE_AT,
+    });
+    expect(result.skipped).toBe(1);
+    expect(smsCalls).toHaveLength(0);
+  });
+
+  it('a DNC caller is suppressed as opted_out through the production gate', async () => {
+    const callerE164 = '+15556660003';
+    const voiceSessionId = await scheduleRow(pool, tenant.tenantId, callerE164);
+    await new PgDncRepository(pool).addToDnc(
+      tenant.tenantId,
+      callerE164.replace(/\D/g, ''),
+      'sms_stop',
+    );
+    const tenantFlags = new PgTenantFeatureFlagRepository(pool, platformFlags);
+    await tenantFlags.setTenantFlag(tenant.tenantId, DROPPED_CALL_RECOVERY_FLAG, true);
+
+    const smsCalls: CapturedSms[] = [];
+    const result = await runDroppedCallRecoverySweep({
+      repo,
+      handlerDeps: productionDeps(smsCalls),
+      logger,
+      isEnabledForTenant: flagGate(),
+      now: () => DUE_AT,
+    });
+    expect(result.suppressed).toBe(1);
+    expect(smsCalls).toHaveLength(0);
+    const { rows } = await pool.query(
+      `SELECT suppressed_reason FROM dropped_call_recoveries WHERE voice_session_id = $1`,
+      [voiceSessionId],
+    );
+    expect(rows[0].suppressed_reason).toBe('opted_out');
+  });
+
+  it('concurrent sweeps: no SKIP LOCKED means both may fetch, but markSent is single-winner and both sends share one idempotency key', async () => {
+    const voiceSessionId = await scheduleRow(pool, tenant.tenantId, '+15556660004');
+    const tenantFlags = new PgTenantFeatureFlagRepository(pool, platformFlags);
+    await tenantFlags.setTenantFlag(tenant.tenantId, DROPPED_CALL_RECOVERY_FLAG, true);
+
+    const smsCalls: CapturedSms[] = [];
+    const deps = productionDeps(smsCalls);
+    const gate = flagGate();
+    // Two "replicas" sweeping the same instant (the leader lock normally
+    // prevents this — this pins the documented defense-in-depth behavior).
+    await Promise.all([
+      runDroppedCallRecoverySweep({ repo, handlerDeps: deps, logger, isEnabledForTenant: gate, now: () => DUE_AT }),
+      runDroppedCallRecoverySweep({ repo, handlerDeps: deps, logger, isEnabledForTenant: gate, now: () => DUE_AT }),
+    ]);
+
+    // Both may have attempted the send (documented: exactly-once rests on the
+    // leader lock + provider idempotency), but every attempt carried the SAME
+    // row-derived idempotency key, so Twilio collapses them...
+    expect(smsCalls.length).toBeGreaterThanOrEqual(1);
+    expect(new Set(smsCalls.map((c) => c.idempotencyKey)).size).toBe(1);
+    // ...and the row is stamped exactly once (markSent WHERE sent_at IS NULL).
+    const { rows } = await pool.query(
+      `SELECT sent_at, sms_message_sid FROM dropped_call_recoveries WHERE voice_session_id = $1`,
+      [voiceSessionId],
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].sent_at).not.toBeNull();
+    expect(rows[0].sms_message_sid).toBeTruthy();
   });
 });
 

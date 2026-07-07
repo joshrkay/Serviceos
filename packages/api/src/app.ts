@@ -598,6 +598,18 @@ import {
   InMemoryDroppedCallRecoveryRepository,
 } from './sms/recovery/scheduler';
 import { createDroppedCallResumeHandler } from './sms/recovery/resume-handler';
+// P8-015 — production deps for the dropped-call recovery sweep.
+import type { DroppedCallHandlerDeps } from './sms/recovery/dropped-call-handler';
+import { createRecoveryRateLimiter } from './sms/recovery/recovery-rate-limiter';
+import { createDroppedCallResolvedSince } from './sms/recovery/resolved-since';
+import { createRecoveryComposer } from './sms/recovery/recovery-composer';
+import { createRecoveryThreader } from './sms/recovery/recovery-threader';
+import {
+  runDroppedCallRecoverySweep,
+  DROPPED_CALL_RECOVERY_FLAG,
+} from './workers/dropped-call-worker';
+import { PgConversationLinkRepository } from './conversations/pg-conversation-link';
+import { InMemoryConversationLinkRepository } from './conversations/linkage';
 import {
   PgConsentEventRepository,
   InMemoryConsentEventRepository,
@@ -2030,6 +2042,11 @@ export function createApp(): express.Express {
     weeklyFeedback: 590020,
     // PRD US-345 — 24h post-completion review-request sweep.
     reviewRequest: 590021,
+    // P8-015 — dropped-call recovery drain. NOTE the collision discipline:
+    // every key here must be unique (590014 was once shared by two sweeps —
+    // an advisory-lock collision that silently serialized them); 590010
+    // remains reserved by a parallel track.
+    droppedCallRecovery: 590022,
   } as const;
   const runAsLeader = async (lockKey: number, work: () => Promise<void>): Promise<void> => {
     if (shuttingDown) return;
@@ -4831,6 +4848,91 @@ export function createApp(): express.Express {
       });
     });
   }, 60_000));
+
+  // P8-015 — dropped-call recovery drain. The scheduler (wired above) has
+  // been inserting durable dropped_call_recoveries rows since RV-115; this
+  // sweep is what actually sends the ~60s recovery SMS. Dark by default:
+  // every row is gated per-tenant on the DROPPED_CALL_RECOVERY_FLAG
+  // (tenant override → platform flag → false), so enabling is an explicit
+  // per-tenant action and the flag doubles as the kill switch.
+  //
+  // CORRECTNESS NOTE: findDue has no FOR UPDATE SKIP LOCKED row claiming —
+  // the runAsLeader advisory lock is the only thing preventing two replicas
+  // from sending the same row in the same tick. Never un-gate this sweep
+  // without adding claiming; the per-row Twilio Idempotency-Key
+  // (dropped_call_recovery:{row.id}) and markSent's sent_at IS NULL guard
+  // are the second and third lines of defense.
+  //
+  // 30s cadence (not 60s): the product promise is "~60s after the drop";
+  // rows are scheduled 60s out, so a 30s tick keeps worst-case latency
+  // ≈90s instead of ≈2× the promise.
+  if (messageDelivery) {
+    const droppedCallLogger = createLogger({
+      service: 'dropped-call-worker',
+      environment: process.env.NODE_ENV || 'development',
+    });
+    const conversationLinkRepo = pool
+      ? new PgConversationLinkRepository(pool)
+      : new InMemoryConversationLinkRepository();
+    const recoveryHandlerDeps: Omit<DroppedCallHandlerDeps, 'repo'> = {
+      audit: auditRepo,
+      logger: droppedCallLogger,
+      // Postgres-backed cross-process limiter; in-memory dev has no pool, so
+      // the sweep only runs against real infrastructure when it can enforce
+      // the one-SMS-per-caller cap (mirrors the limiter's no-fallback rule).
+      rateLimit: pool
+        ? createRecoveryRateLimiter(new PhoneRateLimiter(pool), droppedCallLogger)
+        : { check: async () => true, record: async () => undefined },
+      resolvedSince: createDroppedCallResolvedSince({
+        voiceSessionRepo,
+        proposalRepo,
+        logger: droppedCallLogger,
+      }),
+      // Compliance gate: a caller who texted STOP between the drop and the
+      // send must never receive the recovery SMS.
+      preSendSuppress: async (row) =>
+        (await dncRepo.isOnDnc(row.tenantId, normalizePhone(row.callerE164)))
+          ? 'opted_out'
+          : null,
+      compose: createRecoveryComposer({
+        composerDeps: { gateway: llmGateway, settingsRepo, standingInstructionRepo },
+        businessName: process.env.TWILIO_BUSINESS_NAME ?? 'our team',
+        // Brand-voice only with a real provider key — the mock gateway's
+        // canned output must never reach a customer (digest precedent).
+        aiEnabled: Boolean(config.AI_PROVIDER_API_KEY),
+        logger: droppedCallLogger,
+      }),
+      // Unlike the callMeBack adapter above, this passes tenantId (per-tenant
+      // Twilio subaccount routing) and the idempotency key (Twilio-side
+      // double-send defense).
+      sendSms: async ({ tenantId, to, body, idempotencyKey }) =>
+        (await messageDelivery.sendSms({ to, body, tenantId, idempotencyKey }))
+          .providerMessageId,
+      thread: createRecoveryThreader({
+        conversationRepo,
+        conversationLinkRepo,
+        customerRepo,
+        leadRepo,
+        auditRepo,
+        logger: droppedCallLogger,
+      }),
+    };
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.droppedCallRecovery, async () => {
+        await runDroppedCallRecoverySweep({
+          repo: droppedCallRecoveryRepo,
+          handlerDeps: recoveryHandlerDeps,
+          logger: droppedCallLogger,
+          isEnabledForTenant: (tenantId) =>
+            isFlagEnabledForTenant(tenantId, DROPPED_CALL_RECOVERY_FLAG),
+        });
+      }).catch((err) => {
+        droppedCallLogger.error('dropped-call recovery sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }, 30_000));
+  }
 
   // P21-003 — batch-invoice sweep. Daily-grained work; an hourly tick surfaces
   // newly-completed jobs promptly. Opt-in per tenant (settings.batchInvoiceEnabled);
