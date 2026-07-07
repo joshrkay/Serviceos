@@ -109,11 +109,15 @@ export type RecoverySmsSender = (input: {
  * sms_conversation to one conversation so the caller's reply lands in the same
  * intake thread (P0-037 LinkableEntityType). Implementations resolve/create
  * the conversation; a no-op is acceptable when threading is unavailable.
+ * callerE164/body let the production threader resolve the phone→thread target
+ * and record the outbound message row in the unified inbox.
  */
 export type RecoveryThreader = (input: {
   tenantId: string;
   voiceSessionId: string;
   smsMessageSid: string;
+  callerE164: string;
+  body: string;
 }) => Promise<void>;
 
 export interface DroppedCallHandlerDeps {
@@ -221,6 +225,8 @@ export async function handleDroppedCallRecovery(
         tenantId: row.tenantId,
         voiceSessionId: row.voiceSessionId,
         smsMessageSid,
+        callerE164: row.callerE164,
+        body,
       });
     } catch (err) {
       // Threading is best-effort: the SMS already went out, so a link failure

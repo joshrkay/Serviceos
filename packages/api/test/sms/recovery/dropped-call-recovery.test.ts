@@ -266,11 +266,15 @@ describe('P8-015 dropped-call recovery orchestrator', () => {
     const thread = vi.fn(async () => undefined);
     const deps = freshHandlerDeps(repo, audit, { thread });
     await handleDroppedCallRecovery(row, deps);
-    expect(thread).toHaveBeenCalledWith({
-      tenantId: TENANT,
-      voiceSessionId: SESSION,
-      smsMessageSid: 'SM_fake_sid',
-    });
+    expect(thread).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tenantId: TENANT,
+        voiceSessionId: SESSION,
+        smsMessageSid: 'SM_fake_sid',
+        callerE164: E164,
+        body: expect.stringContaining('cut off'),
+      }),
+    );
   });
 
   it('rate-limited — a caller who keeps dropping gets ONE SMS, not multiple', async () => {

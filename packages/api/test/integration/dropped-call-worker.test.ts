@@ -34,6 +34,11 @@ import { PgAuditRepository } from '../../src/audit/pg-audit';
 import { PhoneRateLimiter } from '../../src/shared/rate-limit/phone-rate-limit';
 import { createRecoveryRateLimiter } from '../../src/sms/recovery/recovery-rate-limiter';
 import { createDroppedCallResolvedSince } from '../../src/sms/recovery/resolved-since';
+import { createRecoveryThreader } from '../../src/sms/recovery/recovery-threader';
+import { createInboundCaptureHandler } from '../../src/sms/inbound-capture';
+import { PgConversationRepository } from '../../src/conversations/pg-conversation';
+import { PgConversationLinkRepository } from '../../src/conversations/pg-conversation-link';
+import { PgCustomerRepository } from '../../src/customers/pg-customer';
 import { PgVoiceSessionRepository } from '../../src/voice/pg-voice-session';
 import { PgProposalRepository } from '../../src/proposals/pg-proposal';
 import { createLogger } from '../../src/logging/logger';
@@ -599,6 +604,129 @@ describe('resolved-since checker — integration (voice_sessions / proposals)', 
 
     expect(result.sent).toBe(1);
     expect(harness.smsCalls).toHaveLength(1);
+  });
+});
+
+/**
+ * P8-015 / P0-037 production adapter — RecoveryThreader over REAL
+ * conversations / messages / conversation_links. The unit tests prove the
+ * threading logic against in-memory repos; only real Postgres can prove the
+ * actual P0-037 outcome — the outbound recovery and the caller's later
+ * INBOUND reply resolve to the SAME conversation row (both directions share
+ * the phone→thread resolution and the one-open-thread unique indexes).
+ */
+describe('recovery threader — integration (conversations / conversation_links)', () => {
+  let pool: Pool;
+  let tenant: { tenantId: string; userId: string };
+  let conversationRepo: PgConversationRepository;
+  let linkRepo: PgConversationLinkRepository;
+  let customerRepo: PgCustomerRepository;
+  let audit: PgAuditRepository;
+
+  beforeAll(async () => {
+    pool = await getSharedTestDb();
+    conversationRepo = new PgConversationRepository(pool);
+    linkRepo = new PgConversationLinkRepository(pool);
+    customerRepo = new PgCustomerRepository(pool);
+    audit = new PgAuditRepository(pool);
+  });
+
+  beforeEach(async () => {
+    tenant = await createTestTenant(pool);
+  });
+
+  afterAll(async () => {
+    await closeSharedTestDb();
+  });
+
+  it('outbound recovery and a later inbound reply land on the SAME conversation', async () => {
+    const callerE164 = '+15554440001';
+    const voiceSessionId = uuidv4();
+    const customerId = uuidv4();
+    // primary_phone feeds the GENERATED phone_normalized column that
+    // findByPhoneNormalized (both directions' thread resolution) matches on.
+    await pool.query(
+      `INSERT INTO customers (id, tenant_id, first_name, last_name, display_name, primary_phone, created_by)
+       VALUES ($1, $2, 'Rey', 'Ortiz', 'Rey Ortiz', $3, $4)`,
+      [customerId, tenant.tenantId, callerE164, tenant.userId],
+    );
+
+    const thread = createRecoveryThreader({
+      conversationRepo,
+      conversationLinkRepo: linkRepo,
+      customerRepo,
+      auditRepo: audit,
+      logger,
+    });
+    await thread({
+      tenantId: tenant.tenantId,
+      voiceSessionId,
+      smsMessageSid: 'SM_out_1',
+      callerE164,
+      body: 'We got cut off — reply to pick back up.',
+    });
+
+    // The caller replies: run the REAL inbound capture handler.
+    const capture = createInboundCaptureHandler({
+      conversationRepo,
+      customerRepo,
+      auditRepo: audit,
+      logger,
+    });
+    const captureResult = await capture.handle({
+      tenantId: tenant.tenantId,
+      fromE164: callerE164,
+      body: 'Yes please — same time tomorrow works.',
+      messageSid: 'SM_in_1',
+    });
+    expect(captureResult.handled).toBe(true);
+
+    // One conversation, both directions on it.
+    const conversations = await conversationRepo.findByEntity(
+      tenant.tenantId,
+      'customer',
+      customerId,
+    );
+    expect(conversations).toHaveLength(1);
+    const messages = await conversationRepo.getMessages(tenant.tenantId, conversations[0].id);
+    expect(messages).toHaveLength(2);
+    const directions = messages.map((m) => (m.metadata ?? {}).direction).sort();
+    expect(directions).toEqual(['inbound', 'outbound']);
+
+    // P0-037 links resolve the voice session to that conversation.
+    const links = await linkRepo.findByEntity(tenant.tenantId, 'voice_session', voiceSessionId);
+    expect(links).toHaveLength(1);
+    expect(links[0].conversationId).toBe(conversations[0].id);
+  });
+
+  it('re-threading is idempotent against the real unique indexes (links + one open thread)', async () => {
+    const callerE164 = '+15554440002';
+    const voiceSessionId = uuidv4();
+    const thread = createRecoveryThreader({
+      conversationRepo,
+      conversationLinkRepo: linkRepo,
+      customerRepo,
+      auditRepo: audit,
+      logger,
+    });
+    const input = {
+      tenantId: tenant.tenantId,
+      voiceSessionId,
+      smsMessageSid: 'SM_out_2',
+      callerE164,
+      body: 'We got cut off — reply to pick back up.',
+    };
+    await thread(input);
+    await thread(input);
+
+    const conversations = await conversationRepo.findByEntity(
+      tenant.tenantId,
+      'sms_unmatched',
+      callerE164,
+    );
+    expect(conversations).toHaveLength(1);
+    const links = await linkRepo.findByEntity(tenant.tenantId, 'voice_session', voiceSessionId);
+    expect(links).toHaveLength(1);
   });
 });
 
