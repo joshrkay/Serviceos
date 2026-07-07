@@ -42,7 +42,7 @@ export const RECOVERY_RATE_LIMIT_WINDOW_MS = 5 * 60_000;
 export const RECOVERY_SMS_MAX_CHARS = 320;
 
 /** Actor stamped on recovery audit rows when no system actor is wired. */
-const DEFAULT_SYSTEM_ACTOR = 'system:dropped-call-recovery';
+export const DEFAULT_SYSTEM_ACTOR = 'system:dropped-call-recovery';
 
 export type RecoveryDisposition =
   | { action: 'sent'; smsMessageSid: string }
@@ -260,7 +260,12 @@ export async function handleDroppedCallRecovery(
   return { action: 'sent', smsMessageSid };
 }
 
-async function suppress(
+/**
+ * Terminal suppression: stamp the row + emit the audit event. Exported so
+ * the worker's staleness-expiry path shares this exact shape (one audit
+ * contract for every suppression, whatever decided it).
+ */
+export async function suppress(
   row: DroppedCallRecoveryRow,
   reason: string,
   deps: DroppedCallHandlerDeps,
