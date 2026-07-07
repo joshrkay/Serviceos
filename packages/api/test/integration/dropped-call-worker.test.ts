@@ -33,6 +33,9 @@ import {
 import { PgAuditRepository } from '../../src/audit/pg-audit';
 import { PhoneRateLimiter } from '../../src/shared/rate-limit/phone-rate-limit';
 import { createRecoveryRateLimiter } from '../../src/sms/recovery/recovery-rate-limiter';
+import { createDroppedCallResolvedSince } from '../../src/sms/recovery/resolved-since';
+import { PgVoiceSessionRepository } from '../../src/voice/pg-voice-session';
+import { PgProposalRepository } from '../../src/proposals/pg-proposal';
 import { createLogger } from '../../src/logging/logger';
 import type {
   DroppedCallHandlerDeps,
@@ -446,6 +449,156 @@ describe('dropped-call recovery worker — integration', () => {
       [tenantA.tenantId, voiceSessionId],
     );
     expect(rows[0].n).toBe(1);
+  });
+});
+
+/**
+ * P8-015 production adapter — ResolvedSinceChecker over REAL voice_sessions /
+ * proposals rows, driven through the actual sweep so the dropped_call_recoveries
+ * context JSONB round-trip (parseContext) is pinned against real Postgres.
+ */
+describe('resolved-since checker — integration (voice_sessions / proposals)', () => {
+  let pool: Pool;
+  let repo: PgDroppedCallRecoveryRepository;
+  let audit: PgAuditRepository;
+  let tenant: { tenantId: string; userId: string };
+  let resolvedSince: ReturnType<typeof createDroppedCallResolvedSince>;
+
+  beforeAll(async () => {
+    pool = await getSharedTestDb();
+    repo = new PgDroppedCallRecoveryRepository(pool);
+    audit = new PgAuditRepository(pool);
+    resolvedSince = createDroppedCallResolvedSince({
+      voiceSessionRepo: new PgVoiceSessionRepository(pool),
+      proposalRepo: new PgProposalRepository(pool),
+      logger,
+    });
+  });
+
+  beforeEach(async () => {
+    tenant = await createTestTenant(pool);
+    // findDue drains cross-tenant: clear pending rows left by earlier
+    // describes in this file so sweep counts here are exact.
+    await pool.query(
+      `DELETE FROM dropped_call_recoveries WHERE sent_at IS NULL AND suppressed_reason IS NULL`,
+    );
+  });
+
+  afterAll(async () => {
+    await closeSharedTestDb();
+  });
+
+  async function seedSession(opts: {
+    outcome: string | null;
+    customerId?: string;
+    startedAt?: Date;
+  }): Promise<string> {
+    const id = uuidv4();
+    await pool.query(
+      `INSERT INTO voice_sessions (id, tenant_id, channel, state, customer_id, started_at, ended_at, outcome)
+       VALUES ($1, $2, 'voice_inbound', 'ended', $3, $4, $4, $5)`,
+      [id, tenant.tenantId, opts.customerId ?? null, opts.startedAt ?? SCHEDULED_FOR, opts.outcome],
+    );
+    return id;
+  }
+
+  async function sweepOnce(harness: CapturingHandlerDeps) {
+    return runDroppedCallRecoverySweep({
+      repo,
+      handlerDeps: { ...harness.deps, resolvedSince },
+      logger,
+      now: () => DUE_AT,
+    });
+  }
+
+  it('signal 1: a session that resolved to completed suppresses as booking_completed', async () => {
+    const voiceSessionId = await seedSession({ outcome: 'completed' });
+    await pool.query(
+      `INSERT INTO dropped_call_recoveries (tenant_id, voice_session_id, caller_e164, scheduled_for)
+       VALUES ($1, $2, '+15553330001', $3)`,
+      [tenant.tenantId, voiceSessionId, SCHEDULED_FOR],
+    );
+
+    const harness = makeHandlerDeps({ audit });
+    const result = await sweepOnce(harness);
+
+    expect(result.suppressed).toBe(1);
+    expect(harness.smsCalls).toHaveLength(0);
+    const { rows } = await pool.query(
+      `SELECT suppressed_reason FROM dropped_call_recoveries WHERE voice_session_id = $1`,
+      [voiceSessionId],
+    );
+    expect(rows[0].suppressed_reason).toBe('booking_completed');
+  });
+
+  it('signal 2: an executed proposal from the persisted context suppresses (JSONB round-trip)', async () => {
+    const voiceSessionId = await seedSession({ outcome: 'dropped' });
+    const proposalId = uuidv4();
+    await pool.query(
+      `INSERT INTO proposals (id, tenant_id, proposal_type, created_by, status)
+       VALUES ($1, $2, 'create_appointment', $3, 'executed')`,
+      [proposalId, tenant.tenantId, tenant.userId],
+    );
+    // Persist context via the PRODUCTION schedule path so findDue's
+    // parseContext reads it back from real JSONB.
+    await repo.schedule({
+      tenantId: tenant.tenantId,
+      voiceSessionId,
+      callerE164: '+15553330002',
+      scheduledFor: SCHEDULED_FOR,
+      context: { state: 'collecting', bucket: 'proposal_created', proposalIds: [proposalId] },
+    });
+
+    const harness = makeHandlerDeps({ audit });
+    const result = await sweepOnce(harness);
+
+    expect(result.suppressed).toBe(1);
+    expect(harness.smsCalls).toHaveLength(0);
+  });
+
+  it('signal 3: a newer completed call-back for the same customer suppresses', async () => {
+    const customerId = uuidv4();
+    await pool.query(
+      `INSERT INTO customers (id, tenant_id, first_name, last_name, display_name, created_by)
+       VALUES ($1, $2, 'Cal', 'Back', 'Cal Back', $3)`,
+      [customerId, tenant.tenantId, tenant.userId],
+    );
+    const droppedId = await seedSession({
+      outcome: 'dropped',
+      customerId,
+      startedAt: SCHEDULED_FOR,
+    });
+    await seedSession({
+      outcome: 'completed',
+      customerId,
+      startedAt: new Date(SCHEDULED_FOR.getTime() + 30_000),
+    });
+    await pool.query(
+      `INSERT INTO dropped_call_recoveries (tenant_id, voice_session_id, caller_e164, scheduled_for)
+       VALUES ($1, $2, '+15553330003', $3)`,
+      [tenant.tenantId, droppedId, SCHEDULED_FOR],
+    );
+
+    const harness = makeHandlerDeps({ audit });
+    const result = await sweepOnce(harness);
+
+    expect(result.suppressed).toBe(1);
+    expect(harness.smsCalls).toHaveLength(0);
+  });
+
+  it('unresolved drop (outcome=dropped, no proposals, no call-back) proceeds to send', async () => {
+    const voiceSessionId = await seedSession({ outcome: 'dropped' });
+    await pool.query(
+      `INSERT INTO dropped_call_recoveries (tenant_id, voice_session_id, caller_e164, scheduled_for)
+       VALUES ($1, $2, '+15553330004', $3)`,
+      [tenant.tenantId, voiceSessionId, SCHEDULED_FOR],
+    );
+
+    const harness = makeHandlerDeps({ audit });
+    const result = await sweepOnce(harness);
+
+    expect(result.sent).toBe(1);
+    expect(harness.smsCalls).toHaveLength(1);
   });
 });
 

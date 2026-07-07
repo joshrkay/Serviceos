@@ -28,6 +28,7 @@ import { createAuditEvent } from '../../audit/audit';
 import { extractContextCue } from '../../voice/recovery/extract-context-cue';
 import { composeStateAwareCue } from './state-aware-cue';
 import type {
+  DroppedCallRecoveryContext,
   DroppedCallRecoveryRepository,
   DroppedCallRecoveryRow,
 } from './scheduler';
@@ -67,11 +68,26 @@ export interface RecoveryRateLimiter {
  * Re-check at execution time: did this voice session ultimately resolve with a
  * successful booking / owner transfer (possibly via a call-back) since the
  * drop? Returns the suppression reason when it did, or null to proceed.
+ *
+ * The optional third argument carries the row's persisted FSM context
+ * snapshot so a production checker can consult `proposalIds` (proposals
+ * carry no session FK); two-argument implementations remain compatible.
  */
 export type ResolvedSinceChecker = (
   tenantId: string,
   voiceSessionId: string,
+  context?: DroppedCallRecoveryContext | null,
 ) => Promise<'booking_completed' | 'transferred' | null>;
+
+/**
+ * Optional compliance gate run AFTER resolvedSince and BEFORE the rate
+ * limit: returns a suppression reason (e.g. 'opted_out' for a caller on the
+ * tenant's DNC list) or null to proceed. Kept separate from resolvedSince —
+ * consent is not booking state.
+ */
+export type RecoveryPreSendSuppress = (
+  row: DroppedCallRecoveryRow,
+) => Promise<string | null>;
 
 /** Compose the brand-voice SMS body (P4-015). Returns the final text. */
 export type RecoveryMessageComposer = (input: {
@@ -106,6 +122,8 @@ export interface DroppedCallHandlerDeps {
   logger: Logger;
   rateLimit: RecoveryRateLimiter;
   resolvedSince: ResolvedSinceChecker;
+  /** Compliance gate (DNC/consent) — suppresses with the returned reason. */
+  preSendSuppress?: RecoveryPreSendSuppress;
   compose: RecoveryMessageComposer;
   sendSms: RecoverySmsSender;
   thread?: RecoveryThreader;
@@ -132,10 +150,21 @@ export async function handleDroppedCallRecovery(
   const actorId = deps.systemActorId ?? DEFAULT_SYSTEM_ACTOR;
 
   // 1. Suppression re-check — booking completed / transferred since the drop.
-  const resolved = await deps.resolvedSince(row.tenantId, row.voiceSessionId);
+  const resolved = await deps.resolvedSince(row.tenantId, row.voiceSessionId, row.context);
   if (resolved) {
     await suppress(row, resolved, deps, actorId);
     return { action: 'suppressed', reason: resolved };
+  }
+
+  // 1b. Compliance gate — a caller who opted out (STOP) between the drop and
+  //     the send must never receive the recovery SMS. Runs before the rate
+  //     limit so a suppressed send can't interfere with the token check.
+  if (deps.preSendSuppress) {
+    const complianceReason = await deps.preSendSuppress(row);
+    if (complianceReason) {
+      await suppress(row, complianceReason, deps, actorId);
+      return { action: 'suppressed', reason: complianceReason };
+    }
   }
 
   // 2. Per-caller rate limit (P0-036) — CHECK only (non-consuming) so a
