@@ -44,6 +44,7 @@ export class ExpoPushDeliveryProvider implements PushDeliveryProvider {
       if (this.accessToken) headers.Authorization = `Bearer ${this.accessToken}`;
 
       let res: Response;
+      let body: { data?: ExpoTicket[] };
       try {
         res = await this.fetchImpl(EXPO_PUSH_SEND_URL, {
           method: 'POST',
@@ -51,21 +52,26 @@ export class ExpoPushDeliveryProvider implements PushDeliveryProvider {
           body: JSON.stringify(
             chunk.map((m) => ({ to: m.to, title: m.title, body: m.body, data: m.data })),
           ),
+          // fetch has no default timeout — a stalled Expo endpoint would
+          // hang the notification worker.
+          signal: AbortSignal.timeout(15_000),
         });
+        if (!res.ok) {
+          for (const m of chunk) {
+            results.push({ to: m.to, ok: false, error: `HTTP ${res.status}`, deviceNotRegistered: false });
+          }
+          continue;
+        }
+        // Parse inside the guard: a 200 with a malformed body must degrade
+        // to per-token failures like every other error here — not reject
+        // the whole sendPush batch.
+        body = (await res.json()) as { data?: ExpoTicket[] };
       } catch (err) {
         const error = err instanceof Error ? err.message : 'network error';
         for (const m of chunk) results.push({ to: m.to, ok: false, error, deviceNotRegistered: false });
         continue;
       }
 
-      if (!res.ok) {
-        for (const m of chunk) {
-          results.push({ to: m.to, ok: false, error: `HTTP ${res.status}`, deviceNotRegistered: false });
-        }
-        continue;
-      }
-
-      const body = (await res.json()) as { data?: ExpoTicket[] };
       const tickets = body.data ?? [];
       chunk.forEach((m, idx) => {
         const ticket = tickets[idx];

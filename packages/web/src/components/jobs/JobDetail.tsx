@@ -880,7 +880,7 @@ export function JobDetailView({
       setPhotoError(null);
       for (const item of captured) {
         try {
-          const file = capturedMediaToFile(item);
+          const file = await capturedMediaToFile(item);
           const category: JobPhotoCategory = item.type === 'video' ? 'other' : 'before';
           await uploadPhoto(id, file, category, undefined, item.capturedAt);
         } catch (err) {
@@ -1042,6 +1042,12 @@ export function JobDetailView({
     else if (key === 'cancel')                     setModal('cancel');
   }
 
+  // NOTE: LeftContent / RightRail are render helpers, invoked as
+  // `{LeftContent()}` — NOT mounted as `<LeftContent />`. Mounting them would
+  // create a brand-new component type every parent render, unmounting and
+  // remounting the whole subtree (Time Tracking inputs lost focus per
+  // keystroke; child cards refetched). Calling them splices their elements
+  // straight into this component's tree. They must not use hooks.
   const LeftContent = () => (
     <div className="flex flex-col gap-4">
       {customer && (
@@ -1362,15 +1368,15 @@ export function JobDetailView({
 
           {/* Desktop 2-column */}
           <div className="hidden md:grid md:grid-cols-[1fr_360px] md:gap-6 md:items-start">
-            <LeftContent />
+            {LeftContent()}
             <div className="sticky top-0">
-              <RightRail />
+              {RightRail()}
             </div>
           </div>
 
           {/* Mobile single column */}
           <div className="md:hidden flex flex-col gap-4">
-            <LeftContent />
+            {LeftContent()}
             <div className="rounded-xl bg-card border border-border overflow-hidden">
               <div className="flex items-center justify-between px-4 py-3.5 border-b border-border">
                 <h4 className="text-foreground">Activity Log</h4>
@@ -1400,7 +1406,7 @@ export function JobDetailView({
           onEnd={() => setModal(null)}
         />
       )}
-      {modal === 'text'     && customer   && <TextSheet name={customer.name} phone={customerPhone} onClose={() => setModal(null)} />}
+      {modal === 'text'     && customer   && <TextSheet name={customer.name} phone={customerPhone} customerId={customer.id} onClose={() => setModal(null)} />}
       {modal === 'estimate' && job.estimateId && <EstimateSheet estimateId={job.estimateId} onClose={() => setModal(null)} />}
       {modal === 'invoice'  && (
         <InvoiceSheet
@@ -1431,6 +1437,7 @@ export function JobDetailView({
           job={job}
           customerName={customer.name}
           customerPhone={customerPhone}
+          customerId={customer.id}
           onClose={() => setModal(null)}
         />
       )}

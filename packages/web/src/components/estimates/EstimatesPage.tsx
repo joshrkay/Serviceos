@@ -247,6 +247,8 @@ function AIPricingSuggestions({ estimateId, items, onLineItemAccepted }: {
       // estimate_line_items.id is a UUID; the pg repo wipes-and-reinserts on
       // update, so generating fresh UUIDs (instead of synthetic "li-..." ids)
       // keeps the PATCH payload valid against the Postgres schema.
+      // The AI hint becomes a brand-new standalone line (no tier metadata),
+      // fresh UUID since it has no existing row.
       const newItem = {
         description: hint.lineItem.description,
         quantity: hint.lineItem.qty,
@@ -258,22 +260,21 @@ function AIPricingSuggestions({ estimateId, items, onLineItemAccepted }: {
       };
       const res = await apiFetch(`/api/estimates/${estimateId}`, {
         method: 'PATCH',
+        // Map existing lines through uiLineToApi so their taxable flag AND
+        // good-better-best metadata (groupKey/groupLabel/isOptional/
+        // isDefaultSelected) survive — the previous inline rebuild forced
+        // taxable:false and dropped the tier structure on every accept,
+        // silently rewriting the customer-facing document.
         body: JSON.stringify({ lineItems: [
-          ...items.map((item, i) => ({
-            description: item.description,
-            quantity: item.qty,
-            unitPriceCents: Math.round(item.rate * 100),
-            totalCents: Math.round(item.qty * item.rate * 100),
-            sortOrder: i,
-            taxable: false,
-            id: crypto.randomUUID(),
-          })),
+          ...items.map((item, i) => uiLineToApi(item, i)),
           newItem,
         ]}),
       });
       if (res.ok) {
         setAccepted(prev => new Set([...prev, hint.id]));
         onLineItemAccepted?.(hint.lineItem!);
+      } else {
+        toast.error(`Couldn't apply the suggestion (HTTP ${res.status}).`);
       }
     } finally {
       setAccepting(null);

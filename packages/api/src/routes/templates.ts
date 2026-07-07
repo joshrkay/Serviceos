@@ -2,7 +2,7 @@ import { Router, Response } from 'express';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
-import { createTemplateSchema, verticalTypeSchema } from '../shared/contracts';
+import { createTemplateSchema, updateTemplateSchema, verticalTypeSchema } from '../shared/contracts';
 import {
   EstimateTemplateRepository,
   createTemplate,
@@ -109,7 +109,10 @@ export function createTemplateRouter(
     requireTenant,
     requirePermission('estimates:update'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      const { name, description, lineItemTemplates, defaultDiscountCents, defaultTaxRateBps, defaultCustomerMessage, isActive } = req.body;
+      // Validated like POST — raw req.body here persisted float/negative
+      // money and out-of-range tax rates straight to the templates table.
+      const { name, description, lineItemTemplates, defaultDiscountCents, defaultTaxRateBps, defaultCustomerMessage, isActive } =
+        updateTemplateSchema.parse(req.body);
       const result = await updateTemplate(
         templateRepo,
         req.auth!.tenantId,

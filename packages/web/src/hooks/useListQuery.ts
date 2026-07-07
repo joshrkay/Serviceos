@@ -53,7 +53,10 @@ export function useListQuery<T>(
   const [search, setSearch] = useState(initialOptions.search ?? '');
   const [filters, setFilters] = useState(initialOptions.filters ?? {});
   const [enabled, setEnabled] = useState(initialOptions.enabled ?? true);
-  const [isLoading, setIsLoading] = useState(false);
+  // Start in loading state when a fetch is imminent: initializing to false
+  // made every list page paint its empty state ("No customers found") for
+  // the frame(s) before the first request even fired.
+  const [isLoading, setIsLoading] = useState(initialOptions.enabled !== false);
   const [error, setError] = useState<string | null>(null);
 
   // Re-sync filters / enabled from props when the caller's initialOptions
@@ -173,5 +176,28 @@ export function useListQuery<T>(
     };
   }, [enabled, refetchInterval]);
 
-  return { data, total, page, pageSize, isLoading, error, refetch, setPage, setSearch, setFilters };
+  // Searching or filtering while on page > 1 must snap back to page 1:
+  // keeping the old page number requests a stale slice of the new result
+  // set and typically renders a wrong empty state even when matches exist.
+  const setSearchAndResetPage = useCallback((next: string) => {
+    setSearch(next);
+    setPage(1);
+  }, []);
+  const setFiltersAndResetPage = useCallback((next: Record<string, string>) => {
+    setFilters(next);
+    setPage(1);
+  }, []);
+
+  return {
+    data,
+    total,
+    page,
+    pageSize,
+    isLoading,
+    error,
+    refetch,
+    setPage,
+    setSearch: setSearchAndResetPage,
+    setFilters: setFiltersAndResetPage,
+  };
 }

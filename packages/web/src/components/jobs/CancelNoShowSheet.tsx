@@ -98,8 +98,11 @@ export function CancelNoShowSheet({ job, appointmentId, customerName, customerPh
         const res = await apiFetch(`/api/appointments/${appointmentId}`, {
           method: 'PUT',
           body: JSON.stringify({
-            status: 'cancelled',
-            cancelReason,
+            // API canonical status is 'canceled' (single L); 'cancelled'
+            // failed validation on every submit. cancelReason is not an
+            // updatable field — persist the reason via the supported `notes`.
+            status: 'canceled',
+            notes: cancelReason,
           }),
         });
         if (!res.ok) {
@@ -107,32 +110,58 @@ export function CancelNoShowSheet({ job, appointmentId, customerName, customerPh
           throw new Error(json?.message ?? `Failed to cancel: HTTP ${res.status}`);
         }
       } else {
-        // No appointment linked — update job status directly
-        const res = await apiFetch(`/api/jobs/${job.id}`, {
-          method: 'PUT',
+        // D1: No appointment linked — transition job to cancelled via POST /api/jobs/:id/transition
+        const cancelReason = `${TYPE_CONFIG[issueType].label}: ${reason}${notes ? ` — ${notes}` : ''}`;
+        const res = await apiFetch(`/api/jobs/${job.id}/transition`, {
+          method: 'POST',
           body: JSON.stringify({
             status: 'cancelled',
-            notes: `${TYPE_CONFIG[issueType].label}: ${reason}${notes ? ` — ${notes}` : ''}`,
+            reason: cancelReason,
           }),
         });
         if (!res.ok) {
           const json = await res.json().catch(() => ({}));
-          throw new Error(json?.message ?? `Failed to update job: HTTP ${res.status}`);
+          throw new Error(json?.message ?? `Failed to cancel job: HTTP ${res.status}`);
         }
       }
 
-      // Handle post-cancel action (text customer)
+      // D1: Handle post-cancel action (text customer) — resolve thread via search, create if needed
       if (action === 'text' && customerId) {
         try {
-          const threadRes = await apiFetch(`/api/conversations/customer/${customerId}`, {
-            method: 'POST',
-          });
-          if (threadRes.ok) {
-            const { conversation } = await threadRes.json();
+          // Search for existing thread
+          const searchRes = await apiFetch(
+            `/api/conversations/search?customerId=${encodeURIComponent(customerId)}`,
+            { method: 'GET' },
+          );
+          let conversationId: string | null = null;
+          if (searchRes.ok) {
+            const { results } = await searchRes.json();
+            if (results && results.length > 0) {
+              conversationId = results[0].conversationId ?? results[0].id;
+            }
+          }
+
+          // If no existing thread, create one
+          if (!conversationId) {
+            const createRes = await apiFetch('/api/conversations', {
+              method: 'POST',
+              body: JSON.stringify({
+                entityType: 'customer',
+                entityId: customerId,
+              }),
+            });
+            if (createRes.ok) {
+              const created = await createRes.json();
+              conversationId = created.id;
+            }
+          }
+
+          // Send the cancellation message if we have a thread
+          if (conversationId) {
             const cancelMessage = issueType === 'noshow'
               ? `Hi ${customerName.split(' ')[0]}, we stopped by but weren't able to reach you. Please contact us to reschedule.`
               : `Hi ${customerName.split(' ')[0]}, your appointment has been cancelled. Please contact us if you'd like to reschedule.`;
-            await apiFetch(`/api/conversations/${conversation.id}/reply`, {
+            await apiFetch(`/api/conversations/${conversationId}/reply`, {
               method: 'POST',
               body: JSON.stringify({ body: cancelMessage, channel: 'sms' }),
             });

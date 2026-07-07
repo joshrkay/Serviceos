@@ -17,6 +17,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { apiFetch, clearTokenGetter, setTokenGetter } from './api-fetch';
+import { clearSignOutHandler } from '../lib/apiClient';
 
 const TOKEN = 'tok-fresh';
 const REFRESHED = 'tok-refreshed';
@@ -56,6 +57,8 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllGlobals();
   clearTokenGetter();
+  // Reset the persistent-401 latch so each test observes its own redirect.
+  clearSignOutHandler();
   restoreLocation();
 });
 

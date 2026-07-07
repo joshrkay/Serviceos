@@ -598,6 +598,17 @@ import {
   InMemoryDroppedCallRecoveryRepository,
 } from './sms/recovery/scheduler';
 import { createDroppedCallResumeHandler } from './sms/recovery/resume-handler';
+// P8-015 — production deps for the dropped-call recovery sweep.
+import type { DroppedCallHandlerDeps } from './sms/recovery/dropped-call-handler';
+import { createRecoveryRateLimiter } from './sms/recovery/recovery-rate-limiter';
+import { createDroppedCallResolvedSince } from './sms/recovery/resolved-since';
+import { createRecoveryComposer } from './sms/recovery/recovery-composer';
+import { createRecoveryThreader } from './sms/recovery/recovery-threader';
+import {
+  runDroppedCallRecoverySweep,
+  DROPPED_CALL_RECOVERY_FLAG,
+} from './workers/dropped-call-worker';
+import { PgConversationLinkRepository } from './conversations/pg-conversation-link';
 import {
   PgConsentEventRepository,
   InMemoryConsentEventRepository,
@@ -705,8 +716,11 @@ export function createApp(): express.Express {
   // handler router is mounted later once repos are constructed.
   app.use('/webhooks/wisetack', express.raw({ type: '*/*' }));
 
-  // Body parsing for all other routes
-  app.use(express.json());
+  // Body parsing for all other routes. Explicit ceiling (default is an
+  // implicit 100kb): large-but-bounded so no client can buffer unbounded
+  // JSON into the process, and the limit is visible here rather than
+  // buried in body-parser defaults.
+  app.use(express.json({ limit: '1mb' }));
 
   // Serve static frontend files from the built React app.
   // resolveWebDistDir anchors on the packages/api boundary so it points at
@@ -2027,6 +2041,11 @@ export function createApp(): express.Express {
     weeklyFeedback: 590020,
     // PRD US-345 — 24h post-completion review-request sweep.
     reviewRequest: 590021,
+    // P8-015 — dropped-call recovery drain. NOTE the collision discipline:
+    // every key here must be unique (590014 was once shared by two sweeps —
+    // an advisory-lock collision that silently serialized them); 590010
+    // remains reserved by a parallel track.
+    droppedCallRecovery: 590022,
   } as const;
   const runAsLeader = async (lockKey: number, work: () => Promise<void>): Promise<void> => {
     if (shuttingDown) return;
@@ -2059,7 +2078,13 @@ export function createApp(): express.Express {
     service: 'execution-worker',
     environment: process.env.NODE_ENV || 'development',
   });
+  // In-flight guard (same shape as the queue poll loop's pollInFlight): on a
+  // 1s cadence a slow executor otherwise stacks overlapping sweeps, each
+  // re-running resetStaleExecuting against the same rows.
+  let executionSweepInFlight = false;
   registerInterval(setInterval(async () => {
+    if (executionSweepInFlight) return;
+    executionSweepInFlight = true;
     try {
       await runExecutionSweep({
         proposalRepo,
@@ -2070,6 +2095,8 @@ export function createApp(): express.Express {
       executionWorkerLogger.error('Execution sweep failed', {
         error: err instanceof Error ? err.message : String(err),
       });
+    } finally {
+      executionSweepInFlight = false;
     }
   }, 1000));
 
@@ -3085,6 +3112,12 @@ export function createApp(): express.Express {
         await client.query('COMMIT');
         const enc = result.rows[0]?.auth_token_primary_enc;
         return enc ? decrypt(enc, encKey) : process.env.TWILIO_AUTH_TOKEN;
+      } catch (err) {
+        // Roll back before release: the outer catch swallows the error to a
+        // fallback, so without this the connection would silently return to
+        // the pool with the transaction (and system_lookup GUC) still open.
+        await client.query('ROLLBACK').catch(() => {});
+        throw err;
       } finally {
         client.release();
       }
@@ -3111,6 +3144,10 @@ export function createApp(): express.Express {
         );
         await client.query('COMMIT');
         return result.rows[0]?.tenant_id ?? process.env.TWILIO_DEFAULT_TENANT_ID;
+      } catch (err) {
+        // Same dirty-connection guard as resolveTwilioAuthTokenForSubaccount.
+        await client.query('ROLLBACK').catch(() => {});
+        throw err;
       } finally {
         client.release();
       }
@@ -4811,6 +4848,95 @@ export function createApp(): express.Express {
     });
   }, 60_000));
 
+  // P8-015 — dropped-call recovery drain. The scheduler (wired above) has
+  // been inserting durable dropped_call_recoveries rows since RV-115; this
+  // sweep is what actually sends the ~60s recovery SMS. Dark by default:
+  // every row is gated per-tenant on the DROPPED_CALL_RECOVERY_FLAG
+  // (tenant override → platform flag → false), so enabling is an explicit
+  // per-tenant action and the flag doubles as the kill switch.
+  //
+  // CORRECTNESS NOTE: findDue has no FOR UPDATE SKIP LOCKED row claiming —
+  // the runAsLeader advisory lock is the only thing preventing two replicas
+  // from sending the same row in the same tick. Never un-gate this sweep
+  // without adding claiming; the per-row Twilio Idempotency-Key
+  // (dropped_call_recovery:{row.id}) and markSent's sent_at IS NULL guard
+  // are the second and third lines of defense.
+  //
+  // 30s cadence (not 60s): the product promise is "~60s after the drop";
+  // rows are scheduled 60s out, so a 30s tick keeps worst-case latency
+  // ≈90s instead of ≈2× the promise.
+  // Gated on `pool` too, not just messageDelivery: with Twilio creds set but
+  // no DATABASE_URL, messageDelivery is the REAL provider while the sweep would
+  // otherwise install an always-allow rate-limiter stub — sending recovery SMS
+  // with the one-per-caller cap silently disabled. No pool ⇒ no cross-process
+  // limiter ⇒ don't run the sweep at all (matches PhoneRateLimiter's
+  // no-in-memory-fallback rule).
+  if (messageDelivery && pool) {
+    const droppedCallLogger = createLogger({
+      service: 'dropped-call-worker',
+      environment: process.env.NODE_ENV || 'development',
+    });
+    const conversationLinkRepo = new PgConversationLinkRepository(pool);
+    const recoveryHandlerDeps: Omit<DroppedCallHandlerDeps, 'repo'> = {
+      audit: auditRepo,
+      logger: droppedCallLogger,
+      rateLimit: createRecoveryRateLimiter(new PhoneRateLimiter(pool), droppedCallLogger),
+      resolvedSince: createDroppedCallResolvedSince({
+        voiceSessionRepo,
+        proposalRepo,
+        logger: droppedCallLogger,
+      }),
+      // Compliance gate: a caller who texted STOP between the drop and the
+      // send must never receive the recovery SMS.
+      preSendSuppress: async (row) =>
+        (await dncRepo.isOnDnc(row.tenantId, normalizePhone(row.callerE164)))
+          ? 'opted_out'
+          : null,
+      compose: createRecoveryComposer({
+        composerDeps: { gateway: llmGateway, settingsRepo, standingInstructionRepo },
+        businessName: process.env.TWILIO_BUSINESS_NAME ?? 'our team',
+        // Brand-voice only with a real provider key — the mock gateway's
+        // canned output must never reach a customer (digest precedent).
+        aiEnabled: Boolean(config.AI_PROVIDER_API_KEY),
+        logger: droppedCallLogger,
+      }),
+      // Unlike the callMeBack adapter above, this passes tenantId (per-tenant
+      // Twilio subaccount routing) and the idempotency key (Twilio-side
+      // double-send defense).
+      sendSms: async ({ tenantId, to, body, idempotencyKey }) =>
+        (await messageDelivery.sendSms({ to, body, tenantId, idempotencyKey }))
+          .providerMessageId,
+      // NOTE: no leadRepo — the dropped CALL is the lead-generating event and
+      // is captured (source 'phone_call') by the inbound-call path. Passing
+      // leadRepo here would make the OUTBOUND recovery SMS mint a lead with
+      // inbound-text provenance ('system:sms-capture', source 'sms') and fire a
+      // misleading "new text lead" owner push. Unknown callers thread under
+      // sms_unmatched instead — still visible in the inbox, correct provenance.
+      thread: createRecoveryThreader({
+        conversationRepo,
+        conversationLinkRepo,
+        customerRepo,
+        auditRepo,
+        logger: droppedCallLogger,
+      }),
+    };
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.droppedCallRecovery, async () => {
+        await runDroppedCallRecoverySweep({
+          repo: droppedCallRecoveryRepo,
+          handlerDeps: recoveryHandlerDeps,
+          logger: droppedCallLogger,
+          isEnabledForTenant: (tenantId) =>
+            isFlagEnabledForTenant(tenantId, DROPPED_CALL_RECOVERY_FLAG),
+        });
+      }).catch((err) => {
+        droppedCallLogger.error('dropped-call recovery sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }, 30_000));
+  }
+
   // P21-003 — batch-invoice sweep. Daily-grained work; an hourly tick surfaces
   // newly-completed jobs promptly. Opt-in per tenant (settings.batchInvoiceEnabled);
   // in-memory dev returns no tenants so it no-ops locally.
@@ -5636,11 +5762,18 @@ export function createApp(): express.Express {
   });
 
   // Catch-all route for client-side routing — serves index.html for all non-API routes
-  // This allows the React SPA to handle routing on the client side
+  // This allows the React SPA to handle routing on the client side.
+  // This route sits AFTER the global error handler, so sendFile's next(err)
+  // would fall through to Express's default handler (stack trace in dev) —
+  // handle the error in the callback instead.
   app.get('*', (req, res) => {
     const frontendPath = resolveWebDistDir(__dirname);
     const indexPath = require('path').join(frontendPath, 'index.html');
-    res.sendFile(indexPath);
+    res.sendFile(indexPath, (err) => {
+      if (err && !res.headersSent) {
+        res.status(500).json({ error: 'INTERNAL_ERROR', message: 'Frontend assets unavailable' });
+      }
+    });
   });
 
   // P0-023: Graceful shutdown — close the Postgres pool on SIGTERM/SIGINT so

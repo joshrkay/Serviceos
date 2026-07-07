@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useApiClient } from '../../../lib/apiClient';
 import { useOnboardingStatus } from '../../../hooks/useOnboardingStatus';
+import { hasLocalFlag, setLocalFlag } from '../../../lib/uiFlags';
 
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 const DISMISS_KEY = 'onboarding.upgradeNudge.dismissedAt';
@@ -29,10 +30,7 @@ export function UpgradeNudgeBanner() {
   const { data, refetch } = useOnboardingStatus(60_000);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [dismissed, setDismissed] = useState(() => {
-    if (typeof window === 'undefined') return false;
-    return !!window.localStorage.getItem(DISMISS_KEY);
-  });
+  const [dismissed, setDismissed] = useState(() => hasLocalFlag(DISMISS_KEY));
 
   if (!data || !data.isComplete) return null;
   if (!data.upgradePromptShownAt) return null;
@@ -42,9 +40,7 @@ export function UpgradeNudgeBanner() {
   if (Number.isNaN(shown) || Date.now() - shown > SEVEN_DAYS_MS) return null;
 
   function dismiss() {
-    if (typeof window !== 'undefined') {
-      window.localStorage.setItem(DISMISS_KEY, new Date().toISOString());
-    }
+    setLocalFlag(DISMISS_KEY);
     setDismissed(true);
   }
 

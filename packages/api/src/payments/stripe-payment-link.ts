@@ -5,6 +5,10 @@ export interface StripeConfig {
   webhookSecret: string;
 }
 
+// fetch has NO default timeout: a stalled Stripe upstream would otherwise pin
+// the calling request (portal payment-link generation) until TCP gives up.
+const STRIPE_REQUEST_TIMEOUT_MS = 10_000;
+
 export class StripePaymentLinkProvider implements PaymentLinkProvider {
   private readonly config: StripeConfig;
 
@@ -37,6 +41,7 @@ export class StripePaymentLinkProvider implements PaymentLinkProvider {
         'metadata[tenant_id]': request.tenantId,
         'metadata[invoice_id]': request.invoiceId,
       }),
+      signal: AbortSignal.timeout(STRIPE_REQUEST_TIMEOUT_MS),
     });
 
     if (!res.ok) {
@@ -71,6 +76,7 @@ export class StripePaymentLinkProvider implements PaymentLinkProvider {
         'Content-Type': 'application/x-www-form-urlencoded',
       },
       body: new URLSearchParams({ active: 'false' }),
+      signal: AbortSignal.timeout(STRIPE_REQUEST_TIMEOUT_MS),
     });
 
     if (!res.ok) {

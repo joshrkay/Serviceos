@@ -1,6 +1,7 @@
 import React, { useMemo } from 'react';
 import { TechnicianDayView } from '../../pages/technician/TechnicianDayView';
 import { useMe } from '../../hooks/useMe';
+import { getLocalFlag } from '../../lib/uiFlags';
 
 export function TechnicianDayPage() {
   const { me, isLoading } = useMe();
@@ -15,11 +16,9 @@ export function TechnicianDayPage() {
   // designed empty state rather than "Failed to load appointments".
   // The localStorage override remains for QA/dispatcher impersonation.
   const technicianId = useMemo(() => {
-    if (typeof window !== 'undefined') {
-      const fromStorage = window.localStorage.getItem('serviceos.technicianId');
-      if (fromStorage && fromStorage.trim().length > 0) {
-        return fromStorage;
-      }
+    const fromStorage = getLocalFlag('serviceos.technicianId');
+    if (fromStorage && fromStorage.trim().length > 0) {
+      return fromStorage;
     }
     return me?.internal_user_id ?? null;
   }, [me?.internal_user_id]);

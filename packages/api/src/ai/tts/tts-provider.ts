@@ -75,6 +75,9 @@ export interface TtsProvider {
  * you want a different voice service, swap this class at the
  * `createTtsProvider` factory in app.ts.
  */
+// Upper bound for one blocking synthesize() call across providers.
+const TTS_SYNTH_TIMEOUT_MS = 30_000;
+
 export class OpenAiTtsProvider implements TtsProvider {
   constructor(
     private readonly apiKey: string,
@@ -100,6 +103,9 @@ export class OpenAiTtsProvider implements TtsProvider {
         voice: input.voice ?? defaultVoice,
         response_format: 'mp3',
       }),
+      // fetch has no default timeout — a stalled TTS vendor would hang the
+      // voice turn indefinitely (the streaming path threads its own signal).
+      signal: AbortSignal.timeout(TTS_SYNTH_TIMEOUT_MS),
     });
     if (!res.ok) {
       const body = await res.text().catch(() => '');
@@ -151,6 +157,9 @@ export class ElevenLabsTtsProvider implements TtsProvider {
           model_id: modelId,
           voice_settings: { stability: 0.5, similarity_boost: 0.75 },
         }),
+        // Same bound as OpenAiTtsProvider — never hang a voice turn on a
+        // stalled vendor.
+        signal: AbortSignal.timeout(TTS_SYNTH_TIMEOUT_MS),
       }
     );
     if (!res.ok) {

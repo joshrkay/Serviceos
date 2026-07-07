@@ -244,6 +244,7 @@ export function AppointmentEdit({ appointmentId, onSaved, onBack }: AppointmentE
       {mode === 'reassign' && (
         <ReassignDialog
           appointmentId={appointmentId}
+          jobId={data.jobId}
           initialAssignedUserId={data.assignedUserId}
           onSaved={handleSaved}
           onCancel={() => setMode(null)}

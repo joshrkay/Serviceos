@@ -31,6 +31,21 @@ First run downloads Chromium (~90MB). Cached after that.
 
 These always run. If any fail, something basic is broken in the stack.
 
+### 401 resilience (`no-401-storm.spec.ts`)
+Real-browser regression suite for the 2026-07-06 401-redirect-storm fix.
+Recreates the outage locally — a stubbed signed-in Clerk
+(`helpers/clerk-stub.ts`, zero network egress needed) plus route-mocked 401s
+on every `/api/*` call — then counts what the app does:
+
+- persistent 401s → exactly ONE latched Clerk sign-out, one soft navigation
+  to `/login`, zero further document loads, and a quiet network afterwards
+- a signed-out `/login` fires zero `/api` traffic (identity bridges gated)
+- healthy-API control: the same signed-in boot stays on the app, no sign-out
+
+Runs whenever `VITE_CLERK_PUBLISHABLE_KEY` is set (any syntactically valid
+`pk_test_` works — the stub short-circuits Clerk's script download, so no
+Clerk account or network access is required).
+
 ### Journeys (`journeys/*.spec.ts`)
 All three are currently `test.skip()` — the spec code documents the intended
 test shape, but the test doesn't execute until the preconditions in each

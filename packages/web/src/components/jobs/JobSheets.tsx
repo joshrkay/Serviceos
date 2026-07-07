@@ -40,22 +40,12 @@ export function CallScreen({ name, phone, initials, color, customerId, onEnd }: 
   const [phase, setPhase] = useState<'confirm' | 'calling'>('confirm');
   const [error, setError] = useState<string | null>(null);
 
-  // Log a comms-timeline touch when call is initiated (best-effort)
-  async function logCallTouch() {
-    if (!customerId) return;
-    try {
-      await apiFetch(`/api/customers/${customerId}/timeline/touch`, {
-        method: 'POST',
-        body: JSON.stringify({ kind: 'call_outbound', phone }),
-      });
-    } catch {
-      // Best-effort — don't block the call
-    }
-  }
+  // D1: No timeline/touch API endpoint exists in the API. The tel: link opens
+  // the native dialer; comms logging would require a dedicated route (P-XXX).
+  // For now, we skip the logging call — the call itself is the user action.
 
   function handleCallNow() {
     setPhase('calling');
-    void logCallTouch();
     // Use tel: to open native dialer
     window.location.href = `tel:${phone.replace(/\D/g, '')}`;
     // Auto-close after a short delay (user is now in phone app)
@@ -156,18 +146,40 @@ export function TextSheet({ name, phone, customerId, onClose }: {
     setSending(true);
 
     try {
-      // Get or create the customer conversation thread
-      const threadRes = await apiFetch(`/api/conversations/customer/${customerId}`, {
-        method: 'POST',
-      });
-      if (!threadRes.ok) {
-        const json = await threadRes.json().catch(() => ({}));
-        throw new Error(json?.message ?? `Failed to open thread: HTTP ${threadRes.status}`);
+      // D1: Resolve existing thread via search, create if none exists
+      const searchRes = await apiFetch(
+        `/api/conversations/search?customerId=${encodeURIComponent(customerId)}`,
+        { method: 'GET' },
+      );
+      if (!searchRes.ok) {
+        const json = await searchRes.json().catch(() => ({}));
+        throw new Error(json?.message ?? `Failed to search threads: HTTP ${searchRes.status}`);
       }
-      const { conversation } = await threadRes.json();
+      const { results } = await searchRes.json();
+
+      let conversationId: string;
+      if (results && results.length > 0) {
+        // Use the first matching thread (most recent)
+        conversationId = results[0].conversationId ?? results[0].id;
+      } else {
+        // No existing thread — create one via POST /api/conversations
+        const createRes = await apiFetch('/api/conversations', {
+          method: 'POST',
+          body: JSON.stringify({
+            entityType: 'customer',
+            entityId: customerId,
+          }),
+        });
+        if (!createRes.ok) {
+          const json = await createRes.json().catch(() => ({}));
+          throw new Error(json?.message ?? `Failed to create thread: HTTP ${createRes.status}`);
+        }
+        const created = await createRes.json();
+        conversationId = created.id;
+      }
 
       // Send the message via the reply endpoint
-      const replyRes = await apiFetch(`/api/conversations/${conversation.id}/reply`, {
+      const replyRes = await apiFetch(`/api/conversations/${conversationId}/reply`, {
         method: 'POST',
         body: JSON.stringify({ body: message.trim(), channel: 'sms' }),
       });

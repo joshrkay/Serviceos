@@ -124,8 +124,32 @@ export interface DroppedCallRecoveryRepository {
       context?: DroppedCallRecoveryContext;
     },
   ): Promise<DroppedCallRecoveryRow>;
-  /** Cross-tenant: due rows not yet sent or suppressed (worker drain). */
-  findDue(now: Date, limit: number): Promise<DroppedCallRecoveryRow[]>;
+  /**
+   * Cross-tenant: rows whose scheduled_for is at or before `staleBefore`
+   * (i.e. older than the freshness window) and not yet sent/suppressed. The
+   * worker reaps these terminally as 'expired' in a dedicated pass, so a large
+   * accumulated backlog is drained OUTSIDE the send batch and can never occupy
+   * send-batch slots (starvation guard).
+   */
+  findExpired(staleBefore: Date, limit: number): Promise<DroppedCallRecoveryRow[]>;
+  /**
+   * Cross-tenant: DISTINCT tenant ids with a FRESH due row — scheduled in
+   * `(staleBefore, now]`, not yet sent/suppressed. The worker resolves each
+   * against the per-tenant flag to build the enabled allowlist for the send
+   * batch, so disabled tenants' rows are never fetched into the batch.
+   */
+  findDueTenantIds(now: Date, staleBefore: Date): Promise<string[]>;
+  /**
+   * Cross-tenant: FRESH due rows scoped to `tenantIds`, oldest first — the
+   * actual send batch. Only rows the worker will attempt to send are fetched,
+   * so a flag-disabled tenant's backlog cannot starve enabled tenants.
+   */
+  findDueForTenants(
+    now: Date,
+    staleBefore: Date,
+    tenantIds: string[],
+    limit: number,
+  ): Promise<DroppedCallRecoveryRow[]>;
   /**
    * Tenant-scoped owner lookup read: recovery SMS rows that have been sent
    * and remain actionable. This table has no inbound-reply-consumed column;
@@ -274,14 +298,52 @@ export class InMemoryDroppedCallRecoveryRepository
     return matches[0] ? { ...matches[0] } : null;
   }
 
-  async findDue(now: Date, limit: number): Promise<DroppedCallRecoveryRow[]> {
+  async findExpired(staleBefore: Date, limit: number): Promise<DroppedCallRecoveryRow[]> {
     return this.rows
       .filter(
         (r) =>
           !r.sentAt &&
           !r.suppressedReason &&
-          r.scheduledFor.getTime() <= now.getTime(),
+          r.scheduledFor.getTime() <= staleBefore.getTime(),
       )
+      .sort((a, b) => a.scheduledFor.getTime() - b.scheduledFor.getTime())
+      .slice(0, limit)
+      .map((r) => ({ ...r }));
+  }
+
+  async findDueTenantIds(now: Date, staleBefore: Date): Promise<string[]> {
+    const tenants = new Set<string>();
+    for (const r of this.rows) {
+      if (
+        !r.sentAt &&
+        !r.suppressedReason &&
+        r.scheduledFor.getTime() <= now.getTime() &&
+        r.scheduledFor.getTime() > staleBefore.getTime()
+      ) {
+        tenants.add(r.tenantId);
+      }
+    }
+    return [...tenants];
+  }
+
+  async findDueForTenants(
+    now: Date,
+    staleBefore: Date,
+    tenantIds: string[],
+    limit: number,
+  ): Promise<DroppedCallRecoveryRow[]> {
+    if (tenantIds.length === 0) return [];
+    const allow = new Set(tenantIds);
+    return this.rows
+      .filter(
+        (r) =>
+          !r.sentAt &&
+          !r.suppressedReason &&
+          allow.has(r.tenantId) &&
+          r.scheduledFor.getTime() <= now.getTime() &&
+          r.scheduledFor.getTime() > staleBefore.getTime(),
+      )
+      .sort((a, b) => a.scheduledFor.getTime() - b.scheduledFor.getTime())
       .slice(0, limit)
       .map((r) => ({ ...r }));
   }
@@ -392,11 +454,11 @@ export class PgDroppedCallRecoveryRepository
     });
   }
 
-  async findDue(now: Date, limit: number): Promise<DroppedCallRecoveryRow[]> {
+  async findExpired(staleBefore: Date, limit: number): Promise<DroppedCallRecoveryRow[]> {
     // Cross-tenant drain: the worker is a system process, so we read across
     // tenants via withCrossTenantSweep (named rls_cross_tenant role when
     // enforcement is on) and rely on the per-row tenant_id for the subsequent
-    // tenant-scoped send/stamp.
+    // tenant-scoped stamp.
     return this.withCrossTenantSweep(async (client) => {
       const { rows } = await client.query(
         `SELECT id, tenant_id, voice_session_id, caller_e164,
@@ -408,7 +470,48 @@ export class PgDroppedCallRecoveryRepository
             AND scheduled_for <= $1
           ORDER BY scheduled_for ASC
           LIMIT $2`,
-        [now, limit],
+        [staleBefore, limit],
+      );
+      return rows.map(mapRow);
+    });
+  }
+
+  async findDueTenantIds(now: Date, staleBefore: Date): Promise<string[]> {
+    return this.withCrossTenantSweep(async (client) => {
+      const { rows } = await client.query<{ tenant_id: string }>(
+        `SELECT DISTINCT tenant_id
+           FROM dropped_call_recoveries
+          WHERE sent_at IS NULL
+            AND suppressed_reason IS NULL
+            AND scheduled_for <= $1
+            AND scheduled_for > $2`,
+        [now, staleBefore],
+      );
+      return rows.map((r) => r.tenant_id);
+    });
+  }
+
+  async findDueForTenants(
+    now: Date,
+    staleBefore: Date,
+    tenantIds: string[],
+    limit: number,
+  ): Promise<DroppedCallRecoveryRow[]> {
+    if (tenantIds.length === 0) return [];
+    return this.withCrossTenantSweep(async (client) => {
+      const { rows } = await client.query(
+        `SELECT id, tenant_id, voice_session_id, caller_e164,
+                scheduled_for, sent_at, suppressed_reason,
+                sms_message_sid, context, created_at
+           FROM dropped_call_recoveries
+          WHERE sent_at IS NULL
+            AND suppressed_reason IS NULL
+            AND scheduled_for <= $1
+            AND scheduled_for > $2
+            AND tenant_id = ANY($3::uuid[])
+          ORDER BY scheduled_for ASC
+          LIMIT $4`,
+        [now, staleBefore, tenantIds, limit],
       );
       return rows.map(mapRow);
     });

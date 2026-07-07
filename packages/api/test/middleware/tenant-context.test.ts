@@ -195,12 +195,17 @@ describe('P0-024 — tenant-context middleware (withTenantTransaction)', () => {
     expect(response.status).toBe(200);
     expect(response.body).toEqual({ t: TENANT_A });
 
-    // First three statements on this connection: BEGIN, set_config, SELECT.
+    // Statement order on this connection: BEGIN, tenant set_config, the
+    // transaction-local timeouts (statement_timeout +
+    // idle_in_transaction_session_timeout — PgBouncer-safe via is_local),
+    // then the handler's SELECT.
     const sqls = calls.map((c) => c.sql);
     expect(sqls[0]).toMatch(/^BEGIN/i);
     expect(sqls[1]).toMatch(/set_config\('app\.current_tenant_id'/i);
     expect(calls[1].params[0]).toBe(TENANT_A);
-    expect(sqls[2]).toMatch(/current_setting/i);
+    expect(sqls[2]).toMatch(/set_config\('statement_timeout'/i);
+    expect(sqls[2]).toMatch(/idle_in_transaction_session_timeout/i);
+    expect(sqls[3]).toMatch(/current_setting/i);
     // After the response finishes, COMMIT must run.
     // res.finish handlers run async — wait a tick.
     await new Promise((r) => setImmediate(r));

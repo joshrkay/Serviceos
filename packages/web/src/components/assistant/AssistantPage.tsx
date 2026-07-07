@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useUser } from '@clerk/clerk-react';
 import { apiFetch } from '../../utils/api-fetch';
+import { getLocalFlag, setLocalFlag } from '../../lib/uiFlags';
 import { firstNameFromUser } from '../../utils/greeting';
 import {
   Send, Mic, Paperclip, Sparkles, Check, Zap,
@@ -263,13 +264,28 @@ function MessageBubble({ msg, isLast }: { msg: Message; isLast: boolean }) {
           <div className="mt-2">
             <AIProposalCard
               proposal={msg.proposal}
-              onApprove={async () => {
+              onApprove={async (edits) => {
+                const proposalId = msg.proposal!.id;
+                // If the operator edited fields in the card, persist them
+                // first via the edit endpoint — the approve endpoint takes
+                // no payload and applies the proposal as stored, so without
+                // this the edits are silently discarded. Throw on failure so
+                // AIProposalCard reverts its optimistic "Approved" state.
+                if (edits && Object.keys(edits).length > 0) {
+                  const editRes = await apiFetch(`/api/proposals/${proposalId}`, {
+                    method: 'PUT',
+                    body: JSON.stringify({ edits }),
+                  });
+                  if (!editRes.ok) {
+                    throw new Error(`Saving edits failed: ${editRes.status} ${editRes.statusText}`);
+                  }
+                }
                 // Use apiFetch so the Clerk bearer token is attached — a
                 // bare fetch() sends no Authorization header and the
                 // backend rejects it with 401. Throw on a non-OK response
                 // so AIProposalCard reverts its optimistic "Approved"
                 // state and shows an error instead of faking success.
-                const response = await apiFetch(`/api/proposals/${msg.proposal!.id}/approve`, {
+                const response = await apiFetch(`/api/proposals/${proposalId}/approve`, {
                   method: 'POST',
                 });
                 if (!response.ok) {
@@ -734,6 +750,12 @@ export function AssistantPage() {
   );
 
   const [messages, setMessages]       = useState<Message[]>([]);
+  // Keep the latest messages in a ref so the memoized `send` callback reads
+  // the current history, not the snapshot from the render that created it —
+  // otherwise from the third turn on, the history POSTed to the assistant is
+  // stale and the model loses recent context.
+  const messagesRef = useRef<Message[]>([]);
+  useEffect(() => { messagesRef.current = messages; }, [messages]);
   const [input, setInput]             = useState('');
   const [typing, setTyping]           = useState(false);
   const [typingReason, setTypingReason] = useState('');
@@ -749,7 +771,7 @@ export function AssistantPage() {
     text: string;
     opts?: { inputMode?: 'voice' | 'photo'; voiceDuration?: number; attachments?: Message['attachments'] };
   } | null>(null);
-  const [ttsEnabled, setTtsEnabled]   = useState(() => localStorage.getItem('rivet:tts-enabled') === 'true');
+  const [ttsEnabled, setTtsEnabled]   = useState(() => getLocalFlag('rivet:tts-enabled') === 'true');
   const { speak, stop: stopTTS, isSpeaking } = useTTS({ rate: 1.0 });
   const lastInputWasVoiceRef = useRef(false);
   // UB-B2 — conversation mode. Populated after `send` is defined (the hook
@@ -763,7 +785,7 @@ export function AssistantPage() {
   const [searchParams, setSearchParams] = useSearchParams();
 
   // Derive conversationId from URL param or localStorage
-  const conversationId = searchParams.get('conversationId') || localStorage.getItem('conversationId') || null;
+  const conversationId = searchParams.get('conversationId') || getLocalFlag('conversationId') || null;
   const { data: conversation, isLoading: convLoading, error: convError } =
     useDetailQuery<ApiConversation>('/api/conversations', conversationId);
 
@@ -833,8 +855,10 @@ export function AssistantPage() {
 
     // Snapshot prior chat (before the new user message) to send as
     // context — the server expects the current message appended at
-    // the end of `messages`, not duplicated.
-    const history = messages.map((m) => ({ role: m.role, content: m.content }));
+    // the end of `messages`, not duplicated. Read from the ref so the
+    // history is current even when this memoized callback was created
+    // several turns ago.
+    const history = messagesRef.current.map((m) => ({ role: m.role, content: m.content }));
 
     setMessages(prev => [...prev, userMsg]);
     setInput('');
@@ -854,7 +878,7 @@ export function AssistantPage() {
       // Story 3.11 — pin the server's conversation id so the next turn appends
       // to the same persisted thread (and survives reload).
       if (reply.newConversationId) {
-        localStorage.setItem('conversationId', reply.newConversationId);
+        setLocalFlag('conversationId', reply.newConversationId);
       }
 
       const aiMsg: Message = {
@@ -971,7 +995,7 @@ export function AssistantPage() {
               onClick={() => {
                 const next = !ttsEnabled;
                 setTtsEnabled(next);
-                localStorage.setItem('rivet:tts-enabled', String(next));
+                setLocalFlag('rivet:tts-enabled', String(next));
                 if (!next) stopTTS();
               }}
               className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs transition-colors ${

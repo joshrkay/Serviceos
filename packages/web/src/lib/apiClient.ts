@@ -69,17 +69,62 @@ export function makeUnauthenticatedAbort(): DOMException {
  */
 export function redirectToLogin(): void {
   if (typeof window === 'undefined') return;
+  // Already on the login page: reloading it would restart every root-mounted
+  // fetch and loop /login into itself, so a repeat 401 here is a no-op.
+  if (window.location.pathname.startsWith('/login')) return;
   // Preserve the full path — pathname AND query string — so the login page
   // can return the user exactly where they were, not just to the route root.
   // Hash is intentionally excluded: it is client-only and not round-tripped
   // through the server-side login flow.
-  const pathname = window.location.pathname;
-  const search = window.location.search;
-  // Guard against redirect loops: if we are already on the login page, fall
-  // back to '/' so we never produce redirect=%2Flogin%3Fredirect%3D….
-  const destination = pathname.startsWith('/login') ? '/' : `${pathname}${search}`;
+  const destination = `${window.location.pathname}${window.location.search}`;
   const target = '/login?redirect=' + encodeURIComponent(destination);
   window.location.href = target;
+}
+
+/**
+ * Sign-out handler wired by AuthTokenBridge. On a persistent 401 the Clerk
+ * client session is still valid locally — the server is the one rejecting
+ * it — so bouncing to /login just lets LoginPage's isSignedIn check Navigate
+ * straight back, refiring every fetch in an unbounded app↔login reload loop
+ * (dev-env outage 2026-07-06). Ending the Clerk session before leaving is
+ * the only exit that reconciles client and server state.
+ */
+type SignOutHandler = () => Promise<unknown>;
+
+let signOutHandler: SignOutHandler | null = null;
+let authFailureInFlight = false;
+
+export function setSignOutHandler(fn: SignOutHandler): void {
+  signOutHandler = fn;
+}
+
+/** Test/teardown helper — undo `setSignOutHandler` and reset the latch. */
+export function clearSignOutHandler(): void {
+  signOutHandler = null;
+  authFailureInFlight = false;
+}
+
+/**
+ * Central persistent-401 exit. Ends the Clerk session when a handler is
+ * wired (falling back to a plain login redirect otherwise), and latches so
+ * concurrent 401s from parallel requests trigger exactly one navigation.
+ */
+export async function handleAuthFailure(): Promise<void> {
+  if (typeof window === 'undefined') return;
+  if (window.location.pathname.startsWith('/login')) return;
+  if (authFailureInFlight) return;
+  authFailureInFlight = true;
+  if (signOutHandler) {
+    try {
+      // ClerkProvider's afterSignOutUrl (/login) performs the navigation.
+      await signOutHandler();
+      return;
+    } catch {
+      // Sign-out failed (network, Clerk outage) — fall through to the
+      // plain redirect rather than leaving the user stuck.
+    }
+  }
+  redirectToLogin();
 }
 
 export type ApiFetch = (
@@ -157,8 +202,10 @@ export function useApiClient(): ApiFetch {
           const retry = await fetch(path, { ...init, headers: retryHeaders });
           if (retry.status !== 401) return retry;
         }
-        // Still unauthorized after a refresh attempt — bounce to login.
-        redirectToLogin();
+        // Still unauthorized after a refresh attempt — the server rejects a
+        // session Clerk considers valid. End the session (single exit,
+        // latched across concurrent 401s) instead of blind-redirecting.
+        await handleAuthFailure();
         throw new Error('Unauthorized — redirecting to login');
       }
 

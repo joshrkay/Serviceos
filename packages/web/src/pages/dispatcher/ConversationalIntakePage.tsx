@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useState } from 'react';
+import { toast } from 'sonner';
 import { ConversationalIntake } from './ConversationalIntake';
 import { Message, Proposal, ProposalStatus } from '../../types/conversation';
+import { apiFetch } from '../../utils/api-fetch';
 
 interface AssistantChatReply {
   message?: {
@@ -76,7 +78,7 @@ export function ConversationalIntakePage() {
             content: m.content ?? '',
           }));
 
-        const res = await fetch('/api/assistant/chat', {
+        const res = await apiFetch('/api/assistant/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -139,23 +141,46 @@ export function ConversationalIntakePage() {
       const form = new FormData();
       form.append('file', blob, 'recording.webm');
       if (conversationId !== 'pending') form.append('conversationId', conversationId);
-      await fetch('/api/voice/recordings', { method: 'POST', body: form });
+      try {
+        const res = await apiFetch('/api/voice/recordings', { method: 'POST', body: form });
+        if (!res.ok) throw new Error(`upload failed: ${res.status}`);
+      } catch (err) {
+        toast.error(
+          `Voice note upload failed — ${err instanceof Error ? err.message : 'unknown error'}`,
+        );
+      }
     },
     [conversationId]
   );
 
   const approveProposal = useCallback(async (proposalId: string) => {
-    await fetch(`/api/proposals/${proposalId}/approve`, { method: 'POST' });
-    setProposals((prev) => prev.filter((p) => p.id !== proposalId));
+    try {
+      const res = await apiFetch(`/api/proposals/${proposalId}/approve`, { method: 'POST' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      // Only drop the card once the server confirmed: removing it on
+      // failure showed an approval that never happened.
+      setProposals((prev) => prev.filter((p) => p.id !== proposalId));
+    } catch (err) {
+      toast.error(
+        `Couldn't approve proposal — ${err instanceof Error ? err.message : 'unknown error'}`,
+      );
+    }
   }, []);
 
   const rejectProposal = useCallback(async (proposalId: string) => {
-    await fetch(`/api/proposals/${proposalId}/reject`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ reason: 'dispatcher rejected' }),
-    });
-    setProposals((prev) => prev.filter((p) => p.id !== proposalId));
+    try {
+      const res = await apiFetch(`/api/proposals/${proposalId}/reject`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason: 'dispatcher rejected' }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setProposals((prev) => prev.filter((p) => p.id !== proposalId));
+    } catch (err) {
+      toast.error(
+        `Couldn't reject proposal — ${err instanceof Error ? err.message : 'unknown error'}`,
+      );
+    }
   }, []);
 
   useEffect(() => {

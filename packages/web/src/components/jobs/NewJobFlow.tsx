@@ -691,8 +691,17 @@ export function NewJobFlow({
       setNewCustomerPhone('');
       setNewCustomerEmail('');
       setNewCustomerAddress('');
-    } catch {
-      applyLocalCustomer();
+    } catch (err) {
+      // Surface the failure and keep the form open. Previously this fell back
+      // to a fabricated local customer with a non-UUID id (`c<timestamp>`),
+      // which the API then rejected at job-create time — the user saw a
+      // misleading "couldn't save the job" error and no customer was ever
+      // persisted. Fail honestly at the point of failure instead.
+      setNewCustomerError(
+        err instanceof Error
+          ? `Couldn't save the customer: ${err.message}`
+          : "Couldn't save the customer. Please try again.",
+      );
     }
   }
 

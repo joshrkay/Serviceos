@@ -22,6 +22,16 @@ jobs:
       - name: Install
         run: npm ci
         working-directory: packages/api
+      - name: Verify API key is present
+        run: |
+          if [ -z "$AI_PROVIDER_API_KEY" ]; then
+            echo "::error::MMS vision smoke requires AI_PROVIDER_API_KEY secret. It is empty."
+            echo "This workflow cannot pass without a real API key — skipped tests do not constitute a green gate."
+            exit 1
+          fi
+          echo "API key verified present."
+        env:
+          AI_PROVIDER_API_KEY: ${{ secrets.AI_PROVIDER_API_KEY }}
       - name: Real vision smoke — draft an estimate from a fixture photo
         run: npx vitest run test/smoke/mms-vision-real.test.ts
         working-directory: packages/api
