@@ -1014,3 +1014,111 @@ describe('recovery rate-limiter — integration (phone_rate_limits)', () => {
     expect(await bucketCount(tenant.tenantId)).toBe(1);
   });
 });
+
+/**
+ * P8-015 starvation guard (review fix) — the send batch is scoped to the
+ * enabled-tenant allowlist and stale rows are reaped separately, so a large
+ * disabled-tenant backlog can never occupy the oldest-first LIMIT and delay an
+ * enabled tenant's recovery. Pins the new repo methods against real Postgres.
+ */
+describe('dropped-call recovery — starvation guard (integration)', () => {
+  let pool: Pool;
+  let repo: PgDroppedCallRecoveryRepository;
+  let audit: PgAuditRepository;
+  let tenant: { tenantId: string; userId: string };
+  let platformFlags: PgFeatureFlagRepository;
+
+  const NOW_TS = new Date('2026-06-19T14:00:01.000Z'); // = DUE_AT
+  const FRESH = new Date(NOW_TS.getTime() - 1000);
+  const STALE = new Date(NOW_TS.getTime() - 40 * 60_000);
+
+  beforeAll(async () => {
+    pool = await getSharedTestDb();
+    repo = new PgDroppedCallRecoveryRepository(pool);
+    audit = new PgAuditRepository(pool);
+    platformFlags = new PgFeatureFlagRepository(pool);
+    await platformFlags.list();
+  });
+
+  beforeEach(async () => {
+    tenant = await createTestTenant(pool);
+    await pool.query(
+      `DELETE FROM dropped_call_recoveries WHERE sent_at IS NULL AND suppressed_reason IS NULL`,
+    );
+    await pool.query(`DELETE FROM _feature_flags WHERE name = $1`, [DROPPED_CALL_RECOVERY_FLAG]);
+  });
+
+  afterAll(async () => {
+    await closeSharedTestDb();
+  });
+
+  async function insertRow(tenantId: string, sessionSuffix: string, scheduledFor: Date) {
+    await pool.query(
+      `INSERT INTO dropped_call_recoveries (tenant_id, voice_session_id, caller_e164, scheduled_for)
+       VALUES ($1, $2, $3, $4)`,
+      [tenantId, uuidv4(), `+1555000${sessionSuffix}`, scheduledFor],
+    );
+  }
+
+  it('findExpired returns only stale rows; findDueTenantIds/findDueForTenants only fresh, scoped', async () => {
+    const staleBefore = new Date(NOW_TS.getTime() - 30 * 60_000);
+    await insertRow(tenant.tenantId, '0001', FRESH);
+    await insertRow(tenant.tenantId, '0002', STALE);
+
+    const expired = await repo.findExpired(staleBefore, 100);
+    expect(expired.map((r) => r.callerE164)).toEqual(['+15550000002']);
+
+    const tenants = await repo.findDueTenantIds(NOW_TS, staleBefore);
+    expect(tenants).toContain(tenant.tenantId);
+
+    const fresh = await repo.findDueForTenants(NOW_TS, staleBefore, [tenant.tenantId], 100);
+    expect(fresh.map((r) => r.callerE164)).toEqual(['+15550000001']);
+
+    // Scoping to an unrelated tenant returns nothing.
+    expect(await repo.findDueForTenants(NOW_TS, staleBefore, [uuidv4()], 100)).toHaveLength(0);
+  });
+
+  it('an enabled tenant sends even behind a >batch-size disabled-tenant backlog', async () => {
+    const disabled = await createTestTenant(pool);
+    // 120 disabled rows OLDER than the enabled one — oldest-first would surface
+    // these first and, pre-fix, fill the batch.
+    for (let i = 0; i < 120; i++) {
+      await insertRow(disabled.tenantId, String(1000 + i), new Date(NOW_TS.getTime() - 2000));
+    }
+    await insertRow(tenant.tenantId, '9999', FRESH);
+
+    const tenantFlags = new PgTenantFeatureFlagRepository(pool, platformFlags);
+    await tenantFlags.setTenantFlag(tenant.tenantId, DROPPED_CALL_RECOVERY_FLAG, true);
+    // disabled tenant left off.
+
+    const smsCalls: string[] = [];
+    const result = await runDroppedCallRecoverySweep({
+      repo,
+      handlerDeps: {
+        audit,
+        logger,
+        rateLimit: { check: async () => true, record: async () => undefined },
+        resolvedSince: async () => null,
+        compose: async () => 'We got cut off — reply to pick back up.',
+        sendSms: async (input) => {
+          smsCalls.push(input.tenantId);
+          return `SM_${smsCalls.length}`;
+        },
+      },
+      logger,
+      batchSize: 100,
+      isEnabledForTenant: (t) =>
+        new PgTenantFeatureFlagRepository(pool, platformFlags).isEnabledForTenant(
+          t,
+          DROPPED_CALL_RECOVERY_FLAG,
+        ),
+      now: () => NOW_TS,
+    });
+
+    // The enabled tenant's row sent despite 120 older disabled rows; the
+    // disabled tenant is skipped (its rows never fetched into the batch).
+    expect(result.sent).toBe(1);
+    expect(smsCalls).toEqual([tenant.tenantId]);
+    expect(result.skipped).toBe(1);
+  });
+});

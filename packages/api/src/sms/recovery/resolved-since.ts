@@ -95,10 +95,16 @@ export function createDroppedCallResolvedSince(deps: ResolvedSinceDeps): Resolve
           endedOnly: true,
           limit: CALLBACK_SCAN_LIMIT,
         });
-        const droppedStart = session.startedAt.getTime();
+        // Lower bound is the dropped call's END, not its start: a genuine
+        // call-back is a NEW session begun after the original hung up. Using
+        // startedAt would misclassify a session that began DURING the original
+        // call (a concurrent/overlapping session) as a call-back and wrongly
+        // suppress a legitimate recovery. Fall back to startedAt only if the
+        // ended session somehow lacks endedAt.
+        const droppedEnd = (session.endedAt ?? session.startedAt).getTime();
         for (const candidate of recent) {
           if (candidate.id === voiceSessionId) continue;
-          if (candidate.startedAt.getTime() <= droppedStart) continue;
+          if (candidate.startedAt.getTime() <= droppedEnd) continue;
           const mapped = mapOutcome(candidate);
           if (mapped) return mapped;
         }

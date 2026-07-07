@@ -21,6 +21,7 @@
 import type { Logger } from '../../logging/logger';
 import {
   composeBrandVoiceMessage,
+  trimToMaxChars,
   type ComposeBrandVoiceDeps,
 } from '../../ai/brand-voice/composer';
 import type { RecoveryMessageComposer } from './dropped-call-handler';
@@ -48,11 +49,10 @@ export function recoveryFallbackTemplate(input: {
   if (input.contextCue) parts.push(input.contextCue);
   parts.push("Reply and we'll pick up where we left off.");
   const text = parts.join(' ');
-  if (text.length <= input.maxChars) return text;
-  // Never send a mid-word cut: trim at the last whitespace inside budget.
-  const slice = text.slice(0, input.maxChars);
-  const lastSpace = slice.lastIndexOf(' ');
-  return lastSpace > 0 ? slice.slice(0, lastSpace) : slice;
+  // Reuse the composer's single maxChars authority (surrogate-safe, strips
+  // trailing punctuation, guarantees <= maxChars) rather than a second
+  // hand-rolled truncation that could split an astral char or exceed the cap.
+  return trimToMaxChars(text, input.maxChars);
 }
 
 export function createRecoveryComposer(options: RecoveryComposerOptions): RecoveryMessageComposer {

@@ -116,7 +116,7 @@ describe('recoveryFallbackTemplate', () => {
     ).toBe("Hi — this is Shop. We got cut off on your call. Reply and we'll pick up where we left off.");
   });
 
-  it('respects maxChars without cutting mid-word', () => {
+  it('respects maxChars without cutting mid-word (delegates to trimToMaxChars)', () => {
     const text = recoveryFallbackTemplate({
       businessName: 'A Very Long Business Name LLC',
       contextCue: 'word '.repeat(100).trim(),
@@ -124,8 +124,19 @@ describe('recoveryFallbackTemplate', () => {
     });
     expect(text.length).toBeLessThanOrEqual(120);
     expect(text.endsWith(' ')).toBe(false);
-    // No mid-word cut: the last token is a complete word from the input.
-    const lastToken = text.split(' ').pop();
-    expect(['word', 'call.', 'LLC.']).toContain(lastToken);
+    // No mid-word cut: every whitespace-delimited token is a complete word
+    // from the input (trimToMaxChars may append a "..." marker).
+    for (const token of text.replace(/\.\.\.$/, '').trim().split(' ')) {
+      expect(['Hi', '—', 'this', 'is', 'A', 'Very', 'Long', 'Business', 'Name', 'LLC.', 'We', 'got', 'cut', 'off', 'on', 'your', 'call.', 'word']).toContain(token);
+    }
+  });
+
+  it('never exceeds maxChars even when the cap is tighter than the first word', () => {
+    const text = recoveryFallbackTemplate({
+      businessName: 'Supercalifragilisticexpialidocious Services',
+      contextCue: '',
+      maxChars: 8,
+    });
+    expect(text.length).toBeLessThanOrEqual(8);
   });
 });

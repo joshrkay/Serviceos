@@ -110,6 +110,49 @@ describe('createDroppedCallResolvedSince', () => {
     expect(await check(TENANT, DROPPED_ID)).toBe('booking_completed');
   });
 
+  it('signal 3: a concurrent session that began DURING the call (before it ended) is not a call-back', async () => {
+    // Dropped call ran T0 → T0+2min. A second/overlapping session that started
+    // at T0+1min (while the original was still live) completing must NOT be
+    // treated as a call-back — using startedAt as the bound would false-suppress.
+    const droppedEnd = new Date(T0.getTime() + 2 * 60_000);
+    const during = new Date(T0.getTime() + 60_000);
+    const check = createDroppedCallResolvedSince({
+      voiceSessionRepo: stubSessionRepo([
+        session({ outcome: 'dropped', customerId: 'cust-1', startedAt: T0, endedAt: droppedEnd }),
+        session({
+          id: 'vs-concurrent',
+          outcome: 'completed',
+          customerId: 'cust-1',
+          startedAt: during,
+          endedAt: new Date(during.getTime() + 30_000),
+        }),
+      ]),
+      proposalRepo: stubProposalRepo({}),
+      logger,
+    });
+    expect(await check(TENANT, DROPPED_ID)).toBeNull();
+  });
+
+  it('signal 3: a genuine call-back started AFTER the call ended IS detected', async () => {
+    const droppedEnd = new Date(T0.getTime() + 2 * 60_000);
+    const callback = new Date(droppedEnd.getTime() + 60_000);
+    const check = createDroppedCallResolvedSince({
+      voiceSessionRepo: stubSessionRepo([
+        session({ outcome: 'dropped', customerId: 'cust-1', startedAt: T0, endedAt: droppedEnd }),
+        session({
+          id: 'vs-callback-after-end',
+          outcome: 'completed',
+          customerId: 'cust-1',
+          startedAt: callback,
+          endedAt: new Date(callback.getTime() + 30_000),
+        }),
+      ]),
+      proposalRepo: stubProposalRepo({}),
+      logger,
+    });
+    expect(await check(TENANT, DROPPED_ID)).toBe('booking_completed');
+  });
+
   it('signal 3: a call-back session started BEFORE the drop is ignored', async () => {
     const earlier = new Date(T0.getTime() - 5 * 60_000);
     const check = createDroppedCallResolvedSince({

@@ -206,9 +206,35 @@ export async function handleDroppedCallRecovery(
     idempotencyKey: `dropped_call_recovery:${row.id}`,
   });
 
+  // Stamp the row terminal (and emit the sent audit) IMMEDIATELY after the
+  // send, BEFORE the best-effort record/thread below. If we deferred markSent
+  // to the end and a later step threw, the row would stay pending and the next
+  // sweep would re-process it: the rate-limit token is already consumed so the
+  // re-check stamps it 'rate_limited' (ledger says suppressed for a message
+  // that was delivered), and the threader would append a SECOND outbound
+  // message to the inbox. Stamping first closes both. markSent's
+  // `sent_at IS NULL` guard keeps a post-send markSent-retry safe, and the
+  // Twilio idempotency key collapses the re-send.
+  await deps.repo.markSent(row.tenantId, row.id, smsMessageSid, now());
+  await deps.audit.create(
+    createAuditEvent({
+      tenantId: row.tenantId,
+      actorId,
+      actorRole: 'system',
+      eventType: 'dropped_call_recovery.sent',
+      entityType: 'voice_session',
+      entityId: row.voiceSessionId,
+      metadata: {
+        recoveryId: row.id,
+        smsMessageSid,
+        hadContextCue: contextCue.length > 0,
+      },
+    }),
+  );
+
   // Record the rate-limit consumption now that the SMS has actually gone out.
-  // Best-effort: the message is already sent, so a record failure must not roll
-  // it back (we'd re-send on retry); the only cost is a slightly looser limit.
+  // Best-effort and post-terminal: the row is already stamped sent, so a
+  // record failure is never retried (the only cost is a slightly looser limit).
   try {
     await deps.rateLimit.record(row.tenantId, row.callerE164);
   } catch (err) {
@@ -229,8 +255,9 @@ export async function handleDroppedCallRecovery(
         body,
       });
     } catch (err) {
-      // Threading is best-effort: the SMS already went out, so a link failure
-      // must not roll it back (we'd re-send on retry). Log + continue.
+      // Threading is best-effort and post-terminal: a failure here is logged,
+      // never retried (the row is already sent), so it can't duplicate the
+      // inbox message.
       deps.logger.warn('dropped-call recovery threading failed', {
         tenantId: row.tenantId,
         voiceSessionId: row.voiceSessionId,
@@ -238,23 +265,6 @@ export async function handleDroppedCallRecovery(
       });
     }
   }
-
-  await deps.repo.markSent(row.tenantId, row.id, smsMessageSid, now());
-  await deps.audit.create(
-    createAuditEvent({
-      tenantId: row.tenantId,
-      actorId,
-      actorRole: 'system',
-      eventType: 'dropped_call_recovery.sent',
-      entityType: 'voice_session',
-      entityId: row.voiceSessionId,
-      metadata: {
-        recoveryId: row.id,
-        smsMessageSid,
-        hadContextCue: contextCue.length > 0,
-      },
-    }),
-  );
 
   deps.logger.info('dropped-call recovery SMS sent', {
     tenantId: row.tenantId,

@@ -68,7 +68,11 @@ export class PgConversationLinkRepository
             AND conversation_id = $1 AND entity_type = $2 AND entity_id = $3`,
         [link.conversationId, link.entityType, link.entityId],
       );
-      return mapRow(existing.rows[0]);
+      // Guard the rare read-committed race where a concurrent delete removed the
+      // conflicting row between our INSERT (0 rows) and this SELECT (0 rows):
+      // return the intended link rather than dereferencing undefined and
+      // crashing the (best-effort) threading pass.
+      return existing.rows[0] ? mapRow(existing.rows[0]) : { ...link };
     });
   }
 

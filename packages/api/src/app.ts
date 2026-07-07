@@ -609,7 +609,6 @@ import {
   DROPPED_CALL_RECOVERY_FLAG,
 } from './workers/dropped-call-worker';
 import { PgConversationLinkRepository } from './conversations/pg-conversation-link';
-import { InMemoryConversationLinkRepository } from './conversations/linkage';
 import {
   PgConsentEventRepository,
   InMemoryConsentEventRepository,
@@ -4866,23 +4865,22 @@ export function createApp(): express.Express {
   // 30s cadence (not 60s): the product promise is "~60s after the drop";
   // rows are scheduled 60s out, so a 30s tick keeps worst-case latency
   // ≈90s instead of ≈2× the promise.
-  if (messageDelivery) {
+  // Gated on `pool` too, not just messageDelivery: with Twilio creds set but
+  // no DATABASE_URL, messageDelivery is the REAL provider while the sweep would
+  // otherwise install an always-allow rate-limiter stub — sending recovery SMS
+  // with the one-per-caller cap silently disabled. No pool ⇒ no cross-process
+  // limiter ⇒ don't run the sweep at all (matches PhoneRateLimiter's
+  // no-in-memory-fallback rule).
+  if (messageDelivery && pool) {
     const droppedCallLogger = createLogger({
       service: 'dropped-call-worker',
       environment: process.env.NODE_ENV || 'development',
     });
-    const conversationLinkRepo = pool
-      ? new PgConversationLinkRepository(pool)
-      : new InMemoryConversationLinkRepository();
+    const conversationLinkRepo = new PgConversationLinkRepository(pool);
     const recoveryHandlerDeps: Omit<DroppedCallHandlerDeps, 'repo'> = {
       audit: auditRepo,
       logger: droppedCallLogger,
-      // Postgres-backed cross-process limiter; in-memory dev has no pool, so
-      // the sweep only runs against real infrastructure when it can enforce
-      // the one-SMS-per-caller cap (mirrors the limiter's no-fallback rule).
-      rateLimit: pool
-        ? createRecoveryRateLimiter(new PhoneRateLimiter(pool), droppedCallLogger)
-        : { check: async () => true, record: async () => undefined },
+      rateLimit: createRecoveryRateLimiter(new PhoneRateLimiter(pool), droppedCallLogger),
       resolvedSince: createDroppedCallResolvedSince({
         voiceSessionRepo,
         proposalRepo,
@@ -4908,11 +4906,16 @@ export function createApp(): express.Express {
       sendSms: async ({ tenantId, to, body, idempotencyKey }) =>
         (await messageDelivery.sendSms({ to, body, tenantId, idempotencyKey }))
           .providerMessageId,
+      // NOTE: no leadRepo — the dropped CALL is the lead-generating event and
+      // is captured (source 'phone_call') by the inbound-call path. Passing
+      // leadRepo here would make the OUTBOUND recovery SMS mint a lead with
+      // inbound-text provenance ('system:sms-capture', source 'sms') and fire a
+      // misleading "new text lead" owner push. Unknown callers thread under
+      // sms_unmatched instead — still visible in the inbox, correct provenance.
       thread: createRecoveryThreader({
         conversationRepo,
         conversationLinkRepo,
         customerRepo,
-        leadRepo,
         auditRepo,
         logger: droppedCallLogger,
       }),
