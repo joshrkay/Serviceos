@@ -55,6 +55,51 @@ export async function setTenantContext(pool: Pool, tenantId: string): Promise<Po
 }
 
 /**
+ * Unprivileged role for RLS-policy assertions. The testcontainer's default
+ * user is a SUPERUSER (bypasses RLS), so any isolation assertion run as the
+ * default user tests the application's WHERE-clause, not the policy. Reads/
+ * writes routed through {@link asTenant} run under this NOBYPASSRLS role, so
+ * the policy itself is the only thing gating cross-tenant access — drop the
+ * policy and the assertion fails. Mirrors rls-tenant-isolation.test.ts.
+ */
+export const RLS_APP_ROLE = 'rls_app_runtime';
+
+/** Create the unprivileged app role (idempotent) and grant table DML. */
+export async function ensureRlsAppRole(pool: Pool): Promise<void> {
+  await pool.query(`DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${RLS_APP_ROLE}') THEN
+      CREATE ROLE ${RLS_APP_ROLE} NOLOGIN NOBYPASSRLS;
+    END IF;
+  END $$;`);
+  await pool.query(`GRANT USAGE ON SCHEMA public TO ${RLS_APP_ROLE}`);
+  await pool.query(
+    `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ${RLS_APP_ROLE}`,
+  );
+}
+
+/**
+ * Run `fn` under the unprivileged RLS role with the tenant GUC set, inside a
+ * transaction that is always rolled back (reads only need the policy applied;
+ * writes are discarded). Call {@link ensureRlsAppRole} once in beforeAll.
+ */
+export async function asTenant<T>(
+  pool: Pool,
+  tenantId: string,
+  fn: (client: PoolClient) => Promise<T>,
+): Promise<T> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(`SET LOCAL ROLE ${RLS_APP_ROLE}`);
+    await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
+    return await fn(client);
+  } finally {
+    await client.query('ROLLBACK').catch(() => undefined);
+    client.release();
+  }
+}
+
+/**
  * Insert a `files` row and return its id. Useful as the FK target for
  * `voice_recordings.file_id` (and other entity tables that FK into
  * files). Defaults are intentionally generic so individual tests can

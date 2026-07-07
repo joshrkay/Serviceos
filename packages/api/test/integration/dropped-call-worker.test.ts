@@ -22,9 +22,15 @@
  * so the SQL the worker actually executes is pinned end-to-end.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { Pool, PoolClient } from 'pg';
+import { Pool } from 'pg';
 import { v4 as uuidv4 } from 'uuid';
-import { closeSharedTestDb, createTestTenant, getSharedTestDb } from './shared';
+import {
+  asTenant,
+  closeSharedTestDb,
+  createTestTenant,
+  ensureRlsAppRole,
+  getSharedTestDb,
+} from './shared';
 import {
   runDroppedCallRecoverySweep,
   DROPPED_CALL_RECOVERY_FLAG,
@@ -39,6 +45,7 @@ import { createRecoveryRateLimiter } from '../../src/sms/recovery/recovery-rate-
 import { createDroppedCallResolvedSince } from '../../src/sms/recovery/resolved-since';
 import { createRecoveryThreader } from '../../src/sms/recovery/recovery-threader';
 import { createRecoveryComposer } from '../../src/sms/recovery/recovery-composer';
+import { createRecoveryComplianceGate } from '../../src/sms/recovery/recovery-compliance';
 import { createInboundCaptureHandler } from '../../src/sms/inbound-capture';
 import { PgFeatureFlagRepository } from '../../src/flags/pg-feature-flags';
 import { PgTenantFeatureFlagRepository } from '../../src/flags/pg-tenant-feature-flags';
@@ -159,42 +166,6 @@ async function scheduleRow(
   return voiceSessionId;
 }
 
-/**
- * Unprivileged role + GUC pattern mirrored from rls-tenant-isolation.test.ts.
- * The testcontainer's default user is a SUPERUSER (bypasses RLS), so any
- * isolation assertion that runs as the default user is testing the
- * application's WHERE-clause, not the policy. Running through asTenant under
- * this unprivileged NOBYPASSRLS role makes the policy itself the only thing
- * gating cross-tenant reads — if the policy were dropped, the assertion fails.
- */
-const APP_ROLE = 'rls_app_runtime';
-
-async function ensureRlsAppRole(pool: Pool): Promise<void> {
-  await pool.query(`DO $$ BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${APP_ROLE}') THEN
-      CREATE ROLE ${APP_ROLE} NOLOGIN NOBYPASSRLS;
-    END IF;
-  END $$;`);
-  await pool.query(`GRANT USAGE ON SCHEMA public TO ${APP_ROLE}`);
-  await pool.query(`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ${APP_ROLE}`);
-}
-
-async function asTenant<T>(
-  pool: Pool,
-  tenantId: string,
-  fn: (client: PoolClient) => Promise<T>,
-): Promise<T> {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    await client.query(`SET LOCAL ROLE ${APP_ROLE}`);
-    await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
-    return await fn(client);
-  } finally {
-    await client.query('ROLLBACK').catch(() => undefined);
-    client.release();
-  }
-}
 
 describe('dropped-call recovery worker — integration', () => {
   let pool: Pool;
@@ -670,13 +641,10 @@ describe('dropped-call recovery — end-to-end wiring (flag gate + production ad
         proposalRepo: new PgProposalRepository(pool),
         logger,
       }),
-      preSendSuppress: async (row) =>
-        (await new PgDncRepository(pool).isOnDnc(
-          row.tenantId,
-          row.callerE164.replace(/\D/g, ''),
-        ))
-          ? 'opted_out'
-          : null,
+      preSendSuppress: createRecoveryComplianceGate({
+        dncRepo: new PgDncRepository(pool),
+        customerRepo: new PgCustomerRepository(pool),
+      }),
       compose: createRecoveryComposer({
         composerDeps: {
           gateway: { complete: async () => ({ content: 'unused', model: 'x', provider: 'x', tokenUsage: { input: 0, output: 0, total: 0 }, latencyMs: 0 }) } as never,
@@ -795,6 +763,59 @@ describe('dropped-call recovery — end-to-end wiring (flag gate + production ad
       [voiceSessionId],
     );
     expect(rows[0].suppressed_reason).toBe('opted_out');
+  });
+
+  it('a known customer who explicitly revoked consent is suppressed (not on DNC)', async () => {
+    const callerE164 = '+15556660007';
+    const voiceSessionId = await scheduleRow(pool, tenant.tenantId, callerE164);
+    // A customer on this number with consent_status='revoked' but NOT on the
+    // DNC list — the defense-in-depth explicit-revoke branch must block.
+    await pool.query(
+      `INSERT INTO customers (id, tenant_id, first_name, last_name, display_name, primary_phone, consent_status, created_by)
+       VALUES ($1, $2, 'Rev', 'Oked', 'Rev Oked', $3, 'revoked', $4)`,
+      [uuidv4(), tenant.tenantId, callerE164, tenant.userId],
+    );
+    const tenantFlags = new PgTenantFeatureFlagRepository(pool, platformFlags);
+    await tenantFlags.setTenantFlag(tenant.tenantId, DROPPED_CALL_RECOVERY_FLAG, true);
+
+    const smsCalls: CapturedSms[] = [];
+    const result = await runDroppedCallRecoverySweep({
+      repo,
+      handlerDeps: productionDeps(smsCalls),
+      logger,
+      isEnabledForTenant: flagGate(),
+      now: () => DUE_AT,
+    });
+    expect(result.suppressed).toBe(1);
+    expect(smsCalls).toHaveLength(0);
+    const { rows } = await pool.query(
+      `SELECT suppressed_reason FROM dropped_call_recoveries WHERE voice_session_id = $1`,
+      [voiceSessionId],
+    );
+    expect(rows[0].suppressed_reason).toBe('opted_out');
+  });
+
+  it('a known customer with granted consent (not on DNC) receives the recovery', async () => {
+    const callerE164 = '+15556660008';
+    await scheduleRow(pool, tenant.tenantId, callerE164);
+    await pool.query(
+      `INSERT INTO customers (id, tenant_id, first_name, last_name, display_name, primary_phone, consent_status, created_by)
+       VALUES ($1, $2, 'Grant', 'Ed', 'Grant Ed', $3, 'granted', $4)`,
+      [uuidv4(), tenant.tenantId, callerE164, tenant.userId],
+    );
+    const tenantFlags = new PgTenantFeatureFlagRepository(pool, platformFlags);
+    await tenantFlags.setTenantFlag(tenant.tenantId, DROPPED_CALL_RECOVERY_FLAG, true);
+
+    const smsCalls: CapturedSms[] = [];
+    const result = await runDroppedCallRecoverySweep({
+      repo,
+      handlerDeps: productionDeps(smsCalls),
+      logger,
+      isEnabledForTenant: flagGate(),
+      now: () => DUE_AT,
+    });
+    expect(result.sent).toBe(1);
+    expect(smsCalls).toHaveLength(1);
   });
 
   it('concurrent sweeps: no SKIP LOCKED means both may fetch, but markSent is single-winner and both sends share one idempotency key', async () => {

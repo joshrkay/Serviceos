@@ -71,46 +71,51 @@ export function createRecoveryThreader(deps: RecoveryThreaderDeps): RecoveryThre
       },
     );
 
-    await deps.conversationRepo.addMessage({
-      tenantId,
-      conversationId: conversation.id,
-      messageType: 'text',
-      content: body,
-      senderId: DEFAULT_SYSTEM_ACTOR,
-      senderRole: 'system',
-      source: 'sms',
-      metadata: {
-        direction: 'outbound',
-        channel: 'sms',
-        messageSid: smsMessageSid,
-        voiceSessionId,
-        toE164: callerE164,
-        ...(target.customerId ? { customerId: target.customerId } : {}),
-        ...(target.leadId ? { leadId: target.leadId } : {}),
-      },
-    });
-
-    // P0-037 links: idempotent on the four-column unique key, so a retried
-    // threading pass re-links without duplicating.
-    await linkConversation(
-      {
+    // The outbound message and the two P0-037 links are independent (each only
+    // needs conversation.id, already in hand) — write them concurrently. Links
+    // are idempotent on the four-column unique key, so a retried threading pass
+    // re-links without duplicating.
+    await Promise.all([
+      deps.conversationRepo.addMessage({
         tenantId,
         conversationId: conversation.id,
-        entityType: 'voice_session',
-        entityId: voiceSessionId,
-      },
-      deps.conversationLinkRepo,
-    );
-    await linkConversation(
-      {
-        tenantId,
-        conversationId: conversation.id,
-        entityType: 'sms_conversation',
-        entityId: smsMessageSid,
-      },
-      deps.conversationLinkRepo,
-    );
+        messageType: 'text',
+        content: body,
+        senderId: DEFAULT_SYSTEM_ACTOR,
+        senderRole: 'system',
+        source: 'sms',
+        metadata: {
+          direction: 'outbound',
+          channel: 'sms',
+          messageSid: smsMessageSid,
+          voiceSessionId,
+          toE164: callerE164,
+          ...(target.customerId ? { customerId: target.customerId } : {}),
+          ...(target.leadId ? { leadId: target.leadId } : {}),
+        },
+      }),
+      linkConversation(
+        {
+          tenantId,
+          conversationId: conversation.id,
+          entityType: 'voice_session',
+          entityId: voiceSessionId,
+        },
+        deps.conversationLinkRepo,
+      ),
+      linkConversation(
+        {
+          tenantId,
+          conversationId: conversation.id,
+          entityType: 'sms_conversation',
+          entityId: smsMessageSid,
+        },
+        deps.conversationLinkRepo,
+      ),
+    ]);
 
+    // Audit last, as the completion marker — only written once the three
+    // writes above have landed.
     await deps.auditRepo.create(
       createAuditEvent({
         tenantId,

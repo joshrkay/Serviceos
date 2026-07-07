@@ -16,7 +16,6 @@
  */
 import type { Logger } from '../logging/logger';
 import {
-  DEFAULT_SYSTEM_ACTOR,
   handleDroppedCallRecovery,
   suppress,
   type DroppedCallHandlerDeps,
@@ -92,7 +91,6 @@ export async function runDroppedCallRecoverySweep(
   const batchSize = deps.batchSize ?? DROPPED_CALL_SWEEP_BATCH;
   const maxAgeMs = deps.maxAgeMs ?? DROPPED_CALL_MAX_AGE_MS;
   const fullDeps: DroppedCallHandlerDeps = { repo: deps.repo, ...deps.handlerDeps };
-  const actorId = deps.handlerDeps.systemActorId ?? DEFAULT_SYSTEM_ACTOR;
   // Snapshot the clock once so the stale/fresh boundary is judged against the
   // same instant that selects the batch (a per-row clock read would let a
   // row's due-vs-expired classification drift as the batch is processed).
@@ -115,7 +113,7 @@ export async function runDroppedCallRecoverySweep(
     const stale = await deps.repo.findExpired(staleBefore, batchSize);
     for (const row of stale) {
       try {
-        await suppress(row, 'expired', fullDeps, actorId);
+        await suppress(row, 'expired', fullDeps);
         expired++;
       } catch (err) {
         failed++;

@@ -603,6 +603,7 @@ import type { DroppedCallHandlerDeps } from './sms/recovery/dropped-call-handler
 import { createRecoveryRateLimiter } from './sms/recovery/recovery-rate-limiter';
 import { createDroppedCallResolvedSince } from './sms/recovery/resolved-since';
 import { createRecoveryComposer } from './sms/recovery/recovery-composer';
+import { createRecoveryComplianceGate } from './sms/recovery/recovery-compliance';
 import { createRecoveryThreader } from './sms/recovery/recovery-threader';
 import {
   runDroppedCallRecoverySweep,
@@ -4886,12 +4887,11 @@ export function createApp(): express.Express {
         proposalRepo,
         logger: droppedCallLogger,
       }),
-      // Compliance gate: a caller who texted STOP between the drop and the
-      // send must never receive the recovery SMS.
-      preSendSuppress: async (row) =>
-        (await dncRepo.isOnDnc(row.tenantId, normalizePhone(row.callerE164)))
-          ? 'opted_out'
-          : null,
+      // Compliance gate (customer-initiated SMS policy, mirrors reply-service):
+      // DNC is the absolute block (STOP lands here), plus a defense-in-depth
+      // explicit-revoke check for a known customer. Never blocks on unset
+      // consent, so unknown callers aren't over-suppressed.
+      preSendSuppress: createRecoveryComplianceGate({ dncRepo, customerRepo }),
       compose: createRecoveryComposer({
         composerDeps: { gateway: llmGateway, settingsRepo, standingInstructionRepo },
         businessName: process.env.TWILIO_BUSINESS_NAME ?? 'our team',

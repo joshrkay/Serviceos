@@ -11,42 +11,17 @@
  *      links.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { Pool, PoolClient } from 'pg';
+import { Pool } from 'pg';
 import { v4 as uuidv4 } from 'uuid';
-import { closeSharedTestDb, createTestTenant, getSharedTestDb } from './shared';
+import {
+  asTenant,
+  closeSharedTestDb,
+  createTestTenant,
+  ensureRlsAppRole,
+  getSharedTestDb,
+} from './shared';
 import { PgConversationLinkRepository } from '../../src/conversations/pg-conversation-link';
 import { linkConversation } from '../../src/conversations/linkage';
-
-const APP_ROLE = 'rls_app_runtime';
-
-async function ensureRlsAppRole(pool: Pool): Promise<void> {
-  await pool.query(`DO $$ BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${APP_ROLE}') THEN
-      CREATE ROLE ${APP_ROLE} NOLOGIN NOBYPASSRLS;
-    END IF;
-  END $$;`);
-  await pool.query(`GRANT USAGE ON SCHEMA public TO ${APP_ROLE}`);
-  await pool.query(
-    `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ${APP_ROLE}`,
-  );
-}
-
-async function asTenant<T>(
-  pool: Pool,
-  tenantId: string,
-  fn: (client: PoolClient) => Promise<T>,
-): Promise<T> {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    await client.query(`SET LOCAL ROLE ${APP_ROLE}`);
-    await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
-    return await fn(client);
-  } finally {
-    await client.query('ROLLBACK').catch(() => undefined);
-    client.release();
-  }
-}
 
 describe('conversation_links — integration', () => {
   let pool: Pool;

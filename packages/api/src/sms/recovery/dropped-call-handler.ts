@@ -156,7 +156,7 @@ export async function handleDroppedCallRecovery(
   // 1. Suppression re-check — booking completed / transferred since the drop.
   const resolved = await deps.resolvedSince(row.tenantId, row.voiceSessionId, row.context);
   if (resolved) {
-    await suppress(row, resolved, deps, actorId);
+    await suppress(row, resolved, deps);
     return { action: 'suppressed', reason: resolved };
   }
 
@@ -166,7 +166,7 @@ export async function handleDroppedCallRecovery(
   if (deps.preSendSuppress) {
     const complianceReason = await deps.preSendSuppress(row);
     if (complianceReason) {
-      await suppress(row, complianceReason, deps, actorId);
+      await suppress(row, complianceReason, deps);
       return { action: 'suppressed', reason: complianceReason };
     }
   }
@@ -176,7 +176,7 @@ export async function handleDroppedCallRecovery(
   //    token and strand the row. The token is recorded after the send succeeds.
   const allowed = await deps.rateLimit.check(row.tenantId, row.callerE164);
   if (!allowed) {
-    await suppress(row, 'rate_limited', deps, actorId);
+    await suppress(row, 'rate_limited', deps);
     return { action: 'suppressed', reason: 'rate_limited' };
   }
 
@@ -285,8 +285,8 @@ export async function suppress(
   row: DroppedCallRecoveryRow,
   reason: string,
   deps: DroppedCallHandlerDeps,
-  actorId: string,
 ): Promise<void> {
+  const actorId = deps.systemActorId ?? DEFAULT_SYSTEM_ACTOR;
   await deps.repo.markSuppressed(row.tenantId, row.id, reason);
   await deps.audit.create(
     createAuditEvent({
