@@ -70,6 +70,28 @@ export function toErrorResponse(err: unknown): { statusCode: number; body: Recor
     };
   }
 
+  // body-parser errors (malformed JSON → 'entity.parse.failed', oversized
+  // payload → 'entity.too.large') are client faults. Reporting them as 500
+  // masks them as server errors — clients then retry a permanently-bad
+  // request and alerting fires on what is really a 400/413. Matched on
+  // body-parser's `type` discriminator (not a generic statusCode field) so
+  // thrown upstream SDK errors keep their existing 500 mapping.
+  if (err && typeof err === 'object' && 'type' in err) {
+    const type = (err as { type?: unknown }).type;
+    if (type === 'entity.too.large') {
+      return {
+        statusCode: 413,
+        body: { error: 'PAYLOAD_TOO_LARGE', message: 'Request payload too large' },
+      };
+    }
+    if (typeof type === 'string' && type.startsWith('entity.')) {
+      return {
+        statusCode: 400,
+        body: { error: 'BAD_REQUEST', message: 'Malformed request body' },
+      };
+    }
+  }
+
   return {
     statusCode: 500,
     body: {

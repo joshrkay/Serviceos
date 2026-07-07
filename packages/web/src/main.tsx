@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client';
 import { ClerkProvider } from '@clerk/clerk-react';
 import { RouterProvider } from 'react-router';
 import { router } from './routes';
+import { ErrorBoundary } from './components/layout/ErrorBoundary';
 import { AuthTokenBridge } from './components/auth/AuthTokenBridge';
 import { AnalyticsIdentityBridge } from './components/auth/AnalyticsIdentityBridge';
 import { TenantTimezoneProvider } from './hooks/useTenantTimezone';
@@ -37,19 +38,24 @@ try {
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <ClerkProvider
-      publishableKey={CLERK_PUBLISHABLE_KEY}
-      clerkJSVersion="5.127.0"
-      signInUrl="/login"
-      signUpUrl="/signup"
-      afterSignOutUrl="/login"
-    >
-      <AuthTokenBridge />
-      <AnalyticsIdentityBridge />
-      <TenantTimezoneProvider>
-        <RouterProvider router={router} />
-      </TenantTimezoneProvider>
-    </ClerkProvider>
+    {/* Outermost boundary: route-level errorElements only cover the routed
+        subtree — a render throw in the providers above RouterProvider would
+        otherwise white-screen the app with no fallback. */}
+    <ErrorBoundary>
+      <ClerkProvider
+        publishableKey={CLERK_PUBLISHABLE_KEY}
+        clerkJSVersion="5.127.0"
+        signInUrl="/login"
+        signUpUrl="/signup"
+        afterSignOutUrl="/login"
+      >
+        <AuthTokenBridge />
+        <AnalyticsIdentityBridge />
+        <TenantTimezoneProvider>
+          <RouterProvider router={router} />
+        </TenantTimezoneProvider>
+      </ClerkProvider>
+    </ErrorBoundary>
   </React.StrictMode>
 );
 

@@ -29,8 +29,18 @@ export interface EscalationEventsDeps {
 export function escalationEventsRouter(deps: EscalationEventsDeps): Router {
   const router = Router();
   router.get('/events', async (req, res) => {
-    const userId = await deps.authUserIdFromRequest(req);
-    const tenantId = await deps.authTenantIdFromRequest(req);
+    // This raw async handler bypasses asyncRoute: a rejected auth lookup
+    // would otherwise escape as an unhandledRejection and leave the
+    // request hanging with no response.
+    let userId: string | null;
+    let tenantId: string | null;
+    try {
+      userId = await deps.authUserIdFromRequest(req);
+      tenantId = await deps.authTenantIdFromRequest(req);
+    } catch {
+      res.status(500).end();
+      return;
+    }
     if (!userId || !tenantId) {
       res.status(401).end();
       return;
@@ -40,8 +50,20 @@ export function escalationEventsRouter(deps: EscalationEventsDeps): Router {
     res.set('Connection', 'keep-alive');
     res.flushHeaders();
 
+    // Writes to a half-closed socket can throw synchronously. The
+    // subscriber below runs inside EventEmitter.emit on session-store
+    // timers, where an uncaught throw escapes to uncaughtException and
+    // kills the process — never let a dead SSE client propagate.
+    const safeWrite = (chunk: string): void => {
+      try {
+        res.write(chunk);
+      } catch {
+        // dead socket — the req 'close' handler detaches us
+      }
+    };
+
     const heartbeat = setInterval(() => {
-      res.write(': hb\n\n');
+      safeWrite(': hb\n\n');
     }, 25_000);
     if (typeof (heartbeat as unknown as { unref?: () => void }).unref === 'function') {
       (heartbeat as unknown as { unref: () => void }).unref();
@@ -51,7 +73,7 @@ export function escalationEventsRouter(deps: EscalationEventsDeps): Router {
       if (evt.type === 'escalation_started') {
         const startedEvt = evt as Extract<VoiceSessionEvent, { type: 'escalation_started' }>;
         if (startedEvt.dispatcherUserId === userId && startedEvt.tenantId === tenantId) {
-          res.write(`data: ${JSON.stringify(startedEvt)}\n\n`);
+          safeWrite(`data: ${JSON.stringify(startedEvt)}\n\n`);
         }
       }
     });
@@ -59,7 +81,11 @@ export function escalationEventsRouter(deps: EscalationEventsDeps): Router {
     req.on('close', () => {
       clearInterval(heartbeat);
       unsubscribe();
-      res.end();
+      try {
+        res.end();
+      } catch {
+        // already closed
+      }
     });
   });
   return router;

@@ -122,7 +122,13 @@ export interface Queue {
 export function createQueueConfig(env: string): QueueConfig {
   return {
     maxRetries: env === 'prod' ? 5 : 3,
-    visibilityTimeout: 30,
+    // First-claim processing window. Slow handlers (media transcription +
+    // LLM correction pass) routinely exceed 30s; the unified poll loop runs
+    // on EVERY replica, so a window shorter than the slowest handler lets a
+    // second replica re-claim an in-flight message and double-process it
+    // (double provider spend, re-fired downstream hooks). Retries back off
+    // exponentially from this base (see PgQueue.receiveBatch).
+    visibilityTimeout: 120,
   };
 }
 

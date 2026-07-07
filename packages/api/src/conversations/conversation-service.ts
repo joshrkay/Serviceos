@@ -251,7 +251,7 @@ export function validateCreateConversation(input: CreateConversationInput): stri
 
 export async function createConversationWithAudit(
   input: CreateConversationInput,
-  repository: ConversationRepository,
+  repository: Pick<ConversationRepository, 'createConversation'>,
   auditRepo?: AuditRepository,
   actorRole?: string,
 ): Promise<Conversation> {

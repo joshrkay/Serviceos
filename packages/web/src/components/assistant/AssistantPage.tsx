@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useUser } from '@clerk/clerk-react';
 import { apiFetch } from '../../utils/api-fetch';
+import { getLocalFlag, setLocalFlag } from '../../lib/uiFlags';
 import { firstNameFromUser } from '../../utils/greeting';
 import {
   Send, Mic, Paperclip, Sparkles, Check, Zap,
@@ -770,7 +771,7 @@ export function AssistantPage() {
     text: string;
     opts?: { inputMode?: 'voice' | 'photo'; voiceDuration?: number; attachments?: Message['attachments'] };
   } | null>(null);
-  const [ttsEnabled, setTtsEnabled]   = useState(() => localStorage.getItem('rivet:tts-enabled') === 'true');
+  const [ttsEnabled, setTtsEnabled]   = useState(() => getLocalFlag('rivet:tts-enabled') === 'true');
   const { speak, stop: stopTTS, isSpeaking } = useTTS({ rate: 1.0 });
   const lastInputWasVoiceRef = useRef(false);
   // UB-B2 — conversation mode. Populated after `send` is defined (the hook
@@ -784,7 +785,7 @@ export function AssistantPage() {
   const [searchParams, setSearchParams] = useSearchParams();
 
   // Derive conversationId from URL param or localStorage
-  const conversationId = searchParams.get('conversationId') || localStorage.getItem('conversationId') || null;
+  const conversationId = searchParams.get('conversationId') || getLocalFlag('conversationId') || null;
   const { data: conversation, isLoading: convLoading, error: convError } =
     useDetailQuery<ApiConversation>('/api/conversations', conversationId);
 
@@ -877,7 +878,7 @@ export function AssistantPage() {
       // Story 3.11 — pin the server's conversation id so the next turn appends
       // to the same persisted thread (and survives reload).
       if (reply.newConversationId) {
-        localStorage.setItem('conversationId', reply.newConversationId);
+        setLocalFlag('conversationId', reply.newConversationId);
       }
 
       const aiMsg: Message = {
@@ -994,7 +995,7 @@ export function AssistantPage() {
               onClick={() => {
                 const next = !ttsEnabled;
                 setTtsEnabled(next);
-                localStorage.setItem('rivet:tts-enabled', String(next));
+                setLocalFlag('rivet:tts-enabled', String(next));
                 if (!next) stopTTS();
               }}
               className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs transition-colors ${

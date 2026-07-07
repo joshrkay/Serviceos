@@ -31,8 +31,17 @@ export class PgIdempotencyLockProvider implements IdempotencyLockProvider {
       await client.query('SELECT pg_advisory_lock($1::int, $2::int)', [k1, k2]);
       return await fn();
     } finally {
-      await client.query('SELECT pg_advisory_unlock($1::int, $2::int)', [k1, k2]);
-      client.release();
+      try {
+        await client.query('SELECT pg_advisory_unlock($1::int, $2::int)', [k1, k2]);
+        client.release();
+      } catch {
+        // Unlock failed (broken connection / server restart). Destroy the
+        // connection instead of returning it: a pooled client that still
+        // holds the session-level advisory lock would both leak the slot
+        // and block every other holder of this key. Disconnecting releases
+        // the advisory lock server-side.
+        client.release(true);
+      }
     }
   }
 }

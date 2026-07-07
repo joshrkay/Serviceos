@@ -97,7 +97,16 @@ export class DispatchBoardEventBus {
     const set = this.listeners.get(subKey(tenantId, event.date));
     if (!set) return;
     for (const listener of set) {
-      listener(event);
+      // Isolate listeners: one throwing subscriber (e.g. an SSE write to a
+      // dead socket) must not abort fan-out to its siblings or propagate
+      // into the publisher's stack.
+      try {
+        listener(event);
+      } catch (err) {
+        process.stderr.write(
+          `dispatch board listener failed: ${err instanceof Error ? err.message : String(err)}\n`
+        );
+      }
     }
   }
 

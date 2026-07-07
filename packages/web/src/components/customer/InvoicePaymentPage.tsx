@@ -10,7 +10,7 @@ import {
   useElements,
   useStripe,
 } from '@stripe/react-stripe-js';
-import { loadStripe, Stripe } from '@stripe/stripe-js';
+import { loadStripe, Stripe, type PaymentIntentResult } from '@stripe/stripe-js';
 import { useInvoiceStatus } from '../../hooks/useInvoiceStatus';
 import { getRuntimeConfigValue } from '../../lib/runtimeConfig';
 import { formatCurrencyAmount } from '../../utils/currency';
@@ -230,13 +230,25 @@ function PaymentForm({
     if (!stripe || !elements || status === 'processing') return;
     setStatus('processing');
     setErrorMessage(null);
-    const result = await stripe.confirmPayment({
-      elements,
-      confirmParams: {
-        return_url: `${window.location.origin}${window.location.pathname}?success=true`,
-      },
-      redirect: 'if_required',
-    });
+    // confirmPayment normally resolves with { error }, but it can REJECT on a
+    // network drop or Stripe.js internal failure — without this catch the
+    // status stays 'processing' and the Pay button locks forever.
+    let result: PaymentIntentResult;
+    try {
+      result = await stripe.confirmPayment({
+        elements,
+        confirmParams: {
+          return_url: `${window.location.origin}${window.location.pathname}?success=true`,
+        },
+        redirect: 'if_required',
+      });
+    } catch {
+      setStatus('failed');
+      setErrorMessage(
+        'Payment could not be processed. Please check your connection and try again.',
+      );
+      return;
+    }
     if (result.error) {
       setStatus('failed');
       setErrorMessage(

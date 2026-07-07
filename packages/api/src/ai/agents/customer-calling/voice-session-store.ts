@@ -658,10 +658,21 @@ export class VoiceSessionStore {
     for (const [id, session] of this.sessions) {
       const idleMs = now - session.lastActivityAt.getTime();
       if (idleMs >= this.idleTtlMs) {
-        session.events.emit('voice-event', {
-          type: 'ended',
-          reason: 'idle_timeout',
-        } satisfies VoiceSessionEvent);
+        // emit() runs listeners synchronously on this timer's stack — with
+        // no request context around it, a throwing listener (SSE write to a
+        // half-closed socket, transport publish) would escape the interval
+        // callback as an uncaughtException and kill the process. One bad
+        // sink must not stop the sweep or take down other tenants' calls.
+        try {
+          session.events.emit('voice-event', {
+            type: 'ended',
+            reason: 'idle_timeout',
+          } satisfies VoiceSessionEvent);
+        } catch (err) {
+          process.stderr.write(
+            `voice-session reap listener failed: ${err instanceof Error ? err.message : String(err)}\n`
+          );
+        }
         this.delete(id);
         reaped.push(id);
       }

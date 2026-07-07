@@ -154,7 +154,10 @@ export interface WebhookRouterDeps {
   queue?: Queue;
   appBaseUrl?: string;
   webhookEventRepo?: {
-    recordReceipt(provider: string, eventId: string, eventType: string, payload: Record<string, unknown>): Promise<{ inserted: boolean }>;
+    // `record` carries the existing row on conflict (PgWebhookEventRepository
+    // always returns it); optional so lightweight fakes can omit it — an
+    // absent record is treated as "not yet processed" (reprocess).
+    recordReceipt(provider: string, eventId: string, eventType: string, payload: Record<string, unknown>): Promise<{ inserted: boolean; record?: { processedAt?: Date | null } }>;
     markProcessed(provider: string, eventId: string): Promise<void>;
   };
   auditRepo?: AuditRepository;
@@ -444,6 +447,9 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                     body: JSON.stringify({
                       public_metadata: { tenant_id: pending.tenantId, role: pending.role },
                     }),
+                    // Bounded: a Clerk stall would otherwise hang this
+                    // already-committed webhook while Clerk retries pile up.
+                    signal: AbortSignal.timeout(10_000),
                   });
                 } catch (err) {
                   logger.error('Clerk public_metadata sync failed (invitee path)', {
@@ -630,6 +636,8 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                 body: JSON.stringify({
                   public_metadata: { tenant_id: result.tenantId, role: 'owner' },
                 }),
+                // Bounded like the invitee-path sync above.
+                signal: AbortSignal.timeout(10_000),
               });
               if (!clerkRes.ok) {
                 const errBody = await clerkRes.text();
@@ -2115,14 +2123,21 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
     if (!eventId) return res.status(400).json({ error: 'Missing MessageSid/CallSid' });
     if (deps.webhookEventRepo) {
       const rec = await deps.webhookEventRepo.recordReceipt('twilio', eventId, kind, req.body ?? {});
-      if (!rec.inserted) return res.status(200).json({ received: true, duplicate: true });
-      await deps.webhookEventRepo.markProcessed('twilio', eventId);
+      // Short-circuit ONLY on a fully-processed duplicate. A row that exists
+      // but was never marked processed means an earlier delivery died between
+      // receipt and dispatch (process crash) — Twilio's retry is our only
+      // chance to run the handler, so it must fall through. markProcessed is
+      // stamped AFTER dispatch (bottom of this handler) for the same reason:
+      // stamping first turned crashes into permanently-lost messages
+      // (a STOP/HELP keyword or booking reply silently dropped).
+      if (!rec.inserted && rec.record?.processedAt) {
+        return res.status(200).json({ received: true, duplicate: true });
+      }
     }
 
     // P2-034 — Inbound SMS keyword dispatcher. Runs only for inbound SMS
-    // (voice/status callbacks have no body to route on) and only AFTER
-    // markProcessed succeeds, so a duplicate delivery short-circuits before
-    // dispatch. The dispatcher contract guarantees no throw — we still
+    // (voice/status callbacks have no body to route on). The dispatcher
+    // contract guarantees no throw — we still
     // wrap so an unexpected programming error here can never turn into a
     // Twilio 5xx (which would trigger a retry of an already-acknowledged
     // message and re-fire any handler side-effects).
@@ -2184,11 +2199,29 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
       }
     }
 
+    // Processing complete (dispatch + audit) — only now stamp the event so a
+    // crash anywhere above leaves the row 'received' and the retry reprocesses.
+    if (deps.webhookEventRepo) {
+      await deps.webhookEventRepo.markProcessed('twilio', eventId);
+    }
+
     return res.status(200).json({ received: true });
   };
-  router.post('/twilio/voice/:tenantId', (req: Request, res: Response) => void recordTwilio('voice', req, res));
-  router.post('/twilio/sms/:tenantId', (req: Request, res: Response) => void recordTwilio('sms', req, res));
-  router.post('/twilio/status/:tenantId', (req: Request, res: Response) => void recordTwilio('status', req, res));
+  // Catch-all around the async handler: recordTwilio pre-guards the known
+  // throw paths, but an unexpected rejection in a void-dispatched promise
+  // would otherwise leave the request hanging (Twilio waits, times out,
+  // retries) and surface only as a swallowed unhandledRejection.
+  const twilioRoute = (kind: string) => (req: Request, res: Response) =>
+    void recordTwilio(kind, req, res).catch((err) => {
+      logger.error('Twilio webhook handler failed unexpectedly', {
+        kind,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      if (!res.headersSent) res.status(500).json({ error: 'Internal error' });
+    });
+  router.post('/twilio/voice/:tenantId', twilioRoute('voice'));
+  router.post('/twilio/sms/:tenantId', twilioRoute('sms'));
+  router.post('/twilio/status/:tenantId', twilioRoute('status'));
 
   // Vapi inbound-call webhook. Signature-verified (fails closed → 403),
   // idempotent on call id, records the inbound session (drives test-call
@@ -2250,8 +2283,16 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
       await rejectBound(tenantId, 'invalid_signature', { kind: 'sendgrid' });
       return res.status(403).json({ error: 'Forbidden' });
     }
-    const body = Buffer.isBuffer(req.body) ? JSON.parse(req.body.toString('utf8')) : req.body;
-    const first = Array.isArray(body) ? body[0] : body;
+    // Guarded like the Stripe/Clerk routes: a malformed (though correctly
+    // signed) body must 400, not reject the async handler and hang the
+    // request with no response.
+    let body: unknown;
+    try {
+      body = Buffer.isBuffer(req.body) ? JSON.parse(req.body.toString('utf8')) : req.body;
+    } catch {
+      return res.status(400).json({ error: 'Invalid JSON payload' });
+    }
+    const first = (Array.isArray(body) ? body[0] : body) as Record<string, unknown> | undefined;
     const eventId = (first?.sg_event_id as string | undefined) ?? (first?.sg_message_id as string | undefined);
     if (deps.webhookEventRepo && eventId) {
       const rec = await deps.webhookEventRepo.recordReceipt('sendgrid', eventId, 'event', { events: req.body });
