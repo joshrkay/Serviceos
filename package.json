@@ -31,6 +31,7 @@
     "seed:clean": "npm run seed:clean --workspace=packages/api",
     "migrate:dryrun": "npm run migrate:dryrun --workspace=packages/api",
     "e2e": "playwright test",
+    "test:e2e-helpers": "vitest run --config e2e/vitest.config.ts",
     "e2e:smoke": "playwright test e2e/smoke.spec.ts",
     "e2e:coverage-sweep": "COVERAGE_SWEEP=1 playwright test --project=coverage-sweep",
     "e2e:ui": "playwright test --ui",

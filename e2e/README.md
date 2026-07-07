@@ -46,6 +46,35 @@ Runs whenever `VITE_CLERK_PUBLISHABLE_KEY` is set (any syntactically valid
 `pk_test_` works — the stub short-circuits Clerk's script download, so no
 Clerk account or network access is required).
 
+### Offline authed suite (`offline/*.spec.ts`)
+Real-browser coverage of the authenticated app (jobs, and — as they land —
+estimates, invoices, assistant) with **zero backend and zero Clerk egress**.
+Built on the `offlineTest` fixture (`helpers/offline-app.ts`), which boots the
+real bundle signed-in via the Clerk stub, aborts all cross-origin requests,
+records any unmocked `/api` call, and installs baseline shell mocks
+(`helpers/api-mocks/shell.ts`). Per-flow API mocks live in
+`helpers/api-mocks/*` and pin every fixture to the real `@ai-service-os/shared`
+Zod contracts, so a drifted contract fails fixture-build rather than shipping.
+
+Each flow asserts what jsdom can't: the real bundle renders real
+contract-shaped data, list→detail navigation works, and the key mutation sends
+the exact `method + path + body`. Business logic is out of scope (the API is
+fake — that proof lives in the real-stack qa-matrix / integration lanes).
+
+Same boot requirement as the 401 suite: any valid `pk_test_` (the offline
+placeholder is fine). Add a spec with
+`import { offlineTest as test, expect } from '../helpers/offline-app'`.
+
+### Placeholder Clerk key (why the offline suites run on every PR)
+`main.tsx` throws without a `VITE_CLERK_PUBLISHABLE_KEY`, so CI sets one even
+when no Clerk secret exists — the offline placeholder in
+`.github/workflows/e2e.yml` (kept byte-identical to `PLACEHOLDER_CLERK_KEY` in
+`helpers/clerk-env.ts`). Two gates keep this honest: offline / 401 specs use
+`webAppCanBoot()` (any key → they run and stub Clerk), while smoke-ui and the
+mobile layout specs use `hasRealClerk()` (skips on the placeholder, so a
+secret-less PR never turns their green skips into failures). Configure a real
+`E2E_CLERK_PUBLISHABLE_KEY` secret to also run the real-Clerk specs.
+
 ### Journeys (`journeys/*.spec.ts`)
 All three are currently `test.skip()` — the spec code documents the intended
 test shape, but the test doesn't execute until the preconditions in each
