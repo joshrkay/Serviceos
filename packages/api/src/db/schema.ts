@@ -5814,6 +5814,35 @@ export const MIGRATIONS = {
         AND payment_method IN ('credit_card', 'bank_transfer')
         AND status IN ('completed', 'processing');
   `,
+
+  '233_conversation_links': `
+    -- P0-037 / P8-015 — persistence for the ConversationLinkRepository port
+    -- (src/conversations/linkage.ts), which until now had only an in-memory
+    -- implementation. Links a conversation to related entities (voice_session,
+    -- sms_conversation, customer, job, estimate, invoice) so e.g. the
+    -- dropped-call recovery threader can make voice→conversation linkage
+    -- queryable. entity_id is TEXT: it holds UUIDs for domain entities but
+    -- also provider identifiers (Twilio message SIDs for sms_conversation).
+    -- Four-column uniqueness makes link creation idempotent (retried
+    -- threading never duplicates). FORCE RLS mirrors 229_create_standing_instructions.
+    CREATE TABLE IF NOT EXISTS conversation_links (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      conversation_id UUID NOT NULL,
+      entity_type TEXT NOT NULL CHECK (entity_type IN
+        ('customer', 'job', 'estimate', 'invoice', 'voice_session', 'sms_conversation')),
+      entity_id TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, conversation_id, entity_type, entity_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_conversation_links_entity
+      ON conversation_links (tenant_id, entity_type, entity_id);
+    ALTER TABLE conversation_links ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE conversation_links FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_conversation_links ON conversation_links;
+    CREATE POLICY tenant_isolation_conversation_links ON conversation_links
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
