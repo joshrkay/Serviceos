@@ -2,6 +2,7 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { MemoryRouter } from 'react-router';
 import { SchedulePage } from './SchedulePage';
+import { dateKeyInTz, formatDateInTenantTz } from '../../utils/formatInTenantTz';
 
 vi.mock('../../utils/api-fetch', () => ({ apiFetch: vi.fn() }));
 
@@ -375,5 +376,94 @@ describe('journey QA bug 4 — new appointment posts tenant-tz-converted UTC', (
     expect(new Date(body.scheduledEnd).getUTCHours()).toBe(20);
     // The appointment's tz field carries the TENANT tz, not the browser's.
     expect(body.timezone).toBe('America/New_York');
+  });
+});
+
+// ─── U8: day keys, day windows, and prev/next derive from the tenant tz ──────
+
+const NY_TZ = 'America/New_York';
+
+/** The date-part (in a tz) of the most recent /api/appointments query window. */
+function latestQueryDayKey(tz: string): string {
+  const calls = vi
+    .mocked(apiFetch)
+    .mock.calls.filter(([u]) => String(u).startsWith('/api/appointments?'));
+  const url = String(calls[calls.length - 1][0]);
+  const from = decodeURIComponent(url.match(/fromDate=([^&]+)/)![1]);
+  return dateKeyInTz(from, tz);
+}
+
+function navButtons(): HTMLElement[] {
+  return screen.getAllByRole('button').filter((b) => b.className.includes('size-8'));
+}
+
+describe('U8 — schedule day keys derive from the tenant tz', () => {
+  it('selected chip date label matches the query-window day when browser tz ≠ tenant tz', async () => {
+    // Near UTC midnight so the tenant calendar day (Sydney, UTC+10) diverges
+    // from the UTC/browser day: 23:30Z May 20 is 09:30 May 21 in Sydney.
+    vi.setSystemTime(new Date('2025-05-20T23:30:00Z'));
+    render(
+      <MemoryRouter>
+        <TenantTimezoneProvider overrideTimezone="Australia/Sydney">
+          <SchedulePage />
+        </TenantTimezoneProvider>
+      </MemoryRouter>,
+    );
+
+    let startUtc = '';
+    await waitFor(() => {
+      const calls = vi
+        .mocked(apiFetch)
+        .mock.calls.filter(([u]) => String(u).startsWith('/api/appointments?'));
+      expect(calls.length).toBeGreaterThan(0);
+      startUtc = decodeURIComponent(String(calls[calls.length - 1][0]).match(/fromDate=([^&]+)/)![1]);
+    });
+
+    // The day chip carries the tenant-tz label AND (post-fix) the tenant-tz key,
+    // so the query window's day renders as the same "Mon D" label as the chip.
+    const selectedChip = screen
+      .getAllByRole('button')
+      .find((b) => b.className.includes('min-w-[64px]') && b.className.includes('bg-slate-900'));
+    expect(selectedChip).toBeDefined();
+    const windowLabel = formatDateInTenantTz(startUtc, 'Australia/Sydney'); // e.g. "May 21"
+    expect(selectedChip!.textContent).toContain(windowLabel);
+  });
+
+  it('prev/next cross the spring-forward DST day by exactly one calendar day (no skip/repeat)', async () => {
+    vi.setSystemTime(new Date('2026-03-08T12:00:00Z')); // US spring forward, EST→EDT
+    render(
+      <MemoryRouter>
+        <TenantTimezoneProvider overrideTimezone={NY_TZ}>
+          <SchedulePage />
+        </TenantTimezoneProvider>
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(latestQueryDayKey(NY_TZ)).toBe('2026-03-08'));
+
+    fireEvent.click(navButtons()[1]); // next → into EDT
+    await waitFor(() => expect(latestQueryDayKey(NY_TZ)).toBe('2026-03-09'));
+    fireEvent.click(navButtons()[0]); // prev → back onto the transition day
+    await waitFor(() => expect(latestQueryDayKey(NY_TZ)).toBe('2026-03-08'));
+    fireEvent.click(navButtons()[0]); // prev → the day before
+    await waitFor(() => expect(latestQueryDayKey(NY_TZ)).toBe('2026-03-07'));
+  });
+
+  it('prev/next cross the fall-back DST day by exactly one calendar day (no skip/repeat)', async () => {
+    vi.setSystemTime(new Date('2026-11-01T12:00:00Z')); // US fall back, EDT→EST
+    render(
+      <MemoryRouter>
+        <TenantTimezoneProvider overrideTimezone={NY_TZ}>
+          <SchedulePage />
+        </TenantTimezoneProvider>
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(latestQueryDayKey(NY_TZ)).toBe('2026-11-01'));
+
+    fireEvent.click(navButtons()[1]); // next
+    await waitFor(() => expect(latestQueryDayKey(NY_TZ)).toBe('2026-11-02'));
+    fireEvent.click(navButtons()[0]); // prev
+    await waitFor(() => expect(latestQueryDayKey(NY_TZ)).toBe('2026-11-01'));
+    fireEvent.click(navButtons()[0]); // prev
+    await waitFor(() => expect(latestQueryDayKey(NY_TZ)).toBe('2026-10-31'));
   });
 });

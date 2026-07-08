@@ -7,7 +7,7 @@ import { Link, useNavigate } from 'react-router';
 import { apiFetch } from '../../utils/api-fetch';
 import { useTechnicianRoster } from '../../hooks/useTechnicianRoster';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
-import { formatInTenantTz, formatTimeInTenantTz, tenantWallClockToUtc } from '../../utils/formatInTenantTz';
+import { formatInTenantTz, formatTimeInTenantTz, tenantWallClockToUtc, dateKeyInTz, dayWindowUtc } from '../../utils/formatInTenantTz';
 
 const SERVICE_ICON: Record<string, string> = { HVAC: '❄️', Plumbing: '🔧', Painting: '🎨' };
 
@@ -46,9 +46,20 @@ function buildWeekDays(today: Date, timezone: string) {
     d.setDate(today.getDate() + i - 1);
     const label = formatInTenantTz(d, timezone, { weekday: 'short' });
     const date  = formatInTenantTz(d, timezone, { month: 'short', day: 'numeric' });
-    const isoDate = d.toISOString().split('T')[0];
+    // Key by the TENANT-tz calendar day so the chip's date key matches the
+    // tenant-tz label above; `d.toISOString()` would key off UTC and drift
+    // the key off the label for a viewer whose browser tz ≠ tenant tz.
+    const isoDate = dateKeyInTz(d, timezone);
     return { label, date, isoDate, isToday: i === 1 };
   });
+}
+
+/** Shift a 'YYYY-MM-DD' key by whole days via calendar arithmetic (DST-safe). */
+function shiftDateKey(dateKey: string, days: number): string {
+  const [y, m, d] = dateKey.split('-').map(Number);
+  const shifted = new Date(Date.UTC(y, m - 1, d + days));
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${shifted.getUTCFullYear()}-${pad(shifted.getUTCMonth() + 1)}-${pad(shifted.getUTCDate())}`;
 }
 
 function toTimeLabel(iso: string, timezone: string) {
@@ -281,11 +292,11 @@ export function SchedulePage() {
     setLoading(true);
     setError(null);
     try {
-      const start = new Date(selectedIso + 'T00:00:00');
-      const end   = new Date(selectedIso + 'T23:59:59.999');
-      const from  = start.toISOString();
-      const to    = end.toISOString();
-      const res  = await apiFetch(`/api/appointments?fromDate=${encodeURIComponent(from)}&toDate=${encodeURIComponent(to)}&sort=asc`);
+      // Query the tenant-local calendar day as a UTC window. `new Date(iso +
+      // 'T00:00:00')` interpreted the day boundary in the BROWSER tz, so a
+      // viewer whose browser tz ≠ tenant tz loaded a shifted day.
+      const { startUtc, endUtc } = dayWindowUtc(selectedIso, tz);
+      const res  = await apiFetch(`/api/appointments?fromDate=${encodeURIComponent(startUtc)}&toDate=${encodeURIComponent(endUtc)}&sort=asc`);
       if (!res.ok) {
         // Surface a clear error instead of a misleading empty state (BUG-4).
         if (res.status === 401) {
@@ -348,7 +359,7 @@ export function SchedulePage() {
     } finally {
       setLoading(false);
     }
-  }, [selectedIso]);
+  }, [selectedIso, tz]);
 
   useEffect(() => { loadAppointments(); }, [loadAppointments]);
 
@@ -413,7 +424,7 @@ export function SchedulePage() {
       {/* Week nav */}
       <div className="flex items-center gap-2 mb-4">
         <button
-          onClick={() => { const d = new Date(selectedIso); d.setDate(d.getDate() - 1); setSelectedIso(d.toISOString().split('T')[0]); }}
+          onClick={() => setSelectedIso(shiftDateKey(selectedIso, -1))}
           className="flex size-8 items-center justify-center rounded-lg border border-slate-200 text-slate-500 hover:bg-slate-50"
         >
           <ChevronLeft size={15} />
@@ -436,7 +447,7 @@ export function SchedulePage() {
           })}
         </div>
         <button
-          onClick={() => { const d = new Date(selectedIso); d.setDate(d.getDate() + 1); setSelectedIso(d.toISOString().split('T')[0]); }}
+          onClick={() => setSelectedIso(shiftDateKey(selectedIso, 1))}
           className="flex size-8 items-center justify-center rounded-lg border border-slate-200 text-slate-500 hover:bg-slate-50"
         >
           <ChevronRight size={15} />

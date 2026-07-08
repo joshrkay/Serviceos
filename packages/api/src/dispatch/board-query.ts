@@ -105,7 +105,7 @@ function getTimezoneOffsetMs(date: Date, timezone: string): number {
   return new Date(tzStr).getTime() - new Date(utcStr).getTime();
 }
 
-function getDayBoundaries(dateStr: string, timezone = 'UTC'): { start: Date; end: Date } {
+export function getDayBoundaries(dateStr: string, timezone = 'UTC'): { start: Date; end: Date } {
   const [year, month, day] = dateStr.split('-').map(Number);
   // Use noon UTC as a DST-safe reference point to determine the timezone offset
   const ref = new Date(Date.UTC(year, month - 1, day, 12, 0, 0));

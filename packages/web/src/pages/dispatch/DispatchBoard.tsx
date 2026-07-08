@@ -34,6 +34,8 @@ import {
   isSameLaneNoOp,
 } from '../../components/dispatch/dispatch-lane-order';
 import { emitProposalsChanged, PROPOSALS_CHANGED } from '../../lib/proposal-events';
+import { useTenantTimezone } from '../../hooks/useTenantTimezone';
+import { tenantWallClockToUtc, utcToTenantWallClock } from '../../utils/formatInTenantTz';
 import type { FeasibilityResult } from '../../components/dispatch/feasibility-types';
 
 type DragSourceType = 'queue' | 'lane';
@@ -76,28 +78,34 @@ function toDateParam(date: Date): string {
   return `${year}-${month}-${day}`;
 }
 
-function dayStartIso(boardDate: string, workingHoursStart?: string): string {
+// The lane's day-start anchor is the tenant-local working-hours start (or
+// 08:00) interpreted in the TENANT tz — not stamped as UTC. The old
+// `${boardDate}T${time}:00.000Z` treated tenant wall-clock hours as UTC, so
+// an empty-lane drop for a NY tenant proposed 08:00Z instead of 08:00 local.
+function dayStartIso(boardDate: string, timezone: string, workingHoursStart?: string): string {
   const time = workingHoursStart?.slice(0, 5) ?? '08:00';
-  return `${boardDate}T${time}:00.000Z`;
+  return tenantWallClockToUtc(boardDate, time, timezone).toISOString();
 }
 
-function toDatetimeLocalValue(iso: string): string {
+function toDatetimeLocalValue(iso: string, timezone: string): string {
   if (!iso) return '';
-  const d = new Date(iso);
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return utcToTenantWallClock(iso, timezone);
 }
 
-function fromDatetimeLocalValue(value: string): string {
+function fromDatetimeLocalValue(value: string, timezone: string): string {
   if (!value) return '';
-  return new Date(value).toISOString();
+  const [datePart, timePart] = value.split('T');
+  if (!datePart || !timePart) return '';
+  const utc = tenantWallClockToUtc(datePart, timePart, timezone);
+  return Number.isNaN(utc.getTime()) ? '' : utc.toISOString();
 }
 
 export function DispatchBoard() {
+  const timezone = useTenantTimezone();
   const [selectedDate, setSelectedDate] = useState<Date>(new Date());
   const [filters, setFilters] = useState<DispatchFilterValues>({});
   const dateParam = toDateParam(selectedDate);
-  const { data, isLoading, error, refetch } = useDispatchBoard(selectedDate);
+  const { data, isLoading, error, refetch } = useDispatchBoard(selectedDate, timezone);
   const { user } = useUser();
   const { userId: clerkUserId } = useAuth();
   const currentUserId = clerkUserId ?? user?.id ?? undefined;
@@ -174,6 +182,7 @@ export function DispatchBoard() {
       dragged: appt,
       dayStartIso: dayStartIso(
         data?.date ?? dateParam,
+        timezone,
         lane?.availabilitySummary?.workingHours?.start,
       ),
     });
@@ -184,7 +193,7 @@ export function DispatchBoard() {
       proposedScheduledStart: slot.proposedScheduledStart,
       proposedScheduledEnd: slot.proposedScheduledEnd,
     };
-  }, [dragSource, dragOverTarget, allAppointments, laneByTechId, data?.date, dateParam, filters.status]);
+  }, [dragSource, dragOverTarget, allAppointments, laneByTechId, data?.date, dateParam, filters.status, timezone]);
 
   const { preview: feasibilityPreview } = useFeasibilityPreview(previewInput);
 
@@ -350,6 +359,7 @@ export function DispatchBoard() {
           dragged: appointment,
           dayStartIso: dayStartIso(
             data?.date ?? dateParam,
+            timezone,
             lane?.availabilitySummary?.workingHours?.start,
           ),
         });
@@ -360,8 +370,8 @@ export function DispatchBoard() {
         }
       }
 
-      setEditedStart(toDatetimeLocalValue(proposedStart));
-      setEditedEnd(toDatetimeLocalValue(proposedEnd));
+      setEditedStart(toDatetimeLocalValue(proposedStart, timezone));
+      setEditedEnd(toDatetimeLocalValue(proposedEnd, timezone));
       setPendingDrop({
         source: dragSource,
         targetKind: target.kind,
@@ -375,7 +385,7 @@ export function DispatchBoard() {
         placement,
       });
     },
-    [dragSource, findAppointment, findTechnicianName, laneByTechId, data?.date, dateParam, filters.status],
+    [dragSource, findAppointment, findTechnicianName, laneByTechId, data?.date, dateParam, filters.status, timezone],
   );
 
   const handleDragStartFromLane = useCallback(
@@ -480,6 +490,7 @@ export function DispatchBoard() {
         dragged: appointment,
         dayStartIso: dayStartIso(
           data?.date ?? dateParam,
+          timezone,
           lane.availabilitySummary?.workingHours?.start,
         ),
       });
@@ -506,10 +517,10 @@ export function DispatchBoard() {
         proposedEnd,
         placement: slot.placement,
       });
-      setEditedStart(toDatetimeLocalValue(proposedStart));
-      setEditedEnd(toDatetimeLocalValue(proposedEnd));
+      setEditedStart(toDatetimeLocalValue(proposedStart, timezone));
+      setEditedEnd(toDatetimeLocalValue(proposedEnd, timezone));
     },
-    [laneByTechId, filters.status, data?.date, dateParam],
+    [laneByTechId, filters.status, data?.date, dateParam, timezone],
   );
 
   const submitProposal = useCallback(async () => {
@@ -519,11 +530,11 @@ export function DispatchBoard() {
     const { source, targetTechnicianId, proposalType, appointment } = pendingDrop;
     const proposedStart =
       pendingDrop.placement === 'overflow'
-        ? fromDatetimeLocalValue(editedStart)
+        ? fromDatetimeLocalValue(editedStart, timezone)
         : pendingDrop.proposedStart;
     const proposedEnd =
       pendingDrop.placement === 'overflow'
-        ? fromDatetimeLocalValue(editedEnd)
+        ? fromDatetimeLocalValue(editedEnd, timezone)
         : pendingDrop.proposedEnd;
 
     const idempotencyKey = generateIdempotencyKey();
@@ -613,7 +624,7 @@ export function DispatchBoard() {
     } finally {
       setIsSubmittingProposal(false);
     }
-  }, [pendingDrop, editedStart, editedEnd, refetch]);
+  }, [pendingDrop, editedStart, editedEnd, refetch, timezone]);
 
   const cancelPendingDrop = useCallback(() => {
     if (isSubmittingProposal) return;
@@ -623,8 +634,8 @@ export function DispatchBoard() {
   const updatePendingTimes = useCallback((start: string, end: string) => {
     setEditedStart(start);
     setEditedEnd(end);
-    const isoStart = fromDatetimeLocalValue(start);
-    const isoEnd = fromDatetimeLocalValue(end);
+    const isoStart = fromDatetimeLocalValue(start, timezone);
+    const isoEnd = fromDatetimeLocalValue(end, timezone);
     // Preserve the existing placement. The time-edit inputs only render while
     // placement is 'overflow'; forcing 'gap' here unmounts them on the first
     // keystroke, making it impossible to edit the second field.
@@ -637,7 +648,7 @@ export function DispatchBoard() {
           }
         : null,
     );
-  }, []);
+  }, [timezone]);
 
   const filteredLanes = data?.technicianLanes.filter((lane) => {
     if (filters.technicianIds && filters.technicianIds.length > 0) {
