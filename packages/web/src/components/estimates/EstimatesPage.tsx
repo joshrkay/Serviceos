@@ -374,7 +374,10 @@ function LineItemsEditor({ items, editable, onChange, onAddRow }: {
         <h4 className="text-foreground">Line items</h4>
         {editable && !editing && (
           <button
-            onClick={() => setEditing(true)}
+            // Re-seed the draft from the CURRENT items on entering edit mode —
+            // the mount-time useState seed goes stale after a refetch, and
+            // saving a stale draft would silently drop newer lines.
+            onClick={() => { setDraft(items); setEditing(true); }}
             className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground border border-border rounded-lg px-2.5 py-1.5 hover:bg-secondary transition-colors"
           >
             <Pencil size={11} /> Edit
