@@ -37,7 +37,11 @@ export function FeedbackPage() {
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch(`/public/feedback/${token}`);
+        // Explicit Accept: the API 302-redirects text/html requests to the
+        // SPA page; this fetch must always get the JSON branch.
+        const res = await fetch(`/public/feedback/${token}`, {
+          headers: { Accept: 'application/json' },
+        });
         if (!res.ok) {
           if (!cancelled) setStatus('error');
           return;

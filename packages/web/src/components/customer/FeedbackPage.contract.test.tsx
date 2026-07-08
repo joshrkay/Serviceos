@@ -15,8 +15,8 @@ const TOKEN = 'abc-token-123';
 
 function renderPage() {
   return render(
-    <MemoryRouter initialEntries={[`/public/feedback/${TOKEN}`]}>
-      <Routes><Route path="/public/feedback/:token" element={<FeedbackPage />} /></Routes>
+    <MemoryRouter initialEntries={[`/feedback/${TOKEN}`]}>
+      <Routes><Route path="/feedback/:token" element={<FeedbackPage />} /></Routes>
     </MemoryRouter>,
   );
 }
