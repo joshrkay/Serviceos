@@ -9,6 +9,9 @@ import { describe, expect, it } from 'vitest';
 const ROUTED_COMPONENTS = [
   'components/jobs/NewJobFlow.tsx',
   'components/jobs/JobDetail.tsx',
+  // Job detail sheets (estimate/invoice/text/call) — reached from routed job
+  // pages; must fetch real docs, never render fixture estimates/invoices.
+  'components/jobs/JobSheets.tsx',
   'components/schedule/SchedulePage.tsx',
   'components/estimates/NewEstimateFlow.tsx',
   'components/estimates/EstimatesPage.tsx',

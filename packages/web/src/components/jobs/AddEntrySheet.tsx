@@ -1,37 +1,59 @@
 import { useState, useRef, useEffect } from 'react';
-import { FileText, Camera, Mic, X, Send, Square, Check, AlertCircle } from 'lucide-react';
+import { FileText, Camera, Mic, X, Send } from 'lucide-react';
 import { SheetOverlay } from './JobSheets';
 import { Textarea } from '../ui';
 import { CameraCapture } from '../shared/CameraCapture';
+import { capturedMediaToFile } from './capturedMediaToFile';
+import {
+  uploadJobPhoto as uploadJobPhotoApi,
+  type JobPhoto,
+  type JobPhotoCategory,
+} from '../../api/job-photos';
 import type { JobActivity } from '../../data/mock-data';
 import type { CapturedMedia } from '../shared/CameraCapture';
 
 type EntryMode = 'note' | 'photo' | 'voice';
 
-const NOTE_TAGS = ['General', 'Issue', 'Customer Request', 'Safety', 'Material', 'Follow-up'];
-
 // D2: Removed fabricated MOCK_TRANSCRIPTS — voice notes now show honest empty state
 // until real transcription pipeline is integrated
 
 interface Props {
+  jobId: string;
   author: string;
   authorInitials: string;
   authorColor: string;
   onClose: () => void;
   onSubmit: (entry: Partial<JobActivity>) => void;
+  /** Test seam for the persisted photo pipeline (defaults to the real API). */
+  uploadPhoto?: (
+    jobId: string,
+    file: File,
+    category: JobPhotoCategory,
+    notes?: string,
+    takenAt?: string,
+  ) => Promise<JobPhoto>;
 }
 
-export function AddEntrySheet({ author, authorInitials, authorColor, onClose, onSubmit }: Props) {
+export function AddEntrySheet({
+  jobId,
+  author,
+  authorInitials,
+  authorColor,
+  onClose,
+  onSubmit,
+  uploadPhoto = uploadJobPhotoApi,
+}: Props) {
   const [mode, setMode] = useState<EntryMode>('note');
 
   // Note state
   const [noteText, setNoteText]   = useState('');
-  const [noteTags, setNoteTags]   = useState<string[]>([]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   // Photo state
   const [cameraOpen, setCameraOpen]     = useState(false);
   const [captured, setCaptured]         = useState<CapturedMedia[]>([]);
+  const [saving, setSaving]             = useState(false);
+  const [error, setError]               = useState<string | null>(null);
 
   // Voice state
   const [recording, setRecording]       = useState(false);
@@ -57,11 +79,7 @@ export function AddEntrySheet({ author, authorInitials, authorColor, onClose, on
     return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
   }
 
-  function toggleTag(tag: string) {
-    setNoteTags(prev => prev.includes(tag) ? prev.filter(t => t !== tag) : [...prev, tag]);
-  }
-
-  function handleSubmit() {
+  async function handleSubmit() {
     const time = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
     if (mode === 'note') {
       if (!noteText.trim()) return;
@@ -73,6 +91,24 @@ export function AddEntrySheet({ author, authorInitials, authorColor, onClose, on
       });
     } else if (mode === 'photo') {
       if (captured.length === 0) return;
+      // Persist captured media through the job-photos pipeline
+      // (presign → PUT → attach), exactly as JobDetail.persistCapturedMedia
+      // does. Only emit the timeline entry once every upload succeeds — never
+      // fake success when a photo failed to store.
+      setSaving(true);
+      setError(null);
+      try {
+        for (const item of captured) {
+          const file = await capturedMediaToFile(item);
+          const category: JobPhotoCategory = item.type === 'video' ? 'other' : 'before';
+          await uploadPhoto(jobId, file, category, undefined, item.capturedAt);
+        }
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Photo upload failed');
+        setSaving(false);
+        return;
+      }
+      setSaving(false);
       onSubmit({
         type: 'photo',
         content: `${captured.length} photo${captured.length > 1 ? 's' : ''} added`,
@@ -137,6 +173,8 @@ export function AddEntrySheet({ author, authorInitials, authorColor, onClose, on
       </div>
 
       {/* ── Note tab ── */}
+      {/* Note tags were dropped: POST /api/notes (createNoteSchema) accepts no
+          `tags` field, so the picker only ever discarded its selection. */}
       {mode === 'note' && (
         <div className="flex flex-col gap-3">
           <Textarea
@@ -148,24 +186,6 @@ export function AddEntrySheet({ author, authorInitials, authorColor, onClose, on
             rows={5}
             className="min-h-11 resize-none"
           />
-          <div>
-            <p className="text-xs text-muted-foreground mb-2">Tag this note</p>
-            <div className="flex flex-wrap gap-1.5">
-              {NOTE_TAGS.map(tag => (
-                <button
-                  key={tag}
-                  onClick={() => toggleTag(tag)}
-                  className={`rounded-full px-2.5 py-1 text-xs transition-colors ${
-                    noteTags.includes(tag)
-                      ? 'bg-primary text-primary-foreground'
-                      : 'bg-secondary text-foreground hover:bg-border'
-                  }`}
-                >
-                  {tag}
-                </button>
-              ))}
-            </div>
-          </div>
         </div>
       )}
 
@@ -238,12 +258,15 @@ export function AddEntrySheet({ author, authorInitials, authorColor, onClose, on
 
       {/* Submit */}
       <div className="mt-5">
+        {error && (
+          <p role="alert" className="mb-2 text-sm text-destructive">{error}</p>
+        )}
         <button
-          onClick={handleSubmit}
-          disabled={!canSubmit}
+          onClick={() => void handleSubmit()}
+          disabled={!canSubmit || saving}
           className="flex items-center justify-center gap-2 w-full py-3 rounded-xl bg-primary text-primary-foreground text-sm hover:bg-primary/90 transition-colors disabled:opacity-30"
         >
-          <Send size={14} /> Add to timeline
+          <Send size={14} /> {saving ? 'Uploading…' : 'Add to timeline'}
         </button>
       </div>
 

@@ -4,6 +4,14 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { MemoryRouter } from 'react-router';
 import { JobDetailView } from './JobDetail';
 
+// Controllable API client so the jobId-filtered estimate/invoice/appointment
+// fetches can be driven per test. Defaults to empty arrays for every path.
+const AH = vi.hoisted(() => ({ fetcher: vi.fn() }));
+vi.mock('../../lib/apiClient', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../lib/apiClient')>();
+  return { ...actual, useApiClient: () => AH.fetcher };
+});
+
 vi.mock('../../hooks/useDetailQuery', () => ({ useDetailQuery: vi.fn() }));
 vi.mock('../../hooks/useMutation', () => ({ useMutation: vi.fn() }));
 vi.mock('../../data/mock-data', () => ({
@@ -18,8 +26,8 @@ vi.mock('./CancelNoShowSheet', () => ({ CancelNoShowSheet: () => null }));
 vi.mock('./JobSheets', () => ({
   CallScreen: () => null,
   TextSheet: () => null,
-  EstimateSheet: () => null,
-  InvoiceSheet: () => null,
+  EstimateSheet: ({ jobId }: { jobId: string }) => <div data-testid="estimate-sheet" data-job-id={jobId} />,
+  InvoiceSheet: ({ jobId }: { jobId: string }) => <div data-testid="invoice-sheet" data-job-id={jobId} />,
 }));
 // U9 (E7): a controllable CameraCapture mock. The button fires onClose with a
 // preset captured-photo set so we can drive the persist pipeline in jsdom.
@@ -80,6 +88,8 @@ const defaultDetailResult = {
 beforeEach(() => {
   vi.mocked(useDetailQuery).mockReturnValue(defaultDetailResult);
   vi.mocked(useMutation).mockReturnValue({ mutate: vi.fn(), isLoading: false, error: null });
+  AH.fetcher.mockReset();
+  AH.fetcher.mockResolvedValue({ ok: true, json: async () => [] });
 });
 
 function renderPage(id = 'j1') {
@@ -337,6 +347,53 @@ describe('JobDetailView', () => {
       await waitFor(() =>
         expect(screen.getByTestId('job-transition-error')).toHaveTextContent('HTTP 400'),
       );
+    });
+  });
+
+  // U9 — the status stepper is derived from the real job.status.
+  describe('status stepper', () => {
+    it('renders a completed job with the stepper at Completed', () => {
+      vi.mocked(useDetailQuery).mockReturnValue({
+        ...defaultDetailResult,
+        data: { ...mockApiJob, status: 'completed' },
+      });
+      renderPage();
+      // LeftContent renders in both the desktop and mobile layouts.
+      expect(screen.getAllByTestId('status-stepper')[0]).toHaveAttribute('data-current-step', 'Completed');
+    });
+
+    it('renders a scheduled job with the stepper at Scheduled', () => {
+      renderPage();
+      expect(screen.getAllByTestId('status-stepper')[0]).toHaveAttribute('data-current-step', 'Scheduled');
+    });
+  });
+
+  // U9 — the invoice action is wired off the jobId-filtered invoices fetch.
+  describe('invoice action', () => {
+    it('opens the invoice sheet wired to the real job id for a job with a linked invoice', async () => {
+      AH.fetcher.mockImplementation((url: string) => {
+        if (url.startsWith('/api/invoices')) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => [{ id: 'inv-real', jobId: 'j1', invoiceNumber: 'INV-9' }],
+          });
+        }
+        return Promise.resolve({ ok: true, json: async () => [] });
+      });
+
+      renderPage();
+
+      // The invoice was fetched by the real job id.
+      await waitFor(() =>
+        expect(AH.fetcher).toHaveBeenCalledWith('/api/invoices?jobId=j1'),
+      );
+
+      const invoiceAction = screen.getByRole('button', { name: 'Invoice' });
+      expect(invoiceAction).toBeEnabled();
+      fireEvent.click(invoiceAction);
+
+      const sheet = await screen.findByTestId('invoice-sheet');
+      expect(sheet).toHaveAttribute('data-job-id', 'j1');
     });
   });
 

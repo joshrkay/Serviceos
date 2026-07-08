@@ -34,6 +34,10 @@ const API_ROUTE_MANIFEST: Array<{ method: string; pathPattern: string }> = [
   { method: 'PUT', pathPattern: '/api/jobs/:id' },
   // jobs.ts — POST /:id/transition
   { method: 'POST', pathPattern: '/api/jobs/:id/transition' },
+  // estimates.ts — GET / (jobId-filtered bare-array lookup)
+  { method: 'GET', pathPattern: '/api/estimates' },
+  // invoices.ts — GET / (jobId-filtered bare-array lookup)
+  { method: 'GET', pathPattern: '/api/invoices' },
 ];
 
 /**
@@ -48,6 +52,10 @@ const JOB_SHEETS_API_CALLS: Array<{ method: string; pathTemplate: string; source
   { method: 'POST', pathTemplate: '/api/conversations', source: 'JobSheets.tsx:TextSheet.handleSend' },
   // TextSheet — send reply
   { method: 'POST', pathTemplate: '/api/conversations/:id/reply', source: 'JobSheets.tsx:TextSheet.handleSend' },
+  // EstimateSheet — load the job's real estimate(s)
+  { method: 'GET', pathTemplate: '/api/estimates?jobId=:jobId', source: 'JobSheets.tsx:EstimateSheet' },
+  // InvoiceSheet — load the job's real invoice(s)
+  { method: 'GET', pathTemplate: '/api/invoices?jobId=:jobId', source: 'JobSheets.tsx:InvoiceSheet' },
 ];
 
 const CANCEL_NO_SHOW_SHEET_API_CALLS: Array<{ method: string; pathTemplate: string; source: string }> = [
