@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { apiFetch } from '../../utils/api-fetch';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
 import { tenantWallClockToUtc, utcToTenantWallClock } from '../../utils/formatInTenantTz';
@@ -35,6 +35,15 @@ export function RescheduleDialog({
   const [end, setEnd] = useState(() => toLocalInputValue(initialEnd, tz));
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+
+  // `useTenantTimezone` returns a fallback synchronously and resolves the real
+  // tenant tz after /api/me. Re-seed the wall-clock inputs when the tz (or the
+  // target appointment) changes, so the displayed time and the tz used at
+  // submit can't disagree if the dialog opened before the tz settled.
+  useEffect(() => {
+    setStart(toLocalInputValue(initialStart, tz));
+    setEnd(toLocalInputValue(initialEnd, tz));
+  }, [tz, initialStart, initialEnd]);
 
   const valid = useMemo(() => {
     if (!start || !end) return false;

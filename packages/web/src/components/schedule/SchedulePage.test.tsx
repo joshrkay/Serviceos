@@ -397,6 +397,38 @@ function navButtons(): HTMLElement[] {
   return screen.getAllByRole('button').filter((b) => b.className.includes('size-8'));
 }
 
+describe('U8 — inclusive-boundary appointments bucket to a single day', () => {
+  it('excludes an appointment starting exactly at the next tenant-local midnight', async () => {
+    // Default tz fallback is America/New_York; suite clock is 2025-05-20, so
+    // selectedIso = 2025-05-20 and the query window ends at the next local
+    // midnight = 2025-05-21T04:00Z. The API filters `scheduled_start <= toDate`
+    // inclusively, so it can return this boundary appointment — the client
+    // must bucket it to 2025-05-21 and NOT render it on the 2025-05-20 view.
+    const boundaryAppt = {
+      id: 'appt-mid',
+      jobId: 'j3',
+      scheduledStart: '2025-05-21T04:00:00.000Z', // 00:00 EDT May 21
+      scheduledEnd: '2025-05-21T05:00:00.000Z',
+      status: 'scheduled',
+      timezone: 'America/New_York',
+    };
+    const job3 = {
+      id: 'j3',
+      jobNumber: 'JOB-003',
+      summary: 'Overnight boundary job',
+      serviceType: 'HVAC',
+      assignedTechnicianId: 't3',
+      customer: { displayName: 'Midnight Edge' },
+      location: { street1: '789 Elm', city: 'Austin', state: 'TX' },
+    };
+    setupApi([appt1, boundaryAppt], { j1: job1, j3: job3 });
+
+    renderPage();
+    expect(await screen.findByText('Alice Smith')).toBeInTheDocument();
+    expect(screen.queryByText('Midnight Edge')).not.toBeInTheDocument();
+  });
+});
+
 describe('U8 — schedule day keys derive from the tenant tz', () => {
   it('selected chip date label matches the query-window day when browser tz ≠ tenant tz', async () => {
     // Near UTC midnight so the tenant calendar day (Sydney, UTC+10) diverges

@@ -308,7 +308,13 @@ export function SchedulePage() {
         return;
       }
       const body = await res.json();
-      const list: ApiAppointment[] = body.data ?? body ?? [];
+      // The appointments query filters `scheduled_start <= toDate` inclusively,
+      // so an appointment starting exactly at the next tenant-local midnight
+      // could land in both today's and tomorrow's windows. Bucket to the
+      // selected day by tenant-tz calendar date (mirrors HomePage).
+      const list: ApiAppointment[] = (body.data ?? body ?? []).filter(
+        (appt: ApiAppointment) => dateKeyInTz(appt.scheduledStart, tz) === selectedIso,
+      );
       setAppointments(list);
 
       // Enrich each appointment with job/customer data

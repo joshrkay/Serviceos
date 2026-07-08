@@ -51,4 +51,24 @@ describe('RescheduleDialog — tenant-tz round-trip', () => {
     expect(body.scheduledStart).toBe('2026-01-15T14:00:00.000Z');
     expect(body.scheduledEnd).toBe('2026-01-15T16:00:00.000Z');
   });
+
+  it('re-seeds the displayed wall clock when the tenant tz resolves after mount', () => {
+    // Simulates useTenantTimezone resolving from its fallback to the real tz
+    // after /api/me: the input must follow, otherwise display and submit-tz
+    // disagree and the operator posts the wrong instant.
+    const { rerender } = render(
+      <TenantTimezoneProvider overrideTimezone="America/New_York">
+        <RescheduleDialog appointmentId="appt-1" initialStart="2026-01-15T13:00:00Z" initialEnd="2026-01-15T15:00:00Z" />
+      </TenantTimezoneProvider>,
+    );
+    expect((screen.getByLabelText('scheduledStart') as HTMLInputElement).value).toBe('2026-01-15T08:00');
+
+    rerender(
+      <TenantTimezoneProvider overrideTimezone="America/Los_Angeles">
+        <RescheduleDialog appointmentId="appt-1" initialStart="2026-01-15T13:00:00Z" initialEnd="2026-01-15T15:00:00Z" />
+      </TenantTimezoneProvider>,
+    );
+    // 13:00Z on a winter day = 05:00 PST (UTC-8).
+    expect((screen.getByLabelText('scheduledStart') as HTMLInputElement).value).toBe('2026-01-15T05:00');
+  });
 });
