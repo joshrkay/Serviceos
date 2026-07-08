@@ -32,6 +32,9 @@ import {
   formatDateInTenantTz,
   formatInTenantTz,
   formatTimeInTenantTz,
+  todayInTz,
+  dateKeyInTz,
+  dayWindowUtc,
 } from '../../utils/formatInTenantTz';
 import { firstNameFromUser, homeGreetingHeading } from '../../utils/greeting';
 
@@ -79,6 +82,16 @@ interface ApiInvoice {
   dueDate?: string;
 }
 
+// Appointments carry the actual scheduled work for a day. GET /api/jobs
+// ignores scheduledDate, so "today's jobs" is sourced from the appointments
+// API (which supports a fromDate/toDate window) and joined to job display
+// data by jobId.
+interface ApiAppointment {
+  jobId: string;
+  /** UTC ISO instant. */
+  scheduledStart: string;
+}
+
 // ─── Static helpers ───────────────────────────────────────────────────────
 const SVC: Record<string, { emoji: string; color: string }> = {
   HVAC:     { emoji: '❄️', color: 'bg-primary/10'   },
@@ -103,10 +116,6 @@ function formatTime(iso: string | undefined, timezone: string): string | null {
 function formatDate(iso: string | undefined, timezone: string): string {
   if (!iso) return '';
   return formatDateInTenantTz(iso, timezone);
-}
-
-function todayIso(): string {
-  return new Date().toISOString().split('T')[0];
 }
 
 function buildWeek(timezone: string): { day: string; date: string; isToday: boolean }[] {
@@ -285,7 +294,10 @@ export function HomePage() {
   );
   const greetingHeading = homeGreetingHeading(ownerFirstName, new Date(), tz);
 
-  const today = todayIso();
+  // "Today" is the tenant's local calendar day, not the viewer's UTC date:
+  // for an evening appointment in a non-UTC tenant the UTC date has already
+  // rolled to tomorrow. `todayInTz` keys off the tenant IANA zone.
+  const today = todayInTz(tz);
   const todayDate = new Date(); todayDate.setHours(0, 0, 0, 0);
 
   // Story 10.7 — surface unread customer replies (newest message inbound) on
@@ -302,15 +314,46 @@ export function HomePage() {
   // Epic 12.2 — the home dashboard auto-refreshes the "today" panels so the
   // owner sees new jobs/estimates/invoices/leads without a manual reload.
   const LIVE_REFETCH_MS = 60_000;
-  const jobsQuery = useListQuery<ApiJob>('/api/jobs', { filters: { scheduledDate: today }, refetchInterval: LIVE_REFETCH_MS });
+  // Today's scheduled work: the appointments API supports a fromDate/toDate
+  // day window (GET /api/jobs does not — it ignores scheduledDate). Bound the
+  // query by the tenant-local day expressed as UTC instants.
+  const { startUtc, endUtc } = dayWindowUtc(today, tz);
+  const appointmentsQuery = useListQuery<ApiAppointment>('/api/appointments', {
+    filters: { fromDate: startUtc, toDate: endUtc },
+    refetchInterval: LIVE_REFETCH_MS,
+  });
+  // Jobs are fetched for card display data only (customer/technician/status);
+  // the "today" set is derived from appointments below and joined by jobId.
+  const jobsQuery = useListQuery<ApiJob>('/api/jobs', { refetchInterval: LIVE_REFETCH_MS });
   const estimatesQuery = useListQuery<ApiEstimate>('/api/estimates', { filters: { status: 'sent' }, refetchInterval: LIVE_REFETCH_MS });
   const invoicesQuery = useListQuery<ApiInvoice>('/api/invoices', { filters: { status: 'open' }, refetchInterval: LIVE_REFETCH_MS });
   const leadsQuery = useListQuery<ApiLead>('/api/leads', { filters: { limit: '50' }, refetchInterval: LIVE_REFETCH_MS });
   const leads = leadsQuery.data ?? [];
 
-  const todayJobs    = jobsQuery.data.filter(j => normalizeJobStatus(j.status) !== 'Canceled');
+  // Join today's appointments to job display data. Bucket each appointment by
+  // its tenant-tz calendar day (defensive against the appointments route's
+  // inclusive upper bound) and dedupe by jobId, keeping the earliest visit's
+  // start time so the row shows when the tech is first due.
+  const jobsById = new Map(jobsQuery.data.map((j) => [j.id, j] as const));
+  const todayJobsById = new Map<string, ApiJob>();
+  for (const appt of [...appointmentsQuery.data].sort(
+    (a, b) => a.scheduledStart.localeCompare(b.scheduledStart),
+  )) {
+    if (dateKeyInTz(appt.scheduledStart, tz) !== today) continue;
+    const job = jobsById.get(appt.jobId);
+    if (!job || todayJobsById.has(job.id)) continue;
+    todayJobsById.set(job.id, { ...job, scheduledStart: appt.scheduledStart });
+  }
+  const todayJobs = Array.from(todayJobsById.values())
+    .filter((j) => normalizeJobStatus(j.status) !== 'Canceled');
   // Epic 12.2 — unassigned work for today (no technician on the job).
   const unassignedToday = todayJobs.filter(j => !j.technician);
+
+  // The "today" panel depends on both queries; surface loading/errors from
+  // either and retry both.
+  const todayLoading = appointmentsQuery.isLoading || jobsQuery.isLoading;
+  const todayError = appointmentsQuery.error ?? jobsQuery.error;
+  const refetchToday = () => { appointmentsQuery.refetch(); jobsQuery.refetch(); };
   const pendingEsts  = estimatesQuery.data.filter(e => {
     const uiStatus = normalizeEstimateStatus(e.status);
     return uiStatus === 'Sent';
@@ -449,14 +492,14 @@ export function HomePage() {
             {/* Today's jobs */}
             <section className="px-4 md:px-6 py-5">
               <SectionHead label="Today's jobs" count={todayJobs.length} onAll={() => navigate('/jobs')} />
-              {jobsQuery.isLoading ? (
+              {todayLoading ? (
                 <div className="flex items-center justify-center py-8">
                   <div className="h-5 w-5 animate-spin rounded-full border-2 border-primary border-t-transparent" />
                 </div>
-              ) : jobsQuery.error ? (
+              ) : todayError ? (
                 <ErrorState
-                  message={jobsQuery.error.includes('401') ? "Session expired — please reload" : "Couldn't load jobs — please try again"}
-                  onRetry={() => jobsQuery.refetch()}
+                  message={todayError.includes('401') ? "Session expired — please reload" : "Couldn't load jobs — please try again"}
+                  onRetry={refetchToday}
                 />
               ) : todayJobs.length === 0 ? (
                 <EmptyState
@@ -723,7 +766,7 @@ export function HomePage() {
             <ActivityFeedCard />
 
             {/* All clear */}
-            {attentionItems.length === 0 && unpaidInvs.length === 0 && pendingEsts.length === 0 && !jobsQuery.isLoading && !estimatesQuery.isLoading && !invoicesQuery.isLoading && !jobsQuery.error && !estimatesQuery.error && !invoicesQuery.error && (
+            {attentionItems.length === 0 && unpaidInvs.length === 0 && pendingEsts.length === 0 && !todayLoading && !estimatesQuery.isLoading && !invoicesQuery.isLoading && !todayError && !estimatesQuery.error && !invoicesQuery.error && (
               <section className="px-4 py-8 flex flex-col items-center gap-2">
                 <CheckCircle2 size={28} className="text-success" />
                 <p className="text-sm text-muted-foreground">All clear — nothing urgent</p>
