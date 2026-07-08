@@ -51,9 +51,33 @@ interface ApiLead {
 /** Convert a shared line item to the UI LineItem shape */
 function apiLineToUi(item: InvoiceLineItem): LineItem {
   return {
+    id: item.id,
     description: item.description,
     qty: item.quantity,
     rate: item.unitPriceCents / 100,
+    taxable: item.taxable,
+    // Persisted rows arrive as `category: null`; normalize to undefined so a
+    // round-trip PUT never sends null at a `.optional()` (non-nullable) field.
+    category: item.category ?? undefined,
+  };
+}
+
+/** Stable client id for a new row (pattern: forms/LineItemEditor makeId). */
+function makeLineId(): string {
+  return `li-${Math.random().toString(36).slice(2, 10)}-${Date.now().toString(36)}`;
+}
+
+/** Convert a UI LineItem back to a shared line item for saving. */
+function uiLineToApi(item: LineItem, sortOrder: number): InvoiceLineItem {
+  return {
+    id: item.id ?? makeLineId(),
+    description: item.description,
+    category: item.category,
+    quantity: item.qty,
+    unitPriceCents: Math.round(item.rate * 100),
+    totalCents: Math.round(item.qty * item.rate * 100),
+    sortOrder,
+    taxable: item.taxable ?? false,
   };
 }
 
@@ -76,7 +100,14 @@ function buildInvCompat(inv: InvoiceResponse, uiStatus: InvoiceStatus, timezone:
   };
 }
 
-type LineItem = { description: string; qty: number; rate: number };
+type LineItem = {
+  id?: string;
+  description: string;
+  qty: number;
+  rate: number;
+  taxable?: boolean;
+  category?: 'labor' | 'material' | 'equipment' | 'other';
+};
 
 // ─── Payment Journey Timeline ─────────────────────────────────────────────
 function PaymentTimeline({ inv }: { inv: InvCompat }) {
@@ -125,7 +156,9 @@ function PaymentTimeline({ inv }: { inv: InvCompat }) {
 }
 
 // ─── Payment Methods Card ─────────────────────────────────────────────────
-function PaymentMethodsCard({ paymentLink }: { paymentLink: string }) {
+// `paymentLink` is the invoice's real Stripe payment link (stripePaymentLinkUrl);
+// when absent there is nothing to copy — a hint explains how to get one.
+function PaymentMethodsCard({ paymentLink }: { paymentLink?: string }) {
   const [copied, setCopied] = useState(false);
 
   return (
@@ -173,15 +206,21 @@ function PaymentMethodsCard({ paymentLink }: { paymentLink: string }) {
         </div>
 
         {/* Payment link */}
-        <div className="flex items-center gap-2 rounded-lg bg-secondary border border-border px-3 py-2.5 mt-1">
-          <p className="flex-1 text-xs text-muted-foreground truncate">{paymentLink}</p>
-          <button
-            onClick={() => { navigator.clipboard?.writeText(paymentLink); setCopied(true); setTimeout(() => setCopied(false), 2000); }}
-            className="flex items-center gap-1 text-xs text-primary hover:text-primary transition-colors shrink-0"
-          >
-            {copied ? <><Check size={11} /> Copied</> : <><Copy size={11} /> Copy link</>}
-          </button>
-        </div>
+        {paymentLink ? (
+          <div className="flex items-center gap-2 rounded-lg bg-secondary border border-border px-3 py-2.5 mt-1">
+            <p className="flex-1 text-xs text-muted-foreground truncate">{paymentLink}</p>
+            <button
+              onClick={() => { navigator.clipboard?.writeText(paymentLink); setCopied(true); setTimeout(() => setCopied(false), 2000); }}
+              className="flex items-center gap-1 text-xs text-primary hover:text-primary transition-colors shrink-0"
+            >
+              {copied ? <><Check size={11} /> Copied</> : <><Copy size={11} /> Copy link</>}
+            </button>
+          </div>
+        ) : (
+          <div className="rounded-lg bg-secondary border border-border px-3 py-2.5 mt-1">
+            <p className="text-xs text-muted-foreground">Send the invoice to generate a payment link.</p>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -189,10 +228,15 @@ function PaymentMethodsCard({ paymentLink }: { paymentLink: string }) {
 
 // ─── Line Items Editor (inline) ───────────────────────────────────────────
 function InvoiceLineItems({ items, editable, onChange }: {
-  items: LineItem[]; editable: boolean; onChange?: (items: LineItem[]) => void;
+  items: LineItem[]; editable: boolean;
+  /** Called with the edited rows on save. May return a promise (the PUT);
+   *  a rejection keeps the editor open with the draft intact. */
+  onChange?: (items: LineItem[]) => void | Promise<void>;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft,   setDraft]   = useState<LineItem[]>(items);
+  const [saving,    setSaving]    = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const total      = items.reduce((s, i) => s + i.qty * i.rate, 0);
   const draftTotal = draft.reduce((s, i) => s + i.qty * i.rate, 0);
 
@@ -203,8 +247,23 @@ function InvoiceLineItems({ items, editable, onChange }: {
   }
   function addRow()            { setDraft(prev => [...prev, { description: '', qty: 1, rate: 0 }]); }
   function removeRow(idx: number) { setDraft(prev => prev.filter((_, j) => j !== idx)); }
-  function save()   { onChange?.(draft); setEditing(false); }
-  function cancel() { setDraft(items); setEditing(false); }
+  // Re-seed the draft from the CURRENT items on every entry into edit mode —
+  // a mount-time-only seed lets a save emit stale rows after a refetch.
+  function startEditing() { setDraft(items); setSaveError(null); setEditing(true); }
+  async function save() {
+    setSaving(true);
+    setSaveError(null);
+    try {
+      await onChange?.(draft);
+      setEditing(false);
+    } catch (err) {
+      // The rows were NOT persisted — keep the editor (and draft) open.
+      setSaveError(err instanceof Error ? err.message : 'Failed to save line items');
+    } finally {
+      setSaving(false);
+    }
+  }
+  function cancel() { setDraft(items); setSaveError(null); setEditing(false); }
 
   return (
     <div className="rounded-xl bg-card border border-border overflow-hidden">
@@ -212,7 +271,7 @@ function InvoiceLineItems({ items, editable, onChange }: {
         <h4 className="text-foreground">Line items</h4>
         {editable && !editing && (
           <button
-            onClick={() => setEditing(true)}
+            onClick={startEditing}
             className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground border border-border rounded-lg px-2.5 py-1.5 hover:bg-secondary transition-colors"
           >
             <Pencil size={11} /> Edit
@@ -282,19 +341,26 @@ function InvoiceLineItems({ items, editable, onChange }: {
       </div>
 
       {editing && (
-        <div className="flex gap-2 px-4 py-3 border-t border-border">
-          <button
-            onClick={save}
-            className="flex-1 flex items-center justify-center gap-1.5 rounded-lg bg-primary text-primary-foreground py-2 text-sm hover:bg-primary/90 transition-colors"
-          >
-            <Check size={13} /> Save changes
-          </button>
-          <button
-            onClick={cancel}
-            className="flex items-center justify-center rounded-lg border border-border px-4 py-2 text-sm text-foreground hover:bg-secondary transition-colors"
-          >
-            Cancel
-          </button>
+        <div className="flex flex-col gap-2 px-4 py-3 border-t border-border">
+          {saveError && (
+            <p className="text-xs text-destructive">Save failed: {saveError}</p>
+          )}
+          <div className="flex gap-2">
+            <button
+              onClick={() => void save()}
+              disabled={saving}
+              className="flex-1 flex items-center justify-center gap-1.5 rounded-lg bg-primary text-primary-foreground py-2 text-sm hover:bg-primary/90 disabled:opacity-50 transition-colors"
+            >
+              {saving ? 'Saving…' : <><Check size={13} /> Save changes</>}
+            </button>
+            <button
+              onClick={cancel}
+              disabled={saving}
+              className="flex items-center justify-center rounded-lg border border-border px-4 py-2 text-sm text-foreground hover:bg-secondary disabled:opacity-50 transition-colors"
+            >
+              Cancel
+            </button>
+          </div>
         </div>
       )}
     </div>
@@ -303,7 +369,9 @@ function InvoiceLineItems({ items, editable, onChange }: {
 
 // ─── Send Payment Sheet ────────────────────────────────────────────────────
 function SendPaymentSheet({ inv, amountDueCents, paymentLink, onClose, onSent, apiId }: {
-  inv: InvCompat; amountDueCents: number; paymentLink: string;
+  inv: InvCompat; amountDueCents: number;
+  /** The invoice's real Stripe payment link, when one exists. */
+  paymentLink?: string;
   onClose: () => void; onSent: () => void;
   /** When set, the sheet calls the real /api/invoices/:id/send endpoint. */
   apiId?: string;
@@ -313,8 +381,8 @@ function SendPaymentSheet({ inv, amountDueCents, paymentLink, onClose, onSent, a
   const [sending, setSending] = useState(false);
   const [sent,    setSent]    = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
-
-  const firstName = inv.customer.split(' ')[0] ?? 'there';
+  // The tokenized pay-page URL minted by POST /:id/send — surfaced post-send.
+  const [sentUrl, setSentUrl] = useState<string | null>(null);
 
   const [msg, setMsg] = useState('');
 
@@ -335,12 +403,13 @@ function SendPaymentSheet({ inv, amountDueCents, paymentLink, onClose, onSent, a
     setSendError(null);
     try {
       if (apiId) {
-        await sendInvoice({
+        const result = await sendInvoice({
           channel,
           recipientPhone: channel === 'sms' ? recipient : undefined,
           recipientEmail: channel === 'email' ? recipient : undefined,
           customMessage: msg,
         });
+        if (result?.viewUrl) setSentUrl(result.viewUrl);
       } else {
         await new Promise((r) => setTimeout(r, 1200));
       }
@@ -435,10 +504,13 @@ function SendPaymentSheet({ inv, amountDueCents, paymentLink, onClose, onSent, a
             />
           </div>
 
-          {/* Payment link row */}
+          {/* Payment link row — the freshly minted view URL after a send,
+              else the invoice's Stripe payment link, else a hint. */}
           <div className="flex items-center gap-2 rounded-lg bg-secondary border border-border px-3 py-2">
             <ExternalLink size={11} className="text-muted-foreground shrink-0" />
-            <p className="text-xs text-muted-foreground truncate flex-1">{paymentLink}</p>
+            <p className="text-xs text-muted-foreground truncate flex-1">
+              {sentUrl ?? paymentLink ?? 'Send the invoice to generate a payment link.'}
+            </p>
           </div>
 
           {/* Due date */}
@@ -630,8 +702,8 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
   const navigate = useNavigate();
   const tz = useTenantTimezone();
   const { data: inv, isLoading, error, refetch } = useDetailQuery<InvoiceResponse>('/api/invoices', invoiceId);
+  const { mutate: updateInvoice } = useMutation<Record<string, unknown>, InvoiceResponse>('PUT', `/api/invoices/${invoiceId}`);
 
-  const [lineItems, setLineItems] = useState<LineItem[]>([]);
   const [sendOpen,  setSendOpen]  = useState(false);
   const [markOpen,  setMarkOpen]  = useState(false);
   const [paid,      setPaid]      = useState(false);
@@ -692,8 +764,7 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
   // status, so a plain normalize would never surface the overdue banner/reminder.
   const uiStatus    = deriveInvoiceUiStatus(apiStatus, inv.dueDate) as InvoiceStatus;
   const invCompat   = buildInvCompat(inv, uiStatus, tz);
-  const apiLineItems = inv.lineItems ?? [];
-  const uiLineItems = lineItems.length > 0 ? lineItems : apiLineItems.map(apiLineToUi);
+  const uiLineItems = (inv.lineItems ?? []).map(apiLineToUi);
 
   // U4 (E4) — money comes from server totals (integer cents), never a
   // float line-item recompute. `totals.totalCents` is the true invoice
@@ -706,7 +777,9 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
   const customer   = inv.customer;
   const status: InvoiceStatus = uiStatus;
   const editable   = status === 'Draft';
-  const paymentLink = `pay.rivet.ai/${inv.invoiceNumber.toLowerCase()}`;
+  // The invoice's REAL Stripe-hosted payment link when one exists — never a
+  // fabricated URL. Absent until the payment link is created server-side.
+  const paymentLink = inv.stripePaymentLinkUrl;
   // U12 (E14) — only offer "Mark as paid" when the backend can actually
   // accept a payment (PAYABLE_STATUSES = open / partially_paid). Drafts,
   // paid, and void/canceled invoices hide it. We read the *normalized* API
@@ -784,7 +857,12 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
               <InvoiceLineItems
                 items={uiLineItems}
                 editable={editable}
-                onChange={setLineItems}
+                onChange={async (items) => {
+                  // Persist the edit — nothing is committed locally until the
+                  // server accepts it (a rejection keeps the editor open).
+                  await updateInvoice({ lineItems: items.map((item, i) => uiLineToApi(item, i)) });
+                  await refetch();
+                }}
               />
               {status !== 'Paid' && (
                 <PaymentMethodsCard paymentLink={paymentLink} />
