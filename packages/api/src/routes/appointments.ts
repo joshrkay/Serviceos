@@ -1,4 +1,5 @@
 import { Router, Response } from 'express';
+import { z } from 'zod';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { createAppointmentSchema, delayAcknowledgmentSchema } from '../shared/contracts';
@@ -38,6 +39,14 @@ interface AppointmentRouterOptions {
   delayNotificationCoordinator?: DelayNotificationEnqueuer;
 }
 
+// Body for POST /:id/running-late. Not the shared delayMinutesSchema
+// (literal 10|15|20|60): the PUT virtual-status branch this shares a
+// helper with has always accepted any positive value (the dispatcher
+// NotifyDelayDialog offers 5/30/45), so the new front door matches.
+const runningLateBodySchema = z.object({
+  delayMinutes: z.number().int().positive().optional(),
+});
+
 export function createAppointmentRouter(
   appointmentRepo: AppointmentRepository,
   ownership: TenantOwnership,
@@ -47,6 +56,41 @@ export function createAppointmentRouter(
   auditRepo?: AuditRepository,
 ): Router {
   const router = Router();
+
+  // Shared by the PUT /:id virtual-status branch (dispatcher backcompat)
+  // and POST /:id/running-late (technician path). `running_late` is a
+  // notification trigger only — no entity is mutated — so, keeping parity
+  // with the original PUT branch, no audit event is emitted here.
+  async function handleRunningLate(
+    req: AuthenticatedRequest,
+    res: Response,
+    delayMinutes: number,
+  ): Promise<void> {
+    const appointment = await getAppointment(req.auth!.tenantId, req.params.id, appointmentRepo);
+    if (!appointment) {
+      res.status(404).json({ error: 'NOT_FOUND', message: 'Appointment not found' });
+      return;
+    }
+    const history = await timelineRepo.findByJob(req.auth!.tenantId, appointment.jobId);
+    const delayVersion = history.filter(
+      (e) => e.eventType === JOB_TIMELINE_EVENT_TYPES.DELAY_ACKNOWLEDGED && e.metadata?.isRunningBehind === true,
+    ).length;
+    try {
+      await options?.delayNotificationCoordinator?.enqueueDelayNotice({
+        tenantId: req.auth!.tenantId,
+        currentAppointmentId: appointment.id,
+        delayVersion,
+        delayMinutes,
+      });
+    } catch (notificationErr) {
+      // eslint-disable-next-line no-console
+      console.warn('Failed to enqueue delay notification for running-late notice', {
+        appointmentId: appointment.id,
+        error: notificationErr instanceof Error ? notificationErr.message : String(notificationErr),
+      });
+    }
+    res.json({ appointmentId: appointment.id, delayMinutes, queued: true });
+  }
 
   router.post(
     '/',
@@ -194,39 +238,17 @@ export function createAppointmentRouter(
     requirePermission('appointments:update'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
-        // `running_late` is a virtual status emitted by the technician GPS
-        // engine. It is not a persisted AppointmentStatus — instead it
-        // triggers the delay notification coordinator so the next customer
-        // receives an SMS and a timeline entry is written.
+        // `running_late` is a virtual status, not a persisted
+        // AppointmentStatus — it triggers the delay notification coordinator
+        // so the next customer receives an SMS. Kept on PUT for backcompat
+        // with dispatcher clients (e.g. AppointmentEdit's NotifyDelayDialog);
+        // technicians use POST /:id/running-late below.
         if (req.body?.status === 'running_late') {
-          const appointment = await getAppointment(req.auth!.tenantId, req.params.id, appointmentRepo);
-          if (!appointment) {
-            res.status(404).json({ error: 'NOT_FOUND', message: 'Appointment not found' });
-            return;
-          }
           const delayMinutes: number =
             typeof req.body.delayMinutes === 'number' && req.body.delayMinutes > 0
               ? req.body.delayMinutes
               : 20;
-          const history = await timelineRepo.findByJob(req.auth!.tenantId, appointment.jobId);
-          const delayVersion = history.filter(
-            (e) => e.eventType === JOB_TIMELINE_EVENT_TYPES.DELAY_ACKNOWLEDGED && e.metadata?.isRunningBehind === true,
-          ).length;
-          try {
-            await options?.delayNotificationCoordinator?.enqueueDelayNotice({
-              tenantId: req.auth!.tenantId,
-              currentAppointmentId: appointment.id,
-              delayVersion,
-              delayMinutes,
-            });
-          } catch (notificationErr) {
-            // eslint-disable-next-line no-console
-            console.warn('Failed to enqueue delay notification from PUT', {
-              appointmentId: appointment.id,
-              error: notificationErr instanceof Error ? notificationErr.message : String(notificationErr),
-            });
-          }
-          res.json({ appointmentId: appointment.id, delayMinutes, queued: true });
+          await handleRunningLate(req, res, delayMinutes);
           return;
         }
 
@@ -251,6 +273,27 @@ export function createAppointmentRouter(
           return;
         }
         res.json(result);
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    }
+  );
+
+  // Technician-reachable running-late notice. Technicians deliberately hold
+  // only `appointments:view` (see auth/rbac.ts — appointments:update stays
+  // dispatcher/owner-only), so the PUT virtual-status path 403s for them.
+  // This endpoint triggers the same delay notification without granting any
+  // appointment mutation.
+  router.post(
+    '/:id/running-late',
+    requireAuth,
+    requireTenant,
+    requirePermission('appointments:view'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const parsed = runningLateBodySchema.parse(req.body ?? {});
+        await handleRunningLate(req, res, parsed.delayMinutes ?? 20);
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);
