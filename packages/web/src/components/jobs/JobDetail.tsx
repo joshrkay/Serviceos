@@ -809,7 +809,7 @@ export function JobDetailView({
   const ownerLabel = `${firstNameFromUser(user?.fullName, user?.primaryEmailAddress?.emailAddress)} (owner)`;
 
   const { data: apiJob, isLoading, error, refetch: refetchJob } = useDetailQuery<JobDetailResponse>('/api/jobs', id);
-  const { mutate: transitionJob } = useMutation<{ status: string }, JobDetailResponse>('POST', `/api/jobs/${id}/transition`);
+  const { mutate: transitionJob } = useMutation<{ status: string; reason?: string }, JobDetailResponse>('POST', `/api/jobs/${id}/transition`);
 
   const job      = apiJob ? buildJobCompat(apiJob) : null;
   const customer = apiJob?.customer ? buildCustomerCompat(apiJob.customer) : undefined;
@@ -834,6 +834,7 @@ export function JobDetailView({
   const [activities,    setActivities]    = useState<JobActivity[]>([]);
   const [materials,     setMaterials]     = useState<MaterialItem[]>([]);
   const [showDuplicate, setShowDuplicate] = useState(false);
+  const [transitionError, setTransitionError] = useState<string | null>(null);
 
   // Time entries state
   const [timeEntries, setTimeEntries] = useState<Array<{
@@ -1237,6 +1238,11 @@ export function JobDetailView({
 
           {/* Banners */}
           <div className="flex flex-col gap-3 mb-5">
+            {transitionError && (
+              <p data-testid="job-transition-error" role="alert" className="text-sm text-destructive">
+                {transitionError}
+              </p>
+            )}
             {showDuplicate && job.duplicateWarning && (
               <DuplicateBanner warning={job.duplicateWarning} onDismiss={() => setShowDuplicate(false)} />
             )}
@@ -1269,12 +1275,20 @@ export function JobDetailView({
                   onChange={async (e) => {
                     const newStatus = e.target.value;
                     if (!newStatus) return;
+                    setTransitionError(null);
                     try {
-                      await transitionJob({ status: newStatus });
+                      // §5.8 — the API rejects backward moves (in_progress →
+                      // scheduled) without a recorded reason.
+                      const backward = apiJob?.status === 'in_progress' && newStatus === 'scheduled';
+                      await transitionJob(
+                        backward
+                          ? { status: newStatus, reason: 'Rescheduled from job detail' }
+                          : { status: newStatus },
+                      );
                       // Reload job data to reflect new status in UI
                       await refetchJob();
-                    } catch {
-                      // non-fatal: reload will reflect actual state
+                    } catch (err) {
+                      setTransitionError(err instanceof Error ? err.message : 'Failed to update job status');
                     }
                   }}
                   title="Change job status"

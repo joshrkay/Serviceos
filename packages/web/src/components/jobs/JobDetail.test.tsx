@@ -303,6 +303,43 @@ describe('JobDetailView', () => {
     });
   });
 
+  describe('status transition control', () => {
+    it('backward reschedule (in_progress → scheduled) sends a non-empty reason', async () => {
+      const mutate = vi.fn().mockResolvedValue({});
+      vi.mocked(useMutation).mockReturnValue({ mutate, isLoading: false, error: null });
+      vi.mocked(useDetailQuery).mockReturnValue({
+        ...defaultDetailResult,
+        data: { ...mockApiJob, status: 'in_progress' },
+      });
+      renderPage();
+
+      fireEvent.change(screen.getByTitle('Change job status'), { target: { value: 'scheduled' } });
+
+      await waitFor(() =>
+        expect(mutate).toHaveBeenCalledWith({
+          status: 'scheduled',
+          reason: expect.stringMatching(/\S/),
+        }),
+      );
+    });
+
+    it('shows the error affordance when a transition fails instead of swallowing it', async () => {
+      const mutate = vi.fn().mockRejectedValue(new Error('HTTP 400'));
+      vi.mocked(useMutation).mockReturnValue({ mutate, isLoading: false, error: null });
+      vi.mocked(useDetailQuery).mockReturnValue({
+        ...defaultDetailResult,
+        data: { ...mockApiJob, status: 'in_progress' },
+      });
+      renderPage();
+
+      fireEvent.change(screen.getByTitle('Change job status'), { target: { value: 'scheduled' } });
+
+      await waitFor(() =>
+        expect(screen.getByTestId('job-transition-error')).toHaveTextContent('HTTP 400'),
+      );
+    });
+  });
+
   // U10b — Path A class contract: the largest jobs file renders on brand tokens.
   it('renders on Path A tokens — no raw Tailwind palette leaks', () => {
     const { container } = renderPage();
