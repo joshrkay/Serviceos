@@ -101,15 +101,19 @@ export function CustomerEdit({ customerId, onSaved, onCancel }: CustomerEditProp
         return;
       }
 
+      // Cleared optionals serialize as '' — never a dropped key. The server
+      // only SETs columns for keys present in the body, so `|| undefined`
+      // (which JSON.stringify drops) silently kept the previous value while
+      // the form claimed the save succeeded.
       const body = {
-        firstName: form.firstName.trim() || undefined,
-        lastName: form.lastName.trim() || undefined,
-        companyName: form.companyName.trim() || undefined,
-        primaryPhone: form.primaryPhone.trim() || undefined,
-        secondaryPhone: form.secondaryPhone.trim() || undefined,
-        email: form.email.trim() || undefined,
+        firstName: form.firstName.trim(),
+        lastName: form.lastName.trim(),
+        companyName: form.companyName.trim(),
+        primaryPhone: form.primaryPhone.trim(),
+        secondaryPhone: form.secondaryPhone.trim(),
+        email: form.email.trim(),
         preferredChannel: form.preferredChannel,
-        communicationNotes: form.communicationNotes.trim() || '',
+        communicationNotes: form.communicationNotes.trim(),
         // D4: Include SMS consent in update
         smsConsent: form.smsConsent,
       };
