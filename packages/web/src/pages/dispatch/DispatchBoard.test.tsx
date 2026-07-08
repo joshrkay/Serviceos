@@ -262,13 +262,57 @@ describe('P6-025 — DispatchBoard drag-and-drop wires schedule proposals', () =
     expect(body.idempotencyKey).toBeTruthy();
   });
 
-  it('same lane — drag within same technician creates a reschedule_appointment proposal', async () => {
+  it('same lane — drag to a genuinely different slot creates a reschedule_appointment proposal', async () => {
+    // A real same-lane move needs 2+ cards: tech-1 gets a second appointment
+    // and we drag the first card past the second (trailing gap, index 2).
+    // Dropping the sole card of a lane onto the gap beside itself is a no-op
+    // (see the dedicated no-op test) and must NOT open the dialog.
+    vi.mocked(useDispatchBoard).mockReturnValue({
+      data: {
+        ...mockBoardData,
+        technicianLanes: [
+          {
+            technicianId: 'tech-1',
+            technicianName: 'John Smith',
+            appointments: [
+              {
+                id: 'assigned-1',
+                jobId: 'job-2',
+                customerName: 'Bob Wilson',
+                locationAddress: '456 Oak Ave',
+                jobSummary: 'Plumbing Fix',
+                technicianName: 'John Smith',
+                scheduledStart: '2026-03-14T10:00:00Z',
+                scheduledEnd: '2026-03-14T11:00:00Z',
+                status: 'scheduled',
+              },
+              {
+                id: 'assigned-2',
+                jobId: 'job-3',
+                customerName: 'Carla Reed',
+                locationAddress: '789 Pine Rd',
+                jobSummary: 'HVAC Tune-up',
+                technicianName: 'John Smith',
+                scheduledStart: '2026-03-14T12:00:00Z',
+                scheduledEnd: '2026-03-14T13:00:00Z',
+                status: 'scheduled',
+              },
+            ],
+          },
+          mockBoardData.technicianLanes[1],
+        ],
+      },
+      isLoading: false,
+      error: null,
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useDispatchBoard>);
+
     render(<DispatchBoard />);
     const lanes = screen.getAllByTestId('technician-lane');
     const sourceLane = lanes.find((l) => l.getAttribute('data-technician-id') === 'tech-1')!;
     const card = sourceLane.querySelector('[data-appointment-id="assigned-1"]') as HTMLElement;
 
-    fireDragSequence(card, sourceLane, 'assigned-1', '1');
+    fireDragSequence(card, sourceLane, 'assigned-1', '2');
 
     expect(screen.getByTestId('confirm-proposal-title')).toHaveTextContent(/reschedule/i);
     fireEvent.click(screen.getByTestId('confirm-proposal-confirm'));
@@ -616,5 +660,82 @@ describe('P6-026 — Conflict-visibility badges on appointment cards', () => {
 
     render(<DispatchBoard />);
     expect(screen.queryByTestId('appointment-conflict-badge')).not.toBeInTheDocument();
+  });
+});
+
+describe('U7 — lane reorder proposes a repacked slot, not the neighbour’s exact times', () => {
+  const twoInOneLane = {
+    date: '2026-03-14',
+    unassignedAppointments: [],
+    technicianLanes: [
+      {
+        technicianId: 'tech-1',
+        technicianName: 'John Smith',
+        appointments: [
+          {
+            id: 'first',
+            jobId: 'job-1',
+            customerName: 'First Cust',
+            locationAddress: '1 A St',
+            jobSummary: 'First',
+            technicianName: 'John Smith',
+            scheduledStart: '2026-03-14T09:00:00Z',
+            scheduledEnd: '2026-03-14T10:00:00Z',
+            status: 'scheduled',
+          },
+          {
+            id: 'second',
+            jobId: 'job-2',
+            customerName: 'Second Cust',
+            locationAddress: '2 B St',
+            jobSummary: 'Second',
+            technicianName: 'John Smith',
+            scheduledStart: '2026-03-14T11:00:00Z',
+            scheduledEnd: '2026-03-14T12:00:00Z',
+            status: 'scheduled',
+          },
+        ],
+      },
+    ],
+    summary: { unassigned: 0, scheduled: 2, inProgress: 0, completed: 0, canceled: 0 },
+  };
+
+  beforeEach(() => {
+    vi.mocked(useDispatchBoard).mockReturnValue({
+      data: twoInOneLane,
+      isLoading: false,
+      error: null,
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useDispatchBoard>);
+    vi.mocked(toast.info).mockClear();
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ id: 'proposal-xyz' }),
+      text: () => Promise.resolve(''),
+    }) as unknown as typeof fetch;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('moving the first card down packs it after the neighbour’s end, not onto the neighbour’s start (no self-overlap)', async () => {
+    render(<DispatchBoard />);
+    // The first card's "later" arrow moves it after the second card.
+    const downButtons = screen.getAllByTestId('lane-reorder-down');
+    fireEvent.click(downButtons[0]);
+
+    expect(screen.getByTestId('confirm-proposal-dialog')).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('confirm-proposal-confirm'));
+
+    await waitFor(() => expect(global.fetch).toHaveBeenCalledTimes(1));
+    const body = JSON.parse((global.fetch as any).mock.calls[0][1].body);
+    expect(body.proposalType).toBe('reschedule_appointment');
+    expect(body.payload.appointmentId).toBe('first');
+    // Repacked after the neighbour's end (11:00–12:00 → 12:00 start), NOT the
+    // neighbour's own start time (which would self-overlap and always fail
+    // feasibility, the pre-fix dead-end behaviour).
+    expect(body.payload.newScheduledStart).toBe('2026-03-14T12:00:00.000Z');
+    expect(body.payload.newScheduledStart).not.toBe('2026-03-14T11:00:00Z');
   });
 });

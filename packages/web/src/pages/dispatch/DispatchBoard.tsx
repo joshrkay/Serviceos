@@ -28,6 +28,11 @@ import {
   computeProposedSlot,
   SlotPlacement,
 } from '../../components/dispatch/compute-proposed-slot';
+import {
+  laneRenderOrder,
+  resolveInsert,
+  isSameLaneNoOp,
+} from '../../components/dispatch/dispatch-lane-order';
 import { emitProposalsChanged, PROPOSALS_CHANGED } from '../../lib/proposal-events';
 import type { FeasibilityResult } from '../../components/dispatch/feasibility-types';
 
@@ -86,12 +91,6 @@ function toDatetimeLocalValue(iso: string): string {
 function fromDatetimeLocalValue(value: string): string {
   if (!value) return '';
   return new Date(value).toISOString();
-}
-
-function isSameLaneNoOp(sorted: AppointmentCardData[], draggedId: string, insertIndex: number): boolean {
-  const origIdx = sorted.findIndex((a) => a.id === draggedId);
-  if (origIdx < 0) return false;
-  return insertIndex === origIdx;
 }
 
 export function DispatchBoard() {
@@ -163,13 +162,15 @@ export function DispatchBoard() {
     const appt = allAppointments.find((a) => a.id === dragSource.appointmentId);
     if (!appt) return null;
     const lane = laneByTechId(dragOverTarget.technicianId);
-    const sorted = [...(lane?.appointments ?? [])].sort(
-      (a, b) => new Date(a.scheduledStart).getTime() - new Date(b.scheduledStart).getTime(),
+    const renderOrder = laneRenderOrder(lane?.appointments ?? [], filters.status);
+    const { withoutDragged, insertIndex } = resolveInsert(
+      renderOrder,
+      dragSource.appointmentId,
+      dragOverTarget.insertIndex,
     );
-    const withoutDragged = sorted.filter((a) => a.id !== dragSource.appointmentId);
     const slot = computeProposedSlot({
       appointments: withoutDragged,
-      insertIndex: dragOverTarget.insertIndex,
+      insertIndex,
       dragged: appt,
       dayStartIso: dayStartIso(
         data?.date ?? dateParam,
@@ -183,7 +184,7 @@ export function DispatchBoard() {
       proposedScheduledStart: slot.proposedScheduledStart,
       proposedScheduledEnd: slot.proposedScheduledEnd,
     };
-  }, [dragSource, dragOverTarget, allAppointments, laneByTechId, data?.date, dateParam]);
+  }, [dragSource, dragOverTarget, allAppointments, laneByTechId, data?.date, dateParam, filters.status]);
 
   const { preview: feasibilityPreview } = useFeasibilityPreview(previewInput);
 
@@ -297,12 +298,10 @@ export function DispatchBoard() {
 
       if (target.kind === 'lane' && target.technicianId && target.insertIndex !== undefined) {
         const lane = laneByTechId(target.technicianId);
-        const sorted = [...(lane?.appointments ?? [])].sort(
-          (a, b) => new Date(a.scheduledStart).getTime() - new Date(b.scheduledStart).getTime(),
-        );
+        const renderOrder = laneRenderOrder(lane?.appointments ?? [], filters.status);
         if (
           dragSource.sourceTechnicianId === target.technicianId &&
-          isSameLaneNoOp(sorted, dragSource.appointmentId, target.insertIndex)
+          isSameLaneNoOp(renderOrder, dragSource.appointmentId, target.insertIndex)
         ) {
           toast.info(
             'Use the arrows on the card to reorder, or drag to another technician lane.',
@@ -339,13 +338,15 @@ export function DispatchBoard() {
 
       if (target.kind === 'lane' && target.technicianId && target.insertIndex !== undefined) {
         const lane = laneByTechId(target.technicianId);
-        const sorted = [...(lane?.appointments ?? [])].sort(
-          (a, b) => new Date(a.scheduledStart).getTime() - new Date(b.scheduledStart).getTime(),
+        const renderOrder = laneRenderOrder(lane?.appointments ?? [], filters.status);
+        const { withoutDragged, insertIndex } = resolveInsert(
+          renderOrder,
+          dragSource.appointmentId,
+          target.insertIndex,
         );
-        const withoutDragged = sorted.filter((a) => a.id !== dragSource.appointmentId);
         const slot = computeProposedSlot({
           appointments: withoutDragged,
-          insertIndex: target.insertIndex,
+          insertIndex,
           dragged: appointment,
           dayStartIso: dayStartIso(
             data?.date ?? dateParam,
@@ -374,7 +375,7 @@ export function DispatchBoard() {
         placement,
       });
     },
-    [dragSource, findAppointment, findTechnicianName, laneByTechId, data?.date, dateParam],
+    [dragSource, findAppointment, findTechnicianName, laneByTechId, data?.date, dateParam, filters.status],
   );
 
   const handleDragStartFromLane = useCallback(
@@ -461,12 +462,31 @@ export function DispatchBoard() {
       if (fromIndex === toIndex) return;
       const lane = laneByTechId(technicianId);
       if (!lane) return;
-      const sorted = [...lane.appointments].sort(
-        (a, b) => new Date(a.scheduledStart).getTime() - new Date(b.scheduledStart).getTime(),
-      );
-      const appointment = sorted[fromIndex];
-      const neighbor = sorted[toIndex];
+      // fromIndex/toIndex index the rendered (filtered + sorted) lane, matching
+      // what TechnicianLane's arrows report.
+      const renderOrder = laneRenderOrder(lane.appointments, filters.status);
+      const appointment = renderOrder[fromIndex];
+      const neighbor = renderOrder[toIndex];
       if (!appointment || !neighbor) return;
+
+      // Repack into the target slot rather than copying the neighbour's exact
+      // times — proposing identical times always trips the feasibility overlap
+      // check and leaves Confirm permanently disabled. `toIndex` is the desired
+      // final position, expressed directly against the dragged-removed list.
+      const withoutDragged = renderOrder.filter((a) => a.id !== appointmentId);
+      const slot = computeProposedSlot({
+        appointments: withoutDragged,
+        insertIndex: toIndex,
+        dragged: appointment,
+        dayStartIso: dayStartIso(
+          data?.date ?? dateParam,
+          lane.availabilitySummary?.workingHours?.start,
+        ),
+      });
+      const proposedStart =
+        slot.placement === 'overflow' ? appointment.scheduledStart : slot.proposedScheduledStart;
+      const proposedEnd =
+        slot.placement === 'overflow' ? appointment.scheduledEnd : slot.proposedScheduledEnd;
 
       setPendingDrop({
         source: {
@@ -478,15 +498,18 @@ export function DispatchBoard() {
         targetTechnicianId: technicianId,
         proposalType: 'reschedule_appointment',
         appointment,
-        targetDescription: `Swap time with ${neighbor.customerName ?? 'neighbor'}`,
-        proposedStart: neighbor.scheduledStart,
-        proposedEnd: neighbor.scheduledEnd,
-        placement: 'gap',
+        targetDescription:
+          toIndex > fromIndex
+            ? `Move after ${neighbor.customerName ?? 'neighbor'}`
+            : `Move before ${neighbor.customerName ?? 'neighbor'}`,
+        proposedStart,
+        proposedEnd,
+        placement: slot.placement,
       });
-      setEditedStart(toDatetimeLocalValue(neighbor.scheduledStart));
-      setEditedEnd(toDatetimeLocalValue(neighbor.scheduledEnd));
+      setEditedStart(toDatetimeLocalValue(proposedStart));
+      setEditedEnd(toDatetimeLocalValue(proposedEnd));
     },
-    [laneByTechId],
+    [laneByTechId, filters.status, data?.date, dateParam],
   );
 
   const submitProposal = useCallback(async () => {
@@ -602,13 +625,15 @@ export function DispatchBoard() {
     setEditedEnd(end);
     const isoStart = fromDatetimeLocalValue(start);
     const isoEnd = fromDatetimeLocalValue(end);
+    // Preserve the existing placement. The time-edit inputs only render while
+    // placement is 'overflow'; forcing 'gap' here unmounts them on the first
+    // keystroke, making it impossible to edit the second field.
     setPendingDrop((prev) =>
       prev
         ? {
             ...prev,
             proposedStart: isoStart,
             proposedEnd: isoEnd,
-            placement: 'gap',
           }
         : null,
     );
