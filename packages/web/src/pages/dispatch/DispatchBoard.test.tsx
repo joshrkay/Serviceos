@@ -618,3 +618,40 @@ describe('P6-026 — Conflict-visibility badges on appointment cards', () => {
     expect(screen.queryByTestId('appointment-conflict-badge')).not.toBeInTheDocument();
   });
 });
+
+// Regression guard for the "board renders unstyled" P0: dispatch-board.css targets
+// these BEM hooks by name, so if a className drifts in the JSX the stylesheet
+// silently stops matching and the whole board loses its layout. Pin the contract
+// in jsdom so a rename can't re-break styling without a failing test.
+describe('P6-001 — dispatch-board.css class contract', () => {
+  const STRUCTURAL_HOOKS = [
+    'dispatch-board',
+    'dispatch-board__header',
+    'dispatch-board__content',
+    'dispatch-board__sidebar',
+    'dispatch-board__lanes',
+    'summary-strip',
+    'dispatch-filters',
+    'date-navigation',
+    'unassigned-queue',
+    'technician-lane',
+    'appointment-card',
+  ];
+
+  beforeEach(() => {
+    vi.mocked(useDispatchBoard).mockReturnValue({
+      data: mockBoardData,
+      isLoading: false,
+      error: null,
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useDispatchBoard>);
+  });
+
+  it.each(STRUCTURAL_HOOKS)(
+    'renders an element carrying the .%s layout hook the stylesheet targets',
+    (hook) => {
+      const { container } = render(<DispatchBoard />);
+      expect(container.querySelector(`.${hook}`)).not.toBeNull();
+    },
+  );
+});

@@ -1,11 +1,11 @@
 /**
  * Pins the PR 319 (P2) guard in the Clerk `user.created` invitee-join path:
  * when a pending invitation matches but `deps.pool` is not wired, the join must
- * NOT consume the invitation (no markAccepted) and must NOT bootstrap a
- * separate ("rogue") tenant for an invitee. Instead the handler fails the
- * webhook with 500 so Clerk retries once the pool is configured (see
- * 04a98f5 "fix(webhooks): fail invitee-join errors instead of bootstrapping a
- * rogue tenant"), leaving the invitation intact for a clean retry.
+ * NOT consume the invitation (no markAccepted). The handler logs the failure and
+ * fails the webhook with a 500 so Clerk retries once the pool is configured —
+ * rather than consuming the invitation (accepted-but-unjoined, no access) or
+ * silently bootstrapping a brand-new tenant for an invitee who should join an
+ * existing one.
  */
 import express from 'express';
 import request from 'supertest';
@@ -98,12 +98,13 @@ describe('Clerk user.created — invitee join with pool not wired (PR 319 P2)', 
       .set('content-type', 'application/json')
       .send(payload);
 
-    // The join failed (no pool) → the webhook fails so Clerk retries, rather
-    // than bootstrapping a rogue tenant for the invitee.
+    // The join can't proceed (no pool), so the webhook fails closed with a 500
+    // to trigger a Clerk retry once the pool is wired.
     expect(res.status).toBe(500);
     // Critical invariant: the invitation was NOT consumed.
     expect(markAccepted).not.toHaveBeenCalled();
-    // And NO separate tenant was bootstrapped for the invitee.
+    // And no brand-new tenant was bootstrapped for an invitee (the handler
+    // returns before the bootstrap path).
     expect(tenantRepo.created).toHaveLength(0);
   });
 });

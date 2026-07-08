@@ -3934,7 +3934,7 @@ export function createApp(): express.Express {
     userRepo,
     invoiceRepo,
     auditRepo,
-  }));
+  }, appointmentRepo));
   app.use(
     '/api/jobs',
     createJobFilesRouter({
