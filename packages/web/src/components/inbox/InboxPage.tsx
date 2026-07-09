@@ -2,7 +2,7 @@ import { useEffect, useState, useRef, useCallback } from 'react';
 import { isCaptureProposalType } from '@ai-service-os/shared';
 import { Undo2, X } from 'lucide-react';
 import { useApiClient } from '../../lib/apiClient';
-import { emitProposalsChanged } from '../../lib/proposal-events';
+import { emitProposalsChanged, PROPOSALS_CHANGED } from '../../lib/proposal-events';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
 import { formatInTenantTz } from '../../utils/formatInTenantTz';
 import { ProposalChainCard, ChainRow } from './ProposalChainCard';
@@ -457,47 +457,52 @@ export function InboxPage() {
         const json = await res.json().catch(() => ({}));
         throw new Error(json?.message ?? `HTTP ${res.status}`);
       }
-      // Refresh the inbox to show the undone proposal
+      // Refresh the inbox to show the undone proposal (background — keep rows)
       emitProposalsChanged();
-      // Trigger a re-fetch
-      const refreshRes = await apiFetch('/api/proposals/inbox');
-      if (refreshRes.ok) {
-        const body = (await refreshRes.json()) as InboxResponse;
-        setRows(body.data);
-        setSummary(body.summary);
-        setExpired(body.expired ?? []);
-        setFailed(body.failed ?? []);
-      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Undo failed');
     }
   }, [apiFetch]);
 
-  useEffect(() => {
-    let cancelled = false;
-    setIsLoading(true);
-    setError(null);
-    apiFetch('/api/proposals/inbox')
-      .then(async (res) => {
+  const hasLoadedRef = useRef(false);
+  const loadInbox = useCallback(
+    async (opts?: { background?: boolean }) => {
+      const background = opts?.background === true && hasLoadedRef.current;
+      if (!background) {
+        setIsLoading(true);
+        setError(null);
+      }
+      try {
+        const res = await apiFetch('/api/proposals/inbox');
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const body = (await res.json()) as InboxResponse;
-        if (!cancelled) {
-          setRows(body.data);
-          setSummary(body.summary);
-          setExpired(body.expired ?? []);
-          setFailed(body.failed ?? []);
-        }
-      })
-      .catch((err) => {
-        if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to load');
-      })
-      .finally(() => {
-        if (!cancelled) setIsLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [apiFetch]);
+        hasLoadedRef.current = true;
+        setRows(body.data);
+        setSummary(body.summary);
+        setExpired(body.expired ?? []);
+        setFailed(body.failed ?? []);
+        setError(null);
+      } catch (err) {
+        if (background) return;
+        setError(err instanceof Error ? err.message : 'Failed to load');
+      } finally {
+        if (!background) setIsLoading(false);
+      }
+    },
+    [apiFetch],
+  );
+
+  useEffect(() => {
+    void loadInbox({ background: hasLoadedRef.current });
+  }, [loadInbox]);
+
+  // Live sync: when another surface (assistant, SMS one-tap, dispatch)
+  // mutates proposals, refresh without flashing the loading copy.
+  useEffect(() => {
+    const onChanged = () => void loadInbox({ background: true });
+    window.addEventListener(PROPOSALS_CHANGED, onChanged);
+    return () => window.removeEventListener(PROPOSALS_CHANGED, onChanged);
+  }, [loadInbox]);
 
   async function actOnProposal(id: string, action: 'approve' | 'reject'): Promise<void> {
     const removed = rows.find((r) => r.proposal.id === id);
@@ -694,7 +699,9 @@ export function InboxPage() {
           )}
         </div>
 
-        {isLoading && <p className="text-sm text-muted-foreground">Loading…</p>}
+        {isLoading && rows.length === 0 && expired.length === 0 && failed.length === 0 && (
+          <p className="text-sm text-muted-foreground">Loading…</p>
+        )}
         {error && <p className="text-sm text-destructive">{error}</p>}
 
         {!isLoading && !error && rows.length === 0 && expired.length === 0 && failed.length === 0 && (

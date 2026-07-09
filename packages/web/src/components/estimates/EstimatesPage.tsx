@@ -1005,7 +1005,7 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
   // would 409. Reopen (rejected/expired -> draft) is the supported path.
   const editable = apiStatus === 'draft' || apiStatus === 'ready_for_review';
 
-  if (isLoading) {
+  if (isLoading && !est) {
     return (
       <div className="h-full flex items-center justify-center">
         <Spinner size="md" className="text-foreground" label={`Loading ${estimateTerm.toLowerCase()}`} />
@@ -1013,7 +1013,7 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
     );
   }
 
-  if (error || !est) {
+  if ((error && !est) || !est) {
     return (
       <div className="h-full flex flex-col items-center justify-center gap-3">
         <p className="text-sm text-destructive">Failed to load {estimateTerm.toLowerCase()}</p>
@@ -1525,8 +1525,8 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
           ))}
         </div>
 
-        {/* Loading / Error */}
-        {isLoading && (
+        {/* Loading / Error — keep list mounted during background refresh. */}
+        {isLoading && data.length === 0 && (
           <div className="flex items-center justify-center py-16">
             <Spinner size="md" className="text-foreground" label={`Loading ${estimateTermPlural.toLowerCase()}`} />
           </div>
@@ -1536,7 +1536,7 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
         )}
 
         {/* List */}
-        {!isLoading && !error && (
+        {!(isLoading && data.length === 0) && !error && (
           <div className="flex flex-col gap-2">
             {filtered.map(est => {
               const status = est.uiStatus;

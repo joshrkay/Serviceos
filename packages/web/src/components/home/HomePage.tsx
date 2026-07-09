@@ -357,7 +357,16 @@ export function HomePage() {
 
   // The "today" panel depends on both queries; surface loading/errors from
   // either and retry both.
-  const todayLoading = appointmentsQuery.isLoading || jobsQuery.isLoading;
+  // Only treat as "loading" when we have nothing to show yet. Background
+  // polls (60s refetchInterval) keep isLoading false once data has landed,
+  // so these sections no longer flash spinners every minute.
+  const todayLoading =
+    (appointmentsQuery.isLoading && appointmentsQuery.data.length === 0) ||
+    (jobsQuery.isLoading && jobsQuery.data.length === 0);
+  const estimatesLoading =
+    estimatesQuery.isLoading && estimatesQuery.data.length === 0;
+  const invoicesLoading =
+    invoicesQuery.isLoading && invoicesQuery.data.length === 0;
   const todayError = appointmentsQuery.error ?? jobsQuery.error;
   const refetchToday = () => { appointmentsQuery.refetch(); jobsQuery.refetch(); };
   const pendingEsts  = estimatesQuery.data.filter(e => {
@@ -644,10 +653,10 @@ export function HomePage() {
             )}
 
             {/* Pending estimates */}
-            {(estimatesQuery.isLoading || estimatesQuery.error || pendingEsts.length > 0) && (
+            {(estimatesLoading || estimatesQuery.error || pendingEsts.length > 0) && (
               <section className="px-4 py-5">
                 <SectionHead label="Pending estimates" count={pendingEsts.length} onAll={() => navigate('/estimates')} />
-                {estimatesQuery.isLoading ? (
+                {estimatesLoading ? (
                   <div className="flex items-center justify-center py-6">
                     <div className="h-5 w-5 animate-spin rounded-full border-2 border-primary border-t-transparent" />
                   </div>
@@ -685,7 +694,7 @@ export function HomePage() {
             )}
 
             {/* Unpaid invoices */}
-            {(invoicesQuery.isLoading || invoicesQuery.error || unpaidInvs.length > 0) && (
+            {(invoicesLoading || invoicesQuery.error || unpaidInvs.length > 0) && (
               <section className="px-4 py-5">
                 <div className="flex items-center justify-between mb-2.5">
                   <div className="flex items-center gap-2">
@@ -699,7 +708,7 @@ export function HomePage() {
                     </button>
                   </div>
                 </div>
-                {invoicesQuery.isLoading ? (
+                {invoicesLoading ? (
                   <div className="flex items-center justify-center py-6">
                     <div className="h-5 w-5 animate-spin rounded-full border-2 border-primary border-t-transparent" />
                   </div>
@@ -772,7 +781,7 @@ export function HomePage() {
             <ActivityFeedCard />
 
             {/* All clear */}
-            {attentionItems.length === 0 && unpaidInvs.length === 0 && pendingEsts.length === 0 && !todayLoading && !estimatesQuery.isLoading && !invoicesQuery.isLoading && !todayError && !estimatesQuery.error && !invoicesQuery.error && (
+            {attentionItems.length === 0 && unpaidInvs.length === 0 && pendingEsts.length === 0 && !todayLoading && !estimatesLoading && !invoicesLoading && !todayError && !estimatesQuery.error && !invoicesQuery.error && (
               <section className="px-4 py-8 flex flex-col items-center gap-2">
                 <CheckCircle2 size={28} className="text-success" />
                 <p className="text-sm text-muted-foreground">All clear — nothing urgent</p>

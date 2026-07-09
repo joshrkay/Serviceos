@@ -15,6 +15,10 @@ export interface ListQueryOptions {
    * is hidden and fires a one-shot catch-up refetch on refocus, so a
    * backgrounded tab doesn't burn requests. Omit (the default) for the
    * original fetch-once-per-change behavior.
+   *
+   * Interval / visibility catch-up refetches are always *background*: they
+   * keep the last-good rows mounted and never flip `isLoading` (which would
+   * flash spinners on Home / Invoices every poll tick).
    */
   refetchInterval?: number;
 }
@@ -24,8 +28,16 @@ export interface ListQueryResult<T> {
   total: number;
   page: number;
   pageSize: number;
+  /**
+   * True only for cold / structural loads (first fetch, page/search/filter
+   * change, or enable). Background polls and explicit `refetch()` keep this
+   * false so consumers can leave last-good content on screen.
+   */
   isLoading: boolean;
+  /** True whenever any fetch is in flight (including background). */
+  isFetching: boolean;
   error: string | null;
+  /** Background refresh — preserves mounted rows. */
   refetch: () => void;
   setPage: (page: number) => void;
   setSearch: (search: string) => void;
@@ -37,9 +49,9 @@ export interface ListQueryResult<T> {
  *
  * Every request flows through {@link useApiClient}, which injects the Clerk
  * Bearer token, cancels unauthenticated requests, and redirects to /login
- * on a persistent 401. The public surface — `{ data, total, page, pageSize,
- * isLoading, error, refetch, setPage, setSearch, setFilters }` — is
- * unchanged from the pre-P0-030 hook.
+ * on a persistent 401. Loading semantics mirror {@link useDispatchBoard}:
+ * structural changes (page/search/filters) are foreground; polls and
+ * explicit `refetch()` are background so live surfaces don't flicker.
  */
 export function useListQuery<T>(
   endpoint: string,
@@ -57,6 +69,7 @@ export function useListQuery<T>(
   // made every list page paint its empty state ("No customers found") for
   // the frame(s) before the first request even fired.
   const [isLoading, setIsLoading] = useState(initialOptions.enabled !== false);
+  const [isFetching, setIsFetching] = useState(initialOptions.enabled !== false);
   const [error, setError] = useState<string | null>(null);
 
   // Re-sync filters / enabled from props when the caller's initialOptions
@@ -90,46 +103,84 @@ export function useListQuery<T>(
   // one with the new filters) can resolve out of order and let the older
   // response overwrite the newer data.
   const requestVersionRef = useRef(0);
+  // Tracks whether a successful list payload has landed. Background
+  // treatment (keep rows mounted, suppress loading/error flash) is only
+  // safe once there's a last-good snapshot to keep showing.
+  const hasLoadedRef = useRef(false);
 
-  const refetch = useCallback(async () => {
-    if (!enabled) {
-      setIsLoading(false);
+  const fetchList = useCallback(
+    async (opts?: { background?: boolean }) => {
+      if (!enabled) {
+        setIsLoading(false);
+        setIsFetching(false);
+        return;
+      }
+      const myVersion = ++requestVersionRef.current;
+      const background = opts?.background === true && hasLoadedRef.current;
+      if (!background) setIsLoading(true);
+      setIsFetching(true);
+      if (!background) setError(null);
+      try {
+        const params = new URLSearchParams({
+          page: String(page),
+          pageSize: String(pageSize),
+          ...(search ? { search } : {}),
+          ...filters,
+        });
+        const response = await apiFetch(`${endpoint}?${params}`);
+        if (myVersion !== requestVersionRef.current) return;
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const result = await response.json();
+        if (myVersion !== requestVersionRef.current) return;
+        hasLoadedRef.current = true;
+        setData(result.data ?? result);
+        setTotal(result.total ?? result.length ?? 0);
+        setError(null);
+      } catch (err) {
+        if (myVersion !== requestVersionRef.current) return;
+        // Sign-out transitions surface as AbortError — treat as a non-error
+        // (the request was deliberately cancelled). Real errors still surface
+        // on foreground loads; background failures keep last-good rows.
+        if (err instanceof DOMException && err.name === 'AbortError') {
+          if (!background) setError(null);
+        } else if (background) {
+          return;
+        } else {
+          setError(err instanceof Error ? err.message : 'Unknown error');
+        }
+      } finally {
+        if (myVersion === requestVersionRef.current) {
+          setIsFetching(false);
+          if (!background) setIsLoading(false);
+        }
+      }
+    },
+    [apiFetch, enabled, endpoint, page, pageSize, search, filters]
+  );
+
+  // Structural changes (page / search / filters / endpoint / enable) are
+  // foreground so the consumer can show a spinner for a genuine new query.
+  // When only `apiFetch` identity changes (Clerk token bridge), keep the
+  // last-good rows mounted — a foreground flash there was a common source
+  // of Home/list flicker under StrictMode / auth re-renders.
+  const queryIdentity = `${endpoint}|${page}|${pageSize}|${search}|${JSON.stringify(filters)}|${enabled}`;
+  const lastQueryIdentityRef = useRef(queryIdentity);
+  useEffect(() => {
+    if (lastQueryIdentityRef.current !== queryIdentity) {
+      lastQueryIdentityRef.current = queryIdentity;
+      // New query shape — next fetch is cold even if a prior list existed.
+      hasLoadedRef.current = false;
+      void fetchList({ background: false });
       return;
     }
-    const myVersion = ++requestVersionRef.current;
-    setIsLoading(true);
-    setError(null);
-    try {
-      const params = new URLSearchParams({
-        page: String(page),
-        pageSize: String(pageSize),
-        ...(search ? { search } : {}),
-        ...filters,
-      });
-      const response = await apiFetch(`${endpoint}?${params}`);
-      if (myVersion !== requestVersionRef.current) return;
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const result = await response.json();
-      if (myVersion !== requestVersionRef.current) return;
-      setData(result.data ?? result);
-      setTotal(result.total ?? result.length ?? 0);
-    } catch (err) {
-      if (myVersion !== requestVersionRef.current) return;
-      // Sign-out transitions surface as AbortError — treat as a non-error
-      // (the request was deliberately cancelled). Real errors still surface.
-      if (err instanceof DOMException && err.name === 'AbortError') {
-        setError(null);
-      } else {
-        setError(err instanceof Error ? err.message : 'Unknown error');
-      }
-    } finally {
-      if (myVersion === requestVersionRef.current) setIsLoading(false);
-    }
-  }, [apiFetch, enabled, endpoint, page, pageSize, search, filters]);
+    void fetchList({ background: hasLoadedRef.current });
+  }, [fetchList, queryIdentity]);
 
-  useEffect(() => {
-    refetch();
-  }, [refetch]);
+  // Explicit refetch is always background once a list has loaded — used by
+  // pollers, post-mutation refresh, and visibility catch-up.
+  const refetch = useCallback(() => {
+    void fetchList({ background: true });
+  }, [fetchList]);
 
   // Epic 12.2 — optional live polling. Held in a ref so the interval doesn't
   // tear down and re-fire on every refetch identity change; pauses while the
@@ -194,6 +245,7 @@ export function useListQuery<T>(
     page,
     pageSize,
     isLoading,
+    isFetching,
     error,
     refetch,
     setPage,

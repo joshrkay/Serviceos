@@ -46,6 +46,19 @@ Runs whenever `VITE_CLERK_PUBLISHABLE_KEY` is set (any syntactically valid
 `pk_test_` works — the stub short-circuits Clerk's script download, so no
 Clerk account or network access is required).
 
+### Render stability (`render-stability.spec.ts`)
+Hermetic regression for the 2026-07-09 list/detail flicker fix. Same Clerk
+stub + in-page API routes as the 401 suite:
+
+- `/invoices` — triggers `useListQuery` visibility catch-up while holding the
+  refresh response; asserts `INV-*` rows stay mounted and the "Loading
+  invoices" spinner never replaces them
+- `/jobs` — same pattern for job cards across a background refetch
+
+Runs whenever `VITE_CLERK_PUBLISHABLE_KEY` is set. Complements the unit tests
+in `useListQuery.test.ts` / `useDetailQuery.test.ts` that pin the hook
+contract (`isLoading` stays false during background refetch).
+
 ### Journeys (`journeys/*.spec.ts`)
 All three are currently `test.skip()` — the spec code documents the intended
 test shape, but the test doesn't execute until the preconditions in each
