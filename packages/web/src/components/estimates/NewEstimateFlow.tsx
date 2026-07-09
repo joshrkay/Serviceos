@@ -1175,6 +1175,13 @@ export function NewEstimateFlow({ onClose, onCreated, preSelectedCustomerId }: {
   const [jobsLoaded,  setJobsLoaded]  = useState(false);
   const [jobId,       setJobId]       = useState<string | null>(null);
   const [creatingJob, setCreatingJob] = useState(false);
+  // Invalidate the cached created-estimate id whenever the inputs that fed it
+  // change. Otherwise, after a create succeeds but /send fails, a user who goes
+  // back and edits the job, valid-until, or line items would re-send the stale
+  // first draft (the cached id is reused without PATCHing the edits).
+  useEffect(() => {
+    createdEstimateIdRef.current = null;
+  }, [jobId, customerId, validUntil, aiResult]);
   // Surfaced API error from the create/send flow (no silent mock success).
   const [submitError, setSubmitError] = useState<string | null>(null);
   // viewUrl returned by POST /api/estimates/:id/send — used for the real

@@ -37,6 +37,28 @@ const TIME_SLOTS_24H: Record<string, string> = {
   '4:00 PM': '16:00',
 };
 
+/**
+ * Convert a time label to 'HH:mm'. Fast-path the whole-hour chips above, then
+ * parse arbitrary labels like "2:30 PM" / "2 pm" / "14:30". Voice parsing can
+ * produce off-chip times ("tomorrow at 2:30pm" → "2:30 PM"); without this they
+ * failed the chip lookup and the job was silently saved unscheduled. Returns
+ * null for anything unparseable.
+ */
+export function timeLabelTo24h(label: string): string | null {
+  const chip = TIME_SLOTS_24H[label];
+  if (chip) return chip;
+  const m = label.trim().match(/^(\d{1,2})(?::(\d{2}))?\s*([AaPp][Mm])?$/);
+  if (!m) return null;
+  let h = parseInt(m[1], 10);
+  const min = m[2] ? parseInt(m[2], 10) : 0;
+  const ampm = m[3]?.toUpperCase();
+  if (Number.isNaN(h) || Number.isNaN(min) || min > 59) return null;
+  if (ampm === 'PM' && h < 12) h += 12;
+  if (ampm === 'AM' && h === 12) h = 0;
+  if (h > 23) return null;
+  return `${pad2(h)}:${pad2(min)}`;
+}
+
 /** A schedule chip holds a real 'YYYY-MM-DD' date key (never a stale label). */
 const isDateKey = (value: string): boolean => /^\d{4}-\d{2}-\d{2}$/.test(value);
 
@@ -777,7 +799,7 @@ export function NewJobFlow({
    */
   function resolveScheduledStart(): Date | null {
     if (!isDateKey(draft.scheduledDate)) return null;
-    const time24 = TIME_SLOTS_24H[draft.scheduledTime];
+    const time24 = timeLabelTo24h(draft.scheduledTime);
     if (!time24) return null;
     const start = tenantWallClockToUtc(draft.scheduledDate, time24, timezone);
     return Number.isNaN(start.getTime()) ? null : start;

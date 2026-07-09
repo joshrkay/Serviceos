@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useCallback } from 'react';
+import { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import {
   ChevronLeft, ChevronRight, Plus, Clock, User, AlertTriangle,
   Bell, CheckCircle, X, MapPin, Briefcase, LayoutGrid,
@@ -279,6 +279,19 @@ export function SchedulePage() {
   const today = useMemo(() => new Date(), []);
   const weekDays = useMemo(() => buildWeekDays(today, tz), [today, tz]);
   const [selectedIso, setSelectedIso] = useState(weekDays[1].isoDate);
+  // `useTenantTimezone` starts at a fallback and resolves the real tenant tz
+  // after /api/me, which can shift the local "today" (e.g. an LA tenant while
+  // NY has already crossed midnight). weekDays recomputes to the correct day,
+  // but selectedIso would keep the fallback date and query the wrong day.
+  // Re-seed to today when the tz resolves — unless the user already picked one.
+  const userPickedDayRef = useRef(false);
+  const pickDay = useCallback((iso: string) => {
+    userPickedDayRef.current = true;
+    setSelectedIso(iso);
+  }, []);
+  useEffect(() => {
+    if (!userPickedDayRef.current) setSelectedIso(weekDays[1].isoDate);
+  }, [weekDays]);
   const [showNew,     setShowNew]     = useState(false);
   const [techFilter,  setTechFilter]  = useState('All');
   const [appointments, setAppointments] = useState<ApiAppointment[]>([]);
@@ -430,7 +443,7 @@ export function SchedulePage() {
       {/* Week nav */}
       <div className="flex items-center gap-2 mb-4">
         <button
-          onClick={() => setSelectedIso(shiftDateKey(selectedIso, -1))}
+          onClick={() => pickDay(shiftDateKey(selectedIso, -1))}
           className="flex size-8 items-center justify-center rounded-lg border border-slate-200 text-slate-500 hover:bg-slate-50"
         >
           <ChevronLeft size={15} />
@@ -439,7 +452,7 @@ export function SchedulePage() {
           {weekDays.map(day => {
             const isSelected = day.isoDate === selectedIso;
             return (
-              <button key={day.isoDate} onClick={() => setSelectedIso(day.isoDate)}
+              <button key={day.isoDate} onClick={() => pickDay(day.isoDate)}
                 className={`flex-1 min-w-[64px] flex flex-col items-center rounded-xl py-2.5 transition-all border ${
                   isSelected ? 'bg-slate-900 border-slate-900 text-white' :
                   day.isToday ? 'bg-blue-50 border-blue-100 text-blue-700' :
@@ -453,7 +466,7 @@ export function SchedulePage() {
           })}
         </div>
         <button
-          onClick={() => setSelectedIso(shiftDateKey(selectedIso, 1))}
+          onClick={() => pickDay(shiftDateKey(selectedIso, 1))}
           className="flex size-8 items-center justify-center rounded-lg border border-slate-200 text-slate-500 hover:bg-slate-50"
         >
           <ChevronRight size={15} />

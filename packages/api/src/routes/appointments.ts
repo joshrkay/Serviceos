@@ -71,6 +71,22 @@ export function createAppointmentRouter(
       res.status(404).json({ error: 'NOT_FOUND', message: 'Appointment not found' });
       return;
     }
+    // A technician may only send a running-late notice for their OWN visit.
+    // The route gate is `appointments:view` (which every technician holds), so
+    // without this an unassigned tech with any appointment id could trigger a
+    // customer delay notification for someone else's work. Mirrors the
+    // assignment check in the delay-ack flow. Dispatcher/owner (who reach this
+    // via the appointments:update PUT branch) are unaffected.
+    if (req.auth!.role === 'technician') {
+      const job = await jobRepo.findById(req.auth!.tenantId, appointment.jobId);
+      if (!job || job.assignedTechnicianId !== req.auth!.userId) {
+        res.status(403).json({
+          error: 'FORBIDDEN',
+          message: 'Only the assigned technician can send a running-late notice',
+        });
+        return;
+      }
+    }
     const history = await timelineRepo.findByJob(req.auth!.tenantId, appointment.jobId);
     const delayVersion = history.filter(
       (e) => e.eventType === JOB_TIMELINE_EVENT_TYPES.DELAY_ACKNOWLEDGED && e.metadata?.isRunningBehind === true,

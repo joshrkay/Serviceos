@@ -48,10 +48,32 @@ function buildRunningLateApp() {
       delayNotificationCoordinator: coordinator,
     }),
   );
-  return { app, timelineRepo, enqueueDelayNotice };
+  return { app, jobRepo, timelineRepo, enqueueDelayNotice };
 }
 
-async function seedAppointment(app: Express): Promise<{ appointmentId: string; jobId: string }> {
+/**
+ * Seed the job an appointment hangs off, assigned to `assignedTechnicianId`.
+ * The running-late endpoint verifies technician ownership against this job.
+ */
+async function seedAppointment(
+  app: Express,
+  jobRepo: InMemoryJobRepository,
+  assignedTechnicianId: string = 'tech-1',
+): Promise<{ appointmentId: string; jobId: string }> {
+  await jobRepo.create({
+    id: 'job-running-late',
+    tenantId: TENANT_ID,
+    customerId: 'cust-1',
+    locationId: 'loc-1',
+    jobNumber: 'JOB-0001',
+    summary: 'Running-late test job',
+    status: 'scheduled',
+    priority: 'normal',
+    assignedTechnicianId,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  } as Parameters<InMemoryJobRepository['create']>[0]);
+
   const start = new Date(Date.now() + 30 * 60 * 1000).toISOString();
   const end = new Date(Date.now() + 90 * 60 * 1000).toISOString();
   const res = await request(app).post('/api/appointments').set('x-test-role', 'dispatcher').send({
@@ -66,8 +88,8 @@ async function seedAppointment(app: Express): Promise<{ appointmentId: string; j
 
 describe('POST /api/appointments/:id/running-late', () => {
   it('lets a technician send a running-late notice, defaulting to 20 minutes', async () => {
-    const { app, enqueueDelayNotice } = buildRunningLateApp();
-    const { appointmentId } = await seedAppointment(app);
+    const { app, jobRepo, enqueueDelayNotice } = buildRunningLateApp();
+    const { appointmentId } = await seedAppointment(app, jobRepo);
 
     const res = await request(app)
       .post(`/api/appointments/${appointmentId}/running-late`)
@@ -86,8 +108,8 @@ describe('POST /api/appointments/:id/running-late', () => {
   });
 
   it('passes explicit delayMinutes and derives delayVersion from running-behind history', async () => {
-    const { app, timelineRepo, enqueueDelayNotice } = buildRunningLateApp();
-    const { appointmentId, jobId } = await seedAppointment(app);
+    const { app, jobRepo, timelineRepo, enqueueDelayNotice } = buildRunningLateApp();
+    const { appointmentId, jobId } = await seedAppointment(app, jobRepo);
 
     await addDelayAcknowledgmentTimelineEntry(TENANT_ID, jobId, 'tech-1', 'technician', timelineRepo, {
       appointmentId,
@@ -115,7 +137,7 @@ describe('POST /api/appointments/:id/running-late', () => {
   });
 
   it('returns 404 for an unknown (or cross-tenant) appointment', async () => {
-    const { app, enqueueDelayNotice } = buildRunningLateApp();
+    const { app, jobRepo, enqueueDelayNotice } = buildRunningLateApp();
 
     const res = await request(app)
       .post('/api/appointments/appt-does-not-exist/running-late')
@@ -128,8 +150,8 @@ describe('POST /api/appointments/:id/running-late', () => {
   });
 
   it('rejects an invalid delayMinutes with a validation error', async () => {
-    const { app, enqueueDelayNotice } = buildRunningLateApp();
-    const { appointmentId } = await seedAppointment(app);
+    const { app, jobRepo, enqueueDelayNotice } = buildRunningLateApp();
+    const { appointmentId } = await seedAppointment(app, jobRepo);
 
     const res = await request(app)
       .post(`/api/appointments/${appointmentId}/running-late`)
@@ -142,8 +164,8 @@ describe('POST /api/appointments/:id/running-late', () => {
   });
 
   it('keeps PUT /:id with status running_late working for dispatchers (backcompat)', async () => {
-    const { app, enqueueDelayNotice } = buildRunningLateApp();
-    const { appointmentId } = await seedAppointment(app);
+    const { app, jobRepo, enqueueDelayNotice } = buildRunningLateApp();
+    const { appointmentId } = await seedAppointment(app, jobRepo);
 
     const res = await request(app)
       .put(`/api/appointments/${appointmentId}`)
@@ -160,9 +182,25 @@ describe('POST /api/appointments/:id/running-late', () => {
     });
   });
 
+  it('403s a technician who is not the assigned tech (no notices for others’ jobs)', async () => {
+    const { app, jobRepo, enqueueDelayNotice } = buildRunningLateApp();
+    // Job assigned to tech-1; the request comes from tech-2.
+    const { appointmentId } = await seedAppointment(app, jobRepo, 'tech-1');
+
+    const res = await request(app)
+      .post(`/api/appointments/${appointmentId}/running-late`)
+      .set('x-test-role', 'technician')
+      .set('x-test-user-id', 'tech-2')
+      .send({});
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('FORBIDDEN');
+    expect(enqueueDelayNotice).not.toHaveBeenCalled();
+  });
+
   it('still 403s a technician on the PUT virtual-status path (permission not widened)', async () => {
-    const { app, enqueueDelayNotice } = buildRunningLateApp();
-    const { appointmentId } = await seedAppointment(app);
+    const { app, jobRepo, enqueueDelayNotice } = buildRunningLateApp();
+    const { appointmentId } = await seedAppointment(app, jobRepo);
 
     const res = await request(app)
       .put(`/api/appointments/${appointmentId}`)

@@ -99,4 +99,22 @@ describe('useDispatchBoard', () => {
     expect(result.current.error).toBeNull();
     expect(result.current.data?.date).toBe('2026-03-14');
   });
+
+  it('surfaces the error when refetch is used to retry after the initial load failed (no empty errorless board)', async () => {
+    // Initial load fails → error shown, no board.
+    apiFetch.mockRejectedValueOnce(new Error('initial failure'));
+    const { result } = renderHook(() => useDispatchBoard(new Date('2026-03-14T12:00:00Z')));
+    await waitFor(() => expect(result.current.error).toBe('initial failure'));
+    expect(result.current.data).toBeNull();
+
+    // Retry (via refetch) also fails. With no board ever loaded this must be a
+    // foreground retry that re-surfaces the error, not a suppressed background
+    // one that leaves an empty, errorless board.
+    apiFetch.mockRejectedValueOnce(new Error('retry failure'));
+    await act(async () => {
+      result.current.refetch();
+    });
+    expect(result.current.error).toBe('retry failure');
+    expect(result.current.isLoading).toBe(false);
+  });
 });

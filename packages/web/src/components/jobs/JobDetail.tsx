@@ -1006,10 +1006,34 @@ export function JobDetailView({
         return null;
       }
     };
+    // Appointments come back ordered scheduled_start ASC across ALL statuses,
+    // so list[0] can be an old canceled/no-show visit rather than the active
+    // one (e.g. a cancel followed by a reschedule). Pick the next upcoming
+    // active appointment, falling back to the latest active one.
+    const activeAppointment = async (): Promise<{ scheduledStart?: string } | null> => {
+      try {
+        const res = await apiFetch(`/api/appointments?jobId=${id}`);
+        if (!res.ok) return null;
+        const list = await res.json();
+        if (!Array.isArray(list)) return null;
+        const active = list.filter(
+          (a: { status?: string }) => a.status !== 'canceled' && a.status !== 'no_show',
+        );
+        if (active.length === 0) return null;
+        const now = Date.now();
+        const upcoming = active.find(
+          (a: { scheduledStart?: string }) =>
+            a.scheduledStart != null && new Date(a.scheduledStart).getTime() >= now,
+        );
+        return upcoming ?? active[active.length - 1];
+      } catch {
+        return null;
+      }
+    };
     const [est, inv, appt] = await Promise.all([
       first(`/api/estimates?jobId=${id}`),
       first(`/api/invoices?jobId=${id}`),
-      first(`/api/appointments?jobId=${id}`),
+      activeAppointment(),
     ]);
     setEstimateId(est?.id ?? null);
     setInvoiceId(inv?.id ?? null);

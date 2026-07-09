@@ -90,6 +90,8 @@ interface ApiAppointment {
   jobId: string;
   /** UTC ISO instant. */
   scheduledStart: string;
+  /** Appointment lifecycle status; canceled/no_show visits are excluded. */
+  status: string;
 }
 
 // ─── Static helpers ───────────────────────────────────────────────────────
@@ -319,7 +321,10 @@ export function HomePage() {
   // query by the tenant-local day expressed as UTC instants.
   const { startUtc, endUtc } = dayWindowUtc(today, tz);
   const appointmentsQuery = useListQuery<ApiAppointment>('/api/appointments', {
-    filters: { fromDate: startUtc, toDate: endUtc },
+    // Explicit limit: fromDate/toDate put the route on its paginated path,
+    // which otherwise defaults to 50 and ignores useListQuery's pageSize —
+    // silently truncating the day for busy tenants. 200 is the API max.
+    filters: { fromDate: startUtc, toDate: endUtc, limit: '200' },
     refetchInterval: LIVE_REFETCH_MS,
   });
   // Jobs are fetched for card display data only (customer/technician/status);
@@ -339,6 +344,7 @@ export function HomePage() {
   for (const appt of [...appointmentsQuery.data].sort(
     (a, b) => a.scheduledStart.localeCompare(b.scheduledStart),
   )) {
+    if (appt.status === 'canceled' || appt.status === 'no_show') continue;
     if (dateKeyInTz(appt.scheduledStart, tz) !== today) continue;
     const job = jobsById.get(appt.jobId);
     if (!job || todayJobsById.has(job.id)) continue;
