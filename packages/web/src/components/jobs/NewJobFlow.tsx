@@ -425,6 +425,21 @@ export function NewJobFlow({
   const [parsed,   setParsed]   = useState<ParsedJob | null>(null);
   const [search,   setSearch]   = useState('');
   const [creating, setCreating] = useState(false);
+  // Which day-quick-pick offset the user tapped (0 = Today, 1 = Tomorrow, …),
+  // or null for a custom/no pick. `useTenantTimezone` starts at a fallback and
+  // resolves the real tz after /api/me; the day chips freeze concrete dates, so
+  // a pick made before the tz resolves would otherwise persist the fallback-tz
+  // date and create the appointment on the wrong day. Re-derive the picked
+  // day's concrete date whenever the tz changes.
+  const [pickedDateOffset, setPickedDateOffset] = useState<number | null>(null);
+  useEffect(() => {
+    if (pickedDateOffset == null) return;
+    const chip = buildDateChips(timezone, 7)[pickedDateOffset];
+    if (chip) setDraft(d => ({ ...d, scheduledDate: chip.value }));
+    // Intentionally keyed on timezone only: a fresh chip tap sets the date
+    // directly, so we re-derive solely when the tenant tz resolves/changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [timezone]);
   const [jobNum,   setJobNum]   = useState('');
   const [createError, setCreateError] = useState('');
   // Persisted-only facts for the done screen: the appointment instant we
@@ -1345,7 +1360,7 @@ export function NewJobFlow({
               <div>
                 <p className="text-xs text-muted-foreground mb-2.5">When?</p>
                 <div className="flex flex-wrap gap-2">
-                  {DATE_CHIPS.map(chip => {
+                  {DATE_CHIPS.map((chip, chipIdx) => {
                     const isCustom  = chip.value === '__custom';
                     const dayChipValues = DATE_CHIPS.slice(0, -1).map(c => c.value);
                     const isCustomSelected =
@@ -1355,8 +1370,8 @@ export function NewJobFlow({
                     return (
                       <button key={chip.value}
                         onClick={() => {
-                          if (isCustom) setField('scheduledDate', customDate || '__custom');
-                          else setField('scheduledDate', chip.value);
+                          if (isCustom) { setPickedDateOffset(null); setField('scheduledDate', customDate || '__custom'); }
+                          else { setPickedDateOffset(chipIdx); setField('scheduledDate', chip.value); }
                         }}
                         className={`rounded-full border px-3.5 py-2 text-sm transition-all ${
                           isSelected
