@@ -21,6 +21,11 @@ README explaining why):
   NOT the deploy target; never apply story/feature work there unless the
   task says so explicitly. Canonical work goes in /packages.
 
+## Product behavior
+- **Interaction model:** `docs/interaction-model-v3.md` is the behavioral reference between PRD,
+  screens, and stories. If a screen or story contradicts it on *behavior*, the interaction model
+  wins. Code alignment: `docs/interaction-model-v3-code-alignment.md`.
+
 ## Core Patterns
 - All money: integer cents, never floating point
 - All times: stored UTC, rendered in tenant timezone
