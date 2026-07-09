@@ -419,6 +419,7 @@ export function NewJobFlow({
   const [newCustomerError, setNewCustomerError] = useState('');
   const [addressConflictNote, setAddressConflictNote] = useState('');
   const { data: apiCustomers } = useListQuery<ApiCustomer>('/api/customers');
+  const tenantTz = useTenantTimezone();
   const { mutate: createJobMutation } = useMutation<CreateJobRequest, CreateJobResponse>('POST', '/api/jobs');
   const { mutate: createAppointmentMutation } = useMutation<Record<string, unknown>, { id: string }>('POST', '/api/appointments');
   const { mutate: createCustomerMutation } = useMutation<Record<string, unknown>, CreateCustomerResponse>('POST', '/api/customers');
@@ -1409,6 +1410,10 @@ export function NewJobFlow({
                   <p className="text-sm text-muted-foreground mt-0.5">{customer?.name}</p>
                 </div>
               </div>
+
+              {createError && (
+                <p className="text-xs text-destructive text-center">{createError}</p>
+              )}
 
               {/* Summary card */}
               <div className="rounded-2xl border border-border overflow-hidden bg-card">
