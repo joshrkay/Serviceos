@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import { useState, useCallback } from 'react';
 import { formatCurrency as formatCents } from '../../utils/currency';
 
 export type PaymentMethod = 'cash' | 'check' | 'credit_card' | 'bank_transfer' | 'other';
@@ -6,7 +6,9 @@ export type PaymentMethod = 'cash' | 'check' | 'credit_card' | 'bank_transfer' |
 export interface PaymentRecordFormProps {
   invoiceId: string;
   amountDueCents: number;
-  onSubmit: (data: PaymentFormData) => void;
+  /** May return a promise (the consumer's POST) — the form disables its
+   *  submit button until it settles so a double-click can't record twice. */
+  onSubmit: (data: PaymentFormData) => void | Promise<void>;
   onCancel: () => void;
 }
 
@@ -29,6 +31,8 @@ const PAYMENT_METHODS: { value: PaymentMethod; label: string }[] = [
 export function validatePaymentForm(data: PaymentFormData, amountDueCents: number): string[] {
   const errors: string[] = [];
   if (!data.amountCents || data.amountCents <= 0) errors.push('Amount must be positive');
+  // Money invariant: integer cents only — 100.5 cents is not a payable amount.
+  if (!Number.isInteger(data.amountCents)) errors.push('Amount must be a whole number of cents');
   if (data.amountCents > amountDueCents) errors.push('Amount exceeds balance due');
   if (!data.method) errors.push('Payment method is required');
   if (!data.receivedDate) errors.push('Received date is required');
@@ -46,8 +50,12 @@ export function PaymentRecordForm({
   const [note, setNote] = useState('');
   const [receivedDate, setReceivedDate] = useState(new Date().toISOString().split('T')[0]);
   const [errors, setErrors] = useState<string[]>([]);
+  const [submitting, setSubmitting] = useState(false);
 
-  const handleSubmit = useCallback(() => {
+  const handleSubmit = useCallback(async () => {
+    // Re-entry guard: a second click while the POST is in flight would
+    // record the payment twice.
+    if (submitting) return;
     const formData: PaymentFormData = {
       invoiceId,
       amountCents,
@@ -61,8 +69,15 @@ export function PaymentRecordForm({
       return;
     }
     setErrors([]);
-    onSubmit(formData);
-  }, [invoiceId, amountCents, method, note, receivedDate, amountDueCents, onSubmit]);
+    setSubmitting(true);
+    try {
+      await onSubmit(formData);
+    } catch (err) {
+      setErrors([err instanceof Error ? err.message : 'Failed to record payment']);
+    } finally {
+      setSubmitting(false);
+    }
+  }, [submitting, invoiceId, amountCents, method, note, receivedDate, amountDueCents, onSubmit]);
 
   return (
     <div className="payment-record-form" data-testid="payment-record-form">
@@ -129,8 +144,12 @@ export function PaymentRecordForm({
       </div>
 
       <div className="form-actions">
-        <button data-testid="submit-button" onClick={handleSubmit}>
-          Record Payment
+        <button
+          data-testid="submit-button"
+          onClick={() => void handleSubmit()}
+          disabled={submitting}
+        >
+          {submitting ? 'Recording…' : 'Record Payment'}
         </button>
         <button data-testid="cancel-button" onClick={onCancel}>
           Cancel

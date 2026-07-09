@@ -199,6 +199,87 @@ describe('EstimateApprovalPage — Tier 4 deposit (PR 3b: before_approval gate +
   });
 });
 
+describe('EstimateApprovalPage — deposit checkout link expiry (re-mint, never a dead URL)', () => {
+  beforeEach(() => {
+    apiFetchMock.mockReset();
+  });
+
+  const gatedView = {
+    ...baseView,
+    depositRequiredCents: 25000,
+    depositStatus: 'pending',
+    depositTimingPolicy: 'before_approval',
+    depositPayable: true,
+    isActionable: false,
+  };
+
+  it('expired link — POSTs /deposit-checkout for a fresh URL and never navigates to the stale one', async () => {
+    const assignSpy = vi.fn();
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: { ...window.location, assign: assignSpy },
+    });
+
+    const expired = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.includes('/deposit-checkout')) {
+        return jsonResponse({ url: 'https://checkout.stripe.com/c/plink_fresh' });
+      }
+      if (!init || init.method === undefined) {
+        return jsonResponse({
+          ...gatedView,
+          depositCheckoutUrl: 'https://checkout.stripe.com/c/plink_stale',
+          depositCheckoutExpiresAt: expired,
+        });
+      }
+      return jsonResponse({});
+    });
+    renderPageAtToken('test-token');
+
+    const cta = await screen.findByTestId('estimate-pay-deposit-cta');
+    cta.click();
+
+    await waitFor(() =>
+      expect(assignSpy).toHaveBeenCalledWith('https://checkout.stripe.com/c/plink_fresh'),
+    );
+    expect(assignSpy).not.toHaveBeenCalledWith('https://checkout.stripe.com/c/plink_stale');
+    expect(
+      apiFetchMock.mock.calls.some(([url]) => String(url).includes('/deposit-checkout')),
+    ).toBe(true);
+  });
+
+  it('live link — navigates straight to the existing URL without minting a new one', async () => {
+    const assignSpy = vi.fn();
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: { ...window.location, assign: assignSpy },
+    });
+
+    const live = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString();
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (!init || init.method === undefined) {
+        return jsonResponse({
+          ...gatedView,
+          depositCheckoutUrl: 'https://checkout.stripe.com/c/plink_live',
+          depositCheckoutExpiresAt: live,
+        });
+      }
+      return jsonResponse({});
+    });
+    renderPageAtToken('test-token');
+
+    const cta = await screen.findByTestId('estimate-pay-deposit-cta');
+    cta.click();
+
+    await waitFor(() =>
+      expect(assignSpy).toHaveBeenCalledWith('https://checkout.stripe.com/c/plink_live'),
+    );
+    expect(
+      apiFetchMock.mock.calls.some(([url]) => String(url).includes('/deposit-checkout')),
+    ).toBe(false);
+  });
+});
+
 describe('EstimateApprovalPage — after_approval deposit on the success screen', () => {
   beforeEach(() => {
     apiFetchMock.mockReset();

@@ -136,6 +136,91 @@ export function tenantWallClockToUtc(
   return new Date(ts);
 }
 
+/**
+ * Extract the tenant-local wall-clock components of an instant as
+ * zero-padded strings. `hour: '2-digit'` with `hour12: false` renders
+ * midnight as '24' in some engines, so we normalize that to '00'.
+ */
+function tenantWallClockParts(
+  d: Date,
+  timezone: string,
+): { year: string; month: string; day: string; hour: string; minute: string } {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: timezone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(d);
+  const get = (type: string): string => parts.find((p) => p.type === type)?.value ?? '';
+  const hour = get('hour');
+  return {
+    year: get('year'),
+    month: get('month'),
+    day: get('day'),
+    hour: hour === '24' ? '00' : hour,
+    minute: get('minute'),
+  };
+}
+
+/** The tenant's current calendar day as 'YYYY-MM-DD' in the given IANA tz. */
+export function todayInTz(timezone: string): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: timezone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date());
+}
+
+/**
+ * The 'YYYY-MM-DD' calendar day an instant falls on IN THE TENANT TZ.
+ * Derived via `Intl` wall-clock parts (never `toISOString`, which would
+ * key off UTC and mis-bucket instants near the tenant's midnight).
+ */
+export function dateKeyInTz(value: Date | string | number, timezone: string): string {
+  const d = toDate(value);
+  if (Number.isNaN(d.getTime())) return '';
+  const { year, month, day } = tenantWallClockParts(d, timezone);
+  return `${year}-${month}-${day}`;
+}
+
+/**
+ * UTC ISO bounds of a tenant-local calendar day. Callers query the
+ * half-open interval [startUtc, endUtc): `startUtc` is the tenant's
+ * local midnight; `endUtc` is the NEXT local midnight. The next day is
+ * computed by calendar arithmetic on Y/M/D (via `Date.UTC(...d+1)`), NOT
+ * by adding 24h — a DST spring-forward/fall-back day is 23h/25h long, so
+ * "+24h" would land inside or past the wrong day.
+ */
+export function dayWindowUtc(
+  dateKey: string,
+  timezone: string,
+): { startUtc: string; endUtc: string } {
+  const startUtc = tenantWallClockToUtc(dateKey, '00:00', timezone).toISOString();
+  const [y, m, d] = dateKey.split('-').map(Number);
+  const next = new Date(Date.UTC(y, m - 1, d + 1));
+  const pad = (n: number): string => String(n).padStart(2, '0');
+  const nextDateKey = `${next.getUTCFullYear()}-${pad(next.getUTCMonth() + 1)}-${pad(next.getUTCDate())}`;
+  const endUtc = tenantWallClockToUtc(nextDateKey, '00:00', timezone).toISOString();
+  return { startUtc, endUtc };
+}
+
+/**
+ * INVERSE of `tenantWallClockToUtc` for `<input type="datetime-local">`:
+ * render a UTC instant as the tenant-local 'YYYY-MM-DDTHH:mm' wall clock.
+ * Round-trips to the minute: feeding the split date/time back through
+ * `tenantWallClockToUtc(...).toISOString()` returns the original instant.
+ */
+export function utcToTenantWallClock(value: Date | string | number, timezone: string): string {
+  const d = toDate(value);
+  if (Number.isNaN(d.getTime())) return '';
+  const { year, month, day, hour, minute } = tenantWallClockParts(d, timezone);
+  return `${year}-${month}-${day}T${hour}:${minute}`;
+}
+
 /** Convenience: "Apr 28, 2026, 1:30 PM". */
 export function formatDateTimeInTenantTz(
   value: Date | string | number,

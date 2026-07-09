@@ -18,7 +18,7 @@ import { Link, useParams } from 'react-router';
 import { useApiClient } from '../../lib/apiClient';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
 import { formatCurrency } from '../../utils/currency';
-import { formatTimeInTenantTz, formatDateTimeInTenantTz } from '../../utils/formatInTenantTz';
+import { formatTimeInTenantTz, formatDateTimeInTenantTz, todayInTz } from '../../utils/formatInTenantTz';
 import { Spinner } from '../../components/ui';
 import { ErrorState } from '../../components/ErrorState';
 
@@ -65,16 +65,6 @@ interface DigestResponse {
 // ─── Date helpers (UTC arithmetic — DST-safe, no float drift) ──────────────
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-
-/** Tenant-local "today" as YYYY-MM-DD in the given IANA timezone. */
-function todayInTz(timezone: string): string {
-  return new Intl.DateTimeFormat('en-CA', {
-    timeZone: timezone,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).format(new Date());
-}
 
 /** The calendar day before/after `date` (YYYY-MM-DD), via UTC arithmetic. */
 function shiftDate(date: string, days: number): string {

@@ -104,6 +104,45 @@ describe('P11-007 CustomerEdit', () => {
     });
   });
 
+  it("serializes cleared optional fields as '' so the clear persists", async () => {
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => baseCustomer,
+      } as unknown as Response)
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ ...baseCustomer, lastName: '', email: '' }),
+      } as unknown as Response);
+
+    const onSaved = vi.fn();
+    render(<CustomerEdit customerId="c-1" onSaved={onSaved} />);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText('email')).toHaveValue('alice@example.com');
+    });
+
+    fireEvent.change(screen.getByLabelText('email'), { target: { value: '' } });
+    fireEvent.change(screen.getByLabelText('lastName'), { target: { value: '' } });
+    fireEvent.click(screen.getByRole('button', { name: /save/i }));
+
+    await waitFor(() => {
+      expect(onSaved).toHaveBeenCalledWith('c-1');
+    });
+
+    // The PUT body must CARRY the cleared keys as '' — a dropped key
+    // (`|| undefined`) makes the server keep the old value silently.
+    const body = JSON.parse(vi.mocked(apiFetch).mock.calls[1][1]?.body as string);
+    expect(Object.keys(body)).toEqual(expect.arrayContaining(['email', 'lastName']));
+    expect(body.email).toBe('');
+    expect(body.lastName).toBe('');
+    // The successful save reflects the cleared values in the form.
+    expect(screen.getByLabelText('email')).toHaveValue('');
+    expect(screen.getByLabelText('lastName')).toHaveValue('');
+  });
+
   it('shows error when neither name nor company is set', async () => {
     vi.mocked(apiFetch).mockResolvedValueOnce({
       ok: true,

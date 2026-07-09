@@ -254,6 +254,63 @@ describe('EstimatesPage', () => {
     await waitFor(() => expect(screen.getByTestId('mock-capture-sheet')).toBeInTheDocument());
   });
 
+  it('LineItemsEditor: entering Edit re-seeds from the latest items so saving keeps refetched rows', async () => {
+    const lineA = {
+      id: 'li-1', description: 'Original line', quantity: 1,
+      unitPriceCents: 10000, totalCents: 10000, sortOrder: 0, taxable: false,
+    };
+    const lineB = {
+      id: 'li-2', description: 'Newer line', quantity: 2,
+      unitPriceCents: 5000, totalCents: 10000, sortOrder: 1, taxable: false,
+    };
+    const estOf = (lineItems: unknown[]) => ({
+      id: 'e1',
+      estimateNumber: 'EST-001',
+      status: 'draft', // editable
+      customerMessage: 'Repair',
+      createdAt: '2026-06-01T00:00:00.000Z',
+      lineItems,
+      totals: totalsOf(10000),
+      customer: { id: 'c1', displayName: 'Alice Smith', firstName: 'Alice', lastName: 'Smith' },
+    });
+    const updateMutate = vi.fn().mockResolvedValue({});
+    vi.mocked(useMutation).mockReturnValue({ mutate: updateMutate, isLoading: false, error: null });
+    vi.mocked(useDetailQuery).mockReturnValue({ data: estOf([lineA]), isLoading: false, error: null, refetch: vi.fn() });
+    // Detail-view side fetches (notes, history, attachments) are best-effort.
+    vi.stubGlobal('fetch', vi.fn(async () =>
+      new Response(JSON.stringify([]), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+
+    const view = render(
+      <MemoryRouter>
+        <EstimatesPage defaultSelectedId="e1" />
+      </MemoryRouter>,
+    );
+    expect(screen.getByText('Original line')).toBeInTheDocument();
+
+    // Simulate a refetch landing a newer row after the editor mounted.
+    vi.mocked(useDetailQuery).mockReturnValue({ data: estOf([lineA, lineB]), isLoading: false, error: null, refetch: vi.fn() });
+    view.rerender(
+      <MemoryRouter>
+        <EstimatesPage defaultSelectedId="e1" />
+      </MemoryRouter>,
+    );
+    expect(screen.getByText('Newer line')).toBeInTheDocument();
+
+    // Entering Edit must show BOTH rows — the draft re-seeds from the
+    // current items, not the mount-time snapshot.
+    fireEvent.click(screen.getByRole('button', { name: /Edit/i }));
+    expect(screen.getByDisplayValue('Original line')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('Newer line')).toBeInTheDocument();
+
+    // Saving emits the fresh rows — the newer line is not silently deleted.
+    fireEvent.click(screen.getByRole('button', { name: /Save changes/i }));
+    await waitFor(() => expect(updateMutate).toHaveBeenCalled());
+    const body = updateMutate.mock.calls[0][0] as { lineItems: Array<{ description: string; unitPriceCents: number }> };
+    expect(body.lineItems).toHaveLength(2);
+    expect(body.lineItems.map(li => li.description)).toEqual(['Original line', 'Newer line']);
+    expect(body.lineItems[1].unitPriceCents).toBe(5000);
+  });
+
   // U8a — Path A class contract: the list renders on brand tokens only (the
   // hint styles collapse to the semantic tones), no raw Tailwind palette leaks.
   it('renders on Path A tokens — no raw Tailwind palette leaks', () => {

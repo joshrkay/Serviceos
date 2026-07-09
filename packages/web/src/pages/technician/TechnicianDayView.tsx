@@ -356,9 +356,9 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
       setDelayPromptAcknowledged(true);
       setShowDelayPrompt(false);
       // running_late is a status signal (no new time) — not expressible as a
-      // reschedule_appointment proposal. Keep the status call, but surface
-      // failures instead of dropping them with a fire-and-forget void apiFetch.
-      void markRunningLate(active.id, decision.confidence);
+      // reschedule_appointment proposal. Send the running-late notice, and
+      // surface failures instead of dropping them with a fire-and-forget void apiFetch.
+      void markRunningLate(active.id);
       return;
     }
 
@@ -513,11 +513,16 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
     }
   }
 
-  async function markRunningLate(appointmentId: string, confidence: number): Promise<boolean> {
+  async function markRunningLate(appointmentId: string): Promise<boolean> {
     try {
-      const response = await apiFetch(`/api/appointments/${appointmentId}`, {
-        method: 'PUT',
-        body: JSON.stringify({ status: 'running_late', confidence }),
+      // Technicians hold only `appointments:view`, so the old
+      // PUT /api/appointments/:id virtual-status call always 403'd here.
+      // Use the technician-reachable running-late endpoint instead. No
+      // delay estimate is available on this path — an empty body lets the
+      // server apply its default (20 minutes).
+      const response = await apiFetch(`/api/appointments/${appointmentId}/running-late`, {
+        method: 'POST',
+        body: JSON.stringify({}),
       });
       if (!response.ok) {
         throw new Error('Failed to send running-late notice');
@@ -539,7 +544,7 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
       return;
     }
 
-    const notified = await markRunningLate(activeAppointmentId, promptConfidence);
+    const notified = await markRunningLate(activeAppointmentId);
     if (!notified) {
       return;
     }

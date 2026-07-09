@@ -199,7 +199,10 @@ async function suggestEstimate(input: string, svcHint?: ServiceType): Promise<Su
     const items: AILineItem[] = (data.lineItems ?? []).map(li => ({
       description: li.description,
       qty: li.quantity,
-      rate: li.unitPrice,
+      // The suggest contract's unitPrice is INTEGER CENTS (estimate task
+      // contract, packages/api/src/ai/tasks/estimate-task.ts); `rate` is
+      // dollars — convert here or the create payload re-multiplies by 100.
+      rate: li.unitPrice / 100,
       ...(li.category ? { note: li.category } : {}),
     }));
     if (items.length === 0) {
@@ -1155,6 +1158,11 @@ export function NewEstimateFlow({ onClose, onCreated, preSelectedCustomerId }: {
   const [sending,    setSending]   = useState(false);
   const [sent,       setSent]      = useState(false);
   const [savedDraft, setSaved]     = useState(false);
+  const [savingDraft, setSavingDraft] = useState(false);
+  // Estimate id from a successful POST /api/estimates. Cached so a retry
+  // after a failed /send (or a double-tap) reuses the existing document
+  // instead of creating a duplicate.
+  const createdEstimateIdRef = useRef<string | null>(null);
   const [voiceKey,   setVoiceKey]  = useState(0);
   const [manualKey,  setManualKey] = useState(0);
   const [photoKey,   setPhotoKey]  = useState(0);
@@ -1167,6 +1175,13 @@ export function NewEstimateFlow({ onClose, onCreated, preSelectedCustomerId }: {
   const [jobsLoaded,  setJobsLoaded]  = useState(false);
   const [jobId,       setJobId]       = useState<string | null>(null);
   const [creatingJob, setCreatingJob] = useState(false);
+  // Invalidate the cached created-estimate id whenever the inputs that fed it
+  // change. Otherwise, after a create succeeds but /send fails, a user who goes
+  // back and edits the job, valid-until, or line items would re-send the stale
+  // first draft (the cached id is reused without PATCHing the edits).
+  useEffect(() => {
+    createdEstimateIdRef.current = null;
+  }, [jobId, customerId, validUntil, aiResult]);
   // Surfaced API error from the create/send flow (no silent mock success).
   const [submitError, setSubmitError] = useState<string | null>(null);
   // viewUrl returned by POST /api/estimates/:id/send — used for the real
@@ -1299,6 +1314,10 @@ export function NewEstimateFlow({ onClose, onCreated, preSelectedCustomerId }: {
   // then POST /api/estimates. Returns the new estimate id, or null on error
   // (error surfaced via submitError; the caller must not claim success).
   async function createEstimate(): Promise<string | null> {
+    // Already created on a previous attempt (e.g. create 200 + send 500):
+    // reuse it so a retry only re-attempts the failed step and never
+    // produces a second estimate document.
+    if (createdEstimateIdRef.current) return createdEstimateIdRef.current;
     setSubmitError(null);
     let useJobId = jobId;
     if (!useJobId) {
@@ -1324,6 +1343,7 @@ export function NewEstimateFlow({ onClose, onCreated, preSelectedCustomerId }: {
         throw new Error((json as { message?: string })?.message ?? `HTTP ${res.status}`);
       }
       const created = await res.json() as { id: string };
+      createdEstimateIdRef.current = created.id;
       return created.id;
     } catch (err) {
       setSubmitError(err instanceof Error ? err.message : 'Failed to create estimate');
@@ -1332,6 +1352,7 @@ export function NewEstimateFlow({ onClose, onCreated, preSelectedCustomerId }: {
   }
 
   async function handleSend() {
+    if (sending) return;
     setSending(true);
     setSubmitError(null);
     const id = await createEstimate();
@@ -1357,11 +1378,17 @@ export function NewEstimateFlow({ onClose, onCreated, preSelectedCustomerId }: {
   }
 
   async function saveAsDraft() {
+    if (savingDraft) return;
+    setSavingDraft(true);
     setSubmitError(null);
-    const id = await createEstimate();
-    if (!id) return;
-    setSaved(true);
-    setTimeout(() => { onCreated(); onClose(); }, 1100);
+    try {
+      const id = await createEstimate();
+      if (!id) return;
+      setSaved(true);
+      setTimeout(() => { onCreated(); onClose(); }, 1100);
+    } finally {
+      setSavingDraft(false);
+    }
   }
 
   return (
@@ -1646,13 +1673,13 @@ export function NewEstimateFlow({ onClose, onCreated, preSelectedCustomerId }: {
                 </div>
               ) : (
                 <div className="flex flex-col gap-2">
-                  <button onClick={() => setStep('send')} disabled={!jobId || creatingJob}
+                  <button onClick={() => setStep('send')} disabled={!jobId || creatingJob || savingDraft}
                     className="flex items-center justify-center gap-2 w-full rounded-xl bg-primary text-primary-foreground py-3.5 text-sm disabled:opacity-40 hover:bg-primary/90 transition-colors">
                     <Send size={14} /> Send to customer
                   </button>
-                  <button onClick={() => void saveAsDraft()} disabled={!jobId || creatingJob}
+                  <button onClick={() => void saveAsDraft()} disabled={!jobId || creatingJob || savingDraft}
                     className="w-full rounded-xl border border-border py-3 text-sm text-foreground disabled:opacity-40 hover:bg-secondary transition-colors">
-                    Save as draft
+                    {savingDraft ? 'Saving…' : 'Save as draft'}
                   </button>
                   {!jobId && (
                     <p className="text-xs text-muted-foreground text-center">Select or create a job to continue</p>

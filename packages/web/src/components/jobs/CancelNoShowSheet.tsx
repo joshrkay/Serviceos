@@ -115,7 +115,10 @@ export function CancelNoShowSheet({ job, appointmentId, customerName, customerPh
         const res = await apiFetch(`/api/jobs/${job.id}/transition`, {
           method: 'POST',
           body: JSON.stringify({
-            status: 'cancelled',
+            // API canonical status is 'canceled' (single L) — 'cancelled'
+            // fails the lifecycle transition check on every submit (see
+            // JOB_STATUS_TRANSITIONS in packages/api/src/jobs/job-lifecycle.ts).
+            status: 'canceled',
             reason: cancelReason,
           }),
         });

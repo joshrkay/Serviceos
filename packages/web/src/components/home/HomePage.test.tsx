@@ -1,10 +1,15 @@
 import React from 'react';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { MemoryRouter } from 'react-router';
 import { HomePage } from './HomePage';
+import { todayInTz, tenantWallClockToUtc } from '../../utils/formatInTenantTz';
 
 vi.mock('../../hooks/useListQuery', () => ({ useListQuery: vi.fn() }));
+
+// U10 — "today" must be the tenant-tz calendar day. Mock the tz so the tests
+// are deterministic regardless of the CI browser's zone.
+vi.mock('../../hooks/useTenantTimezone', () => ({ useTenantTimezone: vi.fn(() => 'UTC') }));
 
 vi.mock('./MoneyLoopHomeCard', () => ({
   MoneyLoopHomeCard: () => <div data-testid="money-loop-home-card" />,
@@ -17,6 +22,7 @@ vi.mock('../../api/conversations', () => ({
 }));
 
 import { useListQuery } from '../../hooks/useListQuery';
+import { useTenantTimezone } from '../../hooks/useTenantTimezone';
 import { listInboxThreads } from '../../api/conversations';
 
 const today = new Date().toISOString().split('T')[0];
@@ -96,6 +102,13 @@ const mockInvoices = [
   },
 ];
 
+// U10 — today's scheduled work comes from the appointments API (GET /api/jobs
+// ignores scheduledDate). One appointment per mock job, dated today (UTC).
+const mockAppointments = [
+  { jobId: 'j1', scheduledStart: `${today}T09:00:00Z` },
+  { jobId: 'j2', scheduledStart: `${today}T11:00:00Z` },
+];
+
 const makeListResult = (data: unknown[]) => ({
   data,
   total: data.length,
@@ -110,7 +123,9 @@ const makeListResult = (data: unknown[]) => ({
 });
 
 beforeEach(() => {
+  vi.mocked(useTenantTimezone).mockReturnValue('UTC');
   vi.mocked(useListQuery).mockImplementation((path: string) => {
+    if (path === '/api/appointments') return makeListResult(mockAppointments) as ReturnType<typeof useListQuery>;
     if (path === '/api/jobs')      return makeListResult(mockJobs) as ReturnType<typeof useListQuery>;
     if (path === '/api/estimates') return makeListResult(mockEstimates) as ReturnType<typeof useListQuery>;
     if (path === '/api/invoices')  return makeListResult(mockInvoices) as ReturnType<typeof useListQuery>;
@@ -214,12 +229,22 @@ describe('HomePage', () => {
     expect(addCustomer).toBeInTheDocument();
   });
 
-  it('queries /api/jobs with today scheduledDate filter', () => {
+  it('queries /api/appointments with a fromDate/toDate day window (not the ignored jobs scheduledDate)', () => {
     renderPage();
+    // U10 — GET /api/jobs ignores scheduledDate, so "today" is driven by the
+    // appointments API's day window, keyed off the tenant tz.
     expect(vi.mocked(useListQuery)).toHaveBeenCalledWith(
-      '/api/jobs',
-      expect.objectContaining({ filters: expect.objectContaining({ scheduledDate: expect.any(String) }) })
+      '/api/appointments',
+      expect.objectContaining({
+        filters: expect.objectContaining({
+          fromDate: expect.any(String),
+          toDate: expect.any(String),
+        }),
+      }),
     );
+    // The jobs query no longer carries a (silently ignored) scheduledDate filter.
+    const jobsCall = vi.mocked(useListQuery).mock.calls.find(([p]) => p === '/api/jobs');
+    expect(jobsCall?.[1]?.filters ?? {}).not.toHaveProperty('scheduledDate');
   });
 
   it('queries /api/estimates with sent filter', () => {
@@ -288,6 +313,80 @@ describe('HomePage', () => {
       '/api/jobs',
       expect.objectContaining({ refetchInterval: expect.any(Number) }),
     );
+    expect(vi.mocked(useListQuery)).toHaveBeenCalledWith(
+      '/api/appointments',
+      expect.objectContaining({ refetchInterval: expect.any(Number) }),
+    );
+  });
+
+  // ── U10: today's jobs sourced from the appointments day window (tz-correct) ─
+
+  it('[U10] renders a job in the today panel when its appointment is inside today (tenant tz)', () => {
+    vi.mocked(useTenantTimezone).mockReturnValue('UTC');
+    vi.mocked(useListQuery).mockImplementation((path: string) => {
+      if (path === '/api/appointments') {
+        return makeListResult([
+          { jobId: 'j1', scheduledStart: `${todayInTz('UTC')}T14:00:00Z` },
+        ]) as ReturnType<typeof useListQuery>;
+      }
+      if (path === '/api/jobs')      return makeListResult(mockJobs) as ReturnType<typeof useListQuery>;
+      if (path === '/api/estimates') return makeListResult([]) as ReturnType<typeof useListQuery>;
+      if (path === '/api/invoices')  return makeListResult([]) as ReturnType<typeof useListQuery>;
+      return makeListResult([]) as ReturnType<typeof useListQuery>;
+    });
+    renderPage();
+    const section = screen.getByText("Today's jobs").closest('section')!;
+    expect(within(section).getByText('Alice Smith')).toBeInTheDocument();
+    // j2 has no appointment today → it must not leak into the panel.
+    expect(within(section).queryByText('Bob Jones')).toBeNull();
+    expect(screen.queryByText('No jobs scheduled today')).toBeNull();
+  });
+
+  it('[U10] counts a 23:30 tenant-local appointment on the correct day when the browser tz differs', () => {
+    // A late-evening appointment in a west-of-UTC tenant lands on the NEXT
+    // calendar day in UTC. Keying "today" off the tenant tz (not the UTC date)
+    // must still place it on the tenant's today.
+    const zone = 'America/Los_Angeles';
+    vi.mocked(useTenantTimezone).mockReturnValue(zone);
+    const localToday = todayInTz(zone);
+    const lateInstant = tenantWallClockToUtc(localToday, '23:30', zone).toISOString();
+    // Sanity: the UTC calendar date of this instant is NOT the tenant's today —
+    // a naive `toISOString().split('T')[0]` implementation would drop it.
+    expect(lateInstant.slice(0, 10)).not.toBe(localToday);
+
+    vi.mocked(useListQuery).mockImplementation((path: string) => {
+      if (path === '/api/appointments') {
+        return makeListResult([
+          { jobId: 'j1', scheduledStart: lateInstant },
+        ]) as ReturnType<typeof useListQuery>;
+      }
+      if (path === '/api/jobs')      return makeListResult(mockJobs) as ReturnType<typeof useListQuery>;
+      if (path === '/api/estimates') return makeListResult([]) as ReturnType<typeof useListQuery>;
+      if (path === '/api/invoices')  return makeListResult([]) as ReturnType<typeof useListQuery>;
+      return makeListResult([]) as ReturnType<typeof useListQuery>;
+    });
+    renderPage();
+    const section = screen.getByText("Today's jobs").closest('section')!;
+    expect(within(section).getByText('Alice Smith')).toBeInTheDocument();
+    expect(screen.queryByText('No jobs scheduled today')).toBeNull();
+  });
+
+  it('[U10] shows the empty state (not the full jobs list) when there are no appointments today', () => {
+    vi.mocked(useTenantTimezone).mockReturnValue('UTC');
+    vi.mocked(useListQuery).mockImplementation((path: string) => {
+      // Jobs exist, but none are scheduled today (no appointments in window).
+      if (path === '/api/appointments') return makeListResult([]) as ReturnType<typeof useListQuery>;
+      if (path === '/api/jobs')      return makeListResult(mockJobs) as ReturnType<typeof useListQuery>;
+      if (path === '/api/estimates') return makeListResult([]) as ReturnType<typeof useListQuery>;
+      if (path === '/api/invoices')  return makeListResult([]) as ReturnType<typeof useListQuery>;
+      return makeListResult([]) as ReturnType<typeof useListQuery>;
+    });
+    renderPage();
+    const section = screen.getByText("Today's jobs").closest('section')!;
+    expect(within(section).getByText('No jobs scheduled today')).toBeInTheDocument();
+    // The full jobs list must NOT render just because /api/jobs returned rows.
+    expect(within(section).queryByText('Alice Smith')).toBeNull();
+    expect(within(section).queryByText('Bob Jones')).toBeNull();
   });
 
   // ── P20-004: Error states for authenticated data panels ──────────────────
@@ -370,6 +469,7 @@ describe('HomePage', () => {
 
   it('shows money-state badge on today job rows', () => {
     vi.mocked(useListQuery).mockImplementation((path: string) => {
+      if (path === '/api/appointments') return makeListResult(mockAppointments) as ReturnType<typeof useListQuery>;
       if (path === '/api/jobs') {
         return makeListResult([
           { ...mockJobs[0], moneyState: 'estimate_sent' },

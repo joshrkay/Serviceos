@@ -1,9 +1,24 @@
 import { defineConfig } from 'vite';
+import { fileURLToPath } from 'node:url';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 
+// DEV-ONLY: when VITE_AUTH_MODE=dev, swap the Clerk SDK for a local shim so
+// the authenticated app boots headlessly without Clerk's hosted frontend
+// (unreachable in sandboxed CI / verification). Never active in a real build.
+const devAuth = process.env.VITE_AUTH_MODE === 'dev';
+
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  resolve: devAuth
+    ? {
+        alias: {
+          '@clerk/clerk-react': fileURLToPath(
+            new URL('./src/dev/clerk-dev-shim.tsx', import.meta.url),
+          ),
+        },
+      }
+    : undefined,
   build: {
     rollupOptions: {
       output: {

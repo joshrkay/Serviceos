@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import {
   X, Search, Check, ArrowLeft, Mic, StopCircle, Sparkles,
   RotateCcw, Calendar, Clock, User, AlertCircle, MapPin,
-  ChevronRight, ClipboardList, Pencil, Zap, Send, FileText,
+  ChevronRight, ClipboardList, Zap, Send, FileText,
   Plus,
 } from 'lucide-react';
 import { apiFetch } from '../../utils/api-fetch';
@@ -11,7 +11,76 @@ import { useMutation } from '../../hooks/useMutation';
 import { useListQuery } from '../../hooks/useListQuery';
 import { useTechnicianRoster } from '../../hooks/useTechnicianRoster';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
-import { resolveScheduleSlot, nextWeekdayIso, tenantDateIso } from './resolve-schedule-slot';
+import {
+  todayInTz,
+  tenantWallClockToUtc,
+  formatDateInTenantTz,
+  formatDateTimeInTenantTz,
+} from '../../utils/formatInTenantTz';
+
+// No default appointment/job duration exists in the API or shared config
+// (verified 2026-07-08 — public-booking derives slot ends from slot
+// definitions, not a fixed default), so the create flow blocks out a
+// conventional 60-minute service window for the new appointment.
+const DEFAULT_APPOINTMENT_MINUTES = 60;
+
+// Fixed schedule-step time chips → 24h wall clock, so a picked slot maps to a
+// real tenant-local instant via tenantWallClockToUtc.
+const TIME_SLOTS_24H: Record<string, string> = {
+  '8:00 AM': '08:00',
+  '9:00 AM': '09:00',
+  '10:00 AM': '10:00',
+  '11:00 AM': '11:00',
+  '1:00 PM': '13:00',
+  '2:00 PM': '14:00',
+  '3:00 PM': '15:00',
+  '4:00 PM': '16:00',
+};
+
+/**
+ * Convert a time label to 'HH:mm'. Fast-path the whole-hour chips above, then
+ * parse arbitrary labels like "2:30 PM" / "2 pm" / "14:30". Voice parsing can
+ * produce off-chip times ("tomorrow at 2:30pm" → "2:30 PM"); without this they
+ * failed the chip lookup and the job was silently saved unscheduled. Returns
+ * null for anything unparseable.
+ */
+export function timeLabelTo24h(label: string): string | null {
+  const chip = TIME_SLOTS_24H[label];
+  if (chip) return chip;
+  const m = label.trim().match(/^(\d{1,2})(?::(\d{2}))?\s*([AaPp][Mm])?$/);
+  if (!m) return null;
+  let h = parseInt(m[1], 10);
+  const min = m[2] ? parseInt(m[2], 10) : 0;
+  const ampm = m[3]?.toUpperCase();
+  if (Number.isNaN(h) || Number.isNaN(min) || min > 59) return null;
+  if (ampm === 'PM' && h < 12) h += 12;
+  if (ampm === 'AM' && h === 12) h = 0;
+  if (h > 23) return null;
+  return `${pad2(h)}:${pad2(min)}`;
+}
+
+/** A schedule chip holds a real 'YYYY-MM-DD' date key (never a stale label). */
+const isDateKey = (value: string): boolean => /^\d{4}-\d{2}-\d{2}$/.test(value);
+
+const pad2 = (n: number): string => String(n).padStart(2, '0');
+
+/** The next `count` calendar days as tenant-tz date-key chips (today first). */
+function buildDateChips(
+  timezone: string,
+  count: number,
+): { label: string; value: string }[] {
+  const [y, m, d] = todayInTz(timezone).split('-').map(Number);
+  return Array.from({ length: count }).map((_, i) => {
+    const dt = new Date(Date.UTC(y, m - 1, d + i));
+    const key = `${dt.getUTCFullYear()}-${pad2(dt.getUTCMonth() + 1)}-${pad2(dt.getUTCDate())}`;
+    // Format off a tenant-local-noon instant so the rendered date matches the
+    // key regardless of the viewer's browser zone.
+    const noon = tenantWallClockToUtc(key, '12:00', timezone);
+    const label =
+      i === 0 ? 'Today' : i === 1 ? 'Tomorrow' : formatDateInTenantTz(noon, timezone);
+    return { label, value: key };
+  });
+}
 
 type ServiceType = 'HVAC' | 'Plumbing' | 'Painting';
 
@@ -51,7 +120,6 @@ interface JobDraft {
   priority:      'Normal' | 'Urgent';
   scheduledDate: string;
   scheduledTime: string;
-  assignedTech:  string;
   notes:         string;
 }
 
@@ -120,7 +188,7 @@ const SVC_ICON: Record<ServiceType, string> = { HVAC: '❄️', Plumbing: '🔧'
 const BLANK: JobDraft = {
   customerId: null, locationId: null, serviceType: null,
   description: '', priority: 'Normal',
-  scheduledDate: '', scheduledTime: '', assignedTech: '', notes: '',
+  scheduledDate: '', scheduledTime: '', notes: '',
 };
 
 // ─── Voice demo transcripts ───────────────────────────────────────────────────
@@ -162,7 +230,7 @@ function parseVoice(
   input: string,
   customerPool: Customer[],
   techRoster: { id: string; name: string }[],
-  tenantTz: string,
+  timezone: string,
 ): ParsedJob {
   const t = input.toLowerCase();
 
@@ -180,18 +248,22 @@ function parseVoice(
   const priority: 'Normal' | 'Urgent' =
     /urgent|asap|emergency|immediately|right away|burst|flood/.test(t) ? 'Urgent' : 'Normal';
 
+  // Only today/tomorrow resolve to a concrete tenant-tz date key here — a bare
+  // weekday ("Friday") is ambiguous without a year and must not be guessed into
+  // a real appointment, so it stays unscheduled for the user to pick.
+  const todayKey = todayInTz(timezone);
+  const [ty, tm, td] = todayKey.split('-').map(Number);
+  const tomorrowDt = new Date(Date.UTC(ty, tm - 1, td + 1));
+  const tomorrowKey = `${tomorrowDt.getUTCFullYear()}-${pad2(tomorrowDt.getUTCMonth() + 1)}-${pad2(tomorrowDt.getUTCDate())}`;
   const scheduledDate =
-    /today|this (morning|afternoon|evening)/.test(t) ? 'Today' :
-    /tomorrow/.test(t)  ? 'Tomorrow' :
-    /monday/.test(t)    ? nextWeekdayIso(1, tenantTz) :
-    /tuesday/.test(t)   ? nextWeekdayIso(2, tenantTz) :
-    /wednesday/.test(t) ? nextWeekdayIso(3, tenantTz) :
-    /thursday/.test(t)  ? nextWeekdayIso(4, tenantTz) :
-    /friday/.test(t)    ? nextWeekdayIso(5, tenantTz) : '';
+    /today|this (morning|afternoon|evening)/.test(t) ? todayKey :
+    /tomorrow/.test(t) ? tomorrowKey : '';
 
+  // Normalize a spoken time to a schedule-step slot label ("2:00 PM") so it
+  // lines up with TIME_SLOTS_24H when persisting.
   const timeMatch = t.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)/);
   const scheduledTime = timeMatch
-    ? `${timeMatch[1]}:${timeMatch[2] ?? '00'} ${timeMatch[3].toUpperCase()}`
+    ? `${Number(timeMatch[1])}:${timeMatch[2] ?? '00'} ${timeMatch[3].toUpperCase()}`
     : '';
 
   const matchedTech = techRoster.find(tech =>
@@ -225,7 +297,6 @@ function parseVoice(
     priority,
     scheduledDate,
     scheduledTime,
-    assignedTech:  matchedTech?.name ?? '',
     notes:         '',
   };
 }
@@ -250,9 +321,11 @@ function Waveform({ active }: { active: boolean }) {
 
 // ─── Parsed result review card ────────────────────────────────────────────────
 function ParsedReviewCard({
-  parsed, onEdit,
-}: { parsed: ParsedJob; onEdit: (field: string, val: string) => void }) {
-  const [expandNotes, setExpandNotes] = useState(false);
+  parsed, timezone,
+}: { parsed: ParsedJob; timezone: string }) {
+  const dateDisplay = isDateKey(parsed.scheduledDate)
+    ? formatDateInTenantTz(tenantWallClockToUtc(parsed.scheduledDate, '12:00', timezone), timezone)
+    : '';
 
   const rows: { icon: typeof Mic; label: string; value: string; field: string; empty?: boolean }[] = [
     {
@@ -275,7 +348,7 @@ function ParsedReviewCard({
     },
     {
       icon: Calendar, label: 'Date',
-      value: parsed.scheduledDate || 'Unscheduled',
+      value: dateDisplay || 'Unscheduled',
       field: 'scheduledDate',
     },
     {
@@ -283,11 +356,6 @@ function ParsedReviewCard({
       value: parsed.scheduledTime || '—',
       field: 'scheduledTime',
       empty: !parsed.scheduledTime,
-    },
-    {
-      icon: User, label: 'Technician',
-      value: parsed.assignedTech || 'Unassigned',
-      field: 'assignedTech',
     },
   ];
 
@@ -345,6 +413,7 @@ export function NewJobFlow({
   preSelectedCustomerId?: string;
 }) {
   const { technicians: techRoster } = useTechnicianRoster();
+  const timezone = useTenantTimezone();
   const [step,     setStep]     = useState<FlowStep>('start');
   const [customerOptions, setCustomerOptions] = useState<Customer[]>([]);
   const [draft,    setDraft]    = useState<JobDraft>({
@@ -356,11 +425,29 @@ export function NewJobFlow({
   const [parsed,   setParsed]   = useState<ParsedJob | null>(null);
   const [search,   setSearch]   = useState('');
   const [creating, setCreating] = useState(false);
+  // Which day-quick-pick offset the user tapped (0 = Today, 1 = Tomorrow, …),
+  // or null for a custom/no pick. `useTenantTimezone` starts at a fallback and
+  // resolves the real tz after /api/me; the day chips freeze concrete dates, so
+  // a pick made before the tz resolves would otherwise persist the fallback-tz
+  // date and create the appointment on the wrong day. Re-derive the picked
+  // day's concrete date whenever the tz changes.
+  const [pickedDateOffset, setPickedDateOffset] = useState<number | null>(null);
+  useEffect(() => {
+    if (pickedDateOffset == null) return;
+    const chip = buildDateChips(timezone, 7)[pickedDateOffset];
+    if (chip) setDraft(d => ({ ...d, scheduledDate: chip.value }));
+    // Intentionally keyed on timezone only: a fresh chip tap sets the date
+    // directly, so we re-derive solely when the tenant tz resolves/changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [timezone]);
   const [jobNum,   setJobNum]   = useState('');
   const [createError, setCreateError] = useState('');
-  // Whether the just-created job actually got an appointment (drives which
-  // parent list — New vs Scheduled — to route to after creation).
-  const [createdScheduled, setCreatedScheduled] = useState(false);
+  // Persisted-only facts for the done screen: the appointment instant we
+  // actually stored (null when the job was left unscheduled), the warning when
+  // scheduling failed after the job was created, and the tab the job landed on.
+  const [persistedStart, setPersistedStart] = useState<Date | null>(null);
+  const [scheduleWarning, setScheduleWarning] = useState('');
+  const [resultFilter, setResultFilter] = useState<'New' | 'Scheduled'>('New');
   const [showNewCustomerForm, setShowNewCustomerForm] = useState(false);
   const [newCustomerName, setNewCustomerName] = useState('');
   const [newCustomerPhone, setNewCustomerPhone] = useState('');
@@ -371,6 +458,7 @@ export function NewJobFlow({
   const { data: apiCustomers } = useListQuery<ApiCustomer>('/api/customers');
   const tenantTz = useTenantTimezone();
   const { mutate: createJobMutation } = useMutation<CreateJobRequest, CreateJobResponse>('POST', '/api/jobs');
+  const { mutate: createAppointmentMutation } = useMutation<Record<string, unknown>, { id: string }>('POST', '/api/appointments');
   const { mutate: createCustomerMutation } = useMutation<Record<string, unknown>, CreateCustomerResponse>('POST', '/api/customers');
   const { mutate: createLocationMutation } = useMutation<Record<string, unknown>, CreateLocationResponse>('POST', '/api/locations');
 
@@ -476,19 +564,33 @@ export function NewJobFlow({
     };
     recorder.stop();
   }
-  function buildFromVoice() {
-    const result = parseVoice(vTranscript, customerOptions, techRoster, tenantTz);
+  async function buildFromVoice() {
+    const result = parseVoice(vTranscript, customerOptions, techRoster, timezone);
+
+    // Voice-matched customers rarely have their locations embedded in the list
+    // payload, so fetch them (mirroring selectCustomer) and pick a default so
+    // the confirmed voice flow can render a location picker and complete.
+    let locationId = result.locationId;
+    if (result.customerId) {
+      const matched = customerOptions.find(c => c.id === result.customerId);
+      if (matched) {
+        const resolved = await ensureLocations(matched);
+        const locs = resolved.locations;
+        const primary = locs.find(l => l.isPrimary) ?? locs[0];
+        locationId = locs.length <= 1 ? (locs[0]?.id ?? null) : (primary?.id ?? null);
+      }
+    }
+
     setParsed(result);
     setDraft(d => ({
       ...d,
       customerId:    result.customerId,
-      locationId:    result.locationId,
+      locationId,
       serviceType:   result.serviceType,
       description:   result.description,
       priority:      result.priority,
       scheduledDate: result.scheduledDate,
       scheduledTime: result.scheduledTime,
-      assignedTech:  result.assignedTech,
     }));
     setVPhase('confirmed');
   }
@@ -499,7 +601,6 @@ export function NewJobFlow({
   const location   = customer?.locations.find(l => l.id === draft.locationId);
   const primaryLoc = customer?.locations.find(l => l.isPrimary) ?? customer?.locations[0];
   const address    = (draft.locationId ? location?.address : primaryLoc?.address) ?? customer?.address ?? '';
-  const tech       = techRoster.find(t => t.name === draft.assignedTech);
 
   const filteredCustomers = search
     ? customerOptions.filter(c =>
@@ -508,35 +609,36 @@ export function NewJobFlow({
         c.address.toLowerCase().includes(search.toLowerCase()))
     : customerOptions;
 
+  // Fetch a customer's locations on-demand (the customers list doesn't embed
+  // them) and cache them into customerOptions so pickers render. Shared by the
+  // manual customer step and the voice flow. Returns the resolved customer.
+  async function ensureLocations(customer: Customer): Promise<Customer> {
+    if (customer.locations.length > 0) return customer;
+    try {
+      const res = await apiFetch(`/api/locations?customerId=${customer.id}`);
+      if (res.ok) {
+        const locs: ApiLocation[] = await res.json();
+        const mappedLocs = locs.map((loc) => ({
+          id: loc.id,
+          nickname: loc.label || (loc.isPrimary ? 'Primary' : 'Location'),
+          address: [loc.street1, loc.city, loc.state, loc.postalCode].filter(Boolean).join(', '),
+          serviceTypes: loc.serviceTypes?.length ? loc.serviceTypes : ['HVAC' as ServiceType],
+          isPrimary: !!loc.isPrimary,
+          jobCount: 0,
+        }));
+        const resolved = { ...customer, locations: mappedLocs };
+        setCustomerOptions(prev => prev.map(opt => (opt.id === customer.id ? resolved : opt)));
+        return resolved;
+      }
+    } catch {
+      // Non-fatal: fall through with empty locations
+    }
+    return customer;
+  }
+
   async function selectCustomer(id: string, source: Customer[] = customerOptions) {
     const c = source.find(c => c.id === id);
-
-    // If the customer has no locations loaded yet (API list doesn't embed them),
-    // fetch them on-demand so the location picker can appear.
-    let resolvedCustomer = c;
-    if (c && c.locations.length === 0) {
-      try {
-        const res = await apiFetch(`/api/locations?customerId=${id}`);
-        if (res.ok) {
-          const locs: ApiLocation[] = await res.json();
-          const mappedLocs = locs.map((loc) => ({
-            id: loc.id,
-            nickname: loc.label || (loc.isPrimary ? 'Primary' : 'Location'),
-            address: [loc.street1, loc.city, loc.state, loc.postalCode].filter(Boolean).join(', '),
-            serviceTypes: loc.serviceTypes?.length ? loc.serviceTypes : ['HVAC' as ServiceType],
-            isPrimary: !!loc.isPrimary,
-            jobCount: 0,
-          }));
-          resolvedCustomer = { ...c, locations: mappedLocs };
-          // Update customerOptions so the picker renders with fresh locations
-          setCustomerOptions(prev =>
-            prev.map(opt => (opt.id === id ? resolvedCustomer! : opt))
-          );
-        }
-      } catch {
-        // Non-fatal: fall through with empty locations
-      }
-    }
+    const resolvedCustomer = c ? await ensureLocations(c) : c;
 
     const locs = resolvedCustomer?.locations ?? [];
     const primaryLoc = locs.find(l => l.isPrimary) ?? locs[0];
@@ -705,6 +807,19 @@ export function NewJobFlow({
     }
   }
 
+  /**
+   * The concrete UTC instant a picked date + time maps to, or null when the
+   * job is left unscheduled. Requires BOTH a real tenant-tz date key and a
+   * known time slot — a date alone can't become an appointment.
+   */
+  function resolveScheduledStart(): Date | null {
+    if (!isDateKey(draft.scheduledDate)) return null;
+    const time24 = timeLabelTo24h(draft.scheduledTime);
+    if (!time24) return null;
+    const start = tenantWallClockToUtc(draft.scheduledDate, time24, timezone);
+    return Number.isNaN(start.getTime()) ? null : start;
+  }
+
   async function createJob() {
     if (!draft.customerId || !draft.locationId) {
       setCreateError('Please choose a customer and service location before creating the job.');
@@ -716,6 +831,7 @@ export function NewJobFlow({
     }
 
     setCreateError('');
+    setScheduleWarning('');
     setCreating(true);
     try {
       const created = await createJobMutation({
@@ -726,36 +842,38 @@ export function NewJobFlow({
         priority: draft.priority === 'Urgent' ? 'urgent' : 'normal',
       });
 
-      // Issue 2 — when a concrete date + time was picked, create the appointment
-      // so the job lands on the dispatch board (unassigned queue). A date with
-      // no time (or an unresolvable value) yields null → job stays unscheduled.
-      const slot = resolveScheduleSlot(draft.scheduledDate, draft.scheduledTime, tenantTz);
-      if (slot) {
-        // The job already exists, so a scheduling failure — whether a non-OK
-        // response OR a thrown network/auth error — must NOT fall through to the
-        // outer catch (which would leave the user on the form to retry and
-        // create a duplicate job). Treat both as "job created, scheduling
-        // failed" and land on the success screen with a note.
-        let scheduled = false;
+      // If a slot was chosen, persist the SCHEDULE as an appointment and move
+      // the job forward (new → scheduled) so it lands on the Scheduled tab.
+      // Tech assignment is intentionally NOT persisted here — there is no
+      // create-time assignee endpoint (appointment_assignees is separate).
+      let landedFilter: 'New' | 'Scheduled' = 'New';
+      let scheduledStart: Date | null = null;
+      const start = resolveScheduledStart();
+      if (start) {
+        const end = new Date(start.getTime() + DEFAULT_APPOINTMENT_MINUTES * 60_000);
         try {
-          const res = await apiFetch(`/api/jobs/${created.id}/schedule`, {
-            method: 'POST',
-            body: JSON.stringify({ ...slot, timezone: tenantTz }),
+          await createAppointmentMutation({
+            jobId: created.id,
+            scheduledStart: start.toISOString(),
+            scheduledEnd: end.toISOString(),
+            timezone,
           });
-          scheduled = res.ok;
+          const res = await apiFetch(`/api/jobs/${created.id}/transition`, {
+            method: 'POST',
+            body: JSON.stringify({ status: 'scheduled' }),
+          });
+          if (!res.ok) throw new Error(`Transition failed: HTTP ${res.status}`);
+          scheduledStart = start;
+          landedFilter = 'Scheduled';
         } catch {
-          scheduled = false;
+          // The job exists; only the schedule didn't stick. Surface it honestly
+          // rather than claiming a scheduled job on the done screen.
+          setScheduleWarning('Job created, but the schedule could not be saved. Schedule it from the job.');
         }
-        setCreatedScheduled(scheduled);
-        setJobNum(created.jobNumber);
-        setStep('done');
-        if (!scheduled) {
-          setCreateError('Job created, but scheduling it failed — schedule it from the dispatch board.');
-        }
-        return;
       }
 
-      setCreatedScheduled(false);
+      setPersistedStart(scheduledStart);
+      setResultFilter(landedFilter);
       setJobNum(created.jobNumber);
       setStep('done');
     } catch {
@@ -764,12 +882,6 @@ export function NewJobFlow({
       setCreating(false);
     }
   }
-
-  // Reflects the ACTUAL creation outcome (did an appointment get created?), not
-  // just the draft selection — so a scheduling failure keeps the job in the New
-  // filter instead of routing the parent to Scheduled, where the still-`new`
-  // job would be hidden.
-  const createdJobFilter: 'New' | 'Scheduled' = createdScheduled ? 'Scheduled' : 'New';
 
   const canCreate = !!draft.customerId && !!draft.locationId && !!draft.serviceType && !!draft.description.trim();
 
@@ -786,29 +898,12 @@ export function NewJobFlow({
 
   const fmt = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 
-  // ── Date quick-picks ──
-  // Today/Tomorrow plus the next few concrete calendar dates, each carrying a
-  // real ISO value so resolveScheduleSlot turns it into an appointment. (No
-  // placeholder chips — those looked scheduled but silently dropped the
-  // schedule, creating the job as New with a misleading "Scheduled" label.)
-  const isoDayChip = (offset: number) => {
-    // Value is the tenant-timezone calendar date (matches how Today/Tomorrow
-    // resolve), so a dispatcher in another zone doesn't schedule the wrong day.
-    const value = tenantDateIso(offset, tenantTz);
-    // Label the pure calendar date — format at UTC noon so the weekday/day don't
-    // shift under the runner's local tz.
-    const label = new Date(`${value}T12:00:00Z`).toLocaleDateString(undefined, {
-      weekday: 'short', day: 'numeric', timeZone: 'UTC',
-    });
-    return { label, value };
-  };
+  // ── Date quick-picks — the next 7 tenant-tz days, plus a custom picker. Each
+  // day chip carries a real 'YYYY-MM-DD' date key so the picked slot resolves
+  // to a concrete instant at create time.
   const DATE_CHIPS = [
-    { label: 'Today',     value: 'Today'    },
-    { label: 'Tomorrow',  value: 'Tomorrow' },
-    isoDayChip(2),
-    isoDayChip(3),
-    isoDayChip(4),
-    { label: 'Later',     value: '__custom' },
+    ...buildDateChips(timezone, 7),
+    { label: 'Later', value: '__custom' },
   ];
   const [customDate, setCustomDate] = useState('');
 
@@ -994,7 +1089,30 @@ export function NewJobFlow({
 
                   {vPhase === 'confirmed' && parsed && (
                     <>
-                      <ParsedReviewCard parsed={parsed} onEdit={() => {}} />
+                      <ParsedReviewCard parsed={parsed} timezone={timezone} />
+
+                      {/* Location picker — the voice parse can only guess the
+                          customer's primary location, so let the user confirm
+                          or switch the service location before creating. */}
+                      {customer && customer.locations.length > 0 && (
+                        <div className="flex flex-col gap-2">
+                          <p className="text-xs text-muted-foreground">Service location</p>
+                          {customer.locations.map(loc => (
+                            <button key={loc.id} onClick={() => setField('locationId', loc.id)}
+                              className={`flex items-center gap-3 rounded-xl px-4 py-3 text-left border transition-all ${
+                                draft.locationId === loc.id ? 'border-primary/30 bg-primary/10' : 'border-border bg-card hover:border-border'
+                              }`}>
+                              <MapPin size={14} className={draft.locationId === loc.id ? 'text-primary shrink-0' : 'text-muted-foreground shrink-0'} />
+                              <div className="flex-1 min-w-0">
+                                <p className="text-sm text-foreground">{loc.nickname}</p>
+                                <p className="text-xs text-muted-foreground mt-0.5 truncate">{loc.address}</p>
+                              </div>
+                              {draft.locationId === loc.id && <Check size={14} className="text-primary shrink-0" />}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+
                       <button onClick={() => { setVPhase('idle'); setVTranscript(''); setParsed(null); }}
                         className="flex items-center justify-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors">
                         <RotateCcw size={11} /> Re-record
@@ -1242,16 +1360,18 @@ export function NewJobFlow({
               <div>
                 <p className="text-xs text-muted-foreground mb-2.5">When?</p>
                 <div className="flex flex-wrap gap-2">
-                  {DATE_CHIPS.map(chip => {
+                  {DATE_CHIPS.map((chip, chipIdx) => {
                     const isCustom  = chip.value === '__custom';
-                    const isSelected = isCustom
-                      ? !DATE_CHIPS.slice(0,-1).some(c => c.value === draft.scheduledDate) && !!draft.scheduledDate
-                      : draft.scheduledDate === chip.value;
+                    const dayChipValues = DATE_CHIPS.slice(0, -1).map(c => c.value);
+                    const isCustomSelected =
+                      draft.scheduledDate === '__custom' ||
+                      (isDateKey(draft.scheduledDate) && !dayChipValues.includes(draft.scheduledDate));
+                    const isSelected = isCustom ? isCustomSelected : draft.scheduledDate === chip.value;
                     return (
                       <button key={chip.value}
                         onClick={() => {
-                          if (isCustom) setField('scheduledDate', customDate || 'Custom');
-                          else setField('scheduledDate', chip.value);
+                          if (isCustom) { setPickedDateOffset(null); setField('scheduledDate', customDate || '__custom'); }
+                          else { setPickedDateOffset(chipIdx); setField('scheduledDate', chip.value); }
                         }}
                         className={`rounded-full border px-3.5 py-2 text-sm transition-all ${
                           isSelected
@@ -1273,8 +1393,11 @@ export function NewJobFlow({
                   </button>
                 </div>
 
-                {/* Custom date input */}
-                {draft.scheduledDate === 'Custom' || draft.scheduledDate === '__custom' ? (
+                {/* Custom date input — shown for the "Later" placeholder or a
+                    picked custom date key not in the quick-pick chips. */}
+                {draft.scheduledDate === '__custom' ||
+                (isDateKey(draft.scheduledDate) &&
+                  !DATE_CHIPS.slice(0, -1).some(c => c.value === draft.scheduledDate)) ? (
                   <Input
                     type="date"
                     value={customDate}
@@ -1284,8 +1407,8 @@ export function NewJobFlow({
                 ) : null}
               </div>
 
-              {/* Time */}
-              {draft.scheduledDate && draft.scheduledDate !== '' && (
+              {/* Time — only meaningful once a concrete date is chosen. */}
+              {isDateKey(draft.scheduledDate) && (
                 <div style={{ animation: 'fadeUp 0.15s ease' }}>
                   <p className="text-xs text-muted-foreground mb-2.5">What time?</p>
                   <div className="flex flex-wrap gap-2">
@@ -1303,46 +1426,11 @@ export function NewJobFlow({
                 </div>
               )}
 
-              {/* Tech assignment */}
-              <div>
-                <p className="text-xs text-muted-foreground mb-2.5">Assign technician</p>
-                <div className="flex flex-col gap-2">
-                  {/* Unassigned */}
-                  <button onClick={() => setField('assignedTech', '')}
-                    className={`flex items-center gap-3 rounded-xl border px-4 py-3 text-left transition-all ${
-                      draft.assignedTech === ''
-                        ? 'border-border bg-secondary shadow-sm'
-                        : 'border-border bg-card hover:border-border'
-                    }`}>
-                    <div className="flex size-9 items-center justify-center rounded-full bg-border shrink-0">
-                      <User size={16} className="text-muted-foreground" />
-                    </div>
-                    <p className="flex-1 text-sm text-foreground">Unassigned</p>
-                    {draft.assignedTech === '' && <Check size={14} className="text-foreground shrink-0" />}
-                  </button>
-
-                  {techRoster.map(t => (
-                    <button key={t.id} onClick={() => setField('assignedTech', t.name)}
-                      className={`flex items-center gap-3 rounded-xl border px-4 py-3 text-left transition-all ${
-                        draft.assignedTech === t.name
-                          ? 'border-primary/30 bg-primary/10 shadow-sm'
-                          : 'border-border bg-card hover:border-border'
-                      }`}>
-                      <div
-                        className="flex size-9 items-center justify-center rounded-full text-primary-foreground text-xs shrink-0"
-                        style={{ background: t.color }}
-                      >
-                        {t.initials}
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm text-foreground">{t.name}</p>
-                        <p className="text-xs text-muted-foreground mt-0.5">{t.activeJobs} active job{t.activeJobs !== 1 ? 's' : ''}</p>
-                      </div>
-                      {draft.assignedTech === t.name && <Check size={14} className="text-primary shrink-0" />}
-                    </button>
-                  ))}
-                </div>
-              </div>
+              {/* Technician assignment is intentionally omitted from create:
+                  there is no create-time assignee endpoint (assignment is a
+                  separate appointment_assignees mechanism), so offering it here
+                  would fabricate a persistence claim. Assign from the job or
+                  schedule surface after creation. */}
             </div>
           )}
 
@@ -1383,29 +1471,23 @@ export function NewJobFlow({
                     <MapPin size={13} className="text-muted-foreground shrink-0" />
                     <p className="text-xs text-muted-foreground flex-1 truncate">{address || customer?.address}</p>
                   </div>
+                  {/* Only persisted facts: show the scheduled instant when an
+                      appointment was actually stored, otherwise Unscheduled. */}
                   <div className="flex items-center gap-3 px-4 py-2.5">
                     <Calendar size={13} className="text-muted-foreground shrink-0" />
                     <p className="text-xs text-muted-foreground">Date</p>
                     <p className="text-sm text-foreground ml-auto">
-                      {draft.scheduledDate
-                        ? `${draft.scheduledDate}${draft.scheduledTime ? ` · ${draft.scheduledTime}` : ''}`
+                      {persistedStart
+                        ? formatDateTimeInTenantTz(persistedStart, timezone)
                         : 'Unscheduled'}
                     </p>
                   </div>
-                  <div className="flex items-center gap-3 px-4 py-2.5">
-                    <User size={13} className="text-muted-foreground shrink-0" />
-                    <p className="text-xs text-muted-foreground">Technician</p>
-                    <div className="ml-auto flex items-center gap-1.5">
-                      {tech ? (
-                        <>
-                          <span className="flex size-5 items-center justify-center rounded-full text-primary-foreground" style={{ fontSize: 8, background: tech.color }}>{tech.initials}</span>
-                          <p className="text-sm text-foreground">{tech.name.split(' ')[0]}</p>
-                        </>
-                      ) : (
-                        <p className="text-sm text-muted-foreground">Unassigned</p>
-                      )}
+                  {scheduleWarning && (
+                    <div className="flex items-center gap-3 px-4 py-2.5 bg-warning/10">
+                      <AlertCircle size={13} className="text-warning shrink-0" />
+                      <p className="text-xs text-warning">{scheduleWarning}</p>
                     </div>
-                  </div>
+                  )}
                   {draft.priority === 'Urgent' && (
                     <div className="flex items-center gap-3 px-4 py-2.5 bg-destructive/10">
                       <AlertCircle size={13} className="text-destructive shrink-0" />
@@ -1420,7 +1502,7 @@ export function NewJobFlow({
                 <p className="text-xs text-muted-foreground text-center mb-3">What would you like to do next?</p>
                 <div className="grid grid-cols-2 gap-3">
                   <button
-                    onClick={() => { onCreated(createdJobFilter); onClose(); }}
+                    onClick={() => { onCreated(resultFilter); onClose(); }}
                     className="flex flex-col items-center gap-2.5 rounded-2xl border-2 border-border bg-card py-4 px-3 hover:border-primary/30 hover:bg-primary/10 active:scale-[0.97] transition-all group"
                   >
                     <div className="flex size-11 items-center justify-center rounded-xl bg-primary/15 group-hover:bg-primary/15 transition-colors">
@@ -1434,7 +1516,7 @@ export function NewJobFlow({
 
                   {onOpenEstimate ? (
                     <button
-                      onClick={() => { onCreated(createdJobFilter); onOpenEstimate(); }}
+                      onClick={() => { onCreated(resultFilter); onOpenEstimate(); }}
                       className="flex flex-col items-center gap-2.5 rounded-2xl border-2 border-border bg-card py-4 px-3 hover:border-primary/30 hover:bg-primary/10 active:scale-[0.97] transition-all group"
                     >
                       <div className="flex size-11 items-center justify-center rounded-xl bg-primary/15 group-hover:bg-primary/15 transition-colors">
@@ -1447,7 +1529,7 @@ export function NewJobFlow({
                     </button>
                   ) : (
                     <button
-                      onClick={() => { onCreated(createdJobFilter); onClose(); }}
+                      onClick={() => { onCreated(resultFilter); onClose(); }}
                       className="flex flex-col items-center gap-2.5 rounded-2xl border-2 border-border bg-card py-4 px-3 hover:border-success/30 hover:bg-success/10 active:scale-[0.97] transition-all group"
                     >
                       <div className="flex size-11 items-center justify-center rounded-xl bg-success/15 group-hover:bg-success/15 transition-colors">
@@ -1484,7 +1566,7 @@ export function NewJobFlow({
             >
               {creating
                 ? <><span className="size-4 rounded-full border-2 border-primary-foreground/30 border-t-primary-foreground animate-spin" /> Creating job…</>
-                : <><Check size={14} /> Create job {parsed.scheduledDate ? `· ${parsed.scheduledDate}` : ''}</>
+                : <><Check size={14} /> Create job</>
               }
             </button>
             {(!draft.customerId || !draft.locationId || !draft.description.trim()) && (
@@ -1537,8 +1619,8 @@ export function NewJobFlow({
                 ? <><span className="size-4 rounded-full border-2 border-primary-foreground/30 border-t-primary-foreground animate-spin" /> Creating job…</>
                 : <>
                     <Check size={14} />
-                    Create job{draft.scheduledDate
-                      ? ` · ${draft.scheduledDate}${draft.assignedTech ? ` · ${draft.assignedTech.split(' ')[0]}` : ''}`
+                    Create job{resolveScheduledStart()
+                      ? ` · ${formatDateTimeInTenantTz(resolveScheduledStart()!, timezone)}`
                       : ' (unscheduled)'}
                   </>
               }

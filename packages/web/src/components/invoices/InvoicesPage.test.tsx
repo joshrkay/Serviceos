@@ -1,6 +1,6 @@
 import React from 'react';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { MemoryRouter } from 'react-router';
 import { InvoicesPage } from './InvoicesPage';
 
@@ -551,5 +551,202 @@ describe('P5-018 InvoicesPage — payment confirmation reflection', () => {
 
     // 3 paid statuses now visible (was 1 paid before).
     expect(screen.getAllByText('Paid').length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+// ── U5 — draft line-item persistence + real Stripe payment link ──────────
+describe('U5 InvoicesPage — line-item save PUTs + stripePaymentLinkUrl', () => {
+  const draftLine = {
+    id: 'li-1',
+    description: 'Labor',
+    quantity: 1,
+    unitPriceCents: 100000,
+    totalCents: 100000,
+    category: 'labor',
+    sortOrder: 0,
+    taxable: true,
+  };
+  const draftInvoice = {
+    id: 'i-draft',
+    invoiceNumber: 'INV-DRAFT',
+    status: 'draft',
+    lineItems: [draftLine],
+    totals: totalsOf(100000),
+    amountPaidCents: 0,
+    amountDueCents: 100000,
+    customer: { id: 'c1', displayName: 'Draft Customer' },
+  };
+  const openInvoice = {
+    id: 'i-open',
+    invoiceNumber: 'INV-OPEN',
+    status: 'open',
+    dueDate: '2099-12-31',
+    lineItems: [draftLine],
+    totals: totalsOf(100000),
+    amountPaidCents: 0,
+    amountDueCents: 100000,
+    customer: { id: 'c1', displayName: 'Open Customer' },
+  };
+
+  beforeEach(() => {
+    // Notes/attachments effects fetch on mount — keep them off the network.
+    vi.stubGlobal('fetch', vi.fn(async () =>
+      new Response(JSON.stringify([]), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function renderDetail(id: string) {
+    return render(
+      <MemoryRouter>
+        <InvoicesPage defaultSelectedId={id} />
+      </MemoryRouter>,
+    );
+  }
+
+  it('editor save PUTs { lineItems } to /api/invoices/:id and re-renders server data', async () => {
+    const mutateMock = vi.fn().mockResolvedValue({});
+    vi.mocked(useMutation).mockReturnValue({ mutate: mutateMock, isLoading: false, error: null });
+
+    // The server's post-save truth differs from the local draft so the test
+    // proves the view re-renders REFETCHED data, not locally committed state.
+    const updatedInvoice = {
+      ...draftInvoice,
+      lineItems: [{ ...draftLine, description: 'Labor (server)', unitPriceCents: 150000, totalCents: 150000 }],
+      totals: totalsOf(150000),
+    };
+    const refetch = vi.fn(async () => {
+      vi.mocked(useDetailQuery).mockReturnValue({ data: updatedInvoice, isLoading: false, error: null, refetch });
+    });
+    vi.mocked(useDetailQuery).mockReturnValue({ data: draftInvoice, isLoading: false, error: null, refetch });
+
+    renderDetail('i-draft');
+
+    fireEvent.click(screen.getByRole('button', { name: /edit/i }));
+    fireEvent.change(screen.getByDisplayValue('Labor'), { target: { value: 'Labor (edited)' } });
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
+
+    await waitFor(() => expect(mutateMock).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(useMutation)).toHaveBeenCalledWith('PUT', '/api/invoices/i-draft');
+    expect(mutateMock.mock.calls[0][0]).toEqual({
+      lineItems: [
+        expect.objectContaining({
+          id: 'li-1',
+          description: 'Labor (edited)',
+          quantity: 1,
+          unitPriceCents: 100000,
+          totalCents: 100000,
+          sortOrder: 0,
+          taxable: true,
+        }),
+      ],
+    });
+    expect(refetch).toHaveBeenCalledTimes(1);
+
+    // Editor closes and the rows shown are the SERVER's refetched ones.
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: /save changes/i })).not.toBeInTheDocument());
+    expect(screen.getByText('Labor (server)')).toBeInTheDocument();
+  });
+
+  it('PUT failure keeps the editor open, shows the error, and does not refetch', async () => {
+    const mutateMock = vi.fn().mockRejectedValue(Object.assign(new Error('HTTP 500'), { status: 500 }));
+    vi.mocked(useMutation).mockReturnValue({ mutate: mutateMock, isLoading: false, error: null });
+    const refetch = vi.fn();
+    vi.mocked(useDetailQuery).mockReturnValue({ data: draftInvoice, isLoading: false, error: null, refetch });
+
+    renderDetail('i-draft');
+
+    fireEvent.click(screen.getByRole('button', { name: /edit/i }));
+    fireEvent.change(screen.getByDisplayValue('Labor'), { target: { value: 'Labor (edited)' } });
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
+
+    await waitFor(() => expect(screen.getByText(/HTTP 500/)).toBeInTheDocument());
+    // Editor is still open with the draft intact — nothing was committed.
+    expect(screen.getByRole('button', { name: /save changes/i })).toBeInTheDocument();
+    expect(screen.getByDisplayValue('Labor (edited)')).toBeInTheDocument();
+    expect(refetch).not.toHaveBeenCalled();
+  });
+
+  it('entering edit mode re-seeds the draft from current items (no stale rows)', () => {
+    const refetch = vi.fn();
+    vi.mocked(useDetailQuery).mockReturnValue({ data: draftInvoice, isLoading: false, error: null, refetch });
+    const { rerender } = renderDetail('i-draft');
+
+    // Server data changes between mount and entering edit mode.
+    vi.mocked(useDetailQuery).mockReturnValue({
+      data: { ...draftInvoice, lineItems: [{ ...draftLine, description: 'Labor v2' }] },
+      isLoading: false,
+      error: null,
+      refetch,
+    });
+    rerender(
+      <MemoryRouter>
+        <InvoicesPage defaultSelectedId="i-draft" />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /edit/i }));
+    expect(screen.getByDisplayValue('Labor v2')).toBeInTheDocument();
+  });
+
+  it('renders and copies the real stripePaymentLinkUrl when present', () => {
+    const url = 'https://pay.stripe.com/plink_123';
+    vi.mocked(useDetailQuery).mockReturnValue({
+      data: { ...openInvoice, stripePaymentLinkUrl: url },
+      isLoading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    const writeText = vi.fn();
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+
+    const { container } = renderDetail('i-open');
+
+    expect(screen.getByText(url)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /copy link/i }));
+    expect(writeText).toHaveBeenCalledWith(url);
+    expect(container.innerHTML).not.toContain('pay.rivet.ai');
+  });
+
+  it('without stripePaymentLinkUrl there is no copyable link — a hint shows instead', () => {
+    vi.mocked(useDetailQuery).mockReturnValue({
+      data: openInvoice,
+      isLoading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const { container } = renderDetail('i-open');
+
+    expect(screen.queryByRole('button', { name: /copy link/i })).not.toBeInTheDocument();
+    expect(screen.getAllByText(/send the invoice to generate a payment link/i).length).toBeGreaterThan(0);
+
+    // The send sheet must not fabricate a link either.
+    fireEvent.click(screen.getByRole('button', { name: /resend payment link/i }));
+    expect(screen.getAllByText(/send the invoice to generate a payment link/i).length).toBeGreaterThan(0);
+    expect(screen.queryByRole('button', { name: /copy link/i })).not.toBeInTheDocument();
+    expect(container.innerHTML).not.toContain('pay.rivet.ai');
+  });
+
+  it('surfaces the viewUrl returned by POST /api/invoices/:id/send after sending', async () => {
+    const mutateMock = vi.fn().mockResolvedValue({ viewUrl: 'https://app.test/pay/tok123', viewToken: 'tok123' });
+    vi.mocked(useMutation).mockReturnValue({ mutate: mutateMock, isLoading: false, error: null });
+    vi.mocked(useDetailQuery).mockReturnValue({
+      data: openInvoice,
+      isLoading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    renderDetail('i-open');
+
+    fireEvent.click(screen.getByRole('button', { name: /resend payment link/i }));
+    // Anchored: the rail's "Resend payment link" also contains this substring.
+    fireEvent.click(screen.getByRole('button', { name: /^send payment link$/i }));
+
+    await waitFor(() => expect(screen.getByText('https://app.test/pay/tok123')).toBeInTheDocument());
+    expect(mutateMock).toHaveBeenCalledWith(expect.objectContaining({ channel: 'sms' }));
   });
 });

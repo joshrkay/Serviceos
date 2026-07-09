@@ -24,11 +24,11 @@
     (function(apiKey){
         // Do NOT load the Pendo agent on the view-token-gated customer pages:
         // their URLs embed bearer tokens (/portal/:token, /pay/:id, /e/:id,
-        // /public/feedback/:token, /intake, /book) and Pendo records full page
+        // /feedback/:token, /intake, /book) and Pendo records full page
         // URLs by default — loading it there leaks those tokens to a third
         // party. Pendo is only meant to instrument the authenticated app.
         var p = window.location.pathname;
-        var PUBLIC_PREFIXES = ['/portal/', '/pay/', '/e/', '/public/', '/intake', '/book'];
+        var PUBLIC_PREFIXES = ['/portal/', '/pay/', '/e/', '/public/', '/feedback/', '/intake', '/book'];
         for (var i = 0; i < PUBLIC_PREFIXES.length; i++) {
             if (p === PUBLIC_PREFIXES[i] || p.indexOf(PUBLIC_PREFIXES[i]) === 0) return;
         }

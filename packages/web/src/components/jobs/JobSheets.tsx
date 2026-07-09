@@ -1,15 +1,16 @@
 import { useState, useEffect, useRef } from 'react';
 import {
-  X, Check, Send, Receipt,
-  Phone, MessageSquare, Eye,
-  MicOff, Mic, Volume2, PhoneOff,
+  X, Check, Send, Receipt, FileText,
+  Phone, MessageSquare,
   AlertCircle,
 } from 'lucide-react';
 import { useNavigate } from 'react-router';
-import { estimates, invoices, calcEstimateTotal, calcInvoiceTotal } from '../../data/mock-data';
+import { formatUsdCentsFixed } from '@ai-service-os/shared';
+import type { EstimateResponse, InvoiceResponse } from '@ai-service-os/shared';
 import { StatusBadge } from '../shared/StatusBadge';
-import { EmptyState, Textarea } from '../ui';
+import { EmptyState, Textarea, Spinner } from '../ui';
 import { apiFetch } from '../../utils/api-fetch';
+import { normalizeEstimateStatus, normalizeInvoiceStatus } from '../../utils/statusNormalize';
 
 // ─── Sheet Overlay ───────────────────────────────────────────────
 export function SheetOverlay({
@@ -272,133 +273,198 @@ export function TextSheet({ name, phone, customerId, onClose }: {
 }
 
 // ─── Estimate Sheet ──────────────────────────────────────────────
-export function EstimateSheet({ estimateId, onClose }: { estimateId: string; onClose: () => void }) {
-  const est = estimates.find(e => e.id === estimateId);
-  if (!est) return null;
-  const total = calcEstimateTotal(est);
+// Fetches the job's real estimate(s) via GET /api/estimates?jobId=<id>
+// (bare-array shape) and renders the most recent one. Empty state links to
+// the real estimate create flow.
+export function EstimateSheet({ jobId, onClose }: { jobId: string; onClose: () => void }) {
+  const navigate = useNavigate();
+  const [est, setEst] = useState<EstimateResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const res = await apiFetch(`/api/estimates?jobId=${encodeURIComponent(jobId)}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const list: EstimateResponse[] = await res.json();
+        if (!cancelled) setEst(Array.isArray(list) && list.length > 0 ? list[0] : null);
+      } catch (err) {
+        if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to load estimate');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [jobId]);
 
   return (
     <SheetOverlay onClose={onClose}>
       <div className="flex items-center justify-between mb-4">
         <div>
-          <p className="text-sm text-foreground">Estimate {est.estimateNumber}</p>
-          <p className="text-xs text-muted-foreground mt-0.5">Created {est.createdDate}</p>
+          <p className="text-sm text-foreground">Estimate{est ? ` ${est.estimateNumber}` : ''}</p>
+          {est && <p className="text-xs text-muted-foreground mt-0.5">{est.lineItems.length} line item{est.lineItems.length === 1 ? '' : 's'}</p>}
         </div>
         <div className="flex items-center gap-2">
-          <StatusBadge status={est.status} />
+          {est && <StatusBadge status={normalizeEstimateStatus(est.status)} />}
           <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-secondary"><X size={16} className="text-muted-foreground" /></button>
         </div>
       </div>
-      <p className="text-xs text-muted-foreground mb-4 bg-secondary rounded-lg px-3 py-2">{est.description}</p>
-      <div className="rounded-xl border border-border overflow-hidden mb-4">
-        <div className="divide-y divide-border">
-          {est.lineItems.map((item, i) => (
-            <div key={i} className="flex items-start justify-between gap-3 px-3 py-3">
-              <div className="flex-1 min-w-0">
-                <p className="text-sm text-foreground">{item.description}</p>
-                <p className="text-xs text-muted-foreground mt-0.5">Qty: {item.qty} × ${item.rate.toFixed(2)}</p>
-              </div>
-              <p className="text-sm text-foreground shrink-0">${(item.qty * item.rate).toFixed(2)}</p>
+
+      {loading ? (
+        <div className="flex items-center justify-center py-10">
+          <Spinner size="md" className="text-foreground" label="Loading estimate" />
+        </div>
+      ) : error ? (
+        <div className="flex items-center gap-2 bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2 mb-4">
+          <AlertCircle size={14} className="text-destructive shrink-0" />
+          <p className="text-xs text-destructive">{error}</p>
+        </div>
+      ) : !est ? (
+        <EmptyState
+          icon={<FileText size={20} />}
+          title="No estimate linked to this job yet."
+          actionLabel="Create estimate"
+          onAction={() => { onClose(); navigate(`/estimates/new?jobId=${encodeURIComponent(jobId)}`); }}
+        />
+      ) : (
+        <>
+          <div className="rounded-xl border border-border overflow-hidden mb-4">
+            <div className="divide-y divide-border">
+              {est.lineItems.map((item, i) => (
+                <div key={item.id ?? i} className="flex items-start justify-between gap-3 px-3 py-3">
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm text-foreground">{item.description}</p>
+                    <p className="text-xs text-muted-foreground mt-0.5">Qty: {item.quantity} × {formatUsdCentsFixed(item.unitPriceCents)}</p>
+                  </div>
+                  <p className="text-sm text-foreground shrink-0">{formatUsdCentsFixed(item.totalCents)}</p>
+                </div>
+              ))}
             </div>
-          ))}
-        </div>
-        <div className="flex justify-between px-3 py-3 bg-secondary border-t border-border">
-          <p className="text-sm text-foreground">Total</p>
-          <p className="text-sm text-foreground">${total.toFixed(2)}</p>
-        </div>
-      </div>
-      {est.validUntil && <p className="text-xs text-muted-foreground text-center mb-4">Valid until {est.validUntil}</p>}
-      <button onClick={onClose} className="w-full py-3 rounded-xl border border-border text-sm text-foreground hover:bg-secondary transition-colors">Close</button>
+            <div className="flex justify-between px-3 py-3 bg-secondary border-t border-border">
+              <p className="text-sm text-foreground">Total</p>
+              <p className="text-sm text-foreground">{formatUsdCentsFixed(est.totals.totalCents)}</p>
+            </div>
+          </div>
+          <button
+            onClick={() => { onClose(); navigate(`/estimates/${est.id}`); }}
+            className="w-full py-3 rounded-xl bg-primary text-primary-foreground text-sm hover:bg-primary/90 transition-colors mb-2"
+          >
+            Open full estimate
+          </button>
+          <button onClick={onClose} className="w-full py-3 rounded-xl border border-border text-sm text-foreground hover:bg-secondary transition-colors">Close</button>
+        </>
+      )}
     </SheetOverlay>
   );
 }
 
 // ─── Invoice Sheet ───────────────────────────────────────────────
-export function InvoiceSheet({ invoiceId, customerName, customerPhone, onClose }: {
-  invoiceId: string; customerName: string; customerPhone: string; onClose: () => void;
+// Fetches the job's real invoice(s) via GET /api/invoices?jobId=<id>
+// (bare-array shape). "Send invoice now" routes to the real invoice page —
+// the sheet never fakes a send. Empty state links to the invoice create flow.
+export function InvoiceSheet({ jobId, customerName, customerPhone, onClose }: {
+  jobId: string; customerName: string; customerPhone: string; onClose: () => void;
 }) {
-  const inv = invoices.find(i => i.id === invoiceId);
-  const [sent, setSent] = useState(false);
+  const navigate = useNavigate();
+  const [inv, setInv] = useState<InvoiceResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-  if (!inv) {
-    return (
-      <SheetOverlay onClose={onClose}>
-        <div className="flex items-center justify-between mb-4">
-          <p className="text-sm text-foreground">Send Invoice</p>
-          <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-secondary"><X size={16} className="text-muted-foreground" /></button>
-        </div>
-        <EmptyState
-          icon={<Receipt size={20} />}
-          title="No invoice linked to this job yet."
-          actionLabel="Create invoice"
-          onAction={() => {}}
-        />
-      </SheetOverlay>
-    );
-  }
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const res = await apiFetch(`/api/invoices?jobId=${encodeURIComponent(jobId)}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const list: InvoiceResponse[] = await res.json();
+        if (!cancelled) setInv(Array.isArray(list) && list.length > 0 ? list[0] : null);
+      } catch (err) {
+        if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to load invoice');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [jobId]);
 
-  const total = calcInvoiceTotal(inv);
+  const status = inv ? normalizeInvoiceStatus(inv.status) : undefined;
 
   return (
     <SheetOverlay onClose={onClose}>
       <div className="flex items-center justify-between mb-4">
         <div>
-          <p className="text-sm text-foreground">Send Invoice {inv.invoiceNumber}</p>
+          <p className="text-sm text-foreground">Invoice{inv ? ` ${inv.invoiceNumber}` : ''}</p>
           <p className="text-xs text-muted-foreground mt-0.5">To {customerName}</p>
         </div>
         <div className="flex items-center gap-2">
-          <StatusBadge status={inv.status} />
+          {status && <StatusBadge status={status} />}
           <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-secondary"><X size={16} className="text-muted-foreground" /></button>
         </div>
       </div>
-      {!sent ? (
+
+      {loading ? (
+        <div className="flex items-center justify-center py-10">
+          <Spinner size="md" className="text-foreground" label="Loading invoice" />
+        </div>
+      ) : error ? (
+        <div className="flex items-center gap-2 bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2 mb-4">
+          <AlertCircle size={14} className="text-destructive shrink-0" />
+          <p className="text-xs text-destructive">{error}</p>
+        </div>
+      ) : !inv ? (
+        <EmptyState
+          icon={<Receipt size={20} />}
+          title="No invoice linked to this job yet."
+          actionLabel="Create invoice"
+          onAction={() => { onClose(); navigate(`/invoices/new?jobId=${encodeURIComponent(jobId)}`); }}
+        />
+      ) : (
         <>
           <div className="rounded-xl border border-border overflow-hidden mb-4">
             <div className="divide-y divide-border">
               {inv.lineItems.map((item, i) => (
-                <div key={i} className="flex items-start justify-between gap-3 px-3 py-3">
+                <div key={item.id ?? i} className="flex items-start justify-between gap-3 px-3 py-3">
                   <div className="flex-1 min-w-0">
                     <p className="text-sm text-foreground">{item.description}</p>
-                    <p className="text-xs text-muted-foreground mt-0.5">Qty: {item.qty} × ${item.rate.toFixed(2)}</p>
+                    <p className="text-xs text-muted-foreground mt-0.5">Qty: {item.quantity} × {formatUsdCentsFixed(item.unitPriceCents)}</p>
                   </div>
-                  <p className="text-sm text-foreground shrink-0">${(item.qty * item.rate).toFixed(2)}</p>
+                  <p className="text-sm text-foreground shrink-0">{formatUsdCentsFixed(item.totalCents)}</p>
                 </div>
               ))}
             </div>
             <div className="flex justify-between px-3 py-3 bg-secondary border-t border-border">
               <p className="text-sm text-foreground">Total due</p>
-              <p className="text-sm text-foreground">${total.toFixed(2)}</p>
+              <p className="text-sm text-foreground">{formatUsdCentsFixed(inv.amountDueCents)}</p>
             </div>
           </div>
-          <div className="rounded-lg bg-primary/10 border border-primary/20 px-3 py-2.5 mb-4 flex items-center gap-2">
-            <Send size={13} className="text-primary shrink-0" />
-            <p className="text-xs text-primary">Will be sent via SMS to {customerPhone}</p>
-          </div>
-          {inv.status === 'Paid' ? (
+          {status === 'Paid' ? (
             <div className="flex flex-col items-center gap-2 py-4">
               <span className="flex size-10 items-center justify-center rounded-full bg-success/15">
                 <Check size={18} className="text-success" />
               </span>
               <p className="text-sm text-foreground">Invoice already paid</p>
-              <p className="text-xs text-muted-foreground">Paid {inv.paidDate}</p>
             </div>
           ) : (
-            <button
-              onClick={() => setSent(true)}
-              className="flex items-center justify-center gap-2 w-full py-3 rounded-xl bg-primary text-primary-foreground text-sm hover:bg-primary/90 transition-colors"
-            >
-              <Send size={14} /> Send invoice now
-            </button>
+            <>
+              <div className="rounded-lg bg-primary/10 border border-primary/20 px-3 py-2.5 mb-4 flex items-center gap-2">
+                <Send size={13} className="text-primary shrink-0" />
+                <p className="text-xs text-primary">Send to {customerName.split(' ')[0]} at {customerPhone} from the invoice page</p>
+              </div>
+              <button
+                onClick={() => { onClose(); navigate(`/invoices/${inv.id}`); }}
+                className="flex items-center justify-center gap-2 w-full py-3 rounded-xl bg-primary text-primary-foreground text-sm hover:bg-primary/90 transition-colors"
+              >
+                <Send size={14} /> Send invoice now
+              </button>
+            </>
           )}
         </>
-      ) : (
-        <div className="flex flex-col items-center gap-3 py-8">
-          <span className="flex size-12 items-center justify-center rounded-full bg-success/15">
-            <Check size={22} className="text-success" />
-          </span>
-          <p className="text-sm text-foreground">Invoice sent to {customerName.split(' ')[0]}</p>
-          <p className="text-xs text-muted-foreground">{customerPhone}</p>
-        </div>
       )}
     </SheetOverlay>
   );

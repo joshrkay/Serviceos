@@ -18,7 +18,7 @@ import { useRouteError, isRouteErrorResponse, useNavigate } from 'react-router';
  * and renders the same visual shape.
  *
  * Public-pages note: the customer-facing /e/:id, /pay/:id, /intake,
- * /public/feedback/:token, and /portal/:token routes each get this element
+ * /feedback/:token, and /portal/:token routes each get this element
  * directly. The authenticated branch (/ → ProtectedRoute → Shell → …) gets it
  * once at the outermost level — descendant errors bubble up to it.
  */

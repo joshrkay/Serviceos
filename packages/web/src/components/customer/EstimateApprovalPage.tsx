@@ -1236,8 +1236,13 @@ function PayDepositButton({ token, initialUrl, expiresAt }: {
     setError(null);
     try {
       // Reuse a previously-minted link to avoid an unnecessary Stripe
-      // round-trip on a returning customer.
-      if (initialUrl) {
+      // round-trip on a returning customer — but only while it's still
+      // live. Past expiresAt the server deactivates the Payment Link, so
+      // fall through and mint a fresh one instead of sending the
+      // customer to a dead URL. (No expiresAt means no known deadline;
+      // an unparseable one re-mints, the safe side.)
+      const linkIsLive = !expiresAt || (depositDays !== null && depositDays > 0);
+      if (initialUrl && linkIsLive) {
         window.location.assign(initialUrl);
         return;
       }

@@ -58,7 +58,10 @@ export const router = createBrowserRouter([
   { path: '/pay/:id',    lazy: async () => ({ Component: (await import('./components/customer/InvoicePaymentPage')).InvoicePaymentPage }),   ErrorBoundary: RouteErrorElement, hydrateFallbackElement: routeFallback },
   { path: '/intake',     lazy: async () => ({ Component: (await import('./components/customer/IntakeFormPage')).IntakeFormPage }),           ErrorBoundary: RouteErrorElement, hydrateFallbackElement: routeFallback },
   { path: '/book',       lazy: async () => ({ Component: (await import('./components/customer/BookingPage')).BookingPage }),                 ErrorBoundary: RouteErrorElement, hydrateFallbackElement: routeFallback },
-  { path: '/public/feedback/:token', lazy: async () => ({ Component: (await import('./components/customer/FeedbackPage')).FeedbackPage }),  ErrorBoundary: RouteErrorElement, hydrateFallbackElement: routeFallback },
+  // NOTE: must NOT live under /public/feedback — that exact path is the API
+  // JSON endpoint (mounted before the SPA fallback), so the SPA route uses the
+  // short public-page convention (/e/:id, /pay/:id, /portal/:token).
+  { path: '/feedback/:token', lazy: async () => ({ Component: (await import('./components/customer/FeedbackPage')).FeedbackPage }),  ErrorBoundary: RouteErrorElement, hydrateFallbackElement: routeFallback },
   { path: '/portal/:token',          lazy: async () => ({ Component: (await import('./pages/portal/PortalShell')).PortalShell }),           ErrorBoundary: RouteErrorElement, hydrateFallbackElement: routeFallback },
 
   // ── App (with Shell nav, auth-gated) ───────────────────────────────────

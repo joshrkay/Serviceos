@@ -1,5 +1,5 @@
-import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { PaymentRecordForm, validatePaymentForm, PaymentFormData } from './PaymentRecordForm';
 
 describe('P5-011A PaymentRecordForm', () => {
@@ -140,5 +140,84 @@ describe('P5-011A PaymentRecordForm', () => {
     const noDate: PaymentFormData = { ...validData, receivedDate: '' };
     const dateErrors = validatePaymentForm(noDate, 10000);
     expect(dateErrors).toContain('Received date is required');
+
+    // Money invariant: integer cents only.
+    const fractionalAmount: PaymentFormData = { ...validData, amountCents: 100.5 };
+    const fractionalErrors = validatePaymentForm(fractionalAmount, 10000);
+    expect(fractionalErrors).toContain('Amount must be a whole number of cents');
+  });
+});
+
+describe('U5 PaymentRecordForm — double-submit guard + integer cents', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /** Mirrors the real consumer (pages/invoices/InvoiceDetail.tsx): onSubmit
+   *  POSTs to /api/payments and resolves when the server responds. */
+  function postingOnSubmit() {
+    return (data: PaymentFormData) =>
+      fetch('/api/payments', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+      }).then(() => undefined);
+  }
+
+  it('double-click on Record Payment sends exactly one POST /api/payments', async () => {
+    let resolvePost!: () => void;
+    const fetchMock = vi.fn(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolvePost = () => resolve(new Response('{}', { status: 201 }));
+        }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(
+      <PaymentRecordForm
+        invoiceId="inv-1"
+        amountDueCents={10000}
+        onSubmit={postingOnSubmit()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    const submit = screen.getByTestId('submit-button');
+    fireEvent.click(submit);
+    // Second click lands while the first POST is still in flight.
+    fireEvent.click(submit);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(submit).toBeDisabled();
+
+    resolvePost();
+    await waitFor(() => expect(submit).not.toBeDisabled());
+    // Settling the request re-enables the button but never re-fires the POST.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects fractional cents (100.5) with a validation error and no POST', () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const onSubmit = vi.fn(postingOnSubmit());
+
+    render(
+      <PaymentRecordForm
+        invoiceId="inv-1"
+        amountDueCents={10000}
+        onSubmit={onSubmit}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    fireEvent.change(screen.getByTestId('amount-input'), { target: { value: '100.5' } });
+    fireEvent.click(screen.getByTestId('submit-button'));
+
+    expect(screen.getByTestId('form-errors').textContent).toContain(
+      'Amount must be a whole number of cents',
+    );
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
