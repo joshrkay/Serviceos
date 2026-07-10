@@ -147,7 +147,9 @@ describe('JobsList', () => {
 
   it('uses /api/jobs endpoint', () => {
     renderPage();
-    expect(vi.mocked(useListQuery)).toHaveBeenCalledWith('/api/jobs');
+    expect(vi.mocked(useListQuery)).toHaveBeenCalledWith('/api/jobs', {
+      refetchInterval: 60_000,
+    });
   });
 
   it('applies created job filter after creating a new job', () => {

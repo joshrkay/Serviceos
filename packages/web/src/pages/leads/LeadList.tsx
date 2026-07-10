@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Plus } from 'lucide-react';
 import { LeadStageColumn } from '../../components/leads/LeadStageColumn';
 import { LeadCardData } from '../../components/leads/LeadCard';
@@ -41,14 +41,17 @@ export interface LeadListProps {
 
 export function LeadList({ onSelectLead, onNewLead }: LeadListProps) {
   const [leads, setLeads] = useState<LeadResponse[]>([]);
-  const [isLoading, setLoading] = useState(false);
+  // Start true so the first paint doesn't flash empty columns before fetch.
+  const [isLoading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [sourceFilter, setSourceFilter] = useState<string | null>(null);
   const [assigneeFilter, setAssigneeFilter] = useState<string | null>(null);
+  const hasLoadedRef = useRef(false);
 
-  const refetch = useCallback(async () => {
-    setLoading(true);
-    setError(null);
+  const refetch = useCallback(async (opts?: { background?: boolean }) => {
+    const background = opts?.background === true && hasLoadedRef.current;
+    if (!background) setLoading(true);
+    if (!background) setError(null);
     try {
       const params = new URLSearchParams();
       if (sourceFilter) params.set('source', sourceFilter);
@@ -57,16 +60,21 @@ export function LeadList({ onSelectLead, onNewLead }: LeadListProps) {
       const res = await apiFetch(`/api/leads?${params.toString()}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const json = (await res.json()) as ListResponse;
+      hasLoadedRef.current = true;
       setLeads(json.data);
+      setError(null);
     } catch (err) {
+      if (background) return;
       setError(err instanceof Error ? err.message : 'Failed to load leads');
     } finally {
-      setLoading(false);
+      if (!background) setLoading(false);
     }
   }, [sourceFilter, assigneeFilter]);
 
   useEffect(() => {
-    void refetch();
+    // Filter changes are cold (new result set); keep hasLoaded so a failed
+    // optimistic rollback can still background-refresh.
+    void refetch({ background: false });
   }, [refetch]);
 
   const byStage = useMemo(() => {
@@ -107,8 +115,8 @@ export function LeadList({ onSelectLead, onNewLead }: LeadListProps) {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to update stage');
-        // Roll back optimistic update by refetching
-        await refetch();
+        // Roll back optimistic update by refetching (background — keep columns)
+        await refetch({ background: true });
       }
     },
     [leads, refetch]
@@ -165,7 +173,7 @@ export function LeadList({ onSelectLead, onNewLead }: LeadListProps) {
           {error}
         </div>
       )}
-      {isLoading && (
+      {isLoading && leads.length === 0 && (
         <p className="mb-3 flex items-center gap-2 text-sm text-slate-500">
           <Spinner size="sm" className="text-slate-400" /> Loading…
         </p>

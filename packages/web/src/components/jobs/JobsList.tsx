@@ -48,7 +48,14 @@ export function JobsList() {
   const [tab,     setTab]     = useState<JobStatus | 'All'>('All');
   const [showNew, setShowNew] = useState(false);
 
-  const { data, isLoading, error, refetch, setSearch, setFilters } = useListQuery<JobListItem>('/api/jobs');
+  const { data, isLoading, error, refetch, setSearch, setFilters } = useListQuery<JobListItem>(
+    '/api/jobs',
+    {
+      // Live refresh so a dispatcher sees status changes without a manual
+      // reload. Background refetch keeps cards mounted (no spinner flash).
+      refetchInterval: 60_000,
+    },
+  );
 
   const applyTabFilter = (nextTab: JobStatus | 'All') => {
     setTab(nextTab);
@@ -141,8 +148,8 @@ export function JobsList() {
           ))}
         </div>
 
-        {/* Loading / Error */}
-        {isLoading && (
+        {/* Loading / Error — keep cards mounted during background refresh. */}
+        {isLoading && data.length === 0 && (
           <div className="flex items-center justify-center py-16">
             <Spinner size="md" className="text-foreground" label="Loading jobs" />
           </div>
@@ -152,7 +159,7 @@ export function JobsList() {
         )}
 
         {/* Job cards */}
-        {!isLoading && !error && (
+        {!(isLoading && data.length === 0) && !error && (
           <div className="flex flex-col gap-2">
             {filtered.map(job => {
               const uiStatus = job.uiStatus;
