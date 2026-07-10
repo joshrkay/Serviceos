@@ -32,3 +32,10 @@ Recommended kickoff order (still separate PRs):
 ## Wave exit (all threads done)
 
 > CI (and one QA matrix report) shows: **a tradesperson can approve an estimate and get paid — and we prove it on every PR.**
+
+## Next waves
+
+| Wave | Index | Theme |
+|------|-------|-------|
+| **Wave 2** | [`../wave2/README.md`](../wave2/README.md) | Trust, legal & field gaps (TCPA, feasibility, notes→invoice, tech-out) |
+| **Wave 3** | [`../wave3/README.md`](../wave3/README.md) | Product day-in-the-life (auto-invoice, dunning, confidence UI, QBO, route/ETA) |

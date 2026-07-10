@@ -66,3 +66,8 @@ Start **W1-3** and **W1-4** first (no auth). Run **W1-1** / **W1-2** in parallel
 
 > After all Wave 1 threads merge, any engineer can point at CI (and one QA matrix report) and say:  
 > **“A tradesperson can approve an estimate and get paid — and we prove it on every PR.”**
+
+## Related waves
+
+- **Wave 2 (trust/field):** [`wave2/README.md`](./wave2/README.md) · [`2026-07-10-002-feat-wave2-trust-and-field-gaps-followup-plan.md`](./2026-07-10-002-feat-wave2-trust-and-field-gaps-followup-plan.md)
+- **Wave 3 (product):** [`wave3/README.md`](./wave3/README.md) · [`2026-07-10-003-feat-wave3-product-day-in-the-life-followup-plan.md`](./2026-07-10-003-feat-wave3-product-day-in-the-life-followup-plan.md)
