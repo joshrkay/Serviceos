@@ -1,11 +1,14 @@
 import { test, expect } from '@playwright/test';
+import { hasRealClerkPublishableKey } from './helpers/clerk-key';
 
 /**
  * Smoke tests — prove the Playwright harness itself is working.
  *
  * Split into two tiers:
  *   - API smoke: always runs. No external deps beyond the dev server.
- *   - UI smoke: requires VITE_CLERK_PUBLISHABLE_KEY. Skipped otherwise.
+ *   - UI smoke: requires a *real* Clerk publishable key (or E2E_BASE_URL).
+ *     Skipped on the CI placeholder key — those specs load Clerk SignIn
+ *     widgets from clerk.com; hermetic offline specs use clerk-stub instead.
  *     (main.tsx throws at module-load when the key is missing, which is
  *     the intentional P0-026 startup guard — see packages/web/src/main.tsx.)
  *
@@ -23,16 +26,9 @@ test.describe('smoke — api', () => {
 });
 
 test.describe('smoke — ui', () => {
-  // When E2E_BASE_URL is set (pointing at deployed env), Clerk is configured
-  // there so we always run. Locally we run only if a Clerk pk is exported
-  // into the dev server's environment.
-  const hasClerk =
-    !!process.env.E2E_BASE_URL ||
-    !!process.env.VITE_CLERK_PUBLISHABLE_KEY;
-
   test.skip(
-    !hasClerk,
-    'Set VITE_CLERK_PUBLISHABLE_KEY locally or E2E_BASE_URL to run UI smoke tests'
+    !hasRealClerkPublishableKey(),
+    'Set a real VITE_CLERK_PUBLISHABLE_KEY (not the CI placeholder) or E2E_BASE_URL to run UI smoke tests',
   );
 
   test('login page renders', async ({ page }) => {
