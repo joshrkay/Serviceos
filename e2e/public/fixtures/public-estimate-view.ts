@@ -95,7 +95,7 @@ export const sentEstimateView: PublicEstimateViewFixture = publicEstimateViewSch
   subtotalCents: 31_000,
   taxCents: 0,
   discountCents: 0,
-  customerMessage: 'Replace failed condenser fan motor',
+  customerMessage: 'Service call — outdoor unit not spinning',
   isActionable: true,
   isExpired: false,
   version: 1,

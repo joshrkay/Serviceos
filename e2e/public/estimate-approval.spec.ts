@@ -46,14 +46,31 @@ async function blockExternalHosts(page: Page, baseURL: string): Promise<void> {
 async function drawSignature(page: Page): Promise<void> {
   const canvas = page.locator('canvas');
   await expect(canvas).toBeVisible();
-  const box = await canvas.boundingBox();
-  expect(box).not.toBeNull();
-  const x = box!.x + box!.width * 0.2;
-  const y = box!.y + box!.height * 0.5;
-  await page.mouse.move(x, y);
-  await page.mouse.down();
-  await page.mouse.move(x + box!.width * 0.5, y + 8, { steps: 8 });
-  await page.mouse.up();
+  // Dispatch real MouseEvents on the canvas (Playwright page.mouse can miss
+  // React's onMouseMove path when the sheet just opened).
+  await canvas.evaluate((el) => {
+    const node = el as HTMLCanvasElement;
+    const rect = node.getBoundingClientRect();
+    const fire = (type: string, x: number, y: number) => {
+      node.dispatchEvent(
+        new MouseEvent(type, {
+          bubbles: true,
+          cancelable: true,
+          clientX: rect.left + x,
+          clientY: rect.top + y,
+          buttons: type === 'mouseup' ? 0 : 1,
+        }),
+      );
+    };
+    fire('mousedown', 24, 40);
+    fire('mousemove', 60, 44);
+    fire('mousemove', 120, 48);
+    fire('mouseup', 120, 48);
+  });
+  // Clear button only appears once hasSig flips true.
+  await expect(page.getByRole('button', { name: /Clear/i })).toBeVisible({
+    timeout: 5_000,
+  });
 }
 
 test.describe('W1-3 — public /e/:id estimate approval (hermetic)', () => {
@@ -120,24 +137,24 @@ test.describe('W1-3 — public /e/:id estimate approval (hermetic)', () => {
     await expect(page.getByText('EST-W1-3001')).toBeVisible({ timeout: 20_000 });
     await expect(page.getByText(/Hi, Morgan!/i)).toBeVisible();
     await expect(page.getByText('River Bend HVAC').first()).toBeVisible();
-    await expect(page.getByText('Condenser fan motor')).toBeVisible();
-    await expect(page.getByText('Diagnostic labor')).toBeVisible();
+    await expect(page.getByText('Condenser fan motor', { exact: true })).toBeVisible();
+    await expect(page.getByText('Diagnostic labor', { exact: true })).toBeVisible();
 
     // Money formatting: integer cents → exactly two decimal places.
     // 31000¢ = $310.00 (not "$310" / "$310.0").
-    await expect(page.getByText('$310.00').first()).toBeVisible();
-    await expect(page.getByText('$185.00').first()).toBeVisible();
-    await expect(page.getByText('$125.00').first()).toBeVisible();
+    await expect(page.getByText('$310.00', { exact: true }).first()).toBeVisible();
+    await expect(page.getByText('$185.00', { exact: true }).first()).toBeVisible();
+    await expect(page.getByText('$125.00', { exact: true }).first()).toBeVisible();
     expect(pageErrors, 'no page errors on first paint').toEqual([]);
 
     await page.getByRole('button', { name: /Accept this estimate/i }).click();
 
     // Approval sheet — name is prefilled; draw signature to enable submit.
-    await expect(page.getByText('Accepting')).toBeVisible();
+    await expect(page.getByText('Accepting', { exact: true })).toBeVisible();
     await expect(page.getByRole('heading', { name: 'EST-W1-3001' })).toBeVisible();
     await drawSignature(page);
 
-    const acceptBtn = page.getByRole('button', { name: /Accept estimate/i });
+    const acceptBtn = page.getByRole('button', { name: /^Accept estimate$/i });
     await expect(acceptBtn).toBeEnabled();
     await acceptBtn.click();
 
@@ -150,7 +167,7 @@ test.describe('W1-3 — public /e/:id estimate approval (hermetic)', () => {
       page.getByRole('heading', { name: /Estimate accepted!/i }),
     ).toBeVisible({ timeout: 10_000 });
     await expect(page.getByText(/Thanks, Morgan!/i)).toBeVisible();
-    await expect(page.getByText('$310.00').first()).toBeVisible();
+    await expect(page.getByText('$310.00', { exact: true }).first()).toBeVisible();
     await expect(page.getByText(/Sarah Johnson/i)).toHaveCount(0);
     expect(pageErrors, 'no page errors through approve → success').toEqual([]);
   });
