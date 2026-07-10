@@ -5906,6 +5906,48 @@ export const MIGRATIONS = {
     WHERE ts.tenant_id = sub.tenant_id
       AND ts.terminology_preferences IS DISTINCT FROM sub.new_terms;
   `,
+
+  // N-011 / P4-015 — Brand-Voice Configurator. Append-only version history for
+  // the per-tenant locked tone profile. Every explicit web edit (and the
+  // onboarding capture) writes a new snapshot row here; rollback re-persists an
+  // older snapshot as a NEW bump (history is never mutated). Each row's
+  // `version` gives outbound utterances a stable brand-voice version to cite.
+  // RLS matches the evaluation_snapshots convention (FORCE + tenant_isolation).
+  '237_brand_voice_versions': `
+    CREATE TABLE IF NOT EXISTS brand_voice_versions (
+      id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id     UUID NOT NULL REFERENCES tenants(id),
+      version       INTEGER NOT NULL,
+      snapshot      JSONB NOT NULL,
+      changed_by    UUID,
+      change_reason TEXT NOT NULL,
+      created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, version)
+    );
+    CREATE INDEX IF NOT EXISTS idx_bvv_tenant_version
+      ON brand_voice_versions(tenant_id, version DESC);
+    ALTER TABLE brand_voice_versions ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE brand_voice_versions FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_brand_voice_versions ON brand_voice_versions;
+    CREATE POLICY tenant_isolation_brand_voice_versions ON brand_voice_versions
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // N-011 / P4-015 — brand-voice bookkeeping columns on tenant_settings so the
+  // composer / lock / cool-down paths read the monotonic version, lock state,
+  // and cool-down anchor WITHOUT digging into the brand_voice JSONB. The
+  // six-field tone data itself stays in the existing brand_voice JSONB column
+  // (additive, no shape migration). All three are additive + defaulted so
+  // legacy rows read version 0 / unlocked / no cool-down. Inherits
+  // tenant_settings' FORCE-RLS tenant_isolation policy.
+  '238_tenant_settings_brand_voice_meta': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS brand_voice_version INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS brand_voice_locked BOOLEAN NOT NULL DEFAULT false;
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS brand_voice_updated_at TIMESTAMPTZ;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

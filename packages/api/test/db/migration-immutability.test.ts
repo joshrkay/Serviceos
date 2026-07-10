@@ -389,6 +389,10 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // authoritative pack_activations table (kill the dual-source drift). 235 is
   // reserved for a sibling fix landing separately.
   ['236_reconcile_active_vertical_packs_mirror', '161871a3a57eb99f2c0b0d1173fa082483923c06210f122faa2a901f0ba24a46'],
+  // N-011 / P4-015 — Brand-Voice Configurator: append-only version history table.
+  ['237_brand_voice_versions', 'e6fbbd8bd25d5b6f50ae30146c0d5d93d8716907d150dfeb3f5bfa4ef4e227d7'],
+  // N-011 / P4-015 — brand-voice version/lock/cool-down bookkeeping columns.
+  ['238_tenant_settings_brand_voice_meta', '5ca3ab678c6330db38f857ac5966e9a963f898781fe4d33652751af03c1f6582'],
 ];
 
 function hashMigration(value: string): string {

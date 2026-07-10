@@ -53,9 +53,32 @@ export interface ComposeBrandVoiceInput {
   maxChars: number;
 }
 
+/**
+ * N-011 — a structured brand-voice deviation. Promoted from the previous
+ * log-only `enforceBannedPhrases` warn. When present, callers must downgrade
+ * the proposal's `_meta.overallConfidence` to no higher than 'low' (see
+ * `applyBrandVoiceDeviationToMeta`) so a message that departed from the locked
+ * profile is surfaced for review instead of auto-approved (N-002 marker).
+ */
+export interface BrandVoiceDeviation {
+  kind: 'banned_phrase_stripped' | 'register_mismatch';
+  /** e.g. the removed banned phrases. */
+  detail: string[];
+}
+
 export interface ComposeBrandVoiceResult {
   text: string;
+  /** Existing: the prompt template version ('brand_voice_v1'). */
   promptVersionId: string;
+  /**
+   * N-011: the tenant's brand-voice CONFIG version (migration 238's
+   * `brand_voice_version`; 0 = never configured / neutral). Every utterance
+   * the composer drafts is tagged with this so the record it lands on can cite
+   * which locked profile produced it.
+   */
+  brandVoiceVersion: number;
+  /** N-011: present when the output departed from the locked profile. */
+  deviation?: BrandVoiceDeviation;
 }
 
 export interface ComposeBrandVoiceDeps {
@@ -95,11 +118,28 @@ export function readToneFromSettings(settings: unknown): BrandVoiceTone | null {
   if (!raw || typeof raw !== 'object') return null;
   const obj = raw as Record<string, unknown>;
   const tone: BrandVoiceTone = {};
+  // N-011 — register is authoritative; legacy formality is mapped forward in
+  // renderToneAuthority via resolveRegister, so we retain both here.
+  if (obj.register === 'formal' || obj.register === 'friendly' || obj.register === 'casual') {
+    tone.register = obj.register;
+  }
   if (obj.formality === 'casual' || obj.formality === 'professional') {
     tone.formality = obj.formality;
   }
   if (obj.pronoun === 'we' || obj.pronoun === 'i') {
     tone.pronoun = obj.pronoun;
+  }
+  if (
+    Array.isArray(obj.opening_lines) &&
+    obj.opening_lines.every((o) => typeof o === 'string')
+  ) {
+    tone.opening_lines = obj.opening_lines as string[];
+  }
+  if (typeof obj.signoff === 'string') {
+    tone.signoff = obj.signoff;
+  }
+  if (typeof obj.persona_name === 'string') {
+    tone.persona_name = obj.persona_name;
   }
   if (
     Array.isArray(obj.vibe_words) &&
@@ -118,6 +158,18 @@ export function readToneFromSettings(settings: unknown): BrandVoiceTone | null {
     tone.banned_phrases = obj.banned_phrases as string[];
   }
   return tone;
+}
+
+/**
+ * N-011 — read the tenant's brand-voice VERSION (the `brand_voice_version`
+ * bookkeeping column, migration 238) off a settings row. This is the config
+ * version the composer stamps onto every utterance — distinct from the
+ * `brand_voice_v1` PROMPT version. 0 means never configured (neutral tone).
+ */
+export function readBrandVoiceVersion(settings: unknown): number {
+  if (!settings || typeof settings !== 'object') return 0;
+  const v = (settings as Record<string, unknown>).brandVoiceVersion;
+  return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : 0;
 }
 
 /**
@@ -238,6 +290,7 @@ export async function composeBrandVoiceMessage(
 
   const settings = await settingsRepo.findByTenant(tenantId);
   const tone = readToneFromSettings(settings);
+  const brandVoiceVersion = readBrandVoiceVersion(settings);
 
   const { system, user } = buildBrandVoicePrompt({
     intent,
@@ -300,7 +353,12 @@ export async function composeBrandVoiceMessage(
   // model to avoid them (prompts.ts), which an LLM can ignore. A banned phrase
   // is an explicit, locked owner correction; it must never reach the customer.
   const { text: cleaned, removed } = enforceBannedPhrases(raw, tone?.banned_phrases);
+  // N-011 — promote the strip signal from a log line to a structured deviation
+  // the caller maps to a downgraded N-002 confidence marker. The warn is kept
+  // for telemetry / the correction loop.
+  let deviation: BrandVoiceDeviation | undefined;
   if (removed.length > 0) {
+    deviation = { kind: 'banned_phrase_stripped', detail: removed };
     deps.logger?.warn(
       'brand-voice: stripped banned phrase(s) from generated output',
       { tenantId, intent, removed },
@@ -320,5 +378,40 @@ export async function composeBrandVoiceMessage(
   // to have respected the budget hint in the prompt.
   const text = trimToMaxChars(cleaned, maxChars);
 
-  return { text, promptVersionId: BRAND_VOICE_PROMPT_VERSION_ID };
+  return {
+    text,
+    promptVersionId: BRAND_VOICE_PROMPT_VERSION_ID,
+    brandVoiceVersion,
+    ...(deviation ? { deviation } : {}),
+  };
+}
+
+/**
+ * N-011 — map a brand-voice deviation onto a proposal `_meta` confidence
+ * envelope. A present deviation downgrades `overallConfidence` to no higher
+ * than 'low' and attaches a marker, so the deviating message is routed to
+ * review rather than auto-approved (threads into the existing N-002/RV-007
+ * confidence gate). Also stamps the brand-voice version. Pure — returns a new
+ * meta object, never mutates the input.
+ */
+export function applyBrandVoiceDeviationToMeta(
+  meta: { overallConfidence: string; markers?: Array<{ path: string; reason: string }>; [k: string]: unknown } | undefined,
+  brandVoiceVersion: number,
+  deviation?: BrandVoiceDeviation,
+): { overallConfidence: string; brandVoiceVersion: number; markers?: Array<{ path: string; reason: string }>; [k: string]: unknown } {
+  const CONFIDENCE_RANK: Record<string, number> = { high: 3, medium: 2, low: 1, very_low: 0 };
+  const base = meta ?? { overallConfidence: 'high' };
+  const next = { ...base, brandVoiceVersion };
+  if (!deviation) return next;
+  // Cap at 'low': keep an already-lower level, otherwise pull down to 'low'.
+  const current = CONFIDENCE_RANK[next.overallConfidence] ?? 3;
+  if (current > CONFIDENCE_RANK.low) {
+    next.overallConfidence = 'low';
+  }
+  const reason =
+    deviation.kind === 'banned_phrase_stripped'
+      ? `Brand-voice deviation: stripped banned phrase(s) — ${deviation.detail.join(', ')}`
+      : `Brand-voice deviation: ${deviation.kind}`;
+  next.markers = [...(next.markers ?? []), { path: '_brandVoice', reason }];
+  return next;
 }

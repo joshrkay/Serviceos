@@ -64,6 +64,13 @@ export const confidenceLevelSchema = z.enum(CONFIDENCE_LEVELS);
 export const proposalConfidenceMetaSchema = z.object({
   overallConfidence: confidenceLevelSchema,
   /**
+   * N-011 — the tenant brand-voice CONFIG version that produced any AI-drafted
+   * text on this proposal (0 = neutral/unconfigured). Stamped by the composer
+   * chokepoint so every AI-generated message carries the version used. Optional
+   * so pre-N-011 payloads keep validating.
+   */
+  brandVoiceVersion: z.number().int().nonnegative().optional(),
+  /**
    * §6.4-B severity marker — how urgent the visible problem is, on the same
    * urgency-tier scale as voice triage. Optional; today set by the MMS-to-quote
    * vision draft and surfaced to the owner in the review UI / SMS.
