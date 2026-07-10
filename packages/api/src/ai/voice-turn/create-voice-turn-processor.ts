@@ -45,7 +45,6 @@
  * same voice-event emissions.
  */
 
-import { v4 as uuidv4 } from 'uuid';
 import type { Pool } from 'pg';
 import { appendAgentTts } from './transcript-append';
 import { classifyIntent, isVoiceApprovalIntent, isVoiceEditIntent } from '../orchestration/intent-classifier';
@@ -678,7 +677,17 @@ export function createVoiceTurnProcessor(
             channel: 'telephony',
             sessionId: session.id,
           },
-          aiRunId: uuidv4(),
+          // QA-2026-07-10: do NOT fabricate an aiRunId. proposals.ai_run_id
+          // has an FK to ai_runs(id); a random uuid violates it and the
+          // swallowed insert error silently dropped EVERY inbound-voice
+          // proposal on Postgres-backed envs (in-memory repos don't enforce
+          // the FK, which is why tests passed). Mirror the in-app adapter:
+          // use a real run id only when one is threaded through the side
+          // effect payload, else leave it null. classifyIntent/the gateway
+          // don't surface the persisted run id into this scope today.
+          ...(typeof fx.payload.aiRunId === 'string' && fx.payload.aiRunId
+            ? { aiRunId: fx.payload.aiRunId }
+            : {}),
           createdBy:
             typeof fx.payload.customerId === 'string'
               ? fx.payload.customerId
@@ -705,7 +714,17 @@ export function createVoiceTurnProcessor(
           channel: 'telephony',
           sessionId: session.id,
         },
-        aiRunId: uuidv4(),
+        // QA-2026-07-10: do NOT fabricate an aiRunId. proposals.ai_run_id has
+        // an FK to ai_runs(id); a random uuid violates it and the swallowed
+        // insert error silently dropped EVERY inbound-voice proposal on
+        // Postgres-backed envs (in-memory repos don't enforce the FK, which
+        // is why tests passed). Mirror the in-app adapter: use a real run id
+        // only when one is threaded through the side effect payload, else
+        // leave it null. classifyIntent/the gateway don't surface the
+        // persisted run id into this scope today.
+        ...(typeof fx.payload.aiRunId === 'string' && fx.payload.aiRunId
+          ? { aiRunId: fx.payload.aiRunId }
+          : {}),
         createdBy:
           typeof fx.payload.customerId === 'string'
             ? fx.payload.customerId
@@ -950,7 +969,12 @@ export function createVoiceTurnProcessor(
           sessionId: session.id,
           escalationReason: reason,
         },
-        aiRunId: uuidv4(),
+        // QA-2026-07-10: do NOT fabricate an aiRunId. proposals.ai_run_id has
+        // an FK to ai_runs(id); a random uuid violates it and the swallowed
+        // insert error silently dropped EVERY inbound-voice proposal on
+        // Postgres-backed envs (in-memory repos don't enforce the FK, which
+        // is why tests passed). This callback proposal is generated internally
+        // with no associated ai_runs row, so ai_run_id stays null.
         createdBy: deps.systemActorId ?? 'calling-agent',
         ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
       });

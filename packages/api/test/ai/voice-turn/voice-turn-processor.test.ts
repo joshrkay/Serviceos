@@ -333,6 +333,54 @@ describe('createVoiceTurnProcessor.executeSideEffects', () => {
       processorNoRepo.executeSideEffects(session, sideEffects, 'tenant-abc'),
     ).resolves.toBeUndefined();
   });
+
+  it('does not fabricate an aiRunId on create_proposal (FK-safe)', async () => {
+    // Regression (QA-2026-07-10): the telephony create_proposal path set
+    // aiRunId to a random uuidv4, violating proposals.ai_run_id →
+    // ai_runs(id). The swallowed FK error silently dropped EVERY voice
+    // proposal on Postgres. The in-memory repo doesn't enforce the FK, so
+    // this asserts the built proposal never carries a fabricated id — the
+    // real-DB proof lives in
+    // test/integration/voice-proposal-ai-run-fk.test.ts.
+    const { processor, session, proposalRepo } = makeCtx({
+      gateway: makeGatewayReturning('{}'),
+      withRepos: true,
+    });
+    await processor.executeSideEffects(
+      session,
+      [
+        {
+          type: 'create_proposal',
+          payload: { intent: 'create_invoice', entities: {} },
+        },
+      ],
+      'tenant-abc',
+    );
+    const proposals = await proposalRepo.findByTenant('tenant-abc');
+    expect(proposals.length).toBe(1);
+    expect(proposals[0]!.aiRunId).toBeUndefined();
+  });
+
+  it('threads a real aiRunId through create_proposal when the side effect provides one', async () => {
+    const { processor, session, proposalRepo } = makeCtx({
+      gateway: makeGatewayReturning('{}'),
+      withRepos: true,
+    });
+    const realRunId = '11111111-2222-3333-4444-555555555555';
+    await processor.executeSideEffects(
+      session,
+      [
+        {
+          type: 'create_proposal',
+          payload: { intent: 'create_invoice', entities: {}, aiRunId: realRunId },
+        },
+      ],
+      'tenant-abc',
+    );
+    const proposals = await proposalRepo.findByTenant('tenant-abc');
+    expect(proposals.length).toBe(1);
+    expect(proposals[0]!.aiRunId).toBe(realRunId);
+  });
 });
 
 // ─── recordCost ─────────────────────────────────────────────────────────────

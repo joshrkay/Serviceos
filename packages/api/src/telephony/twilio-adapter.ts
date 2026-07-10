@@ -18,7 +18,6 @@
  * - No real-time / streaming work happens here. That's P8-012.
  */
 
-import { v4 as uuidv4 } from 'uuid';
 import type { Pool } from 'pg';
 import {
   classifyIntent,
@@ -2720,7 +2719,12 @@ export class TwilioGatherAdapter {
           sessionId: session.id,
           escalationReason: reason,
         },
-        aiRunId: uuidv4(),
+        // QA-2026-07-10: do NOT fabricate an aiRunId. proposals.ai_run_id has
+        // an FK to ai_runs(id); a random uuid violates it and the swallowed
+        // insert error silently dropped EVERY inbound-voice proposal on
+        // Postgres-backed envs (in-memory repos don't enforce the FK, which
+        // is why tests passed). This callback proposal is generated internally
+        // with no associated ai_runs row, so ai_run_id stays null.
         createdBy: this.deps.systemActorId ?? 'calling-agent',
         ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
       });
