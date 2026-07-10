@@ -54,8 +54,16 @@ export async function updateBrandVoice(
 
   const current = await repo.getState(actor.tenantId);
 
-  // Cool-down gate — onboarding's first write is exempt.
-  if (!onboarding && isInCooldown(current.updatedAt, now)) {
+  // The onboarding cool-down exemption applies ONLY to the genuine initial
+  // write (no version yet). Trusting the client `onboarding` flag alone would
+  // let any settings:update caller (or a stale onboarding client) pass
+  // `onboarding: true` to skip the 423 on a later edit and mislabel it as
+  // 'onboarding' — so gate the exemption on the real unconfigured state.
+  const isInitialWrite = current.version === 0;
+  const cooldownExempt = onboarding && isInitialWrite;
+
+  // Cool-down gate — only the initial onboarding write is exempt.
+  if (!cooldownExempt && isInCooldown(current.updatedAt, now)) {
     const until = cooldownUntil(current.updatedAt);
     throw new AppError(
       'BRAND_VOICE_COOLDOWN',
@@ -69,7 +77,7 @@ export async function updateBrandVoice(
   revalidateRoundTrip(nextConfig);
 
   const changedFields = computeChangedFields(current.config, nextConfig);
-  const changeReason = onboarding ? 'onboarding' : 'web_edit';
+  const changeReason = cooldownExempt ? 'onboarding' : 'web_edit';
 
   const state = await repo.bumpVersion(actor.tenantId, {
     config: nextConfig,

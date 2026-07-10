@@ -65,6 +65,32 @@ describe('N-011 — brand-voice service', () => {
     expect(after.state.config.banned_phrases).toEqual(['no refunds']);
   });
 
+  it('does NOT let a client-supplied onboarding:true bypass the cool-down after the first write', async () => {
+    const repo = new InMemoryBrandVoiceRepository();
+    const t0 = Date.parse('2026-07-10T12:00:00.000Z');
+    // Genuine initial onboarding write (version 0 -> 1), exempt from cool-down.
+    await updateBrandVoice({ actor, patch: sixFields, onboarding: true, now: t0 }, repo);
+
+    // A second call 5 minutes later spoofing onboarding:true must STILL 423 —
+    // the exemption is gated on the initial unconfigured state, not the flag.
+    await expect(
+      updateBrandVoice(
+        { actor, patch: { register: 'formal' }, onboarding: true, now: t0 + 5 * 60_000 },
+        repo,
+      ),
+    ).rejects.toMatchObject({ code: 'BRAND_VOICE_COOLDOWN', statusCode: 423 });
+
+    // After the window, an onboarding-spoofed edit succeeds but is recorded as
+    // a web_edit (not mislabeled 'onboarding').
+    const after = await updateBrandVoice(
+      { actor, patch: { register: 'formal' }, onboarding: true, now: t0 + BRAND_VOICE_COOLDOWN_MS },
+      repo,
+    );
+    expect(after.state.version).toBe(2);
+    const versions = await repo.listVersions('t1');
+    expect(versions.find((v) => v.version === 2)?.changeReason).toBe('web_edit');
+  });
+
   it('rollback re-persists an older snapshot as a NEW bump and audits change_reason=rollback', async () => {
     const repo = new InMemoryBrandVoiceRepository();
     const t0 = Date.parse('2026-07-10T12:00:00.000Z');
