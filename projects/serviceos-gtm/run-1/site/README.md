@@ -38,7 +38,8 @@ npm run build       # next build — this exact tree deploys to Vercel
 | `STRIPE_PRICE_ID_PRO` | For real checkout | Stripe Price ID for Pro ($799/mo). |
 | `NEXT_PUBLIC_APP_URL` | No | Product onboarding hand-off target on the success page. Unset → `/go-live-pending` (preview page). Inlined at build time (`NEXT_PUBLIC_*`). |
 | `NEXT_PUBLIC_SITE_URL` | Recommended | Canonical/OG base URL + sitemap host (`metadataBase`). Defaults to `https://example.com`. |
-| `RESEND_API_KEY` | No (future) | Reserved for the nurture engine (email). The current nurture hook is a logging stub. |
+| `RESEND_API_KEY` | No | Nurture engine transport. Unset → PreviewTransport (in-memory mailbox + console log). Set → ResendTransport (real send). Either way, sends are still gated to the test-contacts-only allowlist (`src/lib/nurture/allowlist.ts`) until `GO_LIVE_UNLOCK` is flipped by a human. See "Nurture engine" below. |
+| `NURTURE_FROM_ADDRESS` | No | Overrides the nurture "from" identity. Defaults to `Josh at Rivet <josh@updates.rivet.example>`. |
 | `VERCEL_ENV` | Set by Vercel | Only `production` is indexable; every other value → `robots.txt` disallow-all + `X-Robots-Tag: noindex`. |
 
 ## Pricing (final)
@@ -101,9 +102,58 @@ Stripe keys configured.
    | `invoice.payment_failed` | — | `onPaymentFailed` |
 
 4. Every lifecycle hook (a) logs a structured event and (b) calls the nurture
-   engine hook `notifyNurture(event)` (`src/lib/nurture/trigger.ts`). The current
-   nurture engine is a **logging stub** with a typed interface (`NurtureEngine`);
-   the nurture worker swaps in the real implementation via `setNurtureEngine()`.
+   engine hook `notifyNurture(event)` (`src/lib/nurture/trigger.ts`), which now
+   forwards to the real `LiveNurtureEngine` (see "Nurture engine" below).
+
+## Nurture engine
+
+The 8 written nurture emails (`nurture/emails/*.md` in this GTM run, transcribed
+into `src/lib/nurture/sequences.ts`) are wired to the lifecycle event bus above.
+`src/lib/nurture/trigger.ts` registers `liveNurtureEngine`
+(`src/lib/nurture/engine.ts`) as the active engine at module load — no edit to
+`lifecycle.ts` was needed; tests still override the engine via
+`setNurtureEngine()` exactly as before.
+
+**How it works:**
+
+- **`sequences.ts`** — the 8 emails as typed data: id, trigger event, delay in
+  days, subject/preview text, suppression rules, and bodyHtml/bodyText
+  (rendered from a markdown source via `markdown.ts` so the two never drift).
+  Merge fields (`{{first_name}}`, `{{app_url}}`, trial-summary counts, etc.)
+  are a typed list (`KNOWN_MERGE_FIELDS`); unknown/missing placeholders are
+  left intact rather than silently blanked.
+- **`engine.ts`** — on every lifecycle event, updates an in-memory
+  `ContactState` (per email) and immediately sends whatever is due right now.
+  `computeDueEmails(state, now)` is a **pure function** (no I/O) that a future
+  cron can call against persisted contact state to catch up delayed sends —
+  this deploy is stateless/serverless, so nothing here sleeps for days; delayed
+  emails (+1d, +5d, ...) are visible as a "scheduled queue"
+  (`engine.getScheduledQueue()`, shown on `/nurture-preview`) but only actually
+  send once real time has passed and a new event/tick calls back in. Suppression
+  follows `nurture/lifecycle-mapping.md`: `trial_converted` and `canceled` halt
+  the trial drip, win-back sends once ever, `payment_failed` de-dupes retries
+  within 24h.
+- **`transport.ts`** — `ResendTransport` (real POST to `api.resend.com/emails`
+  using `RESEND_API_KEY`) and `PreviewTransport` (default when no key is set;
+  writes to the in-memory mailbox + a structured console log).
+  `selectTransport()` picks Resend only when the key is present.
+- **`allowlist.ts` — TEST-CONTACTS-ONLY GATE.** Enforced in the send path
+  (`engine.ts`), not in config or a transport: any recipient not in
+  `TEST_CONTACT_ALLOWLIST` (`test+rivet@example.com`, `test+mike@example.com`,
+  `test+jenna@example.com`) is blocked and logged
+  `{ blocked: true, reason: 'not a test contact' }`, regardless of transport or
+  whether `RESEND_API_KEY` is configured. **Go-live** is the single constant
+  `GO_LIVE_UNLOCK` in `allowlist.ts`, currently `false`. Flipping it to `true`
+  is a deliberate human action taken only once a real ESP key is configured and
+  someone has decided this build may email real prospects — it is never
+  flipped as part of routine feature work.
+- **`/nurture-preview`** — internal (noindexed) reviewer page: the full
+  sequence catalog with sample-data-rendered bodies, the live in-memory
+  mailbox for this session (resets on cold start), the scheduled queue, and a
+  "fire test event" form that POSTs to `/api/nurture/fire-test-event` to fire
+  `trial_started` for a chosen test contact — the same `onTrialStarted()` hook
+  demo-checkout and the real Stripe webhook use — so a reviewer can watch the
+  immediate (delay 0) welcome email land in the mailbox.
 
 ## Design tokens
 

@@ -9,6 +9,7 @@ import {
 } from '@/lib/nurture/sequences';
 import { getMailbox } from '@/lib/nurture/mailbox';
 import { TEST_CONTACT_ALLOWLIST, GO_LIVE_UNLOCK } from '@/lib/nurture/allowlist';
+import { liveNurtureEngine } from '@/lib/nurture/engine';
 import { FireTestEventForm } from './FireTestEventForm';
 
 export const metadata: Metadata = pageMetadata({
@@ -61,6 +62,7 @@ function emailPreviewDoc(bodyHtml: string): string {
 
 export default function NurturePreviewPage() {
   const mailbox = getMailbox();
+  const scheduledQueue = liveNurtureEngine.getScheduledQueue();
 
   return (
     <>
@@ -111,6 +113,37 @@ export default function NurturePreviewPage() {
                   to <span className="font-mono">{entry.to}</span> · {entry.emailId} ·{' '}
                   {new Date(entry.at).toLocaleString()}
                 </p>
+              </li>
+            ))}
+          </ul>
+        )}
+      </Section>
+
+      <Section as="div">
+        <h2 className="font-display text-2xl font-bold text-fg">Scheduled queue (this session)</h2>
+        <p className="mt-2 text-sm text-fg-muted">
+          Not-yet-sent emails for contacts seen this session, and when each becomes due. This
+          process never actually waits days to send them — see the README for how a real cron
+          would call the same pure <code className="rounded bg-surface-muted px-1 py-0.5">computeDueEmails</code>{' '}
+          function against persisted state.
+        </p>
+        {scheduledQueue.length === 0 ? (
+          <p className="mt-6 rounded-lg border border-dashed border-border p-6 text-sm text-fg-muted">
+            Nothing queued yet — fire a test event above to enroll a contact in the drip.
+          </p>
+        ) : (
+          <ul className="mt-6 flex flex-col gap-2">
+            {scheduledQueue.map((item) => (
+              <li
+                key={`${item.email}-${item.emailId}`}
+                className="flex flex-wrap items-center justify-between gap-2 rounded border border-border bg-surface px-4 py-2 text-sm"
+              >
+                <span className="font-mono text-fg-muted">{item.email}</span>
+                <span className="text-fg">{item.emailId}</span>
+                <span className="text-fg-muted">due {new Date(item.dueAt).toLocaleString()}</span>
+                <span className={item.isDueNow ? 'text-warning' : 'text-fg-muted'}>
+                  {item.isDueNow ? 'due now (awaiting next tick)' : 'not yet due'}
+                </span>
               </li>
             ))}
           </ul>

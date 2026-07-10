@@ -130,6 +130,11 @@ export const ARTICLES: Article[] = [
         ],
       },
       {
+        kind: 'paragraph',
+        text:
+          "This article is the long version. For a quick side-by-side, see our [vs Jobber comparison](/vs-jobber), or check the [pricing page](/pricing) for exact plan details.",
+      },
+      {
         kind: 'cta',
         heading: 'See where your shop fits',
         text: 'Check the plans, or start a 14-day trial and let the AI answer your next call.',
@@ -180,7 +185,7 @@ export const ARTICLES: Article[] = [
       {
         kind: 'paragraph',
         text:
-          "Rivet's AI checks real availability — drive time and actual job conflicts, not just an open slot — and proposes the booking itself; the owner approves with one tap by text, and the loop closes without a dispatcher or a bolt-on vendor. It also detects emergencies and vulnerable-caller situations and routes those straight to the owner's phone instead of trying to book them. A dropped call gets an automatic text-back within about 60 seconds. After the booking, the same AI drafts a catalog-priced estimate, sends the invoice when the job's done, and runs a payment-chasing cadence — one system, not a stack of vendors.",
+          "Rivet's AI checks real availability — drive time and actual job conflicts, not just an open slot — and proposes the booking itself; the owner approves with one tap by text, and the loop closes without a dispatcher or a bolt-on vendor. It also detects emergencies and vulnerable-caller situations and routes those straight to the owner's phone instead of trying to book them — see our [FAQ](/faq) for more on how that escalation works. A dropped call gets an automatic text-back within about 60 seconds. After the booking, the same AI drafts a catalog-priced estimate, sends the invoice when the job's done, and runs a payment-chasing cadence — one system, not a stack of vendors.",
       },
       {
         kind: 'table',
@@ -272,6 +277,12 @@ export const ARTICLES: Article[] = [
         text:
           "Search \"AI receptionist for HVAC\" or \"AI answering service for plumbers\" and you'll find a long list of single-purpose vendors: [evs7](https://www.evs7.com/industries/ai-answering-service-for-hvac), [Ring Ready](https://www.ring-ready.com/industries/hvac) (advertising a $39/mo flat plan), [NextPhone](https://www.getnextphone.com/blog/best-virtual-receptionist-for-hvac) (advertising $199/mo flat), [Marlie](https://www.marlie.ai/industries/plumbers-answering-service) (advertising $49/mo plus $0.35/minute), and [AgentZap](https://agentzap.ai/industries/plumbing) (advertising $109/mo flat), among others. They all answer calls. Some book into your existing scheduling tool. None of them draft an estimate or send an invoice — the paperwork still lands back on you once the call ends.",
       },
+      { kind: 'heading', text: 'What "AI receptionist" actually means' },
+      {
+        kind: 'paragraph',
+        text:
+          "The term gets used loosely. Some vendors mean a chatbot that answers texts. Some mean a voice bot that plays pre-recorded prompts and routes on keywords. Some mean a live-sounding AI voice that can hold a real conversation and check a calendar. Those are three different products at three different price points, and a features page rarely makes the distinction obvious. The fastest way to tell them apart is to call the number yourself and try to book something real, not to read the marketing copy.",
+      },
       { kind: 'heading', text: 'Five questions to ask any AI receptionist vendor' },
       {
         kind: 'list',
@@ -287,7 +298,7 @@ export const ARTICLES: Article[] = [
       {
         kind: 'paragraph',
         text:
-          "Rivet checks real availability — drive time plus actual job conflicts — before proposing a time, and the owner approves the booking with one tap by text. Medical, elderly, or severe-weather situations stop the booking flow and route straight to the owner's phone instead of getting a generic \"someone will call you back.\" It answers in the shop's own voice. After the call, it drafts a catalog-priced estimate (anything outside the catalog gets flagged for the owner, never guessed), sends the invoice on job completion, and runs a payment-chasing cadence. Pricing is flat — $299, $499, or $799 a month — with no per-conversation or per-minute overage.",
+          "Rivet checks real availability — drive time plus actual job conflicts — before proposing a time, and the owner approves the booking with one tap by text. Medical, elderly, or severe-weather situations stop the booking flow and route straight to the owner's phone instead of getting a generic \"someone will call you back\" (more on that in our [FAQ](/faq)). It answers in the shop's own voice. After the call, it drafts a catalog-priced estimate (anything outside the catalog gets flagged for the owner, never guessed), sends the invoice on job completion, and runs a payment-chasing cadence. Pricing is flat — $299, $499, or $799 a month — with no per-conversation or per-minute overage.",
       },
       { kind: 'heading', text: 'Where a plain answering service is enough' },
       {
@@ -379,6 +390,12 @@ export const ARTICLES: Article[] = [
         text:
           "Invoca's figures come from aggregating roughly 4.2 million inbound calls a year across HVAC, plumbing, roofing, and electrical businesses — a large, vendor-reported dataset, worth citing with that context attached rather than as neutral third-party research. Separately, it's widely reported across industry content that most callers who reach voicemail don't leave a message and simply call the next name on the list — that specific figure isn't tied to one traceable, independently audited study, so take it as a directional pattern rather than a hard number.",
       },
+      { kind: 'heading', text: 'The pattern behind "whoever answers first wins"' },
+      {
+        kind: 'paragraph',
+        text:
+          "It's a simple mechanic, not a mystery: a homeowner with a real problem — no heat, no hot water, a leak — usually calls more than one shop, especially outside business hours when they're anxious and want it handled now. The shop that picks up and gives a real answer gets the job. The shop that goes to voicemail is competing with whoever the caller tries next while they wait. That dynamic doesn't require a specific statistic to be true; it's the basic logic of how emergency service calls get placed, and it's why answering speed matters more in this trade than in a lot of others.",
+      },
       { kind: 'heading', text: 'After-hours calls are a different animal' },
       {
         kind: 'paragraph',
@@ -404,7 +421,7 @@ export const ARTICLES: Article[] = [
       {
         kind: 'paragraph',
         text:
-          "None of this replaces judgment — the owner still approves every booking with one tap, and every AI action is logged so nothing happens invisibly. The point isn't to remove the owner from the loop; it's to make sure the loop runs at 11pm on a Tuesday the same way it runs at 11am, instead of stopping until someone gets back to a desk.",
+          "None of this replaces judgment — the owner still approves every booking with one tap, and every AI action is logged so nothing happens invisibly. The point isn't to remove the owner from the loop; it's to make sure the loop runs at 11pm on a Tuesday the same way it runs at 11am, instead of stopping until someone gets back to a desk. Our [FAQ](/faq) has more detail on how emergency escalation and approvals work day to day.",
       },
       {
         kind: 'table',
@@ -516,6 +533,12 @@ export const ARTICLES: Article[] = [
           ['Typical pricing', '$20–$700/mo depending on tier', '$299–$799/mo flat'],
         ],
       },
+      { kind: 'heading', text: 'If you\'re comparing purely on sticker price' },
+      {
+        kind: 'paragraph',
+        text:
+          "It's tempting to line up the monthly numbers and pick the cheapest one. That works fine if every tool did the same job — but a $29.99/mo entry-tier plan and a $299/mo Rivet plan aren't buying the same thing. The cheap tier usually buys you a scheduling calendar and a place to store customer records. The higher price on either end of that range usually buys either more users and modules (typical FSM upsell) or, in Rivet's case, the phone-answering and paperwork work itself getting done rather than just organized. Ask what each price actually removes from your day, not just what it adds to your app.",
+      },
       { kind: 'heading', text: "Where Rivet fits, and where it doesn't" },
       {
         kind: 'paragraph',
@@ -600,7 +623,24 @@ export const ARTICLES: Article[] = [
       {
         kind: 'paragraph',
         text:
-          "Live, human-staffed answering services haven't disappeared — companies like PATLive and Specialty Answering Service still compete in this space, typically in the $200–2,000/mo band depending on call volume and hours of coverage. A live person can be reassuring, but a traditional answering service almost always relays a message rather than checking your actual schedule or booking a visit. You're paying for a human touch on the phone line, not for the booking or paperwork problem to go away.",
+          "Live, human-staffed answering services haven't disappeared from this market, and per the pricing bands above they typically run $200–2,000/mo depending on call volume and hours of coverage. A live person can be reassuring, but a traditional answering service almost always relays a message rather than checking your actual schedule or booking a visit. You're paying for a human touch on the phone line, not for the booking or paperwork problem to go away.",
+      },
+      { kind: 'heading', text: 'What "unlimited" usually doesn\'t include' },
+      {
+        kind: 'paragraph',
+        text:
+          "Even the flat-rate, unlimited-calls tiers in the $149–299/mo band tend to draw a line somewhere. Common exclusions across this category: emergency or after-hours routing logic (the AI answers, but doesn't distinguish a routine call from one that needs a human right now), booking that actually checks a real calendar versus offering a generic slot, and anything past taking a message — no estimate, no invoice, no follow-up. \"Unlimited\" usually describes the call volume, not the depth of what happens on the call.",
+      },
+      { kind: 'heading', text: 'A short checklist for comparing quotes' },
+      {
+        kind: 'list',
+        items: [
+          'Is the price truly flat, or does it cap calls/minutes/conversations with an overage rate?',
+          'Does the quote include emergency detection, or is that a separate add-on (if it exists at all)?',
+          'Does the price include booking, or just message-taking?',
+          'What happens after the call — is there anything for estimates, invoicing, or follow-up, or is that a separate tool you still need to buy?',
+          "Is there a contract, or can you cancel monthly?",
+        ],
       },
       { kind: 'heading', text: "What Rivet charges, and what's included" },
       {
@@ -613,6 +653,11 @@ export const ARTICLES: Article[] = [
         kind: 'paragraph',
         text:
           "This pricing is built around a 1–3-truck HVAC or plumbing shop's call volume and paperwork load. If you're comparing purely on a per-call basis and you have very low volume, a capped $25–65/mo plan may look cheaper on paper — you'd just be buying the phone line, not the estimate, invoice, and collections that come after it.",
+      },
+      {
+        kind: 'paragraph',
+        text:
+          "On the other end, if you're running a much larger operation with a dedicated CSR team already, or you need deep dispatch and pricebook tooling across many crews, a flat AI-answering price isn't really the comparison you need to make — that's a case for a platform like [ServiceTitan](/resources/servicetitan-overkill-small-shop) built for that scale, where phone-answering is one small piece of a much larger system.",
       },
       {
         kind: 'faq',
@@ -630,6 +675,11 @@ export const ARTICLES: Article[] = [
           {
             question: 'Is there a free trial?',
             answer: '14 days, card required, cancel anytime before day 15.',
+          },
+          {
+            question: 'What if I already pay for Jobber or Housecall Pro and just want the phone answered?',
+            answer:
+              "That's worth thinking through honestly. Rivet runs as its own back office rather than a bolt-on to another FSM tool, so switching means moving the estimating and invoicing workflow too, not just adding a phone line. If you only need calls answered and nothing else, a cheaper point-solution add-on to your existing software may be the smaller change — the trade-off is a second subscription and a second system to check.",
           },
         ],
       },
@@ -669,11 +719,23 @@ export const ARTICLES: Article[] = [
         text:
           "ServiceTitan's own [pricing page](https://www.servicetitan.com/pricing) publishes no numbers — it's a sales-quote model. The figures available come from reseller and consultant blogs: [$245–500+/tech/month](https://projul.com/blog/servicetitan-pricing-analysis-2026/), corroborated in similar ranges by [fieldcamp.ai](https://fieldcamp.ai/reviews/servicetitan/) and [myquoteiq.com](https://myquoteiq.com/servicetitan-pricing-per-month/), plus setup fees in the $5,000–$50,000+ range and 3–6+ month (sometimes longer) onboarding, with 12+ month contracts and early-termination fees reported at $5,000–$20,000+. Mark all of this as third-party estimate, not a confirmed price — there's no free trial, and it's an enterprise sales-demo process.",
       },
+      { kind: 'heading', text: 'What that looks like for a 2-truck shop' },
+      {
+        kind: 'paragraph',
+        text:
+          "Run the third-party per-technician estimate against a small crew as a rough illustration, not a quote: at $245–500+ per technician per month, a 2-person crew would land somewhere around $490–1,000+/mo before the setup fee, and a 3-person crew closer to $735–1,500+/mo — on top of a reported $5,000–$50,000+ implementation cost and a 12+ month contract. That math is ours, built from the cited third-party bands, not a figure ServiceTitan itself publishes; the point isn't the exact dollar amount, it's that the pricing structure (per-tech, plus setup, plus annual commitment) is built around a crew large enough to spread that fixed cost across more trucks.",
+      },
       { kind: 'heading', text: "What it's actually built for" },
       {
         kind: 'paragraph',
         text:
           "ServiceTitan's AI initiative, [Titan Intelligence](https://www.servicetitan.com/features/titan-intelligence), includes Dispatch Pro (auto-matching jobs to technicians by skill, proximity, history, and expected revenue), a TI Chat Assistant trained on the business's own call recordings that can book jobs and answer questions, and Atlas, a general AI copilot across the product. That's genuinely capable dispatch-and-scale tooling. One caveat worth noting: a [Capterra reviewer-composition note](https://www.capterra.com/p/150053/ServiceTitan/) cites 92% of reviewers on that platform self-identifying as small business — that's reviewer-mix data on one review site, not a targeting claim, and it sits in tension with the \"$1M+/20+ techs\" framing from independent buyer guides. Read it as a caveat, not a contradiction of the core positioning.",
+      },
+      { kind: 'heading', text: 'The add-on modules add up too' },
+      {
+        kind: 'paragraph',
+        text:
+          "Beyond the core per-technician price, ServiceTitan sells additional modules separately — Marketing Pro, Phones Pro, Dispatch Pro, Fleet Pro, Pricebook Pro among them. Third-party estimates put Marketing Pro at $2,000+/mo and Phones Pro at $50–200+/mo on top of the base platform cost. None of these figures are ServiceTitan-confirmed, but the pattern across every source is consistent: this is a modular enterprise platform priced and packaged for a business that can justify assembling those pieces, not a single flat number a solo operator can budget against.",
       },
       { kind: 'heading', text: 'What a 1-3 truck shop actually needs instead' },
       {
@@ -691,6 +753,12 @@ export const ARTICLES: Article[] = [
           ['Contract', '12+ month annual commitment reported as standard', 'No long-term contract; 14-day free trial'],
           ['Who answers the phone', 'Titan Intelligence chat assistant / your CSR team', "Rivet's AI, 24/7"],
         ],
+      },
+      { kind: 'heading', text: 'Free trial vs. sales demo' },
+      {
+        kind: 'paragraph',
+        text:
+          "One practical difference worth naming plainly: you can't sign up for ServiceTitan on your own tonight. Per multiple secondary sources, it's a sales-quote model — you book a call, go through a demo and pricing discussion, and, if you proceed, an onboarding process reported at three to six-plus months. Rivet and most of the small-shop tools mentioned earlier let you start a trial and be live within days, which matters when the problem you're trying to solve is happening this week, not next quarter.",
       },
       { kind: 'heading', text: "Where Rivet fits, and where it doesn't" },
       {
@@ -765,11 +833,23 @@ export const ARTICLES: Article[] = [
           "A plain-English note if anything the AI wasn't sure about needs a human look",
         ],
       },
+      { kind: 'heading', text: 'An illustrative Tuesday afternoon' },
+      {
+        kind: 'paragraph',
+        text:
+          "This is a made-up scenario to show the shape of the workflow, not a real customer story. A call comes in at 2:15pm — a leaking water heater. The AI answers in the shop's voice, asks a couple of clarifying questions, checks the tech's actual route and drive time, and proposes a 4:30pm arrival window. The owner gets a one-tap text to approve it; they're under a sink and approve with a thumb. By 5:15pm the tech has replaced the heater and marked the job done from their phone. The invoice drafts itself, priced off the parts and labor already in the shop's catalog, and goes out with a Stripe payment link before the truck leaves the driveway. That evening's text digest notes the job, the payment status, and one line item the AI wasn't fully confident on — flagged, not guessed — for the owner to glance at over dinner.",
+      },
       { kind: 'heading', text: 'How Rivet closes the loop' },
       {
         kind: 'paragraph',
         text:
-          "Estimates are voice-drafted from the call and priced against the tenant's own catalog — anything uncatalogued gets flagged for the owner rather than guessed — with good/better/best tiers, e-signature, and a Stripe deposit on acceptance. Unsold estimates get an automatic follow-up cadence. Invoicing auto-drafts on job completion with a Stripe payment link, runs a dunning cadence, and applies capped late fees automatically. An end-of-day text digest summarizes the day's activity, including what the AI wasn't sure about and what it learned. Every one of those AI actions is a typed proposal that needs the owner's approval — nothing auto-executes — with a full audit trail, undo, a second-pass review agent, and a hard rule that the AI never discounts a price on its own.",
+          "Estimates are voice-drafted from the call and priced against the tenant's own catalog — anything uncatalogued gets flagged for the owner rather than guessed — with good/better/best tiers, e-signature, and a Stripe deposit on acceptance. Unsold estimates get an automatic follow-up cadence. Invoicing auto-drafts on job completion with a Stripe payment link, runs a dunning cadence, and applies capped late fees automatically. An end-of-day text digest summarizes the day's activity, including what the AI wasn't sure about and what it learned. Every one of those AI actions is a typed proposal that needs the owner's approval — nothing auto-executes — with a full audit trail, undo, a second-pass review agent, and a hard rule that the AI never discounts a price on its own. Our [FAQ](/faq) walks through the approval flow in more detail.",
+      },
+      { kind: 'heading', text: 'Why this matters more than the phone call itself' },
+      {
+        kind: 'paragraph',
+        text:
+          "Answering the phone well is table stakes at this point — plenty of vendors do it credibly. The part that actually gives an owner their evening back is everything downstream of the call: not having to sit down and build the estimate from scratch, not having to remember to send the invoice, not having to chase a customer who forgot to pay. A well-answered call that still dumps a pile of paperwork on the owner's desk hasn't actually solved the problem it was sold to solve.",
       },
       { kind: 'heading', text: "What this doesn't mean (yet)" },
       {
