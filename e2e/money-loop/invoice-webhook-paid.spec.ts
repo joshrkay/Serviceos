@@ -2,15 +2,15 @@ import { test, expect, type Page } from '@playwright/test';
 import * as crypto from 'crypto';
 
 /**
- * W1-2 — Hermetic: invoice → Stripe webhook → paid (no Elements / Checkout).
+ * W1-2 — Hermetic UI companion: `/pay` shows Paid after a signed-webhook
+ * settlement signal, without Stripe Elements/Checkout.
  *
- * CI mode (this file): public `/pay/:token` is driven with route mocks.
- * Settlement is simulated by flipping the mock invoice to `isPaid` after a
- * signed webhook POST shape is exercised against a local stub — proving the
- * UI path without live Stripe or Elements card entry.
+ * CI mode: public `/pay/:token` is route-mocked. A page-local webhook sink
+ * verifies Stripe signature shape (same HMAC as
+ * `createWebhookSignature` in packages/api) and flips the mock invoice to
+ * paid — proving the customer UI path without live Stripe or a DB.
  *
- * Strongest settlement proof (signed webhook → durable paid + idempotency)
- * lives in API CI:
+ * Strongest settlement proof (real handler + durable idempotency) is API CI:
  *   - packages/api/test/webhooks/invoice-webhook-paid.test.ts
  *   - packages/api/test/integration/invoice-webhook-paid.test.ts
  *
@@ -109,8 +109,11 @@ function checkoutCompletedEvent(eventId: string): Record<string, unknown> {
 async function mockPublicPayApis(
   page: Page,
   state: { invoice: PublicInvoiceView },
-): Promise<{ webhookPosts: Array<{ signature: string | null; body: string }> }> {
-  const webhookPosts: Array<{ signature: string | null; body: string }> = [];
+): Promise<{
+  webhookPosts: Array<{ signature: string | null; body: string; duplicate: boolean }>;
+}> {
+  const webhookPosts: Array<{ signature: string | null; body: string; duplicate: boolean }> = [];
+  const seenEventIds = new Set<string>();
 
   // Abort Stripe.js / Elements — this thread explicitly skips card UI.
   await page.route('**/*stripe.com/**', (route) => route.abort());
@@ -152,15 +155,15 @@ async function mockPublicPayApis(
     });
   });
 
-  // Hermetic webhook sink: verify signature shape, then flip invoice to paid
-  // (stands in for recordPayment in the real API handler).
+  // Hermetic webhook sink: verify signature shape + event-id idempotency,
+  // then flip the mock invoice (UI companion to the real API handler proof).
   await page.route('**/webhooks/stripe', async (route) => {
     const req = route.request();
     const body = req.postData() ?? '';
     const signature = req.headers()['stripe-signature'] ?? null;
-    webhookPosts.push({ signature, body });
 
     if (!signature) {
+      webhookPosts.push({ signature, body, duplicate: false });
       await route.fulfill({
         status: 400,
         contentType: 'application/json',
@@ -169,13 +172,11 @@ async function mockPublicPayApis(
       return;
     }
 
-    const expected = createWebhookSignature(body, STRIPE_SECRET);
-    // Compare HMAC material (t= may differ by 1s); re-verify with our helper
-    // by checking the v1 digest against the posted body + secret.
     const parts = signature.split(',');
     const tsPart = parts.find((p) => p.startsWith('t='));
     const sigPart = parts.find((p) => p.startsWith('v1='));
     if (!tsPart || !sigPart) {
+      webhookPosts.push({ signature, body, duplicate: false });
       await route.fulfill({
         status: 401,
         contentType: 'application/json',
@@ -190,6 +191,7 @@ async function mockPublicPayApis(
       .update(`${ts}.${body}`)
       .digest('hex');
     if (digest !== provided) {
+      webhookPosts.push({ signature, body, duplicate: false });
       await route.fulfill({
         status: 401,
         contentType: 'application/json',
@@ -198,11 +200,35 @@ async function mockPublicPayApis(
       return;
     }
 
-    // Idempotent: only flip once.
+    let eventId = '';
+    try {
+      const parsed = JSON.parse(body) as { id?: string };
+      eventId = typeof parsed.id === 'string' ? parsed.id : '';
+    } catch {
+      webhookPosts.push({ signature, body, duplicate: false });
+      await route.fulfill({
+        status: 400,
+        contentType: 'application/json',
+        body: JSON.stringify({ error: 'Invalid JSON body' }),
+      });
+      return;
+    }
+
+    if (eventId && seenEventIds.has(eventId)) {
+      webhookPosts.push({ signature, body, duplicate: true });
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ received: true, duplicate: true }),
+      });
+      return;
+    }
+    if (eventId) seenEventIds.add(eventId);
+
     if (!state.invoice.isPaid) {
       state.invoice = paidInvoice();
     }
-    void expected; // documents parity with API helper return shape
+    webhookPosts.push({ signature, body, duplicate: false });
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -213,19 +239,24 @@ async function mockPublicPayApis(
   return { webhookPosts };
 }
 
-test.describe('W1-2 — invoice webhook → paid (hermetic)', () => {
+test.describe('W1-2 — invoice webhook → paid (hermetic UI)', () => {
   test.skip(
     !hasClerk,
     'Set VITE_CLERK_PUBLISHABLE_KEY locally or E2E_BASE_URL to run UI E2E tests',
   );
 
-  test('signed webhook settles invoice; /pay shows Paid without Elements', async ({ page }) => {
+  test('signed webhook settles mock invoice; /pay shows Paid without Elements', async ({
+    page,
+  }) => {
     const state = { invoice: openInvoice() };
     const { webhookPosts } = await mockPublicPayApis(page, state);
 
     await page.goto(`/pay/${VIEW_TOKEN}`);
     await expect(page.getByText('INV-W1-2-E2E')).toBeVisible();
     await expect(page.getByText('Payment received!')).toHaveCount(0);
+    // Open invoice must not mount Elements (production testid).
+    await expect(page.getByTestId('stripe-not-configured')).toBeVisible();
+    await expect(page.locator('iframe[name^="__privateStripeFrame"]')).toHaveCount(0);
 
     const event = checkoutCompletedEvent('evt_w1_2_e2e_1');
     const rawBody = JSON.stringify(event);
@@ -249,10 +280,11 @@ test.describe('W1-2 — invoice webhook → paid (hermetic)', () => {
     );
     expect(webhookRes.status).toBe(200);
     expect(webhookRes.json).toEqual({ received: true });
-    expect(webhookPosts.length).toBeGreaterThanOrEqual(1);
+    expect(webhookPosts).toHaveLength(1);
     expect(webhookPosts[0].signature).toBeTruthy();
+    expect(state.invoice.isPaid).toBe(true);
 
-    // Replay — hermetic sink stays paid; UI still shows a single Paid state.
+    // Replay — same event id must be acknowledged as duplicate, invoice stays paid once.
     const replay = await page.evaluate(
       async ({ body, sig }) => {
         const res = await fetch('/webhooks/stripe', {
@@ -263,21 +295,22 @@ test.describe('W1-2 — invoice webhook → paid (hermetic)', () => {
           },
           body,
         });
-        return { status: res.status };
+        return { status: res.status, json: await res.json() };
       },
       { body: rawBody, sig: createWebhookSignature(rawBody, STRIPE_SECRET) },
     );
     expect(replay.status).toBe(200);
-    expect(state.invoice.isPaid).toBe(true);
+    expect(replay.json).toEqual({ received: true, duplicate: true });
+    expect(webhookPosts).toHaveLength(2);
+    expect(webhookPosts[1].duplicate).toBe(true);
 
     await page.reload();
     await expect(page.getByText('Payment received!')).toBeVisible({ timeout: 10_000 });
     await expect(page.getByText('Paid')).toBeVisible();
-    await expect(page.getByText('$500.00')).toBeVisible();
-
-    // Elements must never mount for this proof.
-    await expect(page.getByTestId('stripe-elements')).toHaveCount(0);
-    await expect(page.getByTestId('stripe-payment-element')).toHaveCount(0);
+    // PaidScreen renders the amount twice (thank-you + receipt row).
+    await expect(page.getByText('$500.00').first()).toBeVisible();
+    await expect(page.getByTestId('stripe-not-configured')).toHaveCount(0);
+    await expect(page.locator('iframe[name^="__privateStripeFrame"]')).toHaveCount(0);
   });
 
   test('unsigned webhook does not flip the invoice to paid', async ({ page }) => {
@@ -286,6 +319,7 @@ test.describe('W1-2 — invoice webhook → paid (hermetic)', () => {
 
     await page.goto(`/pay/${VIEW_TOKEN}`);
     await expect(page.getByText('INV-W1-2-E2E')).toBeVisible();
+    await expect(page.getByTestId('stripe-not-configured')).toBeVisible();
 
     const event = checkoutCompletedEvent('evt_w1_2_e2e_unsigned');
     const unsigned = await page.evaluate(async (body) => {
@@ -301,5 +335,6 @@ test.describe('W1-2 — invoice webhook → paid (hermetic)', () => {
 
     await page.reload();
     await expect(page.getByText('Payment received!')).toHaveCount(0);
+    await expect(page.getByTestId('stripe-not-configured')).toBeVisible();
   });
 });

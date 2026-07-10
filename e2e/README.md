@@ -47,9 +47,10 @@ Runs whenever `VITE_CLERK_PUBLISHABLE_KEY` is set (any syntactically valid
 Clerk account or network access is required).
 
 ### Journeys (`journeys/*.spec.ts`)
-All three are currently `test.skip()` — the spec code documents the intended
+1 and 2 are currently `test.skip()` — the spec code documents the intended
 test shape, but the test doesn't execute until the preconditions in each
-file's header comment are met.
+file's header comment are met. Journey 3 delegates to the W1-2 hermetic
+money-loop proof (also skipped here so CI cannot false-green).
 
 1. **signup-to-first-estimate** — new user signs up, Clerk webhook bootstraps
    a tenant, user drafts their first estimate. Needs Clerk testing tokens +
@@ -57,10 +58,10 @@ file's header comment are met.
 2. **estimate-approval-execution** — AI task produces a draft proposal,
    operator approves, 5s undo window elapses, auto-delivery worker executes,
    estimate row appears. Needs AI provider creds or mocked gateway.
-3. **invoice-to-payment** — delegates to W1-2 hermetic proof
-   (`e2e/money-loop/invoice-webhook-paid.spec.ts`): signed webhook → `/pay`
-   shows Paid without Elements. API proofs:
-   `packages/api/test/webhooks/invoice-webhook-paid.test.ts` +
+3. **invoice-to-payment** — skipped; continuous proof is W1-2:
+   `e2e/money-loop/invoice-webhook-paid.spec.ts` (hermetic `/pay` after
+   signed-webhook signal, no Elements) plus API proofs
+   `packages/api/test/webhooks/invoice-webhook-paid.test.ts` and
    `packages/api/test/integration/invoice-webhook-paid.test.ts`.
    Live Stripe Elements remains out of scope for W1-2.
 
@@ -135,10 +136,12 @@ then fill in the preconditions one at a time.
 e2e/
 ├── README.md                              # this file
 ├── smoke.spec.ts                          # always runs
+├── money-loop/
+│   └── invoice-webhook-paid.spec.ts       # W1-2 hermetic /pay proof
 └── journeys/
     ├── signup-to-first-estimate.spec.ts   # skipped
     ├── estimate-approval-execution.spec.ts # skipped
-    └── invoice-to-payment.spec.ts         # skipped
+    └── invoice-to-payment.spec.ts         # skipped → see money-loop/
 ```
 
 ## CI
