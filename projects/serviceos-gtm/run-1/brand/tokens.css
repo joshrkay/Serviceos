@@ -1,0 +1,148 @@
+/* ============================================================
+   RIVET — Brand Design Tokens
+   Product: ServiceOS  ·  Company: Rivet
+   "You handle the work. We handle the business."
+
+   Single source of truth for color, type, spacing, radii, shadows.
+   Imported verbatim by the marketing site. Light theme is primary
+   (mobile-first). A [data-theme="dark"] block overrides for dark UI.
+
+   Fonts (Google Fonts — load in <head>):
+     https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700;800;900&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap
+   ============================================================ */
+
+:root {
+  /* ---------- BRAND ---------- */
+  --color-primary:            #16212B; /* Gunmetal — ink, headers, primary buttons */
+  --color-primary-hover:      #0F1922; /* pressed/hover on primary */
+  --color-primary-contrast:   #FFFFFF; /* text on primary */
+
+  --color-accent:             #E5551B; /* Hot Rivet — forge orange. LARGE text & buttons only */
+  --color-accent-strong:      #C4470F; /* Rivet-600 — accent as normal-size TEXT/LINKS on light (AA) */
+  --color-accent-tint:        #F6A87F; /* Rivet-300 — accent on dark surfaces, dome highlight */
+  --color-accent-contrast:    #16212B; /* ink text on a bright-accent button (large only) */
+
+  --color-secondary:          #5A6B7D; /* Cool Steel — secondary UI, rivet details, quiet chrome */
+
+  /* ---------- NEUTRALS (cool steel-tinted ramp) ---------- */
+  --color-neutral-50:  #F5F7FA;
+  --color-neutral-100: #E9EDF2;
+  --color-neutral-200: #D4DBE3;
+  --color-neutral-300: #B2BDC9;
+  --color-neutral-400: #8493A3;
+  --color-neutral-500: #647383;
+  --color-neutral-600: #4C5A69;
+  --color-neutral-700: #3A4553;
+  --color-neutral-800: #27313D;
+  --color-neutral-900: #18212B;
+  --color-neutral-950: #0E151C;
+
+  /* ---------- SEMANTIC ---------- */
+  --color-success:      #1E7A46; /* paid / done / booked */
+  --color-success-tint: #3BAE6B; /* success on dark surfaces */
+  --color-warn:         #B26A00; /* needs-you / uncertain / flagged */
+  --color-warn-tint:    #E0922B; /* warn on dark surfaces */
+  --color-error:        #C22E22; /* failed / overdue / declined */
+  --color-error-tint:   #F0645A; /* error on dark surfaces */
+
+  /* ---------- SURFACES & LINES (light theme) ---------- */
+  --color-bg:            #FFFFFF; /* page background */
+  --color-surface:       #F5F7FA; /* raised cards / sections */
+  --color-surface-sunk:  #E9EDF2; /* inset / code / wells */
+  --color-border:        #D4DBE3; /* hairlines, card borders */
+  --color-border-strong: #B2BDC9; /* emphasized dividers */
+
+  --color-text:        #16212B; /* body text */
+  --color-text-muted:  #4C5A69; /* secondary text (AA on white) */
+  --color-text-subtle: #647383; /* captions/labels (AA on white) */
+  --color-link:        #C4470F; /* accent-strong; AA as text on white */
+
+  /* ---------- TYPOGRAPHY ---------- */
+  --font-display: 'Archivo', 'Arial Narrow', 'Helvetica Neue', Arial, sans-serif;
+  --font-body:    'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif;
+  --font-mono:    'IBM Plex Mono', ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
+
+  /* type scale — rem, mobile-first (1rem = 16px) */
+  --text-xs:   0.75rem;   /* 12 */
+  --text-sm:   0.875rem;  /* 14 */
+  --text-base: 1rem;      /* 16 — min body size on mobile */
+  --text-lg:   1.125rem;  /* 18 */
+  --text-xl:   1.25rem;   /* 20 */
+  --text-2xl:  1.5rem;    /* 24 */
+  --text-3xl:  1.875rem;  /* 30 */
+  --text-4xl:  2.25rem;   /* 36 */
+  --text-5xl:  3rem;      /* 48 */
+  --text-6xl:  3.75rem;   /* 60 */
+  /* fluid hero display: min 36px → max 60px */
+  --text-display: clamp(2.25rem, 1.4rem + 4.2vw, 3.75rem);
+
+  --weight-regular:  400;
+  --weight-medium:   500;
+  --weight-semibold: 600;
+  --weight-bold:     700;
+  --weight-extrabold:800;
+  --weight-black:    900;
+
+  --leading-tight:   1.05; /* display headlines */
+  --leading-snug:    1.2;  /* subheads */
+  --leading-normal:  1.6;  /* body copy */
+
+  --tracking-tight:  -0.02em; /* large display */
+  --tracking-normal: 0;
+  --tracking-wide:   0.08em;  /* eyebrows / all-caps labels */
+
+  /* ---------- SPACING (4px base) ---------- */
+  --space-0:  0;
+  --space-1:  0.25rem;  /* 4 */
+  --space-2:  0.5rem;   /* 8 */
+  --space-3:  0.75rem;  /* 12 */
+  --space-4:  1rem;     /* 16 */
+  --space-5:  1.25rem;  /* 20 */
+  --space-6:  1.5rem;   /* 24 */
+  --space-8:  2rem;     /* 32 */
+  --space-10: 2.5rem;   /* 40 */
+  --space-12: 3rem;     /* 48 */
+  --space-16: 4rem;     /* 64 */
+  --space-20: 5rem;     /* 80 */
+  --space-24: 6rem;     /* 96 */
+
+  /* ---------- RADII (angular-industrial: restrained, not pill-everything) ---------- */
+  --radius-sm:   6px;   /* inputs, tags */
+  --radius-md:   10px;  /* buttons, cards */
+  --radius-lg:   14px;  /* modals, large cards */
+  --radius-xl:   20px;  /* hero/media panels */
+  --radius-full: 9999px;/* avatars, pills — use sparingly */
+
+  /* ---------- SHADOWS (steel-tinted, restrained — brand is sturdy, not floaty) ---------- */
+  --shadow-sm: 0 1px 2px rgba(14, 21, 28, 0.08);
+  --shadow-md: 0 4px 12px rgba(14, 21, 28, 0.10);
+  --shadow-lg: 0 12px 28px rgba(14, 21, 28, 0.14);
+  --shadow-focus: 0 0 0 3px rgba(229, 85, 27, 0.45); /* accent focus ring */
+
+  /* ---------- TAP TARGET ---------- */
+  --tap-min: 44px; /* minimum interactive target (mobile) */
+}
+
+/* ============================================================
+   DARK THEME — for dark UI sections / dark-mode marketing blocks.
+   Surfaces flip to gunmetal; accent uses the tint for AA on dark.
+   ============================================================ */
+:root[data-theme="dark"],
+.theme-dark {
+  --color-bg:            #16212B;
+  --color-surface:       #18212B;
+  --color-surface-sunk:  #0E151C;
+  --color-border:        #27313D;
+  --color-border-strong: #3A4553;
+
+  --color-text:        #E9EDF2;
+  --color-text-muted:  #B2BDC9;
+  --color-text-subtle: #8493A3;
+  --color-link:        #F6A87F;
+
+  --color-primary-contrast: #16212B;
+  --color-accent-contrast:  #16212B;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 12px 28px rgba(0, 0, 0, 0.55);
+}

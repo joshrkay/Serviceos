@@ -1,0 +1,48 @@
+@import './tokens.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+  }
+  body {
+    background-color: var(--color-bg);
+    color: var(--color-fg);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  /* Keyboard focus visibility for a11y */
+  :focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+  }
+}
+
+@layer components {
+  /* Every interactive control here meets the >=44px tap-target rule (min-h-11). */
+  .btn {
+    @apply inline-flex min-h-11 items-center justify-center rounded px-5 py-2.5 text-sm font-semibold transition-colors;
+  }
+  .btn-primary {
+    @apply btn bg-primary text-primary-fg hover:opacity-90;
+  }
+  .btn-secondary {
+    @apply btn border border-border bg-surface text-fg hover:bg-surface-muted;
+  }
+  .container-page {
+    @apply mx-auto w-full max-w-content px-4 sm:px-6 lg:px-8;
+  }
+  .eyebrow {
+    @apply text-xs font-semibold uppercase tracking-widest text-fg-muted;
+  }
+  .field-label {
+    @apply mb-1.5 block text-sm font-medium text-fg;
+  }
+  .field-input {
+    @apply min-h-11 w-full rounded border border-border bg-surface px-3 py-2 text-fg placeholder:text-fg-muted focus:border-primary;
+  }
+}

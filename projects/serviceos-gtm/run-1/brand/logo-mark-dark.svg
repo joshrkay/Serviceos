@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Rivet">
+  <path d="M19,5 L45,5 L58,32 L45,59 L19,59 L6,32 Z" fill="#E9EDF2"/>
+  <circle cx="32" cy="32" r="15.5" fill="#B2BDC9"/>
+  <circle cx="32" cy="32" r="13.5" fill="#E5551B"/>
+  <path d="M41.6,22.4 A13.5,13.5 0 0 0 22.4,41.6 Z" fill="#F6A87F"/>
+</svg>

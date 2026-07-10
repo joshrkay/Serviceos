@@ -17,3 +17,7 @@ Format: Q → A → why. (Guardrail 6: never ask; answer with research + reasoni
 **D7. Product hand-off URL?** → Configurable NEXT_PUBLIC_APP_URL; preview points at a /go-live-pending interstitial explaining the hand-off (the product app URL is a go-live checklist item). Why: production app domain not discoverable in repo (env examples use yourdomain.com placeholders); pointing preview at a live tenant app is guardrail-adjacent risk.
 
 **D8. Schema Review/AggregateRating?** → Omitted. No real reviews exist; inventing them violates Guardrail 4 and Google spam policy.
+
+**D9. Demo videos in docs/marketing are synthetic slide animations, not real product recordings (verified frame-by-frame vs packages/web source).** → Re-shoot: boot the real packages/web SPA headlessly with seeded data (packages/web verify harness), drive the actual flows with Playwright video recording, cut a new 60–90s demo with caption narration; regenerate founder video screenshots from real captures. Why: DoD requires the demo to show the REAL product; embedding the mockup would be a placeholder pretending to be finished. The old mockup is kept in video/legacy-mockup/ for reference only.
+
+**D10. WebFetch returned 403 all session (tool-level).** → Research sourced via WebSearch result citations; every load-bearing competitor number phrased "as published, July 2026" with URL; red team re-attempts direct fetch verification before ship. If still unverifiable, the number is cut or hedged per claims.md.
