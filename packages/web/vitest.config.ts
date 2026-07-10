@@ -20,7 +20,11 @@ export default defineConfig({
         'src/main.tsx',              // app entry point
       ],
       thresholds: {
-        lines: 30,
+        // Actual coverage sits at ~80% lines / ~75% branches; these
+        // floors leave ~5 points of headroom so an entirely untested
+        // module can no longer land without failing CI.
+        lines: 75,
+        branches: 70,
       },
     },
   },
