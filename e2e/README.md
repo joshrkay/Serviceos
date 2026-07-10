@@ -47,6 +47,13 @@ Runs whenever `VITE_CLERK_PUBLISHABLE_KEY` is set (any syntactically valid
 Clerk account or network access is required).
 
 ### Public money loop (`public/*.spec.ts`)
+Hermetic, always-on (no Clerk journey secrets):
+
+- **`public/estimate-approval.spec.ts` (W1-3)** — `/e/:id` approve happy
+  path (Zod-pinned fixture → two-decimal money → sign → POST `/approve` →
+  success UI) plus network-failure error UI with no fixture-data leak
+  (Blocker 8). Thread plan:
+  `docs/plans/wave1/W1-3-public-estimate-approval.md` on branch
 Hermetic, always-on (no Clerk journey secrets, no Stripe secrets):
 
 - **`public/invoice-pay-status.spec.ts` (W1-4)** — `/pay/:id` status poll
@@ -146,6 +153,10 @@ then fill in the preconditions one at a time.
 e2e/
 ├── README.md                              # this file
 ├── smoke.spec.ts                          # always runs
+├── public/
+│   ├── estimate-approval.spec.ts          # W1-3 hermetic /e/:id (always-on)
+│   └── fixtures/
+│       └── public-estimate-view.ts        # Zod-pinned public estimate fixture
 ├── helpers/
 │   ├── clerk-stub.ts                      # offline Clerk for hermetic UI
 │   └── stripe-stub.ts                     # offline Stripe for W1-4 status poll
