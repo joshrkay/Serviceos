@@ -54,6 +54,13 @@ Hermetic, always-on (no Clerk journey secrets):
   success UI) plus network-failure error UI with no fixture-data leak
   (Blocker 8). Thread plan:
   `docs/plans/wave1/W1-3-public-estimate-approval.md` on branch
+Hermetic, always-on (no Clerk journey secrets, no Stripe secrets):
+
+- **`public/invoice-pay-status.spec.ts` (W1-4)** — `/pay/:id` status poll
+  proof: unpaid invoice → async `processing` path → poll `open` → `paid`
+  in place without blanking the page. Stripe Elements card entry is
+  **out of scope** (Vite `@stripe/*` deps are stubbed). Thread plan:
+  `docs/plans/wave1/W1-4-public-pay-status.md` on branch
   `docs/wave1-prove-money-loop-followup`.
 
 Needs a syntactically valid `VITE_CLERK_PUBLISHABLE_KEY` (or
@@ -150,6 +157,11 @@ e2e/
 │   ├── estimate-approval.spec.ts          # W1-3 hermetic /e/:id (always-on)
 │   └── fixtures/
 │       └── public-estimate-view.ts        # Zod-pinned public estimate fixture
+├── helpers/
+│   ├── clerk-stub.ts                      # offline Clerk for hermetic UI
+│   └── stripe-stub.ts                     # offline Stripe for W1-4 status poll
+├── public/
+│   └── invoice-pay-status.spec.ts         # W1-4 hermetic /pay/:id status
 └── journeys/
     ├── signup-to-first-estimate.spec.ts   # skipped
     ├── estimate-approval-execution.spec.ts # skipped
