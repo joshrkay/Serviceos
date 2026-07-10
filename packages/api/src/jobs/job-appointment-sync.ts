@@ -237,24 +237,15 @@ export async function syncJobSchedule(
     let previousScheduledStart: Date | undefined;
 
     if (existing) {
-      // Reschedule: validate the new window, then move the SAME row. The DB
-      // trigger re-stamps the assignment window; a conflict surfaces as a
-      // ConflictError (23P01) and rolls the whole request back — no follow-up
-      // write is attempted on the poisoned transaction.
+      // Reschedule the SAME canonical row.
       //
       // PRESERVE the existing slot length unless the caller explicitly passes a
       // new durationMin — moving only the start time must not silently resize
       // the appointment (a 90-min visit rescheduled must stay 90 min).
       previousScheduledStart = existing.scheduledStart;
-      // Switch the technician BEFORE moving the time. The appointment-time
-      // UPDATE re-stamps the CURRENT primary assignment's window via the DB
-      // trigger, so moving the time first (while the old tech is still
-      // attached) makes a valid move to a FREE tech 409 whenever the old tech
-      // is busy at the new time. Reassigning first detaches the old tech, so
-      // only the target tech is checked against the new window.
-      if (input.technicianId !== undefined) {
-        await ensurePrimaryTechnician(deps, tenantId, existing.id, input.technicianId, actorId, actorRole);
-      }
+
+      // Compute + validate the new window BEFORE any mutation, so an invalid
+      // request fails fast without touching assignments.
       const durationMs =
         input.durationMin !== undefined
           ? input.durationMin * 60_000
@@ -262,6 +253,38 @@ export async function syncJobSchedule(
       const scheduledEnd = new Date(scheduledStart.getTime() + durationMs);
       const errs = validateAppointmentTimes({ scheduledStart, scheduledEnd }).errors;
       if (errs.length > 0) throw new ValidationError(`Invalid appointment: ${errs.join(', ')}`);
+
+      // Combined move (new time AND new tech): the TARGET must be validated
+      // against the NEW window, but assignTechnician's double-booking pre-flight
+      // reads the appointment's CURRENT time from the repo. So the correct order
+      // is DETACH the old tech → MOVE the time → ATTACH the new tech:
+      //  - Detaching first stops the appointment-time UPDATE (which re-stamps
+      //    the still-attached primary's window via the DB trigger) from 409-ing
+      //    on the OLD tech's availability at the new window — we're moving off
+      //    them anyway.
+      //  - Attaching last means the target's pre-flight (and the DB EXCLUDE
+      //    backstop `no_double_booking`) check the NEW window: a valid move into
+      //    a slot the target is free for is accepted, and a real clash caught.
+      // Leaving the tech untouched (technicianId undefined) or re-selecting the
+      // same tech keeps them attached, so the time UPDATE re-stamps their window
+      // and the DB trigger correctly checks that same tech at the new slot.
+      const currentPrimary = (await deps.assignmentRepo.findByAppointment(tenantId, existing.id)).find(
+        (a) => a.isPrimary,
+      );
+      const currentPrimaryTech = currentPrimary?.technicianId ?? null;
+      const changingTech =
+        input.technicianId !== undefined && input.technicianId !== currentPrimaryTech;
+
+      if (changingTech && currentPrimary) {
+        await unassignTechnician(tenantId, currentPrimary.id, deps.assignmentRepo, {
+          auditRepo: deps.auditRepo,
+          actorId,
+          actorRole,
+          appointmentId: existing.id,
+          technicianId: currentPrimary.technicianId,
+        });
+      }
+
       const updated = await deps.appointmentRepo.update(tenantId, existing.id, {
         scheduledStart,
         scheduledEnd,
@@ -269,6 +292,14 @@ export async function syncJobSchedule(
       });
       if (!updated) throw new NotFoundError('Appointment', existing.id);
       appointment = updated;
+
+      // Attach the target AFTER the move so its double-booking check sees the
+      // new window. null = leave unassigned (already detached above). The
+      // `!== undefined` re-narrows for the type checker (changingTech already
+      // implies it).
+      if (changingTech && input.technicianId !== undefined && input.technicianId !== null) {
+        await ensurePrimaryTechnician(deps, tenantId, appointment.id, input.technicianId, actorId, actorRole);
+      }
     } else {
       const durationMin = input.durationMin ?? DEFAULT_DURATION_MIN;
       const scheduledEnd = new Date(scheduledStart.getTime() + durationMin * 60_000);

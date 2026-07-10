@@ -34,8 +34,6 @@ import {
   transitionJobStatus,
   JobTimelineRepository,
 } from '../jobs/job-lifecycle';
-import { scheduleJob } from '../jobs/schedule-job';
-import { AppointmentRepository } from '../appointments/appointment';
 import { AuditRepository } from '../audit/audit';
 import { Queue } from '../queues/queue';
 import { FeedbackDispatcher } from '../feedback/dispatcher';
@@ -102,24 +100,6 @@ export function createJobRouter(
       userRepo: scheduleSyncDeps.userRepo,
     };
   };
-   * Issue 2 (dispatch board) — when present, enables POST /:id/schedule to
-   * create an appointment for a job (so it shows on the dispatch board) and
-   * move the job to `scheduled`. Optional so callers/tests that don't wire an
-   * appointment repo stay valid (the route returns 503 NOT_CONFIGURED).
-   */
-  appointmentRepo?: AppointmentRepository,
-): Router {
-  const router = Router();
-
-  const scheduleJobBodySchema = z
-    .object({
-      scheduledStart: z.string().datetime(),
-      scheduledEnd: z.string().datetime().optional(),
-      durationMin: z.number().int().positive().max(24 * 60).optional(),
-      timezone: z.string().min(1).optional(),
-      notes: z.string().optional(),
-    })
-    .strict();
 
   const fromEstimateBodySchema = z
     .object({
@@ -135,6 +115,37 @@ export function createJobRouter(
   // `queue` is retained in the signature (app-level DI) but the on-completion
   // review-request enqueue moved to the 24h review-request sweep (US-345).
   void queue;
+
+  // Embed a lightweight customer summary on job list rows so the UI can show
+  // the customer name without a second round-trip. Jobs whose customer can't
+  // be resolved (deleted / cross-tenant) stay unenriched.
+  const attachCustomerSummaries = async <T extends { customerId: string }>(
+    tenantId: string,
+    jobs: T[],
+  ): Promise<Array<T & { customer?: Record<string, unknown> }>> => {
+    if (!customerRepo || jobs.length === 0) return jobs;
+    const customerIds = [...new Set(jobs.map((j) => j.customerId).filter(Boolean))];
+    const customers = await Promise.all(
+      customerIds.map((id) => customerRepo.findById(tenantId, id).catch(() => null)),
+    );
+    const customerById = new Map(
+      customers.filter((c): c is Customer => c !== null).map((c) => [c.id, c]),
+    );
+    return jobs.map((j) => {
+      const c = customerById.get(j.customerId);
+      return c
+        ? {
+            ...j,
+            customer: {
+              id: c.id,
+              displayName: c.displayName,
+              firstName: c.firstName,
+              lastName: c.lastName,
+            },
+          }
+        : j;
+    });
+  };
 
   router.post(
     '/',
@@ -290,7 +301,10 @@ export function createJobRouter(
     '/:id/schedule',
     requireAuth,
     requireTenant,
-    requirePermission('jobs:update'),
+    // Scheduling a job books an appointment on the dispatch board. Gate on the
+    // appointment-create permission (owner/dispatcher) rather than jobs:update —
+    // a technician holds jobs:update but must not be able to book/move work.
+    requirePermission('appointments:create'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const syncDeps = buildScheduleSyncDeps();
@@ -327,7 +341,9 @@ export function createJobRouter(
     '/:id/reassign',
     requireAuth,
     requireTenant,
-    requirePermission('jobs:update'),
+    // Reassigning moves an existing appointment to another technician — an
+    // appointment mutation, not a job edit. Owner/dispatcher only.
+    requirePermission('appointments:update'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const syncDeps = buildScheduleSyncDeps();
@@ -357,7 +373,9 @@ export function createJobRouter(
     '/:id/unschedule',
     requireAuth,
     requireTenant,
-    requirePermission('jobs:update'),
+    // Unscheduling cancels the appointment and clears the dispatch slot — an
+    // appointment mutation. Owner/dispatcher only.
+    requirePermission('appointments:update'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const syncDeps = buildScheduleSyncDeps();

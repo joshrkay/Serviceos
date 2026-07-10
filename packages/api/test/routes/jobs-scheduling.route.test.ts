@@ -50,7 +50,7 @@ function fakeUserRepo(users: User[]): UserRepository {
   };
 }
 
-function build(users: User[] = [tech(TECH_1), tech(TECH_2)]) {
+function build(users: User[] = [tech(TECH_1), tech(TECH_2)], role: 'owner' | 'dispatcher' | 'technician' = 'owner') {
   const jobRepo = new InMemoryJobRepository();
   const timelineRepo = new InMemoryJobTimelineRepository();
   const auditRepo = new InMemoryAuditRepository();
@@ -61,7 +61,7 @@ function build(users: User[] = [tech(TECH_1), tech(TECH_2)]) {
   const app = express();
   app.use(express.json());
   app.use((req: Request, _res: Response, next: NextFunction) => {
-    (req as AuthenticatedRequest).auth = { userId: USER, sessionId: 's-1', tenantId: TENANT, role: 'owner' };
+    (req as AuthenticatedRequest).auth = { userId: USER, sessionId: 's-1', tenantId: TENANT, role };
     next();
   });
   app.use(
@@ -258,5 +258,29 @@ describe('job cancellation propagates to the appointment (U5)', () => {
     const res = await request(app).post(`/api/jobs/${jobId}/transition`).send({ status: 'canceled' });
     expect(res.status).toBe(200);
     expect(res.body.job.status).toBe('canceled');
+  });
+});
+
+describe('scheduling endpoints require appointment permissions, not jobs:update (P1)', () => {
+  // A technician holds jobs:update but NOT appointments:create/update, so they
+  // must not be able to book, move, or clear work on the dispatch board. The
+  // permission gate runs before the handler, so an unknown job still 403s.
+  it('403s a technician on /schedule, /reassign, and /unschedule', async () => {
+    const { app } = build([tech(TECH_1)], 'technician');
+    const jobId = uuidv4();
+    for (const path of ['schedule', 'reassign', 'unschedule']) {
+      const res = await request(app)
+        .post(`/api/jobs/${jobId}/${path}`)
+        .send({ scheduledStart: START_ISO, technicianId: TECH_1 });
+      expect(res.status).toBe(403);
+    }
+  });
+
+  it('lets a dispatcher past the gate (unknown job → 404, proving the permission passed)', async () => {
+    const { app } = build([tech(TECH_1)], 'dispatcher');
+    const res = await request(app)
+      .post(`/api/jobs/${uuidv4()}/schedule`)
+      .send({ scheduledStart: START_ISO, technicianId: TECH_1 });
+    expect(res.status).toBe(404);
   });
 });

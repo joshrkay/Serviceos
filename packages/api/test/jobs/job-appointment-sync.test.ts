@@ -191,6 +191,45 @@ describe('U2 — syncJobSchedule', () => {
     expect((await getJob(TENANT, job.id, jobRepo))!.assignedTechnicianId).toBe(TECH_2);
   });
 
+  it('combined move validates the target tech against the NEW window, not the old one', async () => {
+    // TECH_2 is booked at START on their own job, and free at NEW_START.
+    const otherJob = await newJob();
+    await syncJobSchedule(deps([tech(TECH_2)]), scheduleInput(otherJob.id, { scheduledStart: START, technicianId: TECH_2 }));
+
+    // jobA sits at START under TECH_1. Move it to NEW_START AND onto TECH_2.
+    const job = await newJob();
+    await syncJobSchedule(deps([tech(TECH_1), tech(TECH_2)]), scheduleInput(job.id)); // TECH_1 @ START
+
+    // The old order validated TECH_2 against START (where they ARE booked) and
+    // wrongly 409'd. The correct order detaches TECH_1, moves to NEW_START, then
+    // checks TECH_2 at NEW_START (free) — so this must succeed.
+    const res = await syncJobSchedule(deps([tech(TECH_1), tech(TECH_2)]), {
+      operation: 'schedule', tenantId: TENANT, jobId: job.id, actorId: 'owner-1', actorRole: 'owner',
+      scheduledStart: NEW_START, technicianId: TECH_2,
+    });
+    const primaries = (await assignmentRepo.findByAppointment(TENANT, res.appointment!.id)).filter((a) => a.isPrimary);
+    expect(primaries.map((a) => a.technicianId)).toEqual([TECH_2]);
+    expect(res.appointment!.scheduledStart.toISOString()).toBe(NEW_START.toISOString());
+    // TECH_1 was detached, not left dangling as a second primary.
+    expect(primaries).toHaveLength(1);
+  });
+
+  it('combined move still rejects when the target tech is busy at the NEW window (ConflictError)', async () => {
+    // TECH_2 is booked at NEW_START on their own job.
+    const otherJob = await newJob();
+    await syncJobSchedule(deps([tech(TECH_2)]), scheduleInput(otherJob.id, { scheduledStart: NEW_START, technicianId: TECH_2 }));
+
+    const job = await newJob();
+    await syncJobSchedule(deps([tech(TECH_1), tech(TECH_2)]), scheduleInput(job.id)); // TECH_1 @ START
+
+    await expect(
+      syncJobSchedule(deps([tech(TECH_1), tech(TECH_2)]), {
+        operation: 'schedule', tenantId: TENANT, jobId: job.id, actorId: 'owner-1', actorRole: 'owner',
+        scheduledStart: NEW_START, technicianId: TECH_2,
+      }),
+    ).rejects.toBeInstanceOf(ConflictError);
+  });
+
   it('reassign to a different technician moves the lane; to null clears it (unassigned)', async () => {
     const job = await newJob();
     const scheduled = await syncJobSchedule(deps([tech(TECH_1), tech(TECH_2)]), scheduleInput(job.id));
