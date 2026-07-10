@@ -5,7 +5,8 @@ import { pageMetadata } from '@/lib/metadata';
 
 export const metadata: Metadata = pageMetadata({
   title: 'Go-live pending',
-  description: 'The production app hand-off is connected at go-live.',
+  description:
+    'This preview build isn’t wired to the production app yet. At launch, this step hands off to product onboarding.',
   path: '/go-live-pending',
 });
 
@@ -16,18 +17,28 @@ export const metadata: Metadata = pageMetadata({
 export default function GoLivePendingPage() {
   return (
     <Section as="div" className="pt-24">
-      <div className="mx-auto max-w-xl rounded-lg border border-border bg-surface p-8 text-center">
-        <h1 className="font-display text-3xl font-bold text-fg">Almost there</h1>
-        <p className="mt-4 text-fg-muted">
-          The production app hand-off is connected at go-live. In this preview build,
-          <code className="mx-1 rounded bg-surface-muted px-1.5 py-0.5 text-sm">NEXT_PUBLIC_APP_URL</code>
-          is not set yet, so onboarding into the live product is not wired.
+      <div className="mx-auto max-w-xl rounded-xl border border-border bg-surface p-8 text-center">
+        <p className="eyebrow">Preview build</p>
+        <h1 className="mt-3 font-display text-3xl font-bold tracking-[-0.01em] text-fg">
+          Almost there
+        </h1>
+        <p className="mt-4 leading-relaxed text-fg-muted">
+          Straight talk: this preview isn’t wired to the production app yet. At launch, this step
+          hands you straight into onboarding — where we set up your number, tune the AI to your
+          shop’s voice, and run a test call.
         </p>
-        <p className="mt-4 text-sm text-fg-muted">
-          Once the app URL is configured, the &ldquo;Continue to setup&rdquo; button on the success page
-          will take new customers straight into product onboarding.
+        <p className="mt-4 text-sm leading-relaxed text-fg-subtle">
+          Under the hood, the{' '}
+          <code className="data mx-1 rounded bg-surface-sunk px-1.5 py-0.5 text-sm">
+            NEXT_PUBLIC_APP_URL
+          </code>{' '}
+          setting isn’t configured on this build. Once it is, the “Continue to setup” button on the
+          success page takes new customers directly into the live product.
         </p>
-        <div className="mt-8">
+        <div className="mt-8 flex flex-col justify-center gap-3 sm:flex-row">
+          <Link href="/how-it-works" className="btn-secondary">
+            See how it works
+          </Link>
           <Link href="/" className="btn-secondary">
             Back to home
           </Link>

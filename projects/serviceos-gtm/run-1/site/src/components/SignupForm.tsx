@@ -85,12 +85,13 @@ export function SignupForm() {
         <label htmlFor="businessName" className="field-label">
           Business name
         </label>
+        <p className="mt-0.5 text-xs text-fg-muted">This is what the AI says when it answers your phone.</p>
         <input
           id="businessName"
           name="businessName"
           type="text"
           autoComplete="organization"
-          className="field-input"
+          className="field-input mt-1.5"
           value={businessName}
           onChange={(e) => setBusinessName(e.target.value)}
           aria-invalid={Boolean(errors.businessName)}
@@ -129,12 +130,13 @@ export function SignupForm() {
         <label htmlFor="email" className="field-label">
           Work email
         </label>
+        <p className="mt-0.5 text-xs text-fg-muted">Your trial confirmation and setup steps go here.</p>
         <input
           id="email"
           name="email"
           type="email"
           autoComplete="email"
-          className="field-input"
+          className="field-input mt-1.5"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
           aria-invalid={Boolean(errors.email)}
@@ -149,7 +151,7 @@ export function SignupForm() {
 
       <fieldset>
         <legend className="field-label">Your trade</legend>
-        <div className="flex flex-wrap gap-2">
+        <div className="mt-1.5 flex flex-wrap gap-2">
           {VERTICALS.map((v) => (
             <label
               key={v}
@@ -173,7 +175,8 @@ export function SignupForm() {
 
       <fieldset>
         <legend className="field-label">Plan</legend>
-        <div className="grid gap-3 sm:grid-cols-3">
+        <p className="mt-0.5 text-xs text-fg-muted">Pick by shop size — every plan is the full product.</p>
+        <div className="mt-1.5 grid gap-3 sm:grid-cols-3">
           {PLAN_ORDER.map((id) => {
             const p = PLANS[id];
             return (
@@ -204,7 +207,7 @@ export function SignupForm() {
         {submitting ? 'Starting…' : 'Start 14-day free trial'}
       </button>
       <p className="text-center text-xs text-fg-muted">
-        Card required. You will not be charged until the trial ends. Cancel anytime.
+        Card required. Nothing is charged until day 15. Cancel anytime before then.
       </p>
     </form>
   );

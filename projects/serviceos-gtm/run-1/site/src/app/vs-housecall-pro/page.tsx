@@ -5,28 +5,28 @@ import { CompareTable, type CompareGroup, type CompareSource } from '@/component
 import { pageMetadata } from '@/lib/metadata';
 
 export const metadata: Metadata = pageMetadata({
-  title: 'Rivet vs Jobber: The AI Jobber Alternative',
+  title: 'Housecall Pro Alternative: Rivet vs HCP',
   description:
-    'An honest Rivet vs Jobber comparison for 1–3-truck HVAC & plumbing shops: AI that answers the phone and does the paperwork, every action owner-approved.',
-  path: '/vs-jobber',
+    'Honest Rivet vs Housecall Pro comparison for small HVAC & plumbing shops: AI answers calls and closes the back-office loop, every action owner-approved.',
+  path: '/vs-housecall-pro',
 });
 
 const SOURCES: CompareSource[] = [
-  { id: 1, label: 'getjobber.com/pricing', href: 'https://www.getjobber.com/pricing/' },
+  { id: 1, label: 'housecallpro.com/pricing', href: 'https://www.housecallpro.com/pricing/' },
   {
     id: 2,
-    label: 'getjobber.com/features/ai-receptionist',
-    href: 'https://www.getjobber.com/features/ai-receptionist/',
+    label: 'help.housecallpro.com — CSR AI Overview',
+    href: 'https://help.housecallpro.com/en/articles/9740104-csr-ai-overview',
   },
   {
     id: 3,
-    label: 'help.getjobber.com — Receptionist powered by Jobber AI',
-    href: 'https://help.getjobber.com/hc/en-us/articles/25315927533847-Receptionist-powered-by-Jobber-AI',
+    label: 'housecallpro.com/features/ai-team/csr-ai',
+    href: 'https://www.housecallpro.com/features/ai-team/csr-ai/',
   },
   {
     id: 4,
-    label: 'help.getjobber.com — Jobber AI Voice and Chat (Beta)',
-    href: 'https://help.getjobber.com/hc/en-us/articles/25315900454423-Jobber-AI-Voice-and-Chat-Beta',
+    label: 'housecallpro.com — February 2026 product updates',
+    href: 'https://www.housecallpro.com/resources/february-2026-product-updates/',
   },
 ];
 
@@ -34,37 +34,32 @@ const GROUPS: CompareGroup[] = [
   {
     name: 'Phone & booking',
     rows: [
-      { feature: 'AI answers calls 24/7 in your shop’s own voice', us: true, them: true, themRefs: [2, 3] },
+      { feature: 'AI answers calls & chats 24/7 in your shop’s voice', us: true, them: true, themRefs: [2, 3] },
       {
         feature: 'Checks real drive-time availability and proposes the booking',
         us: true,
-        them: 'Books simple visits',
+        them: 'Booking “coming soon”',
         themRefs: [2],
       },
       {
         feature: 'Answer → book → draft quote → invoice in one conversation',
         us: true,
-        them: 'Separate tools',
-        themRefs: [3, 4],
+        them: 'Not yet (booking pending)',
+        themRefs: [2],
       },
-      { feature: 'Dropped-call SMS recovery (~60s)', us: true, them: 'Texts back hang-ups', themRefs: [3] },
+      { feature: 'Dropped-call SMS recovery (~60s)', us: true, them: 'Not documented' },
       {
         feature: 'Emergency / vulnerable-caller detection → patched to owner',
         us: true,
-        them: 'Keyword handoff',
-        themRefs: [3],
+        them: 'Qualifies & tags call reason',
+        themRefs: [4],
       },
     ],
   },
   {
     name: 'Estimates & invoices',
     rows: [
-      {
-        feature: 'Voice-drafted, catalog-priced estimates (good/better/best)',
-        us: true,
-        them: 'In-app AI Voice (Beta)',
-        themRefs: [4],
-      },
+      { feature: 'Voice-drafted, catalog-priced estimates (good/better/best)', us: true, them: 'Estimates (manual)', themRefs: [1] },
       { feature: 'E-sign + Stripe deposit on acceptance', us: true, them: true, themRefs: [1] },
       { feature: 'Auto-invoice on completion + dunning + capped late fees', us: true, them: true, themRefs: [1] },
     ],
@@ -74,7 +69,7 @@ const GROUPS: CompareGroup[] = [
     rows: [
       { feature: 'Card payments + payment links', us: true, them: true, themRefs: [1] },
       { feature: 'ACH / bank payments', us: 'Not yet', them: true, themRefs: [1] },
-      { feature: 'Tips, Tap to Pay, consumer financing', us: 'Not yet', them: true, themRefs: [1] },
+      { feature: 'Tips, Tap to Pay, financing, instant payout', us: 'Not yet', them: true, themRefs: [1] },
     ],
   },
   {
@@ -96,7 +91,7 @@ const GROUPS: CompareGroup[] = [
     name: 'Integrations',
     rows: [
       { feature: 'QuickBooks', us: 'One-way (paid invoices)', them: 'Two-way, deep' },
-      { feature: '10-year integrations ecosystem', us: 'Newer', them: true },
+      { feature: 'Established integrations ecosystem', us: 'Newer', them: true },
     ],
   },
   {
@@ -105,64 +100,64 @@ const GROUPS: CompareGroup[] = [
       {
         feature: 'Flat monthly price with AI included',
         us: '$299 / $499 / $799 flat',
-        them: 'Add-on, per-conversation',
-        themRefs: [1, 2],
+        them: '$59–$329/mo + AI Team',
+        themRefs: [1],
       },
     ],
   },
 ];
 
 const AHEAD = [
-  'Native iOS and Android apps. Rivet runs in your phone’s browser as a PWA; Jobber ships real app-store apps your crew may prefer in the field.',
-  'Tips, Tap to Pay, consumer financing, and instant payouts. Jobber offers all of these at the point of payment. Rivet takes card payments and payment links only today.',
-  'Deep two-way QuickBooks sync. Rivet pushes paid invoices one-way; Jobber’s accounting integration is more mature and bidirectional.',
-  'A 10-year ecosystem. Jobber has a large integrations marketplace, a long track record, and years of workflow polish for office staff who live in a dashboard.',
-  'A richer client hub. Jobber’s Client Hub supports in-portal tipping and a decade of refinement; Rivet’s token portal is simpler by design.',
+  'Native iOS and Android apps. Rivet runs in your phone’s browser as a PWA; Housecall Pro ships polished app-store apps your techs may prefer in the field.',
+  'Tips, Tap to Pay, consumer financing, and instant payout. Housecall Pro offers these at the point of payment; Rivet takes card payments and payment links only today.',
+  'Deep two-way QuickBooks sync. Rivet pushes paid invoices one-way; Housecall Pro’s accounting integration is more mature and bidirectional.',
+  'A larger, established ecosystem: a mature marketplace, a longer track record, and years of workflow polish for shops that already have office staff.',
+  'Marketing and price-book tooling refined over years, plus a customizable CSR AI voice and call-reason tagging shipped in its February 2026 release.',
 ];
 
 const FAQS = [
   {
-    q: 'Is Rivet a good Jobber alternative for a small HVAC or plumbing shop?',
-    a: 'It depends on what’s actually broken. If your problem is paperwork and you have office staff to run a dashboard, Jobber-style tools work fine. If your real problem is that nobody answers the phone or does the estimate, invoice, and follow-up without you, Rivet is built for that gap: an AI that answers calls 24/7 in your shop’s voice, checks real availability, and proposes the booking — then drafts catalog-priced estimates and invoices from the same conversation, every action approved by you with one tap.',
+    q: 'Is Rivet a good Housecall Pro alternative for a small plumbing business?',
+    a: 'If you want a tool you operate yourself and you have office staff, Housecall Pro is a strong, mature choice. If your real problem is that no one answers the phone or closes out the estimate and invoice without you, Rivet is built for that: an AI that answers 24/7 in your shop’s voice, checks real availability, proposes the booking, and drafts catalog-priced estimates and invoices from the same conversation — every action approved by you in one tap.',
   },
   {
-    q: 'Does Jobber’s AI Receptionist book jobs automatically?',
-    a: 'Per Jobber’s own materials, yes for straightforward requests — it can offer to book a visit, capture details, or take a message, and it texts back callers who hang up (getjobber.com/features/ai-receptionist, accessed July 2026). It answers calls and texts only. It’s included on Jobber’s Plus plan or available as an add-on elsewhere at $29/mo for 30 conversations, then $0.79 per additional conversation.',
+    q: 'Does Housecall Pro have an AI receptionist that books jobs?',
+    a: 'Housecall Pro’s CSR AI answers calls and chats around the clock, engages customers, asks clarifying questions, and (as of its February 2026 release) tags call reasons for revenue tracking. But per its Help Center, autonomous job-booking is listed as “coming soon” rather than a currently shipped capability (help.housecallpro.com, accessed July 2026). Confirm current status before relying on it — Housecall Pro ships quickly and this may have changed.',
   },
   {
-    q: 'How does Rivet’s pricing compare to Jobber’s?',
-    a: 'Rivet is a flat $299 (Solo) / $499 (Shop) / $799 (Pro) per month with the AI included and a 14-day free trial (card required). Jobber lists plans from $29/mo (Core, one user, billed annually) up to a Plus plan reported around $599/mo monthly, and its AI Receptionist is a per-conversation add-on on most tiers. Jobber’s pricing page and secondary breakdowns disagree on individual-vs-team framing, so confirm current numbers on getjobber.com/pricing before you decide.',
+    q: 'How does Rivet’s pricing compare to Housecall Pro’s?',
+    a: 'Rivet is a flat $299 (Solo) / $499 (Shop) / $799 (Pro) per month with the AI included and a 14-day free trial (card required). Housecall Pro’s plans are reported in a $59–$79 (Basic) / $149–$189 (Essentials) / $299–$329 (MAX) per-month band, with additional users and its AI Team features layered on (housecallpro.com/pricing and secondary breakdowns, accessed July 2026 — sources disagree on exact digits, so confirm on the live pricing page).',
   },
   {
-    q: 'What does Rivet do that Jobber doesn’t?',
-    a: 'Rivet closes the loop in one conversation and wraps every step in a trust layer. Jobber’s Receptionist captures the request; a separate in-app AI Voice tool drafts quotes and invoices. Rivet answers, books, drafts the catalog-priced estimate, and raises the invoice from the same call — and every action is a typed proposal a supervisor agent reviews and you approve, with a full audit trail and undo. Prices are always grounded in your own price book, so the AI never invents a number.',
+    q: 'What does Rivet do that Housecall Pro’s CSR AI doesn’t?',
+    a: 'Rivet closes the loop today. Housecall Pro’s CSR AI answers and qualifies, but autonomous booking is “coming soon.” Rivet answers, books against real drive-time availability, drafts the catalog-priced estimate, and raises the invoice from the same call — and wraps every step in a trust layer: typed proposals, a supervisor second-pass, uncertain prices flagged and never auto-approved, one-tap owner approval, and a full audit trail with undo.',
   },
   {
-    q: 'Where is Jobber still ahead of Rivet?',
-    a: 'Honestly, in several places: native mobile apps, tips, Tap to Pay, consumer financing, deep two-way QuickBooks sync, a 10-year integrations ecosystem, and a more refined client hub. If those matter to you, Jobber is the safer pick today.',
+    q: 'Where is Housecall Pro ahead of Rivet?',
+    a: 'In several places: native mobile apps, tips, Tap to Pay, consumer financing and instant payout, deep two-way QuickBooks sync, a larger established ecosystem, and mature marketing and price-book tooling. If those matter most to you, Housecall Pro is the safer pick today.',
   },
   {
-    q: 'How hard is it to switch from Jobber to Rivet?',
-    a: 'You don’t have to port your phone number to get started — forward your existing line to your Rivet number and you’re live, with full porting optional later. Onboarding sets up your brand voice and builds your catalog from your existing price list, with a design target of under 48 hours to your first AI-handled call.',
+    q: 'How do I switch from Housecall Pro to Rivet?',
+    a: 'You don’t have to port your phone number to start — forward your existing line to your Rivet number and you’re live, with full porting optional later. Onboarding sets up your brand voice, runs a test call, and builds your catalog from your existing price list, with a design target of under 48 hours to your first AI-handled call.',
   },
 ];
 
-export default function VsJobberPage() {
+export default function VsHousecallProPage() {
   return (
     <>
       <Section as="div" className="pt-16">
         <div className="mx-auto max-w-3xl">
-          <p className="eyebrow">Rivet vs Jobber</p>
+          <p className="eyebrow">Rivet vs Housecall Pro</p>
           <h1 className="mt-4 font-display text-4xl font-bold text-fg">
-            Rivet vs. Jobber: which one runs your back office?
+            Rivet vs. Housecall Pro: which one runs your back office?
           </h1>
           <p className="mt-6 text-lg text-fg-muted">
-            Jobber is software you operate: a mature dashboard your office staff uses to run
-            scheduling, quoting, and invoicing. Rivet is an AI that operates the office for you — it
-            answers the phone 24/7 in your shop’s voice, books the job, and drafts the estimate and
-            invoice, with every action approved by you in one tap. Rivet is built for 1–3-truck HVAC
-            and plumbing shops with no office staff; if you have a team that lives in a dashboard and
-            want the biggest ecosystem, Jobber is likely the better fit.
+            Housecall Pro is software you operate: a mature platform your office staff uses to run
+            scheduling, quoting, invoicing, and marketing. Rivet is an AI that operates the office
+            for you — it answers the phone 24/7 in your shop’s voice, books the job, and drafts the
+            estimate and invoice, with every action approved by you in one tap. Rivet is built for
+            1–3-truck HVAC and plumbing shops with no office staff; if you have a team that lives in a
+            dashboard and want the biggest ecosystem, Housecall Pro is likely the better fit.
           </p>
         </div>
       </Section>
@@ -173,12 +168,12 @@ export default function VsJobberPage() {
         </h2>
         <div className="mx-auto mt-6 grid max-w-3xl gap-6 sm:grid-cols-2">
           <div className="rounded-lg border border-border bg-surface p-6">
-            <h3 className="font-display text-lg font-semibold text-fg">Choose Jobber if…</h3>
+            <h3 className="font-display text-lg font-semibold text-fg">Choose Housecall Pro if…</h3>
             <ul className="mt-3 space-y-2 text-sm text-fg-muted">
               <li>You have office staff who live in a dashboard all day.</li>
               <li>You want native mobile apps for the crew.</li>
               <li>You need tips, financing, or Tap to Pay at the point of payment.</li>
-              <li>You value a 10-year ecosystem and deep QuickBooks sync.</li>
+              <li>You value mature marketing tools and deep QuickBooks sync.</li>
             </ul>
           </div>
           <div className="rounded-lg border border-primary bg-surface p-6">
@@ -186,8 +181,8 @@ export default function VsJobberPage() {
             <ul className="mt-3 space-y-2 text-sm text-fg-muted">
               <li>You have no office staff and answer the phone yourself.</li>
               <li>You want calls answered and paperwork done for you, not by you.</li>
-              <li>You want the estimate, invoice, and follow-up to happen automatically.</li>
-              <li>You want a flat price with the AI included, not a per-conversation add-on.</li>
+              <li>You want the booking, estimate, and invoice to happen — and close — automatically.</li>
+              <li>You want a flat price with the AI included.</li>
             </ul>
           </div>
         </div>
@@ -196,20 +191,20 @@ export default function VsJobberPage() {
       <Section aria-labelledby="compare-heading">
         <div className="mx-auto max-w-4xl">
           <h2 id="compare-heading" className="font-display text-2xl font-bold text-fg">
-            Rivet vs. Jobber, feature by feature
+            Rivet vs. Housecall Pro, feature by feature
           </h2>
           <p className="mt-3 text-sm text-fg-muted">
             Rivet values reflect shipped capability; where Rivet doesn’t yet do something, it says
-            “Not yet.” Jobber values are sourced from the pages linked below the table.
+            “Not yet.” Housecall Pro values are sourced from the pages linked below the table.
           </p>
           <div className="mt-8">
             <CompareTable
-              caption="How Rivet and Jobber compare on phone answering, quoting, invoicing, payments, trust, mobile, integrations, and price for a 1–3-truck home-service shop."
+              caption="How Rivet and Housecall Pro compare on phone answering, quoting, invoicing, payments, trust, mobile, integrations, and price for a 1–3-truck home-service shop."
               brand="Rivet"
-              competitor="Jobber"
+              competitor="Housecall Pro"
               groups={GROUPS}
               sources={SOURCES}
-              idPrefix="jobber-src"
+              idPrefix="hcp-src"
             />
           </div>
         </div>
@@ -218,15 +213,15 @@ export default function VsJobberPage() {
       <Section aria-labelledby="ai-model-heading" className="bg-surface-muted">
         <div className="mx-auto max-w-3xl">
           <h2 id="ai-model-heading" className="font-display text-2xl font-bold text-fg">
-            The real difference: capture vs. close the loop
+            The real difference: qualify vs. close the loop
           </h2>
           <p className="mt-4 text-fg-muted">
-            Jobber’s AI Receptionist captures the request — it answers the call, offers to book a
-            simple visit, and texts back callers who hang up (getjobber.com/features/ai-receptionist,
-            accessed July 2026). Drafting quotes and sending invoices lives in a separate in-app
-            “Jobber AI Voice and Chat (Beta)” tool that an admin drives by hand
-            (help.getjobber.com, accessed July 2026). The receptionist captures; a person still
-            carries the work the rest of the way.
+            Housecall Pro’s CSR AI answers calls and chats 24/7, engages callers with clarifying
+            questions, and tags the reason for each call for revenue tracking (its February 2026
+            release added New Job Inquiry, Emergency Repair, Follow-Up, and Sales Call tags). But per
+            its own Help Center, autonomous job-booking is listed as “coming soon”
+            (help.housecallpro.com, accessed July 2026) — the AI answers and qualifies, and a person
+            still books and carries the work forward.
           </p>
           <p className="mt-4 text-fg-muted">
             Rivet closes the loop in one conversation: it answers, checks real drive-time
@@ -253,16 +248,13 @@ export default function VsJobberPage() {
             a 14-day free trial (card required, cancel any time before day 15).
           </p>
           <p className="mt-4 text-fg-muted">
-            <strong className="text-fg">Jobber</strong> lists plans starting at $29/mo (Core, one
-            user, billed annually) and, per secondary pricing breakdowns, ranges up through Connect
-            and Grow tiers to a Plus plan reported around $599/mo monthly (getjobber.com/pricing,
-            accessed July 2026). Its AI Receptionist is included on the Plus plan but is a
-            per-conversation add-on elsewhere — $29/mo for 30 conversations, then $0.79 per
-            additional conversation (getjobber.com/features/ai-receptionist, accessed July 2026). So
-            a mid-tier Jobber plan plus AI usage is billed separately from the base subscription,
-            where Rivet folds it into one flat number. Jobber’s own pricing page and third-party
-            breakdowns disagree on individual-vs-team framing and exact digits, so confirm current
-            numbers directly before deciding.
+            <strong className="text-fg">Housecall Pro</strong> is reported in a band of roughly
+            $59–$79/mo (Basic, one user), $149–$189/mo (Essentials, up to five users), and
+            $299–$329/mo (MAX), with additional users around $35/mo each and its AI Team / CSR AI
+            features layered on (housecallpro.com/pricing and secondary breakdowns, accessed July
+            2026). Its free trial runs 14 days with full MAX-plan access and no credit card required
+            to start. Exact digits vary across sources, so confirm current numbers on the live
+            pricing page before deciding.
           </p>
         </div>
       </Section>
@@ -270,7 +262,7 @@ export default function VsJobberPage() {
       <Section aria-labelledby="switch-heading" className="bg-surface-muted">
         <div className="mx-auto max-w-3xl">
           <h2 id="switch-heading" className="font-display text-2xl font-bold text-fg">
-            Switching from Jobber
+            Switching from Housecall Pro
           </h2>
           <p className="mt-4 text-fg-muted">
             You don’t have to port your phone number to try Rivet. The realistic path: forward your
@@ -286,10 +278,11 @@ export default function VsJobberPage() {
       <Section aria-labelledby="ahead-heading">
         <div className="mx-auto max-w-3xl">
           <h2 id="ahead-heading" className="font-display text-2xl font-bold text-fg">
-            Where Jobber is ahead
+            Where Housecall Pro is ahead
           </h2>
           <p className="mt-4 text-fg-muted">
-            We’d rather you self-select than be sold. Here’s where Jobber genuinely leads today:
+            We’d rather you self-select than be sold. Here’s where Housecall Pro genuinely leads
+            today:
           </p>
           <ul className="mt-6 space-y-4">
             {AHEAD.map((item) => (
@@ -304,7 +297,7 @@ export default function VsJobberPage() {
       <Section aria-labelledby="faq-heading" className="bg-surface-muted">
         <div className="mx-auto max-w-3xl">
           <h2 id="faq-heading" className="font-display text-2xl font-bold text-fg">
-            Rivet vs. Jobber FAQ
+            Rivet vs. Housecall Pro FAQ
           </h2>
           <dl className="mt-8 space-y-8">
             {FAQS.map((faq) => (

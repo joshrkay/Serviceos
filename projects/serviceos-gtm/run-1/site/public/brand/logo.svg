@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 362 100" role="img" aria-label="Rivet">
+  <g transform="translate(4,6) scale(1.375)">
+  <path d="M19,5 L45,5 L58,32 L45,59 L19,59 L6,32 Z" fill="#16212B"/>
+  <circle cx="32" cy="32" r="15.5" fill="#0E151C"/>
+  <circle cx="32" cy="32" r="13.5" fill="#E5551B"/>
+  <path d="M41.6,22.4 A13.5,13.5 0 0 0 22.4,41.6 Z" fill="#F6A87F"/>
+  </g>
+  <g transform="translate(108,18) scale(0.64)" fill="#16212B">
+    <g transform="translate(0,0)"><path fill-rule="evenodd" d="M0,0 L44,0 C60,0 70,10 70,27 C70,44 60,54 44,54 L72,100 L46,100 L20,64 L20,100 L0,100 Z M20,20 L43,20 C52,20 58,23 58,27 C58,31 52,34 43,34 L20,34 Z"/></g>
+    <g transform="translate(88,0)"><path d="M0,0 H20 V100 H0 Z"/></g>
+    <g transform="translate(124,0)"><path d="M0,0 L20,0 L42,66 L64,0 L84,0 L52,100 L32,100 Z"/></g>
+    <g transform="translate(224,0)"><path d="M0,0 H66 V20 H20 V40 H58 V58 H20 V80 H66 V100 H0 Z"/></g>
+    <g transform="translate(306,0)"><path d="M0,0 H78 V20 H49 V100 H29 V20 H0 Z"/></g>
+  </g>
+</svg>

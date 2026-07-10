@@ -5,8 +5,8 @@ import { DemoCheckout } from '@/components/DemoCheckout';
 import { pageMetadata } from '@/lib/metadata';
 
 export const metadata: Metadata = pageMetadata({
-  title: 'Demo checkout',
-  description: 'Simulated checkout used when Stripe test keys are not configured.',
+  title: 'Demo Checkout — Rivet ServiceOS',
+  description: 'Simulated checkout used in preview builds when Stripe test keys are not configured.',
   path: '/signup/demo-checkout',
 });
 

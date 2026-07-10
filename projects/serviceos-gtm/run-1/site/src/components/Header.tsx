@@ -1,20 +1,20 @@
 import Link from 'next/link';
-import { PRIMARY_NAV, SITE_NAME } from '@/lib/site';
+import { PRIMARY_NAV } from '@/lib/site';
 
 export function Header() {
   return (
     <header className="sticky top-0 z-40 border-b border-border bg-bg/90 backdrop-blur">
       <div className="container-page flex h-16 items-center justify-between gap-4">
-        {/* Logo slot — brand track drops the real mark in here. */}
-        <Link href="/" className="flex min-h-11 items-center gap-2 font-display text-lg font-bold text-fg">
-          <span
-            aria-hidden
-            className="inline-flex h-8 w-8 items-center justify-center rounded bg-primary text-primary-fg"
-          >
-            {/* COPY-TODO: logo mark */}
-            S
-          </span>
-          <span>{SITE_NAME}</span>
+        {/* Full lockup on the light header bg (ink mark + wordmark, orange dome). */}
+        <Link href="/" className="flex min-h-11 items-center" aria-label="Rivet — home">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src="/brand/logo.svg"
+            alt="Rivet"
+            width={132}
+            height={36}
+            className="h-8 w-auto"
+          />
         </Link>
 
         <nav aria-label="Primary" className="hidden items-center gap-6 md:flex">
@@ -36,7 +36,7 @@ export function Header() {
         </div>
       </div>
 
-      {/* Mobile nav — simple horizontal scroll strip, no overflow at 320px. */}
+      {/* Mobile nav — horizontal scroll strip, no overflow at 320px. */}
       <nav
         aria-label="Primary mobile"
         className="container-page flex gap-4 overflow-x-auto border-t border-border py-2 md:hidden"

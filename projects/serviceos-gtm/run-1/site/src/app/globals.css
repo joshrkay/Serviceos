@@ -10,39 +10,53 @@
   }
   body {
     background-color: var(--color-bg);
-    color: var(--color-fg);
-    font-family: var(--font-sans);
+    color: var(--color-text);
+    font-family: var(--font-body);
+    font-size: var(--text-base); /* 16px min on mobile */
+    line-height: var(--leading-normal);
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
   }
-  /* Keyboard focus visibility for a11y */
+  /* Keyboard focus visibility for a11y — Hot Rivet ring. */
   :focus-visible {
-    outline: 2px solid var(--color-primary);
+    outline: 2px solid var(--color-accent-strong);
     outline-offset: 2px;
+  }
+  /* Respect reduced-motion for the smooth-scroll demo jump. */
+  @media (prefers-reduced-motion: reduce) {
+    html {
+      scroll-behavior: auto;
+    }
   }
 }
 
 @layer components {
   /* Every interactive control here meets the >=44px tap-target rule (min-h-11). */
   .btn {
-    @apply inline-flex min-h-11 items-center justify-center rounded px-5 py-2.5 text-sm font-semibold transition-colors;
+    @apply inline-flex min-h-11 items-center justify-center gap-2 rounded-md px-6 py-2.5 text-base font-semibold tracking-[0.01em] transition;
   }
+  /* Primary uses accent-strong (#C4470F) + white: AA at all sizes, still Hot Rivet. */
   .btn-primary {
-    @apply btn bg-primary text-primary-fg hover:opacity-90;
+    @apply btn bg-accent-strong text-white shadow-sm hover:brightness-95;
   }
   .btn-secondary {
-    @apply btn border border-border bg-surface text-fg hover:bg-surface-muted;
+    @apply btn border border-border-strong bg-transparent text-fg hover:bg-surface;
   }
   .container-page {
     @apply mx-auto w-full max-w-content px-4 sm:px-6 lg:px-8;
   }
+  /* Section label motif: uppercase Plex 600, +0.08em, accent-strong. */
   .eyebrow {
-    @apply text-xs font-semibold uppercase tracking-widest text-fg-muted;
+    @apply text-xs font-semibold uppercase tracking-[0.08em] text-accent-strong;
   }
   .field-label {
     @apply mb-1.5 block text-sm font-medium text-fg;
   }
   .field-input {
-    @apply min-h-11 w-full rounded border border-border bg-surface px-3 py-2 text-fg placeholder:text-fg-muted focus:border-primary;
+    @apply min-h-11 w-full rounded-md border border-border-strong bg-bg px-3 py-2 text-base text-fg placeholder:text-fg-subtle focus:border-accent-strong;
+  }
+  /* Monospaced data motif — prices, IDs, phone numbers, confidence scores. */
+  .data {
+    font-family: var(--font-mono);
   }
 }

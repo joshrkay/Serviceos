@@ -1,13 +1,20 @@
 /**
- * Nurture engine hook (INTERFACE + STUB).
+ * Nurture engine hook (INTERFACE + registration point).
  *
- * The lifecycle event bus calls notifyNurture() on every lifecycle event. The
- * dedicated nurture worker fleshes out the real implementation (email/SMS
- * sequences via RESEND_API_KEY etc.). For now this stub only logs so the wiring
- * is provable end-to-end.
+ * The lifecycle event bus (src/lib/lifecycle.ts) calls notifyNurture() on
+ * every lifecycle event. This module owns the swappable-engine interface
+ * (NurtureEngine / setNurtureEngine) so lifecycle.ts and its tests never need
+ * to know which engine is active.
+ *
+ * The real engine (src/lib/nurture/engine.ts — LiveNurtureEngine, backed by
+ * the 8 written sequences, the test-contacts-only allowlist gate, and the
+ * Resend/preview transports) is registered as the active engine at the
+ * bottom of this file, at module load. Tests can still call setNurtureEngine()
+ * to swap in a mock/spy, exactly as before.
  */
 
 import type { LifecycleEvent } from '../lifecycle';
+import { liveNurtureEngine } from './engine';
 
 export interface NurtureNotification {
   /** Which lifecycle moment fired. */
@@ -60,3 +67,14 @@ export async function notifyNurture(event: LifecycleEvent): Promise<void> {
     data: event.data ?? {},
   });
 }
+
+/**
+ * Wire the real nurture engine in as the default active engine. This is the
+ * "prefer registering your engine without editing lifecycle.ts" approach:
+ * lifecycle.ts is untouched, and the moment this module is imported (which it
+ * always is, since lifecycle.ts imports notifyNurture from here), the live
+ * engine takes over from the logging stub. Tests that need a mock still call
+ * setNurtureEngine()/restore stubNurtureEngine in beforeEach/afterEach, which
+ * simply overrides this default for their duration.
+ */
+setNurtureEngine(liveNurtureEngine);

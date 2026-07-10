@@ -44,8 +44,8 @@ export function DemoCheckout() {
         role="status"
         className="rounded-t-lg border border-warning/50 bg-warning/15 px-4 py-3 text-sm text-fg"
       >
-        <strong>SIMULATED CHECKOUT</strong> — Stripe test keys not configured. With keys set, this step is
-        Stripe-hosted checkout.
+        <strong>SIMULATED CHECKOUT</strong> — Stripe test keys aren&apos;t configured in this preview build.
+        With keys set, this step hands off to Stripe-hosted checkout instead.
       </div>
 
       <div className="rounded-b-lg border border-t-0 border-border bg-surface p-6">

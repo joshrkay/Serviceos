@@ -4,15 +4,17 @@ export function Section({
   children,
   className = '',
   as: Tag = 'section',
+  id,
   'aria-labelledby': labelledBy,
 }: {
   children: ReactNode;
   className?: string;
   as?: 'section' | 'div';
+  id?: string;
   'aria-labelledby'?: string;
 }) {
   return (
-    <Tag aria-labelledby={labelledBy} className={`py-16 sm:py-20 ${className}`}>
+    <Tag id={id} aria-labelledby={labelledBy} className={`py-16 sm:py-20 ${className}`}>
       <div className="container-page">{children}</div>
     </Tag>
   );
