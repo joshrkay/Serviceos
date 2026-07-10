@@ -5,6 +5,11 @@
  *
  * QA-2026-07-10 — inbound-voice proposals dropped on a fabricated ai_run_id.
  *
+ * FK-PATH-COVERAGE: src/ai/voice-turn/create-voice-turn-processor.ts
+ * FK-PATH-COVERAGE: src/telephony/twilio-adapter.ts
+ * FK-PATH-COVERAGE: src/ai/agents/customer-calling/inapp-adapter.ts
+ * FK-PATH-COVERAGE: src/proposals/pg-proposal.ts
+ *
  * The telephony voice-turn + Twilio-adapter paths built proposals with a
  * random `aiRunId: uuidv4()`. `proposals.ai_run_id` has an FK to
  * `ai_runs(id)`; a random uuid has no matching row, so the INSERT threw

@@ -23,6 +23,7 @@
     "voice-quality:layer2:weekly": "VOICE_QUALITY_LAYER2_WEEKLY=true vitest run -c vitest.voice-quality-layer2.config.ts",
     "lint": "npm run lint:log-safety && tsc --noEmit -p tsconfig.lint.json",
     "check:ai-gateway-guard": "bash scripts/check-ai-gateway-guard.sh",
+    "check:fk-paths": "bash scripts/check-fk-path-coverage.sh",
     "seed": "ts-node scripts/seed.ts",
     "seed:clean": "ts-node scripts/seed.ts --clean",
     "migrate:dryrun": "ts-node scripts/migrate-dryrun.ts",
