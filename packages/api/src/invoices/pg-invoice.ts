@@ -306,6 +306,36 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
     });
   }
 
+  async incrementAmountPaidAtomic(
+    tenantId: string,
+    id: string,
+    deltaCents: number,
+    now: Date,
+  ): Promise<Invoice | null> {
+    return this.withTenantTransaction(tenantId, async (client) => {
+      // Single atomic UPDATE: the new paid/due/status are derived from the
+      // row's OWN current values, so two concurrent credits both apply (no
+      // lost update). GREATEST(0, …) matches the prior JS Math.max(0, …). The
+      // status CASE mirrors the old newStatus logic exactly.
+      const { rows } = await client.query<{ id: string }>(
+        `UPDATE invoices
+         SET amount_paid_cents = amount_paid_cents + $3,
+             amount_due_cents  = GREATEST(0, total_cents - (amount_paid_cents + $3)),
+             status = CASE
+               WHEN total_cents - (amount_paid_cents + $3) <= 0 THEN 'paid'
+               WHEN amount_paid_cents + $3 > 0 AND status IN ('open', 'partially_paid') THEN 'partially_paid'
+               ELSE status
+             END,
+             updated_at = $4
+         WHERE id = $2 AND tenant_id = $1
+         RETURNING id`,
+        [tenantId, id, deltaCents, now],
+      );
+      if (rows.length === 0) return null;
+      return this.findByIdWithClient(client, tenantId, id);
+    });
+  }
+
   async findByViewToken(token: string): Promise<Invoice | null> {
     const headerRow = await this.withClient(async (client) => {
       // Use a SECURITY DEFINER function to bypass RLS for the initial token
