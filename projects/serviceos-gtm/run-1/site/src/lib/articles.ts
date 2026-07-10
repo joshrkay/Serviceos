@@ -385,11 +385,26 @@ export const ARTICLES: Article[] = [
         text:
           "A burst pipe or a dead furnace at 11pm is a different kind of call than a routine tune-up request — it's urgent, and the caller is often already dialing the next number if the first one doesn't pick up. Some after-hours-answering vendors advertise that a large share of contractor calls land outside normal business hours (see, for example, [Swiftly's write-up on after-hours coverage](https://www.withswiftly.com/blog/why-after-hours-customer-service-is-make-or-break-for-contractors)) — exact percentages vary by source and aren't independently audited, so we won't adopt a specific number as fact here, but the underlying pattern (nights and weekends carry real emergency volume) matches what most owner-operators already know from experience.",
       },
+      { kind: 'heading', text: 'A simple gut-check for your own shop' },
+      {
+        kind: 'list',
+        items: [
+          'Do you know how many calls went to voicemail last week, or does it just disappear into missed-call notifications you never got back to?',
+          'When a call comes in while you\'re on a job, does anything happen — or does it wait for you to notice later?',
+          'If a customer calls at 9pm because their heat is out, what actually happens tonight, not tomorrow morning?',
+          'Is your callback process a text template, or does it check your real schedule before promising anything?',
+        ],
+      },
       { kind: 'heading', text: 'What actually closes the loop' },
       {
         kind: 'paragraph',
         text:
           "Rivet answers 24/7 in the shop's own voice, checks real availability — drive time and job conflicts — and proposes the booking, with the owner approving by one tap. A dropped call gets an automatic text-back within about 60 seconds, so a bad connection doesn't turn into a lost job. And when a call sounds like a real emergency — medical, an elderly caller in distress, severe weather — the AI stops trying to book it and patches straight to the owner's phone. That's a deliberately safety-conscious behavior most lead-capture bots don't document at all.",
+      },
+      {
+        kind: 'paragraph',
+        text:
+          "None of this replaces judgment — the owner still approves every booking with one tap, and every AI action is logged so nothing happens invisibly. The point isn't to remove the owner from the loop; it's to make sure the loop runs at 11pm on a Tuesday the same way it runs at 11am, instead of stopping until someone gets back to a desk.",
       },
       {
         kind: 'table',
@@ -479,6 +494,17 @@ export const ARTICLES: Article[] = [
         text:
           "Even the best-reviewed FSM tool for a small shop still requires the owner to answer the phone, build the quote, and hit send on the invoice — the app just makes each of those steps a little easier. Rivet's difference is that the AI operates the back office starting from a phone call: it answers, checks real availability, books the visit, drafts an estimate priced against the shop's own catalog (uncatalogued items flagged for the owner, never guessed), and sends the invoice automatically when the job's done, with a payment-chasing cadence behind it. It's an operator, not a nicer app to operate yourself.",
       },
+      { kind: 'heading', text: '"AI Estimator" claims are showing up everywhere — what to check' },
+      {
+        kind: 'paragraph',
+        text:
+          "QuoteIQ's AI Estimator is the most direct AI-pricing claim we found among small-shop FSM tools — it advertises turning a job description into a priced quote in seconds. That's a real, useful direction for the category, and worth taking seriously rather than dismissing. The question worth asking any tool that makes this claim, ours included, is where the price actually comes from: is it grounded in your shop's own catalog and labor rates, or is it a generic estimate based on average market pricing? And what happens when the job includes a part or line item the tool doesn't recognize — does it guess a number, or does it tell you it's not sure and hand the decision back to you? Those two questions matter more than the speed of the quote.",
+      },
+      {
+        kind: 'paragraph',
+        text:
+          "Rivet's estimates are priced against the shop's own price book through a resolution step before anything reaches the customer; anything that doesn't match a known catalog item is flagged and kept below the confidence threshold that would let it go out automatically. It's a slower promise than \"instant AI pricing,\" but it's the one we're willing to put a name to.",
+      },
       {
         kind: 'table',
         headers: ['What you still do yourself', 'Typical small-shop FSM tool', 'Rivet'],
@@ -558,11 +584,23 @@ export const ARTICLES: Article[] = [
         ],
         caption: "Bands per getnextphone.com's AI receptionist pricing guide, accessed 2026-07-10.",
       },
+      { kind: 'heading', text: 'Why AI answering pricing is harder to compare than it looks' },
+      {
+        kind: 'paragraph',
+        text:
+          "A flat-rate FSM tool is easy to compare — it's a monthly number, maybe with a per-user add-on. AI answering pricing is messier because the meter is call volume, and call volume is exactly the thing a busy shop can't predict. A slow week and a week where three furnaces die on the same cold snap can look wildly different on a per-conversation or per-minute bill, even though your actual staffing cost didn't change at all. That's the core reason to read past the homepage number on any of these plans.",
+      },
       { kind: 'heading', text: 'Where per-conversation pricing adds up' },
       {
         kind: 'paragraph',
         text:
           "Take Jobber's own AI Receptionist add-on as a worked example: [$29/mo for 30 conversations, then $0.79 per additional conversation](https://www.getjobber.com/features/ai-receptionist/). A shop handling 80 conversations in a busy month pays $29 plus 50 × $0.79 — about $68.50 for the phone-answering add-on alone that month, before the core paperwork subscription. Some point-solution vendors price per-minute instead — [Marlie](https://www.marlie.ai/industries/plumbers-answering-service) reports $49/mo plus $0.35/minute — which can look cheap on the homepage and get expensive in exactly the month you're busiest and need it most.",
+      },
+      { kind: 'heading', text: 'Traditional answering services: still around, still pricier' },
+      {
+        kind: 'paragraph',
+        text:
+          "Live, human-staffed answering services haven't disappeared — companies like PATLive and Specialty Answering Service still compete in this space, typically in the $200–2,000/mo band depending on call volume and hours of coverage. A live person can be reassuring, but a traditional answering service almost always relays a message rather than checking your actual schedule or booking a visit. You're paying for a human touch on the phone line, not for the booking or paperwork problem to go away.",
       },
       { kind: 'heading', text: "What Rivet charges, and what's included" },
       {

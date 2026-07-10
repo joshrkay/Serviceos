@@ -3,12 +3,13 @@
  * suppression, and sends through the allowlist gate + transport.
  *
  * Scheduling model (this deploy is stateless/serverless — see README):
- *   (a) An in-memory per-contact state map + scheduled-queue snapshot, good
- *       for the lifetime of one serverless instance / dev-server process.
- *       This is enough to demo the whole path (an event fires, due emails
- *       send immediately, the mailbox shows the result) but delayed emails
- *       (+1d, +5d, ...) will NOT actually fire days later in this process —
- *       there is nothing here that sleeps for days.
+ *   (a) An in-memory per-contact state map (`this.contacts`), good for the
+ *       lifetime of one serverless instance / dev-server process. On every
+ *       lifecycle event, due emails send immediately (getScheduledQueue()
+ *       exposes the not-yet-due remainder as an inspectable "queue" for the
+ *       demo session). This is enough to demo the whole path end to end, but
+ *       delayed emails (+1d, +5d, ...) will NOT actually fire days later in
+ *       this process — there is nothing here that sleeps for days.
  *   (b) `computeDueEmails(state, now)` is a PURE function with no I/O: given
  *       a contact's state and a point in time, it returns exactly the emails
  *       due at that instant. A real deployment would persist ContactState
@@ -19,7 +20,6 @@
  */
 import type { NurtureEngine as NurtureEngineInterface, NurtureNotification } from './trigger';
 import {
-  NURTURE_SEQUENCES,
   TRIAL_DRIP_SEQUENCE,
   WIN_BACK_EMAIL,
   PAYMENT_FAILED_EMAIL,
@@ -302,6 +302,49 @@ export class LiveNurtureEngine implements NurtureEngineInterface {
     }
   }
 
+  /**
+   * The in-memory "scheduled queue" for this demo session: every not-yet-sent,
+   * not-suppressed email still pending for a known contact, with the instant
+   * it becomes (or became) due. Nothing here triggers a send by itself —
+   * flushDue()/notify() do that — this is purely for visibility (e.g. the
+   * `/nurture-preview` page) and for a future cron to reason about backlog.
+   */
+  getScheduledQueue(now: Date = new Date()): QueuedSend[] {
+    const queue: QueuedSend[] = [];
+
+    for (const state of this.contacts.values()) {
+      if (state.trialStartedAt) {
+        const anchor = new Date(state.trialStartedAt);
+        for (const email of TRIAL_DRIP_SEQUENCE) {
+          if (state.sentEmailIds.includes(email.id)) continue;
+          if (isSuppressed(email, state)) continue;
+          const dueAt = new Date(anchor.getTime() + email.delayDays * DAY_MS);
+          queue.push({
+            email: state.email,
+            emailId: email.id,
+            dueAt: dueAt.toISOString(),
+            isDueNow: dueAt.getTime() <= now.getTime(),
+          });
+        }
+      }
+
+      if (!state.sentEmailIds.includes(WIN_BACK_EMAIL.id) && !isSuppressed(WIN_BACK_EMAIL, state)) {
+        const anchor = resolveWinbackAnchor(state, now);
+        if (anchor) {
+          const dueAt = new Date(anchor.getTime() + WIN_BACK_EMAIL.delayDays * DAY_MS);
+          queue.push({
+            email: state.email,
+            emailId: WIN_BACK_EMAIL.id,
+            dueAt: dueAt.toISOString(),
+            isDueNow: dueAt.getTime() <= now.getTime(),
+          });
+        }
+      }
+    }
+
+    return queue;
+  }
+
   /** Read-only snapshot for the preview page / tests. */
   getContactState(email: string): ContactState | undefined {
     return this.contacts.get(email);
@@ -312,7 +355,12 @@ export class LiveNurtureEngine implements NurtureEngineInterface {
   }
 }
 
-export const liveNurtureEngine = new LiveNurtureEngine();
+export interface QueuedSend {
+  email: string;
+  emailId: string;
+  /** ISO timestamp this email becomes (or became) due. */
+  dueAt: string;
+  isDueNow: boolean;
+}
 
-// Re-export for convenience/tests.
-export { NURTURE_SEQUENCES };
+export const liveNurtureEngine = new LiveNurtureEngine();
