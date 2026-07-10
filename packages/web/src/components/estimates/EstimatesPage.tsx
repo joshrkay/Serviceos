@@ -856,7 +856,7 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
   const navigate = useNavigate();
   const tz = useTenantTimezone();
   const estimateTerm = useEstimateTerm();
-  const { data: est, isLoading, error, refetch } = useDetailQuery<EstimateResponse>('/api/estimates', estimateId);
+  const { data: est, isLoading, refetch } = useDetailQuery<EstimateResponse>('/api/estimates', estimateId);
   const { mutate: updateEstimate } = useMutation<Record<string, unknown>, EstimateResponse>('PUT', `/api/estimates/${estimateId}`);
   const { mutate: transitionEstimate } = useMutation<{ status: string }, EstimateResponse>('POST', `/api/estimates/${estimateId}/transition`);
 
@@ -1013,7 +1013,9 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
     );
   }
 
-  if ((error && !est) || !est) {
+  // No entity to show (cold-load error, or not-yet-loaded). A background
+  // refetch failure never nulls `est`, so a loaded estimate stays on screen.
+  if (!est) {
     return (
       <div className="h-full flex flex-col items-center justify-center gap-3">
         <p className="text-sm text-destructive">Failed to load {estimateTerm.toLowerCase()}</p>

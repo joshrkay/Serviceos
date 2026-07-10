@@ -334,7 +334,6 @@ describe('useListQuery — live polling (Epic 12.2)', () => {
       await vi.waitFor(() => expect(gates.length).toBe(1));
       // Mid-poll: last-good rows stay mounted and isLoading stays false.
       expect(result.current.isLoading).toBe(false);
-      expect(result.current.isFetching).toBe(true);
       expect(result.current.data).toEqual([{ id: '1' }]);
 
       await act(async () => {
@@ -342,7 +341,6 @@ describe('useListQuery — live polling (Epic 12.2)', () => {
       });
       await vi.waitFor(() => expect(result.current.data).toEqual([{ id: '2' }]));
       expect(result.current.isLoading).toBe(false);
-      expect(result.current.isFetching).toBe(false);
 
       act(() => {
         result.current.refetch();

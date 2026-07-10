@@ -9,8 +9,6 @@ export interface DetailQueryResult<T> {
    * after every edit.
    */
   isLoading: boolean;
-  /** True whenever any fetch is in flight (including background). */
-  isFetching: boolean;
   error: string | null;
   /** Background refresh for the current id — preserves last-good entity. */
   refetch: () => void;
@@ -38,7 +36,6 @@ export function useDetailQuery<T>(
   // effect ran (InvoiceDetail flashed "Failed to load invoice" on every
   // open).
   const [isLoading, setIsLoading] = useState(id !== null);
-  const [isFetching, setIsFetching] = useState(id !== null);
   const [error, setError] = useState<string | null>(null);
   // Monotonic request id. New fetches increment it; in-flight fetches bail
   // out before committing if a newer request has started, so an out-of-order
@@ -57,7 +54,6 @@ export function useDetailQuery<T>(
         setData(null);
         setError(null);
         setIsLoading(false);
-        setIsFetching(false);
         return;
       }
       const myVersion = ++requestVersionRef.current;
@@ -70,7 +66,6 @@ export function useDetailQuery<T>(
         setIsLoading(true);
         setError(null);
       }
-      setIsFetching(true);
       try {
         const response = await apiFetch(`${endpoint}/${id}`);
         if (myVersion !== requestVersionRef.current) return;
@@ -95,7 +90,6 @@ export function useDetailQuery<T>(
         }
       } finally {
         if (myVersion === requestVersionRef.current) {
-          setIsFetching(false);
           if (!background) setIsLoading(false);
         }
       }
@@ -124,5 +118,5 @@ export function useDetailQuery<T>(
     void fetchDetail({ background: true });
   }, [fetchDetail]);
 
-  return { data, isLoading, isFetching, error, refetch };
+  return { data, isLoading, error, refetch };
 }
