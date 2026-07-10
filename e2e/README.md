@@ -85,6 +85,13 @@ money-loop proof (also skipped here so CI cannot false-green).
    `packages/api/test/webhooks/invoice-webhook-paid.test.ts` and
    `packages/api/test/integration/invoice-webhook-paid.test.ts`.
    Live Stripe Elements remains out of scope for W1-2.
+2. **estimate-approval-execution** — index pointer; hermetic proof is
+   `e2e/money-loop/estimate-approve-execute.spec.ts` (W1-1): offline Clerk
+   stub + seeded ready_for_review proposal, Inbox Approve → executed.
+   Runs with the CI placeholder `pk_test_` (no live LLM / Clerk secrets).
+3. **invoice-to-payment** — approved invoice generates Stripe payment link,
+   `charge.succeeded` webhook flips invoice to paid. Needs Stripe test keys
+   and P5-016 closed (Stripe Elements frontend).
 
 ## CI secrets (unlock journeys)
 

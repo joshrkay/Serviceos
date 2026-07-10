@@ -1,5 +1,6 @@
 import { test, expect, Page, Route } from '@playwright/test';
 import { installClerkStub, readClerkStubCounters } from './helpers/clerk-stub';
+import { hasViteClerkKey } from './helpers/clerk-key';
 
 /**
  * 401-storm regression suite — real-browser proof for the 2026-07-06 fix
@@ -28,11 +29,12 @@ import { installClerkStub, readClerkStubCounters } from './helpers/clerk-stub';
  *   - a signed-out /login never fetches /api/me at all
  *
  * Runs fully offline: no Clerk egress, no API needed (routes are fulfilled
- * in-page), so it works in sandboxes and PR CI alike.
+ * in-page), so it works in sandboxes and PR CI alike. Any syntactically
+ * valid pk_test_ (including the CI placeholder) is enough — the stub
+ * short-circuits Clerk's script download.
  */
 
-const hasWebApp =
-  !!process.env.E2E_BASE_URL || !!process.env.VITE_CLERK_PUBLISHABLE_KEY;
+const hasWebApp = hasViteClerkKey();
 
 /**
  * True only for real API calls. A glob like `**\/api\/**` would also match
