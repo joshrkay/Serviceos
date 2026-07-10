@@ -19,8 +19,9 @@ isolation holds — was exercised end-to-end against a **real Postgres**
 stack with screenshot + database evidence, not mocks.
 
 Verification found **one P0** (every inbound-voice proposal was silently
-dropped on Postgres) plus a cluster of medium/low defects. **6 of them are
-fixed, reviewed, tested, and on this branch.** Three items are documented
+dropped on Postgres) plus a cluster of medium/low defects. **8 of them are
+fixed, reviewed, tested, and on this branch** (six commits; the T4 frontend
+commit carries three). Three items are documented
 for owner decision (regulatory + posture) rather than auto-fixed. Two are
 PRD-coverage gaps (unbuilt features).
 
@@ -98,7 +99,9 @@ happen *on* the call itself.
 | BUG-T1-1 | **P0** | Telephony path fabricated `aiRunId: uuidv4()` → `proposals_ai_run_id_fkey` violation → **every inbound-voice proposal silently dropped on Postgres**; caller escalated with nothing captured. Mocked repos hid it. | `45d7dd7` |
 | BUG-T1-3 | Med | `customers.phone_normalized` keeps the leading `1` but the caller-ID lookup strips it → every `+1` E.164 customer invisible to inbound caller-ID. | `5f97649` |
 | M1 | Med | `/api/estimates/suggest` built `EstimateTaskHandler` with no catalog repo → AI-suggested prices bypassed catalog grounding on a primary surface. | `5ba87c2` |
-| T4-1 | High | `AppointmentEdit` rendered start/end in browser-local tz (wrong time and day) — the known tz-leak bug, still live on this one page. | (T4 thread) |
+| T4-1 | High | `AppointmentEdit` rendered start/end in browser-local tz (wrong time and day) — the known tz-leak bug, still live on this one page. | `7e2cadf` |
+| T4-2 | Med | Job "Agreed total" showed a pre-tax subtotal ($353) instead of the estimate's real tax-inclusive total ($381.24). | `7e2cadf` |
+| T4-3 | Low | Hardcoded "Est. 2–3 hours" string ignored the real appointment duration. | `7e2cadf` |
 | T0-BUG-1 | Med | Onboarding un-completable in any Twilio-less env: provisioning worker skipped silently, so the phone step stayed `current` forever. | `90d0ca2` |
 | L2 | Low | `GET /api/interactions/:id` cast a malformed id to uuid in SQL → 500 instead of 400. | `4875e8f` |
 
@@ -129,10 +132,6 @@ P0). `tsc --project tsconfig.build.json --noEmit` is clean on the branch.
   adapter (only the media-streams path), so unknown callers loop forever.
   Deferred because it edits `twilio-adapter.ts` (same file as the P0 fix) and
   is a larger live-FSM change — land after the P0.
-- **T4-2 (Med):** Job "Agreed total" shows a pre-tax subtotal ($353) vs the
-  estimate's real $381.24. **T4-3 (Low):** hardcoded "Est. 2–3 hours".
-  (Bundled into the T4 frontend fix thread.)
-
 ### PRD-coverage gaps (unbuilt features, not defects)
 
 - **N-005 digest reflection sections** ("what I wasn't sure about" / "what I
