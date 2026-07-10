@@ -38,6 +38,9 @@ touching):**
   prototype only; unrelated to the canonical in-code migrations
   (`packages/api/src/db/schema.ts`).
 
+
+**Historical docs:** superseded launch notes, plans, stories, and old PRD reconciliation documents are archived under [`docs/archive/2026-07-cleanup/`](docs/archive/2026-07-cleanup/README.md). Treat active docs outside `docs/archive/` as current-state guidance.
+
 ## Deployment
 
 - Deployment docs: [`docs/deployment.md`](docs/deployment.md)
