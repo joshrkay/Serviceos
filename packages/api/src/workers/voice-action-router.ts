@@ -1935,11 +1935,18 @@ export function createVoiceActionRouterWorker(
         // and suppresses the dispatch below; every other outcome dispatches
         // normally. Unconfigured gate ⇒ no-op (byte-identical to before).
         let supervisorHold = false;
+        // The gate attaches N-002 supervisor markers to the proposal payload
+        // (and, on a hold, forces draft). It persists those writes, but our
+        // in-memory `outcome.proposal` predates them — so we adopt the gate's
+        // returned proposal for the render/route below, otherwise the queued
+        // one-tap SMS would omit the freshly-attached supervisor warning.
+        let reviewedProposal = outcome.proposal;
         const reviewGate = getSupervisorReviewGate();
         if (reviewGate && outcome.proposal.status === 'ready_for_review') {
           try {
             const res = await reviewGate.review({ proposal: outcome.proposal });
             supervisorHold = res.hold;
+            if (res.proposal) reviewedProposal = res.proposal;
           } catch (err) {
             log.warn('voice-action-router: supervisor review gate failed, dispatching', {
               proposalId: outcome.proposal.id,
@@ -1958,7 +1965,9 @@ export function createVoiceActionRouterWorker(
           try {
             const routing = await ur.resolveRouting?.(tenantId);
             const ownerPhone = await ur.resolveOwnerPhone?.(tenantId);
-            const proposal = outcome.proposal;
+            // Use the gate-reviewed proposal (carries any N-002 supervisor
+            // markers) so the rendered SMS reflects the supervisor findings.
+            const proposal = reviewedProposal;
             await routeUnsupervisedProposal(
               {
                 auditRepo: ur.auditRepo,

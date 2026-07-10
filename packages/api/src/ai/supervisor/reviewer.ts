@@ -336,11 +336,17 @@ export function createSupervisorReviewGate(deps: SupervisorReviewerDeps): Superv
           });
         });
 
+      // Track the proposal AS MUTATED by this gate so the caller can render the
+      // fresh payload/status instead of its stale in-memory copy.
+      let reviewed: Proposal = proposal;
+
       // Attach N-002 markers for every non-pass check (both shadow + enforce).
       if (reasons.length > 0) {
+        const markedPayload = payloadWithSupervisorMarker(proposal.payload, reasons);
+        reviewed = { ...reviewed, payload: markedPayload };
         await deps.proposalRepo
           .update(proposal.tenantId, proposal.id, {
-            payload: payloadWithSupervisorMarker(proposal.payload, reasons),
+            payload: markedPayload,
           })
           .catch((err) => {
             deps.logger.warn('supervisor-review: marker write failed', {
@@ -353,6 +359,7 @@ export function createSupervisorReviewGate(deps: SupervisorReviewerDeps): Superv
       if (hold) {
         // Enforce + customer-harm critical: force draft (no one-tap link minted,
         // no approval SMS) and fire the high-priority escalation alert.
+        reviewed = { ...reviewed, status: 'draft' };
         await deps.proposalRepo
           .updateStatus(proposal.tenantId, proposal.id, 'draft')
           .catch((err) => {
@@ -372,7 +379,7 @@ export function createSupervisorReviewGate(deps: SupervisorReviewerDeps): Superv
         });
       }
 
-      return { hold };
+      return { hold, proposal: reviewed };
     },
   };
 }

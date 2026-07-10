@@ -6005,6 +6005,17 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_supervisor_reviews ON supervisor_reviews
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  // N-011 fix — brand_voice_versions.changed_by must hold the actor's auth
+  // subject, which under Clerk is a string id (`user_2abc…`), NOT a UUID.
+  // Migration 237 typed the column UUID, so a real (Clerk) edit/rollback threw
+  // `invalid input syntax for type uuid` at INSERT time — the integration test
+  // passed only because it used a real-UUID actor. Widen to TEXT. Idempotent
+  // (ALTER … TYPE TEXT is a no-op once the column is already TEXT) and additive
+  // (all existing UUID values are valid TEXT).
+  '243_brand_voice_versions_changed_by_text': `
+    ALTER TABLE brand_voice_versions ALTER COLUMN changed_by TYPE TEXT;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

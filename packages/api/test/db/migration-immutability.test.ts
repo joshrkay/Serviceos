@@ -400,6 +400,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // N-005 — partial index backing the "quotes sent today" sent_at range scan.
   ['241_estimates_tenant_sent_at_index', 'f4c9cb40bd945e3bbab16bfa4b5a8180279919384343c4a153a607cc7b35c630'],
   ['242_create_supervisor_reviews', '9f7aba0a44dac7e8b03a8d2fa1c9c882bbdf72aa8688385acc9b022151374c25'],
+  ['243_brand_voice_versions_changed_by_text', 'cfbe7e3a622aec7a34f86d3a3cb159edad53183794086e00cce557d1daa8fc79'],
 ];
 
 function hashMigration(value: string): string {

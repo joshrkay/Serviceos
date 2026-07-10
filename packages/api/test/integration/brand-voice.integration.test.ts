@@ -121,6 +121,49 @@ describe('Postgres integration — Brand-Voice Configurator (N-011)', () => {
     expect(toVersions).toEqual([1, 2]);
   });
 
+  it('persists a Clerk-style non-UUID actor as changed_by (PUT + rollback) — changed_by is TEXT', async () => {
+    // Regression: brand_voice_versions.changed_by was typed UUID (migration
+    // 237). Under Clerk, req.auth.userId is the subject string (`user_…`), not
+    // a UUID, so a real edit/rollback threw `invalid input syntax for type
+    // uuid` at INSERT. Migration 243 widens the column to TEXT. This test uses
+    // a NON-UUID actor id to prove the write path no longer explodes.
+    const tenant = await createTestTenant(pool);
+    await ensureTenantSettings(tenant.tenantId, settingsRepo);
+    const clerkUserId = 'user_2abcDEF';
+    const actor = { tenantId: tenant.tenantId, userId: clerkUserId, role: 'owner' as const };
+    const t0 = Date.parse('2026-07-10T12:00:00.000Z');
+
+    // PUT (onboarding write) with a Clerk subject id must persist.
+    await updateBrandVoice(
+      { actor, patch: sixFields, onboarding: true, now: t0 },
+      brandVoiceRepo,
+    );
+    // A second edit after the cool-down (v2) and a rollback (v3) — all with the
+    // same non-UUID actor.
+    await updateBrandVoice(
+      { actor, patch: { register: 'formal' }, now: t0 + BRAND_VOICE_COOLDOWN_MS },
+      brandVoiceRepo,
+    );
+    const rolled = await rollbackBrandVoice(
+      { actor, version: 1, now: t0 + 2 * BRAND_VOICE_COOLDOWN_MS },
+      brandVoiceRepo,
+    );
+    expect(rolled.state.version).toBe(3);
+
+    // Every history row records the Clerk subject string verbatim as changedBy.
+    const versions = await brandVoiceRepo.listVersions(tenant.tenantId);
+    expect(versions.map((v) => v.version)).toEqual([3, 2, 1]);
+    expect(versions.every((v) => v.changedBy === clerkUserId)).toBe(true);
+
+    // Direct column read: the value round-trips as the raw string (TEXT column).
+    const row = await pool.query<{ changed_by: string }>(
+      `SELECT changed_by FROM brand_voice_versions
+        WHERE tenant_id = $1 AND version = 3`,
+      [tenant.tenantId],
+    );
+    expect(row.rows[0].changed_by).toBe(clerkUserId);
+  });
+
   it('rollback re-persists an older snapshot as a new bump (history never mutated)', async () => {
     const tenant = await createTestTenant(pool);
     await ensureTenantSettings(tenant.tenantId, settingsRepo);

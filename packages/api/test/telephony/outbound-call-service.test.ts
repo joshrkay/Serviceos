@@ -9,6 +9,7 @@ import {
 } from '../../src/telephony/outbound-call-service';
 import { InMemoryConversationRepository } from '../../src/conversations/conversation-service';
 import { InMemoryDncRepository } from '../../src/compliance/dnc';
+import { isOutboundAllowed } from '../../src/voice/outbound-allowlist';
 
 const TENANT = 'tenant-call-1';
 const CUSTOMER = 'cust-1';
@@ -211,6 +212,35 @@ describe('initiateOutboundCall — TCPA consent gate (TCPA_CONSENT_ENFORCEMENT)'
     expect(warned).toBeDefined();
     expect(warned!.metadata).toMatchObject({ mode: 'warn', decision: 'warned' });
     expect(logger.warn).toHaveBeenCalled();
+  });
+
+  it("'block': normalizes a formatted stored number to E.164 before the gate (not refused as malformed)", async () => {
+    // Regression: the raw `customers.primaryPhone` was passed to the gate, whose
+    // format filter (isOutboundAllowed) requires strict `+1XXXXXXXXXX`. A
+    // validly-stored formatted number was refused as `malformed` in block mode.
+    // The service now normalizes to E.164 first. `checkConsent` here runs the
+    // REAL isOutboundAllowed so a non-normalized value would still block.
+    const checkConsent = vi.fn(async (ctx: { phoneE164: string }) => {
+      const fmt = isOutboundAllowed(ctx.phoneE164);
+      return fmt.allowed
+        ? { allowed: true as const }
+        : { allowed: false as const, reason: fmt.reason, message: 'blocked' };
+    });
+    const { repo } = auditRepo();
+    const e = buildDeps({
+      customer: { id: CUSTOMER, primaryPhone: '(555) 111-2222' },
+      consentEnforcement: 'block',
+      checkConsent,
+      auditRepo: repo,
+    });
+
+    // Must NOT throw consent_blocked — the number is valid once normalized.
+    const result = await initiateOutboundCall(e.deps, input);
+    expect(result.callSid).toBe('CA123');
+    expect(e.fetchMock).toHaveBeenCalledTimes(1);
+    // The gate received the normalized E.164, never the raw formatted string.
+    expect(checkConsent).toHaveBeenCalledTimes(1);
+    expect(checkConsent.mock.calls[0][0]).toMatchObject({ phoneE164: '+15551112222' });
   });
 
   it("'block' with consent granted: places the call and audits the grant", async () => {

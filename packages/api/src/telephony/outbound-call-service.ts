@@ -12,6 +12,7 @@
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { type Logger } from '../logging/logger';
 import { DncRepository, normalizePhone } from '../compliance/dnc';
+import { normalizeMobileE164 } from '../shared/phone/normalize';
 import type {
   OutboundConsentContext,
   OutboundConsentResult,
@@ -143,9 +144,22 @@ export async function initiateOutboundCall(
   // or conversation write, so a block never places a call or logs a message.
   const consentMode = deps.consentEnforcement ?? 'off';
   if (consentMode !== 'off' && deps.checkConsent) {
+    // The consent gate's format filter (isOutboundAllowed) requires strict
+    // E.164 (`+1XXXXXXXXXX`). `customers.primaryPhone` is stored as the owner
+    // typed it — a validly-stored formatted/local number ("(555) 111-2222")
+    // would otherwise be refused as `malformed` in block mode. Normalize first;
+    // a genuinely unparseable number falls through as-is so the gate still
+    // classifies it malformed (fail-closed in block mode).
+    let consentPhone = customerPhone;
+    try {
+      consentPhone = normalizeMobileE164(customerPhone);
+    } catch {
+      // Leave the raw value — isOutboundAllowed will flag it malformed and the
+      // gate handles the block/warn decision, exactly as before.
+    }
     const consent = await deps.checkConsent({
       tenantId: input.tenantId,
-      phoneE164: customerPhone,
+      phoneE164: consentPhone,
       actorId: input.actorId,
       actorRole: input.actorRole,
     });

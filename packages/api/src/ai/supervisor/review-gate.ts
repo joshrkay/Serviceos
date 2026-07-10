@@ -24,6 +24,15 @@ export interface SupervisorReviewGateInput {
 export interface SupervisorReviewGateResult {
   /** True only in enforce mode on a customer-harm critical — caller skips dispatch. */
   hold: boolean;
+  /**
+   * The proposal AFTER the gate's own writes (N-002 supervisor markers and, on
+   * a hold, the forced-draft status). The gate persists these via proposalRepo,
+   * but the caller holds an in-memory `outcome.proposal` that predates them — so
+   * a rendered SMS built from the stale copy would omit the freshly-attached
+   * supervisor warning. Callers that render/route the proposal MUST use this
+   * value when present. Absent on no-op / fail-open paths (nothing changed).
+   */
+  proposal?: Proposal;
 }
 
 export interface SupervisorReviewGate {
