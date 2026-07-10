@@ -18,6 +18,12 @@ let cachedEstimateTerm: string | null = null;
 // (list + detail + sheets) make ONE /api/settings call, not one each.
 let pendingSettingsPromise: Promise<string> | null = null;
 
+/** Drop the cached term so the next mount re-reads it (call on sign-out / tenant switch). */
+export function clearEstimateTermCache(): void {
+  cachedEstimateTerm = null;
+  pendingSettingsPromise = null;
+}
+
 export function useEstimateTerm(): string {
   const apiFetch = useApiClient();
   const [estimateTerm, setEstimateTerm] = useState<string>(cachedEstimateTerm ?? DEFAULT_ESTIMATE_TERM);

@@ -17,6 +17,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { apiFetch, clearTokenGetter, setTokenGetter } from './api-fetch';
+import { clearSignOutHandler } from '../lib/apiClient';
 
 const TOKEN = 'tok-fresh';
 const REFRESHED = 'tok-refreshed';
@@ -56,6 +57,8 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllGlobals();
   clearTokenGetter();
+  // Reset the persistent-401 latch so each test observes its own redirect.
+  clearSignOutHandler();
   restoreLocation();
 });
 
@@ -208,6 +211,64 @@ describe('apiFetch — authenticated /api/ paths', () => {
 
     const init = fetchMock.mock.calls[0][1] as RequestInit;
     expect((init.headers as Record<string, string>)['Content-Type']).toBe('text/plain');
+  });
+});
+
+/**
+ * Sweep-2 comms-reply bug (same root cause as journey QA bug 1 in
+ * lib/apiClient.ts) — the Content-Type presence check must be
+ * case-insensitive. A caller passing lowercase 'content-type' (e.g.
+ * api/conversations.ts reply / suggest-reply) previously got a SECOND
+ * injected 'Content-Type'; fetch merged the duplicates into
+ * "application/json, application/json" and Express's JSON parser dropped
+ * the body → 400.
+ */
+describe('apiFetch — single Content-Type on outgoing requests', () => {
+  function contentTypeKeys(headers: Record<string, string>): string[] {
+    return Object.keys(headers).filter((k) => k.toLowerCase() === 'content-type');
+  }
+
+  it('lowercase caller header: does NOT add a duplicate Content-Type', async () => {
+    fetchMock.mockResolvedValue(new Response(null, { status: 200 }));
+    setTokenGetter(async () => TOKEN);
+
+    await apiFetch('/api/conversations/abc/reply', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ body: 'hi' }),
+    });
+
+    const headers = (fetchMock.mock.calls[0][1] as RequestInit).headers as Record<string, string>;
+    expect(contentTypeKeys(headers)).toEqual(['content-type']);
+    expect(headers['content-type']).toBe('application/json');
+  });
+
+  it('canonical-case caller header: keeps exactly one Content-Type', async () => {
+    fetchMock.mockResolvedValue(new Response(null, { status: 200 }));
+    setTokenGetter(async () => TOKEN);
+
+    await apiFetch('/api/conversations/abc/reply', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ body: 'hi' }),
+    });
+
+    const headers = (fetchMock.mock.calls[0][1] as RequestInit).headers as Record<string, string>;
+    expect(contentTypeKeys(headers)).toEqual(['Content-Type']);
+  });
+
+  it('Headers-instance caller header: no duplicate injected', async () => {
+    fetchMock.mockResolvedValue(new Response(null, { status: 200 }));
+    setTokenGetter(async () => TOKEN);
+
+    await apiFetch('/api/conversations/abc/suggest-reply', {
+      method: 'POST',
+      headers: new Headers({ 'Content-Type': 'application/json' }),
+      body: '{}',
+    });
+
+    const headers = (fetchMock.mock.calls[0][1] as RequestInit).headers as Record<string, string>;
+    expect(contentTypeKeys(headers)).toHaveLength(1);
   });
 });
 

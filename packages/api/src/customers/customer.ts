@@ -412,6 +412,21 @@ export async function updateCustomer(
   if (validationErrors.length > 0) throw new Error(`Validation failed: ${validationErrors.join(', ')}`);
 
   const updates: Partial<Customer> = { ...input, updatedAt: new Date() };
+  // An explicit '' means "clear this optional field" (the web edit form
+  // serializes cleared optionals as blanks — see CustomerEdit.tsx). Coerce
+  // to undefined so repositories persist NULL rather than storing an empty
+  // string, keeping cleared rows indistinguishable from never-set ones.
+  // The key stays present, so the column is still included in the SET.
+  const clearableOptionals = [
+    'companyName',
+    'primaryPhone',
+    'secondaryPhone',
+    'email',
+    'communicationNotes',
+  ] as const;
+  for (const field of clearableOptionals) {
+    if (updates[field] === '') updates[field] = undefined;
+  }
   if (input.firstName !== undefined || input.lastName !== undefined || input.companyName !== undefined) {
     updates.displayName = computeDisplayName(
       input.firstName ?? existing.firstName,

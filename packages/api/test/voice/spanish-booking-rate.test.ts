@@ -3,7 +3,7 @@
  * consistency.
  *
  * Drives the in-app voice adapter (and the underlying CallingAgentStateMachine)
- * end-to-end for 10 Spanish-language inbound-CSR fixtures
+ * end-to-end for 12 Spanish-language inbound-CSR fixtures
  * (fixtures/voice/es/booking-fixtures.json), with the tenant opted into Spanish
  * (supported_languages = ['en', 'es']). For each fixture it asserts:
  *
@@ -107,9 +107,9 @@ describe('Voice-parity Feature 6 — Spanish booking rate + language consistency
     });
   }
 
-  it('loads exactly 10 Spanish fixtures across the booking/capture intents', () => {
+  it('loads exactly 12 Spanish fixtures across the booking/capture intents', () => {
     const fixtures = loadFixtures();
-    expect(fixtures.length).toBe(10);
+    expect(fixtures.length).toBe(12);
     // "Across all intents" — at least 5 distinct intent types represented.
     const intents = new Set(fixtures.map((f) => f.intent));
     expect(intents.size).toBeGreaterThanOrEqual(5);

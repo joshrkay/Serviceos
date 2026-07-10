@@ -63,3 +63,41 @@ describe('RemoveCrewMemberTaskHandler', () => {
     expect(missingFieldsFor(res.proposal)).toContain('technicianId');
   });
 });
+
+// U1 — the router's technician resolver annotates a verified UUID onto the
+// task context (existingEntities.technicianId). The handlers consume it: the
+// payload carries the id and technicianId is NOT flagged missing (the
+// appointment still is — resolution for it stays a review-time step).
+describe('U1: crew handlers consume the resolved technician id', () => {
+  const TECH_ID = '33333333-3333-3333-3333-333333333333';
+
+  it('add_crew_member: resolved id lands on the payload, only appointmentId stays missing', async () => {
+    const res = await new AddCrewMemberTaskHandler().handle(
+      ctx({
+        existingEntities: {
+          appointmentReference: 'the Garcia appointment',
+          targetTechnicianName: 'Carlos',
+          technicianId: TECH_ID,
+        },
+      }),
+    );
+    expect(res.proposal.payload.technicianId).toBe(TECH_ID);
+    expect(res.proposal.payload.targetTechnicianName).toBe('Carlos');
+    expect(missingFieldsFor(res.proposal)).toEqual(['appointmentId']);
+    expect(res.proposal.status).toBe('draft');
+  });
+
+  it('remove_crew_member: resolved id lands on the payload, only appointmentId stays missing', async () => {
+    const res = await new RemoveCrewMemberTaskHandler().handle(
+      ctx({
+        existingEntities: {
+          appointmentReference: "Tuesday's job",
+          targetTechnicianName: 'Carlos',
+          technicianId: TECH_ID,
+        },
+      }),
+    );
+    expect(res.proposal.payload.technicianId).toBe(TECH_ID);
+    expect(missingFieldsFor(res.proposal)).toEqual(['appointmentId']);
+  });
+});

@@ -12,6 +12,8 @@ import {
   scheduleJobSchema,
   reassignJobSchema,
   unscheduleJobSchema,
+  updateInvoiceSchema,
+  updateEstimateSchema,
 } from '../../src/shared/contracts';
 import { validate } from '../../src/shared/validation';
 import { AppError, ValidationError, toErrorResponse } from '../../src/shared/errors';

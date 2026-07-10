@@ -64,6 +64,15 @@ const PRESETS: readonly Preset[] = [
   },
 ];
 
+/**
+ * UB-D / D-015 — autonomous booking lane bounds. Mirrors the API contract
+ * (updateSettingsSchema) and the tenant_settings CHECK: 0.90–0.99,
+ * default 0.95.
+ */
+const AUTONOMOUS_THRESHOLD_DEFAULT = 0.95;
+const AUTONOMOUS_THRESHOLD_MIN = 0.9;
+const AUTONOMOUS_THRESHOLD_MAX = 0.99;
+
 function matchPreset(thresholds: ThresholdMap): Preset['id'] {
   for (const p of PRESETS) {
     if (!p.thresholds) continue;
@@ -83,6 +92,11 @@ interface AIApprovalRulesSheetProps {
 export function AIApprovalRulesSheet({ onClose }: AIApprovalRulesSheetProps) {
   const [thresholds, setThresholds] = useState<ThresholdMap>({});
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  // UB-D / D-015 — autonomous booking lane (opt-in, default OFF).
+  const [autonomousEnabled, setAutonomousEnabled] = useState(false);
+  const [autonomousThreshold, setAutonomousThreshold] = useState<number | undefined>(
+    AUTONOMOUS_THRESHOLD_DEFAULT,
+  );
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string>('');
@@ -93,8 +107,16 @@ export function AIApprovalRulesSheet({ onClose }: AIApprovalRulesSheetProps) {
       try {
         const res = await apiFetch('/api/settings');
         if (!res.ok) throw new Error(`Load failed (${res.status})`);
-        const data = (await res.json()) as { autoApproveThreshold?: ThresholdMap };
+        const data = (await res.json()) as {
+          autoApproveThreshold?: ThresholdMap;
+          autonomousBookingEnabled?: boolean;
+          autonomousBookingThreshold?: number;
+        };
         if (cancelled) return;
+        setAutonomousEnabled(data.autonomousBookingEnabled ?? false);
+        setAutonomousThreshold(
+          data.autonomousBookingThreshold ?? AUTONOMOUS_THRESHOLD_DEFAULT,
+        );
         const loaded: ThresholdMap = data.autoApproveThreshold ?? {};
         // If no override exists, prefill with the Balanced (default)
         // preset so users see meaningful values rather than empty
@@ -132,12 +154,30 @@ export function AIApprovalRulesSheet({ onClose }: AIApprovalRulesSheetProps) {
         return;
       }
     }
+    // UB-D / D-015 — the autonomous threshold must sit in the lane's bounds
+    // (the API rejects anything outside 0.90–0.99).
+    const at = autonomousThreshold;
+    if (
+      at === undefined ||
+      !Number.isFinite(at) ||
+      at < AUTONOMOUS_THRESHOLD_MIN ||
+      at > AUTONOMOUS_THRESHOLD_MAX
+    ) {
+      setError(
+        `Autonomous booking threshold must be between ${AUTONOMOUS_THRESHOLD_MIN} and ${AUTONOMOUS_THRESHOLD_MAX}`,
+      );
+      return;
+    }
     setSaving(true);
     try {
       const res = await apiFetch('/api/settings', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ autoApproveThreshold: thresholds }),
+        body: JSON.stringify({
+          autoApproveThreshold: thresholds,
+          autonomousBookingEnabled: autonomousEnabled,
+          autonomousBookingThreshold: at,
+        }),
       });
       if (!res.ok) {
         let detail = '';
@@ -287,6 +327,61 @@ export function AIApprovalRulesSheet({ onClose }: AIApprovalRulesSheetProps) {
                   })}
                 </div>
               )}
+
+              {/* UB-D / D-015 — autonomous booking lane (opt-in, default OFF). */}
+              <div className="space-y-3 rounded-xl border border-slate-200 px-4 py-3">
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={autonomousEnabled}
+                  onClick={() => setAutonomousEnabled((v) => !v)}
+                  className="flex min-h-11 w-full items-center justify-between gap-3 text-left"
+                >
+                  <span className="text-sm text-slate-800">
+                    Autonomous booking (no supervisor)
+                  </span>
+                  <span
+                    aria-hidden="true"
+                    className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
+                      autonomousEnabled ? 'bg-indigo-600' : 'bg-slate-300'
+                    }`}
+                  >
+                    <span
+                      className={`inline-block size-4 rounded-full bg-white transition-transform ${
+                        autonomousEnabled ? 'translate-x-6' : 'translate-x-1'
+                      }`}
+                    />
+                  </span>
+                </button>
+                <p className="text-xs text-slate-500">
+                  When on, high-confidence bookings from the AI receptionist confirm
+                  instantly with no one watching. You get an SMS with one-tap UNDO for
+                  every one.
+                </p>
+                {autonomousEnabled && (
+                  <label htmlFor="autonomous-booking-threshold" className="block">
+                    <span className="text-sm text-slate-700">
+                      Confidence threshold{' '}
+                      <span className="text-slate-400">
+                        → default {AUTONOMOUS_THRESHOLD_DEFAULT}
+                      </span>
+                    </span>
+                    <input
+                      id="autonomous-booking-threshold"
+                      type="number"
+                      step="0.01"
+                      min={AUTONOMOUS_THRESHOLD_MIN}
+                      max={AUTONOMOUS_THRESHOLD_MAX}
+                      value={autonomousThreshold ?? ''}
+                      onChange={(e) => {
+                        const n = parseFloat(e.target.value);
+                        setAutonomousThreshold(Number.isFinite(n) ? n : undefined);
+                      }}
+                      className="mt-1.5 w-full rounded-xl border border-slate-200 px-4 py-2 text-sm text-slate-800 focus:outline-none focus:border-indigo-400 transition-colors bg-white"
+                    />
+                  </label>
+                )}
+              </div>
 
               {error && (
                 <p className="text-sm text-red-600" role="alert">

@@ -92,6 +92,16 @@ export class InMemoryConversationLinkRepository implements ConversationLinkRepos
   private links: Map<string, ConversationLink> = new Map();
 
   async create(link: ConversationLink): Promise<ConversationLink> {
+    // Mirror PgConversationLinkRepository: idempotent on the four-tuple
+    // (ON CONFLICT DO NOTHING → return the canonical existing row).
+    const existing = Array.from(this.links.values()).find(
+      (l) =>
+        l.tenantId === link.tenantId &&
+        l.conversationId === link.conversationId &&
+        l.entityType === link.entityType &&
+        l.entityId === link.entityId,
+    );
+    if (existing) return { ...existing };
     this.links.set(link.id, { ...link });
     return { ...link };
   }

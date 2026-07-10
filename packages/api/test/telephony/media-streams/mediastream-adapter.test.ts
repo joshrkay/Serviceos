@@ -24,7 +24,7 @@ import type {
   StreamingTranscriptCallback,
   StreamingTranscriptEvent,
 } from '../../../src/voice/transcription-providers';
-import type { TtsProvider, TtsSynthesizeResult } from '../../../src/ai/tts/tts-provider';
+import type { TtsProvider, TtsSynthesizeInput, TtsSynthesizeResult } from '../../../src/ai/tts/tts-provider';
 import type { SideEffect, EscalateWithContextPayload } from '../../../src/ai/agents/customer-calling/types';
 import { escalateWithContextPayloadSchema } from '../../../src/ai/agents/customer-calling/types';
 import { decodeTwilioInboundFrame } from '../../../src/telephony/media-streams/mulaw-codec';
@@ -1460,5 +1460,519 @@ describe('production-shaped wiring (app.ts hooks)', () => {
     void adapter;
 
     stderrSpy.mockRestore();
+  });
+});
+
+// ─── UB-C1/C2 — Spanish on the streaming call path ────────────────────────────
+
+describe('UB-C1 — language threading + live switching', () => {
+  let store: VoiceSessionStore;
+
+  beforeEach(() => {
+    store = new VoiceSessionStore({ startInterval: false });
+  });
+
+  /**
+   * Streaming-provider double that supports MULTIPLE openSession calls
+   * (initial open + finish/reopen cycles). Each call records its args and
+   * returns a fresh session mock; `emit` targets the callback of the most
+   * recent open so post-switch finals flow through the new session.
+   */
+  function makeReopenableProvider(): {
+    provider: StreamingTranscriptionProvider;
+    openCalls: Array<{ language: unknown; options: unknown }>;
+    sessions: Array<{ send: ReturnType<typeof vi.fn>; finish: ReturnType<typeof vi.fn>; destroy: ReturnType<typeof vi.fn> }>;
+    emit: (evt: StreamingTranscriptEvent) => void;
+  } {
+    const callbacks: StreamingTranscriptCallback[] = [];
+    const openCalls: Array<{ language: unknown; options: unknown }> = [];
+    const sessions: Array<{ send: ReturnType<typeof vi.fn>; finish: ReturnType<typeof vi.fn>; destroy: ReturnType<typeof vi.fn> }> = [];
+    const provider: StreamingTranscriptionProvider = {
+      openSession: vi.fn(async (onEvent, _onError, _onClose, language, options) => {
+        callbacks.push(onEvent);
+        openCalls.push({ language, options });
+        const session = { send: vi.fn(), finish: vi.fn(), destroy: vi.fn() };
+        sessions.push(session);
+        return session;
+      }),
+    };
+    return {
+      provider,
+      openCalls,
+      sessions,
+      emit: (evt) => callbacks[callbacks.length - 1]?.(evt),
+    };
+  }
+
+  function makeSpyTts() {
+    return {
+      synthesize: vi.fn(async (_input: TtsSynthesizeInput): Promise<TtsSynthesizeResult> => ({
+        audio: Buffer.alloc(640),
+        contentType: 'audio/mulaw',
+        provider: 'test',
+      })),
+    };
+  }
+
+  function startFrame(callSid: string, streamSid: string) {
+    return {
+      event: 'start',
+      streamSid,
+      start: { callSid, accountSid: 'AC', streamSid, tracks: ['inbound'] },
+    };
+  }
+
+  async function flush(times = 4): Promise<void> {
+    for (let i = 0; i < times; i++) {
+      await new Promise((r) => setImmediate(r));
+    }
+  }
+
+  it('opens Deepgram with the resolved language and SUPPRESSES keywords on es', async () => {
+    store.create('t', 'telephony', { callSid: 'CA-es-open' });
+    const ws = new FakeWs();
+    const { provider, openCalls } = makeReopenableProvider();
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: provider,
+        speechTurn: async () => [],
+        terminologyProvider: { getKeywords: async () => ['furnace:3', 'compressor:3'] },
+        initialLanguageResolver: async () => 'es',
+      },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson(startFrame('CA-es-open', 'MZ-es-open'));
+    await flush();
+
+    expect(openCalls).toHaveLength(1);
+    expect(openCalls[0].language).toBe('es');
+    // English trade-term boost degrades Nova-3 Spanish — must be suppressed.
+    expect(openCalls[0].options).toBeUndefined();
+    expect(store.findByCallSid('CA-es-open')?.language).toBe('es');
+    expect(adapter._debugState().language).toBe('es');
+  });
+
+  it('opens with en + keywords when the resolver yields en', async () => {
+    store.create('t', 'telephony', { callSid: 'CA-en-open' });
+    const ws = new FakeWs();
+    const { provider, openCalls } = makeReopenableProvider();
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: provider,
+        speechTurn: async () => [],
+        terminologyProvider: { getKeywords: async () => ['furnace:3'] },
+        initialLanguageResolver: async () => 'en',
+      },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson(startFrame('CA-en-open', 'MZ-en-open'));
+    await flush();
+
+    expect(openCalls[0].language).toBe('en');
+    expect(openCalls[0].options).toEqual({ keywords: ['furnace:3'] });
+  });
+
+  it('without a resolver, opens with undefined language (pre-UB-C behavior) and does not pin session.language', async () => {
+    store.create('t', 'telephony', { callSid: 'CA-legacy' });
+    const ws = new FakeWs();
+    const { provider, openCalls } = makeReopenableProvider();
+    const adapter = new TwilioMediaStreamAdapter(
+      { store, streamingProvider: provider, speechTurn: async () => [] },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson(startFrame('CA-legacy', 'MZ-legacy'));
+    await flush();
+
+    expect(openCalls[0].language).toBeUndefined();
+    expect(store.findByCallSid('CA-legacy')?.language).toBeUndefined();
+  });
+
+  it('first Spanish final switches ONCE: finish+reopen es, event emitted, turn still dispatched', async () => {
+    const session = store.create('t', 'telephony', { callSid: 'CA-first-es' });
+    session.supportedLanguages = ['en', 'es'];
+    const ws = new FakeWs();
+    const { provider, openCalls, sessions, emit } = makeReopenableProvider();
+    const speechTurn = vi.fn(async (_args: { speechResult: string }): Promise<SideEffect[]> => []);
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: provider,
+        speechTurn,
+        initialLanguageResolver: async () => 'en',
+        terminologyProvider: { getKeywords: async () => ['furnace:3'] },
+      },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson(startFrame('CA-first-es', 'MZ-first-es'));
+    await flush();
+
+    const events: unknown[] = [];
+    session.events.on(VOICE_EVENT_CHANNEL, (evt: { type: string }) => {
+      if (evt.type === 'language_switched') events.push(evt);
+    });
+
+    emit({ type: 'final', isFinal: true, transcript: 'Hola, necesito una cita por favor', confidence: 0.9 });
+    await flush(8);
+
+    // Old session finished, new one opened in es WITHOUT the keyword boost.
+    expect(sessions[0].finish).toHaveBeenCalled();
+    expect(openCalls).toHaveLength(2);
+    expect(openCalls[1].language).toBe('es');
+    expect(openCalls[1].options).toBeUndefined();
+    expect(session.language).toBe('es');
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ type: 'language_switched', from: 'en', to: 'es', trigger: 'first_utterance', switchCount: 1 });
+    // Trigger (a) does NOT consume the turn — the FSM still processes it.
+    expect(speechTurn).toHaveBeenCalledTimes(1);
+    expect(speechTurn.mock.calls[0][0]).toMatchObject({ speechResult: 'Hola, necesito una cita por favor' });
+  });
+
+  it('first-final detection is GATED on the tenant supported_languages opt-in', async () => {
+    const session = store.create('t', 'telephony', { callSid: 'CA-en-only' });
+    session.supportedLanguages = ['en']; // tenant never opted into Spanish
+    const ws = new FakeWs();
+    const { provider, openCalls, emit } = makeReopenableProvider();
+    const speechTurn = vi.fn(async (_args: { speechResult: string }): Promise<SideEffect[]> => []);
+    const adapter = new TwilioMediaStreamAdapter(
+      { store, streamingProvider: provider, speechTurn, initialLanguageResolver: async () => 'en' },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson(startFrame('CA-en-only', 'MZ-en-only'));
+    await flush();
+
+    emit({ type: 'final', isFinal: true, transcript: 'Hola, necesito una cita por favor', confidence: 0.9 });
+    await flush(8);
+
+    expect(openCalls).toHaveLength(1); // no reopen
+    expect(session.language).toBe('en');
+    expect(adapter._debugState().languageSwitchCount).toBe(0);
+    expect(speechTurn).toHaveBeenCalledTimes(1);
+  });
+
+  it('the one-shot first-final trigger does not fire on utterance #2+', async () => {
+    const session = store.create('t', 'telephony', { callSid: 'CA-oneshot' });
+    session.supportedLanguages = ['en', 'es'];
+    const ws = new FakeWs();
+    const { provider, openCalls, emit } = makeReopenableProvider();
+    const adapter = new TwilioMediaStreamAdapter(
+      { store, streamingProvider: provider, speechTurn: async () => [], initialLanguageResolver: async () => 'en' },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson(startFrame('CA-oneshot', 'MZ-oneshot'));
+    await flush();
+
+    emit({ type: 'final', isFinal: true, transcript: 'I need to book an appointment', confidence: 0.9 });
+    await flush(8);
+    // Spanish markers on the SECOND final must not auto-switch.
+    emit({ type: 'final', isFinal: true, transcript: 'Hola, gracias, quiero una cita', confidence: 0.9 });
+    await flush(8);
+
+    expect(openCalls).toHaveLength(1);
+    expect(session.language).toBe('en');
+  });
+
+  it('explicit "hablo español" CONSUMES the turn: localized ack, no speechTurn, transcript kept', async () => {
+    const session = store.create('t', 'telephony', { callSid: 'CA-explicit' });
+    session.supportedLanguages = ['en', 'es'];
+    const ws = new FakeWs();
+    const { provider, openCalls, emit } = makeReopenableProvider();
+    const speechTurn = vi.fn(async (_args: { speechResult: string }): Promise<SideEffect[]> => []);
+    const tts = makeSpyTts();
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: provider,
+        speechTurn,
+        ttsProvider: tts,
+        initialLanguageResolver: async () => 'en',
+      },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson(startFrame('CA-explicit', 'MZ-explicit'));
+    await flush();
+
+    const events: unknown[] = [];
+    session.events.on(VOICE_EVENT_CHANNEL, (evt: { type: string }) => {
+      if (evt.type === 'language_switched') events.push(evt);
+    });
+
+    emit({ type: 'final', isFinal: true, transcript: 'Hablo español, por favor', confidence: 0.9 });
+    await flush(8);
+
+    expect(openCalls).toHaveLength(2);
+    expect(openCalls[1].language).toBe('es');
+    expect(session.language).toBe('es');
+    expect(events[0]).toMatchObject({ trigger: 'explicit_request', to: 'es' });
+    // Consumed: the switch utterance never reaches the FSM.
+    expect(speechTurn).not.toHaveBeenCalled();
+    // Localized ack synthesized in the NEW language.
+    expect(tts.synthesize).toHaveBeenCalledWith(
+      expect.objectContaining({ language: 'es', text: expect.stringContaining('continuemos en español') }),
+    );
+    // Transcript stays faithful for summarization.
+    expect(session.transcript.join('\n')).toContain('caller: Hablo español, por favor');
+    expect(session.transcript.join('\n')).toContain('continuemos en español');
+  });
+
+  it('flap guard: the 3rd switch is refused; keywords are re-applied on the switch back to en', async () => {
+    const session = store.create('t', 'telephony', { callSid: 'CA-flap' });
+    session.supportedLanguages = ['en', 'es'];
+    const ws = new FakeWs();
+    const { provider, openCalls, emit } = makeReopenableProvider();
+    const speechTurn = vi.fn(async (_args: { speechResult: string }): Promise<SideEffect[]> => []);
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: provider,
+        speechTurn,
+        initialLanguageResolver: async () => 'en',
+        terminologyProvider: { getKeywords: async () => ['furnace:3'] },
+      },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson(startFrame('CA-flap', 'MZ-flap'));
+    await flush();
+
+    // Switch 1: en → es (explicit).
+    emit({ type: 'final', isFinal: true, transcript: 'hablo español por favor', confidence: 0.9 });
+    await flush(8);
+    // Switch 2: es → en (explicit).
+    emit({ type: 'final', isFinal: true, transcript: 'switch to english please', confidence: 0.9 });
+    await flush(8);
+    // Switch 3: refused by the flap guard; the utterance flows to the FSM.
+    emit({ type: 'final', isFinal: true, transcript: 'hablo español otra vez', confidence: 0.9 });
+    await flush(8);
+
+    expect(openCalls).toHaveLength(3); // initial + 2 switches, NOT 4
+    expect(adapter._debugState().languageSwitchCount).toBe(2);
+    expect(adapter._debugState().language).toBe('en');
+    expect(session.language).toBe('en');
+    // Keyword boost restored when the live language returned to English.
+    expect(openCalls[2].language).toBe('en');
+    expect(openCalls[2].options).toEqual({ keywords: ['furnace:3'] });
+    // The blocked 3rd request was NOT consumed.
+    expect(speechTurn).toHaveBeenCalledTimes(1);
+    expect(speechTurn.mock.calls[0][0]).toMatchObject({ speechResult: 'hablo español otra vez' });
+  });
+
+  it('an utterance carrying an emergency keyword is NEVER consumed by the language switch', async () => {
+    const session = store.create('t', 'telephony', { callSid: 'CA-emergency-es' });
+    session.supportedLanguages = ['en', 'es'];
+    const ws = new FakeWs();
+    const { provider, openCalls, emit } = makeReopenableProvider();
+    const speechTurn = vi.fn(async (_args: { speechResult: string }): Promise<SideEffect[]> => []);
+    const adapter = new TwilioMediaStreamAdapter(
+      { store, streamingProvider: provider, speechTurn, initialLanguageResolver: async () => 'en' },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson(startFrame('CA-emergency-es', 'MZ-emergency-es'));
+    await flush();
+
+    const events: Array<{ trigger?: string }> = [];
+    session.events.on(VOICE_EVENT_CHANNEL, (evt: { type: string; trigger?: string }) => {
+      if (evt.type === 'language_switched') events.push(evt);
+    });
+
+    emit({
+      type: 'final',
+      isFinal: true,
+      transcript: 'Hay una fuga de gas, hablo español',
+      confidence: 0.9,
+    });
+    await flush(8);
+
+    // Life-safety wins the turn: the explicit-switch path bailed out and the
+    // utterance reaches the host pipeline (where the deterministic safety
+    // scan runs) — it is NEVER consumed by a language ack.
+    expect(speechTurn).toHaveBeenCalledTimes(1);
+    expect(speechTurn.mock.calls[0][0]).toMatchObject({
+      speechResult: 'Hay una fuga de gas, hablo español',
+    });
+    // The non-consuming first-final detection still switches STT to Spanish
+    // (the caller IS speaking Spanish) — as trigger (a), not an explicit ack.
+    expect(openCalls).toHaveLength(2);
+    expect(openCalls[1].language).toBe('es');
+    expect(events[0]).toMatchObject({ trigger: 'first_utterance' });
+  });
+
+  it('a classified language_switch intent (audit_log) flips the language as a fallback', async () => {
+    const session = store.create('t', 'telephony', { callSid: 'CA-classified' });
+    session.supportedLanguages = ['en', 'es'];
+    const ws = new FakeWs();
+    const { provider, openCalls, emit } = makeReopenableProvider();
+    // The classifier caught a phrasing the deterministic heuristic misses.
+    const speechTurn = vi.fn(async () => [
+      {
+        type: 'audit_log' as const,
+        payload: { intentType: 'language_switch', confidence: 0.92 },
+      },
+    ]);
+    const adapter = new TwilioMediaStreamAdapter(
+      { store, streamingProvider: provider, speechTurn, initialLanguageResolver: async () => 'en' },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson(startFrame('CA-classified', 'MZ-classified'));
+    await flush();
+
+    const events: unknown[] = [];
+    session.events.on(VOICE_EVENT_CHANNEL, (evt: { type: string }) => {
+      if (evt.type === 'language_switched') events.push(evt);
+    });
+
+    emit({ type: 'final', isFinal: true, transcript: 'Podemos continuar en el otro idioma', confidence: 0.9 });
+    await flush(8);
+
+    expect(speechTurn).toHaveBeenCalledTimes(1); // normal turn ran
+    expect(openCalls).toHaveLength(2); // then the fallback reopened in es
+    expect(openCalls[1].language).toBe('es');
+    expect(events[0]).toMatchObject({ trigger: 'classified_intent', to: 'es' });
+  });
+});
+
+describe('UB-C2 — streaming TTS language + copy rendering', () => {
+  let store: VoiceSessionStore;
+
+  beforeEach(() => {
+    store = new VoiceSessionStore({ startInterval: false });
+  });
+
+  async function setupSpanishSession(opts: {
+    ttsProvider: TtsProvider;
+    fillerEngine?: {
+      selectNext(
+        ctx?: { skipFillers?: boolean; language?: 'en' | 'es' },
+      ): { id: string; text: string; approxDurationMs: number } | undefined;
+    };
+    fillerCache?: { get: (id: string) => Buffer | undefined };
+    fillerDelayMs?: number;
+  }): Promise<{ adapter: TwilioMediaStreamAdapter; ws: FakeWs }> {
+    const session = store.create('t', 'telephony', { callSid: 'CA-es-tts' });
+    session.language = 'es';
+    session.supportedLanguages = ['en', 'es'];
+    const ws = new FakeWs();
+    const provider: StreamingTranscriptionProvider = {
+      openSession: vi.fn(async () => ({ send: vi.fn(), finish: vi.fn(), destroy: vi.fn() })),
+    };
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: provider,
+        speechTurn: async () => [],
+        ttsProvider: opts.ttsProvider,
+        fillerEngine: opts.fillerEngine,
+        fillerCache: opts.fillerCache,
+        fillerDelayMs: opts.fillerDelayMs,
+      },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-es-tts',
+      start: { callSid: 'CA-es-tts', accountSid: 'AC', streamSid: 'MZ-es-tts', tracks: ['inbound'] },
+    });
+    await new Promise((r) => setImmediate(r));
+    return { adapter, ws };
+  }
+
+  it('renders template keys with the session language and threads language into synthesize', async () => {
+    const tts = {
+      synthesize: vi.fn(async (_input: TtsSynthesizeInput): Promise<TtsSynthesizeResult> => ({
+        audio: Buffer.alloc(640),
+        contentType: 'audio/mulaw',
+        provider: 'test',
+      })),
+    };
+    const { adapter } = await setupSpanishSession({ ttsProvider: tts });
+
+    await (adapter as unknown as { emitSideEffects: (fx: unknown[]) => Promise<void> }).emitSideEffects([
+      {
+        type: 'tts_play',
+        payload: { text: 'intent_confirm', template: 'confirm_intent', intent: 'create_appointment' },
+      },
+    ]);
+
+    expect(tts.synthesize).toHaveBeenCalledTimes(1);
+    const arg = tts.synthesize.mock.calls[0][0];
+    expect(arg.language).toBe('es');
+    // The template key was rendered to Spanish copy — the caller never
+    // hears the literal string "intent_confirm".
+    expect(arg.text).toContain('Para confirmar');
+    expect(arg.text).toContain('agendar una cita');
+  });
+
+  it('threads language into synthesizeStream on the streaming path', async () => {
+    const synthesizeStream = vi.fn((input: { text: string; language?: string }) => ({
+      async *[Symbol.asyncIterator]() {
+        void input;
+        yield { pcm: Buffer.alloc(640), isFinal: true };
+      },
+    }));
+    const tts = {
+      synthesize: vi.fn(),
+      synthesizeStream,
+    } as unknown as TtsProvider;
+    const { adapter } = await setupSpanishSession({ ttsProvider: tts });
+
+    await (adapter as unknown as { emitSideEffects: (fx: unknown[]) => Promise<void> }).emitSideEffects([
+      { type: 'tts_play', payload: { text: 'Perfecto, un momento.' } },
+    ]);
+
+    expect(synthesizeStream).toHaveBeenCalledTimes(1);
+    expect(synthesizeStream.mock.calls[0][0]).toMatchObject({ language: 'es' });
+  });
+
+  it('keys filler selection by session language and degrades to SILENCE when the es clip is missing', async () => {
+    // TTS delays past the filler threshold so the filler path fires.
+    const tts = {
+      synthesize: vi.fn(),
+      synthesizeStream: vi.fn(() => ({
+        async *[Symbol.asyncIterator]() {
+          await new Promise((r) => setTimeout(r, 200));
+          yield { pcm: Buffer.alloc(640), isFinal: true };
+        },
+      })),
+    } as unknown as TtsProvider;
+    const fillerEngine = {
+      selectNext: vi.fn(() => ({ id: 'es-un-momento', text: 'Un momento.', approxDurationMs: 480 })),
+    };
+    // Cache only holds ENGLISH clips — the Spanish clip is unrendered.
+    const englishOnlyCache = { get: (id: string) => (id === 'okay' ? Buffer.alloc(320) : undefined) };
+    const { adapter, ws } = await setupSpanishSession({
+      ttsProvider: tts,
+      fillerEngine,
+      fillerCache: englishOnlyCache,
+      fillerDelayMs: 30,
+    });
+
+    const done = (adapter as unknown as { emitSideEffects: (fx: unknown[]) => Promise<void> }).emitSideEffects([
+      { type: 'tts_play', payload: { text: 'Déjeme revisar su cuenta.' } },
+    ]);
+    // Wait past the filler delay but before the real TTS chunk lands.
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Selection was keyed by the session language…
+    expect(fillerEngine.selectNext).toHaveBeenCalledWith({ language: 'es' });
+    // …and the missing es clip produced SILENCE (no media frames), never
+    // the English 'okay' clip.
+    const mediaFrames = ws.sent.filter((f) => (f as Record<string, unknown>).event === 'media');
+    expect(mediaFrames).toHaveLength(0);
+
+    await done;
+    // Real TTS still played after the silent-gap turn.
+    const framesAfter = ws.sent.filter((f) => (f as Record<string, unknown>).event === 'media');
+    expect(framesAfter.length).toBeGreaterThan(0);
   });
 });

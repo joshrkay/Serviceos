@@ -1,11 +1,18 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { TenantTimezoneProvider, useTenantTimezone, useTenantTimezoneState } from './useTenantTimezone';
+import { _resetMeCacheForTests } from './useMe';
 
 const fetchMock = vi.fn();
 
 vi.mock('../utils/api-fetch', () => ({
   apiFetch: (...args: unknown[]) => fetchMock(...args),
+}));
+
+// The provider gates its fetch on Clerk auth state; these tests exercise
+// the signed-in path.
+vi.mock('@clerk/clerk-react', () => ({
+  useAuth: () => ({ isLoaded: true, isSignedIn: true }),
 }));
 
 function jsonResponse(body: Record<string, unknown>, status = 200): Response {
@@ -24,6 +31,7 @@ function Consumer() {
 }
 
 beforeEach(() => {
+  _resetMeCacheForTests();
   fetchMock.mockReset();
 });
 

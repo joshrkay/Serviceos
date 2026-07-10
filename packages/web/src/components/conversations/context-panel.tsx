@@ -78,7 +78,7 @@ export function ContextPanel({ entities, conversationTitle }: ContextPanelProps)
               {entity.label}
             </div>
             <dl className="context-entity-details">
-              {Object.entries(entity.details).map(([key, value]) => (
+              {Object.entries(entity.details ?? {}).map(([key, value]) => (
                 <React.Fragment key={key}>
                   <dt data-testid={`context-detail-key-${key}`}>{key}</dt>
                   <dd data-testid={`context-detail-value-${key}`}>{sanitizeDetailValue(value)}</dd>

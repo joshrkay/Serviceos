@@ -5,10 +5,9 @@ import { assessConfidence, getConfidenceLevel } from '../guardrails/confidence';
 import type { ProposalConfidenceMeta } from '../../proposals/contracts';
 import { CatalogItemRepository } from '../../catalog/catalog-item';
 import {
-  applyCatalogPricing,
   CatalogPricingOutcome,
+  groundLineItemPricing,
   lineItemConfidenceSignals,
-  resolveLineItems,
   UNCATALOGUED_CONFIDENCE_CAP,
 } from '../resolution/catalog-resolver';
 import {
@@ -16,6 +15,10 @@ import {
   decideEstimateClarification,
   EstimateDraftSignals,
 } from '../clarification/estimate-clarification';
+import {
+  buildStandingInstructionsSection,
+  intersectAppliedStandingInstructions,
+} from '../standing-instructions-context';
 
 /**
  * Story 7.2 — confidence ceiling for a draft that still has open clarifications
@@ -99,12 +102,26 @@ export class EstimateTaskHandler implements TaskHandler {
   async handle(context: TaskContext): Promise<TaskResult> {
     const userMessage = this.buildUserMessage(context);
 
+    // UB-A3 — owner standing instructions ride a SEPARATE, delimited system
+    // message (mirroring the classifier's vertical-context injection) so the
+    // base prompt stays byte-identical when none apply. Content-only: the
+    // section itself forbids approval/confidence/schema/pricing overrides.
+    const systemMessages: Array<{ role: 'system'; content: string }> = [
+      { role: 'system', content: ESTIMATE_SYSTEM_PROMPT },
+    ];
+    const injectedInstructions = context.standingInstructions ?? [];
+    if (injectedInstructions.length > 0) {
+      systemMessages.push({
+        role: 'system',
+        content: buildStandingInstructionsSection(injectedInstructions, {
+          requestAppliedIds: true,
+        }),
+      });
+    }
+
     const llmResponse = await this.gateway.complete({
       taskType: 'draft_estimate',
-      messages: [
-        { role: 'system', content: ESTIMATE_SYSTEM_PROMPT },
-        { role: 'user', content: userMessage },
-      ],
+      messages: [...systemMessages, { role: 'user', content: userMessage }],
       responseFormat: 'json',
     });
 
@@ -117,22 +134,17 @@ export class EstimateTaskHandler implements TaskHandler {
     // (still human-reviewed via the proposal gate).
     let catalogOutcome: CatalogPricingOutcome | undefined;
     const lineItems = payload.lineItems as Array<Record<string, unknown>>;
-    if (this.catalogRepo && Array.isArray(lineItems) && lineItems.length > 0) {
-      try {
-        const items = (await this.catalogRepo.listByTenant(context.tenantId)).filter(
-          (i) => i.archivedAt === null,
-        );
-        if (items.length > 0) {
-          const resolutions = resolveLineItems(
-            lineItems.map((li) => String(li.description ?? '')),
-            items,
-          );
-          catalogOutcome = applyCatalogPricing(lineItems, resolutions, 'unitPrice');
-          payload.lineItems = catalogOutcome.lineItems;
-        }
-      } catch {
-        catalogOutcome = undefined;
-      }
+    if (Array.isArray(lineItems) && lineItems.length > 0) {
+      // Always resolve to an outcome — even with no catalog wired, an empty
+      // catalog, or a read error, every LLM price is treated as uncatalogued
+      // so the confidence cap below still fires (previously an undefined
+      // outcome silently skipped the cap for new/empty-catalog tenants).
+      catalogOutcome = await groundLineItemPricing(
+        lineItems,
+        'unitPrice',
+        this.catalogRepo ? () => this.catalogRepo!.listByTenant(context.tenantId) : null,
+      );
+      payload.lineItems = catalogOutcome.lineItems;
     }
 
     const confidence = assessConfidence(parsed ?? {});
@@ -205,12 +217,27 @@ export class EstimateTaskHandler implements TaskHandler {
         : [],
       'unitPrice',
     );
+    // UB-A3 — applied-instruction marker: the model's claimed ids are
+    // INTERSECTED with what was injected (never trust invented ids) and the
+    // field is dropped entirely when empty.
+    const appliedStandingInstructions = intersectAppliedStandingInstructions(
+      parsed?.appliedStandingInstructions,
+      injectedInstructions,
+    );
     const meta: ProposalConfidenceMeta = {
-      overallConfidence: getConfidenceLevel(confidenceScore),
+      // Hard-block auto-approval for any ungrounded (LLM-priced) line via the
+      // RV-007 confidence-marker guard — independent of the numeric score AND
+      // of any tenant `auto_approve_threshold` override (a threshold ≤ the 0.85
+      // uncatalogued cap / 0.5 clarify cap would otherwise still auto-approve
+      // an AI-invented price). An uncatalogued price must always reach a human.
+      overallConfidence: catalogOutcome?.anyUncatalogued
+        ? 'low'
+        : getConfidenceLevel(confidenceScore),
       ...(Object.keys(signals.fieldConfidence).length > 0
         ? { fieldConfidence: signals.fieldConfidence }
         : {}),
       ...(signals.markers.length > 0 ? { markers: signals.markers } : {}),
+      ...(appliedStandingInstructions.length > 0 ? { appliedStandingInstructions } : {}),
     };
     payload._meta = meta;
 

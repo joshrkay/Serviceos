@@ -205,6 +205,9 @@ export enum ProposalType {
   REVIEW_RESPONSE_PROPOSAL = 'review_response_proposal',
   SEND_PAYMENT_REMINDER = 'send_payment_reminder',
   APPLY_LATE_FEE = 'apply_late_fee',
+  // UB-A2 (agent wave) — voice-captured persistent directive; on approval the
+  // API inserts a standing_instructions row (source 'proposal').
+  CREATE_STANDING_INSTRUCTION = 'create_standing_instruction',
 }
 
 export enum RejectionCategory {

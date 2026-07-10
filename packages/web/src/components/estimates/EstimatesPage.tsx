@@ -247,6 +247,8 @@ function AIPricingSuggestions({ estimateId, items, onLineItemAccepted }: {
       // estimate_line_items.id is a UUID; the pg repo wipes-and-reinserts on
       // update, so generating fresh UUIDs (instead of synthetic "li-..." ids)
       // keeps the PATCH payload valid against the Postgres schema.
+      // The AI hint becomes a brand-new standalone line (no tier metadata),
+      // fresh UUID since it has no existing row.
       const newItem = {
         description: hint.lineItem.description,
         quantity: hint.lineItem.qty,
@@ -258,22 +260,21 @@ function AIPricingSuggestions({ estimateId, items, onLineItemAccepted }: {
       };
       const res = await apiFetch(`/api/estimates/${estimateId}`, {
         method: 'PATCH',
+        // Map existing lines through uiLineToApi so their taxable flag AND
+        // good-better-best metadata (groupKey/groupLabel/isOptional/
+        // isDefaultSelected) survive — the previous inline rebuild forced
+        // taxable:false and dropped the tier structure on every accept,
+        // silently rewriting the customer-facing document.
         body: JSON.stringify({ lineItems: [
-          ...items.map((item, i) => ({
-            description: item.description,
-            quantity: item.qty,
-            unitPriceCents: Math.round(item.rate * 100),
-            totalCents: Math.round(item.qty * item.rate * 100),
-            sortOrder: i,
-            taxable: false,
-            id: crypto.randomUUID(),
-          })),
+          ...items.map((item, i) => uiLineToApi(item, i)),
           newItem,
         ]}),
       });
       if (res.ok) {
         setAccepted(prev => new Set([...prev, hint.id]));
         onLineItemAccepted?.(hint.lineItem!);
+      } else {
+        toast.error(`Couldn't apply the suggestion (HTTP ${res.status}).`);
       }
     } finally {
       setAccepting(null);
@@ -373,7 +374,10 @@ function LineItemsEditor({ items, editable, onChange, onAddRow }: {
         <h4 className="text-foreground">Line items</h4>
         {editable && !editing && (
           <button
-            onClick={() => setEditing(true)}
+            // Re-seed the draft from the CURRENT items on entering edit mode —
+            // the mount-time useState seed goes stale after a refetch, and
+            // saving a stale draft would silently drop newer lines.
+            onClick={() => { setDraft(items); setEditing(true); }}
             className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground border border-border rounded-lg px-2.5 py-1.5 hover:bg-secondary transition-colors"
           >
             <Pencil size={11} /> Edit
@@ -475,8 +479,35 @@ function EstimateDocPreview({ est, lineItems, onClose }: {
 }) {
   const estimateTerm = useEstimateTerm();
   const total    = lineItems.reduce((s, i) => s + i.qty * i.rate, 0);
-  const [copied, setCopied] = useState(false);
-  const link = `rivet.ai/e/${est.estimateNumber.toLowerCase().replace('-', '')}`;
+  // Real tenant identity for the preview + printed document. This modal
+  // previously rendered a fabricated business ('Rivet Pro Services',
+  // 'Austin, TX · (512) 555-0000') into the customer-facing PDF, and a
+  // fabricated rivet.ai share link with a working Copy button (QA
+  // 2026-07-02). The real share link only exists once the estimate is
+  // sent (the send endpoint mints the view token), so none is shown here.
+  const [business, setBusiness] = useState<{ name: string; contact: string } | null>(null);
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const res = await apiFetch('/api/settings');
+        if (!res.ok || !alive) return;
+        const data = (await res.json()) as {
+          businessName?: string | null; businessPhone?: string | null;
+        };
+        if (!alive) return;
+        const name = data.businessName?.trim();
+        if (name) {
+          setBusiness({ name, contact: data.businessPhone?.trim() ?? '' });
+        }
+      } catch {
+        /* non-fatal — preview falls back to name-only header */
+      }
+    })();
+    return () => { alive = false; };
+  }, []);
+  const businessName = business?.name ?? 'Your business';
+  const businessContact = business?.contact ?? '';
 
   return (
     <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-end md:items-center justify-center p-4" onClick={onClose}>
@@ -495,8 +526,8 @@ function EstimateDocPreview({ est, lineItems, onClose }: {
               onClick={() => printEstimateDocument({
                 estimateNumber: est.estimateNumber,
                 customerName: est.customer,
-                businessName: 'Rivet Pro Services',
-                businessContact: 'Austin, TX · (512) 555-0000',
+                businessName,
+                businessContact,
                 description: est.description,
                 validUntil: est.validUntil,
                 documentLabel: estimateTerm,
@@ -518,10 +549,12 @@ function EstimateDocPreview({ est, lineItems, onClose }: {
           <div className="flex items-start justify-between mb-6">
             <div>
               <div className="flex items-center gap-2 mb-1">
-                <div className="flex size-8 items-center justify-center rounded-lg bg-primary text-primary-foreground" style={{ fontSize: 12 }}>F</div>
-                <p className="text-sm text-foreground">Rivet Pro Services</p>
+                <div className="flex size-8 items-center justify-center rounded-lg bg-primary text-primary-foreground" style={{ fontSize: 12 }}>
+                  {businessName.charAt(0).toUpperCase()}
+                </div>
+                <p className="text-sm text-foreground">{businessName}</p>
               </div>
-              <p className="text-xs text-muted-foreground">Austin, TX · (512) 555-0000</p>
+              {businessContact && <p className="text-xs text-muted-foreground">{businessContact}</p>}
             </div>
             <div className="text-right">
               <p className="text-xs text-muted-foreground">{estimateTerm}</p>
@@ -567,19 +600,13 @@ function EstimateDocPreview({ est, lineItems, onClose }: {
           {/* CTA */}
           <div className="rounded-xl bg-primary px-4 py-4 text-center mb-4">
             <p className="text-primary-foreground text-sm">Accept this {estimateTerm.toLowerCase()}</p>
-            <p className="text-primary-foreground/60 text-xs mt-0.5">{link}</p>
           </div>
 
-          {/* Link copy */}
-          <div className="flex items-center gap-2 rounded-lg bg-secondary border border-border px-3 py-2.5">
-            <p className="flex-1 text-xs text-muted-foreground truncate">{link}</p>
-            <button
-              onClick={() => { navigator.clipboard?.writeText(link); setCopied(true); setTimeout(() => setCopied(false), 2000); }}
-              className="flex items-center gap-1 text-xs text-primary hover:text-primary transition-colors shrink-0"
-            >
-              {copied ? <><Check size={11} /> Copied</> : <><Copy size={11} /> Copy</>}
-            </button>
-          </div>
+          {/* The shareable link is minted by the send endpoint (view token);
+              a synthesized one here would be dead. */}
+          <p className="text-xs text-muted-foreground text-center">
+            Sending this {estimateTerm.toLowerCase()} generates the customer&rsquo;s secure link.
+          </p>
         </div>
       </div>
     </div>

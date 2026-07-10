@@ -208,6 +208,117 @@ describe('NewEstimateFlow', () => {
     expect(JSON.parse((createCall![1] as RequestInit).body as string).jobId).toBe('job-new');
   });
 
+  it('AI suggest: unitPrice is integer cents — UI shows dollars and the create body round-trips the cents', async () => {
+    apiFetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url.startsWith('/api/jobs?customerId=')) {
+        return Promise.resolve(jsonResponse([{ id: 'job-1', summary: 'Existing job' }]));
+      }
+      if (url === '/api/estimates/suggest' && init?.method === 'POST') {
+        // Suggest contract: unitPrice is INTEGER CENTS (8500 = $85.00).
+        return Promise.resolve(jsonResponse({
+          proposalId: 'prop-1',
+          lineItems: [{ description: 'Coil cleaning', quantity: 1, unitPrice: 8500, category: 'Service' }],
+          notes: 'Grounded in your catalog.',
+        }));
+      }
+      if (url === '/api/estimates' && init?.method === 'POST') {
+        return Promise.resolve(jsonResponse({ id: 'est-4' }, 201));
+      }
+      return Promise.resolve(jsonResponse([]));
+    });
+
+    renderFlow({ preSelectedCustomerId: 'cust-1' });
+    // Reach the describe step, then drive the photo path (it calls
+    // /api/estimates/suggest without needing MediaRecorder).
+    fireEvent.click(screen.getByText('Speak it'));
+    fireEvent.click(screen.getByRole('button', { name: 'Photos' }));
+    fireEvent.click(screen.getByText('Take or upload a photo'));
+    fireEvent.click(await screen.findByRole('button', { name: /Analyze photos/i }));
+
+    // 8500 cents renders as $85 — not the 100×-inflated $8,500.
+    expect((await screen.findAllByText('$85')).length).toBeGreaterThan(0);
+    expect(screen.queryByText('$8,500')).not.toBeInTheDocument();
+
+    // Round-trip: saving submits the same integer cents the API suggested.
+    fireEvent.click(screen.getByRole('button', { name: /Review estimate →/i }));
+    await screen.findByRole('button', { name: /Send to customer/i });
+    fireEvent.click(screen.getByRole('button', { name: /Save as draft/i }));
+    expect(await screen.findByText(/Draft saved/i)).toBeInTheDocument();
+
+    const createCall = apiFetchMock.mock.calls.find(c => c[0] === '/api/estimates');
+    const body = JSON.parse((createCall![1] as RequestInit).body as string);
+    expect(body.lineItems[0].unitPriceCents).toBe(8500);
+    expect(body.lineItems[0].totalCents).toBe(8500);
+  });
+
+  it('Send retry after a failed send reuses the created estimate — exactly one POST /api/estimates', async () => {
+    let sendAttempts = 0;
+    apiFetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url.startsWith('/api/jobs?customerId=')) {
+        return Promise.resolve(jsonResponse([{ id: 'job-1', summary: 'Existing job' }]));
+      }
+      if (url === '/api/estimates' && init?.method === 'POST') {
+        return Promise.resolve(jsonResponse({ id: 'est-1' }, 201));
+      }
+      if (url === '/api/estimates/est-1/send' && init?.method === 'POST') {
+        sendAttempts += 1;
+        return Promise.resolve(
+          sendAttempts === 1
+            ? jsonResponse({ message: 'SMS provider unavailable' }, 500)
+            : jsonResponse({ viewUrl: 'https://app.test/e/abc123', viewToken: 'abc123' }, 202),
+        );
+      }
+      return Promise.resolve(jsonResponse([]));
+    });
+
+    await reachReview();
+    fireEvent.click(screen.getByRole('button', { name: /Send to customer/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /Send via/i }));
+
+    // First attempt: create succeeded, send failed — error surfaced.
+    expect(await screen.findByText(/SMS provider unavailable/i)).toBeInTheDocument();
+
+    // Retry: must reuse est-1 and only re-attempt the send.
+    fireEvent.click(screen.getByRole('button', { name: /Send via/i }));
+    expect(await screen.findByText(/Estimate sent!/i)).toBeInTheDocument();
+
+    const createCalls = apiFetchMock.mock.calls.filter(
+      c => c[0] === '/api/estimates' && (c[1] as RequestInit)?.method === 'POST',
+    );
+    expect(createCalls).toHaveLength(1);
+    expect(sendAttempts).toBe(2);
+  });
+
+  it('Save draft double-tap: button disables in flight — exactly one POST /api/estimates', async () => {
+    let resolveCreate!: (value: Response) => void;
+    const pendingCreate = new Promise<Response>(res => { resolveCreate = res; });
+    apiFetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url.startsWith('/api/jobs?customerId=')) {
+        return Promise.resolve(jsonResponse([{ id: 'job-1', summary: 'Existing job' }]));
+      }
+      if (url === '/api/estimates' && init?.method === 'POST') {
+        return pendingCreate; // keep the first create in flight
+      }
+      return Promise.resolve(jsonResponse([]));
+    });
+
+    await reachReview();
+    const saveBtn = screen.getByRole('button', { name: /Save as draft/i });
+    fireEvent.click(saveBtn);
+    // Second tap lands while the first create is still in flight.
+    expect(saveBtn).toBeDisabled();
+    expect(saveBtn).toHaveTextContent('Saving…');
+    fireEvent.click(saveBtn);
+
+    resolveCreate(jsonResponse({ id: 'est-5' }, 201));
+    expect(await screen.findByText(/Draft saved/i)).toBeInTheDocument();
+
+    const createCalls = apiFetchMock.mock.calls.filter(
+      c => c[0] === '/api/estimates' && (c[1] as RequestInit)?.method === 'POST',
+    );
+    expect(createCalls).toHaveLength(1);
+  });
+
   it('Create error: surfaces the message and does NOT call onCreated', async () => {
     apiFetchMock.mockImplementation((url: string, init?: RequestInit) => {
       if (url.startsWith('/api/jobs?customerId=')) {

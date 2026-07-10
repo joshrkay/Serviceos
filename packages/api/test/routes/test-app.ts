@@ -106,7 +106,7 @@ export async function buildTestApp(): Promise<TestApp> {
   // packages/api/test/decisions/tenant-isolation.test.ts.
   const ownership = permissiveTenantOwnership();
 
-  app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership, new InMemoryQueue(), new NoopFeedbackDispatcher()));
+  app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership, new InMemoryQueue(), new NoopFeedbackDispatcher(), customerRepo));
   app.use(
     '/api/customers',
     createCustomerRouter(
@@ -133,6 +133,7 @@ export async function buildTestApp(): Promise<TestApp> {
       undefined,
       agreementRepo,
       templateRepo,
+      customerRepo,
     ),
   );
   app.use(

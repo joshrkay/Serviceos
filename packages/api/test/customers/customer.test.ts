@@ -76,6 +76,52 @@ describe('P1-001 — Customer entity + CRUD', () => {
     expect(updated!.displayName).toBe('Jane Doe');
   });
 
+  it("update — '' clears optional fields (blank coerced to unset, never stored)", async () => {
+    const customer = await createCustomer(
+      {
+        tenantId: 'tenant-1',
+        firstName: 'John',
+        lastName: 'Doe',
+        companyName: 'Acme Co',
+        primaryPhone: '5125550100',
+        secondaryPhone: '5125550101',
+        email: 'john@example.com',
+        communicationNotes: 'gate code 1234',
+        createdBy: 'user-1',
+      },
+      repo
+    );
+
+    // The web edit form serializes cleared optionals as '' (CustomerEdit.tsx);
+    // '' must not trip the phone/email format validators and must persist as
+    // unset — NULL in Pg, undefined in-memory — not as an empty string.
+    const updated = await updateCustomer(
+      'tenant-1',
+      customer.id,
+      {
+        lastName: '',
+        companyName: '',
+        primaryPhone: '',
+        secondaryPhone: '',
+        email: '',
+        communicationNotes: '',
+      },
+      repo
+    );
+
+    expect(updated!.companyName).toBeUndefined();
+    expect(updated!.primaryPhone).toBeUndefined();
+    expect(updated!.secondaryPhone).toBeUndefined();
+    expect(updated!.email).toBeUndefined();
+    expect(updated!.communicationNotes).toBeUndefined();
+    // lastName is a required string on the entity — '' is its cleared value.
+    expect(updated!.lastName).toBe('');
+    expect(updated!.displayName).toBe('John');
+
+    const found = await getCustomer('tenant-1', customer.id, repo);
+    expect(found!.email).toBeUndefined();
+  });
+
   it('validation — rejects invalid customer update before write', async () => {
     const customer = await createCustomer(
       { tenantId: 'tenant-1', firstName: 'John', lastName: 'Doe', createdBy: 'user-1' },

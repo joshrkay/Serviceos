@@ -38,7 +38,11 @@ import React, {
 } from 'react';
 import { useAuth } from '@clerk/clerk-react';
 import { useMe } from './useMe';
-import { useResilientStream, type WsServerFrame } from './useResilientStream';
+import {
+  useResilientStream,
+  type StreamStatus,
+  type WsServerFrame,
+} from './useResilientStream';
 
 export type SessionChannel = 'voice_inbound' | 'sms' | 'mms' | 'inapp_voice';
 
@@ -53,12 +57,28 @@ export interface ActiveSessionSummary {
   startedAt: string;
 }
 
+/**
+ * UC-3 — shared access to the app's single client-gateway WebSocket (the
+ * connection this provider already opens for the supervisor wall). Other
+ * consumers (dispatch presence) piggyback on it instead of opening a second
+ * socket per operator. `send` is a stable identity that no-ops when the
+ * socket is not open; `onFrame` registers a listener for every inbound frame
+ * and returns its unsubscribe.
+ */
+export interface GatewayHandle {
+  status: StreamStatus;
+  send: (frame: object) => void;
+  onFrame: (listener: (frame: WsServerFrame) => void) => () => void;
+}
+
 export interface UseActiveSessionsResult {
   sessions: ActiveSessionSummary[];
   /** True while the WS is connecting / waiting for the first frame. */
   isConnecting: boolean;
   /** Count of proposals currently in 'ready_for_review' across all sessions. */
   pendingProposalCount: number;
+  /** The shared client-gateway WS connection (inert without a provider). */
+  gateway: GatewayHandle;
 }
 
 interface ActiveSessionDTO {
@@ -108,6 +128,9 @@ function useActiveSessionsInternal(): UseActiveSessionsResult {
   const sendRef = useRef<((frame: object) => void) | null>(null);
   const subscribedRef = useRef<Set<string>>(new Set());
   const wsConnectedRef = useRef(false);
+  // UC-3 — external frame listeners (dispatch presence, ...). A ref-backed
+  // Set so registering/unregistering never re-binds the socket.
+  const frameListenersRef = useRef<Set<(frame: WsServerFrame) => void>>(new Set());
 
   const refreshToken = useCallback(async (): Promise<string | null> => {
     try {
@@ -181,14 +204,26 @@ function useActiveSessionsInternal(): UseActiveSessionsResult {
   useEffect(() => {
     if (!isAuthorized) return;
     let cancelled = false;
+    // Error backoff: skip ticks (doubling per consecutive failure, capped
+    // at 5 min) instead of re-hitting a persistently failing endpoint at
+    // full rate forever with the error silently swallowed.
+    let consecutiveFailures = 0;
+    let nextAttemptAt = 0;
+    const BACKOFF_CAP_MS = 5 * 60_000;
     const poll = async () => {
+      if (Date.now() < nextAttemptAt) return;
       const fresh = await refreshToken();
       if (cancelled || !fresh) return;
       try {
         const list = await fetchActiveSessions(fresh);
         if (!cancelled) reconcileSessions(list);
+        consecutiveFailures = 0;
+        nextAttemptAt = 0;
       } catch {
-        // Network blip / expired token — next tick refreshes + retries.
+        // Network blip / expired token — retried after the backoff window.
+        consecutiveFailures += 1;
+        nextAttemptAt =
+          Date.now() + Math.min(DISCOVERY_POLL_MS * 2 ** consecutiveFailures, BACKOFF_CAP_MS);
       }
     };
     void poll();
@@ -216,6 +251,13 @@ function useActiveSessionsInternal(): UseActiveSessionsResult {
   }, [isAuthorized]);
 
   const handleFrame = useCallback((frame: WsServerFrame) => {
+    for (const listener of Array.from(frameListenersRef.current)) {
+      try {
+        listener(frame);
+      } catch {
+        // one bad listener mustn't block the rest
+      }
+    }
     if (frame.kind !== 'voice.event') return;
     const { sessionId, event, payload } = frame;
     if (TERMINAL_VOICE_EVENTS.has(event)) {
@@ -289,17 +331,40 @@ function useActiveSessionsInternal(): UseActiveSessionsResult {
     }
   }, [status]);
 
+  // Stable identities so gateway consumers' effects key off `status` only.
+  const gatewaySend = useCallback((frame: object) => {
+    sendRef.current?.(frame);
+  }, []);
+  const gatewayOnFrame = useCallback((listener: (frame: WsServerFrame) => void) => {
+    frameListenersRef.current.add(listener);
+    return () => {
+      frameListenersRef.current.delete(listener);
+    };
+  }, []);
+  const gateway = useMemo<GatewayHandle>(
+    () => ({ status, send: gatewaySend, onFrame: gatewayOnFrame }),
+    [status, gatewaySend, gatewayOnFrame]
+  );
+
   return {
     sessions: Array.from(sessions.values()),
     isConnecting: status === 'connecting',
     pendingProposalCount: 0,
+    gateway,
   };
 }
+
+const INERT_GATEWAY: GatewayHandle = {
+  status: 'idle',
+  send: () => {},
+  onFrame: () => () => {},
+};
 
 const INERT_RESULT: UseActiveSessionsResult = {
   sessions: [],
   isConnecting: false,
   pendingProposalCount: 0,
+  gateway: INERT_GATEWAY,
 };
 
 const ActiveSessionsContext = createContext<UseActiveSessionsResult | null>(null);

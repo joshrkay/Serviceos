@@ -1,11 +1,15 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import { isCaptureProposalType } from '@ai-service-os/shared';
+import { Undo2, X } from 'lucide-react';
 import { useApiClient } from '../../lib/apiClient';
 import { emitProposalsChanged } from '../../lib/proposal-events';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
 import { formatInTenantTz } from '../../utils/formatInTenantTz';
 import { ProposalChainCard, ChainRow } from './ProposalChainCard';
 import { AmbiguityPicker, type AmbiguityCandidate } from './AmbiguityPicker';
+
+// D5: 5-second undo window for approvals (matches execution layer UNDO_WINDOW_MS)
+const UNDO_WINDOW_MS = 5000;
 
 type Urgency = 'critical' | 'high' | 'normal' | 'low';
 
@@ -24,6 +28,9 @@ interface ProposalMeta {
   overallConfidence?: ConfidenceLevel;
   severity?: ProposalSeverity;
   markers?: Array<{ path: string; reason: string }>;
+  // UB-A3 — owner standing instructions the drafting AI applied (server-side
+  // intersected with what was injected; ids are never model-invented).
+  appliedStandingInstructions?: Array<{ id: string; text: string }>;
 }
 
 // §6.4-B (U5) — compact severity badge for the inbox review row. The inbox (not
@@ -120,6 +127,15 @@ type FeedItem =
  * first-seen index as the chain's sort key. Standalone rows pass through
  * untouched, so the flag-off / single-action experience is unchanged.
  */
+/**
+ * Human label for an internal proposal-type id. The raw snake_case id
+ * (`draft_estimate`) leaked into the card header verbatim (QA 2026-07-02).
+ */
+function humanizeProposalType(proposalType: string): string {
+  const words = proposalType.replace(/_/g, ' ');
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
 function groupIntoFeed(rows: InboxProposalRow[]): FeedItem[] {
   const items: FeedItem[] = [];
   const chainItemByid = new Map<string, Extract<FeedItem, { kind: 'chain' }>>();
@@ -181,10 +197,24 @@ interface ExpiredCard {
   createdAt: string;
 }
 
+// Journey QA 2026-07-02 (bug 10) — an approved proposal whose execution
+// failed. Previously these vanished from the inbox with no trace; the card
+// surfaces the server's executionError so the operator knows the approval
+// didn't land.
+interface FailedCard {
+  id: string;
+  proposalType: string;
+  summary: string;
+  status: string;
+  executionError?: string;
+  failedAt?: string;
+}
+
 interface InboxResponse {
   data: InboxProposalRow[];
   summary: InboxSummary;
   expired?: ExpiredCard[];
+  failed?: FailedCard[];
 }
 
 /** Per-id outcome of POST /api/proposals/approve-batch (mirrors the API's
@@ -253,6 +283,8 @@ function ProposalMarkers({
   const catalogResolution = row.proposal.sourceContext?.catalogResolution ?? {};
   const markers = meta?.markers ?? [];
   const severity = meta?.severity;
+  // UB-A3 — "Standing instruction applied" chips.
+  const appliedInstructions = meta?.appliedStandingInstructions ?? [];
   const flagged = lineItems
     .map((li, idx) => ({ li, idx }))
     .filter(({ li }) => li.pricingSource && li.pricingSource !== 'catalog');
@@ -272,6 +304,7 @@ function ProposalMarkers({
     flagged.length === 0 &&
     markers.length === 0 &&
     !severity &&
+    appliedInstructions.length === 0 &&
     entityCandidates.length === 0
   )
     return null;
@@ -320,6 +353,21 @@ function ProposalMarkers({
         </p>
       ))}
 
+      {/* UB-A3 — passive chip per owner standing instruction the draft applied. */}
+      {appliedInstructions.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {appliedInstructions.map((si) => (
+            <span
+              key={si.id}
+              data-testid="standing-instruction-chip"
+              className="inline-flex max-w-full items-center truncate rounded-full border border-border bg-secondary px-2 py-0.5 text-[10px] text-muted-foreground"
+            >
+              Standing instruction applied: {si.text}
+            </span>
+          ))}
+        </div>
+      )}
+
       {flagged
         .filter(
           ({ li, idx }) =>
@@ -363,8 +411,67 @@ export function InboxPage() {
   const [rows, setRows] = useState<InboxProposalRow[]>([]);
   const [summary, setSummary] = useState<InboxSummary | null>(null);
   const [expired, setExpired] = useState<ExpiredCard[]>([]);
+  const [failed, setFailed] = useState<FailedCard[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // D5: Undo toast state — shows after approve for 5 seconds
+  const [undoToast, setUndoToast] = useState<{
+    proposalId: string;
+    summary: string;
+    timeLeft: number;
+  } | null>(null);
+  const undoTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Clear undo timer on unmount
+  useEffect(() => {
+    return () => {
+      if (undoTimerRef.current) clearInterval(undoTimerRef.current);
+    };
+  }, []);
+
+  // Start the undo countdown
+  const startUndoToast = useCallback((proposalId: string, summary: string) => {
+    if (undoTimerRef.current) clearInterval(undoTimerRef.current);
+    setUndoToast({ proposalId, summary, timeLeft: UNDO_WINDOW_MS });
+    undoTimerRef.current = setInterval(() => {
+      setUndoToast((prev) => {
+        if (!prev) return null;
+        const newTimeLeft = prev.timeLeft - 100;
+        if (newTimeLeft <= 0) {
+          if (undoTimerRef.current) clearInterval(undoTimerRef.current);
+          return null;
+        }
+        return { ...prev, timeLeft: newTimeLeft };
+      });
+    }, 100);
+  }, []);
+
+  // D5: Undo an approved proposal
+  const undoApproval = useCallback(async (proposalId: string) => {
+    if (undoTimerRef.current) clearInterval(undoTimerRef.current);
+    setUndoToast(null);
+    try {
+      const res = await apiFetch(`/api/proposals/${proposalId}/undo`, { method: 'POST' });
+      if (!res.ok) {
+        const json = await res.json().catch(() => ({}));
+        throw new Error(json?.message ?? `HTTP ${res.status}`);
+      }
+      // Refresh the inbox to show the undone proposal
+      emitProposalsChanged();
+      // Trigger a re-fetch
+      const refreshRes = await apiFetch('/api/proposals/inbox');
+      if (refreshRes.ok) {
+        const body = (await refreshRes.json()) as InboxResponse;
+        setRows(body.data);
+        setSummary(body.summary);
+        setExpired(body.expired ?? []);
+        setFailed(body.failed ?? []);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Undo failed');
+    }
+  }, [apiFetch]);
 
   useEffect(() => {
     let cancelled = false;
@@ -378,6 +485,7 @@ export function InboxPage() {
           setRows(body.data);
           setSummary(body.summary);
           setExpired(body.expired ?? []);
+          setFailed(body.failed ?? []);
         }
       })
       .catch((err) => {
@@ -398,6 +506,10 @@ export function InboxPage() {
       const res = await apiFetch(`/api/proposals/${id}/${action}`, { method: 'POST' });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       emitProposalsChanged();
+      // D5: Show undo toast for approvals (5s window matching execution layer)
+      if (action === 'approve' && removed) {
+        startUndoToast(id, removed.proposal.summary);
+      }
     } catch (err) {
       if (removed) setRows((prev) => [removed, ...prev]);
       setError(err instanceof Error ? err.message : `${action} failed`);
@@ -585,7 +697,7 @@ export function InboxPage() {
         {isLoading && <p className="text-sm text-muted-foreground">Loading…</p>}
         {error && <p className="text-sm text-destructive">{error}</p>}
 
-        {!isLoading && !error && rows.length === 0 && expired.length === 0 && (
+        {!isLoading && !error && rows.length === 0 && expired.length === 0 && failed.length === 0 && (
           <div className="rounded-xl border border-border bg-card px-6 py-12 text-center">
             <p className="text-sm text-foreground font-medium">Nothing waiting.</p>
             <p className="text-xs text-muted-foreground mt-1">
@@ -646,7 +758,7 @@ export function InboxPage() {
                       <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded border ${badge.classes}`}>
                         {badge.label}
                       </span>
-                      <span className="text-xs text-muted-foreground">{row.proposal.proposalType}</span>
+                      <span className="text-xs text-muted-foreground">{humanizeProposalType(row.proposal.proposalType)}</span>
                     </div>
                     <p className="text-sm text-foreground font-medium truncate">{row.proposal.summary}</p>
                     {holdExpiryLine(row, tz) && (
@@ -677,6 +789,41 @@ export function InboxPage() {
           })}
         </ul>
 
+        {/* Journey QA 2026-07-02 (bug 10) — approvals that failed to execute.
+            Without this section an approved-then-failed proposal silently
+            vanished; the card shows the server's executionError. */}
+        {failed.length > 0 && (
+          <div className="mt-8" data-testid="failed-section">
+            <h2 className="text-sm font-semibold text-foreground mb-2">
+              Approved but failed to execute
+            </h2>
+            <ul className="space-y-2">
+              {failed.map((card) => (
+                <li
+                  key={card.id}
+                  data-testid="failed-row"
+                  className="rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3"
+                >
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="text-[10px] font-medium px-1.5 py-0.5 rounded border border-destructive/30 bg-destructive/10 text-destructive">
+                      Failed
+                    </span>
+                    <span className="text-xs text-muted-foreground">
+                      {humanizeProposalType(card.proposalType)}
+                    </span>
+                  </div>
+                  <p className="text-sm text-foreground font-medium truncate">{card.summary}</p>
+                  {card.executionError && (
+                    <p className="text-xs text-destructive mt-0.5" data-testid="execution-error">
+                      {card.executionError}
+                    </p>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
         {/* §5.5 — expired schedule proposal cards, clearly marked and re-proposable. */}
         {expired.length > 0 && (
           <div className="mt-8" data-testid="expired-section">
@@ -694,7 +841,7 @@ export function InboxPage() {
                         <span className="text-[10px] font-medium px-1.5 py-0.5 rounded border bg-secondary text-muted-foreground border-border">
                           Expired
                         </span>
-                        <span className="text-xs text-muted-foreground">{card.proposalType}</span>
+                        <span className="text-xs text-muted-foreground">{humanizeProposalType(card.proposalType)}</span>
                       </div>
                       <p className="text-sm text-foreground font-medium truncate">{card.summary}</p>
                     </div>
@@ -712,6 +859,47 @@ export function InboxPage() {
           </div>
         )}
       </div>
+
+      {/* D5: Undo toast — shows for 5s after approval, matching execution layer undo window */}
+      {undoToast && (
+        <div
+          data-testid="undo-toast"
+          className="fixed bottom-20 md:bottom-6 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 rounded-xl border border-border bg-card shadow-lg px-4 py-3 min-w-[280px] max-w-[90vw]"
+          style={{ animation: 'slideUp 0.2s ease-out' }}
+        >
+          {/* Progress bar */}
+          <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-secondary rounded-b-xl overflow-hidden">
+            <div
+              className="h-full bg-warning transition-all ease-linear"
+              style={{ width: `${(undoToast.timeLeft / UNDO_WINDOW_MS) * 100}%`, transitionDuration: '100ms' }}
+            />
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-sm text-foreground truncate">{undoToast.summary}</p>
+            <p className="text-xs text-muted-foreground">
+              Approved · {Math.ceil(undoToast.timeLeft / 1000)}s to undo
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => undoApproval(undoToast.proposalId)}
+            className="flex items-center gap-1.5 rounded-lg bg-warning text-primary-foreground px-3 py-1.5 text-sm font-medium hover:bg-warning/90 shrink-0"
+          >
+            <Undo2 size={14} /> Undo
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              if (undoTimerRef.current) clearInterval(undoTimerRef.current);
+              setUndoToast(null);
+            }}
+            className="text-muted-foreground hover:text-foreground shrink-0"
+            aria-label="Dismiss"
+          >
+            <X size={14} />
+          </button>
+        </div>
+      )}
     </div>
   );
 }

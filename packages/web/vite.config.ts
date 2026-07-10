@@ -1,9 +1,24 @@
 import { defineConfig } from 'vite';
+import { fileURLToPath } from 'node:url';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 
+// DEV-ONLY: when VITE_AUTH_MODE=dev, swap the Clerk SDK for a local shim so
+// the authenticated app boots headlessly without Clerk's hosted frontend
+// (unreachable in sandboxed CI / verification). Never active in a real build.
+const devAuth = process.env.VITE_AUTH_MODE === 'dev';
+
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  resolve: devAuth
+    ? {
+        alias: {
+          '@clerk/clerk-react': fileURLToPath(
+            new URL('./src/dev/clerk-dev-shim.tsx', import.meta.url),
+          ),
+        },
+      }
+    : undefined,
   build: {
     rollupOptions: {
       output: {
@@ -32,8 +47,18 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      '/api': process.env.VITE_API_URL || 'http://localhost:3000',
-      '/public/intake': process.env.VITE_API_URL || 'http://localhost:3000',
+      // ws: true so the /api/ws client-gateway WebSocket handshake is
+      // forwarded in dev (a plain string target proxies HTTP only, leaving
+      // useResilientStream in a permanent reconnect loop locally).
+      '/api': {
+        target: process.env.VITE_API_URL || 'http://localhost:3000',
+        changeOrigin: true,
+        ws: true,
+      },
+      // All view-token-gated public API mounts (intake/estimates/invoices/
+      // feedback) live at bare /public on the API — proxy the whole prefix,
+      // not just /public/intake.
+      '/public': process.env.VITE_API_URL || 'http://localhost:3000',
       // Dev-only object storage receiver; the API's DevStorageProvider
       // returns upload URLs under this prefix when STORAGE_* env vars
       // are absent. Prod uses presigned R2/S3 URLs that hit R2 directly.

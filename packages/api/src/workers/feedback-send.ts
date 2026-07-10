@@ -65,7 +65,9 @@ export function createFeedbackSendWorker(deps: {
       const settings = await settingsRepo.findByTenant(tenantId);
       const businessName = settings?.businessName ?? 'our team';
       const normalizedBase = publicBaseUrl.replace(/\/$/, '');
-      const url = `${normalizedBase}/public/feedback/${saved.token}`;
+      // /feedback/:token is the SPA page; /public/feedback/:token is the API
+      // JSON endpoint — texting the latter would show customers raw JSON.
+      const url = `${normalizedBase}/feedback/${saved.token}`;
       const language = resolveCustomerLanguage({
         customerPreferredLanguage: customer.preferredLanguage,
         tenantDefaultLanguage: settings?.defaultLanguage,

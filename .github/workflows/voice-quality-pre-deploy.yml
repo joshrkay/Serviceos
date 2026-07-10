@@ -43,6 +43,14 @@ jobs:
       VOICE_QUALITY_COST_CAP_CENTS: '1000'  # $10
     steps:
       - uses: actions/checkout@v5
+      - name: Verify API keys are present
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ] || [ -z "$OPENAI_API_KEY" ]; then
+            echo "::error::Layer 2 requires ANTHROPIC_API_KEY and OPENAI_API_KEY secrets. One or both are empty."
+            echo "This workflow cannot pass without real API keys — skipped tests do not constitute a green gate."
+            exit 1
+          fi
+          echo "API keys verified present."
       - uses: actions/setup-node@v5
         with:
           node-version: '20'

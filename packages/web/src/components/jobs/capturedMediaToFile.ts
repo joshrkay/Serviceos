@@ -32,10 +32,19 @@ export function dataUrlToBlob(dataUrl: string): Blob {
 /**
  * Build a named `File` from a captured media item. Photos become `.jpg`,
  * videos `.webm`, matching what {@link CameraCapture} encodes.
+ *
+ * Async because videos (and any capture stored via `URL.createObjectURL`)
+ * carry a `blob:` object URL, not a `data:` URL — those must be fetched to
+ * recover the real bytes. Decoding a `blob:` URL as data (the previous bug)
+ * uploaded ~60 bytes of the URL string itself and silently destroyed the
+ * footage while every upload step reported success.
  */
-export function capturedMediaToFile(item: CapturedMedia): File {
-  const blob = dataUrlToBlob(item.url);
+export async function capturedMediaToFile(item: CapturedMedia): Promise<File> {
   const ext = item.type === 'video' ? 'webm' : 'jpg';
-  const type = blob.type || (item.type === 'video' ? 'video/webm' : 'image/jpeg');
+  const fallbackType = item.type === 'video' ? 'video/webm' : 'image/jpeg';
+  const blob = item.url.startsWith('blob:')
+    ? await (await fetch(item.url)).blob()
+    : dataUrlToBlob(item.url);
+  const type = blob.type || fallbackType;
   return new File([blob], `${item.id}.${ext}`, { type });
 }

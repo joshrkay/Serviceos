@@ -24,6 +24,10 @@ export const VOICE_QUALITY_BUCKETS = [
   '08-ambiguity',
   '09-concurrency',
   '10-adversarial',
+  // UB-C4 — Spanish streaming-path corpus: es booking happy path,
+  // first-utterance language switch, explicit mid-call switch back to
+  // English, and es emergency escalation.
+  '11-spanish',
 ] as const;
 
 export const VoiceQualityScriptSchema = z.object({

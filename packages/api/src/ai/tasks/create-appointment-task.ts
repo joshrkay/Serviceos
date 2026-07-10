@@ -16,6 +16,17 @@ import {
 } from '../scheduling/resolve-datetime';
 import { voiceHoldIdempotencyKey } from '../../voice/voice-audit';
 import { appointmentTypeSchema, type AppointmentTypeValue } from '@ai-service-os/shared';
+import {
+  buildStandingInstructionsSection,
+  intersectAppliedStandingInstructions,
+} from '../standing-instructions-context';
+import {
+  evaluateAutonomousBookingLane,
+  autonomousLaneStamp,
+  type AutonomousLaneEvaluation,
+} from '../../proposals/autonomous-lane';
+import { checkBusinessHours } from '../../compliance/business-hours';
+import { parseOnboardingBusinessHours } from '../../telephony/business-hours-loader';
 
 /**
  * LLM-backed CreateAppointmentTaskHandler.
@@ -318,12 +329,26 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
     const timezone = context.timezone ?? DEFAULT_TENANT_TIMEZONE;
     const now = context.now ?? new Date();
 
+    // UB-A3 — owner standing instructions ride a SEPARATE, delimited system
+    // message (mirroring the classifier's vertical-context injection) so the
+    // base prompt stays byte-identical when none apply. Content-only: the
+    // section itself forbids approval/confidence/schema/pricing overrides.
+    const systemMessages: Array<{ role: 'system'; content: string }> = [
+      { role: 'system', content: APPOINTMENT_SYSTEM_PROMPT },
+    ];
+    const injectedInstructions = context.standingInstructions ?? [];
+    if (injectedInstructions.length > 0) {
+      systemMessages.push({
+        role: 'system',
+        content: buildStandingInstructionsSection(injectedInstructions, {
+          requestAppliedIds: true,
+        }),
+      });
+    }
+
     const llmResponse = await this.gateway.complete({
       taskType: 'create_appointment',
-      messages: [
-        { role: 'system', content: APPOINTMENT_SYSTEM_PROMPT },
-        { role: 'user', content: this.buildUserMessage(context) },
-      ],
+      messages: [...systemMessages, { role: 'user', content: this.buildUserMessage(context) }],
       responseFormat: 'json',
     });
 
@@ -367,8 +392,17 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
     // RV-007 — Confidence Marker `_meta`: the task confidence score
     // mapped onto the shared level vocabulary. This handler has no
     // per-field certainty signal, so overall-only is correct.
+    // UB-A3 — applied-instruction marker: the model's claimed ids are
+    // INTERSECTED with what was injected (never trust invented ids) and the
+    // field is dropped entirely when empty. The held-slot create_booking
+    // path below reuses this same meta object, so the marker rides both.
+    const appliedStandingInstructions = intersectAppliedStandingInstructions(
+      parsed?.appliedStandingInstructions,
+      injectedInstructions,
+    );
     const meta: ProposalConfidenceMeta = {
       overallConfidence: getConfidenceLevel(confidence.score),
+      ...(appliedStandingInstructions.length > 0 ? { appliedStandingInstructions } : {}),
     };
     payload._meta = meta;
 
@@ -524,16 +558,61 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
         // create_appointment proposal rather than failing the call.
         return { proposal: createProposal(input), taskType: this.taskType };
       }
+      // Same confidence marker as the create_appointment payload — the
+      // booking proposal can auto-approve on the same score.
+      const bookingPayload: Record<string, unknown> = { appointmentId: held.id, _meta: meta };
+
+      // UB-D / D-015 — autonomous booking lane. When the entry-point threaded
+      // lane inputs, evaluate EVERY gate against the real values from the
+      // hold just placed. BOTH outcomes are stamped on sourceContext (audit
+      // trail: why a booking did or did not take the lane); the evaluation is
+      // handed to createProposal ONLY when eligible, where
+      // decideInitialStatus consults it solely inside the unsupervised
+      // autonomous+capture branch. No lane inputs ⇒ byte-identical behavior.
+      let laneEvaluation: AutonomousLaneEvaluation | undefined;
+      if (context.autonomousBooking) {
+        // No configured hours parses to null and checkBusinessHours fails
+        // OPEN ('no_schedule_configured') — absence of configuration is not
+        // a lane blocker (D-015).
+        const slotWithinBusinessHours = checkBusinessHours(
+          parseOnboardingBusinessHours(context.businessHours, resolved.timezone),
+          new Date(scheduledStart),
+        ).isOpen;
+        laneEvaluation = evaluateAutonomousBookingLane({
+          settings: context.autonomousBooking.settings,
+          proposalType: 'create_booking',
+          inboundReceptionistSource: context.autonomousBooking.inboundReceptionistSource,
+          confidenceScore: confidence.score,
+          payload: bookingPayload,
+          pendingReferenceCount: context.autonomousBooking.pendingReferenceCount,
+          customerId: context.customerId,
+          holdPlaced: true,
+          holdExpiryAt,
+          now: context.now ?? new Date(),
+          slotWithinBusinessHours,
+          // No vulnerability/emergency/negotiation signal exists on this
+          // recorded-transcript path — those flags ride live-call sessions
+          // (the FSM call site, a later PR).
+          flags: {},
+        });
+      }
+      const laneStamp = laneEvaluation ? autonomousLaneStamp(laneEvaluation) : undefined;
+      const bookingSourceContext =
+        context.conversationId || laneStamp
+          ? {
+              ...(context.conversationId ? { conversationId: context.conversationId } : {}),
+              ...(laneStamp ?? {}),
+            }
+          : undefined;
+
       const bookingInput: CreateProposalInput = {
         tenantId: context.tenantId,
         proposalType: 'create_booking',
-        // Same confidence marker as the create_appointment payload — the
-        // booking proposal can auto-approve on the same score.
-        payload: { appointmentId: held.id, _meta: meta },
+        payload: bookingPayload,
         summary,
         confidenceScore: confidence.score,
         confidenceFactors: confidence.factors,
-        sourceContext: context.conversationId ? { conversationId: context.conversationId } : undefined,
+        sourceContext: bookingSourceContext,
         createdBy: context.userId,
         sourceTrustTier: 'autonomous',
         expiresAt: holdExpiryAt,
@@ -545,6 +624,10 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
           ? { supervisorPresent: context.supervisorPresent }
           : {}),
         ...(context.supervisorMode ? { supervisorMode: context.supervisorMode } : {}),
+        // UB-D — the lane result reaches decideInitialStatus ONLY when every
+        // gate passed; ineligible evaluations ride the sourceContext stamp
+        // alone.
+        ...(laneEvaluation?.eligible ? { autonomousLane: laneEvaluation } : {}),
       };
       return { proposal: createProposal(bookingInput), taskType: 'create_booking' };
     }

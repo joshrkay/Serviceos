@@ -141,7 +141,7 @@ export function InvoiceDetail({ invoiceId, onBack }: InvoiceDetailProps) {
     async (form: PaymentFormData) => {
       setSubmitError(null);
       try {
-        const res = await fetch('/api/payments', {
+        const res = await apiFetch('/api/payments', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({

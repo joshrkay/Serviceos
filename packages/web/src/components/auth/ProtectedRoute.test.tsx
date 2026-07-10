@@ -216,7 +216,7 @@ describe('P0-031 ProtectedRoute — routes.ts wiring (source-level)', () => {
       '/e/:id',
       '/pay/:id',
       '/intake',
-      '/public/feedback/:token',
+      '/feedback/:token',
     ];
     for (const p of publicPaths) {
       const m = src.match(new RegExp(`path:\\s*'${p.replace(/\//g, '\\/')}'`));

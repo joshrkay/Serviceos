@@ -26,7 +26,7 @@ describe('P11-007 ReassignDialog', () => {
       }),
     } as unknown as Response);
 
-    render(<ReassignDialog appointmentId="a-1" />);
+    render(<ReassignDialog appointmentId="a-1" jobId="j-1" />);
 
     await waitFor(() => {
       expect(screen.getByText('Tech One')).toBeInTheDocument();
@@ -36,7 +36,7 @@ describe('P11-007 ReassignDialog', () => {
     expect(vi.mocked(apiFetch).mock.calls[0][0]).toBe('/api/users?role=technician');
   });
 
-  it('PUTs assignedUserId on save', async () => {
+  it('PUTs assignedTechnicianId to the job on save', async () => {
     vi.mocked(apiFetch)
       .mockResolvedValueOnce({
         ok: true,
@@ -50,7 +50,7 @@ describe('P11-007 ReassignDialog', () => {
       } as unknown as Response);
 
     const onSaved = vi.fn();
-    render(<ReassignDialog appointmentId="a-1" onSaved={onSaved} />);
+    render(<ReassignDialog appointmentId="a-1" jobId="j-1" onSaved={onSaved} />);
 
     await waitFor(() => {
       expect(screen.getByText('Tech One')).toBeInTheDocument();
@@ -62,10 +62,12 @@ describe('P11-007 ReassignDialog', () => {
     await waitFor(() => expect(onSaved).toHaveBeenCalled());
 
     const putCall = vi.mocked(apiFetch).mock.calls[1];
-    expect(putCall[0]).toBe('/api/appointments/a-1');
+    // Assignment persists on the job, not the appointment (which has no
+    // assignment field).
+    expect(putCall[0]).toBe('/api/jobs/j-1');
     expect(putCall[1]?.method).toBe('PUT');
     const body = JSON.parse(putCall[1]?.body as string);
-    expect(body.assignedUserId).toBe('u-1');
+    expect(body.assignedTechnicianId).toBe('u-1');
   });
 
   it('falls back to manual ID input when users endpoint fails', async () => {
@@ -75,7 +77,7 @@ describe('P11-007 ReassignDialog', () => {
       json: async () => ({}),
     } as unknown as Response);
 
-    render(<ReassignDialog appointmentId="a-1" />);
+    render(<ReassignDialog appointmentId="a-1" jobId="j-1" />);
 
     await waitFor(() => {
       const input = screen.getByLabelText('assignedUserId') as HTMLInputElement;
@@ -90,7 +92,7 @@ describe('P11-007 ReassignDialog', () => {
       json: async () => ({ data: [{ id: 'u-1', name: 'Tech One' }] }),
     } as unknown as Response);
 
-    render(<ReassignDialog appointmentId="a-1" />);
+    render(<ReassignDialog appointmentId="a-1" jobId="j-1" />);
 
     await waitFor(() => {
       expect(screen.getByText('Tech One')).toBeInTheDocument();

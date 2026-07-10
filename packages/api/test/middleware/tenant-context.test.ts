@@ -195,12 +195,17 @@ describe('P0-024 — tenant-context middleware (withTenantTransaction)', () => {
     expect(response.status).toBe(200);
     expect(response.body).toEqual({ t: TENANT_A });
 
-    // First three statements on this connection: BEGIN, set_config, SELECT.
+    // Statement order on this connection: BEGIN, tenant set_config, the
+    // transaction-local timeouts (statement_timeout +
+    // idle_in_transaction_session_timeout — PgBouncer-safe via is_local),
+    // then the handler's SELECT.
     const sqls = calls.map((c) => c.sql);
     expect(sqls[0]).toMatch(/^BEGIN/i);
     expect(sqls[1]).toMatch(/set_config\('app\.current_tenant_id'/i);
     expect(calls[1].params[0]).toBe(TENANT_A);
-    expect(sqls[2]).toMatch(/current_setting/i);
+    expect(sqls[2]).toMatch(/set_config\('statement_timeout'/i);
+    expect(sqls[2]).toMatch(/idle_in_transaction_session_timeout/i);
+    expect(sqls[3]).toMatch(/current_setting/i);
     // After the response finishes, COMMIT must run.
     // res.finish handlers run async — wait a tick.
     await new Promise((r) => setImmediate(r));
@@ -462,6 +467,69 @@ describe('P0-024 — tenant-context middleware (withTenantTransaction)', () => {
 
     expect(response.status).toBe(200);
     // Transaction was NOT skipped: one checkout + a BEGIN.
+    const connectCount = (pool.connect as unknown as ReturnType<typeof vi.fn>).mock.calls
+      .length;
+    expect(connectCount).toBe(1);
+    expect(calls.some((c) => /^\s*BEGIN/i.test(c.sql))).toBe(true);
+  });
+
+  it('UC-2 LLM-long-call bypass — POST /assistant/chat holds no request transaction and stashes no ALS client', async () => {
+    // The assistant chat handler awaits the LLM gateway call; holding the
+    // request transaction across it pins a pooled connection (and under
+    // PgBouncer a server backend) for the whole call. The middleware skips
+    // the transaction for the explicit method+path allowlist; repos on this
+    // route self-manage short SET LOCAL transactions (U2b-2) with an
+    // explicit tenantId — the same contract as the voice worker path.
+    const { pool, calls } = makeMockPool();
+    let sawTenant: string | undefined;
+    let storeAtHandler: unknown = 'unset';
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: 'u1', sessionId: 's1', tenantId: TENANT_A, role: 'owner',
+      };
+      next();
+    });
+    app.use('/api', withTenantTransaction(pool));
+    app.post('/api/assistant/chat', (req, res) => {
+      sawTenant = (req as AuthenticatedRequest).auth?.tenantId;
+      // What a repo would see mid-"LLM call": no request-scoped client.
+      storeAtHandler = currentTenantContext();
+      res.json({ ok: true });
+    });
+
+    const response = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'hi' }] });
+
+    expect(response.status).toBe(200);
+    // Tenant still enforced/available to the handler …
+    expect(sawTenant).toBe(TENANT_A);
+    // … but no ALS client is stashed, no connection checked out, no BEGIN.
+    expect(storeAtHandler).toBeUndefined();
+    const connectCount = (pool.connect as unknown as ReturnType<typeof vi.fn>).mock.calls
+      .length;
+    expect(connectCount).toBe(0);
+    expect(calls.some((c) => /^\s*BEGIN/i.test(c.sql))).toBe(false);
+  });
+
+  it('UC-2 bypass is method-anchored — GET /assistant/chat still opens the transaction', async () => {
+    const { pool, calls } = makeMockPool();
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: 'u1', sessionId: 's1', tenantId: TENANT_A, role: 'owner',
+      };
+      next();
+    });
+    app.use('/api', withTenantTransaction(pool));
+    app.get('/api/assistant/chat', (_req, res) => res.json({ ok: true }));
+
+    const response = await request(app).get('/api/assistant/chat');
+
+    expect(response.status).toBe(200);
     const connectCount = (pool.connect as unknown as ReturnType<typeof vi.fn>).mock.calls
       .length;
     expect(connectCount).toBe(1);

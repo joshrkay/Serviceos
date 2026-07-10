@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { getDispatchBoardData, BoardQueryDependencies, PendingChangeKind } from './board-query';
+import { getDispatchBoardData, getDayBoundaries, BoardQueryDependencies, PendingChangeKind } from './board-query';
 import { AppointmentRepository, listAppointmentsWithMeta } from '../appointments/appointment';
 import { AssignmentRepository } from '../appointments/assignment';
 import { JobRepository } from '../jobs/job';
@@ -7,6 +7,7 @@ import { CustomerRepository } from '../customers/customer';
 import { LocationRepository } from '../locations/location';
 import { ProposalRepository } from '../proposals/proposal';
 import { UserRepository } from '../users/user';
+import { SettingsRepository } from '../settings/settings';
 import { resolvePendingChangeRequests } from './pending-changes';
 import { requireAuth, requireTenant } from '../middleware/auth';
 import { AuthenticatedRequest } from '../auth/clerk';
@@ -48,6 +49,7 @@ export function createDispatchRoutes(deps: {
   enRouteCoordinator?: EnRouteEnqueuer;
   proposalRepo?: ProposalRepository;
   userRepo?: UserRepository;
+  settingsRepo?: SettingsRepository;
 }): Router {
   const router = Router();
 
@@ -118,14 +120,30 @@ export function createDispatchRoutes(deps: {
       try {
         const tenantId = req.auth!.tenantId;
         const technicianId = req.params.id;
+        // Guard before the query: a non-UUID id (e.g. a stale client's
+        // hardcoded 'tech-1') previously reached Postgres and 500'd on the
+        // uuid cast (QA 2026-07-02). Bad input is the caller's error.
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(technicianId)) {
+          return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'technician id must be a UUID' });
+        }
 
         const dateStr = req.query.date as string | undefined;
         if (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
           return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'date query parameter is required (YYYY-MM-DD)' });
         }
 
-        const fromDate = new Date(`${dateStr}T00:00:00.000Z`);
-        const toDate = new Date(`${dateStr}T23:59:59.999Z`);
+        // Bucket the technician's day in the TENANT timezone, not UTC. The old
+        // hardcoded `${dateStr}T00:00:00.000Z`..`T23:59:59.999Z` window dropped
+        // appointments whose tenant-local day maps onto a different UTC day
+        // (e.g. a 23:00 America/Los_Angeles appointment lands on the NEXT UTC
+        // day). Reuses the board's established getDayBoundaries helper.
+        const settings = deps.settingsRepo
+          ? await deps.settingsRepo.findByTenant(tenantId)
+          : null;
+        const { start: fromDate, end: toDate } = getDayBoundaries(
+          dateStr,
+          settings?.timezone,
+        );
 
         const result = await listAppointmentsWithMeta(tenantId, deps.appointmentRepo, {
           technicianId,

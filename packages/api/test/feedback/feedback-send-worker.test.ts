@@ -113,12 +113,14 @@ describe('feedback_send worker — happy path', () => {
     expect(dispatcher.sent).toHaveLength(1);
     expect(dispatcher.sent[0].to).toBe('+15559876543');
     expect(dispatcher.sent[0].body).toContain('Acme Plumbing');
-    // URL has no double slash from the trailing slash in publicBaseUrl.
-    expect(dispatcher.sent[0].body).toContain('https://app.example.com/public/feedback/');
 
     const saved = await feedbackRequestRepo.findByJob(TENANT, jobId);
     expect(saved).not.toBeNull();
-    expect(dispatcher.sent[0].body).toContain(saved!.token);
+    // URL shape pins two things: no double slash from the trailing slash in
+    // publicBaseUrl, and the SPA page path /feedback/:token — NOT the API
+    // endpoint /public/feedback/:token, which would text customers raw JSON.
+    expect(dispatcher.sent[0].body).toContain(`https://app.example.com/feedback/${saved!.token}`);
+    expect(dispatcher.sent[0].body).not.toContain('/public/feedback/');
   });
 });
 

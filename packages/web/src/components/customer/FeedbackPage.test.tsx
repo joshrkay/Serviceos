@@ -19,9 +19,11 @@ function mockFetch(submitBody: unknown) {
 }
 
 function renderPage() {
+  // The SPA serves this page at /feedback/:token (the API owns
+  // /public/feedback/:token, which is only the data endpoint).
   return render(
-    <MemoryRouter initialEntries={[`/public/feedback/${TOKEN}`]}>
-      <Routes><Route path="/public/feedback/:token" element={<FeedbackPage />} /></Routes>
+    <MemoryRouter initialEntries={[`/feedback/${TOKEN}`]}>
+      <Routes><Route path="/feedback/:token" element={<FeedbackPage />} /></Routes>
     </MemoryRouter>,
   );
 }
@@ -32,13 +34,23 @@ describe('FeedbackPage', () => {
       ok: true,
       json: async () => ({ status: 'pending', jobId: 'j1' }),
     }));
-    render(
-      <MemoryRouter initialEntries={[`/public/feedback/${TOKEN}`]}>
-        <Routes><Route path="/public/feedback/:token" element={<FeedbackPage />} /></Routes>
-      </MemoryRouter>
-    );
+    renderPage();
     await waitFor(() => screen.getByTestId('star-rating'));
     expect(screen.getByRole('button', { name: /submit/i })).toBeInTheDocument();
+  });
+
+  it('fetches the API endpoint /public/feedback/:token with Accept: application/json', async () => {
+    // Contract: the page route moved to /feedback/:token but the DATA fetch
+    // must keep hitting the API path — and must send an explicit JSON Accept
+    // so it can never trip the API's text/html → SPA redirect branch.
+    const fetchMock = mockFetch({ ok: true });
+    vi.stubGlobal('fetch', fetchMock);
+    renderPage();
+    await waitFor(() => screen.getByTestId('star-rating'));
+    expect(fetchMock).toHaveBeenCalledWith(
+      `/public/feedback/${TOKEN}`,
+      expect.objectContaining({ headers: { Accept: 'application/json' } }),
+    );
   });
 
   it('shows an invalid link message when token is missing', async () => {
@@ -46,8 +58,8 @@ describe('FeedbackPage', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     render(
-      <MemoryRouter initialEntries={['/public/feedback']}>
-        <Routes><Route path="/public/feedback" element={<FeedbackPage />} /></Routes>
+      <MemoryRouter initialEntries={['/feedback']}>
+        <Routes><Route path="/feedback" element={<FeedbackPage />} /></Routes>
       </MemoryRouter>
     );
 

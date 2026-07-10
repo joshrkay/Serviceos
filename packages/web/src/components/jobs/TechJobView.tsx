@@ -75,17 +75,35 @@ interface VoiceResult {
 }
 
 // ─── Status flow ───────────────────────────────────────────────────────────────
-const STATUS_FLOW: {
+interface StatusStep {
   key: TechStatus; label: string; cta: string;
   dotColor: string; ctaBg: string;
   apiStatus: string;
-}[] = [
+}
+
+// Linear field path. 'waiting' is a branch off in_progress (WAITING_STEP
+// below), never a step the primary CTA advances into — with it in the linear
+// flow, "Mark Complete" landed on "Waiting for Parts" and posted an invalid
+// in_progress→in_progress self-transition.
+const STATUS_FLOW: StatusStep[] = [
   { key: 'en_route',    label: 'En Route',          cta: "I've Arrived",    dotColor: 'bg-primary',   ctaBg: 'bg-primary   hover:bg-primary/90',   apiStatus: 'in_progress' },
   { key: 'on_site',     label: 'On Site',            cta: 'Start Job',       dotColor: 'bg-success',  ctaBg: 'bg-success  hover:bg-success/90',  apiStatus: 'in_progress' },
   { key: 'in_progress', label: 'In Progress',        cta: 'Mark Complete',   dotColor: 'bg-primary', ctaBg: 'bg-primary hover:bg-primary/90', apiStatus: 'in_progress' },
-  { key: 'waiting',     label: 'Waiting for Parts',  cta: 'Resume Job',      dotColor: 'bg-warning',  ctaBg: 'bg-warning  hover:bg-warning/90',  apiStatus: 'in_progress' },
   { key: 'complete',    label: 'Complete',            cta: '',                dotColor: 'bg-success',  ctaBg: '', apiStatus: 'completed' },
 ];
+
+// Entered only via an explicit status update (e.g. voice "waiting on parts").
+// Resuming returns to in_progress locally — the job never left in_progress
+// server-side, so no transition is posted.
+const WAITING_STEP: StatusStep = {
+  key: 'waiting', label: 'Waiting for Parts', cta: 'Resume Job',
+  dotColor: 'bg-warning', ctaBg: 'bg-warning  hover:bg-warning/90',
+  apiStatus: 'in_progress',
+};
+
+function statusStep(key: TechStatus): StatusStep {
+  return STATUS_FLOW.find(s => s.key === key) ?? WAITING_STEP;
+}
 
 // Map API status → TechStatus
 function apiStatusToTech(status: string): TechStatus {
@@ -196,13 +214,9 @@ function Waveform({ active }: { active: boolean }) {
 
 // ─── Voice Hero ────────────────────────────────────────────────────────────────
 function VoiceHero({
-  jobId,
-  techStatus,
   onResult,
   apiFetch,
 }: {
-  jobId: string;
-  techStatus: TechStatus;
   onResult: (r: VoiceResult, applied: boolean) => void;
   apiFetch: (url: string, init?: RequestInit) => Promise<Response>;
 }) {
@@ -349,7 +363,7 @@ function VoiceHero({
           <div className="flex items-center gap-2">
             <CheckCircle2 size={13} className="text-primary shrink-0" />
             <p className="text-sm text-primary">
-              Status → <span className="font-medium">{STATUS_FLOW.find(s => s.key === result.statusUpdate)?.label}</span>
+              Status → <span className="font-medium">{statusStep(result.statusUpdate).label}</span>
             </p>
           </div>
         )}
@@ -653,6 +667,7 @@ export function TechJobView({
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [techStatus, setTechStatus] = useState<TechStatus>('on_site');
+  const [statusError, setStatusError] = useState<string | null>(null);
   const [sheet,      setSheet]      = useState<TechSheet>(null);
   const [activities, setActivities] = useState<JobActivity[]>([]);
   const [materials,  setMaterials]  = useState<MaterialItem[]>([]);
@@ -687,8 +702,9 @@ export function TechJobView({
     try {
       const res = await apiFetch(`/api/notes?entityType=job&entityId=${id}`);
       if (!res.ok) return;
-      const data = await res.json() as { data?: ApiNote[] };
-      const apiNotes = (data.data ?? []).map<FieldNote>(n => ({
+      // GET /api/notes returns a bare array (packages/api/src/routes/notes.ts)
+      const data = await res.json() as ApiNote[];
+      const apiNotes = data.map<FieldNote>(n => ({
         id: n.id,
         text: n.content,
         time: new Date(n.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }),
@@ -767,38 +783,67 @@ export function TechJobView({
   const svcType = (jobData.serviceType ?? 'HVAC') as ServiceType;
 
   const mapsUrl = `https://maps.google.com/?q=${encodeURIComponent(address)}`;
-  const statusIdx = STATUS_FLOW.findIndex(s => s.key === techStatus);
-  const currentStatus = STATUS_FLOW[statusIdx];
+  const statusIdx = STATUS_FLOW.findIndex(s => s.key === techStatus); // -1 in the waiting branch
+  const currentStatus = statusStep(techStatus);
   const isComplete = techStatus === 'complete';
+  // Progress dots track the linear flow; the waiting branch sits at in_progress depth.
+  const progressIdx = techStatus === 'waiting'
+    ? STATUS_FLOW.findIndex(s => s.key === 'in_progress')
+    : statusIdx;
   const now = () => new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 
-  async function advanceStatus() {
-    if (statusIdx >= STATUS_FLOW.length - 1) return;
-    const next = STATUS_FLOW[statusIdx + 1];
-    setTechStatus(next.key);
-
-    // Persist to API
-    try {
-      await apiFetch(`/api/jobs/${id}/transition`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: next.apiStatus }),
-      });
-    } catch {
-      // status update failure is non-critical for the field UI
-    }
-
-    const msgs: Record<TechStatus, string> = {
-      en_route: '', on_site: 'Arrived at job site', in_progress: 'Started work on the job',
-      waiting: 'Waiting for parts', complete: 'Marked job complete',
-    };
+  function logStatusActivity(content: string) {
     setActivities(prev => [...prev, {
       id: `tech-${Date.now()}`, type: 'check_in',
-      content: msgs[next.key], time: now(),
+      content, time: now(),
       author: techName,
       authorInitials: techInitials,
       authorColor: techColor,
     }]);
+  }
+
+  async function advanceStatus() {
+    setStatusError(null);
+
+    if (techStatus === 'waiting') {
+      // Branch state: the job never left in_progress server-side, and the
+      // API rejects self-transitions — resume locally without posting.
+      setTechStatus('in_progress');
+      logStatusActivity('Resumed work on the job');
+      return;
+    }
+
+    if (statusIdx < 0 || statusIdx >= STATUS_FLOW.length - 1) return;
+    const next = STATUS_FLOW[statusIdx + 1];
+
+    // Persist to API — only when the canonical status actually changes
+    // (en_route/on_site/in_progress all map to 'in_progress' server-side,
+    // and the API rejects self-transitions).
+    if (jobData && jobData.status !== next.apiStatus) {
+      try {
+        const res = await apiFetch(`/api/jobs/${id}/transition`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status: next.apiStatus }),
+        });
+        if (!res.ok) {
+          const json = await res.json().catch(() => ({}));
+          throw new Error(json?.message ?? `Failed to update status: HTTP ${res.status}`);
+        }
+        setJobData({ ...jobData, status: next.apiStatus });
+      } catch (err) {
+        // Do not advance the local state to a status the API rejected.
+        setStatusError(err instanceof Error ? err.message : 'Failed to update status');
+        return;
+      }
+    }
+
+    setTechStatus(next.key);
+    const msgs: Partial<Record<TechStatus, string>> = {
+      on_site: 'Arrived at job site', in_progress: 'Started work on the job',
+      complete: 'Marked job complete',
+    };
+    logStatusActivity(msgs[next.key] ?? '');
   }
 
   async function saveNoteToApi(content: string, source: 'voice' | 'typed'): Promise<string | null> {
@@ -822,12 +867,16 @@ export function TechJobView({
     const t = now();
     if (result.statusUpdate) {
       setTechStatus(result.statusUpdate);
-      const apiStatus = STATUS_FLOW.find(s => s.key === result.statusUpdate)?.apiStatus ?? 'in_progress';
-      void apiFetch(`/api/jobs/${id}/transition`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: apiStatus }),
-      });
+      const apiStatus = statusStep(result.statusUpdate).apiStatus;
+      // Skip when unchanged — the API rejects self-transitions (e.g. 'waiting'
+      // is a local branch of the server's in_progress).
+      if (jobData && jobData.status !== apiStatus) {
+        void apiFetch(`/api/jobs/${id}/transition`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status: apiStatus }),
+        });
+      }
     }
     if (result.notes.length > 0) {
       const newNotes = result.notes.map(n => ({ ...n, source: 'voice' as const }));
@@ -866,7 +915,7 @@ export function TechJobView({
     let saved = 0;
     for (const m of media) {
       try {
-        const file = capturedMediaToFile(m);
+        const file = await capturedMediaToFile(m);
         const category: JobPhotoCategory = m.type === 'video' ? 'other' : 'before';
         await uploadPhoto(id, file, category, undefined, m.capturedAt);
         saved += 1;
@@ -985,17 +1034,21 @@ export function TechJobView({
                 </span>
               </div>
               <div className="flex items-center gap-1 mb-3">
-                {STATUS_FLOW.slice(0, 4).map((s, i) => {
-                  const sIdx = STATUS_FLOW.indexOf(s);
-                  const done = statusIdx >= sIdx;
+                {STATUS_FLOW.map((s, i) => {
+                  const done = progressIdx >= i;
                   return (
                     <div key={s.key} className="flex items-center flex-1">
                       <div className={`size-2.5 rounded-full shrink-0 transition-all duration-300 ${done ? s.dotColor : 'bg-border'}`} />
-                      {i < 3 && <div className={`flex-1 h-px transition-colors duration-300 ${done && statusIdx > sIdx ? 'bg-success' : 'bg-border'}`} />}
+                      {i < STATUS_FLOW.length - 1 && <div className={`flex-1 h-px transition-colors duration-300 ${done && progressIdx > i ? 'bg-success' : 'bg-border'}`} />}
                     </div>
                   );
                 })}
               </div>
+              {statusError && (
+                <p data-testid="tech-status-error" role="alert" className="mb-2 text-sm text-destructive">
+                  {statusError}
+                </p>
+              )}
               {!isComplete ? (
                 <button onClick={() => void advanceStatus()}
                   className={`flex items-center justify-center gap-2 w-full py-3.5 rounded-xl text-primary-foreground text-sm transition-colors ${currentStatus.ctaBg}`}>
@@ -1019,8 +1072,6 @@ export function TechJobView({
                 </div>
               </div>
               <VoiceHero
-                jobId={id}
-                techStatus={techStatus}
                 onResult={(result, applied) => { if (applied) handleVoiceResult(result); }}
                 apiFetch={apiFetch}
               />
@@ -1139,6 +1190,7 @@ export function TechJobView({
           job={{ id, jobNumber: jobData.jobNumber, customer: customerName, customerId: jobData.customerId ?? '', address, serviceType: svcType, status: 'Active', priority: 'Normal', assignedTech: techName, description: jobData.summary, statusHistory: [], activity: [], materials: [] }}
           customerName={customerName}
           customerPhone={customerPhone}
+          customerId={jobData.customerId}
           onClose={() => setSheet(null)}
         />
       )}
@@ -1147,11 +1199,12 @@ export function TechJobView({
           name={customerName} phone={customerPhone}
           initials={customerName.split(' ').map((n: string) => n[0]).join('')}
           color={techColor}
+          customerId={jobData.customerId}
           onEnd={() => setSheet(null)}
         />
       )}
       {sheet === 'text' && (
-        <TextSheet name={customerName} phone={customerPhone} onClose={() => setSheet(null)} />
+        <TextSheet name={customerName} phone={customerPhone} customerId={jobData.customerId} onClose={() => setSheet(null)} />
       )}
       {cameraOpen && <CameraCapture onClose={media => void handleCameraClose(media)} />}
 

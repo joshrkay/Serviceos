@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useUser } from '@clerk/clerk-react';
 import { apiFetch } from '../../utils/api-fetch';
+import { getLocalFlag, setLocalFlag } from '../../lib/uiFlags';
 import { firstNameFromUser } from '../../utils/greeting';
 import {
   Send, Mic, Paperclip, Sparkles, Check, Zap,
@@ -14,6 +15,7 @@ import { type Message, type AIProposal } from '../../data/mock-data';
 import { AIProposalCard } from '../shared/AIProposalCard';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useTTS } from '../../hooks/useTTS';
+import { useConversationVoice } from '../../hooks/useConversationVoice';
 
 interface ApiMessage {
   id: string;
@@ -65,6 +67,7 @@ async function sendToConversationAPI(
   conversationId: string | null,
   text: string,
   history: Array<{ role: 'user' | 'assistant'; content: string }>,
+  inputMode?: 'voice',
 ): Promise<{ content: string; reasoning?: string; proposal?: AIProposal; autoApplied?: boolean; newConversationId?: string; failed?: boolean }> {
   try {
     // AST-01b: chat → /api/assistant/chat. The server runs intent
@@ -73,12 +76,15 @@ async function sendToConversationAPI(
     // text. Everything else falls through to the generic LLM reply.
     // Story 3.11 — pin the running conversation so each turn persists to the
     // same thread (server opens one on the first turn and echoes its id).
+    // UB-B3 — voice-originating turns carry inputMode so the server can
+    // refuse voice approval intents deterministically.
     const res = await apiFetch('/api/assistant/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         messages: [...history, { role: 'user', content: text }],
         ...(conversationId ? { conversationId } : {}),
+        ...(inputMode ? { inputMode } : {}),
       }),
     });
 
@@ -258,13 +264,28 @@ function MessageBubble({ msg, isLast }: { msg: Message; isLast: boolean }) {
           <div className="mt-2">
             <AIProposalCard
               proposal={msg.proposal}
-              onApprove={async () => {
+              onApprove={async (edits) => {
+                const proposalId = msg.proposal!.id;
+                // If the operator edited fields in the card, persist them
+                // first via the edit endpoint — the approve endpoint takes
+                // no payload and applies the proposal as stored, so without
+                // this the edits are silently discarded. Throw on failure so
+                // AIProposalCard reverts its optimistic "Approved" state.
+                if (edits && Object.keys(edits).length > 0) {
+                  const editRes = await apiFetch(`/api/proposals/${proposalId}`, {
+                    method: 'PUT',
+                    body: JSON.stringify({ edits }),
+                  });
+                  if (!editRes.ok) {
+                    throw new Error(`Saving edits failed: ${editRes.status} ${editRes.statusText}`);
+                  }
+                }
                 // Use apiFetch so the Clerk bearer token is attached — a
                 // bare fetch() sends no Authorization header and the
                 // backend rejects it with 401. Throw on a non-OK response
                 // so AIProposalCard reverts its optimistic "Approved"
                 // state and shows an error instead of faking success.
-                const response = await apiFetch(`/api/proposals/${msg.proposal!.id}/approve`, {
+                const response = await apiFetch(`/api/proposals/${proposalId}/approve`, {
                   method: 'POST',
                 });
                 if (!response.ok) {
@@ -729,6 +750,12 @@ export function AssistantPage() {
   );
 
   const [messages, setMessages]       = useState<Message[]>([]);
+  // Keep the latest messages in a ref so the memoized `send` callback reads
+  // the current history, not the snapshot from the render that created it —
+  // otherwise from the third turn on, the history POSTed to the assistant is
+  // stale and the model loses recent context.
+  const messagesRef = useRef<Message[]>([]);
+  useEffect(() => { messagesRef.current = messages; }, [messages]);
   const [input, setInput]             = useState('');
   const [typing, setTyping]           = useState(false);
   const [typingReason, setTypingReason] = useState('');
@@ -744,9 +771,13 @@ export function AssistantPage() {
     text: string;
     opts?: { inputMode?: 'voice' | 'photo'; voiceDuration?: number; attachments?: Message['attachments'] };
   } | null>(null);
-  const [ttsEnabled, setTtsEnabled]   = useState(() => localStorage.getItem('rivet:tts-enabled') === 'true');
+  const [ttsEnabled, setTtsEnabled]   = useState(() => getLocalFlag('rivet:tts-enabled') === 'true');
   const { speak, stop: stopTTS, isSpeaking } = useTTS({ rate: 1.0 });
   const lastInputWasVoiceRef = useRef(false);
+  // UB-B2 — conversation mode. Populated after `send` is defined (the hook
+  // needs `send`; `send` needs the session to speak replies through the
+  // conversation's TTS so barge-in can cut them off).
+  const conversationRef = useRef<{ active: boolean; speak: (text: string) => void } | null>(null);
 
   const endRef    = useRef<HTMLDivElement>(null);
   const inputRef  = useRef<HTMLTextAreaElement>(null);
@@ -754,24 +785,34 @@ export function AssistantPage() {
   const [searchParams, setSearchParams] = useSearchParams();
 
   // Derive conversationId from URL param or localStorage
-  const conversationId = searchParams.get('conversationId') || localStorage.getItem('conversationId') || null;
+  const conversationId = searchParams.get('conversationId') || getLocalFlag('conversationId') || null;
   const { data: conversation, isLoading: convLoading, error: convError } =
     useDetailQuery<ApiConversation>('/api/conversations', conversationId);
 
-  // Seed messages from API — show empty state if no conversation exists yet
+  // Seed messages from API — show the welcome bubble if no conversation
+  // exists yet. Journey QA 2026-07-02 (bug 11): this effect re-runs right
+  // after every turn (the reply pins newConversationId → refetch), and it
+  // used to REPLACE local state unconditionally — a server response with an
+  // empty/partial thread wiped the reply the user was reading. Defensive
+  // rule (belt-and-braces with the API fix that now returns `messages`):
+  // only adopt the server thread when it is AHEAD of what's on screen;
+  // never downgrade local messages to an emptier server copy.
   useEffect(() => {
     if (convLoading) return;
-    if (conversation?.messages?.length) {
-      setMessages(conversation.messages.map(mapApiMessage));
-    } else {
-      // No mock data — start with an empty conversation or a welcome message
-      setMessages([{
+    const serverMessages = conversation?.messages ?? [];
+    setMessages((prev) => {
+      const localTurns = prev.filter((m) => m.id !== 'welcome');
+      if (serverMessages.length > localTurns.length) {
+        return serverMessages.map(mapApiMessage);
+      }
+      if (localTurns.length > 0) return prev;
+      return [{
         id: 'welcome',
         role: 'assistant' as const,
         content: welcomeMessage,
         time: new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }),
-      }]);
-    }
+      }];
+    });
   }, [convLoading, conversation, convError, welcomeMessage]);
 
   // Auto-submit from voice bar ?q= param
@@ -814,8 +855,10 @@ export function AssistantPage() {
 
     // Snapshot prior chat (before the new user message) to send as
     // context — the server expects the current message appended at
-    // the end of `messages`, not duplicated.
-    const history = messages.map((m) => ({ role: m.role, content: m.content }));
+    // the end of `messages`, not duplicated. Read from the ref so the
+    // history is current even when this memoized callback was created
+    // several turns ago.
+    const history = messagesRef.current.map((m) => ({ role: m.role, content: m.content }));
 
     setMessages(prev => [...prev, userMsg]);
     setInput('');
@@ -825,12 +868,17 @@ export function AssistantPage() {
     setTypingReason('Thinking…');
 
     try {
-      const reply = await sendToConversationAPI(conversationId, text, history);
+      const reply = await sendToConversationAPI(
+        conversationId,
+        text,
+        history,
+        opts?.inputMode === 'voice' ? 'voice' : undefined,
+      );
 
       // Story 3.11 — pin the server's conversation id so the next turn appends
       // to the same persisted thread (and survives reload).
       if (reply.newConversationId) {
-        localStorage.setItem('conversationId', reply.newConversationId);
+        setLocalFlag('conversationId', reply.newConversationId);
       }
 
       const aiMsg: Message = {
@@ -850,8 +898,12 @@ export function AssistantPage() {
         setFailedSend({ text, opts });
       }
 
-      // Speak the response if TTS enabled or input was via voice
-      if ((ttsEnabled || lastInputWasVoiceRef.current) && reply.content) {
+      // Speak the response. In conversation mode the reply goes through the
+      // session's TTS (markdown stripped, barge-in interruptible); otherwise
+      // keep the existing behavior (TTS toggle or voice-note input).
+      if (conversationRef.current?.active && reply.content) {
+        conversationRef.current.speak(reply.content);
+      } else if ((ttsEnabled || lastInputWasVoiceRef.current) && reply.content) {
         speak(reply.content);
       }
     } catch {
@@ -869,6 +921,15 @@ export function AssistantPage() {
       setTypingReason('');
     }
   }, [conversationId, ttsEnabled, speak]);
+
+  // UB-B2 — conversational voice session: continuous STT, per-utterance
+  // auto-submit through the SAME chat path as typed input (inputMode: 'voice'
+  // rides the request so the server's voice-approval guard applies), spoken
+  // replies, barge-in, 60s silence timeout.
+  const voiceConversation = useConversationVoice({
+    onSubmit: (text) => { void send(text, { inputMode: 'voice' }); },
+  });
+  conversationRef.current = voiceConversation;
 
   const retryFailed = useCallback(() => {
     if (!failedSend) return;
@@ -934,7 +995,7 @@ export function AssistantPage() {
               onClick={() => {
                 const next = !ttsEnabled;
                 setTtsEnabled(next);
-                localStorage.setItem('rivet:tts-enabled', String(next));
+                setLocalFlag('rivet:tts-enabled', String(next));
                 if (!next) stopTTS();
               }}
               className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs transition-colors ${
@@ -946,6 +1007,21 @@ export function AssistantPage() {
             >
               {ttsEnabled ? <Volume2 size={12} /> : <VolumeX size={12} />}
               {isSpeaking && <span className="size-1.5 rounded-full bg-indigo-400 animate-pulse" />}
+            </button>
+            {/* UB-B2 — conversation-mode toggle (≥44px tap target) */}
+            <button
+              onClick={() => (voiceConversation.active ? voiceConversation.stop() : void voiceConversation.start())}
+              title={voiceConversation.active ? 'End conversation mode' : 'Start conversation mode'}
+              aria-pressed={voiceConversation.active}
+              disabled={!voiceConversation.supported}
+              className={`flex items-center gap-1.5 min-h-11 rounded-lg border px-3 text-xs transition-colors disabled:opacity-40 ${
+                voiceConversation.active
+                  ? 'border-green-300 bg-green-50 text-green-700'
+                  : 'border-slate-200 bg-white text-slate-500 hover:bg-slate-50'
+              }`}
+            >
+              <Mic size={12} /> {voiceConversation.active ? 'Listening' : 'Conversation'}
+              {voiceConversation.active && <span className="size-1.5 rounded-full bg-green-500 animate-pulse" />}
             </button>
             <button
               onClick={() => setLiveSessionOpen(v => !v)}
@@ -1061,6 +1137,24 @@ export function AssistantPage() {
       ) : (
         <div className="shrink-0 bg-white border-t border-slate-100 px-4 md:px-6 py-3">
           <div className="max-w-3xl mx-auto">
+
+            {/* UB-B2 — live partial transcript while conversation mode listens */}
+            {voiceConversation.active && (
+              <div
+                data-testid="conversation-live-partial"
+                className="flex items-center gap-2 mb-2 rounded-xl border border-green-200 bg-green-50 px-3 py-2.5"
+              >
+                <Mic size={13} className="text-green-600 shrink-0" />
+                <span className="text-sm text-green-800 italic truncate">
+                  {voiceConversation.partial || 'Listening…'}
+                </span>
+                {voiceConversation.isSpeaking && (
+                  <span className="ml-auto flex items-center gap-1 text-xs text-green-600 shrink-0">
+                    <Volume2 size={12} /> Speaking — talk to interrupt
+                  </span>
+                )}
+              </div>
+            )}
 
             {/* Pending attachment preview */}
             {pendingAttachment && pendingAttachment.length > 0 && (

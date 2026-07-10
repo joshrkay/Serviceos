@@ -4,7 +4,11 @@ import { WorkingHoursRepository } from '../availability/working-hours';
 import { UnavailableBlockRepository } from '../availability/unavailable-block';
 import { DispatchLatenessResult } from './lateness';
 import { getDispatchBoardRevision } from './board-revision';
-import { getEditingOnAppointment } from './presence-store';
+import {
+  findEditingOnAppointment,
+  listDispatchPresence,
+  type PresenceEntry,
+} from './presence-store';
 
 export interface BoardAppointmentEditing {
   userId: string;
@@ -101,14 +105,36 @@ function getTimezoneOffsetMs(date: Date, timezone: string): number {
   return new Date(tzStr).getTime() - new Date(utcStr).getTime();
 }
 
-function getDayBoundaries(dateStr: string, timezone = 'UTC'): { start: Date; end: Date } {
+/**
+ * Convert a tenant-local wall clock on a given calendar day to the UTC instant,
+ * deriving the offset from that instant itself (two-pass convergence across a
+ * DST transition). A single noon-referenced offset applied to both bounds is
+ * wrong on transition days — e.g. 2026-11-01 America/New_York, where local
+ * midnight is UTC-4 (04:00Z) but noon is UTC-5, so a noon offset opened the
+ * window an hour late and dropped 00:00–00:59 local appointments.
+ */
+function localWallClockToUtc(
+  year: number,
+  month: number,
+  day: number,
+  h: number,
+  mi: number,
+  s: number,
+  ms: number,
+  timezone: string,
+): Date {
+  const wallAsUtc = Date.UTC(year, month - 1, day, h, mi, s, ms);
+  let ts = wallAsUtc - getTimezoneOffsetMs(new Date(wallAsUtc), timezone);
+  ts = wallAsUtc - getTimezoneOffsetMs(new Date(ts), timezone);
+  return new Date(ts);
+}
+
+export function getDayBoundaries(dateStr: string, timezone = 'UTC'): { start: Date; end: Date } {
   const [year, month, day] = dateStr.split('-').map(Number);
-  // Use noon UTC as a DST-safe reference point to determine the timezone offset
-  const ref = new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
-  const offsetMs = getTimezoneOffsetMs(ref, timezone);
-  const start = new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0) - offsetMs);
-  const end = new Date(Date.UTC(year, month - 1, day, 23, 59, 59, 999) - offsetMs);
-  return { start, end };
+  return {
+    start: localWallClockToUtc(year, month, day, 0, 0, 0, 0, timezone),
+    end: localWallClockToUtc(year, month, day, 23, 59, 59, 999, timezone),
+  };
 }
 
 function toISOString(date: Date): string {
@@ -121,14 +147,16 @@ function toBoardAppointment(
   technicianId?: string,
   technicianName?: string,
   lateness?: DispatchLatenessResult,
-  boardDate?: string,
+  presenceEntries?: PresenceEntry[],
   viewingUserId?: string,
   coAssignees?: BoardCoAssignee[],
   pendingChange?: PendingChangeKind,
 ): BoardAppointment {
-  const editing = boardDate
-    ? getEditingOnAppointment(appointment.tenantId, boardDate, appointment.id, viewingUserId)
-    : null;
+  const editing = findEditingOnAppointment(
+    presenceEntries ?? [],
+    appointment.id,
+    viewingUserId,
+  );
   return {
     id: appointment.id,
     jobId: appointment.jobId,
@@ -181,6 +209,10 @@ export async function getDispatchBoardData(
   timezone?: string,
 ): Promise<DispatchBoardData> {
   const { start, end } = getDayBoundaries(dateStr, timezone);
+
+  // One presence read per board query (the store may be Redis-backed);
+  // per-appointment `editing` is derived from this list synchronously.
+  const presenceEntries = await listDispatchPresence(tenantId, dateStr);
 
   const appointments = await deps.appointmentRepo.findByDateRange(tenantId, start, end);
 
@@ -270,7 +302,7 @@ export async function getDispatchBoardData(
       undefined,
       undefined,
       unassignedLatenessMap.get(appt.id),
-      dateStr,
+      presenceEntries,
       deps.viewingUserId,
       coAssigneesFor(appt.id),
       pendingChangeMap.get(appt.id),
@@ -299,7 +331,7 @@ export async function getDispatchBoardData(
         techId,
         techName,
         latenessByApptId.get(appointment.id),
-        dateStr,
+        presenceEntries,
         deps.viewingUserId,
         coAssigneesFor(appointment.id),
         pendingChangeMap.get(appointment.id),

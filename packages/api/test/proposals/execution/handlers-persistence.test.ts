@@ -3,6 +3,7 @@ import {
   UpdateCustomerExecutionHandler,
   CreateJobExecutionHandler,
   DraftEstimateExecutionHandler,
+  normalizeDraftLineItems,
 } from '../../../src/proposals/execution/handlers';
 import { Proposal } from '../../../src/proposals/proposal';
 import {
@@ -11,7 +12,10 @@ import {
 } from '../../../src/customers/customer';
 import { InMemoryLocationRepository, createLocation } from '../../../src/locations/location';
 import { InMemoryJobRepository } from '../../../src/jobs/job';
-import { InMemoryEstimateRepository } from '../../../src/estimates/estimate';
+import {
+  InMemoryEstimateRepository,
+  isEstimateCatalogGrounded,
+} from '../../../src/estimates/estimate';
 import { InMemorySettingsRepository } from '../../../src/settings/settings';
 import { LineItem } from '../../../src/shared/billing-engine';
 import { v4 as uuidv4 } from 'uuid';
@@ -192,6 +196,85 @@ describe('DraftEstimateExecutionHandler persistence', () => {
     expect(estimate!.estimateNumber).toMatch(/^EST-/);
   });
 
+  it('normalizes the estimate task shape (unitPrice, no totalCents) instead of failing', async () => {
+    // Regression: the estimate task emits the contract's `unitPrice` field and
+    // no `unitPriceCents`/`totalCents`. The handler used to blind-cast, so
+    // totals came back NaN and the NOT NULL insert failed — every AI estimate
+    // broke. sampleLineItems above hides this by pre-normalizing (the mock-
+    // shape trap), so use the REAL task shape here.
+    const estimateRepo = new InMemoryEstimateRepository();
+    const settingsRepo = new InMemorySettingsRepository();
+    const handler = new DraftEstimateExecutionHandler(estimateRepo, settingsRepo);
+
+    const result = await handler.execute(
+      makeProposal('draft_estimate', {
+        customerId,
+        jobId,
+        lineItems: [
+          { description: 'Water heater install', quantity: 2, unitPrice: 45000, category: 'labor' },
+        ],
+      }),
+      CONTEXT,
+    );
+
+    expect(result.success).toBe(true);
+    const estimate = await estimateRepo.findById(TENANT, result.resultEntityId!);
+    expect(estimate).not.toBeNull();
+    const line = estimate!.lineItems[0];
+    expect(line.unitPriceCents).toBe(45000);
+    expect(line.totalCents).toBe(90000); // 2 × 45000, not NaN
+    expect(estimate!.totals.subtotalCents).toBe(90000);
+    expect(Number.isNaN(estimate!.totals.totalCents)).toBe(false);
+  });
+
+  it('preserves catalog pricingSource so the estimate stays catalog-grounded', async () => {
+    // Regression: normalizing via buildLineItem dropped pricingSource, so a
+    // catalog-priced AI estimate persisted as ungrounded (null) and later took
+    // the manual discount-negotiation path.
+    const estimateRepo = new InMemoryEstimateRepository();
+    const settingsRepo = new InMemorySettingsRepository();
+    const handler = new DraftEstimateExecutionHandler(estimateRepo, settingsRepo);
+
+    const result = await handler.execute(
+      makeProposal('draft_estimate', {
+        customerId,
+        jobId,
+        lineItems: [
+          {
+            description: 'Water heater install',
+            quantity: 1,
+            unitPrice: 185000,
+            category: 'labor',
+            pricingSource: 'catalog',
+          },
+        ],
+      }),
+      CONTEXT,
+    );
+
+    expect(result.success).toBe(true);
+    const estimate = await estimateRepo.findById(TENANT, result.resultEntityId!);
+    expect(estimate!.lineItems[0].pricingSource).toBe('catalog');
+    expect(isEstimateCatalogGrounded(estimate!)).toBe(true);
+  });
+
+  it('rejects a line item with no price rather than persisting NaN', async () => {
+    const handler = new DraftEstimateExecutionHandler(
+      new InMemoryEstimateRepository(),
+      new InMemorySettingsRepository(),
+    );
+    const result = await handler.execute(
+      makeProposal('draft_estimate', {
+        customerId,
+        jobId,
+        lineItems: [{ description: 'Mystery work', quantity: 1 }],
+      }),
+      CONTEXT,
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/price/i);
+  });
+
   it('fails when validUntil is not a parseable date', async () => {
     const handler = new DraftEstimateExecutionHandler(
       new InMemoryEstimateRepository(),
@@ -210,7 +293,7 @@ describe('DraftEstimateExecutionHandler persistence', () => {
     expect(result.error).toMatch(/invalid validUntil/i);
   });
 
-  it('fails when jobId is missing from the payload', async () => {
+  it('fails with a clear jobId message when jobId is missing and job auto-creation is not wired', async () => {
     const handler = new DraftEstimateExecutionHandler(
       new InMemoryEstimateRepository(),
       new InMemorySettingsRepository(),
@@ -224,6 +307,145 @@ describe('DraftEstimateExecutionHandler persistence', () => {
     );
     expect(result.success).toBe(false);
     expect(result.error).toMatch(/jobId/i);
+  });
+
+  // ── Journey QA 2026-07-02 (bug 10) — the canonical drafted payload shape ──
+  // Voice/assistant-drafted line items carry only description/quantity/
+  // unitPriceCents (contracts.ts lineItemSchema — no totalCents/id/sortOrder/
+  // taxable), and jobId is optional in draftEstimatePayloadSchema. The
+  // executor previously blind-cast the payload → NaN totals → execution_failed.
+  describe('drafted (voice/assistant) payload shape', () => {
+    const journeyLineItems = [
+      {
+        description: 'Condenser fan motor (aftermarket)',
+        quantity: 1,
+        unitPriceCents: 38900,
+        pricingSource: 'uncatalogued',
+      },
+      { description: 'Diagnostic visit', quantity: 1, unitPriceCents: 3500 },
+    ];
+
+    it('executes lineItems that lack totalCents into a persisted estimate (no NaN)', async () => {
+      const estimateRepo = new InMemoryEstimateRepository();
+      const handler = new DraftEstimateExecutionHandler(
+        estimateRepo,
+        new InMemorySettingsRepository(),
+      );
+      const result = await handler.execute(
+        makeProposal('draft_estimate', {
+          customerId,
+          jobId,
+          lineItems: journeyLineItems,
+        }),
+        CONTEXT,
+      );
+
+      expect(result.success).toBe(true);
+      const estimate = await estimateRepo.findById(TENANT, result.resultEntityId!);
+      expect(estimate).not.toBeNull();
+      expect(estimate!.lineItems).toHaveLength(2);
+      expect(estimate!.lineItems[0].totalCents).toBe(38900);
+      expect(estimate!.lineItems[0].pricingSource).toBe('uncatalogued');
+      expect(estimate!.lineItems[1].totalCents).toBe(3500);
+      expect(estimate!.totals.totalCents).toBe(42400);
+      expect(Number.isInteger(estimate!.totals.totalCents)).toBe(true);
+    });
+
+    it('accepts the estimate-draft emitter field `unitPrice` (integer cents) as the price', async () => {
+      const estimateRepo = new InMemoryEstimateRepository();
+      const handler = new DraftEstimateExecutionHandler(
+        estimateRepo,
+        new InMemorySettingsRepository(),
+      );
+      const result = await handler.execute(
+        makeProposal('draft_estimate', {
+          customerId,
+          jobId,
+          lineItems: [{ description: 'Water heater install', quantity: 2, unitPrice: 92500 }],
+        }),
+        CONTEXT,
+      );
+      expect(result.success).toBe(true);
+      const estimate = await estimateRepo.findById(TENANT, result.resultEntityId!);
+      expect(estimate!.lineItems[0].unitPriceCents).toBe(92500);
+      expect(estimate!.lineItems[0].totalCents).toBe(185000);
+    });
+
+    it('opens a job for the customer when jobId is absent and job repos are wired', async () => {
+      const estimateRepo = new InMemoryEstimateRepository();
+      const jobRepo = new InMemoryJobRepository();
+      const locationRepo = new InMemoryLocationRepository();
+      const customerRepo = new InMemoryCustomerRepository();
+      const customer = await createCustomer(
+        { tenantId: TENANT, firstName: 'Dana', lastName: 'Voice', createdBy: EXECUTOR },
+        customerRepo,
+      );
+      await createLocation(
+        {
+          tenantId: TENANT,
+          customerId: customer.id,
+          street1: '9 Draft Way',
+          city: 'Austin',
+          state: 'TX',
+          postalCode: '78701',
+          isPrimary: true,
+        },
+        locationRepo,
+      );
+
+      const handler = new DraftEstimateExecutionHandler(
+        estimateRepo,
+        new InMemorySettingsRepository(),
+        jobRepo,
+        locationRepo,
+      );
+      const result = await handler.execute(
+        makeProposal('draft_estimate', {
+          customerId: customer.id,
+          lineItems: journeyLineItems,
+        }),
+        CONTEXT,
+      );
+
+      expect(result.success).toBe(true);
+      const estimate = await estimateRepo.findById(TENANT, result.resultEntityId!);
+      expect(estimate).not.toBeNull();
+      const job = await jobRepo.findById(TENANT, estimate!.jobId);
+      expect(job).not.toBeNull();
+      expect(job!.customerId).toBe(customer.id);
+    });
+
+    it('fails with a clear message (not a cast crash) when neither customerId nor jobId is present', async () => {
+      const handler = new DraftEstimateExecutionHandler(
+        new InMemoryEstimateRepository(),
+        new InMemorySettingsRepository(),
+      );
+      const result = await handler.execute(
+        makeProposal('draft_estimate', { lineItems: journeyLineItems }),
+        CONTEXT,
+      );
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/customerId/);
+    });
+
+    it('flags an unpriceable line by description instead of computing NaN', async () => {
+      const handler = new DraftEstimateExecutionHandler(
+        new InMemoryEstimateRepository(),
+        new InMemorySettingsRepository(),
+      );
+      const result = await handler.execute(
+        makeProposal('draft_estimate', {
+          customerId,
+          jobId,
+          lineItems: [{ description: 'Mystery part', quantity: 1 }],
+        }),
+        CONTEXT,
+      );
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/Mystery part/);
+      expect(result.error).toMatch(/price/i);
+      expect(result.error).not.toMatch(/NaN/);
+    });
   });
 
   it('returns the same id on re-execution when resultEntityId is set', async () => {
@@ -243,5 +465,61 @@ describe('DraftEstimateExecutionHandler persistence', () => {
     expect(result.resultEntityId).toBe(existingId);
     const all = await estimateRepo.findByJob(TENANT, jobId);
     expect(all).toHaveLength(0);
+  });
+});
+
+describe('normalizeDraftLineItems', () => {
+  it('derives totalCents from quantity × unitPriceCents when absent', () => {
+    const { lineItems, malformed } = normalizeDraftLineItems([
+      { description: 'Motor', quantity: 3, unitPriceCents: 12550 },
+    ]);
+    expect(malformed).toEqual([]);
+    expect(lineItems[0]).toMatchObject({
+      description: 'Motor',
+      quantity: 3,
+      unitPriceCents: 12550,
+      totalCents: 37650,
+      sortOrder: 0,
+      taxable: true,
+    });
+    expect(lineItems[0].id).toBeTruthy();
+  });
+
+  it('preserves an explicit integer totalCents and caller fields', () => {
+    const { lineItems } = normalizeDraftLineItems([
+      {
+        id: 'li-1',
+        description: 'Labor',
+        quantity: 2,
+        unitPriceCents: 5000,
+        totalCents: 9000, // e.g. a discounted total — kept, not recomputed
+        taxable: false,
+        category: 'labor',
+        pricingSource: 'catalog',
+      },
+    ]);
+    expect(lineItems[0]).toMatchObject({
+      id: 'li-1',
+      totalCents: 9000,
+      taxable: false,
+      category: 'labor',
+      pricingSource: 'catalog',
+    });
+  });
+
+  it('reports malformed lines (missing description / quantity / price) without producing NaN', () => {
+    const { lineItems, malformed } = normalizeDraftLineItems([
+      { quantity: 1, unitPriceCents: 100 }, // no description
+      { description: 'No quantity', unitPriceCents: 100 },
+      { description: 'No price', quantity: 1 },
+      'not-an-object',
+      { description: 'Good line', quantity: 1, unitPriceCents: 250 },
+    ]);
+    expect(malformed).toHaveLength(4);
+    expect(malformed.join(' ')).toMatch(/Line 1 is missing a description/);
+    expect(malformed.join(' ')).toMatch(/No quantity/);
+    expect(malformed.join(' ')).toMatch(/No price/);
+    expect(lineItems).toHaveLength(1);
+    expect(lineItems[0].totalCents).toBe(250);
   });
 });

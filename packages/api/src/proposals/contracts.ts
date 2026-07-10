@@ -15,6 +15,7 @@ import { createInvoiceSchedulePayloadSchema } from './contracts/create-invoice-s
 import { batchInvoicePayloadSchema } from './contracts/batch-invoice';
 import { sendPaymentReminderPayloadSchema } from './contracts/send-payment-reminder';
 import { applyLateFeePayloadSchema } from './contracts/apply-late-fee';
+import { createStandingInstructionPayloadSchema } from './contracts/standing-instruction';
 import {
   onboardingTenantSettingsPayloadSchema,
   onboardingServiceCategoryPayloadSchema,
@@ -76,6 +77,21 @@ export const proposalConfidenceMetaSchema = z.object({
       z.object({
         path: z.string().min(1),
         reason: z.string().min(1),
+      }),
+    )
+    .optional(),
+  /**
+   * UB-A3 — owner standing instructions the drafting model reported applying,
+   * intersected by the handler with what was actually injected (a model-
+   * invented id can never land here). Presentation-only: the review UI renders
+   * a "Standing instruction applied" chip; `decideInitialStatus` ignores it
+   * (guard-tested byte-identical with/without). Omitted entirely when empty.
+   */
+  appliedStandingInstructions: z
+    .array(
+      z.object({
+        id: z.string().min(1),
+        text: z.string().min(1),
       }),
     )
     .optional(),
@@ -478,6 +494,7 @@ export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
   review_response_proposal: reviewResponseProposalPayloadSchema,
   send_payment_reminder: sendPaymentReminderPayloadSchema,
   apply_late_fee: applyLateFeePayloadSchema,
+  create_standing_instruction: createStandingInstructionPayloadSchema,
 };
 
 export function validateProposalPayload(

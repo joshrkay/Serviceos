@@ -30,11 +30,19 @@ export interface AuthenticatedRequest extends Request {
 // P0-033 — RS256 + JWKS verification
 //
 // Real Clerk session tokens are signed RS256 with a per-instance keypair
-// published at https://{frontend_api_host}/.well-known/jwks.json. The legacy
-// HMAC-SHA256 path can no longer verify a real production token; it remains
-// available behind the explicit CLERK_DEV_HMAC_TOKENS=true flag (refused in
-// production by validateEnvSchema in shared/config.ts) so existing
-// synthetic dev tokens keep working during the transition.
+// published at https://{frontend_api_host}/.well-known/jwks.json.
+//
+// Dispatch order (verifyClerkSession):
+// 1. If CLERK_PUBLISHABLE_KEY is configured, attempt RS256 verification FIRST.
+// 2. If RS256 fails (or no publishable key) AND isHmacDevModeEnabled(env) is
+//    true (dev/test only), fall back to legacy HMAC-SHA256 verification.
+// 3. If both fail (or RS256 fails with the flag off), reject — req.auth stays
+//    unset, requireAuth downstream returns the same 401.
+//
+// The HMAC path remains behind the explicit CLERK_DEV_HMAC_TOKENS=true flag
+// (refused in production by validateEnvSchema in shared/config.ts and
+// isHmacDevModeEnabled at runtime) so existing synthetic dev/QA tokens keep
+// working during real Clerk migration.
 //
 // IMPORTANT — return shape contract: every middleware downstream depends on
 // `{ userId, tenantId, role }` (with the additional `sessionId` we set on
@@ -385,23 +393,50 @@ export function verifyClerkSession(
     }
 
     const env = deps.env ?? process.env;
+    const pubKey = deps.publishableKey ?? env.CLERK_PUBLISHABLE_KEY;
+    const hmacEnabled = isHmacDevModeEnabled(env);
 
     try {
-      let payload: ClerkTokenPayload;
-      if (isHmacDevModeEnabled(env)) {
-        // Legacy dev path — only active with explicit CLERK_DEV_HMAC_TOKENS=true
-        // and never in production.
-        payload = decodeClerkToken(token, clerkSecretKey);
-      } else {
-        const pubKey = deps.publishableKey ?? env.CLERK_PUBLISHABLE_KEY;
-        if (!pubKey) {
-          throw new Error('CLERK_PUBLISHABLE_KEY is required for RS256 verification');
+      let payload: ClerkTokenPayload | undefined;
+      let rs256Error: Error | undefined;
+
+      // ── Dispatch order ─────────────────────────────────────────────────
+      // 1. Try RS256 first if a publishable key is available.
+      // 2. On RS256 failure (or no pubKey) + HMAC flag ON, try HMAC fallback.
+      // 3. Both fail (or RS256 fails with HMAC flag OFF) → reject.
+      // ────────────────────────────────────────────────────────────────────
+
+      if (pubKey) {
+        try {
+          payload = await verifyRs256Token(token, {
+            pubKey,
+            resolver: deps.jwksResolver,
+          });
+        } catch (err) {
+          rs256Error = err instanceof Error ? err : new Error(String(err));
+          // Fall through to HMAC fallback if enabled.
         }
-        payload = await verifyRs256Token(token, {
-          pubKey,
-          resolver: deps.jwksResolver,
-        });
       }
+
+      // If RS256 didn't produce a payload, try HMAC if enabled.
+      if (!payload && hmacEnabled) {
+        try {
+          payload = decodeClerkToken(token, clerkSecretKey);
+        } catch (hmacErr) {
+          // Both paths failed. Prefer reporting the RS256 error if we had one,
+          // otherwise report the HMAC error.
+          throw rs256Error ?? hmacErr;
+        }
+      }
+
+      // If still no payload, we either had no pubKey (with HMAC off) or RS256 failed (with HMAC off).
+      if (!payload) {
+        if (rs256Error) {
+          throw rs256Error;
+        }
+        throw new Error('CLERK_PUBLISHABLE_KEY is required for RS256 verification');
+      }
+
       req.auth = {
         userId: payload.sub,
         sessionId: payload.sid,

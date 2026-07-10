@@ -75,6 +75,9 @@ export interface TtsProvider {
  * you want a different voice service, swap this class at the
  * `createTtsProvider` factory in app.ts.
  */
+// Upper bound for one blocking synthesize() call across providers.
+const TTS_SYNTH_TIMEOUT_MS = 30_000;
+
 export class OpenAiTtsProvider implements TtsProvider {
   constructor(
     private readonly apiKey: string,
@@ -100,6 +103,9 @@ export class OpenAiTtsProvider implements TtsProvider {
         voice: input.voice ?? defaultVoice,
         response_format: 'mp3',
       }),
+      // fetch has no default timeout — a stalled TTS vendor would hang the
+      // voice turn indefinitely (the streaming path threads its own signal).
+      signal: AbortSignal.timeout(TTS_SYNTH_TIMEOUT_MS),
     });
     if (!res.ok) {
       const body = await res.text().catch(() => '');
@@ -151,6 +157,9 @@ export class ElevenLabsTtsProvider implements TtsProvider {
           model_id: modelId,
           voice_settings: { stability: 0.5, similarity_boost: 0.75 },
         }),
+        // Same bound as OpenAiTtsProvider — never hang a voice turn on a
+        // stalled vendor.
+        signal: AbortSignal.timeout(TTS_SYNTH_TIMEOUT_MS),
       }
     );
     if (!res.ok) {
@@ -188,11 +197,19 @@ export class ElevenLabsTtsProvider implements TtsProvider {
 export function createTtsProvider(env: {
   TTS_PROVIDER?: string;
   ELEVENLABS_API_KEY?: string;
+  ELEVENLABS_VOICE_ID?: string;
   AI_PROVIDER_API_KEY?: string;
 }): TtsProvider | undefined {
   if (env.TTS_PROVIDER === 'elevenlabs') {
     if (!env.ELEVENLABS_API_KEY) return undefined;
-    return new ElevenLabsTtsProvider(env.ELEVENLABS_API_KEY);
+    // UB-C2 — honor the same ELEVENLABS_VOICE_ID that scripts/render-fillers.ts
+    // uses, so pre-rendered filler clips and live TTS speak with ONE voice.
+    // (Per-tenant voice selection on the streaming path is a known gap:
+    // settings.ttsVoiceEn/Es are Twilio <Say> Polly voices for the Gather
+    // path — no per-tenant ElevenLabs voice mapping exists yet.)
+    return env.ELEVENLABS_VOICE_ID
+      ? new ElevenLabsTtsProvider(env.ELEVENLABS_API_KEY, env.ELEVENLABS_VOICE_ID)
+      : new ElevenLabsTtsProvider(env.ELEVENLABS_API_KEY);
   }
   if (env.AI_PROVIDER_API_KEY) {
     return new OpenAiTtsProvider(env.AI_PROVIDER_API_KEY);

@@ -1,5 +1,5 @@
 import React from 'react';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { MemoryRouter } from 'react-router';
 import { CustomersPage } from './CustomersPage';
@@ -8,9 +8,11 @@ vi.mock('../../hooks/useListQuery', () => ({ useListQuery: vi.fn() }));
 vi.mock('../../hooks/useMutation', () => ({ useMutation: vi.fn() }));
 vi.mock('../estimates/NewEstimateFlow', () => ({ NewEstimateFlow: () => null }));
 vi.mock('../jobs/NewJobFlow', () => ({ NewJobFlow: () => null }));
+vi.mock('sonner', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
 import { useListQuery } from '../../hooks/useListQuery';
 import { useMutation } from '../../hooks/useMutation';
+import { toast } from 'sonner';
 
 const mockCustomers = [
   {
@@ -203,5 +205,93 @@ describe('CustomersPage', () => {
     expect(chip).toBeDefined();
     expect(chip?.className).toContain('bg-secondary');
     expect(chip?.className).not.toMatch(/(bg|text|border)-(blue|green|violet)-\d{2,3}/);
+  });
+});
+
+describe('AddCustomerSheet — save guard + retry (duplicate-customer fix)', () => {
+  const createCustomerMock = vi.fn();
+  const createLocationMock = vi.fn();
+
+  beforeEach(() => {
+    createCustomerMock.mockReset();
+    createLocationMock.mockReset();
+    vi.mocked(toast.error).mockClear();
+    defaultListResult.refetch.mockClear();
+    vi.mocked(useMutation).mockImplementation((_method, path) => ({
+      mutate: path === '/api/customers' ? createCustomerMock : createLocationMock,
+      isLoading: false,
+      error: null,
+    }));
+  });
+
+  /** Opens the Add sheet and fills both steps up to the save button. */
+  function fillSheetToSave() {
+    renderPage();
+    fireEvent.click(screen.getByText('Add customer'));
+    fireEvent.change(screen.getByPlaceholderText('Full name *'), {
+      target: { value: 'Charlie Brown' },
+    });
+    fireEvent.click(screen.getByText('Next: Add location →'));
+    fireEvent.change(screen.getByPlaceholderText('Street address *'), {
+      target: { value: '12 Elm St, Austin, TX 78701' },
+    });
+    // The sheet's service chip is a BUTTON; the list rows render the same
+    // "<emoji> <type>" text in SPAN chips, so pick by tag.
+    const svcBtn = screen
+      .getAllByText('❄️ HVAC')
+      .find((el) => el.tagName === 'BUTTON')!;
+    fireEvent.click(svcBtn);
+    // Header button and the sheet's save button share the label; the sheet
+    // is portalled last in the DOM.
+    return screen.getAllByText('Add customer').at(-1)! as HTMLButtonElement;
+  }
+
+  it('double-tap on Add customer POSTs exactly one customer', async () => {
+    let resolveCustomer!: (v: unknown) => void;
+    createCustomerMock.mockReturnValue(
+      new Promise((res) => {
+        resolveCustomer = res;
+      }),
+    );
+    createLocationMock.mockResolvedValue({ id: 'loc-1' });
+
+    const saveBtn = fillSheetToSave();
+    fireEvent.click(saveBtn);
+    // Button is disabled (pending state) after the first tap…
+    expect(saveBtn).toBeDisabled();
+    expect(saveBtn).toHaveTextContent('Adding…');
+    // …and a second tap while in flight must not create a second customer.
+    fireEvent.click(saveBtn);
+    expect(createCustomerMock).toHaveBeenCalledTimes(1);
+
+    resolveCustomer({ id: 'c9' });
+    await screen.findByText('Charlie Brown added');
+    expect(createCustomerMock).toHaveBeenCalledTimes(1);
+    expect(createLocationMock).toHaveBeenCalledTimes(1);
+    expect(defaultListResult.refetch).toHaveBeenCalled();
+  });
+
+  it('createLocation failure surfaces a toast; retry POSTs only the location with the cached customer id', async () => {
+    createCustomerMock.mockResolvedValue({ id: 'c9' });
+    createLocationMock
+      .mockRejectedValueOnce(new Error('HTTP 400'))
+      .mockResolvedValueOnce({ id: 'loc-1' });
+
+    const saveBtn = fillSheetToSave();
+    fireEvent.click(saveBtn);
+
+    await waitFor(() => expect(vi.mocked(toast.error)).toHaveBeenCalledWith('HTTP 400'));
+    expect(createCustomerMock).toHaveBeenCalledTimes(1);
+    expect(createLocationMock).toHaveBeenCalledTimes(1);
+    // Still on the location step — the sheet did not advance on failure.
+    expect(screen.queryByText('Charlie Brown added')).not.toBeInTheDocument();
+
+    // Retry: reuses the cached customer id, no second POST /api/customers.
+    fireEvent.click(screen.getAllByText('Add customer').at(-1)!);
+    await screen.findByText('Charlie Brown added');
+    expect(createCustomerMock).toHaveBeenCalledTimes(1);
+    expect(createLocationMock).toHaveBeenCalledTimes(2);
+    expect(createLocationMock.mock.calls[1][0]).toMatchObject({ customerId: 'c9' });
+    expect(defaultListResult.refetch).toHaveBeenCalled();
   });
 });

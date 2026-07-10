@@ -5,6 +5,35 @@ scale-to-1000 plan
 (`docs/plans/2026-06-27-001-feat-scale-to-1000-concurrent-users-plan.md`) and the
 capacity baseline in `docs/runbooks/voice-capacity.md`.
 
+## Go-live checklist: ≥1000 concurrent users
+
+Current production state (verified 2026-07-02): **one process, one replica, no
+Redis, no PgBouncer, capacity tables `TBD`.** The order below matters — doing
+step 3 before steps 1–2 silently multiplies every rate limit/quota by N and
+exhausts Postgres connections.
+
+1. **Provision Redis first** (Phase 4 §1 below): set `REDIS_URL` **and**
+   `VOICE_FANOUT_ENABLED=true` (and `AI_CACHE_ENABLED=true` for a shared LLM
+   cache). Until this is set, WS caps, LLM quotas, rate limits, and voice
+   fan-out are all per-replica.
+2. **Provision PgBouncer** (Phase 4 §2): `DATABASE_URL`→bouncer,
+   `DATABASE_DIRECT_URL`→Postgres direct. Before enabling, confirm the known
+   transaction-pinning offender is fixed: `/api/assistant/chat` must not hold
+   the request transaction across the LLM call (UC-2 in
+   `docs/plans/2026-07-02-001-feat-rivet-jobber-agent-wave-plan.md`).
+3. **Raise replicas** (Phase 4 §3) with stop grace ≥ 35s (Phase 4 §4).
+   Multi-replica correctness prerequisites, tracked in the same plan:
+   dispatch-board event bus/presence/revision externalized (UC-3/UC-4) and
+   telephony timers made durable (UC-5 — the in-memory emergency page retry
+   ladder is the highest-risk item: a deploy can drop an emergency escalation).
+4. **Measure before claiming the number** (Phase 5 / "Measuring" below): run
+   the mixed 1000-user harness (`loadtest/mixed-1000.js`, UC-6) against the
+   pooled topology and replace the `TBD` rows in
+   `docs/runbooks/voice-capacity.md` with real ceilings. Frontend load model
+   for the harness: each dashboard user ≈ 2 req/min baseline
+   (`usePendingProposals` 30s) + 1 WS + up to 2 SSE; dispatch-board users add a
+   presence heartbeat (12 req/min until UC-3 moves it onto the WS).
+
 ## The connection-pool ceiling
 
 The RLS middleware holds one Postgres connection for the whole request, so a
@@ -46,14 +75,16 @@ PgBouncer config: `pool_mode = transaction`, `max_client_conn` high (e.g. 1000),
   (don't `await` long LLM/HTTP calls inside the RLS transaction) so PgBouncer
   actually multiplexes — a request with an open transaction pins a server
   backend for its whole life.
-  > ⚠️ **Known offender — `/api/assistant/chat`.** `withTenantTransaction` is
-  > mounted before the protected `/api` routes, and the assistant handler
-  > `await`s `generateAssistantReply()` (the LLM call) *inside* that request
-  > transaction, so each concurrent chat pins a PgBouncer server backend for the
-  > whole call. At `default_pool_size=25`, ~25 slow chats can stall unrelated
-  > API traffic. Move the LLM call outside the request transaction (or bracket
-  > only its DB sections) before enabling the PgBouncer topology. Tracked in
-  > `docs/runbooks/scale-review-followups.md`. (Codex P2.)
+  > ✅ **Fixed (UC-2) — `/api/assistant/chat`.** The former known offender no
+  > longer holds the request transaction across the LLM call: the middleware
+  > bypasses `POST /assistant/chat` via the method+path-anchored
+  > `LLM_LONG_CALL_ROUTES` allowlist (`packages/api/src/middleware/
+  > tenant-context.ts`), and every DB touch on that route self-manages a
+  > short `SET LOCAL` transaction with an explicit tenantId (U2b-2 standalone
+  > repo path — the same contract the voice worker uses). Pinned by the
+  > middleware bypass tests and a route-level probe test asserting no pooled
+  > client exists at gateway time. Adding another LLM-heavy route? add it to
+  > `LLM_LONG_CALL_ROUTES` and keep its DB work repo-scoped.
 - Direct pool: `DB_DIRECT_MAX_CONNECTIONS` small (default 10) — only lock holders
   + the LISTEN client use it.
 - Postgres ceiling = PgBouncer `default_pool_size` (server side), independent of
@@ -102,6 +133,20 @@ single-instance).
   and additive: the in-process EventEmitter remains the synchronous same-replica
   path, self-originated echoes are dropped (no double-fire), and an unset/failed
   Redis is byte-identical to single-replica behavior.
+- **Dispatch presence** (UC-3): the dispatch-board presence store moves to Redis
+  when `REDIS_URL` is set (one hash per tenant+board-date, per-entry expiry
+  lease), so "who's viewing/dragging" is consistent across replicas. Fails open
+  to a per-replica in-memory store on a Redis error; byte-identical in-memory
+  behavior when `REDIS_URL` is unset. The heartbeat itself rides the client WS
+  gateway (`presence.update` frames) with a ≥30s HTTP PUT fallback — not the
+  old 5s PUT-per-user amplifier.
+- **Dispatch board fan-out** (UC-4): `board_updated`/`presence_updated` events
+  and board revision tokens mirror across replicas over Redis pub/sub
+  (mirroring the U3d voice fan-out: additive, best-effort, self-echo dropped).
+  Double-gated — set `REDIS_URL` **and** `DISPATCH_FANOUT_ENABLED=true`.
+  Revision tokens become totally ordered (`ts.seq.replicaId`) and merge
+  max-wins so concurrent bumps on two replicas converge with no refetch
+  flapping; unset/failed Redis keeps today's process-local bus + UUID tokens.
 - **LLM per-tenant quotas** (U3c): the concurrency semaphore + token bucket move
   to Redis when `REDIS_URL` is set, so per-tenant fairness caps hold cluster-wide
   instead of per-replica. A single atomic Lua (purge → concurrency → refill →
@@ -135,10 +180,11 @@ single-instance).
 Code/config are in the repo; these steps are applied in the Railway account.
 
 1. **Redis** — add a Railway Redis plugin and set `REDIS_URL` on the API service.
-   This is the switch that makes the WS caps, LLM quotas, voice fan-out, and rate
-   limits cluster-wide. Also set `VOICE_FANOUT_ENABLED=true` for multi-replica
-   voice. Without `REDIS_URL`, every shared store stays per-replica — so set it
-   **before** raising `numReplicas`.
+   This is the switch that makes the WS caps, LLM quotas, voice fan-out, dispatch
+   presence, and rate limits cluster-wide. Also set `VOICE_FANOUT_ENABLED=true`
+   for multi-replica voice and `DISPATCH_FANOUT_ENABLED=true` for multi-replica
+   dispatch boards (UC-4). Without `REDIS_URL`, every shared store stays
+   per-replica — so set it **before** raising `numReplicas`.
 2. **PgBouncer** — add a PgBouncer service (`pool_mode=transaction`) in front of
    the Postgres plugin. Point the API's `DATABASE_URL` at PgBouncer and
    `DATABASE_DIRECT_URL` at the Postgres plugin's direct URL (session-scoped

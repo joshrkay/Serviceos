@@ -31,6 +31,42 @@ First run downloads Chromium (~90MB). Cached after that.
 
 These always run. If any fail, something basic is broken in the stack.
 
+### 401 resilience (`no-401-storm.spec.ts`)
+Real-browser regression suite for the 2026-07-06 401-redirect-storm fix.
+Recreates the outage locally — a stubbed signed-in Clerk
+(`helpers/clerk-stub.ts`, zero network egress needed) plus route-mocked 401s
+on every `/api/*` call — then counts what the app does:
+
+- persistent 401s → exactly ONE latched Clerk sign-out, one soft navigation
+  to `/login`, zero further document loads, and a quiet network afterwards
+- a signed-out `/login` fires zero `/api` traffic (identity bridges gated)
+- healthy-API control: the same signed-in boot stays on the app, no sign-out
+
+Runs whenever `VITE_CLERK_PUBLISHABLE_KEY` is set (any syntactically valid
+`pk_test_` works — the stub short-circuits Clerk's script download, so no
+Clerk account or network access is required).
+
+### Public money loop (`public/*.spec.ts`)
+Hermetic, always-on (no Clerk journey secrets):
+
+- **`public/estimate-approval.spec.ts` (W1-3)** — `/e/:id` approve happy
+  path (Zod-pinned fixture → two-decimal money → sign → POST `/approve` →
+  success UI) plus network-failure error UI with no fixture-data leak
+  (Blocker 8). Thread plan:
+  `docs/plans/wave1/W1-3-public-estimate-approval.md` on branch
+Hermetic, always-on (no Clerk journey secrets, no Stripe secrets):
+
+- **`public/invoice-pay-status.spec.ts` (W1-4)** — `/pay/:id` status poll
+  proof: unpaid invoice → async `processing` path → poll `open` → `paid`
+  in place without blanking the page. Stripe Elements card entry is
+  **out of scope** (Vite `@stripe/*` deps are stubbed). Thread plan:
+  `docs/plans/wave1/W1-4-public-pay-status.md` on branch
+  `docs/wave1-prove-money-loop-followup`.
+
+Needs a syntactically valid `VITE_CLERK_PUBLISHABLE_KEY` (or
+`E2E_BASE_URL`) so `main.tsx` boots — same gate as UI smoke. Clerk is
+stubbed offline via `helpers/clerk-stub.ts`.
+
 ### Journeys (`journeys/*.spec.ts`)
 All three are currently `test.skip()` — the spec code documents the intended
 test shape, but the test doesn't execute until the preconditions in each
@@ -39,9 +75,10 @@ file's header comment are met.
 1. **signup-to-first-estimate** — new user signs up, Clerk webhook bootstraps
    a tenant, user drafts their first estimate. Needs Clerk testing tokens +
    ephemeral test PG.
-2. **estimate-approval-execution** — AI task produces a draft proposal,
-   operator approves, 5s undo window elapses, auto-delivery worker executes,
-   estimate row appears. Needs AI provider creds or mocked gateway.
+2. **estimate-approval-execution** — index pointer; hermetic proof is
+   `e2e/money-loop/estimate-approve-execute.spec.ts` (W1-1): offline Clerk
+   stub + seeded ready_for_review proposal, Inbox Approve → executed.
+   Runs with the CI placeholder `pk_test_` (no live LLM / Clerk secrets).
 3. **invoice-to-payment** — approved invoice generates Stripe payment link,
    `charge.succeeded` webhook flips invoice to paid. Needs Stripe test keys
    and P5-016 closed (Stripe Elements frontend).
@@ -117,6 +154,15 @@ then fill in the preconditions one at a time.
 e2e/
 ├── README.md                              # this file
 ├── smoke.spec.ts                          # always runs
+├── public/
+│   ├── estimate-approval.spec.ts          # W1-3 hermetic /e/:id (always-on)
+│   └── fixtures/
+│       └── public-estimate-view.ts        # Zod-pinned public estimate fixture
+├── helpers/
+│   ├── clerk-stub.ts                      # offline Clerk for hermetic UI
+│   └── stripe-stub.ts                     # offline Stripe for W1-4 status poll
+├── public/
+│   └── invoice-pay-status.spec.ts         # W1-4 hermetic /pay/:id status
 └── journeys/
     ├── signup-to-first-estimate.spec.ts   # skipped
     ├── estimate-approval-execution.spec.ts # skipped

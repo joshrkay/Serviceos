@@ -2,6 +2,7 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { MemoryRouter } from 'react-router';
 import { SchedulePage } from './SchedulePage';
+import { dateKeyInTz, formatDateInTenantTz } from '../../utils/formatInTenantTz';
 
 vi.mock('../../utils/api-fetch', () => ({ apiFetch: vi.fn() }));
 
@@ -331,5 +332,170 @@ describe('SchedulePage', () => {
     expect(await screen.findByText('Alice Smith')).toBeInTheDocument();
     expect(screen.queryByText('Session expired — please reload')).not.toBeInTheDocument();
     expect(screen.queryByText(/Couldn't load/)).not.toBeInTheDocument();
+  });
+});
+
+// ─── Journey QA 2026-07-02 (bug 4): appointment times post in TENANT tz ──────
+
+import { TenantTimezoneProvider } from '../../hooks/useTenantTimezone';
+
+describe('journey QA bug 4 — new appointment posts tenant-tz-converted UTC', () => {
+  it('14:00 entered for a New-York tenant posts 18:00Z (EDT), not 14:00Z', async () => {
+    render(
+      <MemoryRouter>
+        <TenantTimezoneProvider overrideTimezone="America/New_York">
+          <SchedulePage />
+        </TenantTimezoneProvider>
+      </MemoryRouter>,
+    );
+    await screen.findByText('Alice Smith');
+
+    fireEvent.click(screen.getByRole('button', { name: /new appointment/i }));
+    fireEvent.change(screen.getByPlaceholderText('paste job UUID'), {
+      target: { value: 'j1' },
+    });
+    const timeInputs = document.querySelectorAll('input[type="time"]');
+    fireEvent.change(timeInputs[0], { target: { value: '14:00' } });
+    fireEvent.change(timeInputs[1], { target: { value: '16:00' } });
+    fireEvent.click(screen.getByRole('button', { name: /create appointment/i }));
+
+    await waitFor(() => {
+      expect(
+        vi
+          .mocked(apiFetch)
+          .mock.calls.some(([url, init]) => url === '/api/appointments' && init?.method === 'POST'),
+      ).toBe(true);
+    });
+    const [, init] = vi
+      .mocked(apiFetch)
+      .mock.calls.find(([url, i]) => url === '/api/appointments' && i?.method === 'POST')!;
+    const body = JSON.parse(String(init!.body));
+
+    // May 2025 is EDT (UTC-4): 14:00 tenant wall clock = 18:00Z.
+    expect(new Date(body.scheduledStart).getUTCHours()).toBe(18);
+    expect(new Date(body.scheduledEnd).getUTCHours()).toBe(20);
+    // The appointment's tz field carries the TENANT tz, not the browser's.
+    expect(body.timezone).toBe('America/New_York');
+  });
+});
+
+// ─── U8: day keys, day windows, and prev/next derive from the tenant tz ──────
+
+const NY_TZ = 'America/New_York';
+
+/** The date-part (in a tz) of the most recent /api/appointments query window. */
+function latestQueryDayKey(tz: string): string {
+  const calls = vi
+    .mocked(apiFetch)
+    .mock.calls.filter(([u]) => String(u).startsWith('/api/appointments?'));
+  const url = String(calls[calls.length - 1][0]);
+  const from = decodeURIComponent(url.match(/fromDate=([^&]+)/)![1]);
+  return dateKeyInTz(from, tz);
+}
+
+function navButtons(): HTMLElement[] {
+  return screen.getAllByRole('button').filter((b) => b.className.includes('size-8'));
+}
+
+describe('U8 — inclusive-boundary appointments bucket to a single day', () => {
+  it('excludes an appointment starting exactly at the next tenant-local midnight', async () => {
+    // Default tz fallback is America/New_York; suite clock is 2025-05-20, so
+    // selectedIso = 2025-05-20 and the query window ends at the next local
+    // midnight = 2025-05-21T04:00Z. The API filters `scheduled_start <= toDate`
+    // inclusively, so it can return this boundary appointment — the client
+    // must bucket it to 2025-05-21 and NOT render it on the 2025-05-20 view.
+    const boundaryAppt = {
+      id: 'appt-mid',
+      jobId: 'j3',
+      scheduledStart: '2025-05-21T04:00:00.000Z', // 00:00 EDT May 21
+      scheduledEnd: '2025-05-21T05:00:00.000Z',
+      status: 'scheduled',
+      timezone: 'America/New_York',
+    };
+    const job3 = {
+      id: 'j3',
+      jobNumber: 'JOB-003',
+      summary: 'Overnight boundary job',
+      serviceType: 'HVAC',
+      assignedTechnicianId: 't3',
+      customer: { displayName: 'Midnight Edge' },
+      location: { street1: '789 Elm', city: 'Austin', state: 'TX' },
+    };
+    setupApi([appt1, boundaryAppt], { j1: job1, j3: job3 });
+
+    renderPage();
+    expect(await screen.findByText('Alice Smith')).toBeInTheDocument();
+    expect(screen.queryByText('Midnight Edge')).not.toBeInTheDocument();
+  });
+});
+
+describe('U8 — schedule day keys derive from the tenant tz', () => {
+  it('selected chip date label matches the query-window day when browser tz ≠ tenant tz', async () => {
+    // Near UTC midnight so the tenant calendar day (Sydney, UTC+10) diverges
+    // from the UTC/browser day: 23:30Z May 20 is 09:30 May 21 in Sydney.
+    vi.setSystemTime(new Date('2025-05-20T23:30:00Z'));
+    render(
+      <MemoryRouter>
+        <TenantTimezoneProvider overrideTimezone="Australia/Sydney">
+          <SchedulePage />
+        </TenantTimezoneProvider>
+      </MemoryRouter>,
+    );
+
+    let startUtc = '';
+    await waitFor(() => {
+      const calls = vi
+        .mocked(apiFetch)
+        .mock.calls.filter(([u]) => String(u).startsWith('/api/appointments?'));
+      expect(calls.length).toBeGreaterThan(0);
+      startUtc = decodeURIComponent(String(calls[calls.length - 1][0]).match(/fromDate=([^&]+)/)![1]);
+    });
+
+    // The day chip carries the tenant-tz label AND (post-fix) the tenant-tz key,
+    // so the query window's day renders as the same "Mon D" label as the chip.
+    const selectedChip = screen
+      .getAllByRole('button')
+      .find((b) => b.className.includes('min-w-[64px]') && b.className.includes('bg-slate-900'));
+    expect(selectedChip).toBeDefined();
+    const windowLabel = formatDateInTenantTz(startUtc, 'Australia/Sydney'); // e.g. "May 21"
+    expect(selectedChip!.textContent).toContain(windowLabel);
+  });
+
+  it('prev/next cross the spring-forward DST day by exactly one calendar day (no skip/repeat)', async () => {
+    vi.setSystemTime(new Date('2026-03-08T12:00:00Z')); // US spring forward, EST→EDT
+    render(
+      <MemoryRouter>
+        <TenantTimezoneProvider overrideTimezone={NY_TZ}>
+          <SchedulePage />
+        </TenantTimezoneProvider>
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(latestQueryDayKey(NY_TZ)).toBe('2026-03-08'));
+
+    fireEvent.click(navButtons()[1]); // next → into EDT
+    await waitFor(() => expect(latestQueryDayKey(NY_TZ)).toBe('2026-03-09'));
+    fireEvent.click(navButtons()[0]); // prev → back onto the transition day
+    await waitFor(() => expect(latestQueryDayKey(NY_TZ)).toBe('2026-03-08'));
+    fireEvent.click(navButtons()[0]); // prev → the day before
+    await waitFor(() => expect(latestQueryDayKey(NY_TZ)).toBe('2026-03-07'));
+  });
+
+  it('prev/next cross the fall-back DST day by exactly one calendar day (no skip/repeat)', async () => {
+    vi.setSystemTime(new Date('2026-11-01T12:00:00Z')); // US fall back, EDT→EST
+    render(
+      <MemoryRouter>
+        <TenantTimezoneProvider overrideTimezone={NY_TZ}>
+          <SchedulePage />
+        </TenantTimezoneProvider>
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(latestQueryDayKey(NY_TZ)).toBe('2026-11-01'));
+
+    fireEvent.click(navButtons()[1]); // next
+    await waitFor(() => expect(latestQueryDayKey(NY_TZ)).toBe('2026-11-02'));
+    fireEvent.click(navButtons()[0]); // prev
+    await waitFor(() => expect(latestQueryDayKey(NY_TZ)).toBe('2026-11-01'));
+    fireEvent.click(navButtons()[0]); // prev
+    await waitFor(() => expect(latestQueryDayKey(NY_TZ)).toBe('2026-10-31'));
   });
 });

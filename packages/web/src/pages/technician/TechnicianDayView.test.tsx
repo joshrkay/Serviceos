@@ -186,7 +186,7 @@ describe('P6-019 — Technician day-of assigned-work view', () => {
     vi.setSystemTime(new Date('2026-03-14T11:20:00Z'));
 
     global.fetch = vi.fn().mockImplementation((url: string) => {
-      if (typeof url === 'string' && url.includes('/api/appointments/') ) {
+      if (typeof url === 'string' && url.includes('/running-late')) {
         return Promise.reject(new Error('network down'));
       }
       return Promise.resolve({ ok: true, json: () => Promise.resolve({ appointments: mockAppointments }) } as never);
@@ -208,7 +208,7 @@ describe('P6-019 — Technician day-of assigned-work view', () => {
     }
 
     // The delay prompt requires a technician decision; accepting triggers the
-    // running_late status call, whose failure must be caught and surfaced.
+    // running-late notice call, whose failure must be caught and surfaced.
     const prompt = await screen.findByTestId('technician-day-delay-prompt');
     expect(prompt).toBeInTheDocument();
     fireEvent.click(screen.getByTestId('technician-day-delay-accept'));
@@ -216,6 +216,46 @@ describe('P6-019 — Technician day-of assigned-work view', () => {
     await waitFor(() => {
       expect(screen.getByTestId('technician-day-error')).toBeInTheDocument();
     });
+    vi.useRealTimers();
+  }, 15000);
+
+  it('delay-prompt Accept POSTs to the running-late endpoint, never the 403ing PUT', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date('2026-03-14T11:20:00Z'));
+
+    render(<TechnicianDayView technicianId="tech-1" />);
+    await screen.findByText('Jane Doe');
+
+    const staleBaseTime = Date.now() - (20 * 60 * 1000);
+    for (let i = 0; i < 5; i += 1) {
+      onPositionSuccess?.({
+        coords: {
+          latitude: 40.7128,
+          longitude: -74.0060,
+          accuracy: 20,
+        } as GeolocationCoordinates,
+        timestamp: staleBaseTime + (i * 1000),
+      } as GeolocationPosition);
+    }
+
+    expect(await screen.findByTestId('technician-day-delay-prompt')).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('technician-day-delay-accept'));
+
+    await waitFor(() => {
+      expect(global.fetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/appointments/appt-1/running-late'),
+        expect.objectContaining({ method: 'POST' })
+      );
+    });
+
+    // Technicians don't hold appointments:update — a direct PUT would 403.
+    const putCall = (global.fetch as ReturnType<typeof vi.fn>).mock.calls.find(
+      (call) =>
+        typeof call[0] === 'string' &&
+        call[0].includes('/api/appointments/') &&
+        (call[1] as RequestInit)?.method === 'PUT'
+    );
+    expect(putCall).toBeUndefined();
     vi.useRealTimers();
   }, 15000);
 
@@ -292,4 +332,51 @@ describe('P6-019 — Technician day-of assigned-work view', () => {
     });
     vi.useRealTimers();
   }, 15000);
+
+  // Sweep-2 S3 — the view used to ship BEM class names with no stylesheet
+  // (inert in this Tailwind app): unstyled text, fused buttons, tap targets
+  // far below the repo's ≥44px mobile rule. Class-contract pin per
+  // CLAUDE.md (pattern: EstimateApprovalPage.layout.test.tsx).
+  describe('mobile styling contract (sweep-2 S3)', () => {
+    it('all interactive controls meet the 44px tap target (min-h-11)', async () => {
+      render(<TechnicianDayView technicianId="tech-1" />);
+      await screen.findByText('Jane Doe');
+
+      const buttons = [
+        screen.getByTestId('technician-day-prev'),
+        screen.getByTestId('technician-day-next'),
+        screen.getByTestId('technician-day-ask-ai'),
+        ...screen.getAllByTestId('technician-day-view-job'),
+        ...screen.getAllByTestId('technician-day-on-my-way'),
+        ...screen.getAllByTestId('technician-day-edit'),
+      ];
+      expect(buttons.length).toBeGreaterThanOrEqual(6);
+      for (const button of buttons) {
+        expect(button.className).toContain('min-h-11');
+      }
+    });
+
+    it('edit-form inputs and actions meet the 44px tap target too', async () => {
+      render(<TechnicianDayView technicianId="tech-1" />);
+      await screen.findByText('Jane Doe');
+
+      fireEvent.click(screen.getAllByTestId('technician-day-edit')[0]);
+
+      expect(screen.getByTestId('technician-day-edit-start').className).toContain('min-h-11');
+      expect(screen.getByTestId('technician-day-edit-end').className).toContain('min-h-11');
+      expect(screen.getByTestId('technician-day-save').className).toContain('min-h-11');
+      expect(screen.getByTestId('technician-day-cancel').className).toContain('min-h-11');
+    });
+
+    it('appointments render as styled cards (no inert BEM classes anywhere)', async () => {
+      const { container } = render(<TechnicianDayView technicianId="tech-1" />);
+      await screen.findByText('Jane Doe');
+
+      const card = screen.getAllByTestId('technician-day-appointment')[0];
+      expect(card.className).toContain('rounded-2xl');
+      expect(card.className).toContain('border');
+      // No leftover technician-day-view__* BEM classes (they had no stylesheet).
+      expect(container.querySelector('[class*="technician-day-view__"]')).toBeNull();
+    });
+  });
 });

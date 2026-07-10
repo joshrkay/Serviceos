@@ -20,7 +20,10 @@ import { useMe } from '../../hooks/useMe';
 export function AnalyticsIdentityBridge() {
   const { isLoaded, isSignedIn, userId } = useAuth();
   const { user } = useUser();
-  const { me } = useMe();
+  // Only fetch /api/me once Clerk reports a signed-in session — this
+  // component mounts outside the router, so an ungated fetch fires on
+  // /login too and feeds the 401 loop when the API rejects tokens.
+  const { me } = useMe({ enabled: isLoaded && isSignedIn === true });
 
   useEffect(() => {
     if (!isLoaded) return;
@@ -32,7 +35,9 @@ export function AnalyticsIdentityBridge() {
       });
 
       // Identify the signed-in user to Pendo once /api/me data is available.
-      if (me) {
+      // Guarded: the Pendo snippet is commonly blocked by ad blockers and
+      // must never break auth-state handling.
+      if (me && typeof pendo !== 'undefined' && pendo) {
         const firstName = user?.firstName ?? undefined;
         const lastName = user?.lastName ?? undefined;
         const fullName =
@@ -40,23 +45,31 @@ export function AnalyticsIdentityBridge() {
             ? [firstName, lastName].filter(Boolean).join(' ')
             : undefined;
 
-        pendo.identify({
-          visitor: {
-            id: me.user_id,
-            email: email ?? undefined,
-            full_name: fullName,
-            role: me.role,
-            canFieldServe: me.can_field_serve,
-            currentMode: me.current_mode,
-          },
-          account: {
-            id: me.tenant_id,
-          },
-        });
+        try {
+          pendo.identify({
+            visitor: {
+              id: me.user_id,
+              email: email ?? undefined,
+              full_name: fullName,
+              role: me.role,
+              canFieldServe: me.can_field_serve,
+              currentMode: me.current_mode,
+            },
+            account: {
+              id: me.tenant_id,
+            },
+          });
+        } catch {
+          // Pendo unavailable — analytics identity is best-effort.
+        }
       }
     } else {
       resetIdentity();
-      pendo.clearSession();
+      try {
+        if (typeof pendo !== 'undefined' && pendo) pendo.clearSession();
+      } catch {
+        // Pendo unavailable — nothing to clear.
+      }
     }
   }, [isLoaded, isSignedIn, userId, user, me]);
 

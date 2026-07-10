@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
+import { toast } from 'sonner';
 import {
   Search, Plus, ChevronRight, MapPin, X, Check,
   AlertTriangle, FileText, Briefcase, ArrowLeft,
@@ -72,8 +73,14 @@ function AddCustomerSheet({ onClose, onNewEstimate, onNewJob, existingCustomers,
     name: '', phone: '', email: '', source: '',
     locNickname: 'Home', locAddress: '', locServiceTypes: [] as ServiceType[],
     locNotes: '', locAccessCode: '',
+    // D4: SMS consent capture
+    smsConsent: false,
   });
   const [dismissedDupe, setDismissedDupe] = useState(false);
+  const [saving, setSaving] = useState(false);
+  // If createCustomer succeeded but createLocation failed, remember the new
+  // customer id so a retry POSTs only the location — never a second customer.
+  const createdCustomerIdRef = useRef<string | null>(null);
 
   // ── Live duplicate detection ─────────────────────────────────────
   const phoneDigits = normalizePhone(form.phone);
@@ -122,6 +129,42 @@ function AddCustomerSheet({ onClose, onNewEstimate, onNewJob, existingCustomers,
       state: state || 'NA',
       postalCode: postalCode || '00000',
     };
+  }
+
+  async function handleAddCustomer() {
+    if (saving) return; // in-flight guard — a double-tap must not double-POST
+    setSaving(true);
+    try {
+      let customerId = createdCustomerIdRef.current;
+      if (!customerId) {
+        const nameParts = form.name.trim().split(' ');
+        const createdCustomer = await createCustomer({
+          firstName: nameParts[0] || 'New',
+          lastName: nameParts.slice(1).join(' ') || 'Customer',
+          primaryPhone: form.phone || undefined,
+          email: form.email || undefined,
+          source: form.source || undefined,
+          // D4: Include SMS consent in create
+          smsConsent: form.smsConsent,
+        });
+        customerId = createdCustomer.id;
+        createdCustomerIdRef.current = customerId;
+      }
+      const address = splitAddress(form.locAddress);
+      await createLocation({
+        customerId,
+        label: form.locNickname || 'Primary',
+        ...address,
+        accessNotes: form.locNotes || undefined,
+        isPrimary: true,
+      });
+      onCreate();
+      setStep('done');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to add customer');
+    } finally {
+      setSaving(false);
+    }
   }
 
   const stepDots: SheetStep[] = ['contact', 'location'];
@@ -343,31 +386,29 @@ function AddCustomerSheet({ onClose, onNewEstimate, onNewJob, existingCustomers,
                 />
               </div>
 
+              {/* D4: SMS consent checkbox */}
+              <div className="flex items-start gap-3 rounded-xl border border-border bg-secondary/30 p-3">
+                <input
+                  type="checkbox"
+                  id="smsConsentCreate"
+                  checked={form.smsConsent}
+                  onChange={(e) => setForm(f => ({ ...f, smsConsent: e.target.checked }))}
+                  className="mt-0.5 h-4 w-4 rounded border-border text-primary focus:ring-primary"
+                />
+                <label htmlFor="smsConsentCreate" className="flex-1 cursor-pointer">
+                  <span className="text-sm text-foreground">SMS consent</span>
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    Customer agrees to receive text messages for appointments, estimates, and invoices.
+                  </p>
+                </label>
+              </div>
+
               <button
-                onClick={async () => {
-                  const nameParts = form.name.trim().split(' ');
-                  const createdCustomer = await createCustomer({
-                    firstName: nameParts[0] || 'New',
-                    lastName: nameParts.slice(1).join(' ') || 'Customer',
-                    primaryPhone: form.phone || undefined,
-                    email: form.email || undefined,
-                    source: form.source || undefined,
-                  });
-                  const address = splitAddress(form.locAddress);
-                  await createLocation({
-                    customerId: createdCustomer.id,
-                    label: form.locNickname || 'Primary',
-                    ...address,
-                    accessNotes: form.locNotes || undefined,
-                    isPrimary: true,
-                  });
-                  onCreate();
-                  setStep('done');
-                }}
-                disabled={!canSave}
+                onClick={handleAddCustomer}
+                disabled={!canSave || saving}
                 className="w-full rounded-xl bg-primary text-primary-foreground py-3.5 text-sm disabled:opacity-40 hover:bg-primary/90 transition-colors mt-1"
               >
-                Add customer
+                {saving ? 'Adding…' : 'Add customer'}
               </button>
             </div>
           )}

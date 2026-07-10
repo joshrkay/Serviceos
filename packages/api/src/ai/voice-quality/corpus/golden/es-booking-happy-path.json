@@ -1,0 +1,10 @@
+[
+  {
+    "proposalType": "create_appointment",
+    "payload": {
+      "customerId": "cust_11_es_maria",
+      "scheduledStart": "2026-05-12T21:00:00.000Z",
+      "scheduledEnd": "2026-05-12T23:00:00.000Z"
+    }
+  }
+]

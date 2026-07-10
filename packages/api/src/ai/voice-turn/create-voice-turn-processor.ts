@@ -141,7 +141,6 @@ import type { SettingsRepository } from '../../settings/settings';
 import { resolveEscalationSettings } from '../../settings/settings';
 import type { SpeechTurnHandler } from '../../telephony/media-streams/mediastream-adapter';
 import { createLogger } from '../../logging/logger';
-import { scheduleDroppedCallRecovery } from '../../telephony/dropped-call-recovery';
 
 const logger = createLogger({
   service: 'ai.voice-turn.processor',
@@ -1091,24 +1090,14 @@ export function createVoiceTurnProcessor(
     session.terminalOutcome = outcome;
     session.terminalReason = reason;
     void persistSessionEnded(session, reason, outcome);
-
-    if (
-      outcome === 'dropped' &&
-      deps.deliveryProvider &&
-      deps.callerPhoneResolver &&
-      session.channel === 'telephony'
-    ) {
-      const callerE164 = deps.callerPhoneResolver(session);
-      if (callerE164 && callerE164.length >= 7) {
-        scheduleDroppedCallRecovery({
-          tenantId: session.tenantId,
-          sessionId: session.id,
-          callerE164,
-          shopName: deps.businessName,
-          sendSms: (args) => deps.deliveryProvider!.sendSms(args),
-        });
-      }
-    }
+    // Dropped-call recovery is DURABLE and host-owned (UC-5b): the adapter
+    // stamps a dropped_call_recoveries row via its DroppedCallScheduler —
+    // both through its finalizeTerminatedSession wrapper and through the
+    // onSessionTerminated callback fired below for the internal speechTurn
+    // path — so the 60s recovery SMS survives restarts and any replica's
+    // dropped-call-worker sweep can send it. The superseded in-process
+    // setTimeout MVP (telephony/dropped-call-recovery.ts) was deleted; it
+    // double-texted callers on this path and lost recoveries on deploy.
   }
 
   async function runSummary(session: VoiceSession): Promise<void> {

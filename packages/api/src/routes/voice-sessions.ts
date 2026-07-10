@@ -129,34 +129,57 @@ export function createVoiceSessionsRouter(deps: VoiceSessionsRouterDeps): Router
       res.setHeader('Connection', 'keep-alive');
       res.flushHeaders?.();
 
+      // A half-closed socket can make res.write()/res.end() throw
+      // synchronously. onEvent runs inside EventEmitter.emit from store
+      // timers (e.g. reapIdle), where an uncaught throw escapes to
+      // uncaughtException and kills the whole process — a dead SSE
+      // client must never propagate past this handler.
+      const safeWrite = (chunk: string): void => {
+        try {
+          res.write(chunk);
+        } catch {
+          // dead socket — the req 'close' handler detaches us
+        }
+      };
+
       // Send the current state immediately so the client renders
       // something even if no transition has fired yet.
-      res.write(
+      safeWrite(
         `data: ${JSON.stringify({ type: 'snapshot', state: session.machine.currentState })}\n\n`
       );
 
       const onEvent = (event: VoiceSessionEvent) => {
-        res.write(`data: ${JSON.stringify(event)}\n\n`);
+        safeWrite(`data: ${JSON.stringify(event)}\n\n`);
         // Mirror SSE events onto the client WS gateway. publish() is a
         // no-op when the gateway is disabled, so SSE remains the source
         // of truth during ramp.
-        void import('../ws/client-gateway').then(({ publish }) => {
-          publish(
-            'voice',
-            session.id,
-            {
-              kind: 'voice.event',
-              channel: 'voice',
-              sessionId: session.id,
-              event: event.type,
-              state: 'state' in event ? (event as { state?: string }).state : undefined,
-              payload: event as unknown as Record<string, unknown>,
-            },
-            session.tenantId,
-          );
-        });
+        void import('../ws/client-gateway')
+          .then(({ publish }) => {
+            publish(
+              'voice',
+              session.id,
+              {
+                kind: 'voice.event',
+                channel: 'voice',
+                sessionId: session.id,
+                event: event.type,
+                state: 'state' in event ? (event as { state?: string }).state : undefined,
+                payload: event as unknown as Record<string, unknown>,
+              },
+              session.tenantId,
+            );
+          })
+          .catch((err) => {
+            process.stderr.write(
+              `voice SSE→WS mirror failed: ${err instanceof Error ? err.message : String(err)}\n`
+            );
+          });
         if (event.type === 'ended') {
-          res.end();
+          try {
+            res.end();
+          } catch {
+            // already closed
+          }
         }
       };
       session.events.on('voice-event', onEvent);
@@ -164,7 +187,7 @@ export function createVoiceSessionsRouter(deps: VoiceSessionsRouterDeps): Router
       // Heartbeat keeps proxies / Cloudflare from killing the stream
       // during long idle stretches. Unrefed so it doesn't block exit.
       const heartbeat = setInterval(() => {
-        res.write(': hb\n\n');
+        safeWrite(': hb\n\n');
       }, 25000);
       heartbeat.unref?.();
 

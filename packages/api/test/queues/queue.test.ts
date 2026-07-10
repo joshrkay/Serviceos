@@ -1,3 +1,4 @@
+import { vi } from 'vitest';
 import { InMemoryQueue, processMessage, WorkerHandler, QueueMessage } from '../../src/queues/queue';
 import { createLogger } from '../../src/logging/logger';
 
@@ -117,6 +118,42 @@ describe('P0-009 — Async job processing with SQS', () => {
     await queue.send('test', { x: 1 }, 'custom-key');
     const msg = await queue.receive();
     expect(msg!.idempotencyKey).toBe('custom-key');
+  });
+
+  it('UC-5 — dedups a pending duplicate idempotency key (PgQueue ON CONFLICT parity)', async () => {
+    await queue.send('test.job', { n: 1 }, 'same-key');
+    await queue.send('test.job', { n: 2 }, 'same-key');
+    expect(queue.size()).toBe(1);
+
+    const msg = await queue.receive<{ n: number }>();
+    expect(msg!.payload.n).toBe(1); // the first send wins
+
+    // Once delivered (removed), the key is free again — mirrors PgQueue
+    // where a deleted row no longer blocks the unique index.
+    await queue.send('test.job', { n: 3 }, 'same-key');
+    expect(queue.size()).toBe(1);
+  });
+
+  it('UC-5 — a delayed message stays invisible until its delay elapses', async () => {
+    vi.useFakeTimers();
+    try {
+      await queue.send('delayed.job', { d: true }, 'delay-key', { delaySeconds: 60 });
+      await queue.send('immediate.job', { d: false });
+
+      // Only the immediate message is visible; the delayed one is skipped
+      // (not consumed, not reordered away).
+      const first = await queue.receiveBatch<{ d: boolean }>(10);
+      expect(first.map((m) => m.type)).toEqual(['immediate.job']);
+      expect(await queue.receive()).toBeNull();
+      expect(queue.size()).toBe(1);
+
+      vi.advanceTimersByTime(60_000);
+      const msg = await queue.receive<{ d: boolean }>();
+      expect(msg).not.toBeNull();
+      expect(msg!.type).toBe('delayed.job');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('AC#3 — moveToDeadLetter persists the message with error context', async () => {

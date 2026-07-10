@@ -122,6 +122,13 @@ export function attachMediaStreamServer(
       return;
     }
 
+    // On 'upgrade' Node hands over a raw net.Socket and stops managing its
+    // errors. Twilio resetting the connection during the async token /
+    // signature window below would emit 'error' with no listener →
+    // uncaughtException → process exit (killing every live call). Swallow
+    // it; rejectUpgrade/handleUpgrade handle the dead socket from here.
+    socket.on('error', () => {});
+
     // P4/U-P4a: reject new media streams while draining so Twilio establishes the
     // call's stream on a live replica (this one is finishing its active calls).
     if (isDraining()) {

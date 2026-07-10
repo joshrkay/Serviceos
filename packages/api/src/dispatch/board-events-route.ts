@@ -11,8 +11,18 @@ export function createBoardEventsRouter(deps: BoardEventsRouteDeps): Router {
   const router = Router();
 
   router.get('/board/events', async (req, res: Response) => {
-    const userId = await deps.authUserIdFromRequest(req);
-    const tenantId = await deps.authTenantIdFromRequest(req);
+    // This raw async handler bypasses asyncRoute: a rejected auth lookup
+    // would otherwise escape as an unhandledRejection and leave the
+    // request hanging with no response.
+    let userId: string | null;
+    let tenantId: string | null;
+    try {
+      userId = await deps.authUserIdFromRequest(req);
+      tenantId = await deps.authTenantIdFromRequest(req);
+    } catch {
+      res.status(500).end();
+      return;
+    }
     if (!userId || !tenantId) {
       res.status(401).end();
       return;
@@ -29,8 +39,19 @@ export function createBoardEventsRouter(deps: BoardEventsRouteDeps): Router {
     res.set('Connection', 'keep-alive');
     res.flushHeaders();
 
+    // Writes to a half-closed socket can throw synchronously; the bus
+    // subscriber runs on the publisher's stack, so a dead SSE client
+    // must never propagate a throw out of this handler.
+    const safeWrite = (chunk: string): void => {
+      try {
+        res.write(chunk);
+      } catch {
+        // dead socket — the req 'close' handler detaches us
+      }
+    };
+
     const heartbeat = setInterval(() => {
-      res.write(': hb\n\n');
+      safeWrite(': hb\n\n');
     }, 25_000);
     if (typeof (heartbeat as NodeJS.Timeout).unref === 'function') {
       heartbeat.unref();
@@ -38,13 +59,17 @@ export function createBoardEventsRouter(deps: BoardEventsRouteDeps): Router {
 
     const bus = getDispatchBoardEventBus();
     const unsubscribe = bus.subscribe(tenantId, date, (evt) => {
-      res.write(`data: ${JSON.stringify(evt)}\n\n`);
+      safeWrite(`data: ${JSON.stringify(evt)}\n\n`);
     });
 
     req.on('close', () => {
       clearInterval(heartbeat);
       unsubscribe();
-      res.end();
+      try {
+        res.end();
+      } catch {
+        // already closed
+      }
     });
   });
 

@@ -177,3 +177,147 @@ describe('TechJobView delay acknowledgement prompt', () => {
     );
   });
 });
+
+describe('TechJobView status flow', () => {
+  function mockRoutes({ jobStatus, transcript }: { jobStatus: string; transcript?: string }) {
+    mockFetcher.mockImplementation((path: string) => {
+      if (path.includes('/transition')) {
+        return Promise.resolve(new Response(JSON.stringify({}), { status: 200 }));
+      }
+      if (path.startsWith('/api/jobs/')) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ ...mockJob, status: jobStatus }), { status: 200 }),
+        );
+      }
+      if (path === '/api/voice/transcribe') {
+        return Promise.resolve(new Response(JSON.stringify({ transcript }), { status: 200 }));
+      }
+      return Promise.resolve(new Response(JSON.stringify([]), { status: 200 }));
+    });
+  }
+
+  function transitionCalls() {
+    return mockFetcher.mock.calls.filter(([p]) => String(p).includes('/transition'));
+  }
+
+  function renderView() {
+    return render(
+      <MemoryRouter>
+        <TechJobView id="j1" />
+      </MemoryRouter>,
+    );
+  }
+
+  beforeEach(() => {
+    mockFetcher.mockReset();
+  });
+
+  it("at in_progress the primary CTA posts {status:'completed'} and reaches Complete", async () => {
+    mockRoutes({ jobStatus: 'in_progress' });
+    renderView();
+
+    const [cta] = await screen.findAllByRole('button', { name: /Mark Complete/ });
+    fireEvent.click(cta);
+
+    await waitFor(() => expect(screen.getByText('Job complete!')).toBeInTheDocument());
+
+    const calls = transitionCalls();
+    expect(calls).toHaveLength(1);
+    expect(calls[0][0]).toBe('/api/jobs/j1/transition');
+    expect(JSON.parse((calls[0][1] as RequestInit).body as string)).toEqual({ status: 'completed' });
+  });
+
+  it('surfaces a rejected transition and does not falsely advance', async () => {
+    mockFetcher.mockImplementation((path: string) => {
+      if (path.includes('/transition')) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ message: 'Transition rejected' }), { status: 400 }),
+        );
+      }
+      if (path.startsWith('/api/jobs/')) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ ...mockJob, status: 'in_progress' }), { status: 200 }),
+        );
+      }
+      return Promise.resolve(new Response(JSON.stringify([]), { status: 200 }));
+    });
+    renderView();
+
+    const [cta] = await screen.findAllByRole('button', { name: /Mark Complete/ });
+    fireEvent.click(cta);
+
+    await waitFor(() =>
+      expect(screen.getByTestId('tech-status-error')).toHaveTextContent('Transition rejected'),
+    );
+    // Still at In Progress — the CTA did not advance to Complete.
+    expect(screen.queryByText('Job complete!')).not.toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: /Mark Complete/ }).length).toBeGreaterThan(0);
+  });
+
+  it("in 'waiting' the CTA resumes to In Progress without posting a transition", async () => {
+    // 'waiting' is a branch entered only via an explicit status update — here
+    // through the real voice path with stubbed media APIs.
+    class FakeMediaRecorder {
+      static isTypeSupported = () => true;
+      state = 'recording';
+      mimeType = 'audio/webm';
+      stream = { getTracks: () => [] as Array<{ stop: () => void }> };
+      ondataavailable: ((e: { data: Blob }) => void) | null = null;
+      onstop: (() => void) | null = null;
+      start() {}
+      stop() { this.state = 'inactive'; this.onstop?.(); }
+    }
+    vi.stubGlobal('MediaRecorder', FakeMediaRecorder);
+    Object.defineProperty(window.navigator, 'mediaDevices', {
+      value: { getUserMedia: vi.fn().mockResolvedValue({ getTracks: () => [] }) },
+      configurable: true,
+    });
+
+    try {
+      mockRoutes({ jobStatus: 'in_progress', transcript: 'waiting on parts' });
+      renderView();
+
+      fireEvent.click(await screen.findByText('Tap to add by voice'));
+      fireEvent.click(await screen.findByRole('button', { name: /Done talking/ }));
+      fireEvent.click(await screen.findByRole('button', { name: /Add all/ }));
+
+      const [resume] = await screen.findAllByRole('button', { name: /Resume Job/ });
+      // Entering the waiting branch posted no self-transition.
+      expect(transitionCalls()).toHaveLength(0);
+
+      fireEvent.click(resume);
+
+      await waitFor(() =>
+        expect(screen.getAllByRole('button', { name: /Mark Complete/ }).length).toBeGreaterThan(0),
+      );
+      // Resuming is local-only — still no transition posted.
+      expect(transitionCalls()).toHaveLength(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('renders persisted notes from the bare-array GET /api/notes response', async () => {
+    mockFetcher.mockImplementation((path: string) => {
+      if (path.startsWith('/api/notes')) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify([
+              { id: 'n1', content: 'Compressor squealing on start', createdAt: '2026-07-08T12:00:00Z' },
+            ]),
+            { status: 200 },
+          ),
+        );
+      }
+      if (path.startsWith('/api/jobs/')) {
+        return Promise.resolve(new Response(JSON.stringify(mockJob), { status: 200 }));
+      }
+      return Promise.resolve(new Response(JSON.stringify([]), { status: 200 }));
+    });
+    renderView();
+
+    await waitFor(() =>
+      expect(screen.getByText('Compressor squealing on start')).toBeInTheDocument(),
+    );
+  });
+});

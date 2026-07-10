@@ -122,4 +122,71 @@ describe('Story 3.2 — useDeepgramDictation', () => {
     await act(async () => { await result.current.start(); });
     expect(result.current.error).toMatch(/not supported/i);
   });
+
+  it('does not request utterance-end events for stop-to-finalize callers (zero behavior change)', async () => {
+    okToken();
+    const { result } = renderHook(() => useDeepgramDictation({ onFinal: vi.fn() }));
+    await act(async () => { await result.current.start(); });
+    expect(FakeWebSocket.instances[0].url).not.toContain('utterance_end_ms');
+    expect(FakeWebSocket.instances[0].url).not.toContain('vad_events');
+  });
+});
+
+// ─── UB-B2: continuous conversation mode ────────────────────────
+describe('UB-B2 — continuous mode (per-utterance finals)', () => {
+  it('adds utterance_end_ms to the stream URL when onUtteranceEnd is passed', async () => {
+    okToken();
+    const { result } = renderHook(() =>
+      useDeepgramDictation({ onUtteranceEnd: vi.fn(), utteranceEndMs: 1200 }),
+    );
+    await act(async () => { await result.current.start(); });
+    const ws = FakeWebSocket.instances[0];
+    expect(ws.url).toContain('utterance_end_ms=1200');
+    expect(ws.url).toContain('vad_events=true');
+    expect(ws.url).toContain('interim_results=true');
+  });
+
+  it('emits per-utterance finals on speech_final while the mic stays open, resetting per utterance', async () => {
+    okToken();
+    const onUtteranceEnd = vi.fn();
+    const { result } = renderHook(() => useDeepgramDictation({ onUtteranceEnd }));
+    await act(async () => { await result.current.start(); });
+    const ws = FakeWebSocket.instances[0];
+    act(() => { ws.onopen?.(); });
+
+    // First utterance: interim → final(speech_final) delivers immediately.
+    act(() => { ws.emit({ is_final: false, channel: { alternatives: [{ transcript: 'invoice the' }] } }); });
+    act(() => { ws.emit({ is_final: true, speech_final: true, channel: { alternatives: [{ transcript: 'invoice the Rodriguez job' }] } }); });
+    expect(onUtteranceEnd).toHaveBeenCalledTimes(1);
+    expect(onUtteranceEnd).toHaveBeenLastCalledWith('invoice the Rodriguez job');
+    // Mic still open; the partial line resets for the next utterance.
+    expect(result.current.isRecording).toBe(true);
+    expect(result.current.partial).toBe('');
+
+    // Second utterance does NOT carry the first one's text.
+    act(() => { ws.emit({ is_final: true, speech_final: true, channel: { alternatives: [{ transcript: 'and send it' }] } }); });
+    expect(onUtteranceEnd).toHaveBeenCalledTimes(2);
+    expect(onUtteranceEnd).toHaveBeenLastCalledWith('and send it');
+  });
+
+  it('flushes accumulated finals on a Deepgram UtteranceEnd event (finals without speech_final)', async () => {
+    okToken();
+    const onUtteranceEnd = vi.fn();
+    const { result } = renderHook(() => useDeepgramDictation({ onUtteranceEnd }));
+    await act(async () => { await result.current.start(); });
+    const ws = FakeWebSocket.instances[0];
+    act(() => { ws.onopen?.(); });
+
+    act(() => { ws.emit({ is_final: true, channel: { alternatives: [{ transcript: 'schedule Thompson' }] } }); });
+    act(() => { ws.emit({ is_final: true, channel: { alternatives: [{ transcript: 'for Friday' }] } }); });
+    expect(onUtteranceEnd).not.toHaveBeenCalled();
+
+    act(() => { ws.emit({ type: 'UtteranceEnd', last_word_end: 4.2 }); });
+    expect(onUtteranceEnd).toHaveBeenCalledTimes(1);
+    expect(onUtteranceEnd).toHaveBeenCalledWith('schedule Thompson for Friday');
+
+    // A stray UtteranceEnd with nothing accumulated is a no-op.
+    act(() => { ws.emit({ type: 'UtteranceEnd', last_word_end: 4.9 }); });
+    expect(onUtteranceEnd).toHaveBeenCalledTimes(1);
+  });
 });

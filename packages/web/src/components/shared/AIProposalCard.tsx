@@ -126,7 +126,7 @@ interface Props {
    * This is the human-approval gate, so a failed call must NOT look like
    * success.
    */
-  onApprove?: () => void | Promise<void>;
+  onApprove?: (edits?: Record<string, string>) => void | Promise<void>;
   /**
    * Invoked when the operator dismisses. May be async — a thrown error
    * (or rejected promise) reverts the optimistic "Rejected" state and
@@ -148,14 +148,17 @@ export function AIProposalCard({ proposal, onApprove, onReject }: Props) {
   // Optimistically flip to Approved, then await the handler. On failure
   // revert to the prior state and surface a toast — never leave a failed
   // approval showing "Applied successfully".
-  const runApprove = async (onDone?: () => void) => {
+  const runApprove = async (onDone?: () => void, edits?: Record<string, string>) => {
     if (isApproving) return;
     const prevStatus = status;
     setStatus('Approved');
     setIsApproving(true);
     onDone?.();
     try {
-      await onApprove?.();
+      // Forward the operator's edits so "Save & apply" actually applies them
+      // — previously fieldValues was read only by the inputs and never sent,
+      // so every edit was silently discarded and the original payload approved.
+      await onApprove?.(edits);
     } catch {
       setStatus(prevStatus);
       toast.error('Couldn’t apply this suggestion. Please try again.');
@@ -196,6 +199,8 @@ export function AIProposalCard({ proposal, onApprove, onReject }: Props) {
     );
   const markers = proposal.meta?.markers ?? [];
   const severity = proposal.meta?.severity;
+  // UB-A3 — "Standing instruction applied" chips.
+  const appliedInstructions = proposal.meta?.appliedStandingInstructions ?? [];
 
   // ── Approved ──────────────────────────────────────────────────
   if (status === 'Approved') {
@@ -256,7 +261,7 @@ export function AIProposalCard({ proposal, onApprove, onReject }: Props) {
           </div>
           <div className="flex items-center gap-2">
             <button
-              onClick={() => { void runApprove(() => setEditing(false)); }}
+              onClick={() => { void runApprove(() => setEditing(false), fieldValues); }}
               disabled={isApproving}
               className="flex items-center gap-1.5 rounded-lg bg-primary px-4 py-2 text-xs text-primary-foreground hover:bg-primary/90 transition-colors disabled:bg-muted disabled:cursor-not-allowed"
             >
@@ -340,6 +345,23 @@ export function AIProposalCard({ proposal, onApprove, onReject }: Props) {
                     </span>
                   );
                 })}
+              </div>
+            )}
+
+            {/* UB-A3 — passive chip per owner standing instruction the
+                draft applied (from `_meta.appliedStandingInstructions`,
+                server-side intersected with what was injected). */}
+            {appliedInstructions.length > 0 && (
+              <div className="mt-2 flex flex-wrap gap-1.5" data-testid="standing-instruction-chips">
+                {appliedInstructions.map((si) => (
+                  <span
+                    key={si.id}
+                    data-testid="standing-instruction-chip"
+                    className="inline-flex max-w-full items-center truncate rounded-full border border-border bg-secondary px-2 py-0.5 text-[10px] font-medium text-muted-foreground"
+                  >
+                    Standing instruction applied: {si.text}
+                  </span>
+                ))}
               </div>
             )}
 

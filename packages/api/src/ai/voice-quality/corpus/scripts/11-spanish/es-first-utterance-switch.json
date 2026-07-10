@@ -1,0 +1,68 @@
+{
+  "id": "es-first-utterance-switch",
+  "bucket": "11-spanish",
+  "callerId": "+15555551102",
+  "callerIdBlocked": false,
+  "fixtures": {
+    "tenant": {
+      "id": "t_11_es_switch",
+      "display_name": "Test HVAC Co",
+      "timezone": "America/Los_Angeles",
+      "default_language": "en",
+      "supported_languages": ["en", "es"]
+    },
+    "customers": [
+      {
+        "id": "cust_11_es_carlos",
+        "tenantId": "t_11_es_switch",
+        "firstName": "Carlos",
+        "lastName": "Rivera",
+        "displayName": "Carlos Rivera",
+        "companyName": null,
+        "primaryPhone": "+15555551102",
+        "secondaryPhone": null,
+        "email": "carlos.rivera@example.com",
+        "preferredChannel": "phone",
+        "smsConsent": false,
+        "communicationNotes": null,
+        "isArchived": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-02-01T10:00:00.000Z",
+        "updatedAt": "2026-04-01T10:00:00.000Z"
+      }
+    ],
+    "appointments": [
+      {
+        "id": "appt_11_es_next_1",
+        "tenantId": "t_11_es_switch",
+        "jobId": "job_11_es_1",
+        "scheduledStart": "2026-06-12T16:00:00.000Z",
+        "scheduledEnd": "2026-06-12T18:00:00.000Z",
+        "arrivalWindowStart": "2026-06-12T16:00:00.000Z",
+        "arrivalWindowEnd": "2026-06-12T16:30:00.000Z",
+        "timezone": "America/Los_Angeles",
+        "status": "scheduled",
+        "notes": "Mantenimiento de aire acondicionado",
+        "createdBy": "user_seed",
+        "createdAt": "2026-04-30T10:00:00.000Z",
+        "updatedAt": "2026-04-30T10:00:00.000Z"
+      }
+    ]
+  },
+  "turns": [
+    {
+      "caller": "Hola, buenos días. ¿Me puede decir cuándo es mi próxima cita, por favor?",
+      "expected": {
+        "intent": "lookup_appointments",
+        "spokenAnswerMatches": "Su próxima cita es el 12 de junio con una ventana de llegada de 9 de la mañana, hora del Pacífico.",
+        "escalates": false
+      },
+      "hangupAfter": true
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 3, 4, 5],
+    "appliesDisposition": [9, 12]
+  },
+  "layer2Eligible": false
+}

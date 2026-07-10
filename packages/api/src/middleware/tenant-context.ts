@@ -78,6 +78,45 @@ function isSseStreamRoute(req: { method: string; path: string }): boolean {
   return req.method === 'GET' && SSE_STREAM_ROUTES.some((re) => re.test(req.path));
 }
 
+/**
+ * Per-request-transaction timeouts, applied via `set_config(..., is_local)`
+ * so they reset at COMMIT/ROLLBACK — the only pooling-safe way to set these
+ * under PgBouncer transaction mode (startup-packet GUCs and session SETs are
+ * not). Without them a wedged query (statement_timeout) or a handler
+ * awaiting a slow upstream while the transaction sits idle
+ * (idle_in_transaction_session_timeout) pins this pooled connection — and in
+ * prod a scarce PgBouncer server backend — indefinitely; enough of those
+ * exhaust the pool and stall all of /api.
+ */
+function positiveIntEnv(name: string, fallback: number): number {
+  const n = Number(process.env[name]);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
+}
+const REQUEST_STATEMENT_TIMEOUT_MS = positiveIntEnv('DB_REQUEST_STATEMENT_TIMEOUT_MS', 30_000);
+const REQUEST_IDLE_TX_TIMEOUT_MS = positiveIntEnv('DB_REQUEST_IDLE_TX_TIMEOUT_MS', 60_000);
+
+/**
+ * UC-2 — routes whose handlers await long LLM/gateway calls and must not hold
+ * the request transaction for their whole life (each concurrent slow request
+ * would pin a pooled connection — and under PgBouncer a server backend — for
+ * the full call; ~`default_pool_size` slow chats stall all of /api). Every DB
+ * touch on these routes goes through repos whose standalone path opens its own
+ * short SET LOCAL transaction (U2b-2), with the tenantId passed explicitly —
+ * the same shape the voice-action-router worker uses, where these handlers
+ * already run with no request transaction. Method+path anchored (never a
+ * client-controlled header), same rationale as SSE_STREAM_ROUTES. Trade-off,
+ * accepted: multi-write atomicity across a single request is lost on these
+ * routes — each proposal/conversation write commits independently, which is
+ * already the contract on the voice path.
+ */
+const LLM_LONG_CALL_ROUTES: readonly { method: string; re: RegExp }[] = [
+  { method: 'POST', re: /\/assistant\/chat$/ },
+];
+
+function isLlmLongCallRoute(req: { method: string; path: string }): boolean {
+  return LLM_LONG_CALL_ROUTES.some((r) => r.method === req.method && r.re.test(req.path));
+}
+
 export function withTenantTransaction(pool: Pool) {
   return async (
     req: AuthenticatedRequest,
@@ -107,7 +146,7 @@ export function withTenantTransaction(pool: Pool) {
     // reuse, never the tenant scope. Enforce tenant presence (above) but skip
     // the long-held transaction for the explicit SSE allowlist (NOT a generic
     // Accept header — see SSE_STREAM_ROUTES). (Codex P1/P2, PR #628.)
-    if (isSseStreamRoute(req)) {
+    if (isSseStreamRoute(req) || isLlmLongCallRoute(req)) {
       next();
       return;
     }
@@ -134,6 +173,10 @@ export function withTenantTransaction(pool: Pool) {
       // required: without it the GUC/role would outlive the transaction and
       // leak to the next request that checked out this pooled connection.
       await applyTenantContext(client, tenantId, { transactional: true });
+      await client.query(
+        "SELECT set_config('statement_timeout', $1, true), set_config('idle_in_transaction_session_timeout', $2, true)",
+        [String(REQUEST_STATEMENT_TIMEOUT_MS), String(REQUEST_IDLE_TX_TIMEOUT_MS)],
+      );
     } catch (err) {
       // BEGIN or SET failed — roll back (best effort) and release.
       try {

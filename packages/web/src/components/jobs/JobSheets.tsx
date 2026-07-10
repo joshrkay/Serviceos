@@ -1,12 +1,16 @@
 import { useState, useEffect, useRef } from 'react';
 import {
-  X, Check, Send, Receipt,
-  Phone, MessageSquare, Eye,
-  MicOff, Mic, Volume2, PhoneOff,
+  X, Check, Send, Receipt, FileText,
+  Phone, MessageSquare,
+  AlertCircle,
 } from 'lucide-react';
-import { estimates, invoices, calcEstimateTotal, calcInvoiceTotal } from '../../data/mock-data';
+import { useNavigate } from 'react-router';
+import { formatUsdCentsFixed } from '@ai-service-os/shared';
+import type { EstimateResponse, InvoiceResponse } from '@ai-service-os/shared';
 import { StatusBadge } from '../shared/StatusBadge';
-import { EmptyState, Textarea } from '../ui';
+import { EmptyState, Textarea, Spinner } from '../ui';
+import { apiFetch } from '../../utils/api-fetch';
+import { normalizeEstimateStatus, normalizeInvoiceStatus } from '../../utils/statusNormalize';
 
 // ─── Sheet Overlay ───────────────────────────────────────────────
 export function SheetOverlay({
@@ -30,27 +34,24 @@ export function SheetOverlay({
 }
 
 // ─── Call Screen ─────────────────────────────────────────────────
-export function CallScreen({ name, phone, initials, color, onEnd }: {
-  name: string; phone: string; initials: string; color: string; onEnd: () => void;
+// D1: Wire to real tel: link that opens native dialer and logs comms touch.
+export function CallScreen({ name, phone, initials, color, customerId, onEnd }: {
+  name: string; phone: string; initials: string; color: string; customerId?: string; onEnd: () => void;
 }) {
-  const [phase, setPhase] = useState<'calling' | 'active'>('calling');
-  const [seconds, setSeconds] = useState(0);
-  const [muted, setMuted] = useState(false);
-  const [speaker, setSpeaker] = useState(false);
+  const [phase, setPhase] = useState<'confirm' | 'calling'>('confirm');
+  const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    const t = setTimeout(() => setPhase('active'), 2200);
-    return () => clearTimeout(t);
-  }, []);
+  // D1: No timeline/touch API endpoint exists in the API. The tel: link opens
+  // the native dialer; comms logging would require a dedicated route (P-XXX).
+  // For now, we skip the logging call — the call itself is the user action.
 
-  useEffect(() => {
-    if (phase !== 'active') return;
-    const t = setInterval(() => setSeconds(s => s + 1), 1000);
-    return () => clearInterval(t);
-  }, [phase]);
-
-  const fmt = (s: number) =>
-    `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+  function handleCallNow() {
+    setPhase('calling');
+    // Use tel: to open native dialer
+    window.location.href = `tel:${phone.replace(/\D/g, '')}`;
+    // Auto-close after a short delay (user is now in phone app)
+    setTimeout(onEnd, 1500);
+  }
 
   return (
     <div
@@ -59,9 +60,8 @@ export function CallScreen({ name, phone, initials, color, onEnd }: {
     >
       <div className="flex flex-col items-center gap-1">
         <p className="text-muted-foreground text-sm tracking-widest uppercase" style={{ fontSize: 11 }}>
-          {phase === 'calling' ? 'Calling…' : 'Active call'}
+          {phase === 'confirm' ? 'Call customer' : 'Opening dialer…'}
         </p>
-        {phase === 'active' && <p className="text-primary-foreground text-sm tabular-nums">{fmt(seconds)}</p>}
       </div>
 
       <div className="flex flex-col items-center gap-4">
@@ -75,28 +75,41 @@ export function CallScreen({ name, phone, initials, color, onEnd }: {
           <p className="text-primary-foreground" style={{ fontSize: '1.4rem' }}>{name}</p>
           <p className="text-muted-foreground text-sm mt-1">{phone}</p>
         </div>
-        {phase === 'calling' && (
-          <div className="flex gap-1 mt-2">
-            {[0, 1, 2].map(i => (
-              <span key={i} className="w-2 h-2 rounded-full bg-primary"
-                style={{ animation: `callPulse 1.2s ease-in-out ${i * 0.3}s infinite` }} />
-            ))}
-          </div>
-        )}
       </div>
 
       <div className="w-full max-w-xs">
-        <div className="grid grid-cols-3 gap-4 mb-8">
-          <CallBtn icon={muted ? MicOff : Mic} label={muted ? 'Unmute' : 'Mute'} active={muted} onPress={() => setMuted(m => !m)} />
-          <CallBtn icon={Volume2} label="Speaker" active={speaker} onPress={() => setSpeaker(s => !s)} />
-          <CallBtn icon={MessageSquare} label="Keypad" onPress={() => {}} />
-        </div>
-        <button
-          onClick={onEnd}
-          className="flex items-center justify-center gap-2 w-full py-4 rounded-full bg-destructive text-primary-foreground hover:bg-destructive/90 transition-colors"
-        >
-          <PhoneOff size={22} /><span className="text-sm">End call</span>
-        </button>
+        {error && (
+          <div className="flex items-center gap-2 bg-destructive/20 border border-destructive/30 rounded-lg px-3 py-2 mb-4">
+            <AlertCircle size={14} className="text-destructive" />
+            <p className="text-xs text-destructive">{error}</p>
+          </div>
+        )}
+        {phase === 'confirm' ? (
+          <>
+            <button
+              onClick={handleCallNow}
+              className="flex items-center justify-center gap-2 w-full py-4 rounded-full bg-success text-primary-foreground hover:bg-success/90 transition-colors mb-3"
+            >
+              <Phone size={22} /><span className="text-sm">Call now</span>
+            </button>
+            <button
+              onClick={onEnd}
+              className="flex items-center justify-center gap-2 w-full py-3 rounded-full bg-card/10 text-muted-foreground hover:bg-card/20 transition-colors"
+            >
+              <span className="text-sm">Cancel</span>
+            </button>
+          </>
+        ) : (
+          <div className="flex flex-col items-center gap-3 py-4">
+            <div className="flex gap-1">
+              {[0, 1, 2].map(i => (
+                <span key={i} className="w-2 h-2 rounded-full bg-primary"
+                  style={{ animation: `callPulse 1.2s ease-in-out ${i * 0.3}s infinite` }} />
+              ))}
+            </div>
+            <p className="text-xs text-muted-foreground">Opening your phone app…</p>
+          </div>
+        )}
       </div>
 
       <style>{`@keyframes callPulse { 0%,100%{opacity:.3;transform:scale(.8)} 50%{opacity:1;transform:scale(1.2)} }`}</style>
@@ -104,25 +117,15 @@ export function CallScreen({ name, phone, initials, color, onEnd }: {
   );
 }
 
-function CallBtn({ icon: Icon, label, active, onPress }: {
-  icon: React.ElementType; label: string; active?: boolean; onPress: () => void;
-}) {
-  return (
-    <button onClick={onPress} className="flex flex-col items-center gap-2">
-      <span
-        className={`flex items-center justify-center rounded-full transition-colors ${active ? 'bg-card' : 'bg-card/10 hover:bg-card/20'}`}
-        style={{ width: 56, height: 56 }}
-      >
-        <Icon size={22} className={active ? 'text-foreground' : 'text-primary-foreground'} />
-      </span>
-      <span className="text-xs text-muted-foreground">{label}</span>
-    </button>
-  );
-}
-
 // ─── Text Sheet ──────────────────────────────────────────────────
-export function TextSheet({ name, phone, onClose }: { name: string; phone: string; onClose: () => void }) {
+// D1: Wire to open comms compose for the customer thread via real API
+export function TextSheet({ name, phone, customerId, onClose }: {
+  name: string; phone: string; customerId?: string; onClose: () => void;
+}) {
+  const navigate = useNavigate();
   const [message, setMessage] = useState('');
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [sent, setSent] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
   const first = name.split(' ')[0];
@@ -133,6 +136,78 @@ export function TextSheet({ name, phone, onClose }: { name: string; phone: strin
     `Hi ${first}, just confirming your appointment today.`,
   ];
 
+  async function handleSend() {
+    if (!message.trim()) return;
+    if (!customerId) {
+      setError('No customer linked to this job');
+      return;
+    }
+
+    setError(null);
+    setSending(true);
+
+    try {
+      // D1: Resolve existing thread via search, create if none exists
+      const searchRes = await apiFetch(
+        `/api/conversations/search?customerId=${encodeURIComponent(customerId)}`,
+        { method: 'GET' },
+      );
+      if (!searchRes.ok) {
+        const json = await searchRes.json().catch(() => ({}));
+        throw new Error(json?.message ?? `Failed to search threads: HTTP ${searchRes.status}`);
+      }
+      const { results } = await searchRes.json();
+
+      let conversationId: string;
+      if (results && results.length > 0) {
+        // Use the first matching thread (most recent)
+        conversationId = results[0].conversationId ?? results[0].id;
+      } else {
+        // No existing thread — create one via POST /api/conversations
+        const createRes = await apiFetch('/api/conversations', {
+          method: 'POST',
+          body: JSON.stringify({
+            entityType: 'customer',
+            entityId: customerId,
+          }),
+        });
+        if (!createRes.ok) {
+          const json = await createRes.json().catch(() => ({}));
+          throw new Error(json?.message ?? `Failed to create thread: HTTP ${createRes.status}`);
+        }
+        const created = await createRes.json();
+        conversationId = created.id;
+      }
+
+      // Send the message via the reply endpoint
+      const replyRes = await apiFetch(`/api/conversations/${conversationId}/reply`, {
+        method: 'POST',
+        body: JSON.stringify({ body: message.trim(), channel: 'sms' }),
+      });
+      if (!replyRes.ok) {
+        const json = await replyRes.json().catch(() => ({}));
+        throw new Error(json?.message ?? `Failed to send: HTTP ${replyRes.status}`);
+      }
+
+      setSent(true);
+      setTimeout(onClose, 1500);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to send message');
+    } finally {
+      setSending(false);
+    }
+  }
+
+  function handleOpenComms() {
+    if (!customerId) {
+      setError('No customer linked to this job');
+      return;
+    }
+    // Navigate to comms inbox filtered to this customer
+    navigate(`/inbox?customerId=${customerId}`);
+    onClose();
+  }
+
   return (
     <SheetOverlay onClose={onClose}>
       <div className="flex items-center justify-between mb-4">
@@ -142,6 +217,13 @@ export function TextSheet({ name, phone, onClose }: { name: string; phone: strin
         </div>
         <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-secondary"><X size={16} className="text-muted-foreground" /></button>
       </div>
+
+      {error && (
+        <div className="flex items-center gap-2 bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2 mb-4">
+          <AlertCircle size={14} className="text-destructive shrink-0" />
+          <p className="text-xs text-destructive">{error}</p>
+        </div>
+      )}
 
       {!sent ? (
         <>
@@ -165,11 +247,17 @@ export function TextSheet({ name, phone, onClose }: { name: string; phone: strin
             className="min-h-11 resize-none mb-3"
           />
           <button
-            onClick={() => { if (!message.trim()) return; setSent(true); setTimeout(onClose, 1500); }}
-            disabled={!message.trim()}
+            onClick={() => void handleSend()}
+            disabled={!message.trim() || sending}
             className="flex items-center justify-center gap-2 w-full py-3 rounded-xl bg-primary text-primary-foreground text-sm hover:bg-primary/90 transition-colors disabled:opacity-40"
           >
-            <Send size={14} /> Send message
+            <Send size={14} /> {sending ? 'Sending…' : 'Send message'}
+          </button>
+          <button
+            onClick={handleOpenComms}
+            className="flex items-center justify-center gap-2 w-full py-2.5 mt-2 rounded-xl border border-border text-foreground text-xs hover:bg-secondary transition-colors"
+          >
+            <MessageSquare size={12} /> Open full conversation
           </button>
         </>
       ) : (
@@ -185,133 +273,198 @@ export function TextSheet({ name, phone, onClose }: { name: string; phone: strin
 }
 
 // ─── Estimate Sheet ──────────────────────────────────────────────
-export function EstimateSheet({ estimateId, onClose }: { estimateId: string; onClose: () => void }) {
-  const est = estimates.find(e => e.id === estimateId);
-  if (!est) return null;
-  const total = calcEstimateTotal(est);
+// Fetches the job's real estimate(s) via GET /api/estimates?jobId=<id>
+// (bare-array shape) and renders the most recent one. Empty state links to
+// the real estimate create flow.
+export function EstimateSheet({ jobId, onClose }: { jobId: string; onClose: () => void }) {
+  const navigate = useNavigate();
+  const [est, setEst] = useState<EstimateResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const res = await apiFetch(`/api/estimates?jobId=${encodeURIComponent(jobId)}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const list: EstimateResponse[] = await res.json();
+        if (!cancelled) setEst(Array.isArray(list) && list.length > 0 ? list[0] : null);
+      } catch (err) {
+        if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to load estimate');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [jobId]);
 
   return (
     <SheetOverlay onClose={onClose}>
       <div className="flex items-center justify-between mb-4">
         <div>
-          <p className="text-sm text-foreground">Estimate {est.estimateNumber}</p>
-          <p className="text-xs text-muted-foreground mt-0.5">Created {est.createdDate}</p>
+          <p className="text-sm text-foreground">Estimate{est ? ` ${est.estimateNumber}` : ''}</p>
+          {est && <p className="text-xs text-muted-foreground mt-0.5">{est.lineItems.length} line item{est.lineItems.length === 1 ? '' : 's'}</p>}
         </div>
         <div className="flex items-center gap-2">
-          <StatusBadge status={est.status} />
+          {est && <StatusBadge status={normalizeEstimateStatus(est.status)} />}
           <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-secondary"><X size={16} className="text-muted-foreground" /></button>
         </div>
       </div>
-      <p className="text-xs text-muted-foreground mb-4 bg-secondary rounded-lg px-3 py-2">{est.description}</p>
-      <div className="rounded-xl border border-border overflow-hidden mb-4">
-        <div className="divide-y divide-border">
-          {est.lineItems.map((item, i) => (
-            <div key={i} className="flex items-start justify-between gap-3 px-3 py-3">
-              <div className="flex-1 min-w-0">
-                <p className="text-sm text-foreground">{item.description}</p>
-                <p className="text-xs text-muted-foreground mt-0.5">Qty: {item.qty} × ${item.rate.toFixed(2)}</p>
-              </div>
-              <p className="text-sm text-foreground shrink-0">${(item.qty * item.rate).toFixed(2)}</p>
+
+      {loading ? (
+        <div className="flex items-center justify-center py-10">
+          <Spinner size="md" className="text-foreground" label="Loading estimate" />
+        </div>
+      ) : error ? (
+        <div className="flex items-center gap-2 bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2 mb-4">
+          <AlertCircle size={14} className="text-destructive shrink-0" />
+          <p className="text-xs text-destructive">{error}</p>
+        </div>
+      ) : !est ? (
+        <EmptyState
+          icon={<FileText size={20} />}
+          title="No estimate linked to this job yet."
+          actionLabel="Create estimate"
+          onAction={() => { onClose(); navigate(`/estimates/new?jobId=${encodeURIComponent(jobId)}`); }}
+        />
+      ) : (
+        <>
+          <div className="rounded-xl border border-border overflow-hidden mb-4">
+            <div className="divide-y divide-border">
+              {est.lineItems.map((item, i) => (
+                <div key={item.id ?? i} className="flex items-start justify-between gap-3 px-3 py-3">
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm text-foreground">{item.description}</p>
+                    <p className="text-xs text-muted-foreground mt-0.5">Qty: {item.quantity} × {formatUsdCentsFixed(item.unitPriceCents)}</p>
+                  </div>
+                  <p className="text-sm text-foreground shrink-0">{formatUsdCentsFixed(item.totalCents)}</p>
+                </div>
+              ))}
             </div>
-          ))}
-        </div>
-        <div className="flex justify-between px-3 py-3 bg-secondary border-t border-border">
-          <p className="text-sm text-foreground">Total</p>
-          <p className="text-sm text-foreground">${total.toFixed(2)}</p>
-        </div>
-      </div>
-      {est.validUntil && <p className="text-xs text-muted-foreground text-center mb-4">Valid until {est.validUntil}</p>}
-      <button onClick={onClose} className="w-full py-3 rounded-xl border border-border text-sm text-foreground hover:bg-secondary transition-colors">Close</button>
+            <div className="flex justify-between px-3 py-3 bg-secondary border-t border-border">
+              <p className="text-sm text-foreground">Total</p>
+              <p className="text-sm text-foreground">{formatUsdCentsFixed(est.totals.totalCents)}</p>
+            </div>
+          </div>
+          <button
+            onClick={() => { onClose(); navigate(`/estimates/${est.id}`); }}
+            className="w-full py-3 rounded-xl bg-primary text-primary-foreground text-sm hover:bg-primary/90 transition-colors mb-2"
+          >
+            Open full estimate
+          </button>
+          <button onClick={onClose} className="w-full py-3 rounded-xl border border-border text-sm text-foreground hover:bg-secondary transition-colors">Close</button>
+        </>
+      )}
     </SheetOverlay>
   );
 }
 
 // ─── Invoice Sheet ───────────────────────────────────────────────
-export function InvoiceSheet({ invoiceId, customerName, customerPhone, onClose }: {
-  invoiceId: string; customerName: string; customerPhone: string; onClose: () => void;
+// Fetches the job's real invoice(s) via GET /api/invoices?jobId=<id>
+// (bare-array shape). "Send invoice now" routes to the real invoice page —
+// the sheet never fakes a send. Empty state links to the invoice create flow.
+export function InvoiceSheet({ jobId, customerName, customerPhone, onClose }: {
+  jobId: string; customerName: string; customerPhone: string; onClose: () => void;
 }) {
-  const inv = invoices.find(i => i.id === invoiceId);
-  const [sent, setSent] = useState(false);
+  const navigate = useNavigate();
+  const [inv, setInv] = useState<InvoiceResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-  if (!inv) {
-    return (
-      <SheetOverlay onClose={onClose}>
-        <div className="flex items-center justify-between mb-4">
-          <p className="text-sm text-foreground">Send Invoice</p>
-          <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-secondary"><X size={16} className="text-muted-foreground" /></button>
-        </div>
-        <EmptyState
-          icon={<Receipt size={20} />}
-          title="No invoice linked to this job yet."
-          actionLabel="Create invoice"
-          onAction={() => {}}
-        />
-      </SheetOverlay>
-    );
-  }
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const res = await apiFetch(`/api/invoices?jobId=${encodeURIComponent(jobId)}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const list: InvoiceResponse[] = await res.json();
+        if (!cancelled) setInv(Array.isArray(list) && list.length > 0 ? list[0] : null);
+      } catch (err) {
+        if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to load invoice');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [jobId]);
 
-  const total = calcInvoiceTotal(inv);
+  const status = inv ? normalizeInvoiceStatus(inv.status) : undefined;
 
   return (
     <SheetOverlay onClose={onClose}>
       <div className="flex items-center justify-between mb-4">
         <div>
-          <p className="text-sm text-foreground">Send Invoice {inv.invoiceNumber}</p>
+          <p className="text-sm text-foreground">Invoice{inv ? ` ${inv.invoiceNumber}` : ''}</p>
           <p className="text-xs text-muted-foreground mt-0.5">To {customerName}</p>
         </div>
         <div className="flex items-center gap-2">
-          <StatusBadge status={inv.status} />
+          {status && <StatusBadge status={status} />}
           <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-secondary"><X size={16} className="text-muted-foreground" /></button>
         </div>
       </div>
-      {!sent ? (
+
+      {loading ? (
+        <div className="flex items-center justify-center py-10">
+          <Spinner size="md" className="text-foreground" label="Loading invoice" />
+        </div>
+      ) : error ? (
+        <div className="flex items-center gap-2 bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2 mb-4">
+          <AlertCircle size={14} className="text-destructive shrink-0" />
+          <p className="text-xs text-destructive">{error}</p>
+        </div>
+      ) : !inv ? (
+        <EmptyState
+          icon={<Receipt size={20} />}
+          title="No invoice linked to this job yet."
+          actionLabel="Create invoice"
+          onAction={() => { onClose(); navigate(`/invoices/new?jobId=${encodeURIComponent(jobId)}`); }}
+        />
+      ) : (
         <>
           <div className="rounded-xl border border-border overflow-hidden mb-4">
             <div className="divide-y divide-border">
               {inv.lineItems.map((item, i) => (
-                <div key={i} className="flex items-start justify-between gap-3 px-3 py-3">
+                <div key={item.id ?? i} className="flex items-start justify-between gap-3 px-3 py-3">
                   <div className="flex-1 min-w-0">
                     <p className="text-sm text-foreground">{item.description}</p>
-                    <p className="text-xs text-muted-foreground mt-0.5">Qty: {item.qty} × ${item.rate.toFixed(2)}</p>
+                    <p className="text-xs text-muted-foreground mt-0.5">Qty: {item.quantity} × {formatUsdCentsFixed(item.unitPriceCents)}</p>
                   </div>
-                  <p className="text-sm text-foreground shrink-0">${(item.qty * item.rate).toFixed(2)}</p>
+                  <p className="text-sm text-foreground shrink-0">{formatUsdCentsFixed(item.totalCents)}</p>
                 </div>
               ))}
             </div>
             <div className="flex justify-between px-3 py-3 bg-secondary border-t border-border">
               <p className="text-sm text-foreground">Total due</p>
-              <p className="text-sm text-foreground">${total.toFixed(2)}</p>
+              <p className="text-sm text-foreground">{formatUsdCentsFixed(inv.amountDueCents)}</p>
             </div>
           </div>
-          <div className="rounded-lg bg-primary/10 border border-primary/20 px-3 py-2.5 mb-4 flex items-center gap-2">
-            <Send size={13} className="text-primary shrink-0" />
-            <p className="text-xs text-primary">Will be sent via SMS to {customerPhone}</p>
-          </div>
-          {inv.status === 'Paid' ? (
+          {status === 'Paid' ? (
             <div className="flex flex-col items-center gap-2 py-4">
               <span className="flex size-10 items-center justify-center rounded-full bg-success/15">
                 <Check size={18} className="text-success" />
               </span>
               <p className="text-sm text-foreground">Invoice already paid</p>
-              <p className="text-xs text-muted-foreground">Paid {inv.paidDate}</p>
             </div>
           ) : (
-            <button
-              onClick={() => setSent(true)}
-              className="flex items-center justify-center gap-2 w-full py-3 rounded-xl bg-primary text-primary-foreground text-sm hover:bg-primary/90 transition-colors"
-            >
-              <Send size={14} /> Send invoice now
-            </button>
+            <>
+              <div className="rounded-lg bg-primary/10 border border-primary/20 px-3 py-2.5 mb-4 flex items-center gap-2">
+                <Send size={13} className="text-primary shrink-0" />
+                <p className="text-xs text-primary">Send to {customerName.split(' ')[0]} at {customerPhone} from the invoice page</p>
+              </div>
+              <button
+                onClick={() => { onClose(); navigate(`/invoices/${inv.id}`); }}
+                className="flex items-center justify-center gap-2 w-full py-3 rounded-xl bg-primary text-primary-foreground text-sm hover:bg-primary/90 transition-colors"
+              >
+                <Send size={14} /> Send invoice now
+              </button>
+            </>
           )}
         </>
-      ) : (
-        <div className="flex flex-col items-center gap-3 py-8">
-          <span className="flex size-12 items-center justify-center rounded-full bg-success/15">
-            <Check size={22} className="text-success" />
-          </span>
-          <p className="text-sm text-foreground">Invoice sent to {customerName.split(' ')[0]}</p>
-          <p className="text-xs text-muted-foreground">{customerPhone}</p>
-        </div>
       )}
     </SheetOverlay>
   );

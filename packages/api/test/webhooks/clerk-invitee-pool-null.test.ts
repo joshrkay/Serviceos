@@ -2,9 +2,10 @@
  * Pins the PR 319 (P2) guard in the Clerk `user.created` invitee-join path:
  * when a pending invitation matches but `deps.pool` is not wired, the join must
  * NOT consume the invitation (no markAccepted). The handler logs the failure and
- * falls through to the normal bootstrap path, so the invitee can be retried once
- * the pool is configured — rather than being left with an accepted-but-unjoined
- * invitation and no access.
+ * fails the webhook with a 500 so Clerk retries once the pool is configured —
+ * rather than consuming the invitation (accepted-but-unjoined, no access) or
+ * silently bootstrapping a brand-new tenant for an invitee who should join an
+ * existing one.
  */
 import express from 'express';
 import request from 'supertest';

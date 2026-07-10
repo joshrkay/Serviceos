@@ -166,6 +166,64 @@ describe('P8-015 dropped-call recovery orchestrator', () => {
     expect(repo.rows[0].suppressedReason).toBe('booking_completed');
   });
 
+  it('preSendSuppress (DNC gate) suppresses with its reason and never sends', async () => {
+    const row = await seedDueRow(repo);
+    const deps = freshHandlerDeps(repo, audit, {
+      preSendSuppress: vi.fn(async () => 'opted_out'),
+    });
+    const result = await handleDroppedCallRecovery(row, deps);
+    expect(result).toEqual({ action: 'suppressed', reason: 'opted_out' });
+    expect(deps.sendSms).not.toHaveBeenCalled();
+    expect(repo.rows[0].suppressedReason).toBe('opted_out');
+    // Audit trail carries the compliance reason like every other suppression.
+    const suppressedEvent = audit.events.find(
+      (e) => e.eventType === 'dropped_call_recovery.suppressed',
+    );
+    expect(suppressedEvent?.metadata?.reason).toBe('opted_out');
+  });
+
+  it('preSendSuppress runs AFTER resolvedSince and BEFORE the rate limit', async () => {
+    const callOrder: string[] = [];
+    const row = await seedDueRow(repo);
+    const deps = freshHandlerDeps(repo, audit, {
+      resolvedSince: vi.fn(async () => {
+        callOrder.push('resolvedSince');
+        return null;
+      }),
+      preSendSuppress: vi.fn(async () => {
+        callOrder.push('preSendSuppress');
+        return null;
+      }),
+      rateLimit: {
+        check: vi.fn(async () => {
+          callOrder.push('rateLimit.check');
+          return true;
+        }),
+        record: vi.fn(async () => undefined),
+      },
+    });
+    await handleDroppedCallRecovery(row, deps);
+    expect(callOrder).toEqual(['resolvedSince', 'preSendSuppress', 'rateLimit.check']);
+  });
+
+  it('resolvedSince receives the row context (proposalIds reachable by production checker)', async () => {
+    const resolvedSince = vi.fn(async () => null);
+    const row = await repo.schedule({
+      tenantId: TENANT,
+      voiceSessionId: SESSION,
+      callerE164: E164,
+      scheduledFor: new Date(T0.getTime() - 1),
+      context: { state: 'collecting', bucket: 'proposal_created', proposalIds: ['p-9'] },
+    });
+    const deps = freshHandlerDeps(repo, audit, { resolvedSince });
+    await handleDroppedCallRecovery(row, deps);
+    expect(resolvedSince).toHaveBeenCalledWith(
+      TENANT,
+      SESSION,
+      expect.objectContaining({ proposalIds: ['p-9'] }),
+    );
+  });
+
   it('audio failure mid-call → SMS sent', async () => {
     // A "failed" outcome row reaches the worker the same way; the handler
     // re-checks suppression + rate limit and sends.
@@ -208,11 +266,15 @@ describe('P8-015 dropped-call recovery orchestrator', () => {
     const thread = vi.fn(async () => undefined);
     const deps = freshHandlerDeps(repo, audit, { thread });
     await handleDroppedCallRecovery(row, deps);
-    expect(thread).toHaveBeenCalledWith({
-      tenantId: TENANT,
-      voiceSessionId: SESSION,
-      smsMessageSid: 'SM_fake_sid',
-    });
+    expect(thread).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tenantId: TENANT,
+        voiceSessionId: SESSION,
+        smsMessageSid: 'SM_fake_sid',
+        callerE164: E164,
+        body: expect.stringContaining('cut off'),
+      }),
+    );
   });
 
   it('rate-limited — a caller who keeps dropping gets ONE SMS, not multiple', async () => {

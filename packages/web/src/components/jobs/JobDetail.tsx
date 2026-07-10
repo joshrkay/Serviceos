@@ -20,6 +20,8 @@ import { useWorkerTerm } from '../../hooks/useWorkerTerm';
 import { normalizeJobStatus } from '../../utils/statusNormalize';
 import { apiFetch } from '../../utils/api-fetch';
 import { firstNameFromUser } from '../../utils/greeting';
+import { useTenantTimezone } from '../../hooks/useTenantTimezone';
+import { formatDateInTenantTz, formatTimeInTenantTz } from '../../utils/formatInTenantTz';
 
 function buildJobCompat(api: JobDetailResponse): Job {
   const techName = api.technician
@@ -83,6 +85,7 @@ import { CameraCapture } from '../shared/CameraCapture';
 import type { CapturedMedia } from '../shared/CameraCapture';
 import { SuppliersSheet } from './SuppliersSheet';
 import { JobPhotoGallery } from './JobPhotoGallery';
+import { JobProfitCard } from './JobProfitCard';
 import { JobFormsPanel } from './JobFormsPanel';
 import { JobCustomFieldsPanel } from './JobCustomFieldsPanel';
 import {
@@ -113,14 +116,20 @@ const STEPS: { key: string; label: string; short: string }[] = [
   { key: 'Completed',   label: 'Completed',   short: 'Done'   },
 ];
 
+// Map the job's real (normalized display) status onto the stepper index. Post
+// buildJobCompat, `statusHistory` is empty — the source of truth is the live
+// job.status, so the stepper reflects where the job actually is.
+const STATUS_STEP_INDEX: Record<string, number> = {
+  New: 0, Created: 0,
+  Scheduled: 1,
+  Dispatched: 2,
+  'On Site': 3, Active: 3,
+  'In Progress': 4, 'Day 2': 4,
+  Completed: 5, Invoiced: 5, Closed: 5,
+};
+
 function resolveStepIndex(job: Job): number {
-  const history = job.statusHistory.map(h => h.status);
-  if (history.some(s => s === 'Completed'))                    return 5;
-  if (history.some(s => s === 'In Progress' || s === 'Day 2')) return 4;
-  if (history.some(s => s === 'On Site' || s === 'Active'))    return 3;
-  if (history.some(s => s === 'Dispatched'))                   return 2;
-  if (history.some(s => s === 'Scheduled'))                    return 1;
-  return 0;
+  return STATUS_STEP_INDEX[job.status] ?? 0;
 }
 
 function StatusStepper({ job }: { job: Job }) {
@@ -130,7 +139,11 @@ function StatusStepper({ job }: { job: Job }) {
   const isIssue    = isCanceled || isNoShow;
 
   return (
-    <div className="rounded-xl bg-card border border-border px-4 py-4">
+    <div
+      className="rounded-xl bg-card border border-border px-4 py-4"
+      data-testid="status-stepper"
+      data-current-step={STEPS[currentIdx]?.key ?? ''}
+    >
       <div className="flex items-center justify-between mb-4">
         <h4 className="text-foreground">Job Progress</h4>
         {isIssue && (
@@ -326,8 +339,8 @@ function CustomerCard({ customer, job, onCall, onText, onViewCustomer }: {
 }
 
 // ─── Schedule + Tech Card ──────────────────────────────────────────────────
-function ScheduleTechCard({ job, tech, onCallTech, workerTerm }: {
-  job: Job; tech: Technician | undefined; onCallTech: () => void; workerTerm: string;
+function ScheduleTechCard({ job, tech, onCallTech, onSchedule, workerTerm }: {
+  job: Job; tech: Technician | undefined; onCallTech: () => void; onSchedule: () => void; workerTerm: string;
 }) {
   const techStatusLabel =
     job.status === 'Active' || job.status === 'In Progress' ? 'On site now' :
@@ -353,7 +366,7 @@ function ScheduleTechCard({ job, tech, onCallTech, workerTerm }: {
           ) : (
             <div>
               <p className="text-sm text-muted-foreground italic">Not scheduled</p>
-              <button className="text-xs text-primary hover:underline mt-1">Schedule now →</button>
+              <button onClick={onSchedule} className="text-xs text-primary hover:underline mt-1">Schedule now →</button>
             </div>
           )}
         </div>
@@ -385,7 +398,7 @@ function ScheduleTechCard({ job, tech, onCallTech, workerTerm }: {
               </button>
             </>
           ) : (
-            <button className="flex items-center gap-1.5 text-sm text-primary hover:text-primary transition-colors">
+            <button onClick={onSchedule} className="flex items-center gap-1.5 text-sm text-primary hover:text-primary transition-colors">
               <Plus size={13} /> Assign {workerTerm.toLowerCase()}
             </button>
           )}
@@ -750,7 +763,7 @@ function DuplicateBanner({ warning, onDismiss }: {
   );
 }
 
-function IssueBanner({ job, onText }: { job: Job; onText: () => void }) {
+function IssueBanner({ job, onText, onReschedule }: { job: Job; onText: () => void; onReschedule: () => void }) {
   if (job.status !== 'Canceled' && job.status !== 'No Show') return null;
   const isCanceled = job.status === 'Canceled';
   return (
@@ -768,7 +781,7 @@ function IssueBanner({ job, onText }: { job: Job; onText: () => void }) {
             {job.cancelReason ?? job.noShowNotes}
           </p>
           <div className="flex gap-3 mt-2.5">
-            <button className={`text-xs underline underline-offset-2 ${isCanceled ? 'text-destructive' : 'text-warning'}`}>
+            <button onClick={onReschedule} className={`text-xs underline underline-offset-2 ${isCanceled ? 'text-destructive' : 'text-warning'}`}>
               Reschedule
             </button>
             <button onClick={onText} className={`text-xs underline underline-offset-2 ${isCanceled ? 'text-destructive' : 'text-warning'}`}>
@@ -805,13 +818,32 @@ export function JobDetailView({
   const navigate = useNavigate();
   const apiFetch = useApiClient();
   const workerTerm = useWorkerTerm();
+  const timezone = useTenantTimezone();
   const { user } = useUser();
   const ownerLabel = `${firstNameFromUser(user?.fullName, user?.primaryEmailAddress?.emailAddress)} (owner)`;
 
   const { data: apiJob, isLoading, error, refetch: refetchJob } = useDetailQuery<JobDetailResponse>('/api/jobs', id);
-  const { mutate: transitionJob } = useMutation<{ status: string }, JobDetailResponse>('POST', `/api/jobs/${id}/transition`);
+  const { mutate: transitionJob } = useMutation<{ status: string; reason?: string }, JobDetailResponse>('POST', `/api/jobs/${id}/transition`);
 
-  const job      = apiJob ? buildJobCompat(apiJob) : null;
+  // Real linked documents / schedule, derived from the jobId-filtered lists
+  // below. buildJobCompat leaves these unset, so without these fetches the
+  // estimate/invoice actions and the schedule card had nothing to point at.
+  const [estimateId, setEstimateId] = useState<string | null>(null);
+  const [invoiceId, setInvoiceId] = useState<string | null>(null);
+  const [appointmentStart, setAppointmentStart] = useState<string | null>(null);
+
+  const job = apiJob ? buildJobCompat(apiJob) : null;
+  if (job) {
+    // Splice the fetched linked-doc ids + scheduled instant onto the compat
+    // job so the stepper hints, estimate/invoice actions, and schedule card
+    // read real data (not the always-undefined buildJobCompat defaults).
+    job.estimateId = estimateId ?? undefined;
+    job.invoiceId = invoiceId ?? undefined;
+    if (appointmentStart) {
+      job.scheduledDate = formatDateInTenantTz(appointmentStart, timezone, { withYear: true });
+      job.scheduledTime = formatTimeInTenantTz(appointmentStart, timezone);
+    }
+  }
   const customer = apiJob?.customer ? buildCustomerCompat(apiJob.customer) : undefined;
   const tech: Technician | undefined = apiJob?.technician ? {
     id: apiJob.technician.id,
@@ -834,6 +866,7 @@ export function JobDetailView({
   const [activities,    setActivities]    = useState<JobActivity[]>([]);
   const [materials,     setMaterials]     = useState<MaterialItem[]>([]);
   const [showDuplicate, setShowDuplicate] = useState(false);
+  const [transitionError, setTransitionError] = useState<string | null>(null);
 
   // Time entries state
   const [timeEntries, setTimeEntries] = useState<Array<{
@@ -880,7 +913,7 @@ export function JobDetailView({
       setPhotoError(null);
       for (const item of captured) {
         try {
-          const file = capturedMediaToFile(item);
+          const file = await capturedMediaToFile(item);
           const category: JobPhotoCategory = item.type === 'video' ? 'other' : 'before';
           await uploadPhoto(id, file, category, undefined, item.capturedAt);
         } catch (err) {
@@ -958,6 +991,57 @@ export function JobDetailView({
   }, [id]);
 
   useEffect(() => { loadNotes(); }, [loadNotes]);
+
+  // Load the job's real linked documents + schedule. Each endpoint returns a
+  // bare array for a jobId lookup; we take the most recent of each. Non-fatal:
+  // a failed fetch just leaves the derived id null (action stays disabled).
+  const loadLinkedDocs = useCallback(async () => {
+    if (!id) return;
+    const first = async (path: string): Promise<{ id?: string; scheduledStart?: string } | null> => {
+      try {
+        const res = await apiFetch(path);
+        if (!res.ok) return null;
+        const list = await res.json();
+        return Array.isArray(list) && list.length > 0 ? list[0] : null;
+      } catch {
+        return null;
+      }
+    };
+    // Appointments come back ordered scheduled_start ASC across ALL statuses,
+    // so list[0] can be an old canceled/no-show visit rather than the active
+    // one (e.g. a cancel followed by a reschedule). Pick the next upcoming
+    // active appointment, falling back to the latest active one.
+    const activeAppointment = async (): Promise<{ scheduledStart?: string } | null> => {
+      try {
+        const res = await apiFetch(`/api/appointments?jobId=${id}`);
+        if (!res.ok) return null;
+        const list = await res.json();
+        if (!Array.isArray(list)) return null;
+        const active = list.filter(
+          (a: { status?: string }) => a.status !== 'canceled' && a.status !== 'no_show',
+        );
+        if (active.length === 0) return null;
+        const now = Date.now();
+        const upcoming = active.find(
+          (a: { scheduledStart?: string }) =>
+            a.scheduledStart != null && new Date(a.scheduledStart).getTime() >= now,
+        );
+        return upcoming ?? active[active.length - 1];
+      } catch {
+        return null;
+      }
+    };
+    const [est, inv, appt] = await Promise.all([
+      first(`/api/estimates?jobId=${id}`),
+      first(`/api/invoices?jobId=${id}`),
+      activeAppointment(),
+    ]);
+    setEstimateId(est?.id ?? null);
+    setInvoiceId(inv?.id ?? null);
+    setAppointmentStart(appt?.scheduledStart ?? null);
+  }, [id, apiFetch]);
+
+  useEffect(() => { void loadLinkedDocs(); }, [loadLinkedDocs]);
 
   if (isLoading) {
     return (
@@ -1042,6 +1126,12 @@ export function JobDetailView({
     else if (key === 'cancel')                     setModal('cancel');
   }
 
+  // NOTE: LeftContent / RightRail are render helpers, invoked as
+  // `{LeftContent()}` — NOT mounted as `<LeftContent />`. Mounting them would
+  // create a brand-new component type every parent render, unmounting and
+  // remounting the whole subtree (Time Tracking inputs lost focus per
+  // keystroke; child cards refetched). Calling them splices their elements
+  // straight into this component's tree. They must not use hooks.
   const LeftContent = () => (
     <div className="flex flex-col gap-4">
       {customer && (
@@ -1071,6 +1161,10 @@ export function JobDetailView({
         />
       )}
       <MaterialsTable materials={materials} onEdit={() => setModal('materials')} onSuppliers={() => setModal('suppliers')} />
+
+      {/* Sweep-2 S4 — job P&L rollup (invoices:view-gated; hides itself
+          when the report is unavailable or the viewer lacks access). */}
+      <JobProfitCard jobId={job.id} />
 
       {/* ── Time Entries ── */}
       <div className="rounded-xl bg-card border border-border overflow-hidden">
@@ -1235,10 +1329,15 @@ export function JobDetailView({
 
           {/* Banners */}
           <div className="flex flex-col gap-3 mb-5">
+            {transitionError && (
+              <p data-testid="job-transition-error" role="alert" className="text-sm text-destructive">
+                {transitionError}
+              </p>
+            )}
             {showDuplicate && job.duplicateWarning && (
               <DuplicateBanner warning={job.duplicateWarning} onDismiss={() => setShowDuplicate(false)} />
             )}
-            <IssueBanner job={job} onText={() => setModal('text')} />
+            <IssueBanner job={job} onText={() => setModal('text')} onReschedule={() => navigate('/schedule')} />
           </div>
 
           {/* Page header */}
@@ -1267,12 +1366,20 @@ export function JobDetailView({
                   onChange={async (e) => {
                     const newStatus = e.target.value;
                     if (!newStatus) return;
+                    setTransitionError(null);
                     try {
-                      await transitionJob({ status: newStatus });
+                      // §5.8 — the API rejects backward moves (in_progress →
+                      // scheduled) without a recorded reason.
+                      const backward = apiJob?.status === 'in_progress' && newStatus === 'scheduled';
+                      await transitionJob(
+                        backward
+                          ? { status: newStatus, reason: 'Rescheduled from job detail' }
+                          : { status: newStatus },
+                      );
                       // Reload job data to reflect new status in UI
                       await refetchJob();
-                    } catch {
-                      // non-fatal: reload will reflect actual state
+                    } catch (err) {
+                      setTransitionError(err instanceof Error ? err.message : 'Failed to update job status');
                     }
                   }}
                   title="Change job status"
@@ -1366,15 +1473,15 @@ export function JobDetailView({
 
           {/* Desktop 2-column */}
           <div className="hidden md:grid md:grid-cols-[1fr_360px] md:gap-6 md:items-start">
-            <LeftContent />
+            {LeftContent()}
             <div className="sticky top-0">
-              <RightRail />
+              {RightRail()}
             </div>
           </div>
 
           {/* Mobile single column */}
           <div className="md:hidden flex flex-col gap-4">
-            <LeftContent />
+            {LeftContent()}
             <div className="rounded-xl bg-card border border-border overflow-hidden">
               <div className="flex items-center justify-between px-4 py-3.5 border-b border-border">
                 <h4 className="text-foreground">Activity Log</h4>
@@ -1404,11 +1511,11 @@ export function JobDetailView({
           onEnd={() => setModal(null)}
         />
       )}
-      {modal === 'text'     && customer   && <TextSheet name={customer.name} phone={customerPhone} onClose={() => setModal(null)} />}
-      {modal === 'estimate' && job.estimateId && <EstimateSheet estimateId={job.estimateId} onClose={() => setModal(null)} />}
+      {modal === 'text'     && customer   && <TextSheet name={customer.name} phone={customerPhone} customerId={customer.id} onClose={() => setModal(null)} />}
+      {modal === 'estimate' && job.estimateId && <EstimateSheet jobId={job.id} onClose={() => setModal(null)} />}
       {modal === 'invoice'  && (
         <InvoiceSheet
-          invoiceId={job.invoiceId ?? ''}
+          jobId={job.id}
           customerName={job.customer}
           customerPhone={customerPhone}
           onClose={() => setModal(null)}
@@ -1416,11 +1523,18 @@ export function JobDetailView({
       )}
       {modal === 'addEntry' && (
         <AddEntrySheet
+          jobId={id}
           author={tech?.name ?? ownerLabel}
           authorInitials={tech?.initials ?? [ownerLabel[0], ownerLabel.split(' ')[1]?.[0]].filter(Boolean).join('').toUpperCase()}
           authorColor={tech?.color ?? '#475569'}
           onClose={() => setModal(null)}
-          onSubmit={entry => { void addActivity(entry); setModal(null); }}
+          onSubmit={entry => {
+            void addActivity(entry);
+            // AddEntrySheet persists Photo-tab captures via the job-photos
+            // client; reload the server-backed gallery so they appear.
+            if (entry.type === 'photo') void loadPhotos();
+            setModal(null);
+          }}
         />
       )}
       {modal === 'materials' && (
@@ -1435,6 +1549,7 @@ export function JobDetailView({
           job={job}
           customerName={customer.name}
           customerPhone={customerPhone}
+          customerId={customer.id}
           onClose={() => setModal(null)}
         />
       )}

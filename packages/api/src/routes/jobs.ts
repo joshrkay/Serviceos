@@ -34,6 +34,8 @@ import {
   transitionJobStatus,
   JobTimelineRepository,
 } from '../jobs/job-lifecycle';
+import { scheduleJob } from '../jobs/schedule-job';
+import { AppointmentRepository } from '../appointments/appointment';
 import { AuditRepository } from '../audit/audit';
 import { Queue } from '../queues/queue';
 import { FeedbackDispatcher } from '../feedback/dispatcher';
@@ -100,6 +102,24 @@ export function createJobRouter(
       userRepo: scheduleSyncDeps.userRepo,
     };
   };
+   * Issue 2 (dispatch board) — when present, enables POST /:id/schedule to
+   * create an appointment for a job (so it shows on the dispatch board) and
+   * move the job to `scheduled`. Optional so callers/tests that don't wire an
+   * appointment repo stay valid (the route returns 503 NOT_CONFIGURED).
+   */
+  appointmentRepo?: AppointmentRepository,
+): Router {
+  const router = Router();
+
+  const scheduleJobBodySchema = z
+    .object({
+      scheduledStart: z.string().datetime(),
+      scheduledEnd: z.string().datetime().optional(),
+      durationMin: z.number().int().positive().max(24 * 60).optional(),
+      timezone: z.string().min(1).optional(),
+      notes: z.string().optional(),
+    })
+    .strict();
 
   const fromEstimateBodySchema = z
     .object({
@@ -414,12 +434,15 @@ export function createJobRouter(
             limit,
             offset,
           });
-          res.json(result);
+          res.json({
+            ...result,
+            data: await attachCustomerSummaries(req.auth!.tenantId, result.data),
+          });
           return;
         }
 
         const result = await listJobs(req.auth!.tenantId, jobRepo, baseOptions);
-        res.json(result);
+        res.json(await attachCustomerSummaries(req.auth!.tenantId, result));
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);

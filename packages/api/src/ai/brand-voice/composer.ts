@@ -21,6 +21,11 @@
 import { AppError } from '../../shared/errors';
 import type { LLMGateway } from '../gateway/gateway';
 import type { SettingsRepository } from '../../settings/settings';
+import type { StandingInstructionRepository } from '../../instructions/standing-instructions';
+import {
+  buildStandingInstructionsSection,
+  selectInjectedStandingInstructions,
+} from '../standing-instructions-context';
 import {
   BRAND_VOICE_TASK_TYPE,
   BRAND_VOICE_PROMPT_VERSION_ID,
@@ -59,6 +64,14 @@ export interface ComposeBrandVoiceDeps {
    * tenantId-first per repo convention; we never open a pool directly here.
    */
   settingsRepo: SettingsRepository;
+  /**
+   * UB-A3 — owner standing instructions applied to brand-voiced drafts.
+   * Resolved here (keyed on the brand-voice intent) rather than threaded by
+   * every caller, because composer callers (digest sweep, reschedule drafts)
+   * have no classifier in play — the intent IS the selection key. Optional
+   * and failure-soft: a repo error composes without instructions.
+   */
+  standingInstructionRepo?: Pick<StandingInstructionRepository, 'listActive'>;
 }
 
 /**
@@ -173,10 +186,32 @@ export async function composeBrandVoiceMessage(
     maxChars,
   });
 
+  // UB-A3 — standing instructions ride a separate, delimited system message
+  // AFTER the tone authority, adjusting CONTENT only (the section itself
+  // forbids approval/confidence/schema overrides). Best-effort: a repo
+  // failure never blocks composition. No applied-id ask: text output.
+  let standingSection: string | undefined;
+  if (deps.standingInstructionRepo) {
+    try {
+      const active = await deps.standingInstructionRepo.listActive(tenantId);
+      const injected = selectInjectedStandingInstructions(active, intent);
+      if (injected) {
+        standingSection = buildStandingInstructionsSection(injected, {
+          requestAppliedIds: false,
+        });
+      }
+    } catch {
+      standingSection = undefined;
+    }
+  }
+
   const response = await gateway.complete({
     taskType: BRAND_VOICE_TASK_TYPE,
     messages: [
       { role: 'system', content: system },
+      ...(standingSection
+        ? [{ role: 'system' as const, content: standingSection }]
+        : []),
       { role: 'user', content: user },
     ],
     responseFormat: 'text',

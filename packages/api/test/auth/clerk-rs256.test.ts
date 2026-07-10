@@ -320,7 +320,28 @@ describe('P0-033 — verifyClerkSession RS256 verification', () => {
       expect(req.authError).toBe('Invalid token signature');
     });
 
-    it('HMAC dev path active only with CLERK_DEV_HMAC_TOKENS=true', async () => {
+    it('flag ON + valid RS256 token — verified via RS256 path first', async () => {
+      // With the RS256-first dispatch order, a valid RS256 token should be
+      // verified via RS256 even when HMAC dev mode is enabled.
+      const key = generateTestKey('kid-rs256-first');
+      const resolver = new StubResolver([makeJwksKey(key)]);
+      const token = signRs256(defaultPayload({ sub: 'user_rs256_first' }), key);
+
+      const mw = verifyClerkSession('hmac-secret', {
+        jwksResolver: resolver,
+        publishableKey: TEST_PUB_KEY,
+        env: { NODE_ENV: 'dev', CLERK_DEV_HMAC_TOKENS: 'true' },
+      });
+      const req = makeReq(token);
+      await runMiddleware(mw, req);
+
+      // RS256 path succeeded — JWKS resolver was called.
+      expect(resolver.calls.length).toBeGreaterThan(0);
+      expect(req.auth?.userId).toBe('user_rs256_first');
+      expect(req.authError).toBeUndefined();
+    });
+
+    it('flag ON + valid HMAC token — falls back to HMAC after RS256 fails', async () => {
       // Build an HMAC-signed token with the legacy shape.
       const secret = 'shared-secret';
       const payload = {
@@ -340,17 +361,74 @@ describe('P0-033 — verifyClerkSession RS256 verification', () => {
         .digest('base64url');
       const token = `${headerB64}.${payloadB64}.${sig}`;
 
-      // Flag ON, dev env → HMAC accepted.
-      const resolverNeverCalled = new StubResolver([]);
-      const onMw = verifyClerkSession(secret, {
-        jwksResolver: resolverNeverCalled,
+      // With RS256-first dispatch: RS256 is attempted (fails because HS256 alg),
+      // then HMAC fallback succeeds.
+      const resolver = new StubResolver([]);
+      const mw = verifyClerkSession(secret, {
+        jwksResolver: resolver,
         publishableKey: TEST_PUB_KEY,
         env: { NODE_ENV: 'dev', CLERK_DEV_HMAC_TOKENS: 'true' },
       });
-      const onReq: AuthenticatedRequest = makeReq(token);
-      await runMiddleware(onMw, onReq);
-      expect(onReq.auth?.userId).toBe('user_hmac');
-      expect(resolverNeverCalled.calls).toHaveLength(0); // no JWKS lookup happened
+      const req: AuthenticatedRequest = makeReq(token);
+      await runMiddleware(mw, req);
+      expect(req.auth?.userId).toBe('user_hmac');
+      // RS256 was attempted but failed (HS256 alg not supported), then HMAC worked.
+      expect(req.authError).toBeUndefined();
+    });
+
+    it('flag ON + token that fails both paths — rejected cleanly', async () => {
+      // A token with wrong HMAC signature AND no matching RS256 key should fail both.
+      const secret = 'shared-secret';
+      const payload = {
+        sub: 'user_bad',
+        sid: 'sess_bad',
+        tenant_id: 'tenant_bad',
+        role: 'owner',
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      };
+      const headerB64 = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString(
+        'base64url'
+      );
+      const payloadB64 = Buffer.from(JSON.stringify(payload)).toString('base64url');
+      // Sign with WRONG secret
+      const sig = crypto
+        .createHmac('sha256', 'wrong-secret')
+        .update(`${headerB64}.${payloadB64}`)
+        .digest('base64url');
+      const token = `${headerB64}.${payloadB64}.${sig}`;
+
+      const resolver = new StubResolver([]);
+      const mw = verifyClerkSession(secret, {
+        jwksResolver: resolver,
+        publishableKey: TEST_PUB_KEY,
+        env: { NODE_ENV: 'dev', CLERK_DEV_HMAC_TOKENS: 'true' },
+      });
+      const req = makeReq(token);
+      await runMiddleware(mw, req);
+
+      // Both paths failed — req.auth not set, but no uncaught throw.
+      expect(req.auth).toBeUndefined();
+      expect(req.authError).toBeTruthy();
+    });
+
+    it('flag OFF + HMAC token — rejected (RS256 path only)', async () => {
+      const secret = 'shared-secret';
+      const payload = {
+        sub: 'user_hmac',
+        sid: 'sess_hmac',
+        tenant_id: 'tenant_hmac',
+        role: 'owner',
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      };
+      const headerB64 = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString(
+        'base64url'
+      );
+      const payloadB64 = Buffer.from(JSON.stringify(payload)).toString('base64url');
+      const sig = crypto
+        .createHmac('sha256', secret)
+        .update(`${headerB64}.${payloadB64}`)
+        .digest('base64url');
+      const token = `${headerB64}.${payloadB64}.${sig}`;
 
       // Flag OFF (absent) → HMAC token rejected because RS256 path is used.
       const resolverEmpty = new StubResolver([]);

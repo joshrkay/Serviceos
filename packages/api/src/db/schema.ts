@@ -5706,6 +5706,143 @@ export const MIGRATIONS = {
     ALTER TABLE marketing_campaigns
       ADD COLUMN IF NOT EXISTS segment_group_id UUID REFERENCES customer_groups(id);
   `,
+
+  '229_create_standing_instructions': `
+    -- UB-A1 (agent wave) — standing instructions: persistent tenant-scoped
+    -- directives the AI agents apply when drafting (e.g. "always add a fuel
+    -- surcharge", "never discount emergency calls"). scope is app-side
+    -- Zod-validated JSONB ({intents?, tradeCategories?, customerSegment?,
+    -- amountCents?} — see src/instructions/standing-instructions.ts).
+    -- Deactivation is soft (active=false + deactivated_*) so instructions that
+    -- influenced past drafts stay auditable. Read/written by
+    -- src/instructions/pg-standing-instructions.ts (20-active-per-tenant cap
+    -- enforced there, inside the insert transaction). FORCE RLS mirrors
+    -- 227_create_customer_groups.
+    CREATE TABLE IF NOT EXISTS standing_instructions (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      instruction TEXT NOT NULL,
+      scope JSONB NOT NULL DEFAULT '{}',
+      active BOOLEAN NOT NULL DEFAULT true,
+      source TEXT NOT NULL CHECK (source IN ('proposal','settings')),
+      created_by TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      deactivated_at TIMESTAMPTZ,
+      deactivated_by TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_standing_instructions_tenant_active
+      ON standing_instructions(tenant_id, active);
+    ALTER TABLE standing_instructions ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE standing_instructions FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_standing_instructions ON standing_instructions;
+    CREATE POLICY tenant_isolation_standing_instructions ON standing_instructions
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '230_users_fullname_trgm_index': `
+    -- U1 (agent wave) — voice technician resolution. GIN trigram expression
+    -- index over the users full-name expression that PgEntityResolver's
+    -- 'technician' kind queries ("give the Davis job to Carlos"). The
+    -- expression must stay byte-identical to the SQL in
+    -- src/ai/resolution/pg-entity-resolver.ts (resolveTechnician) for the
+    -- planner to serve it from this index. Mirrors migration 051's trgm-index
+    -- pattern (051 already created the pg_trgm extension). Index-only — no
+    -- RLS or column change.
+    CREATE INDEX IF NOT EXISTS idx_users_fullname_trgm
+      ON users USING GIN ((TRIM(COALESCE(first_name,'') || ' ' || COALESCE(last_name,''))) gin_trgm_ops);
+  `,
+
+  '231_tenant_settings_autonomous_booking': `
+    -- UB-D / D-015 (agent wave) — autonomous booking lane. Per-tenant opt-in
+    -- (default OFF) letting inbound-receptionist booking proposals
+    -- (create_appointment / create_booking, capture class only) auto-approve
+    -- while unsupervised, judged against a dedicated stricter threshold
+    -- (default 0.95; DB CHECK 0.90–0.99, floor also enforced in code —
+    -- src/proposals/autonomous-lane.ts). Inline CHECK rides the ADD COLUMN so
+    -- the boot-time re-run (IF NOT EXISTS) never re-validates existing rows.
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS autonomous_booking_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS autonomous_booking_threshold NUMERIC(3,2) NOT NULL DEFAULT 0.95
+        CHECK (autonomous_booking_threshold >= 0.90 AND autonomous_booking_threshold <= 0.99);
+  `,
+
+  '232_payments_stripe_reference_unique': `
+    -- Prevent duplicate Stripe payment rows for the same intent. Two Stripe
+    -- events (checkout.session.completed + payment_intent.succeeded) for one
+    -- intent, or a webhook retry with a distinct event id, both pass the
+    -- check-then-insert dedup (findByProviderReference) before either commits
+    -- and insert two 'completed' rows — double-counting revenue and letting a
+    -- later charge.refunded resolve against only one row.
+    --
+    -- Scope: Stripe methods (credit_card / bank_transfer) AND only crediting
+    -- statuses (completed / processing). Manual cash/check references can
+    -- legitimately repeat across invoices; the 'deposit_credit' sentinel
+    -- (payment_method='other') must not be uniqued; and a 'failed' attempt row
+    -- (recordFailedPaymentAttempt stamps the PI id as reference) must NOT block
+    -- the later successful retry of that same intent — only the rows that
+    -- actually credit an invoice can double-count, so only those are uniqued.
+    --
+    -- Preflight: any tenant that already hit this race can have duplicate
+    -- (tenant_id, reference_number) crediting rows, which would abort CREATE
+    -- UNIQUE INDEX and crash the boot-time migration runner. Non-destructively
+    -- quarantine the extras first — keep the earliest crediting row per
+    -- (tenant_id, reference_number) and suffix the reference on the rest so they
+    -- remain queryable for manual reconciliation but no longer collide.
+    -- Idempotent: re-runs find no collisions among the already-suffixed rows.
+    UPDATE payments p
+       SET reference_number = p.reference_number || ':dup:' || p.id::text
+     WHERE p.reference_number IS NOT NULL
+       AND p.payment_method IN ('credit_card', 'bank_transfer')
+       AND p.status IN ('completed', 'processing')
+       AND EXISTS (
+         SELECT 1 FROM payments q
+          WHERE q.tenant_id = p.tenant_id
+            AND q.reference_number = p.reference_number
+            AND q.payment_method IN ('credit_card', 'bank_transfer')
+            AND q.status IN ('completed', 'processing')
+            AND (q.created_at < p.created_at
+                 OR (q.created_at = p.created_at AND q.id < p.id))
+       );
+
+    -- recordPayment catches the resulting 23505 and reconciles the invoice from
+    -- the payment ledger instead of double-crediting.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_stripe_reference_unique
+      ON payments (tenant_id, reference_number)
+      WHERE reference_number IS NOT NULL
+        AND payment_method IN ('credit_card', 'bank_transfer')
+        AND status IN ('completed', 'processing');
+  `,
+
+  '233_conversation_links': `
+    -- P0-037 / P8-015 — persistence for the ConversationLinkRepository port
+    -- (src/conversations/linkage.ts), which until now had only an in-memory
+    -- implementation. Links a conversation to related entities (voice_session,
+    -- sms_conversation, customer, job, estimate, invoice) so e.g. the
+    -- dropped-call recovery threader can make voice→conversation linkage
+    -- queryable. entity_id is TEXT: it holds UUIDs for domain entities but
+    -- also provider identifiers (Twilio message SIDs for sms_conversation).
+    -- Four-column uniqueness makes link creation idempotent (retried
+    -- threading never duplicates). FORCE RLS mirrors 229_create_standing_instructions.
+    CREATE TABLE IF NOT EXISTS conversation_links (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      conversation_id UUID NOT NULL,
+      entity_type TEXT NOT NULL CHECK (entity_type IN
+        ('customer', 'job', 'estimate', 'invoice', 'voice_session', 'sms_conversation')),
+      entity_id TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, conversation_id, entity_type, entity_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_conversation_links_entity
+      ON conversation_links (tenant_id, entity_type, entity_id);
+    ALTER TABLE conversation_links ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE conversation_links FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_conversation_links ON conversation_links;
+    CREATE POLICY tenant_isolation_conversation_links ON conversation_links
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

@@ -137,11 +137,19 @@ export function devAuthBypass(deps: DevAuthBypassDeps) {
         });
       }
 
+      // Honor an optional `role` claim so dev/verification can exercise
+      // non-owner surfaces (e.g. a technician hitting appointments:view-only
+      // routes). Defaults to owner; unknown values fall back to owner rather
+      // than locking the dev session out of everything.
+      const VALID_DEV_ROLES = ['owner', 'dispatcher', 'technician'];
+      const claimedRole = typeof payload.role === 'string' ? payload.role : undefined;
+      const role = claimedRole && VALID_DEV_ROLES.includes(claimedRole) ? claimedRole : 'owner';
+
       req.auth = {
         userId: payload.sub,
         sessionId: typeof payload.sid === 'string' ? payload.sid : 'dev-session',
         tenantId: tenant.id,
-        role: 'owner',
+        role,
       };
       next();
     } catch (err) {

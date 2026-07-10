@@ -16,6 +16,10 @@ import { createIntegrationResolver } from './webhooks/integration-resolver';
 import { createTelephonyRouter } from './routes/telephony';
 import { createCallsRouter, createCallBridgeRouter } from './routes/calls';
 import { TwilioGatherAdapter } from './telephony/twilio-adapter';
+import {
+  createEmergencyPageWorker,
+  createEmergencyPageResolvedCheck,
+} from './telephony/emergency-page-retry';
 import { DefaultTwilioCallControl } from './telephony/twilio-call-control';
 import { createUserPhoneDispatcherResolver, createBusinessPhoneFallback } from './telephony/dispatcher-phone-resolver';
 import { PgPhoneNumberRepository } from './integrations/twilio/phone-number-repository';
@@ -150,6 +154,9 @@ import { AttachmentService } from './attachments/attachment-service';
 import { InMemoryAttachmentRepository } from './attachments/attachment';
 import { PgAttachmentRepository } from './attachments/pg-attachment';
 import { createDispatchRoutes } from './dispatch/routes';
+import { initDispatchPresenceStore } from './dispatch/presence-store';
+import { initDispatchBoardFanout } from './dispatch/board-event-bus';
+import { createDispatchPresenceGatewayDeps } from './dispatch/presence-gateway';
 import { createPublicFeedbackRouter } from './routes/public-feedback';
 import { createPublicIntakeRouter } from './routes/public-intake';
 import { createPublicBookingRouter } from './routes/public-booking';
@@ -207,6 +214,9 @@ import { createMarketingRouter } from './routes/marketing';
 import { InMemoryCustomerGroupRepository } from './customers/customer-group';
 import { PgCustomerGroupRepository } from './customers/pg-customer-group';
 import { createCustomerGroupRouter } from './routes/customer-groups';
+import { InMemoryStandingInstructionRepository } from './instructions/standing-instructions';
+import { PgStandingInstructionRepository } from './instructions/pg-standing-instructions';
+import { createStandingInstructionRouter } from './routes/standing-instructions';
 import { InMemoryLeadRepository } from './leads/lead';
 import { InMemoryLocationRepository } from './locations/location';
 import { InMemoryJobRepository } from './jobs/job';
@@ -373,6 +383,7 @@ import { PublicInvoiceService } from './invoices/public-invoice-service';
 import { createPublicInvoicesRouter } from './routes/public-invoices';
 import { createPublicPaymentsRouter } from './routes/public-payments';
 import { createOneTapApproveRouter } from './routes/one-tap-approve';
+import { createOneTapUndoRouter } from './routes/one-tap-undo';
 import { createFeedbackSendWorker } from './workers/feedback-send';
 import { runRecurringAgreementsSweep } from './workers/recurring-agreements-worker';
 import { runDailyDigestSweep, DIGEST_SWEEP_INTERVAL_MS } from './workers/daily-digest-worker';
@@ -458,6 +469,11 @@ import type { RetrieveAdapter } from './ai/orchestration/context-builder';
 // future channel adapters) can resolve a session's language from the
 // customer override + tenant default + STT hint.
 export { detectLanguage } from './ai/orchestration/language-detector';
+// UB-C1 — the media-stream adapter's initialLanguageResolver composes the
+// identified caller's preferredLanguage with the tenant's language settings
+// through detectLanguage (which applies the supported_languages gate).
+import { detectLanguage as detectInitialCallLanguage } from './ai/orchestration/language-detector';
+import { identifyCaller } from './ai/skills/identify-caller';
 import {
   PgKnowledgeChunkRepository,
   InMemoryKnowledgeChunkRepository,
@@ -582,6 +598,17 @@ import {
   InMemoryDroppedCallRecoveryRepository,
 } from './sms/recovery/scheduler';
 import { createDroppedCallResumeHandler } from './sms/recovery/resume-handler';
+// P8-015 — production deps for the dropped-call recovery sweep.
+import type { DroppedCallHandlerDeps } from './sms/recovery/dropped-call-handler';
+import { createRecoveryRateLimiter } from './sms/recovery/recovery-rate-limiter';
+import { createDroppedCallResolvedSince } from './sms/recovery/resolved-since';
+import { createRecoveryComposer } from './sms/recovery/recovery-composer';
+import { createRecoveryThreader } from './sms/recovery/recovery-threader';
+import {
+  runDroppedCallRecoverySweep,
+  DROPPED_CALL_RECOVERY_FLAG,
+} from './workers/dropped-call-worker';
+import { PgConversationLinkRepository } from './conversations/pg-conversation-link';
 import {
   PgConsentEventRepository,
   InMemoryConsentEventRepository,
@@ -689,8 +716,11 @@ export function createApp(): express.Express {
   // handler router is mounted later once repos are constructed.
   app.use('/webhooks/wisetack', express.raw({ type: '*/*' }));
 
-  // Body parsing for all other routes
-  app.use(express.json());
+  // Body parsing for all other routes. Explicit ceiling (default is an
+  // implicit 100kb): large-but-bounded so no client can buffer unbounded
+  // JSON into the process, and the limit is visible here rather than
+  // buried in body-parser defaults.
+  app.use(express.json({ limit: '1mb' }));
 
   // Serve static frontend files from the built React app.
   // resolveWebDistDir anchors on the packages/api boundary so it points at
@@ -1000,6 +1030,10 @@ export function createApp(): express.Express {
   const financingProvider = createFinancingProvider();
   const campaignRepo = pool ? new PgCampaignRepository(pool) : new InMemoryCampaignRepository();
   const customerGroupRepo = pool ? new PgCustomerGroupRepository(pool) : new InMemoryCustomerGroupRepository();
+  // UB-A1 — standing instructions the AI agents apply when drafting.
+  const standingInstructionRepo = pool
+    ? new PgStandingInstructionRepository(pool)
+    : new InMemoryStandingInstructionRepository();
   // Story 4.6 — customer merge. Pg re-parents child rows + archives the loser
   // in one transaction; the no-DB dev path only archives (no child tables).
   const customerMergeRepo = pool
@@ -1068,14 +1102,26 @@ export function createApp(): express.Express {
   // of a hardcoded one. A 60s cache mirrors thresholdResolver/voicePersona
   // so a multi-segment chain doesn't re-query settings per segment. Best-
   // effort: the router falls back to the product default when undefined.
-  const schedulingTzCache = new Map<string, { timezone?: string; expiresAt: number }>();
+  const schedulingTzCache = new Map<
+    string,
+    {
+      timezone?: string;
+      businessHours?: Record<string, { open: string; close: string } | null> | null;
+      expiresAt: number;
+    }
+  >();
   const tenantSchedulingResolver = async (tenantId: string) => {
     const hit = schedulingTzCache.get(tenantId);
-    if (hit && hit.expiresAt > Date.now()) return { timezone: hit.timezone };
+    if (hit && hit.expiresAt > Date.now()) {
+      return { timezone: hit.timezone, businessHours: hit.businessHours };
+    }
     const settings = await settingsRepo.findByTenant(tenantId);
     const timezone = settings?.timezone;
-    schedulingTzCache.set(tenantId, { timezone, expiresAt: Date.now() + 60_000 });
-    return { timezone };
+    // UB-D — business hours ride the same cached read so the autonomous
+    // booking lane's in-hours gate costs no extra settings query.
+    const businessHours = settings?.businessHours;
+    schedulingTzCache.set(tenantId, { timezone, businessHours, expiresAt: Date.now() + 60_000 });
+    return { timezone, businessHours };
   };
   // B1 — per-tenant voice persona. 60-second LRU cache; shared by
   // both the Twilio and in-app adapters.
@@ -1363,6 +1409,17 @@ export function createApp(): express.Express {
     );
     return receipt.inserted;
   };
+  // UB-D / D3 — same durable receipt store, DISTINCT source: undo nonces
+  // and approve nonces can never collide or cross-consume.
+  const consumeOneTapUndoNonce = async (nonce: string): Promise<boolean> => {
+    const receipt = await webhookEventRepo.recordReceipt(
+      'one_tap_undo',
+      nonce,
+      'one_tap_undo_nonce',
+      {},
+    );
+    return receipt.inserted;
+  };
   // Capture as const so the SMS closure narrows (messageDelivery is a let).
   const oneTapDelivery = messageDelivery;
   const oneTapSmsSender = oneTapDelivery
@@ -1568,8 +1625,9 @@ export function createApp(): express.Express {
         customerRepo,
         // Brand-voice customer SMS drafts route through the shared LLM gateway
         // (CLAUDE.md: all AI calls go through the gateway); tone is read from
-        // tenant_settings via settingsRepo.
-        brandVoiceDeps: { gateway: llmGateway, settingsRepo },
+        // tenant_settings via settingsRepo. UB-A3: owner standing instructions
+        // (keyed on the brand-voice intent) adjust draft content.
+        brandVoiceDeps: { gateway: llmGateway, settingsRepo, standingInstructionRepo },
       },
     },
     { overwrite: true },
@@ -1675,6 +1733,12 @@ export function createApp(): express.Express {
     ? createCredentialResolver({ pool, directPool })
     : null;
   const serviceCreditRepo = pool ? new PgServiceCreditRepository(pool) : undefined;
+  // Reviewer→customer matcher + brand voice for review-response drafting.
+  // Hoisted here (was next to the polling worker at the bottom of createApp)
+  // because the voice-action-router's respond_to_review on-ramp (U3) needs
+  // the same instances; the polling worker below reuses them.
+  const googleReviewsCustomerLoader = pool ? new PgCustomerLoader(pool) : null;
+  const googleReviewsBrandVoiceLoader = new NoopBrandVoiceLoader();
   const googleReplyResolver =
     googleReviewsReviewRepo && googleReviewsCredResolver
       ? new PgGoogleBusinessReplyResolver(
@@ -1733,6 +1797,9 @@ export function createApp(): express.Express {
     // path; message_dispatches backs the 48h cooldown.
     ...(sendService ? { sendService } : {}),
     dispatchRepo,
+    // UB-A2 — create_standing_instruction inserts via the UB-A1 repo
+    // (in-memory fallback when no pool, same as the routes above).
+    standingInstructionRepo,
   });
   // U5 — fail boot loudly if a voice-reachable persist handler is degraded
   // (would return success without saving). Only the persist-critical
@@ -1974,6 +2041,11 @@ export function createApp(): express.Express {
     weeklyFeedback: 590020,
     // PRD US-345 — 24h post-completion review-request sweep.
     reviewRequest: 590021,
+    // P8-015 — dropped-call recovery drain. NOTE the collision discipline:
+    // every key here must be unique (590014 was once shared by two sweeps —
+    // an advisory-lock collision that silently serialized them); 590010
+    // remains reserved by a parallel track.
+    droppedCallRecovery: 590022,
   } as const;
   const runAsLeader = async (lockKey: number, work: () => Promise<void>): Promise<void> => {
     if (shuttingDown) return;
@@ -2006,7 +2078,13 @@ export function createApp(): express.Express {
     service: 'execution-worker',
     environment: process.env.NODE_ENV || 'development',
   });
+  // In-flight guard (same shape as the queue poll loop's pollInFlight): on a
+  // 1s cadence a slow executor otherwise stacks overlapping sweeps, each
+  // re-running resetStaleExecuting against the same rows.
+  let executionSweepInFlight = false;
   registerInterval(setInterval(async () => {
+    if (executionSweepInFlight) return;
+    executionSweepInFlight = true;
     try {
       await runExecutionSweep({
         proposalRepo,
@@ -2017,6 +2095,8 @@ export function createApp(): express.Express {
       executionWorkerLogger.error('Execution sweep failed', {
         error: err instanceof Error ? err.message : String(err),
       });
+    } finally {
+      executionSweepInFlight = false;
     }
   }, 1000));
 
@@ -2055,6 +2135,21 @@ export function createApp(): express.Express {
     availabilityFinder,
     thresholdResolver,
     tenantSchedulingResolver,
+    // UB-D / D-015 — best-effort sink for `autonomous_booking_lane_evaluated`
+    // (also serves the U5b negotiation discount audit when that path engages).
+    auditRepo,
+    // UB-D / D-015 — lane settings; the router consults this ONLY for
+    // booking-classified segments.
+    autonomousBookingResolver: async (tenantId: string) => {
+      const s = await settingsRepo.findByTenant(tenantId);
+      if (!s) return undefined;
+      return {
+        enabled: s.autonomousBookingEnabled ?? false,
+        ...(s.autonomousBookingThreshold !== undefined
+          ? { threshold: s.autonomousBookingThreshold }
+          : {}),
+      };
+    },
     appointmentRepo,
     // RV-042 — lets update_estimate proposals stamp the acceptance-void
     // marker at creation when they target a currently accepted estimate.
@@ -2081,7 +2176,26 @@ export function createApp(): express.Express {
     // constructed, `operatorVerticalPromptResolver` is assigned and the
     // shim starts returning live data on the next classifier call.
     verticalPromptResolver: operatorVerticalResolverShim,
+    // UB-A3 — owner standing instructions injected into drafting prompts.
+    // Active list resolved once per request; selection per classified intent
+    // happens inside the router. Failure-soft (a repo error drafts without).
+    standingInstructionsResolver: (tenantId: string) =>
+      standingInstructionRepo.listActive(tenantId),
     extendedIntentsEnabled: voiceExtendedIntentsFlagShim,
+    // U3 — respond_to_review on-ramp: recent-review lookup + the SAME
+    // build-proposal dep bundle the google-reviews polling worker wires, so
+    // voice-initiated drafts are identical to poll-initiated ones.
+    ...(googleReviewsReviewRepo ? { reviewRepo: googleReviewsReviewRepo } : {}),
+    ...(serviceCreditRepo && googleReviewsCustomerLoader
+      ? {
+          reviewResponseDraftDeps: {
+            llmGateway,
+            customerLoader: googleReviewsCustomerLoader,
+            brandVoiceLoader: googleReviewsBrandVoiceLoader,
+            serviceCreditRepo,
+          },
+        }
+      : {}),
     // P12-004 — unsupervised proposal routing: when no supervisor is
     // present and the tenant routing is queue_and_sms (default), send the
     // owner a one-tap approve SMS with a signed single-use link. Audit
@@ -2097,6 +2211,10 @@ export function createApp(): express.Express {
       ...(oneTapSecret ? { secret: oneTapSecret } : {}),
       buildApproveUrl: (token: string) =>
         `${oneTapApiBaseUrl}/public/proposals/one-tap-approve?token=${encodeURIComponent(token)}`,
+      // UB-D / D3 — one-tap UNDO link for lane auto-approved bookings
+      // (minted with the same one-tap secret).
+      buildUndoUrl: (token: string) =>
+        `${oneTapApiBaseUrl}/public/proposals/one-tap-undo?token=${encodeURIComponent(token)}`,
       resolveOwnerPhone: resolveUnsupervisedOwnerPhone,
       resolveRouting: async (tenantId: string) =>
         (await settingsRepo.findByTenant(tenantId))?.unsupervisedProposalRouting,
@@ -2295,6 +2413,32 @@ export function createApp(): express.Express {
       // for the bound job (batch-invoice eligibility machinery), then
       // redirect into the standard approve flow.
       invoiceMintDeps: { jobRepo, invoiceRepo, estimateRepo },
+    }),
+  );
+
+  // UB-D / D3 — public one-tap UNDO for autonomous-lane bookings. Same
+  // token-gated posture as the approve route above; still-approved
+  // proposals go through undoProposal, executed ones get a compensating
+  // cancel + fixed-template, consent/DNC-gated customer apology SMS.
+  app.use(
+    '/public/proposals',
+    createOneTapUndoRouter({
+      proposalRepo,
+      appointmentRepo,
+      auditRepo,
+      ...(oneTapSecret ? { secret: oneTapSecret } : {}),
+      consumeNonce: consumeOneTapUndoNonce,
+      jobRepo,
+      customerRepo,
+      ...(messageDelivery
+        ? {
+            customerMessageDeps: {
+              delivery: messageDelivery,
+              dispatchRepo,
+              dncRepo,
+            },
+          }
+        : {}),
     }),
   );
 
@@ -2802,6 +2946,10 @@ export function createApp(): express.Express {
       : {}),
     // RV-143 — durable tail for the emergency page-retry ladder.
     callMeBackRepo,
+    // UC-5a — the ladder itself is durable: each page is a delayed job on
+    // the shared queue, consumed by the telephony.emergency_page worker
+    // registered below.
+    queue,
     // RV-115 — FSM context snapshot into dropped_call_recoveries.context.
     droppedCallScheduler,
     // RV-130 — consent ledger + live recording pause on objection.
@@ -2890,6 +3038,41 @@ export function createApp(): express.Express {
         }
       : {}),
   });
+
+  // UC-5a — consumer half of the durable emergency page-retry ladder: the
+  // adapter above enqueues delayed `telephony.emergency_page` jobs; this
+  // worker (dispatched by the unified queue poll loop) re-checks resolution
+  // against the live store and then the persisted voice_sessions row (so a
+  // transfer answered on another replica still cancels the ladder), pages
+  // the owner, and lands the durable call_me_back tail on exhaustion.
+  // Registered only when an SMS provider exists — the adapter's arm gate
+  // mirrors this, so no job is ever enqueued without its consumer.
+  if (messageDelivery) {
+    const emergencyPageWorker = createEmergencyPageWorker({
+      queue,
+      sendSms: (args: { to: string; body: string }) =>
+        messageDelivery.sendSms({ to: args.to, body: args.body }),
+      resolvePagePhone: async (tenantId: string) => {
+        try {
+          const settings = await settingsRepo.findByTenant(tenantId);
+          return settings?.ownerPhone ?? settings?.transferNumber ?? null;
+        } catch {
+          return null;
+        }
+      },
+      isResolved: createEmergencyPageResolvedCheck({
+        store: voiceSessionStore,
+        voiceSessionRepo,
+      }),
+      callMeBackRepo,
+      auditRepo,
+    });
+    workerRegistry.set(
+      emergencyPageWorker.type,
+      emergencyPageWorker as import('./queues/queue').WorkerHandler<unknown>,
+    );
+  }
+
   // P8-012: feature flag the Media Streams (live audio) path. Default
   // off — when off, the existing Gather adapter remains the only
   // telephony surface. When on, /voice returns a <Connect><Stream/>
@@ -2929,6 +3112,12 @@ export function createApp(): express.Express {
         await client.query('COMMIT');
         const enc = result.rows[0]?.auth_token_primary_enc;
         return enc ? decrypt(enc, encKey) : process.env.TWILIO_AUTH_TOKEN;
+      } catch (err) {
+        // Roll back before release: the outer catch swallows the error to a
+        // fallback, so without this the connection would silently return to
+        // the pool with the transaction (and system_lookup GUC) still open.
+        await client.query('ROLLBACK').catch(() => {});
+        throw err;
       } finally {
         client.release();
       }
@@ -2955,6 +3144,10 @@ export function createApp(): express.Express {
         );
         await client.query('COMMIT');
         return result.rows[0]?.tenant_id ?? process.env.TWILIO_DEFAULT_TENANT_ID;
+      } catch (err) {
+        // Same dirty-connection guard as resolveTwilioAuthTokenForSubaccount.
+        await client.query('ROLLBACK').catch(() => {});
+        throw err;
       } finally {
         client.release();
       }
@@ -3179,6 +3372,9 @@ export function createApp(): express.Express {
     const sharedTtsProvider = createTtsProvider({
       TTS_PROVIDER: process.env.TTS_PROVIDER,
       ELEVENLABS_API_KEY: process.env.ELEVENLABS_API_KEY,
+      // UB-C2 — same voice id scripts/render-fillers.ts renders with, so
+      // filler clips and live TTS speak with one voice.
+      ELEVENLABS_VOICE_ID: process.env.ELEVENLABS_VOICE_ID,
       AI_PROVIDER_API_KEY: config.AI_PROVIDER_API_KEY,
     });
     const streamingProvider = deepgramKey
@@ -3383,6 +3579,41 @@ export function createApp(): express.Express {
             streamingProvider,
             ...(sharedTtsProvider ? { ttsProvider: sharedTtsProvider } : {}),
             terminologyProvider,
+            // UB-C1 — resolve the language the call OPENS in, before the
+            // Deepgram socket is created: identified caller's
+            // preferredLanguage > tenant default, both gated by the
+            // tenant's supported_languages opt-in (detectLanguage applies
+            // the gate internally). Failure-soft: any error falls back to
+            // the tenant default / English rather than blocking audio.
+            initialLanguageResolver: async (
+              tenantId: string,
+              ctx: { callSid: string; sessionId: string },
+            ) => {
+              const settings = await settingsRepo.findByTenant(tenantId).catch(() => null);
+              let customerPreferred: 'en' | 'es' | null = null;
+              const callerPhone = twilioAdapter.getCallerPhone(ctx.sessionId);
+              if (pool && callerPhone) {
+                try {
+                  const identified = await identifyCaller({
+                    tenantId,
+                    fromPhone: callerPhone,
+                    pool,
+                  });
+                  if (identified.status === 'matched') {
+                    const customer = await customerRepo.findById(tenantId, identified.customerId);
+                    const pref = customer?.preferredLanguage;
+                    if (pref === 'en' || pref === 'es') customerPreferred = pref;
+                  }
+                } catch {
+                  /* failure-soft — fall through to the tenant default */
+                }
+              }
+              return detectInitialCallLanguage({
+                customerPreferredLanguage: customerPreferred,
+                tenantDefaultLanguage: settings?.defaultLanguage === 'es' ? 'es' : 'en',
+                supportedLanguages: settings?.supportedLanguages ?? ['en'],
+              });
+            },
             fillerEngine,
             fillerCache,
             speechTurn: async ({ session, speechResult, callSid, tenantId }) =>
@@ -3473,6 +3704,9 @@ export function createApp(): express.Express {
       const server = (origListen as any)(...args);
       attachClientGateway(server, {
         registry: connectionRegistry,
+        // UC-3 — dispatch presence heartbeats/reads ride this socket
+        // instead of a 5s HTTP PUT per board user.
+        dispatchPresence: createDispatchPresenceGatewayDeps(),
         // Runtime kill switch: consult the persisted feature flag on
         // every upgrade so flipping ws.client_gateway_enabled off
         // immediately disables /api/ws without redeploy. The env-var
@@ -3623,6 +3857,10 @@ export function createApp(): express.Express {
   app.use('/api/job-forms', createJobFormRouter(jobFormRepo, auditRepo, jobRepo));
   app.use('/api/job-custom-fields', createJobCustomFieldRouter(jobCustomFieldRepo, auditRepo, jobRepo));
   app.use('/api/customer-groups', createCustomerGroupRouter(customerGroupRepo, auditRepo));
+  app.use(
+    '/api/standing-instructions',
+    createStandingInstructionRouter(standingInstructionRepo, auditRepo)
+  );
   app.use(
     '/api/marketing',
     createMarketingRouter({
@@ -3860,6 +4098,15 @@ export function createApp(): express.Express {
       delayNotificationCoordinator,
     }, auditRepo)
   );
+  // UC-3 — presence store goes cluster-wide when REDIS_URL is set (in-memory
+  // and byte-identical to single-replica behavior otherwise).
+  initDispatchPresenceStore(process.env.REDIS_URL);
+  // UC-4 — dispatch-board event/revision fan-out across replicas. Double-gated
+  // like the voice fan-out (U3d): REDIS_URL must be set AND
+  // DISPATCH_FANOUT_ENABLED=true; otherwise the bus stays process-local.
+  initDispatchBoardFanout(
+    process.env.DISPATCH_FANOUT_ENABLED === 'true' ? process.env.REDIS_URL : undefined,
+  );
   app.use(
     '/api/dispatch',
     createDispatchRoutes({
@@ -3871,6 +4118,7 @@ export function createApp(): express.Express {
       enRouteCoordinator: delayNotificationCoordinator,
       proposalRepo,
       userRepo,
+      settingsRepo,
       boardEventsDeps: {
         authUserIdFromRequest: async (req) =>
           (req as { auth?: { userId?: string } }).auth?.userId ?? null,
@@ -3893,6 +4141,7 @@ export function createApp(): express.Express {
       paymentRepo,
       agreementRepo,
       templateRepo,
+      customerRepo,
     ),
   );
   app.use(
@@ -4046,7 +4295,7 @@ export function createApp(): express.Express {
           // downstream callers (the API surface) stay aligned with
           // the auth-layer identity.
           const r = await pool.query(
-            `SELECT clerk_user_id, tenant_id, role,
+            `SELECT id, clerk_user_id, tenant_id, role,
                     COALESCE(can_field_serve, false) AS can_field_serve,
                     COALESCE(current_mode, 'supervisor') AS current_mode,
                     mode_changed_at
@@ -4059,6 +4308,10 @@ export function createApp(): express.Express {
           const row = r.rows[0] as Record<string, unknown>;
           const rec: MeUserRecord = {
             user_id: String(row.clerk_user_id),
+            // Sweep-2 S5 — internal users.id UUID; this is what
+            // appointment_assignments.technician_id references, so the
+            // web technician surfaces resolve THIS, not the Clerk sub.
+            internal_user_id: String(row.id),
             tenant_id: String(row.tenant_id),
             role: String(row.role),
             can_field_serve: Boolean(row.can_field_serve),
@@ -4221,6 +4474,8 @@ export function createApp(): express.Express {
       {
         gateway: llmGateway,
         settingsRepo,
+        // UB-A3 — owner standing instructions injected into suggested replies.
+        standingInstructionRepo,
       },
       // U6 — owner reply send path. Only wired when a delivery provider exists
       // (prod/dev with creds); otherwise POST /:id/reply returns 503.
@@ -4342,6 +4597,10 @@ export function createApp(): express.Express {
       // shim with the voice-action-router so the same vertical context
       // reaches both text and voice classification paths.
       verticalPromptResolver: operatorVerticalResolverShim,
+      // UB-A3 — owner standing instructions injected into assistant-drafted
+      // estimates/invoices (same resolver contract as the voice router).
+      standingInstructionsResolver: (tenantId: string) =>
+        standingInstructionRepo.listActive(tenantId),
       // Story 3.11 — persist each chat turn so the running conversation
       // survives reload and is searchable.
       conversationRepo,
@@ -4594,6 +4853,95 @@ export function createApp(): express.Express {
     });
   }, 60_000));
 
+  // P8-015 — dropped-call recovery drain. The scheduler (wired above) has
+  // been inserting durable dropped_call_recoveries rows since RV-115; this
+  // sweep is what actually sends the ~60s recovery SMS. Dark by default:
+  // every row is gated per-tenant on the DROPPED_CALL_RECOVERY_FLAG
+  // (tenant override → platform flag → false), so enabling is an explicit
+  // per-tenant action and the flag doubles as the kill switch.
+  //
+  // CORRECTNESS NOTE: findDue has no FOR UPDATE SKIP LOCKED row claiming —
+  // the runAsLeader advisory lock is the only thing preventing two replicas
+  // from sending the same row in the same tick. Never un-gate this sweep
+  // without adding claiming; the per-row Twilio Idempotency-Key
+  // (dropped_call_recovery:{row.id}) and markSent's sent_at IS NULL guard
+  // are the second and third lines of defense.
+  //
+  // 30s cadence (not 60s): the product promise is "~60s after the drop";
+  // rows are scheduled 60s out, so a 30s tick keeps worst-case latency
+  // ≈90s instead of ≈2× the promise.
+  // Gated on `pool` too, not just messageDelivery: with Twilio creds set but
+  // no DATABASE_URL, messageDelivery is the REAL provider while the sweep would
+  // otherwise install an always-allow rate-limiter stub — sending recovery SMS
+  // with the one-per-caller cap silently disabled. No pool ⇒ no cross-process
+  // limiter ⇒ don't run the sweep at all (matches PhoneRateLimiter's
+  // no-in-memory-fallback rule).
+  if (messageDelivery && pool) {
+    const droppedCallLogger = createLogger({
+      service: 'dropped-call-worker',
+      environment: process.env.NODE_ENV || 'development',
+    });
+    const conversationLinkRepo = new PgConversationLinkRepository(pool);
+    const recoveryHandlerDeps: Omit<DroppedCallHandlerDeps, 'repo'> = {
+      audit: auditRepo,
+      logger: droppedCallLogger,
+      rateLimit: createRecoveryRateLimiter(new PhoneRateLimiter(pool), droppedCallLogger),
+      resolvedSince: createDroppedCallResolvedSince({
+        voiceSessionRepo,
+        proposalRepo,
+        logger: droppedCallLogger,
+      }),
+      // Compliance gate: a caller who texted STOP between the drop and the
+      // send must never receive the recovery SMS.
+      preSendSuppress: async (row) =>
+        (await dncRepo.isOnDnc(row.tenantId, normalizePhone(row.callerE164)))
+          ? 'opted_out'
+          : null,
+      compose: createRecoveryComposer({
+        composerDeps: { gateway: llmGateway, settingsRepo, standingInstructionRepo },
+        businessName: process.env.TWILIO_BUSINESS_NAME ?? 'our team',
+        // Brand-voice only with a real provider key — the mock gateway's
+        // canned output must never reach a customer (digest precedent).
+        aiEnabled: Boolean(config.AI_PROVIDER_API_KEY),
+        logger: droppedCallLogger,
+      }),
+      // Unlike the callMeBack adapter above, this passes tenantId (per-tenant
+      // Twilio subaccount routing) and the idempotency key (Twilio-side
+      // double-send defense).
+      sendSms: async ({ tenantId, to, body, idempotencyKey }) =>
+        (await messageDelivery.sendSms({ to, body, tenantId, idempotencyKey }))
+          .providerMessageId,
+      // NOTE: no leadRepo — the dropped CALL is the lead-generating event and
+      // is captured (source 'phone_call') by the inbound-call path. Passing
+      // leadRepo here would make the OUTBOUND recovery SMS mint a lead with
+      // inbound-text provenance ('system:sms-capture', source 'sms') and fire a
+      // misleading "new text lead" owner push. Unknown callers thread under
+      // sms_unmatched instead — still visible in the inbox, correct provenance.
+      thread: createRecoveryThreader({
+        conversationRepo,
+        conversationLinkRepo,
+        customerRepo,
+        auditRepo,
+        logger: droppedCallLogger,
+      }),
+    };
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.droppedCallRecovery, async () => {
+        await runDroppedCallRecoverySweep({
+          repo: droppedCallRecoveryRepo,
+          handlerDeps: recoveryHandlerDeps,
+          logger: droppedCallLogger,
+          isEnabledForTenant: (tenantId) =>
+            isFlagEnabledForTenant(tenantId, DROPPED_CALL_RECOVERY_FLAG),
+        });
+      }).catch((err) => {
+        droppedCallLogger.error('dropped-call recovery sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }, 30_000));
+  }
+
   // P21-003 — batch-invoice sweep. Daily-grained work; an hourly tick surfaces
   // newly-completed jobs promptly. Opt-in per tenant (settings.batchInvoiceEnabled);
   // in-memory dev returns no tenants so it no-ops locally.
@@ -4684,7 +5032,9 @@ export function createApp(): express.Express {
                     },
                     maxChars: 420,
                   },
-                  { gateway: llmGateway, settingsRepo },
+                  // UB-A3 — owner standing instructions (keyed on the
+                  // digest_narrative intent) adjust the narrative content.
+                  { gateway: llmGateway, settingsRepo, standingInstructionRepo },
                 );
                 return result.text;
               },
@@ -5069,8 +5419,8 @@ export function createApp(): express.Express {
   // immediately produce a draft review_response_proposal. When any are
   // missing, we log a one-shot warning so ops can see "ingestion only,
   // no proposals being created" without grepping the per-tick logs.
-  const googleReviewsCustomerLoader = pool ? new PgCustomerLoader(pool) : null;
-  const googleReviewsBrandVoiceLoader = new NoopBrandVoiceLoader();
+  // (Loader instances are constructed next to serviceCreditRepo above and
+  // shared with the voice respond_to_review on-ramp — U3.)
   const googleReviewsProposalEmission =
     serviceCreditRepo && googleReviewsCustomerLoader
       ? {
@@ -5226,6 +5576,7 @@ export function createApp(): express.Express {
   const ttsProvider = createTtsProvider({
     TTS_PROVIDER: process.env.TTS_PROVIDER,
     ELEVENLABS_API_KEY: process.env.ELEVENLABS_API_KEY,
+    ELEVENLABS_VOICE_ID: process.env.ELEVENLABS_VOICE_ID,
     AI_PROVIDER_API_KEY: config.AI_PROVIDER_API_KEY,
   });
   const inAppVoiceAdapter = new InAppVoiceAdapter({
@@ -5416,11 +5767,18 @@ export function createApp(): express.Express {
   });
 
   // Catch-all route for client-side routing — serves index.html for all non-API routes
-  // This allows the React SPA to handle routing on the client side
+  // This allows the React SPA to handle routing on the client side.
+  // This route sits AFTER the global error handler, so sendFile's next(err)
+  // would fall through to Express's default handler (stack trace in dev) —
+  // handle the error in the callback instead.
   app.get('*', (req, res) => {
     const frontendPath = resolveWebDistDir(__dirname);
     const indexPath = require('path').join(frontendPath, 'index.html');
-    res.sendFile(indexPath);
+    res.sendFile(indexPath, (err) => {
+      if (err && !res.headersSent) {
+        res.status(500).json({ error: 'INTERNAL_ERROR', message: 'Frontend assets unavailable' });
+      }
+    });
   });
 
   // P0-023: Graceful shutdown — close the Postgres pool on SIGTERM/SIGINT so

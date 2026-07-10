@@ -434,6 +434,15 @@ export function createReportsRouter(deps: ReportsRouterDeps): Router {
             .json({ error: 'NOT_CONFIGURED', message: 'Technician profit unavailable' });
           return;
         }
+        // Guard before the query: a non-UUID id (e.g. a stale client's
+        // hardcoded 'tech-1') previously reached Postgres and 500'd on the
+        // uuid cast (QA 2026-07-02).
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(req.params.technicianId)) {
+          res
+            .status(400)
+            .json({ error: 'VALIDATION_ERROR', message: 'technician id must be a UUID' });
+          return;
+        }
         const tenantId = req.auth!.tenantId;
         const settings = await deps.settingsRepo.findByTenant(tenantId);
         const profit = await getTechnicianProfit(

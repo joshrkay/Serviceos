@@ -49,6 +49,51 @@ export interface UsePendingProposalsResult {
 const DEFAULT_POLL_MS = 30_000;
 
 /**
+ * Module-level network coalescing (QA 2026-07-02). The hook is mounted by
+ * the Shell badge on every page plus per-page cards (home mounts three
+ * instances), and each instance fired its own identical GET. The RESPONSE
+ * is shared; each instance still runs its own baseline/toast diffing over
+ * it. `refresh()` (post-approve) bypasses the TTL but still shares any
+ * in-flight request.
+ */
+const PENDING_CACHE_TTL_MS = 2000;
+type PendingFetch = (path: string) => Promise<Response>;
+let inflightPending: Promise<unknown> | null = null;
+let lastPending: { body: unknown; at: number } | null = null;
+
+async function fetchPendingCoalesced(apiFetch: PendingFetch, force: boolean): Promise<unknown> {
+  if (!force && lastPending && Date.now() - lastPending.at < PENDING_CACHE_TTL_MS) {
+    return lastPending.body;
+  }
+  if (!inflightPending) {
+    inflightPending = (async () => {
+      try {
+        const res = await apiFetch('/api/proposals?status=ready_for_review&limit=100');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const body = (await res.json()) as unknown;
+        lastPending = { body, at: Date.now() };
+        return body;
+      } finally {
+        inflightPending = null;
+      }
+    })();
+  }
+  return inflightPending;
+}
+
+/** Test-only: drop the module cache so test cases don't bleed into each other. */
+export function _resetPendingProposalsCacheForTests(): void {
+  inflightPending = null;
+  lastPending = null;
+}
+
+/** Drop the cached proposals on auth transitions (sign-out / tenant switch). */
+export function invalidatePendingProposalsCache(): void {
+  inflightPending = null;
+  lastPending = null;
+}
+
+/**
  * P2-033 — Polls `/api/proposals?status=ready_for_review` for badge
  * counts + new-proposal notifications.
  *
@@ -69,7 +114,7 @@ export function usePendingProposals(
   const { pollIntervalMs = DEFAULT_POLL_MS, onNewProposal, onCriticalProposal, enabled = true } = options;
   const apiFetch = useApiClient();
   const [proposals, setProposals] = useState<PendingProposalSummary[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
+  const [isLoading, setIsLoading] = useState(enabled);
   const [error, setError] = useState<string | null>(null);
 
   // `null` means "no baseline yet"; on the first successful response we
@@ -98,14 +143,30 @@ export function usePendingProposals(
     apiFetchRef.current = apiFetch;
   }, [apiFetch]);
 
-  const fetchOnce = useCallback(async (): Promise<void> => {
+  // Error backoff: after consecutive failures the poll interval keeps
+  // firing but ticks are skipped until the backoff window elapses
+  // (doubling per failure, capped at 5 min). Without this a persistently
+  // failing endpoint (e.g. server-side auth outage) was re-hit at full
+  // rate forever from every mounted instance.
+  const consecutiveFailuresRef = useRef(0);
+  const nextAttemptAtRef = useRef(0);
+  const BACKOFF_CAP_MS = 5 * 60_000;
+
+  const fetchOnce = useCallback(async (force = false): Promise<void> => {
     if (!enabled) return;
-    setIsLoading(true);
+    if (!force && Date.now() < nextAttemptAtRef.current) return;
+    // Only the initial load (no baseline yet) or an explicit refresh
+    // surfaces the loading flag: flipping it on every 30s background tick
+    // made badge/card consumers flash a spinner per poll.
+    if (knownIdsRef.current === null || force) {
+      setIsLoading(true);
+    }
     setError(null);
     try {
-      const res = await apiFetchRef.current('/api/proposals?status=ready_for_review&limit=100');
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const body = (await res.json()) as ListProposalsResponse & {
+      const body = (await fetchPendingCoalesced(
+        (path) => apiFetchRef.current(path),
+        force,
+      )) as ListProposalsResponse & {
         data?: Array<PendingProposalSummary & { expiresAt?: string | Date }>;
       };
       const list: PendingProposalSummary[] = (body.data ?? []).map((p) => ({
@@ -143,16 +204,21 @@ export function usePendingProposals(
       }
       knownIdsRef.current = new Set(list.map((p) => p.id));
       setProposals(list);
+      consecutiveFailuresRef.current = 0;
+      nextAttemptAtRef.current = 0;
     } catch (err) {
       // Mid sign-out the api client throws an AbortError. That's not a
       // user-visible failure — swallow it and let the next render
       // retry once auth settles.
       if (err instanceof DOMException && err.name === 'AbortError') return;
+      const failures = ++consecutiveFailuresRef.current;
+      nextAttemptAtRef.current =
+        Date.now() + Math.min(pollIntervalMs * 2 ** failures, BACKOFF_CAP_MS);
       setError(err instanceof Error ? err.message : 'Unknown error');
     } finally {
       setIsLoading(false);
     }
-  }, [enabled]);
+  }, [enabled, pollIntervalMs]);
 
   useEffect(() => {
     if (!enabled) return;
@@ -196,11 +262,13 @@ export function usePendingProposals(
     };
   }, [enabled, fetchOnce, pollIntervalMs]);
 
+  const refresh = useCallback(() => fetchOnce(true), [fetchOnce]);
+
   return {
     count: proposals.length,
     proposals,
     isLoading,
     error,
-    refresh: fetchOnce,
+    refresh,
   };
 }
