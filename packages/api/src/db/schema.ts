@@ -5843,6 +5843,22 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_conversation_links ON conversation_links
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  '234_tenant_settings_vapi_webhook_secret': `
+    -- Per-tenant Vapi webhook secret. Previously every tenant's Vapi assistant
+    -- was provisioned with the SAME global VAPI_WEBHOOK_SECRET, and the
+    -- /webhooks/vapi/:tenantId handler verified only that global secret over the
+    -- body — never binding the signature to the :tenantId path. Anyone holding
+    -- the shared secret could forge call events for ANY tenant. Provisioning now
+    -- generates a random per-tenant secret stored here and passes it as the
+    -- assistant's serverUrlSecret; the webhook verifies against it (a body
+    -- signed for tenant A then fails at tenant B). NULL = assistant not yet
+    -- re-provisioned → the handler falls back to the global secret so live voice
+    -- keeps working during migration. Additive + nullable; inherits
+    -- tenant_settings' FORCE-RLS tenant_isolation policy.
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS vapi_webhook_secret TEXT;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

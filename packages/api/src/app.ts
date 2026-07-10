@@ -12,7 +12,7 @@ import { verifyRlsRuntimeRole } from './db/rls-runtime-role';
 import { loadConfig } from './shared/config';
 import { resolveWebDistDir } from './web-static-path';
 import { createWebhookRouter } from './webhooks/routes';
-import { createIntegrationResolver } from './webhooks/integration-resolver';
+import { createIntegrationResolver, createVapiSecretResolver } from './webhooks/integration-resolver';
 import { createTelephonyRouter } from './routes/telephony';
 import { createCallsRouter, createCallBridgeRouter } from './routes/calls';
 import { TwilioGatherAdapter } from './telephony/twilio-adapter';
@@ -973,6 +973,10 @@ export function createApp(): express.Express {
   // verification. Returns null when no row exists or the integration provider
   // doesn't match — recordTwilio / recordSendGrid then 403 with audit.
   const integrationResolver = pool ? createIntegrationResolver(pool) : undefined;
+  // Per-tenant Vapi webhook secret resolver (closes the cross-tenant forgery
+  // the single global secret allowed). The /vapi handler falls back to the
+  // global secret when this returns null (tenant not yet re-provisioned).
+  const vapiSecretResolver = pool ? createVapiSecretResolver(pool) : undefined;
 
   const webhookRouterDeps: import('./webhooks/routes').WebhookRouterDeps = {
     tenantRepo,
@@ -1000,6 +1004,7 @@ export function createApp(): express.Express {
     webhookEventRepo,
     webhookRepo,
     integrationResolver,
+    vapiSecretResolver,
     // #6 phase 4 — persist saved cards on setup_intent.succeeded.
     // customerPaymentMethodRepo is wired in after its instantiation below.
     stripeConfig: process.env.STRIPE_SECRET_KEY

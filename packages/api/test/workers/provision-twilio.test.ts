@@ -341,13 +341,21 @@ describe('provision-twilio worker — number picker', () => {
       }),
     );
 
-    // The assistant id is written back to the tenant so the next run is idempotent…
+    // The assistant id is written back to the tenant so the next run is idempotent,
+    // alongside the per-tenant vapi_webhook_secret.
     const settingsWrite = calls.find(
       (c) =>
-        /UPDATE tenant_settings SET vapi_assistant_id/i.test(c.sql) &&
+        /UPDATE tenant_settings\s+SET vapi_assistant_id/i.test(c.sql) &&
+        /vapi_webhook_secret/i.test(c.sql) &&
         JSON.stringify(c.params).includes('asst_test_123'),
     );
     expect(settingsWrite).toBeDefined();
+    // A random 32-byte hex per-tenant secret is persisted (never the global one).
+    expect(
+      (settingsWrite!.params as unknown[]).some(
+        (p) => typeof p === 'string' && /^[0-9a-f]{64}$/.test(p),
+      ),
+    ).toBe(true);
 
     // …and mirrored onto the integration row's provider_data.
     const integrationWrite = calls.find(

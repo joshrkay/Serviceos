@@ -176,6 +176,16 @@ export interface WebhookRouterDeps {
     authTokenSecondary?: string;
     sendgridPublicKeyPem?: string;
   } | null>;
+  /**
+   * Resolves a tenant's per-tenant Vapi webhook secret
+   * (`tenant_settings.vapi_webhook_secret`) for the `/vapi/:tenantId` handler.
+   * Each tenant's assistant is provisioned with its OWN random secret, so a
+   * body signed for tenant A fails verification at tenant B (closes the
+   * cross-tenant forgery the single global secret allowed). Returns null for a
+   * not-yet-re-provisioned tenant → the handler falls back to the global
+   * `VAPI_WEBHOOK_SECRET` so live inbound voice keeps working during migration.
+   */
+  vapiSecretResolver?: (tenantId: string) => Promise<string | null>;
   provisioningQueue?: {
     send<T>(type: string, payload: T, idempotencyKey?: string): Promise<string>;
   };
@@ -2241,13 +2251,29 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
     const rawBody = Buffer.isBuffer(req.body)
       ? req.body.toString('utf8')
       : JSON.stringify(req.body ?? {});
+    // Per-tenant secret is the primary credential: a body signed for tenant A
+    // fails verification here at tenant B. Fall back to the global secret ONLY
+    // for a tenant whose assistant hasn't been re-provisioned yet (resolver
+    // returns null), so live voice isn't broken mid-migration.
+    let vapiSecret = process.env.VAPI_WEBHOOK_SECRET ?? '';
+    if (deps.vapiSecretResolver) {
+      try {
+        const perTenant = await deps.vapiSecretResolver(tenantId);
+        if (perTenant) vapiSecret = perTenant;
+      } catch (err) {
+        logger.warn('Vapi per-tenant secret resolve failed; using global fallback', {
+          tenantId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
     try {
       const result = await handleVapiCallEvent(
         {
           pool: deps.pool,
           auditRepo: deps.auditRepo,
           webhookRepo: deps.webhookEventRepo,
-          secret: process.env.VAPI_WEBHOOK_SECRET ?? '',
+          secret: vapiSecret,
           ...(deps.sendEmail ? { sendEmail: deps.sendEmail } : {}),
         },
         {
