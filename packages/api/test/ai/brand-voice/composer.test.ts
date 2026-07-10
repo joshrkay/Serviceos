@@ -10,6 +10,7 @@ import {
 } from '../../../src/settings/settings';
 import {
   composeBrandVoiceMessage,
+  enforceBannedPhrases,
   trimToMaxChars,
 } from '../../../src/ai/brand-voice/composer';
 import {
@@ -273,5 +274,76 @@ describe('P4-015 — trimToMaxChars helper', () => {
 
   it('handles maxChars=0 by returning empty', () => {
     expect(trimToMaxChars('anything', 0)).toBe('');
+  });
+});
+
+describe('brand-voice — banned-phrase enforcement (code-level, not just prompt)', () => {
+  it('enforceBannedPhrases: no bans → text unchanged, nothing removed', () => {
+    const r = enforceBannedPhrases('Thanks, we will see you Tuesday.', undefined);
+    expect(r.text).toBe('Thanks, we will see you Tuesday.');
+    expect(r.removed).toEqual([]);
+    const r2 = enforceBannedPhrases('Thanks!', []);
+    expect(r2.removed).toEqual([]);
+  });
+
+  it('enforceBannedPhrases: strips a banned phrase case-insensitively', () => {
+    const r = enforceBannedPhrases('No problemo, we will be there Tuesday.', [
+      'no problemo',
+    ]);
+    expect(r.text.toLowerCase()).not.toContain('no problemo');
+    expect(r.removed).toEqual(['no problemo']);
+    // Reads naturally — no doubled spaces or leading punctuation left behind.
+    expect(r.text).toBe('we will be there Tuesday.');
+  });
+
+  it('enforceBannedPhrases: removes every occurrence and cleans seams', () => {
+    const r = enforceBannedPhrases('Cheers! See you soon, cheers.', ['cheers']);
+    expect(r.text.toLowerCase()).not.toContain('cheers');
+    expect(r.text).toBe('See you soon.');
+  });
+
+  it('enforceBannedPhrases: escapes regex metacharacters in the phrase', () => {
+    const r = enforceBannedPhrases('Call now (limited time)!', ['(limited time)']);
+    expect(r.text).not.toContain('(limited time)');
+    expect(r.removed).toEqual(['(limited time)']);
+  });
+
+  it('composeBrandVoiceMessage: a banned phrase the model emits never reaches output', async () => {
+    const mock = createMockLLMGateway();
+    mock.provider.setDefaultResponse(
+      'No problemo! We will take great care of your unit on Tuesday.',
+    );
+    const settingsRepo = settingsRepoWithTone('tenant-1', {
+      formality: 'casual',
+      banned_phrases: ['no problemo'],
+    });
+    const warnings: Array<{ msg: string; meta: unknown }> = [];
+    const result = await composeBrandVoiceMessage(
+      { tenantId: 'tenant-1', intent: 'review_public_response', context: {}, maxChars: 200 },
+      {
+        gateway: mock.gateway,
+        settingsRepo,
+        logger: { warn: (msg: string, meta?: unknown) => warnings.push({ msg, meta }) },
+      },
+    );
+    expect(result.text.toLowerCase()).not.toContain('no problemo');
+    expect(result.text.length).toBeGreaterThan(0);
+    // The near-miss is observable (feeds the correction loop / telemetry).
+    expect(warnings.length).toBe(1);
+    expect((warnings[0].meta as { removed: string[] }).removed).toContain('no problemo');
+  });
+
+  it('composeBrandVoiceMessage: output entirely banned → typed error, never ships empty', async () => {
+    const mock = createMockLLMGateway();
+    mock.provider.setDefaultResponse('Cheers');
+    const settingsRepo = settingsRepoWithTone('tenant-1', {
+      banned_phrases: ['cheers'],
+    });
+    await expect(
+      composeBrandVoiceMessage(
+        { tenantId: 'tenant-1', intent: 'review_public_response', context: {}, maxChars: 200 },
+        { gateway: mock.gateway, settingsRepo },
+      ),
+    ).rejects.toBeInstanceOf(AppError);
   });
 });

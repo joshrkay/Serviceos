@@ -20,6 +20,7 @@
 
 import { AppError } from '../../shared/errors';
 import type { LLMGateway } from '../gateway/gateway';
+import type { Logger } from '../../logging/logger';
 import type { SettingsRepository } from '../../settings/settings';
 import type { StandingInstructionRepository } from '../../instructions/standing-instructions';
 import {
@@ -72,6 +73,13 @@ export interface ComposeBrandVoiceDeps {
    * and failure-soft: a repo error composes without instructions.
    */
   standingInstructionRepo?: Pick<StandingInstructionRepository, 'listActive'>;
+  /**
+   * Optional logger. When a banned phrase is stripped from generated output
+   * (see `enforceBannedPhrases`), a warn is emitted so the near-miss is visible
+   * to telemetry / the correction loop. Optional and failure-soft: absent
+   * logger simply means no log line.
+   */
+  logger?: Pick<Logger, 'warn'>;
 }
 
 /**
@@ -144,6 +152,58 @@ export function trimToMaxChars(text: string, maxChars: number): string {
     return `${cut}${ELLIPSIS}`;
   }
   return cut;
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Enforce the tenant's `banned_phrases` in CODE, after generation — the model
+ * is only *asked* not to use them (a negative prompt in `prompts.ts`), and an
+ * LLM can ignore that. Banned phrases are grown by the correction loop from
+ * explicit owner edits ("never say X again"), so letting one slip to a customer
+ * silently breaks a locked brand-voice correction. This mirrors the `maxChars`
+ * philosophy: the model is never trusted; the guarantee is enforced here.
+ *
+ * Matching is case-insensitive and literal (regex metachars escaped). Longest
+ * phrases are removed first so an overlapping longer ban wins. Seams left by
+ * removal (doubled spaces, space-before-punctuation, doubled/orphaned
+ * punctuation) are cleaned up so the delivered message still reads naturally.
+ */
+export function enforceBannedPhrases(
+  text: string,
+  bannedPhrases: string[] | undefined,
+): { text: string; removed: string[] } {
+  const phrases = (bannedPhrases ?? [])
+    .filter((p) => typeof p === 'string' && p.trim().length > 0)
+    .sort((a, b) => b.trim().length - a.trim().length);
+  if (phrases.length === 0) return { text, removed: [] };
+
+  let out = text;
+  const removed: string[] = [];
+  for (const phrase of phrases) {
+    const re = new RegExp(escapeRegExp(phrase.trim()), 'gi');
+    const next = out.replace(re, '');
+    if (next !== out) {
+      removed.push(phrase);
+      out = next;
+    }
+  }
+  if (removed.length === 0) return { text, removed: [] };
+
+  out = out
+    .replace(/[ \t]{2,}/g, ' ')
+    // No space before punctuation.
+    .replace(/\s+([,.!?;:])/g, '$1')
+    // Collapse a run of adjacent punctuation (e.g. the ",." left when a phrase
+    // between a comma and a period is removed) down to the final mark.
+    .replace(/[,.!?;:](?:\s*[,.!?;:])+/g, (m) => m.replace(/\s+/g, '').slice(-1))
+    .replace(/\s{2,}/g, ' ')
+    // No leading punctuation/space left dangling at the front.
+    .replace(/^[\s,.!?;:]+/, '')
+    .trim();
+  return { text: out, removed };
 }
 
 /**
@@ -236,9 +296,29 @@ export async function composeBrandVoiceMessage(
     );
   }
 
+  // Banned phrases are enforced HERE, in code — the prompt only *asks* the
+  // model to avoid them (prompts.ts), which an LLM can ignore. A banned phrase
+  // is an explicit, locked owner correction; it must never reach the customer.
+  const { text: cleaned, removed } = enforceBannedPhrases(raw, tone?.banned_phrases);
+  if (removed.length > 0) {
+    deps.logger?.warn(
+      'brand-voice: stripped banned phrase(s) from generated output',
+      { tenantId, intent, removed },
+    );
+  }
+  if (cleaned.trim().length === 0) {
+    // The entire generation was banned content — surface typed, don't ship "".
+    throw new AppError(
+      'BRAND_VOICE_EMPTY_OUTPUT',
+      'Brand-voice generation collapsed to empty after banned-phrase enforcement',
+      502,
+      { intent, tenantId },
+    );
+  }
+
   // maxChars is enforced HERE, after generation — the model is not trusted
   // to have respected the budget hint in the prompt.
-  const text = trimToMaxChars(raw, maxChars);
+  const text = trimToMaxChars(cleaned, maxChars);
 
   return { text, promptVersionId: BRAND_VOICE_PROMPT_VERSION_ID };
 }
