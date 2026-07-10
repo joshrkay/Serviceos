@@ -384,6 +384,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['232_payments_stripe_reference_unique', 'e04f90015062af2dc152c0298799291f58f84d39b80621543cb09330c1d9c6ab'],
   // P8-015/P0-037 — conversation_links table backing PgConversationLinkRepository.
   ['233_conversation_links', 'aecf003e1b316b3deb9972598952698ff7345c922362f1e3a7340c3a441daa93'],
+  ['234_tenant_settings_vapi_webhook_secret', 'd9830667a9f29069849b286cc3d59430cee4920af72a83f9fea6eb706aeaab36'],
 ];
 
 function hashMigration(value: string): string {
