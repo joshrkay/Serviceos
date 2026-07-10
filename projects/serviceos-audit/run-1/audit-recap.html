@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ServiceOS / Rivet — Audit Recap (run-1)</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --panel2:#1e222b; --ink:#e7ebf0; --muted:#9aa4b2;
+    --line:#2a2f3a; --accent:#5b9dff; --ok:#3ecf8e; --warn:#f5b301; --bad:#ff6b6b; --hold:#7c8797;
+  }
+  @media (prefers-color-scheme: light){
+    :root{ --bg:#f6f8fb; --panel:#ffffff; --panel2:#f0f3f8; --ink:#141821; --muted:#5a6473;
+      --line:#e2e7ef; --accent:#2f6bd8; --ok:#0f9d63; --warn:#b9820a; --bad:#d3352b; --hold:#6b7480; }
+  }
+  :root[data-theme="dark"]{ --bg:#0f1115; --panel:#171a21; --panel2:#1e222b; --ink:#e7ebf0; --muted:#9aa4b2; --line:#2a2f3a; }
+  :root[data-theme="light"]{ --bg:#f6f8fb; --panel:#ffffff; --panel2:#f0f3f8; --ink:#141821; --muted:#5a6473; --line:#e2e7ef; }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  .wrap{max-width:1040px;margin:0 auto;padding:32px 20px 80px}
+  header h1{font-size:26px;margin:0 0 4px}
+  header .sub{color:var(--muted);margin:0 0 6px}
+  .verdict{background:linear-gradient(135deg,rgba(62,207,142,.14),rgba(91,157,255,.10));border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin:18px 0}
+  h2{font-size:18px;margin:34px 0 12px;padding-bottom:6px;border-bottom:1px solid var(--line)}
+  h3{font-size:15px;margin:20px 0 8px;color:var(--accent)}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:12px 0}
+  table{width:100%;border-collapse:collapse;font-size:13.5px;margin:8px 0}
+  .scroll{overflow-x:auto}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.03em}
+  code{background:var(--panel2);border:1px solid var(--line);border-radius:5px;padding:.5px 5px;font:12.5px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  .pill{display:inline-block;padding:1px 8px;border-radius:20px;font-size:11.5px;font-weight:600;border:1px solid transparent;white-space:nowrap}
+  .ok{background:rgba(62,207,142,.14);color:var(--ok);border-color:rgba(62,207,142,.3)}
+  .warn{background:rgba(245,179,1,.14);color:var(--warn);border-color:rgba(245,179,1,.3)}
+  .bad{background:rgba(255,107,107,.14);color:var(--bad);border-color:rgba(255,107,107,.3)}
+  .hold{background:rgba(124,135,151,.16);color:var(--hold);border-color:rgba(124,135,151,.3)}
+  ul.done{list-style:none;padding:0;margin:0}
+  ul.done li{padding:5px 0 5px 26px;position:relative}
+  ul.done li:before{content:"✓";position:absolute;left:0;color:var(--ok);font-weight:700}
+  ul.done li.partial:before{content:"◐";color:var(--warn)}
+  .muted{color:var(--muted)}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:10px 0}
+  .stat{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px}
+  .stat b{display:block;font-size:22px}
+  .stat span{color:var(--muted);font-size:12px}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <h1>ServiceOS / Rivet — Audit Recap</h1>
+  <p class="sub">Align · Fix · Harden · Red-Team — engineering run <b>run-1</b> · 2026-07-10 · branch <code>claude/instruction-set-review-gsegfn</code></p>
+</header>
+
+<div class="verdict">
+  <b>Verdict.</b> ServiceOS is a <b>heavily-hardened, largely-aligned</b> codebase — not a demo. Every seeded
+  "overclaim" from the stale 2026-06-20 status doc is now <b>built</b> (the docs lagged the code, exactly as the
+  mission predicted). The audit found and <b>fixed one real alignment defect</b> (brand-voice banned-phrase
+  enforcement) and <b>closed one committed-SLO observability gap</b> (durable-queue depth metric), then added
+  adversarial/property coverage on money + RLS and measured a real load baseline. <b>Zero unaddressed criticals.</b>
+  No production writes; money/RLS/auth invariants verified intact (no fix touched them).
+</div>
+
+<div class="grid">
+  <div class="stat"><b>4</b><span>commits (all gate-green)</span></div>
+  <div class="stat"><b>0</b><span>criticals outstanding</span></div>
+  <div class="stat"><b>9,170</b><span>unit tests (green)</span></div>
+  <div class="stat"><b>623</b><span>integration tests (green, local PG)</span></div>
+  <div class="stat"><b>116</b><span>tenant tables, all FORCE-RLS*</span></div>
+  <div class="stat"><b>~100–150</b><span>VU/instance @ web SLO (floor)</span></div>
+</div>
+
+<h2>Definition of done — self-grade</h2>
+<ul class="done">
+  <li>Persona + brand-voice + naming + SLO targets documented; contradictions flagged (naming casing drift; brand-voice validator gap = finding)</li>
+  <li>Every workflow inventoried + reconciled against the PRD with <code>file:line</code>; seeded overclaims re-verified as built</li>
+  <li>Fixes implemented + committed on-branch with gates green, each mapped to its finding + regression test</li>
+  <li>Nothing deployed to prod; no live-tenant writes; no fix touched money/RLS/auth (so nothing to hold for review this run)</li>
+  <li>Money + RLS have new adversarial/property tests that pass; bad-day scenarios already automated (verified)</li>
+  <li class="partial">Load: harness proven + real per-instance baseline measured; true 1,000-concurrent + voice cert requires staging (documented gap)</li>
+  <li>Observability verified (4 hot paths instrumented, P1/P2 alerts defined); queue-depth metric added so the C1 SLO is now observable; runbook updated with measured numbers</li>
+  <li>Red team ran across tenant-isolation, money, auth, voice/LLM with a logged attack per attempt; the one open item (banned phrases) was fixed + re-attacked</li>
+  <li>No verdict is "aligned/secure/scales" without <code>file:line</code> evidence; no placeholder findings</li>
+</ul>
+
+<h2>Findings → fix → test → red-team</h2>
+<div class="scroll"><table>
+  <tr><th>Finding</th><th>Sev</th><th>Fix (commit)</th><th>Test</th><th>Re-attacked</th></tr>
+  <tr>
+    <td><b>Brand-voice banned phrases enforced only as a soft LLM prompt hint</b> (<code>prompts.ts:135</code>), no code-level check — an owner's locked correction could still ship. Contradicts the composer's own "model is never trusted" (it enforces <code>maxChars</code> in code).</td>
+    <td><span class="pill bad">high</span></td>
+    <td><code>be185d4</code> — <code>enforceBannedPhrases()</code> strips banned phrases post-generation + observability warn</td>
+    <td>8 regression tests (case-insensitive strip, seam cleanup, regex-escape, end-to-end, all-banned→typed error)</td>
+    <td><span class="pill ok">holds</span> composer test proves an emitted banned phrase never reaches output</td>
+  </tr>
+  <tr>
+    <td><b>Durable PgQueue depth never emitted as a metric</b> — only <code>ws_queue_depth</code> (WebSocket) existed, so the committed C1 SLO (depth &lt; 1,000) was unobservable and the P2 alert was "deferred."</td>
+    <td><span class="pill warn">medium</span></td>
+    <td><code>(queue commit)</code> — <code>Queue.depth()</code> + <code>pg_queue_depth</code> gauge + leader-elected 15s sampler; runbook un-deferred</td>
+    <td>PgQueue.depth() integration test + InMemoryQueue parity unit test</td>
+    <td><span class="pill ok">n/a</span> observability wiring, not an attack surface</td>
+  </tr>
+  <tr>
+    <td><b>Money path had no property/invariant test</b> (example-based only) — B3 explicitly requires one.</td>
+    <td><span class="pill warn">coverage</span></td>
+    <td><code>(money test commit)</code> — dependency-free seeded-PRNG property suite</td>
+    <td>16k randomized iterations: integer-cents on every field, non-negativity under over-discount, subtotal identity, <code>applyBps</code> laws</td>
+    <td><span class="pill ok">holds</span> no float leak / negative total found</td>
+  </tr>
+  <tr>
+    <td><b>No runtime "every table" FORCE-RLS proof</b> — <code>schema.test.ts</code> proves it statically (SQL text); a migration could say FORCE yet not take effect.</td>
+    <td><span class="pill warn">coverage</span></td>
+    <td><code>(rls test commit)</code> — runtime catalog property test</td>
+    <td>Queries live <code>pg_catalog</code>: all ~116 tenant tables <code>relforcerowsecurity=true</code> except the 2 documented exemptions; exemption set can't silently grow</td>
+    <td><span class="pill ok">holds</span> no leak; exemptions backstopped by grant-revoke (migration 219)</td>
+  </tr>
+</table></div>
+
+<h2>PRD-vs-code reconciliation (seeded overclaims — all now built)</h2>
+<div class="scroll"><table>
+  <tr><th>Claim (2026-06-20 seed)</th><th>Status now</th><th>Evidence</th></tr>
+  <tr><td>MMS-to-quote (image→estimate)</td><td><span class="pill ok">built</span></td><td><code>sms/customer-mms/customer-mms-intake.ts</code> + vision via <code>ai/gateway</code></td></tr>
+  <tr><td>ACH payments</td><td><span class="pill ok">built</span></td><td><code>payments/payment-service.ts</code>; <code>test/integration/ach-webhook.test.ts</code></td></tr>
+  <tr><td>B2B account recognition</td><td><span class="pill ok">built</span></td><td><code>ai/agents/customer-calling/b2b-account-context.ts</code>; sub-account tests</td></tr>
+  <tr><td>Tech ETA texts</td><td><span class="pill ok">built</span></td><td><code>sms/tech-status/handler.ts</code></td></tr>
+  <tr><td>Inngest-vs-PgQueue mismatch</td><td><span class="pill ok">resolved</span></td><td>workers document "Why not Inngest"; real impl <code>queues/pg-queue.ts</code></td></tr>
+  <tr><td>Conversational onboarding loop</td><td><span class="pill ok">built</span></td><td><code>ai/orchestration/onboarding-conversation.ts</code>, <code>routes/onboarding-conversation.ts</code></td></tr>
+  <tr><td>Painting vertical pack</td><td><span class="pill ok">built</span></td><td><code>verticals/packs/painting.ts</code></td></tr>
+  <tr><td>2-hour delayed thank-you SMS</td><td><span class="pill ok">built</span></td><td><code>workers/thank-you-sms-worker.ts</code></td></tr>
+  <tr><td>Webhook dedup durability</td><td><span class="pill ok">built</span></td><td><code>webhook_events</code> UNIQUE(source, idempotency_key), migration 012</td></tr>
+  <tr><td>Authenticated approval endpoint</td><td><span class="pill ok">built</span></td><td><code>routes/proposals.ts</code> requireAuth/requireTenant/requirePermission</td></tr>
+  <tr><td>RLS FORCE all entity tables</td><td><span class="pill ok">built*</span></td><td>2 documented exemptions (oauth_states, platform_deprovision_log), backstopped by migration 219</td></tr>
+  <tr><td>48h proposal-expiry default</td><td><span class="pill ok">built</span></td><td><code>proposals/proposal.ts:770-772</code> defaultProposalExpiry</td></tr>
+</table></div>
+
+<h2>Red-team attack log (0 criticals)</h2>
+<div class="scroll"><table>
+  <tr><th>Domain</th><th>Attacks</th><th>Outcome</th></tr>
+  <tr><td>Tenant isolation (RLS)</td><td>Unforced table · reach exempt table via app role · GUC-unset→all rows · missing tenant predicate · anon sweep role</td><td><span class="pill ok">all hold</span> — fail-closed + grant-revoke backstop; runtime catalog test</td></tr>
+  <tr><td>Money</td><td>Float leak · negative total via over-discount · webhook replay · concurrent double-execute · negative/zero line</td><td><span class="pill ok">all hold</span> — integer cents + Math.max(0) + durable dedup + atomic CAS claim</td></tr>
+  <tr><td>Auth / approval</td><td>Unauth approval · execute un-approved · cross-tenant approve · double-execute via stale claim</td><td><span class="pill ok">all hold</span> — middleware + <code>status='approved'</code> gate + atomic claim</td></tr>
+  <tr><td>Voice / LLM</td><td>Tone jailbreak · emit banned phrase · uncatalogued price auto-approve</td><td><span class="pill ok">hold</span> — tone is non-overridable; banned-phrase <b>fixed this run</b>; catalog caps confidence</td></tr>
+</table></div>
+
+<h2>Scale &amp; SLO</h2>
+<div class="panel">
+  <b>Committed web SLO</b> (p95&lt;300ms · p99&lt;800ms · err&lt;0.5%) — real per-instance baseline measured against the
+  booted app on a <b>CPU-contended 4-core sandbox</b> + 20-conn pool (treat as a floor):
+  <div class="scroll"><table>
+    <tr><th>Peak VUs</th><th>p50</th><th>p95</th><th>p99</th><th>err%</th><th>req/s</th><th>SLO</th></tr>
+    <tr><td>50</td><td>84</td><td>106</td><td>122</td><td>0.00</td><td>450</td><td><span class="pill ok">pass</span></td></tr>
+    <tr><td>100</td><td>162</td><td>210</td><td>282</td><td>0.21</td><td>437</td><td><span class="pill ok">pass</span></td></tr>
+    <tr><td>200</td><td>333</td><td>400</td><td>432</td><td>0.00</td><td>497</td><td><span class="pill bad">p95&gt;300</span></td></tr>
+  </table></div>
+  Per-instance ceiling for the committed SLO ≈ <b>100–150 VU</b> on this box; throughput plateaus ~500 req/s (CPU +
+  20-conn pool). 1,000 concurrent → <b>~7–10 replicas</b> + PgBouncer (staged in <code>loadtest/docker-compose.loadtest.yml</code>,
+  reviewable IaC). Harness self-checks (HTTP + mixed-1000) both pass.
+  <p class="muted" style="margin:8px 0 0">Honest gaps: the literal 1,000-concurrent + voice (Deepgram/Twilio) certification needs the provisioned
+  staging env the master prompt flags as the user's to supply — harness is ready, cert is the remaining step.</p>
+</div>
+
+<h2>Honest remaining gaps (not force-fixed)</h2>
+<ul class="done">
+  <li class="partial"><b>Brand-voice surface coverage:</b> the composer is wired to ~3 outbound surfaces; "every AI utterance sounds like the shop" is only partially realized (dunning/digest/review use separate drafting paths). Banned-phrase enforcement now lives in the composer; broadening every surface through it is a larger, separate change.</li>
+  <li class="partial"><b>Naming casing drift:</b> PRD says brand=Rivet, product=ServiceOS; <code>day-in-the-life.md</code> uses "Serviceos". Cosmetic doc inconsistency, not a code defect.</li>
+  <li class="partial"><b>1,000-concurrent + voice SLO certification:</b> requires staging (N replicas + PgBouncer + Redis + Deepgram/Twilio). Harness + local baseline delivered; cert deferred to staging.</li>
+</ul>
+
+<p class="muted" style="margin-top:30px">Full detail: <code>projects/serviceos-audit/run-1/</code> — 01 reference standard · 02 gate baseline · 03 scale/SLO · 04 reconciliation · 05 red-team log. *RLS: 116 tenant-scoped tables all FORCE-RLS except two documented, grant-revoke-backstopped exemptions.</p>
+</div>
+</body>
+</html>
