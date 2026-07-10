@@ -91,3 +91,37 @@ export function createIntegrationResolver(pool: Pool): IntegrationResolver {
     };
   };
 }
+
+/**
+ * Pg-backed resolver for a tenant's per-tenant Vapi webhook secret
+ * (`tenant_settings.vapi_webhook_secret`). Mirrors createIntegrationResolver's
+ * tenant-context discipline: reads under the tenant's own RLS context on a
+ * dedicated client and RESETs the GUC on release. Returns null when the id is
+ * malformed, the row is absent, or the secret hasn't been provisioned yet — the
+ * /vapi handler then falls back to the global secret (transitional).
+ */
+export function createVapiSecretResolver(
+  pool: Pool,
+): (tenantId: string) => Promise<string | null> {
+  return async (tenantId) => {
+    if (!isValidTenantId(tenantId)) return null;
+    const { applyTenantContext } = await import('../db/rls-runtime-role');
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await applyTenantContext(client, tenantId, { transactional: true });
+      const { rows } = await client.query<{ vapi_webhook_secret: string | null }>(
+        `SELECT vapi_webhook_secret FROM tenant_settings WHERE tenant_id = $1`,
+        [tenantId],
+      );
+      await client.query('COMMIT');
+      return rows[0]?.vapi_webhook_secret ?? null;
+    } catch (err) {
+      try { await client.query('ROLLBACK'); } catch { /* best-effort */ }
+      throw err;
+    } finally {
+      try { await client.query('RESET app.current_tenant_id'); } catch { /* ignore */ }
+      client.release();
+    }
+  };
+}

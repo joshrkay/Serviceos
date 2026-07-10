@@ -2,6 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { ValidationError } from '../shared/errors';
 import { buildOriginationMetadata } from '../leads/attribution-metadata';
+import { type DepositStatus, deriveDepositStatus } from './deposit-rule';
 
 /**
  * Epic 5.1 — canonical job lifecycle. Stored identifiers; the product labels
@@ -194,6 +195,22 @@ export interface JobRepository {
     opts?: JobFindByCustomerOptions,
   ): Promise<Job[]>;
   update(tenantId: string, id: string, updates: Partial<Job>): Promise<Job | null>;
+  /**
+   * Atomically credit `amountCents` to the job's paid deposit in a SINGLE
+   * UPDATE, clamped at deposit_required_cents and recomputing deposit_status
+   * from the row's own values — never a caller snapshot. Closes the deposit
+   * double-credit race: two distinct `checkout.session.completed` events for the
+   * same job (e.g. a double-tapped "Pay Deposit" minting two Checkout Sessions)
+   * otherwise each read the same deposit_paid and blind-set it, dropping one.
+   * Returns the new paid amount + status, or null if the job is absent / has no
+   * required deposit.
+   */
+  creditDepositAtomic(
+    tenantId: string,
+    id: string,
+    amountCents: number,
+    now: Date,
+  ): Promise<{ depositPaidCents: number; depositStatus: DepositStatus } | null>;
   getNextJobNumber(tenantId: string): Promise<number>;
   /**
    * Tier 4 (Deposit rules — PR 3c follow-up). Atomic claim of a job's
@@ -420,6 +437,22 @@ export class InMemoryJobRepository implements JobRepository {
     const updated = { ...j, ...updates };
     this.jobs.set(id, updated);
     return { ...updated };
+  }
+
+  async creditDepositAtomic(
+    tenantId: string,
+    id: string,
+    amountCents: number,
+    now: Date,
+  ): Promise<{ depositPaidCents: number; depositStatus: DepositStatus } | null> {
+    const j = this.jobs.get(id);
+    if (!j || j.tenantId !== tenantId) return null;
+    const required = j.depositRequiredCents ?? 0;
+    if (required <= 0) return null;
+    const newPaid = Math.min((j.depositPaidCents ?? 0) + amountCents, required);
+    const depositStatus = deriveDepositStatus(required, newPaid);
+    this.jobs.set(id, { ...j, depositPaidCents: newPaid, depositStatus, updatedAt: now });
+    return { depositPaidCents: newPaid, depositStatus };
   }
 
   async getNextJobNumber(tenantId: string): Promise<number> {

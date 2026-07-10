@@ -217,6 +217,9 @@ export class PublicInvoiceService {
         'line_items[0][quantity]': '1',
         'metadata[tenant_id]': invoice.tenantId,
         'metadata[invoice_id]': invoice.id,
+        // Single completed checkout only (see stripe-payment-link.ts) — prevents
+        // a replayed link from double-charging after the invoice is settled.
+        'restrictions[completed_sessions][limit]': '1',
       }),
     });
 

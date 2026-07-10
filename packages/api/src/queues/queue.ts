@@ -116,7 +116,19 @@ export interface Queue {
   delete(messageId: string): Promise<void>;
   moveToDeadLetter(message: QueueMessage, error: string): Promise<void>;
   listDeadLetter(): Promise<DeadLetterEntry[]>;
+  /**
+   * Current queue backlog for observability (scale-to-1000 C1 SLO: PgQueue
+   * depth < 1,000 sustained). `pending` = rows still in the main queue table
+   * (waiting + in-flight/invisible); `deadLetter` = DLQ rows. A cheap COUNT,
+   * sampled by a leader-elected interval — never called on the hot path.
+   */
+  depth(): Promise<QueueDepth>;
   getConfig(): QueueConfig;
+}
+
+export interface QueueDepth {
+  pending: number;
+  deadLetter: number;
 }
 
 export function createQueueConfig(env: string): QueueConfig {
@@ -249,6 +261,10 @@ export class InMemoryQueue implements Queue {
 
   dlqSize(): number {
     return this.dlq.length;
+  }
+
+  async depth(): Promise<QueueDepth> {
+    return { pending: this.messages.length, deadLetter: this.dlq.length };
   }
 }
 

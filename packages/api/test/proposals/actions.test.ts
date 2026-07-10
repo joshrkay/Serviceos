@@ -87,6 +87,39 @@ describe('P2-005 — Approve / reject / edit interactions', () => {
     ).rejects.toThrow(ForbiddenError);
   });
 
+  it('§5.5 — refuses to approve a schedule proposal past its 48h expiry, and flips it to expired', async () => {
+    const repo = makeRepo();
+    // A schedule proposal whose expiresAt is already in the past — the state a
+    // card is in during the gap after 48h but before the hourly sweep runs.
+    const proposal = createProposal({
+      ...baseInput,
+      proposalType: 'create_appointment',
+      expiresAt: new Date(Date.now() - 60_000),
+    });
+    await repo.create(proposal);
+    await repo.updateStatus(tenantId, proposal.id, 'ready_for_review');
+
+    await expect(
+      approveProposal(repo, tenantId, proposal.id, actorId, 'owner'),
+    ).rejects.toThrow(ValidationError);
+    // The approval path itself closed the gap: the row is now 'expired'.
+    expect((await repo.findById(tenantId, proposal.id))!.status).toBe('expired');
+  });
+
+  it('§5.5 — a schedule proposal still within its window approves normally', async () => {
+    const repo = makeRepo();
+    const proposal = createProposal({
+      ...baseInput,
+      proposalType: 'create_appointment',
+      expiresAt: new Date(Date.now() + 60 * 60_000), // 1h out
+    });
+    await repo.create(proposal);
+    await repo.updateStatus(tenantId, proposal.id, 'ready_for_review');
+
+    const result = await approveProposal(repo, tenantId, proposal.id, actorId, 'owner');
+    expect(result.status).toBe('approved');
+  });
+
   it('security — technician cannot reject proposal', async () => {
     const repo = makeRepo();
     const proposal = await createReadyProposal(repo);

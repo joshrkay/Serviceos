@@ -116,6 +116,20 @@ export interface InvoiceRepository {
   /** P1-018: paginated `{ data, total }` form for list UIs. */
   listWithMeta?(tenantId: string, options?: InvoiceListOptions): Promise<InvoiceListResult>;
   update(tenantId: string, id: string, updates: Partial<Invoice>): Promise<Invoice | null>;
+  /**
+   * Atomically credit `deltaCents` to the paid balance in a SINGLE UPDATE,
+   * recomputing amount_due and status from the row's own current values — never
+   * from a caller's stale snapshot. Closes the recordPayment lost-update race:
+   * two concurrent legitimate payments (e.g. a manual cash entry and a Stripe/ACH
+   * webhook) otherwise each read the same amount_paid and blind-set it, silently
+   * dropping one credit. Returns the updated invoice, or null if not found.
+   */
+  incrementAmountPaidAtomic(
+    tenantId: string,
+    id: string,
+    deltaCents: number,
+    now: Date,
+  ): Promise<Invoice | null>;
   /** Look up by unauthenticated view token — no tenant isolation needed (token is the secret). */
   findByViewToken?(token: string): Promise<Invoice | null>;
   /**
@@ -470,6 +484,35 @@ export class InMemoryInvoiceRepository implements InvoiceRepository {
     const i = this.invoices.get(id);
     if (!i || i.tenantId !== tenantId) return null;
     const updated = { ...i, ...updates };
+    this.invoices.set(id, updated);
+    return { ...updated, lineItems: [...updated.lineItems] };
+  }
+
+  async incrementAmountPaidAtomic(
+    tenantId: string,
+    id: string,
+    deltaCents: number,
+    now: Date,
+  ): Promise<Invoice | null> {
+    const i = this.invoices.get(id);
+    if (!i || i.tenantId !== tenantId) return null;
+    // JS is single-threaded, so read-modify-write here is already atomic; the
+    // Pg impl uses a single UPDATE to get the same guarantee under real
+    // concurrency. Recompute from the stored row, never a caller snapshot.
+    const newPaid = i.amountPaidCents + deltaCents;
+    const newDue = Math.max(0, i.totals.totalCents - newPaid);
+    let status = i.status;
+    if (newDue === 0) status = 'paid';
+    else if (newPaid > 0 && (i.status === 'open' || i.status === 'partially_paid')) {
+      status = 'partially_paid';
+    }
+    const updated: Invoice = {
+      ...i,
+      amountPaidCents: newPaid,
+      amountDueCents: newDue,
+      status,
+      updatedAt: now,
+    };
     this.invoices.set(id, updated);
     return { ...updated, lineItems: [...updated.lineItems] };
   }

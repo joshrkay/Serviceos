@@ -25,7 +25,6 @@ import { CustomerPaymentMethodRepository } from '../payments/customer-payment-me
 import { retrievePaymentMethod } from '../payments/stripe-saved-card';
 import { StripeFetch } from '../payments/stripe-payment-intent';
 import { JobRepository } from '../jobs/job';
-import { deriveDepositStatus } from '../jobs/deposit-rule';
 import { PendingInvitationRepository } from '../users/pending-invitation';
 import { BillingService } from '../billing/subscription';
 import { StripeConnectService } from '../billing/stripe-connect';
@@ -177,6 +176,16 @@ export interface WebhookRouterDeps {
     authTokenSecondary?: string;
     sendgridPublicKeyPem?: string;
   } | null>;
+  /**
+   * Resolves a tenant's per-tenant Vapi webhook secret
+   * (`tenant_settings.vapi_webhook_secret`) for the `/vapi/:tenantId` handler.
+   * Each tenant's assistant is provisioned with its OWN random secret, so a
+   * body signed for tenant A fails verification at tenant B (closes the
+   * cross-tenant forgery the single global secret allowed). Returns null for a
+   * not-yet-re-provisioned tenant → the handler falls back to the global
+   * `VAPI_WEBHOOK_SECRET` so live inbound voice keeps working during migration.
+   */
+  vapiSecretResolver?: (tenantId: string) => Promise<string | null>;
   provisioningQueue?: {
     send<T>(type: string, payload: T, idempotencyKey?: string): Promise<string>;
   };
@@ -987,12 +996,16 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             await webhookRepo.updateStatus(webhookEvent.id, 'processed');
             return res.status(200).json({ received: true, skipped: true });
           }
-          const newPaid = Math.min(previouslyPaid + amountTotal, required);
-          await deps.jobRepo.update(tenantId, depositForJobId, {
-            depositPaidCents: newPaid,
-            depositStatus: deriveDepositStatus(required, newPaid),
-            updatedAt: new Date(),
-          });
+          // Atomic credit: two distinct checkout.session.completed events for
+          // the same job (e.g. a double-tapped "Pay Deposit" minting two
+          // sessions) must both count. The old read-then-blind-set dropped one.
+          const credited = await deps.jobRepo.creditDepositAtomic(
+            tenantId,
+            depositForJobId,
+            amountTotal,
+            new Date(),
+          );
+          const newPaid = credited?.depositPaidCents ?? previouslyPaid;
           logger.info('Deposit credited via Stripe checkout', {
             tenantId, depositForJobId, amountTotal, newPaid, required,
           });
@@ -2238,13 +2251,29 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
     const rawBody = Buffer.isBuffer(req.body)
       ? req.body.toString('utf8')
       : JSON.stringify(req.body ?? {});
+    // Per-tenant secret is the primary credential: a body signed for tenant A
+    // fails verification here at tenant B. Fall back to the global secret ONLY
+    // for a tenant whose assistant hasn't been re-provisioned yet (resolver
+    // returns null), so live voice isn't broken mid-migration.
+    let vapiSecret = process.env.VAPI_WEBHOOK_SECRET ?? '';
+    if (deps.vapiSecretResolver) {
+      try {
+        const perTenant = await deps.vapiSecretResolver(tenantId);
+        if (perTenant) vapiSecret = perTenant;
+      } catch (err) {
+        logger.warn('Vapi per-tenant secret resolve failed; using global fallback', {
+          tenantId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
     try {
       const result = await handleVapiCallEvent(
         {
           pool: deps.pool,
           auditRepo: deps.auditRepo,
           webhookRepo: deps.webhookEventRepo,
-          secret: process.env.VAPI_WEBHOOK_SECRET ?? '',
+          secret: vapiSecret,
           ...(deps.sendEmail ? { sendEmail: deps.sendEmail } : {}),
         },
         {
