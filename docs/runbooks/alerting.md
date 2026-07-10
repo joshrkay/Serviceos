@@ -34,11 +34,15 @@ sweep, voice-action-router, Twilio Media Streams connection handler.
 | Payment webhook failure | `tags["path"] = "stripe-webhook"` AND event count ≥ 1 in 5 min | P1 | `#alerts` + DM operator |
 | Proposal execution failure rate | `tags["path"] = "execution-worker"` AND event count ≥ 5 in 15 min | P1 | `#alerts` + DM operator |
 | Voice agent error | `tags["path"] = "voice"` AND event count ≥ 1 in 5 min | P1 | `#alerts` + DM operator |
-| Queue depth (informational) | Custom metric `queue_depth.max` > 1000 sustained 5 min | P2 | `#alerts` |
+| Queue depth (informational) | Prometheus gauge `pg_queue_depth{queue="pending"}` > 1000 sustained 5 min | P2 | `#alerts` |
 
 The first three are tag-filtered event-count rules — Sentry's most reliable
-trigger type. The fourth (queue depth) is deferred until a queue-depth metric
-is emitted (tier-2 work).
+trigger type. The fourth (queue depth) is now backed by the `pg_queue_depth`
+Prometheus gauge (labels `queue=pending|dead_letter`), sampled every 15s by a
+leader-elected interval in `app.ts` and exposed on `/metrics`. This makes the
+scale-to-1000 C1 SLO ("PgQueue depth < 1,000 sustained") directly observable;
+alert on the `pending` series. (Watch `queue="dead_letter"` too — a climbing DLQ
+signals a poison message or a broken handler.)
 
 ## End-to-end verification
 

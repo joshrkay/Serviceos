@@ -182,7 +182,7 @@ import { PgMoneyDashboardRepository } from './reports/pg-money-dashboard';
 import { createFeedbackResponsesRouter } from './routes/feedback';
 import { createInteractionsRouter } from './routes/interactions';
 import { initSentry, setSentryClient } from './monitoring/sentry';
-import { dbPoolConnections } from './monitoring/metrics';
+import { dbPoolConnections, pgQueueDepth } from './monitoring/metrics';
 
 // In-memory repositories (fallback for dev without DATABASE_URL)
 import { InMemoryCustomerRepository } from './customers/customer';
@@ -2046,6 +2046,9 @@ export function createApp(): express.Express {
     // an advisory-lock collision that silently serialized them); 590010
     // remains reserved by a parallel track.
     droppedCallRecovery: 590022,
+    // scale-to-1000 C1 — durable job-queue depth sampler (one replica queries
+    // the shared _queue_messages/_queue_dlq tables per tick).
+    queueDepth: 590023,
   } as const;
   const runAsLeader = async (lockKey: number, work: () => Promise<void>): Promise<void> => {
     if (shuttingDown) return;
@@ -2073,6 +2076,32 @@ export function createApp(): express.Express {
       client.release();
     }
   };
+
+  // scale-to-1000 C1 — sample the durable job-queue backlog into /metrics so the
+  // committed SLO (PgQueue depth < 1,000 sustained) and the P2 queue-depth alert
+  // are observable. Leader-elected: exactly one replica runs the COUNT per tick
+  // (the value is global, so N replicas querying would just be waste). Every
+  // 15s; failure-soft (a transient DB blip must not crash the interval).
+  {
+    let queueDepthInFlight = false;
+    const sampleQueueDepth = async () => {
+      if (queueDepthInFlight) return;
+      queueDepthInFlight = true;
+      try {
+        await runAsLeader(SWEEP_LOCK.queueDepth, async () => {
+          const { pending, deadLetter } = await queue.depth();
+          pgQueueDepth.set({ queue: 'pending' }, pending);
+          pgQueueDepth.set({ queue: 'dead_letter' }, deadLetter);
+        });
+      } catch {
+        // Best-effort telemetry — never let a sampling error break the loop.
+      } finally {
+        queueDepthInFlight = false;
+      }
+    };
+    void sampleQueueDepth();
+    registerInterval(setInterval(() => void sampleQueueDepth(), 15000));
+  }
 
   const executionWorkerLogger = createLogger({
     service: 'execution-worker',

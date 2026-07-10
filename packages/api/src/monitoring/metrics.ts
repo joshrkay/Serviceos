@@ -208,6 +208,17 @@ export const wsQueueDepthBytes = new Gauge({
   registers: [metricsRegistry],
 });
 
+// scale-to-1000 C1 — durable Postgres job-queue backlog. The committed SLO
+// bounds this at < 1,000 sustained; the P2 "queue depth" alert (see
+// docs/runbooks/alerting.md) filters on it. Sampled by a leader-elected
+// interval in app.ts so exactly one replica queries the shared table.
+export const pgQueueDepth = new Gauge({
+  name: 'pg_queue_depth',
+  help: 'Durable Postgres job-queue backlog (scale-to-1000 SLO: < 1000 sustained). Labeled queue=pending|dead_letter.',
+  labelNames: ['queue'],
+  registers: [metricsRegistry],
+});
+
 export const wsDropTotal = new Counter({
   name: 'ws_drop_total',
   help: 'WS frames dropped from the outbound queue',

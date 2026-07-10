@@ -199,4 +199,24 @@ describe('P0-009 — Async job processing with SQS', () => {
     expect(dlq).toHaveLength(3);
     expect(queue.dlqSize()).toBe(3);
   });
+
+  it('depth() reports pending backlog and dead-letter counts (Queue interface parity)', async () => {
+    expect(await queue.depth()).toEqual({ pending: 0, deadLetter: 0 });
+    await queue.send('a', { n: 1 });
+    await queue.send('b', { n: 2 });
+    expect(await queue.depth()).toEqual({ pending: 2, deadLetter: 0 });
+    await queue.moveToDeadLetter(
+      {
+        id: 'x',
+        type: 'a',
+        payload: { n: 1 },
+        attempts: 3,
+        maxAttempts: 3,
+        idempotencyKey: 'idem-x',
+        createdAt: new Date().toISOString(),
+      },
+      'boom',
+    );
+    expect((await queue.depth()).deadLetter).toBe(1);
+  });
 });

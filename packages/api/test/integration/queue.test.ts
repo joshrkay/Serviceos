@@ -130,4 +130,24 @@ describe('Postgres integration — PgQueue', () => {
     expect(ids.length).toBe(6);
     expect(new Set(ids).size).toBe(6); // disjoint
   });
+
+  // scale-to-1000 C1 — depth() feeds the pg_queue_depth gauge + P2 alert.
+  it('depth() counts the pending backlog and the dead-letter queue', async () => {
+    expect(await queue.depth()).toEqual({ pending: 0, deadLetter: 0 });
+
+    for (let i = 0; i < 4; i++) await queue.send('depth.job', { i }, `d-${i}`);
+    // Claiming does NOT remove rows (they stay in the table, invisible), so they
+    // remain part of the backlog until delete()/DLQ — depth still counts them.
+    const claimed = await queue.receiveBatch<{ i: number }>(2);
+    expect((await queue.depth()).pending).toBe(4);
+
+    // Move one claimed message to the DLQ: pending drops by one, deadLetter rises.
+    await queue.moveToDeadLetter(claimed[0], 'boom');
+    const d = await queue.depth();
+    expect(d).toEqual({ pending: 3, deadLetter: 1 });
+
+    // delete() removes from the backlog entirely.
+    await queue.delete(claimed[1].id);
+    expect((await queue.depth()).pending).toBe(2);
+  });
 });
