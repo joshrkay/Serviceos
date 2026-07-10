@@ -4553,7 +4553,7 @@ export function createApp(): express.Express {
       auditRepo,
     ),
   );
-  app.use('/api/settings/packs', createPackActivationRouter(packActivationRepo, canonicalPackRegistry, auditRepo));
+  app.use('/api/settings/packs', createPackActivationRouter(packActivationRepo, canonicalPackRegistry, auditRepo, settingsRepo));
   app.use('/api/verticals', createVerticalRouter(canonicalPackRegistry));
   app.use('/api/vertical-training-assets', createVerticalTrainingAssetsRouter(trainingAssetService));
   app.use('/api/templates', createTemplateRouter(templateRepo, auditRepo));

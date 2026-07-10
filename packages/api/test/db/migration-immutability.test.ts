@@ -385,6 +385,10 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // P8-015/P0-037 — conversation_links table backing PgConversationLinkRepository.
   ['233_conversation_links', 'aecf003e1b316b3deb9972598952698ff7345c922362f1e3a7340c3a441daa93'],
   ['234_tenant_settings_vapi_webhook_secret', 'd9830667a9f29069849b286cc3d59430cee4920af72a83f9fea6eb706aeaab36'],
+  // Fix — reconcile the tenant_settings._activeVerticalPacks mirror with the
+  // authoritative pack_activations table (kill the dual-source drift). 235 is
+  // reserved for a sibling fix landing separately.
+  ['236_reconcile_active_vertical_packs_mirror', '161871a3a57eb99f2c0b0d1173fa082483923c06210f122faa2a901f0ba24a46'],
 ];
 
 function hashMigration(value: string): string {

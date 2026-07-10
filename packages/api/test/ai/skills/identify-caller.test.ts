@@ -56,6 +56,45 @@ describe('normalizePhone', () => {
 });
 
 // ---------------------------------------------------------------------------
+// phone_normalized reconciliation invariant (locks the 5f97649 lookup fix)
+// ---------------------------------------------------------------------------
+//
+// The generated column `customers.phone_normalized` (migration
+// 053_p8_customers_phone_index) is `regexp_replace(primary_phone, '[^0-9]',
+// '', 'g')` — it strips punctuation but KEEPS the leading country-code 1, so a
+// customer saved as "+15125550111" stores "15125550111". `normalizePhone`
+// above instead DROPS the leading 1, producing the 10-digit bare key. A plain
+// `phone_normalized = normalizePhone(from)` equality therefore misses every +1
+// E.164 customer. identifyCaller reconciles the two conventions by matching on
+// the trailing-10 digits from both sides. This unit test documents that
+// divergence + reconciliation so a future refactor of either side can't
+// silently re-break inbound caller-ID. The end-to-end proof against the real
+// generated column lives in test/integration/identify-caller.test.ts.
+describe('phone_normalized reconciliation invariant', () => {
+  // What the generated column stores for a customer saved in +1 E.164 form.
+  const storedGeneratedForm = '15125550111'; // regexp_replace keeps the leading 1
+
+  it('normalizePhone strips the leading 1 that the generated column keeps', () => {
+    const appKey = normalizePhone('+15125550111');
+    expect(appKey).toBe('5125550111'); // 10-digit bare key, no leading 1
+    expect(storedGeneratedForm).toBe('1' + appKey); // the column keeps the 1
+    expect(appKey).not.toBe(storedGeneratedForm); // → plain equality would miss
+  });
+
+  it("trailing-10 digits reconcile the app key with the stored +1 form", () => {
+    const appKey = normalizePhone('+15125550111');
+    // The exact predicate identifyCaller uses: right(phone_normalized, 10).
+    expect(storedGeneratedForm.slice(-10)).toBe(appKey.slice(-10));
+  });
+
+  it('bare 10-digit stored form also reconciles via the trailing-10 match', () => {
+    const appKey = normalizePhone('+15125550222');
+    const storedBareForm = '5125550222'; // customer saved as "5125550222"
+    expect(storedBareForm.slice(-10)).toBe(appKey.slice(-10));
+  });
+});
+
+// ---------------------------------------------------------------------------
 // identifyCaller — matched
 // ---------------------------------------------------------------------------
 

@@ -5859,6 +5859,53 @@ export const MIGRATIONS = {
     ALTER TABLE tenant_settings
       ADD COLUMN IF NOT EXISTS vapi_webhook_secret TEXT;
   `,
+  // Active vertical packs were tracked in TWO places with nothing keeping
+  // them in sync: the authoritative `pack_activations` table (Vertical Packs
+  // settings sheet) and the `tenant_settings.terminology_preferences.
+  // _activeVerticalPacks` mirror (Templates page + public intake form).
+  // Every activate/deactivate through the settings sheet updated only the
+  // table, so the mirror went stale and the Templates page / public intake
+  // showed the wrong packs. The app now re-derives the mirror from the table
+  // on every write (syncActiveVerticalPacksMirror); this one-time backfill
+  // reconciles rows that already drifted before that fix shipped.
+  //
+  // pack_activations is authoritative: for every tenant that has at least
+  // one activation row, rebuild `_activeVerticalPacks` from its ACTIVE rows
+  // (dropping any pack deactivated via the sheet, adding any missed), while
+  // preserving all other terminology keys. Empties the key when no pack is
+  // active, and NULLs the whole column when nothing else remains — matching
+  // buildTerminologyJson's shape. Tenants with no activation rows are left
+  // untouched (JOIN), so a legacy mirror is never wiped. Idempotent:
+  // `IS DISTINCT FROM` makes re-runs (the schema runner re-executes every
+  // migration on each boot) a no-op once reconciled.
+  '236_reconcile_active_vertical_packs_mirror': `
+    UPDATE tenant_settings ts
+    SET terminology_preferences = sub.new_terms
+    FROM (
+      SELECT
+        s.tenant_id,
+        NULLIF(
+          (COALESCE(s.terminology_preferences, '{}'::jsonb) - '_activeVerticalPacks')
+          || CASE
+               WHEN p.active_packs IS NOT NULL AND jsonb_array_length(p.active_packs) > 0
+                 THEN jsonb_build_object('_activeVerticalPacks', p.active_packs)
+               ELSE '{}'::jsonb
+             END,
+          '{}'::jsonb
+        ) AS new_terms
+      FROM tenant_settings s
+      JOIN (
+        SELECT
+          tenant_id,
+          jsonb_agg(pack_id ORDER BY activated_at DESC)
+            FILTER (WHERE status = 'active') AS active_packs
+        FROM pack_activations
+        GROUP BY tenant_id
+      ) p ON p.tenant_id = s.tenant_id
+    ) sub
+    WHERE ts.tenant_id = sub.tenant_id
+      AND ts.terminology_preferences IS DISTINCT FROM sub.new_terms;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
