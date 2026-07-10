@@ -13,9 +13,9 @@ import { installStripeStub, setStripeConfirmResult } from '../helpers/stripe-stu
  * only production path that enables status polling. Real Elements /
  * PaymentIntent confirmation belongs to a later thread (not W1-4).
  *
- * Pattern mirrors `e2e/render-stability.spec.ts` (gate the second
- * response, assert mid-flight UI stays mounted). Avoids
- * `page.clock.install()` before SPA boot.
+ * Pattern: gate the second status response and assert mid-flight UI
+ * stays mounted (same idea as the invoices list render-stability
+ * suite). Avoids `page.clock.install()` before SPA boot.
  */
 
 const hasWebApp =
@@ -87,8 +87,12 @@ test.describe('W1-4 — public /pay/:id status poll (hermetic)', () => {
     page.on('pageerror', (err) => pageErrors.push(err.message));
 
     let statusCalls = 0;
+    // Install the paid-response gate before any poll can fire so a
+    // second tick cannot slip through while we still expect mid-poll UI.
     let releasePaidPoll: (() => void) | null = null;
-    let paidPollGate = Promise.resolve();
+    let paidPollGate = new Promise<void>((resolve) => {
+      releasePaidPoll = resolve;
+    });
 
     await page.route('**/public/invoices/**', async (route: Route) => {
       const method = route.request().method();
@@ -171,16 +175,12 @@ test.describe('W1-4 — public /pay/:id status poll (hermetic)', () => {
     await expect(page.getByText(/Payment received/i)).toHaveCount(0);
     await expect.poll(() => statusCalls).toBeGreaterThanOrEqual(1);
 
-    // Hold the second (paid) poll in flight; content must stay mounted.
-    paidPollGate = new Promise<void>((resolve) => {
-      releasePaidPoll = resolve;
-    });
-
-    // Second tick fires on the 5s interval (no page.clock — safer for SPA boot).
+    // Second tick fires on the 5s interval (no page.clock — safer for SPA boot)
+    // and stays gated until we release — assert mid-poll UI stays mounted.
     await expect.poll(() => statusCalls, { timeout: 15_000 }).toBeGreaterThanOrEqual(2);
 
     await expect(processingBanner).toBeVisible();
-    await expect(page.getByText('INV-E2E-PAY-1')).toBeVisible();
+    await expect(page.getByText('INV-E2E-PAY-1', { exact: true })).toBeVisible();
     // Full-page boot spinner is a lone animate-spin in a min-h-screen flex
     // center — must not replace the processing UI mid-poll.
     await expect(page.locator('.min-h-screen > .animate-spin')).toHaveCount(0);
@@ -188,10 +188,12 @@ test.describe('W1-4 — public /pay/:id status poll (hermetic)', () => {
 
     releasePaidPoll?.();
 
-    await expect(page.getByText('Payment received!')).toBeVisible({
+    await expect(page.getByRole('heading', { name: 'Payment received!' })).toBeVisible({
       timeout: 10_000,
     });
-    await expect(page.getByText('INV-E2E-PAY-1')).toBeVisible();
+    // PaidScreen mentions the invoice number in the thank-you copy and the
+    // receipt row — pin the receipt row (exact) so strict mode stays happy.
+    await expect(page.getByText('INV-E2E-PAY-1', { exact: true })).toBeVisible();
     await expect(page.getByText('Paid', { exact: true })).toBeVisible();
     expect(pageErrors, 'no page errors during status poll → paid').toEqual([]);
   });

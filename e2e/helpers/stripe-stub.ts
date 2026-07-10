@@ -30,8 +30,12 @@ export function loadStripe() {
 }
 `;
 
+// Fulfilled modules are served as raw ESM to the browser — bare
+// `import 'react'` fails (no import map). Point at Vite's prebundle
+// entry; the `?v=` query is stripped by pathname matching so the
+// hashless path stays stable across Vite dep re-optimizations.
 const REACT_STRIPE_STUB = `
-import React from ${JSON.stringify('/node_modules/.vite/deps/react.js')};
+import React from '/node_modules/.vite/deps/react.js';
 
 export function Elements({ children }) {
   return React.createElement('div', { 'data-testid': 'stripe-elements' }, children);

@@ -52,8 +52,9 @@ Hermetic, always-on (no Clerk journey secrets, no Stripe secrets):
 - **`public/invoice-pay-status.spec.ts` (W1-4)** — `/pay/:id` status poll
   proof: unpaid invoice → async `processing` path → poll `open` → `paid`
   in place without blanking the page. Stripe Elements card entry is
-  **out of scope** (Vite `@stripe/*` deps are stubbed). See
-  `docs/plans/wave1/W1-4-public-pay-status.md`.
+  **out of scope** (Vite `@stripe/*` deps are stubbed). Thread plan:
+  `docs/plans/wave1/W1-4-public-pay-status.md` on branch
+  `docs/wave1-prove-money-loop-followup`.
 
 Needs a syntactically valid `VITE_CLERK_PUBLISHABLE_KEY` (or
 `E2E_BASE_URL`) so `main.tsx` boots — same gate as UI smoke. Clerk is
