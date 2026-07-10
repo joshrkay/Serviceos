@@ -57,9 +57,12 @@ file's header comment are met.
 2. **estimate-approval-execution** — AI task produces a draft proposal,
    operator approves, 5s undo window elapses, auto-delivery worker executes,
    estimate row appears. Needs AI provider creds or mocked gateway.
-3. **invoice-to-payment** — approved invoice generates Stripe payment link,
-   `charge.succeeded` webhook flips invoice to paid. Needs Stripe test keys
-   and P5-016 closed (Stripe Elements frontend).
+3. **invoice-to-payment** — delegates to W1-2 hermetic proof
+   (`e2e/money-loop/invoice-webhook-paid.spec.ts`): signed webhook → `/pay`
+   shows Paid without Elements. API proofs:
+   `packages/api/test/webhooks/invoice-webhook-paid.test.ts` +
+   `packages/api/test/integration/invoice-webhook-paid.test.ts`.
+   Live Stripe Elements remains out of scope for W1-2.
 
 ## CI secrets (unlock journeys)
 
