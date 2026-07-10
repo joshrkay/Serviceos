@@ -282,7 +282,9 @@ describe('InvoicesPage', () => {
 
   it('uses /api/invoices endpoint', () => {
     renderPage();
-    expect(vi.mocked(useListQuery)).toHaveBeenCalledWith('/api/invoices');
+    expect(vi.mocked(useListQuery)).toHaveBeenCalledWith('/api/invoices', {
+      refetchInterval: 30_000,
+    });
   });
 
   it('renders invoice attachments and opens capture from Add photo', async () => {

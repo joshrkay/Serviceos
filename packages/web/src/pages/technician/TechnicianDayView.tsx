@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { apiFetch } from '../../utils/api-fetch';
 import { TechnicianProfitCard } from '../../components/technician/TechnicianProfitCard';
@@ -202,6 +202,7 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
   const [onMyWayNotified, setOnMyWayNotified] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
+    let cancelled = false;
     async function fetchAppointments() {
       setIsLoading(true);
       setError(null);
@@ -214,16 +215,31 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
           throw new Error('Failed to load appointments');
         }
         const data = await response.json();
-        setAppointments(data.appointments ?? []);
+        if (!cancelled) setAppointments(data.appointments ?? []);
       } catch (err) {
-        setError(err instanceof Error ? err.message : 'Failed to load appointments');
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : 'Failed to load appointments');
+        }
       } finally {
-        setIsLoading(false);
+        if (!cancelled) setIsLoading(false);
       }
     }
 
-    fetchAppointments();
+    void fetchAppointments();
+    return () => {
+      cancelled = true;
+    };
   }, [technicianId, selectedDate, refetchNonce]);
+
+  // Clear the day when the identity changes so we never paint yesterday's
+  // jobs under today's header. Soft refreshes (refetchNonce) keep rows.
+  const dayIdentity = `${technicianId}|${toDateInputValue(selectedDate)}`;
+  const lastDayIdentityRef = useRef(dayIdentity);
+  useEffect(() => {
+    if (lastDayIdentityRef.current === dayIdentity) return;
+    lastDayIdentityRef.current = dayIdentity;
+    setAppointments([]);
+  }, [dayIdentity]);
 
   useEffect(() => {
     if (typeof navigator === 'undefined' || !navigator.geolocation) {
@@ -689,7 +705,7 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
         </div>
       )}
 
-      {isLoading && (
+      {isLoading && appointments.length === 0 && (
         <div className="py-8 text-center text-sm text-muted-foreground" data-testid="technician-day-loading">
           Loading schedule...
         </div>
@@ -719,7 +735,7 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
         </div>
       )}
 
-      {!isLoading && !error && (
+      {!(isLoading && appointments.length === 0) && !error && (
         <div className="space-y-3" data-testid="technician-day-list">
           {sortedAppointments.length === 0 ? (
             <div

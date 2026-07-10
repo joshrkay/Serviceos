@@ -1043,7 +1043,7 @@ export function JobDetailView({
 
   useEffect(() => { void loadLinkedDocs(); }, [loadLinkedDocs]);
 
-  if (isLoading) {
+  if (isLoading && !job) {
     return (
       <div className="h-full flex items-center justify-center">
         <Spinner size="md" className="text-foreground" label="Loading job" />

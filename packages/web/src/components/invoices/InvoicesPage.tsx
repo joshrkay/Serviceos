@@ -701,7 +701,7 @@ function OriginAttributionLine({ leadId }: { leadId: string }) {
 function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () => void }) {
   const navigate = useNavigate();
   const tz = useTenantTimezone();
-  const { data: inv, isLoading, error, refetch } = useDetailQuery<InvoiceResponse>('/api/invoices', invoiceId);
+  const { data: inv, isLoading, refetch } = useDetailQuery<InvoiceResponse>('/api/invoices', invoiceId);
   const { mutate: updateInvoice } = useMutation<Record<string, unknown>, InvoiceResponse>('PUT', `/api/invoices/${invoiceId}`);
 
   const [sendOpen,  setSendOpen]  = useState(false);
@@ -742,7 +742,7 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
     }
   }
 
-  if (isLoading) {
+  if (isLoading && !inv) {
     return (
       <div className="h-full flex items-center justify-center">
         <div className="h-6 w-6 animate-spin rounded-full border-2 border-primary border-t-transparent" />
@@ -750,7 +750,9 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
     );
   }
 
-  if (error || !inv) {
+  // No entity to show (cold-load error, or not-yet-loaded). A background
+  // refetch failure never nulls `inv`, so a loaded invoice stays on screen.
+  if (!inv) {
     return (
       <div className="h-full flex flex-col items-center justify-center gap-3">
         <p className="text-sm text-destructive">Failed to load invoice</p>
@@ -1077,18 +1079,15 @@ export function InvoicesPage({ defaultSelectedId }: { defaultSelectedId?: string
     setSelected(defaultSelectedId ?? null);
   }, [defaultSelectedId]);
 
-  const { data, total, isLoading, error, setFilters, refetch } = useListQuery<InvoiceResponse>('/api/invoices');
-
-  // P5-018 — Auto-refresh loop. Webhooks update the DB; the dispatcher
-  // sees the change on the next poll. Pause polling while a detail
-  // page is open so the user isn't yanked around.
-  useEffect(() => {
-    if (selected) return;
-    const id = setInterval(() => {
-      refetch();
-    }, INVOICE_LIST_REFRESH_MS);
-    return () => clearInterval(id);
-  }, [selected, refetch]);
+  const { data, total, isLoading, error, setFilters, refetch } = useListQuery<InvoiceResponse>(
+    '/api/invoices',
+    {
+      // P5-018 — live refresh while the list is visible. Pause while a detail
+      // page is open so the user isn't yanked around. Uses the shared hook's
+      // background refetch (no spinner flash) + visibility pause/catch-up.
+      refetchInterval: selected ? undefined : INVOICE_LIST_REFRESH_MS,
+    },
+  );
 
   // P5-018 — Toast when an invoice transitions to paid. We track the
   // previous status map across renders; a transition `previous !== paid
@@ -1192,8 +1191,9 @@ export function InvoicesPage({ defaultSelectedId }: { defaultSelectedId?: string
           ))}
         </div>
 
-        {/* Loading / Error */}
-        {isLoading && (
+        {/* Loading / Error — only blank the list on cold load. Background
+            polls (30s) keep isLoading false once rows exist. */}
+        {isLoading && data.length === 0 && (
           <div className="flex items-center justify-center py-16">
             <Spinner size="md" className="text-foreground" label="Loading invoices" />
           </div>
@@ -1203,7 +1203,7 @@ export function InvoicesPage({ defaultSelectedId }: { defaultSelectedId?: string
         )}
 
         {/* List */}
-        {!isLoading && !error && (
+        {!(isLoading && data.length === 0) && !error && (
           <div className="flex flex-col gap-2">
             {filtered.map(inv => {
               const status = inv.uiStatus;

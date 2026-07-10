@@ -597,8 +597,8 @@ export function CustomersPage() {
           </div>
         )}
 
-        {/* list */}
-        {isLoading && (
+        {/* list — keep cards mounted during background refresh */}
+        {isLoading && data.length === 0 && (
           <div className="flex items-center justify-center py-16">
             <Spinner size="md" className="text-foreground" label="Loading customers" />
           </div>
@@ -606,7 +606,7 @@ export function CustomersPage() {
         {error && (
           <ErrorState message="Failed to load customers" onRetry={refetch} />
         )}
-        {!isLoading && !error && (
+        {!(isLoading && data.length === 0) && !error && (
           <div className="flex flex-col gap-2.5 mt-4">
             {filtered.map(c => {
               const svcTypes = customerServiceTypes(c);
