@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Camera, Eye, ImageIcon } from 'lucide-react';
 import {
   Attachment,
@@ -29,23 +29,33 @@ export function AttachmentSection({ entityType, entityId }: AttachmentSectionPro
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [captureOpen, setCaptureOpen] = useState(false);
+  const hasLoadedRef = useRef(false);
 
-  async function load() {
-    setLoading(true);
-    setError(null);
+  async function load(opts?: { background?: boolean }) {
+    const background = opts?.background === true && hasLoadedRef.current;
+    // Cold load shows the loading copy; background reload (post-capture)
+    // keeps the grid — including optimistic previews — mounted.
+    if (!background) setLoading(true);
+    if (!background) setError(null);
     try {
       const next = await listAttachments(entityType, entityId);
+      hasLoadedRef.current = true;
       setAttachments(next.filter((attachment) => !isArchived(attachment)));
+      setError(null);
     } catch (err) {
+      if (background) return;
       setError(err instanceof Error ? err.message : 'Failed to load attachments');
     } finally {
-      setLoading(false);
+      if (!background) setLoading(false);
     }
   }
 
   useEffect(() => {
-    void load();
+    hasLoadedRef.current = false;
+    void load({ background: false });
   }, [entityType, entityId]);
+
+  const showInitialLoading = loading && attachments.length === 0;
 
   return (
     <div className="rounded-xl border border-slate-200 bg-white overflow-hidden" data-testid={`${entityType}-attachments-section`}>
@@ -56,15 +66,15 @@ export function AttachmentSection({ entityType, entityId }: AttachmentSectionPro
       </div>
 
       <div className="px-4 py-4">
-        {loading && <p className="text-sm text-slate-400">Loading attachments…</p>}
+        {showInitialLoading && <p className="text-sm text-slate-400">Loading attachments…</p>}
         {error && <p role="alert" className="text-sm text-red-600">{error}</p>}
-        {!loading && !error && attachments.length === 0 && (
+        {!showInitialLoading && !error && attachments.length === 0 && (
           <div className="rounded-xl border border-dashed border-slate-200 px-3 py-5 text-center">
             <ImageIcon size={20} className="mx-auto text-slate-300" />
             <p className="mt-2 text-sm text-slate-500">No attachments yet</p>
           </div>
         )}
-        {!loading && !error && attachments.length > 0 && (
+        {!showInitialLoading && !error && attachments.length > 0 && (
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-3" data-testid="attachment-grid">
             {attachments.map((attachment) => {
               const imgSrc = attachment.previewUrl ?? attachment.downloadUrl;
@@ -116,7 +126,7 @@ export function AttachmentSection({ entityType, entityId }: AttachmentSectionPro
           entityId={entityId}
           onClose={() => {
             setCaptureOpen(false);
-            void load();
+            void load({ background: true });
           }}
           onAttached={(attachment, previewUrl) => {
             setAttachments((prev) => {

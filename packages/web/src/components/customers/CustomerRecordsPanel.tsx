@@ -161,22 +161,22 @@ export function CustomerRecordsPanel({ customerId }: { customerId: string }) {
         ))}
       </div>
 
-      {isLoading && (
+      {isLoading && rows.length === 0 && (
         <div className="flex justify-center py-6">
           <Spinner size="sm" className="text-foreground" label="Loading records" />
         </div>
       )}
-      {error && !isLoading && (
+      {error && !(isLoading && rows.length === 0) && (
         <p role="alert" className="text-sm text-destructive">
           {error}
         </p>
       )}
-      {!isLoading && !error && rows.length === 0 && (
+      {!(isLoading && rows.length === 0) && !error && rows.length === 0 && (
         <p className="py-4 text-sm text-muted-foreground">
           No {tab} for this customer yet.
         </p>
       )}
-      {!isLoading && !error && rows.length > 0 && (
+      {!(isLoading && rows.length === 0) && !error && rows.length > 0 && (
         <ul className="flex flex-col gap-1.5">
           {rows.map((row) => (
             <li key={row.id}>

@@ -130,17 +130,27 @@ export function DispatchBoard() {
   });
 
   useEffect(() => {
-    const onVisible = () => {
-      if (document.visibilityState === 'visible') void refetch();
+    let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+    const scheduleRefetch = () => {
+      // Coalesce visibility+focus (both fire on tab return) and bursty
+      // proposal events into a single background board refresh.
+      if (debounceTimer !== null) clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        debounceTimer = null;
+        void refetch();
+      }, 150);
     };
-    const onFocus = () => void refetch();
-    const onProposalsChanged = () => void refetch();
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') scheduleRefetch();
+    };
+    // visibilitychange already covers tab return; skip redundant `focus`
+    // which double-fired with it and stacked board refetches.
+    const onProposalsChanged = () => scheduleRefetch();
     document.addEventListener('visibilitychange', onVisible);
-    window.addEventListener('focus', onFocus);
     window.addEventListener(PROPOSALS_CHANGED, onProposalsChanged);
     return () => {
+      if (debounceTimer !== null) clearTimeout(debounceTimer);
       document.removeEventListener('visibilitychange', onVisible);
-      window.removeEventListener('focus', onFocus);
       window.removeEventListener(PROPOSALS_CHANGED, onProposalsChanged);
     };
   }, [refetch]);

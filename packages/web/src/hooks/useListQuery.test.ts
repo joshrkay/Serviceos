@@ -301,4 +301,83 @@ describe('useListQuery — live polling (Epic 12.2)', () => {
       vi.useRealTimers();
     }
   });
+
+  it('keeps isLoading false and preserves rows during interval / explicit refetch (no flicker)', async () => {
+    vi.useFakeTimers();
+    try {
+      let call = 0;
+      const gates: Array<() => void> = [];
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+        call += 1;
+        const n = call;
+        if (n > 1) {
+          await new Promise<void>((resolve) => {
+            gates.push(resolve);
+          });
+        }
+        return {
+          ok: true,
+          json: async () => ({ data: [{ id: String(n) }], total: 1 }),
+        } as Response;
+      });
+
+      const { result } = renderHook(() =>
+        useListQuery<{ id: string }>('/api/items', { refetchInterval: 1_000 })
+      );
+
+      await vi.waitFor(() => expect(result.current.isLoading).toBe(false));
+      expect(result.current.data).toEqual([{ id: '1' }]);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000);
+      });
+      await vi.waitFor(() => expect(gates.length).toBe(1));
+      // Mid-poll: last-good rows stay mounted and isLoading stays false.
+      expect(result.current.isLoading).toBe(false);
+      expect(result.current.data).toEqual([{ id: '1' }]);
+
+      await act(async () => {
+        gates.shift()?.();
+      });
+      await vi.waitFor(() => expect(result.current.data).toEqual([{ id: '2' }]));
+      expect(result.current.isLoading).toBe(false);
+
+      act(() => {
+        result.current.refetch();
+      });
+      await vi.waitFor(() => expect(gates.length).toBe(1));
+      expect(result.current.isLoading).toBe(false);
+      expect(result.current.data).toEqual([{ id: '2' }]);
+
+      await act(async () => {
+        gates.shift()?.();
+      });
+      await vi.waitFor(() => expect(result.current.data).toEqual([{ id: '3' }]));
+      expect(result.current.isLoading).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('preserves last-good rows when a background refetch fails', async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ data: [{ id: 'ok' }], total: 1 }),
+      } as Response)
+      .mockResolvedValueOnce({ ok: false, status: 500 } as Response);
+
+    const { result } = renderHook(() => useListQuery<{ id: string }>('/api/items'));
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    expect(result.current.data).toEqual([{ id: 'ok' }]);
+
+    act(() => {
+      result.current.refetch();
+    });
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(2));
+    expect(result.current.isLoading).toBe(false);
+    expect(result.current.data).toEqual([{ id: 'ok' }]);
+    expect(result.current.error).toBeNull();
+  });
 });
