@@ -4169,7 +4169,7 @@ export function createApp(): express.Express {
       auditRepo,
       ownership,
       sendService,
-      { gateway: llmGateway, proposalRepo },
+      { gateway: llmGateway, proposalRepo, catalogRepo },
       { jobRepo, invoiceRepo },
       { docRevisionRepo: documentRevisionRepo, editDeltaRepo: deltaRepo },
       paymentRepo,
