@@ -54,20 +54,22 @@
 
 <div class="verdict">
   <b>Verdict.</b> ServiceOS is a <b>heavily-hardened, largely-aligned</b> codebase — not a demo. Every seeded
-  "overclaim" from the stale 2026-06-20 status doc is now <b>built</b> (the docs lagged the code, exactly as the
-  mission predicted). The audit found and <b>fixed one real alignment defect</b> (brand-voice banned-phrase
-  enforcement) and <b>closed one committed-SLO observability gap</b> (durable-queue depth metric), then added
-  adversarial/property coverage on money + RLS and measured a real load baseline. <b>Zero unaddressed criticals.</b>
-  No production writes; money/RLS/auth invariants verified intact (no fix touched them).
+  "overclaim" from the stale 2026-06-20 status doc is now <b>built</b> (the docs lagged the code). A multi-agent
+  fresh-context audit (12 per-surface auditors + red team, adversarially verified) surfaced the deeper
+  <i>reachability</i> defects a first pass misses. The run <b>fixed five real defects</b> — including a
+  <b>TCPA/DNC-consent bypass</b> on review follow-up SMS and a <b>QuickBooks data-loss bug</b> (paid invoices
+  beyond the newest 200 silently dropped) — added adversarial/property coverage on money + RLS, measured a real
+  load baseline, and <b>refuted a false-positive "money-invariant" finding</b> with evidence. <b>Zero unaddressed
+  runtime criticals.</b> No production writes; money/RLS/auth invariants verified intact.
 </div>
 
 <div class="grid">
-  <div class="stat"><b>4</b><span>commits (all gate-green)</span></div>
-  <div class="stat"><b>0</b><span>criticals outstanding</span></div>
-  <div class="stat"><b>9,170</b><span>unit tests (green)</span></div>
-  <div class="stat"><b>623</b><span>integration tests (green, local PG)</span></div>
-  <div class="stat"><b>116</b><span>tenant tables, all FORCE-RLS*</span></div>
-  <div class="stat"><b>~100–150</b><span>VU/instance @ web SLO (floor)</span></div>
+  <div class="stat"><b>8</b><span>commits (all gate-green)</span></div>
+  <div class="stat"><b>5</b><span>real defects fixed</span></div>
+  <div class="stat"><b>0</b><span>runtime criticals open</span></div>
+  <div class="stat"><b>9,181</b><span>unit tests (green)</span></div>
+  <div class="stat"><b>623+</b><span>integration (green, local PG)</span></div>
+  <div class="stat"><b>~100–150</b><span>VU/inst @ web SLO (floor)</span></div>
 </div>
 
 <h2>Definition of done — self-grade</h2>
@@ -87,11 +89,39 @@
 <div class="scroll"><table>
   <tr><th>Finding</th><th>Sev</th><th>Fix (commit)</th><th>Test</th><th>Re-attacked</th></tr>
   <tr>
+    <td><b>Reputation private follow-up SMS bypasses DNC + SMS consent entirely</b> — handler→adapter→Twilio, no gate at any layer, while every other SMS path gates. A customer who texted STOP still gets texted (TCPA violation).</td>
+    <td><span class="pill bad">critical</span></td>
+    <td><code>fb244ba</code> — DNC + consent gate in the adapter; suppression as an explicit result variant (never sent, never a "failure")</td>
+    <td>4 tests: DNC-listed→suppressed, no-consent→suppressed, allowed→sent, email unaffected</td>
+    <td><span class="pill ok">holds</span> — the send is short-circuited before the transport</td>
+  </tr>
+  <tr>
+    <td><b>QuickBooks sync drops paid invoices beyond the newest 200</b> — fixed <code>limit:200</code> fetch, no pagination; a tenant with a backlog never syncs the tail.</td>
+    <td><span class="pill bad">high</span></td>
+    <td><code>42c0740</code> — paginate through every paid invoice (already-synced skipped cheaply)</td>
+    <td>5 invoices, pageSize 2 → all 5 sync across 3 pages</td>
+    <td><span class="pill ok">holds</span> — data-loss closed</td>
+  </tr>
+  <tr>
+    <td><b>Google review responses ignore tenant brand voice</b> — <code>NoopBrandVoiceLoader</code> (returns NEUTRAL) wired into review drafting; the P4-015 stub was never swapped. Public replies are the most visible surface of all.</td>
+    <td><span class="pill bad">high</span></td>
+    <td><code>8ec0d20</code> — <code>SettingsBrandVoiceLoader</code> reads the real tenant tone + banned phrases</td>
+    <td>4 tests: renders tone/signoff, neutral fallback, failure-soft</td>
+    <td><span class="pill ok">holds</span></td>
+  </tr>
+  <tr>
     <td><b>Brand-voice banned phrases enforced only as a soft LLM prompt hint</b> (<code>prompts.ts:135</code>), no code-level check — an owner's locked correction could still ship. Contradicts the composer's own "model is never trusted" (it enforces <code>maxChars</code> in code).</td>
     <td><span class="pill bad">high</span></td>
     <td><code>be185d4</code> — <code>enforceBannedPhrases()</code> strips banned phrases post-generation + observability warn</td>
     <td>8 regression tests (case-insensitive strip, seam cleanup, regex-escape, end-to-end, all-banned→typed error)</td>
     <td><span class="pill ok">holds</span> composer test proves an emitted banned phrase never reaches output</td>
+  </tr>
+  <tr>
+    <td><b>REFUTED — "web estimate route bypasses catalog resolution → money-invariant violation"</b>: the handler treats all prices as uncatalogued with no resolver and caps confidence below auto-approve; the route forces draft. The invariant holds.</td>
+    <td><span class="pill hold">refuted</span></td>
+    <td>no fix needed — auditor over-claimed</td>
+    <td><code>estimate-task.ts</code> confidence-cap + <code>estimates.ts:799</code> forced-draft</td>
+    <td><span class="pill ok">holds</span> — fresh-context verification prevented a needless change</td>
   </tr>
   <tr>
     <td><b>Durable PgQueue depth never emitted as a metric</b> — only <code>ws_queue_depth</code> (WebSocket) existed, so the committed C1 SLO (depth &lt; 1,000) was unobservable and the P2 alert was "deferred."</td>
