@@ -1144,8 +1144,18 @@ export function JobDetailView({
         />
       )}
       <StatusStepper job={job} />
-      <ScheduleTechCard job={job} tech={tech} onCallTech={() => setModal('call')} workerTerm={workerTerm} />
-      <div className="rounded-xl bg-card border border-border p-4">
+      <ScheduleTechCard
+        job={job}
+        tech={tech}
+        onCallTech={() => setModal('call')}
+        onSchedule={() =>
+          document
+            .getElementById('job-schedule-panel')
+            ?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        }
+        workerTerm={workerTerm}
+      />
+      <div id="job-schedule-panel" className="rounded-xl bg-card border border-border p-4">
         <p className="text-sm font-medium text-foreground mb-3">Manage schedule</p>
         <JobSchedulePanel
           jobId={id}

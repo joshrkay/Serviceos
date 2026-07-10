@@ -18,12 +18,6 @@ import {
   formatDateTimeInTenantTz,
 } from '../../utils/formatInTenantTz';
 
-// No default appointment/job duration exists in the API or shared config
-// (verified 2026-07-08 — public-booking derives slot ends from slot
-// definitions, not a fixed default), so the create flow blocks out a
-// conventional 60-minute service window for the new appointment.
-const DEFAULT_APPOINTMENT_MINUTES = 60;
-
 // Fixed schedule-step time chips → 24h wall clock, so a picked slot maps to a
 // real tenant-local instant via tenantWallClockToUtc.
 const TIME_SLOTS_24H: Record<string, string> = {
@@ -138,42 +132,6 @@ interface CreateJobRequest {
   scheduledStart?: string;
   technicianId?: string;
   timezone?: string;
-}
-
-/**
- * Resolve NewJobFlow's schedule draft into an ISO instant, or undefined when a
- * concrete timestamp can't be built. Only the reliably-resolvable date forms
- * schedule the job: 'Today', 'Tomorrow', or an explicit custom `YYYY-MM-DD`.
- * The hard-coded relative chips ('Tue Mar 11', …) are demo placeholders with no
- * year, so they're intentionally NOT booked (better unscheduled than wrong).
- */
-export function deriveScheduledStartISO(
-  scheduledDate: string,
-  scheduledTime: string,
-  now: Date = new Date(),
-): string | undefined {
-  let base: Date | undefined;
-  if (scheduledDate === 'Today') {
-    base = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  } else if (scheduledDate === 'Tomorrow') {
-    base = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
-  } else if (/^\d{4}-\d{2}-\d{2}$/.test(scheduledDate)) {
-    const [y, m, d] = scheduledDate.split('-').map(Number);
-    base = new Date(y, m - 1, d);
-  } else {
-    return undefined;
-  }
-  // Parse a "3:00 PM" style time; default to 8:00 AM (the first offered slot).
-  let hours = 8;
-  let minutes = 0;
-  const tm = scheduledTime.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
-  if (tm) {
-    hours = parseInt(tm[1], 10) % 12;
-    if (/pm/i.test(tm[3])) hours += 12;
-    minutes = parseInt(tm[2], 10);
-  }
-  base.setHours(hours, minutes, 0, 0);
-  return base.toISOString();
 }
 
 interface CreateJobResponse {
@@ -483,10 +441,10 @@ export function NewJobFlow({
   const [jobNum,   setJobNum]   = useState('');
   const [createError, setCreateError] = useState('');
   // Persisted-only facts for the done screen: the appointment instant we
-  // actually stored (null when the job was left unscheduled), the warning when
-  // scheduling failed after the job was created, and the tab the job landed on.
+  // actually stored (null when the job was left unscheduled) and the tab the
+  // job landed on. Scheduling is atomic with the create, so there is no
+  // job-created-but-schedule-failed state to warn about.
   const [persistedStart, setPersistedStart] = useState<Date | null>(null);
-  const [scheduleWarning, setScheduleWarning] = useState('');
   const [resultFilter, setResultFilter] = useState<'New' | 'Scheduled'>('New');
   const [showNewCustomerForm, setShowNewCustomerForm] = useState(false);
   const [newCustomerName, setNewCustomerName] = useState('');
@@ -498,7 +456,6 @@ export function NewJobFlow({
   const { data: apiCustomers } = useListQuery<ApiCustomer>('/api/customers');
   const tenantTz = useTenantTimezone();
   const { mutate: createJobMutation } = useMutation<CreateJobRequest, CreateJobResponse>('POST', '/api/jobs');
-  const { mutate: createAppointmentMutation } = useMutation<Record<string, unknown>, { id: string }>('POST', '/api/appointments');
   const { mutate: createCustomerMutation } = useMutation<Record<string, unknown>, CreateCustomerResponse>('POST', '/api/customers');
   const { mutate: createLocationMutation } = useMutation<Record<string, unknown>, CreateLocationResponse>('POST', '/api/locations');
 
@@ -871,59 +828,31 @@ export function NewJobFlow({
     }
 
     setCreateError('');
-    setScheduleWarning('');
     setCreating(true);
     try {
-      // Schedule-on-create: when the draft carries a resolvable date, book the
-      // appointment so the job reaches the dispatch board (technician optional).
-      const scheduledStart = deriveScheduledStartISO(draft.scheduledDate, draft.scheduledTime);
+      // Schedule-on-create: when the draft resolves to a concrete tenant-tz
+      // instant, send it WITH the create so the API books the appointment in
+      // the SAME atomic request — the job reaches the dispatch board. The slot
+      // is optional (an unscheduled job otherwise). The technician is left
+      // unassigned here (there is no create-time tech picker; assign from the
+      // schedule panel), so a scheduled job lands in the board's unassigned
+      // lane. A scheduling conflict rolls the whole create back, so the catch
+      // below is the only place a failure surfaces — there is never an orphaned
+      // unscheduled job, and no separate appointment call to fall out of sync.
+      const start = resolveScheduledStart();
       const created = await createJobMutation({
         customerId: draft.customerId,
         locationId: draft.locationId,
         summary: draft.description.trim(),
         problemDescription: draft.notes.trim() || undefined,
         priority: draft.priority === 'Urgent' ? 'urgent' : 'normal',
-        ...(scheduledStart
-          ? {
-              scheduledStart,
-              timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-              ...(tech?.id ? { technicianId: tech.id } : {}),
-            }
-          : {}),
+        ...(start ? { scheduledStart: start.toISOString(), timezone } : {}),
       });
 
-      // If a slot was chosen, persist the SCHEDULE as an appointment and move
-      // the job forward (new → scheduled) so it lands on the Scheduled tab.
-      // Tech assignment is intentionally NOT persisted here — there is no
-      // create-time assignee endpoint (appointment_assignees is separate).
-      let landedFilter: 'New' | 'Scheduled' = 'New';
-      let scheduledStart: Date | null = null;
-      const start = resolveScheduledStart();
-      if (start) {
-        const end = new Date(start.getTime() + DEFAULT_APPOINTMENT_MINUTES * 60_000);
-        try {
-          await createAppointmentMutation({
-            jobId: created.id,
-            scheduledStart: start.toISOString(),
-            scheduledEnd: end.toISOString(),
-            timezone,
-          });
-          const res = await apiFetch(`/api/jobs/${created.id}/transition`, {
-            method: 'POST',
-            body: JSON.stringify({ status: 'scheduled' }),
-          });
-          if (!res.ok) throw new Error(`Transition failed: HTTP ${res.status}`);
-          scheduledStart = start;
-          landedFilter = 'Scheduled';
-        } catch {
-          // The job exists; only the schedule didn't stick. Surface it honestly
-          // rather than claiming a scheduled job on the done screen.
-          setScheduleWarning('Job created, but the schedule could not be saved. Schedule it from the job.');
-        }
-      }
-
-      setPersistedStart(scheduledStart);
-      setResultFilter(landedFilter);
+      // A returned job means the create — and its atomic schedule, if any —
+      // stuck, so the done screen can reflect the booked slot honestly.
+      setPersistedStart(start);
+      setResultFilter(start ? 'Scheduled' : 'New');
       setJobNum(created.jobNumber);
       setStep('done');
     } catch {
@@ -1532,12 +1461,6 @@ export function NewJobFlow({
                         : 'Unscheduled'}
                     </p>
                   </div>
-                  {scheduleWarning && (
-                    <div className="flex items-center gap-3 px-4 py-2.5 bg-warning/10">
-                      <AlertCircle size={13} className="text-warning shrink-0" />
-                      <p className="text-xs text-warning">{scheduleWarning}</p>
-                    </div>
-                  )}
                   {draft.priority === 'Urgent' && (
                     <div className="flex items-center gap-3 px-4 py-2.5 bg-destructive/10">
                       <AlertCircle size={13} className="text-destructive shrink-0" />

@@ -2,7 +2,8 @@ import React from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, within, waitFor, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { NewJobFlow, deriveScheduledStartISO } from './NewJobFlow';
+import { NewJobFlow } from './NewJobFlow';
+import { todayInTz, tenantWallClockToUtc } from '../../utils/formatInTenantTz';
 
 const TZ = 'America/Los_Angeles';
 
@@ -24,11 +25,12 @@ const ROBERTO = {
 };
 
 // Hoisted, reconfigurable mock state so individual tests can swap the customer
-// list and drive the job/appointment mutations + apiFetch independently.
+// list and drive the job mutation + apiFetch independently. Scheduling is now
+// atomic with the create (a single POST /api/jobs carries the slot), so there
+// is no separate appointment mutation to stub.
 const H = vi.hoisted(() => ({
   customers: [] as unknown[],
   jobsMutate: vi.fn(),
-  apptMutate: vi.fn(),
   apiFetch: vi.fn(),
 }));
 
@@ -56,8 +58,8 @@ vi.mock('../../hooks/useTenantTimezone', () => ({
 }));
 
 vi.mock('../../hooks/useMutation', () => ({
-  useMutation: (_method: string, path: string) => ({
-    mutate: path === '/api/appointments' ? H.apptMutate : H.jobsMutate,
+  useMutation: () => ({
+    mutate: H.jobsMutate,
     isLoading: false,
     error: null,
   }),
@@ -88,7 +90,6 @@ async function goToScheduleStep(user: ReturnType<typeof userEvent.setup>) {
 beforeEach(() => {
   H.customers = [ROBERTO];
   H.jobsMutate.mockReset();
-  H.apptMutate.mockReset();
   H.apiFetch.mockReset();
   H.apiFetch.mockResolvedValue({ ok: true, json: async () => [] });
 });
@@ -145,11 +146,9 @@ describe('NewJobFlow', () => {
   });
 
   describe('create with a chosen slot', () => {
-    it('POSTs /api/jobs, then /api/appointments (tenant-tz instants), then transitions the job to scheduled', async () => {
+    it('POSTs /api/jobs ONCE with the tenant-tz instant + timezone (no separate appointment call)', async () => {
       const user = userEvent.setup();
       H.jobsMutate.mockResolvedValue({ id: 'job-new-1', jobNumber: 'JOB-100' });
-      H.apptMutate.mockResolvedValue({ id: 'appt-1' });
-      H.apiFetch.mockResolvedValue({ ok: true, json: async () => ({}) });
 
       const onCreated = vi.fn();
       renderFlow({ onCreated });
@@ -159,7 +158,10 @@ describe('NewJobFlow', () => {
       await user.click(screen.getByText('2:00 PM'));
       await user.click(screen.getByRole('button', { name: /create job/i }));
 
-      // Job created first.
+      // The API books the appointment atomically with the create, so the slot
+      // rides along on the SINGLE POST /api/jobs as a tenant-tz instant. No
+      // client-side appointment POST or status transition is issued.
+      const start = tenantWallClockToUtc(todayInTz(TZ), '14:00', TZ);
       await waitFor(() =>
         expect(H.jobsMutate).toHaveBeenCalledWith(
           expect.objectContaining({
@@ -167,43 +169,25 @@ describe('NewJobFlow', () => {
             locationId: 'loc-1',
             summary: 'AC not cooling in the bedroom',
             priority: 'normal',
+            scheduledStart: start.toISOString(),
+            timezone: TZ,
           }),
         ),
       );
-
-      // Appointment persisted with the correct tenant-tz instants.
-      const dateKey = todayInTz(TZ);
-      const start = tenantWallClockToUtc(dateKey, '14:00', TZ);
-      const end = new Date(start.getTime() + 60 * 60_000);
-      await waitFor(() =>
-        expect(H.apptMutate).toHaveBeenCalledWith({
-          jobId: 'job-new-1',
-          scheduledStart: start.toISOString(),
-          scheduledEnd: end.toISOString(),
-          timezone: TZ,
-        }),
-      );
-
-      // Job transitioned forward so it lands on the Scheduled tab.
-      await waitFor(() =>
-        expect(H.apiFetch).toHaveBeenCalledWith(
-          '/api/jobs/job-new-1/transition',
-          expect.objectContaining({
-            method: 'POST',
-            body: JSON.stringify({ status: 'scheduled' }),
-          }),
+      expect(H.jobsMutate).toHaveBeenCalledTimes(1);
+      // No create-time technician assignment (assign from the schedule panel).
+      expect(H.jobsMutate.mock.calls[0][0]).not.toHaveProperty('technicianId');
+      // No legacy appointment POST / transition round-trip.
+      expect(
+        H.apiFetch.mock.calls.some(
+          (c) => typeof c[0] === 'string' && (c[0] as string).includes('/transition'),
         ),
-      );
-
-      // Ordering: jobs → appointments → transition.
-      const jobOrder = H.jobsMutate.mock.invocationCallOrder[0];
-      const apptOrder = H.apptMutate.mock.invocationCallOrder[0];
-      const transitionCall = H.apiFetch.mock.calls.findIndex(
-        (c) => typeof c[0] === 'string' && (c[0] as string).includes('/transition'),
-      );
-      const transitionOrder = H.apiFetch.mock.invocationCallOrder[transitionCall];
-      expect(jobOrder).toBeLessThan(apptOrder);
-      expect(apptOrder).toBeLessThan(transitionOrder);
+      ).toBe(false);
+      expect(
+        H.apiFetch.mock.calls.some(
+          (c) => typeof c[0] === 'string' && (c[0] as string).includes('/api/appointments'),
+        ),
+      ).toBe(false);
 
       // Done screen routes to the Scheduled tab.
       await user.click(await screen.findByText('View job'));
@@ -212,7 +196,7 @@ describe('NewJobFlow', () => {
   });
 
   describe('create without a slot', () => {
-    it('does not POST an appointment or transition, and the done screen shows no fabricated schedule', async () => {
+    it('POSTs /api/jobs with no schedule fields, and the done screen shows no fabricated schedule', async () => {
       const user = userEvent.setup();
       H.jobsMutate.mockResolvedValue({ id: 'job-new-2', jobNumber: 'JOB-101' });
 
@@ -224,7 +208,10 @@ describe('NewJobFlow', () => {
 
       await waitFor(() => expect(H.jobsMutate).toHaveBeenCalledTimes(1));
 
-      expect(H.apptMutate).not.toHaveBeenCalled();
+      // No schedule fields on the create when no slot was chosen.
+      const payload = H.jobsMutate.mock.calls[0][0] as Record<string, unknown>;
+      expect(payload).not.toHaveProperty('scheduledStart');
+      expect(payload).not.toHaveProperty('timezone');
       expect(
         H.apiFetch.mock.calls.some(
           (c) => typeof c[0] === 'string' && (c[0] as string).includes('/transition'),
@@ -304,46 +291,5 @@ describe('NewJobFlow', () => {
       expect(screen.getByText('Service location')).toBeInTheDocument();
       expect(screen.getByText('Home')).toBeInTheDocument();
     });
-  });
-});
-
-describe('deriveScheduledStartISO — NewJobFlow schedule draft → ISO', () => {
-  // A fixed "now" (local time) keeps Today/Tomorrow deterministic.
-  const NOW = new Date(2026, 6, 1, 9, 30); // 2026-07-01 09:30 local
-
-  it('resolves Today + a chosen time to that local instant', () => {
-    const iso = deriveScheduledStartISO('Today', '3:00 PM', NOW);
-    const d = new Date(iso!);
-    expect(d.getFullYear()).toBe(2026);
-    expect(d.getMonth()).toBe(6);
-    expect(d.getDate()).toBe(1);
-    expect(d.getHours()).toBe(15);
-    expect(d.getMinutes()).toBe(0);
-  });
-
-  it('resolves Tomorrow to the next day', () => {
-    const d = new Date(deriveScheduledStartISO('Tomorrow', '8:00 AM', NOW)!);
-    expect(d.getDate()).toBe(2);
-    expect(d.getHours()).toBe(8);
-  });
-
-  it('resolves an explicit YYYY-MM-DD custom date', () => {
-    const d = new Date(deriveScheduledStartISO('2026-09-15', '2:00 PM', NOW)!);
-    expect(d.getFullYear()).toBe(2026);
-    expect(d.getMonth()).toBe(8);
-    expect(d.getDate()).toBe(15);
-    expect(d.getHours()).toBe(14);
-  });
-
-  it('defaults a missing time to 8:00 AM', () => {
-    const d = new Date(deriveScheduledStartISO('Today', '', NOW)!);
-    expect(d.getHours()).toBe(8);
-    expect(d.getMinutes()).toBe(0);
-  });
-
-  it('does NOT book unresolvable inputs (placeholder chips, empty, Custom)', () => {
-    expect(deriveScheduledStartISO('Tue Mar 11', '3:00 PM', NOW)).toBeUndefined();
-    expect(deriveScheduledStartISO('', '3:00 PM', NOW)).toBeUndefined();
-    expect(deriveScheduledStartISO('Custom', '3:00 PM', NOW)).toBeUndefined();
   });
 });
