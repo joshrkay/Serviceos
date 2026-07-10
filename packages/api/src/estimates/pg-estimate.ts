@@ -138,6 +138,18 @@ export class PgEstimateRepository extends PgBaseRepository implements EstimateRe
       paramIndex++;
     }
 
+    if (options?.sentFrom) {
+      conditions.push(`sent_at IS NOT NULL AND sent_at >= $${paramIndex}`);
+      params.push(options.sentFrom);
+      paramIndex++;
+    }
+
+    if (options?.sentTo) {
+      conditions.push(`sent_at IS NOT NULL AND sent_at < $${paramIndex}`);
+      params.push(options.sentTo);
+      paramIndex++;
+    }
+
     return { where: `WHERE ${conditions.join(' AND ')}`, params };
   }
 

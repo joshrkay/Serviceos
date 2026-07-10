@@ -5948,6 +5948,31 @@ export const MIGRATIONS = {
     ALTER TABLE tenant_settings
       ADD COLUMN IF NOT EXISTS brand_voice_updated_at TIMESTAMPTZ;
   `,
+
+  // N-005 (F-9) — explicit SMS retry cap. Counts each digest send pass so the
+  // worker can dead-letter after 3 attempts instead of retrying until local
+  // midnight. Additive + defaulted; legacy rows read 0.
+  '239_daily_digests_send_attempts': `
+    ALTER TABLE daily_digests
+      ADD COLUMN IF NOT EXISTS send_attempts INT NOT NULL DEFAULT 0;
+  `,
+
+  // N-005 (F-9) — supports ProposalRepository.findConfidenceMarkedForDay (the
+  // digest "what I wasn't sure about today" query). Partial expression index on
+  // the low/very_low confidence marker; additive, no-op on prod re-runs.
+  '240_proposals_confidence_marker_index': `
+    CREATE INDEX IF NOT EXISTS idx_proposals_tenant_created_confidence
+      ON proposals (tenant_id, created_at)
+      WHERE payload->'_meta'->>'overallConfidence' IN ('low','very_low');
+  `,
+
+  // N-005 (F-9) — supports the digest "quotes sent today" range scan over
+  // estimates.sent_at (EstimateListOptions sentFrom/sentTo). Additive partial
+  // index over sent (non-null sent_at) estimates.
+  '241_estimates_tenant_sent_at_index': `
+    CREATE INDEX IF NOT EXISTS idx_estimates_tenant_sent_at
+      ON estimates (tenant_id, sent_at) WHERE sent_at IS NOT NULL;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

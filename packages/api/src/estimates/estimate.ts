@@ -153,6 +153,10 @@ export interface EstimateListOptions {
   /** Only estimates whose `sentAt` is strictly before this. Used by the
    *  estimate-reminder worker to find aging sent estimates. */
   sentBefore?: Date;
+  /** N-005 — lower bound (inclusive) on `sentAt`; digest "quotes sent today". */
+  sentFrom?: Date;
+  /** N-005 — upper bound (exclusive) on `sentAt`; digest "quotes sent today". */
+  sentTo?: Date;
 }
 
 export interface EstimateListResult {
@@ -837,6 +841,14 @@ export class InMemoryEstimateRepository implements EstimateRepository {
     if (options?.sentBefore) {
       const cutoff = options.sentBefore.getTime();
       results = results.filter((e) => e.sentAt !== undefined && e.sentAt.getTime() < cutoff);
+    }
+    if (options?.sentFrom) {
+      const from = options.sentFrom.getTime();
+      results = results.filter((e) => e.sentAt !== undefined && e.sentAt.getTime() >= from);
+    }
+    if (options?.sentTo) {
+      const to = options.sentTo.getTime();
+      results = results.filter((e) => e.sentAt !== undefined && e.sentAt.getTime() < to);
     }
     if (options?.search) {
       const q = options.search.toLowerCase();

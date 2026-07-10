@@ -5082,6 +5082,8 @@ export function createApp(): express.Express {
           customerRepo,
           settingsRepo,
           feedbackResponseRepo,
+          // N-005 — "what I learned today" (correction-loop lessons).
+          correctionLessonRepo,
         },
         listTenantIds: async () => {
           if (!pool) return [];
