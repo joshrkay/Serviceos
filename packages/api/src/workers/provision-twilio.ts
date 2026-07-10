@@ -19,6 +19,13 @@ import { buildAssistantConfig } from '../integrations/vapi/assistant-config';
 const STATUS_PROVISIONING = 't0_requested';
 const STATUS_ACTIVE = 'full_readiness';
 
+// Deterministic stub phone assigned in non-production when no Twilio creds are
+// configured, so the onboarding phone step can reach 'full_readiness' and the
+// wizard is completable in dev/test/CI. This is a Twilio "magic" test number
+// (https://www.twilio.com/docs/iam/test-credentials) — never a real, dialable
+// line. Never used in production: the production path throws without real creds.
+const STUB_DEV_PHONE_E164 = '+15005550006';
+
 // tenant_integrations is FORCE ROW LEVEL SECURITY with a policy on
 // app.current_tenant_id. Background workers run outside withTenantTransaction,
 // so every DB op against this table must run in a transaction that sets the
@@ -80,9 +87,32 @@ export function createProvisionTwilioWorker(deps: {
       const encKey = process.env.TENANT_ENCRYPTION_KEY;
 
       if (!masterSid || !masterToken) {
-        // Skip silently in dev when Twilio isn't configured
+        // Dev/test/CI have no Twilio creds. Previously this branch returned
+        // silently, but deriveOnboardingStatus only marks the `phone` step done
+        // when twilioStatus === 'full_readiness' — so skipping left the phone
+        // step 'current' forever and the onboarding wizard un-completable in
+        // every Twilio-less environment. Instead, write a DETERMINISTIC STUB
+        // integration (a Twilio magic test number, never a real line) so
+        // onboarding can complete. Strictly non-production — production still
+        // throws and requires real provisioning.
         if (process.env.NODE_ENV !== 'production') {
-          logger.info('Twilio provisioning skipped — TWILIO_ACCOUNT_SID/AUTH_TOKEN not set', { tenantId });
+          logger.warn(
+            'Twilio creds absent — assigning STUB twilio integration (non-production only); ' +
+              'onboarding phone step will complete with a FAKE test number, nothing real provisioned',
+            { tenantId, stubPhoneE164: STUB_DEV_PHONE_E164 },
+          );
+          await tenantQuery(
+            pool,
+            tenantId,
+            `INSERT INTO tenant_integrations (tenant_id, provider, status, provider_data)
+             VALUES ($1, 'twilio', $2, $3::jsonb)
+             ON CONFLICT (tenant_id, provider) DO UPDATE
+               SET status = $2,
+                   provider_data = tenant_integrations.provider_data || $3::jsonb,
+                   last_error = NULL,
+                   updated_at = NOW()`,
+            [tenantId, STATUS_ACTIVE, JSON.stringify({ phoneE164: STUB_DEV_PHONE_E164, stub: true })],
+          );
           return;
         }
         throw new Error('TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN must be set');

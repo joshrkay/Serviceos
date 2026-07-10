@@ -393,6 +393,56 @@ describe('provision-twilio worker — number picker', () => {
     expect(vapi.linkPhoneNumber).not.toHaveBeenCalled();
   });
 
+  // ─── Dev/test stub: no Twilio creds ───────────────────────────────────────
+
+  it('writes a stub full_readiness integration in non-production when Twilio creds are absent (so onboarding completes)', async () => {
+    setEnv('NODE_ENV', 'development');
+    setEnv('TWILIO_ACCOUNT_SID', undefined);
+    setEnv('TWILIO_AUTH_TOKEN', undefined);
+    // Any Twilio HTTP call here would be a bug — the stub path must not touch Twilio.
+    const fetchFn = mockFetch();
+
+    const { pool, calls } = makePool();
+    const worker = createProvisionTwilioWorker({ pool });
+
+    await worker.handle(
+      buildMessage({ tenantId: TENANT, region: null, baseUrl: 'https://api.test' }),
+      logger,
+    );
+
+    expect(fetchFn).not.toHaveBeenCalled();
+
+    // A tenant_integrations row was written as 'full_readiness' with the fake
+    // stub number, so deriveOnboardingStatus marks the phone step done.
+    const stubWrite = calls.find(
+      (c) =>
+        /INSERT INTO tenant_integrations/i.test(c.sql) &&
+        JSON.stringify(c.params).includes('full_readiness') &&
+        JSON.stringify(c.params).includes('+15005550006'),
+    );
+    expect(stubWrite).toBeDefined();
+  });
+
+  it('does NOT fabricate a stub in production — still requires real Twilio creds', async () => {
+    setEnv('NODE_ENV', 'production');
+    setEnv('TWILIO_ACCOUNT_SID', undefined);
+    setEnv('TWILIO_AUTH_TOKEN', undefined);
+
+    const { pool, calls } = makePool();
+    const worker = createProvisionTwilioWorker({ pool });
+
+    await expect(
+      worker.handle(
+        buildMessage({ tenantId: TENANT, region: null, baseUrl: 'https://api.test' }),
+        logger,
+      ),
+    ).rejects.toThrow(/TWILIO_ACCOUNT_SID/);
+
+    // No stub number was ever persisted in production.
+    const anyStub = calls.find((c) => JSON.stringify(c.params).includes('+15005550006'));
+    expect(anyStub).toBeUndefined();
+  });
+
   it('does not fail Twilio provisioning when Vapi assistant creation throws (best-effort)', async () => {
     configureTwilio();
     mockFetch(...twilioHappyPath());
