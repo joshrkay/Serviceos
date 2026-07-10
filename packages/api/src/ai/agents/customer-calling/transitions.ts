@@ -288,6 +288,9 @@ function checkGlobalGuards(
           callSid: updatedContext.callSid,
           conversationId: updatedContext.conversationId,
           customerId: updatedContext.customerId,
+          // Link the negotiation callback proposal to the classify call's
+          // ai_runs row (FK-satisfied) instead of null.
+          ...(event.aiRunId ? { aiRunId: event.aiRunId } : {}),
         },
       });
     }
@@ -577,6 +580,9 @@ function transitionIntentCapture(
         currentIntent: event.intentType,
         extractedEntities: event.entities,
         lastIntentConfidence: event.confidence,
+        // Carry the classify call's ai_runs id forward so the eventual
+        // create_proposal (after confirm) links the proposal to a REAL run.
+        ...(event.aiRunId ? { lastAiRunId: event.aiRunId } : {}),
         retryCount: 0,
       };
       return {
@@ -793,6 +799,10 @@ function transitionIntentConfirm(
             // Real classifier confidence (caller has also explicitly
             // confirmed the intent by this point) — see types.ts.
             confidence: context.lastIntentConfidence,
+            // Real ai_runs id from the classify call so the proposal builder
+            // sets proposals.ai_run_id to an actual row (FK-satisfied), not
+            // null. Omitted when the classify call had no persisted run.
+            ...(context.lastAiRunId ? { aiRunId: context.lastAiRunId } : {}),
           },
         },
       ],

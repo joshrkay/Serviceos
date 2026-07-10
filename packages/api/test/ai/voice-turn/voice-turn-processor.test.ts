@@ -214,6 +214,99 @@ describe('createVoiceTurnProcessor.speechTurn', () => {
     expect(session.proposalIds).toEqual([proposals[0]!.id]);
   });
 
+  // ─── Part A — real ai_run_id threads classify → event → payload → proposal ──
+
+  it("links the persisted proposal to the classify call's REAL ai_run_id", async () => {
+    const AI_RUN_ID = '11111111-1111-4111-8111-111111111111';
+    // Turn 1 = classify (surfaces the persisted ai_runs id, exactly as the
+    // real LLMGateway does after writing the row); turn 2 = confirmIntent
+    // "yes" and deliberately carries NO aiRunId — the proposal must reuse the
+    // classify turn's id captured in FSM context (lastAiRunId), not the
+    // confirm turn's.
+    const classify: LLMResponse = {
+      content: JSON.stringify({
+        intentType: 'create_invoice',
+        confidence: 0.95,
+        reasoning: 'matches keywords',
+        extractedEntities: { customerName: 'Acme' },
+      }),
+      model: 'mock-model',
+      provider: 'mock',
+      tokenUsage: { input: 1, output: 1, total: 2 },
+      latencyMs: 1,
+      aiRunId: AI_RUN_ID,
+    };
+    const confirm: LLMResponse = {
+      content: JSON.stringify({ answer: 'yes', reasoning: 'caller said yes' }),
+      model: 'mock-model',
+      provider: 'mock',
+      tokenUsage: { input: 1, output: 1, total: 2 },
+      latencyMs: 1,
+    };
+    let i = 0;
+    const seq = [classify, confirm];
+    const gateway = {
+      complete: vi.fn().mockImplementation(async () => seq[Math.min(i++, seq.length - 1)]),
+    } as unknown as LLMGateway;
+
+    const { processor, session, proposalRepo } = makeCtx({ gateway, withRepos: true });
+
+    await processor.speechTurn({
+      session,
+      speechResult: 'I need an invoice for Acme',
+      callSid: 'CA-test',
+      tenantId: 'tenant-abc',
+    });
+    await processor.speechTurn({
+      session,
+      speechResult: 'yes that is correct',
+      callSid: 'CA-test',
+      tenantId: 'tenant-abc',
+    });
+
+    const proposals = await proposalRepo.findByTenant('tenant-abc');
+    expect(proposals.length).toBe(1);
+    // The proposal carries the REAL run id (not null, not a fabricated uuid).
+    expect(proposals[0]!.aiRunId).toBe(AI_RUN_ID);
+    // …and findByAiRun links back to it (the auditability invariant).
+    const linked = await proposalRepo.findByAiRun('tenant-abc', AI_RUN_ID);
+    expect(linked.map((p) => p.id)).toContain(proposals[0]!.id);
+  });
+
+  it('leaves ai_run_id null (never fabricated) when the classify call surfaced no run id', async () => {
+    // Gateway persists no ai_runs row → no aiRunId on the response. The
+    // proposal must be born with a null ai_run_id, NOT a random uuid (a
+    // fabricated id violates proposals.ai_run_id's FK and silently drops the
+    // proposal on Postgres — the P0 this thread supersedes).
+    const gateway = makeGatewayWithSequence([
+      JSON.stringify({
+        intentType: 'create_invoice',
+        confidence: 0.95,
+        reasoning: 'matches keywords',
+        extractedEntities: { customerName: 'Acme' },
+      }),
+      JSON.stringify({ answer: 'yes', reasoning: 'caller said yes' }),
+    ]);
+    const { processor, session, proposalRepo } = makeCtx({ gateway, withRepos: true });
+
+    await processor.speechTurn({
+      session,
+      speechResult: 'I need an invoice for Acme',
+      callSid: 'CA-test',
+      tenantId: 'tenant-abc',
+    });
+    await processor.speechTurn({
+      session,
+      speechResult: 'yes that is correct',
+      callSid: 'CA-test',
+      tenantId: 'tenant-abc',
+    });
+
+    const proposals = await proposalRepo.findByTenant('tenant-abc');
+    expect(proposals.length).toBe(1);
+    expect(proposals[0]!.aiRunId).toBeUndefined();
+  });
+
   it('treats empty speech as confidence_low and does not call the gateway', async () => {
     const gateway = makeGatewayReturning('{}');
     const { processor, session } = makeCtx({ gateway, withRepos: true });
