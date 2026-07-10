@@ -1,7 +1,9 @@
 import Link from 'next/link';
 import type { Metadata } from 'next';
 import { Section } from '@/components/Section';
+import { JsonLd } from '@/components/JsonLd';
 import { pageMetadata } from '@/lib/metadata';
+import { breadcrumbJsonLd } from '@/lib/schema';
 
 export const metadata: Metadata = pageMetadata({
   title: 'How it works: AI answers, books & invoices',
@@ -96,6 +98,12 @@ const ONBOARDING = [
 export default function HowItWorksPage() {
   return (
     <>
+      <JsonLd
+        data={breadcrumbJsonLd([
+          { name: 'Home', path: '/' },
+          { name: 'How it works', path: '/how-it-works' },
+        ])}
+      />
       <Section as="div" className="pt-14">
         <div className="mx-auto max-w-3xl text-center">
           <p className="eyebrow">How it works</p>

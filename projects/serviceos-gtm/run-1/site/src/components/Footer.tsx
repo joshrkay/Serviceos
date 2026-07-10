@@ -5,7 +5,7 @@ export function Footer() {
   const year = new Date().getFullYear();
   return (
     <footer className="theme-dark mt-24 border-t border-border bg-bg text-fg">
-      <div className="container-page grid gap-10 py-12 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="container-page grid gap-10 py-12 sm:grid-cols-2 lg:grid-cols-5">
         <div className="space-y-4">
           <Link href="/" className="inline-flex min-h-11 items-center" aria-label="Rivet — home">
             {/* Dark lockup on the gunmetal footer (light steel hex, white wordmark, orange dome). */}

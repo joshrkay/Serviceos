@@ -4,8 +4,9 @@ import './globals.css';
 import { Header } from '@/components/Header';
 import { Footer } from '@/components/Footer';
 import { JsonLd } from '@/components/JsonLd';
-import { siteMetadataBase } from '@/lib/metadata';
-import { getSiteUrl, SITE_NAME } from '@/lib/site';
+import { siteMetadataBase, OG_IMAGE } from '@/lib/metadata';
+import { SITE_NAME } from '@/lib/site';
+import { organizationJsonLd } from '@/lib/schema';
 
 /**
  * Brand faces, loaded self-hosted via next/font (no render-blocking Google
@@ -38,26 +39,33 @@ export const metadata: Metadata = {
   metadataBase: siteMetadataBase,
   title: {
     default: 'Rivet ServiceOS — AI back office for HVAC & plumbing',
-    template: `%s · ${SITE_NAME}`,
+    template: `%s — ${SITE_NAME}`,
   },
   description:
     'An AI back office for 1–3-truck HVAC and plumbing shops. It answers the phone, books jobs, and sends estimates and invoices — you approve everything.',
   icons: {
     icon: [{ url: '/brand/favicon.svg', type: 'image/svg+xml' }],
   },
+  openGraph: {
+    type: 'website',
+    siteName: SITE_NAME,
+    title: 'Rivet ServiceOS — AI back office for HVAC & plumbing',
+    description:
+      'An AI back office for 1–3-truck HVAC and plumbing shops. It answers the phone, books jobs, and sends estimates and invoices — you approve everything.',
+    url: '/',
+    images: [OG_IMAGE],
+  },
+  twitter: {
+    card: 'summary_large_image',
+    title: 'Rivet ServiceOS — AI back office for HVAC & plumbing',
+    description:
+      'An AI back office for 1–3-truck HVAC and plumbing shops. It answers the phone, books jobs, and sends estimates and invoices — you approve everything.',
+    images: [OG_IMAGE.url],
+  },
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
-  const orgJsonLd = {
-    '@context': 'https://schema.org',
-    '@type': 'Organization',
-    name: 'Rivet',
-    alternateName: 'Rivet ServiceOS',
-    url: getSiteUrl(),
-    logo: `${getSiteUrl()}/brand/logo.svg`,
-    description:
-      'Rivet ServiceOS is an AI back office for one-to-three-truck HVAC and plumbing companies that answers the phone, books jobs, sends estimates and invoices by voice, and never acts without the owner’s approval.',
-  };
+  const orgJsonLd = organizationJsonLd();
 
   return (
     <html

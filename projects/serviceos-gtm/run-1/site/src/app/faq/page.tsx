@@ -3,9 +3,10 @@ import Link from 'next/link';
 import { Section } from '@/components/Section';
 import { JsonLd } from '@/components/JsonLd';
 import { pageMetadata } from '@/lib/metadata';
+import { faqPageJsonLd, breadcrumbJsonLd } from '@/lib/schema';
 
 export const metadata: Metadata = pageMetadata({
-  title: 'FAQ — Rivet ServiceOS AI Answering & Back Office',
+  title: 'FAQ: AI answering & back office questions',
   description:
     'Answers on how Rivet answers calls, drafts estimates, handles emergencies, prices, and what it cannot do yet — in plain language.',
   path: '/faq',
@@ -62,6 +63,10 @@ const FAQ_GROUPS: FaqGroup[] = [
         q: 'Does the AI ever guess at a price if it is not in your price book?',
         a: "No — that's a hard rule. Every AI-drafted line-item price is grounded in your own catalog. An uncatalogued line item gets flagged and its confidence is capped below the auto-approve threshold, so it always needs a human look before it goes out.",
       },
+      {
+        q: 'Does Rivet handle Google reviews?',
+        a: 'Yes. After a job, Rivet sends review requests with 4-star gating toward Google, monitors the Google reviews that come in, and drafts a response — a public reply, plus a private apology where one is warranted. Nothing posts publicly until you approve it.',
+      },
     ],
   },
   {
@@ -70,6 +75,10 @@ const FAQ_GROUPS: FaqGroup[] = [
       {
         q: 'What happens if someone calls with a real emergency?',
         a: 'The AI is built to detect emergency and vulnerability signals — medical situations, elderly callers, severe weather damage. When it does, it stops the normal booking flow and patches the call straight through to your phone instead of handling it automatically.',
+      },
+      {
+        q: 'Can Rivet’s AI negotiate a discount with a customer?',
+        a: 'No. The AI never discounts and never commits to a scope change — that’s a hard guardrail, not a setting you can turn on. If a caller pushes on price, it routes the decision to you rather than giving anything away on its own.',
       },
       {
         q: 'What does "human-approved proposal" actually mean in practice?',
@@ -139,21 +148,17 @@ const FAQ_GROUPS: FaqGroup[] = [
 ];
 
 export default function FaqPage() {
-  const faqJsonLd = {
-    '@context': 'https://schema.org',
-    '@type': 'FAQPage',
-    mainEntity: FAQ_GROUPS.flatMap((group) =>
-      group.items.map((item) => ({
-        '@type': 'Question',
-        name: item.q,
-        acceptedAnswer: { '@type': 'Answer', text: item.a },
-      })),
-    ),
-  };
+  const faqItems = FAQ_GROUPS.flatMap((group) => group.items.map((item) => ({ q: item.q, a: item.a })));
 
   return (
     <>
-      <JsonLd data={faqJsonLd} />
+      <JsonLd data={faqPageJsonLd(faqItems)} />
+      <JsonLd
+        data={breadcrumbJsonLd([
+          { name: 'Home', path: '/' },
+          { name: 'FAQ', path: '/faq' },
+        ])}
+      />
       <Section as="div" className="pt-16">
         <div className="mx-auto max-w-3xl text-center">
           <p className="eyebrow">FAQ</p>

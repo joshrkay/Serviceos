@@ -8,6 +8,7 @@ export default function sitemap(): MetadataRoute.Sitemap {
     '/',
     '/how-it-works',
     '/vs-jobber',
+    '/vs-housecall-pro',
     '/pricing',
     '/faq',
     '/resources',

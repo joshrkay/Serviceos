@@ -10,7 +10,8 @@
     "lint": "next lint",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "validate:schema": "node scripts/validate-schema.mjs"
   },
   "dependencies": {
     "next": "15.1.6",

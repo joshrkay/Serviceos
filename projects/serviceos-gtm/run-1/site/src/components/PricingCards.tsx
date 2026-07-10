@@ -8,9 +8,7 @@ import { PLANS, PLAN_ORDER, TRIAL_PERIOD_DAYS, type PlanId } from '@/lib/plans';
  * Prices, ids, and the "featured" flag come from lib/plans.ts (wired to
  * Stripe — never edited here). The scale framing and feature list below are
  * owned by this component: every plan ships the full product, so the copy
- * differentiates tiers by shop size, not by feature-gating. Do not read
- * plan.tagline / plan.features here — those fields are placeholders in
- * lib/plans.ts pending that file's own cleanup.
+ * differentiates tiers by shop size, not by feature-gating.
  */
 const SCALE_COPY: Record<PlanId, string> = {
   solo: 'One truck, no employees. You are the only approver.',

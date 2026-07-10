@@ -2,13 +2,16 @@ import Link from 'next/link';
 import type { Metadata } from 'next';
 import { Section } from '@/components/Section';
 import { CompareTable, type CompareGroup, type CompareSource } from '@/components/CompareTable';
+import { JsonLd } from '@/components/JsonLd';
 import { pageMetadata } from '@/lib/metadata';
+import { faqPageJsonLd, breadcrumbJsonLd } from '@/lib/schema';
 
 export const metadata: Metadata = pageMetadata({
-  title: 'Rivet vs Jobber: The AI Jobber Alternative',
+  title: 'Rivet vs Jobber: the AI Jobber alternative',
   description:
     'An honest Rivet vs Jobber comparison for 1–3-truck HVAC & plumbing shops: AI that answers the phone and does the paperwork, every action owner-approved.',
   path: '/vs-jobber',
+  titleAbsolute: true,
 });
 
 const SOURCES: CompareSource[] = [
@@ -150,6 +153,13 @@ const FAQS = [
 export default function VsJobberPage() {
   return (
     <>
+      <JsonLd data={faqPageJsonLd(FAQS)} />
+      <JsonLd
+        data={breadcrumbJsonLd([
+          { name: 'Home', path: '/' },
+          { name: 'Rivet vs Jobber', path: '/vs-jobber' },
+        ])}
+      />
       <Section as="div" className="pt-16">
         <div className="mx-auto max-w-3xl">
           <p className="eyebrow">Rivet vs Jobber</p>
@@ -163,6 +173,13 @@ export default function VsJobberPage() {
             invoice, with every action approved by you in one tap. Rivet is built for 1–3-truck HVAC
             and plumbing shops with no office staff; if you have a team that lives in a dashboard and
             want the biggest ecosystem, Jobber is likely the better fit.
+          </p>
+          <p className="mt-4 text-sm text-fg-muted">
+            Comparing something else?{' '}
+            <Link href="/vs-housecall-pro" className="text-link underline">
+              See Rivet vs Housecall Pro
+            </Link>
+            .
           </p>
         </div>
       </Section>

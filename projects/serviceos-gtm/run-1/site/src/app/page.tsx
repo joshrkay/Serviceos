@@ -2,10 +2,12 @@ import Link from 'next/link';
 import type { Metadata } from 'next';
 import { Section } from '@/components/Section';
 import { PricingCards } from '@/components/PricingCards';
+import { JsonLd } from '@/components/JsonLd';
 import { pageMetadata } from '@/lib/metadata';
+import { softwareApplicationJsonLd } from '@/lib/schema';
 
 export const metadata: Metadata = pageMetadata({
-  title: 'AI Answering Service for HVAC & Plumbing',
+  title: 'AI answering service for HVAC & plumbing',
   description:
     'AI answers your phone 24/7, books the job, drafts the estimate, and chases the invoice — you approve every action from your truck. Free 14-day trial.',
   path: '/',
@@ -113,6 +115,7 @@ function MoneyMomentMock() {
 export default function HomePage() {
   return (
     <>
+      <JsonLd data={softwareApplicationJsonLd()} />
       {/* HERO */}
       <Section as="div" className="pt-14 sm:pt-20">
         <div className="grid items-center gap-12 lg:grid-cols-2">
@@ -158,7 +161,25 @@ export default function HomePage() {
             Your browser can&rsquo;t play this video. It shows how Rivet answers a call, books the
             job, and sends the estimate.
           </video>
-          <figcaption className="mt-3 text-center text-sm text-fg-subtle">Product demo</figcaption>
+          <figcaption className="mt-3 text-center text-sm text-fg-subtle">
+            Real product footage — recorded in the Rivet app
+          </figcaption>
+        </figure>
+
+        <figure className="mx-auto mt-10 max-w-2xl">
+          <video
+            className="aspect-video w-full rounded-xl border border-border bg-surface-sunk"
+            controls
+            preload="none"
+            poster="/media/founder-poster.jpg"
+          >
+            <source src="/media/founder.mp4" type="video/mp4" />
+            Your browser can&rsquo;t play this video. It&rsquo;s a short note from the founder on
+            why Rivet exists.
+          </video>
+          <figcaption className="mt-3 text-center text-sm text-fg-subtle">
+            A note from the founder — why Rivet exists
+          </figcaption>
         </figure>
       </Section>
 

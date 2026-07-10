@@ -4,10 +4,11 @@ import { Section } from '@/components/Section';
 import { PricingCards } from '@/components/PricingCards';
 import { JsonLd } from '@/components/JsonLd';
 import { pageMetadata } from '@/lib/metadata';
-import { PLAN_ORDER, PLANS, TRIAL_PERIOD_DAYS } from '@/lib/plans';
+import { TRIAL_PERIOD_DAYS } from '@/lib/plans';
+import { softwareApplicationJsonLd, breadcrumbJsonLd, faqPageJsonLd } from '@/lib/schema';
 
 export const metadata: Metadata = pageMetadata({
-  title: 'Rivet Pricing — $299–$799/mo, 14-Day Free Trial',
+  title: 'Pricing: $299–$799/mo, 14-day free trial',
   description:
     'Rivet costs $299–$799 a month, flat — no per-conversation fees like a standalone AI answering service. 14-day free trial, cancel anytime.',
   path: '/pricing',
@@ -29,21 +30,16 @@ const PRICING_FAQ = [
 ];
 
 export default function PricingPage() {
-  const productJsonLd = {
-    '@context': 'https://schema.org',
-    '@type': 'Product',
-    name: 'Rivet ServiceOS subscription',
-    offers: PLAN_ORDER.map((id) => ({
-      '@type': 'Offer',
-      name: PLANS[id].name,
-      price: (PLANS[id].priceCents / 100).toFixed(2),
-      priceCurrency: 'USD',
-    })),
-  };
-
   return (
     <>
-      <JsonLd data={productJsonLd} />
+      <JsonLd data={softwareApplicationJsonLd()} />
+      <JsonLd data={faqPageJsonLd(PRICING_FAQ)} />
+      <JsonLd
+        data={breadcrumbJsonLd([
+          { name: 'Home', path: '/' },
+          { name: 'Pricing', path: '/pricing' },
+        ])}
+      />
       <Section as="div" className="pt-16">
         <div className="mx-auto max-w-3xl text-center">
           <p className="eyebrow">Pricing</p>

@@ -5,7 +5,7 @@ import { SignupForm } from '@/components/SignupForm';
 import { pageMetadata } from '@/lib/metadata';
 
 export const metadata: Metadata = pageMetadata({
-  title: 'Start Your Free Trial — Rivet ServiceOS',
+  title: 'Start your free 14-day trial',
   description:
     'Start a 14-day free trial of Rivet. Card required, nothing charged until day 15, cancel in two clicks.',
   path: '/signup',

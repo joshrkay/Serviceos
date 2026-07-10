@@ -3,7 +3,7 @@ import { Section } from '@/components/Section';
 import { pageMetadata } from '@/lib/metadata';
 
 export const metadata: Metadata = pageMetadata({
-  title: 'Terms of Service (Draft) — Rivet ServiceOS',
+  title: 'Terms of service (draft)',
   description: 'Draft terms of service for the Rivet trial and billing — not yet reviewed by counsel.',
   path: '/legal/terms',
 });

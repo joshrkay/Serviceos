@@ -4,9 +4,10 @@ import type { ReactNode } from 'react';
 import { notFound } from 'next/navigation';
 import { Section } from '@/components/Section';
 import { JsonLd } from '@/components/JsonLd';
-import { pageMetadata } from '@/lib/metadata';
+import { pageMetadata, OG_IMAGE } from '@/lib/metadata';
 import { allArticleSlugs, getArticle, getRelatedArticles, type ArticleBlock } from '@/lib/articles';
 import { SITE_NAME } from '@/lib/site';
+import { articleJsonLd, faqPageJsonLd, breadcrumbJsonLd, plainText } from '@/lib/schema';
 
 // Statically generate every article at build time.
 export function generateStaticParams() {
@@ -28,6 +29,9 @@ export async function generateMetadata({
     title: article.title,
     description: article.description,
     path: `/resources/${article.slug}`,
+    // Article headlines already read as complete titles (and several would run
+    // past 60 chars with a "— Rivet" suffix), so use them verbatim.
+    titleAbsolute: true,
   });
 
   // Articles are OG type "article" (not the default "website"), with the
@@ -42,6 +46,7 @@ export async function generateMetadata({
       type: 'article',
       publishedTime: article.publishedAt,
       authors: [article.author],
+      images: [OG_IMAGE],
     },
   };
 }
@@ -168,39 +173,38 @@ export default async function ArticlePage({ params }: { params: Promise<{ slug: 
   const article = getArticle(slug);
   if (!article) notFound();
 
-  const articleJsonLd = {
-    '@context': 'https://schema.org',
-    '@type': 'Article',
-    headline: article.title,
+  const articleLd = articleJsonLd({
+    title: article.title,
     description: article.description,
     datePublished: article.publishedAt,
-    author: { '@type': 'Organization', name: article.author },
-    publisher: { '@type': 'Organization', name: SITE_NAME },
-  };
+    authorName: article.author,
+    path: `/resources/${article.slug}`,
+  });
+
+  const breadcrumbLd = breadcrumbJsonLd([
+    { name: 'Home', path: '/' },
+    { name: 'Resources', path: '/resources' },
+    { name: article.title, path: `/resources/${article.slug}` },
+  ]);
 
   const faqItems = article.body
     .filter((b): b is Extract<ArticleBlock, { kind: 'faq' }> => b.kind === 'faq')
     .flatMap((b) => b.items);
 
-  const faqJsonLd =
+  // Answer text is collapsed to plain text (markdown links → their label) so
+  // the FAQPage JSON-LD matches the rendered answer exactly (Google parity).
+  const faqLd =
     faqItems.length > 0
-      ? {
-          '@context': 'https://schema.org',
-          '@type': 'FAQPage',
-          mainEntity: faqItems.map((item) => ({
-            '@type': 'Question',
-            name: item.question,
-            acceptedAnswer: { '@type': 'Answer', text: item.answer },
-          })),
-        }
+      ? faqPageJsonLd(faqItems.map((item) => ({ q: item.question, a: plainText(item.answer) })))
       : null;
 
   const related = getRelatedArticles(article, 3);
 
   return (
     <>
-      <JsonLd data={articleJsonLd} />
-      {faqJsonLd && <JsonLd data={faqJsonLd} />}
+      <JsonLd data={articleLd} />
+      <JsonLd data={breadcrumbLd} />
+      {faqLd && <JsonLd data={faqLd} />}
       <Section as="div" className="pt-16">
         <article className="mx-auto max-w-2xl">
           <p className="eyebrow">{article.category}</p>

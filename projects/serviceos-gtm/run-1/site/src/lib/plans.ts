@@ -10,58 +10,38 @@ export interface Plan {
   name: string;
   priceCents: number;
   priceLabel: string;
-  tagline: string;
   /** Env var name that supplies the Stripe Price ID for this plan. */
   priceEnvVar: `STRIPE_PRICE_ID_${'SOLO' | 'SHOP' | 'PRO'}`;
   featured?: boolean;
-  features: string[];
 }
 
 export const TRIAL_PERIOD_DAYS = 14;
 
+// Note: the plan differentiator is shop size, not feature-gating — every plan
+// ships the full product. The per-tier scale copy and the shared feature list
+// live in PricingCards.tsx, so this catalog carries only pricing + Stripe wiring.
 export const PLANS: Record<PlanId, Plan> = {
   solo: {
     id: 'solo',
     name: 'Solo',
     priceCents: 29900,
     priceLabel: '$299',
-    tagline: 'Owner-operator, one truck.',
     priceEnvVar: 'STRIPE_PRICE_ID_SOLO',
-    features: [
-      /* COPY-TODO: real feature list */
-      'Placeholder feature one',
-      'Placeholder feature two',
-      'Placeholder feature three',
-    ],
   },
   shop: {
     id: 'shop',
     name: 'Shop',
     priceCents: 49900,
     priceLabel: '$499',
-    tagline: 'Small crew, growing book of work.',
     priceEnvVar: 'STRIPE_PRICE_ID_SHOP',
     featured: true,
-    features: [
-      /* COPY-TODO: real feature list */
-      'Everything in Solo',
-      'Placeholder feature two',
-      'Placeholder feature three',
-    ],
   },
   pro: {
     id: 'pro',
     name: 'Pro',
     priceCents: 79900,
     priceLabel: '$799',
-    tagline: 'Multi-crew operation running at volume.',
     priceEnvVar: 'STRIPE_PRICE_ID_PRO',
-    features: [
-      /* COPY-TODO: real feature list */
-      'Everything in Shop',
-      'Placeholder feature two',
-      'Placeholder feature three',
-    ],
   },
 };
 

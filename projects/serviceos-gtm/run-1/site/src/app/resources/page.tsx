@@ -1,11 +1,13 @@
 import Link from 'next/link';
 import type { Metadata } from 'next';
 import { Section } from '@/components/Section';
+import { JsonLd } from '@/components/JsonLd';
 import { pageMetadata } from '@/lib/metadata';
+import { breadcrumbJsonLd } from '@/lib/schema';
 import { ARTICLES, articleCategories, type Article } from '@/lib/articles';
 
 export const metadata: Metadata = pageMetadata({
-  title: 'Resources — guides for owner-operator home-service businesses',
+  title: 'Resources for HVAC & plumbing owner-operators',
   description:
     'Honest guides on AI receptionists, missed calls, and software for 1-3-truck HVAC and plumbing shops — including where Rivet fits and where it doesn\'t.',
   path: '/resources',
@@ -36,6 +38,12 @@ export default function ResourcesPage() {
 
   return (
     <>
+      <JsonLd
+        data={breadcrumbJsonLd([
+          { name: 'Home', path: '/' },
+          { name: 'Resources', path: '/resources' },
+        ])}
+      />
       <Section as="div" className="pt-16">
         <div className="mx-auto max-w-3xl text-center">
           <p className="eyebrow">Resources</p>

@@ -3,7 +3,7 @@ import { Section } from '@/components/Section';
 import { pageMetadata } from '@/lib/metadata';
 
 export const metadata: Metadata = pageMetadata({
-  title: 'Privacy Policy (Draft) — Rivet ServiceOS',
+  title: 'Privacy policy (draft)',
   description: 'Draft privacy policy for the Rivet marketing site — not yet reviewed by counsel.',
   path: '/legal/privacy',
 });

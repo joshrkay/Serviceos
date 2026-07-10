@@ -6,7 +6,7 @@ import { SessionIdNote } from '@/components/SessionIdNote';
 import { pageMetadata } from '@/lib/metadata';
 
 export const metadata: Metadata = pageMetadata({
-  title: 'Your Trial Is Live — Rivet ServiceOS',
+  title: 'Your trial is live',
   description: 'Your 14-day Rivet trial is live. Here is what happens next, from business setup to your first AI-handled call.',
   path: '/signup/success',
 });

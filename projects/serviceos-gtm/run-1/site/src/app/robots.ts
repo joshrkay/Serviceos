@@ -25,8 +25,17 @@ export default function robots(): MetadataRoute.Robots {
     };
   }
 
+  // Production: index everything except internal / transactional / API paths
+  // that must never surface in search (they carry no marketing value and some
+  // are noindexed reviewer-only pages).
   return {
-    rules: [{ userAgent: '*', allow: '/' }],
+    rules: [
+      {
+        userAgent: '*',
+        allow: '/',
+        disallow: ['/api/', '/nurture-preview', '/signup/demo-checkout', '/go-live-pending'],
+      },
+    ],
     sitemap: `${base}/sitemap.xml`,
     host: base,
   };

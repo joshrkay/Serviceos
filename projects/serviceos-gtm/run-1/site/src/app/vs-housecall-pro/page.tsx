@@ -2,13 +2,16 @@ import Link from 'next/link';
 import type { Metadata } from 'next';
 import { Section } from '@/components/Section';
 import { CompareTable, type CompareGroup, type CompareSource } from '@/components/CompareTable';
+import { JsonLd } from '@/components/JsonLd';
 import { pageMetadata } from '@/lib/metadata';
+import { faqPageJsonLd, breadcrumbJsonLd } from '@/lib/schema';
 
 export const metadata: Metadata = pageMetadata({
-  title: 'Housecall Pro Alternative: Rivet vs HCP',
+  title: 'Housecall Pro alternative: Rivet vs HCP',
   description:
     'Honest Rivet vs Housecall Pro comparison for small HVAC & plumbing shops: AI answers calls and closes the back-office loop, every action owner-approved.',
   path: '/vs-housecall-pro',
+  titleAbsolute: true,
 });
 
 const SOURCES: CompareSource[] = [
@@ -145,6 +148,13 @@ const FAQS = [
 export default function VsHousecallProPage() {
   return (
     <>
+      <JsonLd data={faqPageJsonLd(FAQS)} />
+      <JsonLd
+        data={breadcrumbJsonLd([
+          { name: 'Home', path: '/' },
+          { name: 'Rivet vs Housecall Pro', path: '/vs-housecall-pro' },
+        ])}
+      />
       <Section as="div" className="pt-16">
         <div className="mx-auto max-w-3xl">
           <p className="eyebrow">Rivet vs Housecall Pro</p>
@@ -158,6 +168,13 @@ export default function VsHousecallProPage() {
             estimate and invoice, with every action approved by you in one tap. Rivet is built for
             1–3-truck HVAC and plumbing shops with no office staff; if you have a team that lives in a
             dashboard and want the biggest ecosystem, Housecall Pro is likely the better fit.
+          </p>
+          <p className="mt-4 text-sm text-fg-muted">
+            Comparing something else?{' '}
+            <Link href="/vs-jobber" className="text-link underline">
+              See Rivet vs Jobber
+            </Link>
+            .
           </p>
         </div>
       </Section>
