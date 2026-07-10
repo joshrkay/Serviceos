@@ -50,6 +50,10 @@ export const TASK_TYPES = [
   'extract_team',
   'extract_schedule',
   'supervisor_annotate',
+  // N-004 (P2-037) — Supervisor Agent review pass. Pinned to the lightweight
+  // tier so the reviewer is a DIFFERENT, cheaper model than the complex-tier
+  // drafting tasks it reviews (see assertSupervisorReviewModelDistinct).
+  'supervisor_review',
   'intent_classification',
   'call_sentiment',
   'grade_vulnerability',
@@ -89,6 +93,7 @@ const DEFAULT_TASK_TIER_MAPPING: Record<TaskType, ModelTier> = {
   extract_team: 'lightweight',
   extract_schedule: 'lightweight',
   supervisor_annotate: 'lightweight',
+  supervisor_review: 'lightweight',
   intent_classification: 'lightweight',
   call_sentiment: 'lightweight',
   grade_vulnerability: 'lightweight',
@@ -152,6 +157,48 @@ function visionCapableModelSet(): string[] {
     .map((s) => s.trim().toLowerCase())
     .filter(Boolean);
   return [...DEFAULT_VISION_CAPABLE_MODELS.map((m) => m.toLowerCase()), ...fromEnv];
+}
+
+/**
+ * N-004 (P2-037) — resolve the model a task type routes to under a config.
+ * Small helper used by the "supervisor reviewer ≠ primary drafting model"
+ * invariant below and by the reviewer wiring to pin the logged model id.
+ */
+export function resolveModelForTaskType(
+  config: AIRoutingConfig,
+  taskType: string,
+): string {
+  const tier = config.taskTierMapping[taskType] ?? 'standard';
+  return config.tiers[tier].model;
+}
+
+/**
+ * N-004 (P2-037) acceptance ("different model than the primary task",
+ * docs/PRD.md:703). The supervisor reviewer is pinned to the lightweight tier
+ * and the high-stakes drafting tasks (draft_estimate / draft_invoice / …) to
+ * complex. A same-model reviewer is DEGRADED, not broken (the deterministic
+ * checks still run), so this returns the collision rather than throwing — the
+ * boot wiring (app.ts) logs a loud warning and still installs the gate. Returns
+ * null when the reviewer model is distinct from every primary drafting model.
+ */
+export const SUPERVISOR_PRIMARY_DRAFTING_TASKS: readonly string[] = [
+  'draft_estimate',
+  'draft_invoice',
+  'update_estimate',
+  'update_invoice',
+  'mms_estimate',
+];
+
+export function assertSupervisorReviewModelDistinct(
+  config: AIRoutingConfig = DEFAULT_AI_ROUTING_CONFIG,
+): { reviewModel: string; collidingTask: string } | null {
+  const reviewModel = resolveModelForTaskType(config, 'supervisor_review');
+  for (const task of SUPERVISOR_PRIMARY_DRAFTING_TASKS) {
+    if (resolveModelForTaskType(config, task) === reviewModel) {
+      return { reviewModel, collidingTask: task };
+    }
+  }
+  return null;
 }
 
 /**

@@ -5,6 +5,7 @@ import { Proposal, ProposalRepository, createProposal, CreateProposalInput, Prop
 import { assertValidProposalPayload } from '../proposals/contracts';
 import { isSupervisorPresent } from '../ai/supervisor-presence';
 import { routeUnsupervisedProposal, confidenceMetaBlocksAutoApprove } from '../proposals/auto-approve';
+import { getSupervisorReviewGate } from '../ai/supervisor/review-gate';
 import {
   AUTONOMOUS_LANE_PROPOSAL_TYPES,
   autonomousLaneEvaluationFor,
@@ -1631,9 +1632,28 @@ async function processChain(
   // (`suppressApproveLink`): no token minted, anchored
   // `review_required_rendered`, renderChainSms emits the matching copy.
   const head = built[0].proposal;
+
+  // N-004 (P2-037) — supervisor review pass on the chain head before dispatch
+  // (same chokepoint as the single-action path). Fail-open; a hold suppresses
+  // the chain's owner SMS below.
+  let supervisorHold = false;
+  const reviewGate = getSupervisorReviewGate();
+  if (reviewGate) {
+    try {
+      supervisorHold = (await reviewGate.review({ proposal: head })).hold;
+    } catch (err) {
+      log.warn('voice-action-router: chain supervisor review gate failed, dispatching', {
+        chainId,
+        headProposalId: head.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   if (
     deps.unsupervisedRouting &&
     !supervisorPresent &&
+    !supervisorHold &&
     (head.status === 'ready_for_review' || head.status === 'draft')
   ) {
     const ur = deps.unsupervisedRouting;
@@ -1907,9 +1927,31 @@ export function createVoiceActionRouterWorker(
         // (`queue_and_sms` default → one-tap approve SMS to the owner) and
         // emit the `unsupervised_proposal_routed` audit event. Best-effort:
         // a routing failure never fails the (already persisted) proposal.
+        // N-004 (P2-037) — Supervisor Agent review pass at the AMEND P2-007
+        // "before SMS dispatch" chokepoint. Awaited inline (≤60s hard budget,
+        // fail-open). The gate owns its own side effects (checks, ai_runs,
+        // supervisor_reviews, markers, alert). A hold (enforce mode + a
+        // customer-harm critical) forces the proposal to draft inside the gate
+        // and suppresses the dispatch below; every other outcome dispatches
+        // normally. Unconfigured gate ⇒ no-op (byte-identical to before).
+        let supervisorHold = false;
+        const reviewGate = getSupervisorReviewGate();
+        if (reviewGate && outcome.proposal.status === 'ready_for_review') {
+          try {
+            const res = await reviewGate.review({ proposal: outcome.proposal });
+            supervisorHold = res.hold;
+          } catch (err) {
+            log.warn('voice-action-router: supervisor review gate failed, dispatching', {
+              proposalId: outcome.proposal.id,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
+
         if (
           deps.unsupervisedRouting &&
           !outcome.supervisorPresent &&
+          !supervisorHold &&
           outcome.proposal.status === 'ready_for_review'
         ) {
           const ur = deps.unsupervisedRouting;

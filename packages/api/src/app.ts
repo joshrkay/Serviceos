@@ -543,6 +543,23 @@ import {
   runSupervisorAnnotationSweep,
   SUPERVISOR_ANNOTATE_SWEEP_INTERVAL_MS,
 } from './workers/supervisor-review-worker';
+// N-004 (P2-037) — Supervisor Agent review pass (four-check pre-dispatch gate).
+import { configureSupervisorReviewGate } from './ai/supervisor/review-gate';
+import { createSupervisorReviewGate } from './ai/supervisor/reviewer';
+import {
+  InMemorySupervisorReviewRepository,
+  PgSupervisorReviewRepository,
+} from './ai/supervisor/reviews-repo';
+import { PgPricingBaselineResolver } from './ai/supervisor/pricing-baseline';
+import {
+  DEFAULT_SUPERVISOR_REVIEW_MODE,
+  type SupervisorReviewMode,
+} from './ai/supervisor/types';
+import {
+  DEFAULT_AI_ROUTING_CONFIG,
+  resolveModelForTaskType,
+  assertSupervisorReviewModelDistinct,
+} from './config/ai-routing';
 import { ProposalExecutor } from './proposals/execution/executor';
 import { IdempotencyGuard } from './proposals/execution/idempotency';
 import {
@@ -5786,6 +5803,70 @@ export function createApp(): express.Express {
   // Never uninstalled on shutdown — benign: fail-open + fire-and-forget.
   // Tests must reset via configureSupervisorCreationHook(null).
   configureSupervisorCreationHook(supervisorService);
+
+  // N-004 (P2-037) — install the four-check pre-dispatch review gate.
+  // Default mode is shadow (compute + log + mark, never hold) — the safe
+  // default given alert-fatigue is the named risk; SUPERVISOR_REVIEW_MODE can
+  // promote a deploy to 'enforce' (holds active on customer-harm criticals) or
+  // 'off'. Boot-time invariant: the reviewer model must differ from the primary
+  // drafting model (a same-model reviewer is degraded, not broken — warn + run).
+  const supervisorReviewModel = resolveModelForTaskType(
+    DEFAULT_AI_ROUTING_CONFIG,
+    'supervisor_review',
+  );
+  const modelCollision = assertSupervisorReviewModelDistinct(DEFAULT_AI_ROUTING_CONFIG);
+  if (modelCollision) {
+    supervisorLogger.warn(
+      'supervisor-review: reviewer model equals a primary drafting model (degraded)',
+      modelCollision,
+    );
+  }
+  const envReviewMode = (process.env.SUPERVISOR_REVIEW_MODE ?? '').trim();
+  const supervisorReviewMode: SupervisorReviewMode =
+    envReviewMode === 'off' || envReviewMode === 'shadow' || envReviewMode === 'enforce'
+      ? envReviewMode
+      : DEFAULT_SUPERVISOR_REVIEW_MODE;
+  const supervisorPricingBaseline = pool ? new PgPricingBaselineResolver(pool) : null;
+  configureSupervisorReviewGate(
+    createSupervisorReviewGate({
+      gateway: llmGateway,
+      aiRunRepo,
+      reviewsRepo: pool
+        ? new PgSupervisorReviewRepository(pool)
+        : new InMemorySupervisorReviewRepository(),
+      proposalRepo,
+      supervisorModel: supervisorReviewModel,
+      resolveMode: async () => supervisorReviewMode,
+      ...(supervisorPricingBaseline
+        ? { resolveBaseline: (p) => supervisorPricingBaseline.resolve(p.tenantId) }
+        : {}),
+      resolveAccountType: async (p) => {
+        const payload = (p.payload ?? {}) as Record<string, unknown>;
+        const src = (p.sourceContext ?? {}) as Record<string, unknown>;
+        const customerId =
+          (typeof payload.customerId === 'string' && payload.customerId) ||
+          (typeof src.customerId === 'string' && src.customerId) ||
+          null;
+        if (!customerId) return null;
+        try {
+          const customer = await customerRepo.findById(p.tenantId, customerId);
+          return customer?.accountType ?? null;
+        } catch {
+          return null;
+        }
+      },
+      resolveBannedPhrases: async (tenantId) => {
+        try {
+          const settings = await settingsRepo.findByTenant(tenantId);
+          return settings?.brandVoice?.banned_phrases ?? [];
+        } catch {
+          return [];
+        }
+      },
+      logger: supervisorLogger,
+    }),
+  );
+
   // Close the executed-spend loop declared next to the ProposalExecutor.
   supervisorSpendRecorder = (tenantId, proposalId) =>
     recordExecutedProposalSpend({

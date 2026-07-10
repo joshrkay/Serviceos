@@ -5973,6 +5973,38 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_estimates_tenant_sent_at
       ON estimates (tenant_id, sent_at) WHERE sent_at IS NOT NULL;
   `,
+
+  // N-004 (P2-037) — Supervisor Agent review pass ledger. One row per
+  // pre-dispatch review (missed-urgency / pricing-anomaly / brand-voice-drift /
+  // account-routing). ai_run_id FKs the single lightweight-tier LLM run the
+  // review made (nullable: deterministic-only reviews never call a model, and
+  // ON DELETE SET NULL keeps the review row if the ai_runs row is pruned).
+  // `shadow=true` marks a computed-but-not-enforced review; `critical` records
+  // a customer-harm finding even when shadow mode did not hold. Follows the
+  // 167_create_supervisor_policies FORCE-RLS + tenant-isolation shape.
+  '242_create_supervisor_reviews': `
+    CREATE TABLE IF NOT EXISTS supervisor_reviews (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      proposal_id UUID NOT NULL REFERENCES proposals(id),
+      ai_run_id UUID REFERENCES ai_runs(id) ON DELETE SET NULL,
+      model TEXT NOT NULL,
+      verdict TEXT NOT NULL CHECK (verdict IN ('pass', 'flag', 'hold', 'timeout', 'error')),
+      critical BOOLEAN NOT NULL DEFAULT false,
+      checks JSONB NOT NULL DEFAULT '{}',
+      flags JSONB NOT NULL DEFAULT '[]',
+      latency_ms INTEGER,
+      shadow BOOLEAN NOT NULL DEFAULT false,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_supervisor_reviews_tenant ON supervisor_reviews(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_supervisor_reviews_proposal ON supervisor_reviews(proposal_id);
+    CREATE INDEX IF NOT EXISTS idx_supervisor_reviews_created ON supervisor_reviews(tenant_id, created_at);
+    ALTER TABLE supervisor_reviews ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE supervisor_reviews FORCE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_supervisor_reviews ON supervisor_reviews
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
