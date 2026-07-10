@@ -25,9 +25,26 @@ export async function identifyCaller(input: IdentifyCallerInput): Promise<Identi
     return { status: 'unknown' };
   }
 
+  // The `customers.phone_normalized` generated column (migration
+  // 053_p8_customers_phone_index) is `regexp_replace(primary_phone,
+  // '[^0-9]', '', 'g')` — it strips punctuation but KEEPS the leading
+  // country-code 1, so a customer saved as "+15125550111" stores
+  // "15125550111" while one saved as "5125550111" stores "5125550111".
+  // `normalizePhone` above drops the leading 1 (10-digit bare key), so a
+  // plain `phone_normalized = $2` equality misses every +1 E.164
+  // customer. Match on the trailing-10 digits from BOTH sides so the two
+  // conventions reconcile, mirroring the proven predicate in
+  // PgCustomerRepository.findByPhoneNormalized. The `length >= 7` floor
+  // avoids the empty-suffix `LIKE '%'` over-match; tenant_id stays the
+  // first predicate and the query still targets the indexed column.
+  const tail = normalized.slice(-10);
   const result = await pool.query<{ id: string; display_name: string }>(
-    'SELECT id, display_name FROM customers WHERE tenant_id = $1 AND phone_normalized = $2',
-    [tenantId, normalized]
+    `SELECT id, display_name FROM customers
+      WHERE tenant_id = $1
+        AND phone_normalized IS NOT NULL
+        AND length(phone_normalized) >= 7
+        AND (right(phone_normalized, 10) = $2 OR $2 LIKE '%' || phone_normalized)`,
+    [tenantId, tail]
   );
 
   if (result.rows.length === 0) {
