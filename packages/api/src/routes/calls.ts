@@ -25,6 +25,7 @@ const CALL_ERROR_STATUS: Record<OutboundCallErrorCode, number> = {
   not_found: 404,
   no_recipient: 422,
   dnc_blocked: 403,
+  consent_blocked: 403,
   not_configured: 503,
   provider_failed: 502,
 };

@@ -413,6 +413,7 @@ import { MessageDeliveryReviewPrivateMessageSender } from './reputation/private-
 import { SettingsBrandVoiceLoader } from './reputation/settings-brand-voice-loader';
 import { PgCustomerLoader } from './reputation/match-customer';
 import { createCredentialResolver, getTenantTwilioCreds } from './integrations/credentials';
+import { checkOutboundConsent, type OutboundConsentContext } from './voice/outbound-consent';
 import { InMemoryAgreementRepository } from './agreements/agreement';
 import { PgAgreementRepository } from './agreements/pg-agreement';
 import { InMemoryCustomerPaymentMethodRepository } from './payments/customer-payment-method';
@@ -3374,6 +3375,12 @@ export function createApp(): express.Express {
           logger: requestLogger,
           getCreds: (tid: string) => getTenantTwilioCreds(tid, pool),
           publicApiUrl: process.env.PUBLIC_API_URL,
+          // TCPA express-consent gate — off by default (prod behavior unchanged).
+          // The gate must NOT emit its own audit event; initiateOutboundCall owns
+          // the consent-decision audit, so bind checkOutboundConsent WITHOUT an
+          // auditRepo (otherwise 'warn' mode would record a false "blocked").
+          consentEnforcement: config.TCPA_CONSENT_ENFORCEMENT,
+          checkConsent: (ctx: OutboundConsentContext) => checkOutboundConsent({ pool }, ctx),
         }
       : undefined;
   app.use(

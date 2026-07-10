@@ -12,6 +12,10 @@
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { type Logger } from '../logging/logger';
 import { DncRepository, normalizePhone } from '../compliance/dnc';
+import type {
+  OutboundConsentContext,
+  OutboundConsentResult,
+} from '../voice/outbound-consent';
 import type { CustomerRepository } from '../customers/customer';
 import {
   ConversationRepository,
@@ -24,8 +28,12 @@ export type OutboundCallErrorCode =
   | 'not_found'
   | 'no_recipient'
   | 'dnc_blocked'
+  | 'consent_blocked'
   | 'not_configured'
   | 'provider_failed';
+
+/** TCPA/DNC express-consent enforcement mode (config `TCPA_CONSENT_ENFORCEMENT`). */
+export type ConsentEnforcementMode = 'off' | 'warn' | 'block';
 
 export class OutboundCallError extends Error {
   constructor(
@@ -51,6 +59,23 @@ export interface OutboundCallDeps {
   /** Override Twilio REST host for tests. */
   apiBaseUrl?: string;
   logger?: Logger;
+  /**
+   * TCPA/DNC express-consent enforcement mode (config `TCPA_CONSENT_ENFORCEMENT`).
+   * Defaults to 'off' when absent, which preserves prior behavior exactly: only
+   * the `dncRepo.isOnDnc` opt-out check runs. 'warn' and 'block' additionally
+   * consult {@link checkConsent}. Off-by-default so production is unchanged
+   * until an operator opts in.
+   */
+  consentEnforcement?: ConsentEnforcementMode;
+  /**
+   * Per-customer TCPA/DNC consent gate. Injected for testability; in production
+   * bound to `checkOutboundConsent` over the tenant pool. Consulted ONLY when
+   * `consentEnforcement` is 'warn' or 'block'. Absent ⇒ the gate is skipped
+   * (equivalent to 'off'). This function must NOT emit its own audit event —
+   * `initiateOutboundCall` owns the consent-decision audit so 'warn' mode
+   * doesn't record a misleading "blocked" event.
+   */
+  checkConsent?: (ctx: OutboundConsentContext) => Promise<OutboundConsentResult>;
 }
 
 export interface InitiateOutboundCallInput {
@@ -109,6 +134,63 @@ export async function initiateOutboundCall(
 
   if (await deps.dncRepo.isOnDnc(input.tenantId, normalizePhone(customerPhone))) {
     throw new OutboundCallError('dnc_blocked', 'This customer has opted out of contact');
+  }
+
+  // TCPA / DNC express-consent gate (config `TCPA_CONSENT_ENFORCEMENT`).
+  // Off by default: production behaves exactly as before (the DNC opt-out check
+  // above is the only gate). Only when an operator opts into 'warn' or 'block'
+  // does the per-customer express-consent gate run. Runs BEFORE any Twilio call
+  // or conversation write, so a block never places a call or logs a message.
+  const consentMode = deps.consentEnforcement ?? 'off';
+  if (consentMode !== 'off' && deps.checkConsent) {
+    const consent = await deps.checkConsent({
+      tenantId: input.tenantId,
+      phoneE164: customerPhone,
+      actorId: input.actorId,
+      actorRole: input.actorRole,
+    });
+    const decision = consent.allowed
+      ? 'granted'
+      : consentMode === 'block'
+        ? 'blocked'
+        : 'warned';
+    if (!consent.allowed) {
+      deps.logger?.warn('outbound call consent gate denied', {
+        tenantId: input.tenantId,
+        customerId: input.customerId,
+        phone: maskPhone(customerPhone),
+        reason: consent.reason,
+        mode: consentMode,
+        decision,
+      });
+    }
+    // Audit every consent decision (granted/warned/blocked) per the audit
+    // invariant. Only emitted when enforcement is on, so 'off' stays silent.
+    if (deps.auditRepo) {
+      await deps.auditRepo.create(
+        createAuditEvent({
+          tenantId: input.tenantId,
+          actorId: input.actorId,
+          actorRole: input.actorRole,
+          eventType: `call.consent_${decision}`,
+          entityType: 'customer',
+          entityId: input.customerId,
+          metadata: {
+            reason: consent.reason ?? null,
+            message: consent.message ?? '',
+            mode: consentMode,
+            decision,
+          },
+        }),
+      );
+    }
+    if (!consent.allowed && consentMode === 'block') {
+      throw new OutboundCallError(
+        'consent_blocked',
+        consent.message ?? 'Customer has not granted call consent',
+      );
+    }
+    // 'warn' + denied → observability only; fall through and place the call.
   }
 
   let creds: TenantTwilioCreds;

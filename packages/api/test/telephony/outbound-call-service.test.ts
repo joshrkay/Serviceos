@@ -153,6 +153,81 @@ describe('initiateOutboundCall', () => {
   });
 });
 
+describe('initiateOutboundCall — TCPA consent gate (TCPA_CONSENT_ENFORCEMENT)', () => {
+  const DENIED = { allowed: false as const, reason: 'customer_not_found' as const, message: 'No consent on file' };
+
+  function auditRepo() {
+    const events: Array<Record<string, unknown>> = [];
+    return { repo: { create: vi.fn(async (e: Record<string, unknown>) => { events.push(e); return e; }) }, events };
+  }
+
+  it("'off' (default): places the call even without consent and never runs the gate (prod-parity)", async () => {
+    const checkConsent = vi.fn().mockResolvedValue(DENIED);
+    const { repo, events } = auditRepo();
+    // consentEnforcement omitted → defaults to 'off'.
+    const e = buildDeps({ checkConsent, auditRepo: repo });
+    const result = await initiateOutboundCall(e.deps, input);
+
+    expect(result.callSid).toBe('CA123');
+    expect(e.fetchMock).toHaveBeenCalledTimes(1);
+    // Gate is skipped entirely when off — checkConsent is never consulted.
+    expect(checkConsent).not.toHaveBeenCalled();
+    // No consent audit events emitted in off mode.
+    expect(events.some((ev) => String(ev.eventType).startsWith('call.consent_'))).toBe(false);
+  });
+
+  it("'block': refuses a non-consented number with consent_blocked, never calls Twilio, audits the block", async () => {
+    const checkConsent = vi.fn().mockResolvedValue(DENIED);
+    const { repo, events } = auditRepo();
+    const logger = { warn: vi.fn(), info: vi.fn(), error: vi.fn(), debug: vi.fn() };
+    const e = buildDeps({ consentEnforcement: 'block', checkConsent, auditRepo: repo, logger: logger as never });
+
+    await expect(initiateOutboundCall(e.deps, input)).rejects.toMatchObject({ code: 'consent_blocked' });
+    expect(checkConsent).toHaveBeenCalledTimes(1);
+    // A block must never reach Twilio and must not log a call message.
+    expect(e.fetchMock).not.toHaveBeenCalled();
+    const convs = await e.conversationRepo.findByEntity(TENANT, 'customer', CUSTOMER);
+    expect(convs).toHaveLength(0);
+    // Block is audited + logged.
+    const blocked = events.find((ev) => ev.eventType === 'call.consent_blocked');
+    expect(blocked).toBeDefined();
+    expect(blocked!.metadata).toMatchObject({ mode: 'block', decision: 'blocked', reason: 'customer_not_found' });
+    expect(logger.warn).toHaveBeenCalled();
+  });
+
+  it("'warn': proceeds for a non-consented number but logs + audits the would-be block", async () => {
+    const checkConsent = vi.fn().mockResolvedValue(DENIED);
+    const { repo, events } = auditRepo();
+    const logger = { warn: vi.fn(), info: vi.fn(), error: vi.fn(), debug: vi.fn() };
+    const e = buildDeps({ consentEnforcement: 'warn', checkConsent, auditRepo: repo, logger: logger as never });
+
+    const result = await initiateOutboundCall(e.deps, input);
+
+    expect(result.callSid).toBe('CA123');
+    // Warn mode still places the call (observability without breaking prod).
+    expect(e.fetchMock).toHaveBeenCalledTimes(1);
+    expect(checkConsent).toHaveBeenCalledTimes(1);
+    const warned = events.find((ev) => ev.eventType === 'call.consent_warned');
+    expect(warned).toBeDefined();
+    expect(warned!.metadata).toMatchObject({ mode: 'warn', decision: 'warned' });
+    expect(logger.warn).toHaveBeenCalled();
+  });
+
+  it("'block' with consent granted: places the call and audits the grant", async () => {
+    const checkConsent = vi.fn().mockResolvedValue({ allowed: true });
+    const { repo, events } = auditRepo();
+    const e = buildDeps({ consentEnforcement: 'block', checkConsent, auditRepo: repo });
+
+    const result = await initiateOutboundCall(e.deps, input);
+
+    expect(result.callSid).toBe('CA123');
+    expect(e.fetchMock).toHaveBeenCalledTimes(1);
+    const granted = events.find((ev) => ev.eventType === 'call.consent_granted');
+    expect(granted).toBeDefined();
+    expect(granted!.metadata).toMatchObject({ mode: 'block', decision: 'granted' });
+  });
+});
+
 describe('bridge TwiML builders', () => {
   it('dials the customer with the business caller-ID, escaping XML', async () => {
     const xml = buildBridgeTwiml({ customerPhone: '+15551234567', callerId: '+15557778888' });
