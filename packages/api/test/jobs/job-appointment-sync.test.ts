@@ -278,6 +278,28 @@ describe('U2 — syncJobSchedule', () => {
     expect(await activeAppointments(job.id)).toHaveLength(1);
   });
 
+  it('re-schedules after the canonical row was canceled via the generic path (stale key released)', async () => {
+    const job = await newJob();
+    const first = await syncJobSchedule(deps([tech(TECH_1)]), scheduleInput(job.id));
+
+    // Simulate a cancel through /api/appointments/:id (cancel/no-show sheet):
+    // it flips status to canceled but LEAVES the idempotency key on the row.
+    await appointmentRepo.update(TENANT, first.appointment!.id, { status: 'canceled' });
+    const stale = await appointmentRepo.findById(TENANT, first.appointment!.id);
+    expect(stale!.idempotencyKey).toBe(jobScheduleKey(job.id)); // key still held
+
+    // A fresh schedule must NOT dedupe back into the canceled row (which would
+    // 409); it releases the stale key and creates a new schedulable row.
+    const second = await syncJobSchedule(deps([tech(TECH_1)]), scheduleInput(job.id));
+    expect(second.appointment!.id).not.toBe(first.appointment!.id);
+    expect(second.appointment!.status).toBe('scheduled');
+    expect(await activeAppointments(job.id)).toHaveLength(1);
+    // The old row kept its canceled status and gave up the key.
+    const released = await appointmentRepo.findById(TENANT, first.appointment!.id);
+    expect(released!.status).toBe('canceled');
+    expect(released!.idempotencyKey ?? null).toBeNull();
+  });
+
   it('cancelForJob cancels the appointment + releases the key but does NOT revert job status', async () => {
     const job = await newJob();
     const first = await syncJobSchedule(deps([tech(TECH_1)]), scheduleInput(job.id));

@@ -186,6 +186,28 @@ describe('Postgres integration — job-appointment sync', () => {
     expect(await activeAppointments(jobId)).toHaveLength(1);
   });
 
+  it('re-schedules after the canonical row was canceled OUT-OF-BAND (key left set) — releases stale key, no 409', async () => {
+    const jobId = await newJob();
+    const first = await syncJobSchedule(deps, scheduleInput(jobId, T10, techId));
+
+    // Cancel the way /api/appointments/:id does: flip status only, leaving the
+    // idempotency_key on the row (this module's own cancel would NULL it).
+    await appointmentRepo.update(tenantId, first.appointment!.id, { status: 'canceled' });
+    const stale = await appointmentRepo.findById(tenantId, first.appointment!.id);
+    expect(stale!.idempotencyKey).toBe(jobScheduleKey(jobId)); // key still held on the canceled row
+
+    // Without releasing that key, createAppointment's ON CONFLICT (partial-
+    // unique index) would dedupe back into the canceled row and 409. The fix
+    // NULLs the stale key first, so a fresh schedulable row is inserted.
+    const second = await syncJobSchedule(deps, scheduleInput(jobId, T10, techId));
+    expect(second.appointment!.id).not.toBe(first.appointment!.id);
+    expect(second.appointment!.status).toBe('scheduled');
+    expect(await activeAppointments(jobId)).toHaveLength(1);
+    const released = await appointmentRepo.findById(tenantId, first.appointment!.id);
+    expect(released!.status).toBe('canceled');
+    expect(released!.idempotencyKey ?? null).toBeNull();
+  });
+
   it('reschedule into a slot the technician already holds → 409, both times unchanged (no_double_booking)', async () => {
     const jobA = await newJob('Job A');
     const jobB = await newJob('Job B');

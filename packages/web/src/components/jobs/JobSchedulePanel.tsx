@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { apiFetch } from '../../utils/api-fetch';
 import { Input, Select, Field, Button } from '../ui';
 import { useTechnicianRoster } from '../../hooks/useTechnicianRoster';
+import { useTenantTimezone } from '../../hooks/useTenantTimezone';
+import { datetimeLocalToUtc, utcToTenantWallClock } from '../../utils/formatInTenantTz';
 
 interface Appointment {
   id: string;
@@ -19,20 +21,18 @@ export interface JobSchedulePanelProps {
   onChanged?: () => void;
 }
 
-/** Render an ISO instant as a `datetime-local` value in the browser's local tz. */
-function toLocalInput(iso: string): string {
-  const d = new Date(iso);
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-
 /**
  * Schedule / reschedule / reassign / unschedule a job directly from its
  * detail page. Reads the job's active appointment (GET /api/appointments)
  * and drives the POST /api/jobs/:id/{schedule,reassign,unschedule} endpoints.
+ *
+ * All datetime-local values are interpreted in the TENANT timezone, not the
+ * dispatcher's browser zone — `new Date(value)` would book the slot hours off
+ * whenever the two differ.
  */
 export function JobSchedulePanel({ jobId, assignedTechnicianId, onChanged }: JobSchedulePanelProps) {
   const { technicians } = useTechnicianRoster();
+  const timezone = useTenantTimezone();
   const [appointment, setAppointment] = useState<Appointment | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -64,13 +64,13 @@ export function JobSchedulePanel({ jobId, assignedTechnicianId, onChanged }: Job
           (a) => a.idempotencyKey === key && (a.status === 'scheduled' || a.status === 'confirmed'),
         ) ?? null;
       setAppointment(active);
-      if (active) setStart(toLocalInput(active.scheduledStart));
+      if (active) setStart(utcToTenantWallClock(active.scheduledStart, timezone));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load schedule');
     } finally {
       setLoading(false);
     }
-  }, [jobId]);
+  }, [jobId, timezone]);
 
   useEffect(() => {
     void load();
@@ -118,8 +118,8 @@ export function JobSchedulePanel({ jobId, assignedTechnicianId, onChanged }: Job
     // length, so we must not send a stale durationMin that would resize it.
     const includeDuration = !appointment && Number.isFinite(dur) && dur > 0;
     void call('/schedule', {
-      scheduledStart: new Date(start).toISOString(),
-      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      scheduledStart: datetimeLocalToUtc(start, timezone).toISOString(),
+      timezone,
       ...(includeDuration ? { durationMin: dur } : {}),
       ...(technicianId ? { technicianId } : {}),
     });

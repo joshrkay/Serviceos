@@ -3,6 +3,8 @@ import { apiFetch } from '../../utils/api-fetch';
 import { CustomerPicker, CustomerOption } from '../forms/CustomerPicker';
 import { Input, Textarea, Select, Field, Button } from '../ui';
 import { useTechnicianRoster } from '../../hooks/useTechnicianRoster';
+import { useTenantTimezone } from '../../hooks/useTenantTimezone';
+import { datetimeLocalToUtc } from '../../utils/formatInTenantTz';
 
 const PRIORITIES = ['low', 'normal', 'high', 'urgent'] as const;
 
@@ -51,6 +53,7 @@ export function JobForm({ onCreated, onCancel }: JobFormProps) {
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const { technicians } = useTechnicianRoster();
+  const timezone = useTenantTimezone();
 
   useEffect(() => {
     let cancelled = false;
@@ -114,9 +117,11 @@ export function JobForm({ onCreated, onCancel }: JobFormProps) {
 
       // Optional schedule-on-create. Only sent when a start time is set; the
       // API creates a linked appointment so the job reaches the dispatch board.
+      // The datetime-local wall clock is interpreted in the TENANT tz (not the
+      // browser's), so the slot books at the time the dispatcher intended.
       if (form.scheduledStart) {
-        body.scheduledStart = new Date(form.scheduledStart).toISOString();
-        body.timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+        body.scheduledStart = datetimeLocalToUtc(form.scheduledStart, timezone).toISOString();
+        body.timezone = timezone;
         const dur = parseInt(form.durationMin, 10);
         if (!Number.isNaN(dur) && dur > 0) body.durationMin = dur;
         if (form.technicianId) body.technicianId = form.technicianId;
@@ -140,7 +145,7 @@ export function JobForm({ onCreated, onCancel }: JobFormProps) {
         setSubmitting(false);
       }
     },
-    [form, onCreated]
+    [form, onCreated, timezone]
   );
 
   return (

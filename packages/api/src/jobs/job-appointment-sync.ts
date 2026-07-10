@@ -301,6 +301,25 @@ export async function syncJobSchedule(
         await ensurePrimaryTechnician(deps, tenantId, appointment.id, input.technicianId, actorId, actorRole);
       }
     } else {
+      // A CANCELED canonical row may still hold our key. Cancelation via this
+      // module releases the key (see unschedule/cancelForJob below), but the
+      // generic /api/appointments/:id path (cancel/no-show sheet) flips status
+      // only and leaves idempotency_key set. createAppointment dedupes on that
+      // key (ON CONFLICT), so without releasing it first the INSERT resolves
+      // back to the canceled row and the schedulable-status check below 409s —
+      // dead-ending the job. Release the stale key so a FRESH row is created.
+      // A non-canceled keyed row (in_progress/completed/no_show) is a real
+      // active/finished visit and is intentionally left to trip that 409.
+      const keyed = (await deps.appointmentRepo.findByJob(tenantId, jobId)).find(
+        (a) => a.idempotencyKey === jobScheduleKey(jobId),
+      );
+      if (keyed && keyed.status === 'canceled') {
+        await deps.appointmentRepo.update(tenantId, keyed.id, {
+          idempotencyKey: null,
+          updatedAt: new Date(),
+        });
+      }
+
       const durationMin = input.durationMin ?? DEFAULT_DURATION_MIN;
       const scheduledEnd = new Date(scheduledStart.getTime() + durationMin * 60_000);
       const createInput: CreateAppointmentInput = {

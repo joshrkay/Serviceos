@@ -221,6 +221,21 @@ export function utcToTenantWallClock(value: Date | string | number, timezone: st
   return `${year}-${month}-${day}T${hour}:${minute}`;
 }
 
+/**
+ * Convert an `<input type="datetime-local">` value ('YYYY-MM-DDTHH:mm', which
+ * carries NO timezone) into the UTC instant it denotes IN THE TENANT TZ — the
+ * forward pair of `utcToTenantWallClock`. Splitting on 'T' and delegating to
+ * `tenantWallClockToUtc` avoids `new Date(value)`, which interprets the wall
+ * clock in the BROWSER's zone and books the slot hours off for a dispatcher
+ * whose machine differs from the tenant timezone. Returns an invalid Date for
+ * an empty/malformed value (caller guards).
+ */
+export function datetimeLocalToUtc(value: string, timezone: string): Date {
+  if (!value) return new Date(NaN);
+  const [date, time = '00:00'] = value.split('T');
+  return tenantWallClockToUtc(date, time, timezone);
+}
+
 /** Convenience: "Apr 28, 2026, 1:30 PM". */
 export function formatDateTimeInTenantTz(
   value: Date | string | number,

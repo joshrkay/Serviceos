@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { hasRealClerkPublishableKey } from './helpers/clerk-key';
 
 /**
  * U8 — Job scheduling on mobile. The job detail page now carries a Schedule
@@ -6,16 +7,19 @@ import { test, expect } from '@playwright/test';
  * carries an optional schedule block. This pins the mobile bar (CLAUDE.md):
  * no horizontal overflow at 320px and ≥44px tap targets on the new controls.
  *
- * Gated like the UI smoke tests — requires a running stack with auth
- * (E2E_BASE_URL pointing at a deployed env, or a local Clerk pk). The
- * verifiable tap-target contract also has fast jsdom coverage in
+ * Gated like the UI smoke tests — these routes are auth-gated, so they need a
+ * real running stack with auth (E2E_BASE_URL pointing at a deployed env, or a
+ * real Clerk testing pk). `hasRealClerkPublishableKey()` returns false for the
+ * CI placeholder key, so on a bare PR runner this describe SKIPS rather than
+ * failing to find an authenticated create form. The verifiable tap-target
+ * contract also has fast jsdom coverage in
  * packages/web/src/components/jobs/JobForm.test.tsx and
  * JobSchedulePanel.test.tsx.
  */
-const hasStack = !!process.env.E2E_BASE_URL || !!process.env.VITE_CLERK_PUBLISHABLE_KEY;
+const hasStack = hasRealClerkPublishableKey();
 
 test.describe('job scheduling — mobile viewport', () => {
-  test.skip(!hasStack, 'Set E2E_BASE_URL or VITE_CLERK_PUBLISHABLE_KEY to run authenticated UI tests');
+  test.skip(!hasStack, 'Set E2E_BASE_URL or a real Clerk pk to run authenticated UI tests');
   test.use({ viewport: { width: 320, height: 720 } });
 
   async function expectNoHorizontalOverflow(pageScrollWidth: number, clientWidth: number) {
