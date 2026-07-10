@@ -410,7 +410,7 @@ import { PgReviewPollStateRepository } from './reputation/poll-state';
 import { PgServiceCreditRepository } from './reputation/pg-service-credit';
 import { PgGoogleBusinessReplyResolver } from './reputation/pg-google-business-reply-resolver';
 import { MessageDeliveryReviewPrivateMessageSender } from './reputation/private-message-sender-adapter';
-import { NoopBrandVoiceLoader } from './reputation/brand-voice';
+import { SettingsBrandVoiceLoader } from './reputation/settings-brand-voice-loader';
 import { PgCustomerLoader } from './reputation/match-customer';
 import { createCredentialResolver, getTenantTwilioCreds } from './integrations/credentials';
 import { InMemoryAgreementRepository } from './agreements/agreement';
@@ -1738,7 +1738,10 @@ export function createApp(): express.Express {
   // because the voice-action-router's respond_to_review on-ramp (U3) needs
   // the same instances; the polling worker below reuses them.
   const googleReviewsCustomerLoader = pool ? new PgCustomerLoader(pool) : null;
-  const googleReviewsBrandVoiceLoader = new NoopBrandVoiceLoader();
+  // Real tenant-tone loader (was NoopBrandVoiceLoader — a P4-015 placeholder
+  // that shipped but was never swapped, so review responses ignored the shop's
+  // voice + banned_phrases). Reads tenant_settings.brand_voice, failure-soft.
+  const googleReviewsBrandVoiceLoader = new SettingsBrandVoiceLoader(settingsRepo);
   const googleReplyResolver =
     googleReviewsReviewRepo && googleReviewsCredResolver
       ? new PgGoogleBusinessReplyResolver(

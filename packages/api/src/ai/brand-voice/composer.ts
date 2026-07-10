@@ -88,7 +88,7 @@ export interface ComposeBrandVoiceDeps {
  * it defensively off the row and validate the shape before use. A missing or
  * malformed value falls back to the neutral default inside the prompt builder.
  */
-function readToneFromSettings(settings: unknown): BrandVoiceTone | null {
+export function readToneFromSettings(settings: unknown): BrandVoiceTone | null {
   if (!settings || typeof settings !== 'object') return null;
   const raw = (settings as Record<string, unknown>).brandVoice ??
     (settings as Record<string, unknown>).brand_voice;
