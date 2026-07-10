@@ -63,14 +63,19 @@
   <b>refuted a false-positive "money-invariant" finding</b>. Every runtime security/money/compliance critical is
   remediated; remaining criticals are product-completeness (built-but-unreachable), documented with fixes. No
   production writes.
+  <br><br><b>Follow-up session:</b> implemented the two highest-value held money-integrity fixes — the
+  <b>recordPayment lost-update race</b> (<code>bdc9736</code>) and the <b>deposit double-credit race</b>
+  (<code>4e2acc0</code>), each an atomic single-UPDATE with a concurrency integration test, in isolated
+  HELD-FOR-REVIEW commits. The remaining held items (Vapi per-tenant webhook secret, Zod structural gate,
+  dunning write path) are documented with staged plans — Vapi needs a re-provisioning migration decision.
 </div>
 
 <div class="grid">
-  <div class="stat"><b>11</b><span>commits (all gate-green)</span></div>
-  <div class="stat"><b>8</b><span>real defects fixed</span></div>
+  <div class="stat"><b>10</b><span>real defects fixed</span></div>
+  <div class="stat"><b>2</b><span>money-race fixes (held)</span></div>
   <div class="stat"><b>0</b><span>runtime criticals open</span></div>
-  <div class="stat"><b>9,188</b><span>unit tests (green)</span></div>
-  <div class="stat"><b>629</b><span>integration (green, local PG)</span></div>
+  <div class="stat"><b>9,188+</b><span>unit tests (green)</span></div>
+  <div class="stat"><b>631+</b><span>integration (green, local PG)</span></div>
   <div class="stat"><b>~100–150</b><span>VU/inst @ web SLO (floor)</span></div>
 </div>
 
