@@ -46,6 +46,20 @@ Runs whenever `VITE_CLERK_PUBLISHABLE_KEY` is set (any syntactically valid
 `pk_test_` works — the stub short-circuits Clerk's script download, so no
 Clerk account or network access is required).
 
+### Public money loop (`public/*.spec.ts`)
+Hermetic, always-on (no Clerk journey secrets):
+
+- **`public/estimate-approval.spec.ts` (W1-3)** — `/e/:id` approve happy
+  path (Zod-pinned fixture → two-decimal money → sign → POST `/approve` →
+  success UI) plus network-failure error UI with no fixture-data leak
+  (Blocker 8). Thread plan:
+  `docs/plans/wave1/W1-3-public-estimate-approval.md` on branch
+  `docs/wave1-prove-money-loop-followup`.
+
+Needs a syntactically valid `VITE_CLERK_PUBLISHABLE_KEY` (or
+`E2E_BASE_URL`) so `main.tsx` boots — same gate as UI smoke. Clerk is
+stubbed offline via `helpers/clerk-stub.ts`.
+
 ### Journeys (`journeys/*.spec.ts`)
 All three are currently `test.skip()` — the spec code documents the intended
 test shape, but the test doesn't execute until the preconditions in each
