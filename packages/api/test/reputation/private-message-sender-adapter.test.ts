@@ -16,9 +16,17 @@ import {
   type SmsMessage,
 } from '../../src/notifications/delivery-provider';
 import type { Customer, CustomerRepository } from '../../src/customers/customer';
+import type { DncRepository } from '../../src/compliance/dnc';
 
 const TENANT = 'tenant-1';
 const CUSTOMER_ID = 'customer-1';
+
+class StubDncRepo implements Pick<DncRepository, 'isOnDnc'> {
+  constructor(private readonly onDnc: boolean = false) {}
+  async isOnDnc(): Promise<boolean> {
+    return this.onDnc;
+  }
+}
 
 function makeCustomer(overrides: Partial<Customer> = {}): Customer {
   const now = new Date('2026-05-17T10:00:00Z');
@@ -47,7 +55,10 @@ class StubCustomerRepo implements Partial<CustomerRepository> {
   }
 }
 
-function makeAdapter(customer: Customer | null): {
+function makeAdapter(
+  customer: Customer | null,
+  opts: { onDnc?: boolean } = {},
+): {
   adapter: MessageDeliveryReviewPrivateMessageSender;
   provider: InMemoryDeliveryProvider;
 } {
@@ -55,6 +66,7 @@ function makeAdapter(customer: Customer | null): {
   const adapter = new MessageDeliveryReviewPrivateMessageSender(
     provider,
     new StubCustomerRepo(customer) as CustomerRepository,
+    new StubDncRepo(opts.onDnc ?? false),
   );
   return { adapter, provider };
 }
@@ -71,7 +83,7 @@ describe('P7-026 MessageDeliveryReviewPrivateMessageSender', () => {
       idempotencyKey: 'review-response-private:p-1',
     });
 
-    expect(result.providerMessageId).toMatch(/^mem-sms-/);
+    expect('providerMessageId' in result && result.providerMessageId).toMatch(/^mem-sms-/);
     expect(provider.sentSms).toHaveLength(1);
     expect(provider.sentSms[0]).toEqual({
       to: '+15551234567',
@@ -182,6 +194,7 @@ describe('P7-026 MessageDeliveryReviewPrivateMessageSender', () => {
     const adapter = new MessageDeliveryReviewPrivateMessageSender(
       provider,
       new StubCustomerRepo(makeCustomer()) as CustomerRepository,
+      new StubDncRepo(false),
     );
 
     const result = await adapter.send({
@@ -194,5 +207,51 @@ describe('P7-026 MessageDeliveryReviewPrivateMessageSender', () => {
 
     expect(result).toEqual({ providerMessageId: 'twilio-MSG-XYZ' });
     expect(customRecorded).toHaveLength(1);
+  });
+
+  // §7 compliance gate — the review private follow-up must honor DNC/consent
+  // just like every other outbound SMS path (this was previously un-gated).
+  it('suppresses the SMS (does not send) when the customer is on the tenant DNC list', async () => {
+    const { adapter, provider } = makeAdapter(makeCustomer(), { onDnc: true });
+    const result = await adapter.send({
+      tenantId: TENANT,
+      customerId: CUSTOMER_ID,
+      channel: 'sms',
+      body: 'Sorry about your experience',
+      idempotencyKey: 'k',
+    });
+    expect(result).toEqual({ suppressed: true, reason: 'dnc' });
+    expect(provider.sentSms).toHaveLength(0); // nothing left the building
+  });
+
+  it('suppresses the SMS when the customer has not granted SMS consent', async () => {
+    const { adapter, provider } = makeAdapter(makeCustomer({ smsConsent: false }));
+    const result = await adapter.send({
+      tenantId: TENANT,
+      customerId: CUSTOMER_ID,
+      channel: 'sms',
+      body: 'Sorry about your experience',
+      idempotencyKey: 'k',
+    });
+    expect(result).toEqual({ suppressed: true, reason: 'no_consent' });
+    expect(provider.sentSms).toHaveLength(0);
+  });
+
+  it('email path is unaffected by the SMS DNC/consent gate', async () => {
+    // DNC/consent is an SMS concept; email follow-ups still go out (email has
+    // its own unsubscribe mechanism, out of scope for this gate).
+    const { adapter, provider } = makeAdapter(
+      makeCustomer({ smsConsent: false }),
+      { onDnc: true },
+    );
+    const result = await adapter.send({
+      tenantId: TENANT,
+      customerId: CUSTOMER_ID,
+      channel: 'email',
+      body: 'Following up',
+      idempotencyKey: 'k',
+    });
+    expect('providerMessageId' in result).toBe(true);
+    expect(provider.sentEmails).toHaveLength(1);
   });
 });

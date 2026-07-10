@@ -1750,6 +1750,7 @@ export function createApp(): express.Express {
     ? new MessageDeliveryReviewPrivateMessageSender(
         messageDelivery,
         customerRepo,
+        dncRepo,
       )
     : undefined;
   // Built ahead of the execution registry so the notify_delay handler can

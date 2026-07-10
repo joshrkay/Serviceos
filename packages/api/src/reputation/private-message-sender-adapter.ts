@@ -20,12 +20,14 @@
  */
 import type {
   ReviewPrivateMessageSender,
+  ReviewPrivateMessageResult,
 } from '../proposals/execution/review-response-handler';
 import type {
   DeliveryResult,
   MessageDeliveryProvider,
 } from '../notifications/delivery-provider';
 import type { CustomerRepository } from '../customers/customer';
+import { type DncRepository, normalizePhone } from '../compliance/dnc';
 
 export interface ReviewPrivateMessageSenderInput {
   tenantId: string;
@@ -43,12 +45,18 @@ export class MessageDeliveryReviewPrivateMessageSender
   constructor(
     private readonly delivery: MessageDeliveryProvider,
     private readonly customerRepo: CustomerRepository,
+    // §7 compliance gate. SMS follow-ups are suppressed when the recipient is
+    // on the tenant DNC list or has not granted SMS consent — the same gate
+    // every other outbound SMS path enforces (send-service.ts,
+    // customer-message-delivery.ts). Without it, a customer who texted STOP
+    // still receives a review private follow-up (a TCPA violation).
+    private readonly dncRepo: Pick<DncRepository, 'isOnDnc'>,
     private readonly emailSubject: string = DEFAULT_EMAIL_SUBJECT,
   ) {}
 
   async send(
     input: ReviewPrivateMessageSenderInput,
-  ): Promise<{ providerMessageId: string }> {
+  ): Promise<ReviewPrivateMessageResult> {
     const customer = await this.customerRepo.findById(
       input.tenantId,
       input.customerId,
@@ -63,6 +71,13 @@ export class MessageDeliveryReviewPrivateMessageSender
     if (input.channel === 'sms') {
       if (!customer.primaryPhone) {
         throw new Error(`missing_phone: customer ${input.customerId}`);
+      }
+      // Compliance gate BEFORE the transport — never text an opted-out number.
+      if (customer.smsConsent !== true) {
+        return { suppressed: true, reason: 'no_consent' };
+      }
+      if (await this.dncRepo.isOnDnc(input.tenantId, normalizePhone(customer.primaryPhone))) {
+        return { suppressed: true, reason: 'dnc' };
       }
       result = await this.delivery.sendSms({
         to: customer.primaryPhone,

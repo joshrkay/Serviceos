@@ -78,6 +78,18 @@ export interface GoogleBusinessReplyResolver {
  * execution handler doesn't import from `notifications/**` (the
  * adapter for review-driven sends lives in app.ts wiring).
  */
+/**
+ * Result of a private-follow-up send. Either a real delivery
+ * (`providerMessageId`) or a compliance suppression — the recipient is on the
+ * tenant DNC list or has not granted SMS consent, so the message MUST NOT go
+ * out. Suppression is a correct outcome, not a failure: the sender decides it
+ * before hitting the transport, and the handler records it ok=true (nothing
+ * was sent, nothing failed).
+ */
+export type ReviewPrivateMessageResult =
+  | { providerMessageId: string }
+  | { suppressed: true; reason: 'dnc' | 'no_consent' };
+
 export interface ReviewPrivateMessageSender {
   send(input: {
     tenantId: string;
@@ -85,7 +97,7 @@ export interface ReviewPrivateMessageSender {
     channel: 'email' | 'sms';
     body: string;
     idempotencyKey: string;
-  }): Promise<{ providerMessageId: string }>;
+  }): Promise<ReviewPrivateMessageResult>;
 }
 
 export type ReplyToReviewFn = typeof defaultReplyToReview;
@@ -263,6 +275,15 @@ export class ReviewResponseExecutionHandler implements ExecutionHandler {
         // re-runs after a partial failure dedupes correctly.
         idempotencyKey: `review-response-private:${proposal.id}`,
       });
+      if ('suppressed' in result) {
+        // Compliance suppression (DNC / no SMS consent): nothing was sent, and
+        // that is the CORRECT outcome — never texting an opted-out customer is
+        // not a failure. Record ok=true with the reason for the audit trail.
+        console.warn(
+          `ReviewResponseExecutionHandler: private follow-up suppressed (${result.reason}) for proposal ${proposal.id}, customer ${component.customerId}`,
+        );
+        return { kind: 'private', ok: true, error: `suppressed:${result.reason}` };
+      }
       return { kind: 'private', ok: true, id: result.providerMessageId };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
