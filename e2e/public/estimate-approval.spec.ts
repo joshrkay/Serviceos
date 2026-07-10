@@ -161,7 +161,7 @@ test.describe('W1-3 — public /e/:id estimate approval (hermetic)', () => {
     await expect.poll(() => approvePosts.length).toBe(1);
     expect(approvePosts[0].body.acceptedByName).toBe('Morgan Rivera');
     expect(approvePosts[0].body.expectedVersion).toBe(1);
-    expect(typeof approvePosts[0].body.signatureData).toBe('string');
+    expect(approvePosts[0].body.signatureData).toMatch(/^data:image\/png;base64,/);
 
     await expect(
       page.getByRole('heading', { name: /Estimate accepted!/i }),

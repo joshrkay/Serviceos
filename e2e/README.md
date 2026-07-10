@@ -146,6 +146,10 @@ then fill in the preconditions one at a time.
 e2e/
 ├── README.md                              # this file
 ├── smoke.spec.ts                          # always runs
+├── public/
+│   ├── estimate-approval.spec.ts          # W1-3 hermetic /e/:id (always-on)
+│   └── fixtures/
+│       └── public-estimate-view.ts        # Zod-pinned public estimate fixture
 └── journeys/
     ├── signup-to-first-estimate.spec.ts   # skipped
     ├── estimate-approval-execution.spec.ts # skipped
