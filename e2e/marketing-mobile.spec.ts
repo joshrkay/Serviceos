@@ -1,4 +1,5 @@
 import { test, expect, Page } from '@playwright/test';
+import { hasRealClerkPublishableKey } from './helpers/clerk-key';
 
 /**
  * Mobile hardening for the public marketing site (/features, /pricing,
@@ -10,11 +11,11 @@ import { test, expect, Page } from '@playwright/test';
  *   - the App Store / Google Play badges are ≥44px tall
  *
  * These pages are public and static (no API or Clerk journey), so the only
- * gate is the app bundle booting — which needs a Clerk publishable key
- * (P0-026 startup guard), same as the other UI specs.
+ * gate is the app bundle booting with a real Clerk publishable key (Clerk
+ * CDN). The CI placeholder key is not enough — see e2e/helpers/clerk-key.ts.
  */
 
-const hasClerk = !!process.env.E2E_BASE_URL || !!process.env.VITE_CLERK_PUBLISHABLE_KEY;
+const hasClerk = hasRealClerkPublishableKey();
 
 const MARKETING_ROUTES = ['/features', '/pricing', '/download'] as const;
 

@@ -1,4 +1,5 @@
 import { test, expect, Page } from '@playwright/test';
+import { hasRealClerkPublishableKey } from './helpers/clerk-key';
 
 /**
  * Mobile/glove hardening for the public estimate approval page (/e/:id).
@@ -13,12 +14,12 @@ import { test, expect, Page } from '@playwright/test';
  *
  * The backend is mocked via page.route — the page is public
  * (view-token-gated) and these are pure layout assertions, so no DB or
- * Clerk journey secrets are needed beyond the UI bundle booting.
+ * Clerk journey secrets are needed beyond the UI bundle booting with a
+ * real Clerk publishable key (CI placeholder is not enough).
  */
 
-// Same gate as smoke — ui: the app's main.tsx throws at module load
-// without a Clerk publishable key (P0-026 startup guard).
-const hasClerk = !!process.env.E2E_BASE_URL || !!process.env.VITE_CLERK_PUBLISHABLE_KEY;
+// Real Clerk pk (or deployed base) — placeholder alone loads clerk-js and fails.
+const hasClerk = hasRealClerkPublishableKey();
 
 const LONG_DESCRIPTION =
   'TanklessWaterHeaterModelRTGH95DVLN2SerialAB0123456789XYZ Replacement with recirculation pump';

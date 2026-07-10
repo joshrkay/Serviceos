@@ -58,9 +58,18 @@ jobs:
           # tests. See qa/reports/2026-05-11/clerk-testing-tokens-runbook.md.
           E2E_CLERK_PUBLISHABLE_KEY: ${{ secrets.E2E_CLERK_PUBLISHABLE_KEY }}
           E2E_CLERK_SECRET_KEY: ${{ secrets.E2E_CLERK_SECRET_KEY }}
-          # The Vite dev server needs the same pk_test_ value at boot
-          # (main.tsx throws without it). Reuse the same secret.
-          VITE_CLERK_PUBLISHABLE_KEY: ${{ secrets.E2E_CLERK_PUBLISHABLE_KEY }}
+          # The Vite dev server needs a syntactically valid pk_test_ at boot
+          # (main.tsx throws without it). Prefer the real Clerk testing secret
+          # when configured; otherwise fall back to a placeholder so hermetic
+          # offline specs (W1-1 money-loop, no-401-storm) run on every PR
+          # without E2E_CLERK_SECRET_KEY. The clerk-stub short-circuits the
+          # script download either way — see e2e/helpers/clerk-stub.ts.
+          # Placeholder = pk_test_ + base64("dummy.clerk.accounts.dev$").
+          VITE_CLERK_PUBLISHABLE_KEY: ${{ secrets.E2E_CLERK_PUBLISHABLE_KEY || 'pk_test_ZHVtbXkuY2xlcmsuYWNjb3VudHMuZGV2JA==' }}
+          # Real-key signal for smoke-ui / marketing specs that need Clerk CDN
+          # widgets. Placeholder must NOT satisfy this — otherwise those specs
+          # run-and-fail on runners where clerk.com is unreachable / invalid.
+          E2E_HAS_REAL_CLERK_PK: ${{ secrets.E2E_CLERK_PUBLISHABLE_KEY != '' && 'true' || 'false' }}
           # §10 onboarding v2 — OnboardingShell + guard (e2e/journeys/onboarding-v2.spec.ts).
           # Enabled only when Clerk E2E secrets are configured (journey skips otherwise).
           VITE_ONBOARDING_V2_ENABLED: ${{ secrets.E2E_CLERK_SECRET_KEY != '' && 'true' || 'false' }}

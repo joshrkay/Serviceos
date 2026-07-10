@@ -54,9 +54,10 @@ file's header comment are met.
 1. **signup-to-first-estimate** — new user signs up, Clerk webhook bootstraps
    a tenant, user drafts their first estimate. Needs Clerk testing tokens +
    ephemeral test PG.
-2. **estimate-approval-execution** — AI task produces a draft proposal,
-   operator approves, 5s undo window elapses, auto-delivery worker executes,
-   estimate row appears. Needs AI provider creds or mocked gateway.
+2. **estimate-approval-execution** — index pointer; hermetic proof is
+   `e2e/money-loop/estimate-approve-execute.spec.ts` (W1-1): offline Clerk
+   stub + seeded ready_for_review proposal, Inbox Approve → executed.
+   Runs with the CI placeholder `pk_test_` (no live LLM / Clerk secrets).
 3. **invoice-to-payment** — approved invoice generates Stripe payment link,
    `charge.succeeded` webhook flips invoice to paid. Needs Stripe test keys
    and P5-016 closed (Stripe Elements frontend).
