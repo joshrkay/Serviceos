@@ -59,6 +59,13 @@ Runs whenever `VITE_CLERK_PUBLISHABLE_KEY` is set. Complements the unit tests
 in `useListQuery.test.ts` / `useDetailQuery.test.ts` that pin the hook
 contract (`isLoading` stays false during background refetch).
 ### Public money loop (`public/*.spec.ts`)
+Hermetic, always-on (no Clerk journey secrets):
+
+- **`public/estimate-approval.spec.ts` (W1-3)** — `/e/:id` approve happy
+  path (Zod-pinned fixture → two-decimal money → sign → POST `/approve` →
+  success UI) plus network-failure error UI with no fixture-data leak
+  (Blocker 8). Thread plan:
+  `docs/plans/wave1/W1-3-public-estimate-approval.md` on branch
 Hermetic, always-on (no Clerk journey secrets, no Stripe secrets):
 
 - **`public/invoice-pay-status.spec.ts` (W1-4)** — `/pay/:id` status poll
@@ -80,9 +87,10 @@ file's header comment are met.
 1. **signup-to-first-estimate** — new user signs up, Clerk webhook bootstraps
    a tenant, user drafts their first estimate. Needs Clerk testing tokens +
    ephemeral test PG.
-2. **estimate-approval-execution** — AI task produces a draft proposal,
-   operator approves, 5s undo window elapses, auto-delivery worker executes,
-   estimate row appears. Needs AI provider creds or mocked gateway.
+2. **estimate-approval-execution** — index pointer; hermetic proof is
+   `e2e/money-loop/estimate-approve-execute.spec.ts` (W1-1): offline Clerk
+   stub + seeded ready_for_review proposal, Inbox Approve → executed.
+   Runs with the CI placeholder `pk_test_` (no live LLM / Clerk secrets).
 3. **invoice-to-payment** — approved invoice generates Stripe payment link,
    `charge.succeeded` webhook flips invoice to paid. Needs Stripe test keys
    and P5-016 closed (Stripe Elements frontend).
@@ -158,6 +166,10 @@ then fill in the preconditions one at a time.
 e2e/
 ├── README.md                              # this file
 ├── smoke.spec.ts                          # always runs
+├── public/
+│   ├── estimate-approval.spec.ts          # W1-3 hermetic /e/:id (always-on)
+│   └── fixtures/
+│       └── public-estimate-view.ts        # Zod-pinned public estimate fixture
 ├── helpers/
 │   ├── clerk-stub.ts                      # offline Clerk for hermetic UI
 │   └── stripe-stub.ts                     # offline Stripe for W1-4 status poll
