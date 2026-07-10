@@ -701,7 +701,7 @@ function OriginAttributionLine({ leadId }: { leadId: string }) {
 function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () => void }) {
   const navigate = useNavigate();
   const tz = useTenantTimezone();
-  const { data: inv, isLoading, error, refetch } = useDetailQuery<InvoiceResponse>('/api/invoices', invoiceId);
+  const { data: inv, isLoading, refetch } = useDetailQuery<InvoiceResponse>('/api/invoices', invoiceId);
   const { mutate: updateInvoice } = useMutation<Record<string, unknown>, InvoiceResponse>('PUT', `/api/invoices/${invoiceId}`);
 
   const [sendOpen,  setSendOpen]  = useState(false);
@@ -750,7 +750,9 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
     );
   }
 
-  if ((error && !inv) || !inv) {
+  // No entity to show (cold-load error, or not-yet-loaded). A background
+  // refetch failure never nulls `inv`, so a loaded invoice stays on screen.
+  if (!inv) {
     return (
       <div className="h-full flex flex-col items-center justify-center gap-3">
         <p className="text-sm text-destructive">Failed to load invoice</p>

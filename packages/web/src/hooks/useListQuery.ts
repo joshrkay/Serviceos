@@ -34,8 +34,6 @@ export interface ListQueryResult<T> {
    * false so consumers can leave last-good content on screen.
    */
   isLoading: boolean;
-  /** True whenever any fetch is in flight (including background). */
-  isFetching: boolean;
   error: string | null;
   /** Background refresh — preserves mounted rows. */
   refetch: () => void;
@@ -69,7 +67,6 @@ export function useListQuery<T>(
   // made every list page paint its empty state ("No customers found") for
   // the frame(s) before the first request even fired.
   const [isLoading, setIsLoading] = useState(initialOptions.enabled !== false);
-  const [isFetching, setIsFetching] = useState(initialOptions.enabled !== false);
   const [error, setError] = useState<string | null>(null);
 
   // Re-sync filters / enabled from props when the caller's initialOptions
@@ -112,13 +109,11 @@ export function useListQuery<T>(
     async (opts?: { background?: boolean }) => {
       if (!enabled) {
         setIsLoading(false);
-        setIsFetching(false);
         return;
       }
       const myVersion = ++requestVersionRef.current;
       const background = opts?.background === true && hasLoadedRef.current;
       if (!background) setIsLoading(true);
-      setIsFetching(true);
       if (!background) setError(null);
       try {
         const params = new URLSearchParams({
@@ -150,7 +145,6 @@ export function useListQuery<T>(
         }
       } finally {
         if (myVersion === requestVersionRef.current) {
-          setIsFetching(false);
           if (!background) setIsLoading(false);
         }
       }
@@ -245,7 +239,6 @@ export function useListQuery<T>(
     page,
     pageSize,
     isLoading,
-    isFetching,
     error,
     refetch,
     setPage,

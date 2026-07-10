@@ -140,7 +140,11 @@ describe('AttachmentSection', () => {
   });
 
   it('keeps the attachment grid mounted during background reload after capture (no flicker)', async () => {
-    let resolveReload: ((value: Response) => void) | null = null;
+    // Initialised to a no-op (not null) so TS keeps the type callable — the
+    // real resolver is assigned inside the mockImplementationOnce executor,
+    // which control-flow analysis can't see, and a `| null` union would
+    // narrow to `null` at the call site below.
+    let resolveReload: (value: Response) => void = () => {};
     vi.mocked(fetch)
       .mockResolvedValueOnce(
         jsonResponse([
@@ -176,7 +180,7 @@ describe('AttachmentSection', () => {
     expect(screen.getByTestId('attachment-grid')).toBeInTheDocument();
     expect(screen.queryByText('Loading attachments…')).not.toBeInTheDocument();
 
-    resolveReload?.(
+    resolveReload(
       jsonResponse([
         {
           id: 'a1',
