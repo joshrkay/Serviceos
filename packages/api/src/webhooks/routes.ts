@@ -25,7 +25,6 @@ import { CustomerPaymentMethodRepository } from '../payments/customer-payment-me
 import { retrievePaymentMethod } from '../payments/stripe-saved-card';
 import { StripeFetch } from '../payments/stripe-payment-intent';
 import { JobRepository } from '../jobs/job';
-import { deriveDepositStatus } from '../jobs/deposit-rule';
 import { PendingInvitationRepository } from '../users/pending-invitation';
 import { BillingService } from '../billing/subscription';
 import { StripeConnectService } from '../billing/stripe-connect';
@@ -987,12 +986,16 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             await webhookRepo.updateStatus(webhookEvent.id, 'processed');
             return res.status(200).json({ received: true, skipped: true });
           }
-          const newPaid = Math.min(previouslyPaid + amountTotal, required);
-          await deps.jobRepo.update(tenantId, depositForJobId, {
-            depositPaidCents: newPaid,
-            depositStatus: deriveDepositStatus(required, newPaid),
-            updatedAt: new Date(),
-          });
+          // Atomic credit: two distinct checkout.session.completed events for
+          // the same job (e.g. a double-tapped "Pay Deposit" minting two
+          // sessions) must both count. The old read-then-blind-set dropped one.
+          const credited = await deps.jobRepo.creditDepositAtomic(
+            tenantId,
+            depositForJobId,
+            amountTotal,
+            new Date(),
+          );
+          const newPaid = credited?.depositPaidCents ?? previouslyPaid;
           logger.info('Deposit credited via Stripe checkout', {
             tenantId, depositForJobId, amountTotal, newPaid, required,
           });

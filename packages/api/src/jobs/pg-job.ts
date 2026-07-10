@@ -10,6 +10,7 @@ import {
   DEFAULT_JOB_LIMIT,
   MAX_JOB_LIMIT,
 } from './job';
+import { type DepositStatus } from './deposit-rule';
 
 function mapRow(row: Record<string, unknown>): Job {
   return {
@@ -274,6 +275,36 @@ export class PgJobRepository extends PgBaseRepository implements JobRepository {
         params
       );
       return result.rows.length > 0 ? mapRow(result.rows[0]) : null;
+    });
+  }
+
+  async creditDepositAtomic(
+    tenantId: string,
+    id: string,
+    amountCents: number,
+    now: Date,
+  ): Promise<{ depositPaidCents: number; depositStatus: DepositStatus } | null> {
+    return this.withTenant(tenantId, async (client) => {
+      // Single atomic UPDATE: new paid/status derived from the row's OWN value,
+      // clamped at required (LEAST) — mirrors deriveDepositStatus. Two distinct
+      // deposit checkouts for the same job both apply (no lost update). The
+      // `deposit_required_cents > 0` guard means a job with no required deposit
+      // matches 0 rows → null (same skip the caller already applies).
+      const { rows } = await client.query<{ deposit_paid_cents: number; deposit_status: DepositStatus }>(
+        `UPDATE jobs
+         SET deposit_paid_cents = LEAST(deposit_paid_cents + $3, deposit_required_cents),
+             deposit_status = CASE
+               WHEN deposit_required_cents <= 0 THEN 'not_required'
+               WHEN LEAST(deposit_paid_cents + $3, deposit_required_cents) >= deposit_required_cents THEN 'paid'
+               ELSE 'pending'
+             END,
+             updated_at = $4
+         WHERE id = $2 AND tenant_id = $1 AND deposit_required_cents > 0
+         RETURNING deposit_paid_cents, deposit_status`,
+        [tenantId, id, amountCents, now],
+      );
+      if (rows.length === 0) return null;
+      return { depositPaidCents: rows[0].deposit_paid_cents, depositStatus: rows[0].deposit_status };
     });
   }
 
