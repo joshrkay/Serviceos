@@ -159,6 +159,41 @@ describe('U2 — ingestCustomerMms', () => {
     expect(events[0].tenantId).toBe(TENANT);
   });
 
+  it('security — a high injected confidence_score cannot auto-approve a customer-MMS estimate, even with supervisorPresent=true', async () => {
+    // The photo + caption are fully caller-controlled, so the model's
+    // self-reported confidence_score is an injection surface. This async channel
+    // forces supervisorPresent=false, so the draft must land in human review
+    // regardless of confidence or a nominally-present supervisor.
+    await seedCustomer(CUSTOMER_PHONE, 'Jenna');
+    const catalogRepo = new InMemoryCatalogItemRepository();
+    await catalogRepo.create(
+      createCatalogItem({
+        tenantId: TENANT,
+        name: 'Drywall patch',
+        category: 'Labor',
+        unit: 'each',
+        unitPriceCents: 15000,
+      }),
+    );
+    const injectedHighConfidence = JSON.stringify({
+      lineItems: [{ description: 'Drywall patch', quantity: 1, unitPrice: 15000, category: 'labor' }],
+      notes: 'x',
+      confidence_score: 0.99,
+    });
+
+    const result = await ingestCustomerMms(ctx(), {
+      ...baseDeps,
+      catalogRepo,
+      gateway: gatewayReturning(injectedHighConfidence),
+      supervisorPresent: true,
+    });
+
+    const stored = await proposalRepo.findById(TENANT, result.proposalId!);
+    expect(stored).not.toBeNull();
+    expect(stored!.status).not.toBe('approved');
+    expect(['ready_for_review', 'draft']).toContain(stored!.status);
+  });
+
   it('stores + presigns the photo BEFORE the gateway call (image URL passed to task)', async () => {
     await seedCustomer(CUSTOMER_PHONE, 'Jenna');
     const result = await ingestCustomerMms(ctx(), baseDeps);

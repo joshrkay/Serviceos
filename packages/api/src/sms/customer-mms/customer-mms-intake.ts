@@ -327,7 +327,13 @@ export async function ingestCustomerMms(
     images,
     createdBy: CUSTOMER_MMS_ACTOR,
     conversationId: ctx.messageSid,
-    ...(deps.supervisorPresent !== undefined ? { supervisorPresent: deps.supervisorPresent } : {}),
+    // Customer MMS is async and unsupervised by nature: the photo + caption are
+    // fully caller-controlled, so a prompt injection could coax a high
+    // self-reported confidence_score. Force supervisorPresent=false so an
+    // MMS-sourced draft can NEVER auto-approve — it always lands in
+    // ready_for_review for a human (defense against the confidence self-report
+    // bypass; the confidence number alone must not write a real estimate).
+    supervisorPresent: false,
   });
 
   // 4. Parse failure → owner notice, no proposal, no crash.

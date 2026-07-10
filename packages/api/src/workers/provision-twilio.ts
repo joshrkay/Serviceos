@@ -1,3 +1,4 @@
+import { randomBytes } from 'crypto';
 import { WorkerHandler, QueueMessage } from '../queues/queue';
 import { Logger } from '../logging/logger';
 import { Pool, QueryResult, QueryResultRow } from 'pg';
@@ -318,15 +319,19 @@ export function createProvisionTwilioWorker(deps: {
             );
             const cfg = cfgRes.rows[0];
             if (cfg && !cfg.vapi_assistant_id) {
+              // Per-tenant webhook secret: Vapi echoes serverUrlSecret back on
+              // every call event, and /webhooks/vapi/:tenantId verifies against
+              // THIS tenant's stored value — so a body signed for one tenant
+              // can't be replayed at another. Random per tenant, never the
+              // shared global secret.
+              const vapiWebhookSecret = randomBytes(32).toString('hex');
               const assistantConfig = buildAssistantConfig({
                 businessName: cfg.business_name ?? 'ServiceOS',
                 greeting: cfg.voice_greeting,
                 voicePresetId: cfg.voice_id,
                 services: cfg.services_offered ?? [],
                 serverUrl: `${baseUrl}/webhooks/vapi/${tenantId}`,
-                ...(process.env.VAPI_WEBHOOK_SECRET
-                  ? { serverUrlSecret: process.env.VAPI_WEBHOOK_SECRET }
-                  : {}),
+                serverUrlSecret: vapiWebhookSecret,
               });
               const { assistantId } = await vapi.createAssistant(assistantConfig);
               await vapi.linkPhoneNumber({
@@ -337,8 +342,10 @@ export function createProvisionTwilioWorker(deps: {
               await tenantQuery(
                 pool,
                 tenantId,
-                `UPDATE tenant_settings SET vapi_assistant_id = $1, updated_at = NOW() WHERE tenant_id = $2`,
-                [assistantId, tenantId],
+                `UPDATE tenant_settings
+                   SET vapi_assistant_id = $1, vapi_webhook_secret = $2, updated_at = NOW()
+                 WHERE tenant_id = $3`,
+                [assistantId, vapiWebhookSecret, tenantId],
               );
               await tenantQuery(
                 pool,

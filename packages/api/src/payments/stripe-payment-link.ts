@@ -40,6 +40,11 @@ export class StripePaymentLinkProvider implements PaymentLinkProvider {
         'line_items[0][quantity]': '1',
         'metadata[tenant_id]': request.tenantId,
         'metadata[invoice_id]': request.invoiceId,
+        // Single completed checkout only — Stripe itself refuses a 2nd paid
+        // session on this link, so a replayed/saved link can't double-charge a
+        // card after the invoice is already settled (the webhook would silently
+        // drop the 2nd charge as "already settled").
+        'restrictions[completed_sessions][limit]': '1',
       }),
       signal: AbortSignal.timeout(STRIPE_REQUEST_TIMEOUT_MS),
     });

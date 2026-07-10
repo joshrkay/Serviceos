@@ -165,6 +165,35 @@ describe('Postgres integration — provision-twilio Vapi assistant (voice agent)
     expect(ti.rows[0].provider_data.phoneE164).toBe('+15125550123');
   });
 
+  it('generates a random PER-TENANT webhook secret, stores it, and uses it as serverUrlSecret (never the global secret)', async () => {
+    // Even with a global secret configured, provisioning must NOT reuse it —
+    // that shared secret is exactly what let one tenant forge another's calls.
+    setEnv('VAPI_WEBHOOK_SECRET', 'GLOBAL-shared-secret-do-not-use');
+    const { tenantId } = await createTestTenant(pool);
+    await seedSettings(pool, tenantId);
+    stubTwilioFetch();
+    const vapi = makeVapiMock();
+    const worker = createProvisionTwilioWorker({ pool, vapiClient: vapi.client });
+
+    await worker.handle(
+      buildMessage({ tenantId, region: null, baseUrl: 'https://api.test', phoneNumber: '+15125550123' }),
+      logger,
+    );
+
+    const cfg = vapi.createAssistant.mock.calls[0][0];
+    // 32 random bytes as hex — per tenant, not the global secret.
+    expect(cfg.serverUrlSecret).toMatch(/^[0-9a-f]{64}$/);
+    expect(cfg.serverUrlSecret).not.toBe('GLOBAL-shared-secret-do-not-use');
+
+    // Persisted on tenant_settings, matching what the assistant was created with
+    // (the /vapi handler resolves THIS to verify the tenant's own call events).
+    const s = await pool.query<{ vapi_webhook_secret: string | null }>(
+      `SELECT vapi_webhook_secret FROM tenant_settings WHERE tenant_id = $1`,
+      [tenantId],
+    );
+    expect(s.rows[0].vapi_webhook_secret).toBe(cfg.serverUrlSecret);
+  });
+
   it('is idempotent: an existing vapi_assistant_id is not overwritten', async () => {
     const { tenantId } = await createTestTenant(pool);
     await seedSettings(pool, tenantId);

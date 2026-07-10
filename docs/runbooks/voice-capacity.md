@@ -13,6 +13,7 @@ Driven by the dependency-free harness in `loadtest/` (see `loadtest/README.md`).
 | Run date | Target | DB pool (`DB_MAX_CONNECTIONS`) | Max concurrent VUs | p95 (ms) | First bottleneck | Notes |
 |----------|--------|-------------------------------|--------------------|----------|------------------|-------|
 | TBD      | local compose | 20 (shipping default) |        |          | expected: DB pool exhaustion | baseline before any change |
+| 2026-07-10 | local dev boot (`npm run dev`), 4-core sandbox | 20 (shipping default) | ~100–150 (committed SLO p95<300 ms); >200 under the p95<2 s gate | 106 @50VU · 210 @100VU · 400 @200VU | CPU + 20-conn pool (throughput plateaus ~500 req/s) | **Floor, not ceiling** — box was CPU-contended by a concurrent audit workflow. Real ceiling needs an idle/staging box + the compose topology. serviceos-audit run-1. |
 
 Fill this row by running the local topology and ramping `--max` until the knee:
 

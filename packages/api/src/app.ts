@@ -12,7 +12,7 @@ import { verifyRlsRuntimeRole } from './db/rls-runtime-role';
 import { loadConfig } from './shared/config';
 import { resolveWebDistDir } from './web-static-path';
 import { createWebhookRouter } from './webhooks/routes';
-import { createIntegrationResolver } from './webhooks/integration-resolver';
+import { createIntegrationResolver, createVapiSecretResolver } from './webhooks/integration-resolver';
 import { createTelephonyRouter } from './routes/telephony';
 import { createCallsRouter, createCallBridgeRouter } from './routes/calls';
 import { TwilioGatherAdapter } from './telephony/twilio-adapter';
@@ -182,7 +182,7 @@ import { PgMoneyDashboardRepository } from './reports/pg-money-dashboard';
 import { createFeedbackResponsesRouter } from './routes/feedback';
 import { createInteractionsRouter } from './routes/interactions';
 import { initSentry, setSentryClient } from './monitoring/sentry';
-import { dbPoolConnections } from './monitoring/metrics';
+import { dbPoolConnections, pgQueueDepth } from './monitoring/metrics';
 
 // In-memory repositories (fallback for dev without DATABASE_URL)
 import { InMemoryCustomerRepository } from './customers/customer';
@@ -410,7 +410,7 @@ import { PgReviewPollStateRepository } from './reputation/poll-state';
 import { PgServiceCreditRepository } from './reputation/pg-service-credit';
 import { PgGoogleBusinessReplyResolver } from './reputation/pg-google-business-reply-resolver';
 import { MessageDeliveryReviewPrivateMessageSender } from './reputation/private-message-sender-adapter';
-import { NoopBrandVoiceLoader } from './reputation/brand-voice';
+import { SettingsBrandVoiceLoader } from './reputation/settings-brand-voice-loader';
 import { PgCustomerLoader } from './reputation/match-customer';
 import { createCredentialResolver, getTenantTwilioCreds } from './integrations/credentials';
 import { InMemoryAgreementRepository } from './agreements/agreement';
@@ -973,6 +973,10 @@ export function createApp(): express.Express {
   // verification. Returns null when no row exists or the integration provider
   // doesn't match — recordTwilio / recordSendGrid then 403 with audit.
   const integrationResolver = pool ? createIntegrationResolver(pool) : undefined;
+  // Per-tenant Vapi webhook secret resolver (closes the cross-tenant forgery
+  // the single global secret allowed). The /vapi handler falls back to the
+  // global secret when this returns null (tenant not yet re-provisioned).
+  const vapiSecretResolver = pool ? createVapiSecretResolver(pool) : undefined;
 
   const webhookRouterDeps: import('./webhooks/routes').WebhookRouterDeps = {
     tenantRepo,
@@ -1000,6 +1004,7 @@ export function createApp(): express.Express {
     webhookEventRepo,
     webhookRepo,
     integrationResolver,
+    vapiSecretResolver,
     // #6 phase 4 — persist saved cards on setup_intent.succeeded.
     // customerPaymentMethodRepo is wired in after its instantiation below.
     stripeConfig: process.env.STRIPE_SECRET_KEY
@@ -1738,7 +1743,10 @@ export function createApp(): express.Express {
   // because the voice-action-router's respond_to_review on-ramp (U3) needs
   // the same instances; the polling worker below reuses them.
   const googleReviewsCustomerLoader = pool ? new PgCustomerLoader(pool) : null;
-  const googleReviewsBrandVoiceLoader = new NoopBrandVoiceLoader();
+  // Real tenant-tone loader (was NoopBrandVoiceLoader — a P4-015 placeholder
+  // that shipped but was never swapped, so review responses ignored the shop's
+  // voice + banned_phrases). Reads tenant_settings.brand_voice, failure-soft.
+  const googleReviewsBrandVoiceLoader = new SettingsBrandVoiceLoader(settingsRepo);
   const googleReplyResolver =
     googleReviewsReviewRepo && googleReviewsCredResolver
       ? new PgGoogleBusinessReplyResolver(
@@ -1750,6 +1758,7 @@ export function createApp(): express.Express {
     ? new MessageDeliveryReviewPrivateMessageSender(
         messageDelivery,
         customerRepo,
+        dncRepo,
       )
     : undefined;
   // Built ahead of the execution registry so the notify_delay handler can
@@ -2046,6 +2055,9 @@ export function createApp(): express.Express {
     // an advisory-lock collision that silently serialized them); 590010
     // remains reserved by a parallel track.
     droppedCallRecovery: 590022,
+    // scale-to-1000 C1 — durable job-queue depth sampler (one replica queries
+    // the shared _queue_messages/_queue_dlq tables per tick).
+    queueDepth: 590023,
   } as const;
   const runAsLeader = async (lockKey: number, work: () => Promise<void>): Promise<void> => {
     if (shuttingDown) return;
@@ -2073,6 +2085,32 @@ export function createApp(): express.Express {
       client.release();
     }
   };
+
+  // scale-to-1000 C1 — sample the durable job-queue backlog into /metrics so the
+  // committed SLO (PgQueue depth < 1,000 sustained) and the P2 queue-depth alert
+  // are observable. Leader-elected: exactly one replica runs the COUNT per tick
+  // (the value is global, so N replicas querying would just be waste). Every
+  // 15s; failure-soft (a transient DB blip must not crash the interval).
+  {
+    let queueDepthInFlight = false;
+    const sampleQueueDepth = async () => {
+      if (queueDepthInFlight) return;
+      queueDepthInFlight = true;
+      try {
+        await runAsLeader(SWEEP_LOCK.queueDepth, async () => {
+          const { pending, deadLetter } = await queue.depth();
+          pgQueueDepth.set({ queue: 'pending' }, pending);
+          pgQueueDepth.set({ queue: 'dead_letter' }, deadLetter);
+        });
+      } catch {
+        // Best-effort telemetry — never let a sampling error break the loop.
+      } finally {
+        queueDepthInFlight = false;
+      }
+    };
+    void sampleQueueDepth();
+    registerInterval(setInterval(() => void sampleQueueDepth(), 15000));
+  }
 
   const executionWorkerLogger = createLogger({
     service: 'execution-worker',
