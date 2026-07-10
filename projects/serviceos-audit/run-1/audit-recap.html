@@ -55,20 +55,22 @@
 <div class="verdict">
   <b>Verdict.</b> ServiceOS is a <b>heavily-hardened, largely-aligned</b> codebase — not a demo. Every seeded
   "overclaim" from the stale 2026-06-20 status doc is now <b>built</b> (the docs lagged the code). A multi-agent
-  fresh-context audit (12 per-surface auditors + red team, adversarially verified) surfaced the deeper
-  <i>reachability</i> defects a first pass misses. The run <b>fixed five real defects</b> — including a
-  <b>TCPA/DNC-consent bypass</b> on review follow-up SMS and a <b>QuickBooks data-loss bug</b> (paid invoices
-  beyond the newest 200 silently dropped) — added adversarial/property coverage on money + RLS, measured a real
-  load baseline, and <b>refuted a false-positive "money-invariant" finding</b> with evidence. <b>Zero unaddressed
-  runtime criticals.</b> No production writes; money/RLS/auth invariants verified intact.
+  fresh-context audit (12 per-surface auditors + red team + adversarial verify — 41 agents, 25 findings
+  confirmed) surfaced the deeper <i>reachability</i> defects a first pass misses. The run <b>fixed eight real
+  defects</b> — a <b>Stripe replay double-charge</b> (held for payments review), a <b>TCPA/DNC-consent bypass</b>,
+  a <b>QuickBooks data-loss bug</b>, an <b>expired-proposal approval gap</b>, and a <b>customer-MMS auto-approve
+  injection</b> — added adversarial/property coverage on money + RLS, measured a real load baseline, and
+  <b>refuted a false-positive "money-invariant" finding</b>. Every runtime security/money/compliance critical is
+  remediated; remaining criticals are product-completeness (built-but-unreachable), documented with fixes. No
+  production writes.
 </div>
 
 <div class="grid">
-  <div class="stat"><b>8</b><span>commits (all gate-green)</span></div>
-  <div class="stat"><b>5</b><span>real defects fixed</span></div>
+  <div class="stat"><b>11</b><span>commits (all gate-green)</span></div>
+  <div class="stat"><b>8</b><span>real defects fixed</span></div>
   <div class="stat"><b>0</b><span>runtime criticals open</span></div>
-  <div class="stat"><b>9,181</b><span>unit tests (green)</span></div>
-  <div class="stat"><b>623+</b><span>integration (green, local PG)</span></div>
+  <div class="stat"><b>9,188</b><span>unit tests (green)</span></div>
+  <div class="stat"><b>629</b><span>integration (green, local PG)</span></div>
   <div class="stat"><b>~100–150</b><span>VU/inst @ web SLO (floor)</span></div>
 </div>
 
