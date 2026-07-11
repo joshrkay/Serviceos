@@ -2,14 +2,16 @@ import { describe, it, expect } from 'vitest';
 import {
   computeDigestPayload,
   buildFallbackNarrative,
-  renderDigestSms,
+  renderDigestSmsSegments,
   summarizeProposalForDigest,
+  proposalOutcome,
   upsertDigest,
   localDateString,
   nextDateString,
   formatUsd,
   InMemoryDailyDigestRepository,
   DIGEST_SMS_MAX_CHARS,
+  DIGEST_SMS_SOFT_LIMIT,
   type DailyDigestPayload,
   type DigestComputeDeps,
 } from '../../src/digest/digest-service';
@@ -22,6 +24,7 @@ import type { Proposal, ProposalRepository } from '../../src/proposals/proposal'
 import type { CustomerRepository } from '../../src/customers/customer';
 import type { SettingsRepository, TenantSettings } from '../../src/settings/settings';
 import type { FeedbackResponseRepository, RatingCounts } from '../../src/feedback/feedback-response';
+import type { CorrectionLesson, CorrectionLessonRepository } from '../../src/learning/corrections/correction-lesson';
 import { buildLineItem, calculateDocumentTotals } from '../../src/shared/billing-engine';
 
 const TENANT = 'tenant-1';
@@ -80,6 +83,12 @@ interface DepsOverrides {
   customerNames?: Record<string, string>;
   settings?: TenantSettings | null;
   ratingCounts?: RatingCounts;
+  /** N-005 — estimates returned for the quotes-sent (sentFrom/sentTo) query. */
+  sentEstimates?: Estimate[];
+  /** N-005 — proposals returned by findConfidenceMarkedForDay. */
+  confidenceMarked?: Proposal[];
+  /** N-005 — correction lessons applied today. */
+  appliedLessons?: CorrectionLesson[];
 }
 
 function makeDeps(o: DepsOverrides = {}): DigestComputeDeps {
@@ -102,12 +111,14 @@ function makeDeps(o: DepsOverrides = {}): DigestComputeDeps {
     } as unknown as InvoiceRepository,
     estimateRepo: {
       findByJobs: async () => o.estimatesByJob ?? [],
+      findByTenant: async () => o.sentEstimates ?? [],
     } as unknown as EstimateRepository,
     proposalRepo: {
       findByStatus: async (_t: string, status: string) =>
         status === 'draft'
           ? o.draftProposals ?? []
           : o.pendingProposals ?? [],
+      findConfidenceMarkedForDay: async () => o.confidenceMarked ?? [],
     } as unknown as ProposalRepository,
     customerRepo: {
       findById: async (_t: string, id: string) =>
@@ -123,6 +134,9 @@ function makeDeps(o: DepsOverrides = {}): DigestComputeDeps {
       countByRatingInRange: async () =>
         o.ratingCounts ?? { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 },
     } as unknown as FeedbackResponseRepository,
+    correctionLessonRepo: {
+      findAppliedForDay: async () => o.appliedLessons ?? [],
+    } as unknown as CorrectionLessonRepository,
     now: () => NOW,
   };
 }
@@ -323,6 +337,101 @@ describe('computeDigestPayload', () => {
     const result = await computeDigestPayload(TENANT, DATE, makeDeps());
     expect(result.feedback).toEqual({ responses: 0, averageRating: null, lowRatingCount: 0 });
   });
+
+  // ─── N-005 reflection sections ───────────────────────────────────────────
+
+  it('quotesSent sums today\'s sent estimates (count + integer-cents pipeline value)', async () => {
+    const sent = (id: string, totalCents: number): Estimate =>
+      ({ id, jobId: 'j', status: 'sent', totals: { totalCents }, sentAt: NOW } as unknown as Estimate);
+    // Two estimates sent today (one later accepted still counts).
+    const accepted = { ...sent('e-acc', 20000), status: 'accepted' } as unknown as Estimate;
+    const result = await computeDigestPayload(TENANT, DATE, makeDeps({
+      sentEstimates: [sent('e1', 45000), accepted],
+    }));
+    expect(result.quotesSent).toEqual({ count: 2, pipelineValueCents: 65000 });
+  });
+
+  it('omits quotesSent when no estimates were sent today', async () => {
+    const result = await computeDigestPayload(TENANT, DATE, makeDeps({ sentEstimates: [] }));
+    expect(result.quotesSent).toBeUndefined();
+  });
+
+  it('populates "what I wasn\'t sure about" from _meta low-confidence markers with the derived outcome', async () => {
+    const veryLowRejected = proposal({
+      id: 'unsure-1',
+      status: 'rejected',
+      proposalType: 'draft_estimate',
+      summary: 'Estimate for the Reyes job',
+      payload: { _meta: { overallConfidence: 'very_low' } },
+      confidenceFactors: ['ambiguous scope', 'uncatalogued line'],
+    });
+    const result = await computeDigestPayload(TENANT, DATE, makeDeps({ confidenceMarked: [veryLowRejected] }));
+    expect(result.unsureAbout).toHaveLength(1);
+    expect(result.unsureAbout![0]).toMatchObject({
+      proposalId: 'unsure-1',
+      proposalType: 'draft_estimate',
+      summary: 'Estimate for the Reyes job',
+      confidence: 'very_low',
+      outcome: 'rejected',
+      factors: ['ambiguous scope', 'uncatalogued line'],
+    });
+  });
+
+  it('omits unsureAbout when no confidence-marked proposals fired today', async () => {
+    const result = await computeDigestPayload(TENANT, DATE, makeDeps({ confidenceMarked: [] }));
+    expect(result.unsureAbout).toBeUndefined();
+  });
+
+  it('populates "what I learned today" from applied correction lessons and omits when none', async () => {
+    const lesson: CorrectionLesson = {
+      id: 'les-1',
+      tenantId: TENANT,
+      lessonType: 'labor_rate_changed',
+      status: 'applied',
+      sourceProposalId: 'p-src',
+      ownerId: 'owner',
+      summary: 'labor rate is $145 going forward',
+      payload: { newRateCents: 14500 } as unknown as CorrectionLesson['payload'],
+      localDate: DATE,
+      createdAt: NOW,
+      revertedAt: null,
+    };
+    const withLessons = await computeDigestPayload(TENANT, DATE, makeDeps({ appliedLessons: [lesson] }));
+    expect(withLessons.learnedToday).toEqual([
+      { lessonId: 'les-1', lessonType: 'labor_rate_changed', summary: 'labor rate is $145 going forward' },
+    ]);
+
+    const none = await computeDigestPayload(TENANT, DATE, makeDeps({ appliedLessons: [] }));
+    expect(none.learnedToday).toBeUndefined();
+  });
+
+  it('bad-day simulation (PRD §12): unsureAbout + learnedToday populate together', async () => {
+    const veryLow = proposal({
+      id: 'p-unsure',
+      status: 'rejected',
+      payload: { _meta: { overallConfidence: 'very_low' } },
+    });
+    const lesson: CorrectionLesson = {
+      id: 'les-x', tenantId: TENANT, lessonType: 'labor_rate_changed', status: 'applied',
+      sourceProposalId: 'p', ownerId: 'o', summary: 'labor rate is $145 going forward',
+      payload: {} as unknown as CorrectionLesson['payload'], localDate: DATE, createdAt: NOW, revertedAt: null,
+    };
+    const result = await computeDigestPayload(TENANT, DATE, makeDeps({
+      confidenceMarked: [veryLow],
+      appliedLessons: [lesson],
+    }));
+    expect(result.unsureAbout?.[0]).toMatchObject({ proposalId: 'p-unsure', outcome: 'rejected' });
+    expect(result.learnedToday?.[0].summary).toBe('labor rate is $145 going forward');
+  });
+
+  it('unsureAbout.outcome tracks proposal status at generation time (regeneration reflects new status)', async () => {
+    const base = proposal({ id: 'p-track', status: 'ready_for_review', payload: { _meta: { overallConfidence: 'low' } } });
+    const pendingRun = await computeDigestPayload(TENANT, DATE, makeDeps({ confidenceMarked: [base] }));
+    expect(pendingRun.unsureAbout?.[0].outcome).toBe('pending');
+    const approved = { ...base, status: 'approved' as const };
+    const approvedRun = await computeDigestPayload(TENANT, DATE, makeDeps({ confidenceMarked: [approved] }));
+    expect(approvedRun.unsureAbout?.[0].outcome).toBe('approved');
+  });
 });
 
 describe('summarizeProposalForDigest', () => {
@@ -436,11 +545,13 @@ describe('buildFallbackNarrative', () => {
   });
 });
 
-describe('renderDigestSms', () => {
+describe('renderDigestSmsSegments', () => {
+  const DEEP = 'https://app.example.com/digest/2026-06-10';
   const longUrl = (i: number) =>
     `https://api.example.com/public/proposals/one-tap-approve?token=${'x'.repeat(160)}${i}`;
+  const combine = (segs: string[]) => segs.join('\n');
 
-  it('includes counts, top approvals with one-tap links, flags, expiry note, and the digest deep link', () => {
+  it('renders counts, top approvals with one-tap links, flags, expiry note, and the deep link', () => {
     const payload = basePayload({
       pendingApprovals: {
         totalCount: 3,
@@ -453,15 +564,13 @@ describe('renderDigestSms', () => {
       overdueInvoicesCount: 2,
       unbilledJobs: [{ jobId: 'j', customerId: 'c', amountCents: 100 }],
     });
-    const body = renderDigestSms({
+    const segments = renderDigestSmsSegments({
       payload,
-      deepLinkUrl: 'https://app.example.com/digest/2026-06-10',
-      approvalLinks: payload.pendingApprovals.top.map((approval, i) => ({
-        approval,
-        url: `https://x.co/t${i}`,
-      })),
+      deepLinkUrl: DEEP,
+      approvalLinks: payload.pendingApprovals.top.map((approval, i) => ({ approval, url: `https://x.co/t${i}` })),
     });
-    expect(body.length).toBeLessThanOrEqual(DIGEST_SMS_MAX_CHARS);
+    const body = combine(segments);
+    for (const s of segments) expect(s.length).toBeLessThanOrEqual(DIGEST_SMS_MAX_CHARS);
     expect(body).toContain('$450 in');
     expect(body).toContain('3 jobs done');
     expect(body).toContain('Tomorrow: 4 visits');
@@ -469,16 +578,26 @@ describe('renderDigestSms', () => {
     expect(body).toContain('[1] draft estimate $450 Lopez https://x.co/t0');
     expect(body).toContain('https://x.co/t1');
     expect(body).toContain('https://x.co/t2');
-    // Expiry notice must appear when one-tap links are present.
     expect(body).toContain('(links expire in 30 min)');
     expect(body).toContain('Flags: 2 overdue, 1 unbilled.');
-    expect(body).toContain('https://app.example.com/digest/2026-06-10');
+    expect(body).toContain(DEEP);
   });
 
-  it('never exceeds 480 chars: long one-tap URLs degrade to "+N more" while keeping the deep link', () => {
+  it('emits a single un-prefixed segment when the whole digest fits under the soft limit', () => {
+    const segments = renderDigestSmsSegments({
+      payload: basePayload(),
+      deepLinkUrl: DEEP,
+      approvalLinks: [],
+    });
+    expect(segments).toHaveLength(1);
+    expect(segments[0]).not.toMatch(/^\(\d+\/\d+\)/);
+    expect(segments[0].length).toBeLessThanOrEqual(DIGEST_SMS_SOFT_LIMIT);
+  });
+
+  it('splits into >=2 (k/n)-prefixed segments when content exceeds 320; links survive, deep link only in the final segment', () => {
     const payload = basePayload({
       pendingApprovals: {
-        totalCount: 5,
+        totalCount: 3,
         top: [
           { proposalId: 'p1', proposalType: 'draft_estimate', summary: 's', amountCents: 45000 },
           { proposalId: 'p2', proposalType: 'send_invoice', summary: 's' },
@@ -486,80 +605,98 @@ describe('renderDigestSms', () => {
         ],
       },
     });
-    const body = renderDigestSms({
+    const segments = renderDigestSmsSegments({
       payload,
-      deepLinkUrl: 'https://app.example.com/digest/2026-06-10',
-      approvalLinks: payload.pendingApprovals.top.map((approval, i) => ({
-        approval,
-        url: longUrl(i),
-      })),
+      deepLinkUrl: DEEP,
+      approvalLinks: payload.pendingApprovals.top.map((approval, i) => ({ approval, url: longUrl(i) })),
     });
-    expect(body.length).toBeLessThanOrEqual(DIGEST_SMS_MAX_CHARS);
-    expect(body).toMatch(/\+\d more/);
-    expect(body).toContain('https://app.example.com/digest/2026-06-10');
+    expect(segments.length).toBeGreaterThanOrEqual(2);
+    // Each segment ≤ the hard ceiling; the (k/n) prefix is present when split.
+    segments.forEach((s, i) => {
+      expect(s.length).toBeLessThanOrEqual(DIGEST_SMS_MAX_CHARS);
+      expect(s).toMatch(new RegExp(`^\\(${i + 1}/${segments.length}\\) `));
+    });
+    // All three one-tap URLs survive (never collapsed to "+N more").
+    const body = combine(segments);
+    for (let i = 0; i < 3; i++) expect(body).toContain(longUrl(i));
+    expect(body).not.toMatch(/\+\d more/);
+    // Deep link appears ONLY in the final segment.
+    const deepCount = segments.filter((s) => s.includes(DEEP)).length;
+    expect(deepCount).toBe(1);
+    expect(segments[segments.length - 1]).toContain(DEEP);
   });
 
-  it('omits the approvals section entirely when nothing is pending', () => {
-    const body = renderDigestSms({
-      payload: basePayload(),
-      deepLinkUrl: 'https://app.example.com/digest/2026-06-10',
-      approvalLinks: [],
+  it('regenerates byte-identical segments given identical inputs (deterministic)', () => {
+    const payload = basePayload({
+      quotesSent: { count: 2, pipelineValueCents: 50000 },
+      learnedToday: [{ lessonId: 'l1', lessonType: 'labor_rate_changed', summary: 'labor rate now $145' }],
     });
+    const input = { payload, deepLinkUrl: DEEP, approvalLinks: [] };
+    expect(renderDigestSmsSegments(input)).toEqual(renderDigestSmsSegments(input));
+  });
+
+  it('omits the approvals section and reflection lines entirely when absent', () => {
+    const body = combine(
+      renderDigestSmsSegments({ payload: basePayload(), deepLinkUrl: DEEP, approvalLinks: [] }),
+    );
     expect(body).not.toContain('Approvals');
     expect(body).not.toContain('links expire');
-    expect(body.length).toBeLessThanOrEqual(DIGEST_SMS_MAX_CHARS);
+    expect(body).not.toContain('Unsure:');
+    expect(body).not.toContain('Learned:');
+    expect(body).not.toContain('Quotes:');
   });
 
-  it('omits expiry note when approvals exist but all are low-confidence (no links produced)', () => {
+  it('renders the quotes-sent, unsure, and learned compact lines when present', () => {
     const payload = basePayload({
-      pendingApprovals: {
-        totalCount: 1,
-        top: [{ proposalId: 'p1', proposalType: 'draft_estimate', summary: 's', reviewInApp: true }],
-      },
+      quotesSent: { count: 2, pipelineValueCents: 123400 },
+      unsureAbout: [
+        { proposalId: 'u1', proposalType: 'draft_estimate', summary: 's', confidence: 'very_low', outcome: 'approved' },
+        { proposalId: 'u2', proposalType: 'draft_estimate', summary: 's', confidence: 'low', outcome: 'approved' },
+        { proposalId: 'u3', proposalType: 'draft_estimate', summary: 's', confidence: 'low', outcome: 'rejected' },
+      ],
+      learnedToday: [
+        { lessonId: 'l1', lessonType: 'labor_rate_changed', summary: 'labor rate now $145' },
+        { lessonId: 'l2', lessonType: 'part_price_changed', summary: 'filter is $30' },
+      ],
     });
-    const body = renderDigestSms({
-      payload,
-      deepLinkUrl: 'https://app.example.com/digest/2026-06-10',
-      approvalLinks: [], // no links (all filtered by confidence)
-    });
-    expect(body).not.toContain('links expire');
-    expect(body.length).toBeLessThanOrEqual(DIGEST_SMS_MAX_CHARS);
+    const body = combine(renderDigestSmsSegments({ payload, deepLinkUrl: DEEP, approvalLinks: [] }));
+    expect(body).toContain('Quotes: 2 sent, $1234 pipeline.');
+    expect(body).toContain('Unsure: 3 flagged (2 approved, 1 rejected).');
+    expect(body).toContain('Learned: labor rate now $145; 1 more.');
   });
 
-  it('renders the feedback line with average and low-rating flag', () => {
-    const body = renderDigestSms({
-      payload: basePayload({ feedback: { responses: 4, averageRating: 4.3, lowRatingCount: 1 } }),
-      deepLinkUrl: 'https://app.example.com/digest/2026-06-10',
-      approvalLinks: [],
-    });
-    expect(body).toContain('Feedback: 4 today, avg 4.3/5, 1 low (<=3).');
-    expect(body.length).toBeLessThanOrEqual(DIGEST_SMS_MAX_CHARS);
+  it('renders the feedback line with average and low-rating flag; omits it when empty', () => {
+    const withFb = combine(
+      renderDigestSmsSegments({
+        payload: basePayload({ feedback: { responses: 4, averageRating: 4.3, lowRatingCount: 1 } }),
+        deepLinkUrl: DEEP,
+        approvalLinks: [],
+      }),
+    );
+    expect(withFb).toContain('Feedback: 4 today, avg 4.3/5, 1 low (<=3).');
+
+    const noFb = combine(
+      renderDigestSmsSegments({
+        payload: basePayload({ feedback: { responses: 0, averageRating: null, lowRatingCount: 0 } }),
+        deepLinkUrl: DEEP,
+        approvalLinks: [],
+      }),
+    );
+    expect(noFb).not.toContain('Feedback:');
   });
+});
 
-  it('drops the low-rating flag when every rating is 4+', () => {
-    const body = renderDigestSms({
-      payload: basePayload({ feedback: { responses: 2, averageRating: 5, lowRatingCount: 0 } }),
-      deepLinkUrl: 'https://app.example.com/digest/2026-06-10',
-      approvalLinks: [],
-    });
-    expect(body).toContain('Feedback: 2 today, avg 5/5.');
-    expect(body).not.toContain('low (<=3)');
-  });
-
-  it('omits the feedback line on a no-response day and on pre-E5 payloads', () => {
-    const noResponses = renderDigestSms({
-      payload: basePayload({ feedback: { responses: 0, averageRating: null, lowRatingCount: 0 } }),
-      deepLinkUrl: 'https://app.example.com/digest/2026-06-10',
-      approvalLinks: [],
-    });
-    expect(noResponses).not.toContain('Feedback:');
-
-    const preE5 = renderDigestSms({
-      payload: basePayload(), // no feedback field at all
-      deepLinkUrl: 'https://app.example.com/digest/2026-06-10',
-      approvalLinks: [],
-    });
-    expect(preE5).not.toContain('Feedback:');
+describe('proposalOutcome', () => {
+  it('maps every proposal status to the digest outcome', () => {
+    expect(proposalOutcome('draft')).toBe('pending');
+    expect(proposalOutcome('ready_for_review')).toBe('pending');
+    expect(proposalOutcome('approved')).toBe('approved');
+    expect(proposalOutcome('executing')).toBe('approved');
+    expect(proposalOutcome('executed')).toBe('executed');
+    expect(proposalOutcome('rejected')).toBe('rejected');
+    expect(proposalOutcome('expired')).toBe('expired');
+    expect(proposalOutcome('undone')).toBe('undone');
+    expect(proposalOutcome('execution_failed')).toBe('failed');
   });
 });
 

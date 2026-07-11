@@ -154,17 +154,31 @@ export const UNSUPERVISED_PROPOSAL_ROUTING_VALUES: ReadonlyArray<UnsupervisedPro
  * All fields optional; a missing value falls back to a neutral default tone.
  */
 export interface BrandVoiceSettings {
-  formality?: 'casual' | 'professional';
-  pronoun?: 'we' | 'i';
-  vibe_words?: string[];
-  business_name?: string;
+  // N-011 — the six configured fields.
+  /** 1. Register. Supersedes the legacy 2-valued `formality`. */
+  register?: 'formal' | 'friendly' | 'casual';
+  /** 2. Preferred opening lines (rotated/sampled by the composer). */
+  opening_lines?: string[];
+  /** 3. Sign-off (first-class; legacy paths derived it from business_name). */
+  signoff?: string;
   /**
-   * N-009 / P2-038 — brand-voice negative prompt. Phrases the AI must never
+   * 4. N-009 / P2-038 — brand-voice negative prompt. Phrases the AI must never
    * use in customer-facing copy. Grown by the correction loop when an owner
    * edit removes a phrase (each addition is a reversible `banned_phrase`
    * lesson); rendered as a non-overridable "never say" instruction.
    */
   banned_phrases?: string[];
+  /** 5. Shop persona name, e.g. "M&R Mechanical's office". */
+  persona_name?: string;
+  /** 6. Self-reference pronoun (retained; used by renderToneAuthority). */
+  pronoun?: 'we' | 'i';
+
+  // --- retained legacy keys, mapped forward, NOT surfaced in the new UI ---
+  /** Legacy 2-valued formality; read only when `register` is absent. */
+  formality?: 'casual' | 'professional';
+  vibe_words?: string[];
+  /** Legacy business name; signoff fallback. */
+  business_name?: string;
 }
 
 /**
@@ -408,6 +422,16 @@ export interface TenantSettings {
    * brand-voice composer uses a neutral default. Explicit `null` clears it.
    */
   brandVoice?: BrandVoiceSettings | null;
+  /**
+   * N-011 — brand-voice version bookkeeping (migration 238). Read-only
+   * projections of the `brand_voice_version` / `brand_voice_locked` /
+   * `brand_voice_updated_at` columns; the brand-voice router owns writes
+   * (transactional version bump). `brandVoiceVersion` is 0 until the first
+   * configure; the composer stamps it onto every utterance it drafts.
+   */
+  brandVoiceVersion?: number;
+  brandVoiceLocked?: boolean;
+  brandVoiceUpdatedAt?: string | null;
   /**
    * Public review links shown to satisfied customers (4★+) on the
    * post-job feedback page. Migration 120. null/undefined = not

@@ -443,6 +443,33 @@ describe('provision-twilio worker — number picker', () => {
     expect(anyStub).toBeUndefined();
   });
 
+  it.each(['staging', 'prod'])(
+    "does NOT fabricate a stub in %s (production-like) — fails closed like production",
+    async (env) => {
+      // Regression: the stub branch gated on a bare NODE_ENV !== 'production',
+      // so a misconfigured 'prod'/'staging' deploy with missing creds silently
+      // wrote the fake +15005550006 stub and completed onboarding. It must now
+      // throw (fail closed) in every real deployment env.
+      setEnv('NODE_ENV', env);
+      setEnv('TWILIO_ACCOUNT_SID', undefined);
+      setEnv('TWILIO_AUTH_TOKEN', undefined);
+
+      const { pool, calls } = makePool();
+      const worker = createProvisionTwilioWorker({ pool });
+
+      await expect(
+        worker.handle(
+          buildMessage({ tenantId: TENANT, region: null, baseUrl: 'https://api.test' }),
+          logger,
+        ),
+      ).rejects.toThrow(/TWILIO_ACCOUNT_SID/);
+
+      // No stub number was ever persisted in a production-like env.
+      const anyStub = calls.find((c) => JSON.stringify(c.params).includes('+15005550006'));
+      expect(anyStub).toBeUndefined();
+    },
+  );
+
   it('does not fail Twilio provisioning when Vapi assistant creation throws (best-effort)', async () => {
     configureTwilio();
     mockFetch(...twilioHappyPath());

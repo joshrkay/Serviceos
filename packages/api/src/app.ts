@@ -119,6 +119,9 @@ import {
 } from './ai/supervisor-presence';
 import { createConversationRouter } from './routes/conversations';
 import { createSettingsRouter } from './routes/settings';
+import { createBrandVoiceRouter } from './tenants/brand/brand-voice-router';
+import { PgBrandVoiceRepository } from './tenants/brand/pg-brand-voice-repository';
+import { InMemoryBrandVoiceRepository } from './tenants/brand/in-memory-brand-voice-repository';
 import { createDncRouter } from './routes/dnc';
 import { createVerticalRouter } from './routes/verticals';
 import { createVerticalTrainingAssetsRouter } from './routes/vertical-training-assets';
@@ -540,6 +543,23 @@ import {
   runSupervisorAnnotationSweep,
   SUPERVISOR_ANNOTATE_SWEEP_INTERVAL_MS,
 } from './workers/supervisor-review-worker';
+// N-004 (P2-037) — Supervisor Agent review pass (four-check pre-dispatch gate).
+import { configureSupervisorReviewGate } from './ai/supervisor/review-gate';
+import { createSupervisorReviewGate } from './ai/supervisor/reviewer';
+import {
+  InMemorySupervisorReviewRepository,
+  PgSupervisorReviewRepository,
+} from './ai/supervisor/reviews-repo';
+import { PgPricingBaselineResolver } from './ai/supervisor/pricing-baseline';
+import {
+  DEFAULT_SUPERVISOR_REVIEW_MODE,
+  type SupervisorReviewMode,
+} from './ai/supervisor/types';
+import {
+  DEFAULT_AI_ROUTING_CONFIG,
+  resolveModelForTaskType,
+  assertSupervisorReviewModelDistinct,
+} from './config/ai-routing';
 import { ProposalExecutor } from './proposals/execution/executor';
 import { IdempotencyGuard } from './proposals/execution/idempotency';
 import {
@@ -2918,6 +2938,22 @@ export function createApp(): express.Express {
     } catch {
       /* fire-and-forget — admin flags surface via the admin API */
     }
+    // N-011 — dark-launch the Brand-Voice Configurator. Default OFF; seeded so
+    // it appears in the admin UI. Idempotent (only seeds when missing).
+    try {
+      const { BRAND_VOICE_CONFIGURATOR_FLAG } = await import('./tenants/brand/brand-voice');
+      if (!(await featureFlagRepo.get(BRAND_VOICE_CONFIGURATOR_FLAG))) {
+        await featureFlagRepo.upsert({
+          name: BRAND_VOICE_CONFIGURATOR_FLAG,
+          enabled: false,
+          description:
+            'N-011 Brand-Voice Configurator: six-field brand voice capture, ' +
+            'versioning/rollback, and version-tagged utterances.',
+        });
+      }
+    } catch {
+      /* fire-and-forget */
+    }
     await hydrateStoreFromRepository(featureFlagStore, featureFlagRepo);
   })();
   // RV-001 follow-up #8 / RV-122 — per-tenant feature-flag resolution
@@ -4436,7 +4472,18 @@ export function createApp(): express.Express {
     setSupervisorPresenceLoader(pgSupervisorPresenceLoader(pool));
   }
 
-  app.use('/api/me', createMeRouter(userModeService, auditRepo));
+  app.use(
+    '/api/me',
+    createMeRouter(userModeService, auditRepo, {
+      // N-011 — surface the brand_voice_configurator flag so the web gates the
+      // onboarding step + settings sheet. Global flag check (default off).
+      isBrandVoiceConfiguratorEnabled: (tenantId: string) =>
+        isFeatureEnabled(featureFlagStore, 'brand_voice_configurator', {
+          environment: process.env.NODE_ENV || 'development',
+          tenantId,
+        }),
+    }),
+  );
 
   // Mobile push-token registration (POST/DELETE /api/devices). Pg-backed when
   // a DB is configured; in-memory otherwise. Feeds the proposal-execution
@@ -4552,6 +4599,15 @@ export function createApp(): express.Express {
       // D2-1c — audit-log tenant-settings + language mutations.
       auditRepo,
     ),
+  );
+  // N-011 — Brand-Voice Configurator (behind the brand_voice_configurator flag,
+  // enforced at the web surface; the API is permission-gated as normal).
+  const brandVoiceRepo = pool
+    ? new PgBrandVoiceRepository(pool)
+    : new InMemoryBrandVoiceRepository();
+  app.use(
+    '/api/settings/brand-voice',
+    createBrandVoiceRouter(brandVoiceRepo, settingsRepo, auditRepo),
   );
   app.use('/api/settings/packs', createPackActivationRouter(packActivationRepo, canonicalPackRegistry, auditRepo, settingsRepo));
   app.use('/api/verticals', createVerticalRouter(canonicalPackRegistry));
@@ -5043,6 +5099,8 @@ export function createApp(): express.Express {
           customerRepo,
           settingsRepo,
           feedbackResponseRepo,
+          // N-005 — "what I learned today" (correction-loop lessons).
+          correctionLessonRepo,
         },
         listTenantIds: async () => {
           if (!pool) return [];
@@ -5745,6 +5803,70 @@ export function createApp(): express.Express {
   // Never uninstalled on shutdown — benign: fail-open + fire-and-forget.
   // Tests must reset via configureSupervisorCreationHook(null).
   configureSupervisorCreationHook(supervisorService);
+
+  // N-004 (P2-037) — install the four-check pre-dispatch review gate.
+  // Default mode is shadow (compute + log + mark, never hold) — the safe
+  // default given alert-fatigue is the named risk; SUPERVISOR_REVIEW_MODE can
+  // promote a deploy to 'enforce' (holds active on customer-harm criticals) or
+  // 'off'. Boot-time invariant: the reviewer model must differ from the primary
+  // drafting model (a same-model reviewer is degraded, not broken — warn + run).
+  const supervisorReviewModel = resolveModelForTaskType(
+    DEFAULT_AI_ROUTING_CONFIG,
+    'supervisor_review',
+  );
+  const modelCollision = assertSupervisorReviewModelDistinct(DEFAULT_AI_ROUTING_CONFIG);
+  if (modelCollision) {
+    supervisorLogger.warn(
+      'supervisor-review: reviewer model equals a primary drafting model (degraded)',
+      modelCollision,
+    );
+  }
+  const envReviewMode = (process.env.SUPERVISOR_REVIEW_MODE ?? '').trim();
+  const supervisorReviewMode: SupervisorReviewMode =
+    envReviewMode === 'off' || envReviewMode === 'shadow' || envReviewMode === 'enforce'
+      ? envReviewMode
+      : DEFAULT_SUPERVISOR_REVIEW_MODE;
+  const supervisorPricingBaseline = pool ? new PgPricingBaselineResolver(pool) : null;
+  configureSupervisorReviewGate(
+    createSupervisorReviewGate({
+      gateway: llmGateway,
+      aiRunRepo,
+      reviewsRepo: pool
+        ? new PgSupervisorReviewRepository(pool)
+        : new InMemorySupervisorReviewRepository(),
+      proposalRepo,
+      supervisorModel: supervisorReviewModel,
+      resolveMode: async () => supervisorReviewMode,
+      ...(supervisorPricingBaseline
+        ? { resolveBaseline: (p) => supervisorPricingBaseline.resolve(p.tenantId) }
+        : {}),
+      resolveAccountType: async (p) => {
+        const payload = (p.payload ?? {}) as Record<string, unknown>;
+        const src = (p.sourceContext ?? {}) as Record<string, unknown>;
+        const customerId =
+          (typeof payload.customerId === 'string' && payload.customerId) ||
+          (typeof src.customerId === 'string' && src.customerId) ||
+          null;
+        if (!customerId) return null;
+        try {
+          const customer = await customerRepo.findById(p.tenantId, customerId);
+          return customer?.accountType ?? null;
+        } catch {
+          return null;
+        }
+      },
+      resolveBannedPhrases: async (tenantId) => {
+        try {
+          const settings = await settingsRepo.findByTenant(tenantId);
+          return settings?.brandVoice?.banned_phrases ?? [];
+        } catch {
+          return [];
+        }
+      },
+      logger: supervisorLogger,
+    }),
+  );
+
   // Close the executed-spend loop declared next to the ProposalExecutor.
   supervisorSpendRecorder = (tenantId, proposalId) =>
     recordExecutedProposalSpend({

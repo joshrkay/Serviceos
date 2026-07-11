@@ -81,10 +81,12 @@ describe('phone_normalized reconciliation invariant', () => {
     expect(appKey).not.toBe(storedGeneratedForm); // → plain equality would miss
   });
 
-  it("trailing-10 digits reconcile the app key with the stored +1 form", () => {
+  it("the 10-digit tail + a leading-1 variant reconcile with the stored +1 form", () => {
     const appKey = normalizePhone('+15125550111');
-    // The exact predicate identifyCaller uses: right(phone_normalized, 10).
-    expect(storedGeneratedForm.slice(-10)).toBe(appKey.slice(-10));
+    // identifyCaller now probes `phone_normalized IN ($tail, '1' || $tail)`
+    // (index-friendly equality) instead of `right()`/`LIKE`. The stored +1 form
+    // equals the leading-1 variant of the 10-digit tail.
+    expect('1' + appKey.slice(-10)).toBe(storedGeneratedForm);
   });
 
   it('bare 10-digit stored form also reconciles via the trailing-10 match', () => {
@@ -209,6 +211,20 @@ describe('identifyCaller — tenant isolation', () => {
 
     const [sql] = queryFn.mock.calls[0] as [string, unknown[]];
     expect(sql).toContain('phone_normalized');
+  });
+
+  it('uses the index-friendly IN(...) form, not right()/LIKE (perf: no full tenant scan)', async () => {
+    const queryFn = vi.fn().mockResolvedValue({ rows: [] } as unknown as QueryResult);
+    const pool = { query: queryFn } as unknown as Pool;
+
+    await identifyCaller({ tenantId: 'tenant-xyz', fromPhone: '+15125550100', pool });
+
+    const [sql, params] = queryFn.mock.calls[0] as [string, unknown[]];
+    expect(sql).toContain("phone_normalized IN ($2, '1' || $2)");
+    expect(sql).not.toMatch(/right\s*\(/i);
+    expect(sql).not.toMatch(/LIKE/i);
+    // $2 is the 10-digit bare tail (no leading 1).
+    expect(params[1]).toBe('5125550100');
   });
 
   it('different tenants are isolated — query scoped to provided tenantId', async () => {

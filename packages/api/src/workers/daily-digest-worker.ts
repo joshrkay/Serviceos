@@ -47,7 +47,7 @@ import {
   computeDigestPayload,
   isBlockingConfidence,
   localDateString,
-  renderDigestSms,
+  renderDigestSmsSegments,
   type DailyDigestPayload,
   type DailyDigestRecord,
   type DailyDigestRepository,
@@ -58,6 +58,13 @@ import {
 
 /** Sweep cadence app.ts drives — and the bucket width for due matching. */
 export const DIGEST_SWEEP_INTERVAL_MS = 15 * 60 * 1000;
+
+/**
+ * N-005 (PRD line 730) — explicit retry cap: at most 3 SMS send passes per
+ * digest, then dead-letter. Enforced against `daily_digests.send_attempts`
+ * (migration 239).
+ */
+export const DIGEST_MAX_SEND_ATTEMPTS = 3;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Tenant-local due-bucket matching
@@ -406,93 +413,114 @@ async function sendDigestSms(
     return false;
   }
 
-  // Before sending, check whether a dispatch already exists for this digest.
-  // This guards the retry path: a prior sweep that stored the row but crashed
-  // before claiming `setSmsDispatchId` must not re-send the SMS.
-  const existingDispatches = await deps.dispatchRepo.findByEntity(tenantId, 'daily_digest', record.id);
-  if (existingDispatches.length > 0) {
-    const prior = existingDispatches[0]; // sorted sent_at DESC by the repo
-    const claimResult = await deps.digestRepo.setSmsDispatchId(tenantId, record.digestDate, prior.id);
-    if (!claimResult) {
-      deps.logger.info('Daily-digest sweep: dispatch already claimed by another sender (retry path)', {
-        tenantId,
-        digestDate: record.digestDate,
-        dispatchId: prior.id,
-      });
-    }
-    deps.logger.info('Daily-digest sweep: claimed existing dispatch, no re-send', {
-      tenantId,
-      digestDate: record.digestDate,
-      dispatchId: prior.id,
-    });
-    return 'claimed';
-  }
-
-  const body = renderDigestSms({
+  // Render the digest into 320-char soft-limit segments (PRD §12). Each
+  // segment carries its own per-segment idempotency key + dispatch row so a
+  // mid-split crash re-sends ONLY the unsent segments.
+  const segments = renderDigestSmsSegments({
     payload: record.payload,
     deepLinkUrl: `${deps.publicBaseUrl.replace(/\/+$/, '')}/digest/${record.digestDate}`,
     approvalLinks: buildApprovalLinks(tenantId, record.payload, deps),
     // RV-065 — "invoice it" one-tap links for completed-unbilled jobs.
-    // Lowest budget priority inside renderDigestSms (dropped first).
     invoiceLinks: buildInvoiceLinks(tenantId, record.payload, deps),
   });
+  const n = segments.length;
+  const segmentKey = (k: number) => `daily_digest:${record.digestDate}:${k + 1}of${n}`;
 
-  const idempotencyKey = `daily_digest:${record.digestDate}`;
-  const result = await deps.delivery.sendSms({
-    to: settings.ownerPhone,
-    body,
-    tenantId,
-    idempotencyKey,
-  });
+  // Dispatch rows already committed for this digest (per-segment idempotency
+  // keys). A prior sweep may have sent some segments then crashed; those are
+  // skipped here so we never double-send a delivered segment.
+  const existingDispatches = await deps.dispatchRepo.findByEntity(tenantId, 'daily_digest', record.id);
+  const dispatchByKey = new Map(
+    existingDispatches.filter((d) => d.idempotencyKey).map((d) => [d.idempotencyKey!, d]),
+  );
+  const unsentSegments = segments
+    .map((_, k) => segmentKey(k))
+    .filter((key) => !dispatchByKey.has(key));
 
-  let dispatch;
-  try {
-    dispatch = await deps.dispatchRepo.create({
-      tenantId,
-      entityType: 'daily_digest',
-      entityId: record.id,
-      channel: 'sms',
-      recipient: settings.ownerPhone,
-      provider: result.provider,
-      providerMessageId: result.providerMessageId,
-      status: 'sent',
-      idempotencyKey,
-    });
-  } catch (createErr) {
-    // Unique-violation: another concurrent sender committed the dispatch row
-    // first. Look it up and claim it so setSmsDispatchId still fires.
-    deps.logger.info('Daily-digest sweep: dispatch create unique-violation, looking up existing row', {
-      tenantId,
-      digestDate: record.digestDate,
-      error: createErr instanceof Error ? createErr.message : String(createErr),
-    });
-    const fallbackDispatches = await deps.dispatchRepo.findByEntity(tenantId, 'daily_digest', record.id);
-    if (fallbackDispatches.length === 0) {
-      throw createErr; // unexpected — rethrow for observability
+  // Retry cap: only a pass that actually sends counts against the 3-attempt
+  // budget. Once the count exceeds the cap, dead-letter (stop retrying) and
+  // log a structured error for observability.
+  if (unsentSegments.length > 0) {
+    const attempts = await deps.digestRepo.incrementSendAttempts(tenantId, record.digestDate);
+    if (attempts !== null && attempts > DIGEST_MAX_SEND_ATTEMPTS) {
+      deps.logger.error('Daily-digest sweep: SMS send attempts exhausted — dead-lettering digest', {
+        tenantId,
+        digestDate: record.digestDate,
+        attempts,
+        cap: DIGEST_MAX_SEND_ATTEMPTS,
+      });
+      return false;
     }
-    dispatch = fallbackDispatches[0];
   }
 
-  const claimedNew = await deps.digestRepo.setSmsDispatchId(
-    tenantId,
-    record.digestDate,
-    dispatch.id,
-  );
+  let firstDispatchId: string | undefined = dispatchByKey.get(segmentKey(0))?.id;
+  let anySent = false;
+  for (let k = 0; k < n; k++) {
+    const idempotencyKey = segmentKey(k);
+    if (dispatchByKey.has(idempotencyKey)) continue; // already delivered on a prior pass
+    const result = await deps.delivery.sendSms({
+      to: settings.ownerPhone,
+      body: segments[k],
+      tenantId,
+      idempotencyKey,
+    });
+
+    let dispatch;
+    try {
+      dispatch = await deps.dispatchRepo.create({
+        tenantId,
+        entityType: 'daily_digest',
+        entityId: record.id,
+        channel: 'sms',
+        recipient: settings.ownerPhone,
+        provider: result.provider,
+        providerMessageId: result.providerMessageId,
+        status: 'sent',
+        idempotencyKey,
+      });
+    } catch (createErr) {
+      // Unique-violation: another concurrent sender committed this segment's
+      // dispatch row first. Look it up and reuse it.
+      deps.logger.info('Daily-digest sweep: dispatch create unique-violation, looking up existing row', {
+        tenantId,
+        digestDate: record.digestDate,
+        idempotencyKey,
+        error: createErr instanceof Error ? createErr.message : String(createErr),
+      });
+      const fallbackDispatches = await deps.dispatchRepo.findByEntity(tenantId, 'daily_digest', record.id);
+      const found =
+        fallbackDispatches.find((d) => d.idempotencyKey === idempotencyKey) ?? fallbackDispatches[0];
+      if (!found) throw createErr; // unexpected — rethrow for observability
+      dispatch = found;
+    }
+
+    if (k === 0) firstDispatchId = dispatch.id;
+    anySent = true;
+  }
+
+  // The single daily_digests row owns ONE sms_dispatch_id — the first
+  // segment's dispatch — for the double-send guard.
+  const claimDispatchId = firstDispatchId ?? existingDispatches[0]?.id;
+  const claimedNew = claimDispatchId
+    ? await deps.digestRepo.setSmsDispatchId(tenantId, record.digestDate, claimDispatchId)
+    : null;
   if (!claimedNew) {
     // Status check lost: another sender recorded a dispatch first. The
-    // provider-level idempotency key bounds the blast radius to one SMS.
+    // per-segment idempotency keys bound the blast radius.
     deps.logger.warn('Daily-digest sweep: dispatch already recorded by another sender', {
       tenantId,
       digestDate: record.digestDate,
     });
   }
+  const body = segments.join(' ');
 
   // U5 (JTBD #7) — anchor the day's batch-approvable ids over the P2-034
   // transport so an inbound "APPROVE ALL" can delegate to batch-approve.
-  // Only the inserter that actually claimed the dispatch records the anchor
-  // (claimedNew), keeping it 1:1 with the single SMS that went out — a
-  // retry/loser sweep must not append a second, stale anchor.
-  if (deps.recordApproveAllAnchor && claimedNew) {
+  // Only the inserter that actually claimed the dispatch AND sent at least one
+  // segment records the anchor (claimedNew && anySent), keeping it 1:1 with the
+  // SMS that went out — a retry/loser/claim-only sweep must not append a
+  // second, stale anchor.
+  if (deps.recordApproveAllAnchor && claimedNew && anySent) {
     const approveAllIds = batchApprovableProposalIds(record.payload);
     if (approveAllIds.length > 0) {
       try {
@@ -513,7 +541,9 @@ async function sendDigestSms(
     }
   }
 
-  return 'sent';
+  // Every segment already had a dispatch row (a prior sweep sent them and only
+  // the claim was outstanding) → this pass claimed without re-sending.
+  return anySent ? 'sent' : 'claimed';
 }
 
 /**

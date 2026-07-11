@@ -43,7 +43,7 @@ describe('P4-015 — brand-voice prompt templates', () => {
     it(`P4-015 — buildBrandVoicePrompt assembles a non-empty prompt for ${intent}`, () => {
       const { system, user } = buildBrandVoicePrompt({
         intent,
-        tone: { formality: 'casual', vibe_words: ['friendly'] },
+        tone: { register: 'casual', vibe_words: ['friendly'] },
         context: { customer_first_name: 'Pat' },
         maxChars: 160,
       });
@@ -51,7 +51,8 @@ describe('P4-015 — brand-voice prompt templates', () => {
       expect(user.length).toBeGreaterThan(0);
       // Tone authority appears in the system slot, not the user slot.
       expect(system.toLowerCase()).toContain('brand voice');
-      expect(system).toContain('casual');
+      // N-011 — register renders in the tone authority.
+      expect(system).toContain('Register: casual');
       expect(system).toContain('friendly');
       // The maxChars hint is threaded into the user message.
       expect(user).toContain('160');
@@ -67,7 +68,43 @@ describe('P4-015 — brand-voice prompt templates', () => {
       context: {},
       maxChars: 200,
     });
-    expect(system).toContain(DEFAULT_BRAND_VOICE_TONE.formality);
+    expect(system).toContain(DEFAULT_BRAND_VOICE_TONE.register);
+  });
+
+  it('N-011 — register, persona name, opening lines, and signoff render in the tone authority', () => {
+    const { system } = buildBrandVoicePrompt({
+      intent: 'review_public_response',
+      tone: {
+        register: 'friendly',
+        persona_name: "M&R Mechanical's office",
+        opening_lines: ['Thanks for reaching out'],
+        signoff: '— The M&R team',
+        pronoun: 'we',
+      },
+      context: {},
+      maxChars: 200,
+    });
+    expect(system).toContain('Register: friendly');
+    expect(system).toContain('Write as "M&R Mechanical\'s office"');
+    expect(system).toContain('Thanks for reaching out');
+    expect(system).toContain('Sign off with: "— The M&R team"');
+  });
+
+  it('N-011 — legacy formality maps forward to the register when register is absent', () => {
+    const casual = buildBrandVoicePrompt({
+      intent: 'review_public_response',
+      tone: { formality: 'casual' },
+      context: {},
+      maxChars: 200,
+    }).system;
+    const professional = buildBrandVoicePrompt({
+      intent: 'review_public_response',
+      tone: { formality: 'professional' },
+      context: {},
+      maxChars: 200,
+    }).system;
+    expect(casual).toContain('Register: friendly');
+    expect(professional).toContain('Register: formal');
   });
 
   it('P4-015 — isBrandVoiceIntent narrows correctly', () => {

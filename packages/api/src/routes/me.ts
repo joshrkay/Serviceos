@@ -99,6 +99,14 @@ export interface UserModeService {
 export function createMeRouter(
   service: UserModeService,
   auditRepo: AuditRepository,
+  options?: {
+    /**
+     * N-011 — resolves whether the brand_voice_configurator flag is on for a
+     * tenant. Injected from app.ts (feature-flag store) so the web can gate the
+     * onboarding step + settings sheet. Absent → feature reads off.
+     */
+    isBrandVoiceConfiguratorEnabled?: (tenantId: string) => boolean;
+  },
 ): Router {
   const router = Router();
 
@@ -144,6 +152,9 @@ export function createMeRouter(
           backup_supervisor_user_id: settings.backup_supervisor_user_id,
           unsupervised_proposal_routing:
             settings.unsupervised_proposal_routing,
+          // N-011 — gate the Brand-Voice Configurator UI (default off).
+          brand_voice_configurator_enabled:
+            options?.isBrandVoiceConfiguratorEnabled?.(auth.tenantId) ?? false,
           // Business timezone so the web client can render UTC instants
           // in the tenant's local time (appointments, invoice dates,
           // dashboard buckets, etc.).

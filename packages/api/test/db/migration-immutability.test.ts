@@ -389,6 +389,18 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // authoritative pack_activations table (kill the dual-source drift). 235 is
   // reserved for a sibling fix landing separately.
   ['236_reconcile_active_vertical_packs_mirror', '161871a3a57eb99f2c0b0d1173fa082483923c06210f122faa2a901f0ba24a46'],
+  // N-011 / P4-015 — Brand-Voice Configurator: append-only version history table.
+  ['237_brand_voice_versions', 'e6fbbd8bd25d5b6f50ae30146c0d5d93d8716907d150dfeb3f5bfa4ef4e227d7'],
+  // N-011 / P4-015 — brand-voice version/lock/cool-down bookkeeping columns.
+  ['238_tenant_settings_brand_voice_meta', '5ca3ab678c6330db38f857ac5966e9a963f898781fe4d33652751af03c1f6582'],
+  // N-005 / P5-020 — End-of-Day Digest completion: SMS retry-cap counter.
+  ['239_daily_digests_send_attempts', '324b3cadc3702a6ea87969856bcdfc010ac5112b8f6ae66db3cd8ac1dd23b18f'],
+  // N-005 — partial index backing findConfidenceMarkedForDay ("what I wasn't sure about").
+  ['240_proposals_confidence_marker_index', '8627c35efe348224146ddf0d18f4372f7de6a7bc510a28fa50df1cef12ad2307'],
+  // N-005 — partial index backing the "quotes sent today" sent_at range scan.
+  ['241_estimates_tenant_sent_at_index', 'f4c9cb40bd945e3bbab16bfa4b5a8180279919384343c4a153a607cc7b35c630'],
+  ['242_create_supervisor_reviews', '9f7aba0a44dac7e8b03a8d2fa1c9c882bbdf72aa8688385acc9b022151374c25'],
+  ['243_brand_voice_versions_changed_by_text', 'cfbe7e3a622aec7a34f86d3a3cb159edad53183794086e00cce557d1daa8fc79'],
 ];
 
 function hashMigration(value: string): string {

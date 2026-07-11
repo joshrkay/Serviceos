@@ -169,6 +169,59 @@ describe('DigestPage', () => {
     expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
   });
 
+  describe('N-005 reflection sections', () => {
+    const enriched = {
+      ...basePayload,
+      quotesSent: { count: 2, pipelineValueCents: 65_000 },
+      unsureAbout: [
+        {
+          proposalId: 'u-1',
+          proposalType: 'draft_estimate',
+          summary: 'Estimate for the Diaz job',
+          confidence: 'very_low',
+          factors: ['ambiguous scope'],
+          outcome: 'rejected' as const,
+        },
+      ],
+      learnedToday: [
+        { lessonId: 'l-1', lessonType: 'labor_rate_changed', summary: 'labor rate is $145 going forward' },
+      ],
+    };
+
+    it('renders quotes-sent, "what I wasn\'t sure about", and "what I learned today"', async () => {
+      mockFetch.mockResolvedValue(digestResponse(enriched));
+      renderAt('/digest/2026-06-10');
+      await screen.findByText('A solid day.');
+
+      expect(screen.getByText('Quotes sent')).toBeInTheDocument();
+      expect(screen.getByText('Pipeline value')).toBeInTheDocument();
+      expect(screen.getByText('$650.00')).toBeInTheDocument();
+
+      expect(screen.getByText("What I wasn't sure about today")).toBeInTheDocument();
+      expect(screen.getByText('Estimate for the Diaz job')).toBeInTheDocument();
+      expect(screen.getByText('rejected')).toBeInTheDocument();
+
+      expect(screen.getByText('What I learned today')).toBeInTheDocument();
+      expect(screen.getByText('labor rate is $145 going forward')).toBeInTheDocument();
+    });
+
+    it('omits the reflection sections when absent (empty/pre-N005 payloads)', async () => {
+      mockFetch.mockResolvedValue(digestResponse(basePayload));
+      renderAt('/digest/2026-06-10');
+      await screen.findByText('A solid day.');
+      expect(screen.queryByText('Quotes sent')).not.toBeInTheDocument();
+      expect(screen.queryByText("What I wasn't sure about today")).not.toBeInTheDocument();
+      expect(screen.queryByText('What I learned today')).not.toBeInTheDocument();
+    });
+
+    it('the unsure list rows meet the 44px glove target (min-h-11)', async () => {
+      mockFetch.mockResolvedValue(digestResponse(enriched));
+      renderAt('/digest/2026-06-10');
+      const row = (await screen.findByText('Estimate for the Diaz job')).closest('li');
+      expect(row?.className).toContain('min-h-11');
+    });
+  });
+
   describe('date navigation', () => {
     it('prev/next links target the adjacent calendar days', async () => {
       mockFetch.mockResolvedValue(digestResponse());

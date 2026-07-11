@@ -30,6 +30,17 @@ const CACHE_TTL_MS = 60_000;
 // 'staging') and the canonical 'production'.
 const DEPLOYMENT_ENVS = new Set(['production', 'prod', 'staging']);
 
+/**
+ * True when NODE_ENV names a real deployment (production / prod / staging) — the
+ * canonical prod-like check for Twilio credential resolution. Any code that
+ * must fail closed on missing Twilio creds (credential fallback, provisioning
+ * stub) should gate on THIS, never on a bare `!== 'production'` which lets a
+ * misconfigured 'prod'/'staging' deploy slip through.
+ */
+export function isTwilioDeploymentEnv(nodeEnv: string | undefined): boolean {
+  return DEPLOYMENT_ENVS.has(nodeEnv ?? '');
+}
+
 export function flushCredentialCache(tenantId: string): void {
   for (const key of cache.keys()) {
     if (key.startsWith(`${tenantId}:`)) cache.delete(key);

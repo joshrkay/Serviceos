@@ -45,6 +45,10 @@ describe('Postgres integration — identifyCaller phone_normalized reconciliatio
   });
 
   afterAll(async () => {
+    // Clean up the customer rows this suite inserted so a re-run against the
+    // same DB (EXTERNAL_TEST_DB_URL / shared container) starts clean — mirrors
+    // voice-proposal-ai-run-fk.test.ts.
+    await pool.query('DELETE FROM customers WHERE tenant_id = $1', [tenant.tenantId]);
     await closeSharedTestDb();
   });
 

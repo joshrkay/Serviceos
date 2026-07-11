@@ -5906,6 +5906,116 @@ export const MIGRATIONS = {
     WHERE ts.tenant_id = sub.tenant_id
       AND ts.terminology_preferences IS DISTINCT FROM sub.new_terms;
   `,
+
+  // N-011 / P4-015 — Brand-Voice Configurator. Append-only version history for
+  // the per-tenant locked tone profile. Every explicit web edit (and the
+  // onboarding capture) writes a new snapshot row here; rollback re-persists an
+  // older snapshot as a NEW bump (history is never mutated). Each row's
+  // `version` gives outbound utterances a stable brand-voice version to cite.
+  // RLS matches the evaluation_snapshots convention (FORCE + tenant_isolation).
+  '237_brand_voice_versions': `
+    CREATE TABLE IF NOT EXISTS brand_voice_versions (
+      id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id     UUID NOT NULL REFERENCES tenants(id),
+      version       INTEGER NOT NULL,
+      snapshot      JSONB NOT NULL,
+      changed_by    UUID,
+      change_reason TEXT NOT NULL,
+      created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, version)
+    );
+    CREATE INDEX IF NOT EXISTS idx_bvv_tenant_version
+      ON brand_voice_versions(tenant_id, version DESC);
+    ALTER TABLE brand_voice_versions ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE brand_voice_versions FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_brand_voice_versions ON brand_voice_versions;
+    CREATE POLICY tenant_isolation_brand_voice_versions ON brand_voice_versions
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // N-011 / P4-015 — brand-voice bookkeeping columns on tenant_settings so the
+  // composer / lock / cool-down paths read the monotonic version, lock state,
+  // and cool-down anchor WITHOUT digging into the brand_voice JSONB. The
+  // six-field tone data itself stays in the existing brand_voice JSONB column
+  // (additive, no shape migration). All three are additive + defaulted so
+  // legacy rows read version 0 / unlocked / no cool-down. Inherits
+  // tenant_settings' FORCE-RLS tenant_isolation policy.
+  '238_tenant_settings_brand_voice_meta': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS brand_voice_version INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS brand_voice_locked BOOLEAN NOT NULL DEFAULT false;
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS brand_voice_updated_at TIMESTAMPTZ;
+  `,
+
+  // N-005 (F-9) — explicit SMS retry cap. Counts each digest send pass so the
+  // worker can dead-letter after 3 attempts instead of retrying until local
+  // midnight. Additive + defaulted; legacy rows read 0.
+  '239_daily_digests_send_attempts': `
+    ALTER TABLE daily_digests
+      ADD COLUMN IF NOT EXISTS send_attempts INT NOT NULL DEFAULT 0;
+  `,
+
+  // N-005 (F-9) — supports ProposalRepository.findConfidenceMarkedForDay (the
+  // digest "what I wasn't sure about today" query). Partial expression index on
+  // the low/very_low confidence marker; additive, no-op on prod re-runs.
+  '240_proposals_confidence_marker_index': `
+    CREATE INDEX IF NOT EXISTS idx_proposals_tenant_created_confidence
+      ON proposals (tenant_id, created_at)
+      WHERE payload->'_meta'->>'overallConfidence' IN ('low','very_low');
+  `,
+
+  // N-005 (F-9) — supports the digest "quotes sent today" range scan over
+  // estimates.sent_at (EstimateListOptions sentFrom/sentTo). Additive partial
+  // index over sent (non-null sent_at) estimates.
+  '241_estimates_tenant_sent_at_index': `
+    CREATE INDEX IF NOT EXISTS idx_estimates_tenant_sent_at
+      ON estimates (tenant_id, sent_at) WHERE sent_at IS NOT NULL;
+  `,
+
+  // N-004 (P2-037) — Supervisor Agent review pass ledger. One row per
+  // pre-dispatch review (missed-urgency / pricing-anomaly / brand-voice-drift /
+  // account-routing). ai_run_id FKs the single lightweight-tier LLM run the
+  // review made (nullable: deterministic-only reviews never call a model, and
+  // ON DELETE SET NULL keeps the review row if the ai_runs row is pruned).
+  // `shadow=true` marks a computed-but-not-enforced review; `critical` records
+  // a customer-harm finding even when shadow mode did not hold. Follows the
+  // 167_create_supervisor_policies FORCE-RLS + tenant-isolation shape.
+  '242_create_supervisor_reviews': `
+    CREATE TABLE IF NOT EXISTS supervisor_reviews (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      proposal_id UUID NOT NULL REFERENCES proposals(id),
+      ai_run_id UUID REFERENCES ai_runs(id) ON DELETE SET NULL,
+      model TEXT NOT NULL,
+      verdict TEXT NOT NULL CHECK (verdict IN ('pass', 'flag', 'hold', 'timeout', 'error')),
+      critical BOOLEAN NOT NULL DEFAULT false,
+      checks JSONB NOT NULL DEFAULT '{}',
+      flags JSONB NOT NULL DEFAULT '[]',
+      latency_ms INTEGER,
+      shadow BOOLEAN NOT NULL DEFAULT false,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_supervisor_reviews_tenant ON supervisor_reviews(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_supervisor_reviews_proposal ON supervisor_reviews(proposal_id);
+    CREATE INDEX IF NOT EXISTS idx_supervisor_reviews_created ON supervisor_reviews(tenant_id, created_at);
+    ALTER TABLE supervisor_reviews ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE supervisor_reviews FORCE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_supervisor_reviews ON supervisor_reviews
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // N-011 fix — brand_voice_versions.changed_by must hold the actor's auth
+  // subject, which under Clerk is a string id (`user_2abc…`), NOT a UUID.
+  // Migration 237 typed the column UUID, so a real (Clerk) edit/rollback threw
+  // `invalid input syntax for type uuid` at INSERT time — the integration test
+  // passed only because it used a real-UUID actor. Widen to TEXT. Idempotent
+  // (ALTER … TYPE TEXT is a no-op once the column is already TEXT) and additive
+  // (all existing UUID values are valid TEXT).
+  '243_brand_voice_versions_changed_by_text': `
+    ALTER TABLE brand_voice_versions ALTER COLUMN changed_by TYPE TEXT;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

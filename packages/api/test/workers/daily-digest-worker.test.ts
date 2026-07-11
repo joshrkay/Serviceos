@@ -24,6 +24,7 @@ import type { AppointmentRepository } from '../../src/appointments/appointment';
 import type { Proposal, ProposalRepository } from '../../src/proposals/proposal';
 import type { CustomerRepository } from '../../src/customers/customer';
 import type { FeedbackResponseRepository } from '../../src/feedback/feedback-response';
+import type { CorrectionLessonRepository } from '../../src/learning/corrections/correction-lesson';
 
 const logger = createLogger({ service: 'test', environment: 'test', level: 'error' });
 
@@ -88,16 +89,23 @@ function stubComputeDeps(o: ComputeStubOverrides = {}, settingsRepo?: InMemorySe
       findByTenant: async () => [],
       findByJobs: async () => [],
     } as unknown as InvoiceRepository,
-    estimateRepo: { findByJobs: async () => [] } as unknown as EstimateRepository,
+    estimateRepo: {
+      findByJobs: async () => [],
+      findByTenant: async () => [],
+    } as unknown as EstimateRepository,
     proposalRepo: {
       findByStatus: async (_t: string, status: string) =>
         status === 'draft' ? [] : o.proposals ?? [],
+      findConfidenceMarkedForDay: async () => [],
     } as unknown as ProposalRepository,
     customerRepo: { findById: async () => null } as unknown as CustomerRepository,
     settingsRepo: (settingsRepo ?? new InMemorySettingsRepository()) as never,
     feedbackResponseRepo: {
       countByRatingInRange: async () => ({ 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 }),
     } as unknown as FeedbackResponseRepository,
+    correctionLessonRepo: {
+      findAppliedForDay: async () => [],
+    } as unknown as CorrectionLessonRepository,
     now: () => DUE_NOW,
   };
 }
@@ -234,7 +242,8 @@ describe('runDailyDigestSweep', () => {
     expect(msg.to).toBe('+15551230000');
     expect(msg.body.length).toBeLessThanOrEqual(480);
     expect(msg.body).toContain(`/digest/${LOCAL_DATE}`);
-    expect(msg.idempotencyKey).toBe(`daily_digest:${LOCAL_DATE}`);
+    // Per-segment idempotency key (single-segment digest → 1of1).
+    expect(msg.idempotencyKey).toBe(`daily_digest:${LOCAL_DATE}:1of1`);
 
     // Dispatch audit row links back to the digest.
     const dispatches = await dispatchRepo.findByEntity('t1', 'daily_digest', stored!.id);
@@ -477,6 +486,7 @@ describe('runDailyDigestSweep', () => {
       } as unknown as JobRepository,
       estimateRepo: {
         findByJobs: async () => [acceptedEstimate],
+        findByTenant: async () => [],
       } as unknown as EstimateRepository,
     };
 
@@ -591,6 +601,48 @@ describe('runDailyDigestSweep', () => {
 
   it('exports the 15-minute sweep cadence app.ts drives', () => {
     expect(DIGEST_SWEEP_INTERVAL_MS).toBe(15 * 60 * 1000);
+  });
+
+  it('increments send_attempts per failed send and dead-letters after the 3-attempt cap (PRD line 730)', async () => {
+    sendSms.mockRejectedValue(new Error('twilio down'));
+    // Sweep 1 is due; subsequent sweeps advance the clock so the retry path
+    // (stored-but-unsent row) engages each tick.
+    for (let i = 0; i < 4; i++) {
+      const at = new Date(DUE_NOW.getTime() + i * 15 * 60 * 1000);
+      await runDailyDigestSweep(deps({ now: () => at }));
+    }
+    // Exactly 3 real send attempts, then dead-lettered (no 4th send).
+    expect(sendSms).toHaveBeenCalledTimes(3);
+    const stored = await digestRepo.findByTenantAndDate('t1', LOCAL_DATE);
+    expect(stored?.sendAttempts).toBe(4); // 3 sends + the dead-letter pass that tripped the cap
+    expect(stored?.smsDispatchId).toBeUndefined();
+  });
+
+  it('splits a long digest into multiple (k/n) segments — one dispatch row + idempotency key per segment', async () => {
+    const proposals = [pendingProposal('s1'), pendingProposal('s2'), pendingProposal('s3')];
+    const result = await runDailyDigestSweep(deps({
+      computeDeps: stubComputeDeps({ proposals }, settingsRepo),
+    }));
+    expect(result.sent).toBe(1);
+
+    const n = sendSms.mock.calls.length;
+    expect(n).toBeGreaterThanOrEqual(2);
+    sendSms.mock.calls.forEach((c, i) => {
+      const body: string = c[0].body;
+      expect(body.length).toBeLessThanOrEqual(480);
+      expect(body).toMatch(new RegExp(`^\\(${i + 1}/${n}\\) `));
+      expect(c[0].idempotencyKey).toBe(`daily_digest:${LOCAL_DATE}:${i + 1}of${n}`);
+    });
+    // The deep link only appears in the FINAL segment.
+    const withDeep = sendSms.mock.calls.filter((c) => (c[0].body as string).includes(`/digest/${LOCAL_DATE}`));
+    expect(withDeep).toHaveLength(1);
+    expect(sendSms.mock.calls[n - 1][0].body).toContain(`/digest/${LOCAL_DATE}`);
+
+    // One dispatch row per segment; the digest row owns the first segment's dispatch.
+    const stored = await digestRepo.findByTenantAndDate('t1', LOCAL_DATE);
+    const dispatches = await dispatchRepo.findByEntity('t1', 'daily_digest', stored!.id);
+    expect(dispatches).toHaveLength(n);
+    expect(stored?.smsDispatchId).toBeTruthy();
   });
 
   // U5 (JTBD #7) — APPROVE ALL anchor recording.
