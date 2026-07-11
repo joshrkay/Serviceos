@@ -1,7 +1,7 @@
 /**
  * P0-027 — Hardened Whisper transcription provider tests.
  */
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   DevNoopTranscriptionProvider,
   WhisperTranscriptionProvider,
@@ -13,6 +13,7 @@ import {
   WHISPER_MAX_BYTES,
   createWhisperTranscriptionProvider,
   DeepgramStreamingProvider,
+  DEEPGRAM_OPEN_TIMEOUT_MS,
 } from '../../src/voice/transcription-providers';
 
 function audioResponse(ok = true, status = 200, sizeBytes = 1024): Response {
@@ -190,5 +191,75 @@ describe('DeepgramStreamingProvider URL builder', () => {
       buildWsUrl: (lang: 'en' | 'es', options?: { keywords?: ReadonlyArray<string>; endpointingMs?: number }) => string;
     }).buildWsUrl('en', { keywords: [] });
     expect(url).not.toContain('keywords=');
+  });
+});
+
+describe('DeepgramStreamingProvider open timeout (VOX-01)', () => {
+  let originalWebSocket: typeof WebSocket;
+
+  beforeEach(() => {
+    originalWebSocket = global.WebSocket;
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    global.WebSocket = originalWebSocket;
+    vi.useRealTimers();
+  });
+
+  it('rejects and closes the socket when the WS handshake never opens', async () => {
+    // Fake WS that NEVER fires open/error — models a stalled Deepgram
+    // handshake. Without a bound, `await openSession` would hang forever
+    // with caller audio already bridged (dead air). The bound must reject.
+    let closed = false;
+    const fakeWs = {
+      readyState: 0,
+      addEventListener: vi.fn(), // deliberately never invokes any listener
+      send: vi.fn(),
+      close: vi.fn(() => {
+        closed = true;
+      }),
+    };
+    global.WebSocket = vi.fn(() => fakeWs) as unknown as typeof WebSocket;
+
+    const provider = new DeepgramStreamingProvider('test-key');
+    const openPromise = provider.openSession(
+      () => undefined,
+      () => undefined,
+      () => undefined,
+    );
+    // Attach the rejection assertion BEFORE advancing timers so the
+    // rejection is never unhandled.
+    const assertion = expect(openPromise).rejects.toThrow(/deepgram_open_timeout/);
+    await vi.advanceTimersByTimeAsync(DEEPGRAM_OPEN_TIMEOUT_MS + 50);
+    await assertion;
+    expect(closed).toBe(true);
+  });
+
+  it('resolves normally when the socket opens before the timeout', async () => {
+    const listeners: Record<string, (e: unknown) => void> = {};
+    const fakeWs = {
+      readyState: 0,
+      addEventListener: vi.fn((event: string, fn: (e: unknown) => void) => {
+        listeners[event] = fn;
+      }),
+      send: vi.fn(),
+      close: vi.fn(),
+    };
+    global.WebSocket = vi.fn(() => fakeWs) as unknown as typeof WebSocket;
+
+    const provider = new DeepgramStreamingProvider('test-key');
+    const openPromise = provider.openSession(
+      () => undefined,
+      () => undefined,
+      () => undefined,
+    );
+    // Fire open well within the bound.
+    await vi.advanceTimersByTimeAsync(10);
+    fakeWs.readyState = 1;
+    listeners['open']?.({});
+    const session = await openPromise;
+    expect(session).toHaveProperty('send');
+    expect(fakeWs.close).not.toHaveBeenCalled();
   });
 });

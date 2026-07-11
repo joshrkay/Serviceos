@@ -667,7 +667,24 @@ import { buildHelmetOptions } from './bootstrap/helmet-options';
 import { checkMetricsAuth, type MetricsAuthResult } from './bootstrap/metrics-auth';
 export { buildHelmetOptions, checkMetricsAuth, type MetricsAuthResult };
 
-export function createApp(): express.Express {
+// ARCH-02: the graceful-drain sequence (flip /ready to 503, reject new WS
+// upgrades, wait DRAIN_TIMEOUT_MS for live voice/WS sessions, then tear down
+// background loops/Redis/pool) must run for BOTH a clean SIGTERM/SIGINT and a
+// fatal in-process error (uncaughtException) — index.ts's fatal handler calls
+// `app.gracefulDrain(reason)` directly instead of duplicating this sequence
+// so a sync throw can no longer bypass the drain and drop live calls.
+export type AppWithLifecycle = express.Express & {
+  /**
+   * Idempotent, bounded drain-before-teardown. Safe to call more than once
+   * (e.g. a SIGTERM arriving while a fatal-error drain is already in
+   * flight) — every caller after the first gets the SAME in-flight promise
+   * instead of re-running teardown (double-closing the pool/Redis clients).
+   * `reason` is for logging only; it is not necessarily a POSIX signal name.
+   */
+  gracefulDrain: (reason: string) => Promise<void>;
+};
+
+export function createApp(): AppWithLifecycle {
   // §11 H3: Initialize Sentry FIRST so any error thrown during startup
   // or in handler construction below is captured. initSentry() is a no-op
   // when SENTRY_DSN is unset (dev/test), so this is safe in every env.
@@ -5835,7 +5852,20 @@ export function createApp(): express.Express {
   // don't stack handlers, and we exit only when the pool finishes draining
   // (or after a 5s safety timeout). Server lifecycle is owned by index.ts —
   // this handler only takes responsibility for the DB pool.
-  const shutdown = async (signal: NodeJS.Signals) => {
+  //
+  // ARCH-02: wrapped in a memoized promise so it is idempotent — index.ts's
+  // fatal-error handler and this module's own SIGTERM/SIGINT listeners can
+  // all reach this function, and only the FIRST caller actually runs
+  // teardown; every subsequent caller (concurrent SIGTERM during a fatal
+  // drain, or vice versa) awaits the same in-flight drain instead of
+  // re-entering it (which would double-close the pool/Redis clients).
+  let shutdownPromise: Promise<void> | null = null;
+  const shutdown = (reason: string): Promise<void> => {
+    if (shutdownPromise) return shutdownPromise;
+    shutdownPromise = runShutdown(reason);
+    return shutdownPromise;
+  };
+  const runShutdown = async (signal: string) => {
     try {
       // eslint-disable-next-line no-console
       console.log(`[app] ${signal} received — stopping background loops, closing voice sessions and pg pool`);
@@ -5901,5 +5931,10 @@ export function createApp(): express.Express {
   process.once('SIGTERM', shutdown);
   process.once('SIGINT', shutdown);
 
-  return app;
+  // ARCH-02: share the exact same (idempotent, bounded) drain sequence with
+  // index.ts's fatal-error handler — see AppWithLifecycle above.
+  const appWithLifecycle = app as AppWithLifecycle;
+  appWithLifecycle.gracefulDrain = shutdown;
+
+  return appWithLifecycle;
 }

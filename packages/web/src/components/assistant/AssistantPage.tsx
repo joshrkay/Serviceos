@@ -16,6 +16,7 @@ import { AIProposalCard } from '../shared/AIProposalCard';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useTTS } from '../../hooks/useTTS';
 import { useConversationVoice } from '../../hooks/useConversationVoice';
+import { reportError, toSafeErrorShape } from '../../lib/errorReporter';
 
 interface ApiMessage {
   id: string;
@@ -103,8 +104,13 @@ async function sendToConversationAPI(
     };
   } catch (err) {
     // Network/auth failure reaching the assistant API. Surface an accurate,
-    // non-misleading message and log the real cause for debugging.
-    console.error('AI chat request failed:', err);
+    // non-misleading message. OBS-41 — log/report only a safe {name,
+    // message} shape, never the raw error object: `err` can be a fetch
+    // Response-derived Error whose message embeds the API response body
+    // (customer data) or, via apiFetch's 401 retry path, a token.
+    const safe = toSafeErrorShape(err);
+    console.error('AI chat request failed:', safe);
+    reportError(err, 'assistant-chat');
     return {
       content: 'Unable to connect to AI service — please try again or contact support.',
       reasoning: 'Could not reach the AI service.',

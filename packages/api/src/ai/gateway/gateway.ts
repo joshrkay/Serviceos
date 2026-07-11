@@ -12,7 +12,7 @@ import {
   failAiRun,
   AiRun,
 } from '../ai-run';
-import { AIRoutingConfig, isVisionCapableModel, TASK_TYPES } from '../../config/ai-routing';
+import { AIRoutingConfig, isVisionCapableModel, resolveTierDeadlineMs, TASK_TYPES } from '../../config/ai-routing';
 import {
   resolveRouting,
   shouldWarnForUnmappedTaskType,
@@ -336,6 +336,13 @@ export class LLMGateway {
       model: resolvedModel,
       maxTokens: routingDecision.maxTokens,
       temperature: routingDecision.temperature,
+      // VOX-34: apply the resolved tier's default end-to-end deadline when the
+      // caller didn't set one. Without this, every request (including
+      // classify_intent on the voice hot path) inherited the universal 8s
+      // fallback in ProviderRetryDeadlineWrapper — far above the turn SLO.
+      // An explicit request.deadlineMs always wins. The retry layer still
+      // enforces MIN_RETRY_BUDGET_MS against this (now tighter) budget.
+      deadlineMs: request.deadlineMs ?? resolveTierDeadlineMs(routingDecision.resolvedTier),
     };
 
     // Fail fast: an image-bearing request must resolve to a vision-capable

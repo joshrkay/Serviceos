@@ -9,6 +9,7 @@ import { AnalyticsIdentityBridge } from './components/auth/AnalyticsIdentityBrid
 import { TenantTimezoneProvider } from './hooks/useTenantTimezone';
 import { getRuntimeConfigValue } from './lib/runtimeConfig';
 import { initAnalytics } from './lib/analytics';
+import { initErrorReporting } from './lib/errorReporter';
 import { registerServiceWorker } from './pwa/register-sw';
 import './index.css';
 
@@ -22,6 +23,12 @@ if (!CLERK_PUBLISHABLE_KEY) {
 
 // Warm the analytics bundle if a key is configured. No-op when not.
 initAnalytics();
+
+// ARCH-31 / OBS-43 — global async-error capture. Registers
+// window 'unhandledrejection' / 'error' listeners once, at boot, before
+// anything else can run and throw. Reports via the same (off-by-default)
+// PostHog client as initAnalytics() above.
+initErrorReporting();
 
 // Boot Pendo SDK with an anonymous visitor. The SDK resolves the previous
 // visitor from cookies/localStorage if available, otherwise falls back to

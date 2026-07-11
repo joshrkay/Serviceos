@@ -104,7 +104,10 @@ describe('P0-023 — app-wiring (pool ternary coverage)', () => {
       expect(src).toMatch(/registerInterval\(setInterval\(/);
       expect(src).toMatch(/for\s*\(const\s+handle\s+of\s+backgroundIntervals\)\s*clearInterval\(handle\)/);
       // The clearInterval loop must run inside the shutdown handler, before pool.end().
-      const shutdownIdx = src.indexOf('const shutdown = async (signal');
+      // ARCH-02: the handler body was extracted into `runShutdown`, memoized
+      // behind `shutdown` for idempotency (see AppWithLifecycle/gracefulDrain) —
+      // `runShutdown` is the anchor now instead of the old inline `shutdown`.
+      const shutdownIdx = src.indexOf('const runShutdown = async (signal');
       const clearIdx = src.indexOf('for (const handle of backgroundIntervals)');
       const poolEndIdx = src.indexOf('pool.end()');
       expect(shutdownIdx).toBeGreaterThan(-1);

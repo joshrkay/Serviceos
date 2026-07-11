@@ -16,6 +16,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useApiClient } from '../lib/apiClient';
 import { useAuth } from '@clerk/clerk-react';
+import { fetchWithAuthRetry, isAuthRejectedStatus } from '../lib/streamAuth';
 
 interface VoiceSessionEventMessage {
   type: string;
@@ -111,22 +112,23 @@ export function useVoiceSession(): UseVoiceSession {
       const controller = new AbortController();
       sseAbortRef.current = controller;
 
-      const token = await getToken({ template: 'serviceos' });
-      const headers: Record<string, string> = { Accept: 'text/event-stream' };
-      if (token) headers.Authorization = `Bearer ${token}`;
-
       let response: Response;
       try {
-        response = await fetch(`/api/voice/sessions/${id}/events`, {
-          method: 'GET',
-          headers,
-          signal: controller.signal,
-        });
+        // ARCH-30 — shared 401/403 handling: retry once with a
+        // force-refreshed token, then handleAuthFailure() (Clerk sign-out /
+        // login redirect) on a persistent rejection. `ended` is still set
+        // below so the panel doesn't sit in a stuck "connecting" state
+        // while that navigation completes.
+        response = await fetchWithAuthRetry(
+          (opts) => getToken({ template: 'serviceos', ...opts }),
+          `/api/voice/sessions/${id}/events`,
+          { method: 'GET', headers: { Accept: 'text/event-stream' }, signal: controller.signal },
+        );
       } catch {
-        return; // aborted or network error — leave state to caller
+        return; // aborted, no token, or network error — leave state to caller
       }
 
-      if (response.status === 401 || response.status === 403) {
+      if (isAuthRejectedStatus(response.status)) {
         // Surface auth failures explicitly instead of silently retrying.
         setEnded(true);
         return;

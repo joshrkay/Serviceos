@@ -299,6 +299,54 @@ describe('P20-005 — AI failure messaging', () => {
   });
 });
 
+// ─── OBS-41: safe error logging (no raw error object / PII) ─────────────────
+
+describe('OBS-41 — AI chat failure logging does not leak the raw error object', () => {
+  async function typeAndSend(text: string) {
+    await waitFor(() => {
+      expect(screen.getByText(/I'm your AI assistant/)).toBeInTheDocument();
+    });
+    const input = screen.getByPlaceholderText('Ask anything or give a command…');
+    fireEvent.change(input, { target: { value: text } });
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+  }
+
+  it('logs only a safe {name, message} shape, never the raw Error instance', async () => {
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    // Simulate the shape apiFetch's 401 retry path / a JSON error body can
+    // produce: an Error whose message embeds response-body-like content and
+    // a bearer token, plus an extra property a raw response object might
+    // carry (e.g. a parsed body attached by an upstream catch).
+    const sensitiveError = Object.assign(
+      new Error('API error: 401 — Authorization: Bearer super-secret-token-abc123'),
+      { responseBody: { customerEmail: 'jane@example.com', ssn: '123-45-6789' } },
+    );
+    mockedApiFetch.mockRejectedValueOnce(sensitiveError);
+
+    renderPage();
+    await typeAndSend('Hello');
+
+    await waitFor(() => expect(consoleErrorSpy).toHaveBeenCalled());
+
+    const call = consoleErrorSpy.mock.calls.find((c) => c[0] === 'AI chat request failed:');
+    expect(call).toBeDefined();
+
+    // The raw Error instance (and its extra `responseBody` property) must
+    // never be the thing that was logged.
+    const logged = call?.[1];
+    expect(logged).not.toBe(sensitiveError);
+    expect(logged).not.toHaveProperty('responseBody');
+
+    // Only a safe { name, message } shape is logged, and the message must
+    // not carry the raw bearer token through untouched.
+    expect(logged).toMatchObject({ name: 'Error' });
+    const loggedMessage = (logged as { message?: string })?.message ?? '';
+    expect(loggedMessage).not.toContain('super-secret-token-abc123');
+
+    consoleErrorSpy.mockRestore();
+  });
+});
+
 // ─── Story 3.12: retry affordance on a failed turn ───────────────────────────
 
 describe('Story 3.12 — retry on agent failure', () => {

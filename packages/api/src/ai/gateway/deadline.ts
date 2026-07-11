@@ -21,6 +21,11 @@ export const STAGE_BUDGETS = {
   route: 100,
   connect: 500,
   postprocess: 300,
+  // VOX-34: last-resort fallback only. gateway.complete() now sets
+  // request.deadlineMs from the resolved model tier (config/ai-routing.ts
+  // resolveTierDeadlineMs — lightweight ~1.5s / standard ~4s / complex ~8s),
+  // so ProviderRetryDeadlineWrapper reaches this default only for callers that
+  // bypass tier resolution.
   defaultTotal: 8_000,
   defaultStreamingTotal: 25_000,
 } as const;
