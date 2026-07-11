@@ -88,6 +88,25 @@ const configSchema = z.object({
   // autonomous_booking_enabled setting. Absent/'false' preserves today's
   // per-tenant-only gating — no prod requirement.
   AUTONOMOUS_BOOKING_DISABLED: z.enum(['true', 'false']).optional(),
+  // ── WS15 — platform SLO monitor thresholds (workers/slo-monitor.ts). All
+  // optional with safe defaults; documented in .env.production.example and
+  // docs/runbooks/slo-alerts.md. No prod hard-requirement — the monitor runs
+  // with defaults and pages via Sentry (SENTRY_DSN) and, when set, ALERT_SMS_TO.
+  //
+  // Minimum acceptable call completion rate over the trailing 60 min (0..1).
+  SLO_CALL_COMPLETION_MIN: z.coerce.number().min(0).max(1).default(0.85),
+  // Ended-call sample floor: below this many calls in the window the
+  // completion rule never breaches (avoids 1-call false pages).
+  SLO_CALL_COMPLETION_MIN_SAMPLE: z.coerce.number().int().positive().default(5),
+  // Pending queue jobs older than this many minutes count as stale (breach).
+  SLO_QUEUE_STALE_MIN: z.coerce.number().positive().default(15),
+  // Sweep-heartbeat age (minutes) above which the worker loop is presumed wedged.
+  SLO_SWEEP_LAG_MIN: z.coerce.number().positive().default(15),
+  // Per-rule alert cooldown (minutes) — a persistent breach re-pages at most
+  // once per cooldown window, not every monitor tick.
+  SLO_ALERT_COOLDOWN_MIN: z.coerce.number().positive().default(60),
+  // Operator phone (E.164) for SLO breach SMS pages. Unset → Sentry-only.
+  ALERT_SMS_TO: z.string().min(1).optional(),
 });
 
 export type AppConfig = z.infer<typeof configSchema>;

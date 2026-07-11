@@ -34,6 +34,24 @@
 | `TRANSCRIPT_ENCRYPTION_KEY` | Falls back to `TENANT_ENCRYPTION_KEY`; if neither set, raw transcripts not retained |
 | `TENANT_ENCRYPTION_KEY` | Fallback for transcript encryption |
 
+## SLO monitoring / operator alerting (WS15 — all optional, safe defaults)
+
+The SLO monitor (`packages/api/src/workers/slo-monitor.ts`, worker/all roles)
+evaluates call completion rate, queue staleness, and sweep lag every 5 min and
+pages on breach. **What makes a breach reach a human:** `SENTRY_DSN` (+ the
+Sentry→Slack/DM rules in `docs/runbooks/alerting.md`) and, optionally,
+`ALERT_SMS_TO`. Without both, breaches only appear in logs/metrics. Runbook:
+`docs/runbooks/slo-alerts.md`.
+
+| Variable | Default | Notes |
+|----------|---------|-------|
+| `ALERT_SMS_TO` | unset (SMS channel off) | Operator phone (E.164); sent owner-class, never consent-suppressed |
+| `SLO_CALL_COMPLETION_MIN` | `0.85` | Min completion rate, trailing 60 min |
+| `SLO_CALL_COMPLETION_MIN_SAMPLE` | `5` | Sample floor before completion rule can breach |
+| `SLO_QUEUE_STALE_MIN` | `15` | Pending job age (min) that counts as a stuck queue |
+| `SLO_SWEEP_LAG_MIN` | `15` | Sweep-heartbeat age (min) treated as a wedged worker loop |
+| `SLO_ALERT_COOLDOWN_MIN` | `60` | Per-rule re-page cooldown |
+
 ## Web service (build / runtime)
 
 | Variable | Notes |

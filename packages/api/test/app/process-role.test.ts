@@ -215,4 +215,30 @@ describe('WS2 — PROCESS_ROLE process split', () => {
       expect(res.text).toContain('<Connect><Stream');
     });
   });
+
+  describe('WS15 — SLO monitor is a role-gated worker interval', () => {
+    // The count invariants above already prove NO worker interval (this one
+    // included) runs in web role; this pins that the SLO monitor specifically
+    // is one of them — registered inside its shouldRunWorkers block and driven
+    // through the leader lock — so a refactor can't quietly move it into the
+    // ungated observability baseline (where web replicas would page).
+    it('is registered under shouldRunWorkers + the sloMonitor leader lock (source-level)', () => {
+      const { readFileSync } = require('node:fs') as typeof import('node:fs');
+      const { resolve: resolvePath } = require('node:path') as typeof import('node:path');
+      const appSrc = readFileSync(resolvePath(__dirname, '../../src/app.ts'), 'utf8');
+      // The registration segment: from the WS15 worker-gate comment block's
+      // `if (shouldRunWorkers)` to the interval registration.
+      const segment = appSrc.match(
+        /\/\/ WS15 — platform SLO monitor\.[\s\S]*?SLO_MONITOR_INTERVAL_MS\)\);/,
+      );
+      expect(segment).not.toBeNull();
+      expect(segment![0]).toContain('if (shouldRunWorkers) {');
+      expect(segment![0]).toContain('runAsLeader(SWEEP_LOCK.sloMonitor');
+      expect(segment![0]).toContain('runSloMonitor(');
+      // Gate comes before the registration inside the segment.
+      expect(segment![0].indexOf('if (shouldRunWorkers) {')).toBeLessThan(
+        segment![0].indexOf('registerInterval('),
+      );
+    });
+  });
 });

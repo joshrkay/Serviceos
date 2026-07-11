@@ -644,6 +644,21 @@ export class VoiceSessionStore {
   }
 
   /**
+   * WS15 — callSids of LIVE (non-ended) sessions, for the drain-abandonment
+   * alarm: when the shutdown drain window expires with live calls remaining,
+   * the Sentry event names the abandoned callSids so the operator can match
+   * them to Twilio call logs. Sessions without a callSid (web/test channels)
+   * are skipped — liveCount() remains the authoritative count.
+   */
+  liveCallSids(): string[] {
+    const sids: string[] = [];
+    for (const session of this.sessions.values()) {
+      if (!session.ended && session.callSid) sids.push(session.callSid);
+    }
+    return sids;
+  }
+
+  /**
    * X10/PR#398 — supervisor wall discovery. Returns non-ended sessions
    * for the given tenant so the wall can seed its local state and send
    * per-session WS `subscribe` frames (the gateway rejects voice subs

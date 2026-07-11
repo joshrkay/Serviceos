@@ -248,6 +248,50 @@ export const wsReconnectRejectTotal = new Counter({
   registers: [metricsRegistry],
 });
 
+// ---------- Platform SLOs (WS15 — operational resilience) ----------
+
+/**
+ * WS15 — calls abandoned by a shutdown drain: the SIGTERM drain window
+ * (DRAIN_TIMEOUT_MS) expired with live voice sessions still active, and
+ * teardown proceeded anyway (Twilio ends the calls).
+ *
+ * NOTE: Prometheus counters live in process memory and are LOST at process
+ * exit — and this counter is by definition incremented moments before exit,
+ * so a scraper will usually never see it. The Sentry error event emitted
+ * alongside it (see monitoring/alert-operator.ts emitDrainAbandonment) is
+ * the durable alarm; this counter exists for the case where the increment
+ * happens on a process that lingers long enough to be scraped mid-drain.
+ */
+export const voiceDrainAbandonedCallsTotal = new Counter({
+  name: 'voice_drain_abandoned_calls_total',
+  help: 'Voice calls still live when the shutdown drain window expired (teardown proceeded). Durable alarm is the paired Sentry event.',
+  registers: [metricsRegistry],
+});
+
+/** WS15 — last evaluated value per SLO rule (see workers/slo-monitor.ts). */
+export const sloRuleValue = new Gauge({
+  name: 'slo_rule_value',
+  help: 'Last evaluated value per platform SLO rule (call_completion_rate=ratio, queue_staleness=stale job count, sweep_lag=seconds since last sweep success)',
+  labelNames: ['rule'],
+  registers: [metricsRegistry],
+});
+
+/** WS15 — SLO breaches detected by the monitor (pre-cooldown). */
+export const sloBreachTotal = new Counter({
+  name: 'slo_breach_total',
+  help: 'Platform SLO breaches detected by the slo-monitor worker',
+  labelNames: ['rule'],
+  registers: [metricsRegistry],
+});
+
+/** WS15 — operator alerts actually dispatched, per channel (post-cooldown). */
+export const sloAlertsSentTotal = new Counter({
+  name: 'slo_alerts_sent_total',
+  help: 'Operator alerts dispatched by alertOperator, by rule and channel (sentry|sms)',
+  labelNames: ['rule', 'channel'],
+  registers: [metricsRegistry],
+});
+
 export async function renderMetrics(): Promise<{
   contentType: string;
   body: string;

@@ -188,6 +188,11 @@ import { createFeedbackResponsesRouter } from './routes/feedback';
 import { createInteractionsRouter } from './routes/interactions';
 import { initSentry, setSentryClient } from './monitoring/sentry';
 import { dbPoolConnections, pgQueueDepth } from './monitoring/metrics';
+// WS15 — platform SLO monitor + drain-abandonment alarm.
+import { createAlertOperator, emitDrainAbandonment } from './monitoring/alert-operator';
+import { recordSweepSuccess, sweepLastSuccessMs } from './monitoring/sweep-heartbeats';
+import { PgPlatformSloRepository } from './monitoring/pg-platform-slo';
+import { runSloMonitor, SLO_MONITOR_INTERVAL_MS } from './workers/slo-monitor';
 
 // In-memory repositories (fallback for dev without DATABASE_URL)
 import { InMemoryCustomerRepository } from './customers/customer';
@@ -2175,12 +2180,17 @@ export function createApp(): AppWithLifecycle {
     // scale-to-1000 C1 — durable job-queue depth sampler (one replica queries
     // the shared _queue_messages/_queue_dlq tables per tick).
     queueDepth: 590023,
+    // WS15 — platform SLO monitor (evaluates completion rate / queue
+    // staleness / sweep lag and pages the operator on breach).
+    sloMonitor: 590024,
   } as const;
   const runAsLeader = async (lockKey: number, work: () => Promise<void>): Promise<void> => {
     if (shuttingDown) return;
     if (!pool) {
       // In-memory dev: no coordination needed (sweeps no-op with no tenants).
       await work();
+      // WS15 — sweep heartbeat (see below for the pool path).
+      recordSweepSuccess(String(lockKey));
       return;
     }
     // Leader election holds a SESSION advisory lock across work(), so it must
@@ -2195,6 +2205,12 @@ export function createApp(): AppWithLifecycle {
       if (!res.rows[0]?.locked) return; // another instance owns this tick
       try {
         await work();
+        // WS15 — record the sweep heartbeat on SUCCESS only (a throwing
+        // work() must read as lag). Keyed by lock key; the SLO monitor reads
+        // the queue-depth sampler's heartbeat as its worker-loop liveness
+        // canary. In-process registry — see monitoring/sweep-heartbeats.ts
+        // for the multi-replica caveat.
+        recordSweepSuccess(String(lockKey));
       } finally {
         await client.query('SELECT pg_advisory_unlock($1)', [lockKey]);
       }
@@ -2236,6 +2252,61 @@ export function createApp(): AppWithLifecycle {
   // `backgroundIntervalCount` (exposed on the returned app) is the count of
   // those worker loops — length minus this baseline — so it is 0 in web role.
   const observabilityIntervalCount = backgroundIntervals.length;
+
+  // WS15 — platform SLO monitor. Evaluates call completion rate (last 60min,
+  // voice_sessions terminal outcomes, cross-tenant), queue staleness (pending
+  // jobs older than SLO_QUEUE_STALE_MIN), and sweep lag (queue-depth sampler
+  // heartbeat age) every 5 minutes, and ALERTS A HUMAN on breach: always a
+  // Sentry error event (docs/runbooks/alerting.md routes those to Slack/DM),
+  // plus an operator SMS when ALERT_SMS_TO is set (owner-class — bypasses the
+  // consent gate). Leader-locked so exactly one replica evaluates/pages per
+  // tick; per-rule cooldown (SLO_ALERT_COOLDOWN_MIN) inside alertOperator.
+  // Runbook: docs/runbooks/slo-alerts.md.
+  if (shouldRunWorkers) {
+    const sloLogger = createLogger({
+      service: 'slo-monitor',
+      environment: process.env.NODE_ENV || 'development',
+    });
+    const alertOperator = createAlertOperator({
+      sentry: sentryClient,
+      delivery: messageDelivery,
+      alertSmsTo: config.ALERT_SMS_TO,
+      cooldownMs: config.SLO_ALERT_COOLDOWN_MIN * 60 * 1000,
+      logger: sloLogger,
+    });
+    const platformSloRepo = pool ? new PgPlatformSloRepository(pool) : null;
+    let sloMonitorInFlight = false;
+    registerInterval(setInterval(() => {
+      if (sloMonitorInFlight) return;
+      sloMonitorInFlight = true;
+      void runAsLeader(SWEEP_LOCK.sloMonitor, async () => {
+        await runSloMonitor({
+          // In-memory dev (no pool): zero counts — the completion rule's
+          // sample floor keeps it quiet.
+          getCallOutcomeCounts: (windowStart) =>
+            platformSloRepo
+              ? platformSloRepo.endedCallOutcomeCounts(windowStart)
+              : Promise.resolve({ total: 0, completedish: 0 }),
+          getStalePendingCount: (olderThanSeconds) => queue.stalePendingCount(olderThanSeconds),
+          getSweepLastSuccessMs: () => sweepLastSuccessMs(String(SWEEP_LOCK.queueDepth)),
+          alert: alertOperator,
+          thresholds: {
+            callCompletionMin: config.SLO_CALL_COMPLETION_MIN,
+            callCompletionMinSample: config.SLO_CALL_COMPLETION_MIN_SAMPLE,
+            queueStaleMin: config.SLO_QUEUE_STALE_MIN,
+            sweepLagMin: config.SLO_SWEEP_LAG_MIN,
+          },
+          logger: sloLogger,
+        });
+      }).catch((err) => {
+        sloLogger.error('SLO monitor sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }).finally(() => {
+        sloMonitorInFlight = false;
+      });
+    }, SLO_MONITOR_INTERVAL_MS));
+  }
 
   const executionWorkerLogger = createLogger({
     service: 'execution-worker',
@@ -6253,6 +6324,20 @@ export function createApp(): AppWithLifecycle {
         await new Promise((resolve) => setTimeout(resolve, 500));
       }
       console.log(`[app] drain complete — ${voiceSessionStore.liveCount()} live session(s) still active at teardown`);
+      // WS15 — drain-abandonment alarm: the window expired with live calls
+      // remaining, so teardown below hangs up on real callers (Twilio ends
+      // them). emitDrainAbandonment is synchronous fire-and-forget (Sentry
+      // captureMessage enqueues into the client's transport buffer — no await
+      // that could eat into the force-exit backstop) and never throws. The
+      // Prometheus counter it increments dies with this process; the Sentry
+      // error event is the durable alarm.
+      if (voiceSessionStore.liveCount() > 0) {
+        emitDrainAbandonment(
+          voiceSessionStore.liveCount(),
+          voiceSessionStore.liveCallSids(),
+          { sentry: sentryClient, logger: requestLogger },
+        );
+      }
       // Stop the voice-session-store reaper interval so the process can
       // exit cleanly even when no DB pool is wired (dev / in-memory mode).
       voiceSessionStore.dispose();
