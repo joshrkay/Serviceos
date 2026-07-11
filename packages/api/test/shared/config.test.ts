@@ -259,6 +259,51 @@ describe('P0-006 — Secrets/config framework', () => {
       ).not.toThrow();
     });
 
+    // VOX-30 — Media Streams is an OPT-IN feature (unlike the opt-out
+    // features above). When enabled it needs the ElevenLabs streaming TTS
+    // provider (raw PCM); OpenAI/default returns mp3 that plays as static.
+    const mediaBaseEnv = {
+      ...baseProdEnv,
+      TELEPHONY_ENABLED: 'false',
+      EMAIL_ENABLED: 'false',
+      STORAGE_ENABLED: 'false',
+    };
+
+    it('media streams — fails when enabled with TTS_PROVIDER unset (defaults to OpenAI/static)', () => {
+      expect(() =>
+        loadConfig({
+          ...mediaBaseEnv,
+          TWILIO_MEDIA_STREAMS_ENABLED: 'true',
+          ELEVENLABS_API_KEY: 'el_x',
+        })
+      ).toThrow(/TTS_PROVIDER=elevenlabs/);
+    });
+
+    it('media streams — fails when enabled with TTS_PROVIDER=elevenlabs but no ELEVENLABS_API_KEY', () => {
+      expect(() =>
+        loadConfig({
+          ...mediaBaseEnv,
+          TWILIO_MEDIA_STREAMS_ENABLED: 'true',
+          TTS_PROVIDER: 'elevenlabs',
+        })
+      ).toThrow(/ELEVENLABS_API_KEY/);
+    });
+
+    it('media streams — passes when enabled with TTS_PROVIDER=elevenlabs + ELEVENLABS_API_KEY', () => {
+      expect(() =>
+        loadConfig({
+          ...mediaBaseEnv,
+          TWILIO_MEDIA_STREAMS_ENABLED: 'true',
+          TTS_PROVIDER: 'elevenlabs',
+          ELEVENLABS_API_KEY: 'el_x',
+        })
+      ).not.toThrow();
+    });
+
+    it('media streams — off (opt-in): no TTS constraint even with default provider', () => {
+      expect(() => loadConfig({ ...mediaBaseEnv })).not.toThrow();
+    });
+
     it('passes when all feature vars are set', () => {
       expect(() =>
         loadConfig({

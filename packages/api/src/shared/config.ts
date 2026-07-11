@@ -186,6 +186,31 @@ function validateFeatureRequiredConfig(env: Record<string, string | undefined>):
     if (!env.R2_SECRET_ACCESS_KEY) missing.push('R2_SECRET_ACCESS_KEY (or set STORAGE_ENABLED=false)');
   }
 
+  // Voice Media Streams (Twilio bidirectional audio) require a raw-PCM-capable
+  // TTS path. The media-streams adapter feeds the TTS output straight into a
+  // PCM16 -> mu-law encoder with no decoder, so only the ElevenLabs *streaming*
+  // provider (synthesizeStream, raw PCM) is safe. OpenAI tts-1 — the default
+  // when TTS_PROVIDER is unset — returns mp3, which plays as inaudible static
+  // on every call (VOX-30). Opt-IN flag (unlike the opt-out features above), so
+  // only enforced when explicitly enabled. The createApp() boot guard
+  // (assertTtsProviderSupportsMediaStreams) is a second, later layer; this
+  // fails earlier and also catches the missing-key silent-no-audio case.
+  const mediaStreamsEnabled = env.TWILIO_MEDIA_STREAMS_ENABLED === 'true';
+  if (mediaStreamsEnabled) {
+    if (env.TTS_PROVIDER !== 'elevenlabs') {
+      missing.push(
+        'TTS_PROVIDER=elevenlabs (required by TWILIO_MEDIA_STREAMS_ENABLED=true — only the ' +
+          'ElevenLabs streaming provider emits raw PCM; OpenAI/unset returns mp3 that plays as ' +
+          'static; or set TWILIO_MEDIA_STREAMS_ENABLED=false)'
+      );
+    }
+    if (!env.ELEVENLABS_API_KEY) {
+      missing.push(
+        'ELEVENLABS_API_KEY (required by TWILIO_MEDIA_STREAMS_ENABLED=true; or set TWILIO_MEDIA_STREAMS_ENABLED=false)'
+      );
+    }
+  }
+
   if (missing.length > 0) {
     throw new Error(
       `Production feature configuration is missing required values:\n  ${missing.join('\n  ')}\n` +
