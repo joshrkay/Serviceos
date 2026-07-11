@@ -70,6 +70,13 @@ interface DigestLearnedItem {
   summary: string;
 }
 
+// WS6 — supervisor-review reflection. Counts only (no "fixed" nuance — see
+// packages/api digest-service.ts DigestSupervisorChecks doc comment).
+interface DigestSupervisorChecks {
+  checked: number;
+  flagged: number;
+}
+
 interface DigestPayload {
   date: string;
   timezone: string;
@@ -86,6 +93,8 @@ interface DigestPayload {
   quotesSent?: DigestQuotesSent;
   unsureAbout?: DigestUnsureItem[];
   learnedToday?: DigestLearnedItem[];
+  // WS6 — "Checked: N proposals, M flagged" (absent when nothing ran today).
+  supervisorChecks?: DigestSupervisorChecks;
 }
 
 interface DigestResponse {
@@ -433,6 +442,23 @@ function DigestBody({
               </li>
             ))}
           </ul>
+        </SectionCard>
+      )}
+
+      {/* WS6 — supervisor-review reflection. Only when reviews ran today. */}
+      {p.supervisorChecks && p.supervisorChecks.checked > 0 && (
+        <SectionCard title="Supervisor checks">
+          <p className="text-lg font-semibold tabular-nums text-slate-900">
+            {p.supervisorChecks.checked}{' '}
+            <span className="text-sm font-normal text-slate-500">
+              {p.supervisorChecks.checked === 1 ? 'proposal checked' : 'proposals checked'}
+            </span>
+          </p>
+          <p className="mt-0.5 text-sm text-slate-500">
+            {p.supervisorChecks.flagged > 0
+              ? `${p.supervisorChecks.flagged} flagged`
+              : 'None flagged'}
+          </p>
         </SectionCard>
       )}
 

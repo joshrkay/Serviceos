@@ -12,9 +12,12 @@ import {
   InMemoryDailyDigestRepository,
   DIGEST_SMS_MAX_CHARS,
   DIGEST_SMS_SOFT_LIMIT,
+  DIGEST_MAX_REVIEWS,
   type DailyDigestPayload,
   type DigestComputeDeps,
 } from '../../src/digest/digest-service';
+import type { SupervisorReview } from '../../src/ai/supervisor/types';
+import type { SupervisorReviewRepository } from '../../src/ai/supervisor/reviews-repo';
 import type { Payment, PaymentRepository } from '../../src/invoices/payment';
 import type { Invoice, InvoiceRepository } from '../../src/invoices/invoice';
 import type { EstimateRepository, Estimate } from '../../src/estimates/estimate';
@@ -89,6 +92,12 @@ interface DepsOverrides {
   confidenceMarked?: Proposal[];
   /** N-005 — correction lessons applied today. */
   appliedLessons?: CorrectionLesson[];
+  /** WS6 — supervisor reviews run today (findForDay result). */
+  supervisorReviews?: SupervisorReview[];
+  /** WS6 — when false, omit supervisorReviewRepo entirely (optional-dep path). */
+  withSupervisorReviewRepo?: boolean;
+  /** WS6 — records the (from, to, limit) findForDay was called with. */
+  onFindForDay?: (from: Date, to: Date, limit: number | undefined) => void;
 }
 
 function makeDeps(o: DepsOverrides = {}): DigestComputeDeps {
@@ -137,7 +146,35 @@ function makeDeps(o: DepsOverrides = {}): DigestComputeDeps {
     correctionLessonRepo: {
       findAppliedForDay: async () => o.appliedLessons ?? [],
     } as unknown as CorrectionLessonRepository,
+    ...(o.withSupervisorReviewRepo === false
+      ? {}
+      : {
+          supervisorReviewRepo: {
+            findForDay: async (_t: string, from: Date, to: Date, limit?: number) => {
+              o.onFindForDay?.(from, to, limit);
+              return o.supervisorReviews ?? [];
+            },
+          } as unknown as SupervisorReviewRepository,
+        }),
     now: () => NOW,
+  };
+}
+
+function supervisorReview(overrides: Partial<SupervisorReview>): SupervisorReview {
+  return {
+    id: `sr-${Math.random()}`,
+    tenantId: TENANT,
+    proposalId: 'p1',
+    aiRunId: null,
+    model: 'claude-haiku-4-5-20251001',
+    verdict: 'pass',
+    critical: false,
+    checks: {},
+    flags: [],
+    latencyMs: 100,
+    shadow: true,
+    createdAt: NOW,
+    ...overrides,
   };
 }
 
@@ -432,6 +469,49 @@ describe('computeDigestPayload', () => {
     const approvedRun = await computeDigestPayload(TENANT, DATE, makeDeps({ confidenceMarked: [approved] }));
     expect(approvedRun.unsureAbout?.[0].outcome).toBe('approved');
   });
+
+  // ─── WS6 supervisor-review reflection ────────────────────────────────────
+
+  describe('supervisorChecks', () => {
+    it('reports checked + flagged counts (flag and hold both count as flagged; pass/timeout/error do not)', async () => {
+      const result = await computeDigestPayload(TENANT, DATE, makeDeps({
+        supervisorReviews: [
+          supervisorReview({ verdict: 'pass' }),
+          supervisorReview({ verdict: 'flag' }),
+          supervisorReview({ verdict: 'hold', critical: true }),
+          supervisorReview({ verdict: 'timeout' }),
+          supervisorReview({ verdict: 'error' }),
+        ],
+      }));
+      expect(result.supervisorChecks).toEqual({ checked: 5, flagged: 2 });
+    });
+
+    it('omits supervisorChecks when no reviews ran today', async () => {
+      const result = await computeDigestPayload(TENANT, DATE, makeDeps({ supervisorReviews: [] }));
+      expect(result.supervisorChecks).toBeUndefined();
+    });
+
+    it('omits supervisorChecks when the supervisorReviewRepo dep is absent entirely (optional dep)', async () => {
+      const result = await computeDigestPayload(TENANT, DATE, makeDeps({ withSupervisorReviewRepo: false }));
+      expect(result.supervisorChecks).toBeUndefined();
+    });
+
+    it('passes the tenant-tz day window and DIGEST_MAX_REVIEWS as the cap to findForDay', async () => {
+      let seen: { from: Date; to: Date; limit: number | undefined } | null = null;
+      await computeDigestPayload(TENANT, DATE, makeDeps({
+        supervisorReviews: [supervisorReview({})],
+        onFindForDay: (from, to, limit) => {
+          seen = { from, to, limit };
+        },
+      }));
+      expect(seen).not.toBeNull();
+      expect(seen!.limit).toBe(DIGEST_MAX_REVIEWS);
+      // Window matches the tenant-tz day boundaries computeDigestPayload
+      // resolves for `today` (America/Chicago 2026-06-10).
+      expect(seen!.from.toISOString()).toBe('2026-06-10T05:00:00.000Z');
+      expect(seen!.to.toISOString()).toBe('2026-06-11T05:00:00.000Z');
+    });
+  });
 });
 
 describe('summarizeProposalForDigest', () => {
@@ -711,6 +791,32 @@ describe('renderDigestSmsSegments', () => {
     expect(body).not.toContain('Unsure:');
     expect(body).not.toContain('Learned:');
     expect(body).not.toContain('Quotes:');
+    expect(body).not.toContain('Checked:');
+  });
+
+  it('renders the supervisor-checks line: flagged and none-flagged variants', () => {
+    const flaggedBody = combine(
+      renderDigestSmsSegments({
+        payload: basePayload({ supervisorChecks: { checked: 12, flagged: 2 } }),
+        deepLinkUrl: DEEP,
+        approvalLinks: [],
+      }),
+    );
+    expect(flaggedBody).toContain('Checked: 12 proposals, 2 flagged.');
+
+    const noneFlaggedBody = combine(
+      renderDigestSmsSegments({
+        payload: basePayload({ supervisorChecks: { checked: 12, flagged: 0 } }),
+        deepLinkUrl: DEEP,
+        approvalLinks: [],
+      }),
+    );
+    expect(noneFlaggedBody).toContain('Checked: 12 proposals, none flagged.');
+
+    const omittedBody = combine(
+      renderDigestSmsSegments({ payload: basePayload(), deepLinkUrl: DEEP, approvalLinks: [] }),
+    );
+    expect(omittedBody).not.toContain('Checked:');
   });
 
   it('renders the quotes-sent, unsure, and learned compact lines when present', () => {

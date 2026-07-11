@@ -528,8 +528,8 @@ async function prepareResolvedTarget(
       });
       return {
         speak: smsSent
-          ? "For payment actions, use the app or the text link — I've sent you one."
-          : 'For payment actions, use the app or your review queue — I can’t take that approval by voice.',
+          ? 'That one needs a tap to confirm — I’ve sent you a text link.'
+          : 'That one needs a tap to confirm — check the app or your review queue.',
         pending: null,
         outcome: 'refused_challenge_unset',
         proposalId: proposal.id,
@@ -1252,8 +1252,8 @@ export async function continueVoiceApproval(
         });
         return {
           speak: smsSent
-            ? "For payment actions, use the app or the text link — I've sent you one."
-            : 'For payment actions, use the app or your review queue — I can’t take that approval by voice.',
+            ? 'That one needs a tap to confirm — I’ve sent you a text link.'
+            : 'That one needs a tap to confirm — check the app or your review queue.',
           pending: null,
           outcome: 'refused_challenge_unset',
           proposalId: proposal.id,

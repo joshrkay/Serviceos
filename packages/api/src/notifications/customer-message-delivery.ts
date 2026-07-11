@@ -1,6 +1,5 @@
 import { MessageDeliveryProvider } from './delivery-provider';
 import { DispatchRepository, DispatchEntityType } from './dispatch-repository';
-import { DncRepository, normalizePhone } from '../compliance/dnc';
 import { Customer } from '../customers/customer';
 
 export type CustomerMessageChannel = 'sms' | 'email';
@@ -8,7 +7,6 @@ export type CustomerMessageChannel = 'sms' | 'email';
 export interface CustomerMessageDeliveryDeps {
   delivery: MessageDeliveryProvider;
   dispatchRepo: DispatchRepository;
-  dncRepo: DncRepository;
 }
 
 export interface SendCustomerMessageInput {
@@ -25,8 +23,11 @@ export interface SendCustomerMessageInput {
 }
 
 /**
- * Best-effort SMS/email send with sms_consent + DNC gates and dispatch logging.
- * Failures are swallowed so transactional comms never block business mutations.
+ * Best-effort SMS/email send with dispatch logging. The sms_consent + DNC gate
+ * is applied centrally by the GatedMessageDelivery wrapper (`delivery`); this
+ * function just declares the audience (customer) and forwards the stored
+ * consent flag. A suppressed send throws inside sendSms and is swallowed here,
+ * so transactional comms never block business mutations.
  */
 export async function sendCustomerMessage(
   deps: CustomerMessageDeliveryDeps,
@@ -35,33 +36,29 @@ export async function sendCustomerMessage(
   const { customer, tenantId, channels } = input;
 
   if (channels.includes('sms') && input.smsBody && customer.primaryPhone) {
-    if (customer.smsConsent === true) {
-      const phone = normalizePhone(customer.primaryPhone);
-      const onDnc = await deps.dncRepo.isOnDnc(tenantId, phone);
-      if (!onDnc) {
-        const idempotencyKey = `${input.idempotencyKeyPrefix}:sms`;
-        try {
-          const result = await deps.delivery.sendSms({
-            to: customer.primaryPhone,
-            body: input.smsBody,
-            tenantId,
-            idempotencyKey,
-          });
-          await deps.dispatchRepo.create({
-            tenantId,
-            entityType: input.entityType,
-            entityId: input.entityId,
-            channel: 'sms',
-            recipient: customer.primaryPhone,
-            provider: result.provider,
-            providerMessageId: result.providerMessageId,
-            status: 'sent',
-            idempotencyKey,
-          });
-        } catch {
-          // Best-effort.
-        }
-      }
+    const idempotencyKey = `${input.idempotencyKeyPrefix}:sms`;
+    try {
+      const result = await deps.delivery.sendSms({
+        to: customer.primaryPhone,
+        body: input.smsBody,
+        tenantId,
+        idempotencyKey,
+        recipientClass: 'customer',
+        consent: { smsConsent: customer.smsConsent === true, customerId: customer.id },
+      });
+      await deps.dispatchRepo.create({
+        tenantId,
+        entityType: input.entityType,
+        entityId: input.entityId,
+        channel: 'sms',
+        recipient: customer.primaryPhone,
+        provider: result.provider,
+        providerMessageId: result.providerMessageId,
+        status: 'sent',
+        idempotencyKey,
+      });
+    } catch {
+      // Best-effort (includes central gate suppression).
     }
   }
 

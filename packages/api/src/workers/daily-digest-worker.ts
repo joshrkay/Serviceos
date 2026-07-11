@@ -463,6 +463,8 @@ async function sendDigestSms(
       body: segments[k],
       tenantId,
       idempotencyKey,
+      // Owner digest — never gated by customer consent/DNC.
+      recipientClass: 'owner',
     });
 
     let dispatch;

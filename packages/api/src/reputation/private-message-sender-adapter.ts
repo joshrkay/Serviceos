@@ -27,7 +27,7 @@ import type {
   MessageDeliveryProvider,
 } from '../notifications/delivery-provider';
 import type { CustomerRepository } from '../customers/customer';
-import { type DncRepository, normalizePhone } from '../compliance/dnc';
+import { SmsSuppressedError } from '../notifications/gated-message-delivery';
 
 export interface ReviewPrivateMessageSenderInput {
   tenantId: string;
@@ -45,12 +45,6 @@ export class MessageDeliveryReviewPrivateMessageSender
   constructor(
     private readonly delivery: MessageDeliveryProvider,
     private readonly customerRepo: CustomerRepository,
-    // §7 compliance gate. SMS follow-ups are suppressed when the recipient is
-    // on the tenant DNC list or has not granted SMS consent — the same gate
-    // every other outbound SMS path enforces (send-service.ts,
-    // customer-message-delivery.ts). Without it, a customer who texted STOP
-    // still receives a review private follow-up (a TCPA violation).
-    private readonly dncRepo: Pick<DncRepository, 'isOnDnc'>,
     private readonly emailSubject: string = DEFAULT_EMAIL_SUBJECT,
   ) {}
 
@@ -72,19 +66,29 @@ export class MessageDeliveryReviewPrivateMessageSender
       if (!customer.primaryPhone) {
         throw new Error(`missing_phone: customer ${input.customerId}`);
       }
-      // Compliance gate BEFORE the transport — never text an opted-out number.
-      if (customer.smsConsent !== true) {
-        return { suppressed: true, reason: 'no_consent' };
+      // §7 / WS1 — the consent + DNC gate is applied centrally by the
+      // GatedMessageDelivery wrapper. A suppressed send throws
+      // SmsSuppressedError; translate it back into this handler's
+      // {suppressed, reason} contract so an opted-out number is recorded as a
+      // non-failure sub-result (the executor sees the reason in audit metadata).
+      try {
+        result = await this.delivery.sendSms({
+          to: customer.primaryPhone,
+          body: input.body,
+          tenantId: input.tenantId,
+          idempotencyKey: input.idempotencyKey,
+          recipientClass: 'customer',
+          consent: { smsConsent: customer.smsConsent === true, customerId: customer.id },
+        });
+      } catch (err) {
+        if (err instanceof SmsSuppressedError) {
+          return {
+            suppressed: true,
+            reason: err.reason === 'dnc' ? 'dnc' : 'no_consent',
+          };
+        }
+        throw err;
       }
-      if (await this.dncRepo.isOnDnc(input.tenantId, normalizePhone(customer.primaryPhone))) {
-        return { suppressed: true, reason: 'dnc' };
-      }
-      result = await this.delivery.sendSms({
-        to: customer.primaryPhone,
-        body: input.body,
-        tenantId: input.tenantId,
-        idempotencyKey: input.idempotencyKey,
-      });
     } else {
       if (!customer.email) {
         throw new Error(`missing_email: customer ${input.customerId}`);

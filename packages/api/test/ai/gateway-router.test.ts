@@ -16,7 +16,6 @@ describe('P2-028 — Task-complexity-based model routing', () => {
     const tierConfig = resolveModelForTask('intent_classification');
 
     expect(tierConfig.model).toBe('claude-haiku-4-5-20251001');
-    expect(tierConfig.provider).toBe('default');
     expect(tierConfig.maxTokens).toBe(1024);
     expect(tierConfig.temperature).toBe(0);
   });
@@ -25,7 +24,6 @@ describe('P2-028 — Task-complexity-based model routing', () => {
     const tierConfig = resolveModelForTask('create_appointment');
 
     expect(tierConfig.model).toBe('claude-sonnet-4-6');
-    expect(tierConfig.provider).toBe('default');
     expect(tierConfig.maxTokens).toBe(4096);
     expect(tierConfig.temperature).toBe(0.3);
   });
@@ -34,7 +32,6 @@ describe('P2-028 — Task-complexity-based model routing', () => {
     const tierConfig = resolveModelForTask('draft_estimate');
 
     expect(tierConfig.model).toBe('claude-sonnet-4-6');
-    expect(tierConfig.provider).toBe('default');
     expect(tierConfig.maxTokens).toBe(8192);
     expect(tierConfig.temperature).toBe(0.5);
   });
@@ -52,9 +49,9 @@ describe('P2-028 — Task-complexity-based model routing', () => {
   it('validation — custom config overrides defaults', () => {
     const customConfig: AIRoutingConfig = {
       tiers: {
-        lightweight: { model: 'custom-small', provider: 'custom-provider', maxTokens: 512, temperature: 0 },
-        standard: { model: 'custom-medium', provider: 'custom-provider', maxTokens: 2048, temperature: 0.2 },
-        complex: { model: 'custom-large', provider: 'custom-provider', maxTokens: 16384, temperature: 0.7 },
+        lightweight: { model: 'custom-small', maxTokens: 512, temperature: 0 },
+        standard: { model: 'custom-medium', maxTokens: 2048, temperature: 0.2 },
+        complex: { model: 'custom-large', maxTokens: 16384, temperature: 0.7 },
       },
       taskTierMapping: {
         'my_task': 'complex',
@@ -64,7 +61,6 @@ describe('P2-028 — Task-complexity-based model routing', () => {
     const tierConfig = resolveModelForTask('my_task', customConfig);
 
     expect(tierConfig.model).toBe('custom-large');
-    expect(tierConfig.provider).toBe('custom-provider');
     expect(tierConfig.maxTokens).toBe(16384);
     expect(tierConfig.temperature).toBe(0.7);
 

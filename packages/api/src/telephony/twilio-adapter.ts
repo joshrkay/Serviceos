@@ -108,6 +108,7 @@ import type { WhisperCache } from './whisper-cache';
 import {
   createVoiceTurnProcessor,
   appendAgentTts,
+  preloadSessionCatalog,
   type VoiceTurnProcessor,
 } from '../ai/voice-turn';
 import type { CustomerNegotiationContextProvider } from '../customers/customer-negotiation-context';
@@ -927,6 +928,10 @@ export class TwilioGatherAdapter {
       ...(ownerSession ? { ownerSession: true } : {}),
       ...(extendedIntents ? { extendedIntents: true } : {}),
     });
+    // WS5 — kick off the tenant-catalog load ONCE at session establishment so
+    // in-call estimate grounding has the active catalog in hand synchronously
+    // at quote time (both voice transports). Non-blocking: fire-and-stash.
+    preloadSessionCatalog(session, this.deps.catalogRepo);
     // initializeStreamSession reads callerIdBySession to drive
     // identifyCaller/lead creation; without this, every media-stream
     // inbound silently falls through to unknown-caller behavior.
@@ -1497,6 +1502,11 @@ export class TwilioGatherAdapter {
       ...(extendedIntents ? { extendedIntents: true } : {}),
     });
     this.persistVoiceSessionRow(session, opts.callSid);
+
+    // WS5 — kick off the tenant-catalog load ONCE at session establishment so
+    // in-call estimate grounding has the active catalog in hand synchronously
+    // at quote time. Non-blocking: fire-and-stash on the session.
+    preloadSessionCatalog(session, this.deps.catalogRepo);
 
     // P18-001: record the caller-id (or "" when blocked/withheld) so
     // the create_customer voice flow can use it as the new customer's
@@ -2181,6 +2191,41 @@ export class TwilioGatherAdapter {
       }
       return this.runOwnerLookupSkill(session, intentType, tenantId);
     }
+    // WS5 — `lookup_catalog` (browsing the price book) is OWNER-ONLY and
+    // tenant-scoped (no customerId needed). A customer asking about prices now
+    // flows through the grounded estimate path, which speaks catalog-grounded
+    // prices safely; they must never get a raw catalog recital. Gated on the
+    // RV-070 ownerSession flag (caller-ID identity), never utterance content —
+    // same identity source as the owner lookups above, without the
+    // extended-intents tenant opt-in. Handled here, BEFORE the customer-scoped
+    // gate, because the owner line is not itself a customer.
+    if (intentType === 'lookup_catalog') {
+      if (!ownerSession || !this.deps.catalogRepo) {
+        return this.lookupNotWiredFallback();
+      }
+      const catalogStart = Date.now();
+      try {
+        const result = await lookupCatalog(
+          { tenantId, sessionId: session.id },
+          {
+            catalogRepo: this.deps.catalogRepo,
+            ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
+          },
+        );
+        session.events.emit(
+          'voice-event',
+          lookupExecutedEvent(intentType, Date.now() - catalogStart, true),
+        );
+        return result.summary;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        session.events.emit(
+          'voice-event',
+          lookupExecutedEvent(intentType, Date.now() - catalogStart, false, message),
+        );
+        return this.lookupNotWiredFallback();
+      }
+    }
     if (!customerId) {
       // Lookups are customer-scoped. An anonymous caller doesn't have
       // an account to read from; we never want to leak a different
@@ -2362,23 +2407,6 @@ export class TwilioGatherAdapter {
             { tenantId, sessionId: session.id },
             {
               moneyDashboardRepo: this.deps.moneyDashboardRepo,
-              ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
-            },
-          );
-          session.events.emit(
-            'voice-event',
-            lookupExecutedEvent(intentType, Date.now() - startMs, true),
-          );
-          return result.summary;
-        }
-        case 'lookup_catalog': {
-          if (!this.deps.catalogRepo) {
-            return this.lookupNotWiredFallback();
-          }
-          const result = await lookupCatalog(
-            { tenantId, sessionId: session.id },
-            {
-              catalogRepo: this.deps.catalogRepo,
               ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
             },
           );

@@ -466,7 +466,10 @@ describe('RV-071 — money/irreversible challenge', () => {
 
     expect(result.outcome).toBe('refused_challenge_unset');
     expect(result.pending).toBeNull();
-    expect(result.speak).toContain('text link');
+    // Friendly, jargon-free refusal — no "challenge code" spoken to an
+    // owner who never configured one.
+    expect(result.speak).toBe('That one needs a tap to confirm — I’ve sent you a text link.');
+    expect(result.speak.toLowerCase()).not.toContain('challenge code');
     // The SMS actually went out, with a one-tap link, and the render was
     // recorded for the P2-034 reply transport.
     expect(h.sent).toHaveLength(1);
@@ -498,8 +501,43 @@ describe('RV-071 — money/irreversible challenge', () => {
     });
 
     expect(result.outcome).toBe('refused_challenge_unset');
-    expect(result.speak).not.toContain("I've sent you one");
+    expect(result.speak).toBe('That one needs a tap to confirm — check the app or your review queue.');
+    expect(result.speak).not.toContain('text link');
     expect(h.sent).toHaveLength(0);
+  });
+
+  it('challenge disappears between readback and confirm → same friendly refusal + one-tap SMS', async () => {
+    // Covers the confirm-stage guard (continueVoiceApproval), a separate
+    // code path from the readback-stage refusal above but with identical
+    // copy — pins that both stages stay in sync.
+    const h = makeHarness({ challenge: '4271' });
+    await seedPending(h.proposalRepo, {
+      proposalType: 'record_payment',
+      payload: { customerName: 'Acme Corp', amountCents: 20000 },
+      summary: 'Record $200 payment from Acme',
+    });
+
+    const start = await startVoiceApproval(h.deps, {
+      ...ref,
+      action: 'approve',
+      reference: 'the Acme payment',
+    });
+    expect(start.outcome).toBe('readback');
+
+    // Settings lose the challenge between readback and confirm (e.g. the
+    // owner cleared it mid-call from another device).
+    h.deps.settingsRepo = stubSettingsRepo(undefined);
+
+    const result = await continueVoiceApproval(h.deps, {
+      ...ref,
+      utterance: 'yes, approve it',
+      pending: start.pending!,
+    });
+
+    expect(result.outcome).toBe('refused_challenge_unset');
+    expect(result.speak).toBe('That one needs a tap to confirm — I’ve sent you a text link.');
+    expect(result.speak.toLowerCase()).not.toContain('challenge code');
+    expect(h.sent).toHaveLength(1);
   });
 
   it('challenge set → readback, affirmative, PIN prompt, spoken digits approve', async () => {

@@ -6,12 +6,12 @@ import { JobRepository } from '../jobs/job';
 import { SettingsRepository } from '../settings/settings';
 import { ValidationError, NotFoundError } from '../shared/errors';
 import { DispatchRepository } from './dispatch-repository';
-import { DncRepository, normalizePhone } from '../compliance/dnc';
 import {
   EmailMessage,
   MessageDeliveryProvider,
   SmsMessage,
 } from './delivery-provider';
+import { SmsSuppressedError } from './gated-message-delivery';
 import {
   renderEstimateEmail,
   renderEstimateSms,
@@ -64,13 +64,6 @@ export interface SendServiceDeps {
   customerRepo: CustomerRepository;
   settingsRepo: SettingsRepository;
   dispatchRepo: DispatchRepository;
-  /**
-   * §7 Phase 1 compliance gate. SMS sends consult this to suppress
-   * delivery when the recipient is on the tenant DNC list or has
-   * sms_consent=false on the customer record. Email sends are
-   * unaffected.
-   */
-  dncRepo: DncRepository;
   publicBaseUrl: string;
 }
 
@@ -366,27 +359,6 @@ export class SendService {
     };
   }
 
-  /**
-   * Returns null when SMS is allowed; otherwise a human-readable reason
-   * suitable for the dispatch row's error_message. The reason is also
-   * surfaced into the thrown Error so client-facing error mapping has
-   * the same string.
-   */
-  private async assertSmsAllowed(
-    tenantId: string,
-    customerSmsConsent: boolean | undefined,
-    recipient: string,
-  ): Promise<string | null> {
-    if (customerSmsConsent !== true) {
-      return 'customer sms_consent is not granted';
-    }
-    const onDnc = await this.deps.dncRepo.isOnDnc(tenantId, normalizePhone(recipient));
-    if (onDnc) {
-      return 'phone on DNC list (opted out)';
-    }
-    return null;
-  }
-
   private buildViewUrl(prefix: 'e' | 'pay', token: string): string {
     const base = this.deps.publicBaseUrl.replace(/\/$/, '');
     return `${base}/${prefix}/${token}`;
@@ -413,7 +385,7 @@ export class SendService {
     ctx: Parameters<typeof renderEstimateSms>[0]
   ): SmsMessage {
     const { body } = renderEstimateSms(ctx);
-    return { to, body };
+    return { to, body, recipientClass: 'customer' };
   }
 
   private renderEstimateEmailMessage(
@@ -429,7 +401,7 @@ export class SendService {
     ctx: Parameters<typeof renderInvoiceSms>[0]
   ): SmsMessage {
     const { body } = renderInvoiceSms(ctx);
-    return { to, body };
+    return { to, body, recipientClass: 'customer' };
   }
 
   private renderInvoiceEmailMessage(
@@ -454,40 +426,14 @@ export class SendService {
      */
     customerSmsConsent?: boolean;
   }): Promise<SendResult['channelsSent'][number]> {
-    // §7 phase 1: SMS suppression gate. Two conditions block SMS:
-    //   1. The customer's stored sms_consent is false (or never captured).
-    //   2. The recipient phone appears on the tenant DNC list (from STOP).
-    // On block, we audit a failed dispatch row with provider="suppressed" so
-    // the audit trail records the attempt + reason, then throw so the
-    // Promise.allSettled in sendEstimate/sendInvoice surfaces it as a
-    // partial failure rather than a silent skip.
-    if (args.target.channel === 'sms') {
-      const reason = await this.assertSmsAllowed(
-        args.tenantId,
-        args.customerSmsConsent,
-        args.target.recipient,
-      );
-      if (reason) {
-        const errorMessage = `SMS suppressed: ${reason}`;
-        await this.deps.dispatchRepo
-          .create({
-            tenantId: args.tenantId,
-            entityType: args.entityType,
-            entityId: args.entityId,
-            channel: 'sms',
-            recipient: args.target.recipient,
-            provider: 'suppressed',
-            status: 'failed',
-            errorMessage,
-            idempotencyKey: args.idempotencyKey,
-          })
-          .catch(() => {
-            // Best-effort audit; never let an audit failure mask suppression.
-          });
-        throw new Error(errorMessage);
-      }
-    }
-
+    // §7 / WS1: the consent + DNC gate now lives in the single
+    // GatedMessageDelivery wrapper (notifications/gated-message-delivery.ts).
+    // SMS sends here just declare the audience (customer) and forward the
+    // stored consent flag; a suppressed send throws SmsSuppressedError, which
+    // we translate below into the SAME provider='suppressed' failed dispatch
+    // row + re-throw the assertion path previously produced inline — so the
+    // Promise.allSettled in sendEstimate/sendInvoice still surfaces it as a
+    // partial failure rather than a silent skip, and the UX contract is intact.
     const message = args.render();
     let providerMessageId: string;
     let provider: string;
@@ -498,6 +444,8 @@ export class SendService {
           ...(message as SmsMessage),
           tenantId: args.tenantId,
           idempotencyKey: args.idempotencyKey,
+          recipientClass: 'customer',
+          consent: { smsConsent: args.customerSmsConsent === true },
         });
         providerMessageId = result.providerMessageId;
         provider = result.provider;
@@ -512,7 +460,10 @@ export class SendService {
       }
     } catch (err) {
       // Audit the failed attempt before propagating, so support has a
-      // record of every channel attempt (success or failure).
+      // record of every channel attempt (success or failure). A gate
+      // suppression is recorded with provider='suppressed' (as before);
+      // any other transport failure stays provider='unknown'.
+      const suppressed = err instanceof SmsSuppressedError;
       await this.deps.dispatchRepo
         .create({
           tenantId: args.tenantId,
@@ -520,7 +471,7 @@ export class SendService {
           entityId: args.entityId,
           channel: args.target.channel,
           recipient: args.target.recipient,
-          provider: 'unknown',
+          provider: suppressed ? 'suppressed' : 'unknown',
           status: 'failed',
           errorMessage: err instanceof Error ? err.message : 'unknown error',
           idempotencyKey: args.idempotencyKey,

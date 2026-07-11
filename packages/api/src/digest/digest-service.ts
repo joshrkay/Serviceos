@@ -25,6 +25,8 @@ import { missingFieldsFor } from '../proposals/proposal';
 import type { CustomerRepository } from '../customers/customer';
 import type { SettingsRepository } from '../settings/settings';
 import type { CorrectionLessonRepository } from '../learning/corrections/correction-lesson';
+import type { SupervisorReviewRepository } from '../ai/supervisor/reviews-repo';
+import type { SupervisorReview } from '../ai/supervisor/types';
 import { prioritizeProposals } from '../proposals/prioritization';
 import { AUTO_APPROVE_BLOCKING_CONFIDENCE_LEVELS } from '../proposals/auto-approve';
 import { findJobsRequiringInvoicing } from '../invoices/invoicing-queue';
@@ -119,6 +121,21 @@ export interface DigestUnsureItem {
   outcome: DigestUnsureOutcome;
 }
 
+/**
+ * WS6 — supervisor-review reflection ("Checked: N proposals, M flagged").
+ * Counts only: `supervisor_reviews` has no cheap "was this later fixed"
+ * signal (a 'flag' verdict just means markers were attached and the
+ * proposal still dispatched; a 'hold' means the owner must act, not that
+ * anything was already corrected), so a `flaggedFixed` count was dropped
+ * rather than approximated from unrelated correction-lesson data.
+ */
+export interface DigestSupervisorChecks {
+  /** Reviews run today (capped at DIGEST_MAX_REVIEWS — see the fetch). */
+  checked: number;
+  /** Of those, verdict 'flag' or 'hold' (reviews.reasons.length > 0). */
+  flagged: number;
+}
+
 /** N-005 "what I learned today" — one correction-loop lesson applied today. */
 export interface DigestLearnedItem {
   lessonId: string;
@@ -167,6 +184,11 @@ export interface DailyDigestPayload {
   unsureAbout?: DigestUnsureItem[];
   /** N-005 "what I learned today". OMITTED when zero (graceful degradation). */
   learnedToday?: DigestLearnedItem[];
+  /**
+   * WS6 — "Checked: N proposals, M flagged" supervisor-review reflection.
+   * OMITTED when checked===0 (no reviews ran today, or the repo is absent).
+   */
+  supervisorChecks?: DigestSupervisorChecks;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -181,6 +203,13 @@ export const DIGEST_MAX_UNBILLED_JOBS = 10;
 export const DIGEST_MAX_UNSURE = 10;
 /** N-005 — cap on "what I learned today" lessons embedded in the payload. */
 export const DIGEST_MAX_LEARNED = 10;
+/**
+ * WS6 — cap on supervisor reviews fetched for the day's "Checked" count.
+ * Unlike DIGEST_MAX_UNSURE/DIGEST_MAX_LEARNED (which bound a list of items
+ * actually rendered), this only bounds the checked/flagged aggregate query —
+ * set generously so a normal day's true count is never undercounted.
+ */
+export const DIGEST_MAX_REVIEWS = 500;
 
 /**
  * Map a proposal's status to the digest "unsureAbout" outcome. Derived from the
@@ -426,6 +455,17 @@ function learnedSmsLine(items: DigestLearnedItem[] | undefined): string {
 }
 
 /**
+ * WS6 — compact "Checked: N proposals, M flagged" supervisor-review line,
+ * e.g. "Checked: 12 proposals, 2 flagged." or "Checked: 12 proposals, none
+ * flagged." when nothing was flagged. Absent → empty string.
+ */
+function supervisorChecksSmsLine(checks: DigestSupervisorChecks | undefined): string {
+  if (!checks || checks.checked === 0) return '';
+  const flaggedPart = checks.flagged > 0 ? `${checks.flagged} flagged` : 'none flagged';
+  return ` Checked: ${checks.checked} ${checks.checked === 1 ? 'proposal' : 'proposals'}, ${flaggedPart}.`;
+}
+
+/**
  * Build the ordered ATOMIC content chunks for the digest SMS. A chunk is never
  * split across segments; the packer places each chunk whole. The deep link
  * (tail) is the LAST chunk so it always lands in the final segment. No
@@ -490,6 +530,8 @@ function buildDigestSmsChunks(input: RenderDigestSmsInput): string[] {
   if (unsure) chunks.push(unsure);
   const learned = learnedSmsLine(payload.learnedToday);
   if (learned) chunks.push(learned);
+  const supervisorChecks = supervisorChecksSmsLine(payload.supervisorChecks);
+  if (supervisorChecks) chunks.push(supervisorChecks);
 
   chunks.push(` Full day: ${deepLinkUrl}`);
   return chunks;
@@ -592,6 +634,13 @@ export interface DigestComputeDeps {
    * (section self-omits).
    */
   correctionLessonRepo: CorrectionLessonRepository;
+  /**
+   * WS6 — supervisor-review reflection ("Checked: N proposals, M flagged").
+   * Optional (like the correction-lesson repo's optional findAppliedForDay
+   * counterpart method): absent repo, or a repo whose findForDay method is
+   * absent, both simply omit the supervisorChecks section.
+   */
+  supervisorReviewRepo?: SupervisorReviewRepository;
   /** Injectable clock — overdue is "as of now". Defaults to `new Date()`. */
   now?: () => Date;
 }
@@ -619,7 +668,7 @@ export async function computeDigestPayload(
 
   const paymentsFrom = new Date(today.start.getTime() - PAYMENT_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
 
-  const [payments, completedJobs, tomorrowAppointments, openInvoices, partiallyPaidInvoices, readyProposals, draftProposals, unbilledCandidates, ratingCounts, sentEstimates, confidenceMarked, appliedLessons] =
+  const [payments, completedJobs, tomorrowAppointments, openInvoices, partiallyPaidInvoices, readyProposals, draftProposals, unbilledCandidates, ratingCounts, sentEstimates, confidenceMarked, appliedLessons, supervisorReviews] =
     await Promise.all([
       deps.paymentRepo.findByTenant(tenantId, {
         status: 'completed',
@@ -647,6 +696,12 @@ export async function computeDigestPayload(
         : Promise.resolve([] as Proposal[]),
       // N-005 — correction-loop lessons applied today ("what I learned today").
       deps.correctionLessonRepo.findAppliedForDay(tenantId, date),
+      // WS6 — supervisor reviews run today ("Checked: N proposals, M
+      // flagged"). Optional repo + optional method — absent either way
+      // yields no data (section self-omits).
+      deps.supervisorReviewRepo?.findForDay
+        ? deps.supervisorReviewRepo.findForDay(tenantId, today.start, today.end, DIGEST_MAX_REVIEWS)
+        : Promise.resolve([] as SupervisorReview[]),
     ]);
 
   // Combine both actionable statuses — mirrors the inbox's dual-fetch so the
@@ -755,6 +810,17 @@ export async function computeDigestPayload(
         }))
       : undefined;
 
+  // WS6 — "Checked: N proposals, M flagged" supervisor-review reflection.
+  // Omitted when no reviews ran today (checked===0), per the "omit if zero"
+  // convention shared with unsureAbout/learnedToday.
+  const supervisorChecks: DigestSupervisorChecks | undefined =
+    supervisorReviews.length > 0
+      ? {
+          checked: supervisorReviews.length,
+          flagged: supervisorReviews.filter((r) => r.verdict === 'flag' || r.verdict === 'hold').length,
+        }
+      : undefined;
+
   return {
     date,
     timezone,
@@ -777,6 +843,7 @@ export async function computeDigestPayload(
     ...(quotesSent !== undefined ? { quotesSent } : {}),
     ...(unsureAbout !== undefined ? { unsureAbout } : {}),
     ...(learnedToday !== undefined ? { learnedToday } : {}),
+    ...(supervisorChecks !== undefined ? { supervisorChecks } : {}),
   };
 }
 

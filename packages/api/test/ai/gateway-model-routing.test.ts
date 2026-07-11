@@ -172,9 +172,9 @@ describe('P2-028 — gateway model routing integration', () => {
         tenantOverrides: {
           'tenant-premium': {
             tiers: {
-              lightweight: { model: 'tenant-haiku-override', provider: 'default', maxTokens: 512, temperature: 0 },
-              standard: { model: 'tenant-sonnet-override', provider: 'default', maxTokens: 2048, temperature: 0.2 },
-              complex: { model: 'tenant-opus-override', provider: 'default', maxTokens: 16384, temperature: 0.5 },
+              lightweight: { model: 'tenant-haiku-override', maxTokens: 512, temperature: 0 },
+              standard: { model: 'tenant-sonnet-override', maxTokens: 2048, temperature: 0.2 },
+              complex: { model: 'tenant-opus-override', maxTokens: 16384, temperature: 0.5 },
             },
           },
         },
@@ -200,9 +200,9 @@ describe('P2-028 — gateway model routing integration', () => {
       tenantOverrides: {
         'tenant-other': {
           tiers: {
-            lightweight: { model: 'other-tenant-model', provider: 'default' },
-            standard: { model: 'other-tenant-model', provider: 'default' },
-            complex: { model: 'other-tenant-model', provider: 'default' },
+            lightweight: { model: 'other-tenant-model' },
+            standard: { model: 'other-tenant-model' },
+            complex: { model: 'other-tenant-model' },
           },
         },
       },
@@ -225,9 +225,9 @@ describe('P2-028 — gateway model routing integration', () => {
         'tenant-partial': {
           tiers: {
             // All three tiers required by AIRoutingConfig.tiers type — override complex only
-            complex: { model: 'tenant-complex-model', provider: 'default', maxTokens: 16384, temperature: 0.7 },
-            lightweight: { model: process.env.AI_LIGHTWEIGHT_MODEL ?? 'claude-haiku-4-5-20251001', provider: 'default' },
-            standard: { model: process.env.AI_STANDARD_MODEL ?? 'claude-sonnet-4-6', provider: 'default' },
+            complex: { model: 'tenant-complex-model', maxTokens: 16384, temperature: 0.7 },
+            lightweight: { model: process.env.AI_LIGHTWEIGHT_MODEL ?? 'claude-haiku-4-5-20251001' },
+            standard: { model: process.env.AI_STANDARD_MODEL ?? 'claude-sonnet-4-6' },
           },
         },
       },
@@ -248,7 +248,7 @@ describe('P2-028 — gateway model routing integration', () => {
     const gateway = makeGateway(providers, {
       tenantOverrides: {
         'tenant-partial-only-complex': {
-          tiers: { complex: { model: 'partial-complex-model', provider: 'default' } },
+          tiers: { complex: { model: 'partial-complex-model' } },
         } as Partial<import('../../src/config/ai-routing').AIRoutingConfig>,
       },
     });
@@ -410,9 +410,9 @@ describe('P2-028 — gateway model routing integration', () => {
         tenantOverrides: {
           'tenant-x': {
             tiers: {
-              lightweight: { model: 'x-lightweight', provider: 'default' },
-              standard: { model: 'x-standard', provider: 'default' },
-              complex: { model: 'x-complex', provider: 'default' },
+              lightweight: { model: 'x-lightweight' },
+              standard: { model: 'x-standard' },
+              complex: { model: 'x-complex' },
             },
           },
         },

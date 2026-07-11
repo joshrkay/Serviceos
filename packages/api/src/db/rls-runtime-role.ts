@@ -23,6 +23,12 @@ const RLS_ROLE = 'rls_app_runtime';
 // Provisioned by migration 220. (docs/plans/2026-06-25-006-...)
 const CROSS_TENANT_ROLE = 'rls_cross_tenant';
 
+// Raw process.env read (not via loadConfig): this helper is called
+// synchronously from deep in the query path (applyTenantContext) where
+// threading the parsed config would be invasive. RLS_RUNTIME_ROLE is declared
+// on configSchema (shared/config.ts) so it is a validated part of the config
+// surface, and its HARD prod/staging requirement (must be 'true') is enforced
+// at boot by validateFeatureRequiredConfig in shared/config.ts.
 export function isRlsRuntimeRoleEnabled(): boolean {
   return process.env.RLS_RUNTIME_ROLE === 'true';
 }

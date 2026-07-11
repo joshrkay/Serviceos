@@ -149,6 +149,44 @@ export interface TelephonyRouterDeps {
    */
   mediaStreamsEnabled?: boolean;
   /**
+   * WS3 (voice ingestion resilience) — per-tenant staged rollout of the
+   * realtime (media-streams) path. When `mediaStreamsEnabled` (the global
+   * master switch) is on, the /voice branch additionally consults the
+   * `voice_realtime` tenant flag via `isEnabledForTenantWithDefault(tenantId,
+   * 'voice_realtime', true)`. Default-ON means an unconfigured tenant still
+   * gets the realtime path (the global env is the true master switch); a
+   * per-tenant override of `enabled=false` is a kill switch that pins that
+   * tenant to Gather. A flag-read failure falls toward Gather (the proven
+   * path), never toward Stream.
+   *
+   * When unwired (in-memory dev without a tenant_feature_flags table), the
+   * per-tenant gate is skipped and the global flag alone decides.
+   */
+  tenantFeatureFlags?: {
+    isEnabledForTenantWithDefault(
+      tenantId: string,
+      flagKey: string,
+      defaultEnabled: boolean,
+    ): Promise<boolean>;
+  };
+  /**
+   * WS3 — pre-connect health circuit for the realtime path. When present and
+   * `isOpen()` returns true (the realtime transport has failed repeatedly),
+   * the /voice branch returns Gather TwiML even if the flag + prereqs pass.
+   * The mediastream adapter feeds this same instance via recordFailure/
+   * recordSuccess. Unwired → treated as always-closed (no extra gating).
+   */
+  realtimeCircuit?: { isOpen(): boolean };
+  /**
+   * WS3 — realtime prerequisites probe. Returns false when the realtime path
+   * can't physically work (STT/TTS not configured), so the /voice branch
+   * degrades to Gather rather than emitting a Stream that hangs on connect.
+   * Wired in app.ts from the SAME capability computation the /health canary
+   * uses (deepgram + TTS configured). Unwired → treated as met (legacy
+   * behavior: the global flag alone decides).
+   */
+  realtimePrerequisitesMet?: () => boolean;
+  /**
    * §10 onboarding — optional pre-flight gate run after tenant
    * resolution and before AI routing. Composes the subscription
    * status check (Gate A) and trial usage caps (Gate B). When
@@ -379,7 +417,14 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
     }
 
     try {
-      const twiml = deps.mediaStreamsEnabled
+      // WS3 — the realtime (media-streams) path is only chosen when the global
+      // master switch is on AND the per-tenant flag, prerequisites, and health
+      // circuit all pass. Any failure (including a flag-read throw) degrades to
+      // the proven Gather path — never dead air, never a silent hangup.
+      const useStream =
+        !!deps.mediaStreamsEnabled &&
+        (await shouldUseRealtimeStream({ tenantId, callSid, deps }));
+      const twiml = useStream
         ? await deps.adapter.handleInboundForStream({ callSid, from, tenantId })
         : await deps.adapter.handleInbound({ callSid, from, to, tenantId });
       res.status(200).type('text/xml').send(twiml);
@@ -842,6 +887,67 @@ function buildCallbackGatherTwiml(opts: {
     `<Redirect method="POST">${action}</Redirect>` +
     `</Response>`
   );
+}
+
+/**
+ * WS3 — decide whether an inbound call should take the realtime
+ * (media-streams) path. Called only when the global `mediaStreamsEnabled`
+ * master switch is on. Returns true only when EVERY gate passes:
+ *
+ *   (a) realtime prerequisites present (STT + TTS configured), AND
+ *   (b) the pre-connect health circuit is not open, AND
+ *   (c) the per-tenant `voice_realtime` flag is enabled (default ON).
+ *
+ * Any gate failing — including a flag-read throw — returns false so the caller
+ * falls back to Gather (the proven path). The cheap synchronous checks run
+ * first so a fallback decision avoids the flag DB read entirely.
+ */
+async function shouldUseRealtimeStream(opts: {
+  tenantId: string;
+  callSid: string;
+  deps: TelephonyRouterDeps;
+}): Promise<boolean> {
+  const { tenantId, callSid, deps } = opts;
+
+  // (a) prerequisites — STT/TTS must be configured or the Stream would connect
+  // to a socket that can't transcribe/speak. Unwired probe → treat as met.
+  if (deps.realtimePrerequisitesMet && !deps.realtimePrerequisitesMet()) {
+    logger.warn('telephony/voice: realtime prerequisites missing → Gather fallback', {
+      callSid,
+    });
+    return false;
+  }
+
+  // (b) health circuit — recent realtime session failures pin new calls to Gather.
+  if (deps.realtimeCircuit?.isOpen()) {
+    logger.warn('telephony/voice: realtime circuit open → Gather fallback', { callSid });
+    return false;
+  }
+
+  // (c) per-tenant flag (default ON). Fail toward Gather on a read error.
+  if (deps.tenantFeatureFlags) {
+    try {
+      const enabled = await deps.tenantFeatureFlags.isEnabledForTenantWithDefault(
+        tenantId,
+        'voice_realtime',
+        true,
+      );
+      if (!enabled) {
+        logger.info('telephony/voice: voice_realtime tenant flag off → Gather fallback', {
+          callSid,
+        });
+        return false;
+      }
+    } catch (err) {
+      logger.warn('telephony/voice: voice_realtime flag read failed → Gather fallback', {
+        callSid,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return false;
+    }
+  }
+
+  return true;
 }
 
 /**

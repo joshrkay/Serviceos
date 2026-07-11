@@ -15,6 +15,8 @@ import {
   type MessageDeliveryProvider,
   type SmsMessage,
 } from '../../src/notifications/delivery-provider';
+import { GatedMessageDelivery } from '../../src/notifications/gated-message-delivery';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
 import type { Customer, CustomerRepository } from '../../src/customers/customer';
 import type { DncRepository } from '../../src/compliance/dnc';
 
@@ -63,10 +65,19 @@ function makeAdapter(
   provider: InMemoryDeliveryProvider;
 } {
   const provider = new InMemoryDeliveryProvider();
+  // WS1 — the consent/DNC gate now lives in the delivery wrapper. The adapter
+  // is handed a GatedMessageDelivery (enforcement 'block') over the raw double;
+  // suppression surfaces as SmsSuppressedError, which the adapter maps to its
+  // { suppressed, reason } contract.
+  const gated = new GatedMessageDelivery({
+    base: provider,
+    dnc: new StubDncRepo(opts.onDnc ?? false),
+    auditRepo: new InMemoryAuditRepository(),
+    enforcement: 'block',
+  });
   const adapter = new MessageDeliveryReviewPrivateMessageSender(
-    provider,
+    gated,
     new StubCustomerRepo(customer) as CustomerRepository,
-    new StubDncRepo(opts.onDnc ?? false),
   );
   return { adapter, provider };
 }
@@ -90,6 +101,8 @@ describe('P7-026 MessageDeliveryReviewPrivateMessageSender', () => {
       body: 'Sorry to hear about your experience',
       tenantId: TENANT,
       idempotencyKey: 'review-response-private:p-1',
+      recipientClass: 'customer',
+      consent: { smsConsent: true, customerId: CUSTOMER_ID },
     });
   });
 
@@ -194,7 +207,6 @@ describe('P7-026 MessageDeliveryReviewPrivateMessageSender', () => {
     const adapter = new MessageDeliveryReviewPrivateMessageSender(
       provider,
       new StubCustomerRepo(makeCustomer()) as CustomerRepository,
-      new StubDncRepo(false),
     );
 
     const result = await adapter.send({

@@ -7,12 +7,11 @@ Railway is the **only** deployment target. The deployed services are
 configured by `/railway.toml` and `/Dockerfile` and shipped by
 `.github/workflows/deploy.yml` (`railway up`).
 
-Non-deployed architectures are quarantined under `experiments/` and must
-not be mistaken for production infrastructure — see `experiments/README.md`
-and each subdirectory's README: `experiments/infra/` (AWS CDK, deployed by
-nothing), `experiments/service-os-app/` and `experiments/service-os-agent/`
-(prototypes), and `experiments/supabase_migration.sql` (the prototype's
-schema, unrelated to the canonical in-code migrations).
+A prior AWS CDK deployment path (D-001) and two non-deployed prototypes
+(a Next.js app, a Python LangGraph agent) were quarantined under
+`experiments/` and removed entirely in 2026-07 — see `docs/decisions.md`
+D-016. They are recoverable from git history but are not part of the
+working tree; Railway (above) has been the only deployment target.
 
 ## API startup contract
 
@@ -79,6 +78,39 @@ implement graceful drain. (Tracked as go-live Blocker 5.)
 The proposal-execution worker itself is multi-instance-safe
 (`ProposalRepository.claimForExecution` atomically claims work), so the
 constraint above is specifically about the in-process schedulers.
+
+## Two-service split (optional)
+
+By default the API runs as a **single service** (`PROCESS_ROLE` unset ⇒
+`all`): it serves the HTTP/voice/WS surface **and** runs every background
+worker loop in-process. This is unchanged, byte-for-byte, from the pre-split
+deploy — nothing to configure.
+
+To decouple the request surface from background work (so a spike in sweeps or
+the queue drain can never affect HTTP/voice latency, and each can scale and
+restart independently), run **two Railway services from the same image and the
+same `startCommand`** (`node packages/api/dist/src/index.js`), differing only
+by one env var:
+
+| Service | `PROCESS_ROLE` | Networking | Runs |
+|---|---|---|---|
+| API / voice | `web` | Public (Railway public domain) | HTTP + voice/WS/media-streams only; **zero** background worker loops |
+| Worker | `worker` | Private (no public domain needed) | All background sweeps + the queue poll loop; no public traffic |
+
+Notes:
+
+- Both roles still call `app.listen` on `$PORT` (the worker's `/health` backs
+  Railway's deploy gate); Railway networking decides exposure. The worker does
+  **not** need a public domain.
+- Cheap observability intervals (pool-occupancy and queue-depth metric samplers)
+  run in **every** role, so the `web` service still exports its own `/metrics`.
+- Migrations remain a separate one-off/release step (see above) — role choice
+  does not change that.
+- **Safe to get wrong:** if both services are accidentally left as `all`, the
+  tenant-wide sweeps are still gated by `runAsLeader` (Postgres advisory lock),
+  so exactly one instance runs each tick — you get redundancy, not duplicate
+  invoices/reminders. The split is an isolation optimization, not a correctness
+  requirement.
 
 ## Dispatch feasibility env vars
 

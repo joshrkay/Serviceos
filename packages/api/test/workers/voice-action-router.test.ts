@@ -1420,6 +1420,16 @@ describe('voice-action-router entity resolution', () => {
 // confirm turn — even a classifier that returns the intent at 0.99 must
 // produce NO proposal and NO mutation here (Track E: edit_proposal joins
 // the same loud-warn refusal).
+//
+// WS4 — this is the "operator dictation" half of the approval-loop
+// invariant: a transcript like "approve the Henderson estimate" must
+// NEVER fall through to a generic draft proposal here. The other half —
+// the SAME phrase on a verified owner telephone call actually driving
+// `startVoiceApproval`/`continueVoiceApproval` end-to-end (readback →
+// confirm → approved) — is pinned in
+// test/telephony/voice-approval-gather.test.ts. Together they prove
+// voice approval is reachable from exactly one place: the owner-verified
+// telephony channel, never a recorded/dictated transcript.
 
 describe('RV-071 / RV-225 — voice-action-router refuses owner approval/edit intents', () => {
   it.each(['approve_proposal', 'reject_proposal', 'edit_proposal'])(

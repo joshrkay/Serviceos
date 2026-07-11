@@ -24,6 +24,7 @@ import { DefaultTwilioCallControl } from './telephony/twilio-call-control';
 import { createUserPhoneDispatcherResolver, createBusinessPhoneFallback } from './telephony/dispatcher-phone-resolver';
 import { PgPhoneNumberRepository } from './integrations/twilio/phone-number-repository';
 import { attachMediaStreamServer } from './telephony/media-streams';
+import { RealtimeHealthCircuit } from './telephony/realtime-health-circuit';
 import { attachClientGateway, setChannelGate } from './ws/client-gateway';
 import { setDraining, isDraining as isDrainingFlag } from './ws/drain-state';
 import { createConnectionRegistry } from './ws/connection-registry';
@@ -368,13 +369,14 @@ import {
 } from './feedback/feedback-response';
 import { PgFeedbackRequestRepository } from './feedback/pg-feedback-request';
 import { PgFeedbackResponseRepository } from './feedback/pg-feedback-response';
-import { NoopFeedbackDispatcher, SmsProviderFeedbackDispatcher } from './feedback/dispatcher';
+import { NoopFeedbackDispatcher, MessageDeliveryFeedbackDispatcher } from './feedback/dispatcher';
 import {
   MessageDeliveryProvider,
   InMemoryDeliveryProvider,
 } from './notifications/delivery-provider';
 import { TwilioDeliveryProvider } from './notifications/twilio-delivery-provider';
 import { PerTenantTwilioDeliveryProvider } from './notifications/per-tenant-twilio-delivery-provider';
+import { GatedMessageDelivery } from './notifications/gated-message-delivery';
 import { SendService } from './notifications/send-service';
 import {
   InMemoryDispatchRepository,
@@ -703,6 +705,14 @@ export type AppWithLifecycle = express.Express & {
    * `reason` is for logging only; it is not necessarily a POSIX signal name.
    */
   gracefulDrain: (reason: string) => Promise<void>;
+  /**
+   * WS2 — number of background worker intervals this instance registered.
+   * Snapshot taken at construction time. Zero when PROCESS_ROLE=web (the
+   * HTTP/voice surface runs no background loops); nonzero for 'worker'/'all'.
+   * Read-only observability seam so tests can assert the process-role split
+   * without exporting createApp() internals.
+   */
+  readonly backgroundIntervalCount: number;
 };
 
 export function createApp(): AppWithLifecycle {
@@ -1347,6 +1357,13 @@ export function createApp(): AppWithLifecycle {
   const correctionLessonRepo = pool
     ? new PgCorrectionLessonRepository(pool)
     : new InMemoryCorrectionLessonRepository();
+  // WS6 — supervisor_reviews repo, hoisted here (rather than constructed
+  // inline inside the review-gate config further down) so the daily-digest
+  // worker deps can reuse the SAME instance for its "Checked: N proposals,
+  // M flagged" reflection line instead of standing up a second repo.
+  const supervisorReviewsRepo = pool
+    ? new PgSupervisorReviewRepository(pool)
+    : new InMemorySupervisorReviewRepository();
   // Story 3.9 — raw per-field proposal-edit log (intent + field + before/after),
   // queryable per tenant and per intent; the training signal for prompt/routing
   // improvement. Distinct from correction_lessons (cascading config above).
@@ -1377,22 +1394,13 @@ export function createApp(): AppWithLifecycle {
     ? new PgCallTranscriptTurnRepository(pool)
     : new InMemoryCallTranscriptTurnRepository();
 
-  const feedbackDispatcher =
-    process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN && process.env.TWILIO_FROM_NUMBER
-      ? new SmsProviderFeedbackDispatcher({
-          accountSid: process.env.TWILIO_ACCOUNT_SID,
-          authToken: process.env.TWILIO_AUTH_TOKEN,
-          fromNumber: process.env.TWILIO_FROM_NUMBER,
-        })
-      : new NoopFeedbackDispatcher();
-
   // Customer-facing message delivery for estimates and invoices.
   // Production wires Twilio (SMS) + Twilio SendGrid (email). Without
   // the env vars, falls back to InMemoryDeliveryProvider so the app
   // boots in dev without delivery credentials. Send routes return
   // 503 when sendService is undefined.
   const dispatchRepo = pool ? new PgDispatchRepository(pool) : new InMemoryDispatchRepository();
-  let messageDelivery: MessageDeliveryProvider | null;
+  let rawMessageDelivery: MessageDeliveryProvider | null;
   if (
     process.env.TWILIO_ACCOUNT_SID &&
     process.env.TWILIO_AUTH_TOKEN &&
@@ -1420,14 +1428,56 @@ export function createApp(): AppWithLifecycle {
     // through each tenant's own Twilio subaccount (failing closed when a
     // tenant has no credentials). Without a pool we cannot resolve per-tenant
     // creds, so keep the global provider.
-    messageDelivery = pool
+    rawMessageDelivery = pool
       ? new PerTenantTwilioDeliveryProvider({ pool, base: baseDelivery })
       : baseDelivery;
   } else if (config.NODE_ENV === 'prod' || config.NODE_ENV === 'staging') {
-    messageDelivery = null;
+    rawMessageDelivery = null;
   } else {
-    messageDelivery = new InMemoryDeliveryProvider();
+    rawMessageDelivery = new InMemoryDeliveryProvider();
   }
+  // WS1 safety rails — wrap the single delivery object in the consent+DNC gate
+  // so EVERY outbound SMS passes exactly one gate. Owner-class sends bypass;
+  // customer-class sends are gated per `config.TCPA_CONSENT_ENFORCEMENT` (the
+  // SAME value that drives the voice consent gate). Wrapping here — the single
+  // construction site — is what makes the guarantee hold for all three
+  // provider branches (per-tenant, global, and in-memory dev).
+  const messageDelivery: MessageDeliveryProvider | null = rawMessageDelivery
+    ? new GatedMessageDelivery({
+        base: rawMessageDelivery,
+        dnc: dncRepo,
+        auditRepo,
+        enforcement: config.TCPA_CONSENT_ENFORCEMENT,
+      })
+    : null;
+
+  // WS1 — resolve a customer's SMS consent by phone for send sites that only
+  // hold the recipient's number (dropped-call recovery + negotiation replies).
+  // A single customer match yields the consent snapshot; zero or many matches →
+  // undefined, which makes the central gate fail closed (missing_consent_context)
+  // rather than silently guess.
+  const resolveCustomerConsentByPhone = async (
+    tenantId: string,
+    phone: string,
+  ): Promise<{ smsConsent: boolean; customerId?: string } | undefined> => {
+    try {
+      const matches = await customerRepo.findByPhoneNormalized(
+        tenantId,
+        normalizePhone(phone),
+      );
+      if (matches.length !== 1) return undefined;
+      return { smsConsent: matches[0].smsConsent === true, customerId: matches[0].id };
+    } catch {
+      return undefined;
+    }
+  };
+
+  // WS1 — feedback-request SMS now flows through the single messageDelivery
+  // object (customer-class) instead of a raw Twilio fetch. Noop without a
+  // provider so dev/CI boot without SMS creds.
+  const feedbackDispatcher = messageDelivery
+    ? new MessageDeliveryFeedbackDispatcher(messageDelivery)
+    : new NoopFeedbackDispatcher();
   const publicBaseUrl = process.env.APP_PUBLIC_URL ?? 'http://localhost:5173';
   const sendService = messageDelivery
     ? new SendService({
@@ -1438,7 +1488,6 @@ export function createApp(): AppWithLifecycle {
         customerRepo,
         settingsRepo,
         dispatchRepo,
-        dncRepo,
         publicBaseUrl,
       })
     : undefined;
@@ -1483,7 +1532,8 @@ export function createApp(): AppWithLifecycle {
   const oneTapDelivery = messageDelivery;
   const oneTapSmsSender = oneTapDelivery
     ? async (to: string, body: string): Promise<void> => {
-        await oneTapDelivery.sendSms({ to, body });
+        // One-tap approval link → owner/operator. Never gated by customer consent.
+        await oneTapDelivery.sendSms({ to, body, recipientClass: 'owner' });
       }
     : undefined;
   // Owner/backup-supervisor phone for the unsupervised SMS: tenant_settings
@@ -1762,7 +1812,6 @@ export function createApp(): AppWithLifecycle {
         settingsRepo,
         invoiceRepo,
         dispatchRepo,
-        dncRepo,
       })
     : undefined;
   if (transactionalComms) {
@@ -1812,13 +1861,12 @@ export function createApp(): AppWithLifecycle {
     ? new MessageDeliveryReviewPrivateMessageSender(
         messageDelivery,
         customerRepo,
-        dncRepo,
       )
     : undefined;
   // Built ahead of the execution registry so the notify_delay handler can
   // send a real delay notice; reused by the delay-notification worker below.
   const delayNotificationService = messageDelivery
-    ? new TwilioDelayNotificationService(messageDelivery, dispatchRepo)
+    ? new TwilioDelayNotificationService(messageDelivery, dispatchRepo, customerRepo)
     : new NoopDelayNotificationService();
   const executionHandlers = createExecutionHandlerRegistry({
     customerRepo,
@@ -2056,6 +2104,15 @@ export function createApp(): AppWithLifecycle {
     backgroundIntervals.push(handle);
     return handle;
   };
+  // WS2 — process-role split. A PROCESS_ROLE=web deploy serves the HTTP/voice/WS
+  // surface with ZERO background worker loops so it can never be coupled to
+  // (or blocked by) the sweeps/queue drain; 'worker' and 'all' run them. Every
+  // worker interval registration below (and the worker-object constructions that
+  // exist solely to feed them) is gated on this. Cheap observability intervals
+  // (samplePoolMetrics / sampleQueueDepth) stay in ALL roles — a web deploy must
+  // still expose its own pool + queue-depth metrics. Leader locks (runAsLeader)
+  // make it safe if two instances ever both run 'all'.
+  const shouldRunWorkers = config.PROCESS_ROLE !== 'web';
 
   // scale-to-1000 U2c — sample Postgres pool occupancy into /metrics so the
   // saturation signal (waiting climbing while total is pinned at the pool max)
@@ -2166,6 +2223,14 @@ export function createApp(): AppWithLifecycle {
     registerInterval(setInterval(() => void sampleQueueDepth(), 15000));
   }
 
+  // WS2 — baseline for the process-role split. samplePoolMetrics +
+  // sampleQueueDepth are the only intervals registered above and are cheap
+  // observability that runs in EVERY role (incl. PROCESS_ROLE=web); every
+  // interval registered after this point is a gated background WORKER loop.
+  // `backgroundIntervalCount` (exposed on the returned app) is the count of
+  // those worker loops — length minus this baseline — so it is 0 in web role.
+  const observabilityIntervalCount = backgroundIntervals.length;
+
   const executionWorkerLogger = createLogger({
     service: 'execution-worker',
     environment: process.env.NODE_ENV || 'development',
@@ -2174,23 +2239,25 @@ export function createApp(): AppWithLifecycle {
   // 1s cadence a slow executor otherwise stacks overlapping sweeps, each
   // re-running resetStaleExecuting against the same rows.
   let executionSweepInFlight = false;
-  registerInterval(setInterval(async () => {
-    if (executionSweepInFlight) return;
-    executionSweepInFlight = true;
-    try {
-      await runExecutionSweep({
-        proposalRepo,
-        executor: proposalExecutor,
-        logger: executionWorkerLogger,
-      });
-    } catch (err) {
-      executionWorkerLogger.error('Execution sweep failed', {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    } finally {
-      executionSweepInFlight = false;
-    }
-  }, 1000));
+  if (shouldRunWorkers) {
+    registerInterval(setInterval(async () => {
+      if (executionSweepInFlight) return;
+      executionSweepInFlight = true;
+      try {
+        await runExecutionSweep({
+          proposalRepo,
+          executor: proposalExecutor,
+          logger: executionWorkerLogger,
+        });
+      } catch (err) {
+        executionWorkerLogger.error('Execution sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      } finally {
+        executionSweepInFlight = false;
+      }
+    }, 1000));
+  }
 
   // voice-action-router — consumes transcripts enqueued by the
   // transcription worker's onTranscribed hook, classifies intent,
@@ -2326,7 +2393,6 @@ export function createApp(): AppWithLifecycle {
     settingsRepo,
     feedbackRequestRepo,
     dispatcher: feedbackDispatcher,
-    dncRepo,
     publicBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:5173',
   });
   workerRegistry.set(
@@ -2407,21 +2473,23 @@ export function createApp(): AppWithLifecycle {
     }
   };
   let pollInFlight = false;
-  registerInterval(setInterval(async () => {
-    if (pollInFlight) return;
-    pollInFlight = true;
-    try {
-      const messages = await queue.receiveBatch(QUEUE_POLL_BATCH_SIZE);
-      if (messages.length === 0) return;
-      await Promise.all(messages.map((message) => handleQueueMessage(message)));
-    } catch (err) {
-      workerLogger.error('Queue poll failed', {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    } finally {
-      pollInFlight = false;
-    }
-  }, 250));
+  if (shouldRunWorkers) {
+    registerInterval(setInterval(async () => {
+      if (pollInFlight) return;
+      pollInFlight = true;
+      try {
+        const messages = await queue.receiveBatch(QUEUE_POLL_BATCH_SIZE);
+        if (messages.length === 0) return;
+        await Promise.all(messages.map((message) => handleQueueMessage(message)));
+      } catch (err) {
+        workerLogger.error('Queue poll failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      } finally {
+        pollInFlight = false;
+      }
+    }, 250));
+  }
 
   // Cross-entity tenant ownership guard. Routes pass parent ids (e.g.
   // jobs.customerId) through validation against the requesting tenant
@@ -2527,7 +2595,6 @@ export function createApp(): AppWithLifecycle {
             customerMessageDeps: {
               delivery: messageDelivery,
               dispatchRepo,
-              dncRepo,
             },
           }
         : {}),
@@ -2852,8 +2919,20 @@ export function createApp(): AppWithLifecycle {
         recoveryRepo: droppedCallRecoveryRepo,
         proposalRepo,
         callMeBackRepo,
-        sendSms: (args: { to: string; body: string }) =>
-          messageDelivery.sendSms({ to: args.to, body: args.body }),
+        // Customer-class: recovery reply to the dropped caller. Resolve the
+        // caller's consent by phone; unknown/ambiguous → fail closed via the gate.
+        sendSms: async (args: { to: string; body: string; tenantId?: string }) => {
+          const consent = args.tenantId
+            ? await resolveCustomerConsentByPhone(args.tenantId, args.to)
+            : undefined;
+          return messageDelivery.sendSms({
+            to: args.to,
+            body: args.body,
+            ...(args.tenantId ? { tenantId: args.tenantId } : {}),
+            recipientClass: 'customer',
+            ...(consent ? { consent } : {}),
+          });
+        },
         auditRepo,
         businessName: process.env.TWILIO_BUSINESS_NAME ?? 'our team',
       }),
@@ -2899,8 +2978,19 @@ export function createApp(): AppWithLifecycle {
         proposalRepo,
         resolveCustomerContext: resolveNegotiationCustomerContext,
         evaluateDiscount: evaluateNegotiationDiscountForPhone,
-        sendSms: (args: { to: string; body: string }) =>
-          messageDelivery.sendSms({ to: args.to, body: args.body }),
+        // Customer-class: holding-line reply to the negotiating customer.
+        sendSms: async (args: { to: string; body: string; tenantId?: string }) => {
+          const consent = args.tenantId
+            ? await resolveCustomerConsentByPhone(args.tenantId, args.to)
+            : undefined;
+          return messageDelivery.sendSms({
+            to: args.to,
+            body: args.body,
+            ...(args.tenantId ? { tenantId: args.tenantId } : {}),
+            recipientClass: 'customer',
+            ...(consent ? { consent } : {}),
+          });
+        },
         auditRepo,
         resolveBrandContext: async (tenantId: string) => {
           const settings = await settingsRepo.findByTenant(tenantId);
@@ -3047,8 +3137,9 @@ export function createApp(): AppWithLifecycle {
     ...(messageDelivery
       ? {
           deliveryProvider: {
+            // Owner/dispatcher patch + on-call notify SMS — never customer-gated.
             sendSms: (args: { to: string; body: string }) =>
-              messageDelivery.sendSms({ to: args.to, body: args.body }),
+              messageDelivery.sendSms({ to: args.to, body: args.body, recipientClass: 'owner' }),
           },
         }
       : {}),
@@ -3158,8 +3249,9 @@ export function createApp(): AppWithLifecycle {
   if (messageDelivery) {
     const emergencyPageWorker = createEmergencyPageWorker({
       queue,
+      // Emergency page → owner / on-call. Never customer-gated.
       sendSms: (args: { to: string; body: string }) =>
-        messageDelivery.sendSms({ to: args.to, body: args.body }),
+        messageDelivery.sendSms({ to: args.to, body: args.body, recipientClass: 'owner' }),
       resolvePagePhone: async (tenantId: string) => {
         try {
           const settings = await settingsRepo.findByTenant(tenantId);
@@ -3186,6 +3278,18 @@ export function createApp(): AppWithLifecycle {
   // telephony surface. When on, /voice returns a <Connect><Stream/>
   // TwiML and audio flows over the WebSocket attached below.
   const mediaStreamsEnabled = process.env.TWILIO_MEDIA_STREAMS_ENABLED === 'true';
+
+  // WS3 (voice ingestion resilience) — shared realtime health signals. The
+  // /voice TwiML branch reads the circuit (isOpen) and prereq probe to decide
+  // Stream vs Gather; the mediastream adapter feeds the same circuit instance.
+  // `realtimeCapabilities` is the single source the /health canary AND the
+  // route's prereq gate both derive from (STT + TTS configured), so they never
+  // drift.
+  const realtimeCapabilities = (): { ttsEnabled: boolean; sttEnabled: boolean } => ({
+    ttsEnabled: !!process.env.ELEVENLABS_API_KEY || !!config.AI_PROVIDER_API_KEY,
+    sttEnabled: !!process.env.DEEPGRAM_API_KEY,
+  });
+  const realtimeHealthCircuit = new RealtimeHealthCircuit();
 
   // Per-tenant Twilio token + tenant-id resolvers, keyed off
   // tenant_integrations. Falls back to the legacy single-account env
@@ -3348,10 +3452,17 @@ export function createApp(): AppWithLifecycle {
             }
           : {}),
       },
+      // WS3 — per-tenant staged rollout of the realtime path (default ON) and
+      // the pre-connect health signals. tenantFeatureFlags is null in
+      // in-memory dev, in which case the global flag alone decides.
+      ...(tenantFeatureFlags ? { tenantFeatureFlags } : {}),
+      realtimeCircuit: realtimeHealthCircuit,
+      realtimePrerequisitesMet: () => {
+        const c = realtimeCapabilities();
+        return c.sttEnabled && c.ttsEnabled;
+      },
       getHealth: () => {
-        const ttsEnabled =
-          !!process.env.ELEVENLABS_API_KEY || !!config.AI_PROVIDER_API_KEY;
-        const sttEnabled = !!process.env.DEEPGRAM_API_KEY;
+        const { ttsEnabled, sttEnabled } = realtimeCapabilities();
         const recordingEnabled =
           !!process.env.TWILIO_ACCOUNT_SID &&
           !!process.env.TWILIO_AUTH_TOKEN &&
@@ -3635,8 +3746,9 @@ export function createApp(): AppWithLifecycle {
                   businessPhoneFallbackResolver: createBusinessPhoneFallback(settingsRepo),
                   ...(messageDelivery
                     ? {
+                        // Patch-owner-through page → owner. Never customer-gated.
                         sendSms: (args: { to: string; body: string }) =>
-                          messageDelivery.sendSms({ to: args.to, body: args.body }),
+                          messageDelivery.sendSms({ to: args.to, body: args.body, recipientClass: 'owner' }),
                       }
                     : {}),
                   callMeBackRepo,
@@ -3705,6 +3817,11 @@ export function createApp(): AppWithLifecycle {
             store: voiceSessionStore,
             connectionRegistry,
             streamingProvider,
+            // WS3 — feed the shared realtime health circuit (the /voice branch
+            // reads it) and emit the alertable resilience audit events
+            // (session_failed / disclosure.init_failed).
+            realtimeCircuit: realtimeHealthCircuit,
+            ...(auditRepo ? { auditRepo } : {}),
             ...(sharedTtsProvider ? { ttsProvider: sharedTtsProvider } : {}),
             terminologyProvider,
             // UB-C1 — resolve the language the call OPENS in, before the
@@ -4151,7 +4268,9 @@ export function createApp(): AppWithLifecycle {
     ...(messageDelivery
       ? {
           sendReply: async (tenantId: string, to: string, body: string) => {
-            await messageDelivery!.sendSms({ to, body, tenantId });
+            // Reply to an inbound tech MMS — the sender is a registered tech
+            // (owner-side), not a customer.
+            await messageDelivery!.sendSms({ to, body, tenantId, recipientClass: 'owner' });
           },
         }
       : {}),
@@ -4192,7 +4311,7 @@ export function createApp(): AppWithLifecycle {
             notifyOwner: async (tenantId: string, body: string) => {
               const ownerPhone = await resolveUnsupervisedOwnerPhone(tenantId);
               if (ownerPhone) {
-                await messageDelivery!.sendSms({ to: ownerPhone, body, tenantId });
+                await messageDelivery!.sendSms({ to: ownerPhone, body, tenantId, recipientClass: 'owner' });
               }
             },
           }
@@ -4913,32 +5032,35 @@ export function createApp(): AppWithLifecycle {
           // (set at save time from the webhook's event.account).
         })
       : undefined;
-  registerInterval(setInterval(() => {
-    void runAsLeader(SWEEP_LOCK.recurringAgreements, async () => {
-      await runRecurringAgreementsSweep({
-        agreementRepo,
-        runRepo: agreementRunRepo,
-        jobsService: agreementsJobsService,
-        invoicesService: agreementsInvoicesService,
-        listTenantIds: async () => {
-          if (!pool) return [];
-          const r = await pool.query('SELECT id FROM tenants');
-          return r.rows.map((row: { id: string }) => row.id);
-        },
-        auditRepo,
-        duesCollector,
-        logger: agreementsLogger,
+  if (shouldRunWorkers) {
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.recurringAgreements, async () => {
+        await runRecurringAgreementsSweep({
+          agreementRepo,
+          runRepo: agreementRunRepo,
+          jobsService: agreementsJobsService,
+          invoicesService: agreementsInvoicesService,
+          listTenantIds: async () => {
+            if (!pool) return [];
+            const r = await pool.query('SELECT id FROM tenants');
+            return r.rows.map((row: { id: string }) => row.id);
+          },
+          auditRepo,
+          duesCollector,
+          logger: agreementsLogger,
+        });
+      }).catch((err) => {
+        agreementsLogger.error('Recurring-agreements sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
       });
-    }).catch((err) => {
-      agreementsLogger.error('Recurring-agreements sweep failed', {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    });
-  }, 60_000));
+    }, 60_000));
+  }
 
   // RV-132 — recording retention purge. Hourly; pool-gated (the Pg repo is
   // the only implementation that can see the cross-tenant horizon query).
-  if (pool) {
+  // WS2: worker-only — the repo/logger below exist solely to feed this sweep.
+  if (pool && shouldRunWorkers) {
     const retentionPool = pool;
     const recordingRetentionLogger = createLogger({
       service: 'recording-retention-worker',
@@ -4968,33 +5090,36 @@ export function createApp(): AppWithLifecycle {
     service: 'call-me-back-worker',
     environment: process.env.NODE_ENV || 'development',
   });
-  registerInterval(setInterval(() => {
-    void runAsLeader(SWEEP_LOCK.callMeBack, async () => {
-      await runCallMeBackSweep({
-        callMeBackRepo,
-        settingsRepo,
-        ...(messageDelivery
-          ? {
-              deliveryProvider: {
-                sendSms: (args: { to: string; body: string }) =>
-                  messageDelivery.sendSms({ to: args.to, body: args.body }),
-              },
-            }
-          : {}),
-        listTenantIds: async () => {
-          if (!pool) return [];
-          const r = await pool.query('SELECT id FROM tenants');
-          return r.rows.map((row: { id: string }) => row.id);
-        },
-        auditRepo,
-        logger: callMeBackLogger,
+  if (shouldRunWorkers) {
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.callMeBack, async () => {
+        await runCallMeBackSweep({
+          callMeBackRepo,
+          settingsRepo,
+          ...(messageDelivery
+            ? {
+                deliveryProvider: {
+                  // Callback notice → CSR/transfer number (owner-side).
+                  sendSms: (args: { to: string; body: string }) =>
+                    messageDelivery.sendSms({ to: args.to, body: args.body, recipientClass: 'owner' }),
+                },
+              }
+            : {}),
+          listTenantIds: async () => {
+            if (!pool) return [];
+            const r = await pool.query('SELECT id FROM tenants');
+            return r.rows.map((row: { id: string }) => row.id);
+          },
+          auditRepo,
+          logger: callMeBackLogger,
+        });
+      }).catch((err) => {
+        callMeBackLogger.error('call_me_back sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
       });
-    }).catch((err) => {
-      callMeBackLogger.error('call_me_back sweep failed', {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    });
-  }, 60_000));
+    }, 60_000));
+  }
 
   // P8-015 — dropped-call recovery drain. The scheduler (wired above) has
   // been inserting durable dropped_call_recoveries rows since RV-115; this
@@ -5019,7 +5144,8 @@ export function createApp(): AppWithLifecycle {
   // with the one-per-caller cap silently disabled. No pool ⇒ no cross-process
   // limiter ⇒ don't run the sweep at all (matches PhoneRateLimiter's
   // no-in-memory-fallback rule).
-  if (messageDelivery && pool) {
+  // WS2: worker-only — recoveryHandlerDeps below is built solely for this sweep.
+  if (messageDelivery && pool && shouldRunWorkers) {
     const droppedCallLogger = createLogger({
       service: 'dropped-call-worker',
       environment: process.env.NODE_ENV || 'development',
@@ -5035,11 +5161,21 @@ export function createApp(): AppWithLifecycle {
         logger: droppedCallLogger,
       }),
       // Compliance gate: a caller who texted STOP between the drop and the
-      // send must never receive the recovery SMS.
-      preSendSuppress: async (row) =>
-        (await dncRepo.isOnDnc(row.tenantId, normalizePhone(row.callerE164)))
-          ? 'opted_out'
-          : null,
+      // send must never receive the recovery SMS. WS1 — also fail closed on
+      // consent here (terminal markSuppressed) rather than at send time, so an
+      // unknown/ambiguous caller under enforcement is suppressed once instead
+      // of poison-pilling the sweep with a retryable SmsSuppressedError. The
+      // central gate remains the send-time backstop.
+      preSendSuppress: async (row) => {
+        if (await dncRepo.isOnDnc(row.tenantId, normalizePhone(row.callerE164))) {
+          return 'opted_out';
+        }
+        if (config.TCPA_CONSENT_ENFORCEMENT !== 'off') {
+          const consent = await resolveCustomerConsentByPhone(row.tenantId, row.callerE164);
+          if (!consent || consent.smsConsent !== true) return 'no_consent';
+        }
+        return null;
+      },
       compose: createRecoveryComposer({
         composerDeps: { gateway: llmGateway, settingsRepo, standingInstructionRepo },
         businessName: process.env.TWILIO_BUSINESS_NAME ?? 'our team',
@@ -5051,9 +5187,22 @@ export function createApp(): AppWithLifecycle {
       // Unlike the callMeBack adapter above, this passes tenantId (per-tenant
       // Twilio subaccount routing) and the idempotency key (Twilio-side
       // double-send defense).
-      sendSms: async ({ tenantId, to, body, idempotencyKey }) =>
-        (await messageDelivery.sendSms({ to, body, tenantId, idempotencyKey }))
-          .providerMessageId,
+      // Customer-class: the ~60s recovery SMS to the dropped caller. preSendSuppress
+      // above already blocks DNC'd numbers; the gate additionally enforces consent
+      // (resolved by phone — unknown/ambiguous caller → fail closed).
+      sendSms: async ({ tenantId, to, body, idempotencyKey }) => {
+        const consent = await resolveCustomerConsentByPhone(tenantId, to);
+        return (
+          await messageDelivery.sendSms({
+            to,
+            body,
+            tenantId,
+            idempotencyKey,
+            recipientClass: 'customer',
+            ...(consent ? { consent } : {}),
+          })
+        ).providerMessageId;
+      },
       // NOTE: no leadRepo — the dropped CALL is the lead-generating event and
       // is captured (source 'phone_call') by the inbound-call path. Passing
       // leadRepo here would make the OUTBOUND recovery SMS mint a lead with
@@ -5092,30 +5241,32 @@ export function createApp(): AppWithLifecycle {
     service: 'batch-invoice-worker',
     environment: process.env.NODE_ENV || 'development',
   });
-  registerInterval(setInterval(() => {
-    void runAsLeader(SWEEP_LOCK.batchInvoice, async () => {
-      await runBatchInvoiceSweep({
-        jobRepo,
-        invoiceRepo,
-        estimateRepo,
-        proposalRepo,
-        settingsRepo,
-        runRepo: batchInvoiceRunRepo,
-        txRunner: batchInvoiceTxRunner,
-        listTenantIds: async () => {
-          if (!pool) return [];
-          const r = await pool.query('SELECT id FROM tenants');
-          return r.rows.map((row: { id: string }) => row.id);
-        },
-        auditRepo,
-        logger: batchInvoiceLogger,
+  if (shouldRunWorkers) {
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.batchInvoice, async () => {
+        await runBatchInvoiceSweep({
+          jobRepo,
+          invoiceRepo,
+          estimateRepo,
+          proposalRepo,
+          settingsRepo,
+          runRepo: batchInvoiceRunRepo,
+          txRunner: batchInvoiceTxRunner,
+          listTenantIds: async () => {
+            if (!pool) return [];
+            const r = await pool.query('SELECT id FROM tenants');
+            return r.rows.map((row: { id: string }) => row.id);
+          },
+          auditRepo,
+          logger: batchInvoiceLogger,
+        });
+      }).catch((err) => {
+        batchInvoiceLogger.error('Batch-invoice sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
       });
-    }).catch((err) => {
-      batchInvoiceLogger.error('Batch-invoice sweep failed', {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    });
-  }, 3_600_000));
+    }, 3_600_000));
+  }
 
   // RV-061 (F-9) — end-of-day digest sweep. Every 15 minutes, tenants whose
   // tenant-local digest_time fell in the just-passed bucket get their digest
@@ -5130,94 +5281,98 @@ export function createApp(): AppWithLifecycle {
   });
   // Capture as const so the closure narrows (messageDelivery is a let).
   const digestDelivery = messageDelivery;
-  registerInterval(setInterval(() => {
-    void runAsLeader(SWEEP_LOCK.dailyDigest, async () => {
-      await runDailyDigestSweep({
-        settingsRepo,
-        digestRepo: dailyDigestRepo,
-        computeDeps: {
-          paymentRepo,
-          invoiceRepo,
-          estimateRepo,
-          jobRepo,
-          appointmentRepo,
-          proposalRepo,
-          customerRepo,
+  if (shouldRunWorkers) {
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.dailyDigest, async () => {
+        await runDailyDigestSweep({
           settingsRepo,
-          feedbackResponseRepo,
-          // N-005 — "what I learned today" (correction-loop lessons).
-          correctionLessonRepo,
-        },
-        listTenantIds: async () => {
-          if (!pool) return [];
-          const r = await pool.query('SELECT id FROM tenants');
-          return r.rows.map((row: { id: string }) => row.id);
-        },
-        // Narrative through the brand-voice composer ONLY when a real LLM
-        // provider is configured — the mock gateway's canned JSON must not
-        // become an owner-facing narrative. Composer failures fall back to
-        // the deterministic template inside the worker.
-        ...(config.AI_PROVIDER_API_KEY
-          ? {
-              composeNarrative: async (tenantId: string, payload: DailyDigestPayload) => {
-                const result = await composeBrandVoiceMessage(
-                  {
-                    tenantId,
-                    intent: 'digest_narrative',
-                    // PII opt-in: counts only — no customer names or amounts
-                    // beyond the aggregate figures the owner already sees.
-                    context: {
-                      moneyInCents: payload.revenueCents,
-                      jobsCompleted: payload.jobsCompletedCount,
-                      tomorrowVisits: payload.tomorrow.appointmentCount,
-                      tomorrowFirstStart: payload.tomorrow.firstStartIso ?? 'none scheduled',
-                      approvalsWaiting: payload.pendingApprovals.totalCount,
-                      overdueInvoices: payload.overdueInvoicesCount,
-                      unbilledCompletedJobs: payload.unbilledJobs.length,
+          digestRepo: dailyDigestRepo,
+          computeDeps: {
+            paymentRepo,
+            invoiceRepo,
+            estimateRepo,
+            jobRepo,
+            appointmentRepo,
+            proposalRepo,
+            customerRepo,
+            settingsRepo,
+            feedbackResponseRepo,
+            // N-005 — "what I learned today" (correction-loop lessons).
+            correctionLessonRepo,
+            // WS6 — "Checked: N proposals, M flagged" (supervisor reviews).
+            supervisorReviewRepo: supervisorReviewsRepo,
+          },
+          listTenantIds: async () => {
+            if (!pool) return [];
+            const r = await pool.query('SELECT id FROM tenants');
+            return r.rows.map((row: { id: string }) => row.id);
+          },
+          // Narrative through the brand-voice composer ONLY when a real LLM
+          // provider is configured — the mock gateway's canned JSON must not
+          // become an owner-facing narrative. Composer failures fall back to
+          // the deterministic template inside the worker.
+          ...(config.AI_PROVIDER_API_KEY
+            ? {
+                composeNarrative: async (tenantId: string, payload: DailyDigestPayload) => {
+                  const result = await composeBrandVoiceMessage(
+                    {
+                      tenantId,
+                      intent: 'digest_narrative',
+                      // PII opt-in: counts only — no customer names or amounts
+                      // beyond the aggregate figures the owner already sees.
+                      context: {
+                        moneyInCents: payload.revenueCents,
+                        jobsCompleted: payload.jobsCompletedCount,
+                        tomorrowVisits: payload.tomorrow.appointmentCount,
+                        tomorrowFirstStart: payload.tomorrow.firstStartIso ?? 'none scheduled',
+                        approvalsWaiting: payload.pendingApprovals.totalCount,
+                        overdueInvoices: payload.overdueInvoicesCount,
+                        unbilledCompletedJobs: payload.unbilledJobs.length,
+                      },
+                      maxChars: 420,
                     },
-                    maxChars: 420,
-                  },
-                  // UB-A3 — owner standing instructions (keyed on the
-                  // digest_narrative intent) adjust the narrative content.
-                  { gateway: llmGateway, settingsRepo, standingInstructionRepo },
-                );
-                return result.text;
-              },
-            }
-          : {}),
-        ...(digestDelivery ? { delivery: digestDelivery } : {}),
-        dispatchRepo,
-        ...(oneTapSecret ? { oneTapSecret } : {}),
-        buildApproveUrl: (token: string) =>
-          `${oneTapApiBaseUrl}/public/proposals/one-tap-approve?token=${encodeURIComponent(token)}`,
-        publicBaseUrl,
-        // U5 (JTBD #7) — record the "APPROVE ALL" anchor over the P2-034
-        // transport. proposal_id is NOT NULL (FK), so the row uses the first
-        // batch-approvable id as its representative; the full ordered set is
-        // encoded in the body and read back by the reply handler.
-        recordApproveAllAnchor: async ({ tenantId, proposalIds, body }) => {
-          await proposalSmsEventRepo.create(
-            createProposalSmsEvent({
-              tenantId,
-              proposalId: proposalIds[0]!,
-              direction: 'outbound',
-              kind: 'digest_approve_all_rendered',
-              body: encodeDigestApproveAllBody(proposalIds),
-            }),
-          );
-          // `body` is the rendered digest SMS; intentionally not stored on the
-          // anchor (the id set is what the reply path needs, and the dispatch
-          // row already records the send). Referenced to satisfy the seam.
-          void body;
-        },
-        logger: dailyDigestLogger,
+                    // UB-A3 — owner standing instructions (keyed on the
+                    // digest_narrative intent) adjust the narrative content.
+                    { gateway: llmGateway, settingsRepo, standingInstructionRepo },
+                  );
+                  return result.text;
+                },
+              }
+            : {}),
+          ...(digestDelivery ? { delivery: digestDelivery } : {}),
+          dispatchRepo,
+          ...(oneTapSecret ? { oneTapSecret } : {}),
+          buildApproveUrl: (token: string) =>
+            `${oneTapApiBaseUrl}/public/proposals/one-tap-approve?token=${encodeURIComponent(token)}`,
+          publicBaseUrl,
+          // U5 (JTBD #7) — record the "APPROVE ALL" anchor over the P2-034
+          // transport. proposal_id is NOT NULL (FK), so the row uses the first
+          // batch-approvable id as its representative; the full ordered set is
+          // encoded in the body and read back by the reply handler.
+          recordApproveAllAnchor: async ({ tenantId, proposalIds, body }) => {
+            await proposalSmsEventRepo.create(
+              createProposalSmsEvent({
+                tenantId,
+                proposalId: proposalIds[0]!,
+                direction: 'outbound',
+                kind: 'digest_approve_all_rendered',
+                body: encodeDigestApproveAllBody(proposalIds),
+              }),
+            );
+            // `body` is the rendered digest SMS; intentionally not stored on the
+            // anchor (the id set is what the reply path needs, and the dispatch
+            // row already records the send). Referenced to satisfy the seam.
+            void body;
+          },
+          logger: dailyDigestLogger,
+        });
+      }).catch((err) => {
+        dailyDigestLogger.error('Daily-digest sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
       });
-    }).catch((err) => {
-      dailyDigestLogger.error('Daily-digest sweep failed', {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    });
-  }, DIGEST_SWEEP_INTERVAL_MS));
+    }, DIGEST_SWEEP_INTERVAL_MS));
+  }
 
   // §6 Time-to-Cash: overdue-invoice sweep. Hourly — invoice due dates
   // have day granularity, so an hourly check surfaces newly-overdue
@@ -5228,34 +5383,36 @@ export function createApp(): AppWithLifecycle {
     service: 'overdue-invoice-worker',
     environment: process.env.NODE_ENV || 'development',
   });
-  registerInterval(setInterval(() => {
-    void runAsLeader(SWEEP_LOCK.overdueInvoice, async () => {
-      await runOverdueInvoiceSweep({
-        jobRepo,
-        estimateRepo,
-        invoiceRepo,
-        auditRepo,
-        // §7 Collections cadence — raise owner-approved dunning proposals
-        // (send_payment_reminder / apply_late_fee) per the tenant's dunning
-        // policy, gated for idempotency by the dunning event ledger.
-        proposalRepo,
-        dunningConfigRepo,
-        dunningEventRepo,
-        // Owner `invoice_overdue` push dep (U6) — without it the push no-ops.
-        customerRepo,
-        listTenantIds: async () => {
-          if (!pool) return [];
-          const r = await pool.query('SELECT id FROM tenants');
-          return r.rows.map((row: { id: string }) => row.id);
-        },
-        logger: overdueInvoiceLogger,
+  if (shouldRunWorkers) {
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.overdueInvoice, async () => {
+        await runOverdueInvoiceSweep({
+          jobRepo,
+          estimateRepo,
+          invoiceRepo,
+          auditRepo,
+          // §7 Collections cadence — raise owner-approved dunning proposals
+          // (send_payment_reminder / apply_late_fee) per the tenant's dunning
+          // policy, gated for idempotency by the dunning event ledger.
+          proposalRepo,
+          dunningConfigRepo,
+          dunningEventRepo,
+          // Owner `invoice_overdue` push dep (U6) — without it the push no-ops.
+          customerRepo,
+          listTenantIds: async () => {
+            if (!pool) return [];
+            const r = await pool.query('SELECT id FROM tenants');
+            return r.rows.map((row: { id: string }) => row.id);
+          },
+          logger: overdueInvoiceLogger,
+        });
+      }).catch((err) => {
+        overdueInvoiceLogger.error('Overdue-invoice sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
       });
-    }).catch((err) => {
-      overdueInvoiceLogger.error('Overdue-invoice sweep failed', {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    });
-  }, Number(process.env.OVERDUE_SWEEP_INTERVAL_MS) > 0 ? Number(process.env.OVERDUE_SWEEP_INTERVAL_MS) : 60 * 60_000));
+    }, Number(process.env.OVERDUE_SWEEP_INTERVAL_MS) > 0 ? Number(process.env.OVERDUE_SWEEP_INTERVAL_MS) : 60 * 60_000));
+  }
   // QA-2026-06-05: interval is env-tunable (OVERDUE_SWEEP_INTERVAL_MS) so dev/QA
   // can observe the sweep inside a test window; default stays hourly.
 
@@ -5268,7 +5425,7 @@ export function createApp(): AppWithLifecycle {
   // on every redeploy (Railway redeploys far more often than weekly) and could
   // never elapse. The per-week hfcr_weekly_sends gate makes a daily run send
   // exactly one summary per tenant per completed week — restart-safe.
-  if (oneTapSmsSender) {
+  if (oneTapSmsSender && shouldRunWorkers) {
     const oneTapOwnerSms = oneTapSmsSender;
     const hfcrWeeklyLogger = createLogger({
       service: 'hfcr-weekly-send-worker',
@@ -5306,7 +5463,7 @@ export function createApp(): AppWithLifecycle {
   // (like the HFCR weekly sweep). Needs email delivery + a pool; suggestions
   // go through the LLM gateway only when a real provider is configured (the
   // mock gateway must not produce owner-facing text), else deterministic.
-  if (messageDelivery && pool) {
+  if (messageDelivery && pool && shouldRunWorkers) {
     const weeklyFeedbackPool = pool;
     const weeklyFeedbackDelivery = messageDelivery;
     const weeklyFeedbackLogger = createLogger({
@@ -5376,7 +5533,7 @@ export function createApp(): AppWithLifecycle {
   }
 
   // F17 — push paid invoices + customers to QuickBooks every 5 minutes.
-  if (qboConfig) {
+  if (qboConfig && shouldRunWorkers) {
     const accountingSyncLogger = createLogger({
       service: 'accounting-sync-worker',
       environment: process.env.NODE_ENV || 'development',
@@ -5404,7 +5561,7 @@ export function createApp(): AppWithLifecycle {
     service: 'appointment-reminder-worker',
     environment: process.env.NODE_ENV || 'development',
   });
-  if (transactionalComms) {
+  if (transactionalComms && shouldRunWorkers) {
     registerInterval(setInterval(() => {
       void runAsLeader(SWEEP_LOCK.appointmentReminder, async () => {
         await runAppointmentReminderSweep({
@@ -5439,24 +5596,26 @@ export function createApp(): AppWithLifecycle {
     service: 'hold-reaper-worker',
     environment: process.env.NODE_ENV || 'development',
   });
-  registerInterval(setInterval(() => {
-    void runAsLeader(SWEEP_LOCK.holdReaper, async () => {
-      await runHoldReaperSweep({
-        appointmentRepo,
-        auditRepo,
-        listTenantIds: async () => {
-          if (!pool) return [];
-          const r = await pool.query('SELECT id FROM tenants');
-          return r.rows.map((row: { id: string }) => row.id);
-        },
-        logger: holdReaperLogger,
+  if (shouldRunWorkers) {
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.holdReaper, async () => {
+        await runHoldReaperSweep({
+          appointmentRepo,
+          auditRepo,
+          listTenantIds: async () => {
+            if (!pool) return [];
+            const r = await pool.query('SELECT id FROM tenants');
+            return r.rows.map((row: { id: string }) => row.id);
+          },
+          logger: holdReaperLogger,
+        });
+      }).catch((err) => {
+        holdReaperLogger.error('Hold-reaper sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
       });
-    }).catch((err) => {
-      holdReaperLogger.error('Hold-reaper sweep failed', {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    });
-  }, 15 * 60_000));
+    }, 15 * 60_000));
+  }
 
   // Estimate-reminder worker — nudges customers on estimates sent but
   // unviewed/unaccepted after 3 days (1 reminder, capped). Only runs when
@@ -5465,7 +5624,7 @@ export function createApp(): AppWithLifecycle {
     service: 'estimate-reminder-worker',
     environment: process.env.NODE_ENV || 'development',
   });
-  if (sendService) {
+  if (sendService && shouldRunWorkers) {
     registerInterval(setInterval(() => {
       void runAsLeader(SWEEP_LOCK.estimateReminder, async () => {
         await runEstimateReminderSweep({
@@ -5495,25 +5654,27 @@ export function createApp(): AppWithLifecycle {
     service: 'estimate-expiry-worker',
     environment: process.env.NODE_ENV || 'development',
   });
-  registerInterval(setInterval(() => {
-    void runAsLeader(SWEEP_LOCK.estimateExpiry, async () => {
-      await runEstimateExpirySweep({
-        estimateRepo,
-        auditRepo,
-        moneyStateDeps: { jobRepo, estimateRepo, invoiceRepo, auditRepo, logger: estimateExpiryLogger },
-        listTenantIds: async () => {
-          if (!pool) return [];
-          const r = await pool.query('SELECT id FROM tenants');
-          return r.rows.map((row: { id: string }) => row.id);
-        },
-        logger: estimateExpiryLogger,
+  if (shouldRunWorkers) {
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.estimateExpiry, async () => {
+        await runEstimateExpirySweep({
+          estimateRepo,
+          auditRepo,
+          moneyStateDeps: { jobRepo, estimateRepo, invoiceRepo, auditRepo, logger: estimateExpiryLogger },
+          listTenantIds: async () => {
+            if (!pool) return [];
+            const r = await pool.query('SELECT id FROM tenants');
+            return r.rows.map((row: { id: string }) => row.id);
+          },
+          logger: estimateExpiryLogger,
+        });
+      }).catch((err) => {
+        estimateExpiryLogger.error('Estimate-expiry sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
       });
-    }).catch((err) => {
-      estimateExpiryLogger.error('Estimate-expiry sweep failed', {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    });
-  }, 60 * 60_000));
+    }, 60 * 60_000));
+  }
 
   // §5.5 Proposal-expiry worker — transitions schedule proposal cards
   // (create_appointment / create_booking / reschedule_appointment) past their
@@ -5524,24 +5685,26 @@ export function createApp(): AppWithLifecycle {
     service: 'proposal-expiry-worker',
     environment: process.env.NODE_ENV || 'development',
   });
-  registerInterval(setInterval(() => {
-    void runAsLeader(SWEEP_LOCK.proposalExpiry, async () => {
-      await runProposalExpirySweep({
-        proposalRepo,
-        auditRepo,
-        listTenantIds: async () => {
-          if (!pool) return [];
-          const r = await pool.query('SELECT id FROM tenants');
-          return r.rows.map((row: { id: string }) => row.id);
-        },
-        logger: proposalExpiryLogger,
+  if (shouldRunWorkers) {
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.proposalExpiry, async () => {
+        await runProposalExpirySweep({
+          proposalRepo,
+          auditRepo,
+          listTenantIds: async () => {
+            if (!pool) return [];
+            const r = await pool.query('SELECT id FROM tenants');
+            return r.rows.map((row: { id: string }) => row.id);
+          },
+          logger: proposalExpiryLogger,
+        });
+      }).catch((err) => {
+        proposalExpiryLogger.error('Proposal-expiry sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
       });
-    }).catch((err) => {
-      proposalExpiryLogger.error('Proposal-expiry sweep failed', {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    });
-  }, 60 * 60_000));
+    }, 60 * 60_000));
+  }
 
   // P7-026 PR a: Google Business reviews polling. Every 15 minutes
   // we sweep every tenant with an active `google_business`
@@ -5588,35 +5751,37 @@ export function createApp(): AppWithLifecycle {
       },
     );
   }
-  registerInterval(setInterval(() => {
-    if (
-      !googleReviewsReviewRepo ||
-      !googleReviewsPollStateRepo ||
-      !googleReviewsCredResolver
-    ) {
-      return;
-    }
-    void runAsLeader(SWEEP_LOCK.googleReviews, async () => {
-      await runGoogleReviewsSweep({
-        reviewRepo: googleReviewsReviewRepo,
-        pollStateRepo: googleReviewsPollStateRepo,
-        credentialResolver: googleReviewsCredResolver,
-        listTenantIds: async () => {
-          if (!pool) return [];
-          const r = await pool.query('SELECT id FROM tenants');
-          return r.rows.map((row: { id: string }) => row.id);
-        },
-        logger: googleReviewsLogger,
-        ...(googleReviewsProposalEmission
-          ? { proposalEmission: googleReviewsProposalEmission }
-          : {}),
+  if (shouldRunWorkers) {
+    registerInterval(setInterval(() => {
+      if (
+        !googleReviewsReviewRepo ||
+        !googleReviewsPollStateRepo ||
+        !googleReviewsCredResolver
+      ) {
+        return;
+      }
+      void runAsLeader(SWEEP_LOCK.googleReviews, async () => {
+        await runGoogleReviewsSweep({
+          reviewRepo: googleReviewsReviewRepo,
+          pollStateRepo: googleReviewsPollStateRepo,
+          credentialResolver: googleReviewsCredResolver,
+          listTenantIds: async () => {
+            if (!pool) return [];
+            const r = await pool.query('SELECT id FROM tenants');
+            return r.rows.map((row: { id: string }) => row.id);
+          },
+          logger: googleReviewsLogger,
+          ...(googleReviewsProposalEmission
+            ? { proposalEmission: googleReviewsProposalEmission }
+            : {}),
+        });
+      }).catch((err) => {
+        googleReviewsLogger.error('Google reviews sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
       });
-    }).catch((err) => {
-      googleReviewsLogger.error('Google reviews sweep failed', {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    });
-  }, 15 * 60_000));
+    }, 15 * 60_000));
+  }
 
   // Post-job thank-you SMS sweep (PRD §7.2). Same P0-009 sweep idiom as
   // google-reviews / overdue-invoice / appointment-reminder. The pool
@@ -5625,24 +5790,26 @@ export function createApp(): AppWithLifecycle {
     service: 'thank-you-sms-worker',
     environment: process.env.NODE_ENV || 'development',
   });
-  registerInterval(setInterval(() => {
-    void runAsLeader(SWEEP_LOCK.thankYouSms, async () => {
-      await runThankYouSmsSweep({
-        pool: pool ?? null,
-        jobRepo,
-        customerRepo,
-        settingsRepo,
-        dncRepo,
-        dispatcher: feedbackDispatcher,
-        auditRepo,
-        logger: thankYouSmsLogger,
+  if (shouldRunWorkers) {
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.thankYouSms, async () => {
+        await runThankYouSmsSweep({
+          pool: pool ?? null,
+          jobRepo,
+          customerRepo,
+          settingsRepo,
+          dncRepo,
+          dispatcher: feedbackDispatcher,
+          auditRepo,
+          logger: thankYouSmsLogger,
+        });
+      }).catch((err) => {
+        thankYouSmsLogger.error('Thank-you SMS sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
       });
-    }).catch((err) => {
-      thankYouSmsLogger.error('Thank-you SMS sweep failed', {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    });
-  }, 10 * 60_000));
+    }, 10 * 60_000));
+  }
 
   // Post-job review request (PRD US-345) — fires 24h after completion via the
   // same P0-009 leader-locked sweep idiom; reuses the feedback_send worker for
@@ -5651,20 +5818,22 @@ export function createApp(): AppWithLifecycle {
     service: 'review-request-worker',
     environment: process.env.NODE_ENV || 'development',
   });
-  registerInterval(setInterval(() => {
-    void runAsLeader(SWEEP_LOCK.reviewRequest, async () => {
-      await runReviewRequestSweep({
-        pool: pool ?? null,
-        jobRepo,
-        queue,
-        logger: reviewRequestLogger,
+  if (shouldRunWorkers) {
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.reviewRequest, async () => {
+        await runReviewRequestSweep({
+          pool: pool ?? null,
+          jobRepo,
+          queue,
+          logger: reviewRequestLogger,
+        });
+      }).catch((err) => {
+        reviewRequestLogger.error('Review-request sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
       });
-    }).catch((err) => {
-      reviewRequestLogger.error('Review-request sweep failed', {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    });
-  }, 10 * 60_000));
+    }, 10 * 60_000));
+  }
 
   // Onboarding lifecycle email sweeps (setup reminder + trial-ending). Same
   // P0-009 sweep idiom; the pool guard inside each no-ops when running
@@ -5674,40 +5843,44 @@ export function createApp(): AppWithLifecycle {
     service: 'lifecycle-email-sweep',
     environment: process.env.NODE_ENV || 'development',
   });
-  registerInterval(setInterval(() => {
-    void runAsLeader(SWEEP_LOCK.setupReminder, async () => {
-      await runSetupReminderSweep({
-        pool: pool ?? null,
-        settingsRepo,
-        delivery: messageDelivery,
-        auditRepo,
-        appBaseUrl: lifecycleEmailAppBaseUrl,
-        supportEmail: lifecycleEmailSupportEmail,
-        logger: lifecycleSweepLogger,
+  if (shouldRunWorkers) {
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.setupReminder, async () => {
+        await runSetupReminderSweep({
+          pool: pool ?? null,
+          settingsRepo,
+          delivery: messageDelivery,
+          auditRepo,
+          appBaseUrl: lifecycleEmailAppBaseUrl,
+          supportEmail: lifecycleEmailSupportEmail,
+          logger: lifecycleSweepLogger,
+        });
+      }).catch((err) => {
+        lifecycleSweepLogger.error('Setup-reminder sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
       });
-    }).catch((err) => {
-      lifecycleSweepLogger.error('Setup-reminder sweep failed', {
-        error: err instanceof Error ? err.message : String(err),
+    }, 60 * 60_000));
+  }
+  if (shouldRunWorkers) {
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.trialReminder, async () => {
+        await runTrialReminderSweep({
+          pool: pool ?? null,
+          settingsRepo,
+          delivery: messageDelivery,
+          auditRepo,
+          appBaseUrl: lifecycleEmailAppBaseUrl,
+          supportEmail: lifecycleEmailSupportEmail,
+          logger: lifecycleSweepLogger,
+        });
+      }).catch((err) => {
+        lifecycleSweepLogger.error('Trial-reminder sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
       });
-    });
-  }, 60 * 60_000));
-  registerInterval(setInterval(() => {
-    void runAsLeader(SWEEP_LOCK.trialReminder, async () => {
-      await runTrialReminderSweep({
-        pool: pool ?? null,
-        settingsRepo,
-        delivery: messageDelivery,
-        auditRepo,
-        appBaseUrl: lifecycleEmailAppBaseUrl,
-        supportEmail: lifecycleEmailSupportEmail,
-        logger: lifecycleSweepLogger,
-      });
-    }).catch((err) => {
-      lifecycleSweepLogger.error('Trial-reminder sweep failed', {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    });
-  }, 60 * 60_000));
+    }, 60 * 60_000));
+  }
 
   // U5 — the redundant P5-020 hourly digest worker was removed; the daily
   // digest (RV-063 runDailyDigestSweep, scheduled above on the dailyDigest
@@ -5877,9 +6050,8 @@ export function createApp(): AppWithLifecycle {
     createSupervisorReviewGate({
       gateway: llmGateway,
       aiRunRepo,
-      reviewsRepo: pool
-        ? new PgSupervisorReviewRepository(pool)
-        : new InMemorySupervisorReviewRepository(),
+      // WS6 — reuse the hoisted instance (the digest worker deps share it).
+      reviewsRepo: supervisorReviewsRepo,
       proposalRepo,
       supervisorModel: supervisorReviewModel,
       resolveMode: async () => supervisorReviewMode,
@@ -5929,7 +6101,7 @@ export function createApp(): AppWithLifecycle {
   // is passed through, so a tenant with no flag set is swept and only an
   // explicitly opted-out tenant is skipped. Stays advisory — never a status
   // change.
-  if (config.AI_PROVIDER_API_KEY) {
+  if (config.AI_PROVIDER_API_KEY && shouldRunWorkers) {
     registerInterval(setInterval(() => {
       void runAsLeader(SWEEP_LOCK.supervisorAnnotate, async () => {
         await runSupervisorAnnotationSweep({
@@ -6079,6 +6251,13 @@ export function createApp(): AppWithLifecycle {
   // index.ts's fatal-error handler — see AppWithLifecycle above.
   const appWithLifecycle = app as AppWithLifecycle;
   appWithLifecycle.gracefulDrain = shutdown;
+  // WS2 — snapshot the registered interval count for the process-role split.
+  // All registrations happen above, so this is final at return time.
+  Object.defineProperty(appWithLifecycle, 'backgroundIntervalCount', {
+    value: backgroundIntervals.length - observabilityIntervalCount,
+    writable: false,
+    enumerable: false,
+  });
 
   return appWithLifecycle;
 }

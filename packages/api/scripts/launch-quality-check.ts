@@ -64,10 +64,12 @@ check('H1.1', 'IdempotencyGuard required on ProposalExecutor (compile-checked)',
 });
 
 check('H1.2', 'proposal_executions partial unique index (migration 099)', () => {
-  const docSql = join(API, 'src/db/migrations/099_proposal_executions_idempotency_index.sql');
-  if (!existsSync(docSql)) return { pass: false, detail: `missing: ${docSql}` };
+  // The .sql files under src/db/migrations/ were documentation copies only
+  // (never executed at runtime — see docs/runbooks/migration-discipline.md)
+  // and were removed 2026-07; the MIGRATIONS map in schema.ts is the sole
+  // source of truth, so assert directly against it.
   const schema = readFileSync(join(API, 'src/db/schema.ts'), 'utf8');
-  return schema.includes('099_proposal_executions_idempotency_index') &&
+  return schema.includes("'099_proposal_executions_idempotency_index'") &&
     schema.includes('proposal_executions_tenant_idempotency_uniq');
 });
 

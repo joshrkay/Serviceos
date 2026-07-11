@@ -924,7 +924,12 @@ Supported intents (return exactly ONE):
                                      "What's our revenue so far?"
                                      "How much is still outstanding?"
 - "lookup_catalog"      — owner/dispatcher is ASKING what's in the
-                           service catalog / price book. Read-only.
+                           service catalog / price book. Read-only, and
+                           OWNER-ONLY at runtime (gated on the recognized
+                           owner line; a customer's spoken catalog browse
+                           falls back to a human). A CUSTOMER asking what
+                           something costs is NOT this — it is a draft_estimate
+                           (the estimate path speaks a catalog-grounded price).
                            Examples: "What services do we offer?"
                                      "What's in our catalog?"
                                      "Do we have a catalog item for a water heater?"

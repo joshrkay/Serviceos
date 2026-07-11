@@ -138,9 +138,9 @@ export function createRealLayerTwoGateway(
     tenantOverrides: {
       [SYSTEM_TENANT_ID]: {
         tiers: {
-          lightweight: { model, provider: provider.name },
-          standard: { model, provider: provider.name },
-          complex: { model, provider: provider.name },
+          lightweight: { model },
+          standard: { model },
+          complex: { model },
         },
         taskTierMapping: {
           'voice.agent': 'lightweight',

@@ -141,13 +141,6 @@ export interface AIProposal {
    */
   missingFields?: string[];
   /**
-   * Per-action-class flag — when true, this proposal can be approved
-   * by voice ("say approve or cancel"). When false (money / comms /
-   * irreversible), the UI shows a "tap to confirm" badge and
-   * suppresses any voice-approval listener.
-   */
-  voiceApprovable?: boolean;
-  /**
    * P2-035 (U2) — the backend's payload `_meta` confidence fragment,
    * carried through to the review card so it can render the 4-tier
    * confidence bar and the "what I wasn't sure about" markers. Absent

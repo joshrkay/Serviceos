@@ -15,6 +15,29 @@
  * been sent.
  */
 
+/**
+ * Who an outbound SMS is addressed to, for the single consent+DNC gate
+ * (see notifications/gated-message-delivery.ts).
+ *
+ *   - 'customer' — a message to an end customer. Subject to the TCPA
+ *     consent + tenant DNC gate; requires a `consent` context.
+ *   - 'owner'    — a message to the business owner / operator / on-call
+ *     tech (digests, one-tap approval links, emergency pages, dispatcher
+ *     patch/notify). Never blocked by customer consent or DNC.
+ *
+ * Required so every send site is forced to declare its audience — the
+ * gate fails closed on a customer send with no consent context.
+ */
+export type SmsRecipientClass = 'customer' | 'owner';
+
+/** Consent snapshot the gate needs to decide a customer send. */
+export interface SmsConsentContext {
+  /** The customer's stored sms_consent flag. Must be true to send in 'block' mode. */
+  smsConsent: boolean;
+  /** Optional customer id — used for the suppression audit entityId. */
+  customerId?: string;
+}
+
 export interface SmsMessage {
   to: string;
   body: string;
@@ -22,6 +45,16 @@ export interface SmsMessage {
   tenantId?: string;
   /** Optional idempotency key — provider should dedupe within ~24h. */
   idempotencyKey?: string;
+  /**
+   * REQUIRED audience tag. Drives the consent+DNC gate: 'owner' bypasses,
+   * 'customer' is gated. Every call site must set this explicitly.
+   */
+  recipientClass: SmsRecipientClass;
+  /**
+   * Consent context for a customer send. Absent on a 'customer' message
+   * makes the gate fail closed (missing_consent_context). Ignored for 'owner'.
+   */
+  consent?: SmsConsentContext;
 }
 
 export interface EmailMessage {

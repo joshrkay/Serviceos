@@ -167,4 +167,69 @@ describe('Postgres integration — supervisor_reviews (migration 242)', () => {
     expect(baseline.sampleSize).toBe(3);
     expect(baseline.avgCents).toBe(12000);
   });
+
+  describe('findForDay (WS6 digest reflection)', () => {
+    it('returns reviews in [from, to), newest first, capped at limit, scoped to the tenant (RLS)', async () => {
+      const t = await createTestTenant(pool);
+      const p1 = await seedProposal(pool, t.tenantId, t.userId);
+      const p2 = await seedProposal(pool, t.tenantId, t.userId);
+      const p3 = await seedProposal(pool, t.tenantId, t.userId);
+
+      // Three reviews on the target day (one flagged, one held, one pass) +
+      // one review outside the window (yesterday) that must not be counted.
+      await repo.create({
+        tenantId: t.tenantId,
+        proposalId: p1,
+        model: 'm',
+        verdict: 'pass',
+        critical: false,
+        checks: {},
+        flags: [],
+        shadow: true,
+      });
+      await repo.create({
+        tenantId: t.tenantId,
+        proposalId: p2,
+        model: 'm',
+        verdict: 'flag',
+        critical: false,
+        checks: {},
+        flags: ['30% above avg'],
+        shadow: true,
+      });
+      await repo.create({
+        tenantId: t.tenantId,
+        proposalId: p3,
+        model: 'm',
+        verdict: 'hold',
+        critical: true,
+        checks: {},
+        flags: ['unescalated medical mention'],
+        shadow: false,
+      });
+
+      // Push one review's created_at outside today's window (simulates
+      // "yesterday") — mirrors the pattern the confidence-marked proposal
+      // integration coverage uses for day-window pinning.
+      await pool.query(
+        `UPDATE supervisor_reviews SET created_at = now() - interval '2 days' WHERE proposal_id = $1`,
+        [p1],
+      );
+
+      const from = new Date(Date.now() - 6 * 60 * 60 * 1000); // 6h ago
+      const to = new Date(Date.now() + 6 * 60 * 60 * 1000); // 6h from now
+
+      const found = await repo.findForDay(t.tenantId, from, to);
+      expect(found.map((r) => r.proposalId).sort()).toEqual([p2, p3].sort());
+      expect(found.every((r) => r.tenantId === t.tenantId)).toBe(true);
+
+      const capped = await repo.findForDay(t.tenantId, from, to, 1);
+      expect(capped).toHaveLength(1);
+
+      // RLS isolation: another tenant never sees these rows.
+      const other = await createTestTenant(pool);
+      const leaked = await repo.findForDay(other.tenantId, from, to);
+      expect(leaked).toHaveLength(0);
+    });
+  });
 });

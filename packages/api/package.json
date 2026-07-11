@@ -9,6 +9,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:integration:rls": "RLS_RUNTIME_ROLE=true vitest run --config vitest.integration.config.ts",
     "test:rls": "vitest run --config vitest.integration.config.ts test/integration/rls-tenant-isolation.test.ts",
     "test:voice-fixtures": "vitest run test/ai/orchestration/intent-classifier.launch-fixtures.test.ts test/voice/launch-slots.test.ts",
     "test:coverage": "vitest run --coverage",

@@ -1,8 +1,10 @@
 /**
- * Unit tests for the feedback_send worker, including the SMS consent + DNC gate
- * (added to mirror sendCustomerMessage). The worker delivers the review-request
- * link only over SMS, so it must not send — or mint a request/token — without
- * consent or for a DNC-listed number.
+ * Unit tests for the feedback_send worker. WS1: the SMS consent + DNC gate is
+ * now enforced centrally by the GatedMessageDelivery wrapper the dispatcher
+ * sends through — NOT inline in the worker. The review-request link is
+ * delivered only over SMS, so a suppressed number receives nothing; the worker
+ * mints the request row first (needed for the link token) and treats a gate
+ * suppression as a terminal skip.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { v4 as uuidv4 } from 'uuid';
@@ -11,7 +13,14 @@ import { InMemoryCustomerRepository, Customer } from '../../src/customers/custom
 import { InMemoryJobRepository } from '../../src/jobs/job';
 import { InMemorySettingsRepository } from '../../src/settings/settings';
 import { InMemoryFeedbackRequestRepository } from '../../src/feedback/feedback-request';
-import { FeedbackDispatcher, FeedbackDispatchInput } from '../../src/feedback/dispatcher';
+import {
+  FeedbackDispatcher,
+  FeedbackDispatchInput,
+  MessageDeliveryFeedbackDispatcher,
+} from '../../src/feedback/dispatcher';
+import { InMemoryDeliveryProvider } from '../../src/notifications/delivery-provider';
+import { GatedMessageDelivery } from '../../src/notifications/gated-message-delivery';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemoryDncRepository, normalizePhone } from '../../src/compliance/dnc';
 import { createLogger } from '../../src/logging/logger';
 import { QueueMessage } from '../../src/queues/queue';
@@ -19,9 +28,16 @@ import { QueueMessage } from '../../src/queues/queue';
 const TENANT = uuidv4();
 const logger = createLogger({ service: 'test', environment: 'test', level: 'error' });
 
-class RecordingDispatcher implements FeedbackDispatcher {
+/**
+ * Wraps the real MessageDeliveryFeedbackDispatcher (over a gated in-memory
+ * provider) and records only sends that actually left the building — a gate
+ * suppression throws and is NOT recorded.
+ */
+class GatingRecordingDispatcher implements FeedbackDispatcher {
   public sent: FeedbackDispatchInput[] = [];
+  constructor(private readonly inner: FeedbackDispatcher) {}
   async send(input: FeedbackDispatchInput): Promise<void> {
+    await this.inner.send(input);
     this.sent.push(input);
   }
 }
@@ -89,8 +105,17 @@ async function setup(customerOverrides: Partial<Customer> = {}) {
   });
 
   const feedbackRequestRepo = new InMemoryFeedbackRequestRepository();
-  const dispatcher = new RecordingDispatcher();
   const dncRepo = new InMemoryDncRepository();
+  const rawProvider = new InMemoryDeliveryProvider();
+  const gated = new GatedMessageDelivery({
+    base: rawProvider,
+    dnc: dncRepo,
+    auditRepo: new InMemoryAuditRepository(),
+    enforcement: 'block',
+  });
+  const dispatcher = new GatingRecordingDispatcher(
+    new MessageDeliveryFeedbackDispatcher(gated),
+  );
 
   const worker = createFeedbackSendWorker({
     jobRepo,
@@ -98,11 +123,10 @@ async function setup(customerOverrides: Partial<Customer> = {}) {
     settingsRepo,
     feedbackRequestRepo,
     dispatcher,
-    dncRepo,
     publicBaseUrl: 'https://app.example.com/',
   });
 
-  return { worker, jobId, customerId, feedbackRequestRepo, dispatcher, dncRepo };
+  return { worker, jobId, customerId, feedbackRequestRepo, dispatcher, dncRepo, rawProvider };
 }
 
 describe('feedback_send worker — happy path', () => {
@@ -124,23 +148,32 @@ describe('feedback_send worker — happy path', () => {
   });
 });
 
-describe('feedback_send worker — consent + DNC gate', () => {
-  it('does not send (and mints no request) when smsConsent is false', async () => {
-    const { worker, jobId, feedbackRequestRepo, dispatcher } = await setup({ smsConsent: false });
+describe('feedback_send worker — central consent + DNC gate', () => {
+  // WS1 — the gate is now enforced by the delivery wrapper. The worker mints
+  // the request row (the SMS body needs its token) then sends; a suppressed
+  // send throws and is caught as a terminal skip. So: nothing leaves the
+  // building, and the minted request row is left behind (harmless dangling
+  // token, never texted).
+  it('does not send when smsConsent is false (request still minted)', async () => {
+    const { worker, jobId, feedbackRequestRepo, dispatcher, rawProvider } =
+      await setup({ smsConsent: false });
     await worker.handle(message({ tenantId: TENANT, jobId }), logger);
 
     expect(dispatcher.sent).toHaveLength(0);
-    expect(await feedbackRequestRepo.findByJob(TENANT, jobId)).toBeNull();
+    expect(rawProvider.sentSms).toHaveLength(0);
+    expect(await feedbackRequestRepo.findByJob(TENANT, jobId)).not.toBeNull();
   });
 
-  it('does not send when the phone is on the DNC list', async () => {
-    const { worker, jobId, feedbackRequestRepo, dispatcher, dncRepo } = await setup();
+  it('does not send when the phone is on the DNC list (request still minted)', async () => {
+    const { worker, jobId, feedbackRequestRepo, dispatcher, dncRepo, rawProvider } =
+      await setup();
     await dncRepo.addToDnc(TENANT, normalizePhone('+15559876543'), 'test');
 
     await worker.handle(message({ tenantId: TENANT, jobId }), logger);
 
     expect(dispatcher.sent).toHaveLength(0);
-    expect(await feedbackRequestRepo.findByJob(TENANT, jobId)).toBeNull();
+    expect(rawProvider.sentSms).toHaveLength(0);
+    expect(await feedbackRequestRepo.findByJob(TENANT, jobId)).not.toBeNull();
   });
 });
 

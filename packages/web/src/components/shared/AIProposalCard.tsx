@@ -384,15 +384,6 @@ export function AIProposalCard({ proposal, onApprove, onReject }: Props) {
               </div>
             )}
 
-            {/* Screen-tap badge for money / comms / irreversible proposals.
-                When voiceApprovable === false, we make it explicit that
-                voice "yes" is not sufficient here. */}
-            {proposal.voiceApprovable === false && (
-              <div className="mt-2 inline-flex items-center gap-1 rounded-full bg-warning/10 border border-warning/30 px-2.5 py-1">
-                <span className="text-xs text-warning">Tap to confirm on screen</span>
-              </div>
-            )}
-
             {/* Missing-fields prompt. Approve is blocked until the
                 operator fills each listed field via Edit. The task
                 handler populates this when it couldn't extract a
