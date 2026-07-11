@@ -116,4 +116,55 @@ describe('N-011 — brand-voice service', () => {
       rollbackBrandVoice({ actor, version: 9 }, repo),
     ).rejects.toBeInstanceOf(AppError);
   });
+
+  it('PR#663 concurrency: two overlapping edits at the same instant — exactly one wins the cool-down window, no stale-merge lost update', async () => {
+    // TOCTOU regression. The service used to read `current` (getState) OUTSIDE
+    // the lock, cool-down-check + merge, THEN bumpVersion (which took the lock).
+    // Two saves that both read the same pre-write `current` would BOTH pass the
+    // cool-down check and BOTH merge onto stale config — landing v1 AND v2, the
+    // second overwriting fields the first saved and bypassing the 15-min window.
+    //
+    // The fix moves read → cool-down → merge under the row lock (bumpVersion).
+    // The in-memory repo mirrors that: read+decide+write with no interleaving
+    // await, so two overlapping calls serialize (the second reads the first's
+    // write). This test would fail under the old read-before-lock path — both
+    // calls would resolve and a second version would exist.
+    const repo = new InMemoryBrandVoiceRepository();
+    const now = Date.parse('2026-07-10T12:00:00.000Z');
+
+    // Fresh tenant (version 0, no anchor): neither call is cool-down-blocked at
+    // read time, so both race to be the first write. Distinct patches so a
+    // stale merge would be observable as a lost field.
+    const [a, b] = await Promise.allSettled([
+      updateBrandVoice({ actor, patch: { register: 'formal', signoff: '— A' }, now }, repo),
+      updateBrandVoice({ actor, patch: { register: 'casual', persona_name: 'B-desk' }, now }, repo),
+    ]);
+
+    const fulfilled = [a, b].filter((r) => r.status === 'fulfilled');
+    const rejected = [a, b].filter((r) => r.status === 'rejected');
+
+    // Exactly one wins; the loser is rejected with a 423 (inside the window the
+    // winner just opened by anchoring updatedAt = now).
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0] as PromiseRejectedResult).reason).toMatchObject({
+      code: 'BRAND_VOICE_COOLDOWN',
+      statusCode: 423,
+    });
+
+    // Monotonic: only ONE version was ever minted (no stale second bump).
+    const state = await repo.getState('t1');
+    expect(state.version).toBe(1);
+    const versions = await repo.listVersions('t1');
+    expect(versions).toHaveLength(1);
+    expect(versions[0].version).toBe(1);
+
+    // The winner's fields are intact — the loser's stale merge never clobbered
+    // them. The persisted config equals exactly the winning call's result.
+    const winner = (fulfilled[0] as PromiseFulfilledResult<Awaited<ReturnType<typeof updateBrandVoice>>>)
+      .value;
+    expect(winner.state.version).toBe(1);
+    expect(state.config).toEqual(winner.state.config);
+    expect(state.config.register).toBe(winner.state.config.register);
+  });
 });

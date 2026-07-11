@@ -11,11 +11,14 @@
 import { Pool } from 'pg';
 import { PgBaseRepository } from '../../db/pg-base';
 import type { BrandVoiceSettings } from '../../settings/settings';
-import type {
-  BrandVoiceRepository,
-  BrandVoiceState,
-  BrandVoiceVersionRow,
-  BrandVoiceChangeReason,
+import {
+  resolveBumpDecision,
+  type BrandVoiceRepository,
+  type BrandVoiceState,
+  type BrandVoiceVersionRow,
+  type BrandVoiceChangeReason,
+  type BrandVoiceMutation,
+  type BrandVoiceBumpResult,
 } from './brand-voice';
 
 function toConfig(raw: unknown): BrandVoiceSettings {
@@ -93,37 +96,48 @@ export class PgBrandVoiceRepository
   async bumpVersion(
     tenantId: string,
     args: {
-      config: BrandVoiceSettings;
+      mutation: BrandVoiceMutation;
       changedBy: string | null;
-      changeReason: BrandVoiceChangeReason;
-      updatedAt: string;
+      now: number;
     },
-  ): Promise<BrandVoiceState> {
+  ): Promise<BrandVoiceBumpResult> {
     return this.withTenant(tenantId, async (client) => {
-      // Lock the settings row so a concurrent bump can't mint a duplicate
-      // (tenant_id, version) — the UNIQUE constraint would otherwise 23505.
+      // Lock the settings row and re-read the FULL current state under the
+      // lock. This both prevents a concurrent bump from minting a duplicate
+      // (tenant_id, version) — the UNIQUE constraint would otherwise 23505 —
+      // AND makes the cool-down check + merge atomic with the write, so two
+      // overlapping saves can't merge on stale config or double-bypass the
+      // cool-down (TOCTOU fix).
       const cur = await client.query(
-        `SELECT brand_voice_version FROM tenant_settings
-          WHERE tenant_id = $1 FOR UPDATE`,
+        `SELECT brand_voice, brand_voice_version, brand_voice_locked, brand_voice_updated_at
+           FROM tenant_settings WHERE tenant_id = $1 FOR UPDATE`,
         [tenantId],
       );
       if (cur.rowCount === 0) {
         throw new Error(`tenant_settings row missing for tenant ${tenantId}`);
       }
-      const currentVersion = (cur.rows[0].brand_voice_version as number | null) ?? 0;
-      const nextVersion = currentVersion + 1;
+      const row = cur.rows[0];
+      const current: BrandVoiceState = {
+        config: toConfig(row.brand_voice),
+        version: (row.brand_voice_version as number | null) ?? 0,
+        locked: (row.brand_voice_locked as boolean | null) ?? false,
+        updatedAt: toIso(row.brand_voice_updated_at),
+      };
+
+      // Cool-down precondition + merge, decided against the locked state.
+      // Throws BrandVoiceCooldownError (→ 423) inside the window.
+      const decision = resolveBumpDecision(current, args.mutation, args.now);
+      const nextVersion = current.version + 1;
+      // The persisted anchor uses the same `now` the cool-down decision used —
+      // no clock drift between the gate and the stored timestamp.
+      const updatedAtIso = new Date(args.now).toISOString();
+      const configJson = JSON.stringify(decision.nextConfig);
 
       await client.query(
         `INSERT INTO brand_voice_versions
            (tenant_id, version, snapshot, changed_by, change_reason)
          VALUES ($1, $2, $3::jsonb, $4, $5)`,
-        [
-          tenantId,
-          nextVersion,
-          JSON.stringify(args.config),
-          args.changedBy,
-          args.changeReason,
-        ],
+        [tenantId, nextVersion, configJson, args.changedBy, decision.changeReason],
       );
 
       const upd = await client.query(
@@ -134,14 +148,19 @@ export class PgBrandVoiceRepository
                 brand_voice_updated_at = $4::timestamptz
           WHERE tenant_id = $1
         RETURNING brand_voice_updated_at`,
-        [tenantId, JSON.stringify(args.config), nextVersion, args.updatedAt],
+        [tenantId, configJson, nextVersion, updatedAtIso],
       );
 
       return {
-        config: args.config,
-        version: nextVersion,
-        locked: true,
-        updatedAt: toIso(upd.rows[0].brand_voice_updated_at),
+        state: {
+          config: decision.nextConfig,
+          version: nextVersion,
+          locked: true,
+          updatedAt: toIso(upd.rows[0].brand_voice_updated_at),
+        },
+        fromVersion: decision.fromVersion,
+        changedFields: decision.changedFields,
+        changeReason: decision.changeReason,
       };
     });
   }

@@ -66,10 +66,94 @@ export interface BrandVoiceVersionRow {
 }
 
 /**
+ * How a bump derives the next config from the CURRENT (locked) config:
+ *   - `merge`  — an explicit edit: union/replace the six-field patch onto the
+ *     current config. `onboarding` requests the cool-down exemption, granted
+ *     only when the locked state is still the initial unconfigured write.
+ *   - `replace` — a rollback: overwrite with a resolved historical snapshot
+ *     (no merge, cool-down always enforced).
+ */
+export type BrandVoiceMutation =
+  | { kind: 'merge'; patch: BrandVoiceInput; onboarding: boolean }
+  | { kind: 'replace'; config: BrandVoiceSettings; changeReason: 'rollback' };
+
+/** The version-bump result the service needs to build its audit event. */
+export interface BrandVoiceBumpResult {
+  state: BrandVoiceState;
+  fromVersion: number;
+  changedFields: string[];
+  changeReason: BrandVoiceChangeReason;
+}
+
+/**
+ * Thrown by `bumpVersion` when the mutation lands inside the 15-minute
+ * cool-down. The decision is made UNDER the repo's row lock (re-read current
+ * state), so two concurrent saves can't both pass a stale pre-lock check. The
+ * service maps this to an HTTP 423 (keeping HTTP concerns out of the repo).
+ */
+export class BrandVoiceCooldownError extends Error {
+  constructor(readonly cooldownUntil: string | null) {
+    super('Brand voice is in cool-down');
+    this.name = 'BrandVoiceCooldownError';
+  }
+}
+
+/**
+ * Resolve the version-bump decision (cool-down precondition + merge + change
+ * diff) from the LOCKED current state. MUST be called by the repo while it
+ * holds the `FOR UPDATE` row lock so the read → cool-down check → merge is
+ * atomic with the write — otherwise concurrent saves merge on stale config and
+ * both bypass the cool-down (TOCTOU). Pure and side-effect free.
+ *
+ * @throws BrandVoiceCooldownError when the mutation is inside the cool-down.
+ * @throws Error when the merged config does not round-trip to a usable tone.
+ */
+export function resolveBumpDecision(
+  current: BrandVoiceState,
+  mutation: BrandVoiceMutation,
+  now: number,
+): { nextConfig: BrandVoiceSettings; changeReason: BrandVoiceChangeReason; changedFields: string[]; fromVersion: number } {
+  // The onboarding cool-down exemption applies ONLY to the genuine initial
+  // write (no version yet). Trusting the client `onboarding` flag alone would
+  // let any settings:update caller (or a stale onboarding client) skip the 423
+  // on a later edit and mislabel it 'onboarding' — so gate on the real,
+  // now-locked unconfigured state.
+  const isInitialWrite = current.version === 0;
+  const cooldownExempt =
+    mutation.kind === 'merge' && mutation.onboarding && isInitialWrite;
+
+  if (!cooldownExempt && isInCooldown(current.updatedAt, now)) {
+    throw new BrandVoiceCooldownError(cooldownUntil(current.updatedAt));
+  }
+
+  let nextConfig: BrandVoiceSettings;
+  let changeReason: BrandVoiceChangeReason;
+  if (mutation.kind === 'merge') {
+    nextConfig = mergeBrandVoice(current.config, mutation.patch);
+    changeReason = cooldownExempt ? 'onboarding' : 'web_edit';
+  } else {
+    nextConfig = mutation.config;
+    changeReason = mutation.changeReason;
+  }
+  revalidateRoundTrip(nextConfig);
+
+  return {
+    nextConfig,
+    changeReason,
+    changedFields: computeChangedFields(current.config, nextConfig),
+    fromVersion: current.version,
+  };
+}
+
+/**
  * Repository for the append-only history table + the tenant_settings
- * bookkeeping columns. `bumpVersion` is the single transactional write:
- * insert a new snapshot row (version = current + 1) and update the settings
- * blob + bookkeeping columns atomically.
+ * bookkeeping columns. `bumpVersion` is the single transactional write: under
+ * one `FOR UPDATE` lock it re-reads current state, applies the cool-down +
+ * merge precondition (`resolveBumpDecision`), inserts the next snapshot row
+ * (version = current + 1), and updates the settings blob + bookkeeping columns
+ * atomically. The service passes the mutation (patch/snapshot) + cool-down
+ * policy + the `now` used for both the cool-down decision AND the persisted
+ * anchor (no clock drift between the two).
  */
 export interface BrandVoiceRepository {
   getState(tenantId: string): Promise<BrandVoiceState>;
@@ -81,17 +165,11 @@ export interface BrandVoiceRepository {
   bumpVersion(
     tenantId: string,
     args: {
-      config: BrandVoiceSettings;
+      mutation: BrandVoiceMutation;
       changedBy: string | null;
-      changeReason: BrandVoiceChangeReason;
-      /**
-       * The cool-down anchor to persist (ISO). Passed by the service so the
-       * stored `brand_voice_updated_at` is exactly the instant the cool-down
-       * decision used — no clock drift between the gate and the anchor.
-       */
-      updatedAt: string;
+      now: number;
     },
-  ): Promise<BrandVoiceState>;
+  ): Promise<BrandVoiceBumpResult>;
 }
 
 /**

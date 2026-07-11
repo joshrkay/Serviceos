@@ -3,11 +3,13 @@
  * tests (mirrors the Pg impl's version-bump semantics).
  */
 import type { BrandVoiceSettings } from '../../settings/settings';
-import type {
-  BrandVoiceRepository,
-  BrandVoiceState,
-  BrandVoiceVersionRow,
-  BrandVoiceChangeReason,
+import {
+  resolveBumpDecision,
+  type BrandVoiceRepository,
+  type BrandVoiceState,
+  type BrandVoiceVersionRow,
+  type BrandVoiceMutation,
+  type BrandVoiceBumpResult,
 } from './brand-voice';
 
 export class InMemoryBrandVoiceRepository implements BrandVoiceRepository {
@@ -39,17 +41,28 @@ export class InMemoryBrandVoiceRepository implements BrandVoiceRepository {
   async bumpVersion(
     tenantId: string,
     args: {
-      config: BrandVoiceSettings;
+      mutation: BrandVoiceMutation;
       changedBy: string | null;
-      changeReason: BrandVoiceChangeReason;
-      updatedAt: string;
+      now: number;
     },
-  ): Promise<BrandVoiceState> {
-    const current = this.state.get(tenantId);
-    const nextVersion = (current?.version ?? 0) + 1;
-    const updatedAt = args.updatedAt;
+  ): Promise<BrandVoiceBumpResult> {
+    // Read current → cool-down check + merge → write, with NO interleaving
+    // `await`, so under Node's single-threaded model two overlapping
+    // bumpVersion calls run to completion one at a time — the in-memory
+    // equivalent of the Pg repo's `FOR UPDATE` serialization. This is what
+    // makes the concurrency guarantee testable without a database.
+    const current: BrandVoiceState = this.state.get(tenantId) ?? {
+      config: {},
+      version: 0,
+      locked: false,
+      updatedAt: null,
+    };
+
+    const decision = resolveBumpDecision(current, args.mutation, args.now);
+    const nextVersion = current.version + 1;
+    const updatedAt = new Date(args.now).toISOString();
     const next: BrandVoiceState = {
-      config: { ...args.config },
+      config: { ...decision.nextConfig },
       version: nextVersion,
       locked: true,
       updatedAt,
@@ -58,12 +71,17 @@ export class InMemoryBrandVoiceRepository implements BrandVoiceRepository {
     const rows = this.history.get(tenantId) ?? [];
     rows.push({
       version: nextVersion,
-      snapshot: { ...args.config },
+      snapshot: { ...decision.nextConfig },
       changedBy: args.changedBy,
-      changeReason: args.changeReason,
+      changeReason: decision.changeReason,
       createdAt: updatedAt,
     });
     this.history.set(tenantId, rows);
-    return { ...next, config: { ...next.config } };
+    return {
+      state: { ...next, config: { ...next.config } },
+      fromVersion: decision.fromVersion,
+      changedFields: decision.changedFields,
+      changeReason: decision.changeReason,
+    };
   }
 }

@@ -1636,11 +1636,20 @@ async function processChain(
   // N-004 (P2-037) — supervisor review pass on the chain head before dispatch
   // (same chokepoint as the single-action path). Fail-open; a hold suppresses
   // the chain's owner SMS below.
+  //
+  // The gate attaches N-002 supervisor markers to the head payload (and, on a
+  // hold, forces draft). It persists those writes, but our in-memory `head`
+  // predates them — so we adopt the gate's returned proposal for the
+  // render/route below (parity with the single-action path), otherwise the
+  // chain SMS would omit the freshly-attached supervisor warning.
   let supervisorHold = false;
+  let reviewedHead = head;
   const reviewGate = getSupervisorReviewGate();
   if (reviewGate) {
     try {
-      supervisorHold = (await reviewGate.review({ proposal: head })).hold;
+      const res = await reviewGate.review({ proposal: head });
+      supervisorHold = res.hold;
+      if (res.proposal) reviewedHead = res.proposal;
     } catch (err) {
       log.warn('voice-action-router: chain supervisor review gate failed, dispatching', {
         chainId,
@@ -1654,16 +1663,19 @@ async function processChain(
     deps.unsupervisedRouting &&
     !supervisorPresent &&
     !supervisorHold &&
-    (head.status === 'ready_for_review' || head.status === 'draft')
+    (reviewedHead.status === 'ready_for_review' || reviewedHead.status === 'draft')
   ) {
     const ur = deps.unsupervisedRouting;
     const tenantId = base.tenantId;
     try {
       const routing = await ur.resolveRouting?.(tenantId);
       const ownerPhone = await ur.resolveOwnerPhone?.(tenantId);
-      const ordered = built.map((b) => b.proposal);
+      // Head slot carries the gate-reviewed proposal (N-002 markers); dependents
+      // stay as built. renderChainSms + the blocking/token predicates below all
+      // read from this ordered list, so the head's supervisor marker propagates.
+      const ordered = built.map((b, i) => (i === 0 ? reviewedHead : b.proposal));
       const blockingMember = ordered.find((p) => confidenceMetaBlocksAutoApprove(p.payload));
-      const headNotCapture = actionClassForProposalType(head.proposalType) !== 'capture';
+      const headNotCapture = actionClassForProposalType(reviewedHead.proposalType) !== 'capture';
       await routeUnsupervisedProposal(
         {
           auditRepo: ur.auditRepo,
@@ -1674,17 +1686,17 @@ async function processChain(
           ...(ur.recordSmsEvent
             ? {
                 onSmsSent: async ({ body, kind }: { body: string; kind: OutboundAnchorKind }) =>
-                  ur.recordSmsEvent!({ tenantId, proposalId: head.id, body, kind }),
+                  ur.recordSmsEvent!({ tenantId, proposalId: reviewedHead.id, body, kind }),
               }
             : {}),
         },
         {
           tenantId,
-          proposalId: head.id,
+          proposalId: reviewedHead.id,
           ...(routing ? { routing } : {}),
           channel: 'other',
           ...(ownerPhone ? { ownerPhone } : {}),
-          summaryText: head.summary,
+          summaryText: reviewedHead.summary,
           renderSmsBody: (approveUrl: string) =>
             renderChainSms(
               ordered.map((p) => ({
@@ -1696,7 +1708,7 @@ async function processChain(
             ),
           // Blocking-member payload (if any) drives the token-suppression /
           // review_required_rendered anchoring; otherwise the head's.
-          payload: (blockingMember ?? head).payload,
+          payload: (blockingMember ?? reviewedHead).payload,
           // Non-capture head: never Y-approvable — review form, no token.
           ...(headNotCapture ? { suppressApproveLink: true } : {}),
         },

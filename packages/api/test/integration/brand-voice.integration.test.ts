@@ -164,6 +164,52 @@ describe('Postgres integration — Brand-Voice Configurator (N-011)', () => {
     expect(row.rows[0].changed_by).toBe(clerkUserId);
   });
 
+  it('PR#663 concurrency: two overlapping edits serialize on the FOR UPDATE lock — exactly one wins, no stale-merge lost update', async () => {
+    // Real-DB proof for the TOCTOU fix. The cool-down check + merge now happen
+    // UNDER the bumpVersion row lock, so a second overlapping save blocks on
+    // SELECT ... FOR UPDATE until the first commits, then re-reads the fresh
+    // (v1, anchored) state and is rejected with 423 — it can neither merge on
+    // stale config nor bypass the window. Under the old read-before-lock path
+    // both writes would land (v1 AND v2) and the second would clobber the
+    // first's field.
+    const tenant = await createTestTenant(pool);
+    await ensureTenantSettings(tenant.tenantId, settingsRepo);
+    const actor = { tenantId: tenant.tenantId, userId: tenant.userId, role: 'owner' };
+    const now = Date.parse('2026-07-10T12:00:00.000Z');
+
+    // Fresh tenant (version 0, no anchor). Distinct patches so a stale merge
+    // would be observable as a lost field. Both fire concurrently.
+    const [a, b] = await Promise.allSettled([
+      updateBrandVoice({ actor, patch: { register: 'formal', signoff: '— A' }, now }, brandVoiceRepo),
+      updateBrandVoice({ actor, patch: { register: 'casual', persona_name: 'B-desk' }, now }, brandVoiceRepo),
+    ]);
+
+    const fulfilled = [a, b].filter((r) => r.status === 'fulfilled');
+    const rejected = [a, b].filter((r) => r.status === 'rejected');
+
+    // Exactly one wins the window the other just opened.
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0] as PromiseRejectedResult).reason).toMatchObject({
+      code: 'BRAND_VOICE_COOLDOWN',
+      statusCode: 423,
+    });
+
+    // Monotonic + append-only: exactly ONE version row exists (no stale bump).
+    const state = await brandVoiceRepo.getState(tenant.tenantId);
+    expect(state.version).toBe(1);
+    const versions = await brandVoiceRepo.listVersions(tenant.tenantId);
+    expect(versions.map((v) => v.version)).toEqual([1]);
+
+    // The persisted config is exactly the winner's — the loser's stale merge
+    // never clobbered a field.
+    const winner = (
+      fulfilled[0] as PromiseFulfilledResult<Awaited<ReturnType<typeof updateBrandVoice>>>
+    ).value;
+    expect(state.config).toEqual(winner.state.config);
+    expect(versions[0].snapshot).toEqual(winner.state.config);
+  });
+
   it('rollback re-persists an older snapshot as a new bump (history never mutated)', async () => {
     const tenant = await createTestTenant(pool);
     await ensureTenantSettings(tenant.tenantId, settingsRepo);

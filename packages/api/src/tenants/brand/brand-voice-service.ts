@@ -12,10 +12,7 @@ import { createAuditEvent, type AuditEvent } from '../../audit/audit';
 import type { BrandVoiceSettings } from '../../settings/settings';
 import {
   cooldownUntil,
-  isInCooldown,
-  mergeBrandVoice,
-  computeChangedFields,
-  revalidateRoundTrip,
+  BrandVoiceCooldownError,
   type BrandVoiceInput,
   type BrandVoiceRepository,
   type BrandVoiceState,
@@ -52,39 +49,28 @@ export async function updateBrandVoice(
   const { actor, patch, onboarding = false } = args;
   const now = args.now ?? Date.now();
 
-  const current = await repo.getState(actor.tenantId);
-
-  // The onboarding cool-down exemption applies ONLY to the genuine initial
-  // write (no version yet). Trusting the client `onboarding` flag alone would
-  // let any settings:update caller (or a stale onboarding client) pass
-  // `onboarding: true` to skip the 423 on a later edit and mislabel it as
-  // 'onboarding' — so gate the exemption on the real unconfigured state.
-  const isInitialWrite = current.version === 0;
-  const cooldownExempt = onboarding && isInitialWrite;
-
-  // Cool-down gate — only the initial onboarding write is exempt.
-  if (!cooldownExempt && isInCooldown(current.updatedAt, now)) {
-    const until = cooldownUntil(current.updatedAt);
-    throw new AppError(
-      'BRAND_VOICE_COOLDOWN',
-      'Brand voice was changed recently. Try again after the cool-down.',
-      423,
-      { cooldownUntil: until },
-    );
+  // The whole read → cool-down check → merge → write happens atomically under
+  // the repo's row lock (bumpVersion), so two concurrent saves can't merge on
+  // stale config or both bypass the cool-down. The cool-down decision throws
+  // BrandVoiceCooldownError from under the lock; map it to the HTTP 423 here.
+  let bump;
+  try {
+    bump = await repo.bumpVersion(actor.tenantId, {
+      mutation: { kind: 'merge', patch, onboarding },
+      changedBy: actor.userId,
+      now,
+    });
+  } catch (err) {
+    if (err instanceof BrandVoiceCooldownError) {
+      throw new AppError(
+        'BRAND_VOICE_COOLDOWN',
+        'Brand voice was changed recently. Try again after the cool-down.',
+        423,
+        { cooldownUntil: err.cooldownUntil },
+      );
+    }
+    throw err;
   }
-
-  const nextConfig = mergeBrandVoice(current.config, patch);
-  revalidateRoundTrip(nextConfig);
-
-  const changedFields = computeChangedFields(current.config, nextConfig);
-  const changeReason = cooldownExempt ? 'onboarding' : 'web_edit';
-
-  const state = await repo.bumpVersion(actor.tenantId, {
-    config: nextConfig,
-    changedBy: actor.userId,
-    changeReason,
-    updatedAt: new Date(now).toISOString(),
-  });
 
   const audit = createAuditEvent({
     tenantId: actor.tenantId,
@@ -94,14 +80,14 @@ export async function updateBrandVoice(
     entityType: 'brand_voice',
     entityId: actor.tenantId,
     metadata: {
-      fromVersion: current.version,
-      toVersion: state.version,
-      changeReason,
-      changedFields,
+      fromVersion: bump.fromVersion,
+      toVersion: bump.state.version,
+      changeReason: bump.changeReason,
+      changedFields: bump.changedFields,
     },
   });
 
-  return { state, cooldownUntil: cooldownUntil(state.updatedAt), audit };
+  return { state: bump.state, cooldownUntil: cooldownUntil(bump.state.updatedAt), audit };
 }
 
 /**
@@ -118,16 +104,9 @@ export async function rollbackBrandVoice(
   const { actor, version } = args;
   const now = args.now ?? Date.now();
 
-  const current = await repo.getState(actor.tenantId);
-  if (isInCooldown(current.updatedAt, now)) {
-    throw new AppError(
-      'BRAND_VOICE_COOLDOWN',
-      'Brand voice was changed recently. Try again after the cool-down.',
-      423,
-      { cooldownUntil: cooldownUntil(current.updatedAt) },
-    );
-  }
-
+  // History is immutable, so resolving the target snapshot outside the lock is
+  // race-free; the cool-down check moves under the lock (bumpVersion) with the
+  // write so a concurrent rollback/edit can't slip past a stale check.
   const snapshot = await repo.getVersionSnapshot(actor.tenantId, version);
   if (!snapshot) {
     throw new AppError(
@@ -139,14 +118,25 @@ export async function rollbackBrandVoice(
   }
 
   const config: BrandVoiceSettings = { ...snapshot };
-  const changedFields = computeChangedFields(current.config, config);
 
-  const state = await repo.bumpVersion(actor.tenantId, {
-    config,
-    changedBy: actor.userId,
-    changeReason: 'rollback',
-    updatedAt: new Date(now).toISOString(),
-  });
+  let bump;
+  try {
+    bump = await repo.bumpVersion(actor.tenantId, {
+      mutation: { kind: 'replace', config, changeReason: 'rollback' },
+      changedBy: actor.userId,
+      now,
+    });
+  } catch (err) {
+    if (err instanceof BrandVoiceCooldownError) {
+      throw new AppError(
+        'BRAND_VOICE_COOLDOWN',
+        'Brand voice was changed recently. Try again after the cool-down.',
+        423,
+        { cooldownUntil: err.cooldownUntil },
+      );
+    }
+    throw err;
+  }
 
   const audit = createAuditEvent({
     tenantId: actor.tenantId,
@@ -156,13 +146,13 @@ export async function rollbackBrandVoice(
     entityType: 'brand_voice',
     entityId: actor.tenantId,
     metadata: {
-      fromVersion: current.version,
-      toVersion: state.version,
+      fromVersion: bump.fromVersion,
+      toVersion: bump.state.version,
       changeReason: 'rollback',
       rolledBackTo: version,
-      changedFields,
+      changedFields: bump.changedFields,
     },
   });
 
-  return { state, cooldownUntil: cooldownUntil(state.updatedAt), audit };
+  return { state: bump.state, cooldownUntil: cooldownUntil(bump.state.updatedAt), audit };
 }
