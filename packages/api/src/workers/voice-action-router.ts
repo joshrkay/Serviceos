@@ -1430,6 +1430,11 @@ async function processSegment(
   // UB-D / D-015 — audit every lane evaluation (pass or fail) so the trail
   // records why a booking did or did not take the lane. Best-effort: an
   // audit hiccup never blocks the proposal.
+  // WS11 — deliberately NOT moved into a transaction with the proposal write:
+  // this is evaluation telemetry on the live voice path, where audit must
+  // never block the call. The lane's actual STATE CHANGE (the auto-approved
+  // booking executing) flows through ProposalExecutor, which writes its
+  // execution audit atomically with the state change (executeAudited).
   const laneEvaluation = autonomousLaneEvaluationFor(annotated);
   if (laneEvaluation && deps.auditRepo) {
     try {

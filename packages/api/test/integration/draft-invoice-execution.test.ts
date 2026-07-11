@@ -59,7 +59,7 @@ describe('Postgres integration — voice draft_invoice → approve → execute �
     const proposalRepo = new InMemoryProposalRepository();
     const executionRepo = new InMemoryProposalExecutionRepository();
     const guard = new IdempotencyGuard(executionRepo, proposalRepo);
-    const executor = new ProposalExecutor(registry, proposalRepo, guard);
+    const executor = new ProposalExecutor(registry, proposalRepo, guard, auditRepo);
 
     const input: CreateProposalInput = {
       tenantId: tenant.tenantId,

@@ -1968,6 +1968,9 @@ export function createApp(): AppWithLifecycle {
     executionHandlers,
     proposalRepo,
     proposalIdempotencyGuard,
+    // WS11 — execution outcomes write proposal.executed/execution_failed
+    // audit events atomically with the state change (executeAudited).
+    auditRepo,
     {
       executionRepo: proposalExecutionRepo,
       onExecuted: async (event) => {

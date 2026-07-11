@@ -8,6 +8,7 @@ import { PgProposalExecutionRepository } from '../../src/proposals/pg-proposal-e
 import { ProposalExecutor } from '../../src/proposals/execution/executor';
 import { IdempotencyGuard } from '../../src/proposals/execution/idempotency';
 import { PgIdempotencyLockProvider } from '../../src/proposals/execution/idempotency-lock';
+import { PgAuditRepository } from '../../src/audit/pg-audit';
 import {
   ExecutionContext,
   ExecutionHandler,
@@ -215,9 +216,13 @@ describe('ProposalExecutor — DATA-31 transactional atomicity', () => {
       proposalRepo,
       new PgIdempotencyLockProvider(pool),
     );
-    const executor = new ProposalExecutor(handlers, proposalRepo, guard, {
-      executionRepo,
-    });
+    const executor = new ProposalExecutor(
+      handlers,
+      proposalRepo,
+      guard,
+      new PgAuditRepository(pool),
+      { executionRepo },
+    );
 
     const proposal = await makeApprovedProposal(
       proposalRepo,
@@ -258,9 +263,13 @@ describe('ProposalExecutor — DATA-31 transactional atomicity', () => {
       proposalRepo, // guard reads via the real repo
       new PgIdempotencyLockProvider(pool),
     );
-    const executor = new ProposalExecutor(handlers, flakyProposalRepo, guard, {
-      executionRepo,
-    });
+    const executor = new ProposalExecutor(
+      handlers,
+      flakyProposalRepo,
+      guard,
+      new PgAuditRepository(pool),
+      { executionRepo },
+    );
 
     const proposal = await makeApprovedProposal(
       proposalRepo,
@@ -319,9 +328,13 @@ describe('ProposalExecutor — DATA-31 transactional atomicity', () => {
       proposalRepo,
       new PgIdempotencyLockProvider(pool),
     );
-    const executor = new ProposalExecutor(handlers, proposalRepo, guard, {
-      executionRepo,
-    });
+    const executor = new ProposalExecutor(
+      handlers,
+      proposalRepo,
+      guard,
+      new PgAuditRepository(pool),
+      { executionRepo },
+    );
 
     const proposal = await makeApprovedProposal(
       proposalRepo,
@@ -386,9 +399,13 @@ describe('ProposalExecutor — external-I/O handler routing (PR #666)', () => {
       proposalRepo,
       new PgIdempotencyLockProvider(pool),
     );
-    const executor = new ProposalExecutor(handlers, proposalRepo, guard, {
-      executionRepo,
-    });
+    const executor = new ProposalExecutor(
+      handlers,
+      proposalRepo,
+      guard,
+      new PgAuditRepository(pool),
+      { executionRepo },
+    );
 
     const proposal = await makeApprovedProposal(
       proposalRepo,
@@ -432,9 +449,13 @@ describe('ProposalExecutor — external-I/O handler routing (PR #666)', () => {
       proposalRepo,
       new PgIdempotencyLockProvider(pool),
     );
-    const executor = new ProposalExecutor(handlers, flakyProposalRepo, guard, {
-      executionRepo,
-    });
+    const executor = new ProposalExecutor(
+      handlers,
+      flakyProposalRepo,
+      guard,
+      new PgAuditRepository(pool),
+      { executionRepo },
+    );
 
     const proposal = await makeApprovedProposal(
       proposalRepo,

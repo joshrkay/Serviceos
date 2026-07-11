@@ -82,7 +82,7 @@ describe('Integration — voice create_customer via ProposalExecutor', () => {
       ['create_customer', new CreateCustomerVoiceExecutionHandler(customerRepo, auditRepo)],
     ]);
     const guard = new IdempotencyGuard(executionRepo, proposalRepo);
-    const executor = new ProposalExecutor(handlers, proposalRepo, guard);
+    const executor = new ProposalExecutor(handlers, proposalRepo, guard, auditRepo);
 
     const proposal = makeApprovedProposal();
     await proposalRepo.create(proposal);

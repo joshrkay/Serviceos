@@ -1,4 +1,3 @@
-import type { PoolClient } from 'pg';
 import { Proposal, ProposalRepository } from '../proposal';
 import { transitionProposal, isInUndoWindow, UNDO_WINDOW_MS } from '../lifecycle';
 import { ExecutionHandler, ExecutionContext, ExecutionResult } from './handlers';
@@ -8,8 +7,8 @@ import { AppError } from '../../shared/errors';
 import { ProposalExecutionRepository } from '../proposal-execution';
 import { resolveChainReferences } from './chain-resolution';
 import { createLogger } from '../../logging/logger';
-import { tenantContextStore } from '../../middleware/tenant-context';
-import { applyTenantContext } from '../../db/rls-runtime-role';
+import { executeAudited } from '../../commands/command-runner';
+import { AuditEventInput, AuditRepository } from '../../audit/audit';
 
 const logger = createLogger({
   service: 'proposals.execution.executor',
@@ -66,6 +65,15 @@ export class ProposalExecutor {
     private readonly handlers: Map<ProposalType, ExecutionHandler>,
     private readonly proposalRepo: ProposalRepository,
     idempotency: IdempotencyGuard,
+    /**
+     * WS11 — REQUIRED. Every execution outcome writes a
+     * `proposal.executed` / `proposal.execution_failed` audit event in the
+     * SAME transaction as the state change (via executeAudited), so an
+     * agent-driven state change cannot commit without its audit row. Required
+     * at the constructor (not optional) so the invariant is enforced at
+     * compile time for every executor wiring, tests included.
+     */
+    private readonly auditRepo: AuditRepository,
     options: {
       executionRepo?: ProposalExecutionRepository;
       onExecuted?: (event: ProposalExecutionEvent) => Promise<void> | void;
@@ -148,14 +156,27 @@ export class ProposalExecutor {
         );
       }
       // parent_failed → cascade-fail this dependent. No infinite retry.
+      // WS11: this is an execution outcome, so it gets the same
+      // `proposal.execution_failed` audit event as a handler failure. No lock
+      // connection exists yet at this point, so executeAudited runs
+      // untransacted (client: null) — the audit is still mandatory and
+      // unswallowed.
       const failed = transitionProposal(proposal, 'execution_failed', context.executedBy);
-      await this.proposalRepo.updateStatus(failed.tenantId, failed.id, failed.status, {
-        rejectionDetails: `Blocked by failed chain dependency '${chainResolution.parentId}'`,
-      });
-      return {
-        proposal: failed,
-        result: { success: false, error: 'chain_dependency_failed' },
+      const cascadeResult: ExecutionResult = {
+        success: false,
+        error: 'chain_dependency_failed',
       };
+      await executeAudited({
+        client: null,
+        tenantId: failed.tenantId,
+        auditRepo: this.auditRepo,
+        stateChange: () =>
+          this.proposalRepo.updateStatus(failed.tenantId, failed.id, failed.status, {
+            rejectionDetails: `Blocked by failed chain dependency '${chainResolution.parentId}'`,
+          }),
+        audit: () => executionAuditInput(failed, context, cascadeResult),
+      });
+      return { proposal: failed, result: cascadeResult };
     }
 
     // Idempotency gate (§11 H1). Keys default to `proposal-run:{tenant}:{id}`
@@ -174,9 +195,10 @@ export class ProposalExecutor {
     // landed each call on its own connection). A crash after the mutation
     // committed but before updateStatus('executed') stranded the proposal at
     // 'approved' — and, for handlers that don't self-guard on target state, a
-    // retry could re-run the mutation. We now run all three inside ONE
-    // transaction on the advisory lock's OWN connection, so they commit
-    // all-or-nothing while the lock is still held, and only unlock after COMMIT.
+    // retry could re-run the mutation. We now run all three — plus the WS11
+    // execution-outcome audit event — inside ONE transaction on the advisory
+    // lock's OWN connection, so they commit all-or-nothing while the lock is
+    // still held, and only unlock after COMMIT.
     const outcome = await this.idempotency.checkAndExecute(keyedProposal, async (lockClient) => {
       // Shared closure: given the handler's result, compute the post-execution
       // proposal view, write the idempotency marker (on success), and transition
@@ -246,47 +268,52 @@ export class ProposalExecutor {
 
       if (lockClient && !performsExternalIo) {
         // Path A — DB-only handler with a locked connection: UNCHANGED DATA-31
-        // behavior. Run handler.execute() + recordExecution + updateStatus all
-        // inside ONE tenant-scoped transaction on the advisory lock's own
-        // connection, so they commit all-or-nothing while the lock is held. If
-        // anything throws before COMMIT the whole unit rolls back: the proposal
-        // stays 'approved', the mutation is invisible, and no idempotency marker
-        // survives, so a retry re-executes cleanly.
-        return this.runInProposalTransaction(
-          lockClient,
-          keyedProposal.tenantId,
-          async () => {
+        // behavior, now with the WS11 audit event in the SAME unit. Run
+        // handler.execute() + recordExecution + updateStatus + the
+        // execution-outcome audit insert all inside ONE tenant-scoped
+        // transaction on the advisory lock's own connection, so they commit
+        // all-or-nothing while the lock is held. If anything throws before
+        // COMMIT — including the audit insert — the whole unit rolls back: the
+        // proposal stays 'approved', the mutation is invisible, and no
+        // idempotency marker survives, so a retry re-executes cleanly.
+        return executeAudited({
+          client: lockClient,
+          tenantId: keyedProposal.tenantId,
+          auditRepo: this.auditRepo,
+          stateChange: async () => {
             const handlerResult = await handler.execute(keyedProposal, context);
             await recordAndTransition(handlerResult);
             return handlerResult;
           },
-        );
+          // txUpdatedProposal is set by recordAndTransition before the audit
+          // callback runs, so the event records the post-transition status.
+          audit: (handlerResult) =>
+            executionAuditInput(txUpdatedProposal!, context, handlerResult),
+        });
       }
 
-      if (lockClient && performsExternalIo) {
-        // Path B — external-I/O handler with a locked connection: run
-        // handler.execute() OUTSIDE the executor transaction. Its repo writes go
-        // through the normal withTenantTransaction path (own connection/tx per
-        // call), so they COMMIT and release their row locks BEFORE and around the
-        // external send — the connection-exhaustion + long-lived-lock risk the PR
-        // finding flagged is gone. THEN wrap ONLY the idempotency record + status
-        // transition in a small transaction on the advisory lock's own
-        // connection (still held, so idempotency serialization is preserved).
-        const handlerResult = await handler.execute(keyedProposal, context);
-        await this.runInProposalTransaction(
-          lockClient,
-          keyedProposal.tenantId,
-          () => recordAndTransition(handlerResult),
-        );
-        return handlerResult;
-      }
-
+      // Path B — external-I/O handler with a locked connection: run
+      // handler.execute() OUTSIDE the executor transaction. Its repo writes go
+      // through the normal withTenantTransaction path (own connection/tx per
+      // call), so they COMMIT and release their row locks BEFORE and around the
+      // external send — the connection-exhaustion + long-lived-lock risk the PR
+      // finding flagged is gone. THEN wrap the idempotency record + status
+      // transition + audit event in a small transaction on the advisory lock's
+      // own connection (still held, so idempotency serialization is preserved).
+      //
       // Path C — no locked connection (no-op lock / in-memory repos,
-      // single-threaded tests): run everything directly. There is no real
-      // transaction to open, so DB-only and external-I/O handlers behave the same
-      // here (as they did before this change).
+      // single-threaded tests): identical shape, but executeAudited receives an
+      // undefined client so there is no real transaction to open — everything
+      // runs directly (as it did before this change), with the audit write
+      // still mandatory and unswallowed.
       const handlerResult = await handler.execute(keyedProposal, context);
-      await recordAndTransition(handlerResult);
+      await executeAudited({
+        client: lockClient,
+        tenantId: keyedProposal.tenantId,
+        auditRepo: this.auditRepo,
+        stateChange: () => recordAndTransition(handlerResult),
+        audit: () => executionAuditInput(txUpdatedProposal!, context, handlerResult),
+      });
       return handlerResult;
     });
     const result: ExecutionResult = outcome.result;
@@ -388,41 +415,37 @@ export class ProposalExecutor {
 
     return { proposal: updatedProposal, result, alreadyExecuted };
   }
+}
 
-  /**
-   * DATA-31: run `fn` inside a single tenant-scoped transaction on the supplied
-   * connection — the advisory lock's own client (see IdempotencyLockProvider).
-   * Mirrors the db/ helpers (`withTenantSession` /
-   * `applyTenantContext({transactional:true})`) but on a caller-owned client
-   * that it does NOT release: the lock provider owns the connection lifecycle
-   * (unlock + release in its `finally`). Sets the tenant GUC with `SET LOCAL`
-   * (auto-reset at COMMIT/ROLLBACK — PgBouncer transaction-pooling safe) and
-   * runs `fn` inside `tenantContextStore`, so every PgBaseRepository call made
-   * by the handler, the execution repo, and the proposal repo reuses THIS
-   * client and joins the one transaction. COMMIT on success, ROLLBACK on any
-   * throw — the ROLLBACK undoes the domain mutation, the idempotency record,
-   * and the status write together.
-   */
-  private async runInProposalTransaction<T>(
-    client: PoolClient,
-    tenantId: string,
-    fn: () => Promise<T>,
-  ): Promise<T> {
-    await client.query('BEGIN');
-    try {
-      await applyTenantContext(client, tenantId, { transactional: true });
-      const result = await tenantContextStore.run({ client, tenantId }, fn);
-      await client.query('COMMIT');
-      return result;
-    } catch (err) {
-      try {
-        await client.query('ROLLBACK');
-      } catch {
-        // Best-effort: surface the original error. If the connection is broken
-        // the lock provider destroys it on unlock failure, which releases the
-        // advisory lock and the aborted transaction server-side.
-      }
-      throw err;
-    }
-  }
+/**
+ * WS11 — the executor's execution-outcome audit event. Fills the terminal gap
+ * in the proposal lifecycle trail: actions.ts writes created/approved/
+ * rejected/edited/undone via logProposalEvent, but nothing wrote
+ * `proposal.executed` / `proposal.execution_failed`. Shape mirrors
+ * logProposalEvent's conventions exactly (entityType 'proposal', metadata base
+ * of proposalType + post-transition status, extras spread last); actorRole
+ * 'system' because the background sweep — not a human — performs execution.
+ */
+function executionAuditInput(
+  updated: Proposal,
+  context: ExecutionContext,
+  result: ExecutionResult,
+): AuditEventInput {
+  return {
+    tenantId: updated.tenantId,
+    actorId: context.executedBy,
+    actorRole: 'system',
+    eventType: result.success ? 'proposal.executed' : 'proposal.execution_failed',
+    entityType: 'proposal',
+    entityId: updated.id,
+    metadata: {
+      proposalType: updated.proposalType,
+      status: updated.status,
+      ...(result.success
+        ? result.resultEntityId
+          ? { resultEntityId: result.resultEntityId }
+          : {}
+        : { executionError: result.error ?? 'unknown execution failure' }),
+    },
+  };
 }
