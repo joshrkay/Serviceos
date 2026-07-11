@@ -50,7 +50,11 @@ export type CallingAgentEvent =
   | { type: 'entity_ambiguous'; candidates: Array<{ id: string; name: string; score: number }> }
   | { type: 'entity_not_found' }
   | { type: 'confidence_low'; threshold: number; score: number }
-  | { type: 'proposal_queued'; proposalId: string }
+  // WS5 — `utterance` carries the grounded quote read-back computed by the
+  // voice-turn processor (handleCreateProposal) so the FSM speaks a catalog-
+  // grounded price acknowledgment for a drafted estimate instead of the fixed
+  // confirmation line. Absent for every non-estimate proposal (fixed line).
+  | { type: 'proposal_queued'; proposalId: string; utterance?: string }
   | { type: 'cost_cap_approached'; remainingPct: number }
   | { type: 'cost_cap_exceeded' }
   | { type: 'abuse_detected'; category: string }

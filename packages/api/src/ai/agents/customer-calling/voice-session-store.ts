@@ -222,6 +222,14 @@ export interface VoiceSession {
    * turn's `VoiceApprovalTurnResult.sessionState`.
    */
   voiceApprovalState?: import('../../tasks/proposal-approval-task').VoiceApprovalSessionState;
+  /**
+   * WS5 — in-flight tenant-catalog load, kicked off once at session
+   * establishment (both voice transports) so in-call estimate grounding has
+   * the active catalog in hand synchronously at quote time. Managed by
+   * `ai/voice-turn/session-catalog.ts`; the FSM never reads it. Resolves to
+   * `[]` on a read failure (never rejects). GC'd with the session.
+   */
+  catalogPreload?: Promise<import('../../../catalog/catalog-item').CatalogItem[]>;
   /** Set after `endSession()` to short-circuit further input. */
   ended: boolean;
   /**

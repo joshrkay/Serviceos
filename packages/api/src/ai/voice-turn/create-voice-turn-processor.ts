@@ -130,6 +130,16 @@ import { findOrCreateCustomerByPhone } from '../skills/find-or-create-customer';
 import { logInboundCallOnCustomerTimeline } from '../../telephony/inbound-call-log';
 import type { EstimateRepository } from '../../estimates/estimate';
 import type { LookupEventService } from '../../lookup-events/lookup-event-service';
+import type { CatalogItemRepository } from '../../catalog/catalog-item';
+import {
+  groundLineItemPricing,
+  lineItemConfidenceSignals,
+  UNCATALOGUED_CONFIDENCE_CAP,
+} from '../resolution/catalog-resolver';
+import { getConfidenceLevel } from '../guardrails/confidence';
+import type { ProposalConfidenceMeta } from '../../proposals/contracts';
+import { preloadSessionCatalog, resolveSessionCatalog } from './session-catalog';
+import { buildQuoteReadback } from './quote-readback';
 import type { LLMGateway } from '../gateway/gateway';
 import type {
   VoiceRepository,
@@ -258,6 +268,15 @@ export interface VoiceTurnProcessorDeps {
    */
   conversationRepo?: ConversationRepository;
   estimateRepo?: EstimateRepository;
+  /**
+   * WS5 — tenant catalog repo for in-call grounded quoting. When wired, a
+   * drafted estimate's spoken line items are resolved against the tenant's
+   * active catalog synchronously (via a per-session preload) so the caller
+   * hears a catalog-grounded price — never an LLM-invented number — and the
+   * stored proposal payload carries the grounded pricing. Optional: without
+   * it, estimates fall back to the generic confirmation (no price spoken).
+   */
+  catalogRepo?: CatalogItemRepository;
   lookupEvents?: LookupEventService;
   credentialResolver?: TenantCredentialResolver;
   verticalPromptResolver?: (tenantId: string) => Promise<string | undefined>;
@@ -552,6 +571,97 @@ export function createVoiceTurnProcessor(
     }
   }
 
+  /**
+   * WS5 — synchronous in-call estimate grounding. Builds line items from the
+   * classifier's spoken descriptions, resolves them against the preloaded
+   * tenant catalog, and returns the grounded lineItems + confidence `_meta` +
+   * the spoken quote read-back. Returns `undefined` when the intent carried no
+   * line descriptions, so the generic (non-grounded) proposal path runs
+   * unchanged and the caller hears the fixed confirmation.
+   *
+   * Reuses the EstimateTaskHandler's exact grounding + confidence helpers
+   * (`groundLineItemPricing`, `lineItemConfidenceSignals`,
+   * `UNCATALOGUED_CONFIDENCE_CAP`) so the voice and operator paths agree.
+   */
+  async function groundVoiceEstimate(
+    session: VoiceSession,
+    entities: Record<string, unknown>,
+    fx: SideEffect,
+  ): Promise<
+    | {
+        lineItems: Array<Record<string, unknown>>;
+        meta: ProposalConfidenceMeta;
+        missingFields: string[];
+        catalogResolution?: Record<
+          number,
+          Array<{ id: string; name: string; unitPriceCents: number; score: number }>
+        >;
+        confidenceScore?: number;
+        utterance: string;
+      }
+    | undefined
+  > {
+    const descriptions = Array.isArray(entities.lineItemDescriptions)
+      ? entities.lineItemDescriptions.filter(
+          (d): d is string => typeof d === 'string' && d.trim().length > 0,
+        )
+      : [];
+    if (descriptions.length === 0) return undefined;
+    // Voice never carries an LLM price — descriptions only; the catalog sets
+    // every price. Quantity defaults to 1 (the spoken path has no quantity).
+    const rawLines = descriptions.map((description) => ({ description, quantity: 1 }));
+
+    // Establishment kicks the preload off; this is the defensive net for
+    // paths/tests that didn't. Then resolve within a tight budget so the
+    // caller's turn is never blocked — a timeout/unwired repo → null →
+    // treated as "catalog unavailable" (no number spoken, never fabricated).
+    preloadSessionCatalog(session, deps.catalogRepo);
+    const catalog = await resolveSessionCatalog(session);
+    const catalogAvailable = catalog !== null;
+
+    const outcome = await groundLineItemPricing(
+      rawLines,
+      'unitPrice',
+      catalog ? () => Promise.resolve(catalog) : null,
+    );
+    const lineItems = outcome.lineItems;
+
+    // Same money-correctness gate the EstimateTaskHandler applies: an
+    // uncatalogued (or unconsulted-catalog) price caps confidence and forces
+    // overallConfidence 'low' so it always reaches a human; per-line
+    // pricingSource → `_meta` markers for the operator draft.
+    const baseConfidence =
+      typeof fx.payload.confidence === 'number' ? fx.payload.confidence : undefined;
+    let confidenceScore = baseConfidence;
+    if (outcome.anyUncatalogued && typeof confidenceScore === 'number') {
+      confidenceScore = Math.min(confidenceScore, UNCATALOGUED_CONFIDENCE_CAP);
+    }
+    const signals = lineItemConfidenceSignals(lineItems, 'unitPrice');
+    const groundedClean =
+      catalogAvailable && !outcome.anyUncatalogued && outcome.missingFields.length === 0;
+    const meta: ProposalConfidenceMeta = {
+      overallConfidence:
+        groundedClean && typeof confidenceScore === 'number'
+          ? getConfidenceLevel(confidenceScore)
+          : 'low',
+      ...(Object.keys(signals.fieldConfidence).length > 0
+        ? { fieldConfidence: signals.fieldConfidence }
+        : {}),
+      ...(signals.markers.length > 0 ? { markers: signals.markers } : {}),
+    };
+
+    const utterance = buildQuoteReadback({ lineItems, catalogAvailable });
+
+    return {
+      lineItems,
+      meta,
+      missingFields: outcome.missingFields,
+      ...(outcome.catalogResolution ? { catalogResolution: outcome.catalogResolution } : {}),
+      ...(confidenceScore !== undefined ? { confidenceScore } : {}),
+      utterance,
+    };
+  }
+
   async function handleCreateProposal(
     session: VoiceSession,
     fx: SideEffect,
@@ -710,12 +820,28 @@ export function createVoiceTurnProcessor(
         return;
       }
 
+      // WS5 — in-call grounded quoting for a drafted estimate. Grounds the
+      // spoken line items against the preloaded tenant catalog so the stored
+      // payload carries catalog-authoritative pricing (the operator draft
+      // matches what was said) and the caller hears a grounded read-back.
+      // Undefined for every other intent / an estimate with no line items —
+      // the generic path then runs unchanged.
+      const estimateQuote =
+        intent === 'draft_estimate'
+          ? await groundVoiceEstimate(session, entities, fx)
+          : undefined;
+
       const proposal = buildProposal({
         tenantId,
         proposalType: intentToProposalType(intent),
         payload: {
           intent,
           entities,
+          // WS5 — grounded line items + confidence meta ride alongside the raw
+          // entities so the operator-side draft shows exactly what was quoted.
+          ...(estimateQuote
+            ? { lineItems: estimateQuote.lineItems, _meta: estimateQuote.meta }
+            : {}),
           sessionId: session.id,
           callSid: session.callSid,
         },
@@ -724,7 +850,23 @@ export function createVoiceTurnProcessor(
           source: 'calling-agent',
           channel: 'telephony',
           sessionId: session.id,
+          // Ambiguous-line candidates for the review UI (same shape the
+          // EstimateTaskHandler stores) — only present when a line was
+          // ambiguous.
+          ...(estimateQuote?.catalogResolution
+            ? { catalogResolution: estimateQuote.catalogResolution }
+            : {}),
         },
+        // WS5 — thread the (uncatalogued-capped) confidence and force 'draft'
+        // for an ambiguous line, matching the EstimateTaskHandler. The voice
+        // path never sets sourceTrustTier, so the proposal is born 'draft'
+        // regardless; these keep the operator-side signals consistent.
+        ...(estimateQuote && estimateQuote.confidenceScore !== undefined
+          ? { confidenceScore: estimateQuote.confidenceScore }
+          : {}),
+        ...(estimateQuote && estimateQuote.missingFields.length > 0
+          ? { missingFields: estimateQuote.missingFields }
+          : {}),
         // proposals.ai_run_id has an FK to ai_runs(id). Use the REAL run id
         // threaded from the classify call (gateway → classifyIntent →
         // intent_classified event → this side-effect payload); never
@@ -745,6 +887,9 @@ export function createVoiceTurnProcessor(
       const followUps = session.machine.dispatch({
         type: 'proposal_queued',
         proposalId: stored.id,
+        // WS5 — the grounded quote read-back the caller hears. Absent for
+        // non-estimate proposals → the FSM speaks the fixed confirmation.
+        ...(estimateQuote ? { utterance: estimateQuote.utterance } : {}),
       });
       sideEffectsSink.push(...followUps);
     } catch (err) {

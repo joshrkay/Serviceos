@@ -869,7 +869,14 @@ function transitionProposalDraft(
         auditLog(context, 'proposal_draft', 'closing', 'proposal_queued', {
           proposalId: event.proposalId,
         }),
-        ttsPlay("Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?"),
+        // WS5 — a drafted estimate carries a catalog-grounded quote read-back
+        // (event.utterance), computed synchronously by the voice-turn
+        // processor. Never an LLM-invented number, and no number at all for
+        // uncatalogued work. Every other proposal type keeps the fixed line.
+        ttsPlay(
+          event.utterance ??
+            "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?",
+        ),
       ],
       updatedContext: { ...context, pendingProposalId: event.proposalId },
     };
