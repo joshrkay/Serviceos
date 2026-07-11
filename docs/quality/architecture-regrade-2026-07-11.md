@@ -22,6 +22,11 @@ Evidence commits (all on `main` or this branch):
 | WS8 | `d020335` | Web/worker as the defined deploy topology |
 | WS9 | `bc29696` | D-015 platform kill switch + autonomous-booking digest visibility |
 | WS10 | `eed44ea` | Learning-loop reflection — "instructions applied" digest section |
+| WS11 | `c51b56e` | Structural audit — execution state changes cannot commit without their audit row |
+| WS12 | `45ddf3a` | One consent model — cross-channel revocation on the consent_events ledger (D-017) |
+| WS13 | `83caa13` | Integration suite runs under the RLS runtime role by default in CI |
+| WS14 | `25f428c` | Dedicated 'voice' process role + railway.voice.toml + provisioning VOICE_PUBLIC_URL |
+| WS15 | `105ebe4` | Platform SLO monitor + drain-abandonment alarm — alerting a human |
 
 ---
 
@@ -147,7 +152,7 @@ correction lessons, and `ai_run` persistence were already wired.
 Tests: `digest-service.test.ts` describe blocks per section,
 `DigestPage.test.tsx`, integration column-pinning for the new day queries.
 
-## 7. Safety rails for autonomy — was D+, now **B+**
+## 7. Safety rails for autonomy — was D+, now **A−**
 
 Criticism: *"RLS is dormant at runtime, the TCPA/DNC consent gate has zero
 call sites, and D-015 already carved an auto-approve exception."*
@@ -187,11 +192,35 @@ call sites, and D-015 already carved an auto-approve exception."*
   the nightly digest "auto-booked" line, so the lane cannot operate
   invisibly. D-015 amendment recorded in `docs/decisions.md`.
 
-Remaining below A: D-015 remains an intentional exception to
-proposal-first; RLS depends on migrations having run with a CREATEROLE
-principal (self-degrading otherwise, surfaced by the boot probe).
+**A-grade additions (2026-07-11, second wave):**
 
-## 8. Operational resilience for live calls — was C−, now **B+**
+- **Structural audit, not conventional** (WS11 `c51b56e`): the proposal
+  execution engine — the agent-action chokepoint — now writes its
+  `proposal.executed`/`proposal.execution_failed` audit event in the SAME
+  transaction as the state change (`commands/command-runner.ts
+  executeAudited`, audit descriptor required at compile time; `auditRepo` a
+  required executor constructor param). Proven on real Postgres: a failed
+  audit insert rolls back the entire execution unit. Before this, the
+  executor emitted zero audit events and audit writes could land on a
+  separate connection.
+- **One consent model** (WS12 `45ddf3a`, D-017): both outbound gates derive
+  from the `consent_events` ledger via one resolver. Contact-kind
+  revocations (`sms`/`marketing`) suppress BOTH channels from either
+  direction; grants never cross (an SMS START no longer manufactures TCPA
+  voice consent — the rollup leak is closed); `recording` objections stay
+  voice-scoped. 23-case matrix + real-Postgres cross-channel integration
+  proof.
+- **RLS proven on every PR** (WS13 `83caa13`): `npm run test:integration`
+  (what PR CI runs) now sets `RLS_RUNTIME_ROLE=true` — the full 696-test
+  integration suite executes under the least-privilege `rls_app_runtime`
+  role on every merge; verified green both ways against real Postgres.
+
+Remaining below a flat A: D-015 remains an intentional (bounded, killable,
+owner-visible) exception to proposal-first; the structural-audit wrapper
+covers the execution chokepoint — route-layer mutations still audit by
+convention.
+
+## 8. Operational resilience for live calls — was C−, now **A−** (code/config complete; final grade contingent on the operator cutover)
 
 Criticism: *"One process runs HTTP + ~30 worker loops + voice sessions;
 every deploy can drop a live call."*
@@ -216,9 +245,35 @@ every deploy can drop a live call."*
 - Multi-replica correctness prerequisites are boot-enforced (ARCH-01:
   `NUM_REPLICAS>1` without `REDIS_URL` fails boot).
 
-Remaining below A: no live-call migration between replicas (drain is the
-mitigation); the split still requires the operator to create the second
-Railway service.
+**A-grade additions (2026-07-11, second wave):**
+
+- **Dedicated voice service** (WS14 `25f428c`): `PROCESS_ROLE=voice` — full
+  HTTP + media-streams WS, zero worker loops — with `railway.voice.toml`
+  (`overlapSeconds=35`, no migrations). Twilio number webhooks point at the
+  voice domain, so web/worker deploys never touch live calls; the voice
+  service deploys rarely and drains. The onboarding provisioning worker now
+  targets `VOICE_PUBLIC_URL` for new numbers' voice webhooks, so the
+  property holds for post-cutover tenants automatically. Runtime-verified:
+  voice-role boot serves signed `/voice` → `<Connect><Stream/>` with the WS
+  handshake accepted and zero background intervals.
+- **SLOs with teeth** (WS15 `105ebe4`): a leader-locked monitor evaluates
+  call completion rate (real `voice_sessions` outcomes), queue staleness,
+  and sweep lag every 5 minutes and ALERTS A HUMAN — Sentry error event
+  always, operator SMS when `ALERT_SMS_TO` is set, per-rule cooldown. Drain
+  windows that expire with live calls now emit a durable drain-abandonment
+  alarm (counter + Sentry with callSids). Turn-latency P95 is deliberately
+  not claimed: no production histogram exists and the runbook records where
+  it belongs. `docs/runbooks/slo-alerts.md`.
+- **"Actually run the split"** — everything scriptable is in the repo
+  (three service configs, role gates, alarms); the irreducible remainder is
+  ~15 minutes of Railway dashboard work captured step-by-step in
+  `docs/runbooks/deploy-topology-cutover.md` (`2e09211`). **This layer's A
+  is contingent on the operator executing that cutover** — until then
+  production runs the (fully supported) single-service shape.
+
+Remaining below a flat A: no live-call handoff between replicas (drain +
+rare voice deploys are the mitigation); turn-latency SLO pending a safe
+measurement seam.
 
 ## 9. Regression protection for voice — was A−, now **A−** (held)
 
@@ -241,8 +296,8 @@ harness's corpus green.
 | In-call intelligence | C | **B+** |
 | Approval loop | C+ | **B+** |
 | Learning loop | B | **B+/A−** |
-| Safety rails | D+ | **B+** |
-| Operational resilience | C− | **B+** |
+| Safety rails | D+ | **A−** |
+| Operational resilience | C− | **A−** (operator cutover pending) |
 | Voice regression protection | A− | A− |
 
 All nine layers at B+ or better.
