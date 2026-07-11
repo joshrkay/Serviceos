@@ -18,6 +18,7 @@ import {
   readToneFromSettings,
   type BrandVoiceTone,
 } from '../ai/brand-voice/composer';
+import { resolveRegister } from '../ai/brand-voice/prompts';
 import {
   type BrandVoice,
   type BrandVoiceLoader,
@@ -31,10 +32,14 @@ import {
 export function renderToneDescription(tone: BrandVoiceTone | null): string | null {
   if (!tone) return null;
   const parts: string[] = [];
-  if (tone.formality) parts.push(`Speak in a ${tone.formality} register.`);
+  // N-011 — register is authoritative; legacy `formality` maps forward.
+  const register = resolveRegister(tone);
+  if (register) parts.push(`Speak in a ${register} register.`);
+  if (tone.persona_name) parts.push(`Write as "${tone.persona_name}".`);
   if (tone.pronoun) {
     parts.push(`Refer to the business as "${tone.pronoun === 'i' ? 'I' : 'we'}".`);
   }
+  if (tone.signoff) parts.push(`Sign off with: "${tone.signoff}".`);
   if (tone.vibe_words && tone.vibe_words.length > 0) {
     parts.push(`Evoke these qualities: ${tone.vibe_words.join(', ')}.`);
   }
@@ -55,7 +60,12 @@ export class SettingsBrandVoiceLoader implements BrandVoiceLoader {
       if (!tone) return NEUTRAL_BRAND_VOICE;
       return {
         tone: renderToneDescription(tone),
-        signoff: tone.business_name ? `— ${tone.business_name}` : null,
+        // N-011 — first-class signoff wins; fall back to the business name.
+        signoff: tone.signoff
+          ? tone.signoff
+          : tone.business_name
+            ? `— ${tone.business_name}`
+            : null,
       };
     } catch {
       // Never let a settings blip break review-response drafting.

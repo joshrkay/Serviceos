@@ -45,7 +45,6 @@
  * same voice-event emissions.
  */
 
-import { v4 as uuidv4 } from 'uuid';
 import type { Pool } from 'pg';
 import { appendAgentTts } from './transcript-append';
 import { classifyIntent, isVoiceApprovalIntent, isVoiceEditIntent } from '../orchestration/intent-classifier';
@@ -421,6 +420,19 @@ export interface VoiceTurnProcessor {
       tenantId: string;
     },
   ): Promise<SideEffect[]>;
+  /**
+   * ask_caller handler shared by BOTH voice transports. Resolves (or creates)
+   * the unknown caller to a real customer keyed by phone, logs the call on
+   * their timeline, and dispatches `caller_known` so the FSM advances to
+   * intent capture (falls back to `unknown_caller` without a repo/phone or on
+   * failure). Returns the dispatched side effects; the CALLER executes them.
+   * Ported to the Gather adapter so PSTN callers advance out of ask_caller
+   * instead of looping forever on a bare reprompt.
+   */
+  handleAskCaller(
+    session: VoiceSession,
+    tenantId: string,
+  ): Promise<SideEffect[]>;
 }
 
 export function createVoiceTurnProcessor(
@@ -678,7 +690,15 @@ export function createVoiceTurnProcessor(
             channel: 'telephony',
             sessionId: session.id,
           },
-          aiRunId: uuidv4(),
+          // proposals.ai_run_id has an FK to ai_runs(id). Use the REAL run id
+          // threaded from the classify call (surfaced via the gateway →
+          // classifyIntent → intent_classified event → side-effect payload);
+          // never fabricate one — a random uuid violates the FK and the
+          // swallowed insert error silently drops the proposal on Postgres.
+          // Left null when no run was persisted for this turn.
+          ...(typeof fx.payload.aiRunId === 'string' && fx.payload.aiRunId
+            ? { aiRunId: fx.payload.aiRunId }
+            : {}),
           createdBy:
             typeof fx.payload.customerId === 'string'
               ? fx.payload.customerId
@@ -705,7 +725,15 @@ export function createVoiceTurnProcessor(
           channel: 'telephony',
           sessionId: session.id,
         },
-        aiRunId: uuidv4(),
+        // proposals.ai_run_id has an FK to ai_runs(id). Use the REAL run id
+        // threaded from the classify call (gateway → classifyIntent →
+        // intent_classified event → this side-effect payload); never
+        // fabricate one — a random uuid violates the FK and the swallowed
+        // insert error silently drops the proposal on Postgres. Left null
+        // when no run was persisted for this turn.
+        ...(typeof fx.payload.aiRunId === 'string' && fx.payload.aiRunId
+          ? { aiRunId: fx.payload.aiRunId }
+          : {}),
         createdBy:
           typeof fx.payload.customerId === 'string'
             ? fx.payload.customerId
@@ -950,7 +978,9 @@ export function createVoiceTurnProcessor(
           sessionId: session.id,
           escalationReason: reason,
         },
-        aiRunId: uuidv4(),
+        // This callback proposal is generated internally (rotation empty/
+        // exhausted) with no associated ai_runs row, so ai_run_id stays null —
+        // never fabricate a uuid (FK to ai_runs(id) would reject it).
         createdBy: deps.systemActorId ?? 'calling-agent',
         ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
       });
@@ -1360,6 +1390,74 @@ export function createVoiceTurnProcessor(
     return applyVoiceApprovalResult(session, result);
   }
 
+  /**
+   * ask_caller handler shared by BOTH voice adapters (media-streams
+   * `speechTurn` and the PSTN/Gather adapter's `_handleGatherLocked`). An
+   * unknown caller who has just given their info is resolved (or created) to a
+   * real CUSTOMER keyed by their phone so the booking that follows attaches to
+   * a customer record; the call is logged on that customer's timeline and the
+   * FSM advances via `caller_known` so intent capture can proceed. Without a
+   * customerRepo + phone (or on failure) we fall back to the FSM's existing
+   * `unknown_caller` retry/escalate path.
+   *
+   * Returns the dispatched side effects; the CALLER is responsible for
+   * executing them (each adapter runs its own executeSideEffects/finalize).
+   * Extracted (RV) so the Gather path advances out of ask_caller instead of
+   * looping forever on a bare reprompt (the previous Gather adapter had no
+   * ask_caller handler — every turn fell to confidence_low, which ask_caller
+   * ignores).
+   */
+  async function handleAskCaller(
+    session: VoiceSession,
+    tenantId: string,
+  ): Promise<SideEffect[]> {
+    const out: SideEffect[] = [];
+    const callerPhone = deps.callerPhoneResolver?.(session) ?? session.callerPhone;
+    if (deps.customerRepo && callerPhone) {
+      try {
+        const resolved = await findOrCreateCustomerByPhone({
+          tenantId,
+          fromPhone: callerPhone,
+          customerRepo: deps.customerRepo,
+          ...(deps.auditRepo ? { auditRepo: deps.auditRepo } : {}),
+          systemActorId: deps.systemActorId ?? 'system:inbound-call',
+        });
+        session.customerId = resolved.customerId;
+        if (deps.conversationRepo) {
+          try {
+            await logInboundCallOnCustomerTimeline({
+              conversationRepo: deps.conversationRepo,
+              tenantId,
+              customerId: resolved.customerId,
+              fromPhone: callerPhone,
+              ...(session.callSid ? { callSid: session.callSid } : {}),
+              actorId: deps.systemActorId ?? 'system:inbound-call',
+              ...(deps.auditRepo ? { auditRepo: deps.auditRepo } : {}),
+            });
+          } catch (err) {
+            logger.error('ask_caller: inbound call timeline log failed', {
+              error: err instanceof Error ? err.message : String(err),
+              sessionId: session.id,
+            });
+          }
+        }
+        out.push(
+          ...session.machine.dispatch({ type: 'caller_known', customerId: resolved.customerId }),
+        );
+      } catch (err) {
+        logger.error('ask_caller: find-or-create customer failed', {
+          error: err instanceof Error ? err.message : String(err),
+          sessionId: session.id,
+        });
+        out.push(...session.machine.dispatch({ type: 'unknown_caller' }));
+      }
+    } else {
+      // No customer repo / phone wired — keep the existing retry/escalate path.
+      out.push(...session.machine.dispatch({ type: 'unknown_caller' }));
+    }
+    return out;
+  }
+
   // ─── Speech turn (formerly processCallerUtterance) ──────────────────
 
   const speechTurn: SpeechTurnHandler = async ({
@@ -1419,54 +1517,7 @@ export function createVoiceTurnProcessor(
     }
 
     if (currentState === 'ask_caller') {
-      // Unknown caller just gave their info. Resolve (or create) a real CUSTOMER
-      // keyed by their phone so the booking that follows attaches to a customer
-      // record, log the call on that customer's timeline, and advance the FSM
-      // (caller_known) so the agent can take the booking. Without a customerRepo
-      // + phone we fall back to the FSM's existing retry/escalate path.
-      const callerPhone = deps.callerPhoneResolver?.(session) ?? session.callerPhone;
-      if (deps.customerRepo && callerPhone) {
-        try {
-          const resolved = await findOrCreateCustomerByPhone({
-            tenantId,
-            fromPhone: callerPhone,
-            customerRepo: deps.customerRepo,
-            ...(deps.auditRepo ? { auditRepo: deps.auditRepo } : {}),
-            systemActorId: deps.systemActorId ?? 'system:inbound-call',
-          });
-          session.customerId = resolved.customerId;
-          if (deps.conversationRepo) {
-            try {
-              await logInboundCallOnCustomerTimeline({
-                conversationRepo: deps.conversationRepo,
-                tenantId,
-                customerId: resolved.customerId,
-                fromPhone: callerPhone,
-                ...(session.callSid ? { callSid: session.callSid } : {}),
-                actorId: deps.systemActorId ?? 'system:inbound-call',
-                ...(deps.auditRepo ? { auditRepo: deps.auditRepo } : {}),
-              });
-            } catch (err) {
-              logger.error('ask_caller: inbound call timeline log failed', {
-                error: err instanceof Error ? err.message : String(err),
-                sessionId: session.id,
-              });
-            }
-          }
-          sideEffectsAll.push(
-            ...session.machine.dispatch({ type: 'caller_known', customerId: resolved.customerId }),
-          );
-        } catch (err) {
-          logger.error('ask_caller: find-or-create customer failed', {
-            error: err instanceof Error ? err.message : String(err),
-            sessionId: session.id,
-          });
-          sideEffectsAll.push(...session.machine.dispatch({ type: 'unknown_caller' }));
-        }
-      } else {
-        // No customer repo / phone wired — keep the existing retry/escalate path.
-        sideEffectsAll.push(...session.machine.dispatch({ type: 'unknown_caller' }));
-      }
+      sideEffectsAll.push(...(await handleAskCaller(session, tenantId)));
       await executeSideEffects(session, sideEffectsAll, tenantId);
       return sideEffectsAll;
     }
@@ -1557,6 +1608,9 @@ export function createVoiceTurnProcessor(
               unknown
             >,
             confidence: classification.confidence,
+            // Thread the classify call's REAL ai_runs id so a proposal born
+            // from this intent links to its run row (proposals.ai_run_id FK).
+            ...(classification.aiRunId ? { aiRunId: classification.aiRunId } : {}),
           };
         } else {
           classifierEvent = {
@@ -1741,5 +1795,6 @@ export function createVoiceTurnProcessor(
     handlePendingVoiceApproval,
     handleVoiceApprovalIntent,
     handleVoiceEditIntent,
+    handleAskCaller,
   };
 }

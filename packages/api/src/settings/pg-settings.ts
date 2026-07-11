@@ -160,6 +160,15 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
       if (!raw || typeof raw !== 'object' || Object.keys(raw).length === 0) return undefined;
       return raw as TenantSettings['brandVoice'];
     })(),
+    // N-011 — migration 238 bookkeeping columns. NOT NULL DEFAULT 0/false so a
+    // pre-migration row reads version 0 / unlocked; updated_at NULL → null.
+    brandVoiceVersion: (row.brand_voice_version as number | null) ?? 0,
+    brandVoiceLocked: (row.brand_voice_locked as boolean | null) ?? false,
+    brandVoiceUpdatedAt: (() => {
+      const v = row.brand_voice_updated_at as Date | string | null | undefined;
+      if (v == null) return null;
+      return v instanceof Date ? v.toISOString() : String(v);
+    })(),
     // Migration 120. NULL → undefined to match the InMemory repo shape.
     googleReviewUrl: (row.google_review_url as string | null) ?? undefined,
     yelpReviewUrl: (row.yelp_review_url as string | null) ?? undefined,

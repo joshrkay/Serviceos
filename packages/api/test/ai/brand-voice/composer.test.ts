@@ -133,9 +133,11 @@ describe('P4-015 — brand-voice composer', () => {
     const sys1 = calls[0].messages.find((m) => m.role === 'system')?.content ?? '';
     const sys2 = calls[1].messages.find((m) => m.role === 'system')?.content ?? '';
     expect(sys1).not.toBe(sys2);
-    expect(sys1).toContain('casual');
+    // N-011 — legacy `formality` maps forward: casual → friendly register,
+    // professional → formal register.
+    expect(sys1).toContain('Register: friendly');
     expect(sys1).toContain('friendly');
-    expect(sys2).toContain('professional');
+    expect(sys2).toContain('Register: formal');
     expect(sys2).toContain('precise');
   });
 
@@ -224,7 +226,8 @@ describe('P4-015 — brand-voice composer', () => {
     const sys = call.messages.find((m) => m.role === 'system')?.content ?? '';
     // The system block declares itself the non-overridable authority.
     expect(sys.toLowerCase()).toContain('overrides');
-    expect(sys).toContain('professional');
+    // N-011 — legacy `formality: professional` maps to the formal register.
+    expect(sys).toContain('Register: formal');
   });
 
   it('P4-015 — unknown intent throws a typed error', async () => {

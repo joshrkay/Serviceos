@@ -7,7 +7,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { mintDraftInvoiceProposalForJob } from '../../src/digest/invoice-one-tap';
 import {
-  renderDigestSms,
+  renderDigestSmsSegments,
   type DailyDigestPayload,
   type DigestSmsApprovalLink,
   type DigestSmsInvoiceLink,
@@ -157,101 +157,74 @@ function invoiceLink(n: number, name?: string): DigestSmsInvoiceLink {
   };
 }
 
-describe('renderDigestSms invoice links (RV-065)', () => {
+describe('renderDigestSmsSegments invoice links (RV-065)', () => {
+  const combine = (segs: string[]) => segs.join('\n');
+
   it('appends a Bill entry per unbilled job with the one-tap URL and expiry note', () => {
-    const body = renderDigestSms({
+    const segments = renderDigestSmsSegments({
       payload: makePayload(),
       deepLinkUrl: DEEP_LINK,
       approvalLinks: [],
       invoiceLinks: [invoiceLink(1, 'Smith')],
     });
+    const body = combine(segments);
     expect(body).toContain('Bill Smith $480 https://api.example/p/approve?token=INVOICE_TOKEN_1');
     expect(body).toContain('(links expire in 30 min)');
     expect(body).toContain(DEEP_LINK);
-    expect(body.length).toBeLessThanOrEqual(480);
+    for (const s of segments) expect(s.length).toBeLessThanOrEqual(480);
   });
 
   it('never lets punctuation directly follow an invoice URL', () => {
-    const body = renderDigestSms({
+    // Keep it a single segment so the token isn't followed by a segment join.
+    const segments = renderDigestSmsSegments({
       payload: makePayload(),
       deepLinkUrl: DEEP_LINK,
       approvalLinks: [],
       invoiceLinks: [invoiceLink(1)],
     });
-    const idx = body.indexOf('INVOICE_TOKEN_1_xxxxxxxxxxxxxxxxxxxxxxxx');
-    const after = body[idx + 'INVOICE_TOKEN_1_xxxxxxxxxxxxxxxxxxxxxxxx'.length];
-    expect(after === ' ' || after === undefined).toBe(true);
+    for (const body of segments) {
+      const idx = body.indexOf('INVOICE_TOKEN_1_xxxxxxxxxxxxxxxxxxxxxxxx');
+      if (idx === -1) continue;
+      const after = body[idx + 'INVOICE_TOKEN_1_xxxxxxxxxxxxxxxxxxxxxxxx'.length];
+      expect(after === ' ' || after === undefined).toBe(true);
+    }
   });
 
-  it('drops invoice links FIRST when over budget — approval entries survive', () => {
+  it('preserves ALL approval and invoice links across segments (never collapsed/dropped)', () => {
     const payload = makePayload({ pendingApprovals: { totalCount: 2, top: [] } });
     const approvals = [approvalLink(1), approvalLink(2)];
     const invoices = [invoiceLink(1, 'Smith'), invoiceLink(2, 'Jones')];
 
-    const full = renderDigestSms({
+    const segments = renderDigestSmsSegments({
       payload,
       deepLinkUrl: DEEP_LINK,
       approvalLinks: approvals,
       invoiceLinks: invoices,
-      maxChars: 700, // plenty of room: everything fits
     });
-    expect(full).toContain('APPROVE_TOKEN_2');
-    expect(full).toContain('INVOICE_TOKEN_2');
-
-    // Constrain the budget so approvals fit but invoices don't.
-    const withoutInvoices = renderDigestSms({
-      payload,
-      deepLinkUrl: DEEP_LINK,
-      approvalLinks: approvals,
-      invoiceLinks: [],
-    });
-    const tight = renderDigestSms({
-      payload,
-      deepLinkUrl: DEEP_LINK,
-      approvalLinks: approvals,
-      invoiceLinks: invoices,
-      maxChars: withoutInvoices.length + 10, // room for approvals, not invoices
-    });
-    expect(tight.length).toBeLessThanOrEqual(withoutInvoices.length + 10);
-    expect(tight).toContain('APPROVE_TOKEN_1');
-    expect(tight).toContain('APPROVE_TOKEN_2'); // no approval sacrificed
-    expect(tight).not.toContain('INVOICE_TOKEN'); // invoices dropped first
-  });
-
-  it('partially includes invoice links when only some fit (last dropped first)', () => {
-    const payload = makePayload({ pendingApprovals: { totalCount: 0, top: [] } });
-    const invoices = [invoiceLink(1, 'Smith'), invoiceLink(2, 'Jones')];
-    const oneOnly = renderDigestSms({
-      payload,
-      deepLinkUrl: DEEP_LINK,
-      approvalLinks: [],
-      invoiceLinks: [invoices[0]],
-    });
-    const body = renderDigestSms({
-      payload,
-      deepLinkUrl: DEEP_LINK,
-      approvalLinks: [],
-      invoiceLinks: invoices,
-      maxChars: oneOnly.length, // exactly room for the first link
-    });
+    const body = combine(segments);
+    // Links spill into later segments rather than being sacrificed.
+    expect(body).toContain('APPROVE_TOKEN_1');
+    expect(body).toContain('APPROVE_TOKEN_2');
     expect(body).toContain('INVOICE_TOKEN_1');
-    expect(body).not.toContain('INVOICE_TOKEN_2');
+    expect(body).toContain('INVOICE_TOKEN_2');
+    expect(body).not.toMatch(/\+\d more/);
+    for (const s of segments) expect(s.length).toBeLessThanOrEqual(480);
   });
 
-  it('back-compat: omitting invoiceLinks renders exactly the pre-RV-065 body', () => {
+  it('omitting invoiceLinks renders identically to passing an empty array', () => {
     const payload = makePayload({ pendingApprovals: { totalCount: 1, top: [] } });
-    const a = renderDigestSms({
+    const a = renderDigestSmsSegments({
       payload,
       deepLinkUrl: DEEP_LINK,
       approvalLinks: [approvalLink(1)],
     });
-    const b = renderDigestSms({
+    const b = renderDigestSmsSegments({
       payload,
       deepLinkUrl: DEEP_LINK,
       approvalLinks: [approvalLink(1)],
       invoiceLinks: [],
     });
-    expect(a).toBe(b);
-    expect(a).toContain('Approvals: 1 waiting');
+    expect(a).toEqual(b);
+    expect(combine(a)).toContain('Approvals: 1 waiting');
   });
 });

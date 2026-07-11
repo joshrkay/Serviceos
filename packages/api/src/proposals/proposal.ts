@@ -570,6 +570,19 @@ export interface ProposalRepository {
     since: Date,
     limit: number,
   ): Promise<Proposal[]>;
+  /**
+   * N-005 — proposals created in [from, to) whose `_meta.overallConfidence` is
+   * a blocking level ('low' | 'very_low'). Drives the digest "what I wasn't
+   * sure about today". Newest first, capped at `limit`. Optional so partial
+   * test doubles still satisfy the interface; the digest falls back to an empty
+   * section when it is absent.
+   */
+  findConfidenceMarkedForDay?(
+    tenantId: string,
+    from: Date,
+    to: Date,
+    limit?: number,
+  ): Promise<Proposal[]>;
   findByAiRun(tenantId: string, aiRunId: string): Promise<Proposal[]>;
   /**
    * Indexed lookup for voice redelivery dedup (P1). Returns the most recent
@@ -887,6 +900,30 @@ export class InMemoryProposalRepository implements ProposalRepository {
       .sort((a, b) => (b.expiresAt?.getTime() ?? 0) - (a.expiresAt?.getTime() ?? 0))
       .slice(0, limit)
       .map((p) => ({ ...p }));
+  }
+
+  async findConfidenceMarkedForDay(
+    tenantId: string,
+    from: Date,
+    to: Date,
+    limit?: number,
+  ): Promise<Proposal[]> {
+    const BLOCKING = new Set(['low', 'very_low']);
+    const rows = Array.from(this.proposals.values())
+      .filter((p) => {
+        if (p.tenantId !== tenantId) return false;
+        const t = p.createdAt.getTime();
+        if (t < from.getTime() || t >= to.getTime()) return false;
+        const meta = (p.payload as Record<string, unknown>)?._meta;
+        const overall =
+          meta && typeof meta === 'object'
+            ? (meta as Record<string, unknown>).overallConfidence
+            : undefined;
+        return typeof overall === 'string' && BLOCKING.has(overall);
+      })
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+      .map((p) => ({ ...p }));
+    return typeof limit === 'number' ? rows.slice(0, limit) : rows;
   }
 
   async findByAiRun(tenantId: string, aiRunId: string): Promise<Proposal[]> {

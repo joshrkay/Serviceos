@@ -12,12 +12,20 @@ import {
   listSubaccountPhoneNumbers,
 } from '../integrations/twilio/provisioning';
 import { getVapiClient, type VapiClient } from '../integrations/vapi/client';
+import { isTwilioDeploymentEnv } from '../integrations/credentials';
 import { buildAssistantConfig } from '../integrations/vapi/assistant-config';
 
 // Status values match migration 071_widen_tenant_integrations_status:
 // 't0_requested' = provisioning in flight; 'full_readiness' = fully active.
 const STATUS_PROVISIONING = 't0_requested';
 const STATUS_ACTIVE = 'full_readiness';
+
+// Deterministic stub phone assigned in non-production when no Twilio creds are
+// configured, so the onboarding phone step can reach 'full_readiness' and the
+// wizard is completable in dev/test/CI. This is a Twilio "magic" test number
+// (https://www.twilio.com/docs/iam/test-credentials) — never a real, dialable
+// line. Never used in production: the production path throws without real creds.
+const STUB_DEV_PHONE_E164 = '+15005550006';
 
 // tenant_integrations is FORCE ROW LEVEL SECURITY with a policy on
 // app.current_tenant_id. Background workers run outside withTenantTransaction,
@@ -80,15 +88,42 @@ export function createProvisionTwilioWorker(deps: {
       const encKey = process.env.TENANT_ENCRYPTION_KEY;
 
       if (!masterSid || !masterToken) {
-        // Skip silently in dev when Twilio isn't configured
-        if (process.env.NODE_ENV !== 'production') {
-          logger.info('Twilio provisioning skipped — TWILIO_ACCOUNT_SID/AUTH_TOKEN not set', { tenantId });
+        // Dev/test/CI have no Twilio creds. Previously this branch returned
+        // silently, but deriveOnboardingStatus only marks the `phone` step done
+        // when twilioStatus === 'full_readiness' — so skipping left the phone
+        // step 'current' forever and the onboarding wizard un-completable in
+        // every Twilio-less environment. Instead, write a DETERMINISTIC STUB
+        // integration (a Twilio magic test number, never a real line) so
+        // onboarding can complete. Strictly non-deployment — every real
+        // deployment (production / prod / staging) still throws and requires
+        // real provisioning. Gating on the canonical isTwilioDeploymentEnv
+        // (not a bare `!== 'production'`) closes the hole where a misconfigured
+        // 'prod'/'staging' deploy with missing creds silently onboarded on a
+        // fake test number.
+        if (!isTwilioDeploymentEnv(process.env.NODE_ENV)) {
+          logger.warn(
+            'Twilio creds absent — assigning STUB twilio integration (non-production only); ' +
+              'onboarding phone step will complete with a FAKE test number, nothing real provisioned',
+            { tenantId, stubPhoneE164: STUB_DEV_PHONE_E164 },
+          );
+          await tenantQuery(
+            pool,
+            tenantId,
+            `INSERT INTO tenant_integrations (tenant_id, provider, status, provider_data)
+             VALUES ($1, 'twilio', $2, $3::jsonb)
+             ON CONFLICT (tenant_id, provider) DO UPDATE
+               SET status = $2,
+                   provider_data = tenant_integrations.provider_data || $3::jsonb,
+                   last_error = NULL,
+                   updated_at = NOW()`,
+            [tenantId, STATUS_ACTIVE, JSON.stringify({ phoneE164: STUB_DEV_PHONE_E164, stub: true })],
+          );
           return;
         }
         throw new Error('TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN must be set');
       }
       if (!encKey) {
-        if (process.env.NODE_ENV !== 'production') {
+        if (!isTwilioDeploymentEnv(process.env.NODE_ENV)) {
           logger.info('Twilio provisioning skipped — TENANT_ENCRYPTION_KEY not set', { tenantId });
           return;
         }

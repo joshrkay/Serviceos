@@ -1,6 +1,7 @@
 import {
   composeBrandVoiceMessage,
   type ComposeBrandVoiceDeps,
+  type BrandVoiceDeviation,
 } from '../../ai/brand-voice/composer';
 
 /**
@@ -29,6 +30,10 @@ export interface CustomerMessageDraftInput {
 export interface CustomerMessageDraft {
   text: string;
   promptVersionId: string;
+  /** N-011 — the brand-voice config version stamped onto the proposal. */
+  brandVoiceVersion: number;
+  /** N-011 — present when the draft departed from the locked profile. */
+  deviation?: BrandVoiceDeviation;
 }
 
 export const DEFAULT_RESCHEDULE_SMS_MAX_CHARS = 160;
@@ -56,5 +61,10 @@ export async function draftCustomerRescheduleMessage(
     deps,
   );
 
-  return { text: result.text, promptVersionId: result.promptVersionId };
+  return {
+    text: result.text,
+    promptVersionId: result.promptVersionId,
+    brandVoiceVersion: result.brandVoiceVersion,
+    ...(result.deviation ? { deviation: result.deviation } : {}),
+  };
 }

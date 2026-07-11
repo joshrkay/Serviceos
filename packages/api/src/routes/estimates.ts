@@ -38,6 +38,7 @@ import { SendService } from '../notifications/send-service';
 import { LLMGateway } from '../ai/gateway/gateway';
 import { ProposalRepository } from '../proposals/proposal';
 import { EstimateTaskHandler } from '../ai/tasks/estimate-task';
+import { CatalogItemRepository } from '../catalog/catalog-item';
 import { JobRepository } from '../jobs/job';
 import { InvoiceRepository } from '../invoices/invoice';
 import { PaymentRepository } from '../invoices/payment';
@@ -80,6 +81,13 @@ function parseExpectedVersion(req: AuthenticatedRequest): number | undefined {
 export interface EstimateAIDeps {
   gateway: LLMGateway;
   proposalRepo: ProposalRepository;
+  // Tenant catalog repo used to ground AI-suggested line-item prices to the
+  // real catalog price (locked pattern: never trust an LLM-emitted price
+  // without resolution). Wired through so /suggest grounds prices identically
+  // to the voice path. Optional so legacy harnesses without a catalog still
+  // build; when absent, every LLM price is treated as uncatalogued and the
+  // confidence cap fires (see EstimateTaskHandler.groundLineItemPricing).
+  catalogRepo?: CatalogItemRepository;
 }
 
 export function createEstimateRouter(
@@ -777,7 +785,7 @@ export function createEstimateRouter(
           await ownership.requireExists(req.auth!.tenantId, 'customer', parsed.customerId);
         }
 
-        const handler = new EstimateTaskHandler(aiDeps.gateway);
+        const handler = new EstimateTaskHandler(aiDeps.gateway, aiDeps.catalogRepo);
         const existingEntities: Record<string, unknown> = {};
         if (parsed.serviceType) existingEntities.serviceType = parsed.serviceType;
         if (parsed.customerId) existingEntities.customerId = parsed.customerId;

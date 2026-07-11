@@ -425,6 +425,16 @@ export interface IntentClassification {
    */
   tokenUsage?: { input: number; output: number };
   /**
+   * Id of the persisted `ai_runs` row for the underlying LLM classify call
+   * (from `LLMResponse.aiRunId`). Surfaced so the voice path can thread a
+   * REAL run id into the FSM `intent_classified` event → `create_proposal`
+   * side-effect payload, letting the resulting proposal satisfy
+   * `proposals.ai_run_id`'s FK with an actual row instead of null. Omitted
+   * when the classifier short-circuits without an LLM call (empty transcript,
+   * deterministic phrase match) or when no AiRunRepository is wired.
+   */
+  aiRunId?: string;
+  /**
    * Story 3.4 — the intent-taxonomy version that produced this classification
    * (`INTENT_TAXONOMY_VERSION`). Stamped on every result by `classifyIntent`;
    * lets observability / correction analytics detect taxonomy drift.
@@ -1498,16 +1508,25 @@ async function classifyIntentRaw(
       { role: 'user', content: transcript },
     ],
     responseFormat: 'json',
-    // Pass tenantId so gateway-layer features (per-tenant cache keys,
-    // cost accounting, future routing) can scope correctly. Without
-    // this, a cached response for tenant A could be returned to
-    // tenant B if two transcripts collide on the content hash.
+    // Scope this call to the real tenant. The top-level `tenantId` is what the
+    // gateway reads (a) to persist the ai_runs row under the correct tenant —
+    // required so the surfaced aiRunId points at a REAL, FK-valid row a voice
+    // proposal can link to (proposals.ai_run_id → ai_runs(id)); persisting
+    // under the 'system' fallback would fail the tenants FK on Postgres — and
+    // (b) for per-tenant cache-key / cost / routing scoping. `metadata` is
+    // retained for byte-identical logging/correlation.
+    tenantId: context.tenantId,
     metadata: { tenantId: context.tenantId },
   });
 
   const tokenUsage = response.tokenUsage
     ? { input: response.tokenUsage.input, output: response.tokenUsage.output }
     : undefined;
+  // The persisted ai_runs id for THIS classify call. Threaded onto every
+  // post-gateway return path (mirroring tokenUsage) so the voice path can
+  // link the eventual proposal to a REAL ai_runs row. Undefined when no
+  // AiRunRepository is wired or the best-effort run create failed.
+  const aiRunId = response.aiRunId;
 
   const parsed = parseClassifierJson(response.content);
   // P18-001: deterministic create_customer fallback. When the
@@ -1530,13 +1549,16 @@ async function classifyIntentRaw(
         reasoning: 'sign-up phrasing matched deterministic pattern',
       };
       if (tokenUsage) result.tokenUsage = tokenUsage;
+      if (aiRunId) result.aiRunId = aiRunId;
       return result;
     }
     const result = unknownResult('could not parse classifier output', 'parse_failed');
     if (tokenUsage) result.tokenUsage = tokenUsage;
+    if (aiRunId) result.aiRunId = aiRunId;
     return result;
   }
   if (tokenUsage) parsed.tokenUsage = tokenUsage;
+  if (aiRunId) parsed.aiRunId = aiRunId;
   if (
     signupOverride &&
     (parsed.intentType === 'unknown' ||
@@ -1552,6 +1574,7 @@ async function classifyIntentRaw(
       extractedEntities: parsed.extractedEntities,
     };
     if (tokenUsage) overridden.tokenUsage = tokenUsage;
+    if (aiRunId) overridden.aiRunId = aiRunId;
     return overridden;
   }
 
@@ -1573,6 +1596,7 @@ async function classifyIntentRaw(
       extractedEntities: entities,
     };
     if (tokenUsage) mapped.tokenUsage = tokenUsage;
+    if (aiRunId) mapped.aiRunId = aiRunId;
     return mapped;
   }
 
@@ -1593,6 +1617,7 @@ async function classifyIntentRaw(
         parsed.intentType !== 'unknown' ? parsed.intentType : undefined,
     };
     if (tokenUsage) lowConf.tokenUsage = tokenUsage;
+    if (aiRunId) lowConf.aiRunId = aiRunId;
     return lowConf;
   }
 

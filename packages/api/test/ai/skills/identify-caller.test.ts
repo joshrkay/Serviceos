@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { Pool, QueryResult } from 'pg';
 import { identifyCaller, normalizePhone } from '../../../src/ai/skills/identify-caller';
 import type { IdentifyCallerInput } from '../../../src/ai/skills/identify-caller';
+import { isNanpKey } from '../../../src/shared/phone';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -52,6 +53,81 @@ describe('normalizePhone', () => {
 
   it('returns empty string for empty input', () => {
     expect(normalizePhone('')).toBe('');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// isNanpKey — NANP validity of a normalized (leading-1-stripped) key
+// ---------------------------------------------------------------------------
+
+describe('isNanpKey', () => {
+  it('accepts a valid 10-digit NANP key', () => {
+    expect(isNanpKey('5125550111')).toBe(true);
+  });
+
+  it('accepts the leading-1-stripped output of a +1 E.164 number', () => {
+    expect(isNanpKey(normalizePhone('+15125550111'))).toBe(true);
+  });
+
+  it('rejects a non-NANP international number reduced to digits (wrong length)', () => {
+    expect(isNanpKey(normalizePhone('+445551112222'))).toBe(false); // "445551112222" (12)
+  });
+
+  it('rejects an area code beginning with 0 or 1', () => {
+    expect(isNanpKey('1125550111')).toBe(false);
+    expect(isNanpKey('0125550111')).toBe(false);
+  });
+
+  it('rejects an exchange prefix beginning with 0 or 1', () => {
+    expect(isNanpKey('5121550111')).toBe(false);
+    expect(isNanpKey('5120550111')).toBe(false);
+  });
+
+  it('rejects empty / short / over-long inputs', () => {
+    expect(isNanpKey('')).toBe(false);
+    expect(isNanpKey('512555011')).toBe(false); // 9 digits
+    expect(isNanpKey('51255501110')).toBe(false); // 11 digits
+  });
+});
+
+// ---------------------------------------------------------------------------
+// phone_normalized reconciliation invariant (locks the 5f97649 lookup fix)
+// ---------------------------------------------------------------------------
+//
+// The generated column `customers.phone_normalized` (migration
+// 053_p8_customers_phone_index) is `regexp_replace(primary_phone, '[^0-9]',
+// '', 'g')` — it strips punctuation but KEEPS the leading country-code 1, so a
+// customer saved as "+15125550111" stores "15125550111". `normalizePhone`
+// above instead DROPS the leading 1, producing the 10-digit bare key. A plain
+// `phone_normalized = normalizePhone(from)` equality therefore misses every +1
+// E.164 customer. identifyCaller reconciles the two conventions by matching on
+// the trailing-10 digits from both sides. This unit test documents that
+// divergence + reconciliation so a future refactor of either side can't
+// silently re-break inbound caller-ID. The end-to-end proof against the real
+// generated column lives in test/integration/identify-caller.test.ts.
+describe('phone_normalized reconciliation invariant', () => {
+  // What the generated column stores for a customer saved in +1 E.164 form.
+  const storedGeneratedForm = '15125550111'; // regexp_replace keeps the leading 1
+
+  it('normalizePhone strips the leading 1 that the generated column keeps', () => {
+    const appKey = normalizePhone('+15125550111');
+    expect(appKey).toBe('5125550111'); // 10-digit bare key, no leading 1
+    expect(storedGeneratedForm).toBe('1' + appKey); // the column keeps the 1
+    expect(appKey).not.toBe(storedGeneratedForm); // → plain equality would miss
+  });
+
+  it("the 10-digit tail + a leading-1 variant reconcile with the stored +1 form", () => {
+    const appKey = normalizePhone('+15125550111');
+    // identifyCaller now probes `phone_normalized IN ($tail, '1' || $tail)`
+    // (index-friendly equality) instead of `right()`/`LIKE`. The stored +1 form
+    // equals the leading-1 variant of the 10-digit tail.
+    expect('1' + appKey.slice(-10)).toBe(storedGeneratedForm);
+  });
+
+  it('bare 10-digit stored form also reconciles via the trailing-10 match', () => {
+    const appKey = normalizePhone('+15125550222');
+    const storedBareForm = '5125550222'; // customer saved as "5125550222"
+    expect(storedBareForm.slice(-10)).toBe(appKey.slice(-10));
   });
 });
 
@@ -147,6 +223,55 @@ describe('identifyCaller — unknown', () => {
 });
 
 // ---------------------------------------------------------------------------
+// NANP guard — a non-NANP international caller must NOT tail-match a US customer
+// (regression proof for the wrong-customer safety finding). `normalizePhone`
+// only strips to digits, so `+445551112222` collapses to `445551112222`; taking
+// the last 10 digits (`5551112222`) would collide with a US customer stored as
+// `5551112222` / `15551112222`. identifyCaller now requires a valid 10-digit
+// NANP key before probing, and returns unknown WITHOUT querying otherwise.
+// ---------------------------------------------------------------------------
+
+describe('identifyCaller — NANP guard (wrong-customer safety)', () => {
+  it('non-NANP international caller → unknown with NO tail probe (even if a US customer would collide)', async () => {
+    // Pool would return a US customer if queried — proves we never query.
+    const queryFn = vi.fn().mockResolvedValue({ rows: [makeRow('us-cust', 'Unrelated US')] } as unknown as QueryResult);
+    const pool = { query: queryFn } as unknown as Pool;
+
+    const result = await identifyCaller(makeInput({ fromPhone: '+445551112222', pool }));
+
+    expect(result).toEqual({ status: 'unknown' });
+    expect(queryFn).not.toHaveBeenCalled();
+  });
+
+  it('a valid +1 E.164 caller still matches (guard does not break the reconciliation fix)', async () => {
+    const pool = makePool([makeRow('cust-e164', 'Ellen E164')]);
+    const result = await identifyCaller(makeInput({ fromPhone: '+15125550111', pool }));
+
+    expect(result.status).toBe('matched');
+    if (result.status === 'matched') expect(result.customerId).toBe('cust-e164');
+  });
+
+  it('a bare 10-digit US caller still matches', async () => {
+    const pool = makePool([makeRow('cust-bare', 'Bare Ten')]);
+    const result = await identifyCaller(makeInput({ fromPhone: '5125550111', pool }));
+
+    expect(result.status).toBe('matched');
+    if (result.status === 'matched') expect(result.customerId).toBe('cust-bare');
+  });
+
+  it('a number whose area/exchange starts with 0/1 is not a NANP key → unknown, no query', async () => {
+    const queryFn = vi.fn().mockResolvedValue({ rows: [makeRow('x', 'X')] } as unknown as QueryResult);
+    const pool = { query: queryFn } as unknown as Pool;
+
+    // Area code 155 is fine, but exchange starting with 1 (1551...) is invalid NANP.
+    const result = await identifyCaller(makeInput({ fromPhone: '5551551234', pool }));
+
+    expect(result).toEqual({ status: 'unknown' });
+    expect(queryFn).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Tenant isolation
 // ---------------------------------------------------------------------------
 
@@ -170,6 +295,20 @@ describe('identifyCaller — tenant isolation', () => {
 
     const [sql] = queryFn.mock.calls[0] as [string, unknown[]];
     expect(sql).toContain('phone_normalized');
+  });
+
+  it('uses the index-friendly IN(...) form, not right()/LIKE (perf: no full tenant scan)', async () => {
+    const queryFn = vi.fn().mockResolvedValue({ rows: [] } as unknown as QueryResult);
+    const pool = { query: queryFn } as unknown as Pool;
+
+    await identifyCaller({ tenantId: 'tenant-xyz', fromPhone: '+15125550100', pool });
+
+    const [sql, params] = queryFn.mock.calls[0] as [string, unknown[]];
+    expect(sql).toContain("phone_normalized IN ($2, '1' || $2)");
+    expect(sql).not.toMatch(/right\s*\(/i);
+    expect(sql).not.toMatch(/LIKE/i);
+    // $2 is the 10-digit bare tail (no leading 1).
+    expect(params[1]).toBe('5125550100');
   });
 
   it('different tenants are isolated — query scoped to provided tenantId', async () => {

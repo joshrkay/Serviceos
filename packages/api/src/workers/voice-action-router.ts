@@ -5,6 +5,7 @@ import { Proposal, ProposalRepository, createProposal, CreateProposalInput, Prop
 import { assertValidProposalPayload } from '../proposals/contracts';
 import { isSupervisorPresent } from '../ai/supervisor-presence';
 import { routeUnsupervisedProposal, confidenceMetaBlocksAutoApprove } from '../proposals/auto-approve';
+import { getSupervisorReviewGate } from '../ai/supervisor/review-gate';
 import {
   AUTONOMOUS_LANE_PROPOSAL_TYPES,
   autonomousLaneEvaluationFor,
@@ -1631,19 +1632,50 @@ async function processChain(
   // (`suppressApproveLink`): no token minted, anchored
   // `review_required_rendered`, renderChainSms emits the matching copy.
   const head = built[0].proposal;
+
+  // N-004 (P2-037) — supervisor review pass on the chain head before dispatch
+  // (same chokepoint as the single-action path). Fail-open; a hold suppresses
+  // the chain's owner SMS below.
+  //
+  // The gate attaches N-002 supervisor markers to the head payload (and, on a
+  // hold, forces draft). It persists those writes, but our in-memory `head`
+  // predates them — so we adopt the gate's returned proposal for the
+  // render/route below (parity with the single-action path), otherwise the
+  // chain SMS would omit the freshly-attached supervisor warning.
+  let supervisorHold = false;
+  let reviewedHead = head;
+  const reviewGate = getSupervisorReviewGate();
+  if (reviewGate) {
+    try {
+      const res = await reviewGate.review({ proposal: head });
+      supervisorHold = res.hold;
+      if (res.proposal) reviewedHead = res.proposal;
+    } catch (err) {
+      log.warn('voice-action-router: chain supervisor review gate failed, dispatching', {
+        chainId,
+        headProposalId: head.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   if (
     deps.unsupervisedRouting &&
     !supervisorPresent &&
-    (head.status === 'ready_for_review' || head.status === 'draft')
+    !supervisorHold &&
+    (reviewedHead.status === 'ready_for_review' || reviewedHead.status === 'draft')
   ) {
     const ur = deps.unsupervisedRouting;
     const tenantId = base.tenantId;
     try {
       const routing = await ur.resolveRouting?.(tenantId);
       const ownerPhone = await ur.resolveOwnerPhone?.(tenantId);
-      const ordered = built.map((b) => b.proposal);
+      // Head slot carries the gate-reviewed proposal (N-002 markers); dependents
+      // stay as built. renderChainSms + the blocking/token predicates below all
+      // read from this ordered list, so the head's supervisor marker propagates.
+      const ordered = built.map((b, i) => (i === 0 ? reviewedHead : b.proposal));
       const blockingMember = ordered.find((p) => confidenceMetaBlocksAutoApprove(p.payload));
-      const headNotCapture = actionClassForProposalType(head.proposalType) !== 'capture';
+      const headNotCapture = actionClassForProposalType(reviewedHead.proposalType) !== 'capture';
       await routeUnsupervisedProposal(
         {
           auditRepo: ur.auditRepo,
@@ -1654,17 +1686,17 @@ async function processChain(
           ...(ur.recordSmsEvent
             ? {
                 onSmsSent: async ({ body, kind }: { body: string; kind: OutboundAnchorKind }) =>
-                  ur.recordSmsEvent!({ tenantId, proposalId: head.id, body, kind }),
+                  ur.recordSmsEvent!({ tenantId, proposalId: reviewedHead.id, body, kind }),
               }
             : {}),
         },
         {
           tenantId,
-          proposalId: head.id,
+          proposalId: reviewedHead.id,
           ...(routing ? { routing } : {}),
           channel: 'other',
           ...(ownerPhone ? { ownerPhone } : {}),
-          summaryText: head.summary,
+          summaryText: reviewedHead.summary,
           renderSmsBody: (approveUrl: string) =>
             renderChainSms(
               ordered.map((p) => ({
@@ -1676,7 +1708,7 @@ async function processChain(
             ),
           // Blocking-member payload (if any) drives the token-suppression /
           // review_required_rendered anchoring; otherwise the head's.
-          payload: (blockingMember ?? head).payload,
+          payload: (blockingMember ?? reviewedHead).payload,
           // Non-capture head: never Y-approvable — review form, no token.
           ...(headNotCapture ? { suppressApproveLink: true } : {}),
         },
@@ -1907,16 +1939,47 @@ export function createVoiceActionRouterWorker(
         // (`queue_and_sms` default → one-tap approve SMS to the owner) and
         // emit the `unsupervised_proposal_routed` audit event. Best-effort:
         // a routing failure never fails the (already persisted) proposal.
+        // N-004 (P2-037) — Supervisor Agent review pass at the AMEND P2-007
+        // "before SMS dispatch" chokepoint. Awaited inline (≤60s hard budget,
+        // fail-open). The gate owns its own side effects (checks, ai_runs,
+        // supervisor_reviews, markers, alert). A hold (enforce mode + a
+        // customer-harm critical) forces the proposal to draft inside the gate
+        // and suppresses the dispatch below; every other outcome dispatches
+        // normally. Unconfigured gate ⇒ no-op (byte-identical to before).
+        let supervisorHold = false;
+        // The gate attaches N-002 supervisor markers to the proposal payload
+        // (and, on a hold, forces draft). It persists those writes, but our
+        // in-memory `outcome.proposal` predates them — so we adopt the gate's
+        // returned proposal for the render/route below, otherwise the queued
+        // one-tap SMS would omit the freshly-attached supervisor warning.
+        let reviewedProposal = outcome.proposal;
+        const reviewGate = getSupervisorReviewGate();
+        if (reviewGate && outcome.proposal.status === 'ready_for_review') {
+          try {
+            const res = await reviewGate.review({ proposal: outcome.proposal });
+            supervisorHold = res.hold;
+            if (res.proposal) reviewedProposal = res.proposal;
+          } catch (err) {
+            log.warn('voice-action-router: supervisor review gate failed, dispatching', {
+              proposalId: outcome.proposal.id,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
+
         if (
           deps.unsupervisedRouting &&
           !outcome.supervisorPresent &&
+          !supervisorHold &&
           outcome.proposal.status === 'ready_for_review'
         ) {
           const ur = deps.unsupervisedRouting;
           try {
             const routing = await ur.resolveRouting?.(tenantId);
             const ownerPhone = await ur.resolveOwnerPhone?.(tenantId);
-            const proposal = outcome.proposal;
+            // Use the gate-reviewed proposal (carries any N-002 supervisor
+            // markers) so the rendered SMS reflects the supervisor findings.
+            const proposal = reviewedProposal;
             await routeUnsupervisedProposal(
               {
                 auditRepo: ur.auditRepo,
