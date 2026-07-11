@@ -75,6 +75,7 @@ import type { TwilioCallControl } from '../twilio-call-control';
 import type { EscalationSettings } from '../../settings/settings';
 import type { SentimentInput, SentimentResult, SentimentBudget } from '../../ai/agents/customer-calling/sentiment-classifier';
 import type { PanelData } from '../../ai/agents/customer-calling/escalation-summary-builder';
+import { createAuditEvent } from '../../audit/audit';
 
 const logger = createLogger({
   service: 'telephony.media-streams',
@@ -332,6 +333,29 @@ export interface MediaStreamAdapterDeps {
     priorTurns: ReadonlyArray<{ role: 'caller' | 'ai'; text: string }>;
     tenantId: string;
   }) => Promise<void>;
+  /**
+   * WS3 (voice ingestion resilience) — in-process realtime health circuit,
+   * shared with the /voice TwiML branch (which reads `isOpen()`). The adapter
+   * feeds it: `recordFailure` at the terminal pre-conversation failure sites
+   * (Deepgram open failure, recording-disclosure bootstrap failure) so repeated
+   * realtime outages trip the breaker and steer subsequent calls to Gather;
+   * `recordSuccess` once a session establishes cleanly (Deepgram open + — when
+   * an `initializeSession` bootstrap is wired — a successful disclosure init).
+   * Optional; when absent the adapter behaves exactly as before.
+   */
+  realtimeCircuit?: {
+    recordFailure(kind: string): void;
+    recordSuccess(): void;
+  };
+  /**
+   * WS3 — audit sink for the realtime resilience events
+   * (`voice.realtime.session_failed`, `voice.disclosure.init_failed`). Emitted
+   * best-effort (never blocks or throws into the WS handler) so a failed
+   * realtime session and — critically — an undisclosed recording are countable
+   * and alertable rather than a log scrape. Optional; when absent the events
+   * are skipped (test/dev path).
+   */
+  auditRepo?: import('../../audit/audit').AuditRepository;
 }
 
 const TWILIO_SURFACE = 'twilio_media_streams';
@@ -749,6 +773,19 @@ export class TwilioMediaStreamAdapter {
         error: err instanceof Error ? err.message : String(err),
         callSid,
       });
+      // WS3 — terminal pre-conversation failure. Trip the realtime health
+      // circuit and emit an alertable audit event before ending the leg, so
+      // repeated Deepgram outages steer subsequent calls to Gather. A REST
+      // redirect of THIS live call to the Gather webhook is not implemented —
+      // no Twilio REST client is reachable from this context (see the WS3
+      // report / floor-only note). closeWs(1011) still ends the leg as before;
+      // Twilio then ends the call.
+      this.deps.realtimeCircuit?.recordFailure('deepgram_open_failed');
+      await this.emitRealtimeResilienceAudit('voice.realtime.session_failed', {
+        callSid,
+        tenantId: session.tenantId,
+        reason: 'deepgram_open_failed',
+      });
       this.closeWs(1011, 'deepgram_open_failed');
       return;
     }
@@ -767,6 +804,9 @@ export class TwilioMediaStreamAdapter {
           }),
         );
         await this.emitSideEffects(initEffects);
+        // WS3 — session established AND the recording disclosure was delivered
+        // + ledgered. Reset the realtime health circuit.
+        this.deps.realtimeCircuit?.recordSuccess();
       } catch (err) {
         logger.warn('mediastream: initializeSession failed — continuing without greeting', {
           error: err instanceof Error ? err.message : String(err),
@@ -774,16 +814,67 @@ export class TwilioMediaStreamAdapter {
         });
         // DISCLOSURE_INIT_FAILED — the call continues but the caller was never
         // given the recording-consent disclosure and the session is unledgered.
-        // This is a compliance gap that must be countable/alertable.
-        // TODO(follow-up): emit a voice.disclosure_init_failed audit/quality event
-        // once a session-scoped event type is added to VoiceSessionEvent so ops
-        // dashboards can count & alert on this failure mode without a log scrape.
+        // WS3 — undisclosed recording is a compliance stop signal: emit an
+        // alertable audit event and trip the realtime health circuit so
+        // repeated disclosure failures steer subsequent calls to Gather. We do
+        // NOT hang up a live customer — the call continues (Twilio is already
+        // recording per the <Start><Stream> TwiML), the disclosure gap is now
+        // countable rather than a log scrape.
         logger.error('DISCLOSURE_INIT_FAILED', {
           callSid,
           tenantId: session.tenantId,
           error: err instanceof Error ? err.message : String(err),
         });
+        this.deps.realtimeCircuit?.recordFailure('disclosure_init_failed');
+        await this.emitRealtimeResilienceAudit('voice.disclosure.init_failed', {
+          callSid,
+          tenantId: session.tenantId,
+          reason: 'disclosure_init_failed',
+        });
       }
+    } else {
+      // WS3 — no disclosure/greeting bootstrap wired: session establishment is
+      // just the Deepgram open, which succeeded above. Reset the circuit.
+      this.deps.realtimeCircuit?.recordSuccess();
+    }
+  }
+
+  /**
+   * WS3 — best-effort audit emit for the realtime resilience events. Never
+   * throws into the WS handler and never blocks the audio path on a failed
+   * Postgres write; a persistence error is logged and swallowed. No-ops when
+   * no `auditRepo` is wired (test/dev). The event is tenant-scoped and
+   * correlated by callSid so ops can count & alert on realtime session
+   * failures and undisclosed recordings.
+   */
+  private async emitRealtimeResilienceAudit(
+    eventType: 'voice.realtime.session_failed' | 'voice.disclosure.init_failed',
+    args: { callSid: string; tenantId: string; reason: string },
+  ): Promise<void> {
+    if (!this.deps.auditRepo) return;
+    try {
+      await this.deps.auditRepo.create(
+        createAuditEvent({
+          tenantId: args.tenantId,
+          actorId: 'system:media-streams',
+          actorRole: 'system',
+          eventType,
+          entityType: 'voice_session',
+          entityId: args.callSid,
+          correlationId: args.callSid,
+          metadata: {
+            callSid: args.callSid,
+            reason: args.reason,
+            surface: TWILIO_SURFACE,
+          },
+        }),
+      );
+    } catch (err) {
+      logger.warn('mediastream: realtime resilience audit persist failed', {
+        eventType,
+        callSid: args.callSid,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 

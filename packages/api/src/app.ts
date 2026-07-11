@@ -24,6 +24,7 @@ import { DefaultTwilioCallControl } from './telephony/twilio-call-control';
 import { createUserPhoneDispatcherResolver, createBusinessPhoneFallback } from './telephony/dispatcher-phone-resolver';
 import { PgPhoneNumberRepository } from './integrations/twilio/phone-number-repository';
 import { attachMediaStreamServer } from './telephony/media-streams';
+import { RealtimeHealthCircuit } from './telephony/realtime-health-circuit';
 import { attachClientGateway, setChannelGate } from './ws/client-gateway';
 import { setDraining, isDraining as isDrainingFlag } from './ws/drain-state';
 import { createConnectionRegistry } from './ws/connection-registry';
@@ -3271,6 +3272,18 @@ export function createApp(): AppWithLifecycle {
   // TwiML and audio flows over the WebSocket attached below.
   const mediaStreamsEnabled = process.env.TWILIO_MEDIA_STREAMS_ENABLED === 'true';
 
+  // WS3 (voice ingestion resilience) — shared realtime health signals. The
+  // /voice TwiML branch reads the circuit (isOpen) and prereq probe to decide
+  // Stream vs Gather; the mediastream adapter feeds the same circuit instance.
+  // `realtimeCapabilities` is the single source the /health canary AND the
+  // route's prereq gate both derive from (STT + TTS configured), so they never
+  // drift.
+  const realtimeCapabilities = (): { ttsEnabled: boolean; sttEnabled: boolean } => ({
+    ttsEnabled: !!process.env.ELEVENLABS_API_KEY || !!config.AI_PROVIDER_API_KEY,
+    sttEnabled: !!process.env.DEEPGRAM_API_KEY,
+  });
+  const realtimeHealthCircuit = new RealtimeHealthCircuit();
+
   // Per-tenant Twilio token + tenant-id resolvers, keyed off
   // tenant_integrations. Falls back to the legacy single-account env
   // vars when no row matches — preserves the in-production single-tenant
@@ -3432,10 +3445,17 @@ export function createApp(): AppWithLifecycle {
             }
           : {}),
       },
+      // WS3 — per-tenant staged rollout of the realtime path (default ON) and
+      // the pre-connect health signals. tenantFeatureFlags is null in
+      // in-memory dev, in which case the global flag alone decides.
+      ...(tenantFeatureFlags ? { tenantFeatureFlags } : {}),
+      realtimeCircuit: realtimeHealthCircuit,
+      realtimePrerequisitesMet: () => {
+        const c = realtimeCapabilities();
+        return c.sttEnabled && c.ttsEnabled;
+      },
       getHealth: () => {
-        const ttsEnabled =
-          !!process.env.ELEVENLABS_API_KEY || !!config.AI_PROVIDER_API_KEY;
-        const sttEnabled = !!process.env.DEEPGRAM_API_KEY;
+        const { ttsEnabled, sttEnabled } = realtimeCapabilities();
         const recordingEnabled =
           !!process.env.TWILIO_ACCOUNT_SID &&
           !!process.env.TWILIO_AUTH_TOKEN &&
@@ -3790,6 +3810,11 @@ export function createApp(): AppWithLifecycle {
             store: voiceSessionStore,
             connectionRegistry,
             streamingProvider,
+            // WS3 — feed the shared realtime health circuit (the /voice branch
+            // reads it) and emit the alertable resilience audit events
+            // (session_failed / disclosure.init_failed).
+            realtimeCircuit: realtimeHealthCircuit,
+            ...(auditRepo ? { auditRepo } : {}),
             ...(sharedTtsProvider ? { ttsProvider: sharedTtsProvider } : {}),
             terminologyProvider,
             // UB-C1 — resolve the language the call OPENS in, before the
