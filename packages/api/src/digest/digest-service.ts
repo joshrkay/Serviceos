@@ -159,6 +159,21 @@ export interface DigestLearnedItem {
   summary: string;
 }
 
+/**
+ * WS10 — "Instructions applied" reflection. One entry per owner standing
+ * instruction that fired on at least one draft today (see
+ * ai/standing-instructions-context.ts:36-39 — the `{id, text}` marker
+ * stamped on `payload._meta.appliedStandingInstructions`), grouped across
+ * every proposal created today that applied it. `draftCount` counts
+ * DISTINCT proposals, not stamp occurrences (a rule stamped twice on one
+ * draft would still be a single draft).
+ */
+export interface DigestInstructionApplied {
+  id: string;
+  text: string;
+  draftCount: number;
+}
+
 export interface DailyDigestPayload {
   /** Tenant-local calendar day this digest covers (YYYY-MM-DD). */
   date: string;
@@ -209,6 +224,12 @@ export interface DailyDigestPayload {
    * is absent).
    */
   autonomousBookings?: DigestAutonomousBookings;
+  /**
+   * WS10 — "Instructions applied" reflection: owner standing instructions
+   * that shaped at least one draft today, most-applied first. OMITTED when
+   * empty (no instructions applied today, or the repo method is absent).
+   */
+  instructionsApplied?: DigestInstructionApplied[];
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -236,6 +257,15 @@ export const DIGEST_MAX_REVIEWS = 500;
  * DIGEST_MAX_REVIEWS: bounds the query, not a list actually rendered.
  */
 export const DIGEST_MAX_AUTONOMOUS_BOOKINGS = 500;
+/** WS10 — cap on distinct standing instructions rendered in the payload. */
+export const DIGEST_MAX_INSTRUCTIONS = 10;
+/**
+ * WS10 — cap on proposals fetched for the "Instructions applied" grouping
+ * query. Bounds the query (a list of PROPOSALS, not the rendered rule list
+ * — see DIGEST_MAX_INSTRUCTIONS), generous enough that a normal day's true
+ * per-rule counts are never undercounted.
+ */
+export const DIGEST_MAX_APPLIED_INSTRUCTIONS_PROPOSALS = 200;
 
 /**
  * Map a proposal's status to the digest "unsureAbout" outcome. Derived from the
@@ -261,6 +291,50 @@ export function proposalOutcome(status: ProposalStatus): DigestUnsureOutcome {
     case 'execution_failed':
       return 'failed';
   }
+}
+
+/**
+ * WS10 — group proposals' `payload._meta.appliedStandingInstructions` stamps
+ * by instruction id, counting one DISTINCT proposal per instruction (a stamp
+ * repeated twice on the same draft — defensive, shouldn't happen — still
+ * counts once). Tolerates a missing/malformed `_meta` or stamp entry rather
+ * than throwing — the stamp is owner-authored data threaded through an LLM
+ * drafting task, not something this module controls the shape of. Order:
+ * draftCount desc, then id asc (deterministic tie-break). Capped at
+ * DIGEST_MAX_INSTRUCTIONS. Pure — no I/O.
+ */
+export function groupAppliedInstructions(proposals: Proposal[]): DigestInstructionApplied[] {
+  const byId = new Map<string, { text: string; draftCount: number }>();
+  for (const p of proposals) {
+    const meta = (p.payload as Record<string, unknown> | undefined)?._meta;
+    const applied =
+      meta && typeof meta === 'object'
+        ? (meta as Record<string, unknown>).appliedStandingInstructions
+        : undefined;
+    if (!Array.isArray(applied)) continue;
+    // De-dupe within a single proposal so a repeated stamp on one draft
+    // still counts as ONE draft for that instruction.
+    const seenOnThisProposal = new Set<string>();
+    for (const entry of applied) {
+      if (!entry || typeof entry !== 'object') continue;
+      const id = (entry as Record<string, unknown>).id;
+      const text = (entry as Record<string, unknown>).text;
+      if (typeof id !== 'string' || id.length === 0) continue;
+      if (typeof text !== 'string' || text.length === 0) continue;
+      if (seenOnThisProposal.has(id)) continue;
+      seenOnThisProposal.add(id);
+      const existing = byId.get(id);
+      if (existing) {
+        existing.draftCount += 1;
+      } else {
+        byId.set(id, { text, draftCount: 1 });
+      }
+    }
+  }
+  return Array.from(byId.entries())
+    .map(([id, v]) => ({ id, text: v.text, draftCount: v.draftCount }))
+    .sort((a, b) => b.draftCount - a.draftCount || a.id.localeCompare(b.id))
+    .slice(0, DIGEST_MAX_INSTRUCTIONS);
 }
 
 const AMOUNT_KEYS = ['amountCents', 'totalCents', 'priceCents'] as const;
@@ -501,6 +575,26 @@ function autonomousBookingsSmsLine(bookings: DigestAutonomousBookings | undefine
   return ` Auto-booked: ${bookings.count} appointment(s)${undonePart}.`;
 }
 
+/** WS10 — ~40 chars max, ellipsis appended when truncated. */
+const INSTRUCTION_TEXT_SMS_MAX = 40;
+function truncateInstructionText(text: string): string {
+  return text.length > INSTRUCTION_TEXT_SMS_MAX
+    ? `${text.slice(0, INSTRUCTION_TEXT_SMS_MAX).trimEnd()}…`
+    : text;
+}
+
+/**
+ * WS10 — compact "Instructions applied" SMS line for the top rule (by
+ * draftCount), e.g. `Applied your rule "always add trip fee" to 3
+ * draft(s); 2 more rules.` Absent → empty string.
+ */
+function instructionsAppliedSmsLine(items: DigestInstructionApplied[] | undefined): string {
+  if (!items || items.length === 0) return '';
+  const top = items[0];
+  const more = items.length > 1 ? `; ${items.length - 1} more rules` : '';
+  return ` Applied your rule "${truncateInstructionText(top.text)}" to ${top.draftCount} draft(s)${more}.`;
+}
+
 /**
  * Build the ordered ATOMIC content chunks for the digest SMS. A chunk is never
  * split across segments; the packer places each chunk whole. The deep link
@@ -570,6 +664,8 @@ function buildDigestSmsChunks(input: RenderDigestSmsInput): string[] {
   if (supervisorChecks) chunks.push(supervisorChecks);
   const autonomousBookings = autonomousBookingsSmsLine(payload.autonomousBookings);
   if (autonomousBookings) chunks.push(autonomousBookings);
+  const instructionsApplied = instructionsAppliedSmsLine(payload.instructionsApplied);
+  if (instructionsApplied) chunks.push(instructionsApplied);
 
   chunks.push(` Full day: ${deepLinkUrl}`);
   return chunks;
@@ -706,7 +802,7 @@ export async function computeDigestPayload(
 
   const paymentsFrom = new Date(today.start.getTime() - PAYMENT_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
 
-  const [payments, completedJobs, tomorrowAppointments, openInvoices, partiallyPaidInvoices, readyProposals, draftProposals, unbilledCandidates, ratingCounts, sentEstimates, confidenceMarked, appliedLessons, supervisorReviews, autonomousLaneProposals] =
+  const [payments, completedJobs, tomorrowAppointments, openInvoices, partiallyPaidInvoices, readyProposals, draftProposals, unbilledCandidates, ratingCounts, sentEstimates, confidenceMarked, appliedLessons, supervisorReviews, autonomousLaneProposals, appliedInstructionProposals] =
     await Promise.all([
       deps.paymentRepo.findByTenant(tenantId, {
         status: 'completed',
@@ -749,6 +845,17 @@ export async function computeDigestPayload(
             today.start,
             today.end,
             DIGEST_MAX_AUTONOMOUS_BOOKINGS,
+          )
+        : Promise.resolve([] as Proposal[]),
+      // WS10 — proposals created today that carried at least one applied
+      // standing-instruction stamp ("Applied your rule ..."). Optional repo
+      // method — absent on partial doubles, section self-omits.
+      deps.proposalRepo.findAppliedInstructionsForDay
+        ? deps.proposalRepo.findAppliedInstructionsForDay(
+            tenantId,
+            today.start,
+            today.end,
+            DIGEST_MAX_APPLIED_INSTRUCTIONS_PROPOSALS,
           )
         : Promise.resolve([] as Proposal[]),
     ]);
@@ -881,6 +988,14 @@ export async function computeDigestPayload(
         }
       : undefined;
 
+  // WS10 — "Instructions applied" reflection. Omitted when no standing
+  // instruction fired on any draft today (empty list), per the "omit if
+  // zero" convention shared with unsureAbout/learnedToday/supervisorChecks/
+  // autonomousBookings.
+  const groupedInstructions = groupAppliedInstructions(appliedInstructionProposals);
+  const instructionsApplied: DigestInstructionApplied[] | undefined =
+    groupedInstructions.length > 0 ? groupedInstructions : undefined;
+
   return {
     date,
     timezone,
@@ -905,6 +1020,7 @@ export async function computeDigestPayload(
     ...(learnedToday !== undefined ? { learnedToday } : {}),
     ...(supervisorChecks !== undefined ? { supervisorChecks } : {}),
     ...(autonomousBookings !== undefined ? { autonomousBookings } : {}),
+    ...(instructionsApplied !== undefined ? { instructionsApplied } : {}),
   };
 }
 

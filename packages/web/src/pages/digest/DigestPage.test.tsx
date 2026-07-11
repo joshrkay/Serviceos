@@ -281,6 +281,33 @@ describe('DigestPage', () => {
     });
   });
 
+  describe('WS10 instructions-applied section', () => {
+    it('renders each rule with its draft count when present', async () => {
+      const withInstructions = {
+        ...basePayload,
+        instructionsApplied: [
+          { id: 'rule-1', text: 'always add trip fee', draftCount: 3 },
+          { id: 'rule-2', text: 'call before arriving', draftCount: 1 },
+        ],
+      };
+      mockFetch.mockResolvedValue(digestResponse(withInstructions));
+      renderAt('/digest/2026-06-10');
+      await screen.findByText('A solid day.');
+      const section = screen.getByText('Instructions applied').closest('section') as HTMLElement;
+      expect(within(section).getByText('always add trip fee')).toBeInTheDocument();
+      expect(within(section).getByText('3 drafts')).toBeInTheDocument();
+      expect(within(section).getByText('call before arriving')).toBeInTheDocument();
+      expect(within(section).getByText('1 draft')).toBeInTheDocument();
+    });
+
+    it('omits the section entirely when empty / absent', async () => {
+      mockFetch.mockResolvedValue(digestResponse(basePayload));
+      renderAt('/digest/2026-06-10');
+      await screen.findByText('A solid day.');
+      expect(screen.queryByText('Instructions applied')).not.toBeInTheDocument();
+    });
+  });
+
   describe('date navigation', () => {
     it('prev/next links target the adjacent calendar days', async () => {
       mockFetch.mockResolvedValue(digestResponse());

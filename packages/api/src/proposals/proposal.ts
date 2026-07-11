@@ -597,6 +597,21 @@ export interface ProposalRepository {
     to: Date,
     limit?: number,
   ): Promise<Proposal[]>;
+  /**
+   * WS10 — proposals created in [from, to) that carry at least one stamp in
+   * `payload._meta.appliedStandingInstructions` (see
+   * ai/standing-instructions-context.ts:36-39 — Array<{id, text}>, only
+   * stamped by drafting tasks when non-empty). Drives the digest "Applied
+   * your rule ..." reflection. Newest first, capped at `limit`. Optional so
+   * partial test doubles still satisfy the interface; the digest falls back
+   * to an empty section when it is absent.
+   */
+  findAppliedInstructionsForDay?(
+    tenantId: string,
+    from: Date,
+    to: Date,
+    limit?: number,
+  ): Promise<Proposal[]>;
   findByAiRun(tenantId: string, aiRunId: string): Promise<Proposal[]>;
   /**
    * Indexed lookup for voice redelivery dedup (P1). Returns the most recent
@@ -958,6 +973,29 @@ export class InMemoryProposalRepository implements ProposalRepository {
           typeof evaluation === 'object' &&
           (evaluation as Record<string, unknown>).eligible === true
         );
+      })
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+      .map((p) => ({ ...p }));
+    return typeof limit === 'number' ? rows.slice(0, limit) : rows;
+  }
+
+  async findAppliedInstructionsForDay(
+    tenantId: string,
+    from: Date,
+    to: Date,
+    limit?: number,
+  ): Promise<Proposal[]> {
+    const rows = Array.from(this.proposals.values())
+      .filter((p) => {
+        if (p.tenantId !== tenantId) return false;
+        const t = p.createdAt.getTime();
+        if (t < from.getTime() || t >= to.getTime()) return false;
+        const meta = (p.payload as Record<string, unknown> | undefined)?._meta;
+        const applied =
+          meta && typeof meta === 'object'
+            ? (meta as Record<string, unknown>).appliedStandingInstructions
+            : undefined;
+        return Array.isArray(applied) && applied.length > 0;
       })
       .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
       .map((p) => ({ ...p }));

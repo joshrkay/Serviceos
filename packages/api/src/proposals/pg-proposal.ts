@@ -236,6 +236,27 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
     });
   }
 
+  async findAppliedInstructionsForDay(
+    tenantId: string,
+    from: Date,
+    to: Date,
+    limit?: number,
+  ): Promise<Proposal[]> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT * FROM proposals
+           WHERE tenant_id = $1
+             AND created_at >= $2 AND created_at < $3
+             AND payload->'_meta' ? 'appliedStandingInstructions'
+             AND jsonb_array_length(payload->'_meta'->'appliedStandingInstructions') > 0
+           ORDER BY created_at DESC
+           ${typeof limit === 'number' ? 'LIMIT $4' : ''}`,
+        typeof limit === 'number' ? [tenantId, from, to, limit] : [tenantId, from, to],
+      );
+      return result.rows.map(mapRow);
+    });
+  }
+
   async findExpiredScheduleProposals(
     tenantId: string,
     proposalTypes: readonly ProposalType[],

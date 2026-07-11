@@ -6043,6 +6043,18 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_audit_events_tenant_created_at
       ON audit_events(tenant_id, created_at DESC);
   `,
+
+  // WS10 — supports ProposalRepository.findAppliedInstructionsForDay (the
+  // digest "Applied your rule ..." reflection). Partial expression index on
+  // the appliedStandingInstructions marker, mirroring 240's shape; additive,
+  // no-op on prod re-runs. The predicate textually matches the query's FIRST
+  // predicate (the jsonb_array_length check stays a non-indexed residual
+  // filter in the query only) so the planner can use this index.
+  '246_proposals_applied_instructions_index': `
+    CREATE INDEX IF NOT EXISTS idx_proposals_tenant_created_applied_si
+      ON proposals (tenant_id, created_at)
+      WHERE payload->'_meta' ? 'appliedStandingInstructions';
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

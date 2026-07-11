@@ -84,6 +84,14 @@ interface DigestAutonomousBookings {
   undone: number;
 }
 
+// WS10 — "Instructions applied" reflection (see packages/api digest-service.ts
+// DigestInstructionApplied doc comment).
+interface DigestInstructionApplied {
+  id: string;
+  text: string;
+  draftCount: number;
+}
+
 interface DigestPayload {
   date: string;
   timezone: string;
@@ -104,6 +112,8 @@ interface DigestPayload {
   supervisorChecks?: DigestSupervisorChecks;
   // D-015 amendment — "Auto-booked: N appointment(s)" (absent when zero).
   autonomousBookings?: DigestAutonomousBookings;
+  // WS10 — "Instructions applied" (absent when no rule fired today).
+  instructionsApplied?: DigestInstructionApplied[];
 }
 
 interface DigestResponse {
@@ -484,6 +494,23 @@ function DigestBody({
           {p.autonomousBookings.undone > 0 && (
             <p className="mt-0.5 text-sm text-slate-500">{p.autonomousBookings.undone} undone</p>
           )}
+        </SectionCard>
+      )}
+
+      {/* WS10 — "Instructions applied" reflection. Only when at least one
+          standing instruction fired on a draft today. */}
+      {p.instructionsApplied && p.instructionsApplied.length > 0 && (
+        <SectionCard title="Instructions applied">
+          <ul className="divide-y divide-slate-100">
+            {p.instructionsApplied.map((i) => (
+              <li key={i.id} className="flex min-h-11 flex-wrap items-center justify-between gap-2 py-2">
+                <p className="min-w-0 break-words text-sm text-slate-700">{i.text}</p>
+                <span className="shrink-0 text-sm font-medium tabular-nums text-slate-900">
+                  {i.draftCount} {i.draftCount === 1 ? 'draft' : 'drafts'}
+                </span>
+              </li>
+            ))}
+          </ul>
         </SectionCard>
       )}
 

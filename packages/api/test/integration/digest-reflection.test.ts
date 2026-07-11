@@ -11,6 +11,11 @@
  *     the JSONB predicate
  *     `source_context->'autonomousLaneEvaluation'->>'eligible' = 'true'`
  *     + created_at window + tenant (RLS) scoping.
+ *   - ProposalRepository.findAppliedInstructionsForDay (WS10): the JSONB
+ *     predicate `payload->'_meta' ? 'appliedStandingInstructions' AND
+ *     jsonb_array_length(payload->'_meta'->'appliedStandingInstructions') > 0`
+ *     + created_at window + tenant (RLS) scoping, and that the partial index
+ *     (migration 246) predicate matches the query's first predicate.
  *   - EstimateListOptions sentFrom/sentTo: the `sent_at >= $ AND sent_at < $`
  *     range scan behind "quotes sent today".
  *   - computeDigestPayload end-to-end over real proposal/estimate/correction
@@ -193,6 +198,58 @@ describe('Postgres integration — digest reflection sections (N-005)', () => {
     // RLS + explicit tenant_id predicate: another tenant never sees this row.
     const other = await createTestTenant(pool);
     const leaked = await proposalRepo.findAutonomousLaneApprovedForDay!(
+      other.tenantId,
+      DAY_START,
+      DAY_END,
+      10,
+    );
+    expect(leaked).toHaveLength(0);
+  });
+
+  it('findAppliedInstructionsForDay returns only today\'s applied-instruction proposals, tenant-scoped (WS10)', async () => {
+    const appliedToday = makeProposal({
+      status: 'ready_for_review',
+      summary: 'Estimate with trip fee rule applied',
+      payload: {
+        _meta: {
+          appliedStandingInstructions: [{ id: 'rule-1', text: 'always add trip fee' }],
+        },
+      },
+    });
+    const noStampToday = makeProposal({ status: 'draft', payload: {} });
+    const emptyArrayStampToday = makeProposal({
+      status: 'draft',
+      payload: { _meta: { appliedStandingInstructions: [] } },
+    });
+    const appliedYesterday = makeProposal({
+      createdAt: YESTERDAY,
+      updatedAt: YESTERDAY,
+      status: 'ready_for_review',
+      payload: {
+        _meta: {
+          appliedStandingInstructions: [{ id: 'rule-1', text: 'always add trip fee' }],
+        },
+      },
+    });
+    await proposalRepo.create(appliedToday);
+    await proposalRepo.create(noStampToday);
+    await proposalRepo.create(emptyArrayStampToday);
+    await proposalRepo.create(appliedYesterday);
+
+    const rows = await proposalRepo.findAppliedInstructionsForDay!(
+      tenant.tenantId,
+      DAY_START,
+      DAY_END,
+      10,
+    );
+    expect(rows.map((r) => r.id)).toEqual([appliedToday.id]);
+    expect(rows[0].payload).toMatchObject({
+      _meta: { appliedStandingInstructions: [{ id: 'rule-1', text: 'always add trip fee' }] },
+    });
+
+    // RLS + explicit tenant_id predicate: another tenant never sees this row.
+    const other = await createTestTenant(pool);
+    const leaked = await proposalRepo.findAppliedInstructionsForDay!(
       other.tenantId,
       DAY_START,
       DAY_END,

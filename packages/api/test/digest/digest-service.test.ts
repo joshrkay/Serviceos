@@ -13,6 +13,8 @@ import {
   DIGEST_SMS_MAX_CHARS,
   DIGEST_SMS_SOFT_LIMIT,
   DIGEST_MAX_REVIEWS,
+  DIGEST_MAX_INSTRUCTIONS,
+  groupAppliedInstructions,
   type DailyDigestPayload,
   type DigestComputeDeps,
 } from '../../src/digest/digest-service';
@@ -102,6 +104,10 @@ interface DepsOverrides {
   autonomousLaneProposals?: Proposal[];
   /** D-015 amendment — when false, omit findAutonomousLaneApprovedForDay entirely (optional-method path). */
   withAutonomousLaneMethod?: boolean;
+  /** WS10 — proposals returned by findAppliedInstructionsForDay. */
+  appliedInstructionProposals?: Proposal[];
+  /** WS10 — when false, omit findAppliedInstructionsForDay entirely (optional-method path). */
+  withAppliedInstructionsMethod?: boolean;
 }
 
 function makeDeps(o: DepsOverrides = {}): DigestComputeDeps {
@@ -135,6 +141,9 @@ function makeDeps(o: DepsOverrides = {}): DigestComputeDeps {
       ...(o.withAutonomousLaneMethod === false
         ? {}
         : { findAutonomousLaneApprovedForDay: async () => o.autonomousLaneProposals ?? [] }),
+      ...(o.withAppliedInstructionsMethod === false
+        ? {}
+        : { findAppliedInstructionsForDay: async () => o.appliedInstructionProposals ?? [] }),
     } as unknown as ProposalRepository,
     customerRepo: {
       findById: async (_t: string, id: string) =>
@@ -544,6 +553,50 @@ describe('computeDigestPayload', () => {
       expect(result.autonomousBookings).toBeUndefined();
     });
   });
+
+  // ─── WS10: "Instructions applied" reflection ─────────────────────────────
+
+  describe('instructionsApplied', () => {
+    it('composes + groups: two proposals sharing a rule, one proposal with two rules', async () => {
+      const result = await computeDigestPayload(TENANT, DATE, makeDeps({
+        appliedInstructionProposals: [
+          proposal({
+            id: 'ai-1',
+            payload: { _meta: { appliedStandingInstructions: [{ id: 'rule-1', text: 'always add trip fee' }] } },
+          }),
+          proposal({
+            id: 'ai-2',
+            payload: { _meta: { appliedStandingInstructions: [{ id: 'rule-1', text: 'always add trip fee' }] } },
+          }),
+          proposal({
+            id: 'ai-3',
+            payload: {
+              _meta: {
+                appliedStandingInstructions: [
+                  { id: 'rule-1', text: 'always add trip fee' },
+                  { id: 'rule-2', text: 'call before arriving' },
+                ],
+              },
+            },
+          }),
+        ],
+      }));
+      expect(result.instructionsApplied).toEqual([
+        { id: 'rule-1', text: 'always add trip fee', draftCount: 3 },
+        { id: 'rule-2', text: 'call before arriving', draftCount: 1 },
+      ]);
+    });
+
+    it('omits instructionsApplied when no proposal applied a standing instruction today', async () => {
+      const result = await computeDigestPayload(TENANT, DATE, makeDeps({ appliedInstructionProposals: [] }));
+      expect(result.instructionsApplied).toBeUndefined();
+    });
+
+    it('omits instructionsApplied when findAppliedInstructionsForDay is absent (optional method)', async () => {
+      const result = await computeDigestPayload(TENANT, DATE, makeDeps({ withAppliedInstructionsMethod: false }));
+      expect(result.instructionsApplied).toBeUndefined();
+    });
+  });
 });
 
 describe('summarizeProposalForDigest', () => {
@@ -610,6 +663,98 @@ describe('summarizeProposalForDigest', () => {
       proposal({ proposalType: 'draft_estimate', sourceContext: { missingFields: [] } }),
     );
     expect(emptyMissing.hasMissingFields).toBeUndefined();
+  });
+});
+
+describe('groupAppliedInstructions', () => {
+  it('groups two proposals sharing a rule into one entry with draftCount 2', () => {
+    const grouped = groupAppliedInstructions([
+      proposal({
+        id: 'p1',
+        payload: { _meta: { appliedStandingInstructions: [{ id: 'r1', text: 'trip fee' }] } },
+      }),
+      proposal({
+        id: 'p2',
+        payload: { _meta: { appliedStandingInstructions: [{ id: 'r1', text: 'trip fee' }] } },
+      }),
+    ]);
+    expect(grouped).toEqual([{ id: 'r1', text: 'trip fee', draftCount: 2 }]);
+  });
+
+  it('counts one proposal with two rules as one draft for each rule, ordered by draftCount desc then id', () => {
+    const grouped = groupAppliedInstructions([
+      proposal({
+        id: 'p1',
+        payload: {
+          _meta: {
+            appliedStandingInstructions: [
+              { id: 'r-a', text: 'rule a' },
+              { id: 'r-b', text: 'rule b' },
+            ],
+          },
+        },
+      }),
+      proposal({
+        id: 'p2',
+        payload: { _meta: { appliedStandingInstructions: [{ id: 'r-b', text: 'rule b' }] } },
+      }),
+    ]);
+    expect(grouped).toEqual([
+      { id: 'r-b', text: 'rule b', draftCount: 2 },
+      { id: 'r-a', text: 'rule a', draftCount: 1 },
+    ]);
+  });
+
+  it('a repeated stamp on the SAME proposal counts once (defensive de-dupe)', () => {
+    const grouped = groupAppliedInstructions([
+      proposal({
+        id: 'p1',
+        payload: {
+          _meta: {
+            appliedStandingInstructions: [
+              { id: 'r1', text: 'trip fee' },
+              { id: 'r1', text: 'trip fee' },
+            ],
+          },
+        },
+      }),
+    ]);
+    expect(grouped).toEqual([{ id: 'r1', text: 'trip fee', draftCount: 1 }]);
+  });
+
+  it('returns an empty array for no proposals / no stamps', () => {
+    expect(groupAppliedInstructions([])).toEqual([]);
+    expect(groupAppliedInstructions([proposal({ payload: {} })])).toEqual([]);
+  });
+
+  it('tolerates malformed _meta / stamp shapes defensively', () => {
+    const grouped = groupAppliedInstructions([
+      proposal({ id: 'null-meta', payload: { _meta: null } }),
+      proposal({ id: 'string-meta', payload: { _meta: 'not-an-object' } }),
+      proposal({ id: 'non-array-stamp', payload: { _meta: { appliedStandingInstructions: 'nope' } } }),
+      proposal({ id: 'null-entry', payload: { _meta: { appliedStandingInstructions: [null, 42, 'x'] } } }),
+      proposal({
+        id: 'missing-fields',
+        payload: { _meta: { appliedStandingInstructions: [{ id: 'r1' }, { text: 'no id' }, {}] } },
+      }),
+      proposal({
+        id: 'valid',
+        payload: { _meta: { appliedStandingInstructions: [{ id: 'r-ok', text: 'a valid rule' }] } },
+      }),
+    ]);
+    expect(grouped).toEqual([{ id: 'r-ok', text: 'a valid rule', draftCount: 1 }]);
+  });
+
+  it('caps output at DIGEST_MAX_INSTRUCTIONS', () => {
+    const proposals = Array.from({ length: DIGEST_MAX_INSTRUCTIONS + 5 }, (_, i) =>
+      proposal({
+        id: `p${i}`,
+        payload: {
+          _meta: { appliedStandingInstructions: [{ id: `r${i}`, text: `rule ${i}` }] },
+        },
+      }),
+    );
+    expect(groupAppliedInstructions(proposals)).toHaveLength(DIGEST_MAX_INSTRUCTIONS);
   });
 });
 
@@ -825,6 +970,7 @@ describe('renderDigestSmsSegments', () => {
     expect(body).not.toContain('Quotes:');
     expect(body).not.toContain('Checked:');
     expect(body).not.toContain('Auto-booked:');
+    expect(body).not.toContain('Applied your rule');
   });
 
   it('renders the supervisor-checks line: flagged and none-flagged variants', () => {
@@ -876,6 +1022,58 @@ describe('renderDigestSmsSegments', () => {
       renderDigestSmsSegments({ payload: basePayload(), deepLinkUrl: DEEP, approvalLinks: [] }),
     );
     expect(omittedBody).not.toContain('Auto-booked:');
+  });
+
+  it('renders the "Instructions applied" line: single rule, truncation, multi-rule, and omitted when absent', () => {
+    const singleRuleBody = combine(
+      renderDigestSmsSegments({
+        payload: basePayload({
+          instructionsApplied: [{ id: 'r1', text: 'always add trip fee', draftCount: 3 }],
+        }),
+        deepLinkUrl: DEEP,
+        approvalLinks: [],
+      }),
+    );
+    expect(singleRuleBody).toContain('Applied your rule "always add trip fee" to 3 draft(s).');
+    expect(singleRuleBody).not.toContain('more rules');
+
+    // Rule text longer than ~40 chars is truncated with an ellipsis.
+    const longText = 'a'.repeat(60);
+    const truncatedBody = combine(
+      renderDigestSmsSegments({
+        payload: basePayload({
+          instructionsApplied: [{ id: 'r1', text: longText, draftCount: 1 }],
+        }),
+        deepLinkUrl: DEEP,
+        approvalLinks: [],
+      }),
+    );
+    expect(truncatedBody).toContain(`Applied your rule "${'a'.repeat(40)}…" to 1 draft(s).`);
+    expect(truncatedBody).not.toContain(longText);
+
+    // Multiple rules — top rule (already draftCount-sorted by the grouping
+    // helper) renders, "; K more rules" appends the rest.
+    const multiRuleBody = combine(
+      renderDigestSmsSegments({
+        payload: basePayload({
+          instructionsApplied: [
+            { id: 'r1', text: 'always add trip fee', draftCount: 3 },
+            { id: 'r2', text: 'call before arriving', draftCount: 2 },
+            { id: 'r3', text: 'note gate code', draftCount: 1 },
+          ],
+        }),
+        deepLinkUrl: DEEP,
+        approvalLinks: [],
+      }),
+    );
+    expect(multiRuleBody).toContain(
+      'Applied your rule "always add trip fee" to 3 draft(s); 2 more rules.',
+    );
+
+    const omittedBody = combine(
+      renderDigestSmsSegments({ payload: basePayload(), deepLinkUrl: DEEP, approvalLinks: [] }),
+    );
+    expect(omittedBody).not.toContain('Applied your rule');
   });
 
   it('renders the quotes-sent, unsure, and learned compact lines when present', () => {
