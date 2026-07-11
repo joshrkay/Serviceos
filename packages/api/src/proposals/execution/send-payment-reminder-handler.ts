@@ -21,6 +21,9 @@ import { sendPaymentReminderPayloadSchema } from '../contracts/send-payment-remi
  */
 export class SendPaymentReminderExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'send_payment_reminder';
+  // Awaits transactionalComms.notifyInvoiceOverdue → sendCustomerMessage →
+  // delivery provider SMS/email — external network I/O.
+  performsExternalIo = true;
 
   constructor(
     private readonly transactionalComms?: TransactionalCommsService,

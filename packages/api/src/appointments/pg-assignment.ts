@@ -28,6 +28,13 @@ function mapRow(row: Record<string, unknown>): AppointmentAssignment {
  *  - `uq_assignment_primary_per_appointment` — unique_violation (23505)
  *    from the partial unique index that allows at most one primary
  *    assignment per appointment.
+ *  - deadlock_detected (40P01) — two concurrent assignment INSERTs racing
+ *    the `no_double_booking` EXCLUDE constraint can each hold an index lock
+ *    the other needs, so Postgres aborts one with a deadlock instead of a
+ *    clean exclusion_violation. On this write path a deadlock IS the
+ *    double-booking race resolving itself, so it's a retryable conflict
+ *    (409), not a server error (500) — otherwise a concurrent double-book
+ *    would surface as a 500 depending purely on lock-acquisition timing.
  *
  * Everything else is rethrown unchanged.
  */
@@ -41,6 +48,11 @@ function mapAssignmentDbError(err: unknown): Error {
     }
     if (e.code === '23505' && e.constraint === 'uq_assignment_primary_per_appointment') {
       return new ConflictError('Another primary technician is already assigned to this appointment.');
+    }
+    if (e.code === '40P01') {
+      return new ConflictError(
+        'Technician assignment conflicted with a concurrent booking for the same slot; please retry.',
+      );
     }
   }
   return err instanceof Error ? err : new Error(String(err));

@@ -1,3 +1,4 @@
+import type { PoolClient } from 'pg';
 import { Proposal, ProposalRepository } from '../proposal';
 import { transitionProposal, isInUndoWindow, UNDO_WINDOW_MS } from '../lifecycle';
 import { ExecutionHandler, ExecutionContext, ExecutionResult } from './handlers';
@@ -7,6 +8,8 @@ import { AppError } from '../../shared/errors';
 import { ProposalExecutionRepository } from '../proposal-execution';
 import { resolveChainReferences } from './chain-resolution';
 import { createLogger } from '../../logging/logger';
+import { tenantContextStore } from '../../middleware/tenant-context';
+import { applyTenantContext } from '../../db/rls-runtime-role';
 
 const logger = createLogger({
   service: 'proposals.execution.executor',
@@ -160,33 +163,142 @@ export class ProposalExecutor {
     const keyedProposal = withResolvedIdempotencyKey(executableProposal);
     let executionId: string | undefined;
     let executionRecordedInGuard = false;
-    const outcome = await this.idempotency.checkAndExecute(keyedProposal, async () => {
-      const handlerResult = await handler.execute(keyedProposal, context);
+    // Set inside the transactional core on a FIRST (non-short-circuited) run;
+    // stays undefined when the idempotency guard short-circuits.
+    let txUpdatedProposal: Proposal | undefined;
 
-      // Critical race fix (§11 H1): write the idempotency marker while we still
-      // hold the advisory lock. If this insert happened later (after
-      // checkAndExecute returns), a second concurrent caller could acquire the
-      // lock, fail to find a prior execution, and run the handler a second time.
-      if (this.executionRepo && handlerResult.success) {
-        const row = await this.executionRepo.recordExecution({
-          tenantId: keyedProposal.tenantId,
-          proposalId: keyedProposal.id,
-          executedPayload: keyedProposal.payload,
-          executedBy: context.executedBy,
-          status: 'succeeded',
-          idempotencyKey: keyedProposal.idempotencyKey,
-        });
-        executionId = row.id;
-        executionRecordedInGuard = true;
+    // DATA-31: the handler's domain mutation, the idempotency record, and the
+    // proposal status transition used to be three writes on three connections
+    // with no shared transaction (this is a BACKGROUND sweep, so
+    // PgBaseRepository.withTenantTransaction found no ambient request tx and
+    // landed each call on its own connection). A crash after the mutation
+    // committed but before updateStatus('executed') stranded the proposal at
+    // 'approved' — and, for handlers that don't self-guard on target state, a
+    // retry could re-run the mutation. We now run all three inside ONE
+    // transaction on the advisory lock's OWN connection, so they commit
+    // all-or-nothing while the lock is still held, and only unlock after COMMIT.
+    const outcome = await this.idempotency.checkAndExecute(keyedProposal, async (lockClient) => {
+      // Shared closure: given the handler's result, compute the post-execution
+      // proposal view, write the idempotency marker (on success), and transition
+      // the status. Factored out so it isn't duplicated across the DB-only and
+      // external-I/O branches below. Sets the outer-scope `executionId`,
+      // `executionRecordedInGuard`, and `txUpdatedProposal`. Callers decide the
+      // transaction boundary this runs in (see the three paths below).
+      const recordAndTransition = async (handlerResult: ExecutionResult): Promise<void> => {
+        let updated: Proposal;
+        if (handlerResult.success) {
+          updated = transitionProposal(proposal, 'executed', context.executedBy);
+          updated.resultEntityId = handlerResult.resultEntityId;
+          updated.executedAt = new Date();
+          updated.executedBy = context.executedBy;
+        } else {
+          updated = transitionProposal(proposal, 'execution_failed', context.executedBy);
+        }
+
+        // Critical race fix (§11 H1): write the idempotency marker while we still
+        // hold the advisory lock. A second concurrent caller can't acquire the
+        // lock until we COMMIT + unlock, so it will see this marker and
+        // short-circuit instead of re-running.
+        if (this.executionRepo && handlerResult.success) {
+          const row = await this.executionRepo.recordExecution({
+            tenantId: keyedProposal.tenantId,
+            proposalId: keyedProposal.id,
+            executedPayload: keyedProposal.payload,
+            executedBy: context.executedBy,
+            status: 'succeeded',
+            idempotencyKey: keyedProposal.idempotencyKey,
+          });
+          executionId = row.id;
+          executionRecordedInGuard = true;
+        }
+
+        // Status transition. In the DB-only path this commits atomically with the
+        // domain mutation and the idempotency record (DATA-31). In the
+        // external-I/O path the handler's domain writes have already committed on
+        // their own connections; only this marker + status write share a
+        // transaction, so a failure here does NOT unwind the already-sent side
+        // effect (mirrors pre-DATA-31 semantics for those handlers).
+        await this.proposalRepo.updateStatus(
+          updated.tenantId,
+          updated.id,
+          updated.status,
+          {
+            resultEntityId: updated.resultEntityId,
+            executedAt: updated.executedAt,
+            executedBy: updated.executedBy,
+            // QA-2026-06-05: persist WHY execution failed. Handlers return a
+            // reason in result.error, but it was dropped — execution_failed
+            // rows had execution_error NULL and were undebuggable (live: every
+            // voice create_customer failed silently on a payload-shape
+            // mismatch for weeks of QA archaeology).
+            ...(handlerResult.success
+              ? {}
+              : { executionError: handlerResult.error ?? 'unknown execution failure' }),
+          }
+        );
+
+        txUpdatedProposal = updated;
+      };
+
+      // PR #666 (Gemini HIGH): branch on whether the handler performs synchronous
+      // external network I/O inside execute().
+      const performsExternalIo = handler.performsExternalIo === true;
+
+      if (lockClient && !performsExternalIo) {
+        // Path A — DB-only handler with a locked connection: UNCHANGED DATA-31
+        // behavior. Run handler.execute() + recordExecution + updateStatus all
+        // inside ONE tenant-scoped transaction on the advisory lock's own
+        // connection, so they commit all-or-nothing while the lock is held. If
+        // anything throws before COMMIT the whole unit rolls back: the proposal
+        // stays 'approved', the mutation is invisible, and no idempotency marker
+        // survives, so a retry re-executes cleanly.
+        return this.runInProposalTransaction(
+          lockClient,
+          keyedProposal.tenantId,
+          async () => {
+            const handlerResult = await handler.execute(keyedProposal, context);
+            await recordAndTransition(handlerResult);
+            return handlerResult;
+          },
+        );
       }
 
+      if (lockClient && performsExternalIo) {
+        // Path B — external-I/O handler with a locked connection: run
+        // handler.execute() OUTSIDE the executor transaction. Its repo writes go
+        // through the normal withTenantTransaction path (own connection/tx per
+        // call), so they COMMIT and release their row locks BEFORE and around the
+        // external send — the connection-exhaustion + long-lived-lock risk the PR
+        // finding flagged is gone. THEN wrap ONLY the idempotency record + status
+        // transition in a small transaction on the advisory lock's own
+        // connection (still held, so idempotency serialization is preserved).
+        const handlerResult = await handler.execute(keyedProposal, context);
+        await this.runInProposalTransaction(
+          lockClient,
+          keyedProposal.tenantId,
+          () => recordAndTransition(handlerResult),
+        );
+        return handlerResult;
+      }
+
+      // Path C — no locked connection (no-op lock / in-memory repos,
+      // single-threaded tests): run everything directly. There is no real
+      // transaction to open, so DB-only and external-I/O handlers behave the same
+      // here (as they did before this change).
+      const handlerResult = await handler.execute(keyedProposal, context);
+      await recordAndTransition(handlerResult);
       return handlerResult;
     });
     const result: ExecutionResult = outcome.result;
     const alreadyExecuted = outcome.alreadyExecuted;
 
+    // The status transition already committed inside the transaction on a first
+    // run. Recover that committed view for the post-commit consumers below; on
+    // the idempotency short-circuit path the core never ran, so recompute it.
     let updatedProposal: Proposal;
-    if (result.success) {
+    if (txUpdatedProposal) {
+      updatedProposal = txUpdatedProposal;
+    } else if (result.success) {
       updatedProposal = transitionProposal(proposal, 'executed', context.executedBy);
       updatedProposal.resultEntityId = result.resultEntityId;
       updatedProposal.executedAt = new Date();
@@ -195,52 +307,16 @@ export class ProposalExecutor {
       updatedProposal = transitionProposal(proposal, 'execution_failed', context.executedBy);
     }
 
-    // Write the status transition. Normally this runs for every
-    // execution. When the idempotency guard short-circuits
-    // (`alreadyExecuted`) we usually want to leave the DB row alone
-    // because it is already in 'executed' state from the prior
-    // successful run — re-writing would stomp on executedAt/executedBy.
-    //
-    // HOWEVER: there's a subtle race. If a prior run succeeded at the
-    // handler but CRASHED before it could write the status update,
-    // the DB row is stuck at 'approved' while the idempotency guard
-    // — which looks up by key AND status='executed' — won't find a
-    // match. That means a retry would see the side effect as "not
-    // done" and try to re-execute, double-firing the mutation.
-    //
-    // The current `alreadyExecuted` branch here is reached only when
-    // the guard DID find an executed match, so the DB is consistent
-    // and we can skip the write. The crash-in-the-middle path needs
-    // a different fix at the guard layer (follow-up — requires
-    // transactional wrapping of handler+status). For now we
-    // reconcile as best we can: on the `alreadyExecuted` branch, if
-    // the caller's view of the proposal is still 'approved' (e.g.,
-    // because it was re-fetched after the crash), force the status
-    // to 'executed' with the idempotency result so the row becomes
-    // consistent the first time a retry runs cleanly.
-    if (!alreadyExecuted) {
-      await this.proposalRepo.updateStatus(
-        updatedProposal.tenantId,
-        updatedProposal.id,
-        updatedProposal.status,
-        {
-          resultEntityId: updatedProposal.resultEntityId,
-          executedAt: updatedProposal.executedAt,
-          executedBy: updatedProposal.executedBy,
-          // QA-2026-06-05: persist WHY execution failed. Handlers return a
-          // reason in result.error, but it was dropped — execution_failed
-          // rows had execution_error NULL and were undebuggable (live: every
-          // voice create_customer failed silently on a payload-shape
-          // mismatch for weeks of QA archaeology).
-          ...(result.success ? {} : { executionError: result.error ?? 'unknown execution failure' }),
-        }
-      );
-    } else if (proposal.status === 'approved') {
-      // Defensive reconciliation: the idempotency guard matched on a
-      // prior 'executed' proposal under the same key, but THIS row is
-      // still 'approved' — likely the same proposal being retried
-      // after a prior crash. Transition it now using the resolved
-      // resultEntityId so the audit trail is coherent.
+    // Crash-recovery reconciliation for the idempotency short-circuit path.
+    // DATA-31 closes the crash window for NEW runs (the mutation + status now
+    // commit atomically), but a proposal stranded by a PRE-DATA-31 crash can
+    // still arrive here: the guard matches a prior 'executed' proposal under
+    // the same key while THIS row is still 'approved'. Transition it now using
+    // the resolved resultEntityId so the audit trail is coherent. This is a
+    // single status write with no accompanying domain mutation, so it needs no
+    // transaction of its own; on a first run the write already happened inside
+    // the transaction above, so we skip it here.
+    if (alreadyExecuted && proposal.status === 'approved') {
       await this.proposalRepo.updateStatus(
         proposal.tenantId,
         proposal.id,
@@ -311,5 +387,42 @@ export class ProposalExecutor {
     }
 
     return { proposal: updatedProposal, result, alreadyExecuted };
+  }
+
+  /**
+   * DATA-31: run `fn` inside a single tenant-scoped transaction on the supplied
+   * connection — the advisory lock's own client (see IdempotencyLockProvider).
+   * Mirrors the db/ helpers (`withTenantSession` /
+   * `applyTenantContext({transactional:true})`) but on a caller-owned client
+   * that it does NOT release: the lock provider owns the connection lifecycle
+   * (unlock + release in its `finally`). Sets the tenant GUC with `SET LOCAL`
+   * (auto-reset at COMMIT/ROLLBACK — PgBouncer transaction-pooling safe) and
+   * runs `fn` inside `tenantContextStore`, so every PgBaseRepository call made
+   * by the handler, the execution repo, and the proposal repo reuses THIS
+   * client and joins the one transaction. COMMIT on success, ROLLBACK on any
+   * throw — the ROLLBACK undoes the domain mutation, the idempotency record,
+   * and the status write together.
+   */
+  private async runInProposalTransaction<T>(
+    client: PoolClient,
+    tenantId: string,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    await client.query('BEGIN');
+    try {
+      await applyTenantContext(client, tenantId, { transactional: true });
+      const result = await tenantContextStore.run({ client, tenantId }, fn);
+      await client.query('COMMIT');
+      return result;
+    } catch (err) {
+      try {
+        await client.query('ROLLBACK');
+      } catch {
+        // Best-effort: surface the original error. If the connection is broken
+        // the lock provider destroys it on unlock failure, which releases the
+        // advisory lock and the aborted transaction server-side.
+      }
+      throw err;
+    }
   }
 }

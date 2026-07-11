@@ -249,6 +249,54 @@ describe('P0-006 — Secrets/config framework', () => {
     });
   });
 
+  describe('ARCH-01 — REDIS_URL required when NUM_REPLICAS > 1', () => {
+    const baseMultiReplica = {
+      NODE_ENV: 'prod',
+      DATABASE_URL: 'postgres://u:p@h/d',
+      CLERK_SECRET_KEY: 'sk_x',
+      CLERK_PUBLISHABLE_KEY: 'pk_x',
+      CLERK_WEBHOOK_SECRET: 'whsec_x',
+      STRIPE_WEBHOOK_SECRET: 'whsec_stripe_x',
+      AI_PROVIDER_API_KEY: 'ak_x',
+      CORS_ORIGIN: 'https://app.example.com',
+      // Isolate the Redis requirement: opt features out, RLS on.
+      TELEPHONY_ENABLED: 'false',
+      EMAIL_ENABLED: 'false',
+      STORAGE_ENABLED: 'false',
+      RLS_RUNTIME_ROLE: 'true',
+    };
+
+    it('prod + NUM_REPLICAS=2 + no REDIS_URL — fails fast naming REDIS_URL', () => {
+      expect(() =>
+        loadConfig({ ...baseMultiReplica, NUM_REPLICAS: '2' })
+      ).toThrow(/REDIS_URL/);
+    });
+
+    it('prod + NUM_REPLICAS=2 + REDIS_URL set — passes', () => {
+      expect(() =>
+        loadConfig({ ...baseMultiReplica, NUM_REPLICAS: '2', REDIS_URL: 'redis://cache:6379' })
+      ).not.toThrow();
+    });
+
+    it('prod + NUM_REPLICAS unset + no REDIS_URL — passes (current single-replica deploy still boots)', () => {
+      expect(() => loadConfig({ ...baseMultiReplica })).not.toThrow();
+    });
+
+    it('prod + NUM_REPLICAS=1 explicit + no REDIS_URL — passes', () => {
+      expect(() => loadConfig({ ...baseMultiReplica, NUM_REPLICAS: '1' })).not.toThrow();
+    });
+
+    it('prod + NUM_REPLICAS non-numeric + no REDIS_URL — treated as single replica, passes', () => {
+      expect(() => loadConfig({ ...baseMultiReplica, NUM_REPLICAS: 'auto' })).not.toThrow();
+    });
+
+    it('dev + NUM_REPLICAS=2 + no REDIS_URL — does not throw (guard is prod/staging only)', () => {
+      expect(() =>
+        loadConfig({ ...baseMultiReplica, NODE_ENV: 'dev', NUM_REPLICAS: '2' })
+      ).not.toThrow();
+    });
+  });
+
   describe('feature-required config gate (Sprint 1 / Story 1.5)', () => {
     const baseProdEnv = {
       NODE_ENV: 'prod',
