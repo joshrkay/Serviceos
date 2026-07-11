@@ -14,6 +14,8 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Pool } from 'pg';
 import { getSharedTestDb, createTestTenant, closeSharedTestDb, type TestTenant } from './shared';
 import { buildWeeklyFeedbackSnapshot } from '../../src/digest/weekly-feedback-builder';
+import { PgCorrectionRepository } from '../../src/proposals/corrections/pg-correction';
+import type { Correction } from '../../src/proposals/corrections/correction';
 
 const WEEK_START = new Date('2026-06-01T00:00:00.000Z');
 const WEEK_END = new Date('2026-06-08T00:00:00.000Z');
@@ -64,5 +66,49 @@ describe('Postgres integration — weekly feedback builder', () => {
 
     const snap = await buildWeeklyFeedbackSnapshot(pool, tenant.tenantId, WEEK_START, WEEK_END);
     expect(snap.callsAnswered).toBe(1);
+  });
+
+  // WS22 — "same mistake twice" weekly rate wiring.
+  describe('repeatCorrections (WS22)', () => {
+    it('omits repeatCorrections when no correctionRepo is passed (backward compatible)', async () => {
+      const snap = await buildWeeklyFeedbackSnapshot(pool, tenant.tenantId, WEEK_START, WEEK_END);
+      expect(snap.repeatCorrections).toBeUndefined();
+    });
+
+    it('joins the real PgCorrectionRepository and reports total/repeats/rate', async () => {
+      const correctionRepo = new PgCorrectionRepository(pool);
+      const t = await createTestTenant(pool);
+
+      function row(over: Partial<Correction>): Correction {
+        return {
+          id: crypto.randomUUID(),
+          tenantId: t.tenantId,
+          proposalId: crypto.randomUUID(),
+          intent: 'create_estimate',
+          field: 'laborRate',
+          beforeValue: 100,
+          afterValue: 120,
+          actorId: t.userId,
+          createdAt: new Date('2026-06-03T00:00:00.000Z'),
+          ...over,
+        };
+      }
+
+      await correctionRepo.recordMany([
+        row({ createdAt: new Date('2026-06-02T00:00:00.000Z') }),
+        row({ createdAt: new Date('2026-06-03T00:00:00.000Z') }), // repeat of the same (intent, field)
+        row({ field: 'scope', beforeValue: 'a', afterValue: 'b', createdAt: new Date('2026-06-04T00:00:00.000Z') }),
+      ]);
+
+      const snap = await buildWeeklyFeedbackSnapshot(pool, t.tenantId, WEEK_START, WEEK_END, correctionRepo);
+      expect(snap.repeatCorrections).toEqual({ total: 3, repeats: 1, rate: 33 });
+    });
+
+    it('omits repeatCorrections when the tenant has zero corrections this week ("omit if zero")', async () => {
+      const correctionRepo = new PgCorrectionRepository(pool);
+      const t = await createTestTenant(pool);
+      const snap = await buildWeeklyFeedbackSnapshot(pool, t.tenantId, WEEK_START, WEEK_END, correctionRepo);
+      expect(snap.repeatCorrections).toBeUndefined();
+    });
   });
 });

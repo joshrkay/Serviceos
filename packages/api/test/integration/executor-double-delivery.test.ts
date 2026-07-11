@@ -6,6 +6,7 @@ import { PgProposalRepository } from '../../src/proposals/pg-proposal';
 import { PgProposalExecutionRepository } from '../../src/proposals/pg-proposal-execution';
 import { ProposalExecutor } from '../../src/proposals/execution/executor';
 import { IdempotencyGuard } from '../../src/proposals/execution/idempotency';
+import { PgAuditRepository } from '../../src/audit/pg-audit';
 import {
   ExecutionContext,
   ExecutionHandler,
@@ -73,9 +74,13 @@ describe('ProposalExecutor — double-delivery idempotency (§11 H1)', () => {
       ['create_customer', handler],
     ]);
     const guard = new IdempotencyGuard(executionRepo, proposalRepo);
-    const executor = new ProposalExecutor(handlers, proposalRepo, guard, {
-      executionRepo,
-    });
+    const executor = new ProposalExecutor(
+      handlers,
+      proposalRepo,
+      guard,
+      new PgAuditRepository(pool),
+      { executionRepo },
+    );
     return { executor, getInvocations: () => handlerInvocations };
   }
 

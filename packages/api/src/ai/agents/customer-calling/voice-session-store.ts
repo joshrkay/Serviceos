@@ -223,6 +223,31 @@ export interface VoiceSession {
    */
   voiceApprovalState?: import('../../tasks/proposal-approval-task').VoiceApprovalSessionState;
   /**
+   * WS18 — in-flight on-call SMS consent capture. Set when the close flow asks
+   * the caller for permission to text the quote + booking link; the NEXT turn's
+   * answer is evaluated by strict confirmIntent (ambiguous → no). Adapter-side
+   * state like `pendingVoiceApproval` (the FSM never reads it); consumed and
+   * cleared at the top of the speech turn. Carries no secrets.
+   *
+   * WS18d — `close` is set when the capture was initiated by the D-018 close
+   * flow: a grant then continues into hold placement + the sanctioned chain
+   * execution instead of the plain acknowledgment. `strictConfirmed` records
+   * that the authoritative confirmIntent gate already passed on the
+   * affirmative turn (an input to evaluateAutonomousCloseLane).
+   */
+  pendingConsentCapture?: {
+    customerId: string;
+    phone: string;
+    close?: { proposalId: string; strictConfirmed: boolean };
+  };
+  /**
+   * WS18d — terminal close-flow state for this session. 'closed' after the
+   * sanctioned chain ran (fully or timeout-partial: booking + text are in
+   * motion); 'fallback' after the owner-finalizes chain was queued. Guards a
+   * repeated "yes, book it" from re-running the close / re-texting the owner.
+   */
+  closeState?: 'closed' | 'fallback';
+  /**
    * WS5 — in-flight tenant-catalog load, kicked off once at session
    * establishment (both voice transports) so in-call estimate grounding has
    * the active catalog in hand synchronously at quote time. Managed by
@@ -641,6 +666,21 @@ export class VoiceSessionStore {
     let n = 0;
     for (const session of this.sessions.values()) if (!session.ended) n += 1;
     return n;
+  }
+
+  /**
+   * WS15 — callSids of LIVE (non-ended) sessions, for the drain-abandonment
+   * alarm: when the shutdown drain window expires with live calls remaining,
+   * the Sentry event names the abandoned callSids so the operator can match
+   * them to Twilio call logs. Sessions without a callSid (web/test channels)
+   * are skipped — liveCount() remains the authoritative count.
+   */
+  liveCallSids(): string[] {
+    const sids: string[] = [];
+    for (const session of this.sessions.values()) {
+      if (!session.ended && session.callSid) sids.push(session.callSid);
+    }
+    return sids;
   }
 
   /**

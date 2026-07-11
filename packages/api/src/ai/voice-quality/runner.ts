@@ -83,7 +83,7 @@ import type { InvoiceRepository } from '../../invoices/invoice';
 import type { EstimateRepository } from '../../estimates/estimate';
 import type { JobRepository } from '../../jobs/job';
 import type { LeadRepository } from '../../leads/lead';
-import type { ProposalRepository } from '../../proposals/proposal';
+import type { Proposal, ProposalRepository } from '../../proposals/proposal';
 import type { AuditRepository } from '../../audit/audit';
 
 // ─── Public types ────────────────────────────────────────────────────────────
@@ -264,6 +264,15 @@ async function seedFixtures(
       await repos.invoiceRepo.create(i);
     }
   }
+  // WS21b — pending proposals so an owner-approval script has real targets to
+  // approve/reject. Seeded verbatim into the SAME proposalRepo the driver's
+  // approval dialogue reads/writes, so a script's approve turn flips the
+  // seeded proposal's status and the runner's post-count delta observes it.
+  if (script.fixtures.proposals) {
+    for (const p of script.fixtures.proposals as Proposal[]) {
+      await repos.proposalRepo.create(p);
+    }
+  }
   // Estimates / jobs / leads not surfaced in the v1 schema's optional
   // fixture set, but the repo bundle exposes them so future schema
   // versions can extend without touching this signature. Treated as
@@ -352,6 +361,9 @@ export async function runScript(
       tenantId,
       callerId: script.callerId,
       callerIdBlocked: script.callerIdBlocked,
+      // WS21b — unlock the owner-only approval/edit dialogue when the fixture
+      // declares the caller is the owner (or seeds a matching ownerPhone).
+      ...(script.callerIsOwner ? { callerIsOwner: true } : {}),
     });
     sessionId = startResult.sessionId;
 

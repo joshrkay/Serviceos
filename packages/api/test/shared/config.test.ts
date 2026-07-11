@@ -3,6 +3,7 @@ import {
   resetConfig,
   EnvironmentSecretResolver,
   validateEnvSchema,
+  resolveMediaStreamsEnabled,
 } from '../../src/shared/config';
 
 describe('P0-006 — Secrets/config framework', () => {
@@ -579,6 +580,78 @@ describe('P0-006 — Secrets/config framework', () => {
       expect(c.TCPA_CONSENT_ENFORCEMENT).toBe('block');
     });
   });
+
+  describe('D-018 — AUTONOMOUS_CLOSE_DISABLED kill switch', () => {
+    it('defaults to undefined (per-tenant gating only)', () => {
+      expect(loadConfig({ NODE_ENV: 'dev' }).AUTONOMOUS_CLOSE_DISABLED).toBeUndefined();
+    });
+
+    it("accepts 'true' / 'false' and is independent of AUTONOMOUS_BOOKING_DISABLED", () => {
+      const c = loadConfig({
+        NODE_ENV: 'dev',
+        AUTONOMOUS_CLOSE_DISABLED: 'true',
+        AUTONOMOUS_BOOKING_DISABLED: 'false',
+      });
+      expect(c.AUTONOMOUS_CLOSE_DISABLED).toBe('true');
+      expect(c.AUTONOMOUS_BOOKING_DISABLED).toBe('false');
+    });
+
+    it('rejects a non-boolean value', () => {
+      expect(() =>
+        loadConfig({ NODE_ENV: 'dev', AUTONOMOUS_CLOSE_DISABLED: 'maybe' }),
+      ).toThrow();
+    });
+  });
+
+  describe('WS14 — PROCESS_ROLE widened to include "voice"', () => {
+    it('accepts "voice" as a valid role', () => {
+      const c = loadConfig({ NODE_ENV: 'dev', PROCESS_ROLE: 'voice' });
+      expect(c.PROCESS_ROLE).toBe('voice');
+    });
+
+    it('still accepts the original three roles', () => {
+      expect(loadConfig({ NODE_ENV: 'dev', PROCESS_ROLE: 'web' }).PROCESS_ROLE).toBe('web');
+      resetConfig();
+      expect(loadConfig({ NODE_ENV: 'dev', PROCESS_ROLE: 'worker' }).PROCESS_ROLE).toBe('worker');
+      resetConfig();
+      expect(loadConfig({ NODE_ENV: 'dev', PROCESS_ROLE: 'all' }).PROCESS_ROLE).toBe('all');
+    });
+
+    it('unset still defaults to "all" (byte-for-byte back-compat)', () => {
+      const c = loadConfig({ NODE_ENV: 'dev' });
+      expect(c.PROCESS_ROLE).toBe('all');
+    });
+
+    it('rejects an invalid role', () => {
+      expect(() => loadConfig({ NODE_ENV: 'dev', PROCESS_ROLE: 'bogus' })).toThrow();
+    });
+  });
+
+  describe('WS26 — voice turn-latency SLO knobs', () => {
+    it('defaults: 3500ms P95 threshold, 30-turn sample floor', () => {
+      const c = loadConfig({ NODE_ENV: 'dev' });
+      expect(c.SLO_TURN_LATENCY_P95_MS).toBe(3500);
+      expect(c.SLO_TURN_LATENCY_MIN_SAMPLE).toBe(30);
+    });
+
+    it('coerces string overrides to numbers', () => {
+      const c = loadConfig({
+        NODE_ENV: 'dev',
+        SLO_TURN_LATENCY_P95_MS: '2800',
+        SLO_TURN_LATENCY_MIN_SAMPLE: '50',
+      });
+      expect(c.SLO_TURN_LATENCY_P95_MS).toBe(2800);
+      expect(c.SLO_TURN_LATENCY_MIN_SAMPLE).toBe(50);
+    });
+
+    it('rejects a non-positive threshold and a non-integer sample floor', () => {
+      expect(() => loadConfig({ NODE_ENV: 'dev', SLO_TURN_LATENCY_P95_MS: '0' })).toThrow();
+      resetConfig();
+      expect(() =>
+        loadConfig({ NODE_ENV: 'dev', SLO_TURN_LATENCY_MIN_SAMPLE: '5.5' }),
+      ).toThrow();
+    });
+  });
 });
 
 describe('P0-026 — validateEnvSchema (Zod startup validation)', () => {
@@ -687,5 +760,59 @@ describe('P0-026 — validateEnvSchema (Zod startup validation)', () => {
     expect(() =>
       validateEnvSchema({ NODE_ENV: 'development', CORS_ORIGIN: 'true' })
     ).not.toThrow();
+  });
+});
+
+describe('WS7 — resolveMediaStreamsEnabled (auto mode)', () => {
+  const fullStack = {
+    TTS_PROVIDER: 'elevenlabs',
+    ELEVENLABS_API_KEY: 'el_x',
+    DEEPGRAM_API_KEY: 'dg_x',
+  };
+
+  it("explicit 'true' → on", () => {
+    expect(resolveMediaStreamsEnabled({ TWILIO_MEDIA_STREAMS_ENABLED: 'true' })).toBe(true);
+  });
+
+  it("explicit 'false' → off even with the full stack (kill switch)", () => {
+    expect(
+      resolveMediaStreamsEnabled({ ...fullStack, TWILIO_MEDIA_STREAMS_ENABLED: 'false' }),
+    ).toBe(false);
+  });
+
+  it('unset + full stack → auto-on', () => {
+    expect(resolveMediaStreamsEnabled({ ...fullStack })).toBe(true);
+  });
+
+  it("'auto' + full stack → on", () => {
+    expect(
+      resolveMediaStreamsEnabled({ ...fullStack, TWILIO_MEDIA_STREAMS_ENABLED: 'auto' }),
+    ).toBe(true);
+  });
+
+  it('unset + no keys → off', () => {
+    expect(resolveMediaStreamsEnabled({})).toBe(false);
+  });
+
+  it('unset + missing DEEPGRAM_API_KEY → off (auto requires all three)', () => {
+    expect(
+      resolveMediaStreamsEnabled({ TTS_PROVIDER: 'elevenlabs', ELEVENLABS_API_KEY: 'el_x' }),
+    ).toBe(false);
+  });
+
+  it('unset + missing ELEVENLABS_API_KEY → off', () => {
+    expect(
+      resolveMediaStreamsEnabled({ TTS_PROVIDER: 'elevenlabs', DEEPGRAM_API_KEY: 'dg_x' }),
+    ).toBe(false);
+  });
+
+  it('unset + TTS_PROVIDER not elevenlabs → off (never auto-enables a half-capable stack)', () => {
+    expect(
+      resolveMediaStreamsEnabled({
+        TTS_PROVIDER: 'openai',
+        ELEVENLABS_API_KEY: 'el_x',
+        DEEPGRAM_API_KEY: 'dg_x',
+      }),
+    ).toBe(false);
   });
 });

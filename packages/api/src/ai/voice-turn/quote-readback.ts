@@ -13,9 +13,17 @@
  *     get a no-number acknowledgment and defer to the operator's written
  *     quote. Same for "catalog unavailable" (a read timeout / unwired repo):
  *     absent grounding, we must not quote.
- *   - At most ONE spoken price per turn (single line → that line's price;
- *     multiple all-catalogued lines → the TOTAL only, never a per-line
- *     recital that would speak several numbers).
+ *   - Prices are spoken ONLY for a FULLY-catalogued quote (every line a clean
+ *     catalog match). A mixed quote (any uncatalogued / ambiguous line) keeps
+ *     the all-or-nothing no-number rule — never a partial recital.
+ *   - Within a fully-catalogued quote (WS17 I2): a single line speaks its
+ *     price; 2..`PER_LINE_READBACK_MAX_LINES` lines speak each line's price
+ *     followed by the total ("The water heater is $1,850, and the gasket is
+ *     $9 — that's $1,859 all together. I'll send the full quote to
+ *     confirm."); more lines than that speak the TOTAL only (a long per-line
+ *     recital would overwhelm the caller). The total is always the last
+ *     figure spoken, and every priced read-back ends with the written-quote
+ *     confirmation suffix.
  *
  * No I/O, no LLM — trivially unit-testable, and the exact strings are pinned
  * by tests so a copy tweak can't silently change what a caller is told about
@@ -60,20 +68,73 @@ export interface QuoteReadbackInput {
   catalogAvailable: boolean;
 }
 
+/**
+ * WS17 (I2) — upper bound on how many all-catalogued lines get a per-line
+ * price recital before we fall back to a total-only read-back. At or below
+ * this many lines the caller hears each line plus the total; above it, only
+ * the total (a long spoken list would overwhelm rather than reassure).
+ */
+export const PER_LINE_READBACK_MAX_LINES = 3;
+
 /** Integer-cents line total (unit price × quantity, quantity defaulting to 1). */
 function lineTotalCents(li: QuoteReadbackLine): number {
   const qty = typeof li.quantity === 'number' && li.quantity > 0 ? li.quantity : 1;
   return (li.unitPrice ?? 0) * qty;
 }
 
+/** Effective quantity for a line (≥ 1). */
+function lineQuantity(li: QuoteReadbackLine): number {
+  return typeof li.quantity === 'number' && li.quantity > 0 ? li.quantity : 1;
+}
+
 /**
- * Build the spoken read-back for a drafted estimate. See module header for
- * the safety rules. Returns exactly one of:
+ * Spoken pluralisation for a qty>1 line, using the standard small English
+ * rules: already ends in s → unchanged ("Gaskets"); ends in s/x/z/ch/sh →
+ * +es ("Box" → "Boxes", "Brush" → "Brushes"); consonant+y → ies
+ * ("Assembly" → "Assemblies"); default +s ("Gasket" → "Gaskets"). No
+ * irregular table — anything beyond these rules keeps +s. This feeds TTS
+ * the owner's customers hear, so "Boxs" is not acceptable output.
+ */
+function pluralizeDescription(desc: string): string {
+  if (/s$/i.test(desc)) return desc;
+  if (/(?:x|z|ch|sh)$/i.test(desc)) return `${desc}es`;
+  if (/[^aeiou\s]y$/i.test(desc)) return `${desc.slice(0, -1)}ies`;
+  return `${desc}s`;
+}
+
+/**
+ * One line's spoken clause. qty 1 → "the water heater is $1,850"; qty>1 →
+ * "3 smoke detectors are $267" (the price is the LINE total, unit×qty).
+ */
+function linePhrase(li: QuoteReadbackLine): string {
+  const price = formatCents(lineTotalCents(li));
+  const desc = li.description ?? 'item';
+  const qty = lineQuantity(li);
+  return qty > 1
+    ? `${qty} ${pluralizeDescription(desc)} are ${price}`
+    : `the ${desc} is ${price}`;
+}
+
+/** Join clauses with an Oxford-style "and" ("a, b, and c"; "a, and b"). */
+function joinPhrases(phrases: string[]): string {
+  if (phrases.length <= 1) return phrases[0] ?? '';
+  if (phrases.length === 2) return `${phrases[0]}, and ${phrases[1]}`;
+  return `${phrases.slice(0, -1).join(', ')}, and ${phrases[phrases.length - 1]}`;
+}
+
+function capitalizeFirst(s: string): string {
+  return s.length > 0 ? s[0]!.toUpperCase() + s.slice(1) : s;
+}
+
+/**
+ * Build the spoken read-back for a drafted estimate/invoice. See module header
+ * for the safety rules. Returns exactly one of:
  *   - the generic confirmation (no line items),
- *   - the no-number acknowledgment (catalog unavailable, or any line not
- *     cleanly catalog-priced),
+ *   - the no-number acknowledgment (catalog unavailable, or ANY line not
+ *     cleanly catalog-priced — the all-or-nothing mixed-quote rule),
  *   - a single grounded price (one catalogued line),
- *   - a single grounded TOTAL (multiple all-catalogued lines).
+ *   - a per-line recital + grounded TOTAL (2..N all-catalogued lines),
+ *   - a grounded TOTAL only (more than N all-catalogued lines).
  */
 export function buildQuoteReadback(input: QuoteReadbackInput): string {
   const lines = input.lineItems ?? [];
@@ -93,5 +154,15 @@ export function buildQuoteReadback(input: QuoteReadbackInput): string {
   }
 
   const total = lines.reduce((sum, li) => sum + lineTotalCents(li), 0);
+
+  // 2..N all-catalogued lines: recite each line, then the total last. The
+  // confirmation suffix stays — it sets the expectation that a formal written
+  // quote follows the spoken number (trust + the close-the-sale flow).
+  if (lines.length <= PER_LINE_READBACK_MAX_LINES) {
+    const sentence = capitalizeFirst(joinPhrases(lines.map(linePhrase)));
+    return `${sentence} — that's ${formatCents(total)} all together. I'll send the full quote to confirm.`;
+  }
+
+  // More than N lines: a per-line recital would overwhelm — total only.
   return `That usually comes to about ${formatCents(total)} all together. I'll send the full quote to confirm.`;
 }

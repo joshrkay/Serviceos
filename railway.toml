@@ -1,4 +1,8 @@
-# Railway build config — api stage targets the Node.js production image
+# Railway build config — api stage targets the Node.js production image.
+# This file is linked to the WEB service. The worker service (PROCESS_ROLE=
+# worker) links railway.worker.toml — same build, no preDeployCommand (the
+# web service runs migrations), no overlapSeconds (no public traffic to
+# drain). See docs/deployment.md "Deploy topology (web + worker)".
 [build]
 dockerfilePath = "Dockerfile"
 dockerfileTarget = "api"

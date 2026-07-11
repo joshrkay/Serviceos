@@ -98,6 +98,13 @@ waiting). **Saturation signal:** `state="waiting"` persistently > 0 while
 
 ## Scaling replicas (Railway)
 
+- **Deploy topology first:** production runs the API as two Railway services
+  — web (`PROCESS_ROLE=web`, public, HTTP/voice/WS only) and worker
+  (`PROCESS_ROLE=worker`, private, background sweeps + queue drain only) —
+  so a spike in either half can't starve the other's replicas. See
+  `docs/deployment.md` "Deploy topology (web + worker)" for setup and
+  `docs/prod-env-checklist.md` for the required service variables. The
+  replica guidance below applies independently to each service.
 - Set replica count + autoscaling triggers (CPU / memory / request rate) in the
   Railway **service settings** for the `api` service.
 - The app drains the pg pool(s) on `SIGTERM` (`app.ts` shutdown handler);

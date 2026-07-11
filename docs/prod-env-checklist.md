@@ -34,6 +34,24 @@
 | `TRANSCRIPT_ENCRYPTION_KEY` | Falls back to `TENANT_ENCRYPTION_KEY`; if neither set, raw transcripts not retained |
 | `TENANT_ENCRYPTION_KEY` | Fallback for transcript encryption |
 
+## SLO monitoring / operator alerting (WS15 — all optional, safe defaults)
+
+The SLO monitor (`packages/api/src/workers/slo-monitor.ts`, worker/all roles)
+evaluates call completion rate, queue staleness, and sweep lag every 5 min and
+pages on breach. **What makes a breach reach a human:** `SENTRY_DSN` (+ the
+Sentry→Slack/DM rules in `docs/runbooks/alerting.md`) and, optionally,
+`ALERT_SMS_TO`. Without both, breaches only appear in logs/metrics. Runbook:
+`docs/runbooks/slo-alerts.md`.
+
+| Variable | Default | Notes |
+|----------|---------|-------|
+| `ALERT_SMS_TO` | unset (SMS channel off) | Operator phone (E.164); sent owner-class, never consent-suppressed |
+| `SLO_CALL_COMPLETION_MIN` | `0.85` | Min completion rate, trailing 60 min |
+| `SLO_CALL_COMPLETION_MIN_SAMPLE` | `5` | Sample floor before completion rule can breach |
+| `SLO_QUEUE_STALE_MIN` | `15` | Pending job age (min) that counts as a stuck queue |
+| `SLO_SWEEP_LAG_MIN` | `15` | Sweep-heartbeat age (min) treated as a wedged worker loop |
+| `SLO_ALERT_COOLDOWN_MIN` | `60` | Per-rule re-page cooldown |
+
 ## Web service (build / runtime)
 
 | Variable | Notes |
@@ -50,6 +68,44 @@
 | `WEB_URL` | Stripe success/cancel URLs, upgrade emails |
 | `STRIPE_PRICE_ID` | Onboarding trial subscription price |
 
+## Deploy topology (web + worker split)
+
+See `docs/deployment.md` "Deploy topology (web + worker)" for the full
+setup steps (config-file-path linking, ordering). All rows are dashboard
+service variables — not set in the `.toml` files.
+
+| Variable | Service | Notes |
+|----------|---------|-------|
+| `PROCESS_ROLE=web` | API/voice service (`railway.toml`) | HTTP + voice/WS only, zero background worker loops |
+| `PROCESS_ROLE=worker` | Worker service (`railway.worker.toml`) | Background sweeps + queue drain only; no public traffic, no voice WS upgrades |
+| `PROCESS_ROLE=voice` | Optional dedicated voice service (`railway.voice.toml`, WS14) | HTTP + voice/WS only, zero background worker loops — same surface as `web`, deployed separately so web/worker deploys never drain live calls |
+
+Migrations run on the **web service only** (its `preDeployCommand`); the
+worker's and voice's configs have none. The web service must deploy first
+whenever a release contains a migration. A single-service deploy leaves
+`PROCESS_ROLE` unset on the one service (⇒ `all`), which needs no
+checklist row.
+
+**`PUBLIC_API_URL` is per-service, not global.** Each of `web`, `worker`,
+and `voice` (when it exists) should set its own `PUBLIC_API_URL` to its own
+public domain — this is what Twilio signature validation reconstructs the
+request URL against, and what any `<Connect><Stream/>` TwiML embeds as the
+WS target. On the voice service specifically, `PUBLIC_API_URL` MUST be the
+voice service's own domain, not the web domain, or inbound Twilio signature
+checks fail and Stream URLs point at the wrong socket.
+
+**`VOICE_PUBLIC_URL` (three-service topology only)** — set on the **web
+and worker** services (where provisioning jobs run) to the voice service's
+public base URL. The number-provisioning worker
+(`packages/api/src/workers/provision-twilio.ts`) uses it for each new
+number's Twilio `VoiceUrl` + voice-call status callback, so numbers
+provisioned/claimed through onboarding automatically point at the voice
+domain (SMS + Vapi webhooks stay on the web domain). Unset ⇒ falls back to
+the web base — today's behavior — so it needs no row in a single- or
+two-service deploy. Numbers provisioned **before** the cutover still need
+a one-time manual re-point at the voice domain in the Twilio console. See
+`docs/deployment.md` "Optional third service: dedicated voice (WS14)".
+
 ## Advisory (recommended for launch)
 
 | Variable | Notes |
@@ -57,6 +113,10 @@
 | `SENTRY_DSN` | Error tracking; no-op without it |
 | `DEEPGRAM_API_KEY` | Streaming STT for inbound voice |
 | `TTS_PROVIDER` / `ELEVENLABS_API_KEY` | TTS when not using OpenAI default |
+| `TWILIO_MEDIA_STREAMS_ENABLED` | Realtime voice master switch (WS7). `false`=Gather-only kill switch; `true`=forced on (requires `TTS_PROVIDER=elevenlabs`+`ELEVENLABS_API_KEY`); **unset/`auto`**=on iff `TTS_PROVIDER=elevenlabs`+`ELEVENLABS_API_KEY`+`DEEPGRAM_API_KEY` all set. See `docs/runbooks/voice-realtime-rollout.md`. |
+| `PUBLIC_API_URL` | Absolute API base Twilio POSTs to. Required for the mid-call REST degrade-to-Gather (WS7); absent → realtime failures hang up (1011) instead of falling back mid-call. |
+| `AUTONOMOUS_BOOKING_DISABLED` | D-015 amendment — platform-wide kill switch for the autonomous booking lane; unset/`false` preserves per-tenant opt-in gating, `true` disables the lane for every tenant (incident response) regardless of `tenant_settings.autonomous_booking_enabled` |
+| `AUTONOMOUS_CLOSE_DISABLED` | D-018 — platform-wide kill switch for the autonomous CLOSE lane (live agent closing the sale on the call). Independent sibling of `AUTONOMOUS_BOOKING_DISABLED`; unset/`false` preserves per-tenant opt-in (`tenant_settings.autonomous_close_enabled`), `true` freezes on-call sale-closing for every tenant while leaving autonomous booking untouched |
 
 ## QA matrix nightly (GitHub secrets — not Railway)
 

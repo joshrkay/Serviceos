@@ -8,6 +8,7 @@
 import { z } from 'zod';
 import type { RepairTemplate } from '../../../verticals/registry';
 import type { EscalationSummary } from './escalation-summary-builder';
+import type { QuoteReadbackLine } from '../../voice-turn/quote-readback';
 
 // ─── States ──────────────────────────────────────────────────────────────────
 
@@ -54,7 +55,40 @@ export type CallingAgentEvent =
   // voice-turn processor (handleCreateProposal) so the FSM speaks a catalog-
   // grounded price acknowledgment for a drafted estimate instead of the fixed
   // confirmation line. Absent for every non-estimate proposal (fixed line).
-  | { type: 'proposal_queued'; proposalId: string; utterance?: string }
+  //
+  // WS18 — when the queued proposal is a grounded estimate, the processor also
+  // carries the read-back's structured lines + cleanliness + total so the FSM
+  // can stash a `pendingQuote` on the context. This is what lets the caller
+  // refine the quote ("actually, make it two") or close the sale ("yes, book
+  // it") mid-call without discarding the draft. Absent for every non-estimate
+  // proposal → `pendingQuote` stays undefined and `closing` behaves as before.
+  | {
+      type: 'proposal_queued';
+      proposalId: string;
+      utterance?: string;
+      groundedLines?: QuoteReadbackLine[];
+      groundedClean?: boolean;
+      totalCents?: number;
+    }
+  // WS18 — deterministic post-quote signals produced by the voice-turn
+  // processor's pre-check (state === 'closing' && a pendingQuote is set),
+  // BEFORE the LLM classifier runs. They never originate from the classifier.
+  //
+  //  - post_quote_affirmative: the caller assented to book ("yes, book it").
+  //    Begins the D-018 close flow in the processor; the FSM keeps pendingQuote
+  //    (the flow may fall back to the owner) and never discards the draft.
+  //  - refine_pending_quote: the caller edited the quote ("make it two", "also
+  //    add a gasket"). The processor has already re-grounded + edited the draft
+  //    proposal in place; the FSM speaks the fresh read-back and stays closing.
+  | { type: 'post_quote_affirmative' }
+  | {
+      type: 'refine_pending_quote';
+      proposalId: string;
+      groundedLines: QuoteReadbackLine[];
+      groundedClean: boolean;
+      totalCents: number;
+      utterance: string;
+    }
   | { type: 'cost_cap_approached'; remainingPct: number }
   | { type: 'cost_cap_exceeded' }
   | { type: 'abuse_detected'; category: string }
@@ -167,6 +201,28 @@ export interface CallingAgentContext {
    * turn. Inert for every other flow — only the negotiation global guard reads it.
    */
   negotiationFlagged?: boolean;
+  /**
+   * WS18 — the drafted, catalog-grounded estimate the caller is currently being
+   * quoted on the live call. Set in `proposal_draft` when a `proposal_queued`
+   * event carries grounded estimate data; consumed in `closing` so the caller
+   * can refine the quote in place ("actually, make it two") or close the sale
+   * ("yes, book it") without discarding the draft. Undefined for every
+   * non-estimate proposal, so `closing` behaves exactly as it did pre-WS18.
+   *
+   *  - `groundedClean`: every line resolved to a clean catalog match (the
+   *    D-018 lane requires this before an autonomous close is even eligible).
+   *  - `totalCents`: integer cents, the spoken total; never floating point.
+   *  - `refinementCount`: bounded by MAX_REFINEMENTS_PER_CALL so a caller can't
+   *    loop the agent editing the quote forever — past the cap the FSM defers
+   *    to the owner.
+   */
+  pendingQuote?: {
+    proposalId: string;
+    groundedLines: QuoteReadbackLine[];
+    groundedClean: boolean;
+    totalCents: number;
+    refinementCount: number;
+  };
 }
 
 // ─── Side effects ─────────────────────────────────────────────────────────────

@@ -6,10 +6,10 @@
  * row — the two DB-touching behaviors a mocked-Pool unit test can't pin (per
  * CLAUDE.md: "Tests that mock the DB are never the only proof a query works").
  *
- * Runs under the default (role-off) integration run and under
- * `npm run test:integration:rls` (RLS_RUNTIME_ROLE=true) — the DNC add and
- * audit insert both go through withTenant, so they exercise the RLS policies
- * on tenant_dnc_list + audit_events when the role is on.
+ * Runs under `npm run test:integration` (RLS_RUNTIME_ROLE=true by default,
+ * WS13) and under `npm run test:integration:norls` (flag off) — the DNC add
+ * and audit insert both go through withTenant, so they exercise the RLS
+ * policies on tenant_dnc_list + audit_events when the role is on.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Pool } from 'pg';

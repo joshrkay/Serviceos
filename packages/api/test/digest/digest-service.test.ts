@@ -13,6 +13,8 @@ import {
   DIGEST_SMS_MAX_CHARS,
   DIGEST_SMS_SOFT_LIMIT,
   DIGEST_MAX_REVIEWS,
+  DIGEST_MAX_INSTRUCTIONS,
+  groupAppliedInstructions,
   type DailyDigestPayload,
   type DigestComputeDeps,
 } from '../../src/digest/digest-service';
@@ -28,6 +30,7 @@ import type { CustomerRepository } from '../../src/customers/customer';
 import type { SettingsRepository, TenantSettings } from '../../src/settings/settings';
 import type { FeedbackResponseRepository, RatingCounts } from '../../src/feedback/feedback-response';
 import type { CorrectionLesson, CorrectionLessonRepository } from '../../src/learning/corrections/correction-lesson';
+import type { AuditEvent, AuditRepository } from '../../src/audit/audit';
 import { buildLineItem, calculateDocumentTotals } from '../../src/shared/billing-engine';
 
 const TENANT = 'tenant-1';
@@ -98,6 +101,24 @@ interface DepsOverrides {
   withSupervisorReviewRepo?: boolean;
   /** WS6 — records the (from, to, limit) findForDay was called with. */
   onFindForDay?: (from: Date, to: Date, limit: number | undefined) => void;
+  /** D-015 amendment — proposals returned by findAutonomousLaneApprovedForDay. */
+  autonomousLaneProposals?: Proposal[];
+  /** D-015 amendment — when false, omit findAutonomousLaneApprovedForDay entirely (optional-method path). */
+  withAutonomousLaneMethod?: boolean;
+  /** WS10 — proposals returned by findAppliedInstructionsForDay. */
+  appliedInstructionProposals?: Proposal[];
+  /** WS10 — when false, omit findAppliedInstructionsForDay entirely (optional-method path). */
+  withAppliedInstructionsMethod?: boolean;
+  /**
+   * WS22 — audit events keyed by proposalId, returned from
+   * auditRepo.findByEntity(tenant, 'proposal', proposalId). Only eventType +
+   * createdAt matter for the flaggedFixed computation.
+   */
+  auditEventsByProposal?: Record<string, Array<{ eventType: string; createdAt: Date }>>;
+  /** WS22 — when false, omit auditRepo entirely (optional-dep path). */
+  withAuditRepo?: boolean;
+  /** WS22 — records each proposalId findByEntity was called with (dedup assertions). */
+  onFindByEntity?: (proposalId: string) => void;
 }
 
 function makeDeps(o: DepsOverrides = {}): DigestComputeDeps {
@@ -128,6 +149,12 @@ function makeDeps(o: DepsOverrides = {}): DigestComputeDeps {
           ? o.draftProposals ?? []
           : o.pendingProposals ?? [],
       findConfidenceMarkedForDay: async () => o.confidenceMarked ?? [],
+      ...(o.withAutonomousLaneMethod === false
+        ? {}
+        : { findAutonomousLaneApprovedForDay: async () => o.autonomousLaneProposals ?? [] }),
+      ...(o.withAppliedInstructionsMethod === false
+        ? {}
+        : { findAppliedInstructionsForDay: async () => o.appliedInstructionProposals ?? [] }),
     } as unknown as ProposalRepository,
     customerRepo: {
       findById: async (_t: string, id: string) =>
@@ -155,6 +182,27 @@ function makeDeps(o: DepsOverrides = {}): DigestComputeDeps {
               return o.supervisorReviews ?? [];
             },
           } as unknown as SupervisorReviewRepository,
+        }),
+    ...(o.withAuditRepo === false
+      ? {}
+      : {
+          auditRepo: {
+            findByEntity: async (_t: string, _entityType: string, proposalId: string) => {
+              o.onFindByEntity?.(proposalId);
+              return (o.auditEventsByProposal?.[proposalId] ?? []).map(
+                (e): AuditEvent => ({
+                  id: `ae-${Math.random()}`,
+                  tenantId: TENANT,
+                  actorId: 'owner',
+                  actorRole: 'owner',
+                  eventType: e.eventType,
+                  entityType: 'proposal',
+                  entityId: proposalId,
+                  createdAt: e.createdAt,
+                }),
+              );
+            },
+          } as unknown as AuditRepository,
         }),
     now: () => NOW,
   };
@@ -483,7 +531,7 @@ describe('computeDigestPayload', () => {
           supervisorReview({ verdict: 'error' }),
         ],
       }));
-      expect(result.supervisorChecks).toEqual({ checked: 5, flagged: 2 });
+      expect(result.supervisorChecks).toEqual({ checked: 5, flagged: 2, fixed: 0 });
     });
 
     it('omits supervisorChecks when no reviews ran today', async () => {
@@ -510,6 +558,158 @@ describe('computeDigestPayload', () => {
       // resolves for `today` (America/Chicago 2026-06-10).
       expect(seen!.from.toISOString()).toBe('2026-06-10T05:00:00.000Z');
       expect(seen!.to.toISOString()).toBe('2026-06-11T05:00:00.000Z');
+    });
+
+    // ─── WS22: flaggedFixed (edited-after-flag) ────────────────────────────
+
+    it('counts fixed when a flagged proposal is edited after the review, same day', async () => {
+      const reviewTime = new Date('2026-06-10T12:00:00Z');
+      const editTime = new Date('2026-06-10T13:00:00Z');
+      const result = await computeDigestPayload(TENANT, DATE, makeDeps({
+        supervisorReviews: [supervisorReview({ proposalId: 'p1', verdict: 'flag', createdAt: reviewTime })],
+        auditEventsByProposal: { p1: [{ eventType: 'proposal.edited', createdAt: editTime }] },
+      }));
+      expect(result.supervisorChecks).toEqual({ checked: 1, flagged: 1, fixed: 1 });
+    });
+
+    it('a proposal.sms_edited audit event also counts as fixed', async () => {
+      const reviewTime = new Date('2026-06-10T12:00:00Z');
+      const editTime = new Date('2026-06-10T13:00:00Z');
+      const result = await computeDigestPayload(TENANT, DATE, makeDeps({
+        supervisorReviews: [supervisorReview({ proposalId: 'p1', verdict: 'hold', createdAt: reviewTime })],
+        auditEventsByProposal: { p1: [{ eventType: 'proposal.sms_edited', createdAt: editTime }] },
+      }));
+      expect(result.supervisorChecks).toEqual({ checked: 1, flagged: 1, fixed: 1 });
+    });
+
+    it('does not count fixed when the flagged proposal was never edited', async () => {
+      const result = await computeDigestPayload(TENANT, DATE, makeDeps({
+        supervisorReviews: [supervisorReview({ proposalId: 'p1', verdict: 'flag' })],
+      }));
+      expect(result.supervisorChecks).toEqual({ checked: 1, flagged: 1, fixed: 0 });
+    });
+
+    it('does not count fixed when the edit happened BEFORE the flag (stale edit)', async () => {
+      const reviewTime = new Date('2026-06-10T13:00:00Z');
+      const editTime = new Date('2026-06-10T12:00:00Z'); // before the review
+      const result = await computeDigestPayload(TENANT, DATE, makeDeps({
+        supervisorReviews: [supervisorReview({ proposalId: 'p1', verdict: 'flag', createdAt: reviewTime })],
+        auditEventsByProposal: { p1: [{ eventType: 'proposal.edited', createdAt: editTime }] },
+      }));
+      expect(result.supervisorChecks).toEqual({ checked: 1, flagged: 1, fixed: 0 });
+    });
+
+    it('does not count an edit that falls outside the digest day window', async () => {
+      const reviewTime = new Date('2026-06-10T12:00:00Z');
+      const editTime = new Date('2026-06-11T06:00:00Z'); // after today.end (05:00Z next day)
+      const result = await computeDigestPayload(TENANT, DATE, makeDeps({
+        supervisorReviews: [supervisorReview({ proposalId: 'p1', verdict: 'flag', createdAt: reviewTime })],
+        auditEventsByProposal: { p1: [{ eventType: 'proposal.edited', createdAt: editTime }] },
+      }));
+      expect(result.supervisorChecks).toEqual({ checked: 1, flagged: 1, fixed: 0 });
+    });
+
+    it('an unrelated audit event type on the same proposal does not count as fixed', async () => {
+      const reviewTime = new Date('2026-06-10T12:00:00Z');
+      const editTime = new Date('2026-06-10T13:00:00Z');
+      const result = await computeDigestPayload(TENANT, DATE, makeDeps({
+        supervisorReviews: [supervisorReview({ proposalId: 'p1', verdict: 'flag', createdAt: reviewTime })],
+        auditEventsByProposal: { p1: [{ eventType: 'proposal.viewed', createdAt: editTime }] },
+      }));
+      expect(result.supervisorChecks).toEqual({ checked: 1, flagged: 1, fixed: 0 });
+    });
+
+    it('only looks up audit events for flagged proposals, deduped across reviews sharing a proposal', async () => {
+      const seen: string[] = [];
+      const reviewTime = new Date('2026-06-10T12:00:00Z');
+      const result = await computeDigestPayload(TENANT, DATE, makeDeps({
+        supervisorReviews: [
+          supervisorReview({ proposalId: 'p-pass', verdict: 'pass', createdAt: reviewTime }),
+          supervisorReview({ proposalId: 'p1', verdict: 'flag', createdAt: reviewTime }),
+          supervisorReview({ proposalId: 'p1', verdict: 'hold', createdAt: reviewTime }),
+        ],
+        onFindByEntity: (proposalId) => seen.push(proposalId),
+      }));
+      // Deduped to one lookup for p1; the pass-verdict proposal is never looked up.
+      expect(seen).toEqual(['p1']);
+      expect(result.supervisorChecks).toEqual({ checked: 3, flagged: 2, fixed: 0 });
+    });
+
+    it('defaults fixed to 0 without throwing when the auditRepo dep is absent entirely', async () => {
+      const result = await computeDigestPayload(TENANT, DATE, makeDeps({
+        supervisorReviews: [supervisorReview({ verdict: 'flag' })],
+        withAuditRepo: false,
+      }));
+      expect(result.supervisorChecks).toEqual({ checked: 1, flagged: 1, fixed: 0 });
+    });
+  });
+
+  // ─── D-015 amendment: autonomous-booking-lane reflection ────────────────
+
+  describe('autonomousBookings', () => {
+    it('reports count + undone (undone = status "undone" at fetch time)', async () => {
+      const result = await computeDigestPayload(TENANT, DATE, makeDeps({
+        autonomousLaneProposals: [
+          proposal({ id: 'ab-1', proposalType: 'create_booking', status: 'approved' }),
+          proposal({ id: 'ab-2', proposalType: 'create_booking', status: 'executed' }),
+          proposal({ id: 'ab-3', proposalType: 'create_booking', status: 'undone' }),
+        ],
+      }));
+      expect(result.autonomousBookings).toEqual({ count: 3, undone: 1 });
+    });
+
+    it('omits autonomousBookings when nothing took the lane today', async () => {
+      const result = await computeDigestPayload(TENANT, DATE, makeDeps({ autonomousLaneProposals: [] }));
+      expect(result.autonomousBookings).toBeUndefined();
+    });
+
+    it('omits autonomousBookings when findAutonomousLaneApprovedForDay is absent (optional method)', async () => {
+      const result = await computeDigestPayload(TENANT, DATE, makeDeps({ withAutonomousLaneMethod: false }));
+      expect(result.autonomousBookings).toBeUndefined();
+    });
+  });
+
+  // ─── WS10: "Instructions applied" reflection ─────────────────────────────
+
+  describe('instructionsApplied', () => {
+    it('composes + groups: two proposals sharing a rule, one proposal with two rules', async () => {
+      const result = await computeDigestPayload(TENANT, DATE, makeDeps({
+        appliedInstructionProposals: [
+          proposal({
+            id: 'ai-1',
+            payload: { _meta: { appliedStandingInstructions: [{ id: 'rule-1', text: 'always add trip fee' }] } },
+          }),
+          proposal({
+            id: 'ai-2',
+            payload: { _meta: { appliedStandingInstructions: [{ id: 'rule-1', text: 'always add trip fee' }] } },
+          }),
+          proposal({
+            id: 'ai-3',
+            payload: {
+              _meta: {
+                appliedStandingInstructions: [
+                  { id: 'rule-1', text: 'always add trip fee' },
+                  { id: 'rule-2', text: 'call before arriving' },
+                ],
+              },
+            },
+          }),
+        ],
+      }));
+      expect(result.instructionsApplied).toEqual([
+        { id: 'rule-1', text: 'always add trip fee', draftCount: 3 },
+        { id: 'rule-2', text: 'call before arriving', draftCount: 1 },
+      ]);
+    });
+
+    it('omits instructionsApplied when no proposal applied a standing instruction today', async () => {
+      const result = await computeDigestPayload(TENANT, DATE, makeDeps({ appliedInstructionProposals: [] }));
+      expect(result.instructionsApplied).toBeUndefined();
+    });
+
+    it('omits instructionsApplied when findAppliedInstructionsForDay is absent (optional method)', async () => {
+      const result = await computeDigestPayload(TENANT, DATE, makeDeps({ withAppliedInstructionsMethod: false }));
+      expect(result.instructionsApplied).toBeUndefined();
     });
   });
 });
@@ -578,6 +778,98 @@ describe('summarizeProposalForDigest', () => {
       proposal({ proposalType: 'draft_estimate', sourceContext: { missingFields: [] } }),
     );
     expect(emptyMissing.hasMissingFields).toBeUndefined();
+  });
+});
+
+describe('groupAppliedInstructions', () => {
+  it('groups two proposals sharing a rule into one entry with draftCount 2', () => {
+    const grouped = groupAppliedInstructions([
+      proposal({
+        id: 'p1',
+        payload: { _meta: { appliedStandingInstructions: [{ id: 'r1', text: 'trip fee' }] } },
+      }),
+      proposal({
+        id: 'p2',
+        payload: { _meta: { appliedStandingInstructions: [{ id: 'r1', text: 'trip fee' }] } },
+      }),
+    ]);
+    expect(grouped).toEqual([{ id: 'r1', text: 'trip fee', draftCount: 2 }]);
+  });
+
+  it('counts one proposal with two rules as one draft for each rule, ordered by draftCount desc then id', () => {
+    const grouped = groupAppliedInstructions([
+      proposal({
+        id: 'p1',
+        payload: {
+          _meta: {
+            appliedStandingInstructions: [
+              { id: 'r-a', text: 'rule a' },
+              { id: 'r-b', text: 'rule b' },
+            ],
+          },
+        },
+      }),
+      proposal({
+        id: 'p2',
+        payload: { _meta: { appliedStandingInstructions: [{ id: 'r-b', text: 'rule b' }] } },
+      }),
+    ]);
+    expect(grouped).toEqual([
+      { id: 'r-b', text: 'rule b', draftCount: 2 },
+      { id: 'r-a', text: 'rule a', draftCount: 1 },
+    ]);
+  });
+
+  it('a repeated stamp on the SAME proposal counts once (defensive de-dupe)', () => {
+    const grouped = groupAppliedInstructions([
+      proposal({
+        id: 'p1',
+        payload: {
+          _meta: {
+            appliedStandingInstructions: [
+              { id: 'r1', text: 'trip fee' },
+              { id: 'r1', text: 'trip fee' },
+            ],
+          },
+        },
+      }),
+    ]);
+    expect(grouped).toEqual([{ id: 'r1', text: 'trip fee', draftCount: 1 }]);
+  });
+
+  it('returns an empty array for no proposals / no stamps', () => {
+    expect(groupAppliedInstructions([])).toEqual([]);
+    expect(groupAppliedInstructions([proposal({ payload: {} })])).toEqual([]);
+  });
+
+  it('tolerates malformed _meta / stamp shapes defensively', () => {
+    const grouped = groupAppliedInstructions([
+      proposal({ id: 'null-meta', payload: { _meta: null } }),
+      proposal({ id: 'string-meta', payload: { _meta: 'not-an-object' } }),
+      proposal({ id: 'non-array-stamp', payload: { _meta: { appliedStandingInstructions: 'nope' } } }),
+      proposal({ id: 'null-entry', payload: { _meta: { appliedStandingInstructions: [null, 42, 'x'] } } }),
+      proposal({
+        id: 'missing-fields',
+        payload: { _meta: { appliedStandingInstructions: [{ id: 'r1' }, { text: 'no id' }, {}] } },
+      }),
+      proposal({
+        id: 'valid',
+        payload: { _meta: { appliedStandingInstructions: [{ id: 'r-ok', text: 'a valid rule' }] } },
+      }),
+    ]);
+    expect(grouped).toEqual([{ id: 'r-ok', text: 'a valid rule', draftCount: 1 }]);
+  });
+
+  it('caps output at DIGEST_MAX_INSTRUCTIONS', () => {
+    const proposals = Array.from({ length: DIGEST_MAX_INSTRUCTIONS + 5 }, (_, i) =>
+      proposal({
+        id: `p${i}`,
+        payload: {
+          _meta: { appliedStandingInstructions: [{ id: `r${i}`, text: `rule ${i}` }] },
+        },
+      }),
+    );
+    expect(groupAppliedInstructions(proposals)).toHaveLength(DIGEST_MAX_INSTRUCTIONS);
   });
 });
 
@@ -792,21 +1084,23 @@ describe('renderDigestSmsSegments', () => {
     expect(body).not.toContain('Learned:');
     expect(body).not.toContain('Quotes:');
     expect(body).not.toContain('Checked:');
+    expect(body).not.toContain('Auto-booked:');
+    expect(body).not.toContain('Applied your rule');
   });
 
-  it('renders the supervisor-checks line: flagged and none-flagged variants', () => {
+  it('renders the supervisor-checks line: flagged (with fixed) and none-flagged variants', () => {
     const flaggedBody = combine(
       renderDigestSmsSegments({
-        payload: basePayload({ supervisorChecks: { checked: 12, flagged: 2 } }),
+        payload: basePayload({ supervisorChecks: { checked: 12, flagged: 2, fixed: 1 } }),
         deepLinkUrl: DEEP,
         approvalLinks: [],
       }),
     );
-    expect(flaggedBody).toContain('Checked: 12 proposals, 2 flagged.');
+    expect(flaggedBody).toContain('Checked: 12 proposals, 2 flagged, 1 fixed.');
 
     const noneFlaggedBody = combine(
       renderDigestSmsSegments({
-        payload: basePayload({ supervisorChecks: { checked: 12, flagged: 0 } }),
+        payload: basePayload({ supervisorChecks: { checked: 12, flagged: 0, fixed: 0 } }),
         deepLinkUrl: DEEP,
         approvalLinks: [],
       }),
@@ -817,6 +1111,84 @@ describe('renderDigestSmsSegments', () => {
       renderDigestSmsSegments({ payload: basePayload(), deepLinkUrl: DEEP, approvalLinks: [] }),
     );
     expect(omittedBody).not.toContain('Checked:');
+  });
+
+  it('renders the auto-booked line: undone and no-undone variants, omitted when absent', () => {
+    const withUndoneBody = combine(
+      renderDigestSmsSegments({
+        payload: basePayload({ autonomousBookings: { count: 3, undone: 1 } }),
+        deepLinkUrl: DEEP,
+        approvalLinks: [],
+      }),
+    );
+    expect(withUndoneBody).toContain('Auto-booked: 3 appointment(s), 1 undone.');
+
+    const noUndoneBody = combine(
+      renderDigestSmsSegments({
+        payload: basePayload({ autonomousBookings: { count: 1, undone: 0 } }),
+        deepLinkUrl: DEEP,
+        approvalLinks: [],
+      }),
+    );
+    expect(noUndoneBody).toContain('Auto-booked: 1 appointment(s).');
+    expect(noUndoneBody).not.toContain('undone');
+
+    const omittedBody = combine(
+      renderDigestSmsSegments({ payload: basePayload(), deepLinkUrl: DEEP, approvalLinks: [] }),
+    );
+    expect(omittedBody).not.toContain('Auto-booked:');
+  });
+
+  it('renders the "Instructions applied" line: single rule, truncation, multi-rule, and omitted when absent', () => {
+    const singleRuleBody = combine(
+      renderDigestSmsSegments({
+        payload: basePayload({
+          instructionsApplied: [{ id: 'r1', text: 'always add trip fee', draftCount: 3 }],
+        }),
+        deepLinkUrl: DEEP,
+        approvalLinks: [],
+      }),
+    );
+    expect(singleRuleBody).toContain('Applied your rule "always add trip fee" to 3 draft(s).');
+    expect(singleRuleBody).not.toContain('more rules');
+
+    // Rule text longer than ~40 chars is truncated with an ellipsis.
+    const longText = 'a'.repeat(60);
+    const truncatedBody = combine(
+      renderDigestSmsSegments({
+        payload: basePayload({
+          instructionsApplied: [{ id: 'r1', text: longText, draftCount: 1 }],
+        }),
+        deepLinkUrl: DEEP,
+        approvalLinks: [],
+      }),
+    );
+    expect(truncatedBody).toContain(`Applied your rule "${'a'.repeat(40)}…" to 1 draft(s).`);
+    expect(truncatedBody).not.toContain(longText);
+
+    // Multiple rules — top rule (already draftCount-sorted by the grouping
+    // helper) renders, "; K more rules" appends the rest.
+    const multiRuleBody = combine(
+      renderDigestSmsSegments({
+        payload: basePayload({
+          instructionsApplied: [
+            { id: 'r1', text: 'always add trip fee', draftCount: 3 },
+            { id: 'r2', text: 'call before arriving', draftCount: 2 },
+            { id: 'r3', text: 'note gate code', draftCount: 1 },
+          ],
+        }),
+        deepLinkUrl: DEEP,
+        approvalLinks: [],
+      }),
+    );
+    expect(multiRuleBody).toContain(
+      'Applied your rule "always add trip fee" to 3 draft(s); 2 more rules.',
+    );
+
+    const omittedBody = combine(
+      renderDigestSmsSegments({ payload: basePayload(), deepLinkUrl: DEEP, approvalLinks: [] }),
+    );
+    expect(omittedBody).not.toContain('Applied your rule');
   });
 
   it('renders the quotes-sent, unsure, and learned compact lines when present', () => {

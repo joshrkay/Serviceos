@@ -27,6 +27,7 @@ import type { SettingsRepository } from '../settings/settings';
 import type { CorrectionLessonRepository } from '../learning/corrections/correction-lesson';
 import type { SupervisorReviewRepository } from '../ai/supervisor/reviews-repo';
 import type { SupervisorReview } from '../ai/supervisor/types';
+import type { AuditRepository } from '../audit/audit';
 import { prioritizeProposals } from '../proposals/prioritization';
 import { AUTO_APPROVE_BLOCKING_CONFIDENCE_LEVELS } from '../proposals/auto-approve';
 import { findJobsRequiringInvoicing } from '../invoices/invoicing-queue';
@@ -123,17 +124,43 @@ export interface DigestUnsureItem {
 
 /**
  * WS6 — supervisor-review reflection ("Checked: N proposals, M flagged").
- * Counts only: `supervisor_reviews` has no cheap "was this later fixed"
- * signal (a 'flag' verdict just means markers were attached and the
- * proposal still dispatched; a 'hold' means the owner must act, not that
- * anything was already corrected), so a `flaggedFixed` count was dropped
- * rather than approximated from unrelated correction-lesson data.
+ * WS22 amendment: `fixed` now exists with a grounded definition.
+ * `supervisor_reviews` itself has no "was this fixed" column, but the audit
+ * trail does: a flagged review (verdict 'flag' or 'hold') counts as `fixed`
+ * when that SAME proposalId later carries a `proposal.edited` or
+ * `proposal.sms_edited` audit event whose `createdAt` is strictly after the
+ * review's `createdAt` and still inside the digest day window. This is a
+ * real, grounded "the owner (or an SMS reply) touched this after the
+ * supervisor flagged it" signal — not an approximation from unrelated
+ * correction-lesson data (which is what made the original WS6 count
+ * un-groundable and got it dropped).
  */
 export interface DigestSupervisorChecks {
   /** Reviews run today (capped at DIGEST_MAX_REVIEWS — see the fetch). */
   checked: number;
   /** Of those, verdict 'flag' or 'hold' (reviews.reasons.length > 0). */
   flagged: number;
+  /**
+   * WS22 — of the flagged reviews, how many were followed same-day by a
+   * proposal.edited/proposal.sms_edited audit event on that proposal. 0 when
+   * flagged is 0 (never omitted alongside `checked`/`flagged` — always a
+   * number when supervisorChecks itself is present).
+   */
+  fixed: number;
+}
+
+/**
+ * D-015 amendment — "Auto-booked: N appointment(s)" reflection. `undone` is a
+ * real signal (status 'undone' AT GENERATION TIME, same snapshot caveat as
+ * unsureAbout/DigestUnsureOutcome) — a real owner one-tap UNDO on an
+ * autonomous-lane booking sets this status (proposals/one-tap-undo.ts), so
+ * unlike WS6's dropped `flaggedFixed` this count is not an approximation.
+ */
+export interface DigestAutonomousBookings {
+  /** Autonomous-lane-eligible proposals created today (capped at DIGEST_MAX_AUTONOMOUS_BOOKINGS). */
+  count: number;
+  /** Of those, status 'undone' at generation time. */
+  undone: number;
 }
 
 /** N-005 "what I learned today" — one correction-loop lesson applied today. */
@@ -143,6 +170,21 @@ export interface DigestLearnedItem {
   lessonType: string;
   /** Human-readable line straight from correction_lessons.summary. */
   summary: string;
+}
+
+/**
+ * WS10 — "Instructions applied" reflection. One entry per owner standing
+ * instruction that fired on at least one draft today (see
+ * ai/standing-instructions-context.ts:36-39 — the `{id, text}` marker
+ * stamped on `payload._meta.appliedStandingInstructions`), grouped across
+ * every proposal created today that applied it. `draftCount` counts
+ * DISTINCT proposals, not stamp occurrences (a rule stamped twice on one
+ * draft would still be a single draft).
+ */
+export interface DigestInstructionApplied {
+  id: string;
+  text: string;
+  draftCount: number;
 }
 
 export interface DailyDigestPayload {
@@ -189,6 +231,18 @@ export interface DailyDigestPayload {
    * OMITTED when checked===0 (no reviews ran today, or the repo is absent).
    */
   supervisorChecks?: DigestSupervisorChecks;
+  /**
+   * D-015 amendment — "Auto-booked: N appointment(s)" reflection. OMITTED
+   * when count===0 (no autonomous-lane bookings today, or the repo method
+   * is absent).
+   */
+  autonomousBookings?: DigestAutonomousBookings;
+  /**
+   * WS10 — "Instructions applied" reflection: owner standing instructions
+   * that shaped at least one draft today, most-applied first. OMITTED when
+   * empty (no instructions applied today, or the repo method is absent).
+   */
+  instructionsApplied?: DigestInstructionApplied[];
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -210,6 +264,21 @@ export const DIGEST_MAX_LEARNED = 10;
  * set generously so a normal day's true count is never undercounted.
  */
 export const DIGEST_MAX_REVIEWS = 500;
+/**
+ * D-015 amendment — cap on autonomous-lane-approved proposals fetched for the
+ * day's "Auto-booked" count. Same generous-aggregate rationale as
+ * DIGEST_MAX_REVIEWS: bounds the query, not a list actually rendered.
+ */
+export const DIGEST_MAX_AUTONOMOUS_BOOKINGS = 500;
+/** WS10 — cap on distinct standing instructions rendered in the payload. */
+export const DIGEST_MAX_INSTRUCTIONS = 10;
+/**
+ * WS10 — cap on proposals fetched for the "Instructions applied" grouping
+ * query. Bounds the query (a list of PROPOSALS, not the rendered rule list
+ * — see DIGEST_MAX_INSTRUCTIONS), generous enough that a normal day's true
+ * per-rule counts are never undercounted.
+ */
+export const DIGEST_MAX_APPLIED_INSTRUCTIONS_PROPOSALS = 200;
 
 /**
  * Map a proposal's status to the digest "unsureAbout" outcome. Derived from the
@@ -235,6 +304,50 @@ export function proposalOutcome(status: ProposalStatus): DigestUnsureOutcome {
     case 'execution_failed':
       return 'failed';
   }
+}
+
+/**
+ * WS10 — group proposals' `payload._meta.appliedStandingInstructions` stamps
+ * by instruction id, counting one DISTINCT proposal per instruction (a stamp
+ * repeated twice on the same draft — defensive, shouldn't happen — still
+ * counts once). Tolerates a missing/malformed `_meta` or stamp entry rather
+ * than throwing — the stamp is owner-authored data threaded through an LLM
+ * drafting task, not something this module controls the shape of. Order:
+ * draftCount desc, then id asc (deterministic tie-break). Capped at
+ * DIGEST_MAX_INSTRUCTIONS. Pure — no I/O.
+ */
+export function groupAppliedInstructions(proposals: Proposal[]): DigestInstructionApplied[] {
+  const byId = new Map<string, { text: string; draftCount: number }>();
+  for (const p of proposals) {
+    const meta = (p.payload as Record<string, unknown> | undefined)?._meta;
+    const applied =
+      meta && typeof meta === 'object'
+        ? (meta as Record<string, unknown>).appliedStandingInstructions
+        : undefined;
+    if (!Array.isArray(applied)) continue;
+    // De-dupe within a single proposal so a repeated stamp on one draft
+    // still counts as ONE draft for that instruction.
+    const seenOnThisProposal = new Set<string>();
+    for (const entry of applied) {
+      if (!entry || typeof entry !== 'object') continue;
+      const id = (entry as Record<string, unknown>).id;
+      const text = (entry as Record<string, unknown>).text;
+      if (typeof id !== 'string' || id.length === 0) continue;
+      if (typeof text !== 'string' || text.length === 0) continue;
+      if (seenOnThisProposal.has(id)) continue;
+      seenOnThisProposal.add(id);
+      const existing = byId.get(id);
+      if (existing) {
+        existing.draftCount += 1;
+      } else {
+        byId.set(id, { text, draftCount: 1 });
+      }
+    }
+  }
+  return Array.from(byId.entries())
+    .map(([id, v]) => ({ id, text: v.text, draftCount: v.draftCount }))
+    .sort((a, b) => b.draftCount - a.draftCount || a.id.localeCompare(b.id))
+    .slice(0, DIGEST_MAX_INSTRUCTIONS);
 }
 
 const AMOUNT_KEYS = ['amountCents', 'totalCents', 'priceCents'] as const;
@@ -456,13 +569,47 @@ function learnedSmsLine(items: DigestLearnedItem[] | undefined): string {
 
 /**
  * WS6 — compact "Checked: N proposals, M flagged" supervisor-review line,
- * e.g. "Checked: 12 proposals, 2 flagged." or "Checked: 12 proposals, none
- * flagged." when nothing was flagged. Absent → empty string.
+ * e.g. "Checked: 12 proposals, none flagged." when nothing was flagged.
+ * WS22 amendment: when something WAS flagged, the fixed count rides along —
+ * "Checked: 12 proposals, 2 flagged, 1 fixed." — only ever shown when
+ * flagged > 0 (M>0); the none-flagged case has no fixed to report. Absent →
+ * empty string.
  */
 function supervisorChecksSmsLine(checks: DigestSupervisorChecks | undefined): string {
   if (!checks || checks.checked === 0) return '';
-  const flaggedPart = checks.flagged > 0 ? `${checks.flagged} flagged` : 'none flagged';
+  const flaggedPart =
+    checks.flagged > 0 ? `${checks.flagged} flagged, ${checks.fixed} fixed` : 'none flagged';
   return ` Checked: ${checks.checked} ${checks.checked === 1 ? 'proposal' : 'proposals'}, ${flaggedPart}.`;
+}
+
+/**
+ * D-015 amendment — compact "Auto-booked: N appointment(s)" line, e.g.
+ * "Auto-booked: 3 appointment(s), 1 undone." Absent → empty string.
+ */
+function autonomousBookingsSmsLine(bookings: DigestAutonomousBookings | undefined): string {
+  if (!bookings || bookings.count === 0) return '';
+  const undonePart = bookings.undone > 0 ? `, ${bookings.undone} undone` : '';
+  return ` Auto-booked: ${bookings.count} appointment(s)${undonePart}.`;
+}
+
+/** WS10 — ~40 chars max, ellipsis appended when truncated. */
+const INSTRUCTION_TEXT_SMS_MAX = 40;
+function truncateInstructionText(text: string): string {
+  return text.length > INSTRUCTION_TEXT_SMS_MAX
+    ? `${text.slice(0, INSTRUCTION_TEXT_SMS_MAX).trimEnd()}…`
+    : text;
+}
+
+/**
+ * WS10 — compact "Instructions applied" SMS line for the top rule (by
+ * draftCount), e.g. `Applied your rule "always add trip fee" to 3
+ * draft(s); 2 more rules.` Absent → empty string.
+ */
+function instructionsAppliedSmsLine(items: DigestInstructionApplied[] | undefined): string {
+  if (!items || items.length === 0) return '';
+  const top = items[0];
+  const more = items.length > 1 ? `; ${items.length - 1} more rules` : '';
+  return ` Applied your rule "${truncateInstructionText(top.text)}" to ${top.draftCount} draft(s)${more}.`;
 }
 
 /**
@@ -532,6 +679,10 @@ function buildDigestSmsChunks(input: RenderDigestSmsInput): string[] {
   if (learned) chunks.push(learned);
   const supervisorChecks = supervisorChecksSmsLine(payload.supervisorChecks);
   if (supervisorChecks) chunks.push(supervisorChecks);
+  const autonomousBookings = autonomousBookingsSmsLine(payload.autonomousBookings);
+  if (autonomousBookings) chunks.push(autonomousBookings);
+  const instructionsApplied = instructionsAppliedSmsLine(payload.instructionsApplied);
+  if (instructionsApplied) chunks.push(instructionsApplied);
 
   chunks.push(` Full day: ${deepLinkUrl}`);
   return chunks;
@@ -641,6 +792,16 @@ export interface DigestComputeDeps {
    * absent, both simply omit the supervisorChecks section.
    */
   supervisorReviewRepo?: SupervisorReviewRepository;
+  /**
+   * WS22 — drives `DigestSupervisorChecks.fixed`: for each flagged review,
+   * `auditRepo.findByEntity(tenantId, 'proposal', proposalId)` is called
+   * (deduped per proposalId, so O(distinct flagged proposals) — bounded by
+   * DIGEST_MAX_REVIEWS) and filtered in-memory for a
+   * proposal.edited/proposal.sms_edited event after the review. Optional —
+   * absent repo simply yields `fixed: 0` (never blocks the rest of the
+   * digest; matches the "absent optional dep" convention elsewhere here).
+   */
+  auditRepo?: AuditRepository;
   /** Injectable clock — overdue is "as of now". Defaults to `new Date()`. */
   now?: () => Date;
 }
@@ -668,7 +829,7 @@ export async function computeDigestPayload(
 
   const paymentsFrom = new Date(today.start.getTime() - PAYMENT_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
 
-  const [payments, completedJobs, tomorrowAppointments, openInvoices, partiallyPaidInvoices, readyProposals, draftProposals, unbilledCandidates, ratingCounts, sentEstimates, confidenceMarked, appliedLessons, supervisorReviews] =
+  const [payments, completedJobs, tomorrowAppointments, openInvoices, partiallyPaidInvoices, readyProposals, draftProposals, unbilledCandidates, ratingCounts, sentEstimates, confidenceMarked, appliedLessons, supervisorReviews, autonomousLaneProposals, appliedInstructionProposals] =
     await Promise.all([
       deps.paymentRepo.findByTenant(tenantId, {
         status: 'completed',
@@ -702,6 +863,28 @@ export async function computeDigestPayload(
       deps.supervisorReviewRepo?.findForDay
         ? deps.supervisorReviewRepo.findForDay(tenantId, today.start, today.end, DIGEST_MAX_REVIEWS)
         : Promise.resolve([] as SupervisorReview[]),
+      // D-015 amendment — proposals that took the autonomous booking lane
+      // today ("Auto-booked: N appointment(s)"). Optional repo method —
+      // absent on partial doubles, section self-omits.
+      deps.proposalRepo.findAutonomousLaneApprovedForDay
+        ? deps.proposalRepo.findAutonomousLaneApprovedForDay(
+            tenantId,
+            today.start,
+            today.end,
+            DIGEST_MAX_AUTONOMOUS_BOOKINGS,
+          )
+        : Promise.resolve([] as Proposal[]),
+      // WS10 — proposals created today that carried at least one applied
+      // standing-instruction stamp ("Applied your rule ..."). Optional repo
+      // method — absent on partial doubles, section self-omits.
+      deps.proposalRepo.findAppliedInstructionsForDay
+        ? deps.proposalRepo.findAppliedInstructionsForDay(
+            tenantId,
+            today.start,
+            today.end,
+            DIGEST_MAX_APPLIED_INSTRUCTIONS_PROPOSALS,
+          )
+        : Promise.resolve([] as Proposal[]),
     ]);
 
   // Combine both actionable statuses — mirrors the inbox's dual-fetch so the
@@ -813,13 +996,63 @@ export async function computeDigestPayload(
   // WS6 — "Checked: N proposals, M flagged" supervisor-review reflection.
   // Omitted when no reviews ran today (checked===0), per the "omit if zero"
   // convention shared with unsureAbout/learnedToday.
+  //
+  // WS22 — `fixed`: for each flagged review, was there a proposal.edited or
+  // proposal.sms_edited audit event on that SAME proposalId, strictly after
+  // the review's createdAt and still inside today's window? One
+  // findByEntity call per DISTINCT flagged proposalId (not per review — a
+  // proposal can carry more than one review) keeps this O(distinct flagged
+  // proposals), bounded by DIGEST_MAX_REVIEWS regardless of how many
+  // proposals were actually flagged.
+  const flaggedReviews = supervisorReviews.filter((r) => r.verdict === 'flag' || r.verdict === 'hold');
+  const flaggedProposalIds = Array.from(new Set(flaggedReviews.map((r) => r.proposalId)));
+  const editEventsByProposal = new Map<string, Date[]>();
+  if (deps.auditRepo && flaggedProposalIds.length > 0) {
+    await Promise.all(
+      flaggedProposalIds.map(async (proposalId) => {
+        const events = await deps.auditRepo!.findByEntity(tenantId, 'proposal', proposalId);
+        editEventsByProposal.set(
+          proposalId,
+          events
+            .filter((e) => e.eventType === 'proposal.edited' || e.eventType === 'proposal.sms_edited')
+            .map((e) => e.createdAt),
+        );
+      }),
+    );
+  }
+  const fixedCount = flaggedReviews.filter((r) => {
+    const edits = editEventsByProposal.get(r.proposalId);
+    if (!edits) return false;
+    return edits.some((t) => t.getTime() > r.createdAt.getTime() && t.getTime() < today.end.getTime());
+  }).length;
+
   const supervisorChecks: DigestSupervisorChecks | undefined =
     supervisorReviews.length > 0
       ? {
           checked: supervisorReviews.length,
-          flagged: supervisorReviews.filter((r) => r.verdict === 'flag' || r.verdict === 'hold').length,
+          flagged: flaggedReviews.length,
+          fixed: fixedCount,
         }
       : undefined;
+
+  // D-015 amendment — "Auto-booked: N appointment(s)" reflection. Omitted
+  // when no autonomous-lane bookings ran today (count===0), per the "omit if
+  // zero" convention shared with unsureAbout/learnedToday/supervisorChecks.
+  const autonomousBookings: DigestAutonomousBookings | undefined =
+    autonomousLaneProposals.length > 0
+      ? {
+          count: autonomousLaneProposals.length,
+          undone: autonomousLaneProposals.filter((p) => p.status === 'undone').length,
+        }
+      : undefined;
+
+  // WS10 — "Instructions applied" reflection. Omitted when no standing
+  // instruction fired on any draft today (empty list), per the "omit if
+  // zero" convention shared with unsureAbout/learnedToday/supervisorChecks/
+  // autonomousBookings.
+  const groupedInstructions = groupAppliedInstructions(appliedInstructionProposals);
+  const instructionsApplied: DigestInstructionApplied[] | undefined =
+    groupedInstructions.length > 0 ? groupedInstructions : undefined;
 
   return {
     date,
@@ -844,6 +1077,8 @@ export async function computeDigestPayload(
     ...(unsureAbout !== undefined ? { unsureAbout } : {}),
     ...(learnedToday !== undefined ? { learnedToday } : {}),
     ...(supervisorChecks !== undefined ? { supervisorChecks } : {}),
+    ...(autonomousBookings !== undefined ? { autonomousBookings } : {}),
+    ...(instructionsApplied !== undefined ? { instructionsApplied } : {}),
   };
 }
 

@@ -12,6 +12,7 @@ import { transitionProposal, UNDO_WINDOW_MS } from '../../../src/proposals/lifec
 import { ProposalExecutor } from '../../../src/proposals/execution/executor';
 import { IdempotencyGuard } from '../../../src/proposals/execution/idempotency';
 import { IdempotencyLockProvider } from '../../../src/proposals/execution/idempotency-lock';
+import { InMemoryAuditRepository } from '../../../src/audit/audit';
 import {
   ExecutionContext,
   ExecutionHandler,
@@ -111,6 +112,7 @@ async function runWith(handler: ExecutionHandler): Promise<Proposal> {
     new Map<ProposalType, ExecutionHandler>([['create_customer', handler]]),
     repo,
     guard,
+    new InMemoryAuditRepository(),
     { executionRepo },
   );
   const proposal = makeApprovedProposal(tenantId);

@@ -115,6 +115,7 @@ migration).
 | Spoken example a tradesperson would expect to work | Proposal type | Class | Plan |
 |---|---|---|---|
 | "Book this caller for Thursday" | `create_booking` | capture | deferred (customer-call FSM path) |
+| _(none — system-generated, not spoken)_ | `update_catalog_item` | capture | WS20: the correction loop emits this after N same-SKU price corrections; intentionally never voice-reachable (no on-ramp by design) |
 
 (`create_invoice_schedule` and `review_response_proposal` graduated to
 section A in taxonomy 1.2.0 — U2/U3 of the agent build wave.)
@@ -184,7 +185,8 @@ approves by screen/SMS tap).
     { "intent": "create_standing_instruction", "proposalType": "create_standing_instruction", "actionClass": "capture" }
   ],
   "handlerNoOnramp": [
-    "create_booking"
+    "create_booking",
+    "update_catalog_item"
   ],
   "gated": ["approve_proposal", "reject_proposal", "edit_proposal"]
 }

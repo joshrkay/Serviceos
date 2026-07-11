@@ -248,6 +248,81 @@ export const wsReconnectRejectTotal = new Counter({
   registers: [metricsRegistry],
 });
 
+// ---------- Voice turn latency (WS26) ----------
+
+/**
+ * WS26 — voice turn latency: the time from the STT provider returning a FINAL
+ * transcript for the caller's turn to the FIRST outbound TTS audio chunk of the
+ * agent's reply being enqueued, on the Twilio Media Streams path. This is the
+ * "caller stops speaking → first audio of the reply" seam the scorecard's
+ * "turn latency P95" SLO targets.
+ *
+ * Observed best-effort inside the media-streams adapter (mediastream-adapter.ts)
+ * at the exact points that already bracket the turn: `transcript_received`
+ * (final transcript) arms the timer, the first non-filler outbound media chunk
+ * observes it. FILLER chunks are excluded — a filler clip fills the LLM-thinking
+ * gap and would mask the real turn latency.
+ *
+ * No labels: this histogram is only ever observed from the single media-streams
+ * transport. If a second transport ever measures turn latency, add a `transport`
+ * label here and at the observe site.
+ *
+ * Cumulative in-process: like every prom-client histogram it accumulates since
+ * process boot and is only visible where the voice service runs. The SLO monitor
+ * reads it in-process ONLY under PROCESS_ROLE=all (single-service deploys). Split
+ * topologies alert on it via Prometheus/Grafana — see docs/runbooks/slo-alerts.md.
+ */
+export const voiceTurnLatencyMs = new Histogram({
+  name: 'voice_turn_latency_ms',
+  help: 'Voice turn latency (ms): STT-final transcript → first outbound TTS chunk of the reply, media-streams path. Excludes filler chunks.',
+  buckets: [250, 500, 1000, 1500, 2000, 2500, 3000, 3500, 5000, 7500, 10_000],
+  registers: [metricsRegistry],
+});
+
+// ---------- Platform SLOs (WS15 — operational resilience) ----------
+
+/**
+ * WS15 — calls abandoned by a shutdown drain: the SIGTERM drain window
+ * (DRAIN_TIMEOUT_MS) expired with live voice sessions still active, and
+ * teardown proceeded anyway (Twilio ends the calls).
+ *
+ * NOTE: Prometheus counters live in process memory and are LOST at process
+ * exit — and this counter is by definition incremented moments before exit,
+ * so a scraper will usually never see it. The Sentry error event emitted
+ * alongside it (see monitoring/alert-operator.ts emitDrainAbandonment) is
+ * the durable alarm; this counter exists for the case where the increment
+ * happens on a process that lingers long enough to be scraped mid-drain.
+ */
+export const voiceDrainAbandonedCallsTotal = new Counter({
+  name: 'voice_drain_abandoned_calls_total',
+  help: 'Voice calls still live when the shutdown drain window expired (teardown proceeded). Durable alarm is the paired Sentry event.',
+  registers: [metricsRegistry],
+});
+
+/** WS15 — last evaluated value per SLO rule (see workers/slo-monitor.ts). */
+export const sloRuleValue = new Gauge({
+  name: 'slo_rule_value',
+  help: 'Last evaluated value per platform SLO rule (call_completion_rate=ratio, queue_staleness=stale job count, sweep_lag=seconds since last sweep success, voice_turn_latency_p95=P95 turn latency ms)',
+  labelNames: ['rule'],
+  registers: [metricsRegistry],
+});
+
+/** WS15 — SLO breaches detected by the monitor (pre-cooldown). */
+export const sloBreachTotal = new Counter({
+  name: 'slo_breach_total',
+  help: 'Platform SLO breaches detected by the slo-monitor worker',
+  labelNames: ['rule'],
+  registers: [metricsRegistry],
+});
+
+/** WS15 — operator alerts actually dispatched, per channel (post-cooldown). */
+export const sloAlertsSentTotal = new Counter({
+  name: 'slo_alerts_sent_total',
+  help: 'Operator alerts dispatched by alertOperator, by rule and channel (sentry|sms)',
+  labelNames: ['rule', 'channel'],
+  registers: [metricsRegistry],
+});
+
 export async function renderMetrics(): Promise<{
   contentType: string;
   body: string;

@@ -21,6 +21,8 @@ const MALFORMED = 'not a number';
 interface MockResponses {
   dnc?: Array<{ phone: string }>;
   customer?: Array<{ id: string; consent_status: string }>;
+  /** consent_events ledger rows, newest first (WS12 cross-channel check). */
+  consentEvents?: Array<{ kind: string; state: string }>;
   updateRowCount?: number;
   customerBefore?: Array<{ consent_status: string }>;
 }
@@ -34,6 +36,10 @@ function buildPool(responses: MockResponses = {}) {
       calls.push({ sql: text, params: params ?? [] });
       if (text.includes('FROM tenant_dnc_list')) {
         const rows = responses.dnc ?? [];
+        return { rows, rowCount: rows.length } as unknown as QueryResult;
+      }
+      if (text.includes('FROM consent_events')) {
+        const rows = responses.consentEvents ?? [];
         return { rows, rowCount: rows.length } as unknown as QueryResult;
       }
       if (text.includes('FROM customers') && text.includes('phone_normalized')) {
@@ -191,6 +197,87 @@ describe('checkOutboundConsent — customer consent', () => {
     );
     expect(res.allowed).toBe(false);
     expect(res.reason).toBe('customer_not_found');
+  });
+});
+
+describe('checkOutboundConsent — WS12 cross-channel revocation (one consent model)', () => {
+  it('an SMS STOP in the ledger blocks the CALL even when consent_status = granted', async () => {
+    const { pool, calls } = buildPool({
+      customer: [{ id: 'cust-1', consent_status: 'granted' }],
+      consentEvents: [{ kind: 'sms', state: 'revoked' }],
+    });
+    const { repo, events } = makeAuditRepo();
+
+    const res = await checkOutboundConsent(
+      { pool, auditRepo: repo },
+      { tenantId: TENANT, phoneE164: PHONE, ...ACTOR },
+    );
+
+    expect(res.allowed).toBe(false);
+    expect(res.reason).toBe('consent_revoked');
+    // The ledger was consulted inside the same transaction.
+    expect(calls.some((c) => c.sql.includes('FROM consent_events'))).toBe(true);
+    // Same audit shape as any consent block.
+    expect(events).toHaveLength(1);
+    expect(events[0].eventType).toBe('voice.outbound_blocked');
+    expect(events[0].metadata).toMatchObject({ reason: 'consent_revoked' });
+  });
+
+  it('a marketing revocation blocks the call too', async () => {
+    const { pool } = buildPool({
+      customer: [{ id: 'cust-1', consent_status: 'granted' }],
+      consentEvents: [{ kind: 'marketing', state: 'revoked' }],
+    });
+    const res = await checkOutboundConsent(
+      { pool },
+      { tenantId: TENANT, phoneE164: PHONE, ...ACTOR },
+    );
+    expect(res.allowed).toBe(false);
+    expect(res.reason).toBe('consent_revoked');
+  });
+
+  it('a recording objection in the ledger does NOT cross-block a granted customer (kind-scoping)', async () => {
+    // Recording is not a contact kind; voice blocking for an objector flows
+    // through the consent_status rollup (covered by the consent-status
+    // matrix above), never through the cross-channel ledger check.
+    const { pool } = buildPool({
+      customer: [{ id: 'cust-1', consent_status: 'granted' }],
+      consentEvents: [{ kind: 'recording', state: 'revoked' }],
+    });
+    const res = await checkOutboundConsent(
+      { pool },
+      { tenantId: TENANT, phoneE164: PHONE, ...ACTOR },
+    );
+    expect(res.allowed).toBe(true);
+  });
+
+  it('an sms GRANT never manufactures voice consent (asymmetry)', async () => {
+    const { pool } = buildPool({
+      customer: [{ id: 'cust-1', consent_status: 'not_requested' }],
+      consentEvents: [{ kind: 'sms', state: 'granted' }],
+    });
+    const res = await checkOutboundConsent(
+      { pool },
+      { tenantId: TENANT, phoneE164: PHONE, ...ACTOR },
+    );
+    expect(res.allowed).toBe(false);
+    expect(res.reason).toBe('consent_not_granted');
+  });
+
+  it('STOP → START re-opt-in clears the cross-channel block (per-channel consent still applies)', async () => {
+    const { pool } = buildPool({
+      customer: [{ id: 'cust-1', consent_status: 'granted' }],
+      // newest first: the later START clears the sms-kind revocation.
+      consentEvents: [
+        { kind: 'sms', state: 'granted' },
+        { kind: 'sms', state: 'revoked' },
+      ],
+    });
+    const res = await checkOutboundConsent(
+      { pool },
+      { tenantId: TENANT, phoneE164: PHONE, ...ACTOR },
+    );
+    expect(res.allowed).toBe(true);
   });
 });
 

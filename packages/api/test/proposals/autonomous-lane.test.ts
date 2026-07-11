@@ -54,6 +54,12 @@ describe('evaluateAutonomousBookingLane — every gate blocks independently', ()
   });
 
   const cases: Array<[string, Partial<EvaluateAutonomousLaneInput>, string]> = [
+    ['platform kill switch (tenant opted in)', { platformDisabled: true }, 'platform_disabled'],
+    [
+      'platform kill switch checked BEFORE tenant opt-in',
+      { platformDisabled: true, settings: { enabled: false } },
+      'platform_disabled',
+    ],
     ['tenant not opted in', { settings: { enabled: false } }, 'tenant_not_opted_in'],
     ['settings absent', { settings: undefined }, 'tenant_not_opted_in'],
     [
@@ -96,6 +102,17 @@ describe('evaluateAutonomousBookingLane — every gate blocks independently', ()
       expect(result).toEqual({ eligible: false, reason });
     });
   }
+
+  it('platformDisabled absent/false ⇒ byte-identical to today (eligible when every other gate passes)', () => {
+    expect(evaluateAutonomousBookingLane({ ...eligibleInput(), platformDisabled: undefined })).toEqual({
+      eligible: true,
+      threshold: 0.95,
+    });
+    expect(evaluateAutonomousBookingLane({ ...eligibleInput(), platformDisabled: false })).toEqual({
+      eligible: true,
+      threshold: 0.95,
+    });
+  });
 
   it('threshold floor is enforced in code — a 0.80 setting still judges at 0.90', () => {
     const result = evaluateAutonomousBookingLane({

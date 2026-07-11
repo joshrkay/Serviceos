@@ -224,8 +224,8 @@ describe('DigestPage', () => {
   });
 
   describe('WS6 supervisor checks section', () => {
-    it('renders "Checked" + flagged count when reviews ran today', async () => {
-      const withChecks = { ...basePayload, supervisorChecks: { checked: 12, flagged: 2 } };
+    it('renders "Checked" + flagged count when reviews ran today (no fixed)', async () => {
+      const withChecks = { ...basePayload, supervisorChecks: { checked: 12, flagged: 2, fixed: 0 } };
       mockFetch.mockResolvedValue(digestResponse(withChecks));
       renderAt('/digest/2026-06-10');
       await screen.findByText('A solid day.');
@@ -235,8 +235,17 @@ describe('DigestPage', () => {
       expect(screen.getByText('2 flagged')).toBeInTheDocument();
     });
 
+    // WS22 — flaggedFixed.
+    it('renders the fixed count alongside flagged when fixed > 0', async () => {
+      const withChecks = { ...basePayload, supervisorChecks: { checked: 12, flagged: 2, fixed: 1 } };
+      mockFetch.mockResolvedValue(digestResponse(withChecks));
+      renderAt('/digest/2026-06-10');
+      await screen.findByText('A solid day.');
+      expect(screen.getByText('2 flagged, 1 fixed')).toBeInTheDocument();
+    });
+
     it('renders "None flagged" when nothing was flagged', async () => {
-      const withChecks = { ...basePayload, supervisorChecks: { checked: 5, flagged: 0 } };
+      const withChecks = { ...basePayload, supervisorChecks: { checked: 5, flagged: 0, fixed: 0 } };
       mockFetch.mockResolvedValue(digestResponse(withChecks));
       renderAt('/digest/2026-06-10');
       await screen.findByText('A solid day.');
@@ -248,6 +257,63 @@ describe('DigestPage', () => {
       renderAt('/digest/2026-06-10');
       await screen.findByText('A solid day.');
       expect(screen.queryByText('Supervisor checks')).not.toBeInTheDocument();
+    });
+  });
+
+  describe('D-015 auto-booked section', () => {
+    it('renders the count + undone note when the lane approved bookings today', async () => {
+      const withBookings = { ...basePayload, autonomousBookings: { count: 7, undone: 1 } };
+      mockFetch.mockResolvedValue(digestResponse(withBookings));
+      renderAt('/digest/2026-06-10');
+      await screen.findByText('A solid day.');
+      const section = screen.getByText('Auto-booked').closest('section') as HTMLElement;
+      expect(within(section).getByText('7')).toBeInTheDocument();
+      expect(within(section).getByText('appointments')).toBeInTheDocument();
+      expect(within(section).getByText('1 undone')).toBeInTheDocument();
+    });
+
+    it('omits the undone note when nothing was undone', async () => {
+      const withBookings = { ...basePayload, autonomousBookings: { count: 1, undone: 0 } };
+      mockFetch.mockResolvedValue(digestResponse(withBookings));
+      renderAt('/digest/2026-06-10');
+      await screen.findByText('A solid day.');
+      const section = screen.getByText('Auto-booked').closest('section') as HTMLElement;
+      expect(within(section).getByText('appointment')).toBeInTheDocument();
+      expect(within(section).queryByText(/undone/)).not.toBeInTheDocument();
+    });
+
+    it('omits the section entirely when count===0 / absent', async () => {
+      mockFetch.mockResolvedValue(digestResponse(basePayload));
+      renderAt('/digest/2026-06-10');
+      await screen.findByText('A solid day.');
+      expect(screen.queryByText('Auto-booked')).not.toBeInTheDocument();
+    });
+  });
+
+  describe('WS10 instructions-applied section', () => {
+    it('renders each rule with its draft count when present', async () => {
+      const withInstructions = {
+        ...basePayload,
+        instructionsApplied: [
+          { id: 'rule-1', text: 'always add trip fee', draftCount: 3 },
+          { id: 'rule-2', text: 'call before arriving', draftCount: 1 },
+        ],
+      };
+      mockFetch.mockResolvedValue(digestResponse(withInstructions));
+      renderAt('/digest/2026-06-10');
+      await screen.findByText('A solid day.');
+      const section = screen.getByText('Instructions applied').closest('section') as HTMLElement;
+      expect(within(section).getByText('always add trip fee')).toBeInTheDocument();
+      expect(within(section).getByText('3 drafts')).toBeInTheDocument();
+      expect(within(section).getByText('call before arriving')).toBeInTheDocument();
+      expect(within(section).getByText('1 draft')).toBeInTheDocument();
+    });
+
+    it('omits the section entirely when empty / absent', async () => {
+      mockFetch.mockResolvedValue(digestResponse(basePayload));
+      renderAt('/digest/2026-06-10');
+      await screen.findByText('A solid day.');
+      expect(screen.queryByText('Instructions applied')).not.toBeInTheDocument();
     });
   });
 

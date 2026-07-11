@@ -93,6 +93,9 @@ const TYPE_PRIORITY: Record<ProposalType, number> = {
   // UB-A2 — standing instructions are back-office policy capture; they gate
   // no same-day work. Same low tier as notes.
   create_standing_instruction: 5,
+  // WS20 — correction-repetition catalog update is back-office config capture;
+  // it gates no same-day work. Same low tier as notes / standing instructions.
+  update_catalog_item: 5,
 };
 
 export function getUrgency(proposal: Proposal): { urgency: PrioritizedProposal['urgency']; reason: string } {

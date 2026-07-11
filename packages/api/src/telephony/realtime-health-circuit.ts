@@ -9,8 +9,17 @@
  *
  * This breaker is the "recent failures" signal the /voice TwiML branch consults
  * (via {@link isOpen}) and the mediastream adapter feeds (via
- * {@link recordFailure} / {@link recordSuccess}) at its session-establishment
- * and terminal-failure sites.
+ * {@link recordFailure} / {@link recordSuccess}).
+ *
+ * WS16a feed semantics (the CLASS is unchanged — only what the adapter feeds
+ * it changed): the adapter now votes from REAL per-call outcomes, once per call
+ * leg, at CLOSE time — failure on a transport-failure termination (Deepgram
+ * open/reopen failure, disclosure bootstrap failure, unexpected mid-call
+ * Deepgram close, transport-failure-class WS close) and success only when an
+ * ESTABLISHED session ends on a clean/caller-driven reason. It deliberately no
+ * longer records success at establishment: that reset the consecutive counter
+ * and let a clean-establish-then-die-mid-call leg never trip the breaker (the
+ * "establish-then-die" trap). Pre-establishment closes do not vote.
  *
  * Design constraints (deliberately dead simple):
  *   - Pure + in-process. No I/O, no timers. State is three fields.
@@ -21,6 +30,14 @@
  *     subsequent failure re-opens immediately (the failure count is not reset
  *     on half-open, so a single failure is back over threshold); a success
  *     fully resets.
+ *   - Half-open is a WINDOW, not a single-probe gate: `isOpen()` clears the
+ *     open marker on the first post-TTL call, so it AND every subsequent call
+ *     read closed until some `recordFailure` re-opens. Every call admitted
+ *     during that window is itself a probe; one failing probe re-opens
+ *     immediately. Because the adapter now votes at close time, that window
+ *     effectively lasts until an admitted probe call terminates — acceptable,
+ *     since any single failure (including a fast follow-on establishment
+ *     failure) re-trips instantly.
  *
  * Scope: a single process-wide instance is shared between the route (read) and
  * the adapter (write) — it is NOT per-tenant. A realtime transport outage

@@ -110,6 +110,7 @@ import {
   appendAgentTts,
   preloadSessionCatalog,
   type VoiceTurnProcessor,
+  type VoiceTurnProcessorDeps,
 } from '../ai/voice-turn';
 import type { CustomerNegotiationContextProvider } from '../customers/customer-negotiation-context';
 import type { CurrentQuoteResolver } from '../conversations/negotiation/current-quote-resolver';
@@ -396,6 +397,22 @@ export interface TwilioAdapterDeps {
    * recording itself can't be paused — logged loudly).
    */
   recordingControl?: RecordingControl;
+  /**
+   * WS18b — append-only consent ledger for the on-call SMS consent capture
+   * (grant kind:'sms', source:'voice' + customers.sms_consent flip).
+   * Processor-only pass-through: the adapter never reads this itself — it
+   * flows through the `...this.deps` spread into createVoiceTurnProcessor.
+   * Distinct from `consentEvents` above (RV-130 recording consent).
+   */
+  consentEventRepo?: ConsentEventRepository;
+  /**
+   * WS18d (D-018) — the sanctioned on-call close wiring (production
+   * executor, platform kill switches, owner UNDO/one-tap SMS). Processor-
+   * only pass-through: consumed exclusively by createVoiceTurnProcessor's
+   * close-chain gating; typed by reference so the adapter surface can never
+   * drift from VoiceTurnProcessorDeps.
+   */
+  autonomousClose?: VoiceTurnProcessorDeps['autonomousClose'];
 }
 
 /**
@@ -906,37 +923,17 @@ export class TwilioGatherAdapter {
     from: string;
     tenantId: string;
   }): Promise<string> {
-    const existing = this.deps.store.findByCallSid(opts.callSid);
-    if (existing && existing.tenantId === opts.tenantId) {
-      return this.buildStreamTwiML({ sessionId: existing.id, callSid: opts.callSid });
-    }
-    const repairTemplates = this.deps.repairTemplatesResolver
-      ? await this.deps.repairTemplatesResolver(opts.tenantId).catch(() => [])
-      : [];
-    const escalationTriggers = await this.resolveEscalationTriggers(opts.tenantId);
-    const extendedIntentsFlag = await this.resolveExtendedIntents(opts.tenantId);
-    // RV-070 — owner-line recognition happens at session establishment:
-    // recognized owner line (caller-ID match; see approver-identity.ts).
-    const ownerSession = await this.resolveOwnerSession(opts.tenantId, opts.from);
-    // Live-call customer complaint handling is unwired today; revisit this AND
-    // when the FSM complaint path ships.
-    const extendedIntents = extendedIntentsFlag && ownerSession;
-    const session = this.deps.store.create(opts.tenantId, 'telephony', {
+    // WS16b — Phase A only (shared). WS5's deliberate rule: NO FSM greeting
+    // before the WS `start` frame — Phase B (`bootstrapCallEstablishment`) runs
+    // later via `initializeStreamSession`, under the mediastream adapter's
+    // session lock. Replay and fresh construction both return the same
+    // <Connect><Stream> keyed on session.id, so no replay branch is needed here
+    // (establishInboundSession skips construction on replay).
+    const { session } = await this.establishInboundSession({
       callSid: opts.callSid,
-      ...(repairTemplates.length > 0 ? { repairTemplates } : {}),
-      ...(escalationTriggers ? { escalationTriggers } : {}),
-      ...(ownerSession ? { ownerSession: true } : {}),
-      ...(extendedIntents ? { extendedIntents: true } : {}),
+      from: opts.from,
+      tenantId: opts.tenantId,
     });
-    // WS5 — kick off the tenant-catalog load ONCE at session establishment so
-    // in-call estimate grounding has the active catalog in hand synchronously
-    // at quote time (both voice transports). Non-blocking: fire-and-stash.
-    preloadSessionCatalog(session, this.deps.catalogRepo);
-    // initializeStreamSession reads callerIdBySession to drive
-    // identifyCaller/lead creation; without this, every media-stream
-    // inbound silently falls through to unknown-caller behavior.
-    this.callerIdBySession.set(session.id, opts.from ?? '');
-    this.persistVoiceSessionRow(session, opts.callSid);
     return this.buildStreamTwiML({ sessionId: session.id, callSid: opts.callSid });
   }
 
@@ -959,6 +956,289 @@ export class TwilioGatherAdapter {
       });
   }
 
+  // ─── WS16b — shared inbound establishment cores ────────────────────────────
+
+  /**
+   * WS16b Phase A — webhook-time session construction, shared by BOTH voice
+   * transports (Gather and Media Streams). Replay-detects by CallSid (the
+   * replay RESPONSE rendering stays in each caller), resolves the per-tenant
+   * context, creates the session, preloads the catalog, captures the caller-id,
+   * and fire-and-forgets the voice_sessions row. Returns `replayed: true` (with
+   * the existing session) when this CallSid is a Twilio retry so the caller can
+   * re-render without re-running construction or firing duplicate side effects.
+   *
+   * The Phase-A ops after `store.create` are order-independent (all
+   * fire-and-forget or pure writes with no inter-dependency), so a single
+   * canonical order serves both transports byte-identically.
+   */
+  private async establishInboundSession(opts: {
+    callSid: string;
+    from: string;
+    tenantId: string;
+  }): Promise<{ session: VoiceSession; replayed: boolean }> {
+    // WS16c — fully converged across transports (no per-transport branch here):
+    // the caller-id is pinned on the session for both Gather and Media Streams.
+    // CallSid replay protection: Twilio retries the /voice webhook if it does
+    // not get a 2xx in time. Without this, every retry creates a fresh session
+    // AND fires duplicate audit/notify_oncall side effects.
+    const existing = this.deps.store.findByCallSid(opts.callSid);
+    if (existing && existing.tenantId === opts.tenantId) {
+      return { session: existing, replayed: true };
+    }
+
+    const repairTemplates = this.deps.repairTemplatesResolver
+      ? await this.deps.repairTemplatesResolver(opts.tenantId).catch(() => [])
+      : [];
+    const escalationTriggers = await this.resolveEscalationTriggers(opts.tenantId);
+    const extendedIntentsFlag = await this.resolveExtendedIntents(opts.tenantId);
+    // RV-070 — owner-line recognition happens at session establishment:
+    // recognized owner line (caller-ID match; see approver-identity.ts).
+    const ownerSession = await this.resolveOwnerSession(opts.tenantId, opts.from);
+    // Live-call customer complaint handling is unwired today; revisit this AND
+    // when the FSM complaint path ships.
+    const extendedIntents = extendedIntentsFlag && ownerSession;
+    const session = this.deps.store.create(opts.tenantId, 'telephony', {
+      callSid: opts.callSid,
+      ...(repairTemplates.length > 0 ? { repairTemplates } : {}),
+      ...(escalationTriggers ? { escalationTriggers } : {}),
+      ...(ownerSession ? { ownerSession: true } : {}),
+      ...(extendedIntents ? { extendedIntents: true } : {}),
+    });
+    // WS5 — kick off the tenant-catalog load ONCE at session establishment so
+    // in-call estimate grounding has the active catalog in hand synchronously
+    // at quote time (both voice transports). Non-blocking: fire-and-stash.
+    preloadSessionCatalog(session, this.deps.catalogRepo);
+    // P18-001 — record the caller-id (or "" when blocked/withheld) so the
+    // create_customer voice flow can reuse it without re-prompting; the stream
+    // bootstrap also reads it back to drive identify/lead creation.
+    this.callerIdBySession.set(session.id, opts.from ?? '');
+    // B2 — fire-and-forget the voice_sessions row (state is the freshly-created
+    // initial FSM state on both transports — no bootstrap has run yet).
+    this.persistVoiceSessionRow(session, opts.callSid);
+    // WS16c (divergence #2, CONVERGED) — pin the caller-id on the session for
+    // BOTH transports so the ask_caller wire can find-or-create a customer by
+    // phone without re-prompting. Previously Gather-only; the stream path
+    // leaned on the voice-turn processor's callerPhoneResolver fallback, which
+    // stays as defense-in-depth but is no longer the sole source.
+    if (opts.from) session.callerPhone = opts.from;
+    return { session, replayed: false };
+  }
+
+  /**
+   * WS16b Phase B — establishment bootstrap, shared by BOTH voice transports.
+   * Runs synchronously in the webhook for Gather (from `handleInbound`) and
+   * post-`start`/post-Deepgram-open under `withSessionLock` for Media Streams
+   * (from `initializeStreamSession`, whose call site the mediastream adapter
+   * owns — this core is timing-agnostic; WHEN it runs stays owned by each
+   * transport's orchestrator). Pins the spoken language, discloses recording,
+   * identifies the caller, drives the FSM through the greeting + known / failed
+   * / unknown branches, substitutes the real greeting, fires the owner push +
+   * customer-timeline log, runs `executeSideEffects`, and returns the fully-
+   * substituted side-effect array.
+   *
+   * WS16c CONVERGED this core across transports — owner push (#5), timeline log
+   * (#4), identify guard (#3), lead guard (#6), callerPhone (#2), greeting
+   * substitution (#9), and language pin (#8) are now identical for Gather and
+   * Media Streams. The only remaining per-transport differences live in the
+   * ORCHESTRATORS by genuine mechanics, not policy: the replay renderer (#1),
+   * the `to` value ('' post-WS on stream, #7), the stream missing-session
+   * fallback (#10), and the Gather-only terminated-finalize step (#11).
+   */
+  private async bootstrapCallEstablishment(opts: {
+    session: VoiceSession;
+    callSid: string;
+    from: string;
+    to: string;
+    tenantId: string;
+  }): Promise<SideEffect[]> {
+    const { session, from } = opts;
+
+    // P11-002 / UB-C1 — resolve + pin the spoken language + TTS voice. Honor a
+    // pre-pinned session.language (the stream adapter's initialLanguageResolver
+    // sets it before Deepgram opens); a freshly-created Gather session is never
+    // pre-pinned, so `pinned` is undefined there → tenant default, byte-identical
+    // to the pre-WS16 handleInbound. (Divergence #8 unified.)
+    const pinnedLanguage =
+      session.language === 'en' || session.language === 'es' ? session.language : undefined;
+    const { language, ttsVoice, supportedLanguages } = await this.resolveTenantLanguage(
+      opts.tenantId,
+      pinnedLanguage,
+    );
+    session.language = language;
+    session.ttsVoice = ttsVoice;
+    if (supportedLanguages) session.supportedLanguages = supportedLanguages;
+
+    // 1. Recording disclosure (text only — Gather <Say> / stream TTS speak it).
+    const disclosure = await discloseRecording({
+      tenantId: opts.tenantId,
+      channel: 'telephony',
+      businessName: this.deps.businessName,
+      language,
+      // RV-130 — ledger the implicit recording consent against the session.
+      ...(this.deps.consentEvents ? { consentLedger: this.deps.consentEvents } : {}),
+      ...(from ? { callerPhone: from } : {}),
+      voiceSessionId: session.id,
+    });
+
+    // 2. Identify caller by phone number.
+    // WS16c (divergence #3, CONVERGED) — identify-guard parity: BOTH transports
+    // now require `pool && from`. Previously Gather ran identifyCaller even on a
+    // blocked/empty From (it always came back unmatched → unknown_caller), which
+    // was a wasted lookup; skipping it reaches the identical FSM outcome.
+    let callerKnown: { customerId: string; customerName: string } | null = null;
+    let identifyFailed = false;
+    if (this.deps.pool && from) {
+      try {
+        const result = await identifyCaller({
+          tenantId: opts.tenantId,
+          fromPhone: from,
+          pool: this.deps.pool,
+        });
+        if (result.status === 'matched') {
+          callerKnown = { customerId: result.customerId, customerName: result.customerName };
+        }
+      } catch (err) {
+        logger.error('identifyCaller failed', {
+          error: err instanceof Error ? err.message : String(err),
+          callSid: opts.callSid,
+        });
+        identifyFailed = true;
+      }
+    }
+
+    // 3. Dispatch incoming_call → greeting state.
+    // Divergence #7 stays per-transport by MECHANICS, not policy: Gather passes
+    // the real `to` from the webhook; the stream path has no To at WS-start, so
+    // it passes '' (the caller supplies it — the shared core just carries `to`).
+    const sideEffects: SideEffect[] = [];
+    sideEffects.push(
+      ...session.machine.dispatch({
+        type: 'incoming_call',
+        callSid: opts.callSid,
+        from,
+        to: opts.to,
+        tenantId: opts.tenantId,
+      }),
+    );
+
+    // 4. Replace the placeholder 'greeting' tts_play with the actual greeting +
+    // disclosure copy. B1: resolve per-tenant persona first (best-effort).
+    // Divergence #9 unified on an immutable `.map` copy — the payload text is
+    // identical and the in-place mutation the stream path used aliased nothing
+    // either consumer observes.
+    let persona: VoicePersona | null | undefined;
+    if (this.deps.voicePersonaResolver) {
+      try {
+        persona = await this.deps.voicePersonaResolver(opts.tenantId);
+      } catch {
+        persona = undefined;
+      }
+    }
+    const greetingText = buildTelephonyGreeting(
+      this.deps.businessName,
+      disclosure.disclosureText,
+      persona,
+      language,
+    );
+    const expanded = sideEffects.map((fx) =>
+      fx.type === 'tts_play' && fx.payload.text === 'greeting'
+        ? { ...fx, payload: { ...fx.payload, text: greetingText } }
+        : fx,
+    );
+
+    // 5. Drive FSM forward: greeted_ok → caller_known / caller_identification_
+    // failed / unknown_caller. Escalate on identifyFailed (DB error) instead of
+    // falling through to anonymous, which would target the wrong customer.
+    expanded.push(...session.machine.dispatch({ type: 'greeted_ok' }));
+
+    if (callerKnown) {
+      session.customerId = callerKnown.customerId;
+      // WS16c (divergence #4, CONVERGED) — log the inbound call on the customer
+      // timeline for BOTH transports (realtime callers previously never showed
+      // up in the unified inbox / conversation history). Best-effort; a logging
+      // failure never fails the call.
+      if (this.deps.conversationRepo) {
+        try {
+          await logInboundCallOnCustomerTimeline({
+            conversationRepo: this.deps.conversationRepo,
+            tenantId: opts.tenantId,
+            customerId: callerKnown.customerId,
+            fromPhone: from,
+            callSid: opts.callSid,
+            actorId: this.deps.systemActorId ?? 'system:inbound-call',
+            ...(this.deps.auditRepo ? { auditRepo: this.deps.auditRepo } : {}),
+          });
+        } catch (err) {
+          logger.error('inbound call timeline log failed', {
+            callSid: opts.callSid,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+      // U4 — assemble B2B priority routing context for a business / property-
+      // manager caller before driving the FSM forward.
+      await this.loadB2bAccountContext(session, opts.tenantId, callerKnown.customerId);
+      expanded.push(
+        ...session.machine.dispatch({ type: 'caller_known', customerId: callerKnown.customerId }),
+      );
+    } else if (identifyFailed) {
+      expanded.push(
+        ...session.machine.dispatch({
+          type: 'caller_identification_failed',
+          reason: 'identify_caller_threw',
+        }),
+      );
+    } else {
+      // Unknown caller: best-effort find-or-create a CRM lead so the call lands
+      // in the kanban. Failure here must NOT fail the call — we log and fall
+      // through to the FSM's unknown_caller path either way.
+      // WS16c (divergence #6, CONVERGED) — lead-guard parity: BOTH transports
+      // require `leadRepo && from` (a blocked/empty From has no phone to key a
+      // lead on).
+      if (this.deps.leadRepo && from) {
+        try {
+          const result = await findOrCreateLeadByPhone({
+            tenantId: opts.tenantId,
+            fromPhone: from,
+            leadRepo: this.deps.leadRepo,
+            ...(this.deps.auditRepo ? { auditRepo: this.deps.auditRepo } : {}),
+            systemActorId: this.deps.systemActorId ?? 'system:inbound-call',
+          });
+          session.leadId = result.leadId;
+          logger.info('inbound call lead resolved', {
+            callSid: opts.callSid,
+            sessionId: session.id,
+            leadStatus: result.status,
+          });
+        } catch (err) {
+          logger.error('findOrCreateLeadByPhone failed', {
+            callSid: opts.callSid,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+      expanded.push(...session.machine.dispatch({ type: 'unknown_caller' }));
+    }
+
+    // WS16c (divergence #5, CONVERGED) — fire ONE owner "incoming call" push per
+    // inbound call on BOTH transports (realtime callers previously never
+    // triggered the owner push). Known caller deep-links to their customer with
+    // their name; an unknown caller routes to the customers list. Failure-
+    // isolated inside notifyOwner.
+    await notifyOwnerOfIncomingCall({
+      tenantId: opts.tenantId,
+      ...(callerKnown
+        ? { customerId: callerKnown.customerId, customerName: callerKnown.customerName }
+        : {}),
+      ...(from ? { fromPhone: from } : {}),
+    });
+
+    // 6. Execute non-TwiML side effects (audit_log, create_proposal,
+    // notify_oncall) against the wired repos.
+    await this.processor.executeSideEffects(session, expanded, opts.tenantId);
+    return expanded;
+  }
+
   /**
    * P8-012 — Run greeting initialization for the Media Streams path.
    *
@@ -974,132 +1254,25 @@ export class TwilioGatherAdapter {
   }): Promise<SideEffect[]> {
     const session = this.deps.store.findByCallSid(opts.callSid);
     if (!session) {
+      // Missing-session fallback (divergence #10) stays owned by the stream
+      // orchestrator: a canned greeting when the WS `start` referenced a
+      // CallSid the store no longer knows about.
       return [
         { type: 'tts_play', payload: { text: `Thank you for calling ${this.deps.businessName}. How can I help you today?` } },
       ];
     }
-
+    // WS16b — the stream transport's `from` was captured at webhook time into
+    // callerIdBySession (Phase A); replay it into the shared Phase B bootstrap.
+    // The mediastream adapter invokes this under withSessionLock, so the timing
+    // asymmetry and lock discipline are preserved by construction.
     const from = this.callerIdBySession.get(session.id) ?? '';
-
-    // P11-002: resolve + pin the spoken language + TTS voice (tenant default).
-    // UB-C1 — when the media-stream adapter already pinned session.language
-    // (customer preferredLanguage resolved before Deepgram opened), honor it
-    // instead of overwriting with the tenant default.
-    const pinnedLanguage =
-      session.language === 'en' || session.language === 'es' ? session.language : undefined;
-    const { language, ttsVoice, supportedLanguages } = await this.resolveTenantLanguage(
-      opts.tenantId,
-      pinnedLanguage,
-    );
-    session.language = language;
-    session.ttsVoice = ttsVoice;
-    if (supportedLanguages) session.supportedLanguages = supportedLanguages;
-
-    // 1. Recording disclosure (text only — TTS synthesizes the audio).
-    const disclosure = await discloseRecording({
+    return this.bootstrapCallEstablishment({
+      session,
+      callSid: opts.callSid,
+      from,
+      to: '',
       tenantId: opts.tenantId,
-      channel: 'telephony',
-      businessName: this.deps.businessName,
-      language,
-      // RV-130 — ledger the implicit recording consent against the session.
-      ...(this.deps.consentEvents ? { consentLedger: this.deps.consentEvents } : {}),
-      ...(from ? { callerPhone: from } : {}),
-      voiceSessionId: session.id,
     });
-
-    // 2. Identify caller by phone number.
-    let callerKnown: { customerId: string; customerName: string } | null = null;
-    let identifyFailed = false;
-    if (this.deps.pool && from) {
-      try {
-        const result = await identifyCaller({
-          tenantId: opts.tenantId,
-          fromPhone: from,
-          pool: this.deps.pool,
-        });
-        if (result.status === 'matched') {
-          callerKnown = { customerId: result.customerId, customerName: result.customerName };
-        }
-      } catch (err) {
-        logger.error('initializeStreamSession: identifyCaller failed', {
-          error: err instanceof Error ? err.message : String(err),
-          callSid: opts.callSid,
-        });
-        identifyFailed = true;
-      }
-    }
-
-    // 3. FSM bootstrap: incoming_call → greeting → identifying.
-    const sideEffects: SideEffect[] = [];
-    sideEffects.push(
-      ...session.machine.dispatch({
-        type: 'incoming_call',
-        callSid: opts.callSid,
-        from,
-        to: '',
-        tenantId: opts.tenantId,
-      }),
-    );
-
-    // 4. Replace 'greeting' placeholder with real greeting + disclosure text.
-    let persona: VoicePersona | null | undefined;
-    if (this.deps.voicePersonaResolver) {
-      try {
-        persona = await this.deps.voicePersonaResolver(opts.tenantId);
-      } catch {
-        persona = undefined;
-      }
-    }
-    const greetingText = buildTelephonyGreeting(
-      this.deps.businessName,
-      disclosure.disclosureText,
-      persona,
-      language,
-    );
-    for (const fx of sideEffects) {
-      if (fx.type === 'tts_play' && fx.payload.text === 'greeting') {
-        fx.payload.text = greetingText;
-      }
-    }
-
-    // 5. Drive FSM forward: greeted_ok → caller_known / unknown_caller.
-    sideEffects.push(...session.machine.dispatch({ type: 'greeted_ok' }));
-
-    if (callerKnown) {
-      session.customerId = callerKnown.customerId;
-      // U4 — assemble B2B priority routing context for a business / property-
-      // manager caller before driving the FSM forward.
-      await this.loadB2bAccountContext(session, opts.tenantId, callerKnown.customerId);
-      sideEffects.push(
-        ...session.machine.dispatch({ type: 'caller_known', customerId: callerKnown.customerId }),
-      );
-    } else if (identifyFailed) {
-      sideEffects.push(
-        ...session.machine.dispatch({ type: 'caller_identification_failed', reason: 'identify_caller_threw' }),
-      );
-    } else {
-      if (this.deps.leadRepo && from) {
-        try {
-          const result = await findOrCreateLeadByPhone({
-            tenantId: opts.tenantId,
-            fromPhone: from,
-            leadRepo: this.deps.leadRepo,
-            ...(this.deps.auditRepo ? { auditRepo: this.deps.auditRepo } : {}),
-            systemActorId: this.deps.systemActorId ?? 'system:inbound-call',
-          });
-          session.leadId = result.leadId;
-        } catch (err) {
-          logger.error('initializeStreamSession: findOrCreateLeadByPhone failed', {
-            callSid: opts.callSid,
-            error: err instanceof Error ? err.message : String(err),
-          });
-        }
-      }
-      sideEffects.push(...session.machine.dispatch({ type: 'unknown_caller' }));
-    }
-
-    await this.processor.executeSideEffects(session, sideEffects, opts.tenantId);
-    return sideEffects;
   }
 
   /**
@@ -1463,228 +1636,42 @@ export class TwilioGatherAdapter {
     to: string;
     tenantId: string;
   }): Promise<string> {
-    // CallSid replay protection: Twilio retries the /voice webhook if it
-    // doesn't get a 2xx in time. Without this, every retry creates a
-    // fresh session AND fires duplicate audit/notify_oncall side effects.
-    // We rebuild the same greeting TwiML for the existing session.
-    const existing = this.deps.store.findByCallSid(opts.callSid);
-    if (existing && existing.tenantId === opts.tenantId) {
+    // WS16b — Phase A (shared). CallSid replay protection: Twilio retries the
+    // /voice webhook if it doesn't get a 2xx in time. Without this, every retry
+    // creates a fresh session AND fires duplicate audit/notify_oncall side
+    // effects. On replay we rebuild the same greeting TwiML for the existing
+    // session (renderer stays here — divergence #1).
+    const { session, replayed } = await this.establishInboundSession({
+      callSid: opts.callSid,
+      from: opts.from,
+      tenantId: opts.tenantId,
+    });
+    if (replayed) {
       logger.info('handleInbound: replay for existing CallSid — reusing session', {
         callSid: opts.callSid,
-        sessionId: existing.id,
+        sessionId: session.id,
       });
       return buildTwiML(
-        [{ type: 'tts_play', payload: { text: t('greeting.one_moment', existing.language ?? 'en') } }],
+        [{ type: 'tts_play', payload: { text: t('greeting.one_moment', session.language ?? 'en') } }],
         {
-          gatherActionUrl: this.gatherUrl(existing.id),
-          ...(existing.language ? { language: existing.language } : {}),
-          ...(existing.ttsVoice ? { voiceOverride: existing.ttsVoice } : {}),
+          gatherActionUrl: this.gatherUrl(session.id),
+          ...(session.language ? { language: session.language } : {}),
+          ...(session.ttsVoice ? { voiceOverride: session.ttsVoice } : {}),
         },
       );
     }
 
-    const repairTemplatesForInbound = this.deps.repairTemplatesResolver
-      ? await this.deps.repairTemplatesResolver(opts.tenantId).catch(() => [])
-      : [];
-    const escalationTriggers = await this.resolveEscalationTriggers(opts.tenantId);
-    const extendedIntentsFlag = await this.resolveExtendedIntents(opts.tenantId);
-    // RV-070 — owner-line recognition happens at session establishment:
-    // recognized owner line (caller-ID match; see approver-identity.ts).
-    const ownerSession = await this.resolveOwnerSession(opts.tenantId, opts.from);
-    // Live-call customer complaint handling is unwired today; revisit this AND
-    // when the FSM complaint path ships.
-    const extendedIntents = extendedIntentsFlag && ownerSession;
-    const session = this.deps.store.create(opts.tenantId, 'telephony', {
+    // WS16b — Phase B (shared): language pin + disclosure + identify + FSM
+    // bootstrap + greeting substitution + owner push + timeline log +
+    // executeSideEffects. Returns the fully-substituted effect array that steps
+    // 7–8 render + finalize below.
+    const expanded = await this.bootstrapCallEstablishment({
+      session,
       callSid: opts.callSid,
-      ...(repairTemplatesForInbound.length > 0 ? { repairTemplates: repairTemplatesForInbound } : {}),
-      ...(escalationTriggers ? { escalationTriggers } : {}),
-      ...(ownerSession ? { ownerSession: true } : {}),
-      ...(extendedIntents ? { extendedIntents: true } : {}),
-    });
-    this.persistVoiceSessionRow(session, opts.callSid);
-
-    // WS5 — kick off the tenant-catalog load ONCE at session establishment so
-    // in-call estimate grounding has the active catalog in hand synchronously
-    // at quote time. Non-blocking: fire-and-stash on the session.
-    preloadSessionCatalog(session, this.deps.catalogRepo);
-
-    // P18-001: record the caller-id (or "" when blocked/withheld) so
-    // the create_customer voice flow can use it as the new customer's
-    // primaryPhone without re-prompting.
-    this.callerIdBySession.set(session.id, opts.from ?? '');
-    // Also pin it on the session so the voice-turn processor's ask_caller wire
-    // can find-or-create a CUSTOMER by phone for an unknown caller who books.
-    if (opts.from) session.callerPhone = opts.from;
-
-    // P11-002: resolve spoken language + TTS voice (tenant default) and pin
-    // them on the session so the greeting, disclosure, and every TwiML build
-    // speak it in the right language/voice.
-    const { language, ttsVoice, supportedLanguages } = await this.resolveTenantLanguage(opts.tenantId);
-    session.language = language;
-    session.ttsVoice = ttsVoice;
-    if (supportedLanguages) session.supportedLanguages = supportedLanguages;
-
-    // 1. Disclose recording (text generation; no TTS — Twilio <Say> handles audio).
-    const disclosure = await discloseRecording({
+      from: opts.from,
+      to: opts.to,
       tenantId: opts.tenantId,
-      channel: 'telephony',
-      businessName: this.deps.businessName,
-      language,
-      // RV-130 — ledger the implicit recording consent against the session.
-      ...(this.deps.consentEvents ? { consentLedger: this.deps.consentEvents } : {}),
-      ...(opts.from ? { callerPhone: opts.from } : {}),
-      voiceSessionId: session.id,
     });
-
-    // 2. Identify caller. Skill requires a Pool; if we don't have one (dev),
-    //    skip and treat as unknown_caller below.
-    let callerKnown: { customerId: string; customerName: string } | null = null;
-    let identifyFailed = false;
-    if (this.deps.pool) {
-      try {
-        const result = await identifyCaller({
-          tenantId: opts.tenantId,
-          fromPhone: opts.from,
-          pool: this.deps.pool,
-        });
-        if (result.status === 'matched') {
-          callerKnown = {
-            customerId: result.customerId,
-            customerName: result.customerName,
-          };
-        }
-      } catch (err) {
-        logger.error('identifyCaller failed', {
-          error: err instanceof Error ? err.message : String(err),
-          callSid: opts.callSid,
-        });
-        identifyFailed = true;
-      }
-    }
-
-    // 3. Dispatch incoming_call → greeting state.
-    const sideEffectsAll: SideEffect[] = [];
-    sideEffectsAll.push(
-      ...session.machine.dispatch({
-        type: 'incoming_call',
-        callSid: opts.callSid,
-        from: opts.from,
-        to: opts.to,
-        tenantId: opts.tenantId,
-      })
-    );
-
-    // 4. Replace the placeholder 'greeting' tts_play with the actual greeting
-    //    + disclosure copy. B1: resolve per-tenant persona first (best-effort).
-    let persona: VoicePersona | null | undefined;
-    if (this.deps.voicePersonaResolver) {
-      try {
-        persona = await this.deps.voicePersonaResolver(opts.tenantId);
-      } catch {
-        persona = undefined;
-      }
-    }
-    const greetingText = buildTelephonyGreeting(
-      this.deps.businessName,
-      disclosure.disclosureText,
-      persona,
-      language,
-    );
-
-    const expanded = sideEffectsAll.map((fx) => {
-      if (fx.type === 'tts_play' && fx.payload.text === 'greeting') {
-        return { ...fx, payload: { ...fx.payload, text: greetingText } };
-      }
-      return fx;
-    });
-
-    // 5. Drive FSM forward: greeted_ok → identifying, then caller_known,
-    //    caller_identification_failed, or unknown_caller. We escalate on
-    //    identifyFailed (DB error) instead of falling through to anonymous,
-    //    which would create proposals against the wrong customer.
-    expanded.push(...session.machine.dispatch({ type: 'greeted_ok' }));
-
-    if (callerKnown) {
-      session.customerId = callerKnown.customerId;
-      // Log the inbound call on the customer's timeline (best-effort) so it
-      // shows up in their conversation history / unified inbox alongside the
-      // outbound click-to-call log. Never let a logging failure fail the call.
-      if (this.deps.conversationRepo) {
-        try {
-          await logInboundCallOnCustomerTimeline({
-            conversationRepo: this.deps.conversationRepo,
-            tenantId: opts.tenantId,
-            customerId: callerKnown.customerId,
-            fromPhone: opts.from,
-            callSid: opts.callSid,
-            actorId: this.deps.systemActorId ?? 'system:inbound-call',
-            ...(this.deps.auditRepo ? { auditRepo: this.deps.auditRepo } : {}),
-          });
-        } catch (err) {
-          logger.error('inbound call timeline log failed', {
-            callSid: opts.callSid,
-            error: err instanceof Error ? err.message : String(err),
-          });
-        }
-      }
-      // U4 — assemble B2B priority routing context for a business / property-
-      // manager caller before driving the FSM forward.
-      await this.loadB2bAccountContext(session, opts.tenantId, callerKnown.customerId);
-      expanded.push(
-        ...session.machine.dispatch({
-          type: 'caller_known',
-          customerId: callerKnown.customerId,
-        })
-      );
-    } else if (identifyFailed) {
-      expanded.push(
-        ...session.machine.dispatch({
-          type: 'caller_identification_failed',
-          reason: 'identify_caller_threw',
-        })
-      );
-    } else {
-      // Unknown caller: best-effort find-or-create a CRM lead so the call
-      // lands in the kanban. Failure here must NOT fail the call — we log
-      // and fall through to the FSM's unknown_caller path either way.
-      if (this.deps.leadRepo) {
-        try {
-          const result = await findOrCreateLeadByPhone({
-            tenantId: opts.tenantId,
-            fromPhone: opts.from,
-            leadRepo: this.deps.leadRepo,
-            ...(this.deps.auditRepo ? { auditRepo: this.deps.auditRepo } : {}),
-            systemActorId: this.deps.systemActorId ?? 'system:inbound-call',
-          });
-          session.leadId = result.leadId;
-          logger.info('inbound call lead resolved', {
-            callSid: opts.callSid,
-            sessionId: session.id,
-            leadStatus: result.status,
-          });
-        } catch (err) {
-          logger.error('findOrCreateLeadByPhone failed', {
-            callSid: opts.callSid,
-            error: err instanceof Error ? err.message : String(err),
-          });
-        }
-      }
-      expanded.push(...session.machine.dispatch({ type: 'unknown_caller' }));
-    }
-
-    // U2 — fire ONE owner "incoming call" push per inbound call (best-effort,
-    // after the caller is identified above). Known caller deep-links to their
-    // customer with their name; an unknown caller routes to the customers list
-    // (a lead has no mobile detail route). notifyOwner is failure-isolated.
-    await notifyOwnerOfIncomingCall({
-      tenantId: opts.tenantId,
-      ...(callerKnown ? { customerId: callerKnown.customerId, customerName: callerKnown.customerName } : {}),
-      ...(opts.from ? { fromPhone: opts.from } : {}),
-    });
-
-    // 6. Execute non-TwiML side effects (audit_log, create_proposal,
-    //    notify_oncall) against the wired repos.
-    await this.processor.executeSideEffects(session, expanded, opts.tenantId);
 
     // 7. Build TwiML — P8-013 may have produced a <Dial> transfer for
     //    the rare case where notify_oncall fires during the inbound

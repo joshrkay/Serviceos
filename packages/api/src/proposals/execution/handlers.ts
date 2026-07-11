@@ -85,6 +85,8 @@ import { dispatchEstimateNudge } from '../../estimates/estimate-nudge';
 import type { SendService } from '../../notifications/send-service';
 import type { DispatchRepository } from '../../notifications/dispatch-repository';
 import { CreateStandingInstructionExecutionHandler } from './standing-instruction-handler';
+import { UpdateCatalogItemExecutionHandler } from './update-catalog-item-handler';
+import { CatalogItemRepository } from '../../catalog/catalog-item';
 import type { StandingInstructionRepository } from '../../instructions/standing-instructions';
 
 export interface ExecutionContext {
@@ -932,6 +934,9 @@ export function createExecutionHandlerRegistry(deps?: {
   // UB-A2 — create_standing_instruction inserts via the UB-A1 repo.
   // Absent → the handler degrades to a synthetic-id passthrough.
   standingInstructionRepo?: StandingInstructionRepository;
+  // WS20 — update_catalog_item writes the new SKU price via the catalog repo.
+  // Absent → the handler degrades to a synthetic passthrough.
+  catalogRepo?: CatalogItemRepository;
 }): Map<ProposalType, ExecutionHandler> {
   // §6 Time-to-Cash. Built once; passed to the handlers that call the
   // widened money-mutation domain functions (recordPayment, issueInvoice).
@@ -1056,6 +1061,11 @@ export function createExecutionHandlerRegistry(deps?: {
       deps?.standingInstructionRepo,
       deps?.auditRepo,
     ),
+    // WS20 — update_catalog_item: applies the owner-ratified catalog price via
+    // the catalog domain fn (which emits catalog_item.updated). Capture-class,
+    // but the correction loop creates it with no trust tier, so it only ever
+    // runs after a human tap.
+    new UpdateCatalogItemExecutionHandler(deps?.catalogRepo, deps?.auditRepo),
   ];
 
   // Handlers that mutate existing entities take a repo dep. Registered

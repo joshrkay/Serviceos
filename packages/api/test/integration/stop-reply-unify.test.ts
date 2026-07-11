@@ -75,7 +75,7 @@ describe('Postgres integration — STOP/START opt-out unification', () => {
     expect(after!.consentStatus).toBe('revoked');
   });
 
-  it('START re-grants across all three stores', async () => {
+  it('START clears DNC + ledgers the re-grant, but never re-grants the voice rollup (WS12/D-017)', async () => {
     const cust = await customerRepo.create(customer(tenant.tenantId));
     await buildStopKeywordHandler({ dncRepo, consentRepo, customerRepo, pool }).handle(
       ctx(tenant.tenantId),
@@ -87,8 +87,16 @@ describe('Postgres integration — STOP/START opt-out unification', () => {
     });
 
     expect(await dncRepo.isOnDnc(tenant.tenantId, normalizePhone(PHONE))).toBe(false);
+    // The ledger records the re-grant (newest first) — this is what clears
+    // the sms-kind revocation at both outbound gates.
+    const events = await consentRepo.listByPhone(tenant.tenantId, PHONE);
+    expect(events[0].kind).toBe('sms');
+    expect(events[0].state).toBe('granted');
+    // Deliberate WS12 reversal of the original Story 10.6 assertion: an SMS
+    // re-opt-in must NOT manufacture voice-call consent, so consent_status
+    // stays 'revoked' (only the voice capture seam can grant it).
     const after = await customerRepo.findById(tenant.tenantId, cust.id);
-    expect(after!.consentStatus).toBe('granted');
+    expect(after!.consentStatus).toBe('revoked');
   });
 
   it('does not roll up consent onto another tenant sharing the number', async () => {

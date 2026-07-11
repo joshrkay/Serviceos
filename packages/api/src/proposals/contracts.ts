@@ -16,6 +16,7 @@ import { batchInvoicePayloadSchema } from './contracts/batch-invoice';
 import { sendPaymentReminderPayloadSchema } from './contracts/send-payment-reminder';
 import { applyLateFeePayloadSchema } from './contracts/apply-late-fee';
 import { createStandingInstructionPayloadSchema } from './contracts/standing-instruction';
+import { updateCatalogItemPayloadSchema } from './contracts/update-catalog-item';
 import {
   onboardingTenantSettingsPayloadSchema,
   onboardingServiceCategoryPayloadSchema,
@@ -502,6 +503,7 @@ export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
   send_payment_reminder: sendPaymentReminderPayloadSchema,
   apply_late_fee: applyLateFeePayloadSchema,
   create_standing_instruction: createStandingInstructionPayloadSchema,
+  update_catalog_item: updateCatalogItemPayloadSchema,
 };
 
 export function validateProposalPayload(

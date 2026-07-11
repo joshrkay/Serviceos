@@ -49,18 +49,78 @@ const configSchema = z.object({
   // without express consent on file. Off-by-default so production behavior is
   // unchanged until an operator explicitly opts in.
   TCPA_CONSENT_ENFORCEMENT: z.enum(['off', 'warn', 'block']).default('off'),
-  // WS2 — process-role split. One image, two Railway services: 'web' serves the
-  // HTTP/voice/WS surface only, 'worker' runs the background sweeps + queue poll
-  // loop only, 'all' (default) runs both — byte-for-byte back-compat with the
-  // single-service deploy. See docs/deployment.md "Two-service split (optional)".
-  // 'web' never starts the background interval loops; every other role does.
-  PROCESS_ROLE: z.enum(['web', 'worker', 'all']).default('all'),
+  // WS2 — process-role split. One image, up to three Railway services: 'web'
+  // serves the HTTP/voice/WS surface only, 'worker' runs the background sweeps
+  // + queue poll loop only, 'all' (default) runs both — byte-for-byte
+  // back-compat with the single-service deploy. See docs/deployment.md
+  // "Deploy topology (web + worker)".
+  // WS14 — 'voice' is a THIRD, opt-in role: a dedicated telephony-webhook +
+  // media-streams-WS service that deploys rarely, so Twilio's phone-number
+  // webhooks can point at a domain web/worker deploys never touch (live
+  // calls no longer ride the web service's 25s drain window). It serves the
+  // full HTTP surface — same as 'web' (Railway can't path-route, and it
+  // needs /health plus the telephony/gather/recording webhooks reachable;
+  // other routes existing on it is harmless since nothing points at them)
+  // — and attaches the media-streams WS, exactly like 'web' does. It runs
+  // ZERO background worker loops, same as 'web'.
+  // 'web' never starts the background interval loops; neither does 'voice'.
+  // Every other role ('worker', 'all') does.
+  //
+  // Companion env var (read raw from process.env, same pattern as
+  // PUBLIC_API_URL — intentionally NOT in this schema): VOICE_PUBLIC_URL is
+  // the dedicated voice service's public base URL, set on the WEB and WORKER
+  // services (where provisioning jobs execute). The Twilio number-provisioning
+  // worker (workers/provision-twilio.ts) uses it for the number's VoiceUrl +
+  // voice status callback so newly-provisioned numbers point at the voice
+  // domain; unset ⇒ single/two-service topology ⇒ falls back to the job's
+  // baseUrl (PUBLIC_API_URL at enqueue time). SMS + Vapi webhooks always stay
+  // on the web domain. See docs/deployment.md + docs/prod-env-checklist.md.
+  PROCESS_ROLE: z.enum(['web', 'worker', 'voice', 'all']).default('all'),
   // SEC-01 / WS1 — Postgres RLS runtime-role enforcement flag. Read raw today
   // by db/rls-runtime-role.ts (isRlsRuntimeRoleEnabled); declared here so it is
   // part of the validated config surface. The HARD prod/staging requirement
   // (must be 'true') is enforced in validateFeatureRequiredConfig above — this
   // schema entry only types/normalizes the value.
   RLS_RUNTIME_ROLE: z.enum(['true', 'false']).optional(),
+  // D-015 amendment — platform-wide kill switch for the autonomous booking
+  // lane. 'true' short-circuits evaluateAutonomousBookingLane before the
+  // per-tenant opt-in check, regardless of any tenant's
+  // autonomous_booking_enabled setting. Absent/'false' preserves today's
+  // per-tenant-only gating — no prod requirement.
+  AUTONOMOUS_BOOKING_DISABLED: z.enum(['true', 'false']).optional(),
+  // D-018 — platform-wide kill switch for the autonomous CLOSE lane
+  // (proposals/autonomous-close-lane.ts). 'true' short-circuits
+  // evaluateAutonomousCloseLane before the per-tenant opt-in check. It is a
+  // SIBLING of AUTONOMOUS_BOOKING_DISABLED, checked independently, so an
+  // operator can freeze on-call sale-closing while leaving autonomous booking
+  // live (and vice-versa). Absent/'false' preserves per-tenant-only gating —
+  // no prod requirement.
+  AUTONOMOUS_CLOSE_DISABLED: z.enum(['true', 'false']).optional(),
+  // ── WS15 — platform SLO monitor thresholds (workers/slo-monitor.ts). All
+  // optional with safe defaults; documented in .env.production.example and
+  // docs/runbooks/slo-alerts.md. No prod hard-requirement — the monitor runs
+  // with defaults and pages via Sentry (SENTRY_DSN) and, when set, ALERT_SMS_TO.
+  //
+  // Minimum acceptable call completion rate over the trailing 60 min (0..1).
+  SLO_CALL_COMPLETION_MIN: z.coerce.number().min(0).max(1).default(0.85),
+  // Ended-call sample floor: below this many calls in the window the
+  // completion rule never breaches (avoids 1-call false pages).
+  SLO_CALL_COMPLETION_MIN_SAMPLE: z.coerce.number().int().positive().default(5),
+  // Pending queue jobs older than this many minutes count as stale (breach).
+  SLO_QUEUE_STALE_MIN: z.coerce.number().positive().default(15),
+  // Sweep-heartbeat age (minutes) above which the worker loop is presumed wedged.
+  SLO_SWEEP_LAG_MIN: z.coerce.number().positive().default(15),
+  // WS26 — voice turn-latency P95 breach threshold (ms): STT-final → first TTS
+  // chunk on the media-streams path. Only evaluated in-process under
+  // PROCESS_ROLE=all; split topologies alert via Prometheus (see slo-alerts.md).
+  SLO_TURN_LATENCY_P95_MS: z.coerce.number().positive().default(3500),
+  // WS26 — minimum recorded turns before the turn-latency rule can breach.
+  SLO_TURN_LATENCY_MIN_SAMPLE: z.coerce.number().int().positive().default(30),
+  // Per-rule alert cooldown (minutes) — a persistent breach re-pages at most
+  // once per cooldown window, not every monitor tick.
+  SLO_ALERT_COOLDOWN_MIN: z.coerce.number().positive().default(60),
+  // Operator phone (E.164) for SLO breach SMS pages. Unset → Sentry-only.
+  ALERT_SMS_TO: z.string().min(1).optional(),
 });
 
 export type AppConfig = z.infer<typeof configSchema>;
@@ -323,6 +383,32 @@ function validateFeatureRequiredConfig(env: Record<string, string | undefined>):
 
 export function resetConfig(): void {
   cachedConfig = null;
+}
+
+/**
+ * WS7 — resolve the effective media-streams (realtime voice) master switch.
+ *
+ * `TWILIO_MEDIA_STREAMS_ENABLED`:
+ *   - `'true'`  → on. The hard-require validation in `validateProductionConfig`
+ *     and the `assertTtsProviderSupportsMediaStreams` boot guard enforce a
+ *     complete streaming stack (crash on a misconfigured provider/key).
+ *   - `'false'` → off (kill switch).
+ *   - unset / `'auto'` → on ONLY when the full streaming stack is already
+ *     present: `TTS_PROVIDER === 'elevenlabs'` AND `ELEVENLABS_API_KEY` AND
+ *     `DEEPGRAM_API_KEY`. Stricter than `realtimeCapabilities()` (which accepts
+ *     `AI_PROVIDER_API_KEY` for TTS) so auto never boot-crashes on
+ *     `assertTtsProviderSupportsMediaStreams` and never enables a half-capable
+ *     (no-Deepgram) stack. A partial stack resolves off, unchanged.
+ */
+export function resolveMediaStreamsEnabled(env: NodeJS.ProcessEnv): boolean {
+  const raw = env.TWILIO_MEDIA_STREAMS_ENABLED;
+  if (raw === 'true') return true;
+  if (raw === 'false') return false;
+  return (
+    env.TTS_PROVIDER === 'elevenlabs' &&
+    Boolean(env.ELEVENLABS_API_KEY) &&
+    Boolean(env.DEEPGRAM_API_KEY)
+  );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

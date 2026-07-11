@@ -1,6 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { transition } from '../../../../src/ai/agents/customer-calling/transitions';
+import {
+  transition,
+  REFINEMENT_CAP_LINE,
+  POST_QUOTE_REPROMPT_LINE,
+  MAX_REFINEMENTS_PER_CALL,
+} from '../../../../src/ai/agents/customer-calling/transitions';
 import type { CallingAgentContext } from '../../../../src/ai/agents/customer-calling/types';
+import type { QuoteReadbackLine } from '../../../../src/ai/voice-turn/quote-readback';
 
 const baseContext: CallingAgentContext = {
   sessionId: 'session-test',
@@ -298,5 +304,190 @@ describe('ai_run_id threading across turns (PR #664 finding A)', () => {
     const proposal = confirmed.sideEffects.find((fx) => fx.type === 'create_proposal');
     expect(proposal).toBeDefined();
     expect((proposal!.payload as { aiRunId?: string }).aiRunId).toBeUndefined();
+  });
+});
+
+// ─── WS18 — post-quote FSM surface ─────────────────────────────────────────
+
+const gasketLine: QuoteReadbackLine = {
+  description: 'Gasket',
+  unitPrice: 450,
+  quantity: 1,
+  pricingSource: 'catalog',
+};
+
+function ttsTexts(sideEffects: ReturnType<typeof transition>['sideEffects']): string[] {
+  return sideEffects
+    .filter((fx) => fx.type === 'tts_play')
+    .map((fx) => (fx.payload as { text: string }).text);
+}
+
+/** A `closing` context carrying a live catalog-grounded quote. */
+function closingWithQuote(overrides: Partial<NonNullable<CallingAgentContext['pendingQuote']>> = {}): CallingAgentContext {
+  return {
+    ...baseContext,
+    pendingProposalId: 'prop-1',
+    pendingQuote: {
+      proposalId: 'prop-1',
+      groundedLines: [gasketLine],
+      groundedClean: true,
+      totalCents: 450,
+      refinementCount: 0,
+      ...overrides,
+    },
+  };
+}
+
+describe('WS18 — proposal_draft stashes pendingQuote for a grounded estimate', () => {
+  it('sets pendingQuote (refinementCount 0) when proposal_queued carries grounded lines', () => {
+    const result = transition(
+      'proposal_draft',
+      {
+        type: 'proposal_queued',
+        proposalId: 'prop-1',
+        utterance: 'For the Gasket, that is typically $4.50. I will send the full quote to confirm.',
+        groundedLines: [gasketLine],
+        groundedClean: true,
+        totalCents: 450,
+      },
+      baseContext,
+    );
+    expect(result.nextState).toBe('closing');
+    expect(result.updatedContext.pendingQuote).toEqual({
+      proposalId: 'prop-1',
+      groundedLines: [gasketLine],
+      groundedClean: true,
+      totalCents: 450,
+      refinementCount: 0,
+    });
+    // The read-back is still spoken (WS5 behavior preserved).
+    expect(ttsTexts(result.sideEffects)[0]).toContain('$4.50');
+  });
+
+  it('leaves pendingQuote undefined for a non-estimate proposal (closing byte-stable)', () => {
+    const result = transition(
+      'proposal_draft',
+      { type: 'proposal_queued', proposalId: 'prop-2' },
+      baseContext,
+    );
+    expect(result.nextState).toBe('closing');
+    expect(result.updatedContext.pendingQuote).toBeUndefined();
+    expect(result.updatedContext.pendingProposalId).toBe('prop-2');
+    // Fixed confirmation line for every non-estimate proposal.
+    expect(ttsTexts(result.sideEffects)[0]).toContain("You'll receive a confirmation shortly");
+  });
+});
+
+describe('WS18 — post_quote_affirmative (discard-bug fix)', () => {
+  it('stays in closing and KEEPS pendingQuote (never discards the draft)', () => {
+    const ctx = closingWithQuote();
+    const result = transition('closing', { type: 'post_quote_affirmative' }, ctx);
+    expect(result.nextState).toBe('closing');
+    // The whole bug: the quote must survive the affirmative.
+    expect(result.updatedContext.pendingQuote).toEqual(ctx.pendingQuote);
+    expect(result.updatedContext.pendingProposalId).toBe('prop-1');
+    // FSM speaks nothing here — the processor owns the spoken close.
+    expect(ttsTexts(result.sideEffects)).toEqual([]);
+    // Audit records the assent.
+    const audit = result.sideEffects.find((fx) => fx.type === 'audit_log');
+    expect(audit!.payload.eventType).toContain('post_quote_affirmative');
+  });
+});
+
+describe('WS18 — refine_pending_quote', () => {
+  it('speaks the fresh read-back, stays in closing, and increments refinementCount', () => {
+    const ctx = closingWithQuote();
+    const twoGaskets: QuoteReadbackLine = { ...gasketLine, quantity: 2 };
+    const result = transition(
+      'closing',
+      {
+        type: 'refine_pending_quote',
+        proposalId: 'prop-1',
+        groundedLines: [twoGaskets],
+        groundedClean: true,
+        totalCents: 900,
+        utterance: '2 Gaskets are $9.00. I will send the full quote to confirm.',
+      },
+      ctx,
+    );
+    expect(result.nextState).toBe('closing');
+    expect(ttsTexts(result.sideEffects)[0]).toContain('$9.00');
+    expect(result.updatedContext.pendingQuote).toEqual({
+      proposalId: 'prop-1',
+      groundedLines: [twoGaskets],
+      groundedClean: true,
+      totalCents: 900,
+      refinementCount: 1,
+    });
+  });
+
+  it('past MAX_REFINEMENTS_PER_CALL speaks the owner-deferral line and keeps the last quote', () => {
+    const ctx = closingWithQuote({ refinementCount: MAX_REFINEMENTS_PER_CALL });
+    const result = transition(
+      'closing',
+      {
+        type: 'refine_pending_quote',
+        proposalId: 'prop-1',
+        groundedLines: [gasketLine],
+        groundedClean: true,
+        totalCents: 450,
+        utterance: 'ignored on the capped branch',
+      },
+      ctx,
+    );
+    expect(result.nextState).toBe('closing');
+    expect(ttsTexts(result.sideEffects)).toEqual([REFINEMENT_CAP_LINE]);
+    // Last accepted quote is preserved — the caller can still say "yes".
+    expect(result.updatedContext.pendingQuote!.refinementCount).toBe(MAX_REFINEMENTS_PER_CALL);
+  });
+});
+
+describe('WS18 — confidence_low in closing (dead-air fix)', () => {
+  it('bounded-reprompts (not silence) when a pendingQuote is live', () => {
+    const ctx = closingWithQuote();
+    const result = transition('closing', { type: 'confidence_low', threshold: 0.75, score: 0.1 }, ctx);
+    expect(result.nextState).toBe('closing');
+    expect(ttsTexts(result.sideEffects)).toEqual([POST_QUOTE_REPROMPT_LINE]);
+    expect(result.updatedContext.repromptCount).toBe(1);
+    // Quote preserved.
+    expect(result.updatedContext.pendingQuote).toEqual(ctx.pendingQuote);
+  });
+
+  it('escalates to a human once the reprompt budget is exhausted', () => {
+    const ctx = closingWithQuote({ refinementCount: 0 });
+    ctx.repromptCount = 2; // next confidence_low hits MAX_REPROMPTS (3)
+    const result = transition('closing', { type: 'confidence_low', threshold: 0.75, score: 0.1 }, ctx);
+    expect(result.nextState).toBe('escalating');
+    expect(result.updatedContext.escalationReason).toBe('low_confidence_intent');
+    expect(result.sideEffects.some((fx) => fx.type === 'notify_oncall')).toBe(true);
+  });
+
+  it('a non-estimate closing (no pendingQuote) keeps the pre-WS18 ignored behavior', () => {
+    const ctx: CallingAgentContext = { ...baseContext, pendingProposalId: 'prop-x' };
+    const result = transition('closing', { type: 'confidence_low', threshold: 0.75, score: 0.1 }, ctx);
+    // Ignored transition: same state, audit only, no reprompt tts.
+    expect(result.nextState).toBe('closing');
+    expect(ttsTexts(result.sideEffects)).toEqual([]);
+  });
+});
+
+describe('WS18 — a genuine second intent still clears the quote', () => {
+  it('second_intent → intent_capture and clears pendingQuote', () => {
+    const ctx = closingWithQuote();
+    const result = transition('closing', { type: 'second_intent' }, ctx);
+    expect(result.nextState).toBe('intent_capture');
+    expect(result.updatedContext.pendingQuote).toBeUndefined();
+    expect(result.updatedContext.pendingProposalId).toBeUndefined();
+  });
+
+  it('intent_classified (second intent via classify) → intent_capture and clears pendingQuote', () => {
+    const ctx = closingWithQuote();
+    const result = transition(
+      'closing',
+      { type: 'intent_classified', intentType: 'create_appointment', entities: {}, confidence: 0.9 },
+      ctx,
+    );
+    expect(result.nextState).toBe('intent_capture');
+    expect(result.updatedContext.pendingQuote).toBeUndefined();
   });
 });

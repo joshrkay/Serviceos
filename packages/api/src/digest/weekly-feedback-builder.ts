@@ -9,14 +9,54 @@
 import type { Pool } from 'pg';
 import { withTenantSession } from '../db/rls-runtime-role';
 import type { WeeklyFeedbackSnapshot } from './weekly-feedback';
+import type { CorrectionRepository } from '../proposals/corrections/correction';
 
 export async function buildWeeklyFeedbackSnapshot(
   pool: Pool,
   tenantId: string,
   weekStart: Date,
   weekEnd: Date,
+  /**
+   * WS22 — optional (like the daily digest's supervisorReviewRepo): absent
+   * repo, or a repo whose countRepeatsInWindow method is absent, both simply
+   * omit `repeatCorrections` from the snapshot. Queried independently of the
+   * `withTenantSession` block below (it manages its own tenant-scoped
+   * session via PgCorrectionRepository.withTenant), run in parallel.
+   */
+  correctionRepo?: CorrectionRepository,
 ): Promise<WeeklyFeedbackSnapshot> {
   const priorStart = new Date(weekStart.getTime() - (weekEnd.getTime() - weekStart.getTime()));
+
+  const [base, repeatWindow] = await Promise.all([
+    buildBaseSnapshot(pool, tenantId, weekStart, weekEnd, priorStart),
+    correctionRepo?.countRepeatsInWindow
+      ? correctionRepo.countRepeatsInWindow(tenantId, weekStart, weekEnd)
+      : Promise.resolve(undefined),
+  ]);
+
+  // "Omit if zero" — no corrections this week means nothing to report.
+  const repeatCorrections =
+    repeatWindow && repeatWindow.total > 0
+      ? {
+          total: repeatWindow.total,
+          repeats: repeatWindow.repeats,
+          rate: Math.round((repeatWindow.repeats / repeatWindow.total) * 100),
+        }
+      : undefined;
+
+  return {
+    ...base,
+    ...(repeatCorrections ? { repeatCorrections } : {}),
+  };
+}
+
+async function buildBaseSnapshot(
+  pool: Pool,
+  tenantId: string,
+  weekStart: Date,
+  weekEnd: Date,
+  priorStart: Date,
+): Promise<WeeklyFeedbackSnapshot> {
   return withTenantSession(pool, tenantId, async (client) => {
 
     // Every query filters by tenant_id explicitly in ADDITION to the RLS GUC

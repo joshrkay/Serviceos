@@ -14,7 +14,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Pool } from 'pg';
 import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
 import { PgCorrectionRepository } from '../../src/proposals/corrections/pg-correction';
-import { computeCorrections } from '../../src/proposals/corrections/correction';
+import { computeCorrections, type Correction } from '../../src/proposals/corrections/correction';
 
 describe('Postgres integration — corrections (migration 209)', () => {
   let pool: Pool;
@@ -96,5 +96,71 @@ describe('Postgres integration — corrections (migration 209)', () => {
     expect(await repo.findByIntent(other.tenantId, 'record_payment')).toHaveLength(0);
     expect(await repo.findByProposal(other.tenantId, proposalId)).toHaveLength(0);
     expect(await repo.findByTenant(other.tenantId)).toHaveLength(0);
+  });
+
+  // WS22 — pins the real window-function SQL shape (ROW_NUMBER() over
+  // (intent, field) partitions, ordered by created_at). A mocked Pool proves
+  // nothing about whether Postgres actually accepts this query.
+  it('countRepeatsInWindow: PARTITION BY (intent, field) ranks chronologically; a repeat earlier than the window still counts', async () => {
+    const t = await createTestTenant(pool);
+    const proposalId = crypto.randomUUID();
+
+    function row(over: Partial<Correction>): Correction {
+      return {
+        id: crypto.randomUUID(),
+        tenantId: t.tenantId,
+        proposalId,
+        intent: 'create_estimate',
+        field: 'laborRate',
+        beforeValue: 100,
+        afterValue: 120,
+        actorId: t.userId,
+        createdAt: new Date(),
+        ...over,
+      };
+    }
+
+    const from = new Date('2026-07-01T00:00:00Z');
+    const to = new Date('2026-07-08T00:00:00Z');
+
+    await repo.recordMany([
+      // Establishes (create_estimate, laborRate) BEFORE the window — the
+      // window-scoped repeat still has to see it via the full-table ranking.
+      row({ createdAt: new Date('2026-06-20T00:00:00Z') }),
+      // In-window repeat of the same pair.
+      row({ createdAt: new Date('2026-07-02T00:00:00Z') }),
+      // In-window, first-ever occurrence of a DIFFERENT field — not a repeat.
+      row({ field: 'scope', beforeValue: 'a', afterValue: 'b', createdAt: new Date('2026-07-03T00:00:00Z') }),
+      // Outside the window (after `to`) — must not be counted in total.
+      row({ createdAt: new Date('2026-07-09T00:00:00Z') }),
+    ]);
+
+    const result = await repo.countRepeatsInWindow!(t.tenantId, from, to);
+    expect(result).toEqual({ total: 2, repeats: 1 });
+  });
+
+  it('countRepeatsInWindow: FORCE RLS isolates the count across tenants', async () => {
+    const t = await createTestTenant(pool);
+    const other = await createTestTenant(pool);
+    const from = new Date('2026-07-01T00:00:00Z');
+    const to = new Date('2026-07-08T00:00:00Z');
+
+    function row(tenantId: string): Correction {
+      return {
+        id: crypto.randomUUID(),
+        tenantId,
+        proposalId: crypto.randomUUID(),
+        intent: 'create_estimate',
+        field: 'laborRate',
+        beforeValue: 100,
+        afterValue: 120,
+        actorId: t.userId,
+        createdAt: new Date('2026-07-02T00:00:00Z'),
+      };
+    }
+
+    await repo.recordMany([row(t.tenantId)]);
+    expect(await repo.countRepeatsInWindow!(other.tenantId, from, to)).toEqual({ total: 0, repeats: 0 });
+    expect(await repo.countRepeatsInWindow!(t.tenantId, from, to)).toEqual({ total: 1, repeats: 0 });
   });
 });

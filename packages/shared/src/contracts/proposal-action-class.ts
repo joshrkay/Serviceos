@@ -50,6 +50,11 @@ export const CAPTURE_PROPOSAL_TYPES: ReadonlySet<string> = new Set<string>([
   // The voice task handler omits sourceTrustTier, so despite being
   // capture-class the instruction proposal always lands for review in v1.
   ProposalType.CREATE_STANDING_INSTRUCTION,
+  // WS20 — updates a catalog item's unit price. Config change: moves no money
+  // (future pricing only), sends no customer message, reversible (edit the
+  // price back). The correction loop creates it with no trust tier, so it
+  // always lands for review — never auto-executed (D-004).
+  ProposalType.UPDATE_CATALOG_ITEM,
 ]);
 
 /**

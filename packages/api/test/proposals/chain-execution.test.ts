@@ -5,6 +5,7 @@ import {
   Proposal,
 } from '../../src/proposals/proposal';
 import { InMemoryProposalExecutionRepository } from '../../src/proposals/proposal-execution';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { transitionProposal, UNDO_WINDOW_MS } from '../../src/proposals/lifecycle';
 import { ProposalExecutor } from '../../src/proposals/execution/executor';
 import { IdempotencyGuard } from '../../src/proposals/execution/idempotency';
@@ -74,7 +75,7 @@ describe('multi-action chain — execution-time resolution', () => {
     const executionRepo = new InMemoryProposalExecutionRepository();
     const handlers = createExecutionHandlerRegistry();
     const guard = new IdempotencyGuard(executionRepo, repo);
-    const executor = new ProposalExecutor(handlers, repo, guard);
+    const executor = new ProposalExecutor(handlers, repo, guard, new InMemoryAuditRepository());
     return { repo, executor };
   }
 

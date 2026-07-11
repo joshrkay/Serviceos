@@ -1,14 +1,18 @@
 /**
- * WS5 — in-call grounded quoting at handleCreateProposal.
+ * WS5 / WS17 — in-call grounded quoting at handleCreateProposal.
  *
- * Drives the real FSM + voice-turn processor through a draft_estimate confirm
- * flow (classify → "yes") and asserts:
+ * Drives the real FSM + voice-turn processor through a draft_estimate /
+ * draft_invoice confirm flow (classify → "yes") and asserts:
  *   - the stored payload carries grounded lineItems (catalog price +
  *     pricingSource per line) alongside the raw entities;
  *   - an uncatalogued line caps confidence and forces _meta 'low';
  *   - the caller hears the grounded read-back (or the no-number line);
  *   - catalog unavailable degrades to the no-number phrasing;
- *   - non-estimate proposals are untouched (fixed line, no lineItems).
+ *   - WS17 I1: a spoken leading quantity ("three smoke detectors") grounds at
+ *     that quantity; a size ("2 inch pipe fitting") stays quantity 1;
+ *   - WS17 I3: draft_invoice is grounded too, on the unitPriceCents contract
+ *     (185000 cents speaks $1850.00), while a non-extended proposal type
+ *     (record_payment) keeps the fixed generic confirmation line.
  */
 import { describe, it, expect, vi } from 'vitest';
 
@@ -39,6 +43,9 @@ function catalogItem(name: string, unitPriceCents: number): CatalogItem {
 const CATALOG: CatalogItem[] = [
   catalogItem('Water Heater Replacement', 185000),
   catalogItem('Gasket', 450),
+  // WS17 I1 fixtures — a countable item and a size-named item.
+  catalogItem('Smoke Detector', 8900),
+  catalogItem('2 Inch Pipe Fitting', 1200),
 ];
 
 function stubCatalogRepo(
@@ -73,6 +80,18 @@ function estimateFlowGateway(lineItemDescriptions: string[]): LLMGateway {
       intentType: 'draft_estimate',
       confidence: 0.95,
       reasoning: 'caller describing work for a quote',
+      extractedEntities: { customerName: 'Acme', lineItemDescriptions },
+    }),
+    JSON.stringify({ answer: 'yes', reasoning: 'caller confirmed' }),
+  ]);
+}
+
+function invoiceFlowGateway(lineItemDescriptions: string[]): LLMGateway {
+  return gatewaySequence([
+    JSON.stringify({
+      intentType: 'create_invoice',
+      confidence: 0.95,
+      reasoning: 'caller wants an invoice for completed work',
       extractedEntities: { customerName: 'Acme', lineItemDescriptions },
     }),
     JSON.stringify({ answer: 'yes', reasoning: 'caller confirmed' }),
@@ -159,6 +178,49 @@ describe('WS5 — grounded estimate at handleCreateProposal', () => {
     );
   });
 
+  it('WS17 I1 — "three smoke detectors" grounds at qty 3, spoken total = 3×unit', async () => {
+    const ctx = makeEstimateCtx({
+      gateway: estimateFlowGateway(['three smoke detectors']),
+      catalogRepo: stubCatalogRepo(),
+    });
+    const sideEffects = await runConfirmFlow(ctx);
+
+    const p = (await ctx.proposalRepo.findByTenant('tenant-abc'))[0]!;
+    const lineItems = p.payload.lineItems as Array<Record<string, unknown>>;
+    expect(lineItems).toHaveLength(1);
+    expect(lineItems[0]).toMatchObject({
+      description: 'Smoke Detector',
+      unitPrice: 8900, // catalog UNIT price (not the line total)
+      quantity: 3, // recovered from "three"
+      pricingSource: 'catalog',
+    });
+    // Spoken figure is the LINE TOTAL: 3 × $89.00 = $267.00.
+    expect(lastTts(sideEffects)).toBe(
+      "For the Smoke Detector, that's typically $267.00. I'll send the full quote to confirm.",
+    );
+  });
+
+  it('WS17 I1 — "2 inch pipe fitting" is a SIZE: qty 1, full description matched (not qty 2)', async () => {
+    const ctx = makeEstimateCtx({
+      gateway: estimateFlowGateway(['2 inch pipe fitting']),
+      catalogRepo: stubCatalogRepo(),
+    });
+    const sideEffects = await runConfirmFlow(ctx);
+
+    const p = (await ctx.proposalRepo.findByTenant('tenant-abc'))[0]!;
+    const lineItems = p.payload.lineItems as Array<Record<string, unknown>>;
+    expect(lineItems[0]).toMatchObject({
+      description: '2 Inch Pipe Fitting',
+      unitPrice: 1200,
+      quantity: 1, // NOT 2 — the leading "2" sizes the pipe
+      pricingSource: 'catalog',
+    });
+    // qty 1 → the spoken figure is the unit price ($12.00), never $24.00.
+    expect(lastTts(sideEffects)).toBe(
+      "For the 2 Inch Pipe Fitting, that's typically $12.00. I'll send the full quote to confirm.",
+    );
+  });
+
   it('uncatalogued line: caps confidence, forces _meta low, speaks NO number', async () => {
     const ctx = makeEstimateCtx({
       gateway: estimateFlowGateway(['custom stainless fabrication']),
@@ -218,13 +280,44 @@ describe('WS5 — grounded estimate at handleCreateProposal', () => {
     );
   });
 
-  it('non-estimate proposal (create_invoice) is untouched: fixed line, no grounding', async () => {
+  it('WS17 I3 — draft_invoice grounds too: cents contract, speaks $1850.00 not $185,000', async () => {
+    const ctx = makeEstimateCtx({
+      gateway: invoiceFlowGateway(['water heater replacement']),
+      catalogRepo: stubCatalogRepo(),
+    });
+    const sideEffects = await runConfirmFlow(ctx);
+
+    const p = (await ctx.proposalRepo.findByTenant('tenant-abc'))[0]!;
+    expect(p.proposalType).toBe('draft_invoice');
+
+    const lineItems = p.payload.lineItems as Array<Record<string, unknown>>;
+    expect(lineItems).toHaveLength(1);
+    // Invoice contract: unitPriceCents + recomputed totalCents (NOT unitPrice).
+    expect(lineItems[0]).toMatchObject({
+      description: 'Water Heater Replacement',
+      unitPriceCents: 185000,
+      totalCents: 185000,
+      pricingSource: 'catalog',
+    });
+    expect(lineItems[0]!.unitPrice).toBeUndefined();
+
+    // Cents/dollars must not get confused on the wire: 185000 cents → $1850.00.
+    const said = lastTts(sideEffects)!;
+    expect(said).toBe(
+      "For the Water Heater Replacement, that's typically $1850.00. I'll send the full quote to confirm.",
+    );
+    expect(said).toContain('$1850.00');
+    expect(said).not.toContain('$185000');
+    expect(said).not.toContain('$185,000');
+  });
+
+  it('WS17 I3 — a NON-extended type (record_payment) keeps the fixed generic line', async () => {
     const store = new VoiceSessionStore({ startInterval: false });
     const proposalRepo = new InMemoryProposalRepository();
-    const session = store.create('tenant-abc', 'telephony', { callSid: 'CA-inv' });
+    const session = store.create('tenant-abc', 'telephony', { callSid: 'CA-pay' });
     session.machine.dispatch({
       type: 'incoming_call',
-      callSid: 'CA-inv',
+      callSid: 'CA-pay',
       from: '+15125550100',
       to: '+15125550999',
       tenantId: 'tenant-abc',
@@ -238,9 +331,10 @@ describe('WS5 — grounded estimate at handleCreateProposal', () => {
       store,
       gateway: gatewaySequence([
         JSON.stringify({
-          intentType: 'create_invoice',
+          intentType: 'record_payment',
           confidence: 0.95,
-          reasoning: 'invoice',
+          reasoning: 'payment',
+          // Even if descriptions ride along, record_payment is NOT grounded.
           extractedEntities: { customerName: 'Acme', lineItemDescriptions: ['water heater replacement'] },
         }),
         JSON.stringify({ answer: 'yes', reasoning: 'ok' }),
@@ -251,16 +345,16 @@ describe('WS5 — grounded estimate at handleCreateProposal', () => {
       catalogRepo: { listByTenant } as unknown as CatalogItemRepository,
     });
 
-    await processor.speechTurn({ session, speechResult: 'invoice acme', callSid: 'CA-inv', tenantId: 'tenant-abc' });
+    await processor.speechTurn({ session, speechResult: 'record a payment', callSid: 'CA-pay', tenantId: 'tenant-abc' });
     const sideEffects = await processor.speechTurn({
       session,
       speechResult: 'yes',
-      callSid: 'CA-inv',
+      callSid: 'CA-pay',
       tenantId: 'tenant-abc',
     });
 
     const p = (await proposalRepo.findByTenant('tenant-abc'))[0]!;
-    expect(p.proposalType).toBe('draft_invoice');
+    expect(p.proposalType).toBe('record_payment');
     expect(p.payload.lineItems).toBeUndefined();
     expect(lastTts(sideEffects)).toBe(
       "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?",

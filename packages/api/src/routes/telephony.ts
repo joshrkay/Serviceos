@@ -218,6 +218,13 @@ export interface TelephonyRouterDeps {
    * rotation-cascade + voicemail behavior.
    */
   callMeBackRepo?: CallMeBackRepository;
+  /**
+   * WS7 — session store consulted by `POST /voice/gather-fallback` to continue
+   * the SAME session on Gather after a mid-call realtime degrade. Looked up by
+   * CallSid. When unwired, the fallback route treats every CallSid as unknown
+   * and starts a fresh inbound Gather session.
+   */
+  voiceSessionStore?: VoiceSessionStore;
 }
 
 export interface TelephonyHealthReport {
@@ -442,6 +449,75 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
         .send(
           `<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="Polly.Joanna">We're experiencing technical difficulties. Please try again later.</Say><Hangup/></Response>`
         );
+    }
+  });
+
+  /**
+   * WS7 — POST /api/telephony/voice/gather-fallback
+   *
+   * Target of the mid-call REST redirect (`telephony/twilio-call-redirect.ts`).
+   * Twilio re-requests TwiML here after the realtime transport degraded on a
+   * live call. A KNOWN CallSid continues the SAME session on Gather (tenant +
+   * FSM state preserved) via `action=/api/telephony/gather?sid=<sessionId>`; an
+   * UNKNOWN CallSid starts a fresh inbound Gather session. This endpoint NEVER
+   * emits `<Stream>` — it can't loop back into the realtime path by construction.
+   * Signature verification is inherited from the router-level middleware above.
+   */
+  router.post('/voice/gather-fallback', async (req: Request, res: Response) => {
+    const body = req.body as Record<string, string | undefined>;
+    const callSid = body.CallSid ?? '';
+    const session = callSid ? deps.voiceSessionStore?.findByCallSid(callSid) : undefined;
+
+    if (session) {
+      const base = (deps.publicBaseUrl ?? '').replace(/\/+$/, '');
+      const action = `${base}/api/telephony/gather?sid=${encodeURIComponent(session.id)}`;
+      const lang: Language = session.language === 'es' ? 'es' : 'en';
+      res
+        .status(200)
+        .type('text/xml')
+        .send(
+          buildCallbackGatherTwiml({
+            promptText: t('realtime.degraded_repair', lang),
+            actionUrl: action,
+            lang,
+          }),
+        );
+      return;
+    }
+
+    // Unknown CallSid — no live session to continue. Start a fresh inbound
+    // Gather session (never Stream). Mirrors /voice's tenant resolution.
+    const from = body.From ?? '';
+    const to = body.To ?? '';
+    if (!from || !to) {
+      logger.warn('telephony/gather-fallback: missing From/To for fresh session', { callSid });
+      res.status(200).type('text/xml').send(technicalDifficultiesTwiml());
+      return;
+    }
+    let tenantId: string | undefined;
+    try {
+      tenantId = await resolveInboundTenantId({ to, from, callSid, deps });
+    } catch (err) {
+      logger.error('telephony/gather-fallback: tenant lookup failed', {
+        callSid,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      res.status(503).type('text/plain').send('Service temporarily unavailable');
+      return;
+    }
+    if (!tenantId) {
+      res.status(200).type('text/xml').send(numberNotInServiceTwiml());
+      return;
+    }
+    try {
+      const twiml = await deps.adapter.handleInbound({ callSid, from, to, tenantId });
+      res.status(200).type('text/xml').send(twiml);
+    } catch (err) {
+      logger.error('telephony/gather-fallback: handleInbound failed', {
+        callSid,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      res.status(200).type('text/xml').send(technicalDifficultiesTwiml());
     }
   });
 

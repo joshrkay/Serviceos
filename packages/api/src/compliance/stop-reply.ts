@@ -63,6 +63,10 @@ async function recordConsentTransition(
     // Roll the derived status onto every customer sharing the number (e.g.
     // household lines). No-op without a pool (in-memory/dev) — the ledger
     // append above is still the source of truth and is integration-tested.
+    // WS12 (D-017): only a STOP moves the rollup (→ 'revoked'); a START is a
+    // rollup no-op by design — deriveConsentStatus never maps grants, so an
+    // SMS re-opt-in cannot manufacture voice-call consent. The START still
+    // clears the sms-kind revocation at both gates via the ledger itself.
     if (deps.pool) {
       for (const customer of customers) {
         await updateDerivedConsentStatus(deps.pool, {

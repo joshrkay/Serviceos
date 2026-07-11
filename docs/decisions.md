@@ -212,6 +212,18 @@ not a change to D-004's posture.
 - (c) Treating supervisorPresent as true when the flag is on — would leak permissiveness
   into all capture types.
 
+**Amendment (2026-07-11):** Added a platform-wide kill switch,
+`AUTONOMOUS_BOOKING_DISABLED=true`, checked in `evaluateAutonomousBookingLane`
+before the per-tenant opt-in gate (reason `platform_disabled`, distinct from
+`tenant_not_opted_in` in the audit trail and the sourceContext stamp) — an
+operator-level shutoff for every tenant simultaneously, independent of each
+tenant's `autonomous_booking_enabled` setting, for incident response without a
+per-tenant settings sweep. Also added digest visibility: the nightly owner
+digest now reports "Auto-booked: N appointment(s)" — a count of the day's
+proposals whose `sourceContext.autonomousLaneEvaluation.eligible = true` —
+mirroring the WS6 supervisorChecks reflection so autonomous activity is never
+silent even when nothing goes wrong.
+
 ### D-016: Railway supersedes AWS (D-001) — CDK prototype removed
 **Date:** 2026-07-11
 **Decision:** D-001's single-cloud AWS/CDK deployment was never carried into production.
@@ -242,3 +254,88 @@ because nothing runs it.
   architecture (Railway/Supabase/Clerk/Twilio) depends on it; reviving AWS deployment would
   start from a fresh CDK design against the current schema, not from a two-generations-old
   prototype.
+
+### D-017: One consent model — revoke-anywhere-suppress-everywhere, grants never cross channels
+**Date:** 2026-07-11
+**Decision:** Both outbound gates (voice `checkOutboundConsent`, SMS `GatedMessageDelivery`)
+now derive their decision through a single shared resolver
+(`packages/api/src/compliance/resolve-outbound-consent.ts`) on top of the append-only
+`consent_events` ledger (migration 168). The rule is deliberately asymmetric:
+- A standing revocation of a CONTACT consent kind (`sms` | `marketing`) — SMS STOP,
+  portal/manual opt-out — blocks BOTH voice and SMS, regardless of what
+  `customers.consent_status` or `sms_consent` read.
+- A GRANT never crosses channels. Each channel keeps its own affirmative signal
+  (voice: `consent_status = 'granted'`, written only by the voice capture seam
+  `recordCustomerConsent`; SMS: `sms_consent = true`). A ledger grant can only CLEAR a
+  prior revocation of the SAME kind (STOP → START), never create consent elsewhere.
+- Kind `recording` is NOT a contact kind: a "stop recording" objection keeps blocking
+  outbound VOICE (via the existing `consent_status = 'revoked'` rollup) but does NOT
+  suppress SMS — a caller who objected to being recorded still gets appointment texts.
+To enforce the grant asymmetry, `deriveConsentStatus` was deliberately tightened
+(partially reversing Story 10.6's rollup): ledger grants no longer roll
+`consent_status = 'granted'`, so an SMS START can no longer manufacture TCPA consent for
+autodialed voice calls. Manual `sms_consent` toggles (dashboard PUT /api/customers/:id)
+now also append a `consent_events` row (kind `sms`, source `manual`), making the ledger
+the source of truth for consent changes going forward. No migration: the ledger already
+carries kind/state/phone/tenant — cross-channel derivation is computed, not stored.
+**Rationale:** Voice read `customers.consent_status`, SMS read `sms_consent` — two
+unrelated fields with no cross-enforcement, so a customer who revoked by phone could
+still be texted. TCPA voice-call consent and SMS consent are formally distinct, so the
+unification must be conservative in exactly one direction: honoring a revocation
+everywhere is always safe; propagating a grant across channels would fabricate consent.
+**Story:** WS12 (safety-rails scorecard, item 2 — one consent model).
+**Alternatives rejected:**
+- Widening `consent_status` into a shared both-channels rollup — a single mutable field
+  cannot encode per-kind grant/revoke history, and any shared "granted" value would leak
+  consent across channels (the exact TCPA failure mode).
+- A new derived cross-channel column + migration — redundant: the ledger already carries
+  enough to derive the decision at the gates; a stored rollup would be a second source
+  of truth that can drift.
+- Letting `recording` revocations suppress SMS — objecting to being recorded is not a
+  revocation of contact consent; suppressing confirmations would punish the customer for
+  a privacy preference.
+
+### D-018: Autonomous close lane — sanctioned on-call sale-closing with owner UNDO
+**Date:** 2026-07-11
+**Decision:** A per-tenant opt-in (default OFF), stricter SIBLING of the D-015 booking
+lane (`packages/api/src/proposals/autonomous-close-lane.ts`) that authorizes the live
+voice agent to CLOSE the sale on the call: a three-member chain
+`draft_estimate → send_estimate($ref estimateId) → create_booking`, assembled on the live
+path via `applyChainMetadata`. `send_estimate` is comms-class and
+`decideInitialStatus`/`actionClassForProposalType` are deliberately UNCHANGED — a comms
+proposal is still born blocked. Instead the close flow performs an explicit SYSTEM
+APPROVAL of each chain member under the D-018 sanction (the analog of an owner's one-tap),
+stamped + audited; the create-time comms block stays. Every member carries
+`sourceContext.autonomousCloseEvaluation`.
+`evaluateAutonomousCloseLane` gates in order (first-failing wins): `platform_disabled`
+(`AUTONOMOUS_CLOSE_DISABLED`, checked FIRST and independently of
+`AUTONOMOUS_BOOKING_DISABLED`) → `tenant_not_opted_in`
+(`tenant_settings.autonomous_close_enabled`) → `quote_not_grounded_clean` (every line a
+clean catalog match — no LLM price is ever auto-sent) → `above_close_cap`
+(`tenant_settings.autonomous_close_max_cents`) → `not_strict_confirmed` (the authoritative
+strict `confirmIntent` gate; the deterministic pre-check is necessary, not sufficient) →
+`sms_consent_not_captured` (the on-call TCPA capture must succeed via
+`recordSmsConsentFromVoice`) → `scheduling_incomplete`/`hold_not_placed`/`hold_expired` →
+`booking_lane_ineligible` (the composed D-015 evaluation) → `session_flagged`
+(vulnerability/emergency/negotiation, checked last). Migration 247 adds the two
+`tenant_settings` columns.
+**Rationale:** Booking a held slot (D-015) and closing a sale (drafting + SENDING a
+priced quote/deposit link to the customer) are different risk tiers, so the close needs
+its own opt-in, its own cap, and its own kill switch — never a widening of D-015's gate
+set. A caller-initiated, strict-confirmed, consent-gated close warrants IMMEDIATE
+execution rather than D-015's 5-second undo delay: the sanction backdates `approvedAt`
+by UNDO_WINDOW_MS at approval time (audited as `undoWindowBypassed: true`) so the
+executor's D-009 gate treats the window as elapsed — the executor itself is unmodified.
+The safety net is the strict confirm gate plus an owner UNDO (`create_booking` → compensating cancellation + apology;
+`send_estimate` → the estimate is withdrawn/voided so its approval link stops accepting
+and no deposit can be taken — the quote TEXT itself cannot be recalled, and the UNDO copy
+says so).
+**Story:** WS18 (close the sale on the call).
+**Alternatives rejected:**
+- Teaching `decideInitialStatus` to auto-approve comms — would weaken the WS12 gate
+  platform-wide; the sanction is a scoped explicit approval, not a rule change.
+- Bypassing the `GatedMessageDelivery` / consent gate for the deposit text — the on-call
+  SMS consent capture is what makes the gate pass legitimately.
+- Reusing `AUTONOMOUS_BOOKING_DISABLED` — an operator must be able to freeze on-call
+  sale-closing while leaving autonomous booking live (and vice-versa), so the close needs
+  its own independent kill switch.

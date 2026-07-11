@@ -7,6 +7,15 @@
  *   - ProposalRepository.findConfidenceMarkedForDay: the JSONB expression
  *     predicate `payload->'_meta'->>'overallConfidence' IN ('low','very_low')`
  *     + created_at window + LIMIT ordering.
+ *   - ProposalRepository.findAutonomousLaneApprovedForDay (D-015 amendment):
+ *     the JSONB predicate
+ *     `source_context->'autonomousLaneEvaluation'->>'eligible' = 'true'`
+ *     + created_at window + tenant (RLS) scoping.
+ *   - ProposalRepository.findAppliedInstructionsForDay (WS10): the JSONB
+ *     predicate `payload->'_meta' ? 'appliedStandingInstructions' AND
+ *     jsonb_array_length(payload->'_meta'->'appliedStandingInstructions') > 0`
+ *     + created_at window + tenant (RLS) scoping, and that the partial index
+ *     (migration 246) predicate matches the query's first predicate.
  *   - EstimateListOptions sentFrom/sentTo: the `sent_at >= $ AND sent_at < $`
  *     range scan behind "quotes sent today".
  *   - computeDigestPayload end-to-end over real proposal/estimate/correction
@@ -150,6 +159,103 @@ describe('Postgres integration — digest reflection sections (N-005)', () => {
     expect(rows.map((r) => r.id)).toEqual([veryLow.id]);
     expect(rows[0].status).toBe('rejected');
     expect(rows[0].confidenceFactors).toEqual(['ambiguous scope']);
+  });
+
+  it('findAutonomousLaneApprovedForDay returns only today\'s eligible-lane proposals, tenant-scoped (D-015 amendment)', async () => {
+    const eligibleToday = makeProposal({
+      status: 'approved',
+      summary: 'Auto-booked AC repair',
+      sourceContext: { autonomousLaneEvaluation: { eligible: true, threshold: 0.95 } },
+    });
+    const ineligibleToday = makeProposal({
+      status: 'ready_for_review',
+      summary: 'Ineligible booking',
+      sourceContext: { autonomousLaneEvaluation: { eligible: false, reason: 'below_threshold' } },
+    });
+    const eligibleYesterday = makeProposal({
+      createdAt: YESTERDAY,
+      updatedAt: YESTERDAY,
+      status: 'approved',
+      sourceContext: { autonomousLaneEvaluation: { eligible: true, threshold: 0.95 } },
+    });
+    const noStamp = makeProposal({ status: 'draft' });
+    await proposalRepo.create(eligibleToday);
+    await proposalRepo.create(ineligibleToday);
+    await proposalRepo.create(eligibleYesterday);
+    await proposalRepo.create(noStamp);
+
+    const rows = await proposalRepo.findAutonomousLaneApprovedForDay!(
+      tenant.tenantId,
+      DAY_START,
+      DAY_END,
+      10,
+    );
+    expect(rows.map((r) => r.id)).toEqual([eligibleToday.id]);
+    expect(rows[0].sourceContext).toMatchObject({
+      autonomousLaneEvaluation: { eligible: true, threshold: 0.95 },
+    });
+
+    // RLS + explicit tenant_id predicate: another tenant never sees this row.
+    const other = await createTestTenant(pool);
+    const leaked = await proposalRepo.findAutonomousLaneApprovedForDay!(
+      other.tenantId,
+      DAY_START,
+      DAY_END,
+      10,
+    );
+    expect(leaked).toHaveLength(0);
+  });
+
+  it('findAppliedInstructionsForDay returns only today\'s applied-instruction proposals, tenant-scoped (WS10)', async () => {
+    const appliedToday = makeProposal({
+      status: 'ready_for_review',
+      summary: 'Estimate with trip fee rule applied',
+      payload: {
+        _meta: {
+          appliedStandingInstructions: [{ id: 'rule-1', text: 'always add trip fee' }],
+        },
+      },
+    });
+    const noStampToday = makeProposal({ status: 'draft', payload: {} });
+    const emptyArrayStampToday = makeProposal({
+      status: 'draft',
+      payload: { _meta: { appliedStandingInstructions: [] } },
+    });
+    const appliedYesterday = makeProposal({
+      createdAt: YESTERDAY,
+      updatedAt: YESTERDAY,
+      status: 'ready_for_review',
+      payload: {
+        _meta: {
+          appliedStandingInstructions: [{ id: 'rule-1', text: 'always add trip fee' }],
+        },
+      },
+    });
+    await proposalRepo.create(appliedToday);
+    await proposalRepo.create(noStampToday);
+    await proposalRepo.create(emptyArrayStampToday);
+    await proposalRepo.create(appliedYesterday);
+
+    const rows = await proposalRepo.findAppliedInstructionsForDay!(
+      tenant.tenantId,
+      DAY_START,
+      DAY_END,
+      10,
+    );
+    expect(rows.map((r) => r.id)).toEqual([appliedToday.id]);
+    expect(rows[0].payload).toMatchObject({
+      _meta: { appliedStandingInstructions: [{ id: 'rule-1', text: 'always add trip fee' }] },
+    });
+
+    // RLS + explicit tenant_id predicate: another tenant never sees this row.
+    const other = await createTestTenant(pool);
+    const leaked = await proposalRepo.findAppliedInstructionsForDay!(
+      other.tenantId,
+      DAY_START,
+      DAY_END,
+      10,
+    );
+    expect(leaked).toHaveLength(0);
   });
 
   it('estimate findByTenant sentFrom/sentTo scans today\'s sent estimates (sent_at range)', async () => {

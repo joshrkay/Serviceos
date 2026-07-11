@@ -24,10 +24,12 @@ async function applyMigrations(uri: string): Promise<void> {
     await bootstrap.query("SET lock_timeout = '5s'");
     await bootstrap.query("SET statement_timeout = '25s'");
     await bootstrap.query(getMigrationSQL());
-    // WS1 — provision (but do NOT enable) the RLS runtime role so the suite can
-    // be run under RLS_RUNTIME_ROLE=true via `npm run test:integration:rls`.
-    // Safe/no-op for the default role-off run; the app only assumes the role
-    // when the flag is set.
+    // WS13 — provision the RLS runtime role unconditionally. `npm run
+    // test:integration` now runs with RLS_RUNTIME_ROLE=true by default (a
+    // query that breaks under least-privilege must fail PR CI, not just an
+    // opt-in job), so the role must exist before any test file connects.
+    // Also harmless/no-op for `npm run test:integration:norls` (flag off) —
+    // the app only assumes the role when the flag is set.
     await ensureRlsRuntimeRole(bootstrap);
   } finally {
     await bootstrap.end();

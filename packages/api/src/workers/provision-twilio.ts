@@ -83,6 +83,33 @@ export function createProvisionTwilioWorker(deps: {
       const { tenantId, region, baseUrl, phoneNumber: preferredNumber } = message.payload;
       const { pool } = deps;
 
+      // WS14 — three-service topology support. This job runs on web/worker/all
+      // (never on the dedicated 'voice' service, which runs zero background
+      // workers), so `baseUrl` (the enqueuing process's PUBLIC_API_URL) is the
+      // WEB domain. But the number's VOICE surfaces must point at the dedicated
+      // voice service when one exists, or every newly-provisioned number would
+      // silently ride the web service's deploy/drain window — defeating the
+      // split for post-cutover tenants. VOICE_PUBLIC_URL (set on the web and
+      // worker services, where this job executes; read raw from process.env at
+      // job-execution time, same pattern as PUBLIC_API_URL) is the voice
+      // service's public base. Unset ⇒ single/two-service topology ⇒ fall back
+      // to baseUrl (today's behavior, unchanged).
+      //
+      // URL → base mapping (see docs/deployment.md "Optional third service"):
+      // - VoiceUrl (/api/telephony/voice — TwiML; the live call rides this
+      //   service and its <Stream> targets this service's WS) → voiceBaseUrl
+      // - IncomingPhoneNumber StatusCallback (/webhooks/twilio/status/:tenantId
+      //   — voice-CALL lifecycle events for this number) → voiceBaseUrl, so
+      //   all Twilio call traffic for the number stays on one domain
+      // - Messaging service InboundRequestUrl (/webhooks/twilio/sms/:tenantId)
+      //   → baseUrl: SMS is not a live-call surface; its dispatch pipeline is
+      //   web/worker work and gains nothing from the voice domain
+      // - Vapi serverUrl (/webhooks/vapi/:tenantId) → baseUrl: Vapi calls live
+      //   on Vapi's infrastructure (not our media-streams WS), the webhook is
+      //   a 200-ack event feed verified by per-tenant HMAC (no PUBLIC_API_URL
+      //   URL reconstruction), so our voice service's drain is irrelevant
+      const voiceBaseUrl = process.env.VOICE_PUBLIC_URL?.replace(/\/+$/, '') || baseUrl;
+
       const masterSid = process.env.TWILIO_ACCOUNT_SID;
       const masterToken = process.env.TWILIO_AUTH_TOKEN;
       const encKey = process.env.TENANT_ENCRYPTION_KEY;
@@ -250,8 +277,11 @@ export function createProvisionTwilioWorker(deps: {
                 // /api/telephony/voice handler which resolves tenant from
                 // the inbound `to` number. The /webhooks/twilio/* routes only
                 // 200-ack and don't emit TwiML, so they'd break call handling.
-                `${baseUrl}/api/telephony/voice`,
-                `${baseUrl}/webhooks/twilio/status/${tenantId}`,
+                // Both voice-call surfaces use voiceBaseUrl (WS14 — the
+                // dedicated voice service's domain when VOICE_PUBLIC_URL is
+                // set; baseUrl otherwise). See the mapping comment above.
+                `${voiceBaseUrl}/api/telephony/voice`,
+                `${voiceBaseUrl}/webhooks/twilio/status/${tenantId}`,
                 preferredNumber
               );
             } catch (purchaseErr) {

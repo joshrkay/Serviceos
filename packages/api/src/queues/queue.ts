@@ -123,6 +123,15 @@ export interface Queue {
    * sampled by a leader-elected interval — never called on the hot path.
    */
   depth(): Promise<QueueDepth>;
+  /**
+   * WS15 (SLO monitor) — count of pending messages older than
+   * `olderThanSeconds`. The poll loop drains every second, so an old pending
+   * row means the queue is STUCK (dead poller, wedged handler, poison-retry
+   * loop) — the staleness signal the queue_staleness SLO alerts on, distinct
+   * from raw depth (which a healthy burst can also raise). Cheap COUNT on an
+   * interval — never called on the hot path.
+   */
+  stalePendingCount(olderThanSeconds: number): Promise<number>;
   getConfig(): QueueConfig;
 }
 
@@ -265,6 +274,12 @@ export class InMemoryQueue implements Queue {
 
   async depth(): Promise<QueueDepth> {
     return { pending: this.messages.length, deadLetter: this.dlq.length };
+  }
+
+  /** WS15 — mirror of PgQueue.stalePendingCount (created_at age filter). */
+  async stalePendingCount(olderThanSeconds: number): Promise<number> {
+    const cutoff = Date.now() - Math.max(0, olderThanSeconds) * 1000;
+    return this.messages.filter((m) => new Date(m.createdAt).getTime() < cutoff).length;
   }
 }
 

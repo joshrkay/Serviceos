@@ -28,11 +28,13 @@ export async function closeSharedTestDb(): Promise<void> {
 
 /**
  * WS1 — provision the `rls_app_runtime` role so the integration suite can run
- * under RLS_RUNTIME_ROLE=true (see the `test:integration:rls` npm script). This
- * ONLY makes the role assumable + grants it table/sequence access; it does NOT
- * turn RLS enforcement on. The app assumes the role (SET ROLE) only when
- * RLS_RUNTIME_ROLE=true (src/db/rls-runtime-role.ts), so calling this
- * unconditionally in global-setup is safe for the default (role-off) run.
+ * under RLS_RUNTIME_ROLE=true, which `npm run test:integration` now sets by
+ * default (WS13 — `npm run test:integration:norls` is the flag-off escape
+ * hatch). This ONLY makes the role assumable + grants it table/sequence
+ * access; it does NOT turn RLS enforcement on by itself. The app assumes the
+ * role (SET ROLE) only when RLS_RUNTIME_ROLE=true (src/db/rls-runtime-role.ts),
+ * so calling this unconditionally in global-setup is also safe for a
+ * `test:integration:norls` (role-off) run.
  *
  * Idempotent — safe to call repeatedly against the shared container.
  * Previously this logic lived inline in rls-tenant-isolation.test.ts; hoisted

@@ -13,6 +13,7 @@ import { transitionProposal, UNDO_WINDOW_MS } from '../../src/proposals/lifecycl
 import { ProposalExecutor } from '../../src/proposals/execution/executor';
 import { IdempotencyGuard } from '../../src/proposals/execution/idempotency';
 import { InMemoryProposalExecutionRepository } from '../../src/proposals/proposal-execution';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { createExecutionHandlerRegistry } from '../../src/proposals/execution/handlers';
 import { runExecutionSweep, ExecutionWorkerDeps } from '../../src/workers/execution-worker';
 import { createLogger } from '../../src/logging/logger';
@@ -30,7 +31,7 @@ const logger = createLogger({ service: 'test', environment: 'test', level: 'erro
 function makeDeps(repo: InMemoryProposalRepository): ExecutionWorkerDeps {
   const handlers = createExecutionHandlerRegistry();
   const guard = new IdempotencyGuard(new InMemoryProposalExecutionRepository(), repo);
-  const executor = new ProposalExecutor(handlers, repo, guard);
+  const executor = new ProposalExecutor(handlers, repo, guard, new InMemoryAuditRepository());
   return { proposalRepo: repo, executor, logger };
 }
 

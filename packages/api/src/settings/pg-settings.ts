@@ -211,6 +211,14 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
       row.autonomous_booking_threshold != null
         ? Number(row.autonomous_booking_threshold)
         : undefined,
+    // D-018 (WS18) — migration 247. enabled is NOT NULL DEFAULT FALSE so
+    // legacy rows read false; max_cents is a nullable BIGINT (node-pg
+    // returns bigint as a string — convert explicitly).
+    autonomousCloseEnabled: (row.autonomous_close_enabled as boolean | null) ?? false,
+    autonomousCloseMaxCents:
+      row.autonomous_close_max_cents != null
+        ? Number(row.autonomous_close_max_cents)
+        : undefined,
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
   };
@@ -410,6 +418,9 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         // null through, so the generic `value ?? null` handler is safe.
         autonomousBookingEnabled: 'autonomous_booking_enabled',
         autonomousBookingThreshold: 'autonomous_booking_threshold',
+        // D-018 (WS18) — migration 247.
+        autonomousCloseEnabled: 'autonomous_close_enabled',
+        autonomousCloseMaxCents: 'autonomous_close_max_cents',
         updatedAt: 'updated_at',
       };
 

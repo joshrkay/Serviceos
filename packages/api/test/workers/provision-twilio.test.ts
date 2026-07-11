@@ -299,6 +299,111 @@ describe('provision-twilio worker — number picker', () => {
     expect(fetchFn).not.toHaveBeenCalled();
   });
 
+  // ─── WS14: VOICE_PUBLIC_URL — three-service topology webhook targeting ────
+
+  it('VOICE_PUBLIC_URL set → VoiceUrl + status callback use the voice domain; SMS + Vapi stay on baseUrl', async () => {
+    configureTwilio();
+    setEnv('VAPI_API_KEY', undefined);
+    setEnv('VOICE_PUBLIC_URL', 'https://voice.test/'); // trailing slash must be trimmed
+    const fetchFn = mockFetch(...twilioHappyPath());
+
+    const { pool } = makePool({
+      settingsRow: {
+        business_name: "Bob's Plumbing",
+        voice_greeting: null,
+        voice_id: 'adam',
+        services_offered: [],
+        vapi_assistant_id: null,
+      },
+    });
+    const vapi = makeVapiMock();
+    const worker = createProvisionTwilioWorker({ pool, vapiClient: vapi.client });
+
+    await worker.handle(
+      buildMessage({
+        tenantId: TENANT,
+        region: null,
+        baseUrl: 'https://api.test',
+        phoneNumber: '+15125550123',
+      }),
+      logger,
+    );
+
+    // Voice-call surfaces → voice domain (the live call must ride the
+    // dedicated voice service, never the web service's drain window).
+    const purchaseCall = fetchFn.mock.calls.find(
+      (c) =>
+        String(c[0]).includes('/IncomingPhoneNumbers.json') &&
+        (c[1] as RequestInit | undefined)?.method === 'POST',
+    );
+    expect(purchaseCall).toBeDefined();
+    const purchaseBody = String((purchaseCall![1] as RequestInit).body);
+    expect(purchaseBody).toContain(
+      `VoiceUrl=${encodeURIComponent('https://voice.test/api/telephony/voice')}`,
+    );
+    expect(purchaseBody).toContain(
+      `StatusCallback=${encodeURIComponent(`https://voice.test/webhooks/twilio/status/${TENANT}`)}`,
+    );
+
+    // SMS inbound stays on the web domain — not a live-call surface.
+    const msgServiceCall = fetchFn.mock.calls.find((c) =>
+      String((c[1] as RequestInit | undefined)?.body ?? '').includes('InboundRequestUrl'),
+    );
+    expect(msgServiceCall).toBeDefined();
+    expect(String((msgServiceCall![1] as RequestInit).body)).toContain(
+      `InboundRequestUrl=${encodeURIComponent(`https://api.test/webhooks/twilio/sms/${TENANT}`)}`,
+    );
+
+    // Vapi event webhook stays on the web domain — Vapi calls live on Vapi's
+    // infra, and the webhook is verified by per-tenant HMAC, not URL base.
+    expect(vapi.createAssistant).toHaveBeenCalledTimes(1);
+    expect(vapi.createAssistant.mock.calls[0][0].serverUrl).toBe(
+      `https://api.test/webhooks/vapi/${TENANT}`,
+    );
+  });
+
+  it('VOICE_PUBLIC_URL unset → every URL uses baseUrl exactly as today (single/two-service topology)', async () => {
+    configureTwilio();
+    setEnv('VAPI_API_KEY', undefined);
+    setEnv('VOICE_PUBLIC_URL', undefined);
+    const fetchFn = mockFetch(...twilioHappyPath());
+
+    const { pool } = makePool();
+    const worker = createProvisionTwilioWorker({ pool });
+
+    await worker.handle(
+      buildMessage({
+        tenantId: TENANT,
+        region: null,
+        baseUrl: 'https://api.test',
+        phoneNumber: '+15125550123',
+      }),
+      logger,
+    );
+
+    const purchaseCall = fetchFn.mock.calls.find(
+      (c) =>
+        String(c[0]).includes('/IncomingPhoneNumbers.json') &&
+        (c[1] as RequestInit | undefined)?.method === 'POST',
+    );
+    expect(purchaseCall).toBeDefined();
+    const purchaseBody = String((purchaseCall![1] as RequestInit).body);
+    expect(purchaseBody).toContain(
+      `VoiceUrl=${encodeURIComponent('https://api.test/api/telephony/voice')}`,
+    );
+    expect(purchaseBody).toContain(
+      `StatusCallback=${encodeURIComponent(`https://api.test/webhooks/twilio/status/${TENANT}`)}`,
+    );
+
+    const msgServiceCall = fetchFn.mock.calls.find((c) =>
+      String((c[1] as RequestInit | undefined)?.body ?? '').includes('InboundRequestUrl'),
+    );
+    expect(msgServiceCall).toBeDefined();
+    expect(String((msgServiceCall![1] as RequestInit).body)).toContain(
+      `InboundRequestUrl=${encodeURIComponent(`https://api.test/webhooks/twilio/sms/${TENANT}`)}`,
+    );
+  });
+
   // ─── Step 4.5: Vapi assistant (the voice agent) creation ──────────────────
 
   it('creates the Vapi assistant, links the number, and persists vapi_assistant_id', async () => {

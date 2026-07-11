@@ -42,21 +42,45 @@ export interface ClerkStubCounters {
   getTokenCalls: number;
 }
 
+export interface InstallClerkStubOptions {
+  signedIn: boolean;
+  /**
+   * Clerk user id — becomes `user.id` and the JWT `sub` claim. Defaults to
+   * 'user_e2e_stub' so every existing spec that passes only `{ signedIn }`
+   * produces a byte-identical stub. Override it to bind the browser session to
+   * a specific tenant owner (e.g. the sub a signed `user.created` webhook just
+   * bootstrapped — see e2e/journeys/signup-to-first-estimate.hermetic.spec.ts).
+   */
+  sub?: string;
+  /**
+   * Bearer token returned by `session.getToken()` (and mirrored as the session
+   * claims `__raw`). Defaults to the opaque 'e2e.stub.jwt' the offline
+   * money-loop specs rely on. Override with an UNSIGNED `header.payload.sig`
+   * JWT carrying `sub` when the browser must authenticate against a REAL API
+   * running in DEV_AUTH_BYPASS mode (which decodes the sub without verifying).
+   */
+  token?: string;
+}
+
 /**
  * Install the stub before any app script runs. MUST be called before the
  * first page.goto() — addInitScript only affects subsequent documents.
  */
 export async function installClerkStub(
   page: Page,
-  opts: { signedIn: boolean },
+  opts: InstallClerkStubOptions,
 ): Promise<void> {
-  await page.addInitScript((signedIn: boolean) => {
+  const sub = opts.sub ?? 'user_e2e_stub';
+  const token = opts.token ?? 'e2e.stub.jwt';
+  await page.addInitScript(
+    (args: { signedIn: boolean; sub: string; token: string }) => {
+    const { signedIn, sub, token } = args;
     const counters = { signOutCalls: 0, getTokenCalls: 0 };
     type Listener = (resources: unknown) => void;
     const listeners: Listener[] = [];
 
     const user = {
-      id: 'user_e2e_stub',
+      id: sub,
       fullName: 'E2E Stub User',
       firstName: 'E2E',
       lastName: 'Stub',
@@ -78,12 +102,12 @@ export async function installClerkStub(
       // "@clerk/clerk-react: Invalid state" on every render.
       lastActiveToken: {
         jwt: {
-          claims: { __raw: 'e2e.stub.jwt', sub: 'user_e2e_stub' },
+          claims: { __raw: token, sub },
         },
       },
       getToken: async () => {
         counters.getTokenCalls += 1;
-        return 'e2e.stub.jwt';
+        return token;
       },
     };
 
@@ -165,7 +189,9 @@ export async function installClerkStub(
       buildSignUpUrl: () => '/signup',
       buildAfterSignOutUrl: () => '/login',
     };
-  }, opts.signedIn);
+    },
+    { signedIn: opts.signedIn, sub, token },
+  );
 }
 
 /** Read the stub's call counters from the page. */

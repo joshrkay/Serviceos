@@ -7,6 +7,7 @@ import { PgProposalExecutionRepository } from '../../src/proposals/pg-proposal-e
 import { ProposalExecutor } from '../../src/proposals/execution/executor';
 import { IdempotencyGuard } from '../../src/proposals/execution/idempotency';
 import { PgIdempotencyLockProvider } from '../../src/proposals/execution/idempotency-lock';
+import { PgAuditRepository } from '../../src/audit/pg-audit';
 import {
   ExecutionContext,
   ExecutionHandler,
@@ -49,9 +50,13 @@ describe('ProposalExecutor — concurrent idempotency (§11 H1)', () => {
       proposalRepo,
       new PgIdempotencyLockProvider(pool),
     );
-    const executor = new ProposalExecutor(handlers, proposalRepo, guard, {
-      executionRepo,
-    });
+    const executor = new ProposalExecutor(
+      handlers,
+      proposalRepo,
+      guard,
+      new PgAuditRepository(pool),
+      { executionRepo },
+    );
 
     let proposal = await proposalRepo.create({
       tenantId: tenant.tenantId,

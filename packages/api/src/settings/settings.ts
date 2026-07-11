@@ -62,8 +62,27 @@ export interface EscalationSettings {
    * JSONB so no new migration is needed (161-163 are owned by parallel
    * tracks). A dedicated column is the planned permanent home; when it
    * lands, read it first and fall back to this key.
+   *
+   * DEPRECATED (WS21a) — plaintext-at-rest. Superseded by
+   * `voice_approval_pin_hash` (HMAC-SHA256, hashed at rest). Retained for
+   * back-compat: the verify seam checks the hash first and only falls back to
+   * this plaintext field when no hash exists, so a tenant that DID set this
+   * legacy value keeps working with no migration. Enrolling a PIN through the
+   * settings route stores ONLY the hash and clears this field; do not add new
+   * writers of the plaintext path.
    */
   voice_approval_challenge?: string;
+  /**
+   * WS21a — HMAC-SHA256 of the normalized PIN digits (hex), keyed by the
+   * tenant-secrets key and salted by tenantId (see
+   * settings/voice-approval-pin.ts). This is the ENROLLED, hashed-at-rest home
+   * for the money/irreversible voice-approval PIN. Written only by the
+   * dedicated settings route (`PUT /api/settings/voice-approval-pin`) which
+   * hashes server-side — never by the generic settings PUT (the
+   * `escalationSettings` zod schema strips unknown keys, so a raw hash can't be
+   * injected). Redacted from `GET /api/settings` (never echoed).
+   */
+  voice_approval_pin_hash?: string;
 }
 
 export const DEFAULT_ESCALATION_SETTINGS: EscalationSettings = {
@@ -510,6 +529,19 @@ export interface TenantSettings {
    * defense in depth.
    */
   autonomousBookingThreshold?: number;
+  /**
+   * D-018 (WS18) — autonomous CLOSE lane. Opt-in (column defaults FALSE,
+   * migration 247): when true, the live voice agent may close the sale on
+   * the call (draft + send estimate + confirm the held booking) under the
+   * D-018 gate set (proposals/autonomous-close-lane.ts). Optional on the
+   * type so pre-migration rows / legacy fixtures read as "off" via `?? false`.
+   */
+  autonomousCloseEnabled?: boolean;
+  /**
+   * D-018 — per-tenant cap (integer cents) on the quote total the agent may
+   * auto-close. Nullable BIGINT; undefined ⇒ no cap gate.
+   */
+  autonomousCloseMaxCents?: number;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -643,6 +675,10 @@ export interface UpdateSettingsInput {
   autonomousBookingEnabled?: boolean;
   /** UB-D / D-015 — lane confidence threshold, 0.90–0.99 (column default 0.95). */
   autonomousBookingThreshold?: number;
+  /** D-018 — opt into the autonomous close lane (column default false). */
+  autonomousCloseEnabled?: boolean;
+  /** D-018 — cap (integer cents) on the auto-closeable quote total. */
+  autonomousCloseMaxCents?: number;
 }
 
 export interface SettingsRepository {

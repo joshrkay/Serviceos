@@ -31,6 +31,22 @@ export interface WeeklyFeedbackSnapshot {
   newLeads: number;
   /** Current outstanding receivables snapshot (integer cents). */
   outstandingCents: number;
+  /**
+   * WS22 — "same mistake twice" weekly rate: of the proposal-edit
+   * corrections logged this week (proposals/corrections, keyed by
+   * (intent, field)), how many repeat a correction already made at some
+   * earlier time (in-window or not). Coarse field-level identity — line-item
+   * edits all collapse to field:'lineItems' (see CorrectionRepository doc
+   * comment). Absent when the correction repo/method wasn't wired, OR when
+   * `total` is 0 (no corrections this week — nothing to report; "omit if
+   * zero" convention shared with the daily digest's optional sections).
+   */
+  repeatCorrections?: {
+    total: number;
+    repeats: number;
+    /** repeats / total, rounded to the nearest whole percent. */
+    rate: number;
+  };
 }
 
 export interface WeeklySuggestions {

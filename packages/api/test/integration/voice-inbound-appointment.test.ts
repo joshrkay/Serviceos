@@ -28,6 +28,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Pool } from 'pg';
 import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
 import { PgAppointmentRepository } from '../../src/appointments/pg-appointment';
+import { PgAuditRepository } from '../../src/audit/pg-audit';
 import { PgJobRepository } from '../../src/jobs/pg-job';
 import { PgCustomerRepository } from '../../src/customers/pg-customer';
 import { PgLocationRepository } from '../../src/locations/pg-location';
@@ -181,7 +182,12 @@ describe('Integration — inbound voice appointment-setting (real Postgres)', ()
       ['create_appointment', new CreateAppointmentExecutionHandler(appointmentRepo)],
     ]);
     const guard = new IdempotencyGuard(executionRepo, proposalRepo);
-    const executor = new ProposalExecutor(handlers, proposalRepo, guard);
+    const executor = new ProposalExecutor(
+      handlers,
+      proposalRepo,
+      guard,
+      new PgAuditRepository(pool),
+    );
     await proposalRepo.create(proposal);
 
     // Gate: nothing booked before execution runs.

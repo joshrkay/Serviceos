@@ -6043,6 +6043,30 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_audit_events_tenant_created_at
       ON audit_events(tenant_id, created_at DESC);
   `,
+
+  // WS10 — supports ProposalRepository.findAppliedInstructionsForDay (the
+  // digest "Applied your rule ..." reflection). Partial expression index on
+  // the appliedStandingInstructions marker, mirroring 240's shape; additive,
+  // no-op on prod re-runs. The predicate textually matches the query's FIRST
+  // predicate (the jsonb_array_length check stays a non-indexed residual
+  // filter in the query only) so the planner can use this index.
+  '246_proposals_applied_instructions_index': `
+    CREATE INDEX IF NOT EXISTS idx_proposals_tenant_created_applied_si
+      ON proposals (tenant_id, created_at)
+      WHERE payload->'_meta' ? 'appliedStandingInstructions';
+  `,
+
+  // D-018 — autonomous CLOSE lane. Per-tenant opt-in (default OFF) letting the
+  // live agent close the sale on the call (draft + send estimate + confirm the
+  // held booking), plus a per-tenant cap on the total it may auto-close. Both
+  // additive/nullable-safe; the code floor + platform kill switch
+  // (AUTONOMOUS_CLOSE_DISABLED) live in src/proposals/autonomous-close-lane.ts.
+  '247_tenant_settings_autonomous_close': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS autonomous_close_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS autonomous_close_max_cents BIGINT;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

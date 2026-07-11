@@ -290,6 +290,24 @@ export class PgQueue extends PgBaseRepository implements Queue {
     });
   }
 
+  /**
+   * WS15 — pending messages older than `olderThanSeconds` (see Queue
+   * interface). Filters on created_at, not visible_at: a message mid-backoff
+   * is still "sitting in the queue" from the SLO's point of view.
+   */
+  async stalePendingCount(olderThanSeconds: number): Promise<number> {
+    return this.withClient(async (client) => {
+      await this.ensureTable(client);
+      const res = await client.query<{ stale: string }>(
+        `SELECT COUNT(*) AS stale
+           FROM _queue_messages
+          WHERE created_at < NOW() - ($1 || ' seconds')::interval`,
+        [String(Math.max(0, olderThanSeconds))],
+      );
+      return Number(res.rows[0].stale);
+    });
+  }
+
   getConfig(): QueueConfig {
     return { ...this.config };
   }

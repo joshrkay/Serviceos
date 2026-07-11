@@ -9,7 +9,7 @@ import { createHealthRouter, HealthCheck } from './health/health';
 import { toErrorResponse } from './shared/errors';
 import { createPool, createDirectPool } from './db/pool';
 import { verifyRlsRuntimeRole } from './db/rls-runtime-role';
-import { loadConfig } from './shared/config';
+import { loadConfig, resolveMediaStreamsEnabled } from './shared/config';
 import { resolveWebDistDir } from './web-static-path';
 import { createWebhookRouter } from './webhooks/routes';
 import { createIntegrationResolver, createVapiSecretResolver } from './webhooks/integration-resolver';
@@ -24,6 +24,7 @@ import { DefaultTwilioCallControl } from './telephony/twilio-call-control';
 import { createUserPhoneDispatcherResolver, createBusinessPhoneFallback } from './telephony/dispatcher-phone-resolver';
 import { PgPhoneNumberRepository } from './integrations/twilio/phone-number-repository';
 import { attachMediaStreamServer } from './telephony/media-streams';
+import { createTwilioCallRedirector } from './telephony/twilio-call-redirect';
 import { RealtimeHealthCircuit } from './telephony/realtime-health-circuit';
 import { attachClientGateway, setChannelGate } from './ws/client-gateway';
 import { setDraining, isDraining as isDrainingFlag } from './ws/drain-state';
@@ -186,7 +187,16 @@ import { PgMoneyDashboardRepository } from './reports/pg-money-dashboard';
 import { createFeedbackResponsesRouter } from './routes/feedback';
 import { createInteractionsRouter } from './routes/interactions';
 import { initSentry, setSentryClient } from './monitoring/sentry';
-import { dbPoolConnections, pgQueueDepth } from './monitoring/metrics';
+import { dbPoolConnections, pgQueueDepth, voiceTurnLatencyMs } from './monitoring/metrics';
+// WS15 — platform SLO monitor + drain-abandonment alarm.
+import { createAlertOperator, emitDrainAbandonment } from './monitoring/alert-operator';
+import { recordSweepSuccess, sweepLastSuccessMs } from './monitoring/sweep-heartbeats';
+import { PgPlatformSloRepository } from './monitoring/pg-platform-slo';
+import {
+  runSloMonitor,
+  SLO_MONITOR_INTERVAL_MS,
+  estimateTurnLatencyP95,
+} from './workers/slo-monitor';
 
 // In-memory repositories (fallback for dev without DATABASE_URL)
 import { InMemoryCustomerRepository } from './customers/customer';
@@ -707,10 +717,10 @@ export type AppWithLifecycle = express.Express & {
   gracefulDrain: (reason: string) => Promise<void>;
   /**
    * WS2 — number of background worker intervals this instance registered.
-   * Snapshot taken at construction time. Zero when PROCESS_ROLE=web (the
-   * HTTP/voice surface runs no background loops); nonzero for 'worker'/'all'.
-   * Read-only observability seam so tests can assert the process-role split
-   * without exporting createApp() internals.
+   * Snapshot taken at construction time. Zero when PROCESS_ROLE=web or
+   * PROCESS_ROLE=voice (the HTTP/voice surface runs no background loops);
+   * nonzero for 'worker'/'all'. Read-only observability seam so tests can
+   * assert the process-role split without exporting createApp() internals.
    */
   readonly backgroundIntervalCount: number;
 };
@@ -1436,18 +1446,29 @@ export function createApp(): AppWithLifecycle {
   } else {
     rawMessageDelivery = new InMemoryDeliveryProvider();
   }
+  // RV-130 — consent ledger (append-only consent_events). Constructed here —
+  // before the SMS gate — because WS12 makes it the cross-channel source of
+  // truth both outbound gates consult; the STOP/START keyword handlers and
+  // the voice adapter (registered further down) append to the same instance.
+  const consentEventRepo = pool
+    ? new PgConsentEventRepository(pool)
+    : new InMemoryConsentEventRepository();
+
   // WS1 safety rails — wrap the single delivery object in the consent+DNC gate
   // so EVERY outbound SMS passes exactly one gate. Owner-class sends bypass;
   // customer-class sends are gated per `config.TCPA_CONSENT_ENFORCEMENT` (the
   // SAME value that drives the voice consent gate). Wrapping here — the single
   // construction site — is what makes the guarantee hold for all three
   // provider branches (per-tenant, global, and in-memory dev).
+  // WS12 — the gate also consults the consent ledger so a revocation arriving
+  // on ANY channel (voice, portal, manual, STOP) suppresses customer SMS.
   const messageDelivery: MessageDeliveryProvider | null = rawMessageDelivery
     ? new GatedMessageDelivery({
         base: rawMessageDelivery,
         dnc: dncRepo,
         auditRepo,
         enforcement: config.TCPA_CONSENT_ENFORCEMENT,
+        consentLedger: consentEventRepo,
       })
     : null;
 
@@ -1911,6 +1932,8 @@ export function createApp(): AppWithLifecycle {
     // UB-A2 — create_standing_instruction inserts via the UB-A1 repo
     // (in-memory fallback when no pool, same as the routes above).
     standingInstructionRepo,
+    // WS20 — update_catalog_item writes the owner-ratified SKU price.
+    catalogRepo,
   });
   // U5 — fail boot loudly if a voice-reachable persist handler is degraded
   // (would return success without saving). Only the persist-critical
@@ -1962,6 +1985,9 @@ export function createApp(): AppWithLifecycle {
     executionHandlers,
     proposalRepo,
     proposalIdempotencyGuard,
+    // WS11 — execution outcomes write proposal.executed/execution_failed
+    // audit events atomically with the state change (executeAudited).
+    auditRepo,
     {
       executionRepo: proposalExecutionRepo,
       onExecuted: async (event) => {
@@ -2010,6 +2036,7 @@ export function createApp(): AppWithLifecycle {
               proposalExecutionRepo,
               settingsRepo,
               lessonRepo: correctionLessonRepo,
+              catalogRepo,
               ports: correctionConfigPorts,
               auditRepo,
             },
@@ -2104,15 +2131,20 @@ export function createApp(): AppWithLifecycle {
     backgroundIntervals.push(handle);
     return handle;
   };
-  // WS2 — process-role split. A PROCESS_ROLE=web deploy serves the HTTP/voice/WS
-  // surface with ZERO background worker loops so it can never be coupled to
-  // (or blocked by) the sweeps/queue drain; 'worker' and 'all' run them. Every
-  // worker interval registration below (and the worker-object constructions that
-  // exist solely to feed them) is gated on this. Cheap observability intervals
-  // (samplePoolMetrics / sampleQueueDepth) stay in ALL roles — a web deploy must
-  // still expose its own pool + queue-depth metrics. Leader locks (runAsLeader)
+  // WS2 — process-role split. A PROCESS_ROLE=web (or, WS14, PROCESS_ROLE=voice)
+  // deploy serves the HTTP/voice/WS surface with ZERO background worker loops
+  // so it can never be coupled to (or blocked by) the sweeps/queue drain;
+  // 'worker' and 'all' run them. Every worker interval registration below
+  // (and the worker-object constructions that exist solely to feed them) is
+  // gated on this. Cheap observability intervals (samplePoolMetrics /
+  // sampleQueueDepth) stay in ALL roles — a web/voice deploy must still
+  // expose its own pool + queue-depth metrics. Leader locks (runAsLeader)
   // make it safe if two instances ever both run 'all'.
-  const shouldRunWorkers = config.PROCESS_ROLE !== 'web';
+  // Explicit allowlist (not `!== 'web'`) so a THIRD non-worker role can
+  // never accidentally start running background sweeps by falling through
+  // an exclusion list — 'voice' must land here, not in shouldRunWorkers.
+  const shouldRunWorkers =
+    config.PROCESS_ROLE === 'worker' || config.PROCESS_ROLE === 'all';
 
   // scale-to-1000 U2c — sample Postgres pool occupancy into /metrics so the
   // saturation signal (waiting climbing while total is pinned at the pool max)
@@ -2169,12 +2201,17 @@ export function createApp(): AppWithLifecycle {
     // scale-to-1000 C1 — durable job-queue depth sampler (one replica queries
     // the shared _queue_messages/_queue_dlq tables per tick).
     queueDepth: 590023,
+    // WS15 — platform SLO monitor (evaluates completion rate / queue
+    // staleness / sweep lag and pages the operator on breach).
+    sloMonitor: 590024,
   } as const;
   const runAsLeader = async (lockKey: number, work: () => Promise<void>): Promise<void> => {
     if (shuttingDown) return;
     if (!pool) {
       // In-memory dev: no coordination needed (sweeps no-op with no tenants).
       await work();
+      // WS15 — sweep heartbeat (see below for the pool path).
+      recordSweepSuccess(String(lockKey));
       return;
     }
     // Leader election holds a SESSION advisory lock across work(), so it must
@@ -2189,6 +2226,12 @@ export function createApp(): AppWithLifecycle {
       if (!res.rows[0]?.locked) return; // another instance owns this tick
       try {
         await work();
+        // WS15 — record the sweep heartbeat on SUCCESS only (a throwing
+        // work() must read as lag). Keyed by lock key; the SLO monitor reads
+        // the queue-depth sampler's heartbeat as its worker-loop liveness
+        // canary. In-process registry — see monitoring/sweep-heartbeats.ts
+        // for the multi-replica caveat.
+        recordSweepSuccess(String(lockKey));
       } finally {
         await client.query('SELECT pg_advisory_unlock($1)', [lockKey]);
       }
@@ -2230,6 +2273,75 @@ export function createApp(): AppWithLifecycle {
   // `backgroundIntervalCount` (exposed on the returned app) is the count of
   // those worker loops — length minus this baseline — so it is 0 in web role.
   const observabilityIntervalCount = backgroundIntervals.length;
+
+  // WS15 — platform SLO monitor. Evaluates call completion rate (last 60min,
+  // voice_sessions terminal outcomes, cross-tenant), queue staleness (pending
+  // jobs older than SLO_QUEUE_STALE_MIN), and sweep lag (queue-depth sampler
+  // heartbeat age) every 5 minutes, and ALERTS A HUMAN on breach: always a
+  // Sentry error event (docs/runbooks/alerting.md routes those to Slack/DM),
+  // plus an operator SMS when ALERT_SMS_TO is set (owner-class — bypasses the
+  // consent gate). Leader-locked so exactly one replica evaluates/pages per
+  // tick; per-rule cooldown (SLO_ALERT_COOLDOWN_MIN) inside alertOperator.
+  // Runbook: docs/runbooks/slo-alerts.md.
+  if (shouldRunWorkers) {
+    const sloLogger = createLogger({
+      service: 'slo-monitor',
+      environment: process.env.NODE_ENV || 'development',
+    });
+    const alertOperator = createAlertOperator({
+      sentry: sentryClient,
+      delivery: messageDelivery,
+      alertSmsTo: config.ALERT_SMS_TO,
+      cooldownMs: config.SLO_ALERT_COOLDOWN_MIN * 60 * 1000,
+      logger: sloLogger,
+    });
+    const platformSloRepo = pool ? new PgPlatformSloRepository(pool) : null;
+    let sloMonitorInFlight = false;
+    registerInterval(setInterval(() => {
+      if (sloMonitorInFlight) return;
+      sloMonitorInFlight = true;
+      void runAsLeader(SWEEP_LOCK.sloMonitor, async () => {
+        await runSloMonitor({
+          // In-memory dev (no pool): zero counts — the completion rule's
+          // sample floor keeps it quiet.
+          getCallOutcomeCounts: (windowStart) =>
+            platformSloRepo
+              ? platformSloRepo.endedCallOutcomeCounts(windowStart)
+              : Promise.resolve({ total: 0, completedish: 0 }),
+          getStalePendingCount: (olderThanSeconds) => queue.stalePendingCount(olderThanSeconds),
+          getSweepLastSuccessMs: () => sweepLastSuccessMs(String(SWEEP_LOCK.queueDepth)),
+          // WS26 — turn-latency snapshot from the in-process histogram. Only
+          // consulted when PROCESS_ROLE=all (the rule's role guard); reading the
+          // metric is failure-soft so a prom error never aborts the tick.
+          processRole: config.PROCESS_ROLE,
+          getTurnLatencySnapshot: async () => {
+            try {
+              const snap = await voiceTurnLatencyMs.get();
+              return estimateTurnLatencyP95(snap.values);
+            } catch {
+              return null;
+            }
+          },
+          alert: alertOperator,
+          thresholds: {
+            callCompletionMin: config.SLO_CALL_COMPLETION_MIN,
+            callCompletionMinSample: config.SLO_CALL_COMPLETION_MIN_SAMPLE,
+            queueStaleMin: config.SLO_QUEUE_STALE_MIN,
+            sweepLagMin: config.SLO_SWEEP_LAG_MIN,
+            turnLatencyP95Ms: config.SLO_TURN_LATENCY_P95_MS,
+            turnLatencyMinSample: config.SLO_TURN_LATENCY_MIN_SAMPLE,
+          },
+          logger: sloLogger,
+        });
+      }).catch((err) => {
+        sloLogger.error('SLO monitor sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }).finally(() => {
+        sloMonitorInFlight = false;
+      });
+    }, SLO_MONITOR_INTERVAL_MS));
+  }
 
   const executionWorkerLogger = createLogger({
     service: 'execution-worker',
@@ -2309,6 +2421,9 @@ export function createApp(): AppWithLifecycle {
           : {}),
       };
     },
+    // D-015 amendment — platform-wide kill switch, checked before tenant
+    // opt-in by evaluateAutonomousBookingLane.
+    autonomousBookingPlatformDisabled: config.AUTONOMOUS_BOOKING_DISABLED === 'true',
     appointmentRepo,
     // RV-042 — lets update_estimate proposals stamp the acceptance-void
     // marker at creation when they target a currently accepted estimate.
@@ -2590,6 +2705,10 @@ export function createApp(): AppWithLifecycle {
       consumeNonce: consumeOneTapUndoNonce,
       jobRepo,
       customerRepo,
+      // WS18d (D-018) — close-chain compensation: undoing a close-chain
+      // booking also stops pending siblings and voids the sent estimate so
+      // its approval link stops accepting.
+      estimateRepo,
       ...(messageDelivery
         ? {
             customerMessageDeps: {
@@ -3020,12 +3139,10 @@ export function createApp(): AppWithLifecycle {
     { overwrite: true },
   );
 
-  // RV-130 — consent ledger + recording control. The ledger appends
-  // implicit recording consent at disclosure and revocations on a
-  // "stop recording" objection; the control pauses the live recording.
-  const consentEventRepo = pool
-    ? new PgConsentEventRepository(pool)
-    : new InMemoryConsentEventRepository();
+  // RV-130 — the consent ledger (constructed above, before the SMS gate)
+  // appends implicit recording consent at disclosure and revocations on a
+  // "stop recording" objection; the recording control pauses the live
+  // recording.
   // Story 10.6 — register STOP/START now that DNC, the consent ledger, and the
   // customer repo all exist, so an opt-out updates every store at once.
   registerKeywordHandler(
@@ -3103,7 +3220,14 @@ export function createApp(): AppWithLifecycle {
   voiceExtendedIntentsFlagResolver = (tenantId: string) =>
     isFlagEnabledForTenant(tenantId, 'voice_extended_intents');
 
-  const twilioAdapter = new TwilioGatherAdapter({
+  // WS18d — assembled as a VARIABLE (not an inline literal) deliberately: the
+  // adapter spreads its deps into createVoiceTurnProcessor, and the processor-
+  // only WS18 keys below (consentEventRepo, autonomousClose) are not part of
+  // TwilioAdapterDeps — a literal would trip TS excess-property checking. The
+  // clean fix (extending TwilioAdapterDeps) belongs to the WS16 owner of
+  // twilio-adapter.ts; this keeps that file untouched while the processor
+  // receives its full dep surface at runtime.
+  const twilioAdapterDeps = {
     store: voiceSessionStore,
     gateway: llmGateway,
     ...(pool ? { pool } : {}),
@@ -3236,7 +3360,27 @@ export function createApp(): AppWithLifecycle {
           },
         }
       : {}),
-  });
+    // ── WS18 processor-only deps (flow through the adapter's spread into
+    //    createVoiceTurnProcessor; see the variable-assembly note above) ──
+    // WS18b — on-call SMS consent capture (ledger + customers.sms_consent).
+    consentEventRepo,
+    // WS18d (D-018) — the sanctioned on-call close: the production executor,
+    // both platform kill switches, and the owner SMS/one-tap wiring for the
+    // UNDO link + the fallback chain SMS.
+    autonomousClose: {
+      executor: proposalExecutor,
+      platformDisabled: config.AUTONOMOUS_CLOSE_DISABLED === 'true',
+      bookingPlatformDisabled: config.AUTONOMOUS_BOOKING_DISABLED === 'true',
+      ownerPhoneResolver: resolveUnsupervisedOwnerPhone,
+      ...(oneTapSmsSender ? { sendOwnerSms: oneTapSmsSender } : {}),
+      ...(oneTapSecret ? { oneTapSecret } : {}),
+      buildUndoUrl: (token: string) =>
+        `${oneTapApiBaseUrl}/public/proposals/one-tap-undo?token=${encodeURIComponent(token)}`,
+      buildApproveUrl: (token: string) =>
+        `${oneTapApiBaseUrl}/public/proposals/one-tap-approve?token=${encodeURIComponent(token)}`,
+    },
+  };
+  const twilioAdapter = new TwilioGatherAdapter(twilioAdapterDeps);
 
   // UC-5a — consumer half of the durable emergency page-retry ladder: the
   // adapter above enqueues delayed `telephony.emergency_page` jobs; this
@@ -3273,11 +3417,12 @@ export function createApp(): AppWithLifecycle {
     );
   }
 
-  // P8-012: feature flag the Media Streams (live audio) path. Default
-  // off — when off, the existing Gather adapter remains the only
-  // telephony surface. When on, /voice returns a <Connect><Stream/>
-  // TwiML and audio flows over the WebSocket attached below.
-  const mediaStreamsEnabled = process.env.TWILIO_MEDIA_STREAMS_ENABLED === 'true';
+  // P8-012 / WS7: feature flag the Media Streams (live audio) path. `'false'`
+  // (kill switch) → the existing Gather adapter is the only telephony surface.
+  // `'true'` → forced on (validated stack). Unset/`'auto'` → on iff the full
+  // ElevenLabs+Deepgram streaming stack is present. When on, /voice returns a
+  // <Connect><Stream/> TwiML and audio flows over the WebSocket attached below.
+  const mediaStreamsEnabled = resolveMediaStreamsEnabled(process.env);
 
   // WS3 (voice ingestion resilience) — shared realtime health signals. The
   // /voice TwiML branch reads the circuit (isOpen) and prereq probe to decide
@@ -3383,7 +3528,17 @@ export function createApp(): AppWithLifecycle {
       publicBaseUrl: process.env.PUBLIC_API_URL,
       ...(phoneNumberRepo ? { phoneNumberRepo } : {}),
       resolveTenantId: ({ to }) => resolveTenantIdByPhoneNumber(to),
-      mediaStreamsEnabled,
+      // WS8 — a worker-role process never attaches the media-streams WS
+      // handler (see the role gate on attachMediaStreamServer below), so its
+      // /voice must never emit <Connect><Stream/> pointing at a socket this
+      // process will reject — degrade to Gather instead. WS14 — 'voice' is
+      // NOT excluded here (only 'worker' is): the dedicated voice service
+      // attaches the WS the same as 'web' does, so its /voice keeps emitting
+      // <Connect><Stream/> normally.
+      mediaStreamsEnabled: mediaStreamsEnabled && config.PROCESS_ROLE !== 'worker',
+      // WS7 — mid-call degrade to Gather: /voice/gather-fallback resolves the
+      // live session by CallSid to continue the SAME FSM state on Gather.
+      voiceSessionStore,
       // P8-014: mount the recording webhook in production. Without this
       // block the route is unreachable and Twilio's recordingStatusCallback
       // POSTs 404 — call recordings would be lost. Pool / Twilio creds are
@@ -3582,7 +3737,18 @@ export function createApp(): AppWithLifecycle {
   // server starts listening, the upgrade handler is already attached.
   // The flag also gates whether DeepgramStreamingProvider is constructed
   // (no DEEPGRAM_API_KEY required when the feature is disabled).
-  if (mediaStreamsEnabled) {
+  //
+  // WS8 — a PROCESS_ROLE=worker deploy never accepts voice WS upgrades:
+  // Twilio can't reach it anyway (private networking, no public ingress),
+  // so constructing the Deepgram streaming provider, the shared TTS
+  // provider, and wrapping app.listen would be dead weight — and would
+  // boot-warn/crash the worker on a misconfigured TTS_PROVIDER for a
+  // surface it never serves. /health stays role-agnostic (index.ts listens
+  // in every role); only this voice-WS attach is role-gated.
+  // WS14 — PROCESS_ROLE=voice attaches this exactly like 'web' does (only
+  // 'worker' is excluded); it's the intended home for the WS upgrade in the
+  // three-service topology.
+  if (mediaStreamsEnabled && config.PROCESS_ROLE !== 'worker') {
     const deepgramKey = process.env.DEEPGRAM_API_KEY;
     if (!deepgramKey) {
       // eslint-disable-next-line no-console
@@ -3708,6 +3874,19 @@ export function createApp(): AppWithLifecycle {
         ? new PgTriageEventRepository(pool)
         : new InMemoryTriageEventRepository();
       const mediaStreamPublicBase = (process.env.PUBLIC_API_URL ?? '').replace(/\/+$/, '');
+      // WS7 — mid-call REST redirector: on a terminal realtime failure the
+      // mediastream adapter steers the LIVE call back to the Gather-fallback
+      // webhook instead of hanging up. Wired only when PUBLIC_API_URL is set
+      // (Twilio must POST an absolute URL); absent → adapter keeps 1011-close.
+      const twilioCallRedirector = process.env.PUBLIC_API_URL
+        ? createTwilioCallRedirector({
+            resolveAuthToken: (accountSid) => resolveTwilioAuthTokenForSubaccount(accountSid),
+            ...(process.env.TWILIO_ACCOUNT_SID
+              ? { defaultAccountSid: process.env.TWILIO_ACCOUNT_SID }
+              : {}),
+            publicBaseUrl: process.env.PUBLIC_API_URL,
+          })
+        : undefined;
       const vulnerabilityTriageHookDep = llmGateway
         ? createVulnerabilityTriageHook({
             isEnabledForTenant: isFlagEnabledForTenant,
@@ -3821,6 +4000,7 @@ export function createApp(): AppWithLifecycle {
             // reads it) and emit the alertable resilience audit events
             // (session_failed / disclosure.init_failed).
             realtimeCircuit: realtimeHealthCircuit,
+            ...(twilioCallRedirector ? { restRedirect: twilioCallRedirector } : {}),
             ...(auditRepo ? { auditRepo } : {}),
             ...(sharedTtsProvider ? { ttsProvider: sharedTtsProvider } : {}),
             terminologyProvider,
@@ -4092,7 +4272,10 @@ export function createApp(): AppWithLifecycle {
       customerContactRepo,
       customerTagRepo,
       customerCustomFieldRepo,
-      customerMergeRepo
+      customerMergeRepo,
+      // WS12 — manual sms_consent toggles ledger to consent_events so a
+      // dashboard opt-out suppresses BOTH outbound channels.
+      consentEventRepo
     )
   );
   app.use(
@@ -5301,6 +5484,8 @@ export function createApp(): AppWithLifecycle {
             correctionLessonRepo,
             // WS6 — "Checked: N proposals, M flagged" (supervisor reviews).
             supervisorReviewRepo: supervisorReviewsRepo,
+            // WS22 — "K fixed" (flagged proposal edited after review).
+            auditRepo,
           },
           listTenantIds: async () => {
             if (!pool) return [];
@@ -5474,8 +5659,9 @@ export function createApp(): AppWithLifecycle {
         void runAsLeader(SWEEP_LOCK.weeklyFeedback, async () => {
           await runWeeklyFeedbackSweep({
             auditRepo,
+            // WS22 — "same mistake twice" weekly rate (repeatCorrections).
             buildSnapshot: (tenantId, weekStart, weekEnd) =>
-              buildWeeklyFeedbackSnapshot(weeklyFeedbackPool, tenantId, weekStart, weekEnd),
+              buildWeeklyFeedbackSnapshot(weeklyFeedbackPool, tenantId, weekStart, weekEnd, correctionRepo),
             resolveOwnerEmail: async (tenantId) => {
               const r = await weeklyFeedbackPool.query(
                 'SELECT owner_email FROM tenants WHERE id = $1',
@@ -6208,6 +6394,20 @@ export function createApp(): AppWithLifecycle {
         await new Promise((resolve) => setTimeout(resolve, 500));
       }
       console.log(`[app] drain complete — ${voiceSessionStore.liveCount()} live session(s) still active at teardown`);
+      // WS15 — drain-abandonment alarm: the window expired with live calls
+      // remaining, so teardown below hangs up on real callers (Twilio ends
+      // them). emitDrainAbandonment is synchronous fire-and-forget (Sentry
+      // captureMessage enqueues into the client's transport buffer — no await
+      // that could eat into the force-exit backstop) and never throws. The
+      // Prometheus counter it increments dies with this process; the Sentry
+      // error event is the durable alarm.
+      if (voiceSessionStore.liveCount() > 0) {
+        emitDrainAbandonment(
+          voiceSessionStore.liveCount(),
+          voiceSessionStore.liveCallSids(),
+          { sentry: sentryClient, logger: requestLogger },
+        );
+      }
       // Stop the voice-session-store reaper interval so the process can
       // exit cleanly even when no DB pool is wired (dev / in-memory mode).
       voiceSessionStore.dispose();

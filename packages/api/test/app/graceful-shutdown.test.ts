@@ -133,3 +133,35 @@ describe('ARCH-02 — src/index.ts fatal-path wiring (source-level)', () => {
     expect(codeOnly).not.toMatch(/process\.exit\(/);
   });
 });
+
+describe('WS15 — drain-abandonment alarm wiring in runShutdown (source-level)', () => {
+  // Injecting a LIVE voice session into createApp()'s internal store is not
+  // possible from outside (the store is private to the closure), so — matching
+  // the index.ts precedent above — the shutdown-path wiring is pinned with
+  // source assertions, while emitDrainAbandonment's BEHAVIOR (counter, Sentry
+  // payload, never-throws) is covered in test/monitoring/alert-operator.test.ts.
+  const appSrc = readFileSync(resolve(__dirname, '../../src/app.ts'), 'utf8');
+
+  // The drain segment: from the drain deadline loop to the store teardown.
+  const drainMatch = appSrc.match(
+    /const drainDeadline = [\s\S]*?voiceSessionStore\.dispose\(\);/,
+  );
+
+  it('runShutdown emits the drain-abandonment alarm when live sessions remain after the drain window', () => {
+    expect(drainMatch).not.toBeNull();
+    const segment = drainMatch![0];
+    // Guarded on live sessions remaining, and fed the live callSids.
+    expect(segment).toMatch(/if \(voiceSessionStore\.liveCount\(\) > 0\)/);
+    expect(segment).toContain('emitDrainAbandonment(');
+    expect(segment).toContain('voiceSessionStore.liveCallSids()');
+  });
+
+  it('the emit is fire-and-forget — never awaited (must not eat into the force-exit backstop)', () => {
+    expect(drainMatch![0]).not.toMatch(/await\s+emitDrainAbandonment/);
+    // And it happens BEFORE the store is disposed (dispose ends sessions).
+    const segment = drainMatch![0];
+    expect(segment.indexOf('emitDrainAbandonment(')).toBeLessThan(
+      segment.indexOf('voiceSessionStore.dispose()'),
+    );
+  });
+});

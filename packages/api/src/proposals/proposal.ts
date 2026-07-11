@@ -26,7 +26,7 @@ export type ProposalStatus =
   // or re-executed. If the operator wants to proceed after undoing,
   // they draft a new proposal. Decision 9 ("5-second undo window").
   | 'undone';
-export type ProposalType = 'create_customer' | 'update_customer' | 'create_job' | 'create_appointment' | 'create_booking' | 'callback' | 'draft_estimate' | 'update_estimate' | 'draft_invoice' | 'update_invoice' | 'issue_invoice' | 'create_invoice_schedule' | 'batch_invoice' | 'reassign_appointment' | 'reschedule_appointment' | 'add_crew_member' | 'remove_crew_member' | 'cancel_appointment' | 'voice_clarification' | 'add_note' | 'send_invoice' | 'send_estimate' | 'send_estimate_nudge' | 'record_payment' | 'log_expense' | 'convert_lead' | 'confirm_appointment' | 'mark_lead_lost' | 'add_service_location' | 'log_time_entry' | 'notify_delay' | 'request_feedback' | 'emergency_dispatch' | 'onboarding_tenant_settings' | 'onboarding_service_category' | 'onboarding_estimate_template' | 'onboarding_team_member' | 'onboarding_schedule' | 'review_response_proposal' | 'send_payment_reminder' | 'apply_late_fee' | 'create_standing_instruction';
+export type ProposalType = 'create_customer' | 'update_customer' | 'create_job' | 'create_appointment' | 'create_booking' | 'callback' | 'draft_estimate' | 'update_estimate' | 'draft_invoice' | 'update_invoice' | 'issue_invoice' | 'create_invoice_schedule' | 'batch_invoice' | 'reassign_appointment' | 'reschedule_appointment' | 'add_crew_member' | 'remove_crew_member' | 'cancel_appointment' | 'voice_clarification' | 'add_note' | 'send_invoice' | 'send_estimate' | 'send_estimate_nudge' | 'record_payment' | 'log_expense' | 'convert_lead' | 'confirm_appointment' | 'mark_lead_lost' | 'add_service_location' | 'log_time_entry' | 'notify_delay' | 'request_feedback' | 'emergency_dispatch' | 'onboarding_tenant_settings' | 'onboarding_service_category' | 'onboarding_estimate_template' | 'onboarding_team_member' | 'onboarding_schedule' | 'review_response_proposal' | 'send_payment_reminder' | 'apply_late_fee' | 'create_standing_instruction' | 'update_catalog_item';
 
 export const VALID_PROPOSAL_TYPES: ProposalType[] = [
   'create_customer',
@@ -71,6 +71,7 @@ export const VALID_PROPOSAL_TYPES: ProposalType[] = [
   'send_payment_reminder',
   'apply_late_fee',
   'create_standing_instruction',
+  'update_catalog_item',
 ];
 
 /**
@@ -330,6 +331,12 @@ export function actionClassForProposalType(type: ProposalType): ActionClass {
     // voice task handler deliberately omits sourceTrustTier, so the
     // instruction itself always lands for human review in v1.
     case 'create_standing_instruction':
+    // WS20 — updating a catalog item's unit price is a config change: it moves
+    // no money (only shapes FUTURE drafts, which are themselves reviewed),
+    // contacts no customer, and is reversible (edit the price back). Capture-
+    // class, but the correction loop creates it with no trust tier, so it
+    // always lands for human review — never auto-executed (D-004).
+    case 'update_catalog_item':
       return 'capture';
     // Delay notices and feedback requests are outbound customer-facing
     // messages — comms-class so they never auto-approve regardless of
@@ -583,6 +590,35 @@ export interface ProposalRepository {
     to: Date,
     limit?: number,
   ): Promise<Proposal[]>;
+  /**
+   * D-015 amendment — proposals created in [from, to) that took the
+   * autonomous booking lane (`sourceContext.autonomousLaneEvaluation.eligible
+   * === true`). Drives the digest "Auto-booked: N appointment(s)"
+   * reflection. Newest first, capped at `limit`. Optional so partial test
+   * doubles still satisfy the interface; the digest falls back to an empty
+   * section when it is absent.
+   */
+  findAutonomousLaneApprovedForDay?(
+    tenantId: string,
+    from: Date,
+    to: Date,
+    limit?: number,
+  ): Promise<Proposal[]>;
+  /**
+   * WS10 — proposals created in [from, to) that carry at least one stamp in
+   * `payload._meta.appliedStandingInstructions` (see
+   * ai/standing-instructions-context.ts:36-39 — Array<{id, text}>, only
+   * stamped by drafting tasks when non-empty). Drives the digest "Applied
+   * your rule ..." reflection. Newest first, capped at `limit`. Optional so
+   * partial test doubles still satisfy the interface; the digest falls back
+   * to an empty section when it is absent.
+   */
+  findAppliedInstructionsForDay?(
+    tenantId: string,
+    from: Date,
+    to: Date,
+    limit?: number,
+  ): Promise<Proposal[]>;
   findByAiRun(tenantId: string, aiRunId: string): Promise<Proposal[]>;
   /**
    * Indexed lookup for voice redelivery dedup (P1). Returns the most recent
@@ -612,6 +648,22 @@ export interface ProposalRepository {
    * test doubles still satisfy the interface; both real repos implement it.
    */
   findByConversation?(tenantId: string, conversationId: string): Promise<Proposal[]>;
+  /**
+   * WS20 — proposals of `proposalType` that carry a matching
+   * `sourceContext.correctionTarget` (`{ kind, key }`), optionally filtered to
+   * `statuses`. Backs the correction-repetition dedup: a meta-proposal for the
+   * same catalog SKU (or banned phrase) that is already open (draft /
+   * ready_for_review) suppresses a duplicate; a rejected one suppresses until a
+   * NEWER correction re-earns it. Filtered in SQL on the JSONB path so a
+   * tenant-wide proposal set is never pulled into memory. Optional so partial
+   * test doubles still satisfy the interface; both real repos implement it.
+   */
+  findByCorrectionTarget?(
+    tenantId: string,
+    proposalType: ProposalType,
+    target: { kind: string; key: string },
+    statuses?: readonly ProposalStatus[],
+  ): Promise<Proposal[]>;
   updateStatus(
     tenantId: string,
     id: string,
@@ -926,6 +978,53 @@ export class InMemoryProposalRepository implements ProposalRepository {
     return typeof limit === 'number' ? rows.slice(0, limit) : rows;
   }
 
+  async findAutonomousLaneApprovedForDay(
+    tenantId: string,
+    from: Date,
+    to: Date,
+    limit?: number,
+  ): Promise<Proposal[]> {
+    const rows = Array.from(this.proposals.values())
+      .filter((p) => {
+        if (p.tenantId !== tenantId) return false;
+        const t = p.createdAt.getTime();
+        if (t < from.getTime() || t >= to.getTime()) return false;
+        const evaluation = (p.sourceContext as Record<string, unknown> | undefined)
+          ?.autonomousLaneEvaluation;
+        return (
+          !!evaluation &&
+          typeof evaluation === 'object' &&
+          (evaluation as Record<string, unknown>).eligible === true
+        );
+      })
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+      .map((p) => ({ ...p }));
+    return typeof limit === 'number' ? rows.slice(0, limit) : rows;
+  }
+
+  async findAppliedInstructionsForDay(
+    tenantId: string,
+    from: Date,
+    to: Date,
+    limit?: number,
+  ): Promise<Proposal[]> {
+    const rows = Array.from(this.proposals.values())
+      .filter((p) => {
+        if (p.tenantId !== tenantId) return false;
+        const t = p.createdAt.getTime();
+        if (t < from.getTime() || t >= to.getTime()) return false;
+        const meta = (p.payload as Record<string, unknown> | undefined)?._meta;
+        const applied =
+          meta && typeof meta === 'object'
+            ? (meta as Record<string, unknown>).appliedStandingInstructions
+            : undefined;
+        return Array.isArray(applied) && applied.length > 0;
+      })
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+      .map((p) => ({ ...p }));
+    return typeof limit === 'number' ? rows.slice(0, limit) : rows;
+  }
+
   async findByAiRun(tenantId: string, aiRunId: string): Promise<Proposal[]> {
     return Array.from(this.proposals.values())
       .filter((p) => p.tenantId === tenantId && p.aiRunId === aiRunId)
@@ -968,6 +1067,24 @@ export class InMemoryProposalRepository implements ProposalRepository {
           (p.sourceContext as Record<string, unknown> | undefined)?.conversationId ===
             conversationId,
       )
+      .map((p) => ({ ...p }));
+  }
+
+  async findByCorrectionTarget(
+    tenantId: string,
+    proposalType: ProposalType,
+    target: { kind: string; key: string },
+    statuses?: readonly ProposalStatus[],
+  ): Promise<Proposal[]> {
+    return Array.from(this.proposals.values())
+      .filter((p) => {
+        if (p.tenantId !== tenantId || p.proposalType !== proposalType) return false;
+        if (statuses && !statuses.includes(p.status)) return false;
+        const ct = (p.sourceContext as Record<string, unknown> | undefined)?.correctionTarget as
+          | { kind?: unknown; key?: unknown }
+          | undefined;
+        return ct?.kind === target.kind && ct?.key === target.key;
+      })
       .map((p) => ({ ...p }));
   }
 
