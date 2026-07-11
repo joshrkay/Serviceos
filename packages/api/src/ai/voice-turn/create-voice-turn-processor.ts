@@ -88,7 +88,15 @@ import { buildEscalationSummary } from '../agents/customer-calling/escalation-su
 import { buildCallerContextFromSession } from '../agents/customer-calling/escalation-context-from-session';
 import type { WhisperCache } from '../../telephony/whisper-cache';
 import type { PanelData } from '../agents/customer-calling/escalation-summary-builder';
-import { TAU_INT } from '../agents/customer-calling/transitions';
+import {
+  TAU_INT,
+  MAX_REFINEMENTS_PER_CALL,
+  REFINEMENT_CAP_LINE,
+} from '../agents/customer-calling/transitions';
+import {
+  classifyPostQuoteUtterance,
+  type PostQuoteEdit,
+} from './post-quote-precheck';
 import type {
   CallingAgentEvent,
   SideEffect,
@@ -187,6 +195,16 @@ function mapNotifyReasonToSkillReason(
  */
 const SMS_BEFORE_BRIDGE_TIMEOUT_MS = 4000;
 
+/**
+ * WS18a — honest acknowledgment spoken when the caller assents to book a live
+ * quote, BEFORE the sanctioned on-call D-018 close executor exists (that lands
+ * in WS18c). The drafted quote is already queued for the owner; we make NO
+ * booking claim. WS18c replaces `handlePostQuoteClose` with the full close
+ * flow (strict confirm → consent capture → lane → synchronous close executor).
+ */
+const POST_QUOTE_AFFIRMATIVE_INTERIM =
+  "Perfect — I'll have the owner finalize that and send you the full quote and booking link by text.";
+
 function xmlEscape(s: string): string {
   return s
     .replace(/&/g, '&amp;')
@@ -234,6 +252,90 @@ function intentToProposalType(intent: string | undefined): ProposalType {
     default:
       return 'voice_clarification';
   }
+}
+
+/**
+ * WS5 / WS17 / WS18 — turn a catalog-grounding `outcome` into the operator-side
+ * `_meta`/confidence signals AND the spoken read-back + structured lines the
+ * caller hears. Extracted so BOTH the initial grounding (`groundVoiceQuote`)
+ * AND the live-quote refinement path (`applyQuoteRefinement`) compute the read-
+ * back and the money-correctness gate identically. Pure — no I/O.
+ */
+function finalizeGroundedQuote(
+  outcome: Awaited<ReturnType<typeof groundLineItemPricing>>,
+  catalogAvailable: boolean,
+  priceField: 'unitPrice' | 'unitPriceCents',
+  baseConfidence: number | undefined,
+): {
+  lineItems: Array<Record<string, unknown>>;
+  meta: ProposalConfidenceMeta;
+  missingFields: string[];
+  catalogResolution?: Record<
+    number,
+    Array<{ id: string; name: string; unitPriceCents: number; score: number }>
+  >;
+  confidenceScore?: number;
+  utterance: string;
+  groundedClean: boolean;
+  totalCents: number;
+  readbackLines: QuoteReadbackLine[];
+} {
+  const lineItems = outcome.lineItems;
+  // Same money-correctness gate the task handlers apply: an uncatalogued (or
+  // unconsulted-catalog) price caps confidence and forces overallConfidence
+  // 'low' so it always reaches a human; per-line pricingSource → `_meta`
+  // markers for the operator draft.
+  let confidenceScore = baseConfidence;
+  if (outcome.anyUncatalogued && typeof confidenceScore === 'number') {
+    confidenceScore = Math.min(confidenceScore, UNCATALOGUED_CONFIDENCE_CAP);
+  }
+  const signals = lineItemConfidenceSignals(lineItems, priceField);
+  const groundedClean =
+    catalogAvailable && !outcome.anyUncatalogued && outcome.missingFields.length === 0;
+  const meta: ProposalConfidenceMeta = {
+    overallConfidence:
+      groundedClean && typeof confidenceScore === 'number'
+        ? getConfidenceLevel(confidenceScore)
+        : 'low',
+    ...(Object.keys(signals.fieldConfidence).length > 0
+      ? { fieldConfidence: signals.fieldConfidence }
+      : {}),
+    ...(signals.markers.length > 0 ? { markers: signals.markers } : {}),
+  };
+
+  // WS17 I3 — the read-back reads `unitPrice` (integer cents). Invoice lines
+  // carry the cents under `unitPriceCents`, so map onto the read-back's field.
+  // BOTH are integer cents (`formatCents` divides by 100), so this is a pure
+  // field rename — a 185000-cent line speaks $1850.00, never $185,000.
+  const readbackLines: QuoteReadbackLine[] = lineItems.map((li) => ({
+    ...(typeof li.pricingSource === 'string' ? { pricingSource: li.pricingSource } : {}),
+    ...(typeof li.unitPrice === 'number'
+      ? { unitPrice: li.unitPrice }
+      : typeof li.unitPriceCents === 'number'
+        ? { unitPrice: li.unitPriceCents }
+        : {}),
+    ...(typeof li.quantity === 'number' ? { quantity: li.quantity } : {}),
+    ...(typeof li.description === 'string' ? { description: li.description } : {}),
+  }));
+  const utterance = buildQuoteReadback({ lineItems: readbackLines, catalogAvailable });
+  // WS18 — the spoken total (integer cents; formatCents divides by 100). Sum of
+  // each line's unit price × quantity, exactly what buildQuoteReadback recites.
+  const totalCents = readbackLines.reduce((sum, li) => {
+    const qty = typeof li.quantity === 'number' && li.quantity > 0 ? li.quantity : 1;
+    return sum + (typeof li.unitPrice === 'number' ? li.unitPrice * qty : 0);
+  }, 0);
+
+  return {
+    lineItems,
+    meta,
+    missingFields: outcome.missingFields,
+    ...(outcome.catalogResolution ? { catalogResolution: outcome.catalogResolution } : {}),
+    ...(confidenceScore !== undefined ? { confidenceScore } : {}),
+    utterance,
+    groundedClean,
+    totalCents,
+    readbackLines,
+  };
 }
 
 export interface VoiceTurnProcessorDeps {
@@ -611,6 +713,13 @@ export function createVoiceTurnProcessor(
         >;
         confidenceScore?: number;
         utterance: string;
+        // WS18 — surfaced (finding 9: computed but previously not returned) so
+        // the FSM can stash them on `pendingQuote`. `groundedClean` gates the
+        // D-018 autonomous close; `totalCents` is the spoken total (integer
+        // cents), `readbackLines` are the structured lines the caller heard.
+        groundedClean: boolean;
+        totalCents: number;
+        readbackLines: QuoteReadbackLine[];
       }
     | undefined
   > {
@@ -642,57 +751,126 @@ export function createVoiceTurnProcessor(
       priceField,
       catalog ? () => Promise.resolve(catalog) : null,
     );
-    const lineItems = outcome.lineItems;
 
-    // Same money-correctness gate the task handlers apply: an uncatalogued (or
-    // unconsulted-catalog) price caps confidence and forces overallConfidence
-    // 'low' so it always reaches a human; per-line pricingSource → `_meta`
-    // markers for the operator draft.
     const baseConfidence =
       typeof fx.payload.confidence === 'number' ? fx.payload.confidence : undefined;
-    let confidenceScore = baseConfidence;
-    if (outcome.anyUncatalogued && typeof confidenceScore === 'number') {
-      confidenceScore = Math.min(confidenceScore, UNCATALOGUED_CONFIDENCE_CAP);
+    return finalizeGroundedQuote(outcome, catalogAvailable, priceField, baseConfidence);
+  }
+
+  /**
+   * WS18 — apply a deterministic live-quote refinement to the pending draft
+   * estimate and persist it. Re-grounds the edited line set against the tenant
+   * catalog (so a newly-added line gets a catalog price, never an LLM number),
+   * writes the new lineItems + `_meta` back onto the draft proposal in place,
+   * and returns the fresh read-back to speak. Returns null when there is no
+   * catalog resolvable / the edit can't be applied — the caller then defers to
+   * the classifier path.
+   *
+   * NOTE: this uses `proposalRepo.update` rather than `editProposal`
+   * (proposals/actions.ts): the live voice draft_estimate payload is
+   * deliberately partial (no top-level `customerId` — the operator fills it at
+   * review), so `editProposal`'s contract validation would reject it. We
+   * preserve the same "edit the draft in place + audit" behavior without the
+   * review-time contract gate, matching how the create path persists the draft.
+   */
+  async function applyQuoteRefinement(
+    session: VoiceSession,
+    tenantId: string,
+    edit: PostQuoteEdit,
+  ): Promise<
+    | { readbackLines: QuoteReadbackLine[]; groundedClean: boolean; totalCents: number; utterance: string }
+    | null
+  > {
+    const pq = session.machine.currentContext.pendingQuote;
+    if (!pq || !deps.proposalRepo) return null;
+
+    // Rebuild the raw (description, quantity) lines from the last grounded quote.
+    const rawLines: Array<{ description: string; quantity: number }> = pq.groundedLines
+      .filter((li): li is QuoteReadbackLine & { description: string } => typeof li.description === 'string')
+      .map((li) => ({
+        description: li.description,
+        quantity: typeof li.quantity === 'number' && li.quantity > 0 ? li.quantity : 1,
+      }));
+
+    if (edit.type === 'set_quantity') {
+      if (rawLines.length === 0) return null;
+      // Apply to the last line (the most-recently-discussed item).
+      rawLines[rawLines.length - 1]!.quantity = edit.quantity;
+    } else if (edit.type === 'add_line') {
+      rawLines.push({ description: edit.description, quantity: edit.quantity });
+    } else {
+      // remove_line — drop the line whose description contains the noun.
+      const noun = edit.noun.toLowerCase();
+      const remaining = rawLines.filter(
+        (li) => !li.description.toLowerCase().includes(noun),
+      );
+      // Never empty the quote; if the noun matched nothing, defer to classifier.
+      if (remaining.length === 0 || remaining.length === rawLines.length) return null;
+      rawLines.length = 0;
+      rawLines.push(...remaining);
     }
-    const signals = lineItemConfidenceSignals(lineItems, priceField);
-    const groundedClean =
-      catalogAvailable && !outcome.anyUncatalogued && outcome.missingFields.length === 0;
-    const meta: ProposalConfidenceMeta = {
-      overallConfidence:
-        groundedClean && typeof confidenceScore === 'number'
-          ? getConfidenceLevel(confidenceScore)
-          : 'low',
-      ...(Object.keys(signals.fieldConfidence).length > 0
-        ? { fieldConfidence: signals.fieldConfidence }
-        : {}),
-      ...(signals.markers.length > 0 ? { markers: signals.markers } : {}),
-    };
 
-    // WS17 I3 — the read-back reads `unitPrice` (integer cents). Invoice lines
-    // carry the cents under `unitPriceCents`, so map onto the read-back's
-    // field. BOTH are integer cents (`formatCents` divides by 100), so this is
-    // a pure field rename — no cents/dollars confusion reaches the spoken
-    // string (a 185000-cent line speaks $1850.00, never $185,000).
-    const readbackLines: QuoteReadbackLine[] = lineItems.map((li) => ({
-      ...(typeof li.pricingSource === 'string' ? { pricingSource: li.pricingSource } : {}),
-      ...(typeof li.unitPrice === 'number'
-        ? { unitPrice: li.unitPrice }
-        : typeof li.unitPriceCents === 'number'
-          ? { unitPrice: li.unitPriceCents }
-          : {}),
-      ...(typeof li.quantity === 'number' ? { quantity: li.quantity } : {}),
-      ...(typeof li.description === 'string' ? { description: li.description } : {}),
-    }));
-    const utterance = buildQuoteReadback({ lineItems: readbackLines, catalogAvailable });
+    preloadSessionCatalog(session, deps.catalogRepo);
+    const catalog = await resolveSessionCatalog(session);
+    const catalogAvailable = catalog !== null;
+    const outcome = await groundLineItemPricing(
+      rawLines,
+      'unitPrice',
+      catalog ? () => Promise.resolve(catalog) : null,
+    );
 
-    return {
-      lineItems,
-      meta,
-      missingFields: outcome.missingFields,
-      ...(outcome.catalogResolution ? { catalogResolution: outcome.catalogResolution } : {}),
-      ...(confidenceScore !== undefined ? { confidenceScore } : {}),
-      utterance,
-    };
+    // Preserve the draft's original confidence as the base (the cap re-applies
+    // if the refinement introduced an uncatalogued line).
+    let baseConfidence: number | undefined;
+    try {
+      const existing = await deps.proposalRepo.findById(tenantId, pq.proposalId);
+      if (existing && typeof existing.confidenceScore === 'number') {
+        baseConfidence = existing.confidenceScore;
+      }
+      const grounded = finalizeGroundedQuote(outcome, catalogAvailable, 'unitPrice', baseConfidence);
+      if (existing) {
+        const nextPayload: Record<string, unknown> = {
+          ...(existing.payload as Record<string, unknown>),
+          lineItems: grounded.lineItems,
+          _meta: grounded.meta,
+        };
+        await deps.proposalRepo.update(tenantId, pq.proposalId, { payload: nextPayload });
+      }
+      if (deps.auditRepo) {
+        try {
+          await deps.auditRepo.create(
+            createAuditEvent({
+              tenantId,
+              actorId: deps.systemActorId ?? 'calling-agent',
+              actorRole: 'system',
+              eventType: 'agent.calling.quote_refined',
+              entityType: 'proposal',
+              entityId: pq.proposalId,
+              correlationId: session.id,
+              metadata: {
+                editType: edit.type,
+                totalCents: grounded.totalCents,
+                groundedClean: grounded.groundedClean,
+              },
+            }),
+          );
+        } catch {
+          /* audit is best-effort */
+        }
+      }
+      return {
+        readbackLines: grounded.readbackLines,
+        groundedClean: grounded.groundedClean,
+        totalCents: grounded.totalCents,
+        utterance: grounded.utterance,
+      };
+    } catch (err) {
+      logger.warn('applyQuoteRefinement failed', {
+        error: err instanceof Error ? err.message : String(err),
+        sessionId: session.id,
+      });
+      return null;
+    }
   }
 
   async function handleCreateProposal(
@@ -927,6 +1105,16 @@ export function createVoiceTurnProcessor(
         // WS5 — the grounded quote read-back the caller hears. Absent for
         // non-estimate proposals → the FSM speaks the fixed confirmation.
         ...(estimateQuote ? { utterance: estimateQuote.utterance } : {}),
+        // WS18 — a grounded ESTIMATE (only) becomes a live, refinable/closeable
+        // pendingQuote on the FSM. Scoped to draft_estimate: an invoice quote is
+        // for completed work, not a sale to close on the call.
+        ...(estimateQuote && intent === 'draft_estimate'
+          ? {
+              groundedLines: estimateQuote.readbackLines,
+              groundedClean: estimateQuote.groundedClean,
+              totalCents: estimateQuote.totalCents,
+            }
+          : {}),
       });
       sideEffectsSink.push(...followUps);
     } catch (err) {
@@ -1615,6 +1803,28 @@ export function createVoiceTurnProcessor(
    * ask_caller handler — every turn fell to confidence_low, which ask_caller
    * ignores).
    */
+  /**
+   * WS18 — the caller assented to book the live quote. The FSM records the
+   * assent (keeping pendingQuote) and stays in `closing`; the processor owns
+   * the spoken close.
+   *
+   * WS18a interim: speak an honest "owner will finalize" acknowledgment. WS18c
+   * replaces this body with the sanctioned close flow (strict confirmIntent →
+   * SMS consent capture → D-018 lane → synchronous in-order close executor).
+   */
+  async function handlePostQuoteClose(
+    session: VoiceSession,
+    _tenantId: string,
+  ): Promise<SideEffect[]> {
+    const out: SideEffect[] = [];
+    out.push(...session.machine.dispatch({ type: 'post_quote_affirmative' }));
+    out.push({
+      type: 'tts_play',
+      payload: { text: POST_QUOTE_AFFIRMATIVE_INTERIM, source: 'post_quote_close' },
+    });
+    return out;
+  }
+
   async function handleAskCaller(
     session: VoiceSession,
     tenantId: string,
@@ -1770,6 +1980,59 @@ export function createVoiceTurnProcessor(
         );
       }
     } else if (currentState === 'intent_capture' || currentState === 'closing') {
+      // WS18 — deterministic post-quote pre-check. Runs ONLY in `closing` with a
+      // live pendingQuote, BEFORE the classifier (the classifier prompt/schema
+      // stay byte-stable). Closes the discard bug: "yes, book it" and "make it
+      // two" are handled here instead of being misread as a second intent that
+      // silently drops the quote.
+      const pendingQuote = session.machine.currentContext.pendingQuote;
+      if (currentState === 'closing' && pendingQuote) {
+        const decision = classifyPostQuoteUtterance(speechResult);
+        if (decision.kind === 'affirmative') {
+          sideEffectsAll.push(...(await handlePostQuoteClose(session, tenantId)));
+          await executeSideEffects(session, sideEffectsAll, tenantId);
+          appendAgentTts(deps.store, session.id, sideEffectsAll);
+          return sideEffectsAll;
+        }
+        if (decision.kind === 'refine') {
+          if (pendingQuote.refinementCount >= MAX_REFINEMENTS_PER_CALL) {
+            // At the cap — don't re-ground; the FSM speaks the deferral line
+            // (utterance is ignored on the capped branch).
+            sideEffectsAll.push(
+              ...session.machine.dispatch({
+                type: 'refine_pending_quote',
+                proposalId: pendingQuote.proposalId,
+                groundedLines: pendingQuote.groundedLines,
+                groundedClean: pendingQuote.groundedClean,
+                totalCents: pendingQuote.totalCents,
+                utterance: REFINEMENT_CAP_LINE,
+              }),
+            );
+            await executeSideEffects(session, sideEffectsAll, tenantId);
+            appendAgentTts(deps.store, session.id, sideEffectsAll);
+            return sideEffectsAll;
+          }
+          const refined = await applyQuoteRefinement(session, tenantId, decision.edit);
+          if (refined) {
+            sideEffectsAll.push(
+              ...session.machine.dispatch({
+                type: 'refine_pending_quote',
+                proposalId: pendingQuote.proposalId,
+                groundedLines: refined.readbackLines,
+                groundedClean: refined.groundedClean,
+                totalCents: refined.totalCents,
+                utterance: refined.utterance,
+              }),
+            );
+            await executeSideEffects(session, sideEffectsAll, tenantId);
+            appendAgentTts(deps.store, session.id, sideEffectsAll);
+            return sideEffectsAll;
+          }
+          // refined === null (unresolvable edit) → fall through to the classifier.
+        }
+        // passthrough / unresolved refine → continue to the classifier below.
+      }
+
       let classifierEvent: CallingAgentEvent | null = null;
       const verticalPromptSection = await resolveVerticalPromptSection(tenantId);
       const planPromptSection = await resolvePlanPromptSection(

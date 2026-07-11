@@ -68,6 +68,23 @@ const UNIT_TOKENS = new Set<string>([
   'btu', 'btus', 'hp', 'psi', 'gauge', 'ga', 'degree', 'degrees',
 ]);
 
+/**
+ * WS18 — resolve a single digit or number-word token ("2", "two") to its
+ * integer count, or null when it is neither / out of range. Shares
+ * NUMBER_WORDS + MAX_PARSED_QUANTITY with `parseLeadingQuantity` so the live
+ * quote-refinement pre-check ("make it two", "actually three") reads counts
+ * exactly the way the initial grounding does.
+ */
+export function parseCountToken(token: string): number | null {
+  const t = token.trim().toLowerCase();
+  if (/^\d+$/.test(t)) {
+    const n = Number.parseInt(t, 10);
+    return n >= 1 && n <= MAX_PARSED_QUANTITY ? n : null;
+  }
+  if (Object.prototype.hasOwnProperty.call(NUMBER_WORDS, t)) return NUMBER_WORDS[t]!;
+  return null;
+}
+
 export interface ParsedQuantity {
   /** Recovered count (≥ 1). Defaults to 1 when no leading count is present. */
   quantity: number;
