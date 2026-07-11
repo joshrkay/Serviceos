@@ -30,6 +30,7 @@ describe('P0-006 — Secrets/config framework', () => {
       CLERK_SECRET_KEY: 'sk_test_staging',
       CLERK_PUBLISHABLE_KEY: 'pk_test_staging',
       CLERK_WEBHOOK_SECRET: 'whsec_test',
+      STRIPE_WEBHOOK_SECRET: 'whsec_stripe_test',
       AI_PROVIDER_API_KEY: 'ak_test',
       AI_PROVIDER_BASE_URL: 'https://ai.example.com',
       CORS_ORIGIN: 'https://app.example.com',
@@ -140,6 +141,7 @@ describe('P0-006 — Secrets/config framework', () => {
         CLERK_SECRET_KEY: 'sk_x',
         CLERK_PUBLISHABLE_KEY: 'pk_x',
         CLERK_WEBHOOK_SECRET: 'whsec_x',
+        STRIPE_WEBHOOK_SECRET: 'whsec_stripe_x',
         AI_PROVIDER_API_KEY: 'ak_x',
         CORS_ORIGIN: 'https://app.example.com',
         // Opt features out so the feature-required gate doesn't fire.
@@ -166,6 +168,87 @@ describe('P0-006 — Secrets/config framework', () => {
     ).toThrow(/CLERK_PUBLISHABLE_KEY/);
   });
 
+  describe('SEC-43 — STRIPE_WEBHOOK_SECRET required in prod/staging', () => {
+    const baseNoStripe = {
+      DATABASE_URL: 'postgres://u:p@h/d',
+      CLERK_SECRET_KEY: 'sk_x',
+      CLERK_PUBLISHABLE_KEY: 'pk_x',
+      CLERK_WEBHOOK_SECRET: 'whsec_x',
+      AI_PROVIDER_API_KEY: 'ak_x',
+      CORS_ORIGIN: 'https://app.example.com',
+      // Isolate the Stripe requirement: opt features out, RLS on.
+      TELEPHONY_ENABLED: 'false',
+      EMAIL_ENABLED: 'false',
+      STORAGE_ENABLED: 'false',
+      RLS_RUNTIME_ROLE: 'true',
+    };
+
+    it('prod — fails fast naming STRIPE_WEBHOOK_SECRET when unset', () => {
+      expect(() => loadConfig({ ...baseNoStripe, NODE_ENV: 'prod' })).toThrow(
+        /STRIPE_WEBHOOK_SECRET/
+      );
+    });
+
+    it('staging — fails fast naming STRIPE_WEBHOOK_SECRET when unset', () => {
+      expect(() => loadConfig({ ...baseNoStripe, NODE_ENV: 'staging' })).toThrow(
+        /STRIPE_WEBHOOK_SECRET/
+      );
+    });
+
+    it('prod — passes once STRIPE_WEBHOOK_SECRET is present', () => {
+      expect(() =>
+        loadConfig({ ...baseNoStripe, NODE_ENV: 'prod', STRIPE_WEBHOOK_SECRET: 'whsec_stripe_x' })
+      ).not.toThrow();
+    });
+
+    it('dev — no STRIPE_WEBHOOK_SECRET requirement (payments off locally is fine)', () => {
+      expect(() => loadConfig({ ...baseNoStripe, NODE_ENV: 'dev' })).not.toThrow();
+    });
+  });
+
+  describe('SEC-43 — WISETACK_WEBHOOK_SECRET gated on financing being enabled', () => {
+    const baseFinancing = {
+      NODE_ENV: 'prod',
+      DATABASE_URL: 'postgres://u:p@h/d',
+      CLERK_SECRET_KEY: 'sk_x',
+      CLERK_PUBLISHABLE_KEY: 'pk_x',
+      CLERK_WEBHOOK_SECRET: 'whsec_x',
+      STRIPE_WEBHOOK_SECRET: 'whsec_stripe_x',
+      AI_PROVIDER_API_KEY: 'ak_x',
+      CORS_ORIGIN: 'https://app.example.com',
+      TELEPHONY_ENABLED: 'false',
+      EMAIL_ENABLED: 'false',
+      STORAGE_ENABLED: 'false',
+      RLS_RUNTIME_ROLE: 'true',
+    };
+
+    it('financing off (no Wisetack config) — WISETACK_WEBHOOK_SECRET NOT required', () => {
+      expect(() => loadConfig({ ...baseFinancing })).not.toThrow();
+    });
+
+    it('financing enabled via WISETACK_API_KEY — fails naming WISETACK_WEBHOOK_SECRET', () => {
+      expect(() =>
+        loadConfig({ ...baseFinancing, WISETACK_API_KEY: 'wt_live_x' })
+      ).toThrow(/WISETACK_WEBHOOK_SECRET/);
+    });
+
+    it('financing enabled via FINANCING_ENABLED=true — fails naming WISETACK_WEBHOOK_SECRET', () => {
+      expect(() =>
+        loadConfig({ ...baseFinancing, FINANCING_ENABLED: 'true' })
+      ).toThrow(/WISETACK_WEBHOOK_SECRET/);
+    });
+
+    it('financing enabled with WISETACK_WEBHOOK_SECRET present — passes', () => {
+      expect(() =>
+        loadConfig({
+          ...baseFinancing,
+          WISETACK_API_KEY: 'wt_live_x',
+          WISETACK_WEBHOOK_SECRET: 'wt_whsec_x',
+        })
+      ).not.toThrow();
+    });
+  });
+
   describe('feature-required config gate (Sprint 1 / Story 1.5)', () => {
     const baseProdEnv = {
       NODE_ENV: 'prod',
@@ -173,6 +256,7 @@ describe('P0-006 — Secrets/config framework', () => {
       CLERK_SECRET_KEY: 'sk_x',
       CLERK_PUBLISHABLE_KEY: 'pk_x',
       CLERK_WEBHOOK_SECRET: 'whsec_x',
+      STRIPE_WEBHOOK_SECRET: 'whsec_stripe_x',
       AI_PROVIDER_API_KEY: 'ak_x',
       CORS_ORIGIN: 'https://app.example.com',
       // SEC-01 — RLS enforcement is a hard prod/staging requirement; set here so
@@ -345,6 +429,7 @@ describe('P0-006 — Secrets/config framework', () => {
       CLERK_SECRET_KEY: 'sk_x',
       CLERK_PUBLISHABLE_KEY: 'pk_x',
       CLERK_WEBHOOK_SECRET: 'whsec_x',
+      STRIPE_WEBHOOK_SECRET: 'whsec_stripe_x',
       AI_PROVIDER_API_KEY: 'ak_x',
       CORS_ORIGIN: 'https://app.example.com',
       TELEPHONY_ENABLED: 'false',

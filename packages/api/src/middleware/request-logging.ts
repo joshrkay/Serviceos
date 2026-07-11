@@ -1,6 +1,7 @@
 import type { NextFunction, Request, Response } from 'express';
 import { randomUUID } from 'crypto';
 import type { Logger } from '../logging/logger';
+import { redactUrlValue } from '../logging/redact';
 
 const SENSITIVE_KEY_PATTERN = /(authorization|cookie|token|secret|password|api[_-]?key)/i;
 
@@ -44,11 +45,20 @@ export function createRequestLoggingMiddleware(logger: Logger) {
   return (req: Request, res: Response, next: NextFunction) => {
     const startedAt = process.hrtime.bigint();
     const correlationId = (req.headers['x-correlation-id'] as string | undefined) || randomUUID();
-    const tenantId = (req.headers['x-tenant-id'] as string | undefined) || (req as any).auth?.tenantId;
+    // SEC-26 — prefer the verified auth context for tenant attribution in
+    // logs; the `x-tenant-id` header is client-forgeable and is only used
+    // as a fallback for unauthenticated (no req.auth) requests, e.g. public
+    // token-gated routes that never populate req.auth.
+    const tenantId = (req as any).auth?.tenantId || (req.headers['x-tenant-id'] as string | undefined);
 
     const safeRequestLog = {
       method: req.method,
-      route: req.originalUrl || req.path,
+      // SEC-20 — the raw URL/path can carry a live bearer token, either as
+      // a `?token=` query param or as the `:token` path segment on public
+      // routes (see PUBLIC_TOKEN_PATH_PATTERNS in logging/redact.ts).
+      // sanitizeValue below only redacts by KEY name, so it never inspects
+      // this string value — redactUrlValue does the value-pattern scrub.
+      route: redactUrlValue(req.originalUrl || req.path),
       correlation_id: correlationId,
       tenant_id: tenantId,
       params: sanitizeValue(req.params),

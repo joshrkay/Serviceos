@@ -716,7 +716,6 @@ export function createApp(): AppWithLifecycle {
   // svix signed, instead of re-serializing the parsed object (key order /
   // whitespace differences would fail legit webhooks and break tenant bootstrap).
   app.use('/webhooks/clerk', express.raw({ type: 'application/json' }));
-  app.use('/api/webhooks/clerk', express.raw({ type: 'application/json' }));
 
   // Vapi signs its server messages (serverUrlSecret). Capture the raw Buffer
   // here so the HMAC verification in handleVapiCallEvent sees the exact bytes
@@ -732,6 +731,15 @@ export function createApp(): AppWithLifecycle {
   // Register the raw parser BEFORE global express.json() (like Stripe); the
   // handler router is mounted later once repos are constructed.
   app.use('/webhooks/wisetack', express.raw({ type: '*/*' }));
+
+  // SEC-40 — SendGrid's Event Webhook signs `timestamp + payload` (ECDSA over
+  // the EXACT delivered bytes). Capture the raw Buffer here BEFORE global
+  // express.json() so handleSendGrid verifies over the bytes SendGrid signed —
+  // same treatment as Stripe/Vapi. Without this the global json() consumes and
+  // re-parses the body; the handler's JSON.stringify() fallback re-serializes a
+  // different byte sequence (key order / whitespace), so verifySendGridSignature
+  // rejects every genuine signed delivery and the webhook is non-functional.
+  app.use('/webhooks/sendgrid', express.raw({ type: 'application/json' }));
 
   // Body parsing for all other routes. Explicit ceiling (default is an
   // implicit 100kb): large-but-bounded so no client can buffer unbounded
@@ -1028,8 +1036,16 @@ export function createApp(): AppWithLifecycle {
       ? { apiKey: process.env.STRIPE_SECRET_KEY }
       : undefined,
   };
+  // SEC-41 — canonical webhook surface is `/webhooks/*` (every external
+  // provider config in docs/launch/GO-LIVE-RUNBOOK.md + docs/third-party-services
+  // points there). The former `/api/webhooks` alias was mounted WITHOUT the
+  // per-provider raw-body middleware above (only registered for `/webhooks/*`),
+  // so `/api/webhooks/stripe|vapi` reached the handler with a JSON-parsed body:
+  // the Stripe handler throws synchronously when req.body isn't a Buffer, which
+  // in Express 4 becomes an unhandled rejection and HANGS the request. The alias
+  // is unreferenced by any test, e2e spec, doc, or provider config, so it is
+  // removed rather than duplicated — smaller surface, no divergent behavior.
   app.use('/webhooks', createWebhookRouter(config, webhookRouterDeps));
-  app.use('/api/webhooks', createWebhookRouter(config, webhookRouterDeps));
 
   // Dev-only storage PUT receiver for DevStorageProvider upload URLs.
   // Mounted before /api Clerk auth so unauthenticated presigned-style PUTs

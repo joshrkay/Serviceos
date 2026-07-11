@@ -101,8 +101,15 @@ function validateProductionConfig(config: AppConfig): void {
   if (!config.CLERK_SECRET_KEY) missing.push('CLERK_SECRET_KEY');
   if (!config.CLERK_PUBLISHABLE_KEY) missing.push('CLERK_PUBLISHABLE_KEY');
 
-  // Webhooks — signing secrets required to verify inbound webhooks
+  // Webhooks — signing secrets required to verify inbound webhooks.
+  // SEC-43: CLERK gates tenant bootstrap; STRIPE gates payment confirmation
+  // (billing is core — every prod tenant takes card payments). Without
+  // STRIPE_WEBHOOK_SECRET the Stripe handler 400s/503s on the first real
+  // event, so Stripe shows "paid" while the invoice never settles. Fail fast
+  // at boot instead. (WISETACK_WEBHOOK_SECRET is financing-gated — see the
+  // feature-required gate below — because financing is opt-in per tenant.)
   if (!config.CLERK_WEBHOOK_SECRET) missing.push('CLERK_WEBHOOK_SECRET');
+  if (!config.STRIPE_WEBHOOK_SECRET) missing.push('STRIPE_WEBHOOK_SECRET');
 
   // AI provider
   if (!config.AI_PROVIDER_API_KEY) missing.push('AI_PROVIDER_API_KEY');
@@ -209,6 +216,25 @@ function validateFeatureRequiredConfig(env: Record<string, string | undefined>):
         'ELEVENLABS_API_KEY (required by TWILIO_MEDIA_STREAMS_ENABLED=true; or set TWILIO_MEDIA_STREAMS_ENABLED=false)'
       );
     }
+  }
+
+  // SEC-43 — Wisetack financing webhook secret, gated on financing being on.
+  // Financing is OPT-IN per tenant: createFinancingProvider() only builds the
+  // live Wisetack client when WISETACK_API_KEY is present (else it falls back
+  // to the Manual provider), so we must NOT force Wisetack config on tenants
+  // that don't offer financing. But when financing IS wired, the webhook secret
+  // is required — without it the Wisetack status webhook 500s and approvals/
+  // declines silently stop updating (customer approved, invoice never reflects
+  // it). Enabled when WISETACK_API_KEY is set, or explicitly via
+  // FINANCING_ENABLED=true. Names the opt-out so an operator can fix it.
+  const financingEnabled =
+    env.FINANCING_ENABLED === 'true' || Boolean(env.WISETACK_API_KEY);
+  if (financingEnabled && !env.WISETACK_WEBHOOK_SECRET) {
+    missing.push(
+      'WISETACK_WEBHOOK_SECRET (required when financing is enabled via ' +
+        'WISETACK_API_KEY / FINANCING_ENABLED=true — verifies inbound Wisetack ' +
+        'status webhooks; unset it only if you disable financing)'
+    );
   }
 
   // SEC-01 — RLS runtime-role enforcement is a HARD prod/staging requirement.
