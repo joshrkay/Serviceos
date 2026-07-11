@@ -356,6 +356,16 @@ export interface MediaStreamAdapterDeps {
    * are skipped (test/dev path).
    */
   auditRepo?: import('../../audit/audit').AuditRepository;
+  /**
+   * WS7 — mid-call REST redirect to the Gather-only fallback webhook. When
+   * wired, a terminal realtime failure (Deepgram open failure, unexpected
+   * mid-call Deepgram close) attempts to steer the LIVE call back to `<Gather>`
+   * via Twilio's Calls REST resource instead of hanging up. Returns `true` when
+   * Twilio accepted the redirect; on `false`/absent the adapter falls back to
+   * today's WS-close behavior. Never throws. `accountSid` is the value Twilio
+   * sent in the `start` frame.
+   */
+  restRedirect?: (args: { callSid: string; accountSid?: string }) => Promise<boolean>;
 }
 
 const TWILIO_SURFACE = 'twilio_media_streams';
@@ -379,6 +389,8 @@ interface RuntimeState {
   ws: WsLike;
   streamSid: string | null;
   callSid: string | null;
+  /** WS7 — Twilio AccountSid from the `start` frame, for the mid-call REST redirect. */
+  accountSid: string | null;
   tenantId: string | null;
   session: VoiceSession | null;
   deepgram: StreamingSession | null;
@@ -479,6 +491,26 @@ interface RuntimeState {
   /** UB-C1 — flap guard. Hard cap on Deepgram reopen cycles per call. */
   languageSwitchCount: number;
   /**
+   * WS7 — monotonic Deepgram session generation. Bumped on every
+   * `openSession` call AND before discarding the old session in
+   * `switchLanguage`, so a stale session's `onClose` (fired by the
+   * deliberate finish/reopen cycle) can be told apart from the LIVE
+   * session closing unexpectedly. The degrade-to-Gather hook bails when
+   * its captured generation is no longer current — a healthy
+   * language-switched call must never be REST-redirected.
+   */
+  deepgramGeneration: number;
+  /**
+   * WS7 — set once a mid-call REST redirect to Gather was ACCEPTED by
+   * Twilio. `handleClose` then skips `finalizeOnClose`: the session is
+   * still live (the caller continues on the Gather leg), so stamping a
+   * terminal CallOutcome here would mark it ended mid-call, block the
+   * Gather leg's own finalization (terminalOutcome early-return), and
+   * schedule dropped-call recovery SMS to a caller who is still on the
+   * phone. The Gather path owns finalization from this point.
+   */
+  degradedToGather: boolean;
+  /**
    * UB-C1 — set once the first FINAL transcript has been through the
    * one-shot language-detection trigger, so utterance #2+ can only
    * switch via the explicit-request path.
@@ -561,6 +593,7 @@ export class TwilioMediaStreamAdapter {
       ws,
       streamSid: null,
       callSid: null,
+      accountSid: null,
       tenantId: null,
       session: null,
       deepgram: null,
@@ -591,6 +624,8 @@ export class TwilioMediaStreamAdapter {
       language: 'en',
       sttKeywords: [],
       languageSwitchCount: 0,
+      deepgramGeneration: 0,
+      degradedToGather: false,
       firstFinalLanguageChecked: false,
     };
   }
@@ -699,6 +734,7 @@ export class TwilioMediaStreamAdapter {
 
     this.state.streamSid = frame.start.streamSid;
     this.state.callSid = callSid;
+    this.state.accountSid = frame.start.accountSid ?? null;
     this.state.session = session;
     this.state.tenantId = session.tenantId;
 
@@ -749,6 +785,7 @@ export class TwilioMediaStreamAdapter {
     }
 
     try {
+      const dgGeneration = ++this.state.deepgramGeneration;
       this.state.deepgram = await this.deps.streamingProvider.openSession(
         (event) => {
           this.onTranscriptEvent(event).catch((err) => {
@@ -761,8 +798,16 @@ export class TwilioMediaStreamAdapter {
           logger.warn('mediastream deepgram error', { error: err.message });
         },
         () => {
-          // Deepgram closed independently — we can still drain Twilio
-          // until it sends `stop`. No-op.
+          // WS7 — Deepgram closed independently mid-call. Attempt to steer the
+          // live call back to Gather so the caller isn't talking into dead
+          // transcription. Generation-guarded: a deliberate finish/reopen
+          // cycle (switchLanguage) closes THIS session on purpose — only the
+          // current generation's close is an unexpected failure. On redirect
+          // failure / absent dep (or during normal teardown, which
+          // attemptDegradeToGather guards against) this keeps today's
+          // behavior: drain Twilio until it sends `stop`.
+          if (dgGeneration !== this.state.deepgramGeneration) return;
+          void this.attemptDegradeToGather('deepgram_unexpected_close');
         },
         initialLanguage, // undefined → provider default (English)
         // UB-C1 — suppress the English trade-term boost on Spanish opens.
@@ -773,20 +818,22 @@ export class TwilioMediaStreamAdapter {
         error: err instanceof Error ? err.message : String(err),
         callSid,
       });
-      // WS3 — terminal pre-conversation failure. Trip the realtime health
+      // WS3/WS7 — terminal pre-conversation failure. Trip the realtime health
       // circuit and emit an alertable audit event before ending the leg, so
-      // repeated Deepgram outages steer subsequent calls to Gather. A REST
-      // redirect of THIS live call to the Gather webhook is not implemented —
-      // no Twilio REST client is reachable from this context (see the WS3
-      // report / floor-only note). closeWs(1011) still ends the leg as before;
-      // Twilio then ends the call.
+      // repeated Deepgram outages steer subsequent calls to Gather. WS7: also
+      // attempt a REST redirect of THIS live call to the Gather webhook; on
+      // success the caller continues on Gather (close 1000) instead of being
+      // hung up. When no redirector is wired or the redirect fails, closeWs(1011)
+      // ends the leg exactly as before and Twilio ends the call.
       this.deps.realtimeCircuit?.recordFailure('deepgram_open_failed');
       await this.emitRealtimeResilienceAudit('voice.realtime.session_failed', {
         callSid,
         tenantId: session.tenantId,
         reason: 'deepgram_open_failed',
       });
-      this.closeWs(1011, 'deepgram_open_failed');
+      if (!(await this.attemptDegradeToGather('deepgram_open_failed'))) {
+        this.closeWs(1011, 'deepgram_open_failed');
+      }
       return;
     }
 
@@ -848,7 +895,10 @@ export class TwilioMediaStreamAdapter {
    * failures and undisclosed recordings.
    */
   private async emitRealtimeResilienceAudit(
-    eventType: 'voice.realtime.session_failed' | 'voice.disclosure.init_failed',
+    eventType:
+      | 'voice.realtime.session_failed'
+      | 'voice.disclosure.init_failed'
+      | 'voice.realtime.degraded_to_gather',
     args: { callSid: string; tenantId: string; reason: string },
   ): Promise<void> {
     if (!this.deps.auditRepo) return;
@@ -876,6 +926,46 @@ export class TwilioMediaStreamAdapter {
         error: err instanceof Error ? err.message : String(err),
       });
     }
+  }
+
+  /**
+   * WS7 — attempt to steer the LIVE call back to Gather via the Twilio REST
+   * redirect (`deps.restRedirect`). On success emit the
+   * `voice.realtime.degraded_to_gather` audit and close the WS with 1000 —
+   * Twilio then re-requests TwiML from the Gather-fallback webhook and the
+   * caller continues on Gather instead of hearing dead air. Returns `true` when
+   * the redirect was accepted; on `false`/absent dep the caller keeps its
+   * existing terminal behavior. Never throws.
+   */
+  private async attemptDegradeToGather(reason: string): Promise<boolean> {
+    const { restRedirect } = this.deps;
+    const callSid = this.state.callSid;
+    if (!restRedirect || !callSid || this.state.wsCloseInitiated || this.state.closed) {
+      return false;
+    }
+    let redirected = false;
+    try {
+      redirected = await restRedirect({
+        callSid,
+        ...(this.state.accountSid ? { accountSid: this.state.accountSid } : {}),
+      });
+    } catch {
+      redirected = false;
+    }
+    if (!redirected) return false;
+    if (this.state.session) {
+      await this.emitRealtimeResilienceAudit('voice.realtime.degraded_to_gather', {
+        callSid,
+        tenantId: this.state.session.tenantId,
+        reason,
+      });
+    }
+    // The session stays LIVE — the caller continues on the Gather leg, which
+    // owns finalization from here. handleClose reads this flag and skips
+    // finalizeOnClose (a terminal outcome stamped now would be mid-call).
+    this.state.degradedToGather = true;
+    this.closeWs(1000, 'degraded_to_gather');
+    return true;
   }
 
   private async handleMedia(frame: Extract<TwilioInboundFrame, { event: 'media' }>): Promise<void> {
@@ -1241,16 +1331,20 @@ export class TwilioMediaStreamAdapter {
       const from = this.state.language;
       const old = this.state.deepgram;
       // Null out first so handleMedia drops frames instead of feeding a
-      // finishing socket.
+      // finishing socket. Bump the generation BEFORE finishing so the old
+      // session's onClose (fired by this deliberate teardown) is stale and
+      // never mistaken for an unexpected mid-call failure (WS7).
       this.state.deepgram = null;
+      this.state.deepgramGeneration++;
       try {
         old?.finish();
       } catch {
         /* swallow — the old session is being discarded either way */
       }
 
-      const openWith = async (lang: 'en' | 'es') =>
-        this.deps.streamingProvider.openSession(
+      const openWith = async (lang: 'en' | 'es') => {
+        const dgGeneration = ++this.state.deepgramGeneration;
+        return this.deps.streamingProvider.openSession(
           (event) => {
             this.onTranscriptEvent(event).catch((err) => {
               logger.warn('mediastream transcript handler threw', {
@@ -1262,11 +1356,16 @@ export class TwilioMediaStreamAdapter {
             logger.warn('mediastream deepgram error', { error: err.message });
           },
           () => {
-            // Deepgram closed independently — drain Twilio until `stop`.
+            // WS7 — same unexpected-close degrade as the initial open, so a
+            // language-switched call keeps mid-call failure coverage.
+            // Generation-guarded like the initial open's hook.
+            if (dgGeneration !== this.state.deepgramGeneration) return;
+            void this.attemptDegradeToGather('deepgram_unexpected_close');
           },
           lang,
           this.deepgramKeywordOptions(lang),
         );
+      };
 
       try {
         this.state.deepgram = await openWith(target);
@@ -1971,7 +2070,12 @@ export class TwilioMediaStreamAdapter {
     // dispatch's effects (with `end_session.payload.reason`) when the
     // close was triggered by an FSM end_session — empty otherwise, in
     // which case the host falls back to the mapped close reason.
-    if (this.deps.finalizeOnClose && this.state.session) {
+    // WS7 — skipped after a successful degrade-to-Gather: the call is NOT
+    // over (Twilio is re-requesting TwiML from /voice/gather-fallback), so a
+    // terminal stamp here would misrecord a live call as transport_failure,
+    // block the Gather leg's real finalization (terminalOutcome early-return)
+    // and schedule dropped-call recovery SMS to a caller still on the phone.
+    if (!this.state.degradedToGather && this.deps.finalizeOnClose && this.state.session) {
       try {
         this.deps.finalizeOnClose(
           this.state.session,

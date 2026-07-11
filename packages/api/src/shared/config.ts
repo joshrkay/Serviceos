@@ -331,6 +331,32 @@ export function resetConfig(): void {
   cachedConfig = null;
 }
 
+/**
+ * WS7 — resolve the effective media-streams (realtime voice) master switch.
+ *
+ * `TWILIO_MEDIA_STREAMS_ENABLED`:
+ *   - `'true'`  → on. The hard-require validation in `validateProductionConfig`
+ *     and the `assertTtsProviderSupportsMediaStreams` boot guard enforce a
+ *     complete streaming stack (crash on a misconfigured provider/key).
+ *   - `'false'` → off (kill switch).
+ *   - unset / `'auto'` → on ONLY when the full streaming stack is already
+ *     present: `TTS_PROVIDER === 'elevenlabs'` AND `ELEVENLABS_API_KEY` AND
+ *     `DEEPGRAM_API_KEY`. Stricter than `realtimeCapabilities()` (which accepts
+ *     `AI_PROVIDER_API_KEY` for TTS) so auto never boot-crashes on
+ *     `assertTtsProviderSupportsMediaStreams` and never enables a half-capable
+ *     (no-Deepgram) stack. A partial stack resolves off, unchanged.
+ */
+export function resolveMediaStreamsEnabled(env: NodeJS.ProcessEnv): boolean {
+  const raw = env.TWILIO_MEDIA_STREAMS_ENABLED;
+  if (raw === 'true') return true;
+  if (raw === 'false') return false;
+  return (
+    env.TTS_PROVIDER === 'elevenlabs' &&
+    Boolean(env.ELEVENLABS_API_KEY) &&
+    Boolean(env.DEEPGRAM_API_KEY)
+  );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // P0-026 — Startup environment validation (Zod schema)
 //

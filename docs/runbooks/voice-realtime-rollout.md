@@ -10,8 +10,16 @@ hangup, never an undisclosed recording.
 
 | Control | Where | Effect |
 |---------|-------|--------|
-| `TWILIO_MEDIA_STREAMS_ENABLED` (env) | `app.ts` → `mediaStreamsEnabled` | **Master switch.** Off → every call uses Gather, full stop. Also gates whether the Deepgram provider + WS upgrade handler are even constructed. Requires `TTS_PROVIDER=elevenlabs` + `ELEVENLABS_API_KEY` (validated in `shared/config.ts`); `DEEPGRAM_API_KEY` missing only warns. |
+| `TWILIO_MEDIA_STREAMS_ENABLED` (env) | `app.ts` → `resolveMediaStreamsEnabled(process.env)` | **Master switch, three states.** `false` → every call uses Gather, full stop (kill switch). `true` → forced on; requires `TTS_PROVIDER=elevenlabs` + `ELEVENLABS_API_KEY` (hard-validated in `shared/config.ts`, `DEEPGRAM_API_KEY` missing only warns). **Unset / `auto`** → on **iff** the full streaming stack is already present: `TTS_PROVIDER=elevenlabs` AND `ELEVENLABS_API_KEY` AND `DEEPGRAM_API_KEY` (all three; stricter than `true`, so auto never boot-crashes on a half-capable stack). Any partial stack → off. Also gates whether the Deepgram provider + WS upgrade handler are even constructed. |
 | `voice_realtime` (per-tenant flag) | `tenant_feature_flags` table | **Staged rollout, default ON.** Consulted only when the master switch is on, via `isEnabledForTenantWithDefault(tenantId, 'voice_realtime', true)`. An unconfigured tenant gets realtime; setting `enabled=false` for a tenant is a **kill switch** pinning that tenant to Gather. |
+
+> **Auto-mode rollout note (WS7).** A prod env that already has all three keys
+> (`TTS_PROVIDER=elevenlabs` + `ELEVENLABS_API_KEY` + `DEEPGRAM_API_KEY`) but
+> leaves `TWILIO_MEDIA_STREAMS_ENABLED` **unset** now flips from Gather-only to
+> realtime **on the next deploy**. Mitigations in place: the per-tenant
+> `voice_realtime` kill switch, the health circuit, and the mid-call REST
+> degrade below. To stay Gather-only despite a full key set, set
+> `TWILIO_MEDIA_STREAMS_ENABLED=false` explicitly.
 
 Staged-rollout recipe: keep `TWILIO_MEDIA_STREAMS_ENABLED=true` globally, and
 pre-seed `voice_realtime = false` for tenants you are NOT ready to ramp. Flip a
@@ -65,18 +73,36 @@ The adapter feeds it at the session-establishment sites in
 - **Clean establishment** (Deepgram open + successful disclosure init, or
   Deepgram open when no bootstrap is wired) → `recordSuccess` resets the breaker.
 
-### Mid-call REST redirect — not implemented (floor-only)
+### Mid-call REST redirect — implemented (WS7)
 
 On a mid-call terminal failure the adapter records the circuit failure + audit
-and closes the WS (Twilio ends that leg). It does **not** REST-redirect the live
-call to the Gather webhook, because no Twilio REST client is reachable from the
-WS handler context: the `twilio` SDK is imported only for signature validation,
-the adapter deps carry no AccountSid/auth-token/REST client, and the only
-call-control seam emits TwiML strings, never REST calls. Additionally a redirect
-back to `/voice` would re-enter the same branch and re-emit Stream on the first
-failure (the circuit opens only after 2 consecutive failures), risking a
-redirect loop. The circuit is the recovery mechanism: it steers **subsequent**
-calls to Gather until the transport recovers.
+and then attempts to **REST-redirect the live call to Gather** instead of only
+hanging up. `telephony/twilio-call-redirect.ts` (`createTwilioCallRedirector`)
+POSTs a new `Url=<PUBLIC_API_URL>/api/telephony/voice/gather-fallback` to
+Twilio's `Calls/{CallSid}.json` REST resource (subaccount-aware auth token
+resolved from the `start` frame's AccountSid). Wired in `app.ts` only when
+`PUBLIC_API_URL` is set — absent → the adapter keeps the old 1011-close.
+
+- **Redirect accepted** → the adapter emits `voice.realtime.degraded_to_gather`
+  and closes the WS with **1000**; Twilio re-requests TwiML from
+  `/voice/gather-fallback`, which continues the **same** session on Gather
+  (tenant + FSM state preserved via `action=/api/telephony/gather?sid=...`).
+  The WS close deliberately **skips** the terminal outcome stamp
+  (`finalizeOnClose`) — the call is not over, and stamping here would
+  misrecord it as `transport_failure` and fire dropped-call recovery SMS at a
+  caller still on the line. The Gather leg owns finalization from this point:
+  the FSM reaching `terminated` on a later `/gather` turn stamps the real
+  outcome, and the recording webhook's outcome stamp + the session store's
+  idle reaper backstop a mid-Gather hangup, exactly as for any Gather call.
+- **Redirect rejected / no redirector / redirect throws** → today's exact
+  behavior: `closeWs(1011)` on the Deepgram-open-failure site, no-op drain on
+  the unexpected mid-call Deepgram close.
+
+**No redirect loop by construction:** `/voice/gather-fallback` never calls
+`shouldUseRealtimeStream` and never emits `<Connect><Stream/>` — a known CallSid
+gets Gather, an unknown CallSid gets a fresh inbound Gather session. The health
+circuit remains the mechanism that steers **subsequent** calls to Gather until
+the transport recovers.
 
 ## Audit events to alert on
 
@@ -85,5 +111,9 @@ calls to Gather until the transport recovers.
 - `voice.disclosure.init_failed` — the caller was NOT given the recording
   disclosure and the session is unledgered. **Compliance-critical** — alert on
   any occurrence.
+- `voice.realtime.degraded_to_gather` — a live call was mid-call REST-redirected
+  from realtime to Gather after a terminal Deepgram failure (WS7). Tenant-scoped,
+  correlated by `callSid`. A spike indicates realtime-transport instability even
+  when the circuit hasn't yet tripped.
 
-Both are emitted best-effort (never block or throw into the audio path).
+All are emitted best-effort (never block or throw into the audio path).

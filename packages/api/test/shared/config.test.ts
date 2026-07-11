@@ -3,6 +3,7 @@ import {
   resetConfig,
   EnvironmentSecretResolver,
   validateEnvSchema,
+  resolveMediaStreamsEnabled,
 } from '../../src/shared/config';
 
 describe('P0-006 — Secrets/config framework', () => {
@@ -687,5 +688,59 @@ describe('P0-026 — validateEnvSchema (Zod startup validation)', () => {
     expect(() =>
       validateEnvSchema({ NODE_ENV: 'development', CORS_ORIGIN: 'true' })
     ).not.toThrow();
+  });
+});
+
+describe('WS7 — resolveMediaStreamsEnabled (auto mode)', () => {
+  const fullStack = {
+    TTS_PROVIDER: 'elevenlabs',
+    ELEVENLABS_API_KEY: 'el_x',
+    DEEPGRAM_API_KEY: 'dg_x',
+  };
+
+  it("explicit 'true' → on", () => {
+    expect(resolveMediaStreamsEnabled({ TWILIO_MEDIA_STREAMS_ENABLED: 'true' })).toBe(true);
+  });
+
+  it("explicit 'false' → off even with the full stack (kill switch)", () => {
+    expect(
+      resolveMediaStreamsEnabled({ ...fullStack, TWILIO_MEDIA_STREAMS_ENABLED: 'false' }),
+    ).toBe(false);
+  });
+
+  it('unset + full stack → auto-on', () => {
+    expect(resolveMediaStreamsEnabled({ ...fullStack })).toBe(true);
+  });
+
+  it("'auto' + full stack → on", () => {
+    expect(
+      resolveMediaStreamsEnabled({ ...fullStack, TWILIO_MEDIA_STREAMS_ENABLED: 'auto' }),
+    ).toBe(true);
+  });
+
+  it('unset + no keys → off', () => {
+    expect(resolveMediaStreamsEnabled({})).toBe(false);
+  });
+
+  it('unset + missing DEEPGRAM_API_KEY → off (auto requires all three)', () => {
+    expect(
+      resolveMediaStreamsEnabled({ TTS_PROVIDER: 'elevenlabs', ELEVENLABS_API_KEY: 'el_x' }),
+    ).toBe(false);
+  });
+
+  it('unset + missing ELEVENLABS_API_KEY → off', () => {
+    expect(
+      resolveMediaStreamsEnabled({ TTS_PROVIDER: 'elevenlabs', DEEPGRAM_API_KEY: 'dg_x' }),
+    ).toBe(false);
+  });
+
+  it('unset + TTS_PROVIDER not elevenlabs → off (never auto-enables a half-capable stack)', () => {
+    expect(
+      resolveMediaStreamsEnabled({
+        TTS_PROVIDER: 'openai',
+        ELEVENLABS_API_KEY: 'el_x',
+        DEEPGRAM_API_KEY: 'dg_x',
+      }),
+    ).toBe(false);
   });
 });

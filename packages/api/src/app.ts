@@ -9,7 +9,7 @@ import { createHealthRouter, HealthCheck } from './health/health';
 import { toErrorResponse } from './shared/errors';
 import { createPool, createDirectPool } from './db/pool';
 import { verifyRlsRuntimeRole } from './db/rls-runtime-role';
-import { loadConfig } from './shared/config';
+import { loadConfig, resolveMediaStreamsEnabled } from './shared/config';
 import { resolveWebDistDir } from './web-static-path';
 import { createWebhookRouter } from './webhooks/routes';
 import { createIntegrationResolver, createVapiSecretResolver } from './webhooks/integration-resolver';
@@ -24,6 +24,7 @@ import { DefaultTwilioCallControl } from './telephony/twilio-call-control';
 import { createUserPhoneDispatcherResolver, createBusinessPhoneFallback } from './telephony/dispatcher-phone-resolver';
 import { PgPhoneNumberRepository } from './integrations/twilio/phone-number-repository';
 import { attachMediaStreamServer } from './telephony/media-streams';
+import { createTwilioCallRedirector } from './telephony/twilio-call-redirect';
 import { RealtimeHealthCircuit } from './telephony/realtime-health-circuit';
 import { attachClientGateway, setChannelGate } from './ws/client-gateway';
 import { setDraining, isDraining as isDrainingFlag } from './ws/drain-state';
@@ -3276,11 +3277,12 @@ export function createApp(): AppWithLifecycle {
     );
   }
 
-  // P8-012: feature flag the Media Streams (live audio) path. Default
-  // off — when off, the existing Gather adapter remains the only
-  // telephony surface. When on, /voice returns a <Connect><Stream/>
-  // TwiML and audio flows over the WebSocket attached below.
-  const mediaStreamsEnabled = process.env.TWILIO_MEDIA_STREAMS_ENABLED === 'true';
+  // P8-012 / WS7: feature flag the Media Streams (live audio) path. `'false'`
+  // (kill switch) → the existing Gather adapter is the only telephony surface.
+  // `'true'` → forced on (validated stack). Unset/`'auto'` → on iff the full
+  // ElevenLabs+Deepgram streaming stack is present. When on, /voice returns a
+  // <Connect><Stream/> TwiML and audio flows over the WebSocket attached below.
+  const mediaStreamsEnabled = resolveMediaStreamsEnabled(process.env);
 
   // WS3 (voice ingestion resilience) — shared realtime health signals. The
   // /voice TwiML branch reads the circuit (isOpen) and prereq probe to decide
@@ -3387,6 +3389,9 @@ export function createApp(): AppWithLifecycle {
       ...(phoneNumberRepo ? { phoneNumberRepo } : {}),
       resolveTenantId: ({ to }) => resolveTenantIdByPhoneNumber(to),
       mediaStreamsEnabled,
+      // WS7 — mid-call degrade to Gather: /voice/gather-fallback resolves the
+      // live session by CallSid to continue the SAME FSM state on Gather.
+      voiceSessionStore,
       // P8-014: mount the recording webhook in production. Without this
       // block the route is unreachable and Twilio's recordingStatusCallback
       // POSTs 404 — call recordings would be lost. Pool / Twilio creds are
@@ -3719,6 +3724,19 @@ export function createApp(): AppWithLifecycle {
         ? new PgTriageEventRepository(pool)
         : new InMemoryTriageEventRepository();
       const mediaStreamPublicBase = (process.env.PUBLIC_API_URL ?? '').replace(/\/+$/, '');
+      // WS7 — mid-call REST redirector: on a terminal realtime failure the
+      // mediastream adapter steers the LIVE call back to the Gather-fallback
+      // webhook instead of hanging up. Wired only when PUBLIC_API_URL is set
+      // (Twilio must POST an absolute URL); absent → adapter keeps 1011-close.
+      const twilioCallRedirector = process.env.PUBLIC_API_URL
+        ? createTwilioCallRedirector({
+            resolveAuthToken: (accountSid) => resolveTwilioAuthTokenForSubaccount(accountSid),
+            ...(process.env.TWILIO_ACCOUNT_SID
+              ? { defaultAccountSid: process.env.TWILIO_ACCOUNT_SID }
+              : {}),
+            publicBaseUrl: process.env.PUBLIC_API_URL,
+          })
+        : undefined;
       const vulnerabilityTriageHookDep = llmGateway
         ? createVulnerabilityTriageHook({
             isEnabledForTenant: isFlagEnabledForTenant,
@@ -3832,6 +3850,7 @@ export function createApp(): AppWithLifecycle {
             // reads it) and emit the alertable resilience audit events
             // (session_failed / disclosure.init_failed).
             realtimeCircuit: realtimeHealthCircuit,
+            ...(twilioCallRedirector ? { restRedirect: twilioCallRedirector } : {}),
             ...(auditRepo ? { auditRepo } : {}),
             ...(sharedTtsProvider ? { ttsProvider: sharedTtsProvider } : {}),
             terminologyProvider,
