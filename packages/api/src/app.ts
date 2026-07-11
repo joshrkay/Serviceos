@@ -2030,6 +2030,7 @@ export function createApp(): AppWithLifecycle {
               proposalExecutionRepo,
               settingsRepo,
               lessonRepo: correctionLessonRepo,
+              catalogRepo,
               ports: correctionConfigPorts,
               auditRepo,
             },

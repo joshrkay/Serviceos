@@ -10,6 +10,10 @@ import { InMemoryAuditRepository } from '../../../src/audit/audit';
 import { InMemoryCorrectionLessonRepository } from '../../../src/learning/corrections/correction-lesson';
 import { FakeConfigPorts } from '../../../src/learning/corrections/lesson-applicator';
 import {
+  InMemoryCatalogItemRepository,
+  type CatalogItem,
+} from '../../../src/catalog/catalog-item';
+import {
   recordCorrectionLessonsOnExecution,
   type RecordOnExecutionDeps,
 } from '../../../src/learning/corrections/record-on-execution';
@@ -32,12 +36,33 @@ function li(over: Partial<LineItem> & { id: string }): LineItem {
   };
 }
 
+function catalogItem(over: Partial<CatalogItem> & { id: string; unitPriceCents: number }): CatalogItem {
+  return {
+    tenantId: TENANT,
+    name: 'Smoke Detector',
+    description: '',
+    category: 'Materials',
+    unit: 'each',
+    productServiceType: 'product',
+    archivedAt: null,
+    createdAt: EXECUTED_AT.toISOString(),
+    updatedAt: EXECUTED_AT.toISOString(),
+    ...over,
+  };
+}
+
 function buildDeps(opts: {
   draftedItems: LineItem[];
   executedItems: LineItem[];
   executionStatus?: 'succeeded' | 'failed';
   laborRateCents?: number | null;
-}): { deps: RecordOnExecutionDeps; ports: FakeConfigPorts; lessonRepo: InMemoryCorrectionLessonRepository } {
+  catalogItems?: CatalogItem[];
+}): {
+  deps: RecordOnExecutionDeps;
+  ports: FakeConfigPorts;
+  lessonRepo: InMemoryCorrectionLessonRepository;
+  catalogRepo: InMemoryCatalogItemRepository;
+} {
   const proposalRepo = {
     findById: async (t: string, id: string) =>
       t === TENANT && id === PROPOSAL
@@ -79,11 +104,25 @@ function buildDeps(opts: {
   const lessonRepo = new InMemoryCorrectionLessonRepository();
   const ports = new FakeConfigPorts({ laborRateCents: opts.laborRateCents ?? 11500 });
   const auditRepo = new InMemoryAuditRepository();
+  const catalogRepo = new InMemoryCatalogItemRepository();
+  for (const item of opts.catalogItems ?? []) {
+    // seed synchronously enough for the test's first await
+    void catalogRepo.create(item);
+  }
 
   return {
-    deps: { proposalRepo, proposalExecutionRepo, settingsRepo, lessonRepo, ports, auditRepo },
+    deps: {
+      proposalRepo,
+      proposalExecutionRepo,
+      settingsRepo,
+      lessonRepo,
+      catalogRepo,
+      ports,
+      auditRepo,
+    },
     ports,
     lessonRepo,
+    catalogRepo,
   };
 }
 
@@ -166,6 +205,105 @@ describe('U7 — recordCorrectionLessonsOnExecution', () => {
       executedItems: [li({ id: 'l1', unitPriceCents: 13500 })],
       executionStatus: 'failed',
     });
+    const lessons = await recordCorrectionLessonsOnExecution(
+      { tenantId: TENANT, proposalId: PROPOSAL },
+      deps,
+    );
+    expect(lessons).toHaveLength(0);
+  });
+
+  it('records a part_price_changed lesson from a catalog-bound material price edit', async () => {
+    // WS20a: the SKU binding (catalogItemId) now flows into the extractor and
+    // the catalog price is pre-loaded as `beforeCents`, so a material line edit
+    // grounds to a real part-price lesson (previously skuPriceCents was {} and
+    // catalogItemId was stripped → the lesson never fired).
+    const partLine = (cents: number) =>
+      ({
+        id: 'p1',
+        description: 'Smoke Detector',
+        category: 'material',
+        quantity: 1,
+        unitPriceCents: cents,
+        totalCents: cents,
+        sortOrder: 1,
+        taxable: true,
+        catalogItemId: 'cat-smoke',
+        sku: 'SD-100',
+      } as unknown as LineItem);
+
+    const { deps, ports, lessonRepo } = buildDeps({
+      draftedItems: [partLine(10000)],
+      executedItems: [partLine(8900)],
+      catalogItems: [catalogItem({ id: 'cat-smoke', unitPriceCents: 10000, name: 'Smoke Detector' })],
+    });
+
+    const lessons = await recordCorrectionLessonsOnExecution(
+      { tenantId: TENANT, proposalId: PROPOSAL },
+      deps,
+    );
+
+    expect(lessons).toHaveLength(1);
+    expect(lessons[0].lessonType).toBe('part_price_changed');
+    expect(lessons[0].payload).toMatchObject({
+      kind: 'part_price_changed',
+      catalogItemId: 'cat-smoke',
+      sku: 'SD-100',
+      beforeCents: 10000,
+      afterCents: 8900,
+    });
+    // Cascade updated the catalog SKU price forward.
+    expect(ports.skuPriceCents['cat-smoke']).toBe(8900);
+    expect(await lessonRepo.findAppliedForDay(TENANT, '2026-06-15')).toHaveLength(1);
+  });
+
+  it('records no part_price lesson for an UNCATALOGUED material edit (no catalogItemId)', async () => {
+    const partLine = (cents: number) =>
+      ({
+        id: 'p1',
+        description: 'Random part',
+        category: 'material',
+        quantity: 1,
+        unitPriceCents: cents,
+        totalCents: cents,
+        sortOrder: 1,
+        taxable: true,
+      } as unknown as LineItem);
+
+    const { deps } = buildDeps({
+      draftedItems: [partLine(10000)],
+      executedItems: [partLine(8900)],
+    });
+
+    const lessons = await recordCorrectionLessonsOnExecution(
+      { tenantId: TENANT, proposalId: PROPOSAL },
+      deps,
+    );
+    // No SKU binding → no tenant price to ground → no guess, no lesson.
+    expect(lessons).toHaveLength(0);
+  });
+
+  it('records no part_price lesson when the edited price equals the current catalog price', async () => {
+    const partLine = (cents: number) =>
+      ({
+        id: 'p1',
+        description: 'Smoke Detector',
+        category: 'material',
+        quantity: 1,
+        unitPriceCents: cents,
+        totalCents: cents,
+        sortOrder: 1,
+        taxable: true,
+        catalogItemId: 'cat-smoke',
+      } as unknown as LineItem);
+
+    // Drafted differs from executed, but executed already equals the catalog
+    // price → nothing new to learn (self-limiting; the cascade already stuck).
+    const { deps } = buildDeps({
+      draftedItems: [partLine(10000)],
+      executedItems: [partLine(8900)],
+      catalogItems: [catalogItem({ id: 'cat-smoke', unitPriceCents: 8900 })],
+    });
+
     const lessons = await recordCorrectionLessonsOnExecution(
       { tenantId: TENANT, proposalId: PROPOSAL },
       deps,
