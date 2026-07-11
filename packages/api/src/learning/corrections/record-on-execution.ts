@@ -37,6 +37,7 @@ import {
 } from './correction-extractor';
 import { recordCorrectionLessons } from './apply-undo';
 import { localDateFor, type CorrectionLesson, type CorrectionLessonRepository } from './correction-lesson';
+import { detectCorrectionRepetition } from './correction-repetition';
 import type { ConfigPorts } from './lesson-applicator';
 
 const DEFAULT_TIMEZONE = 'America/New_York';
@@ -175,7 +176,7 @@ export async function recordCorrectionLessonsOnExecution(
   const tz = settings?.timezone || DEFAULT_TIMEZONE;
   const localDate = localDateFor(execution.executedAt, tz);
 
-  return recordCorrectionLessons(
+  const recorded = await recordCorrectionLessons(
     {
       tenantId,
       sourceProposalId: proposalId,
@@ -185,4 +186,21 @@ export async function recordCorrectionLessonsOnExecution(
     },
     { repository: deps.lessonRepo, ports: deps.ports, auditRepo: deps.auditRepo },
   );
+
+  // WS20 — after persisting the fresh lessons, check whether the owner has now
+  // corrected the same target enough times that the AI should PROPOSE the
+  // durable fix itself (a reviewed update_catalog_item / create_standing_
+  // instruction). Never throws; a detection failure must not lose the recorded
+  // lessons this function returns.
+  await detectCorrectionRepetition(
+    { tenantId, recordedLessons: recorded },
+    {
+      lessonRepo: deps.lessonRepo,
+      proposalRepo: deps.proposalRepo,
+      catalogRepo: deps.catalogRepo,
+      auditRepo: deps.auditRepo,
+    },
+  );
+
+  return recorded;
 }

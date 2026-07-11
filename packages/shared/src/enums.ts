@@ -208,6 +208,11 @@ export enum ProposalType {
   // UB-A2 (agent wave) — voice-captured persistent directive; on approval the
   // API inserts a standing_instructions row (source 'proposal').
   CREATE_STANDING_INSTRUCTION = 'create_standing_instruction',
+  // WS20 — correction-repetition meta-proposal. Emitted by the correction
+  // loop (not voice) once the owner has corrected the same catalog SKU's price
+  // N times; on approval the execution handler updates the catalog item's
+  // unit price. Config/capture-class, reversible, never auto-executed (D-004).
+  UPDATE_CATALOG_ITEM = 'update_catalog_item',
 }
 
 export enum RejectionCategory {

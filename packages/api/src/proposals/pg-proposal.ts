@@ -339,6 +339,36 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
     });
   }
 
+  async findByCorrectionTarget(
+    tenantId: string,
+    proposalType: ProposalType,
+    target: { kind: string; key: string },
+    statuses?: readonly ProposalStatus[],
+  ): Promise<Proposal[]> {
+    return this.withTenant(tenantId, async (client) => {
+      // JSONB-extract the WS20 correction-target stamp
+      // (source_context.correctionTarget = { kind, key }); filter in SQL so a
+      // tenant-wide proposal set is never pulled into memory. Optional status
+      // filter via ANY($5). Tenant-scoped by RLS + the explicit predicate.
+      const params: unknown[] = [tenantId, proposalType, target.kind, target.key];
+      let statusClause = '';
+      if (statuses && statuses.length > 0) {
+        params.push([...statuses]);
+        statusClause = ` AND status = ANY($5)`;
+      }
+      const result = await client.query(
+        `SELECT * FROM proposals
+         WHERE tenant_id = $1
+           AND proposal_type = $2
+           AND source_context->'correctionTarget'->>'kind' = $3
+           AND source_context->'correctionTarget'->>'key' = $4${statusClause}
+         ORDER BY created_at DESC`,
+        params
+      );
+      return result.rows.map(mapRow);
+    });
+  }
+
   async updateStatus(
     tenantId: string,
     id: string,

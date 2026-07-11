@@ -1928,6 +1928,8 @@ export function createApp(): AppWithLifecycle {
     // UB-A2 — create_standing_instruction inserts via the UB-A1 repo
     // (in-memory fallback when no pool, same as the routes above).
     standingInstructionRepo,
+    // WS20 — update_catalog_item writes the owner-ratified SKU price.
+    catalogRepo,
   });
   // U5 — fail boot loudly if a voice-reachable persist handler is degraded
   // (would return success without saving). Only the persist-critical
