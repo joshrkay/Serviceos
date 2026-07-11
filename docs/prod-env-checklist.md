@@ -116,6 +116,7 @@ a one-time manual re-point at the voice domain in the Twilio console. See
 | `TWILIO_MEDIA_STREAMS_ENABLED` | Realtime voice master switch (WS7). `false`=Gather-only kill switch; `true`=forced on (requires `TTS_PROVIDER=elevenlabs`+`ELEVENLABS_API_KEY`); **unset/`auto`**=on iff `TTS_PROVIDER=elevenlabs`+`ELEVENLABS_API_KEY`+`DEEPGRAM_API_KEY` all set. See `docs/runbooks/voice-realtime-rollout.md`. |
 | `PUBLIC_API_URL` | Absolute API base Twilio POSTs to. Required for the mid-call REST degrade-to-Gather (WS7); absent → realtime failures hang up (1011) instead of falling back mid-call. |
 | `AUTONOMOUS_BOOKING_DISABLED` | D-015 amendment — platform-wide kill switch for the autonomous booking lane; unset/`false` preserves per-tenant opt-in gating, `true` disables the lane for every tenant (incident response) regardless of `tenant_settings.autonomous_booking_enabled` |
+| `AUTONOMOUS_CLOSE_DISABLED` | D-018 — platform-wide kill switch for the autonomous CLOSE lane (live agent closing the sale on the call). Independent sibling of `AUTONOMOUS_BOOKING_DISABLED`; unset/`false` preserves per-tenant opt-in (`tenant_settings.autonomous_close_enabled`), `true` freezes on-call sale-closing for every tenant while leaving autonomous booking untouched |
 
 ## QA matrix nightly (GitHub secrets — not Railway)
 

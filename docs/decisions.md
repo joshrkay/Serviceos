@@ -294,3 +294,46 @@ everywhere is always safe; propagating a grant across channels would fabricate c
 - Letting `recording` revocations suppress SMS — objecting to being recorded is not a
   revocation of contact consent; suppressing confirmations would punish the customer for
   a privacy preference.
+
+### D-018: Autonomous close lane — sanctioned on-call sale-closing with owner UNDO
+**Date:** 2026-07-11
+**Decision:** A per-tenant opt-in (default OFF), stricter SIBLING of the D-015 booking
+lane (`packages/api/src/proposals/autonomous-close-lane.ts`) that authorizes the live
+voice agent to CLOSE the sale on the call: a three-member chain
+`draft_estimate → send_estimate($ref estimateId) → create_booking`, assembled on the live
+path via `applyChainMetadata`. `send_estimate` is comms-class and
+`decideInitialStatus`/`actionClassForProposalType` are deliberately UNCHANGED — a comms
+proposal is still born blocked. Instead the close flow performs an explicit SYSTEM
+APPROVAL of each chain member under the D-018 sanction (the analog of an owner's one-tap),
+stamped + audited; the create-time comms block stays. Every member carries
+`sourceContext.autonomousCloseEvaluation`.
+`evaluateAutonomousCloseLane` gates in order (first-failing wins): `platform_disabled`
+(`AUTONOMOUS_CLOSE_DISABLED`, checked FIRST and independently of
+`AUTONOMOUS_BOOKING_DISABLED`) → `tenant_not_opted_in`
+(`tenant_settings.autonomous_close_enabled`) → `quote_not_grounded_clean` (every line a
+clean catalog match — no LLM price is ever auto-sent) → `above_close_cap`
+(`tenant_settings.autonomous_close_max_cents`) → `not_strict_confirmed` (the authoritative
+strict `confirmIntent` gate; the deterministic pre-check is necessary, not sufficient) →
+`sms_consent_not_captured` (the on-call TCPA capture must succeed via
+`recordSmsConsentFromVoice`) → `scheduling_incomplete`/`hold_not_placed`/`hold_expired` →
+`booking_lane_ineligible` (the composed D-015 evaluation) → `session_flagged`
+(vulnerability/emergency/negotiation, checked last). Migration 247 adds the two
+`tenant_settings` columns.
+**Rationale:** Booking a held slot (D-015) and closing a sale (drafting + SENDING a
+priced quote/deposit link to the customer) are different risk tiers, so the close needs
+its own opt-in, its own cap, and its own kill switch — never a widening of D-015's gate
+set. A caller-initiated, strict-confirmed, consent-gated close warrants IMMEDIATE
+execution rather than D-015's 5-second undo delay; the safety net is the strict confirm
+gate plus an owner UNDO (`create_booking` → compensating cancellation + apology;
+`send_estimate` → the estimate is withdrawn/voided so its approval link stops accepting
+and no deposit can be taken — the quote TEXT itself cannot be recalled, and the UNDO copy
+says so).
+**Story:** WS18 (close the sale on the call).
+**Alternatives rejected:**
+- Teaching `decideInitialStatus` to auto-approve comms — would weaken the WS12 gate
+  platform-wide; the sanction is a scoped explicit approval, not a rule change.
+- Bypassing the `GatedMessageDelivery` / consent gate for the deposit text — the on-call
+  SMS consent capture is what makes the gate pass legitimately.
+- Reusing `AUTONOMOUS_BOOKING_DISABLED` — an operator must be able to freeze on-call
+  sale-closing while leaving autonomous booking live (and vice-versa), so the close needs
+  its own independent kill switch.

@@ -88,6 +88,14 @@ const configSchema = z.object({
   // autonomous_booking_enabled setting. Absent/'false' preserves today's
   // per-tenant-only gating — no prod requirement.
   AUTONOMOUS_BOOKING_DISABLED: z.enum(['true', 'false']).optional(),
+  // D-018 — platform-wide kill switch for the autonomous CLOSE lane
+  // (proposals/autonomous-close-lane.ts). 'true' short-circuits
+  // evaluateAutonomousCloseLane before the per-tenant opt-in check. It is a
+  // SIBLING of AUTONOMOUS_BOOKING_DISABLED, checked independently, so an
+  // operator can freeze on-call sale-closing while leaving autonomous booking
+  // live (and vice-versa). Absent/'false' preserves per-tenant-only gating —
+  // no prod requirement.
+  AUTONOMOUS_CLOSE_DISABLED: z.enum(['true', 'false']).optional(),
   // ── WS15 — platform SLO monitor thresholds (workers/slo-monitor.ts). All
   // optional with safe defaults; documented in .env.production.example and
   // docs/runbooks/slo-alerts.md. No prod hard-requirement — the monitor runs

@@ -6055,6 +6055,18 @@ export const MIGRATIONS = {
       ON proposals (tenant_id, created_at)
       WHERE payload->'_meta' ? 'appliedStandingInstructions';
   `,
+
+  // D-018 — autonomous CLOSE lane. Per-tenant opt-in (default OFF) letting the
+  // live agent close the sale on the call (draft + send estimate + confirm the
+  // held booking), plus a per-tenant cap on the total it may auto-close. Both
+  // additive/nullable-safe; the code floor + platform kill switch
+  // (AUTONOMOUS_CLOSE_DISABLED) live in src/proposals/autonomous-close-lane.ts.
+  '247_tenant_settings_autonomous_close': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS autonomous_close_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS autonomous_close_max_cents BIGINT;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

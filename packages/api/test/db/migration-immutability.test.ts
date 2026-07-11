@@ -407,6 +407,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['245_audit_events_tenant_created_at_index', '570afac2db19bba1e0a9f1a7dea4f86392b962055de5dcdbbc1be629f9f6c83a'],
   // WS10 — proposals partial index for the appliedStandingInstructions digest query.
   ['246_proposals_applied_instructions_index', '4cd48dc77845dfb212f6097ec3ff19a292bf2d920ad4aab2bdb30003fca0ea12'],
+  // D-018 (WS18) — autonomous close lane: per-tenant opt-in + close cap columns.
+  ['247_tenant_settings_autonomous_close', 'e619fd69ae718ae2298a4ceddbc37ead5e93e5b8406bb739f8bbc4c16d5833ca'],
 ];
 
 function hashMigration(value: string): string {

@@ -581,6 +581,28 @@ describe('P0-006 — Secrets/config framework', () => {
     });
   });
 
+  describe('D-018 — AUTONOMOUS_CLOSE_DISABLED kill switch', () => {
+    it('defaults to undefined (per-tenant gating only)', () => {
+      expect(loadConfig({ NODE_ENV: 'dev' }).AUTONOMOUS_CLOSE_DISABLED).toBeUndefined();
+    });
+
+    it("accepts 'true' / 'false' and is independent of AUTONOMOUS_BOOKING_DISABLED", () => {
+      const c = loadConfig({
+        NODE_ENV: 'dev',
+        AUTONOMOUS_CLOSE_DISABLED: 'true',
+        AUTONOMOUS_BOOKING_DISABLED: 'false',
+      });
+      expect(c.AUTONOMOUS_CLOSE_DISABLED).toBe('true');
+      expect(c.AUTONOMOUS_BOOKING_DISABLED).toBe('false');
+    });
+
+    it('rejects a non-boolean value', () => {
+      expect(() =>
+        loadConfig({ NODE_ENV: 'dev', AUTONOMOUS_CLOSE_DISABLED: 'maybe' }),
+      ).toThrow();
+    });
+  });
+
   describe('WS14 — PROCESS_ROLE widened to include "voice"', () => {
     it('accepts "voice" as a valid role', () => {
       const c = loadConfig({ NODE_ENV: 'dev', PROCESS_ROLE: 'voice' });
