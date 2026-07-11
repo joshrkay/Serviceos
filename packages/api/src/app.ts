@@ -3585,7 +3585,15 @@ export function createApp(): AppWithLifecycle {
   // server starts listening, the upgrade handler is already attached.
   // The flag also gates whether DeepgramStreamingProvider is constructed
   // (no DEEPGRAM_API_KEY required when the feature is disabled).
-  if (mediaStreamsEnabled) {
+  //
+  // WS8 — a PROCESS_ROLE=worker deploy never accepts voice WS upgrades:
+  // Twilio can't reach it anyway (private networking, no public ingress),
+  // so constructing the Deepgram streaming provider, the shared TTS
+  // provider, and wrapping app.listen would be dead weight — and would
+  // boot-warn/crash the worker on a misconfigured TTS_PROVIDER for a
+  // surface it never serves. /health stays role-agnostic (index.ts listens
+  // in every role); only this voice-WS attach is role-gated.
+  if (mediaStreamsEnabled && config.PROCESS_ROLE !== 'worker') {
     const deepgramKey = process.env.DEEPGRAM_API_KEY;
     if (!deepgramKey) {
       // eslint-disable-next-line no-console

@@ -50,6 +50,22 @@
 | `WEB_URL` | Stripe success/cancel URLs, upgrade emails |
 | `STRIPE_PRICE_ID` | Onboarding trial subscription price |
 
+## Deploy topology (web + worker split)
+
+See `docs/deployment.md` "Deploy topology (web + worker)" for the full
+setup steps (config-file-path linking, ordering). Both rows are dashboard
+service variables — not set in the `.toml` files.
+
+| Variable | Service | Notes |
+|----------|---------|-------|
+| `PROCESS_ROLE=web` | API/voice service (`railway.toml`) | HTTP + voice/WS only, zero background worker loops |
+| `PROCESS_ROLE=worker` | Worker service (`railway.worker.toml`) | Background sweeps + queue drain only; no public traffic, no voice WS upgrades |
+
+Migrations run on the **web service only** (its `preDeployCommand`); the
+worker's config has none. The web service must deploy first whenever a
+release contains a migration. A single-service deploy leaves `PROCESS_ROLE`
+unset on the one service (⇒ `all`), which needs no checklist row.
+
 ## Advisory (recommended for launch)
 
 | Variable | Notes |

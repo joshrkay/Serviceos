@@ -79,38 +79,69 @@ The proposal-execution worker itself is multi-instance-safe
 (`ProposalRepository.claimForExecution` atomically claims work), so the
 constraint above is specifically about the in-process schedulers.
 
-## Two-service split (optional)
+## Deploy topology (web + worker)
 
-By default the API runs as a **single service** (`PROCESS_ROLE` unset ⇒
-`all`): it serves the HTTP/voice/WS surface **and** runs every background
-worker loop in-process. This is unchanged, byte-for-byte, from the pre-split
-deploy — nothing to configure.
+Production runs **two Railway services from the same image and the same
+`startCommand`** (`node packages/api/dist/src/index.js`), differing only by
+which config file and env var each is linked to. This is the defined
+production topology — it decouples the request surface from background
+work, so a spike in sweeps or the queue drain can never affect HTTP/voice
+latency, and each half can scale and restart independently.
 
-To decouple the request surface from background work (so a spike in sweeps or
-the queue drain can never affect HTTP/voice latency, and each can scale and
-restart independently), run **two Railway services from the same image and the
-same `startCommand`** (`node packages/api/dist/src/index.js`), differing only
-by one env var:
+A single-service deploy (`PROCESS_ROLE` unset on the one service ⇒ `all`,
+serving HTTP/voice/WS **and** running every background worker loop
+in-process) remains fully supported and is the default for local/dev —
+nothing to configure there, and it is byte-for-byte identical to the
+pre-split behavior.
 
-| Service | `PROCESS_ROLE` | Networking | Runs |
-|---|---|---|---|
-| API / voice | `web` | Public (Railway public domain) | HTTP + voice/WS/media-streams only; **zero** background worker loops |
-| Worker | `worker` | Private (no public domain needed) | All background sweeps + the queue poll loop; no public traffic |
+| Service | Config file | `PROCESS_ROLE` | Networking | Runs |
+|---|---|---|---|---|
+| API / voice (web) | `railway.toml` | `web` | Public (Railway public domain) | HTTP + voice/WS/media-streams only; **zero** background worker loops |
+| Worker | `railway.worker.toml` | `worker` | Private (no public domain needed) | All background sweeps + the queue poll loop; no public traffic; no voice WS upgrades |
+
+### Setup
+
+1. Create the second Railway service pointing at the same repo/image.
+2. On the worker service, set **Settings → Config File Path** to
+   `railway.worker.toml` (Railway's per-service config-as-code path
+   setting). Leave the web service on the default `railway.toml`.
+3. Set the `PROCESS_ROLE` **dashboard service variable** on each service
+   explicitly: `web` on the API/voice service, `worker` on the worker
+   service. Railway config-as-code (the `.toml` files) does not support
+   setting service env vars, so this step can't be folded into the config
+   files — it must be set per-service in the dashboard (or via `railway
+   variables set`). Leaving it unset defaults to `all`, which is correct
+   for a single-service deploy but redundant (and defeats the isolation
+   goal) once the worker service exists — set it explicitly once you've
+   split.
+4. Deploy the **web service first** whenever a release contains a
+   migration. Migrations run exactly once, via `preDeployCommand` on the
+   web service only (`railway.worker.toml` intentionally has no
+   `preDeployCommand`) — see "Migration execution policy" above. Workers
+   tolerate reading against the old schema for the short window before
+   their own deploy lands; additive migrations plus the leader-locked
+   sweeps / `SKIP LOCKED` queue consumers are written to be
+   forward-compatible with that window.
 
 Notes:
 
-- Both roles still call `app.listen` on `$PORT` (the worker's `/health` backs
-  Railway's deploy gate); Railway networking decides exposure. The worker does
-  **not** need a public domain.
-- Cheap observability intervals (pool-occupancy and queue-depth metric samplers)
-  run in **every** role, so the `web` service still exports its own `/metrics`.
-- Migrations remain a separate one-off/release step (see above) — role choice
-  does not change that.
-- **Safe to get wrong:** if both services are accidentally left as `all`, the
-  tenant-wide sweeps are still gated by `runAsLeader` (Postgres advisory lock),
-  so exactly one instance runs each tick — you get redundancy, not duplicate
-  invoices/reminders. The split is an isolation optimization, not a correctness
-  requirement.
+- Both roles still call `app.listen` on `$PORT` (the worker's `/health`
+  backs Railway's deploy gate); Railway networking decides exposure. The
+  worker does **not** need a public domain.
+- `PROCESS_ROLE=worker` additionally gates the voice Media Streams WS
+  upgrade attach (`app.ts`, guarded alongside `TWILIO_MEDIA_STREAMS_ENABLED`)
+  — a worker never constructs the Deepgram/TTS providers or wraps
+  `app.listen` for the WS upgrade handler, since Twilio has no path to
+  reach a private-networked worker anyway. `/health` stays role-agnostic.
+- Cheap observability intervals (pool-occupancy and queue-depth metric
+  samplers) run in **every** role, so the `web` service still exports its
+  own `/metrics`.
+- **Safe to get wrong:** if both services are accidentally left as `all`,
+  the tenant-wide sweeps are still gated by `runAsLeader` (Postgres
+  advisory lock), so exactly one instance runs each tick — you get
+  redundancy, not duplicate invoices/reminders. The split is an isolation
+  optimization; leader locks keep it correctness-safe even if
+  misconfigured.
 
 ## Dispatch feasibility env vars
 

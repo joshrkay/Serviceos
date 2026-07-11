@@ -78,4 +78,69 @@ describe('WS2 — PROCESS_ROLE process split', () => {
     expect(res.status).toBe(200);
     expect(res.body.status).toBeDefined();
   });
+
+  describe('WS8 — role gates the Media Streams WS upgrade handler', () => {
+    // Full "media streams on" env: TWILIO_MEDIA_STREAMS_ENABLED=true alone
+    // isn't enough to reach the app.listen wrap — DEEPGRAM_API_KEY must also
+    // be set (streamingProvider truthy), and TTS_PROVIDER=elevenlabs +
+    // ELEVENLABS_API_KEY must be set or assertTtsProviderSupportsMediaStreams
+    // throws at boot (see test/shared/config.test.ts:432).
+    const mediaStreamsEnvKeys = [
+      'TWILIO_MEDIA_STREAMS_ENABLED',
+      'TTS_PROVIDER',
+      'ELEVENLABS_API_KEY',
+      'DEEPGRAM_API_KEY',
+    ] as const;
+    const originalMediaStreamsEnv: Record<string, string | undefined> = {};
+
+    beforeEach(() => {
+      for (const key of mediaStreamsEnvKeys) {
+        originalMediaStreamsEnv[key] = process.env[key];
+      }
+      process.env.TWILIO_MEDIA_STREAMS_ENABLED = 'true';
+      process.env.TTS_PROVIDER = 'elevenlabs';
+      process.env.ELEVENLABS_API_KEY = 'el_test_key';
+      process.env.DEEPGRAM_API_KEY = 'dg_test_key';
+    });
+
+    afterEach(() => {
+      for (const key of mediaStreamsEnvKeys) {
+        const original = originalMediaStreamsEnv[key];
+        if (original === undefined) delete process.env[key];
+        else process.env[key] = original;
+      }
+    });
+
+    // app.listen is overridden (only) when mediaStreamsEnabled && role !==
+    // 'worker'; the override attaches the WS upgrade listener synchronously
+    // before app.listen(...) returns, so listenerCount('upgrade') on the
+    // returned http.Server observes the gate directly — same surface used by
+    // twilio-mediastream-server.test.ts's "feature-flag off" case.
+    const listenAndCountUpgradeHandlers = (app: AppWithLifecycle): Promise<number> =>
+      new Promise((resolve, reject) => {
+        const server = app.listen(0, () => {
+          const count = server.listenerCount('upgrade');
+          server.close(() => resolve(count));
+        });
+        server.on('error', reject);
+      });
+
+    it('role "worker" does NOT attach the WS upgrade handler', async () => {
+      const app = buildApp('worker');
+      const count = await listenAndCountUpgradeHandlers(app);
+      expect(count).toBe(0);
+    });
+
+    it('role "web" still attaches the WS upgrade handler (unchanged)', async () => {
+      const app = buildApp('web');
+      const count = await listenAndCountUpgradeHandlers(app);
+      expect(count).toBeGreaterThan(0);
+    });
+
+    it('role "all" still attaches the WS upgrade handler (unchanged)', async () => {
+      const app = buildApp('all');
+      const count = await listenAndCountUpgradeHandlers(app);
+      expect(count).toBeGreaterThan(0);
+    });
+  });
 });
