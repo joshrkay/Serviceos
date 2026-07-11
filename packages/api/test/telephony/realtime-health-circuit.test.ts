@@ -104,4 +104,31 @@ describe('RealtimeHealthCircuit', () => {
     c.recordFailure('x');
     expect(c.isOpen()).toBe(false);
   });
+
+  // WS16a — documents the multi-call probe window the adapter feed relies on.
+  // Because the adapter now votes at CLOSE time, the half-open window stays
+  // "open for admission" across MANY concurrent probe calls until one of them
+  // terminates and votes. isOpen() clearing openedAt on the first post-TTL call
+  // means all subsequent reads are also closed — every admitted call is itself
+  // a probe — and a single failing probe re-opens instantly.
+  it('half-open is a multi-call window: repeated isOpen() stay false until a vote; one failure re-opens', () => {
+    const clock = new FakeClock();
+    const c = new RealtimeHealthCircuit({ ttlMs: 60_000, clock });
+    c.recordFailure('deepgram_unexpected_close');
+    c.recordFailure('deepgram_unexpected_close');
+    expect(c.isOpen()).toBe(true);
+
+    clock.advance(60_000);
+    // First post-TTL read half-opens (clears the marker) → admits a probe.
+    expect(c.isOpen()).toBe(false);
+    // The window does NOT re-arm on its own: further calls are ALSO admitted
+    // (each is a probe) even though no probe has voted yet.
+    expect(c.isOpen()).toBe(false);
+    expect(c.isOpen()).toBe(false);
+
+    // One admitted probe finally terminates in failure → re-opens immediately,
+    // because the consecutive count was never reset on half-open.
+    c.recordFailure('deepgram_unexpected_close');
+    expect(c.isOpen()).toBe(true);
+  });
 });

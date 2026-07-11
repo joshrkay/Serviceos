@@ -334,14 +334,22 @@ export interface MediaStreamAdapterDeps {
     tenantId: string;
   }) => Promise<void>;
   /**
-   * WS3 (voice ingestion resilience) — in-process realtime health circuit,
-   * shared with the /voice TwiML branch (which reads `isOpen()`). The adapter
-   * feeds it: `recordFailure` at the terminal pre-conversation failure sites
-   * (Deepgram open failure, recording-disclosure bootstrap failure) so repeated
-   * realtime outages trip the breaker and steer subsequent calls to Gather;
-   * `recordSuccess` once a session establishes cleanly (Deepgram open + — when
-   * an `initializeSession` bootstrap is wired — a successful disclosure init).
-   * Optional; when absent the adapter behaves exactly as before.
+   * WS3/WS16a (voice ingestion resilience) — in-process realtime health
+   * circuit, shared with the /voice TwiML branch (which reads `isOpen()`). The
+   * adapter votes it AT MOST ONCE per call leg (see
+   * {@link RuntimeState.circuitRecorded}) from REAL call outcomes:
+   *   - `recordFailure` on a terminal realtime failure — Deepgram open failure,
+   *     recording-disclosure bootstrap failure, an unexpected mid-call Deepgram
+   *     close (even when the call then degrades to Gather — realtime still
+   *     died), a failed language-switch reopen, or an ESTABLISHED session that
+   *     closes on a transport_failure-class reason.
+   *   - `recordSuccess` only when an ESTABLISHED session closes on a clean /
+   *     caller-driven reason (twilio_stop, end_session, audio_idle_timeout) —
+   *     the transport survived the whole call.
+   * Success is NOT recorded at establishment: doing so reset the consecutive-
+   * failure counter and let a clean-establish-then-die-mid-call leg never trip
+   * the breaker (the establish-then-die trap). Pre-establishment closes never
+   * vote. Optional; when absent the adapter behaves exactly as before.
    */
   realtimeCircuit?: {
     recordFailure(kind: string): void;
@@ -516,6 +524,17 @@ interface RuntimeState {
    * switch via the explicit-request path.
    */
   firstFinalLanguageChecked: boolean;
+  /**
+   * WS16a — realtime-circuit latch. One WebSocket == one realtime call leg,
+   * so the leg votes the circuit at most ONCE (`recordFailure` OR
+   * `recordSuccess`). The FIRST, most-precise signal wins: a mid-call
+   * `deepgram_unexpected_close` recorded at its onClose site suppresses the
+   * blunt `ws_closed` that follows it through `handleClose`, and a disclosure
+   * failure suppresses the clean terminal `twilio_stop` (letting a clean end
+   * erase an establishment failure would resurrect the establish-then-die
+   * trap). Init false in the constructor.
+   */
+  circuitRecorded: boolean;
 }
 
 const TWILIO_QUEUE_MAX_MSGS = 200;
@@ -566,7 +585,12 @@ function mapCloseReasonToFinalize(reason: string): string {
     reason === 'ws_error' ||
     reason === 'ws_closed' ||
     reason === 'slow_consumer' ||
-    reason === 'queue_overflow_terminal'
+    reason === 'queue_overflow_terminal' ||
+    // WS16a — a failed Deepgram reopen (language switch) with no recovery
+    // leaves the live call with no STT: a transport failure, not the
+    // caller_hangup default it previously fell through to. Both the CallOutcome
+    // (`failed`) and the realtime-circuit vote depend on this classification.
+    reason === 'deepgram_reopen_failed'
   ) {
     return 'transport_failure';
   }
@@ -627,7 +651,25 @@ export class TwilioMediaStreamAdapter {
       deepgramGeneration: 0,
       degradedToGather: false,
       firstFinalLanguageChecked: false,
+      circuitRecorded: false,
     };
+  }
+
+  /**
+   * WS16a — feed the realtime health circuit AT MOST ONCE per call leg. The
+   * first signal latches; every later signal for the same WS is suppressed so
+   * a single dying call (deepgram close → accepted degrade → ws close) casts
+   * exactly one vote, and the earliest (most precise) reason wins. No-ops when
+   * no circuit is wired (test/dev). See {@link RuntimeState.circuitRecorded}.
+   */
+  private recordCircuitOutcomeOnce(kind: 'success' | 'failure', reason: string): void {
+    if (this.state.circuitRecorded || !this.deps.realtimeCircuit) return;
+    this.state.circuitRecorded = true;
+    if (kind === 'failure') {
+      this.deps.realtimeCircuit.recordFailure(reason);
+    } else {
+      this.deps.realtimeCircuit.recordSuccess();
+    }
   }
 
   /** Wire WS event listeners. Idempotent — call once per connection. */
@@ -807,6 +849,18 @@ export class TwilioMediaStreamAdapter {
           // attemptDegradeToGather guards against) this keeps today's
           // behavior: drain Twilio until it sends `stop`.
           if (dgGeneration !== this.state.deepgramGeneration) return;
+          // WS16a — a deliberate teardown (twilio `stop`, idle timeout, WS
+          // close) calls deepgram.finish(), whose real provider fires THIS
+          // hook on the follow-on ws close. That is not a transport failure,
+          // so bail before voting once the leg is already tearing down; the
+          // clean-close success is recorded by handleClose instead.
+          if (this.state.closed || this.state.wsCloseInitiated) return;
+          // An unexpected mid-call close on the LIVE generation IS a realtime
+          // transport failure. Vote BEFORE the degrade attempt — a successful
+          // degrade-to-Gather still means realtime died mid-call, so it counts
+          // as a failure of the realtime transport (the latch then suppresses
+          // the blunt `ws_closed` that the degrade's closeWs produces).
+          this.recordCircuitOutcomeOnce('failure', 'deepgram_unexpected_close');
           void this.attemptDegradeToGather('deepgram_unexpected_close');
         },
         initialLanguage, // undefined → provider default (English)
@@ -825,7 +879,7 @@ export class TwilioMediaStreamAdapter {
       // success the caller continues on Gather (close 1000) instead of being
       // hung up. When no redirector is wired or the redirect fails, closeWs(1011)
       // ends the leg exactly as before and Twilio ends the call.
-      this.deps.realtimeCircuit?.recordFailure('deepgram_open_failed');
+      this.recordCircuitOutcomeOnce('failure', 'deepgram_open_failed');
       await this.emitRealtimeResilienceAudit('voice.realtime.session_failed', {
         callSid,
         tenantId: session.tenantId,
@@ -851,9 +905,14 @@ export class TwilioMediaStreamAdapter {
           }),
         );
         await this.emitSideEffects(initEffects);
-        // WS3 — session established AND the recording disclosure was delivered
-        // + ledgered. Reset the realtime health circuit.
-        this.deps.realtimeCircuit?.recordSuccess();
+        // WS16a — establishment success is deliberately NOT recorded here. The
+        // old recordSuccess() at this site reset the circuit's consecutive-
+        // failure counter, so a call that established cleanly then died mid-call
+        // (Deepgram dropped, transport failure) never counted — the
+        // "establish-then-die" trap that let the breaker never trip under the
+        // most common realtime outage mode. Success is now voted once at close
+        // time (handleClose) and only on a clean/caller-driven end reason; a
+        // transport-failure close votes failure instead.
       } catch (err) {
         logger.warn('mediastream: initializeSession failed — continuing without greeting', {
           error: err instanceof Error ? err.message : String(err),
@@ -872,18 +931,17 @@ export class TwilioMediaStreamAdapter {
           tenantId: session.tenantId,
           error: err instanceof Error ? err.message : String(err),
         });
-        this.deps.realtimeCircuit?.recordFailure('disclosure_init_failed');
+        this.recordCircuitOutcomeOnce('failure', 'disclosure_init_failed');
         await this.emitRealtimeResilienceAudit('voice.disclosure.init_failed', {
           callSid,
           tenantId: session.tenantId,
           reason: 'disclosure_init_failed',
         });
       }
-    } else {
-      // WS3 — no disclosure/greeting bootstrap wired: session establishment is
-      // just the Deepgram open, which succeeded above. Reset the circuit.
-      this.deps.realtimeCircuit?.recordSuccess();
     }
+    // WS16a — the no-`initializeSession` branch no longer records success here
+    // either: like the wired path, a clean session votes success only at close
+    // time. Recording success at establishment is the establish-then-die trap.
   }
 
   /**
@@ -1360,6 +1418,11 @@ export class TwilioMediaStreamAdapter {
             // language-switched call keeps mid-call failure coverage.
             // Generation-guarded like the initial open's hook.
             if (dgGeneration !== this.state.deepgramGeneration) return;
+            // WS16a — same latch + teardown guard + vote-before-degrade as the
+            // initial open's hook (see there): don't vote on a deliberate
+            // teardown; an unexpected live-generation close is a failure.
+            if (this.state.closed || this.state.wsCloseInitiated) return;
+            this.recordCircuitOutcomeOnce('failure', 'deepgram_unexpected_close');
             void this.attemptDegradeToGather('deepgram_unexpected_close');
           },
           lang,
@@ -1381,6 +1444,14 @@ export class TwilioMediaStreamAdapter {
           this.state.deepgram = await openWith(from);
           return false;
         } catch {
+          // WS16a — both the target reopen and the same-language recovery
+          // failed: the live call now has no STT at all. That is a realtime
+          // transport failure — vote it here (the most precise reason) so the
+          // latch suppresses the blunt `ws_closed`/transport_failure that the
+          // handleClose below produces. mapCloseReasonToFinalize now classifies
+          // `deepgram_reopen_failed` as transport_failure so the CallOutcome is
+          // stamped `failed`, not the caller_hangup default.
+          this.recordCircuitOutcomeOnce('failure', 'deepgram_reopen_failed');
           this.handleClose('deepgram_reopen_failed');
           return false;
         }
@@ -2063,6 +2134,25 @@ export class TwilioMediaStreamAdapter {
   private handleClose(reason: string): void {
     if (this.state.closed) return;
     this.state.closed = true;
+    // WS16a — vote the realtime health circuit from the TERMINAL close outcome,
+    // but ONLY for an ESTABLISHED session: state.session assigned AND at least
+    // one Deepgram open attempted (deepgramGeneration > 0). Pre-establishment
+    // security closes (invalid start, unknown CallSid, tenant mismatch,
+    // connection cap) all close before state.session is set — they are
+    // caller/config noise, not transport health, and must not vote. A
+    // transport_failure-class reason votes failure; a clean/caller-driven end
+    // (twilio_stop, end_session, audio_idle_timeout) votes success — the
+    // transport survived the whole call. The once-per-leg latch means an
+    // earlier, more precise signal (deepgram_unexpected_close,
+    // disclosure_init_failed, deepgram_reopen_failed) already recorded and this
+    // blunt terminal signal is suppressed.
+    if (this.state.session && this.state.deepgramGeneration > 0) {
+      if (mapCloseReasonToFinalize(reason) === 'transport_failure') {
+        this.recordCircuitOutcomeOnce('failure', reason);
+      } else {
+        this.recordCircuitOutcomeOnce('success', reason);
+      }
+    }
     // B2: stash the outcome BEFORE we tear down. The host's
     // `finalizeOnClose` is sync (sets session.terminalOutcome and
     // kicks off the DB write in the background), so close stays
