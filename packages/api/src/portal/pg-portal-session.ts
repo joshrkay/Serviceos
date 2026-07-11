@@ -59,14 +59,28 @@ export class PgPortalSessionRepository
   }
 
   async findByTokenHash(tokenHash: string): Promise<PortalSession | null> {
-    // System-level: token-hash lookup uses app.portal_token_lookup (migration 106).
+    // System-level: token-hash lookup relies on the app.portal_token_lookup
+    // escape-hatch RLS policy (migration 107). The GUC MUST be set with SET LOCAL
+    // (set_config is_local=true) inside the SAME explicit transaction as the
+    // SELECT: a set_config(..., true) issued OUTSIDE a BEGIN applies only to the
+    // implicit transaction of that one statement and is discarded before the next
+    // query — so under an RLS-enforcing role (RLS_RUNTIME_ROLE=true) the policy
+    // would evaluate false and the SELECT would return ZERO rows, breaking the
+    // customer portal. Mirrors integrations/twilio/phone-number-repository.ts.
     return this.withClient(async (client) => {
-      await client.query("SELECT set_config('app.portal_token_lookup', 'true', true)");
-      const result = await client.query(
-        'SELECT * FROM portal_sessions WHERE token_hash = $1',
-        [tokenHash],
-      );
-      return result.rows.length > 0 ? mapRow(result.rows[0]) : null;
+      await client.query('BEGIN');
+      try {
+        await client.query("SELECT set_config('app.portal_token_lookup', 'true', true)");
+        const result = await client.query(
+          'SELECT * FROM portal_sessions WHERE token_hash = $1',
+          [tokenHash],
+        );
+        await client.query('COMMIT');
+        return result.rows.length > 0 ? mapRow(result.rows[0]) : null;
+      } catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+      }
     });
   }
 

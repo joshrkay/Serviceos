@@ -7,9 +7,22 @@ longer cross tenants. Today the app connects as a privileged (`BYPASSRLS`)
 principal, so RLS is a no-op; this is the second line of defense behind the
 app-layer tenant filters.
 
-**Control:** the `RLS_RUNTIME_ROLE` env var. **Default off** — deploying the
-code changes nothing until you set it. **Rollback is instant:** unset the var
-and redeploy/restart; no migration required.
+**Control:** the `RLS_RUNTIME_ROLE` env var. **Default off** in dev/test —
+deploying the code changes nothing locally until you set it. **Rollback is
+instant** in dev: unset the var and redeploy/restart; no migration required.
+
+> **Go-live requirement (SEC-01):** as of the SEC-01 change, `RLS_RUNTIME_ROLE=true`
+> is a **required prod/staging boot var**. `validateFeatureRequiredConfig`
+> (`packages/api/src/shared/config.ts`) refuses to boot a prod/staging process
+> without it (dev/test are unaffected). This is intentional: prod must never run
+> with tenant isolation resting solely on app-layer filters. Because the boot
+> probe `verifyRlsRuntimeRole` also fails fast when `rls_app_runtime` is
+> unprovisioned, requiring the flag can never silently ship a broken RLS state —
+> but it does mean the role must be provisioned **before** the first prod/staging
+> boot. On managed Postgres where the app user lacks `CREATEROLE`, run the admin
+> SQL in Pre-flight step 3 first (migration 217 will otherwise skip provisioning
+> and the boot probe will refuse to start). To roll back in prod you must revert
+> this config requirement, not merely unset the var.
 
 **Safety property:** if `RLS_RUNTIME_ROLE=true` but the `rls_app_runtime` role
 is not assumable by the app's DB principal, the app **refuses to boot** (a

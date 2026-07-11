@@ -211,6 +211,25 @@ function validateFeatureRequiredConfig(env: Record<string, string | undefined>):
     }
   }
 
+  // SEC-01 — RLS runtime-role enforcement is a HARD prod/staging requirement.
+  // Postgres Row-Level Security is a runtime NO-OP unless the app drops to the
+  // least-privilege, RLS-subject `rls_app_runtime` role for tenant-scoped queries,
+  // which only happens when RLS_RUNTIME_ROLE=true (see db/rls-runtime-role.ts).
+  // Without it, a single forgotten `tenant_id` filter silently crosses tenants —
+  // tenant isolation would rest solely on app-layer filters. Unlike the feature
+  // bundles above there is NO opt-out flag: shipping prod/staging with RLS
+  // unenforced is not permitted. The boot probe `verifyRlsRuntimeRole` fails fast
+  // if the `rls_app_runtime` role is unprovisioned, so requiring the flag can
+  // never silently ship a broken RLS state — provision the role first (migration
+  // 217 / docs/runbooks/rls-runtime-role-rollout.md), then set the flag.
+  if (env.RLS_RUNTIME_ROLE !== 'true') {
+    missing.push(
+      'RLS_RUNTIME_ROLE=true (Postgres RLS enforcement — makes tenant-isolation ' +
+        'policies actually enforce; requires the rls_app_runtime role from migration ' +
+        '217; see docs/runbooks/rls-runtime-role-rollout.md)'
+    );
+  }
+
   if (missing.length > 0) {
     throw new Error(
       `Production feature configuration is missing required values:\n  ${missing.join('\n  ')}\n` +

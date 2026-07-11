@@ -39,6 +39,8 @@ describe('P0-006 — Secrets/config framework', () => {
       TELEPHONY_ENABLED: 'false',
       EMAIL_ENABLED: 'false',
       STORAGE_ENABLED: 'false',
+      // SEC-01 — required in prod/staging; covered on its own below.
+      RLS_RUNTIME_ROLE: 'true',
     });
     expect(config.NODE_ENV).toBe('staging');
     expect(config.PORT).toBe(8080);
@@ -145,6 +147,8 @@ describe('P0-006 — Secrets/config framework', () => {
         TELEPHONY_ENABLED: 'false',
         EMAIL_ENABLED: 'false',
         STORAGE_ENABLED: 'false',
+        // SEC-01 — required in prod/staging; covered on its own below.
+        RLS_RUNTIME_ROLE: 'true',
       })
     ).not.toThrow();
   });
@@ -171,6 +175,10 @@ describe('P0-006 — Secrets/config framework', () => {
       CLERK_WEBHOOK_SECRET: 'whsec_x',
       AI_PROVIDER_API_KEY: 'ak_x',
       CORS_ORIGIN: 'https://app.example.com',
+      // SEC-01 — RLS enforcement is a hard prod/staging requirement; set here so
+      // these feature-gate tests isolate the var under test. The RLS requirement
+      // has its own dedicated describe block below.
+      RLS_RUNTIME_ROLE: 'true',
     };
 
     it('telephony — fails naming each missing TWILIO var when not opted out', () => {
@@ -326,6 +334,63 @@ describe('P0-006 — Secrets/config framework', () => {
       // Dev should never trip these — silent feature-off is the
       // intended local behavior.
       expect(() => loadConfig({ NODE_ENV: 'dev' })).not.toThrow();
+    });
+  });
+
+  describe('SEC-01 — RLS_RUNTIME_ROLE required in prod/staging', () => {
+    // Base env that passes every OTHER prod gate, so these tests isolate the
+    // RLS requirement (features opted out; RLS deliberately omitted).
+    const baseNoRls = {
+      DATABASE_URL: 'postgres://u:p@h/d',
+      CLERK_SECRET_KEY: 'sk_x',
+      CLERK_PUBLISHABLE_KEY: 'pk_x',
+      CLERK_WEBHOOK_SECRET: 'whsec_x',
+      AI_PROVIDER_API_KEY: 'ak_x',
+      CORS_ORIGIN: 'https://app.example.com',
+      TELEPHONY_ENABLED: 'false',
+      EMAIL_ENABLED: 'false',
+      STORAGE_ENABLED: 'false',
+    };
+
+    it('prod — fails fast naming RLS_RUNTIME_ROLE when unset', () => {
+      expect(() => loadConfig({ ...baseNoRls, NODE_ENV: 'prod' })).toThrow(
+        /RLS_RUNTIME_ROLE=true/
+      );
+    });
+
+    it('staging — fails fast naming RLS_RUNTIME_ROLE when unset', () => {
+      expect(() => loadConfig({ ...baseNoRls, NODE_ENV: 'staging' })).toThrow(
+        /RLS_RUNTIME_ROLE=true/
+      );
+    });
+
+    it('prod — fails when RLS_RUNTIME_ROLE is set to a non-true value', () => {
+      expect(() =>
+        loadConfig({ ...baseNoRls, NODE_ENV: 'prod', RLS_RUNTIME_ROLE: 'false' })
+      ).toThrow(/RLS_RUNTIME_ROLE=true/);
+    });
+
+    it('prod — passes when RLS_RUNTIME_ROLE=true', () => {
+      expect(() =>
+        loadConfig({ ...baseNoRls, NODE_ENV: 'prod', RLS_RUNTIME_ROLE: 'true' })
+      ).not.toThrow();
+    });
+
+    it('staging — passes when RLS_RUNTIME_ROLE=true', () => {
+      expect(() =>
+        loadConfig({ ...baseNoRls, NODE_ENV: 'staging', RLS_RUNTIME_ROLE: 'true' })
+      ).not.toThrow();
+    });
+
+    it('dev — no RLS requirement (RLS off locally is fine)', () => {
+      expect(() => loadConfig({ NODE_ENV: 'dev' })).not.toThrow();
+      expect(() =>
+        loadConfig({ NODE_ENV: 'dev', RLS_RUNTIME_ROLE: 'false' })
+      ).not.toThrow();
+    });
+
+    it('test — no RLS requirement (RLS off in test is fine)', () => {
+      expect(() => loadConfig({ NODE_ENV: 'test' })).not.toThrow();
     });
   });
 });

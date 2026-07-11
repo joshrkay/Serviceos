@@ -14,6 +14,7 @@
 | `AI_PROVIDER_API_KEY` | Always prod/staging | `validateProductionConfig` |
 | `CORS_ORIGIN` | Always prod/staging | Explicit origin, not wildcard |
 | `STRIPE_SECRET_KEY` or `STRIPE_API_KEY` | Always prod/staging | `createPaymentLinkProvider` forbids mock |
+| `RLS_RUNTIME_ROLE=true` | Always prod/staging (SEC-01; no opt-out) | `validateFeatureRequiredConfig`; boot probe `verifyRlsRuntimeRole` also fails fast if `rls_app_runtime` (migration 217) is unprovisioned. See `docs/runbooks/rls-runtime-role-rollout.md` |
 | `TWILIO_ACCOUNT_SID` | Unless `TELEPHONY_ENABLED=false` and `EMAIL_ENABLED=false` | `validateFeatureRequiredConfig` |
 | `TWILIO_AUTH_TOKEN` | Same | Feature gate |
 | `TWILIO_FROM_NUMBER` | Same | Feature gate |
