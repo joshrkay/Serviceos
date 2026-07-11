@@ -75,6 +75,58 @@ class InsertCustomerHandler implements ExecutionHandler {
 }
 
 /**
+ * A fake external sender (email/SMS/push stand-in). On each send it observes, on
+ * a SEPARATE pooled connection, whether the handler's domain write is already
+ * committed. If the handler ran INSIDE an open executor transaction, that
+ * fresh-connection read would see the row as invisible (0) until COMMIT. Seeing
+ * it committed (1) proves the domain write landed on its own connection BEFORE
+ * the send — i.e. the send is NOT inside an open executor transaction.
+ */
+class FakeExternalSender {
+  public readonly sends: Array<{ visibleCustomerCount: number }> = [];
+
+  constructor(
+    private readonly pool: Pool,
+    private readonly tenantId: string,
+  ) {}
+
+  async send(): Promise<void> {
+    const visibleCustomerCount = await countCustomers(this.pool, this.tenantId);
+    this.sends.push({ visibleCustomerCount });
+  }
+}
+
+/**
+ * External-I/O handler (performsExternalIo=true): inserts a customer row AND
+ * awaits an external send. The executor must run this OUTSIDE its transaction —
+ * the domain write commits on its own connection, and only the idempotency
+ * record + status transition are wrapped in the executor's transaction.
+ */
+class ExternalIoInsertCustomerHandler implements ExecutionHandler {
+  proposalType: ProposalType = 'create_customer';
+  performsExternalIo = true;
+  public invocations = 0;
+
+  constructor(
+    private readonly repo: CustomerWriteRepo,
+    private readonly sender: FakeExternalSender,
+  ) {}
+
+  async execute(
+    proposal: Proposal,
+    context: ExecutionContext,
+  ): Promise<ExecutionResult> {
+    this.invocations += 1;
+    const customerId = (proposal.payload.customerId as string) ?? randomUUID();
+    await this.repo.insertCustomer(context.tenantId, customerId, context.executedBy);
+    // Synchronous external send — happens after the domain write commits and
+    // before the executor opens its marker/status transaction.
+    await this.sender.send();
+    return { success: true, resultEntityId: customerId };
+  }
+}
+
+/**
  * Wrap a ProposalRepository so `updateStatus` throws while `shouldFail()` is
  * true — simulates a crash AFTER the handler's domain write but DURING the
  * status transition, inside the executor's transaction.
@@ -292,5 +344,128 @@ describe('ProposalExecutor — DATA-31 transactional atomicity', () => {
     // Handler ran once; exactly one customer row exists.
     expect(handler.invocations).toBe(1);
     expect(await countCustomers(pool, tenant.tenantId)).toBe(1);
+  });
+});
+
+/**
+ * PR #666 (Gemini HIGH) — for an EXTERNAL-I/O handler (performsExternalIo=true)
+ * the executor runs execute() OUTSIDE its transaction so the domain write
+ * commits (and its row locks release) around the external send. Only the
+ * idempotency record + status transition are wrapped in the executor's
+ * transaction. These cases prove the two paths diverge:
+ *
+ *   DB-only (above): a status-write failure ROLLS BACK the domain mutation
+ *     (count → 0).
+ *   External-I/O (here): the SAME injected status-write failure does NOT roll
+ *     back the already-committed domain mutation (count → 1), mirroring
+ *     pre-DATA-31 semantics for these handlers — and the handler is not re-run
+ *     within one execute call.
+ */
+describe('ProposalExecutor — external-I/O handler routing (PR #666)', () => {
+  let pool: Pool;
+  let proposalRepo: PgProposalRepository;
+  let executionRepo: PgProposalExecutionRepository;
+  let customerRepo: CustomerWriteRepo;
+
+  beforeAll(async () => {
+    pool = await getSharedTestDb();
+    proposalRepo = new PgProposalRepository(pool);
+    executionRepo = new PgProposalExecutionRepository(pool);
+    customerRepo = new CustomerWriteRepo(pool);
+  });
+
+  it('runs the handler OUTSIDE the executor tx: the send observes the domain write already committed', async () => {
+    const tenant = await createTestTenant(pool);
+    const sender = new FakeExternalSender(pool, tenant.tenantId);
+    const handler = new ExternalIoInsertCustomerHandler(customerRepo, sender);
+    const handlers = new Map<ProposalType, ExecutionHandler>([
+      ['create_customer', handler],
+    ]);
+    const guard = new IdempotencyGuard(
+      executionRepo,
+      proposalRepo,
+      new PgIdempotencyLockProvider(pool),
+    );
+    const executor = new ProposalExecutor(handlers, proposalRepo, guard, {
+      executionRepo,
+    });
+
+    const proposal = await makeApprovedProposal(
+      proposalRepo,
+      tenant.tenantId,
+      tenant.userId,
+      `data31-extio-happy-${randomUUID()}`,
+    );
+    const ctx: ExecutionContext = {
+      tenantId: tenant.tenantId,
+      executedBy: tenant.userId,
+    };
+
+    const { proposal: after } = await executor.execute(proposal, ctx);
+
+    expect(after.status).toBe('executed');
+    expect(handler.invocations).toBe(1);
+    expect(await countCustomers(pool, tenant.tenantId)).toBe(1);
+    // The send fired exactly once, and at send time the domain write was already
+    // committed and visible on a separate connection → the handler ran OUTSIDE
+    // the executor transaction.
+    expect(sender.sends).toHaveLength(1);
+    expect(sender.sends[0].visibleCustomerCount).toBe(1);
+  });
+
+  it('marker/status failure does NOT roll back the handler domain write (mirrors pre-DATA-31), handler not re-run', async () => {
+    const tenant = await createTestTenant(pool);
+    const sender = new FakeExternalSender(pool, tenant.tenantId);
+    const handler = new ExternalIoInsertCustomerHandler(customerRepo, sender);
+    const handlers = new Map<ProposalType, ExecutionHandler>([
+      ['create_customer', handler],
+    ]);
+
+    // Fail the status write — inside the executor's marker/status transaction,
+    // AFTER the handler already committed its domain write on its own connection.
+    const flakyProposalRepo = withFailingUpdateStatus(
+      proposalRepo,
+      () => true,
+    );
+    const guard = new IdempotencyGuard(
+      executionRepo,
+      proposalRepo,
+      new PgIdempotencyLockProvider(pool),
+    );
+    const executor = new ProposalExecutor(handlers, flakyProposalRepo, guard, {
+      executionRepo,
+    });
+
+    const proposal = await makeApprovedProposal(
+      proposalRepo,
+      tenant.tenantId,
+      tenant.userId,
+      `data31-extio-crash-${randomUUID()}`,
+    );
+    const ctx: ExecutionContext = {
+      tenantId: tenant.tenantId,
+      executedBy: tenant.userId,
+    };
+
+    await expect(executor.execute(proposal, ctx)).rejects.toThrow(
+      /crash simulation/,
+    );
+
+    // The differential vs. the DB-only crash case: the domain mutation SURVIVES
+    // the marker/status rollback (external-I/O handler ran outside the tx).
+    expect(handler.invocations).toBe(1);
+    expect(sender.sends).toHaveLength(1);
+    expect(await countCustomers(pool, tenant.tenantId)).toBe(1);
+
+    // No idempotency marker survived (it shared the rolled-back marker/status
+    // tx), so the proposal is still 'approved' — the domain mutation and send,
+    // however, already happened and are NOT unwound.
+    const markerAfterCrash = await executionRepo.findByIdempotencyKey(
+      tenant.tenantId,
+      proposal.idempotencyKey!,
+    );
+    expect(markerAfterCrash).toBeNull();
+    const stranded = await proposalRepo.findById(tenant.tenantId, proposal.id);
+    expect(stranded?.status).toBe('approved');
   });
 });

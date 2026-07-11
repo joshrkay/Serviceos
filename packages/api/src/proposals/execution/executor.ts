@@ -178,11 +178,13 @@ export class ProposalExecutor {
     // transaction on the advisory lock's OWN connection, so they commit
     // all-or-nothing while the lock is still held, and only unlock after COMMIT.
     const outcome = await this.idempotency.checkAndExecute(keyedProposal, async (lockClient) => {
-      const runCore = async (): Promise<ExecutionResult> => {
-        const handlerResult = await handler.execute(keyedProposal, context);
-
-        // Compute the post-execution proposal view here so the status write
-        // below participates in the same transaction as the mutation.
+      // Shared closure: given the handler's result, compute the post-execution
+      // proposal view, write the idempotency marker (on success), and transition
+      // the status. Factored out so it isn't duplicated across the DB-only and
+      // external-I/O branches below. Sets the outer-scope `executionId`,
+      // `executionRecordedInGuard`, and `txUpdatedProposal`. Callers decide the
+      // transaction boundary this runs in (see the three paths below).
+      const recordAndTransition = async (handlerResult: ExecutionResult): Promise<void> => {
         let updated: Proposal;
         if (handlerResult.success) {
           updated = transitionProposal(proposal, 'executed', context.executedBy);
@@ -193,10 +195,10 @@ export class ProposalExecutor {
           updated = transitionProposal(proposal, 'execution_failed', context.executedBy);
         }
 
-        // Critical race fix (§11 H1): write the idempotency marker inside the
-        // same transaction while we still hold the advisory lock. A second
-        // concurrent caller can't acquire the lock until we COMMIT + unlock, so
-        // it will see this marker and short-circuit instead of re-running.
+        // Critical race fix (§11 H1): write the idempotency marker while we still
+        // hold the advisory lock. A second concurrent caller can't acquire the
+        // lock until we COMMIT + unlock, so it will see this marker and
+        // short-circuit instead of re-running.
         if (this.executionRepo && handlerResult.success) {
           const row = await this.executionRepo.recordExecution({
             tenantId: keyedProposal.tenantId,
@@ -210,11 +212,12 @@ export class ProposalExecutor {
           executionRecordedInGuard = true;
         }
 
-        // Status transition — same transaction, so it commits atomically with
-        // the domain mutation and the idempotency record (DATA-31). If anything
-        // throws before COMMIT the whole unit rolls back: the proposal stays
-        // 'approved' and the mutation is invisible, so a retry re-executes
-        // cleanly to a consistent 'executed'.
+        // Status transition. In the DB-only path this commits atomically with the
+        // domain mutation and the idempotency record (DATA-31). In the
+        // external-I/O path the handler's domain writes have already committed on
+        // their own connections; only this marker + status write share a
+        // transaction, so a failure here does NOT unwind the already-sent side
+        // effect (mirrors pre-DATA-31 semantics for those handlers).
         await this.proposalRepo.updateStatus(
           updated.tenantId,
           updated.id,
@@ -235,16 +238,56 @@ export class ProposalExecutor {
         );
 
         txUpdatedProposal = updated;
-        return handlerResult;
       };
 
-      // When the advisory lock owns a connection (production / Postgres), run
-      // the core inside ONE tenant-scoped transaction on that same connection.
-      // Otherwise (no-op lock / in-memory repos, single-threaded tests) run it
-      // directly — there is no real transaction to open.
-      return lockClient
-        ? this.runInProposalTransaction(lockClient, keyedProposal.tenantId, runCore)
-        : runCore();
+      // PR #666 (Gemini HIGH): branch on whether the handler performs synchronous
+      // external network I/O inside execute().
+      const performsExternalIo = handler.performsExternalIo === true;
+
+      if (lockClient && !performsExternalIo) {
+        // Path A — DB-only handler with a locked connection: UNCHANGED DATA-31
+        // behavior. Run handler.execute() + recordExecution + updateStatus all
+        // inside ONE tenant-scoped transaction on the advisory lock's own
+        // connection, so they commit all-or-nothing while the lock is held. If
+        // anything throws before COMMIT the whole unit rolls back: the proposal
+        // stays 'approved', the mutation is invisible, and no idempotency marker
+        // survives, so a retry re-executes cleanly.
+        return this.runInProposalTransaction(
+          lockClient,
+          keyedProposal.tenantId,
+          async () => {
+            const handlerResult = await handler.execute(keyedProposal, context);
+            await recordAndTransition(handlerResult);
+            return handlerResult;
+          },
+        );
+      }
+
+      if (lockClient && performsExternalIo) {
+        // Path B — external-I/O handler with a locked connection: run
+        // handler.execute() OUTSIDE the executor transaction. Its repo writes go
+        // through the normal withTenantTransaction path (own connection/tx per
+        // call), so they COMMIT and release their row locks BEFORE and around the
+        // external send — the connection-exhaustion + long-lived-lock risk the PR
+        // finding flagged is gone. THEN wrap ONLY the idempotency record + status
+        // transition in a small transaction on the advisory lock's own
+        // connection (still held, so idempotency serialization is preserved).
+        const handlerResult = await handler.execute(keyedProposal, context);
+        await this.runInProposalTransaction(
+          lockClient,
+          keyedProposal.tenantId,
+          () => recordAndTransition(handlerResult),
+        );
+        return handlerResult;
+      }
+
+      // Path C — no locked connection (no-op lock / in-memory repos,
+      // single-threaded tests): run everything directly. There is no real
+      // transaction to open, so DB-only and external-I/O handlers behave the same
+      // here (as they did before this change).
+      const handlerResult = await handler.execute(keyedProposal, context);
+      await recordAndTransition(handlerResult);
+      return handlerResult;
     });
     const result: ExecutionResult = outcome.result;
     const alreadyExecuted = outcome.alreadyExecuted;

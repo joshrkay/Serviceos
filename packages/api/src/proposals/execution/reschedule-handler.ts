@@ -18,6 +18,11 @@ import { boardDateFromAppointment } from '../../dispatch/board-revision';
 
 export class RescheduleAppointmentExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'reschedule_appointment';
+  // Awaits transactionalComms.notifyRescheduled (customer SMS/email) — external
+  // network I/O alongside the appointment-reschedule DB write.
+  // (notifyDispatchBoardChanged is a non-awaited in-process SSE signal and does
+  // not count.)
+  performsExternalIo = true;
 
   constructor(
     private readonly appointmentRepo?: AppointmentRepository,

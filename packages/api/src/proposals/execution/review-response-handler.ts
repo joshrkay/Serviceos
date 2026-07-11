@@ -112,6 +112,10 @@ interface SubActionResult {
 
 export class ReviewResponseExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'review_response_proposal';
+  // Awaits replyFn (Google Business Profile API) and privateMessageSender.send
+  // (customer email/SMS) — external network I/O alongside the service-credit DB
+  // insert.
+  performsExternalIo = true;
 
   constructor(
     private readonly serviceCreditRepo?: ServiceCreditRepository,

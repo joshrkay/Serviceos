@@ -137,6 +137,12 @@ const VOICE_PAYMENT_METHOD_MAP: Record<string, PaymentMethod> = {
 
 export class RecordPaymentExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'record_payment';
+  // recordPayment() awaits paymentReceiptNotifier.notifyPaymentReceived (customer
+  // SMS/email receipt via the delivery provider) and an owner push — external
+  // network I/O. Its DB writes are already crash-safe outside a shared executor
+  // tx (atomic invoice credit + ledger reconciliation backstop), so run it out
+  // of the executor transaction.
+  performsExternalIo = true;
 
   constructor(
     private readonly paymentRepo?: PaymentRepository,
@@ -263,6 +269,8 @@ export class NoopEstimateDeliveryProvider implements EstimateDeliveryProvider {
 
 export class SendEstimateExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'send_estimate';
+  // Awaits provider.send() — outbound estimate email/SMS delivery.
+  performsExternalIo = true;
 
   constructor(private readonly provider?: EstimateDeliveryProvider) {}
 
@@ -306,6 +314,8 @@ export class SendEstimateExecutionHandler implements ExecutionHandler {
 
 export class SendInvoiceExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'send_invoice';
+  // Awaits provider.send() — outbound invoice email/SMS delivery.
+  performsExternalIo = true;
 
   constructor(private readonly provider?: InvoiceDeliveryProvider) {}
 
