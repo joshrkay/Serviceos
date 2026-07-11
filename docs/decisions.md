@@ -254,3 +254,43 @@ because nothing runs it.
   architecture (Railway/Supabase/Clerk/Twilio) depends on it; reviving AWS deployment would
   start from a fresh CDK design against the current schema, not from a two-generations-old
   prototype.
+
+### D-017: One consent model — revoke-anywhere-suppress-everywhere, grants never cross channels
+**Date:** 2026-07-11
+**Decision:** Both outbound gates (voice `checkOutboundConsent`, SMS `GatedMessageDelivery`)
+now derive their decision through a single shared resolver
+(`packages/api/src/compliance/resolve-outbound-consent.ts`) on top of the append-only
+`consent_events` ledger (migration 168). The rule is deliberately asymmetric:
+- A standing revocation of a CONTACT consent kind (`sms` | `marketing`) — SMS STOP,
+  portal/manual opt-out — blocks BOTH voice and SMS, regardless of what
+  `customers.consent_status` or `sms_consent` read.
+- A GRANT never crosses channels. Each channel keeps its own affirmative signal
+  (voice: `consent_status = 'granted'`, written only by the voice capture seam
+  `recordCustomerConsent`; SMS: `sms_consent = true`). A ledger grant can only CLEAR a
+  prior revocation of the SAME kind (STOP → START), never create consent elsewhere.
+- Kind `recording` is NOT a contact kind: a "stop recording" objection keeps blocking
+  outbound VOICE (via the existing `consent_status = 'revoked'` rollup) but does NOT
+  suppress SMS — a caller who objected to being recorded still gets appointment texts.
+To enforce the grant asymmetry, `deriveConsentStatus` was deliberately tightened
+(partially reversing Story 10.6's rollup): ledger grants no longer roll
+`consent_status = 'granted'`, so an SMS START can no longer manufacture TCPA consent for
+autodialed voice calls. Manual `sms_consent` toggles (dashboard PUT /api/customers/:id)
+now also append a `consent_events` row (kind `sms`, source `manual`), making the ledger
+the source of truth for consent changes going forward. No migration: the ledger already
+carries kind/state/phone/tenant — cross-channel derivation is computed, not stored.
+**Rationale:** Voice read `customers.consent_status`, SMS read `sms_consent` — two
+unrelated fields with no cross-enforcement, so a customer who revoked by phone could
+still be texted. TCPA voice-call consent and SMS consent are formally distinct, so the
+unification must be conservative in exactly one direction: honoring a revocation
+everywhere is always safe; propagating a grant across channels would fabricate consent.
+**Story:** WS12 (safety-rails scorecard, item 2 — one consent model).
+**Alternatives rejected:**
+- Widening `consent_status` into a shared both-channels rollup — a single mutable field
+  cannot encode per-kind grant/revoke history, and any shared "granted" value would leak
+  consent across channels (the exact TCPA failure mode).
+- A new derived cross-channel column + migration — redundant: the ledger already carries
+  enough to derive the decision at the gates; a stored rollup would be a second source
+  of truth that can drift.
+- Letting `recording` revocations suppress SMS — objecting to being recorded is not a
+  revocation of contact consent; suppressing confirmations would punish the customer for
+  a privacy preference.

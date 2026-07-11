@@ -18,10 +18,22 @@
  *       · enforcement 'warn'  → if the send WOULD block, audit
  *         `sms.suppressed-would-block` then SEND anyway (observability).
  *       · enforcement 'block' → send only when consent.smsConsent === true AND
- *         the phone is not on the tenant DNC list. Otherwise audit
- *         `sms.suppressed` and throw `SmsSuppressedError`.
+ *         there is no standing contact-consent revocation in the consent
+ *         ledger (WS12 — see below) AND the phone is not on the tenant DNC
+ *         list. Otherwise audit `sms.suppressed` and throw
+ *         `SmsSuppressedError`.
  *       · a 'customer' send with no `consent` context fails closed
  *         (missing_consent_context) in warn/block modes.
+ *
+ * WS12 (one consent model, D-017): when a `consentLedger` is wired, the gate
+ * also consults the append-only `consent_events` ledger and suppresses when
+ * the number carries a standing 'sms'/'marketing' revocation — a customer
+ * who revoked on ANY channel (voice call, portal, manual) is never texted,
+ * even while the stored sms_consent flag still reads true (reason:
+ * 'revoked'). The rule is asymmetric — revocations cross channels, grants
+ * never do — and 'recording' objections do NOT suppress SMS (a caller who
+ * objected to being recorded still gets their appointment confirmations).
+ * See compliance/resolve-outbound-consent.ts, the shared decision core.
  *
  * Suppression surfaces as a thrown `SmsSuppressedError` so existing callers
  * keep their contracts: SendService catches it to write its `suppressed`
@@ -31,6 +43,10 @@
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { normalizePhone } from '../compliance/dnc';
 import {
+  resolveOutboundConsent,
+  type ConsentLedgerEventLike,
+} from '../compliance/resolve-outbound-consent';
+import {
   DeliveryResult,
   EmailMessage,
   MessageDeliveryProvider,
@@ -39,7 +55,12 @@ import {
 
 export type SmsEnforcementMode = 'off' | 'warn' | 'block';
 
-export type SmsSuppressionReason = 'no_consent' | 'dnc' | 'missing_consent_context';
+export type SmsSuppressionReason =
+  | 'no_consent'
+  | 'dnc'
+  | 'missing_consent_context'
+  /** WS12 — standing cross-channel (sms/marketing) revocation in the ledger. */
+  | 'revoked';
 
 /** Narrow DNC seam — satisfied by DncRepository and test stubs. */
 export interface DncLookup {
@@ -62,12 +83,26 @@ export class SmsSuppressedError extends Error {
   }
 }
 
+/**
+ * Narrow consent-ledger seam — satisfied by ConsentEventRepository and test
+ * stubs. Rows must be newest first (the listByPhone contract).
+ */
+export interface ConsentLedgerLookup {
+  listByPhone(tenantId: string, phone: string): Promise<ConsentLedgerEventLike[]>;
+}
+
 export interface GatedMessageDeliveryDeps {
   base: MessageDeliveryProvider;
   dnc: DncLookup;
   auditRepo: AuditRepository;
   /** Enforcement mode — the SAME value that drives the voice consent gate. */
   enforcement: SmsEnforcementMode;
+  /**
+   * WS12 — consent ledger for cross-channel revocation. Optional so tests
+   * and legacy construction sites keep byte-identical behavior; when absent
+   * the gate enforces only the per-channel flag + DNC (pre-WS12 semantics).
+   */
+  consentLedger?: ConsentLedgerLookup;
 }
 
 export class GatedMessageDelivery implements MessageDeliveryProvider {
@@ -105,18 +140,35 @@ export class GatedMessageDelivery implements MessageDeliveryProvider {
 
   /**
    * Returns the block reason for a customer send, or null when allowed.
-   * Checks consent first (most informative), then per-tenant DNC.
+   * Legacy checks keep their pre-WS12 label priority (consent context →
+   * per-channel flag → tenant scope); the ledger + DNC lookups then feed the
+   * shared resolver (compliance/resolve-outbound-consent.ts) so the
+   * cross-channel revocation rule lives in exactly one place.
    */
   private async evaluate(message: SmsMessage): Promise<SmsSuppressionReason | null> {
     if (!message.consent) return 'missing_consent_context';
     if (message.consent.smsConsent !== true) return 'no_consent';
-    // The DNC list is per-tenant; a customer send with no tenant scope can't be
-    // checked, so fail closed rather than send to a possibly-opted-out number.
+    // The DNC list and consent ledger are per-tenant; a customer send with no
+    // tenant scope can't be checked, so fail closed rather than send to a
+    // possibly-opted-out number.
     if (!message.tenantId) return 'missing_consent_context';
-    if (await this.deps.dnc.isOnDnc(message.tenantId, normalizePhone(message.to))) {
-      return 'dnc';
-    }
-    return null;
+    const ledgerEvents = this.deps.consentLedger
+      ? await this.deps.consentLedger.listByPhone(message.tenantId, message.to)
+      : [];
+    const dncListed = await this.deps.dnc.isOnDnc(
+      message.tenantId,
+      normalizePhone(message.to),
+    );
+    const decision = resolveOutboundConsent({
+      channel: 'sms',
+      dncListed,
+      ledgerEvents,
+      // Both already verified above; passing them re-asserts the invariant
+      // inside the shared resolver.
+      sms: { hasConsentContext: true, smsConsent: true },
+    });
+    if (decision.allowed) return null;
+    return decision.reason === 'cross_channel_revoked' ? 'revoked' : 'dnc';
   }
 
   private async audit(

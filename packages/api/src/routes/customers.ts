@@ -39,6 +39,7 @@ import {
   listResolvedCustomFields,
 } from '../customers/custom-field';
 import { CustomerMergeRepository, mergeCustomers } from '../customers/merge';
+import type { ConsentEventRepository } from '../compliance/consent-events';
 import {
   createCustomerContactSchema,
   updateCustomerContactSchema,
@@ -67,7 +68,12 @@ export function createCustomerRouter(
   tagRepo?: TagRepository,
   customFieldRepo?: CustomFieldRepository,
   // Story 4.6 — customer merge. Optional, same quietly-404 pattern.
-  mergeRepo?: CustomerMergeRepository
+  mergeRepo?: CustomerMergeRepository,
+  // WS12 (one consent model, D-017) — when provided, a manual sms_consent
+  // toggle on PUT /:id also appends a consent_events row so a dashboard
+  // opt-out suppresses BOTH outbound channels. Optional so existing call
+  // sites/tests keep byte-identical behavior.
+  consentLedger?: ConsentEventRepository
 ): Router {
   const router = Router();
 
@@ -196,7 +202,8 @@ export function createCustomerRouter(
         req.body,
         customerRepo,
         req.auth!.userId,
-        auditRepo
+        auditRepo,
+        consentLedger
       );
       if (!result) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Customer not found' });

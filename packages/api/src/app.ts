@@ -1442,18 +1442,29 @@ export function createApp(): AppWithLifecycle {
   } else {
     rawMessageDelivery = new InMemoryDeliveryProvider();
   }
+  // RV-130 — consent ledger (append-only consent_events). Constructed here —
+  // before the SMS gate — because WS12 makes it the cross-channel source of
+  // truth both outbound gates consult; the STOP/START keyword handlers and
+  // the voice adapter (registered further down) append to the same instance.
+  const consentEventRepo = pool
+    ? new PgConsentEventRepository(pool)
+    : new InMemoryConsentEventRepository();
+
   // WS1 safety rails — wrap the single delivery object in the consent+DNC gate
   // so EVERY outbound SMS passes exactly one gate. Owner-class sends bypass;
   // customer-class sends are gated per `config.TCPA_CONSENT_ENFORCEMENT` (the
   // SAME value that drives the voice consent gate). Wrapping here — the single
   // construction site — is what makes the guarantee hold for all three
   // provider branches (per-tenant, global, and in-memory dev).
+  // WS12 — the gate also consults the consent ledger so a revocation arriving
+  // on ANY channel (voice, portal, manual, STOP) suppresses customer SMS.
   const messageDelivery: MessageDeliveryProvider | null = rawMessageDelivery
     ? new GatedMessageDelivery({
         base: rawMessageDelivery,
         dnc: dncRepo,
         auditRepo,
         enforcement: config.TCPA_CONSENT_ENFORCEMENT,
+        consentLedger: consentEventRepo,
       })
     : null;
 
@@ -3103,12 +3114,10 @@ export function createApp(): AppWithLifecycle {
     { overwrite: true },
   );
 
-  // RV-130 — consent ledger + recording control. The ledger appends
-  // implicit recording consent at disclosure and revocations on a
-  // "stop recording" objection; the control pauses the live recording.
-  const consentEventRepo = pool
-    ? new PgConsentEventRepository(pool)
-    : new InMemoryConsentEventRepository();
+  // RV-130 — the consent ledger (constructed above, before the SMS gate)
+  // appends implicit recording consent at disclosure and revocations on a
+  // "stop recording" objection; the recording control pauses the live
+  // recording.
   // Story 10.6 — register STOP/START now that DNC, the consent ledger, and the
   // customer repo all exist, so an opt-out updates every store at once.
   registerKeywordHandler(
@@ -4211,7 +4220,10 @@ export function createApp(): AppWithLifecycle {
       customerContactRepo,
       customerTagRepo,
       customerCustomFieldRepo,
-      customerMergeRepo
+      customerMergeRepo,
+      // WS12 — manual sms_consent toggles ledger to consent_events so a
+      // dashboard opt-out suppresses BOTH outbound channels.
+      consentEventRepo
     )
   );
   app.use(

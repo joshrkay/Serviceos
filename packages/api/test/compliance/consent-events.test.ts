@@ -36,8 +36,8 @@ describe('RV-130 — consent ledger (append-only)', () => {
     expect(events.every((e) => e.phoneNormalized === '15125550188')).toBe(true);
   });
 
-  it('deriveConsentStatus: explicit states roll up; implicit never upgrades', () => {
-    expect(deriveConsentStatus({ state: 'granted' })).toBe('granted');
+  it('deriveConsentStatus: only revocations roll up — grants never manufacture voice consent (WS12/D-017), implicit never upgrades', () => {
+    expect(deriveConsentStatus({ state: 'granted' })).toBeNull();
     expect(deriveConsentStatus({ state: 'revoked' })).toBe('revoked');
     expect(deriveConsentStatus({ state: 'implicit' })).toBeNull();
   });

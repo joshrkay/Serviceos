@@ -3,19 +3,31 @@ import { isOutboundAllowed, type OutboundCheck } from './outbound-allowlist';
 import { applyTenantContext } from '../db/rls-runtime-role';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { normalizePhone } from '../shared/phone';
+import {
+  resolveOutboundConsent,
+  type ConsentLedgerEventLike,
+  type VoiceConsentStatus,
+} from '../compliance/resolve-outbound-consent';
 
 /**
  * Blocker 11 — TCPA / DNC consent gate for outbound AI calls.
  *
  * The existing `isOutboundAllowed` rejects malformed and premium numbers
- * but says nothing about whether placing the call is *legal*. Two
+ * but says nothing about whether placing the call is *legal*. Three
  * additional gates close that:
  *
  *  1. **Tenant DNC list** (`tenant_dnc_list`, migration 052). A
  *     tenant-local opt-out registry. A number on this list cannot
  *     receive an outbound call regardless of any consent record.
  *
- *  2. **Per-customer consent** (`customers.consent_status`, migration
+ *  2. **Cross-channel revocation** (WS12, one consent model — D-017).
+ *     A standing sms/marketing revocation in the `consent_events` ledger
+ *     (migration 168) — e.g. an SMS STOP or a portal/manual opt-out —
+ *     blocks the CALL too, even when `consent_status` still reads
+ *     'granted'. The rule is asymmetric: revocations cross channels,
+ *     grants never do (see compliance/resolve-outbound-consent.ts).
+ *
+ *  3. **Per-customer consent** (`customers.consent_status`, migration
  *     132). Under TCPA, an autodialed/AI call to a US number requires
  *     prior express consent. We refuse calls for customers in
  *     `not_requested`, `revoked`, or `expired` states. Calls only go
@@ -139,30 +151,37 @@ export async function checkOutboundConsent(
        LIMIT 1`,
       [ctx.tenantId, phoneKey],
     );
+
+    // WS12 — cross-channel revocation. Read the consent ledger for this
+    // number (same transaction) so a standing sms/marketing revocation —
+    // SMS STOP, portal/manual opt-out — blocks the call even when
+    // consent_status still reads 'granted'. consent_events stores
+    // digits-only phones (normalizeConsentPhone keeps the leading 1), so
+    // match BOTH storage conventions, mirroring the customer lookup above.
+    const ledger = await client.query<ConsentLedgerEventLike>(
+      `SELECT kind, state FROM consent_events
+       WHERE tenant_id = $1 AND phone_normalized IN ($2, '1' || $2)
+       ORDER BY created_at DESC`,
+      [ctx.tenantId, phoneKey],
+    );
     await client.query('COMMIT');
 
-    if ((cust.rowCount ?? 0) === 0) {
-      // Fail-closed: no customer row → no consent on file → refuse.
-      const result: OutboundConsentResult = {
-        allowed: false,
-        reason: 'customer_not_found',
-        message: 'No customer record for this number; cannot verify consent.',
-      };
-      await emitBlockedAudit(deps, ctx, result);
-      return result;
-    }
+    const row = cust.rows[0] as CustomerRow | undefined;
+    // The shared resolver (compliance/resolve-outbound-consent.ts) is the
+    // single decision core for both outbound channels. DNC already
+    // short-circuited above, so dncListed is false here by construction.
+    const decision = resolveOutboundConsent({
+      channel: 'voice',
+      dncListed: false,
+      ledgerEvents: ledger.rows,
+      voice: {
+        customerFound: row !== undefined,
+        consentStatus: row?.consent_status as VoiceConsentStatus | undefined,
+      },
+    });
+    if (decision.allowed) return { allowed: true };
 
-    const row = cust.rows[0];
-    if (row.consent_status === 'granted') return { allowed: true };
-
-    // `granted` already returned above, so the remaining union is the
-    // three refused states. The map matches that narrowed shape.
-    const reasonMap: Record<'not_requested' | 'revoked' | 'expired', OutboundBlockReason> = {
-      not_requested: 'consent_not_granted',
-      revoked: 'consent_revoked',
-      expired: 'consent_expired',
-    };
-    const reason = reasonMap[row.consent_status];
+    const reason = mapVoiceBlockReason(decision.reason!, row?.consent_status);
     const result: OutboundConsentResult = {
       allowed: false,
       reason,
@@ -177,6 +196,43 @@ export async function checkOutboundConsent(
     // Same GUC-leak guard as the rest of the repo layer (Blocker 3).
     try { await client.query('RESET app.current_tenant_id'); } catch { /* ignore */ }
     client.release();
+  }
+}
+
+/**
+ * Translate the shared resolver's canonical refusal into this gate's
+ * pre-existing OutboundBlockReason vocabulary so the audit/metadata shape
+ * is unchanged for every pre-WS12 scenario:
+ *
+ *   - cross_channel_revoked → 'consent_revoked' (the customer DID revoke
+ *     consent — it just arrived on the other channel).
+ *   - no_channel_consent    → the same per-status reason as before
+ *     (not_requested/revoked/expired).
+ *   - customer_not_found    → unchanged.
+ */
+function mapVoiceBlockReason(
+  canonical: 'cross_channel_revoked' | 'no_channel_consent' | 'customer_not_found' | 'dnc' | 'missing_channel_context',
+  consentStatus: CustomerRow['consent_status'] | undefined,
+): OutboundBlockReason {
+  switch (canonical) {
+    case 'cross_channel_revoked':
+      return 'consent_revoked';
+    case 'customer_not_found':
+      return 'customer_not_found';
+    case 'no_channel_consent': {
+      const reasonMap: Record<'not_requested' | 'revoked' | 'expired', OutboundBlockReason> = {
+        not_requested: 'consent_not_granted',
+        revoked: 'consent_revoked',
+        expired: 'consent_expired',
+      };
+      return consentStatus && consentStatus !== 'granted'
+        ? reasonMap[consentStatus]
+        : 'consent_not_granted';
+    }
+    default:
+      // 'dnc' / 'missing_channel_context' are unreachable on the voice path
+      // (DNC short-circuits earlier; missing context is SMS-only).
+      return 'consent_not_granted';
   }
 }
 
@@ -223,6 +279,12 @@ async function emitBlockedAudit(
  * + audit fields, and emits a `customer.consent_changed` audit event. Use
  * this from the consent-capture flows (intake forms, dashboard, voicemail
  * opt-in handler) instead of writing the columns directly.
+ *
+ * Kept despite having no production caller yet: since WS12 tightened the
+ * ledger rollup (grants never move consent_status), this is deliberately the
+ * ONLY seam that can write `consent_status = 'granted'` — the voice
+ * channel's affirmative TCPA capture. Deleting it would leave no legitimate
+ * write path for voice consent at all.
  */
 export interface RecordConsentInput {
   tenantId: string;

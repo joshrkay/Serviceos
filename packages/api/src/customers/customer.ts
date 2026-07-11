@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { AuditEventInput, AuditRepository, createAuditEvent } from '../audit/audit';
+import type { ConsentEventRepository } from '../compliance/consent-events';
 import {
   checkCustomerDuplicatesPg,
   CustomerDuplicateLoader,
@@ -403,7 +404,12 @@ export async function updateCustomer(
   input: UpdateCustomerInput,
   repository: CustomerRepository,
   actorId?: string,
-  auditRepo?: AuditRepository
+  auditRepo?: AuditRepository,
+  // WS12 (one consent model, D-017) — when wired, a manual sms_consent
+  // toggle also appends to the consent_events ledger so the change is
+  // visible to BOTH outbound gates (a portal/dashboard opt-out suppresses
+  // voice too, not just SMS).
+  consentLedger?: ConsentEventRepository
 ): Promise<Customer | null> {
   const existing = await repository.findById(tenantId, id);
   if (!existing) return null;
@@ -436,6 +442,38 @@ export async function updateCustomer(
   }
 
   const updated = await repository.update(tenantId, id, updates);
+
+  // WS12 — ledger the sms_consent change (kind 'sms', source 'manual') so the
+  // one consent model sees it: a revoke here suppresses BOTH channels at the
+  // gates; a re-grant clears only the sms-kind revocation (never voice
+  // consent — see compliance/resolve-outbound-consent.ts). Best-effort,
+  // mirroring stop-reply.ts: the sms_consent column write above is the SMS
+  // channel's primary affirmative signal and must not be undone by a ledger
+  // failure. Skipped when the customer has no phone — the ledger is keyed by
+  // phone_normalized (NOT NULL), and a phoneless customer can't be texted or
+  // called anyway.
+  if (
+    consentLedger &&
+    updated &&
+    input.smsConsent !== undefined &&
+    input.smsConsent !== existing.smsConsent
+  ) {
+    const phone = updated.primaryPhone ?? existing.primaryPhone;
+    if (phone) {
+      try {
+        await consentLedger.append({
+          tenantId,
+          customerId: id,
+          phone,
+          kind: 'sms',
+          state: input.smsConsent ? 'granted' : 'revoked',
+          source: 'manual',
+        });
+      } catch {
+        /* best-effort — never fail the customer update on a ledger write */
+      }
+    }
+  }
 
   if (auditRepo && actorId && updated) {
     const event = createAuditEvent({
