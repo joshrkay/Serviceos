@@ -516,8 +516,8 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
       deps.jobRepo,
     ),
   );
-  handlers.set('update_invoice', new InvoiceEditTaskHandler(deps.gateway));
-  handlers.set('update_estimate', new EstimateEditTaskHandler(deps.gateway, deps.estimateRepo));
+  handlers.set('update_invoice', new InvoiceEditTaskHandler(deps.gateway, { catalogRepo: deps.catalogRepo }));
+  handlers.set('update_estimate', new EstimateEditTaskHandler(deps.gateway, deps.estimateRepo, deps.catalogRepo));
   handlers.set('issue_invoice', new IssueInvoiceTaskHandler(deps.proposalRepo, deps.thresholdResolver));
   handlers.set('create_customer', new CreateCustomerTaskHandler());
   handlers.set('create_job', new CreateJobVoiceTaskHandler());

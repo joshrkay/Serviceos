@@ -1,5 +1,11 @@
 import { LLMGateway, validateLLMRequest } from '../../src/ai/gateway/gateway';
-import type { LLMProvider, LLMRequest, LLMResponse, LLMGatewayConfig } from '../../src/ai/gateway/gateway';
+import type {
+  LLMProvider,
+  LLMRequest,
+  LLMResponse,
+  LLMGatewayConfig,
+  LLMGatewayLogger,
+} from '../../src/ai/gateway/gateway';
 import { StubProvider } from '../../src/ai/gateway/providers';
 import { AppError, ValidationError } from '../../src/shared/errors';
 
@@ -13,14 +19,29 @@ function makeRequest(overrides: Partial<LLMRequest> = {}): LLMRequest {
 
 function makeGateway(
   providers: Map<string, LLMProvider>,
-  config: Partial<LLMGatewayConfig> = {}
+  config: Partial<LLMGatewayConfig> = {},
+  logger?: LLMGatewayLogger
 ): LLMGateway {
   const fullConfig: LLMGatewayConfig = {
     defaultProvider: 'stub',
     defaultModel: 'test-model',
     ...config,
   };
-  return new LLMGateway(fullConfig, providers);
+  return new LLMGateway(fullConfig, providers, logger);
+}
+
+interface CapturedLogEntry {
+  message: string;
+  meta?: Record<string, unknown>;
+}
+
+function makeCapturingLogger(): { logger: LLMGatewayLogger; entries: CapturedLogEntry[] } {
+  const entries: CapturedLogEntry[] = [];
+  const logger: LLMGatewayLogger = {
+    info: (message, meta) => entries.push({ message, meta }),
+    error: (message, meta) => entries.push({ message, meta }),
+  };
+  return { logger, entries };
 }
 
 describe('P2-027 — Provider-agnostic LLM gateway', () => {
@@ -174,5 +195,68 @@ describe('P2-027 — Provider-agnostic LLM gateway', () => {
     expect(response.content).toBe('');
     expect(response.provider).toBe('bad');
     expect(response.tokenUsage).toBeDefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P0 scaling bug guard: LLMGateway.complete() warns (does NOT throw) when a
+// tenant-scoped taskType is missing a top-level tenantId. Without this, the
+// resilience wrappers (ProviderTenantQuotaWrapper / CachingGatewayWrapper)
+// silently fall back to the shared "system" bucket, collapsing every
+// tenant's quota onto one process-global limit. This must stay a warning,
+// not a hard throw — other call sites still omit the top-level field and are
+// being fixed separately; a throw here would break them.
+// ---------------------------------------------------------------------------
+describe('LLMGateway.complete() — missing top-level tenantId guard', () => {
+  it('warns when a known tenant-scoped taskType has no top-level tenantId', async () => {
+    const stub = new StubProvider('stub');
+    stub.setResponse({ content: 'ok', tokenUsage: { input: 1, output: 1, total: 2 } });
+    const providers = new Map<string, LLMProvider>([['stub', stub]]);
+    const { logger, entries } = makeCapturingLogger();
+    const gateway = makeGateway(providers, {}, logger);
+
+    // 'classify_intent' is in the canonical TASK_TYPES list (config/ai-routing.ts)
+    // — a real, tenant-scoped call site — and no top-level tenantId is set here.
+    await gateway.complete(
+      makeRequest({ taskType: 'classify_intent', metadata: { tenantId: 'tenant-xyz' } })
+    );
+
+    const warning = entries.find(
+      (e) => e.meta?.level === 'warn' && e.meta?.taskType === 'classify_intent'
+    );
+    expect(warning).toBeDefined();
+    expect(warning?.message).toMatch(/tenantId/i);
+    // The (buggy) metadata-only placement should still be visible in the log
+    // for triage, even though it doesn't satisfy the guard.
+    expect(warning?.meta?.hasMetadataTenantId).toBe(true);
+  });
+
+  it('does not warn when the request carries a top-level tenantId', async () => {
+    const stub = new StubProvider('stub');
+    stub.setResponse({ content: 'ok', tokenUsage: { input: 1, output: 1, total: 2 } });
+    const providers = new Map<string, LLMProvider>([['stub', stub]]);
+    const { logger, entries } = makeCapturingLogger();
+    const gateway = makeGateway(providers, {}, logger);
+
+    await gateway.complete(
+      makeRequest({ taskType: 'classify_intent', tenantId: 'tenant-xyz' })
+    );
+
+    const warning = entries.find((e) => e.meta?.level === 'warn' && /tenantId/i.test(e.message));
+    expect(warning).toBeUndefined();
+  });
+
+  it('does not throw for a taskType outside the known tenant-scoped set (avoids false positives)', async () => {
+    const stub = new StubProvider('stub');
+    stub.setResponse({ content: 'ok', tokenUsage: { input: 1, output: 1, total: 2 } });
+    const providers = new Map<string, LLMProvider>([['stub', stub]]);
+    const { logger, entries } = makeCapturingLogger();
+    const gateway = makeGateway(providers, {}, logger);
+
+    // 'summarize' (the default makeRequest taskType) is not in the canonical
+    // TASK_TYPES list, so it must not trip the guard.
+    await expect(gateway.complete(makeRequest())).resolves.toBeDefined();
+    const warning = entries.find((e) => e.meta?.level === 'warn' && /tenantId/i.test(e.message));
+    expect(warning).toBeUndefined();
   });
 });

@@ -38,6 +38,7 @@ import React, {
 } from 'react';
 import { useAuth } from '@clerk/clerk-react';
 import { useMe } from './useMe';
+import { fetchWithAuthRetry, type StreamTokenGetter } from '../lib/streamAuth';
 import {
   useResilientStream,
   type StreamStatus,
@@ -96,10 +97,14 @@ function buildWsUrl(): string {
   return `${proto}//${window.location.host}/api/ws`;
 }
 
-async function fetchActiveSessions(token: string): Promise<ActiveSessionDTO[]> {
-  const res = await fetch('/api/voice/sessions/active', {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+async function fetchActiveSessions(getToken: StreamTokenGetter): Promise<ActiveSessionDTO[]> {
+  // ARCH-30 — previously took an already-resolved token string and treated
+  // any non-2xx (including a 401) as a generic network blip subject to the
+  // discovery loop's backoff, so a persistently rejected session just
+  // retried forever instead of signing out. fetchWithAuthRetry retries once
+  // with a force-refreshed token and, on a still-rejected 401/403, routes
+  // through the shared handleAuthFailure() exit like the request layer.
+  const res = await fetchWithAuthRetry(getToken, '/api/voice/sessions/active');
   // Throw on non-2xx so the caller's catch keeps the previous session
   // state instead of treating a transient 401/500/proxy blip as
   // "tenant has zero sessions" and flapping the wall to empty.
@@ -212,15 +217,21 @@ function useActiveSessionsInternal(): UseActiveSessionsResult {
     const BACKOFF_CAP_MS = 5 * 60_000;
     const poll = async () => {
       if (Date.now() < nextAttemptAt) return;
+      // Mirror a fresh token into `token` state for the WS connection below
+      // (useResilientStream reconnects with it). The REST call itself uses
+      // `getToken` directly via fetchActiveSessions, which does its own
+      // retry-then-signout on a rejected token independent of this value.
       const fresh = await refreshToken();
       if (cancelled || !fresh) return;
       try {
-        const list = await fetchActiveSessions(fresh);
+        const list = await fetchActiveSessions((opts) => getToken({ template: 'serviceos', ...opts }));
         if (!cancelled) reconcileSessions(list);
         consecutiveFailures = 0;
         nextAttemptAt = 0;
       } catch {
-        // Network blip / expired token — retried after the backoff window.
+        // Network blip — retried after the backoff window. A persistently
+        // rejected token no longer lands here: fetchActiveSessions already
+        // routed it through handleAuthFailure() before throwing.
         consecutiveFailures += 1;
         nextAttemptAt =
           Date.now() + Math.min(DISCOVERY_POLL_MS * 2 ** consecutiveFailures, BACKOFF_CAP_MS);
@@ -232,7 +243,7 @@ function useActiveSessionsInternal(): UseActiveSessionsResult {
       cancelled = true;
       clearInterval(handle);
     };
-  }, [isAuthorized, refreshToken, reconcileSessions]);
+  }, [isAuthorized, refreshToken, reconcileSessions, getToken]);
 
   // Authorization can flip true → false mid-session (mode switch from
   // supervisor to technician, role downgrade, sign-out). The discovery

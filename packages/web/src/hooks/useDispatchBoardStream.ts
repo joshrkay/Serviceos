@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { useAuth } from '@clerk/clerk-react';
+import { fetchWithAuthRetry } from '../lib/streamAuth';
 
 export interface DispatchBoardStreamEvent {
   type: 'board_updated' | 'presence_updated';
@@ -60,16 +61,19 @@ export function useDispatchBoardStream(
       sseAbortRef.current = controller;
 
       try {
-        const token = await getToken({ template: 'serviceos' });
-        const headers: Record<string, string> = { Accept: 'text/event-stream' };
-        if (token) headers.Authorization = `Bearer ${token}`;
-
-        const response = await fetch(
+        // ARCH-30 — shared 401/403 handling (retry once with a
+        // force-refreshed token, then handleAuthFailure() on the request
+        // layer's terminal exit) instead of the old bare `return`, which
+        // left the board silently dead until the operator navigated away
+        // and back. A still-rejected response falls through to the
+        // `!response.ok` branch below, which throws into the catch block's
+        // existing exponential-backoff reconnect.
+        const response = await fetchWithAuthRetry(
+          (opts) => getToken({ template: 'serviceos', ...opts }),
           `/api/dispatch/board/events?date=${encodeURIComponent(dateParam)}`,
-          { method: 'GET', headers, signal: controller.signal },
+          { method: 'GET', headers: { Accept: 'text/event-stream' }, signal: controller.signal },
         );
 
-        if (response.status === 401 || response.status === 403) return;
         if (!response.ok || !response.body) throw new Error(`SSE ${response.status}`);
 
         sseFailedAtRef.current = null;

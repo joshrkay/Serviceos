@@ -9,7 +9,7 @@ import { ProposalRepository } from '../proposals/proposal';
 import { UserRepository } from '../users/user';
 import { SettingsRepository } from '../settings/settings';
 import { resolvePendingChangeRequests } from './pending-changes';
-import { requireAuth, requireTenant } from '../middleware/auth';
+import { requireAuth, requireRole, requireTenant } from '../middleware/auth';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { toErrorResponse } from '../shared/errors';
 import { createBoardEventsRouter, BoardEventsRouteDeps } from './board-events-route';
@@ -53,14 +53,16 @@ export function createDispatchRoutes(deps: {
 }): Router {
   const router = Router();
 
-  router.get('/board', async (req: Request, res: Response) => {
+  router.get('/board', requireAuth, requireTenant, async (req: AuthenticatedRequest, res: Response) => {
     try {
-      const authReq = req as AuthenticatedRequest;
-      const tenantId =
-        authReq.auth?.tenantId ?? (req.headers['x-tenant-id'] as string | undefined);
-      if (!tenantId) {
-        return res.status(400).json({ error: 'x-tenant-id header is required' });
-      }
+      // SEC-21 — tenant is derived exclusively from the verified session
+      // (req.auth.tenantId), never a client-supplied header. requireAuth +
+      // requireTenant above already 401/403 when it's absent; the old
+      // `?? x-tenant-id header` fallback let a forged header resolve the
+      // board for an arbitrary tenant on any future remount that skipped
+      // (or reordered) the global auth middleware.
+      const authReq = req;
+      const tenantId = authReq.auth!.tenantId;
 
       const date = req.query.date as string;
       if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
@@ -116,6 +118,7 @@ export function createDispatchRoutes(deps: {
     '/technician/:id/appointments',
     requireAuth,
     requireTenant,
+    requireRole('owner', 'dispatcher', 'technician'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const tenantId = req.auth!.tenantId;
@@ -125,6 +128,23 @@ export function createDispatchRoutes(deps: {
         // uuid cast (QA 2026-07-02). Bad input is the caller's error.
         if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(technicianId)) {
           return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'technician id must be a UUID' });
+        }
+
+        // SEC-22 — same-tenant IDOR guard. Mirrors the gate in
+        // routes/technician-location.ts:47: owner/dispatcher may read any
+        // technician's day; a technician-role caller may only read their
+        // OWN day (req.auth.userId is the technician id used throughout
+        // dispatch — see assignmentRepo.create({ technicianId: userId })
+        // in test/integration/dispatch-technician-day-window.test.ts).
+        // Without this, any authenticated tenant member — including a
+        // plain technician — could pass an arbitrary technician UUID and
+        // read that technician's customer names, addresses, lat/long, and
+        // job summaries for the day.
+        if (req.auth!.role === 'technician' && technicianId !== req.auth!.userId) {
+          return res.status(403).json({
+            error: 'FORBIDDEN',
+            message: 'Technicians may only view their own appointments',
+          });
         }
 
         const dateStr = req.query.date as string | undefined;

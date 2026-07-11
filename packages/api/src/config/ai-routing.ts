@@ -9,6 +9,15 @@ export interface TierConfig {
   provider: string;
   maxTokens?: number;
   temperature?: number;
+  /**
+   * VOX-34: per-tier default end-to-end deadline in ms. Applied by
+   * `gateway.complete()` to `request.deadlineMs` when the caller didn't set
+   * one, so latency-critical (lightweight / voice-hot-path) tasks get a budget
+   * consistent with the turn SLO (p95 < 1.5s) instead of the universal 8s
+   * fallback, while heavier tiers keep a larger budget. An explicit
+   * `request.deadlineMs` always wins. Read it via `resolveTierDeadlineMs`.
+   */
+  deadlineMs?: number;
 }
 
 export interface AIRoutingConfig {
@@ -21,6 +30,22 @@ export interface AIRoutingConfig {
 const lightweightModel = process.env.AI_LIGHTWEIGHT_MODEL || 'claude-haiku-4-5-20251001';
 const standardModel = process.env.AI_STANDARD_MODEL || 'claude-sonnet-4-6';
 const complexModel = process.env.AI_COMPLEX_MODEL || 'claude-sonnet-4-6';
+
+/** Parse a positive-integer env var (ms), falling back on unset/invalid input. */
+function parsePositiveIntEnv(raw: string | undefined, fallback: number): number {
+  if (!raw) return fallback;
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : fallback;
+}
+
+// VOX-34: per-tier default deadlines (ms), env-overridable without a deploy.
+// Lightweight is the voice hot path (classify_intent etc.) — kept close to the
+// turn SLO. Standard/complex get progressively larger budgets. The retry layer
+// still enforces MIN_RETRY_BUDGET_MS, so a tight budget never forces zero
+// retries where a quick one would fit.
+const lightweightDeadlineMs = parsePositiveIntEnv(process.env.AI_LIGHTWEIGHT_DEADLINE_MS, 1_500);
+const standardDeadlineMs = parsePositiveIntEnv(process.env.AI_STANDARD_DEADLINE_MS, 4_000);
+const complexDeadlineMs = parsePositiveIntEnv(process.env.AI_COMPLEX_DEADLINE_MS, 8_000);
 
 /**
  * Canonical set of gateway taskTypes — every value passed to
@@ -130,12 +155,31 @@ const DEFAULT_TASK_TIER_MAPPING: Record<TaskType, ModelTier> = {
 
 export const DEFAULT_AI_ROUTING_CONFIG: AIRoutingConfig = {
   tiers: {
-    lightweight: { model: lightweightModel, provider: 'default', maxTokens: 1024, temperature: 0 },
-    standard: { model: standardModel, provider: 'default', maxTokens: 4096, temperature: 0.3 },
-    complex: { model: complexModel, provider: 'default', maxTokens: 8192, temperature: 0.5 },
+    lightweight: { model: lightweightModel, provider: 'default', maxTokens: 1024, temperature: 0, deadlineMs: lightweightDeadlineMs },
+    standard: { model: standardModel, provider: 'default', maxTokens: 4096, temperature: 0.3, deadlineMs: standardDeadlineMs },
+    complex: { model: complexModel, provider: 'default', maxTokens: 8192, temperature: 0.5, deadlineMs: complexDeadlineMs },
   },
   taskTierMapping: DEFAULT_TASK_TIER_MAPPING,
 };
+
+/**
+ * VOX-34: resolve the per-request default deadline (ms) for a model tier.
+ *
+ * `gateway.complete()` calls this with the resolved tier when the caller left
+ * `request.deadlineMs` unset. Falls back to the built-in default-config tier
+ * budget (and finally the complex-tier budget) if a tenant override replaced a
+ * tier entry without carrying `deadlineMs` — so we never return undefined.
+ */
+export function resolveTierDeadlineMs(
+  tier: ModelTier,
+  config: AIRoutingConfig = DEFAULT_AI_ROUTING_CONFIG,
+): number {
+  return (
+    config.tiers[tier]?.deadlineMs ??
+    DEFAULT_AI_ROUTING_CONFIG.tiers[tier].deadlineMs ??
+    complexDeadlineMs
+  );
+}
 
 /**
  * Models known to accept image content parts. Env-overridable so ops can

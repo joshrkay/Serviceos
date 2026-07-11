@@ -49,9 +49,33 @@ export const NO_RETRY: RetryPolicy = {
   mode: 'in-stream',
 };
 
+/**
+ * VOX-32: thrown by a provider when a request completes but the model returns
+ * structurally empty / malformed output (no content). This is a classic
+ * transient LLM hiccup, not a permanent failure, so `classifyError` maps it to
+ * 'transient' and `runWithRetry` retries it within the remaining deadline.
+ *
+ * KNOWN LIMITATION (separately tracked): with a single configured provider the
+ * failover list (`fallbackProviders`) is always empty, so in-deadline retry is
+ * the ONLY recovery path for this class — there is no cross-provider failover
+ * yet. Adding a second real provider is purely additive (see
+ * compose-resilience.ts single-provider note).
+ */
+export class EmptyProviderResponseError extends Error {
+  readonly code = 'PROVIDER_EMPTY_RESPONSE';
+  constructor(message: string) {
+    super(message);
+    this.name = 'EmptyProviderResponseError';
+  }
+}
+
 export function classifyError(err: unknown): ErrorClass {
   if (isDeadlineExceeded(err)) return 'timeout';
   if (err instanceof Error) {
+    // VOX-32: empty/malformed provider output → transient (retryable). It
+    // carries no HTTP status, so without this it would fall through to
+    // 'permanent' and never be retried.
+    if ((err as { code?: string }).code === 'PROVIDER_EMPTY_RESPONSE') return 'transient';
     const msg = err.message.toLowerCase();
     const status = (err as { status?: number; statusCode?: number }).status
       ?? (err as { statusCode?: number }).statusCode;

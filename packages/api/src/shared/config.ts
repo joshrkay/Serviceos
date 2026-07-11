@@ -108,8 +108,15 @@ function validateProductionConfig(config: AppConfig): void {
   if (!config.CLERK_SECRET_KEY) missing.push('CLERK_SECRET_KEY');
   if (!config.CLERK_PUBLISHABLE_KEY) missing.push('CLERK_PUBLISHABLE_KEY');
 
-  // Webhooks — signing secrets required to verify inbound webhooks
+  // Webhooks — signing secrets required to verify inbound webhooks.
+  // SEC-43: CLERK gates tenant bootstrap; STRIPE gates payment confirmation
+  // (billing is core — every prod tenant takes card payments). Without
+  // STRIPE_WEBHOOK_SECRET the Stripe handler 400s/503s on the first real
+  // event, so Stripe shows "paid" while the invoice never settles. Fail fast
+  // at boot instead. (WISETACK_WEBHOOK_SECRET is financing-gated — see the
+  // feature-required gate below — because financing is opt-in per tenant.)
   if (!config.CLERK_WEBHOOK_SECRET) missing.push('CLERK_WEBHOOK_SECRET');
+  if (!config.STRIPE_WEBHOOK_SECRET) missing.push('STRIPE_WEBHOOK_SECRET');
 
   // AI provider
   if (!config.AI_PROVIDER_API_KEY) missing.push('AI_PROVIDER_API_KEY');
@@ -191,6 +198,69 @@ function validateFeatureRequiredConfig(env: Record<string, string | undefined>):
     if (!env.R2_ACCOUNT_ID) missing.push('R2_ACCOUNT_ID (or set STORAGE_ENABLED=false)');
     if (!env.R2_ACCESS_KEY_ID) missing.push('R2_ACCESS_KEY_ID (or set STORAGE_ENABLED=false)');
     if (!env.R2_SECRET_ACCESS_KEY) missing.push('R2_SECRET_ACCESS_KEY (or set STORAGE_ENABLED=false)');
+  }
+
+  // Voice Media Streams (Twilio bidirectional audio) require a raw-PCM-capable
+  // TTS path. The media-streams adapter feeds the TTS output straight into a
+  // PCM16 -> mu-law encoder with no decoder, so only the ElevenLabs *streaming*
+  // provider (synthesizeStream, raw PCM) is safe. OpenAI tts-1 — the default
+  // when TTS_PROVIDER is unset — returns mp3, which plays as inaudible static
+  // on every call (VOX-30). Opt-IN flag (unlike the opt-out features above), so
+  // only enforced when explicitly enabled. The createApp() boot guard
+  // (assertTtsProviderSupportsMediaStreams) is a second, later layer; this
+  // fails earlier and also catches the missing-key silent-no-audio case.
+  const mediaStreamsEnabled = env.TWILIO_MEDIA_STREAMS_ENABLED === 'true';
+  if (mediaStreamsEnabled) {
+    if (env.TTS_PROVIDER !== 'elevenlabs') {
+      missing.push(
+        'TTS_PROVIDER=elevenlabs (required by TWILIO_MEDIA_STREAMS_ENABLED=true — only the ' +
+          'ElevenLabs streaming provider emits raw PCM; OpenAI/unset returns mp3 that plays as ' +
+          'static; or set TWILIO_MEDIA_STREAMS_ENABLED=false)'
+      );
+    }
+    if (!env.ELEVENLABS_API_KEY) {
+      missing.push(
+        'ELEVENLABS_API_KEY (required by TWILIO_MEDIA_STREAMS_ENABLED=true; or set TWILIO_MEDIA_STREAMS_ENABLED=false)'
+      );
+    }
+  }
+
+  // SEC-43 — Wisetack financing webhook secret, gated on financing being on.
+  // Financing is OPT-IN per tenant: createFinancingProvider() only builds the
+  // live Wisetack client when WISETACK_API_KEY is present (else it falls back
+  // to the Manual provider), so we must NOT force Wisetack config on tenants
+  // that don't offer financing. But when financing IS wired, the webhook secret
+  // is required — without it the Wisetack status webhook 500s and approvals/
+  // declines silently stop updating (customer approved, invoice never reflects
+  // it). Enabled when WISETACK_API_KEY is set, or explicitly via
+  // FINANCING_ENABLED=true. Names the opt-out so an operator can fix it.
+  const financingEnabled =
+    env.FINANCING_ENABLED === 'true' || Boolean(env.WISETACK_API_KEY);
+  if (financingEnabled && !env.WISETACK_WEBHOOK_SECRET) {
+    missing.push(
+      'WISETACK_WEBHOOK_SECRET (required when financing is enabled via ' +
+        'WISETACK_API_KEY / FINANCING_ENABLED=true — verifies inbound Wisetack ' +
+        'status webhooks; unset it only if you disable financing)'
+    );
+  }
+
+  // SEC-01 — RLS runtime-role enforcement is a HARD prod/staging requirement.
+  // Postgres Row-Level Security is a runtime NO-OP unless the app drops to the
+  // least-privilege, RLS-subject `rls_app_runtime` role for tenant-scoped queries,
+  // which only happens when RLS_RUNTIME_ROLE=true (see db/rls-runtime-role.ts).
+  // Without it, a single forgotten `tenant_id` filter silently crosses tenants —
+  // tenant isolation would rest solely on app-layer filters. Unlike the feature
+  // bundles above there is NO opt-out flag: shipping prod/staging with RLS
+  // unenforced is not permitted. The boot probe `verifyRlsRuntimeRole` fails fast
+  // if the `rls_app_runtime` role is unprovisioned, so requiring the flag can
+  // never silently ship a broken RLS state — provision the role first (migration
+  // 217 / docs/runbooks/rls-runtime-role-rollout.md), then set the flag.
+  if (env.RLS_RUNTIME_ROLE !== 'true') {
+    missing.push(
+      'RLS_RUNTIME_ROLE=true (Postgres RLS enforcement — makes tenant-isolation ' +
+        'policies actually enforce; requires the rls_app_runtime role from migration ' +
+        '217; see docs/runbooks/rls-runtime-role-rollout.md)'
+    );
   }
 
   if (missing.length > 0) {

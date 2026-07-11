@@ -60,7 +60,11 @@ export type AnalyticsEvent =
   | 'wizard_completed'
   | 'test_call_initiated'
   | 'test_call_succeeded'
-  | 'activation_celebrated';
+  | 'activation_celebrated'
+  // ARCH-31 / OBS-43 — global async-error capture (lib/errorReporter.ts).
+  // Payload is always the redacted { name, message, source } shape; never
+  // the raw Error object, a stack trace, a request body, or a token.
+  | 'app_error';
 
 type Props = Record<string, string | number | boolean | null | undefined>;
 

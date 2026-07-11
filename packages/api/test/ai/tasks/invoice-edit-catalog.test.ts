@@ -186,23 +186,36 @@ describe('P22-001 invoice-edit-catalog', () => {
     expect(parsed.success).toBe(true);
   });
 
-  it('degrades to current free-text behavior when the catalog is empty', async () => {
+  it('flags an empty catalog as uncatalogued and hard-blocks auto-approve (VOX-51)', async () => {
     const repo = new InMemoryCatalogItemRepository();
     const gateway = mockGateway(
-      editResponse([
-        { type: 'add_line_item', lineItem: { description: 'trip fee', quantity: 1, unitPrice: 7500 } },
-      ]),
+      editResponse(
+        [{ type: 'add_line_item', lineItem: { description: 'trip fee', quantity: 1, unitPrice: 7500 } }],
+        0.98,
+      ),
     );
 
     const handler = new InvoiceEditTaskHandler(gateway, { catalogRepo: repo });
     const result = await handler.handle({ tenantId: TENANT, userId: 'u-1', message: 'add a trip fee' });
 
-    const payload = result.proposal.payload as { editActions: Array<Record<string, unknown>> };
+    const payload = result.proposal.payload as {
+      editActions: Array<Record<string, unknown>>;
+      _meta?: { overallConfidence?: string };
+    };
     const lineItem = payload.editActions[0].lineItem as Record<string, unknown>;
-    // Untouched: no flags, LLM price kept (operator spoke it).
-    expect(lineItem).toEqual({ description: 'trip fee', quantity: 1, unitPrice: 7500 });
+    // Empty catalog is no longer a free-text short-circuit: with nothing to
+    // ground against, the LLM price is untrusted.
+    expect(lineItem.pricingSource).toBe('uncatalogued');
+    expect(lineItem.needsPricing).toBe(true);
+    expect(lineItem.unitPriceCents).toBeNull();
+    // Executable `unitPrice` stays numeric (update_invoice Zod contract)…
+    expect(lineItem.unitPrice).toBe(7500);
+    // …but the LLM's 0.98 self-report can never auto-approve.
+    expect(payload._meta?.overallConfidence).toBe('low');
+    expect(result.proposal.confidenceScore).toBeLessThanOrEqual(UNCATALOGUED_CONFIDENCE_CAP);
+    expect(result.proposal.status).not.toBe('approved');
 
-    // No catalog section injected into the prompt either.
+    // No catalog section injected into the prompt (empty catalog).
     const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
     expect(call.messages[1].content).not.toContain('Service catalog');
   });
@@ -424,6 +437,73 @@ describe('P22-001 invoice-edit-catalog', () => {
       expect(payload.lineItems[0].unitPriceCents).toBe(7500);
       // …but it also must not silently let an ungrounded price auto-approve.
       expect(payload.lineItems[0].pricingSource).toBe('uncatalogued');
+      expect(result.proposal.confidenceScore).toBeLessThanOrEqual(UNCATALOGUED_CONFIDENCE_CAP);
+      expect(result.proposal.status).not.toBe('approved');
+    });
+  });
+
+  // VOX-51 — the money-safety invariant: an AI-invented edit price must never
+  // auto-execute. Gated with a supervisor present + a low tenant threshold so
+  // that ONLY the `_meta.overallConfidence:'low'` marker (not a missing
+  // supervisor) is what blocks the uncatalogued case.
+  describe('VOX-51 confidence gating for update_invoice edits', () => {
+    const supervised = {
+      supervisorPresent: true,
+      supervisorMode: 'supervisor' as const,
+      tenantThresholdOverride: { supervisor: 0.5 }, // below the 0.85 cap
+    };
+
+    it('(a) a catalogued edit line auto-approves — catalog price wins, confidence not force-capped', async () => {
+      const repo = new InMemoryCatalogItemRepository();
+      const [gasket] = await seedCatalog(repo, TENANT, [{ name: 'Gasket', unitPriceCents: 450 }]);
+
+      const gateway = mockGateway(
+        editResponse(
+          [{ type: 'add_line_item', lineItem: { description: 'gasket', quantity: 1, unitPrice: 9999 } }],
+          0.9,
+        ),
+      );
+      const handler = new InvoiceEditTaskHandler(gateway, { catalogRepo: repo });
+      const result = await handler.handle({ tenantId: TENANT, userId: 'u-1', message: 'edit', ...supervised });
+
+      const payload = result.proposal.payload as {
+        editActions: Array<Record<string, unknown>>;
+        _meta?: { overallConfidence?: string };
+      };
+      const lineItem = payload.editActions[0].lineItem as Record<string, unknown>;
+      expect(lineItem.unitPrice).toBe(450); // catalog overwrites the LLM's 9999
+      expect(lineItem.catalogItemId).toBe(gasket.id);
+      expect(lineItem.pricingSource).toBe('catalog');
+      // Not uncatalogued → confidence untouched, marker not forced low.
+      expect(result.proposal.confidenceScore).toBe(0.9);
+      expect(payload._meta?.overallConfidence).not.toBe('low');
+      expect(result.proposal.status).toBe('approved');
+    });
+
+    it('(b) an uncatalogued edit line with LLM confidence 0.98 carries _meta.overallConfidence low and does NOT auto-approve', async () => {
+      const repo = new InMemoryCatalogItemRepository();
+      await seedCatalog(repo, TENANT, [{ name: 'Gasket', unitPriceCents: 450 }]);
+
+      const gateway = mockGateway(
+        editResponse(
+          // "premium widget" is not in the catalog.
+          [{ type: 'add_line_item', lineItem: { description: 'premium widget', quantity: 1, unitPrice: 12345 } }],
+          0.98,
+        ),
+      );
+      const handler = new InvoiceEditTaskHandler(gateway, { catalogRepo: repo });
+      const result = await handler.handle({ tenantId: TENANT, userId: 'u-1', message: 'edit', ...supervised });
+
+      const payload = result.proposal.payload as {
+        editActions: Array<Record<string, unknown>>;
+        _meta?: { overallConfidence?: string };
+      };
+      const lineItem = payload.editActions[0].lineItem as Record<string, unknown>;
+      expect(lineItem.pricingSource).toBe('uncatalogued');
+      expect(lineItem.needsPricing).toBe(true);
+      expect(lineItem.unitPriceCents).toBeNull();
+      // The hard block: low marker + capped score → never auto-approved.
+      expect(payload._meta?.overallConfidence).toBe('low');
       expect(result.proposal.confidenceScore).toBeLessThanOrEqual(UNCATALOGUED_CONFIDENCE_CAP);
       expect(result.proposal.status).not.toBe('approved');
     });

@@ -273,6 +273,17 @@ export interface StreamingTranscriptionProvider {
  * P8-012 wires this into the Twilio Media Streams WebSocket handler.
  * Whisper stays in place for the existing async technician voice path.
  */
+
+/**
+ * VOX-01 — upper bound on the Deepgram WS handshake. Deliberately far
+ * tighter than the blocking-request bounds (TTS/Whisper 30s, Vapi 20s):
+ * this runs on the live-call hot path with caller audio already bridged,
+ * so a stall here is immediate dead air. A WS upgrade that hasn't
+ * completed in a few seconds is not going to; fail fast to the
+ * closeWs('deepgram_open_failed') path instead of hanging the call.
+ */
+export const DEEPGRAM_OPEN_TIMEOUT_MS = 5_000;
+
 export class DeepgramStreamingProvider implements StreamingTranscriptionProvider {
   private readonly defaultLanguage: 'en' | 'es';
 
@@ -318,9 +329,54 @@ export class DeepgramStreamingProvider implements StreamingTranscriptionProvider
 
     // Attach message listener BEFORE awaiting open to avoid missing frames
     // that Deepgram sends immediately on connection.
+    //
+    // VOX-01 — bound the handshake. Twilio has already bridged caller audio
+    // by the time we open Deepgram, so if the WS upgrade stalls (no 'open',
+    // no 'error') an unbounded `await openPromise` would leave `deepgram`
+    // null and silently drop every inbound frame until the 30-minute idle
+    // timer — dead air for the whole call. Every other provider bounds its
+    // calls (TTS/Whisper 30s, Vapi 20s); a few seconds is ample for a WS
+    // upgrade. On expiry we reject (and close the socket) so the caller's
+    // existing catch path (closeWs(1011,'deepgram_open_failed')) runs. This
+    // bound lives inside openSession, so BOTH call sites — the initial open
+    // and the language-switch reopen in mediastream-adapter — inherit it.
     const openPromise = new Promise<void>((resolve, reject) => {
-      ws.addEventListener('open', () => resolve(), { once: true });
-      ws.addEventListener('error', (e) => reject(new Error(String(e))), { once: true });
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        try {
+          ws.close();
+        } catch {
+          /* swallow — we are already failing the open */
+        }
+        reject(
+          new Error(
+            `deepgram_open_timeout: no open/error within ${DEEPGRAM_OPEN_TIMEOUT_MS}ms`,
+          ),
+        );
+      }, DEEPGRAM_OPEN_TIMEOUT_MS);
+      if (typeof timer.unref === 'function') timer.unref();
+      ws.addEventListener(
+        'open',
+        () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolve();
+        },
+        { once: true },
+      );
+      ws.addEventListener(
+        'error',
+        (e) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          reject(new Error(String(e)));
+        },
+        { once: true },
+      );
     });
 
     ws.addEventListener('message', (msg) => {

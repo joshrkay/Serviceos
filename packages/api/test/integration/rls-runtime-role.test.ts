@@ -10,9 +10,12 @@
  */
 import crypto from 'crypto';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { Pool as PgPool } from 'pg';
 import type { Pool, PoolClient } from 'pg';
 import { closeSharedTestDb, createTestTenant, getSharedTestDb } from './shared';
 import { applyTenantContext, clearTenantContext } from '../../src/db/rls-runtime-role';
+import { PgPortalSessionRepository } from '../../src/portal/pg-portal-session';
+import { PgAccountingIntegrationRepository } from '../../src/integrations/accounting/repository';
 
 let pool: Pool;
 const ORIGINAL_FLAG = process.env.RLS_RUNTIME_ROLE;
@@ -132,5 +135,93 @@ describe('RLS runtime-role enforcement (real Postgres, RLS_RUNTIME_ROLE=true)', 
     } finally {
       client.release();
     }
+  });
+});
+
+/**
+ * SEC-02 — system-level lookups must set their escape-hatch GUC with SET LOCAL
+ * inside the SAME transaction as the dependent SELECT.
+ *
+ * The repos-under-test run on a pool whose connections assume the restricted,
+ * RLS-subject `rls_app_runtime` role at connection start (libpq startup
+ * `options: -c role=...`), so RLS actually enforces against them — the same
+ * end-state as production with RLS_RUNTIME_ROLE=true. Seeding uses the
+ * privileged shared `pool` (BYPASSRLS), which writes across tenants freely.
+ *
+ * Before the SEC-02 fix, `findByTokenHash` / `findAllActive` issued
+ * `set_config(..., is_local=true)` OUTSIDE any transaction; that GUC was
+ * discarded before the separate SELECT ran, so under this role the policy
+ * evaluated false and the query returned ZERO rows. If either method regresses
+ * to the non-transactional pattern, these tests fail (row/rows disappear).
+ */
+describe('RLS runtime-role: system-level lookups set their GUC transactionally (SEC-02)', () => {
+  let rlsPool: PgPool;
+
+  beforeAll(() => {
+    rlsPool = new PgPool({
+      connectionString: process.env.TEST_DB_URL,
+      options: '-c role=rls_app_runtime',
+    });
+  });
+  afterAll(async () => {
+    await rlsPool.end();
+  });
+
+  it('S1: PgPortalSessionRepository.findByTokenHash returns the row under the enforcing role', async () => {
+    const t = await createTestTenant(pool);
+    const tokenHash = crypto
+      .createHash('sha256')
+      .update(crypto.randomUUID())
+      .digest('hex');
+    const sessionId = crypto.randomUUID();
+    await pool.query(
+      `INSERT INTO portal_sessions (id, tenant_id, customer_id, token_hash, expires_at, created_by)
+       VALUES ($1, $2, $3, $4, NOW() + INTERVAL '1 day', $5)`,
+      [sessionId, t.tenantId, crypto.randomUUID(), tokenHash, t.userId]
+    );
+
+    const repo = new PgPortalSessionRepository(rlsPool);
+    // Without the transactional GUC this returns null (0 rows) under the role.
+    const found = await repo.findByTokenHash(tokenHash);
+    expect(found).not.toBeNull();
+    expect(found!.id).toBe(sessionId);
+    expect(found!.tenantId).toBe(t.tenantId);
+
+    // A hash with no matching row still resolves to null (not an error).
+    const miss = await repo.findByTokenHash('0'.repeat(64));
+    expect(miss).toBeNull();
+  });
+
+  it('S2: AccountingIntegrationRepository.findAllActive returns active integrations under the enforcing role', async () => {
+    const a = await createTestTenant(pool);
+    const b = await createTestTenant(pool);
+    const c = await createTestTenant(pool);
+    await pool.query(
+      `INSERT INTO accounting_integrations
+         (tenant_id, provider, access_token_encrypted, refresh_token_encrypted, realm_id, status)
+       VALUES ($1, 'quickbooks', 'enc-a', 'enc-a', 'realm-a', 'active')`,
+      [a.tenantId]
+    );
+    await pool.query(
+      `INSERT INTO accounting_integrations
+         (tenant_id, provider, access_token_encrypted, refresh_token_encrypted, realm_id, status)
+       VALUES ($1, 'quickbooks', 'enc-b', 'enc-b', 'realm-b', 'active')`,
+      [b.tenantId]
+    );
+    // Disconnected integration must be excluded by the status filter.
+    await pool.query(
+      `INSERT INTO accounting_integrations
+         (tenant_id, provider, access_token_encrypted, refresh_token_encrypted, realm_id, status)
+       VALUES ($1, 'quickbooks', 'enc-c', 'enc-c', 'realm-c', 'disconnected')`,
+      [c.tenantId]
+    );
+
+    const repo = new PgAccountingIntegrationRepository(rlsPool);
+    // Cross-tenant by design: sees BOTH active tenants (would be 0 before the fix).
+    const active = await repo.findAllActive();
+    const tenantIds = active.map((i) => i.tenantId);
+    expect(tenantIds).toContain(a.tenantId);
+    expect(tenantIds).toContain(b.tenantId);
+    expect(tenantIds).not.toContain(c.tenantId);
   });
 });

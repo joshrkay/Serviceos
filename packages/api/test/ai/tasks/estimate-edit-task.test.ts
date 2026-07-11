@@ -24,6 +24,11 @@ import {
   calculateDocumentTotals,
   LineItem,
 } from '../../../src/shared/billing-engine';
+import {
+  InMemoryCatalogItemRepository,
+  createCatalogItem,
+} from '../../../src/catalog/catalog-item';
+import { UNCATALOGUED_CONFIDENCE_CAP } from '../../../src/ai/resolution/catalog-resolver';
 
 function mockGateway(jsonContent: string): LLMGateway {
   return {
@@ -227,7 +232,15 @@ describe('EstimateEditTaskHandler', () => {
       expect(meta.markers![0].reason).toMatch(/voids the customer's prior acceptance/);
     });
 
-    it('omits the marker when the target estimate is NOT accepted', async () => {
+    // The `editGateway()` transcript adds an uncatalogued "Trip fee" with no
+    // catalog wired, so `_meta` is now present (VOX-50 low-confidence marker).
+    // These cases assert the ACCEPTANCE-void marker specifically is ABSENT.
+    function acceptanceMarkerPresent(payload: Record<string, unknown>): boolean {
+      const meta = payload._meta as { markers?: Array<{ path: string; reason: string }> } | undefined;
+      return Boolean(meta?.markers?.some((m) => m.path === ACCEPTANCE_VOID_MARKER.path));
+    }
+
+    it('omits the acceptance marker when the target estimate is NOT accepted', async () => {
       const estimateRepo = new InMemoryEstimateRepository();
       await estimateRepo.create(makeEstimate({ status: 'draft', acceptedAt: undefined }));
 
@@ -238,20 +251,20 @@ describe('EstimateEditTaskHandler', () => {
         message: 'Add a trip fee to EST-0001',
       });
 
-      expect((result.proposal.payload as Record<string, unknown>)._meta).toBeUndefined();
+      expect(acceptanceMarkerPresent(result.proposal.payload as Record<string, unknown>)).toBe(false);
     });
 
-    it('omits the marker when no estimate repo is wired', async () => {
+    it('omits the acceptance marker when no estimate repo is wired', async () => {
       const handler = new EstimateEditTaskHandler(editGateway());
       const result = await handler.handle({
         tenantId,
         userId,
         message: 'Add a trip fee to EST-0001',
       });
-      expect((result.proposal.payload as Record<string, unknown>)._meta).toBeUndefined();
+      expect(acceptanceMarkerPresent(result.proposal.payload as Record<string, unknown>)).toBe(false);
     });
 
-    it('omits the marker when the reference is ambiguous (two matches)', async () => {
+    it('omits the acceptance marker when the reference is ambiguous (two matches)', async () => {
       const estimateRepo = new InMemoryEstimateRepository();
       await estimateRepo.create(makeEstimate({ id: 'est-1', estimateNumber: 'EST-0001' }));
       await estimateRepo.create(makeEstimate({ id: 'est-2', estimateNumber: 'EST-00012' }));
@@ -262,7 +275,7 @@ describe('EstimateEditTaskHandler', () => {
         userId,
         message: 'Add a trip fee to EST-0001',
       });
-      expect((result.proposal.payload as Record<string, unknown>)._meta).toBeUndefined();
+      expect(acceptanceMarkerPresent(result.proposal.payload as Record<string, unknown>)).toBe(false);
     });
 
     it('resolves by estimateId when the payload carries one', async () => {
@@ -309,7 +322,152 @@ describe('EstimateEditTaskHandler', () => {
         message: 'Add a trip fee to EST-0001',
       });
       expect(result.proposal.proposalType).toBe('update_estimate');
-      expect((result.proposal.payload as Record<string, unknown>)._meta).toBeUndefined();
+      expect(acceptanceMarkerPresent(result.proposal.payload as Record<string, unknown>)).toBe(false);
+    });
+  });
+
+  describe('VOX-50 — catalog grounding for update_estimate edits', () => {
+    async function seedCatalog(
+      repo: InMemoryCatalogItemRepository,
+      entries: Array<{ name: string; unitPriceCents: number }>,
+    ) {
+      const created = [];
+      for (const e of entries) {
+        created.push(
+          await repo.create(
+            createCatalogItem({
+              tenantId,
+              name: e.name,
+              category: 'Parts',
+              unit: 'each',
+              unitPriceCents: e.unitPriceCents,
+            }),
+          ),
+        );
+      }
+      return created;
+    }
+
+    function editResponse(
+      lineItem: Record<string, unknown>,
+      confidence = 0.9,
+    ): LLMGateway {
+      return mockGateway(
+        JSON.stringify({
+          estimateReference: 'EST-0001',
+          editActions: [{ type: 'add_line_item', lineItem }],
+          confidence_score: confidence,
+        }),
+      );
+    }
+
+    // Supervisor present + low tenant threshold so ONLY the low-confidence
+    // marker (not a missing supervisor) can block the uncatalogued case.
+    const supervised = {
+      supervisorPresent: true,
+      supervisorMode: 'supervisor' as const,
+      tenantThresholdOverride: { supervisor: 0.5 },
+    };
+
+    it('(a) a catalogued edit line takes the catalog price, overwriting the LLM guess, and auto-approves', async () => {
+      const repo = new InMemoryCatalogItemRepository();
+      const [siteVisit] = await seedCatalog(repo, [{ name: 'Site Visit', unitPriceCents: 15000 }]);
+
+      const gateway = editResponse(
+        { description: 'site visit', quantity: 1, unitPrice: 99999 },
+        0.9,
+      );
+      const handler = new EstimateEditTaskHandler(gateway, undefined, repo);
+      const result = await handler.handle({ tenantId, userId, message: 'edit', ...supervised });
+
+      const payload = result.proposal.payload as {
+        editActions: Array<Record<string, unknown>>;
+        _meta?: { overallConfidence?: string };
+      };
+      const lineItem = payload.editActions[0].lineItem as Record<string, unknown>;
+      expect(lineItem.unitPrice).toBe(15000); // catalog overwrites the LLM's 99999
+      expect(lineItem.unitPriceCents).toBe(15000);
+      expect(lineItem.catalogItemId).toBe(siteVisit.id);
+      expect(lineItem.pricingSource).toBe('catalog');
+      expect(result.proposal.confidenceScore).toBe(0.9); // not force-capped
+      expect(payload._meta?.overallConfidence).not.toBe('low');
+      expect(result.proposal.status).toBe('approved');
+    });
+
+    it('(b) an uncatalogued edit line with LLM confidence 0.98 carries _meta.overallConfidence low and does NOT auto-approve', async () => {
+      const repo = new InMemoryCatalogItemRepository();
+      await seedCatalog(repo, [{ name: 'Site Visit', unitPriceCents: 15000 }]);
+
+      const gateway = editResponse(
+        { description: 'premium widget', quantity: 1, unitPrice: 12345 },
+        0.98,
+      );
+      const handler = new EstimateEditTaskHandler(gateway, undefined, repo);
+      const result = await handler.handle({ tenantId, userId, message: 'edit', ...supervised });
+
+      const payload = result.proposal.payload as {
+        editActions: Array<Record<string, unknown>>;
+        _meta?: { overallConfidence?: string };
+      };
+      const lineItem = payload.editActions[0].lineItem as Record<string, unknown>;
+      expect(lineItem.pricingSource).toBe('uncatalogued');
+      expect(lineItem.needsPricing).toBe(true);
+      expect(lineItem.unitPriceCents).toBeNull();
+      expect(payload._meta?.overallConfidence).toBe('low');
+      expect(result.proposal.confidenceScore).toBeLessThanOrEqual(UNCATALOGUED_CONFIDENCE_CAP);
+      expect(result.proposal.status).not.toBe('approved');
+    });
+
+    it('merges the acceptance-void marker with the uncatalogued marker (RV-042 + VOX-50)', async () => {
+      const estimateRepo = new InMemoryEstimateRepository();
+      const lineItems: LineItem[] = [
+        buildLineItem('li-1', 'Replace heater', 1, 120000, 0, true, 'labor'),
+      ];
+      await estimateRepo.create({
+        id: 'est-1',
+        tenantId,
+        jobId: 'job-1',
+        estimateNumber: 'EST-0001',
+        status: 'accepted',
+        lineItems,
+        totals: calculateDocumentTotals(lineItems, 0, 0),
+        acceptedAt: new Date('2026-06-05T12:00:00Z'),
+        version: 2,
+        createdBy: userId,
+        createdAt: new Date('2026-06-01T00:00:00Z'),
+        updatedAt: new Date('2026-06-05T12:00:00Z'),
+      });
+      const repo = new InMemoryCatalogItemRepository(); // empty → uncatalogued
+
+      const gateway = editResponse({ description: 'trip fee', quantity: 1, unitPrice: 7500 }, 0.9);
+      const handler = new EstimateEditTaskHandler(gateway, estimateRepo, repo);
+      const result = await handler.handle({ tenantId, userId, message: 'Add a trip fee to EST-0001' });
+
+      const meta = (result.proposal.payload as Record<string, unknown>)._meta as {
+        overallConfidence?: string;
+        markers?: Array<{ path: string; reason: string }>;
+      };
+      // Both markers present; acceptance marker stays first, uncatalogued low wins.
+      expect(meta.overallConfidence).toBe('low');
+      expect(meta.markers).toContainEqual(ACCEPTANCE_VOID_MARKER);
+      expect(meta.markers![0].path).toBe('_acceptance');
+      expect(meta.markers!.some((m) => m.path.startsWith('editActions['))).toBe(true);
+    });
+
+    it('backward compatible when constructed without a catalog repo (uncatalogued, capped)', async () => {
+      const gateway = editResponse({ description: 'trip fee', quantity: 1, unitPrice: 7500 }, 0.98);
+      const handler = new EstimateEditTaskHandler(gateway);
+      const result = await handler.handle({ tenantId, userId, message: 'edit', ...supervised });
+
+      const payload = result.proposal.payload as {
+        editActions: Array<Record<string, unknown>>;
+        _meta?: { overallConfidence?: string };
+      };
+      const lineItem = payload.editActions[0].lineItem as Record<string, unknown>;
+      expect(lineItem.pricingSource).toBe('uncatalogued');
+      expect(lineItem.unitPrice).toBe(7500); // kept numeric for the Zod contract
+      expect(payload._meta?.overallConfidence).toBe('low');
+      expect(result.proposal.status).not.toBe('approved');
     });
   });
 });

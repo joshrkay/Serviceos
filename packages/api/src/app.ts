@@ -508,7 +508,7 @@ import { PgAiRunRepository } from './ai/pg-ai-run';
 import { createEvaluationRouter } from './routes/evaluation';
 import { PgShadowComparisonStore } from './ai/evaluation/pg-shadow-comparison';
 import { InMemoryShadowComparisonStore } from './ai/evaluation/shadow-comparison';
-import { createTtsProvider } from './ai/tts/tts-provider';
+import { createTtsProvider, assertTtsProviderSupportsMediaStreams } from './ai/tts/tts-provider';
 import { InAppVoiceAdapter } from './ai/agents/customer-calling/inapp-adapter';
 import { VoiceSessionStore } from './ai/agents/customer-calling/voice-session-store';
 import { createVoiceEventTransport } from './ai/agents/customer-calling/voice-event-transport';
@@ -688,7 +688,24 @@ import { buildHelmetOptions } from './bootstrap/helmet-options';
 import { checkMetricsAuth, type MetricsAuthResult } from './bootstrap/metrics-auth';
 export { buildHelmetOptions, checkMetricsAuth, type MetricsAuthResult };
 
-export function createApp(): express.Express {
+// ARCH-02: the graceful-drain sequence (flip /ready to 503, reject new WS
+// upgrades, wait DRAIN_TIMEOUT_MS for live voice/WS sessions, then tear down
+// background loops/Redis/pool) must run for BOTH a clean SIGTERM/SIGINT and a
+// fatal in-process error (uncaughtException) — index.ts's fatal handler calls
+// `app.gracefulDrain(reason)` directly instead of duplicating this sequence
+// so a sync throw can no longer bypass the drain and drop live calls.
+export type AppWithLifecycle = express.Express & {
+  /**
+   * Idempotent, bounded drain-before-teardown. Safe to call more than once
+   * (e.g. a SIGTERM arriving while a fatal-error drain is already in
+   * flight) — every caller after the first gets the SAME in-flight promise
+   * instead of re-running teardown (double-closing the pool/Redis clients).
+   * `reason` is for logging only; it is not necessarily a POSIX signal name.
+   */
+  gracefulDrain: (reason: string) => Promise<void>;
+};
+
+export function createApp(): AppWithLifecycle {
   // §11 H3: Initialize Sentry FIRST so any error thrown during startup
   // or in handler construction below is captured. initSentry() is a no-op
   // when SENTRY_DSN is unset (dev/test), so this is safe in every env.
@@ -720,7 +737,6 @@ export function createApp(): express.Express {
   // svix signed, instead of re-serializing the parsed object (key order /
   // whitespace differences would fail legit webhooks and break tenant bootstrap).
   app.use('/webhooks/clerk', express.raw({ type: 'application/json' }));
-  app.use('/api/webhooks/clerk', express.raw({ type: 'application/json' }));
 
   // Vapi signs its server messages (serverUrlSecret). Capture the raw Buffer
   // here so the HMAC verification in handleVapiCallEvent sees the exact bytes
@@ -736,6 +752,15 @@ export function createApp(): express.Express {
   // Register the raw parser BEFORE global express.json() (like Stripe); the
   // handler router is mounted later once repos are constructed.
   app.use('/webhooks/wisetack', express.raw({ type: '*/*' }));
+
+  // SEC-40 — SendGrid's Event Webhook signs `timestamp + payload` (ECDSA over
+  // the EXACT delivered bytes). Capture the raw Buffer here BEFORE global
+  // express.json() so handleSendGrid verifies over the bytes SendGrid signed —
+  // same treatment as Stripe/Vapi. Without this the global json() consumes and
+  // re-parses the body; the handler's JSON.stringify() fallback re-serializes a
+  // different byte sequence (key order / whitespace), so verifySendGridSignature
+  // rejects every genuine signed delivery and the webhook is non-functional.
+  app.use('/webhooks/sendgrid', express.raw({ type: 'application/json' }));
 
   // Body parsing for all other routes. Explicit ceiling (default is an
   // implicit 100kb): large-but-bounded so no client can buffer unbounded
@@ -1032,8 +1057,16 @@ export function createApp(): express.Express {
       ? { apiKey: process.env.STRIPE_SECRET_KEY }
       : undefined,
   };
+  // SEC-41 — canonical webhook surface is `/webhooks/*` (every external
+  // provider config in docs/launch/GO-LIVE-RUNBOOK.md + docs/third-party-services
+  // points there). The former `/api/webhooks` alias was mounted WITHOUT the
+  // per-provider raw-body middleware above (only registered for `/webhooks/*`),
+  // so `/api/webhooks/stripe|vapi` reached the handler with a JSON-parsed body:
+  // the Stripe handler throws synchronously when req.body isn't a Buffer, which
+  // in Express 4 becomes an unhandled rejection and HANGS the request. The alias
+  // is unreferenced by any test, e2e spec, doc, or provider config, so it is
+  // removed rather than duplicated — smaller surface, no divergent behavior.
   app.use('/webhooks', createWebhookRouter(config, webhookRouterDeps));
-  app.use('/api/webhooks', createWebhookRouter(config, webhookRouterDeps));
 
   // Dev-only storage PUT receiver for DevStorageProvider upload URLs.
   // Mounted before /api Clerk auth so unauthenticated presigned-style PUTs
@@ -3457,6 +3490,20 @@ export function createApp(): express.Express {
       // filler clips and live TTS speak with one voice.
       ELEVENLABS_VOICE_ID: process.env.ELEVENLABS_VOICE_ID,
       AI_PROVIDER_API_KEY: config.AI_PROVIDER_API_KEY,
+    });
+    // P0 voice-output fail-fast: Twilio Media Streams requires raw PCM16
+    // audio (mediastream-adapter.ts encodes it to mu-law itself via
+    // streamPcmAsMedia). A TtsProvider that only implements synthesize()
+    // (OpenAI tts-1, ElevenLabs' non-streaming call) returns compressed
+    // audio (mp3) with no transcoder in the media-streams path — feeding
+    // that into streamPcmAsMedia produces inaudible static on every call.
+    // Only synthesizeStream() implementations (currently ElevenLabs) emit
+    // raw PCM. Crash at boot rather than ship a silent voice outage — same
+    // fail-fast posture as the DATABASE_URL check above.
+    assertTtsProviderSupportsMediaStreams({
+      mediaStreamsEnabled,
+      provider: sharedTtsProvider,
+      ttsProviderEnv: process.env.TTS_PROVIDER,
     });
     const streamingProvider = deepgramKey
       ? new DeepgramStreamingProvider(deepgramKey)
@@ -5949,7 +5996,20 @@ export function createApp(): express.Express {
   // don't stack handlers, and we exit only when the pool finishes draining
   // (or after a 5s safety timeout). Server lifecycle is owned by index.ts —
   // this handler only takes responsibility for the DB pool.
-  const shutdown = async (signal: NodeJS.Signals) => {
+  //
+  // ARCH-02: wrapped in a memoized promise so it is idempotent — index.ts's
+  // fatal-error handler and this module's own SIGTERM/SIGINT listeners can
+  // all reach this function, and only the FIRST caller actually runs
+  // teardown; every subsequent caller (concurrent SIGTERM during a fatal
+  // drain, or vice versa) awaits the same in-flight drain instead of
+  // re-entering it (which would double-close the pool/Redis clients).
+  let shutdownPromise: Promise<void> | null = null;
+  const shutdown = (reason: string): Promise<void> => {
+    if (shutdownPromise) return shutdownPromise;
+    shutdownPromise = runShutdown(reason);
+    return shutdownPromise;
+  };
+  const runShutdown = async (signal: string) => {
     try {
       // eslint-disable-next-line no-console
       console.log(`[app] ${signal} received — stopping background loops, closing voice sessions and pg pool`);
@@ -6015,5 +6075,10 @@ export function createApp(): express.Express {
   process.once('SIGTERM', shutdown);
   process.once('SIGINT', shutdown);
 
-  return app;
+  // ARCH-02: share the exact same (idempotent, bounded) drain sequence with
+  // index.ts's fatal-error handler — see AppWithLifecycle above.
+  const appWithLifecycle = app as AppWithLifecycle;
+  appWithLifecycle.gracefulDrain = shutdown;
+
+  return appWithLifecycle;
 }

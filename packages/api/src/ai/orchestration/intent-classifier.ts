@@ -1508,14 +1508,17 @@ async function classifyIntentRaw(
       { role: 'user', content: transcript },
     ],
     responseFormat: 'json',
-    // Scope this call to the real tenant. The top-level `tenantId` is what the
-    // gateway reads (a) to persist the ai_runs row under the correct tenant —
-    // required so the surfaced aiRunId points at a REAL, FK-valid row a voice
-    // proposal can link to (proposals.ai_run_id → ai_runs(id)); persisting
-    // under the 'system' fallback would fail the tenants FK on Postgres — and
-    // (b) for per-tenant cache-key / cost / routing scoping. `metadata` is
-    // retained for byte-identical logging/correlation.
+    // Top-level tenantId is what the resilience wrappers key on
+    // (ProviderTenantQuotaWrapper / CachingGatewayWrapper both read
+    // request.tenantId, not metadata.tenantId). Without it every tenant's
+    // classify_intent calls collapsed onto the shared SYSTEM_TENANT_ID
+    // quota bucket (concurrency 8 for the WHOLE platform) and, were the
+    // gateway cache ever enabled, onto a shared cache key (cross-tenant
+    // leak of classification + extracted entities).
     tenantId: context.tenantId,
+    // Kept in metadata too: some downstream logging/consumers still read
+    // tenantId from here (see gateway.ts correlationId/promptVersionId
+    // metadata reads for the pattern this follows).
     metadata: { tenantId: context.tenantId },
   });
 

@@ -1,13 +1,16 @@
 import { TaskHandler, TaskContext, TaskResult } from './task-handlers';
 import { createProposal, CreateProposalInput } from '../../proposals/proposal';
 import { LLMGateway } from '../gateway/gateway';
-import { assessConfidence } from '../guardrails/confidence';
+import { assessConfidence, getConfidenceLevel } from '../guardrails/confidence';
+import type { ConfidenceLevel } from '../guardrails/confidence';
+import type { ProposalConfidenceMeta } from '../../proposals/contracts';
 import type { CatalogItem, CatalogItemRepository } from '../../catalog/catalog-item';
 import {
   buildCatalogPromptSection,
   resolveSpokenLineItems,
   CATALOG_PROMPT_ITEM_CAP,
 } from './catalog-resolution';
+import { UNCATALOGUED_CONFIDENCE_CAP } from '../resolution/catalog-resolver';
 
 /**
  * InvoiceEditTaskHandler — produces `update_invoice` proposals from
@@ -94,28 +97,51 @@ function buildPayload(parsed: Record<string, unknown> | null): Record<string, un
 }
 
 /**
- * P22-001 — post-process LLM edit actions through catalog resolution.
+ * VOX-51 — post-process LLM edit actions through catalog resolution.
  *
- * For every `add_line_item` / `update_line_item` action:
+ * Runs the SAME money-correctness contract as draft_invoice: an
+ * AI-invented price must never be trusted into an auto-approvable
+ * proposal. For every `add_line_item` / `update_line_item` action:
  * - resolved against exactly one catalog item → the catalog's
  *   `unitPriceCents` OVERWRITES the LLM's price (never trust LLM
  *   prices), and `catalogItemId` is stamped on the line item.
- * - unresolved (not in catalog, or ambiguous) → LLM text kept,
- *   `unitPriceCents: null`, flagged `needsPricing: true` so the
- *   approval UI highlights it. Never guessed.
+ * - unresolved (not in catalog, ambiguous, OR no catalog to ground
+ *   against) → the LLM price is UNTRUSTED: flagged
+ *   `pricingSource:'uncatalogued'` + `needsPricing:true`, `unitPriceCents`
+ *   nulled, and the line drives `anyUncatalogued` so the handler caps
+ *   confidence AND stamps `_meta.overallConfidence:'low'` (hard-blocks
+ *   auto-approval). LLM text kept verbatim — never guessed.
  *
- * Empty catalog → payload returned untouched (current free-text
- * behavior). Additive fields only, so the update_invoice Zod contract
- * (which requires `unitPrice`) still validates.
+ * Empty catalog is NOT a short-circuit (that was the VOX-51 hole where a
+ * new/empty-catalog tenant let an LLM-priced edit auto-approve): with no
+ * catalog every priced line is uncatalogued, exactly like the draft
+ * path's markAllUncatalogued. The executable `unitPrice` is left numeric
+ * so the update_invoice Zod contract (which requires it) still
+ * validates; it can never reach execution without a human first
+ * reviewing the low-confidence proposal.
  */
-function applyCatalogPricingToEditActions(
+interface EditGroundingResult {
+  payload: Record<string, unknown>;
+  anyUncatalogued: boolean;
+  anyCatalogPriced: boolean;
+  markers: Array<{ path: string; reason: string }>;
+  fieldConfidence: Record<string, ConfidenceLevel>;
+}
+
+function groundEditActionPricing(
   payload: Record<string, unknown>,
   catalogItems: CatalogItem[],
-): Record<string, unknown> {
-  if (catalogItems.length === 0) return payload;
-  if (!Array.isArray(payload.editActions)) return payload;
+): EditGroundingResult {
+  const markers: Array<{ path: string; reason: string }> = [];
+  const fieldConfidence: Record<string, ConfidenceLevel> = {};
+  let anyUncatalogued = false;
+  let anyCatalogPriced = false;
 
-  const editActions = (payload.editActions as Array<Record<string, unknown>>).map((action) => {
+  if (!Array.isArray(payload.editActions)) {
+    return { payload, anyUncatalogued, anyCatalogPriced, markers, fieldConfidence };
+  }
+
+  const editActions = (payload.editActions as Array<Record<string, unknown>>).map((action, idx) => {
     if (
       !action ||
       (action.type !== 'add_line_item' && action.type !== 'update_line_item') ||
@@ -129,13 +155,19 @@ function applyCatalogPricingToEditActions(
     const description = typeof lineItem.description === 'string' ? lineItem.description : '';
     const quantity = typeof lineItem.quantity === 'number' ? lineItem.quantity : undefined;
 
-    const { resolved } = resolveSpokenLineItems(
-      [{ description, ...(quantity !== undefined ? { quantity } : {}) }],
-      catalogItems,
-    );
+    // No catalog to ground against ⇒ every priced line is uncatalogued
+    // (never trust the LLM price), mirroring markAllUncatalogued.
+    const resolved =
+      catalogItems.length > 0
+        ? resolveSpokenLineItems(
+            [{ description, ...(quantity !== undefined ? { quantity } : {}) }],
+            catalogItems,
+          ).resolved
+        : [];
 
     if (resolved.length === 1) {
       const match = resolved[0];
+      anyCatalogPriced = true;
       return {
         ...action,
         lineItem: {
@@ -148,25 +180,40 @@ function applyCatalogPricingToEditActions(
           unitPrice: match.unitPriceCents,
           unitPriceCents: match.unitPriceCents,
           catalogItemId: match.catalogItemId,
+          pricingSource: 'catalog',
           needsPricing: false,
         },
       };
     }
 
-    // Unresolved: keep the LLM's text verbatim, never guess a catalog
-    // price. `unitPrice` is left as-is (contract requires a number);
-    // `unitPriceCents: null` + needsPricing flag the item for review.
+    // Unresolved / ambiguous / no-catalog: the LLM price is untrusted.
+    anyUncatalogued = true;
+    const path = `editActions[${idx}].lineItem.unitPrice`;
+    fieldConfidence[path] = 'low';
+    markers.push({
+      path,
+      reason: `"${description}" is not in the tenant catalog — the price is AI-estimated and needs review`,
+    });
     return {
       ...action,
       lineItem: {
         ...lineItem,
+        // Executable `unitPrice` kept numeric for the Zod contract, but the
+        // proposal cannot auto-approve (see _meta low + confidence cap).
         unitPriceCents: null,
+        pricingSource: 'uncatalogued',
         needsPricing: true,
       },
     };
   });
 
-  return { ...payload, editActions };
+  return {
+    payload: { ...payload, editActions },
+    anyUncatalogued,
+    anyCatalogPriced,
+    markers,
+    fieldConfidence,
+  };
 }
 
 export interface InvoiceEditTaskDeps {
@@ -216,16 +263,45 @@ export class InvoiceEditTaskHandler implements TaskHandler {
     });
 
     const parsed = tryParseJson(llmResponse.content);
-    const payload = applyCatalogPricingToEditActions(buildPayload(parsed), catalogItems);
+    const grounding = groundEditActionPricing(buildPayload(parsed), catalogItems);
+    const payload = grounding.payload;
+
     const confidence = assessConfidence(parsed ?? {});
+    let confidenceScore = confidence.score;
+    const confidenceFactors = [...confidence.factors];
+    if (grounding.anyCatalogPriced) confidenceFactors.push('catalog_priced');
+    if (grounding.anyUncatalogued) {
+      confidenceFactors.push('uncatalogued_line_item');
+      // Money-correctness gate: an AI-invented price must never ride a
+      // ≥0.9 confidence score into autonomous auto-approval.
+      confidenceScore = Math.min(confidenceScore, UNCATALOGUED_CONFIDENCE_CAP);
+    }
+
+    // VOX-51 — Confidence Marker `_meta`. Any ungrounded (LLM-priced) line
+    // hard-blocks auto-approval via the RV-007 confidence-marker guard,
+    // independent of the numeric score AND of any tenant
+    // auto_approve_threshold override. An AI-invented edit price must always
+    // reach a human.
+    if (grounding.anyUncatalogued || grounding.anyCatalogPriced) {
+      const meta: ProposalConfidenceMeta = {
+        overallConfidence: grounding.anyUncatalogued
+          ? 'low'
+          : getConfidenceLevel(confidenceScore),
+        ...(Object.keys(grounding.fieldConfidence).length > 0
+          ? { fieldConfidence: grounding.fieldConfidence }
+          : {}),
+        ...(grounding.markers.length > 0 ? { markers: grounding.markers } : {}),
+      };
+      payload._meta = meta;
+    }
 
     const input: CreateProposalInput = {
       tenantId: context.tenantId,
       proposalType: this.taskType,
       payload,
       summary: context.message,
-      confidenceScore: confidence.score,
-      confidenceFactors: confidence.factors,
+      confidenceScore,
+      confidenceFactors,
       sourceContext: context.conversationId ? { conversationId: context.conversationId } : undefined,
       createdBy: context.userId,
       // update_invoice touches an existing entity but the target is
@@ -265,6 +341,6 @@ export {
   INVOICE_EDIT_SYSTEM_PROMPT,
   tryParseJson,
   buildPayload,
-  applyCatalogPricingToEditActions,
+  groundEditActionPricing,
   CATALOG_PROMPT_ITEM_CAP,
 };

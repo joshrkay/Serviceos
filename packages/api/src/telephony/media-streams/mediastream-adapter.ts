@@ -473,6 +473,22 @@ const TWILIO_SLOW_CONSUMER_GRACE_MS = 8_000;
 const TWILIO_SLOW_CONSUMER_EWMA_THRESHOLD_MS = 250;
 
 /**
+ * P0 voice-output fix — MIME types that `streamPcmAsMedia` can safely
+ * consume. That method treats its input as raw, unencoded PCM16 samples
+ * (it does the PCM16 → mu-law encoding itself via `encodeTwilioOutboundFrame`)
+ * — it has no decoder for compressed formats. A `TtsProvider.synthesize()`
+ * result is only safe to hand to it when `contentType` is one of these; any
+ * compressed format (e.g. OpenAI/ElevenLabs' default 'audio/mpeg') would be
+ * streamed out as static with no error otherwise.
+ */
+const RAW_PCM_CONTENT_TYPES = new Set(['audio/pcm', 'audio/l16', 'audio/x-raw', 'audio/raw']);
+
+function isRawPcmContentType(contentType: string): boolean {
+  const base = contentType.split(';')[0]?.trim().toLowerCase() ?? '';
+  return RAW_PCM_CONTENT_TYPES.has(base);
+}
+
+/**
  * B2 — map handleClose's `reason` into a CallOutcome-compatible
  * endedReason recognised by `deriveCallOutcome`. Transport-layer
  * failures (WS errors, slow-consumer disconnects, outbound-queue
@@ -1553,31 +1569,53 @@ export class TwilioMediaStreamAdapter {
 
     try {
       if (typeof ttsProvider.synthesizeStream === 'function') {
-        const stream = ttsProvider.synthesizeStream({
-          text,
-          tenantId: this.state.tenantId ?? undefined,
-          signal: controller.signal,
-          language: lang,
-        });
-        let first = true;
-        for await (const chunk of stream) {
-          if (turnId !== this.state.outboundTurnId || !this.state.agentSpeaking) {
-            controller.abort();
-            break;
+        try {
+          const stream = ttsProvider.synthesizeStream({
+            text,
+            tenantId: this.state.tenantId ?? undefined,
+            signal: controller.signal,
+            language: lang,
+          });
+          let first = true;
+          for await (const chunk of stream) {
+            if (turnId !== this.state.outboundTurnId || !this.state.agentSpeaking) {
+              controller.abort();
+              break;
+            }
+            if (first && chunk.pcm.length > 0) {
+              realStarted = true;
+              if (fillerTimer) clearTimeout(fillerTimer);
+              // If a filler clip is mid-stream, terminate it cleanly by
+              // bumping outboundTurnId (exits its streamPcmAsMedia loop)
+              // and rebinding our local turnId to the new value.
+              cancelActiveFiller();
+              first = false;
+            }
+            if (chunk.pcm.length > 0) {
+              await this.streamPcmAsMedia(chunk.pcm, turnId);
+            }
+            if (chunk.isFinal) break;
           }
-          if (first && chunk.pcm.length > 0) {
-            realStarted = true;
+        } catch (streamErr) {
+          // VOX-35b — a WS blip or a VOX-33 inactivity stall surfaces here
+          // as a thrown rejection. The old caller only logged.warn, so the
+          // utterance was cut off mid-sentence → dead air. Recover once via
+          // the buffered REST synth (or a short filler) instead of silently
+          // ending the turn. A clean barge-in does NOT reach this path: it
+          // aborts the controller, which closes the WS and ends the stream
+          // normally (done, not error).
+          logger.warn('mediastream: TTS stream failed mid-turn, attempting recovery', {
+            error: streamErr instanceof Error ? streamErr.message : String(streamErr),
+            realStarted,
+            callSid: this.state.callSid,
+          });
+          // Only recover if this turn still owns the floor (no barge-in, no
+          // newer turn superseded it).
+          if (turnId === this.state.outboundTurnId && this.state.agentSpeaking) {
             if (fillerTimer) clearTimeout(fillerTimer);
-            // If a filler clip is mid-stream, terminate it cleanly by
-            // bumping outboundTurnId (exits its streamPcmAsMedia loop)
-            // and rebinding our local turnId to the new value.
             cancelActiveFiller();
-            first = false;
+            await this.recoverTurnAfterStreamFailure(ttsProvider, text, lang, turnId);
           }
-          if (chunk.pcm.length > 0) {
-            await this.streamPcmAsMedia(chunk.pcm, turnId);
-          }
-          if (chunk.isFinal) break;
         }
       } else {
         const result = await ttsProvider.synthesize({
@@ -1589,7 +1627,21 @@ export class TwilioMediaStreamAdapter {
         if (fillerTimer) clearTimeout(fillerTimer);
         // Same cancellation logic for buffered (non-streaming) TTS.
         cancelActiveFiller();
-        if (turnId === this.state.outboundTurnId && this.state.agentSpeaking) {
+        // P0 defense-in-depth: streamPcmAsMedia() assumes raw PCM16 @ 16kHz
+        // (it mu-law-encodes the bytes itself) and does NOT decode
+        // compressed formats. synthesize() results are only PCM-safe when
+        // contentType says so — feeding compressed audio (e.g. OpenAI's
+        // default 'audio/mpeg') into it produces inaudible static with no
+        // error surfaced to the caller. The app.ts boot guard should
+        // prevent a non-streaming, non-PCM provider from ever being wired
+        // when Media Streams is enabled; this check is the belt-and-
+        // suspenders so a future provider swap can't silently regress.
+        if (!isRawPcmContentType(result.contentType)) {
+          logger.error(
+            'mediastream: synthesize() returned non-PCM audio, dropping instead of streaming as static',
+            { contentType: result.contentType, provider: result.provider, tenantId: this.state.tenantId ?? undefined },
+          );
+        } else if (turnId === this.state.outboundTurnId && this.state.agentSpeaking) {
           await this.streamPcmAsMedia(result.audio, turnId);
         }
       }
@@ -1602,6 +1654,82 @@ export class TwilioMediaStreamAdapter {
     // Return the (possibly rebounded) turnId so emitSideEffects can
     // compare it against outboundTurnId for the agentSpeaking reset.
     return turnId;
+  }
+
+  /**
+   * VOX-35b — recover a voice turn whose streaming TTS failed mid-flight
+   * (WS error, or a VOX-33 inactivity stall). Preference order, all bounded:
+   *
+   *  1. Buffered REST `synthesize()` — but ONLY stream it when the result is
+   *     raw PCM (same guard the non-streaming branch uses). ElevenLabs REST
+   *     returns mp3, which streamPcmAsMedia would emit as inaudible static —
+   *     worse than silence — so a non-PCM result is dropped, not played.
+   *  2. A short filler/apology clip from the cache, so the caller hears an
+   *     acknowledgement rather than dead air while the turn ends cleanly.
+   *
+   * If neither is available we still return normally: the throw is now
+   * caught, so `agentSpeaking` resets in the caller's finally and the call
+   * proceeds to listen again — never the 30-minute idle hang.
+   *
+   * All writes are re-guarded on turn ownership because `synthesize()` can
+   * take time and the caller may barge in during the fallback.
+   */
+  private async recoverTurnAfterStreamFailure(
+    ttsProvider: TtsProvider,
+    text: string,
+    lang: SessionLanguage,
+    turnId: number,
+  ): Promise<void> {
+    let result: Awaited<ReturnType<TtsProvider['synthesize']>> | null = null;
+    try {
+      result = await ttsProvider.synthesize({
+        text,
+        tenantId: this.state.tenantId ?? undefined,
+        language: lang,
+      });
+    } catch (err) {
+      logger.warn('mediastream: buffered TTS fallback also failed', {
+        error: err instanceof Error ? err.message : String(err),
+        callSid: this.state.callSid,
+      });
+    }
+
+    if (
+      result &&
+      isRawPcmContentType(result.contentType) &&
+      turnId === this.state.outboundTurnId &&
+      this.state.agentSpeaking
+    ) {
+      await this.streamPcmAsMedia(result.audio, turnId);
+      return;
+    }
+    if (result && !isRawPcmContentType(result.contentType)) {
+      logger.warn(
+        'mediastream: buffered TTS fallback returned non-PCM audio, cannot stream — trying filler',
+        { contentType: result.contentType, provider: result.provider, callSid: this.state.callSid },
+      );
+    }
+
+    // Last resort: a short filler clip so the caller hears something.
+    const engine = this.deps.fillerEngine;
+    const cache = this.deps.fillerCache;
+    if (
+      engine &&
+      cache &&
+      turnId === this.state.outboundTurnId &&
+      this.state.agentSpeaking
+    ) {
+      const filler = engine.selectNext({ language: lang });
+      const pcm = filler ? cache.get(filler.id) : undefined;
+      if (pcm) {
+        await this.streamPcmAsMedia(pcm, turnId, /* isFiller */ true);
+        return;
+      }
+    }
+
+    logger.warn('mediastream: TTS turn ended without audio after stream failure', {
+      callSid: this.state.callSid,
+    });
   }
 
   /**
