@@ -401,6 +401,10 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['241_estimates_tenant_sent_at_index', 'f4c9cb40bd945e3bbab16bfa4b5a8180279919384343c4a153a607cc7b35c630'],
   ['242_create_supervisor_reviews', '9f7aba0a44dac7e8b03a8d2fa1c9c882bbdf72aa8688385acc9b022151374c25'],
   ['243_brand_voice_versions_changed_by_text', 'cfbe7e3a622aec7a34f86d3a3cb159edad53183794086e00cce557d1daa8fc79'],
+  // DATA-01 — jobs(tenant_id, assigned_technician_id) covering index.
+  ['244_jobs_tenant_assigned_technician_index', '6ec31bae8e5a854d824f9b702f78abf085542989e1fb6ed3b0ec9a4ac841d902'],
+  // DATA-02 — audit_events(tenant_id, created_at DESC) covering index.
+  ['245_audit_events_tenant_created_at_index', '570afac2db19bba1e0a9f1a7dea4f86392b962055de5dcdbbc1be629f9f6c83a'],
 ];
 
 function hashMigration(value: string): string {
