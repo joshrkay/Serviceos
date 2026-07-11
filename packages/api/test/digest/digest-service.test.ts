@@ -478,6 +478,27 @@ describe('summarizeProposalForDigest', () => {
     expect(absent.overallConfidence).toBeUndefined();
     expect(absent.reviewInApp).toBeUndefined();
   });
+
+  it('marks hasMissingFields when the proposal has unresolved missingFields (draft with ambiguous line)', () => {
+    // A draft capture proposal with an unresolved catalog line: approveProposal
+    // rejects it, so the digest must not offer a one-tap link.
+    const withMissing = summarizeProposalForDigest(
+      proposal({
+        proposalType: 'draft_estimate',
+        sourceContext: { missingFields: ['lineItems[1].catalogItemId'] },
+      }),
+    );
+    expect(withMissing.hasMissingFields).toBe(true);
+
+    // No missingFields (or empty) → flag absent (stays one-tap eligible).
+    const complete = summarizeProposalForDigest(proposal({ proposalType: 'draft_estimate' }));
+    expect(complete.hasMissingFields).toBeUndefined();
+
+    const emptyMissing = summarizeProposalForDigest(
+      proposal({ proposalType: 'draft_estimate', sourceContext: { missingFields: [] } }),
+    );
+    expect(emptyMissing.hasMissingFields).toBeUndefined();
+  });
 });
 
 describe('date helpers', () => {

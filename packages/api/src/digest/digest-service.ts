@@ -21,6 +21,7 @@ import type { EstimateRepository } from '../estimates/estimate';
 import type { JobRepository } from '../jobs/job';
 import type { AppointmentRepository } from '../appointments/appointment';
 import type { ProposalRepository, Proposal, ProposalStatus } from '../proposals/proposal';
+import { missingFieldsFor } from '../proposals/proposal';
 import type { CustomerRepository } from '../customers/customer';
 import type { SettingsRepository } from '../settings/settings';
 import type { CorrectionLessonRepository } from '../learning/corrections/correction-lesson';
@@ -62,6 +63,14 @@ export interface DigestPendingApproval {
    * Absent (falsy) when one-tap is allowed.
    */
   reviewInApp?: true;
+  /**
+   * True when the proposal has unresolved `missingFields` (e.g. an ambiguous
+   * catalog line on a draft estimate). `approveProposal` rejects such
+   * proposals, so the worker must suppress one-tap / "APPROVE ALL" links for
+   * them — they surface in the digest deep link for in-app review only.
+   * Absent (falsy) when there are no missing fields.
+   */
+  hasMissingFields?: true;
 }
 
 export interface DigestUnbilledJob {
@@ -248,6 +257,7 @@ export function summarizeProposalForDigest(proposal: Proposal): DigestPendingApp
   const amountCents = extractAmountCents(proposal.payload ?? {});
   const customerName = extractCustomerName(proposal);
   const overallConfidence = extractOverallConfidence(proposal.payload ?? {});
+  const hasMissingFields = missingFieldsFor(proposal).length > 0;
   return {
     proposalId: proposal.id,
     proposalType: proposal.proposalType,
@@ -256,6 +266,7 @@ export function summarizeProposalForDigest(proposal: Proposal): DigestPendingApp
     ...(amountCents !== undefined ? { amountCents } : {}),
     ...(overallConfidence !== undefined ? { overallConfidence } : {}),
     ...(isBlockingConfidence(overallConfidence) ? { reviewInApp: true as const } : {}),
+    ...(hasMissingFields ? { hasMissingFields: true as const } : {}),
   };
 }
 

@@ -554,9 +554,15 @@ async function sendDigestSms(
  * surface in the digest deep link for in-app review, but never carry a bare
  * approve affordance — mirroring the chain-send `suppressApproveLink`
  * invariant and the SMS Y-reply class refusal. Unknown class fails closed.
+ *
+ * Proposals with unresolved `missingFields` (e.g. an ambiguous catalog line on
+ * a draft estimate) are likewise excluded: `approveProposal` rejects them, so a
+ * one-tap / "APPROVE ALL" link would always fail. They stay in the digest deep
+ * link for in-app review only.
  */
 function isBatchApprovable(approval: DailyDigestPayload['pendingApprovals']['top'][number]): boolean {
   if (isBlockingConfidence(approval.overallConfidence)) return false;
+  if (approval.hasMissingFields) return false;
   return actionClassForProposalType(approval.proposalType as ProposalType) === 'capture';
 }
 
