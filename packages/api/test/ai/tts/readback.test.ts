@@ -1,92 +1,20 @@
 /**
- * Readback + voice-approval classifier tests.
+ * Voice-approval utterance classifier tests.
  *
- * Critical safety: money / comms / irreversible proposals must
- * ALWAYS say "tap to confirm on screen" — they cannot be approved
- * by voice under any circumstance. These tests are the forcing
- * function that keeps the behavior explicit.
+ * Critical safety: `classifyStrictConfirm` gates the RV-071 confirm
+ * stage — only a short, unambiguous affirmative approves; negation
+ * always dominates, and retargeting/compound utterances re-ask rather
+ * than execute. These tests are the forcing function that keeps that
+ * behavior explicit. (The readback script itself — including the
+ * money/comms/irreversible screen-tap cue — is composed by
+ * `composeReadback` in ai/tasks/proposal-approval-task.ts and pinned
+ * there.)
  */
 import { describe, it, expect } from 'vitest';
 import {
-  buildReadbackScript,
-  isVoiceApprovable,
   classifyVoiceApproval,
   classifyStrictConfirm,
 } from '../../../src/ai/tts/readback';
-import { Proposal, ProposalType } from '../../../src/proposals/proposal';
-
-function fakeProposal(partial: Partial<Proposal> & { proposalType: ProposalType }): Proposal {
-  const now = new Date();
-  return {
-    id: 'p-1',
-    tenantId: 't-1',
-    status: 'draft',
-    payload: {},
-    summary: 'Sarah Chen, $450',
-    createdBy: 'u-1',
-    createdAt: now,
-    updatedAt: now,
-    ...partial,
-  };
-}
-
-describe('readback — isVoiceApprovable', () => {
-  it('allows voice approval only for capture-class proposals', () => {
-    expect(isVoiceApprovable('draft_invoice')).toBe(true);
-    expect(isVoiceApprovable('create_customer')).toBe(true);
-    expect(isVoiceApprovable('reschedule_appointment')).toBe(true);
-    expect(isVoiceApprovable('add_note')).toBe(true);
-  });
-
-  it('refuses voice approval for money / comms / irreversible', () => {
-    expect(isVoiceApprovable('record_payment')).toBe(false); // money
-    expect(isVoiceApprovable('send_invoice')).toBe(false); // comms
-    expect(isVoiceApprovable('send_estimate')).toBe(false); // comms
-    expect(isVoiceApprovable('cancel_appointment')).toBe(false); // irreversible
-  });
-});
-
-describe('readback — buildReadbackScript', () => {
-  it('ends capture-class readbacks with the voice approval cue', () => {
-    const s = buildReadbackScript(fakeProposal({ proposalType: 'draft_invoice' }));
-    expect(s).toContain('Say approve or cancel.');
-  });
-
-  it('forces screen-tap cue on money proposals even if payload looks harmless', () => {
-    const s = buildReadbackScript(fakeProposal({ proposalType: 'record_payment' }));
-    expect(s).not.toContain('Say approve');
-    expect(s.toLowerCase()).toContain('tap to confirm on screen');
-  });
-
-  it('forces screen-tap cue on comms proposals (send_invoice)', () => {
-    const s = buildReadbackScript(fakeProposal({ proposalType: 'send_invoice' }));
-    expect(s).not.toContain('Say approve');
-    expect(s.toLowerCase()).toContain('tap to confirm on screen');
-  });
-
-  it('forces screen-tap cue on comms proposals (send_estimate)', () => {
-    const s = buildReadbackScript(fakeProposal({ proposalType: 'send_estimate' }));
-    expect(s).not.toContain('Say approve');
-    expect(s.toLowerCase()).toContain('tap to confirm on screen');
-    expect(s.toLowerCase()).toContain('send an estimate');
-  });
-
-  it('forces screen-tap cue on irreversible proposals (cancel_appointment)', () => {
-    const s = buildReadbackScript(fakeProposal({ proposalType: 'cancel_appointment' }));
-    expect(s).not.toContain('Say approve');
-    expect(s.toLowerCase()).toContain('tap to confirm on screen');
-  });
-
-  it('truncates overlong summaries with an ellipsis to keep the readback short', () => {
-    const long =
-      'Very long summary '.repeat(20) + 'END';
-    const s = buildReadbackScript(
-      fakeProposal({ proposalType: 'draft_invoice', summary: long })
-    );
-    expect(s.length).toBeLessThan(200);
-    expect(s).toContain('…');
-  });
-});
 
 describe('readback — classifyVoiceApproval', () => {
   it('recognizes approval phrases', () => {
