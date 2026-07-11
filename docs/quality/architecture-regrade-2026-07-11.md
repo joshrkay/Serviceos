@@ -18,10 +18,10 @@ Evidence commits (all on `main` or this branch):
 | WS6 | `689c3aa` | Digest supervisor-check reflection |
 | — | `d3d118e` | Enforce RLS runtime role in prod (SEC-01/SEC-02) |
 | — | `e5fc4c2` | Wire TCPA consent gate into outbound path |
-| WS7 | `TBD-WS7` | Voice realtime auto-default + mid-call REST degrade to Gather |
-| WS8 | `TBD-WS8` | Web/worker as the defined deploy topology |
-| WS9 | `TBD-WS9` | D-015 platform kill switch + autonomous-booking digest visibility |
-| WS10 | `TBD-WS10` | Learning-loop reflection — "instructions applied" digest section |
+| WS7 | `2ef8100` | Voice realtime auto-default + mid-call REST degrade to Gather |
+| WS8 | `d020335` | Web/worker as the defined deploy topology |
+| WS9 | `bc29696` | D-015 platform kill switch + autonomous-booking digest visibility |
+| WS10 | `eed44ea` | Learning-loop reflection — "instructions applied" digest section |
 
 ---
 
