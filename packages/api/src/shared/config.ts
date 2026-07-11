@@ -49,6 +49,12 @@ const configSchema = z.object({
   // without express consent on file. Off-by-default so production behavior is
   // unchanged until an operator explicitly opts in.
   TCPA_CONSENT_ENFORCEMENT: z.enum(['off', 'warn', 'block']).default('off'),
+  // WS2 — process-role split. One image, two Railway services: 'web' serves the
+  // HTTP/voice/WS surface only, 'worker' runs the background sweeps + queue poll
+  // loop only, 'all' (default) runs both — byte-for-byte back-compat with the
+  // single-service deploy. See docs/deployment.md "Two-service split (optional)".
+  // 'web' never starts the background interval loops; every other role does.
+  PROCESS_ROLE: z.enum(['web', 'worker', 'all']).default('all'),
 });
 
 export type AppConfig = z.infer<typeof configSchema>;

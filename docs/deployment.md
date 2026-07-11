@@ -80,6 +80,39 @@ The proposal-execution worker itself is multi-instance-safe
 (`ProposalRepository.claimForExecution` atomically claims work), so the
 constraint above is specifically about the in-process schedulers.
 
+## Two-service split (optional)
+
+By default the API runs as a **single service** (`PROCESS_ROLE` unset ⇒
+`all`): it serves the HTTP/voice/WS surface **and** runs every background
+worker loop in-process. This is unchanged, byte-for-byte, from the pre-split
+deploy — nothing to configure.
+
+To decouple the request surface from background work (so a spike in sweeps or
+the queue drain can never affect HTTP/voice latency, and each can scale and
+restart independently), run **two Railway services from the same image and the
+same `startCommand`** (`node packages/api/dist/src/index.js`), differing only
+by one env var:
+
+| Service | `PROCESS_ROLE` | Networking | Runs |
+|---|---|---|---|
+| API / voice | `web` | Public (Railway public domain) | HTTP + voice/WS/media-streams only; **zero** background worker loops |
+| Worker | `worker` | Private (no public domain needed) | All background sweeps + the queue poll loop; no public traffic |
+
+Notes:
+
+- Both roles still call `app.listen` on `$PORT` (the worker's `/health` backs
+  Railway's deploy gate); Railway networking decides exposure. The worker does
+  **not** need a public domain.
+- Cheap observability intervals (pool-occupancy and queue-depth metric samplers)
+  run in **every** role, so the `web` service still exports its own `/metrics`.
+- Migrations remain a separate one-off/release step (see above) — role choice
+  does not change that.
+- **Safe to get wrong:** if both services are accidentally left as `all`, the
+  tenant-wide sweeps are still gated by `runAsLeader` (Postgres advisory lock),
+  so exactly one instance runs each tick — you get redundancy, not duplicate
+  invoices/reminders. The split is an isolation optimization, not a correctness
+  requirement.
+
 ## Dispatch feasibility env vars
 
 The dispatch board's feasibility composer (overlap + travel-time + skill checks) reads the following optional env vars. All are safe to omit — the API degrades to a haversine-only travel estimator and stub skill matcher.
