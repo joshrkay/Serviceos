@@ -223,6 +223,14 @@ export interface VoiceSession {
    */
   voiceApprovalState?: import('../../tasks/proposal-approval-task').VoiceApprovalSessionState;
   /**
+   * WS18 — in-flight on-call SMS consent capture. Set when the close flow asks
+   * the caller for permission to text the quote + booking link; the NEXT turn's
+   * answer is evaluated by strict confirmIntent (ambiguous → no). Adapter-side
+   * state like `pendingVoiceApproval` (the FSM never reads it); consumed and
+   * cleared at the top of the speech turn. Carries no secrets.
+   */
+  pendingConsentCapture?: { customerId: string; phone: string };
+  /**
    * WS5 — in-flight tenant-catalog load, kicked off once at session
    * establishment (both voice transports) so in-call estimate grounding has
    * the active catalog in hand synchronously at quote time. Managed by

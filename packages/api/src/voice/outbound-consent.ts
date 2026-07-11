@@ -8,6 +8,8 @@ import {
   type ConsentLedgerEventLike,
   type VoiceConsentStatus,
 } from '../compliance/resolve-outbound-consent';
+import type { ConsentEventRepository } from '../compliance/consent-events';
+import type { Customer, CustomerRepository } from '../customers/customer';
 
 /**
  * Blocker 11 — TCPA / DNC consent gate for outbound AI calls.
@@ -353,4 +355,91 @@ export async function recordCustomerConsent(
       }),
     );
   }
+}
+
+// ─── WS18 — on-call SMS consent capture ──────────────────────────────────────
+
+export interface SmsConsentFromVoiceDeps {
+  /** Append-only consent ledger (migration 168). */
+  consentLedger: ConsentEventRepository;
+  /** Flips the SMS channel's affirmative column (`customers.sms_consent`). */
+  customerRepo: Pick<CustomerRepository, 'findById' | 'update'>;
+  auditRepo?: AuditRepository;
+}
+
+export interface SmsConsentFromVoiceInput {
+  tenantId: string;
+  customerId: string;
+  /** Caller E.164 (the number they're calling from). */
+  phone: string;
+  /** The live voice session this grant was captured on (ledger provenance). */
+  voiceSessionId?: string;
+  actorId?: string;
+}
+
+/**
+ * WS18 — capture a caller's affirmative SMS consent DURING a live call.
+ *
+ * This is the on-call TCPA capture seam. It writes BOTH:
+ *   1. an append-only ledger row {kind:'sms', state:'granted', source:'voice',
+ *      voiceSessionId} — provenance + the cross-channel view, AND
+ *   2. `customers.sms_consent = true` — the SMS channel's affirmative column.
+ *
+ * It deliberately does NOT touch `customers.consent_status`: per D-017 a ledger
+ * grant is channel-scoped (deriveConsentStatus returns null for grants), so a
+ * voice-captured SMS opt-in must never manufacture autodialed-VOICE consent.
+ * Never route this through `recordCustomerConsent` (which writes the voice
+ * consent_status field). `resolveOutboundConsent` reads the ledger, so a later
+ * SMS STOP still blocks — the grant clears only a prior sms-kind revocation.
+ *
+ * Returns whether the sms_consent column actually changed (already-true is a
+ * no-op) so the caller can audit `customer.consent_changed` only on a real flip.
+ */
+export async function recordSmsConsentFromVoice(
+  deps: SmsConsentFromVoiceDeps,
+  input: SmsConsentFromVoiceInput,
+): Promise<{ smsConsentChanged: boolean }> {
+  // 1. Ledger the grant — channel-scoped (D-017): kind 'sms', source 'voice'.
+  await deps.consentLedger.append({
+    tenantId: input.tenantId,
+    customerId: input.customerId,
+    phone: input.phone,
+    kind: 'sms',
+    state: 'granted',
+    source: 'voice',
+    voiceSessionId: input.voiceSessionId ?? null,
+  });
+
+  // 2. Flip the SMS affirmative column — only when it isn't already granted.
+  const existing: Customer | null = await deps.customerRepo.findById(
+    input.tenantId,
+    input.customerId,
+  );
+  const smsConsentChanged = existing !== null && existing.smsConsent !== true;
+  if (smsConsentChanged) {
+    await deps.customerRepo.update(input.tenantId, input.customerId, {
+      smsConsent: true,
+    });
+    if (deps.auditRepo) {
+      await deps.auditRepo.create(
+        createAuditEvent({
+          tenantId: input.tenantId,
+          actorId: input.actorId ?? 'calling-agent',
+          actorRole: 'system',
+          eventType: 'customer.consent_changed',
+          entityType: 'customer',
+          entityId: input.customerId,
+          metadata: {
+            field: 'sms_consent',
+            from: false,
+            to: true,
+            source: 'voice',
+            ...(input.voiceSessionId ? { voiceSessionId: input.voiceSessionId } : {}),
+          },
+        }),
+      );
+    }
+  }
+
+  return { smsConsentChanged };
 }

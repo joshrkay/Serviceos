@@ -97,6 +97,8 @@ import {
   classifyPostQuoteUtterance,
   type PostQuoteEdit,
 } from './post-quote-precheck';
+import { recordSmsConsentFromVoice } from '../../voice/outbound-consent';
+import type { ConsentEventRepository } from '../../compliance/consent-events';
 import type {
   CallingAgentEvent,
   SideEffect,
@@ -204,6 +206,21 @@ const SMS_BEFORE_BRIDGE_TIMEOUT_MS = 4000;
  */
 const POST_QUOTE_AFFIRMATIVE_INTERIM =
   "Perfect — I'll have the owner finalize that and send you the full quote and booking link by text.";
+
+/**
+ * WS18 — spoken to ASK for SMS consent before texting the quote + booking link.
+ * Set alongside session.pendingConsentCapture (the close flow, WS18c). The
+ * caller's next turn is the answer, evaluated by strict confirmIntent.
+ */
+export const SMS_CONSENT_ASK =
+  'Great — I can text the full quote and a link to lock in your booking. Is it okay to send that to the number you\'re calling from?';
+
+/** WS18a interim ack after a GRANT (WS18c continues into the close after this). */
+const SMS_CONSENT_GRANT_ACK = "Perfect — you'll get that text shortly.";
+
+/** WS18 — decline / ambiguous → hand the send to the owner. Design-exact copy. */
+export const SMS_CONSENT_DECLINE_FALLBACK =
+  "No problem — I'll have the owner send that over, and you'll get a text shortly.";
 
 function xmlEscape(s: string): string {
   return s
@@ -383,6 +400,13 @@ export interface VoiceTurnProcessorDeps {
    * it, estimates fall back to the generic confirmation (no price spoken).
    */
   catalogRepo?: CatalogItemRepository;
+  /**
+   * WS18 — append-only consent ledger. When wired (with customerRepo), the
+   * on-call SMS consent capture writes the grant (kind:'sms', source:'voice')
+   * and flips customers.sms_consent so the GatedMessageDelivery gate passes
+   * legitimately for the deposit/quote text.
+   */
+  consentEventRepo?: ConsentEventRepository;
   lookupEvents?: LookupEventService;
   credentialResolver?: TenantCredentialResolver;
   verticalPromptResolver?: (tenantId: string) => Promise<string | undefined>;
@@ -1825,6 +1849,98 @@ export function createVoiceTurnProcessor(
     return out;
   }
 
+  /**
+   * WS18 — consume an in-flight on-call SMS consent capture. Modeled on
+   * handlePendingVoiceApproval: when session.pendingConsentCapture is set, the
+   * caller's utterance is the answer to "is it okay to text you the quote?".
+   * Strict confirmIntent (ambiguous → no). A GRANT writes the consent (ledger +
+   * customers.sms_consent) via the recordSmsConsentFromVoice seam so the
+   * GatedMessageDelivery gate later passes legitimately; a DECLINE / ambiguous /
+   * unwired-persistence hands the send to the owner. Returns the turn's side
+   * effects, or null when no capture is pending.
+   */
+  async function handlePendingConsentCapture(
+    session: VoiceSession,
+    speechResult: string,
+    tenantId: string,
+  ): Promise<SideEffect[] | null> {
+    const pending = session.pendingConsentCapture;
+    if (!pending) return null;
+
+    let granted = false;
+    try {
+      const confirmation = await confirmIntent({
+        intentSummary: 'text you the full quote and a link to book',
+        callerResponse: speechResult,
+        tenantId,
+        gateway: deps.gateway,
+      });
+      recordCost(session, confirmation.tokenUsage);
+      granted = confirmation.confirmed;
+    } catch (err) {
+      // Fail closed — an evaluation error is treated as "no consent".
+      logger.warn('consent capture: confirmIntent failed', {
+        error: err instanceof Error ? err.message : String(err),
+        sessionId: session.id,
+      });
+      granted = false;
+    }
+
+    session.pendingConsentCapture = undefined;
+
+    if (granted) {
+      if (deps.consentEventRepo && deps.customerRepo) {
+        try {
+          await recordSmsConsentFromVoice(
+            {
+              consentLedger: deps.consentEventRepo,
+              customerRepo: deps.customerRepo,
+              ...(deps.auditRepo ? { auditRepo: deps.auditRepo } : {}),
+            },
+            {
+              tenantId,
+              customerId: pending.customerId,
+              phone: pending.phone,
+              voiceSessionId: session.id,
+              actorId: deps.systemActorId ?? 'calling-agent',
+            },
+          );
+        } catch (err) {
+          // Couldn't persist consent → do NOT claim we'll text; fall to owner.
+          logger.warn('consent capture: recordSmsConsentFromVoice failed', {
+            error: err instanceof Error ? err.message : String(err),
+            sessionId: session.id,
+          });
+          granted = false;
+        }
+      } else {
+        // No persistence wired → cannot legitimately pass the gate → owner path.
+        granted = false;
+      }
+    }
+
+    return [
+      {
+        type: 'audit_log',
+        payload: {
+          eventType: 'agent.calling.sms_consent_captured',
+          sessionId: session.id,
+          tenantId,
+          customerId: pending.customerId,
+          outcome: granted ? 'granted' : 'declined',
+          ts: Date.now(),
+        },
+      },
+      {
+        type: 'tts_play',
+        payload: {
+          text: granted ? SMS_CONSENT_GRANT_ACK : SMS_CONSENT_DECLINE_FALLBACK,
+          source: 'sms_consent_capture',
+        },
+      },
+    ];
+  }
+
   async function handleAskCaller(
     session: VoiceSession,
     tenantId: string,
@@ -1917,6 +2033,15 @@ export function createVoiceTurnProcessor(
       await executeSideEffects(session, approvalTurn, tenantId);
       appendAgentTts(deps.store, session.id, approvalTurn);
       return approvalTurn;
+    }
+
+    // WS18 — an in-flight on-call SMS consent capture also consumes the turn
+    // before the FSM-state branch (the caller's utterance is the yes/no answer).
+    const consentTurn = await handlePendingConsentCapture(session, speechResult, tenantId);
+    if (consentTurn) {
+      await executeSideEffects(session, consentTurn, tenantId);
+      appendAgentTts(deps.store, session.id, consentTurn);
+      return consentTurn;
     }
 
     const sideEffectsAll: SideEffect[] = [];
