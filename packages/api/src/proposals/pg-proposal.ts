@@ -450,6 +450,11 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
         executedBy: 'executed_by',
         undoneAt: 'undone_at',
         undoneBy: 'undone_by',
+        // WS18 (D-018) — the live close flow retrofits an EXISTING drafted
+        // estimate proposal as the head of the close chain, so the indexed
+        // chain_id column must be writable post-create (findByChain queries
+        // the column, not sourceContext).
+        chainId: 'chain_id',
       };
 
       const setClauses: string[] = ['updated_at = NOW()'];

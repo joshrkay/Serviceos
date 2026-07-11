@@ -323,8 +323,10 @@ strict `confirmIntent` gate; the deterministic pre-check is necessary, not suffi
 priced quote/deposit link to the customer) are different risk tiers, so the close needs
 its own opt-in, its own cap, and its own kill switch — never a widening of D-015's gate
 set. A caller-initiated, strict-confirmed, consent-gated close warrants IMMEDIATE
-execution rather than D-015's 5-second undo delay; the safety net is the strict confirm
-gate plus an owner UNDO (`create_booking` → compensating cancellation + apology;
+execution rather than D-015's 5-second undo delay: the sanction backdates `approvedAt`
+by UNDO_WINDOW_MS at approval time (audited as `undoWindowBypassed: true`) so the
+executor's D-009 gate treats the window as elapsed — the executor itself is unmodified.
+The safety net is the strict confirm gate plus an owner UNDO (`create_booking` → compensating cancellation + apology;
 `send_estimate` → the estimate is withdrawn/voided so its approval link stops accepting
 and no deposit can be taken — the quote TEXT itself cannot be recalled, and the UNDO copy
 says so).

@@ -29,8 +29,13 @@
 import { Router, Request, Response, urlencoded } from 'express';
 import { verifyOneTapUndoToken } from '../proposals/one-tap-undo';
 import { AUTONOMOUS_LANE_PROPOSAL_TYPES } from '../proposals/autonomous-lane';
+import { autonomousCloseEvaluationFor } from '../proposals/autonomous-close-lane';
 import { undoProposal } from '../proposals/actions';
 import type { Proposal, ProposalRepository } from '../proposals/proposal';
+import {
+  transitionEstimateStatus,
+  type EstimateRepository,
+} from '../estimates/estimate';
 import {
   updateAppointment,
   type Appointment,
@@ -83,6 +88,14 @@ export interface OneTapUndoRouterDeps {
    * Optional: absent ⇒ the cancel still happens, the apology is skipped.
    */
   customerMessageDeps?: CustomerMessageDeliveryDeps;
+  /**
+   * WS18d (D-018) — estimate withdrawal for a close-chain undo. When the
+   * undone booking is part of a D-018 close chain, the chained estimate is
+   * transitioned to 'expired' so its approval link stops accepting and no
+   * deposit can be taken (the quote TEXT itself cannot be recalled — the
+   * page copy says so). Optional: absent ⇒ booking-only compensation.
+   */
+  estimateRepo?: EstimateRepository;
 }
 
 function page(title: string, body: string): string {
@@ -132,6 +145,98 @@ export function createOneTapUndoRouter(deps: OneTapUndoRouterDeps): Router {
         error: err instanceof Error ? err.message : String(err),
       });
     }
+  };
+
+  /**
+   * WS18d (D-018) — compensate the REST of a close chain when its booking is
+   * undone. `send_estimate` cannot be unsent, so the withdrawal is the
+   * compensation: the chained estimate (member 0's resultEntityId) is
+   * transitioned 'sent' → 'expired' so the approval link stops accepting and
+   * no deposit can be taken. Any chain sibling still 'approved' (a
+   * timeout-partial close the sweep hasn't reached) is undone via the
+   * existing undoProposal path so the sweep never runs it. Best-effort per
+   * sibling; returns what happened so the page copy can be honest.
+   */
+  const compensateCloseChain = async (
+    tenantId: string,
+    bookingProposal: Proposal,
+  ): Promise<{ closeChain: boolean; estimateWithdrawn: boolean }> => {
+    const chainId = bookingProposal.chainId;
+    if (!chainId || autonomousCloseEvaluationFor(bookingProposal)?.eligible !== true) {
+      return { closeChain: false, estimateWithdrawn: false };
+    }
+    let estimateWithdrawn = false;
+    let siblings: Proposal[] = [];
+    try {
+      siblings = await deps.proposalRepo.findByChain(tenantId, chainId);
+    } catch (err) {
+      logger.warn('close-chain undo: sibling lookup failed', {
+        chainId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return { closeChain: true, estimateWithdrawn: false };
+    }
+    for (const sibling of siblings) {
+      if (sibling.id === bookingProposal.id) continue;
+      // Stop anything the sweep hasn't executed yet (timeout-partial close).
+      // NOT undoProposal: the D-018 sanction backdates approvedAt past the 5s
+      // window (immediate execution), so the D-009 undo path would refuse —
+      // the owner's tap here is a REJECTION of the still-pending member.
+      if (sibling.status === 'approved') {
+        try {
+          await deps.proposalRepo.updateStatus(tenantId, sibling.id, 'rejected', {
+            rejectionReason: 'owner_one_tap_undo',
+            rejectionDetails: `Close chain undone by the owner (booking ${bookingProposal.id})`,
+          });
+          await deps.auditRepo.create(
+            createAuditEvent({
+              tenantId,
+              actorId: ONE_TAP_UNDO_ACTOR_ID,
+              actorRole: ONE_TAP_UNDO_ACTOR_ROLE,
+              eventType: 'proposal.rejected',
+              entityType: 'proposal',
+              entityId: sibling.id,
+              correlationId: chainId,
+              metadata: { channel: 'sms_one_tap', reason: 'close_chain_undone' },
+            }),
+          );
+        } catch (err) {
+          logger.warn('close-chain undo: sibling stop failed', {
+            proposalId: sibling.id,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+      // Withdraw the estimate so the approval link stops accepting. Only a
+      // 'sent' estimate has a live link; a still-draft estimate never went out
+      // (nothing to void) and an 'accepted' one is a real customer action the
+      // owner must resolve by hand — never auto-voided here.
+      if (
+        sibling.proposalType === 'draft_estimate' &&
+        sibling.status === 'executed' &&
+        typeof sibling.resultEntityId === 'string' &&
+        deps.estimateRepo
+      ) {
+        try {
+          const estimate = await deps.estimateRepo.findById(tenantId, sibling.resultEntityId);
+          if (estimate?.status === 'sent') {
+            await transitionEstimateStatus(
+              tenantId,
+              estimate.id,
+              'expired',
+              deps.estimateRepo,
+            );
+            estimateWithdrawn = true;
+          }
+        } catch (err) {
+          logger.warn('close-chain undo: estimate withdrawal failed', {
+            estimateId: sibling.resultEntityId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    }
+    return { closeChain: true, estimateWithdrawn };
   };
 
   const auditUndone = async (
@@ -303,11 +408,25 @@ export function createOneTapUndoRouter(deps: OneTapUndoRouterDeps): Router {
           deps.appointmentRepo,
         );
       }
+      // WS18d — a close-chain booking undone pre-execution still has chained
+      // siblings to stop (and possibly a sent quote to void).
+      const compensated = await compensateCloseChain(tenantId, proposal);
       await auditUndone(tenantId, proposal.id, 'pre_execution', appointment?.id);
       res
         .status(200)
         .type('html')
-        .send(page('Booking undone', 'The booking was undone before it went out.'));
+        .send(
+          page(
+            'Booking undone',
+            compensated.closeChain
+              ? `The booking was undone and the remaining steps were stopped.${
+                  compensated.estimateWithdrawn
+                    ? ' The quote was voided so its link no longer works — the quote text already sent can’t be recalled.'
+                    : ''
+                }`
+              : 'The booking was undone before it went out.',
+          ),
+        );
       return;
     }
 
@@ -335,6 +454,9 @@ export function createOneTapUndoRouter(deps: OneTapUndoRouterDeps): Router {
         return;
       }
       await sendApology(tenantId, appointment);
+      // WS18d — close-chain compensation: stop pending siblings + void the
+      // sent quote so its approval link stops accepting (D-018).
+      const compensated = await compensateCloseChain(tenantId, proposal);
       await auditUndone(tenantId, proposal.id, 'post_execution_compensated', appointment.id);
       res
         .status(200)
@@ -342,7 +464,13 @@ export function createOneTapUndoRouter(deps: OneTapUndoRouterDeps): Router {
         .send(
           page(
             'Booking undone',
-            'The appointment was canceled and the customer received an apology text.',
+            compensated.closeChain
+              ? `The appointment was canceled and the customer received an apology text.${
+                  compensated.estimateWithdrawn
+                    ? ' The quote was voided so its link no longer works — the quote text already sent can’t be recalled.'
+                    : ' Any unsent steps were stopped.'
+                }`
+              : 'The appointment was canceled and the customer received an apology text.',
           ),
         );
       return;

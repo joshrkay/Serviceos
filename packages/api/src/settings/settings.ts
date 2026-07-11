@@ -510,6 +510,19 @@ export interface TenantSettings {
    * defense in depth.
    */
   autonomousBookingThreshold?: number;
+  /**
+   * D-018 (WS18) — autonomous CLOSE lane. Opt-in (column defaults FALSE,
+   * migration 247): when true, the live voice agent may close the sale on
+   * the call (draft + send estimate + confirm the held booking) under the
+   * D-018 gate set (proposals/autonomous-close-lane.ts). Optional on the
+   * type so pre-migration rows / legacy fixtures read as "off" via `?? false`.
+   */
+  autonomousCloseEnabled?: boolean;
+  /**
+   * D-018 — per-tenant cap (integer cents) on the quote total the agent may
+   * auto-close. Nullable BIGINT; undefined ⇒ no cap gate.
+   */
+  autonomousCloseMaxCents?: number;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -643,6 +656,10 @@ export interface UpdateSettingsInput {
   autonomousBookingEnabled?: boolean;
   /** UB-D / D-015 — lane confidence threshold, 0.90–0.99 (column default 0.95). */
   autonomousBookingThreshold?: number;
+  /** D-018 — opt into the autonomous close lane (column default false). */
+  autonomousCloseEnabled?: boolean;
+  /** D-018 — cap (integer cents) on the auto-closeable quote total. */
+  autonomousCloseMaxCents?: number;
 }
 
 export interface SettingsRepository {

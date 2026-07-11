@@ -120,9 +120,11 @@ describe('WS18a — affirmative-to-close', () => {
     const ctx = await reachClosing(['gasket']);
     const before = ctx.complete.mock.calls.length; // 2 (classify + confirm)
     const fx = await turn(ctx, 'yes book it');
-    // The classifier was NOT consulted for the affirmative → the quote can't be
-    // misread as a second intent.
-    expect(ctx.complete.mock.calls.length).toBe(before);
+    // The INTENT CLASSIFIER was NOT consulted for the affirmative → the quote
+    // can't be misread as a second intent. Exactly ONE extra gateway call is
+    // expected: the WS18d strict confirmIntent yes/no gate (the authoritative
+    // D-018 check) — never classifyIntent.
+    expect(ctx.complete.mock.calls.length).toBe(before + 1);
     expect(ctx.session.machine.currentState).toBe('closing');
     expect(ctx.session.machine.currentContext.pendingQuote).toBeDefined();
     expect(lastTts(fx)).toContain('send you the full quote');
@@ -132,7 +134,8 @@ describe('WS18a — affirmative-to-close', () => {
     const ctx = await reachClosing(['gasket']);
     const before = ctx.complete.mock.calls.length;
     await turn(ctx, 'yeah lock it in');
-    expect(ctx.complete.mock.calls.length).toBe(before);
+    // +1 = the strict confirmIntent gate (WS18d), never the classifier.
+    expect(ctx.complete.mock.calls.length).toBe(before + 1);
     expect(ctx.session.machine.currentState).toBe('closing');
     expect(ctx.session.machine.currentContext.pendingQuote).toBeDefined();
   });

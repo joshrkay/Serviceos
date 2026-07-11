@@ -2687,6 +2687,10 @@ export function createApp(): AppWithLifecycle {
       consumeNonce: consumeOneTapUndoNonce,
       jobRepo,
       customerRepo,
+      // WS18d (D-018) — close-chain compensation: undoing a close-chain
+      // booking also stops pending siblings and voids the sent estimate so
+      // its approval link stops accepting.
+      estimateRepo,
       ...(messageDelivery
         ? {
             customerMessageDeps: {
@@ -3198,7 +3202,14 @@ export function createApp(): AppWithLifecycle {
   voiceExtendedIntentsFlagResolver = (tenantId: string) =>
     isFlagEnabledForTenant(tenantId, 'voice_extended_intents');
 
-  const twilioAdapter = new TwilioGatherAdapter({
+  // WS18d — assembled as a VARIABLE (not an inline literal) deliberately: the
+  // adapter spreads its deps into createVoiceTurnProcessor, and the processor-
+  // only WS18 keys below (consentEventRepo, autonomousClose) are not part of
+  // TwilioAdapterDeps — a literal would trip TS excess-property checking. The
+  // clean fix (extending TwilioAdapterDeps) belongs to the WS16 owner of
+  // twilio-adapter.ts; this keeps that file untouched while the processor
+  // receives its full dep surface at runtime.
+  const twilioAdapterDeps = {
     store: voiceSessionStore,
     gateway: llmGateway,
     ...(pool ? { pool } : {}),
@@ -3331,7 +3342,27 @@ export function createApp(): AppWithLifecycle {
           },
         }
       : {}),
-  });
+    // ── WS18 processor-only deps (flow through the adapter's spread into
+    //    createVoiceTurnProcessor; see the variable-assembly note above) ──
+    // WS18b — on-call SMS consent capture (ledger + customers.sms_consent).
+    consentEventRepo,
+    // WS18d (D-018) — the sanctioned on-call close: the production executor,
+    // both platform kill switches, and the owner SMS/one-tap wiring for the
+    // UNDO link + the fallback chain SMS.
+    autonomousClose: {
+      executor: proposalExecutor,
+      platformDisabled: config.AUTONOMOUS_CLOSE_DISABLED === 'true',
+      bookingPlatformDisabled: config.AUTONOMOUS_BOOKING_DISABLED === 'true',
+      ownerPhoneResolver: resolveUnsupervisedOwnerPhone,
+      ...(oneTapSmsSender ? { sendOwnerSms: oneTapSmsSender } : {}),
+      ...(oneTapSecret ? { oneTapSecret } : {}),
+      buildUndoUrl: (token: string) =>
+        `${oneTapApiBaseUrl}/public/proposals/one-tap-undo?token=${encodeURIComponent(token)}`,
+      buildApproveUrl: (token: string) =>
+        `${oneTapApiBaseUrl}/public/proposals/one-tap-approve?token=${encodeURIComponent(token)}`,
+    },
+  };
+  const twilioAdapter = new TwilioGatherAdapter(twilioAdapterDeps);
 
   // UC-5a — consumer half of the durable emergency page-retry ladder: the
   // adapter above enqueues delayed `telephony.emergency_page` jobs; this
