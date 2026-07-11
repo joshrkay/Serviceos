@@ -288,6 +288,9 @@ function checkGlobalGuards(
           callSid: updatedContext.callSid,
           conversationId: updatedContext.conversationId,
           customerId: updatedContext.customerId,
+          // Link the negotiation callback proposal to the classify call's
+          // ai_runs row (FK-satisfied) instead of null.
+          ...(event.aiRunId ? { aiRunId: event.aiRunId } : {}),
         },
       });
     }
@@ -577,6 +580,13 @@ function transitionIntentCapture(
         currentIntent: event.intentType,
         extractedEntities: event.entities,
         lastIntentConfidence: event.confidence,
+        // Carry the classify call's ai_runs id forward so the eventual
+        // create_proposal (after confirm) links the proposal to a REAL run.
+        // Set UNCONDITIONALLY (not a conditional spread): a re-classification
+        // whose turn has no persisted run must CLEAR the prior turn's id, or
+        // the `...context` spread above would leak the previous run and the
+        // eventual create_proposal would link to the WRONG ai_runs record.
+        lastAiRunId: event.aiRunId,
         retryCount: 0,
       };
       return {
@@ -793,6 +803,10 @@ function transitionIntentConfirm(
             // Real classifier confidence (caller has also explicitly
             // confirmed the intent by this point) — see types.ts.
             confidence: context.lastIntentConfidence,
+            // Real ai_runs id from the classify call so the proposal builder
+            // sets proposals.ai_run_id to an actual row (FK-satisfied), not
+            // null. Omitted when the classify call had no persisted run.
+            ...(context.lastAiRunId ? { aiRunId: context.lastAiRunId } : {}),
           },
         },
       ],
@@ -814,6 +828,8 @@ function transitionIntentConfirm(
         ...context,
         currentIntent: undefined,
         extractedEntities: undefined,
+        // Abandon the captured turn's run id so a re-classify can't reuse it.
+        lastAiRunId: undefined,
         retryCount: 0,
       },
     };
@@ -832,6 +848,8 @@ function transitionIntentConfirm(
         ...context,
         currentIntent: undefined,
         extractedEntities: undefined,
+        // Abandon the captured turn's run id so a re-classify can't reuse it.
+        lastAiRunId: undefined,
         retryCount: 0,
       },
     };
@@ -889,6 +907,9 @@ function transitionClosing(
         currentIntent: undefined,
         extractedEntities: undefined,
         pendingProposalId: undefined,
+        // Abandon the prior turn's run id so the second intent's proposal
+        // can't inherit the first turn's ai_runs record.
+        lastAiRunId: undefined,
         retryCount: 0,
       },
     };
@@ -907,6 +928,9 @@ function transitionClosing(
         currentIntent: undefined,
         extractedEntities: undefined,
         pendingProposalId: undefined,
+        // Abandon the prior turn's run id so the second intent's proposal
+        // can't inherit the first turn's ai_runs record.
+        lastAiRunId: undefined,
         retryCount: 0,
       },
     };

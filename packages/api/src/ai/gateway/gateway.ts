@@ -95,6 +95,15 @@ export interface LLMResponse {
   providerPath?: string[];
   /** Hint to clients when degraded; ms until they should retry. */
   retryAfterMs?: number;
+  /**
+   * Id of the persisted `ai_runs` row for THIS completion. Present only when
+   * an `AiRunRepository` is wired AND the row was created successfully
+   * (creation is best-effort). Callers thread this into downstream records —
+   * e.g. the voice classifier surfaces it so a voice proposal can satisfy
+   * `proposals.ai_run_id`'s FK with a REAL run id instead of null. Undefined
+   * when no repo is configured or the best-effort create failed.
+   */
+  aiRunId?: string;
 }
 
 export interface LLMProvider {
@@ -417,6 +426,10 @@ export class LLMGateway {
       const result: LLMResponse = {
         ...response,
         latencyMs,
+        // Surface the persisted ai_runs id so callers can link downstream
+        // records (e.g. proposals.ai_run_id) to a REAL run row. Present only
+        // when the best-effort create above succeeded.
+        ...(aiRun ? { aiRunId: aiRun.id } : {}),
       };
 
       const labels = {

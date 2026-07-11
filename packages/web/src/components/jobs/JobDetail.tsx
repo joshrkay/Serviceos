@@ -11,7 +11,8 @@ import {
 } from 'lucide-react';
 import type { Job, JobActivity, MaterialItem, Customer, Technician } from '../../data/mock-data';
 import type { JobDetailResponse } from '@ai-service-os/shared';
-import { calcMaterialsTotal, calcEstimateTotalFromLines } from '../../utils/job-ui-math';
+import { calcMaterialsTotal, formatAppointmentDurationLabel } from '../../utils/job-ui-math';
+import { formatCurrency } from '../../utils/currency';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useMutation } from '../../hooks/useMutation';
 import { useApiClient } from '../../lib/apiClient';
@@ -338,8 +339,10 @@ function CustomerCard({ customer, job, onCall, onText, onViewCustomer }: {
 }
 
 // ─── Schedule + Tech Card ──────────────────────────────────────────────────
-function ScheduleTechCard({ job, tech, onCallTech, onSchedule, workerTerm }: {
+function ScheduleTechCard({ job, tech, onCallTech, onSchedule, workerTerm, durationLabel }: {
   job: Job; tech: Technician | undefined; onCallTech: () => void; onSchedule: () => void; workerTerm: string;
+  /** Derived from the real appointment window (start→end); omitted when unknown. */
+  durationLabel?: string;
 }) {
   const techStatusLabel =
     job.status === 'Active' || job.status === 'In Progress' ? 'On site now' :
@@ -360,7 +363,9 @@ function ScheduleTechCard({ job, tech, onCallTech, onSchedule, workerTerm }: {
               {job.scheduledTime && (
                 <p className="text-2xl text-foreground leading-none">{job.scheduledTime}</p>
               )}
-              <p className="text-xs text-muted-foreground mt-2">Est. 2–3 hours</p>
+              {durationLabel && (
+                <p className="text-xs text-muted-foreground mt-2">{durationLabel}</p>
+              )}
             </>
           ) : (
             <div>
@@ -437,6 +442,8 @@ function EstimateScopeCard({ estimateId, onOpen }: { estimateId: string; onOpen:
     estimateNumber: string;
     status: string;
     lineItems: Array<{ description: string; qty: number; rate: number }>;
+    /** Authoritative tax-inclusive total in integer cents, from the API. */
+    totalCents: number;
   } | null>(null);
   const [open, setOpen] = useState(true);
 
@@ -454,10 +461,14 @@ function EstimateScopeCard({ estimateId, onOpen }: { estimateId: string; onOpen:
         }),
       );
       if (!cancelled && items.length > 0) {
+        // Use the estimate's authoritative tax-inclusive total from the API
+        // (integer cents) — never recompute a pre-tax sum on the client, which
+        // mislabels the amount owed (CLAUDE.md: money is integer cents).
         setEstimate({
           estimateNumber: body.estimateNumber ?? estimateId,
           status: body.status ?? 'draft',
           lineItems: items,
+          totalCents: body.totals?.totalCents ?? 0,
         });
       }
     })();
@@ -467,8 +478,6 @@ function EstimateScopeCard({ estimateId, onOpen }: { estimateId: string; onOpen:
   }, [estimateId]);
 
   if (!estimate) return null;
-
-  const total = calcEstimateTotalFromLines(estimate.lineItems);
 
   return (
     <div className="rounded-xl bg-card border border-border overflow-hidden">
@@ -514,7 +523,7 @@ function EstimateScopeCard({ estimateId, onOpen }: { estimateId: string; onOpen:
 
           <div className="flex items-center justify-between px-4 py-3.5 border-t border-border bg-primary rounded-b-xl">
             <p className="text-sm text-muted-foreground">Agreed total</p>
-            <p className="text-primary-foreground">${total.toLocaleString()}</p>
+            <p className="text-primary-foreground">{formatCurrency(estimate.totalCents)}</p>
           </div>
         </>
       )}
@@ -830,6 +839,7 @@ export function JobDetailView({
   const [estimateId, setEstimateId] = useState<string | null>(null);
   const [invoiceId, setInvoiceId] = useState<string | null>(null);
   const [appointmentStart, setAppointmentStart] = useState<string | null>(null);
+  const [appointmentEnd, setAppointmentEnd] = useState<string | null>(null);
 
   const job = apiJob ? buildJobCompat(apiJob) : null;
   if (job) {
@@ -1010,7 +1020,7 @@ export function JobDetailView({
     // so list[0] can be an old canceled/no-show visit rather than the active
     // one (e.g. a cancel followed by a reschedule). Pick the next upcoming
     // active appointment, falling back to the latest active one.
-    const activeAppointment = async (): Promise<{ scheduledStart?: string } | null> => {
+    const activeAppointment = async (): Promise<{ scheduledStart?: string; scheduledEnd?: string } | null> => {
       try {
         const res = await apiFetch(`/api/appointments?jobId=${id}`);
         if (!res.ok) return null;
@@ -1038,6 +1048,7 @@ export function JobDetailView({
     setEstimateId(est?.id ?? null);
     setInvoiceId(inv?.id ?? null);
     setAppointmentStart(appt?.scheduledStart ?? null);
+    setAppointmentEnd(appt?.scheduledEnd ?? null);
   }, [id, apiFetch]);
 
   useEffect(() => { void loadLinkedDocs(); }, [loadLinkedDocs]);
@@ -1143,7 +1154,7 @@ export function JobDetailView({
         />
       )}
       <StatusStepper job={job} />
-      <ScheduleTechCard job={job} tech={tech} onCallTech={() => setModal('call')} onSchedule={() => navigate('/schedule')} workerTerm={workerTerm} />
+      <ScheduleTechCard job={job} tech={tech} onCallTech={() => setModal('call')} onSchedule={() => navigate('/schedule')} workerTerm={workerTerm} durationLabel={formatAppointmentDurationLabel(appointmentStart, appointmentEnd) ?? undefined} />
       <DescriptionCard job={job} />
       {job.estimateId && (
         <EstimateScopeCard

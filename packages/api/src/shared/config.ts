@@ -42,6 +42,13 @@ const configSchema = z.object({
   STRIPE_WEBHOOK_SECRET: z.string().optional(),
   WEB_URL: z.string().url().optional().default('http://localhost:5173'),
   STRIPE_PRICE_ID: z.string().optional(),
+  // TCPA/DNC express-consent enforcement for the outbound calling path.
+  // 'off' (default) preserves prior behavior exactly (DNC opt-out check only);
+  // 'warn' runs the per-customer consent gate and audits+logs a would-be block
+  // but still places the call (observability); 'block' refuses calls to numbers
+  // without express consent on file. Off-by-default so production behavior is
+  // unchanged until an operator explicitly opts in.
+  TCPA_CONSENT_ENFORCEMENT: z.enum(['off', 'warn', 'block']).default('off'),
 });
 
 export type AppConfig = z.infer<typeof configSchema>;

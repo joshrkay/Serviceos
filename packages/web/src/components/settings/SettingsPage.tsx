@@ -6,6 +6,7 @@ import {
   CreditCard, Link, Zap, FileText, Sparkles, Copy, ExternalLink,
   MapPin, Check, Store, RefreshCw, TrendingUp, Mail, BookOpen, Star, Phone,
   Calendar, ClipboardList, SlidersHorizontal, Megaphone, ScrollText,
+  MessageSquareQuote,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { QuickBooksIntegrationSheet } from './QuickBooksIntegrationSheet';
@@ -22,6 +23,7 @@ import { JobCustomFieldsSheet } from './JobCustomFieldsSheet';
 import { MarketingCampaignsSheet } from './MarketingCampaignsSheet';
 import { CustomerGroupsSheet } from './CustomerGroupsSheet';
 import { StandingInstructionsSheet } from './StandingInstructionsSheet';
+import { BrandVoiceSheet } from './BrandVoiceSheet';
 import { AIApprovalRulesSheet } from './AIApprovalRulesSheet';
 import { DepositRulesSheet } from './DepositRulesSheet';
 import { DiscountPolicySheet } from './DiscountPolicySheet';
@@ -192,6 +194,7 @@ export function SettingsPage() {
   const [marketingOpen, setMarketingOpen] = useState(false);
   const [customerGroupsOpen, setCustomerGroupsOpen] = useState(false);
   const [standingInstructionsOpen, setStandingInstructionsOpen] = useState(false);
+  const [brandVoiceOpen, setBrandVoiceOpen] = useState(false);
   const [aiRulesOpen, setAiRulesOpen] = useState(false);
   const [depositRulesOpen, setDepositRulesOpen] = useState(false);
   const [discountPolicyOpen, setDiscountPolicyOpen] = useState(false);
@@ -414,6 +417,10 @@ export function SettingsPage() {
         },
         { icon: Zap,      label: 'AI approval rules',               description: 'Set what the AI can apply automatically',    action: () => setAiRulesOpen(true) },
         { icon: ScrollText, label: 'Standing instructions',         description: 'Rules the AI follows on every draft ("always add a trip fee")', action: () => setStandingInstructionsOpen(true) },
+        // N-011 — gated behind the brand_voice_configurator flag (default off).
+        ...(me?.brand_voice_configurator_enabled
+          ? [{ icon: MessageSquareQuote, label: 'Brand voice', description: 'How the AI sounds in every customer message — register, sign-off, banned phrases', action: () => setBrandVoiceOpen(true) }]
+          : []),
         { icon: Bell,     label: 'Reminders & follow-ups',          description: 'Auto-send thresholds and timing',             action: () => toast.info('Coming soon') },
         { icon: FileText, label: 'Estimate & invoice templates',    description: 'Default line items, terms, expiry',           action: () => navigate('/settings/templates') },
         { icon: ClipboardList, label: 'Forms & checklists',         description: 'Reusable job forms your team fills out on site', action: () => setJobFormsOpen(true) },
@@ -894,6 +901,9 @@ export function SettingsPage() {
       )}
       {customerGroupsOpen && (
         <CustomerGroupsSheet onClose={() => setCustomerGroupsOpen(false)} />
+      )}
+      {brandVoiceOpen && me?.brand_voice_configurator_enabled && (
+        <BrandVoiceSheet onClose={() => setBrandVoiceOpen(false)} />
       )}
       {standingInstructionsOpen && (
         <StandingInstructionsSheet onClose={() => setStandingInstructionsOpen(false)} />

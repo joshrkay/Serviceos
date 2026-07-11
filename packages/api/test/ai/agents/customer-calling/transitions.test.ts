@@ -217,3 +217,86 @@ describe('RV-140/RV-142 — emergency_detected handler', () => {
     expect((tts[0]!.payload as { text: string }).text).toContain('911');
   });
 });
+
+describe('ai_run_id threading across turns (PR #664 finding A)', () => {
+  // A confirmed classify captures its ai_runs id into context.lastAiRunId so
+  // the eventual create_proposal links the proposal to the REAL run. The bug:
+  // a SUBSEQUENT classify whose turn has NO run must CLEAR the prior id — a
+  // conditional spread left the stale id in place and the proposal linked to
+  // the WRONG ai_runs audit record.
+
+  it('a confidence-passing classify WITH aiRunId sets lastAiRunId', () => {
+    const result = transition(
+      'intent_capture',
+      { type: 'intent_classified', intentType: 'book_service', entities: {}, confidence: 0.9, aiRunId: 'run-1' },
+      baseContext,
+    );
+    expect(result.nextState).toBe('entity_resolution');
+    expect(result.updatedContext.lastAiRunId).toBe('run-1');
+  });
+
+  it('a SUBSEQUENT classify WITHOUT aiRunId CLEARS the prior turn id (no inheritance)', () => {
+    // First turn seeds a run id (as a prior classify would have).
+    const seeded: CallingAgentContext = { ...baseContext, lastAiRunId: 'run-1' };
+    const result = transition(
+      'intent_capture',
+      { type: 'intent_classified', intentType: 'reschedule', entities: {}, confidence: 0.9 },
+      seeded,
+    );
+    expect(result.nextState).toBe('entity_resolution');
+    // Must be cleared, NOT the leaked 'run-1'.
+    expect(result.updatedContext.lastAiRunId).toBeUndefined();
+  });
+
+  it('create_proposal on confirm carries the CURRENT turn aiRunId (real run threaded)', () => {
+    const ctx: CallingAgentContext = {
+      ...baseContext,
+      currentIntent: 'book_service',
+      extractedEntities: { service: 'drain' },
+      lastIntentConfidence: 0.9,
+      lastAiRunId: 'run-2',
+    };
+    const result = transition('intent_confirm', { type: 'confirmed' }, ctx);
+    const proposal = result.sideEffects.find((fx) => fx.type === 'create_proposal');
+    expect(proposal).toBeDefined();
+    expect((proposal!.payload as { aiRunId?: string }).aiRunId).toBe('run-2');
+  });
+
+  it('create_proposal on confirm omits aiRunId when the current turn had no run (never a stale id)', () => {
+    // Simulate a full flow: turn 1 classifies WITH a run, gets corrected, then
+    // turn 2 re-classifies WITHOUT a run. The proposal must not inherit run-1.
+    const afterFirstClassify = transition(
+      'intent_capture',
+      { type: 'intent_classified', intentType: 'book_service', entities: {}, confidence: 0.9, aiRunId: 'run-1' },
+      baseContext,
+    );
+    expect(afterFirstClassify.updatedContext.lastAiRunId).toBe('run-1');
+
+    // Caller corrects in intent_confirm — the captured turn is abandoned.
+    const afterCorrection = transition(
+      'intent_confirm',
+      { type: 'correction', newTranscript: 'actually a reschedule' },
+      { ...afterFirstClassify.updatedContext, currentIntent: 'book_service' },
+    );
+    expect(afterCorrection.nextState).toBe('intent_capture');
+    expect(afterCorrection.updatedContext.lastAiRunId).toBeUndefined();
+
+    // Turn 2 re-classifies WITHOUT a persisted run.
+    const afterSecondClassify = transition(
+      'intent_capture',
+      { type: 'intent_classified', intentType: 'reschedule', entities: {}, confidence: 0.9 },
+      afterCorrection.updatedContext,
+    );
+    expect(afterSecondClassify.updatedContext.lastAiRunId).toBeUndefined();
+
+    // Confirm turn 2 → proposal must NOT carry the stale run-1.
+    const confirmed = transition(
+      'intent_confirm',
+      { type: 'confirmed' },
+      { ...afterSecondClassify.updatedContext, currentIntent: 'reschedule', extractedEntities: {} },
+    );
+    const proposal = confirmed.sideEffects.find((fx) => fx.type === 'create_proposal');
+    expect(proposal).toBeDefined();
+    expect((proposal!.payload as { aiRunId?: string }).aiRunId).toBeUndefined();
+  });
+});

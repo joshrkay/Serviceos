@@ -57,3 +57,5 @@ packages/api/voice-quality-layer2-failures/
 packages/api/src/ai/agents/customer-calling/fillers/*.mp3
 packages/api/src/ai/agents/customer-calling/fillers/*.bin
 packages/api/src/ai/agents/customer-calling/fillers/*.pcm
+.fable-verif/
+docs/verification-runs/fable-2026-07-10-artifacts/

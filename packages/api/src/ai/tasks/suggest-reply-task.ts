@@ -13,6 +13,7 @@
  */
 import { LLMGateway } from '../gateway/gateway';
 import type { BrandVoiceSettings } from '../../settings/settings';
+import { resolveRegister } from '../brand-voice/prompts';
 import {
   buildStandingInstructionsSection,
   type InjectedStandingInstruction,
@@ -58,8 +59,9 @@ function buildSystemPrompt(input: SuggestReplyInput): string {
   const bv = input.brandVoice ?? {};
   const shop = bv.business_name || input.businessName || 'the business';
   const pronoun = bv.pronoun === 'i' ? 'I' : 'we';
+  // N-011 — register is authoritative; legacy `formality` maps forward.
   const formality =
-    bv.formality === 'professional'
+    resolveRegister(bv) === 'formal'
       ? 'professional and polished'
       : 'warm, friendly, and plain-spoken';
   const vibe =

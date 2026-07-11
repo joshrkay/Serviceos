@@ -9,6 +9,8 @@ import {
   setSupervisorPresenceLoader,
   _resetSupervisorPresenceCache,
 } from '../../src/ai/supervisor-presence';
+import { configureSupervisorReviewGate } from '../../src/ai/supervisor/review-gate';
+import { payloadWithSupervisorMarker } from '../../src/proposals/supervisor/marker';
 import { QueueMessage } from '../../src/queues/queue';
 import { createMockLLMGateway } from '../../src/ai/gateway/factory';
 import { chainMetaFor } from '../../src/proposals/chain';
@@ -206,6 +208,7 @@ describe('voice-action-router — RV-221 chain SMS routing', () => {
   afterEach(() => {
     _resetSupervisorPresenceCache();
     setSupervisorPresenceLoader(null);
+    configureSupervisorReviewGate(null);
   });
 
   function chainProviderImpl(
@@ -451,5 +454,84 @@ describe('voice-action-router — RV-221 chain SMS routing', () => {
     expect(await repo.findByTenant('tenant-1')).toHaveLength(2);
     expect(sendSms).not.toHaveBeenCalled();
     expect(recordSmsEvent).not.toHaveBeenCalled();
+  });
+
+  it('N-004: a non-holding supervisor review on the capture-class chain head reaches the routed chain SMS (parity with the single-action path)', async () => {
+    // Parity regression for the multi-action chain path. The gate attaches an
+    // N-002 supervisor marker to the head payload and persists it, but the
+    // router historically read only `.hold` from the gate result and rendered
+    // the chain from the STALE `built[]` head — so the freshly-attached
+    // supervisor verdict never reached the owner (unlike the single-action
+    // path, which adopts the gate's returned proposal). The fix mirrors that
+    // path: the head slot in `ordered` is the gate-reviewed proposal.
+    //
+    // renderChainSms surfaces the reviewed head via the blocking-confidence
+    // path (it carries no per-member "Check:" line like renderProposalSms), so
+    // we model a FLAGGED (non-holding) review that marks the capture-class head
+    // with a blocking `_meta.overallConfidence`. With the fix, the reviewed
+    // head is the chain's blocking member → the whole SMS flips to the review
+    // form (no one-tap token, anchored review_required_rendered). Under the
+    // stale-payload bug the head stays the original capture, non-blocking
+    // create_customer, so the chain would send the approvable form WITH a token
+    // — the assertions below would fail.
+    setSupervisorPresenceLoader(async () => false);
+    const supervisorReason = 'pricing 40% above catalog';
+    configureSupervisorReviewGate({
+      review: async ({ proposal }) => {
+        const marked = payloadWithSupervisorMarker(
+          { ...proposal.payload, _meta: { overallConfidence: 'low' } },
+          [supervisorReason],
+        );
+        return { hold: false, proposal: { ...proposal, payload: marked } };
+      },
+    });
+
+    const { gateway, provider } = createMockLLMGateway();
+    // Default chain: create_customer (capture head) + create_job — NEITHER is
+    // blocking on its own, so the only source of a blocking member is the
+    // gate-reviewed head. That isolates the parity behavior.
+    vi.spyOn(provider, 'complete').mockImplementation(chainProviderImpl() as never);
+
+    const repo = new InMemoryProposalRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const sendSms = vi.fn(async () => {});
+    const recordSmsEvent = vi.fn(async () => {});
+    const worker = makeRoutedWorker(repo, auditRepo, sendSms, recordSmsEvent, gateway);
+
+    await worker.handle(
+      makeMessage('create a customer named Jane Doe and open a job for her'),
+      silentLogger(),
+    );
+
+    const all = await repo.findByTenant('tenant-1');
+    expect(all).toHaveLength(2);
+    const head = all.find((p) => p.proposalType === 'create_customer')!;
+
+    // ONE SMS — the review form, because the reviewed head is now the chain's
+    // blocking member. No Reply-Y, no one-tap token.
+    expect(sendSms).toHaveBeenCalledTimes(1);
+    const [, body] = sendSms.mock.calls[0] as unknown as [string, string];
+    expect(body).toContain('2 linked actions:');
+    expect(body).toContain('Needs review in app before approval — reply N to reject.');
+    expect(body).not.toContain('Reply Y to approve');
+    expect(body).not.toContain('https://api.example.com/approve?token=');
+
+    // Anchored review_required_rendered on the head — the reviewed (blocking)
+    // head payload drove the suppression, not the stale capture head.
+    expect(recordSmsEvent).toHaveBeenCalledTimes(1);
+    expect(recordSmsEvent.mock.calls[0][0]).toMatchObject({
+      tenantId: 'tenant-1',
+      proposalId: head.id,
+      kind: 'review_required_rendered',
+    });
+
+    const routed = auditRepo
+      .getAll()
+      .filter((e) => e.eventType === 'unsupervised_proposal_routed');
+    expect(routed).toHaveLength(1);
+    expect(routed[0].metadata).toMatchObject({
+      approveLinkSuppressed: true,
+      suppressReason: 'low_confidence',
+    });
   });
 });

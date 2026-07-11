@@ -39,6 +39,9 @@ jobs:
       - name: AI gateway guard
         run: npm run check:ai-gateway-guard --workspace=packages/api
 
+      - name: FK-path coverage guard
+        run: npm run check:fk-paths --workspace=packages/api
+
       - name: Unit tests
         run: npm test -- --reporter=verbose
 

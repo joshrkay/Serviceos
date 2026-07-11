@@ -17,6 +17,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { AuthenticatedRequest } from '../../src/auth/clerk';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemoryPackActivationRepository } from '../../src/settings/pack-activation';
+import { InMemorySettingsRepository } from '../../src/settings/settings';
 import {
   InMemoryVerticalPackRegistry,
   registerPack,
@@ -67,7 +68,7 @@ async function buildHarness(): Promise<Harness> {
 
   app.use(
     '/api/pack-activation',
-    createPackActivationRouter(packActivationRepo, verticalPackRegistry, auditRepo)
+    createPackActivationRouter(packActivationRepo, verticalPackRegistry, auditRepo, new InMemorySettingsRepository())
   );
   app.use(
     '/api/maintenance-contracts',

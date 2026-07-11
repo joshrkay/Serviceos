@@ -18,7 +18,6 @@
  * - No real-time / streaming work happens here. That's P8-012.
  */
 
-import { v4 as uuidv4 } from 'uuid';
 import type { Pool } from 'pg';
 import {
   classifyIntent,
@@ -1925,6 +1924,9 @@ export class TwilioGatherAdapter {
             intentType: classification.intentType,
             entities: (classification.extractedEntities ?? {}) as Record<string, unknown>,
             confidence: classification.confidence,
+            // Thread the classify call's REAL ai_runs id so a proposal born
+            // from this intent links to its run row (proposals.ai_run_id FK).
+            ...(classification.aiRunId ? { aiRunId: classification.aiRunId } : {}),
           };
         } else {
           classifierEvent = {
@@ -2055,6 +2057,17 @@ export class TwilioGatherAdapter {
         );
         this.processor.expandIntentConfirmTemplate(sideEffectsAll, classifierEvent.intentType);
       }
+    } else if (currentState === 'ask_caller') {
+      // Unknown caller on the PSTN/Gather path just gave their info. Reuse the
+      // SAME find-or-create-customer + advance-to-intake logic the media-
+      // streams adapter runs (shared handleAskCaller). Without this branch the
+      // turn fell to the generic `else` below → confidence_low, which the
+      // ask_caller state ignores, so unknown callers looped forever on a bare
+      // <Gather> reprompt. Now they advance (caller_known → intent_capture) and
+      // the FSM's own reprompt/escalate handles a still-unresolved caller.
+      sideEffectsAll.push(
+        ...(await this.processor.handleAskCaller(session, opts.tenantId)),
+      );
     } else {
       // Other states: log and reprompt with a generic message. Treat as a
       // confidence_low so the FSM's normal retry/escalate logic applies.
@@ -2720,7 +2733,12 @@ export class TwilioGatherAdapter {
           sessionId: session.id,
           escalationReason: reason,
         },
-        aiRunId: uuidv4(),
+        // QA-2026-07-10: do NOT fabricate an aiRunId. proposals.ai_run_id has
+        // an FK to ai_runs(id); a random uuid violates it and the swallowed
+        // insert error silently dropped EVERY inbound-voice proposal on
+        // Postgres-backed envs (in-memory repos don't enforce the FK, which
+        // is why tests passed). This callback proposal is generated internally
+        // with no associated ai_runs row, so ai_run_id stays null.
         createdBy: this.deps.systemActorId ?? 'calling-agent',
         ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
       });

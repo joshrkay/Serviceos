@@ -45,7 +45,7 @@ export type CallingAgentEvent =
   | { type: 'text_input'; text: string }
   | { type: 'session_ended' }
   // Internal events (produced by skills, consumed by the state machine)
-  | { type: 'intent_classified'; intentType: string; entities: Record<string, unknown>; confidence: number }
+  | { type: 'intent_classified'; intentType: string; entities: Record<string, unknown>; confidence: number; aiRunId?: string }
   | { type: 'entity_resolved'; refs: Record<string, string> }
   | { type: 'entity_ambiguous'; candidates: Array<{ id: string; name: string; score: number }> }
   | { type: 'entity_not_found' }
@@ -97,6 +97,16 @@ export interface CallingAgentContext {
    * draft guard landed.
    */
   lastIntentConfidence?: number;
+  /**
+   * The persisted `ai_runs` id of the classify call that produced the current
+   * intent (from the `intent_classified` event's `aiRunId`). Captured at
+   * intent_classified alongside `lastIntentConfidence` so the eventual
+   * `create_proposal` side-effect can thread a REAL run id into the proposal
+   * (proposals.ai_run_id FK). Undefined when the classifier short-circuited
+   * without an LLM call or no AiRunRepository is wired — the proposal builder
+   * then leaves ai_run_id null rather than fabricating one.
+   */
+  lastAiRunId?: string;
   customerName?: string;
   currentIntent?: string;
   extractedEntities?: Record<string, unknown>;

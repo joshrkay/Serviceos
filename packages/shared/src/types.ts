@@ -61,4 +61,10 @@ export interface MeResponse {
     | 'queue_and_sms'
     | 'queue_only'
     | 'escalate_to_oncall';
+  /**
+   * N-011 — whether the Brand-Voice Configurator feature flag is on for this
+   * principal. Gates the onboarding brand-voice step + the settings sheet on
+   * the web. Optional (default off) so existing fixtures stay valid.
+   */
+  brand_voice_configurator_enabled?: boolean;
 }

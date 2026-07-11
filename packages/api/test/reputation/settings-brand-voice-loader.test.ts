@@ -43,7 +43,8 @@ describe('SettingsBrandVoiceLoader — real tenant tone for review responses', (
       business_name: 'Acme HVAC',
     });
     const bv = await new SettingsBrandVoiceLoader(repo).load('t1');
-    expect(bv.tone).toContain('casual');
+    // N-011 — legacy `formality: casual` maps forward to the friendly register.
+    expect(bv.tone).toContain('friendly register');
     expect(bv.tone).toContain('"we"');
     expect(bv.tone).toContain('friendly, warm');
     // Owner-banned phrases reach the public review-response prompt as guidance.

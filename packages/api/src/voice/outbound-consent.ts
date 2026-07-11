@@ -2,6 +2,7 @@ import { Pool } from 'pg';
 import { isOutboundAllowed, type OutboundCheck } from './outbound-allowlist';
 import { applyTenantContext } from '../db/rls-runtime-role';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { normalizePhone } from '../shared/phone';
 
 /**
  * Blocker 11 — TCPA / DNC consent gate for outbound AI calls.
@@ -118,14 +119,25 @@ export async function checkOutboundConsent(
       return result;
     }
 
-    // Match the customer by normalized phone. We rely on
-    // `customers.phone_normalized` (migration 053) which stores the
-    // E.164 form used here.
+    // Match the customer by normalized phone. `customers.phone_normalized`
+    // (migration 053) is `regexp_replace(primary_phone, '[^0-9]', '', 'g')`
+    // — digits only, KEEPING the leading country-code 1 (a customer saved as
+    // "+15551112222" stores "15551112222"). `ctx.phoneE164` here is the
+    // E.164 display form ("+15551112222"), so the old plain
+    // `phone_normalized = $2` equality NEVER matched a +1 customer and
+    // fail-closed reported `customer_not_found` (block mode false-refused a
+    // granted customer). Normalize to the bare 10-digit key and match BOTH
+    // storage conventions — with and without the leading 1 — mirroring the
+    // proven reconciliation in identify-caller / findByPhoneNormalized. The
+    // isOutboundAllowed gate above already guarantees a +1 NANP number, so an
+    // exact `IN ($2, '1' || $2)` is sufficient (no LIKE / substring
+    // over-match) and still targets the indexed column.
+    const phoneKey = normalizePhone(ctx.phoneE164);
     const cust = await client.query<CustomerRow>(
       `SELECT id, consent_status FROM customers
-       WHERE tenant_id = $1 AND phone_normalized = $2
+       WHERE tenant_id = $1 AND phone_normalized IN ($2, '1' || $2)
        LIMIT 1`,
-      [ctx.tenantId, ctx.phoneE164],
+      [ctx.tenantId, phoneKey],
     );
     await client.query('COMMIT');
 
