@@ -29,14 +29,30 @@ Investigated 2026-07-11; the honest state is stronger than the criticism:
    approval/pay specs (W1-3/W1-4) run against the offline Clerk stub
    (`e2e/helpers/clerk-stub.ts`) with zero secrets.
 
+4. **A fully hermetic browser Journey-1 now runs on every PR** (WS24):
+   `e2e/journeys/signup-to-first-estimate.hermetic.spec.ts`. With ZERO Clerk
+   secrets it POSTs a *signed* `user.created` svix webhook to the REAL local
+   `/webhooks/clerk` route (running the REAL `bootstrapTenant()` — the same
+   signing mechanism as TEST-04), then installs the Clerk stub bound to the
+   SAME `sub`, asserts `/api/me` returns that real `tenant_id`, and creates +
+   renders the first estimate through the real API and authed SPA. The API
+   webServer boots in `DEV_AUTH_BYPASS` mode (playwright.config.ts's
+   `apiWebServerEnv`), so the stub's unsigned JWT resolves to the
+   webhook-bootstrapped tenant via the single shared in-memory `tenantRepo`
+   (app.ts BUG-2 wiring). It runs in the always-on `chromium` project — NOT
+   guarded by `hasClerkTestingCreds` — so it gates every PR alongside the
+   secret-gated real-Clerk journey.
+
 ## The unlock: browser journeys currently `test.skip` (pure ops, ~15 min)
 
 `e2e/journeys/signup-to-first-estimate.spec.ts` and
 `onboarding-v2.spec.ts` drive the REAL Clerk hosted signup (bot-bypass
-testing tokens) and therefore genuinely need a Clerk dev instance — the
-offline stub cannot mint a real `user.created` webhook. The workflow
-(`e2e.yml`) already auto-enables everything from secret presence; **no
-workflow edits are needed.**
+testing tokens) and therefore genuinely need a Clerk dev instance. These
+now UPGRADE FIDELITY (real hosted signup UI + real Clerk session tokens)
+rather than being the only browser proof of Journey-1 — the hermetic
+`signup-to-first-estimate.hermetic.spec.ts` (above) already gates every PR
+without them. The workflow (`e2e.yml`) auto-enables the real-Clerk specs
+from secret presence; **no workflow edits are needed** to unlock them.
 
 Operator checklist:
 1. Clerk dashboard → your dev instance → Configure → **enable Testing
@@ -55,14 +71,17 @@ Operator checklist:
 
 ## Deliberate design, not debt
 
-The split is intentional: **hermetic-always-on** (stub-auth browser specs +
-the TEST-04 integration journey) gates every PR; **secret-gated-optional**
-(real-Clerk browser journeys) adds the last mile of fidelity when the
-operator provisions the dev instance. `invoice-to-payment.spec.ts` is
-permanently delegated to the hermetic W1-2 + webhook proofs (live Stripe
+The split is intentional: **hermetic-always-on** (stub-auth browser specs,
+the hermetic Journey-1, and the TEST-04 integration journey) gates every
+PR; **secret-gated-optional** (real-Clerk browser journeys) adds the last
+mile of fidelity — the real hosted signup UI and real Clerk session tokens
+— when the operator provisions the dev instance. `invoice-to-payment.spec.ts`
+is permanently delegated to the hermetic W1-2 + webhook proofs (live Stripe
 Elements out of scope by decision).
 
-If a fully hermetic browser Journey-1 is ever wanted without Clerk secrets,
-the code work is: an offline `/webhooks/clerk` seam paired with the stub so
-`/api/me` returns a real seeded tenant — a small follow-up WS, valuable but
-not required for the proof layer to be honest.
+The once-hypothetical "fully hermetic browser Journey-1 without Clerk
+secrets" shipped in WS24: rather than a new offline `/webhooks/clerk` seam,
+it reuses the REAL webhook route driven by a locally-signed svix payload,
+paired with the stub + the API's existing `DEV_AUTH_BYPASS` so `/api/me`
+returns the real bootstrapped tenant. See
+`e2e/journeys/signup-to-first-estimate.hermetic.spec.ts`.

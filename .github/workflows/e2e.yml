@@ -47,6 +47,16 @@ jobs:
           TEST_DB: testcontainers
           E2E_CLERK_SECRET_KEY: ${{ secrets.E2E_CLERK_SECRET_KEY }}
 
+      # The default `chromium` project runs every spec under e2e/ (minus the
+      # opt-in qa-matrix / coverage-sweep / ui-flow projects). That includes the
+      # ALWAYS-ON hermetic browser Journey-1
+      # (e2e/journeys/signup-to-first-estimate.hermetic.spec.ts): it drives a
+      # signed user.created webhook → REAL bootstrapTenant → first estimate with
+      # ZERO Clerk secrets. It is NOT guarded by hasClerkTestingCreds, so it
+      # gates every PR here; the API webServer boots in DEV_AUTH_BYPASS mode and
+      # with a hermetic CLERK_WEBHOOK_SECRET via playwright.config.ts. The
+      # sibling real-Clerk signup spec stays test.skip until the secrets below
+      # land — it adds fidelity, it is not the only browser proof of Journey-1.
       - name: Run E2E tests
         run: npm run e2e
         env:
