@@ -1357,6 +1357,13 @@ export function createApp(): AppWithLifecycle {
   const correctionLessonRepo = pool
     ? new PgCorrectionLessonRepository(pool)
     : new InMemoryCorrectionLessonRepository();
+  // WS6 — supervisor_reviews repo, hoisted here (rather than constructed
+  // inline inside the review-gate config further down) so the daily-digest
+  // worker deps can reuse the SAME instance for its "Checked: N proposals,
+  // M flagged" reflection line instead of standing up a second repo.
+  const supervisorReviewsRepo = pool
+    ? new PgSupervisorReviewRepository(pool)
+    : new InMemorySupervisorReviewRepository();
   // Story 3.9 — raw per-field proposal-edit log (intent + field + before/after),
   // queryable per tenant and per intent; the training signal for prompt/routing
   // improvement. Distinct from correction_lessons (cascading config above).
@@ -5292,6 +5299,8 @@ export function createApp(): AppWithLifecycle {
             feedbackResponseRepo,
             // N-005 — "what I learned today" (correction-loop lessons).
             correctionLessonRepo,
+            // WS6 — "Checked: N proposals, M flagged" (supervisor reviews).
+            supervisorReviewRepo: supervisorReviewsRepo,
           },
           listTenantIds: async () => {
             if (!pool) return [];
@@ -6041,9 +6050,8 @@ export function createApp(): AppWithLifecycle {
     createSupervisorReviewGate({
       gateway: llmGateway,
       aiRunRepo,
-      reviewsRepo: pool
-        ? new PgSupervisorReviewRepository(pool)
-        : new InMemorySupervisorReviewRepository(),
+      // WS6 — reuse the hoisted instance (the digest worker deps share it).
+      reviewsRepo: supervisorReviewsRepo,
       proposalRepo,
       supervisorModel: supervisorReviewModel,
       resolveMode: async () => supervisorReviewMode,

@@ -212,6 +212,7 @@ describe('DigestPage', () => {
       expect(screen.queryByText('Quotes sent')).not.toBeInTheDocument();
       expect(screen.queryByText("What I wasn't sure about today")).not.toBeInTheDocument();
       expect(screen.queryByText('What I learned today')).not.toBeInTheDocument();
+      expect(screen.queryByText('Supervisor checks')).not.toBeInTheDocument();
     });
 
     it('the unsure list rows meet the 44px glove target (min-h-11)', async () => {
@@ -219,6 +220,34 @@ describe('DigestPage', () => {
       renderAt('/digest/2026-06-10');
       const row = (await screen.findByText('Estimate for the Diaz job')).closest('li');
       expect(row?.className).toContain('min-h-11');
+    });
+  });
+
+  describe('WS6 supervisor checks section', () => {
+    it('renders "Checked" + flagged count when reviews ran today', async () => {
+      const withChecks = { ...basePayload, supervisorChecks: { checked: 12, flagged: 2 } };
+      mockFetch.mockResolvedValue(digestResponse(withChecks));
+      renderAt('/digest/2026-06-10');
+      await screen.findByText('A solid day.');
+      expect(screen.getByText('Supervisor checks')).toBeInTheDocument();
+      expect(screen.getByText('12')).toBeInTheDocument();
+      expect(screen.getByText('proposals checked')).toBeInTheDocument();
+      expect(screen.getByText('2 flagged')).toBeInTheDocument();
+    });
+
+    it('renders "None flagged" when nothing was flagged', async () => {
+      const withChecks = { ...basePayload, supervisorChecks: { checked: 5, flagged: 0 } };
+      mockFetch.mockResolvedValue(digestResponse(withChecks));
+      renderAt('/digest/2026-06-10');
+      await screen.findByText('A solid day.');
+      expect(screen.getByText('None flagged')).toBeInTheDocument();
+    });
+
+    it('omits the section entirely when checked===0 / absent', async () => {
+      mockFetch.mockResolvedValue(digestResponse(basePayload));
+      renderAt('/digest/2026-06-10');
+      await screen.findByText('A solid day.');
+      expect(screen.queryByText('Supervisor checks')).not.toBeInTheDocument();
     });
   });
 
