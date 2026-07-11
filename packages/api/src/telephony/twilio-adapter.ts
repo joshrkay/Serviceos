@@ -110,6 +110,7 @@ import {
   appendAgentTts,
   preloadSessionCatalog,
   type VoiceTurnProcessor,
+  type VoiceTurnProcessorDeps,
 } from '../ai/voice-turn';
 import type { CustomerNegotiationContextProvider } from '../customers/customer-negotiation-context';
 import type { CurrentQuoteResolver } from '../conversations/negotiation/current-quote-resolver';
@@ -396,6 +397,22 @@ export interface TwilioAdapterDeps {
    * recording itself can't be paused — logged loudly).
    */
   recordingControl?: RecordingControl;
+  /**
+   * WS18b — append-only consent ledger for the on-call SMS consent capture
+   * (grant kind:'sms', source:'voice' + customers.sms_consent flip).
+   * Processor-only pass-through: the adapter never reads this itself — it
+   * flows through the `...this.deps` spread into createVoiceTurnProcessor.
+   * Distinct from `consentEvents` above (RV-130 recording consent).
+   */
+  consentEventRepo?: ConsentEventRepository;
+  /**
+   * WS18d (D-018) — the sanctioned on-call close wiring (production
+   * executor, platform kill switches, owner UNDO/one-tap SMS). Processor-
+   * only pass-through: consumed exclusively by createVoiceTurnProcessor's
+   * close-chain gating; typed by reference so the adapter surface can never
+   * drift from VoiceTurnProcessorDeps.
+   */
+  autonomousClose?: VoiceTurnProcessorDeps['autonomousClose'];
 }
 
 /**

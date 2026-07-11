@@ -15,7 +15,7 @@ import { createWebhookRouter } from './webhooks/routes';
 import { createIntegrationResolver, createVapiSecretResolver } from './webhooks/integration-resolver';
 import { createTelephonyRouter } from './routes/telephony';
 import { createCallsRouter, createCallBridgeRouter } from './routes/calls';
-import { TwilioGatherAdapter } from './telephony/twilio-adapter';
+import { TwilioGatherAdapter, type TwilioAdapterDeps } from './telephony/twilio-adapter';
 import {
   createEmergencyPageWorker,
   createEmergencyPageResolvedCheck,
@@ -3202,14 +3202,11 @@ export function createApp(): AppWithLifecycle {
   voiceExtendedIntentsFlagResolver = (tenantId: string) =>
     isFlagEnabledForTenant(tenantId, 'voice_extended_intents');
 
-  // WS18d — assembled as a VARIABLE (not an inline literal) deliberately: the
-  // adapter spreads its deps into createVoiceTurnProcessor, and the processor-
-  // only WS18 keys below (consentEventRepo, autonomousClose) are not part of
-  // TwilioAdapterDeps — a literal would trip TS excess-property checking. The
-  // clean fix (extending TwilioAdapterDeps) belongs to the WS16 owner of
-  // twilio-adapter.ts; this keeps that file untouched while the processor
-  // receives its full dep surface at runtime.
-  const twilioAdapterDeps = {
+  // Explicitly typed so the literal gets full excess-property checking. The
+  // WS18 processor-only keys (consentEventRepo, autonomousClose) are declared
+  // on TwilioAdapterDeps as documented pass-throughs into
+  // createVoiceTurnProcessor — the old untyped-variable workaround is gone.
+  const twilioAdapterDeps: TwilioAdapterDeps = {
     store: voiceSessionStore,
     gateway: llmGateway,
     ...(pool ? { pool } : {}),
