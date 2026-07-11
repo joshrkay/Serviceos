@@ -51,9 +51,34 @@ describe('GatedMessageDelivery — owner bypass', () => {
 });
 
 describe('GatedMessageDelivery — enforcement off', () => {
-  it('customer send goes through with no audit, even without consent', async () => {
+  it('customer send goes through with no audit, even without consent (not on DNC)', async () => {
     const { gate, base, auditRepo } = build('off');
     await gate.sendSms(customerMsg({ consent: { smsConsent: false } }));
+    expect(base.sentSms).toHaveLength(1);
+    expect(auditRepo.getAll()).toHaveLength(0);
+  });
+
+  it('DNC is a hard floor even in off: a DNC-listed customer is suppressed + audited', async () => {
+    // Regression: 'off' must NOT drop the tenant-DNC block the legacy inline
+    // gates applied unconditionally. DNC hit → suppress + audit in every mode.
+    const { gate, base, auditRepo } = build('off', { dncPhone: DNC_PHONE });
+    await expect(
+      gate.sendSms(customerMsg({ to: DNC_PHONE })),
+    ).rejects.toMatchObject({ reason: 'dnc' });
+    expect(base.sentSms).toHaveLength(0);
+    const events = auditRepo.getAll();
+    expect(events).toHaveLength(1);
+    expect(events[0].eventType).toBe('sms.suppressed');
+    expect(events[0].metadata?.reason).toBe('dnc');
+    // The audit records the real enforcement mode, not one inferred from the event.
+    expect(events[0].metadata?.mode).toBe('off');
+  });
+
+  it('customer send with no tenantId still sends in off (previously-ungated path, not newly failed)', async () => {
+    const { gate, base, auditRepo } = build('off');
+    const msg = customerMsg({ consent: { smsConsent: false } });
+    delete (msg as { tenantId?: unknown }).tenantId;
+    await gate.sendSms(msg);
     expect(base.sentSms).toHaveLength(1);
     expect(auditRepo.getAll()).toHaveLength(0);
   });

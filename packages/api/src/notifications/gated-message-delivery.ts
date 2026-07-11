@@ -7,6 +7,10 @@
  * enforced, instead of four+ duplicated ad-hoc gates that each path had to
  * remember to apply (and some forgot — recovery, negotiation, digests).
  *
+ * The decision itself lives in the pure `evaluateCustomerSms` helper below so
+ * the gate and any pre-send precheck (e.g. the feedback_send worker, which
+ * must decide BEFORE minting a request row) share ONE implementation.
+ *
  * Semantics (SMS only; email delegates untouched):
  *
  *   - recipientClass 'owner'  → bypass the gate entirely. Owner / operator /
@@ -14,14 +18,27 @@
  *     dispatcher patches) are NEVER blocked by customer consent or DNC — even
  *     if the owner's own number happens to be on a DNC list.
  *   - recipientClass 'customer':
- *       · enforcement 'off'   → send; audit nothing (byte-for-byte legacy).
- *       · enforcement 'warn'  → if the send WOULD block, audit
- *         `sms.suppressed-would-block` then SEND anyway (observability).
- *       · enforcement 'block' → send only when consent.smsConsent === true AND
- *         the phone is not on the tenant DNC list. Otherwise audit
- *         `sms.suppressed` and throw `SmsSuppressedError`.
+ *       · the tenant DNC list is a HARD FLOOR in EVERY mode (off/warn/block):
+ *         a send to a number on the tenant DNC list is ALWAYS suppressed
+ *         (audit `sms.suppressed` reason 'dnc' + throw `SmsSuppressedError`).
+ *         This restores the legacy unconditional DNC block the four inline
+ *         gates applied before this wrapper — enforcement 'off' must NOT drop
+ *         DNC protection. Only checkable when the send carries a `tenantId`
+ *         (the DNC list is per-tenant); a customer send with no tenant scope
+ *         cannot be DNC-checked.
+ *       · consent (smsConsent) is governed by the enforcement mode:
+ *           - 'off'   → consent NOT enforced; send (byte-for-byte legacy for
+ *             non-DNC sends). A missing tenantId or missing consent context
+ *             does NOT fail in 'off' — previously-ungated paths never checked
+ *             consent, so 'off' must not newly fail them.
+ *           - 'warn'  → if consent is absent/false (or the tenant scope is
+ *             missing), audit `sms.suppressed-would-block` then SEND anyway
+ *             (observability only). DNC still hard-blocks.
+ *           - 'block' → send only when consent.smsConsent === true AND a
+ *             `tenantId` is present AND the number is not on DNC; otherwise
+ *             audit `sms.suppressed` and throw `SmsSuppressedError`.
  *       · a 'customer' send with no `consent` context fails closed
- *         (missing_consent_context) in warn/block modes.
+ *         (missing_consent_context) in warn/block; in 'off' it sends.
  *
  * Suppression surfaces as a thrown `SmsSuppressedError` so existing callers
  * keep their contracts: SendService catches it to write its `suppressed`
@@ -62,6 +79,65 @@ export class SmsSuppressedError extends Error {
   }
 }
 
+/** Outcome of evaluating a customer SMS against consent + DNC in a given mode. */
+export type SmsGateOutcome = 'send' | 'would_block' | 'suppress';
+
+export interface SmsGateDecision {
+  outcome: SmsGateOutcome;
+  /** Present when outcome is 'would_block' or 'suppress'. */
+  reason?: SmsSuppressionReason;
+}
+
+export interface CustomerSmsEvaluatorDeps {
+  dnc: DncLookup;
+  /** Enforcement mode — the SAME value that drives the voice consent gate. */
+  enforcement: SmsEnforcementMode;
+}
+
+/**
+ * The single source of the consent + DNC decision. Returns whether a message
+ * should send, would-block-but-send (warn), or suppress — WITHOUT performing
+ * the send or any audit write. Used by `GatedMessageDelivery` (which then
+ * audits + dispatches) and by pre-send prechecks that must decide before doing
+ * side effects (feedback_send mints a request row only when this says send).
+ *
+ * DNC is a hard floor applied in EVERY mode; consent is mode-governed. See the
+ * module doc comment for the full semantics table.
+ */
+export function evaluateCustomerSms(
+  deps: CustomerSmsEvaluatorDeps,
+): (message: SmsMessage) => Promise<SmsGateDecision> {
+  return async (message: SmsMessage): Promise<SmsGateDecision> => {
+    // Owner / operator sends are never gated.
+    if (message.recipientClass === 'owner') return { outcome: 'send' };
+
+    // DNC hard floor — applies in off/warn/block alike. Only checkable with a
+    // tenant scope (the list is per-tenant). A DNC hit ALWAYS suppresses,
+    // restoring the legacy unconditional block that enforcement 'off' otherwise
+    // would have dropped.
+    if (message.tenantId) {
+      const onDnc = await deps.dnc.isOnDnc(message.tenantId, normalizePhone(message.to));
+      if (onDnc) return { outcome: 'suppress', reason: 'dnc' };
+    }
+
+    // 'off' — consent is not enforced and a missing tenant scope / consent
+    // context does not fail (byte-for-byte legacy for non-DNC sends).
+    if (deps.enforcement === 'off') return { outcome: 'send' };
+
+    // 'warn' / 'block' — enforce a consent context, a true consent flag, and a
+    // tenant scope. Order is informative-first (missing context vs. explicit no).
+    let reason: SmsSuppressionReason | null = null;
+    if (!message.consent) reason = 'missing_consent_context';
+    else if (message.consent.smsConsent !== true) reason = 'no_consent';
+    else if (!message.tenantId) reason = 'missing_consent_context';
+
+    if (!reason) return { outcome: 'send' };
+    return deps.enforcement === 'warn'
+      ? { outcome: 'would_block', reason }
+      : { outcome: 'suppress', reason };
+  };
+}
+
 export interface GatedMessageDeliveryDeps {
   base: MessageDeliveryProvider;
   dnc: DncLookup;
@@ -71,29 +147,24 @@ export interface GatedMessageDeliveryDeps {
 }
 
 export class GatedMessageDelivery implements MessageDeliveryProvider {
-  constructor(private readonly deps: GatedMessageDeliveryDeps) {}
+  private readonly evaluate: (message: SmsMessage) => Promise<SmsGateDecision>;
+
+  constructor(private readonly deps: GatedMessageDeliveryDeps) {
+    // Share the exact decision logic used by pre-send prechecks (single source).
+    this.evaluate = evaluateCustomerSms({ dnc: deps.dnc, enforcement: deps.enforcement });
+  }
 
   async sendSms(message: SmsMessage): Promise<DeliveryResult> {
-    // Owner / operator sends bypass the gate entirely.
-    if (message.recipientClass === 'owner') {
+    const decision = await this.evaluate(message);
+
+    if (decision.outcome === 'would_block') {
+      // Warn mode observes — audit then send anyway.
+      await this.audit('sms.suppressed-would-block', decision.reason!, message);
       return this.deps.base.sendSms(message);
     }
-
-    // Customer send. 'off' preserves legacy behavior exactly — no gate, no audit.
-    if (this.deps.enforcement === 'off') {
-      return this.deps.base.sendSms(message);
-    }
-
-    const reason = await this.evaluate(message);
-    if (reason) {
-      if (this.deps.enforcement === 'warn') {
-        // Would block, but warn mode only observes — audit then send.
-        await this.audit('sms.suppressed-would-block', reason, message);
-        return this.deps.base.sendSms(message);
-      }
-      // block mode — suppress.
-      await this.audit('sms.suppressed', reason, message);
-      throw new SmsSuppressedError(reason, message.recipientClass);
+    if (decision.outcome === 'suppress') {
+      await this.audit('sms.suppressed', decision.reason!, message);
+      throw new SmsSuppressedError(decision.reason!, message.recipientClass);
     }
 
     return this.deps.base.sendSms(message);
@@ -101,22 +172,6 @@ export class GatedMessageDelivery implements MessageDeliveryProvider {
 
   sendEmail(message: EmailMessage): Promise<DeliveryResult> {
     return this.deps.base.sendEmail(message);
-  }
-
-  /**
-   * Returns the block reason for a customer send, or null when allowed.
-   * Checks consent first (most informative), then per-tenant DNC.
-   */
-  private async evaluate(message: SmsMessage): Promise<SmsSuppressionReason | null> {
-    if (!message.consent) return 'missing_consent_context';
-    if (message.consent.smsConsent !== true) return 'no_consent';
-    // The DNC list is per-tenant; a customer send with no tenant scope can't be
-    // checked, so fail closed rather than send to a possibly-opted-out number.
-    if (!message.tenantId) return 'missing_consent_context';
-    if (await this.deps.dnc.isOnDnc(message.tenantId, normalizePhone(message.to))) {
-      return 'dnc';
-    }
-    return null;
   }
 
   private async audit(
@@ -142,7 +197,9 @@ export class GatedMessageDelivery implements MessageDeliveryProvider {
             recipientClass: message.recipientClass,
             phoneLast4: last4,
             tenantId,
-            mode: eventType === 'sms.suppressed-would-block' ? 'warn' : 'block',
+            // Real enforcement mode — a DNC hard-floor suppression can fire in
+            // 'off'/'warn', so don't infer the mode from the event type.
+            mode: this.deps.enforcement,
           },
         }),
       );

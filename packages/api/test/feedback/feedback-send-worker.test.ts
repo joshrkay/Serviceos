@@ -2,9 +2,10 @@
  * Unit tests for the feedback_send worker. WS1: the SMS consent + DNC gate is
  * now enforced centrally by the GatedMessageDelivery wrapper the dispatcher
  * sends through — NOT inline in the worker. The review-request link is
- * delivered only over SMS, so a suppressed number receives nothing; the worker
- * mints the request row first (needed for the link token) and treats a gate
- * suppression as a terminal skip.
+ * delivered only over SMS, so a suppressed number receives nothing. The worker
+ * runs the SAME pure consent+DNC decision (evaluateCustomerSms) BEFORE minting
+ * the request row, so a suppressed send leaves NO poisoned findByJob row — a
+ * later run after consent is granted still sends.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { v4 as uuidv4 } from 'uuid';
@@ -19,7 +20,7 @@ import {
   MessageDeliveryFeedbackDispatcher,
 } from '../../src/feedback/dispatcher';
 import { InMemoryDeliveryProvider } from '../../src/notifications/delivery-provider';
-import { GatedMessageDelivery } from '../../src/notifications/gated-message-delivery';
+import { GatedMessageDelivery, evaluateCustomerSms } from '../../src/notifications/gated-message-delivery';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemoryDncRepository, normalizePhone } from '../../src/compliance/dnc';
 import { createLogger } from '../../src/logging/logger';
@@ -123,10 +124,12 @@ async function setup(customerOverrides: Partial<Customer> = {}) {
     settingsRepo,
     feedbackRequestRepo,
     dispatcher,
+    // Same logic the gate runs at send time, bound with the same dnc + mode.
+    evaluateSms: evaluateCustomerSms({ dnc: dncRepo, enforcement: 'block' }),
     publicBaseUrl: 'https://app.example.com/',
   });
 
-  return { worker, jobId, customerId, feedbackRequestRepo, dispatcher, dncRepo, rawProvider };
+  return { worker, jobId, customerId, customerRepo, feedbackRequestRepo, dispatcher, dncRepo, rawProvider };
 }
 
 describe('feedback_send worker — happy path', () => {
@@ -149,22 +152,21 @@ describe('feedback_send worker — happy path', () => {
 });
 
 describe('feedback_send worker — central consent + DNC gate', () => {
-  // WS1 — the gate is now enforced by the delivery wrapper. The worker mints
-  // the request row (the SMS body needs its token) then sends; a suppressed
-  // send throws and is caught as a terminal skip. So: nothing leaves the
-  // building, and the minted request row is left behind (harmless dangling
-  // token, never texted).
-  it('does not send when smsConsent is false (request still minted)', async () => {
+  // WS1 finding 3 — the worker evaluates suppression (same gate logic) BEFORE
+  // minting the request row. A suppressed send therefore leaves NO row behind,
+  // so the next sweep's findByJob dedup does not treat the customer as already
+  // handled once they later grant consent / leave the DNC list.
+  it('does not send when smsConsent is false and mints NO request row', async () => {
     const { worker, jobId, feedbackRequestRepo, dispatcher, rawProvider } =
       await setup({ smsConsent: false });
     await worker.handle(message({ tenantId: TENANT, jobId }), logger);
 
     expect(dispatcher.sent).toHaveLength(0);
     expect(rawProvider.sentSms).toHaveLength(0);
-    expect(await feedbackRequestRepo.findByJob(TENANT, jobId)).not.toBeNull();
+    expect(await feedbackRequestRepo.findByJob(TENANT, jobId)).toBeNull();
   });
 
-  it('does not send when the phone is on the DNC list (request still minted)', async () => {
+  it('does not send when the phone is on the DNC list and mints NO request row', async () => {
     const { worker, jobId, feedbackRequestRepo, dispatcher, dncRepo, rawProvider } =
       await setup();
     await dncRepo.addToDnc(TENANT, normalizePhone('+15559876543'), 'test');
@@ -173,6 +175,23 @@ describe('feedback_send worker — central consent + DNC gate', () => {
 
     expect(dispatcher.sent).toHaveLength(0);
     expect(rawProvider.sentSms).toHaveLength(0);
+    expect(await feedbackRequestRepo.findByJob(TENANT, jobId)).toBeNull();
+  });
+
+  it('a suppressed customer who later grants consent is NOT permanently poisoned — a re-run sends', async () => {
+    const { worker, jobId, customerId, customerRepo, feedbackRequestRepo, dispatcher } =
+      await setup({ smsConsent: false });
+
+    // First run: suppressed, no row minted.
+    await worker.handle(message({ tenantId: TENANT, jobId }), logger);
+    expect(dispatcher.sent).toHaveLength(0);
+    expect(await feedbackRequestRepo.findByJob(TENANT, jobId)).toBeNull();
+
+    // Customer grants consent; the next sweep must now send (no poisoned dedup row).
+    await customerRepo.update(TENANT, customerId, { smsConsent: true });
+
+    await worker.handle(message({ tenantId: TENANT, jobId }), logger);
+    expect(dispatcher.sent).toHaveLength(1);
     expect(await feedbackRequestRepo.findByJob(TENANT, jobId)).not.toBeNull();
   });
 });

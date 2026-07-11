@@ -44,6 +44,7 @@ import { DncRepository, normalizePhone } from '../compliance/dnc';
 import { resolveCustomerLanguage } from '../i18n/resolve-language';
 import { renderThankYouSms } from '../notifications/templates';
 import { FeedbackDispatcher } from '../feedback/dispatcher';
+import { SmsSuppressedError } from '../notifications/gated-message-delivery';
 
 const HOUR_MS = 60 * 60 * 1000;
 const THANK_YOU_ACTOR = 'system:thank_you_sms';
@@ -242,7 +243,29 @@ async function sendOneThankYou(
   });
   const { body } = renderThankYouSms({ businessName, language });
 
-  await deps.dispatcher.send({ to: customer.primaryPhone, body });
+  // Forward tenant scope + the customer's consent snapshot so the central
+  // consent+DNC gate (GatedMessageDelivery) can allow the send. Omitting these
+  // made every send fail closed as `missing_consent_context` under the prod
+  // default 'block' mode — the send was counted transient and retried hot every
+  // sweep, and thank_you_sms_sent_at was never stamped.
+  try {
+    await deps.dispatcher.send({
+      to: customer.primaryPhone,
+      body,
+      tenantId,
+      consent: { smsConsent: customer.smsConsent === true, customerId: customer.id },
+    });
+  } catch (err) {
+    if (err instanceof SmsSuppressedError) {
+      // Terminal: the gate suppressed (e.g. the number hit the DNC list between
+      // our precheck above and the send). Stamp so the sweep stops re-evaluating
+      // this row — mirrors the no_phone / no_consent / on_dnc terminal paths
+      // rather than looping as a transient retry forever.
+      await markHandled(deps, tenantId, jobId, customer.id, `gate_${err.reason}`);
+      return 'suppressed';
+    }
+    throw err; // transient (e.g. Twilio 5xx) — leave the stamp null for retry.
+  }
 
   await deps.jobRepo.update(tenantId, jobId, {
     thankYouSmsSentAt: (deps.now ?? (() => new Date()))(),

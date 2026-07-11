@@ -6,7 +6,8 @@ import { InMemoryDncRepository } from '../../src/compliance/dnc';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemoryJobRepository, type Job } from '../../src/jobs/job';
 import { createLogger } from '../../src/logging/logger';
-import type { FeedbackDispatcher } from '../../src/feedback/dispatcher';
+import type { FeedbackDispatcher, FeedbackDispatchInput } from '../../src/feedback/dispatcher';
+import { SmsSuppressedError } from '../../src/notifications/gated-message-delivery';
 import {
   runThankYouSmsSweep,
   type ThankYouSmsWorkerDeps,
@@ -82,7 +83,7 @@ describe('runThankYouSmsSweep', () => {
   let dncRepo: InMemoryDncRepository;
   let auditRepo: InMemoryAuditRepository;
   let dispatcher: FeedbackDispatcher;
-  let send: ReturnType<typeof vi.fn<[{ to: string; body: string }], Promise<void>>>;
+  let send: ReturnType<typeof vi.fn<[FeedbackDispatchInput], Promise<void>>>;
 
   beforeEach(async () => {
     jobRepo = new InMemoryJobRepository();
@@ -90,7 +91,7 @@ describe('runThankYouSmsSweep', () => {
     settingsRepo = new InMemorySettingsRepository();
     dncRepo = new InMemoryDncRepository();
     auditRepo = new InMemoryAuditRepository();
-    send = vi.fn(async (_input: { to: string; body: string }) => undefined as void);
+    send = vi.fn(async (_input: FeedbackDispatchInput) => undefined as void);
     dispatcher = { send } as unknown as FeedbackDispatcher;
 
     await settingsRepo.create(baseSettings(TENANT, 'Acme Plumbing'));
@@ -154,9 +155,13 @@ describe('runThankYouSmsSweep', () => {
 
     expect(result).toEqual({ tenants: 1, candidates: 1, sent: 1, suppressed: 0, failed: 0 });
     expect(send).toHaveBeenCalledTimes(1);
+    // The send now carries tenant scope + the customer's consent snapshot so the
+    // central consent+DNC gate can allow it (missing → fails closed in 'block').
     expect(send).toHaveBeenCalledWith({
       to: '+15551234567',
       body: expect.stringContaining('Acme Plumbing'),
+      tenantId: TENANT,
+      consent: { smsConsent: true, customerId: 'cust-1' },
     });
 
     const stamped = await jobRepo.findById(TENANT, job.id);
@@ -231,6 +236,33 @@ describe('runThankYouSmsSweep', () => {
     expect(stamped?.thankYouSmsSentAt).toBeUndefined();
     // No sent audit event on a transient failure.
     const events = await auditRepo.findByEntity(TENANT, 'job', job.id);
+    expect(events.some((e) => e.eventType === 'notification.thank_you_sms.sent')).toBe(false);
+  });
+
+  it('treats a gate SmsSuppressedError as a TERMINAL skip: stamps the column so it does not retry hot every sweep', async () => {
+    // The worker prechecks consent/DNC, but the number can hit the DNC list
+    // between that precheck and the send (race). The central gate then throws
+    // SmsSuppressedError — this must be terminal (stamp set, counted suppressed),
+    // NOT a transient failure that leaves the stamp null and retries forever.
+    const job = makeJob({});
+    await jobRepo.create(job);
+    await customerRepo.create(makeCustomer());
+    send.mockRejectedValueOnce(new SmsSuppressedError('dnc'));
+
+    const result = await runThankYouSmsSweep(deps([{ id: job.id, tenant_id: TENANT }]));
+
+    expect(result.suppressed).toBe(1);
+    expect(result.failed).toBe(0);
+    expect(result.sent).toBe(0);
+
+    const stamped = await jobRepo.findById(TENANT, job.id);
+    expect(stamped?.thankYouSmsSentAt).toEqual(NOW);
+
+    const events = await auditRepo.findByEntity(TENANT, 'job', job.id);
+    expect(
+      events.find((e) => e.eventType === 'notification.thank_you_sms.suppressed')?.metadata,
+    ).toMatchObject({ reason: 'gate_dnc' });
+    // No sent audit event on a suppression.
     expect(events.some((e) => e.eventType === 'notification.thank_you_sms.sent')).toBe(false);
   });
 

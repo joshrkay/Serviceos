@@ -376,7 +376,7 @@ import {
 } from './notifications/delivery-provider';
 import { TwilioDeliveryProvider } from './notifications/twilio-delivery-provider';
 import { PerTenantTwilioDeliveryProvider } from './notifications/per-tenant-twilio-delivery-provider';
-import { GatedMessageDelivery } from './notifications/gated-message-delivery';
+import { GatedMessageDelivery, evaluateCustomerSms } from './notifications/gated-message-delivery';
 import { SendService } from './notifications/send-service';
 import {
   InMemoryDispatchRepository,
@@ -1451,6 +1451,14 @@ export function createApp(): AppWithLifecycle {
       })
     : null;
 
+  // WS1 — the same pure consent+DNC decision the gate runs at send time, bound
+  // with the SAME dnc + enforcement. Used by the feedback_send worker to decide
+  // suppression BEFORE minting a request row (single source of the logic).
+  const evaluateCustomerSmsGate = evaluateCustomerSms({
+    dnc: dncRepo,
+    enforcement: config.TCPA_CONSENT_ENFORCEMENT,
+  });
+
   // WS1 — resolve a customer's SMS consent by phone for send sites that only
   // hold the recipient's number (dropped-call recovery + negotiation replies).
   // A single customer match yields the consent snapshot; zero or many matches →
@@ -2393,6 +2401,7 @@ export function createApp(): AppWithLifecycle {
     settingsRepo,
     feedbackRequestRepo,
     dispatcher: feedbackDispatcher,
+    evaluateSms: evaluateCustomerSmsGate,
     publicBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:5173',
   });
   workerRegistry.set(
