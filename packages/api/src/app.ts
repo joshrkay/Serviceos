@@ -504,7 +504,7 @@ import { PgAiRunRepository } from './ai/pg-ai-run';
 import { createEvaluationRouter } from './routes/evaluation';
 import { PgShadowComparisonStore } from './ai/evaluation/pg-shadow-comparison';
 import { InMemoryShadowComparisonStore } from './ai/evaluation/shadow-comparison';
-import { createTtsProvider } from './ai/tts/tts-provider';
+import { createTtsProvider, assertTtsProviderSupportsMediaStreams } from './ai/tts/tts-provider';
 import { InAppVoiceAdapter } from './ai/agents/customer-calling/inapp-adapter';
 import { VoiceSessionStore } from './ai/agents/customer-calling/voice-session-store';
 import { createVoiceEventTransport } from './ai/agents/customer-calling/voice-event-transport';
@@ -3414,6 +3414,20 @@ export function createApp(): express.Express {
       // filler clips and live TTS speak with one voice.
       ELEVENLABS_VOICE_ID: process.env.ELEVENLABS_VOICE_ID,
       AI_PROVIDER_API_KEY: config.AI_PROVIDER_API_KEY,
+    });
+    // P0 voice-output fail-fast: Twilio Media Streams requires raw PCM16
+    // audio (mediastream-adapter.ts encodes it to mu-law itself via
+    // streamPcmAsMedia). A TtsProvider that only implements synthesize()
+    // (OpenAI tts-1, ElevenLabs' non-streaming call) returns compressed
+    // audio (mp3) with no transcoder in the media-streams path — feeding
+    // that into streamPcmAsMedia produces inaudible static on every call.
+    // Only synthesizeStream() implementations (currently ElevenLabs) emit
+    // raw PCM. Crash at boot rather than ship a silent voice outage — same
+    // fail-fast posture as the DATABASE_URL check above.
+    assertTtsProviderSupportsMediaStreams({
+      mediaStreamsEnabled,
+      provider: sharedTtsProvider,
+      ttsProviderEnv: process.env.TTS_PROVIDER,
     });
     const streamingProvider = deepgramKey
       ? new DeepgramStreamingProvider(deepgramKey)

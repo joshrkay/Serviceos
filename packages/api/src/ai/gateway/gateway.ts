@@ -12,7 +12,7 @@ import {
   failAiRun,
   AiRun,
 } from '../ai-run';
-import { AIRoutingConfig, isVisionCapableModel } from '../../config/ai-routing';
+import { AIRoutingConfig, isVisionCapableModel, TASK_TYPES } from '../../config/ai-routing';
 import {
   resolveRouting,
   shouldWarnForUnmappedTaskType,
@@ -124,6 +124,53 @@ export interface LLMGatewayLogger {
 
 /** Sentinel tenant ID used when a request carries no tenantId. */
 export const SYSTEM_TENANT_ID = 'system';
+
+/**
+ * Known tenant-scoped task types — the canonical `TASK_TYPES` list from
+ * `config/ai-routing.ts` (every value a real call site passes to
+ * `gateway.complete({ taskType })`). Every one of these is per-tenant voice/AI
+ * work; none of them is a legitimately system-level task. Used only as a
+ * conservative allow-list for `warnIfMissingTopLevelTenantId` below —
+ * dynamically-constructed taskTypes (e.g. the `assistant.*` namespace) are
+ * intentionally excluded so we don't emit false-positive warnings for
+ * taskTypes this list doesn't know about.
+ */
+const TENANT_SCOPED_TASK_TYPES: ReadonlySet<string> = new Set(TASK_TYPES);
+
+/**
+ * P0 scaling bug guard: a tenant-scoped taskType dispatched with no
+ * top-level `tenantId` silently falls back to the shared `SYSTEM_TENANT_ID`
+ * bucket in the resilience wrappers (`ProviderTenantQuotaWrapper` /
+ * `CachingGatewayWrapper` both key on `request.tenantId`, not
+ * `request.metadata.tenantId`) — collapsing every tenant's concurrency quota
+ * onto one process-global bucket, and (if the gateway cache is ever enabled)
+ * leaking cached classifications/entities across tenants.
+ *
+ * This is a WARNING, not a hard throw: several other call sites are known to
+ * still omit the top-level field (being fixed separately) and a throw here
+ * would take down those flows. The goal is to make the silent-fallback class
+ * of bug visible in logs so it can't recur unnoticed, not to enforce it yet.
+ */
+function warnIfMissingTopLevelTenantId(
+  request: LLMRequest,
+  logger?: LLMGatewayLogger,
+): void {
+  if (request.tenantId) return;
+  if (!TENANT_SCOPED_TASK_TYPES.has(request.taskType)) return;
+  const metadataTenantId =
+    request.metadata && typeof request.metadata === 'object'
+      ? (request.metadata as Record<string, unknown>).tenantId
+      : undefined;
+  logger?.info(
+    'LLM request for a tenant-scoped taskType is missing a top-level tenantId — ' +
+      'falling back to the shared "system" quota/cache bucket for this call',
+    {
+      level: 'warn',
+      taskType: request.taskType,
+      hasMetadataTenantId: metadataTenantId !== undefined,
+    },
+  );
+}
 
 // Accepts an image data URL with optional RFC-2397 params before ;base64,
 // e.g. "data:image/png;base64," and "data:image/png;name=x.png;base64,".
@@ -266,6 +313,8 @@ export class LLMGateway {
     if (validationErrors.length > 0) {
       throw new ValidationError('Invalid LLM request', { errors: validationErrors });
     }
+
+    warnIfMissingTopLevelTenantId(request, this.logger);
 
     const providerName = this.resolveProvider(request.taskType);
     const provider = this.providers.get(providerName);

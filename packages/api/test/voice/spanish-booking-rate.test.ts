@@ -129,23 +129,35 @@ describe('Voice-parity Feature 6 — Spanish booking rate + language consistency
       const { sessionId } = await adapter.startSession(TENANT, USER);
       const result = await adapter.handleInput(sessionId, fx.callerUtterance);
 
+      // Auto-confirm was removed: a booking intent parks at the intent_confirm
+      // readback, so the caller confirms with a Spanish "sí" on a second turn.
+      // The proposal is only queued after that genuine confirmation.
+      let confirmResult: Awaited<ReturnType<typeof adapter.handleInput>> | undefined;
+      if (result.state === 'intent_confirm') {
+        confirmResult = await adapter.handleInput(sessionId, 'sí');
+      }
+      const finalResult = confirmResult ?? result;
+
       // (1) Auto-detection — the Spanish first utterance pinned the session.
       const session = store.get(sessionId);
       if (session?.language !== 'es') {
         failures.push(`${fx.id}: session.language=${session?.language} (expected es)`);
       }
 
-      // (2) Booking/capture — did the call draft a proposal?
+      // (2) Booking/capture — did the call draft a proposal (post-confirm)?
       if (fx.expectsBooking) {
         bookingEligible++;
-        if (result.proposalIds.length >= 1) booked++;
+        if (finalResult.proposalIds.length >= 1) booked++;
       }
 
-      // (3) Language consistency — the agent's spoken response is Spanish.
-      const spoken = result.ttsText ?? '';
-      for (const tell of ENGLISH_TELLS) {
-        if (spoken.includes(tell)) {
-          failures.push(`${fx.id}: English bleed in agent copy ("${tell}"): ${spoken}`);
+      // (3) Language consistency — the agent's spoken copy on BOTH the
+      // readback and the confirm/close turn must stay Spanish.
+      const spokenTurns = [result.ttsText ?? '', confirmResult?.ttsText ?? ''];
+      for (const spoken of spokenTurns) {
+        for (const tell of ENGLISH_TELLS) {
+          if (spoken.includes(tell)) {
+            failures.push(`${fx.id}: English bleed in agent copy ("${tell}"): ${spoken}`);
+          }
         }
       }
     }

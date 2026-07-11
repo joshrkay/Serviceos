@@ -107,7 +107,7 @@ function makeTtsProvider(): TtsProvider {
   return {
     synthesize: vi.fn(async (): Promise<TtsSynthesizeResult> => ({
       audio: Buffer.alloc(640),
-      contentType: 'audio/mulaw',
+      contentType: 'audio/pcm',
       provider: 'test',
     })),
   };
@@ -200,6 +200,50 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
 
     const mediaFrames = ws.sent.filter((m) => (m as Record<string, unknown>).event === 'media');
     expect(mediaFrames.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('P0: does NOT stream synthesize() output as PCM when contentType is compressed audio (e.g. mp3)', async () => {
+    // Regression pin for the silent-voice-output bug: a non-streaming
+    // TtsProvider (OpenAI tts-1 in production) returns 'audio/mpeg' — MP3
+    // bytes streamPcmAsMedia has no decoder for. Feeding it through
+    // previously produced inaudible static with no error. The adapter must
+    // now refuse to treat non-PCM contentType as raw PCM and log instead.
+    store.create('t', 'telephony', { callSid: 'CA-mp3' });
+    const ws = new FakeWs();
+    const { provider, handle } = makeStreamingProvider();
+    const mp3OnlyTts: TtsProvider = {
+      synthesize: vi.fn(async (): Promise<TtsSynthesizeResult> => ({
+        audio: Buffer.from('ID3-fake-mp3-bytes'),
+        contentType: 'audio/mpeg',
+        provider: 'openai-tts-1',
+      })),
+      // Deliberately no synthesizeStream — exercises the buffered branch.
+    };
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: provider,
+        speechTurn: async () => [],
+        ttsProvider: mp3OnlyTts,
+        initializeSession: async () => [{ type: 'tts_play', payload: { text: 'Hello!' } }],
+      },
+      ws,
+    );
+    adapter.start();
+
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-mp3',
+      start: { callSid: 'CA-mp3', accountSid: 'AC', streamSid: 'MZ-mp3', tracks: ['inbound'] },
+    });
+    await new Promise((r) => setImmediate(r));
+    handle.emit({ type: 'final', isFinal: true, transcript: 'hello', confidence: 0.95 });
+    await new Promise((r) => setImmediate(r));
+
+    expect(mp3OnlyTts.synthesize).toHaveBeenCalledTimes(1);
+    // No media frames were emitted — the mp3 bytes never reached streamPcmAsMedia.
+    const mediaFrames = ws.sent.filter((m) => (m as Record<string, unknown>).event === 'media');
+    expect(mediaFrames.length).toBe(0);
   });
 
   it('closes WS with 1008 when start frame has empty callSid (invalid_start_payload)', async () => {
@@ -1508,7 +1552,7 @@ describe('UB-C1 — language threading + live switching', () => {
     return {
       synthesize: vi.fn(async (_input: TtsSynthesizeInput): Promise<TtsSynthesizeResult> => ({
         audio: Buffer.alloc(640),
-        contentType: 'audio/mulaw',
+        contentType: 'audio/pcm',
         provider: 'test',
       })),
     };
@@ -1891,7 +1935,7 @@ describe('UB-C2 — streaming TTS language + copy rendering', () => {
     const tts = {
       synthesize: vi.fn(async (_input: TtsSynthesizeInput): Promise<TtsSynthesizeResult> => ({
         audio: Buffer.alloc(640),
-        contentType: 'audio/mulaw',
+        contentType: 'audio/pcm',
         provider: 'test',
       })),
     };

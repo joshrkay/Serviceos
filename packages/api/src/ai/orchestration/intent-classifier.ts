@@ -1498,10 +1498,17 @@ async function classifyIntentRaw(
       { role: 'user', content: transcript },
     ],
     responseFormat: 'json',
-    // Pass tenantId so gateway-layer features (per-tenant cache keys,
-    // cost accounting, future routing) can scope correctly. Without
-    // this, a cached response for tenant A could be returned to
-    // tenant B if two transcripts collide on the content hash.
+    // Top-level tenantId is what the resilience wrappers key on
+    // (ProviderTenantQuotaWrapper / CachingGatewayWrapper both read
+    // request.tenantId, not metadata.tenantId). Without it every tenant's
+    // classify_intent calls collapsed onto the shared SYSTEM_TENANT_ID
+    // quota bucket (concurrency 8 for the WHOLE platform) and, were the
+    // gateway cache ever enabled, onto a shared cache key (cross-tenant
+    // leak of classification + extracted entities).
+    tenantId: context.tenantId,
+    // Kept in metadata too: some downstream logging/consumers still read
+    // tenantId from here (see gateway.ts correlationId/promptVersionId
+    // metadata reads for the pattern this follows).
     metadata: { tenantId: context.tenantId },
   });
 

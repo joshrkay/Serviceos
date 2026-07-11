@@ -246,6 +246,23 @@ describe('intent-classifier — classifyIntent', () => {
     expect(call.metadata).toEqual({ tenantId: 'tenant-xyz' });
   });
 
+  // P0 scaling bug regression: the resilience wrappers (ProviderTenantQuotaWrapper /
+  // CachingGatewayWrapper) read request.tenantId at the TOP LEVEL of the LLMRequest,
+  // not metadata.tenantId. Nesting it only in metadata collapsed every tenant's
+  // classify_intent calls onto the shared "system" quota bucket (concurrency 8 for
+  // the whole platform) and, if the gateway cache is ever enabled, onto a shared
+  // cache key (cross-tenant leak of classification + extracted entities).
+  it('passes tenantId as a TOP-LEVEL field on the LLMRequest (not only in metadata)', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({ intentType: 'create_invoice', confidence: 0.9 })
+    );
+    await classifyIntent('create an invoice', { tenantId: 'tenant-xyz' }, gateway);
+    const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(call.tenantId).toBe('tenant-xyz');
+    // Still present in metadata for any downstream reader that expects it there.
+    expect(call.metadata).toEqual({ tenantId: 'tenant-xyz' });
+  });
+
   it('returns unknown when LLM returns an unsupported intentType', async () => {
     // Use a clearly-never-supported intent name so this test doesn't
     // regress whenever we expand the supported-intent list. (Earlier

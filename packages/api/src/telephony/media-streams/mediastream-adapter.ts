@@ -473,6 +473,22 @@ const TWILIO_SLOW_CONSUMER_GRACE_MS = 8_000;
 const TWILIO_SLOW_CONSUMER_EWMA_THRESHOLD_MS = 250;
 
 /**
+ * P0 voice-output fix — MIME types that `streamPcmAsMedia` can safely
+ * consume. That method treats its input as raw, unencoded PCM16 samples
+ * (it does the PCM16 → mu-law encoding itself via `encodeTwilioOutboundFrame`)
+ * — it has no decoder for compressed formats. A `TtsProvider.synthesize()`
+ * result is only safe to hand to it when `contentType` is one of these; any
+ * compressed format (e.g. OpenAI/ElevenLabs' default 'audio/mpeg') would be
+ * streamed out as static with no error otherwise.
+ */
+const RAW_PCM_CONTENT_TYPES = new Set(['audio/pcm', 'audio/l16', 'audio/x-raw', 'audio/raw']);
+
+function isRawPcmContentType(contentType: string): boolean {
+  const base = contentType.split(';')[0]?.trim().toLowerCase() ?? '';
+  return RAW_PCM_CONTENT_TYPES.has(base);
+}
+
+/**
  * B2 — map handleClose's `reason` into a CallOutcome-compatible
  * endedReason recognised by `deriveCallOutcome`. Transport-layer
  * failures (WS errors, slow-consumer disconnects, outbound-queue
@@ -1589,7 +1605,21 @@ export class TwilioMediaStreamAdapter {
         if (fillerTimer) clearTimeout(fillerTimer);
         // Same cancellation logic for buffered (non-streaming) TTS.
         cancelActiveFiller();
-        if (turnId === this.state.outboundTurnId && this.state.agentSpeaking) {
+        // P0 defense-in-depth: streamPcmAsMedia() assumes raw PCM16 @ 16kHz
+        // (it mu-law-encodes the bytes itself) and does NOT decode
+        // compressed formats. synthesize() results are only PCM-safe when
+        // contentType says so — feeding compressed audio (e.g. OpenAI's
+        // default 'audio/mpeg') into it produces inaudible static with no
+        // error surfaced to the caller. The app.ts boot guard should
+        // prevent a non-streaming, non-PCM provider from ever being wired
+        // when Media Streams is enabled; this check is the belt-and-
+        // suspenders so a future provider swap can't silently regress.
+        if (!isRawPcmContentType(result.contentType)) {
+          logger.error(
+            'mediastream: synthesize() returned non-PCM audio, dropping instead of streaming as static',
+            { contentType: result.contentType, provider: result.provider, tenantId: this.state.tenantId ?? undefined },
+          );
+        } else if (turnId === this.state.outboundTurnId && this.state.agentSpeaking) {
           await this.streamPcmAsMedia(result.audio, turnId);
         }
       }

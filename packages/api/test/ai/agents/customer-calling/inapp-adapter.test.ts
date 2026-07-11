@@ -87,7 +87,13 @@ describe('InAppVoiceAdapter', () => {
       onCallRepo,
     });
     const { sessionId } = await adapter.startSession(TENANT, USER);
-    const result = await adapter.handleInput(sessionId, 'Invoice Acme for 450');
+    // Turn 1: high-confidence intent resolves and parks at the readback
+    // (intent_confirm) — no proposal is created without caller confirmation.
+    const readback = await adapter.handleInput(sessionId, 'Invoice Acme for 450');
+    expect(readback.state).toBe('intent_confirm');
+    expect(readback.proposalIds.length).toBe(0);
+    // Turn 2: the caller confirms — NOW the proposal is created and we close.
+    const result = await adapter.handleInput(sessionId, 'yes');
     expect(result.proposalIds.length).toBe(1);
     expect(result.state).toBe('closing');
     const proposals = await proposalRepo.findByTenant(TENANT);
@@ -314,6 +320,8 @@ describe('InAppVoiceAdapter', () => {
       });
       const { sessionId } = await adapter.startSession(TENANT, USER);
       await adapter.handleInput(sessionId, 'Invoice Acme for 450');
+      // Caller confirms the readback so the proposal is actually created.
+      await adapter.handleInput(sessionId, 'yes');
       expect(thresholdResolver).toHaveBeenCalledWith(TENANT);
       // Without going through the full proposal-status decision, the
       // smoke test is: the resolver was called and a proposal was
@@ -441,6 +449,8 @@ describe('InAppVoiceAdapter', () => {
       });
       const { sessionId } = await adapter.startSession(TENANT, USER);
       await adapter.handleInput(sessionId, 'Invoice Acme for 450');
+      // Caller confirms the readback → proposal queued → closing.
+      await adapter.handleInput(sessionId, 'yes');
       await adapter.endSession(sessionId);
       await Promise.resolve();
       await Promise.resolve();
