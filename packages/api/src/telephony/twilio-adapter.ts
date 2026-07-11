@@ -692,14 +692,6 @@ export function injectSafetySayLines(
 
 // ─── Adapter ─────────────────────────────────────────────────────────────────
 
-/**
- * WS16b — which voice transport an inbound establishment is running for. The
- * two shared cores (`establishInboundSession`, `bootstrapCallEstablishment`)
- * are transport-agnostic in structure; the remaining per-transport drift is
- * gated on this and enumerated in-code as WS16c convergence candidates.
- */
-type EstablishTransport = 'gather' | 'stream';
-
 export class TwilioGatherAdapter {
   /**
    * Per-session pending TwiML override. Set by `handleNotifyOncall` when
@@ -924,7 +916,6 @@ export class TwilioGatherAdapter {
       callSid: opts.callSid,
       from: opts.from,
       tenantId: opts.tenantId,
-      transport: 'stream',
     });
     return this.buildStreamTwiML({ sessionId: session.id, callSid: opts.callSid });
   }
@@ -967,8 +958,9 @@ export class TwilioGatherAdapter {
     callSid: string;
     from: string;
     tenantId: string;
-    transport: EstablishTransport;
   }): Promise<{ session: VoiceSession; replayed: boolean }> {
+    // WS16c — fully converged across transports (no per-transport branch here):
+    // the caller-id is pinned on the session for both Gather and Media Streams.
     // CallSid replay protection: Twilio retries the /voice webhook if it does
     // not get a 2xx in time. Without this, every retry creates a fresh session
     // AND fires duplicate audit/notify_oncall side effects.
@@ -1006,13 +998,12 @@ export class TwilioGatherAdapter {
     // B2 — fire-and-forget the voice_sessions row (state is the freshly-created
     // initial FSM state on both transports — no bootstrap has run yet).
     this.persistVoiceSessionRow(session, opts.callSid);
-    // WS16c convergence candidate #2 — `session.callerPhone` is set on the
-    // Gather transport only today; the stream path leaves it unset and the
-    // voice-turn processor's `callerPhoneResolver` compensates
-    // (create-voice-turn-processor.ts). Gated per-transport here.
-    if (opts.transport === 'gather' && opts.from) {
-      session.callerPhone = opts.from;
-    }
+    // WS16c (divergence #2, CONVERGED) — pin the caller-id on the session for
+    // BOTH transports so the ask_caller wire can find-or-create a customer by
+    // phone without re-prompting. Previously Gather-only; the stream path
+    // leaned on the voice-turn processor's callerPhoneResolver fallback, which
+    // stays as defense-in-depth but is no longer the sole source.
+    if (opts.from) session.callerPhone = opts.from;
     return { session, replayed: false };
   }
 
@@ -1024,10 +1015,17 @@ export class TwilioGatherAdapter {
    * owns — this core is timing-agnostic; WHEN it runs stays owned by each
    * transport's orchestrator). Pins the spoken language, discloses recording,
    * identifies the caller, drives the FSM through the greeting + known / failed
-   * / unknown branches, substitutes the real greeting, runs
-   * `executeSideEffects`, and returns the fully-substituted side-effect array.
-   * The per-transport drift below is gated explicitly and enumerated as WS16c
-   * convergence candidates.
+   * / unknown branches, substitutes the real greeting, fires the owner push +
+   * customer-timeline log, runs `executeSideEffects`, and returns the fully-
+   * substituted side-effect array.
+   *
+   * WS16c CONVERGED this core across transports — owner push (#5), timeline log
+   * (#4), identify guard (#3), lead guard (#6), callerPhone (#2), greeting
+   * substitution (#9), and language pin (#8) are now identical for Gather and
+   * Media Streams. The only remaining per-transport differences live in the
+   * ORCHESTRATORS by genuine mechanics, not policy: the replay renderer (#1),
+   * the `to` value ('' post-WS on stream, #7), the stream missing-session
+   * fallback (#10), and the Gather-only terminated-finalize step (#11).
    */
   private async bootstrapCallEstablishment(opts: {
     session: VoiceSession;
@@ -1035,9 +1033,8 @@ export class TwilioGatherAdapter {
     from: string;
     to: string;
     tenantId: string;
-    transport: EstablishTransport;
   }): Promise<SideEffect[]> {
-    const { session, from, transport } = opts;
+    const { session, from } = opts;
 
     // P11-002 / UB-C1 — resolve + pin the spoken language + TTS voice. Honor a
     // pre-pinned session.language (the stream adapter's initialLanguageResolver
@@ -1067,37 +1064,35 @@ export class TwilioGatherAdapter {
     });
 
     // 2. Identify caller by phone number.
-    // WS16c convergence candidate #3 — identify-guard drift: Gather runs on
-    // `pool` alone (so a blocked/empty From still hits identifyCaller and comes
-    // back unmatched); the stream path requires `pool && from`.
+    // WS16c (divergence #3, CONVERGED) — identify-guard parity: BOTH transports
+    // now require `pool && from`. Previously Gather ran identifyCaller even on a
+    // blocked/empty From (it always came back unmatched → unknown_caller), which
+    // was a wasted lookup; skipping it reaches the identical FSM outcome.
     let callerKnown: { customerId: string; customerName: string } | null = null;
     let identifyFailed = false;
-    const shouldIdentify =
-      transport === 'gather' ? !!this.deps.pool : !!(this.deps.pool && from);
-    if (shouldIdentify) {
+    if (this.deps.pool && from) {
       try {
         const result = await identifyCaller({
           tenantId: opts.tenantId,
           fromPhone: from,
-          pool: this.deps.pool!,
+          pool: this.deps.pool,
         });
         if (result.status === 'matched') {
           callerKnown = { customerId: result.customerId, customerName: result.customerName };
         }
       } catch (err) {
-        logger.error(
-          transport === 'gather'
-            ? 'identifyCaller failed'
-            : 'initializeStreamSession: identifyCaller failed',
-          { error: err instanceof Error ? err.message : String(err), callSid: opts.callSid },
-        );
+        logger.error('identifyCaller failed', {
+          error: err instanceof Error ? err.message : String(err),
+          callSid: opts.callSid,
+        });
         identifyFailed = true;
       }
     }
 
     // 3. Dispatch incoming_call → greeting state.
-    // WS16c convergence candidate #7 — Gather passes the real `to`; the stream
-    // path passes '' (no To at WS-start). Shared signature carries `to`.
+    // Divergence #7 stays per-transport by MECHANICS, not policy: Gather passes
+    // the real `to` from the webhook; the stream path has no To at WS-start, so
+    // it passes '' (the caller supplies it — the shared core just carries `to`).
     const sideEffects: SideEffect[] = [];
     sideEffects.push(
       ...session.machine.dispatch({
@@ -1141,11 +1136,11 @@ export class TwilioGatherAdapter {
 
     if (callerKnown) {
       session.customerId = callerKnown.customerId;
-      // WS16c convergence candidate #4 — the inbound-call timeline log fires on
-      // the Gather transport only today; the stream path never logs the call on
-      // the customer timeline. Best-effort; a logging failure never fails the
-      // call.
-      if (transport === 'gather' && this.deps.conversationRepo) {
+      // WS16c (divergence #4, CONVERGED) — log the inbound call on the customer
+      // timeline for BOTH transports (realtime callers previously never showed
+      // up in the unified inbox / conversation history). Best-effort; a logging
+      // failure never fails the call.
+      if (this.deps.conversationRepo) {
         try {
           await logInboundCallOnCustomerTimeline({
             conversationRepo: this.deps.conversationRepo,
@@ -1180,54 +1175,46 @@ export class TwilioGatherAdapter {
       // Unknown caller: best-effort find-or-create a CRM lead so the call lands
       // in the kanban. Failure here must NOT fail the call — we log and fall
       // through to the FSM's unknown_caller path either way.
-      // WS16c convergence candidate #6 — lead-creation guard drift: Gather runs
-      // on `leadRepo` alone; the stream path requires `leadRepo && from`.
-      const shouldCreateLead =
-        transport === 'gather' ? !!this.deps.leadRepo : !!(this.deps.leadRepo && from);
-      if (shouldCreateLead) {
+      // WS16c (divergence #6, CONVERGED) — lead-guard parity: BOTH transports
+      // require `leadRepo && from` (a blocked/empty From has no phone to key a
+      // lead on).
+      if (this.deps.leadRepo && from) {
         try {
           const result = await findOrCreateLeadByPhone({
             tenantId: opts.tenantId,
             fromPhone: from,
-            leadRepo: this.deps.leadRepo!,
+            leadRepo: this.deps.leadRepo,
             ...(this.deps.auditRepo ? { auditRepo: this.deps.auditRepo } : {}),
             systemActorId: this.deps.systemActorId ?? 'system:inbound-call',
           });
           session.leadId = result.leadId;
-          // Gather-only info log preserved (the stream path never logged this).
-          if (transport === 'gather') {
-            logger.info('inbound call lead resolved', {
-              callSid: opts.callSid,
-              sessionId: session.id,
-              leadStatus: result.status,
-            });
-          }
+          logger.info('inbound call lead resolved', {
+            callSid: opts.callSid,
+            sessionId: session.id,
+            leadStatus: result.status,
+          });
         } catch (err) {
-          logger.error(
-            transport === 'gather'
-              ? 'findOrCreateLeadByPhone failed'
-              : 'initializeStreamSession: findOrCreateLeadByPhone failed',
-            { callSid: opts.callSid, error: err instanceof Error ? err.message : String(err) },
-          );
+          logger.error('findOrCreateLeadByPhone failed', {
+            callSid: opts.callSid,
+            error: err instanceof Error ? err.message : String(err),
+          });
         }
       }
       expanded.push(...session.machine.dispatch({ type: 'unknown_caller' }));
     }
 
-    // WS16c convergence candidate #5 — the owner "incoming call" push fires on
-    // the Gather transport only today; realtime/stream callers never trigger
-    // it. U2: fire ONE push per inbound call, after the caller is identified.
-    // Known caller deep-links to their customer with their name; an unknown
-    // caller routes to the customers list. Failure-isolated inside notifyOwner.
-    if (transport === 'gather') {
-      await notifyOwnerOfIncomingCall({
-        tenantId: opts.tenantId,
-        ...(callerKnown
-          ? { customerId: callerKnown.customerId, customerName: callerKnown.customerName }
-          : {}),
-        ...(from ? { fromPhone: from } : {}),
-      });
-    }
+    // WS16c (divergence #5, CONVERGED) — fire ONE owner "incoming call" push per
+    // inbound call on BOTH transports (realtime callers previously never
+    // triggered the owner push). Known caller deep-links to their customer with
+    // their name; an unknown caller routes to the customers list. Failure-
+    // isolated inside notifyOwner.
+    await notifyOwnerOfIncomingCall({
+      tenantId: opts.tenantId,
+      ...(callerKnown
+        ? { customerId: callerKnown.customerId, customerName: callerKnown.customerName }
+        : {}),
+      ...(from ? { fromPhone: from } : {}),
+    });
 
     // 6. Execute non-TwiML side effects (audit_log, create_proposal,
     // notify_oncall) against the wired repos.
@@ -1268,7 +1255,6 @@ export class TwilioGatherAdapter {
       from,
       to: '',
       tenantId: opts.tenantId,
-      transport: 'stream',
     });
   }
 
@@ -1642,7 +1628,6 @@ export class TwilioGatherAdapter {
       callSid: opts.callSid,
       from: opts.from,
       tenantId: opts.tenantId,
-      transport: 'gather',
     });
     if (replayed) {
       logger.info('handleInbound: replay for existing CallSid — reusing session', {
@@ -1660,16 +1645,15 @@ export class TwilioGatherAdapter {
     }
 
     // WS16b — Phase B (shared): language pin + disclosure + identify + FSM
-    // bootstrap + greeting substitution + owner push / timeline log (Gather
-    // gates) + executeSideEffects. Returns the fully-substituted effect array
-    // that steps 7–8 render + finalize below.
+    // bootstrap + greeting substitution + owner push + timeline log +
+    // executeSideEffects. Returns the fully-substituted effect array that steps
+    // 7–8 render + finalize below.
     const expanded = await this.bootstrapCallEstablishment({
       session,
       callSid: opts.callSid,
       from: opts.from,
       to: opts.to,
       tenantId: opts.tenantId,
-      transport: 'gather',
     });
 
     // 7. Build TwiML — P8-013 may have produced a <Dial> transfer for
