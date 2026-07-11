@@ -368,13 +368,14 @@ import {
 } from './feedback/feedback-response';
 import { PgFeedbackRequestRepository } from './feedback/pg-feedback-request';
 import { PgFeedbackResponseRepository } from './feedback/pg-feedback-response';
-import { NoopFeedbackDispatcher, SmsProviderFeedbackDispatcher } from './feedback/dispatcher';
+import { NoopFeedbackDispatcher, MessageDeliveryFeedbackDispatcher } from './feedback/dispatcher';
 import {
   MessageDeliveryProvider,
   InMemoryDeliveryProvider,
 } from './notifications/delivery-provider';
 import { TwilioDeliveryProvider } from './notifications/twilio-delivery-provider';
 import { PerTenantTwilioDeliveryProvider } from './notifications/per-tenant-twilio-delivery-provider';
+import { GatedMessageDelivery } from './notifications/gated-message-delivery';
 import { SendService } from './notifications/send-service';
 import {
   InMemoryDispatchRepository,
@@ -1385,22 +1386,13 @@ export function createApp(): AppWithLifecycle {
     ? new PgCallTranscriptTurnRepository(pool)
     : new InMemoryCallTranscriptTurnRepository();
 
-  const feedbackDispatcher =
-    process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN && process.env.TWILIO_FROM_NUMBER
-      ? new SmsProviderFeedbackDispatcher({
-          accountSid: process.env.TWILIO_ACCOUNT_SID,
-          authToken: process.env.TWILIO_AUTH_TOKEN,
-          fromNumber: process.env.TWILIO_FROM_NUMBER,
-        })
-      : new NoopFeedbackDispatcher();
-
   // Customer-facing message delivery for estimates and invoices.
   // Production wires Twilio (SMS) + Twilio SendGrid (email). Without
   // the env vars, falls back to InMemoryDeliveryProvider so the app
   // boots in dev without delivery credentials. Send routes return
   // 503 when sendService is undefined.
   const dispatchRepo = pool ? new PgDispatchRepository(pool) : new InMemoryDispatchRepository();
-  let messageDelivery: MessageDeliveryProvider | null;
+  let rawMessageDelivery: MessageDeliveryProvider | null;
   if (
     process.env.TWILIO_ACCOUNT_SID &&
     process.env.TWILIO_AUTH_TOKEN &&
@@ -1428,14 +1420,56 @@ export function createApp(): AppWithLifecycle {
     // through each tenant's own Twilio subaccount (failing closed when a
     // tenant has no credentials). Without a pool we cannot resolve per-tenant
     // creds, so keep the global provider.
-    messageDelivery = pool
+    rawMessageDelivery = pool
       ? new PerTenantTwilioDeliveryProvider({ pool, base: baseDelivery })
       : baseDelivery;
   } else if (config.NODE_ENV === 'prod' || config.NODE_ENV === 'staging') {
-    messageDelivery = null;
+    rawMessageDelivery = null;
   } else {
-    messageDelivery = new InMemoryDeliveryProvider();
+    rawMessageDelivery = new InMemoryDeliveryProvider();
   }
+  // WS1 safety rails — wrap the single delivery object in the consent+DNC gate
+  // so EVERY outbound SMS passes exactly one gate. Owner-class sends bypass;
+  // customer-class sends are gated per `config.TCPA_CONSENT_ENFORCEMENT` (the
+  // SAME value that drives the voice consent gate). Wrapping here — the single
+  // construction site — is what makes the guarantee hold for all three
+  // provider branches (per-tenant, global, and in-memory dev).
+  const messageDelivery: MessageDeliveryProvider | null = rawMessageDelivery
+    ? new GatedMessageDelivery({
+        base: rawMessageDelivery,
+        dnc: dncRepo,
+        auditRepo,
+        enforcement: config.TCPA_CONSENT_ENFORCEMENT,
+      })
+    : null;
+
+  // WS1 — resolve a customer's SMS consent by phone for send sites that only
+  // hold the recipient's number (dropped-call recovery + negotiation replies).
+  // A single customer match yields the consent snapshot; zero or many matches →
+  // undefined, which makes the central gate fail closed (missing_consent_context)
+  // rather than silently guess.
+  const resolveCustomerConsentByPhone = async (
+    tenantId: string,
+    phone: string,
+  ): Promise<{ smsConsent: boolean; customerId?: string } | undefined> => {
+    try {
+      const matches = await customerRepo.findByPhoneNormalized(
+        tenantId,
+        normalizePhone(phone),
+      );
+      if (matches.length !== 1) return undefined;
+      return { smsConsent: matches[0].smsConsent === true, customerId: matches[0].id };
+    } catch {
+      return undefined;
+    }
+  };
+
+  // WS1 — feedback-request SMS now flows through the single messageDelivery
+  // object (customer-class) instead of a raw Twilio fetch. Noop without a
+  // provider so dev/CI boot without SMS creds.
+  const feedbackDispatcher = messageDelivery
+    ? new MessageDeliveryFeedbackDispatcher(messageDelivery)
+    : new NoopFeedbackDispatcher();
   const publicBaseUrl = process.env.APP_PUBLIC_URL ?? 'http://localhost:5173';
   const sendService = messageDelivery
     ? new SendService({
@@ -1446,7 +1480,6 @@ export function createApp(): AppWithLifecycle {
         customerRepo,
         settingsRepo,
         dispatchRepo,
-        dncRepo,
         publicBaseUrl,
       })
     : undefined;
@@ -1491,7 +1524,8 @@ export function createApp(): AppWithLifecycle {
   const oneTapDelivery = messageDelivery;
   const oneTapSmsSender = oneTapDelivery
     ? async (to: string, body: string): Promise<void> => {
-        await oneTapDelivery.sendSms({ to, body });
+        // One-tap approval link → owner/operator. Never gated by customer consent.
+        await oneTapDelivery.sendSms({ to, body, recipientClass: 'owner' });
       }
     : undefined;
   // Owner/backup-supervisor phone for the unsupervised SMS: tenant_settings
@@ -1770,7 +1804,6 @@ export function createApp(): AppWithLifecycle {
         settingsRepo,
         invoiceRepo,
         dispatchRepo,
-        dncRepo,
       })
     : undefined;
   if (transactionalComms) {
@@ -1820,13 +1853,12 @@ export function createApp(): AppWithLifecycle {
     ? new MessageDeliveryReviewPrivateMessageSender(
         messageDelivery,
         customerRepo,
-        dncRepo,
       )
     : undefined;
   // Built ahead of the execution registry so the notify_delay handler can
   // send a real delay notice; reused by the delay-notification worker below.
   const delayNotificationService = messageDelivery
-    ? new TwilioDelayNotificationService(messageDelivery, dispatchRepo)
+    ? new TwilioDelayNotificationService(messageDelivery, dispatchRepo, customerRepo)
     : new NoopDelayNotificationService();
   const executionHandlers = createExecutionHandlerRegistry({
     customerRepo,
@@ -2353,7 +2385,6 @@ export function createApp(): AppWithLifecycle {
     settingsRepo,
     feedbackRequestRepo,
     dispatcher: feedbackDispatcher,
-    dncRepo,
     publicBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:5173',
   });
   workerRegistry.set(
@@ -2556,7 +2587,6 @@ export function createApp(): AppWithLifecycle {
             customerMessageDeps: {
               delivery: messageDelivery,
               dispatchRepo,
-              dncRepo,
             },
           }
         : {}),
@@ -2881,8 +2911,20 @@ export function createApp(): AppWithLifecycle {
         recoveryRepo: droppedCallRecoveryRepo,
         proposalRepo,
         callMeBackRepo,
-        sendSms: (args: { to: string; body: string }) =>
-          messageDelivery.sendSms({ to: args.to, body: args.body }),
+        // Customer-class: recovery reply to the dropped caller. Resolve the
+        // caller's consent by phone; unknown/ambiguous → fail closed via the gate.
+        sendSms: async (args: { to: string; body: string; tenantId?: string }) => {
+          const consent = args.tenantId
+            ? await resolveCustomerConsentByPhone(args.tenantId, args.to)
+            : undefined;
+          return messageDelivery.sendSms({
+            to: args.to,
+            body: args.body,
+            ...(args.tenantId ? { tenantId: args.tenantId } : {}),
+            recipientClass: 'customer',
+            ...(consent ? { consent } : {}),
+          });
+        },
         auditRepo,
         businessName: process.env.TWILIO_BUSINESS_NAME ?? 'our team',
       }),
@@ -2928,8 +2970,19 @@ export function createApp(): AppWithLifecycle {
         proposalRepo,
         resolveCustomerContext: resolveNegotiationCustomerContext,
         evaluateDiscount: evaluateNegotiationDiscountForPhone,
-        sendSms: (args: { to: string; body: string }) =>
-          messageDelivery.sendSms({ to: args.to, body: args.body }),
+        // Customer-class: holding-line reply to the negotiating customer.
+        sendSms: async (args: { to: string; body: string; tenantId?: string }) => {
+          const consent = args.tenantId
+            ? await resolveCustomerConsentByPhone(args.tenantId, args.to)
+            : undefined;
+          return messageDelivery.sendSms({
+            to: args.to,
+            body: args.body,
+            ...(args.tenantId ? { tenantId: args.tenantId } : {}),
+            recipientClass: 'customer',
+            ...(consent ? { consent } : {}),
+          });
+        },
         auditRepo,
         resolveBrandContext: async (tenantId: string) => {
           const settings = await settingsRepo.findByTenant(tenantId);
@@ -3076,8 +3129,9 @@ export function createApp(): AppWithLifecycle {
     ...(messageDelivery
       ? {
           deliveryProvider: {
+            // Owner/dispatcher patch + on-call notify SMS — never customer-gated.
             sendSms: (args: { to: string; body: string }) =>
-              messageDelivery.sendSms({ to: args.to, body: args.body }),
+              messageDelivery.sendSms({ to: args.to, body: args.body, recipientClass: 'owner' }),
           },
         }
       : {}),
@@ -3187,8 +3241,9 @@ export function createApp(): AppWithLifecycle {
   if (messageDelivery) {
     const emergencyPageWorker = createEmergencyPageWorker({
       queue,
+      // Emergency page → owner / on-call. Never customer-gated.
       sendSms: (args: { to: string; body: string }) =>
-        messageDelivery.sendSms({ to: args.to, body: args.body }),
+        messageDelivery.sendSms({ to: args.to, body: args.body, recipientClass: 'owner' }),
       resolvePagePhone: async (tenantId: string) => {
         try {
           const settings = await settingsRepo.findByTenant(tenantId);
@@ -3664,8 +3719,9 @@ export function createApp(): AppWithLifecycle {
                   businessPhoneFallbackResolver: createBusinessPhoneFallback(settingsRepo),
                   ...(messageDelivery
                     ? {
+                        // Patch-owner-through page → owner. Never customer-gated.
                         sendSms: (args: { to: string; body: string }) =>
-                          messageDelivery.sendSms({ to: args.to, body: args.body }),
+                          messageDelivery.sendSms({ to: args.to, body: args.body, recipientClass: 'owner' }),
                       }
                     : {}),
                   callMeBackRepo,
@@ -4180,7 +4236,9 @@ export function createApp(): AppWithLifecycle {
     ...(messageDelivery
       ? {
           sendReply: async (tenantId: string, to: string, body: string) => {
-            await messageDelivery!.sendSms({ to, body, tenantId });
+            // Reply to an inbound tech MMS — the sender is a registered tech
+            // (owner-side), not a customer.
+            await messageDelivery!.sendSms({ to, body, tenantId, recipientClass: 'owner' });
           },
         }
       : {}),
@@ -4221,7 +4279,7 @@ export function createApp(): AppWithLifecycle {
             notifyOwner: async (tenantId: string, body: string) => {
               const ownerPhone = await resolveUnsupervisedOwnerPhone(tenantId);
               if (ownerPhone) {
-                await messageDelivery!.sendSms({ to: ownerPhone, body, tenantId });
+                await messageDelivery!.sendSms({ to: ownerPhone, body, tenantId, recipientClass: 'owner' });
               }
             },
           }
@@ -5009,8 +5067,9 @@ export function createApp(): AppWithLifecycle {
           ...(messageDelivery
             ? {
                 deliveryProvider: {
+                  // Callback notice → CSR/transfer number (owner-side).
                   sendSms: (args: { to: string; body: string }) =>
-                    messageDelivery.sendSms({ to: args.to, body: args.body }),
+                    messageDelivery.sendSms({ to: args.to, body: args.body, recipientClass: 'owner' }),
                 },
               }
             : {}),
@@ -5070,11 +5129,21 @@ export function createApp(): AppWithLifecycle {
         logger: droppedCallLogger,
       }),
       // Compliance gate: a caller who texted STOP between the drop and the
-      // send must never receive the recovery SMS.
-      preSendSuppress: async (row) =>
-        (await dncRepo.isOnDnc(row.tenantId, normalizePhone(row.callerE164)))
-          ? 'opted_out'
-          : null,
+      // send must never receive the recovery SMS. WS1 — also fail closed on
+      // consent here (terminal markSuppressed) rather than at send time, so an
+      // unknown/ambiguous caller under enforcement is suppressed once instead
+      // of poison-pilling the sweep with a retryable SmsSuppressedError. The
+      // central gate remains the send-time backstop.
+      preSendSuppress: async (row) => {
+        if (await dncRepo.isOnDnc(row.tenantId, normalizePhone(row.callerE164))) {
+          return 'opted_out';
+        }
+        if (config.TCPA_CONSENT_ENFORCEMENT !== 'off') {
+          const consent = await resolveCustomerConsentByPhone(row.tenantId, row.callerE164);
+          if (!consent || consent.smsConsent !== true) return 'no_consent';
+        }
+        return null;
+      },
       compose: createRecoveryComposer({
         composerDeps: { gateway: llmGateway, settingsRepo, standingInstructionRepo },
         businessName: process.env.TWILIO_BUSINESS_NAME ?? 'our team',
@@ -5086,9 +5155,22 @@ export function createApp(): AppWithLifecycle {
       // Unlike the callMeBack adapter above, this passes tenantId (per-tenant
       // Twilio subaccount routing) and the idempotency key (Twilio-side
       // double-send defense).
-      sendSms: async ({ tenantId, to, body, idempotencyKey }) =>
-        (await messageDelivery.sendSms({ to, body, tenantId, idempotencyKey }))
-          .providerMessageId,
+      // Customer-class: the ~60s recovery SMS to the dropped caller. preSendSuppress
+      // above already blocks DNC'd numbers; the gate additionally enforces consent
+      // (resolved by phone — unknown/ambiguous caller → fail closed).
+      sendSms: async ({ tenantId, to, body, idempotencyKey }) => {
+        const consent = await resolveCustomerConsentByPhone(tenantId, to);
+        return (
+          await messageDelivery.sendSms({
+            to,
+            body,
+            tenantId,
+            idempotencyKey,
+            recipientClass: 'customer',
+            ...(consent ? { consent } : {}),
+          })
+        ).providerMessageId;
+      },
       // NOTE: no leadRepo — the dropped CALL is the lead-generating event and
       // is captured (source 'phone_call') by the inbound-call path. Passing
       // leadRepo here would make the OUTBOUND recovery SMS mint a lead with

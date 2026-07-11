@@ -478,6 +478,59 @@ describe('P0-006 — Secrets/config framework', () => {
       expect(() => loadConfig({ NODE_ENV: 'test' })).not.toThrow();
     });
   });
+
+  describe('WS1 — TCPA_CONSENT_ENFORCEMENT prod/staging coercion', () => {
+    // Full valid prod env (features opted out, RLS on) so loadConfig reaches the
+    // end and we can inspect the resolved enforcement value.
+    const baseProdValid = {
+      DATABASE_URL: 'postgres://u:p@h/d',
+      CLERK_SECRET_KEY: 'sk_x',
+      CLERK_PUBLISHABLE_KEY: 'pk_x',
+      CLERK_WEBHOOK_SECRET: 'whsec_x',
+      STRIPE_WEBHOOK_SECRET: 'whsec_stripe_x',
+      AI_PROVIDER_API_KEY: 'ak_x',
+      CORS_ORIGIN: 'https://app.example.com',
+      TELEPHONY_ENABLED: 'false',
+      EMAIL_ENABLED: 'false',
+      STORAGE_ENABLED: 'false',
+      RLS_RUNTIME_ROLE: 'true',
+    };
+
+    it('prod — unset resolves to block', () => {
+      const c = loadConfig({ ...baseProdValid, NODE_ENV: 'prod' });
+      expect(c.TCPA_CONSENT_ENFORCEMENT).toBe('block');
+    });
+
+    it('staging — unset resolves to block', () => {
+      const c = loadConfig({ ...baseProdValid, NODE_ENV: 'staging' });
+      expect(c.TCPA_CONSENT_ENFORCEMENT).toBe('block');
+    });
+
+    it('prod — explicit off is honored (not overridden)', () => {
+      const c = loadConfig({ ...baseProdValid, NODE_ENV: 'prod', TCPA_CONSENT_ENFORCEMENT: 'off' });
+      expect(c.TCPA_CONSENT_ENFORCEMENT).toBe('off');
+    });
+
+    it('prod — explicit warn is honored', () => {
+      const c = loadConfig({ ...baseProdValid, NODE_ENV: 'prod', TCPA_CONSENT_ENFORCEMENT: 'warn' });
+      expect(c.TCPA_CONSENT_ENFORCEMENT).toBe('warn');
+    });
+
+    it('dev — unset stays off (zod default; no coercion)', () => {
+      const c = loadConfig({ NODE_ENV: 'dev' });
+      expect(c.TCPA_CONSENT_ENFORCEMENT).toBe('off');
+    });
+
+    it('test — unset stays off', () => {
+      const c = loadConfig({ NODE_ENV: 'test' });
+      expect(c.TCPA_CONSENT_ENFORCEMENT).toBe('off');
+    });
+
+    it('dev — explicit block is honored', () => {
+      const c = loadConfig({ NODE_ENV: 'dev', TCPA_CONSENT_ENFORCEMENT: 'block' });
+      expect(c.TCPA_CONSENT_ENFORCEMENT).toBe('block');
+    });
+  });
 });
 
 describe('P0-026 — validateEnvSchema (Zod startup validation)', () => {

@@ -65,6 +65,9 @@ export interface EmergencySmsSender {
     body: string;
     tenantId?: string;
     idempotencyKey?: string;
+    // WS1 — required on MessageDeliveryProvider.sendSms; emergency pages are
+    // owner/on-call, so the call site sets 'owner' (never customer-gated).
+    recipientClass: 'customer' | 'owner';
   }): Promise<unknown>;
 }
 
@@ -321,6 +324,7 @@ export class EmergencyDispatchExecutionHandler implements ExecutionHandler {
         if (ownerPhone) {
           await this.smsSender.sendSms({
             to: ownerPhone,
+            recipientClass: 'owner',
             body: composeEmergencyPageSms({
               businessName: settings?.businessName ?? 'Your shop',
               emergencyDescription: fields.emergencyDescription,

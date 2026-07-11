@@ -55,6 +55,12 @@ const configSchema = z.object({
   // single-service deploy. See docs/deployment.md "Two-service split (optional)".
   // 'web' never starts the background interval loops; every other role does.
   PROCESS_ROLE: z.enum(['web', 'worker', 'all']).default('all'),
+  // SEC-01 / WS1 — Postgres RLS runtime-role enforcement flag. Read raw today
+  // by db/rls-runtime-role.ts (isRlsRuntimeRoleEnabled); declared here so it is
+  // part of the validated config surface. The HARD prod/staging requirement
+  // (must be 'true') is enforced in validateFeatureRequiredConfig above — this
+  // schema entry only types/normalizes the value.
+  RLS_RUNTIME_ROLE: z.enum(['true', 'false']).optional(),
 });
 
 export type AppConfig = z.infer<typeof configSchema>;
@@ -83,6 +89,18 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   }
 
   cachedConfig = result.data;
+
+  // WS1 — prod/staging default the consent gate to enforcement. The zod default
+  // is 'off' (safe for dev/test), but in production a send must fail closed
+  // unless an operator has EXPLICITLY set the value. So: when unset in
+  // prod/staging, resolve to 'block'. An explicit 'off' (or 'warn') is honored.
+  // This same value drives BOTH the voice consent gate and the SMS gate.
+  if (
+    (cachedConfig.NODE_ENV === 'prod' || cachedConfig.NODE_ENV === 'staging') &&
+    normalized.TCPA_CONSENT_ENFORCEMENT === undefined
+  ) {
+    cachedConfig.TCPA_CONSENT_ENFORCEMENT = 'block';
+  }
 
   // Enforce required config in production environments
   if (cachedConfig.NODE_ENV === 'prod' || cachedConfig.NODE_ENV === 'staging') {

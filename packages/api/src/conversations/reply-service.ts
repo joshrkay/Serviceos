@@ -245,6 +245,12 @@ export async function sendConversationReply(
         body,
         tenantId: input.tenantId,
         idempotencyKey,
+        // Customer-facing, but this is a human-authored reply to a customer-
+        // initiated thread: the owner pressing Send IS the consent, so we mark
+        // consent granted (see the trust-model note in the file header). DNC is
+        // still the absolute block — enforced above AND re-checked by the gate.
+        recipientClass: 'customer',
+        consent: { smsConsent: true },
       });
       provider = result.provider;
       providerMessageId = result.providerMessageId;

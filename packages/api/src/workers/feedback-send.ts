@@ -5,7 +5,7 @@ import { JobRepository } from '../jobs/job';
 import { SettingsRepository } from '../settings/settings';
 import { createFeedbackRequest, FeedbackRequestRepository } from '../feedback/feedback-request';
 import { FeedbackDispatcher } from '../feedback/dispatcher';
-import { DncRepository, normalizePhone } from '../compliance/dnc';
+import { SmsSuppressedError } from '../notifications/gated-message-delivery';
 import { resolveCustomerLanguage } from '../i18n/resolve-language';
 import { tn } from '../notifications/i18n';
 
@@ -20,10 +20,9 @@ export function createFeedbackSendWorker(deps: {
   settingsRepo: SettingsRepository;
   feedbackRequestRepo: FeedbackRequestRepository;
   dispatcher: FeedbackDispatcher;
-  dncRepo: DncRepository;
   publicBaseUrl: string;
 }): WorkerHandler<FeedbackSendPayload> {
-  const { jobRepo, customerRepo, settingsRepo, feedbackRequestRepo, dispatcher, dncRepo, publicBaseUrl } = deps;
+  const { jobRepo, customerRepo, settingsRepo, feedbackRequestRepo, dispatcher, publicBaseUrl } = deps;
 
   return {
     type: 'feedback_send',
@@ -48,18 +47,10 @@ export function createFeedbackSendWorker(deps: {
         return;
       }
 
-      // Consent + DNC gate (mirrors sendCustomerMessage). The feedback request
-      // is delivered only over SMS, so without consent there is no channel to
-      // send on — don't mint a request/token that can never be delivered.
-      if (customer.smsConsent !== true) {
-        logger.info('Skipping feedback request: customer has not consented to SMS', { tenantId, jobId, customerId: customer.id });
-        return;
-      }
-      if (await dncRepo.isOnDnc(tenantId, normalizePhone(customer.primaryPhone))) {
-        logger.info('Skipping feedback request: customer phone is on the DNC list', { tenantId, jobId, customerId: customer.id });
-        return;
-      }
-
+      // §7 / WS1 — consent + DNC are enforced centrally by the GatedMessageDelivery
+      // wrapper the dispatcher sends through. This worker just forwards the
+      // stored consent flag; a suppressed send throws SmsSuppressedError, caught
+      // below as a terminal skip (not a retryable job failure).
       const request = createFeedbackRequest({ tenantId, jobId });
       const saved = await feedbackRequestRepo.create(request);
       const settings = await settingsRepo.findByTenant(tenantId);
@@ -74,7 +65,25 @@ export function createFeedbackSendWorker(deps: {
       });
       const text = tn('sms.feedback.request', language, { business: businessName, url });
 
-      await dispatcher.send({ to: customer.primaryPhone, body: text });
+      try {
+        await dispatcher.send({
+          to: customer.primaryPhone,
+          body: text,
+          tenantId,
+          consent: { smsConsent: customer.smsConsent === true, customerId: customer.id },
+        });
+      } catch (err) {
+        if (err instanceof SmsSuppressedError) {
+          logger.info('Feedback request send suppressed by consent/DNC gate', {
+            tenantId,
+            jobId,
+            customerId: customer.id,
+            reason: err.reason,
+          });
+          return;
+        }
+        throw err;
+      }
 
       logger.info('Feedback request sent', { tenantId, jobId, requestId: saved.id, customerId: customer.id });
     },
