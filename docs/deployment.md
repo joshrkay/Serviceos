@@ -7,12 +7,11 @@ Railway is the **only** deployment target. The deployed services are
 configured by `/railway.toml` and `/Dockerfile` and shipped by
 `.github/workflows/deploy.yml` (`railway up`).
 
-Non-deployed architectures are quarantined under `experiments/` and must
-not be mistaken for production infrastructure — see `experiments/README.md`
-and each subdirectory's README: `experiments/infra/` (AWS CDK, deployed by
-nothing), `experiments/service-os-app/` and `experiments/service-os-agent/`
-(prototypes), and `experiments/supabase_migration.sql` (the prototype's
-schema, unrelated to the canonical in-code migrations).
+A prior AWS CDK deployment path (D-001) and two non-deployed prototypes
+(a Next.js app, a Python LangGraph agent) were quarantined under
+`experiments/` and removed entirely in 2026-07 — see `docs/decisions.md`
+D-016. They are recoverable from git history but are not part of the
+working tree; Railway (above) has been the only deployment target.
 
 ## API startup contract
 

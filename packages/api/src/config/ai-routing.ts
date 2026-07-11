@@ -2,11 +2,6 @@ export type ModelTier = 'lightweight' | 'standard' | 'complex';
 
 export interface TierConfig {
   model: string;
-  /**
-   * Currently unused — provider selection comes from `LLMGatewayConfig.taskRouting`.
-   * Reserved for future use (P2-029 failover/provider routing will wire this).
-   */
-  provider: string;
   maxTokens?: number;
   temperature?: number;
   /**
@@ -155,9 +150,9 @@ const DEFAULT_TASK_TIER_MAPPING: Record<TaskType, ModelTier> = {
 
 export const DEFAULT_AI_ROUTING_CONFIG: AIRoutingConfig = {
   tiers: {
-    lightweight: { model: lightweightModel, provider: 'default', maxTokens: 1024, temperature: 0, deadlineMs: lightweightDeadlineMs },
-    standard: { model: standardModel, provider: 'default', maxTokens: 4096, temperature: 0.3, deadlineMs: standardDeadlineMs },
-    complex: { model: complexModel, provider: 'default', maxTokens: 8192, temperature: 0.5, deadlineMs: complexDeadlineMs },
+    lightweight: { model: lightweightModel, maxTokens: 1024, temperature: 0, deadlineMs: lightweightDeadlineMs },
+    standard: { model: standardModel, maxTokens: 4096, temperature: 0.3, deadlineMs: standardDeadlineMs },
+    complex: { model: complexModel, maxTokens: 8192, temperature: 0.5, deadlineMs: complexDeadlineMs },
   },
   taskTierMapping: DEFAULT_TASK_TIER_MAPPING,
 };

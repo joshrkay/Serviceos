@@ -278,9 +278,9 @@ function buildGatewayConfig(
       tenantOverrides: {
         [SYSTEM_TENANT_ID]: {
           tiers: {
-            lightweight: { model: defaultModel!, provider: providerName },
-            standard: { model: defaultModel!, provider: providerName },
-            complex: { model: defaultModel!, provider: providerName },
+            lightweight: { model: defaultModel! },
+            standard: { model: defaultModel! },
+            complex: { model: defaultModel! },
           },
         },
       },

@@ -10,7 +10,7 @@ When implementing a story and facing an architectural choice not covered by the 
 
 ## Locked Decisions (from PRD planning)
 
-### D-001: Single-cloud AWS deployment (superseded by D-016)
+### D-001: Single-cloud AWS deployment
 **Date:** Pre-Phase 0
 **Decision:** AWS single-cloud SaaS with CDK in TypeScript
 **Rationale:** Team expertise, ECS/Fargate simplicity, integrated services (RDS, S3, SQS, CloudWatch)
@@ -212,24 +212,33 @@ not a change to D-004's posture.
 - (c) Treating supervisorPresent as true when the flag is on — would leak permissiveness
   into all capture types.
 
-### D-016: Railway is the deploy target, not AWS/CDK (supersedes D-001)
+### D-016: Railway supersedes AWS (D-001) — CDK prototype removed
 **Date:** 2026-07-11
-**Decision:** The canonical deploy target is **Railway**, defined by `/railway.toml` +
-`/Dockerfile` at the repo root, building and running `/packages` (api, web, shared). The
-AWS CDK stack from D-001 was never wired to any CI/CD pipeline that pushed to it; it lives
-as a quarantined, undeployed prototype under `/experiments/infra` (see
-`/experiments/README.md`). This decision formally supersedes D-001 rather than leaving it
-silently stale; removal of the `/experiments/infra` files themselves is tracked separately
-(blocked on `packages/api/test/decisions/decisions.test.ts` and
-`packages/api/test/contracts/python-agent-contract.test.ts`, which assert against
-`/experiments/service-os-agent` for founding decisions D9/A1/A2 — see repo cleanup notes).
-**Rationale:** D-001 was a pre-Phase-0 intent that the actual build never executed on —
-the ECR image the CDK stack referenced was never pushed by CI, and Railway became the
-running production system. Documenting the switch explicitly (instead of letting D-001
-stand uncontested) prevents future readers from assuming AWS/CDK is still the target.
-**Story:** 2026-07 repository cleanup (experiments/ quarantine review).
+**Decision:** D-001's single-cloud AWS/CDK deployment was never carried into production.
+The actual deploy target is **Railway** (`/railway.toml` + `/Dockerfile`), running the
+canonical monorepo under `/packages`. The AWS CDK stacks that implemented D-001
+(`experiments/infra/`) were quarantined as non-deployed in an earlier cleanup pass and have
+now been **removed entirely**, along with the rest of `/experiments`
+(`service-os-app/`, `service-os-agent/`, `supabase_migration.sql`) — none of it was ever
+wired into CI or the Railway build, and it had drifted too far from the shipping schema to
+be a safe reference. Two CI-run test files that pinned "founding decisions" against the
+quarantined Python prototype (`service-os-agent`) were deleted/surgically trimmed in the
+same pass: `packages/api/test/contracts/python-agent-contract.test.ts` (fully
+experiments-dependent, deleted) and `packages/api/test/decisions/decisions.test.ts`
+(D9/A1 trimmed to their non-experiments assertions; A2 deleted — it had no assertions left
+once its experiments-dependent tests were removed).
+**Rationale:** A decision record should reflect what actually ships. D-001 is superseded
+by the Railway deploy target that has been true since before this repo's current history;
+keeping a dead AWS prototype and tests that graded a never-deployed Python service against
+"founding decisions" gave false signal — CI could stay green on a decision the product
+doesn't implement, and a real regression in the Python prototype would never be caught
+because nothing runs it.
+**Story:** 2026-07 repo-cleanup sweep.
 **Alternatives rejected:**
-- Leave D-001 unmarked and let README/CLAUDE.md drift as the only signal. Rejected:
-  the decision log is the canonical place architectural reversals get recorded.
-- Delete D-001 outright. Rejected: the decision log is append-only history; superseding
-  in place preserves the record of why the original choice was made and abandoned.
+- Keep `/experiments` quarantined indefinitely — rejected: zero live references after the
+  prior pass, and its presence kept inviting new "founding decision" tests to be written
+  against it (see D9/A1/A2 history) instead of the real product.
+- Keep the CDK stack in case AWS is revisited — rejected: nothing in the current
+  architecture (Railway/Supabase/Clerk/Twilio) depends on it; reviving AWS deployment would
+  start from a fresh CDK design against the current schema, not from a two-generations-old
+  prototype.

@@ -5,21 +5,20 @@ Canonical product (deployed on Railway):
 - /packages/api — Backend API (TypeScript, Node, Express)
 - /packages/web — Frontend (React, TypeScript, Tailwind)
 - /packages/shared — Shared types, contracts, constants
+- /packages/mobile, /packages/voice-eval — supporting packages in the same
+  monorepo (mobile client, voice-quality eval harness); not independent
+  deploy targets.
 
 Deployment: /railway.toml + /Dockerfile (Railway is the deploy target).
 See /docs/deployment.md.
 
-NOT deployed / experimental — quarantined under /experiments (see
-/experiments/README.md); do not mistake for production (each has a
-README explaining why):
-- /infra — AWS CDK stacks; built but deployed by nothing.
-- /service-os-app — Next.js prototype that bypasses the proposal/audit gate.
-- /service-os-agent — Python LangGraph prototype with known defects.
-- /supabase_migration.sql — schema for the service-os-app prototype only;
-  unrelated to the canonical in-code migrations (packages/api/src/db/schema.ts).
-
-Note: /rewrite (a parallel ground-up rebuild prototype) was deleted 2026-07-09
-and no longer exists in the working tree (recoverable from git history).
+Prototypes removed 2026-07: /experiments (AWS CDK infra, a Next.js
+prototype that bypassed the proposal/audit gate, a Python LangGraph
+prototype with known defects, and its standalone Supabase schema) and
+/rewrite (a parallel ground-up rebuild) were quarantined non-production
+code with zero live references from the shipping app; both are gone from
+the working tree but recoverable from git history (see docs/decisions.md
+D-016). Canonical work goes in /packages only.
 
 ## Core Patterns
 - All money: integer cents, never floating point

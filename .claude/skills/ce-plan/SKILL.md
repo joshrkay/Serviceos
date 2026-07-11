@@ -47,8 +47,10 @@ wrong by construction (see `CLAUDE.md`):
   lines cap confidence below auto-approve.
 - Free-text entity references on voice paths resolve through the entity
   resolver; ambiguity becomes a one-tap `voice_clarification`.
-- Canonical product lives in `/packages`. Never plan story/feature work
-  in `/experiments`, etc. unless the task says so.
+- Canonical product lives in `/packages`. `/experiments` and `/rewrite`
+  (quarantined non-production prototypes) were removed entirely in 2026-07
+  (see `docs/decisions.md` D-016) — never plan story/feature work against
+  paths that no longer exist in the working tree.
 - **All file paths in the plan are repo-relative** (`packages/api/src/...`),
   never absolute.
 

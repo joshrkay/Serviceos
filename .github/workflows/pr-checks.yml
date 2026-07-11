@@ -33,8 +33,9 @@ jobs:
       - name: Lint
         run: npm run lint
 
-      # infra/ moved to experiments/infra (B9): not deployed, removed
-      # from CI builds. See experiments/README.md.
+      # infra/ (AWS CDK, D-001) was quarantined to experiments/infra (B9)
+      # as not deployed/not in CI, then removed entirely in 2026-07 along
+      # with the rest of experiments/. See docs/decisions.md D-016.
 
       - name: AI gateway guard
         run: npm run check:ai-gateway-guard --workspace=packages/api

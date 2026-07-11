@@ -1,4 +1,13 @@
-# Agent/API Ownership Boundaries
+# Agent/API Ownership Boundaries (historical)
+
+> Archived 2026-07-11: `experiments/service-os-agent/` — the Python
+> LangGraph prototype this document defines a boundary against — was
+> removed entirely along with the rest of `/experiments` (see
+> `docs/decisions.md` D-016). `packages/api/test/contracts/python-agent-contract.test.ts`,
+> referenced below, was deleted in the same pass. `packages/api/` remains
+> the sole orchestration authority; there is currently no external caller
+> surface for this document to bound. Kept for historical context in case
+> an agent-platform caller surface is reintroduced.
 
 ## Single orchestration authority
 - **`packages/api/` is the runtime orchestration authority** for voice decisioning, intent classification, proposal lifecycle, and approval/execution guardrails.

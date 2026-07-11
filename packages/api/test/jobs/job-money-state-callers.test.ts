@@ -7,7 +7,6 @@ import { InMemoryEstimateRepository } from '../../src/estimates/estimate';
 import { InMemoryInvoiceRepository, Invoice, InvoiceStatus } from '../../src/invoices/invoice';
 import { InMemoryPaymentRepository } from '../../src/invoices/payment';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
-import { IssueInvoiceExecutionHandler } from '../../src/proposals/handlers/issue-invoice';
 import { RecordPaymentExecutionHandler } from '../../src/proposals/execution/voice-extended-handlers';
 import type { RefreshJobMoneyStateDeps } from '../../src/jobs/job-money-state';
 import type { Proposal } from '../../src/proposals/proposal';
@@ -41,29 +40,15 @@ function makeInvoice(jobId: string, status: InvoiceStatus): Invoice {
 }
 
 describe('money-state — remaining caller wiring', () => {
-  describe('IssueInvoiceExecutionHandler', () => {
-    it('rolls the job to invoiced when constructed with money-state deps', async () => {
-      const jobRepo = new InMemoryJobRepository();
-      const estimateRepo = new InMemoryEstimateRepository();
-      const invoiceRepo = new InMemoryInvoiceRepository();
-      const auditRepo = new InMemoryAuditRepository();
-      const job = await createJob(
-        { tenantId: 't1', customerId: 'c1', locationId: 'l1', summary: 'Job', createdBy: 'u1' },
-        jobRepo,
-      );
-      const invoice = await invoiceRepo.create(makeInvoice(job.id, 'draft'));
-      const deps: RefreshJobMoneyStateDeps = { jobRepo, estimateRepo, invoiceRepo, auditRepo };
-      const handler = new IssueInvoiceExecutionHandler(invoiceRepo, deps);
-
-      const result = await handler.execute(
-        { payload: { invoiceId: invoice.id } } as unknown as Proposal,
-        { tenantId: 't1', executedBy: 'u1' } as ExecutionContext,
-      );
-
-      expect(result.success).toBe(true);
-      expect((await jobRepo.findById('t1', job.id))!.moneyState).toBe('invoiced');
-    });
-  });
+  // NOTE (2026-07 cleanup): this file previously had an
+  // `IssueInvoiceExecutionHandler` block that exercised
+  // `packages/api/src/proposals/handlers/issue-invoice.ts` — an orphaned,
+  // never-registered duplicate of the live handler in
+  // `proposals/execution/issue-invoice-handler.ts` (confirmed zero
+  // production imports; only these tests referenced it). Both the dead
+  // handler and this block were deleted. Money-state rollup coverage for
+  // the live handler now lives in
+  // `test/proposals/issue-invoice-handler.test.ts`.
 
   describe('RecordPaymentExecutionHandler', () => {
     it('rolls the job to paid when constructed with money-state deps', async () => {
