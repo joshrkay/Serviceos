@@ -3388,7 +3388,11 @@ export function createApp(): AppWithLifecycle {
       publicBaseUrl: process.env.PUBLIC_API_URL,
       ...(phoneNumberRepo ? { phoneNumberRepo } : {}),
       resolveTenantId: ({ to }) => resolveTenantIdByPhoneNumber(to),
-      mediaStreamsEnabled,
+      // WS8 — a worker-role process never attaches the media-streams WS
+      // handler (see the role gate on attachMediaStreamServer below), so its
+      // /voice must never emit <Connect><Stream/> pointing at a socket this
+      // process will reject — degrade to Gather instead.
+      mediaStreamsEnabled: mediaStreamsEnabled && config.PROCESS_ROLE !== 'worker',
       // WS7 — mid-call degrade to Gather: /voice/gather-fallback resolves the
       // live session by CallSid to continue the SAME FSM state on Gather.
       voiceSessionStore,

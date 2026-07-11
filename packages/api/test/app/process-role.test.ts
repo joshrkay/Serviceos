@@ -12,6 +12,7 @@
  * DATABASE_URL) so the drain resolves instantly and no Pg/Redis is required;
  * each app is drained in afterEach to clear its intervals + signal handlers.
  */
+import { createHmac } from 'node:crypto';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import request from 'supertest';
 import { createApp, type AppWithLifecycle } from '../../src/app';
@@ -90,6 +91,9 @@ describe('WS2 — PROCESS_ROLE process split', () => {
       'TTS_PROVIDER',
       'ELEVENLABS_API_KEY',
       'DEEPGRAM_API_KEY',
+      'TWILIO_AUTH_TOKEN',
+      'TWILIO_DEFAULT_TENANT_ID',
+      'PUBLIC_API_URL',
     ] as const;
     const originalMediaStreamsEnv: Record<string, string | undefined> = {};
 
@@ -141,6 +145,44 @@ describe('WS2 — PROCESS_ROLE process split', () => {
       const app = buildApp('all');
       const count = await listenAndCountUpgradeHandlers(app);
       expect(count).toBeGreaterThan(0);
+    });
+
+    // The /voice branch must agree with the WS attach gate: a worker never
+    // serves the stream socket, so its TwiML must never point Twilio at it.
+    const signedVoicePost = (app: AppWithLifecycle) => {
+      const url = 'http://localhost:3101/api/telephony/voice';
+      const params = { CallSid: 'CArole1', From: '+15005550006', To: '+15550001111' };
+      const data =
+        url + Object.keys(params).sort().map((k) => k + params[k as keyof typeof params]).join('');
+      const signature = createHmac('sha1', process.env.TWILIO_AUTH_TOKEN as string)
+        .update(Buffer.from(data, 'utf-8'))
+        .digest('base64');
+      return request(app)
+        .post('/api/telephony/voice')
+        .set('x-twilio-signature', signature)
+        .type('form')
+        .send(params);
+    };
+
+    it('role "worker" /voice degrades to Gather — never <Stream> at a socket this process rejects', async () => {
+      process.env.TWILIO_AUTH_TOKEN = 'testtoken123';
+      process.env.TWILIO_DEFAULT_TENANT_ID = '11111111-1111-4111-8111-111111111111';
+      process.env.PUBLIC_API_URL = 'http://localhost:3101';
+      const app = buildApp('worker');
+      const res = await signedVoicePost(app);
+      expect(res.status).toBe(200);
+      expect(res.text).not.toContain('<Stream');
+      expect(res.text).toContain('<Gather');
+    });
+
+    it('role "all" /voice still emits <Connect><Stream/> (unchanged)', async () => {
+      process.env.TWILIO_AUTH_TOKEN = 'testtoken123';
+      process.env.TWILIO_DEFAULT_TENANT_ID = '11111111-1111-4111-8111-111111111111';
+      process.env.PUBLIC_API_URL = 'http://localhost:3101';
+      const app = buildApp('all');
+      const res = await signedVoicePost(app);
+      expect(res.status).toBe(200);
+      expect(res.text).toContain('<Connect><Stream');
     });
   });
 });
