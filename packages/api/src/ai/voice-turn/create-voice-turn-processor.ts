@@ -50,7 +50,10 @@ import { appendAgentTts } from './transcript-append';
 import { classifyIntent, isVoiceApprovalIntent, isVoiceEditIntent } from '../orchestration/intent-classifier';
 import {
   startVoiceApproval,
+  startVoiceBatchApproval,
   continueVoiceApproval,
+  continueVoiceBatchApproval,
+  isBatchActive,
   startVoiceEdit,
   type OneTapFallbackDeps,
   type VoiceApprovalDeps,
@@ -1441,7 +1444,14 @@ export function createVoiceTurnProcessor(
       session.pendingVoiceApproval = undefined;
       return null;
     }
-    const result = await continueVoiceApproval(approvalDeps, {
+    // WS19 — a batch walk carries its cursor on voiceApprovalState. When one is
+    // active the batch continuation drives the turn (global stop / per-item
+    // skip / edit / delegate-to-single-item + cursor advance); otherwise the
+    // single-item engine handles it byte-identically.
+    const continueTurn = isBatchActive(session.voiceApprovalState)
+      ? continueVoiceBatchApproval
+      : continueVoiceApproval;
+    const result = await continueTurn(approvalDeps, {
       tenantId,
       sessionId: session.id,
       ownerSession: session.machine.currentContext.ownerSession === true,
@@ -1494,6 +1504,25 @@ export function createVoiceTurnProcessor(
       args.entities.proposalReference.trim().length > 0
         ? args.entities.proposalReference
         : args.utterance;
+
+    // WS19 — deterministic batch trigger (NOT a classifier-prompt change, so
+    // cassettes stay byte-stable): an approve on an owner session whose
+    // reference OR raw utterance names the whole queue ("approve all",
+    // "everything", "what's waiting", "go through them") starts a batch walk
+    // over the full pending set instead of resolving a single target. Reject
+    // stays single-target — a batch is an approve-all pass.
+    const isApprove = args.intentType !== 'reject_proposal';
+    const batchTrigger = /\b(all|everything|queue|what'?s\s+waiting|go\s+through)\b/i;
+    if (isApprove && (batchTrigger.test(reference) || batchTrigger.test(args.utterance))) {
+      const batchResult = await startVoiceBatchApproval(approvalDeps, {
+        tenantId: args.tenantId,
+        sessionId: session.id,
+        ownerSession,
+        sessionState: session.voiceApprovalState,
+      });
+      return applyVoiceApprovalResult(session, batchResult);
+    }
+
     const result = await startVoiceApproval(approvalDeps, {
       tenantId: args.tenantId,
       sessionId: session.id,

@@ -137,6 +137,31 @@ export interface VoiceApprovalSessionState {
    * subsequent refusal copy tells the owner the link was already sent.
    */
   oneTapSmsSentAfterLockout?: boolean;
+
+  // ─── WS19 — batch voice approval session flow ──────────────────────────
+  // A batch is pure session-flow state layered over the single-item engine:
+  // an ordered cursor the batch walker advances after each terminal per-item
+  // outcome. When `batchQueue` is absent the single-item flow is byte-identical
+  // (the purity pin). The whole batch is one 'approve' pass over the queue.
+  /**
+   * Ordered proposal ids to walk this batch, frozen at batch start from the
+   * PendingProposalResolver's full pending set (newest first). Survives
+   * dialogue restarts by design (it lives on session state, not the
+   * per-item PendingVoiceApproval).
+   */
+  batchQueue?: string[];
+  /** Cursor into `batchQueue` — the item currently being read back / decided. */
+  batchIndex?: number;
+  /** Running tally of items approved this batch (for the closing summary). */
+  batchApprovedCount?: number;
+  /** Running tally of items skipped/refused this batch (for the summary). */
+  batchSkippedCount?: number;
+  /**
+   * Money/irreversible items skipped because the session locked out mid-batch
+   * (3 failed challenges). Flushed to one-tap SMS via `sendOneTapFallback` at
+   * batch end so the owner can still approve them with a tap.
+   */
+  batchDeferredMoneyIds?: string[];
 }
 
 export type VoiceApprovalOutcome =
@@ -165,7 +190,10 @@ export type VoiceApprovalOutcome =
   // Track E — the edit targeted a chained dependent whose payload still
   // holds an unresolved `$ref:chain[…]` token in a field the delta
   // touches. Refused: the edit would overwrite the chain wiring.
-  | 'edit_blocked_chain_ref';
+  | 'edit_blocked_chain_ref'
+  // WS19 — a batch approval walk reached the end of the queue (or was
+  // stopped early). Carries the closing summary; the batch cursor is cleared.
+  | 'batch_complete';
 
 export interface VoiceApprovalTurnResult {
   /** TTS-ready line for this turn. */
@@ -1351,4 +1379,387 @@ export async function continueVoiceApproval(
   }
   await audit(deps, input, 'proposal.voice_approval_challenge_passed', proposal.id);
   return executeApprove(deps, input, proposal.id);
+}
+
+// ─── WS19 — batch voice approval (session-flow over the single-item engine) ──
+//
+// One owner call clears the whole approval queue: "You have N waiting. First:
+// {readback} — approve it? … Next: …". This is NOT new machinery — it is a
+// cursor carried on VoiceApprovalSessionState that the walker advances after
+// each TERMINAL per-item outcome, delegating every per-item readback / strict
+// confirm / money challenge to the UNCHANGED single-item engine above. When no
+// batch is active the single-item flow is byte-identical (the purity pin).
+
+/** A batch is active when a non-empty queue has an unconsumed cursor. */
+export function isBatchActive(state: VoiceApprovalSessionState | undefined): boolean {
+  return (
+    !!state?.batchQueue &&
+    state.batchQueue.length > 0 &&
+    (state.batchIndex ?? 0) < state.batchQueue.length
+  );
+}
+
+/**
+ * Global "end the whole batch" vocab — deliberately distinct from a per-item
+ * "no" (which skips ONE item and advances). A digit-bearing utterance is never
+ * treated as a stop word (a money challenge PIN can contain no stop words, but
+ * guard anyway for parity with the challenge-stage cancel rule).
+ */
+const BATCH_STOP_RX = /\b(stop|that'?s enough|that'?s all|i'?m done|enough|that'?ll do)\b/i;
+/**
+ * Per-item "skip this one" vocab. The single-item engine treats "skip"/"next"
+ * as a non-strict reask, so the batch layer intercepts it to advance instead.
+ */
+const BATCH_SKIP_RX = /\b(skip|next|pass|move on)\b/i;
+
+/** Terminal per-item outcomes that advance the batch cursor to the next item. */
+const TERMINAL_ITEM_OUTCOMES: ReadonlySet<VoiceApprovalOutcome> = new Set([
+  'approved',
+  'rejected',
+  'kept_for_later',
+  'challenge_lockout',
+  'refused_challenge_unset',
+  'blocked_pending_edit',
+  'not_found',
+  'approve_failed',
+  'reject_failed',
+]);
+
+/** Join spoken fragments into one TTS line, dropping empties. */
+function joinSpeak(...parts: string[]): string {
+  return parts
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0)
+    .join(' ');
+}
+
+/** Merge a per-turn session delta into the working batch state (in place). */
+function mergeState(
+  state: VoiceApprovalSessionState,
+  delta: Partial<VoiceApprovalSessionState> | undefined,
+): VoiceApprovalSessionState {
+  if (delta) Object.assign(state, delta);
+  return state;
+}
+
+/**
+ * A reference that re-targets a KNOWN batch item through the same
+ * PendingProposalResolver the edit dialogue uses — customer + type, which
+ * scores 1.0 against exactly that proposal (unless two pending items share
+ * both, in which case the edit clarifies and the item is skipped).
+ */
+function referenceForProposal(proposal: Proposal): string {
+  const payload = (proposal.payload ?? {}) as Record<string, unknown>;
+  const customer = payloadCustomerName(payload);
+  const parts = [customer, typeLabel(proposal)].filter(
+    (p): p is string => typeof p === 'string' && p.length > 0,
+  );
+  return parts.length > 0 ? parts.join(' ') : proposal.summary;
+}
+
+/** True when any UN-decided item still in the queue needs a money challenge. */
+async function queueHasRemainingMoney(
+  deps: VoiceApprovalDeps,
+  tenantId: string,
+  state: VoiceApprovalSessionState,
+): Promise<boolean> {
+  const queue = state.batchQueue ?? [];
+  for (let i = state.batchIndex ?? 0; i < queue.length; i++) {
+    const p = await fetchReviewable(deps, tenantId, queue[i]);
+    if (p && requiresChallenge(p)) return true;
+  }
+  return false;
+}
+
+/**
+ * Advance the cursor from its current position, auto-skipping items that
+ * resolve WITHOUT owner input (already-handled elsewhere, money-while-locked,
+ * or refused at readback), until it lands on an item that needs the owner's
+ * decision (→ pause on a readback) or the queue is exhausted (→ summary).
+ * Mutates `state` in place; the returned `sessionState` IS that same object.
+ *
+ * `lead` prefixes the paused item's readback ("First:" / "Next:"); `preamble`
+ * is prepended verbatim (the batch opener and/or the just-decided outcome line).
+ */
+async function walkBatchToNextPrompt(
+  deps: VoiceApprovalDeps,
+  ref: VoiceApprovalSessionRef,
+  state: VoiceApprovalSessionState,
+  lead: string,
+  preamble: string,
+): Promise<VoiceApprovalTurnResult> {
+  const queue = state.batchQueue ?? [];
+  while ((state.batchIndex ?? 0) < queue.length) {
+    const idx = state.batchIndex ?? 0;
+    const id = queue[idx];
+    const proposal = await fetchReviewable(deps, ref.tenantId, id);
+
+    // Handled elsewhere (dashboard / SMS Y) since the batch started — skip.
+    if (!proposal) {
+      state.batchSkippedCount = (state.batchSkippedCount ?? 0) + 1;
+      state.batchIndex = idx + 1;
+      continue;
+    }
+
+    // Money/irreversible while the session is locked out — defer to a one-tap
+    // link at batch end and skip now (capture items keep flowing).
+    if (requiresChallenge(proposal) && state.challengeLockedOut) {
+      state.batchDeferredMoneyIds = [...(state.batchDeferredMoneyIds ?? []), id];
+      state.batchSkippedCount = (state.batchSkippedCount ?? 0) + 1;
+      state.batchIndex = idx + 1;
+      continue;
+    }
+
+    const refWithState: VoiceApprovalSessionRef = { ...ref, sessionState: state };
+    const item = await prepareResolvedTarget(deps, refWithState, proposal, 'approve');
+    mergeState(state, item.sessionState);
+
+    if (item.outcome === 'readback') {
+      // Pause here for the owner's yes / no / skip / edit on this item.
+      return {
+        speak: joinSpeak(preamble, `${lead} ${item.speak}`),
+        pending: item.pending,
+        outcome: 'readback',
+        ...(item.proposalId ? { proposalId: item.proposalId } : {}),
+        sessionState: state,
+      };
+    }
+
+    // Terminal-without-input (refused_challenge_unset, challenge_lockout,
+    // blocked_pending_edit): count as skipped and keep walking.
+    state.batchSkippedCount = (state.batchSkippedCount ?? 0) + 1;
+    state.batchIndex = idx + 1;
+  }
+
+  // Queue exhausted → closing summary (flushes deferred money one-taps).
+  return finishBatch(deps, ref, state, preamble);
+}
+
+/**
+ * Close the batch: flush deferred money items to one-tap SMS links, speak the
+ * tally summary, and clear the batch cursor (challenge-lockout state stays for
+ * the rest of the session).
+ */
+async function finishBatch(
+  deps: VoiceApprovalDeps,
+  ref: VoiceApprovalSessionRef,
+  state: VoiceApprovalSessionState,
+  preamble: string,
+): Promise<VoiceApprovalTurnResult> {
+  const approved = state.batchApprovedCount ?? 0;
+  const skipped = state.batchSkippedCount ?? 0;
+  const deferred = state.batchDeferredMoneyIds ?? [];
+
+  // Flush deferred money items to one-tap links (reuse the existing fallback).
+  let deferredSent = 0;
+  for (const id of deferred) {
+    const proposal = await fetchReviewable(deps, ref.tenantId, id);
+    if (!proposal) continue;
+    const sent = await sendOneTapFallback(deps, ref, proposal);
+    if (sent) deferredSent += 1;
+  }
+
+  const parts = [`That's all of them — ${approved} approved, ${skipped} skipped.`];
+  if (deferred.length > 0) {
+    const n = deferred.length;
+    parts.push(
+      deferredSent > 0
+        ? `I've texted you one-tap links for the ${n === 1 ? 'one that moves' : `${n} that move`} money.`
+        : `The ${n === 1 ? 'one that moves' : `${n} that move`} money need a tap in your review queue.`,
+    );
+  }
+  await audit(deps, ref, 'proposal.voice_batch_complete', '', {
+    approved,
+    skipped,
+    deferredMoney: deferred.length,
+    deferredSent,
+  });
+
+  // Clear the batch cursor + tallies; keep challenge-lockout session state.
+  const cleared: VoiceApprovalSessionState = {
+    ...state,
+    batchQueue: undefined,
+    batchIndex: undefined,
+    batchApprovedCount: undefined,
+    batchSkippedCount: undefined,
+    batchDeferredMoneyIds: undefined,
+  };
+  return {
+    speak: joinSpeak(preamble, parts.join(' ')),
+    pending: null,
+    outcome: 'batch_complete',
+    sessionState: cleared,
+  };
+}
+
+export type StartVoiceBatchApprovalInput = VoiceApprovalSessionRef;
+
+/**
+ * Turn 1 of a batch — "approve all" / "what's waiting" / "go through them".
+ * Seeds the cursor from the FULL ordered pending set and reads back the first
+ * actionable item. Unlike the SMS approve-all (capture-class only, money
+ * silently excluded), a voice batch reads money items back and runs the
+ * per-item challenge — a lockout skips remaining money items (one-tap links at
+ * batch end) but capture items keep approving.
+ */
+export async function startVoiceBatchApproval(
+  deps: VoiceApprovalDeps,
+  input: StartVoiceBatchApprovalInput,
+): Promise<VoiceApprovalTurnResult> {
+  if (!input.ownerSession) {
+    await audit(deps, input, 'proposal.voice_approval_denied_not_owner', '', {
+      action: 'approve',
+      batch: true,
+    });
+    return {
+      speak: 'I can’t take approvals on this line. How else can I help?',
+      pending: null,
+      outcome: 'denied_not_owner',
+    };
+  }
+
+  const resolver = new PendingProposalResolver(deps.proposalRepo);
+  const pending = await resolver.listPending(input.tenantId);
+  if (pending.length === 0) {
+    await audit(deps, input, 'proposal.voice_approval_nothing_pending', '', { batch: true });
+    return {
+      speak: 'Nothing is waiting for your approval right now.',
+      pending: null,
+      outcome: 'nothing_pending',
+    };
+  }
+
+  const state: VoiceApprovalSessionState = {
+    ...(input.sessionState ?? {}),
+    batchQueue: pending.map((p) => p.id),
+    batchIndex: 0,
+    batchApprovedCount: 0,
+    batchSkippedCount: 0,
+    batchDeferredMoneyIds: [],
+  };
+  await audit(deps, input, 'proposal.voice_batch_started', '', { count: pending.length });
+
+  return walkBatchToNextPrompt(deps, input, state, 'First:', `You have ${pending.length} waiting.`);
+}
+
+/**
+ * Turn 2+ of a batch. Global "stop" ends it with a summary; per-item
+ * "skip"/"next" advances; "edit …" runs the existing voice-edit dialogue for
+ * the current item then returns to the cursor; everything else delegates to
+ * the UNCHANGED single-item `continueVoiceApproval` for confirm/challenge, and
+ * the cursor advances on each terminal per-item outcome.
+ */
+export async function continueVoiceBatchApproval(
+  deps: VoiceApprovalDeps,
+  input: ContinueVoiceApprovalInput,
+): Promise<VoiceApprovalTurnResult> {
+  if (!input.ownerSession) {
+    return {
+      speak: 'I can’t take approvals on this line. How else can I help?',
+      pending: null,
+      outcome: 'denied_not_owner',
+    };
+  }
+
+  // Working copy of session state — mutated through the turn, returned whole.
+  const state: VoiceApprovalSessionState = { ...(input.sessionState ?? {}) };
+
+  // Not actually in a batch → the single-item engine (purity pin).
+  if (!isBatchActive(state)) {
+    return continueVoiceApproval(deps, input);
+  }
+
+  const { pending, utterance } = input;
+  const currentId = pending.proposalId ?? state.batchQueue![state.batchIndex ?? 0];
+  const digitless = spokenDigits(utterance).length === 0;
+
+  // 1. Global stop — end the batch now with a summary of what was done.
+  if (digitless && BATCH_STOP_RX.test(utterance)) {
+    await audit(deps, input, 'proposal.voice_batch_stopped', '', {
+      atIndex: state.batchIndex ?? 0,
+    });
+    return finishBatch(deps, input, state, 'Okay, stopping there.');
+  }
+
+  // 2. Per-item skip — advance without approving.
+  if (digitless && BATCH_SKIP_RX.test(utterance)) {
+    state.batchSkippedCount = (state.batchSkippedCount ?? 0) + 1;
+    state.batchIndex = (state.batchIndex ?? 0) + 1;
+    return walkBatchToNextPrompt(deps, input, state, 'Next:', 'Skipped.');
+  }
+
+  // 3. Per-item edit — route to the existing voice-edit dialogue for THIS item.
+  if (classifyVoiceApproval(utterance) === 'edit') {
+    const proposal = currentId ? await fetchReviewable(deps, input.tenantId, currentId) : null;
+    if (proposal) {
+      const editResult = await startVoiceEdit(deps, {
+        tenantId: input.tenantId,
+        sessionId: input.sessionId,
+        ownerSession: input.ownerSession,
+        sessionState: state,
+        reference: referenceForProposal(proposal),
+        instruction: utterance,
+      });
+      if (editResult.outcome === 'edited') {
+        // Applied — re-read the UPDATED item and keep the same cursor so the
+        // owner can approve the edited version on the next turn.
+        const updated = await fetchReviewable(deps, input.tenantId, currentId!);
+        if (updated) {
+          const readback = await prepareResolvedTarget(
+            deps,
+            { ...input, sessionState: state },
+            updated,
+            'approve',
+          );
+          mergeState(state, readback.sessionState);
+          return {
+            speak: joinSpeak(editResult.speak, readback.speak),
+            pending: readback.pending,
+            outcome: 'readback',
+            ...(readback.proposalId ? { proposalId: readback.proposalId } : {}),
+            sessionState: state,
+          };
+        }
+      }
+      // Recorded / blocked / failed edit → the item now blocks approval; skip.
+      state.batchSkippedCount = (state.batchSkippedCount ?? 0) + 1;
+      state.batchIndex = (state.batchIndex ?? 0) + 1;
+      return walkBatchToNextPrompt(deps, input, state, 'Next:', editResult.speak);
+    }
+  }
+
+  // 4. Delegate to the single-item engine (confirm / challenge / disambiguate).
+  const item = await continueVoiceApproval(deps, { ...input, sessionState: state });
+  mergeState(state, item.sessionState);
+
+  // Non-terminal — still working this item (repeat readback, reask, challenge
+  // prompt, wrong-code retry). Stay put; the cursor does not advance.
+  if (!TERMINAL_ITEM_OUTCOMES.has(item.outcome)) {
+    return {
+      speak: item.speak,
+      pending: item.pending,
+      outcome: item.outcome,
+      ...(item.proposalId ? { proposalId: item.proposalId } : {}),
+      sessionState: state,
+    };
+  }
+
+  // Terminal — tally and advance.
+  if (item.outcome === 'approved') {
+    state.batchApprovedCount = (state.batchApprovedCount ?? 0) + 1;
+  } else {
+    state.batchSkippedCount = (state.batchSkippedCount ?? 0) + 1;
+  }
+  state.batchIndex = (state.batchIndex ?? 0) + 1;
+
+  // On a lockout mid-batch, tell the owner the remaining money items will get
+  // one-tap links (the walker defers + finishBatch flushes them).
+  let preamble = item.speak;
+  if (
+    item.outcome === 'challenge_lockout' &&
+    (await queueHasRemainingMoney(deps, input.tenantId, state))
+  ) {
+    preamble = joinSpeak(item.speak, "I'll text you one-tap links for the money ones.");
+  }
+  return walkBatchToNextPrompt(deps, input, state, 'Next:', preamble);
 }
