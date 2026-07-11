@@ -179,6 +179,18 @@ export async function resolveSchedulingEntities(
 ): Promise<SchedulingEntityResolution> {
   const refs: Record<string, string> = {};
 
+  // Carry through the classifier's free-text fields (custom cancellation
+  // `reason`, `assigneeName`, `noteText`, `customerName`, etc.) that downstream
+  // task handlers consume. The VOX-52 rewrite narrowed this to only the resolved
+  // outputs, silently dropping those fields — a regression this restores. EXCLUDE
+  // the identity keys (customerId/jobId/appointmentId): those are the resolver's
+  // authority and must never be trusted raw from the classifier (the core VOX-52
+  // invariant); the resolution logic below overlays them.
+  const IDENTITY_KEYS = new Set(['customerId', 'jobId', 'appointmentId']);
+  for (const [k, v] of Object.entries(entities)) {
+    if (typeof v === 'string' && !IDENTITY_KEYS.has(k)) refs[k] = v;
+  }
+
   // Deterministic natural-language datetime → concrete UTC window. This is a
   // PARSE of the caller's own words, not an identity guess, so it stays inline.
   const dt = typeof entities.dateTimeDescription === 'string'
