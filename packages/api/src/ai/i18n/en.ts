@@ -98,6 +98,20 @@ export const en = {
   // ── Generic fallback ─────────────────────────────────────────────────
   'generic.help_someone':
     "Let me get someone to help.",
+
+  // ── In-call grounded quote read-back (WS5) ───────────────────────────
+  // The live voice agent's spoken confirmation after drafting a proposal.
+  // These MUST be localized here (not left as raw English on the FSM
+  // event) because WS5 threads them as a dynamic `utterance` that bypasses
+  // the SENTENCE_CATALOG_ES exact-match seam the old fixed line used.
+  'quote.confirmation_generic':
+    "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?",
+  'quote.uncatalogued':
+    "I've got the details — the owner will confirm pricing and you'll get the full quote by text.",
+  'quote.single_line':
+    "For the {{description}}, that's typically {{amount}}. I'll send the full quote to confirm.",
+  'quote.total':
+    "That usually comes to about {{amount}} all together. I'll send the full quote to confirm.",
 } as const;
 
 export type EnglishCatalog = typeof en;

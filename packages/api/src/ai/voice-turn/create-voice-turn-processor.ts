@@ -650,7 +650,13 @@ export function createVoiceTurnProcessor(
       ...(signals.markers.length > 0 ? { markers: signals.markers } : {}),
     };
 
-    const utterance = buildQuoteReadback({ lineItems, catalogAvailable });
+    // Speak the read-back in the caller's resolved session language so a
+    // Spanish call never hears an English quote (WS5 threaded this as a
+    // dynamic utterance that bypasses the FSM's SENTENCE_CATALOG_ES seam).
+    const utterance = buildQuoteReadback(
+      { lineItems, catalogAvailable },
+      session.language ?? 'en',
+    );
 
     return {
       lineItems,

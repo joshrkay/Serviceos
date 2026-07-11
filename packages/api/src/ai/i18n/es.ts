@@ -100,4 +100,18 @@ export const es: Record<keyof EnglishCatalog, string> = {
   // ── Generic fallback ─────────────────────────────────────────────────
   'generic.help_someone':
     'Déjeme conectarle con alguien que pueda ayudar.',
+
+  // ── In-call grounded quote read-back (WS5) ───────────────────────────
+  // Mirrors the generic-confirmation Spanish already in
+  // agents/customer-calling/tts-copy.ts (SENTENCE_CATALOG_ES) so the
+  // spoken line is identical whether it flows through the catalog seam or
+  // is built here in the caller's language.
+  'quote.confirmation_generic':
+    'Perfecto, ya quedó registrado. Recibirá una confirmación en breve. ¿Hay algo más en lo que pueda ayudarle?',
+  'quote.uncatalogued':
+    'Tengo los detalles — el dueño confirmará el precio y usted recibirá el presupuesto completo por mensaje de texto.',
+  'quote.single_line':
+    'Para {{description}}, normalmente son unos {{amount}}. Le enviaré el presupuesto completo para confirmarlo.',
+  'quote.total':
+    'En total, normalmente son unos {{amount}}. Le enviaré el presupuesto completo para confirmarlo.',
 };

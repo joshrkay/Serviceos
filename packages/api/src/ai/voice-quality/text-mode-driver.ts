@@ -75,6 +75,10 @@ import {
 import { AgentEventBus } from './event-bus';
 import type { CallingAgentEvent, SideEffect } from '../agents/customer-calling/types';
 import { enforceCompliance } from '../skills/enforce-compliance';
+import {
+  detectEmergency,
+  EMERGENCY_SAFETY_LINE,
+} from '../agents/customer-calling/emergency-detector';
 import { escalateToHuman } from '../skills/escalate-to-human';
 import { toEscalationReason } from '../agents/customer-calling/inapp-adapter';
 import { estimateCostCents } from '../skills/session-cost-tracker';
@@ -464,6 +468,27 @@ export class TextModeDriver implements AgentDriver {
 
     let agentResponse: string;
     try {
+      // RV-140/RV-142 — deterministic emergency keyword interrupt. Mirrors
+      // the telephony adapters: run BEFORE any LLM classify call so a
+      // life-safety phrase (EN or ES, e.g. "fuga de gas") fast-paths to
+      // escalation with the 911 safety line, regardless of session language.
+      // The harness previously had no wiring for this, so bucket-11's
+      // es-emergency script could never satisfy criterion 11 (escalation).
+      const emergency = detectEmergency(callerTranscript);
+      if (emergency.matched) {
+        const tts = await this.fireEscalation(
+          session,
+          {
+            type: 'emergency_detected',
+            keyword: emergency.keyword ?? '',
+            utterance: callerTranscript,
+          },
+          'emergency_dispatch',
+        );
+        // No intent_classified is emitted (the emergency turn pins none);
+        // fall through to the shared transcript/speech-event tail below.
+        agentResponse = tts ?? EMERGENCY_SAFETY_LINE;
+      } else {
       const classification = await classifyIntent(
         callerTranscript,
         {
@@ -591,6 +616,7 @@ export class TextModeDriver implements AgentDriver {
       }
 
       emitIntentClassified();
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       agentResponse = `I had trouble processing that — ${message}`;

@@ -96,4 +96,74 @@ describe('buildQuoteReadback', () => {
     });
     expect(said).toBe(UNCATALOGUED_QUOTE_READBACK);
   });
+
+  it("defaulting the language yields English (byte-identical to the 'en' pass)", () => {
+    const line = catalogLine('Service Call', 12500);
+    expect(buildQuoteReadback({ lineItems: [line], catalogAvailable: true })).toBe(
+      buildQuoteReadback({ lineItems: [line], catalogAvailable: true }, 'en'),
+    );
+  });
+});
+
+/**
+ * WS5 + i18n — the read-back must speak the CALLER'S language. A Spanish
+ * session hears real Spanish (routed through the voice i18n catalog), with
+ * the same no-invented-number rules and the same US spoken-money format.
+ */
+describe('buildQuoteReadback — Spanish', () => {
+  it('empty line items → Spanish generic confirmation', () => {
+    expect(buildQuoteReadback({ lineItems: [], catalogAvailable: true }, 'es')).toBe(
+      'Perfecto, ya quedó registrado. Recibirá una confirmación en breve. ¿Hay algo más en lo que pueda ayudarle?',
+    );
+  });
+
+  it('single catalogued line → one grounded price, in Spanish', () => {
+    const said = buildQuoteReadback(
+      { lineItems: [catalogLine('Reemplazo de calentador', 185000)], catalogAvailable: true },
+      'es',
+    );
+    expect(said).toBe(
+      'Para Reemplazo de calentador, normalmente son unos $1850.00. Le enviaré el presupuesto completo para confirmarlo.',
+    );
+    // Still exactly one dollar figure, still the bare US spoken-money format.
+    expect(said.match(/\$/g)).toHaveLength(1);
+  });
+
+  it('multiple catalogued lines → the TOTAL only, in Spanish', () => {
+    const said = buildQuoteReadback(
+      {
+        lineItems: [catalogLine('Instalación', 85000), catalogLine('Empaque', 450, 2)],
+        catalogAvailable: true,
+      },
+      'es',
+    );
+    expect(said).toBe(
+      'En total, normalmente son unos $859.00. Le enviaré el presupuesto completo para confirmarlo.',
+    );
+    expect(said.match(/\$/g)).toHaveLength(1);
+  });
+
+  it('ANY uncatalogued / unavailable line → Spanish no-number acknowledgment', () => {
+    const uncatalogued = buildQuoteReadback(
+      {
+        lineItems: [
+          catalogLine('Instalación', 85000),
+          { description: 'fabricación a medida', pricingSource: 'uncatalogued' },
+        ],
+        catalogAvailable: true,
+      },
+      'es',
+    );
+    expect(uncatalogued).toBe(
+      'Tengo los detalles — el dueño confirmará el precio y usted recibirá el presupuesto completo por mensaje de texto.',
+    );
+    expect(uncatalogued).not.toMatch(/\$/);
+
+    const unavailable = buildQuoteReadback(
+      { lineItems: [catalogLine('Instalación', 85000)], catalogAvailable: false },
+      'es',
+    );
+    expect(unavailable).not.toMatch(/\$/);
+    expect(unavailable).toBe(uncatalogued);
+  });
 });

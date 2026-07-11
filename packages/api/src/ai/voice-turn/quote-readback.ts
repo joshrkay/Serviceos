@@ -22,22 +22,24 @@
  * their money.
  */
 import { formatCents } from '../skills/spoken-format';
+import { t, type Language } from '../i18n/i18n';
 
 /**
  * The pre-WS5 fixed confirmation line, kept verbatim so NON-estimate
  * proposals (and estimates with no line items) speak exactly what they did
- * before. Sourced from the `proposal_draft` transition.
+ * before. Sourced from the `proposal_draft` transition and now backed by
+ * the voice i18n catalog so a Spanish call hears the Spanish line. The
+ * exported English constant is the catalog's English value verbatim — it
+ * remains the exact-match key `SENTENCE_CATALOG_ES` uses.
  */
-export const GENERIC_PROPOSAL_CONFIRMATION =
-  "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?";
+export const GENERIC_PROPOSAL_CONFIRMATION = t('quote.confirmation_generic', 'en');
 
 /**
  * No-number acknowledgment spoken whenever ANY line is uncatalogued /
  * ambiguous, or the catalog could not be consulted. Defers pricing to the
  * operator's written quote — deliberately carries no dollar figure.
  */
-export const UNCATALOGUED_QUOTE_READBACK =
-  "I've got the details — the owner will confirm pricing and you'll get the full quote by text.";
+export const UNCATALOGUED_QUOTE_READBACK = t('quote.uncatalogued', 'en');
 
 /** One grounded line item, as produced by `applyCatalogPricing`. */
 export interface QuoteReadbackLine {
@@ -74,24 +76,38 @@ function lineTotalCents(li: QuoteReadbackLine): number {
  *     cleanly catalog-priced),
  *   - a single grounded price (one catalogued line),
  *   - a single grounded TOTAL (multiple all-catalogued lines).
+ *
+ * `language` picks the spoken language ('en' | 'es'), defaulting to English.
+ * The strings come from the voice i18n catalog so the caller hears their own
+ * language — this is the localization seam the pre-WS5 fixed line used. The
+ * function stays PURE: the caller (the voice-turn processor) passes the
+ * resolved session language in; no I/O, no session lookup here. Money is
+ * still formatted with `formatCents` (bare `$N.NN`) — the US-only spoken
+ * money contract that both TTS engines read correctly.
  */
-export function buildQuoteReadback(input: QuoteReadbackInput): string {
+export function buildQuoteReadback(
+  input: QuoteReadbackInput,
+  language: Language = 'en',
+): string {
   const lines = input.lineItems ?? [];
-  if (lines.length === 0) return GENERIC_PROPOSAL_CONFIRMATION;
-  if (!input.catalogAvailable) return UNCATALOGUED_QUOTE_READBACK;
+  if (lines.length === 0) return t('quote.confirmation_generic', language);
+  if (!input.catalogAvailable) return t('quote.uncatalogued', language);
 
   // Every line must be a clean catalog match with a numeric price. Any
   // uncatalogued / ambiguous / price-less line → no numbers at all.
   const allCatalogued = lines.every(
     (li) => li.pricingSource === 'catalog' && typeof li.unitPrice === 'number',
   );
-  if (!allCatalogued) return UNCATALOGUED_QUOTE_READBACK;
+  if (!allCatalogued) return t('quote.uncatalogued', language);
 
   if (lines.length === 1) {
     const li = lines[0]!;
-    return `For the ${li.description}, that's typically ${formatCents(lineTotalCents(li))}. I'll send the full quote to confirm.`;
+    return t('quote.single_line', language, {
+      description: li.description ?? '',
+      amount: formatCents(lineTotalCents(li)),
+    });
   }
 
   const total = lines.reduce((sum, li) => sum + lineTotalCents(li), 0);
-  return `That usually comes to about ${formatCents(total)} all together. I'll send the full quote to confirm.`;
+  return t('quote.total', language, { amount: formatCents(total) });
 }
