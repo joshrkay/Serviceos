@@ -27,6 +27,14 @@ Evidence commits (all on `main` or this branch):
 | WS13 | `83caa13` | Integration suite runs under the RLS runtime role by default in CI |
 | WS14 | `25f428c` | Dedicated 'voice' process role + railway.voice.toml + provisioning VOICE_PUBLIC_URL |
 | WS15 | `105ebe4` | Platform SLO monitor + drain-abandonment alarm — alerting a human |
+| WS16 | `a381da5`/`f0de11d`/`e431424` | Circuit fed by real call outcomes; establishment unified; transport drift converged |
+| WS17 | `0151e8d` | In-call quotes: quantity, per-line read-back, invoice parity |
+| WS18 | `5e4727c`/`6e18e49`/`4a0f9f3`/`020813f` | Post-quote FSM + refinement; consent capture + hold; D-018 lane; wired autonomous close |
+| WS19 | `80cd860` | Batch voice approval sessions — one call clears the queue |
+| WS20 | `48a5501`/`2e77785` | Per-SKU correction capture; correction-repetition meta-proposals |
+| WS21 | `b58bf22`/`b296e01` | Enrolled hashed voice PIN; harness reaches approval + quoting dialogues |
+| WS22 | `5c8cd02` | Honest flaggedFixed + weekly same-mistake-twice rate |
+| WS23 | `ecc43da` | Proof layer: CI reality + 15-minute E2E unlock runbook |
 
 ---
 
@@ -46,7 +54,7 @@ before every other autonomous-lane gate) — no loosening.
 owner sessions, `test/telephony/lookup-catalog-owner-gate.test.ts`) —
 a tightening, not a regression.
 
-## 3. Voice ingestion — was C+, now **B+**
+## 3. Voice ingestion — was C+, now **A−**
 
 Criticism: *"Realtime Deepgram agent path exists but is flag-gated; the
 legacy turn-based Gather adapter is still the default."*
@@ -71,10 +79,21 @@ legacy turn-based Gather adapter is still the default."*
   (`test/telephony/media-streams/telephony-realtime-fallback.test.ts`),
   circuit + resilience suites, new redirect/route/adapter failure-path tests.
 
-Remaining below A: no mid-call *handoff* between replicas (industry-standard
-drain instead), realtime rollout still ultimately an ops env decision.
+**A-grade additions (third wave, WS16):** the health circuit is fed by REAL
+call outcomes — success recorded only at clean established close (the
+establish-then-die trap that could never trip a consecutive breaker is
+fixed and regression-pinned against a real circuit), one latched vote per
+call leg, deepgram-reopen failures reclassified transport_failure;
+runtime-verified live (two mid-call failures → third call routed to
+Gather). The duplicated ~260-line Gather establishment is unified with the
+stream path (pure refactor pinned by 412 unmodified tests), and the
+silently-drifted features converged — realtime calls now fire owner
+incoming-call notifications and customer-timeline entries. voice_realtime
+reframed kill-switch-only. Remaining below a flat A: no mid-call replica
+handoff (drain + the WS14 rarely-deployed voice service are the
+mitigation).
 
-## 4. In-call intelligence (quote on the phone) — was C, now **B+**
+## 4. In-call intelligence (quote on the phone) — was C, now **A−**
 
 Criticism: *"Voice captures intent only; the deterministic catalog resolver
 runs operator-side after the call, not in the turn loop."*
@@ -94,11 +113,24 @@ runs operator-side after the call, not in the turn loop."*
   `session-catalog.test.ts`, `estimate-grounding-idempotent.test.ts` (voice
   and operator paths agree).
 
-Remaining below A: grounding covers `draft_estimate` only; multi-line quotes
-speak the total only; quantity fixed at 1 on the spoken path. These are
-deliberate money-safety scoping choices, not correctness gaps.
+**A-grade additions (third wave, WS17 + WS18):** quantity-aware quotes
+('three smoke detectors' → 3 × catalog unit; sizes like '2 inch pipe'
+never misparse), per-line read-back for all-catalogued quotes up to 3
+lines (mixed quotes keep the all-or-nothing no-number rule), invoice
+grounding parity (unitPriceCents contract, cents-mapping pinned). Mid-call
+refinement: 'actually make it two of those' re-grounds and re-speaks the
+total in place (max 3, then owner fallback) — and the discard bug (a
+post-quote 'yes, book it' previously THREW AWAY the quote) is fixed and
+regression-pinned. The close itself: D-018's guardrailed autonomous close
+(default-off tenant flag, grounded-clean-only, cap, strict confirm,
+on-call SMS consent captured to the ledger, live hold, owner UNDO SMS)
+executes draft_estimate → send_estimate → create_booking before hangup,
+with the one-tap owner close as the always-available fallback. Proven on
+real Postgres end-to-end. Remaining below a flat A: autonomous close
+requires tenant opt-in by design; the deposit rides the approval link
+rather than a separate texted link.
 
-## 5. Approval loop — was C+, now **B+**
+## 5. Approval loop — was C+, now **A−**
 
 Criticism: *"no voice read-back/approve, and `voiceApprovable === false`
 proposals punt to a screen."*
@@ -142,11 +174,21 @@ grounded catalog, and a money-class PIN. New corpus scenarios: owner batch
 approval walk, money-class approval with the WS21a PIN challenge, grounded quote
 against a catalog fixture, and a quantity variant.
 
-Remaining below A: money-class voice approval requires one-time PIN
-enrollment (now a real hashed-at-rest path, WS21a — onboarding-step capture
-still a follow-up).
+**A-grade additions (third wave, WS19 + WS21):** batch voice sessions —
+'You have four waiting. First: estimate for Lopez, \$450.00 — approve it?
+… Next: …' — one call clears the queue over the unchanged single-item
+engine (money items get the per-item challenge, never silently skipped
+like SMS APPROVE ALL; lockout defers them to one-tap links while capture
+items keep approving). Money-class identity is now an ENROLLED voice PIN:
+HMAC-hashed at rest, settings-route enrollment (never echoed), legacy
+plaintext honored as fallback — replacing the config nobody set. The
+voice-quality corpus now reaches the approval dialogue (recorded
+scenarios: batch walk, PIN challenge). Remaining below a flat A:
+onboarding-step PIN capture is a stated follow-up (the conversational
+proposer would land the PIN in plaintext transcripts); caller-ID stays the
+deliberate base identity for capture-class.
 
-## 6. Learning loop — was B, now **B+/A−**
+## 6. Learning loop — was B, now **A**
 
 Criticism: *"digest reflection sections still missing."*
 
@@ -164,6 +206,18 @@ render on the web digest page (`digest/digest-service.ts`,
    `payload._meta.appliedStandingInstructions` stamp the drafting tasks
    already persist (no separate bookkeeping), with a partial index for the
    day query.
+
+**A-grade additions (third wave, WS20 + WS22):** corrections now change the
+SYSTEM, not just the log — per-SKU price-correction identity is actually
+captured (the stale onExecuted wiring that silently discarded catalogItemId
+is fixed), and after the third same-target correction the AI proposes the
+catalog update itself (update_catalog_item proposal in the normal inbox,
+evidence attached, deduped, rejection-respecting; repeated banned-phrase
+removals propose the standing instruction). flaggedFixed is honest — a
+flagged proposal counts fixed only when the owner actually edited it after
+the flag ('Checked: N, M flagged, K fixed.') — and the weekly feedback
+email carries the metric that proves learning is real: 'Of 6 corrections
+this week, 2 were repeats of an earlier correction (33%).'
 
 Plus (WS9) the **auto-booked** line — the D-015 autonomous lane reports its
 own activity to the owner nightly. Standing instructions ("from now on…"),
@@ -312,12 +366,16 @@ harness's corpus green.
 |---|---|---|
 | Action rail | A− | A− |
 | Read-side voice | A− | A− |
-| Voice ingestion | C+ | **B+** |
-| In-call intelligence | C | **B+** |
-| Approval loop | C+ | **B+** |
-| Learning loop | B | **B+/A−** |
+| Voice ingestion | C+ | **A−** |
+| In-call intelligence | C | **A−** |
+| Approval loop | C+ | **A−** |
+| Learning loop | B | **A** |
 | Safety rails | D+ | **A−** |
 | Operational resilience | C− | **A−** (operator cutover pending) |
 | Voice regression protection | A− | A− |
 
-All nine layers at B+ or better.
+All nine layers at A− or better (the two original A− holds unchanged), and
+§9's harness gained the reach it lacked — approval and grounded-quote
+corpus scenarios (WS21b). The proof layer's reality is recorded in
+docs/runbooks/proof-layer.md: integration tests gate every PR under RLS
+already; the browser-journey unlock is a 15-minute operator checklist.
