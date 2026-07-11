@@ -19,6 +19,11 @@ import { notifyDispatchBoardChanged } from '../../dispatch/board-notify';
  */
 export class CreateBookingExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'create_booking';
+  // Awaits confirmationNotifier.enqueue — in production this is
+  // TransactionalCommsService, which sends the customer confirmation SMS/email
+  // synchronously via the delivery provider — external network I/O alongside the
+  // hold-confirm DB write.
+  performsExternalIo = true;
 
   constructor(
     private readonly appointmentRepo?: AppointmentRepository,

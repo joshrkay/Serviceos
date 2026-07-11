@@ -135,6 +135,9 @@ export function composeEmergencyPageSms(opts: {
 
 export class EmergencyDispatchExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'emergency_dispatch';
+  // Awaits smsSender.sendSms (owner page) and notifyOwner (owner push) —
+  // external network I/O alongside the urgent-job + appointment-hold DB writes.
+  performsExternalIo = true;
 
   constructor(
     private readonly jobRepo?: JobRepository,

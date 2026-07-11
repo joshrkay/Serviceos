@@ -102,6 +102,21 @@ export interface ExecutionHandler {
   proposalType: ProposalType;
   execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult>;
   /**
+   * True when `execute()` performs synchronous external network I/O — email /
+   * SMS / push / 3rd-party API — so the executor runs it OUTSIDE the DB
+   * transaction; the domain DB writes then commit in their own per-call
+   * transactions and only the idempotency record + status transition are
+   * wrapped in the executor's transaction. Absent/false = DB-only = fully
+   * atomic per DATA-31.
+   *
+   * Rationale (PR #666, Gemini HIGH): a handler that awaits an external send
+   * while its domain mutation's row locks are held inside the executor's
+   * transaction pins a pooled connection AND holds those locks for the whole
+   * network round-trip — a pool-exhaustion + long-lived-lock risk. Marking it
+   * here moves the send (and its DB writes) out of the executor transaction.
+   */
+  performsExternalIo?: boolean;
+  /**
    * Optional capability signal for the boot-time wiring guard
    * (proposals/execution/wiring-assertions.ts). Returns false when the
    * handler is missing a dependency it needs to PERSIST — i.e. it would
@@ -263,6 +278,13 @@ export class CreateJobExecutionHandler implements ExecutionHandler {
 
 export class CreateAppointmentExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'create_appointment';
+  // Awaits confirmationNotifier.enqueue — in production this is
+  // TransactionalCommsService, which sends the customer confirmation SMS/email
+  // synchronously via the delivery provider — external network I/O alongside the
+  // appointment + assignment DB writes. Those writes already tolerate
+  // per-connection commits (assignment-failure compensation), so running out of
+  // the executor tx is safe.
+  performsExternalIo = true;
 
   constructor(
     private readonly appointmentRepo?: AppointmentRepository,
@@ -739,6 +761,10 @@ export const ESTIMATE_NUDGE_COOLDOWN_MS = 48 * 60 * 60 * 1000;
 
 export class SendEstimateNudgeExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'send_estimate_nudge';
+  // Awaits dispatchEstimateNudge → sendService.sendEstimate (outbound estimate
+  // re-send via the send service) — external network I/O alongside the
+  // estimate reminder-bookkeeping DB write.
+  performsExternalIo = true;
 
   constructor(
     private readonly estimateRepo?: EstimateRepository,

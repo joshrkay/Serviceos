@@ -39,6 +39,11 @@ function formatWhenLabel(start: Date, timezone: string): string {
 
 export class CancelAppointmentExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'cancel_appointment';
+  // Awaits transactionalComms.notifyCanceled (customer SMS/email) and notifyOwner
+  // (owner push) — external network I/O alongside the appointment-cancel DB
+  // write. (notifyDispatchBoardChanged is a non-awaited in-process SSE signal and
+  // does not count.)
+  performsExternalIo = true;
 
   constructor(
     private readonly appointmentRepo?: AppointmentRepository,

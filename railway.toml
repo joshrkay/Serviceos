@@ -14,11 +14,15 @@ healthcheckPath = "/health"
 healthcheckTimeout = 60
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3
-# Horizontal scale (scale-to-1000 P4). Raise once REDIS_URL is set (so the WS
-# caps / LLM quotas / voice fan-out / rate limits are cluster-wide) and a
-# PgBouncer service fronts Postgres (so N pools multiplex onto a bounded
-# max_connections). Metric-based autoscaling (CPU/mem/req triggers, min/max) is
-# configured in the Railway service settings, not here. See docs/runbooks/scaling.md.
+# Horizontal scale (scale-to-1000 P4). Raising this past 1 REQUIRES setting both
+# REDIS_URL (so the WS caps / LLM quotas / voice fan-out / rate limits are
+# cluster-wide instead of degrading silently to per-replica in-memory) and the
+# NUM_REPLICAS env var to the same count — ARCH-01: validateFeatureRequiredConfig
+# fails boot in prod/staging when NUM_REPLICAS > 1 and REDIS_URL is unset, so the
+# degradation can't ship silently. Also front Postgres with a PgBouncer service
+# (so N pools multiplex onto a bounded max_connections). Metric-based autoscaling
+# (CPU/mem/req triggers, min/max) is configured in the Railway service settings,
+# not here. See docs/runbooks/scaling.md.
 numReplicas = 1
 # Zero-downtime rollout: keep the old replica serving until the new one is
 # healthy. The app drains live voice/WS calls on SIGTERM (U-P4a) — it flips

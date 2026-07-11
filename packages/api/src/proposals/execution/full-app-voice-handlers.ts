@@ -180,6 +180,9 @@ export class LogTimeEntryExecutionHandler implements ExecutionHandler {
 
 export class NotifyDelayExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'notify_delay';
+  // Awaits delayService.sendDelayNotice — outbound customer delay SMS/email via
+  // the delivery provider. Read-only on the DB otherwise (no domain mutation).
+  performsExternalIo = true;
 
   constructor(
     private readonly delayService?: DelayNotificationService,

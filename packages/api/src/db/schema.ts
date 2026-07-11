@@ -6016,6 +6016,33 @@ export const MIGRATIONS = {
   '243_brand_voice_versions_changed_by_text': `
     ALTER TABLE brand_voice_versions ALTER COLUMN changed_by TYPE TEXT;
   `,
+
+  // DATA-01 — jobs had no index covering the (tenant_id, assigned_technician_id)
+  // filter that PgJobRepository.buildListWhere adds when `technicianId` is
+  // supplied (reachable via `GET /api/jobs?technicianId=` in routes/jobs.ts,
+  // and via reports/technician-profit.ts). Without this, that predicate fell
+  // back to the existing idx_jobs_tenant (tenant_id-only) index plus a filter
+  // scan, which degrades to a sequential scan on jobs at volume. Plain
+  // composite (not partial) because the column is legitimately queried both
+  // when assigned (technician filter) and the index also serves any future
+  // IS NULL / IS NOT NULL scan without a second index.
+  '244_jobs_tenant_assigned_technician_index': `
+    CREATE INDEX IF NOT EXISTS idx_jobs_tenant_assigned_technician
+      ON jobs(tenant_id, assigned_technician_id);
+  `,
+
+  // DATA-02 — audit_events had no index covering
+  // PgAuditRepository.findByTenant's `SELECT * FROM audit_events WHERE
+  // tenant_id = $1 ORDER BY created_at DESC LIMIT $2` (every mutation emits
+  // an audit event, so this table grows unbounded). The existing idx_audit_tenant
+  // index is tenant_id-only, so the ORDER BY required an expensive Sort once
+  // the index-filtered rows didn't come back pre-sorted. This composite with
+  // created_at DESC lets Postgres satisfy both the filter and the ORDER BY
+  // from the index directly (backward index scan for ASC callers still works).
+  '245_audit_events_tenant_created_at_index': `
+    CREATE INDEX IF NOT EXISTS idx_audit_events_tenant_created_at
+      ON audit_events(tenant_id, created_at DESC);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
