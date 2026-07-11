@@ -248,6 +248,37 @@ export const wsReconnectRejectTotal = new Counter({
   registers: [metricsRegistry],
 });
 
+// ---------- Voice turn latency (WS26) ----------
+
+/**
+ * WS26 — voice turn latency: the time from the STT provider returning a FINAL
+ * transcript for the caller's turn to the FIRST outbound TTS audio chunk of the
+ * agent's reply being enqueued, on the Twilio Media Streams path. This is the
+ * "caller stops speaking → first audio of the reply" seam the scorecard's
+ * "turn latency P95" SLO targets.
+ *
+ * Observed best-effort inside the media-streams adapter (mediastream-adapter.ts)
+ * at the exact points that already bracket the turn: `transcript_received`
+ * (final transcript) arms the timer, the first non-filler outbound media chunk
+ * observes it. FILLER chunks are excluded — a filler clip fills the LLM-thinking
+ * gap and would mask the real turn latency.
+ *
+ * No labels: this histogram is only ever observed from the single media-streams
+ * transport. If a second transport ever measures turn latency, add a `transport`
+ * label here and at the observe site.
+ *
+ * Cumulative in-process: like every prom-client histogram it accumulates since
+ * process boot and is only visible where the voice service runs. The SLO monitor
+ * reads it in-process ONLY under PROCESS_ROLE=all (single-service deploys). Split
+ * topologies alert on it via Prometheus/Grafana — see docs/runbooks/slo-alerts.md.
+ */
+export const voiceTurnLatencyMs = new Histogram({
+  name: 'voice_turn_latency_ms',
+  help: 'Voice turn latency (ms): STT-final transcript → first outbound TTS chunk of the reply, media-streams path. Excludes filler chunks.',
+  buckets: [250, 500, 1000, 1500, 2000, 2500, 3000, 3500, 5000, 7500, 10_000],
+  registers: [metricsRegistry],
+});
+
 // ---------- Platform SLOs (WS15 — operational resilience) ----------
 
 /**
@@ -271,7 +302,7 @@ export const voiceDrainAbandonedCallsTotal = new Counter({
 /** WS15 — last evaluated value per SLO rule (see workers/slo-monitor.ts). */
 export const sloRuleValue = new Gauge({
   name: 'slo_rule_value',
-  help: 'Last evaluated value per platform SLO rule (call_completion_rate=ratio, queue_staleness=stale job count, sweep_lag=seconds since last sweep success)',
+  help: 'Last evaluated value per platform SLO rule (call_completion_rate=ratio, queue_staleness=stale job count, sweep_lag=seconds since last sweep success, voice_turn_latency_p95=P95 turn latency ms)',
   labelNames: ['rule'],
   registers: [metricsRegistry],
 });

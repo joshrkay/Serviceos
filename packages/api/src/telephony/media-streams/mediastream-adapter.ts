@@ -41,7 +41,7 @@ import {
   pcm16ToMulaw,
 } from './mulaw-codec';
 import { BoundedSendQueue, type Priority } from '../../ws/bounded-send-queue';
-import { wsDisconnectTotal } from '../../monitoring/metrics';
+import { wsDisconnectTotal, voiceTurnLatencyMs } from '../../monitoring/metrics';
 import {
   ConnectionRegistry,
   ConnectionLease,
@@ -452,6 +452,14 @@ interface RuntimeState {
    */
   awaitingFirstAudioFrame: boolean;
   /**
+   * WS26 — epoch-ms stamped when a FINAL transcript arms the turn (paired with
+   * `awaitingFirstAudioFrame`). Read once when the first non-filler outbound
+   * chunk is enqueued to observe `voice_turn_latency_ms`, then cleared. `null`
+   * between turns. Overwritten each turn, so a barge-in that killed the prior
+   * turn before any audio never leaks a stale start into the next measurement.
+   */
+  turnLatencyStartMs: number | null;
+  /**
    * True while a filler clip is actively streaming. Cleared when real
    * TTS preempts it or when barge-in kills it. Used to gate
    * TTFA emission and to coordinate filler/real-TTS cancellation.
@@ -597,6 +605,23 @@ function mapCloseReasonToFinalize(reason: string): string {
   return 'caller_hangup';
 }
 
+/**
+ * WS26 — best-effort observation of voice turn latency (STT-final → first TTS
+ * chunk) into the `voice_turn_latency_ms` histogram. Wrapped so a metrics-layer
+ * failure (a throwing prom registry) can NEVER propagate into the outbound audio
+ * loop — the same posture as the adapter's other best-effort emitters. A `null`
+ * start (no armed turn) or a negative delta (clock skew) is silently ignored.
+ */
+function observeTurnLatency(startMs: number | null): void {
+  if (startMs === null) return;
+  try {
+    const deltaMs = Date.now() - startMs;
+    if (deltaMs >= 0) voiceTurnLatencyMs.observe(deltaMs);
+  } catch {
+    /* metrics must never throw into the audio pipeline */
+  }
+}
+
 // ─── Adapter ─────────────────────────────────────────────────────────────────
 
 /**
@@ -641,6 +666,7 @@ export class TwilioMediaStreamAdapter {
       wsCloseInitiated: false,
       pendingFinalizeEffects: [],
       awaitingFirstAudioFrame: false,
+      turnLatencyStartMs: null,
       fillerActive: false,
       pendingTransferTwiml: null,
       resolvedEscalationSettings: null,
@@ -1100,6 +1126,9 @@ export class TwilioMediaStreamAdapter {
     // `audio_frame_emitted`. Emitted BEFORE speechTurn to capture the
     // full agent-thinking window.
     this.state.awaitingFirstAudioFrame = true;
+    // WS26 — stamp the turn-latency start (STT-final). Plain assignment; a
+    // metrics failure can only happen at observe() time, which is wrapped.
+    this.state.turnLatencyStartMs = Date.now();
     session.events.emit(VOICE_EVENT_CHANNEL, transcriptReceivedEvent());
 
     let sideEffects: SideEffect[] = [];
@@ -2036,6 +2065,12 @@ export class TwilioMediaStreamAdapter {
       // thinking gap and would otherwise poison the TTFA metric.
       if (!isFiller && this.state.awaitingFirstAudioFrame && this.state.session) {
         this.state.awaitingFirstAudioFrame = false;
+        // WS26 — observe voice turn latency at the first real (non-filler)
+        // outbound chunk. Best-effort + exception-proof (observeTurnLatency
+        // swallows any metrics error); done BEFORE the event emit so a
+        // metrics failure can't disturb the existing TTFA telemetry either.
+        observeTurnLatency(this.state.turnLatencyStartMs);
+        this.state.turnLatencyStartMs = null;
         this.state.session.events.emit(
           VOICE_EVENT_CHANNEL,
           audioFrameEmittedEvent({ byteCount: chunk.length }),

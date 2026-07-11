@@ -138,18 +138,60 @@ First response:
 4. Check `docs/runbooks/voice-capacity.md` if abandonments correlate with
    call-volume spikes.
 
-## Not yet measured: voice turn latency P95
+### 4. `voice_turn_latency_p95` (warning)
 
-The "turn latency P95" SLO from the scorecard is **not shipped**: turn latency
-(caller stops speaking → first audio of the reply) is not currently measured
-anywhere in the production path — there is no histogram at the turn-processing
-seam (`ai/voice-quality/audio-timings.ts` is the offline eval harness only).
-Bolting timing into the live audio path was judged riskier than the gap.
-Where it would go: a `voice_turn_latency_ms` prom histogram observed at the
-media-streams adapter's turn boundary (STT final → first TTS chunk enqueued),
-then a fourth rule in `slo-monitor.ts` reading the in-process histogram's
-buckets. Until then, use the offline voice-quality eval harness and Twilio's
-per-call diagnostics for latency investigations.
+| | |
+|---|---|
+| Measures | P95 of `voice_turn_latency_ms` — a prom histogram observed on the media-streams path at the turn boundary: the caller's STT-final transcript → the FIRST outbound TTS audio chunk of the reply being enqueued (`packages/api/src/telephony/media-streams/mediastream-adapter.ts`). Filler chunks are excluded so the metric reflects the real reply gap, not the LLM-thinking filler. |
+| Threshold | `SLO_TURN_LATENCY_P95_MS` (default `3500`) |
+| Sample floor | `SLO_TURN_LATENCY_MIN_SAMPLE` (default `30`) — below this many recorded turns the rule never breaches |
+
+This is the "turn latency P95" SLO from the scorecard, now shipped (WS26). The
+histogram is observed best-effort and exception-proof: a metrics-layer failure
+can never throw into the live audio pipeline (same posture as the adapter's
+other best-effort emitters). Buckets are voice-sized:
+`250, 500, 1000, 1500, 2000, 2500, 3000, 3500, 5000, 7500, 10000` ms.
+
+**Cross-process / split-topology caveat (read before trusting the in-process
+rule).** prom-client histograms live in the process that recorded them, so
+`voice_turn_latency_ms` is only visible where the voice service runs. The SLO
+monitor is leader-locked and may run in a *different* process (`PROCESS_ROLE=
+worker`) than voice (`web`/`voice`). Because of that, the in-process rule is
+**gated to `PROCESS_ROLE=all`** (single-service deploys, where the monitor and
+voice share a process). In a split (`web|voice` + `worker`) topology the
+worker running the monitor has no turn-latency data, so the rule is **silently
+skipped** — it will not appear in the monitor's `evaluated` list and
+`slo_rule_value{rule="voice_turn_latency_p95"}` is not written by that process.
+
+For split topologies (and as the authoritative signal even on single-service
+deploys — the in-process value is cumulative since process boot, so it is a
+coarse backstop, not a trailing-window signal), alert on the **exported buckets
+via Prometheus/Grafana** instead. Every voice replica exposes
+`voice_turn_latency_ms_bucket` on `/metrics`; a recording/alert rule such as:
+
+```promql
+histogram_quantile(
+  0.95,
+  sum by (le) (rate(voice_turn_latency_ms_bucket[10m]))
+) > 3500
+```
+
+gives a true trailing-window P95 across all voice replicas. This is the
+recommended production alert regardless of topology; the in-process rule exists
+so single-service deploys still get a Sentry/SMS page without a metrics backend.
+
+First response:
+1. Confirm it's real, not cumulative drift: scrape `/metrics` on a voice
+   replica and run the Prometheus query above over a recent window. A rising
+   trailing-window P95 is a genuine regression; a high cumulative-since-boot
+   P95 with a flat recent rate is stale history, not a live problem.
+2. Real regression → check the LLM gateway latency (`gateway_request_latency_ms`)
+   and provider failover/breaker metrics — turn latency is dominated by the
+   model round-trip. Check the latest deploy for a prompt/model change.
+3. Rule out TTS: a slow or degraded TTS provider delays the first chunk. Check
+   the TTS provider's status and recent config.
+4. For offline / per-call latency forensics, use the voice-quality eval harness
+   (`ai/voice-quality/audio-timings.ts`) and Twilio's per-call diagnostics.
 
 ## Verification (staging)
 

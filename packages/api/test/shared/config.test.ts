@@ -626,6 +626,32 @@ describe('P0-006 — Secrets/config framework', () => {
       expect(() => loadConfig({ NODE_ENV: 'dev', PROCESS_ROLE: 'bogus' })).toThrow();
     });
   });
+
+  describe('WS26 — voice turn-latency SLO knobs', () => {
+    it('defaults: 3500ms P95 threshold, 30-turn sample floor', () => {
+      const c = loadConfig({ NODE_ENV: 'dev' });
+      expect(c.SLO_TURN_LATENCY_P95_MS).toBe(3500);
+      expect(c.SLO_TURN_LATENCY_MIN_SAMPLE).toBe(30);
+    });
+
+    it('coerces string overrides to numbers', () => {
+      const c = loadConfig({
+        NODE_ENV: 'dev',
+        SLO_TURN_LATENCY_P95_MS: '2800',
+        SLO_TURN_LATENCY_MIN_SAMPLE: '50',
+      });
+      expect(c.SLO_TURN_LATENCY_P95_MS).toBe(2800);
+      expect(c.SLO_TURN_LATENCY_MIN_SAMPLE).toBe(50);
+    });
+
+    it('rejects a non-positive threshold and a non-integer sample floor', () => {
+      expect(() => loadConfig({ NODE_ENV: 'dev', SLO_TURN_LATENCY_P95_MS: '0' })).toThrow();
+      resetConfig();
+      expect(() =>
+        loadConfig({ NODE_ENV: 'dev', SLO_TURN_LATENCY_MIN_SAMPLE: '5.5' }),
+      ).toThrow();
+    });
+  });
 });
 
 describe('P0-026 — validateEnvSchema (Zod startup validation)', () => {

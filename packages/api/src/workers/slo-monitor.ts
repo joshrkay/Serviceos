@@ -22,13 +22,19 @@
  *      leader-sweep machinery itself is wedged or its DB access is failing.
  *      In-process registry — see sweep-heartbeats.ts for the multi-replica
  *      caveat.
- *
- * NOT shipped: voice turn-latency P95. Turn latency is not currently measured
- * anywhere in the production path (no histogram at the turn-processing seam;
- * ai/voice-quality/audio-timings.ts is the offline eval harness). Adding
- * timing to the live audio path is not an "obviously safe" change, so it is
- * deliberately omitted — see docs/runbooks/slo-alerts.md ("Not yet measured")
- * for where it would go.
+ *   4. voice_turn_latency_p95 (WS26) — P95 of `voice_turn_latency_ms` (the
+ *      media-streams STT-final → first-TTS-chunk seam). Breach above
+ *      SLO_TURN_LATENCY_P95_MS (default 3500) once at least
+ *      SLO_TURN_LATENCY_MIN_SAMPLE (default 30) turns are recorded. CROSS-
+ *      PROCESS CAVEAT: prom-client histograms are in-process, so this rule is
+ *      only evaluable where the voice service runs. It is therefore gated to
+ *      PROCESS_ROLE=all (single-service deploys, where the monitor and voice
+ *      share a process); in split (web|voice + worker) topologies the worker
+ *      that runs the monitor has no turn-latency data, so the rule is SKIPPED
+ *      and the authoritative alert is a Prometheus/Grafana rule over the
+ *      exported buckets — see docs/runbooks/slo-alerts.md. The in-process value
+ *      is also cumulative-since-boot (histograms never reset), so this guard is
+ *      a coarse backstop, not a trailing-window signal.
  *
  * Evaluators are exported pure functions so unit tests need no DB.
  */
@@ -48,6 +54,10 @@ export interface SloThresholds {
   queueStaleMin: number;
   /** Sweep-heartbeat age (minutes) above which the worker loop is presumed wedged. Default 15. */
   sweepLagMin: number;
+  /** WS26 — voice turn-latency P95 breach threshold in ms. Default 3500. */
+  turnLatencyP95Ms: number;
+  /** WS26 — minimum recorded turns before the turn-latency rule can breach. Default 30. */
+  turnLatencyMinSample: number;
 }
 
 export interface SloRuleResult {
@@ -124,6 +134,100 @@ export function evaluateSweepLag(
   };
 }
 
+/** Turn-latency snapshot read from the in-process histogram. */
+export interface TurnLatencySnapshot {
+  /** Estimated P95 in ms (Prometheus-style linear interpolation within the bucket). */
+  p95Ms: number;
+  /** Total recorded turns (histogram _count) — drives the sample floor. */
+  sampleCount: number;
+}
+
+/** One prom-client histogram export sample (shape of `histogram.get().values[i]`). */
+export interface HistogramSampleValue {
+  metricName?: string;
+  labels: Record<string, string | number | undefined>;
+  value: number;
+}
+
+/**
+ * WS26 — estimate a quantile (default P95) from a prom-client histogram's
+ * exported samples, using the same linear-interpolation-within-the-bucket
+ * method as Prometheus `histogram_quantile`. Pure so the SLO test can drive it
+ * off a hand-built bucket set with no registry.
+ *
+ * `values` is `(await histogram.get()).values`: a set of cumulative
+ * `*_bucket{le=...}` samples (including `le="+Inf"`) plus `*_sum` / `*_count`.
+ * When the quantile falls in the open-ended `+Inf` bucket we return the largest
+ * finite bucket boundary (Prometheus does the same — the true value is unknown,
+ * only known to exceed that boundary).
+ */
+export function estimateTurnLatencyP95(
+  values: ReadonlyArray<HistogramSampleValue>,
+  quantile = 0.95,
+): TurnLatencySnapshot {
+  const finiteBuckets: Array<{ le: number; cum: number }> = [];
+  let count = 0;
+  for (const v of values) {
+    const name = v.metricName ?? '';
+    if (name.endsWith('_bucket')) {
+      const le = v.labels.le;
+      // The open-ended +Inf bucket carries the total but no upper bound — its
+      // cumulative count equals `_count`, so nothing is lost by skipping it.
+      if (le === '+Inf' || le === Infinity || le === 'Inf') continue;
+      const leNum = Number(le);
+      if (Number.isFinite(leNum)) finiteBuckets.push({ le: leNum, cum: v.value });
+    } else if (name.endsWith('_count')) {
+      count = v.value;
+    }
+  }
+  if (count <= 0 || finiteBuckets.length === 0) {
+    return { p95Ms: 0, sampleCount: Math.max(0, count) };
+  }
+  finiteBuckets.sort((a, b) => a.le - b.le);
+  const largestFiniteLe = finiteBuckets[finiteBuckets.length - 1]!.le;
+  const rank = quantile * count;
+  let prevLe = 0;
+  let prevCum = 0;
+  for (const b of finiteBuckets) {
+    if (b.cum >= rank) {
+      const bucketCount = b.cum - prevCum;
+      if (bucketCount <= 0) return { p95Ms: b.le, sampleCount: count };
+      const p = prevLe + (b.le - prevLe) * ((rank - prevCum) / bucketCount);
+      return { p95Ms: p, sampleCount: count };
+    }
+    prevLe = b.le;
+    prevCum = b.cum;
+  }
+  // Quantile falls beyond the largest finite bucket (in the +Inf tail): the
+  // value is only known to exceed the largest finite boundary.
+  return { p95Ms: largestFiniteLe, sampleCount: count };
+}
+
+/**
+ * Rule 4 (WS26) — voice turn-latency P95. `null` when there is no snapshot
+ * (the monitor is not co-located with the voice service — see the role guard in
+ * runSloMonitor) or the sample floor isn't met (not enough turns to judge).
+ */
+export function evaluateTurnLatency(
+  snapshot: TurnLatencySnapshot | null,
+  thresholds: Pick<SloThresholds, 'turnLatencyP95Ms' | 'turnLatencyMinSample'>,
+): SloRuleResult | null {
+  if (!snapshot) return null;
+  if (snapshot.sampleCount < thresholds.turnLatencyMinSample) return null;
+  return {
+    rule: 'voice_turn_latency_p95',
+    breached: snapshot.p95Ms > thresholds.turnLatencyP95Ms,
+    value: snapshot.p95Ms,
+    summary: `voice turn latency P95 ${Math.round(snapshot.p95Ms)}ms over ${snapshot.sampleCount} turns (threshold ${thresholds.turnLatencyP95Ms}ms)`,
+    details: {
+      p95Ms: Math.round(snapshot.p95Ms),
+      sampleCount: snapshot.sampleCount,
+      thresholdMs: thresholds.turnLatencyP95Ms,
+    },
+    severity: 'warning',
+  };
+}
+
 export interface SloMonitorDeps {
   /** Cross-tenant terminal call-outcome counts since `windowStart`. */
   getCallOutcomeCounts(windowStart: Date): Promise<{ total: number; completedish: number }>;
@@ -131,6 +235,17 @@ export interface SloMonitorDeps {
   getStalePendingCount(olderThanSeconds: number): Promise<number>;
   /** Epoch-ms of the canary sweep's last success in this process, if any. */
   getSweepLastSuccessMs(): number | undefined;
+  /**
+   * WS26 — this process's role. The turn-latency rule reads an in-process
+   * histogram and so is only evaluated when role is 'all' (the monitor and the
+   * voice service share a process). See the role guard in runSloMonitor.
+   */
+  processRole: 'web' | 'worker' | 'voice' | 'all';
+  /**
+   * WS26 — snapshot of the in-process `voice_turn_latency_ms` histogram, or
+   * `null` when unavailable. Only invoked when `processRole === 'all'`.
+   */
+  getTurnLatencySnapshot(): Promise<TurnLatencySnapshot | null>;
   alert(alert: OperatorAlert): Promise<void>;
   thresholds: SloThresholds;
   logger: Logger;
@@ -182,6 +297,23 @@ export async function runSloMonitor(deps: SloMonitorDeps): Promise<SloMonitorRun
     const r = evaluateSweepLag(deps.getSweepLastSuccessMs(), nowMs, deps.thresholds);
     if (r) results.push(r);
     evaluated.push('sweep_lag');
+  }
+
+  // Rule 4 (WS26) — voice turn-latency P95. In-process histogram: only
+  // meaningful where the voice service runs. Guarded to PROCESS_ROLE=all
+  // (single-service deploys); split topologies leave this unevaluated here and
+  // alert via Prometheus/Grafana instead (see docs/runbooks/slo-alerts.md).
+  if (deps.processRole === 'all') {
+    try {
+      const snapshot = await deps.getTurnLatencySnapshot();
+      const r = evaluateTurnLatency(snapshot, deps.thresholds);
+      if (r) results.push(r);
+      evaluated.push('voice_turn_latency_p95');
+    } catch (err) {
+      deps.logger.error('SLO monitor: turn-latency read failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   const breached: string[] = [];

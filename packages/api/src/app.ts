@@ -15,7 +15,7 @@ import { createWebhookRouter } from './webhooks/routes';
 import { createIntegrationResolver, createVapiSecretResolver } from './webhooks/integration-resolver';
 import { createTelephonyRouter } from './routes/telephony';
 import { createCallsRouter, createCallBridgeRouter } from './routes/calls';
-import { TwilioGatherAdapter, type TwilioAdapterDeps } from './telephony/twilio-adapter';
+import { TwilioGatherAdapter } from './telephony/twilio-adapter';
 import {
   createEmergencyPageWorker,
   createEmergencyPageResolvedCheck,
@@ -187,12 +187,16 @@ import { PgMoneyDashboardRepository } from './reports/pg-money-dashboard';
 import { createFeedbackResponsesRouter } from './routes/feedback';
 import { createInteractionsRouter } from './routes/interactions';
 import { initSentry, setSentryClient } from './monitoring/sentry';
-import { dbPoolConnections, pgQueueDepth } from './monitoring/metrics';
+import { dbPoolConnections, pgQueueDepth, voiceTurnLatencyMs } from './monitoring/metrics';
 // WS15 — platform SLO monitor + drain-abandonment alarm.
 import { createAlertOperator, emitDrainAbandonment } from './monitoring/alert-operator';
 import { recordSweepSuccess, sweepLastSuccessMs } from './monitoring/sweep-heartbeats';
 import { PgPlatformSloRepository } from './monitoring/pg-platform-slo';
-import { runSloMonitor, SLO_MONITOR_INTERVAL_MS } from './workers/slo-monitor';
+import {
+  runSloMonitor,
+  SLO_MONITOR_INTERVAL_MS,
+  estimateTurnLatencyP95,
+} from './workers/slo-monitor';
 
 // In-memory repositories (fallback for dev without DATABASE_URL)
 import { InMemoryCustomerRepository } from './customers/customer';
@@ -2306,12 +2310,26 @@ export function createApp(): AppWithLifecycle {
               : Promise.resolve({ total: 0, completedish: 0 }),
           getStalePendingCount: (olderThanSeconds) => queue.stalePendingCount(olderThanSeconds),
           getSweepLastSuccessMs: () => sweepLastSuccessMs(String(SWEEP_LOCK.queueDepth)),
+          // WS26 — turn-latency snapshot from the in-process histogram. Only
+          // consulted when PROCESS_ROLE=all (the rule's role guard); reading the
+          // metric is failure-soft so a prom error never aborts the tick.
+          processRole: config.PROCESS_ROLE,
+          getTurnLatencySnapshot: async () => {
+            try {
+              const snap = await voiceTurnLatencyMs.get();
+              return estimateTurnLatencyP95(snap.values);
+            } catch {
+              return null;
+            }
+          },
           alert: alertOperator,
           thresholds: {
             callCompletionMin: config.SLO_CALL_COMPLETION_MIN,
             callCompletionMinSample: config.SLO_CALL_COMPLETION_MIN_SAMPLE,
             queueStaleMin: config.SLO_QUEUE_STALE_MIN,
             sweepLagMin: config.SLO_SWEEP_LAG_MIN,
+            turnLatencyP95Ms: config.SLO_TURN_LATENCY_P95_MS,
+            turnLatencyMinSample: config.SLO_TURN_LATENCY_MIN_SAMPLE,
           },
           logger: sloLogger,
         });
@@ -3202,11 +3220,14 @@ export function createApp(): AppWithLifecycle {
   voiceExtendedIntentsFlagResolver = (tenantId: string) =>
     isFlagEnabledForTenant(tenantId, 'voice_extended_intents');
 
-  // Explicitly typed so the literal gets full excess-property checking. The
-  // WS18 processor-only keys (consentEventRepo, autonomousClose) are declared
-  // on TwilioAdapterDeps as documented pass-throughs into
-  // createVoiceTurnProcessor — the old untyped-variable workaround is gone.
-  const twilioAdapterDeps: TwilioAdapterDeps = {
+  // WS18d — assembled as a VARIABLE (not an inline literal) deliberately: the
+  // adapter spreads its deps into createVoiceTurnProcessor, and the processor-
+  // only WS18 keys below (consentEventRepo, autonomousClose) are not part of
+  // TwilioAdapterDeps — a literal would trip TS excess-property checking. The
+  // clean fix (extending TwilioAdapterDeps) belongs to the WS16 owner of
+  // twilio-adapter.ts; this keeps that file untouched while the processor
+  // receives its full dep surface at runtime.
+  const twilioAdapterDeps = {
     store: voiceSessionStore,
     gateway: llmGateway,
     ...(pool ? { pool } : {}),

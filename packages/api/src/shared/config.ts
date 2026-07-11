@@ -110,6 +110,12 @@ const configSchema = z.object({
   SLO_QUEUE_STALE_MIN: z.coerce.number().positive().default(15),
   // Sweep-heartbeat age (minutes) above which the worker loop is presumed wedged.
   SLO_SWEEP_LAG_MIN: z.coerce.number().positive().default(15),
+  // WS26 — voice turn-latency P95 breach threshold (ms): STT-final → first TTS
+  // chunk on the media-streams path. Only evaluated in-process under
+  // PROCESS_ROLE=all; split topologies alert via Prometheus (see slo-alerts.md).
+  SLO_TURN_LATENCY_P95_MS: z.coerce.number().positive().default(3500),
+  // WS26 — minimum recorded turns before the turn-latency rule can breach.
+  SLO_TURN_LATENCY_MIN_SAMPLE: z.coerce.number().int().positive().default(30),
   // Per-rule alert cooldown (minutes) — a persistent breach re-pages at most
   // once per cooldown window, not every monitor tick.
   SLO_ALERT_COOLDOWN_MIN: z.coerce.number().positive().default(60),
