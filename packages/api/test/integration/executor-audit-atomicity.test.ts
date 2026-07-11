@@ -238,8 +238,13 @@ describe('ProposalExecutor — WS11 audit-event atomicity', () => {
     );
     const ctx: ExecutionContext = { tenantId: tenant.tenantId, executedBy: tenant.userId };
 
-    // The NOT NULL violation on audit_events aborts the shared transaction.
-    await expect(executor.execute(proposal, ctx)).rejects.toThrow(/null value|not-null/i);
+    // The NULL tenant_id insert aborts the shared transaction. Which error
+    // fires depends on the role: under RLS_RUNTIME_ROLE the row dies on the
+    // audit_events RLS WITH CHECK policy (Postgres evaluates RLS before
+    // column constraints); without it, on the NOT NULL constraint.
+    await expect(executor.execute(proposal, ctx)).rejects.toThrow(
+      /null value|not-null|row-level security/i,
+    );
 
     // The handler RAN — but nothing it did survived the rollback.
     expect(handler.invocations).toBe(1);
