@@ -131,10 +131,20 @@ proposals punt to a screen."*
   on the telephony channel), SMS `reply-handler.test.ts`,
   `batch-approve.test.ts`.
 
+WS21b closed the corpus gap: the voice-quality harness now grades approval and
+quoting conversations like everything else. The TextModeDriver stamps
+`ownerSession` (caller-ID match or an explicit fixture flag) and routes
+approve/reject/edit + pending-dialogue continuations through the SAME
+`createVoiceTurnProcessor` the telephony transports use (the voice-action-router
+worker refuses those intents), and the fixtures schema grew
+`proposals`/`catalog`/owner-PIN so a script can seed a pending proposal, a
+grounded catalog, and a money-class PIN. New corpus scenarios: owner batch
+approval walk, money-class approval with the WS21a PIN challenge, grounded quote
+against a catalog fixture, and a quantity variant.
+
 Remaining below A: money-class voice approval requires one-time PIN
 enrollment (now a real hashed-at-rest path, WS21a — onboarding-step capture
-still a follow-up); no voice-quality-corpus scenario reaches the approval
-dialogue (text-mode driver limitation).
+still a follow-up).
 
 ## 6. Learning loop — was B, now **B+/A−**
 

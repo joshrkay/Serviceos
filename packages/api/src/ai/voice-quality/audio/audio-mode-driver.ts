@@ -106,8 +106,14 @@ export class AudioModeDriver implements AgentDriver {
     // lookup resolves in the WS `start` handshake. The `CA_TEST_`
     // prefix is unambiguous against real Twilio CallSids (which start
     // with `CA` followed by a hex blob).
+    // WS21b — stamp the RV-070 ownerSession flag before the WS `start`
+    // handshake so the production media-streams processor unlocks the
+    // owner-only approve/reject/edit dialogue for this call. Layer 2 has no
+    // settings repo of its own, so ownership comes from the fixture's explicit
+    // `callerIsOwner` flag (the runner threads it through startSession).
     const session = this.deps.voiceSessionStore.create(opts.tenantId, 'telephony', {
       callSid: `CA_TEST_${crypto.randomUUID()}`,
+      ...(opts.callerIsOwner === true ? { ownerSession: true } : {}),
     });
     const sessionId = session.id;
     const callSid = session.callSid!;
