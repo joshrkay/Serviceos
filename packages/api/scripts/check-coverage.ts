@@ -23,6 +23,8 @@ const THRESHOLDS: ModuleThreshold[] = [
   { pattern: 'src/invoices/payment', label: 'Payment modules', minLines: 90 },
   { pattern: 'src/estimates/', label: 'Estimate calculations', minLines: 90 },
   { pattern: 'src/invoices/invoice', label: 'Invoice calculations', minLines: 90 },
+  { pattern: 'src/billing/', label: 'Billing (Stripe subscription)', minLines: 90 },
+  { pattern: 'src/escalations/', label: 'Escalations (dispatcher SSE)', minLines: 90 },
   { pattern: 'src/proposals/execution/', label: 'Proposal execution', minLines: 85 },
   { pattern: 'src/auth/', label: 'Auth/RBAC', minLines: 85 },
   { pattern: 'src/middleware/', label: 'Middleware', minLines: 85 },
