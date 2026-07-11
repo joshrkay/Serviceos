@@ -212,6 +212,18 @@ not a change to D-004's posture.
 - (c) Treating supervisorPresent as true when the flag is on — would leak permissiveness
   into all capture types.
 
+**Amendment (2026-07-11):** Added a platform-wide kill switch,
+`AUTONOMOUS_BOOKING_DISABLED=true`, checked in `evaluateAutonomousBookingLane`
+before the per-tenant opt-in gate (reason `platform_disabled`, distinct from
+`tenant_not_opted_in` in the audit trail and the sourceContext stamp) — an
+operator-level shutoff for every tenant simultaneously, independent of each
+tenant's `autonomous_booking_enabled` setting, for incident response without a
+per-tenant settings sweep. Also added digest visibility: the nightly owner
+digest now reports "Auto-booked: N appointment(s)" — a count of the day's
+proposals whose `sourceContext.autonomousLaneEvaluation.eligible = true` —
+mirroring the WS6 supervisorChecks reflection so autonomous activity is never
+silent even when nothing goes wrong.
+
 ### D-016: Railway supersedes AWS (D-001) — CDK prototype removed
 **Date:** 2026-07-11
 **Decision:** D-001's single-cloud AWS/CDK deployment was never carried into production.

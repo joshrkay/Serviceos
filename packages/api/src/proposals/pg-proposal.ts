@@ -216,6 +216,26 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
     });
   }
 
+  async findAutonomousLaneApprovedForDay(
+    tenantId: string,
+    from: Date,
+    to: Date,
+    limit?: number,
+  ): Promise<Proposal[]> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT * FROM proposals
+           WHERE tenant_id = $1
+             AND created_at >= $2 AND created_at < $3
+             AND source_context->'autonomousLaneEvaluation'->>'eligible' = 'true'
+           ORDER BY created_at DESC
+           ${typeof limit === 'number' ? 'LIMIT $4' : ''}`,
+        typeof limit === 'number' ? [tenantId, from, to, limit] : [tenantId, from, to],
+      );
+      return result.rows.map(mapRow);
+    });
+  }
+
   async findExpiredScheduleProposals(
     tenantId: string,
     proposalTypes: readonly ProposalType[],

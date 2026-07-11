@@ -19,6 +19,13 @@
  * Every evaluation (pass or fail) should be stamped on the proposal's
  * sourceContext (`autonomousLaneEvaluation`) so the audit trail records why
  * a booking did or did not take the lane.
+ *
+ * D-015 amendment (2026-07-11): a platform-wide kill switch
+ * (`AUTONOMOUS_BOOKING_DISABLED=true`) can disable the lane for every
+ * tenant regardless of their opt-in. It is checked FIRST — before the
+ * tenant opt-in gate — so the stamped reason (`platform_disabled`)
+ * distinguishes an operator-level shutoff from a tenant simply not having
+ * opted in.
  */
 import { actionClassForProposalType, type ProposalType } from './proposal';
 import { confidenceMetaBlocksAutoApprove } from './auto-approve';
@@ -41,6 +48,11 @@ export interface AutonomousLaneSettings {
 }
 
 export interface EvaluateAutonomousLaneInput {
+  /**
+   * D-015 amendment — platform-wide kill switch (AUTONOMOUS_BOOKING_DISABLED).
+   * Checked before every other gate, including tenant opt-in.
+   */
+  platformDisabled?: boolean;
   settings?: AutonomousLaneSettings;
   proposalType: ProposalType;
   /**
@@ -82,6 +94,7 @@ export type AutonomousLaneEvaluation =
   | { eligible: false; reason: AutonomousLaneIneligibleReason };
 
 export type AutonomousLaneIneligibleReason =
+  | 'platform_disabled'
   | 'tenant_not_opted_in'
   | 'proposal_type_not_eligible'
   | 'not_inbound_receptionist'
@@ -102,6 +115,9 @@ export type AutonomousLaneIneligibleReason =
 export function evaluateAutonomousBookingLane(
   input: EvaluateAutonomousLaneInput,
 ): AutonomousLaneEvaluation {
+  if (input.platformDisabled) {
+    return { eligible: false, reason: 'platform_disabled' };
+  }
   if (!input.settings?.enabled) {
     return { eligible: false, reason: 'tenant_not_opted_in' };
   }

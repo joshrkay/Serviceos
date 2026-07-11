@@ -296,6 +296,14 @@ export interface VoiceActionRouterDeps {
     tenantId: string,
   ) => Promise<{ enabled: boolean; threshold?: number } | undefined>;
   /**
+   * D-015 amendment — platform-wide kill switch for the autonomous booking
+   * lane (config.AUTONOMOUS_BOOKING_DISABLED === 'true'). Threaded onto
+   * TaskContext.autonomousBooking.platformDisabled, checked FIRST by
+   * evaluateAutonomousBookingLane (before tenant opt-in). Absent/false ⇒
+   * byte-identical behavior.
+   */
+  autonomousBookingPlatformDisabled?: boolean;
+  /**
    * Injectable clock for the scheduling handlers' relative-date resolution
    * ("tomorrow", "next Tuesday"). Defaults to `new Date()` in production;
    * the voice-quality corpus pins it so booking expectations are
@@ -1390,6 +1398,7 @@ async function processSegment(
             settings: autonomousBookingSettings,
             inboundReceptionistSource: Boolean(customerId),
             pendingReferenceCount: annotation.pendingReferences.length,
+            ...(deps.autonomousBookingPlatformDisabled ? { platformDisabled: true } : {}),
           },
         }
       : {}),

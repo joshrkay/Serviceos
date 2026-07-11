@@ -98,6 +98,10 @@ interface DepsOverrides {
   withSupervisorReviewRepo?: boolean;
   /** WS6 — records the (from, to, limit) findForDay was called with. */
   onFindForDay?: (from: Date, to: Date, limit: number | undefined) => void;
+  /** D-015 amendment — proposals returned by findAutonomousLaneApprovedForDay. */
+  autonomousLaneProposals?: Proposal[];
+  /** D-015 amendment — when false, omit findAutonomousLaneApprovedForDay entirely (optional-method path). */
+  withAutonomousLaneMethod?: boolean;
 }
 
 function makeDeps(o: DepsOverrides = {}): DigestComputeDeps {
@@ -128,6 +132,9 @@ function makeDeps(o: DepsOverrides = {}): DigestComputeDeps {
           ? o.draftProposals ?? []
           : o.pendingProposals ?? [],
       findConfidenceMarkedForDay: async () => o.confidenceMarked ?? [],
+      ...(o.withAutonomousLaneMethod === false
+        ? {}
+        : { findAutonomousLaneApprovedForDay: async () => o.autonomousLaneProposals ?? [] }),
     } as unknown as ProposalRepository,
     customerRepo: {
       findById: async (_t: string, id: string) =>
@@ -512,6 +519,31 @@ describe('computeDigestPayload', () => {
       expect(seen!.to.toISOString()).toBe('2026-06-11T05:00:00.000Z');
     });
   });
+
+  // ─── D-015 amendment: autonomous-booking-lane reflection ────────────────
+
+  describe('autonomousBookings', () => {
+    it('reports count + undone (undone = status "undone" at fetch time)', async () => {
+      const result = await computeDigestPayload(TENANT, DATE, makeDeps({
+        autonomousLaneProposals: [
+          proposal({ id: 'ab-1', proposalType: 'create_booking', status: 'approved' }),
+          proposal({ id: 'ab-2', proposalType: 'create_booking', status: 'executed' }),
+          proposal({ id: 'ab-3', proposalType: 'create_booking', status: 'undone' }),
+        ],
+      }));
+      expect(result.autonomousBookings).toEqual({ count: 3, undone: 1 });
+    });
+
+    it('omits autonomousBookings when nothing took the lane today', async () => {
+      const result = await computeDigestPayload(TENANT, DATE, makeDeps({ autonomousLaneProposals: [] }));
+      expect(result.autonomousBookings).toBeUndefined();
+    });
+
+    it('omits autonomousBookings when findAutonomousLaneApprovedForDay is absent (optional method)', async () => {
+      const result = await computeDigestPayload(TENANT, DATE, makeDeps({ withAutonomousLaneMethod: false }));
+      expect(result.autonomousBookings).toBeUndefined();
+    });
+  });
 });
 
 describe('summarizeProposalForDigest', () => {
@@ -792,6 +824,7 @@ describe('renderDigestSmsSegments', () => {
     expect(body).not.toContain('Learned:');
     expect(body).not.toContain('Quotes:');
     expect(body).not.toContain('Checked:');
+    expect(body).not.toContain('Auto-booked:');
   });
 
   it('renders the supervisor-checks line: flagged and none-flagged variants', () => {
@@ -817,6 +850,32 @@ describe('renderDigestSmsSegments', () => {
       renderDigestSmsSegments({ payload: basePayload(), deepLinkUrl: DEEP, approvalLinks: [] }),
     );
     expect(omittedBody).not.toContain('Checked:');
+  });
+
+  it('renders the auto-booked line: undone and no-undone variants, omitted when absent', () => {
+    const withUndoneBody = combine(
+      renderDigestSmsSegments({
+        payload: basePayload({ autonomousBookings: { count: 3, undone: 1 } }),
+        deepLinkUrl: DEEP,
+        approvalLinks: [],
+      }),
+    );
+    expect(withUndoneBody).toContain('Auto-booked: 3 appointment(s), 1 undone.');
+
+    const noUndoneBody = combine(
+      renderDigestSmsSegments({
+        payload: basePayload({ autonomousBookings: { count: 1, undone: 0 } }),
+        deepLinkUrl: DEEP,
+        approvalLinks: [],
+      }),
+    );
+    expect(noUndoneBody).toContain('Auto-booked: 1 appointment(s).');
+    expect(noUndoneBody).not.toContain('undone');
+
+    const omittedBody = combine(
+      renderDigestSmsSegments({ payload: basePayload(), deepLinkUrl: DEEP, approvalLinks: [] }),
+    );
+    expect(omittedBody).not.toContain('Auto-booked:');
   });
 
   it('renders the quotes-sent, unsure, and learned compact lines when present', () => {

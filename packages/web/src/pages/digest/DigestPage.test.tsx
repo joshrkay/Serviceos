@@ -251,6 +251,36 @@ describe('DigestPage', () => {
     });
   });
 
+  describe('D-015 auto-booked section', () => {
+    it('renders the count + undone note when the lane approved bookings today', async () => {
+      const withBookings = { ...basePayload, autonomousBookings: { count: 7, undone: 1 } };
+      mockFetch.mockResolvedValue(digestResponse(withBookings));
+      renderAt('/digest/2026-06-10');
+      await screen.findByText('A solid day.');
+      const section = screen.getByText('Auto-booked').closest('section') as HTMLElement;
+      expect(within(section).getByText('7')).toBeInTheDocument();
+      expect(within(section).getByText('appointments')).toBeInTheDocument();
+      expect(within(section).getByText('1 undone')).toBeInTheDocument();
+    });
+
+    it('omits the undone note when nothing was undone', async () => {
+      const withBookings = { ...basePayload, autonomousBookings: { count: 1, undone: 0 } };
+      mockFetch.mockResolvedValue(digestResponse(withBookings));
+      renderAt('/digest/2026-06-10');
+      await screen.findByText('A solid day.');
+      const section = screen.getByText('Auto-booked').closest('section') as HTMLElement;
+      expect(within(section).getByText('appointment')).toBeInTheDocument();
+      expect(within(section).queryByText(/undone/)).not.toBeInTheDocument();
+    });
+
+    it('omits the section entirely when count===0 / absent', async () => {
+      mockFetch.mockResolvedValue(digestResponse(basePayload));
+      renderAt('/digest/2026-06-10');
+      await screen.findByText('A solid day.');
+      expect(screen.queryByText('Auto-booked')).not.toBeInTheDocument();
+    });
+  });
+
   describe('date navigation', () => {
     it('prev/next links target the adjacent calendar days', async () => {
       mockFetch.mockResolvedValue(digestResponse());

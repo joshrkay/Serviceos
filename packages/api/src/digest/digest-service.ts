@@ -136,6 +136,20 @@ export interface DigestSupervisorChecks {
   flagged: number;
 }
 
+/**
+ * D-015 amendment — "Auto-booked: N appointment(s)" reflection. `undone` is a
+ * real signal (status 'undone' AT GENERATION TIME, same snapshot caveat as
+ * unsureAbout/DigestUnsureOutcome) — a real owner one-tap UNDO on an
+ * autonomous-lane booking sets this status (proposals/one-tap-undo.ts), so
+ * unlike WS6's dropped `flaggedFixed` this count is not an approximation.
+ */
+export interface DigestAutonomousBookings {
+  /** Autonomous-lane-eligible proposals created today (capped at DIGEST_MAX_AUTONOMOUS_BOOKINGS). */
+  count: number;
+  /** Of those, status 'undone' at generation time. */
+  undone: number;
+}
+
 /** N-005 "what I learned today" — one correction-loop lesson applied today. */
 export interface DigestLearnedItem {
   lessonId: string;
@@ -189,6 +203,12 @@ export interface DailyDigestPayload {
    * OMITTED when checked===0 (no reviews ran today, or the repo is absent).
    */
   supervisorChecks?: DigestSupervisorChecks;
+  /**
+   * D-015 amendment — "Auto-booked: N appointment(s)" reflection. OMITTED
+   * when count===0 (no autonomous-lane bookings today, or the repo method
+   * is absent).
+   */
+  autonomousBookings?: DigestAutonomousBookings;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -210,6 +230,12 @@ export const DIGEST_MAX_LEARNED = 10;
  * set generously so a normal day's true count is never undercounted.
  */
 export const DIGEST_MAX_REVIEWS = 500;
+/**
+ * D-015 amendment — cap on autonomous-lane-approved proposals fetched for the
+ * day's "Auto-booked" count. Same generous-aggregate rationale as
+ * DIGEST_MAX_REVIEWS: bounds the query, not a list actually rendered.
+ */
+export const DIGEST_MAX_AUTONOMOUS_BOOKINGS = 500;
 
 /**
  * Map a proposal's status to the digest "unsureAbout" outcome. Derived from the
@@ -466,6 +492,16 @@ function supervisorChecksSmsLine(checks: DigestSupervisorChecks | undefined): st
 }
 
 /**
+ * D-015 amendment — compact "Auto-booked: N appointment(s)" line, e.g.
+ * "Auto-booked: 3 appointment(s), 1 undone." Absent → empty string.
+ */
+function autonomousBookingsSmsLine(bookings: DigestAutonomousBookings | undefined): string {
+  if (!bookings || bookings.count === 0) return '';
+  const undonePart = bookings.undone > 0 ? `, ${bookings.undone} undone` : '';
+  return ` Auto-booked: ${bookings.count} appointment(s)${undonePart}.`;
+}
+
+/**
  * Build the ordered ATOMIC content chunks for the digest SMS. A chunk is never
  * split across segments; the packer places each chunk whole. The deep link
  * (tail) is the LAST chunk so it always lands in the final segment. No
@@ -532,6 +568,8 @@ function buildDigestSmsChunks(input: RenderDigestSmsInput): string[] {
   if (learned) chunks.push(learned);
   const supervisorChecks = supervisorChecksSmsLine(payload.supervisorChecks);
   if (supervisorChecks) chunks.push(supervisorChecks);
+  const autonomousBookings = autonomousBookingsSmsLine(payload.autonomousBookings);
+  if (autonomousBookings) chunks.push(autonomousBookings);
 
   chunks.push(` Full day: ${deepLinkUrl}`);
   return chunks;
@@ -668,7 +706,7 @@ export async function computeDigestPayload(
 
   const paymentsFrom = new Date(today.start.getTime() - PAYMENT_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
 
-  const [payments, completedJobs, tomorrowAppointments, openInvoices, partiallyPaidInvoices, readyProposals, draftProposals, unbilledCandidates, ratingCounts, sentEstimates, confidenceMarked, appliedLessons, supervisorReviews] =
+  const [payments, completedJobs, tomorrowAppointments, openInvoices, partiallyPaidInvoices, readyProposals, draftProposals, unbilledCandidates, ratingCounts, sentEstimates, confidenceMarked, appliedLessons, supervisorReviews, autonomousLaneProposals] =
     await Promise.all([
       deps.paymentRepo.findByTenant(tenantId, {
         status: 'completed',
@@ -702,6 +740,17 @@ export async function computeDigestPayload(
       deps.supervisorReviewRepo?.findForDay
         ? deps.supervisorReviewRepo.findForDay(tenantId, today.start, today.end, DIGEST_MAX_REVIEWS)
         : Promise.resolve([] as SupervisorReview[]),
+      // D-015 amendment — proposals that took the autonomous booking lane
+      // today ("Auto-booked: N appointment(s)"). Optional repo method —
+      // absent on partial doubles, section self-omits.
+      deps.proposalRepo.findAutonomousLaneApprovedForDay
+        ? deps.proposalRepo.findAutonomousLaneApprovedForDay(
+            tenantId,
+            today.start,
+            today.end,
+            DIGEST_MAX_AUTONOMOUS_BOOKINGS,
+          )
+        : Promise.resolve([] as Proposal[]),
     ]);
 
   // Combine both actionable statuses — mirrors the inbox's dual-fetch so the
@@ -821,6 +870,17 @@ export async function computeDigestPayload(
         }
       : undefined;
 
+  // D-015 amendment — "Auto-booked: N appointment(s)" reflection. Omitted
+  // when no autonomous-lane bookings ran today (count===0), per the "omit if
+  // zero" convention shared with unsureAbout/learnedToday/supervisorChecks.
+  const autonomousBookings: DigestAutonomousBookings | undefined =
+    autonomousLaneProposals.length > 0
+      ? {
+          count: autonomousLaneProposals.length,
+          undone: autonomousLaneProposals.filter((p) => p.status === 'undone').length,
+        }
+      : undefined;
+
   return {
     date,
     timezone,
@@ -844,6 +904,7 @@ export async function computeDigestPayload(
     ...(unsureAbout !== undefined ? { unsureAbout } : {}),
     ...(learnedToday !== undefined ? { learnedToday } : {}),
     ...(supervisorChecks !== undefined ? { supervisorChecks } : {}),
+    ...(autonomousBookings !== undefined ? { autonomousBookings } : {}),
   };
 }
 

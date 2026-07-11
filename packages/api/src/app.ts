@@ -2309,6 +2309,9 @@ export function createApp(): AppWithLifecycle {
           : {}),
       };
     },
+    // D-015 amendment — platform-wide kill switch, checked before tenant
+    // opt-in by evaluateAutonomousBookingLane.
+    autonomousBookingPlatformDisabled: config.AUTONOMOUS_BOOKING_DISABLED === 'true',
     appointmentRepo,
     // RV-042 — lets update_estimate proposals stamp the acceptance-void
     // marker at creation when they target a currently accepted estimate.

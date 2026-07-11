@@ -61,6 +61,12 @@ const configSchema = z.object({
   // (must be 'true') is enforced in validateFeatureRequiredConfig above — this
   // schema entry only types/normalizes the value.
   RLS_RUNTIME_ROLE: z.enum(['true', 'false']).optional(),
+  // D-015 amendment — platform-wide kill switch for the autonomous booking
+  // lane. 'true' short-circuits evaluateAutonomousBookingLane before the
+  // per-tenant opt-in check, regardless of any tenant's
+  // autonomous_booking_enabled setting. Absent/'false' preserves today's
+  // per-tenant-only gating — no prod requirement.
+  AUTONOMOUS_BOOKING_DISABLED: z.enum(['true', 'false']).optional(),
 });
 
 export type AppConfig = z.infer<typeof configSchema>;

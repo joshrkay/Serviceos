@@ -83,11 +83,14 @@ export interface TaskContext {
    * the lane can never engage for them. `pendingReferenceCount` carries the
    * router's unresolved free-text reference count (annotation
    * .pendingReferences) — any pending reference blocks the lane.
+   * `platformDisabled` (D-015 amendment) carries the AUTONOMOUS_BOOKING_DISABLED
+   * platform kill switch — checked before tenant opt-in by the evaluator.
    */
   autonomousBooking?: {
     settings: { enabled: boolean; threshold?: number };
     inboundReceptionistSource: boolean;
     pendingReferenceCount: number;
+    platformDisabled?: boolean;
   };
   /**
    * UB-A3 — owner standing instructions applicable to this task, resolved

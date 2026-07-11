@@ -57,6 +57,7 @@
 | `SENTRY_DSN` | Error tracking; no-op without it |
 | `DEEPGRAM_API_KEY` | Streaming STT for inbound voice |
 | `TTS_PROVIDER` / `ELEVENLABS_API_KEY` | TTS when not using OpenAI default |
+| `AUTONOMOUS_BOOKING_DISABLED` | D-015 amendment — platform-wide kill switch for the autonomous booking lane; unset/`false` preserves per-tenant opt-in gating, `true` disables the lane for every tenant (incident response) regardless of `tenant_settings.autonomous_booking_enabled` |
 
 ## QA matrix nightly (GitHub secrets — not Railway)
 

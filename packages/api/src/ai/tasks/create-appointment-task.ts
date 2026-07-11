@@ -579,6 +579,7 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
           new Date(scheduledStart),
         ).isOpen;
         laneEvaluation = evaluateAutonomousBookingLane({
+          platformDisabled: context.autonomousBooking.platformDisabled,
           settings: context.autonomousBooking.settings,
           proposalType: 'create_booking',
           inboundReceptionistSource: context.autonomousBooking.inboundReceptionistSource,

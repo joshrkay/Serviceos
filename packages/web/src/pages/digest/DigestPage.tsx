@@ -77,6 +77,13 @@ interface DigestSupervisorChecks {
   flagged: number;
 }
 
+// D-015 amendment — autonomous booking lane reflection (see packages/api
+// digest-service.ts DigestAutonomousBookings doc comment).
+interface DigestAutonomousBookings {
+  count: number;
+  undone: number;
+}
+
 interface DigestPayload {
   date: string;
   timezone: string;
@@ -95,6 +102,8 @@ interface DigestPayload {
   learnedToday?: DigestLearnedItem[];
   // WS6 — "Checked: N proposals, M flagged" (absent when nothing ran today).
   supervisorChecks?: DigestSupervisorChecks;
+  // D-015 amendment — "Auto-booked: N appointment(s)" (absent when zero).
+  autonomousBookings?: DigestAutonomousBookings;
 }
 
 interface DigestResponse {
@@ -459,6 +468,22 @@ function DigestBody({
               ? `${p.supervisorChecks.flagged} flagged`
               : 'None flagged'}
           </p>
+        </SectionCard>
+      )}
+
+      {/* D-015 amendment — autonomous booking lane reflection. Only when the
+          lane approved at least one booking today. */}
+      {p.autonomousBookings && p.autonomousBookings.count > 0 && (
+        <SectionCard title="Auto-booked">
+          <p className="text-lg font-semibold tabular-nums text-slate-900">
+            {p.autonomousBookings.count}{' '}
+            <span className="text-sm font-normal text-slate-500">
+              {p.autonomousBookings.count === 1 ? 'appointment' : 'appointments'}
+            </span>
+          </p>
+          {p.autonomousBookings.undone > 0 && (
+            <p className="mt-0.5 text-sm text-slate-500">{p.autonomousBookings.undone} undone</p>
+          )}
         </SectionCard>
       )}
 

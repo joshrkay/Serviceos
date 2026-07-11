@@ -583,6 +583,20 @@ export interface ProposalRepository {
     to: Date,
     limit?: number,
   ): Promise<Proposal[]>;
+  /**
+   * D-015 amendment — proposals created in [from, to) that took the
+   * autonomous booking lane (`sourceContext.autonomousLaneEvaluation.eligible
+   * === true`). Drives the digest "Auto-booked: N appointment(s)"
+   * reflection. Newest first, capped at `limit`. Optional so partial test
+   * doubles still satisfy the interface; the digest falls back to an empty
+   * section when it is absent.
+   */
+  findAutonomousLaneApprovedForDay?(
+    tenantId: string,
+    from: Date,
+    to: Date,
+    limit?: number,
+  ): Promise<Proposal[]>;
   findByAiRun(tenantId: string, aiRunId: string): Promise<Proposal[]>;
   /**
    * Indexed lookup for voice redelivery dedup (P1). Returns the most recent
@@ -920,6 +934,30 @@ export class InMemoryProposalRepository implements ProposalRepository {
             ? (meta as Record<string, unknown>).overallConfidence
             : undefined;
         return typeof overall === 'string' && BLOCKING.has(overall);
+      })
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+      .map((p) => ({ ...p }));
+    return typeof limit === 'number' ? rows.slice(0, limit) : rows;
+  }
+
+  async findAutonomousLaneApprovedForDay(
+    tenantId: string,
+    from: Date,
+    to: Date,
+    limit?: number,
+  ): Promise<Proposal[]> {
+    const rows = Array.from(this.proposals.values())
+      .filter((p) => {
+        if (p.tenantId !== tenantId) return false;
+        const t = p.createdAt.getTime();
+        if (t < from.getTime() || t >= to.getTime()) return false;
+        const evaluation = (p.sourceContext as Record<string, unknown> | undefined)
+          ?.autonomousLaneEvaluation;
+        return (
+          !!evaluation &&
+          typeof evaluation === 'object' &&
+          (evaluation as Record<string, unknown>).eligible === true
+        );
       })
       .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
       .map((p) => ({ ...p }));

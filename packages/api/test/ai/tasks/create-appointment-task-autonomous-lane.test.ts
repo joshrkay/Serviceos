@@ -187,4 +187,27 @@ describe('create-appointment task — autonomous booking lane (UB-D)', () => {
     );
     expect(result.proposal.status).toBe('approved');
   });
+
+  it('D-015 amendment — platform kill switch: platform_disabled even though the tenant is opted in and every other gate passes', async () => {
+    const result = await handlerWith(mockGateway(bookingJson(0.97))).handle(
+      laneContext({}, { platformDisabled: true }),
+    );
+
+    expect(result.proposal.status).toBe('ready_for_review');
+    expect(autonomousLaneEvaluationFor(result.proposal)).toEqual({
+      eligible: false,
+      reason: 'platform_disabled',
+    });
+  });
+
+  it('platform kill switch is checked BEFORE tenant opt-in: disabled + not-opted-in → platform_disabled', async () => {
+    const result = await handlerWith(mockGateway(bookingJson(0.97))).handle(
+      laneContext({}, { platformDisabled: true, settings: { enabled: false, threshold: 0.95 } }),
+    );
+
+    expect(autonomousLaneEvaluationFor(result.proposal)).toEqual({
+      eligible: false,
+      reason: 'platform_disabled',
+    });
+  });
 });

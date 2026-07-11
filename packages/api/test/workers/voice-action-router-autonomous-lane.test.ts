@@ -186,6 +186,7 @@ describe('voice-action-router — autonomous booking lane (UB-D)', () => {
   function makeWorker(opts: {
     sendSms?: (to: string, body: string) => Promise<void>;
     laneEnabled?: boolean;
+    platformDisabled?: boolean;
   }) {
     return createVoiceActionRouterWorker({
       gateway: bookingGateway(),
@@ -196,6 +197,9 @@ describe('voice-action-router — autonomous booking lane (UB-D)', () => {
         enabled: opts.laneEnabled ?? true,
         threshold: 0.95,
       }),
+      ...(opts.platformDisabled !== undefined
+        ? { autonomousBookingPlatformDisabled: opts.platformDisabled }
+        : {}),
       unsupervisedRouting: {
         auditRepo,
         sendSms: opts.sendSms ?? (async () => {}),
@@ -327,5 +331,25 @@ describe('voice-action-router — autonomous booking lane (UB-D)', () => {
     const events = await auditRepo.findByEntity(TENANT, 'proposal', proposals[0].id);
     const evaluated = events.find((e) => e.eventType === 'autonomous_booking_lane_evaluated');
     expect(evaluated?.metadata).toMatchObject({ eligible: false, reason: 'tenant_not_opted_in' });
+  });
+
+  it('D-015 amendment — platform kill switch: booking queues for review with platform_disabled audited, even though the tenant is opted in', async () => {
+    const worker = makeWorker({ laneEnabled: true, platformDisabled: true });
+
+    await worker.handle(
+      msg({
+        tenantId: TENANT,
+        userId: 'u-1',
+        transcript: 'Book the AC repair tomorrow at 2pm',
+        customerId: CUSTOMER_ID,
+      }),
+      silentLogger(),
+    );
+
+    const proposals = await proposalRepo.findByTenant(TENANT);
+    expect(proposals[0].status).toBe('ready_for_review');
+    const events = await auditRepo.findByEntity(TENANT, 'proposal', proposals[0].id);
+    const evaluated = events.find((e) => e.eventType === 'autonomous_booking_lane_evaluated');
+    expect(evaluated?.metadata).toMatchObject({ eligible: false, reason: 'platform_disabled' });
   });
 });
