@@ -6,6 +6,17 @@ quality transport. The legacy `<Gather>` speech path is the proven fallback.
 Every control below fails **toward Gather** — never dead air, never a silent
 hangup, never an undisclosed recording.
 
+> **Deploy topology (WS14).** Everything in this runbook — the media-streams
+> WS attach, the `<Voice>` webhook handlers, the health circuit, the mid-call
+> REST redirect — runs on whichever service serves `PROCESS_ROLE=web` (or, in
+> the optional three-service topology, `PROCESS_ROLE=voice`). In that
+> topology the dedicated voice service is where realtime lives: it deploys
+> rarely and is the only service Twilio's phone-number webhooks point at, so
+> `web`/`worker` deploys never interrupt a live call. See
+> `docs/deployment.md` "Optional third service: dedicated voice (WS14)" for
+> setup and `docs/prod-env-checklist.md` for the per-service `PUBLIC_API_URL`
+> requirement.
+
 ## The two switches
 
 | Control | Where | Effect |

@@ -580,6 +580,30 @@ describe('P0-006 — Secrets/config framework', () => {
       expect(c.TCPA_CONSENT_ENFORCEMENT).toBe('block');
     });
   });
+
+  describe('WS14 — PROCESS_ROLE widened to include "voice"', () => {
+    it('accepts "voice" as a valid role', () => {
+      const c = loadConfig({ NODE_ENV: 'dev', PROCESS_ROLE: 'voice' });
+      expect(c.PROCESS_ROLE).toBe('voice');
+    });
+
+    it('still accepts the original three roles', () => {
+      expect(loadConfig({ NODE_ENV: 'dev', PROCESS_ROLE: 'web' }).PROCESS_ROLE).toBe('web');
+      resetConfig();
+      expect(loadConfig({ NODE_ENV: 'dev', PROCESS_ROLE: 'worker' }).PROCESS_ROLE).toBe('worker');
+      resetConfig();
+      expect(loadConfig({ NODE_ENV: 'dev', PROCESS_ROLE: 'all' }).PROCESS_ROLE).toBe('all');
+    });
+
+    it('unset still defaults to "all" (byte-for-byte back-compat)', () => {
+      const c = loadConfig({ NODE_ENV: 'dev' });
+      expect(c.PROCESS_ROLE).toBe('all');
+    });
+
+    it('rejects an invalid role', () => {
+      expect(() => loadConfig({ NODE_ENV: 'dev', PROCESS_ROLE: 'bogus' })).toThrow();
+    });
+  });
 });
 
 describe('P0-026 — validateEnvSchema (Zod startup validation)', () => {

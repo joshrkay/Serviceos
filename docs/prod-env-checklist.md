@@ -53,18 +53,40 @@
 ## Deploy topology (web + worker split)
 
 See `docs/deployment.md` "Deploy topology (web + worker)" for the full
-setup steps (config-file-path linking, ordering). Both rows are dashboard
+setup steps (config-file-path linking, ordering). All rows are dashboard
 service variables — not set in the `.toml` files.
 
 | Variable | Service | Notes |
 |----------|---------|-------|
 | `PROCESS_ROLE=web` | API/voice service (`railway.toml`) | HTTP + voice/WS only, zero background worker loops |
 | `PROCESS_ROLE=worker` | Worker service (`railway.worker.toml`) | Background sweeps + queue drain only; no public traffic, no voice WS upgrades |
+| `PROCESS_ROLE=voice` | Optional dedicated voice service (`railway.voice.toml`, WS14) | HTTP + voice/WS only, zero background worker loops — same surface as `web`, deployed separately so web/worker deploys never drain live calls |
 
 Migrations run on the **web service only** (its `preDeployCommand`); the
-worker's config has none. The web service must deploy first whenever a
-release contains a migration. A single-service deploy leaves `PROCESS_ROLE`
-unset on the one service (⇒ `all`), which needs no checklist row.
+worker's and voice's configs have none. The web service must deploy first
+whenever a release contains a migration. A single-service deploy leaves
+`PROCESS_ROLE` unset on the one service (⇒ `all`), which needs no
+checklist row.
+
+**`PUBLIC_API_URL` is per-service, not global.** Each of `web`, `worker`,
+and `voice` (when it exists) should set its own `PUBLIC_API_URL` to its own
+public domain — this is what Twilio signature validation reconstructs the
+request URL against, and what any `<Connect><Stream/>` TwiML embeds as the
+WS target. On the voice service specifically, `PUBLIC_API_URL` MUST be the
+voice service's own domain, not the web domain, or inbound Twilio signature
+checks fail and Stream URLs point at the wrong socket.
+
+**`VOICE_PUBLIC_URL` (three-service topology only)** — set on the **web
+and worker** services (where provisioning jobs run) to the voice service's
+public base URL. The number-provisioning worker
+(`packages/api/src/workers/provision-twilio.ts`) uses it for each new
+number's Twilio `VoiceUrl` + voice-call status callback, so numbers
+provisioned/claimed through onboarding automatically point at the voice
+domain (SMS + Vapi webhooks stay on the web domain). Unset ⇒ falls back to
+the web base — today's behavior — so it needs no row in a single- or
+two-service deploy. Numbers provisioned **before** the cutover still need
+a one-time manual re-point at the voice domain in the Twilio console. See
+`docs/deployment.md` "Optional third service: dedicated voice (WS14)".
 
 ## Advisory (recommended for launch)
 

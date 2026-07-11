@@ -708,10 +708,10 @@ export type AppWithLifecycle = express.Express & {
   gracefulDrain: (reason: string) => Promise<void>;
   /**
    * WS2 — number of background worker intervals this instance registered.
-   * Snapshot taken at construction time. Zero when PROCESS_ROLE=web (the
-   * HTTP/voice surface runs no background loops); nonzero for 'worker'/'all'.
-   * Read-only observability seam so tests can assert the process-role split
-   * without exporting createApp() internals.
+   * Snapshot taken at construction time. Zero when PROCESS_ROLE=web or
+   * PROCESS_ROLE=voice (the HTTP/voice surface runs no background loops);
+   * nonzero for 'worker'/'all'. Read-only observability seam so tests can
+   * assert the process-role split without exporting createApp() internals.
    */
   readonly backgroundIntervalCount: number;
 };
@@ -2105,15 +2105,20 @@ export function createApp(): AppWithLifecycle {
     backgroundIntervals.push(handle);
     return handle;
   };
-  // WS2 — process-role split. A PROCESS_ROLE=web deploy serves the HTTP/voice/WS
-  // surface with ZERO background worker loops so it can never be coupled to
-  // (or blocked by) the sweeps/queue drain; 'worker' and 'all' run them. Every
-  // worker interval registration below (and the worker-object constructions that
-  // exist solely to feed them) is gated on this. Cheap observability intervals
-  // (samplePoolMetrics / sampleQueueDepth) stay in ALL roles — a web deploy must
-  // still expose its own pool + queue-depth metrics. Leader locks (runAsLeader)
+  // WS2 — process-role split. A PROCESS_ROLE=web (or, WS14, PROCESS_ROLE=voice)
+  // deploy serves the HTTP/voice/WS surface with ZERO background worker loops
+  // so it can never be coupled to (or blocked by) the sweeps/queue drain;
+  // 'worker' and 'all' run them. Every worker interval registration below
+  // (and the worker-object constructions that exist solely to feed them) is
+  // gated on this. Cheap observability intervals (samplePoolMetrics /
+  // sampleQueueDepth) stay in ALL roles — a web/voice deploy must still
+  // expose its own pool + queue-depth metrics. Leader locks (runAsLeader)
   // make it safe if two instances ever both run 'all'.
-  const shouldRunWorkers = config.PROCESS_ROLE !== 'web';
+  // Explicit allowlist (not `!== 'web'`) so a THIRD non-worker role can
+  // never accidentally start running background sweeps by falling through
+  // an exclusion list — 'voice' must land here, not in shouldRunWorkers.
+  const shouldRunWorkers =
+    config.PROCESS_ROLE === 'worker' || config.PROCESS_ROLE === 'all';
 
   // scale-to-1000 U2c — sample Postgres pool occupancy into /metrics so the
   // saturation signal (waiting climbing while total is pinned at the pool max)
@@ -3391,7 +3396,10 @@ export function createApp(): AppWithLifecycle {
       // WS8 — a worker-role process never attaches the media-streams WS
       // handler (see the role gate on attachMediaStreamServer below), so its
       // /voice must never emit <Connect><Stream/> pointing at a socket this
-      // process will reject — degrade to Gather instead.
+      // process will reject — degrade to Gather instead. WS14 — 'voice' is
+      // NOT excluded here (only 'worker' is): the dedicated voice service
+      // attaches the WS the same as 'web' does, so its /voice keeps emitting
+      // <Connect><Stream/> normally.
       mediaStreamsEnabled: mediaStreamsEnabled && config.PROCESS_ROLE !== 'worker',
       // WS7 — mid-call degrade to Gather: /voice/gather-fallback resolves the
       // live session by CallSid to continue the SAME FSM state on Gather.
@@ -3602,6 +3610,9 @@ export function createApp(): AppWithLifecycle {
   // boot-warn/crash the worker on a misconfigured TTS_PROVIDER for a
   // surface it never serves. /health stays role-agnostic (index.ts listens
   // in every role); only this voice-WS attach is role-gated.
+  // WS14 — PROCESS_ROLE=voice attaches this exactly like 'web' does (only
+  // 'worker' is excluded); it's the intended home for the WS upgrade in the
+  // three-service topology.
   if (mediaStreamsEnabled && config.PROCESS_ROLE !== 'worker') {
     const deepgramKey = process.env.DEEPGRAM_API_KEY;
     if (!deepgramKey) {

@@ -59,6 +59,14 @@ describe('WS2 — PROCESS_ROLE process split', () => {
     expect(app.backgroundIntervalCount).toBe(0);
   });
 
+  // WS14 — 'voice' is a THIRD non-worker role: it must land in the same
+  // zero-worker bucket as 'web', not fall through `!== 'web'` into running
+  // background sweeps it was never meant to run.
+  it('role "voice" registers ZERO background worker intervals', () => {
+    const app = buildApp('voice');
+    expect(app.backgroundIntervalCount).toBe(0);
+  });
+
   it('roles "worker" and "all" register an identical, nonzero worker interval count', () => {
     const worker = buildApp('worker');
     const all = buildApp('all');
@@ -147,6 +155,14 @@ describe('WS2 — PROCESS_ROLE process split', () => {
       expect(count).toBeGreaterThan(0);
     });
 
+    // WS14 — the dedicated voice service attaches the WS exactly like 'web'
+    // does; only 'worker' is excluded from this gate.
+    it('role "voice" attaches the WS upgrade handler', async () => {
+      const app = buildApp('voice');
+      const count = await listenAndCountUpgradeHandlers(app);
+      expect(count).toBeGreaterThan(0);
+    });
+
     // The /voice branch must agree with the WS attach gate: a worker never
     // serves the stream socket, so its TwiML must never point Twilio at it.
     const signedVoicePost = (app: AppWithLifecycle) => {
@@ -180,6 +196,20 @@ describe('WS2 — PROCESS_ROLE process split', () => {
       process.env.TWILIO_DEFAULT_TENANT_ID = '11111111-1111-4111-8111-111111111111';
       process.env.PUBLIC_API_URL = 'http://localhost:3101';
       const app = buildApp('all');
+      const res = await signedVoicePost(app);
+      expect(res.status).toBe(200);
+      expect(res.text).toContain('<Connect><Stream');
+    });
+
+    // WS14 — the dedicated voice service is the intended home for live
+    // media-streams calls in the three-service topology: it must emit
+    // <Connect><Stream/> exactly like 'web'/'all' do, never degrade to
+    // Gather the way a worker-role process does.
+    it('role "voice" /voice emits <Connect><Stream/>', async () => {
+      process.env.TWILIO_AUTH_TOKEN = 'testtoken123';
+      process.env.TWILIO_DEFAULT_TENANT_ID = '11111111-1111-4111-8111-111111111111';
+      process.env.PUBLIC_API_URL = 'http://localhost:3101';
+      const app = buildApp('voice');
       const res = await signedVoicePost(app);
       expect(res.status).toBe(200);
       expect(res.text).toContain('<Connect><Stream');

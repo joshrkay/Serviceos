@@ -98,6 +98,7 @@ pre-split behavior.
 |---|---|---|---|---|
 | API / voice (web) | `railway.toml` | `web` | Public (Railway public domain) | HTTP + voice/WS/media-streams only; **zero** background worker loops |
 | Worker | `railway.worker.toml` | `worker` | Private (no public domain needed) | All background sweeps + the queue poll loop; no public traffic; no voice WS upgrades |
+| Voice (optional, WS14) | `railway.voice.toml` | `voice` | Public (its own Railway domain) | HTTP + voice/WS/media-streams only; **zero** background worker loops; same surface as `web` |
 
 ### Setup
 
@@ -142,6 +143,66 @@ Notes:
   redundancy, not duplicate invoices/reminders. The split is an isolation
   optimization; leader locks keep it correctness-safe even if
   misconfigured.
+
+### Optional third service: dedicated voice (WS14)
+
+Today, even in the two-service topology above, live calls ride the `web`
+service — Twilio's phone-number webhooks point at the web domain, so every
+web deploy risks calls active past the `overlapSeconds`/`DRAIN_TIMEOUT_MS`
+drain window. `PROCESS_ROLE=voice` adds a **third, opt-in** service that
+hosts telephony webhooks + the media-streams WS and deploys rarely, so web
+(and worker) deploys never touch live calls. It is recommended for
+production voice once call volume makes web-deploy-interrupts-calls a real
+risk; the two-service topology remains fully supported if you don't need
+this yet.
+
+`voice` behaves exactly like `web` (full HTTP surface, media-streams WS
+attached, zero background worker loops) — the only difference is which
+Railway service it's deployed as and which domain Twilio is told to call.
+
+1. Create a third Railway service pointing at the same repo/image.
+2. Set **Settings → Config File Path** to `railway.voice.toml`.
+3. Set the `PROCESS_ROLE` **dashboard service variable** to `voice` on this
+   service (same caveat as step 3 above — config-as-code can't set this).
+4. Set this service's own `PUBLIC_API_URL` to **its own** public domain,
+   not the web service's. This matters for two things: Twilio signature
+   validation reconstructs the request URL from `PUBLIC_API_URL`
+   (`packages/api/src/telephony/twilio-signature.ts`) so a mismatched
+   domain fails every inbound signature check; and any
+   `<Connect><Stream/>` TwiML the app emits embeds `PUBLIC_API_URL` as the
+   WS target, so it must point back at this same service.
+5. Point Twilio's phone-number webhooks (Voice URL, status callback,
+   recording callback) at **this service's** public domain instead of the
+   web service's. This is the entire mechanism — there is no code-level
+   routing involved; whichever domain Twilio is configured to call is
+   whichever service's drain window a live call is exposed to.
+6. Set `VOICE_PUBLIC_URL` (this voice service's public base URL) as a
+   dashboard variable on the **web and worker** services — the services
+   where provisioning jobs execute. The automated number-provisioning flow
+   (`packages/api/src/workers/provision-twilio.ts`, driven from onboarding)
+   runs as a background queue job on `web`/`worker`/`all` (never `voice`,
+   which runs zero background workers), and uses `VOICE_PUBLIC_URL` for
+   the newly-provisioned number's `VoiceUrl` (`/api/telephony/voice`) and
+   voice-call status callback (`/webhooks/twilio/status/:tenantId`), so
+   every number provisioned or claimed through onboarding automatically
+   points at the voice domain. SMS inbound
+   (`/webhooks/twilio/sms/:tenantId`, via the messaging service) and the
+   Vapi event webhook (`/webhooks/vapi/:tenantId`) intentionally stay on
+   the web domain — neither is a live-call surface on our infrastructure.
+   Unset `VOICE_PUBLIC_URL` falls back to the web base, i.e. exactly
+   today's single/two-service behavior.
+   **One residual operator step:** numbers provisioned **before** the
+   voice-service cutover still carry the web domain in their Twilio
+   webhook config — re-point those at the voice domain once, in the
+   Twilio console or via the number record (inherently operational; the
+   code path only covers numbers provisioned after `VOICE_PUBLIC_URL` is
+   set).
+
+Payoff: with Twilio pointed at the voice domain, `web` and `worker` deploys
+never interrupt a live call — only a `voice`-service deploy can, and that
+service is meant to change rarely (telephony wiring, not everyday feature
+work), so it drains the same 25s/35s window as `web` today but on a much
+lower-frequency deploy cadence.
 
 ## Dispatch feasibility env vars
 

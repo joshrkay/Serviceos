@@ -49,12 +49,33 @@ const configSchema = z.object({
   // without express consent on file. Off-by-default so production behavior is
   // unchanged until an operator explicitly opts in.
   TCPA_CONSENT_ENFORCEMENT: z.enum(['off', 'warn', 'block']).default('off'),
-  // WS2 — process-role split. One image, two Railway services: 'web' serves the
-  // HTTP/voice/WS surface only, 'worker' runs the background sweeps + queue poll
-  // loop only, 'all' (default) runs both — byte-for-byte back-compat with the
-  // single-service deploy. See docs/deployment.md "Two-service split (optional)".
-  // 'web' never starts the background interval loops; every other role does.
-  PROCESS_ROLE: z.enum(['web', 'worker', 'all']).default('all'),
+  // WS2 — process-role split. One image, up to three Railway services: 'web'
+  // serves the HTTP/voice/WS surface only, 'worker' runs the background sweeps
+  // + queue poll loop only, 'all' (default) runs both — byte-for-byte
+  // back-compat with the single-service deploy. See docs/deployment.md
+  // "Deploy topology (web + worker)".
+  // WS14 — 'voice' is a THIRD, opt-in role: a dedicated telephony-webhook +
+  // media-streams-WS service that deploys rarely, so Twilio's phone-number
+  // webhooks can point at a domain web/worker deploys never touch (live
+  // calls no longer ride the web service's 25s drain window). It serves the
+  // full HTTP surface — same as 'web' (Railway can't path-route, and it
+  // needs /health plus the telephony/gather/recording webhooks reachable;
+  // other routes existing on it is harmless since nothing points at them)
+  // — and attaches the media-streams WS, exactly like 'web' does. It runs
+  // ZERO background worker loops, same as 'web'.
+  // 'web' never starts the background interval loops; neither does 'voice'.
+  // Every other role ('worker', 'all') does.
+  //
+  // Companion env var (read raw from process.env, same pattern as
+  // PUBLIC_API_URL — intentionally NOT in this schema): VOICE_PUBLIC_URL is
+  // the dedicated voice service's public base URL, set on the WEB and WORKER
+  // services (where provisioning jobs execute). The Twilio number-provisioning
+  // worker (workers/provision-twilio.ts) uses it for the number's VoiceUrl +
+  // voice status callback so newly-provisioned numbers point at the voice
+  // domain; unset ⇒ single/two-service topology ⇒ falls back to the job's
+  // baseUrl (PUBLIC_API_URL at enqueue time). SMS + Vapi webhooks always stay
+  // on the web domain. See docs/deployment.md + docs/prod-env-checklist.md.
+  PROCESS_ROLE: z.enum(['web', 'worker', 'voice', 'all']).default('all'),
   // SEC-01 / WS1 — Postgres RLS runtime-role enforcement flag. Read raw today
   // by db/rls-runtime-role.ts (isRlsRuntimeRoleEnabled); declared here so it is
   // part of the validated config surface. The HARD prod/staging requirement
