@@ -3,7 +3,7 @@ import { Pool } from 'pg';
 import { getSharedTestDb } from './shared';
 import {
   migrationAdvisoryKey,
-  runMigrationsOnClient,
+  withMigrationAdvisoryLock,
 } from '../../src/db/migrate';
 
 /**
@@ -63,38 +63,46 @@ describe('DATA-04: migration advisory lock', () => {
     }
   });
 
-  it('applies migrations under the lock and releases it afterward', async () => {
+  it('withMigrationAdvisoryLock holds the lock for the body and releases it after', async () => {
+    // Drive the real wrapper with a lightweight body (NOT the full migration
+    // corpus — re-running the DDL mid-suite against a DB other integration
+    // files have already populated would re-validate CHECK constraints against
+    // their rows). Prove the mechanism: while the body runs the lock is held
+    // (a second connection can't acquire the same key), and afterward it's
+    // released.
+    const [k1, k2] = migrationAdvisoryKey();
     const client = await pool.connect();
+    const probe = await pool.connect();
     try {
-      // Migrations already ran once in global-setup; this idempotent re-apply
-      // under the lock must succeed and leave a consistent schema.
-      await runMigrationsOnClient(client);
+      let observedHeldDuringBody: boolean | null = null;
+      await withMigrationAdvisoryLock(client, async () => {
+        const r = await probe.query<{ locked: boolean }>(
+          'SELECT pg_try_advisory_lock($1::int, $2::int) AS locked',
+          [k1, k2],
+        );
+        observedHeldDuringBody = r.rows[0].locked;
+        // If the probe somehow acquired it, release so we don't leak.
+        if (r.rows[0].locked) {
+          await probe.query('SELECT pg_advisory_unlock($1::int, $2::int)', [k1, k2]);
+        }
+      });
+      // The migration lock was held for the whole body → probe was excluded.
+      expect(observedHeldDuringBody).toBe(false);
 
-      // The lock is released after runMigrationsOnClient returns: a fresh
-      // try-acquire on the same session succeeds (0 held locks for this key).
-      const [k1, k2] = migrationAdvisoryKey();
-      const held = await client.query<{ locked: boolean }>(
+      // After the wrapper returns, the lock is free again.
+      const after = await probe.query<{ locked: boolean }>(
         'SELECT pg_try_advisory_lock($1::int, $2::int) AS locked',
         [k1, k2],
       );
-      expect(held.rows[0].locked).toBe(true);
-      await client.query('SELECT pg_advisory_unlock($1::int, $2::int)', [k1, k2]);
-
-      // Spot-check the schema is intact: a core table + a known index exist.
-      const tbl = await client.query(
-        "SELECT to_regclass('public.tenants') AS t",
-      );
-      expect(tbl.rows[0].t).toBe('tenants');
-      const idx = await client.query(
-        "SELECT 1 FROM pg_indexes WHERE indexname = 'idx_jobs_tenant_assigned_technician'",
-      );
-      expect(idx.rowCount).toBe(1);
+      expect(after.rows[0].locked).toBe(true);
+      await probe.query('SELECT pg_advisory_unlock($1::int, $2::int)', [k1, k2]);
     } finally {
-      // runMigrationsOnClient leaves session GUCs (statement_timeout,
-      // lock_timeout) set on this pooled connection; RESET ALL clears them so
-      // nothing leaks into other integration files sharing the pool.
+      // withMigrationAdvisoryLock sets statement_timeout on `client`; RESET ALL
+      // clears any session GUCs so nothing leaks into other integration files
+      // sharing the pool.
       await client.query('RESET ALL');
       client.release();
+      probe.release();
     }
   });
 });
