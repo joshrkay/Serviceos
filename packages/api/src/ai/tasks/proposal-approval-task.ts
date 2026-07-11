@@ -63,6 +63,10 @@ import type { AppointmentRepository } from '../../appointments/appointment';
 import { createAuditEvent, type AuditRepository } from '../../audit/audit';
 import type { SettingsRepository } from '../../settings/settings';
 import { resolveEscalationSettings } from '../../settings/settings';
+import {
+  resolveVoiceApprovalPinSecret,
+  voiceApprovalPinMatches,
+} from '../../settings/voice-approval-pin';
 import { ValidationError } from '../../shared/errors';
 import { createLogger } from '../../logging/logger';
 import { classifyVoiceApproval, classifyStrictConfirm } from '../tts/readback';
@@ -362,21 +366,72 @@ function requiresChallenge(proposal: Proposal): boolean {
   return cls === 'money' || cls === 'irreversible';
 }
 
-async function readChallenge(
+/**
+ * The resolved money-challenge state for a tenant. `enrolled` answers "does a
+ * PIN exist?" (drives the unset → refuse + one-tap-SMS branch); `verify(u)`
+ * answers "does this spoken utterance match?" (drives the challenge stage).
+ * WS21a — the verify seam checks the HMAC `voice_approval_pin_hash` FIRST and
+ * only falls back to the DEPRECATED plaintext `voice_approval_challenge` when
+ * no hash exists, so a tenant that set the legacy plaintext keeps working with
+ * no migration.
+ */
+interface VoiceApprovalChallengeState {
+  enrolled: boolean;
+  verify(utterance: string): boolean;
+}
+
+const NO_CHALLENGE: VoiceApprovalChallengeState = {
+  enrolled: false,
+  verify: () => false,
+};
+
+/** Legacy plaintext compare — digit PINs on extracted digits ("four two seven
+ *  one" passes "4271"); non-digit passphrases compare case-insensitively.
+ *  Unchanged from the pre-WS21a inline comparison. */
+function legacyPlaintextMatches(utterance: string, plaintext: string): boolean {
+  const expectedDigits = spokenDigits(plaintext);
+  return expectedDigits.length > 0
+    ? spokenDigits(utterance) === expectedDigits
+    : utterance.trim().toLowerCase() === plaintext.toLowerCase();
+}
+
+async function readChallengeState(
   deps: VoiceApprovalDeps,
   tenantId: string,
-): Promise<string | null> {
-  if (!deps.settingsRepo) return null;
+): Promise<VoiceApprovalChallengeState> {
+  if (!deps.settingsRepo) return NO_CHALLENGE;
   try {
     const settings = await deps.settingsRepo.findByTenant(tenantId);
-    const challenge = resolveEscalationSettings(settings).voice_approval_challenge;
-    return typeof challenge === 'string' && challenge.trim().length > 0
-      ? challenge.trim()
-      : null;
+    const escalation = resolveEscalationSettings(settings);
+    const pinHash = escalation.voice_approval_pin_hash;
+    const legacy = escalation.voice_approval_challenge;
+    const legacyPlaintext =
+      typeof legacy === 'string' && legacy.trim().length > 0 ? legacy.trim() : null;
+
+    if (typeof pinHash === 'string' && pinHash.length > 0) {
+      // Hashed-at-rest path (preferred). Fail closed if the server secret is
+      // unavailable — a stored hash can never match without it.
+      const secret = resolveVoiceApprovalPinSecret();
+      return {
+        enrolled: true,
+        verify: (utterance: string) =>
+          !!secret &&
+          voiceApprovalPinMatches(spokenDigits(utterance), pinHash, tenantId, secret),
+      };
+    }
+    if (legacyPlaintext) {
+      // DEPRECATED plaintext fallback — no writers remain; verify preserves
+      // the exact pre-WS21a comparison for tenants that set the legacy value.
+      return {
+        enrolled: true,
+        verify: (utterance: string) => legacyPlaintextMatches(utterance, legacyPlaintext),
+      };
+    }
+    return NO_CHALLENGE;
   } catch {
-    // Fail closed: unreadable settings behave like "no challenge
-    // configured" → money/irreversible approvals are refused.
-    return null;
+    // Fail closed: unreadable settings behave like "no challenge configured"
+    // → money/irreversible approvals are refused.
+    return NO_CHALLENGE;
   }
 }
 
@@ -547,8 +602,8 @@ async function prepareResolvedTarget(
   // Money/irreversible approvals need the spoken challenge; without one
   // configured they are politely refused and the one-tap SMS goes out.
   if (action === 'approve' && requiresChallenge(proposal)) {
-    const challenge = await readChallenge(deps, ref.tenantId);
-    if (!challenge) {
+    const challengeState = await readChallengeState(deps, ref.tenantId);
+    if (!challengeState.enrolled) {
       const smsSent = await sendOneTapFallback(deps, ref, proposal);
       await audit(deps, ref, 'proposal.voice_approve_refused_no_challenge', proposal.id, {
         proposalType: proposal.proposalType,
@@ -1269,8 +1324,8 @@ export async function continueVoiceApproval(
 
     // decision === 'approve' — strict affirmative confirmed.
     if (pending.action === 'approve' && requiresChallenge(proposal)) {
-      const challenge = await readChallenge(deps, input.tenantId);
-      if (!challenge) {
+      const challengeState = await readChallengeState(deps, input.tenantId);
+      if (!challengeState.enrolled) {
         // Config disappeared between readback and confirm — refuse the
         // same way the readback stage would have.
         const smsSent = await sendOneTapFallback(deps, input, proposal);
@@ -1301,9 +1356,10 @@ export async function continueVoiceApproval(
       : executeReject(deps, input, proposal.id);
   }
 
-  // 'challenge' — verify the spoken code against the configured value.
-  // Digit challenges ("4271") compare on extracted digits so "four two
-  // seven one" passes; non-digit passphrases compare case-insensitively.
+  // 'challenge' — verify the spoken code via the WS21a seam. Hash-first
+  // (HMAC over extracted digits so "four two seven one" passes "4271"), with
+  // the deprecated plaintext fallback preserving the legacy digit/passphrase
+  // comparison for tenants that never re-enrolled.
 
   // Stage assert: action MUST be 'approve' here — 'reject' never reaches
   // the challenge stage (the confirm handler routes reject directly to
@@ -1316,13 +1372,8 @@ export async function continueVoiceApproval(
     return { speak: KEEP_FOR_LATER_LINE, pending: null, outcome: 'kept_for_later', proposalId: proposal.id };
   }
 
-  const challenge = await readChallenge(deps, input.tenantId);
-  const expectedDigits = challenge ? spokenDigits(challenge) : '';
-  const matched = challenge
-    ? expectedDigits.length > 0
-      ? spokenDigits(input.utterance) === expectedDigits
-      : input.utterance.trim().toLowerCase() === challenge.toLowerCase()
-    : false;
+  const challengeState = await readChallengeState(deps, input.tenantId);
+  const matched = challengeState.verify(input.utterance);
   if (!matched) {
     // An explicit cancel ("cancel", "never mind") with NO digits exits the
     // dialogue without burning an attempt — the proposal stays pending.

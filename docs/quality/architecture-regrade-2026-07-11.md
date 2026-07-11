@@ -112,8 +112,17 @@ proposals punt to a screen."*
   caller-ID-verified owner sessions.
 - Coverage by action class: all ~30 capture-class proposal types are fully
   voice-approvable; money/irreversible types voice-approve behind a
-  per-tenant spoken PIN (`escalation_settings.voice_approval_challenge`).
-- The "punt" is no longer a screen: when no PIN is configured (or after
+  per-tenant spoken PIN. WS21a made that PIN a real **enrolled** credential:
+  it is captured via `PUT /api/settings/voice-approval-pin`, hashed at rest
+  (HMAC-SHA256, tenant-salted — `settings/voice-approval-pin.ts`), stored as
+  `escalation_settings.voice_approval_pin_hash`, and never echoed back. The
+  verify seam checks the hash first and falls back to the deprecated
+  plaintext `voice_approval_challenge` so any tenant who set the interim value
+  keeps working with no migration. (Onboarding-step capture is a stated
+  follow-up — enrollment today is the settings route; a spoken PIN would land
+  plaintext in the onboarding proposal payload/transcript, so it was
+  deliberately kept off the conversation path.)
+- The "punt" is no longer a screen: when no PIN is enrolled (or after
   challenge lockout) the flow texts a **one-tap approve link** and says so in
   a friendly line (WS4). Web/in-app assistant voice deterministically refuses
   approval (UB-B3) — approval by voice is deliberately owner-telephony-only.
@@ -122,9 +131,10 @@ proposals punt to a screen."*
   on the telephony channel), SMS `reply-handler.test.ts`,
   `batch-approve.test.ts`.
 
-Remaining below A: money-class voice approval requires one-time PIN setup;
-no voice-quality-corpus scenario reaches the approval dialogue (text-mode
-driver limitation).
+Remaining below A: money-class voice approval requires one-time PIN
+enrollment (now a real hashed-at-rest path, WS21a — onboarding-step capture
+still a follow-up); no voice-quality-corpus scenario reaches the approval
+dialogue (text-mode driver limitation).
 
 ## 6. Learning loop — was B, now **B+/A−**
 
