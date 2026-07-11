@@ -582,7 +582,11 @@ function transitionIntentCapture(
         lastIntentConfidence: event.confidence,
         // Carry the classify call's ai_runs id forward so the eventual
         // create_proposal (after confirm) links the proposal to a REAL run.
-        ...(event.aiRunId ? { lastAiRunId: event.aiRunId } : {}),
+        // Set UNCONDITIONALLY (not a conditional spread): a re-classification
+        // whose turn has no persisted run must CLEAR the prior turn's id, or
+        // the `...context` spread above would leak the previous run and the
+        // eventual create_proposal would link to the WRONG ai_runs record.
+        lastAiRunId: event.aiRunId,
         retryCount: 0,
       };
       return {
@@ -824,6 +828,8 @@ function transitionIntentConfirm(
         ...context,
         currentIntent: undefined,
         extractedEntities: undefined,
+        // Abandon the captured turn's run id so a re-classify can't reuse it.
+        lastAiRunId: undefined,
         retryCount: 0,
       },
     };
@@ -842,6 +848,8 @@ function transitionIntentConfirm(
         ...context,
         currentIntent: undefined,
         extractedEntities: undefined,
+        // Abandon the captured turn's run id so a re-classify can't reuse it.
+        lastAiRunId: undefined,
         retryCount: 0,
       },
     };
@@ -899,6 +907,9 @@ function transitionClosing(
         currentIntent: undefined,
         extractedEntities: undefined,
         pendingProposalId: undefined,
+        // Abandon the prior turn's run id so the second intent's proposal
+        // can't inherit the first turn's ai_runs record.
+        lastAiRunId: undefined,
         retryCount: 0,
       },
     };
@@ -917,6 +928,9 @@ function transitionClosing(
         currentIntent: undefined,
         extractedEntities: undefined,
         pendingProposalId: undefined,
+        // Abandon the prior turn's run id so the second intent's proposal
+        // can't inherit the first turn's ai_runs record.
+        lastAiRunId: undefined,
         retryCount: 0,
       },
     };
