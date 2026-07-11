@@ -139,7 +139,8 @@ import {
 import { getConfidenceLevel } from '../guardrails/confidence';
 import type { ProposalConfidenceMeta } from '../../proposals/contracts';
 import { preloadSessionCatalog, resolveSessionCatalog } from './session-catalog';
-import { buildQuoteReadback } from './quote-readback';
+import { buildQuoteReadback, type QuoteReadbackLine } from './quote-readback';
+import { parseLeadingQuantity } from './quantity-parse';
 import type { LLMGateway } from '../gateway/gateway';
 import type {
   VoiceRepository,
@@ -572,21 +573,30 @@ export function createVoiceTurnProcessor(
   }
 
   /**
-   * WS5 — synchronous in-call estimate grounding. Builds line items from the
-   * classifier's spoken descriptions, resolves them against the preloaded
-   * tenant catalog, and returns the grounded lineItems + confidence `_meta` +
-   * the spoken quote read-back. Returns `undefined` when the intent carried no
-   * line descriptions, so the generic (non-grounded) proposal path runs
-   * unchanged and the caller hears the fixed confirmation.
+   * WS5 / WS17 — synchronous in-call quote grounding for a drafted estimate OR
+   * invoice. Builds line items from the classifier's spoken descriptions
+   * (WS17 I1: recovering a leading quantity — "three smoke detectors" — from
+   * the text, since the classifier emits descriptions only), resolves them
+   * against the preloaded tenant catalog, and returns the grounded lineItems +
+   * confidence `_meta` + the spoken quote read-back. Returns `undefined` when
+   * the intent carried no line descriptions, so the generic (non-grounded)
+   * proposal path runs unchanged and the caller hears the fixed confirmation.
    *
-   * Reuses the EstimateTaskHandler's exact grounding + confidence helpers
+   * `priceField` selects the document contract (WS17 I3): estimates use
+   * `unitPrice` (integer cents, no per-line total); invoices use
+   * `unitPriceCents` + a recomputed `totalCents` — exactly what the operator
+   * InvoiceTaskHandler does. See
+   * docs/solutions/conventions/line-item-price-field-estimate-vs-invoice.md.
+   *
+   * Reuses the task handlers' exact grounding + confidence helpers
    * (`groundLineItemPricing`, `lineItemConfidenceSignals`,
    * `UNCATALOGUED_CONFIDENCE_CAP`) so the voice and operator paths agree.
    */
-  async function groundVoiceEstimate(
+  async function groundVoiceQuote(
     session: VoiceSession,
     entities: Record<string, unknown>,
     fx: SideEffect,
+    priceField: 'unitPrice' | 'unitPriceCents',
   ): Promise<
     | {
         lineItems: Array<Record<string, unknown>>;
@@ -608,8 +618,13 @@ export function createVoiceTurnProcessor(
       : [];
     if (descriptions.length === 0) return undefined;
     // Voice never carries an LLM price — descriptions only; the catalog sets
-    // every price. Quantity defaults to 1 (the spoken path has no quantity).
-    const rawLines = descriptions.map((description) => ({ description, quantity: 1 }));
+    // every price. WS17 I1: recover a leading quantity ("three smoke
+    // detectors" → qty 3, "2 inch pipe fitting" → qty 1) deterministically;
+    // the remainder is what we match against the catalog.
+    const rawLines = descriptions.map((raw) => {
+      const { quantity, description } = parseLeadingQuantity(raw);
+      return { description, quantity };
+    });
 
     // Establishment kicks the preload off; this is the defensive net for
     // paths/tests that didn't. Then resolve within a tight budget so the
@@ -621,22 +636,22 @@ export function createVoiceTurnProcessor(
 
     const outcome = await groundLineItemPricing(
       rawLines,
-      'unitPrice',
+      priceField,
       catalog ? () => Promise.resolve(catalog) : null,
     );
     const lineItems = outcome.lineItems;
 
-    // Same money-correctness gate the EstimateTaskHandler applies: an
-    // uncatalogued (or unconsulted-catalog) price caps confidence and forces
-    // overallConfidence 'low' so it always reaches a human; per-line
-    // pricingSource → `_meta` markers for the operator draft.
+    // Same money-correctness gate the task handlers apply: an uncatalogued (or
+    // unconsulted-catalog) price caps confidence and forces overallConfidence
+    // 'low' so it always reaches a human; per-line pricingSource → `_meta`
+    // markers for the operator draft.
     const baseConfidence =
       typeof fx.payload.confidence === 'number' ? fx.payload.confidence : undefined;
     let confidenceScore = baseConfidence;
     if (outcome.anyUncatalogued && typeof confidenceScore === 'number') {
       confidenceScore = Math.min(confidenceScore, UNCATALOGUED_CONFIDENCE_CAP);
     }
-    const signals = lineItemConfidenceSignals(lineItems, 'unitPrice');
+    const signals = lineItemConfidenceSignals(lineItems, priceField);
     const groundedClean =
       catalogAvailable && !outcome.anyUncatalogued && outcome.missingFields.length === 0;
     const meta: ProposalConfidenceMeta = {
@@ -650,7 +665,22 @@ export function createVoiceTurnProcessor(
       ...(signals.markers.length > 0 ? { markers: signals.markers } : {}),
     };
 
-    const utterance = buildQuoteReadback({ lineItems, catalogAvailable });
+    // WS17 I3 — the read-back reads `unitPrice` (integer cents). Invoice lines
+    // carry the cents under `unitPriceCents`, so map onto the read-back's
+    // field. BOTH are integer cents (`formatCents` divides by 100), so this is
+    // a pure field rename — no cents/dollars confusion reaches the spoken
+    // string (a 185000-cent line speaks $1850.00, never $185,000).
+    const readbackLines: QuoteReadbackLine[] = lineItems.map((li) => ({
+      ...(typeof li.pricingSource === 'string' ? { pricingSource: li.pricingSource } : {}),
+      ...(typeof li.unitPrice === 'number'
+        ? { unitPrice: li.unitPrice }
+        : typeof li.unitPriceCents === 'number'
+          ? { unitPrice: li.unitPriceCents }
+          : {}),
+      ...(typeof li.quantity === 'number' ? { quantity: li.quantity } : {}),
+      ...(typeof li.description === 'string' ? { description: li.description } : {}),
+    }));
+    const utterance = buildQuoteReadback({ lineItems: readbackLines, catalogAvailable });
 
     return {
       lineItems,
@@ -820,16 +850,20 @@ export function createVoiceTurnProcessor(
         return;
       }
 
-      // WS5 — in-call grounded quoting for a drafted estimate. Grounds the
-      // spoken line items against the preloaded tenant catalog so the stored
-      // payload carries catalog-authoritative pricing (the operator draft
-      // matches what was said) and the caller hears a grounded read-back.
-      // Undefined for every other intent / an estimate with no line items —
-      // the generic path then runs unchanged.
+      // WS5 / WS17 I3 — in-call grounded quoting for a drafted estimate OR
+      // invoice. Grounds the spoken line items against the preloaded tenant
+      // catalog so the stored payload carries catalog-authoritative pricing
+      // (the operator draft matches what was said) and the caller hears a
+      // grounded read-back. The price-field contract differs by document:
+      // estimates use `unitPrice`, invoices `unitPriceCents` (+ recomputed
+      // totalCents) — see the convention doc. Undefined for every other intent
+      // / a quote with no line items — the generic path then runs unchanged.
       const estimateQuote =
         intent === 'draft_estimate'
-          ? await groundVoiceEstimate(session, entities, fx)
-          : undefined;
+          ? await groundVoiceQuote(session, entities, fx, 'unitPrice')
+          : intent === 'create_invoice'
+            ? await groundVoiceQuote(session, entities, fx, 'unitPriceCents')
+            : undefined;
 
       const proposal = buildProposal({
         tenantId,
