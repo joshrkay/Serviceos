@@ -4476,12 +4476,11 @@ export function createApp(): express.Express {
     '/api/me',
     createMeRouter(userModeService, auditRepo, {
       // N-011 — surface the brand_voice_configurator flag so the web gates the
-      // onboarding step + settings sheet. Global flag check (default off).
+      // onboarding step + settings sheet. Tenant-aware (tenant override →
+      // platform flag → false) so a per-tenant dark launch actually exposes
+      // the UI; default off.
       isBrandVoiceConfiguratorEnabled: (tenantId: string) =>
-        isFeatureEnabled(featureFlagStore, 'brand_voice_configurator', {
-          environment: process.env.NODE_ENV || 'development',
-          tenantId,
-        }),
+        isFlagEnabledForTenant(tenantId, 'brand_voice_configurator'),
     }),
   );
 

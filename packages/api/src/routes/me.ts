@@ -105,7 +105,9 @@ export function createMeRouter(
      * tenant. Injected from app.ts (feature-flag store) so the web can gate the
      * onboarding step + settings sheet. Absent → feature reads off.
      */
-    isBrandVoiceConfiguratorEnabled?: (tenantId: string) => boolean;
+    isBrandVoiceConfiguratorEnabled?: (
+      tenantId: string,
+    ) => boolean | Promise<boolean>;
   },
 ): Router {
   const router = Router();
@@ -153,8 +155,11 @@ export function createMeRouter(
           unsupervised_proposal_routing:
             settings.unsupervised_proposal_routing,
           // N-011 — gate the Brand-Voice Configurator UI (default off).
+          // Awaited: the resolver is tenant-aware (tenant override →
+          // platform flag → false), so a per-tenant dark launch works.
           brand_voice_configurator_enabled:
-            options?.isBrandVoiceConfiguratorEnabled?.(auth.tenantId) ?? false,
+            (await options?.isBrandVoiceConfiguratorEnabled?.(auth.tenantId)) ??
+            false,
           // Business timezone so the web client can render UTC instants
           // in the tenant's local time (appointments, invoice dates,
           // dashboard buckets, etc.).
