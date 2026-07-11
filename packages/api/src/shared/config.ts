@@ -263,6 +263,32 @@ function validateFeatureRequiredConfig(env: Record<string, string | undefined>):
     );
   }
 
+  // ARCH-01 — REDIS_URL is a HARD requirement once the app runs on more than
+  // one replica. Redis is otherwise entirely optional: createRedisClient()
+  // returns null when REDIS_URL is unset/unreachable and every shared-state
+  // store FAILS OPEN to a per-replica in-memory path (rate-limit-store.ts,
+  // ws/redis-connection-registry.ts, ai/gateway/redis-tenant-quota.ts,
+  // dispatch presence + fan-out). That is correct for the single-replica
+  // deploy, but if numReplicas is raised past 1 without a shared Redis, every
+  // one of those stores silently degrades to per-process memory: rate limits
+  // become N× the configured limit, LLM per-tenant quota and WS connection
+  // caps stop being global, and voice/dispatch fan-out no longer crosses
+  // replicas — with no boot error and no health-check failure. The operator
+  // signals the replica count to the app via NUM_REPLICAS (kept in step with
+  // railway.toml's numReplicas); when it is >1 we require REDIS_URL so the
+  // degradation can never ship silently. Absent/unparseable/≤1 → single
+  // replica, unchanged (the current no-Redis prod deploy still boots).
+  const numReplicas = Number.parseInt(env.NUM_REPLICAS ?? '', 10);
+  if (Number.isFinite(numReplicas) && numReplicas > 1 && !env.REDIS_URL) {
+    missing.push(
+      `REDIS_URL (required when NUM_REPLICAS=${numReplicas} — with more than one ` +
+        'replica and no shared Redis, rate limiting degrades to N× the configured ' +
+        'limit, LLM tenant quota and WebSocket connection caps become per-process, ' +
+        'and voice/dispatch fan-out stops crossing replicas, all silently; set ' +
+        'REDIS_URL before raising numReplicas, or run a single replica)'
+    );
+  }
+
   if (missing.length > 0) {
     throw new Error(
       `Production feature configuration is missing required values:\n  ${missing.join('\n  ')}\n` +
