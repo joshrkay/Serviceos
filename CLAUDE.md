@@ -17,9 +17,9 @@ README explaining why):
 - /service-os-agent — Python LangGraph prototype with known defects.
 - /supabase_migration.sql — schema for the service-os-app prototype only;
   unrelated to the canonical in-code migrations (packages/api/src/db/schema.ts).
-- /rewrite — parallel ground-up rebuild (first-principles, command bus).
-  NOT the deploy target; never apply story/feature work there unless the
-  task says so explicitly. Canonical work goes in /packages.
+
+Note: /rewrite (a parallel ground-up rebuild prototype) was deleted 2026-07-09
+and no longer exists in the working tree (recoverable from git history).
 
 ## Core Patterns
 - All money: integer cents, never floating point

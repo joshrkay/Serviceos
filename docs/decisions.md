@@ -10,7 +10,7 @@ When implementing a story and facing an architectural choice not covered by the 
 
 ## Locked Decisions (from PRD planning)
 
-### D-001: Single-cloud AWS deployment
+### D-001: Single-cloud AWS deployment (superseded by D-016)
 **Date:** Pre-Phase 0
 **Decision:** AWS single-cloud SaaS with CDK in TypeScript
 **Rationale:** Team expertise, ECS/Fargate simplicity, integrated services (RDS, S3, SQS, CloudWatch)
@@ -211,3 +211,25 @@ not a change to D-004's posture.
   still requiring the cancellation path.
 - (c) Treating supervisorPresent as true when the flag is on — would leak permissiveness
   into all capture types.
+
+### D-016: Railway is the deploy target, not AWS/CDK (supersedes D-001)
+**Date:** 2026-07-11
+**Decision:** The canonical deploy target is **Railway**, defined by `/railway.toml` +
+`/Dockerfile` at the repo root, building and running `/packages` (api, web, shared). The
+AWS CDK stack from D-001 was never wired to any CI/CD pipeline that pushed to it; it lives
+as a quarantined, undeployed prototype under `/experiments/infra` (see
+`/experiments/README.md`). This decision formally supersedes D-001 rather than leaving it
+silently stale; removal of the `/experiments/infra` files themselves is tracked separately
+(blocked on `packages/api/test/decisions/decisions.test.ts` and
+`packages/api/test/contracts/python-agent-contract.test.ts`, which assert against
+`/experiments/service-os-agent` for founding decisions D9/A1/A2 — see repo cleanup notes).
+**Rationale:** D-001 was a pre-Phase-0 intent that the actual build never executed on —
+the ECR image the CDK stack referenced was never pushed by CI, and Railway became the
+running production system. Documenting the switch explicitly (instead of letting D-001
+stand uncontested) prevents future readers from assuming AWS/CDK is still the target.
+**Story:** 2026-07 repository cleanup (experiments/ quarantine review).
+**Alternatives rejected:**
+- Leave D-001 unmarked and let README/CLAUDE.md drift as the only signal. Rejected:
+  the decision log is the canonical place architectural reversals get recorded.
+- Delete D-001 outright. Rejected: the decision log is append-only history; superseding
+  in place preserves the record of why the original choice was made and abandoned.
