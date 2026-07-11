@@ -117,4 +117,38 @@ describe('Postgres integration — identifyCaller phone_normalized reconciliatio
     });
     expect(result).toEqual({ status: 'unknown' });
   });
+
+  it('does NOT match a US customer when a non-NANP international caller shares the last 10 digits', async () => {
+    // A US customer stored as the bare 10-digit form `5125550777` (valid NANP).
+    const usId = await insertCustomer(
+      pool,
+      tenant.tenantId,
+      tenant.userId,
+      'Collision US',
+      '5125550777',
+    );
+    const col = await pool.query<{ phone_normalized: string }>(
+      'SELECT phone_normalized FROM customers WHERE id = $1',
+      [usId],
+    );
+    expect(col.rows[0].phone_normalized).toBe('5125550777');
+
+    // A non-NANP international caller `+445125550777` whose trailing 10 digits
+    // (`5125550777`) collide with the US customer. It must NOT attach.
+    const result = await identifyCaller({
+      tenantId: tenant.tenantId,
+      fromPhone: '+445125550777',
+      pool,
+    });
+    expect(result).toEqual({ status: 'unknown' });
+
+    // Control: the same US customer is still reachable by its real NANP caller-ID.
+    const nanp = await identifyCaller({
+      tenantId: tenant.tenantId,
+      fromPhone: '5125550777',
+      pool,
+    });
+    expect(nanp.status).toBe('matched');
+    if (nanp.status === 'matched') expect(nanp.customerId).toBe(usId);
+  });
 });

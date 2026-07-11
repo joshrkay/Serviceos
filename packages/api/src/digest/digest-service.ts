@@ -517,10 +517,48 @@ export function renderDigestSmsSegments(input: RenderDigestSmsInput): string[] {
   if (current !== '') bodies.push(current);
 
   const n = bodies.length;
-  return bodies.map((body, i) => {
-    const withPrefix = n > 1 ? `(${i + 1}/${n}) ${body.trimStart()}` : body;
-    return withPrefix.length > hardMax ? withPrefix.slice(0, hardMax) : withPrefix;
-  });
+  const segments: string[] = [];
+  for (let i = 0; i < n; i++) {
+    const prefix = n > 1 ? `(${i + 1}/${n}) ` : '';
+    const bodyText = n > 1 ? bodies[i].trimStart() : bodies[i];
+    // Cap the BODY (URL-aware), then re-attach the prefix, so the `(k/n)`
+    // marker is never eaten by truncation and the hard ceiling still holds.
+    const capped = capSegmentPreservingUrl(bodyText, hardMax - prefix.length);
+    // A null cap means even the bare one-tap URL can't fit under the ceiling —
+    // omit the entry rather than emit a chunk with a truncated signed token.
+    if (capped === null) continue;
+    segments.push(prefix + capped);
+  }
+  return segments;
+}
+
+/**
+ * Truncate an over-long SMS segment body WITHOUT slicing through a trailing
+ * one-tap URL. Approval/invoice chunks place the signed one-tap URL last, so a
+ * blind tail slice would corrupt the token and produce an unusable
+ * approval/invoice link. When the body exceeds `max` we instead shorten the
+ * leading (non-URL) label and keep the full URL intact. If even the URL alone
+ * cannot fit under `max`, return `null` so the caller drops the entry rather
+ * than sending a truncated token. Bodies with no URL fall back to a plain tail
+ * slice (safe — no token to corrupt).
+ */
+function capSegmentPreservingUrl(text: string, max: number): string | null {
+  if (text.length <= max) return text;
+  const matches = [...text.matchAll(/https?:\/\/\S+/g)];
+  if (matches.length === 0) {
+    // No URL to protect — a plain-text tail slice can't corrupt a token.
+    return text.slice(0, max);
+  }
+  const last = matches[matches.length - 1];
+  const urlStart = last.index ?? text.indexOf(last[0]);
+  const urlTail = text.slice(urlStart); // full URL + any trailing chars
+  // Reserve one char for the space separating the (shortened) label from the
+  // URL. If the URL itself can't fit, never truncate it — signal a drop.
+  if (urlTail.length + 1 > max) return null;
+  const label = text.slice(0, urlStart).trimEnd();
+  const room = max - urlTail.length - 1; // chars left for the label
+  const shortLabel = room > 0 ? label.slice(0, room).trimEnd() : '';
+  return shortLabel.length > 0 ? `${shortLabel} ${urlTail}` : urlTail;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

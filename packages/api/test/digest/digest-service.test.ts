@@ -635,6 +635,52 @@ describe('renderDigestSmsSegments', () => {
     expect(renderDigestSmsSegments(input)).toEqual(renderDigestSmsSegments(input));
   });
 
+  it('never slices through a one-tap URL when a single chunk exceeds the hard cap (money/link integrity)', () => {
+    // A long customer name + a long signed one-tap URL pushes a single approval
+    // chunk past the 480-char hard ceiling. The URL sits at the END of the
+    // chunk, so a blind tail slice would corrupt the signed token → an unusable
+    // approval link. Assert the FULL URL survives intact and the token is never
+    // cut, while a normal-length approval in the same digest still renders fully.
+    const hugeToken = 'y'.repeat(240);
+    const bigUrl = `https://api.example.com/public/proposals/one-tap-approve?token=${hugeToken}`;
+    const normalUrl = 'https://x.co/normal';
+    const longName = 'A'.repeat(260); // long label pushes the chunk over the cap
+
+    const payload = basePayload({
+      pendingApprovals: {
+        totalCount: 2,
+        top: [
+          { proposalId: 'p-big', proposalType: 'draft_estimate', summary: 's', customerName: longName, amountCents: 45000 },
+          { proposalId: 'p-norm', proposalType: 'send_invoice', summary: 's', customerName: 'Lopez', amountCents: 12000 },
+        ],
+      },
+    });
+    const segments = renderDigestSmsSegments({
+      payload,
+      deepLinkUrl: DEEP,
+      approvalLinks: [
+        { approval: payload.pendingApprovals.top[0], url: bigUrl },
+        { approval: payload.pendingApprovals.top[1], url: normalUrl },
+      ],
+    });
+    const body = combine(segments);
+
+    // Hard ceiling still honored on every segment.
+    for (const s of segments) expect(s.length).toBeLessThanOrEqual(DIGEST_SMS_MAX_CHARS);
+    // The full signed one-tap URL survives verbatim — the token is never sliced.
+    expect(body).toContain(bigUrl);
+    expect(body).toContain(hugeToken);
+    // The normal-length approval still renders its full URL.
+    expect(body).toContain(normalUrl);
+    // A truncated variant of the signed URL (token cut short) must never appear
+    // as the tail of a segment.
+    for (const s of segments) {
+      if (s.includes('one-tap-approve') && !s.includes(bigUrl)) {
+        throw new Error(`segment carries a truncated one-tap URL: ${s.slice(-60)}`);
+      }
+    }
+  });
+
   it('omits the approvals section and reflection lines entirely when absent', () => {
     const body = combine(
       renderDigestSmsSegments({ payload: basePayload(), deepLinkUrl: DEEP, approvalLinks: [] }),
