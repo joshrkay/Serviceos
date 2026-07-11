@@ -224,8 +224,8 @@ describe('DigestPage', () => {
   });
 
   describe('WS6 supervisor checks section', () => {
-    it('renders "Checked" + flagged count when reviews ran today', async () => {
-      const withChecks = { ...basePayload, supervisorChecks: { checked: 12, flagged: 2 } };
+    it('renders "Checked" + flagged count when reviews ran today (no fixed)', async () => {
+      const withChecks = { ...basePayload, supervisorChecks: { checked: 12, flagged: 2, fixed: 0 } };
       mockFetch.mockResolvedValue(digestResponse(withChecks));
       renderAt('/digest/2026-06-10');
       await screen.findByText('A solid day.');
@@ -235,8 +235,17 @@ describe('DigestPage', () => {
       expect(screen.getByText('2 flagged')).toBeInTheDocument();
     });
 
+    // WS22 — flaggedFixed.
+    it('renders the fixed count alongside flagged when fixed > 0', async () => {
+      const withChecks = { ...basePayload, supervisorChecks: { checked: 12, flagged: 2, fixed: 1 } };
+      mockFetch.mockResolvedValue(digestResponse(withChecks));
+      renderAt('/digest/2026-06-10');
+      await screen.findByText('A solid day.');
+      expect(screen.getByText('2 flagged, 1 fixed')).toBeInTheDocument();
+    });
+
     it('renders "None flagged" when nothing was flagged', async () => {
-      const withChecks = { ...basePayload, supervisorChecks: { checked: 5, flagged: 0 } };
+      const withChecks = { ...basePayload, supervisorChecks: { checked: 5, flagged: 0, fixed: 0 } };
       mockFetch.mockResolvedValue(digestResponse(withChecks));
       renderAt('/digest/2026-06-10');
       await screen.findByText('A solid day.');

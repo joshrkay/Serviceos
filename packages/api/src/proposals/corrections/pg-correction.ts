@@ -10,7 +10,7 @@
  */
 import { Pool } from 'pg';
 import { PgBaseRepository } from '../../db/pg-base';
-import type { Correction, CorrectionRepository } from './correction';
+import type { Correction, CorrectionRepeatWindow, CorrectionRepository } from './correction';
 
 function mapRow(row: Record<string, unknown>): Correction {
   return {
@@ -118,6 +118,35 @@ export class PgCorrectionRepository extends PgBaseRepository implements Correcti
         [tenantId, proposalId],
       );
       return result.rows.map(mapRow);
+    });
+  }
+
+  /**
+   * WS22 — "same mistake twice" weekly rate. Ranks EVERY tenant correction
+   * (not just the window) chronologically within its (intent, field)
+   * partition via ROW_NUMBER(); a row ranked > 1 has an earlier row in the
+   * same partition (in-window or not) — that's a "repeat". The window only
+   * bounds which rows get COUNTED, not which rows establish the ranking, so
+   * a repeat of a mistake first made last month still counts correctly this
+   * week. `id` breaks ties on identical `created_at` for determinism.
+   */
+  async countRepeatsInWindow(tenantId: string, from: Date, to: Date): Promise<CorrectionRepeatWindow> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query<{ total: string; repeats: string }>(
+        `WITH ranked AS (
+           SELECT created_at,
+                  ROW_NUMBER() OVER (PARTITION BY intent, field ORDER BY created_at ASC, id ASC) AS rn
+             FROM corrections
+            WHERE tenant_id = $1
+         )
+         SELECT
+           COUNT(*) FILTER (WHERE created_at >= $2 AND created_at < $3)::int AS total,
+           COUNT(*) FILTER (WHERE created_at >= $2 AND created_at < $3 AND rn > 1)::int AS repeats
+         FROM ranked`,
+        [tenantId, from, to],
+      );
+      const row = result.rows[0];
+      return { total: Number(row?.total ?? 0), repeats: Number(row?.repeats ?? 0) };
     });
   }
 }

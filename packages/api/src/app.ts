@@ -5432,6 +5432,8 @@ export function createApp(): AppWithLifecycle {
             correctionLessonRepo,
             // WS6 — "Checked: N proposals, M flagged" (supervisor reviews).
             supervisorReviewRepo: supervisorReviewsRepo,
+            // WS22 — "K fixed" (flagged proposal edited after review).
+            auditRepo,
           },
           listTenantIds: async () => {
             if (!pool) return [];
@@ -5605,8 +5607,9 @@ export function createApp(): AppWithLifecycle {
         void runAsLeader(SWEEP_LOCK.weeklyFeedback, async () => {
           await runWeeklyFeedbackSweep({
             auditRepo,
+            // WS22 — "same mistake twice" weekly rate (repeatCorrections).
             buildSnapshot: (tenantId, weekStart, weekEnd) =>
-              buildWeeklyFeedbackSnapshot(weeklyFeedbackPool, tenantId, weekStart, weekEnd),
+              buildWeeklyFeedbackSnapshot(weeklyFeedbackPool, tenantId, weekStart, weekEnd, correctionRepo),
             resolveOwnerEmail: async (tenantId) => {
               const r = await weeklyFeedbackPool.query(
                 'SELECT owner_email FROM tenants WHERE id = $1',

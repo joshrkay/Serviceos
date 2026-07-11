@@ -133,6 +133,81 @@ describe('Story 3.9 — InMemoryCorrectionRepository', () => {
   });
 });
 
+describe('WS22 — InMemoryCorrectionRepository.countRepeatsInWindow', () => {
+  function row(over: Partial<Correction>): Correction {
+    return {
+      id: Math.random().toString(36).slice(2),
+      tenantId: 'tenant-1',
+      proposalId: 'prop-1',
+      intent: 'create_customer',
+      field: 'name',
+      beforeValue: 'a',
+      afterValue: 'b',
+      actorId: 'user-1',
+      createdAt: new Date(),
+      ...over,
+    };
+  }
+
+  const from = new Date('2026-06-15T00:00:00Z');
+  const to = new Date('2026-06-22T00:00:00Z');
+
+  it('total counts only corrections in [from, to); repeats requires a same (intent, field) row strictly earlier', async () => {
+    const repo = new InMemoryCorrectionRepository();
+    await repo.recordMany([
+      // First-ever occurrence of (create_customer, name) — not a repeat, even though it's in-window.
+      row({ intent: 'create_customer', field: 'name', createdAt: new Date('2026-06-16T00:00:00Z') }),
+      // Second occurrence of the same pair, later in the window — a repeat.
+      row({ intent: 'create_customer', field: 'name', createdAt: new Date('2026-06-17T00:00:00Z') }),
+      // A different field — its own partition, first occurrence, not a repeat.
+      row({ intent: 'create_customer', field: 'phone', createdAt: new Date('2026-06-18T00:00:00Z') }),
+    ]);
+    const result = await repo.countRepeatsInWindow!('tenant-1', from, to);
+    expect(result).toEqual({ total: 3, repeats: 1 });
+  });
+
+  it('a repeat still counts when the EARLIER row of the pair is outside the window', async () => {
+    const repo = new InMemoryCorrectionRepository();
+    await repo.recordMany([
+      // Outside the window (before `from`) — establishes the (intent, field) pair.
+      row({ intent: 'create_customer', field: 'name', createdAt: new Date('2026-06-01T00:00:00Z') }),
+      // Inside the window — repeats the pair first seen last week, outside the window.
+      row({ intent: 'create_customer', field: 'name', createdAt: new Date('2026-06-16T00:00:00Z') }),
+    ]);
+    const result = await repo.countRepeatsInWindow!('tenant-1', from, to);
+    // Only the in-window row is counted in `total`; it IS a repeat.
+    expect(result).toEqual({ total: 1, repeats: 1 });
+  });
+
+  it('the window is [from, to) — the boundary at `to` is excluded', async () => {
+    const repo = new InMemoryCorrectionRepository();
+    await repo.recordMany([
+      row({ intent: 'create_customer', field: 'name', createdAt: from }), // exactly `from` — included
+      row({ intent: 'create_customer', field: 'name', createdAt: to }), // exactly `to` — excluded
+    ]);
+    const result = await repo.countRepeatsInWindow!('tenant-1', from, to);
+    expect(result.total).toBe(1);
+  });
+
+  it('returns {total: 0, repeats: 0} for a tenant/window with no corrections', async () => {
+    const repo = new InMemoryCorrectionRepository();
+    const result = await repo.countRepeatsInWindow!('tenant-1', from, to);
+    expect(result).toEqual({ total: 0, repeats: 0 });
+  });
+
+  it('isolates the count per tenant', async () => {
+    const repo = new InMemoryCorrectionRepository();
+    await repo.recordMany([
+      row({ tenantId: 'tenant-1', intent: 'create_customer', field: 'name', createdAt: new Date('2026-06-01T00:00:00Z') }),
+      row({ tenantId: 'tenant-1', intent: 'create_customer', field: 'name', createdAt: new Date('2026-06-16T00:00:00Z') }),
+      // Same (intent, field) shape on a different tenant must not leak into tenant-1's repeat count.
+      row({ tenantId: 'tenant-2', intent: 'create_customer', field: 'name', createdAt: new Date('2026-06-16T00:00:00Z') }),
+    ]);
+    expect(await repo.countRepeatsInWindow!('tenant-1', from, to)).toEqual({ total: 1, repeats: 1 });
+    expect(await repo.countRepeatsInWindow!('tenant-2', from, to)).toEqual({ total: 1, repeats: 0 });
+  });
+});
+
 describe('Story 3.9 — editProposal records corrections', () => {
   const tenantId = 'tenant-1';
   const actorId = 'user-1';

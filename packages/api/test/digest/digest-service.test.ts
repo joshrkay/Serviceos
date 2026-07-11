@@ -30,6 +30,7 @@ import type { CustomerRepository } from '../../src/customers/customer';
 import type { SettingsRepository, TenantSettings } from '../../src/settings/settings';
 import type { FeedbackResponseRepository, RatingCounts } from '../../src/feedback/feedback-response';
 import type { CorrectionLesson, CorrectionLessonRepository } from '../../src/learning/corrections/correction-lesson';
+import type { AuditEvent, AuditRepository } from '../../src/audit/audit';
 import { buildLineItem, calculateDocumentTotals } from '../../src/shared/billing-engine';
 
 const TENANT = 'tenant-1';
@@ -108,6 +109,16 @@ interface DepsOverrides {
   appliedInstructionProposals?: Proposal[];
   /** WS10 — when false, omit findAppliedInstructionsForDay entirely (optional-method path). */
   withAppliedInstructionsMethod?: boolean;
+  /**
+   * WS22 — audit events keyed by proposalId, returned from
+   * auditRepo.findByEntity(tenant, 'proposal', proposalId). Only eventType +
+   * createdAt matter for the flaggedFixed computation.
+   */
+  auditEventsByProposal?: Record<string, Array<{ eventType: string; createdAt: Date }>>;
+  /** WS22 — when false, omit auditRepo entirely (optional-dep path). */
+  withAuditRepo?: boolean;
+  /** WS22 — records each proposalId findByEntity was called with (dedup assertions). */
+  onFindByEntity?: (proposalId: string) => void;
 }
 
 function makeDeps(o: DepsOverrides = {}): DigestComputeDeps {
@@ -171,6 +182,27 @@ function makeDeps(o: DepsOverrides = {}): DigestComputeDeps {
               return o.supervisorReviews ?? [];
             },
           } as unknown as SupervisorReviewRepository,
+        }),
+    ...(o.withAuditRepo === false
+      ? {}
+      : {
+          auditRepo: {
+            findByEntity: async (_t: string, _entityType: string, proposalId: string) => {
+              o.onFindByEntity?.(proposalId);
+              return (o.auditEventsByProposal?.[proposalId] ?? []).map(
+                (e): AuditEvent => ({
+                  id: `ae-${Math.random()}`,
+                  tenantId: TENANT,
+                  actorId: 'owner',
+                  actorRole: 'owner',
+                  eventType: e.eventType,
+                  entityType: 'proposal',
+                  entityId: proposalId,
+                  createdAt: e.createdAt,
+                }),
+              );
+            },
+          } as unknown as AuditRepository,
         }),
     now: () => NOW,
   };
@@ -499,7 +531,7 @@ describe('computeDigestPayload', () => {
           supervisorReview({ verdict: 'error' }),
         ],
       }));
-      expect(result.supervisorChecks).toEqual({ checked: 5, flagged: 2 });
+      expect(result.supervisorChecks).toEqual({ checked: 5, flagged: 2, fixed: 0 });
     });
 
     it('omits supervisorChecks when no reviews ran today', async () => {
@@ -526,6 +558,89 @@ describe('computeDigestPayload', () => {
       // resolves for `today` (America/Chicago 2026-06-10).
       expect(seen!.from.toISOString()).toBe('2026-06-10T05:00:00.000Z');
       expect(seen!.to.toISOString()).toBe('2026-06-11T05:00:00.000Z');
+    });
+
+    // ─── WS22: flaggedFixed (edited-after-flag) ────────────────────────────
+
+    it('counts fixed when a flagged proposal is edited after the review, same day', async () => {
+      const reviewTime = new Date('2026-06-10T12:00:00Z');
+      const editTime = new Date('2026-06-10T13:00:00Z');
+      const result = await computeDigestPayload(TENANT, DATE, makeDeps({
+        supervisorReviews: [supervisorReview({ proposalId: 'p1', verdict: 'flag', createdAt: reviewTime })],
+        auditEventsByProposal: { p1: [{ eventType: 'proposal.edited', createdAt: editTime }] },
+      }));
+      expect(result.supervisorChecks).toEqual({ checked: 1, flagged: 1, fixed: 1 });
+    });
+
+    it('a proposal.sms_edited audit event also counts as fixed', async () => {
+      const reviewTime = new Date('2026-06-10T12:00:00Z');
+      const editTime = new Date('2026-06-10T13:00:00Z');
+      const result = await computeDigestPayload(TENANT, DATE, makeDeps({
+        supervisorReviews: [supervisorReview({ proposalId: 'p1', verdict: 'hold', createdAt: reviewTime })],
+        auditEventsByProposal: { p1: [{ eventType: 'proposal.sms_edited', createdAt: editTime }] },
+      }));
+      expect(result.supervisorChecks).toEqual({ checked: 1, flagged: 1, fixed: 1 });
+    });
+
+    it('does not count fixed when the flagged proposal was never edited', async () => {
+      const result = await computeDigestPayload(TENANT, DATE, makeDeps({
+        supervisorReviews: [supervisorReview({ proposalId: 'p1', verdict: 'flag' })],
+      }));
+      expect(result.supervisorChecks).toEqual({ checked: 1, flagged: 1, fixed: 0 });
+    });
+
+    it('does not count fixed when the edit happened BEFORE the flag (stale edit)', async () => {
+      const reviewTime = new Date('2026-06-10T13:00:00Z');
+      const editTime = new Date('2026-06-10T12:00:00Z'); // before the review
+      const result = await computeDigestPayload(TENANT, DATE, makeDeps({
+        supervisorReviews: [supervisorReview({ proposalId: 'p1', verdict: 'flag', createdAt: reviewTime })],
+        auditEventsByProposal: { p1: [{ eventType: 'proposal.edited', createdAt: editTime }] },
+      }));
+      expect(result.supervisorChecks).toEqual({ checked: 1, flagged: 1, fixed: 0 });
+    });
+
+    it('does not count an edit that falls outside the digest day window', async () => {
+      const reviewTime = new Date('2026-06-10T12:00:00Z');
+      const editTime = new Date('2026-06-11T06:00:00Z'); // after today.end (05:00Z next day)
+      const result = await computeDigestPayload(TENANT, DATE, makeDeps({
+        supervisorReviews: [supervisorReview({ proposalId: 'p1', verdict: 'flag', createdAt: reviewTime })],
+        auditEventsByProposal: { p1: [{ eventType: 'proposal.edited', createdAt: editTime }] },
+      }));
+      expect(result.supervisorChecks).toEqual({ checked: 1, flagged: 1, fixed: 0 });
+    });
+
+    it('an unrelated audit event type on the same proposal does not count as fixed', async () => {
+      const reviewTime = new Date('2026-06-10T12:00:00Z');
+      const editTime = new Date('2026-06-10T13:00:00Z');
+      const result = await computeDigestPayload(TENANT, DATE, makeDeps({
+        supervisorReviews: [supervisorReview({ proposalId: 'p1', verdict: 'flag', createdAt: reviewTime })],
+        auditEventsByProposal: { p1: [{ eventType: 'proposal.viewed', createdAt: editTime }] },
+      }));
+      expect(result.supervisorChecks).toEqual({ checked: 1, flagged: 1, fixed: 0 });
+    });
+
+    it('only looks up audit events for flagged proposals, deduped across reviews sharing a proposal', async () => {
+      const seen: string[] = [];
+      const reviewTime = new Date('2026-06-10T12:00:00Z');
+      const result = await computeDigestPayload(TENANT, DATE, makeDeps({
+        supervisorReviews: [
+          supervisorReview({ proposalId: 'p-pass', verdict: 'pass', createdAt: reviewTime }),
+          supervisorReview({ proposalId: 'p1', verdict: 'flag', createdAt: reviewTime }),
+          supervisorReview({ proposalId: 'p1', verdict: 'hold', createdAt: reviewTime }),
+        ],
+        onFindByEntity: (proposalId) => seen.push(proposalId),
+      }));
+      // Deduped to one lookup for p1; the pass-verdict proposal is never looked up.
+      expect(seen).toEqual(['p1']);
+      expect(result.supervisorChecks).toEqual({ checked: 3, flagged: 2, fixed: 0 });
+    });
+
+    it('defaults fixed to 0 without throwing when the auditRepo dep is absent entirely', async () => {
+      const result = await computeDigestPayload(TENANT, DATE, makeDeps({
+        supervisorReviews: [supervisorReview({ verdict: 'flag' })],
+        withAuditRepo: false,
+      }));
+      expect(result.supervisorChecks).toEqual({ checked: 1, flagged: 1, fixed: 0 });
     });
   });
 
@@ -973,19 +1088,19 @@ describe('renderDigestSmsSegments', () => {
     expect(body).not.toContain('Applied your rule');
   });
 
-  it('renders the supervisor-checks line: flagged and none-flagged variants', () => {
+  it('renders the supervisor-checks line: flagged (with fixed) and none-flagged variants', () => {
     const flaggedBody = combine(
       renderDigestSmsSegments({
-        payload: basePayload({ supervisorChecks: { checked: 12, flagged: 2 } }),
+        payload: basePayload({ supervisorChecks: { checked: 12, flagged: 2, fixed: 1 } }),
         deepLinkUrl: DEEP,
         approvalLinks: [],
       }),
     );
-    expect(flaggedBody).toContain('Checked: 12 proposals, 2 flagged.');
+    expect(flaggedBody).toContain('Checked: 12 proposals, 2 flagged, 1 fixed.');
 
     const noneFlaggedBody = combine(
       renderDigestSmsSegments({
-        payload: basePayload({ supervisorChecks: { checked: 12, flagged: 0 } }),
+        payload: basePayload({ supervisorChecks: { checked: 12, flagged: 0, fixed: 0 } }),
         deepLinkUrl: DEEP,
         approvalLinks: [],
       }),

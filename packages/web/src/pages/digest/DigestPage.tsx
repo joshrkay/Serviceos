@@ -70,11 +70,13 @@ interface DigestLearnedItem {
   summary: string;
 }
 
-// WS6 — supervisor-review reflection. Counts only (no "fixed" nuance — see
-// packages/api digest-service.ts DigestSupervisorChecks doc comment).
+// WS6 — supervisor-review reflection. WS22 amendment: `fixed` is grounded in
+// an edited-after-flag audit signal (see packages/api digest-service.ts
+// DigestSupervisorChecks doc comment for the exact definition).
 interface DigestSupervisorChecks {
   checked: number;
   flagged: number;
+  fixed: number;
 }
 
 // D-015 amendment — autonomous booking lane reflection (see packages/api
@@ -475,7 +477,9 @@ function DigestBody({
           </p>
           <p className="mt-0.5 text-sm text-slate-500">
             {p.supervisorChecks.flagged > 0
-              ? `${p.supervisorChecks.flagged} flagged`
+              ? `${p.supervisorChecks.flagged} flagged${
+                  p.supervisorChecks.fixed > 0 ? `, ${p.supervisorChecks.fixed} fixed` : ''
+                }`
               : 'None flagged'}
           </p>
         </SectionCard>

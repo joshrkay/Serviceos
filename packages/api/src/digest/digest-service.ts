@@ -27,6 +27,7 @@ import type { SettingsRepository } from '../settings/settings';
 import type { CorrectionLessonRepository } from '../learning/corrections/correction-lesson';
 import type { SupervisorReviewRepository } from '../ai/supervisor/reviews-repo';
 import type { SupervisorReview } from '../ai/supervisor/types';
+import type { AuditRepository } from '../audit/audit';
 import { prioritizeProposals } from '../proposals/prioritization';
 import { AUTO_APPROVE_BLOCKING_CONFIDENCE_LEVELS } from '../proposals/auto-approve';
 import { findJobsRequiringInvoicing } from '../invoices/invoicing-queue';
@@ -123,17 +124,29 @@ export interface DigestUnsureItem {
 
 /**
  * WS6 — supervisor-review reflection ("Checked: N proposals, M flagged").
- * Counts only: `supervisor_reviews` has no cheap "was this later fixed"
- * signal (a 'flag' verdict just means markers were attached and the
- * proposal still dispatched; a 'hold' means the owner must act, not that
- * anything was already corrected), so a `flaggedFixed` count was dropped
- * rather than approximated from unrelated correction-lesson data.
+ * WS22 amendment: `fixed` now exists with a grounded definition.
+ * `supervisor_reviews` itself has no "was this fixed" column, but the audit
+ * trail does: a flagged review (verdict 'flag' or 'hold') counts as `fixed`
+ * when that SAME proposalId later carries a `proposal.edited` or
+ * `proposal.sms_edited` audit event whose `createdAt` is strictly after the
+ * review's `createdAt` and still inside the digest day window. This is a
+ * real, grounded "the owner (or an SMS reply) touched this after the
+ * supervisor flagged it" signal — not an approximation from unrelated
+ * correction-lesson data (which is what made the original WS6 count
+ * un-groundable and got it dropped).
  */
 export interface DigestSupervisorChecks {
   /** Reviews run today (capped at DIGEST_MAX_REVIEWS — see the fetch). */
   checked: number;
   /** Of those, verdict 'flag' or 'hold' (reviews.reasons.length > 0). */
   flagged: number;
+  /**
+   * WS22 — of the flagged reviews, how many were followed same-day by a
+   * proposal.edited/proposal.sms_edited audit event on that proposal. 0 when
+   * flagged is 0 (never omitted alongside `checked`/`flagged` — always a
+   * number when supervisorChecks itself is present).
+   */
+  fixed: number;
 }
 
 /**
@@ -556,12 +569,16 @@ function learnedSmsLine(items: DigestLearnedItem[] | undefined): string {
 
 /**
  * WS6 — compact "Checked: N proposals, M flagged" supervisor-review line,
- * e.g. "Checked: 12 proposals, 2 flagged." or "Checked: 12 proposals, none
- * flagged." when nothing was flagged. Absent → empty string.
+ * e.g. "Checked: 12 proposals, none flagged." when nothing was flagged.
+ * WS22 amendment: when something WAS flagged, the fixed count rides along —
+ * "Checked: 12 proposals, 2 flagged, 1 fixed." — only ever shown when
+ * flagged > 0 (M>0); the none-flagged case has no fixed to report. Absent →
+ * empty string.
  */
 function supervisorChecksSmsLine(checks: DigestSupervisorChecks | undefined): string {
   if (!checks || checks.checked === 0) return '';
-  const flaggedPart = checks.flagged > 0 ? `${checks.flagged} flagged` : 'none flagged';
+  const flaggedPart =
+    checks.flagged > 0 ? `${checks.flagged} flagged, ${checks.fixed} fixed` : 'none flagged';
   return ` Checked: ${checks.checked} ${checks.checked === 1 ? 'proposal' : 'proposals'}, ${flaggedPart}.`;
 }
 
@@ -775,6 +792,16 @@ export interface DigestComputeDeps {
    * absent, both simply omit the supervisorChecks section.
    */
   supervisorReviewRepo?: SupervisorReviewRepository;
+  /**
+   * WS22 — drives `DigestSupervisorChecks.fixed`: for each flagged review,
+   * `auditRepo.findByEntity(tenantId, 'proposal', proposalId)` is called
+   * (deduped per proposalId, so O(distinct flagged proposals) — bounded by
+   * DIGEST_MAX_REVIEWS) and filtered in-memory for a
+   * proposal.edited/proposal.sms_edited event after the review. Optional —
+   * absent repo simply yields `fixed: 0` (never blocks the rest of the
+   * digest; matches the "absent optional dep" convention elsewhere here).
+   */
+  auditRepo?: AuditRepository;
   /** Injectable clock — overdue is "as of now". Defaults to `new Date()`. */
   now?: () => Date;
 }
@@ -969,11 +996,42 @@ export async function computeDigestPayload(
   // WS6 — "Checked: N proposals, M flagged" supervisor-review reflection.
   // Omitted when no reviews ran today (checked===0), per the "omit if zero"
   // convention shared with unsureAbout/learnedToday.
+  //
+  // WS22 — `fixed`: for each flagged review, was there a proposal.edited or
+  // proposal.sms_edited audit event on that SAME proposalId, strictly after
+  // the review's createdAt and still inside today's window? One
+  // findByEntity call per DISTINCT flagged proposalId (not per review — a
+  // proposal can carry more than one review) keeps this O(distinct flagged
+  // proposals), bounded by DIGEST_MAX_REVIEWS regardless of how many
+  // proposals were actually flagged.
+  const flaggedReviews = supervisorReviews.filter((r) => r.verdict === 'flag' || r.verdict === 'hold');
+  const flaggedProposalIds = Array.from(new Set(flaggedReviews.map((r) => r.proposalId)));
+  const editEventsByProposal = new Map<string, Date[]>();
+  if (deps.auditRepo && flaggedProposalIds.length > 0) {
+    await Promise.all(
+      flaggedProposalIds.map(async (proposalId) => {
+        const events = await deps.auditRepo!.findByEntity(tenantId, 'proposal', proposalId);
+        editEventsByProposal.set(
+          proposalId,
+          events
+            .filter((e) => e.eventType === 'proposal.edited' || e.eventType === 'proposal.sms_edited')
+            .map((e) => e.createdAt),
+        );
+      }),
+    );
+  }
+  const fixedCount = flaggedReviews.filter((r) => {
+    const edits = editEventsByProposal.get(r.proposalId);
+    if (!edits) return false;
+    return edits.some((t) => t.getTime() > r.createdAt.getTime() && t.getTime() < today.end.getTime());
+  }).length;
+
   const supervisorChecks: DigestSupervisorChecks | undefined =
     supervisorReviews.length > 0
       ? {
           checked: supervisorReviews.length,
-          flagged: supervisorReviews.filter((r) => r.verdict === 'flag' || r.verdict === 'hold').length,
+          flagged: flaggedReviews.length,
+          fixed: fixedCount,
         }
       : undefined;
 

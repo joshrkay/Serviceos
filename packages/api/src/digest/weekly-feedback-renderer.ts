@@ -72,6 +72,17 @@ export function renderWeeklyFeedbackEmail(
 
   const greeting = opts.businessName ? `Here’s ${opts.businessName}’s week (${range}).` : `Here’s your week (${range}).`;
 
+  // WS22 — "same mistake twice" honest line. Omitted when the snapshot
+  // carries no repeatCorrections (repo/method not wired, or zero corrections
+  // this week — the builder already applies the "omit if zero" rule).
+  const rc = snapshot.repeatCorrections;
+  const repeatCorrectionsLine =
+    rc && rc.total > 0
+      ? `Of ${rc.total} correction${rc.total === 1 ? '' : 's'} this week, ${rc.repeats} ${
+          rc.repeats === 1 ? 'was a repeat' : 'were repeats'
+        } of an earlier correction (${rc.rate}%).`
+      : null;
+
   const textLines = [
     greeting,
     '',
@@ -80,6 +91,7 @@ export function renderWeeklyFeedbackEmail(
     ...section('Wins', suggestions.wins),
     ...section('Worth watching', suggestions.misses),
     ...section('Suggested next steps', suggestions.actions),
+    ...(repeatCorrectionsLine ? [repeatCorrectionsLine, ''] : []),
   ];
   const text = textLines.join('\n').trim();
 
@@ -103,6 +115,9 @@ export function renderWeeklyFeedbackEmail(
     list('Wins', suggestions.wins),
     list('Worth watching', suggestions.misses),
     list('Suggested next steps', suggestions.actions),
+    repeatCorrectionsLine
+      ? `<p style="color:#64748b;font-size:13px;margin-top:16px">${escapeHtml(repeatCorrectionsLine)}</p>`
+      : '',
     `</div>`,
   ].join('');
 
