@@ -105,13 +105,8 @@ import {
   type AutonomousCloseIneligibleReason,
 } from '../../proposals/autonomous-close-lane';
 import {
-  assembleCloseChain,
-  sanctionCloseChain,
-  executeCloseChain,
-  sendCloseUndoSms,
   queueCloseFallbackChain,
   AUTONOMOUS_CLOSE_ACTOR,
-  type CloseChainExecutor,
 } from '../../proposals/autonomous-close-execution';
 import { resolveAndPlaceAppointmentHold } from '../scheduling/place-hold';
 import { formatForReadback } from '../scheduling/resolve-datetime';
@@ -218,11 +213,10 @@ function mapNotifyReasonToSkillReason(
 const SMS_BEFORE_BRIDGE_TIMEOUT_MS = 4000;
 
 /**
- * WS18a — honest acknowledgment spoken when the caller assents to book a live
- * quote, BEFORE the sanctioned on-call D-018 close executor exists (that lands
- * in WS18c). The drafted quote is already queued for the owner; we make NO
- * booking claim. WS18c replaces `handlePostQuoteClose` with the full close
- * flow (strict confirm → consent capture → lane → synchronous close executor).
+ * Honest acknowledgment spoken when the caller assents to book a live quote but
+ * a pre-consent gate failed (or a repeated affirmative arrives after the owner
+ * chain was already queued). The drafted quote is staged for OWNER approval; we
+ * make NO booking claim — nothing is confirmed until the owner taps approve.
  */
 const POST_QUOTE_AFFIRMATIVE_INTERIM =
   "Perfect — I'll have the owner finalize that and send you the full quote and booking link by text.";
@@ -243,34 +237,13 @@ export const SMS_CONSENT_DECLINE_FALLBACK =
   "No problem — I'll have the owner send that over, and you'll get a text shortly.";
 
 /**
- * WS18d — D-018 close SUCCESS copy (design-exact shape). `{time}` is the
- * resolved booking time in the tenant timezone. Never claims the text ARRIVED
- * — only that it is being sent.
- */
-export function closeSuccessCopy(resolvedTime: string): string {
-  return `You're booked for ${resolvedTime}. I'm sending the quote and booking link to your phone now — you'll get a text in a moment.`;
-}
-
-/**
- * WS18d — spoken when the synchronous budget expired or a member failed
- * mid-chain: the hold is placed and the members are approved, so the booking
- * lands via the background sweep; the quote reaches the caller via the owner.
- * Design-exact copy.
- */
-export const CLOSE_TIMEOUT_COPY =
-  "You're booked — the owner will get the quote over to you shortly.";
-
-/**
- * WS18d — honest fallback line spoken when a POST-CONSENT gate failed (lane
- * ineligible / hold not placed / scheduling incomplete): consent was granted,
- * so the text promise is legitimate, but the booking is the owner's call.
+ * WS2 — honest line spoken once the close is STAGED for owner approval (consent
+ * captured, owner one-tap chain queued). The text promise is legitimate (consent
+ * granted), but the booking is confirmed only when the owner taps approve — so
+ * this never claims the caller is booked.
  */
 export const CLOSE_FALLBACK_LINE =
   "Great — I'll have the owner confirm your booking, and you'll get the quote by text shortly.";
-
-/** WS18d — repeated affirmative after the close already ran. */
-const CLOSE_ALREADY_DONE_LINE =
-  "You're all set — the booking is confirmed and the text is on its way.";
 
 function xmlEscape(s: string): string {
   return s
@@ -458,27 +431,25 @@ export interface VoiceTurnProcessorDeps {
    */
   consentEventRepo?: ConsentEventRepository;
   /**
-   * WS18d (D-018) — the sanctioned on-call close. When wired (executor +
-   * repos), a caller's strict-confirmed, consent-gated affirmative on a
-   * grounded quote runs the synchronous close chain (draft_estimate →
-   * send_estimate → create_booking) on this turn; any failed gate falls back
-   * to the owner-finalizes chain + one renderChainSms one-tap SMS. Absent →
-   * the affirmative keeps the safe owner-finalizes interim behavior.
+   * QUALITY-2026-07-12 WS2 — on-call close PREPARATION (supersedes the D-018
+   * autonomous close). When wired, a caller's strict-confirmed, consent-gated
+   * affirmative on a grounded quote holds the slot and STAGES the close for the
+   * owner: a draft chain (draft_estimate → send_estimate → create_booking, all
+   * DRAFT/blocked) plus ONE owner one-tap approval SMS. Nothing is approved or
+   * executed by the system — the owner's tap is the only approval. Absent → the
+   * affirmative keeps the safe owner-finalizes interim behavior.
    */
   autonomousClose?: {
-    /** The production ProposalExecutor (or a compatible test double). */
-    executor: CloseChainExecutor;
     /** AUTONOMOUS_CLOSE_DISABLED === 'true' — checked FIRST, pre-consent. */
     platformDisabled?: boolean;
     /** AUTONOMOUS_BOOKING_DISABLED === 'true' — the composed D-015 leg. */
     bookingPlatformDisabled?: boolean;
-    /** Owner phone for the UNDO SMS + the fallback chain SMS. */
+    /** Owner phone for the one-tap approval chain SMS. */
     ownerPhoneResolver?: (tenantId: string) => Promise<string | null | undefined>;
     /** Owner-class SMS sender (never customer-gated). */
     sendOwnerSms?: (to: string, body: string) => Promise<void>;
-    /** One-tap HMAC secret (approve + undo tokens). */
+    /** One-tap HMAC secret (approve token). */
     oneTapSecret?: string;
-    buildUndoUrl?: (token: string) => string;
     buildApproveUrl?: (token: string) => string;
   };
   lookupEvents?: LookupEventService;
@@ -1897,21 +1868,23 @@ export function createVoiceTurnProcessor(
   }
 
   /**
-   * WS18d — queue the owner-finalizes fallback chain (no-carve-out mode) for
-   * the live quote: estimate stays a draft, a send_estimate draft is chained
-   * to it, ONE renderChainSms owner one-tap SMS goes out. Idempotent (skips a
-   * head that is already chained). Best-effort: a fallback failure must never
-   * strand the caller — the honest interim line is spoken regardless.
+   * WS2 — stage the owner-approval close chain for the live quote and send the
+   * owner ONE one-tap approval SMS. The estimate stays a draft, a send_estimate
+   * draft is chained to it, and — when a hold was placed (the eligible path) —
+   * a create_booking draft for the held slot is chained too so the owner's tap
+   * confirms the booking. Nothing is approved or executed here. Idempotent
+   * (skips a head that is already chained). Best-effort: a queue failure must
+   * never strand the caller — the honest line is spoken regardless.
    */
-  async function runCloseFallback(
+  async function queueOwnerCloseChain(
     session: VoiceSession,
     tenantId: string,
-    reason: AutonomousCloseIneligibleReason,
+    evaluation: AutonomousCloseEvaluation,
+    booking?: { appointmentId: string; holdExpiryAt: Date; summary: string },
   ): Promise<void> {
     const pq = session.machine.currentContext.pendingQuote;
     if (!pq || !deps.proposalRepo) return;
     const ac = deps.autonomousClose;
-    const evaluation: AutonomousCloseEvaluation = { eligible: false, reason };
     try {
       await queueCloseFallbackChain(
         {
@@ -1940,30 +1913,40 @@ export function createVoiceTurnProcessor(
             : {}),
           sessionId: session.id,
           evaluation,
+          ...(booking ? { booking } : {}),
         },
       );
       session.closeState = 'fallback';
     } catch (err) {
-      logger.warn('close fallback queue failed', {
+      logger.warn('close owner-chain queue failed', {
         error: err instanceof Error ? err.message : String(err),
         sessionId: session.id,
       });
     }
   }
 
+  /** A failed gate → stage the two-member owner chain (no held booking). */
+  async function runCloseFallback(
+    session: VoiceSession,
+    tenantId: string,
+    reason: AutonomousCloseIneligibleReason,
+  ): Promise<void> {
+    await queueOwnerCloseChain(session, tenantId, { eligible: false, reason });
+  }
+
   /**
-   * WS18d — the caller assented to book the live quote. The FSM records the
+   * WS2 — the caller assented to book the live quote. The FSM records the
    * assent (keeping pendingQuote) and stays in `closing`; the processor owns
    * the spoken close.
    *
    * Pre-consent gate ladder (cheap checks BEFORE asking for anything):
    * platform kill switch → tenant opt-in → groundedClean → close cap → strict
-   * confirmIntent on the affirmative (the authoritative D-018 gate — the
-   * deterministic pre-check was necessary, not sufficient) → an identified
-   * caller with a phone. Any failure keeps the honest owner-finalizes interim
-   * line and queues the fallback chain. All pre-gates passing asks the caller
-   * for SMS consent; the NEXT turn's grant continues into the sanctioned close
-   * (handlePendingConsentCapture → runSanctionedClose).
+   * confirmIntent on the affirmative (authoritative — the deterministic
+   * pre-check was necessary, not sufficient) → an identified caller with a
+   * phone. Any failure keeps the honest owner-finalizes interim line and stages
+   * the owner chain. All pre-gates passing asks the caller for SMS consent; the
+   * NEXT turn's grant continues into owner-approval close staging
+   * (handlePendingConsentCapture → runOwnerApprovedClose).
    */
   async function handlePostQuoteClose(
     session: VoiceSession,
@@ -1973,14 +1956,8 @@ export function createVoiceTurnProcessor(
     const out: SideEffect[] = [];
     out.push(...session.machine.dispatch({ type: 'post_quote_affirmative' }));
 
-    // Repeated affirmative after the close already resolved this session.
-    if (session.closeState === 'closed') {
-      out.push({
-        type: 'tts_play',
-        payload: { text: CLOSE_ALREADY_DONE_LINE, source: 'post_quote_close' },
-      });
-      return out;
-    }
+    // Repeated affirmative after the owner chain was already staged this
+    // session — nothing more to do here; the owner still owns the approval.
     if (session.closeState === 'fallback') {
       out.push({
         type: 'tts_play',
@@ -1994,8 +1971,8 @@ export function createVoiceTurnProcessor(
     const callerPhone = deps.callerPhoneResolver?.(session) ?? session.callerPhone;
     const customerId = session.customerId ?? session.machine.currentContext.customerId;
 
-    // Authoritative strict confirm (D-018). Run before the settings gates so
-    // its verdict is available for the ladder; a gateway error fails closed.
+    // Authoritative strict confirm. Run before the settings gates so its verdict
+    // is available for the ladder; a gateway error fails closed.
     let strictConfirmed = false;
     try {
       const confirmation = await confirmIntent({
@@ -2078,13 +2055,15 @@ export function createVoiceTurnProcessor(
   }
 
   /**
-   * WS18d — the sanctioned close continuation, run on the consent-grant turn.
-   * Hold placement → full D-018 lane evaluation (composed D-015 booking leg) →
-   * chain assembly → explicit system approval → synchronous in-order
-   * execution → owner UNDO SMS. Every non-eligible outcome falls back to the
-   * owner-finalizes chain with the honest CLOSE_FALLBACK_LINE.
+   * WS2 — the close continuation, run on the consent-grant turn. Hold placement
+   * → lane evaluation (composed D-015 booking leg, used here as telemetry +
+   * whether to include the held booking in the owner chain) → stage the
+   * owner-approval chain + ONE one-tap approval SMS. NOTHING is approved or
+   * executed by the system — the owner's tap is the only approval. When a gate
+   * fails the fresh hold is released and a two-member owner chain is staged;
+   * either way the honest CLOSE_FALLBACK_LINE is spoken.
    */
-  async function runSanctionedClose(
+  async function runOwnerApprovedClose(
     session: VoiceSession,
     tenantId: string,
     pending: { customerId: string; phone: string; close: { proposalId: string; strictConfirmed: boolean } },
@@ -2253,73 +2232,35 @@ export function createVoiceTurnProcessor(
       return fallback(evaluation.reason);
     }
 
+    // Lane-eligible: the held slot is safe to stage as a create_booking DRAFT
+    // in the owner chain, so the owner's ONE one-tap approval confirms the
+    // booking too. The hold is KEPT (the caller confirmed it); if the owner
+    // never approves, the create_booking proposal + the hold expire naturally.
     const resolvedTime = formatForReadback(hold.scheduledStart, hold.timezone);
     const summary = `Booked ${resolvedTime}`;
 
-    const closeDeps = {
-      proposalRepo: deps.proposalRepo,
-      executor: ac.executor,
-      ...(deps.auditRepo ? { auditRepo: deps.auditRepo } : {}),
-    };
-    const chain = await assembleCloseChain(closeDeps, {
-      tenantId,
-      draftEstimateProposalId: pq.proposalId,
-      customerId: pending.customerId,
-      ...(jobId ? { jobId } : {}),
-      callerPhone: pending.phone,
+    await queueOwnerCloseChain(session, tenantId, evaluation, {
       appointmentId: hold.appointmentId,
       holdExpiryAt: hold.holdExpiryAt,
-      evaluation,
-      sessionId: session.id,
       summary,
     });
-    if (!chain) {
-      return fallback('scheduling_incomplete');
-    }
-
-    const approved = await sanctionCloseChain(closeDeps, tenantId, chain.members);
-    const outcome = await executeCloseChain(closeDeps, tenantId, approved);
-    session.closeState = 'closed';
-
-    // Owner UNDO SMS — IMMEDIATELY, on full success AND timeout-partial (the
-    // booking + text are in motion either way). Best-effort.
-    if (ac.ownerPhoneResolver && ac.sendOwnerSms && ac.oneTapSecret && ac.buildUndoUrl) {
-      await sendCloseUndoSms(
-        {
-          sendSms: ac.sendOwnerSms,
-          resolveOwnerPhone: ac.ownerPhoneResolver,
-          secret: ac.oneTapSecret,
-          buildUndoUrl: ac.buildUndoUrl,
-        },
-        { tenantId, bookingProposal: approved[2]!, summary },
-      );
-    }
 
     out.push({
       type: 'audit_log',
       payload: {
-        eventType: 'agent.calling.autonomous_close_executed',
+        eventType: 'agent.calling.close_owner_chain_staged',
         sessionId: session.id,
         tenantId,
-        chainId: chain.chainId,
-        completed: outcome.completed,
-        timedOut: outcome.timedOut,
-        executedIds: outcome.executedIds,
-        ...(outcome.failedId ? { failedId: outcome.failedId } : {}),
-        ...(outcome.failureError ? { failureError: outcome.failureError } : {}),
+        chainHeadProposalId: pq.proposalId,
+        appointmentId: hold.appointmentId,
         ts: Date.now(),
       },
     });
 
-    // Success copy never claims the text ARRIVED; the timeout/failure copy
-    // makes no send claim at all (approved members land via the background
-    // sweep — chain resolution preserves ordering there too).
+    // Never claims the caller is booked — the owner still has to approve.
     out.push({
       type: 'tts_play',
-      payload: {
-        text: outcome.completed ? closeSuccessCopy(resolvedTime) : CLOSE_TIMEOUT_COPY,
-        source: 'post_quote_close',
-      },
+      payload: { text: CLOSE_FALLBACK_LINE, source: 'post_quote_close' },
     });
     return out;
   }
@@ -2406,12 +2347,12 @@ export function createVoiceTurnProcessor(
       },
     };
 
-    // WS18d — a capture initiated by the close flow continues into the
-    // sanctioned close on a grant; a decline (or persistence failure) queues
-    // the owner-finalizes fallback and speaks the design's decline copy.
+    // WS2 — a capture initiated by the close flow continues into the
+    // owner-approval close staging on a grant; a decline (or persistence
+    // failure) queues the owner-finalizes fallback and speaks the decline copy.
     if (pending.close) {
       if (granted) {
-        const closeFx = await runSanctionedClose(session, tenantId, {
+        const closeFx = await runOwnerApprovedClose(session, tenantId, {
           customerId: pending.customerId,
           phone: pending.phone,
           close: pending.close,

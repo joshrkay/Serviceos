@@ -1,11 +1,12 @@
 /**
- * WS18d (D-018) — one-tap UNDO of a sanctioned close chain.
- *
- * Undoing the close's create_booking must also compensate the REST of the
- * chain: the sent estimate is withdrawn ('sent' → 'expired', so the approval
- * link stops accepting and no deposit can be taken), any still-approved
- * sibling is undone so the sweep never runs it, and the page copy says the
- * quote text can't be recalled. A plain D-015 booking undo is unchanged.
+ * QUALITY-2026-07-12 WS2 (D-019) — the D-018 close-chain compensation was
+ * REVOKED with the sanctioned autonomous close. The one-tap UNDO route is now
+ * the generic D-015 booking undo only: undoing a create_booking cancels the
+ * appointment (and, post-execution, sends the fixed apology) — it must NOT
+ * withdraw a chained estimate or reject chained siblings, even when the booking
+ * happens to carry a legacy close stamp. Owner-approved close bookings are
+ * undone/canceled like any other booking (from the app or the generic link);
+ * no close-specific compensation runs here anymore.
  */
 import { describe, it, expect } from 'vitest';
 import express from 'express';
@@ -30,7 +31,7 @@ const SECRET = 'test-undo-secret';
 
 const ELIGIBLE_STAMP = autonomousCloseStamp({ eligible: true, bookingThreshold: 0.95 });
 
-async function makeCloseChainApp(opts: { sendStatus: 'executed' | 'approved' }) {
+async function makeCloseChainApp() {
   const proposalRepo = new InMemoryProposalRepository();
   const auditRepo = new InMemoryAuditRepository();
   const appointmentRepo = new InMemoryAppointmentRepository();
@@ -51,7 +52,8 @@ async function makeCloseChainApp(opts: { sendStatus: 'executed' | 'approved' }) 
     appointmentRepo,
   );
 
-  // A SENT estimate — its approval link is live; the undo must void it.
+  // A SENT estimate — the removed D-018 compensation used to void it. It must
+  // now stay 'sent': the generic undo never touches a chained estimate.
   const estimateId = uuidv4();
   const estimate: Estimate = {
     id: estimateId,
@@ -101,7 +103,7 @@ async function makeCloseChainApp(opts: { sendStatus: 'executed' | 'approved' }) 
     return base;
   };
 
-  const draftMember = await proposalRepo.create(
+  await proposalRepo.create(
     member({
       proposalType: 'draft_estimate',
       payload: { lineItems: [{ description: 'Water Heater Replacement', quantity: 1, unitPrice: 185000 }] },
@@ -110,13 +112,14 @@ async function makeCloseChainApp(opts: { sendStatus: 'executed' | 'approved' }) 
       resultEntityId: estimateId,
     }),
   );
+  // A still-approved send sibling (the generic undo must NOT reject it — the
+  // D-018-specific "reject because backdated" path is gone).
   const sendMember = await proposalRepo.create(
     member({
       proposalType: 'send_estimate',
       payload: { estimateId, channel: 'sms' },
       chainIndex: 1,
-      status: opts.sendStatus,
-      ...(opts.sendStatus === 'executed' ? { resultEntityId: uuidv4() } : {}),
+      status: 'approved',
     }),
   );
   const bookingMember = await proposalRepo.create(
@@ -136,17 +139,16 @@ async function makeCloseChainApp(opts: { sendStatus: 'executed' | 'approved' }) 
       proposalRepo,
       appointmentRepo,
       auditRepo,
-      estimateRepo,
       secret: SECRET,
       consumeNonce: () => true,
     }),
   );
-  return { app, proposalRepo, appointmentRepo, estimateRepo, auditRepo, appointment, estimateId, draftMember, sendMember, bookingMember };
+  return { app, proposalRepo, appointmentRepo, estimateRepo, auditRepo, appointment, estimateId, sendMember, bookingMember };
 }
 
-describe('WS18d — close-chain one-tap UNDO', () => {
-  it('cancels the booking, voids the SENT estimate, and says the text cannot be recalled', async () => {
-    const h = await makeCloseChainApp({ sendStatus: 'executed' });
+describe('WS2 (D-019) — one-tap UNDO no longer runs close-chain compensation', () => {
+  it('cancels the booking but leaves the sent estimate + approved sibling untouched', async () => {
+    const h = await makeCloseChainApp();
     const { token } = createOneTapUndoToken({
       proposalId: h.bookingMember.id,
       tenantId: TENANT,
@@ -155,37 +157,23 @@ describe('WS18d — close-chain one-tap UNDO', () => {
     const res = await request(h.app).get(`/public/proposals/one-tap-undo?token=${encodeURIComponent(token)}`);
     expect(res.status).toBe(200);
     expect(res.text).toContain('Booking undone');
-    expect(res.text).toContain('can’t be recalled');
+    // The generic copy — never the D-018 "quote can't be recalled" line.
+    expect(res.text).not.toContain('can’t be recalled');
 
+    // Booking canceled (generic D-015 behavior).
     const appt = await h.appointmentRepo.findById(TENANT, h.appointment.id);
     expect(appt!.status).toBe('canceled');
-    // The estimate is withdrawn — its approval link stops accepting.
+
+    // The chained estimate is NOT withdrawn — the D-018 compensation is gone.
     const estimate = await h.estimateRepo.findById(TENANT, h.estimateId);
-    expect(estimate!.status).toBe('expired');
-  });
+    expect(estimate!.status).toBe('sent');
 
-  it('a timeout-partial chain: the still-approved send_estimate is undone so the sweep never texts', async () => {
-    const h = await makeCloseChainApp({ sendStatus: 'approved' });
-    const { token } = createOneTapUndoToken({
-      proposalId: h.bookingMember.id,
-      tenantId: TENANT,
-      secret: SECRET,
-    });
-    const res = await request(h.app).get(`/public/proposals/one-tap-undo?token=${encodeURIComponent(token)}`);
-    expect(res.status).toBe(200);
-
-    // The still-pending send is REJECTED (never undoProposal — the D-018
-    // sanction backdated approvedAt past the 5s window), so the sweep never
-    // texts the caller.
+    // The approved send sibling is NOT rejected — no close-chain sibling stop.
     const send = await h.proposalRepo.findById(TENANT, h.sendMember.id);
-    expect(send!.status).toBe('rejected');
-    // The estimate is voided too (belt+braces — the link must not accept
-    // once the owner undid the close).
-    const estimate = await h.estimateRepo.findById(TENANT, h.estimateId);
-    expect(estimate!.status).toBe('expired');
+    expect(send!.status).toBe('approved');
   });
 
-  it('a plain D-015 booking (no close stamp) keeps the original page copy', async () => {
+  it('a plain D-015 booking (no close stamp) still cancels with the generic copy', async () => {
     const proposalRepo = new InMemoryProposalRepository();
     const auditRepo = new InMemoryAuditRepository();
     const appointmentRepo = new InMemoryAppointmentRepository();
@@ -222,5 +210,6 @@ describe('WS18d — close-chain one-tap UNDO', () => {
     const res = await request(app).get(`/public/proposals/one-tap-undo?token=${encodeURIComponent(token)}`);
     expect(res.status).toBe(200);
     expect(res.text).not.toContain('can’t be recalled');
+    expect((await appointmentRepo.findById(TENANT, appointment.id))!.status).toBe('canceled');
   });
 });

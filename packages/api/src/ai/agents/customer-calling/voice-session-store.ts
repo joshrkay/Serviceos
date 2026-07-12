@@ -229,11 +229,11 @@ export interface VoiceSession {
    * state like `pendingVoiceApproval` (the FSM never reads it); consumed and
    * cleared at the top of the speech turn. Carries no secrets.
    *
-   * WS18d — `close` is set when the capture was initiated by the D-018 close
-   * flow: a grant then continues into hold placement + the sanctioned chain
-   * execution instead of the plain acknowledgment. `strictConfirmed` records
-   * that the authoritative confirmIntent gate already passed on the
-   * affirmative turn (an input to evaluateAutonomousCloseLane).
+   * WS2 — `close` is set when the capture was initiated by the close flow: a
+   * grant then continues into hold placement + owner-approval chain staging
+   * instead of the plain acknowledgment. `strictConfirmed` records that the
+   * authoritative confirmIntent gate already passed on the affirmative turn (an
+   * input to evaluateAutonomousCloseLane).
    */
   pendingConsentCapture?: {
     customerId: string;
@@ -241,12 +241,12 @@ export interface VoiceSession {
     close?: { proposalId: string; strictConfirmed: boolean };
   };
   /**
-   * WS18d — terminal close-flow state for this session. 'closed' after the
-   * sanctioned chain ran (fully or timeout-partial: booking + text are in
-   * motion); 'fallback' after the owner-finalizes chain was queued. Guards a
-   * repeated "yes, book it" from re-running the close / re-texting the owner.
+   * WS2 — terminal close-flow state for this session. 'fallback' after the
+   * owner-approval chain was staged (nothing is confirmed until the owner
+   * taps approve). Guards a repeated "yes, book it" from re-staging the chain /
+   * re-texting the owner.
    */
-  closeState?: 'closed' | 'fallback';
+  closeState?: 'fallback';
   /**
    * WS5 — in-flight tenant-catalog load, kicked off once at session
    * establishment (both voice transports) so in-call estimate grounding has

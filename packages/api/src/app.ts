@@ -2716,10 +2716,6 @@ export function createApp(): AppWithLifecycle {
       consumeNonce: consumeOneTapUndoNonce,
       jobRepo,
       customerRepo,
-      // WS18d (D-018) — close-chain compensation: undoing a close-chain
-      // booking also stops pending siblings and voids the sent estimate so
-      // its approval link stops accepting.
-      estimateRepo,
       ...(messageDelivery
         ? {
             customerMessageDeps: {
@@ -3375,18 +3371,17 @@ export function createApp(): AppWithLifecycle {
     //    createVoiceTurnProcessor; see the variable-assembly note above) ──
     // WS18b — on-call SMS consent capture (ledger + customers.sms_consent).
     consentEventRepo,
-    // WS18d (D-018) — the sanctioned on-call close: the production executor,
-    // both platform kill switches, and the owner SMS/one-tap wiring for the
-    // UNDO link + the fallback chain SMS.
+    // QUALITY-2026-07-12 WS2 — on-call close PREPARATION (supersedes the D-018
+    // autonomous close): both platform kill switches and the owner SMS/one-tap
+    // approve wiring for the staged owner-approval chain. No executor — nothing
+    // is approved or executed by the system; the owner's one-tap is the only
+    // approval.
     autonomousClose: {
-      executor: proposalExecutor,
       platformDisabled: config.AUTONOMOUS_CLOSE_DISABLED === 'true',
       bookingPlatformDisabled: config.AUTONOMOUS_BOOKING_DISABLED === 'true',
       ownerPhoneResolver: resolveUnsupervisedOwnerPhone,
       ...(oneTapSmsSender ? { sendOwnerSms: oneTapSmsSender } : {}),
       ...(oneTapSecret ? { oneTapSecret } : {}),
-      buildUndoUrl: (token: string) =>
-        `${oneTapApiBaseUrl}/public/proposals/one-tap-undo?token=${encodeURIComponent(token)}`,
       buildApproveUrl: (token: string) =>
         `${oneTapApiBaseUrl}/public/proposals/one-tap-approve?token=${encodeURIComponent(token)}`,
     },
