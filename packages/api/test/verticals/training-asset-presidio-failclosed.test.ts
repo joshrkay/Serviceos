@@ -214,4 +214,64 @@ describe('TrainingAssetRedactionService.redactAsync', () => {
     expect(result.scrubbedText).toBe('');
     expect(result.summary.residualSignals).toContain(PRESIDIO_UNAVAILABLE_SIGNAL);
   });
+
+  it('carries Presidio spans into the audit redactions and summary (PR #669 review)', async () => {
+    // A PERSON span only Presidio catches: the deterministic sweep has no
+    // known-entity for "Sarah Jones" here, so without span merging the asset
+    // would contain [PERSON] while the audit reported zero redactions.
+    const presidio: PresidioAnonymizer = {
+      async anonymize(text: string) {
+        expect(text).toBe('Sarah Jones called about the heater.');
+        return {
+          anonymizedText: '[PERSON] called about the heater.',
+          entities: [{ entityType: 'PERSON', start: 0, end: 11, score: 0.99 }],
+        };
+      },
+    };
+    const redaction = new TrainingAssetRedactionService({ presidio });
+    const result = await redaction.redactAsync({
+      text: 'Sarah Jones called about the heater.',
+    });
+
+    expect(result.status).toBe('redacted');
+    expect(result.scrubbedText).toContain('[PERSON]');
+    expect(result.auditRedactions).toContainEqual({
+      kind: 'presidio:PERSON',
+      placeholder: '[PERSON]',
+      start: 0,
+      end: 11,
+    });
+    expect(result.summary.redactionCount).toBeGreaterThanOrEqual(1);
+    expect(result.summary.redactionKinds).toContain('presidio:PERSON');
+    expect(result.summary.placeholders).toContain('[PERSON]');
+  });
+
+  it('merges Presidio spans with local-sweep redactions when both fire', async () => {
+    // Presidio catches the PERSON; the deterministic regex sweep catches the
+    // phone number Presidio "missed" — both must appear in the audit.
+    const presidio = new TransformPresidio((text) =>
+      text.replace('Sarah Jones', '[PERSON]'),
+    );
+    // TransformPresidio returns no entities; hand-roll one that returns both
+    // the transformed text and the span.
+    const spanPresidio: PresidioAnonymizer = {
+      async anonymize(text: string) {
+        const out = await presidio.anonymize(text);
+        return {
+          anonymizedText: out.anonymizedText,
+          entities: [{ entityType: 'PERSON', start: 0, end: 11, score: 0.9 }],
+        };
+      },
+    };
+    const redaction = new TrainingAssetRedactionService({ presidio: spanPresidio });
+    const result = await redaction.redactAsync({
+      text: 'Sarah Jones at 415-555-0123 has no heat.',
+    });
+
+    const kinds = result.auditRedactions.map((r) => r.kind);
+    expect(kinds).toContain('presidio:PERSON');
+    expect(kinds.some((k) => !k.startsWith('presidio:'))).toBe(true); // local phone catch
+    expect(result.scrubbedText).not.toContain('415-555-0123');
+    expect(result.summary.redactionCount).toBe(result.auditRedactions.length);
+  });
 });

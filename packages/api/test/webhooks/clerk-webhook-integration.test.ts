@@ -13,7 +13,7 @@
 import express from 'express';
 import request from 'supertest';
 import * as crypto from 'crypto';
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { createWebhookRouter } from '../../src/webhooks/routes';
 import { Tenant, TenantRepository } from '../../src/auth/clerk';
 import type { AppConfig } from '../../src/shared/config';
@@ -428,5 +428,107 @@ describe('EXP-3 — Clerk webhook → tenant bootstrap integration', () => {
     expect(queuedEvent).toBeTruthy();
     expect(queuedEvent?.correlationId).toBe(`signup:${svixId}`);
     expect(queuedEvent?.metadata?.queueMessageId).toBe('msg-tenant-provisioning-1');
+  });
+});
+
+/**
+ * QUALITY-2026-07-12 WS4 (PR #669 review) — owner membership creation must
+ * fail the webhook. Previously an owner users-row insert failure was logged
+ * and the event was marked processed (200): Clerk never retried, and with
+ * DB-authoritative authorization the freshly-bootstrapped owner was locked
+ * out of /api until manual repair. Now the failure rethrows → 500 → the event
+ * row is marked 'failed' → Clerk's retry re-executes and the idempotent
+ * insert re-attempts. All `result.created`-gated side effects run BEFORE the
+ * insert, so the retry (created=false) never repeats or skips them.
+ */
+describe('owner membership insert — webhook failure semantics', () => {
+  // The route's owner-insert block only fires for UUID tenant ids (RLS
+  // set_config requires one), so this repo mints real UUIDs.
+  class UuidTenantRepository extends FakeTenantRepository {
+    async create(data: { ownerId: string; ownerEmail: string; name: string }): Promise<Tenant> {
+      const tenant = await super.create(data);
+      tenant.id = `550e8400-e29b-41d4-a716-44665544${String(this.created.length).padStart(4, '0')}`;
+      return tenant;
+    }
+  }
+
+  interface FakeClient {
+    query: ReturnType<typeof vi.fn>;
+    release: ReturnType<typeof vi.fn>;
+  }
+
+  function makeFakePool(behavior: { failInsert: boolean }) {
+    const queries: string[] = [];
+    const client: FakeClient = {
+      query: vi.fn(async (sql: string) => {
+        queries.push(typeof sql === 'string' ? sql : String(sql));
+        if (behavior.failInsert && typeof sql === 'string' && sql.includes('INSERT INTO users')) {
+          throw new Error('transient insert failure');
+        }
+        return { rows: [], rowCount: 0 };
+      }),
+      release: vi.fn(),
+    };
+    const pool = { connect: vi.fn(async () => client) };
+    return { pool, client, queries };
+  }
+
+  function signedRequest(app: express.Express, svixId: string, userId: string, email: string) {
+    const svixTimestamp = String(Math.floor(Date.now() / 1000));
+    const payload = userCreatedPayload(userId, email);
+    const { signature } = signSvixPayload(payload, svixId, svixTimestamp, WEBHOOK_SECRET);
+    return request(app)
+      .post('/webhooks/clerk')
+      .set('svix-id', svixId)
+      .set('svix-timestamp', svixTimestamp)
+      .set('svix-signature', signature)
+      .send(payload);
+  }
+
+  it('a users-row insert failure fails the webhook (500), and the retry succeeds', async () => {
+    const tenantRepo = new UuidTenantRepository();
+    const behavior = { failInsert: true };
+    const { pool, queries } = makeFakePool(behavior);
+    const app = express();
+    app.use(express.json());
+    const config = { CLERK_WEBHOOK_SECRET: WEBHOOK_SECRET, CLERK_SECRET_KEY: undefined } as unknown as AppConfig;
+    app.use('/webhooks', createWebhookRouter(config, {
+      tenantRepo,
+      pool: pool as never,
+    }));
+
+    // Attempt 1: insert fails → 500 (Clerk will retry), tenant already bootstrapped.
+    const first = await signedRequest(app, 'svix_owner_fail_1', 'user_owner_1', 'owner1@example.com');
+    expect(first.status).toBe(500);
+    expect(tenantRepo.created).toHaveLength(1);
+    expect(queries.some((q) => q.includes('ROLLBACK'))).toBe(true);
+
+    // Attempt 2 (Clerk retry, same event id): the in-memory webhook repo lets a
+    // 'failed' event re-execute; the insert now succeeds → 200.
+    behavior.failInsert = false;
+    const second = await signedRequest(app, 'svix_owner_fail_1', 'user_owner_1', 'owner1@example.com');
+    expect(second.status).toBe(200);
+    // bootstrapTenant is idempotent — no second tenant.
+    expect(tenantRepo.created).toHaveLength(1);
+    expect(queries.filter((q) => q.includes('INSERT INTO users'))).toHaveLength(2);
+    expect(queries.filter((q) => q.includes('COMMIT'))).toHaveLength(1);
+  });
+
+  it('a successful insert commits within the tenant RLS context and returns 200', async () => {
+    const tenantRepo = new UuidTenantRepository();
+    const { pool, client, queries } = makeFakePool({ failInsert: false });
+    const app = express();
+    app.use(express.json());
+    const config = { CLERK_WEBHOOK_SECRET: WEBHOOK_SECRET, CLERK_SECRET_KEY: undefined } as unknown as AppConfig;
+    app.use('/webhooks', createWebhookRouter(config, {
+      tenantRepo,
+      pool: pool as never,
+    }));
+
+    const res = await signedRequest(app, 'svix_owner_ok_1', 'user_owner_2', 'owner2@example.com');
+    expect(res.status).toBe(200);
+    expect(queries.some((q) => q.includes("set_config('app.current_tenant_id'"))).toBe(true);
+    expect(queries.filter((q) => q.includes('COMMIT'))).toHaveLength(1);
+    expect(client.release).toHaveBeenCalled();
   });
 });

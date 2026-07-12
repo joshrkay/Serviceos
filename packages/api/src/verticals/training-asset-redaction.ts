@@ -100,9 +100,24 @@ export class TrainingAssetRedactionService {
     }
 
     let presidioText: string;
+    let presidioRedactions: AuditSafeRedaction[];
     try {
       const result = await this.presidio.anonymize(input.text);
       presidioText = result.anonymizedText;
+      // PR #669 review — every Presidio span must reach the privacy audit.
+      // Anything Presidio catches that the deterministic sweep would not
+      // (e.g. a PERSON span) is removed from the persisted text; dropping the
+      // spans here would leave [PERSON] in the asset while
+      // privacy_audit.redactions under-reports the transformation. Kinds are
+      // namespaced (`presidio:PERSON`) to distinguish provenance from the
+      // local sweep's kinds; start/end are offsets into the ORIGINAL text
+      // (local-sweep spans are offsets into Presidio's output).
+      presidioRedactions = result.entities.map((entity) => ({
+        kind: `presidio:${entity.entityType}`,
+        placeholder: `[${entity.entityType}]`,
+        start: entity.start,
+        end: entity.end,
+      }));
     } catch (err) {
       if (err instanceof PresidioUnavailableError) {
         return this.failClosedResult();
@@ -112,21 +127,25 @@ export class TrainingAssetRedactionService {
     }
 
     // Defense in depth: run the deterministic sweep over Presidio's output.
-    return this.finishLocal(presidioText, input.knownEntities);
+    return this.finishLocal(presidioText, input.knownEntities, presidioRedactions);
   }
 
   /** Run the deterministic scrub + residual gate and shape the result. */
   private finishLocal(
     text: string,
     knownEntities?: KnownEntities,
+    priorRedactions: AuditSafeRedaction[] = [],
   ): TrainingAssetRedactionResult {
     const scrubbed = scrubPii(text, { knownEntities, failOnResidual: false });
-    const auditRedactions = scrubbed.redactions.map((redaction) => ({
-      kind: redaction.kind,
-      placeholder: redaction.placeholder,
-      start: redaction.start,
-      end: redaction.end,
-    }));
+    const auditRedactions = [
+      ...priorRedactions,
+      ...scrubbed.redactions.map((redaction) => ({
+        kind: redaction.kind,
+        placeholder: redaction.placeholder,
+        start: redaction.start,
+        end: redaction.end,
+      })),
+    ];
     const summary: TrainingAssetRedactionSummary = {
       redactionCount: auditRedactions.length,
       redactionKinds: [...new Set(auditRedactions.map((redaction) => redaction.kind))],

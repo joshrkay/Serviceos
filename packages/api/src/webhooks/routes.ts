@@ -531,59 +531,6 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             settingsRepository: deps.settingsRepo,
           });
 
-          // QUALITY-2026-07-12 WS4 — create the OWNER's membership row.
-          // Authorization is now DB-authoritative (see resolveAuthorization):
-          // a caller with no `users` row is rejected. bootstrapTenant creates
-          // the tenant + Clerk metadata but historically NO users row, so
-          // without this every freshly-signed-up owner would be locked out of
-          // /api. Insert idempotently under the tenant's RLS context; the
-          // `users` table has no unique (tenant_id, clerk_user_id) constraint,
-          // so we guard with WHERE NOT EXISTS instead of ON CONFLICT (safe on
-          // webhook replay). Best-effort: a transient failure here is logged at
-          // ERROR but does not fail the webhook, so the tenant-provisioning
-          // side effects below (gated on result.created) are never skipped by a
-          // retry; the row is re-attempted on any later user.created delivery.
-          if (deps.pool) {
-            const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-            if (UUID_RE.test(result.tenantId)) {
-              const ownerClient = await deps.pool.connect();
-              try {
-                await ownerClient.query('BEGIN');
-                await ownerClient.query(
-                  "SELECT set_config('app.current_tenant_id', $1, true)",
-                  [result.tenantId],
-                );
-                await ownerClient.query(
-                  `INSERT INTO users (
-                     id, tenant_id, clerk_user_id, email, role,
-                     first_name, last_name, created_at, updated_at
-                   )
-                   SELECT gen_random_uuid(), $1, $2, $3, 'owner', $4, $5, NOW(), NOW()
-                   WHERE NOT EXISTS (
-                     SELECT 1 FROM users WHERE tenant_id = $1 AND clerk_user_id = $2
-                   )`,
-                  [
-                    result.tenantId,
-                    userId,
-                    primaryEmail,
-                    (userData.first_name as string | null) ?? null,
-                    (userData.last_name as string | null) ?? null,
-                  ],
-                );
-                await ownerClient.query('COMMIT');
-              } catch (ownerErr) {
-                await ownerClient.query('ROLLBACK').catch(() => undefined);
-                logger.error('Owner users-row insert failed (owner may be locked out until reprovisioned)', {
-                  tenantId: result.tenantId,
-                  userId,
-                  error: ownerErr instanceof Error ? ownerErr.message : String(ownerErr),
-                });
-              } finally {
-                ownerClient.release();
-              }
-            }
-          }
-
           const signupCorrelationId = `signup:${svixId}`;
           logger.info('Tenant bootstrap complete', {
             tenantId: result.tenantId,
@@ -714,6 +661,65 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                 error: err instanceof Error ? err.message : 'Unknown error',
               });
             });
+          }
+
+          // QUALITY-2026-07-12 WS4 (+ PR #669 review) — create the OWNER's
+          // membership row. Authorization is DB-authoritative
+          // (resolveAuthorization): a caller with no `users` row is rejected,
+          // so a bootstrapped owner without this row is locked out of /api.
+          // Insert idempotently under the tenant's RLS context (`users` has no
+          // unique (tenant_id, clerk_user_id) constraint, so WHERE NOT EXISTS
+          // instead of ON CONFLICT — safe on webhook replay).
+          //
+          // A failure here RETHROWS and fails the webhook (500 → Clerk
+          // retries; the catch below marks the event 'failed' so dedup lets
+          // the retry re-execute). That is safe BECAUSE this block runs AFTER
+          // every `result.created`-gated side effect above: on the retry,
+          // created=false skips the already-done funnel/Twilio/welcome/
+          // provisioning work and this idempotent insert simply re-attempts.
+          // Logging-only was the previous behavior and left the owner locked
+          // out with no retry (Clerk got a 200). Migration 249 backfills any
+          // rows missed before this change.
+          if (deps.pool) {
+            const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+            if (UUID_RE.test(result.tenantId)) {
+              const ownerClient = await deps.pool.connect();
+              try {
+                await ownerClient.query('BEGIN');
+                await ownerClient.query(
+                  "SELECT set_config('app.current_tenant_id', $1, true)",
+                  [result.tenantId],
+                );
+                await ownerClient.query(
+                  `INSERT INTO users (
+                     id, tenant_id, clerk_user_id, email, role,
+                     first_name, last_name, created_at, updated_at
+                   )
+                   SELECT gen_random_uuid(), $1, $2, $3, 'owner', $4, $5, NOW(), NOW()
+                   WHERE NOT EXISTS (
+                     SELECT 1 FROM users WHERE tenant_id = $1 AND clerk_user_id = $2
+                   )`,
+                  [
+                    result.tenantId,
+                    userId,
+                    primaryEmail,
+                    (userData.first_name as string | null) ?? null,
+                    (userData.last_name as string | null) ?? null,
+                  ],
+                );
+                await ownerClient.query('COMMIT');
+              } catch (ownerErr) {
+                await ownerClient.query('ROLLBACK').catch(() => undefined);
+                logger.error('Owner users-row insert failed — failing webhook so Clerk retries', {
+                  tenantId: result.tenantId,
+                  userId,
+                  error: ownerErr instanceof Error ? ownerErr.message : String(ownerErr),
+                });
+                throw ownerErr;
+              } finally {
+                ownerClient.release();
+              }
+            }
           }
 
           // Write tenant_id back to Clerk user's public_metadata (best-effort)
