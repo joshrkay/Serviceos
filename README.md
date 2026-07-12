@@ -43,8 +43,10 @@ system is a TypeScript monorepo deployed on **Railway**.
 **Docs, tooling, data:**
 
 - `docs/` — architecture, decisions, runbooks, plans; see
-  `docs/architecture.md` for a new-developer orientation and
-  `docs/decisions.md` for the founding-decisions log.
+  `docs/architecture.md` for a new-developer orientation,
+  `docs/decisions.md` for the founding-decisions log, and
+  `docs/PRD-master.md` for the canonical positioning and
+  voice-interaction spec.
 - `scripts/` — one-off and CI-invoked operational scripts (QA token
   minting, schema probes, data pipeline, etc).
 - `tools/` — repo-maintenance utilities.

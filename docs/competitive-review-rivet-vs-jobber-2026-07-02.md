@@ -1,5 +1,12 @@
 # Rivet vs. Jobber — Voice-First Competitive Readiness Review
 
+> **Positioning superseded by [`docs/PRD-master.md`](PRD-master.md) (§12)** — use the Master
+> PRD for canonical competitive framing. The code/market verification findings in this
+> document remain standing corrections until re-verified — in particular the finding that
+> Jobber's 2026 "AI Voice and Chat" now writes to its system of record, which contradicts
+> the Master PRD's §12 scorecard and must be reconciled before that scorecard goes in front
+> of a prospect.
+
 **Date:** 2026-07-02 · **Method:** every verdict verified against `/packages` source (code wins over docs); Jobber's 2026 bar verified against current public sources the same day. Companion build plan: `docs/plans/2026-07-02-001-feat-rivet-jobber-agent-wave-plan.md`.
 
 **Governing test:** if a competitive capability cannot be completed by speaking a sentence, it does not count as parity — it's a gap.

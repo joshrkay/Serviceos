@@ -1,5 +1,9 @@
 # Competitive analysis — feature parity with ServiceTitan & Jobber
 
+> **Positioning superseded by [`docs/PRD-master.md`](PRD-master.md) (§12)** — use the Master
+> PRD for canonical competitive framing. The code/market verification findings in this
+> document remain standing corrections until re-verified.
+
 **Last revised:** 2026-05-31
 **Framing:** "Win the ICP, AI-first." Keep the owner-operator focus from
 `docs/PRD.md` v2.0. Match the *table-stakes* field-service features the

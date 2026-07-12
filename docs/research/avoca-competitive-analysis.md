@@ -8,6 +8,10 @@ tags: [competitive-analysis, voice-ai, avoca, trades, training-methodology]
 
 # Avoca.ai vs. Serviceos — Competitive Analysis & Voice-AI Quality Playbook
 
+> **Positioning superseded by [`../PRD-master.md`](../PRD-master.md) (§12)** — use the Master
+> PRD for canonical competitive framing. The code/market verification findings in this
+> document remain standing corrections until re-verified.
+
 > **What this is:** A cited, feature-by-feature comparison of Avoca.ai against the
 > canonical Serviceos product (`/packages`), with a focused teardown of *how Avoca
 > trained its voice AI for the trades* and a concrete plan to compete on quality.

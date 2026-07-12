@@ -393,3 +393,54 @@ owner's, act.
 - Dropping the held booking entirely on caller confirmation — the goal explicitly permits
   holding a slot and preparing proposals; staging the booking as a DRAFT under owner approval
   preserves the product outcome without the violation.
+
+### D-020: Voice approval of proposals — PROPOSED, held for owner review
+**Date:** 2026-07-12
+**Status:** 🟡 Proposed — held for Josh's review. No decision made; recorder-channel voice
+approval remains hard-refused (RV-071/225) and the launch scope in
+`docs/launch/voice-interaction-scope.md` (approve by screen or SMS tap) remains in force.
+**Decision (pending):** Whether owners may approve proposals by voice. Options, per
+`docs/PRD-master.md` §14 / D-020:
+- **A (recommended):** amend the narrative, keep the tap. Docs/copy only; zero build; zero
+  new attack surface. The governing test becomes "Can the owner *direct* this with a spoken
+  sentence…" — approval is exempt by design (directing is labor; approving is control).
+- **B (not recommended):** build full recorder-channel voice approval — audio-triggered
+  execution on money-class actions, consent without a visual.
+- **C (post-launch candidate):** capture-class-only voice approval with two-turn TTS
+  read-back, anti-spoof, flagged default-off; tap required forever for money/comms/
+  irreversible. Hard preconditions: boot-time wiring guard (U5) first, action-class
+  enforcement pinned by test, blocked at router and re-asserted at executor.
+**Rationale:** The archived PRD v3 promised approval "by voice" in four places while the
+code correctly refuses it. A tap is the stronger assent primitive (unambiguous, not
+spoofable by ambient audio), approving something only heard is weaker consent than a card
+read, and the feature is not north-star-moving (~15 seconds/day). Option C would change
+only the *transport* of assent, never its existence — it would not violate D-004 or D-019
+(human approval remains mandatory; no system actor may approve).
+**Story:** Rivet Master PRD consolidation (`docs/PRD-master.md` §13 Gap 1, §14).
+**Alternatives rejected:** none yet — decision is open pending owner review.
+
+### D-021: Canonical inbound voice path — PROPOSED, open
+**Date:** 2026-07-12
+**Status:** 🟡 Proposed — open.
+**Decision (pending):** Pick one canonical inbound voice path and retire the divergence.
+Current state: **Twilio Gather** is the certified path that actually books appointments;
+**VAPI** does not book yet; **Media Streams** is the real-time path that hits the sub-800ms
+time-to-first-audio bar. Sales and engineering must not describe these as a single thing.
+**Rationale:** Two inbound paths where only one books is a demo/GTM honesty risk
+(`docs/PRD-master.md` §13 Gap 5) and a maintenance divergence.
+**Story:** Rivet Master PRD consolidation (`docs/PRD-master.md` §14).
+**Alternatives rejected:** none yet — decision is open.
+
+### D-022: Pricing — PROPOSED, blocks GTM
+**Date:** 2026-07-12
+**Status:** 🟡 Proposed — unresolved; blocks GTM.
+**Decision (pending):** Set the list price. The archived PRD v3 says **$300–500/mo** (full
+back office); a **$99/mo** figure also exists in the record — notably
+`docs/competitive-review-rivet-vs-jobber-2026-07-02.md` treats "flat $99/mo" as part of the
+competitive wedge against Jobber's realistic $377–527/mo AI-forward stack. Competitive
+anchor: Jobber $79–249/mo for a 2-person shop; Avoca is an add-on on top of whatever runs
+the office.
+**Settled sub-points:** 0.5% platform processing fee atop Stripe; tiered model routing
+(~70% cheap-tier) addresses COGS and resilience.
+**Story:** Rivet Master PRD consolidation (`docs/PRD-master.md` §14).
+**Alternatives rejected:** none yet — decision is open.

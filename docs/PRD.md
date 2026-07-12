@@ -14,6 +14,9 @@ for, and why.** It is the product-level reference for every team:
 engineering, design, sales, support, and leadership.
 
 **Companion documents** (treat as authoritative for their domain):
+- `docs/PRD-master.md` — the Rivet Master PRD: canonical positioning and
+  voice-interaction spec. **When this doc and the Master PRD disagree on
+  positioning or competitive framing, the Master PRD wins.**
 - `docs/strategy/day-in-the-life.md` — the emotional and operational spine;
   the personas; the bad-day failure modes.
 - `docs/strategy/roadmap-audit.md` — how the current build maps against

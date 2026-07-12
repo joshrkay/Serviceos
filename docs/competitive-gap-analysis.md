@@ -1,5 +1,9 @@
 # Competitive Gap Analysis — ServiceOS for the 1–5 Person Shop
 
+> **Positioning superseded by [`docs/PRD-master.md`](PRD-master.md) (§12)** — use the Master
+> PRD for canonical competitive framing. The code/market verification findings in this
+> document remain standing corrections until re-verified.
+
 Date: 2026-06-10 (rev 3 — ICP reframe; corrections note below)
 Scope: canonical product (`packages/api`, `packages/web`, `packages/shared`).
 
