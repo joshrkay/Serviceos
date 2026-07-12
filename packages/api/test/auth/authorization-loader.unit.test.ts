@@ -52,7 +52,7 @@ describe('createAuthorizationLoader — mapping (unit)', () => {
     const pool = poolReturning([], 0);
     const load = createAuthorizationLoader(pool);
     await load('user_abc', 'tenant_xyz');
-    const [sql, params] = (pool.query as ReturnType<typeof vi.fn>).mock.calls[0];
+    const [sql, params] = vi.mocked(pool.query).mock.calls[0];
     expect(String(sql)).toMatch(/tenant_id = \$1 AND clerk_user_id = \$2/);
     expect(params).toEqual(['tenant_xyz', 'user_abc']);
   });

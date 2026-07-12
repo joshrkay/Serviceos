@@ -186,7 +186,7 @@ describe('P0-029 ClerkProvider integration — env requirement', () => {
     const fs = await import('node:fs/promises');
     const path = await import('node:path');
     const entry = await fs.readFile(
-      path.resolve(path.dirname(new URL(import.meta.url).pathname), '../../main.tsx'),
+      path.resolve(path.dirname((await import('node:url')).fileURLToPath(import.meta.url)), '../../main.tsx'),
       'utf8'
     );
     expect(entry).toMatch(/VITE_CLERK_PUBLISHABLE_KEY/);
