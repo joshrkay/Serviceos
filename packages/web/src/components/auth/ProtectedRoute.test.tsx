@@ -194,7 +194,7 @@ describe('P0-031 ProtectedRoute — routes.ts wiring (source-level)', () => {
     const fs = await import('node:fs/promises');
     const path = await import('node:path');
     const src = await fs.readFile(
-      path.resolve(process.cwd(), 'src/routes.ts'),
+      path.resolve(path.dirname(new URL(import.meta.url).pathname), '../../routes.ts'),
       'utf8'
     );
 
