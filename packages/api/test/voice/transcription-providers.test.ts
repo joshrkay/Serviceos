@@ -220,7 +220,7 @@ describe('DeepgramStreamingProvider open timeout (VOX-01)', () => {
         closed = true;
       }),
     };
-    global.WebSocket = vi.fn(() => fakeWs) as unknown as typeof WebSocket;
+    global.WebSocket = vi.fn(function () { return fakeWs; }) as unknown as typeof WebSocket;
 
     const provider = new DeepgramStreamingProvider('test-key');
     const openPromise = provider.openSession(
@@ -246,7 +246,7 @@ describe('DeepgramStreamingProvider open timeout (VOX-01)', () => {
       send: vi.fn(),
       close: vi.fn(),
     };
-    global.WebSocket = vi.fn(() => fakeWs) as unknown as typeof WebSocket;
+    global.WebSocket = vi.fn(function () { return fakeWs; }) as unknown as typeof WebSocket;
 
     const provider = new DeepgramStreamingProvider('test-key');
     const openPromise = provider.openSession(

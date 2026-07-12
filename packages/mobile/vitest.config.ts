@@ -7,15 +7,19 @@ import path from 'node:path';
 // `// @vitest-environment jsdom`) with the native modules mocked. React Native
 // component-render tests use jest-expo (`test:rn`).
 export default defineConfig({
-  esbuild: {
-    // Don't read packages/mobile/tsconfig.json here — it `extends`
-    // expo/tsconfig.base, which only exists after `npm install` in this
-    // isolated project. Pure-logic tests don't need the Expo TS settings.
-    tsconfigRaw: '{}',
+  // Vite 8 transforms TS/JSX with Oxc (not esbuild), so the old `esbuild`
+  // block is ignored. Oxc has no `tsconfigRaw` bypass and always resolves the
+  // nearest on-disk tsconfig — packages/mobile/tsconfig.json is kept
+  // self-contained (no `expo/tsconfig.base` extends) precisely so this lane
+  // resolves without installing the isolated Expo project. See that file's
+  // top comment.
+  oxc: {
     // Screen tests render .tsx with no explicit React import (the screens use
-    // the automatic runtime via babel-preset-expo); use it here too so esbuild
-    // emits react/jsx-runtime calls instead of bare React.createElement.
-    jsx: 'automatic',
+    // the automatic runtime via babel-preset-expo); use it here too so Oxc
+    // emits react/jsx-runtime calls instead of bare React.createElement. This
+    // overrides the tsconfig's `jsx: "react-native"` (which the real
+    // `tsc --noEmit` typecheck still uses).
+    jsx: { runtime: 'automatic' },
   },
   test: {
     // Tests live under src/ only — never under app/, where expo-router's
@@ -48,10 +52,15 @@ export default defineConfig({
         'app/(tabs)/settings/voice.tsx',
         'app/jobs/\\[id\\]/photos.tsx',
       ],
-      // Floors sit a few points under current coverage (stmts/lines ~96%,
-      // funcs ~93%, branches ~76%) so routine churn passes but dropped tests
-      // or untested new code fail the lane.
-      thresholds: { statements: 92, branches: 72, functions: 88, lines: 92 },
+      // Rescaled for vitest 4 (QUALITY-2026-07-12 WS8): @vitest/coverage-v8 v4
+      // remaps via `ast-v8-to-istanbul` (no opt-out), counting statements/
+      // functions more granularly than v1's `v8-to-istanbul`. The identical
+      // 482 tests now measure stmts ~88% / funcs ~85% / lines ~91% / branches
+      // ~76% (was stmts/lines ~96%, funcs ~93%) — a measurement change, not a
+      // coverage regression (no test was removed or weakened). Floors sit a few
+      // points under the new measured values; branches is unchanged (still
+      // passes at ~76%).
+      thresholds: { statements: 86, branches: 72, functions: 82, lines: 89 },
     },
     // tsconfigRaw above disables esbuild's tsconfig path resolution, so map the
     // project aliases explicitly here for tests that import via them. Shared is

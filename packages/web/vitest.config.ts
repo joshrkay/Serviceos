@@ -20,11 +20,16 @@ export default defineConfig({
         'src/main.tsx',              // app entry point
       ],
       thresholds: {
-        // Actual coverage sits at ~80% lines / ~75% branches; these
-        // floors leave ~5 points of headroom so an entirely untested
-        // module can no longer land without failing CI.
-        lines: 75,
-        branches: 70,
+        // Rescaled for vitest 4 (QUALITY-2026-07-12 WS8): @vitest/coverage-v8
+        // v4 remaps via `ast-v8-to-istanbul` (no opt-out), which counts
+        // JSX/TSX statements and branches far more granularly than v1's
+        // `v8-to-istanbul`. The identical 1,774 tests now measure ~70% lines /
+        // ~60% branches instead of ~80% / ~75% — a measurement change, not a
+        // coverage regression (no test was removed or weakened). Floors kept a
+        // couple of points under the new measured values so an entirely
+        // untested module still fails CI.
+        lines: 68,
+        branches: 57,
       },
     },
   },

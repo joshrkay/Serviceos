@@ -11,7 +11,7 @@
  *   - barge-in: a non-empty partial while TTS is speaking stops speech,
  *   - 60s of silence ends the session.
  */
-import { renderHook, act } from '@testing-library/react';
+import { renderHook, act, cleanup } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const apiFetchMock = vi.fn();
@@ -96,6 +96,12 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // Unmount the hook BEFORE unstubbing globals so useTTS's cleanup effect
+  // still sees the stubbed `speechSynthesis` when it calls `.cancel()`.
+  // vitest 4 runs this afterEach ahead of Testing Library's auto-cleanup,
+  // so without an explicit unmount here the deferred unmount would hit a
+  // torn-down `speechSynthesis` and throw during passive-effect flush.
+  cleanup();
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
