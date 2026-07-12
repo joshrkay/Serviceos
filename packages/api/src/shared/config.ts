@@ -121,6 +121,15 @@ const configSchema = z.object({
   SLO_ALERT_COOLDOWN_MIN: z.coerce.number().positive().default(60),
   // Operator phone (E.164) for SLO breach SMS pages. Unset → Sentry-only.
   ALERT_SMS_TO: z.string().min(1).optional(),
+  // QUALITY-2026-07-12 WS5 — Microsoft Presidio PII redaction backend for
+  // training-asset ingestion. Two separate REST services (matching Presidio's
+  // standard deployment): the Analyzer detects PII spans, the Anonymizer
+  // replaces them. Both must be set to enable the Presidio-first redaction
+  // pass; when set, an unreachable backend FAILS CLOSED (asset quarantined,
+  // never persisted with raw / regex-only text). Unset ⇒ local deterministic
+  // scrub only (dev/test). See ai/privacy/presidio-adapter.ts.
+  PRESIDIO_ANALYZER_URL: z.string().url().optional(),
+  PRESIDIO_ANONYMIZER_URL: z.string().url().optional(),
 });
 
 export type AppConfig = z.infer<typeof configSchema>;
