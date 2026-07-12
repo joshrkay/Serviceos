@@ -905,8 +905,8 @@ export function LiveTemplatesSection() {
 
 // ─── Main Page ────────────────────────────────────────────────────────────────
 // D2: Removed fabricated AI suggestions, stats, and community insights.
-// Only the LiveTemplatesSection (backend-backed) is shown. Other sections
-// are marked "coming soon" until real data pipelines are integrated.
+// Only the LiveTemplatesSection (backend-backed) and the weekly-digest
+// control are shown; unbacked "coming soon" placeholders were removed.
 export function TemplatesPage() {
   const navigate = useNavigate();
   const [digestOpen, setDigestOpen] = useState(false);
@@ -941,38 +941,6 @@ export function TemplatesPage() {
         {/* ── P4-014 — Live templates (backend-backed). This is the real,
             backend-persisted template editor. ── */}
         <LiveTemplatesSection />
-
-        {/* ── AI Suggestions — Coming Soon ── */}
-        <div className="mb-6">
-          <div className="flex items-center gap-2 mb-3">
-            <Sparkles size={14} className="text-slate-400" />
-            <p className="text-sm text-slate-700">AI-powered suggestions</p>
-            <span className="text-xs text-amber-600 bg-amber-100 rounded-full px-2 py-0.5">Coming soon</span>
-          </div>
-          <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-8 text-center">
-            <Sparkles size={24} className="text-slate-300 mx-auto mb-2" />
-            <p className="text-sm text-slate-600">Template refinement suggestions</p>
-            <p className="text-xs text-slate-400 mt-1 max-w-sm mx-auto">
-              Once you've processed more jobs, Rivet will analyze your usage patterns and suggest template improvements.
-            </p>
-          </div>
-        </div>
-
-        {/* ── Community Insights — Coming Soon ── */}
-        <div className="mb-6">
-          <div className="flex items-center gap-2 mb-3">
-            <Globe size={14} className="text-slate-400" />
-            <p className="text-sm text-slate-700">Community insights</p>
-            <span className="text-xs text-amber-600 bg-amber-100 rounded-full px-2 py-0.5">Coming soon</span>
-          </div>
-          <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-8 text-center">
-            <Users size={24} className="text-slate-300 mx-auto mb-2" />
-            <p className="text-sm text-slate-600">Insights from similar businesses</p>
-            <p className="text-xs text-slate-400 mt-1 max-w-sm mx-auto">
-              See what's working for other businesses in your trade — anonymized and aggregated.
-            </p>
-          </div>
-        </div>
 
         {/* ── Weekly Digest ── */}
         <div className="mb-6">

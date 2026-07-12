@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { useClerk } from '@clerk/clerk-react';
 import {
-  ChevronRight, Building2, Users, Shield, Bell, Globe, Clock,
+  ChevronRight, Building2, Users, Globe, Clock,
   CreditCard, Link, Zap, FileText, Sparkles, Copy, ExternalLink,
   MapPin, Check, Store, RefreshCw, TrendingUp, Mail, BookOpen, Star, Phone,
   Calendar, ClipboardList, SlidersHorizontal, Megaphone, ScrollText,
@@ -385,7 +385,6 @@ export function SettingsPage() {
       title: 'Team',
       items: [
         { icon: Users,  label: 'Team members',        description: 'View the roster and roles', action: () => setTeamMembersOpen(true) },
-        { icon: Shield, label: 'Roles & permissions', description: 'Owner, Admin, Technician',             action: () => toast.info('Coming soon') },
       ],
     },
     {
@@ -421,7 +420,6 @@ export function SettingsPage() {
         ...(me?.brand_voice_configurator_enabled
           ? [{ icon: MessageSquareQuote, label: 'Brand voice', description: 'How the AI sounds in every customer message — register, sign-off, banned phrases', action: () => setBrandVoiceOpen(true) }]
           : []),
-        { icon: Bell,     label: 'Reminders & follow-ups',          description: 'Auto-send thresholds and timing',             action: () => toast.info('Coming soon') },
         { icon: FileText, label: 'Estimate & invoice templates',    description: 'Default line items, terms, expiry',           action: () => navigate('/settings/templates') },
         { icon: ClipboardList, label: 'Forms & checklists',         description: 'Reusable job forms your team fills out on site', action: () => setJobFormsOpen(true) },
         { icon: SlidersHorizontal, label: 'Job custom fields',      description: 'Extra fields on every job (PO #, permit #, gate code)', action: () => setJobCustomFieldsOpen(true) },
@@ -465,12 +463,6 @@ export function SettingsPage() {
             ? { label: 'Connected', color: 'bg-green-100 text-green-700' }
             : { label: 'Connect', color: 'bg-blue-100 text-blue-700' },
           action: () => setQbOpen(true),
-        },
-        {
-          icon: Link,
-          label: 'Zapier',
-          description: 'Not connected',
-          action: () => toast.info('Coming soon'),
         },
       ],
     },
