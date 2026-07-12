@@ -3,6 +3,7 @@ import type { Pool } from 'pg';
 import type { KnownEntities } from '../ai/training/scrub';
 import { createAuditEvent, type AuditRepository } from '../audit/audit';
 import { runInTenantTransaction } from '../commands/command-runner';
+import { tenantContextStore } from '../middleware/tenant-context';
 import { PRESIDIO_UNAVAILABLE_SIGNAL } from '../ai/privacy/presidio-adapter';
 import { ConflictError, NotFoundError, ValidationError } from '../shared/errors';
 import type {
@@ -279,6 +280,18 @@ export class TrainingAssetService {
   private async withPersistence<T>(tenantId: string, fn: () => Promise<T>): Promise<T> {
     if (!this.deps.pool) {
       return runInTenantTransaction(null, tenantId, fn);
+    }
+    // PR #669 review — the /api routes mount withTenantTransaction(pool), so
+    // the request ALREADY holds a pool client with an open tenant-scoped
+    // transaction in tenantContextStore. Opening a second client here means N
+    // concurrent training-asset requests each hold their outer client while
+    // all blocking on an inner connect() — pool starvation with pool size N.
+    // Reuse the ambient transaction instead: every PgBaseRepository write in
+    // `fn` already joins it, and a throw propagates to the middleware, which
+    // rolls the whole request unit back — same all-or-nothing guarantee.
+    const ambient = tenantContextStore.getStore();
+    if (ambient && ambient.tenantId === tenantId) {
+      return fn();
     }
     const client = await this.deps.pool.connect();
     try {

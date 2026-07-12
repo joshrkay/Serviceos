@@ -112,20 +112,34 @@ jobs:
       - name: Install Railway CLI
         run: npm install -g @railway/cli
       # Migrations run inside Railway via `preDeployCommand` in railway.toml.
+      # `--ci` (not `--detach`, PR #669 review): streams build logs and fails
+      # this step on a build failure instead of returning at upload time.
       - name: Deploy API to Railway (Development)
-        run: railway up --service "@serviceos/api" --environment Development --detach
+        run: railway up --service "@serviceos/api" --environment Development --ci
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
       - name: Deploy Web to Railway (Development)
-        run: railway up --service "@serviceos/web" --environment Development --detach
+        run: railway up --service "@serviceos/web" --environment Development --ci
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
 
       # --- Post-deploy verification (WS7) --------------------------------
-      # `railway up --detach` returns as soon as the build is queued — it does
-      # NOT wait for the new container to become healthy, migrations to run
-      # (preDeployCommand), or the rollout to swap. Without the steps below a
-      # broken deploy (failed migration, boot crash, bad env) reports GREEN.
+      # `railway up --ci` exits after the BUILD; the rollout (preDeployCommand
+      # migration + container swap + Railway healthcheck) continues in the
+      # background, and on failure Railway keeps the OLD container serving —
+      # so a public-URL poll alone can green against the previous deploy.
+      # wait-for-deployment.sh closes that race by polling the service's
+      # newest deployment status until SUCCESS (hard-fail on FAILED/CRASHED);
+      # only then do the health poll + smoke verify the new deploy is serving.
+      #
+      - name: Wait for dev API deployment to reach SUCCESS
+        run: bash scripts/ci/wait-for-deployment.sh "@serviceos/api" Development
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      - name: Wait for dev Web deployment to reach SUCCESS
+        run: bash scripts/ci/wait-for-deployment.sh "@serviceos/web" Development
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
       #
       # DEV_HEALTHCHECK_URL must point at the dev API's public base URL (no
       # trailing path). If it is unset we FAIL LOUD rather than skip — a
@@ -174,17 +188,27 @@ jobs:
       - name: Install Railway CLI
         run: npm install -g @railway/cli
       - name: Deploy API to Railway (production)
-        run: railway up --service "@serviceos/api" --environment production --detach
+        run: railway up --service "@serviceos/api" --environment production --ci
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
       - name: Deploy Web to Railway (production)
-        run: railway up --service "@serviceos/web" --environment production --detach
+        run: railway up --service "@serviceos/web" --environment production --ci
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
 
       # --- Post-deploy verification (WS7) --------------------------------
-      # Same rationale as dev. PROD_HEALTHCHECK_URL must be the prod API base
-      # URL; unset ⇒ hard fail (no false green).
+      # Same rationale as dev: wait for the actual deployments to reach
+      # SUCCESS (a public-URL poll alone can green against the old container),
+      # then verify health + smoke. PROD_HEALTHCHECK_URL must be the prod API
+      # base URL; unset ⇒ hard fail (no false green).
+      - name: Wait for prod API deployment to reach SUCCESS
+        run: bash scripts/ci/wait-for-deployment.sh "@serviceos/api" production
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      - name: Wait for prod Web deployment to reach SUCCESS
+        run: bash scripts/ci/wait-for-deployment.sh "@serviceos/web" production
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
       - name: Verify PROD_HEALTHCHECK_URL is configured
         run: |
           if [ -z "$PROD_HEALTHCHECK_URL" ]; then

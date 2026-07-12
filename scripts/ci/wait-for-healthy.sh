@@ -46,11 +46,17 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
   # -s silent, -S show errors, --max-time bounds a hung connection so a
   # stalled SYN can't eat the whole timeout in one attempt.
   if last_body="$(curl -sS --max-time 10 "$HEALTH_URL" 2>&1)"; then
-    if printf '%s' "$last_body" | grep -q '"status":"ok"'; then
+    # Parse the TOP-LEVEL .status only (PR #669 review): the body nests
+    # per-check statuses (e.g. "drain":{"status":"ok"}), so a substring grep
+    # for "status":"ok" would pass on a DB-down body whose top-level status
+    # is "down". jq is present on GitHub runners; a parse failure counts as
+    # not-healthy rather than a pass.
+    top_status="$(printf '%s' "$last_body" | jq -r '.status // empty' 2>/dev/null || true)"
+    if [ "$top_status" = "ok" ]; then
       echo "  healthy after ${attempt} attempt(s): $last_body"
       exit 0
     fi
-    echo "  attempt ${attempt}: not healthy yet — $last_body"
+    echo "  attempt ${attempt}: not healthy yet (top-level status: ${top_status:-unparseable}) — $last_body"
   else
     echo "  attempt ${attempt}: request failed — $last_body"
   fi
