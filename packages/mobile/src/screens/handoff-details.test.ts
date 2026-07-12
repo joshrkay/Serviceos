@@ -2,6 +2,7 @@
 import { cleanup, fireEvent, render, waitFor } from '@testing-library/react';
 import { createElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { __setLinkingOpenURL } from '../../test/stubs/react-native';
 
 const h = vi.hoisted(() => ({
   push: vi.fn(),
@@ -10,6 +11,7 @@ const h = vi.hoisted(() => ({
   clockTimeEntry: vi.fn(),
   updateCustomer: vi.fn(),
   run: vi.fn(),
+  openURL: vi.fn(),
   phase: 'idle' as 'idle' | 'saving' | 'saved' | 'error',
   saveError: null as string | null,
   data: null as Record<string, unknown> | null,
@@ -70,6 +72,8 @@ beforeEach(() => {
   });
   h.updateCustomer.mockResolvedValue({ id: 'abc123' });
   h.clockTimeEntry.mockResolvedValue(undefined);
+  h.openURL = vi.fn().mockResolvedValue(undefined);
+  __setLinkingOpenURL(h.openURL);
 });
 
 afterEach(() => cleanup());
@@ -81,7 +85,7 @@ describe('Handoff detail screens', () => {
       jobNumber: 'JOB-99',
       summary: 'Replace filter',
       status: 'scheduled',
-      customer: { displayName: 'Acme HVAC' },
+      customer: { displayName: 'Acme HVAC', primaryPhone: '555-010-0200' },
       location: { street1: '1 Main St', city: 'Springfield', state: 'IL' },
     };
     const { getByText } = render(createElement(JobDetail));
@@ -91,10 +95,35 @@ describe('Handoff detail screens', () => {
     expect(photos.className).toMatch(/\bmin-h-11\b/);
     fireEvent.click(photos);
     expect(h.push).toHaveBeenCalledWith('/jobs/abc123/photos');
-    fireEvent.click(getByText('Message').closest('button')!);
-    fireEvent.click(getByText('Navigate').closest('button')!);
     fireEvent.click(getByText('Time').closest('button')!);
     expect(h.push).toHaveBeenCalledWith('/jobs/abc123/time');
+  });
+
+  it('JobDetail Message texts the customer and Navigate opens maps (iOS)', () => {
+    h.data = {
+      id: 'abc123',
+      customer: { displayName: 'Acme HVAC', primaryPhone: '(555) 010-0200' },
+      location: { street1: '1 Main St', city: 'Springfield', state: 'IL' },
+    };
+    const { getByText } = render(createElement(JobDetail));
+    fireEvent.click(getByText('Message').closest('button')!);
+    expect(h.openURL).toHaveBeenCalledWith('sms:5550100200');
+    fireEvent.click(getByText('Navigate').closest('button')!);
+    expect(h.openURL).toHaveBeenCalledWith(
+      'http://maps.apple.com/?q=1%20Main%20St%2C%20Springfield%2C%20IL',
+    );
+  });
+
+  it('JobDetail disables Message with no phone and Navigate with no address', () => {
+    h.data = { id: 'abc123', customer: { displayName: 'Acme HVAC' } };
+    const { getByText } = render(createElement(JobDetail));
+    const message = getByText('Message').closest('button')!;
+    const navigate = getByText('Navigate').closest('button')!;
+    expect(message.hasAttribute('disabled')).toBe(true);
+    expect(navigate.hasAttribute('disabled')).toBe(true);
+    fireEvent.click(message);
+    fireEvent.click(navigate);
+    expect(h.openURL).not.toHaveBeenCalled();
   });
 
   it('InvoiceDetail fetches by route id and shows formatted total', () => {
@@ -126,6 +155,39 @@ describe('Handoff detail screens', () => {
     expect(getByText('Gamma Corp')).toBeTruthy();
     expect(getByText('qualified')).toBeTruthy();
     expect(getByText('$1,500.00')).toBeTruthy();
+  });
+
+  it('LeadDetail Call/Text/Email deep-link the lead phone and email', () => {
+    h.data = {
+      id: 'abc123',
+      companyName: 'Gamma Corp',
+      primaryPhone: '(555) 020-0300',
+      email: 'sales@gamma.example',
+    };
+    const { getByText, getAllByText } = render(createElement(LeadDetail));
+    // 'Email' also appears as a LabelValueTable row label; pick the button node.
+    const emailButton = getAllByText('Email')
+      .map((n) => n.closest('button'))
+      .find(Boolean)!;
+    fireEvent.click(getByText('Call').closest('button')!);
+    expect(h.openURL).toHaveBeenCalledWith('tel:5550200300');
+    fireEvent.click(getByText('Text').closest('button')!);
+    expect(h.openURL).toHaveBeenCalledWith('sms:5550200300');
+    fireEvent.click(emailButton);
+    expect(h.openURL).toHaveBeenCalledWith('mailto:sales%40gamma.example');
+  });
+
+  it('LeadDetail disables Call/Text/Email when phone and email are absent', () => {
+    h.data = { id: 'abc123', companyName: 'Gamma Corp' };
+    const { getByText, getAllByText } = render(createElement(LeadDetail));
+    const emailButton = getAllByText('Email')
+      .map((n) => n.closest('button'))
+      .find(Boolean)!;
+    expect(getByText('Call').closest('button')!.hasAttribute('disabled')).toBe(true);
+    expect(getByText('Text').closest('button')!.hasAttribute('disabled')).toBe(true);
+    expect(emailButton.hasAttribute('disabled')).toBe(true);
+    fireEvent.click(getByText('Call').closest('button')!);
+    expect(h.openURL).not.toHaveBeenCalled();
   });
 
   it('EditCustomer fetches by route id and renders the edit form', () => {

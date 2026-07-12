@@ -1,10 +1,11 @@
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { ActivityIndicator, Pressable, Text, View } from 'react-native';
+import { ActivityIndicator, Linking, Platform, Pressable, Text, View } from 'react-native';
 import { ErrorState } from '../../src/components/ErrorState';
 import { ScreenShell } from '../../src/components/ScreenShell';
 import { LabelValueTable } from '../../src/components/LabelValueTable';
 import { useDetailQuery } from '../../src/hooks/useDetailQuery';
 import { jobRowText } from '../../src/lib/jobRow';
+import { buildMapsUrl, buildSmsUrl, type DevicePlatform } from '../../src/lib/deviceLinks';
 
 interface JobDetail {
   id: string;
@@ -15,11 +16,14 @@ interface JobDetail {
     displayName?: string;
     firstName?: string;
     lastName?: string;
+    primaryPhone?: string;
   };
   location?: {
     street1?: string;
+    street2?: string;
     city?: string;
     state?: string;
+    postalCode?: string;
   };
 }
 
@@ -27,6 +31,16 @@ function customerName(job?: JobDetail): string | undefined {
   const c = job?.customer;
   if (!c) return undefined;
   return c.displayName || [c.firstName, c.lastName].filter(Boolean).join(' ');
+}
+
+/** Single-line address for display and maps routing, or undefined when unknown. */
+function jobAddress(job?: JobDetail): string | undefined {
+  const loc = job?.location;
+  if (!loc) return undefined;
+  const line = [loc.street1, loc.street2, loc.city, loc.state, loc.postalCode]
+    .filter(Boolean)
+    .join(', ');
+  return line || undefined;
 }
 
 export default function JobDetailScreen() {
@@ -38,9 +52,10 @@ export default function JobDetailScreen() {
   );
 
   const headline = data ? jobRowText(data).primary : 'Job';
-  const locationLine = data?.location
-    ? [data.location.street1, data.location.city, data.location.state].filter(Boolean).join(', ')
-    : undefined;
+  const locationLine = jobAddress(data);
+
+  const smsUrl = buildSmsUrl(data?.customer?.primaryPhone);
+  const mapsUrl = buildMapsUrl(locationLine, Platform.OS as DevicePlatform);
 
   return (
     <ScreenShell title={headline} backLabel="‹ Jobs">
@@ -52,17 +67,23 @@ export default function JobDetailScreen() {
           <View className="mb-4 flex-row gap-2">
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel="Message"
-              onPress={() => {}}
-              className="min-h-11 flex-1 items-center justify-center rounded-md bg-primary px-4 py-3"
+              accessibilityLabel={smsUrl ? 'Message customer' : 'Message unavailable — no phone on file'}
+              disabled={!smsUrl}
+              onPress={() => smsUrl && void Linking.openURL(smsUrl)}
+              className={`min-h-11 flex-1 items-center justify-center rounded-md bg-primary px-4 py-3 ${
+                smsUrl ? '' : 'opacity-50'
+              }`}
             >
               <Text className="text-base font-semibold text-primaryForeground">Message</Text>
             </Pressable>
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel="Navigate"
-              onPress={() => {}}
-              className="min-h-11 flex-1 items-center justify-center rounded-md border border-border px-4 py-3"
+              accessibilityLabel={mapsUrl ? 'Navigate to job address' : 'Navigate unavailable — no address on file'}
+              disabled={!mapsUrl}
+              onPress={() => mapsUrl && void Linking.openURL(mapsUrl)}
+              className={`min-h-11 flex-1 items-center justify-center rounded-md border border-border px-4 py-3 ${
+                mapsUrl ? '' : 'opacity-50'
+              }`}
             >
               <Text className="text-base text-foreground">Navigate</Text>
             </Pressable>

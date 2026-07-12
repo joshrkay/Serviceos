@@ -18,7 +18,6 @@ const SECONDARY: Array<{ label: string; route: Href }> = [
   { label: 'Estimates', route: '/estimates' },
   { label: 'Invoices', route: '/invoices' },
   { label: 'Approvals', route: '/approvals' },
-  { label: 'Notifications', route: '/notifications' },
 ];
 
 export default function Home() {
@@ -53,8 +52,12 @@ export default function Home() {
       className="flex-1 bg-background"
       contentContainerStyle={{ paddingHorizontal: 24, paddingTop: 96, paddingBottom: 96 }}
     >
-      <Text className="font-heading text-2xl font-semibold text-foreground">{greetingForDate()}</Text>
-      <Text className="mt-1 text-base text-mutedForeground">{formatWeekdayDate(new Date())}</Text>
+      <Text className="font-heading text-2xl font-semibold text-foreground">
+        {greetingForDate(new Date(), me?.timezone)}
+      </Text>
+      <Text className="mt-1 text-base text-mutedForeground">
+        {formatWeekdayDate(new Date(), me?.timezone)}
+      </Text>
 
       <Pressable
         accessibilityRole="button"

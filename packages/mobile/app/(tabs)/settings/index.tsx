@@ -14,10 +14,7 @@ const LINKS: Array<{ label: string; route: Href; subtitle?: string }> = [
   { label: 'Team & roles', route: '/settings/team', subtitle: 'Invite and manage your crew' },
   { label: 'Voice settings', route: '/settings/voice', subtitle: 'Assistant and capture' },
   { label: 'Brand voice', route: '/settings/brand-voice', subtitle: 'Tone and messaging style' },
-  { label: 'Proposal lanes', route: '/settings/lanes', subtitle: 'Confidence and auto-approve' },
   { label: 'Message templates', route: '/settings/templates', subtitle: 'Reusable SMS replies' },
-  { label: 'Lead sources', route: '/settings/lead-sources', subtitle: 'Attribution config' },
-  { label: 'Billing', route: '/settings/billing', subtitle: 'Subscription and payments' },
   { label: 'Weekly digest', route: '/digest', subtitle: 'Owner summary' },
   { label: 'End of day review', route: '/digest/end-of-day', subtitle: 'Close-out checklist' },
 ];
