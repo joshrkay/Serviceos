@@ -14,7 +14,7 @@
 | Unit tests | `pr-checks.yml`, `deploy.yml` | `npm test` |
 | API integration (testcontainers) | `pr-checks.yml`, `deploy.yml` | `npm run test:integration` — image `pgvector/pgvector:pg16` |
 | Coverage + per-module thresholds | `pr-checks.yml`, `deploy.yml` | `npm run test:coverage` + `scripts/check-coverage.ts` |
-| Voice quality Layer 1 | `pr-checks.yml` | `npm run voice-quality` |
+| Voice quality Layer 1 | `pr-checks.yml`, `voice-quality-nightly.yml` | `npm run voice-quality` with `VOICE_QUALITY_ENFORCE_LAUNCH_GATE=true` (merge step exits non-zero on any launch-gate blocker) |
 | Playwright job | `e2e.yml` | `npm run e2e` — **job** must pass |
 | Owner-loop + voice smoke | `deploy.yml` only | `owner-loop-critical-path`, `voice-smoke.synthetic` |
 | Migration dry-run | `deploy.yml` only | `npm run migrate:dryrun` |
@@ -25,7 +25,6 @@ Per-module coverage (`check-coverage.ts`) is **gating** — there is no `continu
 
 | Suite | Workflow | Notes |
 |-------|----------|-------|
-| Voice quality pg nightly | `voice-quality-nightly.yml` | `continue-on-error: true` until pg mode lands |
 | Voice quality weekly trend | `voice-quality-weekly-trend.yml` | Alerting steps advisory |
 | QA matrix gate | `qa-matrix-gate.yml` | Gating within nightly workflow; requires 11 GitHub secrets |
 | Onboarding integration (E2E workflow) | `e2e.yml` | Skips with exit 0 when `E2E_CLERK_SECRET_KEY` unset |
@@ -42,6 +41,23 @@ Without GitHub secrets `E2E_CLERK_PUBLISHABLE_KEY` and `E2E_CLERK_SECRET_KEY`:
 - `invoice-to-payment.spec.ts` and `estimate-approval-execution.spec.ts` are permanently `test.skip` until implemented.
 
 **To upgrade to Option A (full journeys):** add both Clerk secrets to GitHub repo settings. See `qa/reports/2026-05-11/clerk-testing-tokens-runbook.md`. Optionally set `E2E_DATABASE_URL` for BYO Postgres instead of ephemeral testcontainers in E2E global setup.
+
+## Voice quality: nightly Layer 1 (pg mode removed)
+
+The nightly `voice-quality-nightly.yml` previously advertised a `VOICE_QUALITY_REPO=pg`
+run against a Postgres service, gated behind `continue-on-error: true`. That
+run was decorative: the runner's `pg` mode was a throwing stub, so the corpus
+never actually executed against Postgres — the step errored and was ignored.
+
+QUALITY-2026-07-12 WS1 removed the fake `pg` option. Layer 1 is memory-only by
+design: the LLM is mocked via deterministic cassettes, and the harness driver
+reads several repos (owner-approval settings, catalog, on-call, DNC) that the
+runner's `RepoBundle` does not own — so a partial-Pg bundle would be a
+misleading DB signal, not a faithful one. The nightly now runs the same
+memory-mode Layer-1 corpus as PR CI, with the launch gate **enforced**
+(`VOICE_QUALITY_ENFORCE_LAUNCH_GATE=true`) and **no** `continue-on-error`, so a
+regression reddens it. A true DB-backed Layer-1 harness (real Pg repos +
+migrations + RLS runtime role) is tracked as future work, not faked in CI.
 
 ## Docker / integration reliability
 

@@ -1,16 +1,20 @@
-# VQ-024 — Voice Quality v1 Layer 1 nightly Pg variant.
+# Voice Quality v1 Layer 1 — nightly gate.
 #
-# Runs the same corpus suite as the PR-checks `voice-quality` job but
-# against a real Postgres testcontainer (VOICE_QUALITY_REPO=pg). Catches
-# Pg-specific regressions (RLS, transaction boundaries, JSONB shape)
-# that the InMemory repo bundle can't surface.
+# Runs the SAME Layer-1 corpus suite as the PR-checks `voice-quality` job
+# (InMemory repo bundle, deterministic script-aware cassettes, no API keys)
+# on a daily schedule, with the launch gate ENFORCED.
 #
-# Status: the runner currently throws on `pg` mode (per VQ-008's
-# "pg mode not yet supported" comment). This workflow file is correct
-# but will fail until pg mode lands. `continue-on-error: true` keeps
-# the schedule non-fatal until then; remove once both cassettes and
-# pg mode are ready.
-name: Voice Quality (nightly Pg)
+# History (QUALITY-2026-07-12 WS1): this job used to run a `VOICE_QUALITY_REPO=pg`
+# variant against a Postgres service, behind `continue-on-error: true`. But the
+# runner's `pg` mode was a throwing stub — the corpus never actually ran against
+# Postgres; the step errored and was ignored, so the nightly was decorative. The
+# `pg` option has been removed (Layer 1 is memory-only: the LLM is mocked and the
+# driver reads several repos the bundle doesn't own, so a partial-Pg bundle would
+# be a misleading signal). The nightly now runs the real memory-mode corpus with
+# the gate enforced and no continue-on-error, so a regression reddens it. A true
+# DB-backed Layer-1 harness (real Pg repos + migrations + RLS role) is tracked as
+# future work, not faked here.
+name: Voice Quality (nightly)
 
 on:
   schedule:
@@ -18,21 +22,9 @@ on:
   workflow_dispatch:
 
 jobs:
-  layer1-pg:
+  layer1:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_PASSWORD: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -40,17 +32,14 @@ jobs:
           node-version: '20'
           cache: 'npm'
       - run: npm ci
-      - name: Apply migrations
-        run: npm run migrate:apply --workspace=packages/api
-        env:
-          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
-      - name: Run voice quality (Pg variant)
+      - name: Run voice quality (Layer 1, gate enforced)
         run: npm run voice-quality --workspace=packages/api
         env:
-          VOICE_QUALITY_REPO: pg
           VOICE_QUALITY_CASSETTE_MODE: replay
-          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
-        continue-on-error: true # TODO(VQ-024-followup): remove once pg mode + cassettes are ready
+          # Enforced: the merge step exits non-zero on any launch-gate blocker
+          # (floor break, a bucket under threshold incl. Spanish ≥90%, overall
+          # <90%). No continue-on-error — a red nightly is a real signal.
+          VOICE_QUALITY_ENFORCE_LAUNCH_GATE: 'true'
       - name: Cassette staleness report (informational)
         if: always()
         # Deterministic, offline (no DB/LLM): surfaces how much of the corpus

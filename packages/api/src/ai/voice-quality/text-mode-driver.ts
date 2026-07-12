@@ -80,6 +80,11 @@ import {
   type VoiceSession,
 } from '../agents/customer-calling/voice-session-store';
 import { AgentEventBus } from './event-bus';
+import {
+  detectEmergency,
+  EMERGENCY_SAFETY_LINE,
+} from '../agents/customer-calling/emergency-detector';
+import { detectLanguage, renderTtsText } from '../agents/customer-calling/tts-copy';
 import type { CallingAgentEvent, SideEffect } from '../agents/customer-calling/types';
 import { enforceCompliance } from '../skills/enforce-compliance';
 import { escalateToHuman } from '../skills/escalate-to-human';
@@ -275,6 +280,15 @@ const LOOKUP_NOT_WIRED_FALLBACK =
   "I'm having trouble pulling that up right now. Let me get a person to help.";
 
 /**
+ * WS21b — skill name stamped on the `lookup_executed` event a recognized owner
+ * line emits at session establishment. The floor PII grader keys identity
+ * resolution off this name (see graders/floor.ts IDENTITY_RESOLVING_LOOKUPS):
+ * an owner caller-ID match IS identity verification, so owner-only readbacks
+ * that name a customer/amount are post-identity, not a pre-identity PII leak.
+ */
+const OWNER_IDENTITY_LOOKUP_SKILL = 'verify_owner_identity';
+
+/**
  * Build a one-line spoken confirmation for a freshly-created proposal.
  * Mirrors the "intent_confirm" flavor the Twilio adapter would speak
  * after the FSM lands a proposal — short, operator-friendly, never
@@ -395,6 +409,21 @@ export class TextModeDriver implements AgentDriver {
     });
     if (this.deps.bus) {
       this.deps.bus.subscribe(session);
+    }
+
+    // WS21b — a recognized owner line is identity-resolved the instant the
+    // session is established: the caller-ID matched tenant_settings.owner_phone
+    // (or an explicit fixture flag), which is the verification. Production has
+    // no lookup skill for this (it's a session-establishment fact, not a read),
+    // so we stamp a dedicated identity-resolving `lookup_executed` here — before
+    // any turn speaks — so the floor PII grader treats owner-only readbacks
+    // (e.g. an approval readback naming a customer + amount) as post-identity.
+    // The PIN challenge remains the money-movement gate; this is identity only.
+    if (ownerSession) {
+      session.events.emit(
+        'voice-event',
+        lookupExecutedEvent(OWNER_IDENTITY_LOOKUP_SKILL, 0, true),
+      );
     }
 
     const state = await this.resolveStartState(session, opts);
@@ -552,6 +581,22 @@ export class TextModeDriver implements AgentDriver {
     const state = this.stateBySession.get(sessionId);
 
     let agentResponse: string;
+
+    // RV-140/RV-142 — deterministic emergency-keyword interrupt, mirroring the
+    // telephony transports (twilio-adapter.runEmergencyScan /
+    // mediastream scanInterimForEmergency): a life-safety phrase in the caller
+    // transcript short-circuits the turn BEFORE any classify/LLM call. The 911
+    // safety line is spoken FIRST (localized to the call's language), then the
+    // call escalates to the on-call dispatcher (reason=emergency_dispatch). The
+    // Layer-1 driver never wired this, so a Spanish "fuga de gas" fell through
+    // to the classifier and never escalated.
+    const emergency = detectEmergency(callerTranscript);
+    if (emergency.matched) {
+      const emergencyResponse = await this.handleEmergency(session, callerTranscript, emergency.language);
+      const latencyMsEmergency = performance.now() - startedAt;
+      this.appendAgentAndEmit(session, sessionId, emergencyResponse);
+      return { agentResponse: emergencyResponse, latencyMs: latencyMsEmergency };
+    }
 
     // WS21b — an in-flight owner approval dialogue (confirm / disambiguate /
     // challenge / batch continuation) consumes the turn BEFORE classify,
@@ -978,6 +1023,31 @@ export class TextModeDriver implements AgentDriver {
     } catch {
       return true;
     }
+  }
+
+  /**
+   * RV-142 — emergency handling for the text-mode driver. Speaks the 911
+   * safety line FIRST (localized to the call's language via the same
+   * `renderTtsText` catalog the FSM transports use — the Spanish translation
+   * lives in tts-copy.ts SENTENCE_CATALOG_ES), then escalates to the on-call
+   * dispatcher with reason `emergency_dispatch` so `escalation_triggered`
+   * fires for the disposition grader. Language is detected from the caller's
+   * own utterance (the driver has no live STT language gate); an accented /
+   * marker-heavy Spanish emergency therefore gets the Spanish safety line.
+   */
+  private async handleEmergency(
+    session: VoiceSession,
+    callerTranscript: string,
+    keywordLanguage?: 'en' | 'es',
+  ): Promise<string> {
+    // Prefer the matched emergency keyword's language (strongest per-call
+    // signal — a Spanish "fuga de gas" means the caller speaks Spanish even
+    // when the sentence carries no accents the generic detector keys on);
+    // fall back to the transcript heuristic.
+    const lang = keywordLanguage ?? detectLanguage(callerTranscript);
+    const safetyLine = renderTtsText(EMERGENCY_SAFETY_LINE, {}, lang);
+    await this.escalate(session, 'emergency_dispatch');
+    return safetyLine;
   }
 
   /**

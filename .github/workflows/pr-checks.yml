@@ -100,6 +100,12 @@ jobs:
       - run: npm ci
       - name: Run voice quality suite
         run: npm run voice-quality --workspace=packages/api
+        # WS1 (QUALITY-2026-07-12) — enforce the launch gate: the merge step
+        # exits non-zero when launchGate.pass is false (floor break, a bucket
+        # under threshold incl. Spanish ≥90%, or overall <90%). Without this
+        # the corpus could regress while the job stayed green.
+        env:
+          VOICE_QUALITY_ENFORCE_LAUNCH_GATE: 'true'
       - name: Upload report artifact
         if: always()
         uses: actions/upload-artifact@v5

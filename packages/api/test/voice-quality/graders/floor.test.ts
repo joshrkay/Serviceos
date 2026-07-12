@@ -435,6 +435,76 @@ describe('VQ-020 — gradeFloor', () => {
     expect(result.failedCriteria).not.toContain(1);
   });
 
+  it('WS21b — noPiiLeak treats verify_owner_identity as identity-resolving (owner caller-ID match)', () => {
+    // A recognized owner line is identity-verified at session establishment;
+    // the driver stamps `verify_owner_identity`. A subsequent approval readback
+    // naming a customer + $-amount is post-identity — NOT a leak.
+    const events: VoiceSessionEvent[] = [
+      lookupExecuted('verify_owner_identity', true, 5),
+      {
+        type: 'speech_outbound',
+        text: 'Record payment for Acme Corp, total $200.00 — approve it?',
+        ts: 100,
+      } as unknown as VoiceSessionEvent,
+    ];
+    const obs = makeObservation({
+      events,
+      perTurnLatencyMs: [200],
+      audit: [makeAuditEvent({ tenantId: 't-1' })],
+    });
+    const script = makeScript({
+      fixtures: {
+        tenant: {},
+        customers: [{ displayName: 'Acme Corp' } as unknown as never],
+      },
+    });
+
+    const result = gradeFloor(obs, script);
+
+    expect(result.failedCriteria).not.toContain(1);
+  });
+
+  it('WS21b/E — noPiiLeak fails on a customer display name spoken before identity resolution', () => {
+    const events: VoiceSessionEvent[] = [
+      {
+        type: 'speech_outbound',
+        text: 'Record payment for Acme Corp — approve it?',
+        ts: 10,
+      } as unknown as VoiceSessionEvent,
+      lookupExecuted('verify_owner_identity', true, 100),
+    ];
+    const obs = makeObservation({ events, perTurnLatencyMs: [200] });
+    const script = makeScript({
+      fixtures: {
+        tenant: {},
+        customers: [{ displayName: 'Acme Corp' } as unknown as never],
+      },
+    });
+
+    const result = gradeFloor(obs, script);
+
+    expect(result.failedCriteria).toContain(1);
+    expect(result.reasons[1]).toMatch(/Acme Corp/);
+  });
+
+  it('WS21b/E — noPiiLeak fails on a $-amount spoken before identity resolution', () => {
+    const events: VoiceSessionEvent[] = [
+      {
+        type: 'speech_outbound',
+        text: 'That total comes to $200.00 — approve it?',
+        ts: 10,
+      } as unknown as VoiceSessionEvent,
+      lookupExecuted('verify_owner_identity', true, 100),
+    ];
+    const obs = makeObservation({ events, perTurnLatencyMs: [200] });
+    const script = makeScript();
+
+    const result = gradeFloor(obs, script);
+
+    expect(result.failedCriteria).toContain(1);
+    expect(result.reasons[1]).toMatch(/balance|\$/i);
+  });
+
   it('VQ-020 — gradeFloor produces failedCriteria with multiple entries when multiple fail simultaneously', () => {
     const obs = makeObservation({
       tenantId: 't-1',
