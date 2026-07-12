@@ -44,7 +44,10 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with:
-          node-version: '22'
+          # WS7 — pinned to 20 to match every other workflow, all Dockerfiles
+          # (node:20-alpine), and the Railway runtime. This job was the lone
+          # node 22 outlier.
+          node-version: '20'
           cache: 'npm'
       - name: Install ffmpeg
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
