@@ -1,7 +1,8 @@
 import React from 'react';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { AddEntrySheet } from './AddEntrySheet';
+import type { JobActivity } from '../../data/mock-data';
 
 // Keep the sheet chrome trivial — we only care about the photo pipeline here.
 vi.mock('./JobSheets', () => ({
@@ -25,11 +26,14 @@ vi.mock('../shared/CameraCapture', () => ({
 
 function renderSheet(opts: {
   uploadPhoto: ReturnType<typeof vi.fn>;
-  onSubmit?: ReturnType<typeof vi.fn>;
-  onClose?: ReturnType<typeof vi.fn>;
+  // vitest 4 types a bare `vi.fn()` as `Mock<Procedure | Constructable>`, whose
+  // constructable arm is not assignable to the sheet's concrete callback props.
+  // Pin the mock signatures so they match `onClose`/`onSubmit` exactly.
+  onSubmit?: Mock<(entry: Partial<JobActivity>) => void>;
+  onClose?: Mock<() => void>;
 }) {
-  const onSubmit = opts.onSubmit ?? vi.fn();
-  const onClose = opts.onClose ?? vi.fn();
+  const onSubmit = opts.onSubmit ?? vi.fn<(entry: Partial<JobActivity>) => void>();
+  const onClose = opts.onClose ?? vi.fn<() => void>();
   render(
     <AddEntrySheet
       jobId="j1"

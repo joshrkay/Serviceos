@@ -32,15 +32,14 @@ export default defineConfig({
     // config) and NOT the Layer 1 corpus entry (that uses
     // `vitest.voice-quality.config.ts`).
     include: ['test/voice-quality/**/voice-quality.layer2.test.ts'],
+    // Sequential: voting is inherently sequential per script; no benefit from
+    // parallel forks at this layer. Vitest 4 removed `poolOptions`;
+    // `maxWorkers`/`minWorkers: 1` + `isolate: false` reproduce the old
+    // single-fork (`poolOptions.forks.maxForks/minForks`) behaviour.
     pool: 'forks',
-    poolOptions: {
-      forks: {
-        // Sequential: voting is inherently sequential per script;
-        // no benefit from parallel forks at this layer.
-        maxForks: 1,
-        minForks: 1,
-      },
-    },
+    maxWorkers: 1,
+    minWorkers: 1,
+    isolate: false,
     testTimeout: 60_000,    // single script can take 30s+ with real audio
     hookTimeout: 120_000,
     globals: false,

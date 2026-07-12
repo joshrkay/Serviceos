@@ -31,7 +31,11 @@ describe('ElevenLabsStreamConnection', () => {
   beforeEach(() => {
     ws = new FakeWs();
     originalWebSocket = global.WebSocket;
-    global.WebSocket = vi.fn(() => {
+    // Regular function (not an arrow) so the mock is constructable — the
+    // connection helper calls `new WebSocket(...)`, and vitest 4's spy
+    // forwards `new` to the implementation via Reflect.construct, which
+    // rejects non-constructable arrow functions.
+    global.WebSocket = vi.fn(function () {
       // Open asynchronously to mirror real WHATWG behavior.
       queueMicrotask(() => {
         ws.readyState = FakeWs.OPEN;
