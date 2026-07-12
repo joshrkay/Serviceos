@@ -10,24 +10,32 @@ const devAuth = process.env.VITE_AUTH_MODE === 'dev';
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
-  // @stripe/react-stripe-js@3.x ships no `exports` map (CJS `main` + ESM
-  // `module`); vite 8's dep optimizer emits interop glue that expects a
-  // default export the package doesn't have, breaking the DEV server ("does
-  // not provide an export named 'default'" on /pay). Excluding it makes the
-  // dev server load its real ESM (`dist/react-stripe.esm.mjs`) directly —
-  // named imports work, and the production build (rollup) was never affected.
-  optimizeDeps: {
-    exclude: ['@stripe/react-stripe-js'],
+  resolve: {
+    alias: {
+      // @stripe/react-stripe-js@3.x ships no `exports` map and its `browser`
+      // field points at the UMD build. Under vite 8 that combination breaks
+      // the DEV server both ways: the dep optimizer emits default-export
+      // interop glue the package doesn't have ("does not provide an export
+      // named 'default'" on /pay), and merely excluding it from optimization
+      // makes resolution follow `browser` to the UMD file, which has no named
+      // ESM exports ("does not provide an export named 'Elements'"). Alias
+      // straight to the real ESM entry so both dev and build see the same
+      // named-exports module. Production output was verified unchanged.
+      '@stripe/react-stripe-js': fileURLToPath(
+        new URL(
+          '../../node_modules/@stripe/react-stripe-js/dist/react-stripe.esm.mjs',
+          import.meta.url,
+        ),
+      ),
+      ...(devAuth
+        ? {
+            '@clerk/clerk-react': fileURLToPath(
+              new URL('./src/dev/clerk-dev-shim.tsx', import.meta.url),
+            ),
+          }
+        : {}),
+    },
   },
-  resolve: devAuth
-    ? {
-        alias: {
-          '@clerk/clerk-react': fileURLToPath(
-            new URL('./src/dev/clerk-dev-shim.tsx', import.meta.url),
-          ),
-        },
-      }
-    : undefined,
   build: {
     rollupOptions: {
       output: {
