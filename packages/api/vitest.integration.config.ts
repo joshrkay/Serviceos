@@ -15,12 +15,15 @@ export default defineConfig({
     // Integration tests run sequentially to avoid port conflicts. Vitest 4
     // removed `poolOptions` (pool rework); `maxWorkers`/`minWorkers: 1` pins a
     // single fork so files run one at a time — the same effect the old
-    // `poolOptions.forks.singleFork` gave. `isolate: false` keeps every file in
-    // the one fork context (matching singleFork), so module singletons like the
-    // shared pg pool are created once.
+    // `poolOptions.forks.singleFork` gave. Default per-file ISOLATION is kept
+    // deliberately: `singleFork` shared the process but vitest still gave each
+    // file its own module registry, which `vi.mock` depends on — with
+    // `isolate: false` a file that imports a module unmocked poisons the next
+    // file's mock of it (broke onboarding-activation/-vapi funnel spies on
+    // PR #670's first CI run). Each file creates/closes its own pg pool via
+    // getSharedTestDb/closeSharedTestDb, exactly as under vitest 1.
     pool: 'forks',
     maxWorkers: 1,
     minWorkers: 1,
-    isolate: false,
   },
 });

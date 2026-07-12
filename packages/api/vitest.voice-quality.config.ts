@@ -29,12 +29,12 @@ export default defineConfig({
     include: ['test/voice-quality/**/voice-quality.test.ts'],
     // Single fork so all 40 script verdict shards land in one merge pass.
     // Vitest 4 removed `poolOptions`; `maxWorkers`/`minWorkers: 1` pin one fork
-    // (the old `poolOptions.forks.maxForks/minForks`) and `isolate: false` keeps
-    // the corpus sequential in one process context.
+    // (the old `poolOptions.forks.maxForks/minForks`). Default per-file
+    // isolation is kept — singleFork never disabled module isolation, and
+    // sequentiality comes from the single worker, not from sharing a registry.
     pool: 'forks',
     maxWorkers: 1,
     minWorkers: 1,
-    isolate: false,
     testTimeout: 30000,
     hookTimeout: 60000,
     globals: false,
