@@ -4603,6 +4603,7 @@ export function createApp(): AppWithLifecycle {
       estimateRepo,
       paymentLinkProvider,
       agreementRepo,
+      customerRepo,
     ),
   );
 

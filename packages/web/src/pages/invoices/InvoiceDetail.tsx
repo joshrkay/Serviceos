@@ -14,6 +14,8 @@ import { InvoiceFinancingPanel } from '../../components/invoices/InvoiceFinancin
 import { apiFetch } from '../../utils/api-fetch';
 import { formatCurrency as formatCents } from '../../utils/currency';
 import { toTitleCase } from '../../utils/string';
+import { useTenantTimezone } from '../../hooks/useTenantTimezone';
+import { formatDateTimeInTenantTz } from '../../utils/formatInTenantTz';
 
 interface LineItem {
   id: string;
@@ -32,11 +34,22 @@ interface Payment {
   createdAt: string;
 }
 
+/** Enriched customer summary the API embeds on invoice detail (WS6). */
+interface InvoiceCustomer {
+  id: string;
+  displayName?: string;
+  firstName?: string;
+  lastName?: string;
+  primaryPhone?: string;
+  email?: string;
+}
+
 interface Invoice {
   id: string;
   invoiceNumber: string;
   status: string;
   jobId: string;
+  customer?: InvoiceCustomer;
   subtotalCents: number;
   discountCents: number;
   taxCents: number;
@@ -50,8 +63,14 @@ interface Invoice {
   createdAt: string;
 }
 
-function formatDateTime(isoDate: string): string {
-  return new Date(isoDate).toLocaleString();
+/** Resolve a display name from the embedded customer summary. */
+function customerDisplayName(customer?: InvoiceCustomer): string | undefined {
+  if (!customer) return undefined;
+  return (
+    customer.displayName ||
+    [customer.firstName, customer.lastName].filter(Boolean).join(' ') ||
+    undefined
+  );
 }
 
 function formatPaymentMethod(method: string): string {
@@ -85,6 +104,11 @@ interface InvoiceDetailProps {
 
 export function InvoiceDetail({ invoiceId, onBack }: InvoiceDetailProps) {
   const { data, isLoading, error, refetch } = useDetailQuery<Invoice>('/api/invoices', invoiceId);
+  const tz = useTenantTimezone();
+  const formatDateTime = React.useCallback(
+    (isoDate: string): string => formatDateTimeInTenantTz(isoDate, tz),
+    [tz],
+  );
   const [showPaymentForm, setShowPaymentForm] = React.useState(false);
   const [submitError, setSubmitError] = React.useState<string | null>(null);
 
@@ -200,7 +224,9 @@ export function InvoiceDetail({ invoiceId, onBack }: InvoiceDetailProps) {
           title: 'Invoice Info',
           content: (
             <div>
-              <p>Job: {data.jobId}</p>
+              <p data-testid="invoice-customer-name">
+                <strong>Customer:</strong> {customerDisplayName(data.customer) ?? 'Unknown customer'}
+              </p>
               <p><strong>Invoice Status:</strong> {formatPaymentStatus(data.status)}</p>
               <p><strong>Payment Status:</strong> {paymentAuditSummary}</p>
               {mostRecentSettledPayment && (
