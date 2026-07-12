@@ -1945,11 +1945,15 @@ export function createApp(): AppWithLifecycle {
     standingInstructionRepo,
     // WS20 — update_catalog_item writes the owner-ratified SKU price.
     catalogRepo,
+    // WS3 — voice update_customer consent parity: a spoken smsConsent toggle
+    // appends to the consent ledger in the same transaction as the customer
+    // update + audit event (matching the authenticated route path).
+    consentEventRepo,
   });
-  // U5 — fail boot loudly if a voice-reachable persist handler is degraded
-  // (would return success without saving). Only the persist-critical
-  // handlers (invoice / job / appointment) report isFullyWired today; the
-  // rest are treated as wired until they opt in.
+  // U5 / WS3 — fail boot loudly if a voice-reachable persist handler is
+  // degraded (would return success without saving). Every voice-reachable
+  // persistence handler now reports isFullyWired (WS3), so a missing repo for
+  // any of them aborts boot rather than silently no-opping voice traffic.
   assertVoiceHandlersWired(
     executionHandlers,
     Object.values(INTENT_TO_PROPOSAL_TYPE),

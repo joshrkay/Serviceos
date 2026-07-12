@@ -65,6 +65,12 @@ export class CreateCustomerVoiceExecutionHandler implements ExecutionHandler {
     private readonly auditRepo?: AuditRepository,
   ) {}
 
+  // WS3 — degrades to a synthetic-id passthrough (saves nothing) without the
+  // customer repo; boot fails when a pool is configured but this is false.
+  isFullyWired(): boolean {
+    return Boolean(this.customerRepo);
+  }
+
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const { payload } = proposal;
 

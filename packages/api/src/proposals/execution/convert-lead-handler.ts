@@ -31,6 +31,13 @@ export class ConvertLeadExecutionHandler implements ExecutionHandler {
     private readonly auditRepo?: AuditRepository,
   ) {}
 
+  // WS3 — degrades to an id passthrough (converts nothing) without both the
+  // lead repo and the customer repo; boot fails when a pool is configured but
+  // this is false.
+  isFullyWired(): boolean {
+    return Boolean(this.leadRepo) && Boolean(this.customerRepo);
+  }
+
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const payload = proposal.payload as Record<string, unknown>;
     const leadId = typeof payload.leadId === 'string' ? payload.leadId : undefined;
