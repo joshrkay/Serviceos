@@ -115,3 +115,39 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPORT_PATH: packages/api/voice-quality-report.json
+
+  # WS7 — Mobile typecheck gate.
+  #
+  # packages/mobile is an isolated Expo project (intentionally NOT a root npm
+  # workspace — see packages/mobile/package.json), so the root `npm ci` in the
+  # `test` job never installs it and its `tsc --noEmit` never ran in CI. This
+  # dedicated job installs the mobile tree and gates its typecheck, catching
+  # type regressions in the mobile client on every PR.
+  #
+  # RN component tests (`npm run test:rn`, jest-expo) remain INTENTIONALLY
+  # UNGATED: the `jest` command currently globs the Vitest `*.test.ts` specs
+  # (which import from 'vitest' and set `@vitest-environment jsdom`) and fails
+  # to load all 84 suites — jest has no config scoping it to jest-expo specs.
+  # Gating it today would be a permanent red. Wiring a jest.config that selects
+  # only jest-expo specs (and excludes the Vitest suites) is the prerequisite,
+  # tracked separately. The Vitest mobile suite (logic/hooks/jsdom screen
+  # contracts) already gates in the `test` job's "Mobile unit tests" step.
+  mobile-typecheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: packages/mobile/package-lock.json
+      # Isolated install — the root workspace `npm ci` does not cover mobile.
+      - name: Install mobile deps
+        run: npm ci
+        working-directory: packages/mobile
+      # Run inside the package dir — mobile is not a root npm workspace, so
+      # `--workspace=packages/mobile` would not resolve.
+      - name: Type check Mobile
+        run: npm run typecheck
+        working-directory: packages/mobile
