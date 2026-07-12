@@ -65,19 +65,23 @@ Do not reintroduce migration-gated startup.
 
 ## Horizontal scaling note
 
-**Launch on a single instance.** Scaling the API beyond one instance is
-**not yet safe**: tenant-wide scheduled sweeps (recurring agreements,
-overdue-invoice, appointment/estimate reminders, Google-reviews) run as
-in-process `setInterval`s in `app.ts`, so every additional instance would
-re-run every sweep — duplicate invoices, reminders, and review replies.
-Graceful shutdown is also incomplete (intervals/in-flight jobs are not
-drained on SIGTERM). Before scaling out, gate the sweeps behind a leader
-lock (Postgres advisory lock) or move them to a single worker process, and
-implement graceful drain. (Tracked as go-live Blocker 5.)
+Scaling past one instance is supported, with prerequisites. The historical
+blockers (in-process `setInterval` sweeps duplicating per replica; no
+graceful drain) are addressed: sweeps are gated by `runAsLeader` (a Postgres
+advisory lock, so exactly one instance runs each tick) and SIGTERM triggers
+a graceful drain (`/ready` → 503, new WS upgrades rejected, active voice
+calls drained). Before raising `numReplicas` past 1:
+
+1. Provision shared Redis and set `REDIS_URL` (quotas, voice/board fan-out,
+   presence, and WS connection caps silently degrade to per-replica
+   in-memory state without it — see `railway.toml`).
+2. Confirm the scheduled **Redis multi-instance correctness** workflow
+   (`.github/workflows/redis-multi-instance.yml`) is green — it runs the
+   two-instance suites against a real Redis and is the gate for
+   `numReplicas > 1`.
 
 The proposal-execution worker itself is multi-instance-safe
-(`ProposalRepository.claimForExecution` atomically claims work), so the
-constraint above is specifically about the in-process schedulers.
+(`ProposalRepository.claimForExecution` atomically claims work).
 
 ## Deploy topology (web + worker)
 
@@ -246,13 +250,6 @@ steps that must be applied in the Railway account. For the rationale and
 rollout sequence see [`docs/runbooks/scaling.md`](runbooks/scaling.md)
 (§ Provisioning & rollout); for the actual 1000-concurrent validation run see
 [`docs/runbooks/phase5-validation-handoff.md`](runbooks/phase5-validation-handoff.md).
-
-> The **Horizontal scaling note** above predates this work. Its blockers are
-> now addressed: the in-process sweeps are gated by `runAsLeader` (a Postgres
-> advisory lock, so exactly one instance runs each tick) and SIGTERM triggers a
-> graceful drain (`/ready` → 503, new WS upgrades rejected, active voice calls
-> drained). Scaling past one instance is safe once Redis + PgBouncer are
-> provisioned (below) — provision Redis **before** raising `numReplicas`.
 
 ### In-repo deploy artifacts
 
