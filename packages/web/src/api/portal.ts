@@ -16,7 +16,17 @@ export interface PortalCustomer {
   secondaryPhone?: string;
   email?: string;
   preferredChannel: string;
+  /**
+   * WS6 — tenant IANA timezone, supplied by the portal bootstrap (`/customer`)
+   * so customer-facing dates render in the business's timezone. Optional for
+   * backward compatibility with older bootstrap responses; consumers fall back
+   * to America/New_York (the tenant_settings DB default).
+   */
+  timezone?: string;
 }
+
+/** Portal date-rendering fallback — matches the tenant_settings DB default. */
+export const PORTAL_FALLBACK_TZ = 'America/New_York';
 
 export interface PortalEstimate {
   id: string;

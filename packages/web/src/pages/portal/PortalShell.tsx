@@ -9,7 +9,7 @@
  */
 import { useEffect, useMemo, useState } from 'react';
 import { useParams } from 'react-router';
-import { PortalCustomer, portalApi } from '../../api/portal';
+import { PortalCustomer, portalApi, PORTAL_FALLBACK_TZ } from '../../api/portal';
 import { PortalDashboard } from './PortalDashboard';
 import { PortalEstimateList } from './PortalEstimateList';
 import { PortalInvoiceList } from './PortalInvoiceList';
@@ -74,6 +74,9 @@ export function PortalShell() {
     return customer.firstName || customer.companyName || customer.displayName;
   }, [customer]);
 
+  // Tenant timezone from the portal bootstrap — all portal dates render in it.
+  const timezone = customer?.timezone || PORTAL_FALLBACK_TZ;
+
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-background">
@@ -118,7 +121,8 @@ export function PortalShell() {
                   type="button"
                   onClick={() => setTab(t.id)}
                   className={
-                    'whitespace-nowrap py-2 px-1 text-sm border-b-2 ' +
+                    // min-h-11 (44px) tap target — WS6 accessibility fix.
+                    'inline-flex items-center whitespace-nowrap min-h-11 py-2 px-2 text-sm border-b-2 ' +
                     (active
                       ? 'border-primary text-foreground font-medium'
                       : 'border-transparent text-muted-foreground hover:text-foreground')
@@ -133,10 +137,10 @@ export function PortalShell() {
       </header>
 
       <main className="max-w-3xl mx-auto px-4 sm:px-6 py-6 space-y-4">
-        {tab === 'dashboard' && <PortalDashboard token={token} customer={customer} />}
-        {tab === 'estimates' && <PortalEstimateList token={token} />}
-        {tab === 'invoices' && <PortalInvoiceList token={token} />}
-        {tab === 'jobs' && <PortalJobList token={token} />}
+        {tab === 'dashboard' && <PortalDashboard token={token} customer={customer} timezone={timezone} />}
+        {tab === 'estimates' && <PortalEstimateList token={token} timezone={timezone} />}
+        {tab === 'invoices' && <PortalInvoiceList token={token} timezone={timezone} />}
+        {tab === 'jobs' && <PortalJobList token={token} timezone={timezone} />}
         {tab === 'agreements' && <PortalAgreementList token={token} />}
         {tab === 'book' && <PortalBookAppointment token={token} />}
         {tab === 'payment-methods' && <PortalPaymentMethods token={token} />}

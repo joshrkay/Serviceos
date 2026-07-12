@@ -12,13 +12,17 @@ import {
   PortalSlot,
   formatPortalCents,
   portalApi,
+  PORTAL_FALLBACK_TZ,
 } from '../../api/portal';
 import { PortalCard } from '../../components/portal/PortalCard';
+import { formatDateTimeInTenantTz } from '../../utils/formatInTenantTz';
 import { PortalSlotPicker, SlotPickerOutcome } from './PortalSlotPicker';
 
 interface Props {
   token: string;
   customer: PortalCustomer;
+  /** Tenant timezone from the portal bootstrap. */
+  timezone?: string;
 }
 
 interface Snapshot {
@@ -29,7 +33,7 @@ interface Snapshot {
   error: string | null;
 }
 
-export function PortalDashboard({ token, customer }: Props) {
+export function PortalDashboard({ token, customer, timezone = PORTAL_FALLBACK_TZ }: Props) {
   const [snap, setSnap] = useState<Snapshot>({
     invoices: [],
     estimates: [],
@@ -145,7 +149,10 @@ export function PortalDashboard({ token, customer }: Props) {
         trailing={
           nextAppt ? (
             <span className="text-sm text-foreground">
-              {new Date(nextAppt.scheduledStart).toLocaleString()}
+              {formatDateTimeInTenantTz(
+                nextAppt.scheduledStart,
+                nextAppt.timezone || timezone,
+              )}
             </span>
           ) : null
         }
@@ -168,7 +175,7 @@ export function PortalDashboard({ token, customer }: Props) {
                 <button
                   type="button"
                   onClick={() => setShowReschedule(false)}
-                  className="text-sm text-muted-foreground hover:underline"
+                  className="inline-flex items-center min-h-11 text-sm text-muted-foreground hover:underline"
                 >
                   Never mind
                 </button>
@@ -178,7 +185,7 @@ export function PortalDashboard({ token, customer }: Props) {
                 <button
                   type="button"
                   onClick={() => setShowReschedule(true)}
-                  className="text-sm text-foreground hover:underline"
+                  className="inline-flex items-center min-h-11 text-sm text-foreground hover:underline"
                 >
                   Reschedule
                 </button>
@@ -186,7 +193,7 @@ export function PortalDashboard({ token, customer }: Props) {
                   type="button"
                   disabled={cancelling}
                   onClick={() => void cancelAppointment(nextAppt.id)}
-                  className="text-sm text-destructive hover:underline disabled:opacity-50"
+                  className="inline-flex items-center min-h-11 text-sm text-destructive hover:underline disabled:opacity-50"
                 >
                   {cancelling ? 'Requesting…' : 'Cancel this appointment'}
                 </button>

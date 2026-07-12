@@ -3,10 +3,12 @@ import {
   PortalEstimate,
   formatPortalCents,
   portalApi,
+  PORTAL_FALLBACK_TZ,
 } from '../../api/portal';
 import { PortalCard } from '../../components/portal/PortalCard';
+import { formatDateInTenantTz } from '../../utils/formatInTenantTz';
 
-export function PortalEstimateList({ token }: { token: string }) {
+export function PortalEstimateList({ token, timezone = PORTAL_FALLBACK_TZ }: { token: string; timezone?: string }) {
   const [estimates, setEstimates] = useState<PortalEstimate[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -71,9 +73,9 @@ export function PortalEstimateList({ token }: { token: string }) {
           >
             <div className="flex items-center justify-between gap-2">
               <div className="min-w-0 text-xs text-muted-foreground">
-                Created {new Date(e.createdAt).toLocaleDateString()}
+                Created {formatDateInTenantTz(e.createdAt, timezone, { withYear: true })}
                 {e.validUntil
-                  ? ` · valid until ${new Date(e.validUntil).toLocaleDateString()}`
+                  ? ` · valid until ${formatDateInTenantTz(e.validUntil, timezone, { withYear: true })}`
                   : ''}
               </div>
               {e.publicViewToken ? (

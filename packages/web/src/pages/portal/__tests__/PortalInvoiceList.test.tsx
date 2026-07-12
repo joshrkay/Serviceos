@@ -1,6 +1,7 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { PortalInvoiceList } from '../PortalInvoiceList';
+import { formatDateInTenantTz } from '../../../utils/formatInTenantTz';
 
 function jsonResponse(body: unknown): Response {
   return {
@@ -89,6 +90,31 @@ describe('Portal — PortalInvoiceList (P10-001)', () => {
       expect(screen.getByText('$100.00 due')).toBeInTheDocument();
     });
     expect(screen.queryByRole('link', { name: 'Pay now' })).not.toBeInTheDocument();
+  });
+
+  it('renders the issued date in the tenant timezone, not the viewer locale (WS6)', async () => {
+    // 2026-06-01T12:00:00Z is still May 31 in Los Angeles — the tenant-tz
+    // formatter must key off the passed timezone, not the process TZ.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse({ invoices: [invoice({ payNowUrl: null })] }),
+      ),
+    );
+
+    render(<PortalInvoiceList token="tok-1" timezone="America/Los_Angeles" />);
+
+    const expected = `Issued ${formatDateInTenantTz(
+      '2026-06-01T12:00:00Z',
+      'America/Los_Angeles',
+      { withYear: true },
+    )}`;
+    await waitFor(() => {
+      expect(screen.getByText(expected)).toBeInTheDocument();
+    });
+    // In LA, 2026-06-01T12:00Z is Jun 1, 5:00 AM — still Jun 1; but an instant
+    // near midnight would differ. Assert the label is the tenant-tz string.
+    expect(expected).toContain('Jun 1');
   });
 
   it('shows an empty state when there are no invoices', async () => {
