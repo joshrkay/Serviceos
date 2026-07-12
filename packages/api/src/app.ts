@@ -266,6 +266,7 @@ import {
 } from './verticals/in-memory-training-assets';
 import { TrainingAssetRedactionService } from './verticals/training-asset-redaction';
 import { TrainingAssetService } from './verticals/training-asset-service';
+import { createPresidioAnonymizer } from './ai/privacy/presidio-adapter';
 import { InMemoryQualityMetricsRepository } from './quality/metrics';
 import { InMemoryVoiceRepository, createTranscribeAudioFn } from './voice/voice-service';
 import { createWhisperTranscriptionProvider } from './voice/transcription-providers';
@@ -1276,11 +1277,20 @@ export function createApp(): AppWithLifecycle {
       ? voiceExtendedIntentsFlagResolver(tenantId)
       : false;
   };
+  // WS5 — Presidio-first redaction. When both analyzer + anonymizer URLs are
+  // configured we run a real Presidio pass ahead of the deterministic scrub and
+  // fail closed (quarantine) if it is unreachable. Unset ⇒ local-only scrub.
+  const presidioAnonymizer = createPresidioAnonymizer(config);
   const trainingAssetService = new TrainingAssetService({
     assetRepo: trainingAssetRepo,
     privacyAuditRepo,
     auditRepo,
-    redaction: new TrainingAssetRedactionService(),
+    redaction: new TrainingAssetRedactionService(
+      presidioAnonymizer ? { presidio: presidioAnonymizer } : {},
+    ),
+    // Transactional persistence for the asset + privacy_audit + audit writes
+    // when a real Postgres pool is present (compensating deletes otherwise).
+    pool: pool ?? undefined,
     invalidatePromptCache: (tenantId) => invalidateVerticalPromptCache?.(tenantId),
   });
   const fileRepo           = pool ? new PgFileRepository(pool)           : new InMemoryFileRepository();

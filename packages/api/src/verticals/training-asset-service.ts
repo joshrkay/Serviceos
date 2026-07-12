@@ -1,8 +1,14 @@
 import { randomUUID } from 'crypto';
+import type { Pool } from 'pg';
 import type { KnownEntities } from '../ai/training/scrub';
 import { createAuditEvent, type AuditRepository } from '../audit/audit';
+import { runInTenantTransaction } from '../commands/command-runner';
+import { PRESIDIO_UNAVAILABLE_SIGNAL } from '../ai/privacy/presidio-adapter';
 import { ConflictError, NotFoundError, ValidationError } from '../shared/errors';
-import type { TrainingAssetRedactionService } from './training-asset-redaction';
+import type {
+  TrainingAssetRedactionResult,
+  TrainingAssetRedactionService,
+} from './training-asset-redaction';
 import {
   createTrainingAssetDraft,
   trainingAssetInputSchema,
@@ -59,7 +65,30 @@ const METADATA_NAME_VOCAB_DENYLIST: ReadonlySet<string> = new Set([
   'service tier', 'service visit', 'site visit', 'work order',
 ]);
 
-type RedactionResult = ReturnType<TrainingAssetRedactionService['redact']>;
+type RedactionResult = TrainingAssetRedactionResult;
+
+/**
+ * A synthesized fail-closed redaction result used to short-circuit the
+ * remaining fields once Presidio has been observed unavailable for a request —
+ * so we don't incur a fresh 5s timeout per field. Mirrors the redaction
+ * service's own fail-closed shape: quarantine, no derived text, the
+ * `presidio_unavailable` residual signal.
+ */
+function presidioFailClosedRedaction(): RedactionResult {
+  return {
+    status: 'quarantined',
+    scrubbedText: '',
+    summary: {
+      redactionCount: 0,
+      redactionKinds: [],
+      placeholders: [],
+      residualSignals: [PRESIDIO_UNAVAILABLE_SIGNAL],
+      hasResidualPii: true,
+    },
+    auditRedactions: [],
+    failClosed: true,
+  };
+}
 
 function applyMetadataNameFallback(text: string): {
   scrubbedText: string;
@@ -111,30 +140,30 @@ function applyMetadataNameFallback(text: string): {
  * string would share the same `sourceField` and overlapping offsets
  * would be ambiguous in the privacy audit trail.
  */
-function redactEntities(
+async function redactEntities(
   value: unknown,
-  redactString: (s: string, path: string) => { scrubbed: string; quarantined: boolean },
+  redactString: (s: string, path: string) => Promise<{ scrubbed: string; quarantined: boolean }>,
   path: string,
-): { value: unknown; quarantined: boolean } {
+): Promise<{ value: unknown; quarantined: boolean }> {
   if (typeof value === 'string') {
-    const result = redactString(value, path);
+    const result = await redactString(value, path);
     return { value: result.scrubbed, quarantined: result.quarantined };
   }
   if (Array.isArray(value)) {
     const out: unknown[] = [];
     let quarantined = false;
-    value.forEach((element, idx) => {
-      const child = redactEntities(element, redactString, `${path}[${idx}]`);
+    for (let idx = 0; idx < value.length; idx += 1) {
+      const child = await redactEntities(value[idx], redactString, `${path}[${idx}]`);
       out.push(child.value);
       quarantined ||= child.quarantined;
-    });
+    }
     return { value: out, quarantined };
   }
   if (value !== null && typeof value === 'object') {
     const out: Record<string, unknown> = {};
     let quarantined = false;
     for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-      const child = redactEntities(v, redactString, `${path}.${k}`);
+      const child = await redactEntities(v, redactString, `${path}.${k}`);
       out[k] = child.value;
       quarantined ||= child.quarantined;
     }
@@ -186,6 +215,16 @@ export interface TrainingAssetServiceDeps {
   privacyAuditRepo: PrivacyAuditRepository;
   auditRepo: AuditRepository;
   redaction: TrainingAssetRedactionService;
+  /**
+   * WS5 — when provided, `create`/`transition` persist the asset write, the
+   * privacy_audit entry, and the normal audit entry inside ONE Postgres
+   * transaction (via `runInTenantTransaction`), so a failure in any write
+   * rolls back all of them — no compensating deletes, no orphaned rows. When
+   * absent (in-memory repos: dev/test), the service falls back to
+   * compensating deletes to preserve the same all-or-nothing guarantee
+   * without a real transaction.
+   */
+  pool?: Pool;
   idGenerator?: () => string;
   now?: () => Date;
   /**
@@ -220,11 +259,33 @@ export class TrainingAssetService {
   private readonly idGenerator: () => string;
   private readonly now: () => Date;
   private readonly invalidatePromptCache: (tenantId: string) => void;
+  /** True when a real Postgres transaction covers persistence (pool wired). */
+  private readonly transactional: boolean;
 
   constructor(private readonly deps: TrainingAssetServiceDeps) {
     this.idGenerator = deps.idGenerator ?? randomUUID;
     this.now = deps.now ?? (() => new Date());
     this.invalidatePromptCache = deps.invalidatePromptCache ?? (() => {});
+    this.transactional = Boolean(deps.pool);
+  }
+
+  /**
+   * Run `fn` inside a single tenant-scoped Postgres transaction when a pool is
+   * wired; otherwise run it directly (in-memory repos). In the transactional
+   * path every PgBaseRepository write inside `fn` reuses the same client (via
+   * `tenantContextStore`) and joins the one transaction, so a throw rolls the
+   * whole unit back.
+   */
+  private async withPersistence<T>(tenantId: string, fn: () => Promise<T>): Promise<T> {
+    if (!this.deps.pool) {
+      return runInTenantTransaction(null, tenantId, fn);
+    }
+    const client = await this.deps.pool.connect();
+    try {
+      return await runInTenantTransaction(client, tenantId, fn);
+    } finally {
+      client.release();
+    }
   }
 
   async create(request: CreateTrainingAssetRequest): Promise<VerticalTrainingAsset> {
@@ -241,11 +302,23 @@ export class TrainingAssetService {
     const now = this.now();
     const sourcedRedactions: SourcedRedactionResult[] = [];
     let metadataHasResidualPii = false;
-    const redactMetadataText = (value: string, sourceField: string): RedactionResult => {
-      const result = this.deps.redaction.redact({
-        text: value,
-        knownEntities: request.knownEntities,
-      });
+    // Once Presidio is observed unavailable for this request we stop calling it
+    // and synthesize fail-closed results for the remaining fields — otherwise
+    // every field would eat a fresh ~5s timeout. The whole asset quarantines.
+    let presidioUnavailable = false;
+    const redactMetadataText = async (
+      value: string,
+      sourceField: string,
+    ): Promise<RedactionResult> => {
+      const result = presidioUnavailable
+        ? presidioFailClosedRedaction()
+        : await this.deps.redaction.redactAsync({
+            text: value,
+            knownEntities: request.knownEntities,
+          });
+      if (result.failClosed) {
+        presidioUnavailable = true;
+      }
       const fallback = applyMetadataNameFallback(result.scrubbedText);
       const auditRedactions = [...result.auditRedactions, ...fallback.auditRedactions];
       const merged: RedactionResult = {
@@ -267,7 +340,7 @@ export class TrainingAssetService {
       return merged;
     };
 
-    const titleRedacted = redactMetadataText(parsed.title, 'title');
+    const titleRedacted = await redactMetadataText(parsed.title, 'title');
     const title = titleRedacted.status === 'quarantined'
       ? QUARANTINED_TITLE
       : titleRedacted.scrubbedText;
@@ -276,8 +349,8 @@ export class TrainingAssetService {
     const provenance = { ...parsed.provenance };
     const sourceIdRedacted = parsed.provenance.sourceId === undefined
       ? undefined
-      : redactMetadataText(parsed.provenance.sourceId, 'provenance.sourceId');
-    const sourceVersionRedacted = redactMetadataText(
+      : await redactMetadataText(parsed.provenance.sourceId, 'provenance.sourceId');
+    const sourceVersionRedacted = await redactMetadataText(
       parsed.provenance.sourceVersion,
       'provenance.sourceVersion',
     );
@@ -296,7 +369,7 @@ export class TrainingAssetService {
     }
 
     if (parsed.provenance.notes !== undefined) {
-      const notesRedacted = redactMetadataText(parsed.provenance.notes, 'provenance.notes');
+      const notesRedacted = await redactMetadataText(parsed.provenance.notes, 'provenance.notes');
       if (notesRedacted.status === 'quarantined') {
         delete provenance.notes;
         metadataHasResidualPii = true;
@@ -306,8 +379,11 @@ export class TrainingAssetService {
     }
 
     const labels: TrainingAssetLabels = { ...parsed.labels };
-    const redactLabelText = (value: string, sourceField: string): string | undefined => {
-      const result = redactMetadataText(value, sourceField);
+    const redactLabelText = async (
+      value: string,
+      sourceField: string,
+    ): Promise<string | undefined> => {
+      const result = await redactMetadataText(value, sourceField);
       if (result.status === 'quarantined') {
         metadataHasResidualPii = true;
         return undefined;
@@ -316,7 +392,7 @@ export class TrainingAssetService {
     };
 
     if (parsed.labels.intent !== undefined) {
-      const intent = redactLabelText(parsed.labels.intent, 'labels.intent');
+      const intent = await redactLabelText(parsed.labels.intent, 'labels.intent');
       if (intent === undefined) {
         delete labels.intent;
       } else {
@@ -324,7 +400,7 @@ export class TrainingAssetService {
       }
     }
     if (typeof parsed.labels.expectedNextQuestion === 'string') {
-      const expectedNextQuestion = redactLabelText(
+      const expectedNextQuestion = await redactLabelText(
         parsed.labels.expectedNextQuestion,
         'labels.expectedNextQuestion',
       );
@@ -335,7 +411,7 @@ export class TrainingAssetService {
       }
     }
     if (parsed.labels.expectedNextAction !== undefined) {
-      const expectedNextAction = redactLabelText(
+      const expectedNextAction = await redactLabelText(
         parsed.labels.expectedNextAction,
         'labels.expectedNextAction',
       );
@@ -346,19 +422,22 @@ export class TrainingAssetService {
       }
     }
     if (parsed.labels.expectedRetrievalTerms !== undefined) {
-      labels.expectedRetrievalTerms = parsed.labels.expectedRetrievalTerms.flatMap(
-        (term, index) => {
-          const sanitized = redactLabelText(term, `labels.expectedRetrievalTerms[${index}]`);
-          return sanitized === undefined ? [] : [sanitized];
-        },
-      );
+      const retrievalTerms: string[] = [];
+      for (let index = 0; index < parsed.labels.expectedRetrievalTerms.length; index += 1) {
+        const sanitized = await redactLabelText(
+          parsed.labels.expectedRetrievalTerms[index],
+          `labels.expectedRetrievalTerms[${index}]`,
+        );
+        if (sanitized !== undefined) retrievalTerms.push(sanitized);
+      }
+      labels.expectedRetrievalTerms = retrievalTerms;
     }
     if (parsed.labels.entities !== undefined) {
       let entitiesQuarantined = false;
-      const redacted = redactEntities(
+      const redacted = await redactEntities(
         parsed.labels.entities,
-        (s, path) => {
-          const result = redactMetadataText(s, path);
+        async (s, path) => {
+          const result = await redactMetadataText(s, path);
           const quarantined = result.status === 'quarantined';
           entitiesQuarantined ||= quarantined;
           return { scrubbed: result.scrubbedText, quarantined };
@@ -386,7 +465,7 @@ export class TrainingAssetService {
       createdBy: request.actorId,
       now,
     });
-    const rawTextRedacted = redactMetadataText(parsed.rawText, 'rawText');
+    const rawTextRedacted = await redactMetadataText(parsed.rawText, 'rawText');
     const allRedactions = combineSourcedRedactionResults(sourcedRedactions);
     const status = metadataHasResidualPii || rawTextRedacted.status === 'quarantined'
       ? 'quarantined'
@@ -401,10 +480,60 @@ export class TrainingAssetService {
       ...(request.idempotencyKey ? { idempotencyKey: request.idempotencyKey } : {}),
     };
 
-    let saved: VerticalTrainingAsset;
+    // Persist the asset, the privacy_audit entry, and the normal audit event
+    // atomically. Transactional path (pool wired): a throw rolls the whole
+    // unit back. Non-transactional path (in-memory): compensating deletes give
+    // the same all-or-nothing guarantee.
+    const privacyAuditId = this.idGenerator();
     try {
-      saved = await this.deps.assetRepo.save(asset);
+      return await this.withPersistence(request.tenantId, async () => {
+        const saved = await this.deps.assetRepo.save(asset);
+        let privacyAuditCreated = false;
+        try {
+          await this.deps.privacyAuditRepo.create({
+            id: privacyAuditId,
+            tenantId: request.tenantId,
+            actorId: request.actorId,
+            entityType: 'vertical_training_asset',
+            entityId: asset.id,
+            operation: 'redact_training_asset',
+            redactionSummary: allRedactions.summary,
+            redactions: allRedactions.auditRedactions,
+            createdAt: now,
+          });
+          privacyAuditCreated = true;
+          await this.deps.auditRepo.create(createAuditEvent({
+            tenantId: request.tenantId,
+            actorId: request.actorId,
+            actorRole: 'user',
+            eventType: 'vertical_training_asset.created',
+            entityType: 'vertical_training_asset',
+            entityId: asset.id,
+            metadata: {
+              status: asset.status,
+              verticalType: asset.verticalType,
+              assetKind: asset.assetKind,
+            },
+          }));
+        } catch (err) {
+          // Transactional path: the surrounding transaction ROLLBACK undoes the
+          // asset + any partial audit writes, so DON'T issue compensating
+          // deletes (the tx is already poisoned). Non-transactional path: undo
+          // by hand.
+          if (!this.transactional) {
+            await this.deps.assetRepo.delete(request.tenantId, asset.id);
+            if (privacyAuditCreated) {
+              await this.deps.privacyAuditRepo.delete(request.tenantId, privacyAuditId);
+            }
+          }
+          throw err;
+        }
+        return saved;
+      });
     } catch (err) {
+      // A unique-violation on the asset insert means a concurrent create with
+      // the same idempotency key won the race; return the winner. The read
+      // happens AFTER the transaction has rolled back (fresh connection).
       if (request.idempotencyKey && isUniqueViolation(err)) {
         const replay = await this.deps.assetRepo.findByIdempotencyKey(
           request.tenantId,
@@ -414,42 +543,6 @@ export class TrainingAssetService {
       }
       throw err;
     }
-    const privacyAuditId = this.idGenerator();
-    let privacyAuditCreated = false;
-    try {
-      await this.deps.privacyAuditRepo.create({
-        id: privacyAuditId,
-        tenantId: request.tenantId,
-        actorId: request.actorId,
-        entityType: 'vertical_training_asset',
-        entityId: asset.id,
-        operation: 'redact_training_asset',
-        redactionSummary: allRedactions.summary,
-        redactions: allRedactions.auditRedactions,
-        createdAt: now,
-      });
-      privacyAuditCreated = true;
-      await this.deps.auditRepo.create(createAuditEvent({
-        tenantId: request.tenantId,
-        actorId: request.actorId,
-        actorRole: 'user',
-        eventType: 'vertical_training_asset.created',
-        entityType: 'vertical_training_asset',
-        entityId: asset.id,
-        metadata: {
-          status: asset.status,
-          verticalType: asset.verticalType,
-          assetKind: asset.assetKind,
-        },
-      }));
-    } catch (err) {
-      await this.deps.assetRepo.delete(request.tenantId, asset.id);
-      if (privacyAuditCreated) {
-        await this.deps.privacyAuditRepo.delete(request.tenantId, privacyAuditId);
-      }
-      throw err;
-    }
-    return saved;
   }
 
   async approve(request: LifecycleRequest): Promise<VerticalTrainingAsset> {
@@ -544,60 +637,73 @@ export class TrainingAssetService {
     }
     const now = this.now();
     const next = spec.applyMutation(existing, now);
-    const updateResult = await this.deps.assetRepo.tryUpdate(next, existing.updatedAt);
-    if (updateResult.kind === 'missing') {
-      throw new NotFoundError('Training asset', request.assetId);
-    }
-    if (updateResult.kind === 'stale') {
-      throw new ConflictError(
-        `Training asset was modified by another request (assetId=${request.assetId})`,
-      );
-    }
-    const updated = updateResult.asset;
-    // Order matters: write the privacy_audit row first, then the
-    // standard audit event. If the standard audit write fails, we can
-    // delete the privacy_audit row and revert state, leaving no
-    // orphaned audit trail. If we wrote the standard audit first and
-    // the privacy audit failed, the revert would still leave a "this
-    // succeeded" row claiming a transition that never persisted.
+
+    // The optimistic status update, the privacy_audit row, and the standard
+    // audit event all persist atomically. Transactional path (pool wired): any
+    // throw rolls the whole unit back — the status change cannot commit without
+    // its audit rows, and no manual revert is needed. Non-transactional path
+    // (in-memory): revert the status write + delete the privacy_audit row by
+    // hand for the same guarantee.
+    //
+    // Order still matters in the non-transactional path: write the
+    // privacy_audit row first, then the standard audit event, so a failure of
+    // the standard audit write leaves no orphaned "this succeeded" row.
     const privacyAuditId = this.idGenerator();
-    let privacyAuditCreated = false;
-    try {
-      await this.deps.privacyAuditRepo.create({
-        id: privacyAuditId,
-        tenantId: request.tenantId,
-        actorId: request.actorId,
-        entityType: 'vertical_training_asset',
-        entityId: updated.id,
-        operation: spec.privacyAuditOperation,
-        redactionSummary: emptyRedactionSummary(),
-        redactions: [],
-        createdAt: now,
-      });
-      privacyAuditCreated = true;
-      await this.deps.auditRepo.create(createAuditEvent({
-        tenantId: request.tenantId,
-        actorId: request.actorId,
-        actorRole: 'user',
-        eventType: spec.eventType,
-        entityType: 'vertical_training_asset',
-        entityId: updated.id,
-        metadata: {
-          previousStatus: existing.status,
-          status: updated.status,
-        },
-      }));
-    } catch (err) {
-      if (privacyAuditCreated) {
-        await this.deps.privacyAuditRepo.delete(request.tenantId, privacyAuditId);
+    const updated = await this.withPersistence(request.tenantId, async () => {
+      const updateResult = await this.deps.assetRepo.tryUpdate(next, existing.updatedAt);
+      if (updateResult.kind === 'missing') {
+        throw new NotFoundError('Training asset', request.assetId);
       }
-      const revertResult = await this.deps.assetRepo.tryUpdate(existing, updated.updatedAt);
-      if (revertResult.kind !== 'updated') {
-        // Best-effort revert: if another writer raced in we let the
-        // newer state stand and surface the original audit failure.
+      if (updateResult.kind === 'stale') {
+        throw new ConflictError(
+          `Training asset was modified by another request (assetId=${request.assetId})`,
+        );
       }
-      throw err;
-    }
+      const updatedAsset = updateResult.asset;
+      let privacyAuditCreated = false;
+      try {
+        await this.deps.privacyAuditRepo.create({
+          id: privacyAuditId,
+          tenantId: request.tenantId,
+          actorId: request.actorId,
+          entityType: 'vertical_training_asset',
+          entityId: updatedAsset.id,
+          operation: spec.privacyAuditOperation,
+          redactionSummary: emptyRedactionSummary(),
+          redactions: [],
+          createdAt: now,
+        });
+        privacyAuditCreated = true;
+        await this.deps.auditRepo.create(createAuditEvent({
+          tenantId: request.tenantId,
+          actorId: request.actorId,
+          actorRole: 'user',
+          eventType: spec.eventType,
+          entityType: 'vertical_training_asset',
+          entityId: updatedAsset.id,
+          metadata: {
+            previousStatus: existing.status,
+            status: updatedAsset.status,
+          },
+        }));
+      } catch (err) {
+        if (!this.transactional) {
+          if (privacyAuditCreated) {
+            await this.deps.privacyAuditRepo.delete(request.tenantId, privacyAuditId);
+          }
+          const revertResult = await this.deps.assetRepo.tryUpdate(
+            existing,
+            updatedAsset.updatedAt,
+          );
+          if (revertResult.kind !== 'updated') {
+            // Best-effort revert: if another writer raced in we let the
+            // newer state stand and surface the original audit failure.
+          }
+        }
+        throw err;
+      }
+      return updatedAsset;
+    });
     this.invalidatePromptCache(request.tenantId);
     return updated;
   }
