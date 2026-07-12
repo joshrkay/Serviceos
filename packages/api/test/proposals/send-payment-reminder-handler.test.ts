@@ -6,10 +6,17 @@
  * and failure-soft audit emission.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
+import { v4 as uuidv4 } from 'uuid';
 import { SendPaymentReminderExecutionHandler } from '../../src/proposals/execution/send-payment-reminder-handler';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { Proposal } from '../../src/proposals/proposal';
 import { TransactionalCommsService } from '../../src/notifications/transactional-comms-service';
+import {
+  DunningEvent,
+  DunningEventRepository,
+  InMemoryDunningEventRepository,
+  manualReminderStepKey,
+} from '../../src/invoices/dunning-config';
 
 const TENANT = 't-1';
 const INVOICE_ID = 'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa';
@@ -17,8 +24,12 @@ const INVOICE_ID = 'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa';
 class FakeComms {
   calls: Array<{ tenantId: string; invoiceId: string }> = [];
   shouldThrow = false;
+  /** Optional hook fired synchronously inside the send — lets a test observe
+   *  the ledger state AT the moment of send (proves record-before-send). */
+  onSend?: (tenantId: string, invoiceId: string) => Promise<void> | void;
   async notifyInvoiceOverdue(tenantId: string, invoiceId: string): Promise<void> {
     if (this.shouldThrow) throw new Error('delivery failed');
+    if (this.onSend) await this.onSend(tenantId, invoiceId);
     this.calls.push({ tenantId, invoiceId });
   }
 }
@@ -85,5 +96,133 @@ describe('send_payment_reminder execution handler', () => {
     const result = await bare.execute(makeProposal(), ctx);
     expect(result.success).toBe(true);
     expect(result.resultEntityId).toBe(INVOICE_ID);
+  });
+});
+
+// Layer 1 — MANUAL-send execution-time dedup guard (72h cooldown +
+// record-first ledger idempotency). Cadence proposals are never gated here.
+describe('send_payment_reminder — manual dedup guard', () => {
+  const NOW = new Date('2026-05-14T12:00:00Z');
+  const ONE_HOUR_AGO = new Date(NOW.getTime() - 60 * 60 * 1000);
+  const FOUR_DAYS_AGO = new Date(NOW.getTime() - 4 * 24 * 60 * 60 * 1000);
+
+  let comms: FakeComms;
+  let auditRepo: InMemoryAuditRepository;
+  let ledger: InMemoryDunningEventRepository;
+  const ctx = { tenantId: TENANT, executedBy: 'u-1' };
+
+  function makeManualProposal(id = 'manual-prop-1'): Proposal {
+    return makeProposal({
+      id,
+      payload: { invoiceId: INVOICE_ID, stepKey: 'manual', offsetDays: 0, channel: 'sms' },
+    });
+  }
+
+  function seed(event: Partial<DunningEvent>): Promise<DunningEvent> {
+    return ledger.create({
+      id: uuidv4(),
+      tenantId: TENANT,
+      invoiceId: INVOICE_ID,
+      kind: 'reminder',
+      stepKey: '3:sms',
+      channel: 'sms',
+      sentAt: ONE_HOUR_AGO,
+      ...event,
+    });
+  }
+
+  function handlerWith(repo?: DunningEventRepository): SendPaymentReminderExecutionHandler {
+    return new SendPaymentReminderExecutionHandler(
+      comms as unknown as TransactionalCommsService,
+      auditRepo,
+      repo,
+      () => NOW,
+    );
+  }
+
+  beforeEach(() => {
+    comms = new FakeComms();
+    auditRepo = new InMemoryAuditRepository();
+    ledger = new InMemoryDunningEventRepository();
+  });
+
+  it('refuses a manual send when a recent CADENCE reminder is in the ledger (no comms)', async () => {
+    await seed({ stepKey: '3:sms', sentAt: ONE_HOUR_AGO });
+    const result = await handlerWith(ledger).execute(makeManualProposal(), ctx);
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/72h/);
+    expect(comms.calls).toHaveLength(0);
+  });
+
+  it('refuses a manual send when a recent FOREIGN manual reminder is in the ledger (no comms)', async () => {
+    await seed({ stepKey: manualReminderStepKey('some-other-prop'), sentAt: ONE_HOUR_AGO });
+    const result = await handlerWith(ledger).execute(makeManualProposal(), ctx);
+    expect(result.success).toBe(false);
+    expect(comms.calls).toHaveLength(0);
+  });
+
+  it('sends on a clean ledger and records the manual:<proposalId> row BEFORE the send', async () => {
+    let rowExistedAtSend = false;
+    const proposal = makeManualProposal('manual-prop-clean');
+    comms.onSend = async () => {
+      const rows = await ledger.findByInvoice(TENANT, INVOICE_ID);
+      rowExistedAtSend = rows.some(
+        (r) => r.stepKey === manualReminderStepKey(proposal.id) && r.kind === 'reminder',
+      );
+    };
+
+    const result = await handlerWith(ledger).execute(proposal, ctx);
+
+    expect(result.success).toBe(true);
+    expect(comms.calls).toHaveLength(1);
+    expect(rowExistedAtSend).toBe(true); // record-first
+    const rows = await ledger.findByInvoice(TENANT, INVOICE_ID);
+    expect(rows.filter((r) => r.kind === 'reminder')).toHaveLength(1);
+    expect(rows[0].channel).toBe('sms');
+  });
+
+  it('re-executing the same manual proposal is idempotent — exactly one send total', async () => {
+    const proposal = makeManualProposal('manual-prop-idem');
+    const handler = handlerWith(ledger);
+
+    const first = await handler.execute(proposal, ctx);
+    const second = await handler.execute(proposal, ctx);
+
+    expect(first.success).toBe(true);
+    expect(second.success).toBe(true);
+    expect(comms.calls).toHaveLength(1); // never re-sent
+    const rows = await ledger.findByInvoice(TENANT, INVOICE_ID);
+    expect(rows.filter((r) => r.kind === 'reminder')).toHaveLength(1);
+  });
+
+  it('does NOT gate a cadence-step proposal even with a fresh manual row, and writes no extra ledger row', async () => {
+    await seed({ stepKey: manualReminderStepKey('manual-prev'), sentAt: ONE_HOUR_AGO });
+    const before = (await ledger.findByInvoice(TENANT, INVOICE_ID)).length;
+
+    // A cadence proposal (stepKey '3:sms') — its ledger row was already written
+    // by the sweep, so the handler neither gates nor re-records it.
+    const cadence = makeProposal({
+      id: 'cadence-prop',
+      payload: { invoiceId: INVOICE_ID, stepKey: '3:sms', offsetDays: 3, channel: 'sms' },
+    });
+    const result = await handlerWith(ledger).execute(cadence, ctx);
+
+    expect(result.success).toBe(true);
+    expect(comms.calls).toHaveLength(1); // sent, not gated
+    const after = (await ledger.findByInvoice(TENANT, INVOICE_ID)).length;
+    expect(after).toBe(before); // no second ledger write for cadence
+  });
+
+  it('allows a manual send when the only prior reminder is OUTSIDE the 72h window', async () => {
+    await seed({ stepKey: '3:sms', sentAt: FOUR_DAYS_AGO });
+    const result = await handlerWith(ledger).execute(makeManualProposal(), ctx);
+    expect(result.success).toBe(true);
+    expect(comms.calls).toHaveLength(1);
+  });
+
+  it('no dunningEventRepo → legacy behavior (manual send is not gated, no ledger)', async () => {
+    const result = await handlerWith(undefined).execute(makeManualProposal(), ctx);
+    expect(result.success).toBe(true);
+    expect(comms.calls).toHaveLength(1);
   });
 });

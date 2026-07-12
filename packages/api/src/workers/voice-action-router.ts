@@ -55,6 +55,7 @@ import { AppointmentRepository } from '../appointments/appointment';
 import { JobRepository } from '../jobs/job';
 import { CatalogItemRepository } from '../catalog/catalog-item';
 import { InvoicingQueueDeps } from '../invoices/invoicing-queue';
+import { DunningEventRepository } from '../invoices/dunning-config';
 import {
   EntityCandidate,
   EntityKind,
@@ -338,6 +339,13 @@ export interface VoiceActionRouterDeps {
    */
   invoicingDeps?: InvoicingQueueDeps;
   /**
+   * Collections cadence — dunning-event ledger. When wired (alongside the
+   * invoice + job repos), the send_payment_reminder voice on-ramp annotates a
+   * draft whose resolved customer already got a reminder recently (Layer 3,
+   * best-effort). Optional so tests can omit it.
+   */
+  dunningEventRepo?: DunningEventRepository;
+  /**
    * P8 — "three Bobs" closure. When present, the classifier's free-text
    * customerName / jobReference are resolved to tenant-scoped IDs
    * BEFORE the task handler runs: resolved → verified UUIDs land on the
@@ -544,7 +552,14 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
   handlers.set('send_invoice', new SendInvoiceTaskHandler());
   handlers.set('send_estimate', new SendEstimateTaskHandler());
   handlers.set('send_estimate_nudge', new SendEstimateNudgeTaskHandler());
-  handlers.set('send_payment_reminder', new SendPaymentReminderTaskHandler());
+  handlers.set(
+    'send_payment_reminder',
+    new SendPaymentReminderTaskHandler({
+      dunningEventRepo: deps.dunningEventRepo,
+      invoiceRepo: deps.invoicingDeps?.invoiceRepo,
+      jobRepo: deps.jobRepo,
+    }),
+  );
   handlers.set('apply_late_fee', new ApplyLateFeeTaskHandler());
   handlers.set('record_payment', new RecordPaymentTaskHandler());
   handlers.set('emergency_dispatch', new EmergencyDispatchTaskHandler());

@@ -40,6 +40,7 @@ import { RefreshJobMoneyStateDeps } from '../../jobs/job-money-state';
 import { AppointmentRepository, createAppointment } from '../../appointments/appointment';
 import { AssignmentRepository, assignTechnician } from '../../appointments/assignment';
 import { InvoiceRepository } from '../../invoices/invoice';
+import { DunningEventRepository } from '../../invoices/dunning-config';
 import {
   EstimateRepository,
   createEstimate,
@@ -933,6 +934,10 @@ export function createExecutionHandlerRegistry(deps?: {
   scheduleRepo?: InvoiceScheduleRepository;
   // P21-003 — batch_invoice fans out draft_invoice proposals via this repo.
   proposalRepo?: ProposalRepository;
+  // Collections cadence — dunning-event ledger. When wired, MANUAL (voice)
+  // send_payment_reminder proposals are deduped at execution time (72h
+  // cooldown + record-first idempotency). Absent → legacy send behavior.
+  dunningEventRepo?: DunningEventRepository;
   // Estimate edit history — when wired, voice update_estimate snapshots a
   // revision + edit delta, matching the authenticated edit path.
   docRevisionRepo?: DocumentRevisionRepository;
@@ -1099,6 +1104,7 @@ export function createExecutionHandlerRegistry(deps?: {
     new SendPaymentReminderExecutionHandler(
       deps?.transactionalComms,
       deps?.auditRepo,
+      deps?.dunningEventRepo,
     ),
     // UB-A2 — create_standing_instruction: inserts the approved directive via
     // the UB-A1 domain service (500-char cap, scope validation, 20-active

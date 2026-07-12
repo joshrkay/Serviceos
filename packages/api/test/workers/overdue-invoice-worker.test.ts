@@ -15,6 +15,7 @@ import {
   DunningConfig,
   InMemoryDunningConfigRepository,
   InMemoryDunningEventRepository,
+  manualReminderStepKey,
 } from '../../src/invoices/dunning-config';
 
 const logger = createLogger({ service: 'test', environment: 'test', level: 'error' });
@@ -332,6 +333,99 @@ describe('runOverdueInvoiceSweep', () => {
       // Ledger is tenant-scoped: t1's events never reference t2's invoice.
       const t1Events = await dunningEventRepo.findByInvoice('t1', inv2.id);
       expect(t1Events).toHaveLength(0);
+    });
+
+    // Layer 2 — a recent MANUAL (voice) reminder defers cadence reminder
+    // proposals THIS sweep (deferral, not cancellation). Late-fee raising
+    // is unaffected.
+    async function seedManualReminder(invoiceId: string, sentAt: Date) {
+      const dunningEventRepo = new InMemoryDunningEventRepository();
+      await dunningEventRepo.create({
+        id: uuidv4(),
+        tenantId: 't1',
+        invoiceId,
+        kind: 'reminder',
+        stepKey: manualReminderStepKey('manual-prop'),
+        channel: 'sms',
+        sentAt,
+      });
+      return dunningEventRepo;
+    }
+
+    it('defers cadence reminder proposals when a manual reminder was sent within 72h', async () => {
+      const invoice = await seedOverdueInvoice('t1');
+      const proposalRepo = new InMemoryProposalRepository();
+      // Manual send 1h before NOW → inside the 72h cooldown.
+      const dunningEventRepo = await seedManualReminder(
+        invoice.id,
+        new Date(NOW.getTime() - 60 * 60 * 1000),
+      );
+
+      await runOverdueInvoiceSweep({
+        ...deps(async () => ['t1']),
+        proposalRepo,
+        dunningEventRepo,
+      });
+
+      const reminders = (await proposalRepo.findByStatus('t1', 'ready_for_review')).filter(
+        (p) => p.proposalType === 'send_payment_reminder',
+      );
+      expect(reminders).toHaveLength(0);
+    });
+
+    it('raises the due cadence reminders once the manual cooldown has elapsed (deferral, not loss)', async () => {
+      const invoice = await seedOverdueInvoice('t1');
+      const proposalRepo = new InMemoryProposalRepository();
+      // Manual send 4 days before NOW → outside the 72h cooldown.
+      const dunningEventRepo = await seedManualReminder(
+        invoice.id,
+        new Date(NOW.getTime() - 4 * 24 * 60 * 60 * 1000),
+      );
+
+      await runOverdueInvoiceSweep({
+        ...deps(async () => ['t1']),
+        proposalRepo,
+        dunningEventRepo,
+      });
+
+      const reminders = (await proposalRepo.findByStatus('t1', 'ready_for_review')).filter(
+        (p) => p.proposalType === 'send_payment_reminder',
+      );
+      // 13 days overdue on the default 3/7/14 cadence → day-3 and day-7 due.
+      expect(reminders.map((r) => r.payload.stepKey).sort()).toEqual(['3:sms', '7:sms']);
+    });
+
+    it('still raises a due late fee while cadence reminders are deferred by a recent manual send', async () => {
+      const invoice = await seedOverdueInvoice('t1');
+      const proposalRepo = new InMemoryProposalRepository();
+      const dunningEventRepo = await seedManualReminder(
+        invoice.id,
+        new Date(NOW.getTime() - 60 * 60 * 1000),
+      );
+      const dunningConfigRepo = new InMemoryDunningConfigRepository();
+      await dunningConfigRepo.upsert(
+        makeConfig({
+          reminderSteps: [{ offsetDays: 3, channel: 'sms' }],
+          lateFeeType: 'flat',
+          lateFeeValueCents: 2500,
+          lateFeeGraceDays: 0,
+        }),
+      );
+
+      await runOverdueInvoiceSweep({
+        ...deps(async () => ['t1']),
+        proposalRepo,
+        dunningEventRepo,
+        dunningConfigRepo,
+      });
+
+      const proposals = await proposalRepo.findByStatus('t1', 'ready_for_review');
+      expect(
+        proposals.filter((p) => p.proposalType === 'send_payment_reminder'),
+      ).toHaveLength(0);
+      const fees = proposals.filter((p) => p.proposalType === 'apply_late_fee');
+      expect(fees).toHaveLength(1);
+      expect(fees[0].payload).toMatchObject({ invoiceId: invoice.id, feeCents: 2500 });
     });
   });
 });

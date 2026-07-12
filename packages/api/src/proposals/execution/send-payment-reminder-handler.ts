@@ -1,8 +1,24 @@
+import { v4 as uuidv4 } from 'uuid';
 import { Proposal, ProposalType } from '../proposal';
 import { ExecutionHandler, ExecutionContext, ExecutionResult } from './handlers';
 import { TransactionalCommsService } from '../../notifications/transactional-comms-service';
 import { AuditRepository, createAuditEvent } from '../../audit/audit';
+import {
+  DunningEventRepository,
+  PAYMENT_REMINDER_COOLDOWN_MS,
+  manualReminderStepKey,
+} from '../../invoices/dunning-config';
 import { sendPaymentReminderPayloadSchema } from '../contracts/send-payment-reminder';
+
+/**
+ * Payload `stepKey` value the voice/manual on-ramp stamps
+ * (SendPaymentReminderTaskHandler). It is the discriminator that selects the
+ * execution-time dedup guard below: cadence-raised proposals carry a
+ * `'<offsetDays>:<channel>'` key (their ledger row was already written by the
+ * overdue sweep) and are never gated here; a manual send has no prior ledger
+ * row, so this handler owns its cooldown check + record-first ledger write.
+ */
+const MANUAL_REMINDER_PAYLOAD_STEP_KEY = 'manual';
 
 /**
  * Executes an approved `send_payment_reminder` proposal (collections cadence).
@@ -28,6 +44,16 @@ export class SendPaymentReminderExecutionHandler implements ExecutionHandler {
   constructor(
     private readonly transactionalComms?: TransactionalCommsService,
     private readonly auditRepo?: AuditRepository,
+    /**
+     * Dunning-event ledger. When wired, MANUAL (voice/on-demand) reminders are
+     * deduped against it: a 72h cooldown refusal + a record-first ledger write
+     * that makes re-execution of the same approved proposal idempotent. Absent
+     * → exact legacy behavior (no gating, no ledger write). Cadence-raised
+     * reminders are never gated here regardless (their row exists already).
+     */
+    private readonly dunningEventRepo?: DunningEventRepository,
+    /** Injectable clock for deterministic cooldown tests. */
+    private readonly now: () => Date = () => new Date(),
   ) {}
 
   async execute(
@@ -46,6 +72,65 @@ export class SendPaymentReminderExecutionHandler implements ExecutionHandler {
     if (!this.transactionalComms) {
       // Dev wiring without a comms service. Returns the invoice id.
       return { success: true, resultEntityId: invoiceId };
+    }
+
+    // ── Layer 1 (authoritative) — MANUAL-send dedup guard. Only manual/voice
+    // proposals reach this: cadence reminders carry a '<offsetDays>:<channel>'
+    // stepKey and their ledger row was written by the sweep at raise time, so
+    // they are neither gated nor re-recorded here. No ledger wired → legacy.
+    const isManual = stepKey === MANUAL_REMINDER_PAYLOAD_STEP_KEY;
+    if (this.dunningEventRepo && isManual) {
+      const asOf = this.now();
+      const ownStepKey = manualReminderStepKey(proposal.id);
+      const cooldownFloor = asOf.getTime() - PAYMENT_REMINDER_COOLDOWN_MS;
+
+      const priorReminders = (
+        await this.dunningEventRepo.findByInvoice(context.tenantId, invoiceId)
+      ).filter((e) => e.kind === 'reminder' && e.sentAt.getTime() >= cooldownFloor);
+
+      // Own-row idempotency FIRST: this exact proposal already recorded a send
+      // (a retry / undo-then-re-execute). Idempotent success, never re-send —
+      // even if another reminder also landed inside the window.
+      if (priorReminders.some((e) => e.stepKey === ownStepKey)) {
+        return { success: true, resultEntityId: invoiceId };
+      }
+
+      // Any OTHER reminder inside the 72h window blocks a manual double-send.
+      const recent = priorReminders.sort(
+        (a, b) => b.sentAt.getTime() - a.sentAt.getTime(),
+      )[0];
+      if (recent) {
+        return {
+          success: false,
+          error:
+            `Payment reminder refused: a reminder for this invoice already went out at ` +
+            `${recent.sentAt.toISOString()} — manual reminders are spaced at least 72h apart.`,
+        };
+      }
+
+      // Record-first: write the ledger row BEFORE the customer send so a
+      // concurrent execution that loses the UNIQUE race (23505) treats it as
+      // already-sent. A failed write means we cannot guarantee dedup, so we
+      // refuse rather than send without a ledger row.
+      try {
+        await this.dunningEventRepo.create({
+          id: uuidv4(),
+          tenantId: context.tenantId,
+          invoiceId,
+          kind: 'reminder',
+          stepKey: ownStepKey,
+          channel,
+          sentAt: asOf,
+        });
+      } catch (err) {
+        if ((err as { code?: string }).code === '23505') {
+          return { success: true, resultEntityId: invoiceId };
+        }
+        return {
+          success: false,
+          error: err instanceof Error ? err.message : 'Failed to record payment reminder',
+        };
+      }
     }
 
     try {

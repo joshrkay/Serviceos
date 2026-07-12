@@ -1911,6 +1911,8 @@ export function createApp(): AppWithLifecycle {
     settingsRepo,
     scheduleRepo: invoiceScheduleRepo,
     proposalRepo,
+    // Collections cadence — dunning ledger for MANUAL reminder execution dedup.
+    dunningEventRepo,
     docRevisionRepo: documentRevisionRepo,
     editDeltaRepo: deltaRepo,
     noteRepo,
@@ -2450,6 +2452,9 @@ export function createApp(): AppWithLifecycle {
     // jobs (findJobsRequiringInvoicing) so "invoice all my completed jobs"
     // mints one batch_invoice proposal. Same repos the batch sweep + digest use.
     invoicingDeps: { jobRepo, invoiceRepo, estimateRepo },
+    // Layer 3 — draft-time duplicate-reminder marker for the voice
+    // send_payment_reminder on-ramp (best-effort; advisory only).
+    dunningEventRepo,
     // P8 — "three Bobs": free-text customer/job references resolve to
     // verified tenant IDs (pg_trgm) before drafting; ambiguous matches
     // become one-tap clarifications. In-memory mode (no pool) skips
