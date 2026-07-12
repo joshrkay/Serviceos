@@ -53,7 +53,12 @@ export interface VapiWebhookDeps {
   pool: Pool;
   auditRepo: AuditRepository;
   webhookRepo: VapiWebhookRepository;
-  /** VAPI_WEBHOOK_SECRET — the serverUrlSecret configured on the assistant. */
+  /**
+   * The tenant's per-tenant Vapi `serverUrlSecret` (from
+   * `tenant_settings.vapi_webhook_secret`). Empty string when the tenant has no
+   * provisioned secret — verification then fails closed (403). The global
+   * `VAPI_WEBHOOK_SECRET` fallback was removed in QUALITY-2026-07-12 WS4.
+   */
   secret: string;
   sendEmail?: SendEmailFn;
 }

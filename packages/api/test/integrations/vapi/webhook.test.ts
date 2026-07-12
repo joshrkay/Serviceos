@@ -129,6 +129,46 @@ describe('handleVapiCallEvent', () => {
     expect(recordFunnelEventMock).not.toHaveBeenCalled();
   });
 
+  it('WS4: fails closed (403) when no per-tenant secret is provisioned (empty secret)', async () => {
+    // The /vapi route resolves an empty secret when the tenant has no
+    // provisioned per-tenant secret and the global fallback was removed. An
+    // empty secret must reject every delivery — even one carrying a header —
+    // rather than fall open.
+    const { deps, webhookRepo } = makeDeps();
+    (deps as { secret: string }).secret = '';
+    const body = endedBody('call_noheader', '+15125550000');
+    const res = await handleVapiCallEvent(deps, {
+      tenantId: TENANT,
+      rawBody: body,
+      // Even a syntactically valid HMAC computed with SOME secret can't verify
+      // against an empty configured secret.
+      signatureHeader: computeVapiHmac(body, 'attacker-guess'),
+      sharedSecretHeader: null,
+    });
+    expect(res.status).toBe(403);
+    expect(webhookRepo.recordReceipt).not.toHaveBeenCalled();
+  });
+
+  it('WS4: cross-tenant forgery rejected — body signed with tenant A secret, verified against tenant B secret', async () => {
+    // Tenant B's handler is configured with B's secret; the attacker replays a
+    // body signed with tenant A's secret. Distinct per-tenant secrets mean the
+    // HMAC can't match, so verification fails closed (403). This is the exact
+    // cross-tenant forgery the global-secret fallback used to allow.
+    const secretA = 'vapi_whsec_tenant_A';
+    const secretB = 'vapi_whsec_tenant_B';
+    const { deps, webhookRepo } = makeDeps();
+    (deps as { secret: string }).secret = secretB;
+    const body = endedBody('call_cross', '+15125550000');
+    const res = await handleVapiCallEvent(deps, {
+      tenantId: TENANT,
+      rawBody: body,
+      signatureHeader: computeVapiHmac(body, secretA), // signed for A
+      sharedSecretHeader: null,
+    });
+    expect(res.status).toBe(403);
+    expect(webhookRepo.recordReceipt).not.toHaveBeenCalled();
+  });
+
   it('ignores non-terminal events with 200', async () => {
     const { deps } = makeDeps();
     const body = JSON.stringify({ message: { type: 'status-update', status: 'in-progress', call: { id: 'call_x' } } });

@@ -6067,6 +6067,22 @@ export const MIGRATIONS = {
     ALTER TABLE tenant_settings
       ADD COLUMN IF NOT EXISTS autonomous_close_max_cents BIGINT;
   `,
+
+  // QUALITY-2026-07-12 WS4 — DB-authoritative authorization. The auth
+  // middleware now resolves a user's role + access from THIS table on every
+  // request (the Clerk JWT is authentication proof only). `status` lets an
+  // operator suspend a teammate's access without deleting the row (deleted_at,
+  // migration 093, covers hard removal). Anything other than 'active' — or a
+  // non-null deleted_at — denies the request. Additive + backfilled 'active',
+  // so existing rows keep working. The composite index serves the exact
+  // per-request lookup (tenant_id + clerk_user_id).
+  '248_users_status': `
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'suspended'));
+    CREATE INDEX IF NOT EXISTS idx_users_tenant_clerk
+      ON users(tenant_id, clerk_user_id);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

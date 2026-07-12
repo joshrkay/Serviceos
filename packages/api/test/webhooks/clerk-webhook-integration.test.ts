@@ -276,6 +276,115 @@ describe('EXP-3 — Clerk webhook → tenant bootstrap integration', () => {
     expect(tenantRepo.created).toHaveLength(1);
   });
 
+  // ───────────────────────────────────────────────────────────────────────
+  // QUALITY-2026-07-12 WS4 — svix-timestamp replay-window enforcement.
+  // ───────────────────────────────────────────────────────────────────────
+  describe('WS4 — replay tolerance', () => {
+    it('rejects a stale timestamp (> 5 min old) with 400 and does not bootstrap', async () => {
+      const svixId = 'evt_stale';
+      const staleTs = String(Math.floor(Date.now() / 1000) - 400); // 6m40s old
+      const payload = userCreatedPayload('user_stale', 'stale@example.com');
+      // Correctly signed for the stale timestamp — proves we reject on the
+      // timestamp window BEFORE (and independent of) signature validity.
+      const { signature } = signSvixPayload(payload, svixId, staleTs, WEBHOOK_SECRET);
+
+      const res = await request(app)
+        .post('/webhooks/clerk')
+        .set('svix-id', svixId)
+        .set('svix-timestamp', staleTs)
+        .set('svix-signature', signature)
+        .send(payload);
+
+      expect(res.status).toBe(400);
+      expect(tenantRepo.created).toHaveLength(0);
+    });
+
+    it('rejects a future-skewed timestamp (> 5 min ahead) with 400', async () => {
+      const svixId = 'evt_future';
+      const futureTs = String(Math.floor(Date.now() / 1000) + 400);
+      const payload = userCreatedPayload('user_future', 'future@example.com');
+      const { signature } = signSvixPayload(payload, svixId, futureTs, WEBHOOK_SECRET);
+
+      const res = await request(app)
+        .post('/webhooks/clerk')
+        .set('svix-id', svixId)
+        .set('svix-timestamp', futureTs)
+        .set('svix-signature', signature)
+        .send(payload);
+
+      expect(res.status).toBe(400);
+      expect(tenantRepo.created).toHaveLength(0);
+    });
+
+    it('rejects a malformed (non-numeric) timestamp with 400', async () => {
+      const svixId = 'evt_malformed';
+      const payload = userCreatedPayload('user_malformed', 'malformed@example.com');
+      const { signature } = signSvixPayload(payload, svixId, 'not-a-number', WEBHOOK_SECRET);
+
+      const res = await request(app)
+        .post('/webhooks/clerk')
+        .set('svix-id', svixId)
+        .set('svix-timestamp', 'not-a-number')
+        .set('svix-signature', signature)
+        .send(payload);
+
+      expect(res.status).toBe(400);
+      expect(tenantRepo.created).toHaveLength(0);
+    });
+
+    it('accepts a fresh timestamp within tolerance (bootstraps normally)', async () => {
+      const svixId = 'evt_fresh';
+      const freshTs = String(Math.floor(Date.now() / 1000) - 30); // well inside 5m
+      const payload = userCreatedPayload('user_fresh', 'fresh@example.com');
+      const { signature } = signSvixPayload(payload, svixId, freshTs, WEBHOOK_SECRET);
+
+      const res = await request(app)
+        .post('/webhooks/clerk')
+        .set('svix-id', svixId)
+        .set('svix-timestamp', freshTs)
+        .set('svix-signature', signature)
+        .send(payload);
+
+      expect(res.status).toBe(200);
+      expect(tenantRepo.created).toHaveLength(1);
+    });
+
+    it('event-id idempotency survives replay with a DIFFERENT fresh timestamp', async () => {
+      // The durable event-id dedup (source, idempotency_key = svix-id) must
+      // still catch a replay even when the attacker re-stamps a fresh, in-
+      // tolerance timestamp (so the replay-window check passes). Same svix-id,
+      // new timestamp+signature → deduped, exactly one bootstrap.
+      const svixId = 'evt_replay_fresh_ts';
+      const ts1 = String(Math.floor(Date.now() / 1000) - 60);
+      const payload = userCreatedPayload('user_replay_fresh', 'replayfresh@example.com');
+      const first = signSvixPayload(payload, svixId, ts1, WEBHOOK_SECRET);
+
+      const r1 = await request(app)
+        .post('/webhooks/clerk')
+        .set('svix-id', svixId)
+        .set('svix-timestamp', ts1)
+        .set('svix-signature', first.signature)
+        .send(payload);
+      expect(r1.status).toBe(200);
+
+      // Replay: same event id, a fresh (different but in-tolerance) timestamp,
+      // re-signed so signature verification also passes.
+      const ts2 = String(Math.floor(Date.now() / 1000)); // different, still fresh
+      const second = signSvixPayload(payload, svixId, ts2, WEBHOOK_SECRET);
+      const r2 = await request(app)
+        .post('/webhooks/clerk')
+        .set('svix-id', svixId)
+        .set('svix-timestamp', ts2)
+        .set('svix-signature', second.signature)
+        .send(payload);
+      expect(r2.status).toBe(200);
+      expect(r2.body).toEqual({ received: true, duplicate: true });
+
+      // Exactly one bootstrap despite the fresh-timestamp replay.
+      expect(tenantRepo.created).toHaveLength(1);
+    });
+  });
+
   it('returns signup response without waiting for downstream provisioning enqueue', async () => {
     const auditRepo = new InMemoryAuditRepository();
     let releaseEnqueue: (() => void) | undefined;

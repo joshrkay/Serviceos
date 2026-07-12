@@ -98,7 +98,8 @@ export function createIntegrationResolver(pool: Pool): IntegrationResolver {
  * tenant-context discipline: reads under the tenant's own RLS context on a
  * dedicated client and RESETs the GUC on release. Returns null when the id is
  * malformed, the row is absent, or the secret hasn't been provisioned yet — the
- * /vapi handler then falls back to the global secret (transitional).
+ * /vapi handler then fails CLOSED (403). There is no global-secret fallback
+ * (removed in QUALITY-2026-07-12 WS4).
  */
 export function createVapiSecretResolver(
   pool: Pool,

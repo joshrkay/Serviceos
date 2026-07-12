@@ -683,7 +683,8 @@ import {
   isDevAuthBypassEnabled,
   DevInMemoryTenantRepository,
 } from './auth/dev-auth-bypass';
-import { requireAuth } from './middleware/auth';
+import { requireAuth, resolveAuthorization, setAuthorizationLoader } from './middleware/auth';
+import { createAuthorizationLoader } from './auth/authorization-loader';
 import { withTenantTransaction } from './middleware/tenant-context';
 import type { TenantIntegrationStatus } from './integrations/status-machine';
 // In-memory dev fallback for the WebhookEvent idempotency repo. Extracted from
@@ -4219,6 +4220,15 @@ export function createApp(): AppWithLifecycle {
   // invariant in packages/api/test/decisions/decisions.test.ts (D6).
   app.use('/api', requireAuth);
 
+  // QUALITY-2026-07-12 WS4 — DB-authoritative authorization. Runs immediately
+  // after requireAuth (so req.auth is populated) and BEFORE any route or the
+  // per-tenant limiter, so every /api/* request has its role re-resolved from
+  // the DB and deleted/suspended/non-member callers are rejected regardless of
+  // what their (still-valid) Clerk token claims. The loader is wired below only
+  // when a Pool exists and dev-auth-bypass is off; otherwise this is a no-op
+  // pass-through that keeps the JWT claim (see resolveAuthorization).
+  app.use('/api', resolveAuthorization);
+
   // P3/U-P3c: per-tenant fairness limiter. The pre-auth /api limiter above is a
   // coarse per-IP DoS guard; this one runs AFTER requireAuth (so req.auth is
   // populated) and caps requests PER TENANT cluster-wide, so one tenant's
@@ -4812,6 +4822,19 @@ export function createApp(): AppWithLifecycle {
       return null;
     }
   });
+
+  // QUALITY-2026-07-12 WS4 — wire the DB-authoritative authorization loader.
+  // Only when a real Pool exists AND dev-auth-bypass is off: dev-bypass already
+  // trusts unsigned tokens by design, and the no-DB dev path has no membership
+  // table to be authoritative over — both keep the JWT claim (resolveAuthorization
+  // no-ops when no loader is wired). `userId` here is the Clerk subject
+  // (req.auth.userId = payload.sub), so the lookup matches on clerk_user_id,
+  // exactly like userModeService.getUser. Errors are DELIBERATELY allowed to
+  // propagate (not caught) so resolveAuthorization fails closed on a DB blip
+  // instead of falling back to the token's role claim.
+  if (pool && !isDevAuthBypassEnabled()) {
+    setAuthorizationLoader(createAuthorizationLoader(pool));
+  }
 
   // Phase 12 — wire the tenant-wide supervisor-presence loader. The
   // proposal auto-approve threshold and the emergency-immediate-Dial
