@@ -166,11 +166,6 @@ export function setAuthorizationLoader(loader: AuthorizationLoader | null): void
   authorizationLoader = loader;
 }
 
-/** Test-only: read the wired loader (so tests can assert wiring). */
-export function getAuthorizationLoaderForTests(): AuthorizationLoader | null {
-  return authorizationLoader;
-}
-
 /**
  * DB-authoritative authorization middleware. Mount after `requireAuth` so
  * `req.auth` is populated. Overwrites `req.auth.role` with the DB role and
