@@ -105,6 +105,12 @@ export class HttpPresidioClient implements PresidioAnonymizer {
     text: string,
     opts: { language?: string } = {},
   ): Promise<PresidioAnonymizeResult> {
+    // Empty / whitespace-only input has nothing to redact — skip both HTTP
+    // round-trips rather than paying (and potentially failing on) two network
+    // calls for a no-op.
+    if (!text.trim()) {
+      return { anonymizedText: text, entities: [] };
+    }
     const language = opts.language ?? this.defaultLanguage;
     const analyzerResults = await this.analyze(text, language);
     const entities: PresidioEntity[] = analyzerResults.map((item) => ({
@@ -142,7 +148,11 @@ export class HttpPresidioClient implements PresidioAnonymizer {
         item === null ||
         typeof (item as AnalyzerResponseItem).entity_type !== 'string' ||
         typeof (item as AnalyzerResponseItem).start !== 'number' ||
-        typeof (item as AnalyzerResponseItem).end !== 'number'
+        (item as AnalyzerResponseItem).start < 0 ||
+        typeof (item as AnalyzerResponseItem).end !== 'number' ||
+        (item as AnalyzerResponseItem).end < (item as AnalyzerResponseItem).start ||
+        typeof (item as AnalyzerResponseItem).score !== 'number' ||
+        Number.isNaN((item as AnalyzerResponseItem).score)
       ) {
         throw new PresidioUnavailableError('Presidio analyze returned a malformed span');
       }
@@ -159,9 +169,12 @@ export class HttpPresidioClient implements PresidioAnonymizer {
     // ALL-CAPS tokens are exactly what the residual-PII gate strips before
     // its heuristics run, so Presidio's output composes cleanly with the
     // deterministic sweep.
-    const anonymizers: Record<string, { type: string; new_value: string }> = {
-      DEFAULT: { type: 'replace', new_value: '[REDACTED]' },
-    };
+    // Object.create(null): entity_type comes from an external service, so a
+    // prototype-less dictionary prevents a hostile/buggy entity name like
+    // "__proto__" or "constructor" from polluting or shadowing Object.prototype.
+    const anonymizers: Record<string, { type: string; new_value: string }> =
+      Object.create(null);
+    anonymizers.DEFAULT = { type: 'replace', new_value: '[REDACTED]' };
     for (const item of analyzerResults) {
       anonymizers[item.entity_type] = {
         type: 'replace',
@@ -240,8 +253,12 @@ export function createPresidioAnonymizer(
   config: PresidioConfig,
   opts: { timeoutMs?: number; fetchFn?: typeof fetch } = {},
 ): PresidioAnonymizer | null {
-  const analyzerUrl = config.PRESIDIO_ANALYZER_URL;
-  const anonymizerUrl = config.PRESIDIO_ANONYMIZER_URL;
+  // Trim: an env var configured with stray whitespace would pass the presence
+  // check but fail at connect time. (The fields are genuinely optional in the
+  // config schema, so the optional chaining here is presence handling, not
+  // defensive masking.)
+  const analyzerUrl = config.PRESIDIO_ANALYZER_URL?.trim();
+  const anonymizerUrl = config.PRESIDIO_ANONYMIZER_URL?.trim();
   if (!analyzerUrl || !anonymizerUrl) {
     return null;
   }

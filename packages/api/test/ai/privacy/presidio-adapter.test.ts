@@ -161,6 +161,55 @@ describe('HttpPresidioClient', () => {
     );
   });
 
+  it.each([
+    ['negative start', { entity_type: 'PERSON', start: -1, end: 10, score: 0.9 }],
+    ['end before start', { entity_type: 'PERSON', start: 10, end: 3, score: 0.9 }],
+    ['missing score', { entity_type: 'PERSON', start: 0, end: 10 }],
+    ['NaN score', { entity_type: 'PERSON', start: 0, end: 10, score: Number.NaN }],
+  ])('fails closed on an out-of-bounds span (%s)', async (_label, span) => {
+    const fetchFn = vi.fn(async () => jsonResponse([span]));
+    const client = makeClient(fetchFn as unknown as typeof fetch);
+
+    await expect(client.anonymize('Sarah Jones')).rejects.toBeInstanceOf(
+      PresidioUnavailableError,
+    );
+  });
+
+  it('short-circuits empty / whitespace-only input without any HTTP call', async () => {
+    const fetchFn = vi.fn();
+    const client = makeClient(fetchFn as unknown as typeof fetch);
+
+    await expect(client.anonymize('')).resolves.toEqual({
+      anonymizedText: '',
+      entities: [],
+    });
+    await expect(client.anonymize('   \n\t')).resolves.toEqual({
+      anonymizedText: '   \n\t',
+      entities: [],
+    });
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it('keeps a hostile entity_type ("__proto__") from polluting the anonymizer map', async () => {
+    let anonymizeBody: Record<string, unknown> | undefined;
+    const fetchFn = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).endsWith('/analyze')) {
+        return jsonResponse([{ entity_type: '__proto__', start: 0, end: 5, score: 0.9 }]);
+      }
+      anonymizeBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return jsonResponse({ text: '[__proto__] here' });
+    });
+    const client = makeClient(fetchFn as unknown as typeof fetch);
+
+    const result = await client.anonymize('Sarah here');
+    expect(result.anonymizedText).toBe('[__proto__] here');
+    // The prototype-less dictionary carries the key as plain data…
+    const anonymizers = anonymizeBody?.anonymizers as Record<string, unknown>;
+    expect(anonymizers['__proto__']).toEqual({ type: 'replace', new_value: '[__proto__]' });
+    // …and Object.prototype was not polluted in the process.
+    expect(({} as Record<string, unknown>).new_value).toBeUndefined();
+  });
+
   it('fails closed when anonymize returns a body without text', async () => {
     const fetchFn = vi.fn(async (url: string | URL | Request) => {
       if (String(url).endsWith('/analyze')) {
@@ -185,6 +234,21 @@ describe('createPresidioAnonymizer', () => {
     expect(
       createPresidioAnonymizer({ PRESIDIO_ANONYMIZER_URL: 'http://b:3000' }),
     ).toBeNull();
+  });
+
+  it('treats whitespace-only URLs as unconfigured and trims real ones', () => {
+    expect(
+      createPresidioAnonymizer({
+        PRESIDIO_ANALYZER_URL: '   ',
+        PRESIDIO_ANONYMIZER_URL: 'http://b:3000',
+      }),
+    ).toBeNull();
+    expect(
+      createPresidioAnonymizer({
+        PRESIDIO_ANALYZER_URL: ' http://a:3000 ',
+        PRESIDIO_ANONYMIZER_URL: ' http://b:3000 ',
+      }),
+    ).toBeInstanceOf(HttpPresidioClient);
   });
 
   it('returns a client when both URLs are configured', () => {
