@@ -88,12 +88,13 @@ const configSchema = z.object({
   // autonomous_booking_enabled setting. Absent/'false' preserves today's
   // per-tenant-only gating — no prod requirement.
   AUTONOMOUS_BOOKING_DISABLED: z.enum(['true', 'false']).optional(),
-  // D-018 — platform-wide kill switch for the autonomous CLOSE lane
-  // (proposals/autonomous-close-lane.ts). 'true' short-circuits
-  // evaluateAutonomousCloseLane before the per-tenant opt-in check. It is a
-  // SIBLING of AUTONOMOUS_BOOKING_DISABLED, checked independently, so an
-  // operator can freeze on-call sale-closing while leaving autonomous booking
-  // live (and vice-versa). Absent/'false' preserves per-tenant-only gating —
+  // D-018 → DEPRECATED by D-019 (QUALITY-2026-07-12 WS2). There is no longer
+  // any autonomous CLOSE execution to disable — the on-call close only ever
+  // STAGES proposals for owner one-tap approval (nothing is system-approved or
+  // executed). Still accepted (and independent of AUTONOMOUS_BOOKING_DISABLED)
+  // as a platform-wide off switch for even PREPARING the owner-approval chain:
+  // 'true' short-circuits evaluateAutonomousCloseLane so the affirmative falls
+  // back to the plain owner-finalizes interim. Absent/'false' is the default —
   // no prod requirement.
   AUTONOMOUS_CLOSE_DISABLED: z.enum(['true', 'false']).optional(),
   // ── WS15 — platform SLO monitor thresholds (workers/slo-monitor.ts). All

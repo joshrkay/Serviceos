@@ -530,16 +530,21 @@ export interface TenantSettings {
    */
   autonomousBookingThreshold?: number;
   /**
-   * D-018 (WS18) — autonomous CLOSE lane. Opt-in (column defaults FALSE,
-   * migration 247): when true, the live voice agent may close the sale on
-   * the call (draft + send estimate + confirm the held booking) under the
-   * D-018 gate set (proposals/autonomous-close-lane.ts). Optional on the
-   * type so pre-migration rows / legacy fixtures read as "off" via `?? false`.
+   * D-018 → amended by D-019 (QUALITY-2026-07-12 WS2). Opt-in (column defaults
+   * FALSE, migration 247 — column retained). It NO LONGER authorizes any
+   * autonomous execution: a system actor can never approve a proposal. When
+   * true, a caller's confirmed on-call close is PREPARED for the owner — the
+   * held slot is staged as a `create_booking` DRAFT in the owner-approval chain
+   * so the owner's one-tap approval confirms the booking too. When false, that
+   * booking is left to the owner (the estimate+send chain still stages).
+   * Optional on the type so pre-migration rows / legacy fixtures read as "off"
+   * via `?? false`.
    */
   autonomousCloseEnabled?: boolean;
   /**
-   * D-018 — per-tenant cap (integer cents) on the quote total the agent may
-   * auto-close. Nullable BIGINT; undefined ⇒ no cap gate.
+   * D-018 → amended by D-019 — per-tenant cap (integer cents) on the quote
+   * total for which the held booking is staged in the owner chain. Nullable
+   * BIGINT; undefined ⇒ no cap gate. Never authorizes autonomous execution.
    */
   autonomousCloseMaxCents?: number;
   createdAt: Date;
