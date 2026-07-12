@@ -72,6 +72,7 @@
     "@types/uuid": "^9.0.0",
     "@types/ws": "^8.18.1",
     "@vitest/coverage-v8": "^1.6.0",
+    "fast-check": "^4.9.0",
     "ioredis-mock": "^8.13.1",
     "supertest": "^6.3.0",
     "ts-node": "^10.9.0",
