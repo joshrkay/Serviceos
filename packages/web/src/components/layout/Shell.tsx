@@ -31,6 +31,8 @@ import {
   usePendingProposals,
   type PendingProposalSummary,
 } from '../../hooks/usePendingProposals';
+import { useTenantTimezone } from '../../hooks/useTenantTimezone';
+import { formatTimeInTenantTz } from '../../utils/formatInTenantTz';
 
 interface NavItem {
   to: string;
@@ -281,6 +283,7 @@ function ShellInner() {
   const { me, switchMode } = useMe();
   const { sessions, pendingProposalCount: liveSessionPendingCount } = useActiveSessions();
   const navigate = useNavigate();
+  const timezone = useTenantTimezone();
 
   // P2-033 — toast on each genuinely new pending proposal. Sonner's
   // action.onClick doesn't auto-navigate, so we drive it through
@@ -302,7 +305,7 @@ function ShellInner() {
   const handleCriticalProposal = useCallback(
     (proposal: PendingProposalSummary) => {
       const expiry = proposal.expiresAt
-        ? new Date(proposal.expiresAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+        ? formatTimeInTenantTz(proposal.expiresAt, timezone)
         : 'soon';
       toast.warning(`Hold expiring ${expiry}: ${proposal.summary}`, {
         action: {
@@ -311,7 +314,7 @@ function ShellInner() {
         },
       });
     },
-    [navigate],
+    [navigate, timezone],
   );
 
   const {

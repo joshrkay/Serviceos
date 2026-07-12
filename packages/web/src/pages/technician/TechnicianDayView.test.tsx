@@ -2,11 +2,22 @@ import React from 'react';
 import { fireEvent, render as rtlRender, screen, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { MemoryRouter } from 'react-router';
-import { TechnicianDayView } from './TechnicianDayView';
+import { TechnicianDayView, answerScheduleQuestion } from './TechnicianDayView';
+import { TenantTimezoneProvider } from '../../hooks/useTenantTimezone';
 
 // TechnicianDayView now uses useNavigate() so all renders need a router.
 function render(ui: React.ReactElement) {
   return rtlRender(<MemoryRouter>{ui}</MemoryRouter>);
+}
+
+// Renders inside a pinned tenant timezone (bypasses the /api/me fetch via the
+// provider's overrideTimezone test seam).
+function renderWithTz(ui: React.ReactElement, timezone: string) {
+  return rtlRender(
+    <TenantTimezoneProvider overrideTimezone={timezone}>
+      <MemoryRouter>{ui}</MemoryRouter>
+    </TenantTimezoneProvider>,
+  );
 }
 
 describe('P6-019 — Technician day-of assigned-work view', () => {
@@ -377,6 +388,58 @@ describe('P6-019 — Technician day-of assigned-work view', () => {
       expect(card.className).toContain('border');
       // No leftover technician-day-view__* BEM classes (they had no stylesheet).
       expect(container.querySelector('[class*="technician-day-view__"]')).toBeNull();
+    });
+  });
+
+  // Finding 4 (WS6) — appointment times were rendered with
+  // `new Date(iso).toLocaleTimeString()` (browser-local), so the same instant
+  // showed a different wall clock for every viewer. They must render in the
+  // TENANT timezone, deterministically, regardless of the JS runtime timezone
+  // (CLAUDE.md: "stored UTC, rendered in tenant timezone").
+  describe('tenant-timezone date rendering', () => {
+    // 2026-03-14T14:00:00Z: after US DST start (2026-03-08), so NY is EDT
+    // (UTC-4) and LA is PDT (UTC-7).
+    const startZ = '2026-03-14T14:00:00Z';
+
+    it('answerScheduleQuestion formats the next-appointment time in the tenant tz (NY)', () => {
+      const appts = [
+        { ...mockAppointments[0], scheduledStart: startZ },
+      ];
+      const answer = answerScheduleQuestion(
+        'Where is my next appointment?',
+        appts,
+        new Date('2026-03-14T00:00:00Z'),
+        'America/New_York',
+      );
+      // 14:00Z is 10:00 AM in New York — NOT the process-local wall clock.
+      expect(answer).toContain('10:00 AM');
+    });
+
+    it('answerScheduleQuestion renders the SAME instant differently under a different tenant tz (LA)', () => {
+      const appts = [
+        { ...mockAppointments[0], scheduledStart: startZ },
+      ];
+      const answer = answerScheduleQuestion(
+        'Where is my next appointment?',
+        appts,
+        new Date('2026-03-14T00:00:00Z'),
+        'America/Los_Angeles',
+      );
+      // Same instant, LA (UTC-7) → 7:00 AM. Proves the output tracks the tenant
+      // tz argument, not the browser/process timezone.
+      expect(answer).toContain('7:00 AM');
+    });
+
+    it('renders appointment time rows in the tenant timezone (NY), independent of process TZ', async () => {
+      renderWithTz(<TechnicianDayView technicianId="tech-1" />, 'America/New_York');
+
+      await screen.findByText('Jane Doe');
+
+      // appt-1: 09:00Z–11:00Z EDT → 5:00 AM – 7:00 AM.
+      // appt-2: 14:00Z–16:00Z EDT → 10:00 AM – 12:00 PM.
+      const times = screen.getAllByTestId('technician-day-time').map((el) => el.textContent);
+      expect(times).toContain('5:00 AM - 7:00 AM');
+      expect(times).toContain('10:00 AM - 12:00 PM');
     });
   });
 });
