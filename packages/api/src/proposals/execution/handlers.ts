@@ -444,7 +444,7 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
         ? (payload.appointmentType as AppointmentTypeValue)
         : undefined,
       createdBy: context.executedBy,
-    }, this.appointmentRepo);
+    }, this.appointmentRepo, undefined, this.auditRepo, 'system');
 
     if (this.assignmentRepo && payload.technicianId && typeof payload.technicianId === 'string') {
       try {

@@ -4,6 +4,7 @@ import { Proposal } from '../../../src/proposals/proposal';
 import { InMemoryAppointmentRepository, createAppointment } from '../../../src/appointments/appointment';
 import { InMemoryAssignmentRepository, assignTechnician } from '../../../src/appointments/assignment';
 import { ConflictError } from '../../../src/shared/errors';
+import { InMemoryAuditRepository } from '../../../src/audit/audit';
 
 describe('CreateAppointmentExecutionHandler', () => {
   const tenantId = '550e8400-e29b-41d4-a716-446655440000';
@@ -280,5 +281,32 @@ describe('CreateAppointmentExecutionHandler', () => {
 
     const created = await appointmentRepo.findById(tenantId, result.resultEntityId!);
     expect(created?.notes).toBe('Dispatcher note');
+  });
+
+  it('emits exactly one appointment.created audit event on execute (production audit fix)', async () => {
+    // Regression guard: the handler forwards this.auditRepo into
+    // createAppointment; before the fix it was silently dropped, so no
+    // appointment.created audit event was emitted on the proposal-execution
+    // path even though the appointment persisted.
+    const auditRepo = new InMemoryAuditRepository();
+    const handler = new CreateAppointmentExecutionHandler(
+      appointmentRepo,
+      assignmentRepo,
+      { enqueue },
+      auditRepo,
+    );
+
+    const proposal = makeProposal({
+      jobId: '99999999-9999-4999-8999-999999999999',
+      scheduledStart: '2026-04-26T14:00:00Z',
+      scheduledEnd: '2026-04-26T15:00:00Z',
+    });
+
+    const result = await handler.execute(proposal, context);
+    expect(result.success).toBe(true);
+
+    const events = auditRepo.getAll().filter((e) => e.eventType === 'appointment.created');
+    expect(events).toHaveLength(1);
+    expect(events[0].entityId).toBe(result.resultEntityId);
   });
 });
