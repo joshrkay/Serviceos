@@ -85,6 +85,43 @@ describe('InboxPage', () => {
     );
   });
 
+  it('Finding 2 — approve raises the server-window undo toast; Undo POSTs the undo endpoint', async () => {
+    apiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        data: [
+          { proposal: { id: 'p-u', proposalType: 'add_note', summary: 'Add a note', status: 'ready_for_review', createdAt: new Date().toISOString() }, urgency: 'low', reason: 'Standard priority' },
+        ],
+        summary: { totalCount: 1, criticalCount: 0, highCount: 0, normalCount: 0, lowCount: 1, truncated: false },
+      }),
+    );
+    // Approve response carries the server undo window (approvedAt + undoExpiresAt).
+    apiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        id: 'p-u',
+        status: 'approved',
+        approvedAt: new Date().toISOString(),
+        undoExpiresAt: new Date(Date.now() + 5000).toISOString(),
+      }),
+    );
+
+    render(<InboxPage />);
+    await waitFor(() => screen.getByText('Add a note'));
+    fireEvent.click(screen.getByRole('button', { name: /approve/i }));
+
+    // The undo toast surfaces after approval, anchored to the server window.
+    await waitFor(() => expect(screen.getByTestId('undo-toast')).toBeInTheDocument());
+
+    apiFetch.mockResolvedValueOnce(jsonResponse({ id: 'p-u', status: 'undone' }));
+    fireEvent.click(screen.getByRole('button', { name: /undo/i }));
+
+    await waitFor(() => {
+      expect(apiFetch).toHaveBeenCalledWith(
+        '/api/proposals/p-u/undo',
+        expect.objectContaining({ method: 'POST' }),
+      );
+    });
+  });
+
   it('§5.5 — marks expired schedule cards and re-proposes one optimistically', async () => {
     apiFetch.mockResolvedValueOnce(
       jsonResponse({

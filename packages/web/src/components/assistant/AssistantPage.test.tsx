@@ -442,6 +442,54 @@ describe('B4 — proposal approve/reject', () => {
     });
   });
 
+  it('Finding 2: renders the undo toast after a successful approve (server-driven window)', async () => {
+    await renderWithProposal();
+
+    // Approve response now carries the server's undo window (approvedAt +
+    // undoExpiresAt). The page must raise the shared undo toast — parity with
+    // the inbox, which previously the assistant surface lacked entirely.
+    mockedApiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        id: 'prop-1',
+        status: 'approved',
+        approvedAt: new Date().toISOString(),
+        undoExpiresAt: new Date(Date.now() + 5000).toISOString(),
+      }),
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /approve/i }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('undo-toast')).toBeInTheDocument();
+    });
+    expect(screen.getByRole('button', { name: /undo/i })).toBeInTheDocument();
+  });
+
+  it('Finding 2: clicking Undo POSTs the undo endpoint for the approved proposal', async () => {
+    await renderWithProposal();
+
+    mockedApiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        id: 'prop-1',
+        status: 'approved',
+        approvedAt: new Date().toISOString(),
+        undoExpiresAt: new Date(Date.now() + 5000).toISOString(),
+      }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: /approve/i }));
+    await waitFor(() => screen.getByTestId('undo-toast'));
+
+    mockedApiFetch.mockResolvedValueOnce(jsonResponse({ id: 'prop-1', status: 'undone' }));
+    fireEvent.click(screen.getByRole('button', { name: /undo/i }));
+
+    await waitFor(() => {
+      expect(mockedApiFetch).toHaveBeenCalledWith(
+        '/api/proposals/prop-1/undo',
+        expect.objectContaining({ method: 'POST' }),
+      );
+    });
+  });
+
   it('B4: failed approve shows an error and does not mark the proposal approved', async () => {
     await renderWithProposal();
 

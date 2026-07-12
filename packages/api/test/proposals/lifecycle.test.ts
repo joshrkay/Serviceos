@@ -3,6 +3,7 @@ import {
   isTerminalStatus,
   transitionProposal,
   isInUndoWindow,
+  undoExpiresAt,
   UNDO_WINDOW_MS,
 } from '../../src/proposals/lifecycle';
 import { createProposal, Proposal, CreateProposalInput } from '../../src/proposals/proposal';
@@ -150,6 +151,20 @@ describe('P2-003 — Proposal lifecycle transitions', () => {
 
     it('UNDO_WINDOW_MS is 5000', () => {
       expect(UNDO_WINDOW_MS).toBe(5000);
+    });
+
+    it('undoExpiresAt = approvedAt + UNDO_WINDOW_MS', () => {
+      const approvedAt = new Date('2026-07-12T10:00:00.000Z');
+      const proposal = makeProposal({ status: 'approved', approvedAt });
+      const expires = undoExpiresAt(proposal);
+      expect(expires).toBeInstanceOf(Date);
+      expect(expires!.getTime()).toBe(approvedAt.getTime() + UNDO_WINDOW_MS);
+    });
+
+    it('undoExpiresAt returns undefined when approvedAt is missing (backward compat)', () => {
+      const proposal = makeProposal({ status: 'approved' });
+      expect(proposal.approvedAt).toBeUndefined();
+      expect(undoExpiresAt(proposal)).toBeUndefined();
     });
 
     it('isInUndoWindow returns false when status is not approved', () => {

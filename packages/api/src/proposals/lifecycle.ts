@@ -62,6 +62,24 @@ export function isInUndoWindow(
   return elapsed < windowMs;
 }
 
+/**
+ * Finding 2 — the instant the 5-second undo window closes for an approved
+ * proposal: `approvedAt + windowMs`. Returns undefined when the proposal has
+ * no `approvedAt` (historical rows, or a non-approved proposal) so the
+ * response layer can OMIT the field rather than emit a bogus expiry.
+ *
+ * The client drives its undo countdown from this instant (not a fresh 5s at
+ * round-trip-return time), so the tail of the window the approve round-trip
+ * already consumed is never offered as undoable.
+ */
+export function undoExpiresAt(
+  proposal: Proposal,
+  windowMs: number = UNDO_WINDOW_MS
+): Date | undefined {
+  if (!proposal.approvedAt) return undefined;
+  return new Date(proposal.approvedAt.getTime() + windowMs);
+}
+
 export function canTransition(from: ProposalStatus, to: ProposalStatus): boolean {
   const allowed = VALID_TRANSITIONS[from];
   return allowed !== undefined && allowed.includes(to);
