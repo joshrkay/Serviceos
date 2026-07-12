@@ -34,7 +34,7 @@ function customerName(job?: JobDetail): string | undefined {
 }
 
 /** Single-line address for display and maps routing, or undefined when unknown. */
-function jobAddress(job?: JobDetail): string | undefined {
+function jobAddress(job?: JobDetail | null): string | undefined {
   const loc = job?.location;
   if (!loc) return undefined;
   const line = [loc.street1, loc.street2, loc.city, loc.state, loc.postalCode]

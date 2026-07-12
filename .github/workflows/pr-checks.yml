@@ -147,8 +147,16 @@ jobs:
         with:
           node-version: '20'
           cache: 'npm'
-          cache-dependency-path: packages/mobile/package-lock.json
-      # Isolated install — the root workspace `npm ci` does not cover mobile.
+          cache-dependency-path: |
+            package-lock.json
+            packages/mobile/package-lock.json
+      # BOTH installs are required: mobile's own npm ci provides expo/RN types
+      # (mobile is not a root workspace), while the ROOT npm ci provides the
+      # deps its ../shared imports resolve against (zod) and the hoisted
+      # @testing-library/react its vitest specs type against. With only the
+      # isolated install, tsc fails on every ../shared contract (TS2307).
+      - name: Install root workspace deps
+        run: npm ci
       - name: Install mobile deps
         run: npm ci
         working-directory: packages/mobile
