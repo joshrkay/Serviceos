@@ -29,6 +29,7 @@ import {
   NoopEstimateDeliveryProvider,
 } from '../../../src/proposals/execution/voice-extended-handlers';
 import { InMemoryNoteRepository } from '../../../src/notes/note';
+import { InMemoryAuditRepository } from '../../../src/audit/audit';
 import {
   InMemoryPaymentRepository,
   Payment,
@@ -77,7 +78,7 @@ describe('AddNoteExecutionHandler — real NoteRepository wire-up', () => {
   });
 
   it('persists a note via NoteRepository when targetId is a valid UUID', async () => {
-    const handler = new AddNoteExecutionHandler(noteRepo);
+    const handler = new AddNoteExecutionHandler(noteRepo, new InMemoryAuditRepository());
     const proposal = fakeApproved('add_note', {
       body: 'customer wants a call before arrival',
       targetKind: 'job',
@@ -99,7 +100,7 @@ describe('AddNoteExecutionHandler — real NoteRepository wire-up', () => {
 
   it('resolves a chained add_note token onto targetId and attaches to the parent-created entity', async () => {
     const proposalRepo = new InMemoryProposalRepository();
-    const handler = new AddNoteExecutionHandler(noteRepo);
+    const handler = new AddNoteExecutionHandler(noteRepo, new InMemoryAuditRepository());
     const parentJobId = '770e8400-e29b-41d4-a716-446655440002';
     const parent = fakeApproved('create_job', {
       customerId: validUuid,
@@ -148,7 +149,7 @@ describe('AddNoteExecutionHandler — real NoteRepository wire-up', () => {
   });
 
   it('rejects when only targetReference is supplied — needs a resolved UUID', async () => {
-    const handler = new AddNoteExecutionHandler(noteRepo);
+    const handler = new AddNoteExecutionHandler(noteRepo, new InMemoryAuditRepository());
     const proposal = fakeApproved('add_note', {
       body: 'note text',
       targetKind: 'job',
@@ -162,7 +163,7 @@ describe('AddNoteExecutionHandler — real NoteRepository wire-up', () => {
   });
 
   it('rejects when targetKind is not a NoteRepository entity type', async () => {
-    const handler = new AddNoteExecutionHandler(noteRepo);
+    const handler = new AddNoteExecutionHandler(noteRepo, new InMemoryAuditRepository());
     // 'appointment' is a valid voice targetKind but NOT a valid
     // NoteRepository entityType (which is customer/location/job/
     // estimate/invoice). Handler must reject so we never persist
@@ -180,7 +181,7 @@ describe('AddNoteExecutionHandler — real NoteRepository wire-up', () => {
   });
 
   it('still rejects when body is empty (existing schema-level guard preserved)', async () => {
-    const handler = new AddNoteExecutionHandler(noteRepo);
+    const handler = new AddNoteExecutionHandler(noteRepo, new InMemoryAuditRepository());
     const proposal = fakeApproved('add_note', {
       body: '',
       targetKind: 'job',

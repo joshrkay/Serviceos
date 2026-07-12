@@ -266,6 +266,7 @@ import {
 } from './verticals/in-memory-training-assets';
 import { TrainingAssetRedactionService } from './verticals/training-asset-redaction';
 import { TrainingAssetService } from './verticals/training-asset-service';
+import { createPresidioAnonymizer } from './ai/privacy/presidio-adapter';
 import { InMemoryQualityMetricsRepository } from './quality/metrics';
 import { InMemoryVoiceRepository, createTranscribeAudioFn } from './voice/voice-service';
 import { createWhisperTranscriptionProvider } from './voice/transcription-providers';
@@ -683,7 +684,8 @@ import {
   isDevAuthBypassEnabled,
   DevInMemoryTenantRepository,
 } from './auth/dev-auth-bypass';
-import { requireAuth } from './middleware/auth';
+import { requireAuth, resolveAuthorization, setAuthorizationLoader } from './middleware/auth';
+import { createAuthorizationLoader } from './auth/authorization-loader';
 import { withTenantTransaction } from './middleware/tenant-context';
 import type { TenantIntegrationStatus } from './integrations/status-machine';
 // In-memory dev fallback for the WebhookEvent idempotency repo. Extracted from
@@ -1275,11 +1277,20 @@ export function createApp(): AppWithLifecycle {
       ? voiceExtendedIntentsFlagResolver(tenantId)
       : false;
   };
+  // WS5 — Presidio-first redaction. When both analyzer + anonymizer URLs are
+  // configured we run a real Presidio pass ahead of the deterministic scrub and
+  // fail closed (quarantine) if it is unreachable. Unset ⇒ local-only scrub.
+  const presidioAnonymizer = createPresidioAnonymizer(config);
   const trainingAssetService = new TrainingAssetService({
     assetRepo: trainingAssetRepo,
     privacyAuditRepo,
     auditRepo,
-    redaction: new TrainingAssetRedactionService(),
+    redaction: new TrainingAssetRedactionService(
+      presidioAnonymizer ? { presidio: presidioAnonymizer } : {},
+    ),
+    // Transactional persistence for the asset + privacy_audit + audit writes
+    // when a real Postgres pool is present (compensating deletes otherwise).
+    pool: pool ?? undefined,
     invalidatePromptCache: (tenantId) => invalidateVerticalPromptCache?.(tenantId),
   });
   const fileRepo           = pool ? new PgFileRepository(pool)           : new InMemoryFileRepository();
@@ -1934,11 +1945,15 @@ export function createApp(): AppWithLifecycle {
     standingInstructionRepo,
     // WS20 — update_catalog_item writes the owner-ratified SKU price.
     catalogRepo,
+    // WS3 — voice update_customer consent parity: a spoken smsConsent toggle
+    // appends to the consent ledger in the same transaction as the customer
+    // update + audit event (matching the authenticated route path).
+    consentEventRepo,
   });
-  // U5 — fail boot loudly if a voice-reachable persist handler is degraded
-  // (would return success without saving). Only the persist-critical
-  // handlers (invoice / job / appointment) report isFullyWired today; the
-  // rest are treated as wired until they opt in.
+  // U5 / WS3 — fail boot loudly if a voice-reachable persist handler is
+  // degraded (would return success without saving). Every voice-reachable
+  // persistence handler now reports isFullyWired (WS3), so a missing repo for
+  // any of them aborts boot rather than silently no-opping voice traffic.
   assertVoiceHandlersWired(
     executionHandlers,
     Object.values(INTENT_TO_PROPOSAL_TYPE),
@@ -2705,10 +2720,6 @@ export function createApp(): AppWithLifecycle {
       consumeNonce: consumeOneTapUndoNonce,
       jobRepo,
       customerRepo,
-      // WS18d (D-018) — close-chain compensation: undoing a close-chain
-      // booking also stops pending siblings and voids the sent estimate so
-      // its approval link stops accepting.
-      estimateRepo,
       ...(messageDelivery
         ? {
             customerMessageDeps: {
@@ -3364,18 +3375,17 @@ export function createApp(): AppWithLifecycle {
     //    createVoiceTurnProcessor; see the variable-assembly note above) ──
     // WS18b — on-call SMS consent capture (ledger + customers.sms_consent).
     consentEventRepo,
-    // WS18d (D-018) — the sanctioned on-call close: the production executor,
-    // both platform kill switches, and the owner SMS/one-tap wiring for the
-    // UNDO link + the fallback chain SMS.
+    // QUALITY-2026-07-12 WS2 — on-call close PREPARATION (supersedes the D-018
+    // autonomous close): both platform kill switches and the owner SMS/one-tap
+    // approve wiring for the staged owner-approval chain. No executor — nothing
+    // is approved or executed by the system; the owner's one-tap is the only
+    // approval.
     autonomousClose: {
-      executor: proposalExecutor,
       platformDisabled: config.AUTONOMOUS_CLOSE_DISABLED === 'true',
       bookingPlatformDisabled: config.AUTONOMOUS_BOOKING_DISABLED === 'true',
       ownerPhoneResolver: resolveUnsupervisedOwnerPhone,
       ...(oneTapSmsSender ? { sendOwnerSms: oneTapSmsSender } : {}),
       ...(oneTapSecret ? { oneTapSecret } : {}),
-      buildUndoUrl: (token: string) =>
-        `${oneTapApiBaseUrl}/public/proposals/one-tap-undo?token=${encodeURIComponent(token)}`,
       buildApproveUrl: (token: string) =>
         `${oneTapApiBaseUrl}/public/proposals/one-tap-approve?token=${encodeURIComponent(token)}`,
     },
@@ -4219,6 +4229,15 @@ export function createApp(): AppWithLifecycle {
   // invariant in packages/api/test/decisions/decisions.test.ts (D6).
   app.use('/api', requireAuth);
 
+  // QUALITY-2026-07-12 WS4 — DB-authoritative authorization. Runs immediately
+  // after requireAuth (so req.auth is populated) and BEFORE any route or the
+  // per-tenant limiter, so every /api/* request has its role re-resolved from
+  // the DB and deleted/suspended/non-member callers are rejected regardless of
+  // what their (still-valid) Clerk token claims. The loader is wired below only
+  // when a Pool exists and dev-auth-bypass is off; otherwise this is a no-op
+  // pass-through that keeps the JWT claim (see resolveAuthorization).
+  app.use('/api', resolveAuthorization);
+
   // P3/U-P3c: per-tenant fairness limiter. The pre-auth /api limiter above is a
   // coarse per-IP DoS guard; this one runs AFTER requireAuth (so req.auth is
   // populated) and caps requests PER TENANT cluster-wide, so one tenant's
@@ -4583,6 +4602,7 @@ export function createApp(): AppWithLifecycle {
       estimateRepo,
       paymentLinkProvider,
       agreementRepo,
+      customerRepo,
     ),
   );
 
@@ -4812,6 +4832,19 @@ export function createApp(): AppWithLifecycle {
       return null;
     }
   });
+
+  // QUALITY-2026-07-12 WS4 — wire the DB-authoritative authorization loader.
+  // Only when a real Pool exists AND dev-auth-bypass is off: dev-bypass already
+  // trusts unsigned tokens by design, and the no-DB dev path has no membership
+  // table to be authoritative over — both keep the JWT claim (resolveAuthorization
+  // no-ops when no loader is wired). `userId` here is the Clerk subject
+  // (req.auth.userId = payload.sub), so the lookup matches on clerk_user_id,
+  // exactly like userModeService.getUser. Errors are DELIBERATELY allowed to
+  // propagate (not caught) so resolveAuthorization fails closed on a DB blip
+  // instead of falling back to the token's role claim.
+  if (pool && !isDevAuthBypassEnabled()) {
+    setAuthorizationLoader(createAuthorizationLoader(pool));
+  }
 
   // Phase 12 — wire the tenant-wide supervisor-presence loader. The
   // proposal auto-approve threshold and the emergency-immediate-Dial

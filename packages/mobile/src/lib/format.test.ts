@@ -55,6 +55,25 @@ describe('formatShortDate', () => {
   });
 });
 
+describe('tenant timezone independence', () => {
+  // A fixed UTC instant must render in the tenant's timezone regardless of the
+  // device/process zone. This suite is run twice in CI (TZ=UTC and
+  // TZ=America/Los_Angeles) to prove the output does not depend on process.env.TZ.
+  const instant = '2026-06-20T02:00:00Z'; // 22:00 Jun 19 in New York (UTC-4)
+
+  it('renders a short date in the tenant zone, not the ambient zone', () => {
+    expect(formatShortDate(instant, 'America/New_York')).toBe('Jun 19, 2026');
+    // Same instant, a different tenant zone → a different local date, proving the
+    // explicit param (not the process TZ) drives the result.
+    expect(formatShortDate(instant, 'Asia/Tokyo')).toBe('Jun 20, 2026');
+  });
+
+  it('renders a weekday date in the tenant zone, not the ambient zone', () => {
+    expect(formatWeekdayDate(instant, 'America/New_York')).toBe('Friday, Jun 19');
+    expect(formatWeekdayDate(instant, 'Asia/Tokyo')).toBe('Saturday, Jun 20');
+  });
+});
+
 describe('formatDuration', () => {
   it('renders minutes and seconds or seconds only', () => {
     expect(formatDuration(null)).toBe('—');

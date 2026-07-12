@@ -17,7 +17,7 @@ import { AppointmentRepository } from '../../appointments/appointment';
 import { LeadRepository } from '../../leads/lead';
 import { loseLead } from '../../leads/lead-service';
 import { LocationRepository, createLocation } from '../../locations/location';
-import { AuditRepository } from '../../audit/audit';
+import { AuditRepository, createAuditEvent } from '../../audit/audit';
 import { TimeEntryService } from '../../time-tracking/time-entry-service';
 import { EntryType } from '../../time-tracking/time-entry';
 import {
@@ -36,7 +36,20 @@ import {
 export class ConfirmAppointmentExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'confirm_appointment';
 
-  constructor(private readonly appointmentRepo?: AppointmentRepository) {}
+  constructor(
+    private readonly appointmentRepo: AppointmentRepository | undefined,
+    // WS3 — auditRepo is structurally REQUIRED: confirming an appointment is a
+    // state mutation and must emit its appointment.confirmed audit event. There
+    // is no domain fn for this bare status flip, so the handler emits it
+    // directly. Non-optional so a call site cannot skip the audit.
+    private readonly auditRepo: AuditRepository,
+  ) {}
+
+  // WS3 — degrades to nothing without the appointment repo; boot fails when a
+  // pool is configured but this is false.
+  isFullyWired(): boolean {
+    return Boolean(this.appointmentRepo);
+  }
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const payload = proposal.payload as Record<string, unknown>;
@@ -45,7 +58,8 @@ export class ConfirmAppointmentExecutionHandler implements ExecutionHandler {
       return { success: false, error: 'confirm_appointment requires a resolved appointmentId' };
     }
     if (!this.appointmentRepo) {
-      return { success: true, resultEntityId: appointmentId };
+      // WS3 — no synthetic success: a missing repo is a wiring fault.
+      return { success: false, error: 'handler_not_wired:appointmentRepo' };
     }
     try {
       const updated = await this.appointmentRepo.update(context.tenantId, appointmentId, {
@@ -55,6 +69,21 @@ export class ConfirmAppointmentExecutionHandler implements ExecutionHandler {
       if (!updated) {
         return { success: false, error: `Appointment ${appointmentId} not found` };
       }
+      // WS3 — emit the appointment.confirmed audit event. Bare `await` (no
+      // try/catch): the audit joins the ambient tenant transaction, so a
+      // failure here rolls back the status flip rather than silently losing
+      // the only audit record of this mutation.
+      await this.auditRepo.create(
+        createAuditEvent({
+          tenantId: context.tenantId,
+          actorId: context.executedBy,
+          actorRole: 'system',
+          eventType: 'appointment.confirmed',
+          entityType: 'appointment',
+          entityId: appointmentId,
+          metadata: { proposalId: proposal.id, jobId: updated.jobId },
+        }),
+      );
       return { success: true, resultEntityId: appointmentId };
     } catch (err) {
       return { success: false, error: err instanceof Error ? err.message : String(err) };
@@ -69,6 +98,12 @@ export class MarkLeadLostExecutionHandler implements ExecutionHandler {
     private readonly leadRepo?: LeadRepository,
     private readonly auditRepo?: AuditRepository,
   ) {}
+
+  // WS3 — degrades to a synthetic-id passthrough (saves nothing) without the
+  // lead repo; boot fails when a pool is configured but this is false.
+  isFullyWired(): boolean {
+    return Boolean(this.leadRepo);
+  }
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const payload = proposal.payload as Record<string, unknown>;
@@ -109,6 +144,12 @@ export class AddServiceLocationExecutionHandler implements ExecutionHandler {
     private readonly locationRepo?: LocationRepository,
     private readonly auditRepo?: AuditRepository,
   ) {}
+
+  // WS3 — degrades to a synthetic-id passthrough (saves nothing) without the
+  // location repo; boot fails when a pool is configured but this is false.
+  isFullyWired(): boolean {
+    return Boolean(this.locationRepo);
+  }
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const payload = proposal.payload as Record<string, unknown>;
@@ -155,6 +196,12 @@ export class LogTimeEntryExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'log_time_entry';
 
   constructor(private readonly timeEntryService?: TimeEntryService) {}
+
+  // WS3 — degrades to a success passthrough (clocks in nothing) without the
+  // time-entry service; boot fails when a pool is configured but this is false.
+  isFullyWired(): boolean {
+    return Boolean(this.timeEntryService);
+  }
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const payload = proposal.payload as Record<string, unknown>;
@@ -251,7 +298,20 @@ export class NotifyDelayExecutionHandler implements ExecutionHandler {
 export class RequestFeedbackExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'request_feedback';
 
-  constructor(private readonly feedbackRepo?: FeedbackRequestRepository) {}
+  constructor(
+    private readonly feedbackRepo: FeedbackRequestRepository | undefined,
+    // WS3 — auditRepo is structurally REQUIRED: creating a feedback request is
+    // a mutation that must emit its audit event. createFeedbackRequest has no
+    // audit hook, so the handler emits it directly. Non-optional so a call site
+    // cannot skip the audit.
+    private readonly auditRepo: AuditRepository,
+  ) {}
+
+  // WS3 — degrades to nothing without the feedback repo; boot fails when a pool
+  // is configured but this is false.
+  isFullyWired(): boolean {
+    return Boolean(this.feedbackRepo);
+  }
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const payload = proposal.payload as Record<string, unknown>;
@@ -260,11 +320,27 @@ export class RequestFeedbackExecutionHandler implements ExecutionHandler {
       return { success: false, error: 'request_feedback requires a resolved jobId' };
     }
     if (!this.feedbackRepo) {
-      return { success: true, resultEntityId: jobId };
+      // WS3 — no synthetic success: a missing repo is a wiring fault.
+      return { success: false, error: 'handler_not_wired:feedbackRepo' };
     }
     try {
       const request = createFeedbackRequest({ tenantId: context.tenantId, jobId });
       const created = await this.feedbackRepo.create(request);
+      // WS3 — emit the feedback_request.created audit event. Bare `await` (no
+      // try/catch): the audit joins the ambient tenant transaction, so a
+      // failure rolls back the feedback-request insert rather than losing the
+      // only audit record of this mutation.
+      await this.auditRepo.create(
+        createAuditEvent({
+          tenantId: context.tenantId,
+          actorId: context.executedBy,
+          actorRole: 'system',
+          eventType: 'feedback_request.created',
+          entityType: 'feedback_request',
+          entityId: created.id,
+          metadata: { proposalId: proposal.id, jobId },
+        }),
+      );
       return { success: true, resultEntityId: created.id };
     } catch (err) {
       return { success: false, error: err instanceof Error ? err.message : String(err) };

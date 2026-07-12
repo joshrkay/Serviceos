@@ -5,8 +5,9 @@
  *
  *  - `.github/workflows/pr-checks.yml` declares a `voice-quality` job
  *    that runs the corpus suite on every PR.
- *  - `.github/workflows/voice-quality-nightly.yml` exists and is a
- *    valid YAML document for the nightly Pg variant.
+ *  - `.github/workflows/voice-quality-nightly.yml` exists and runs the
+ *    enforced memory-mode Layer-1 gate (the decorative pg variant was
+ *    removed — QUALITY-2026-07-12 WS1).
  *  - `packages/api/package.json` exposes the `voice-quality` script the
  *    CI jobs invoke via `npm run voice-quality --workspace=packages/api`.
  *  - Both workflow files specify Node 20 so the runner stays in lockstep
@@ -35,7 +36,7 @@ const nightlyPath = path.join(
 const apiPackageJsonPath = path.resolve(__dirname, '../../package.json');
 
 describe('VQ-024 — CI workflow integration', () => {
-  it('VQ-024 — pr-checks.yml contains a voice-quality job', () => {
+  it('VQ-024 — pr-checks.yml contains a voice-quality job with the launch gate enforced', () => {
     expect(fs.existsSync(prChecksPath)).toBe(true);
     const src = fs.readFileSync(prChecksPath, 'utf-8');
     // Job key at column 2 under `jobs:` — pin the shape so a stray
@@ -47,21 +48,28 @@ describe('VQ-024 — CI workflow integration', () => {
     // Report artifact upload — graders/aggregators consume this in
     // VQ-025.
     expect(src).toMatch(/voice-quality-report\.json/);
+    // WS1 (QUALITY-2026-07-12) — the launch gate MUST be enforced so the
+    // merge step fails the job on any launch-gate blocker. Pin it so a
+    // future edit can't silently drop enforcement back to advisory.
+    expect(src).toMatch(/VOICE_QUALITY_ENFORCE_LAUNCH_GATE:\s*['"]true['"]/);
   });
 
-  it('VQ-024 — voice-quality-nightly.yml exists and parses as YAML', () => {
+  it('WS1 — voice-quality-nightly.yml runs the enforced memory-mode Layer-1 gate (no decorative pg run)', () => {
     expect(fs.existsSync(nightlyPath)).toBe(true);
     const src = fs.readFileSync(nightlyPath, 'utf-8');
     // Top-level workflow name + a recognisable schedule trigger.
-    expect(src).toMatch(/^name:\s*Voice Quality \(nightly Pg\)/m);
+    expect(src).toMatch(/^name:\s*Voice Quality \(nightly\)/m);
     expect(src).toMatch(/schedule:/);
     expect(src).toMatch(/cron:\s*['"]0 6 \* \* \*['"]/);
-    // Pg variant: the runner is configured for the pg repo bundle.
-    expect(src).toMatch(/VOICE_QUALITY_REPO:\s*pg/);
+    expect(src).toMatch(/npm run voice-quality --workspace=packages\/api/);
     expect(src).toMatch(/VOICE_QUALITY_CASSETTE_MODE:\s*replay/);
-    // A postgres service must be declared so the testcontainer-style
-    // workflow has a DB to point at.
-    expect(src).toMatch(/postgres:16-alpine/);
+    // The nightly enforces the launch gate — a regression reddens it.
+    expect(src).toMatch(/VOICE_QUALITY_ENFORCE_LAUNCH_GATE:\s*['"]true['"]/);
+    // The decorative pg run was removed: no pg repo mode, no postgres service,
+    // and no continue-on-error masking a failed corpus run.
+    expect(src).not.toMatch(/VOICE_QUALITY_REPO:\s*pg/);
+    expect(src).not.toMatch(/postgres:16-alpine/);
+    expect(src).not.toMatch(/continue-on-error:\s*true\s*#\s*TODO/);
   });
 
   it('VQ-024 — voice-quality npm script exists in packages/api/package.json', () => {

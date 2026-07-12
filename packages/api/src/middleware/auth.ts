@@ -2,6 +2,12 @@ import { Response, NextFunction } from 'express';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { Permission, hasPermission, Role, isValidRole } from '../auth/rbac';
 import { Mode } from '@ai-service-os/shared';
+import { createLogger } from '../logging/logger';
+
+const authzLogger = createLogger({
+  service: 'authorization',
+  environment: process.env.NODE_ENV || 'dev',
+});
 
 // P12-001 — `req.auth.mode` is set by `requireTenant` below. We avoid
 // editing `auth/clerk.ts` (out of this story's scope: owned by the
@@ -93,6 +99,155 @@ export function setCachedMode(
   // loadModeWithCache so a primed entry actually hits on next read.
   const cacheKey = `${tenantId}::${userId}`;
   modeCache.set(cacheKey, { mode, fetchedAt: Date.now() });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// QUALITY-2026-07-12 WS4 — DB-authoritative authorization.
+//
+// The Clerk JWT proves *authentication* (who signed in) but is NOT trusted for
+// *authorization*: its `role` / tenant-membership claims are minted at token
+// time and go stale the moment an operator demotes, suspends, or removes a
+// teammate. `resolveAuthorization` loads the caller's live membership row from
+// the DB on every request and OVERWRITES `req.auth.role` with the DB role, so
+// requirePermission / requireRole / enforceTenantIsolation downstream gate on
+// the authoritative role. A demotion therefore takes effect on the NEXT request
+// with no Clerk token refresh, and a deleted / suspended user is rejected even
+// while holding a still-valid token.
+//
+// Wiring mirrors the userModeLoader seam above: app.ts injects a Pg-backed
+// loader via setAuthorizationLoader so this module keeps zero DB-layer deps and
+// stays unit-testable with a fake loader. When no loader is wired (no-DB dev /
+// dev-auth-bypass) the JWT claim is used as-is — there is no DB to be
+// authoritative over, and dev-bypass already trusts the token by design.
+//
+// PERFORMANCE / freshness: this adds one indexed lookup per request. We do NOT
+// cache the result (unlike the 60s mode cache) — the whole point is that a
+// role change is honored on the very next request, which a TTL cache would
+// defeat. The lookup is keyed by the (tenant_id, clerk_user_id) index added in
+// migration 248.
+//
+// FAIL CLOSED: a loader throw (DB down / transient error) denies the request
+// with 503 rather than falling back to the JWT-claimed role. We never "default
+// to a role" on the authorization path (contrast userModeLoader, which defaults
+// to 'supervisor' because mode is not a security boundary).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * A user's live, DB-authoritative membership for a tenant. `deleted` mirrors a
+ * non-null `users.deleted_at`; `status` mirrors `users.status`
+ * ('active' | 'suspended'). Access is granted only when NOT deleted and status
+ * === 'active'.
+ */
+export interface MembershipRecord {
+  role: string;
+  deleted: boolean;
+  status: string;
+}
+
+/**
+ * Resolves the DB-authoritative membership for a Clerk subject within a tenant.
+ * Returns `null` when no membership row exists for that user in that tenant.
+ * MUST let infrastructure errors propagate (throw) so `resolveAuthorization`
+ * can fail closed rather than silently trusting the token.
+ */
+export type AuthorizationLoader = (
+  userId: string,
+  tenantId: string,
+) => Promise<MembershipRecord | null>;
+
+let authorizationLoader: AuthorizationLoader | null = null;
+
+/**
+ * Wire the loader used by `resolveAuthorization`. Idempotent — called once at
+ * boot. Not wiring it (no-DB dev / dev-auth-bypass) leaves authorization on the
+ * JWT claim.
+ */
+export function setAuthorizationLoader(loader: AuthorizationLoader | null): void {
+  authorizationLoader = loader;
+}
+
+/**
+ * DB-authoritative authorization middleware. Mount after `requireAuth` so
+ * `req.auth` is populated. Overwrites `req.auth.role` with the DB role and
+ * rejects deleted / suspended / non-member callers. Fails closed on DB errors.
+ */
+export async function resolveAuthorization(
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  // Defensive: requireAuth runs first, so req.auth is set in practice. If it
+  // isn't, there is nothing to resolve — let the downstream gate 401.
+  if (!req.auth) {
+    next();
+    return;
+  }
+
+  // No loader wired → no DB to be authoritative over (dev / dev-auth-bypass).
+  // Keep the JWT claim.
+  if (!authorizationLoader) {
+    next();
+    return;
+  }
+
+  // A token with no tenant context has no tenant-scoped membership to resolve.
+  // Tenant-scoped routes are independently gated by requireTenant (403); leave
+  // the claim untouched for the rare authenticated-but-tenantless request.
+  if (!req.auth.tenantId) {
+    next();
+    return;
+  }
+
+  let membership: MembershipRecord | null;
+  try {
+    membership = await authorizationLoader(req.auth.userId, req.auth.tenantId);
+  } catch (err) {
+    // Fail closed: deny rather than trust the (possibly stale) token claim.
+    authzLogger.error('Authorization resolution failed — failing closed', {
+      reason: err instanceof Error ? err.message : String(err),
+      userId: req.auth.userId,
+      tenantId: req.auth.tenantId,
+      path: req.path,
+    });
+    res.status(503).json({
+      error: 'AUTHZ_UNAVAILABLE',
+      message: 'Authorization service temporarily unavailable',
+    });
+    return;
+  }
+
+  if (!membership) {
+    authzLogger.warn('Authorization denied — no membership row', {
+      userId: req.auth.userId,
+      tenantId: req.auth.tenantId,
+      path: req.path,
+    });
+    res.status(403).json({
+      error: 'FORBIDDEN',
+      message: 'No active membership for this tenant',
+    });
+    return;
+  }
+
+  if (membership.deleted || membership.status !== 'active') {
+    authzLogger.warn('Authorization denied — user not active', {
+      userId: req.auth.userId,
+      tenantId: req.auth.tenantId,
+      deleted: membership.deleted,
+      status: membership.status,
+      path: req.path,
+    });
+    res.status(403).json({
+      error: 'FORBIDDEN',
+      message: 'User access has been revoked',
+    });
+    return;
+  }
+
+  // Authoritative: the DB role wins over the token claim. A stale token that
+  // says 'owner' is enforced as whatever the DB now says.
+  req.auth.role = membership.role;
+  next();
 }
 
 export function requireAuth(req: AuthenticatedRequest, res: Response, next: NextFunction): void {

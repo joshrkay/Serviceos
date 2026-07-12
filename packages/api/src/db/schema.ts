@@ -6067,6 +6067,41 @@ export const MIGRATIONS = {
     ALTER TABLE tenant_settings
       ADD COLUMN IF NOT EXISTS autonomous_close_max_cents BIGINT;
   `,
+
+  // QUALITY-2026-07-12 WS4 — DB-authoritative authorization. The auth
+  // middleware now resolves a user's role + access from THIS table on every
+  // request (the Clerk JWT is authentication proof only). `status` lets an
+  // operator suspend a teammate's access without deleting the row (deleted_at,
+  // migration 093, covers hard removal). Anything other than 'active' — or a
+  // non-null deleted_at — denies the request. Additive + backfilled 'active',
+  // so existing rows keep working. The composite index serves the exact
+  // per-request lookup (tenant_id + clerk_user_id).
+  '248_users_status': `
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'suspended'));
+    CREATE INDEX IF NOT EXISTS idx_users_tenant_clerk
+      ON users(tenant_id, clerk_user_id);
+  `,
+
+  // QUALITY-2026-07-12 WS4 follow-up (PR #669 review) — backfill OWNER
+  // membership rows for tenants bootstrapped BEFORE the Clerk user.created
+  // handler started creating them. bootstrapTenant historically created only
+  // the tenant + settings, so with authorization now DB-authoritative
+  // (resolveAuthorization) every pre-existing owner would resolve to
+  // no-membership and be locked out with 403s. tenants.owner_id is the
+  // owner's Clerk user id and owner_email their email — exactly the shape the
+  // webhook insert writes. Idempotent: skips tenants whose owner already has
+  // a users row.
+  '249_backfill_owner_memberships': `
+    INSERT INTO users (tenant_id, clerk_user_id, email, role)
+    SELECT t.id, t.owner_id, t.owner_email, 'owner'
+    FROM tenants t
+    WHERE NOT EXISTS (
+      SELECT 1 FROM users u
+      WHERE u.tenant_id = t.id AND u.clerk_user_id = t.owner_id
+    );
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

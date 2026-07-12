@@ -241,6 +241,12 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Customer not found' });
         return;
       }
+      // WS6 (QUALITY-2026-07-12) — the portal is a customer-facing surface with
+      // no Clerk /api/me, so it can't reach the tenant timezone the way the
+      // authed SPA does. Include it in the bootstrap response (resolved from
+      // tenant settings, tenant-scoped) so every portal date renders in the
+      // business's timezone per the "render in tenant timezone" core pattern.
+      const timezone = await resolveTenantTimezone(deps, tenantId);
       // Strip internal-only fields. The portal user only needs identity.
       res.json({
         id: customer.id,
@@ -252,6 +258,7 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
         secondaryPhone: customer.secondaryPhone,
         email: customer.email,
         preferredChannel: customer.preferredChannel,
+        timezone,
       });
     } catch (err) {
       const { statusCode, body } = toErrorResponse(err);

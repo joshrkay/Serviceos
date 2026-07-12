@@ -14,6 +14,8 @@ import { CallScreen, TextSheet } from './JobSheets';
 import { CameraCapture } from '../shared/CameraCapture';
 import type { CapturedMedia } from '../shared/CameraCapture';
 import { useApiClient } from '../../lib/apiClient';
+import { useTenantTimezone } from '../../hooks/useTenantTimezone';
+import { formatDateInTenantTz, formatTimeInTenantTz } from '../../utils/formatInTenantTz';
 import type { JobActivity, MaterialItem, ServiceType } from '../../data/mock-data';
 import { JobPhotoGallery } from './JobPhotoGallery';
 import {
@@ -662,6 +664,7 @@ export function TechJobView({
 }: TechJobViewProps) {
   const navigate = useNavigate();
   const apiFetch = useApiClient();
+  const timezone = useTenantTimezone();
 
   const [jobData, setJobData] = useState<ApiJobDetail | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -979,9 +982,9 @@ export function TechJobView({
                     <div className="flex items-center gap-1.5 mt-1">
                       <Clock size={12} className="text-muted-foreground shrink-0" />
                       <p className="text-muted-foreground text-sm">
-                        {new Date(jobData.scheduledStart).toLocaleDateString([], { month: 'short', day: 'numeric' })}
+                        {formatDateInTenantTz(jobData.scheduledStart, timezone)}
                         {' · '}
-                        {new Date(jobData.scheduledStart).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        {formatTimeInTenantTz(jobData.scheduledStart, timezone)}
                       </p>
                     </div>
                   )}

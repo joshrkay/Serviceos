@@ -9,13 +9,17 @@ import {
   Copy, ChevronDown, Clock, Briefcase, Receipt, Calendar,
   AlertCircle, Volume2, VolumeX, PhoneCall,
 } from 'lucide-react';
+import { toast } from 'sonner';
 import { VoiceSessionPanel } from './VoiceSessionPanel';
 import { useSearchParams } from 'react-router';
 import { type Message, type AIProposal } from '../../data/mock-data';
 import { AIProposalCard } from '../shared/AIProposalCard';
+import { UndoToast } from '../common/UndoToast';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useTTS } from '../../hooks/useTTS';
 import { useConversationVoice } from '../../hooks/useConversationVoice';
+import { useUndoableApproval, type StartUndoInput, type ApproveResponseLike } from '../../hooks/useUndoableApproval';
+import { emitProposalsChanged } from '../../lib/proposal-events';
 import { reportError, toSafeErrorShape } from '../../lib/errorReporter';
 
 interface ApiMessage {
@@ -179,7 +183,17 @@ function VoiceWaveform({ duration }: { duration: number }) {
 }
 
 // ─── Message Bubble ─────────────────────────────────────────────
-function MessageBubble({ msg, isLast }: { msg: Message; isLast: boolean }) {
+function MessageBubble({
+  msg,
+  isLast,
+  onApproved,
+}: {
+  msg: Message;
+  isLast: boolean;
+  // Finding 2 — invoked after a proposal approve succeeds so the page can raise
+  // the shared undo toast (same affordance as the inbox).
+  onApproved?: (input: StartUndoInput) => void;
+}) {
   const [reaction, setReaction] = useState<'up' | 'down' | null>(null);
   const [showActions, setShowActions] = useState(false);
   const isUser = msg.role === 'user';
@@ -297,6 +311,15 @@ function MessageBubble({ msg, isLast }: { msg: Message; isLast: boolean }) {
                 if (!response.ok) {
                   throw new Error(`Approve failed: ${response.status} ${response.statusText}`);
                 }
+                // Finding 2 — parity with the inbox: raise the undo toast,
+                // anchored to the server's real window (approvedAt /
+                // undoExpiresAt ride the approve response).
+                const body = (await response.json().catch(() => null)) as ApproveResponseLike | null;
+                onApproved?.({
+                  proposalId,
+                  summary: msg.proposal!.title,
+                  response: body,
+                });
               }}
               onReject={async () => {
                 // Same authenticated client + throw-on-failure contract as
@@ -779,6 +802,17 @@ export function AssistantPage() {
   } | null>(null);
   const [ttsEnabled, setTtsEnabled]   = useState(() => getLocalFlag('rivet:tts-enabled') === 'true');
   const { speak, stop: stopTTS, isSpeaking } = useTTS({ rate: 1.0 });
+
+  // Finding 2 — approval-undo toast, identical to the inbox affordance and
+  // driven by the same server-anchored countdown. Fixes the assistant surface
+  // approving with NO undo path at all.
+  const undoToast = useUndoableApproval({
+    requestUndo: (proposalId) =>
+      apiFetch(`/api/proposals/${proposalId}/undo`, { method: 'POST' }),
+    // Keep the inbox (and any other live surface) in sync after an undo.
+    onUndone: () => emitProposalsChanged(),
+    onError: (message) => toast.error(message),
+  });
   const lastInputWasVoiceRef = useRef(false);
   // UB-B2 — conversation mode. Populated after `send` is defined (the hook
   // needs `send`; `send` needs the session to speak replies through the
@@ -1075,7 +1109,12 @@ export function AssistantPage() {
           <DateSep label={`Today · ${new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`} />
 
           {messages.map((msg, i) => (
-            <MessageBubble key={msg.id} msg={msg} isLast={i === messages.length - 1} />
+            <MessageBubble
+              key={msg.id}
+              msg={msg}
+              isLast={i === messages.length - 1}
+              onApproved={undoToast.start}
+            />
           ))}
 
           {typing && <TypingIndicator reasoning={typingReason} />}
@@ -1263,6 +1302,18 @@ export function AssistantPage() {
         <div className="fixed bottom-24 right-6 z-50 w-96">
           <VoiceSessionPanel />
         </div>
+      )}
+
+      {/* Finding 2 — approval-undo toast (same component + server-driven window
+          as the inbox), so approving in the assistant is undoable too. */}
+      {undoToast.isActive && (
+        <UndoToast
+          summary={undoToast.summary}
+          remainingMs={undoToast.remainingMs}
+          windowMs={undoToast.windowMs}
+          onUndo={() => void undoToast.undo()}
+          onDismiss={undoToast.dismiss}
+        />
       )}
 
       <style>{`

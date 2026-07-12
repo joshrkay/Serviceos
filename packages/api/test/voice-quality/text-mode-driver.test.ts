@@ -31,6 +31,7 @@ import { InMemoryJobRepository } from '../../src/jobs/job';
 import { InMemoryLeadRepository } from '../../src/leads/in-memory-lead';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemoryDailyDigestRepository } from '../../src/digest/digest-service';
+import { InMemoryOnCallRepository } from '../../src/oncall/rotation';
 
 import type { Customer } from '../../src/customers/customer';
 import type { MockLLMProvider } from '../../src/ai/providers/mock';
@@ -290,6 +291,68 @@ describe('VQ-007 — TextModeDriver', () => {
     expect(h.store.snapshot(sessionId)).not.toBeNull();
     await h.driver.endSession(sessionId);
     expect(h.store.snapshot(sessionId)).toBeNull();
+  });
+
+  it('WS1 — a Spanish emergency keyword speaks the localized 911 line FIRST and escalates', async () => {
+    // Emergency handling short-circuits BEFORE classify (no LLM), so we wire an
+    // on-call rotation so escalateToHuman can emit escalation_triggered.
+    const onCallRepo = new InMemoryOnCallRepository(
+      new Map([['t-emergency', [{ id: 'oncall_1', userId: 'dispatcher_1', orderIndex: 0 }]]]),
+    );
+    const driver = new TextModeDriver({
+      voiceSessionStore: h.store,
+      bus: h.bus,
+      gateway: createMockLLMGateway().gateway,
+      proposalRepo: h.proposalRepo,
+      customerRepo: h.customerRepo,
+      onCallRepo,
+      systemActorId: 'system:vq-test',
+    });
+
+    const { sessionId } = await driver.startSession({
+      tenantId: 't-emergency',
+      callerId: '+15555551104',
+      callerIdBlocked: false,
+    });
+
+    const { agentResponse } = await driver.speak(
+      sessionId,
+      '¡Hay una fuga de gas en mi casa, se siente el olor a gas muy fuerte!',
+    );
+
+    // Localized Spanish 911 safety line, not the English source.
+    expect(agentResponse).toBe('Si alguien está en peligro inmediato, cuelgue y llame al 911.');
+    expect(h.bus.filterByType('escalation_triggered').length).toBeGreaterThan(0);
+    // No classifier ran — the emergency interrupt consumed the turn.
+    expect(h.bus.filterByType('intent_classified')).toHaveLength(0);
+  });
+
+  it('WS1 — an owner-session emits a verify_owner_identity lookup at establishment', async () => {
+    const { sessionId } = await h.driver.startSession({
+      tenantId: 't-owner',
+      callerId: '+15125550100',
+      callerIdBlocked: false,
+      callerIsOwner: true,
+    });
+    expect(sessionId).toBeTruthy();
+
+    const ownerId = h.bus
+      .filterByType('lookup_executed')
+      .filter((e) => e.skillName === 'verify_owner_identity');
+    expect(ownerId).toHaveLength(1);
+    expect(ownerId[0].success).toBe(true);
+  });
+
+  it('WS1 — a non-owner session does NOT emit verify_owner_identity', async () => {
+    await h.driver.startSession({
+      tenantId: 't-non-owner',
+      callerId: '+15125550999',
+      callerIdBlocked: false,
+    });
+    const ownerId = h.bus
+      .filterByType('lookup_executed')
+      .filter((e) => e.skillName === 'verify_owner_identity');
+    expect(ownerId).toHaveLength(0);
   });
 
   it('VQ-007 — multiple sessions on the same store do not cross-contaminate', async () => {

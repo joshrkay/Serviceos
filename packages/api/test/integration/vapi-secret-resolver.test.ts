@@ -50,7 +50,13 @@ describe('Postgres integration — createVapiSecretResolver', () => {
     expect(await resolve(tenantA)).not.toBe(await resolve(tenantB));
   });
 
-  it('returns null for a tenant with no provisioned secret (→ handler global fallback)', async () => {
+  it('returns null for a tenant with no provisioned secret (→ handler fails CLOSED)', async () => {
+    // WS4: null no longer means "fall back to the global secret" — the /vapi
+    // handler treats a null secret as an empty secret, which verifyVapiSignature
+    // rejects (403). A not-yet-provisioned tenant is fail-closed, not
+    // fail-open. See the handler-level assertion in
+    // test/integrations/vapi/webhook.test.ts ("fails closed when no per-tenant
+    // secret is provisioned").
     const fresh = (await createTestTenant(pool)).tenantId;
     await pool.query(
       `INSERT INTO tenant_settings (id, tenant_id, business_name) VALUES (gen_random_uuid(), $1, 'Fresh Co')`,

@@ -182,8 +182,9 @@ export interface WebhookRouterDeps {
    * Each tenant's assistant is provisioned with its OWN random secret, so a
    * body signed for tenant A fails verification at tenant B (closes the
    * cross-tenant forgery the single global secret allowed). Returns null for a
-   * not-yet-re-provisioned tenant → the handler falls back to the global
-   * `VAPI_WEBHOOK_SECRET` so live inbound voice keeps working during migration.
+   * not-yet-provisioned tenant → the handler fails CLOSED (403). The former
+   * global `VAPI_WEBHOOK_SECRET` fallback was removed in WS4: a tenant with no
+   * per-tenant secret is rejected rather than verified against a shared secret.
    */
   vapiSecretResolver?: (tenantId: string) => Promise<string | null>;
   provisioningQueue?: {
@@ -248,6 +249,33 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
 
     if (!svixId || !svixTimestamp || !svixSignature) {
       return res.status(400).json({ error: 'Missing svix headers' });
+    }
+
+    // QUALITY-2026-07-12 WS4 — replay-window enforcement. Svix signs
+    // `${id}.${timestamp}.${body}` and expects verifiers to reject deliveries
+    // whose timestamp is outside a tolerance (Svix's own libraries use 5
+    // minutes; the Stripe path here already enforces the same). Without this a
+    // captured-but-valid signed payload could be replayed indefinitely — the
+    // event-id idempotency below only dedups the SAME id, not a fresh capture.
+    // Parse as unix seconds; reject malformed / non-integer and > 5-min skew
+    // (either direction). Runs BEFORE signature verification so a replayed body
+    // is cheap to reject; signature + event-id idempotency below are unchanged.
+    const SVIX_TOLERANCE_SECONDS = 300;
+    const svixTs = Number(svixTimestamp);
+    if (!Number.isInteger(svixTs)) {
+      logger.warn('Clerk webhook rejected — malformed svix-timestamp', {
+        svixId,
+        svixTimestamp,
+      });
+      return res.status(400).json({ error: 'Invalid svix-timestamp' });
+    }
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    if (Math.abs(nowSeconds - svixTs) > SVIX_TOLERANCE_SECONDS) {
+      logger.warn('Clerk webhook rejected — timestamp outside tolerance', {
+        svixId,
+        skewSeconds: nowSeconds - svixTs,
+      });
+      return res.status(400).json({ error: 'Timestamp outside tolerance' });
     }
 
     // Verify over the RAW request bytes svix signed. Production mounts
@@ -414,7 +442,8 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
               try {
                 await client.query('BEGIN');
                 await client.query(
-                  `SET LOCAL app.current_tenant_id = '${pending.tenantId}'`,
+                  "SELECT set_config('app.current_tenant_id', $1, true)",
+                  [pending.tenantId],
                 );
                 await client.query(
                   `INSERT INTO users (
@@ -501,6 +530,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           const result = await bootstrapTenant(userId, primaryEmail, deps.tenantRepo, {
             settingsRepository: deps.settingsRepo,
           });
+
           const signupCorrelationId = `signup:${svixId}`;
           logger.info('Tenant bootstrap complete', {
             tenantId: result.tenantId,
@@ -631,6 +661,65 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                 error: err instanceof Error ? err.message : 'Unknown error',
               });
             });
+          }
+
+          // QUALITY-2026-07-12 WS4 (+ PR #669 review) — create the OWNER's
+          // membership row. Authorization is DB-authoritative
+          // (resolveAuthorization): a caller with no `users` row is rejected,
+          // so a bootstrapped owner without this row is locked out of /api.
+          // Insert idempotently under the tenant's RLS context (`users` has no
+          // unique (tenant_id, clerk_user_id) constraint, so WHERE NOT EXISTS
+          // instead of ON CONFLICT — safe on webhook replay).
+          //
+          // A failure here RETHROWS and fails the webhook (500 → Clerk
+          // retries; the catch below marks the event 'failed' so dedup lets
+          // the retry re-execute). That is safe BECAUSE this block runs AFTER
+          // every `result.created`-gated side effect above: on the retry,
+          // created=false skips the already-done funnel/Twilio/welcome/
+          // provisioning work and this idempotent insert simply re-attempts.
+          // Logging-only was the previous behavior and left the owner locked
+          // out with no retry (Clerk got a 200). Migration 249 backfills any
+          // rows missed before this change.
+          if (deps.pool) {
+            const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+            if (UUID_RE.test(result.tenantId)) {
+              const ownerClient = await deps.pool.connect();
+              try {
+                await ownerClient.query('BEGIN');
+                await ownerClient.query(
+                  "SELECT set_config('app.current_tenant_id', $1, true)",
+                  [result.tenantId],
+                );
+                await ownerClient.query(
+                  `INSERT INTO users (
+                     id, tenant_id, clerk_user_id, email, role,
+                     first_name, last_name, created_at, updated_at
+                   )
+                   SELECT gen_random_uuid(), $1, $2, $3, 'owner', $4, $5, NOW(), NOW()
+                   WHERE NOT EXISTS (
+                     SELECT 1 FROM users WHERE tenant_id = $1 AND clerk_user_id = $2
+                   )`,
+                  [
+                    result.tenantId,
+                    userId,
+                    primaryEmail,
+                    (userData.first_name as string | null) ?? null,
+                    (userData.last_name as string | null) ?? null,
+                  ],
+                );
+                await ownerClient.query('COMMIT');
+              } catch (ownerErr) {
+                await ownerClient.query('ROLLBACK').catch(() => undefined);
+                logger.error('Owner users-row insert failed — failing webhook so Clerk retries', {
+                  tenantId: result.tenantId,
+                  userId,
+                  error: ownerErr instanceof Error ? ownerErr.message : String(ownerErr),
+                });
+                throw ownerErr;
+              } finally {
+                ownerClient.release();
+              }
+            }
           }
 
           // Write tenant_id back to Clerk user's public_metadata (best-effort)
@@ -2251,20 +2340,24 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
     const rawBody = Buffer.isBuffer(req.body)
       ? req.body.toString('utf8')
       : JSON.stringify(req.body ?? {});
-    // Per-tenant secret is the primary credential: a body signed for tenant A
-    // fails verification here at tenant B. Fall back to the global secret ONLY
-    // for a tenant whose assistant hasn't been re-provisioned yet (resolver
-    // returns null), so live voice isn't broken mid-migration.
-    let vapiSecret = process.env.VAPI_WEBHOOK_SECRET ?? '';
+    // QUALITY-2026-07-12 WS4 — fail CLOSED. The per-tenant secret is the ONLY
+    // credential accepted here: a body signed for tenant A verifies only at
+    // tenant A. The previous global VAPI_WEBHOOK_SECRET fallback is removed —
+    // it let anyone holding the shared secret forge call events for ANY tenant.
+    // When the resolver returns null (tenant not yet provisioned) or throws
+    // (DB error), the secret stays empty and verifyVapiSignature rejects with
+    // 403. There is no tenant-less Vapi endpoint (the only route is
+    // /vapi/:tenantId), so no global secret is legitimate anywhere.
+    let vapiSecret = '';
     if (deps.vapiSecretResolver) {
       try {
-        const perTenant = await deps.vapiSecretResolver(tenantId);
-        if (perTenant) vapiSecret = perTenant;
+        vapiSecret = (await deps.vapiSecretResolver(tenantId)) ?? '';
       } catch (err) {
-        logger.warn('Vapi per-tenant secret resolve failed; using global fallback', {
+        logger.warn('Vapi per-tenant secret resolve failed; failing closed', {
           tenantId,
           error: err instanceof Error ? err.message : String(err),
         });
+        vapiSecret = '';
       }
     }
     try {

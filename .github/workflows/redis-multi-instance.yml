@@ -1,0 +1,89 @@
+# Redis multi-instance correctness gate (QUALITY-2026-07-12, WS7).
+#
+# WHY THIS EXISTS
+# ---------------
+# railway.toml documents that raising `numReplicas` past 1 REQUIRES a shared
+# REDIS_URL, because these cross-instance invariants degrade SILENTLY to
+# per-replica in-memory state when Redis is absent:
+#   - LLM tenant quotas   (src/ai/gateway/redis-tenant-quota.ts) — one shared
+#     concurrency cap + token bucket across replicas, not N× per replica.
+#   - Voice event fan-out (src/ai/agents/customer-calling/redis-voice-event-transport.ts)
+#     — a call handled on replica A reaches a subscriber on replica B.
+#   - Dispatch board fan-out (src/dispatch/redis-board-fanout.ts) and presence
+#     (src/dispatch/redis-presence-store.ts).
+#   - WebSocket connection caps (src/ws/redis-connection-registry.ts) — the cap
+#     is cluster-wide, not per-replica.
+#
+# The repo already has real-Redis, two-instance tests for each seam, gated on
+# `TEST_REDIS_URL` (they `describe.skipIf(!TEST_REDIS_URL)`), but NOTHING in CI
+# ever set that variable — so they were dead weight. This workflow provisions a
+# real Redis, sets TEST_REDIS_URL, and RUNS them. It is the gate that must be
+# GREEN before anyone sets `numReplicas > 1` in railway.toml.
+#
+# It runs weekly + on demand (the seams change rarely; PR-time CI stays fast).
+# It HARD-FAILS if Redis never becomes reachable — a skipped Redis suite is not
+# a green gate.
+name: Redis multi-instance correctness
+
+on:
+  schedule:
+    - cron: '0 5 * * 1' # Monday 05:00 UTC
+  workflow_dispatch:
+
+jobs:
+  redis-multi-instance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        # If Redis never becomes healthy the job fails before the tests run —
+        # so this can never pass by silently skipping the Redis suite.
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      TEST_REDIS_URL: redis://localhost:6379
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+
+      # Belt-and-suspenders: prove the app can actually reach Redis at the URL
+      # the tests will use. Fail loud (not skip) if it can't.
+      - name: Verify Redis is reachable
+        run: |
+          for i in $(seq 1 15); do
+            if (exec 3<>/dev/tcp/localhost/6379) 2>/dev/null; then
+              echo "Redis reachable on localhost:6379 (attempt $i)."
+              exec 3>&- 3<&-
+              exit 0
+            fi
+            echo "Redis not reachable yet (attempt $i)..."
+            sleep 2
+          done
+          echo "::error::Redis did not become reachable on localhost:6379. Multi-instance correctness cannot be verified — this is a hard failure, not a skip."
+          exit 1
+
+      # Runs the real-Redis two-instance suites: two store instances share ONE
+      # Redis and must observe a single cluster-wide cap / bucket / fan-out /
+      # connection cap — exactly what breaks if numReplicas>1 ships without a
+      # shared Redis. With TEST_REDIS_URL set, the skipIf guards are inert, so
+      # these assertions actually execute.
+      - name: Run Redis multi-instance correctness suites
+        working-directory: packages/api
+        run: |
+          npx vitest run --reporter=verbose \
+            test/ai/gateway/redis-tenant-quota.test.ts \
+            test/ai/gateway/redis-tenant-quota-two-instance.test.ts \
+            test/ai/agents/customer-calling/voice-fanout-two-instance.test.ts \
+            test/dispatch/board-fanout-two-instance.test.ts \
+            test/dispatch/redis-presence-store.test.ts \
+            test/ws/redis-connection-cap-two-instance.test.ts

@@ -108,7 +108,7 @@ describe('Home / Today dashboard', () => {
   it('renders every tap target at the >=44px contract (min-h-11)', () => {
     const { container } = render(createElement(Home));
     const buttons = Array.from(container.querySelectorAll('button'));
-    // speak + approvals + money + 3 modes + 6 quick links
+    // speak + approvals + money + 3 modes + 5 quick links
     expect(buttons.length).toBeGreaterThanOrEqual(8);
     for (const b of buttons) {
       expect(b.className).toMatch(/\bmin-h-11\b/);

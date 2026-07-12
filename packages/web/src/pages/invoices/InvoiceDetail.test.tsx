@@ -2,6 +2,13 @@ import React from 'react';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { InvoiceDetail } from './InvoiceDetail';
+import { formatDateTimeInTenantTz } from '../../utils/formatInTenantTz';
+
+// InvoiceDetail renders every date through the tenant timezone. With no
+// TenantTimezoneProvider mounted, useTenantTimezone() falls back to
+// America/New_York — so expectations are built with that same tz + formatter.
+const TZ = 'America/New_York';
+const fmt = (iso: string): string => formatDateTimeInTenantTz(iso, TZ);
 
 vi.mock('../../hooks/useDetailQuery', () => ({
   useDetailQuery: vi.fn(),
@@ -63,6 +70,38 @@ describe('InvoiceDetail', () => {
     expect(screen.queryByText(/Processing fee:/)).not.toBeInTheDocument();
   });
 
+  it('renders the enriched customer displayName instead of a raw jobId (WS6)', () => {
+    vi.mocked(useDetailQuery).mockReturnValue({
+      data: {
+        id: '1', invoiceNumber: 'INV-CUST', status: 'sent', jobId: 'j-secret',
+        customer: { id: 'c1', displayName: 'Grace Hopper', firstName: 'Grace', lastName: 'Hopper' },
+        subtotalCents: 5000, discountCents: 0, taxCents: 0, totalCents: 5000,
+        amountPaidCents: 0, amountDueCents: 5000,
+        createdAt: '2026-01-15T00:00:00Z', lineItems: [], payments: [],
+      },
+      isLoading: false, error: null, refetch: vi.fn(),
+    });
+    render(<InvoiceDetail invoiceId="1" />);
+    expect(screen.getByTestId('invoice-customer-name')).toHaveTextContent('Grace Hopper');
+    // The raw jobId must NOT be surfaced as the customer identity.
+    expect(screen.queryByText(/j-secret/)).toBeNull();
+  });
+
+  it('falls back to firstName + lastName when displayName is absent', () => {
+    vi.mocked(useDetailQuery).mockReturnValue({
+      data: {
+        id: '1', invoiceNumber: 'INV-CUST2', status: 'sent', jobId: 'j1',
+        customer: { id: 'c2', firstName: 'Alan', lastName: 'Turing' },
+        subtotalCents: 5000, discountCents: 0, taxCents: 0, totalCents: 5000,
+        amountPaidCents: 0, amountDueCents: 5000,
+        createdAt: '2026-01-15T00:00:00Z', lineItems: [], payments: [],
+      },
+      isLoading: false, error: null, refetch: vi.fn(),
+    });
+    render(<InvoiceDetail invoiceId="1" />);
+    expect(screen.getByTestId('invoice-customer-name')).toHaveTextContent('Alan Turing');
+  });
+
   it('renders line item and payment data', () => {
     render(<InvoiceDetail invoiceId="1" />);
     expect(screen.getByText('Labor')).toBeInTheDocument();
@@ -72,7 +111,7 @@ describe('InvoiceDetail', () => {
 
   it('renders payment audit status in invoice info', () => {
     render(<InvoiceDetail invoiceId="1" />);
-    const paidTimestamp = new Date('2026-01-20T00:00:00Z').toLocaleString();
+    const paidTimestamp = fmt('2026-01-20T00:00:00Z');
     expect(screen.getByText('Invoice Status:')).toBeInTheDocument();
     expect(screen.getByText('Payment Status:')).toBeInTheDocument();
     expect(screen.getByText('Paid via Credit Card')).toBeInTheDocument();
@@ -82,7 +121,7 @@ describe('InvoiceDetail', () => {
 
   it('renders payment row with timestamp (date + time)', () => {
     render(<InvoiceDetail invoiceId="1" />);
-    const paidTimestamp = new Date('2026-01-20T00:00:00Z').toLocaleString();
+    const paidTimestamp = fmt('2026-01-20T00:00:00Z');
     expect(screen.getAllByText(paidTimestamp).length).toBeGreaterThanOrEqual(2);
   });
 
@@ -230,8 +269,8 @@ describe('InvoiceDetail', () => {
       expect(screen.getByText('Credit Card')).toBeInTheDocument();
       expect(screen.getByText('ACH / Bank Transfer')).toBeInTheDocument();
       // Dates rendered as full timestamps.
-      const ts1 = new Date('2026-01-15T10:00:00Z').toLocaleString();
-      const ts2 = new Date('2026-01-20T14:30:00Z').toLocaleString();
+      const ts1 = fmt('2026-01-15T10:00:00Z');
+      const ts2 = fmt('2026-01-20T14:30:00Z');
       expect(screen.getAllByText(ts1).length).toBeGreaterThanOrEqual(1);
       expect(screen.getAllByText(ts2).length).toBeGreaterThanOrEqual(1);
     });

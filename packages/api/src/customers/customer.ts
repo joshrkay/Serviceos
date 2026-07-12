@@ -446,12 +446,19 @@ export async function updateCustomer(
   // WS12 — ledger the sms_consent change (kind 'sms', source 'manual') so the
   // one consent model sees it: a revoke here suppresses BOTH channels at the
   // gates; a re-grant clears only the sms-kind revocation (never voice
-  // consent — see compliance/resolve-outbound-consent.ts). Best-effort,
-  // mirroring stop-reply.ts: the sms_consent column write above is the SMS
-  // channel's primary affirmative signal and must not be undone by a ledger
-  // failure. Skipped when the customer has no phone — the ledger is keyed by
-  // phone_normalized (NOT NULL), and a phoneless customer can't be texted or
-  // called anyway.
+  // consent — see compliance/resolve-outbound-consent.ts). Skipped when the
+  // customer has no phone — the ledger is keyed by phone_normalized (NOT NULL),
+  // and a phoneless customer can't be texted or called anyway.
+  //
+  // WS3 — consent-ledger integrity: this append is NO LONGER best-effort. A
+  // consent-bearing update whose ledger write fails must FAIL the whole update
+  // rather than leave the sms_consent column and the immutable ledger
+  // disagreeing (the column would say "opted out" while the ledger — the gate's
+  // source of truth for the OTHER channel — never recorded it, or vice versa).
+  // The append runs on the ambient tenant transaction (executor Path A /
+  // request middleware), so a throw here rolls back the customers.update and
+  // the audit event below atomically. For non-consent updates (smsConsent
+  // unchanged) the ledger is never touched.
   if (
     consentLedger &&
     updated &&
@@ -460,18 +467,14 @@ export async function updateCustomer(
   ) {
     const phone = updated.primaryPhone ?? existing.primaryPhone;
     if (phone) {
-      try {
-        await consentLedger.append({
-          tenantId,
-          customerId: id,
-          phone,
-          kind: 'sms',
-          state: input.smsConsent ? 'granted' : 'revoked',
-          source: 'manual',
-        });
-      } catch {
-        /* best-effort — never fail the customer update on a ledger write */
-      }
+      await consentLedger.append({
+        tenantId,
+        customerId: id,
+        phone,
+        kind: 'sms',
+        state: input.smsConsent ? 'granted' : 'revoked',
+        source: 'manual',
+      });
     }
   }
 

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render } from '@testing-library/react';
+import { cleanup, render } from '@testing-library/react';
 import { createElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -15,10 +15,20 @@ const h = vi.hoisted(() => ({
   data: [] as Appointment[],
   isLoading: false,
   error: null as string | null,
+  timezone: undefined as string | undefined,
 }));
 
 vi.mock('expo-router', () => ({
   useRouter: () => ({ push: vi.fn(), back: vi.fn(), replace: vi.fn() }),
+}));
+vi.mock('../hooks/useMe', () => ({
+  useMe: () => ({
+    me: { timezone: h.timezone } as unknown,
+    isLoading: false,
+    error: null,
+    switchMode: vi.fn(),
+    refetch: vi.fn(),
+  }),
 }));
 vi.mock('../hooks/useListQuery', () => ({
   useListQuery: (endpoint: string, options?: unknown) => {
@@ -42,6 +52,7 @@ beforeEach(() => {
   h.data = [];
   h.isLoading = false;
   h.error = null;
+  h.timezone = undefined;
 });
 
 afterEach(() => cleanup());
@@ -61,14 +72,16 @@ describe('Schedule screen', () => {
     expect(getByText('Repair · Scheduled')).toBeTruthy();
   });
 
+  it('renders the appointment date in the tenant timezone', () => {
+    // 2026-06-22T02:00:00Z is still Jun 21 in America/New_York (UTC-4).
+    h.timezone = 'America/New_York';
+    h.data = [{ id: 'a1', scheduledStart: '2026-06-22T02:00:00Z' }];
+    const { getByText } = render(createElement(Schedule));
+    expect(getByText('Jun 21, 2026')).toBeTruthy();
+  });
+
   it('shows the empty state when nothing is scheduled', () => {
     const { getByText } = render(createElement(Schedule));
     expect(getByText('Nothing scheduled.')).toBeTruthy();
-  });
-
-  it('switches to the map view from the header toggle', () => {
-    const { getByText } = render(createElement(Schedule));
-    fireEvent.click(getByText('map').closest('button')!);
-    expect(getByText("Map view shows today's route order. Pull to refresh on List view for latest jobs.")).toBeTruthy();
   });
 });

@@ -297,6 +297,9 @@ everywhere is always safe; propagating a grant across channels would fabricate c
 
 ### D-018: Autonomous close lane — sanctioned on-call sale-closing with owner UNDO
 **Date:** 2026-07-11
+**Superseded by D-019** (2026-07-12): the system-approval + undo-window backdating described
+below were REVOKED as a human-authority violation. On-call close now only STAGES proposals for
+explicit owner one-tap approval; the historical record is kept as written.
 **Decision:** A per-tenant opt-in (default OFF), stricter SIBLING of the D-015 booking
 lane (`packages/api/src/proposals/autonomous-close-lane.ts`) that authorizes the live
 voice agent to CLOSE the sale on the call: a three-member chain
@@ -339,3 +342,54 @@ says so).
 - Reusing `AUTONOMOUS_BOOKING_DISABLED` — an operator must be able to freeze on-call
   sale-closing while leaving autonomous booking live (and vice-versa), so the close needs
   its own independent kill switch.
+
+### D-019: On-call close requires explicit owner approval — D-018 system approval revoked
+**Date:** 2026-07-12
+**Initiative:** QUALITY-2026-07-12 (Restore human-authority invariants), Workstream 2.
+**Decision:** The D-018 "sanctioned autonomous close" is revoked. No proposal may ever be
+approved by a system actor: `system:autonomous-close` (and any `system:` actor) can CREATE
+and stage proposals but can NEVER transition one to `approved`. Approval — the point at which
+canonical writes, customer communication, booking confirmation, and money movement become
+authorized — belongs to a human (the owner). Concretely:
+- Deleted `sanctionCloseChain` (the explicit per-member system approval), `executeCloseChain`
+  (the synchronous in-order executor), `sendCloseUndoSms` (the after-the-fact owner UNDO), and
+  `assembleCloseChain` (the pre-approval 3-member assembler) from
+  `proposals/autonomous-close-execution.ts`.
+- Removed the undo-window backdating entirely: nothing writes `approvedAt` in the past
+  (`new Date(Date.now() - UNDO_WINDOW_MS)` is gone), so the D-009 5-second undo window is
+  honored on every close proposal the owner approves.
+- A caller's confirmed, consent-gated, catalog-clean close now HOLDS the slot and STAGES a
+  DRAFT chain — `draft_estimate → send_estimate($ref estimateId) → create_booking` (the held
+  slot as a concrete `create_booking` DRAFT) — then sends the owner ONE `renderChainSms`
+  one-tap approval SMS. The owner's tap (routes/one-tap-approve.ts → `approveChainSet`)
+  approves the capture-class head + the capture-class booking in one action (the comms-class
+  `send_estimate` follows separately, exactly as the chain legend says); the D-009 undo window
+  and the standard executor are unchanged. The one-tap owner-approval fallback is preserved and
+  is now the ONLY close path.
+- The lane evaluation (`evaluateAutonomousCloseLane`) is retained as telemetry and to decide
+  whether the held booking is staged in the owner chain (eligible) or the hold is released and
+  a two-member estimate+send chain is staged (ineligible) — it no longer gates any autonomous
+  execution.
+- Structural guard: `transitionProposal` (proposals/lifecycle.ts) rejects any transition to
+  `approved` by a `system:` actor, so the invariant cannot be reintroduced by a future caller.
+- Removed the D-018-specific close-chain compensation from the one-tap UNDO route (siblings
+  are no longer system-approved, and no close UNDO token is minted); the generic D-015 booking
+  undo is unchanged.
+- `AUTONOMOUS_CLOSE_DISABLED` (env) is deprecated but still accepted as a platform-wide off
+  switch for even PREPARING the owner chain; `tenant_settings.autonomous_close_enabled` /
+  `autonomous_close_max_cents` columns are retained (migration 247 is immutable) but now only
+  govern whether the held booking is included in the owner-approval chain — never autonomous
+  execution.
+**Rationale:** "Never auto-execute proposals — all require human approval" (CLAUDE.md) is a
+hard product invariant. D-018's system approval + undo-window backdating let the platform
+confirm a booking, text a customer, and stand up a deposit link with no human in the loop —
+a governance violation that no gate ladder makes acceptable. Holding a slot and preparing
+proposals on caller confirmation is fine; authorizing them is the owner's, and only the
+owner's, act.
+**Story:** QUALITY-2026-07-12 WS2 (restore human-authority invariants).
+**Alternatives rejected:**
+- Keeping system approval behind a stricter gate — any system approval violates the invariant;
+  the gate strength is irrelevant.
+- Dropping the held booking entirely on caller confirmation — the goal explicitly permits
+  holding a slot and preparing proposals; staging the booking as a DRAFT under owner approval
+  preserves the product outcome without the violation.

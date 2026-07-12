@@ -190,7 +190,13 @@ describe('P1-001 — Customer entity + CRUD', () => {
     expect(ledger.rows).toHaveLength(0);
   });
 
-  it('WS12 — a ledger append failure never fails the customer update (best-effort)', async () => {
+  it('WS3 — a consent-bearing ledger append failure FAILS the customer update (no longer best-effort)', async () => {
+    // WS3 reverses the WS12 best-effort posture: a consent-bearing update whose
+    // ledger write fails must NOT report success, so the sms_consent column and
+    // the immutable ledger can never silently disagree. In production this runs
+    // inside the executor / request transaction, so the whole update rolls back
+    // atomically (proven in test/integration/ws3-consent-audit-atomicity.test.ts);
+    // here we pin that the failure propagates rather than being swallowed.
     const ledger = new InMemoryConsentEventRepository();
     ledger.append = async () => {
       throw new Error('pg down');
@@ -207,16 +213,17 @@ describe('P1-001 — Customer entity + CRUD', () => {
       repo
     );
 
-    const updated = await updateCustomer(
-      'tenant-1',
-      customer.id,
-      { smsConsent: false },
-      repo,
-      'user-1',
-      auditRepo,
-      ledger
-    );
-    expect(updated!.smsConsent).toBe(false);
+    await expect(
+      updateCustomer(
+        'tenant-1',
+        customer.id,
+        { smsConsent: false },
+        repo,
+        'user-1',
+        auditRepo,
+        ledger
+      )
+    ).rejects.toThrow('pg down');
   });
 
   it('validation — rejects invalid customer update before write', async () => {

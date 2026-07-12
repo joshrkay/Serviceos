@@ -34,6 +34,23 @@ jobs:
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
 
+      # WS7 — Option B (docs/launch/ci-gating.md) keeps this workflow GREEN
+      # without the real Clerk secrets, running only the hermetic smoke +
+      # always-on Journey-1. That is intentional, but a green check here must
+      # not be silently mistaken for full journey coverage. Emit an explicit
+      # annotation so the coverage gap is visible on every secretless run.
+      # (GitHub Actions forbids `secrets` in step-level `if:`, so gate in-shell.)
+      - name: Annotate E2E coverage scope
+        run: |
+          if [ -z "$E2E_CLERK_SECRET_KEY" ] || [ -z "$E2E_CLERK_PUBLISHABLE_KEY" ]; then
+            echo "::warning::E2E running smoke-only (Option B) — real-Clerk secrets absent, so the real-Clerk signup + full journey specs self-skip. A green result here does NOT prove full journey coverage. Add E2E_CLERK_PUBLISHABLE_KEY + E2E_CLERK_SECRET_KEY to upgrade to Option A."
+          else
+            echo "Real Clerk E2E secrets present — full journey specs will run (Option A)."
+          fi
+        env:
+          E2E_CLERK_PUBLISHABLE_KEY: ${{ secrets.E2E_CLERK_PUBLISHABLE_KEY }}
+          E2E_CLERK_SECRET_KEY: ${{ secrets.E2E_CLERK_SECRET_KEY }}
+
       # GitHub Actions forbids `secrets` in step-level `if:` — gate in-shell instead.
       - name: Onboarding API integration (migration 098)
         run: |

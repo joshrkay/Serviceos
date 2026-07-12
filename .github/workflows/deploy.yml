@@ -21,7 +21,7 @@ jobs:
         run: npx tsc --noEmit
         working-directory: packages/web
 
-      - name: Owner-loop critical path
+      - name: Owner-loop critical path — §11 H2
         run: npx vitest run test/owner-loop-critical-path.test.ts
         working-directory: packages/api
         env:
@@ -33,12 +33,6 @@ jobs:
         # add the full canned-audio → CreateBooking assertion.
         # See docs/runbooks/launch-quality-bar.md.
         run: npx vitest run test/voice/voice-smoke.synthetic.test.ts
-        working-directory: packages/api
-        env:
-          NODE_ENV: test
-
-      - name: Owner loop critical path — §11 H2
-        run: npx vitest run test/owner-loop-critical-path.test.ts
         working-directory: packages/api
         env:
           NODE_ENV: test
@@ -69,40 +63,167 @@ jobs:
         run: npm run migrate:dryrun
         working-directory: packages/api
 
+  # WS7 — Layer-1 voice-quality corpus gate on the DEPLOY path.
+  #
+  # pr-checks.yml runs Layer 1 on PRs and voice-quality-pre-deploy.yml runs
+  # Layer 2 on release/* branches, but a direct push to `main` (the branch
+  # that actually deploys to Railway) previously deployed with NO voice gate
+  # at all. This job closes that hole: it runs the same corpus suite with the
+  # launch-gate ENFORCED (VOICE_QUALITY_ENFORCE_LAUNCH_GATE=true makes
+  # scripts/merge-voice-quality-report.ts exit non-zero when the launch gate
+  # fails), and every Railway deploy job below `needs:` it.
+  voice-quality-gate:
+    needs: [test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - name: Run voice quality Layer 1 suite (launch gate enforced)
+        run: npm run voice-quality --workspace=packages/api
+        env:
+          VOICE_QUALITY_ENFORCE_LAUNCH_GATE: 'true'
+      - name: Upload voice quality report
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: deploy-voice-quality-report
+          path: packages/api/voice-quality-report.json
+
   # Railway deployment pipeline
   deploy-railway-dev:
-    needs: test
+    needs: [test, voice-quality-gate]
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: dev
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+          cache: 'npm'
+      # npm ci is needed for the post-deploy smoke script (scripts/smoke-test.ts
+      # runs via ts-node) — the health poll below only needs curl.
+      - run: npm ci
       - name: Install Railway CLI
         run: npm install -g @railway/cli
       # Migrations run inside Railway via `preDeployCommand` in railway.toml.
+      # `--ci` (not `--detach`, PR #669 review): streams build logs and fails
+      # this step on a build failure instead of returning at upload time.
       - name: Deploy API to Railway (Development)
-        run: railway up --service "@serviceos/api" --environment Development --detach
+        run: railway up --service "@serviceos/api" --environment Development --ci
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
       - name: Deploy Web to Railway (Development)
-        run: railway up --service "@serviceos/web" --environment Development --detach
+        run: railway up --service "@serviceos/web" --environment Development --ci
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
 
+      # --- Post-deploy verification (WS7) --------------------------------
+      # `railway up --ci` exits after the BUILD; the rollout (preDeployCommand
+      # migration + container swap + Railway healthcheck) continues in the
+      # background, and on failure Railway keeps the OLD container serving —
+      # so a public-URL poll alone can green against the previous deploy.
+      # wait-for-deployment.sh closes that race by polling the service's
+      # newest deployment status until SUCCESS (hard-fail on FAILED/CRASHED);
+      # only then do the health poll + smoke verify the new deploy is serving.
+      #
+      - name: Wait for dev API deployment to reach SUCCESS
+        run: bash scripts/ci/wait-for-deployment.sh "@serviceos/api" Development
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      - name: Wait for dev Web deployment to reach SUCCESS
+        run: bash scripts/ci/wait-for-deployment.sh "@serviceos/web" Development
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      #
+      # DEV_HEALTHCHECK_URL must point at the dev API's public base URL (no
+      # trailing path). If it is unset we FAIL LOUD rather than skip — a
+      # missing URL means we have NO deploy verification, which must not read
+      # as a green deploy. See docs/launch/secret-manifest.md.
+      - name: Verify DEV_HEALTHCHECK_URL is configured
+        run: |
+          if [ -z "$DEV_HEALTHCHECK_URL" ]; then
+            echo "::error::DEV_HEALTHCHECK_URL secret is not set. Post-deploy verification cannot run."
+            echo "A deploy with no health verification is NOT a green deploy. Set DEV_HEALTHCHECK_URL to the dev API base URL."
+            exit 1
+          fi
+          echo "DEV_HEALTHCHECK_URL configured."
+        env:
+          DEV_HEALTHCHECK_URL: ${{ secrets.DEV_HEALTHCHECK_URL }}
+      - name: Wait for dev deploy to become healthy
+        # Poll /health until it returns {"status":"ok"} or ~5 min elapses.
+        # /health degrades (not 200-with-status-ok) while the DB is
+        # unreachable, so this waits out the preDeployCommand migration +
+        # container swap and fails if the new deploy never becomes healthy.
+        run: bash scripts/ci/wait-for-healthy.sh "$DEV_HEALTHCHECK_URL"
+        env:
+          DEV_HEALTHCHECK_URL: ${{ secrets.DEV_HEALTHCHECK_URL }}
+      - name: Post-deploy smoke (dev)
+        # Critical-workflow smoke: /health (status ok), /ready (200, 503 if a
+        # critical dep is down), /api/telephony/health (ok:true). Reuses the
+        # rollback-runbook smoke script (packages/api/scripts/smoke-test.ts).
+        run: npm run smoke-test --workspace=packages/api -- --base="$DEV_HEALTHCHECK_URL"
+        env:
+          DEV_HEALTHCHECK_URL: ${{ secrets.DEV_HEALTHCHECK_URL }}
+
   deploy-railway-prod:
-    needs: deploy-railway-dev
+    # Depends on the full dev job — which now includes dev post-deploy health +
+    # smoke — so prod never ships behind a dev deploy that failed verification.
+    needs: [deploy-railway-dev]
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: prod
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
       - name: Install Railway CLI
         run: npm install -g @railway/cli
       - name: Deploy API to Railway (production)
-        run: railway up --service "@serviceos/api" --environment production --detach
+        run: railway up --service "@serviceos/api" --environment production --ci
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
       - name: Deploy Web to Railway (production)
-        run: railway up --service "@serviceos/web" --environment production --detach
+        run: railway up --service "@serviceos/web" --environment production --ci
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+
+      # --- Post-deploy verification (WS7) --------------------------------
+      # Same rationale as dev: wait for the actual deployments to reach
+      # SUCCESS (a public-URL poll alone can green against the old container),
+      # then verify health + smoke. PROD_HEALTHCHECK_URL must be the prod API
+      # base URL; unset ⇒ hard fail (no false green).
+      - name: Wait for prod API deployment to reach SUCCESS
+        run: bash scripts/ci/wait-for-deployment.sh "@serviceos/api" production
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      - name: Wait for prod Web deployment to reach SUCCESS
+        run: bash scripts/ci/wait-for-deployment.sh "@serviceos/web" production
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      - name: Verify PROD_HEALTHCHECK_URL is configured
+        run: |
+          if [ -z "$PROD_HEALTHCHECK_URL" ]; then
+            echo "::error::PROD_HEALTHCHECK_URL secret is not set. Post-deploy verification cannot run."
+            echo "A deploy with no health verification is NOT a green deploy. Set PROD_HEALTHCHECK_URL to the prod API base URL."
+            exit 1
+          fi
+          echo "PROD_HEALTHCHECK_URL configured."
+        env:
+          PROD_HEALTHCHECK_URL: ${{ secrets.PROD_HEALTHCHECK_URL }}
+      - name: Wait for prod deploy to become healthy
+        run: bash scripts/ci/wait-for-healthy.sh "$PROD_HEALTHCHECK_URL"
+        env:
+          PROD_HEALTHCHECK_URL: ${{ secrets.PROD_HEALTHCHECK_URL }}
+      - name: Post-deploy smoke (prod)
+        run: npm run smoke-test --workspace=packages/api -- --base="$PROD_HEALTHCHECK_URL"
+        env:
+          PROD_HEALTHCHECK_URL: ${{ secrets.PROD_HEALTHCHECK_URL }}

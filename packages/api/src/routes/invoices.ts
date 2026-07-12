@@ -24,6 +24,7 @@ import { PaymentRepository, recordPayment } from '../invoices/payment';
 import { applyDepositCreditToInvoice } from '../invoices/deposit-credit';
 import { SendService } from '../notifications/send-service';
 import { Job, JobRepository } from '../jobs/job';
+import { Customer, CustomerRepository } from '../customers/customer';
 import { EstimateRepository } from '../estimates/estimate';
 import { RefreshJobMoneyStateDeps } from '../jobs/job-money-state';
 import { applyBps } from '../shared/billing-engine';
@@ -65,8 +66,67 @@ export function createInvoiceRouter(
   // converted from an estimate, which already carries the discount) for a
   // member has that discount folded in. Optional so legacy harnesses build.
   agreementRepo?: AgreementRepository,
+  // WS6 (QUALITY-2026-07-12) — customer enrichment. When wired (with jobRepo),
+  // list/detail responses embed a `customer` summary so the UI renders a real
+  // name instead of the literal "Customer" fallback. Optional so legacy
+  // harnesses build; unenriched responses still validate (customer optional).
+  customerRepo?: CustomerRepository,
 ): Router {
   const router = Router();
+
+  /**
+   * WS6 — attach a customer summary to invoice rows. Invoices carry only
+   * job_id, so this resolves invoice → job → customer with deduplicated,
+   * page-bounded batches (mirrors the estimates route's enrichment). Best
+   * effort: missing repos or rows leave the invoice unenriched.
+   */
+  const attachCustomerSummaries = async <T extends { jobId: string }>(
+    tenantId: string,
+    invoices: T[],
+  ): Promise<Array<T & { customer?: Record<string, unknown> }>> => {
+    if (!jobRepo || !customerRepo || invoices.length === 0) return invoices;
+    const jobIds = [...new Set(invoices.map((i) => i.jobId).filter(Boolean))];
+    const jobs = await Promise.all(
+      jobIds.map((id) => jobRepo.findById(tenantId, id).catch(() => null)),
+    );
+    const jobById = new Map(jobs.filter((j) => j !== null).map((j) => [j!.id, j!]));
+    const customerIds = [
+      ...new Set(
+        [...jobById.values()].map((j) => j.customerId).filter((id): id is string => !!id),
+      ),
+    ];
+    const customers = await Promise.all(
+      customerIds.map((id) => customerRepo.findById(tenantId, id).catch(() => null)),
+    );
+    const customerById = new Map(
+      customers.filter((c): c is Customer => c !== null).map((c) => [c.id, c]),
+    );
+    return invoices.map((inv) => {
+      const job = jobById.get(inv.jobId);
+      const c = job?.customerId ? customerById.get(job.customerId) : undefined;
+      return c
+        ? {
+            ...inv,
+            customer: {
+              id: c.id,
+              displayName: c.displayName,
+              firstName: c.firstName,
+              lastName: c.lastName,
+              primaryPhone: c.primaryPhone,
+              email: c.email,
+            },
+          }
+        : inv;
+    });
+  };
+
+  const attachOneCustomerSummary = async <T extends { jobId: string }>(
+    tenantId: string,
+    invoice: T,
+  ): Promise<T & { customer?: Record<string, unknown> }> => {
+    const [enriched] = await attachCustomerSummaries(tenantId, [invoice]);
+    return enriched;
+  };
 
   // §6 Time-to-Cash. Built once at factory time — the rollup needs the
   // job, estimate and invoice repos plus the audit repo for the
@@ -258,7 +318,7 @@ export function createInvoiceRouter(
           let invoices = await invoiceRepo.findByJobs(req.auth!.tenantId, jobIds);
           if (status) invoices = invoices.filter((inv) => inv.status === status);
           invoices.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
-          res.json(invoices);
+          res.json(await attachCustomerSummaries(req.auth!.tenantId, invoices));
           return;
         }
 
@@ -266,7 +326,7 @@ export function createInvoiceRouter(
         // existing UI code continues to work without an opt-in.
         if (jobId && req.query.paginated !== 'true' && req.query.limit === undefined && req.query.offset === undefined) {
           const result = await invoiceRepo.findByJob(req.auth!.tenantId, jobId);
-          res.json(result);
+          res.json(await attachCustomerSummaries(req.auth!.tenantId, result));
           return;
         }
 
@@ -302,12 +362,15 @@ export function createInvoiceRouter(
             limit,
             offset,
           });
-          res.json(result);
+          res.json({
+            ...result,
+            data: await attachCustomerSummaries(req.auth!.tenantId, result.data),
+          });
           return;
         }
 
         const result = await listInvoices(req.auth!.tenantId, invoiceRepo, baseOptions);
-        res.json(result);
+        res.json(await attachCustomerSummaries(req.auth!.tenantId, result));
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);
@@ -327,7 +390,7 @@ export function createInvoiceRouter(
           res.status(404).json({ error: 'NOT_FOUND', message: 'Invoice not found' });
           return;
         }
-        res.json(result);
+        res.json(await attachOneCustomerSummary(req.auth!.tenantId, result));
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);

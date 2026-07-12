@@ -374,8 +374,25 @@ harness's corpus green.
 | Operational resilience | C− | **A−** (operator cutover pending) |
 | Voice regression protection | A− | A− |
 
-All nine layers at A− or better (the two original A− holds unchanged), and
-§9's harness gained the reach it lacked — approval and grounded-quote
-corpus scenarios (WS21b). The proof layer's reality is recorded in
-docs/runbooks/proof-layer.md: integration tests gate every PR under RLS
-already; the browser-journey unlock is a 15-minute operator checklist.
+All nine layers at A− or better **as graded on code-in-repo, with two
+explicit contingencies**: §8 Operational resilience is contingent on the
+operator executing the web/worker cutover (until then production runs the
+single-service shape), and §9's grade assumed the voice launch gate was
+enforced — which, as of the grading date, it was not (see the correction
+below). §9's harness gained the reach it lacked — approval and
+grounded-quote corpus scenarios (WS21b). The proof layer's reality is
+recorded in docs/runbooks/proof-layer.md: integration tests gate every PR
+under RLS already; the browser-journey unlock is a 15-minute operator
+checklist.
+
+> **Correction (2026-07-12, QUALITY-2026-07-12):** at the time this regrade
+> was written, the Layer-1 voice launch gate was computed but NOT enforced
+> anywhere in CI (`VOICE_QUALITY_ENFORCE_LAUNCH_GATE` was never set), the
+> corpus vitest asserted only that verdicts were boolean, and 6 of 66
+> corpus scripts were failing (Spanish bucket at 0%, two owner-approval
+> scripts red). An unqualified all-A− claim was therefore not supportable
+> on that date. The QUALITY-2026-07-12 initiative fixed the failing
+> scenarios, made the tests assert `verdict.passed === true`, and enforced
+> the launch gate on PR and deploy paths; D-018's system-approval lane was
+> also revoked as a human-authority violation (see docs/decisions.md
+> D-019), which affects the §5 approval-loop narrative below.

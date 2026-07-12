@@ -76,7 +76,35 @@ describe('Voice Quality v1 (Layer 1) — corpus', () => {
 
       expect(result.errors).toEqual([]);
       expect(result.observation.scriptId).toBe(script.id);
-      expect(typeof verdict.passed).toBe('boolean');
+      // Each scenario must actually PASS its rubric — a red scenario makes
+      // vitest itself red (the merge/launch-gate is a second, aggregate
+      // guard, but the per-script test is the first line of defense). The
+      // message names the failing criteria + reasons so triage is one read.
+      const reasonParts: string[] = [];
+      if (verdict.floorResult.failedCriteria.length > 0) {
+        reasonParts.push(
+          `floor=[${verdict.floorResult.failedCriteria.join(',')}] ${JSON.stringify(verdict.floorResult.reasons)}`,
+        );
+      }
+      if (verdict.dispositionStructuredResult.failedCriteria.length > 0) {
+        reasonParts.push(
+          `structured=[${verdict.dispositionStructuredResult.failedCriteria.join(',')}] ${JSON.stringify(verdict.dispositionStructuredResult.reasons)}`,
+        );
+      }
+      if (
+        verdict.dispositionLlmResult &&
+        verdict.dispositionLlmResult.failedCriteria.length > 0
+      ) {
+        reasonParts.push(
+          `llm=[${verdict.dispositionLlmResult.failedCriteria.join(',')}] ${JSON.stringify(verdict.dispositionLlmResult.reasons)}`,
+        );
+      }
+      expect(
+        verdict.passed,
+        `Voice-quality scenario '${script.id}' (${script.bucket}) failed its rubric: ${
+          reasonParts.join('; ') || 'no criteria detail captured'
+        }`,
+      ).toBe(true);
       expect(tenantId).toMatch(/^vq_test_/);
     });
   }

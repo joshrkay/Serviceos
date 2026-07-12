@@ -149,6 +149,7 @@ export async function buildTestApp(): Promise<TestApp> {
       estimateRepo,
       new MockPaymentLinkProvider(),
       agreementRepo,
+      customerRepo,
     ),
   );
   app.use(

@@ -409,6 +409,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['246_proposals_applied_instructions_index', '4cd48dc77845dfb212f6097ec3ff19a292bf2d920ad4aab2bdb30003fca0ea12'],
   // D-018 (WS18) — autonomous close lane: per-tenant opt-in + close cap columns.
   ['247_tenant_settings_autonomous_close', 'e619fd69ae718ae2298a4ceddbc37ead5e93e5b8406bb739f8bbc4c16d5833ca'],
+  ['248_users_status', '4db13faea1417601ec58108546e7a222d19224a9ebbf32106170fa868f198206'],
+  ['249_backfill_owner_memberships', '469b396524bded1559614c2c091bb48c70a36c7769230e77ae9b96cad5e8025d'],
 ];
 
 function hashMigration(value: string): string {
