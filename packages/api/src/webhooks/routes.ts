@@ -442,7 +442,8 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
               try {
                 await client.query('BEGIN');
                 await client.query(
-                  `SET LOCAL app.current_tenant_id = '${pending.tenantId}'`,
+                  "SELECT set_config('app.current_tenant_id', $1, true)",
+                  [pending.tenantId],
                 );
                 await client.query(
                   `INSERT INTO users (
@@ -549,7 +550,8 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
               try {
                 await ownerClient.query('BEGIN');
                 await ownerClient.query(
-                  `SET LOCAL app.current_tenant_id = '${result.tenantId}'`,
+                  "SELECT set_config('app.current_tenant_id', $1, true)",
+                  [result.tenantId],
                 );
                 await ownerClient.query(
                   `INSERT INTO users (
