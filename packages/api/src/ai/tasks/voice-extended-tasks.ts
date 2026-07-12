@@ -26,10 +26,18 @@ import {
 import { ExtractedEntities } from '../orchestration/intent-classifier';
 import type { AppointmentRepository } from '../../appointments/appointment';
 import type { JobRepository } from '../../jobs/job';
+import type { InvoiceRepository } from '../../invoices/invoice';
 import type { LLMGateway } from '../gateway/gateway';
 import { resolveDateTime, DEFAULT_TENANT_TIMEZONE } from '../scheduling/resolve-datetime';
 import { findJobsRequiringInvoicing, InvoicingQueueDeps } from '../../invoices/invoicing-queue';
+import {
+  DunningEvent,
+  DunningEventRepository,
+  DUNNING_MARKER_WINDOW_MS,
+} from '../../invoices/dunning-config';
 import { parseMilestoneSentence } from '../../invoices/milestone-sentence-parser';
+
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 function entitiesFrom(context: TaskContext): ExtractedEntities {
   return (context.existingEntities ?? {}) as ExtractedEntities;
@@ -527,6 +535,18 @@ export class SendEstimateNudgeTaskHandler implements TaskHandler {
 export class SendPaymentReminderTaskHandler implements TaskHandler {
   readonly taskType = 'send_payment_reminder' as const;
 
+  // Layer 3 (best-effort) — when a resolved caller's invoices already got a
+  // reminder recently, the draft is annotated so the owner sees it before
+  // approving. All three deps are optional; any missing → no marker, exact
+  // legacy drafting. The authoritative dedup is the 72h execution-time cooldown.
+  constructor(
+    private readonly deps?: {
+      dunningEventRepo?: DunningEventRepository;
+      invoiceRepo?: InvoiceRepository;
+      jobRepo?: JobRepository;
+    },
+  ) {}
+
   async handle(context: TaskContext): Promise<TaskResult> {
     const ee = entitiesFrom(context);
     const payload: Record<string, unknown> = {
@@ -542,10 +562,86 @@ export class SendPaymentReminderTaskHandler implements TaskHandler {
     if (ee.jobReference) payload.invoiceReference = ee.jobReference;
     else if (ee.customerName) payload.invoiceReference = ee.customerName;
 
+    await this.attachDuplicateReminderMarker(context, payload);
+
     return {
       proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
       taskType: this.taskType,
     };
+  }
+
+  /**
+   * Best-effort draft-time duplicate-reminder marker. When the router resolved
+   * a concrete caller (`context.customerId`) and all three deps are wired, walk
+   * that customer's recent jobs → unpaid invoices → reminder events; if the
+   * most recent reminder is within DUNNING_MARKER_WINDOW_MS, annotate the
+   * payload with a synthesized 'medium' confidence + a marker on `invoiceId`.
+   * Never throws and never blocks drafting: any error → draft without a marker.
+   */
+  private async attachDuplicateReminderMarker(
+    context: TaskContext,
+    payload: Record<string, unknown>,
+  ): Promise<void> {
+    const customerId = context.customerId;
+    const dunningEventRepo = this.deps?.dunningEventRepo;
+    const invoiceRepo = this.deps?.invoiceRepo;
+    const jobRepo = this.deps?.jobRepo;
+    // findByCustomer is OPTIONAL on JobRepository — guard for its absence.
+    if (!customerId || !dunningEventRepo || !invoiceRepo || !jobRepo?.findByCustomer) {
+      return;
+    }
+    try {
+      const now = context.now ?? new Date();
+      const jobs = (await jobRepo.findByCustomer(context.tenantId, customerId)).slice(0, 20);
+      if (jobs.length === 0) return;
+
+      const invoices = await invoiceRepo.findByJobs(
+        context.tenantId,
+        jobs.map((j) => j.id),
+      );
+      const unpaid = invoices.filter(
+        (inv) => inv.status === 'open' || inv.status === 'partially_paid',
+      );
+      if (unpaid.length === 0) return;
+
+      let mostRecent: DunningEvent | undefined;
+      for (const inv of unpaid) {
+        const events = await dunningEventRepo.findByInvoice(context.tenantId, inv.id);
+        for (const e of events) {
+          if (e.kind !== 'reminder') continue;
+          if (!mostRecent || e.sentAt.getTime() > mostRecent.sentAt.getTime()) {
+            mostRecent = e;
+          }
+        }
+      }
+      if (!mostRecent) return;
+
+      const ageMs = now.getTime() - mostRecent.sentAt.getTime();
+      if (ageMs < 0 || ageMs > DUNNING_MARKER_WINDOW_MS) return;
+
+      const days = Math.max(1, Math.round(ageMs / DAY_MS));
+      const channel = mostRecent.channel ?? 'unknown channel';
+      const reason =
+        `A payment reminder already went to this customer ${days} day(s) ago ` +
+        `(${mostRecent.stepKey}, ${channel}) — approving will send another.`;
+
+      const existingMeta =
+        payload._meta && typeof payload._meta === 'object' && !Array.isArray(payload._meta)
+          ? (payload._meta as Record<string, unknown>)
+          : {};
+      const existingMarkers = Array.isArray(existingMeta.markers)
+        ? (existingMeta.markers as unknown[])
+        : [];
+      payload._meta = {
+        ...existingMeta,
+        // Synthesized envelope requires overallConfidence; advisory layer is
+        // only authorized to assert the neutral 'medium' (marker.ts contract).
+        overallConfidence: 'medium',
+        markers: [...existingMarkers, { path: 'invoiceId', reason }],
+      };
+    } catch {
+      // best-effort — a duplicate-check hiccup must never block drafting.
+    }
   }
 }
 

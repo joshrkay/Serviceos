@@ -40,7 +40,9 @@ import {
   DunningConfigRepository,
   DunningEventRepository,
   defaultDunningConfig,
+  isManualReminderStepKey,
   LATE_FEE_ONE_TIME_KEY,
+  PAYMENT_REMINDER_COOLDOWN_MS,
 } from '../invoices/dunning-config';
 import { selectDueReminderSteps } from '../invoices/dunning-schedule';
 import { computeLateFeeCents } from '../invoices/late-fee';
@@ -284,7 +286,29 @@ async function raiseDunningProposals(
     .reduce((sum, e) => sum + (e.amountCents ?? 0), 0);
 
   // 1. Reminder cadence — one comms proposal per newly-due step.
-  const dueSteps = selectDueReminderSteps(config, { dueDate, now, sentStepKeys });
+  //
+  // Layer 2 (deferral) — if a MANUAL reminder went to this invoice within the
+  // manual cooldown, skip raising cadence reminder proposals THIS sweep so the
+  // owner's on-demand send and the autonomous sweep don't stack a duplicate.
+  // This is deferral, not cancellation: no step key is recorded, so any
+  // still-due step is re-offered by selectDueReminderSteps on the next sweep
+  // once the window clears. Late-fee raising below is unaffected.
+  const manualReminderSentAt = priorEvents
+    .filter((e) => e.kind === 'reminder' && isManualReminderStepKey(e.stepKey))
+    .map((e) => e.sentAt.getTime());
+  const manualCooldownActive =
+    manualReminderSentAt.length > 0 &&
+    now.getTime() - Math.max(...manualReminderSentAt) < PAYMENT_REMINDER_COOLDOWN_MS;
+
+  const dueSteps = manualCooldownActive
+    ? []
+    : selectDueReminderSteps(config, { dueDate, now, sentStepKeys });
+  if (manualCooldownActive) {
+    deps.logger.info('Overdue-invoice sweep: deferring cadence reminders (recent manual send)', {
+      tenantId,
+      invoiceId: invoice.id,
+    });
+  }
   for (const { stepKey, step } of dueSteps) {
     // Ledger gate: record the step BEFORE creating the proposal so a
     // concurrent/re-run sweep that loses the UNIQUE race (23505) skips it.
