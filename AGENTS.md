@@ -57,3 +57,15 @@ The authoritative recipes are the verify skills — read them before booting:
   3. `cd packages/api && EXTERNAL_TEST_DB_URL="postgresql://postgres:postgres@127.0.0.1:5432/serviceos_test" npm run test:integration`
   The connecting role must be a superuser (the `postgres` role, password
   `postgres`, is). pgvector is required by migration 062.
+- Playwright e2e (`npm run e2e`): install the browser once with
+  `npx playwright install chromium`. Run it the way CI does (secretless
+  "Option B" — see `.github/workflows/e2e.yml`):
+  `CI=1 E2E_HAS_REAL_CLERK_PK=false VITE_ONBOARDING_V2_ENABLED=false VITE_CLERK_PUBLISHABLE_KEY='pk_test_ZHVtbXkuY2xlcmsuYWNjb3VudHMuZGV2JA==' npm run e2e`
+  (expected: hermetic Journey-1 + offline specs pass; real-Clerk/UI-smoke
+  specs self-skip). Two gotchas: (1) `CI=1` makes Playwright start its OWN
+  api/web servers, so stop any dev servers holding ports 3000/5173 first; and
+  (2) TEMPORARILY move `packages/web/.env.local` aside for the run — its
+  `VITE_AUTH_MODE=dev` shim (and unpadded placeholder key) force an
+  always-signed-in session that makes signed-out/UI-smoke specs run-and-fail
+  instead of skipping. The padded `...JA==` placeholder above is the value
+  `hasRealClerkPublishableKey()` treats as "not real".
