@@ -37,6 +37,15 @@ The authoritative recipes are the verify skills — read them before booting:
   data seeded over HTTP is visible in the UI. Seed representative data with
   `cd packages/api && node scripts/verify-seed.mjs` (run AFTER the API is up and
   do not restart the API between seeding and driving the UI — in-memory only).
+- Some surfaces are DB-only (no in-memory fallback) and are simply not mounted
+  when `DATABASE_URL` is unset — e.g. the interactions router is gated by
+  `if (pool)` in `app.ts`, so the **Interactions / call-log page shows
+  "Couldn't load interactions" in the in-memory dev boot**. This is expected,
+  not a bug; it works once the API is booted with `DATABASE_URL` (verified:
+  `GET /api/interactions` → `200 {"data":[],...}`). Similarly
+  `/api/onboarding/status` returns 503 on in-memory. Boot the API against the
+  local Postgres (`DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/serviceos_dev`,
+  create the DB + run migrations first) to review DB-only pages.
 - A "What's new" modal opens on first web load; dismiss with "Got it".
 
 ### Lint / test / build (commands live in the root + package `package.json`)
