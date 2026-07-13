@@ -46,5 +46,14 @@ The authoritative recipes are the verify skills — read them before booting:
   (the default `tsconfig.json` includes tests and is NOT sufficient).
 - Unit tests: `npm run test` (runs each workspace's `vitest run`).
 - API integration/RLS tests (`npm run test:integration` / `test:rls`) use
-  testcontainers and require a working Docker daemon + Postgres — not available
-  by default in this VM; skip unless Docker has been set up.
+  testcontainers by default (needs a Docker daemon, which is NOT installed
+  here). Instead, this VM has PostgreSQL 16 + pgvector installed via apt, and
+  `test/integration/global-setup.ts` honors `EXTERNAL_TEST_DB_URL` to skip
+  testcontainers entirely. To run them:
+  1. Start Postgres (it does not auto-start on boot):
+     `sudo pg_ctlcluster 16 main start`
+  2. Use a FRESH database each run (migrations are not re-runnable on a
+     populated DB): `sudo -u postgres psql -c "DROP DATABASE IF EXISTS serviceos_test; CREATE DATABASE serviceos_test;"`
+  3. `cd packages/api && EXTERNAL_TEST_DB_URL="postgresql://postgres:postgres@127.0.0.1:5432/serviceos_test" npm run test:integration`
+  The connecting role must be a superuser (the `postgres` role, password
+  `postgres`, is). pgvector is required by migration 062.
