@@ -85,6 +85,7 @@ import { createBillingRouter } from './routes/billing';
 import { StripeConnectService } from './billing/stripe-connect';
 import { BillingService } from './billing/subscription';
 import { createPaymentRouter } from './routes/payments';
+import { createTerminalRouter } from './routes/terminal';
 import { createNoteRouter } from './routes/notes';
 import { createDevicesRouter } from './routes/devices';
 import { InMemoryDeviceTokenRepository } from './push/device-token-service';
@@ -4739,6 +4740,16 @@ export function createApp(): AppWithLifecycle {
       auditRepo,
       transactionalComms,
     ),
+  );
+  // Stripe Terminal — field card-present collect (Connect direct charges).
+  app.use(
+    '/api/terminal',
+    createTerminalRouter({
+      invoiceRepo,
+      connectAccountResolver,
+      stripeApiKey: process.env.STRIPE_SECRET_KEY ?? null,
+      auditRepo,
+    }),
   );
   app.use('/api/notes', createNoteRouter(noteRepo, ownership, auditRepo));
 

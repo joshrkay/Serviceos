@@ -40,3 +40,12 @@ Customer charges may be **Connect direct charges** (`Stripe-Account`). Those obj
 - Stripe MCP (Cursor Desktop, Test mode) can help inspect accounts/prices; webhook destination listing may still require the Dashboard.
 - Do not rely on `stripe listen` alone for production Connect coverage.
 - SaaS Billing Checkout stays on the **platform** account; Connected-accounts destination must not break those events (platform destination still required).
+
+## Terminal (field collect)
+
+1. Enable Terminal for the Connect platform / connected accounts in the Dashboard (card_present capability).
+2. API routes (auth + `invoices:update`):
+   - `POST /api/terminal/connection-token`
+   - `POST /api/terminal/payment-intents` `{ invoiceId }`
+3. Mobile prepares both, then confirms via Stripe Terminal SDK on an **EAS native build**. Expo Go returns an unavailable fallback (pay link / cash).
+4. Settlement: existing `payment_intent.succeeded` webhook → `recordPayment` (metadata `invoice_id` + `collection=terminal`).
