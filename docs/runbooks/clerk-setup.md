@@ -257,3 +257,36 @@ Full commercial loop: `docs/launch/GO-LIVE-RUNBOOK.md`.
 | Webhook bootstrap + metadata PATCH | `packages/api/src/webhooks/routes.ts` |
 | Prod env gate | `packages/api/src/shared/config.ts` (`validateEnvSchema`, `validateProductionConfig`) |
 | Manual QA user bootstrap | `packages/api/scripts/bootstrap-mobile-qa-user.ts` |
+
+---
+
+## 10. Live instance verification (2026-07-14)
+
+Checked against the linked Development Clerk app and Railway
+`serviceosapi-development` / `serviceosweb-development`.
+
+| Check | Development (`romantic-lark-48`) | Production instance |
+|-------|----------------------------------|---------------------|
+| JWT template `serviceos` | Present — claims `tenant_id` + `role` from `public_metadata` | Present — same claims |
+| API keys | `pk_test_` / `sk_test_` | (use `pk_live_` / `sk_live_` on prod Railway) |
+| Webhook URL | `https://serviceosapi-development.up.railway.app/webhooks/clerk` | Set to prod API host when launching |
+| Webhook events | `user.created` + `user.deleted` | Mirror on prod |
+| Webhook enabled | Yes (enabled in Clerk dashboard) | Confirm when wiring prod |
+| Localhost origins | Dev instance allows localhost (incl. `:5173`) | N/A — set prod web origin |
+
+### Remaining operator step (blocks tenant bootstrap)
+
+`POST https://serviceosapi-development.up.railway.app/webhooks/clerk` currently
+returns `{"error":"Webhook not configured"}` — the API process does not have
+`CLERK_WEBHOOK_SECRET` set (see `webhooks/routes.ts`).
+
+1. Clerk → Webhooks → the Railway endpoint → **Advanced** → copy **Signing Secret** (`whsec_…`).
+2. Railway → `serviceosapi-development` → Variables → set `CLERK_WEBHOOK_SECRET` to that value → redeploy.
+3. Clerk → Webhooks → **Testing** → send `user.created` → expect **200** (not 500).
+4. Confirm the user in Clerk has `public_metadata.tenant_id` + `role`.
+
+Until step 2–3 succeed, every existing Clerk user in this instance still has
+**empty** `public_metadata` (verified via Backend API on 2026-07-14), so
+`serviceos` JWTs mint without `role`/`tenant_id` and the API rejects them.
+After the webhook works, either sign up a fresh user or backfill metadata
+(`packages/api/scripts/bootstrap-mobile-qa-user.ts` for a single QA user).
