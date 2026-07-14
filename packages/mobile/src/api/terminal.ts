@@ -13,6 +13,7 @@ export class TerminalApiError extends Error {
 
 export interface TerminalConnectionToken {
   secret: string;
+  locationId: string;
   stripeAccountId: string;
 }
 
@@ -42,7 +43,15 @@ export async function createTerminalConnectionToken(
 ): Promise<TerminalConnectionToken> {
   const res = await client('/api/terminal/connection-token', { method: 'POST' });
   if (!res.ok) throw await readError(res);
-  return (await res.json()) as TerminalConnectionToken;
+  const data = (await res.json()) as TerminalConnectionToken;
+  if (!data.secret || !data.locationId) {
+    throw new TerminalApiError(
+      'Connection token response missing secret or locationId',
+      'INVALID_RESPONSE',
+      502,
+    );
+  }
+  return data;
 }
 
 export async function createTerminalPaymentIntent(
@@ -59,10 +68,9 @@ export async function createTerminalPaymentIntent(
 }
 
 /**
- * Prepare a Terminal collect session: connection token + card_present PI.
- * Native Stripe Terminal SDK (EAS build) uses the token secret and
- * clientSecret to collect/confirm on-device. Expo Go / web builds surface
- * a clear unavailable state via `isTerminalSdkAvailable`.
+ * Prepare a Terminal collect session: connection token (+ location) +
+ * card_present PI. Native Stripe Terminal SDK uses these to collect/confirm
+ * on-device. Settlement is webhook-driven.
  */
 export async function prepareTerminalCollect(
   client: AuthedFetch,

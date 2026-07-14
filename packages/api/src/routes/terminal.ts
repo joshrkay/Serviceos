@@ -2,6 +2,7 @@
  * Authenticated Stripe Terminal routes for field collection.
  *
  * POST /connection-token — mint a Terminal connection token on Connect
+ *   (also ensures a Terminal Location exists; returns locationId)
  * POST /payment-intents  — create card_present PI for an open invoice
  *
  * Connect with charges_enabled is required; otherwise CONNECT_REQUIRED
@@ -16,8 +17,8 @@ import { InvoiceRepository } from '../invoices/invoice';
 import { ConnectAccountResolver } from '../invoices/public-invoice-service';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import {
-  createTerminalConnectionToken,
   createTerminalPaymentIntent,
+  createTerminalSession,
 } from '../payments/stripe-terminal';
 import { StripeFetch } from '../payments/stripe-payment-intent';
 import { asyncRoute } from '../middleware/async-route';
@@ -28,9 +29,16 @@ const paymentIntentBodySchema = z.object({
   invoiceId: z.string().uuid(),
 });
 
+export interface TerminalLocationStore {
+  getExistingLocationId(tenantId: string): Promise<string | null>;
+  persistLocationId(tenantId: string, locationId: string): Promise<void>;
+  resolveDisplayName(tenantId: string): Promise<string>;
+}
+
 export interface TerminalRouterDeps {
   invoiceRepo: InvoiceRepository;
   connectAccountResolver?: ConnectAccountResolver;
+  terminalLocation?: TerminalLocationStore;
   stripeApiKey?: string | null;
   stripeFetch?: StripeFetch;
   auditRepo?: AuditRepository;
@@ -77,10 +85,38 @@ export function createTerminalRouter(deps: TerminalRouterDeps): Router {
       }
       const tenantId = req.auth!.tenantId;
       const { accountId } = await requireConnectAccount(deps.connectAccountResolver, tenantId);
-      const result = await createTerminalConnectionToken(
-        { apiKey: deps.stripeApiKey, stripeAccountId: accountId },
-        deps.stripeFetch,
-      );
+
+      const existingLocationId = deps.terminalLocation
+        ? await deps.terminalLocation.getExistingLocationId(tenantId)
+        : null;
+      const displayName = deps.terminalLocation
+        ? await deps.terminalLocation.resolveDisplayName(tenantId)
+        : 'Field location';
+
+      let session;
+      try {
+        session = await createTerminalSession(
+          { apiKey: deps.stripeApiKey, stripeAccountId: accountId },
+          { displayName, existingLocationId },
+          deps.stripeFetch,
+        );
+      } catch (err) {
+        const code = (err as { code?: string }).code;
+        if (code === 'TERMINAL_LOCATION_ADDRESS_REQUIRED') {
+          throw new AppError(
+            'TERMINAL_LOCATION_ADDRESS_REQUIRED',
+            (err as Error).message ||
+              'Connect account needs a business address for Terminal',
+            409,
+          );
+        }
+        throw err;
+      }
+
+      if (session.locationCreated && deps.terminalLocation) {
+        await deps.terminalLocation.persistLocationId(tenantId, session.locationId);
+      }
+
       if (deps.auditRepo) {
         await deps.auditRepo.create(
           createAuditEvent({
@@ -90,11 +126,19 @@ export function createTerminalRouter(deps: TerminalRouterDeps): Router {
             eventType: 'terminal.connection_token_minted',
             entityType: 'tenant',
             entityId: tenantId,
-            metadata: { stripeAccountId: accountId },
+            metadata: {
+              stripeAccountId: accountId,
+              locationId: session.locationId,
+              locationCreated: session.locationCreated,
+            },
           }),
         );
       }
-      res.status(200).json({ secret: result.secret, stripeAccountId: accountId });
+      res.status(200).json({
+        secret: session.secret,
+        locationId: session.locationId,
+        stripeAccountId: accountId,
+      });
     }),
   );
 

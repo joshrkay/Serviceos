@@ -4749,6 +4749,25 @@ export function createApp(): AppWithLifecycle {
       connectAccountResolver,
       stripeApiKey: process.env.STRIPE_SECRET_KEY ?? null,
       auditRepo,
+      terminalLocation: connectService
+        ? {
+            getExistingLocationId: async (tenantId) => {
+              const view = await connectService.getAccount(tenantId);
+              return view.terminalLocationId;
+            },
+            persistLocationId: (tenantId, locationId) =>
+              connectService.setTerminalLocationId(tenantId, locationId),
+            resolveDisplayName: async (tenantId) => {
+              if (!pool) return 'Field location';
+              const { rows } = await pool.query(
+                `SELECT name FROM tenants WHERE id = $1`,
+                [tenantId],
+              );
+              const name = rows[0]?.name as string | undefined;
+              return name?.trim() || 'Field location';
+            },
+          }
+        : undefined,
     }),
   );
   app.use('/api/notes', createNoteRouter(noteRepo, ownership, auditRepo));

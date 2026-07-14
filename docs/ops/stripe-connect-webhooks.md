@@ -45,7 +45,13 @@ Customer charges may be **Connect direct charges** (`Stripe-Account`). Those obj
 
 1. Enable Terminal for the Connect platform / connected accounts in the Dashboard (card_present capability).
 2. API routes (auth + `invoices:update`):
-   - `POST /api/terminal/connection-token`
-   - `POST /api/terminal/payment-intents` `{ invoiceId }`
-3. Mobile prepares both, then confirms via Stripe Terminal SDK on an **EAS native build**. Expo Go returns an unavailable fallback (pay link / cash).
+   - `POST /api/terminal/connection-token` → `{ secret, locationId, stripeAccountId }`
+     (lazily creates a Terminal Location from the Connect business address; persists `tenants.stripe_terminal_location_id`)
+   - `POST /api/terminal/payment-intents` `{ invoiceId }` → card_present PI on the Connect account
+3. Mobile (EAS native build with `@stripe/stripe-terminal-react-native` + Tap to Pay plugins):
+   - Invoice detail → **Collect payment** → `initialize` → `easyConnect({ discoveryMethod: 'tapToPay', locationId })` → collect/confirm
+   - Set `EXPO_PUBLIC_TERMINAL_SIMULATED=1` for Stripe simulated Tap to Pay in Test mode
+   - **Not supported in Expo Go** — use an EAS development or production build
+   - Web export stubs the Terminal package (Metro) so Playwright viewport e2e still runs
 4. Settlement: existing `payment_intent.succeeded` webhook → `recordPayment` (metadata `invoice_id` + `collection=terminal`).
+5. If connection-token returns `TERMINAL_LOCATION_ADDRESS_REQUIRED`, finish Connect onboarding business address first.

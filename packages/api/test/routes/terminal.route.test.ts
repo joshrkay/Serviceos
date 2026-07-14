@@ -45,17 +45,47 @@ async function build(opts: {
   stripeConfigured?: boolean;
   invoiceOverrides?: Partial<Invoice>;
   stripeFetch?: StripeFetch;
+  existingLocationId?: string | null;
 } = {}) {
   const invoiceRepo = new InMemoryInvoiceRepository();
   await invoiceRepo.create(makeInvoice(opts.invoiceOverrides));
 
   const seen: Array<{ url: string; headers: Record<string, string>; body: string }> = [];
+  const persisted: { locationId: string | null } = {
+    locationId: opts.existingLocationId ?? null,
+  };
+
   const defaultFetch: StripeFetch = async (url, init) => {
     seen.push({
       url,
       headers: init.headers,
       body: init.body,
     });
+    if (url.includes('/v1/accounts/')) {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => '',
+        json: async () => ({
+          company: {
+            address: {
+              line1: '1 Main St',
+              city: 'Austin',
+              postal_code: '78701',
+              country: 'US',
+            },
+          },
+        }),
+      };
+    }
+    if (url.includes('/terminal/locations')) {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => '',
+        json: async () => ({ id: 'tml_created' }),
+      };
+    }
     if (url.includes('connection_tokens')) {
       return {
         ok: true,
@@ -105,9 +135,16 @@ async function build(opts: {
             : {
                 resolveTenantConnectAccount: async () => opts.connect,
               },
+      terminalLocation: {
+        getExistingLocationId: async () => persisted.locationId,
+        persistLocationId: async (_tenantId, locationId) => {
+          persisted.locationId = locationId;
+        },
+        resolveDisplayName: async () => 'Acme Plumbing',
+      },
     }),
   );
-  return { app, seen };
+  return { app, seen, persisted };
 }
 
 describe('routes/terminal', () => {
@@ -115,13 +152,24 @@ describe('routes/terminal', () => {
     vi.restoreAllMocks();
   });
 
-  it('POST /connection-token returns secret on Connect', async () => {
-    const { app, seen } = await build();
+  it('POST /connection-token returns secret + locationId on Connect', async () => {
+    const { app, seen, persisted } = await build({ existingLocationId: null });
     const res = await request(app).post('/api/terminal/connection-token').send({});
     expect(res.status).toBe(200);
     expect(res.body.secret).toBe('pst_test');
+    expect(res.body.locationId).toBe('tml_created');
     expect(res.body.stripeAccountId).toBe('acct_term_1');
-    expect(seen[0].headers['Stripe-Account']).toBe('acct_term_1');
+    expect(persisted.locationId).toBe('tml_created');
+    expect(seen.some((s) => s.url.includes('/terminal/locations'))).toBe(true);
+    expect(seen.some((s) => s.headers['Stripe-Account'] === 'acct_term_1')).toBe(true);
+  });
+
+  it('POST /connection-token reuses persisted locationId', async () => {
+    const { app, seen } = await build({ existingLocationId: 'tml_cached' });
+    const res = await request(app).post('/api/terminal/connection-token').send({});
+    expect(res.status).toBe(200);
+    expect(res.body.locationId).toBe('tml_cached');
+    expect(seen.some((s) => s.url.includes('/terminal/locations'))).toBe(false);
   });
 
   it('POST /payment-intents creates card_present PI for open invoice', async () => {

@@ -23,7 +23,7 @@ describe('mobile terminal API', () => {
     const client = mockClient({
       'connection-token': {
         status: 200,
-        body: { secret: 'pst_x', stripeAccountId: 'acct_1' },
+        body: { secret: 'pst_x', locationId: 'tml_1', stripeAccountId: 'acct_1' },
       },
       'payment-intents': {
         status: 200,
@@ -39,6 +39,7 @@ describe('mobile terminal API', () => {
     });
     const prepared = await prepareTerminalCollect(client, 'inv-1');
     expect(prepared.connection.secret).toBe('pst_x');
+    expect(prepared.connection.locationId).toBe('tml_1');
     expect(prepared.payment.amountCents).toBe(5000);
   });
 

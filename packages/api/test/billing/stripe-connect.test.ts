@@ -12,6 +12,7 @@ function makePool(initial: Record<string, unknown> = {}) {
     chargesEnabled: Boolean(initial.stripe_connect_charges_enabled),
     payoutsEnabled: Boolean(initial.stripe_connect_payouts_enabled),
     status: (initial.stripe_connect_status as string) ?? 'pending',
+    terminalLocationId: (initial.stripe_terminal_location_id as string | null) ?? null,
   };
   const queryMock = vi.fn(async (sql: string, params?: unknown[]) => {
     if (sql.includes('SELECT stripe_connect_account_id')) {
@@ -22,9 +23,14 @@ function makePool(initial: Record<string, unknown> = {}) {
             stripe_connect_charges_enabled: state.chargesEnabled,
             stripe_connect_payouts_enabled: state.payoutsEnabled,
             stripe_connect_status: state.status,
+            stripe_terminal_location_id: state.terminalLocationId,
           },
         ],
       };
+    }
+    if (sql.includes('stripe_terminal_location_id = $2')) {
+      state.terminalLocationId = params?.[1] as string;
+      return { rows: [], rowCount: state.accountId ? 1 : 0 };
     }
     // Order matters — the disconnect UPDATE sets BOTH
     // stripe_connect_status = 'disconnected' AND
@@ -103,11 +109,23 @@ describe('StripeConnectService (PR 1)', () => {
       stripe_connect_charges_enabled: true,
       stripe_connect_payouts_enabled: true,
       stripe_connect_status: 'active',
+      stripe_terminal_location_id: 'tml_1',
     });
     const svc = new StripeConnectService({ pool });
     const view = await svc.getAccount(TENANT);
     expect(view.accountId).toBe('acct_existing');
     expect(view.status).toBe('active');
+    expect(view.terminalLocationId).toBe('tml_1');
+  });
+
+  it('setTerminalLocationId persists the location id', async () => {
+    const { pool, state } = makePool({
+      stripe_connect_account_id: 'acct_existing',
+      stripe_connect_status: 'active',
+    });
+    const svc = new StripeConnectService({ pool });
+    await svc.setTerminalLocationId(TENANT, 'tml_persisted');
+    expect(state.terminalLocationId).toBe('tml_persisted');
   });
 
   it('createOnboardingLink throws when not configured', async () => {

@@ -1,10 +1,7 @@
 import { useState } from 'react';
 import { ActivityIndicator, Pressable, Text, View } from 'react-native';
-import {
-  prepareTerminalCollect,
-  TerminalApiError,
-} from '../api/terminal';
-import { collectTerminalPayment } from '../payments/terminalSdk';
+import { TerminalApiError } from '../api/terminal';
+import { useTerminalCollect } from '../payments/useTerminalCollect';
 import { formatMoneyCents } from '../lib/format';
 import type { AuthedFetch } from '../api/me';
 
@@ -18,9 +15,8 @@ export interface CollectPaymentPanelProps {
 }
 
 /**
- * Field "Collect payment" control for open invoices.
- * Prepares Connect Terminal PI via API; native SDK confirm is gated until
- * an EAS Terminal build is available. Always offers fallbacks.
+ * Web / vitest Collect payment panel — Terminal native SDK is unavailable.
+ * Still exposes the collect CTA so operators see fallbacks (pay link).
  */
 export function CollectPaymentPanel({
   client,
@@ -29,6 +25,7 @@ export function CollectPaymentPanel({
   payLinkUrl,
   onCollected,
 }: CollectPaymentPanelProps): JSX.Element | null {
+  const collect = useTerminalCollect();
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [connectRequired, setConnectRequired] = useState(false);
@@ -40,15 +37,9 @@ export function CollectPaymentPanel({
     setMessage(null);
     setConnectRequired(false);
     try {
-      const prepared = await prepareTerminalCollect(client, invoiceId);
-      const result = await collectTerminalPayment({
-        connectionTokenSecret: prepared.connection.secret,
-        clientSecret: prepared.payment.clientSecret,
-        paymentIntentId: prepared.payment.paymentIntentId,
-        stripeAccountId: prepared.payment.stripeAccountId,
-      });
+      const result = await collect({ client, invoiceId });
       if (result.status === 'succeeded') {
-        setMessage('Payment collected.');
+        setMessage('Payment collected. Invoice will update when Stripe confirms.');
         onCollected?.();
         return;
       }
