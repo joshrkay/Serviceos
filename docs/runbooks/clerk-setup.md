@@ -276,9 +276,9 @@ Checked against the linked Development Clerk app and Railway
 
 ### Railway webhook secret (set 2026-07-14)
 
-| Railway API | Clerk webhook | `CLERK_WEBHOOK_SECRET` | Probe `POST /webhooks/clerk` (no svix headers) |
-|-------------|---------------|------------------------|-----------------------------------------------|
-| `serviceosapi-development` | Dev endpoint → that host `/webhooks/clerk` | Set + redeployed | `400 Missing svix headers` (secret loaded; was `500 Webhook not configured`) |
-| `serviceosapi-production` | Created prod endpoint → `https://serviceosapi-production.up.railway.app/webhooks/clerk` (`user.created` + `user.deleted`) | Set from **prod** signing secret + redeployed | `400 Missing svix headers` |
+| Railway API | Clerk webhook | `CLERK_WEBHOOK_SECRET` | Probe / Clerk test |
+|-------------|---------------|------------------------|--------------------|
+| `serviceosapi-development` | `https://serviceosapi-development.up.railway.app/webhooks/clerk` (`user.created` + `user.deleted`, enabled) | Full Svix secret (must be ≥38 chars — truncated secrets cause `Invalid signature`) | Clerk test + signed probe → **200** `{"received":true}` |
+| `serviceosapi-production` | `https://serviceosapi-production.up.railway.app/webhooks/clerk` (created; **no `/api` prefix**) | Prod signing secret | Clerk test → **200** |
 
-Next: Clerk → Webhooks → **Testing** → send `user.created` on each instance → expect **200**. Existing Dev users may still have empty `public_metadata` until a successful webhook or backfill (`packages/api/scripts/bootstrap-mobile-qa-user.ts`).
+Dev users: all 13 Clerk users backfilled with `public_metadata.tenant_id` + `role: owner` via signed `user.created` replays after the secret was fixed (was empty before).
