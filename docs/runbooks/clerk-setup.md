@@ -300,3 +300,20 @@ After the publishable-key fix:
 - **Web public:** login / signup / health OK; Playwright smoke 5/5.
 - **Web authenticated UI:** Clerk sign-in ticket works when consumed immediately; incomplete onboarding (`identity`/`billing` pending) redirects most CRM routes to `/onboarding`. `/inbox` reachable; `/proposals` web route 404 (API inbox is `/api/proposals/inbox`).
 - Full write-up: `/opt/cursor/artifacts/E2E_FEATURE_CHECK.md` (agent artifact; not in repo).
+
+
+### Production E2E (2026-07-14)
+
+During a full production feature pass, production web was proxying to the
+**development** API (`API_URL` / `VITE_API_URL`), and production API
+`CORS_ORIGIN` allowed only the development web origin. Same JWT: absolute
+`serviceosapi-production` → 200; same-origin `/api` via web → 403 membership
+errors and forced sign-out. Both were corrected to production hosts.
+
+Also fixed on prod API: trailing newline on `CLERK_PUBLISHABLE_KEY`, truncated
+`CLERK_WEBHOOK_SECRET`, and bootstrapped the owner tenant in the prod DB.
+
+**Still open:** production is running Clerk **Development** keys and
+`NODE_ENV=development` — not go-live ready until live Clerk/Stripe/`NODE_ENV`
+are applied. Full matrix: agent artifact `PROD_E2E_FEATURE_CHECK.md`.
+
