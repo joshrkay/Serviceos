@@ -1830,14 +1830,20 @@ export function createApp(): AppWithLifecycle {
   // Voice intents (add_note, send_invoice, record_payment) execute
   // against real domain repositories. Invoice delivery routes through
   // SendService when configured; resolveInvoiceDeliveryProvider throws at
-  // boot in prod/staging without credentials; dev/test uses Noop.
+  // boot in prod/staging without credentials unless delivery is explicitly
+  // opted out (EMAIL_ENABLED=false + TELEPHONY_ENABLED=false); otherwise
+  // dev/test uses Noop.
+  const deliveryOptedOut =
+    process.env.EMAIL_ENABLED === 'false' && process.env.TELEPHONY_ENABLED === 'false';
   const invoiceDeliveryProvider = resolveInvoiceDeliveryProvider({
     nodeEnv: config.NODE_ENV,
     sendService,
+    allowNoopInProduction: deliveryOptedOut,
   });
   const estimateDeliveryProvider = resolveEstimateDeliveryProvider({
     nodeEnv: config.NODE_ENV,
     sendService,
+    allowNoopInProduction: deliveryOptedOut,
   });
   const dispatchAnalyticsRepo = pool
     ? new PgDispatchAnalyticsRepository(pool)
