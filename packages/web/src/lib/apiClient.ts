@@ -132,6 +132,47 @@ export type ApiFetch = (
   init?: RequestInit
 ) => Promise<Response>;
 
+/** Clerk JWT template name required by the API (tenant_id + role claims). */
+export const CLERK_JWT_TEMPLATE = 'serviceos' as const;
+
+/**
+ * Fetch a session token for the API. When the named JWT template is missing
+ * in the Clerk dashboard, `getToken({ template })` returns null even though
+ * the user is signed in — previously this looked identical to "signed out"
+ * and caused a silent login redirect loop. Diagnose that case explicitly.
+ *
+ * @see docs/runbooks/clerk-setup.md
+ */
+export async function getServiceosToken(
+  getToken: (opts?: { template?: string; skipCache?: boolean }) => Promise<string | null>,
+  opts?: { skipCache?: boolean },
+): Promise<string | null> {
+  const token = await getToken({
+    template: CLERK_JWT_TEMPLATE,
+    skipCache: opts?.skipCache,
+  });
+  if (token) return token;
+
+  // Distinguish "not signed in" from "template missing".
+  let defaultToken: string | null = null;
+  try {
+    defaultToken = await getToken(opts?.skipCache ? { skipCache: true } : undefined);
+  } catch {
+    defaultToken = null;
+  }
+  if (defaultToken) {
+    // Signed in, but the serviceos template did not mint a token.
+    // eslint-disable-next-line no-console -- operator-facing misconfig signal
+    console.error(
+      `[apiClient] Clerk getToken({ template: '${CLERK_JWT_TEMPLATE}' }) returned null ` +
+        'while a default session token exists. Create the JWT template named ' +
+        `"${CLERK_JWT_TEMPLATE}" with tenant_id + role claims ` +
+        '(docs/runbooks/clerk-setup.md).',
+    );
+  }
+  return null;
+}
+
 /**
  * React hook that returns a fetch-shaped function with auth + 401 handling
  * baked in. The returned function is stable across renders for a given
@@ -179,10 +220,10 @@ export function useApiClient(): ApiFetch {
       const needsAuth = shouldInjectAuth(path);
 
       if (needsAuth) {
-        const token = await getToken({ template: 'serviceos' });
+        const token = await getServiceosToken(getToken);
         if (!token) {
-          // Sign-out transition or no active session. Cancel the request
-          // by throwing an AbortError — we MUST NOT send unauthenticated.
+          // Sign-out transition, no session, or missing JWT template.
+          // Cancel — we MUST NOT send unauthenticated.
           throw makeUnauthenticatedAbort();
         }
         headers['Authorization'] = `Bearer ${token}`;
@@ -193,7 +234,7 @@ export function useApiClient(): ApiFetch {
       if (response.status === 401 && needsAuth) {
         // Try once with a forcibly refreshed token before giving up. This
         // covers the normal token-expiry case without bouncing the user.
-        const fresh = await getToken({ template: 'serviceos', skipCache: true });
+        const fresh = await getServiceosToken(getToken, { skipCache: true });
         if (fresh) {
           const retryHeaders: Record<string, string> = {
             ...headers,

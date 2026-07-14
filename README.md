@@ -69,3 +69,4 @@ the working tree but recoverable from git history — see
 
 - Deployment docs: [`docs/deployment.md`](docs/deployment.md)
 - Architecture overview: [`docs/architecture.md`](docs/architecture.md)
+- Clerk auth (dev + prod): [`docs/runbooks/clerk-setup.md`](docs/runbooks/clerk-setup.md)

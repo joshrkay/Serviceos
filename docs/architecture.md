@@ -10,6 +10,9 @@ the founding-decisions log see [`docs/decisions.md`](decisions.md).
    tries RS256+JWKS verification first (real Clerk session tokens); falls
    back to legacy HMAC only when `isHmacDevModeEnabled()` (dev/test). On
    success it sets `req.auth = { userId, sessionId, tenantId, role }`.
+   Frontend tokens come from the Clerk JWT template named `serviceos`
+   (claims `tenant_id` + `role` from `user.public_metadata`). Setup for
+   both environments: [`docs/runbooks/clerk-setup.md`](runbooks/clerk-setup.md).
 2. **Tenant-context middleware** — `middleware/tenant-context.ts`. Opens
    one Postgres transaction per request, runs `SET LOCAL app.current_tenant_id`
    (never a plain `SET` — that would leak across a pooled connection to
