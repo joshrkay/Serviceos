@@ -814,9 +814,16 @@ export function createApp(): AppWithLifecycle {
   const isProd = process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'prod';
   app.use(helmet(buildHelmetOptions(isProd)));
 
-  // CORS — use explicit origin in prod/staging (validated by config), wildcard in dev/test.
+  // CORS — use explicit origin(s) in prod/staging (validated by config),
+  // wildcard in dev/test. Comma-separated CORS_ORIGIN lets Railway host
+  // both the custom domain and the *.up.railway.app alias.
+  const corsOrigin = config.CORS_ORIGIN
+    ? config.CORS_ORIGIN.split(',').map((o) => o.trim()).filter(Boolean)
+    : true;
   app.use(cors({
-    origin: config.CORS_ORIGIN ?? true,
+    origin: Array.isArray(corsOrigin) && corsOrigin.length === 1
+      ? corsOrigin[0]
+      : corsOrigin,
     credentials: true,
   }));
 
