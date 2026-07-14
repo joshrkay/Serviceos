@@ -8,9 +8,9 @@
 | Variable | Required when | Verified by |
 |----------|---------------|-------------|
 | `DATABASE_URL` | Always prod/staging | Pool created; durable `webhookRepo` wired (`packages/api/src/app.ts`) |
-| `CLERK_SECRET_KEY` | Always prod/staging | `validateProductionConfig` |
-| `CLERK_PUBLISHABLE_KEY` | Always prod/staging | `validateProductionConfig` |
-| `CLERK_WEBHOOK_SECRET` | Always prod/staging | `validateProductionConfig` |
+| `CLERK_SECRET_KEY` | Always prod/staging | `validateProductionConfig`; live keys (`sk_live_`) required when `NODE_ENV=production` unless `ALLOW_CLERK_TEST_KEYS=true` |
+| `CLERK_PUBLISHABLE_KEY` | Always prod/staging | `validateProductionConfig`; must match web `VITE_CLERK_PUBLISHABLE_KEY` instance; `pk_live_` in prod |
+| `CLERK_WEBHOOK_SECRET` | Always prod/staging | `validateProductionConfig`; writes `public_metadata.tenant_id` + `role` for JWT template |
 | `AI_PROVIDER_API_KEY` | Always prod/staging | `validateProductionConfig` |
 | `CORS_ORIGIN` | Always prod/staging | Explicit origin, not wildcard |
 | `STRIPE_SECRET_KEY` or `STRIPE_API_KEY` | Always prod/staging | `createPaymentLinkProvider` forbids mock |
@@ -29,6 +29,7 @@
 
 | Variable | Behavior if missing |
 |----------|---------------------|
+| JWT template `serviceos` (Clerk dashboard) | Web `getToken({ template: 'serviceos' })` returns null → auth abort / login loop. See `docs/runbooks/clerk-setup.md` |
 | `STRIPE_WEBHOOK_SECRET` | Stripe webhooks return 500 |
 | `METRICS_TOKEN` | `/metrics` returns 503 in prod/staging |
 | `TRANSCRIPT_ENCRYPTION_KEY` | Falls back to `TENANT_ENCRYPTION_KEY`; if neither set, raw transcripts not retained |
@@ -57,7 +58,7 @@ Sentry→Slack/DM rules in `docs/runbooks/alerting.md`) and, optionally,
 | Variable | Notes |
 |----------|-------|
 | `VITE_API_URL` | API base URL for browser |
-| `VITE_CLERK_PUBLISHABLE_KEY` | Clerk frontend |
+| `VITE_CLERK_PUBLISHABLE_KEY` | Clerk frontend — same instance as API `CLERK_PUBLISHABLE_KEY`. Requires JWT template `serviceos` (see `docs/runbooks/clerk-setup.md`) |
 | `VITE_STRIPE_PUBLISHABLE_KEY` | Customer invoice payment page (`InvoicePaymentPage`) |
 | `VITE_ONBOARDING_V2_ENABLED` | Onboarding shell; set `true` in prod |
 
