@@ -2686,6 +2686,15 @@ export function createApp(): AppWithLifecycle {
     // Roll up job money state when a lapsed estimate is auto-expired on the
     // public path, so the job doesn't stay stuck in 'estimate_sent'.
     moneyStateDeps: { jobRepo, estimateRepo, invoiceRepo, auditRepo, logger: requestLogger },
+    connectAccountResolver: connectService
+      ? {
+          resolveTenantConnectAccount: async (tenantId: string) => {
+            const view = await connectService.getAccount(tenantId);
+            if (!view.accountId) return null;
+            return { accountId: view.accountId, chargesEnabled: view.chargesEnabled };
+          },
+        }
+      : undefined,
   });
   app.use('/public/estimates', createPublicEstimatesRouter(publicEstimateService));
 
@@ -2852,6 +2861,7 @@ export function createApp(): AppWithLifecycle {
       stripeConfig: process.env.STRIPE_SECRET_KEY
         ? { apiKey: process.env.STRIPE_SECRET_KEY }
         : null,
+      connectAccountResolver,
     }),
   );
 
@@ -4608,6 +4618,7 @@ export function createApp(): AppWithLifecycle {
       paymentLinkProvider,
       agreementRepo,
       customerRepo,
+      connectAccountResolver,
     ),
   );
 

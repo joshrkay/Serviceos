@@ -8,9 +8,10 @@
  */
 import { useEffect, useMemo, useState } from 'react';
 import { Elements, PaymentElement, useElements, useStripe } from '@stripe/react-stripe-js';
-import { loadStripe, Stripe } from '@stripe/stripe-js';
+import type { Stripe } from '@stripe/stripe-js';
 import { portalApi, PortalPaymentMethod } from '../../api/portal';
 import { getRuntimeConfigValue } from '../../lib/runtimeConfig';
+import { loadStripeForAccount } from '../../lib/stripeConnect';
 
 function getPublishableKey(): string | undefined {
   return getRuntimeConfigValue('VITE_STRIPE_PUBLISHABLE_KEY');
@@ -43,7 +44,7 @@ function AddCardForm({ onSaved }: { onSaved: () => void }): JSX.Element {
         type="button"
         onClick={submit}
         disabled={!stripe || submitting}
-        className="rounded-lg bg-primary text-white px-4 py-2 text-sm disabled:opacity-50"
+        className="min-h-11 rounded-lg bg-primary text-white px-4 py-2 text-sm disabled:opacity-50"
       >
         {submitting ? 'Saving…' : 'Save card'}
       </button>
@@ -55,13 +56,16 @@ export function PortalPaymentMethods({ token }: { token: string }): JSX.Element 
   const [cards, setCards] = useState<PortalPaymentMethod[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [clientSecret, setClientSecret] = useState<string | null>(null);
+  const [stripeAccountId, setStripeAccountId] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
   const [savedNotice, setSavedNotice] = useState(false);
 
   const stripePromise = useMemo<Promise<Stripe | null>>(() => {
+    if (!clientSecret) return Promise.resolve(null);
     const key = getPublishableKey();
-    return key ? loadStripe(key) : Promise.resolve(null);
-  }, []);
+    if (!key) return Promise.resolve(null);
+    return loadStripeForAccount(key, stripeAccountId);
+  }, [clientSecret, stripeAccountId]);
 
   const load = () => {
     portalApi
@@ -82,8 +86,9 @@ export function PortalPaymentMethods({ token }: { token: string }): JSX.Element 
     setStarting(true);
     setError(null);
     try {
-      const { clientSecret: secret } = await portalApi.startCardSetup(token);
-      setClientSecret(secret);
+      const result = await portalApi.startCardSetup(token);
+      setStripeAccountId(result.stripeAccountId ?? null);
+      setClientSecret(result.clientSecret);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not start card setup.');
     } finally {
@@ -93,6 +98,7 @@ export function PortalPaymentMethods({ token }: { token: string }): JSX.Element 
 
   const onSaved = () => {
     setClientSecret(null);
+    setStripeAccountId(null);
     setSavedNotice(true);
     // The webhook persists the card asynchronously; refetch so it shows once it lands.
     load();
@@ -148,7 +154,7 @@ export function PortalPaymentMethods({ token }: { token: string }): JSX.Element 
           onClick={startAddCard}
           disabled={starting}
           data-testid="add-card-button"
-          className="rounded-lg border border-border px-4 py-2 text-sm text-foreground hover:bg-muted disabled:opacity-50"
+          className="min-h-11 rounded-lg border border-border px-4 py-2 text-sm text-foreground hover:bg-muted disabled:opacity-50"
         >
           {starting ? 'Starting…' : 'Add a card'}
         </button>

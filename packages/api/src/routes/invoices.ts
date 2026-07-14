@@ -33,6 +33,7 @@ import { getCustomerMemberDiscountBps } from '../agreements/member-pricing';
 import { createLogger } from '../logging/logger';
 import { PaymentLinkProvider } from '../payments/payment-link-provider';
 import { createInvoicePaymentLink } from '../invoices/invoice-payment-link';
+import { ConnectAccountResolver } from '../invoices/public-invoice-service';
 
 const logger = createLogger({
   service: 'invoices-route',
@@ -71,6 +72,8 @@ export function createInvoiceRouter(
   // name instead of the literal "Customer" fallback. Optional so legacy
   // harnesses build; unenriched responses still validate (customer optional).
   customerRepo?: CustomerRepository,
+  /** Routes operator payment links to Connect when charges are enabled. */
+  connectAccountResolver?: ConnectAccountResolver,
 ): Router {
   const router = Router();
 
@@ -448,6 +451,7 @@ export function createInvoiceRouter(
           req.params.id,
           invoiceRepo,
           paymentLinkProvider,
+          connectAccountResolver,
         );
         res.json(result);
       } catch (err) {

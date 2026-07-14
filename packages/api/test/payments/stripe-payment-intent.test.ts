@@ -60,7 +60,7 @@ describe('P5-016 stripe-payment-intent — createPaymentIntent', () => {
     expect(init.body).toContain('tenant_id');
   });
 
-  it('uses an idempotency key derived from invoiceId+amount', async () => {
+  it('uses an idempotency key derived from invoiceId+amount+platform', async () => {
     const spy = vi.fn() as MockedFunction<StripeFetch>;
     spy.mockResolvedValue({
       ok: true,
@@ -70,7 +70,26 @@ describe('P5-016 stripe-payment-intent — createPaymentIntent', () => {
     });
     await createPaymentIntent({ apiKey: 'sk_test' }, validInput, spy);
     const [, init] = spy.mock.calls[0];
-    expect(init.headers['Idempotency-Key']).toBe('pi_inv-1_12500');
+    expect(init.headers['Idempotency-Key']).toBe('pi_inv-1_12500_platform');
+    expect(init.headers['Stripe-Account']).toBeUndefined();
+  });
+
+  it('sets Stripe-Account and scopes idempotency when stripeAccountId is set', async () => {
+    const spy = vi.fn() as MockedFunction<StripeFetch>;
+    spy.mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => '',
+      json: async () => ({ id: 'pi_connect', client_secret: 'pi_connect_secret' }),
+    });
+    await createPaymentIntent(
+      { apiKey: 'sk_test' },
+      { ...validInput, stripeAccountId: 'acct_tenant_1' },
+      spy,
+    );
+    const [, init] = spy.mock.calls[0];
+    expect(init.headers['Stripe-Account']).toBe('acct_tenant_1');
+    expect(init.headers['Idempotency-Key']).toBe('pi_inv-1_12500_acct_tenant_1');
   });
 
   it('throws when Stripe returns non-2xx', async () => {
