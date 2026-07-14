@@ -240,6 +240,7 @@ Full commercial loop: `docs/launch/GO-LIVE-RUNBOOK.md`.
 | Boot: `CLERK_DEV_HMAC_TOKENS=true is forbidden` | Prod misconfig | Unset the flag |
 | Boot: test keys forbidden in production | `pk_test_`/`sk_test_` under `NODE_ENV=production` | Use live keys, or set `ALLOW_CLERK_TEST_KEYS=true` on staging only |
 | Local UI works, API rejects tokens | Forgot `CLERK_PUBLISHABLE_KEY` on API (JWKS host) | Set it to the same instance’s publishable key |
+| Valid `serviceos` JWT still 401 on API | `CLERK_PUBLISHABLE_KEY` truncated / wrong instance (JWKS host mismatch) | Paste the **full** `pk_test_`/`pk_live_` value (dev `romantic-lark-48` is **56** chars, ends `cy5kZXYk`). Redeploy API after change. Do not confuse with `VITE_`/`NEXT_PUBLIC_` alone — API reads **`CLERK_PUBLISHABLE_KEY`**. |
 | Signup OK, onboarding empty until refresh | Metadata race: JWT minted before webhook wrote claims | Wait ~2s and hard-refresh, or sign out/in; confirm webhook 200 |
 | E2E journeys skipped | Missing GitHub secrets | `qa/reports/2026-05-11/clerk-testing-tokens-runbook.md` |
 
@@ -282,3 +283,20 @@ Checked against the linked Development Clerk app and Railway
 | `serviceosapi-production` | `https://serviceosapi-production.up.railway.app/webhooks/clerk` (created; **no `/api` prefix**) | Prod signing secret | Clerk test → **200** |
 
 Dev users: all 13 Clerk users backfilled with `public_metadata.tenant_id` + `role: owner` via signed `user.created` replays after the secret was fixed (was empty before).
+
+### Railway `CLERK_PUBLISHABLE_KEY` (fixed 2026-07-14)
+
+| Check | Development (`serviceosapi-development`) |
+|-------|------------------------------------------|
+| `CLERK_PUBLISHABLE_KEY` | Must be the **full** `pk_test_` for `romantic-lark-48` (56 chars). A 55-char truncated value made every RS256 `/api/*` call return 401 despite valid JWTs. |
+| Redeploy | Required after correcting the var (`serviceInstanceRedeploy`). |
+| Verify | Mint `POST /sessions/{id}/tokens/serviceos` → `GET /api/me` returns 200 with `role` + `tenant_id`. |
+
+### E2E feature check (2026-07-14)
+
+After the publishable-key fix:
+
+- **API (RS256):** customers / locations / jobs / estimates / invoices / proposals inbox / conversations / dispatch board / settings / users / billing / catalog / integrations — read + write paths OK on Development.
+- **Web public:** login / signup / health OK; Playwright smoke 5/5.
+- **Web authenticated UI:** Clerk sign-in ticket works when consumed immediately; incomplete onboarding (`identity`/`billing` pending) redirects most CRM routes to `/onboarding`. `/inbox` reachable; `/proposals` web route 404 (API inbox is `/api/proposals/inbox`).
+- Full write-up: `/opt/cursor/artifacts/E2E_FEATURE_CHECK.md` (agent artifact; not in repo).
