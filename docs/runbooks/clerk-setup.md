@@ -274,19 +274,11 @@ Checked against the linked Development Clerk app and Railway
 | Webhook enabled | Yes (enabled in Clerk dashboard) | Confirm when wiring prod |
 | Localhost origins | Dev instance allows localhost (incl. `:5173`) | N/A — set prod web origin |
 
-### Remaining operator step (blocks tenant bootstrap)
+### Railway webhook secret (set 2026-07-14)
 
-`POST https://serviceosapi-development.up.railway.app/webhooks/clerk` currently
-returns `{"error":"Webhook not configured"}` — the API process does not have
-`CLERK_WEBHOOK_SECRET` set (see `webhooks/routes.ts`).
+| Railway API | Clerk webhook | `CLERK_WEBHOOK_SECRET` | Probe `POST /webhooks/clerk` (no svix headers) |
+|-------------|---------------|------------------------|-----------------------------------------------|
+| `serviceosapi-development` | Dev endpoint → that host `/webhooks/clerk` | Set + redeployed | `400 Missing svix headers` (secret loaded; was `500 Webhook not configured`) |
+| `serviceosapi-production` | Created prod endpoint → `https://serviceosapi-production.up.railway.app/webhooks/clerk` (`user.created` + `user.deleted`) | Set from **prod** signing secret + redeployed | `400 Missing svix headers` |
 
-1. Clerk → Webhooks → the Railway endpoint → **Advanced** → copy **Signing Secret** (`whsec_…`).
-2. Railway → `serviceosapi-development` → Variables → set `CLERK_WEBHOOK_SECRET` to that value → redeploy.
-3. Clerk → Webhooks → **Testing** → send `user.created` → expect **200** (not 500).
-4. Confirm the user in Clerk has `public_metadata.tenant_id` + `role`.
-
-Until step 2–3 succeed, every existing Clerk user in this instance still has
-**empty** `public_metadata` (verified via Backend API on 2026-07-14), so
-`serviceos` JWTs mint without `role`/`tenant_id` and the API rejects them.
-After the webhook works, either sign up a fresh user or backfill metadata
-(`packages/api/scripts/bootstrap-mobile-qa-user.ts` for a single QA user).
+Next: Clerk → Webhooks → **Testing** → send `user.created` on each instance → expect **200**. Existing Dev users may still have empty `public_metadata` until a successful webhook or backfill (`packages/api/scripts/bootstrap-mobile-qa-user.ts`).
