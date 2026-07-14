@@ -116,6 +116,21 @@ describe('Story 3.2 — useDeepgramDictation', () => {
     expect(FakeWebSocket.instances).toHaveLength(0);
   });
 
+  it('prefers the server message when stream-token returns 503 misconfigured', async () => {
+    apiFetchMock.mockResolvedValue({
+      ok: false,
+      status: 503,
+      json: async () => ({
+        error: 'NOT_CONFIGURED',
+        message: 'Live transcription is misconfigured: Deepgram API key needs Member permissions',
+      }),
+    });
+    const { result } = renderHook(() => useDeepgramDictation({}));
+    await act(async () => { await result.current.start(); });
+    expect(result.current.error).toMatch(/Member permissions/i);
+    expect(result.current.isRecording).toBe(false);
+  });
+
   it('reports an unsupported browser without throwing', async () => {
     vi.stubGlobal('MediaRecorder', undefined);
     const { result } = renderHook(() => useDeepgramDictation({}));
