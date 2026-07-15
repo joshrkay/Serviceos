@@ -135,10 +135,12 @@ describe('Handoff detail screens', () => {
       totals: { totalCents: 9900, subtotalCents: 9000, taxCents: 900 },
       customer: { displayName: 'Beta Builders', email: 'beta@example.com' },
     };
-    const { getByText } = render(createElement(InvoiceDetail));
+    const { getByText, getAllByText } = render(createElement(InvoiceDetail));
     expect(h.endpoint).toBe('/api/invoices/abc123');
-    expect(getByText('$99.00')).toBeTruthy();
+    // Header total + Amount due row both format the same cents after Terminal collect UI.
+    expect(getAllByText('$99.00').length).toBeGreaterThanOrEqual(1);
     expect(getByText('open')).toBeTruthy();
+    expect(getByText('Collect payment')).toBeTruthy();
   });
 
   it('LeadDetail fetches by route id and renders lead fields', () => {
