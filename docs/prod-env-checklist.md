@@ -112,7 +112,7 @@ a one-time manual re-point at the voice domain in the Twilio console. See
 | Variable | Notes |
 |----------|-------|
 | `SENTRY_DSN` | Error tracking; no-op without it |
-| `DEEPGRAM_API_KEY` | Streaming STT for inbound voice |
+| `DEEPGRAM_API_KEY` | Streaming STT for inbound voice **and** browser dictation (`POST /api/voice/stream-token` → Deepgram `/v1/auth/grant`). Must be a key with **Member** (or higher) permissions — a usage-only key returns `403 Insufficient permissions` on grant and breaks AI conversation dictation. Create via Deepgram Console → API Keys → Create Key → Advanced → Member. |
 | `TTS_PROVIDER` / `ELEVENLABS_API_KEY` | TTS when not using OpenAI default |
 | `TWILIO_MEDIA_STREAMS_ENABLED` | Realtime voice master switch (WS7). `false`=Gather-only kill switch; `true`=forced on (requires `TTS_PROVIDER=elevenlabs`+`ELEVENLABS_API_KEY`); **unset/`auto`**=on iff `TTS_PROVIDER=elevenlabs`+`ELEVENLABS_API_KEY`+`DEEPGRAM_API_KEY` all set. See `docs/runbooks/voice-realtime-rollout.md`. |
 | `PUBLIC_API_URL` | Absolute API base Twilio POSTs to. Required for the mid-call REST degrade-to-Gather (WS7); absent → realtime failures hang up (1011) instead of falling back mid-call. |

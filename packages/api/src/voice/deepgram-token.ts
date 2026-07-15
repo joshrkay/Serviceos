@@ -36,6 +36,21 @@ export class DeepgramTokenMintError extends Error {
   }
 }
 
+/**
+ * Thrown when Deepgram rejects the grant because the long-lived key lacks
+ * Member (or higher) permissions. Callers map this to 503 — the key is
+ * present but cannot mint browser tokens until it is replaced.
+ * @see https://developers.deepgram.com/guides/fundamentals/token-based-authentication
+ */
+export class DeepgramTokenPermissionError extends Error {
+  constructor(
+    message = 'DEEPGRAM_API_KEY lacks Member permissions required to mint stream tokens',
+  ) {
+    super(message);
+    this.name = 'DeepgramTokenPermissionError';
+  }
+}
+
 export interface MintDeepgramTokenDeps {
   apiKey?: string;
   /** Injectable for tests; defaults to the global fetch. */
@@ -80,6 +95,15 @@ export async function mintDeepgramStreamToken(
   }
 
   if (!res.ok) {
+    // 403 FORBIDDEN / Insufficient permissions is the documented failure mode
+    // when the long-lived key is usage-scoped instead of Member+. Surfacing it
+    // as a typed permission error lets the route return 503 (misconfigured)
+    // instead of a generic 502 that the UI maps to "try again".
+    if (res.status === 403) {
+      throw new DeepgramTokenPermissionError(
+        `Deepgram grant returned 403 (key needs Member permissions)`,
+      );
+    }
     throw new DeepgramTokenMintError(`Deepgram grant returned ${res.status}`);
   }
 
