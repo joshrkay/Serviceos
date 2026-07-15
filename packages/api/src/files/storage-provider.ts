@@ -23,6 +23,8 @@ export interface StorageProviderEnv {
   STORAGE_ACCESS_KEY_ID?: string;
   STORAGE_SECRET_ACCESS_KEY?: string;
   STORAGE_PUBLIC_URL?: string;
+  /** Explicit opt-out aligned with validateFeatureRequiredConfig. */
+  STORAGE_ENABLED?: string;
   API_PORT?: string;
   PORT?: string;
   NODE_ENV?: string;
@@ -303,6 +305,7 @@ export function createStorageProvider(env: StorageProviderEnv = process.env): {
     STORAGE_ACCESS_KEY_ID,
     STORAGE_SECRET_ACCESS_KEY,
     STORAGE_PUBLIC_URL,
+    STORAGE_ENABLED,
     NODE_ENV,
   } = env;
 
@@ -328,7 +331,10 @@ export function createStorageProvider(env: StorageProviderEnv = process.env): {
     };
   }
 
-  if (isProductionLikeEnv(NODE_ENV)) {
+  // Match validateFeatureRequiredConfig: STORAGE_ENABLED=false opts out of
+  // object storage in prod/staging (recordings/uploads stay unavailable).
+  const storageOptedOut = STORAGE_ENABLED === 'false';
+  if (isProductionLikeEnv(NODE_ENV) && !storageOptedOut) {
     throw new Error(
       'Storage configuration missing: set STORAGE_BUCKET, STORAGE_ENDPOINT, STORAGE_REGION, STORAGE_ACCESS_KEY_ID, STORAGE_SECRET_ACCESS_KEY'
     );
