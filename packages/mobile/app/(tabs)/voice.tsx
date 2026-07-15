@@ -1,5 +1,5 @@
 import { ActivityIndicator, Pressable, Text, View } from 'react-native';
-import { useRouter } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useVoiceCapture } from '../../src/voice/useVoiceCapture';
 
 // Hold-to-talk capture screen. Owner presses the mic, speaks one action,
@@ -7,15 +7,22 @@ import { useVoiceCapture } from '../../src/voice/useVoiceCapture';
 // (surfaced in approvals — a later unit). Dirty-hands UX: one large target.
 export default function VoiceScreen() {
   const router = useRouter();
-  const { phase, transcript, error, startRecording, stopAndTranscribe, reset } = useVoiceCapture();
+  const params = useLocalSearchParams<{ jobId?: string | string[] }>();
+  const jobId = Array.isArray(params.jobId) ? params.jobId[0] : params.jobId;
+  const { phase, transcript, error, startRecording, stopAndTranscribe, reset } =
+    useVoiceCapture(jobId);
   const listening = phase === 'listening';
   const busy = phase === 'transcribing';
 
   return (
     <View className="flex-1 bg-background px-6 pb-20 pt-24">
-      <Text className="font-heading text-2xl font-semibold text-foreground">Speak an action</Text>
+      <Text className="font-heading text-2xl font-semibold text-foreground">
+        {jobId ? 'Update this job' : 'Speak an action'}
+      </Text>
       <Text className="mt-1 text-base text-mutedForeground">
-        Hold the mic, say what happened, release. We&apos;ll draft it for your approval.
+        {jobId
+          ? "Describe what happened on this job. We'll draft an update for approval."
+          : "Hold the mic, say what happened, release. We'll draft it for your approval."}
       </Text>
 
       <View className="flex-1 items-center justify-center">

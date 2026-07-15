@@ -17,7 +17,7 @@ async function horizontalOverflowPx(page: Page): Promise<number> {
   );
 }
 
-const ROUTES = ['/', '/sign-in', '/customers/new', '/schedule', '/digest'];
+const ROUTES = ['/', '/today', '/sign-in', '/customers/new', '/schedule', '/digest'];
 
 for (const width of [320, 390]) {
   test.describe(`mobile web @ ${width}px`, () => {

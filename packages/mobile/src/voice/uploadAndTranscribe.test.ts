@@ -65,6 +65,38 @@ describe('uploadAndTranscribe', () => {
     });
   });
 
+  it('adds the verified job id only when the caller supplies one', async () => {
+    const deps = makeDeps(HAPPY_ROUTES);
+    const jobId = '3b6cbf1a-bd8a-45f7-8b84-ce6b43a231d1';
+
+    await uploadAndTranscribe(clip, deps, jobId);
+
+    const recCall = (deps.api as ReturnType<typeof vi.fn>).mock.calls.find(
+      (c) => c[0] === '/api/voice/recordings',
+    );
+    expect(JSON.parse((recCall![1] as RequestInit).body as string)).toEqual({
+      fileId: 'f1',
+      audioUrl: 'https://cdn/f1.m4a',
+      idempotencyKey: 'idem-1',
+      jobId,
+    });
+  });
+
+  it('preserves the existing recording request body when job id is absent', async () => {
+    const deps = makeDeps(HAPPY_ROUTES);
+
+    await uploadAndTranscribe(clip, deps);
+
+    const recCall = (deps.api as ReturnType<typeof vi.fn>).mock.calls.find(
+      (c) => c[0] === '/api/voice/recordings',
+    );
+    expect(JSON.parse((recCall![1] as RequestInit).body as string)).toEqual({
+      fileId: 'f1',
+      audioUrl: 'https://cdn/f1.m4a',
+      idempotencyKey: 'idem-1',
+    });
+  });
+
   it('falls back to /api/files/upload when upload-url is not ok', async () => {
     const deps = makeDeps({
       'POST /api/files/upload-url': () => jsonRes({}, 500),

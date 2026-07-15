@@ -4,6 +4,7 @@
 import { cleanup, fireEvent, render, waitFor } from '@testing-library/react';
 import { createElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { MeResponse } from '@ai-service-os/shared';
 import type { MoneySummary } from '../hooks/useMoneyDashboard';
 
 const h = vi.hoisted(() => ({
@@ -11,17 +12,7 @@ const h = vi.hoisted(() => ({
   showErrorToast: vi.fn(),
   refetch: vi.fn(),
   switchMode: vi.fn().mockResolvedValue(undefined),
-  me: {
-    user_id: 'u',
-    tenant_id: 't1',
-    role: 'supervisor',
-    can_field_serve: true,
-    current_mode: 'both',
-    mode_changed_at: null,
-    permissions: [] as string[],
-    backup_supervisor_user_id: null,
-    unsupervised_proposal_routing: 'queue_only' as const,
-  } as unknown,
+  me: null as MeResponse | null,
   isLoading: false,
   error: null as Error | null,
   // approvals
@@ -82,6 +73,18 @@ beforeEach(() => {
   vi.clearAllMocks();
   h.isLoading = false;
   h.error = null;
+  h.me = {
+    user_id: 'user_clerk_123',
+    internal_user_id: '059f1a36-2d09-4698-954f-e640d61a9237',
+    tenant_id: 't1',
+    role: 'owner',
+    can_field_serve: true,
+    current_mode: 'supervisor',
+    mode_changed_at: null,
+    permissions: [],
+    backup_supervisor_user_id: null,
+    unsupervised_proposal_routing: 'queue_only',
+  };
   h.switchMode = vi.fn().mockResolvedValue(undefined);
   h.approvalsCount = 0;
   h.approvalsLoading = false;
@@ -169,6 +172,43 @@ describe('Home / Today dashboard', () => {
     expect(h.push).toHaveBeenCalledWith('/messages');
     fireEvent.click(getByText('Approvals').closest('button')!);
     expect(h.push).toHaveBeenCalledWith('/approvals');
+  });
+
+  it('gives tech mode a prominent Today path and hides money, approvals, and mode controls', () => {
+    h.me = {
+      ...h.me!,
+      role: 'technician',
+      current_mode: 'tech',
+      can_field_serve: true,
+    };
+    const { getByText, queryByText } = render(createElement(Home));
+
+    fireEvent.click(getByText('Open Today').closest('button')!);
+    expect(h.push).toHaveBeenCalledWith('/today');
+    expect(queryByText('Speak an action')).toBeNull();
+    expect(queryByText('Approval inbox')).toBeNull();
+    expect(queryByText('This month')).toBeNull();
+    expect(queryByText('Switch mode')).toBeNull();
+    expect(queryByText('Invoices')).toBeNull();
+  });
+
+  it('blends Today and approvals in both mode without supervisor money bloat', () => {
+    h.me = { ...h.me!, current_mode: 'both' };
+    const { getByText, queryByText } = render(createElement(Home));
+
+    expect(getByText('Open Today')).toBeTruthy();
+    expect(getByText('Approval inbox')).toBeTruthy();
+    expect(queryByText('This month')).toBeNull();
+  });
+
+  it('hides the mode toggle for a non-owner who cannot field serve', () => {
+    h.me = {
+      ...h.me!,
+      role: 'dispatcher',
+      can_field_serve: false,
+      current_mode: 'supervisor',
+    };
+    expect(render(createElement(Home)).queryByText('Switch mode')).toBeNull();
   });
 
   it('shows a loading spinner and no actions while /api/me is loading', () => {

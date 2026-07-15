@@ -18,6 +18,11 @@ describe('routeForNotification', () => {
     expect(routeForNotification({ proposalId: 'abc', kind: 'executed' })).toBe('/proposals/abc');
   });
 
+  it('allows a job detail route but rejects nested paths below the job', () => {
+    expect(routeForNotification({ screen: '/jobs/job-123' })).toBe('/jobs/job-123');
+    expect(routeForNotification({ screen: '/jobs/job-123/time' })).toBe('/');
+  });
+
   // Each notification type carries the producer-set `screen`; the router returns
   // it verbatim once it passes the allowlist. One case per NotificationType.
   const perTypeCases: Array<{ type: NotificationType; screen: string; expected: string }> = [

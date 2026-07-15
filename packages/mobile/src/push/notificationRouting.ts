@@ -18,7 +18,7 @@ const HOME_ROUTE = '/';
 // single id segment (`/customers/<id>`); list routes match exactly. Any path
 // outside this set falls back to Home — the client never trusts an arbitrary
 // server-supplied path.
-const DETAIL_ROUTE_PREFIXES = ['/customers/', '/messages/', '/proposals/'] as const;
+const DETAIL_ROUTE_PREFIXES = ['/customers/', '/messages/', '/proposals/', '/jobs/'] as const;
 const EXACT_ROUTES = new Set(['/schedule', '/invoices', '/approvals']);
 
 /**
