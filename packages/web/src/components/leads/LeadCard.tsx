@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useRef } from 'react';
 import { formatUsdCentsFixed } from '@ai-service-os/shared';
 
 /**
@@ -55,6 +55,9 @@ export interface LeadCardProps {
   lead: LeadCardData;
   onClick?: (id: string) => void;
   onDragStart?: (id: string) => void;
+  onDragEnd?: () => void;
+  /** When true, this card ignores pointer events so the column receives drops. */
+  pointerEventsNone?: boolean;
 }
 
 function fullName(lead: LeadCardData): string {
@@ -67,24 +70,49 @@ function formatCents(cents?: number): string | null {
   return formatUsdCentsFixed(cents);
 }
 
-export function LeadCard({ lead, onClick, onDragStart }: LeadCardProps) {
+export function LeadCard({
+  lead,
+  onClick,
+  onDragStart,
+  onDragEnd,
+  pointerEventsNone = false,
+}: LeadCardProps) {
   const value = formatCents(lead.estimatedValueCents);
+  // Suppress the post-drag click that browsers fire on the drag source —
+  // otherwise a successful kanban move navigates to LeadDetail.
+  const didDragRef = useRef(false);
+
   return (
     <div
       role="button"
       tabIndex={0}
       draggable
       data-testid={`lead-card-${lead.id}`}
-      onClick={() => onClick?.(lead.id)}
+      onMouseDown={() => {
+        didDragRef.current = false;
+      }}
+      onClick={() => {
+        if (didDragRef.current) {
+          didDragRef.current = false;
+          return;
+        }
+        onClick?.(lead.id);
+      }}
       onKeyDown={(e) => {
         if (e.key === 'Enter' || e.key === ' ') onClick?.(lead.id);
       }}
       onDragStart={(e) => {
+        didDragRef.current = true;
         e.dataTransfer.setData('text/plain', lead.id);
         e.dataTransfer.effectAllowed = 'move';
         onDragStart?.(lead.id);
       }}
-      className="block w-full text-left rounded-xl bg-white border border-slate-200 hover:border-slate-300 hover:shadow-sm transition-all p-3 cursor-grab active:cursor-grabbing"
+      onDragEnd={() => {
+        onDragEnd?.();
+      }}
+      className={`block w-full text-left rounded-xl bg-white border border-slate-200 hover:border-slate-300 hover:shadow-sm transition-all p-3 cursor-grab active:cursor-grabbing select-none ${
+        pointerEventsNone ? 'pointer-events-none' : ''
+      }`}
     >
       <div className="flex items-start justify-between gap-2 mb-1">
         <p className="text-sm text-slate-900 truncate">{fullName(lead)}</p>
