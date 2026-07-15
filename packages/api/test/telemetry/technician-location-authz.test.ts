@@ -4,20 +4,43 @@ import { InMemoryTechnicianLocationAuthorizer } from '../../src/telemetry/techni
 describe('technician location authz', () => {
   const authorizer = new InMemoryTechnicianLocationAuthorizer();
   const tenantId = '550e8400-e29b-41d4-a716-446655440000';
+  const technicianId = '550e8400-e29b-41d4-a716-446655440020';
+  const otherTechnicianId = '550e8400-e29b-41d4-a716-446655440021';
 
-  it('allows technician to submit for self only', async () => {
+  it('allows technician to submit for their canonical users.id only', async () => {
     await expect(
       authorizer.canSubmitForTechnician(
-        { userId: 'tech-1', sessionId: 's1', tenantId, role: 'technician' },
-        'tech-1'
+        {
+          userId: 'user_tech_clerk',
+          canonicalUserId: technicianId,
+          sessionId: 's1',
+          tenantId,
+          role: 'technician',
+        },
+        technicianId,
       )
     ).resolves.toBe(true);
 
     await expect(
       authorizer.canSubmitForTechnician(
-        { userId: 'tech-1', sessionId: 's1', tenantId, role: 'technician' },
-        'tech-2'
+        {
+          userId: 'user_tech_clerk',
+          canonicalUserId: technicianId,
+          sessionId: 's1',
+          tenantId,
+          role: 'technician',
+        },
+        otherTechnicianId,
       )
+    ).resolves.toBe(false);
+  });
+
+  it('fails closed without a canonical identity', async () => {
+    await expect(
+      authorizer.canSubmitForTechnician(
+        { userId: 'user_tech_clerk', sessionId: 's1', tenantId, role: 'technician' },
+        technicianId,
+      ),
     ).resolves.toBe(false);
   });
 

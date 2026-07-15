@@ -4,11 +4,12 @@
  *
  * The auth middleware resolves each request's role + access state from the
  * `users` table via `createAuthorizationLoader`. This pins that query against
- * the REAL migrated schema — the exact columns it reads (`role`, `status`,
+ * the REAL migrated schema — the exact columns it reads (`id`, `role`, `status`,
  * `deleted_at`) and the `(tenant_id, clerk_user_id)` lookup — so a column rename
  * can't ship green behind a mocked Pool (the failure mode CLAUDE.md calls out).
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import crypto from 'crypto';
 import type { Pool } from 'pg';
 import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
 import { createAuthorizationLoader } from '../../src/auth/authorization-loader';
@@ -17,6 +18,7 @@ describe('Postgres integration — createAuthorizationLoader', () => {
   let pool: Pool;
   let load: ReturnType<typeof createAuthorizationLoader>;
   let tenantA: string;
+  let ownerACanonicalId: string;
   let ownerAClerkId: string;
   let tenantB: string;
 
@@ -25,7 +27,12 @@ describe('Postgres integration — createAuthorizationLoader', () => {
     load = createAuthorizationLoader(pool);
     const a = await createTestTenant(pool);
     tenantA = a.tenantId;
-    ownerAClerkId = a.userId; // createTestTenant sets clerk_user_id = userId
+    ownerACanonicalId = a.userId;
+    ownerAClerkId = `user_${crypto.randomUUID()}`;
+    await pool.query(
+      `UPDATE users SET clerk_user_id = $1 WHERE tenant_id = $2 AND id = $3`,
+      [ownerAClerkId, tenantA, ownerACanonicalId],
+    );
     tenantB = (await createTestTenant(pool)).tenantId;
   });
 
@@ -33,9 +40,11 @@ describe('Postgres integration — createAuthorizationLoader', () => {
     await closeSharedTestDb();
   });
 
-  it('resolves an active member to its DB role (default status active, not deleted)', async () => {
+  it('resolves a distinct Clerk subject to its canonical users.id and DB role', async () => {
     const rec = await load(ownerAClerkId, tenantA);
     expect(rec).not.toBeNull();
+    expect(rec!.userId).toBe(ownerACanonicalId);
+    expect(rec!.userId).not.toBe(ownerAClerkId);
     expect(rec!.role).toBe('owner');
     expect(rec!.status).toBe('active');
     expect(rec!.deleted).toBe(false);

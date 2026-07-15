@@ -1611,6 +1611,7 @@ export function createApp(): AppWithLifecycle {
           transcript: event.transcript,
           conversationId: event.conversationId,
           recordingId: event.recordingId,
+          ...(event.jobId ? { jobId: event.jobId } : {}),
         };
         await queue.send(
           'voice_action_router',
@@ -4593,6 +4594,7 @@ export function createApp(): AppWithLifecycle {
       proposalRepo,
       userRepo,
       settingsRepo,
+      auditRepo,
       boardEventsDeps: {
         authUserIdFromRequest: async (req) =>
           (req as { auth?: { userId?: string } }).auth?.userId ?? null,
@@ -5073,6 +5075,7 @@ export function createApp(): AppWithLifecycle {
       // dangling S3 404 after the retention worker deletes the object).
       fileRepo,
       storage: storageProvider,
+      jobRepo,
     }),
   );
   app.use(
@@ -5112,6 +5115,7 @@ export function createApp(): AppWithLifecycle {
       repository: technicianLocationPingRepo,
       canSubmitForTechnician: (auth, technicianId) =>
         technicianLocationAuthorizer.canSubmitForTechnician(auth, technicianId),
+      auditRepo,
     })
   );
   app.use('/api/catalog/items', createCatalogItemsRouter(catalogRepo, auditRepo));

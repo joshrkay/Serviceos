@@ -6124,6 +6124,21 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS country TEXT,
       ADD COLUMN IF NOT EXISTS access_notes TEXT;
   `,
+
+  // Mobile location batches are retried after transient network failures.
+  // The client-generated UUID makes each ping idempotent within its tenant;
+  // existing rows backfill from their already-unique primary key.
+  '252_technician_location_ping_idempotency': `
+    ALTER TABLE technician_location_pings
+      ADD COLUMN IF NOT EXISTS client_ping_id UUID;
+    UPDATE technician_location_pings
+      SET client_ping_id = id
+      WHERE client_ping_id IS NULL;
+    ALTER TABLE technician_location_pings
+      ALTER COLUMN client_ping_id SET NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_tlp_tenant_client_ping
+      ON technician_location_pings(tenant_id, client_ping_id);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
