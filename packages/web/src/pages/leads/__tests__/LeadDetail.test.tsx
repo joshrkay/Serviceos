@@ -51,11 +51,17 @@ describe('Leads — LeadDetail (P9-001)', () => {
     expect(link).toHaveAttribute('href', '/customers/cust-7');
   });
 
-  it('Convert button calls /convert and surfaces the new customer id', async () => {
+  it('Convert button calls /convert with address and surfaces the new customer id', async () => {
     vi.mocked(apiFetch).mockResolvedValueOnce({
       ok: true,
       status: 200,
-      json: async () => baseLead,
+      json: async () => ({
+        ...baseLead,
+        street1: '100 Main St',
+        city: 'Austin',
+        state: 'TX',
+        postalCode: '78701',
+      }),
     } as unknown as Response);
     vi.mocked(apiFetch).mockResolvedValueOnce({
       ok: true,
@@ -63,6 +69,7 @@ describe('Leads — LeadDetail (P9-001)', () => {
       json: async () => ({
         lead: { ...baseLead, stage: 'won', convertedCustomerId: 'cust-7' },
         customer: { id: 'cust-7' },
+        location: { id: 'loc-1' },
       }),
     } as unknown as Response);
 
@@ -78,11 +85,37 @@ describe('Leads — LeadDetail (P9-001)', () => {
         .mock.calls.find((c) => String(c[0]).endsWith('/convert'));
       expect(convertCall).toBeDefined();
       expect((convertCall![1] as RequestInit).method).toBe('POST');
+      expect(JSON.parse((convertCall![1] as RequestInit).body as string)).toEqual({
+        street1: '100 Main St',
+        city: 'Austin',
+        state: 'TX',
+        postalCode: '78701',
+      });
     });
 
     await waitFor(() => {
       expect(onConverted).toHaveBeenCalledWith('cust-7');
     });
+  });
+
+  it('blocks convert confirm when address fields are incomplete', async () => {
+    vi.mocked(apiFetch).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => baseLead,
+    } as unknown as Response);
+
+    render(<LeadDetail leadId="lead-1" />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Convert to Customer' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Confirm' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      /street, city, state, and postal code are required/i,
+    );
+    expect(
+      vi.mocked(apiFetch).mock.calls.find((c) => String(c[0]).endsWith('/convert')),
+    ).toBeUndefined();
   });
 
   it('Mark as Lost requires a reason and POSTs /lose', async () => {

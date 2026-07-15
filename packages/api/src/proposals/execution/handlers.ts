@@ -1063,7 +1063,7 @@ export function createExecutionHandlerRegistry(deps?: {
       deps?.auditRepo,
     ),
     new LogExpenseExecutionHandler(deps?.expenseRepo, deps?.auditRepo),
-    new ConvertLeadExecutionHandler(deps?.leadRepo, deps?.customerRepo, deps?.auditRepo),
+    new ConvertLeadExecutionHandler(deps?.leadRepo, deps?.customerRepo, deps?.auditRepo, deps?.locationRepo),
     new ConfirmAppointmentExecutionHandler(deps?.appointmentRepo, requiredAuditRepo),
     new MarkLeadLostExecutionHandler(deps?.leadRepo, deps?.auditRepo),
     new AddServiceLocationExecutionHandler(deps?.locationRepo, deps?.auditRepo),
