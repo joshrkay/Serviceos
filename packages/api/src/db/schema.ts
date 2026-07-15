@@ -6102,6 +6102,20 @@ export const MIGRATIONS = {
       WHERE u.tenant_id = t.id AND u.clerk_user_id = t.owner_id
     );
   `,
+
+  // QA-MANUAL-0730: optional structured service address on leads so
+  // convertToCustomer can promote it to a primary service_locations row.
+  // All columns nullable — address is optional until convert time.
+  '250_leads_service_address': `
+    ALTER TABLE leads
+      ADD COLUMN IF NOT EXISTS street1 TEXT,
+      ADD COLUMN IF NOT EXISTS street2 TEXT,
+      ADD COLUMN IF NOT EXISTS city TEXT,
+      ADD COLUMN IF NOT EXISTS state TEXT,
+      ADD COLUMN IF NOT EXISTS postal_code TEXT,
+      ADD COLUMN IF NOT EXISTS country TEXT,
+      ADD COLUMN IF NOT EXISTS access_notes TEXT;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

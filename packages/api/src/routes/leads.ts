@@ -18,6 +18,7 @@ import {
 } from '../leads/lead-service';
 import {
   createLeadSchema,
+  convertLeadAddressSchema,
   loseLeadSchema,
   updateLeadSchema,
   LEAD_SOURCES,
@@ -25,11 +26,13 @@ import {
   LeadSource,
   LeadStage,
 } from '../leads/enums';
+import { LocationRepository } from '../locations/location';
 
 export function createLeadsRouter(
   leadRepo: LeadRepository,
   customerRepo: CustomerRepository,
-  auditRepo: AuditRepository
+  auditRepo: AuditRepository,
+  locationRepo: LocationRepository
 ): Router {
   const router = Router();
 
@@ -155,6 +158,11 @@ export function createLeadsRouter(
     requireTenant,
     requirePermission('customers:create'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      // Empty body is fine — address may already live on the lead.
+      const body =
+        req.body && typeof req.body === 'object' && Object.keys(req.body).length > 0
+          ? convertLeadAddressSchema.parse(req.body)
+          : undefined;
       const result = await convertToCustomer(
         req.auth!.tenantId,
         req.params.id,
@@ -162,7 +170,9 @@ export function createLeadsRouter(
         customerRepo,
         req.auth!.userId,
         req.auth!.role,
-        auditRepo
+        auditRepo,
+        locationRepo,
+        body
       );
       if (!result) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Lead not found' });

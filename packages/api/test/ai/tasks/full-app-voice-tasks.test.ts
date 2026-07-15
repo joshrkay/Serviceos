@@ -29,6 +29,7 @@ import { NotifyDelayExecutionHandler } from '../../../src/proposals/execution/fu
 import { Proposal, ProposalType, missingFieldsFor } from '../../../src/proposals/proposal';
 import { InMemoryLeadRepository } from '../../../src/leads/lead';
 import { InMemoryCustomerRepository } from '../../../src/customers/customer';
+import { InMemoryLocationRepository } from '../../../src/locations/location';
 import { createLead } from '../../../src/leads/lead-service';
 
 function ctx(overrides: Partial<TaskContext>): TaskContext {
@@ -289,6 +290,7 @@ describe('ConvertLeadExecutionHandler', () => {
   it('converts a real lead into a customer via the shared service', async () => {
     const leadRepo = new InMemoryLeadRepository();
     const customerRepo = new InMemoryCustomerRepository();
+    const locationRepo = new InMemoryLocationRepository();
     const lead = await createLead(
       {
         tenantId: 't-1',
@@ -297,11 +299,20 @@ describe('ConvertLeadExecutionHandler', () => {
         primaryPhone: '+15555550100',
         source: 'phone_call',
         createdBy: 'u-1',
+        street1: '100 Main St',
+        city: 'Austin',
+        state: 'TX',
+        postalCode: '78701',
       },
       leadRepo,
     );
 
-    const handler = new ConvertLeadExecutionHandler(leadRepo, customerRepo);
+    const handler = new ConvertLeadExecutionHandler(
+      leadRepo,
+      customerRepo,
+      undefined,
+      locationRepo,
+    );
     const res = await handler.execute(approved('convert_lead', { leadId: lead.id }), {
       tenantId: 't-1',
       executedBy: 'u-1',
@@ -311,6 +322,9 @@ describe('ConvertLeadExecutionHandler', () => {
     expect(res.resultEntityId).toBeDefined();
     const refreshed = await leadRepo.findById('t-1', lead.id);
     expect(refreshed?.convertedCustomerId).toBe(res.resultEntityId);
+    const locations = await locationRepo.findByCustomer('t-1', res.resultEntityId!);
+    expect(locations).toHaveLength(1);
+    expect(locations[0].isPrimary).toBe(true);
   });
 });
 
