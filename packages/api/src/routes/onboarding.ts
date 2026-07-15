@@ -77,10 +77,31 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         if (!pool) {
-          res.status(503).json({
-            error: 'ONBOARDING_NOT_CONFIGURED',
-            message: 'Onboarding status requires a database connection',
+          // Hermetic / no-DB boot: return a soft status from settings so the
+          // Settings "AI phone answering" toggle is not stuck on Loading…
+          // forever (503 left voiceAgentLive === null in the web client).
+          const settings = await settingsRepo.findByTenant(req.auth!.tenantId);
+          const status = deriveOnboardingStatus({
+            tenantId: req.auth!.tenantId,
+            tenantExists: true,
+            identity: {
+              businessName: settings?.businessName ?? null,
+              businessHours: settings?.businessHours ?? null,
+              jobBufferMinutes: settings?.jobBufferMinutes ?? null,
+              hourlyRateCents: settings?.hourlyRateCents ?? null,
+            },
+            packActivated: false,
+            twilioStatus: null,
+            subscription: { stripeSubscriptionId: null, status: null },
+            inboundCallCount: 0,
+            testCallSkippedAt: null,
+            voiceAgentLiveAt: null,
+            activatedAt: null,
+            aiConfigPresent: Boolean(settings?.aiModel),
+            aiVerificationStatus: null,
           });
+          res.set('Cache-Control', 'private, max-age=2');
+          res.json(status);
           return;
         }
 

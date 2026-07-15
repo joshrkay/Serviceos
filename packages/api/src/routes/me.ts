@@ -298,6 +298,8 @@ export class InMemoryUserModeService implements UserModeService {
       existing.mode_changed_at = modeChangedAt;
     } else {
       // Synthesize a default row so subsequent GETs reflect the switch.
+      // Preserve internal_user_id when a prior upsert already seeded it —
+      // otherwise a mode switch would wipe the technician profile UUID.
       this.users.set(key, {
         user_id: userId,
         tenant_id: tenantId,
@@ -305,6 +307,7 @@ export class InMemoryUserModeService implements UserModeService {
         can_field_serve: true,
         current_mode: mode,
         mode_changed_at: modeChangedAt,
+        internal_user_id: null,
       });
     }
     return { modeChangedAt };

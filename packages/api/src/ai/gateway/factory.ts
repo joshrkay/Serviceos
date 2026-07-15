@@ -346,6 +346,25 @@ export function createMockLLMGateway(defaultResponse = '{"mock": true}'): {
 }
 
 /**
+ * Hermetic / local-demo gateway used when `AI_PROVIDER_API_KEY` is unset.
+ * Scripts intent classification + free-text drafting so Assistant can create
+ * real proposals without a paid provider key. Unit tests that need a fixed
+ * JSON reply should keep using {@link createMockLLMGateway}.
+ */
+export function createHermeticMockLLMGateway(): {
+  gateway: LLMGateway;
+  provider: MockLLMProvider;
+} {
+  const provider = new MockLLMProvider('{"intentType":"unknown","confidence":0}', {
+    hermetic: true,
+  });
+  const providers = new Map<string, LLMProvider>([['mock', provider]]);
+  const gatewayConfig: LLMGatewayConfig = { defaultProvider: 'mock' };
+  const gateway = new LLMGateway(gatewayConfig, providers);
+  return { gateway, provider };
+}
+
+/**
  * Phase 4a-1 — dedicated `EmbeddingProvider` for the RAG corpus.
  *
  * Returns `null` when `AI_PROVIDER_API_KEY` is unset so the rest of the
