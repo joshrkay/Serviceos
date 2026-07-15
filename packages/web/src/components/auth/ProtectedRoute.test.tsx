@@ -37,6 +37,30 @@ vi.mock('@clerk/clerk-react', () => ({
   useClerk:  () => ({ signOut: vi.fn() }),
 }));
 
+const onboardingState: {
+  data: {
+    steps: Array<{ id: string; status: string }>;
+    isComplete: boolean;
+    currentStep: string | null;
+    voiceAgentLive: boolean;
+    tenantId: string;
+    subscriptionStatus: null;
+  } | null;
+  isLoading: boolean;
+} = {
+  data: null,
+  isLoading: true,
+};
+
+vi.mock('../../hooks/useOnboardingStatus', () => ({
+  useOnboardingStatus: () => ({
+    data: onboardingState.data,
+    isLoading: onboardingState.isLoading,
+    error: null,
+    refetch: async () => undefined,
+  }),
+}));
+
 // Imports that depend on the mock must come AFTER vi.mock above.
 import { ProtectedRoute } from './ProtectedRoute';
 import { extractFromPath, type LocationState } from './LoginPage';
@@ -44,6 +68,8 @@ import { extractFromPath, type LocationState } from './LoginPage';
 beforeEach(() => {
   clerkState.isLoaded = true;
   clerkState.isSignedIn = true;
+  onboardingState.isLoading = true;
+  onboardingState.data = null;
 });
 
 // A simple sentinel to confirm a route's children rendered.
@@ -124,6 +150,69 @@ describe('P0-031 ProtectedRoute — authenticated', () => {
     );
 
     expect(screen.getByTestId('protected-content')).toBeInTheDocument();
+  });
+
+  it('redirects to /onboarding when identity is not done', () => {
+    clerkState.isLoaded = true;
+    clerkState.isSignedIn = true;
+    onboardingState.isLoading = false;
+    onboardingState.data = {
+      steps: [
+        { id: 'signup', status: 'done' },
+        { id: 'identity', status: 'current' },
+      ],
+      isComplete: false,
+      currentStep: 'identity',
+      voiceAgentLive: false,
+      tenantId: 't-1',
+      subscriptionStatus: null,
+    };
+
+    render(
+      <MemoryRouter initialEntries={['/jobs']}>
+        <Routes>
+          <Route path="/onboarding" element={<div data-testid="onboarding-page">ONBOARDING</div>} />
+          <Route element={<ProtectedRoute />}>
+            <Route path="/jobs" element={<ProtectedContent />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>
+    );
+
+    expect(screen.getByTestId('onboarding-page')).toBeInTheDocument();
+    expect(screen.queryByTestId('protected-content')).toBeNull();
+  });
+
+  it('allows CRM routes once identity is done even if onboarding is incomplete', () => {
+    clerkState.isLoaded = true;
+    clerkState.isSignedIn = true;
+    onboardingState.isLoading = false;
+    onboardingState.data = {
+      steps: [
+        { id: 'signup', status: 'done' },
+        { id: 'identity', status: 'done' },
+        { id: 'billing', status: 'current' },
+      ],
+      isComplete: false,
+      currentStep: 'billing',
+      voiceAgentLive: false,
+      tenantId: 't-1',
+      subscriptionStatus: null,
+    };
+
+    render(
+      <MemoryRouter initialEntries={['/jobs']}>
+        <Routes>
+          <Route path="/onboarding" element={<div data-testid="onboarding-page">ONBOARDING</div>} />
+          <Route element={<ProtectedRoute />}>
+            <Route path="/jobs" element={<ProtectedContent />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>
+    );
+
+    expect(screen.getByTestId('protected-content')).toBeInTheDocument();
+    expect(screen.queryByTestId('onboarding-page')).toBeNull();
   });
 });
 
@@ -240,6 +329,8 @@ describe('P0-031 ProtectedRoute — routes.ts wiring (source-level)', () => {
       'estimates',
       'invoices',
       'contracts',
+      'inbox',
+      'proposals',
       'interactions',
       'settings',
       'technician/day',

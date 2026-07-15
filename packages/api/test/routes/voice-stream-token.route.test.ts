@@ -146,4 +146,26 @@ describe('UB-B1 — POST /api/voice/stream-token mint hardening', () => {
     expect(res.status).toBe(503);
     expect(auditRepo.getAll()).toHaveLength(0);
   });
+
+  it('returns 503 (not a retryable 502) when Deepgram rejects the key as non-Member', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new global.Response(
+          JSON.stringify({ err_code: 'FORBIDDEN', err_msg: 'Insufficient permissions.' }),
+          { status: 403, headers: { 'content-type': 'application/json' } },
+        ),
+      ),
+    );
+    const auditRepo = new InMemoryAuditRepository();
+    const app = buildApp(auditRepo);
+
+    const res = await request(app).post('/api/voice/stream-token');
+    expect(res.status).toBe(503);
+    expect(res.body).toMatchObject({
+      error: 'NOT_CONFIGURED',
+      message: expect.stringMatching(/Member permissions/i),
+    });
+    expect(auditRepo.getAll()).toHaveLength(0);
+  });
 });

@@ -761,6 +761,39 @@ describe('P0-026 — validateEnvSchema (Zod startup validation)', () => {
       validateEnvSchema({ NODE_ENV: 'development', CORS_ORIGIN: 'true' })
     ).not.toThrow();
   });
+
+  it('validateEnvSchema — DEV_AUTH_BYPASS=true is forbidden in production', () => {
+    expect(() =>
+      validateEnvSchema({ ...fullProdEnv, DEV_AUTH_BYPASS: 'true' }),
+    ).toThrow(/DEV_AUTH_BYPASS/);
+  });
+
+  it('validateEnvSchema — CLERK_DEV_HMAC_TOKENS=true is forbidden in production', () => {
+    expect(() =>
+      validateEnvSchema({ ...fullProdEnv, CLERK_DEV_HMAC_TOKENS: 'true' }),
+    ).toThrow(/CLERK_DEV_HMAC_TOKENS/);
+  });
+
+  it('validateEnvSchema — pk_test_ / sk_test_ refused in production by default', () => {
+    expect(() =>
+      validateEnvSchema({
+        ...fullProdEnv,
+        CLERK_PUBLISHABLE_KEY: 'pk_test_abc',
+        CLERK_SECRET_KEY: 'sk_test_abc',
+      }),
+    ).toThrow(/pk_live_/);
+  });
+
+  it('validateEnvSchema — ALLOW_CLERK_TEST_KEYS=true permits test keys in production', () => {
+    expect(() =>
+      validateEnvSchema({
+        ...fullProdEnv,
+        CLERK_PUBLISHABLE_KEY: 'pk_test_abc',
+        CLERK_SECRET_KEY: 'sk_test_abc',
+        ALLOW_CLERK_TEST_KEYS: 'true',
+      }),
+    ).not.toThrow();
+  });
 });
 
 describe('WS7 — resolveMediaStreamsEnabled (auto mode)', () => {

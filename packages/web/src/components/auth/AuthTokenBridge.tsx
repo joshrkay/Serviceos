@@ -1,7 +1,11 @@
 import { useEffect, useRef } from 'react';
 import { useAuth } from '@clerk/clerk-react';
 import { setTokenGetter } from '../../utils/api-fetch';
-import { clearSignOutHandler, setSignOutHandler } from '../../lib/apiClient';
+import {
+  clearSignOutHandler,
+  getServiceosToken,
+  setSignOutHandler,
+} from '../../lib/apiClient';
 import { invalidateMeCache } from '../../hooks/useMe';
 import { invalidateOnboardingStatusCache } from '../../hooks/useOnboardingStatus';
 import { invalidatePendingProposalsCache } from '../../hooks/usePendingProposals';
@@ -43,7 +47,7 @@ export function AuthTokenBridge() {
 
   useEffect(() => {
     setTokenGetter((opts) =>
-      getToken({ template: 'serviceos', skipCache: opts?.forceRefresh ?? false }),
+      getServiceosToken(getToken, { skipCache: opts?.forceRefresh ?? false }),
     );
   }, [getToken]);
 

@@ -449,6 +449,12 @@ const baseEnvShape = {
   // P0-033 — legacy HMAC dev-token gate. Production refuses any value other
   // than absent/'false' (enforced via the prod refinement on the schema).
   CLERK_DEV_HMAC_TOKENS: z.string().optional(),
+  // Unsigned-token local bypass (auth/dev-auth-bypass.ts). Runtime is already
+  // hard-gated on NODE_ENV=dev|development; refuse at schema parse in prod too.
+  DEV_AUTH_BYPASS: z.string().optional(),
+  // Staging escape hatch: allow pk_test_/sk_test_ under NODE_ENV=production.
+  // Production must use live keys unless this is explicitly 'true'.
+  ALLOW_CLERK_TEST_KEYS: z.string().optional(),
 } as const;
 
 const devEnvSchema = z.object({
@@ -462,6 +468,44 @@ const devEnvSchema = z.object({
   CLERK_SECRET_KEY: z.string().min(1).optional(),
   CLERK_PUBLISHABLE_KEY: z.string().min(1).optional(),
 });
+
+/**
+ * True when Clerk test-key prefixes are allowed under a production NODE_ENV
+ * (staging-shaped deploys). Default: refuse — prod must use pk_live_/sk_live_.
+ */
+export function allowsClerkTestKeys(
+  env: Record<string, string | undefined>,
+): boolean {
+  return env.ALLOW_CLERK_TEST_KEYS === 'true';
+}
+
+/** Reject pk_test_/sk_test_ in production unless ALLOW_CLERK_TEST_KEYS=true. */
+export function assertClerkKeyPrefixesForProduction(
+  env: Record<string, string | undefined>,
+): void {
+  if (allowsClerkTestKeys(env)) return;
+  const pub = env.CLERK_PUBLISHABLE_KEY ?? '';
+  const secret = env.CLERK_SECRET_KEY ?? '';
+  const problems: string[] = [];
+  if (pub.startsWith('pk_test_')) {
+    problems.push(
+      "CLERK_PUBLISHABLE_KEY: production requires pk_live_ (got pk_test_). " +
+        'Use the Production Clerk instance, or set ALLOW_CLERK_TEST_KEYS=true for staging.',
+    );
+  }
+  if (secret.startsWith('sk_test_')) {
+    problems.push(
+      "CLERK_SECRET_KEY: production requires sk_live_ (got sk_test_). " +
+        'Use the Production Clerk instance, or set ALLOW_CLERK_TEST_KEYS=true for staging.',
+    );
+  }
+  if (problems.length > 0) {
+    throw new Error(
+      `Environment validation failed:\n${problems.map((p) => `  - ${p}`).join('\n')}\n` +
+        'See docs/runbooks/clerk-setup.md.',
+    );
+  }
+}
 
 const prodEnvSchema = z
   .object({
@@ -491,6 +535,13 @@ const prodEnvSchema = z
       .refine((v) => v !== 'true', {
         message:
           "CLERK_DEV_HMAC_TOKENS=true is forbidden in production. Unset or set to 'false' before starting.",
+      }),
+    DEV_AUTH_BYPASS: z
+      .string()
+      .optional()
+      .refine((v) => v !== 'true', {
+        message:
+          "DEV_AUTH_BYPASS=true is forbidden in production. Unset or set to 'false' before starting.",
       }),
   });
 
@@ -523,6 +574,10 @@ export function validateEnvSchema(
       `Environment validation failed:\n${lines.join('\n')}\n` +
         'Set these environment variables before starting the service.'
     );
+  }
+
+  if (isProductionEnv(env.NODE_ENV)) {
+    assertClerkKeyPrefixesForProduction(env);
   }
 
   return result.data as Env;
