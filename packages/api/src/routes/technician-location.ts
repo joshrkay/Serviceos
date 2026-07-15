@@ -12,7 +12,7 @@ import { AuditRepository, createAuditEvent } from '../audit/audit';
 
 const pingSchema = z.object({
   clientPingId: z.string().uuid(),
-  appointmentId: z.string().optional(),
+  appointmentId: z.string().uuid().optional(),
   lat: z.number(),
   lng: z.number(),
   accuracyMeters: z.number().optional(),
@@ -29,11 +29,57 @@ const batchedPingSchema = z.object({
 
 export interface TechnicianLocationRouteDeps {
   repository: TechnicianLocationPingRepository;
-  canSubmitForTechnician?: (auth: NonNullable<AuthenticatedRequest['auth']>, technicianId: string) => Promise<boolean>;
+  canSubmitForTechnician?: (
+    auth: NonNullable<AuthenticatedRequest['auth']>,
+    technicianId: string,
+  ) => Promise<boolean>;
+  /**
+   * When set, pings whose appointmentId is not assigned to the submitting
+   * technician have appointmentId stripped (location still accepted).
+   */
+  isAppointmentAssignedToTechnician?: (
+    tenantId: string,
+    appointmentId: string,
+    technicianId: string,
+  ) => Promise<boolean>;
   auditRepo?: AuditRepository;
 }
 
 type ParsedPing = z.infer<typeof pingSchema>;
+
+async function sanitizeAppointmentIds(
+  deps: TechnicianLocationRouteDeps,
+  tenantId: string,
+  technicianId: string,
+  pings: ParsedPing[],
+): Promise<ParsedPing[]> {
+  if (!deps.isAppointmentAssignedToTechnician) return pings;
+
+  const cache = new Map<string, boolean>();
+  const out: ParsedPing[] = [];
+  for (const ping of pings) {
+    if (!ping.appointmentId) {
+      out.push(ping);
+      continue;
+    }
+    let allowed = cache.get(ping.appointmentId);
+    if (allowed === undefined) {
+      allowed = await deps.isAppointmentAssignedToTechnician(
+        tenantId,
+        ping.appointmentId,
+        technicianId,
+      );
+      cache.set(ping.appointmentId, allowed);
+    }
+    if (allowed) {
+      out.push(ping);
+    } else {
+      const { appointmentId: _stripped, ...rest } = ping;
+      out.push(rest);
+    }
+  }
+  return out;
+}
 
 function buildLocationBatch(
   tenantId: string,
@@ -83,7 +129,7 @@ async function emitLocationBatchAudit(
 }
 
 export function createTechnicianLocationRouter(
-  repositoryOrDeps: TechnicianLocationPingRepository | TechnicianLocationRouteDeps
+  repositoryOrDeps: TechnicianLocationPingRepository | TechnicianLocationRouteDeps,
 ): Router {
   const deps: TechnicianLocationRouteDeps =
     'repository' in repositoryOrDeps ? repositoryOrDeps : { repository: repositoryOrDeps };
@@ -119,11 +165,13 @@ export function createTechnicianLocationRouter(
         }
       }
 
-      const batch = buildLocationBatch(
+      const sanitized = await sanitizeAppointmentIds(
+        deps,
         req.auth!.tenantId,
         parsed.technicianId,
         parsed.pings,
       );
+      const batch = buildLocationBatch(req.auth!.tenantId, parsed.technicianId, sanitized);
 
       const inserted = await deps.repository.insertMany(req.auth!.tenantId, batch);
       await emitLocationBatchAudit(
@@ -139,7 +187,7 @@ export function createTechnicianLocationRouter(
         duplicateCount: batch.length - inserted.length,
         pings: inserted,
       });
-    })
+    }),
   );
 
   return router;

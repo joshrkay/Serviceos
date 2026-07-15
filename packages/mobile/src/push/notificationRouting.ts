@@ -19,7 +19,7 @@ const HOME_ROUTE = '/';
 // outside this set falls back to Home — the client never trusts an arbitrary
 // server-supplied path.
 const DETAIL_ROUTE_PREFIXES = ['/customers/', '/messages/', '/proposals/', '/jobs/'] as const;
-const EXACT_ROUTES = new Set(['/schedule', '/invoices', '/approvals']);
+const EXACT_ROUTES = new Set(['/schedule', '/today', '/invoices', '/approvals']);
 
 /**
  * True when `screen` is an absolute path the app is permitted to navigate to:

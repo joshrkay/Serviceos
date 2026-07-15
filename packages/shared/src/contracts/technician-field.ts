@@ -20,6 +20,80 @@ export interface TechnicianDayAppointment {
   updatedAt: string;
 }
 
+/** Terminal visit statuses excluded from "next / active job" selection. */
+export const TECHNICIAN_APPOINTMENT_TERMINAL_STATUSES = new Set<string>([
+  'canceled',
+  'completed',
+  'no_show',
+]);
+
+export interface PickActiveAppointmentInput {
+  id: string;
+  status: string;
+  scheduledStart: string;
+  scheduledEnd: string;
+}
+
+/**
+ * Pick the tradesperson's current / next job for GPS attachment and schedule UX.
+ *
+ * Preference order:
+ * 1. `in_progress`
+ * 2. Currently inside the scheduled window
+ * 3. Next future start
+ * 4. Most recently started open visit (late / overrun)
+ */
+export function pickActiveAppointment<T extends PickActiveAppointmentInput>(
+  appointments: readonly T[],
+  nowMs: number,
+): T | null {
+  const open = appointments.filter(
+    (appointment) => !TECHNICIAN_APPOINTMENT_TERMINAL_STATUSES.has(appointment.status),
+  );
+  if (open.length === 0) return null;
+
+  const inProgress = open.find((appointment) => appointment.status === 'in_progress');
+  if (inProgress) return inProgress;
+
+  const inWindow = open.find((appointment) => {
+    const start = Date.parse(appointment.scheduledStart);
+    const end = Date.parse(appointment.scheduledEnd);
+    return Number.isFinite(start) && Number.isFinite(end) && start <= nowMs && nowMs <= end;
+  });
+  if (inWindow) return inWindow;
+
+  const upcoming = open
+    .filter((appointment) => {
+      const start = Date.parse(appointment.scheduledStart);
+      return Number.isFinite(start) && start >= nowMs;
+    })
+    .sort(
+      (left, right) =>
+        Date.parse(left.scheduledStart) - Date.parse(right.scheduledStart),
+    );
+  if (upcoming[0]) return upcoming[0];
+
+  const pastOpen = [...open].sort(
+    (left, right) =>
+      Date.parse(right.scheduledStart) - Date.parse(left.scheduledStart),
+  );
+  return pastOpen[0] ?? null;
+}
+
+/** Calendar date `YYYY-MM-DD` in the tenant timezone (falls back to runtime local). */
+export function tenantLocalDate(now: Date, timeZone?: string): string {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    ...(timeZone ? { timeZone } : {}),
+  }).formatToParts(now);
+  const year = parts.find((part) => part.type === 'year')?.value ?? '';
+  const month = parts.find((part) => part.type === 'month')?.value ?? '';
+  const day = parts.find((part) => part.type === 'day')?.value ?? '';
+  return `${year}-${month}-${day}`;
+}
+
 export interface TechnicianDayAppointmentListResponse {
   appointments: TechnicianDayAppointment[];
   total: number;

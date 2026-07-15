@@ -45,6 +45,8 @@ const BOTH_LINKS: readonly PersonaQuickLink[] = [
 const TECH_LINKS: readonly PersonaQuickLink[] = [
   { label: 'Jobs', route: '/jobs' },
   { label: 'Messages', route: '/messages' },
+  // Schedule deep-links redirect technicians to Today (see app/schedule.tsx).
+  { label: 'Schedule', route: '/schedule' },
 ];
 
 function isTechnicianRole(role: string): boolean {

@@ -5115,6 +5115,10 @@ export function createApp(): AppWithLifecycle {
       repository: technicianLocationPingRepo,
       canSubmitForTechnician: (auth, technicianId) =>
         technicianLocationAuthorizer.canSubmitForTechnician(auth, technicianId),
+      isAppointmentAssignedToTechnician: async (tenantId, appointmentId, technicianId) => {
+        const assignments = await assignmentRepo.findByAppointment(tenantId, appointmentId);
+        return assignments.some((assignment) => assignment.technicianId === technicianId);
+      },
       auditRepo,
     })
   );

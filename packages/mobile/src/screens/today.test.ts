@@ -56,6 +56,7 @@ const h = vi.hoisted(() => ({
     | 'paused'
     | 'denied'
     | 'error',
+  tracker: vi.fn(),
 }));
 
 vi.mock('expo-router', () => ({
@@ -84,7 +85,7 @@ vi.mock('../api/technicianField', () => ({
   postRunningLate: h.runningLate,
 }));
 vi.mock('../location/useForegroundLocationTracker', () => ({
-  useForegroundLocationTracker: () => ({ status: h.trackingStatus }),
+  useForegroundLocationTracker: (options: unknown) => h.tracker(options),
 }));
 
 // eslint-disable-next-line import/first
@@ -96,6 +97,7 @@ beforeEach(() => {
   h.meLoading = false;
   h.meError = null;
   h.trackingStatus = 'tracking';
+  h.tracker.mockImplementation(() => ({ status: h.trackingStatus }));
   h.listAppointments.mockResolvedValue({ appointments: [APPOINTMENT], total: 1 });
   h.enRoute.mockResolvedValue({ accepted: true, notified: true, idempotencyKey: 'notice-1' });
   h.runningLate.mockResolvedValue({
@@ -130,11 +132,12 @@ describe('Today technician screen', () => {
     const { container, getByText } = render(createElement(Today));
 
     await waitFor(() => expect(getByText('Rivera Family')).toBeTruthy());
+    expect(getByText('Next up')).toBeTruthy();
     expect(getByText('9:00 AM–10:30 AM')).toBeTruthy();
     expect(getByText('12 Market St, Oakland, CA')).toBeTruthy();
     expect(getByText('Scheduled')).toBeTruthy();
     expect(getByText('Repair upstairs air conditioner')).toBeTruthy();
-    expect(getByText('Location sharing while Today is open')).toBeTruthy();
+    expect(getByText('Sharing location for Rivera Family')).toBeTruthy();
 
     const buttons = Array.from(container.querySelectorAll('button'));
     expect(buttons).toHaveLength(4);
@@ -143,6 +146,46 @@ describe('Today technician screen', () => {
       expect(button.className).not.toMatch(/\bmin-w-\[/);
     }
     expect(container.firstElementChild?.className).toMatch(/\bmax-w-full\b/);
+  });
+
+  it('attaches GPS pings to the active / next appointment id', async () => {
+    vi.setSystemTime(new Date('2026-07-15T15:00:00.000Z'));
+    render(createElement(Today));
+
+    await waitFor(() =>
+      expect(h.tracker).toHaveBeenCalledWith(
+        expect.objectContaining({
+          enabled: true,
+          technicianId: TECHNICIAN_ID,
+          appointmentId: APPOINTMENT.id,
+        }),
+      ),
+    );
+  });
+
+  it('locks GPS to the visit the technician marked en route', async () => {
+    vi.setSystemTime(new Date('2026-07-15T12:00:00.000Z'));
+    const later: TechnicianDayAppointment = {
+      ...APPOINTMENT,
+      id: 'appointment-2',
+      jobId: 'job-2',
+      customerName: 'Later Stop',
+      scheduledStart: '2026-07-15T20:00:00.000Z',
+      scheduledEnd: '2026-07-15T21:00:00.000Z',
+    };
+    h.listAppointments.mockResolvedValue({
+      appointments: [APPOINTMENT, later],
+      total: 2,
+    });
+    const { getAllByText, getByText } = render(createElement(Today));
+    await waitFor(() => expect(getByText('Rivera Family')).toBeTruthy());
+
+    fireEvent.click(getAllByText('En route')[1]!.closest('button')!);
+    await waitFor(() =>
+      expect(h.tracker).toHaveBeenCalledWith(
+        expect.objectContaining({ appointmentId: later.id }),
+      ),
+    );
   });
 
   it('renders an empty day and can refetch after an API error', async () => {

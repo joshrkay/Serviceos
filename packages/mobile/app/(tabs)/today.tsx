@@ -1,6 +1,6 @@
 import type { TechnicianDayAppointment } from '@ai-service-os/shared';
 import { useRouter } from 'expo-router';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Linking,
@@ -23,6 +23,7 @@ import { useForegroundLocationTracker } from '../../src/location/useForegroundLo
 import { buildMapsUrl } from '../../src/lib/deviceLinks';
 import {
   formatAppointmentWindow,
+  pickActiveAppointment,
   technicianStatusLabel,
   tenantLocalDate,
 } from '../../src/lib/technicianDay';
@@ -34,20 +35,25 @@ type AppointmentAction = 'en-route' | 'running-late';
 function trackingCopy(
   status: ReturnType<typeof useForegroundLocationTracker>['status'],
   enabled: boolean,
+  active: TechnicianDayAppointment | null,
 ): string {
   if (!enabled) return 'Location sharing is off in supervisor mode';
+  if (!active) return 'Location sharing starts when you have a visit today';
   if (status === 'requesting') return 'Requesting location access…';
-  if (status === 'tracking') return 'Location sharing while Today is open';
+  if (status === 'tracking') {
+    return `Sharing location for ${active.customerName || 'your next visit'}`;
+  }
   if (status === 'paused') return 'Location paused while the app is in the background';
   if (status === 'denied') return 'Location off — enable access in Settings to share';
   if (status === 'error') return 'Location sharing unavailable — appointments still work';
-  return 'Location sharing starts while Today is open';
+  return `Location sharing ready for ${active.customerName || 'your next visit'}`;
 }
 
 function AppointmentCard({
   appointment,
   timezone,
   disabled,
+  isNext,
   onAction,
   onOpenJob,
   onOpenMaps,
@@ -55,14 +61,24 @@ function AppointmentCard({
   appointment: TechnicianDayAppointment;
   timezone?: string;
   disabled: boolean;
+  isNext: boolean;
   onAction: (action: AppointmentAction) => void;
   onOpenJob: () => void;
   onOpenMaps: (() => void) | null;
 }) {
   return (
-    <View className="mb-4 w-full max-w-full rounded-xl border border-border bg-card p-4">
+    <View
+      className={`mb-4 w-full max-w-full rounded-xl border bg-card p-4 ${
+        isNext ? 'border-primary' : 'border-border'
+      }`}
+    >
       <View className="min-w-0 flex-row items-start justify-between gap-3">
         <View className="min-w-0 flex-1">
+          {isNext ? (
+            <Text className="mb-1 text-xs font-semibold uppercase tracking-wide text-primary">
+              Next up
+            </Text>
+          ) : null}
           <Text className="font-heading text-lg font-semibold text-foreground">
             {appointment.customerName || 'Customer'}
           </Text>
@@ -154,6 +170,7 @@ export default function Today() {
   const [dayLoading, setDayLoading] = useState(true);
   const [dayError, setDayError] = useState<Error | null>(null);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
+  const [enRouteFocusId, setEnRouteFocusId] = useState<string | null>(null);
   const actionInFlightRef = useRef(false);
   const requestVersionRef = useRef(0);
 
@@ -166,10 +183,24 @@ export default function Today() {
         canFieldServe: me.can_field_serve,
       })
     : null;
-  const trackingEnabled = nav?.persona === 'tech' || nav?.persona === 'both';
+  const personaAllowsTracking = nav?.persona === 'tech' || nav?.persona === 'both';
+  const activeAppointment = useMemo(() => {
+    if (
+      enRouteFocusId &&
+      appointments.some((appointment) => appointment.id === enRouteFocusId)
+    ) {
+      const focused = appointments.find((appointment) => appointment.id === enRouteFocusId);
+      if (focused && focused.status !== 'canceled' && focused.status !== 'completed' && focused.status !== 'no_show') {
+        return focused;
+      }
+    }
+    return pickActiveAppointment(appointments, Date.now());
+  }, [appointments, enRouteFocusId]);
+  const trackingEnabled = personaAllowsTracking && Boolean(activeAppointment);
   const location = useForegroundLocationTracker({
     enabled: trackingEnabled,
     technicianId,
+    appointmentId: activeAppointment?.id,
   });
 
   const loadDay = useCallback(async () => {
@@ -210,6 +241,7 @@ export default function Today() {
     try {
       if (action === 'en-route') {
         const result = await postEnRoute(client, appointment.id);
+        setEnRouteFocusId(appointment.id);
         showToast({
           title: result.notified ? 'Customer notified' : 'Marked en route',
           body: result.notified
@@ -305,7 +337,7 @@ export default function Today() {
 
         <View className="mb-5 mt-4 w-full max-w-full rounded-lg bg-secondary px-4 py-3">
           <Text className="text-sm text-secondaryForeground">
-            {trackingCopy(location.status, trackingEnabled)}
+            {trackingCopy(location.status, personaAllowsTracking, activeAppointment)}
           </Text>
         </View>
 
@@ -338,6 +370,7 @@ export default function Today() {
                 appointment={appointment}
                 timezone={me?.timezone}
                 disabled={pendingAction !== null}
+                isNext={activeAppointment?.id === appointment.id}
                 onAction={(action) => void runAction(appointment, action)}
                 onOpenJob={() => router.push(`/jobs/${appointment.jobId}`)}
                 onOpenMaps={

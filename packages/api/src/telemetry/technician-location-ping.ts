@@ -103,6 +103,9 @@ export function validateTechnicianLocationPingInput(
   if (!input.technicianId) errors.push('technicianId is required');
   if (!UUID_PATTERN.test(input.clientPingId)) errors.push('clientPingId must be a valid UUID');
   if (!input.source) errors.push('source is required');
+  if (input.appointmentId != null && !UUID_PATTERN.test(input.appointmentId)) {
+    errors.push('appointmentId must be a valid UUID when provided');
+  }
   errors.push(...validateLocationValues(input));
   errors.push(...validateRecordedAt(input.recordedAt, now, maxStaleMs, maxFutureDriftMs));
 

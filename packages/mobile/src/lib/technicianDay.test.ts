@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   formatAppointmentWindow,
+  pickActiveAppointment,
   tenantLocalDate,
   technicianStatusLabel,
 } from './technicianDay';
@@ -24,5 +25,21 @@ describe('technician day formatting', () => {
 
   it('turns wire statuses into compact display labels', () => {
     expect(technicianStatusLabel('in_progress')).toBe('In progress');
+  });
+
+  it('re-exports pickActiveAppointment for next-job GPS targeting', () => {
+    expect(
+      pickActiveAppointment(
+        [
+          {
+            id: 'next',
+            status: 'scheduled',
+            scheduledStart: '2026-07-15T18:00:00.000Z',
+            scheduledEnd: '2026-07-15T19:00:00.000Z',
+          },
+        ],
+        Date.parse('2026-07-15T12:00:00.000Z'),
+      )?.id,
+    ).toBe('next');
   });
 });

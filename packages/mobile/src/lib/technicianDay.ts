@@ -1,18 +1,10 @@
+export {
+  pickActiveAppointment,
+  tenantLocalDate,
+} from '@ai-service-os/shared';
+
 function dateTimeOptions(timeZone?: string): Intl.DateTimeFormatOptions {
   return timeZone ? { timeZone } : {};
-}
-
-export function tenantLocalDate(now: Date, timeZone?: string): string {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    ...dateTimeOptions(timeZone),
-  }).formatToParts(now);
-  const year = parts.find((part) => part.type === 'year')?.value ?? '';
-  const month = parts.find((part) => part.type === 'month')?.value ?? '';
-  const day = parts.find((part) => part.type === 'day')?.value ?? '';
-  return `${year}-${month}-${day}`;
 }
 
 export function formatAppointmentWindow(

@@ -107,10 +107,12 @@ describe('useForegroundLocationTracker', () => {
     expect(first.pings.map((ping) => ping.clientPingId)).toEqual([
       '04b0afcd-bd09-4e9d-a671-b44d57dd617b',
     ]);
+    expect(first.pings[0]?.appointmentId).toBe('appointment-1');
     expect(retry.pings.map((ping) => ping.clientPingId)).toEqual([
       '04b0afcd-bd09-4e9d-a671-b44d57dd617b',
       'c43a76b0-fb83-4c1b-86cb-16d1c80552a2',
     ]);
+    expect(retry.pings.every((ping) => ping.appointmentId === 'appointment-1')).toBe(true);
     expect(result.current.status).toBe('tracking');
   });
 

@@ -271,6 +271,82 @@ describe('POST /api/technician-location', () => {
     expect(res.status).toBeGreaterThanOrEqual(400);
   });
 
+  it('rejects a non-UUID appointmentId before persistence', async () => {
+    const res = await request(app).post('/api/technician-location').send({
+      technicianId,
+      pings: [
+        {
+          clientPingId: firstClientPingId,
+          appointmentId: 'not-a-uuid',
+          lat: 37.7,
+          lng: -122.4,
+          recordedAt: firstPingIso,
+          source: 'gps',
+        },
+      ],
+    });
+
+    expect(res.status).toBe(400);
+    expect(await repo.listByTechnician(tenantId, technicianId)).toHaveLength(0);
+  });
+
+  it('strips unassigned appointmentIds but still accepts the location sample', async () => {
+    const assignedAppointmentId = '550e8400-e29b-41d4-a716-446655440030';
+    const foreignAppointmentId = '550e8400-e29b-41d4-a716-446655440031';
+    app = express();
+    app.use(express.json());
+    repo = new InMemoryTechnicianLocationPingRepository();
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: technicianClerkId,
+        canonicalUserId: technicianId,
+        sessionId: 'session-1',
+        tenantId,
+        role: 'technician',
+      };
+      next();
+    });
+    app.use(
+      '/api/technician-location',
+      createTechnicianLocationRouter({
+        repository: repo,
+        isAppointmentAssignedToTechnician: async (_tenantId, appointmentId) =>
+          appointmentId === assignedAppointmentId,
+        auditRepo,
+      }),
+    );
+
+    const res = await request(app).post('/api/technician-location').send({
+      technicianId,
+      pings: [
+        {
+          clientPingId: firstClientPingId,
+          appointmentId: foreignAppointmentId,
+          lat: 37.7,
+          lng: -122.4,
+          recordedAt: firstPingIso,
+          source: 'gps',
+        },
+        {
+          clientPingId: secondClientPingId,
+          appointmentId: assignedAppointmentId,
+          lat: 37.8,
+          lng: -122.5,
+          recordedAt: secondPingIso,
+          source: 'gps',
+        },
+      ],
+    });
+
+    expect(res.status).toBe(201);
+    const rows = await repo.listByTechnician(tenantId, technicianId);
+    expect(rows).toHaveLength(2);
+    expect(rows.find((row) => row.clientPingId === firstClientPingId)?.appointmentId).toBeUndefined();
+    expect(rows.find((row) => row.clientPingId === secondClientPingId)?.appointmentId).toBe(
+      assignedAppointmentId,
+    );
+  });
+
   it('keeps tenant isolation across repositories', async () => {
     await request(app).post('/api/technician-location').send({
       technicianId,
