@@ -85,6 +85,12 @@ describe('Hermetic DEV_AUTH_BYPASS boot', () => {
     expect(res.status).toBe(200);
     expect(typeof res.body.voiceAgentLive).toBe('boolean');
     expect(res.body.voiceAgentLive).toBe(false);
+    // CRM unlock contract: seeded settings ⇒ identity done so hermetic
+    // journeys are not redirected to /onboarding (ProtectedRoute gate).
+    const identity = (res.body.steps as Array<{ id: string; status: string }>).find(
+      (s) => s.id === 'identity',
+    );
+    expect(identity?.status).toBe('done');
   });
 
   it('POST /api/assistant/chat creates a create_customer proposal', async () => {

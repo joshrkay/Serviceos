@@ -80,15 +80,31 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
           // Hermetic / no-DB boot: return a soft status from settings so the
           // Settings "AI phone answering" toggle is not stuck on Loading…
           // forever (503 left voiceAgentLive === null in the web client).
+          //
+          // Soft identity: webhook / ensureTenantSettings only seeds
+          // businessName. Without a pool, PUT /identity is 503, so we cannot
+          // finish the real wizard. Previously a 503 left useOnboardingStatus
+          // data=null and OnboardingGuard kept CRM open. Returning incomplete
+          // identity here hard-redirects to /onboarding and breaks hermetic
+          // journeys (e.g. EST-0001 never visible on /estimates). When a
+          // settings row exists, treat identity as done for CRM unlock only.
           const settings = await settingsRepo.findByTenant(req.auth!.tenantId);
+          const seededName = settings?.businessName?.trim() || null;
+          const softIdentityDone = seededName != null;
           const status = deriveOnboardingStatus({
             tenantId: req.auth!.tenantId,
             tenantExists: true,
             identity: {
-              businessName: settings?.businessName ?? null,
-              businessHours: settings?.businessHours ?? null,
-              jobBufferMinutes: settings?.jobBufferMinutes ?? null,
-              hourlyRateCents: settings?.hourlyRateCents ?? null,
+              businessName: seededName,
+              businessHours:
+                settings?.businessHours ??
+                (softIdentityDone
+                  ? { monday: { open: '09:00', close: '17:00' } }
+                  : null),
+              jobBufferMinutes:
+                settings?.jobBufferMinutes ?? (softIdentityDone ? 15 : null),
+              hourlyRateCents:
+                settings?.hourlyRateCents ?? (softIdentityDone ? 15000 : null),
             },
             packActivated: false,
             twilioStatus: null,
