@@ -232,6 +232,18 @@ export const router = createBrowserRouter([
       { path: 'contracts',      lazy: async () => ({ Component: (await import('./components/contracts/MaintenanceContractsPage')).MaintenanceContractsPage }) },
       { path: 'contracts/:id',  lazy: async () => ({ Component: (await import('./components/contracts/ContractDetailPage')).ContractDetailPage }) },
       { path: 'inbox',          lazy: async () => ({ Component: (await import('./components/inbox/InboxPage')).InboxPage }) },
+      // Canonical proposals UI lives at /inbox; keep /proposals as an alias
+      // so deep links and nav typos land on the approvals surface.
+      {
+        path: 'proposals',
+        lazy: async () => {
+          const { Navigate } = await import('react-router');
+          function ProposalsRedirect() {
+            return React.createElement(Navigate, { to: '/inbox', replace: true });
+          }
+          return { Component: ProposalsRedirect };
+        },
+      },
       { path: 'comms-inbox',    lazy: async () => ({ Component: (await import('./pages/conversations/CommsInboxPage')).CommsInboxPage }) },
       { path: 'interactions',   lazy: async () => ({ Component: (await import('./components/interactions/InteractionsPage')).InteractionsPage }) },
       { path: 'interactions/dispatch', lazy: async () => ({ Component: (await import('./components/interactions/DispatchLogPage')).DispatchLogPage }) },

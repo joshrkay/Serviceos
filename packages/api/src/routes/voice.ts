@@ -20,6 +20,7 @@ import { Queue } from '../queues/queue';
 import {
   mintDeepgramStreamToken,
   DeepgramTokenUnavailableError,
+  DeepgramTokenPermissionError,
 } from '../voice/deepgram-token';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { Logger } from '../logging/logger';
@@ -148,6 +149,19 @@ export function createVoiceRouter(
           res.status(503).json({
             error: 'NOT_CONFIGURED',
             message: 'Live transcription is not configured',
+          });
+          return;
+        }
+        if (err instanceof DeepgramTokenPermissionError) {
+          // Key is set but cannot mint browser grant tokens (needs Member+).
+          // Same operator-facing posture as NOT_CONFIGURED: not a transient retry.
+          logger?.error('voice.stream-token: key lacks grant permissions', {
+            error: err.message,
+          });
+          res.status(503).json({
+            error: 'NOT_CONFIGURED',
+            message:
+              'Live transcription is misconfigured: Deepgram API key needs Member permissions',
           });
           return;
         }

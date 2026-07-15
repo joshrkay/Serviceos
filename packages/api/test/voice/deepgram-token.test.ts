@@ -3,6 +3,7 @@ import {
   mintDeepgramStreamToken,
   DeepgramTokenUnavailableError,
   DeepgramTokenMintError,
+  DeepgramTokenPermissionError,
   STREAM_TOKEN_TTL_SECONDS,
   STREAM_TOKEN_MODEL,
 } from '../../src/voice/deepgram-token';
@@ -53,6 +54,17 @@ describe('Story 3.2 — mintDeepgramStreamToken', () => {
     await expect(
       mintDeepgramStreamToken({ apiKey: 'k', fetchImpl }),
     ).rejects.toBeInstanceOf(DeepgramTokenMintError);
+  });
+
+  it('throws DeepgramTokenPermissionError on a 403 grant (usage-scoped key)', async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: false,
+      status: 403,
+      json: async () => ({ err_code: 'FORBIDDEN', err_msg: 'Insufficient permissions.' }),
+    })) as unknown as typeof fetch;
+    await expect(
+      mintDeepgramStreamToken({ apiKey: 'k', fetchImpl }),
+    ).rejects.toBeInstanceOf(DeepgramTokenPermissionError);
   });
 
   it('throws when the grant response is missing access_token', async () => {
