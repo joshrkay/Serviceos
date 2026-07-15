@@ -4392,7 +4392,7 @@ export function createApp(): AppWithLifecycle {
     // revoke emit portal_session.{created,revoked} via auditRepo.
     createPortalRouter({ portalRepo: portalSessionRepo, customerRepo, auditRepo }),
   );
-  app.use('/api/leads', createLeadsRouter(leadRepo, customerRepo, auditRepo));
+  app.use('/api/leads', createLeadsRouter(leadRepo, customerRepo, auditRepo, locationRepo));
   app.use('/api/locations', createLocationRouter(locationRepo, ownership, auditRepo));
   app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership, queue, feedbackDispatcher, customerRepo, locationRepo, {
     estimateRepo,

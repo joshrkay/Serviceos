@@ -6109,6 +6109,21 @@ export const MIGRATIONS = {
     ALTER TABLE tenants
       ADD COLUMN IF NOT EXISTS stripe_terminal_location_id TEXT;
   `,
+
+  // QA-MANUAL-0730: optional structured service address on leads so
+  // convertToCustomer can promote it to a primary service_locations row.
+  // All columns nullable — address is optional until convert time.
+  // Numbered 251 because main shipped 250_tenants_stripe_terminal_location.
+  '251_leads_service_address': `
+    ALTER TABLE leads
+      ADD COLUMN IF NOT EXISTS street1 TEXT,
+      ADD COLUMN IF NOT EXISTS street2 TEXT,
+      ADD COLUMN IF NOT EXISTS city TEXT,
+      ADD COLUMN IF NOT EXISTS state TEXT,
+      ADD COLUMN IF NOT EXISTS postal_code TEXT,
+      ADD COLUMN IF NOT EXISTS country TEXT,
+      ADD COLUMN IF NOT EXISTS access_notes TEXT;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

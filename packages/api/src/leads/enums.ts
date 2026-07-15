@@ -56,45 +56,106 @@ export const attributionSchema = z
     message: 'attribution may have at most 20 entries',
   });
 
-export const createLeadSchema = z.object({
-  firstName: z.string().min(1).max(100).optional(),
-  lastName: z.string().min(1).max(100).optional(),
-  companyName: z.string().min(1).max(200).optional(),
-  primaryPhone: z.string().min(1).max(40).optional(),
-  email: z.string().email().optional(),
-  source: leadSourceSchema,
-  sourceDetail: z.string().max(500).optional(),
-  utmSource: z.string().max(200).optional(),
-  utmMedium: z.string().max(200).optional(),
-  utmCampaign: z.string().max(200).optional(),
-  attribution: attributionSchema.optional(),
-  estimatedValueCents: estimatedValueCentsSchema.optional(),
-  notes: z.string().max(5000).optional(),
-  assignedUserId: z.string().uuid().optional(),
-  // stage defaults to 'new' on create — callers may not set it.
-}).refine(
-  (v) => Boolean(v.firstName || v.companyName),
-  { message: 'firstName or companyName is required' }
-);
+/** Optional service-address fields shared by lead create/update and convert. */
+const leadAddressFields = {
+  street1: z.string().trim().min(1).max(200).optional(),
+  street2: z.string().trim().max(200).optional(),
+  city: z.string().trim().min(1).max(100).optional(),
+  state: z.string().trim().min(1).max(50).optional(),
+  postalCode: z.string().trim().min(1).max(20).optional(),
+  country: z.string().trim().min(1).max(50).optional(),
+  accessNotes: z.string().trim().max(2000).optional(),
+};
 
-export const updateLeadSchema = z.object({
-  firstName: z.string().min(1).max(100).optional(),
-  lastName: z.string().min(1).max(100).optional(),
-  companyName: z.string().min(1).max(200).optional(),
-  primaryPhone: z.string().min(1).max(40).optional(),
-  email: z.string().email().optional().or(z.literal('')),
-  source: leadSourceSchema.optional(),
-  sourceDetail: z.string().max(500).optional(),
-  utmSource: z.string().max(200).nullable().optional(),
-  utmMedium: z.string().max(200).nullable().optional(),
-  utmCampaign: z.string().max(200).nullable().optional(),
-  attribution: attributionSchema.optional(),
-  stage: leadStageSchema.optional(),
-  estimatedValueCents: estimatedValueCentsSchema.nullable().optional(),
-  notes: z.string().max(5000).optional(),
-  assignedUserId: z.string().uuid().nullable().optional(),
-  preferredLanguage: z.enum(['en', 'es']).nullable().optional(),
-});
+/**
+ * When any core address field is present, all four required location
+ * fields must be present (same completeness gate as createServiceLocation).
+ */
+function refineCompleteAddress<T extends {
+  street1?: string | null;
+  city?: string | null;
+  state?: string | null;
+  postalCode?: string | null;
+}>(v: T): boolean {
+  const any =
+    Boolean(v.street1) || Boolean(v.city) || Boolean(v.state) || Boolean(v.postalCode);
+  if (!any) return true;
+  return Boolean(v.street1 && v.city && v.state && v.postalCode);
+}
+
+export const createLeadSchema = z
+  .object({
+    firstName: z.string().min(1).max(100).optional(),
+    lastName: z.string().min(1).max(100).optional(),
+    companyName: z.string().min(1).max(200).optional(),
+    primaryPhone: z.string().min(1).max(40).optional(),
+    email: z.string().email().optional(),
+    source: leadSourceSchema,
+    sourceDetail: z.string().max(500).optional(),
+    utmSource: z.string().max(200).optional(),
+    utmMedium: z.string().max(200).optional(),
+    utmCampaign: z.string().max(200).optional(),
+    attribution: attributionSchema.optional(),
+    estimatedValueCents: estimatedValueCentsSchema.optional(),
+    notes: z.string().max(5000).optional(),
+    assignedUserId: z.string().uuid().optional(),
+    ...leadAddressFields,
+    // stage defaults to 'new' on create — callers may not set it.
+  })
+  .refine((v) => Boolean(v.firstName || v.companyName), {
+    message: 'firstName or companyName is required',
+  })
+  .refine(refineCompleteAddress, {
+    message: 'street1, city, state, and postalCode are required together',
+  });
+
+export const updateLeadSchema = z
+  .object({
+    firstName: z.string().min(1).max(100).optional(),
+    lastName: z.string().min(1).max(100).optional(),
+    companyName: z.string().min(1).max(200).optional(),
+    primaryPhone: z.string().min(1).max(40).optional(),
+    email: z.string().email().optional().or(z.literal('')),
+    source: leadSourceSchema.optional(),
+    sourceDetail: z.string().max(500).optional(),
+    utmSource: z.string().max(200).nullable().optional(),
+    utmMedium: z.string().max(200).nullable().optional(),
+    utmCampaign: z.string().max(200).nullable().optional(),
+    attribution: attributionSchema.optional(),
+    stage: leadStageSchema.optional(),
+    estimatedValueCents: estimatedValueCentsSchema.nullable().optional(),
+    notes: z.string().max(5000).optional(),
+    assignedUserId: z.string().uuid().nullable().optional(),
+    preferredLanguage: z.enum(['en', 'es']).nullable().optional(),
+    street1: z.string().trim().min(1).max(200).nullable().optional(),
+    street2: z.string().trim().max(200).nullable().optional(),
+    city: z.string().trim().min(1).max(100).nullable().optional(),
+    state: z.string().trim().min(1).max(50).nullable().optional(),
+    postalCode: z.string().trim().min(1).max(20).nullable().optional(),
+    country: z.string().trim().min(1).max(50).nullable().optional(),
+    accessNotes: z.string().trim().max(2000).nullable().optional(),
+  })
+  .refine(refineCompleteAddress, {
+    message: 'street1, city, state, and postalCode are required together',
+  });
+
+/** Body for POST /leads/:id/convert — optional override of the lead address. */
+export const convertLeadAddressSchema = z
+  .object({
+    street1: z.string().trim().min(1).max(200).optional(),
+    street2: z.string().trim().max(200).optional(),
+    city: z.string().trim().min(1).max(100).optional(),
+    state: z.string().trim().min(1).max(50).optional(),
+    postalCode: z.string().trim().min(1).max(20).optional(),
+    country: z.string().trim().min(1).max(50).optional(),
+    accessNotes: z.string().trim().max(2000).optional(),
+    label: z.string().trim().max(100).optional(),
+  })
+  .refine(refineCompleteAddress, {
+    message: 'street1, city, state, and postalCode are required together',
+  });
+
+export type ConvertLeadAddressInput = z.infer<typeof convertLeadAddressSchema>;
 
 export const loseLeadSchema = z.object({
   reason: z.string().min(1, 'reason is required').max(500),

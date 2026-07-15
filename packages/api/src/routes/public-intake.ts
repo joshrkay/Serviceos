@@ -41,13 +41,21 @@ const intakeSchema = z.object({
   primaryPhone: z.string().trim().min(7).max(40).optional(),
   email: z.string().trim().email().max(200).optional(),
   // Free-form intake context — service type, urgency, problem description,
-  // address, preferred dates — collapses into a single sourceDetail blob
-  // so we don't need new columns for fields we only display, never query.
+  // preferred dates — collapses into a single sourceDetail blob so we don't
+  // need new columns for fields we only display, never query.
   serviceType: z.string().trim().max(100).optional(),
   urgency: z.string().trim().max(40).optional(),
   description: z.string().trim().max(5000).optional(),
   preferredDates: z.string().trim().max(200).optional(),
+  // Free-text address kept for backward compat; structured fields preferred.
   address: z.string().trim().max(500).optional(),
+  street1: z.string().trim().min(1).max(200).optional(),
+  street2: z.string().trim().max(200).optional(),
+  city: z.string().trim().min(1).max(100).optional(),
+  state: z.string().trim().min(1).max(50).optional(),
+  postalCode: z.string().trim().min(1).max(20).optional(),
+  country: z.string().trim().min(1).max(50).optional(),
+  accessNotes: z.string().trim().max(2000).optional(),
   utmSource: z.string().trim().max(200).optional(),
   utmMedium: z.string().trim().max(200).optional(),
   utmCampaign: z.string().trim().max(200).optional(),
@@ -57,6 +65,14 @@ const intakeSchema = z.object({
 }).refine(
   (v) => Boolean(v.primaryPhone || v.email),
   { message: 'A primaryPhone or email is required so we can reach you' }
+).refine(
+  (v) => {
+    const any =
+      Boolean(v.street1) || Boolean(v.city) || Boolean(v.state) || Boolean(v.postalCode);
+    if (!any) return true;
+    return Boolean(v.street1 && v.city && v.state && v.postalCode);
+  },
+  { message: 'street1, city, state, and postalCode are required together' }
 );
 
 const TENANT_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -66,12 +82,48 @@ function buildSourceDetail(p: z.infer<typeof intakeSchema>): string | undefined 
   if (p.serviceType) parts.push(`Service: ${p.serviceType}`);
   if (p.urgency) parts.push(`Urgency: ${p.urgency}`);
   if (p.preferredDates) parts.push(`Preferred: ${p.preferredDates}`);
-  if (p.address) parts.push(`Address: ${p.address}`);
+  const structuredAddress =
+    p.street1 && p.city && p.state && p.postalCode
+      ? [p.street1, p.street2, `${p.city}, ${p.state} ${p.postalCode}`]
+          .filter(Boolean)
+          .join(', ')
+      : undefined;
+  const addressLine = structuredAddress || p.address;
+  if (addressLine) parts.push(`Address: ${addressLine}`);
   if (p.description) parts.push(`Description: ${p.description}`);
   if (parts.length === 0) return undefined;
   // Lead.sourceDetail is capped at 500 chars by createLeadSchema.
   const joined = parts.join(' | ');
   return joined.length > 500 ? joined.slice(0, 497) + '...' : joined;
+}
+
+/** Prefer structured address; free-text `address` alone is incomplete (street1 only). */
+function resolveIntakeAddress(p: z.infer<typeof intakeSchema>): {
+  street1?: string;
+  street2?: string;
+  city?: string;
+  state?: string;
+  postalCode?: string;
+  country?: string;
+  accessNotes?: string;
+} {
+  if (p.street1 && p.city && p.state && p.postalCode) {
+    return {
+      street1: p.street1,
+      street2: p.street2,
+      city: p.city,
+      state: p.state,
+      postalCode: p.postalCode,
+      country: p.country,
+      accessNotes: p.accessNotes,
+    };
+  }
+  // Free-text only — store on street1 for display; convert will still require
+  // a complete address (city/state/postal) via the convert prompt.
+  if (p.address) {
+    return { street1: p.address };
+  }
+  return {};
 }
 
 export function createPublicIntakeRouter(
@@ -108,6 +160,7 @@ export function createPublicIntakeRouter(
       return;
     }
 
+    const addressFields = resolveIntakeAddress(parsed);
     const lead = await createLead(
       {
         tenantId,
@@ -122,6 +175,7 @@ export function createPublicIntakeRouter(
         utmMedium: parsed.utmMedium,
         utmCampaign: parsed.utmCampaign,
         attribution: parsed.attribution,
+        ...addressFields,
         createdBy: PUBLIC_INTAKE_ACTOR_ID,
         actorRole: PUBLIC_INTAKE_ACTOR_ROLE,
       },
