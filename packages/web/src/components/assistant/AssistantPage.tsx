@@ -1201,6 +1201,16 @@ export function AssistantPage() {
               </div>
             )}
 
+            {voiceConversation.error && (
+              <p
+                role="alert"
+                data-testid="conversation-voice-error"
+                className="mb-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700"
+              >
+                {voiceConversation.error}
+              </p>
+            )}
+
             {/* Pending attachment preview */}
             {pendingAttachment && pendingAttachment.length > 0 && (
               <div className="flex items-center gap-2 mb-2 flex-wrap">

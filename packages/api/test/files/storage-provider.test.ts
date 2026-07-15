@@ -195,6 +195,15 @@ describe('createStorageProvider factory', () => {
     expect(() => createStorageProvider({ NODE_ENV: 'staging' })).toThrow(/Storage configuration/);
   });
 
+  it('allows the dev provider in production when STORAGE_ENABLED=false', () => {
+    const { provider, mode } = createStorageProvider({
+      NODE_ENV: 'production',
+      STORAGE_ENABLED: 'false',
+    });
+    expect(mode).toBe('dev');
+    expect(provider).toBeInstanceOf(DevStorageProvider);
+  });
+
   it('defaults dev public URL to an absolute localhost address', async () => {
     const { provider } = createStorageProvider({ NODE_ENV: 'development', API_PORT: '4321' });
     const url = await provider.generateUploadUrl('b', 'k', 'audio/webm');

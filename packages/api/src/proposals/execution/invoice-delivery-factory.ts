@@ -3,18 +3,24 @@ import { SendServiceInvoiceDeliveryProvider } from '../../notifications/invoice-
 import { NoopInvoiceDeliveryProvider } from './voice-extended-handlers';
 import type { InvoiceDeliveryProvider } from './voice-extended-handlers';
 
+function isProductionLike(nodeEnv: string): boolean {
+  return nodeEnv === 'prod' || nodeEnv === 'production' || nodeEnv === 'staging';
+}
+
 export function resolveInvoiceDeliveryProvider(opts: {
   nodeEnv: string;
   sendService: SendService | undefined;
+  /**
+   * When Twilio/SendGrid are explicitly opted out via EMAIL_ENABLED=false
+   * and TELEPHONY_ENABLED=false, allow the noop provider in prod/staging
+   * instead of refusing to boot.
+   */
+  allowNoopInProduction?: boolean;
 }): InvoiceDeliveryProvider {
   if (opts.sendService) {
     return new SendServiceInvoiceDeliveryProvider(opts.sendService);
   }
-  if (
-    opts.nodeEnv === 'prod' ||
-    opts.nodeEnv === 'production' ||
-    opts.nodeEnv === 'staging'
-  ) {
+  if (isProductionLike(opts.nodeEnv) && !opts.allowNoopInProduction) {
     throw new Error(
       'Invoice delivery requires SendService in production/staging. Configure Twilio/SendGrid credentials.',
     );
