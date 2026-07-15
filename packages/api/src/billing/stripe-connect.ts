@@ -34,6 +34,8 @@ export interface ConnectAccountView {
   status: ConnectStatus;
   chargesEnabled: boolean;
   payoutsEnabled: boolean;
+  /** Stripe Terminal Location id on the connected account, when created. */
+  terminalLocationId: string | null;
 }
 
 export interface StripeConnectServiceDeps {
@@ -161,7 +163,8 @@ export class StripeConnectService {
       `SELECT stripe_connect_account_id,
               stripe_connect_charges_enabled,
               stripe_connect_payouts_enabled,
-              stripe_connect_status
+              stripe_connect_status,
+              stripe_terminal_location_id
        FROM tenants WHERE id = $1`,
       [tenantId],
     );
@@ -172,7 +175,18 @@ export class StripeConnectService {
       chargesEnabled: Boolean(row.stripe_connect_charges_enabled),
       payoutsEnabled: Boolean(row.stripe_connect_payouts_enabled),
       status: (row.stripe_connect_status as ConnectStatus) ?? 'pending',
+      terminalLocationId: (row.stripe_terminal_location_id as string | null) ?? null,
     };
+  }
+
+  async setTerminalLocationId(tenantId: string, locationId: string): Promise<void> {
+    const { rowCount } = await this.deps.pool.query(
+      `UPDATE tenants
+          SET stripe_terminal_location_id = $2
+        WHERE id = $1 AND stripe_connect_account_id IS NOT NULL`,
+      [tenantId, locationId],
+    );
+    if (!rowCount) throw new NotFoundError('Tenant', tenantId);
   }
 
   /**

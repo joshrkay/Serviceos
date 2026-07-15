@@ -6102,6 +6102,13 @@ export const MIGRATIONS = {
       WHERE u.tenant_id = t.id AND u.clerk_user_id = t.owner_id
     );
   `,
+
+  // Stripe Terminal Location id on the connected account (direct charges).
+  // Created lazily on first field collect; reused for Tap to Pay / readers.
+  '250_tenants_stripe_terminal_location': `
+    ALTER TABLE tenants
+      ADD COLUMN IF NOT EXISTS stripe_terminal_location_id TEXT;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

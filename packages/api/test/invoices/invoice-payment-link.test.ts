@@ -56,6 +56,46 @@ describe('createInvoicePaymentLink (INV-04)', () => {
     expect(updated?.stripePaymentLinkUrl).toBe(result.url);
   });
 
+  it('passes stripeAccountId to the provider when Connect charges are enabled', async () => {
+    const repo = new InMemoryInvoiceRepository();
+    const invoice = await repo.create({
+      id: '00000000-0000-4000-8000-000000000013',
+      tenantId,
+      jobId,
+      invoiceNumber: 'INV-0004',
+      status: 'open',
+      lineItems: [{ description: 'Labor', quantity: 1, unitPriceCents: 2000, taxable: true }],
+      totals: calculateDocumentTotals([{ description: 'Labor', quantity: 1, unitPriceCents: 2000, taxable: true }]),
+      amountPaidCents: 0,
+      amountDueCents: 2000,
+      createdBy: 'user-1',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    const seen: Array<{ stripeAccountId?: string }> = [];
+    const provider = {
+      generateLink: async (req: { stripeAccountId?: string }) => {
+        seen.push({ stripeAccountId: req.stripeAccountId });
+        return {
+          linkId: 'plink_1',
+          linkUrl: 'https://pay.mock.com/plink_1',
+          providerReference: 'mock_plink_1',
+        };
+      },
+      deactivateLink: async () => undefined,
+    };
+
+    await createInvoicePaymentLink(tenantId, invoice.id, repo, provider, {
+      resolveTenantConnectAccount: async () => ({
+        accountId: 'acct_op_link',
+        chargesEnabled: true,
+      }),
+    });
+
+    expect(seen[0]?.stripeAccountId).toBe('acct_op_link');
+  });
+
   it('rejects draft invoice with 409-class error', async () => {
     const repo = new InMemoryInvoiceRepository();
     const invoice = await repo.create({
