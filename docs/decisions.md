@@ -415,3 +415,25 @@ camera, microphone, location, and notification permissions must match actual use
 **Alternatives rejected:** Swift/SwiftUI (iOS-only rewrite plus separate Android
 client), Flutter (Dart rewrite with no direct shared-contract reuse), and a
 Capacitor/WebView wrapper (weaker field media, push, and payment integration).
+### D-020: Sent-estimate retract is soft-delete (UI: Withdraw) — no void status
+**Date:** 2026-07-15
+**Initiative:** CRM QA QA-MANUAL-0730 (EST-0002 sent; no Cancel/Void/Withdraw control).
+**Decision:** Owners retract a sent estimate by soft-deleting it. The web UI labels that
+action **Withdraw** for `status === 'sent'` (including the UI-derived "Viewed" state, which
+is still `sent` underneath). Soft-delete sets `deleted_at`, emits audit event
+`estimate.deleted` (metadata includes the prior status), removes the row from list/get
+paths, and stops the public approval link (`findById` filters `deleted_at IS NULL`). Draft,
+`ready_for_review`, `rejected`, and `expired` keep the **Delete** label for the same
+`DELETE /api/estimates/:id` path. Accepted estimates remain non-deletable (clone instead).
+There is **no** estimate `voided` / `canceled` / `withdrawn` status; invoice void stays
+invoice-only.
+**Rationale:** Retractability already shipped via soft-delete (`softDeleteEstimate` in
+`packages/api/src/estimates/estimate.ts`, migration `125_estimates_deleted_at`). QA found a
+discoverability gap — the control only said "Delete" and the confirm copy never named the
+customer-link effect. Renaming/clarifying the UX closes the finding without a status-machine
+migration or a parallel audit event.
+**Story:** QA-MANUAL-0730 / EST withdraw UX.
+**Alternatives rejected:**
+- First-class `voided` status mirroring invoices — expands shared enums, DB CHECK, public
+  approve/decline gates, and money-state for Medium-priority discoverability; deferred.
+- Document-only "sent estimates are immutable" — false; soft-delete already retracts.
