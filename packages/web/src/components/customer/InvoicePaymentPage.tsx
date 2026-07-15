@@ -10,7 +10,8 @@ import {
   useElements,
   useStripe,
 } from '@stripe/react-stripe-js';
-import { loadStripe, Stripe, type PaymentIntentResult } from '@stripe/stripe-js';
+import { Stripe, type PaymentIntentResult } from '@stripe/stripe-js';
+import { loadStripeForAccount } from '../../lib/stripeConnect';
 import { useInvoiceStatus } from '../../hooks/useInvoiceStatus';
 import { getRuntimeConfigValue } from '../../lib/runtimeConfig';
 import { formatCurrencyAmount } from '../../utils/currency';
@@ -112,7 +113,10 @@ async function pingView(token: string) {
   await fetch(`/public/invoices/${token}/view`, { method: 'POST' }).catch(() => undefined);
 }
 
-async function createPaymentIntent(invoiceId: string, viewToken: string): Promise<string> {
+async function createPaymentIntent(
+  invoiceId: string,
+  viewToken: string,
+): Promise<{ clientSecret: string; stripeAccountId: string | null }> {
   const res = await fetch('/api/public-payments/create-payment-intent', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -125,8 +129,14 @@ async function createPaymentIntent(invoiceId: string, viewToken: string): Promis
     }
     throw new Error(body.message ?? `Error ${res.status}`);
   }
-  const data = await res.json() as { clientSecret: string };
-  return data.clientSecret;
+  const data = await res.json() as {
+    clientSecret: string;
+    stripeAccountId?: string | null;
+  };
+  return {
+    clientSecret: data.clientSecret,
+    stripeAccountId: data.stripeAccountId ?? null,
+  };
 }
 
 // ─── Success screen ────────────────────────────────────────────────────────
@@ -362,6 +372,7 @@ export function InvoicePaymentPage() {
 
   // Stripe PaymentIntent state — fetched once after the invoice loads.
   const [clientSecret, setClientSecret] = useState<string | null>(null);
+  const [stripeAccountId, setStripeAccountId] = useState<string | null>(null);
   const [intentError, setIntentError] = useState<string | null>(null);
   const [stripeNotConfigured, setStripeNotConfigured] = useState(false);
 
@@ -370,13 +381,14 @@ export function InvoicePaymentPage() {
   // "Payment received" once the webhook reconciliation lands.
   const [processingAsync, setProcessingAsync] = useState(false);
 
-  // Built per mount so vitest can stub the publishable key. `loadStripe`
-  // de-dupes internally so this still results in a single network call
-  // per key over the page lifecycle.
+  // Built after the PaymentIntent response so Connect direct charges
+  // init Stripe.js with the matching `stripeAccount` option.
   const stripePromise = useMemo<Promise<Stripe | null>>(() => {
+    if (!clientSecret) return Promise.resolve(null);
     const key = getPublishableKey();
-    return key ? loadStripe(key) : Promise.resolve(null);
-  }, []);
+    if (!key) return Promise.resolve(null);
+    return loadStripeForAccount(key, stripeAccountId);
+  }, [clientSecret, stripeAccountId]);
 
   // Stripe redirects back with ?success=true after a completed checkout.
   const paymentSucceeded = searchParams.get('success') === 'true';
@@ -395,12 +407,16 @@ export function InvoicePaymentPage() {
       });
   }, [token]);
 
-  // P2 review fix: detect missing FRONTEND publishable key by awaiting
-  // `stripePromise`. When `loadStripe` resolves to null (or no key is
-  // configured), show the same not-configured fallback we use for the
-  // backend 503 path — otherwise <Elements> would render a permanently
-  // disabled form with no actionable message.
+  // Detect missing FRONTEND publishable key before minting a PaymentIntent.
   useEffect(() => {
+    if (!getPublishableKey()) {
+      setStripeNotConfigured(true);
+    }
+  }, []);
+
+  // After intent loads, also catch loadStripe resolving to null.
+  useEffect(() => {
+    if (!clientSecret) return;
     let cancelled = false;
     stripePromise.then((stripe) => {
       if (!cancelled && !stripe) setStripeNotConfigured(true);
@@ -408,7 +424,7 @@ export function InvoicePaymentPage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [clientSecret, stripePromise]);
 
   // After the invoice loads, request a PaymentIntent client_secret for
   // payable invoices. Skip when already paid or success-redirect.
@@ -418,7 +434,11 @@ export function InvoicePaymentPage() {
     if (stripeNotConfigured) return;
     let cancelled = false;
     createPaymentIntent(invoice.id, token)
-      .then((secret) => { if (!cancelled) setClientSecret(secret); })
+      .then((result) => {
+        if (cancelled) return;
+        setStripeAccountId(result.stripeAccountId);
+        setClientSecret(result.clientSecret);
+      })
       .catch((err: Error) => {
         if (cancelled) return;
         if (err.message === 'STRIPE_NOT_CONFIGURED') {

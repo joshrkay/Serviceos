@@ -85,6 +85,7 @@ import { createBillingRouter } from './routes/billing';
 import { StripeConnectService } from './billing/stripe-connect';
 import { BillingService } from './billing/subscription';
 import { createPaymentRouter } from './routes/payments';
+import { createTerminalRouter } from './routes/terminal';
 import { createNoteRouter } from './routes/notes';
 import { createDevicesRouter } from './routes/devices';
 import { InMemoryDeviceTokenRepository } from './push/device-token-service';
@@ -814,9 +815,16 @@ export function createApp(): AppWithLifecycle {
   const isProd = process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'prod';
   app.use(helmet(buildHelmetOptions(isProd)));
 
-  // CORS — use explicit origin in prod/staging (validated by config), wildcard in dev/test.
+  // CORS — use explicit origin(s) in prod/staging (validated by config),
+  // wildcard in dev/test. Comma-separated CORS_ORIGIN lets Railway host
+  // both the custom domain and the *.up.railway.app alias.
+  const corsOrigin = config.CORS_ORIGIN
+    ? config.CORS_ORIGIN.split(',').map((o) => o.trim()).filter(Boolean)
+    : true;
   app.use(cors({
-    origin: config.CORS_ORIGIN ?? true,
+    origin: Array.isArray(corsOrigin) && corsOrigin.length === 1
+      ? corsOrigin[0]
+      : corsOrigin,
     credentials: true,
   }));
 
@@ -1823,14 +1831,20 @@ export function createApp(): AppWithLifecycle {
   // Voice intents (add_note, send_invoice, record_payment) execute
   // against real domain repositories. Invoice delivery routes through
   // SendService when configured; resolveInvoiceDeliveryProvider throws at
-  // boot in prod/staging without credentials; dev/test uses Noop.
+  // boot in prod/staging without credentials unless delivery is explicitly
+  // opted out (EMAIL_ENABLED=false + TELEPHONY_ENABLED=false); otherwise
+  // dev/test uses Noop.
+  const deliveryOptedOut =
+    process.env.EMAIL_ENABLED === 'false' && process.env.TELEPHONY_ENABLED === 'false';
   const invoiceDeliveryProvider = resolveInvoiceDeliveryProvider({
     nodeEnv: config.NODE_ENV,
     sendService,
+    allowNoopInProduction: deliveryOptedOut,
   });
   const estimateDeliveryProvider = resolveEstimateDeliveryProvider({
     nodeEnv: config.NODE_ENV,
     sendService,
+    allowNoopInProduction: deliveryOptedOut,
   });
   const dispatchAnalyticsRepo = pool
     ? new PgDispatchAnalyticsRepository(pool)
@@ -2686,6 +2700,15 @@ export function createApp(): AppWithLifecycle {
     // Roll up job money state when a lapsed estimate is auto-expired on the
     // public path, so the job doesn't stay stuck in 'estimate_sent'.
     moneyStateDeps: { jobRepo, estimateRepo, invoiceRepo, auditRepo, logger: requestLogger },
+    connectAccountResolver: connectService
+      ? {
+          resolveTenantConnectAccount: async (tenantId: string) => {
+            const view = await connectService.getAccount(tenantId);
+            if (!view.accountId) return null;
+            return { accountId: view.accountId, chargesEnabled: view.chargesEnabled };
+          },
+        }
+      : undefined,
   });
   app.use('/public/estimates', createPublicEstimatesRouter(publicEstimateService));
 
@@ -2852,6 +2875,7 @@ export function createApp(): AppWithLifecycle {
       stripeConfig: process.env.STRIPE_SECRET_KEY
         ? { apiKey: process.env.STRIPE_SECRET_KEY }
         : null,
+      connectAccountResolver,
     }),
   );
 
@@ -4608,6 +4632,7 @@ export function createApp(): AppWithLifecycle {
       paymentLinkProvider,
       agreementRepo,
       customerRepo,
+      connectAccountResolver,
     ),
   );
 
@@ -4649,7 +4674,7 @@ export function createApp(): AppWithLifecycle {
 
   // billingService is hoisted earlier so the Stripe webhook can use
   // the same instance.
-  app.use('/api/billing', createBillingRouter({ billingService, connectService, auditRepo }));
+  app.use('/api/billing', createBillingRouter({ billingService, connectService, auditRepo, pool: pool ?? undefined }));
 
   // Tenant-scoped reporting (revenue by lead source / UTM, money dashboard, tax export).
   const revenueBySourceRepo = pool
@@ -4728,6 +4753,35 @@ export function createApp(): AppWithLifecycle {
       auditRepo,
       transactionalComms,
     ),
+  );
+  // Stripe Terminal — field card-present collect (Connect direct charges).
+  app.use(
+    '/api/terminal',
+    createTerminalRouter({
+      invoiceRepo,
+      connectAccountResolver,
+      stripeApiKey: process.env.STRIPE_SECRET_KEY ?? null,
+      auditRepo,
+      terminalLocation: connectService
+        ? {
+            getExistingLocationId: async (tenantId) => {
+              const view = await connectService.getAccount(tenantId);
+              return view.terminalLocationId;
+            },
+            persistLocationId: (tenantId, locationId) =>
+              connectService.setTerminalLocationId(tenantId, locationId),
+            resolveDisplayName: async (tenantId) => {
+              if (!pool) return 'Field location';
+              const { rows } = await pool.query(
+                `SELECT name FROM tenants WHERE id = $1`,
+                [tenantId],
+              );
+              const name = rows[0]?.name as string | undefined;
+              return name?.trim() || 'Field location';
+            },
+          }
+        : undefined,
+    }),
   );
   app.use('/api/notes', createNoteRouter(noteRepo, ownership, auditRepo));
 

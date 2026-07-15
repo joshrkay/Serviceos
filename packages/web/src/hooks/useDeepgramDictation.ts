@@ -169,10 +169,17 @@ export function useDeepgramDictation(opts: {
     try {
       const res = await apiFetch('/api/voice/stream-token', { method: 'POST' });
       if (!res.ok) {
+        let serverMessage: string | undefined;
+        try {
+          const body = (await res.json()) as { message?: string };
+          serverMessage = typeof body.message === 'string' ? body.message : undefined;
+        } catch {
+          /* ignore non-JSON error bodies */
+        }
         setError(
           res.status === 503
-            ? 'Live transcription is not available right now.'
-            : 'Could not start dictation. Please try again.',
+            ? (serverMessage ?? 'Live transcription is not available right now.')
+            : (serverMessage ?? 'Could not start dictation. Please try again.'),
         );
         return;
       }

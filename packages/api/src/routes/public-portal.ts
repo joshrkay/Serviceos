@@ -898,7 +898,11 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
         },
         deps.stripeFetch,
       );
-      res.status(200).json({ clientSecret: result.clientSecret, setupIntentId: result.setupIntentId });
+      res.status(200).json({
+        clientSecret: result.clientSecret,
+        setupIntentId: result.setupIntentId,
+        stripeAccountId: connect && connect.chargesEnabled ? connect.accountId : null,
+      });
     } catch (err) {
       const { statusCode, body } = toErrorResponse(err);
       res.status(statusCode).json(body);

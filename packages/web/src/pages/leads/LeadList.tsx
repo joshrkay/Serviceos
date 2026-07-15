@@ -46,6 +46,7 @@ export function LeadList({ onSelectLead, onNewLead }: LeadListProps) {
   const [error, setError] = useState<string | null>(null);
   const [sourceFilter, setSourceFilter] = useState<string | null>(null);
   const [assigneeFilter, setAssigneeFilter] = useState<string | null>(null);
+  const [draggingLeadId, setDraggingLeadId] = useState<string | null>(null);
   const hasLoadedRef = useRef(false);
 
   const refetch = useCallback(async (opts?: { background?: boolean }) => {
@@ -188,6 +189,9 @@ export function LeadList({ onSelectLead, onNewLead }: LeadListProps) {
             leads={byStage[stage.key] ?? []}
             onCardClick={onSelectLead}
             onDropLead={handleDropLead}
+            onDragStartLead={setDraggingLeadId}
+            onDragEndLead={() => setDraggingLeadId(null)}
+            draggingLeadId={draggingLeadId}
           />
         ))}
       </div>

@@ -1,6 +1,8 @@
 import { Router, Response } from 'express';
+import type { Pool } from 'pg';
 import { z } from 'zod';
 import { AuthenticatedRequest } from '../auth/clerk';
+import { resolveOwnerEmail } from '../auth/resolve-owner-email';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { toErrorResponse, NotFoundError } from '../shared/errors';
 import { BillingService } from '../billing/subscription';
@@ -41,10 +43,12 @@ export interface BillingRouteDeps {
   connectService?: StripeConnectService;
   /** Optional audit repository for emitting billing lifecycle events. */
   auditRepo?: AuditRepository;
+  /** Used to resolve owner email when the JWT has no email claim. */
+  pool?: Pool;
 }
 
 export function createBillingRouter(deps: BillingRouteDeps = {}): Router {
-  const { billingService, connectService, auditRepo } = deps;
+  const { billingService, connectService, auditRepo, pool } = deps;
   const router = Router();
 
   router.get(
@@ -85,11 +89,9 @@ export function createBillingRouter(deps: BillingRouteDeps = {}): Router {
           return;
         }
         const parsed = portalSessionSchema.parse(req.body ?? {});
-        // Owner email is populated on req.clerkUser by the auth
-        // middleware after JWT verification (see auth/clerk.ts —
-        // ClerkUser carries email/firstName/lastName separately
-        // from the auth context to keep the auth shape minimal).
-        const email = req.clerkUser?.email;
+        // Prefer JWT/clerkUser email; fall back to users/tenants rows
+        // (serviceos template historically omitted email).
+        const email = await resolveOwnerEmail(req, pool);
         if (!email) {
           res.status(400).json({
             error: 'VALIDATION_ERROR',
@@ -155,7 +157,7 @@ export function createBillingRouter(deps: BillingRouteDeps = {}): Router {
           return;
         }
         const parsed = connectOnboardingSchema.parse(req.body ?? {});
-        const email = req.clerkUser?.email;
+        const email = await resolveOwnerEmail(req, pool);
         if (!email) {
           res.status(400).json({
             error: 'VALIDATION_ERROR',

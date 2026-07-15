@@ -1,5 +1,6 @@
 import { ConflictError, NotFoundError, ValidationError } from '../shared/errors';
 import { PaymentLinkProvider } from '../payments/payment-link-provider';
+import { ConnectAccountResolver } from './public-invoice-service';
 import { Invoice, InvoiceRepository } from './invoice';
 
 const PAYABLE_STATUSES = new Set(['open', 'partially_paid']);
@@ -11,12 +12,15 @@ export interface InvoicePaymentLinkResult {
 
 /**
  * INV-04 — mint or return a hosted checkout link for an invoice.
+ * When Connect charges are enabled, the link is a direct charge on the
+ * tenant's Express account (same routing as public invoice checkout).
  */
 export async function createInvoicePaymentLink(
   tenantId: string,
   invoiceId: string,
   invoiceRepo: InvoiceRepository,
   provider: PaymentLinkProvider,
+  connectAccountResolver?: ConnectAccountResolver,
 ): Promise<InvoicePaymentLinkResult> {
   const invoice = await invoiceRepo.findById(tenantId, invoiceId);
   if (!invoice) {
@@ -40,6 +44,12 @@ export async function createInvoicePaymentLink(
     };
   }
 
+  const connect = connectAccountResolver
+    ? await connectAccountResolver.resolveTenantConnectAccount(tenantId).catch(() => null)
+    : null;
+  const stripeAccountId =
+    connect && connect.chargesEnabled ? connect.accountId : undefined;
+
   const link = await provider.generateLink({
     tenantId,
     invoiceId: invoice.id,
@@ -47,6 +57,7 @@ export async function createInvoicePaymentLink(
     currency: 'usd',
     description: `Invoice ${invoice.invoiceNumber}`,
     metadata: { tenant_id: tenantId, invoice_id: invoice.id },
+    ...(stripeAccountId ? { stripeAccountId } : {}),
   });
 
   await invoiceRepo.update(tenantId, invoice.id, {

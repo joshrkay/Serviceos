@@ -33,10 +33,11 @@ export function ProtectedRoute() {
 }
 
 /**
- * §10 onboarding completion guard. Redirects to /onboarding whenever the
- * tenant has incomplete steps and is trying to view any other authed route.
- * Status is polled at 30s so completion elsewhere (or a webhook-driven step
- * flip) unblocks soon.
+ * Soft onboarding gate: CRM unlocks once business identity is saved
+ * (name + hours + rate). Remaining steps (phone, billing, AI check,
+ * test call) stay available on /onboarding and are soft-nudged — they
+ * must not hard-block the product when Stripe/Twilio are still pending.
+ * Status is polled at 30s so a save elsewhere unblocks soon.
  */
 function OnboardingGuard() {
   const location = useLocation();
@@ -46,12 +47,15 @@ function OnboardingGuard() {
   // late is preferable to blocking the whole shell on a status fetch.
   if (isLoading || !data) return <Outlet />;
 
-  const onboardingBypassPrefixes = ['/onboarding', '/inbox', '/reports/money'];
-  const allowedDuringSetup = onboardingBypassPrefixes.some((prefix) =>
-    location.pathname.startsWith(prefix),
+  if (location.pathname.startsWith('/onboarding')) {
+    return <Outlet />;
+  }
+
+  const identityDone = data.steps.some(
+    (step) => step.id === 'identity' && step.status === 'done',
   );
 
-  if (!data.isComplete && !allowedDuringSetup) {
+  if (!identityDone) {
     return <Navigate to="/onboarding" replace />;
   }
 

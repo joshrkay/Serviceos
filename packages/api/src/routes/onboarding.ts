@@ -1,6 +1,7 @@
 import { Router, Response } from 'express';
 import type { Pool } from 'pg';
 import { AuthenticatedRequest } from '../auth/clerk';
+import { resolveOwnerEmail } from '../auth/resolve-owner-email';
 import { requireAuth, requireTenant, requireRole } from '../middleware/auth';
 import { currentTenantContext } from '../middleware/tenant-context';
 import { toErrorResponse } from '../shared/errors';
@@ -852,7 +853,7 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
         }
 
         const tenantId = req.auth!.tenantId;
-        const email = req.clerkUser?.email;
+        const email = await resolveOwnerEmail(req, pool);
         if (!email) {
           res.status(400).json({
             error: 'VALIDATION_ERROR',
@@ -861,7 +862,10 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
           return;
         }
 
-        const webUrl = process.env.WEB_URL ?? 'http://localhost:5173';
+        const webUrl =
+          process.env.WEB_URL ??
+          process.env.APP_PUBLIC_URL ??
+          'http://localhost:5173';
         const successUrl = `${webUrl}/onboarding?billing=ok`;
         const cancelUrl = `${webUrl}/onboarding?billing=cancel`;
 

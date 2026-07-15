@@ -25,6 +25,7 @@ import { ErrorBoundary } from '../src/components/ErrorBoundary';
 import { ToastProvider } from '../src/components/Toast';
 import { OfflineBanner } from '../src/components/OfflineBanner';
 import { PushStatusProvider } from '../src/push/pushStatusContext';
+import { TerminalProvider } from '../src/payments/TerminalProvider';
 
 function AuthGate() {
   const { isLoaded, isSignedIn } = useAuth();
@@ -51,7 +52,9 @@ function AuthGate() {
 
   return (
     <PushStatusProvider status={pushStatus}>
-      <Slot />
+      <TerminalProvider>
+        <Slot />
+      </TerminalProvider>
     </PushStatusProvider>
   );
 }

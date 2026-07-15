@@ -14,6 +14,7 @@ import { evaluateDepositRule, deriveDepositStatus, isDepositPayable } from '../j
 import { ValidationError, NotFoundError, ConflictError } from '../shared/errors';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { publicActorFromToken } from '../feedback/feedback-response';
+import type { ConnectAccountResolver } from '../invoices/public-invoice-service';
 
 /**
  * Service layer for the unauthenticated customer-facing estimate
@@ -200,6 +201,11 @@ export interface PublicEstimateServiceDeps {
   settingsRepo: SettingsRepository;
   stripeConfig?: DepositStripeConfig | null;
   stripeFetch?: DepositStripeFetch;
+  /**
+   * When present and charges are enabled, deposit Payment Links are
+   * minted as Connect direct charges on the tenant's Express account.
+   */
+  connectAccountResolver?: ConnectAccountResolver;
   /**
    * D2-1d — audit logging for token-scoped customer approval / decline.
    * Optional so older harnesses still build the service.
@@ -748,14 +754,23 @@ export class PublicEstimateService {
       // leave a live charge vector the customer could still reach via an
       // old email. Best-effort — a Stripe hiccup here must not block the
       // customer from getting a fresh, payable link.
+      const deactivateHeaders: Record<string, string> = {
+        Authorization: `Bearer ${this.deps.stripeConfig.apiKey}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      };
+      const connectForDeactivate = this.deps.connectAccountResolver
+        ? await this.deps.connectAccountResolver
+            .resolveTenantConnectAccount(job.tenantId)
+            .catch(() => null)
+        : null;
+      if (connectForDeactivate?.chargesEnabled) {
+        deactivateHeaders['Stripe-Account'] = connectForDeactivate.accountId;
+      }
       await fetchFn(
         `https://api.stripe.com/v1/payment_links/${job.depositStripePaymentLinkId}`,
         {
           method: 'POST',
-          headers: {
-            Authorization: `Bearer ${this.deps.stripeConfig.apiKey}`,
-            'Content-Type': 'application/x-www-form-urlencoded',
-          },
+          headers: deactivateHeaders,
           body: new URLSearchParams({ active: 'false' }),
         },
       ).catch(() => undefined);
@@ -769,12 +784,23 @@ export class PublicEstimateService {
       customer ? ` — ${customer.displayName}` : ''
     }`;
 
+    const connect = this.deps.connectAccountResolver
+      ? await this.deps.connectAccountResolver
+          .resolveTenantConnectAccount(job.tenantId)
+          .catch(() => null)
+      : null;
+    const useConnect = connect && connect.chargesEnabled;
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${this.deps.stripeConfig.apiKey}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    };
+    if (useConnect && connect) {
+      headers['Stripe-Account'] = connect.accountId;
+    }
+
     const res = await fetchFn('https://api.stripe.com/v1/payment_links', {
       method: 'POST',
-      headers: {
-        Authorization: `Bearer ${this.deps.stripeConfig.apiKey}`,
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
+      headers,
       body: new URLSearchParams({
         'line_items[0][price_data][currency]': 'usd',
         'line_items[0][price_data][product_data][name]': description,
@@ -819,12 +845,16 @@ export class PublicEstimateService {
         updatedAt: new Date(),
       });
     } catch (dbErr) {
+      const rollbackHeaders: Record<string, string> = {
+        Authorization: `Bearer ${this.deps.stripeConfig.apiKey}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      };
+      if (useConnect && connect) {
+        rollbackHeaders['Stripe-Account'] = connect.accountId;
+      }
       await fetchFn(`https://api.stripe.com/v1/payment_links/${data.id}`, {
         method: 'POST',
-        headers: {
-          Authorization: `Bearer ${this.deps.stripeConfig.apiKey}`,
-          'Content-Type': 'application/x-www-form-urlencoded',
-        },
+        headers: rollbackHeaders,
         body: new URLSearchParams({ active: 'false' }),
       }).catch(() => undefined);
       const msg = dbErr instanceof Error ? dbErr.message : String(dbErr);

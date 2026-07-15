@@ -47,7 +47,7 @@ Detailed Wave-1 specs: see `docs/stories/phase-20-stories.md`. Clusters 3–8 fo
 **Cluster framings (one line each):**
 - **C1 (P20):** job→`completed` fires a `draft_invoice`+`send_invoice` proposal; the overdue sweep walks a configurable reminder cadence + accrues late fees; outcomes summarized in the digest.
 - **C2 (P21):** *"Bill 50% now, balance on completion? [Yes]"* mints linked milestone invoices; batch is a morning digest nudge fanning out N `draft_invoice` proposals.
-- **C3 (P22):** financing offered inside the estimate; tips/surcharges as pay-page toggles; tap-to-pay as a field button; auto-pay as a digest confirmation. All settlement on the webhook base; extends Stripe Connect.
+- **C3 (P22):** financing offered inside the estimate; tips/surcharges as pay-page toggles; tap-to-pay as a field button; auto-pay as a digest confirmation. All settlement on the webhook base; extends Stripe Connect. **Connect routing + Terminal PRD/plan (2026-07-14):** `docs/strategy/prd-stripe-trades-payments.md`, `docs/plans/2026-07-14-001-feat-stripe-connect-and-terminal-completion-plan.md`.
 - **C4 (P23):** QBO is invisible plumbing (queue-driven sync worker); the only owner moment is a digest "synced ✓ / 1 failed — Retry?"; PDFs auto-attach to sends.
 - **C5 (P24):** equipment captured conversationally (`add_equipment` proposal); next visit the AI says *"the Carrier unit you serviced in May"* — the HVAC differentiator.
 - **C6 (P25):** *"Assign Carlos (closest + certified, 2 jobs today)? [Yes][Pick another]"* — a ranked `assign_technician` proposal on top of `checkFeasibility`.

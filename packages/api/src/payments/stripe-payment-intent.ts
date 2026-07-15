@@ -8,8 +8,13 @@
  * from the customer's browser into Stripe's iframe (`<PaymentElement>`),
  * never through our server.
  *
- * Idempotency is enforced per (invoiceId, amount) so duplicate POSTs from
- * the public payment page don't create multiple intents.
+ * Idempotency is enforced per (invoiceId, amount, account-scope) so duplicate
+ * POSTs from the public payment page don't create multiple intents, and a
+ * tenant that later enables Connect does not collide with a prior platform
+ * intent key.
+ *
+ * When `stripeAccountId` is set, the request is a Connect direct charge
+ * (`Stripe-Account` header) so funds settle on the tenant's Express account.
  */
 
 export interface StripePaymentIntentConfig {
@@ -21,6 +26,8 @@ export interface CreatePaymentIntentInput {
   currency: string; // e.g. 'usd'
   invoiceId: string;
   tenantId: string;
+  /** Connected account id for direct charges; omit for platform. */
+  stripeAccountId?: string;
 }
 
 export interface CreatePaymentIntentResult {
@@ -82,15 +89,22 @@ export async function createPaymentIntent(
     'metadata[tenant_id]': input.tenantId,
   });
 
+  const accountScope = input.stripeAccountId?.trim() || 'platform';
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${config.apiKey}`,
+    'Content-Type': 'application/x-www-form-urlencoded',
+    // Idempotency-Key prevents duplicate intents when the customer
+    // double-taps the pay button or the page remounts on iOS Safari.
+    // Account scope keeps platform vs Connect intents distinct.
+    'Idempotency-Key': `pi_${input.invoiceId}_${input.amount}_${accountScope}`,
+  };
+  if (input.stripeAccountId?.trim()) {
+    headers['Stripe-Account'] = input.stripeAccountId.trim();
+  }
+
   const res = await fetcher('https://api.stripe.com/v1/payment_intents', {
     method: 'POST',
-    headers: {
-      Authorization: `Bearer ${config.apiKey}`,
-      'Content-Type': 'application/x-www-form-urlencoded',
-      // Idempotency-Key prevents duplicate intents when the customer
-      // double-taps the pay button or the page remounts on iOS Safari.
-      'Idempotency-Key': `pi_${input.invoiceId}_${input.amount}`,
-    },
+    headers,
     body: body.toString(),
   });
 

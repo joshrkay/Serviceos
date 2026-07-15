@@ -26,6 +26,17 @@ config.resolver.nodeModulesPaths = [
 
 const baseResolveRequest = config.resolver.resolveRequest;
 config.resolver.resolveRequest = (context, moduleName, platform) => {
+  // Stripe Terminal is native-only; web e2e export must not load NativeModules.
+  if (
+    platform === 'web' &&
+    (moduleName === '@stripe/stripe-terminal-react-native' ||
+      moduleName.startsWith('@stripe/stripe-terminal-react-native/'))
+  ) {
+    return {
+      type: 'sourceFile',
+      filePath: path.join(projectRoot, 'src/payments/stripeTerminal.web-stub.js'),
+    };
+  }
   // Bare package → its TypeScript entry.
   if (moduleName === '@ai-service-os/shared') {
     return { type: 'sourceFile', filePath: path.join(sharedSrc, 'index.ts') };
