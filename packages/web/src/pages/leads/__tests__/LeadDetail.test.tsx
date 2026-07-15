@@ -240,4 +240,57 @@ describe('Leads — LeadDetail (P9-001)', () => {
     // The unsaved draft must survive the language change.
     expect((notes as HTMLTextAreaElement).value).toBe('call back after 5pm');
   });
+
+  it('stage select PATCHes intermediate stage and updates the badge', async () => {
+    vi.mocked(apiFetch).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ ...baseLead, stage: 'new' }),
+    } as unknown as Response);
+
+    render(<LeadDetail leadId="lead-1" />);
+
+    const stageSelect = await screen.findByLabelText('Lead stage');
+    expect(stageSelect).toHaveValue('new');
+
+    vi.mocked(apiFetch).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ ...baseLead, stage: 'contacted' }),
+    } as unknown as Response);
+
+    fireEvent.change(stageSelect, { target: { value: 'contacted' } });
+
+    await waitFor(() => {
+      const patchCall = vi
+        .mocked(apiFetch)
+        .mock.calls.find(
+          (c) =>
+            (c[1] as RequestInit | undefined)?.method === 'PATCH' &&
+            JSON.parse((c[1] as RequestInit).body as string).stage === 'contacted',
+        );
+      expect(patchCall).toBeDefined();
+      expect(patchCall![0]).toBe('/api/leads/lead-1');
+    });
+
+    await waitFor(() => {
+      expect(screen.getByLabelText('Lead stage')).toHaveValue('contacted');
+    });
+  });
+
+  it('does not show a stage select for won leads', async () => {
+    vi.mocked(apiFetch).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        ...baseLead,
+        stage: 'won',
+        convertedCustomerId: 'cust-7',
+      }),
+    } as unknown as Response);
+
+    render(<LeadDetail leadId="lead-1" />);
+    await screen.findByText('Alice Wong');
+    expect(screen.queryByLabelText('Lead stage')).not.toBeInTheDocument();
+  });
 });
