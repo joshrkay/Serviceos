@@ -6103,10 +6103,18 @@ export const MIGRATIONS = {
     );
   `,
 
+  // Stripe Terminal Location id on the connected account (direct charges).
+  // Created lazily on first field collect; reused for Tap to Pay / readers.
+  '250_tenants_stripe_terminal_location': `
+    ALTER TABLE tenants
+      ADD COLUMN IF NOT EXISTS stripe_terminal_location_id TEXT;
+  `,
+
   // QA-MANUAL-0730: optional structured service address on leads so
   // convertToCustomer can promote it to a primary service_locations row.
   // All columns nullable — address is optional until convert time.
-  '250_leads_service_address': `
+  // Numbered 251 because main shipped 250_tenants_stripe_terminal_location.
+  '251_leads_service_address': `
     ALTER TABLE leads
       ADD COLUMN IF NOT EXISTS street1 TEXT,
       ADD COLUMN IF NOT EXISTS street2 TEXT,
@@ -6115,11 +6123,6 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS postal_code TEXT,
       ADD COLUMN IF NOT EXISTS country TEXT,
       ADD COLUMN IF NOT EXISTS access_notes TEXT;
-  // Stripe Terminal Location id on the connected account (direct charges).
-  // Created lazily on first field collect; reused for Tap to Pay / readers.
-  '250_tenants_stripe_terminal_location': `
-    ALTER TABLE tenants
-      ADD COLUMN IF NOT EXISTS stripe_terminal_location_id TEXT;
   `,
 };
 
