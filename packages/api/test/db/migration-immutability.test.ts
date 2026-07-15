@@ -412,6 +412,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['248_users_status', '4db13faea1417601ec58108546e7a222d19224a9ebbf32106170fa868f198206'],
   ['249_backfill_owner_memberships', '469b396524bded1559614c2c091bb48c70a36c7769230e77ae9b96cad5e8025d'],
   ['250_leads_service_address', '0033dc709e9d1fb22584a20873826d59fa2430c6554c0846e4f9c86e60c4f82b'],
+  // Stripe Terminal Location id on tenants (Connect Tap to Pay).
+  ['250_tenants_stripe_terminal_location', '95a128f94a94231772731bdf6a583bd1f6f6c03c20b3615c162adc5ddaa2d8e7'],
 ];
 
 function hashMigration(value: string): string {

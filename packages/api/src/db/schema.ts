@@ -6115,6 +6115,11 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS postal_code TEXT,
       ADD COLUMN IF NOT EXISTS country TEXT,
       ADD COLUMN IF NOT EXISTS access_notes TEXT;
+  // Stripe Terminal Location id on the connected account (direct charges).
+  // Created lazily on first field collect; reused for Tap to Pay / readers.
+  '250_tenants_stripe_terminal_location': `
+    ALTER TABLE tenants
+      ADD COLUMN IF NOT EXISTS stripe_terminal_location_id TEXT;
   `,
 };
 

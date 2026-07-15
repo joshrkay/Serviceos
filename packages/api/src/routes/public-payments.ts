@@ -18,6 +18,7 @@
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { InvoiceRepository } from '../invoices/invoice';
+import { ConnectAccountResolver } from '../invoices/public-invoice-service';
 import {
   createPaymentIntent,
   StripeFetch,
@@ -44,6 +45,11 @@ export interface PublicPaymentsDeps {
   defaultCurrency?: string;
   /** Optional fetch override — used to mock Stripe in tests. */
   stripeFetch?: StripeFetch;
+  /**
+   * When present and the tenant has charges enabled, PaymentIntents are
+   * created as Connect direct charges (`Stripe-Account` header).
+   */
+  connectAccountResolver?: ConnectAccountResolver;
 }
 
 export function createPublicPaymentsRouter(deps: PublicPaymentsDeps): Router {
@@ -109,6 +115,14 @@ export function createPublicPaymentsRouter(deps: PublicPaymentsDeps): Router {
       return;
     }
 
+    const connect = deps.connectAccountResolver
+      ? await deps.connectAccountResolver
+          .resolveTenantConnectAccount(invoice.tenantId)
+          .catch(() => null)
+      : null;
+    const stripeAccountId =
+      connect && connect.chargesEnabled ? connect.accountId : null;
+
     const { clientSecret, paymentIntentId } = await createPaymentIntent(
       deps.stripeConfig,
       {
@@ -116,11 +130,12 @@ export function createPublicPaymentsRouter(deps: PublicPaymentsDeps): Router {
         currency: deps.defaultCurrency ?? 'usd',
         invoiceId: invoice.id,
         tenantId: invoice.tenantId,
+        ...(stripeAccountId ? { stripeAccountId } : {}),
       },
       deps.stripeFetch,
     );
 
-    res.status(200).json({ clientSecret, paymentIntentId });
+    res.status(200).json({ clientSecret, paymentIntentId, stripeAccountId });
   }));
 
   /**

@@ -9,6 +9,8 @@ export interface PaymentLinkRequest {
   customerEmail?: string;
   description?: string;
   metadata?: Record<string, unknown>;
+  /** Connect direct-charge account; omit for platform. */
+  stripeAccountId?: string;
 }
 
 export interface PaymentLinkResult {

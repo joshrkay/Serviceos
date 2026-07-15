@@ -85,6 +85,7 @@ import { createBillingRouter } from './routes/billing';
 import { StripeConnectService } from './billing/stripe-connect';
 import { BillingService } from './billing/subscription';
 import { createPaymentRouter } from './routes/payments';
+import { createTerminalRouter } from './routes/terminal';
 import { createNoteRouter } from './routes/notes';
 import { createDevicesRouter } from './routes/devices';
 import { InMemoryDeviceTokenRepository } from './push/device-token-service';
@@ -2699,6 +2700,15 @@ export function createApp(): AppWithLifecycle {
     // Roll up job money state when a lapsed estimate is auto-expired on the
     // public path, so the job doesn't stay stuck in 'estimate_sent'.
     moneyStateDeps: { jobRepo, estimateRepo, invoiceRepo, auditRepo, logger: requestLogger },
+    connectAccountResolver: connectService
+      ? {
+          resolveTenantConnectAccount: async (tenantId: string) => {
+            const view = await connectService.getAccount(tenantId);
+            if (!view.accountId) return null;
+            return { accountId: view.accountId, chargesEnabled: view.chargesEnabled };
+          },
+        }
+      : undefined,
   });
   app.use('/public/estimates', createPublicEstimatesRouter(publicEstimateService));
 
@@ -2865,6 +2875,7 @@ export function createApp(): AppWithLifecycle {
       stripeConfig: process.env.STRIPE_SECRET_KEY
         ? { apiKey: process.env.STRIPE_SECRET_KEY }
         : null,
+      connectAccountResolver,
     }),
   );
 
@@ -4621,6 +4632,7 @@ export function createApp(): AppWithLifecycle {
       paymentLinkProvider,
       agreementRepo,
       customerRepo,
+      connectAccountResolver,
     ),
   );
 
@@ -4741,6 +4753,35 @@ export function createApp(): AppWithLifecycle {
       auditRepo,
       transactionalComms,
     ),
+  );
+  // Stripe Terminal — field card-present collect (Connect direct charges).
+  app.use(
+    '/api/terminal',
+    createTerminalRouter({
+      invoiceRepo,
+      connectAccountResolver,
+      stripeApiKey: process.env.STRIPE_SECRET_KEY ?? null,
+      auditRepo,
+      terminalLocation: connectService
+        ? {
+            getExistingLocationId: async (tenantId) => {
+              const view = await connectService.getAccount(tenantId);
+              return view.terminalLocationId;
+            },
+            persistLocationId: (tenantId, locationId) =>
+              connectService.setTerminalLocationId(tenantId, locationId),
+            resolveDisplayName: async (tenantId) => {
+              if (!pool) return 'Field location';
+              const { rows } = await pool.query(
+                `SELECT name FROM tenants WHERE id = $1`,
+                [tenantId],
+              );
+              const name = rows[0]?.name as string | undefined;
+              return name?.trim() || 'Field location';
+            },
+          }
+        : undefined,
+    }),
   );
   app.use('/api/notes', createNoteRouter(noteRepo, ownership, auditRepo));
 

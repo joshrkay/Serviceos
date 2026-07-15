@@ -13,10 +13,23 @@
     },
     "ios": {
       "supportsTablet": false,
-      "bundleIdentifier": "com.serviceos.app"
+      "bundleIdentifier": "com.serviceos.app",
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "Location is used to enable Tap to Pay and nearby card readers for in-person payments.",
+        "NSBluetoothAlwaysUsageDescription": "Bluetooth is used to connect to Stripe Terminal card readers.",
+        "NSBluetoothPeripheralUsageDescription": "Bluetooth is used to connect to Stripe Terminal card readers.",
+        "NSLocalNetworkUsageDescription": "Local network access is used to discover Stripe Terminal readers."
+      }
     },
     "android": {
-      "package": "com.serviceos.app"
+      "package": "com.serviceos.app",
+      "permissions": [
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.BLUETOOTH",
+        "android.permission.BLUETOOTH_ADMIN",
+        "android.permission.BLUETOOTH_CONNECT",
+        "android.permission.BLUETOOTH_SCAN"
+      ]
     },
     "plugins": [
       "expo-router",
@@ -26,7 +39,33 @@
           "microphonePermission": "Allow ServiceOS to use the microphone to capture voice actions."
         }
       ],
-      "expo-notifications"
+      "expo-notifications",
+      [
+        "@stripe/stripe-terminal-react-native",
+        {
+          "bluetoothBackgroundMode": true,
+          "locationWhenInUsePermission": "Allow ServiceOS to use your location to enable Tap to Pay and card readers.",
+          "bluetoothPeripheralPermission": "Allow ServiceOS to connect to Stripe Terminal card readers.",
+          "bluetoothAlwaysUsagePermission": "Allow ServiceOS to connect to Stripe Terminal card readers.",
+          "localNetworkUsagePermission": "Allow ServiceOS to discover Stripe Terminal readers on your network.",
+          "tapToPayCheck": true,
+          "appDelegate": true
+        }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "minSdkVersion": 26,
+            "packagingOptions": {
+              "pickFirst": [
+                "org/bouncycastle/x509/CertPathReviewerMessages.properties",
+                "org/bouncycastle/x509/CertPathReviewerMessages_de.properties"
+              ]
+            }
+          }
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true

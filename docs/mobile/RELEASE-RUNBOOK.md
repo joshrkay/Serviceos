@@ -35,6 +35,12 @@ npx eas-cli env:create --environment production --name EXPO_PUBLIC_CLERK_PUBLISH
 ```
 (Optionally `EAS_PROJECT_ID` if you prefer the env path over `app.json`.)
 
+For Stripe Terminal Tap to Pay Test builds, also set:
+```
+npx eas-cli env:create --environment preview --name EXPO_PUBLIC_TERMINAL_SIMULATED --value 1
+```
+Terminal requires this EAS native build (config plugins in `app.json`). **Expo Go is not supported** once Terminal is linked.
+
 ### 3. Fill the App Store Connect submit credentials
 `eas.json` → `submit.production.ios` still has placeholders:
 `appleId`, `ascAppId`, `appleTeamId` (`REPLACE_WITH_…`). Fill them (or pass via

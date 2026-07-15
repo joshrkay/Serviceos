@@ -39,4 +39,31 @@ describe('StripePaymentLinkProvider — single completed checkout restriction', 
     const params = new URLSearchParams(capturedBody);
     expect(params.get('restrictions[completed_sessions][limit]')).toBe('1');
   });
+
+  it('sets Stripe-Account when stripeAccountId is provided', async () => {
+    let capturedHeaders: HeadersInit | undefined;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init: { headers?: HeadersInit; body?: URLSearchParams }) => {
+        capturedHeaders = init.headers;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ id: 'plink_connect', url: 'https://pay.stripe.com/c' }),
+          text: async () => '',
+        } as unknown as Response;
+      }),
+    );
+
+    const provider = new StripePaymentLinkProvider({ apiKey: 'sk_test_x', webhookSecret: 'whsec_x' });
+    await provider.generateLink({
+      tenantId: 't1',
+      invoiceId: 'inv1',
+      amountCents: 5000,
+      currency: 'usd',
+      stripeAccountId: 'acct_op_1',
+    });
+
+    expect(capturedHeaders).toMatchObject({ 'Stripe-Account': 'acct_op_1' });
+  });
 });

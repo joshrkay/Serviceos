@@ -34,6 +34,30 @@ describe('Leads — LeadCard (P9-001)', () => {
     expect(onClick).toHaveBeenCalledWith('lead-99');
   });
 
+  it('suppresses onClick after a drag gesture', () => {
+    const onClick = vi.fn();
+    render(<LeadCard lead={lead} onClick={onClick} />);
+    const card = screen.getByTestId('lead-card-lead-99');
+
+    const dataTransfer = {
+      data: {} as Record<string, string>,
+      effectAllowed: '',
+      setData(this: { data: Record<string, string> }, key: string, value: string) {
+        this.data[key] = value;
+      },
+      getData(this: { data: Record<string, string> }, key: string) {
+        return this.data[key] ?? '';
+      },
+    };
+
+    fireEvent.mouseDown(card);
+    fireEvent.dragStart(card, { dataTransfer });
+    fireEvent.dragEnd(card);
+    fireEvent.click(card);
+
+    expect(onClick).not.toHaveBeenCalled();
+  });
+
   // P12-005 — first-class customer_portal lead source.
   it('P12-005: renders customer_portal source with a globe icon', () => {
     const portalLead: LeadCardData = { ...lead, source: 'customer_portal' };

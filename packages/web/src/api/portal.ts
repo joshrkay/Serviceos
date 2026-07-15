@@ -264,7 +264,11 @@ export const portalApi = {
   paymentMethods: (token: string) =>
     getJson<{ paymentMethods: PortalPaymentMethod[] }>(`${base(token)}/payment-methods`),
   startCardSetup: (token: string) =>
-    postJson<{ clientSecret: string; setupIntentId: string }>(
+    postJson<{
+      clientSecret: string;
+      setupIntentId: string;
+      stripeAccountId?: string | null;
+    }>(
       `${base(token)}/payment-methods/setup`,
       {},
     ),
