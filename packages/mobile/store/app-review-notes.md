@@ -4,7 +4,7 @@ Paste into App Store Connect → App Review Information (Notes) and mirror
 the same guidance in Google Play Console → App content / testing notes.
 
 Binary: Expo app in `packages/mobile` (`com.serviceos.app`). One app
-serves **supervisor** and **technician** personas (see decision D-020).
+serves **supervisor** and **technician** personas (see decision D-021).
 
 ---
 

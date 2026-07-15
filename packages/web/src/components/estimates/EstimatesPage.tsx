@@ -27,6 +27,26 @@ import { toast } from 'sonner';
 
 type EstimateStatus = 'Draft' | 'Sent' | 'Viewed' | 'Approved' | 'Declined' | 'Expired';
 
+/** Status-aware retract copy for soft-delete (D-020). Sent → Withdraw; else Delete. */
+export function getEstimateRetractCopy(
+  apiStatus: string,
+  estimateTerm = 'estimate',
+): { label: string; confirm: string; isWithdraw: boolean } {
+  const term = estimateTerm.toLowerCase();
+  if (apiStatus === 'sent') {
+    return {
+      label: 'Withdraw',
+      confirm: `Withdraw this ${term}? The customer's approval link will stop working and it will be removed from your list.`,
+      isWithdraw: true,
+    };
+  }
+  return {
+    label: 'Delete',
+    confirm: `Delete this ${term}? It will be removed from your list.`,
+    isWithdraw: false,
+  };
+}
+
 interface EstCompat {
   id: string;
   estimateNumber: string;
@@ -886,15 +906,19 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
   }
 
   async function handleDelete() {
-    if (!window.confirm('Delete this estimate? It will be removed from your list.')) return;
+    const statusForRetract = wasSent ? 'sent' : (est?.status ?? 'draft');
+    const retract = getEstimateRetractCopy(statusForRetract, estimateTerm);
+    if (!window.confirm(retract.confirm)) return;
     setActionBusy(true);
     setActionError(null);
     try {
       const res = await apiFetch(`/api/estimates/${estimateId}`, { method: 'DELETE' });
-      if (!res.ok && res.status !== 204) throw new Error(`Could not delete estimate (HTTP ${res.status})`);
+      if (!res.ok && res.status !== 204) {
+        throw new Error(`Could not ${retract.isWithdraw ? 'withdraw' : 'delete'} ${estimateTerm.toLowerCase()} (HTTP ${res.status})`);
+      }
       onBack();
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : 'Failed to delete estimate');
+      setActionError(err instanceof Error ? err.message : `Failed to ${retract.isWithdraw ? 'withdraw' : 'delete'} ${estimateTerm.toLowerCase()}`);
       setActionBusy(false);
     }
   }
@@ -1004,6 +1028,8 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
   // expired/rejected. Keying off the raw status avoids offering an edit that
   // would 409. Reopen (rejected/expired -> draft) is the supported path.
   const editable = apiStatus === 'draft' || apiStatus === 'ready_for_review';
+  // Soft-delete retract copy (D-020): sent → Withdraw; otherwise Delete.
+  const retractCopy = getEstimateRetractCopy(apiStatus, estimateTerm);
 
   if (isLoading && !est) {
     return (
@@ -1280,7 +1306,7 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
                       disabled={actionBusy}
                       className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-destructive/30 bg-card text-destructive py-3 text-sm hover:bg-destructive/10 transition-colors disabled:opacity-50"
                     >
-                      <Trash2 size={14} /> Delete
+                      <Trash2 size={14} /> {retractCopy.label}
                     </button>
                   )}
                 </div>
@@ -1298,6 +1324,9 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
                   </div>
                   <p className={`text-xs ${status === 'Viewed' ? 'text-primary' : 'text-warning'}`}>
                     {status === 'Viewed' ? 'Follow up if they have questions' : 'Awaiting response'}
+                  </p>
+                  <p className={`text-xs mt-2 ${status === 'Viewed' ? 'text-primary' : 'text-warning'}`}>
+                    Withdraw to retract the customer approval link, or send a follow-up and wait for a response.
                   </p>
                 </div>
               )}
