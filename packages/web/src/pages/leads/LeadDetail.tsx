@@ -58,6 +58,14 @@ const STAGE_VARIANT: Record<string, BadgeVariant> = {
   lost: 'danger',
 };
 
+/** Lateral pipeline stages — won/lost require Convert / Mark Lost. */
+const INTERMEDIATE_STAGES = ['new', 'contacted', 'qualified', 'quoted'] as const;
+type IntermediateStage = (typeof INTERMEDIATE_STAGES)[number];
+
+function isIntermediateStage(stage: string): stage is IntermediateStage {
+  return (INTERMEDIATE_STAGES as readonly string[]).includes(stage);
+}
+
 export function LeadDetail({ leadId, onConverted, onBack }: LeadDetailProps) {
   const [lead, setLead] = useState<Lead | null>(null);
   const [isLoading, setLoading] = useState(false);
@@ -70,6 +78,7 @@ export function LeadDetail({ leadId, onConverted, onBack }: LeadDetailProps) {
   const [savingNote, setSavingNote] = useState(false);
   const [language, setLanguage] = useState('');
   const [languageSaving, setLanguageSaving] = useState(false);
+  const [stageSaving, setStageSaving] = useState(false);
 
   const refetch = useCallback(async () => {
     setLoading(true);
@@ -187,6 +196,38 @@ export function LeadDetail({ leadId, onConverted, onBack }: LeadDetailProps) {
     [leadId, language],
   );
 
+  const handleStageChange = useCallback(
+    async (next: string) => {
+      if (!lead || next === lead.stage) return;
+      if (!isIntermediateStage(next)) {
+        setError('Use Convert or Mark Lost for Won / Lost.');
+        return;
+      }
+      const previous = lead.stage;
+      setLead({ ...lead, stage: next });
+      setStageSaving(true);
+      setError(null);
+      try {
+        const res = await apiFetch(`/api/leads/${leadId}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ stage: next }),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const updated = await res.json();
+        setLead(updated);
+        toast.success(`Stage updated to ${next}`);
+      } catch (err) {
+        setLead((prev) => (prev ? { ...prev, stage: previous } : prev));
+        const message = err instanceof Error ? err.message : 'Failed to update stage';
+        setError(message);
+        toast.error(message);
+      } finally {
+        setStageSaving(false);
+      }
+    },
+    [lead, leadId],
+  );
+
   if (isLoading && !lead)
     return (
       <p className="flex items-center gap-2 p-6 text-sm text-slate-500">
@@ -268,6 +309,25 @@ export function LeadDetail({ leadId, onConverted, onBack }: LeadDetailProps) {
             <CardTitle>Pipeline</CardTitle>
           </CardHeader>
           <CardContent className="flex flex-col gap-1.5">
+            {isIntermediateStage(lead.stage) ? (
+              <div className="flex items-center gap-2 pb-1">
+                <span className="text-sm text-slate-700 shrink-0">Stage:</span>
+                <div className="w-40">
+                  <Select
+                    aria-label="Lead stage"
+                    value={lead.stage}
+                    disabled={stageSaving}
+                    onChange={(e) => void handleStageChange(e.target.value)}
+                  >
+                    {INTERMEDIATE_STAGES.map((s) => (
+                      <option key={s} value={s}>
+                        {s}
+                      </option>
+                    ))}
+                  </Select>
+                </div>
+              </div>
+            ) : null}
             <p className="text-sm text-slate-700">Source detail: {lead.sourceDetail ?? '—'}</p>
             <p className="text-sm text-slate-700">
               Est. value:{' '}
