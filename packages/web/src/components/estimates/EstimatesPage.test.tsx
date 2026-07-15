@@ -2,7 +2,7 @@ import React from 'react';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { MemoryRouter } from 'react-router';
-import { EstimatesPage } from './EstimatesPage';
+import { EstimatesPage, getEstimateRetractCopy } from './EstimatesPage';
 
 vi.mock('../../hooks/useListQuery', () => ({ useListQuery: vi.fn() }));
 vi.mock('../../hooks/useDetailQuery', () => ({ useDetailQuery: vi.fn() }));
@@ -318,5 +318,123 @@ describe('EstimatesPage', () => {
     expect(container.innerHTML).not.toMatch(
       /(bg|text|border|ring|divide)-(slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)-\d{2,3}/,
     );
+  });
+});
+
+describe('getEstimateRetractCopy (D-020 soft-delete withdraw)', () => {
+  it('labels sent estimates Withdraw and names the approval-link effect', () => {
+    const copy = getEstimateRetractCopy('sent');
+    expect(copy.label).toBe('Withdraw');
+    expect(copy.isWithdraw).toBe(true);
+    expect(copy.confirm).toMatch(/approval link will stop working/i);
+    expect(copy.confirm).toMatch(/removed from your list/i);
+  });
+
+  it('labels draft estimates Delete with list-removal copy', () => {
+    const copy = getEstimateRetractCopy('draft');
+    expect(copy.label).toBe('Delete');
+    expect(copy.isWithdraw).toBe(false);
+    expect(copy.confirm).toMatch(/^Delete this estimate\?/i);
+    expect(copy.confirm).not.toMatch(/approval link/i);
+  });
+
+  it('keeps Delete for ready_for_review, rejected, and expired', () => {
+    for (const status of ['ready_for_review', 'rejected', 'expired'] as const) {
+      expect(getEstimateRetractCopy(status).label).toBe('Delete');
+      expect(getEstimateRetractCopy(status).isWithdraw).toBe(false);
+    }
+  });
+
+  it('uses the tenant estimate term in confirm copy', () => {
+    expect(getEstimateRetractCopy('sent', 'Quote').confirm).toMatch(/Withdraw this quote\?/i);
+    expect(getEstimateRetractCopy('draft', 'Bid').confirm).toMatch(/Delete this bid\?/i);
+  });
+});
+
+describe('EstimatesPage retract controls (D-020)', () => {
+  function detailFixture(status: string) {
+    return {
+      id: 'e1',
+      estimateNumber: 'EST-001',
+      status,
+      customerMessage: 'Repair',
+      createdAt: '2026-06-01T00:00:00.000Z',
+      validUntil: '2026-07-01',
+      lineItems: [],
+      totals: totalsOf(150000),
+      customer: { id: 'c1', displayName: 'Alice Smith', firstName: 'Alice', lastName: 'Smith' },
+    };
+  }
+
+  function renderDetail(status: string) {
+    vi.mocked(useDetailQuery).mockReturnValue({
+      data: detailFixture(status),
+      isLoading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    vi.stubGlobal('fetch', vi.fn(async () =>
+      new Response(JSON.stringify([]), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+    return render(
+      <MemoryRouter>
+        <EstimatesPage defaultSelectedId="e1" />
+      </MemoryRouter>,
+    );
+  }
+
+  it('shows Withdraw on a sent estimate and confirms with approval-link copy', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    renderDetail('sent');
+    const withdrawBtn = await screen.findByRole('button', { name: /Withdraw/i });
+    expect(withdrawBtn).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Delete$/i })).not.toBeInTheDocument();
+    expect(screen.getByText(/Withdraw to retract the customer approval link/i)).toBeInTheDocument();
+    fireEvent.click(withdrawBtn);
+    expect(confirmSpy).toHaveBeenCalledWith(expect.stringMatching(/approval link will stop working/i));
+  });
+
+  it('shows Delete on a draft estimate', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    renderDetail('draft');
+    const deleteBtn = await screen.findByRole('button', { name: /^Delete$/i });
+    fireEvent.click(deleteBtn);
+    expect(confirmSpy).toHaveBeenCalledWith(expect.stringMatching(/^Delete this estimate\?/i));
+  });
+
+  it('hides Delete/Withdraw when the estimate is accepted', async () => {
+    renderDetail('accepted');
+    expect(await screen.findByRole('button', { name: /Convert to invoice/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Withdraw/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Delete$/i })).not.toBeInTheDocument();
+  });
+
+  it('calls DELETE when Withdraw is confirmed on a sent estimate', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/estimates/e1' && init?.method === 'DELETE') {
+        return new Response(null, { status: 204 });
+      }
+      return new Response(JSON.stringify([]), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    vi.mocked(useDetailQuery).mockReturnValue({
+      data: detailFixture('sent'),
+      isLoading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    render(
+      <MemoryRouter>
+        <EstimatesPage defaultSelectedId="e1" />
+      </MemoryRouter>,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: /Withdraw/i }));
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        '/api/estimates/e1',
+        expect.objectContaining({ method: 'DELETE' }),
+      );
+    });
   });
 });
