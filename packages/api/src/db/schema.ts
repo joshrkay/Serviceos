@@ -6139,6 +6139,64 @@ export const MIGRATIONS = {
     CREATE UNIQUE INDEX IF NOT EXISTS uq_tlp_tenant_client_ping
       ON technician_location_pings(tenant_id, client_ping_id);
   `,
+
+  // QUALITY-2026-07-15 — (tenant_id, clerk_user_id) must be unique. Migration
+  // 249 + the Clerk user.created owner insert could both land a row for the
+  // same owner (249 has no unique guard; the webhook uses WHERE NOT EXISTS
+  // but races / replays still doubled). resolveAuthorization LIMIT 1 hid the
+  // dupes; Clerk public_metadata pointing at a phantom tenant_id then 403'd
+  // owners who DID have a real membership under tenants.owner_id. Dedupe,
+  // unique-index, and drop the non-unique predecessor from 248.
+  '253_users_tenant_clerk_unique': `
+    -- Session-scoped temps (migrate.js runs the corpus on one client with no
+    -- wrapping BEGIN). DROP at end so a re-run of the full corpus in the same
+    -- session does not collide on the temp relation names.
+    DROP TABLE IF EXISTS _user_dup_victims;
+    DROP TABLE IF EXISTS _user_dup_keepers;
+    CREATE TEMP TABLE _user_dup_keepers AS
+    SELECT DISTINCT ON (tenant_id, clerk_user_id)
+      id AS keep_id, tenant_id, clerk_user_id
+    FROM users
+    WHERE clerk_user_id IS NOT NULL
+    ORDER BY tenant_id, clerk_user_id, created_at ASC NULLS LAST, id ASC;
+
+    CREATE TEMP TABLE _user_dup_victims AS
+    SELECT u.id AS victim_id, k.keep_id
+    FROM users u
+    JOIN _user_dup_keepers k
+      ON k.tenant_id = u.tenant_id AND k.clerk_user_id = u.clerk_user_id
+    WHERE u.id <> k.keep_id;
+
+    UPDATE appointment_assignments a SET technician_id = v.keep_id
+    FROM _user_dup_victims v WHERE a.technician_id = v.victim_id;
+    UPDATE jobs j SET assigned_technician_id = v.keep_id
+    FROM _user_dup_victims v WHERE j.assigned_technician_id = v.victim_id;
+    UPDATE leads l SET assigned_user_id = v.keep_id
+    FROM _user_dup_victims v WHERE l.assigned_user_id = v.victim_id;
+    UPDATE tech_status_today t SET technician_id = v.keep_id
+    FROM _user_dup_victims v WHERE t.technician_id = v.victim_id;
+    UPDATE tech_unavailable_blocks t SET technician_id = v.keep_id
+    FROM _user_dup_victims v WHERE t.technician_id = v.victim_id;
+    UPDATE technician_working_hours t SET technician_id = v.keep_id
+    FROM _user_dup_victims v WHERE t.technician_id = v.victim_id;
+    UPDATE tenant_oncall_rotation t SET user_id = v.keep_id
+    FROM _user_dup_victims v WHERE t.user_id = v.victim_id;
+    UPDATE tenant_settings t SET backup_supervisor_user_id = v.keep_id
+    FROM _user_dup_victims v WHERE t.backup_supervisor_user_id = v.victim_id;
+    UPDATE voice_sessions vs SET supervisor_user_id = v.keep_id
+    FROM _user_dup_victims v WHERE vs.supervisor_user_id = v.victim_id;
+
+    DELETE FROM users u
+    USING _user_dup_victims v
+    WHERE u.id = v.victim_id;
+
+    DROP TABLE IF EXISTS _user_dup_victims;
+    DROP TABLE IF EXISTS _user_dup_keepers;
+
+    DROP INDEX IF EXISTS idx_users_tenant_clerk;
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_users_tenant_clerk
+      ON users (tenant_id, clerk_user_id);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
