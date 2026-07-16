@@ -51,7 +51,7 @@ function mockUsersAndInvitations(opts: {
   });
 }
 
-describe('TeamMembersSheet — Tier 4 Team members (PR 1: read-only list)', () => {
+describe('TeamMembersSheet — read-only list', () => {
   beforeEach(() => {
     apiFetchMock.mockReset();
     toastSuccess.mockReset();
@@ -112,7 +112,7 @@ describe('TeamMembersSheet — Tier 4 Team members (PR 1: read-only list)', () =
   });
 });
 
-describe('TeamMembersSheet — Tier 4 Team members (PR 2: role editing)', () => {
+describe('TeamMembersSheet — role editing', () => {
   const baseUsers = [
     {
       id: 'u1',
@@ -230,7 +230,7 @@ describe('TeamMembersSheet — Tier 4 Team members (PR 2: role editing)', () => 
   });
 });
 
-describe('TeamMembersSheet — Tier 4 Team members (PR 3: invite flow)', () => {
+describe('TeamMembersSheet — invite flow', () => {
   const baseUsers = [
     { id: 'u1', email: 'jane@example.com', role: 'owner', firstName: 'Jane', canFieldServe: true },
   ];

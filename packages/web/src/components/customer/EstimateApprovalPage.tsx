@@ -75,7 +75,7 @@ interface PublicEstimateView {
   /** ISO timestamp the estimate was last revised after sending. */
   lastRevisedAt?: string;
   /**
-   * Tier 4 (Deposit rules — PR 3a). Required deposit cents derived
+   * Required deposit cents derived
    * from the linked job. 0 when no rule applies; >0 means the
    * customer must pay this much before work begins. The UI surfaces
    * the figure on the approval card today; PR 3b adds the
@@ -91,7 +91,7 @@ interface PublicEstimateView {
    */
   depositPayable?: boolean;
   /**
-   * Tier 4 (Deposit rules — PR 3b). Tenant policy controlling whether
+   * Tenant policy controlling whether
    * the deposit must be paid BEFORE the customer can approve the
    * estimate. The page replaces the Accept CTA with a Pay deposit
    * CTA when this is `'before_approval'` and the deposit is unpaid.
@@ -421,7 +421,7 @@ function SuccessScreen({
           </div>
         </div>
 
-        {/* Deposit prompt — Tier 4 (after_approval). The estimate is
+        {/* Deposit prompt — after_approval. The estimate is
             accepted; if a deposit is still owed, this is the "you'll be
             prompted to pay after approving" step. Pays via the same Stripe
             link as before_approval; the settlement poll swaps this for the
@@ -1091,7 +1091,7 @@ export function EstimateApprovalPage() {
             <Download size={12} /> Download PDF
           </button>
 
-          {/* Deposit notice — Tier 4 (Deposit rules — PR 3a). When the
+          {/* Deposit notice. When the
               tenant has a deposit rule and the estimate qualifies, the
               backend writes depositRequiredCents onto the linked job;
               the public view surfaces it. PR 3b adds the actual
@@ -1138,7 +1138,7 @@ export function EstimateApprovalPage() {
         {(() => {
           if (isExpired || isAlreadyDeclined) return null;
 
-          // Tier 4 (Deposit rules). Show the Pay-deposit CTA whenever the
+          // Show the Pay-deposit CTA whenever the
           // deposit is payable (policy-agnostic, computed server-side). For
           // before_approval this is the sent+pending estimate — the Accept
           // CTA stays hidden until the deposit is paid (the backend's
@@ -1215,7 +1215,7 @@ export function EstimateApprovalPage() {
 }
 
 // ─── Decline button ────────────────────────────────────────────────────────
-// Tier 4 (Deposit rules — PR 3b). Pay-deposit CTA shown when the
+// Pay-deposit CTA shown when the
 // tenant policy is 'before_approval'. On click, mints (or reuses) a
 // Stripe Payment Link via POST /public/estimates/:token/deposit-checkout
 // and redirects the customer there. After payment Stripe redirects

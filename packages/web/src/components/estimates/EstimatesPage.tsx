@@ -672,7 +672,7 @@ function SendEstimateSheet({ est, total, onClose, onSent, apiId }: {
           customMessage: msg,
         });
       } else {
-        // No API id: fall back to local animation only (used by mock-data screens).
+        // No API id: fall back to local animation only (offline/demo path).
         await new Promise((r) => setTimeout(r, 1200));
       }
       setSending(false);

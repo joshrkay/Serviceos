@@ -16,7 +16,7 @@ import type { CapturedMedia } from '../shared/CameraCapture';
 import { useApiClient } from '../../lib/apiClient';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
 import { formatDateInTenantTz, formatTimeInTenantTz } from '../../utils/formatInTenantTz';
-import type { JobActivity, MaterialItem, ServiceType } from '../../data/mock-data';
+import type { JobActivity, MaterialItem, ServiceType } from '../../types/job-ui';
 import { JobPhotoGallery } from './JobPhotoGallery';
 import {
   uploadJobPhoto as uploadJobPhotoApi,

@@ -44,7 +44,7 @@ export function SettingsPage() {
   const navigate = useNavigate();
   const { signOut } = useClerk();
   const { me } = useMe();
-  // Tier 4 — Quick toggles: load from backend on mount, persist on
+  // Quick toggles: load from backend on mount, persist on
   // toggle. aiAuto + reminders live on /api/settings (migration 075).
   // spanishMode derives from /api/settings/language (P11-002).
   const [aiAuto, setAiAuto]         = useState(false);
@@ -211,7 +211,7 @@ export function SettingsPage() {
   const [callRoutingOpen, setCallRoutingOpen] = useState(false);
   const [dncListOpen, setDncListOpen] = useState(false);
   const [operatorHoursOpen, setOperatorHoursOpen] = useState(false);
-  // Tier 4 (Calendar sync — PR 1). Auto-open the sheet + toast when
+  // Calendar sync OAuth return: auto-open the sheet + toast when
   // the user lands back here from Google's OAuth redirect. The
   // server-side callback redirects to /settings?calendar_connected=1
   // on success or ?calendar_error=<reason> when Google rejects /
@@ -221,7 +221,7 @@ export function SettingsPage() {
     const params = new URLSearchParams(window.location.search);
     const isConnected = params.get('calendar_connected') === '1';
     const connectionError = params.get('calendar_error');
-    // Tier 4 (Payment methods — PR 1). Operator returns from Stripe
+    // Payment methods OAuth return: operator returns from Stripe
     // Connect onboarding to /settings?stripe_connect=1. Auto-open
     // the sheet so they see the freshly-mirrored status.
     const stripeReturned = params.get('stripe_connect') === '1';
@@ -270,7 +270,7 @@ export function SettingsPage() {
   const [reviewsError, setReviewsError]       = useState('');
 
   /**
-   * Tier 4 (Subscription — Rivet billing). POST /api/billing/portal-session
+   * Rivet billing portal — POST /api/billing/portal-session
    * and redirect the operator to the Stripe-hosted portal where they can
    * manage card, plan, view invoices, etc. Returns to /settings on close.
    */
@@ -874,7 +874,7 @@ export function SettingsPage() {
         <SuppliersSheet serviceType="HVAC" onClose={() => setSuppliersOpen(false)} />
       )}
 
-      {/* Business profile sheet — closes the first of the 13 settings stubs. */}
+      {/* Business profile sheet */}
       {businessProfileOpen && (
         <BusinessProfileSheet
           onClose={() => setBusinessProfileOpen(false)}

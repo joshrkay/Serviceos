@@ -349,7 +349,7 @@ describe('P5-018 InvoicePaymentPage — async settlement polling', () => {
   }, 15_000);
 });
 
-describe('Tier 4 deposit (PR 3c) — InvoicePaymentPage credit row', () => {
+describe('InvoicePaymentPage — deposit credit row', () => {
   beforeEach(async () => {
     vi.restoreAllMocks();
     confirmPaymentMock.mockReset();
