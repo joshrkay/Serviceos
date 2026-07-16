@@ -36,6 +36,7 @@ from corpus_io import (  # noqa: E402
 )
 from classifier import BOOKING_INTENTS, classify_intent, handle_edge  # noqa: E402
 from slots import EXTRACTORS  # noqa: E402
+import posthog_client as ph  # noqa: E402
 
 ACC_TARGET = 0.92
 SLOT_F1_TARGET = 0.88
@@ -260,6 +261,7 @@ def main() -> int:
 
     # ── Target checks per scope ──
     problems: list[str] = []
+    regression_detected = False
     if scope in ("full",):
         if intents["accuracy"] < ACC_TARGET:
             problems.append(f"intent accuracy {intents['accuracy']} < {ACC_TARGET}")
@@ -276,7 +278,14 @@ def main() -> int:
             problems.append(f"spanish gap {spanish_gap} > {SPANISH_GAP_TARGET}")
         prev = previous_metrics()
         if prev and prev.get("intent", {}).get("accuracy", 0) - intents["accuracy"] > 1e-9:
-            problems.append(f"REGRESSION: accuracy {intents['accuracy']} < prior {prev['intent']['accuracy']}")
+            prior_acc = prev["intent"]["accuracy"]
+            problems.append(f"REGRESSION: accuracy {intents['accuracy']} < prior {prior_acc}")
+            regression_detected = True
+            ph.capture("eval_regression_detected", {
+                "scope": scope,
+                "current_accuracy": intents["accuracy"],
+                "prior_accuracy": prior_acc,
+            })
     elif scope == "edge-cases":
         if not edges["all_categories_pass"]:
             problems.append("edge categories not all passing")
@@ -293,6 +302,22 @@ def main() -> int:
     print(f"  edges: handling_acc={edges['handling_accuracy']} all_pass={edges['all_categories_pass']}")
     print(f"  negatives: booking_leaks={negatives['booking_leaks']} routing_acc={negatives['routing_accuracy']}")
     print(f"  language: en={en_acc} es={es_acc} gap={spanish_gap}")
+
+    slot_f1_values = [v["f1"] for v in slots.values()]
+    ph.capture("eval_run_completed", {
+        "scope": scope,
+        "intent_accuracy": intents["accuracy"],
+        "unknown_rate": intents["unknown_rate"],
+        "utterance_count": intents["n"],
+        "min_slot_f1": min(slot_f1_values) if slot_f1_values else None,
+        "edges_all_pass": edges["all_categories_pass"],
+        "negative_booking_leaks": negatives["booking_leaks"],
+        "spanish_gap": spanish_gap,
+        "passed": len(problems) == 0,
+        "regression_detected": regression_detected,
+        "failure_count": len(problems),
+    })
+
     if problems:
         print("[FAIL] " + "; ".join(problems))
         return 1

@@ -36,6 +36,7 @@ except Exception:  # pragma: no cover - optional dependency
 # is never evaluated at runtime and needs no module-level import.
 from corpus_classification import classify_record, clean_for_corpus
 from scrub_pii import KnownEntities, extract_self_identified_names, scrub_pii
+import posthog_client as ph
 
 if False:  # type-checking only; never executed
     from supabase import Client  # noqa: F401
@@ -400,8 +401,22 @@ def run() -> int:
     if args.dry_run:
         print("(dry-run: no database writes)")
 
+    ph.capture("corpus_processing_completed", {
+        "accepted_rows": accepted,
+        "dry_run": args.dry_run,
+        "file_count": len(zst_files),
+        "include_comments": args.comments,
+        "english_only": args.english_only,
+        "triage_distribution": dict(stats),
+    })
+
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(run())
+    try:
+        raise SystemExit(run())
+    except Exception as exc:
+        ph.capture_exception(exc)
+        ph.capture("corpus_processing_failed", {"error_type": type(exc).__name__})
+        raise
