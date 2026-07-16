@@ -11,6 +11,7 @@ import { createPool, createDirectPool } from './db/pool';
 import { verifyRlsRuntimeRole } from './db/rls-runtime-role';
 import { loadConfig, resolveMediaStreamsEnabled } from './shared/config';
 import { resolveWebDistDir } from './web-static-path';
+import { registerMarketingRedirects } from './marketing-redirects';
 import { createWebhookRouter } from './webhooks/routes';
 import { createIntegrationResolver, createVapiSecretResolver } from './webhooks/integration-resolver';
 import { createTelephonyRouter } from './routes/telephony';
@@ -6451,6 +6452,11 @@ export function createApp(): AppWithLifecycle {
     const { statusCode, body } = toErrorResponse(err);
     res.status(statusCode).json(body);
   });
+
+  // Marketing/legal pages moved to the standalone marketing site — forward
+  // the retired in-app paths (/pricing, /privacy, …) there before the SPA
+  // catch-all can serve index.html for them.
+  registerMarketingRedirects(app);
 
   // Catch-all route for client-side routing — serves index.html for all non-API routes
   // This allows the React SPA to handle routing on the client side.

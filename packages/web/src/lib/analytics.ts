@@ -30,15 +30,6 @@ export type AnalyticsEvent =
   | 'voice_agent_turned_on'
   | 'first_ai_call_detected'
   | 'trial_started'
-  | 'pricing_cta_clicked'
-  | 'landing_signup_clicked'
-  // Marketing-site pageviews + app-store CTA. Fired from the standalone
-  // marketing pages (features/pricing/about/download) and the store badges.
-  | 'view_features'
-  | 'view_pricing'
-  | 'view_about'
-  | 'view_download'
-  | 'download_app_clicked'
   // In-app guidance: the new-account first-run tour and the what's-new
   // changelog (components/walkthrough/*).
   | 'tour_started'
