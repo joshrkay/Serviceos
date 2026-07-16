@@ -58,6 +58,13 @@ function pickMeta(
 
 interface Mapping {
   name: ProductEventName;
+  /**
+   * Explicit `feature_domain` override. Set when the eventType prefix doesn't
+   * derive the desired domain (e.g. `call.*`/`voicemail.*` → `voice`, the flat
+   * AI-agent events → `ai`, `recurring_job.*`/`lead.*` folded into
+   * `job`/`customer`). Falls back to `featureDomainFor(eventType)`.
+   */
+  domain?: string;
   /** Extra event-specific props pulled by NAME from metadata. IDs/enums only. */
   props?: (event: AuditEvent) => Record<string, SafeVal>;
 }
@@ -125,6 +132,91 @@ const ALLOWLIST: Record<string, Mapping> = {
     name: 'appointment_booked',
     props: (e) => pickMeta(e.metadata, { job_id: 'jobId' }),
   },
+
+  // Jobs
+  'job.created': { name: 'job_created', domain: 'job' },
+  'job.status_changed': {
+    name: 'job_status_changed',
+    domain: 'job',
+    // NOT `reason` (free text on a backward transition).
+    props: (e) => pickMeta(e.metadata, { from_status: 'fromStatus', to_status: 'toStatus' }),
+  },
+  'job.created_from_estimate': {
+    name: 'job_created_from_estimate',
+    domain: 'job',
+    props: (e) => pickMeta(e.metadata, { estimate_id: 'estimateId' }),
+  },
+  'recurring_job.created': {
+    name: 'recurring_job_created',
+    domain: 'job',
+    props: (e) => pickMeta(e.metadata, { schedule: 'schedule' }),
+  },
+
+  // Customers / CRM (leads folded into the customer domain)
+  'customer.created': { name: 'customer_created', domain: 'customer' },
+  'customer.merged': { name: 'customer_merged', domain: 'customer' },
+  'customer.created_from_lead': {
+    name: 'customer_created_from_lead',
+    domain: 'customer',
+    // NOT the attribution metadata (may embed a referrer URL).
+    props: (e) => pickMeta(e.metadata, { lead_id: 'leadId' }),
+  },
+  'lead.created': {
+    name: 'lead_created',
+    domain: 'customer',
+    // `source` only — NOT the attribution metadata.
+    props: (e) => pickMeta(e.metadata, { source: 'source' }),
+  },
+  'lead.converted': {
+    name: 'lead_converted',
+    domain: 'customer',
+    props: (e) => pickMeta(e.metadata, { from_stage: 'fromStage' }),
+  },
+  'lead.lost': {
+    name: 'lead_lost',
+    domain: 'customer',
+    // NOT `reason` (free text).
+    props: (e) => pickMeta(e.metadata, { from_stage: 'fromStage' }),
+  },
+
+  // Voice / calls
+  'call.initiated': { name: 'call_initiated', domain: 'voice' },
+  'voicemail.received': {
+    name: 'voicemail_received',
+    domain: 'voice',
+    props: (e) => pickMeta(e.metadata, { has_recording_url: 'hasRecordingUrl' }),
+  },
+  'call_me_back.scheduled': {
+    name: 'callback_scheduled',
+    domain: 'voice',
+    // `reason` here is a fixed enum ('transfer_failed'), not free text.
+    props: (e) => pickMeta(e.metadata, { has_message: 'hasMessage', reason: 'reason' }),
+  },
+  'customer_callback_required': { name: 'customer_callback_required', domain: 'voice' },
+
+  // AI agent activity
+  'unsupervised_proposal_routed': {
+    name: 'unsupervised_proposal_routed',
+    domain: 'ai',
+    props: (e) =>
+      pickMeta(e.metadata, {
+        requested_routing: 'requestedRouting',
+        effective_routing: 'effectiveRouting',
+        channel: 'channel',
+        escalated: 'escalated',
+      }),
+  },
+  'escalation.requested': {
+    name: 'escalation_requested',
+    domain: 'ai',
+    // `outcome` only — NOT free-text `reason` or the assigned user id.
+    props: (e) => pickMeta(e.metadata, { outcome: 'outcome' }),
+  },
+  'autonomous_booking_undone': {
+    name: 'autonomous_booking_undone',
+    domain: 'ai',
+    props: (e) => pickMeta(e.metadata, { channel: 'channel', phase: 'phase' }),
+  },
 };
 
 const SERVER_DISTINCT_ID: Record<'agent' | 'system', string> = {
@@ -170,7 +262,7 @@ export function auditEventToProductEvent(event: AuditEvent): ProductEvent | null
     entity_id: event.entityId,
     actor_role: event.actorRole,
     actor_kind: actorKindFor(event.actorRole),
-    feature_domain: featureDomainFor(event.eventType),
+    feature_domain: mapping.domain ?? featureDomainFor(event.eventType),
     audit_event_type: event.eventType,
   };
   const specific = mapping.props ? mapping.props(event) : {};

@@ -31,7 +31,28 @@ export type ProductEventName =
   | 'payment_recorded'
   | 'payment_refunded'
   | 'payment_failed'
-  | 'appointment_booked';
+  | 'appointment_booked'
+  // Jobs
+  | 'job_created'
+  | 'job_status_changed'
+  | 'job_created_from_estimate'
+  | 'recurring_job_created'
+  // Customers / CRM (leads folded into the customer domain)
+  | 'customer_created'
+  | 'customer_merged'
+  | 'customer_created_from_lead'
+  | 'lead_created'
+  | 'lead_converted'
+  | 'lead_lost'
+  // Voice / calls
+  | 'call_initiated'
+  | 'voicemail_received'
+  | 'callback_scheduled'
+  | 'customer_callback_required'
+  // AI agent activity
+  | 'unsupervised_proposal_routed'
+  | 'escalation_requested'
+  | 'autonomous_booking_undone';
 
 /**
  * Runtime list of every catalogued product-event name. Kept in lockstep with
@@ -52,6 +73,23 @@ export const PRODUCT_EVENT_NAMES: readonly ProductEventName[] = [
   'payment_refunded',
   'payment_failed',
   'appointment_booked',
+  'job_created',
+  'job_status_changed',
+  'job_created_from_estimate',
+  'recurring_job_created',
+  'customer_created',
+  'customer_merged',
+  'customer_created_from_lead',
+  'lead_created',
+  'lead_converted',
+  'lead_lost',
+  'call_initiated',
+  'voicemail_received',
+  'callback_scheduled',
+  'customer_callback_required',
+  'unsupervised_proposal_routed',
+  'escalation_requested',
+  'autonomous_booking_undone',
 ] as const;
 
 // Compile-time guard: every union member must appear in PRODUCT_EVENT_NAMES

@@ -131,6 +131,107 @@ describe('auditEventToProductEvent', () => {
   });
 });
 
+describe('broadened domains (jobs / customers / voice / ai)', () => {
+  it('maps jobs and folds recurring_job into the job domain', () => {
+    const created = auditEventToProductEvent(ev({ eventType: 'job.created', entityType: 'job', actorRole: 'user' }));
+    expect(created!.name).toBe('job_created');
+    expect(created!.properties.feature_domain).toBe('job');
+
+    const recurring = auditEventToProductEvent(
+      ev({ eventType: 'recurring_job.created', entityType: 'recurring_job', metadata: { customerId: 'c1', schedule: 'Every 2 weeks' } }),
+    );
+    expect(recurring!.name).toBe('recurring_job_created');
+    expect(recurring!.properties.feature_domain).toBe('job');
+    expect(recurring!.properties.schedule).toBe('Every 2 weeks');
+    // customerId was not whitelisted for this event.
+    expect(Object.keys(recurring!.properties)).not.toContain('customer_id');
+  });
+
+  it('drops the free-text reason on job.status_changed', () => {
+    const pe = auditEventToProductEvent(
+      ev({
+        eventType: 'job.status_changed',
+        entityType: 'job',
+        metadata: { fromStatus: 'scheduled', toStatus: 'cancelled', backward: true, reason: 'customer no-showed, rude on phone' },
+      }),
+    );
+    expect(pe!.properties).toMatchObject({ from_status: 'scheduled', to_status: 'cancelled' });
+    expect(Object.keys(pe!.properties)).not.toContain('reason');
+    expect(Object.values(pe!.properties)).not.toContain('customer no-showed, rude on phone');
+  });
+
+  it('folds leads into the customer domain and drops attribution + free-text', () => {
+    const lead = auditEventToProductEvent(
+      ev({
+        eventType: 'lead.created',
+        entityType: 'lead',
+        metadata: { source: 'web', utmCampaign: 'spring', referrer: 'https://ads.example.com/?email=leak@x.com' },
+      }),
+    );
+    expect(lead!.name).toBe('lead_created');
+    expect(lead!.properties.feature_domain).toBe('customer');
+    expect(lead!.properties.source).toBe('web');
+    // attribution (which can embed a referrer URL / PII) never forwards.
+    expect(Object.keys(lead!.properties)).not.toContain('referrer');
+    expect(Object.keys(lead!.properties)).not.toContain('utm_campaign');
+    expect(Object.values(lead!.properties)).not.toContain('https://ads.example.com/?email=leak@x.com');
+
+    const lost = auditEventToProductEvent(
+      ev({ eventType: 'lead.lost', entityType: 'lead', metadata: { fromStage: 'qualified', reason: 'went with a cheaper competitor' } }),
+    );
+    expect(lost!.properties).toMatchObject({ from_stage: 'qualified' });
+    expect(Object.keys(lost!.properties)).not.toContain('reason');
+  });
+
+  it('maps voice/calls to the voice domain', () => {
+    const call = auditEventToProductEvent(
+      ev({ eventType: 'call.initiated', entityType: 'customer', actorRole: 'system', metadata: { callSid: 'CA123', conversationId: 'conv1' } }),
+    );
+    expect(call!.name).toBe('call_initiated');
+    expect(call!.properties.feature_domain).toBe('voice');
+    // opaque Twilio ids were not whitelisted.
+    expect(Object.keys(call!.properties)).not.toContain('call_sid');
+
+    const vm = auditEventToProductEvent(
+      ev({ eventType: 'voicemail.received', entityType: 'lead', actorRole: 'system', metadata: { callSid: 'CA1', hasRecordingUrl: true } }),
+    );
+    expect(vm!.name).toBe('voicemail_received');
+    expect(vm!.properties.feature_domain).toBe('voice');
+    expect(vm!.properties.has_recording_url).toBe(true);
+  });
+
+  it('maps AI-agent activity to the ai domain', () => {
+    const routed = auditEventToProductEvent(
+      ev({
+        eventType: 'unsupervised_proposal_routed',
+        actorRole: 'system',
+        actorId: 'system',
+        metadata: { requestedRouting: 'queue_and_sms', effectiveRouting: 'escalate_to_oncall', channel: 'voice', escalated: true },
+      }),
+    );
+    expect(routed!.name).toBe('unsupervised_proposal_routed');
+    expect(routed!.properties.feature_domain).toBe('ai');
+    expect(routed!.properties).toMatchObject({
+      requested_routing: 'queue_and_sms',
+      effective_routing: 'escalate_to_oncall',
+      channel: 'voice',
+      escalated: true,
+    });
+    expect(routed!.distinctId).toBe('server:system');
+
+    const escalation = auditEventToProductEvent(
+      ev({ eventType: 'escalation.requested', entityType: 'session', actorRole: 'system', actorId: 'sess_1', metadata: { reason: 'customer very upset about the invoice', outcome: 'assigned', assignedUserId: 'u1' } }),
+    );
+    expect(escalation!.name).toBe('escalation_requested');
+    expect(escalation!.properties.feature_domain).toBe('ai');
+    expect(escalation!.properties.outcome).toBe('assigned');
+    // free-text reason + the assigned user id never forward.
+    expect(Object.keys(escalation!.properties)).not.toContain('reason');
+    expect(Object.keys(escalation!.properties)).not.toContain('assigned_user_id');
+    expect(Object.values(escalation!.properties)).not.toContain('customer very upset about the invoice');
+  });
+});
+
 describe('distinctIdFor', () => {
   it('passes human actor ids through', () => {
     expect(distinctIdFor(ev({ eventType: 'proposal.approved', actorRole: 'owner', actorId: 'clerk_owner' }))).toBe(
