@@ -86,6 +86,11 @@ import {
 import { VOICE_EVENT_CHANNEL } from '../voice-quality/event-bus';
 import { buildEscalationSummary } from '../agents/customer-calling/escalation-summary-builder';
 import { buildCallerContextFromSession } from '../agents/customer-calling/escalation-context-from-session';
+import {
+  hydrateEscalationCrm,
+  mergeCallerContextWithCrm,
+} from '../agents/customer-calling/hydrate-escalation-crm';
+import type { TagRepository } from '../../customers/tag';
 import type { WhisperCache } from '../../telephony/whisper-cache';
 import type { PanelData } from '../agents/customer-calling/escalation-summary-builder';
 import {
@@ -405,6 +410,8 @@ export interface VoiceTurnProcessorDeps {
   invoiceRepo?: InvoiceRepository;
   agreementRepo?: AgreementRepository;
   customerRepo?: CustomerRepository;
+  /** Customer tags for escalation CRM hydration (handoff context pack). */
+  tagRepo?: TagRepository;
   /**
    * When wired (with customerRepo), an unknown inbound caller who gives their
    * info at `ask_caller` gets a CUSTOMER resolved/created by phone and the call
@@ -1271,6 +1278,23 @@ export function createVoiceTurnProcessor(
         rawReason,
       );
 
+      const crm = await hydrateEscalationCrm(
+        tenantId,
+        {
+          ...(callerBundle.caller.customerId
+            ? { customerId: callerBundle.caller.customerId }
+            : {}),
+          ...(callerPhone !== 'unknown' ? { phone: callerPhone } : {}),
+        },
+        {
+          ...(deps.customerRepo ? { customerRepo: deps.customerRepo } : {}),
+          ...(deps.tagRepo ? { tagRepo: deps.tagRepo } : {}),
+          ...(deps.jobRepo ? { jobRepo: deps.jobRepo } : {}),
+          ...(deps.agreementRepo ? { agreementRepo: deps.agreementRepo } : {}),
+        },
+      );
+      const enrichedCaller = mergeCallerContextWithCrm(callerBundle, crm);
+
       const result = await escalateToHuman({
         tenantId,
         sessionId: session.id,
@@ -1292,10 +1316,10 @@ export function createVoiceTurnProcessor(
         channelPreferences,
         buildSummary: buildEscalationSummary,
         callerContext: {
-          caller: callerBundle.caller,
-          customer: callerBundle.customer,
-          intent: callerBundle.intent,
-          transcriptSnapshot: callerBundle.transcriptSnapshot,
+          caller: enrichedCaller.caller,
+          ...(enrichedCaller.customer ? { customer: enrichedCaller.customer } : {}),
+          intent: enrichedCaller.intent,
+          transcriptSnapshot: enrichedCaller.transcriptSnapshot,
         },
         shopName: deps.businessName,
         ...(deps.publicBaseUrl ? { publicWebBaseUrl: deps.publicBaseUrl } : {}),
