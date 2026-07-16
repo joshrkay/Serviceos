@@ -55,6 +55,7 @@ import type { InvoiceRepository } from '../invoices/invoice';
 import type { DunningConfigRepository } from '../invoices/dunning-config';
 import type { AgreementRepository } from '../agreements/agreement';
 import type { CustomerRepository } from '../customers/customer';
+import type { TagRepository } from '../customers/tag';
 import { isCustomerDuplicateLoader } from '../customers/dedup';
 import type { EstimateRepository } from '../estimates/estimate';
 import type { DailyDigestRepository } from '../digest/digest-service';
@@ -233,6 +234,8 @@ export interface TwilioAdapterDeps {
   agreementRepo?: AgreementRepository;
   /** VQ-006: read-only customer + estimate lookups. */
   customerRepo?: CustomerRepository;
+  /** Customer tags for escalation CRM hydration (handoff context pack). */
+  tagRepo?: TagRepository;
   /**
    * When wired, an identified inbound caller's call is logged on their
    * conversation timeline (channel=call, direction=inbound) — the inbound

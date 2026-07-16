@@ -3338,6 +3338,8 @@ export function createApp(): AppWithLifecycle {
     invoiceRepo,
     estimateRepo,
     customerRepo,
+    // Handoff context pack — tags hydrate into escalate whisper/SMS/panel.
+    tagRepo: customerTagRepo,
     // Inbound-call timeline logging — an identified caller's call is threaded
     // onto their conversation, mirroring the outbound click-to-call log.
     conversationRepo,

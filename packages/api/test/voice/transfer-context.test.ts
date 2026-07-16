@@ -144,6 +144,126 @@ describe('Feature 7 — context SMS to transfer_number before the bridge', () =>
     expect(twiml).toContain(TRANSFER_NUMBER);
   });
 
+  it('hydrates CRM into the context SMS / whisper when customer repos are wired', async () => {
+    const store = new VoiceSessionStore({ startInterval: false });
+    const auditRepo = new InMemoryAuditRepository();
+    const onCallRepo = new InMemoryOnCallRepository();
+    const callControl = new DefaultTwilioCallControl();
+    const pendingTransferTwiml = new Map<string, string>();
+    const { WhisperCache } = await import('../../src/telephony/whisper-cache');
+    const whisperCache = new WhisperCache();
+    const sent: { to: string; body: string }[] = [];
+    const deliveryProvider = {
+      sendSms: vi.fn(async (a: { to: string; body: string }) => {
+        sent.push(a);
+      }),
+    };
+    const settingsRepo = {
+      findByTenant: vi.fn(
+        async () =>
+          ({ transferNumber: TRANSFER_NUMBER, businessName: 'Acme Plumbing' } as unknown as TenantSettings),
+      ),
+    } as unknown as SettingsRepository;
+
+    const { InMemoryCustomerRepository } = await import('../../src/customers/customer');
+    const { InMemoryTagRepository } = await import('../../src/customers/tag');
+    const { InMemoryJobRepository } = await import('../../src/jobs/job');
+    const { InMemoryAgreementRepository } = await import('../../src/agreements/agreement');
+
+    const customerRepo = new InMemoryCustomerRepository();
+    const tagRepo = new InMemoryTagRepository();
+    const jobRepo = new InMemoryJobRepository();
+    const agreementRepo = new InMemoryAgreementRepository();
+    const customerId = '22222222-2222-4222-8222-222222222222';
+    await customerRepo.create({
+      id: customerId,
+      tenantId: TENANT_ID,
+      firstName: 'María',
+      lastName: 'López',
+      displayName: 'María López',
+      preferredChannel: 'phone',
+      smsConsent: true,
+      isArchived: false,
+      createdBy: 'test',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      primaryPhone: '+15125550142',
+      communicationNotes: 'Prefers mornings.',
+    });
+    await tagRepo.addTag(TENANT_ID, customerId, 'vip');
+    await jobRepo.create({
+      id: 'job-1',
+      tenantId: TENANT_ID,
+      customerId,
+      locationId: 'loc-1',
+      jobNumber: 'J-1',
+      summary: 'AC tune-up',
+      status: 'completed',
+      priority: 'normal',
+      createdBy: 'test',
+      createdAt: new Date('2026-01-10T12:00:00Z'),
+      updatedAt: new Date('2026-01-10T12:00:00Z'),
+      completedAt: new Date('2026-01-10T15:00:00Z'),
+    });
+    await agreementRepo.create({
+      id: 'agr-1',
+      tenantId: TENANT_ID,
+      customerId,
+      name: 'Gold Plan',
+      recurrenceRule: 'FREQ=YEARLY',
+      priceCents: 29900,
+      autoGenerateInvoice: false,
+      autoGenerateJob: false,
+      nextRunAt: new Date(),
+      status: 'active',
+      startsOn: '2025-01-01',
+      endsOn: '2027-01-01',
+      memberDiscountBps: 1000,
+      createdBy: 'test',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    const processor = createVoiceTurnProcessor({
+      store,
+      gateway: makeGateway('{}'),
+      businessName: 'Acme Plumbing',
+      systemActorId: 'test-actor',
+      auditRepo,
+      onCallRepo,
+      callControl,
+      settingsRepo,
+      deliveryProvider,
+      pendingTransferTwiml,
+      publicBaseUrl: PUBLIC_BASE_URL,
+      whisperCache,
+      customerRepo,
+      tagRepo,
+      jobRepo,
+      agreementRepo,
+    });
+
+    const session = store.create(TENANT_ID, 'telephony', { callSid: 'CA-crm' });
+    session.transcript.push('caller: necesito una cita');
+
+    await processor.executeSideEffects(
+      session,
+      [
+        {
+          type: 'notify_oncall',
+          payload: { reason: 'operator_request', callerPhone: '+15125550142' },
+        },
+      ],
+      TENANT_ID,
+    );
+
+    expect(sent[0]?.body).toMatch(/Gold Plan member|Member/i);
+    const escMatch = sent[0]?.body.match(/\/c\/(esc_[A-Za-z0-9-]+)/);
+    expect(escMatch).toBeTruthy();
+    const whisperText = whisperCache.get(escMatch![1]);
+    expect(whisperText).toMatch(/Gold Plan member|Member/i);
+  });
+
   it('does not expose the bridge TwiML until the context SMS resolves', async () => {
     const store = new VoiceSessionStore({ startInterval: false });
     const auditRepo = new InMemoryAuditRepository();
