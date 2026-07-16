@@ -52,7 +52,12 @@ function BrandLoader() {
  */
 function MarketingRedirect() {
   useEffect(() => {
-    window.location.replace(MARKETING_SITE_URL);
+    // Carry the query string across so campaign / attribution params
+    // (utm_*, gclid, …) reach the marketing site — this redirect is the only
+    // root experience for signed-out app-domain traffic. The server-side
+    // redirects preserve the query the same way (the server never sees the
+    // fragment, so we match that and leave the hash off).
+    window.location.replace(`${MARKETING_SITE_URL}${window.location.search}`);
   }, []);
   return <BrandLoader />;
 }

@@ -28,6 +28,17 @@ describe('marketing redirects', () => {
     }
   });
 
+  it('preserves the query string so attribution params survive the hop', async () => {
+    const app = makeApp();
+    const res = await request(app).get(
+      '/pricing?utm_source=google&utm_campaign=spring&gclid=abc123',
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toBe(
+      `${MARKETING_SITE_URL}/pricing?utm_source=google&utm_campaign=spring&gclid=abc123`,
+    );
+  });
+
   it('does not intercept unrelated paths (they fall through to the SPA)', async () => {
     const app = makeApp();
     const res = await request(app).get('/jobs');

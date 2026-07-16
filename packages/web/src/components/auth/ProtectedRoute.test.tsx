@@ -117,7 +117,7 @@ describe('P0-031 ProtectedRoute — unauthenticated', () => {
     const replaceSpy = vi.fn();
     Object.defineProperty(window, 'location', {
       configurable: true,
-      value: { ...originalLocation, replace: replaceSpy },
+      value: { ...originalLocation, search: '', replace: replaceSpy },
     });
 
     try {
@@ -136,6 +136,42 @@ describe('P0-031 ProtectedRoute — unauthenticated', () => {
       // Neither the protected content nor a login flash should render.
       expect(screen.queryByTestId('protected-content')).toBeNull();
       expect(screen.queryByTestId('login-page')).toBeNull();
+    } finally {
+      Object.defineProperty(window, 'location', {
+        configurable: true,
+        value: originalLocation,
+      });
+    }
+  });
+
+  it('carries the query string to the marketing site (attribution params)', () => {
+    clerkState.isLoaded = true;
+    clerkState.isSignedIn = false;
+    const originalLocation = window.location;
+    const replaceSpy = vi.fn();
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: {
+        ...originalLocation,
+        search: '?utm_source=google&gclid=abc123',
+        replace: replaceSpy,
+      },
+    });
+
+    try {
+      render(
+        <MemoryRouter initialEntries={['/?utm_source=google&gclid=abc123']}>
+          <Routes>
+            <Route element={<ProtectedRoute />}>
+              <Route path="/" element={<ProtectedContent />} />
+            </Route>
+          </Routes>
+        </MemoryRouter>
+      );
+
+      expect(replaceSpy).toHaveBeenCalledWith(
+        'https://therivetapp.com?utm_source=google&gclid=abc123',
+      );
     } finally {
       Object.defineProperty(window, 'location', {
         configurable: true,

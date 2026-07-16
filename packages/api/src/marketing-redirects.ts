@@ -37,8 +37,13 @@ export const MARKETING_REDIRECT_PATHS = [
  */
 export function registerMarketingRedirects(app: Express): void {
   for (const path of MARKETING_REDIRECT_PATHS) {
-    app.get(path, (_req, res) => {
-      res.redirect(302, `${MARKETING_SITE_URL}${path}`);
+    app.get(path, (req, res) => {
+      // Redirect with the full original URI (path + query string) so campaign
+      // / attribution params (utm_*, gclid, …) survive the hop. The
+      // destination host is fixed, so appending untrusted query data can't
+      // become an open redirect. Matches the nginx edge, which uses
+      // $request_uri.
+      res.redirect(302, `${MARKETING_SITE_URL}${req.originalUrl}`);
     });
   }
 }
