@@ -71,6 +71,7 @@ type Props = Record<string, string | number | boolean | null | undefined>;
 interface PostHogLike {
   capture: (event: string, props?: Props) => void;
   identify: (distinctId: string, traits?: Props) => void;
+  group: (groupType: string, groupKey: string, props?: Props) => void;
   reset: () => void;
 }
 
@@ -183,6 +184,28 @@ export function identify(userId: string, traits?: Props): void {
     if (!ph) return;
     try {
       ph.identify(userId, traits);
+    } catch {
+      /* swallow */
+    }
+  });
+}
+
+/**
+ * Bind the current browser session to a tenant group so events roll up per
+ * tenant (PostHog group analytics — the primary lever for a multi-tenant B2B
+ * product). Call after identify(). Off-by-default and never throws, like the
+ * rest of this wrapper.
+ *
+ * Only the thin tenant traits available client-side (e.g. `timezone` from
+ * /api/me) are passed here; the authoritative B2B traits (vertical, plan,
+ * subscription_status, activated) are set server-side, where they change and
+ * are known even for tenants who never open the web app.
+ */
+export function groupTenant(tenantId: string, traits?: Props): void {
+  void loadPosthog().then((ph) => {
+    if (!ph) return;
+    try {
+      ph.group('tenant', tenantId, traits);
     } catch {
       /* swallow */
     }

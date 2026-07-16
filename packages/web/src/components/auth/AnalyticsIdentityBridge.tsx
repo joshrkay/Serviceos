@@ -14,7 +14,7 @@
  */
 import { useEffect } from 'react';
 import { useAuth, useUser } from '@clerk/clerk-react';
-import { identify, resetIdentity } from '../../lib/analytics';
+import { identify, groupTenant, resetIdentity } from '../../lib/analytics';
 import { useMe } from '../../hooks/useMe';
 
 export function AnalyticsIdentityBridge() {
@@ -32,7 +32,24 @@ export function AnalyticsIdentityBridge() {
       const emailDomain = email?.split('@')[1];
       identify(userId, {
         emailDomain: emailDomain ?? null,
+        // Person-level traits, available once /api/me resolves. Enums/flags
+        // only — never PII. `me` may be null on the first pass (the effect
+        // re-runs when it loads), so these are conditionally merged.
+        ...(me
+          ? {
+              role: me.role,
+              current_mode: me.current_mode,
+              can_field_serve: me.can_field_serve,
+            }
+          : {}),
       });
+
+      // Tenant group so every event rolls up per tenant. Only the thin
+      // client-available trait (timezone) is seeded here; the authoritative
+      // B2B traits (vertical, plan, subscription_status) are set server-side.
+      if (me?.tenant_id) {
+        groupTenant(me.tenant_id, me.timezone ? { timezone: me.timezone } : undefined);
+      }
 
       // Identify the signed-in user to Pendo once /api/me data is available.
       // Guarded: the Pendo snippet is commonly blocked by ad blockers and
