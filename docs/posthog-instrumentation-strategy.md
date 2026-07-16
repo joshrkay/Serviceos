@@ -267,9 +267,10 @@ Four complementary signals; we have one.
    `$error_tracking_issue_*` scaffolding). Keep the redaction — feed the safe
    shape, not raw stacks.
 2. **Backend errors — the gap.** `captureRequestError` only stashes the error
-   for the request logger. Add a PostHog capture in the **global error handler**
-   (`app.ts:6450`) for any 5xx: emit `api_error { route, status, source,
-   tenant_id }` — **no** request body, headers, or message with PII. Also cover
+   for the request logger. Add a PostHog capture in the **global Express error
+   handler** in `app.ts` (the terminal `app.use((err, _req, res, _next) => …)`
+   that maps `toErrorResponse`) for any 5xx: emit `api_error { route, status,
+   source, tenant_id }` — **no** request body, headers, or message with PII. Also cover
    LLM gateway failures and async worker (P0-009) job failures. Without this,
    "customer hit a 500" is invisible in PostHog.
 3. **Session replay (masked) — highest-leverage bug tool.** Turn on replay
