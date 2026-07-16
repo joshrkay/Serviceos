@@ -101,6 +101,7 @@ async function pollRecordingUntilDone(
 export async function uploadAndTranscribe(
   clip: AudioClip,
   deps: UploadAndTranscribeDeps,
+  jobId?: string,
 ): Promise<string> {
   const { fileId, audioUrl } = await createSignedAudioUpload(clip, deps);
 
@@ -110,7 +111,12 @@ export async function uploadAndTranscribe(
   const createRes = await deps.api('/api/voice/recordings', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ fileId, audioUrl, idempotencyKey: deps.makeIdempotencyKey() }),
+    body: JSON.stringify({
+      fileId,
+      audioUrl,
+      idempotencyKey: deps.makeIdempotencyKey(),
+      ...(jobId ? { jobId } : {}),
+    }),
   });
   if (!createRes.ok) throw new Error('Unable to start transcription.');
 

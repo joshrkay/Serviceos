@@ -57,10 +57,64 @@ export function createAppointmentRouter(
 ): Router {
   const router = Router();
 
+  async function mayTriggerRunningLate(
+    req: AuthenticatedRequest,
+    jobId: string,
+  ): Promise<boolean> {
+    if (req.auth!.role !== 'technician') return true;
+    if (!req.auth!.canonicalUserId) return false;
+    const job = await jobRepo.findById(req.auth!.tenantId, jobId);
+    return job?.assignedTechnicianId === req.auth!.canonicalUserId;
+  }
+
+  async function enqueueRunningLate(
+    req: AuthenticatedRequest,
+    appointmentId: string,
+    delayVersion: number,
+    delayMinutes: number,
+  ): Promise<string | null> {
+    try {
+      return await options?.delayNotificationCoordinator?.enqueueDelayNotice({
+        tenantId: req.auth!.tenantId,
+        currentAppointmentId: appointmentId,
+        delayVersion,
+        delayMinutes,
+      }) ?? null;
+    } catch (notificationErr) {
+      // eslint-disable-next-line no-console
+      console.warn('Failed to enqueue delay notification for running-late notice', {
+        appointmentId,
+        error: notificationErr instanceof Error ? notificationErr.message : String(notificationErr),
+      });
+      return null;
+    }
+  }
+
+  async function emitRunningLateAudit(
+    req: AuthenticatedRequest,
+    appointmentId: string,
+    jobId: string,
+    delayVersion: number,
+    delayMinutes: number,
+    idempotencyKey: string | null,
+  ): Promise<void> {
+    if (!auditRepo) return;
+    await auditRepo.create(
+      createAuditEvent({
+        tenantId: req.auth!.tenantId,
+        actorId: req.auth!.userId,
+        actorRole: req.auth!.role,
+        eventType: 'appointment.running_late_triggered',
+        entityType: 'appointment',
+        entityId: appointmentId,
+        correlationId: idempotencyKey ?? undefined,
+        metadata: { jobId, delayMinutes, delayVersion },
+      }),
+    );
+  }
+
   // Shared by the PUT /:id virtual-status branch (dispatcher backcompat)
-  // and POST /:id/running-late (technician path). `running_late` is a
-  // notification trigger only — no entity is mutated — so, keeping parity
-  // with the original PUT branch, no audit event is emitted here.
+  // and POST /:id/running-late (technician path).
   async function handleRunningLate(
     req: AuthenticatedRequest,
     res: Response,
@@ -77,34 +131,31 @@ export function createAppointmentRouter(
     // customer delay notification for someone else's work. Mirrors the
     // assignment check in the delay-ack flow. Dispatcher/owner (who reach this
     // via the appointments:update PUT branch) are unaffected.
-    if (req.auth!.role === 'technician') {
-      const job = await jobRepo.findById(req.auth!.tenantId, appointment.jobId);
-      if (!job || job.assignedTechnicianId !== req.auth!.userId) {
-        res.status(403).json({
-          error: 'FORBIDDEN',
-          message: 'Only the assigned technician can send a running-late notice',
-        });
-        return;
-      }
+    if (!(await mayTriggerRunningLate(req, appointment.jobId))) {
+      res.status(403).json({
+        error: 'FORBIDDEN',
+        message: 'Only the assigned technician can send a running-late notice',
+      });
+      return;
     }
     const history = await timelineRepo.findByJob(req.auth!.tenantId, appointment.jobId);
     const delayVersion = history.filter(
       (e) => e.eventType === JOB_TIMELINE_EVENT_TYPES.DELAY_ACKNOWLEDGED && e.metadata?.isRunningBehind === true,
     ).length;
-    try {
-      await options?.delayNotificationCoordinator?.enqueueDelayNotice({
-        tenantId: req.auth!.tenantId,
-        currentAppointmentId: appointment.id,
-        delayVersion,
-        delayMinutes,
-      });
-    } catch (notificationErr) {
-      // eslint-disable-next-line no-console
-      console.warn('Failed to enqueue delay notification for running-late notice', {
-        appointmentId: appointment.id,
-        error: notificationErr instanceof Error ? notificationErr.message : String(notificationErr),
-      });
-    }
+    const idempotencyKey = await enqueueRunningLate(
+      req,
+      appointment.id,
+      delayVersion,
+      delayMinutes,
+    );
+    await emitRunningLateAudit(
+      req,
+      appointment.id,
+      appointment.jobId,
+      delayVersion,
+      delayMinutes,
+      idempotencyKey,
+    );
     res.json({ appointmentId: appointment.id, delayMinutes, queued: true });
   }
 

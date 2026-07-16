@@ -23,8 +23,13 @@ afterAll(async () => {
   await closeSharedTestDb();
 });
 
-function auth(tenantId: string, role: 'owner' | 'dispatcher' | 'technician', userId: string) {
-  return { tenantId, role, userId, sessionId: 'sess-test' };
+function auth(
+  tenantId: string,
+  role: 'owner' | 'dispatcher' | 'technician',
+  userId: string,
+  canonicalUserId?: string,
+) {
+  return { tenantId, role, userId, canonicalUserId, sessionId: 'sess-test' };
 }
 
 async function seedTechnician(tenantId: string): Promise<{ id: string; clerkId: string }> {
@@ -76,11 +81,22 @@ describe('PgTechnicianLocationAuthorizer (real Postgres)', () => {
     expect(await authz.canSubmitForTechnician(auth(a.tenantId, 'owner', a.userId), techB.id)).toBe(false);
   });
 
-  it('technician self-submit short-circuits on their own id (no DB needed)', async () => {
+  it('technician self-submit uses their canonical users.id (no DB needed)', async () => {
     const { tenantId } = await createTestTenant(pool);
     const authz = new PgTechnicianLocationAuthorizer(pool);
-    const me = 'clerk_self_123';
-    expect(await authz.canSubmitForTechnician(auth(tenantId, 'technician', me), me)).toBe(true);
-    expect(await authz.canSubmitForTechnician(auth(tenantId, 'technician', me), 'someone-else')).toBe(false);
+    const clerkId = 'user_clerk_self_123';
+    const canonicalId = crypto.randomUUID();
+    expect(
+      await authz.canSubmitForTechnician(
+        auth(tenantId, 'technician', clerkId, canonicalId),
+        canonicalId,
+      ),
+    ).toBe(true);
+    expect(
+      await authz.canSubmitForTechnician(
+        auth(tenantId, 'technician', clerkId, canonicalId),
+        crypto.randomUUID(),
+      ),
+    ).toBe(false);
   });
 });

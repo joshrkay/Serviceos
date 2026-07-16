@@ -102,7 +102,13 @@ export function SettingsPage() {
       }
       try {
         const statusRes = await apiFetch('/api/onboarding/status');
-        if (cancelled || !statusRes.ok) return;
+        if (cancelled) return;
+        if (!statusRes.ok) {
+          // Soft-fail: keep Settings usable; don't leave the AI phone
+          // answering row stuck on "Loading…" forever.
+          setVoiceAgentLive(false);
+          return;
+        }
         const status = (await statusRes.json()) as { voiceAgentLive?: boolean };
         setVoiceAgentLive(status.voiceAgentLive ?? false);
       } catch {

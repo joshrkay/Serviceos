@@ -52,7 +52,7 @@ describe('Postgres integration — 249_backfill_owner_memberships', () => {
     await pool.query(BACKFILL_SQL);
 
     const rows = await pool.query(
-      `SELECT role, status, email, deleted_at FROM users
+      `SELECT id, role, status, email, deleted_at FROM users
        WHERE tenant_id = $1 AND clerk_user_id = $2`,
       [legacyTenantId, legacyOwnerId],
     );
@@ -63,7 +63,14 @@ describe('Postgres integration — 249_backfill_owner_memberships', () => {
     expect(rows.rows[0].deleted_at).toBeNull();
 
     const after = await load(legacyOwnerId, legacyTenantId);
-    expect(after).toEqual({ role: 'owner', status: 'active', deleted: false });
+    // MembershipRecord includes canonical users.id as userId (authz loader
+    // SELECT) so technicians/canonical FK checks resolve off the DB UUID.
+    expect(after).toEqual({
+      userId: rows.rows[0].id,
+      role: 'owner',
+      status: 'active',
+      deleted: false,
+    });
   });
 
   it('is idempotent — re-running the backfill inserts nothing new', async () => {

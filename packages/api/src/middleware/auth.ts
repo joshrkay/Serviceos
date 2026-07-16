@@ -139,6 +139,8 @@ export function setCachedMode(
  * === 'active'.
  */
 export interface MembershipRecord {
+  /** Canonical tenant-scoped `users.id` for this Clerk subject. */
+  userId: string;
   role: string;
   deleted: boolean;
   status: string;
@@ -247,6 +249,10 @@ export async function resolveAuthorization(
   // Authoritative: the DB role wins over the token claim. A stale token that
   // says 'owner' is enforced as whatever the DB now says.
   req.auth.role = membership.role;
+  // Preserve req.auth.userId as the Clerk subject for existing audit/auth
+  // consumers. Canonical entity authorization uses this separately resolved
+  // UUID so an external subject is never compared to users.id foreign keys.
+  req.auth.canonicalUserId = membership.userId;
   next();
 }
 

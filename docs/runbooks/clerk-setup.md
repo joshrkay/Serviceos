@@ -236,6 +236,7 @@ Full commercial loop: `docs/launch/GO-LIVE-RUNBOOK.md`.
 | Console: template `serviceos` diagnostic | Same | §2 |
 | API 401 “Token missing or invalid role claim” | `public_metadata.role` empty or template claim wrong | Fix webhook + template; sign out/in to refresh JWT |
 | API 403 “Tenant context required” | `tenant_id` missing in JWT | Webhook did not write metadata; check Clerk webhook logs |
+| API 403 “No active membership for this tenant” | JWT `tenant_id` ≠ `tenants.id` owned by this Clerk user, or missing `users` row | Align Clerk `public_metadata.tenant_id` to `tenants.id` where `owner_id = clerk user id`; ensure owner `users` row exists (migration 249/253). Sign out/in to refresh JWT. |
 | API 401 after deploy with mixed keys | `pk_test` frontend + `pk_live` API (or reverse) | Align prefixes; same Clerk instance for web + API |
 | Boot: `CLERK_DEV_HMAC_TOKENS=true is forbidden` | Prod misconfig | Unset the flag |
 | Boot: test keys forbidden in production | `pk_test_`/`sk_test_` under `NODE_ENV=production` | Use live keys, or set `ALLOW_CLERK_TEST_KEYS=true` on staging only |

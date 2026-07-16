@@ -35,7 +35,7 @@ export interface UseVoiceCaptureResult {
  * either cancels the start (before record()) or, once recording, takes the
  * normal stop path — never leaves the mic recording with no matching stop.
  */
-export function useVoiceCapture(): UseVoiceCaptureResult {
+export function useVoiceCapture(jobId?: string): UseVoiceCaptureResult {
   const api = useApiClient();
   const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
   const [phase, setPhase] = useState<VoicePhase>('idle');
@@ -55,7 +55,11 @@ export function useVoiceCapture(): UseVoiceCaptureResult {
         if (!sizeBytes) throw new Error('No audio captured. Please retry.');
 
         const clip: AudioClip = { fileUri: uri, contentType: 'audio/mp4', sizeBytes };
-        const text = await uploadAndTranscribe(clip, { api, uploadFile, makeIdempotencyKey });
+        const text = await uploadAndTranscribe(
+          clip,
+          { api, uploadFile, makeIdempotencyKey },
+          jobId,
+        );
         if (!text) throw new Error('No transcript was returned. Please retry.');
 
         setTranscript(text);
@@ -65,7 +69,7 @@ export function useVoiceCapture(): UseVoiceCaptureResult {
         setPhase('error');
       }
     },
-    [api],
+    [api, jobId],
   );
 
   const doStop = useCallback(async () => {

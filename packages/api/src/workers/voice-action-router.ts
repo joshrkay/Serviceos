@@ -136,6 +136,11 @@ export interface VoiceActionRouterPayload {
   conversationId?: string;
   recordingId?: string;
   /**
+   * Job selected by an authenticated technician and verified by the recording
+   * route against the tenant. This trusted context always wins over AI output.
+   */
+  jobId?: string;
+  /**
    * Resolved caller identity (caller-ID match). Threaded onto the task
    * context so handlers that need the caller's customer — create/cancel/
    * reschedule appointment — attribute the proposal to the verified
@@ -771,6 +776,7 @@ async function annotateResolvedEntities(
     tenantId: string;
     entities: ExtractedEntities | undefined;
     verifiedCustomerId?: string;
+    verifiedJobId?: string;
   },
   log: Logger,
 ): Promise<EntityAnnotation | EntityAmbiguity> {
@@ -781,7 +787,7 @@ async function annotateResolvedEntities(
   if (params.entities.customerName && !params.verifiedCustomerId) {
     lookups.push({ kind: 'customer', reference: params.entities.customerName });
   }
-  if (params.entities.jobReference) {
+  if (params.entities.jobReference && !params.verifiedJobId) {
     lookups.push({ kind: 'job', reference: params.entities.jobReference });
   }
   // U1 — spoken technician names on reassign / add-crew / remove-crew
@@ -1091,6 +1097,8 @@ interface SegmentParams {
   conversationId?: string;
   recordingId?: string;
   customerId?: string;
+  /** Tenant-verified job selected before recording. */
+  jobId?: string;
   verticalPromptSection?: string;
   /**
    * UB-A3 — the tenant's ACTIVE standing instructions, resolved once per
@@ -1142,7 +1150,15 @@ async function processSegment(
   params: SegmentParams,
   log: Logger,
 ): Promise<SegmentOutcome> {
-  const { tenantId, userId, segmentText, conversationId, recordingId, customerId } = params;
+  const {
+    tenantId,
+    userId,
+    segmentText,
+    conversationId,
+    recordingId,
+    customerId,
+    jobId,
+  } = params;
 
   const classification = await classifyIntent(
     segmentText,
@@ -1289,6 +1305,7 @@ async function processSegment(
       tenantId,
       entities: classification.extractedEntities,
       ...(customerId ? { verifiedCustomerId: customerId } : {}),
+      ...(jobId ? { verifiedJobId: jobId } : {}),
     },
     log,
   );
@@ -1394,6 +1411,9 @@ async function processSegment(
       ...(annotation.resolved.technicianId
         ? { technicianId: annotation.resolved.technicianId }
         : {}),
+      // Mobile job detail supplies this only after the recording route verifies
+      // tenant ownership. Keep it last so no classifier/resolver value can win.
+      ...(jobId ? { jobId } : {}),
     },
     timezone: scheduling?.timezone ?? DEFAULT_TENANT_TIMEZONE,
     ...(scheduling?.businessHours !== undefined
@@ -1768,7 +1788,15 @@ export function createVoiceActionRouterWorker(
       message: QueueMessage<VoiceActionRouterPayload>,
       logger: Logger
     ): Promise<void> => {
-      const { tenantId, userId, transcript, conversationId, recordingId, customerId } = message.payload;
+      const {
+        tenantId,
+        userId,
+        transcript,
+        conversationId,
+        recordingId,
+        customerId,
+        jobId,
+      } = message.payload;
 
       const log = logger.child({ tenantId, recordingId, transcriptLen: transcript.length });
       log.info('voice-action-router: classifying transcript');
@@ -1920,6 +1948,7 @@ export function createVoiceActionRouterWorker(
               conversationId,
               recordingId,
               customerId,
+              ...(jobId ? { jobId } : {}),
               verticalPromptSection,
               ...(activeStandingInstructions ? { activeStandingInstructions } : {}),
               ...(extendedIntents ? { extendedIntents: true } : {}),
@@ -1940,6 +1969,7 @@ export function createVoiceActionRouterWorker(
           conversationId,
           recordingId,
           customerId,
+          ...(jobId ? { jobId } : {}),
           verticalPromptSection,
           ...(activeStandingInstructions ? { activeStandingInstructions } : {}),
           ...(extendedIntents ? { extendedIntents: true } : {}),

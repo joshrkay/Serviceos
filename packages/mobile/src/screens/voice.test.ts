@@ -7,6 +7,8 @@ const h = vi.hoisted(() => ({
   startRecording: vi.fn(),
   stopAndTranscribe: vi.fn(),
   reset: vi.fn(),
+  captureJobId: vi.fn(),
+  jobId: undefined as string | string[] | undefined,
   phase: 'idle' as 'idle' | 'listening' | 'transcribing' | 'transcript' | 'error',
   transcript: '',
   error: null as string | null,
@@ -14,16 +16,20 @@ const h = vi.hoisted(() => ({
 
 vi.mock('expo-router', () => ({
   useRouter: () => ({ push: vi.fn(), back: vi.fn(), replace: vi.fn() }),
+  useLocalSearchParams: () => ({ jobId: h.jobId }),
 }));
 vi.mock('../voice/useVoiceCapture', () => ({
-  useVoiceCapture: () => ({
-    phase: h.phase,
-    transcript: h.transcript,
-    error: h.error,
-    startRecording: h.startRecording,
-    stopAndTranscribe: h.stopAndTranscribe,
-    reset: h.reset,
-  }),
+  useVoiceCapture: (jobId?: string) => {
+    h.captureJobId(jobId);
+    return {
+      phase: h.phase,
+      transcript: h.transcript,
+      error: h.error,
+      startRecording: h.startRecording,
+      stopAndTranscribe: h.stopAndTranscribe,
+      reset: h.reset,
+    };
+  },
 }));
 
 // eslint-disable-next-line import/first
@@ -34,6 +40,7 @@ beforeEach(() => {
   h.phase = 'idle';
   h.transcript = '';
   h.error = null;
+  h.jobId = undefined;
 });
 
 afterEach(() => cleanup());
@@ -54,6 +61,23 @@ describe('Voice screen', () => {
     expect(h.startRecording).toHaveBeenCalledTimes(1);
     fireEvent.mouseUp(mic);
     expect(h.stopAndTranscribe).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows job-update copy and scopes capture to the route job id', () => {
+    h.jobId = ['3b6cbf1a-bd8a-45f7-8b84-ce6b43a231d1'];
+
+    const { getByText } = render(createElement(VoiceScreen));
+
+    expect(getByText('Update this job')).toBeTruthy();
+    expect(getByText(/Describe what happened on this job/)).toBeTruthy();
+    expect(h.captureJobId).toHaveBeenLastCalledWith('3b6cbf1a-bd8a-45f7-8b84-ce6b43a231d1');
+  });
+
+  it('preserves the generic voice experience without a job id', () => {
+    const { getByText } = render(createElement(VoiceScreen));
+
+    expect(getByText('Speak an action')).toBeTruthy();
+    expect(h.captureJobId).toHaveBeenLastCalledWith(undefined);
   });
 
   it('reflects the listening state on the mic while recording', () => {

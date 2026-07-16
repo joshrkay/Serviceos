@@ -77,6 +77,26 @@ describe('useVoiceCapture', () => {
     expect(result.current.transcript).toBe('reschedule the Tuesday job');
   });
 
+  it('passes a job-scoped capture through to the upload pipeline', async () => {
+    const jobId = '3b6cbf1a-bd8a-45f7-8b84-ce6b43a231d1';
+    const { result } = renderHook(() => useVoiceCapture(jobId));
+
+    await act(async () => {
+      await result.current.startRecording();
+      await result.current.stopAndTranscribe();
+    });
+
+    expect(h.upload).toHaveBeenCalledWith(
+      {
+        fileUri: 'file:///clip.m4a',
+        contentType: 'audio/mp4',
+        sizeBytes: 2048,
+      },
+      expect.objectContaining({ api: h.apiFn }),
+      jobId,
+    );
+  });
+
   it('permission denied — surfaces an error and never records, then recovers on the next press', async () => {
     h.permission.mockResolvedValueOnce({ granted: false });
     const { result } = renderHook(() => useVoiceCapture());

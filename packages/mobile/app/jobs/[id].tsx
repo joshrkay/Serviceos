@@ -104,6 +104,16 @@ export default function JobDetailScreen() {
           </Text>
           <Pressable
             accessibilityRole="button"
+            onPress={() => router.push({ pathname: '/voice', params: { jobId: id } })}
+            className="mb-2 min-h-11 rounded-lg border border-border bg-card px-4 py-3"
+          >
+            <Text className="text-base font-medium text-foreground">Voice update</Text>
+            <Text className="mt-0.5 text-sm text-mutedForeground">
+              Describe work, notes, or changes hands-free
+            </Text>
+          </Pressable>
+          <Pressable
+            accessibilityRole="button"
             onPress={() => router.push(`/jobs/${id}/photos`)}
             className="mb-2 min-h-11 rounded-lg border border-border bg-card px-4 py-3"
           >

@@ -12,8 +12,6 @@ import { PrimaryButton } from '../../../src/components/Buttons';
 
 const LINKS: Array<{ label: string; route: Href; subtitle?: string }> = [
   { label: 'Team & roles', route: '/settings/team', subtitle: 'Invite and manage your crew' },
-  { label: 'Voice settings', route: '/settings/voice', subtitle: 'Assistant and capture' },
-  { label: 'Brand voice', route: '/settings/brand-voice', subtitle: 'Tone and messaging style' },
   { label: 'Message templates', route: '/settings/templates', subtitle: 'Reusable SMS replies' },
   { label: 'Weekly digest', route: '/digest', subtitle: 'Owner summary' },
   { label: 'End of day review', route: '/digest/end-of-day', subtitle: 'Close-out checklist' },

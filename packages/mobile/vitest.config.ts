@@ -39,6 +39,7 @@ export default defineConfig({
         'src/push/nativePushDeps.ts',
         'src/push/nativeNotificationDeps.ts',
         'src/jobs/nativeJobPhotoDeps.ts',
+        'src/location/nativeLocationDeps.ts',
         'src/lib/env.ts',
         'src/lib/tokenCache.ts',
         'src/calls/callbackStorage.ts',

@@ -18,9 +18,15 @@ function poolReturning(rows: unknown[], rowCount = rows.length): Pool {
 describe('createAuthorizationLoader — mapping (unit)', () => {
   it('maps an active row: role passed through, null status defaults to active', async () => {
     const load = createAuthorizationLoader(
-      poolReturning([{ role: 'dispatcher', status: null, deleted_at: null }]),
+      poolReturning([{
+        id: '550e8400-e29b-41d4-a716-446655440010',
+        role: 'dispatcher',
+        status: null,
+        deleted_at: null,
+      }]),
     );
-    await expect(load('user_1', 'tenant_1')).resolves.toEqual({
+    await expect(load('user_clerk_1', 'tenant_1')).resolves.toEqual({
+      userId: '550e8400-e29b-41d4-a716-446655440010',
       role: 'dispatcher',
       status: 'active',
       deleted: false,
@@ -29,16 +35,27 @@ describe('createAuthorizationLoader — mapping (unit)', () => {
 
   it('maps suspension and deletion flags', async () => {
     const suspended = createAuthorizationLoader(
-      poolReturning([{ role: 'owner', status: 'suspended', deleted_at: null }]),
+      poolReturning([{
+        id: '550e8400-e29b-41d4-a716-446655440011',
+        role: 'owner',
+        status: 'suspended',
+        deleted_at: null,
+      }]),
     );
     await expect(suspended('u', 't')).resolves.toEqual({
+      userId: '550e8400-e29b-41d4-a716-446655440011',
       role: 'owner',
       status: 'suspended',
       deleted: false,
     });
 
     const deleted = createAuthorizationLoader(
-      poolReturning([{ role: 'owner', status: 'active', deleted_at: new Date('2026-07-01') }]),
+      poolReturning([{
+        id: '550e8400-e29b-41d4-a716-446655440012',
+        role: 'owner',
+        status: 'active',
+        deleted_at: new Date('2026-07-01'),
+      }]),
     );
     await expect(deleted('u', 't')).resolves.toMatchObject({ deleted: true });
   });

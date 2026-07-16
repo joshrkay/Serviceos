@@ -18,6 +18,10 @@ describe('routeForNotification', () => {
     expect(routeForNotification({ proposalId: 'abc', kind: 'executed' })).toBe('/proposals/abc');
   });
 
+  it('allows the Today tab for technician schedule reminders', () => {
+    expect(routeForNotification({ screen: '/today' })).toBe('/today');
+  });
+
   // Each notification type carries the producer-set `screen`; the router returns
   // it verbatim once it passes the allowlist. One case per NotificationType.
   const perTypeCases: Array<{ type: NotificationType; screen: string; expected: string }> = [

@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { pickActiveAppointment, tenantLocalDate } from '@ai-service-os/shared';
 import { useNavigate } from 'react-router';
 import { apiFetch } from '../../utils/api-fetch';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
@@ -56,11 +57,6 @@ function generateIdempotencyKey(): string {
     return crypto.randomUUID();
   }
   return `tech-day-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-}
-
-function toDateInputValue(date: Date): string {
-  const pad = (value: number) => String(value).padStart(2, '0');
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
 }
 
 function toDateTimeInputValue(iso: string): string {
@@ -157,9 +153,7 @@ export function answerScheduleQuestion(
   const normalized = question.toLowerCase();
 
   if (normalized.includes('next appointment') || normalized.includes('where') || normalized.includes('next stop')) {
-    const next = appointments
-      .filter((appt) => new Date(appt.scheduledStart).getTime() >= now.getTime())
-      .sort((a, b) => new Date(a.scheduledStart).getTime() - new Date(b.scheduledStart).getTime())[0];
+    const next = pickActiveAppointment(appointments, now.getTime());
 
     if (!next) {
       return 'You do not have any more appointments scheduled today.';
@@ -214,7 +208,7 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
       setIsLoading(true);
       setError(null);
       try {
-        const dateStr = toDateInputValue(selectedDate);
+        const dateStr = tenantLocalDate(selectedDate, timezone);
         const response = await apiFetch(
           `/api/dispatch/technician/${technicianId}/appointments?date=${dateStr}`
         );
@@ -236,11 +230,11 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
     return () => {
       cancelled = true;
     };
-  }, [technicianId, selectedDate, refetchNonce]);
+  }, [technicianId, selectedDate, refetchNonce, timezone]);
 
   // Clear the day when the identity changes so we never paint yesterday's
   // jobs under today's header. Soft refreshes (refetchNonce) keep rows.
-  const dayIdentity = `${technicianId}|${toDateInputValue(selectedDate)}`;
+  const dayIdentity = `${technicianId}|${tenantLocalDate(selectedDate, timezone)}`;
   const lastDayIdentityRef = useRef(dayIdentity);
   useEffect(() => {
     if (lastDayIdentityRef.current === dayIdentity) return;
@@ -285,10 +279,10 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
     [appointments]
   );
 
-  const nextAppointment = useMemo(() => {
-    const now = Date.now();
-    return sortedAppointments.find((appt) => new Date(appt.scheduledStart).getTime() >= now) ?? null;
-  }, [sortedAppointments]);
+  const nextAppointment = useMemo(
+    () => pickActiveAppointment(sortedAppointments, Date.now()),
+    [sortedAppointments],
+  );
 
   useEffect(() => {
     if (positionHistory.length === 0 || sortedAppointments.length === 0 || delayPromptAcknowledged) {
