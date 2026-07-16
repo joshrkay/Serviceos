@@ -177,6 +177,12 @@ describe('CommsInboxPage', () => {
     renderInbox();
     expect(await screen.findByTestId('comms-inbox-empty')).toBeInTheDocument();
   });
+
+  it('deep-links ?conversation= to open that thread', async () => {
+    renderInbox('/comms-inbox?conversation=conv-1');
+    expect(await screen.findByTestId('conversation-thread')).toBeInTheDocument();
+    expect(screen.getAllByText('one more question').length).toBeGreaterThan(0);
+  });
 });
 
 describe('CommsInboxPage — history search (Story 3.11)', () => {
@@ -188,7 +194,7 @@ describe('CommsInboxPage — history search (Story 3.11)', () => {
     lastMessageAt: '2026-06-16T09:00:00Z',
   };
 
-  // /search must be matched before the generic GET /api/conversations branch.
+  // /search and /messages must be matched before the generic GET /api/conversations branch.
   function routeSearch(url: string, init?: RequestInit): Response {
     const u = String(url);
     if (u.includes('/api/conversations/search')) {
@@ -203,6 +209,7 @@ describe('CommsInboxPage — history search (Story 3.11)', () => {
         : [];
       return jsonResponse({ results });
     }
+    if (u.includes('/messages')) return jsonResponse(MESSAGES);
     if (u.includes('/api/conversations') && (init?.method ?? 'GET') === 'GET') {
       return jsonResponse({ threads: [THREAD, THREAD2] });
     }
@@ -250,11 +257,5 @@ describe('CommsInboxPage — history search (Story 3.11)', () => {
     fireEvent.click(screen.getByTestId('search-button'));
 
     expect(await screen.findByTestId('comms-inbox-no-matches')).toBeInTheDocument();
-  });
-
-  it('deep-links ?conversation= to open that thread', async () => {
-    renderInbox('/comms-inbox?conversation=conv-1');
-    expect(await screen.findByTestId('conversation-thread')).toBeInTheDocument();
-    expect(screen.getAllByText('one more question').length).toBeGreaterThan(0);
   });
 });
