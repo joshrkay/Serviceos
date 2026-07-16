@@ -24,6 +24,7 @@ from collections import Counter
 from pathlib import Path
 
 from local_embed import vectorize
+import posthog_client as ph
 
 HERE = Path(__file__).resolve().parent
 EMB = HERE / "sample_embeddings.json"
@@ -92,6 +93,11 @@ def selftest() -> int:
         print(f"  {'✅' if ok else '❌'} {query!r} -> {ids} (want {expected})")
     print(f"\nSemantic search self-test over {len(QUERY_FIXTURES)} queries: "
           f"{'PASS' if failures == 0 else f'FAIL ({failures})'}")
+    ph.capture("semantic_search_selftest_completed", {
+        "query_count": len(QUERY_FIXTURES),
+        "failure_count": failures,
+        "passed": failures == 0,
+    })
     return 1 if failures else 0
 
 
