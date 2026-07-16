@@ -338,6 +338,7 @@ import { PgNoteRepository } from './notes/pg-note';
 import { PgConversationRepository } from './conversations/pg-conversation';
 import { PgSettingsRepository } from './settings/pg-settings';
 import { PgAuditRepository } from './audit/pg-audit';
+import { ForwardingAuditRepository } from './audit/forwarding-audit-repository';
 import { PgEstimateTemplateRepository } from './templates/pg-estimate-template';
 import { PgServiceBundleRepository } from './verticals/pg-bundles';
 import {
@@ -1032,7 +1033,14 @@ export function createApp(): AppWithLifecycle {
   // Queue constructed here (before webhook router) so new-tenant webhooks can
   // enqueue provisioning jobs synchronously during the request.
   const queue = pool ? new PgQueue(pool) : new InMemoryQueue();
-  const webhookAuditRepo = pool ? new PgAuditRepository(pool) : new InMemoryAuditRepository();
+  // Wrap the single audit-repo instance in the PostHog forwarding decorator at
+  // the composition root: every mutation's audit write (~270 sites, all
+  // domains) is threaded through `auditRepo`, so this one wrap gives full
+  // in-app product-event coverage. Off-by-default — a no-op forward until
+  // POSTHOG_API_KEY is set, and it can never break a mutation.
+  const webhookAuditRepo = new ForwardingAuditRepository(
+    pool ? new PgAuditRepository(pool) : new InMemoryAuditRepository(),
+  );
   const webhookEventRepo = pool ? new PgWebhookEventRepository(pool) : new InMemoryWebhookEventRepository();
   // Blocker 1 — durable idempotency store for the Stripe/Clerk dedup path
   // (handleWebhookEvent). Postgres-backed in real deploys; left undefined
