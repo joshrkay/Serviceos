@@ -33,6 +33,7 @@
     "validate-env": "ts-node -e \"require('./src/shared/config').validateEnvSchema(process.env); console.log('env ok');\"",
     "smoke-test": "ts-node scripts/smoke-test.ts",
     "verify:telephony": "ts-node scripts/verify-telephony-config.ts",
+    "verify:handoff-context": "ts-node scripts/verify-handoff-context.ts",
     "lint:log-safety": "node scripts/check-log-safety.js",
     "launch-quality-check": "tsx scripts/launch-quality-check.ts",
     "voice-load:selfcheck": "tsx scripts/voice-load-selfcheck.ts",
