@@ -61,4 +61,35 @@ describe('devAuthBypass — role claim', () => {
     expect(called).toBe(true);
     expect(req.auth).toBeUndefined();
   });
+
+  it('seeds settings + owner user when repos are provided', async () => {
+    const { InMemorySettingsRepository } = await import('../../src/settings/settings');
+    const { InMemoryUserRepository } = await import('../../src/users/user');
+    const { InMemoryUserModeService } = await import('../../src/routes/me');
+
+    const tenantRepo = new DevInMemoryTenantRepository();
+    const settingsRepo = new InMemorySettingsRepository();
+    const userRepo = new InMemoryUserRepository();
+    const userModeService = new InMemoryUserModeService();
+    const mw = devAuthBypass({ tenantRepo, settingsRepo, userRepo, userModeService });
+    const req = {
+      headers: { authorization: `Bearer ${unsignedJwt({ sub: 'seed-owner', role: 'owner' })}` },
+    } as unknown as AuthenticatedRequest;
+    await mw(req, {} as Response, () => undefined);
+
+    expect(req.auth?.tenantId).toBeTruthy();
+    expect(req.auth?.canonicalUserId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+    );
+    const settings = await settingsRepo.findByTenant(req.auth!.tenantId);
+    expect(settings).toBeTruthy();
+    const users = await userRepo.findByTenant(req.auth!.tenantId);
+    expect(users).toHaveLength(1);
+    expect(users[0].clerkUserId).toBe('seed-owner');
+    const me = await userModeService.getUser(req.auth!.tenantId, 'seed-owner');
+    expect(me?.internal_user_id).toBe(users[0].id);
+    // Idempotent on second pass
+    await mw(req, {} as Response, () => undefined);
+    expect(await userRepo.findByTenant(req.auth!.tenantId)).toHaveLength(1);
+  });
 });

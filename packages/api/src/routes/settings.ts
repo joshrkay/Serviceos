@@ -154,11 +154,9 @@ export function createSettingsRouter(
     requirePermission('settings:view'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
-        const result = await getSettings(req.auth!.tenantId, settingsRepo);
-        if (!result) {
-          res.status(404).json({ error: 'NOT_FOUND', message: 'Settings not found' });
-          return;
-        }
+        // Lazy-seed so hermetic/dev tenants (and any webhook miss) still
+        // get a usable Settings document instead of a hard 404.
+        const result = await ensureTenantSettings(req.auth!.tenantId, settingsRepo);
         // WS21a — never echo the money-approval PIN (hash or legacy plaintext).
         res.json(redactSettingsForResponse(result));
       } catch (err) {

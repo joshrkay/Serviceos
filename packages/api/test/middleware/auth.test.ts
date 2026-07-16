@@ -105,6 +105,7 @@ describe('P0-003 — Auth middleware', () => {
     });
 
     const active = (role: string): MembershipRecord => ({
+      userId: '550e8400-e29b-41d4-a716-446655440010',
       role,
       deleted: false,
       status: 'active',
@@ -122,13 +123,19 @@ describe('P0-003 — Auth middleware', () => {
       expect(next).toHaveBeenCalled();
       // The DB role overwrites the token claim.
       expect(req.auth!.role).toBe('technician');
+      expect(req.auth!.canonicalUserId).toBe('550e8400-e29b-41d4-a716-446655440010');
       // And the downstream permission gate now denies owner-only actions.
       requirePermission('tenant:manage')(req, res, next);
       expect((res as any).statusCode).toBe(403);
     });
 
     it('deleted user (valid token) → 403 and no next()', async () => {
-      setAuthorizationLoader(async () => ({ role: 'owner', deleted: true, status: 'active' }));
+      setAuthorizationLoader(async () => ({
+        userId: '550e8400-e29b-41d4-a716-446655440010',
+        role: 'owner',
+        deleted: true,
+        status: 'active',
+      }));
       const { req, res, next } = mockReqRes({
         userId: 'u1',
         sessionId: 's1',
@@ -141,7 +148,12 @@ describe('P0-003 — Auth middleware', () => {
     });
 
     it('suspended user (valid token) → 403 and no next()', async () => {
-      setAuthorizationLoader(async () => ({ role: 'dispatcher', deleted: false, status: 'suspended' }));
+      setAuthorizationLoader(async () => ({
+        userId: '550e8400-e29b-41d4-a716-446655440010',
+        role: 'dispatcher',
+        deleted: false,
+        status: 'suspended',
+      }));
       const { req, res, next } = mockReqRes({
         userId: 'u1',
         sessionId: 's1',

@@ -99,6 +99,24 @@ describe('Handoff detail screens', () => {
     expect(h.push).toHaveBeenCalledWith('/jobs/abc123/time');
   });
 
+  it('JobDetail opens a job-scoped voice update from a >=44px control', () => {
+    h.data = {
+      id: 'abc123',
+      jobNumber: 'JOB-99',
+      summary: 'Replace filter',
+      status: 'in_progress',
+    };
+    const { getByText } = render(createElement(JobDetail));
+
+    const voiceUpdate = getByText('Voice update').closest('button')!;
+    expect(voiceUpdate.className).toMatch(/\bmin-h-11\b/);
+    fireEvent.click(voiceUpdate);
+    expect(h.push).toHaveBeenCalledWith({
+      pathname: '/voice',
+      params: { jobId: 'abc123' },
+    });
+  });
+
   it('JobDetail Message texts the customer and Navigate opens maps (iOS)', () => {
     h.data = {
       id: 'abc123',

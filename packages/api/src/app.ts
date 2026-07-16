@@ -510,7 +510,7 @@ import { DefaultAvailabilityFinder } from './ai/tasks/availability-finder';
 import { runExecutionSweep } from './workers/execution-worker';
 import {
   createLLMGateway,
-  createMockLLMGateway,
+  createHermeticMockLLMGateway,
   createEmbeddingProvider,
   shutdownCacheStores,
 } from './ai/gateway/factory';
@@ -978,12 +978,16 @@ export function createApp(): AppWithLifecycle {
   // path and the dev-auth-bypass middleware end up with disjoint
   // tenant maps and customers created on one side don't resolve on
   // the other.
+  // Same for settings: InMemorySettingsRepository is stateful — the
+  // Clerk webhook seeder and /api/settings must share one map or
+  // hermetic/dev boots 404 on Settings after a successful bootstrap.
   const tenantRepo = pool
     ? new PgTenantRepository(pool)
     : new DevInMemoryTenantRepository();
-  const webhookSettingsRepo = pool
+  const settingsRepo = pool
     ? new PgSettingsRepository(pool)
     : new InMemorySettingsRepository();
+  const webhookSettingsRepo = settingsRepo;
   // Constructed early so the Stripe webhook handler can record payments.
   const webhookInvoiceRepo = pool ? new PgInvoiceRepository(pool) : new InMemoryInvoiceRepository();
   const webhookEstimateRepo = pool ? new PgEstimateRepository(pool) : new InMemoryEstimateRepository();
@@ -1142,6 +1146,10 @@ export function createApp(): AppWithLifecycle {
   // Declared here (ahead of its first router use) so the jobs router's
   // from-estimate scheduling deps can reference it.
   const userRepo = pool ? new PgUserRepository(pool) : new InMemoryUserRepository();
+  // Hermetic / DEV_AUTH_BYPASS path: share one InMemoryUserModeService so
+  // bootstrap can upsert the owner row (with internal_user_id) before
+  // /api/me mounts. Pg-backed mode still builds its service later.
+  const inMemoryUserModeService = pool ? null : new InMemoryUserModeService();
   // Working hours are now Pg-backed in production (migration 137 added
   // technician_working_hours), so the dispatch feasibility composer and the
   // inbound-AI availability search enforce real working-hours rows instead of
@@ -1174,7 +1182,7 @@ export function createApp(): AppWithLifecycle {
   void paymentLinkProvider;
   const noteRepo           = pool ? new PgNoteRepository(pool)           : new InMemoryNoteRepository();
   const conversationRepo   = pool ? new PgConversationRepository(pool)   : new InMemoryConversationRepository();
-  const settingsRepo       = pool ? new PgSettingsRepository(pool)       : new InMemorySettingsRepository();
+  // settingsRepo is constructed once above (webhook + /api/settings share it).
   // P2-036 V2 — resolves the customer's current live quote for the discount engine.
   const negotiationQuoteResolver = new DefaultCurrentQuoteResolver({ jobRepo, estimateRepo });
   // Voice-parity (Feature 7) — call_me_back tasks (failed-transfer callbacks).
@@ -1352,11 +1360,12 @@ export function createApp(): AppWithLifecycle {
 
   // LLM gateway — single instance shared across intent classifier,
   // voice-action-router task handlers, and future AI features.
-  // Falls back to a MockLLMProvider in dev/test so the app boots
-  // without an AI_PROVIDER_API_KEY.
+  // Falls back to a hermetic MockLLMProvider in dev/test so the app boots
+  // without an AI_PROVIDER_API_KEY and Assistant can still draft proposals
+  // (fixed "unknown" mock permanently degraded the chat path).
   const llmGateway = config.AI_PROVIDER_API_KEY
     ? createLLMGateway(config, { aiRunRepo, shadowStore })
-    : createMockLLMGateway('{"intentType":"unknown","confidence":0}').gateway;
+    : createHermeticMockLLMGateway().gateway;
 
   // Phase 4a-1: dedicated EmbeddingProvider for the RAG corpus. The
   // gateway routes chat completions through shadow/router logic that
@@ -1611,6 +1620,7 @@ export function createApp(): AppWithLifecycle {
           transcript: event.transcript,
           conversationId: event.conversationId,
           recordingId: event.recordingId,
+          ...(event.jobId ? { jobId: event.jobId } : {}),
         };
         await queue.send(
           'voice_action_router',
@@ -4242,7 +4252,15 @@ export function createApp(): AppWithLifecycle {
     // this module. Previously this branch instantiated its own
     // DevInMemoryTenantRepository, leaving the dev-bypass and intake
     // paths with disjoint tenant maps.
-    app.use('/api', devAuthBypass({ tenantRepo }));
+    app.use(
+      '/api',
+      devAuthBypass({
+        tenantRepo,
+        settingsRepo,
+        userRepo,
+        ...(inMemoryUserModeService ? { userModeService: inMemoryUserModeService } : {}),
+      }),
+    );
     // eslint-disable-next-line no-console
     console.warn(
       '[app] ⚠️  DEV_AUTH_BYPASS=true — accepting Clerk tokens WITHOUT signature verification. ' +
@@ -4593,6 +4611,7 @@ export function createApp(): AppWithLifecycle {
       proposalRepo,
       userRepo,
       settingsRepo,
+      auditRepo,
       boardEventsDeps: {
         authUserIdFromRequest: async (req) =>
           (req as { auth?: { userId?: string } }).auth?.userId ?? null,
@@ -4879,7 +4898,7 @@ export function createApp(): AppWithLifecycle {
           return { modeChangedAt: now };
         },
       }
-    : new InMemoryUserModeService();
+    : inMemoryUserModeService!;
 
   // Wire the middleware-side mode loader. Reuses the same service so
   // we don't drift between read paths.
@@ -5073,6 +5092,7 @@ export function createApp(): AppWithLifecycle {
       // dangling S3 404 after the retention worker deletes the object).
       fileRepo,
       storage: storageProvider,
+      jobRepo,
     }),
   );
   app.use(
@@ -5112,6 +5132,11 @@ export function createApp(): AppWithLifecycle {
       repository: technicianLocationPingRepo,
       canSubmitForTechnician: (auth, technicianId) =>
         technicianLocationAuthorizer.canSubmitForTechnician(auth, technicianId),
+      isAppointmentAssignedToTechnician: async (tenantId, appointmentId, technicianId) => {
+        const assignments = await assignmentRepo.findByAppointment(tenantId, appointmentId);
+        return assignments.some((assignment) => assignment.technicianId === technicianId);
+      },
+      auditRepo,
     })
   );
   app.use('/api/catalog/items', createCatalogItemsRouter(catalogRepo, auditRepo));

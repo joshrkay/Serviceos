@@ -1,7 +1,7 @@
 /**
  * QUALITY-2026-07-12 WS4 — Pg-backed DB-authoritative authorization loader.
  *
- * Loads the caller's live membership row (role + access state) for a tenant so
+ * Loads the caller's live membership row (canonical id + role + access state) for a tenant so
  * `resolveAuthorization` (middleware/auth.ts) can gate on the DB rather than the
  * Clerk JWT claim. Extracted into its own factory (mirroring
  * `createVapiSecretResolver`) so its SQL — and the exact column names it depends
@@ -28,11 +28,12 @@ export function createAuthorizationLoader(pool: Pool): AuthorizationLoader {
     // `userId` is the Clerk subject (req.auth.userId = payload.sub), so the
     // lookup matches on clerk_user_id — exactly like userModeService.getUser.
     const r = await pool.query<{
+      id: string;
       role: string;
       status: string | null;
       deleted_at: Date | null;
     }>(
-      `SELECT role, status, deleted_at
+      `SELECT id, role, status, deleted_at
          FROM users
         WHERE tenant_id = $1 AND clerk_user_id = $2
         LIMIT 1`,
@@ -41,6 +42,7 @@ export function createAuthorizationLoader(pool: Pool): AuthorizationLoader {
     if (r.rowCount === 0) return null;
     const row = r.rows[0];
     return {
+      userId: row.id,
       role: String(row.role),
       status: row.status ? String(row.status) : 'active',
       deleted: row.deleted_at != null,

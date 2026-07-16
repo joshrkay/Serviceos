@@ -17,7 +17,15 @@ export interface ClerkUser {
 
 export interface AuthenticatedRequest extends Request {
   auth?: {
+    /** Clerk subject (`sub`) from the verified session token. */
     userId: string;
+    /**
+     * Tenant-scoped canonical `users.id`, populated by the DB authorization
+     * loader after it resolves the Clerk subject. Security-sensitive routes
+     * must fail closed when this is absent rather than treating `userId` as a
+     * canonical entity id.
+     */
+    canonicalUserId?: string;
     sessionId: string;
     tenantId: string;
     role: string;

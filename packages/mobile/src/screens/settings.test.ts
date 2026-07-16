@@ -64,6 +64,16 @@ describe('Settings screen', () => {
     expect(getByText('Yes')).toBeTruthy();
   });
 
+  it('lists team, templates, and digests — not admin voice stubs', () => {
+    const { getByText, queryByText } = render(createElement(Settings));
+    expect(getByText('Team & roles')).toBeTruthy();
+    expect(getByText('Message templates')).toBeTruthy();
+    expect(getByText('Weekly digest')).toBeTruthy();
+    expect(getByText('End of day review')).toBeTruthy();
+    expect(queryByText('Voice settings')).toBeNull();
+    expect(queryByText('Brand voice')).toBeNull();
+  });
+
   it('signs out from a >=44px tap target', () => {
     const { getByText } = render(createElement(Settings));
     const button = getByText('Sign out').closest('button')!;

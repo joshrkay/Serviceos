@@ -416,3 +416,25 @@ migration or a parallel audit event.
 - First-class `voided` status mirroring invoices — expands shared enums, DB CHECK, public
   approve/decline gates, and money-state for Medium-priority discoverability; deferred.
 - Document-only "sent estimates are immutable" — false; soft-delete already retracts.
+
+### D-021: One Expo app serves supervisor and technician field personas
+**Date:** 2026-07-15
+**Decision:** The App Store and Play Store clients ship from the existing
+`packages/mobile` Expo + React Native codebase as one binary. The authenticated
+user's DB-authoritative role and `current_mode` select the surface: supervisors
+land on voice, approvals, and money; technicians land on Today, assigned work,
+field status, voice notes, and job photos; owner-operators in `both` mode receive
+the combined surface. Administration remains web-first. AI, proposal execution,
+tenant authorization, and canonical writes remain server-side.
+**Rationale:** The supervisor voice-to-approval loop, camera, push, Clerk auth,
+Stripe Terminal, and shared TypeScript contracts already run in Expo. The
+technician day APIs also already exist. A Swift or Flutter rewrite would discard
+that leverage, duplicate security-sensitive API clients and proposal UX, and
+create a second implementation before native-only requirements justify it.
+**Constraints:** Mobile navigation is permission- and mode-aware; technician
+ownership checks resolve Clerk subjects to canonical `users.id` values; voice and
+AI calls continue through the API gateway; proposals still require human approval;
+camera, microphone, location, and notification permissions must match actual use.
+**Alternatives rejected:** Swift/SwiftUI (iOS-only rewrite plus separate Android
+client), Flutter (Dart rewrite with no direct shared-contract reuse), and a
+Capacitor/WebView wrapper (weaker field media, push, and payment integration).

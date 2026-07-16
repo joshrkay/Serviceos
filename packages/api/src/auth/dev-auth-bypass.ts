@@ -2,6 +2,12 @@ import { Response, NextFunction } from 'express';
 import { randomUUID } from 'crypto';
 import { AuthenticatedRequest, Tenant, TenantRepository } from './clerk';
 import { createLogger } from '../logging/logger';
+import {
+  ensureTenantSettings,
+  type SettingsRepository,
+} from '../settings/settings';
+import type { UserRepository, UserRole } from '../users/user';
+import type { InMemoryUserModeService } from '../routes/me';
 
 /**
  * DEV-ONLY auth bypass.
@@ -25,6 +31,12 @@ import { createLogger } from '../logging/logger';
  * Hard-gated on NODE_ENV=dev. No-ops in every other environment.
  * Refuses to activate without an explicit DEV_AUTH_BYPASS=true flag
  * so no one accidentally ships it.
+ *
+ * Bootstrap (idempotent, once per Clerk sub):
+ *   - tenant row
+ *   - tenant_settings (via ensureTenantSettings) so Settings does not 404
+ *   - users row + optional InMemoryUserModeService upsert so /api/me
+ *     returns `internal_user_id` and /api/users/me/phone resolves
  */
 
 const logger = createLogger({
@@ -84,6 +96,15 @@ export class DevInMemoryTenantRepository implements TenantRepository {
 
 export interface DevAuthBypassDeps {
   tenantRepo: TenantRepository;
+  /** When provided, seeds default tenant_settings on first bootstrap. */
+  settingsRepo?: SettingsRepository;
+  /** When provided, seeds an owner/dispatcher/technician users row. */
+  userRepo?: UserRepository;
+  /**
+   * Optional in-memory /api/me store. When present, upserts the same user
+   * with `internal_user_id` so technician Today resolves without Postgres.
+   */
+  userModeService?: InMemoryUserModeService;
 }
 
 export function isDevAuthBypassEnabled(): boolean {
@@ -95,6 +116,55 @@ export function isDevAuthBypassEnabled(): boolean {
   const isDevEnv =
     process.env.NODE_ENV === 'dev' || process.env.NODE_ENV === 'development';
   return isDevEnv && process.env.DEV_AUTH_BYPASS === 'true';
+}
+
+async function ensureDevOwnerUser(
+  deps: DevAuthBypassDeps,
+  tenant: Tenant,
+  clerkUserId: string,
+  email: string,
+  role: UserRole,
+): Promise<string | null> {
+  if (!deps.userRepo?.create) return null;
+
+  const existing = (await deps.userRepo.findByTenant(tenant.id)).find(
+    (u) => u.clerkUserId === clerkUserId,
+  );
+  if (existing) {
+    deps.userModeService?.upsertUser({
+      user_id: clerkUserId,
+      tenant_id: tenant.id,
+      role: existing.role,
+      can_field_serve: existing.canFieldServe,
+      current_mode: 'supervisor',
+      mode_changed_at: null,
+      internal_user_id: existing.id,
+    });
+    return existing.id;
+  }
+
+  const user = await deps.userRepo.create({
+    id: randomUUID(),
+    tenantId: tenant.id,
+    clerkUserId,
+    email,
+    role,
+    firstName: 'Dev',
+    lastName: role === 'technician' ? 'Technician' : 'Owner',
+    canFieldServe: true,
+  });
+
+  deps.userModeService?.upsertUser({
+    user_id: clerkUserId,
+    tenant_id: tenant.id,
+    role: user.role,
+    can_field_serve: user.canFieldServe,
+    current_mode: 'supervisor',
+    mode_changed_at: null,
+    internal_user_id: user.id,
+  });
+
+  return user.id;
 }
 
 export function devAuthBypass(deps: DevAuthBypassDeps) {
@@ -125,12 +195,14 @@ export function devAuthBypass(deps: DevAuthBypassDeps) {
       // bootstrapTenant is idempotent — returns the existing tenant
       // if one exists for this owner, creates one otherwise.
       let tenant = await deps.tenantRepo.findByOwner(payload.sub);
+      let createdTenant = false;
       if (!tenant) {
         tenant = await deps.tenantRepo.create({
           ownerId: payload.sub,
           ownerEmail: email,
           name: `${email.split('@')[0]}'s dev workspace`,
         });
+        createdTenant = true;
         logger.info('dev-auth-bypass: bootstrapped tenant for Clerk user', {
           userId: payload.sub,
           tenantId: tenant.id,
@@ -141,15 +213,41 @@ export function devAuthBypass(deps: DevAuthBypassDeps) {
       // non-owner surfaces (e.g. a technician hitting appointments:view-only
       // routes). Defaults to owner; unknown values fall back to owner rather
       // than locking the dev session out of everything.
-      const VALID_DEV_ROLES = ['owner', 'dispatcher', 'technician'];
+      const VALID_DEV_ROLES: UserRole[] = ['owner', 'dispatcher', 'technician'];
       const claimedRole = typeof payload.role === 'string' ? payload.role : undefined;
-      const role = claimedRole && VALID_DEV_ROLES.includes(claimedRole) ? claimedRole : 'owner';
+      const role: UserRole =
+        claimedRole && (VALID_DEV_ROLES as readonly string[]).includes(claimedRole)
+          ? (claimedRole as UserRole)
+          : 'owner';
+
+      if (deps.settingsRepo) {
+        await ensureTenantSettings(tenant.id, deps.settingsRepo, {
+          businessName: tenant.name,
+        });
+      }
+
+      const canonicalUserId = await ensureDevOwnerUser(
+        deps,
+        tenant,
+        payload.sub,
+        email,
+        role,
+      );
+
+      if (createdTenant) {
+        logger.info('dev-auth-bypass: seeded settings + owner user', {
+          userId: payload.sub,
+          tenantId: tenant.id,
+          internalUserId: canonicalUserId,
+        });
+      }
 
       req.auth = {
         userId: payload.sub,
         sessionId: typeof payload.sid === 'string' ? payload.sid : 'dev-session',
         tenantId: tenant.id,
         role,
+        ...(canonicalUserId ? { canonicalUserId } : {}),
       };
       next();
     } catch (err) {
