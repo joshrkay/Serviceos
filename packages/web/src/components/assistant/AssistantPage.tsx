@@ -12,7 +12,7 @@ import {
 import { toast } from 'sonner';
 import { VoiceSessionPanel } from './VoiceSessionPanel';
 import { useSearchParams } from 'react-router';
-import { type Message, type AIProposal } from '../../data/mock-data';
+import type { Message, AIProposal } from '../../types/assistant-ui';
 import { AIProposalCard } from '../shared/AIProposalCard';
 import { UndoToast } from '../common/UndoToast';
 import { useDetailQuery } from '../../hooks/useDetailQuery';

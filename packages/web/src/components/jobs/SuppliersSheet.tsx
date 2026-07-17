@@ -3,7 +3,7 @@ import {
   X, MapPin, ExternalLink, Phone, Navigation, Search,
   Clock, ChevronRight, Star,
 } from 'lucide-react';
-import type { ServiceType } from '../../data/mock-data';
+import type { ServiceType } from '../../types/job-ui';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface Store {

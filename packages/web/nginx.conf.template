@@ -46,6 +46,19 @@ server {
         add_header Cache-Control "public, max-age=31536000, immutable";
     }
 
+    # Retired marketing/legal pages moved to the standalone marketing site.
+    # This web edge serves page requests directly (it only proxies /api/ and
+    # /public/ to the API), so the API's own redirect handler is NOT in front
+    # of these paths here — they must be redirected at the edge or they'd fall
+    # into the SPA fallback below and render an empty shell (the React routes
+    # were removed). A regex location outranks the plain `location /` prefix.
+    # 302 (not 301) since the destination is a separate deploy; promote to 301
+    # once its pages are confirmed live. Kept in sync with nginx.conf and the
+    # API handler (packages/api/src/marketing-redirects.ts).
+    location ~ ^/(features|pricing|about|download|privacy|terms)/?$ {
+        return 302 https://therivetapp.com$request_uri;
+    }
+
     location / {
         try_files $uri $uri/ /index.html;
     }

@@ -5,9 +5,6 @@ import { MemoryRouter } from 'react-router';
 import { AssistantPage } from './AssistantPage';
 
 vi.mock('../../hooks/useDetailQuery', () => ({ useDetailQuery: vi.fn() }));
-vi.mock('../../data/mock-data', () => ({
-  type: {},
-}));
 // Mock the authenticated fetch wrapper so tests can assert the page uses it
 // (with the Clerk bearer token attached) instead of bare global fetch.
 vi.mock('../../utils/api-fetch', () => ({ apiFetch: vi.fn() }));

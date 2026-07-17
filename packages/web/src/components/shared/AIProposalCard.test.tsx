@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, within, fireEvent } from '@testing-library/react';
 import { AIProposalCard } from './AIProposalCard';
-import type { AIProposal, ProposalConfidenceLevel } from '../../data/mock-data';
+import type { AIProposal, ProposalConfidenceLevel } from '../../types/assistant-ui';
 
 // sonner's <Toaster> isn't mounted in unit tests — the card imports
 // `toast` at module scope, so stub it to keep the render side-effect-free.

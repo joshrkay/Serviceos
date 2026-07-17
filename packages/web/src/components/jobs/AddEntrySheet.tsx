@@ -9,7 +9,7 @@ import {
   type JobPhoto,
   type JobPhotoCategory,
 } from '../../api/job-photos';
-import type { JobActivity } from '../../data/mock-data';
+import type { JobActivity } from '../../types/job-ui';
 import type { CapturedMedia } from '../shared/CameraCapture';
 
 type EntryMode = 'note' | 'photo' | 'voice';

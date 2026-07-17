@@ -110,6 +110,76 @@ describe('P0-031 ProtectedRoute — unauthenticated', () => {
     expect(screen.queryByTestId('protected-content')).toBeNull();
   });
 
+  it('forwards the signed-out root to the marketing site (no in-app landing)', () => {
+    clerkState.isLoaded = true;
+    clerkState.isSignedIn = false;
+    const originalLocation = window.location;
+    const replaceSpy = vi.fn();
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: { ...originalLocation, search: '', replace: replaceSpy },
+    });
+
+    try {
+      render(
+        <MemoryRouter initialEntries={['/']}>
+          <Routes>
+            <Route path="/login" element={<LoginRouteProbe />} />
+            <Route element={<ProtectedRoute />}>
+              <Route path="/" element={<ProtectedContent />} />
+            </Route>
+          </Routes>
+        </MemoryRouter>
+      );
+
+      expect(replaceSpy).toHaveBeenCalledWith('https://therivetapp.com');
+      // Neither the protected content nor a login flash should render.
+      expect(screen.queryByTestId('protected-content')).toBeNull();
+      expect(screen.queryByTestId('login-page')).toBeNull();
+    } finally {
+      Object.defineProperty(window, 'location', {
+        configurable: true,
+        value: originalLocation,
+      });
+    }
+  });
+
+  it('carries the query string to the marketing site (attribution params)', () => {
+    clerkState.isLoaded = true;
+    clerkState.isSignedIn = false;
+    const originalLocation = window.location;
+    const replaceSpy = vi.fn();
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: {
+        ...originalLocation,
+        search: '?utm_source=google&gclid=abc123',
+        replace: replaceSpy,
+      },
+    });
+
+    try {
+      render(
+        <MemoryRouter initialEntries={['/?utm_source=google&gclid=abc123']}>
+          <Routes>
+            <Route element={<ProtectedRoute />}>
+              <Route path="/" element={<ProtectedContent />} />
+            </Route>
+          </Routes>
+        </MemoryRouter>
+      );
+
+      expect(replaceSpy).toHaveBeenCalledWith(
+        'https://therivetapp.com?utm_source=google&gclid=abc123',
+      );
+    } finally {
+      Object.defineProperty(window, 'location', {
+        configurable: true,
+        value: originalLocation,
+      });
+    }
+  });
+
   it('preserves the deep link through the sign-in redirect (state.from)', () => {
     clerkState.isLoaded = true;
     clerkState.isSignedIn = false;
