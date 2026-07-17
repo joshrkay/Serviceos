@@ -287,8 +287,14 @@ export class InvoiceEditTaskHandler implements TaskHandler {
     // hard-blocks auto-approval via the RV-007 confidence-marker guard,
     // independent of the numeric score AND of any tenant
     // auto_approve_threshold override. An AI-invented edit price must always
-    // reach a human.
-    if (grounding.anyUncatalogued || grounding.anyCatalogPriced) {
+    // reach a human. B3 — `anyAmbiguousWithCandidates` also surfaces markers
+    // here (so the review UI shows why a line needs a pick), but deliberately
+    // does NOT drive `overallConfidence` to 'low' — see edit-action-grounding.ts
+    // "SPLIT REVIEW SIGNAL": that stamp is never lifted by resolveProposalLine,
+    // so stamping a resolvable ambiguity 'low' would keep blocking approval
+    // after the operator resolves it. Only `anyUncatalogued` (nothing to
+    // resolve to) drives the sticky 'low' stamp.
+    if (grounding.anyUncatalogued || grounding.anyCatalogPriced || grounding.anyAmbiguousWithCandidates) {
       const meta: ProposalConfidenceMeta = {
         overallConfidence: grounding.anyUncatalogued
           ? 'low'
@@ -309,7 +315,17 @@ export class InvoiceEditTaskHandler implements TaskHandler {
     // instead of letting an unresolved edit reach
     // UpdateInvoiceExecutionHandler, which has no resolution step of its
     // own and would fail after approval.
-    const { missingFields, candidates } = await this.resolveInvoiceId(context.tenantId, payload);
+    const { missingFields: invoiceIdMissingFields, candidates } = await this.resolveInvoiceId(
+      context.tenantId,
+      payload,
+    );
+
+    // B3 — the invoiceId gate (B2) and the editAction catalog gates
+    // (edit-action-grounding.ts) are disjoint string sets (`invoiceId` vs
+    // `editActions[i].lineItem.catalogItemId`); they compose by simple
+    // concatenation, resolved independently by resolve-entity.ts and
+    // resolve-line.ts respectively.
+    const missingFields = [...invoiceIdMissingFields, ...grounding.missingFields];
 
     // B2 — layer the resolved candidate list ON TOP of the gate (never a
     // substitute for it): only recorded while the gate is still present, so
@@ -317,13 +333,17 @@ export class InvoiceEditTaskHandler implements TaskHandler {
     // needs to act on.
     const sourceContext: Record<string, unknown> = {
       ...(context.conversationId ? { conversationId: context.conversationId } : {}),
-      ...(missingFields.length > 0 && candidates.length > 0
+      ...(invoiceIdMissingFields.length > 0 && candidates.length > 0
         ? {
             entityCandidates: candidates,
             entityKind: 'invoice',
             entityReference: payload.invoiceReference,
           }
         : {}),
+      // B3 — edit-action catalog candidates, keyed by edit-action index;
+      // resolve-line.ts reads this the same way it reads the draft path's
+      // sourceContext.catalogResolution.
+      ...(grounding.catalogResolution ? { catalogResolution: grounding.catalogResolution } : {}),
     };
 
     const input: CreateProposalInput = {

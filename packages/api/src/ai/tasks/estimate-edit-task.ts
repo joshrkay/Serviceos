@@ -221,7 +221,19 @@ export class EstimateEditTaskHandler implements TaskHandler {
     // path ran, so both contribute. Acceptance marker stays first.
     const { target, candidates } = await this.resolveTargetEstimate(context.tenantId, payload);
     const accepted = target?.status === 'accepted';
-    if (accepted || grounding.anyUncatalogued || grounding.anyCatalogPriced) {
+    // B3 — `anyAmbiguousWithCandidates` also surfaces markers here (so the
+    // review UI shows why a line needs a pick), but deliberately does NOT
+    // drive `overallConfidence` to 'low' — see edit-action-grounding.ts
+    // "SPLIT REVIEW SIGNAL": that stamp is never lifted by
+    // resolveProposalLine, so stamping a resolvable ambiguity 'low' would
+    // keep blocking approval after the operator resolves it. Only
+    // `anyUncatalogued` (nothing to resolve to) drives the sticky 'low' stamp.
+    if (
+      accepted ||
+      grounding.anyUncatalogued ||
+      grounding.anyCatalogPriced ||
+      grounding.anyAmbiguousWithCandidates
+    ) {
       const markers = [
         ...(accepted ? [ACCEPTANCE_VOID_MARKER] : []),
         ...grounding.markers,
@@ -250,7 +262,14 @@ export class EstimateEditTaskHandler implements TaskHandler {
     // blocks it instead of letting an unresolved edit reach
     // UpdateEstimateExecutionHandler, which has no resolution step of its
     // own and would fail after approval.
-    const missingFields = this.resolveEstimateIdGate(payload, target);
+    const estimateIdMissingFields = this.resolveEstimateIdGate(payload, target);
+
+    // B3 — the estimateId gate (B2) and the editAction catalog gates
+    // (edit-action-grounding.ts) are disjoint string sets (`estimateId` vs
+    // `editActions[i].lineItem.catalogItemId`); they compose by simple
+    // concatenation, resolved independently by resolve-entity.ts and
+    // resolve-line.ts respectively.
+    const missingFields = [...estimateIdMissingFields, ...grounding.missingFields];
 
     // B2 — layer the resolved candidate list ON TOP of the gate (never a
     // substitute for it): only recorded while the gate is still present, so
@@ -258,13 +277,17 @@ export class EstimateEditTaskHandler implements TaskHandler {
     // needs to act on.
     const sourceContext: Record<string, unknown> = {
       ...(context.conversationId ? { conversationId: context.conversationId } : {}),
-      ...(missingFields.length > 0 && candidates.length > 0
+      ...(estimateIdMissingFields.length > 0 && candidates.length > 0
         ? {
             entityCandidates: candidates,
             entityKind: 'estimate',
             entityReference: payload.estimateReference,
           }
         : {}),
+      // B3 — edit-action catalog candidates, keyed by edit-action index;
+      // resolve-line.ts reads this the same way it reads the draft path's
+      // sourceContext.catalogResolution.
+      ...(grounding.catalogResolution ? { catalogResolution: grounding.catalogResolution } : {}),
     };
 
     const input: CreateProposalInput = {

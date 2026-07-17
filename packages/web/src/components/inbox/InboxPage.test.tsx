@@ -375,6 +375,95 @@ describe('InboxPage', () => {
     });
   });
 
+  // B3 — update_invoice / update_estimate proposals carry `editActions`, not
+  // `lineItems`. An ambiguous edit-action line with recorded candidates gets
+  // the SAME one-tap picker as a draft line, POSTing to the SAME
+  // resolve-line endpoint with the SAME body shape.
+  it('renders a one-tap picker for an ambiguous editAction line and resolves it via resolve-line (B3)', async () => {
+    apiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        data: [
+          {
+            proposal: {
+              id: 'p-edit',
+              proposalType: 'update_invoice',
+              summary: 'Edit invoice INV-0042 — add a water heater install',
+              status: 'draft',
+              createdAt: new Date().toISOString(),
+              payload: {
+                _meta: {
+                  overallConfidence: 'high',
+                  markers: [
+                    {
+                      path: 'editActions[0].lineItem.unitPrice',
+                      reason: 'price differs from the catalog price for "Water Heater Install"',
+                    },
+                  ],
+                },
+                editActions: [
+                  {
+                    type: 'add_line_item',
+                    lineItem: { description: 'water heater install', pricingSource: 'ambiguous' },
+                  },
+                ],
+              },
+              sourceContext: {
+                missingFields: ['editActions[0].lineItem.catalogItemId'],
+                catalogResolution: {
+                  0: [
+                    { id: 'cat-heater', name: 'Water Heater Install', unitPriceCents: 15_000, score: 1 },
+                    { id: 'spoken:0', name: 'Keep spoken price', unitPriceCents: 7_500, score: 0 },
+                  ],
+                },
+              },
+            },
+            urgency: 'normal',
+            reason: 'Awaiting review',
+          },
+        ],
+        summary: { totalCount: 1, criticalCount: 0, highCount: 0, normalCount: 1, lowCount: 0, truncated: false },
+      }),
+    );
+    // resolve-line returns the patched proposal: editAction grounded, gate cleared.
+    apiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        id: 'p-edit',
+        proposalType: 'update_invoice',
+        summary: 'Edit invoice INV-0042 — add a water heater install',
+        status: 'ready_for_review',
+        createdAt: new Date().toISOString(),
+        payload: {
+          editActions: [
+            {
+              type: 'add_line_item',
+              lineItem: { description: 'Water Heater Install', pricingSource: 'catalog' },
+            },
+          ],
+        },
+        sourceContext: { missingFields: [], catalogResolution: {} },
+      }),
+    );
+
+    render(<InboxPage />);
+    await waitFor(() => screen.getByText('Edit invoice INV-0042 — add a water heater install'));
+    expect(screen.getAllByTestId('ambiguity-option')).toHaveLength(2);
+    fireEvent.click(screen.getByText('Water Heater Install'));
+
+    await waitFor(() => {
+      expect(apiFetch).toHaveBeenCalledWith(
+        '/api/proposals/p-edit/resolve-line',
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({ lineIndex: 0, catalogItemId: 'cat-heater' }),
+        }),
+      );
+    });
+    // After resolution the picker is gone (the editAction line is now catalog-grounded).
+    await waitFor(() => {
+      expect(screen.queryByTestId('ambiguity-picker')).not.toBeInTheDocument();
+    });
+  });
+
   it('resolving an ambiguous entity ("which Bob?") POSTs resolve-entity and merges the re-drafted proposal (U8/E9)', async () => {
     apiFetch.mockResolvedValueOnce(
       jsonResponse({

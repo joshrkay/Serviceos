@@ -104,7 +104,7 @@ describe('P22-001 invoice-edit-catalog', () => {
     expect(lineItem.description).toBe('Gasket');
   });
 
-  it('surfaces a price conflict (large deviation) instead of silently snapping — keeps the spoken price, flags for review', async () => {
+  it('surfaces a price conflict (large deviation) instead of silently snapping — keeps the spoken price, flags for review (B3: resolvable, not the sticky low stamp)', async () => {
     const repo = new InMemoryCatalogItemRepository();
     await seedCatalog(repo, TENANT, [{ name: 'Gasket', unitPriceCents: 450 }]);
 
@@ -120,6 +120,9 @@ describe('P22-001 invoice-edit-catalog', () => {
           },
         ],
         0.98,
+        // An already-resolved UUID invoiceReference keeps the invoiceId gate
+        // (B2) out of the picture — this test is about the editAction gate.
+        '00000000-0000-4000-8000-000000000042',
       ),
     );
 
@@ -144,10 +147,21 @@ describe('P22-001 invoice-edit-catalog', () => {
     expect(lineItem.pricingSource).toBe('ambiguous');
     expect(lineItem.needsPricing).toBe(true);
     expect(lineItem.catalogItemId).toBeUndefined();
-    // Routed to review — the structural gate hard-blocks auto-approval.
-    expect(payload._meta?.overallConfidence).toBe('low');
-    expect(result.proposal.confidenceScore).toBeLessThanOrEqual(UNCATALOGUED_CONFIDENCE_CAP);
+    // B3 split signal: a price conflict is RESOLVABLE (candidates recorded,
+    // missingFields gate) — it must NOT stamp the sticky
+    // `_meta.overallConfidence:'low'` (that stamp is never lifted by
+    // resolveProposalLine, so it would keep blocking approval even after
+    // the operator resolves the line). The LLM's own 0.98 confidence maps
+    // to 'high'.
+    expect(payload._meta?.overallConfidence).toBe('high');
+    expect(result.proposal.confidenceScore).toBe(0.98); // not capped
+    // Still gated — missingFields (editAction gate) alone blocks approval.
     expect(result.proposal.status).not.toBe('approved');
+    expect(result.proposal.sourceContext).toMatchObject({
+      missingFields: ['editActions[0].lineItem.catalogItemId'],
+    });
+    const sc = result.proposal.sourceContext as Record<string, unknown>;
+    expect((sc.catalogResolution as Record<string, unknown>)?.[0]).toBeDefined();
   });
 
   it('resolves "service call + three gaskets" with catalog prices on both items', async () => {

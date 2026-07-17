@@ -714,7 +714,7 @@ describe('EstimateEditTaskHandler', () => {
       expect(result.proposal.status).toBe('approved');
     });
 
-    it('(a2) surfaces a price conflict (large deviation) instead of silently snapping — keeps spoken price, flags for review', async () => {
+    it('(a2) surfaces a price conflict (large deviation) instead of silently snapping — keeps spoken price, flags for review (B3: resolvable, not the sticky low stamp)', async () => {
       const repo = new InMemoryCatalogItemRepository();
       await seedCatalog(repo, [{ name: 'Site Visit', unitPriceCents: 15000 }]);
 
@@ -723,6 +723,10 @@ describe('EstimateEditTaskHandler', () => {
         // custom price ("half price for Mrs. Henderson"), not a mishear.
         { description: 'site visit', quantity: 1, unitPrice: 7500 },
         0.98,
+        // An already-resolved UUID estimateReference keeps the estimateId
+        // gate (B2) out of the picture — this test is about the editAction
+        // gate specifically.
+        '00000000-0000-4000-8000-000000000002',
       );
       const handler = new EstimateEditTaskHandler(gateway, undefined, repo);
       const result = await handler.handle({ tenantId, userId, message: 'edit', ...supervised });
@@ -737,9 +741,17 @@ describe('EstimateEditTaskHandler', () => {
       expect(lineItem.pricingSource).toBe('ambiguous');
       expect(lineItem.needsPricing).toBe(true);
       expect(lineItem.catalogItemId).toBeUndefined();
-      expect(payload._meta?.overallConfidence).toBe('low');
-      expect(result.proposal.confidenceScore).toBeLessThanOrEqual(UNCATALOGUED_CONFIDENCE_CAP);
+      // B3 split signal: resolvable (candidates + missingFields gate), so
+      // the sticky `_meta.overallConfidence:'low'` stamp must NOT fire —
+      // it's never lifted by resolveProposalLine. The LLM's 0.98 confidence
+      // maps to 'high'.
+      expect(payload._meta?.overallConfidence).toBe('high');
+      expect(result.proposal.confidenceScore).toBe(0.98); // not capped
+      // Still gated — missingFields (editAction gate) alone blocks approval.
       expect(result.proposal.status).not.toBe('approved');
+      expect(result.proposal.sourceContext).toMatchObject({
+        missingFields: ['editActions[0].lineItem.catalogItemId'],
+      });
     });
 
     it('(b) an uncatalogued edit line with LLM confidence 0.98 carries _meta.overallConfidence low and does NOT auto-approve', async () => {

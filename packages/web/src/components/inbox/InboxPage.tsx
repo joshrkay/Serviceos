@@ -47,6 +47,19 @@ interface LineItemView {
   pricingSource?: PricingSource;
 }
 
+// B3 — update_invoice / update_estimate proposals carry `editActions`, not
+// `lineItems`. An add/update action's `lineItem` is groundable the same way
+// a draft line is (ai/resolution/edit-action-grounding.ts); `remove_line_item`
+// actions carry no `lineItem` and are never flagged.
+interface EditActionLineItemView {
+  description?: string;
+  pricingSource?: PricingSource;
+}
+interface EditActionView {
+  type?: string;
+  lineItem?: EditActionLineItemView;
+}
+
 // U8 (E9) — a candidate for an ambiguous entity reference ("which Bob?"). The
 // voice clarification serializes these on the proposal; picking one re-drafts
 // the original action with the chosen id.
@@ -80,6 +93,8 @@ interface InboxProposalRow {
     payload?: {
       _meta?: ProposalMeta;
       lineItems?: LineItemView[];
+      // B3 — edit-action lines on update_invoice / update_estimate proposals.
+      editActions?: EditActionView[];
       // U8 (E9) — ambiguous entity candidates on a voice_clarification card.
       entityCandidates?: EntityCandidateView[];
     };
@@ -278,6 +293,11 @@ function ProposalMarkers({
   const meta = row.proposal.payload?._meta;
   const conf = meta?.overallConfidence ? CONFIDENCE_CONFIG[meta.overallConfidence] : null;
   const lineItems = row.proposal.payload?.lineItems ?? [];
+  // B3 — update_invoice / update_estimate proposals carry editActions
+  // instead of lineItems; they share the SAME sourceContext.catalogResolution
+  // map (keyed by index) since a proposal is one shape or the other, never
+  // both.
+  const editActions = row.proposal.payload?.editActions ?? [];
   const catalogResolution = row.proposal.sourceContext?.catalogResolution ?? {};
   const markers = meta?.markers ?? [];
   const severity = meta?.severity;
@@ -286,6 +306,14 @@ function ProposalMarkers({
   const flagged = lineItems
     .map((li, idx) => ({ li, idx }))
     .filter(({ li }) => li.pricingSource && li.pricingSource !== 'catalog');
+  // B3 — ambiguous/price-conflict edit-action lines with a recorded
+  // candidate set get the same one-tap picker draft lines already have.
+  const flaggedEditActions = editActions
+    .map((a, idx) => ({ li: a.lineItem, idx }))
+    .filter(
+      ({ li, idx }) =>
+        li?.pricingSource === 'ambiguous' && (catalogResolution[String(idx)]?.length ?? 0) > 0,
+    );
 
   // U8 (E9) — ambiguous entity candidates ("which Bob?") on a
   // voice_clarification card. Read from the payload (where the voice emitter
@@ -300,6 +328,7 @@ function ProposalMarkers({
   if (
     !conf &&
     flagged.length === 0 &&
+    flaggedEditActions.length === 0 &&
     markers.length === 0 &&
     !severity &&
     appliedInstructions.length === 0 &&
@@ -380,6 +409,19 @@ function ProposalMarkers({
             onPick={(catalogItemId) => onResolveLine(row.proposal.id, idx, catalogItemId)}
           />
         ))}
+
+      {/* B3 — one-tap picker for an ambiguous / price-conflicting editAction
+          line (update_invoice / update_estimate). Same resolve-line POST as
+          the lineItems picker above — the server branches on
+          Array.isArray(payload.editActions) to know which shape to patch. */}
+      {flaggedEditActions.map(({ li, idx }) => (
+        <AmbiguityPicker
+          key={`edit-action-picker-${idx}`}
+          lineDescription={li?.description ?? `Line ${idx + 1}`}
+          candidates={catalogResolution[String(idx)]}
+          onPick={(catalogItemId) => onResolveLine(row.proposal.id, idx, catalogItemId)}
+        />
+      ))}
 
       {/* U8 (E9) — entity disambiguation picker. Picking a candidate re-drafts
           the original action with the chosen id instead of discarding it. */}
