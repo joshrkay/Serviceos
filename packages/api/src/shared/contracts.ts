@@ -376,6 +376,8 @@ export const createCatalogItemSchema = z.object({
   category: z.enum(['Labor', 'Parts', 'Materials']),
   unit: z.enum(['each', 'hour', 'sq ft', 'per lb', 'per gal']),
   unitPriceCents: z.number().int().nonnegative(),
+  // EE-4 — hero photo, a file id from the upload flow. `null` clears it.
+  imageFileId: z.string().uuid().nullish(),
 });
 
 export const updateCatalogItemSchema = createCatalogItemSchema.partial();

@@ -72,4 +72,35 @@ describe('Postgres integration — catalog', () => {
     expect(await repo.archive(tenant.tenantId, item.id)).toBe(true);
     expect(await repo.archive(tenant.tenantId, item.id)).toBe(false);
   });
+
+  it('EE-4 — persists and round-trips image_file_id (real column)', async () => {
+    const fileId = crypto.randomUUID();
+    const created = await repo.create(
+      createCatalogItem({
+        tenantId: tenant.tenantId,
+        name: 'Water heater (photo)',
+        category: 'Materials',
+        unit: 'each',
+        unitPriceCents: 90000,
+        imageFileId: fileId,
+      }),
+    );
+    expect(created.imageFileId).toBe(fileId);
+
+    const found = await repo.findById(tenant.tenantId, created.id);
+    expect(found?.imageFileId).toBe(fileId);
+
+    // Replace, then clear.
+    const newFileId = crypto.randomUUID();
+    const replaced = await repo.update(tenant.tenantId, created.id, { imageFileId: newFileId });
+    expect(replaced?.imageFileId).toBe(newFileId);
+    const cleared = await repo.update(tenant.tenantId, created.id, { imageFileId: null });
+    expect(cleared?.imageFileId).toBeNull();
+  });
+
+  it('EE-4 — defaults image_file_id to null when unset', async () => {
+    const item = await seed(tenant.tenantId, 'No-photo item', 'Parts');
+    const found = await repo.findById(tenant.tenantId, item.id);
+    expect(found?.imageFileId).toBeNull();
+  });
 });

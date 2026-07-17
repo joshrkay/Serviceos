@@ -19,6 +19,7 @@ function mapRow(row: Record<string, unknown>): CatalogItem {
     unit: row.unit as CatalogItem['unit'],
     unitPriceCents: Number(row.unit_price_cents),
     productServiceType: row.product_service_type as ProductServiceType,
+    imageFileId: (row.image_file_id as string | null) ?? null,
     archivedAt: row.archived_at ? new Date(row.archived_at as string).toISOString() : null,
     createdAt: new Date(row.created_at as string).toISOString(),
     updatedAt: new Date(row.updated_at as string).toISOString(),
@@ -34,8 +35,8 @@ export class PgCatalogItemRepository extends PgBaseRepository implements Catalog
     return this.withTenant(item.tenantId, async (client) => {
       const result = await client.query(
         `INSERT INTO catalog_items
-          (id, tenant_id, name, description, category, unit, unit_price_cents, product_service_type, archived_at, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+          (id, tenant_id, name, description, category, unit, unit_price_cents, product_service_type, image_file_id, archived_at, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
          RETURNING *`,
         [
           item.id,
@@ -46,6 +47,7 @@ export class PgCatalogItemRepository extends PgBaseRepository implements Catalog
           item.unit,
           item.unitPriceCents,
           item.productServiceType,
+          item.imageFileId ?? null,
           item.archivedAt,
           item.createdAt,
           item.updatedAt,
@@ -124,6 +126,10 @@ export class PgCatalogItemRepository extends PgBaseRepository implements Catalog
       if (updates.unitPriceCents !== undefined) {
         setClauses.push(`unit_price_cents = $${param++}`);
         values.push(updates.unitPriceCents);
+      }
+      if (updates.imageFileId !== undefined) {
+        setClauses.push(`image_file_id = $${param++}`);
+        values.push(updates.imageFileId);
       }
       if (updates.category !== undefined) {
         setClauses.push(`product_service_type = $${param++}`);

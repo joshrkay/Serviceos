@@ -6197,6 +6197,12 @@ export const MIGRATIONS = {
     CREATE UNIQUE INDEX IF NOT EXISTS uq_users_tenant_clerk
       ON users (tenant_id, clerk_user_id);
   `,
+
+  // EE-4 — a catalog item's hero photo, stored as a file id into the `files`
+  // table (resolved to a signed URL only at the edge). Nullable/additive.
+  '254_catalog_items_image_file_id': `
+    ALTER TABLE catalog_items ADD COLUMN IF NOT EXISTS image_file_id UUID;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
