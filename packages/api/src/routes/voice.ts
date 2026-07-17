@@ -40,7 +40,6 @@ interface RetryTranscriptionBody {
 }
 
 const MAX_AUDIO_SIZE = 25 * 1024 * 1024; // 25 MB
-const MAX_DURATION_SECONDS = 300; // 5 minute max recording
 const JOB_ID_SCHEMA = z.string().uuid();
 
 const ALLOWED_MIME_TYPES = new Set([
@@ -120,31 +119,45 @@ export function createVoiceRouter(
     mintLimiter,
     asyncRoute(async (req: Request, res: Response) => {
       const authReq = req as AuthenticatedRequest;
+      const tenantId = authReq.auth?.tenantId ?? 'unknown';
+      const actorId = authReq.auth?.userId ?? 'unknown';
+      const routeName = 'POST /api/voice/stream-token';
+
+      // UB-B1 — audit trail for every mint attempt (mirrors the
+      // voice.transcription.completed/.failed emission in /transcribe below):
+      // conversation mode makes token minting a high-frequency surface, so
+      // both successful mints AND mint failures must be attributable per
+      // tenant/actor. Failure-soft: an audit-write error never blocks the
+      // response, but it is logged at warn level so a silently-broken audit
+      // sink is observable instead of swallowed.
+      async function auditMint(eventType: string, metadata: Record<string, unknown>) {
+        if (!auditRepo) return;
+        try {
+          await auditRepo.create(createAuditEvent({
+            tenantId,
+            actorId,
+            actorRole: 'user',
+            eventType,
+            entityType: 'voice_stream_token',
+            entityId: `mint-${Date.now()}`,
+            metadata,
+          }));
+        } catch (auditErr) {
+          logger?.warn('voice.stream-token: audit write failed', {
+            route: routeName,
+            tenantId,
+            eventType,
+            error: auditErr instanceof Error ? auditErr.message : String(auditErr),
+          });
+        }
+      }
+
       try {
         const minted = await mintDeepgramStreamToken({ apiKey: process.env.DEEPGRAM_API_KEY });
-        // UB-B1 — audit trail for every mint (mirrors the
-        // voice.transcription.completed emission below): conversation mode
-        // makes token minting a high-frequency surface, so mints must be
-        // attributable per tenant/actor. Failure-soft: audit errors never
-        // block the mint.
-        if (auditRepo) {
-          try {
-            await auditRepo.create(createAuditEvent({
-              tenantId: authReq.auth?.tenantId ?? 'unknown',
-              actorId: authReq.auth?.userId ?? 'unknown',
-              actorRole: 'user',
-              eventType: 'voice.stream_token_minted',
-              entityType: 'voice_stream_token',
-              entityId: `mint-${Date.now()}`,
-              metadata: {
-                model: minted.model,
-                expiresInSeconds: minted.expiresInSeconds,
-              },
-            }));
-          } catch {
-            // Audit failures should not block token minting
-          }
-        }
+        await auditMint('voice.stream_token_minted', {
+          model: minted.model,
+          expiresInSeconds: minted.expiresInSeconds,
+        });
         res.json({
           token: minted.token,
           expiresIn: minted.expiresInSeconds,
@@ -152,6 +165,7 @@ export function createVoiceRouter(
         });
       } catch (err) {
         if (err instanceof DeepgramTokenUnavailableError) {
+          await auditMint('voice.stream_token_mint_failed', { reason: 'not_configured' });
           res.status(503).json({
             error: 'NOT_CONFIGURED',
             message: 'Live transcription is not configured',
@@ -164,6 +178,7 @@ export function createVoiceRouter(
           logger?.error('voice.stream-token: key lacks grant permissions', {
             error: err.message,
           });
+          await auditMint('voice.stream_token_mint_failed', { reason: 'permission_denied' });
           res.status(503).json({
             error: 'NOT_CONFIGURED',
             message:
@@ -171,9 +186,9 @@ export function createVoiceRouter(
           });
           return;
         }
-        logger?.error('voice.stream-token: mint failed', {
-          error: err instanceof Error ? err.message : String(err),
-        });
+        const errMsg = err instanceof Error ? err.message : String(err);
+        logger?.error('voice.stream-token: mint failed', { error: errMsg });
+        await auditMint('voice.stream_token_mint_failed', { reason: 'provider_error', error: errMsg });
         res.status(502).json({
           error: 'TOKEN_MINT_FAILED',
           message: 'Could not start live transcription. Please try again.',
@@ -204,7 +219,9 @@ export function createVoiceRouter(
       // Optional language hint (ISO 639-1 code) via query param, e.g. ?language=es
       const languageHint = typeof req.query.language === 'string' ? req.query.language : undefined;
 
-      // Helper: emit transcription audit event
+      // Helper: emit transcription audit event. Failure-soft: an audit-write
+      // error never blocks transcription, but it is logged at warn level so
+      // a silently-broken audit sink is observable instead of swallowed.
       async function emitAudit(eventType: string, metadata: Record<string, unknown>) {
         if (!auditRepo) return;
         try {
@@ -217,8 +234,13 @@ export function createVoiceRouter(
             entityId: `txn-${Date.now()}`,
             metadata,
           }));
-        } catch {
-          // Audit failures should not block transcription
+        } catch (auditErr) {
+          logger?.warn('voice.transcribe: audit write failed', {
+            route: 'POST /api/voice/transcribe',
+            tenantId,
+            eventType,
+            error: auditErr instanceof Error ? auditErr.message : String(auditErr),
+          });
         }
       }
 
