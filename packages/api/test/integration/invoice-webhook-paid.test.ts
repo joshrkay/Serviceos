@@ -126,6 +126,28 @@ describe('Postgres integration — W1-2 invoice webhook → paid', () => {
     };
   }
 
+  // U6 — a Connect direct charge (Elements PaymentIntent on the tenant's
+  // connected account) is delivered from the "Connected accounts" webhook
+  // destination with a top-level `account: acct_…`. The settlement branch keys
+  // off data.object.metadata, so a connected-origin event must credit the real
+  // Postgres ledger identically to a platform one.
+  function connectPaymentIntentEvent(eventId: string, invoiceId: string): Record<string, unknown> {
+    return {
+      id: eventId,
+      type: 'payment_intent.succeeded',
+      account: 'acct_connect_w1_2_integration',
+      data: {
+        object: {
+          id: `pi_${eventId}`,
+          amount: AMOUNT_CENTS,
+          amount_received: AMOUNT_CENTS,
+          metadata: { tenant_id: tenant.tenantId, invoice_id: invoiceId },
+          charges: { data: [{ payment_method_details: { type: 'card' } }] },
+        },
+      },
+    };
+  }
+
   async function postSigned(body: Record<string, unknown>) {
     const raw = JSON.stringify(body);
     return request(app)
@@ -208,5 +230,35 @@ describe('Postgres integration — W1-2 invoice webhook → paid', () => {
 
     const row = await webhookRepo.findByIdempotencyKey('stripe', eventId);
     expect(row?.status).toBe('processed');
+  });
+
+  it('Connect direct charge (payment_intent.succeeded with event.account) settles the real ledger + idempotent', async () => {
+    const invoiceId = await seedOpenInvoice();
+    const eventId = `evt_${randomUUID()}`;
+    const event = connectPaymentIntentEvent(eventId, invoiceId);
+
+    const first = await postSigned(event);
+    expect(first.status).toBe(200);
+    expect(first.body).toEqual({ received: true });
+
+    const after = await invoiceRepo.findById(tenant.tenantId, invoiceId);
+    expect(after?.status).toBe('paid');
+    expect(after?.amountPaidCents).toBe(AMOUNT_CENTS);
+    expect(after?.amountDueCents).toBe(0);
+
+    const payments = await paymentRepo.findByInvoice(tenant.tenantId, invoiceId);
+    expect(payments).toHaveLength(1);
+    expect(payments[0].amountCents).toBe(AMOUNT_CENTS);
+    expect(payments[0].method).toBe('credit_card');
+    expect(payments[0].providerReference).toBe(`pi_${eventId}`);
+
+    // Re-deliver the same connected-account event id — no double-credit.
+    const second = await postSigned(event);
+    expect(second.status).toBe(200);
+    expect(second.body).toEqual({ received: true, duplicate: true });
+
+    const settled = await invoiceRepo.findById(tenant.tenantId, invoiceId);
+    expect(settled?.amountPaidCents).toBe(AMOUNT_CENTS);
+    expect(await paymentRepo.findByInvoice(tenant.tenantId, invoiceId)).toHaveLength(1);
   });
 });
