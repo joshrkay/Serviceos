@@ -880,12 +880,15 @@ describe('money-path handler wiring — update_estimate is catalog-grounded (bot
     return app;
   }
 
-  // The LLM invents a price ($999.99) for a line that matches an existing
-  // catalog item ("Site Visit", $150.00). If EstimateEditTaskHandler was
-  // constructed without deps.catalogRepo (the pre-fix bug — the 3rd
-  // constructor arg was omitted), this line would never resolve against the
-  // catalog and would ride the LLM's invented price as 'uncatalogued'
-  // instead of being overwritten by the grounded catalog price.
+  // The LLM mishears the price ($150.50) for a line that matches an
+  // existing catalog item ("Site Visit", $150.00). The deviation (50c) is
+  // BELOW both PRICE_CONFLICT_MIN_ABS_CENTS (100c) and PRICE_CONFLICT_MIN_REL
+  // (10%), so per edit-action-grounding.ts this is a sub-tolerance mishear,
+  // not a deliberate custom price — it snaps to the catalog price. If
+  // EstimateEditTaskHandler was constructed without deps.catalogRepo (the
+  // pre-fix bug — the 3rd constructor arg was omitted), this line would
+  // never resolve against the catalog and would ride the LLM's price as
+  // 'uncatalogued' instead of being grounded/snapped to the catalog price.
   it('single-intent path: a catalog-matching update_estimate line takes the catalog price, not the LLM guess', async () => {
     const { repo } = await seedSiteVisit();
     const gateway = scriptedGateway([
@@ -893,7 +896,7 @@ describe('money-path handler wiring — update_estimate is catalog-grounded (bot
       JSON.stringify({
         estimateReference: 'EST-0001',
         editActions: [
-          { type: 'add_line_item', lineItem: { description: 'site visit', quantity: 1, unitPrice: 99999 } },
+          { type: 'add_line_item', lineItem: { description: 'site visit', quantity: 1, unitPrice: 15050 } },
         ],
         confidence_score: 0.9,
       }),
@@ -912,11 +915,22 @@ describe('money-path handler wiring — update_estimate is catalog-grounded (bot
     const payload = persisted[0].payload as { editActions: Array<{ lineItem: Record<string, unknown> }> };
     const lineItem = payload.editActions[0].lineItem;
     expect(lineItem.pricingSource).toBe('catalog');
-    // Catalog price ($150.00) overwrites the LLM's invented $999.99.
+    // Catalog price ($150.00) snaps the LLM's near-miss $150.50 — a
+    // sub-tolerance mishear, not a price conflict.
     expect(lineItem.unitPrice).toBe(15000);
     expect(lineItem.unitPriceCents).toBe(15000);
   });
 
+  // The LLM invents a price ($999.99) for a line that matches an existing
+  // catalog item ("Site Visit", $150.00). The deviation (84999c, ~567%) is
+  // far past BOTH PRICE_CONFLICT_MIN_ABS_CENTS and PRICE_CONFLICT_MIN_REL,
+  // so per edit-action-grounding.ts this is a "did you mean" price
+  // conflict, not a mishear — the spoken price is KEPT (never silently
+  // overwritten; the owner may have deliberately quoted a custom price)
+  // and the line is routed to review. This still proves the assistant path
+  // passes catalogRepo so grounding actually runs: without it, this line
+  // would ride as 'uncatalogued' instead of 'ambiguous', and the catalog
+  // match/markers below would never be produced at all.
   it('chain path ("X then Y"): the update_estimate step is catalog-grounded and send_invoice routes to its own handler', async () => {
     const { repo } = await seedSiteVisit();
     const gateway = scriptedGateway([
@@ -958,9 +972,26 @@ describe('money-path handler wiring — update_estimate is catalog-grounded (bot
     expect(persisted.map((p) => p.proposalType).sort()).toEqual(['send_invoice', 'update_estimate']);
 
     const estimateProposal = persisted.find((p) => p.proposalType === 'update_estimate')!;
-    const payload = estimateProposal.payload as { editActions: Array<{ lineItem: Record<string, unknown> }> };
+    const payload = estimateProposal.payload as {
+      editActions: Array<{ lineItem: Record<string, unknown> }>;
+      _meta?: { overallConfidence?: string; markers?: Array<{ path: string; reason: string }> };
+    };
     const lineItem = payload.editActions[0].lineItem;
-    expect(lineItem.pricingSource).toBe('catalog');
-    expect(lineItem.unitPrice).toBe(15000);
+    // Price conflict: the spoken $999.99 is KEPT, not snapped to the
+    // catalog's $150.00 — grounding never silently overwrites a deliberate
+    // custom price.
+    expect(lineItem.pricingSource).toBe('ambiguous');
+    expect(lineItem.unitPrice).toBe(99999);
+    expect(lineItem.unitPriceCents).toBeNull();
+    expect(lineItem.needsPricing).toBe(true);
+    expect(lineItem.catalogItemId).toBeUndefined();
+    // Untrusted price hard-blocks auto-approval via _meta.overallConfidence,
+    // independent of the numeric confidence score / any tenant threshold.
+    expect(payload._meta?.overallConfidence).toBe('low');
+    expect(payload._meta?.markers).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ path: 'editActions[0].lineItem.unitPrice' }),
+      ]),
+    );
   });
 });
