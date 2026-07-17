@@ -151,6 +151,7 @@ import type { UserRepository } from '../users/user';
 import { isApproverPhone } from '../proposals/approver-identity';
 import type { ProposalSmsEventRepository } from '../proposals/sms/sms-event';
 import type { OneTapFallbackDeps } from '../ai/tasks/proposal-approval-task';
+import { TenantGlossaryProvider } from '../voice/tenant-glossary-provider';
 
 const logger = createLogger({
   service: 'telephony.twilio-adapter',
@@ -348,6 +349,18 @@ export interface TwilioAdapterDeps {
    * When absent, the FSM falls back to the generic "say that again" prompt.
    */
   repairTemplatesResolver?: (tenantId: string) => Promise<ReadonlyArray<RepairTemplate>>;
+  /**
+   * A2 — resolves the `<Gather hints="...">` boost terms for a tenant
+   * (e.g. vertical `sttKeywords` in addition to the tenant glossary).
+   * Optional override: when unset, the adapter falls back to a
+   * `TenantGlossaryProvider` built from `catalogRepo`/`customerRepo`/
+   * `userRepo` (below) when all three are wired, so Gather still gets
+   * tenant-specific hints (catalog items, customer/technician names)
+   * without requiring this resolver. Vertical `sttKeywords` are not
+   * reachable from this adapter today (no vertical-pack dep here) — a
+   * caller can wire this resolver to add them; see A2 follow-up notes.
+   */
+  sttHintsResolver?: (tenantId: string) => Promise<ReadonlyArray<string>>;
   /**
    * F8 — per-tenant escalation settings repository. When wired, the
    * processor loads channel preferences before each `escalateToHuman`
@@ -595,12 +608,26 @@ interface BuildTwimlOpts {
    * `language`.
    */
   voiceOverride?: string;
+  /**
+   * A2 — STT boost terms (vertical + tenant glossary) rendered as
+   * `<Gather hints="term1,term2,...">`. Twilio's built-in recognizer uses
+   * `hints` as a single comma-separated phrase list (unlike Deepgram's
+   * repeated `keyterm=`/`keywords=` params) — a plain term list works for
+   * both languages so no per-language filtering is applied here. Omitted
+   * entirely when empty/absent, same fail-open posture as the rest of
+   * this builder.
+   */
+  hints?: ReadonlyArray<string>;
 }
 
 const GATHER_VOICE_EN = 'Polly.Joanna';
 const GATHER_VOICE_ES = 'Polly.Mia-Neural';
 const GATHER_LOCALE_EN = 'en-US';
 const GATHER_LOCALE_ES = 'es-US';
+/** A2 — mirrors VerticalTerminologyProvider/TenantGlossaryProvider's caps; protects Gather URL/TwiML size. */
+const GATHER_HINTS_MAX = 50;
+/** Twilio speech recognition tuned for phone-quality audio (vs. the default model). */
+const GATHER_SPEECH_MODEL = 'phone_call';
 
 /**
  * Translate FSM side effects into a TwiML string.
@@ -671,8 +698,13 @@ export function buildTwiML(
     // P11-002: thread the session language to Twilio's built-in STT so
     // Spanish callers don't get transcribed against the English model.
     const gatherLang = opts.language === 'es' ? GATHER_LOCALE_ES : GATHER_LOCALE_EN;
+    // A2 — hints= biases Twilio's recognizer toward tenant/vertical terms,
+    // same intent as Deepgram's keyterm boosting on the other transports.
+    // Capped defensively even though callers are expected to cap upstream.
+    const hints = opts.hints && opts.hints.length > 0 ? opts.hints.slice(0, GATHER_HINTS_MAX) : undefined;
+    const hintsAttr = hints ? ` hints="${xmlEscape(hints.join(','))}"` : '';
     parts.push(
-      `<Gather input="speech" speechTimeout="auto" language="${gatherLang}" action="${xmlEscape(
+      `<Gather input="speech" speechTimeout="auto" language="${gatherLang}" speechModel="${GATHER_SPEECH_MODEL}"${hintsAttr} action="${xmlEscape(
         opts.gatherActionUrl
       )}" method="POST"/>`
     );
@@ -762,6 +794,18 @@ export class TwilioGatherAdapter {
    * bounded reprompt budget (2 turns) rather than a durable guarantee.
    */
   private readonly lowConfidenceGatherStreak = new Map<string, number>();
+
+  /**
+   * A2 — lazily-constructed fallback source for `<Gather hints="...">`
+   * when `deps.sttHintsResolver` is not wired. Built once (not per-call)
+   * from `catalogRepo`/`customerRepo`/`userRepo` — the same three repos
+   * `TenantGlossaryProvider` (A1) already reads for the transcription-
+   * correction pass — so Gather gets tenant-specific hints (catalog item
+   * names, customer/technician names) purely from deps this adapter
+   * already carries. `undefined` (checked, never rebuilt) when any of
+   * the three repos is missing.
+   */
+  private glossaryProvider: TenantGlossaryProvider | undefined | null = null;
 
   /**
    * Closure-captured agent loop (P38-FOLLOWUP). Owns `speechTurn`,
@@ -1681,12 +1725,14 @@ export class TwilioGatherAdapter {
         callSid: opts.callSid,
         sessionId: session.id,
       });
+      const replayHints = await this.resolveGatherHints(opts.tenantId);
       return buildTwiML(
         [{ type: 'tts_play', payload: { text: t('greeting.one_moment', session.language ?? 'en') } }],
         {
           gatherActionUrl: this.gatherUrl(session.id),
           ...(session.language ? { language: session.language } : {}),
           ...(session.ttsVoice ? { voiceOverride: session.ttsVoice } : {}),
+          ...(replayHints ? { hints: replayHints } : {}),
         },
       );
     }
@@ -1710,6 +1756,7 @@ export class TwilioGatherAdapter {
     //    set on the initial inbound response so Twilio doesn't start a
     //    second concurrent recording on each <Gather> turn (P8-014).
     const transferTwiml = this.takePendingTransferTwiml(session.id);
+    const inboundHints = transferTwiml ? undefined : await this.resolveGatherHints(opts.tenantId);
     const twiml =
       transferTwiml ??
       buildTwiML(expanded, {
@@ -1719,6 +1766,7 @@ export class TwilioGatherAdapter {
         ...(this.deps.recordingCallbackPath
           ? { recordingStatusCallback: this.recordingCallbackUrl() }
           : {}),
+        ...(inboundHints ? { hints: inboundHints } : {}),
       });
 
     // 8. If the FSM drove straight to 'terminated' (escalation chain
@@ -2206,6 +2254,40 @@ export class TwilioGatherAdapter {
   }
 
   /**
+   * A2 — resolve the `<Gather hints="...">` boost terms for `tenantId`.
+   * Prefers `deps.sttHintsResolver` (a caller-supplied source, e.g. one
+   * that also merges vertical `sttKeywords`); falls back to a
+   * `TenantGlossaryProvider` built from `catalogRepo`/`customerRepo`/
+   * `userRepo` when all three are wired. Failure-soft like every other
+   * boost source in this branch — a lookup error never blocks a Gather
+   * turn, it just omits hints.
+   */
+  private async resolveGatherHints(tenantId: string): Promise<ReadonlyArray<string> | undefined> {
+    try {
+      if (this.deps.sttHintsResolver) {
+        const hints = await this.deps.sttHintsResolver(tenantId);
+        return hints.length > 0 ? hints : undefined;
+      }
+      if (this.glossaryProvider === null) {
+        const { catalogRepo, customerRepo, userRepo } = this.deps;
+        this.glossaryProvider =
+          catalogRepo && customerRepo && userRepo
+            ? new TenantGlossaryProvider({ catalogRepo, customerRepo, userRepo })
+            : undefined;
+      }
+      if (!this.glossaryProvider) return undefined;
+      const terms = await this.glossaryProvider.termsForTenant(tenantId);
+      return terms.length > 0 ? terms : undefined;
+    } catch (err) {
+      logger.warn('twilio-adapter: gather hints resolution failed — proceeding without hints', {
+        tenantId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return undefined;
+    }
+  }
+
+  /**
    * Build TwiML and, when the FSM has reached `terminated`, kick off
    * the end-of-call summary in the background. Centralizes the
    * end-of-handler wrap-up shared by handleGather and handleInbound.
@@ -2235,10 +2317,12 @@ export class TwilioGatherAdapter {
       });
     }
 
+    const hints = await this.resolveGatherHints(session.tenantId);
     const twiml = buildTwiML(sideEffects, {
       gatherActionUrl: this.gatherUrl(sessionId),
       ...(session.language ? { language: session.language } : {}),
       ...(session.ttsVoice ? { voiceOverride: session.ttsVoice } : {}),
+      ...(hints ? { hints } : {}),
     });
     // Capture the agent's reply so summarizeSession sees both sides
     // of the conversation, not just the caller turns.

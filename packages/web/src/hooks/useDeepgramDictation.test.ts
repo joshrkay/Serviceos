@@ -147,6 +147,47 @@ describe('Story 3.2 — useDeepgramDictation', () => {
   });
 });
 
+// ─── A2 — language + keyterms threading ─────────────────────────
+describe('A2 — dictation language + keyterms threading', () => {
+  it('threads language onto both the /stream-token mint call and the Deepgram WS URL', async () => {
+    okToken();
+    const { result } = renderHook(() => useDeepgramDictation({ language: 'es' }));
+    await act(async () => { await result.current.start(); });
+
+    expect(apiFetchMock).toHaveBeenCalledWith('/api/voice/stream-token?language=es', { method: 'POST' });
+    expect(FakeWebSocket.instances[0].url).toContain('language=es');
+  });
+
+  it('omits the language param entirely when none is supplied (zero behavior change)', async () => {
+    okToken();
+    const { result } = renderHook(() => useDeepgramDictation({}));
+    await act(async () => { await result.current.start(); });
+
+    expect(apiFetchMock).toHaveBeenCalledWith('/api/voice/stream-token', { method: 'POST' });
+    expect(FakeWebSocket.instances[0].url).not.toContain('language=');
+  });
+
+  it('threads keyterms onto the Deepgram WS URL as repeated keyterm= params', async () => {
+    okToken();
+    const { result } = renderHook(() =>
+      useDeepgramDictation({ keyterms: ['Henderson HOA', 'PEX pipe'] }),
+    );
+    await act(async () => { await result.current.start(); });
+
+    // URLSearchParams encodes spaces as '+', not '%20' — assert via its own
+    // decode rather than encodeURIComponent's percent-encoding.
+    const url = new URL(FakeWebSocket.instances[0].url);
+    expect(url.searchParams.getAll('keyterm')).toEqual(['Henderson HOA', 'PEX pipe']);
+  });
+
+  it('omits keyterm= entirely when no keyterms are supplied', async () => {
+    okToken();
+    const { result } = renderHook(() => useDeepgramDictation({}));
+    await act(async () => { await result.current.start(); });
+    expect(FakeWebSocket.instances[0].url).not.toContain('keyterm=');
+  });
+});
+
 // ─── UB-B2: continuous conversation mode ────────────────────────
 describe('UB-B2 — continuous mode (per-utterance finals)', () => {
   it('adds utterance_end_ms to the stream URL when onUtteranceEnd is passed', async () => {

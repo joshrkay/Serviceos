@@ -176,20 +176,81 @@ describe('DeepgramStreamingProvider URL builder', () => {
     expect(url).toContain('endpointing=450');
   });
 
-  it('appends URL-encoded keywords when provided', () => {
+  it('appends URL-encoded boost terms when provided (A2: keyterm=, since the default model is nova-3)', () => {
     const url = (provider as unknown as {
       buildWsUrl: (lang: 'en' | 'es', options?: { keywords?: ReadonlyArray<string>; endpointingMs?: number }) => string;
     }).buildWsUrl('en', { keywords: ['heat pump:3', 'P-trap:3'] });
-    expect(url).toContain('keywords=heat%20pump%3A3');
-    expect(url).toContain('keywords=P-trap%3A3');
+    expect(url).toContain('keyterm=heat%20pump%3A3');
+    expect(url).toContain('keyterm=P-trap%3A3');
     // Both should appear as separate query params (joined by &)
-    expect(url).toMatch(/keywords=heat%20pump%3A3&keywords=P-trap%3A3|keywords=P-trap%3A3&keywords=heat%20pump%3A3/);
+    expect(url).toMatch(/keyterm=heat%20pump%3A3&keyterm=P-trap%3A3|keyterm=P-trap%3A3&keyterm=heat%20pump%3A3/);
   });
 
   it('omits the keywords parameter when the list is empty', () => {
     const url = (provider as unknown as {
       buildWsUrl: (lang: 'en' | 'es', options?: { keywords?: ReadonlyArray<string>; endpointingMs?: number }) => string;
     }).buildWsUrl('en', { keywords: [] });
+    expect(url).not.toContain('keywords=');
+  });
+
+  it('defaults to model=nova-3', () => {
+    const url = (provider as unknown as {
+      buildWsUrl: (lang: 'en' | 'es', options?: { keywords?: ReadonlyArray<string>; endpointingMs?: number }) => string;
+    }).buildWsUrl('en');
+    expect(url).toContain('model=nova-3');
+  });
+});
+
+// A2 — Nova-3 uses Deepgram's `keyterm` prompting param; the legacy
+// `keywords` param is a Nova-2-era feature Nova-3 silently ignores. Detect
+// the model family so a future Nova-2 pin still boosts via the param it
+// supports, while preserving the weighted-term format and URL-encoding.
+describe('DeepgramStreamingProvider keyterm vs keywords by model family (A2)', () => {
+  it('nova-3 (default model) emits keyterm=, not keywords=', () => {
+    const provider = new DeepgramStreamingProvider('test-key');
+    const url = (provider as unknown as {
+      buildWsUrl: (lang: 'en' | 'es', options?: { keywords?: ReadonlyArray<string>; endpointingMs?: number }) => string;
+    }).buildWsUrl('en', { keywords: ['furnace:3'] });
+    expect(url).toContain('keyterm=furnace%3A3');
+    expect(url).not.toContain('keywords=');
+  });
+
+  it('an explicit nova-3 variant (e.g. nova-3-general) still emits keyterm=', () => {
+    const provider = new DeepgramStreamingProvider('test-key', 'en', 'nova-3-general');
+    const url = (provider as unknown as {
+      buildWsUrl: (lang: 'en' | 'es', options?: { keywords?: ReadonlyArray<string>; endpointingMs?: number }) => string;
+    }).buildWsUrl('en', { keywords: ['furnace:3'] });
+    expect(url).toContain('model=nova-3-general');
+    expect(url).toContain('keyterm=furnace%3A3');
+  });
+
+  it('a nova-2 pin still emits the legacy keywords= param', () => {
+    const provider = new DeepgramStreamingProvider('test-key', 'en', 'nova-2');
+    const url = (provider as unknown as {
+      buildWsUrl: (lang: 'en' | 'es', options?: { keywords?: ReadonlyArray<string>; endpointingMs?: number }) => string;
+    }).buildWsUrl('en', { keywords: ['heat pump:3', 'P-trap:3'] });
+    expect(url).toContain('model=nova-2');
+    expect(url).toContain('keywords=heat%20pump%3A3');
+    expect(url).toContain('keywords=P-trap%3A3');
+    expect(url).not.toContain('keyterm=');
+  });
+
+  it('preserves the weighted term:weight format and URL-encoding under keyterm=', () => {
+    const provider = new DeepgramStreamingProvider('test-key');
+    const url = (provider as unknown as {
+      buildWsUrl: (lang: 'en' | 'es', options?: { keywords?: ReadonlyArray<string>; endpointingMs?: number }) => string;
+    }).buildWsUrl('en', { keywords: ['heat pump:3', 'P-trap:3'] });
+    expect(url).toContain('keyterm=heat%20pump%3A3');
+    expect(url).toContain('keyterm=P-trap%3A3');
+    expect(url).toMatch(/keyterm=heat%20pump%3A3&keyterm=P-trap%3A3|keyterm=P-trap%3A3&keyterm=heat%20pump%3A3/);
+  });
+
+  it('omits both params when the keyword list is empty, regardless of model', () => {
+    const provider = new DeepgramStreamingProvider('test-key', 'en', 'nova-2');
+    const url = (provider as unknown as {
+      buildWsUrl: (lang: 'en' | 'es', options?: { keywords?: ReadonlyArray<string>; endpointingMs?: number }) => string;
+    }).buildWsUrl('en', { keywords: [] });
+    expect(url).not.toContain('keyterm=');
     expect(url).not.toContain('keywords=');
   });
 });

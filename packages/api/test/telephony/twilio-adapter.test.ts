@@ -183,6 +183,50 @@ describe('buildTwiML', () => {
     expect(xml).toContain('a&quot;&gt;&lt;Hangup/&gt;');
   });
 
+  // ─── A2: Gather hints + speechModel ────────────────────────────────────────
+
+  describe('A2 — Gather hints + speechModel', () => {
+    it('always emits speechModel="phone_call" on the <Gather>', () => {
+      const xml = buildTwiML([], { gatherActionUrl: '/g' });
+      expect(xml).toContain('speechModel="phone_call"');
+    });
+
+    it('renders a comma-separated hints attribute when hints are provided', () => {
+      const xml = buildTwiML([], { gatherActionUrl: '/g', hints: ['furnace', 'Henderson HOA'] });
+      expect(xml).toContain('hints="furnace,Henderson HOA"');
+    });
+
+    it('omits the hints attribute when hints is absent or empty', () => {
+      const withoutOpt = buildTwiML([], { gatherActionUrl: '/g' });
+      expect(withoutOpt).not.toContain('hints=');
+      const withEmpty = buildTwiML([], { gatherActionUrl: '/g', hints: [] });
+      expect(withEmpty).not.toContain('hints=');
+    });
+
+    it('caps hints at 50 terms even if the caller passes more', () => {
+      const many = Array.from({ length: 60 }, (_, i) => `term${i}`);
+      const xml = buildTwiML([], { gatherActionUrl: '/g', hints: many });
+      const match = /hints="([^"]*)"/.exec(xml);
+      expect(match).not.toBeNull();
+      expect(match![1].split(',')).toHaveLength(50);
+    });
+
+    it('XML-escapes hints so a malformed term cannot break TwiML', () => {
+      const xml = buildTwiML([], { gatherActionUrl: '/g', hints: ['a"><Hangup/>'] });
+      expect(xml).not.toContain('"><Hangup/>');
+      expect(xml).toContain('a&quot;&gt;&lt;Hangup/&gt;');
+    });
+
+    it('omits the hints attribute (but still ends the call cleanly) when the turn ends', () => {
+      const xml = buildTwiML(
+        [{ type: 'end_session', payload: { reason: 'normal_close' } }],
+        { gatherActionUrl: '/g', hints: ['furnace'] },
+      );
+      expect(xml).not.toContain('<Gather');
+      expect(xml).not.toContain('hints=');
+    });
+  });
+
   // ─── P8-014: recordingStatusCallback wiring ────────────────────────────────
 
   describe('recordingStatusCallback (P8-014 record_call)', () => {
@@ -505,6 +549,99 @@ describe('TwilioGatherAdapter.handleInbound', () => {
     );
     const snap = store.snapshot(ids[0] as string);
     expect(snap?.leadId).toBeUndefined();
+  });
+});
+
+// ─── A2 — Gather hints wiring (sttHintsResolver + TenantGlossaryProvider fallback) ─
+
+describe('A2 — TwilioGatherAdapter Gather hints wiring', () => {
+  it('uses sttHintsResolver when wired, and threads its output into <Gather hints>', async () => {
+    const store = new VoiceSessionStore();
+    const gateway = makeGatewayReturning('{"intentType":"unknown","confidence":0,"reasoning":"x"}');
+    const sttHintsResolver = vi.fn(async (tenantId: string) => {
+      expect(tenantId).toBe('tenant-abc');
+      return ['furnace', 'compressor'];
+    });
+    const adapter = new TwilioGatherAdapter({
+      store,
+      gateway,
+      businessName: 'Acme Plumbing',
+      publicBaseUrl: 'https://example.com',
+      sttHintsResolver,
+    });
+    const xml = await adapter.handleInbound({
+      callSid: 'CA-hints-resolver',
+      from: '+15125550100',
+      to: '+15125550999',
+      tenantId: 'tenant-abc',
+    });
+    expect(sttHintsResolver).toHaveBeenCalledWith('tenant-abc');
+    expect(xml).toContain('hints="furnace,compressor"');
+    expect(xml).toContain('speechModel="phone_call"');
+  });
+
+  it('falls back to a TenantGlossaryProvider built from catalogRepo/customerRepo/userRepo when no sttHintsResolver is wired', async () => {
+    const store = new VoiceSessionStore();
+    const gateway = makeGatewayReturning('{"intentType":"unknown","confidence":0,"reasoning":"x"}');
+    const catalogRepo = {
+      listByTenant: vi.fn(async () => [{ name: 'Widget Deluxe' }]),
+    } as unknown as import('../../src/catalog/catalog-item').CatalogItemRepository;
+    const customerRepo = {
+      findByTenant: vi.fn(async () => [{ displayName: 'Henderson HOA' }]),
+    } as unknown as import('../../src/customers/customer').CustomerRepository;
+    const userRepo = {
+      findByTenant: vi.fn(async () => [{ firstName: 'Sam', lastName: 'Lee' }]),
+    } as unknown as import('../../src/users/user').UserRepository;
+    const adapter = new TwilioGatherAdapter({
+      store,
+      gateway,
+      businessName: 'Acme Plumbing',
+      publicBaseUrl: 'https://example.com',
+      catalogRepo,
+      customerRepo,
+      userRepo,
+    });
+    const xml = await adapter.handleInbound({
+      callSid: 'CA-hints-glossary',
+      from: '+15125550100',
+      to: '+15125550999',
+      tenantId: 'tenant-abc',
+    });
+    expect(xml).toContain('hints="Widget Deluxe,Henderson HOA,Sam Lee"');
+  });
+
+  it('omits hints (but still emits a valid <Gather>) when neither sttHintsResolver nor the three glossary repos are wired', async () => {
+    const { adapter } = makeAdapter();
+    const xml = await adapter.handleInbound({
+      callSid: 'CA-no-hints',
+      from: '+15125550100',
+      to: '+15125550999',
+      tenantId: 'tenant-abc',
+    });
+    expect(xml).not.toContain('hints=');
+    expect(xml).toContain('<Gather input="speech"');
+  });
+
+  it('failure-soft: an sttHintsResolver error never blocks the Gather turn — hints just omitted', async () => {
+    const store = new VoiceSessionStore();
+    const gateway = makeGatewayReturning('{"intentType":"unknown","confidence":0,"reasoning":"x"}');
+    const adapter = new TwilioGatherAdapter({
+      store,
+      gateway,
+      businessName: 'Acme Plumbing',
+      publicBaseUrl: 'https://example.com',
+      sttHintsResolver: async () => {
+        throw new Error('boom');
+      },
+    });
+    const xml = await adapter.handleInbound({
+      callSid: 'CA-hints-fail',
+      from: '+15125550100',
+      to: '+15125550999',
+      tenantId: 'tenant-abc',
+    });
+    expect(xml).not.toContain('hints=');
+    expect(xml).toContain('<Gather input="speech"');
   });
 });
 

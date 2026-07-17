@@ -1555,14 +1555,21 @@ export class TwilioMediaStreamAdapter {
   // ─── UB-C1 — live language switching ───────────────────────────────────────
 
   /**
-   * Keyword-boost options for a Deepgram open/reopen in `lang`. The boost
-   * list is English trade terminology — it degrades Nova-3's Spanish
-   * recognition, so it is only sent on English sessions.
+   * Keyword-boost options for a Deepgram open/reopen in `lang`.
+   *
+   * A2 — previously this returned `undefined` on Spanish sessions (the
+   * boost list was assumed to be English-only trade terminology that would
+   * degrade Nova-3's Spanish recognition), which silently dropped boosting
+   * for every es caller. The terms themselves (catalog items, proper nouns,
+   * codeswitched trade jargon like "PEX" or model numbers) are frequently
+   * spoken as-is by Spanish speakers too, so suppressing them cost more
+   * than it protected. Boosting is now sent for both languages; the
+   * 50-term cap (`VerticalTerminologyProvider.MAX_KEYWORDS`) still bounds
+   * the list upstream.
    */
   private deepgramKeywordOptions(
-    lang: 'en' | 'es',
+    _lang: 'en' | 'es',
   ): { keywords: ReadonlyArray<string> } | undefined {
-    if (lang === 'es') return undefined;
     return this.state.sttKeywords.length > 0
       ? { keywords: this.state.sttKeywords }
       : undefined;

@@ -1690,7 +1690,7 @@ describe('UB-C1 — language threading + live switching', () => {
     }
   }
 
-  it('opens Deepgram with the resolved language and SUPPRESSES keywords on es', async () => {
+  it('A2: opens Deepgram with the resolved language and no longer suppresses keywords on es', async () => {
     store.create('t', 'telephony', { callSid: 'CA-es-open' });
     const ws = new FakeWs();
     const { provider, openCalls } = makeReopenableProvider();
@@ -1710,8 +1710,10 @@ describe('UB-C1 — language threading + live switching', () => {
 
     expect(openCalls).toHaveLength(1);
     expect(openCalls[0].language).toBe('es');
-    // English trade-term boost degrades Nova-3 Spanish — must be suppressed.
-    expect(openCalls[0].options).toBeUndefined();
+    // A2 — es sessions used to silently drop the boost list; they now get
+    // the same keyterms as en (the 50-term cap still bounds the list
+    // upstream in VerticalTerminologyProvider).
+    expect(openCalls[0].options).toEqual({ keywords: ['furnace:3', 'compressor:3'] });
     expect(store.findByCallSid('CA-es-open')?.language).toBe('es');
     expect(adapter._debugState().language).toBe('es');
   });
@@ -1782,11 +1784,12 @@ describe('UB-C1 — language threading + live switching', () => {
     emit({ type: 'final', isFinal: true, transcript: 'Hola, necesito una cita por favor', confidence: 0.9 });
     await flush(8);
 
-    // Old session finished, new one opened in es WITHOUT the keyword boost.
+    // Old session finished, new one opened in es. A2 — the keyword boost is
+    // no longer suppressed on the es reopen.
     expect(sessions[0].finish).toHaveBeenCalled();
     expect(openCalls).toHaveLength(2);
     expect(openCalls[1].language).toBe('es');
-    expect(openCalls[1].options).toBeUndefined();
+    expect(openCalls[1].options).toEqual({ keywords: ['furnace:3'] });
     expect(session.language).toBe('es');
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({ type: 'language_switched', from: 'en', to: 'es', trigger: 'first_utterance', switchCount: 1 });
@@ -1919,7 +1922,7 @@ describe('UB-C1 — language threading + live switching', () => {
     expect(adapter._debugState().languageSwitchCount).toBe(2);
     expect(adapter._debugState().language).toBe('en');
     expect(session.language).toBe('en');
-    // Keyword boost restored when the live language returned to English.
+    // A2 — keyword boost is present on every reopen (en and es alike).
     expect(openCalls[2].language).toBe('en');
     expect(openCalls[2].options).toEqual({ keywords: ['furnace:3'] });
     // The blocked 3rd request was NOT consumed.
