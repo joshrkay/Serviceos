@@ -11,6 +11,7 @@ import {
 import { toErrorResponse, ValidationError } from '../shared/errors';
 import { syncJobSchedule, JobAppointmentSyncDeps } from '../jobs/job-appointment-sync';
 import { notifyDispatchBoardChanged } from '../dispatch/board-notify';
+import { runAfterCommit } from '../middleware/tenant-context';
 import { AppointmentRepository } from '../appointments/appointment';
 import { AssignmentRepository } from '../appointments/assignment';
 import { UserRepository } from '../users/user';
@@ -223,7 +224,14 @@ export function createJobRouter(
             durationMin,
             timezone,
           });
-          if (appointment) notifyDispatchBoardChanged(req.auth!.tenantId, appointment.scheduledStart);
+          // Publish AFTER the request transaction commits (runAfterCommit) so a
+          // board woken by the SSE can't refetch the still-uncommitted row, and
+          // key the notify by the appointment's TENANT-LOCAL day.
+          if (appointment) {
+            runAfterCommit(res, () =>
+              notifyDispatchBoardChanged(req.auth!.tenantId, appointment.scheduledStart, appointment.timezone),
+            );
+          }
           const scheduledJob = await getJob(req.auth!.tenantId, result.id, jobRepo);
           res.status(201).json(scheduledJob ?? result);
           return;
@@ -324,10 +332,18 @@ export function createJobRouter(
           durationMin: body.durationMin,
           timezone: body.timezone,
         });
-        // New day always; the old day too on a reschedule.
-        if (result.appointment) notifyDispatchBoardChanged(req.auth!.tenantId, result.appointment.scheduledStart);
+        // New day always; the old day too on a reschedule. After commit + keyed
+        // by the appointment's tenant-local day.
+        const tz = result.timezone;
+        if (result.appointment) {
+          const appt = result.appointment;
+          runAfterCommit(res, () =>
+            notifyDispatchBoardChanged(req.auth!.tenantId, appt.scheduledStart, tz),
+          );
+        }
         if (result.previousScheduledStart) {
-          notifyDispatchBoardChanged(req.auth!.tenantId, result.previousScheduledStart);
+          const prev = result.previousScheduledStart;
+          runAfterCommit(res, () => notifyDispatchBoardChanged(req.auth!.tenantId, prev, tz));
         }
         const job = await getJob(req.auth!.tenantId, req.params.id, jobRepo);
         res.status(200).json(job);
@@ -360,7 +376,13 @@ export function createJobRouter(
           actorRole: req.auth!.role,
           technicianId: body.technicianId,
         });
-        if (result.appointment) notifyDispatchBoardChanged(req.auth!.tenantId, result.appointment.scheduledStart);
+        if (result.appointment) {
+          const appt = result.appointment;
+          const tz = result.timezone;
+          runAfterCommit(res, () =>
+            notifyDispatchBoardChanged(req.auth!.tenantId, appt.scheduledStart, tz),
+          );
+        }
         const job = await getJob(req.auth!.tenantId, req.params.id, jobRepo);
         res.status(200).json(job);
       } catch (err) {
@@ -393,7 +415,9 @@ export function createJobRouter(
           reason: body.reason,
         });
         if (result.previousScheduledStart) {
-          notifyDispatchBoardChanged(req.auth!.tenantId, result.previousScheduledStart);
+          const prev = result.previousScheduledStart;
+          const tz = result.timezone;
+          runAfterCommit(res, () => notifyDispatchBoardChanged(req.auth!.tenantId, prev, tz));
         }
         const job = await getJob(req.auth!.tenantId, req.params.id, jobRepo);
         res.status(200).json(job);
@@ -638,7 +662,9 @@ export function createJobRouter(
               actorRole: req.auth!.role,
             });
             if (sync.previousScheduledStart) {
-              notifyDispatchBoardChanged(req.auth!.tenantId, sync.previousScheduledStart);
+              const prev = sync.previousScheduledStart;
+              const tz = sync.timezone;
+              runAfterCommit(res, () => notifyDispatchBoardChanged(req.auth!.tenantId, prev, tz));
             }
           }
         }

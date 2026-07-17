@@ -141,7 +141,7 @@ export class ReassignAppointmentExecutionHandler implements ExecutionHandler {
 
       if (this.appointmentRepo) {
         const appt = await this.appointmentRepo.findById(context.tenantId, appointmentId);
-        if (appt) notifyDispatchBoardChanged(context.tenantId, appt.scheduledStart);
+        if (appt) notifyDispatchBoardChanged(context.tenantId, appt.scheduledStart, appt.timezone);
       }
 
       return {

@@ -21,6 +21,7 @@
  * identical to the single-replica behavior shipped before UC-4.
  */
 import { randomUUID } from 'crypto';
+import { localDateKey } from '../shared/timezone';
 
 interface RevisionOrd {
   ts: number;
@@ -136,7 +137,14 @@ export function applyRemoteDispatchBoardRevision(
   }
 }
 
-/** Board calendar date from an appointment instant (UTC day). */
-export function boardDateFromAppointment(scheduledStart: Date): string {
-  return scheduledStart.toISOString().slice(0, 10);
+/**
+ * Board calendar date an appointment falls on. Given the appointment's
+ * `timezone` this is the TENANT-LOCAL day — the same key the dispatch board
+ * subscribes and queries by (tenant-timezone day boundaries), so a late-evening
+ * appointment in a western tenant (e.g. 11 PM PT = next UTC day) still notifies
+ * the date the dispatcher is viewing. Without a tz it falls back to the UTC day
+ * (legacy behavior; correct only when the tenant tz matches UTC's calendar day).
+ */
+export function boardDateFromAppointment(scheduledStart: Date, timezone?: string): string {
+  return timezone ? localDateKey(scheduledStart, timezone) : scheduledStart.toISOString().slice(0, 10);
 }

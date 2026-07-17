@@ -18,6 +18,31 @@ export function isValidTimezone(timezone: string): timezone is SupportedTimezone
   return VALID_TIMEZONES.includes(timezone as SupportedTimezone);
 }
 
+const dateKeyFormatterCache = new Map<string, Intl.DateTimeFormat>();
+
+/**
+ * The 'YYYY-MM-DD' calendar day `instant` falls on IN THE GIVEN IANA tz.
+ * Derived from `Intl` wall-clock parts, NOT `toISOString().slice(0,10)`
+ * (which keys off UTC and mis-buckets instants near the tenant's midnight —
+ * an 11 PM America/Los_Angeles appointment is the NEXT UTC day). Falls back
+ * to the UTC date for an unsupported tz, matching `addCalendarDays`.
+ */
+export function localDateKey(instant: Date, tz: string): string {
+  if (!isValidTimezone(tz)) return instant.toISOString().slice(0, 10);
+  let f = dateKeyFormatterCache.get(tz);
+  if (!f) {
+    // en-CA renders as 'YYYY-MM-DD'.
+    f = new Intl.DateTimeFormat('en-CA', {
+      timeZone: tz,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    });
+    dateKeyFormatterCache.set(tz, f);
+  }
+  return f.format(instant);
+}
+
 const wallClockFormatterCache = new Map<string, Intl.DateTimeFormat>();
 
 function wallClockFormatter(tz: string): Intl.DateTimeFormat {

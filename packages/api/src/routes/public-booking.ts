@@ -416,7 +416,7 @@ export function createPublicBookingRouter(deps: PublicBookingDeps): Router {
       // day immediately, flagged pending approval. Best-effort: a broadcast
       // failure must not 500 a booking that already committed.
       try {
-        notifyDispatchBoardChanged(tenantId, outcome.held.scheduledStart);
+        notifyDispatchBoardChanged(tenantId, outcome.held.scheduledStart, outcome.held.timezone);
       } catch (broadcastErr) {
         bookingLogger.error('dispatch-board broadcast failed after booking', {
           tenantId,

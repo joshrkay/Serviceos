@@ -2,8 +2,30 @@ import { describe, it, expect } from 'vitest';
 import {
   addCalendarDays,
   isValidTimezone,
+  localDateKey,
   tzMidnight,
 } from '../../src/shared/timezone';
+
+describe('localDateKey', () => {
+  it('keys the calendar day in the tenant tz, not UTC', () => {
+    // 06:30Z on Jul 3 is 11:30 PM Jul 2 in America/Los_Angeles (PDT, -7).
+    const instant = new Date('2026-07-03T06:30:00.000Z');
+    expect(localDateKey(instant, 'America/Los_Angeles')).toBe('2026-07-02');
+    expect(localDateKey(instant, 'America/New_York')).toBe('2026-07-03'); // 02:30 EDT
+    expect(localDateKey(instant, 'UTC')).toBe('2026-07-03');
+  });
+
+  it('an 11 PM PT appointment (next UTC day) keys the PT day', () => {
+    // 2026-07-02 23:00 PT === 2026-07-03 06:00Z.
+    const instant = new Date('2026-07-03T06:00:00.000Z');
+    expect(localDateKey(instant, 'America/Los_Angeles')).toBe('2026-07-02');
+  });
+
+  it('falls back to the UTC date for an unsupported tz', () => {
+    const instant = new Date('2026-07-03T06:30:00.000Z');
+    expect(localDateKey(instant, 'Mars/Phobos')).toBe('2026-07-03');
+  });
+});
 
 describe('P12-002 timezone helpers', () => {
   describe('tzMidnight', () => {

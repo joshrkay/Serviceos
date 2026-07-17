@@ -206,11 +206,14 @@ export class RescheduleAppointmentExecutionHandler implements ExecutionHandler {
       // boards must refresh: the new day (appointment appears) and the old
       // day (appointment leaves). Notifying only the new day would leave a
       // stale card on a dispatcher viewing the original day.
-      notifyDispatchBoardChanged(context.tenantId, updated.scheduledStart);
-      const oldDate = boardDateFromAppointment(appointment.scheduledStart);
-      const newDate = boardDateFromAppointment(updated.scheduledStart);
+      notifyDispatchBoardChanged(context.tenantId, updated.scheduledStart, updated.timezone);
+      // Compare the tenant-LOCAL days (not UTC) — a move within the same tenant
+      // day that straddles UTC midnight must not spuriously notify a second
+      // board, and a cross-tenant-day move that stays within one UTC day must.
+      const oldDate = boardDateFromAppointment(appointment.scheduledStart, appointment.timezone);
+      const newDate = boardDateFromAppointment(updated.scheduledStart, updated.timezone);
       if (oldDate !== newDate) {
-        notifyDispatchBoardChanged(context.tenantId, appointment.scheduledStart);
+        notifyDispatchBoardChanged(context.tenantId, appointment.scheduledStart, appointment.timezone);
       }
 
       return {

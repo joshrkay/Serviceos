@@ -103,6 +103,12 @@ export interface SyncJobScheduleResult {
   appointment: Appointment | null;
   /** The appointment's start before a reschedule/cancel — lets the route notify the old board day. */
   previousScheduledStart?: Date;
+  /**
+   * The canonical appointment's timezone (stable across the op). Lets the route
+   * key board notifications by the TENANT-LOCAL day even when `appointment` is
+   * null (unschedule/cancel) and only `previousScheduledStart` is available.
+   */
+  timezone?: string;
 }
 
 /**
@@ -370,7 +376,7 @@ export async function syncJobSchedule(
       rescheduled: Boolean(existing),
     });
 
-    return { appointment, previousScheduledStart };
+    return { appointment, previousScheduledStart, timezone: appointment.timezone };
   }
 
   if (input.operation === 'reassign') {
@@ -384,7 +390,7 @@ export async function syncJobSchedule(
       technicianId: input.technicianId,
     });
     // Reassign keeps the slot, so there is no "previous day" to also notify.
-    return { appointment: existing };
+    return { appointment: existing, timezone: existing.timezone };
   }
 
   // unschedule | cancelForJob — both cancel the canonical appointment.
@@ -443,7 +449,7 @@ export async function syncJobSchedule(
     });
   }
 
-  return { appointment: null, previousScheduledStart };
+  return { appointment: null, previousScheduledStart, timezone: existing.timezone };
 }
 
 /** First-time schedule advances new → scheduled (forward; any role). Idempotent. */

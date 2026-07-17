@@ -712,7 +712,7 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
 
       // Post-commit side effect: the tentative hold should appear on any open
       // dispatch board for that day immediately, flagged pending approval.
-      notifyDispatchBoardChanged(tenantId, outcome.held.scheduledStart);
+      notifyDispatchBoardChanged(tenantId, outcome.held.scheduledStart, outcome.held.timezone);
 
       res.status(201).json({
         status: 'pending_confirmation',
@@ -772,7 +772,7 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
       });
       // Surface the "change requested" badge live on any open board for the
       // appointment's day, even though nothing has moved spatially yet.
-      notifyDispatchBoardChanged(tenantId, owned.scheduledStart);
+      notifyDispatchBoardChanged(tenantId, owned.scheduledStart, owned.timezone);
 
       res.status(201).json({
         status: 'pending_confirmation',
@@ -848,7 +848,7 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
         metadata: { proposalId: persisted.id },
       });
       // Surface the "change requested" badge live on the current day's board.
-      notifyDispatchBoardChanged(tenantId, owned.scheduledStart);
+      notifyDispatchBoardChanged(tenantId, owned.scheduledStart, owned.timezone);
 
       res.status(201).json({
         status: 'pending_confirmation',

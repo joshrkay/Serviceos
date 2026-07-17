@@ -201,8 +201,10 @@ export function withTenantTransaction(pool: Pool) {
     const cleanup = async (commit: boolean) => {
       if (cleanedUp || released) return;
       cleanedUp = true;
+      let committed = false;
       try {
         await client.query(commit ? 'COMMIT' : 'ROLLBACK');
+        committed = commit;
       } catch {
         // If commit fails, fall back to rollback so the connection is
         // returned to the pool in a clean state. Swallow rollback
@@ -216,6 +218,22 @@ export function withTenantTransaction(pool: Pool) {
         }
       } finally {
         releaseOnce();
+      }
+      // Run after-commit hooks ONLY once the writes are durable. A rolled-back
+      // (or failed-then-rolled-back) request never fires them, so side effects
+      // like dispatch-board SSE notifications can't publish a revision for data
+      // a reader would then fetch before it exists. Failure-isolated per hook.
+      if (committed) {
+        const hooks = res.locals?.afterCommitHooks as Array<() => void> | undefined;
+        if (hooks) {
+          for (const hook of hooks) {
+            try {
+              hook();
+            } catch {
+              /* a broken hook must not wedge cleanup */
+            }
+          }
+        }
       }
     };
     res.once('finish', () => {
@@ -242,6 +260,29 @@ export function withTenantTransaction(pool: Pool) {
       next();
     });
   };
+}
+
+/**
+ * Defer a side effect until AFTER the request transaction commits.
+ *
+ * Under `/api` the `withTenantTransaction` middleware commits on `res.finish`,
+ * so anything a route runs inline (e.g. publishing a dispatch-board SSE
+ * revision) happens while the writes are still uncommitted — a reader woken by
+ * that event can refetch and cache board contents that don't yet include the
+ * new row, then never get a second event. Registering the effect here runs it
+ * only once COMMIT succeeds; on rollback it never fires.
+ *
+ * Outside a request transaction (SSE stream routes, background workers, tests —
+ * no tenant-context store) there is nothing to wait for, so the effect runs
+ * immediately, preserving behavior for those callers.
+ */
+export function runAfterCommit(res: Response, effect: () => void): void {
+  if (!tenantContextStore.getStore()) {
+    effect();
+    return;
+  }
+  const hooks = (res.locals.afterCommitHooks ??= []) as Array<() => void>;
+  hooks.push(effect);
 }
 
 /**

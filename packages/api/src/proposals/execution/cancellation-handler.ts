@@ -149,7 +149,7 @@ export class CancelAppointmentExecutionHandler implements ExecutionHandler {
 
       // Spatial board sync: a canceled appointment must vanish from any open
       // dispatch board for that day.
-      notifyDispatchBoardChanged(context.tenantId, appointment.scheduledStart);
+      notifyDispatchBoardChanged(context.tenantId, appointment.scheduledStart, appointment.timezone);
 
       return { success: true, resultEntityId: appointmentId };
     }
