@@ -56,6 +56,14 @@ export function buildHelmetOptions(isProd: boolean): Parameters<typeof helmet>[0
               'https://*.clerk.accounts.dev',
               'wss://*.twilio.com',
               'https://*.twilio.com',
+              // Live voice dictation streams mic audio from the browser
+              // straight to Deepgram's realtime STT WebSocket (see the web
+              // useDeepgramDictation hook — it opens wss://api.deepgram.com/v1/
+              // listen with a short-lived grant token). Without this in
+              // connect-src, production CSP blocks that WebSocket and the
+              // assistant's conversation/dictation mode fails with "Lost the
+              // dictation connection. Please try again."
+              'wss://api.deepgram.com',
               'https://*.ingest.sentry.io',
               'https://*.ingest.us.sentry.io',
               // PostHog analytics (US cloud): event ingestion + remote config.
