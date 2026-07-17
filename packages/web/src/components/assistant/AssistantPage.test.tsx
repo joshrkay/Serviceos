@@ -14,6 +14,8 @@ vi.mock('../../utils/api-fetch', () => ({ apiFetch: vi.fn() }));
 // sonner's <Toaster> isn't mounted in unit tests — spy on toast.error to
 // assert the visible error surface.
 vi.mock('sonner', () => ({ toast: { error: vi.fn(), success: vi.fn() } }));
+// U6 — spy on the analytics wrapper to assert assistant_message_sent fires.
+vi.mock('../../lib/analytics', () => ({ track: vi.fn() }));
 
 // UB-B2 — controllable conversation-mode hook: page tests drive the captured
 // onSubmit exactly like a settled utterance would, without WebSocket/mic fakes.
@@ -44,8 +46,10 @@ vi.mock('../../hooks/useConversationVoice', () => ({
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { apiFetch } from '../../utils/api-fetch';
 import { toast } from 'sonner';
+import { track } from '../../lib/analytics';
 
 const mockedApiFetch = vi.mocked(apiFetch);
+const trackMock = vi.mocked(track);
 
 // jsdom doesn't implement scrollIntoView
 beforeAll(() => {
@@ -144,6 +148,24 @@ describe('AssistantPage', () => {
   it('renders header with AI assistant name', () => {
     renderPage();
     expect(screen.getByText('Rivet AI')).toBeInTheDocument();
+  });
+
+  it('emits assistant_message_sent when a message is sent (enums/counts, no text)', async () => {
+    trackMock.mockClear();
+    mockedApiFetch.mockResolvedValue(jsonResponse({ message: { content: 'ok' }, conversationId: 'c1' }));
+    renderPage();
+
+    // A suggestion chip funnels through the same send() path as typed input.
+    fireEvent.click(screen.getByText('Invoice the Rodriguez job'));
+
+    await waitFor(() => {
+      expect(trackMock.mock.calls.some((c) => c[0] === 'assistant_message_sent')).toBe(true);
+    });
+    const call = trackMock.mock.calls.find((c) => c[0] === 'assistant_message_sent')!;
+    expect(call[1]).toMatchObject({ input_mode: 'text', has_attachment: false });
+    expect(typeof (call[1] as { length: number }).length).toBe('number');
+    // never the message text
+    expect(JSON.stringify(call[1])).not.toContain('Rodriguez');
   });
 });
 
