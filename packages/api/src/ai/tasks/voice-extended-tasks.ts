@@ -1215,10 +1215,15 @@ export class RequestFeedbackTaskHandler implements TaskHandler {
 //
 // The task-handlers.ts CreateJobTaskHandler is a plain passthrough
 // that expects a pre-built payload. This voice variant maps the
-// classifier's extracted fields to the required schema shape. Like
-// ReassignAppointmentTaskHandler, customerId is always listed as
-// missing because the classifier returns a customer NAME, never a
-// UUID — the review UI resolves the reference before approval.
+// classifier's extracted fields to the required schema shape.
+//
+// B6 fix — the router's entity resolver (P8) already resolves the
+// free-text customerName to a verified customerId on
+// context.existingEntities.customerId when the match is unique — but
+// this handler used to DROP it and unconditionally gate customerId,
+// so every create_job stalled at review even on an unambiguous
+// resolution. Mirror LogTimeEntryTaskHandler/CreateInvoiceScheduleTaskHandler:
+// consume the resolved id when present, only gate when genuinely absent.
 export class CreateJobVoiceTaskHandler implements TaskHandler {
   readonly taskType = 'create_job' as const;
 
@@ -1227,10 +1232,14 @@ export class CreateJobVoiceTaskHandler implements TaskHandler {
     const payload: Record<string, unknown> = {};
     const missing: string[] = [];
 
+    // P8 — verified customerId resolved by the router from the spoken name.
+    const resolvedCustomerId =
+      typeof context.existingEntities?.customerId === 'string'
+        ? context.existingEntities.customerId
+        : undefined;
+    if (resolvedCustomerId) payload.customerId = resolvedCustomerId;
     if (ee.customerName) payload.customerReference = ee.customerName;
-    // Always require customerId — the reference alone isn't enough
-    // to execute.
-    missing.push('customerId');
+    if (!resolvedCustomerId) missing.push('customerId');
 
     if (ee.jobTitle) payload.title = ee.jobTitle;
     else if (ee.jobReference) payload.title = ee.jobReference;

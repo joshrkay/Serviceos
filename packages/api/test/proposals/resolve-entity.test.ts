@@ -410,12 +410,14 @@ describe('U8/U1 — resolveProposalEntity re-draft', () => {
     expect(after?.proposalType).toBe('voice_clarification');
   });
 
-  it('does NOT throw on an incomplete-but-typed re-draft — tracks gaps via missingFields and gates approval (mirrors canonical path)', async () => {
+  it('does NOT throw on an incomplete-but-typed re-draft — a customer-only draft_invoice has no gaps (B6: jobId is optional)', async () => {
     await repo.create(ambiguousWithIntent());
-    // draft_invoice requires customerId + jobId + ≥1 lineItem. The resolved
-    // customer rides existingEntities; the handler drafts it but leaves jobId
-    // unset (the customer-name ambiguity carried no job). The canonical path
-    // persists this and gates approval on missingFields — it must NOT 400.
+    // B6 — draft_invoice requires only customerId + ≥1 lineItem; jobId is
+    // optional on the schema (CreateInvoiceExecutionHandler auto-opens a job
+    // at execution when absent, mirroring draft_estimate). The resolved
+    // customer rides existingEntities; the handler drafts it with no job
+    // (the customer-name ambiguity carried no job reference). The canonical
+    // path persists this — it must NOT 400 and must NOT gate on jobId.
     const { handler } = mockHandler('draft_invoice', (ctx) => ({
       customerId: (ctx.existingEntities as Record<string, unknown>).customerId,
       lineItems: [{ description: 'Water heater', quantity: 1, unitPrice: 45000 }],
@@ -426,8 +428,8 @@ describe('U8/U1 — resolveProposalEntity re-draft', () => {
     // The type transitioned (not a throw) and surfaced for review.
     expect(result.proposalType).toBe('draft_invoice');
     expect(result.status).toBe('ready_for_review');
-    // The required-but-missing field is carried so approval is blocked.
-    expect(missingFieldsFor(result)).toContain('jobId');
+    // jobId is no longer required — nothing gates approval on it.
+    expect(missingFieldsFor(result)).not.toContain('jobId');
   });
 
   it('preserves chainId when the clarification was a chain member', async () => {
@@ -794,7 +796,7 @@ describe('U8/U1 — resolveProposalEntity re-draft via REAL handler factory', ()
       { proposalRepo: repo, auditRepo, redraftHandlerFactory: factory },
     );
 
-  it('customer-name ambiguity → real draft_invoice (no jobId): no 400, ready_for_review, missingFields has jobId', async () => {
+  it('customer-name ambiguity → real draft_invoice (no jobId): no 400, ready_for_review, no jobId gate (B6)', async () => {
     // The grounded LLM drafts a customer + line item but no job (the ambiguity
     // was a customer name, not a job) — the common case the old code 400'd.
     const gateway = gatewayReturning(
@@ -840,8 +842,9 @@ describe('U8/U1 — resolveProposalEntity re-draft via REAL handler factory', ()
     expect(result.proposalType).toBe('draft_invoice');
     expect(result.status).toBe('ready_for_review');
     expect(result.status).not.toBe('approved');
-    // jobId is required by the schema but absent → tracked, gating approval.
-    expect(missingFieldsFor(result)).toContain('jobId');
+    // B6 — jobId is optional on the schema (job auto-opens at execution),
+    // so an absent job reference no longer gates approval.
+    expect(missingFieldsFor(result)).not.toContain('jobId');
     expect(result.targetEntityId).toBe(CUST_B);
     expect(result.targetEntityType).toBe('customer');
   });

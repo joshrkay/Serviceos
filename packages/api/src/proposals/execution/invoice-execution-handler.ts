@@ -8,6 +8,8 @@ import {
 } from '../../invoices/invoice';
 import { SettingsRepository } from '../../settings/settings';
 import { AuditRepository } from '../../audit/audit';
+import { JobRepository, createJob } from '../../jobs/job';
+import { LocationRepository } from '../../locations/location';
 
 /**
  * P5-005 — Deterministic execution for draft_invoice proposals.
@@ -29,7 +31,16 @@ export class CreateInvoiceExecutionHandler implements ExecutionHandler {
     // Without this the executed invoice persists but emits no
     // invoice.created audit event (the "every mutation emits audit"
     // invariant). The domain function already forwards it.
-    private readonly auditRepo?: AuditRepository
+    private readonly auditRepo?: AuditRepository,
+    // B6 — voice/assistant-drafted payloads carry a customerId but often no
+    // jobId (jobId is optional in draftInvoicePayloadSchema), mirroring the
+    // same gap DraftEstimateExecutionHandler closed for draft_estimate. When
+    // both repos are wired the handler opens a job for the customer (same
+    // primary/fallback-location resolution) instead of refusing the
+    // canonical drafted payload. New optional params appended after
+    // auditRepo so existing positional call sites remain valid.
+    private readonly jobRepo?: JobRepository,
+    private readonly locationRepo?: LocationRepository,
   ) {}
 
   // Degrades to a synthetic-id passthrough (saves nothing) without both
@@ -44,9 +55,11 @@ export class CreateInvoiceExecutionHandler implements ExecutionHandler {
     if (!payload.customerId || typeof payload.customerId !== 'string') {
       return { success: false, error: 'Payload must include a valid customerId' };
     }
-    if (!payload.jobId || typeof payload.jobId !== 'string') {
-      return { success: false, error: 'Payload must include a valid jobId' };
-    }
+    const customerId = payload.customerId;
+    // B6 — jobId is optional on the contract; a job is auto-opened below
+    // (mirroring DraftEstimateExecutionHandler) when it's absent.
+    let jobId =
+      typeof payload.jobId === 'string' && payload.jobId.length > 0 ? payload.jobId : undefined;
     if (!Array.isArray(payload.lineItems) || payload.lineItems.length === 0) {
       return { success: false, error: 'Payload must include at least one lineItem' };
     }
@@ -75,9 +88,49 @@ export class CreateInvoiceExecutionHandler implements ExecutionHandler {
     }
 
     try {
+      // Invoices require a job container. A drafted payload without one
+      // (customer resolved, job reference not) gets a job opened for the
+      // customer — same primary/fallback-location resolution as
+      // DraftEstimateExecutionHandler.
+      if (!jobId) {
+        if (!this.jobRepo || !this.locationRepo) {
+          return {
+            success: false,
+            error:
+              'Invoice draft has no jobId and job auto-creation is not configured — pick a job before approving',
+          };
+        }
+        const locations = await this.locationRepo.findByCustomer(context.tenantId, customerId);
+        const location =
+          locations.find((loc) => loc.isPrimary && !loc.isArchived) ??
+          locations.find((loc) => !loc.isArchived);
+        if (!location) {
+          return {
+            success: false,
+            error: 'Customer has no service location — add one before approving this invoice',
+          };
+        }
+        const job = await createJob(
+          {
+            tenantId: context.tenantId,
+            customerId,
+            locationId: location.id,
+            summary:
+              typeof payload.internalNotes === 'string' &&
+              payload.internalNotes.trim().length > 0
+                ? payload.internalNotes.trim()
+                : proposal.summary || lineItems[0].description,
+            createdBy: context.executedBy,
+          },
+          this.jobRepo,
+          this.auditRepo,
+        );
+        jobId = job.id;
+      }
+
       const input: Omit<CreateInvoiceInput, 'invoiceNumber'> = {
         tenantId: context.tenantId,
-        jobId: payload.jobId,
+        jobId,
         estimateId: typeof payload.estimateId === 'string' ? payload.estimateId : undefined,
         lineItems,
         discountCents:

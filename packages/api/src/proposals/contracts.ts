@@ -263,7 +263,12 @@ export const updateEstimatePayloadSchema = z.object({
 
 export const draftInvoicePayloadSchema = z.object({
   customerId: z.string().uuid(),
-  jobId: z.string().uuid(),
+  // B6 — jobId is optional, mirroring draftEstimatePayloadSchema: a
+  // resolved customer with no resolvable job reference (e.g. "invoice the
+  // Smith account") should still draft for review instead of stalling.
+  // CreateInvoiceExecutionHandler auto-opens a job at execution when this
+  // is absent, matching DraftEstimateExecutionHandler's job auto-create.
+  jobId: z.string().uuid().optional(),
   estimateId: z.string().uuid().optional(),
   invoiceNumber: z.string().min(1).optional(),
   lineItems: z.array(lineItemSchema).min(1),
