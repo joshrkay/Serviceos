@@ -119,8 +119,8 @@ export function createVoiceRouter(
     mintLimiter,
     asyncRoute(async (req: Request, res: Response) => {
       const authReq = req as AuthenticatedRequest;
-      const tenantId = authReq.auth?.tenantId ?? 'unknown';
-      const actorId = authReq.auth?.userId ?? 'unknown';
+      const tenantId = authReq.auth!.tenantId;
+      const actorId = authReq.auth!.userId;
       const routeName = 'POST /api/voice/stream-token';
 
       // UB-B1 — audit trail for every mint attempt (mirrors the
@@ -214,8 +214,8 @@ export function createVoiceRouter(
       const contentType = req.headers['content-type'] || '';
 
       const authReq = req as AuthenticatedRequest;
-      const tenantId = authReq.auth?.tenantId ?? 'unknown';
-      const actorId = authReq.auth?.userId ?? 'unknown';
+      const tenantId = authReq.auth!.tenantId;
+      const actorId = authReq.auth!.userId;
       // Optional language hint (ISO 639-1 code) via query param, e.g. ?language=es
       const languageHint = typeof req.query.language === 'string' ? req.query.language : undefined;
 

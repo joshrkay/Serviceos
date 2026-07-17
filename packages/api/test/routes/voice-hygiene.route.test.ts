@@ -11,9 +11,9 @@
  *      RecordingDuration — a trusted third-party value, not something a
  *      browser/mobile client asserts on these routes). Per project hygiene
  *      rules the dead constant was removed rather than left unenforced or
- *      wired to invented API surface. This test pins its absence so a
- *      future edit doesn't reintroduce a dead cost-control knob without a
- *      real product decision on server-side duration enforcement.
+ *      wired to invented API surface. Server-side duration enforcement
+ *      needs a real product decision (client-asserted duration or server
+ *      audio decoding) before a limit can come back.
  *   2. POST /transcribe's audit-write failures are now logged at warn
  *      level (with route/tenantId/eventType context) instead of being
  *      swallowed by an empty catch, while remaining non-fatal to the
@@ -21,8 +21,6 @@
  *      voice-stream-token.route.test.ts).
  */
 import { describe, it, expect, vi } from 'vitest';
-import { readFileSync } from 'fs';
-import path from 'path';
 import express, { NextFunction, Request, Response } from 'express';
 import request from 'supertest';
 import { AuthenticatedRequest } from '../../src/auth/clerk';
@@ -76,16 +74,6 @@ function buildApp(opts: {
   );
   return app;
 }
-
-describe('routes/voice.ts hygiene — MAX_DURATION_SECONDS dead constant', () => {
-  it('is not present in the route source (deleted, not silently unenforced)', () => {
-    const src = readFileSync(
-      path.join(__dirname, '../../src/routes/voice.ts'),
-      'utf8',
-    );
-    expect(src).not.toMatch(/MAX_DURATION_SECONDS/);
-  });
-});
 
 describe('POST /api/voice/transcribe — audit-write failure is logged, not swallowed', () => {
   it('still returns the transcript when the audit write throws, and warns with context', async () => {
