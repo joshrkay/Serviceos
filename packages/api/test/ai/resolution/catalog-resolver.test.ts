@@ -264,6 +264,25 @@ describe('applyCatalogPricing', () => {
     expect(out.lineItems[0]).not.toHaveProperty('totalCents');
   });
 
+  it('EE-4 — stamps the catalog item photo onto a grounded estimate line', () => {
+    const withPhoto = item('Water Heater Install', 185_000, { imageFileId: 'file-abc' });
+    const out = applyCatalogPricing(
+      [{ description: 'Water Heater Install', quantity: 1, unitPrice: 184_000 }],
+      [resolved(withPhoto)],
+      'unitPrice',
+    );
+    expect(out.lineItems[0]).toMatchObject({ imageFileId: 'file-abc', pricingSource: 'catalog' });
+  });
+
+  it('EE-4 — stamps no image when the catalog item has none', () => {
+    const out = applyCatalogPricing(
+      [{ description: 'Water Heater Install', quantity: 1, unitPrice: 184_000 }],
+      [resolved(heater)],
+      'unitPrice',
+    );
+    expect(out.lineItems[0]).not.toHaveProperty('imageFileId');
+  });
+
   it('maps Parts/Materials categories to material', () => {
     const coil = item('Condenser Coil', 62_000, { category: 'Parts' });
     const out = applyCatalogPricing(

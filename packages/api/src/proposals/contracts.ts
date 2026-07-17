@@ -215,6 +215,10 @@ const lineItemSchema = z
     groupLabel: z.string().optional(),
     isOptional: z.boolean().optional(),
     isDefaultSelected: z.boolean().optional(),
+    // EE-4 — catalog image snapshot stamped by the catalog resolver. Must be
+    // declared here or assertValidProposalPayload would strip/reject it and the
+    // image would vanish on the AI path only.
+    imageFileId: z.string().optional(),
   })
   .refine((li) => li.unitPrice !== undefined || li.unitPriceCents != null, {
     message: 'line item requires unitPrice or unitPriceCents',

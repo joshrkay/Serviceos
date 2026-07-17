@@ -508,6 +508,15 @@ describe('normalizeDraftLineItems', () => {
     });
   });
 
+  it('EE-4 — forwards imageFileId (frozen catalog image; the parity choke point)', () => {
+    const { lineItems } = normalizeDraftLineItems([
+      { description: 'Water heater', quantity: 1, unitPriceCents: 90000, pricingSource: 'catalog', imageFileId: 'file-xyz' },
+      { description: 'Labor', quantity: 1, unitPriceCents: 5000 },
+    ]);
+    expect(lineItems[0].imageFileId).toBe('file-xyz');
+    expect(lineItems[1].imageFileId).toBeUndefined();
+  });
+
   it('reports malformed lines (missing description / quantity / price) without producing NaN', () => {
     const { lineItems, malformed } = normalizeDraftLineItems([
       { quantity: 1, unitPriceCents: 100 }, // no description

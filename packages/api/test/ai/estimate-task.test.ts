@@ -737,3 +737,35 @@ describe('EE-1 — good-better-best tier drafting', () => {
     expect(addon2?.isDefaultSelected).toBe(true);
   });
 });
+
+// ─── EE-4: catalog image on AI-drafted lines ─────────────────────────────
+describe('EE-4 — image on AI-drafted estimate lines', () => {
+  it('carries the catalog item photo onto a grounded draft line', async () => {
+    const repo = new InMemoryCatalogItemRepository();
+    await repo.create(
+      createCatalogItem({
+        tenantId: 'tenant-1',
+        name: 'Water Heater Install',
+        category: 'Labor',
+        unit: 'each',
+        unitPriceCents: 185_000,
+        imageFileId: 'file-heater',
+      }),
+    );
+    const stub = new StubProvider('stub');
+    stub.setResponse({
+      content: JSON.stringify({
+        customerId: '550e8400-e29b-41d4-a716-446655440000',
+        lineItems: [{ description: 'Water Heater Install', quantity: 1, unitPrice: 184_000 }],
+        confidence_score: 0.95,
+      }),
+    });
+    const handler = new EstimateTaskHandler(makeGateway(stub), repo);
+
+    const { proposal } = await handler.handle(makeContext());
+
+    const line = (proposal.payload.lineItems as Array<Record<string, unknown>>)[0];
+    expect(line.pricingSource).toBe('catalog');
+    expect(line.imageFileId).toBe('file-heater'); // AI draft inherits the image
+  });
+});
