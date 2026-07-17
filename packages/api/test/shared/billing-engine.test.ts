@@ -1,9 +1,11 @@
 import {
   calculateLineItemTotal,
   calculateDocumentTotals,
+  calculateSelectedDocumentTotals,
   validateLineItem,
   validateDocumentTotals,
   buildLineItem,
+  type LineItem,
 } from '../../src/shared/billing-engine';
 
 describe('P1-009A — Shared line-item validation + calculation engine', () => {
@@ -172,5 +174,28 @@ describe('P1-009A — Shared line-item validation + calculation engine', () => {
         'processingFeeBps must not exceed 10000 (100%)',
       );
     });
+  });
+});
+
+// ─── EE-1: calculateSelectedDocumentTotals ───────────────────────────────
+describe('EE-1 — calculateSelectedDocumentTotals', () => {
+  const tiered: LineItem[] = [
+    { id: 'a', description: 'Diagnostic', quantity: 1, unitPriceCents: 5000, totalCents: 5000, sortOrder: 0, taxable: false },
+    { id: 'b', description: 'Builder', quantity: 1, unitPriceCents: 90000, totalCents: 90000, sortOrder: 1, taxable: false, groupKey: 'wh', isOptional: true, isDefaultSelected: true },
+    { id: 'c', description: 'Premium', quantity: 1, unitPriceCents: 140000, totalCents: 140000, sortOrder: 2, taxable: false, groupKey: 'wh', isOptional: true },
+    { id: 'd', description: 'Add-on', quantity: 1, unitPriceCents: 8000, totalCents: 8000, sortOrder: 3, taxable: false, isOptional: true },
+  ];
+
+  it('totals only the default selection for a tiered document', () => {
+    // Diagnostic (5000, always billed) + Builder default tier (90000).
+    expect(calculateSelectedDocumentTotals(tiered, 0, 0).totalCents).toBe(95000);
+  });
+
+  it('matches calculateDocumentTotals for a flat document', () => {
+    const flat: LineItem[] = [
+      buildLineItem('1', 'Labor', 2, 5000, 1, true, 'labor'),
+      buildLineItem('2', 'Material', 1, 3000, 2, true, 'material'),
+    ];
+    expect(calculateSelectedDocumentTotals(flat, 0, 825)).toEqual(calculateDocumentTotals(flat, 0, 825));
   });
 });

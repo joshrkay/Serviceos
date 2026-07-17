@@ -297,4 +297,17 @@ describe('EE-1 — default-selection headline totals', () => {
     expect(estimate.totals.totalCents).toBe(15000);
     expect(estimate.lineItems).toHaveLength(2);
   });
+
+  it('keeps the default-selection total when a tiered estimate is updated (not re-inflated)', async () => {
+    const repo = new InMemoryEstimateRepository();
+    const created = await createEstimate(
+      { tenantId: 'tenant-1', jobId: 'job-1', estimateNumber: 'EST-T2', lineItems: tieredItems(), createdBy: 'u-1' },
+      repo,
+    );
+    expect(created.totals.totalCents).toBe(95000);
+    // An unrelated edit must not re-sum every option back into the headline.
+    const updated = await updateEstimate('tenant-1', created.id, { internalNotes: 'call first' }, repo);
+    expect(updated!.totals.totalCents).toBe(95000);
+    expect(updated!.lineItems).toHaveLength(4);
+  });
 });

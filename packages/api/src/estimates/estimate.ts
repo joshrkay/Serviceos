@@ -2,8 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import {
   LineItem,
   DocumentTotals,
-  calculateDocumentTotals,
-  resolveSelectedLineItems,
+  calculateSelectedDocumentTotals,
 } from '../shared/billing-engine';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { ValidationError, ConflictError } from '../shared/errors';
@@ -261,14 +260,11 @@ export async function createEstimate(
 
   // EE-1 — a tiered estimate's headline total reflects the DEFAULT selection
   // (each group's default tier + pre-checked add-ons + always-billed lines),
-  // not the sum of every option. resolveSelectedLineItems returns ALL items
-  // when there are no selectable groups, so a flat estimate's total is
-  // byte-identical. Every line item is still persisted (input.lineItems below);
-  // only the headline total narrows. Accept-time recompute
-  // (public-estimate-service) uses the same resolve-then-total shape over the
-  // customer's chosen selection.
-  const totals = calculateDocumentTotals(
-    resolveSelectedLineItems(input.lineItems),
+  // not the sum of every option; a flat estimate's total is byte-identical
+  // (all lines selected). Every line item is still persisted (input.lineItems
+  // below); only the headline total narrows. See calculateSelectedDocumentTotals.
+  const totals = calculateSelectedDocumentTotals(
+    input.lineItems,
     input.discountCents ?? 0,
     input.taxRateBps ?? 0
   );
@@ -519,7 +515,9 @@ export async function updateEstimate(
   const lineItems = input.lineItems ?? existing.lineItems;
   const discountCents = input.discountCents ?? existing.totals.discountCents;
   const taxRateBps = input.taxRateBps ?? existing.totals.taxRateBps;
-  const totals = calculateDocumentTotals(lineItems, discountCents, taxRateBps);
+  // EE-1 — headline over the default selection so a tiered estimate isn't
+  // re-inflated on edit (flat estimates are unaffected).
+  const totals = calculateSelectedDocumentTotals(lineItems, discountCents, taxRateBps);
   const now = new Date();
 
   // RV-042 — acceptance invalidation: the content the customer accepted is
@@ -619,7 +617,8 @@ export async function reviseEstimate(
   const lineItems = input.lineItems ?? existing.lineItems;
   const discountCents = input.discountCents ?? existing.totals.discountCents;
   const taxRateBps = input.taxRateBps ?? existing.totals.taxRateBps;
-  const totals = calculateDocumentTotals(lineItems, discountCents, taxRateBps);
+  // EE-1 — headline over the default selection (see calculateSelectedDocumentTotals).
+  const totals = calculateSelectedDocumentTotals(lineItems, discountCents, taxRateBps);
   const now = new Date();
 
   const updated = await repository.update(tenantId, id, {
@@ -779,7 +778,8 @@ export async function cloneEstimate(
     estimateNumber: newEstimateNumber,
     status: 'draft',
     lineItems: existing.lineItems.map((li) => ({ ...li, id: uuidv4() })),
-    totals: calculateDocumentTotals(
+    // EE-1 — headline over the default selection (see calculateSelectedDocumentTotals).
+    totals: calculateSelectedDocumentTotals(
       existing.lineItems,
       existing.totals.discountCents,
       existing.totals.taxRateBps,

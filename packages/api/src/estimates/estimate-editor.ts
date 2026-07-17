@@ -4,7 +4,7 @@ import {
   LineItem,
   LineItemCategory,
   buildLineItem,
-  calculateDocumentTotals,
+  calculateSelectedDocumentTotals,
   validateLineItem as validateBillingLineItem,
 } from '../shared/billing-engine';
 import { ValidationError } from '../shared/errors';
@@ -126,7 +126,9 @@ export function applyEstimateEdits(
   }
 
   const normalized = lineItems.map((l, idx) => ({ ...l, sortOrder: idx }));
-  const totals = calculateDocumentTotals(
+  // EE-1 — headline over the default selection so a tiered estimate isn't
+  // re-inflated by a voice edit (flat estimates are unaffected).
+  const totals = calculateSelectedDocumentTotals(
     normalized,
     estimate.totals.discountCents,
     estimate.totals.taxRateBps
