@@ -431,8 +431,13 @@ describe('P22 — EstimateTaskHandler catalog grounding', () => {
     expect(spokenCandidate?.unitPriceCents).toBe(99_900);
     expect(spokenCandidate?.score).toBe(0);
 
+    // The conflict gates via missingFields (cleared by one-tap resolution),
+    // NOT a persisted 'low' stamp — that stamp is never lifted by resolution
+    // and would keep blocking chain-set/SMS approval after the pick. The
+    // estimate handler's clarification cap maps the ambiguous draft to
+    // 'medium' — score-derived, NOT the sticky 'low'.
     const meta = proposal.payload._meta as Record<string, unknown>;
-    expect(meta.overallConfidence).toBe('low');
+    expect(meta.overallConfidence).toBe('medium');
   });
 
   it('ambiguous match forces draft with missingFields + candidates', async () => {
@@ -455,13 +460,15 @@ describe('P22 — EstimateTaskHandler catalog grounding', () => {
     const ctx = proposal.sourceContext as Record<string, unknown>;
     expect(ctx.missingFields).toEqual(['lineItems[0].catalogItemId']);
     expect(ctx.catalogResolution).toBeDefined();
-    // requiresReview (anyUncatalogued=false, missingFields.length>0) now hard-
-    // blocks the overall confidence meta too — not just the proposal status —
-    // so a reviewer never sees a "high confidence" stamp on an unresolved,
-    // operator-must-pick line item.
+    // Ambiguous-only lines keep their score-derived confidence: the gate is
+    // missingFields (cleared by one-tap resolution), NOT a persisted 'low'
+    // stamp, which resolution never lifts and would keep blocking
+    // chain-set/SMS approval after the operator picks.
     expect(proposal.confidenceFactors).not.toContain('uncatalogued_line_item');
+    // Score-derived via the estimate handler's clarification cap ('medium'),
+    // NOT the sticky 'low' that resolution could never lift.
     const meta = proposal.payload._meta as Record<string, unknown>;
-    expect(meta.overallConfidence).toBe('low');
+    expect(meta.overallConfidence).toBe('medium');
   });
 
   it('uncatalogued line caps confidence below auto-approve', async () => {

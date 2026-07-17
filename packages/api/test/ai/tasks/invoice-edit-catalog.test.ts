@@ -356,16 +356,17 @@ describe('P22-001 invoice-edit-catalog', () => {
     // proves the gate now drives `_meta.overallConfidence`, not just proposal
     // status via missingFields — a reviewer must never see "high confidence" on
     // a line that needs an operator pick.
-    it('an ambiguous-only line (requiresReview true, anyUncatalogued false) forces overallConfidence low', async () => {
+    it('an ambiguous-only line keeps score-derived confidence (gated by missingFields, not a sticky low stamp)', async () => {
       const repo = new InMemoryCatalogItemRepository();
       await seedCatalog(repo, TENANT, [
         { name: 'Ball Valve', unitPriceCents: 3200 },
         { name: 'Gate Valve', unitPriceCents: 4100 },
       ]);
 
-      // draftResponse defaults confidence_score to 0.9 — high enough that,
-      // pre-`requiresReview`, the hand-rolled `anyUncatalogued` ternary would
-      // have mapped this straight through to overallConfidence 'high'.
+      // draftResponse defaults confidence_score to 0.9, which maps to 'high'
+      // — and must STAY 'high' for an ambiguous-only line: a persisted 'low'
+      // stamp is never lifted by line resolution, so it would keep blocking
+      // chain-set/SMS approval after the operator picks a candidate.
       const gateway = mockGateway(
         draftResponse([{ description: 'valve', quantity: 1, unitPrice: 3500 }]),
       );
@@ -380,8 +381,8 @@ describe('P22-001 invoice-edit-catalog', () => {
       // Not uncatalogued — the LLM's high self-reported confidence is NOT
       // pulled down by the UNCATALOGUED_CONFIDENCE_CAP path.
       expect(result.proposal.confidenceFactors).not.toContain('uncatalogued_line_item');
-      // But requiresReview still hard-blocks the overall confidence marker.
-      expect(payload._meta?.overallConfidence).toBe('low');
+      // The stamp stays score-derived; the structural gate is missingFields.
+      expect(payload._meta?.overallConfidence).toBe('high');
       expect(result.proposal.status).not.toBe('approved');
     });
 

@@ -389,10 +389,17 @@ export interface CatalogPricingOutcome {
    * `missingFields` would permanently deadlock approval instead of merely
    * blocking auto-approval. `requiresReview` is the numeric-cap's structural
    * companion, not a replacement for `missingFields`: it is `true` whenever
-   * `anyUncatalogued` or `missingFields.length > 0`, equivalent to (but a
-   * single documented boolean instead of a per-consumer-reimplemented
-   * ternary over) the `payload._meta.overallConfidence = 'low'` hard block
-   * every real caller of `groundLineItemPricing` already stamps by hand.
+   * `anyUncatalogued` or `missingFields.length > 0`.
+   *
+   * NOTE for consumers: use this for STATUS gates (force 'draft' /
+   * groundedClean checks). Do NOT drive the persisted
+   * `payload._meta.overallConfidence = 'low'` stamp from it — that stamp is
+   * never lifted by line resolution, so stamping ambiguous-only outcomes
+   * 'low' would keep blocking chain-set/SMS approval after the operator
+   * resolves the ambiguity. Drive the stamp from `anyUncatalogued` (an
+   * uncatalogued line has nothing to resolve, so its block is rightly
+   * permanent); ambiguity is gated by `missingFields`, which resolution
+   * clears.
    */
   requiresReview: boolean;
 }
@@ -445,8 +452,11 @@ export function applyCatalogPricing(
     if ((resolution.tier === 'exact' || resolution.tier === 'high') && resolution.match) {
       const item = resolution.match;
       const draftedRaw = li[priceField];
+      // Zero is a REAL drafted price (a comped/free line — the contract's
+      // unitPriceCents is min(0)), so it must be conflict-eligible rather
+      // than silently snapped back to the full catalog price.
       const draftedPrice =
-        typeof draftedRaw === 'number' && Number.isInteger(draftedRaw) && draftedRaw > 0
+        typeof draftedRaw === 'number' && Number.isInteger(draftedRaw) && draftedRaw >= 0
           ? draftedRaw
           : null;
 

@@ -363,8 +363,11 @@ describe('P22 — InvoiceTaskHandler catalog grounding', () => {
     expect(spokenCandidate?.unitPriceCents).toBe(99_900);
     expect(spokenCandidate?.score).toBe(0);
 
+    // The conflict gates via missingFields (cleared by one-tap resolution),
+    // NOT a persisted 'low' stamp — that stamp is never lifted by resolution
+    // and would keep blocking chain-set/SMS approval after the pick.
     const meta = proposal.payload._meta as Record<string, unknown>;
-    expect(meta.overallConfidence).toBe('low');
+    expect(meta.overallConfidence).toBe('high');
   });
 
   it('ambiguous match keeps the LLM price, forces draft, and surfaces candidates', async () => {

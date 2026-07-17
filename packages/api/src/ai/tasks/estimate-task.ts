@@ -230,7 +230,12 @@ export class EstimateTaskHandler implements TaskHandler {
       // of any tenant `auto_approve_threshold` override (a threshold ≤ the 0.85
       // uncatalogued cap / 0.5 clarify cap would otherwise still auto-approve
       // an AI-invented price). An uncatalogued price must always reach a human.
-      overallConfidence: catalogOutcome?.requiresReview
+      // Deliberately `anyUncatalogued`, NOT `requiresReview`: ambiguous lines
+      // are gated by `missingFields`, which one-tap resolution CLEARS — a
+      // persisted 'low' stamp would keep blocking chain-set/SMS approval
+      // after the ambiguity is resolved. Uncatalogued lines have nothing to
+      // resolve, so their 'low' stamp is rightly permanent.
+      overallConfidence: catalogOutcome?.anyUncatalogued
         ? 'low'
         : getConfidenceLevel(confidenceScore),
       ...(Object.keys(signals.fieldConfidence).length > 0

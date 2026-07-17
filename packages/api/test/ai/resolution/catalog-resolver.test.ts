@@ -435,6 +435,39 @@ describe('applyCatalogPricing — price conflict ("did you mean")', () => {
     expect(out.anyCatalogPriced).toBe(true);
   });
 
+  it('a zero-cent (comped) price is a REAL drafted price — surfaces a conflict, not a snap to full price', () => {
+    const out = applyCatalogPricing(
+      [{ description: 'Water Heater Install', quantity: 1, unitPriceCents: 0 }],
+      [resolved(heater)],
+      'unitPriceCents',
+    );
+    expect(out.lineItems[0]).toMatchObject({
+      unitPriceCents: 0,
+      pricingSource: 'ambiguous',
+      needsPricing: true,
+    });
+    expect(out.catalogResolution![0]).toEqual([
+      { id: heater.id, name: 'Water Heater Install', unitPriceCents: 15_000, score: 1 },
+      { id: 'spoken:0', name: 'Keep spoken price', unitPriceCents: 0, score: 0 },
+    ]);
+    expect(out.requiresReview).toBe(true);
+  });
+
+  it('a zero-cent price against a sub-$1 catalog item still snaps (below the absolute threshold)', () => {
+    const washer = item('Washer', 80);
+    const out = applyCatalogPricing(
+      [{ description: 'Washer', quantity: 1, unitPriceCents: 0 }],
+      [resolved(washer)],
+      'unitPriceCents',
+    );
+    expect(out.lineItems[0]).toMatchObject({
+      unitPriceCents: 80,
+      catalogItemId: washer.id,
+      pricingSource: 'catalog',
+    });
+    expect(out.requiresReview).toBe(false);
+  });
+
   it('a non-integer price never triggers a conflict — snaps to catalog', () => {
     const out = applyCatalogPricing(
       [{ description: 'Water Heater Install', quantity: 1, unitPriceCents: 7_500.5 }],
