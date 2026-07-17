@@ -140,6 +140,38 @@ describe('POST /api/assistant/chat — create_customer path', () => {
     expect(byKey.phone).toBe('');
   });
 
+  it('marks missingFields=[name] when create_customer is classified without a name (blocks one-tap Approve)', async () => {
+    // The "Add a new customer" suggestion chip sends bare text that classifies
+    // as create_customer with NO extracted name. Without a missingFields marker
+    // the card would let the operator Approve an empty-payload proposal that
+    // then fails execution ("Payload must include a non-empty name").
+    const gateway = scriptedGateway([
+      JSON.stringify({
+        intentType: 'create_customer',
+        confidence: 0.9,
+        extractedEntities: {},
+      }),
+    ]);
+    const app = buildApp(gateway, proposalRepo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Add a new customer' }] });
+
+    expect(res.status).toBe(200);
+    const proposal = res.body?.message?.proposal;
+    expect(proposal?.type).toBe('Customer');
+    // The card reads missingFields and disables Approve until the operator
+    // supplies the name via the inline Edit flow.
+    expect(proposal?.missingFields).toEqual(['name']);
+
+    // Persisted proposal carries it on sourceContext so the inbox card and the
+    // approval gate see it too.
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted).toHaveLength(1);
+    expect((persisted[0].sourceContext as { missingFields?: string[] }).missingFields).toEqual(['name']);
+  });
+
   // §3B/3D/3E — assistant chat must thread the vertical resolver
   // through to the classifier so the operator's text commands see the
   // same HVAC/plumbing terminology the voice path already gets.

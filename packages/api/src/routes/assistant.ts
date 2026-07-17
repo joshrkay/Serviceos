@@ -725,6 +725,21 @@ async function generateAssistantReply(
           message: lastUserText,
           existingEntities: customerPayload,
         });
+        // A create_customer classified from an under-specified command
+        // ("Add a new customer" — e.g. the one-tap assistant suggestion chip)
+        // extracts no name, so the handler builds an empty-payload proposal.
+        // Without a missingFields marker the review card would let the operator
+        // Approve it and execution then fails hard ("Payload must include a
+        // non-empty name"). Stamp missingFields so the card blocks Approve and
+        // routes the operator through Edit to supply the name first — the same
+        // guard the voice/entity-resolution path uses. (createProposal only
+        // persists caller-supplied missingFields, so we set it here.)
+        if (!customerPayload.name) {
+          proposal.sourceContext = {
+            ...(proposal.sourceContext ?? {}),
+            missingFields: ['name'],
+          };
+        }
         await deps.proposalRepo.create(proposal);
         // QA-2026-06-05: parity with the guardrail promote step (see
         // inapp-adapter.handleCreateProposal). create-customer-task builds
