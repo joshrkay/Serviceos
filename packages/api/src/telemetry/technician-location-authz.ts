@@ -9,7 +9,7 @@ export interface TechnicianLocationAuthorizer {
 export class InMemoryTechnicianLocationAuthorizer implements TechnicianLocationAuthorizer {
   async canSubmitForTechnician(auth: NonNullable<AuthenticatedRequest['auth']>, technicianId: string): Promise<boolean> {
     if (auth.role === 'technician') {
-      return auth.userId === technicianId;
+      return auth.canonicalUserId === technicianId;
     }
     return true;
   }
@@ -22,7 +22,7 @@ export class PgTechnicianLocationAuthorizer extends PgBaseRepository implements 
 
   async canSubmitForTechnician(auth: NonNullable<AuthenticatedRequest['auth']>, technicianId: string): Promise<boolean> {
     if (auth.role === 'technician') {
-      return auth.userId === technicianId;
+      return auth.canonicalUserId === technicianId;
     }
 
     // Owner/dispatcher may submit on behalf of any technician in the tenant.

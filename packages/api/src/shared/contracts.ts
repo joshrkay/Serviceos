@@ -500,9 +500,13 @@ export const updateSettingsSchema = z.object({
       // RV-071 — spoken challenge (PIN/passphrase) gating money/
       // irreversible VOICE approvals on the recognized owner line
       // (caller-ID match; see approver-identity.ts).
-      // Interim home in this JSONB (no new migration); min length keeps
-      // out trivially guessable one-digit codes. Unset → those voice
-      // approvals are refused with a one-tap SMS fallback (fail-safe).
+      // DEPRECATED (WS21a) — plaintext-at-rest. Enroll via
+      // `PUT /api/settings/voice-approval-pin` instead, which hashes the PIN
+      // (HMAC) and stores only `voice_approval_pin_hash`. This field is kept
+      // for back-compat (the verify seam falls back to it) but should not be
+      // written by new clients. `voice_approval_pin_hash` is intentionally
+      // NOT in this schema, so a raw hash can never be injected via the
+      // generic settings PUT (unknown keys are stripped by `.partial()`).
       voice_approval_challenge: z.string().min(4).max(64),
     })
     .partial()

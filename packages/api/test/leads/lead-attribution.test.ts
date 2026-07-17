@@ -18,9 +18,16 @@ import {
   createInvoice,
 } from '../../src/invoices/invoice';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
+import { InMemoryLocationRepository } from '../../src/locations/location';
 import { createLeadSchema } from '../../src/leads/enums';
 
 const TENANT = '00000000-0000-4000-8000-0000000000ab';
+const SAMPLE_ADDRESS = {
+  street1: '100 Main St',
+  city: 'Austin',
+  state: 'TX',
+  postalCode: '78701',
+} as const;
 
 describe('lead-to-cash source attribution', () => {
   let leadRepo: InMemoryLeadRepository;
@@ -28,6 +35,7 @@ describe('lead-to-cash source attribution', () => {
   let jobRepo: InMemoryJobRepository;
   let invoiceRepo: InMemoryInvoiceRepository;
   let auditRepo: InMemoryAuditRepository;
+  let locationRepo: InMemoryLocationRepository;
 
   beforeEach(() => {
     leadRepo = new InMemoryLeadRepository();
@@ -35,6 +43,7 @@ describe('lead-to-cash source attribution', () => {
     jobRepo = new InMemoryJobRepository();
     invoiceRepo = new InMemoryInvoiceRepository();
     auditRepo = new InMemoryAuditRepository();
+    locationRepo = new InMemoryLocationRepository();
   });
 
   it('round-trips UTM + attribution fields through createLead', async () => {
@@ -79,6 +88,7 @@ describe('lead-to-cash source attribution', () => {
         utmSource: 'google',
         utmCampaign: 'spring_promo',
         createdBy: 'public_intake',
+        ...SAMPLE_ADDRESS,
       },
       leadRepo,
       auditRepo
@@ -92,7 +102,8 @@ describe('lead-to-cash source attribution', () => {
       customerRepo,
       'user-1',
       'owner',
-      auditRepo
+      auditRepo,
+      locationRepo
     );
     expect(conversion).not.toBeNull();
     expect(conversion!.customer.originatingLeadId).toBe(lead.id);

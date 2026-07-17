@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
-import { PortalJob, portalApi } from '../../api/portal';
+import { PortalJob, portalApi, PORTAL_FALLBACK_TZ } from '../../api/portal';
 import { PortalCard } from '../../components/portal/PortalCard';
+import { formatDateInTenantTz } from '../../utils/formatInTenantTz';
 
-export function PortalJobList({ token }: { token: string }) {
+export function PortalJobList({ token, timezone = PORTAL_FALLBACK_TZ }: { token: string; timezone?: string }) {
   const [jobs, setJobs] = useState<PortalJob[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -47,7 +48,7 @@ export function PortalJobList({ token }: { token: string }) {
           }
         >
           <div className="text-xs text-muted-foreground">
-            Opened {new Date(j.createdAt).toLocaleDateString()}
+            Opened {formatDateInTenantTz(j.createdAt, timezone, { withYear: true })}
           </div>
         </PortalCard>
       ))}

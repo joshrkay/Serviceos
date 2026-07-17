@@ -43,6 +43,33 @@ const MAX_INTENT_CAPTURE_RETRIES = 1;
 const MAX_REPROMPTS = 3;
 
 /**
+ * WS18 — hard cap on how many times a caller may refine a live quote before the
+ * agent stops editing and defers to the owner. Bounds a caller who keeps
+ * re-tweaking line items so the agent can never be looped forever. Exported so
+ * the settings-aware voice-turn processor's deterministic pre-check reads the
+ * SAME cap it does (a re-ground is skipped once the cap is reached).
+ */
+export const MAX_REFINEMENTS_PER_CALL = 3;
+
+/**
+ * WS18 — spoken when the refinement cap is hit: the agent stops editing the
+ * live quote and hands it to the owner to finalize. The processor pairs this
+ * with a one-tap owner fallback. Deliberately makes NO booking claim.
+ */
+export const REFINEMENT_CAP_LINE =
+  'Let me have the owner finalize the details and send you the full quote by text.';
+
+/**
+ * WS18 — bounded reprompt spoken in `closing` when the caller's response to a
+ * live quote is low-confidence (empty / unintelligible). Closes the dead-air
+ * hole where a `confidence_low` in `closing` previously fell through to an
+ * ignored transition and the caller heard silence. Governed by the existing
+ * repromptCount / MAX_REPROMPTS budget.
+ */
+export const POST_QUOTE_REPROMPT_LINE =
+  'Sorry — did you want me to lock that in, or is there something to change?';
+
+/**
  * N-003 (P2-036) — deterministic holding line spoken when the caller pushes on
  * price, scope, or terms. The agent must never negotiate; it defers to the owner.
  * The pure FSM emits this FIXED fallback (it can't load async settings) tagged
@@ -288,6 +315,9 @@ function checkGlobalGuards(
           callSid: updatedContext.callSid,
           conversationId: updatedContext.conversationId,
           customerId: updatedContext.customerId,
+          // Link the negotiation callback proposal to the classify call's
+          // ai_runs row (FK-satisfied) instead of null.
+          ...(event.aiRunId ? { aiRunId: event.aiRunId } : {}),
         },
       });
     }
@@ -577,6 +607,13 @@ function transitionIntentCapture(
         currentIntent: event.intentType,
         extractedEntities: event.entities,
         lastIntentConfidence: event.confidence,
+        // Carry the classify call's ai_runs id forward so the eventual
+        // create_proposal (after confirm) links the proposal to a REAL run.
+        // Set UNCONDITIONALLY (not a conditional spread): a re-classification
+        // whose turn has no persisted run must CLEAR the prior turn's id, or
+        // the `...context` spread above would leak the previous run and the
+        // eventual create_proposal would link to the WRONG ai_runs record.
+        lastAiRunId: event.aiRunId,
         retryCount: 0,
       };
       return {
@@ -793,6 +830,10 @@ function transitionIntentConfirm(
             // Real classifier confidence (caller has also explicitly
             // confirmed the intent by this point) — see types.ts.
             confidence: context.lastIntentConfidence,
+            // Real ai_runs id from the classify call so the proposal builder
+            // sets proposals.ai_run_id to an actual row (FK-satisfied), not
+            // null. Omitted when the classify call had no persisted run.
+            ...(context.lastAiRunId ? { aiRunId: context.lastAiRunId } : {}),
           },
         },
       ],
@@ -814,6 +855,8 @@ function transitionIntentConfirm(
         ...context,
         currentIntent: undefined,
         extractedEntities: undefined,
+        // Abandon the captured turn's run id so a re-classify can't reuse it.
+        lastAiRunId: undefined,
         retryCount: 0,
       },
     };
@@ -832,6 +875,8 @@ function transitionIntentConfirm(
         ...context,
         currentIntent: undefined,
         extractedEntities: undefined,
+        // Abandon the captured turn's run id so a re-classify can't reuse it.
+        lastAiRunId: undefined,
         retryCount: 0,
       },
     };
@@ -845,15 +890,45 @@ function transitionProposalDraft(
   context: CallingAgentContext
 ): TransitionResult {
   if (event.type === 'proposal_queued') {
+    // WS18 — when the queued proposal is a catalog-grounded estimate the
+    // processor carries the read-back's structured lines + total, so we stash a
+    // `pendingQuote` on the context. This is what makes the drafted quote
+    // refinable ("actually, make it two") and closeable ("yes, book it") in
+    // `closing` instead of being silently discarded. Absent for every
+    // non-estimate proposal → pendingQuote stays undefined → closing is
+    // byte-for-byte the pre-WS18 behavior.
+    const updatedContext: CallingAgentContext = {
+      ...context,
+      pendingProposalId: event.proposalId,
+      ...(event.groundedLines
+        ? {
+            pendingQuote: {
+              proposalId: event.proposalId,
+              groundedLines: event.groundedLines,
+              groundedClean: event.groundedClean === true,
+              totalCents:
+                typeof event.totalCents === 'number' ? event.totalCents : 0,
+              refinementCount: 0,
+            },
+          }
+        : {}),
+    };
     return {
       nextState: 'closing',
       sideEffects: [
         auditLog(context, 'proposal_draft', 'closing', 'proposal_queued', {
           proposalId: event.proposalId,
         }),
-        ttsPlay("Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?"),
+        // WS5 — a drafted estimate carries a catalog-grounded quote read-back
+        // (event.utterance), computed synchronously by the voice-turn
+        // processor. Never an LLM-invented number, and no number at all for
+        // uncatalogued work. Every other proposal type keeps the fixed line.
+        ttsPlay(
+          event.utterance ??
+            "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?",
+        ),
       ],
-      updatedContext: { ...context, pendingProposalId: event.proposalId },
+      updatedContext,
     };
   }
 
@@ -876,6 +951,113 @@ function transitionClosing(
     };
   }
 
+  // WS18 — the caller assented to book the live quote ("yes, book it"). The
+  // processor's deterministic pre-check dispatched this BEFORE the classifier,
+  // so it can never be misread as a second intent (the discard bug). The FSM
+  // keeps pendingQuote (the processor's D-018 close flow may fall back to the
+  // owner) and stays in closing; the processor owns the spoken close + booking.
+  if (event.type === 'post_quote_affirmative') {
+    return {
+      nextState: 'closing',
+      sideEffects: [
+        auditLog(context, 'closing', 'closing', 'post_quote_affirmative', {
+          ...(context.pendingQuote
+            ? {
+                proposalId: context.pendingQuote.proposalId,
+                groundedClean: context.pendingQuote.groundedClean,
+              }
+            : {}),
+        }),
+      ],
+      updatedContext: context,
+    };
+  }
+
+  // WS18 — the caller edited the live quote ("make it two", "also add a
+  // gasket"). The processor has already re-grounded + edited the draft proposal
+  // in place; here we speak the fresh read-back and stay in closing, keeping
+  // (and bumping) pendingQuote. Bounded by MAX_REFINEMENTS_PER_CALL — past the
+  // cap the agent stops editing and defers to the owner.
+  if (event.type === 'refine_pending_quote') {
+    const currentCount = context.pendingQuote?.refinementCount ?? 0;
+    const newCount = currentCount + 1;
+    if (newCount > MAX_REFINEMENTS_PER_CALL) {
+      return {
+        nextState: 'closing',
+        sideEffects: [
+          auditLog(context, 'closing', 'closing', 'refine_pending_quote_capped', {
+            refinementCount: currentCount,
+            proposalId: event.proposalId,
+          }),
+          ttsPlay(REFINEMENT_CAP_LINE),
+        ],
+        // Keep the last accepted quote — the caller can still say "yes".
+        updatedContext: context,
+      };
+    }
+    return {
+      nextState: 'closing',
+      sideEffects: [
+        auditLog(context, 'closing', 'closing', 'refine_pending_quote', {
+          refinementCount: newCount,
+          proposalId: event.proposalId,
+          groundedClean: event.groundedClean,
+        }),
+        ttsPlay(event.utterance),
+      ],
+      updatedContext: {
+        ...context,
+        pendingQuote: {
+          proposalId: event.proposalId,
+          groundedLines: event.groundedLines,
+          groundedClean: event.groundedClean,
+          totalCents: event.totalCents,
+          refinementCount: newCount,
+        },
+      },
+    };
+  }
+
+  // WS18 — low-confidence caller response to a live quote (empty / garbled).
+  // Previously fell through to `ignoredTransition` → dead air. Now a bounded
+  // reprompt, governed by the existing repromptCount / MAX_REPROMPTS budget, so
+  // a persistently unintelligible caller still escalates to a human. Scoped to
+  // pendingQuote — a non-estimate `closing` keeps its prior (ignored) behavior.
+  if (event.type === 'confidence_low' && context.pendingQuote) {
+    const newRepromptCount = context.repromptCount + 1;
+    if (newRepromptCount >= MAX_REPROMPTS) {
+      return {
+        nextState: 'escalating',
+        sideEffects: [
+          auditLog(context, 'closing', 'escalating', 'post_quote_low_confidence_max', {
+            threshold: event.threshold,
+            score: event.score,
+            repromptCount: newRepromptCount,
+          }),
+          ttsPlay("I'm having trouble understanding your request. Let me connect you with a team member."),
+          notifyOncall(context, 'low_confidence_intent'),
+        ],
+        updatedContext: {
+          ...context,
+          repromptCount: newRepromptCount,
+          escalationReason: 'low_confidence_intent',
+        },
+      };
+    }
+    return {
+      nextState: 'closing',
+      sideEffects: [
+        auditLog(context, 'closing', 'closing', 'post_quote_reprompt', {
+          threshold: event.threshold,
+          score: event.score,
+          repromptCount: newRepromptCount,
+        }),
+        ttsPlay(POST_QUOTE_REPROMPT_LINE),
+      ],
+      updatedContext: { ...context, repromptCount: newRepromptCount },
+    };
+  }
+
   // second_intent → back to intent_capture
   if (event.type === 'second_intent') {
     return {
@@ -889,6 +1071,11 @@ function transitionClosing(
         currentIntent: undefined,
         extractedEntities: undefined,
         pendingProposalId: undefined,
+        // WS18 — a genuine second intent abandons the live quote.
+        pendingQuote: undefined,
+        // Abandon the prior turn's run id so the second intent's proposal
+        // can't inherit the first turn's ai_runs record.
+        lastAiRunId: undefined,
         retryCount: 0,
       },
     };
@@ -907,6 +1094,11 @@ function transitionClosing(
         currentIntent: undefined,
         extractedEntities: undefined,
         pendingProposalId: undefined,
+        // WS18 — a genuine second intent abandons the live quote.
+        pendingQuote: undefined,
+        // Abandon the prior turn's run id so the second intent's proposal
+        // can't inherit the first turn's ai_runs record.
+        lastAiRunId: undefined,
         retryCount: 0,
       },
     };

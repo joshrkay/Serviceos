@@ -3,6 +3,7 @@ import {
   resetConfig,
   EnvironmentSecretResolver,
   validateEnvSchema,
+  resolveMediaStreamsEnabled,
 } from '../../src/shared/config';
 
 describe('P0-006 — Secrets/config framework', () => {
@@ -30,6 +31,7 @@ describe('P0-006 — Secrets/config framework', () => {
       CLERK_SECRET_KEY: 'sk_test_staging',
       CLERK_PUBLISHABLE_KEY: 'pk_test_staging',
       CLERK_WEBHOOK_SECRET: 'whsec_test',
+      STRIPE_WEBHOOK_SECRET: 'whsec_stripe_test',
       AI_PROVIDER_API_KEY: 'ak_test',
       AI_PROVIDER_BASE_URL: 'https://ai.example.com',
       CORS_ORIGIN: 'https://app.example.com',
@@ -39,6 +41,8 @@ describe('P0-006 — Secrets/config framework', () => {
       TELEPHONY_ENABLED: 'false',
       EMAIL_ENABLED: 'false',
       STORAGE_ENABLED: 'false',
+      // SEC-01 — required in prod/staging; covered on its own below.
+      RLS_RUNTIME_ROLE: 'true',
     });
     expect(config.NODE_ENV).toBe('staging');
     expect(config.PORT).toBe(8080);
@@ -138,6 +142,7 @@ describe('P0-006 — Secrets/config framework', () => {
         CLERK_SECRET_KEY: 'sk_x',
         CLERK_PUBLISHABLE_KEY: 'pk_x',
         CLERK_WEBHOOK_SECRET: 'whsec_x',
+        STRIPE_WEBHOOK_SECRET: 'whsec_stripe_x',
         AI_PROVIDER_API_KEY: 'ak_x',
         CORS_ORIGIN: 'https://app.example.com',
         // Opt features out so the feature-required gate doesn't fire.
@@ -145,6 +150,8 @@ describe('P0-006 — Secrets/config framework', () => {
         TELEPHONY_ENABLED: 'false',
         EMAIL_ENABLED: 'false',
         STORAGE_ENABLED: 'false',
+        // SEC-01 — required in prod/staging; covered on its own below.
+        RLS_RUNTIME_ROLE: 'true',
       })
     ).not.toThrow();
   });
@@ -162,6 +169,135 @@ describe('P0-006 — Secrets/config framework', () => {
     ).toThrow(/CLERK_PUBLISHABLE_KEY/);
   });
 
+  describe('SEC-43 — STRIPE_WEBHOOK_SECRET required in prod/staging', () => {
+    const baseNoStripe = {
+      DATABASE_URL: 'postgres://u:p@h/d',
+      CLERK_SECRET_KEY: 'sk_x',
+      CLERK_PUBLISHABLE_KEY: 'pk_x',
+      CLERK_WEBHOOK_SECRET: 'whsec_x',
+      AI_PROVIDER_API_KEY: 'ak_x',
+      CORS_ORIGIN: 'https://app.example.com',
+      // Isolate the Stripe requirement: opt features out, RLS on.
+      TELEPHONY_ENABLED: 'false',
+      EMAIL_ENABLED: 'false',
+      STORAGE_ENABLED: 'false',
+      RLS_RUNTIME_ROLE: 'true',
+    };
+
+    it('prod — fails fast naming STRIPE_WEBHOOK_SECRET when unset', () => {
+      expect(() => loadConfig({ ...baseNoStripe, NODE_ENV: 'prod' })).toThrow(
+        /STRIPE_WEBHOOK_SECRET/
+      );
+    });
+
+    it('staging — fails fast naming STRIPE_WEBHOOK_SECRET when unset', () => {
+      expect(() => loadConfig({ ...baseNoStripe, NODE_ENV: 'staging' })).toThrow(
+        /STRIPE_WEBHOOK_SECRET/
+      );
+    });
+
+    it('prod — passes once STRIPE_WEBHOOK_SECRET is present', () => {
+      expect(() =>
+        loadConfig({ ...baseNoStripe, NODE_ENV: 'prod', STRIPE_WEBHOOK_SECRET: 'whsec_stripe_x' })
+      ).not.toThrow();
+    });
+
+    it('dev — no STRIPE_WEBHOOK_SECRET requirement (payments off locally is fine)', () => {
+      expect(() => loadConfig({ ...baseNoStripe, NODE_ENV: 'dev' })).not.toThrow();
+    });
+  });
+
+  describe('SEC-43 — WISETACK_WEBHOOK_SECRET gated on financing being enabled', () => {
+    const baseFinancing = {
+      NODE_ENV: 'prod',
+      DATABASE_URL: 'postgres://u:p@h/d',
+      CLERK_SECRET_KEY: 'sk_x',
+      CLERK_PUBLISHABLE_KEY: 'pk_x',
+      CLERK_WEBHOOK_SECRET: 'whsec_x',
+      STRIPE_WEBHOOK_SECRET: 'whsec_stripe_x',
+      AI_PROVIDER_API_KEY: 'ak_x',
+      CORS_ORIGIN: 'https://app.example.com',
+      TELEPHONY_ENABLED: 'false',
+      EMAIL_ENABLED: 'false',
+      STORAGE_ENABLED: 'false',
+      RLS_RUNTIME_ROLE: 'true',
+    };
+
+    it('financing off (no Wisetack config) — WISETACK_WEBHOOK_SECRET NOT required', () => {
+      expect(() => loadConfig({ ...baseFinancing })).not.toThrow();
+    });
+
+    it('financing enabled via WISETACK_API_KEY — fails naming WISETACK_WEBHOOK_SECRET', () => {
+      expect(() =>
+        loadConfig({ ...baseFinancing, WISETACK_API_KEY: 'wt_live_x' })
+      ).toThrow(/WISETACK_WEBHOOK_SECRET/);
+    });
+
+    it('financing enabled via FINANCING_ENABLED=true — fails naming WISETACK_WEBHOOK_SECRET', () => {
+      expect(() =>
+        loadConfig({ ...baseFinancing, FINANCING_ENABLED: 'true' })
+      ).toThrow(/WISETACK_WEBHOOK_SECRET/);
+    });
+
+    it('financing enabled with WISETACK_WEBHOOK_SECRET present — passes', () => {
+      expect(() =>
+        loadConfig({
+          ...baseFinancing,
+          WISETACK_API_KEY: 'wt_live_x',
+          WISETACK_WEBHOOK_SECRET: 'wt_whsec_x',
+        })
+      ).not.toThrow();
+    });
+  });
+
+  describe('ARCH-01 — REDIS_URL required when NUM_REPLICAS > 1', () => {
+    const baseMultiReplica = {
+      NODE_ENV: 'prod',
+      DATABASE_URL: 'postgres://u:p@h/d',
+      CLERK_SECRET_KEY: 'sk_x',
+      CLERK_PUBLISHABLE_KEY: 'pk_x',
+      CLERK_WEBHOOK_SECRET: 'whsec_x',
+      STRIPE_WEBHOOK_SECRET: 'whsec_stripe_x',
+      AI_PROVIDER_API_KEY: 'ak_x',
+      CORS_ORIGIN: 'https://app.example.com',
+      // Isolate the Redis requirement: opt features out, RLS on.
+      TELEPHONY_ENABLED: 'false',
+      EMAIL_ENABLED: 'false',
+      STORAGE_ENABLED: 'false',
+      RLS_RUNTIME_ROLE: 'true',
+    };
+
+    it('prod + NUM_REPLICAS=2 + no REDIS_URL — fails fast naming REDIS_URL', () => {
+      expect(() =>
+        loadConfig({ ...baseMultiReplica, NUM_REPLICAS: '2' })
+      ).toThrow(/REDIS_URL/);
+    });
+
+    it('prod + NUM_REPLICAS=2 + REDIS_URL set — passes', () => {
+      expect(() =>
+        loadConfig({ ...baseMultiReplica, NUM_REPLICAS: '2', REDIS_URL: 'redis://cache:6379' })
+      ).not.toThrow();
+    });
+
+    it('prod + NUM_REPLICAS unset + no REDIS_URL — passes (current single-replica deploy still boots)', () => {
+      expect(() => loadConfig({ ...baseMultiReplica })).not.toThrow();
+    });
+
+    it('prod + NUM_REPLICAS=1 explicit + no REDIS_URL — passes', () => {
+      expect(() => loadConfig({ ...baseMultiReplica, NUM_REPLICAS: '1' })).not.toThrow();
+    });
+
+    it('prod + NUM_REPLICAS non-numeric + no REDIS_URL — treated as single replica, passes', () => {
+      expect(() => loadConfig({ ...baseMultiReplica, NUM_REPLICAS: 'auto' })).not.toThrow();
+    });
+
+    it('dev + NUM_REPLICAS=2 + no REDIS_URL — does not throw (guard is prod/staging only)', () => {
+      expect(() =>
+        loadConfig({ ...baseMultiReplica, NODE_ENV: 'dev', NUM_REPLICAS: '2' })
+      ).not.toThrow();
+    });
+  });
+
   describe('feature-required config gate (Sprint 1 / Story 1.5)', () => {
     const baseProdEnv = {
       NODE_ENV: 'prod',
@@ -169,8 +305,13 @@ describe('P0-006 — Secrets/config framework', () => {
       CLERK_SECRET_KEY: 'sk_x',
       CLERK_PUBLISHABLE_KEY: 'pk_x',
       CLERK_WEBHOOK_SECRET: 'whsec_x',
+      STRIPE_WEBHOOK_SECRET: 'whsec_stripe_x',
       AI_PROVIDER_API_KEY: 'ak_x',
       CORS_ORIGIN: 'https://app.example.com',
+      // SEC-01 — RLS enforcement is a hard prod/staging requirement; set here so
+      // these feature-gate tests isolate the var under test. The RLS requirement
+      // has its own dedicated describe block below.
+      RLS_RUNTIME_ROLE: 'true',
     };
 
     it('telephony — fails naming each missing TWILIO var when not opted out', () => {
@@ -259,6 +400,51 @@ describe('P0-006 — Secrets/config framework', () => {
       ).not.toThrow();
     });
 
+    // VOX-30 — Media Streams is an OPT-IN feature (unlike the opt-out
+    // features above). When enabled it needs the ElevenLabs streaming TTS
+    // provider (raw PCM); OpenAI/default returns mp3 that plays as static.
+    const mediaBaseEnv = {
+      ...baseProdEnv,
+      TELEPHONY_ENABLED: 'false',
+      EMAIL_ENABLED: 'false',
+      STORAGE_ENABLED: 'false',
+    };
+
+    it('media streams — fails when enabled with TTS_PROVIDER unset (defaults to OpenAI/static)', () => {
+      expect(() =>
+        loadConfig({
+          ...mediaBaseEnv,
+          TWILIO_MEDIA_STREAMS_ENABLED: 'true',
+          ELEVENLABS_API_KEY: 'el_x',
+        })
+      ).toThrow(/TTS_PROVIDER=elevenlabs/);
+    });
+
+    it('media streams — fails when enabled with TTS_PROVIDER=elevenlabs but no ELEVENLABS_API_KEY', () => {
+      expect(() =>
+        loadConfig({
+          ...mediaBaseEnv,
+          TWILIO_MEDIA_STREAMS_ENABLED: 'true',
+          TTS_PROVIDER: 'elevenlabs',
+        })
+      ).toThrow(/ELEVENLABS_API_KEY/);
+    });
+
+    it('media streams — passes when enabled with TTS_PROVIDER=elevenlabs + ELEVENLABS_API_KEY', () => {
+      expect(() =>
+        loadConfig({
+          ...mediaBaseEnv,
+          TWILIO_MEDIA_STREAMS_ENABLED: 'true',
+          TTS_PROVIDER: 'elevenlabs',
+          ELEVENLABS_API_KEY: 'el_x',
+        })
+      ).not.toThrow();
+    });
+
+    it('media streams — off (opt-in): no TTS constraint even with default provider', () => {
+      expect(() => loadConfig({ ...mediaBaseEnv })).not.toThrow();
+    });
+
     it('passes when all feature vars are set', () => {
       expect(() =>
         loadConfig({
@@ -281,6 +467,189 @@ describe('P0-006 — Secrets/config framework', () => {
       // Dev should never trip these — silent feature-off is the
       // intended local behavior.
       expect(() => loadConfig({ NODE_ENV: 'dev' })).not.toThrow();
+    });
+  });
+
+  describe('SEC-01 — RLS_RUNTIME_ROLE required in prod/staging', () => {
+    // Base env that passes every OTHER prod gate, so these tests isolate the
+    // RLS requirement (features opted out; RLS deliberately omitted).
+    const baseNoRls = {
+      DATABASE_URL: 'postgres://u:p@h/d',
+      CLERK_SECRET_KEY: 'sk_x',
+      CLERK_PUBLISHABLE_KEY: 'pk_x',
+      CLERK_WEBHOOK_SECRET: 'whsec_x',
+      STRIPE_WEBHOOK_SECRET: 'whsec_stripe_x',
+      AI_PROVIDER_API_KEY: 'ak_x',
+      CORS_ORIGIN: 'https://app.example.com',
+      TELEPHONY_ENABLED: 'false',
+      EMAIL_ENABLED: 'false',
+      STORAGE_ENABLED: 'false',
+    };
+
+    it('prod — fails fast naming RLS_RUNTIME_ROLE when unset', () => {
+      expect(() => loadConfig({ ...baseNoRls, NODE_ENV: 'prod' })).toThrow(
+        /RLS_RUNTIME_ROLE=true/
+      );
+    });
+
+    it('staging — fails fast naming RLS_RUNTIME_ROLE when unset', () => {
+      expect(() => loadConfig({ ...baseNoRls, NODE_ENV: 'staging' })).toThrow(
+        /RLS_RUNTIME_ROLE=true/
+      );
+    });
+
+    it('prod — fails when RLS_RUNTIME_ROLE is set to a non-true value', () => {
+      expect(() =>
+        loadConfig({ ...baseNoRls, NODE_ENV: 'prod', RLS_RUNTIME_ROLE: 'false' })
+      ).toThrow(/RLS_RUNTIME_ROLE=true/);
+    });
+
+    it('prod — passes when RLS_RUNTIME_ROLE=true', () => {
+      expect(() =>
+        loadConfig({ ...baseNoRls, NODE_ENV: 'prod', RLS_RUNTIME_ROLE: 'true' })
+      ).not.toThrow();
+    });
+
+    it('staging — passes when RLS_RUNTIME_ROLE=true', () => {
+      expect(() =>
+        loadConfig({ ...baseNoRls, NODE_ENV: 'staging', RLS_RUNTIME_ROLE: 'true' })
+      ).not.toThrow();
+    });
+
+    it('dev — no RLS requirement (RLS off locally is fine)', () => {
+      expect(() => loadConfig({ NODE_ENV: 'dev' })).not.toThrow();
+      expect(() =>
+        loadConfig({ NODE_ENV: 'dev', RLS_RUNTIME_ROLE: 'false' })
+      ).not.toThrow();
+    });
+
+    it('test — no RLS requirement (RLS off in test is fine)', () => {
+      expect(() => loadConfig({ NODE_ENV: 'test' })).not.toThrow();
+    });
+  });
+
+  describe('WS1 — TCPA_CONSENT_ENFORCEMENT prod/staging coercion', () => {
+    // Full valid prod env (features opted out, RLS on) so loadConfig reaches the
+    // end and we can inspect the resolved enforcement value.
+    const baseProdValid = {
+      DATABASE_URL: 'postgres://u:p@h/d',
+      CLERK_SECRET_KEY: 'sk_x',
+      CLERK_PUBLISHABLE_KEY: 'pk_x',
+      CLERK_WEBHOOK_SECRET: 'whsec_x',
+      STRIPE_WEBHOOK_SECRET: 'whsec_stripe_x',
+      AI_PROVIDER_API_KEY: 'ak_x',
+      CORS_ORIGIN: 'https://app.example.com',
+      TELEPHONY_ENABLED: 'false',
+      EMAIL_ENABLED: 'false',
+      STORAGE_ENABLED: 'false',
+      RLS_RUNTIME_ROLE: 'true',
+    };
+
+    it('prod — unset resolves to block', () => {
+      const c = loadConfig({ ...baseProdValid, NODE_ENV: 'prod' });
+      expect(c.TCPA_CONSENT_ENFORCEMENT).toBe('block');
+    });
+
+    it('staging — unset resolves to block', () => {
+      const c = loadConfig({ ...baseProdValid, NODE_ENV: 'staging' });
+      expect(c.TCPA_CONSENT_ENFORCEMENT).toBe('block');
+    });
+
+    it('prod — explicit off is honored (not overridden)', () => {
+      const c = loadConfig({ ...baseProdValid, NODE_ENV: 'prod', TCPA_CONSENT_ENFORCEMENT: 'off' });
+      expect(c.TCPA_CONSENT_ENFORCEMENT).toBe('off');
+    });
+
+    it('prod — explicit warn is honored', () => {
+      const c = loadConfig({ ...baseProdValid, NODE_ENV: 'prod', TCPA_CONSENT_ENFORCEMENT: 'warn' });
+      expect(c.TCPA_CONSENT_ENFORCEMENT).toBe('warn');
+    });
+
+    it('dev — unset stays off (zod default; no coercion)', () => {
+      const c = loadConfig({ NODE_ENV: 'dev' });
+      expect(c.TCPA_CONSENT_ENFORCEMENT).toBe('off');
+    });
+
+    it('test — unset stays off', () => {
+      const c = loadConfig({ NODE_ENV: 'test' });
+      expect(c.TCPA_CONSENT_ENFORCEMENT).toBe('off');
+    });
+
+    it('dev — explicit block is honored', () => {
+      const c = loadConfig({ NODE_ENV: 'dev', TCPA_CONSENT_ENFORCEMENT: 'block' });
+      expect(c.TCPA_CONSENT_ENFORCEMENT).toBe('block');
+    });
+  });
+
+  describe('D-018 — AUTONOMOUS_CLOSE_DISABLED kill switch', () => {
+    it('defaults to undefined (per-tenant gating only)', () => {
+      expect(loadConfig({ NODE_ENV: 'dev' }).AUTONOMOUS_CLOSE_DISABLED).toBeUndefined();
+    });
+
+    it("accepts 'true' / 'false' and is independent of AUTONOMOUS_BOOKING_DISABLED", () => {
+      const c = loadConfig({
+        NODE_ENV: 'dev',
+        AUTONOMOUS_CLOSE_DISABLED: 'true',
+        AUTONOMOUS_BOOKING_DISABLED: 'false',
+      });
+      expect(c.AUTONOMOUS_CLOSE_DISABLED).toBe('true');
+      expect(c.AUTONOMOUS_BOOKING_DISABLED).toBe('false');
+    });
+
+    it('rejects a non-boolean value', () => {
+      expect(() =>
+        loadConfig({ NODE_ENV: 'dev', AUTONOMOUS_CLOSE_DISABLED: 'maybe' }),
+      ).toThrow();
+    });
+  });
+
+  describe('WS14 — PROCESS_ROLE widened to include "voice"', () => {
+    it('accepts "voice" as a valid role', () => {
+      const c = loadConfig({ NODE_ENV: 'dev', PROCESS_ROLE: 'voice' });
+      expect(c.PROCESS_ROLE).toBe('voice');
+    });
+
+    it('still accepts the original three roles', () => {
+      expect(loadConfig({ NODE_ENV: 'dev', PROCESS_ROLE: 'web' }).PROCESS_ROLE).toBe('web');
+      resetConfig();
+      expect(loadConfig({ NODE_ENV: 'dev', PROCESS_ROLE: 'worker' }).PROCESS_ROLE).toBe('worker');
+      resetConfig();
+      expect(loadConfig({ NODE_ENV: 'dev', PROCESS_ROLE: 'all' }).PROCESS_ROLE).toBe('all');
+    });
+
+    it('unset still defaults to "all" (byte-for-byte back-compat)', () => {
+      const c = loadConfig({ NODE_ENV: 'dev' });
+      expect(c.PROCESS_ROLE).toBe('all');
+    });
+
+    it('rejects an invalid role', () => {
+      expect(() => loadConfig({ NODE_ENV: 'dev', PROCESS_ROLE: 'bogus' })).toThrow();
+    });
+  });
+
+  describe('WS26 — voice turn-latency SLO knobs', () => {
+    it('defaults: 3500ms P95 threshold, 30-turn sample floor', () => {
+      const c = loadConfig({ NODE_ENV: 'dev' });
+      expect(c.SLO_TURN_LATENCY_P95_MS).toBe(3500);
+      expect(c.SLO_TURN_LATENCY_MIN_SAMPLE).toBe(30);
+    });
+
+    it('coerces string overrides to numbers', () => {
+      const c = loadConfig({
+        NODE_ENV: 'dev',
+        SLO_TURN_LATENCY_P95_MS: '2800',
+        SLO_TURN_LATENCY_MIN_SAMPLE: '50',
+      });
+      expect(c.SLO_TURN_LATENCY_P95_MS).toBe(2800);
+      expect(c.SLO_TURN_LATENCY_MIN_SAMPLE).toBe(50);
+    });
+
+    it('rejects a non-positive threshold and a non-integer sample floor', () => {
+      expect(() => loadConfig({ NODE_ENV: 'dev', SLO_TURN_LATENCY_P95_MS: '0' })).toThrow();
+      resetConfig();
+      expect(() =>
+        loadConfig({ NODE_ENV: 'dev', SLO_TURN_LATENCY_MIN_SAMPLE: '5.5' }),
+      ).toThrow();
     });
   });
 });
@@ -391,5 +760,92 @@ describe('P0-026 — validateEnvSchema (Zod startup validation)', () => {
     expect(() =>
       validateEnvSchema({ NODE_ENV: 'development', CORS_ORIGIN: 'true' })
     ).not.toThrow();
+  });
+
+  it('validateEnvSchema — DEV_AUTH_BYPASS=true is forbidden in production', () => {
+    expect(() =>
+      validateEnvSchema({ ...fullProdEnv, DEV_AUTH_BYPASS: 'true' }),
+    ).toThrow(/DEV_AUTH_BYPASS/);
+  });
+
+  it('validateEnvSchema — CLERK_DEV_HMAC_TOKENS=true is forbidden in production', () => {
+    expect(() =>
+      validateEnvSchema({ ...fullProdEnv, CLERK_DEV_HMAC_TOKENS: 'true' }),
+    ).toThrow(/CLERK_DEV_HMAC_TOKENS/);
+  });
+
+  it('validateEnvSchema — pk_test_ / sk_test_ refused in production by default', () => {
+    expect(() =>
+      validateEnvSchema({
+        ...fullProdEnv,
+        CLERK_PUBLISHABLE_KEY: 'pk_test_abc',
+        CLERK_SECRET_KEY: 'sk_test_abc',
+      }),
+    ).toThrow(/pk_live_/);
+  });
+
+  it('validateEnvSchema — ALLOW_CLERK_TEST_KEYS=true permits test keys in production', () => {
+    expect(() =>
+      validateEnvSchema({
+        ...fullProdEnv,
+        CLERK_PUBLISHABLE_KEY: 'pk_test_abc',
+        CLERK_SECRET_KEY: 'sk_test_abc',
+        ALLOW_CLERK_TEST_KEYS: 'true',
+      }),
+    ).not.toThrow();
+  });
+});
+
+describe('WS7 — resolveMediaStreamsEnabled (auto mode)', () => {
+  const fullStack = {
+    TTS_PROVIDER: 'elevenlabs',
+    ELEVENLABS_API_KEY: 'el_x',
+    DEEPGRAM_API_KEY: 'dg_x',
+  };
+
+  it("explicit 'true' → on", () => {
+    expect(resolveMediaStreamsEnabled({ TWILIO_MEDIA_STREAMS_ENABLED: 'true' })).toBe(true);
+  });
+
+  it("explicit 'false' → off even with the full stack (kill switch)", () => {
+    expect(
+      resolveMediaStreamsEnabled({ ...fullStack, TWILIO_MEDIA_STREAMS_ENABLED: 'false' }),
+    ).toBe(false);
+  });
+
+  it('unset + full stack → auto-on', () => {
+    expect(resolveMediaStreamsEnabled({ ...fullStack })).toBe(true);
+  });
+
+  it("'auto' + full stack → on", () => {
+    expect(
+      resolveMediaStreamsEnabled({ ...fullStack, TWILIO_MEDIA_STREAMS_ENABLED: 'auto' }),
+    ).toBe(true);
+  });
+
+  it('unset + no keys → off', () => {
+    expect(resolveMediaStreamsEnabled({})).toBe(false);
+  });
+
+  it('unset + missing DEEPGRAM_API_KEY → off (auto requires all three)', () => {
+    expect(
+      resolveMediaStreamsEnabled({ TTS_PROVIDER: 'elevenlabs', ELEVENLABS_API_KEY: 'el_x' }),
+    ).toBe(false);
+  });
+
+  it('unset + missing ELEVENLABS_API_KEY → off', () => {
+    expect(
+      resolveMediaStreamsEnabled({ TTS_PROVIDER: 'elevenlabs', DEEPGRAM_API_KEY: 'dg_x' }),
+    ).toBe(false);
+  });
+
+  it('unset + TTS_PROVIDER not elevenlabs → off (never auto-enables a half-capable stack)', () => {
+    expect(
+      resolveMediaStreamsEnabled({
+        TTS_PROVIDER: 'openai',
+        ELEVENLABS_API_KEY: 'el_x',
+        DEEPGRAM_API_KEY: 'dg_x',
+      }),
+    ).toBe(false);
   });
 });

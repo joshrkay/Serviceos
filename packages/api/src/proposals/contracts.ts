@@ -16,6 +16,7 @@ import { batchInvoicePayloadSchema } from './contracts/batch-invoice';
 import { sendPaymentReminderPayloadSchema } from './contracts/send-payment-reminder';
 import { applyLateFeePayloadSchema } from './contracts/apply-late-fee';
 import { createStandingInstructionPayloadSchema } from './contracts/standing-instruction';
+import { updateCatalogItemPayloadSchema } from './contracts/update-catalog-item';
 import {
   onboardingTenantSettingsPayloadSchema,
   onboardingServiceCategoryPayloadSchema,
@@ -63,6 +64,13 @@ export const confidenceLevelSchema = z.enum(CONFIDENCE_LEVELS);
 
 export const proposalConfidenceMetaSchema = z.object({
   overallConfidence: confidenceLevelSchema,
+  /**
+   * N-011 — the tenant brand-voice CONFIG version that produced any AI-drafted
+   * text on this proposal (0 = neutral/unconfigured). Stamped by the composer
+   * chokepoint so every AI-generated message carries the version used. Optional
+   * so pre-N-011 payloads keep validating.
+   */
+  brandVoiceVersion: z.number().int().nonnegative().optional(),
   /**
    * §6.4-B severity marker — how urgent the visible problem is, on the same
    * urgency-tier scale as voice triage. Optional; today set by the MMS-to-quote
@@ -284,14 +292,33 @@ export const issueInvoicePayloadSchema = z.object({
 // handler carries `leadReference` and flags `leadId` missing until the
 // review UI / execution handler resolves a concrete lead. Either a
 // resolved `leadId` (uuid) or a `leadReference` must be present.
+// Optional address fields supply a primary service location when the
+// lead has none (QA-MANUAL-0730).
 export const convertLeadPayloadSchema = z
   .object({
     leadId: z.string().uuid().optional(),
     leadReference: z.string().min(1).optional(),
+    street1: z.string().trim().min(1).max(200).optional(),
+    street2: z.string().trim().max(200).optional(),
+    city: z.string().trim().min(1).max(100).optional(),
+    state: z.string().trim().min(1).max(50).optional(),
+    postalCode: z.string().trim().min(1).max(20).optional(),
+    country: z.string().trim().min(1).max(50).optional(),
+    accessNotes: z.string().trim().max(2000).optional(),
+    label: z.string().trim().max(100).optional(),
   })
   .refine((v) => Boolean(v.leadId || v.leadReference), {
     message: 'leadId or leadReference is required',
-  });
+  })
+  .refine(
+    (v) => {
+      const any =
+        Boolean(v.street1) || Boolean(v.city) || Boolean(v.state) || Boolean(v.postalCode);
+      if (!any) return true;
+      return Boolean(v.street1 && v.city && v.state && v.postalCode);
+    },
+    { message: 'street1, city, state, and postalCode are required together' }
+  );
 
 // confirm_appointment: mark an existing appointment confirmed. Resolved
 // appointmentId (uuid) by execution time; appointmentReference carries
@@ -495,6 +522,7 @@ export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
   send_payment_reminder: sendPaymentReminderPayloadSchema,
   apply_late_fee: applyLateFeePayloadSchema,
   create_standing_instruction: createStandingInstructionPayloadSchema,
+  update_catalog_item: updateCatalogItemPayloadSchema,
 };
 
 export function validateProposalPayload(

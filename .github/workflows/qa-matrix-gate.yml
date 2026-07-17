@@ -26,6 +26,40 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # WS7 — fail fast (and loud) when the 11 QA-matrix secrets are absent,
+      # mirroring mms-vision-smoke.yml. qa:doctor also validates these, but it
+      # only runs after npm ci + Playwright browser install (~minutes); this
+      # early guard makes a missing-credentials run fail in seconds with an
+      # explicit message so a secretless run can never be mistaken for a green
+      # gate. See docs/launch/secret-manifest.md.
+      - name: Verify QA matrix secrets are present
+        run: |
+          missing=""
+          for var in E2E_BASE_URL E2E_API_URL E2E_DB_URL_READONLY E2E_DB_URL_READWRITE \
+                     E2E_CLERK_HMAC_SECRET E2E_TENANT_A_ID E2E_TENANT_A_CUSTOMER_ID \
+                     E2E_TENANT_A_JOB_ID E2E_TENANT_B_ID E2E_TENANT_B_CUSTOMER_ID \
+                     E2E_TENANT_B_JOB_ID; do
+            if [ -z "${!var}" ]; then missing="$missing $var"; fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::QA Matrix Gate requires these secrets, which are empty:$missing"
+            echo "This gate runs against Railway dev with real Clerk HMAC tokens — without these secrets it cannot run, and a skipped run is NOT a green gate."
+            exit 1
+          fi
+          echo "QA matrix secrets verified present."
+        env:
+          E2E_BASE_URL: ${{ secrets.E2E_BASE_URL }}
+          E2E_API_URL: ${{ secrets.E2E_API_URL }}
+          E2E_DB_URL_READONLY: ${{ secrets.E2E_DB_URL_READONLY }}
+          E2E_DB_URL_READWRITE: ${{ secrets.E2E_DB_URL_READWRITE }}
+          E2E_CLERK_HMAC_SECRET: ${{ secrets.E2E_CLERK_HMAC_SECRET }}
+          E2E_TENANT_A_ID: ${{ secrets.E2E_TENANT_A_ID }}
+          E2E_TENANT_A_CUSTOMER_ID: ${{ secrets.E2E_TENANT_A_CUSTOMER_ID }}
+          E2E_TENANT_A_JOB_ID: ${{ secrets.E2E_TENANT_A_JOB_ID }}
+          E2E_TENANT_B_ID: ${{ secrets.E2E_TENANT_B_ID }}
+          E2E_TENANT_B_CUSTOMER_ID: ${{ secrets.E2E_TENANT_B_CUSTOMER_ID }}
+          E2E_TENANT_B_JOB_ID: ${{ secrets.E2E_TENANT_B_JOB_ID }}
+
       - uses: actions/setup-node@v4
         with:
           node-version: '20'

@@ -3,6 +3,8 @@ import { apiFetch } from '../../utils/api-fetch';
 import { RescheduleDialog } from '../../components/appointments/RescheduleDialog';
 import { CancelDialog } from '../../components/appointments/CancelDialog';
 import { ReassignDialog } from '../../components/appointments/ReassignDialog';
+import { useTenantTimezone } from '../../hooks/useTenantTimezone';
+import { formatDateTimeInTenantTz } from '../../utils/formatInTenantTz';
 
 const DELAY_OPTIONS = [5, 10, 15, 20, 30, 45, 60] as const;
 type DelayMinutes = typeof DELAY_OPTIONS[number];
@@ -121,6 +123,7 @@ export function AppointmentEdit({ appointmentId, onSaved, onBack }: AppointmentE
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [mode, setMode] = useState<DialogMode>(null);
+  const timezone = useTenantTimezone();
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -179,8 +182,8 @@ export function AppointmentEdit({ appointmentId, onSaved, onBack }: AppointmentE
       <div className="rounded-lg border border-slate-200 p-4 mb-4 text-sm text-slate-700 space-y-1">
         <p>Job: {data.jobId}</p>
         <p>Status: {data.status}</p>
-        <p>Start: {new Date(data.scheduledStart).toLocaleString()}</p>
-        <p>End: {new Date(data.scheduledEnd).toLocaleString()}</p>
+        <p>Start: {formatDateTimeInTenantTz(data.scheduledStart, timezone)}</p>
+        <p>End: {formatDateTimeInTenantTz(data.scheduledEnd, timezone)}</p>
       </div>
 
       {mode === null && (

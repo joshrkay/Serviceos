@@ -384,6 +384,38 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['232_payments_stripe_reference_unique', 'e04f90015062af2dc152c0298799291f58f84d39b80621543cb09330c1d9c6ab'],
   // P8-015/P0-037 — conversation_links table backing PgConversationLinkRepository.
   ['233_conversation_links', 'aecf003e1b316b3deb9972598952698ff7345c922362f1e3a7340c3a441daa93'],
+  ['234_tenant_settings_vapi_webhook_secret', 'd9830667a9f29069849b286cc3d59430cee4920af72a83f9fea6eb706aeaab36'],
+  // Fix — reconcile the tenant_settings._activeVerticalPacks mirror with the
+  // authoritative pack_activations table (kill the dual-source drift). 235 is
+  // reserved for a sibling fix landing separately.
+  ['236_reconcile_active_vertical_packs_mirror', '161871a3a57eb99f2c0b0d1173fa082483923c06210f122faa2a901f0ba24a46'],
+  // N-011 / P4-015 — Brand-Voice Configurator: append-only version history table.
+  ['237_brand_voice_versions', 'e6fbbd8bd25d5b6f50ae30146c0d5d93d8716907d150dfeb3f5bfa4ef4e227d7'],
+  // N-011 / P4-015 — brand-voice version/lock/cool-down bookkeeping columns.
+  ['238_tenant_settings_brand_voice_meta', '5ca3ab678c6330db38f857ac5966e9a963f898781fe4d33652751af03c1f6582'],
+  // N-005 / P5-020 — End-of-Day Digest completion: SMS retry-cap counter.
+  ['239_daily_digests_send_attempts', '324b3cadc3702a6ea87969856bcdfc010ac5112b8f6ae66db3cd8ac1dd23b18f'],
+  // N-005 — partial index backing findConfidenceMarkedForDay ("what I wasn't sure about").
+  ['240_proposals_confidence_marker_index', '8627c35efe348224146ddf0d18f4372f7de6a7bc510a28fa50df1cef12ad2307'],
+  // N-005 — partial index backing the "quotes sent today" sent_at range scan.
+  ['241_estimates_tenant_sent_at_index', 'f4c9cb40bd945e3bbab16bfa4b5a8180279919384343c4a153a607cc7b35c630'],
+  ['242_create_supervisor_reviews', '9f7aba0a44dac7e8b03a8d2fa1c9c882bbdf72aa8688385acc9b022151374c25'],
+  ['243_brand_voice_versions_changed_by_text', 'cfbe7e3a622aec7a34f86d3a3cb159edad53183794086e00cce557d1daa8fc79'],
+  // DATA-01 — jobs(tenant_id, assigned_technician_id) covering index.
+  ['244_jobs_tenant_assigned_technician_index', '6ec31bae8e5a854d824f9b702f78abf085542989e1fb6ed3b0ec9a4ac841d902'],
+  // DATA-02 — audit_events(tenant_id, created_at DESC) covering index.
+  ['245_audit_events_tenant_created_at_index', '570afac2db19bba1e0a9f1a7dea4f86392b962055de5dcdbbc1be629f9f6c83a'],
+  // WS10 — proposals partial index for the appliedStandingInstructions digest query.
+  ['246_proposals_applied_instructions_index', '4cd48dc77845dfb212f6097ec3ff19a292bf2d920ad4aab2bdb30003fca0ea12'],
+  // D-018 (WS18) — autonomous close lane: per-tenant opt-in + close cap columns.
+  ['247_tenant_settings_autonomous_close', 'e619fd69ae718ae2298a4ceddbc37ead5e93e5b8406bb739f8bbc4c16d5833ca'],
+  ['248_users_status', '4db13faea1417601ec58108546e7a222d19224a9ebbf32106170fa868f198206'],
+  ['249_backfill_owner_memberships', '469b396524bded1559614c2c091bb48c70a36c7769230e77ae9b96cad5e8025d'],
+  // Stripe Terminal Location id on tenants (Connect Tap to Pay).
+  ['250_tenants_stripe_terminal_location', '95a128f94a94231772731bdf6a583bd1f6f6c03c20b3615c162adc5ddaa2d8e7'],
+  ['251_leads_service_address', '0033dc709e9d1fb22584a20873826d59fa2430c6554c0846e4f9c86e60c4f82b'],
+  ['252_technician_location_ping_idempotency', '5f309f1a77d6c208f6a8eb5ca0fe34eb8db2c86f7ebe47a814275d3ba4d9ed5d'],
+  ['253_users_tenant_clerk_unique', 'b96f4d052f79ac1b8a30a9073fb42d323ee98a72193e3c9206ffc14c40bb864b'],
 ];
 
 function hashMigration(value: string): string {

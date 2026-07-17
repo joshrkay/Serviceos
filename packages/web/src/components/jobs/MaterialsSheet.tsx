@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Search, Plus, Minus, Trash2, X, Check, Package } from 'lucide-react';
 import { SheetOverlay } from './JobSheets';
 import { Input } from '../ui';
-import type { MaterialItem, ServiceType } from '../../data/mock-data';
+import type { MaterialItem, ServiceType } from '../../types/job-ui';
 
 const CATALOG: Record<ServiceType, Omit<MaterialItem, 'id' | 'qty'>[]> = {
   HVAC: [

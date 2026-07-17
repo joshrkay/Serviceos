@@ -1,6 +1,14 @@
 {
-  "extends": "expo/tsconfig.base",
+  "//": "Self-contained (no `extends: expo/tsconfig.base`) on purpose. Vitest's transform moved from esbuild to Oxc in Vite 8, and Oxc always resolves the nearest on-disk tsconfig — there is no `tsconfigRaw` bypass like esbuild had. The root-hoisted CI lane (`vitest run --root packages/mobile`, see .github/workflows/pr-checks.yml) runs WITHOUT installing this isolated project's node_modules, so `expo/tsconfig.base` would be unresolvable and Oxc would hard-fail with TSCONFIG_ERROR. The compilerOptions below are Expo SDK 52's tsconfig.base inlined verbatim (allowJs/esModuleInterop/jsx/lib/moduleResolution/noEmit/resolveJsonModule/skipLibCheck/target) plus this project's own strict/moduleResolution:bundler/baseUrl/paths overrides, so `tsc --noEmit` behaviour is identical while the file resolves in every lane. Re-sync with expo/tsconfig.base if the Expo SDK major is bumped.",
   "compilerOptions": {
+    "allowJs": true,
+    "esModuleInterop": true,
+    "jsx": "react-native",
+    "lib": ["DOM", "ESNext"],
+    "noEmit": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "target": "ESNext",
     "strict": true,
     "moduleResolution": "bundler",
     "baseUrl": ".",
@@ -16,5 +24,6 @@
     "nativewind-env.d.ts",
     ".expo/types/**/*.ts",
     "expo-env.d.ts"
-  ]
+  ],
+  "exclude": ["node_modules", "babel.config.js", "metro.config.js", "jest.config.js"]
 }

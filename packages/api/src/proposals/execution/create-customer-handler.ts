@@ -65,6 +65,12 @@ export class CreateCustomerVoiceExecutionHandler implements ExecutionHandler {
     private readonly auditRepo?: AuditRepository,
   ) {}
 
+  // WS3 — degrades to a synthetic-id passthrough (saves nothing) without the
+  // customer repo; boot fails when a pool is configured but this is false.
+  isFullyWired(): boolean {
+    return Boolean(this.customerRepo);
+  }
+
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const { payload } = proposal;
 
@@ -122,6 +128,9 @@ export class CreateCustomerVoiceExecutionHandler implements ExecutionHandler {
     // Voice session correlation: AC-4 requires the audit event tying
     // the executed proposal to the voice session. The session id rides
     // either in payload.voice.sessionId or in proposal.sourceContext.
+    // WS11 — kept deliberately alongside the executor's own atomic
+    // `proposal.executed` row (entityType 'proposal'): this one is the
+    // customer-entity join-row for voice-session queries, best-effort by design.
     if (this.auditRepo) {
       const correlationId = readSessionCorrelation(proposal);
       try {

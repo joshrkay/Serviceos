@@ -11,6 +11,7 @@ import { AppointmentRepository } from '../appointments/appointment';
 import { AuditRepository } from '../audit/audit';
 import { ProposalFilter } from '../proposals/proposal-contracts';
 import { buildInboxPayload } from '../proposals/inbox';
+import { undoExpiresAt } from '../proposals/lifecycle';
 import { listProposals, getProposalDetail } from '../proposals/routes';
 import {
   approveProposal,
@@ -303,7 +304,17 @@ export function createProposalsRouter(
         auditRepo,
         'ui', // RV-073 — dashboard screen-tap approval
       );
-      res.json(result);
+      // Finding 2 — surface the undo window honestly. `approvedAt` already
+      // serializes to an ISO string; derive `undoExpiresAt` (= approvedAt +
+      // UNDO_WINDOW_MS) so the client can drive its countdown from the
+      // SERVER's real window instead of a fresh 5s that ignores the
+      // round-trip latency already spent. Both fields are additive — every
+      // existing proposal field is preserved.
+      const undoAt = undoExpiresAt(result);
+      res.json({
+        ...result,
+        ...(undoAt ? { undoExpiresAt: undoAt.toISOString() } : {}),
+      });
     })
   );
 

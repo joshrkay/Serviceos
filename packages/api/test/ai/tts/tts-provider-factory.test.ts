@@ -9,8 +9,10 @@
 import { describe, it, expect } from 'vitest';
 import {
   createTtsProvider,
+  assertTtsProviderSupportsMediaStreams,
   ElevenLabsTtsProvider,
   OpenAiTtsProvider,
+  type TtsProvider,
 } from '../../../src/ai/tts/tts-provider';
 
 describe('UB-C2 — createTtsProvider', () => {
@@ -42,5 +44,79 @@ describe('UB-C2 — createTtsProvider', () => {
     expect(
       createTtsProvider({ AI_PROVIDER_API_KEY: 'openai-key' }),
     ).toBeInstanceOf(OpenAiTtsProvider);
+  });
+});
+
+/**
+ * P0 voice-output bug — Twilio Media Streams requires raw PCM
+ * (synthesizeStream); a provider that only implements synthesize()
+ * (OpenAI tts-1, the default TTS_PROVIDER) returns compressed audio
+ * (mp3), which mediastream-adapter.ts would previously stream out as
+ * inaudible static with zero errors. assertTtsProviderSupportsMediaStreams
+ * must fail loud at boot instead.
+ */
+describe('assertTtsProviderSupportsMediaStreams — P0 boot guard', () => {
+  const streamingCapableProvider: TtsProvider = new ElevenLabsTtsProvider('key');
+  const nonStreamingProvider: TtsProvider = new OpenAiTtsProvider('key');
+
+  it('throws when media streams is enabled and the resolved provider cannot stream PCM', () => {
+    expect(() =>
+      assertTtsProviderSupportsMediaStreams({
+        mediaStreamsEnabled: true,
+        provider: nonStreamingProvider,
+        ttsProviderEnv: undefined,
+      }),
+    ).toThrow(/TWILIO_MEDIA_STREAMS_ENABLED=true/);
+    expect(() =>
+      assertTtsProviderSupportsMediaStreams({
+        mediaStreamsEnabled: true,
+        provider: nonStreamingProvider,
+        ttsProviderEnv: undefined,
+      }),
+    ).toThrow(/synthesizeStream/);
+  });
+
+  it('does not throw when media streams is disabled, regardless of provider capability', () => {
+    expect(() =>
+      assertTtsProviderSupportsMediaStreams({
+        mediaStreamsEnabled: false,
+        provider: nonStreamingProvider,
+      }),
+    ).not.toThrow();
+    expect(() =>
+      assertTtsProviderSupportsMediaStreams({
+        mediaStreamsEnabled: false,
+        provider: undefined,
+      }),
+    ).not.toThrow();
+  });
+
+  it('does not throw when the resolved provider implements synthesizeStream', () => {
+    expect(() =>
+      assertTtsProviderSupportsMediaStreams({
+        mediaStreamsEnabled: true,
+        provider: streamingCapableProvider,
+        ttsProviderEnv: 'elevenlabs',
+      }),
+    ).not.toThrow();
+  });
+
+  it('does not throw when no provider resolved at all (surfaced separately via /health)', () => {
+    expect(() =>
+      assertTtsProviderSupportsMediaStreams({
+        mediaStreamsEnabled: true,
+        provider: undefined,
+      }),
+    ).not.toThrow();
+  });
+
+  it('error message names the misconfigured TTS_PROVIDER value', () => {
+    expect(() =>
+      assertTtsProviderSupportsMediaStreams({
+        mediaStreamsEnabled: true,
+        provider: nonStreamingProvider,
+        ttsProviderEnv: 'openai',
+      }),
+    ).toThrow(/TTS_PROVIDER=openai/);
   });
 });

@@ -246,6 +246,23 @@ describe('intent-classifier — classifyIntent', () => {
     expect(call.metadata).toEqual({ tenantId: 'tenant-xyz' });
   });
 
+  // P0 scaling bug regression: the resilience wrappers (ProviderTenantQuotaWrapper /
+  // CachingGatewayWrapper) read request.tenantId at the TOP LEVEL of the LLMRequest,
+  // not metadata.tenantId. Nesting it only in metadata collapsed every tenant's
+  // classify_intent calls onto the shared "system" quota bucket (concurrency 8 for
+  // the whole platform) and, if the gateway cache is ever enabled, onto a shared
+  // cache key (cross-tenant leak of classification + extracted entities).
+  it('passes tenantId as a TOP-LEVEL field on the LLMRequest (not only in metadata)', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({ intentType: 'create_invoice', confidence: 0.9 })
+    );
+    await classifyIntent('create an invoice', { tenantId: 'tenant-xyz' }, gateway);
+    const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(call.tenantId).toBe('tenant-xyz');
+    // Still present in metadata for any downstream reader that expects it there.
+    expect(call.metadata).toEqual({ tenantId: 'tenant-xyz' });
+  });
+
   it('returns unknown when LLM returns an unsupported intentType', async () => {
     // Use a clearly-never-supported intent name so this test doesn't
     // regress whenever we expand the supported-intent list. (Earlier
@@ -1105,5 +1122,60 @@ describe('taxonomy 1.2.0 — new intents + entities', () => {
     const result = await classifyIntent('Respond to that bad review', { tenantId: 't-1' }, gateway);
     expect(result.intentType).toBe('respond_to_review');
     expect(result.taxonomyVersion).toBe('1.2.0');
+  });
+});
+
+// ─── Part A — ai_run_id threading (classify → classification) ─────────────────
+
+describe('intent-classifier — ai_run_id surfacing', () => {
+  function mockGatewayWithAiRun(jsonContent: string, aiRunId?: string): LLMGateway {
+    return {
+      complete: vi.fn(async () => ({
+        content: jsonContent,
+        model: 'mock-model',
+        provider: 'mock',
+        tokenUsage: { input: 100, output: 50, total: 150 },
+        latencyMs: 42,
+        ...(aiRunId ? { aiRunId } : {}),
+      } satisfies LLMResponse)),
+    } as unknown as LLMGateway;
+  }
+
+  it("surfaces the gateway's persisted ai_runs id onto the classification", async () => {
+    const AI_RUN_ID = '22222222-2222-4222-8222-222222222222';
+    const gateway = mockGatewayWithAiRun(
+      JSON.stringify({
+        intentType: 'create_invoice',
+        confidence: 0.95,
+        extractedEntities: { customerName: 'Acme' },
+      }),
+      AI_RUN_ID,
+    );
+    const result = await classifyIntent('Create an invoice for Acme', { tenantId: 't-1' }, gateway);
+    expect(result.intentType).toBe('create_invoice');
+    expect(result.aiRunId).toBe(AI_RUN_ID);
+  });
+
+  it('omits aiRunId when the gateway response carries none (null fallback)', async () => {
+    const gateway = mockGatewayWithAiRun(
+      JSON.stringify({ intentType: 'create_invoice', confidence: 0.95 }),
+    );
+    const result = await classifyIntent('Create an invoice for Acme', { tenantId: 't-1' }, gateway);
+    expect(result.aiRunId).toBeUndefined();
+  });
+
+  it('passes the tenantId to the gateway so the ai_runs row persists under the real tenant', async () => {
+    const gateway = mockGatewayWithAiRun(
+      JSON.stringify({ intentType: 'create_invoice', confidence: 0.95 }),
+      '33333333-3333-4333-8333-333333333333',
+    );
+    await classifyIntent('Create an invoice for Acme', { tenantId: 'tenant-real' }, gateway);
+    const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0]![0] as {
+      tenantId?: string;
+    };
+    // Top-level tenantId is what LLMGateway reads to scope the ai_runs row;
+    // without it the run persists under the 'system' fallback and fails the
+    // tenants FK on Postgres (aiRunId would come back undefined → null link).
+    expect(call.tenantId).toBe('tenant-real');
   });
 });

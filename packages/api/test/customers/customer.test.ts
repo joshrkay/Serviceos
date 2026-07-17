@@ -11,6 +11,7 @@ import {
   InMemoryCustomerRepository,
 } from '../../src/customers/customer';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
+import { InMemoryConsentEventRepository } from '../../src/compliance/consent-events';
 
 describe('P1-001 — Customer entity + CRUD', () => {
   let repo: InMemoryCustomerRepository;
@@ -120,6 +121,109 @@ describe('P1-001 — Customer entity + CRUD', () => {
 
     const found = await getCustomer('tenant-1', customer.id, repo);
     expect(found!.email).toBeUndefined();
+  });
+
+  it('WS12 — a manual sms_consent toggle appends a consent_events row (kind sms, source manual)', async () => {
+    const ledger = new InMemoryConsentEventRepository();
+    const customer = await createCustomer(
+      {
+        tenantId: 'tenant-1',
+        firstName: 'John',
+        lastName: 'Doe',
+        primaryPhone: '+15125550100',
+        smsConsent: true,
+        createdBy: 'user-1',
+      },
+      repo
+    );
+
+    await updateCustomer(
+      'tenant-1',
+      customer.id,
+      { smsConsent: false },
+      repo,
+      'user-1',
+      auditRepo,
+      ledger
+    );
+    let events = await ledger.listByPhone('tenant-1', '+15125550100');
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      kind: 'sms',
+      state: 'revoked',
+      source: 'manual',
+      customerId: customer.id,
+    });
+
+    // Re-grant appends a second (granted) event — the ledger is append-only.
+    await updateCustomer(
+      'tenant-1',
+      customer.id,
+      { smsConsent: true },
+      repo,
+      'user-1',
+      auditRepo,
+      ledger
+    );
+    events = await ledger.listByPhone('tenant-1', '+15125550100');
+    expect(events).toHaveLength(2);
+    expect(events[0].state).toBe('granted'); // newest first
+  });
+
+  it('WS12 — no ledger row when sms_consent is unchanged or absent from the update', async () => {
+    const ledger = new InMemoryConsentEventRepository();
+    const customer = await createCustomer(
+      {
+        tenantId: 'tenant-1',
+        firstName: 'John',
+        lastName: 'Doe',
+        primaryPhone: '+15125550100',
+        smsConsent: true,
+        createdBy: 'user-1',
+      },
+      repo
+    );
+
+    // Same value → no event; unrelated field → no event.
+    await updateCustomer('tenant-1', customer.id, { smsConsent: true }, repo, 'user-1', auditRepo, ledger);
+    await updateCustomer('tenant-1', customer.id, { firstName: 'Jane' }, repo, 'user-1', auditRepo, ledger);
+    expect(ledger.rows).toHaveLength(0);
+  });
+
+  it('WS3 — a consent-bearing ledger append failure FAILS the customer update (no longer best-effort)', async () => {
+    // WS3 reverses the WS12 best-effort posture: a consent-bearing update whose
+    // ledger write fails must NOT report success, so the sms_consent column and
+    // the immutable ledger can never silently disagree. In production this runs
+    // inside the executor / request transaction, so the whole update rolls back
+    // atomically (proven in test/integration/ws3-consent-audit-atomicity.test.ts);
+    // here we pin that the failure propagates rather than being swallowed.
+    const ledger = new InMemoryConsentEventRepository();
+    ledger.append = async () => {
+      throw new Error('pg down');
+    };
+    const customer = await createCustomer(
+      {
+        tenantId: 'tenant-1',
+        firstName: 'John',
+        lastName: 'Doe',
+        primaryPhone: '+15125550100',
+        smsConsent: true,
+        createdBy: 'user-1',
+      },
+      repo
+    );
+
+    await expect(
+      updateCustomer(
+        'tenant-1',
+        customer.id,
+        { smsConsent: false },
+        repo,
+        'user-1',
+        auditRepo,
+        ledger
+      )
+    ).rejects.toThrow('pg down');
   });
 
   it('validation — rejects invalid customer update before write', async () => {

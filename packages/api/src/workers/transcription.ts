@@ -9,6 +9,8 @@ export interface TranscriptionJobPayload {
   recordingId: string;
   audioUrl: string;
   conversationId?: string;
+  /** Tenant-verified job context supplied by the recording route. */
+  jobId?: string;
   /**
    * The user whose session produced the voice recording. Required when
    * downstream consumers (voice-action-router) need to create proposals
@@ -24,6 +26,7 @@ export interface TranscriptionCompletionEvent {
   transcript: string;
   conversationId?: string;
   userId?: string;
+  jobId?: string;
 }
 
 /**
@@ -221,7 +224,7 @@ export function createTranscriptionWorker(
   return {
     type: 'transcription',
     async handle(message: QueueMessage<TranscriptionJobPayload>, logger: Logger): Promise<void> {
-      const { tenantId, recordingId, audioUrl, conversationId, userId } = message.payload;
+      const { tenantId, recordingId, audioUrl, conversationId, userId, jobId } = message.payload;
 
       logger.info('Starting transcription', { recordingId, conversationId });
 
@@ -288,6 +291,7 @@ export function createTranscriptionWorker(
                 transcript: sanitizedTranscript,
                 conversationId,
                 userId,
+                ...(jobId ? { jobId } : {}),
               },
               logger
             );

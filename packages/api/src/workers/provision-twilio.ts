@@ -1,3 +1,4 @@
+import { randomBytes } from 'crypto';
 import { WorkerHandler, QueueMessage } from '../queues/queue';
 import { Logger } from '../logging/logger';
 import { Pool, QueryResult, QueryResultRow } from 'pg';
@@ -11,12 +12,20 @@ import {
   listSubaccountPhoneNumbers,
 } from '../integrations/twilio/provisioning';
 import { getVapiClient, type VapiClient } from '../integrations/vapi/client';
+import { isTwilioDeploymentEnv } from '../integrations/credentials';
 import { buildAssistantConfig } from '../integrations/vapi/assistant-config';
 
 // Status values match migration 071_widen_tenant_integrations_status:
 // 't0_requested' = provisioning in flight; 'full_readiness' = fully active.
 const STATUS_PROVISIONING = 't0_requested';
 const STATUS_ACTIVE = 'full_readiness';
+
+// Deterministic stub phone assigned in non-production when no Twilio creds are
+// configured, so the onboarding phone step can reach 'full_readiness' and the
+// wizard is completable in dev/test/CI. This is a Twilio "magic" test number
+// (https://www.twilio.com/docs/iam/test-credentials) — never a real, dialable
+// line. Never used in production: the production path throws without real creds.
+const STUB_DEV_PHONE_E164 = '+15005550006';
 
 // tenant_integrations is FORCE ROW LEVEL SECURITY with a policy on
 // app.current_tenant_id. Background workers run outside withTenantTransaction,
@@ -74,20 +83,74 @@ export function createProvisionTwilioWorker(deps: {
       const { tenantId, region, baseUrl, phoneNumber: preferredNumber } = message.payload;
       const { pool } = deps;
 
+      // WS14 — three-service topology support. This job runs on web/worker/all
+      // (never on the dedicated 'voice' service, which runs zero background
+      // workers), so `baseUrl` (the enqueuing process's PUBLIC_API_URL) is the
+      // WEB domain. But the number's VOICE surfaces must point at the dedicated
+      // voice service when one exists, or every newly-provisioned number would
+      // silently ride the web service's deploy/drain window — defeating the
+      // split for post-cutover tenants. VOICE_PUBLIC_URL (set on the web and
+      // worker services, where this job executes; read raw from process.env at
+      // job-execution time, same pattern as PUBLIC_API_URL) is the voice
+      // service's public base. Unset ⇒ single/two-service topology ⇒ fall back
+      // to baseUrl (today's behavior, unchanged).
+      //
+      // URL → base mapping (see docs/deployment.md "Optional third service"):
+      // - VoiceUrl (/api/telephony/voice — TwiML; the live call rides this
+      //   service and its <Stream> targets this service's WS) → voiceBaseUrl
+      // - IncomingPhoneNumber StatusCallback (/webhooks/twilio/status/:tenantId
+      //   — voice-CALL lifecycle events for this number) → voiceBaseUrl, so
+      //   all Twilio call traffic for the number stays on one domain
+      // - Messaging service InboundRequestUrl (/webhooks/twilio/sms/:tenantId)
+      //   → baseUrl: SMS is not a live-call surface; its dispatch pipeline is
+      //   web/worker work and gains nothing from the voice domain
+      // - Vapi serverUrl (/webhooks/vapi/:tenantId) → baseUrl: Vapi calls live
+      //   on Vapi's infrastructure (not our media-streams WS), the webhook is
+      //   a 200-ack event feed verified by per-tenant HMAC (no PUBLIC_API_URL
+      //   URL reconstruction), so our voice service's drain is irrelevant
+      const voiceBaseUrl = process.env.VOICE_PUBLIC_URL?.replace(/\/+$/, '') || baseUrl;
+
       const masterSid = process.env.TWILIO_ACCOUNT_SID;
       const masterToken = process.env.TWILIO_AUTH_TOKEN;
       const encKey = process.env.TENANT_ENCRYPTION_KEY;
 
       if (!masterSid || !masterToken) {
-        // Skip silently in dev when Twilio isn't configured
-        if (process.env.NODE_ENV !== 'production') {
-          logger.info('Twilio provisioning skipped — TWILIO_ACCOUNT_SID/AUTH_TOKEN not set', { tenantId });
+        // Dev/test/CI have no Twilio creds. Previously this branch returned
+        // silently, but deriveOnboardingStatus only marks the `phone` step done
+        // when twilioStatus === 'full_readiness' — so skipping left the phone
+        // step 'current' forever and the onboarding wizard un-completable in
+        // every Twilio-less environment. Instead, write a DETERMINISTIC STUB
+        // integration (a Twilio magic test number, never a real line) so
+        // onboarding can complete. Strictly non-deployment — every real
+        // deployment (production / prod / staging) still throws and requires
+        // real provisioning. Gating on the canonical isTwilioDeploymentEnv
+        // (not a bare `!== 'production'`) closes the hole where a misconfigured
+        // 'prod'/'staging' deploy with missing creds silently onboarded on a
+        // fake test number.
+        if (!isTwilioDeploymentEnv(process.env.NODE_ENV)) {
+          logger.warn(
+            'Twilio creds absent — assigning STUB twilio integration (non-production only); ' +
+              'onboarding phone step will complete with a FAKE test number, nothing real provisioned',
+            { tenantId, stubPhoneE164: STUB_DEV_PHONE_E164 },
+          );
+          await tenantQuery(
+            pool,
+            tenantId,
+            `INSERT INTO tenant_integrations (tenant_id, provider, status, provider_data)
+             VALUES ($1, 'twilio', $2, $3::jsonb)
+             ON CONFLICT (tenant_id, provider) DO UPDATE
+               SET status = $2,
+                   provider_data = tenant_integrations.provider_data || $3::jsonb,
+                   last_error = NULL,
+                   updated_at = NOW()`,
+            [tenantId, STATUS_ACTIVE, JSON.stringify({ phoneE164: STUB_DEV_PHONE_E164, stub: true })],
+          );
           return;
         }
         throw new Error('TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN must be set');
       }
       if (!encKey) {
-        if (process.env.NODE_ENV !== 'production') {
+        if (!isTwilioDeploymentEnv(process.env.NODE_ENV)) {
           logger.info('Twilio provisioning skipped — TENANT_ENCRYPTION_KEY not set', { tenantId });
           return;
         }
@@ -214,8 +277,11 @@ export function createProvisionTwilioWorker(deps: {
                 // /api/telephony/voice handler which resolves tenant from
                 // the inbound `to` number. The /webhooks/twilio/* routes only
                 // 200-ack and don't emit TwiML, so they'd break call handling.
-                `${baseUrl}/api/telephony/voice`,
-                `${baseUrl}/webhooks/twilio/status/${tenantId}`,
+                // Both voice-call surfaces use voiceBaseUrl (WS14 — the
+                // dedicated voice service's domain when VOICE_PUBLIC_URL is
+                // set; baseUrl otherwise). See the mapping comment above.
+                `${voiceBaseUrl}/api/telephony/voice`,
+                `${voiceBaseUrl}/webhooks/twilio/status/${tenantId}`,
                 preferredNumber
               );
             } catch (purchaseErr) {
@@ -318,15 +384,19 @@ export function createProvisionTwilioWorker(deps: {
             );
             const cfg = cfgRes.rows[0];
             if (cfg && !cfg.vapi_assistant_id) {
+              // Per-tenant webhook secret: Vapi echoes serverUrlSecret back on
+              // every call event, and /webhooks/vapi/:tenantId verifies against
+              // THIS tenant's stored value — so a body signed for one tenant
+              // can't be replayed at another. Random per tenant, never the
+              // shared global secret.
+              const vapiWebhookSecret = randomBytes(32).toString('hex');
               const assistantConfig = buildAssistantConfig({
                 businessName: cfg.business_name ?? 'ServiceOS',
                 greeting: cfg.voice_greeting,
                 voicePresetId: cfg.voice_id,
                 services: cfg.services_offered ?? [],
                 serverUrl: `${baseUrl}/webhooks/vapi/${tenantId}`,
-                ...(process.env.VAPI_WEBHOOK_SECRET
-                  ? { serverUrlSecret: process.env.VAPI_WEBHOOK_SECRET }
-                  : {}),
+                serverUrlSecret: vapiWebhookSecret,
               });
               const { assistantId } = await vapi.createAssistant(assistantConfig);
               await vapi.linkPhoneNumber({
@@ -337,8 +407,10 @@ export function createProvisionTwilioWorker(deps: {
               await tenantQuery(
                 pool,
                 tenantId,
-                `UPDATE tenant_settings SET vapi_assistant_id = $1, updated_at = NOW() WHERE tenant_id = $2`,
-                [assistantId, tenantId],
+                `UPDATE tenant_settings
+                   SET vapi_assistant_id = $1, vapi_webhook_secret = $2, updated_at = NOW()
+                 WHERE tenant_id = $3`,
+                [assistantId, vapiWebhookSecret, tenantId],
               );
               await tenantQuery(
                 pool,

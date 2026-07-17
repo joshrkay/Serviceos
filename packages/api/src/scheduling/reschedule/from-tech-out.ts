@@ -12,7 +12,10 @@ import {
 } from '../../proposals/proposal';
 import { rescheduleAppointmentPayloadSchema } from '../../proposals/contracts/reschedule';
 import { ConflictError } from '../../shared/errors';
-import type { ComposeBrandVoiceDeps } from '../../ai/brand-voice/composer';
+import {
+  applyBrandVoiceDeviationToMeta,
+  type ComposeBrandVoiceDeps,
+} from '../../ai/brand-voice/composer';
 import { draftCustomerRescheduleMessage } from './customer-message-draft';
 
 /**
@@ -165,12 +168,26 @@ export async function createRescheduleProposalsFromTechOut(
     // yet, so we seed them with the CURRENT times — the proposal review UI is
     // where the owner edits to the real new slot before approving. reason
     // records why the reschedule was proposed.
-    const payload = {
+    // N-011 — when the draft deviated from the locked profile (a banned phrase
+    // was stripped), attach a `_meta` envelope that downgrades confidence to
+    // 'low' and tags the brand-voice version, so the proposal routes to review
+    // rather than auto-approving. `_meta` rides through the envelope
+    // passthrough; the frozen reschedule payload keys are unchanged. Absent a
+    // deviation the version is recorded on sourceContext (below) instead of
+    // forcing a confidence envelope onto every reschedule.
+    const payload: Record<string, unknown> = {
       appointmentId: appt.id,
       newScheduledStart: appt.scheduledStart.toISOString(),
       newScheduledEnd: appt.scheduledEnd.toISOString(),
       reason: input.reason,
     };
+    if (draft.deviation) {
+      payload._meta = applyBrandVoiceDeviationToMeta(
+        undefined,
+        draft.brandVoiceVersion,
+        draft.deviation,
+      );
+    }
     // Validate against the frozen contract so a malformed payload never lands.
     rescheduleAppointmentPayloadSchema.parse(payload);
 
@@ -196,6 +213,9 @@ export async function createRescheduleProposalsFromTechOut(
         // Tier-2-safe: the brand-voice customer SMS rides in sourceContext.
         draftSms: draft.text,
         brandVoicePromptVersion: draft.promptVersionId,
+        // N-011 — tag the drafted customer SMS with the tenant brand-voice
+        // config version used to produce it.
+        brandVoiceVersion: draft.brandVoiceVersion,
         techStatus: input.reason,
         technicianId: input.technicianId,
         // The payload is seeded with the appointment's CURRENT times (the owner

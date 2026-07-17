@@ -2,17 +2,24 @@ import { describe, it, expect } from 'vitest';
 import {
   computeDigestPayload,
   buildFallbackNarrative,
-  renderDigestSms,
+  renderDigestSmsSegments,
   summarizeProposalForDigest,
+  proposalOutcome,
   upsertDigest,
   localDateString,
   nextDateString,
   formatUsd,
   InMemoryDailyDigestRepository,
   DIGEST_SMS_MAX_CHARS,
+  DIGEST_SMS_SOFT_LIMIT,
+  DIGEST_MAX_REVIEWS,
+  DIGEST_MAX_INSTRUCTIONS,
+  groupAppliedInstructions,
   type DailyDigestPayload,
   type DigestComputeDeps,
 } from '../../src/digest/digest-service';
+import type { SupervisorReview } from '../../src/ai/supervisor/types';
+import type { SupervisorReviewRepository } from '../../src/ai/supervisor/reviews-repo';
 import type { Payment, PaymentRepository } from '../../src/invoices/payment';
 import type { Invoice, InvoiceRepository } from '../../src/invoices/invoice';
 import type { EstimateRepository, Estimate } from '../../src/estimates/estimate';
@@ -22,6 +29,8 @@ import type { Proposal, ProposalRepository } from '../../src/proposals/proposal'
 import type { CustomerRepository } from '../../src/customers/customer';
 import type { SettingsRepository, TenantSettings } from '../../src/settings/settings';
 import type { FeedbackResponseRepository, RatingCounts } from '../../src/feedback/feedback-response';
+import type { CorrectionLesson, CorrectionLessonRepository } from '../../src/learning/corrections/correction-lesson';
+import type { AuditEvent, AuditRepository } from '../../src/audit/audit';
 import { buildLineItem, calculateDocumentTotals } from '../../src/shared/billing-engine';
 
 const TENANT = 'tenant-1';
@@ -80,6 +89,36 @@ interface DepsOverrides {
   customerNames?: Record<string, string>;
   settings?: TenantSettings | null;
   ratingCounts?: RatingCounts;
+  /** N-005 — estimates returned for the quotes-sent (sentFrom/sentTo) query. */
+  sentEstimates?: Estimate[];
+  /** N-005 — proposals returned by findConfidenceMarkedForDay. */
+  confidenceMarked?: Proposal[];
+  /** N-005 — correction lessons applied today. */
+  appliedLessons?: CorrectionLesson[];
+  /** WS6 — supervisor reviews run today (findForDay result). */
+  supervisorReviews?: SupervisorReview[];
+  /** WS6 — when false, omit supervisorReviewRepo entirely (optional-dep path). */
+  withSupervisorReviewRepo?: boolean;
+  /** WS6 — records the (from, to, limit) findForDay was called with. */
+  onFindForDay?: (from: Date, to: Date, limit: number | undefined) => void;
+  /** D-015 amendment — proposals returned by findAutonomousLaneApprovedForDay. */
+  autonomousLaneProposals?: Proposal[];
+  /** D-015 amendment — when false, omit findAutonomousLaneApprovedForDay entirely (optional-method path). */
+  withAutonomousLaneMethod?: boolean;
+  /** WS10 — proposals returned by findAppliedInstructionsForDay. */
+  appliedInstructionProposals?: Proposal[];
+  /** WS10 — when false, omit findAppliedInstructionsForDay entirely (optional-method path). */
+  withAppliedInstructionsMethod?: boolean;
+  /**
+   * WS22 — audit events keyed by proposalId, returned from
+   * auditRepo.findByEntity(tenant, 'proposal', proposalId). Only eventType +
+   * createdAt matter for the flaggedFixed computation.
+   */
+  auditEventsByProposal?: Record<string, Array<{ eventType: string; createdAt: Date }>>;
+  /** WS22 — when false, omit auditRepo entirely (optional-dep path). */
+  withAuditRepo?: boolean;
+  /** WS22 — records each proposalId findByEntity was called with (dedup assertions). */
+  onFindByEntity?: (proposalId: string) => void;
 }
 
 function makeDeps(o: DepsOverrides = {}): DigestComputeDeps {
@@ -102,12 +141,20 @@ function makeDeps(o: DepsOverrides = {}): DigestComputeDeps {
     } as unknown as InvoiceRepository,
     estimateRepo: {
       findByJobs: async () => o.estimatesByJob ?? [],
+      findByTenant: async () => o.sentEstimates ?? [],
     } as unknown as EstimateRepository,
     proposalRepo: {
       findByStatus: async (_t: string, status: string) =>
         status === 'draft'
           ? o.draftProposals ?? []
           : o.pendingProposals ?? [],
+      findConfidenceMarkedForDay: async () => o.confidenceMarked ?? [],
+      ...(o.withAutonomousLaneMethod === false
+        ? {}
+        : { findAutonomousLaneApprovedForDay: async () => o.autonomousLaneProposals ?? [] }),
+      ...(o.withAppliedInstructionsMethod === false
+        ? {}
+        : { findAppliedInstructionsForDay: async () => o.appliedInstructionProposals ?? [] }),
     } as unknown as ProposalRepository,
     customerRepo: {
       findById: async (_t: string, id: string) =>
@@ -123,7 +170,59 @@ function makeDeps(o: DepsOverrides = {}): DigestComputeDeps {
       countByRatingInRange: async () =>
         o.ratingCounts ?? { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 },
     } as unknown as FeedbackResponseRepository,
+    correctionLessonRepo: {
+      findAppliedForDay: async () => o.appliedLessons ?? [],
+    } as unknown as CorrectionLessonRepository,
+    ...(o.withSupervisorReviewRepo === false
+      ? {}
+      : {
+          supervisorReviewRepo: {
+            findForDay: async (_t: string, from: Date, to: Date, limit?: number) => {
+              o.onFindForDay?.(from, to, limit);
+              return o.supervisorReviews ?? [];
+            },
+          } as unknown as SupervisorReviewRepository,
+        }),
+    ...(o.withAuditRepo === false
+      ? {}
+      : {
+          auditRepo: {
+            findByEntity: async (_t: string, _entityType: string, proposalId: string) => {
+              o.onFindByEntity?.(proposalId);
+              return (o.auditEventsByProposal?.[proposalId] ?? []).map(
+                (e): AuditEvent => ({
+                  id: `ae-${Math.random()}`,
+                  tenantId: TENANT,
+                  actorId: 'owner',
+                  actorRole: 'owner',
+                  eventType: e.eventType,
+                  entityType: 'proposal',
+                  entityId: proposalId,
+                  createdAt: e.createdAt,
+                }),
+              );
+            },
+          } as unknown as AuditRepository,
+        }),
     now: () => NOW,
+  };
+}
+
+function supervisorReview(overrides: Partial<SupervisorReview>): SupervisorReview {
+  return {
+    id: `sr-${Math.random()}`,
+    tenantId: TENANT,
+    proposalId: 'p1',
+    aiRunId: null,
+    model: 'claude-haiku-4-5-20251001',
+    verdict: 'pass',
+    critical: false,
+    checks: {},
+    flags: [],
+    latencyMs: 100,
+    shadow: true,
+    createdAt: NOW,
+    ...overrides,
   };
 }
 
@@ -323,6 +422,296 @@ describe('computeDigestPayload', () => {
     const result = await computeDigestPayload(TENANT, DATE, makeDeps());
     expect(result.feedback).toEqual({ responses: 0, averageRating: null, lowRatingCount: 0 });
   });
+
+  // ─── N-005 reflection sections ───────────────────────────────────────────
+
+  it('quotesSent sums today\'s sent estimates (count + integer-cents pipeline value)', async () => {
+    const sent = (id: string, totalCents: number): Estimate =>
+      ({ id, jobId: 'j', status: 'sent', totals: { totalCents }, sentAt: NOW } as unknown as Estimate);
+    // Two estimates sent today (one later accepted still counts).
+    const accepted = { ...sent('e-acc', 20000), status: 'accepted' } as unknown as Estimate;
+    const result = await computeDigestPayload(TENANT, DATE, makeDeps({
+      sentEstimates: [sent('e1', 45000), accepted],
+    }));
+    expect(result.quotesSent).toEqual({ count: 2, pipelineValueCents: 65000 });
+  });
+
+  it('omits quotesSent when no estimates were sent today', async () => {
+    const result = await computeDigestPayload(TENANT, DATE, makeDeps({ sentEstimates: [] }));
+    expect(result.quotesSent).toBeUndefined();
+  });
+
+  it('populates "what I wasn\'t sure about" from _meta low-confidence markers with the derived outcome', async () => {
+    const veryLowRejected = proposal({
+      id: 'unsure-1',
+      status: 'rejected',
+      proposalType: 'draft_estimate',
+      summary: 'Estimate for the Reyes job',
+      payload: { _meta: { overallConfidence: 'very_low' } },
+      confidenceFactors: ['ambiguous scope', 'uncatalogued line'],
+    });
+    const result = await computeDigestPayload(TENANT, DATE, makeDeps({ confidenceMarked: [veryLowRejected] }));
+    expect(result.unsureAbout).toHaveLength(1);
+    expect(result.unsureAbout![0]).toMatchObject({
+      proposalId: 'unsure-1',
+      proposalType: 'draft_estimate',
+      summary: 'Estimate for the Reyes job',
+      confidence: 'very_low',
+      outcome: 'rejected',
+      factors: ['ambiguous scope', 'uncatalogued line'],
+    });
+  });
+
+  it('omits unsureAbout when no confidence-marked proposals fired today', async () => {
+    const result = await computeDigestPayload(TENANT, DATE, makeDeps({ confidenceMarked: [] }));
+    expect(result.unsureAbout).toBeUndefined();
+  });
+
+  it('populates "what I learned today" from applied correction lessons and omits when none', async () => {
+    const lesson: CorrectionLesson = {
+      id: 'les-1',
+      tenantId: TENANT,
+      lessonType: 'labor_rate_changed',
+      status: 'applied',
+      sourceProposalId: 'p-src',
+      ownerId: 'owner',
+      summary: 'labor rate is $145 going forward',
+      payload: { newRateCents: 14500 } as unknown as CorrectionLesson['payload'],
+      localDate: DATE,
+      createdAt: NOW,
+      revertedAt: null,
+    };
+    const withLessons = await computeDigestPayload(TENANT, DATE, makeDeps({ appliedLessons: [lesson] }));
+    expect(withLessons.learnedToday).toEqual([
+      { lessonId: 'les-1', lessonType: 'labor_rate_changed', summary: 'labor rate is $145 going forward' },
+    ]);
+
+    const none = await computeDigestPayload(TENANT, DATE, makeDeps({ appliedLessons: [] }));
+    expect(none.learnedToday).toBeUndefined();
+  });
+
+  it('bad-day simulation (PRD §12): unsureAbout + learnedToday populate together', async () => {
+    const veryLow = proposal({
+      id: 'p-unsure',
+      status: 'rejected',
+      payload: { _meta: { overallConfidence: 'very_low' } },
+    });
+    const lesson: CorrectionLesson = {
+      id: 'les-x', tenantId: TENANT, lessonType: 'labor_rate_changed', status: 'applied',
+      sourceProposalId: 'p', ownerId: 'o', summary: 'labor rate is $145 going forward',
+      payload: {} as unknown as CorrectionLesson['payload'], localDate: DATE, createdAt: NOW, revertedAt: null,
+    };
+    const result = await computeDigestPayload(TENANT, DATE, makeDeps({
+      confidenceMarked: [veryLow],
+      appliedLessons: [lesson],
+    }));
+    expect(result.unsureAbout?.[0]).toMatchObject({ proposalId: 'p-unsure', outcome: 'rejected' });
+    expect(result.learnedToday?.[0].summary).toBe('labor rate is $145 going forward');
+  });
+
+  it('unsureAbout.outcome tracks proposal status at generation time (regeneration reflects new status)', async () => {
+    const base = proposal({ id: 'p-track', status: 'ready_for_review', payload: { _meta: { overallConfidence: 'low' } } });
+    const pendingRun = await computeDigestPayload(TENANT, DATE, makeDeps({ confidenceMarked: [base] }));
+    expect(pendingRun.unsureAbout?.[0].outcome).toBe('pending');
+    const approved = { ...base, status: 'approved' as const };
+    const approvedRun = await computeDigestPayload(TENANT, DATE, makeDeps({ confidenceMarked: [approved] }));
+    expect(approvedRun.unsureAbout?.[0].outcome).toBe('approved');
+  });
+
+  // ─── WS6 supervisor-review reflection ────────────────────────────────────
+
+  describe('supervisorChecks', () => {
+    it('reports checked + flagged counts (flag and hold both count as flagged; pass/timeout/error do not)', async () => {
+      const result = await computeDigestPayload(TENANT, DATE, makeDeps({
+        supervisorReviews: [
+          supervisorReview({ verdict: 'pass' }),
+          supervisorReview({ verdict: 'flag' }),
+          supervisorReview({ verdict: 'hold', critical: true }),
+          supervisorReview({ verdict: 'timeout' }),
+          supervisorReview({ verdict: 'error' }),
+        ],
+      }));
+      expect(result.supervisorChecks).toEqual({ checked: 5, flagged: 2, fixed: 0 });
+    });
+
+    it('omits supervisorChecks when no reviews ran today', async () => {
+      const result = await computeDigestPayload(TENANT, DATE, makeDeps({ supervisorReviews: [] }));
+      expect(result.supervisorChecks).toBeUndefined();
+    });
+
+    it('omits supervisorChecks when the supervisorReviewRepo dep is absent entirely (optional dep)', async () => {
+      const result = await computeDigestPayload(TENANT, DATE, makeDeps({ withSupervisorReviewRepo: false }));
+      expect(result.supervisorChecks).toBeUndefined();
+    });
+
+    it('passes the tenant-tz day window and DIGEST_MAX_REVIEWS as the cap to findForDay', async () => {
+      let seen: { from: Date; to: Date; limit: number | undefined } | null = null;
+      await computeDigestPayload(TENANT, DATE, makeDeps({
+        supervisorReviews: [supervisorReview({})],
+        onFindForDay: (from, to, limit) => {
+          seen = { from, to, limit };
+        },
+      }));
+      expect(seen).not.toBeNull();
+      expect(seen!.limit).toBe(DIGEST_MAX_REVIEWS);
+      // Window matches the tenant-tz day boundaries computeDigestPayload
+      // resolves for `today` (America/Chicago 2026-06-10).
+      expect(seen!.from.toISOString()).toBe('2026-06-10T05:00:00.000Z');
+      expect(seen!.to.toISOString()).toBe('2026-06-11T05:00:00.000Z');
+    });
+
+    // ─── WS22: flaggedFixed (edited-after-flag) ────────────────────────────
+
+    it('counts fixed when a flagged proposal is edited after the review, same day', async () => {
+      const reviewTime = new Date('2026-06-10T12:00:00Z');
+      const editTime = new Date('2026-06-10T13:00:00Z');
+      const result = await computeDigestPayload(TENANT, DATE, makeDeps({
+        supervisorReviews: [supervisorReview({ proposalId: 'p1', verdict: 'flag', createdAt: reviewTime })],
+        auditEventsByProposal: { p1: [{ eventType: 'proposal.edited', createdAt: editTime }] },
+      }));
+      expect(result.supervisorChecks).toEqual({ checked: 1, flagged: 1, fixed: 1 });
+    });
+
+    it('a proposal.sms_edited audit event also counts as fixed', async () => {
+      const reviewTime = new Date('2026-06-10T12:00:00Z');
+      const editTime = new Date('2026-06-10T13:00:00Z');
+      const result = await computeDigestPayload(TENANT, DATE, makeDeps({
+        supervisorReviews: [supervisorReview({ proposalId: 'p1', verdict: 'hold', createdAt: reviewTime })],
+        auditEventsByProposal: { p1: [{ eventType: 'proposal.sms_edited', createdAt: editTime }] },
+      }));
+      expect(result.supervisorChecks).toEqual({ checked: 1, flagged: 1, fixed: 1 });
+    });
+
+    it('does not count fixed when the flagged proposal was never edited', async () => {
+      const result = await computeDigestPayload(TENANT, DATE, makeDeps({
+        supervisorReviews: [supervisorReview({ proposalId: 'p1', verdict: 'flag' })],
+      }));
+      expect(result.supervisorChecks).toEqual({ checked: 1, flagged: 1, fixed: 0 });
+    });
+
+    it('does not count fixed when the edit happened BEFORE the flag (stale edit)', async () => {
+      const reviewTime = new Date('2026-06-10T13:00:00Z');
+      const editTime = new Date('2026-06-10T12:00:00Z'); // before the review
+      const result = await computeDigestPayload(TENANT, DATE, makeDeps({
+        supervisorReviews: [supervisorReview({ proposalId: 'p1', verdict: 'flag', createdAt: reviewTime })],
+        auditEventsByProposal: { p1: [{ eventType: 'proposal.edited', createdAt: editTime }] },
+      }));
+      expect(result.supervisorChecks).toEqual({ checked: 1, flagged: 1, fixed: 0 });
+    });
+
+    it('does not count an edit that falls outside the digest day window', async () => {
+      const reviewTime = new Date('2026-06-10T12:00:00Z');
+      const editTime = new Date('2026-06-11T06:00:00Z'); // after today.end (05:00Z next day)
+      const result = await computeDigestPayload(TENANT, DATE, makeDeps({
+        supervisorReviews: [supervisorReview({ proposalId: 'p1', verdict: 'flag', createdAt: reviewTime })],
+        auditEventsByProposal: { p1: [{ eventType: 'proposal.edited', createdAt: editTime }] },
+      }));
+      expect(result.supervisorChecks).toEqual({ checked: 1, flagged: 1, fixed: 0 });
+    });
+
+    it('an unrelated audit event type on the same proposal does not count as fixed', async () => {
+      const reviewTime = new Date('2026-06-10T12:00:00Z');
+      const editTime = new Date('2026-06-10T13:00:00Z');
+      const result = await computeDigestPayload(TENANT, DATE, makeDeps({
+        supervisorReviews: [supervisorReview({ proposalId: 'p1', verdict: 'flag', createdAt: reviewTime })],
+        auditEventsByProposal: { p1: [{ eventType: 'proposal.viewed', createdAt: editTime }] },
+      }));
+      expect(result.supervisorChecks).toEqual({ checked: 1, flagged: 1, fixed: 0 });
+    });
+
+    it('only looks up audit events for flagged proposals, deduped across reviews sharing a proposal', async () => {
+      const seen: string[] = [];
+      const reviewTime = new Date('2026-06-10T12:00:00Z');
+      const result = await computeDigestPayload(TENANT, DATE, makeDeps({
+        supervisorReviews: [
+          supervisorReview({ proposalId: 'p-pass', verdict: 'pass', createdAt: reviewTime }),
+          supervisorReview({ proposalId: 'p1', verdict: 'flag', createdAt: reviewTime }),
+          supervisorReview({ proposalId: 'p1', verdict: 'hold', createdAt: reviewTime }),
+        ],
+        onFindByEntity: (proposalId) => seen.push(proposalId),
+      }));
+      // Deduped to one lookup for p1; the pass-verdict proposal is never looked up.
+      expect(seen).toEqual(['p1']);
+      expect(result.supervisorChecks).toEqual({ checked: 3, flagged: 2, fixed: 0 });
+    });
+
+    it('defaults fixed to 0 without throwing when the auditRepo dep is absent entirely', async () => {
+      const result = await computeDigestPayload(TENANT, DATE, makeDeps({
+        supervisorReviews: [supervisorReview({ verdict: 'flag' })],
+        withAuditRepo: false,
+      }));
+      expect(result.supervisorChecks).toEqual({ checked: 1, flagged: 1, fixed: 0 });
+    });
+  });
+
+  // ─── D-015 amendment: autonomous-booking-lane reflection ────────────────
+
+  describe('autonomousBookings', () => {
+    it('reports count + undone (undone = status "undone" at fetch time)', async () => {
+      const result = await computeDigestPayload(TENANT, DATE, makeDeps({
+        autonomousLaneProposals: [
+          proposal({ id: 'ab-1', proposalType: 'create_booking', status: 'approved' }),
+          proposal({ id: 'ab-2', proposalType: 'create_booking', status: 'executed' }),
+          proposal({ id: 'ab-3', proposalType: 'create_booking', status: 'undone' }),
+        ],
+      }));
+      expect(result.autonomousBookings).toEqual({ count: 3, undone: 1 });
+    });
+
+    it('omits autonomousBookings when nothing took the lane today', async () => {
+      const result = await computeDigestPayload(TENANT, DATE, makeDeps({ autonomousLaneProposals: [] }));
+      expect(result.autonomousBookings).toBeUndefined();
+    });
+
+    it('omits autonomousBookings when findAutonomousLaneApprovedForDay is absent (optional method)', async () => {
+      const result = await computeDigestPayload(TENANT, DATE, makeDeps({ withAutonomousLaneMethod: false }));
+      expect(result.autonomousBookings).toBeUndefined();
+    });
+  });
+
+  // ─── WS10: "Instructions applied" reflection ─────────────────────────────
+
+  describe('instructionsApplied', () => {
+    it('composes + groups: two proposals sharing a rule, one proposal with two rules', async () => {
+      const result = await computeDigestPayload(TENANT, DATE, makeDeps({
+        appliedInstructionProposals: [
+          proposal({
+            id: 'ai-1',
+            payload: { _meta: { appliedStandingInstructions: [{ id: 'rule-1', text: 'always add trip fee' }] } },
+          }),
+          proposal({
+            id: 'ai-2',
+            payload: { _meta: { appliedStandingInstructions: [{ id: 'rule-1', text: 'always add trip fee' }] } },
+          }),
+          proposal({
+            id: 'ai-3',
+            payload: {
+              _meta: {
+                appliedStandingInstructions: [
+                  { id: 'rule-1', text: 'always add trip fee' },
+                  { id: 'rule-2', text: 'call before arriving' },
+                ],
+              },
+            },
+          }),
+        ],
+      }));
+      expect(result.instructionsApplied).toEqual([
+        { id: 'rule-1', text: 'always add trip fee', draftCount: 3 },
+        { id: 'rule-2', text: 'call before arriving', draftCount: 1 },
+      ]);
+    });
+
+    it('omits instructionsApplied when no proposal applied a standing instruction today', async () => {
+      const result = await computeDigestPayload(TENANT, DATE, makeDeps({ appliedInstructionProposals: [] }));
+      expect(result.instructionsApplied).toBeUndefined();
+    });
+
+    it('omits instructionsApplied when findAppliedInstructionsForDay is absent (optional method)', async () => {
+      const result = await computeDigestPayload(TENANT, DATE, makeDeps({ withAppliedInstructionsMethod: false }));
+      expect(result.instructionsApplied).toBeUndefined();
+    });
+  });
 });
 
 describe('summarizeProposalForDigest', () => {
@@ -368,6 +757,119 @@ describe('summarizeProposalForDigest', () => {
     const absent = summarizeProposalForDigest(proposal({ payload: {} }));
     expect(absent.overallConfidence).toBeUndefined();
     expect(absent.reviewInApp).toBeUndefined();
+  });
+
+  it('marks hasMissingFields when the proposal has unresolved missingFields (draft with ambiguous line)', () => {
+    // A draft capture proposal with an unresolved catalog line: approveProposal
+    // rejects it, so the digest must not offer a one-tap link.
+    const withMissing = summarizeProposalForDigest(
+      proposal({
+        proposalType: 'draft_estimate',
+        sourceContext: { missingFields: ['lineItems[1].catalogItemId'] },
+      }),
+    );
+    expect(withMissing.hasMissingFields).toBe(true);
+
+    // No missingFields (or empty) → flag absent (stays one-tap eligible).
+    const complete = summarizeProposalForDigest(proposal({ proposalType: 'draft_estimate' }));
+    expect(complete.hasMissingFields).toBeUndefined();
+
+    const emptyMissing = summarizeProposalForDigest(
+      proposal({ proposalType: 'draft_estimate', sourceContext: { missingFields: [] } }),
+    );
+    expect(emptyMissing.hasMissingFields).toBeUndefined();
+  });
+});
+
+describe('groupAppliedInstructions', () => {
+  it('groups two proposals sharing a rule into one entry with draftCount 2', () => {
+    const grouped = groupAppliedInstructions([
+      proposal({
+        id: 'p1',
+        payload: { _meta: { appliedStandingInstructions: [{ id: 'r1', text: 'trip fee' }] } },
+      }),
+      proposal({
+        id: 'p2',
+        payload: { _meta: { appliedStandingInstructions: [{ id: 'r1', text: 'trip fee' }] } },
+      }),
+    ]);
+    expect(grouped).toEqual([{ id: 'r1', text: 'trip fee', draftCount: 2 }]);
+  });
+
+  it('counts one proposal with two rules as one draft for each rule, ordered by draftCount desc then id', () => {
+    const grouped = groupAppliedInstructions([
+      proposal({
+        id: 'p1',
+        payload: {
+          _meta: {
+            appliedStandingInstructions: [
+              { id: 'r-a', text: 'rule a' },
+              { id: 'r-b', text: 'rule b' },
+            ],
+          },
+        },
+      }),
+      proposal({
+        id: 'p2',
+        payload: { _meta: { appliedStandingInstructions: [{ id: 'r-b', text: 'rule b' }] } },
+      }),
+    ]);
+    expect(grouped).toEqual([
+      { id: 'r-b', text: 'rule b', draftCount: 2 },
+      { id: 'r-a', text: 'rule a', draftCount: 1 },
+    ]);
+  });
+
+  it('a repeated stamp on the SAME proposal counts once (defensive de-dupe)', () => {
+    const grouped = groupAppliedInstructions([
+      proposal({
+        id: 'p1',
+        payload: {
+          _meta: {
+            appliedStandingInstructions: [
+              { id: 'r1', text: 'trip fee' },
+              { id: 'r1', text: 'trip fee' },
+            ],
+          },
+        },
+      }),
+    ]);
+    expect(grouped).toEqual([{ id: 'r1', text: 'trip fee', draftCount: 1 }]);
+  });
+
+  it('returns an empty array for no proposals / no stamps', () => {
+    expect(groupAppliedInstructions([])).toEqual([]);
+    expect(groupAppliedInstructions([proposal({ payload: {} })])).toEqual([]);
+  });
+
+  it('tolerates malformed _meta / stamp shapes defensively', () => {
+    const grouped = groupAppliedInstructions([
+      proposal({ id: 'null-meta', payload: { _meta: null } }),
+      proposal({ id: 'string-meta', payload: { _meta: 'not-an-object' } }),
+      proposal({ id: 'non-array-stamp', payload: { _meta: { appliedStandingInstructions: 'nope' } } }),
+      proposal({ id: 'null-entry', payload: { _meta: { appliedStandingInstructions: [null, 42, 'x'] } } }),
+      proposal({
+        id: 'missing-fields',
+        payload: { _meta: { appliedStandingInstructions: [{ id: 'r1' }, { text: 'no id' }, {}] } },
+      }),
+      proposal({
+        id: 'valid',
+        payload: { _meta: { appliedStandingInstructions: [{ id: 'r-ok', text: 'a valid rule' }] } },
+      }),
+    ]);
+    expect(grouped).toEqual([{ id: 'r-ok', text: 'a valid rule', draftCount: 1 }]);
+  });
+
+  it('caps output at DIGEST_MAX_INSTRUCTIONS', () => {
+    const proposals = Array.from({ length: DIGEST_MAX_INSTRUCTIONS + 5 }, (_, i) =>
+      proposal({
+        id: `p${i}`,
+        payload: {
+          _meta: { appliedStandingInstructions: [{ id: `r${i}`, text: `rule ${i}` }] },
+        },
+      }),
+    );
+    expect(groupAppliedInstructions(proposals)).toHaveLength(DIGEST_MAX_INSTRUCTIONS);
   });
 });
 
@@ -436,11 +938,13 @@ describe('buildFallbackNarrative', () => {
   });
 });
 
-describe('renderDigestSms', () => {
+describe('renderDigestSmsSegments', () => {
+  const DEEP = 'https://app.example.com/digest/2026-06-10';
   const longUrl = (i: number) =>
     `https://api.example.com/public/proposals/one-tap-approve?token=${'x'.repeat(160)}${i}`;
+  const combine = (segs: string[]) => segs.join('\n');
 
-  it('includes counts, top approvals with one-tap links, flags, expiry note, and the digest deep link', () => {
+  it('renders counts, top approvals with one-tap links, flags, expiry note, and the deep link', () => {
     const payload = basePayload({
       pendingApprovals: {
         totalCount: 3,
@@ -453,15 +957,13 @@ describe('renderDigestSms', () => {
       overdueInvoicesCount: 2,
       unbilledJobs: [{ jobId: 'j', customerId: 'c', amountCents: 100 }],
     });
-    const body = renderDigestSms({
+    const segments = renderDigestSmsSegments({
       payload,
-      deepLinkUrl: 'https://app.example.com/digest/2026-06-10',
-      approvalLinks: payload.pendingApprovals.top.map((approval, i) => ({
-        approval,
-        url: `https://x.co/t${i}`,
-      })),
+      deepLinkUrl: DEEP,
+      approvalLinks: payload.pendingApprovals.top.map((approval, i) => ({ approval, url: `https://x.co/t${i}` })),
     });
-    expect(body.length).toBeLessThanOrEqual(DIGEST_SMS_MAX_CHARS);
+    const body = combine(segments);
+    for (const s of segments) expect(s.length).toBeLessThanOrEqual(DIGEST_SMS_MAX_CHARS);
     expect(body).toContain('$450 in');
     expect(body).toContain('3 jobs done');
     expect(body).toContain('Tomorrow: 4 visits');
@@ -469,16 +971,26 @@ describe('renderDigestSms', () => {
     expect(body).toContain('[1] draft estimate $450 Lopez https://x.co/t0');
     expect(body).toContain('https://x.co/t1');
     expect(body).toContain('https://x.co/t2');
-    // Expiry notice must appear when one-tap links are present.
     expect(body).toContain('(links expire in 30 min)');
     expect(body).toContain('Flags: 2 overdue, 1 unbilled.');
-    expect(body).toContain('https://app.example.com/digest/2026-06-10');
+    expect(body).toContain(DEEP);
   });
 
-  it('never exceeds 480 chars: long one-tap URLs degrade to "+N more" while keeping the deep link', () => {
+  it('emits a single un-prefixed segment when the whole digest fits under the soft limit', () => {
+    const segments = renderDigestSmsSegments({
+      payload: basePayload(),
+      deepLinkUrl: DEEP,
+      approvalLinks: [],
+    });
+    expect(segments).toHaveLength(1);
+    expect(segments[0]).not.toMatch(/^\(\d+\/\d+\)/);
+    expect(segments[0].length).toBeLessThanOrEqual(DIGEST_SMS_SOFT_LIMIT);
+  });
+
+  it('splits into >=2 (k/n)-prefixed segments when content exceeds 320; links survive, deep link only in the final segment', () => {
     const payload = basePayload({
       pendingApprovals: {
-        totalCount: 5,
+        totalCount: 3,
         top: [
           { proposalId: 'p1', proposalType: 'draft_estimate', summary: 's', amountCents: 45000 },
           { proposalId: 'p2', proposalType: 'send_invoice', summary: 's' },
@@ -486,80 +998,250 @@ describe('renderDigestSms', () => {
         ],
       },
     });
-    const body = renderDigestSms({
+    const segments = renderDigestSmsSegments({
       payload,
-      deepLinkUrl: 'https://app.example.com/digest/2026-06-10',
-      approvalLinks: payload.pendingApprovals.top.map((approval, i) => ({
-        approval,
-        url: longUrl(i),
-      })),
+      deepLinkUrl: DEEP,
+      approvalLinks: payload.pendingApprovals.top.map((approval, i) => ({ approval, url: longUrl(i) })),
     });
-    expect(body.length).toBeLessThanOrEqual(DIGEST_SMS_MAX_CHARS);
-    expect(body).toMatch(/\+\d more/);
-    expect(body).toContain('https://app.example.com/digest/2026-06-10');
+    expect(segments.length).toBeGreaterThanOrEqual(2);
+    // Each segment ≤ the hard ceiling; the (k/n) prefix is present when split.
+    segments.forEach((s, i) => {
+      expect(s.length).toBeLessThanOrEqual(DIGEST_SMS_MAX_CHARS);
+      expect(s).toMatch(new RegExp(`^\\(${i + 1}/${segments.length}\\) `));
+    });
+    // All three one-tap URLs survive (never collapsed to "+N more").
+    const body = combine(segments);
+    for (let i = 0; i < 3; i++) expect(body).toContain(longUrl(i));
+    expect(body).not.toMatch(/\+\d more/);
+    // Deep link appears ONLY in the final segment.
+    const deepCount = segments.filter((s) => s.includes(DEEP)).length;
+    expect(deepCount).toBe(1);
+    expect(segments[segments.length - 1]).toContain(DEEP);
   });
 
-  it('omits the approvals section entirely when nothing is pending', () => {
-    const body = renderDigestSms({
-      payload: basePayload(),
-      deepLinkUrl: 'https://app.example.com/digest/2026-06-10',
-      approvalLinks: [],
+  it('regenerates byte-identical segments given identical inputs (deterministic)', () => {
+    const payload = basePayload({
+      quotesSent: { count: 2, pipelineValueCents: 50000 },
+      learnedToday: [{ lessonId: 'l1', lessonType: 'labor_rate_changed', summary: 'labor rate now $145' }],
     });
-    expect(body).not.toContain('Approvals');
-    expect(body).not.toContain('links expire');
-    expect(body.length).toBeLessThanOrEqual(DIGEST_SMS_MAX_CHARS);
+    const input = { payload, deepLinkUrl: DEEP, approvalLinks: [] };
+    expect(renderDigestSmsSegments(input)).toEqual(renderDigestSmsSegments(input));
   });
 
-  it('omits expiry note when approvals exist but all are low-confidence (no links produced)', () => {
+  it('never slices through a one-tap URL when a single chunk exceeds the hard cap (money/link integrity)', () => {
+    // A long customer name + a long signed one-tap URL pushes a single approval
+    // chunk past the 480-char hard ceiling. The URL sits at the END of the
+    // chunk, so a blind tail slice would corrupt the signed token → an unusable
+    // approval link. Assert the FULL URL survives intact and the token is never
+    // cut, while a normal-length approval in the same digest still renders fully.
+    const hugeToken = 'y'.repeat(240);
+    const bigUrl = `https://api.example.com/public/proposals/one-tap-approve?token=${hugeToken}`;
+    const normalUrl = 'https://x.co/normal';
+    const longName = 'A'.repeat(260); // long label pushes the chunk over the cap
+
     const payload = basePayload({
       pendingApprovals: {
-        totalCount: 1,
-        top: [{ proposalId: 'p1', proposalType: 'draft_estimate', summary: 's', reviewInApp: true }],
+        totalCount: 2,
+        top: [
+          { proposalId: 'p-big', proposalType: 'draft_estimate', summary: 's', customerName: longName, amountCents: 45000 },
+          { proposalId: 'p-norm', proposalType: 'send_invoice', summary: 's', customerName: 'Lopez', amountCents: 12000 },
+        ],
       },
     });
-    const body = renderDigestSms({
+    const segments = renderDigestSmsSegments({
       payload,
-      deepLinkUrl: 'https://app.example.com/digest/2026-06-10',
-      approvalLinks: [], // no links (all filtered by confidence)
+      deepLinkUrl: DEEP,
+      approvalLinks: [
+        { approval: payload.pendingApprovals.top[0], url: bigUrl },
+        { approval: payload.pendingApprovals.top[1], url: normalUrl },
+      ],
     });
+    const body = combine(segments);
+
+    // Hard ceiling still honored on every segment.
+    for (const s of segments) expect(s.length).toBeLessThanOrEqual(DIGEST_SMS_MAX_CHARS);
+    // The full signed one-tap URL survives verbatim — the token is never sliced.
+    expect(body).toContain(bigUrl);
+    expect(body).toContain(hugeToken);
+    // The normal-length approval still renders its full URL.
+    expect(body).toContain(normalUrl);
+    // A truncated variant of the signed URL (token cut short) must never appear
+    // as the tail of a segment.
+    for (const s of segments) {
+      if (s.includes('one-tap-approve') && !s.includes(bigUrl)) {
+        throw new Error(`segment carries a truncated one-tap URL: ${s.slice(-60)}`);
+      }
+    }
+  });
+
+  it('omits the approvals section and reflection lines entirely when absent', () => {
+    const body = combine(
+      renderDigestSmsSegments({ payload: basePayload(), deepLinkUrl: DEEP, approvalLinks: [] }),
+    );
+    expect(body).not.toContain('Approvals');
     expect(body).not.toContain('links expire');
-    expect(body.length).toBeLessThanOrEqual(DIGEST_SMS_MAX_CHARS);
+    expect(body).not.toContain('Unsure:');
+    expect(body).not.toContain('Learned:');
+    expect(body).not.toContain('Quotes:');
+    expect(body).not.toContain('Checked:');
+    expect(body).not.toContain('Auto-booked:');
+    expect(body).not.toContain('Applied your rule');
   });
 
-  it('renders the feedback line with average and low-rating flag', () => {
-    const body = renderDigestSms({
-      payload: basePayload({ feedback: { responses: 4, averageRating: 4.3, lowRatingCount: 1 } }),
-      deepLinkUrl: 'https://app.example.com/digest/2026-06-10',
-      approvalLinks: [],
-    });
-    expect(body).toContain('Feedback: 4 today, avg 4.3/5, 1 low (<=3).');
-    expect(body.length).toBeLessThanOrEqual(DIGEST_SMS_MAX_CHARS);
+  it('renders the supervisor-checks line: flagged (with fixed) and none-flagged variants', () => {
+    const flaggedBody = combine(
+      renderDigestSmsSegments({
+        payload: basePayload({ supervisorChecks: { checked: 12, flagged: 2, fixed: 1 } }),
+        deepLinkUrl: DEEP,
+        approvalLinks: [],
+      }),
+    );
+    expect(flaggedBody).toContain('Checked: 12 proposals, 2 flagged, 1 fixed.');
+
+    const noneFlaggedBody = combine(
+      renderDigestSmsSegments({
+        payload: basePayload({ supervisorChecks: { checked: 12, flagged: 0, fixed: 0 } }),
+        deepLinkUrl: DEEP,
+        approvalLinks: [],
+      }),
+    );
+    expect(noneFlaggedBody).toContain('Checked: 12 proposals, none flagged.');
+
+    const omittedBody = combine(
+      renderDigestSmsSegments({ payload: basePayload(), deepLinkUrl: DEEP, approvalLinks: [] }),
+    );
+    expect(omittedBody).not.toContain('Checked:');
   });
 
-  it('drops the low-rating flag when every rating is 4+', () => {
-    const body = renderDigestSms({
-      payload: basePayload({ feedback: { responses: 2, averageRating: 5, lowRatingCount: 0 } }),
-      deepLinkUrl: 'https://app.example.com/digest/2026-06-10',
-      approvalLinks: [],
-    });
-    expect(body).toContain('Feedback: 2 today, avg 5/5.');
-    expect(body).not.toContain('low (<=3)');
+  it('renders the auto-booked line: undone and no-undone variants, omitted when absent', () => {
+    const withUndoneBody = combine(
+      renderDigestSmsSegments({
+        payload: basePayload({ autonomousBookings: { count: 3, undone: 1 } }),
+        deepLinkUrl: DEEP,
+        approvalLinks: [],
+      }),
+    );
+    expect(withUndoneBody).toContain('Auto-booked: 3 appointment(s), 1 undone.');
+
+    const noUndoneBody = combine(
+      renderDigestSmsSegments({
+        payload: basePayload({ autonomousBookings: { count: 1, undone: 0 } }),
+        deepLinkUrl: DEEP,
+        approvalLinks: [],
+      }),
+    );
+    expect(noUndoneBody).toContain('Auto-booked: 1 appointment(s).');
+    expect(noUndoneBody).not.toContain('undone');
+
+    const omittedBody = combine(
+      renderDigestSmsSegments({ payload: basePayload(), deepLinkUrl: DEEP, approvalLinks: [] }),
+    );
+    expect(omittedBody).not.toContain('Auto-booked:');
   });
 
-  it('omits the feedback line on a no-response day and on pre-E5 payloads', () => {
-    const noResponses = renderDigestSms({
-      payload: basePayload({ feedback: { responses: 0, averageRating: null, lowRatingCount: 0 } }),
-      deepLinkUrl: 'https://app.example.com/digest/2026-06-10',
-      approvalLinks: [],
-    });
-    expect(noResponses).not.toContain('Feedback:');
+  it('renders the "Instructions applied" line: single rule, truncation, multi-rule, and omitted when absent', () => {
+    const singleRuleBody = combine(
+      renderDigestSmsSegments({
+        payload: basePayload({
+          instructionsApplied: [{ id: 'r1', text: 'always add trip fee', draftCount: 3 }],
+        }),
+        deepLinkUrl: DEEP,
+        approvalLinks: [],
+      }),
+    );
+    expect(singleRuleBody).toContain('Applied your rule "always add trip fee" to 3 draft(s).');
+    expect(singleRuleBody).not.toContain('more rules');
 
-    const preE5 = renderDigestSms({
-      payload: basePayload(), // no feedback field at all
-      deepLinkUrl: 'https://app.example.com/digest/2026-06-10',
-      approvalLinks: [],
+    // Rule text longer than ~40 chars is truncated with an ellipsis.
+    const longText = 'a'.repeat(60);
+    const truncatedBody = combine(
+      renderDigestSmsSegments({
+        payload: basePayload({
+          instructionsApplied: [{ id: 'r1', text: longText, draftCount: 1 }],
+        }),
+        deepLinkUrl: DEEP,
+        approvalLinks: [],
+      }),
+    );
+    expect(truncatedBody).toContain(`Applied your rule "${'a'.repeat(40)}…" to 1 draft(s).`);
+    expect(truncatedBody).not.toContain(longText);
+
+    // Multiple rules — top rule (already draftCount-sorted by the grouping
+    // helper) renders, "; K more rules" appends the rest.
+    const multiRuleBody = combine(
+      renderDigestSmsSegments({
+        payload: basePayload({
+          instructionsApplied: [
+            { id: 'r1', text: 'always add trip fee', draftCount: 3 },
+            { id: 'r2', text: 'call before arriving', draftCount: 2 },
+            { id: 'r3', text: 'note gate code', draftCount: 1 },
+          ],
+        }),
+        deepLinkUrl: DEEP,
+        approvalLinks: [],
+      }),
+    );
+    expect(multiRuleBody).toContain(
+      'Applied your rule "always add trip fee" to 3 draft(s); 2 more rules.',
+    );
+
+    const omittedBody = combine(
+      renderDigestSmsSegments({ payload: basePayload(), deepLinkUrl: DEEP, approvalLinks: [] }),
+    );
+    expect(omittedBody).not.toContain('Applied your rule');
+  });
+
+  it('renders the quotes-sent, unsure, and learned compact lines when present', () => {
+    const payload = basePayload({
+      quotesSent: { count: 2, pipelineValueCents: 123400 },
+      unsureAbout: [
+        { proposalId: 'u1', proposalType: 'draft_estimate', summary: 's', confidence: 'very_low', outcome: 'approved' },
+        { proposalId: 'u2', proposalType: 'draft_estimate', summary: 's', confidence: 'low', outcome: 'approved' },
+        { proposalId: 'u3', proposalType: 'draft_estimate', summary: 's', confidence: 'low', outcome: 'rejected' },
+      ],
+      learnedToday: [
+        { lessonId: 'l1', lessonType: 'labor_rate_changed', summary: 'labor rate now $145' },
+        { lessonId: 'l2', lessonType: 'part_price_changed', summary: 'filter is $30' },
+      ],
     });
-    expect(preE5).not.toContain('Feedback:');
+    const body = combine(renderDigestSmsSegments({ payload, deepLinkUrl: DEEP, approvalLinks: [] }));
+    expect(body).toContain('Quotes: 2 sent, $1234 pipeline.');
+    expect(body).toContain('Unsure: 3 flagged (2 approved, 1 rejected).');
+    expect(body).toContain('Learned: labor rate now $145; 1 more.');
+  });
+
+  it('renders the feedback line with average and low-rating flag; omits it when empty', () => {
+    const withFb = combine(
+      renderDigestSmsSegments({
+        payload: basePayload({ feedback: { responses: 4, averageRating: 4.3, lowRatingCount: 1 } }),
+        deepLinkUrl: DEEP,
+        approvalLinks: [],
+      }),
+    );
+    expect(withFb).toContain('Feedback: 4 today, avg 4.3/5, 1 low (<=3).');
+
+    const noFb = combine(
+      renderDigestSmsSegments({
+        payload: basePayload({ feedback: { responses: 0, averageRating: null, lowRatingCount: 0 } }),
+        deepLinkUrl: DEEP,
+        approvalLinks: [],
+      }),
+    );
+    expect(noFb).not.toContain('Feedback:');
+  });
+});
+
+describe('proposalOutcome', () => {
+  it('maps every proposal status to the digest outcome', () => {
+    expect(proposalOutcome('draft')).toBe('pending');
+    expect(proposalOutcome('ready_for_review')).toBe('pending');
+    expect(proposalOutcome('approved')).toBe('approved');
+    expect(proposalOutcome('executing')).toBe('approved');
+    expect(proposalOutcome('executed')).toBe('executed');
+    expect(proposalOutcome('rejected')).toBe('rejected');
+    expect(proposalOutcome('expired')).toBe('expired');
+    expect(proposalOutcome('undone')).toBe('undone');
+    expect(proposalOutcome('execution_failed')).toBe('failed');
   });
 });
 

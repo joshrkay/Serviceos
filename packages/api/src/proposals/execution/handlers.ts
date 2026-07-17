@@ -32,13 +32,15 @@ import { ServiceCreditRepository } from '../../reputation/service-credit';
 import { NoteRepository } from '../../notes/note';
 import { PaymentRepository } from '../../invoices/payment';
 import { ExpenseRepository } from '../../expenses/expense';
-import { AuditRepository, createAuditEvent } from '../../audit/audit';
+import { AuditRepository, InMemoryAuditRepository, createAuditEvent } from '../../audit/audit';
+import type { ConsentEventRepository } from '../../compliance/consent-events';
 import { ConflictError, ValidationError } from '../../shared/errors';
 import { JobRepository, createJob } from '../../jobs/job';
 import { RefreshJobMoneyStateDeps } from '../../jobs/job-money-state';
 import { AppointmentRepository, createAppointment } from '../../appointments/appointment';
 import { AssignmentRepository, assignTechnician } from '../../appointments/assignment';
 import { InvoiceRepository } from '../../invoices/invoice';
+import { DunningEventRepository } from '../../invoices/dunning-config';
 import {
   EstimateRepository,
   createEstimate,
@@ -85,6 +87,8 @@ import { dispatchEstimateNudge } from '../../estimates/estimate-nudge';
 import type { SendService } from '../../notifications/send-service';
 import type { DispatchRepository } from '../../notifications/dispatch-repository';
 import { CreateStandingInstructionExecutionHandler } from './standing-instruction-handler';
+import { UpdateCatalogItemExecutionHandler } from './update-catalog-item-handler';
+import { CatalogItemRepository } from '../../catalog/catalog-item';
 import type { StandingInstructionRepository } from '../../instructions/standing-instructions';
 
 export interface ExecutionContext {
@@ -102,6 +106,21 @@ export interface ExecutionHandler {
   proposalType: ProposalType;
   execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult>;
   /**
+   * True when `execute()` performs synchronous external network I/O — email /
+   * SMS / push / 3rd-party API — so the executor runs it OUTSIDE the DB
+   * transaction; the domain DB writes then commit in their own per-call
+   * transactions and only the idempotency record + status transition are
+   * wrapped in the executor's transaction. Absent/false = DB-only = fully
+   * atomic per DATA-31.
+   *
+   * Rationale (PR #666, Gemini HIGH): a handler that awaits an external send
+   * while its domain mutation's row locks are held inside the executor's
+   * transaction pins a pooled connection AND holds those locks for the whole
+   * network round-trip — a pool-exhaustion + long-lived-lock risk. Marking it
+   * here moves the send (and its DB writes) out of the executor transaction.
+   */
+  performsExternalIo?: boolean;
+  /**
    * Optional capability signal for the boot-time wiring guard
    * (proposals/execution/wiring-assertions.ts). Returns false when the
    * handler is missing a dependency it needs to PERSIST — i.e. it would
@@ -115,7 +134,28 @@ export interface ExecutionHandler {
 export class UpdateCustomerExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'update_customer';
 
-  constructor(private readonly customerRepo?: CustomerRepository) {}
+  constructor(
+    private readonly customerRepo: CustomerRepository | undefined,
+    // WS3 — auditRepo is structurally REQUIRED (not optional): update_customer
+    // is a consent-bearing mutation and must always emit its customer.updated
+    // audit event. A non-optional constructor param makes it impossible to
+    // wire this handler without an audit sink. updateCustomer forwards it.
+    private readonly auditRepo: AuditRepository,
+    // WS3/WS12 — voice consent parity: a spoken smsConsent toggle must append
+    // to the consent ledger exactly like the authenticated route does
+    // (routes/customers.ts). Optional only so pool-less unit tests can omit
+    // it. When a consent-bearing field changes and the ledger is wired, an
+    // append failure FAILS the update (see customer.ts updateCustomer) — the
+    // whole mutation rolls back atomically via the ambient tenant transaction.
+    private readonly consentLedger?: ConsentEventRepository,
+  ) {}
+
+  // WS3 — degrades to nothing without the customer repo. The boot-time guard
+  // (wiring-assertions.ts) fails boot when a pool is configured but this is
+  // false, so the synthetic-success no-op can never run in production.
+  isFullyWired(): boolean {
+    return Boolean(this.customerRepo);
+  }
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const { payload } = proposal;
@@ -124,7 +164,9 @@ export class UpdateCustomerExecutionHandler implements ExecutionHandler {
     }
 
     if (!this.customerRepo) {
-      return { success: true };
+      // WS3 — no synthetic success: a missing repo is a wiring fault, never a
+      // silent no-op that reports success while persisting nothing.
+      return { success: false, error: 'handler_not_wired:customerRepo' };
     }
 
     const input: UpdateCustomerInput = {};
@@ -156,6 +198,12 @@ export class UpdateCustomerExecutionHandler implements ExecutionHandler {
         input,
         this.customerRepo,
         context.executedBy,
+        // WS3 — thread audit + consent ledger through the voice path so
+        // updateCustomer emits customer.updated and appends the consent event
+        // (all three writes join one transaction via the ambient tenant
+        // context established by the executor / request middleware).
+        this.auditRepo,
+        this.consentLedger,
       );
       if (!updated) {
         return { success: false, error: 'Customer not found' };
@@ -263,6 +311,13 @@ export class CreateJobExecutionHandler implements ExecutionHandler {
 
 export class CreateAppointmentExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'create_appointment';
+  // Awaits confirmationNotifier.enqueue — in production this is
+  // TransactionalCommsService, which sends the customer confirmation SMS/email
+  // synchronously via the delivery provider — external network I/O alongside the
+  // appointment + assignment DB writes. Those writes already tolerate
+  // per-connection commits (assignment-failure compensation), so running out of
+  // the executor tx is safe.
+  performsExternalIo = true;
 
   constructor(
     private readonly appointmentRepo?: AppointmentRepository,
@@ -390,7 +445,7 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
         ? (payload.appointmentType as AppointmentTypeValue)
         : undefined,
       createdBy: context.executedBy,
-    }, this.appointmentRepo);
+    }, this.appointmentRepo, undefined, this.auditRepo, 'system');
 
     if (this.assignmentRepo && payload.technicianId && typeof payload.technicianId === 'string') {
       try {
@@ -613,6 +668,13 @@ export class DraftEstimateExecutionHandler implements ExecutionHandler {
     private readonly auditRepo?: AuditRepository,
   ) {}
 
+  // WS3 — degrades to a synthetic-id passthrough (saves nothing) without both
+  // the estimate repo and the settings repo (estimate numbering). Boot fails
+  // when a pool is configured but this is false.
+  isFullyWired(): boolean {
+    return Boolean(this.estimateRepo) && Boolean(this.settingsRepo);
+  }
+
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const { payload } = proposal;
     const customerId =
@@ -739,6 +801,10 @@ export const ESTIMATE_NUDGE_COOLDOWN_MS = 48 * 60 * 60 * 1000;
 
 export class SendEstimateNudgeExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'send_estimate_nudge';
+  // Awaits dispatchEstimateNudge → sendService.sendEstimate (outbound estimate
+  // re-send via the send service) — external network I/O alongside the
+  // estimate reminder-bookkeeping DB write.
+  performsExternalIo = true;
 
   constructor(
     private readonly estimateRepo?: EstimateRepository,
@@ -868,6 +934,10 @@ export function createExecutionHandlerRegistry(deps?: {
   scheduleRepo?: InvoiceScheduleRepository;
   // P21-003 — batch_invoice fans out draft_invoice proposals via this repo.
   proposalRepo?: ProposalRepository;
+  // Collections cadence — dunning-event ledger. When wired, MANUAL (voice)
+  // send_payment_reminder proposals are deduped at execution time (72h
+  // cooldown + record-first idempotency). Absent → legacy send behavior.
+  dunningEventRepo?: DunningEventRepository;
   // Estimate edit history — when wired, voice update_estimate snapshots a
   // revision + edit delta, matching the authenticated edit path.
   docRevisionRepo?: DocumentRevisionRepository;
@@ -906,7 +976,20 @@ export function createExecutionHandlerRegistry(deps?: {
   // UB-A2 — create_standing_instruction inserts via the UB-A1 repo.
   // Absent → the handler degrades to a synthetic-id passthrough.
   standingInstructionRepo?: StandingInstructionRepository;
+  // WS20 — update_catalog_item writes the new SKU price via the catalog repo.
+  // Absent → the handler degrades to a synthetic passthrough.
+  catalogRepo?: CatalogItemRepository;
+  // WS3 — voice update_customer consent parity. When wired, a spoken smsConsent
+  // toggle appends to the consent ledger (kind 'sms', source 'manual') in the
+  // SAME transaction as the customer update + audit event.
+  consentEventRepo?: ConsentEventRepository;
 }): Map<ProposalType, ExecutionHandler> {
+  // WS3 — audit is a structural invariant for the consent/entity mutation
+  // handlers below (their constructors take a non-optional AuditRepository).
+  // Production always passes deps.auditRepo (app.ts); an in-memory fallback
+  // keeps `createExecutionHandlerRegistry({})` unit-test call sites valid
+  // without letting a handler skip auditing entirely.
+  const requiredAuditRepo: AuditRepository = deps?.auditRepo ?? new InMemoryAuditRepository();
   // §6 Time-to-Cash. Built once; passed to the handlers that call the
   // widened money-mutation domain functions (recordPayment, issueInvoice).
   // `logger` is intentionally omitted — the registry has no ambient logger
@@ -926,7 +1009,7 @@ export function createExecutionHandlerRegistry(deps?: {
 
   const handlers: ExecutionHandler[] = [
     new CreateCustomerVoiceExecutionHandler(deps?.customerRepo, deps?.auditRepo),
-    new UpdateCustomerExecutionHandler(deps?.customerRepo),
+    new UpdateCustomerExecutionHandler(deps?.customerRepo, requiredAuditRepo, deps?.consentEventRepo),
     new CreateJobExecutionHandler(deps?.jobRepo, deps?.locationRepo, deps?.auditRepo),
     new CreateAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.schedulingNotifier, deps?.auditRepo, deps?.jobRepo),
     new CreateBookingExecutionHandler(deps?.appointmentRepo, deps?.auditRepo),
@@ -961,7 +1044,7 @@ export function createExecutionHandlerRegistry(deps?: {
     // handler degrades to a synthetic-id passthrough when its dep is
     // absent (used by in-memory tests that don't exercise the
     // mutation path). Production wires the real deps in app.ts.
-    new AddNoteExecutionHandler(deps?.noteRepo),
+    new AddNoteExecutionHandler(deps?.noteRepo, requiredAuditRepo),
     new SendInvoiceExecutionHandler(deps?.invoiceDeliveryProvider),
     new SendEstimateExecutionHandler(deps?.estimateDeliveryProvider),
     // RV-086 — comms-class nudge for aging sent estimates; 48h cooldown
@@ -980,8 +1063,8 @@ export function createExecutionHandlerRegistry(deps?: {
       deps?.auditRepo,
     ),
     new LogExpenseExecutionHandler(deps?.expenseRepo, deps?.auditRepo),
-    new ConvertLeadExecutionHandler(deps?.leadRepo, deps?.customerRepo, deps?.auditRepo),
-    new ConfirmAppointmentExecutionHandler(deps?.appointmentRepo),
+    new ConvertLeadExecutionHandler(deps?.leadRepo, deps?.customerRepo, deps?.auditRepo, deps?.locationRepo),
+    new ConfirmAppointmentExecutionHandler(deps?.appointmentRepo, requiredAuditRepo),
     new MarkLeadLostExecutionHandler(deps?.leadRepo, deps?.auditRepo),
     new AddServiceLocationExecutionHandler(deps?.locationRepo, deps?.auditRepo),
     new LogTimeEntryExecutionHandler(deps?.timeEntryService),
@@ -991,7 +1074,7 @@ export function createExecutionHandlerRegistry(deps?: {
       deps?.jobRepo,
       deps?.customerRepo,
     ),
-    new RequestFeedbackExecutionHandler(deps?.feedbackRepo),
+    new RequestFeedbackExecutionHandler(deps?.feedbackRepo, requiredAuditRepo),
     // P7-026 PR c — review-response handler. Wired with optional deps;
     // see ReviewResponseExecutionHandler constructor for per-dep
     // degraded behavior. Action class 'comms' guarantees the proposal
@@ -1021,6 +1104,7 @@ export function createExecutionHandlerRegistry(deps?: {
     new SendPaymentReminderExecutionHandler(
       deps?.transactionalComms,
       deps?.auditRepo,
+      deps?.dunningEventRepo,
     ),
     // UB-A2 — create_standing_instruction: inserts the approved directive via
     // the UB-A1 domain service (500-char cap, scope validation, 20-active
@@ -1030,6 +1114,11 @@ export function createExecutionHandlerRegistry(deps?: {
       deps?.standingInstructionRepo,
       deps?.auditRepo,
     ),
+    // WS20 — update_catalog_item: applies the owner-ratified catalog price via
+    // the catalog domain fn (which emits catalog_item.updated). Capture-class,
+    // but the correction loop creates it with no trust tier, so it only ever
+    // runs after a human tap.
+    new UpdateCatalogItemExecutionHandler(deps?.catalogRepo, deps?.auditRepo),
   ];
 
   // Handlers that mutate existing entities take a repo dep. Registered

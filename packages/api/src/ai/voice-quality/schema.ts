@@ -38,9 +38,32 @@ export const VoiceQualityScriptSchema = z.object({
     customers: z.array(z.unknown()),
     appointments: z.array(z.unknown()).optional(),
     invoices: z.array(z.unknown()).optional(),
+    /**
+     * WS21b — pending proposals to seed so an owner-approval script has
+     * something to approve/reject. Rows are passed to `proposalRepo.create`
+     * verbatim (already-shaped `Proposal` objects, `unknown` for
+     * forward-compat like the other fixture arrays). The tenant's owner PIN
+     * (for money-class challenges) rides on `fixtures.tenant.voiceApprovalPin`
+     * and is hashed into the settings row by the driver factory.
+     */
+    proposals: z.array(z.unknown()).optional(),
+    /**
+     * WS21b — tenant catalog items to seed so a grounded-quote script resolves
+     * spoken line items against real catalog prices (closes the WS17
+     * quoting-scenario gap). Seeded into the driver factory's catalog repo.
+     */
+    catalog: z.array(z.unknown()).optional(),
   }),
   callerId: z.string().nullable(),
   callerIdBlocked: z.boolean().default(false),
+  /**
+   * WS21b — when true, the caller is stamped as an RV-070 `ownerSession` at
+   * startSession (mirrors `isApproverPhone`), unlocking the owner-only
+   * approval/edit dialogue. A fixture may instead set
+   * `fixtures.tenant.ownerPhone` equal to `callerId` to reach the same state
+   * via the production caller-ID match. Defaults false (non-owner caller).
+   */
+  callerIsOwner: z.boolean().default(false),
   turns: z.array(
     z.object({
       caller: z.string(),

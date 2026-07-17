@@ -41,6 +41,59 @@ interface DigestUnbilledJob {
   amountCents: number;
 }
 
+interface DigestQuotesSent {
+  count: number;
+  pipelineValueCents: number;
+}
+
+type DigestUnsureOutcome =
+  | 'pending'
+  | 'approved'
+  | 'executed'
+  | 'rejected'
+  | 'expired'
+  | 'undone'
+  | 'failed';
+
+interface DigestUnsureItem {
+  proposalId: string;
+  proposalType: string;
+  summary: string;
+  confidence: string;
+  factors?: string[];
+  outcome: DigestUnsureOutcome;
+}
+
+interface DigestLearnedItem {
+  lessonId: string;
+  lessonType: string;
+  summary: string;
+}
+
+// WS6 — supervisor-review reflection. WS22 amendment: `fixed` is grounded in
+// an edited-after-flag audit signal (see packages/api digest-service.ts
+// DigestSupervisorChecks doc comment for the exact definition).
+interface DigestSupervisorChecks {
+  checked: number;
+  flagged: number;
+  fixed: number;
+}
+
+// D-015 amendment — autonomous booking lane reflection (see packages/api
+// digest-service.ts DigestAutonomousBookings doc comment).
+interface DigestAutonomousBookings {
+  count: number;
+  undone: number;
+}
+
+// WS10 — "Instructions applied" reflection (see packages/api digest-service.ts
+// DigestInstructionApplied doc comment).
+interface DigestInstructionApplied {
+  id: string;
+  text: string;
+  draftCount: number;
+}
+
 interface DigestPayload {
   date: string;
   timezone: string;
@@ -53,6 +106,16 @@ interface DigestPayload {
   pendingApprovals: { totalCount: number; top: DigestPendingApproval[] };
   overdueInvoicesCount: number;
   unbilledJobs: DigestUnbilledJob[];
+  // N-005 — optional reflection sections (absent on pre-N005 stored digests).
+  quotesSent?: DigestQuotesSent;
+  unsureAbout?: DigestUnsureItem[];
+  learnedToday?: DigestLearnedItem[];
+  // WS6 — "Checked: N proposals, M flagged" (absent when nothing ran today).
+  supervisorChecks?: DigestSupervisorChecks;
+  // D-015 amendment — "Auto-booked: N appointment(s)" (absent when zero).
+  autonomousBookings?: DigestAutonomousBookings;
+  // WS10 — "Instructions applied" (absent when no rule fired today).
+  instructionsApplied?: DigestInstructionApplied[];
 }
 
 interface DigestResponse {
@@ -88,6 +151,24 @@ function formatHeaderDate(date: string, timezone: string): string {
 
 function approvalLabel(type: string): string {
   return type.replace(/_/g, ' ');
+}
+
+/** Tailwind classes for the "what I wasn't sure about" outcome pill. */
+function outcomePillClass(outcome: DigestUnsureOutcome): string {
+  switch (outcome) {
+    case 'approved':
+    case 'executed':
+      return 'border-green-200 bg-green-50 text-green-700';
+    case 'rejected':
+    case 'failed':
+      return 'border-red-200 bg-red-50 text-red-700';
+    case 'expired':
+    case 'undone':
+      return 'border-slate-200 bg-slate-100 text-slate-600';
+    case 'pending':
+    default:
+      return 'border-amber-200 bg-amber-50 text-amber-700';
+  }
 }
 
 // ─── Section card ──────────────────────────────────────────────────────────
@@ -257,6 +338,24 @@ function DigestBody({
         </div>
       </div>
 
+      {/* Quotes sent today (N-005). Omitted when absent/zero. */}
+      {p.quotesSent && p.quotesSent.count > 0 && (
+        <div className="grid grid-cols-2 gap-3">
+          <div className="rounded-xl border border-slate-200 bg-white px-4 py-3.5">
+            <p className="text-xs uppercase tracking-wide text-slate-500">Quotes sent</p>
+            <p className="mt-1 text-xl font-semibold tabular-nums text-slate-900">
+              {p.quotesSent.count}
+            </p>
+          </div>
+          <div className="rounded-xl border border-slate-200 bg-white px-4 py-3.5">
+            <p className="text-xs uppercase tracking-wide text-slate-500">Pipeline value</p>
+            <p className="mt-1 text-xl font-semibold tabular-nums text-slate-900">
+              {formatCurrency(p.quotesSent.pipelineValueCents)}
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Jobs completed + tomorrow */}
       <div className="grid grid-cols-2 gap-3">
         <SectionCard title="Jobs completed">
@@ -324,6 +423,100 @@ function DigestBody({
           </Link>
         )}
       </SectionCard>
+
+      {/* What I wasn't sure about today (N-005). Only when non-empty. */}
+      {p.unsureAbout && p.unsureAbout.length > 0 && (
+        <SectionCard title="What I wasn't sure about today">
+          <ul className="divide-y divide-slate-100">
+            {p.unsureAbout.map((u) => (
+              <li key={u.proposalId} className="flex min-h-11 flex-wrap items-center justify-between gap-2 py-2">
+                <div className="min-w-0">
+                  <p className="break-words text-sm font-medium capitalize text-slate-800">
+                    {approvalLabel(u.proposalType)}
+                  </p>
+                  <p className="break-words text-sm text-slate-500">{u.summary}</p>
+                  {u.factors && u.factors.length > 0 && (
+                    <p className="mt-0.5 break-words text-xs text-slate-400">{u.factors.join(' · ')}</p>
+                  )}
+                </div>
+                <span
+                  className={`inline-flex shrink-0 items-center rounded-full border px-2 py-0.5 text-xs font-medium capitalize ${outcomePillClass(u.outcome)}`}
+                >
+                  {u.outcome}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </SectionCard>
+      )}
+
+      {/* What I learned today (N-005). Only when non-empty. */}
+      {p.learnedToday && p.learnedToday.length > 0 && (
+        <SectionCard title="What I learned today">
+          <ul className="divide-y divide-slate-100">
+            {p.learnedToday.map((l) => (
+              <li key={l.lessonId} className="flex min-h-11 flex-col justify-center gap-1 py-2">
+                <span className="inline-flex w-fit items-center rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-xs font-medium capitalize text-blue-700">
+                  {approvalLabel(l.lessonType)}
+                </span>
+                <p className="break-words text-sm text-slate-700">{l.summary}</p>
+              </li>
+            ))}
+          </ul>
+        </SectionCard>
+      )}
+
+      {/* WS6 — supervisor-review reflection. Only when reviews ran today. */}
+      {p.supervisorChecks && p.supervisorChecks.checked > 0 && (
+        <SectionCard title="Supervisor checks">
+          <p className="text-lg font-semibold tabular-nums text-slate-900">
+            {p.supervisorChecks.checked}{' '}
+            <span className="text-sm font-normal text-slate-500">
+              {p.supervisorChecks.checked === 1 ? 'proposal checked' : 'proposals checked'}
+            </span>
+          </p>
+          <p className="mt-0.5 text-sm text-slate-500">
+            {p.supervisorChecks.flagged > 0
+              ? `${p.supervisorChecks.flagged} flagged${
+                  p.supervisorChecks.fixed > 0 ? `, ${p.supervisorChecks.fixed} fixed` : ''
+                }`
+              : 'None flagged'}
+          </p>
+        </SectionCard>
+      )}
+
+      {/* D-015 amendment — autonomous booking lane reflection. Only when the
+          lane approved at least one booking today. */}
+      {p.autonomousBookings && p.autonomousBookings.count > 0 && (
+        <SectionCard title="Auto-booked">
+          <p className="text-lg font-semibold tabular-nums text-slate-900">
+            {p.autonomousBookings.count}{' '}
+            <span className="text-sm font-normal text-slate-500">
+              {p.autonomousBookings.count === 1 ? 'appointment' : 'appointments'}
+            </span>
+          </p>
+          {p.autonomousBookings.undone > 0 && (
+            <p className="mt-0.5 text-sm text-slate-500">{p.autonomousBookings.undone} undone</p>
+          )}
+        </SectionCard>
+      )}
+
+      {/* WS10 — "Instructions applied" reflection. Only when at least one
+          standing instruction fired on a draft today. */}
+      {p.instructionsApplied && p.instructionsApplied.length > 0 && (
+        <SectionCard title="Instructions applied">
+          <ul className="divide-y divide-slate-100">
+            {p.instructionsApplied.map((i) => (
+              <li key={i.id} className="flex min-h-11 flex-wrap items-center justify-between gap-2 py-2">
+                <p className="min-w-0 break-words text-sm text-slate-700">{i.text}</p>
+                <span className="shrink-0 text-sm font-medium tabular-nums text-slate-900">
+                  {i.draftCount} {i.draftCount === 1 ? 'draft' : 'drafts'}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </SectionCard>
+      )}
 
       {/* Overdue invoices */}
       <SectionCard title="Overdue invoices">

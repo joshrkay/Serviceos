@@ -58,9 +58,16 @@ import { LLMGateway } from '../gateway/gateway';
 import {
   classifyIntent,
   isLookupIntent,
+  isVoiceApprovalIntent,
+  isVoiceEditIntent,
   OWNER_LOOKUP_INTENT_TYPES,
   type IntentType,
 } from '../orchestration/intent-classifier';
+import { isApproverPhone } from '../../proposals/approver-identity';
+import {
+  createVoiceTurnProcessor,
+  type VoiceTurnProcessor,
+} from '../voice-turn/create-voice-turn-processor';
 import {
   intentClassifiedEvent,
   lookupExecutedEvent,
@@ -73,6 +80,11 @@ import {
   type VoiceSession,
 } from '../agents/customer-calling/voice-session-store';
 import { AgentEventBus } from './event-bus';
+import {
+  detectEmergency,
+  EMERGENCY_SAFETY_LINE,
+} from '../agents/customer-calling/emergency-detector';
+import { detectLanguage, renderTtsText } from '../agents/customer-calling/tts-copy';
 import type { CallingAgentEvent, SideEffect } from '../agents/customer-calling/types';
 import { enforceCompliance } from '../skills/enforce-compliance';
 import { escalateToHuman } from '../skills/escalate-to-human';
@@ -150,6 +162,14 @@ export interface AgentDriverStartOpts {
   tenantId: string;
   callerId: string | null;
   callerIdBlocked: boolean;
+  /**
+   * WS21b — force the session to be a recognized owner line (RV-070
+   * `ownerSession`), unlocking the owner-only approve/reject/edit dialogue.
+   * When omitted, the driver still resolves ownerSession via caller-ID match
+   * against `tenant_settings.owner_phone` (production `isApproverPhone`
+   * semantics), so a fixture can reach owner state either way.
+   */
+  callerIsOwner?: boolean;
 }
 
 export interface AgentDriverSpeakResult {
@@ -260,6 +280,15 @@ const LOOKUP_NOT_WIRED_FALLBACK =
   "I'm having trouble pulling that up right now. Let me get a person to help.";
 
 /**
+ * WS21b — skill name stamped on the `lookup_executed` event a recognized owner
+ * line emits at session establishment. The floor PII grader keys identity
+ * resolution off this name (see graders/floor.ts IDENTITY_RESOLVING_LOOKUPS):
+ * an owner caller-ID match IS identity verification, so owner-only readbacks
+ * that name a customer/amount are post-identity, not a pre-identity PII leak.
+ */
+const OWNER_IDENTITY_LOOKUP_SKILL = 'verify_owner_identity';
+
+/**
  * Build a one-line spoken confirmation for a freshly-created proposal.
  * Mirrors the "intent_confirm" flavor the Twilio adapter would speak
  * after the FSM lands a proposal — short, operator-friendly, never
@@ -268,6 +297,21 @@ const LOOKUP_NOT_WIRED_FALLBACK =
 function buildProposalConfirmation(proposalType: string): string {
   const human = proposalType.replace(/_/g, ' ');
   return `Got it — I've drafted a ${human} for review. Anything else I can help you with?`;
+}
+
+/**
+ * WS21b — pull the first spoken line out of a voice-turn processor result.
+ * The approval/edit handlers return a `tts_play` side effect carrying the
+ * dialogue's spoken text (readback / challenge prompt / confirmation); the
+ * driver surfaces that as the turn's `agentResponse`.
+ */
+function firstTtsText(sideEffects: SideEffect[]): string | undefined {
+  for (const fx of sideEffects) {
+    if (fx.type === 'tts_play' && typeof fx.payload.text === 'string' && fx.payload.text.length > 0) {
+      return fx.payload.text;
+    }
+  }
+  return undefined;
 }
 
 export class TextModeDriver implements AgentDriver {
@@ -279,6 +323,16 @@ export class TextModeDriver implements AgentDriver {
    * the handler map.
    */
   private readonly voiceActionRouter: ReturnType<typeof createVoiceActionRouterWorker>;
+  /**
+   * WS21b — the SAME production agent loop the Gather / media-streams
+   * transports use. The voice-action-router worker deliberately REFUSES
+   * approval intents (they mutate approval state, not create proposals), so
+   * approve/reject/edit turns — and pending-dialogue continuations (confirm /
+   * challenge / batch) — route here instead, reusing `handleVoiceApprovalIntent`
+   * / `handleVoiceEditIntent` / `handlePendingVoiceApproval` verbatim. Built
+   * once per driver; its deps are stable for the driver's lifetime.
+   */
+  private readonly voiceProcessor: VoiceTurnProcessor;
   /**
    * VQ2-followup: per-session zero-indexed turn counter. The driver
    * does not constrain itself to a single session at a time (the
@@ -312,6 +366,27 @@ export class TextModeDriver implements AgentDriver {
         : {}),
       now: () => (deps.now ? deps.now() : new Date()),
     });
+    // WS21b — construct the production voice-turn processor once. Only the
+    // approval/edit surface is exercised from the driver (the FSM-driven
+    // speechTurn stays owned by the driver's own classify loop), so we wire
+    // the deps that surface needs: proposalRepo (targets), settingsRepo (the
+    // money-class PIN challenge — WS21a interplay), catalogRepo (grounded
+    // quoting), plus audit/appointment/edit-interpreter (via gateway).
+    this.voiceProcessor = createVoiceTurnProcessor({
+      store: deps.voiceSessionStore,
+      gateway: deps.gateway,
+      businessName: 'VQ Harness',
+      proposalRepo: deps.proposalRepo,
+      ...(deps.settingsRepo ? { settingsRepo: deps.settingsRepo } : {}),
+      ...(deps.auditRepo ? { auditRepo: deps.auditRepo } : {}),
+      ...(deps.appointmentRepo ? { appointmentRepo: deps.appointmentRepo } : {}),
+      ...(deps.catalogRepo ? { catalogRepo: deps.catalogRepo } : {}),
+      ...(deps.invoiceRepo ? { invoiceRepo: deps.invoiceRepo } : {}),
+      ...(deps.estimateRepo ? { estimateRepo: deps.estimateRepo } : {}),
+      ...(deps.jobRepo ? { jobRepo: deps.jobRepo } : {}),
+      ...(deps.leadRepo ? { leadRepo: deps.leadRepo } : {}),
+      ...(deps.customerRepo ? { customerRepo: deps.customerRepo } : {}),
+    });
   }
 
   private now(): Date {
@@ -323,11 +398,32 @@ export class TextModeDriver implements AgentDriver {
     // session if a future test wants to. Prefix is unambiguous against
     // real Twilio CallSids (which start with 'CA').
     const synthetic = `${TEXT_MODE_CALLSID_PREFIX}${uuidv4()}`;
+    // WS21b — RV-070 owner-line recognition at session establishment (mirrors
+    // TwilioGatherAdapter.resolveOwnerSession): an explicit fixture flag OR a
+    // caller-ID match against tenant_settings.owner_phone stamps ownerSession,
+    // unlocking the owner-only approve/reject/edit dialogue. Fail-closed.
+    const ownerSession = await this.resolveOwnerSession(opts);
     const session = this.deps.voiceSessionStore.create(opts.tenantId, 'telephony', {
       callSid: synthetic,
+      ...(ownerSession ? { ownerSession: true } : {}),
     });
     if (this.deps.bus) {
       this.deps.bus.subscribe(session);
+    }
+
+    // WS21b — a recognized owner line is identity-resolved the instant the
+    // session is established: the caller-ID matched tenant_settings.owner_phone
+    // (or an explicit fixture flag), which is the verification. Production has
+    // no lookup skill for this (it's a session-establishment fact, not a read),
+    // so we stamp a dedicated identity-resolving `lookup_executed` here — before
+    // any turn speaks — so the floor PII grader treats owner-only readbacks
+    // (e.g. an approval readback naming a customer + amount) as post-identity.
+    // The PIN challenge remains the money-movement gate; this is identity only.
+    if (ownerSession) {
+      session.events.emit(
+        'voice-event',
+        lookupExecutedEvent(OWNER_IDENTITY_LOOKUP_SKILL, 0, true),
+      );
     }
 
     const state = await this.resolveStartState(session, opts);
@@ -436,6 +532,28 @@ export class TextModeDriver implements AgentDriver {
     };
   }
 
+  /**
+   * WS21b — resolve whether this caller is a recognized owner line. An
+   * explicit fixture `callerIsOwner` wins; otherwise mirror production's
+   * caller-ID identity check (`isApproverPhone` against
+   * tenant_settings.owner_phone). Best-effort + fail-closed: any lookup
+   * failure resolves to non-owner so a degraded dependency can never mint an
+   * owner session.
+   */
+  private async resolveOwnerSession(opts: AgentDriverStartOpts): Promise<boolean> {
+    if (opts.callerIsOwner === true) return true;
+    if (!this.deps.settingsRepo || !opts.callerId) return false;
+    try {
+      return await isApproverPhone(
+        { settingsRepo: this.deps.settingsRepo },
+        opts.tenantId,
+        opts.callerId,
+      );
+    } catch {
+      return false;
+    }
+  }
+
   async speak(
     sessionId: string,
     callerTranscript: string,
@@ -463,12 +581,53 @@ export class TextModeDriver implements AgentDriver {
     const state = this.stateBySession.get(sessionId);
 
     let agentResponse: string;
+
+    // RV-140/RV-142 — deterministic emergency-keyword interrupt, mirroring the
+    // telephony transports (twilio-adapter.runEmergencyScan /
+    // mediastream scanInterimForEmergency): a life-safety phrase in the caller
+    // transcript short-circuits the turn BEFORE any classify/LLM call. The 911
+    // safety line is spoken FIRST (localized to the call's language), then the
+    // call escalates to the on-call dispatcher (reason=emergency_dispatch). The
+    // Layer-1 driver never wired this, so a Spanish "fuga de gas" fell through
+    // to the classifier and never escalated.
+    const emergency = detectEmergency(callerTranscript);
+    if (emergency.matched) {
+      const emergencyResponse = await this.handleEmergency(session, callerTranscript, emergency.language);
+      const latencyMsEmergency = performance.now() - startedAt;
+      this.appendAgentAndEmit(session, sessionId, emergencyResponse);
+      return { agentResponse: emergencyResponse, latencyMs: latencyMsEmergency };
+    }
+
+    // WS21b — an in-flight owner approval dialogue (confirm / disambiguate /
+    // challenge / batch continuation) consumes the turn BEFORE classify,
+    // exactly as the production speechTurn does: a challenge PIN like "four two
+    // seven one" must never be re-classified as a fresh intent. The processor
+    // mutates session.pendingVoiceApproval / voiceApprovalState in place, so
+    // the next turn continues the dialogue.
+    const pendingApprovalFx = await this.voiceProcessor.handlePendingVoiceApproval(
+      session,
+      callerTranscript,
+      session.tenantId,
+    );
+    if (pendingApprovalFx) {
+      agentResponse = firstTtsText(pendingApprovalFx) ?? 'Got it.';
+      const latencyMsPending = performance.now() - startedAt;
+      this.appendAgentAndEmit(session, sessionId, agentResponse);
+      return { agentResponse, latencyMs: latencyMsPending };
+    }
+
     try {
       const classification = await classifyIntent(
         callerTranscript,
         {
           tenantId: session.tenantId,
           callerIsExistingCustomer: state?.identityState === 'resolved',
+          // WS21b — the owner-approval prompt section is appended to the
+          // classifier prompt ONLY on a recognized owner line, so every
+          // non-owner call's prompt (and its cassette) stays byte-identical.
+          ...(session.machine.currentContext.ownerSession === true
+            ? { ownerSession: true }
+            : {}),
         },
         this.deps.gateway,
       );
@@ -501,6 +660,55 @@ export class TextModeDriver implements AgentDriver {
         state.intentCounts.set(intent, (state.intentCounts.get(intent) ?? 0) + 1);
       }
 
+      // Emit `intent_classified` AFTER any escalation decision so its log
+      // index is at-or-after any escalation_triggered fired this turn.
+      // The disposition grader attributes escalations by append-only log
+      // index (not timestamp): turn i owns events in (intent[i-1], intent[i]].
+      // Emitting intent last keeps each turn's escalation inside its window.
+      const emitIntentClassified = (): void => {
+        session.events.emit(
+          'voice-event',
+          intentClassifiedEvent({
+            intentType: classification.intentType,
+            confidence: classification.confidence,
+            tokenUsage: classification.tokenUsage,
+          }),
+        );
+      };
+
+      // WS21b — owner approve/reject/edit route through the SAME production
+      // dialogue the telephony transports use (the voice-action-router
+      // deliberately refuses these intents). The processor hard-gates on the
+      // session's RV-070 ownerSession flag, so a non-owner "approve …" falls
+      // through the processor's own reprompt path — never starts an approval.
+      const entities = (classification.extractedEntities ?? {}) as Record<
+        string,
+        unknown
+      >;
+      if (isVoiceApprovalIntent(intent)) {
+        const approvalFx = await this.voiceProcessor.handleVoiceApprovalIntent(
+          session,
+          { intentType: intent, entities, utterance: callerTranscript, tenantId: session.tenantId },
+        );
+        agentResponse = firstTtsText(approvalFx) ?? 'Got it.';
+        emitIntentClassified();
+        const latencyMsApproval = performance.now() - startedAt;
+        this.appendAgentAndEmit(session, sessionId, agentResponse);
+        return { agentResponse, latencyMs: latencyMsApproval };
+      }
+      if (isVoiceEditIntent(intent)) {
+        const editFx = await this.voiceProcessor.handleVoiceEditIntent(session, {
+          entities,
+          utterance: callerTranscript,
+          tenantId: session.tenantId,
+        });
+        agentResponse = firstTtsText(editFx) ?? 'Got it.';
+        emitIntentClassified();
+        const latencyMsEdit = performance.now() - startedAt;
+        this.appendAgentAndEmit(session, sessionId, agentResponse);
+        return { agentResponse, latencyMs: latencyMsEdit };
+      }
+
       const decision = await this.evaluateTurn(
         state,
         session,
@@ -516,22 +724,6 @@ export class TextModeDriver implements AgentDriver {
       if (state && ADVERSARIAL_INPUT_RE.test(callerTranscript)) {
         state.tainted = true;
       }
-
-      // Emit `intent_classified` AFTER the escalation decision so its log
-      // index is at-or-after any escalation_triggered fired this turn.
-      // The disposition grader attributes escalations by append-only log
-      // index (not timestamp): turn i owns events in (intent[i-1], intent[i]].
-      // Emitting intent last keeps each turn's escalation inside its window.
-      const emitIntentClassified = (): void => {
-        session.events.emit(
-          'voice-event',
-          intentClassifiedEvent({
-            intentType: classification.intentType,
-            confidence: classification.confidence,
-            tokenUsage: classification.tokenUsage,
-          }),
-        );
-      };
 
       switch (decision.kind) {
         case 'terminate_dnc': {
@@ -597,20 +789,28 @@ export class TextModeDriver implements AgentDriver {
     }
 
     const latencyMs = performance.now() - startedAt;
+    this.appendAgentAndEmit(session, sessionId, agentResponse);
+    return { agentResponse, latencyMs };
+  }
 
-    // Capture the agent's reply on the transcript so summarizeSession
-    // sees both sides (mirrors twilio-adapter.processCallerUtterance).
+  /**
+   * Shared turn tail: capture the agent's reply on the transcript (so
+   * summarizeSession sees both sides, mirroring
+   * twilio-adapter.processCallerUtterance) and emit `speech_outbound` for the
+   * per-turn graders (perceived-completion, reprompt) with the zero-indexed
+   * turn position. Extracted so the WS21b approval/edit early-returns and the
+   * normal FSM path finalize the turn identically.
+   */
+  private appendAgentAndEmit(
+    session: VoiceSession,
+    sessionId: string,
+    agentResponse: string,
+  ): void {
     this.deps.voiceSessionStore.appendTranscript(sessionId, {
       speaker: 'agent',
       text: agentResponse,
       ts: Date.now(),
     });
-
-    // VQ2-followup: emit a speech_outbound event so graders that
-    // consume per-turn agent transcripts (perceived-completion,
-    // reprompt) work in Layer 1 too. The turn index is the
-    // zero-indexed position of this `speak()` call within the
-    // session.
     const turnIndex = this.turnIndexBySession.get(sessionId) ?? 0;
     this.turnIndexBySession.set(sessionId, turnIndex + 1);
     session.events.emit(
@@ -620,8 +820,6 @@ export class TextModeDriver implements AgentDriver {
         turnIndex,
       }),
     );
-
-    return { agentResponse, latencyMs };
   }
 
   async hangup(sessionId: string): Promise<void> {
@@ -825,6 +1023,31 @@ export class TextModeDriver implements AgentDriver {
     } catch {
       return true;
     }
+  }
+
+  /**
+   * RV-142 — emergency handling for the text-mode driver. Speaks the 911
+   * safety line FIRST (localized to the call's language via the same
+   * `renderTtsText` catalog the FSM transports use — the Spanish translation
+   * lives in tts-copy.ts SENTENCE_CATALOG_ES), then escalates to the on-call
+   * dispatcher with reason `emergency_dispatch` so `escalation_triggered`
+   * fires for the disposition grader. Language is detected from the caller's
+   * own utterance (the driver has no live STT language gate); an accented /
+   * marker-heavy Spanish emergency therefore gets the Spanish safety line.
+   */
+  private async handleEmergency(
+    session: VoiceSession,
+    callerTranscript: string,
+    keywordLanguage?: 'en' | 'es',
+  ): Promise<string> {
+    // Prefer the matched emergency keyword's language (strongest per-call
+    // signal — a Spanish "fuga de gas" means the caller speaks Spanish even
+    // when the sentence carries no accents the generic detector keys on);
+    // fall back to the transcript heuristic.
+    const lang = keywordLanguage ?? detectLanguage(callerTranscript);
+    const safetyLine = renderTtsText(EMERGENCY_SAFETY_LINE, {}, lang);
+    await this.escalate(session, 'emergency_dispatch');
+    return safetyLine;
   }
 
   /**

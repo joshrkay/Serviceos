@@ -25,6 +25,12 @@ export class LogExpenseExecutionHandler implements ExecutionHandler {
     private readonly auditRepo?: AuditRepository,
   ) {}
 
+  // WS3 — degrades to a synthetic-id passthrough (saves nothing) without the
+  // expense repo; boot fails when a pool is configured but this is false.
+  isFullyWired(): boolean {
+    return Boolean(this.expenseRepo);
+  }
+
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const { payload } = proposal;
     const description = typeof payload.description === 'string' ? payload.description : '';

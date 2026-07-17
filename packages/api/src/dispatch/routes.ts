@@ -9,11 +9,12 @@ import { ProposalRepository } from '../proposals/proposal';
 import { UserRepository } from '../users/user';
 import { SettingsRepository } from '../settings/settings';
 import { resolvePendingChangeRequests } from './pending-changes';
-import { requireAuth, requireTenant } from '../middleware/auth';
+import { requireAuth, requireRole, requireTenant } from '../middleware/auth';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { toErrorResponse } from '../shared/errors';
 import { createBoardEventsRouter, BoardEventsRouteDeps } from './board-events-route';
 import { createPresenceRouter } from './presence-routes';
+import { AuditRepository, createAuditEvent } from '../audit/audit';
 
 export interface EnRouteEnqueuer {
   enqueueEnRouteNotice(input: {
@@ -21,6 +22,40 @@ export interface EnRouteEnqueuer {
     appointmentId: string;
     technicianName?: string;
   }): Promise<string | null>;
+}
+
+interface DispatchRouteDeps {
+  appointmentRepo: AppointmentRepository;
+  assignmentRepo: AssignmentRepository;
+  jobRepo?: JobRepository;
+  customerRepo?: CustomerRepository;
+  locationRepo?: LocationRepository;
+  boardEventsDeps?: BoardEventsRouteDeps;
+  enRouteCoordinator?: EnRouteEnqueuer;
+  proposalRepo?: ProposalRepository;
+  userRepo?: UserRepository;
+  settingsRepo?: SettingsRepository;
+  auditRepo?: AuditRepository;
+}
+
+async function emitEnRouteAudit(
+  deps: DispatchRouteDeps,
+  auth: NonNullable<AuthenticatedRequest['auth']>,
+  appointmentId: string,
+  idempotencyKey: string | null,
+): Promise<void> {
+  if (!deps.auditRepo) return;
+  await deps.auditRepo.create(
+    createAuditEvent({
+      tenantId: auth.tenantId,
+      actorId: auth.userId,
+      actorRole: auth.role,
+      eventType: 'appointment.en_route_triggered',
+      entityType: 'appointment',
+      entityId: appointmentId,
+      correlationId: idempotencyKey ?? undefined,
+    }),
+  );
 }
 
 /**
@@ -39,28 +74,19 @@ export async function resolveTechnicianName(
   return fullName || user.email || technicianId;
 }
 
-export function createDispatchRoutes(deps: {
-  appointmentRepo: AppointmentRepository;
-  assignmentRepo: AssignmentRepository;
-  jobRepo?: JobRepository;
-  customerRepo?: CustomerRepository;
-  locationRepo?: LocationRepository;
-  boardEventsDeps?: BoardEventsRouteDeps;
-  enRouteCoordinator?: EnRouteEnqueuer;
-  proposalRepo?: ProposalRepository;
-  userRepo?: UserRepository;
-  settingsRepo?: SettingsRepository;
-}): Router {
+export function createDispatchRoutes(deps: DispatchRouteDeps): Router {
   const router = Router();
 
-  router.get('/board', async (req: Request, res: Response) => {
+  router.get('/board', requireAuth, requireTenant, async (req: AuthenticatedRequest, res: Response) => {
     try {
-      const authReq = req as AuthenticatedRequest;
-      const tenantId =
-        authReq.auth?.tenantId ?? (req.headers['x-tenant-id'] as string | undefined);
-      if (!tenantId) {
-        return res.status(400).json({ error: 'x-tenant-id header is required' });
-      }
+      // SEC-21 — tenant is derived exclusively from the verified session
+      // (req.auth.tenantId), never a client-supplied header. requireAuth +
+      // requireTenant above already 401/403 when it's absent; the old
+      // `?? x-tenant-id header` fallback let a forged header resolve the
+      // board for an arbitrary tenant on any future remount that skipped
+      // (or reordered) the global auth middleware.
+      const authReq = req;
+      const tenantId = authReq.auth!.tenantId;
 
       const date = req.query.date as string;
       if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
@@ -116,6 +142,7 @@ export function createDispatchRoutes(deps: {
     '/technician/:id/appointments',
     requireAuth,
     requireTenant,
+    requireRole('owner', 'dispatcher', 'technician'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const tenantId = req.auth!.tenantId;
@@ -125,6 +152,26 @@ export function createDispatchRoutes(deps: {
         // uuid cast (QA 2026-07-02). Bad input is the caller's error.
         if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(technicianId)) {
           return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'technician id must be a UUID' });
+        }
+
+        // SEC-22 — same-tenant IDOR guard. Mirrors the gate in
+        // routes/technician-location.ts:47: owner/dispatcher may read any
+        // technician's day; a technician-role caller may only read their
+        // OWN day. req.auth.userId is the Clerk subject, while the URL and
+        // assignment rows use canonical users.id UUIDs; resolveAuthorization
+        // places that UUID in canonicalUserId. Absence fails closed.
+        // Without this, any authenticated tenant member — including a
+        // plain technician — could pass an arbitrary technician UUID and
+        // read that technician's customer names, addresses, lat/long, and
+        // job summaries for the day.
+        if (
+          req.auth!.role === 'technician' &&
+          technicianId !== req.auth!.canonicalUserId
+        ) {
+          return res.status(403).json({
+            error: 'FORBIDDEN',
+            message: 'Technicians may only view their own appointments',
+          });
         }
 
         const dateStr = req.query.date as string | undefined;
@@ -216,6 +263,7 @@ export function createDispatchRoutes(deps: {
     '/appointments/:id/en-route',
     requireAuth,
     requireTenant,
+    requireRole('owner', 'dispatcher', 'technician'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         if (!deps.enRouteCoordinator) {
@@ -231,6 +279,19 @@ export function createDispatchRoutes(deps: {
           return res.status(404).json({ error: 'NOT_FOUND', message: 'Appointment not found' });
         }
 
+        if (req.auth!.role === 'technician') {
+          const canonicalUserId = req.auth!.canonicalUserId;
+          const assignments = canonicalUserId
+            ? await deps.assignmentRepo.findByAppointment(tenantId, appointmentId)
+            : [];
+          if (!assignments.some((assignment) => assignment.technicianId === canonicalUserId)) {
+            return res.status(403).json({
+              error: 'FORBIDDEN',
+              message: 'Only an assigned technician can send an en-route notice',
+            });
+          }
+        }
+
         const technicianName =
           typeof req.body?.technicianName === 'string' && req.body.technicianName.trim()
             ? req.body.technicianName.trim()
@@ -241,6 +302,7 @@ export function createDispatchRoutes(deps: {
           appointmentId,
           technicianName,
         });
+        await emitEnRouteAudit(deps, req.auth!, appointmentId, idempotencyKey);
 
         return res.status(202).json({
           accepted: true,

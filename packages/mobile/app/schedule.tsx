@@ -1,8 +1,10 @@
-import { useMemo, useState } from 'react';
-import { Pressable, Text, View } from 'react-native';
+import { useEffect, useMemo } from 'react';
 import { EntityList } from '../src/components/EntityList';
 import { useListQuery } from '../src/hooks/useListQuery';
+import { useMe } from '../src/hooks/useMe';
 import { formatShortDate } from '../src/lib/format';
+import { navModelFor } from '../src/navigation/personaNav';
+import { useRouter } from 'expo-router';
 
 interface Appointment {
   id: string;
@@ -10,8 +12,6 @@ interface Appointment {
   status?: string;
   appointmentType?: string;
 }
-
-type ScheduleView = 'list' | 'day' | 'week' | 'map';
 
 function titleCase(value?: string): string | undefined {
   if (!value) return undefined;
@@ -21,10 +21,32 @@ function titleCase(value?: string): string | undefined {
     .join(' ');
 }
 
+/**
+ * Supervisor schedule list. Technician accounts redirect to Today — the
+ * assigned day spine — instead of the tenant-wide appointments list.
+ */
 export default function Schedule() {
-  const [view, setView] = useState<ScheduleView>('list');
+  const router = useRouter();
+  const { me } = useMe();
+  // Technician role has no tenant-wide schedule — Today is the assigned day spine.
+  // Owners/dispatchers in "both" mode keep the supervisor schedule list.
+  const technicianOnly = me
+    ? navModelFor({
+        role: me.role,
+        currentMode: me.current_mode,
+        canFieldServe: me.can_field_serve,
+      }).persona === 'tech'
+    : false;
+
+  useEffect(() => {
+    if (technicianOnly) {
+      router.replace('/(tabs)/today');
+    }
+  }, [technicianOnly, router]);
+
   const { data, isLoading, error, refetch } = useListQuery<Appointment>('/api/appointments', {
     params: { paginated: 'true' },
+    enabled: !technicianOnly && Boolean(me),
   });
 
   const sorted = useMemo(
@@ -35,38 +57,8 @@ export default function Schedule() {
     [data],
   );
 
-  const headerAction = (
-    <View className="flex-row gap-1">
-      {(['list', 'day', 'week', 'map'] as ScheduleView[]).map((v) => (
-        <Pressable
-          key={v}
-          accessibilityRole="button"
-          accessibilityLabel={`${v} view`}
-          onPress={() => setView(v)}
-          className={`min-h-11 items-center justify-center rounded-md px-2 ${
-            view === v ? 'bg-primary' : 'bg-secondary'
-          }`}
-        >
-          <Text className={`text-xs capitalize ${view === v ? 'text-primaryForeground' : 'text-secondaryForeground'}`}>
-            {v}
-          </Text>
-        </Pressable>
-      ))}
-    </View>
-  );
-
-  if (view === 'map') {
-    return (
-      <View className="flex-1 bg-background pt-16 pb-20">
-        <View className="px-6">
-          <Text className="font-heading text-2xl font-semibold text-foreground">Schedule</Text>
-          <View className="mt-4">{headerAction}</View>
-          <Text className="mt-6 text-base text-mutedForeground">
-            Map view shows today&apos;s route order. Pull to refresh on List view for latest jobs.
-          </Text>
-        </View>
-      </View>
-    );
+  if (technicianOnly) {
+    return null;
   }
 
   return (
@@ -78,11 +70,10 @@ export default function Schedule() {
       onRefresh={() => void refetch()}
       keyOf={(a) => a.id}
       renderRow={(a) => ({
-        primary: a.scheduledStart ? formatShortDate(a.scheduledStart) : 'Appointment',
+        primary: a.scheduledStart ? formatShortDate(a.scheduledStart, me?.timezone) : 'Appointment',
         secondary: [titleCase(a.appointmentType), titleCase(a.status)].filter(Boolean).join(' · '),
       })}
       emptyText="Nothing scheduled."
-      headerAction={headerAction}
     />
   );
 }

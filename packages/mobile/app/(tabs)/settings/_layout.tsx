@@ -7,10 +7,7 @@ export default function SettingsLayout() {
       <Stack.Screen name="team" />
       <Stack.Screen name="voice" />
       <Stack.Screen name="brand-voice" />
-      <Stack.Screen name="lanes" />
       <Stack.Screen name="templates" />
-      <Stack.Screen name="lead-sources" />
-      <Stack.Screen name="billing" />
     </Stack>
   );
 }

@@ -9,13 +9,19 @@ import {
   Copy, ChevronDown, Clock, Briefcase, Receipt, Calendar,
   AlertCircle, Volume2, VolumeX, PhoneCall,
 } from 'lucide-react';
+import { toast } from 'sonner';
 import { VoiceSessionPanel } from './VoiceSessionPanel';
 import { useSearchParams } from 'react-router';
-import { type Message, type AIProposal } from '../../data/mock-data';
+import type { Message, AIProposal } from '../../types/assistant-ui';
 import { AIProposalCard } from '../shared/AIProposalCard';
+import { UndoToast } from '../common/UndoToast';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useTTS } from '../../hooks/useTTS';
 import { useConversationVoice } from '../../hooks/useConversationVoice';
+import { useUndoableApproval, type StartUndoInput, type ApproveResponseLike } from '../../hooks/useUndoableApproval';
+import { emitProposalsChanged } from '../../lib/proposal-events';
+import { reportError, toSafeErrorShape } from '../../lib/errorReporter';
+import { track } from '../../lib/analytics';
 
 interface ApiMessage {
   id: string;
@@ -103,8 +109,13 @@ async function sendToConversationAPI(
     };
   } catch (err) {
     // Network/auth failure reaching the assistant API. Surface an accurate,
-    // non-misleading message and log the real cause for debugging.
-    console.error('AI chat request failed:', err);
+    // non-misleading message. OBS-41 — log/report only a safe {name,
+    // message} shape, never the raw error object: `err` can be a fetch
+    // Response-derived Error whose message embeds the API response body
+    // (customer data) or, via apiFetch's 401 retry path, a token.
+    const safe = toSafeErrorShape(err);
+    console.error('AI chat request failed:', safe);
+    reportError(err, 'assistant-chat');
     return {
       content: 'Unable to connect to AI service — please try again or contact support.',
       reasoning: 'Could not reach the AI service.',
@@ -173,7 +184,17 @@ function VoiceWaveform({ duration }: { duration: number }) {
 }
 
 // ─── Message Bubble ─────────────────────────────────────────────
-function MessageBubble({ msg, isLast }: { msg: Message; isLast: boolean }) {
+function MessageBubble({
+  msg,
+  isLast,
+  onApproved,
+}: {
+  msg: Message;
+  isLast: boolean;
+  // Finding 2 — invoked after a proposal approve succeeds so the page can raise
+  // the shared undo toast (same affordance as the inbox).
+  onApproved?: (input: StartUndoInput) => void;
+}) {
   const [reaction, setReaction] = useState<'up' | 'down' | null>(null);
   const [showActions, setShowActions] = useState(false);
   const isUser = msg.role === 'user';
@@ -291,6 +312,15 @@ function MessageBubble({ msg, isLast }: { msg: Message; isLast: boolean }) {
                 if (!response.ok) {
                   throw new Error(`Approve failed: ${response.status} ${response.statusText}`);
                 }
+                // Finding 2 — parity with the inbox: raise the undo toast,
+                // anchored to the server's real window (approvedAt /
+                // undoExpiresAt ride the approve response).
+                const body = (await response.json().catch(() => null)) as ApproveResponseLike | null;
+                onApproved?.({
+                  proposalId,
+                  summary: msg.proposal!.title,
+                  response: body,
+                });
               }}
               onReject={async () => {
                 // Same authenticated client + throw-on-failure contract as
@@ -773,6 +803,17 @@ export function AssistantPage() {
   } | null>(null);
   const [ttsEnabled, setTtsEnabled]   = useState(() => getLocalFlag('rivet:tts-enabled') === 'true');
   const { speak, stop: stopTTS, isSpeaking } = useTTS({ rate: 1.0 });
+
+  // Finding 2 — approval-undo toast, identical to the inbox affordance and
+  // driven by the same server-anchored countdown. Fixes the assistant surface
+  // approving with NO undo path at all.
+  const undoToast = useUndoableApproval({
+    requestUndo: (proposalId) =>
+      apiFetch(`/api/proposals/${proposalId}/undo`, { method: 'POST' }),
+    // Keep the inbox (and any other live surface) in sync after an undo.
+    onUndone: () => emitProposalsChanged(),
+    onError: (message) => toast.error(message),
+  });
   const lastInputWasVoiceRef = useRef(false);
   // UB-B2 — conversation mode. Populated after `send` is defined (the hook
   // needs `send`; `send` needs the session to speak replies through the
@@ -840,6 +881,16 @@ export function AssistantPage() {
 
   const send = useCallback(async (text: string, opts?: { inputMode?: 'voice' | 'photo'; voiceDuration?: number; attachments?: Message['attachments'] }) => {
     if (!text.trim() && !opts?.attachments?.length) return;
+
+    // assistant_message_sent (U6) — every assistant turn funnels through here
+    // (typed, voice, suggestion chip, retry). Enums/counts only — never the
+    // message text.
+    track('assistant_message_sent', {
+      input_mode: opts?.inputMode ?? 'text',
+      length: text.trim().length,
+      has_attachment: (opts?.attachments?.length ?? 0) > 0,
+    });
+
     const t = now();
     lastInputWasVoiceRef.current = opts?.inputMode === 'voice';
 
@@ -1069,7 +1120,12 @@ export function AssistantPage() {
           <DateSep label={`Today · ${new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`} />
 
           {messages.map((msg, i) => (
-            <MessageBubble key={msg.id} msg={msg} isLast={i === messages.length - 1} />
+            <MessageBubble
+              key={msg.id}
+              msg={msg}
+              isLast={i === messages.length - 1}
+              onApproved={undoToast.start}
+            />
           ))}
 
           {typing && <TypingIndicator reasoning={typingReason} />}
@@ -1154,6 +1210,16 @@ export function AssistantPage() {
                   </span>
                 )}
               </div>
+            )}
+
+            {voiceConversation.error && (
+              <p
+                role="alert"
+                data-testid="conversation-voice-error"
+                className="mb-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700"
+              >
+                {voiceConversation.error}
+              </p>
             )}
 
             {/* Pending attachment preview */}
@@ -1257,6 +1323,18 @@ export function AssistantPage() {
         <div className="fixed bottom-24 right-6 z-50 w-96">
           <VoiceSessionPanel />
         </div>
+      )}
+
+      {/* Finding 2 — approval-undo toast (same component + server-driven window
+          as the inbox), so approving in the assistant is undoable too. */}
+      {undoToast.isActive && (
+        <UndoToast
+          summary={undoToast.summary}
+          remainingMs={undoToast.remainingMs}
+          windowMs={undoToast.windowMs}
+          onUndo={() => void undoToast.undo()}
+          onDismiss={undoToast.dismiss}
+        />
       )}
 
       <style>{`

@@ -29,22 +29,10 @@ export const router = createBrowserRouter([
     hydrateFallbackElement: routeFallback,
   },
 
-  // ── Public marketing site (shared header/footer, no auth) ──────────────
-  // Standalone pages the LandingPage (at "/") and footers link to. Public so
-  // they render signed-out and signed-in; "/" itself stays on ProtectedRoute.
-  {
-    lazy: async () => ({ Component: (await import('./components/marketing/MarketingLayout')).MarketingLayout }),
-    ErrorBoundary: RouteErrorElement,
-    hydrateFallbackElement: routeFallback,
-    children: [
-      { path: '/features', lazy: async () => ({ Component: (await import('./components/marketing/FeaturesPage')).FeaturesPage }) },
-      { path: '/pricing',  lazy: async () => ({ Component: (await import('./components/marketing/PricingPage')).PricingPage }) },
-      { path: '/about',    lazy: async () => ({ Component: (await import('./components/marketing/AboutPage')).AboutPage }) },
-      { path: '/download', lazy: async () => ({ Component: (await import('./components/marketing/DownloadPage')).DownloadPage }) },
-      { path: '/privacy',  lazy: async () => ({ Component: (await import('./components/marketing/PrivacyPage')).PrivacyPage }) },
-      { path: '/terms',    lazy: async () => ({ Component: (await import('./components/marketing/TermsPage')).TermsPage }) },
-    ],
-  },
+  // NOTE: The public marketing/legal pages (/features, /pricing, /about,
+  // /download, /privacy, /terms) moved to the standalone marketing site.
+  // The API forwards those paths there (see marketing-redirects.ts), and a
+  // signed-out visit to "/" is redirected too (see ProtectedRoute).
 
   // ── Fullscreen flows (no Shell chrome) ─────────────────────────────────
   // §10 onboarding — v2 sidebar shell (the legacy v1 wizard was retired).
@@ -232,6 +220,18 @@ export const router = createBrowserRouter([
       { path: 'contracts',      lazy: async () => ({ Component: (await import('./components/contracts/MaintenanceContractsPage')).MaintenanceContractsPage }) },
       { path: 'contracts/:id',  lazy: async () => ({ Component: (await import('./components/contracts/ContractDetailPage')).ContractDetailPage }) },
       { path: 'inbox',          lazy: async () => ({ Component: (await import('./components/inbox/InboxPage')).InboxPage }) },
+      // Canonical proposals UI lives at /inbox; keep /proposals as an alias
+      // so deep links and nav typos land on the approvals surface.
+      {
+        path: 'proposals',
+        lazy: async () => {
+          const { Navigate } = await import('react-router');
+          function ProposalsRedirect() {
+            return React.createElement(Navigate, { to: '/inbox', replace: true });
+          }
+          return { Component: ProposalsRedirect };
+        },
+      },
       { path: 'comms-inbox',    lazy: async () => ({ Component: (await import('./pages/conversations/CommsInboxPage')).CommsInboxPage }) },
       { path: 'interactions',   lazy: async () => ({ Component: (await import('./components/interactions/InteractionsPage')).InteractionsPage }) },
       { path: 'interactions/dispatch', lazy: async () => ({ Component: (await import('./components/interactions/DispatchLogPage')).DispatchLogPage }) },

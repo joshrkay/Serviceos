@@ -60,6 +60,7 @@ describe('integration — voice transcription → proposal', () => {
     const tenantId = 'tenant-integration';
     const userId = 'user-integration';
     const recordingId = 'rec-1';
+    const jobId = '3b6cbf1a-bd8a-45f7-8b84-ce6b43a231d1';
 
     // Seed the recording so voice repo can update it later.
     await voiceRepo.create({
@@ -92,7 +93,7 @@ describe('integration — voice transcription → proposal', () => {
       }),
       JSON.stringify({
         customerId: 'cust-1',
-        jobId: 'job-1',
+        jobId,
         lineItems: [{ description: 'Emergency repair', quantity: 1, unitPrice: 45000 }],
         customerMessage: 'Thanks for your business',
         confidence_score: 0.92,
@@ -129,6 +130,7 @@ describe('integration — voice transcription → proposal', () => {
               transcript: event.transcript,
               conversationId: event.conversationId,
               recordingId: event.recordingId,
+              ...(event.jobId ? { jobId: event.jobId } : {}),
             } satisfies VoiceActionRouterPayload,
             `${event.tenantId}:${event.recordingId}:voice_action_router`
           );
@@ -149,6 +151,7 @@ describe('integration — voice transcription → proposal', () => {
       recordingId,
       audioUrl: 'https://example.com/audio.webm',
       userId,
+      jobId,
     } satisfies TranscriptionJobPayload);
 
     // Step 2: drain the queue. Each iteration handles whatever message
@@ -171,6 +174,7 @@ describe('integration — voice transcription → proposal', () => {
     expect(proposals[0].proposalType).toBe('draft_invoice');
     expect(proposals[0].createdBy).toBe(userId);
     expect(proposals[0].summary).toContain('Acme Plumbing');
+    expect(proposals[0].payload.jobId).toBe(jobId);
 
     // Step 4: the voice recording transitioned to completed.
     const updatedRec = await voiceRepo.findById(tenantId, recordingId);

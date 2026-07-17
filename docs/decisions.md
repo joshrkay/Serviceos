@@ -211,3 +211,230 @@ not a change to D-004's posture.
   still requiring the cancellation path.
 - (c) Treating supervisorPresent as true when the flag is on — would leak permissiveness
   into all capture types.
+
+**Amendment (2026-07-11):** Added a platform-wide kill switch,
+`AUTONOMOUS_BOOKING_DISABLED=true`, checked in `evaluateAutonomousBookingLane`
+before the per-tenant opt-in gate (reason `platform_disabled`, distinct from
+`tenant_not_opted_in` in the audit trail and the sourceContext stamp) — an
+operator-level shutoff for every tenant simultaneously, independent of each
+tenant's `autonomous_booking_enabled` setting, for incident response without a
+per-tenant settings sweep. Also added digest visibility: the nightly owner
+digest now reports "Auto-booked: N appointment(s)" — a count of the day's
+proposals whose `sourceContext.autonomousLaneEvaluation.eligible = true` —
+mirroring the WS6 supervisorChecks reflection so autonomous activity is never
+silent even when nothing goes wrong.
+
+### D-016: Railway supersedes AWS (D-001) — CDK prototype removed
+**Date:** 2026-07-11
+**Decision:** D-001's single-cloud AWS/CDK deployment was never carried into production.
+The actual deploy target is **Railway** (`/railway.toml` + `/Dockerfile`), running the
+canonical monorepo under `/packages`. The AWS CDK stacks that implemented D-001
+(`experiments/infra/`) were quarantined as non-deployed in an earlier cleanup pass and have
+now been **removed entirely**, along with the rest of `/experiments`
+(`service-os-app/`, `service-os-agent/`, `supabase_migration.sql`) — none of it was ever
+wired into CI or the Railway build, and it had drifted too far from the shipping schema to
+be a safe reference. Two CI-run test files that pinned "founding decisions" against the
+quarantined Python prototype (`service-os-agent`) were deleted/surgically trimmed in the
+same pass: `packages/api/test/contracts/python-agent-contract.test.ts` (fully
+experiments-dependent, deleted) and `packages/api/test/decisions/decisions.test.ts`
+(D9/A1 trimmed to their non-experiments assertions; A2 deleted — it had no assertions left
+once its experiments-dependent tests were removed).
+**Rationale:** A decision record should reflect what actually ships. D-001 is superseded
+by the Railway deploy target that has been true since before this repo's current history;
+keeping a dead AWS prototype and tests that graded a never-deployed Python service against
+"founding decisions" gave false signal — CI could stay green on a decision the product
+doesn't implement, and a real regression in the Python prototype would never be caught
+because nothing runs it.
+**Story:** 2026-07 repo-cleanup sweep.
+**Alternatives rejected:**
+- Keep `/experiments` quarantined indefinitely — rejected: zero live references after the
+  prior pass, and its presence kept inviting new "founding decision" tests to be written
+  against it (see D9/A1/A2 history) instead of the real product.
+- Keep the CDK stack in case AWS is revisited — rejected: nothing in the current
+  architecture (Railway/Supabase/Clerk/Twilio) depends on it; reviving AWS deployment would
+  start from a fresh CDK design against the current schema, not from a two-generations-old
+  prototype.
+
+### D-017: One consent model — revoke-anywhere-suppress-everywhere, grants never cross channels
+**Date:** 2026-07-11
+**Decision:** Both outbound gates (voice `checkOutboundConsent`, SMS `GatedMessageDelivery`)
+now derive their decision through a single shared resolver
+(`packages/api/src/compliance/resolve-outbound-consent.ts`) on top of the append-only
+`consent_events` ledger (migration 168). The rule is deliberately asymmetric:
+- A standing revocation of a CONTACT consent kind (`sms` | `marketing`) — SMS STOP,
+  portal/manual opt-out — blocks BOTH voice and SMS, regardless of what
+  `customers.consent_status` or `sms_consent` read.
+- A GRANT never crosses channels. Each channel keeps its own affirmative signal
+  (voice: `consent_status = 'granted'`, written only by the voice capture seam
+  `recordCustomerConsent`; SMS: `sms_consent = true`). A ledger grant can only CLEAR a
+  prior revocation of the SAME kind (STOP → START), never create consent elsewhere.
+- Kind `recording` is NOT a contact kind: a "stop recording" objection keeps blocking
+  outbound VOICE (via the existing `consent_status = 'revoked'` rollup) but does NOT
+  suppress SMS — a caller who objected to being recorded still gets appointment texts.
+To enforce the grant asymmetry, `deriveConsentStatus` was deliberately tightened
+(partially reversing Story 10.6's rollup): ledger grants no longer roll
+`consent_status = 'granted'`, so an SMS START can no longer manufacture TCPA consent for
+autodialed voice calls. Manual `sms_consent` toggles (dashboard PUT /api/customers/:id)
+now also append a `consent_events` row (kind `sms`, source `manual`), making the ledger
+the source of truth for consent changes going forward. No migration: the ledger already
+carries kind/state/phone/tenant — cross-channel derivation is computed, not stored.
+**Rationale:** Voice read `customers.consent_status`, SMS read `sms_consent` — two
+unrelated fields with no cross-enforcement, so a customer who revoked by phone could
+still be texted. TCPA voice-call consent and SMS consent are formally distinct, so the
+unification must be conservative in exactly one direction: honoring a revocation
+everywhere is always safe; propagating a grant across channels would fabricate consent.
+**Story:** WS12 (safety-rails scorecard, item 2 — one consent model).
+**Alternatives rejected:**
+- Widening `consent_status` into a shared both-channels rollup — a single mutable field
+  cannot encode per-kind grant/revoke history, and any shared "granted" value would leak
+  consent across channels (the exact TCPA failure mode).
+- A new derived cross-channel column + migration — redundant: the ledger already carries
+  enough to derive the decision at the gates; a stored rollup would be a second source
+  of truth that can drift.
+- Letting `recording` revocations suppress SMS — objecting to being recorded is not a
+  revocation of contact consent; suppressing confirmations would punish the customer for
+  a privacy preference.
+
+### D-018: Autonomous close lane — sanctioned on-call sale-closing with owner UNDO
+**Date:** 2026-07-11
+**Superseded by D-019** (2026-07-12): the system-approval + undo-window backdating described
+below were REVOKED as a human-authority violation. On-call close now only STAGES proposals for
+explicit owner one-tap approval; the historical record is kept as written.
+**Decision:** A per-tenant opt-in (default OFF), stricter SIBLING of the D-015 booking
+lane (`packages/api/src/proposals/autonomous-close-lane.ts`) that authorizes the live
+voice agent to CLOSE the sale on the call: a three-member chain
+`draft_estimate → send_estimate($ref estimateId) → create_booking`, assembled on the live
+path via `applyChainMetadata`. `send_estimate` is comms-class and
+`decideInitialStatus`/`actionClassForProposalType` are deliberately UNCHANGED — a comms
+proposal is still born blocked. Instead the close flow performs an explicit SYSTEM
+APPROVAL of each chain member under the D-018 sanction (the analog of an owner's one-tap),
+stamped + audited; the create-time comms block stays. Every member carries
+`sourceContext.autonomousCloseEvaluation`.
+`evaluateAutonomousCloseLane` gates in order (first-failing wins): `platform_disabled`
+(`AUTONOMOUS_CLOSE_DISABLED`, checked FIRST and independently of
+`AUTONOMOUS_BOOKING_DISABLED`) → `tenant_not_opted_in`
+(`tenant_settings.autonomous_close_enabled`) → `quote_not_grounded_clean` (every line a
+clean catalog match — no LLM price is ever auto-sent) → `above_close_cap`
+(`tenant_settings.autonomous_close_max_cents`) → `not_strict_confirmed` (the authoritative
+strict `confirmIntent` gate; the deterministic pre-check is necessary, not sufficient) →
+`sms_consent_not_captured` (the on-call TCPA capture must succeed via
+`recordSmsConsentFromVoice`) → `scheduling_incomplete`/`hold_not_placed`/`hold_expired` →
+`booking_lane_ineligible` (the composed D-015 evaluation) → `session_flagged`
+(vulnerability/emergency/negotiation, checked last). Migration 247 adds the two
+`tenant_settings` columns.
+**Rationale:** Booking a held slot (D-015) and closing a sale (drafting + SENDING a
+priced quote/deposit link to the customer) are different risk tiers, so the close needs
+its own opt-in, its own cap, and its own kill switch — never a widening of D-015's gate
+set. A caller-initiated, strict-confirmed, consent-gated close warrants IMMEDIATE
+execution rather than D-015's 5-second undo delay: the sanction backdates `approvedAt`
+by UNDO_WINDOW_MS at approval time (audited as `undoWindowBypassed: true`) so the
+executor's D-009 gate treats the window as elapsed — the executor itself is unmodified.
+The safety net is the strict confirm gate plus an owner UNDO (`create_booking` → compensating cancellation + apology;
+`send_estimate` → the estimate is withdrawn/voided so its approval link stops accepting
+and no deposit can be taken — the quote TEXT itself cannot be recalled, and the UNDO copy
+says so).
+**Story:** WS18 (close the sale on the call).
+**Alternatives rejected:**
+- Teaching `decideInitialStatus` to auto-approve comms — would weaken the WS12 gate
+  platform-wide; the sanction is a scoped explicit approval, not a rule change.
+- Bypassing the `GatedMessageDelivery` / consent gate for the deposit text — the on-call
+  SMS consent capture is what makes the gate pass legitimately.
+- Reusing `AUTONOMOUS_BOOKING_DISABLED` — an operator must be able to freeze on-call
+  sale-closing while leaving autonomous booking live (and vice-versa), so the close needs
+  its own independent kill switch.
+
+### D-019: On-call close requires explicit owner approval — D-018 system approval revoked
+**Date:** 2026-07-12
+**Initiative:** QUALITY-2026-07-12 (Restore human-authority invariants), Workstream 2.
+**Decision:** The D-018 "sanctioned autonomous close" is revoked. No proposal may ever be
+approved by a system actor: `system:autonomous-close` (and any `system:` actor) can CREATE
+and stage proposals but can NEVER transition one to `approved`. Approval — the point at which
+canonical writes, customer communication, booking confirmation, and money movement become
+authorized — belongs to a human (the owner). Concretely:
+- Deleted `sanctionCloseChain` (the explicit per-member system approval), `executeCloseChain`
+  (the synchronous in-order executor), `sendCloseUndoSms` (the after-the-fact owner UNDO), and
+  `assembleCloseChain` (the pre-approval 3-member assembler) from
+  `proposals/autonomous-close-execution.ts`.
+- Removed the undo-window backdating entirely: nothing writes `approvedAt` in the past
+  (`new Date(Date.now() - UNDO_WINDOW_MS)` is gone), so the D-009 5-second undo window is
+  honored on every close proposal the owner approves.
+- A caller's confirmed, consent-gated, catalog-clean close now HOLDS the slot and STAGES a
+  DRAFT chain — `draft_estimate → send_estimate($ref estimateId) → create_booking` (the held
+  slot as a concrete `create_booking` DRAFT) — then sends the owner ONE `renderChainSms`
+  one-tap approval SMS. The owner's tap (routes/one-tap-approve.ts → `approveChainSet`)
+  approves the capture-class head + the capture-class booking in one action (the comms-class
+  `send_estimate` follows separately, exactly as the chain legend says); the D-009 undo window
+  and the standard executor are unchanged. The one-tap owner-approval fallback is preserved and
+  is now the ONLY close path.
+- The lane evaluation (`evaluateAutonomousCloseLane`) is retained as telemetry and to decide
+  whether the held booking is staged in the owner chain (eligible) or the hold is released and
+  a two-member estimate+send chain is staged (ineligible) — it no longer gates any autonomous
+  execution.
+- Structural guard: `transitionProposal` (proposals/lifecycle.ts) rejects any transition to
+  `approved` by a `system:` actor, so the invariant cannot be reintroduced by a future caller.
+- Removed the D-018-specific close-chain compensation from the one-tap UNDO route (siblings
+  are no longer system-approved, and no close UNDO token is minted); the generic D-015 booking
+  undo is unchanged.
+- `AUTONOMOUS_CLOSE_DISABLED` (env) is deprecated but still accepted as a platform-wide off
+  switch for even PREPARING the owner chain; `tenant_settings.autonomous_close_enabled` /
+  `autonomous_close_max_cents` columns are retained (migration 247 is immutable) but now only
+  govern whether the held booking is included in the owner-approval chain — never autonomous
+  execution.
+**Rationale:** "Never auto-execute proposals — all require human approval" (CLAUDE.md) is a
+hard product invariant. D-018's system approval + undo-window backdating let the platform
+confirm a booking, text a customer, and stand up a deposit link with no human in the loop —
+a governance violation that no gate ladder makes acceptable. Holding a slot and preparing
+proposals on caller confirmation is fine; authorizing them is the owner's, and only the
+owner's, act.
+**Story:** QUALITY-2026-07-12 WS2 (restore human-authority invariants).
+**Alternatives rejected:**
+- Keeping system approval behind a stricter gate — any system approval violates the invariant;
+  the gate strength is irrelevant.
+- Dropping the held booking entirely on caller confirmation — the goal explicitly permits
+  holding a slot and preparing proposals; staging the booking as a DRAFT under owner approval
+  preserves the product outcome without the violation.
+
+### D-020: Sent-estimate retract is soft-delete (UI: Withdraw) — no void status
+**Date:** 2026-07-15
+**Initiative:** CRM QA QA-MANUAL-0730 (EST-0002 sent; no Cancel/Void/Withdraw control).
+**Decision:** Owners retract a sent estimate by soft-deleting it. The web UI labels that
+action **Withdraw** for `status === 'sent'` (including the UI-derived "Viewed" state, which
+is still `sent` underneath). Soft-delete sets `deleted_at`, emits audit event
+`estimate.deleted` (metadata includes the prior status), removes the row from list/get
+paths, and stops the public approval link (`findById` filters `deleted_at IS NULL`). Draft,
+`ready_for_review`, `rejected`, and `expired` keep the **Delete** label for the same
+`DELETE /api/estimates/:id` path. Accepted estimates remain non-deletable (clone instead).
+There is **no** estimate `voided` / `canceled` / `withdrawn` status; invoice void stays
+invoice-only.
+**Rationale:** Retractability already shipped via soft-delete (`softDeleteEstimate` in
+`packages/api/src/estimates/estimate.ts`, migration `125_estimates_deleted_at`). QA found a
+discoverability gap — the control only said "Delete" and the confirm copy never named the
+customer-link effect. Renaming/clarifying the UX closes the finding without a status-machine
+migration or a parallel audit event.
+**Story:** QA-MANUAL-0730 / EST withdraw UX.
+**Alternatives rejected:**
+- First-class `voided` status mirroring invoices — expands shared enums, DB CHECK, public
+  approve/decline gates, and money-state for Medium-priority discoverability; deferred.
+- Document-only "sent estimates are immutable" — false; soft-delete already retracts.
+
+### D-021: One Expo app serves supervisor and technician field personas
+**Date:** 2026-07-15
+**Decision:** The App Store and Play Store clients ship from the existing
+`packages/mobile` Expo + React Native codebase as one binary. The authenticated
+user's DB-authoritative role and `current_mode` select the surface: supervisors
+land on voice, approvals, and money; technicians land on Today, assigned work,
+field status, voice notes, and job photos; owner-operators in `both` mode receive
+the combined surface. Administration remains web-first. AI, proposal execution,
+tenant authorization, and canonical writes remain server-side.
+**Rationale:** The supervisor voice-to-approval loop, camera, push, Clerk auth,
+Stripe Terminal, and shared TypeScript contracts already run in Expo. The
+technician day APIs also already exist. A Swift or Flutter rewrite would discard
+that leverage, duplicate security-sensitive API clients and proposal UX, and
+create a second implementation before native-only requirements justify it.
+**Constraints:** Mobile navigation is permission- and mode-aware; technician
+ownership checks resolve Clerk subjects to canonical `users.id` values; voice and
+AI calls continue through the API gateway; proposals still require human approval;
+camera, microphone, location, and notification permissions must match actual use.
+**Alternatives rejected:** Swift/SwiftUI (iOS-only rewrite plus separate Android
+client), Flutter (Dart rewrite with no direct shared-contract reuse), and a
+Capacitor/WebView wrapper (weaker field media, push, and payment integration).

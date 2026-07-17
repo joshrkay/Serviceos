@@ -147,6 +147,43 @@ export const LANGUAGE_SWITCH_ACK: Record<SessionLanguage, string> = {
   es: 'De acuerdo, continuemos en español. ¿En qué puedo ayudarle?',
 };
 
+/**
+ * VOX-52 — voice a disambiguation prompt for an ambiguous entity reference.
+ * `candidates` is the resolver's candidate set mapped to `{ id, name, score }`.
+ * Speaks the distinct candidate names so the caller can choose; when the names
+ * are indistinguishable (e.g. two customers both "Bob Smith"), reading them
+ * back helps nobody, so we ask for a distinguishing detail instead. Never
+ * picks for the caller.
+ */
+function renderDisambiguation(candidates: unknown, lang: SessionLanguage): string {
+  const names = Array.isArray(candidates)
+    ? candidates
+        .map((c) =>
+          c && typeof c === 'object' && typeof (c as { name?: unknown }).name === 'string'
+            ? ((c as { name: string }).name).trim()
+            : '',
+        )
+        .filter((n) => n.length > 0)
+    : [];
+  const distinct = [...new Set(names)].slice(0, 3);
+
+  // Identical or missing names → ask for a distinguishing detail rather than
+  // reading the same name back.
+  if (distinct.length < 2) {
+    return lang === 'es'
+      ? 'Encontré más de un registro con ese nombre. ¿Me puede dar la dirección de servicio para elegir el correcto?'
+      : 'I found more than one record under that name. Could you give me the service address so I can pick the right one?';
+  }
+
+  const list =
+    lang === 'es'
+      ? distinct.slice(0, -1).join(', ') + ' o ' + distinct[distinct.length - 1]
+      : distinct.slice(0, -1).join(', ') + ' or ' + distinct[distinct.length - 1];
+  return lang === 'es'
+    ? `Encontré varias coincidencias — ¿se refiere a ${list}? ¿Cuál de ellas?`
+    : `I found a few matches — did you mean ${list}? Which one?`;
+}
+
 export function renderTtsText(
   rawText: string,
   payload: Record<string, unknown>,
@@ -172,6 +209,12 @@ export function renderTtsText(
       return lang === 'es'
         ? `Para confirmar: usted desea ${intentLabel(intent, 'es')}. ¿Es correcto?`
         : `Just to confirm — you'd like to ${intentLabel(intent, 'en')}. Is that right?`;
+    case 'disambiguate':
+      // VOX-52 — a free-text reference matched more than one record above the
+      // resolver threshold. Voice the distinct candidate names so the caller
+      // can pick; if the names are identical (the "two Bobs" case) listing them
+      // helps nobody, so ask for a distinguishing detail instead. Never guess.
+      return renderDisambiguation(payload.candidates, lang);
     case 'greeting':
       return lang === 'es'
         ? '¡Hola! ¿En qué puedo ayudarle hoy?'

@@ -31,6 +31,7 @@ import { decodeTwilioInboundFrame } from '../../../src/telephony/media-streams/m
 import { VOICE_EVENT_CHANNEL } from '../../../src/ai/voice-quality/event-bus';
 import { WhisperCache } from '../../../src/telephony/whisper-cache';
 import { DEFAULT_ESCALATION_SETTINGS } from '../../../src/settings/settings';
+import { voiceTurnLatencyMs } from '../../../src/monitoring/metrics';
 
 // ─── Fakes ─────────────────────────────────────────────────────────────────────────────
 
@@ -107,7 +108,7 @@ function makeTtsProvider(): TtsProvider {
   return {
     synthesize: vi.fn(async (): Promise<TtsSynthesizeResult> => ({
       audio: Buffer.alloc(640),
-      contentType: 'audio/mulaw',
+      contentType: 'audio/pcm',
       provider: 'test',
     })),
   };
@@ -200,6 +201,50 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
 
     const mediaFrames = ws.sent.filter((m) => (m as Record<string, unknown>).event === 'media');
     expect(mediaFrames.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('P0: does NOT stream synthesize() output as PCM when contentType is compressed audio (e.g. mp3)', async () => {
+    // Regression pin for the silent-voice-output bug: a non-streaming
+    // TtsProvider (OpenAI tts-1 in production) returns 'audio/mpeg' — MP3
+    // bytes streamPcmAsMedia has no decoder for. Feeding it through
+    // previously produced inaudible static with no error. The adapter must
+    // now refuse to treat non-PCM contentType as raw PCM and log instead.
+    store.create('t', 'telephony', { callSid: 'CA-mp3' });
+    const ws = new FakeWs();
+    const { provider, handle } = makeStreamingProvider();
+    const mp3OnlyTts: TtsProvider = {
+      synthesize: vi.fn(async (): Promise<TtsSynthesizeResult> => ({
+        audio: Buffer.from('ID3-fake-mp3-bytes'),
+        contentType: 'audio/mpeg',
+        provider: 'openai-tts-1',
+      })),
+      // Deliberately no synthesizeStream — exercises the buffered branch.
+    };
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: provider,
+        speechTurn: async () => [],
+        ttsProvider: mp3OnlyTts,
+        initializeSession: async () => [{ type: 'tts_play', payload: { text: 'Hello!' } }],
+      },
+      ws,
+    );
+    adapter.start();
+
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-mp3',
+      start: { callSid: 'CA-mp3', accountSid: 'AC', streamSid: 'MZ-mp3', tracks: ['inbound'] },
+    });
+    await new Promise((r) => setImmediate(r));
+    handle.emit({ type: 'final', isFinal: true, transcript: 'hello', confidence: 0.95 });
+    await new Promise((r) => setImmediate(r));
+
+    expect(mp3OnlyTts.synthesize).toHaveBeenCalledTimes(1);
+    // No media frames were emitted — the mp3 bytes never reached streamPcmAsMedia.
+    const mediaFrames = ws.sent.filter((m) => (m as Record<string, unknown>).event === 'media');
+    expect(mediaFrames.length).toBe(0);
   });
 
   it('closes WS with 1008 when start frame has empty callSid (invalid_start_payload)', async () => {
@@ -955,6 +1000,99 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
     expect(streamingProvider.synthesizeStream).toHaveBeenCalledTimes(1);
   });
 
+  describe('VOX-35b: streaming TTS failure recovery', () => {
+    it('falls back to buffered REST synth (PCM) when the stream throws, instead of dead air', async () => {
+      // synthesizeStream opens then throws before any chunk (models a VOX-33
+      // inactivity stall / WS blip). synthesize() returns raw PCM, so the
+      // fallback should stream it out — the caller must hear the utterance.
+      const synthesize = vi.fn(
+        async (): Promise<TtsSynthesizeResult> => ({
+          audio: Buffer.alloc(640 * 2),
+          contentType: 'audio/pcm',
+          provider: 'fallback-rest',
+        }),
+      );
+      const failingStreamProvider: TtsProvider = {
+        synthesize,
+        synthesizeStream: vi.fn(() => ({
+          // eslint-disable-next-line require-yield
+          async *[Symbol.asyncIterator]() {
+            throw new Error('ElevenLabs stream inactivity timeout after 4000ms');
+          },
+        })),
+      };
+
+      const { adapter, ws } = setupAdapter({
+        ttsProvider: failingStreamProvider,
+        callSid: 'CA-fallback-pcm',
+      });
+      ws.inboundJson({
+        event: 'start',
+        streamSid: 'MZ-fallback-pcm',
+        start: { callSid: 'CA-fallback-pcm', accountSid: 'AC', streamSid: 'MZ-fallback-pcm', tracks: ['inbound'] },
+      });
+      await new Promise((r) => setImmediate(r));
+
+      await (adapter as unknown as { emitSideEffects: (fx: unknown[]) => Promise<void> }).emitSideEffects([
+        { type: 'tts_play', payload: { text: 'Your appointment is confirmed for Tuesday.' } },
+      ]);
+
+      // The REST fallback ran…
+      expect(synthesize).toHaveBeenCalledTimes(1);
+      // …and its PCM reached the wire (no dead air).
+      const mediaFrames = ws.sent.filter((f: unknown) => (f as { event?: string }).event === 'media');
+      expect(mediaFrames.length).toBeGreaterThan(0);
+    });
+
+    it('drops a non-PCM buffered fallback and plays a filler clip instead of static', async () => {
+      // ElevenLabs REST returns mp3 — feeding that to streamPcmAsMedia would
+      // be inaudible static, so the PCM guard must reject it and fall through
+      // to a short filler clip (audible acknowledgement, not dead air).
+      const synthesize = vi.fn(
+        async (): Promise<TtsSynthesizeResult> => ({
+          audio: Buffer.from([0xff, 0xfb, 0x00]),
+          contentType: 'audio/mpeg',
+          provider: 'elevenlabs',
+        }),
+      );
+      const failingStreamProvider: TtsProvider = {
+        synthesize,
+        synthesizeStream: vi.fn(() => ({
+          // eslint-disable-next-line require-yield
+          async *[Symbol.asyncIterator]() {
+            throw new Error('ElevenLabs WS error');
+          },
+        })),
+      };
+      const fillerCache = makeFakeFillerCache(['okay']);
+      const fillerEngine = {
+        selectNext: () => ({ id: 'okay', text: 'One moment.', approxDurationMs: 260 }),
+      };
+
+      const { adapter, ws } = setupAdapter({
+        ttsProvider: failingStreamProvider,
+        fillerCache,
+        fillerEngine,
+        callSid: 'CA-fallback-mp3',
+      });
+      ws.inboundJson({
+        event: 'start',
+        streamSid: 'MZ-fallback-mp3',
+        start: { callSid: 'CA-fallback-mp3', accountSid: 'AC', streamSid: 'MZ-fallback-mp3', tracks: ['inbound'] },
+      });
+      await new Promise((r) => setImmediate(r));
+
+      await (adapter as unknown as { emitSideEffects: (fx: unknown[]) => Promise<void> }).emitSideEffects([
+        { type: 'tts_play', payload: { text: 'Give me a second.' } },
+      ]);
+
+      expect(synthesize).toHaveBeenCalledTimes(1);
+      // The mp3 was NOT streamed as static, but the filler clip WAS played.
+      const mediaFrames = ws.sent.filter((f: unknown) => (f as { event?: string }).event === 'media');
+      expect(mediaFrames.length).toBeGreaterThan(0);
+    });
+  });
+
   describe('escalate_with_context fan-out', () => {
     it('writes whisper cache, calls SMS provider, emits in-app event in parallel', async () => {
       const whisperCache = new WhisperCache();
@@ -1508,7 +1646,7 @@ describe('UB-C1 — language threading + live switching', () => {
     return {
       synthesize: vi.fn(async (_input: TtsSynthesizeInput): Promise<TtsSynthesizeResult> => ({
         audio: Buffer.alloc(640),
-        contentType: 'audio/mulaw',
+        contentType: 'audio/pcm',
         provider: 'test',
       })),
     };
@@ -1891,7 +2029,7 @@ describe('UB-C2 — streaming TTS language + copy rendering', () => {
     const tts = {
       synthesize: vi.fn(async (_input: TtsSynthesizeInput): Promise<TtsSynthesizeResult> => ({
         audio: Buffer.alloc(640),
-        contentType: 'audio/mulaw',
+        contentType: 'audio/pcm',
         provider: 'test',
       })),
     };
@@ -1974,5 +2112,107 @@ describe('UB-C2 — streaming TTS language + copy rendering', () => {
     // Real TTS still played after the silent-gap turn.
     const framesAfter = ws.sent.filter((f) => (f as Record<string, unknown>).event === 'media');
     expect(framesAfter.length).toBeGreaterThan(0);
+  });
+});
+
+// ─── WS26 — voice turn latency (STT-final → first TTS chunk) ──────────────────
+
+describe('WS26 voice_turn_latency_ms', () => {
+  /** Read the histogram's cumulative sample count from its prom export. */
+  async function turnLatencyCount(): Promise<number> {
+    const snap = await voiceTurnLatencyMs.get();
+    return (
+      snap.values.find((v) => v.metricName === 'voice_turn_latency_ms_count')?.value ?? 0
+    );
+  }
+
+  beforeEach(() => {
+    // Isolated from other tests + reruns — this metric is a module singleton.
+    voiceTurnLatencyMs.reset();
+  });
+
+  it('observes exactly one sample per driven turn (final transcript → first TTS chunk)', async () => {
+    store.create('t', 'telephony', { callSid: 'CA-ws26' });
+    const ws = new FakeWs();
+    const { provider, handle } = makeStreamingProvider();
+    const tts = makeTtsProvider();
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: provider,
+        // The turn's reply is what produces outbound audio AFTER the final
+        // transcript arms the latency timer (the greeting would not count).
+        speechTurn: async () => [{ type: 'tts_play', payload: { text: 'Sure, one moment.' } }],
+        ttsProvider: tts,
+      },
+      ws,
+    );
+    adapter.start();
+
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-ws26',
+      start: { callSid: 'CA-ws26', accountSid: 'AC', streamSid: 'MZ-ws26', tracks: ['inbound'] },
+    });
+    await new Promise((r) => setImmediate(r));
+
+    expect(await turnLatencyCount()).toBe(0);
+
+    handle.emit({ type: 'final', isFinal: true, transcript: 'do you have a slot', confidence: 0.95 });
+    await new Promise((r) => setImmediate(r));
+
+    // Audio actually flowed…
+    const mediaFrames = ws.sent.filter((m) => (m as Record<string, unknown>).event === 'media');
+    expect(mediaFrames.length).toBeGreaterThanOrEqual(1);
+    // …and the turn was measured exactly once, no matter how many chunks.
+    expect(await turnLatencyCount()).toBe(1);
+  });
+
+  it('does not throw into the audio path when the metrics registry throws', async () => {
+    // Simulate a broken prom registry: observe() throws. The turn must still
+    // complete and stream audio — the timing capture is best-effort only.
+    const observeSpy = vi
+      .spyOn(voiceTurnLatencyMs, 'observe')
+      .mockImplementation(() => {
+        throw new Error('registry exploded');
+      });
+    try {
+      store.create('t', 'telephony', { callSid: 'CA-ws26-throw' });
+      const ws = new FakeWs();
+      const { provider, handle } = makeStreamingProvider();
+      const tts = makeTtsProvider();
+      const adapter = new TwilioMediaStreamAdapter(
+        {
+          store,
+          streamingProvider: provider,
+          speechTurn: async () => [{ type: 'tts_play', payload: { text: 'Of course.' } }],
+          ttsProvider: tts,
+        },
+        ws,
+      );
+      adapter.start();
+
+      ws.inboundJson({
+        event: 'start',
+        streamSid: 'MZ-ws26-throw',
+        start: {
+          callSid: 'CA-ws26-throw',
+          accountSid: 'AC',
+          streamSid: 'MZ-ws26-throw',
+          tracks: ['inbound'],
+        },
+      });
+      await new Promise((r) => setImmediate(r));
+      handle.emit({ type: 'final', isFinal: true, transcript: 'hi there', confidence: 0.95 });
+      await new Promise((r) => setImmediate(r));
+
+      // observe() was reached (proving the seam is wired) and it threw…
+      expect(observeSpy).toHaveBeenCalled();
+      // …yet the outbound audio path was unaffected.
+      const mediaFrames = ws.sent.filter((m) => (m as Record<string, unknown>).event === 'media');
+      expect(mediaFrames.length).toBeGreaterThanOrEqual(1);
+    } finally {
+      observeSpy.mockRestore();
+    }
   });
 });

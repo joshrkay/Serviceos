@@ -32,7 +32,7 @@ import {
 } from '../../src/webhooks/webhook-handler';
 import { Tenant, TenantRepository } from '../../src/auth/clerk';
 import { InMemoryInvoiceRepository, Invoice } from '../../src/invoices/invoice';
-import { InMemoryPaymentRepository } from '../../src/invoices/payment';
+import { InMemoryPaymentRepository, recordPayment } from '../../src/invoices/payment';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { buildLineItem, calculateDocumentTotals } from '../../src/shared/billing-engine';
 import type { AppConfig } from '../../src/shared/config';
@@ -331,5 +331,197 @@ describe('B1 — Clerk user.created dedup through the injected durable repo', ()
 
     const afterRetry = await sharedRepo.findByIdempotencyKey('clerk', svixId);
     expect(afterRetry?.status).toBe('processed');
+  });
+});
+
+// ── TEST-01/03 — refund/dispute handlers throw mid-processing, then redeliver ──
+//
+// The checkout/Clerk describes above prove the GENERIC "throw mid-processing
+// -> marked failed -> retry recovers" mechanism. These extend the same proof
+// to the two money-reversal event types (charge.refunded, charge.dispute.created),
+// which each carry their OWN idempotency guard below the outer webhookRepo
+// dedup (recordRefund's per-stripeRefundId short-circuit; reversePayment's
+// atomic compare-and-swap + self-heal). A throw AFTER the underlying mutation
+// already committed but BEFORE the route acks 'processed' is exactly the
+// crash window those inner guards exist for — this proves the two layers
+// compose correctly, not just each one in isolation.
+
+/** Wraps InMemoryAuditRepository so its FIRST `create()` call throws, then
+ * behaves normally — simulates a transient failure (e.g. a DB blip on the
+ * audit write) landing AFTER the payment/invoice mutation already committed. */
+class ThrowOnceAuditRepository extends InMemoryAuditRepository {
+  private thrown = false;
+  async create(event: Parameters<InMemoryAuditRepository['create']>[0]) {
+    if (!this.thrown) {
+      this.thrown = true;
+      throw new Error('simulated transient audit-write failure');
+    }
+    return super.create(event);
+  }
+}
+
+describe('B1/TEST-01 — charge.refunded: throw mid-processing then redeliver (idempotent)', () => {
+  const PI_ID = 'pi_refund_throw_1';
+
+  function chargeRefundedEvent(eventId: string) {
+    return {
+      id: eventId,
+      type: 'charge.refunded',
+      data: {
+        object: {
+          id: 'ch_refund_throw_1',
+          payment_intent: PI_ID,
+          metadata: {},
+          refunds: {
+            data: [
+              {
+                id: 're_throw_1',
+                amount: 1500,
+                created: Math.floor(Date.now() / 1000),
+                status: 'succeeded',
+                payment_intent: PI_ID,
+                metadata: { tenant_id: TENANT },
+              },
+            ],
+          },
+        },
+      },
+    };
+  }
+
+  it('a throw after the refund mutation committed marks the event failed; the redelivery is idempotent (no double-count) and completes', async () => {
+    const sharedRepo = new InMemoryWebhookRepository();
+    const invoiceRepo = new InMemoryInvoiceRepository();
+    const paymentRepo = new InMemoryPaymentRepository();
+    const auditRepo = new ThrowOnceAuditRepository();
+    await invoiceRepo.create(makeInvoice());
+    const { payment } = await recordPayment(
+      {
+        tenantId: TENANT,
+        invoiceId: INVOICE_ID,
+        amountCents: 10000,
+        method: 'credit_card',
+        providerReference: PI_ID,
+        processedBy: 'stripe_webhook',
+      },
+      invoiceRepo,
+      paymentRepo,
+    );
+
+    const app = buildStripeApp({
+      invoiceRepo,
+      paymentRepo,
+      auditRepo,
+      stripeWebhookSecret: STRIPE_SECRET,
+      webhookRepo: sharedRepo,
+    });
+
+    const event = chargeRefundedEvent('evt_refund_throw_1');
+
+    const first = await postStripe(app, event);
+    // recordRefund's incrementRefundAtomic already committed by the time
+    // ThrowOnceAuditRepository.create() throws — the mutation is NOT rolled
+    // back (this is the exact crash window the per-refund idempotency guard
+    // exists for). The route's outer catch turns the throw into 500 + 'failed'.
+    expect(first.status).toBe(500);
+    const afterFailure = await sharedRepo.findByIdempotencyKey('stripe', 'evt_refund_throw_1');
+    expect(afterFailure?.status).toBe('failed');
+    const afterFirstAttempt = await paymentRepo.findById(TENANT, payment.id);
+    expect(afterFirstAttempt?.refundedAmountCents).toBe(1500);
+    expect(afterFirstAttempt?.lastRefundStripeId).toBe('re_throw_1');
+
+    // Stripe redelivers the SAME event id. recordRefund's per-stripeRefundId
+    // short-circuit (lastRefundStripeId already == 're_throw_1') makes the
+    // retry a clean no-op on the payment row — refundedAmountCents must NOT
+    // become 3000.
+    const retry = await postStripe(app, event);
+    expect(retry.status).toBe(200);
+    expect(retry.body).toEqual({ received: true });
+
+    const afterRetry = await paymentRepo.findById(TENANT, payment.id);
+    expect(afterRetry?.refundedAmountCents).toBe(1500); // NOT double-counted
+    const afterRetryEvent = await sharedRepo.findByIdempotencyKey('stripe', 'evt_refund_throw_1');
+    expect(afterRetryEvent?.status).toBe('processed');
+  });
+});
+
+describe('B1/TEST-01 — charge.dispute.created: throw mid-processing then redeliver (idempotent)', () => {
+  const PI_ID = 'pi_dispute_throw_1';
+
+  function chargeDisputeEvent(eventId: string) {
+    return {
+      id: eventId,
+      type: 'charge.dispute.created',
+      data: {
+        object: {
+          id: 'dp_throw_1',
+          amount: 10000,
+          reason: 'fraudulent',
+          payment_intent: PI_ID,
+        },
+      },
+    };
+  }
+
+  it('a throw after the reversal mutation committed marks the event failed; the redelivery self-heals into a clean no-op', async () => {
+    const sharedRepo = new InMemoryWebhookRepository();
+    const invoiceRepo = new InMemoryInvoiceRepository();
+    const paymentRepo = new InMemoryPaymentRepository();
+    const auditRepo = new ThrowOnceAuditRepository();
+    await invoiceRepo.create(makeInvoice());
+    const { payment } = await recordPayment(
+      {
+        tenantId: TENANT,
+        invoiceId: INVOICE_ID,
+        amountCents: 10000,
+        method: 'credit_card',
+        providerReference: PI_ID,
+        processedBy: 'stripe_webhook',
+      },
+      invoiceRepo,
+      paymentRepo,
+    );
+    expect((await invoiceRepo.findById(TENANT, INVOICE_ID))?.status).toBe('paid');
+
+    const app = buildStripeApp({
+      invoiceRepo,
+      paymentRepo,
+      auditRepo,
+      stripeWebhookSecret: STRIPE_SECRET,
+      webhookRepo: sharedRepo,
+    });
+
+    const event = chargeDisputeEvent('evt_dispute_throw_1');
+
+    const first = await postStripe(app, event);
+    // reversePaymentAtomic + the invoice decrement already committed before
+    // ThrowOnceAuditRepository.create() throws inside reversePayment's audit
+    // block — route 500s, event marked 'failed'.
+    expect(first.status).toBe(500);
+    const afterFailure = await sharedRepo.findByIdempotencyKey('stripe', 'evt_dispute_throw_1');
+    expect(afterFailure?.status).toBe('failed');
+    const paymentAfterFirst = await paymentRepo.findById(TENANT, payment.id);
+    expect(paymentAfterFirst?.status).toBe('failed');
+    expect(paymentAfterFirst?.reversalReason).toBe('dispute');
+    const invoiceAfterFirst = await invoiceRepo.findById(TENANT, INVOICE_ID);
+    expect(invoiceAfterFirst?.status).toBe('open');
+    expect(invoiceAfterFirst?.amountPaidCents).toBe(0);
+
+    // Redelivery of the SAME dispute event. reversePaymentAtomic's guard
+    // (already 'failed' + reversedAt set) makes the flip itself a no-op;
+    // reversePayment's self-heal branch checks the ledger, finds it already
+    // reconciled (the decrement committed pre-throw), and does NOT
+    // re-decrement — the invoice must stay exactly as it was, not go negative.
+    const retry = await postStripe(app, event);
+    expect(retry.status).toBe(200);
+    expect(retry.body).toEqual({ received: true });
+
+    const invoiceAfterRetry = await invoiceRepo.findById(TENANT, INVOICE_ID);
+    expect(invoiceAfterRetry?.status).toBe('open');
+    expect(invoiceAfterRetry?.amountPaidCents).toBe(0);
+    expect(invoiceAfterRetry?.amountDueCents).toBeGreaterThanOrEqual(0);
+
+    const afterRetryEvent = await sharedRepo.findByIdempotencyKey('stripe', 'evt_dispute_throw_1');
+    expect(afterRetryEvent?.status).toBe('processed');
   });
 });

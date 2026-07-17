@@ -12,9 +12,14 @@ import {
   CustomerRepository,
   PreferredChannel,
 } from '../customers/customer';
-import { ValidationError } from '../shared/errors';
+import {
+  createLocation,
+  LocationRepository,
+  ServiceLocation,
+} from '../locations/location';
+import { AppError, ValidationError } from '../shared/errors';
 import { CreateLeadInput, Lead, LeadRepository, UpdateLeadInput } from './lead';
-import { LeadSource, LeadStage } from './enums';
+import { ConvertLeadAddressInput, LeadSource, LeadStage } from './enums';
 import { buildAttributionMetadata } from './attribution-metadata';
 import { notifyOwner } from '../notifications/owner-notifications-instance';
 
@@ -102,6 +107,13 @@ export async function createLead(
     assignedUserId: input.assignedUserId,
     convertedCustomerId: undefined,
     lostReason: undefined,
+    street1: input.street1,
+    street2: input.street2,
+    city: input.city,
+    state: input.state,
+    postalCode: input.postalCode,
+    country: input.country,
+    accessNotes: input.accessNotes,
     createdBy: input.createdBy,
     createdAt: now,
     updatedAt: now,
@@ -182,6 +194,13 @@ export async function updateLead(
     ...(input.preferredLanguage !== undefined
       ? { preferredLanguage: input.preferredLanguage ?? undefined }
       : {}),
+    ...(input.street1 !== undefined ? { street1: input.street1 ?? undefined } : {}),
+    ...(input.street2 !== undefined ? { street2: input.street2 ?? undefined } : {}),
+    ...(input.city !== undefined ? { city: input.city ?? undefined } : {}),
+    ...(input.state !== undefined ? { state: input.state ?? undefined } : {}),
+    ...(input.postalCode !== undefined ? { postalCode: input.postalCode ?? undefined } : {}),
+    ...(input.country !== undefined ? { country: input.country ?? undefined } : {}),
+    ...(input.accessNotes !== undefined ? { accessNotes: input.accessNotes ?? undefined } : {}),
     updatedAt: new Date(),
   };
 
@@ -270,6 +289,66 @@ export async function loseLead(
 export interface ConversionResult {
   lead: Lead;
   customer: Customer;
+  location: ServiceLocation;
+}
+
+export interface ConvertServiceLocationInput {
+  street1: string;
+  street2?: string;
+  city: string;
+  state: string;
+  postalCode: string;
+  country?: string;
+  accessNotes?: string;
+  label?: string;
+}
+
+function isCompleteAddress(addr: {
+  street1?: string | null;
+  city?: string | null;
+  state?: string | null;
+  postalCode?: string | null;
+}): addr is {
+  street1: string;
+  city: string;
+  state: string;
+  postalCode: string;
+} {
+  return Boolean(addr.street1 && addr.city && addr.state && addr.postalCode);
+}
+
+/**
+ * Resolve the service address for conversion: body override wins, else
+ * the lead's structured address. Incomplete addresses are treated as missing.
+ */
+export function resolveConvertAddress(
+  lead: Lead,
+  override?: ConvertLeadAddressInput | ConvertServiceLocationInput
+): ConvertServiceLocationInput | null {
+  if (override && isCompleteAddress(override)) {
+    return {
+      street1: override.street1,
+      street2: override.street2 ?? undefined,
+      city: override.city,
+      state: override.state,
+      postalCode: override.postalCode,
+      country: override.country ?? undefined,
+      accessNotes: override.accessNotes ?? undefined,
+      label: 'label' in override ? override.label : undefined,
+    };
+  }
+  if (isCompleteAddress(lead)) {
+    return {
+      street1: lead.street1,
+      street2: lead.street2,
+      city: lead.city,
+      state: lead.state,
+      postalCode: lead.postalCode,
+      country: lead.country,
+      accessNotes: lead.accessNotes,
+    };
+  }
+  return null;
 }
 
 /**
@@ -277,13 +356,17 @@ export interface ConversionResult {
  *
  * Atomicity contract:
  *   - Insert customer row
+ *   - Insert primary service_location from lead address (or convert override)
  *   - Set `lead.converted_customer_id` and stage='won'
  *   - Write `lead.converted` and `customer.created_from_lead` audit events
  *   If any step fails, the whole transaction rolls back and no row is
  *   visible to other readers.
  *
+ * Requires a complete service address (lead fields or `serviceLocation`
+ * override). Without one, throws `SERVICE_LOCATION_REQUIRED`.
+ *
  * Pg path uses `withTenantTransaction()` (single ROLLBACK boundary).
- * In-memory fallback simulates rollback by deleting the inserted customer
+ * In-memory fallback simulates rollback by archiving the inserted customer
  * if the lead update fails — best-effort for tests; production never
  * takes this path because pool is wired.
  */
@@ -294,12 +377,29 @@ export async function convertToCustomer(
   customerRepo: CustomerRepository,
   actorId: string,
   actorRole: string,
-  auditRepo?: AuditRepository
+  auditRepo?: AuditRepository,
+  locationRepo?: LocationRepository,
+  serviceLocation?: ConvertLeadAddressInput | ConvertServiceLocationInput
 ): Promise<ConversionResult | null> {
   const existing = await leadRepo.findById(tenantId, leadId);
   if (!existing) return null;
   if (existing.convertedCustomerId) {
     throw new ValidationError('Lead has already been converted');
+  }
+
+  if (!locationRepo) {
+    throw new ValidationError(
+      'locationRepo is required to convert a lead (service location creation)'
+    );
+  }
+
+  const address = resolveConvertAddress(existing, serviceLocation);
+  if (!address) {
+    throw new AppError(
+      'SERVICE_LOCATION_REQUIRED',
+      'A service location address is required to convert a lead — provide street1, city, state, and postalCode',
+      400
+    );
   }
 
   const correlationId = uuidv4();
@@ -343,22 +443,70 @@ export async function convertToCustomer(
     };
   };
 
+  const createPrimaryLocation = async (
+    customerId: string
+  ): Promise<ServiceLocation> => {
+    return createLocation(
+      {
+        tenantId,
+        customerId,
+        street1: address.street1,
+        street2: address.street2,
+        city: address.city,
+        state: address.state,
+        postalCode: address.postalCode,
+        country: address.country || 'US',
+        accessNotes: address.accessNotes,
+        label: address.label,
+        isPrimary: true,
+        addressType: 'service',
+      },
+      locationRepo,
+      auditRepo,
+      actorId,
+      actorRole
+    );
+  };
+
+  const writeAudits = async (leadIdForAudit: string, customerId: string) => {
+    if (!auditRepo) return;
+    const attributionMeta = buildAttributionMetadata(existing);
+    await auditRepo.create(
+      createAuditEvent({
+        tenantId,
+        actorId,
+        actorRole,
+        eventType: 'lead.converted',
+        entityType: 'lead',
+        entityId: leadIdForAudit,
+        correlationId,
+        metadata: {
+          customerId,
+          fromStage: existing.stage,
+          ...attributionMeta,
+        },
+      })
+    );
+    await auditRepo.create(
+      createAuditEvent({
+        tenantId,
+        actorId,
+        actorRole,
+        eventType: 'customer.created_from_lead',
+        entityType: 'customer',
+        entityId: customerId,
+        correlationId,
+        metadata: { leadId: leadIdForAudit, ...attributionMeta },
+      })
+    );
+  };
+
   // ── Pg / transactional path ────────────────────────────────────────
   if (isTransactional(leadRepo)) {
     return leadRepo.withTransaction(tenantId, async () => {
-      // Inside the transaction the same tenant context is set; the
-      // customer/audit repos go through their own withTenant() which
-      // detects the request-scoped store via AsyncLocalStorage. Outside
-      // a request, the inner withTenant calls would acquire fresh
-      // connections and not share the BEGIN — to keep convertToCustomer
-      // safe in that case, we pass through the customer create + lead
-      // update + audit writes serially; they all share the same tenant
-      // context so RLS holds. If any throws, withTenantTransaction
-      // rolls back the lead update (the most important integrity
-      // boundary) and the customer create is rolled back too because
-      // it ran on the same client when invoked via tenantContextStore.
       const customer = buildCustomer();
       const createdCustomer = await customerRepo.create(customer);
+      const location = await createPrimaryLocation(createdCustomer.id);
       const updated = await leadRepo.update(tenantId, leadId, {
         convertedCustomerId: createdCustomer.id,
         stage: 'won',
@@ -368,46 +516,18 @@ export async function convertToCustomer(
         // Force rollback of the customer insert by throwing.
         throw new Error('Lead disappeared mid-conversion');
       }
-      if (auditRepo) {
-        const attributionMeta = buildAttributionMetadata(existing);
-        await auditRepo.create(
-          createAuditEvent({
-            tenantId,
-            actorId,
-            actorRole,
-            eventType: 'lead.converted',
-            entityType: 'lead',
-            entityId: leadId,
-            correlationId,
-            metadata: {
-              customerId: createdCustomer.id,
-              fromStage: existing.stage,
-              ...attributionMeta,
-            },
-          })
-        );
-        await auditRepo.create(
-          createAuditEvent({
-            tenantId,
-            actorId,
-            actorRole,
-            eventType: 'customer.created_from_lead',
-            entityType: 'customer',
-            entityId: createdCustomer.id,
-            correlationId,
-            metadata: { leadId, ...attributionMeta },
-          })
-        );
-      }
-      return { lead: updated, customer: createdCustomer };
+      await writeAudits(leadId, createdCustomer.id);
+      return { lead: updated, customer: createdCustomer, location };
     });
   }
 
   // ── In-memory fallback path with manual rollback ───────────────────
   const customer = buildCustomer();
   const createdCustomer = await customerRepo.create(customer);
+  let location: ServiceLocation;
   let updated: Lead | null = null;
   try {
+    location = await createPrimaryLocation(createdCustomer.id);
     updated = await leadRepo.update(tenantId, leadId, {
       convertedCustomerId: createdCustomer.id,
       stage: 'won',
@@ -427,37 +547,7 @@ export async function convertToCustomer(
     throw err;
   }
 
-  if (auditRepo) {
-    const attributionMeta = buildAttributionMetadata(existing);
-    await auditRepo.create(
-      createAuditEvent({
-        tenantId,
-        actorId,
-        actorRole,
-        eventType: 'lead.converted',
-        entityType: 'lead',
-        entityId: leadId,
-        correlationId,
-        metadata: {
-          customerId: createdCustomer.id,
-          fromStage: existing.stage,
-          ...attributionMeta,
-        },
-      })
-    );
-    await auditRepo.create(
-      createAuditEvent({
-        tenantId,
-        actorId,
-        actorRole,
-        eventType: 'customer.created_from_lead',
-        entityType: 'customer',
-        entityId: createdCustomer.id,
-        correlationId,
-        metadata: { leadId, ...attributionMeta },
-      })
-    );
-  }
+  await writeAudits(leadId, createdCustomer.id);
 
-  return { lead: updated, customer: createdCustomer };
+  return { lead: updated, customer: createdCustomer, location };
 }

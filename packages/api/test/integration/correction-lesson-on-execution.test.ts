@@ -25,6 +25,7 @@ describe('Postgres integration — correction lessons on execution (U7)', () => 
   let settingsRepo: PgSettingsRepository;
   let lessonRepo: PgCorrectionLessonRepository;
   let auditRepo: PgAuditRepository;
+  let catalogRepo: PgCatalogItemRepository;
   let ports: ConfigPorts;
   const proposalId = crypto.randomUUID();
   const executedAt = new Date('2026-06-15T18:00:00Z');
@@ -35,7 +36,7 @@ describe('Postgres integration — correction lessons on execution (U7)', () => 
     settingsRepo = new PgSettingsRepository(pool);
     lessonRepo = new PgCorrectionLessonRepository(pool);
     auditRepo = new PgAuditRepository(pool);
-    const catalogRepo = new PgCatalogItemRepository(pool);
+    catalogRepo = new PgCatalogItemRepository(pool);
     const proposalRepo = new PgProposalRepository(pool);
     const executionRepo = new PgProposalExecutionRepository(pool);
 
@@ -131,7 +132,7 @@ describe('Postgres integration — correction lessons on execution (U7)', () => 
 
     const lessons = await recordCorrectionLessonsOnExecution(
       { tenantId: tenant.tenantId, proposalId },
-      { proposalRepo, proposalExecutionRepo: executionRepo, settingsRepo, lessonRepo, ports, auditRepo },
+      { proposalRepo, proposalExecutionRepo: executionRepo, settingsRepo, lessonRepo, catalogRepo, ports, auditRepo },
     );
 
     expect(lessons).toHaveLength(1);

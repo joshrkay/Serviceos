@@ -199,4 +199,47 @@ describe('P0-009 — Async job processing with SQS', () => {
     expect(dlq).toHaveLength(3);
     expect(queue.dlqSize()).toBe(3);
   });
+
+  it('depth() reports pending backlog and dead-letter counts (Queue interface parity)', async () => {
+    expect(await queue.depth()).toEqual({ pending: 0, deadLetter: 0 });
+    await queue.send('a', { n: 1 });
+    await queue.send('b', { n: 2 });
+    expect(await queue.depth()).toEqual({ pending: 2, deadLetter: 0 });
+    await queue.moveToDeadLetter(
+      {
+        id: 'x',
+        type: 'a',
+        payload: { n: 1 },
+        attempts: 3,
+        maxAttempts: 3,
+        idempotencyKey: 'idem-x',
+        createdAt: new Date().toISOString(),
+      },
+      'boom',
+    );
+    expect((await queue.depth()).deadLetter).toBe(1);
+  });
+
+  describe('WS15 — stalePendingCount (queue-staleness SLO feed)', () => {
+    it('counts only pending messages older than the age window', async () => {
+      vi.useFakeTimers();
+      try {
+        await queue.send('test.job', { n: 1 }); // will be 20min old
+        vi.advanceTimersByTime(10 * 60 * 1000);
+        await queue.send('test.job', { n: 2 }); // will be 10min old
+        vi.advanceTimersByTime(10 * 60 * 1000);
+        await queue.send('test.job', { n: 3 }); // fresh
+
+        expect(await queue.stalePendingCount(15 * 60)).toBe(1); // only the 20min row
+        expect(await queue.stalePendingCount(5 * 60)).toBe(2);
+        expect(await queue.stalePendingCount(60 * 60)).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('returns 0 on an empty queue', async () => {
+      expect(await queue.stalePendingCount(0)).toBe(0);
+    });
+  });
 });

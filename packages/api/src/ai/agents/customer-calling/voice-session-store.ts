@@ -222,6 +222,39 @@ export interface VoiceSession {
    * turn's `VoiceApprovalTurnResult.sessionState`.
    */
   voiceApprovalState?: import('../../tasks/proposal-approval-task').VoiceApprovalSessionState;
+  /**
+   * WS18 — in-flight on-call SMS consent capture. Set when the close flow asks
+   * the caller for permission to text the quote + booking link; the NEXT turn's
+   * answer is evaluated by strict confirmIntent (ambiguous → no). Adapter-side
+   * state like `pendingVoiceApproval` (the FSM never reads it); consumed and
+   * cleared at the top of the speech turn. Carries no secrets.
+   *
+   * WS2 — `close` is set when the capture was initiated by the close flow: a
+   * grant then continues into hold placement + owner-approval chain staging
+   * instead of the plain acknowledgment. `strictConfirmed` records that the
+   * authoritative confirmIntent gate already passed on the affirmative turn (an
+   * input to evaluateAutonomousCloseLane).
+   */
+  pendingConsentCapture?: {
+    customerId: string;
+    phone: string;
+    close?: { proposalId: string; strictConfirmed: boolean };
+  };
+  /**
+   * WS2 — terminal close-flow state for this session. 'fallback' after the
+   * owner-approval chain was staged (nothing is confirmed until the owner
+   * taps approve). Guards a repeated "yes, book it" from re-staging the chain /
+   * re-texting the owner.
+   */
+  closeState?: 'fallback';
+  /**
+   * WS5 — in-flight tenant-catalog load, kicked off once at session
+   * establishment (both voice transports) so in-call estimate grounding has
+   * the active catalog in hand synchronously at quote time. Managed by
+   * `ai/voice-turn/session-catalog.ts`; the FSM never reads it. Resolves to
+   * `[]` on a read failure (never rejects). GC'd with the session.
+   */
+  catalogPreload?: Promise<import('../../../catalog/catalog-item').CatalogItem[]>;
   /** Set after `endSession()` to short-circuit further input. */
   ended: boolean;
   /**
@@ -633,6 +666,21 @@ export class VoiceSessionStore {
     let n = 0;
     for (const session of this.sessions.values()) if (!session.ended) n += 1;
     return n;
+  }
+
+  /**
+   * WS15 — callSids of LIVE (non-ended) sessions, for the drain-abandonment
+   * alarm: when the shutdown drain window expires with live calls remaining,
+   * the Sentry event names the abandoned callSids so the operator can match
+   * them to Twilio call logs. Sessions without a callSid (web/test channels)
+   * are skipped — liveCount() remains the authoritative count.
+   */
+  liveCallSids(): string[] {
+    const sids: string[] = [];
+    for (const session of this.sessions.values()) {
+      if (!session.ended && session.callSid) sids.push(session.callSid);
+    }
+    return sids;
   }
 
   /**

@@ -5,6 +5,7 @@ import { Proposal, ProposalRepository, createProposal, CreateProposalInput, Prop
 import { assertValidProposalPayload } from '../proposals/contracts';
 import { isSupervisorPresent } from '../ai/supervisor-presence';
 import { routeUnsupervisedProposal, confidenceMetaBlocksAutoApprove } from '../proposals/auto-approve';
+import { getSupervisorReviewGate } from '../ai/supervisor/review-gate';
 import {
   AUTONOMOUS_LANE_PROPOSAL_TYPES,
   autonomousLaneEvaluationFor,
@@ -54,6 +55,7 @@ import { AppointmentRepository } from '../appointments/appointment';
 import { JobRepository } from '../jobs/job';
 import { CatalogItemRepository } from '../catalog/catalog-item';
 import { InvoicingQueueDeps } from '../invoices/invoicing-queue';
+import { DunningEventRepository } from '../invoices/dunning-config';
 import {
   EntityCandidate,
   EntityKind,
@@ -133,6 +135,11 @@ export interface VoiceActionRouterPayload {
   transcript: string;
   conversationId?: string;
   recordingId?: string;
+  /**
+   * Job selected by an authenticated technician and verified by the recording
+   * route against the tenant. This trusted context always wins over AI output.
+   */
+  jobId?: string;
   /**
    * Resolved caller identity (caller-ID match). Threaded onto the task
    * context so handlers that need the caller's customer — create/cancel/
@@ -295,6 +302,14 @@ export interface VoiceActionRouterDeps {
     tenantId: string,
   ) => Promise<{ enabled: boolean; threshold?: number } | undefined>;
   /**
+   * D-015 amendment — platform-wide kill switch for the autonomous booking
+   * lane (config.AUTONOMOUS_BOOKING_DISABLED === 'true'). Threaded onto
+   * TaskContext.autonomousBooking.platformDisabled, checked FIRST by
+   * evaluateAutonomousBookingLane (before tenant opt-in). Absent/false ⇒
+   * byte-identical behavior.
+   */
+  autonomousBookingPlatformDisabled?: boolean;
+  /**
    * Injectable clock for the scheduling handlers' relative-date resolution
    * ("tomorrow", "next Tuesday"). Defaults to `new Date()` in production;
    * the voice-quality corpus pins it so booking expectations are
@@ -328,6 +343,13 @@ export interface VoiceActionRouterDeps {
    * clarification instead of a draft. Optional so tests can omit it.
    */
   invoicingDeps?: InvoicingQueueDeps;
+  /**
+   * Collections cadence — dunning-event ledger. When wired (alongside the
+   * invoice + job repos), the send_payment_reminder voice on-ramp annotates a
+   * draft whose resolved customer already got a reminder recently (Layer 3,
+   * best-effort). Optional so tests can omit it.
+   */
+  dunningEventRepo?: DunningEventRepository;
   /**
    * P8 — "three Bobs" closure. When present, the classifier's free-text
    * customerName / jobReference are resolved to tenant-scoped IDs
@@ -515,8 +537,8 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
       deps.jobRepo,
     ),
   );
-  handlers.set('update_invoice', new InvoiceEditTaskHandler(deps.gateway));
-  handlers.set('update_estimate', new EstimateEditTaskHandler(deps.gateway, deps.estimateRepo));
+  handlers.set('update_invoice', new InvoiceEditTaskHandler(deps.gateway, { catalogRepo: deps.catalogRepo }));
+  handlers.set('update_estimate', new EstimateEditTaskHandler(deps.gateway, deps.estimateRepo, deps.catalogRepo));
   handlers.set('issue_invoice', new IssueInvoiceTaskHandler(deps.proposalRepo, deps.thresholdResolver));
   handlers.set('create_customer', new CreateCustomerTaskHandler());
   handlers.set('create_job', new CreateJobVoiceTaskHandler());
@@ -535,7 +557,14 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
   handlers.set('send_invoice', new SendInvoiceTaskHandler());
   handlers.set('send_estimate', new SendEstimateTaskHandler());
   handlers.set('send_estimate_nudge', new SendEstimateNudgeTaskHandler());
-  handlers.set('send_payment_reminder', new SendPaymentReminderTaskHandler());
+  handlers.set(
+    'send_payment_reminder',
+    new SendPaymentReminderTaskHandler({
+      dunningEventRepo: deps.dunningEventRepo,
+      invoiceRepo: deps.invoicingDeps?.invoiceRepo,
+      jobRepo: deps.jobRepo,
+    }),
+  );
   handlers.set('apply_late_fee', new ApplyLateFeeTaskHandler());
   handlers.set('record_payment', new RecordPaymentTaskHandler());
   handlers.set('emergency_dispatch', new EmergencyDispatchTaskHandler());
@@ -747,6 +776,7 @@ async function annotateResolvedEntities(
     tenantId: string;
     entities: ExtractedEntities | undefined;
     verifiedCustomerId?: string;
+    verifiedJobId?: string;
   },
   log: Logger,
 ): Promise<EntityAnnotation | EntityAmbiguity> {
@@ -757,7 +787,7 @@ async function annotateResolvedEntities(
   if (params.entities.customerName && !params.verifiedCustomerId) {
     lookups.push({ kind: 'customer', reference: params.entities.customerName });
   }
-  if (params.entities.jobReference) {
+  if (params.entities.jobReference && !params.verifiedJobId) {
     lookups.push({ kind: 'job', reference: params.entities.jobReference });
   }
   // U1 — spoken technician names on reassign / add-crew / remove-crew
@@ -1067,6 +1097,8 @@ interface SegmentParams {
   conversationId?: string;
   recordingId?: string;
   customerId?: string;
+  /** Tenant-verified job selected before recording. */
+  jobId?: string;
   verticalPromptSection?: string;
   /**
    * UB-A3 — the tenant's ACTIVE standing instructions, resolved once per
@@ -1118,7 +1150,15 @@ async function processSegment(
   params: SegmentParams,
   log: Logger,
 ): Promise<SegmentOutcome> {
-  const { tenantId, userId, segmentText, conversationId, recordingId, customerId } = params;
+  const {
+    tenantId,
+    userId,
+    segmentText,
+    conversationId,
+    recordingId,
+    customerId,
+    jobId,
+  } = params;
 
   const classification = await classifyIntent(
     segmentText,
@@ -1265,6 +1305,7 @@ async function processSegment(
       tenantId,
       entities: classification.extractedEntities,
       ...(customerId ? { verifiedCustomerId: customerId } : {}),
+      ...(jobId ? { verifiedJobId: jobId } : {}),
     },
     log,
   );
@@ -1370,6 +1411,9 @@ async function processSegment(
       ...(annotation.resolved.technicianId
         ? { technicianId: annotation.resolved.technicianId }
         : {}),
+      // Mobile job detail supplies this only after the recording route verifies
+      // tenant ownership. Keep it last so no classifier/resolver value can win.
+      ...(jobId ? { jobId } : {}),
     },
     timezone: scheduling?.timezone ?? DEFAULT_TENANT_TIMEZONE,
     ...(scheduling?.businessHours !== undefined
@@ -1389,6 +1433,7 @@ async function processSegment(
             settings: autonomousBookingSettings,
             inboundReceptionistSource: Boolean(customerId),
             pendingReferenceCount: annotation.pendingReferences.length,
+            ...(deps.autonomousBookingPlatformDisabled ? { platformDisabled: true } : {}),
           },
         }
       : {}),
@@ -1420,6 +1465,11 @@ async function processSegment(
   // UB-D / D-015 — audit every lane evaluation (pass or fail) so the trail
   // records why a booking did or did not take the lane. Best-effort: an
   // audit hiccup never blocks the proposal.
+  // WS11 — deliberately NOT moved into a transaction with the proposal write:
+  // this is evaluation telemetry on the live voice path, where audit must
+  // never block the call. The lane's actual STATE CHANGE (the auto-approved
+  // booking executing) flows through ProposalExecutor, which writes its
+  // execution audit atomically with the state change (executeAudited).
   const laneEvaluation = autonomousLaneEvaluationFor(annotated);
   if (laneEvaluation && deps.auditRepo) {
     try {
@@ -1631,19 +1681,50 @@ async function processChain(
   // (`suppressApproveLink`): no token minted, anchored
   // `review_required_rendered`, renderChainSms emits the matching copy.
   const head = built[0].proposal;
+
+  // N-004 (P2-037) — supervisor review pass on the chain head before dispatch
+  // (same chokepoint as the single-action path). Fail-open; a hold suppresses
+  // the chain's owner SMS below.
+  //
+  // The gate attaches N-002 supervisor markers to the head payload (and, on a
+  // hold, forces draft). It persists those writes, but our in-memory `head`
+  // predates them — so we adopt the gate's returned proposal for the
+  // render/route below (parity with the single-action path), otherwise the
+  // chain SMS would omit the freshly-attached supervisor warning.
+  let supervisorHold = false;
+  let reviewedHead = head;
+  const reviewGate = getSupervisorReviewGate();
+  if (reviewGate) {
+    try {
+      const res = await reviewGate.review({ proposal: head });
+      supervisorHold = res.hold;
+      if (res.proposal) reviewedHead = res.proposal;
+    } catch (err) {
+      log.warn('voice-action-router: chain supervisor review gate failed, dispatching', {
+        chainId,
+        headProposalId: head.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   if (
     deps.unsupervisedRouting &&
     !supervisorPresent &&
-    (head.status === 'ready_for_review' || head.status === 'draft')
+    !supervisorHold &&
+    (reviewedHead.status === 'ready_for_review' || reviewedHead.status === 'draft')
   ) {
     const ur = deps.unsupervisedRouting;
     const tenantId = base.tenantId;
     try {
       const routing = await ur.resolveRouting?.(tenantId);
       const ownerPhone = await ur.resolveOwnerPhone?.(tenantId);
-      const ordered = built.map((b) => b.proposal);
+      // Head slot carries the gate-reviewed proposal (N-002 markers); dependents
+      // stay as built. renderChainSms + the blocking/token predicates below all
+      // read from this ordered list, so the head's supervisor marker propagates.
+      const ordered = built.map((b, i) => (i === 0 ? reviewedHead : b.proposal));
       const blockingMember = ordered.find((p) => confidenceMetaBlocksAutoApprove(p.payload));
-      const headNotCapture = actionClassForProposalType(head.proposalType) !== 'capture';
+      const headNotCapture = actionClassForProposalType(reviewedHead.proposalType) !== 'capture';
       await routeUnsupervisedProposal(
         {
           auditRepo: ur.auditRepo,
@@ -1654,17 +1735,17 @@ async function processChain(
           ...(ur.recordSmsEvent
             ? {
                 onSmsSent: async ({ body, kind }: { body: string; kind: OutboundAnchorKind }) =>
-                  ur.recordSmsEvent!({ tenantId, proposalId: head.id, body, kind }),
+                  ur.recordSmsEvent!({ tenantId, proposalId: reviewedHead.id, body, kind }),
               }
             : {}),
         },
         {
           tenantId,
-          proposalId: head.id,
+          proposalId: reviewedHead.id,
           ...(routing ? { routing } : {}),
           channel: 'other',
           ...(ownerPhone ? { ownerPhone } : {}),
-          summaryText: head.summary,
+          summaryText: reviewedHead.summary,
           renderSmsBody: (approveUrl: string) =>
             renderChainSms(
               ordered.map((p) => ({
@@ -1676,7 +1757,7 @@ async function processChain(
             ),
           // Blocking-member payload (if any) drives the token-suppression /
           // review_required_rendered anchoring; otherwise the head's.
-          payload: (blockingMember ?? head).payload,
+          payload: (blockingMember ?? reviewedHead).payload,
           // Non-capture head: never Y-approvable — review form, no token.
           ...(headNotCapture ? { suppressApproveLink: true } : {}),
         },
@@ -1707,7 +1788,15 @@ export function createVoiceActionRouterWorker(
       message: QueueMessage<VoiceActionRouterPayload>,
       logger: Logger
     ): Promise<void> => {
-      const { tenantId, userId, transcript, conversationId, recordingId, customerId } = message.payload;
+      const {
+        tenantId,
+        userId,
+        transcript,
+        conversationId,
+        recordingId,
+        customerId,
+        jobId,
+      } = message.payload;
 
       const log = logger.child({ tenantId, recordingId, transcriptLen: transcript.length });
       log.info('voice-action-router: classifying transcript');
@@ -1859,6 +1948,7 @@ export function createVoiceActionRouterWorker(
               conversationId,
               recordingId,
               customerId,
+              ...(jobId ? { jobId } : {}),
               verticalPromptSection,
               ...(activeStandingInstructions ? { activeStandingInstructions } : {}),
               ...(extendedIntents ? { extendedIntents: true } : {}),
@@ -1879,6 +1969,7 @@ export function createVoiceActionRouterWorker(
           conversationId,
           recordingId,
           customerId,
+          ...(jobId ? { jobId } : {}),
           verticalPromptSection,
           ...(activeStandingInstructions ? { activeStandingInstructions } : {}),
           ...(extendedIntents ? { extendedIntents: true } : {}),
@@ -1907,16 +1998,47 @@ export function createVoiceActionRouterWorker(
         // (`queue_and_sms` default → one-tap approve SMS to the owner) and
         // emit the `unsupervised_proposal_routed` audit event. Best-effort:
         // a routing failure never fails the (already persisted) proposal.
+        // N-004 (P2-037) — Supervisor Agent review pass at the AMEND P2-007
+        // "before SMS dispatch" chokepoint. Awaited inline (≤60s hard budget,
+        // fail-open). The gate owns its own side effects (checks, ai_runs,
+        // supervisor_reviews, markers, alert). A hold (enforce mode + a
+        // customer-harm critical) forces the proposal to draft inside the gate
+        // and suppresses the dispatch below; every other outcome dispatches
+        // normally. Unconfigured gate ⇒ no-op (byte-identical to before).
+        let supervisorHold = false;
+        // The gate attaches N-002 supervisor markers to the proposal payload
+        // (and, on a hold, forces draft). It persists those writes, but our
+        // in-memory `outcome.proposal` predates them — so we adopt the gate's
+        // returned proposal for the render/route below, otherwise the queued
+        // one-tap SMS would omit the freshly-attached supervisor warning.
+        let reviewedProposal = outcome.proposal;
+        const reviewGate = getSupervisorReviewGate();
+        if (reviewGate && outcome.proposal.status === 'ready_for_review') {
+          try {
+            const res = await reviewGate.review({ proposal: outcome.proposal });
+            supervisorHold = res.hold;
+            if (res.proposal) reviewedProposal = res.proposal;
+          } catch (err) {
+            log.warn('voice-action-router: supervisor review gate failed, dispatching', {
+              proposalId: outcome.proposal.id,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
+
         if (
           deps.unsupervisedRouting &&
           !outcome.supervisorPresent &&
+          !supervisorHold &&
           outcome.proposal.status === 'ready_for_review'
         ) {
           const ur = deps.unsupervisedRouting;
           try {
             const routing = await ur.resolveRouting?.(tenantId);
             const ownerPhone = await ur.resolveOwnerPhone?.(tenantId);
-            const proposal = outcome.proposal;
+            // Use the gate-reviewed proposal (carries any N-002 supervisor
+            // markers) so the rendered SMS reflects the supervisor findings.
+            const proposal = reviewedProposal;
             await routeUnsupervisedProposal(
               {
                 auditRepo: ur.auditRepo,

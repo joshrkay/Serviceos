@@ -13,6 +13,8 @@ brief, the brief wins.
 > the subscription. Keep the listing free-to-download with no in-app
 > purchase items.
 
+See also `app-review-notes.md` for App Review walkthrough + demo accounts.
+
 ---
 
 ## Identity
@@ -21,7 +23,7 @@ brief, the brief wins.
 |---|---|
 | App name | **Rivet: AI for Home Services** (30-char limit — fallback: "Rivet — AI Dispatcher") |
 | Subtitle | **Answer calls. Quote. Get paid.** (30-char limit) |
-| Bundle ID | `com.serviceos.app` — ⚠️ see launch blockers |
+| Bundle ID | `com.serviceos.app` (kept; user-invisible — changing after release is disruptive) |
 | Primary category | Business |
 | Secondary category | Productivity |
 | Price | Free (subscription managed on the web) |
@@ -37,7 +39,8 @@ brief, the brief wins.
 Rivet is the AI back office for solo HVAC and plumbing operators. You
 learned the trade — Rivet runs the business.
 
-The app puts your shop in your pocket:
+The app puts your shop in your pocket — one binary for supervisors and
+technicians:
 
 • Speak an action — "just finished the Rodriguez job, bill 3 hours and the
   parts" — and Rivet drafts the invoice for you to approve.
@@ -45,8 +48,10 @@ The app puts your shop in your pocket:
   with a live count. Approve, edit, or reject in one tap.
 • Money dashboard — today's revenue, what's collected, and what's still
   chasing, at a glance.
-• Works in the field — recordings queue offline and upload the moment
-  you're back in range.
+• Technician Today — assigned jobs, en route / running late, voice notes,
+  and job photos when you're connected.
+• Needs a connection for voice and photos — if you drop offline, Rivet
+  shows a reconnect banner; capture resumes when you're back online.
 
 Rivet tells you the truth. Every evening you get one text: what got done,
 what got paid, and what Rivet wasn't sure about today. Nothing irreversible
@@ -75,30 +80,40 @@ got a dedicated office manager and a 20-truck fleet.
 Declare in App Store Connect → App Privacy:
 
 - **Contact info** — name, email, phone (account; via Clerk).
-- **User content** — audio recordings, messages, customer/job records
+- **User content** — voice audio, job photos, messages, customer/job records
   (app functionality).
+- **Location** — precise location when the technician Today surface is open
+  (field GPS) and when enabling Tap to Pay / Stripe Terminal readers. Not
+  used for continuous background tracking (`isIosBackgroundLocationEnabled`
+  is false).
 - **Identifiers** — user/account ID (app functionality).
-- **Usage data** — product interaction (analytics; PostHog).
-- **Diagnostics** — crash/performance data.
+- **Diagnostics** — crash/performance data from the platform where available.
 
-Not used for tracking across other companies' apps; no third-party ad SDKs.
+**Not collected on mobile:** product-analytics SDKs (no PostHog or similar
+in `packages/mobile`). Not used for tracking across other companies' apps;
+no third-party ad SDKs.
+
+Permissions the binary requests (see `app.json`):
+
+- **Microphone** — voice actions and field voice notes.
+- **Camera** — job photos (barcode scanning disabled).
+- **Location (when in use)** — tech GPS while Today is open + Tap to Pay /
+  Terminal.
+- **Bluetooth / local network** — Stripe Terminal card readers.
+- **Notifications** — approvals, job updates, end-of-day digest.
+
 See `packages/web` Privacy Policy (`/privacy`) for the full disclosure.
-
-## Permissions strings (already in app.json)
-
-- Microphone: "Allow Rivet to use the microphone to capture voice actions."
-  (⚠️ currently reads "ServiceOS" — see launch blockers.)
-- Notifications: push for new approvals and the end-of-day digest.
 
 ## Screenshot plan (6.7" + 6.1" + 5.5" required sizes)
 
-Capture from the app's main screens with seeded demo data:
+Capture from both personas with seeded demo data:
 
-1. Home — "Speak an action" with the greeting + money/approvals summary.
+1. Supervisor home — "Speak an action" with money/approvals summary.
 2. Approvals inbox with a live count.
 3. A proposal review (quote) with Approve / Edit / Reject.
 4. Money dashboard (revenue + month-to-date).
-5. Messages thread.
+5. Technician Today — assigned jobs + status actions.
+6. Job photo / voice note capture (connected state).
 
 Caption each with the value, e.g. "Approve a quote in one tap",
 "See what you're owed", "Speak it — Rivet drafts the rest".
@@ -107,14 +122,14 @@ Caption each with the value, e.g. "Approve a quote in one tap",
 
 ## Launch blockers (resolve before first submission)
 
-- [ ] **Rebrand the binary:** `app.json` still uses `name: "ServiceOS"`,
-      `slug: serviceos-mobile`, scheme `serviceos`, and the microphone
-      permission string says "ServiceOS". Decide whether the bundle id
-      `com.serviceos.app` ships as-is (it's user-invisible and changing it
-      after release is disruptive) or is renamed before first release.
-- [ ] **App icon:** `assets/icon.png` is a placeholder — replace with the
-      Rivet mark before submission.
+- [ ] **`eas init`** — fills `extra.eas.projectId` (kept as `""` placeholder
+      in repo until then).
 - [ ] **Apple Developer Program** membership + App Store Connect app record
-      + Apple Team ID wired into `eas.json` `submit` config.
+      + Apple Team ID wired into `eas.json` `submit.production.ios`
+      (`REPLACE_WITH_*` placeholders).
+- [ ] Real Rivet mark replacing placeholder `assets/*.png` before public
+      store screenshots (scaffold PNGs are present for builds).
 - [ ] Real screenshots captured at all required device sizes.
 - [ ] Privacy Policy + Support pages live at the URLs above.
+- [ ] Dual demo accounts provisioned for App Review (see
+      `app-review-notes.md`).

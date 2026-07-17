@@ -425,6 +425,16 @@ export interface IntentClassification {
    */
   tokenUsage?: { input: number; output: number };
   /**
+   * Id of the persisted `ai_runs` row for the underlying LLM classify call
+   * (from `LLMResponse.aiRunId`). Surfaced so the voice path can thread a
+   * REAL run id into the FSM `intent_classified` event → `create_proposal`
+   * side-effect payload, letting the resulting proposal satisfy
+   * `proposals.ai_run_id`'s FK with an actual row instead of null. Omitted
+   * when the classifier short-circuits without an LLM call (empty transcript,
+   * deterministic phrase match) or when no AiRunRepository is wired.
+   */
+  aiRunId?: string;
+  /**
    * Story 3.4 — the intent-taxonomy version that produced this classification
    * (`INTENT_TAXONOMY_VERSION`). Stamped on every result by `classifyIntent`;
    * lets observability / correction analytics detect taxonomy drift.
@@ -914,7 +924,12 @@ Supported intents (return exactly ONE):
                                      "What's our revenue so far?"
                                      "How much is still outstanding?"
 - "lookup_catalog"      — owner/dispatcher is ASKING what's in the
-                           service catalog / price book. Read-only.
+                           service catalog / price book. Read-only, and
+                           OWNER-ONLY at runtime (gated on the recognized
+                           owner line; a customer's spoken catalog browse
+                           falls back to a human). A CUSTOMER asking what
+                           something costs is NOT this — it is a draft_estimate
+                           (the estimate path speaks a catalog-grounded price).
                            Examples: "What services do we offer?"
                                      "What's in our catalog?"
                                      "Do we have a catalog item for a water heater?"
@@ -1498,16 +1513,28 @@ async function classifyIntentRaw(
       { role: 'user', content: transcript },
     ],
     responseFormat: 'json',
-    // Pass tenantId so gateway-layer features (per-tenant cache keys,
-    // cost accounting, future routing) can scope correctly. Without
-    // this, a cached response for tenant A could be returned to
-    // tenant B if two transcripts collide on the content hash.
+    // Top-level tenantId is what the resilience wrappers key on
+    // (ProviderTenantQuotaWrapper / CachingGatewayWrapper both read
+    // request.tenantId, not metadata.tenantId). Without it every tenant's
+    // classify_intent calls collapsed onto the shared SYSTEM_TENANT_ID
+    // quota bucket (concurrency 8 for the WHOLE platform) and, were the
+    // gateway cache ever enabled, onto a shared cache key (cross-tenant
+    // leak of classification + extracted entities).
+    tenantId: context.tenantId,
+    // Kept in metadata too: some downstream logging/consumers still read
+    // tenantId from here (see gateway.ts correlationId/promptVersionId
+    // metadata reads for the pattern this follows).
     metadata: { tenantId: context.tenantId },
   });
 
   const tokenUsage = response.tokenUsage
     ? { input: response.tokenUsage.input, output: response.tokenUsage.output }
     : undefined;
+  // The persisted ai_runs id for THIS classify call. Threaded onto every
+  // post-gateway return path (mirroring tokenUsage) so the voice path can
+  // link the eventual proposal to a REAL ai_runs row. Undefined when no
+  // AiRunRepository is wired or the best-effort run create failed.
+  const aiRunId = response.aiRunId;
 
   const parsed = parseClassifierJson(response.content);
   // P18-001: deterministic create_customer fallback. When the
@@ -1530,13 +1557,16 @@ async function classifyIntentRaw(
         reasoning: 'sign-up phrasing matched deterministic pattern',
       };
       if (tokenUsage) result.tokenUsage = tokenUsage;
+      if (aiRunId) result.aiRunId = aiRunId;
       return result;
     }
     const result = unknownResult('could not parse classifier output', 'parse_failed');
     if (tokenUsage) result.tokenUsage = tokenUsage;
+    if (aiRunId) result.aiRunId = aiRunId;
     return result;
   }
   if (tokenUsage) parsed.tokenUsage = tokenUsage;
+  if (aiRunId) parsed.aiRunId = aiRunId;
   if (
     signupOverride &&
     (parsed.intentType === 'unknown' ||
@@ -1552,6 +1582,7 @@ async function classifyIntentRaw(
       extractedEntities: parsed.extractedEntities,
     };
     if (tokenUsage) overridden.tokenUsage = tokenUsage;
+    if (aiRunId) overridden.aiRunId = aiRunId;
     return overridden;
   }
 
@@ -1573,6 +1604,7 @@ async function classifyIntentRaw(
       extractedEntities: entities,
     };
     if (tokenUsage) mapped.tokenUsage = tokenUsage;
+    if (aiRunId) mapped.aiRunId = aiRunId;
     return mapped;
   }
 
@@ -1593,6 +1625,7 @@ async function classifyIntentRaw(
         parsed.intentType !== 'unknown' ? parsed.intentType : undefined,
     };
     if (tokenUsage) lowConf.tokenUsage = tokenUsage;
+    if (aiRunId) lowConf.aiRunId = aiRunId;
     return lowConf;
   }
 

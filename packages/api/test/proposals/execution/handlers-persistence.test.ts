@@ -17,6 +17,7 @@ import {
   isEstimateCatalogGrounded,
 } from '../../../src/estimates/estimate';
 import { InMemorySettingsRepository } from '../../../src/settings/settings';
+import { InMemoryAuditRepository } from '../../../src/audit/audit';
 import { LineItem } from '../../../src/shared/billing-engine';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -68,7 +69,7 @@ describe('UpdateCustomerExecutionHandler persistence', () => {
       customerRepo,
     );
 
-    const handler = new UpdateCustomerExecutionHandler(customerRepo);
+    const handler = new UpdateCustomerExecutionHandler(customerRepo, new InMemoryAuditRepository());
     const result = await handler.execute(
       makeProposal('update_customer', {
         customerId: created.id,
@@ -86,7 +87,7 @@ describe('UpdateCustomerExecutionHandler persistence', () => {
   });
 
   it('returns not found when customerId does not exist', async () => {
-    const handler = new UpdateCustomerExecutionHandler(new InMemoryCustomerRepository());
+    const handler = new UpdateCustomerExecutionHandler(new InMemoryCustomerRepository(), new InMemoryAuditRepository());
     const result = await handler.execute(
       makeProposal('update_customer', {
         customerId: uuidv4(),

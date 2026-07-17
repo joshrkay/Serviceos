@@ -1,4 +1,35 @@
-import { parseNaturalDatetime } from '../../../../src/ai/agents/customer-calling/entity-resolution';
+import {
+  parseNaturalDatetime,
+  resolveSchedulingEntities,
+} from '../../../../src/ai/agents/customer-calling/entity-resolution';
+
+// VOX-52 regression (PR #665 review): the resolver rewrite must still carry the
+// classifier's free-text fields (reason, assigneeName, noteText, …) into refs —
+// only the identity keys (customerId/jobId/appointmentId) are the resolver's
+// authority and are never copied raw from the classifier.
+describe('resolveSchedulingEntities — carries free-text classifier fields into refs', () => {
+  it('preserves non-identity string entities, drops raw identity keys', async () => {
+    const res = await resolveSchedulingEntities(undefined, 'tenant-1', 'reassign_appointment', {
+      assigneeName: 'Maria',
+      reason: 'customer requested a different tech',
+      noteText: 'gate code is 1234',
+      customerId: 'not-a-uuid-should-not-leak',
+    });
+    expect(res.status).toBe('resolved');
+    expect(res.refs.assigneeName).toBe('Maria');
+    expect(res.refs.reason).toBe('customer requested a different tech');
+    expect(res.refs.noteText).toBe('gate code is 1234');
+    // Identity keys are never trusted raw from the classifier.
+    expect(res.refs.customerId).toBeUndefined();
+  });
+
+  it('does not overwrite a classifier-provided cancellation reason with the default', async () => {
+    const res = await resolveSchedulingEntities(undefined, 'tenant-1', 'cancel_appointment', {
+      reason: 'rescheduling to next week',
+    });
+    expect(res.refs.reason).toBe('rescheduling to next week');
+  });
+});
 
 // QA-2026-06-05 (SCH-02/03) — deterministic NL datetime parsing for the
 // calling agent's entity resolution. Fixed "now" so weekday math is stable.

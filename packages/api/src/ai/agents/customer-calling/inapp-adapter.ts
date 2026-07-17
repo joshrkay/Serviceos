@@ -42,6 +42,9 @@ import type { VoiceSessionRepository } from '../../../voice/voice-session';
 import type { CallOutcome } from '../../../voice/voice-service';
 import { deriveCallOutcome } from './outcome-mapper';
 import { resolveSchedulingEntities } from './entity-resolution';
+import type { SchedulingEntityResolution } from './entity-resolution';
+import { PgEntityResolver } from '../../resolution/pg-entity-resolver';
+import type { EntityResolver } from '../../resolution/entity-resolver';
 import { detectLanguage, renderTtsText } from './tts-copy';
 import type { Language } from '../../i18n/i18n';
 import { isLanguageSupported } from '../../orchestration/language-detector';
@@ -60,8 +63,25 @@ export interface InAppAdapterDeps {
   /**
    * Postgres pool — when present, end-of-call summaries are persisted to
    * call_summaries. Optional so dev mode (no DB) still works.
+   *
+   * Also used to self-construct the entity resolver (see `entityResolver`)
+   * when one isn't injected, so production wiring needs no change.
    */
   pool?: Pool;
+  /**
+   * P0 voice-safety — shared, tenant-scoped entity resolver (production:
+   * `PgEntityResolver`, pg_trgm, τ_ent=0.80). Free-text
+   * customer/job/appointment references on the scheduling path resolve
+   * through this so ambiguity becomes a one-tap voice_clarification instead
+   * of a silent "newest match" guess (CLAUDE.md invariant).
+   *
+   * Optional and self-constructed from `pool` when omitted (see
+   * `getEntityResolver`), so app.ts needs no wiring change; tests inject a
+   * mock resolver directly (no DB required). When neither a resolver nor a
+   * pool is present, resolution is skipped and references pass through
+   * unresolved (proposal surfaces for operator review) — never guessed.
+   */
+  entityResolver?: EntityResolver;
   /** Used for `actorId` on proposal/audit rows. */
   systemActorId?: string;
   /**
@@ -262,8 +282,108 @@ export function toEscalationReason(reason: string | undefined): EscalationReason
   }
 }
 
+/**
+ * Whole-utterance affirmations recognized when the caller answers the
+ * intent_confirm readback ("...Is that right?"). Kept deterministic so the
+ * confirm turn needs no LLM round-trip. Anything NOT clearly affirmative is
+ * treated as a correction (safe default: re-capture rather than queue the
+ * wrong proposal) — mirrors the confirm-intent skill's "ambiguous → no" rule.
+ */
+const AFFIRMATION_PHRASES = new Set([
+  'yes', 'yeah', 'yep', 'yup', 'yea', 'sure', 'correct', 'right', 'ok', 'okay',
+  'confirm', 'confirmed', 'go ahead', 'sounds good', 'that works', 'looks good',
+  'do it', 'please do', 'affirmative', 'of course', 'absolutely', 'perfect',
+  "that's right", 'thats right', 'that is right', 'exactly', 'yes please',
+  // es
+  'si', 'sí', 'claro', 'correcto', 'de acuerdo', 'está bien', 'esta bien',
+  'adelante', 'perfecto', 'así es', 'asi es',
+]);
+
+/** Leading affirmative tokens ("yes, that's the one" / "sí, adelante"). */
+const AFFIRMATION_LEAD_TOKENS = new Set([
+  'yes', 'yeah', 'yep', 'yup', 'yea', 'sure', 'correct', 'confirm', 'confirmed',
+  'ok', 'okay', 'absolutely', 'affirmative', 'si', 'sí', 'claro', 'correcto',
+  'adelante', 'perfecto',
+]);
+
+/**
+ * True when the caller's readback response is a clear affirmation. Default is
+ * FALSE (→ correction) for anything ambiguous, so we never queue a proposal
+ * off an unclear "yes".
+ */
+export function isAffirmation(text: string): boolean {
+  const normalized = text.trim().toLowerCase().replace(/[.!?,]+$/g, '').trim();
+  if (!normalized) return false;
+  if (AFFIRMATION_PHRASES.has(normalized)) return true;
+  const first = normalized.split(/\s+/)[0].replace(/[.!?,]+$/g, '');
+  return AFFIRMATION_LEAD_TOKENS.has(first);
+}
+
 export class InAppVoiceAdapter {
   constructor(private readonly deps: InAppAdapterDeps) {}
+
+  /**
+   * Lazily-constructed PgEntityResolver when `pool` is wired but no explicit
+   * resolver was injected. Cached so we don't allocate one per turn.
+   */
+  private pgResolver?: EntityResolver;
+
+  /**
+   * Resolve the entity resolver to use: an explicitly injected one (tests),
+   * else a PgEntityResolver built from the pool (production), else undefined
+   * (dev/no-DB — resolution is skipped, never guessed).
+   */
+  private getEntityResolver(): EntityResolver | undefined {
+    if (this.deps.entityResolver) return this.deps.entityResolver;
+    if (this.pgResolver) return this.pgResolver;
+    if (this.deps.pool) {
+      this.pgResolver = new PgEntityResolver(this.deps.pool);
+      return this.pgResolver;
+    }
+    return undefined;
+  }
+
+  /**
+   * Resolve scheduling entity references, translating the resolver outcome
+   * into the FSM event the transition table expects. Resolution failure is
+   * non-fatal: we fall back to a best-effort "resolved with no refs" (the
+   * proposal then surfaces for operator review) rather than escalating on an
+   * infra hiccup — but we NEVER guess an id.
+   */
+  private async resolveEntities(
+    tenantId: string,
+    intent: string,
+    entities: Record<string, unknown>,
+  ): Promise<SchedulingEntityResolution> {
+    const resolver = this.getEntityResolver();
+    try {
+      return await resolveSchedulingEntities(resolver, tenantId, intent, entities);
+    } catch {
+      return { status: 'resolved', refs: {} };
+    }
+  }
+
+  /**
+   * Map a resolution outcome to the FSM event. The disambiguation TTS expects
+   * candidates shaped `{ id, name, score }`, so the resolver's EntityCandidate
+   * `label` is mapped to `name`.
+   */
+  private toResolutionEvent(resolution: SchedulingEntityResolution): CallingAgentEvent {
+    if (resolution.status === 'ambiguous' && resolution.ambiguous) {
+      return {
+        type: 'entity_ambiguous',
+        candidates: resolution.ambiguous.candidates.map((c) => ({
+          id: c.id,
+          name: c.label,
+          score: c.score,
+        })),
+      };
+    }
+    if (resolution.status === 'not_found') {
+      return { type: 'entity_not_found' };
+    }
+    return { type: 'entity_resolved', refs: resolution.refs };
+  }
 
   /**
    * Open a new in-app session. Drives the FSM through the
@@ -387,165 +507,162 @@ export class InAppVoiceAdapter {
       session.language = 'en';
     }
 
-    // §3B + §3D: vertical + intake-question prompt section.
-    // §3C: caller-plan prompt section (only when caller is identified).
-    // Both best-effort: a resolver that throws or returns undefined
-    // silently degrades to base-prompt classification rather than
-    // failing the turn (callers don't lose voice service over a
-    // contextual lookup hiccup).
-    let verticalPromptSection: string | undefined;
-    if (this.deps.verticalPromptResolver) {
-      try {
-        verticalPromptSection = await this.deps.verticalPromptResolver(session.tenantId);
-      } catch {
-        verticalPromptSection = undefined;
+    // Decide the primary FSM event for this turn. Two shapes:
+    //  A) The FSM is at `intent_confirm` — the caller is answering the
+    //     readback ("...Is that right?"). Their words are a yes/no
+    //     confirmation, NOT a new intent, so we do NOT run the intent
+    //     classifier. Affirmation → `confirmed`; anything else → `correction`
+    //     (safe default: re-capture rather than queue a wrong proposal).
+    //  B) Any other state — classify the utterance as an intent.
+    const stateBeforeTurn: string = session.machine.currentState;
+    let fsmEvent: CallingAgentEvent;
+
+    if (stateBeforeTurn === 'intent_confirm') {
+      fsmEvent = isAffirmation(text)
+        ? { type: 'confirmed' }
+        : { type: 'correction', newTranscript: text };
+    } else {
+      // §3B + §3D: vertical + intake-question prompt section.
+      // §3C: caller-plan prompt section (only when caller is identified).
+      // Both best-effort: a resolver that throws or returns undefined
+      // silently degrades to base-prompt classification rather than
+      // failing the turn (callers don't lose voice service over a
+      // contextual lookup hiccup).
+      let verticalPromptSection: string | undefined;
+      if (this.deps.verticalPromptResolver) {
+        try {
+          verticalPromptSection = await this.deps.verticalPromptResolver(session.tenantId);
+        } catch {
+          verticalPromptSection = undefined;
+        }
       }
-    }
-    let planPromptSection: string | undefined;
-    if (this.deps.callerPlanResolver && session.customerId) {
+      let planPromptSection: string | undefined;
+      if (this.deps.callerPlanResolver && session.customerId) {
+        try {
+          planPromptSection = await this.deps.callerPlanResolver(
+            session.tenantId,
+            session.customerId,
+          );
+        } catch {
+          planPromptSection = undefined;
+        }
+      }
+
+      // Classify intent. Failures fall back to a low-confidence event so
+      // the FSM still progresses (and the operator gets a clarification
+      // prompt) instead of silently dropping the turn.
+      let classifierUsage: { input: number; output: number } | undefined;
       try {
-        planPromptSection = await this.deps.callerPlanResolver(
-          session.tenantId,
-          session.customerId,
+        const classification = await classifyIntent(
+          text,
+          {
+            tenantId: session.tenantId,
+            verticalPromptSection,
+            planPromptSection,
+          },
+          this.deps.gateway
+        );
+        classifierUsage = classification.tokenUsage
+          ? { input: classification.tokenUsage.input, output: classification.tokenUsage.output }
+          : undefined;
+        // VQ-003: announce the classifier outcome on the session bus so
+        // the harness can grade intent-recognition independently of the
+        // FSM transition that follows.
+        session.events.emit(
+          'voice-event',
+          intentClassifiedEvent({
+            intentType: classification.intentType,
+            confidence: classification.confidence,
+            tokenUsage: classifierUsage,
+          }),
+        );
+        fsmEvent = classifierToFsmEvent(
+          classification.intentType,
+          classification.confidence,
+          classification.extractedEntities as Record<string, unknown> | undefined
         );
       } catch {
-        planPromptSection = undefined;
+        fsmEvent = { type: 'confidence_low', threshold: CLASSIFIER_CONFIDENCE_THRESHOLD, score: 0 };
       }
-    }
 
-    // Classify intent. Failures fall back to a low-confidence event so
-    // the FSM still progresses (and the operator gets a clarification
-    // prompt) instead of silently dropping the turn.
-    let fsmEvent: CallingAgentEvent;
-    let classifierUsage: { input: number; output: number } | undefined;
-    try {
-      const classification = await classifyIntent(
-        text,
-        {
-          tenantId: session.tenantId,
-          verticalPromptSection,
-          planPromptSection,
-        },
-        this.deps.gateway
-      );
-      classifierUsage = classification.tokenUsage
-        ? { input: classification.tokenUsage.input, output: classification.tokenUsage.output }
-        : undefined;
-      // VQ-003: announce the classifier outcome on the session bus so
-      // the harness can grade intent-recognition independently of the
-      // FSM transition that follows.
-      session.events.emit(
-        'voice-event',
-        intentClassifiedEvent({
-          intentType: classification.intentType,
-          confidence: classification.confidence,
-          tokenUsage: classifierUsage,
-        }),
-      );
-      fsmEvent = classifierToFsmEvent(
-        classification.intentType,
-        classification.confidence,
-        classification.extractedEntities as Record<string, unknown> | undefined
-      );
-    } catch {
-      fsmEvent = { type: 'confidence_low', threshold: CLASSIFIER_CONFIDENCE_THRESHOLD, score: 0 };
-    }
-
-    // Wire the classifier's token usage into the cost tracker. If the
-    // cap is exceeded, dispatch the global cost_cap_exceeded event so
-    // the FSM escalates instead of finishing the turn normally.
-    if (classifierUsage) {
-      const cents = estimateCostCents(classifierUsage.input, classifierUsage.output);
-      const capEvents = session.costTracker.recordUsage({
-        inputTokens: classifierUsage.input,
-        outputTokens: classifierUsage.output,
-        costCents: cents,
-      });
-      // VQ-003: emit cost_incurred for the harness's running tally.
-      // deltaCents is the just-recorded turn; totalCents is read off
-      // the tracker so it stays in lockstep.
-      session.events.emit(
-        'voice-event',
-        costIncurredEvent(cents, session.costTracker.totals.costCents),
-      );
-      const exceeded = capEvents.find((e) => e.type === 'cost_cap_exceeded');
-      if (exceeded) {
-        // Override the classifier's event — escalation supersedes the
-        // intent dispatch for the current turn.
-        fsmEvent = { type: 'cost_cap_exceeded' };
-        // VQ-003: surface session_terminated so graders see WHY the
-        // session is ending without inferring it from FSM transitions.
-        session.events.emit('voice-event', sessionTerminatedEvent('cap_exceeded'));
+      // Wire the classifier's token usage into the cost tracker. If the
+      // cap is exceeded, dispatch the global cost_cap_exceeded event so
+      // the FSM escalates instead of finishing the turn normally.
+      if (classifierUsage) {
+        const cents = estimateCostCents(classifierUsage.input, classifierUsage.output);
+        const capEvents = session.costTracker.recordUsage({
+          inputTokens: classifierUsage.input,
+          outputTokens: classifierUsage.output,
+          costCents: cents,
+        });
+        // VQ-003: emit cost_incurred for the harness's running tally.
+        // deltaCents is the just-recorded turn; totalCents is read off
+        // the tracker so it stays in lockstep.
+        session.events.emit(
+          'voice-event',
+          costIncurredEvent(cents, session.costTracker.totals.costCents),
+        );
+        const exceeded = capEvents.find((e) => e.type === 'cost_cap_exceeded');
+        if (exceeded) {
+          // Override the classifier's event — escalation supersedes the
+          // intent dispatch for the current turn.
+          fsmEvent = { type: 'cost_cap_exceeded' };
+          // VQ-003: surface session_terminated so graders see WHY the
+          // session is ending without inferring it from FSM transitions.
+          session.events.emit('voice-event', sessionTerminatedEvent('cap_exceeded'));
+        }
       }
     }
 
     const allSideEffects: SideEffect[] = [];
 
-    // Dispatch the classifier-derived event.
+    // Dispatch the primary event (classifier-derived, or the confirm/correct
+    // event from the intent_confirm branch).
     const effects1 = session.machine.dispatch(fsmEvent);
     allSideEffects.push(...effects1);
     const aggregate1 = await this.executeSideEffects(session, effects1);
+    let lastProposalId = aggregate1.lastProposalId;
 
-    // For high-confidence intents we expect the FSM to land in
-    // entity_resolution; auto-resolve to keep the flow progressing
-    // without a separate entity-resolution skill (P8 wave 8B simplified
-    // path). For phase-1 inapp the entities supplied by the classifier
-    // are treated as resolved.
-    const stateAfterClassify: string = session.machine.currentState;
+    // Path A — a freshly classified intent landed us in entity_resolution.
+    // Resolve the customer/job/appointment references through the shared
+    // tenant-scoped resolver (τ_ent=0.80). THREE outcomes, NEVER a silent
+    // guess (CLAUDE.md invariant):
+    //   resolved  → entity_resolved → intent_confirm readback. We STOP here:
+    //               the caller confirms on the NEXT turn (we no longer
+    //               synthesize `confirmed`), so a wrong match can be caught.
+    //   ambiguous → entity_ambiguous with the candidate set — the FSM asks a
+    //               one-tap disambiguation question and stays in
+    //               entity_resolution.
+    //   not_found → entity_not_found — the FSM escalates to a human.
     if (
-      stateAfterClassify === 'entity_resolution' &&
+      session.machine.currentState === 'entity_resolution' &&
       fsmEvent.type === 'intent_classified'
     ) {
-      const refs: Record<string, string> = {};
-      for (const [k, v] of Object.entries(fsmEvent.entities)) {
-        if (typeof v === 'string') refs[k] = v;
-      }
-      // QA-2026-06-05 (SCH-02/03): REAL resolution before entity_resolved —
-      // turn customer/job/appointment references and natural-language times
-      // into concrete ids/timestamps so the execution contract is satisfied.
-      // Best-effort: failures leave refs as-is and the proposal surfaces for
-      // operator review.
-      if (this.deps.pool) {
-        try {
-          const concrete = await resolveSchedulingEntities(
-            this.deps.pool,
-            session.tenantId,
-            fsmEvent.intentType,
-            fsmEvent.entities,
-          );
-          Object.assign(refs, concrete);
-        } catch {
-          // Resolution must never break the call flow.
-        }
-      }
-      const effects2 = session.machine.dispatch({ type: 'entity_resolved', refs });
+      const resolution = await this.resolveEntities(
+        session.tenantId,
+        fsmEvent.intentType,
+        fsmEvent.entities,
+      );
+      const resolutionEvent = this.toResolutionEvent(resolution);
+      const effects2 = session.machine.dispatch(resolutionEvent);
       allSideEffects.push(...effects2);
       const aggregate2 = await this.executeSideEffects(session, effects2);
-
-      // FSM is now in intent_confirm; auto-confirm in phase-1 (we drive
-      // confirmation later when readback is wired into the UI).
-      const effects3 = session.machine.dispatch({ type: 'confirmed' });
-      allSideEffects.push(...effects3);
-      const aggregate3 = await this.executeSideEffects(session, effects3);
-
-      // proposal_draft is the state immediately after `confirmed`. If a
-      // proposal was created in aggregate3, push proposal_queued so the
-      // FSM proceeds to closing.
-      const lastProposalId = aggregate3.lastProposalId
-        ?? aggregate2.lastProposalId
-        ?? aggregate1.lastProposalId;
-      const stateAfterConfirm: string = session.machine.currentState;
-      if (stateAfterConfirm === 'proposal_draft' && lastProposalId) {
-        const effects4 = session.machine.dispatch({
-          type: 'proposal_queued',
-          proposalId: lastProposalId,
-        });
-        allSideEffects.push(...effects4);
-        await this.executeSideEffects(session, effects4);
-      }
+      lastProposalId = aggregate2.lastProposalId ?? lastProposalId;
     }
 
-    const last = allSideEffects[allSideEffects.length - 1];
+    // Path B — the caller confirmed at intent_confirm, so the FSM created the
+    // proposal and moved to proposal_draft. Queue it so the flow proceeds to
+    // closing. Reached only via a GENUINE `confirmed` event from the caller —
+    // never a synthesized one.
+    if (session.machine.currentState === 'proposal_draft' && lastProposalId) {
+      const effects3 = session.machine.dispatch({
+        type: 'proposal_queued',
+        proposalId: lastProposalId,
+      });
+      allSideEffects.push(...effects3);
+      await this.executeSideEffects(session, effects3);
+    }
+
     const ttsLast = [...allSideEffects].reverse().find((e) => e.type === 'tts_play');
     let ttsAudio: Buffer | undefined;
     let ttsText: string | undefined;

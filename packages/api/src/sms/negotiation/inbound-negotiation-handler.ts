@@ -45,8 +45,12 @@ export interface NegotiationBrandContext {
 
 export interface InboundNegotiationDeps {
   proposalRepo: Pick<ProposalRepository, 'create'>;
-  /** Reply transport (same delivery provider the other inbound handlers use). */
-  sendSms: (args: { to: string; body: string }) => Promise<unknown>;
+  /**
+   * Reply transport (same delivery provider the other inbound handlers use).
+   * tenantId is forwarded so the central consent+DNC gate can resolve the
+   * customer + per-tenant DNC (WS1).
+   */
+  sendSms: (args: { to: string; body: string; tenantId?: string }) => Promise<unknown>;
   auditRepo?: AuditRepository;
   /** Per-tenant brand voice / owner name for the holding line. */
   resolveBrandContext?: (tenantId: string) => Promise<NegotiationBrandContext>;
@@ -189,7 +193,7 @@ export function createInboundNegotiationHandler(
         brandVoice: brand.brandVoice ?? null,
         businessName: brand.businessName ?? null,
       });
-      await deps.sendSms({ to: ctx.fromE164, body });
+      await deps.sendSms({ to: ctx.fromE164, body, tenantId: ctx.tenantId });
 
       await audit(ctx, {
         askType: built.auditAskType,

@@ -19,12 +19,23 @@ import { notifyDispatchBoardChanged } from '../../dispatch/board-notify';
  */
 export class CreateBookingExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'create_booking';
+  // Awaits confirmationNotifier.enqueue — in production this is
+  // TransactionalCommsService, which sends the customer confirmation SMS/email
+  // synchronously via the delivery provider — external network I/O alongside the
+  // hold-confirm DB write.
+  performsExternalIo = true;
 
   constructor(
     private readonly appointmentRepo?: AppointmentRepository,
     private readonly auditRepo?: AuditRepository,
     private readonly confirmationNotifier?: SchedulingConfirmationNotifier,
   ) {}
+
+  // WS3 — degrades to an id passthrough (confirms nothing) without the
+  // appointment repo; boot fails when a pool is configured but this is false.
+  isFullyWired(): boolean {
+    return Boolean(this.appointmentRepo);
+  }
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const { payload } = proposal;

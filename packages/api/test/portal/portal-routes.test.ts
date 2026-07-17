@@ -33,6 +33,7 @@ import {
 } from '../../src/appointments/appointment';
 import { InMemoryLeadRepository } from '../../src/leads/lead';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
+import { InMemorySettingsRepository } from '../../src/settings/settings';
 import { createPortalRouter } from '../../src/routes/portal';
 import { createPublicPortalRouter } from '../../src/routes/public-portal';
 
@@ -56,6 +57,8 @@ interface Harness {
 async function build(opts: {
   paymentLinkProvider?: import('../../src/payments/payment-link-provider').PaymentLinkProvider;
   invoiceRepoOverride?: import('../../src/invoices/invoice').InvoiceRepository;
+  /** WS6 — when supplied, the portal resolves the tenant timezone from it. */
+  tenantTimezone?: string;
 } = {}): Promise<Harness> {
   const app = express();
   app.use(express.json());
@@ -69,6 +72,23 @@ async function build(opts: {
   const appointmentRepo = new InMemoryAppointmentRepository();
   const leadRepo = new InMemoryLeadRepository();
   const auditRepo = new InMemoryAuditRepository();
+  let settingsRepo: InMemorySettingsRepository | undefined;
+  if (opts.tenantTimezone) {
+    settingsRepo = new InMemorySettingsRepository();
+    await settingsRepo.create({
+      id: `settings-${TENANT}`,
+      tenantId: TENANT,
+      businessName: 'Test Business',
+      timezone: opts.tenantTimezone,
+      estimatePrefix: 'EST-',
+      invoicePrefix: 'INV-',
+      nextEstimateNumber: 1,
+      nextInvoiceNumber: 1,
+      defaultPaymentTermDays: 30,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+  }
 
   const customer = await customerRepo.create({
     id: uuidv4(),
@@ -100,6 +120,7 @@ async function build(opts: {
       appointmentRepo,
       leadRepo,
       auditRepo,
+      settingsRepo,
       paymentLinkProvider: opts.paymentLinkProvider,
     }),
   );
@@ -198,6 +219,17 @@ describe('P10-001 GET /api/public/portal/:token/customer', () => {
     expect(res.status).toBe(200);
     expect(res.body.id).toBe(h.customer.id);
     expect(res.body.email).toBe('pat@example.com');
+    // WS6 — bootstrap carries a tenant timezone so portal dates render in it.
+    // With no settingsRepo wired, the fallback (tenant_settings DB default) is used.
+    expect(res.body.timezone).toBe('America/New_York');
+  });
+
+  it('returns the tenant timezone from settings when configured (WS6)', async () => {
+    const h = await build({ tenantTimezone: 'America/Los_Angeles' });
+    const token = await mintToken(h);
+    const res = await request(h.app).get(`/api/public/portal/${token}/customer`);
+    expect(res.status).toBe(200);
+    expect(res.body.timezone).toBe('America/Los_Angeles');
   });
 
   it('rejects invalid tokens with 401', async () => {

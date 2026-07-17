@@ -9,6 +9,8 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { sendCustomerMessage } from '../../src/notifications/customer-message-delivery';
 import { InMemoryDeliveryProvider } from '../../src/notifications/delivery-provider';
+import { GatedMessageDelivery } from '../../src/notifications/gated-message-delivery';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemoryDispatchRepository } from '../../src/notifications/dispatch-repository';
 import { InMemoryDncRepository, normalizePhone } from '../../src/compliance/dnc';
 import { Customer } from '../../src/customers/customer';
@@ -34,11 +36,24 @@ function makeCustomer(overrides: Partial<Customer> = {}): Customer {
   };
 }
 
+// WS1 — the consent/DNC gate now lives in the delivery wrapper. sendCustomerMessage
+// is handed a GatedMessageDelivery (enforcement 'block') over the raw in-memory
+// double; assertions still inspect the raw `delivery` (sentSms).
 function makeDeps() {
+  const delivery = new InMemoryDeliveryProvider();
+  const dispatchRepo = new InMemoryDispatchRepository();
+  const dncRepo = new InMemoryDncRepository();
+  const gated = new GatedMessageDelivery({
+    base: delivery,
+    dnc: dncRepo,
+    auditRepo: new InMemoryAuditRepository(),
+    enforcement: 'block',
+  });
   return {
-    delivery: new InMemoryDeliveryProvider(),
-    dispatchRepo: new InMemoryDispatchRepository(),
-    dncRepo: new InMemoryDncRepository(),
+    delivery,
+    dispatchRepo,
+    dncRepo,
+    sendDeps: { delivery: gated, dispatchRepo },
   };
 }
 
@@ -55,7 +70,7 @@ const baseInput = {
 describe('sendCustomerMessage — both channels', () => {
   it('sends SMS + email and logs a dispatch row each with channel-specific idempotency keys', async () => {
     const deps = makeDeps();
-    await sendCustomerMessage(deps, {
+    await sendCustomerMessage(deps.sendDeps, {
       ...baseInput,
       customer: makeCustomer(),
       channels: ['sms', 'email'],
@@ -74,7 +89,7 @@ describe('sendCustomerMessage — both channels', () => {
 describe('sendCustomerMessage — SMS consent + DNC gates', () => {
   it('skips SMS (no row) when smsConsent is false but still sends email', async () => {
     const deps = makeDeps();
-    await sendCustomerMessage(deps, {
+    await sendCustomerMessage(deps.sendDeps, {
       ...baseInput,
       customer: makeCustomer({ smsConsent: false }),
       channels: ['sms', 'email'],
@@ -89,7 +104,7 @@ describe('sendCustomerMessage — SMS consent + DNC gates', () => {
   it('skips SMS (no row) when the number is on the DNC list', async () => {
     const deps = makeDeps();
     await deps.dncRepo.addToDnc(TENANT, normalizePhone('+15559876543'), 'test');
-    await sendCustomerMessage(deps, {
+    await sendCustomerMessage(deps.sendDeps, {
       ...baseInput,
       customer: makeCustomer(),
       channels: ['sms'],
@@ -100,7 +115,7 @@ describe('sendCustomerMessage — SMS consent + DNC gates', () => {
 
   it('skips SMS when the customer has no primary phone', async () => {
     const deps = makeDeps();
-    await sendCustomerMessage(deps, {
+    await sendCustomerMessage(deps.sendDeps, {
       ...baseInput,
       customer: makeCustomer({ primaryPhone: undefined }),
       channels: ['sms'],
@@ -112,7 +127,7 @@ describe('sendCustomerMessage — SMS consent + DNC gates', () => {
 describe('sendCustomerMessage — email requirements', () => {
   it('skips email when the customer has no email address', async () => {
     const deps = makeDeps();
-    await sendCustomerMessage(deps, {
+    await sendCustomerMessage(deps.sendDeps, {
       ...baseInput,
       customer: makeCustomer({ email: undefined }),
       channels: ['email'],
@@ -122,7 +137,7 @@ describe('sendCustomerMessage — email requirements', () => {
 
   it('does not send a channel that was not requested', async () => {
     const deps = makeDeps();
-    await sendCustomerMessage(deps, {
+    await sendCustomerMessage(deps.sendDeps, {
       ...baseInput,
       customer: makeCustomer(),
       channels: ['sms'],

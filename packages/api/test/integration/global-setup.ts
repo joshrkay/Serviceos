@@ -14,6 +14,7 @@
 import { PostgreSqlContainer, StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 import { Pool } from 'pg';
 import { getMigrationSQL } from '../../src/db/schema';
+import { ensureRlsRuntimeRole } from './shared';
 
 let container: StartedPostgreSqlContainer | null = null;
 
@@ -23,6 +24,13 @@ async function applyMigrations(uri: string): Promise<void> {
     await bootstrap.query("SET lock_timeout = '5s'");
     await bootstrap.query("SET statement_timeout = '25s'");
     await bootstrap.query(getMigrationSQL());
+    // WS13 — provision the RLS runtime role unconditionally. `npm run
+    // test:integration` now runs with RLS_RUNTIME_ROLE=true by default (a
+    // query that breaks under least-privilege must fail PR CI, not just an
+    // opt-in job), so the role must exist before any test file connects.
+    // Also harmless/no-op for `npm run test:integration:norls` (flag off) —
+    // the app only assumes the role when the flag is set.
+    await ensureRlsRuntimeRole(bootstrap);
   } finally {
     await bootstrap.end();
   }

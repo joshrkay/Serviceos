@@ -1,6 +1,15 @@
+import {
+  MessageDeliveryProvider,
+  SmsConsentContext,
+} from '../notifications/delivery-provider';
+
 export interface FeedbackDispatchInput {
   to: string;
   body: string;
+  /** Tenant scope — required for per-tenant Twilio routing + DNC. */
+  tenantId?: string;
+  /** Customer consent snapshot for the central gate (customer-class send). */
+  consent?: SmsConsentContext;
 }
 
 export interface FeedbackDispatcher {
@@ -13,51 +22,24 @@ export class NoopFeedbackDispatcher implements FeedbackDispatcher {
   }
 }
 
-export interface SmsProviderDispatcherOptions {
-  accountSid: string;
-  authToken: string;
-  fromNumber: string;
-  apiBaseUrl?: string;
-}
-
-export class SmsProviderFeedbackDispatcher implements FeedbackDispatcher {
-  private readonly accountSid: string;
-  private readonly authToken: string;
-  private readonly fromNumber: string;
-  private readonly apiBaseUrl: string;
-
-  constructor(options: SmsProviderDispatcherOptions) {
-    this.accountSid = options.accountSid;
-    this.authToken = options.authToken;
-    this.fromNumber = options.fromNumber;
-    this.apiBaseUrl = options.apiBaseUrl ?? 'https://api.twilio.com/2010-04-01';
-  }
+/**
+ * WS1 — feedback-request SMS goes through the single `messageDelivery` object
+ * like every other product SMS, instead of the old SmsProviderFeedbackDispatcher
+ * that made a raw Twilio Messages.json fetch and bypassed the consent + DNC
+ * gate entirely. Feedback requests are customer-facing, so this tags every send
+ * customer-class and forwards the caller's consent snapshot; the gate enforces
+ * consent + DNC centrally.
+ */
+export class MessageDeliveryFeedbackDispatcher implements FeedbackDispatcher {
+  constructor(private readonly delivery: MessageDeliveryProvider) {}
 
   async send(input: FeedbackDispatchInput): Promise<void> {
-    const body = new URLSearchParams({
-      To: input.to,
-      From: this.fromNumber,
-      Body: input.body,
+    await this.delivery.sendSms({
+      to: input.to,
+      body: input.body,
+      ...(input.tenantId ? { tenantId: input.tenantId } : {}),
+      recipientClass: 'customer',
+      ...(input.consent ? { consent: input.consent } : {}),
     });
-
-    const auth = Buffer.from(`${this.accountSid}:${this.authToken}`).toString('base64');
-    const response = await fetch(
-      `${this.apiBaseUrl}/Accounts/${this.accountSid}/Messages.json`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Basic ${auth}`,
-          'Content-Type': 'application/x-www-form-urlencoded',
-        },
-        body: body.toString(),
-        // fetch has no default timeout — never hang the feedback send.
-        signal: AbortSignal.timeout(15_000),
-      }
-    );
-
-    if (!response.ok) {
-      const text = await response.text();
-      throw new Error(`SMS provider send failed (${response.status}): ${text}`);
-    }
   }
 }

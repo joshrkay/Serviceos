@@ -87,9 +87,17 @@ describe('voice-sessions routes', () => {
     const app = buildApp('tenant-a', 'user-a', store, adapter);
     const startRes = await request(app).post('/api/voice/sessions').send({});
     const id = startRes.body.sessionId;
-    const inputRes = await request(app)
+    // Turn 1 parks at the intent_confirm readback (no proposal yet).
+    const readbackRes = await request(app)
       .post(`/api/voice/sessions/${id}/input`)
       .send({ text: 'Invoice Acme for 450' });
+    expect(readbackRes.status).toBe(200);
+    expect(readbackRes.body.state).toBe('intent_confirm');
+    expect(readbackRes.body.proposalIds.length).toBe(0);
+    // Turn 2: caller confirms → proposal queued → closing.
+    const inputRes = await request(app)
+      .post(`/api/voice/sessions/${id}/input`)
+      .send({ text: 'yes' });
     expect(inputRes.status).toBe(200);
     expect(inputRes.body.state).toBe('closing');
     expect(inputRes.body.proposalIds.length).toBe(1);

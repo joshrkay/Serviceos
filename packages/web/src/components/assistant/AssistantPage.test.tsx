@@ -5,15 +5,14 @@ import { MemoryRouter } from 'react-router';
 import { AssistantPage } from './AssistantPage';
 
 vi.mock('../../hooks/useDetailQuery', () => ({ useDetailQuery: vi.fn() }));
-vi.mock('../../data/mock-data', () => ({
-  type: {},
-}));
 // Mock the authenticated fetch wrapper so tests can assert the page uses it
 // (with the Clerk bearer token attached) instead of bare global fetch.
 vi.mock('../../utils/api-fetch', () => ({ apiFetch: vi.fn() }));
 // sonner's <Toaster> isn't mounted in unit tests — spy on toast.error to
 // assert the visible error surface.
 vi.mock('sonner', () => ({ toast: { error: vi.fn(), success: vi.fn() } }));
+// U6 — spy on the analytics wrapper to assert assistant_message_sent fires.
+vi.mock('../../lib/analytics', () => ({ track: vi.fn() }));
 
 // UB-B2 — controllable conversation-mode hook: page tests drive the captured
 // onSubmit exactly like a settled utterance would, without WebSocket/mic fakes.
@@ -44,8 +43,10 @@ vi.mock('../../hooks/useConversationVoice', () => ({
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { apiFetch } from '../../utils/api-fetch';
 import { toast } from 'sonner';
+import { track } from '../../lib/analytics';
 
 const mockedApiFetch = vi.mocked(apiFetch);
+const trackMock = vi.mocked(track);
 
 // jsdom doesn't implement scrollIntoView
 beforeAll(() => {
@@ -144,6 +145,24 @@ describe('AssistantPage', () => {
   it('renders header with AI assistant name', () => {
     renderPage();
     expect(screen.getByText('Rivet AI')).toBeInTheDocument();
+  });
+
+  it('emits assistant_message_sent when a message is sent (enums/counts, no text)', async () => {
+    trackMock.mockClear();
+    mockedApiFetch.mockResolvedValue(jsonResponse({ message: { content: 'ok' }, conversationId: 'c1' }));
+    renderPage();
+
+    // A suggestion chip funnels through the same send() path as typed input.
+    fireEvent.click(screen.getByText('Invoice the Rodriguez job'));
+
+    await waitFor(() => {
+      expect(trackMock.mock.calls.some((c) => c[0] === 'assistant_message_sent')).toBe(true);
+    });
+    const call = trackMock.mock.calls.find((c) => c[0] === 'assistant_message_sent')!;
+    expect(call[1]).toMatchObject({ input_mode: 'text', has_attachment: false });
+    expect(typeof (call[1] as { length: number }).length).toBe('number');
+    // never the message text
+    expect(JSON.stringify(call[1])).not.toContain('Rodriguez');
   });
 });
 
@@ -299,6 +318,54 @@ describe('P20-005 — AI failure messaging', () => {
   });
 });
 
+// ─── OBS-41: safe error logging (no raw error object / PII) ─────────────────
+
+describe('OBS-41 — AI chat failure logging does not leak the raw error object', () => {
+  async function typeAndSend(text: string) {
+    await waitFor(() => {
+      expect(screen.getByText(/I'm your AI assistant/)).toBeInTheDocument();
+    });
+    const input = screen.getByPlaceholderText('Ask anything or give a command…');
+    fireEvent.change(input, { target: { value: text } });
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+  }
+
+  it('logs only a safe {name, message} shape, never the raw Error instance', async () => {
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    // Simulate the shape apiFetch's 401 retry path / a JSON error body can
+    // produce: an Error whose message embeds response-body-like content and
+    // a bearer token, plus an extra property a raw response object might
+    // carry (e.g. a parsed body attached by an upstream catch).
+    const sensitiveError = Object.assign(
+      new Error('API error: 401 — Authorization: Bearer super-secret-token-abc123'),
+      { responseBody: { customerEmail: 'jane@example.com', ssn: '123-45-6789' } },
+    );
+    mockedApiFetch.mockRejectedValueOnce(sensitiveError);
+
+    renderPage();
+    await typeAndSend('Hello');
+
+    await waitFor(() => expect(consoleErrorSpy).toHaveBeenCalled());
+
+    const call = consoleErrorSpy.mock.calls.find((c) => c[0] === 'AI chat request failed:');
+    expect(call).toBeDefined();
+
+    // The raw Error instance (and its extra `responseBody` property) must
+    // never be the thing that was logged.
+    const logged = call?.[1];
+    expect(logged).not.toBe(sensitiveError);
+    expect(logged).not.toHaveProperty('responseBody');
+
+    // Only a safe { name, message } shape is logged, and the message must
+    // not carry the raw bearer token through untouched.
+    expect(logged).toMatchObject({ name: 'Error' });
+    const loggedMessage = (logged as { message?: string })?.message ?? '';
+    expect(loggedMessage).not.toContain('super-secret-token-abc123');
+
+    consoleErrorSpy.mockRestore();
+  });
+});
+
 // ─── Story 3.12: retry affordance on a failed turn ───────────────────────────
 
 describe('Story 3.12 — retry on agent failure', () => {
@@ -391,6 +458,54 @@ describe('B4 — proposal approve/reject', () => {
     expect(bareFetch).not.toHaveBeenCalled();
     await waitFor(() => {
       expect(screen.getByText('Applied successfully')).toBeInTheDocument();
+    });
+  });
+
+  it('Finding 2: renders the undo toast after a successful approve (server-driven window)', async () => {
+    await renderWithProposal();
+
+    // Approve response now carries the server's undo window (approvedAt +
+    // undoExpiresAt). The page must raise the shared undo toast — parity with
+    // the inbox, which previously the assistant surface lacked entirely.
+    mockedApiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        id: 'prop-1',
+        status: 'approved',
+        approvedAt: new Date().toISOString(),
+        undoExpiresAt: new Date(Date.now() + 5000).toISOString(),
+      }),
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /approve/i }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('undo-toast')).toBeInTheDocument();
+    });
+    expect(screen.getByRole('button', { name: /undo/i })).toBeInTheDocument();
+  });
+
+  it('Finding 2: clicking Undo POSTs the undo endpoint for the approved proposal', async () => {
+    await renderWithProposal();
+
+    mockedApiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        id: 'prop-1',
+        status: 'approved',
+        approvedAt: new Date().toISOString(),
+        undoExpiresAt: new Date(Date.now() + 5000).toISOString(),
+      }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: /approve/i }));
+    await waitFor(() => screen.getByTestId('undo-toast'));
+
+    mockedApiFetch.mockResolvedValueOnce(jsonResponse({ id: 'prop-1', status: 'undone' }));
+    fireEvent.click(screen.getByRole('button', { name: /undo/i }));
+
+    await waitFor(() => {
+      expect(mockedApiFetch).toHaveBeenCalledWith(
+        '/api/proposals/prop-1/undo',
+        expect.objectContaining({ method: 'POST' }),
+      );
     });
   });
 

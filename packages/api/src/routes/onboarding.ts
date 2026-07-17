@@ -1,6 +1,7 @@
 import { Router, Response } from 'express';
 import type { Pool } from 'pg';
 import { AuthenticatedRequest } from '../auth/clerk';
+import { resolveOwnerEmail } from '../auth/resolve-owner-email';
 import { requireAuth, requireTenant, requireRole } from '../middleware/auth';
 import { currentTenantContext } from '../middleware/tenant-context';
 import { toErrorResponse } from '../shared/errors';
@@ -76,10 +77,47 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         if (!pool) {
-          res.status(503).json({
-            error: 'ONBOARDING_NOT_CONFIGURED',
-            message: 'Onboarding status requires a database connection',
+          // Hermetic / no-DB boot: return a soft status from settings so the
+          // Settings "AI phone answering" toggle is not stuck on Loading…
+          // forever (503 left voiceAgentLive === null in the web client).
+          //
+          // Soft identity: webhook / ensureTenantSettings only seeds
+          // businessName. Without a pool, PUT /identity is 503, so we cannot
+          // finish the real wizard. Previously a 503 left useOnboardingStatus
+          // data=null and OnboardingGuard kept CRM open. Returning incomplete
+          // identity here hard-redirects to /onboarding and breaks hermetic
+          // journeys (e.g. EST-0001 never visible on /estimates). When a
+          // settings row exists, treat identity as done for CRM unlock only.
+          const settings = await settingsRepo.findByTenant(req.auth!.tenantId);
+          const seededName = settings?.businessName?.trim() || null;
+          const softIdentityDone = seededName != null;
+          const status = deriveOnboardingStatus({
+            tenantId: req.auth!.tenantId,
+            tenantExists: true,
+            identity: {
+              businessName: seededName,
+              businessHours:
+                settings?.businessHours ??
+                (softIdentityDone
+                  ? { monday: { open: '09:00', close: '17:00' } }
+                  : null),
+              jobBufferMinutes:
+                settings?.jobBufferMinutes ?? (softIdentityDone ? 15 : null),
+              hourlyRateCents:
+                settings?.hourlyRateCents ?? (softIdentityDone ? 15000 : null),
+            },
+            packActivated: false,
+            twilioStatus: null,
+            subscription: { stripeSubscriptionId: null, status: null },
+            inboundCallCount: 0,
+            testCallSkippedAt: null,
+            voiceAgentLiveAt: null,
+            activatedAt: null,
+            aiConfigPresent: Boolean(settings?.aiModel),
+            aiVerificationStatus: null,
           });
+          res.set('Cache-Control', 'private, max-age=2');
+          res.json(status);
           return;
         }
 
@@ -852,7 +890,7 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
         }
 
         const tenantId = req.auth!.tenantId;
-        const email = req.clerkUser?.email;
+        const email = await resolveOwnerEmail(req, pool);
         if (!email) {
           res.status(400).json({
             error: 'VALIDATION_ERROR',
@@ -861,7 +899,10 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
           return;
         }
 
-        const webUrl = process.env.WEB_URL ?? 'http://localhost:5173';
+        const webUrl =
+          process.env.WEB_URL ??
+          process.env.APP_PUBLIC_URL ??
+          'http://localhost:5173';
         const successUrl = `${webUrl}/onboarding?billing=ok`;
         const cancelUrl = `${webUrl}/onboarding?billing=cancel`;
 

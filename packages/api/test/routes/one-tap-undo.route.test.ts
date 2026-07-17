@@ -25,6 +25,8 @@ import {
   type Proposal,
 } from '../../src/proposals/proposal';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
+import { GatedMessageDelivery } from '../../src/notifications/gated-message-delivery';
+import type { MessageDeliveryProvider } from '../../src/notifications/delivery-provider';
 import { InMemoryAppointmentRepository } from '../../src/appointments/in-memory-appointment';
 import { createAppointment } from '../../src/appointments/appointment';
 import type { JobRepository } from '../../src/jobs/job';
@@ -94,14 +96,23 @@ async function makeApp(opts: {
   const sendSms = vi.fn(async (_args: unknown) => ({
     provider: 'mock',
     providerMessageId: 'SM-1',
+    channel: 'sms' as const,
   }));
-  const customerMessageDeps = {
-    delivery: {
+  // WS1 — the consent/DNC gate now lives in the delivery wrapper. In production
+  // the router receives the gated messageDelivery; mirror that here so the
+  // DNC/consent behavior is exercised (raw `sendSms` is the gate's base).
+  const gatedDelivery = new GatedMessageDelivery({
+    base: {
       sendSms,
-      sendEmail: vi.fn(async () => ({ provider: 'mock', providerMessageId: 'EM-1' })),
-    },
+      sendEmail: vi.fn(async () => ({ provider: 'mock', providerMessageId: 'EM-1', channel: 'email' as const })),
+    } as unknown as MessageDeliveryProvider,
+    dnc: { isOnDnc: vi.fn(async () => opts.onDnc ?? false) },
+    auditRepo,
+    enforcement: 'block',
+  });
+  const customerMessageDeps = {
+    delivery: gatedDelivery,
     dispatchRepo: { create: vi.fn(async (r: unknown) => r) },
-    dncRepo: { isOnDnc: vi.fn(async () => opts.onDnc ?? false) },
   } as unknown as CustomerMessageDeliveryDeps;
 
   const app = express();

@@ -62,8 +62,27 @@ export interface EscalationSettings {
    * JSONB so no new migration is needed (161-163 are owned by parallel
    * tracks). A dedicated column is the planned permanent home; when it
    * lands, read it first and fall back to this key.
+   *
+   * DEPRECATED (WS21a) — plaintext-at-rest. Superseded by
+   * `voice_approval_pin_hash` (HMAC-SHA256, hashed at rest). Retained for
+   * back-compat: the verify seam checks the hash first and only falls back to
+   * this plaintext field when no hash exists, so a tenant that DID set this
+   * legacy value keeps working with no migration. Enrolling a PIN through the
+   * settings route stores ONLY the hash and clears this field; do not add new
+   * writers of the plaintext path.
    */
   voice_approval_challenge?: string;
+  /**
+   * WS21a — HMAC-SHA256 of the normalized PIN digits (hex), keyed by the
+   * tenant-secrets key and salted by tenantId (see
+   * settings/voice-approval-pin.ts). This is the ENROLLED, hashed-at-rest home
+   * for the money/irreversible voice-approval PIN. Written only by the
+   * dedicated settings route (`PUT /api/settings/voice-approval-pin`) which
+   * hashes server-side — never by the generic settings PUT (the
+   * `escalationSettings` zod schema strips unknown keys, so a raw hash can't be
+   * injected). Redacted from `GET /api/settings` (never echoed).
+   */
+  voice_approval_pin_hash?: string;
 }
 
 export const DEFAULT_ESCALATION_SETTINGS: EscalationSettings = {
@@ -154,17 +173,31 @@ export const UNSUPERVISED_PROPOSAL_ROUTING_VALUES: ReadonlyArray<UnsupervisedPro
  * All fields optional; a missing value falls back to a neutral default tone.
  */
 export interface BrandVoiceSettings {
-  formality?: 'casual' | 'professional';
-  pronoun?: 'we' | 'i';
-  vibe_words?: string[];
-  business_name?: string;
+  // N-011 — the six configured fields.
+  /** 1. Register. Supersedes the legacy 2-valued `formality`. */
+  register?: 'formal' | 'friendly' | 'casual';
+  /** 2. Preferred opening lines (rotated/sampled by the composer). */
+  opening_lines?: string[];
+  /** 3. Sign-off (first-class; legacy paths derived it from business_name). */
+  signoff?: string;
   /**
-   * N-009 / P2-038 — brand-voice negative prompt. Phrases the AI must never
+   * 4. N-009 / P2-038 — brand-voice negative prompt. Phrases the AI must never
    * use in customer-facing copy. Grown by the correction loop when an owner
    * edit removes a phrase (each addition is a reversible `banned_phrase`
    * lesson); rendered as a non-overridable "never say" instruction.
    */
   banned_phrases?: string[];
+  /** 5. Shop persona name, e.g. "M&R Mechanical's office". */
+  persona_name?: string;
+  /** 6. Self-reference pronoun (retained; used by renderToneAuthority). */
+  pronoun?: 'we' | 'i';
+
+  // --- retained legacy keys, mapped forward, NOT surfaced in the new UI ---
+  /** Legacy 2-valued formality; read only when `register` is absent. */
+  formality?: 'casual' | 'professional';
+  vibe_words?: string[];
+  /** Legacy business name; signoff fallback. */
+  business_name?: string;
 }
 
 /**
@@ -409,6 +442,16 @@ export interface TenantSettings {
    */
   brandVoice?: BrandVoiceSettings | null;
   /**
+   * N-011 — brand-voice version bookkeeping (migration 238). Read-only
+   * projections of the `brand_voice_version` / `brand_voice_locked` /
+   * `brand_voice_updated_at` columns; the brand-voice router owns writes
+   * (transactional version bump). `brandVoiceVersion` is 0 until the first
+   * configure; the composer stamps it onto every utterance it drafts.
+   */
+  brandVoiceVersion?: number;
+  brandVoiceLocked?: boolean;
+  brandVoiceUpdatedAt?: string | null;
+  /**
    * Public review links shown to satisfied customers (4★+) on the
    * post-job feedback page. Migration 120. null/undefined = not
    * configured (no button rendered).
@@ -486,6 +529,24 @@ export interface TenantSettings {
    * defense in depth.
    */
   autonomousBookingThreshold?: number;
+  /**
+   * D-018 → amended by D-019 (QUALITY-2026-07-12 WS2). Opt-in (column defaults
+   * FALSE, migration 247 — column retained). It NO LONGER authorizes any
+   * autonomous execution: a system actor can never approve a proposal. When
+   * true, a caller's confirmed on-call close is PREPARED for the owner — the
+   * held slot is staged as a `create_booking` DRAFT in the owner-approval chain
+   * so the owner's one-tap approval confirms the booking too. When false, that
+   * booking is left to the owner (the estimate+send chain still stages).
+   * Optional on the type so pre-migration rows / legacy fixtures read as "off"
+   * via `?? false`.
+   */
+  autonomousCloseEnabled?: boolean;
+  /**
+   * D-018 → amended by D-019 — per-tenant cap (integer cents) on the quote
+   * total for which the held booking is staged in the owner chain. Nullable
+   * BIGINT; undefined ⇒ no cap gate. Never authorizes autonomous execution.
+   */
+  autonomousCloseMaxCents?: number;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -619,6 +680,10 @@ export interface UpdateSettingsInput {
   autonomousBookingEnabled?: boolean;
   /** UB-D / D-015 — lane confidence threshold, 0.90–0.99 (column default 0.95). */
   autonomousBookingThreshold?: number;
+  /** D-018 — opt into the autonomous close lane (column default false). */
+  autonomousCloseEnabled?: boolean;
+  /** D-018 — cap (integer cents) on the auto-closeable quote total. */
+  autonomousCloseMaxCents?: number;
 }
 
 export interface SettingsRepository {

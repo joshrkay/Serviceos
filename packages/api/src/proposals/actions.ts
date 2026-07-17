@@ -1,5 +1,6 @@
 import { Proposal, ProposalRepository, missingFieldsFor, actionClassForProposalType, createProposal, isScheduleProposalType } from './proposal';
 import { transitionProposal, isInUndoWindow, UNDO_WINDOW_MS } from './lifecycle';
+import { isProposalExpired } from '../workers/proposal-expiry-worker';
 import { validateProposalPayload } from './contracts';
 import { Role, hasPermission } from '../auth/rbac';
 import { AppError, ConflictError, ForbiddenError, ValidationError, NotFoundError } from '../shared/errors';
@@ -169,6 +170,19 @@ export async function approveProposal(
   const proposal = await proposalRepo.findById(tenantId, proposalId);
   if (!proposal) {
     throw new NotFoundError('Proposal', proposalId);
+  }
+
+  // §5.5 — a schedule proposal's 48h window is enforced by an HOURLY sweep, so
+  // there is a window after expiresAt but before the sweep where the row still
+  // reads ready_for_review. Guard the approval path directly (same predicate the
+  // sweep uses) so an expired card can't be tapped-approved into execution in
+  // that gap. Flip it to expired here too, idempotent with the sweep.
+  if (isProposalExpired(proposal, new Date())) {
+    await proposalRepo.updateStatus(tenantId, proposalId, 'expired');
+    throw new ValidationError(
+      'Cannot approve a proposal whose 48-hour window has expired',
+      { proposalId, expiresAt: proposal.expiresAt },
+    );
   }
 
   // A proposal with unfilled required fields can't be approved — the

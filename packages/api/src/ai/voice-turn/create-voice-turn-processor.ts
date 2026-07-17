@@ -45,13 +45,15 @@
  * same voice-event emissions.
  */
 
-import { v4 as uuidv4 } from 'uuid';
 import type { Pool } from 'pg';
 import { appendAgentTts } from './transcript-append';
 import { classifyIntent, isVoiceApprovalIntent, isVoiceEditIntent } from '../orchestration/intent-classifier';
 import {
   startVoiceApproval,
+  startVoiceBatchApproval,
   continueVoiceApproval,
+  continueVoiceBatchApproval,
+  isBatchActive,
   startVoiceEdit,
   type OneTapFallbackDeps,
   type VoiceApprovalDeps,
@@ -84,9 +86,39 @@ import {
 import { VOICE_EVENT_CHANNEL } from '../voice-quality/event-bus';
 import { buildEscalationSummary } from '../agents/customer-calling/escalation-summary-builder';
 import { buildCallerContextFromSession } from '../agents/customer-calling/escalation-context-from-session';
+import {
+  hydrateEscalationCrm,
+  mergeCallerContextWithCrm,
+} from '../agents/customer-calling/hydrate-escalation-crm';
+import type { TagRepository } from '../../customers/tag';
 import type { WhisperCache } from '../../telephony/whisper-cache';
 import type { PanelData } from '../agents/customer-calling/escalation-summary-builder';
-import { TAU_INT } from '../agents/customer-calling/transitions';
+import {
+  TAU_INT,
+  MAX_REFINEMENTS_PER_CALL,
+  REFINEMENT_CAP_LINE,
+} from '../agents/customer-calling/transitions';
+import {
+  classifyPostQuoteUtterance,
+  type PostQuoteEdit,
+} from './post-quote-precheck';
+import { recordSmsConsentFromVoice } from '../../voice/outbound-consent';
+import type { ConsentEventRepository } from '../../compliance/consent-events';
+import {
+  evaluateAutonomousCloseLane,
+  type AutonomousCloseEvaluation,
+  type AutonomousCloseIneligibleReason,
+} from '../../proposals/autonomous-close-lane';
+import {
+  queueCloseFallbackChain,
+  AUTONOMOUS_CLOSE_ACTOR,
+} from '../../proposals/autonomous-close-execution';
+import { resolveAndPlaceAppointmentHold } from '../scheduling/place-hold';
+import { formatForReadback } from '../scheduling/resolve-datetime';
+import { checkBusinessHours } from '../../compliance/business-hours';
+import { parseOnboardingBusinessHours } from '../../telephony/business-hours-loader';
+import { updateAppointment } from '../../appointments/appointment';
+import type { TenantSettings } from '../../settings/settings';
 import type {
   CallingAgentEvent,
   SideEffect,
@@ -131,6 +163,17 @@ import { findOrCreateCustomerByPhone } from '../skills/find-or-create-customer';
 import { logInboundCallOnCustomerTimeline } from '../../telephony/inbound-call-log';
 import type { EstimateRepository } from '../../estimates/estimate';
 import type { LookupEventService } from '../../lookup-events/lookup-event-service';
+import type { CatalogItemRepository } from '../../catalog/catalog-item';
+import {
+  groundLineItemPricing,
+  lineItemConfidenceSignals,
+  UNCATALOGUED_CONFIDENCE_CAP,
+} from '../resolution/catalog-resolver';
+import { getConfidenceLevel } from '../guardrails/confidence';
+import type { ProposalConfidenceMeta } from '../../proposals/contracts';
+import { preloadSessionCatalog, resolveSessionCatalog } from './session-catalog';
+import { buildQuoteReadback, type QuoteReadbackLine } from './quote-readback';
+import { parseLeadingQuantity } from './quantity-parse';
 import type { LLMGateway } from '../gateway/gateway';
 import type {
   VoiceRepository,
@@ -173,6 +216,39 @@ function mapNotifyReasonToSkillReason(
  * deadline we bridge anyway (a late text beats a dropped transfer).
  */
 const SMS_BEFORE_BRIDGE_TIMEOUT_MS = 4000;
+
+/**
+ * Honest acknowledgment spoken when the caller assents to book a live quote but
+ * a pre-consent gate failed (or a repeated affirmative arrives after the owner
+ * chain was already queued). The drafted quote is staged for OWNER approval; we
+ * make NO booking claim — nothing is confirmed until the owner taps approve.
+ */
+const POST_QUOTE_AFFIRMATIVE_INTERIM =
+  "Perfect — I'll have the owner finalize that and send you the full quote and booking link by text.";
+
+/**
+ * WS18 — spoken to ASK for SMS consent before texting the quote + booking link.
+ * Set alongside session.pendingConsentCapture (the close flow, WS18c). The
+ * caller's next turn is the answer, evaluated by strict confirmIntent.
+ */
+export const SMS_CONSENT_ASK =
+  'Great — I can text the full quote and a link to lock in your booking. Is it okay to send that to the number you\'re calling from?';
+
+/** Plain-capture ack after a GRANT (non-close captures only — the close flow speaks its own outcome). */
+const SMS_CONSENT_GRANT_ACK = "Perfect — you'll get that text shortly.";
+
+/** WS18 — decline / ambiguous → hand the send to the owner. Design-exact copy. */
+export const SMS_CONSENT_DECLINE_FALLBACK =
+  "No problem — I'll have the owner send that over, and you'll get a text shortly.";
+
+/**
+ * WS2 — honest line spoken once the close is STAGED for owner approval (consent
+ * captured, owner one-tap chain queued). The text promise is legitimate (consent
+ * granted), but the booking is confirmed only when the owner taps approve — so
+ * this never claims the caller is booked.
+ */
+export const CLOSE_FALLBACK_LINE =
+  "Great — I'll have the owner confirm your booking, and you'll get the quote by text shortly.";
 
 function xmlEscape(s: string): string {
   return s
@@ -223,6 +299,90 @@ function intentToProposalType(intent: string | undefined): ProposalType {
   }
 }
 
+/**
+ * WS5 / WS17 / WS18 — turn a catalog-grounding `outcome` into the operator-side
+ * `_meta`/confidence signals AND the spoken read-back + structured lines the
+ * caller hears. Extracted so BOTH the initial grounding (`groundVoiceQuote`)
+ * AND the live-quote refinement path (`applyQuoteRefinement`) compute the read-
+ * back and the money-correctness gate identically. Pure — no I/O.
+ */
+function finalizeGroundedQuote(
+  outcome: Awaited<ReturnType<typeof groundLineItemPricing>>,
+  catalogAvailable: boolean,
+  priceField: 'unitPrice' | 'unitPriceCents',
+  baseConfidence: number | undefined,
+): {
+  lineItems: Array<Record<string, unknown>>;
+  meta: ProposalConfidenceMeta;
+  missingFields: string[];
+  catalogResolution?: Record<
+    number,
+    Array<{ id: string; name: string; unitPriceCents: number; score: number }>
+  >;
+  confidenceScore?: number;
+  utterance: string;
+  groundedClean: boolean;
+  totalCents: number;
+  readbackLines: QuoteReadbackLine[];
+} {
+  const lineItems = outcome.lineItems;
+  // Same money-correctness gate the task handlers apply: an uncatalogued (or
+  // unconsulted-catalog) price caps confidence and forces overallConfidence
+  // 'low' so it always reaches a human; per-line pricingSource → `_meta`
+  // markers for the operator draft.
+  let confidenceScore = baseConfidence;
+  if (outcome.anyUncatalogued && typeof confidenceScore === 'number') {
+    confidenceScore = Math.min(confidenceScore, UNCATALOGUED_CONFIDENCE_CAP);
+  }
+  const signals = lineItemConfidenceSignals(lineItems, priceField);
+  const groundedClean =
+    catalogAvailable && !outcome.anyUncatalogued && outcome.missingFields.length === 0;
+  const meta: ProposalConfidenceMeta = {
+    overallConfidence:
+      groundedClean && typeof confidenceScore === 'number'
+        ? getConfidenceLevel(confidenceScore)
+        : 'low',
+    ...(Object.keys(signals.fieldConfidence).length > 0
+      ? { fieldConfidence: signals.fieldConfidence }
+      : {}),
+    ...(signals.markers.length > 0 ? { markers: signals.markers } : {}),
+  };
+
+  // WS17 I3 — the read-back reads `unitPrice` (integer cents). Invoice lines
+  // carry the cents under `unitPriceCents`, so map onto the read-back's field.
+  // BOTH are integer cents (`formatCents` divides by 100), so this is a pure
+  // field rename — a 185000-cent line speaks $1850.00, never $185,000.
+  const readbackLines: QuoteReadbackLine[] = lineItems.map((li) => ({
+    ...(typeof li.pricingSource === 'string' ? { pricingSource: li.pricingSource } : {}),
+    ...(typeof li.unitPrice === 'number'
+      ? { unitPrice: li.unitPrice }
+      : typeof li.unitPriceCents === 'number'
+        ? { unitPrice: li.unitPriceCents }
+        : {}),
+    ...(typeof li.quantity === 'number' ? { quantity: li.quantity } : {}),
+    ...(typeof li.description === 'string' ? { description: li.description } : {}),
+  }));
+  const utterance = buildQuoteReadback({ lineItems: readbackLines, catalogAvailable });
+  // WS18 — the spoken total (integer cents; formatCents divides by 100). Sum of
+  // each line's unit price × quantity, exactly what buildQuoteReadback recites.
+  const totalCents = readbackLines.reduce((sum, li) => {
+    const qty = typeof li.quantity === 'number' && li.quantity > 0 ? li.quantity : 1;
+    return sum + (typeof li.unitPrice === 'number' ? li.unitPrice * qty : 0);
+  }, 0);
+
+  return {
+    lineItems,
+    meta,
+    missingFields: outcome.missingFields,
+    ...(outcome.catalogResolution ? { catalogResolution: outcome.catalogResolution } : {}),
+    ...(confidenceScore !== undefined ? { confidenceScore } : {}),
+    utterance,
+    groundedClean,
+    totalCents,
+    readbackLines,
+  };
+}
+
 export interface VoiceTurnProcessorDeps {
   store: VoiceSessionStore;
   gateway: LLMGateway;
@@ -250,6 +410,8 @@ export interface VoiceTurnProcessorDeps {
   invoiceRepo?: InvoiceRepository;
   agreementRepo?: AgreementRepository;
   customerRepo?: CustomerRepository;
+  /** Customer tags for escalation CRM hydration (handoff context pack). */
+  tagRepo?: TagRepository;
   /**
    * When wired (with customerRepo), an unknown inbound caller who gives their
    * info at `ask_caller` gets a CUSTOMER resolved/created by phone and the call
@@ -259,6 +421,44 @@ export interface VoiceTurnProcessorDeps {
    */
   conversationRepo?: ConversationRepository;
   estimateRepo?: EstimateRepository;
+  /**
+   * WS5 — tenant catalog repo for in-call grounded quoting. When wired, a
+   * drafted estimate's spoken line items are resolved against the tenant's
+   * active catalog synchronously (via a per-session preload) so the caller
+   * hears a catalog-grounded price — never an LLM-invented number — and the
+   * stored proposal payload carries the grounded pricing. Optional: without
+   * it, estimates fall back to the generic confirmation (no price spoken).
+   */
+  catalogRepo?: CatalogItemRepository;
+  /**
+   * WS18 — append-only consent ledger. When wired (with customerRepo), the
+   * on-call SMS consent capture writes the grant (kind:'sms', source:'voice')
+   * and flips customers.sms_consent so the GatedMessageDelivery gate passes
+   * legitimately for the deposit/quote text.
+   */
+  consentEventRepo?: ConsentEventRepository;
+  /**
+   * QUALITY-2026-07-12 WS2 — on-call close PREPARATION (supersedes the D-018
+   * autonomous close). When wired, a caller's strict-confirmed, consent-gated
+   * affirmative on a grounded quote holds the slot and STAGES the close for the
+   * owner: a draft chain (draft_estimate → send_estimate → create_booking, all
+   * DRAFT/blocked) plus ONE owner one-tap approval SMS. Nothing is approved or
+   * executed by the system — the owner's tap is the only approval. Absent → the
+   * affirmative keeps the safe owner-finalizes interim behavior.
+   */
+  autonomousClose?: {
+    /** AUTONOMOUS_CLOSE_DISABLED === 'true' — checked FIRST, pre-consent. */
+    platformDisabled?: boolean;
+    /** AUTONOMOUS_BOOKING_DISABLED === 'true' — the composed D-015 leg. */
+    bookingPlatformDisabled?: boolean;
+    /** Owner phone for the one-tap approval chain SMS. */
+    ownerPhoneResolver?: (tenantId: string) => Promise<string | null | undefined>;
+    /** Owner-class SMS sender (never customer-gated). */
+    sendOwnerSms?: (to: string, body: string) => Promise<void>;
+    /** One-tap HMAC secret (approve token). */
+    oneTapSecret?: string;
+    buildApproveUrl?: (token: string) => string;
+  };
   lookupEvents?: LookupEventService;
   credentialResolver?: TenantCredentialResolver;
   verticalPromptResolver?: (tenantId: string) => Promise<string | undefined>;
@@ -421,6 +621,19 @@ export interface VoiceTurnProcessor {
       tenantId: string;
     },
   ): Promise<SideEffect[]>;
+  /**
+   * ask_caller handler shared by BOTH voice transports. Resolves (or creates)
+   * the unknown caller to a real customer keyed by phone, logs the call on
+   * their timeline, and dispatches `caller_known` so the FSM advances to
+   * intent capture (falls back to `unknown_caller` without a repo/phone or on
+   * failure). Returns the dispatched side effects; the CALLER executes them.
+   * Ported to the Gather adapter so PSTN callers advance out of ask_caller
+   * instead of looping forever on a bare reprompt.
+   */
+  handleAskCaller(
+    session: VoiceSession,
+    tenantId: string,
+  ): Promise<SideEffect[]>;
 }
 
 export function createVoiceTurnProcessor(
@@ -537,6 +750,214 @@ export function createVoiceTurnProcessor(
         error: err instanceof Error ? err.message : String(err),
         sessionId: session.id,
       });
+    }
+  }
+
+  /**
+   * WS5 / WS17 — synchronous in-call quote grounding for a drafted estimate OR
+   * invoice. Builds line items from the classifier's spoken descriptions
+   * (WS17 I1: recovering a leading quantity — "three smoke detectors" — from
+   * the text, since the classifier emits descriptions only), resolves them
+   * against the preloaded tenant catalog, and returns the grounded lineItems +
+   * confidence `_meta` + the spoken quote read-back. Returns `undefined` when
+   * the intent carried no line descriptions, so the generic (non-grounded)
+   * proposal path runs unchanged and the caller hears the fixed confirmation.
+   *
+   * `priceField` selects the document contract (WS17 I3): estimates use
+   * `unitPrice` (integer cents, no per-line total); invoices use
+   * `unitPriceCents` + a recomputed `totalCents` — exactly what the operator
+   * InvoiceTaskHandler does. See
+   * docs/solutions/conventions/line-item-price-field-estimate-vs-invoice.md.
+   *
+   * Reuses the task handlers' exact grounding + confidence helpers
+   * (`groundLineItemPricing`, `lineItemConfidenceSignals`,
+   * `UNCATALOGUED_CONFIDENCE_CAP`) so the voice and operator paths agree.
+   */
+  async function groundVoiceQuote(
+    session: VoiceSession,
+    entities: Record<string, unknown>,
+    fx: SideEffect,
+    priceField: 'unitPrice' | 'unitPriceCents',
+  ): Promise<
+    | {
+        lineItems: Array<Record<string, unknown>>;
+        meta: ProposalConfidenceMeta;
+        missingFields: string[];
+        catalogResolution?: Record<
+          number,
+          Array<{ id: string; name: string; unitPriceCents: number; score: number }>
+        >;
+        confidenceScore?: number;
+        utterance: string;
+        // WS18 — surfaced (finding 9: computed but previously not returned) so
+        // the FSM can stash them on `pendingQuote`. `groundedClean` gates the
+        // D-018 autonomous close; `totalCents` is the spoken total (integer
+        // cents), `readbackLines` are the structured lines the caller heard.
+        groundedClean: boolean;
+        totalCents: number;
+        readbackLines: QuoteReadbackLine[];
+      }
+    | undefined
+  > {
+    const descriptions = Array.isArray(entities.lineItemDescriptions)
+      ? entities.lineItemDescriptions.filter(
+          (d): d is string => typeof d === 'string' && d.trim().length > 0,
+        )
+      : [];
+    if (descriptions.length === 0) return undefined;
+    // Voice never carries an LLM price — descriptions only; the catalog sets
+    // every price. WS17 I1: recover a leading quantity ("three smoke
+    // detectors" → qty 3, "2 inch pipe fitting" → qty 1) deterministically;
+    // the remainder is what we match against the catalog.
+    const rawLines = descriptions.map((raw) => {
+      const { quantity, description } = parseLeadingQuantity(raw);
+      return { description, quantity };
+    });
+
+    // Establishment kicks the preload off; this is the defensive net for
+    // paths/tests that didn't. Then resolve within a tight budget so the
+    // caller's turn is never blocked — a timeout/unwired repo → null →
+    // treated as "catalog unavailable" (no number spoken, never fabricated).
+    preloadSessionCatalog(session, deps.catalogRepo);
+    const catalog = await resolveSessionCatalog(session);
+    const catalogAvailable = catalog !== null;
+
+    const outcome = await groundLineItemPricing(
+      rawLines,
+      priceField,
+      catalog ? () => Promise.resolve(catalog) : null,
+    );
+
+    const baseConfidence =
+      typeof fx.payload.confidence === 'number' ? fx.payload.confidence : undefined;
+    return finalizeGroundedQuote(outcome, catalogAvailable, priceField, baseConfidence);
+  }
+
+  /**
+   * WS18 — apply a deterministic live-quote refinement to the pending draft
+   * estimate and persist it. Re-grounds the edited line set against the tenant
+   * catalog (so a newly-added line gets a catalog price, never an LLM number),
+   * writes the new lineItems + `_meta` back onto the draft proposal in place,
+   * and returns the fresh read-back to speak. Returns null when there is no
+   * catalog resolvable / the edit can't be applied — the caller then defers to
+   * the classifier path.
+   *
+   * NOTE: this uses `proposalRepo.update` rather than `editProposal`
+   * (proposals/actions.ts): the live voice draft_estimate payload is
+   * deliberately partial (no top-level `customerId` — the operator fills it at
+   * review), so `editProposal`'s contract validation would reject it. We
+   * preserve the same "edit the draft in place + audit" behavior without the
+   * review-time contract gate, matching how the create path persists the draft.
+   */
+  async function applyQuoteRefinement(
+    session: VoiceSession,
+    tenantId: string,
+    edit: PostQuoteEdit,
+  ): Promise<
+    | { readbackLines: QuoteReadbackLine[]; groundedClean: boolean; totalCents: number; utterance: string }
+    | null
+  > {
+    const pq = session.machine.currentContext.pendingQuote;
+    if (!pq || !deps.proposalRepo) return null;
+
+    // Rebuild the raw (description, quantity) lines from the last grounded quote.
+    const rawLines: Array<{ description: string; quantity: number }> = pq.groundedLines
+      .filter((li): li is QuoteReadbackLine & { description: string } => typeof li.description === 'string')
+      .map((li) => ({
+        description: li.description,
+        quantity: typeof li.quantity === 'number' && li.quantity > 0 ? li.quantity : 1,
+      }));
+
+    if (edit.type === 'set_quantity') {
+      if (rawLines.length === 0) return null;
+      // Apply to the last line (the most-recently-discussed item).
+      rawLines[rawLines.length - 1]!.quantity = edit.quantity;
+    } else if (edit.type === 'add_line') {
+      rawLines.push({ description: edit.description, quantity: edit.quantity });
+    } else {
+      // remove_line — drop the line whose description contains the noun.
+      const noun = edit.noun.toLowerCase();
+      const remaining = rawLines.filter(
+        (li) => !li.description.toLowerCase().includes(noun),
+      );
+      // Never empty the quote; if the noun matched nothing, defer to classifier.
+      if (remaining.length === 0 || remaining.length === rawLines.length) return null;
+      rawLines.length = 0;
+      rawLines.push(...remaining);
+    }
+
+    preloadSessionCatalog(session, deps.catalogRepo);
+    const catalog = await resolveSessionCatalog(session);
+    const catalogAvailable = catalog !== null;
+    const outcome = await groundLineItemPricing(
+      rawLines,
+      'unitPrice',
+      catalog ? () => Promise.resolve(catalog) : null,
+    );
+
+    // Preserve the draft's original confidence as the base (the cap re-applies
+    // if the refinement introduced an uncatalogued line).
+    let baseConfidence: number | undefined;
+    try {
+      const existing = await deps.proposalRepo.findById(tenantId, pq.proposalId);
+      // WS18d — only a still-pending draft may be refined (mirrors
+      // editProposal's status gate). Once the close chain approved/executed
+      // the proposal, a further "make it two" must NOT rewrite executed money
+      // state — defer to the classifier path instead.
+      if (existing && existing.status !== 'draft' && existing.status !== 'ready_for_review') {
+        return null;
+      }
+      if (existing && typeof existing.confidenceScore === 'number') {
+        baseConfidence = existing.confidenceScore;
+      }
+      const grounded = finalizeGroundedQuote(outcome, catalogAvailable, 'unitPrice', baseConfidence);
+      if (existing) {
+        const nextPayload: Record<string, unknown> = {
+          ...(existing.payload as Record<string, unknown>),
+          lineItems: grounded.lineItems,
+          _meta: grounded.meta,
+        };
+        // Direct repo.update rather than editProposal (proposals/actions.ts):
+        // the refined payload is SYSTEM-CONSTRUCTED from catalog grounding —
+        // never owner-typed input — and the live voice draft is deliberately
+        // partial (no top-level customerId until close/review), so
+        // editProposal's review-time contract validation does not apply here.
+        await deps.proposalRepo.update(tenantId, pq.proposalId, { payload: nextPayload });
+      }
+      if (deps.auditRepo) {
+        try {
+          await deps.auditRepo.create(
+            createAuditEvent({
+              tenantId,
+              actorId: deps.systemActorId ?? 'calling-agent',
+              actorRole: 'system',
+              eventType: 'agent.calling.quote_refined',
+              entityType: 'proposal',
+              entityId: pq.proposalId,
+              correlationId: session.id,
+              metadata: {
+                editType: edit.type,
+                totalCents: grounded.totalCents,
+                groundedClean: grounded.groundedClean,
+              },
+            }),
+          );
+        } catch {
+          /* audit is best-effort */
+        }
+      }
+      return {
+        readbackLines: grounded.readbackLines,
+        groundedClean: grounded.groundedClean,
+        totalCents: grounded.totalCents,
+        utterance: grounded.utterance,
+      };
+    } catch (err) {
+      logger.warn('applyQuoteRefinement failed', {
+        error: err instanceof Error ? err.message : String(err),
+        sessionId: session.id,
+      });
+      return null;
     }
   }
 
@@ -678,7 +1099,15 @@ export function createVoiceTurnProcessor(
             channel: 'telephony',
             sessionId: session.id,
           },
-          aiRunId: uuidv4(),
+          // proposals.ai_run_id has an FK to ai_runs(id). Use the REAL run id
+          // threaded from the classify call (surfaced via the gateway →
+          // classifyIntent → intent_classified event → side-effect payload);
+          // never fabricate one — a random uuid violates the FK and the
+          // swallowed insert error silently drops the proposal on Postgres.
+          // Left null when no run was persisted for this turn.
+          ...(typeof fx.payload.aiRunId === 'string' && fx.payload.aiRunId
+            ? { aiRunId: fx.payload.aiRunId }
+            : {}),
           createdBy:
             typeof fx.payload.customerId === 'string'
               ? fx.payload.customerId
@@ -690,12 +1119,32 @@ export function createVoiceTurnProcessor(
         return;
       }
 
+      // WS5 / WS17 I3 — in-call grounded quoting for a drafted estimate OR
+      // invoice. Grounds the spoken line items against the preloaded tenant
+      // catalog so the stored payload carries catalog-authoritative pricing
+      // (the operator draft matches what was said) and the caller hears a
+      // grounded read-back. The price-field contract differs by document:
+      // estimates use `unitPrice`, invoices `unitPriceCents` (+ recomputed
+      // totalCents) — see the convention doc. Undefined for every other intent
+      // / a quote with no line items — the generic path then runs unchanged.
+      const estimateQuote =
+        intent === 'draft_estimate'
+          ? await groundVoiceQuote(session, entities, fx, 'unitPrice')
+          : intent === 'create_invoice'
+            ? await groundVoiceQuote(session, entities, fx, 'unitPriceCents')
+            : undefined;
+
       const proposal = buildProposal({
         tenantId,
         proposalType: intentToProposalType(intent),
         payload: {
           intent,
           entities,
+          // WS5 — grounded line items + confidence meta ride alongside the raw
+          // entities so the operator-side draft shows exactly what was quoted.
+          ...(estimateQuote
+            ? { lineItems: estimateQuote.lineItems, _meta: estimateQuote.meta }
+            : {}),
           sessionId: session.id,
           callSid: session.callSid,
         },
@@ -704,8 +1153,32 @@ export function createVoiceTurnProcessor(
           source: 'calling-agent',
           channel: 'telephony',
           sessionId: session.id,
+          // Ambiguous-line candidates for the review UI (same shape the
+          // EstimateTaskHandler stores) — only present when a line was
+          // ambiguous.
+          ...(estimateQuote?.catalogResolution
+            ? { catalogResolution: estimateQuote.catalogResolution }
+            : {}),
         },
-        aiRunId: uuidv4(),
+        // WS5 — thread the (uncatalogued-capped) confidence and force 'draft'
+        // for an ambiguous line, matching the EstimateTaskHandler. The voice
+        // path never sets sourceTrustTier, so the proposal is born 'draft'
+        // regardless; these keep the operator-side signals consistent.
+        ...(estimateQuote && estimateQuote.confidenceScore !== undefined
+          ? { confidenceScore: estimateQuote.confidenceScore }
+          : {}),
+        ...(estimateQuote && estimateQuote.missingFields.length > 0
+          ? { missingFields: estimateQuote.missingFields }
+          : {}),
+        // proposals.ai_run_id has an FK to ai_runs(id). Use the REAL run id
+        // threaded from the classify call (gateway → classifyIntent →
+        // intent_classified event → this side-effect payload); never
+        // fabricate one — a random uuid violates the FK and the swallowed
+        // insert error silently drops the proposal on Postgres. Left null
+        // when no run was persisted for this turn.
+        ...(typeof fx.payload.aiRunId === 'string' && fx.payload.aiRunId
+          ? { aiRunId: fx.payload.aiRunId }
+          : {}),
         createdBy:
           typeof fx.payload.customerId === 'string'
             ? fx.payload.customerId
@@ -717,6 +1190,19 @@ export function createVoiceTurnProcessor(
       const followUps = session.machine.dispatch({
         type: 'proposal_queued',
         proposalId: stored.id,
+        // WS5 — the grounded quote read-back the caller hears. Absent for
+        // non-estimate proposals → the FSM speaks the fixed confirmation.
+        ...(estimateQuote ? { utterance: estimateQuote.utterance } : {}),
+        // WS18 — a grounded ESTIMATE (only) becomes a live, refinable/closeable
+        // pendingQuote on the FSM. Scoped to draft_estimate: an invoice quote is
+        // for completed work, not a sale to close on the call.
+        ...(estimateQuote && intent === 'draft_estimate'
+          ? {
+              groundedLines: estimateQuote.readbackLines,
+              groundedClean: estimateQuote.groundedClean,
+              totalCents: estimateQuote.totalCents,
+            }
+          : {}),
       });
       sideEffectsSink.push(...followUps);
     } catch (err) {
@@ -792,6 +1278,23 @@ export function createVoiceTurnProcessor(
         rawReason,
       );
 
+      const crm = await hydrateEscalationCrm(
+        tenantId,
+        {
+          ...(callerBundle.caller.customerId
+            ? { customerId: callerBundle.caller.customerId }
+            : {}),
+          ...(callerPhone !== 'unknown' ? { phone: callerPhone } : {}),
+        },
+        {
+          ...(deps.customerRepo ? { customerRepo: deps.customerRepo } : {}),
+          ...(deps.tagRepo ? { tagRepo: deps.tagRepo } : {}),
+          ...(deps.jobRepo ? { jobRepo: deps.jobRepo } : {}),
+          ...(deps.agreementRepo ? { agreementRepo: deps.agreementRepo } : {}),
+        },
+      );
+      const enrichedCaller = mergeCallerContextWithCrm(callerBundle, crm);
+
       const result = await escalateToHuman({
         tenantId,
         sessionId: session.id,
@@ -813,10 +1316,10 @@ export function createVoiceTurnProcessor(
         channelPreferences,
         buildSummary: buildEscalationSummary,
         callerContext: {
-          caller: callerBundle.caller,
-          customer: callerBundle.customer,
-          intent: callerBundle.intent,
-          transcriptSnapshot: callerBundle.transcriptSnapshot,
+          caller: enrichedCaller.caller,
+          ...(enrichedCaller.customer ? { customer: enrichedCaller.customer } : {}),
+          intent: enrichedCaller.intent,
+          transcriptSnapshot: enrichedCaller.transcriptSnapshot,
         },
         shopName: deps.businessName,
         ...(deps.publicBaseUrl ? { publicWebBaseUrl: deps.publicBaseUrl } : {}),
@@ -950,7 +1453,9 @@ export function createVoiceTurnProcessor(
           sessionId: session.id,
           escalationReason: reason,
         },
-        aiRunId: uuidv4(),
+        // This callback proposal is generated internally (rotation empty/
+        // exhausted) with no associated ai_runs row, so ai_run_id stays null —
+        // never fabricate a uuid (FK to ai_runs(id) would reject it).
         createdBy: deps.systemActorId ?? 'calling-agent',
         ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
       });
@@ -1232,7 +1737,14 @@ export function createVoiceTurnProcessor(
       session.pendingVoiceApproval = undefined;
       return null;
     }
-    const result = await continueVoiceApproval(approvalDeps, {
+    // WS19 — a batch walk carries its cursor on voiceApprovalState. When one is
+    // active the batch continuation drives the turn (global stop / per-item
+    // skip / edit / delegate-to-single-item + cursor advance); otherwise the
+    // single-item engine handles it byte-identically.
+    const continueTurn = isBatchActive(session.voiceApprovalState)
+      ? continueVoiceBatchApproval
+      : continueVoiceApproval;
+    const result = await continueTurn(approvalDeps, {
       tenantId,
       sessionId: session.id,
       ownerSession: session.machine.currentContext.ownerSession === true,
@@ -1285,6 +1797,25 @@ export function createVoiceTurnProcessor(
       args.entities.proposalReference.trim().length > 0
         ? args.entities.proposalReference
         : args.utterance;
+
+    // WS19 — deterministic batch trigger (NOT a classifier-prompt change, so
+    // cassettes stay byte-stable): an approve on an owner session whose
+    // reference OR raw utterance names the whole queue ("approve all",
+    // "everything", "what's waiting", "go through them") starts a batch walk
+    // over the full pending set instead of resolving a single target. Reject
+    // stays single-target — a batch is an approve-all pass.
+    const isApprove = args.intentType !== 'reject_proposal';
+    const batchTrigger = /\b(all|everything|queue|what'?s\s+waiting|go\s+through)\b/i;
+    if (isApprove && (batchTrigger.test(reference) || batchTrigger.test(args.utterance))) {
+      const batchResult = await startVoiceBatchApproval(approvalDeps, {
+        tenantId: args.tenantId,
+        sessionId: session.id,
+        ownerSession,
+        sessionState: session.voiceApprovalState,
+      });
+      return applyVoiceApprovalResult(session, batchResult);
+    }
+
     const result = await startVoiceApproval(approvalDeps, {
       tenantId: args.tenantId,
       sessionId: session.id,
@@ -1360,6 +1891,581 @@ export function createVoiceTurnProcessor(
     return applyVoiceApprovalResult(session, result);
   }
 
+  /**
+   * WS2 — stage the owner-approval close chain for the live quote and send the
+   * owner ONE one-tap approval SMS. The estimate stays a draft, a send_estimate
+   * draft is chained to it, and — when a hold was placed (the eligible path) —
+   * a create_booking draft for the held slot is chained too so the owner's tap
+   * confirms the booking. Nothing is approved or executed here. Idempotent
+   * (skips a head that is already chained). Best-effort: a queue failure must
+   * never strand the caller — the honest line is spoken regardless.
+   */
+  async function queueOwnerCloseChain(
+    session: VoiceSession,
+    tenantId: string,
+    evaluation: AutonomousCloseEvaluation,
+    booking?: { appointmentId: string; holdExpiryAt: Date; summary: string },
+  ): Promise<void> {
+    const pq = session.machine.currentContext.pendingQuote;
+    if (!pq || !deps.proposalRepo) return;
+    const ac = deps.autonomousClose;
+    try {
+      await queueCloseFallbackChain(
+        {
+          proposalRepo: deps.proposalRepo,
+          ...(deps.auditRepo ? { auditRepo: deps.auditRepo } : {}),
+          ...(deps.auditRepo && ac
+            ? {
+                routing: {
+                  auditRepo: deps.auditRepo,
+                  ...(ac.sendOwnerSms ? { sendSms: ac.sendOwnerSms } : {}),
+                  ...(ac.oneTapSecret ? { secret: ac.oneTapSecret } : {}),
+                  ...(ac.buildApproveUrl ? { buildApproveUrl: ac.buildApproveUrl } : {}),
+                  ...(ac.ownerPhoneResolver
+                    ? { ownerPhoneResolver: ac.ownerPhoneResolver }
+                    : {}),
+                },
+              }
+            : {}),
+        },
+        {
+          tenantId,
+          draftEstimateProposalId: pq.proposalId,
+          ...(session.customerId ? { customerId: session.customerId } : {}),
+          ...((deps.callerPhoneResolver?.(session) ?? session.callerPhone)
+            ? { callerPhone: deps.callerPhoneResolver?.(session) ?? session.callerPhone }
+            : {}),
+          sessionId: session.id,
+          evaluation,
+          ...(booking ? { booking } : {}),
+        },
+      );
+      session.closeState = 'fallback';
+    } catch (err) {
+      logger.warn('close owner-chain queue failed', {
+        error: err instanceof Error ? err.message : String(err),
+        sessionId: session.id,
+      });
+    }
+  }
+
+  /** A failed gate → stage the two-member owner chain (no held booking). */
+  async function runCloseFallback(
+    session: VoiceSession,
+    tenantId: string,
+    reason: AutonomousCloseIneligibleReason,
+  ): Promise<void> {
+    await queueOwnerCloseChain(session, tenantId, { eligible: false, reason });
+  }
+
+  /**
+   * WS2 — the caller assented to book the live quote. The FSM records the
+   * assent (keeping pendingQuote) and stays in `closing`; the processor owns
+   * the spoken close.
+   *
+   * Pre-consent gate ladder (cheap checks BEFORE asking for anything):
+   * platform kill switch → tenant opt-in → groundedClean → close cap → strict
+   * confirmIntent on the affirmative (authoritative — the deterministic
+   * pre-check was necessary, not sufficient) → an identified caller with a
+   * phone. Any failure keeps the honest owner-finalizes interim line and stages
+   * the owner chain. All pre-gates passing asks the caller for SMS consent; the
+   * NEXT turn's grant continues into owner-approval close staging
+   * (handlePendingConsentCapture → runOwnerApprovedClose).
+   */
+  async function handlePostQuoteClose(
+    session: VoiceSession,
+    tenantId: string,
+    speechResult: string,
+  ): Promise<SideEffect[]> {
+    const out: SideEffect[] = [];
+    out.push(...session.machine.dispatch({ type: 'post_quote_affirmative' }));
+
+    // Repeated affirmative after the owner chain was already staged this
+    // session — nothing more to do here; the owner still owns the approval.
+    if (session.closeState === 'fallback') {
+      out.push({
+        type: 'tts_play',
+        payload: { text: POST_QUOTE_AFFIRMATIVE_INTERIM, source: 'post_quote_close' },
+      });
+      return out;
+    }
+
+    const pq = session.machine.currentContext.pendingQuote;
+    const ac = deps.autonomousClose;
+    const callerPhone = deps.callerPhoneResolver?.(session) ?? session.callerPhone;
+    const customerId = session.customerId ?? session.machine.currentContext.customerId;
+
+    // Authoritative strict confirm. Run before the settings gates so its verdict
+    // is available for the ladder; a gateway error fails closed.
+    let strictConfirmed = false;
+    try {
+      const confirmation = await confirmIntent({
+        intentSummary: 'lock in this quote and book the work',
+        callerResponse: speechResult,
+        tenantId,
+        gateway: deps.gateway,
+      });
+      const capExceeded = recordCost(session, confirmation.tokenUsage);
+      if (capExceeded) {
+        out.push(...session.machine.dispatch({ type: 'cost_cap_exceeded' }));
+        return out;
+      }
+      strictConfirmed = confirmation.confirmed;
+    } catch (err) {
+      logger.warn('post-quote close: strict confirm failed — treating as not confirmed', {
+        error: err instanceof Error ? err.message : String(err),
+        sessionId: session.id,
+      });
+      strictConfirmed = false;
+    }
+
+    // Pre-consent gate ladder (first-failing wins, matching the lane order).
+    let preGateFailure: AutonomousCloseIneligibleReason | null = null;
+    let settings: TenantSettings | null = null;
+    if (!ac || ac.platformDisabled === true) {
+      preGateFailure = 'platform_disabled';
+    } else {
+      settings = deps.settingsRepo
+        ? await deps.settingsRepo.findByTenant(tenantId).catch(() => null)
+        : null;
+      if (!(settings?.autonomousCloseEnabled ?? false)) {
+        preGateFailure = 'tenant_not_opted_in';
+      } else if (!pq?.groundedClean) {
+        preGateFailure = 'quote_not_grounded_clean';
+      } else if (
+        typeof settings?.autonomousCloseMaxCents === 'number' &&
+        pq.totalCents > settings.autonomousCloseMaxCents
+      ) {
+        preGateFailure = 'above_close_cap';
+      } else if (!strictConfirmed) {
+        preGateFailure = 'not_strict_confirmed';
+      } else if (!customerId || !callerPhone) {
+        // Can't legitimately capture consent without an identified caller.
+        preGateFailure = 'sms_consent_not_captured';
+      }
+    }
+
+    if (preGateFailure) {
+      out.push({
+        type: 'audit_log',
+        payload: {
+          eventType: 'agent.calling.close_pre_gate_failed',
+          sessionId: session.id,
+          tenantId,
+          reason: preGateFailure,
+          ...(pq ? { proposalId: pq.proposalId } : {}),
+          ts: Date.now(),
+        },
+      });
+      await runCloseFallback(session, tenantId, preGateFailure);
+      out.push({
+        type: 'tts_play',
+        payload: { text: POST_QUOTE_AFFIRMATIVE_INTERIM, source: 'post_quote_close' },
+      });
+      return out;
+    }
+
+    // All pre-gates pass → ask for on-call SMS consent (WS18b mini-dialogue).
+    session.pendingConsentCapture = {
+      customerId: customerId!,
+      phone: callerPhone!,
+      close: { proposalId: pq!.proposalId, strictConfirmed: true },
+    };
+    out.push({
+      type: 'tts_play',
+      payload: { text: SMS_CONSENT_ASK, source: 'sms_consent_capture' },
+    });
+    return out;
+  }
+
+  /**
+   * WS2 — the close continuation, run on the consent-grant turn. Hold placement
+   * → lane evaluation (composed D-015 booking leg, used here as telemetry +
+   * whether to include the held booking in the owner chain) → stage the
+   * owner-approval chain + ONE one-tap approval SMS. NOTHING is approved or
+   * executed by the system — the owner's tap is the only approval. When a gate
+   * fails the fresh hold is released and a two-member owner chain is staged;
+   * either way the honest CLOSE_FALLBACK_LINE is spoken.
+   */
+  async function runOwnerApprovedClose(
+    session: VoiceSession,
+    tenantId: string,
+    pending: { customerId: string; phone: string; close: { proposalId: string; strictConfirmed: boolean } },
+  ): Promise<SideEffect[]> {
+    const out: SideEffect[] = [];
+    const ctx = session.machine.currentContext;
+    const pq = ctx.pendingQuote;
+    const ac = deps.autonomousClose;
+
+    const fallback = async (reason: AutonomousCloseIneligibleReason): Promise<SideEffect[]> => {
+      await runCloseFallback(session, tenantId, reason);
+      out.push({
+        type: 'audit_log',
+        payload: {
+          eventType: 'agent.calling.close_gate_failed',
+          sessionId: session.id,
+          tenantId,
+          reason,
+          ts: Date.now(),
+        },
+      });
+      out.push({
+        type: 'tts_play',
+        payload: { text: CLOSE_FALLBACK_LINE, source: 'post_quote_close' },
+      });
+      return out;
+    };
+
+    if (!pq || !ac || !deps.proposalRepo) {
+      // Quote vanished / close unwired mid-flight — owner mode.
+      return fallback('scheduling_incomplete');
+    }
+
+    const settings: TenantSettings | null = deps.settingsRepo
+      ? await deps.settingsRepo.findByTenant(tenantId).catch(() => null)
+      : null;
+
+    // Scheduling inputs. The spoken time rides the classifier's whitelisted
+    // `dateTimeDescription` entity (verbatim phrase; sanitizeExtractedEntities
+    // admits no other time key). The classifier NEVER emits ids, so the job is
+    // resolved HERE: an explicit entities.jobId (programmatic paths) wins;
+    // otherwise the verified caller's SINGLE active job. Zero or multiple
+    // active jobs → fallback — ambiguity is never a silent guess (CLAUDE.md),
+    // and the hold's ownership guard re-verifies whatever we picked.
+    const entities = ctx.extractedEntities ?? {};
+    const dateTimeDescription = [
+      entities.dateTimeDescription,
+      entities.dateTimePhrase,
+    ].find((v): v is string => typeof v === 'string' && v.trim().length > 0);
+
+    let jobId = typeof entities.jobId === 'string' ? entities.jobId : undefined;
+    if (!jobId && deps.jobRepo?.findByCustomer) {
+      try {
+        const jobs = await deps.jobRepo.findByCustomer(tenantId, pending.customerId);
+        const active = jobs.filter((j) =>
+          ['new', 'scheduled', 'dispatched', 'in_progress'].includes(j.status),
+        );
+        if (active.length === 1) jobId = active[0]!.id;
+      } catch {
+        /* fall through to scheduling_incomplete */
+      }
+    }
+
+    if (!jobId || !dateTimeDescription || !deps.appointmentRepo) {
+      return fallback('scheduling_incomplete');
+    }
+
+    const hold = await resolveAndPlaceAppointmentHold(
+      {
+        appointmentRepo: deps.appointmentRepo,
+        ...(deps.jobRepo ? { jobRepo: deps.jobRepo } : {}),
+      },
+      {
+        tenantId,
+        jobId,
+        customerId: pending.customerId,
+        dateTimeDescription,
+        ...(settings?.timezone ? { timezone: settings.timezone } : {}),
+        createdBy: AUTONOMOUS_CLOSE_ACTOR,
+        // Deterministic per-session key: a retried close turn returns the
+        // existing hold instead of double-holding the slot.
+        idempotencyKey: `autonomous-close:${session.id}`,
+      },
+    );
+    if (!hold.ok) {
+      return fallback(
+        hold.failed === 'unresolved_datetime' ? 'scheduling_incomplete' : 'hold_not_placed',
+      );
+    }
+
+    // Full D-018 lane — composed D-015 booking leg included. No configured
+    // hours parse to null and checkBusinessHours fails OPEN (D-015).
+    const slotWithinBusinessHours = checkBusinessHours(
+      parseOnboardingBusinessHours(settings?.businessHours, hold.timezone),
+      new Date(hold.scheduledStart),
+    ).isOpen;
+    const draft = await deps.proposalRepo.findById(tenantId, pq.proposalId);
+    const now = new Date();
+    const evaluation = evaluateAutonomousCloseLane({
+      platformDisabled: ac.platformDisabled === true,
+      tenantOptedIn: settings?.autonomousCloseEnabled ?? false,
+      ...(typeof settings?.autonomousCloseMaxCents === 'number'
+        ? { closeCapCents: settings.autonomousCloseMaxCents }
+        : {}),
+      groundedClean: pq.groundedClean,
+      quoteTotalCents: pq.totalCents,
+      strictConfirmed: pending.close.strictConfirmed,
+      smsConsentCaptured: true,
+      schedulingComplete: true,
+      holdPlaced: true,
+      holdExpiryAt: hold.holdExpiryAt,
+      now,
+      booking: {
+        platformDisabled: ac.bookingPlatformDisabled === true,
+        settings: {
+          enabled: settings?.autonomousBookingEnabled ?? false,
+          ...(settings?.autonomousBookingThreshold !== undefined
+            ? { threshold: settings.autonomousBookingThreshold }
+            : {}),
+        },
+        proposalType: 'create_booking',
+        inboundReceptionistSource: true,
+        ...(typeof draft?.confidenceScore === 'number'
+          ? { confidenceScore: draft.confidenceScore }
+          : {}),
+        payload: { appointmentId: hold.appointmentId },
+        pendingReferenceCount: 0,
+        customerId: pending.customerId,
+        holdPlaced: true,
+        holdExpiryAt: hold.holdExpiryAt,
+        now,
+        slotWithinBusinessHours,
+      },
+      // Live-session risk flags. Negotiation rides the FSM context; a
+      // vulnerability/emergency session never reaches `closing` with a
+      // pendingQuote (both fast-path to escalating).
+      flags: { negotiation: ctx.negotiationFlagged === true },
+    });
+
+    out.push({
+      type: 'audit_log',
+      payload: {
+        eventType: 'agent.calling.autonomous_close_evaluated',
+        sessionId: session.id,
+        tenantId,
+        evaluation,
+        proposalId: pq.proposalId,
+        appointmentId: hold.appointmentId,
+        ts: Date.now(),
+      },
+    });
+
+    if (!evaluation.eligible) {
+      // Release the fresh hold — nothing will ever confirm it in owner mode,
+      // and a 24h phantom hold would block the calendar.
+      try {
+        await updateAppointment(
+          tenantId,
+          hold.appointmentId,
+          { status: 'canceled', holdPendingApproval: false },
+          deps.appointmentRepo,
+        );
+      } catch {
+        /* best-effort — the hold reaper releases it at expiry regardless */
+      }
+      return fallback(evaluation.reason);
+    }
+
+    // Lane-eligible: the held slot is safe to stage as a create_booking DRAFT
+    // in the owner chain, so the owner's ONE one-tap approval confirms the
+    // booking too. The hold is KEPT (the caller confirmed it); if the owner
+    // never approves, the create_booking proposal + the hold expire naturally.
+    const resolvedTime = formatForReadback(hold.scheduledStart, hold.timezone);
+    const summary = `Booked ${resolvedTime}`;
+
+    await queueOwnerCloseChain(session, tenantId, evaluation, {
+      appointmentId: hold.appointmentId,
+      holdExpiryAt: hold.holdExpiryAt,
+      summary,
+    });
+
+    out.push({
+      type: 'audit_log',
+      payload: {
+        eventType: 'agent.calling.close_owner_chain_staged',
+        sessionId: session.id,
+        tenantId,
+        chainHeadProposalId: pq.proposalId,
+        appointmentId: hold.appointmentId,
+        ts: Date.now(),
+      },
+    });
+
+    // Never claims the caller is booked — the owner still has to approve.
+    out.push({
+      type: 'tts_play',
+      payload: { text: CLOSE_FALLBACK_LINE, source: 'post_quote_close' },
+    });
+    return out;
+  }
+
+  /**
+   * WS18 — consume an in-flight on-call SMS consent capture. Modeled on
+   * handlePendingVoiceApproval: when session.pendingConsentCapture is set, the
+   * caller's utterance is the answer to "is it okay to text you the quote?".
+   * Strict confirmIntent (ambiguous → no). A GRANT writes the consent (ledger +
+   * customers.sms_consent) via the recordSmsConsentFromVoice seam so the
+   * GatedMessageDelivery gate later passes legitimately; a DECLINE / ambiguous /
+   * unwired-persistence hands the send to the owner. Returns the turn's side
+   * effects, or null when no capture is pending.
+   */
+  async function handlePendingConsentCapture(
+    session: VoiceSession,
+    speechResult: string,
+    tenantId: string,
+  ): Promise<SideEffect[] | null> {
+    const pending = session.pendingConsentCapture;
+    if (!pending) return null;
+
+    let granted = false;
+    try {
+      const confirmation = await confirmIntent({
+        intentSummary: 'text you the full quote and a link to book',
+        callerResponse: speechResult,
+        tenantId,
+        gateway: deps.gateway,
+      });
+      recordCost(session, confirmation.tokenUsage);
+      granted = confirmation.confirmed;
+    } catch (err) {
+      // Fail closed — an evaluation error is treated as "no consent".
+      logger.warn('consent capture: confirmIntent failed', {
+        error: err instanceof Error ? err.message : String(err),
+        sessionId: session.id,
+      });
+      granted = false;
+    }
+
+    session.pendingConsentCapture = undefined;
+
+    if (granted) {
+      if (deps.consentEventRepo && deps.customerRepo) {
+        try {
+          await recordSmsConsentFromVoice(
+            {
+              consentLedger: deps.consentEventRepo,
+              customerRepo: deps.customerRepo,
+              ...(deps.auditRepo ? { auditRepo: deps.auditRepo } : {}),
+            },
+            {
+              tenantId,
+              customerId: pending.customerId,
+              phone: pending.phone,
+              voiceSessionId: session.id,
+              actorId: deps.systemActorId ?? 'calling-agent',
+            },
+          );
+        } catch (err) {
+          // Couldn't persist consent → do NOT claim we'll text; fall to owner.
+          logger.warn('consent capture: recordSmsConsentFromVoice failed', {
+            error: err instanceof Error ? err.message : String(err),
+            sessionId: session.id,
+          });
+          granted = false;
+        }
+      } else {
+        // No persistence wired → cannot legitimately pass the gate → owner path.
+        granted = false;
+      }
+    }
+
+    const captureAudit: SideEffect = {
+      type: 'audit_log',
+      payload: {
+        eventType: 'agent.calling.sms_consent_captured',
+        sessionId: session.id,
+        tenantId,
+        customerId: pending.customerId,
+        outcome: granted ? 'granted' : 'declined',
+        ts: Date.now(),
+      },
+    };
+
+    // WS2 — a capture initiated by the close flow continues into the
+    // owner-approval close staging on a grant; a decline (or persistence
+    // failure) queues the owner-finalizes fallback and speaks the decline copy.
+    if (pending.close) {
+      if (granted) {
+        const closeFx = await runOwnerApprovedClose(session, tenantId, {
+          customerId: pending.customerId,
+          phone: pending.phone,
+          close: pending.close,
+        });
+        return [captureAudit, ...closeFx];
+      }
+      await runCloseFallback(session, tenantId, 'sms_consent_not_captured');
+      return [
+        captureAudit,
+        {
+          type: 'tts_play',
+          payload: { text: SMS_CONSENT_DECLINE_FALLBACK, source: 'sms_consent_capture' },
+        },
+      ];
+    }
+
+    return [
+      captureAudit,
+      {
+        type: 'tts_play',
+        payload: {
+          text: granted ? SMS_CONSENT_GRANT_ACK : SMS_CONSENT_DECLINE_FALLBACK,
+          source: 'sms_consent_capture',
+        },
+      },
+    ];
+  }
+
+  /**
+   * ask_caller handler shared by BOTH voice adapters (media-streams
+   * `speechTurn` and the PSTN/Gather adapter's `_handleGatherLocked`). An
+   * unknown caller who has just given their info is resolved (or created) to a
+   * real CUSTOMER keyed by their phone so the booking that follows attaches to
+   * a customer record; the call is logged on that customer's timeline and the
+   * FSM advances via `caller_known` so intent capture can proceed. Without a
+   * customerRepo + phone (or on failure) we fall back to the FSM's existing
+   * `unknown_caller` retry/escalate path.
+   */
+  async function handleAskCaller(
+    session: VoiceSession,
+    tenantId: string,
+  ): Promise<SideEffect[]> {
+    const out: SideEffect[] = [];
+    const callerPhone = deps.callerPhoneResolver?.(session) ?? session.callerPhone;
+    if (deps.customerRepo && callerPhone) {
+      try {
+        const resolved = await findOrCreateCustomerByPhone({
+          tenantId,
+          fromPhone: callerPhone,
+          customerRepo: deps.customerRepo,
+          ...(deps.auditRepo ? { auditRepo: deps.auditRepo } : {}),
+          systemActorId: deps.systemActorId ?? 'system:inbound-call',
+        });
+        session.customerId = resolved.customerId;
+        if (deps.conversationRepo) {
+          try {
+            await logInboundCallOnCustomerTimeline({
+              conversationRepo: deps.conversationRepo,
+              tenantId,
+              customerId: resolved.customerId,
+              fromPhone: callerPhone,
+              ...(session.callSid ? { callSid: session.callSid } : {}),
+              actorId: deps.systemActorId ?? 'system:inbound-call',
+              ...(deps.auditRepo ? { auditRepo: deps.auditRepo } : {}),
+            });
+          } catch (err) {
+            logger.error('ask_caller: inbound call timeline log failed', {
+              error: err instanceof Error ? err.message : String(err),
+              sessionId: session.id,
+            });
+          }
+        }
+        out.push(
+          ...session.machine.dispatch({ type: 'caller_known', customerId: resolved.customerId }),
+        );
+      } catch (err) {
+        logger.error('ask_caller: find-or-create customer failed', {
+          error: err instanceof Error ? err.message : String(err),
+          sessionId: session.id,
+        });
+        out.push(...session.machine.dispatch({ type: 'unknown_caller' }));
+      }
+    } else {
+      // No customer repo / phone wired — keep the existing retry/escalate path.
+      out.push(...session.machine.dispatch({ type: 'unknown_caller' }));
+    }
+    return out;
+  }
+
   // ─── Speech turn (formerly processCallerUtterance) ──────────────────
 
   const speechTurn: SpeechTurnHandler = async ({
@@ -1403,6 +2509,15 @@ export function createVoiceTurnProcessor(
       return approvalTurn;
     }
 
+    // WS18 — an in-flight on-call SMS consent capture also consumes the turn
+    // before the FSM-state branch (the caller's utterance is the yes/no answer).
+    const consentTurn = await handlePendingConsentCapture(session, speechResult, tenantId);
+    if (consentTurn) {
+      await executeSideEffects(session, consentTurn, tenantId);
+      appendAgentTts(deps.store, session.id, consentTurn);
+      return consentTurn;
+    }
+
     const sideEffectsAll: SideEffect[] = [];
     const currentState = session.machine.currentState;
 
@@ -1419,54 +2534,7 @@ export function createVoiceTurnProcessor(
     }
 
     if (currentState === 'ask_caller') {
-      // Unknown caller just gave their info. Resolve (or create) a real CUSTOMER
-      // keyed by their phone so the booking that follows attaches to a customer
-      // record, log the call on that customer's timeline, and advance the FSM
-      // (caller_known) so the agent can take the booking. Without a customerRepo
-      // + phone we fall back to the FSM's existing retry/escalate path.
-      const callerPhone = deps.callerPhoneResolver?.(session) ?? session.callerPhone;
-      if (deps.customerRepo && callerPhone) {
-        try {
-          const resolved = await findOrCreateCustomerByPhone({
-            tenantId,
-            fromPhone: callerPhone,
-            customerRepo: deps.customerRepo,
-            ...(deps.auditRepo ? { auditRepo: deps.auditRepo } : {}),
-            systemActorId: deps.systemActorId ?? 'system:inbound-call',
-          });
-          session.customerId = resolved.customerId;
-          if (deps.conversationRepo) {
-            try {
-              await logInboundCallOnCustomerTimeline({
-                conversationRepo: deps.conversationRepo,
-                tenantId,
-                customerId: resolved.customerId,
-                fromPhone: callerPhone,
-                ...(session.callSid ? { callSid: session.callSid } : {}),
-                actorId: deps.systemActorId ?? 'system:inbound-call',
-                ...(deps.auditRepo ? { auditRepo: deps.auditRepo } : {}),
-              });
-            } catch (err) {
-              logger.error('ask_caller: inbound call timeline log failed', {
-                error: err instanceof Error ? err.message : String(err),
-                sessionId: session.id,
-              });
-            }
-          }
-          sideEffectsAll.push(
-            ...session.machine.dispatch({ type: 'caller_known', customerId: resolved.customerId }),
-          );
-        } catch (err) {
-          logger.error('ask_caller: find-or-create customer failed', {
-            error: err instanceof Error ? err.message : String(err),
-            sessionId: session.id,
-          });
-          sideEffectsAll.push(...session.machine.dispatch({ type: 'unknown_caller' }));
-        }
-      } else {
-        // No customer repo / phone wired — keep the existing retry/escalate path.
-        sideEffectsAll.push(...session.machine.dispatch({ type: 'unknown_caller' }));
-      }
+      sideEffectsAll.push(...(await handleAskCaller(session, tenantId)));
       await executeSideEffects(session, sideEffectsAll, tenantId);
       return sideEffectsAll;
     }
@@ -1511,6 +2579,59 @@ export function createVoiceTurnProcessor(
         );
       }
     } else if (currentState === 'intent_capture' || currentState === 'closing') {
+      // WS18 — deterministic post-quote pre-check. Runs ONLY in `closing` with a
+      // live pendingQuote, BEFORE the classifier (the classifier prompt/schema
+      // stay byte-stable). Closes the discard bug: "yes, book it" and "make it
+      // two" are handled here instead of being misread as a second intent that
+      // silently drops the quote.
+      const pendingQuote = session.machine.currentContext.pendingQuote;
+      if (currentState === 'closing' && pendingQuote) {
+        const decision = classifyPostQuoteUtterance(speechResult);
+        if (decision.kind === 'affirmative') {
+          sideEffectsAll.push(...(await handlePostQuoteClose(session, tenantId, speechResult)));
+          await executeSideEffects(session, sideEffectsAll, tenantId);
+          appendAgentTts(deps.store, session.id, sideEffectsAll);
+          return sideEffectsAll;
+        }
+        if (decision.kind === 'refine') {
+          if (pendingQuote.refinementCount >= MAX_REFINEMENTS_PER_CALL) {
+            // At the cap — don't re-ground; the FSM speaks the deferral line
+            // (utterance is ignored on the capped branch).
+            sideEffectsAll.push(
+              ...session.machine.dispatch({
+                type: 'refine_pending_quote',
+                proposalId: pendingQuote.proposalId,
+                groundedLines: pendingQuote.groundedLines,
+                groundedClean: pendingQuote.groundedClean,
+                totalCents: pendingQuote.totalCents,
+                utterance: REFINEMENT_CAP_LINE,
+              }),
+            );
+            await executeSideEffects(session, sideEffectsAll, tenantId);
+            appendAgentTts(deps.store, session.id, sideEffectsAll);
+            return sideEffectsAll;
+          }
+          const refined = await applyQuoteRefinement(session, tenantId, decision.edit);
+          if (refined) {
+            sideEffectsAll.push(
+              ...session.machine.dispatch({
+                type: 'refine_pending_quote',
+                proposalId: pendingQuote.proposalId,
+                groundedLines: refined.readbackLines,
+                groundedClean: refined.groundedClean,
+                totalCents: refined.totalCents,
+                utterance: refined.utterance,
+              }),
+            );
+            await executeSideEffects(session, sideEffectsAll, tenantId);
+            appendAgentTts(deps.store, session.id, sideEffectsAll);
+            return sideEffectsAll;
+          }
+          // refined === null (unresolvable edit) → fall through to the classifier.
+        }
+        // passthrough / unresolved refine → continue to the classifier below.
+      }
+
       let classifierEvent: CallingAgentEvent | null = null;
       const verticalPromptSection = await resolveVerticalPromptSection(tenantId);
       const planPromptSection = await resolvePlanPromptSection(
@@ -1557,6 +2678,9 @@ export function createVoiceTurnProcessor(
               unknown
             >,
             confidence: classification.confidence,
+            // Thread the classify call's REAL ai_runs id so a proposal born
+            // from this intent links to its run row (proposals.ai_run_id FK).
+            ...(classification.aiRunId ? { aiRunId: classification.aiRunId } : {}),
           };
         } else {
           classifierEvent = {
@@ -1741,5 +2865,6 @@ export function createVoiceTurnProcessor(
     handlePendingVoiceApproval,
     handleVoiceApprovalIntent,
     handleVoiceEditIntent,
+    handleAskCaller,
   };
 }

@@ -12,6 +12,7 @@ import {
   CardHeader,
   CardTitle,
   Field,
+  Input,
   Select,
   Spinner,
   Textarea,
@@ -35,11 +36,43 @@ interface Lead {
   lostReason?: string;
   /** P11-002: optional spoken-language preference. */
   preferredLanguage?: 'en' | 'es' | null;
+  street1?: string;
+  street2?: string;
+  city?: string;
+  state?: string;
+  postalCode?: string;
+  country?: string;
+  accessNotes?: string;
 }
 
 interface ConvertResponse {
   lead: Lead;
   customer: { id: string };
+  location: { id: string };
+}
+
+interface ConvertAddressForm {
+  street1: string;
+  street2: string;
+  city: string;
+  state: string;
+  postalCode: string;
+}
+
+function addressFromLead(lead: Lead): ConvertAddressForm {
+  return {
+    street1: lead.street1 ?? '',
+    street2: lead.street2 ?? '',
+    city: lead.city ?? '',
+    state: lead.state ?? '',
+    postalCode: lead.postalCode ?? '',
+  };
+}
+
+function formatLeadAddress(lead: Lead): string | null {
+  if (!lead.street1 || !lead.city || !lead.state || !lead.postalCode) return null;
+  const line2 = lead.street2 ? `, ${lead.street2}` : '';
+  return `${lead.street1}${line2}, ${lead.city}, ${lead.state} ${lead.postalCode}`;
 }
 
 export interface LeadDetailProps {
@@ -58,18 +91,34 @@ const STAGE_VARIANT: Record<string, BadgeVariant> = {
   lost: 'danger',
 };
 
+/** Lateral pipeline stages — won/lost require Convert / Mark Lost. */
+const INTERMEDIATE_STAGES = ['new', 'contacted', 'qualified', 'quoted'] as const;
+type IntermediateStage = (typeof INTERMEDIATE_STAGES)[number];
+
+function isIntermediateStage(stage: string): stage is IntermediateStage {
+  return (INTERMEDIATE_STAGES as readonly string[]).includes(stage);
+}
+
 export function LeadDetail({ leadId, onConverted, onBack }: LeadDetailProps) {
   const [lead, setLead] = useState<Lead | null>(null);
   const [isLoading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [converting, setConverting] = useState(false);
+  const [convertAddress, setConvertAddress] = useState<ConvertAddressForm>({
+    street1: '',
+    street2: '',
+    city: '',
+    state: '',
+    postalCode: '',
+  });
   const [loseReason, setLoseReason] = useState('');
   const [showLose, setShowLose] = useState(false);
   const [noteText, setNoteText] = useState('');
   const [savingNote, setSavingNote] = useState(false);
   const [language, setLanguage] = useState('');
   const [languageSaving, setLanguageSaving] = useState(false);
+  const [stageSaving, setStageSaving] = useState(false);
 
   const refetch = useCallback(async () => {
     setLoading(true);
@@ -81,6 +130,7 @@ export function LeadDetail({ leadId, onConverted, onBack }: LeadDetailProps) {
       setLead(json);
       setNoteText(json.notes ?? '');
       setLanguage(json.preferredLanguage ?? '');
+      setConvertAddress(addressFromLead(json));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load lead');
     } finally {
@@ -92,12 +142,38 @@ export function LeadDetail({ leadId, onConverted, onBack }: LeadDetailProps) {
     void refetch();
   }, [refetch]);
 
+  const openConvertConfirm = useCallback(() => {
+    if (lead) setConvertAddress(addressFromLead(lead));
+    setConfirmOpen(true);
+  }, [lead]);
+
   const handleConvert = useCallback(async () => {
+    const street1 = convertAddress.street1.trim();
+    const city = convertAddress.city.trim();
+    const state = convertAddress.state.trim();
+    const postalCode = convertAddress.postalCode.trim();
+    if (!street1 || !city || !state || !postalCode) {
+      setError('Street, city, state, and postal code are required to convert.');
+      return;
+    }
+
     setConverting(true);
     setError(null);
     try {
-      const res = await apiFetch(`/api/leads/${leadId}/convert`, { method: 'POST' });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const res = await apiFetch(`/api/leads/${leadId}/convert`, {
+        method: 'POST',
+        body: JSON.stringify({
+          street1,
+          street2: convertAddress.street2.trim() || undefined,
+          city,
+          state,
+          postalCode,
+        }),
+      });
+      if (!res.ok) {
+        const json = await res.json().catch(() => ({}));
+        throw new Error(json?.message ?? `HTTP ${res.status}`);
+      }
       const json = (await res.json()) as ConvertResponse;
       setConfirmOpen(false);
       toast.success('Lead converted to customer');
@@ -109,7 +185,7 @@ export function LeadDetail({ leadId, onConverted, onBack }: LeadDetailProps) {
     } finally {
       setConverting(false);
     }
-  }, [leadId, onConverted]);
+  }, [leadId, onConverted, convertAddress]);
 
   const handleLose = useCallback(async () => {
     if (!loseReason.trim()) {
@@ -185,6 +261,38 @@ export function LeadDetail({ leadId, onConverted, onBack }: LeadDetailProps) {
       }
     },
     [leadId, language],
+  );
+
+  const handleStageChange = useCallback(
+    async (next: string) => {
+      if (!lead || next === lead.stage) return;
+      if (!isIntermediateStage(next)) {
+        setError('Use Convert or Mark Lost for Won / Lost.');
+        return;
+      }
+      const previous = lead.stage;
+      setLead({ ...lead, stage: next });
+      setStageSaving(true);
+      setError(null);
+      try {
+        const res = await apiFetch(`/api/leads/${leadId}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ stage: next }),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const updated = await res.json();
+        setLead(updated);
+        toast.success(`Stage updated to ${next}`);
+      } catch (err) {
+        setLead((prev) => (prev ? { ...prev, stage: previous } : prev));
+        const message = err instanceof Error ? err.message : 'Failed to update stage';
+        setError(message);
+        toast.error(message);
+      } finally {
+        setStageSaving(false);
+      }
+    },
+    [lead, leadId],
   );
 
   if (isLoading && !lead)
@@ -268,7 +376,29 @@ export function LeadDetail({ leadId, onConverted, onBack }: LeadDetailProps) {
             <CardTitle>Pipeline</CardTitle>
           </CardHeader>
           <CardContent className="flex flex-col gap-1.5">
+            {isIntermediateStage(lead.stage) ? (
+              <div className="flex items-center gap-2 pb-1">
+                <span className="text-sm text-slate-700 shrink-0">Stage:</span>
+                <div className="w-40">
+                  <Select
+                    aria-label="Lead stage"
+                    value={lead.stage}
+                    disabled={stageSaving}
+                    onChange={(e) => void handleStageChange(e.target.value)}
+                  >
+                    {INTERMEDIATE_STAGES.map((s) => (
+                      <option key={s} value={s}>
+                        {s}
+                      </option>
+                    ))}
+                  </Select>
+                </div>
+              </div>
+            ) : null}
             <p className="text-sm text-slate-700">Source detail: {lead.sourceDetail ?? '—'}</p>
+            <p className="text-sm text-slate-700">
+              Service address: {formatLeadAddress(lead) ?? '—'}
+            </p>
             <p className="text-sm text-slate-700">
               Est. value:{' '}
               {lead.estimatedValueCents !== undefined
@@ -322,7 +452,7 @@ export function LeadDetail({ leadId, onConverted, onBack }: LeadDetailProps) {
           size="sm"
           variant="primary"
           disabled={alreadyConverted}
-          onClick={() => setConfirmOpen(true)}
+          onClick={openConvertConfirm}
           className="bg-blue-600 hover:bg-blue-700"
         >
           {alreadyConverted ? 'Converted' : 'Convert to Customer'}
@@ -346,9 +476,60 @@ export function LeadDetail({ leadId, onConverted, onBack }: LeadDetailProps) {
         >
           <CardContent className="py-4">
             <p className="text-sm text-slate-700">
-              Convert <strong>{displayName}</strong> into a customer? This will create a customer record,
-              mark the lead as Won, and write audit events on both.
+              Convert <strong>{displayName}</strong> into a customer? This will create a customer
+              record with a primary service location, mark the lead as Won, and write audit events.
             </p>
+            <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
+              <Field label="Street address" className="md:col-span-2" required>
+                <Input
+                  required
+                  aria-label="Convert street address"
+                  value={convertAddress.street1}
+                  onChange={(e) =>
+                    setConvertAddress((prev) => ({ ...prev, street1: e.target.value }))
+                  }
+                />
+              </Field>
+              <Field label="Street line 2" className="md:col-span-2">
+                <Input
+                  aria-label="Convert street line 2"
+                  value={convertAddress.street2}
+                  onChange={(e) =>
+                    setConvertAddress((prev) => ({ ...prev, street2: e.target.value }))
+                  }
+                />
+              </Field>
+              <Field label="City" required>
+                <Input
+                  required
+                  aria-label="Convert city"
+                  value={convertAddress.city}
+                  onChange={(e) =>
+                    setConvertAddress((prev) => ({ ...prev, city: e.target.value }))
+                  }
+                />
+              </Field>
+              <Field label="State" required>
+                <Input
+                  required
+                  aria-label="Convert state"
+                  value={convertAddress.state}
+                  onChange={(e) =>
+                    setConvertAddress((prev) => ({ ...prev, state: e.target.value }))
+                  }
+                />
+              </Field>
+              <Field label="Postal code" className="md:col-span-2" required>
+                <Input
+                  required
+                  aria-label="Convert postal code"
+                  value={convertAddress.postalCode}
+                  onChange={(e) =>
+                    setConvertAddress((prev) => ({ ...prev, postalCode: e.target.value }))
+                  }
+                />
+              </Field>
+            </div>
             <div className="mt-3 flex gap-2">
               <Button
                 size="sm"

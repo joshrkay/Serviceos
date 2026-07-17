@@ -10,13 +10,17 @@
 import { describe, it, expect } from 'vitest';
 import {
   startVoiceApproval,
+  startVoiceBatchApproval,
   continueVoiceApproval,
+  continueVoiceBatchApproval,
+  isBatchActive,
   composeReadback,
   spokenDigits,
   VOICE_APPROVAL_ACTOR_ID,
   type VoiceApprovalDeps,
   type PendingVoiceApproval,
   type VoiceApprovalSessionState,
+  type VoiceApprovalTurnResult,
 } from '../../../src/ai/tasks/proposal-approval-task';
 import {
   createProposal,
@@ -466,7 +470,10 @@ describe('RV-071 — money/irreversible challenge', () => {
 
     expect(result.outcome).toBe('refused_challenge_unset');
     expect(result.pending).toBeNull();
-    expect(result.speak).toContain('text link');
+    // Friendly, jargon-free refusal — no "challenge code" spoken to an
+    // owner who never configured one.
+    expect(result.speak).toBe('That one needs a tap to confirm — I’ve sent you a text link.');
+    expect(result.speak.toLowerCase()).not.toContain('challenge code');
     // The SMS actually went out, with a one-tap link, and the render was
     // recorded for the P2-034 reply transport.
     expect(h.sent).toHaveLength(1);
@@ -498,8 +505,43 @@ describe('RV-071 — money/irreversible challenge', () => {
     });
 
     expect(result.outcome).toBe('refused_challenge_unset');
-    expect(result.speak).not.toContain("I've sent you one");
+    expect(result.speak).toBe('That one needs a tap to confirm — check the app or your review queue.');
+    expect(result.speak).not.toContain('text link');
     expect(h.sent).toHaveLength(0);
+  });
+
+  it('challenge disappears between readback and confirm → same friendly refusal + one-tap SMS', async () => {
+    // Covers the confirm-stage guard (continueVoiceApproval), a separate
+    // code path from the readback-stage refusal above but with identical
+    // copy — pins that both stages stay in sync.
+    const h = makeHarness({ challenge: '4271' });
+    await seedPending(h.proposalRepo, {
+      proposalType: 'record_payment',
+      payload: { customerName: 'Acme Corp', amountCents: 20000 },
+      summary: 'Record $200 payment from Acme',
+    });
+
+    const start = await startVoiceApproval(h.deps, {
+      ...ref,
+      action: 'approve',
+      reference: 'the Acme payment',
+    });
+    expect(start.outcome).toBe('readback');
+
+    // Settings lose the challenge between readback and confirm (e.g. the
+    // owner cleared it mid-call from another device).
+    h.deps.settingsRepo = stubSettingsRepo(undefined);
+
+    const result = await continueVoiceApproval(h.deps, {
+      ...ref,
+      utterance: 'yes, approve it',
+      pending: start.pending!,
+    });
+
+    expect(result.outcome).toBe('refused_challenge_unset');
+    expect(result.speak).toBe('That one needs a tap to confirm — I’ve sent you a text link.');
+    expect(result.speak.toLowerCase()).not.toContain('challenge code');
+    expect(h.sent).toHaveLength(1);
   });
 
   it('challenge set → readback, affirmative, PIN prompt, spoken digits approve', async () => {
@@ -1737,5 +1779,264 @@ describe('Track E — voice edit chain-ref guard', () => {
     expect(stored?.sourceContext?.pendingVoiceEditRequest).toMatchObject({
       instruction: 'issue invoice 1024 instead',
     });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WS19 — batch voice approval (session-flow over the single-item engine)
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface BatchHarness {
+  deps: VoiceApprovalDeps;
+  proposalRepo: InMemoryProposalRepository;
+  auditRepo: InMemoryAuditRepository;
+  smsEvents: InMemoryProposalSmsEventRepository;
+  sent: { to: string; body: string }[];
+}
+
+function makeBatchHarness(
+  opts: { challenge?: string; delta?: Record<string, unknown> | null } = {},
+): BatchHarness {
+  const proposalRepo = new InMemoryProposalRepository();
+  const auditRepo = new InMemoryAuditRepository();
+  const smsEvents = new InMemoryProposalSmsEventRepository();
+  const sent: { to: string; body: string }[] = [];
+  const interpreter: ProposalEditInterpreter = async () => opts.delta ?? null;
+  const deps: VoiceApprovalDeps = {
+    proposalRepo,
+    auditRepo,
+    settingsRepo: stubSettingsRepo(opts.challenge ?? '4271'),
+    smsEventRepo: smsEvents,
+    editInterpreter: interpreter,
+    oneTapFallback: {
+      sendSms: async (to, body) => {
+        sent.push({ to, body });
+      },
+      secret: 'test-secret',
+      buildApproveUrl: (token) => `https://x.test/approve?token=${token}`,
+      resolveOwnerPhone: async () => '+15125550100',
+    },
+  };
+  return { deps, proposalRepo, auditRepo, smsEvents, sent };
+}
+
+async function seedCapture(
+  repo: InMemoryProposalRepository,
+  customerName: string,
+): Promise<Proposal> {
+  return seedPending(repo, {
+    payload: {
+      customerId: CUSTOMER_UUID,
+      customerName,
+      lineItems: [{ description: 'Water heater replacement', quantity: 1, unitPrice: 45000 }],
+      totalCents: 45000,
+    },
+    summary: `Estimate for ${customerName} — water heater`,
+  });
+}
+
+async function seedMoney(
+  repo: InMemoryProposalRepository,
+  customerName: string,
+  amountCents = 20000,
+): Promise<Proposal> {
+  return seedPending(repo, {
+    proposalType: 'record_payment',
+    payload: { customerName, amountCents },
+    summary: `Record $${amountCents / 100} payment from ${customerName}`,
+  });
+}
+
+/**
+ * Drive a batch to completion. `utterFor(proposal, cur)` returns the utterance
+ * to speak for the currently-presented item (branch on `cur.pending.stage`).
+ */
+async function walkBatch(
+  h: BatchHarness,
+  utterFor: (proposal: Proposal, cur: VoiceApprovalTurnResult) => string,
+  startState: VoiceApprovalSessionState = {},
+): Promise<{
+  result: VoiceApprovalTurnResult;
+  sessionState: VoiceApprovalSessionState;
+  lines: string[];
+}> {
+  const lines: string[] = [];
+  let cur = await startVoiceBatchApproval(h.deps, { ...ref, sessionState: startState });
+  lines.push(cur.speak);
+  let state: VoiceApprovalSessionState = { ...startState, ...cur.sessionState };
+  let guard = 0;
+  while (cur.pending && guard++ < 80) {
+    const proposal = (await h.proposalRepo.findById(TENANT, cur.pending.proposalId!))!;
+    const utter = utterFor(proposal, cur);
+    cur = await continueVoiceBatchApproval(h.deps, {
+      ...ref,
+      sessionState: state,
+      utterance: utter,
+      pending: cur.pending,
+    });
+    lines.push(cur.speak);
+    state = { ...state, ...cur.sessionState };
+  }
+  return { result: cur, sessionState: state, lines };
+}
+
+describe('WS19 — batch voice approval', () => {
+  it('opening line reads "You have N waiting. First: …" and clears the whole queue', async () => {
+    const h = makeBatchHarness();
+    const lopez = await seedCapture(h.proposalRepo, 'Lopez');
+    const nguyen = await seedCapture(h.proposalRepo, 'Nguyen');
+    const ortiz = await seedCapture(h.proposalRepo, 'Ortiz');
+    const acme = await seedMoney(h.proposalRepo, 'Acme'); // money, challenge 4271
+
+    const { result, lines } = await walkBatch(h, (_p, cur) =>
+      cur.pending!.stage === 'challenge' ? 'four two seven one' : 'yes',
+    );
+
+    // Opening line.
+    expect(lines[0]).toContain('You have 4 waiting.');
+    expect(lines[0]).toContain('First:');
+    // Terminal summary.
+    expect(result.outcome).toBe('batch_complete');
+    expect(result.speak).toContain("That's all of them — 4 approved, 0 skipped.");
+    // Every proposal — including the money one (via challenge) — is approved.
+    for (const p of [lopez, nguyen, ortiz, acme]) {
+      expect((await h.proposalRepo.findById(TENANT, p.id))?.status).toBe('approved');
+    }
+    // The batch cursor was cleared.
+    expect(isBatchActive(result.sessionState)).toBe(false);
+    // A batch-started + batch-complete audit pair was emitted.
+    const started = h.auditRepo.getAll().find((e) => e.eventType === 'proposal.voice_batch_started');
+    expect(started?.metadata).toMatchObject({ count: 4 });
+    expect(h.auditRepo.getAll().some((e) => e.eventType === 'proposal.voice_batch_complete')).toBe(true);
+  });
+
+  it('per-item "skip" advances without approving that one', async () => {
+    const h = makeBatchHarness();
+    await seedCapture(h.proposalRepo, 'Lopez');
+    await seedCapture(h.proposalRepo, 'Nguyen');
+    await seedCapture(h.proposalRepo, 'Ortiz');
+
+    let skippedId: string | undefined;
+    const { result } = await walkBatch(h, (_p, cur) => {
+      if (!skippedId) {
+        skippedId = cur.pending!.proposalId!;
+        return 'skip';
+      }
+      return 'yes';
+    });
+
+    expect(result.outcome).toBe('batch_complete');
+    expect(result.speak).toContain("That's all of them — 2 approved, 1 skipped.");
+    // The explicitly-skipped item stays pending; the rest approved.
+    expect((await h.proposalRepo.findById(TENANT, skippedId!))?.status).toBe('ready_for_review');
+    const others = (await h.proposalRepo.findByStatus(TENANT, 'approved')).length;
+    expect(others).toBe(2);
+  });
+
+  it('per-item "edit …" applies via the shared seam, then re-reads the item for approval', async () => {
+    const h = makeBatchHarness({ delta: { totalCents: 20000 } });
+    await seedCapture(h.proposalRepo, 'Lopez');
+    await seedCapture(h.proposalRepo, 'Nguyen');
+
+    let editedOnce = false;
+    let editedId: string | undefined;
+    const { result, lines } = await walkBatch(h, (_p, cur) => {
+      if (!editedOnce) {
+        editedOnce = true;
+        editedId = cur.pending!.proposalId!;
+        return 'change the total to 200 dollars';
+      }
+      return 'yes';
+    });
+
+    expect(result.outcome).toBe('batch_complete');
+    // The edited value was applied and read back (payload provenance).
+    expect(lines.some((l) => l.includes('$200.00'))).toBe(true);
+    // Both items end approved (the edited one after its re-read → yes).
+    const edited = await h.proposalRepo.findById(TENANT, editedId!);
+    expect(edited?.status).toBe('approved');
+    expect(edited?.payload.totalCents).toBe(20000);
+    expect((await h.proposalRepo.findByStatus(TENANT, 'approved')).length).toBe(2);
+    expect(result.speak).toContain("That's all of them — 2 approved, 0 skipped.");
+  });
+
+  it('challenge lockout skips remaining money items but keeps approving capture items', async () => {
+    const h = makeBatchHarness({ challenge: '4271' });
+    const cap1 = await seedCapture(h.proposalRepo, 'Lopez');
+    const cap2 = await seedCapture(h.proposalRepo, 'Nguyen');
+    const money1 = await seedMoney(h.proposalRepo, 'Acme');
+    const money2 = await seedMoney(h.proposalRepo, 'Beta', 5000);
+
+    const { result, sessionState } = await walkBatch(h, (p, cur) => {
+      if (cur.pending!.stage === 'confirm') return 'yes';
+      // challenge stage — always feed a WRONG code for money items.
+      return p.proposalType === 'record_payment' ? '0 0 0 0' : 'four two seven one';
+    });
+
+    expect(result.outcome).toBe('batch_complete');
+    // Session locked out after 3 wrong codes.
+    expect(sessionState.challengeLockedOut).toBe(true);
+    // Both capture items still approved despite the money lockout.
+    expect((await h.proposalRepo.findById(TENANT, cap1.id))?.status).toBe('approved');
+    expect((await h.proposalRepo.findById(TENANT, cap2.id))?.status).toBe('approved');
+    // Neither money item was approved.
+    expect((await h.proposalRepo.findById(TENANT, money1.id))?.status).toBe('ready_for_review');
+    expect((await h.proposalRepo.findById(TENANT, money2.id))?.status).toBe('ready_for_review');
+    // The owner was told money items get one-tap links, and the SMS(es) went out.
+    expect(result.speak).toContain('all of them');
+    expect(result.speak).toContain('money');
+    expect(h.sent.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('global "stop" ends the batch with a summary of what was done so far', async () => {
+    const h = makeBatchHarness();
+    await seedCapture(h.proposalRepo, 'Lopez');
+    await seedCapture(h.proposalRepo, 'Nguyen');
+    await seedCapture(h.proposalRepo, 'Ortiz');
+
+    // Approve the first item, then stop.
+    let firstId: string | undefined;
+    const { result } = await walkBatch(h, (_p, cur) => {
+      if (!firstId) {
+        firstId = cur.pending!.proposalId!;
+        return 'yes';
+      }
+      return "that's enough";
+    });
+
+    expect(result.outcome).toBe('batch_complete');
+    expect(result.speak.toLowerCase()).toContain('stopping there');
+    expect(result.speak).toContain("That's all of them — 1 approved, 0 skipped.");
+    // Only the first item was approved; the remaining two stay pending.
+    expect((await h.proposalRepo.findById(TENANT, firstId!))?.status).toBe('approved');
+    expect((await h.proposalRepo.findByStatus(TENANT, 'ready_for_review')).length).toBe(2);
+    const stopped = h.auditRepo.getAll().find((e) => e.eventType === 'proposal.voice_batch_stopped');
+    expect(stopped).toBeDefined();
+  });
+
+  it('empty queue → truthful nothing-pending line, no batch started', async () => {
+    const h = makeBatchHarness();
+    const result = await startVoiceBatchApproval(h.deps, { ...ref, sessionState: {} });
+    expect(result.outcome).toBe('nothing_pending');
+    expect(result.pending).toBeNull();
+    expect(isBatchActive(result.sessionState)).toBe(false);
+  });
+
+  it('single-item flow is untouched — a specific approve does not seed a batch cursor', async () => {
+    const h = makeBatchHarness();
+    await seedCapture(h.proposalRepo, 'Lopez');
+    await seedCapture(h.proposalRepo, 'Nguyen');
+
+    // Purity pin: startVoiceApproval (the single-target entry) never sets
+    // batch state, and continueVoiceApproval is what the processor still uses
+    // when no batch is active.
+    const start = await startVoiceApproval(h.deps, {
+      ...ref,
+      action: 'approve',
+      reference: 'the Lopez estimate',
+    });
+    expect(start.outcome).toBe('readback');
+    expect(isBatchActive(start.sessionState)).toBe(false);
+    expect(start.sessionState?.batchQueue).toBeUndefined();
   });
 });

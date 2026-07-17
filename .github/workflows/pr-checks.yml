@@ -33,11 +33,15 @@ jobs:
       - name: Lint
         run: npm run lint
 
-      # infra/ moved to experiments/infra (B9): not deployed, removed
-      # from CI builds. See experiments/README.md.
+      # infra/ (AWS CDK, D-001) was quarantined to experiments/infra (B9)
+      # as not deployed/not in CI, then removed entirely in 2026-07 along
+      # with the rest of experiments/. See docs/decisions.md D-016.
 
       - name: AI gateway guard
         run: npm run check:ai-gateway-guard --workspace=packages/api
+
+      - name: FK-path coverage guard
+        run: npm run check:fk-paths --workspace=packages/api
 
       - name: Unit tests
         run: npm test -- --reporter=verbose
@@ -96,6 +100,12 @@ jobs:
       - run: npm ci
       - name: Run voice quality suite
         run: npm run voice-quality --workspace=packages/api
+        # WS1 (QUALITY-2026-07-12) — enforce the launch gate: the merge step
+        # exits non-zero when launchGate.pass is false (floor break, a bucket
+        # under threshold incl. Spanish ≥90%, or overall <90%). Without this
+        # the corpus could regress while the job stayed green.
+        env:
+          VOICE_QUALITY_ENFORCE_LAUNCH_GATE: 'true'
       - name: Upload report artifact
         if: always()
         uses: actions/upload-artifact@v5
@@ -111,3 +121,47 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPORT_PATH: packages/api/voice-quality-report.json
+
+  # WS7 — Mobile typecheck gate.
+  #
+  # packages/mobile is an isolated Expo project (intentionally NOT a root npm
+  # workspace — see packages/mobile/package.json), so the root `npm ci` in the
+  # `test` job never installs it and its `tsc --noEmit` never ran in CI. This
+  # dedicated job installs the mobile tree and gates its typecheck, catching
+  # type regressions in the mobile client on every PR.
+  #
+  # RN component tests (`npm run test:rn`, jest-expo) remain INTENTIONALLY
+  # UNGATED: the `jest` command currently globs the Vitest `*.test.ts` specs
+  # (which import from 'vitest' and set `@vitest-environment jsdom`) and fails
+  # to load all 84 suites — jest has no config scoping it to jest-expo specs.
+  # Gating it today would be a permanent red. Wiring a jest.config that selects
+  # only jest-expo specs (and excludes the Vitest suites) is the prerequisite,
+  # tracked separately. The Vitest mobile suite (logic/hooks/jsdom screen
+  # contracts) already gates in the `test` job's "Mobile unit tests" step.
+  mobile-typecheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: |
+            package-lock.json
+            packages/mobile/package-lock.json
+      # BOTH installs are required: mobile's own npm ci provides expo/RN types
+      # (mobile is not a root workspace), while the ROOT npm ci provides the
+      # deps its ../shared imports resolve against (zod) and the hoisted
+      # @testing-library/react its vitest specs type against. With only the
+      # isolated install, tsc fails on every ../shared contract (TS2307).
+      - name: Install root workspace deps
+        run: npm ci
+      - name: Install mobile deps
+        run: npm ci
+        working-directory: packages/mobile
+      # Run inside the package dir — mobile is not a root npm workspace, so
+      # `--workspace=packages/mobile` would not resolve.
+      - name: Type check Mobile
+        run: npm run typecheck
+        working-directory: packages/mobile

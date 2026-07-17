@@ -8,7 +8,9 @@
     "start": "node dist/src/index.js",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:integration": "RLS_RUNTIME_ROLE=true vitest run --config vitest.integration.config.ts",
+    "test:integration:norls": "vitest run --config vitest.integration.config.ts",
+    "test:integration:rls": "RLS_RUNTIME_ROLE=true vitest run --config vitest.integration.config.ts",
     "test:rls": "vitest run --config vitest.integration.config.ts test/integration/rls-tenant-isolation.test.ts",
     "test:voice-fixtures": "vitest run test/ai/orchestration/intent-classifier.launch-fixtures.test.ts test/voice/launch-slots.test.ts",
     "test:coverage": "vitest run --coverage",
@@ -23,6 +25,7 @@
     "voice-quality:layer2:weekly": "VOICE_QUALITY_LAYER2_WEEKLY=true vitest run -c vitest.voice-quality-layer2.config.ts",
     "lint": "npm run lint:log-safety && tsc --noEmit -p tsconfig.lint.json",
     "check:ai-gateway-guard": "bash scripts/check-ai-gateway-guard.sh",
+    "check:fk-paths": "bash scripts/check-fk-path-coverage.sh",
     "seed": "ts-node scripts/seed.ts",
     "seed:clean": "ts-node scripts/seed.ts --clean",
     "migrate:dryrun": "ts-node scripts/migrate-dryrun.ts",
@@ -30,6 +33,7 @@
     "validate-env": "ts-node -e \"require('./src/shared/config').validateEnvSchema(process.env); console.log('env ok');\"",
     "smoke-test": "ts-node scripts/smoke-test.ts",
     "verify:telephony": "ts-node scripts/verify-telephony-config.ts",
+    "verify:handoff-context": "ts-node scripts/verify-handoff-context.ts",
     "lint:log-safety": "node scripts/check-log-safety.js",
     "launch-quality-check": "tsx scripts/launch-quality-check.ts",
     "voice-load:selfcheck": "tsx scripts/voice-load-selfcheck.ts",
@@ -53,7 +57,7 @@
     "sharp": "^0.35.1",
     "swagger-ui-express": "^5.0.1",
     "twilio": "^6.0.0",
-    "uuid": "^9.0.0",
+    "uuid": "^11.1.1",
     "ws": "^8.20.0",
     "zod": "^3.22.0"
   },
@@ -66,14 +70,14 @@
     "@types/pg": "^8.18.0",
     "@types/supertest": "^6.0.0",
     "@types/swagger-ui-express": "^4.1.8",
-    "@types/uuid": "^9.0.0",
     "@types/ws": "^8.18.1",
-    "@vitest/coverage-v8": "^1.6.0",
+    "@vitest/coverage-v8": "^4.1.10",
+    "fast-check": "^4.9.0",
     "ioredis-mock": "^8.13.1",
     "supertest": "^6.3.0",
     "ts-node": "^10.9.0",
     "tsx": "^4.22.0",
     "typescript": "^5.9.3",
-    "vitest": "^1.6.0"
+    "vitest": "^4.1.10"
   }
 }

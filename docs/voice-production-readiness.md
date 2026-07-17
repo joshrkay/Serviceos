@@ -2,6 +2,15 @@
 
 Date: 2026-03-18
 
+> **HISTORICAL — superseded (annotated 2026-07-12, QUALITY-2026-07-12).**
+> This document describes the March 2026 prototype state ("in-memory
+> transcription provider") and its integration *options*. It no longer
+> reflects the codebase: production voice runs realtime media-streams STT
+> (Deepgram) through the telephony pipeline — see
+> `docs/quality/architecture-regrade-2026-07-11.md` §Voice ingestion and
+> `packages/api/src/telephony/`. Kept as a decision-history record only;
+> do not use it to assess current voice readiness.
+
 ## Current state (baseline)
 
 The API now has a functional `/api/voice` route shape that:

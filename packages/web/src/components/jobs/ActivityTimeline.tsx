@@ -3,7 +3,7 @@ import {
   Zap, ArrowRight, MapPin, FileText, Camera,
   Mic, Package, ChevronDown, ChevronUp, Plus,
 } from 'lucide-react';
-import type { JobActivity, MaterialItem } from '../../data/mock-data';
+import type { JobActivity, MaterialItem } from '../../types/job-ui';
 
 const EVENT_CONFIG: Record<
   JobActivity['type'],

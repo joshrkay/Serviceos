@@ -169,6 +169,154 @@ describe('DigestPage', () => {
     expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
   });
 
+  describe('N-005 reflection sections', () => {
+    const enriched = {
+      ...basePayload,
+      quotesSent: { count: 2, pipelineValueCents: 65_000 },
+      unsureAbout: [
+        {
+          proposalId: 'u-1',
+          proposalType: 'draft_estimate',
+          summary: 'Estimate for the Diaz job',
+          confidence: 'very_low',
+          factors: ['ambiguous scope'],
+          outcome: 'rejected' as const,
+        },
+      ],
+      learnedToday: [
+        { lessonId: 'l-1', lessonType: 'labor_rate_changed', summary: 'labor rate is $145 going forward' },
+      ],
+    };
+
+    it('renders quotes-sent, "what I wasn\'t sure about", and "what I learned today"', async () => {
+      mockFetch.mockResolvedValue(digestResponse(enriched));
+      renderAt('/digest/2026-06-10');
+      await screen.findByText('A solid day.');
+
+      expect(screen.getByText('Quotes sent')).toBeInTheDocument();
+      expect(screen.getByText('Pipeline value')).toBeInTheDocument();
+      expect(screen.getByText('$650.00')).toBeInTheDocument();
+
+      expect(screen.getByText("What I wasn't sure about today")).toBeInTheDocument();
+      expect(screen.getByText('Estimate for the Diaz job')).toBeInTheDocument();
+      expect(screen.getByText('rejected')).toBeInTheDocument();
+
+      expect(screen.getByText('What I learned today')).toBeInTheDocument();
+      expect(screen.getByText('labor rate is $145 going forward')).toBeInTheDocument();
+    });
+
+    it('omits the reflection sections when absent (empty/pre-N005 payloads)', async () => {
+      mockFetch.mockResolvedValue(digestResponse(basePayload));
+      renderAt('/digest/2026-06-10');
+      await screen.findByText('A solid day.');
+      expect(screen.queryByText('Quotes sent')).not.toBeInTheDocument();
+      expect(screen.queryByText("What I wasn't sure about today")).not.toBeInTheDocument();
+      expect(screen.queryByText('What I learned today')).not.toBeInTheDocument();
+      expect(screen.queryByText('Supervisor checks')).not.toBeInTheDocument();
+    });
+
+    it('the unsure list rows meet the 44px glove target (min-h-11)', async () => {
+      mockFetch.mockResolvedValue(digestResponse(enriched));
+      renderAt('/digest/2026-06-10');
+      const row = (await screen.findByText('Estimate for the Diaz job')).closest('li');
+      expect(row?.className).toContain('min-h-11');
+    });
+  });
+
+  describe('WS6 supervisor checks section', () => {
+    it('renders "Checked" + flagged count when reviews ran today (no fixed)', async () => {
+      const withChecks = { ...basePayload, supervisorChecks: { checked: 12, flagged: 2, fixed: 0 } };
+      mockFetch.mockResolvedValue(digestResponse(withChecks));
+      renderAt('/digest/2026-06-10');
+      await screen.findByText('A solid day.');
+      expect(screen.getByText('Supervisor checks')).toBeInTheDocument();
+      expect(screen.getByText('12')).toBeInTheDocument();
+      expect(screen.getByText('proposals checked')).toBeInTheDocument();
+      expect(screen.getByText('2 flagged')).toBeInTheDocument();
+    });
+
+    // WS22 — flaggedFixed.
+    it('renders the fixed count alongside flagged when fixed > 0', async () => {
+      const withChecks = { ...basePayload, supervisorChecks: { checked: 12, flagged: 2, fixed: 1 } };
+      mockFetch.mockResolvedValue(digestResponse(withChecks));
+      renderAt('/digest/2026-06-10');
+      await screen.findByText('A solid day.');
+      expect(screen.getByText('2 flagged, 1 fixed')).toBeInTheDocument();
+    });
+
+    it('renders "None flagged" when nothing was flagged', async () => {
+      const withChecks = { ...basePayload, supervisorChecks: { checked: 5, flagged: 0, fixed: 0 } };
+      mockFetch.mockResolvedValue(digestResponse(withChecks));
+      renderAt('/digest/2026-06-10');
+      await screen.findByText('A solid day.');
+      expect(screen.getByText('None flagged')).toBeInTheDocument();
+    });
+
+    it('omits the section entirely when checked===0 / absent', async () => {
+      mockFetch.mockResolvedValue(digestResponse(basePayload));
+      renderAt('/digest/2026-06-10');
+      await screen.findByText('A solid day.');
+      expect(screen.queryByText('Supervisor checks')).not.toBeInTheDocument();
+    });
+  });
+
+  describe('D-015 auto-booked section', () => {
+    it('renders the count + undone note when the lane approved bookings today', async () => {
+      const withBookings = { ...basePayload, autonomousBookings: { count: 7, undone: 1 } };
+      mockFetch.mockResolvedValue(digestResponse(withBookings));
+      renderAt('/digest/2026-06-10');
+      await screen.findByText('A solid day.');
+      const section = screen.getByText('Auto-booked').closest('section') as HTMLElement;
+      expect(within(section).getByText('7')).toBeInTheDocument();
+      expect(within(section).getByText('appointments')).toBeInTheDocument();
+      expect(within(section).getByText('1 undone')).toBeInTheDocument();
+    });
+
+    it('omits the undone note when nothing was undone', async () => {
+      const withBookings = { ...basePayload, autonomousBookings: { count: 1, undone: 0 } };
+      mockFetch.mockResolvedValue(digestResponse(withBookings));
+      renderAt('/digest/2026-06-10');
+      await screen.findByText('A solid day.');
+      const section = screen.getByText('Auto-booked').closest('section') as HTMLElement;
+      expect(within(section).getByText('appointment')).toBeInTheDocument();
+      expect(within(section).queryByText(/undone/)).not.toBeInTheDocument();
+    });
+
+    it('omits the section entirely when count===0 / absent', async () => {
+      mockFetch.mockResolvedValue(digestResponse(basePayload));
+      renderAt('/digest/2026-06-10');
+      await screen.findByText('A solid day.');
+      expect(screen.queryByText('Auto-booked')).not.toBeInTheDocument();
+    });
+  });
+
+  describe('WS10 instructions-applied section', () => {
+    it('renders each rule with its draft count when present', async () => {
+      const withInstructions = {
+        ...basePayload,
+        instructionsApplied: [
+          { id: 'rule-1', text: 'always add trip fee', draftCount: 3 },
+          { id: 'rule-2', text: 'call before arriving', draftCount: 1 },
+        ],
+      };
+      mockFetch.mockResolvedValue(digestResponse(withInstructions));
+      renderAt('/digest/2026-06-10');
+      await screen.findByText('A solid day.');
+      const section = screen.getByText('Instructions applied').closest('section') as HTMLElement;
+      expect(within(section).getByText('always add trip fee')).toBeInTheDocument();
+      expect(within(section).getByText('3 drafts')).toBeInTheDocument();
+      expect(within(section).getByText('call before arriving')).toBeInTheDocument();
+      expect(within(section).getByText('1 draft')).toBeInTheDocument();
+    });
+
+    it('omits the section entirely when empty / absent', async () => {
+      mockFetch.mockResolvedValue(digestResponse(basePayload));
+      renderAt('/digest/2026-06-10');
+      await screen.findByText('A solid day.');
+      expect(screen.queryByText('Instructions applied')).not.toBeInTheDocument();
+    });
+  });
+
   describe('date navigation', () => {
     it('prev/next links target the adjacent calendar days', async () => {
       mockFetch.mockResolvedValue(digestResponse());

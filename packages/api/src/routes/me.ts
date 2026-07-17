@@ -99,6 +99,16 @@ export interface UserModeService {
 export function createMeRouter(
   service: UserModeService,
   auditRepo: AuditRepository,
+  options?: {
+    /**
+     * N-011 — resolves whether the brand_voice_configurator flag is on for a
+     * tenant. Injected from app.ts (feature-flag store) so the web can gate the
+     * onboarding step + settings sheet. Absent → feature reads off.
+     */
+    isBrandVoiceConfiguratorEnabled?: (
+      tenantId: string,
+    ) => boolean | Promise<boolean>;
+  },
 ): Router {
   const router = Router();
 
@@ -144,6 +154,12 @@ export function createMeRouter(
           backup_supervisor_user_id: settings.backup_supervisor_user_id,
           unsupervised_proposal_routing:
             settings.unsupervised_proposal_routing,
+          // N-011 — gate the Brand-Voice Configurator UI (default off).
+          // Awaited: the resolver is tenant-aware (tenant override →
+          // platform flag → false), so a per-tenant dark launch works.
+          brand_voice_configurator_enabled:
+            (await options?.isBrandVoiceConfiguratorEnabled?.(auth.tenantId)) ??
+            false,
           // Business timezone so the web client can render UTC instants
           // in the tenant's local time (appointments, invoice dates,
           // dashboard buckets, etc.).
@@ -282,6 +298,8 @@ export class InMemoryUserModeService implements UserModeService {
       existing.mode_changed_at = modeChangedAt;
     } else {
       // Synthesize a default row so subsequent GETs reflect the switch.
+      // Preserve internal_user_id when a prior upsert already seeded it —
+      // otherwise a mode switch would wipe the technician profile UUID.
       this.users.set(key, {
         user_id: userId,
         tenant_id: tenantId,
@@ -289,6 +307,7 @@ export class InMemoryUserModeService implements UserModeService {
         can_field_serve: true,
         current_mode: mode,
         mode_changed_at: modeChangedAt,
+        internal_user_id: null,
       });
     }
     return { modeChangedAt };

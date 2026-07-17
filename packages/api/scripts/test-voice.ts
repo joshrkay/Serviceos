@@ -32,7 +32,7 @@ import {
   createVoiceActionRouterWorker,
   VoiceActionRouterPayload,
 } from '../src/workers/voice-action-router';
-import { createLLMGateway, createMockLLMGateway } from '../src/ai/gateway/factory';
+import { createLLMGateway, createHermeticMockLLMGateway } from '../src/ai/gateway/factory';
 import { loadConfig } from '../src/shared/config';
 import type { LLMGateway, LLMResponse } from '../src/ai/gateway/gateway';
 import type { QueueMessage } from '../src/queues/queue';
@@ -102,9 +102,9 @@ async function main() {
     gateway = createLLMGateway(config);
     console.log('→ Using real LLM gateway (%s)', config.AI_DEFAULT_MODEL);
   } else {
-    gateway = createMockLLMGateway('{"intentType":"unknown","confidence":0}').gateway;
-    console.log('→ Using mock LLM (will always classify as unknown).');
-    console.log('  Set AI_PROVIDER_API_KEY or MOCK_RESPONSES to see real proposals.');
+    gateway = createHermeticMockLLMGateway().gateway;
+    console.log('→ Using hermetic mock LLM (scripts create_customer / estimate / invoice).');
+    console.log('  Set AI_PROVIDER_API_KEY or MOCK_RESPONSES for custom replies.');
   }
 
   const proposalRepo = new InMemoryProposalRepository();

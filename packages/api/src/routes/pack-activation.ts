@@ -6,16 +6,19 @@ import {
   activatePack,
   deactivatePack,
   getActivePacks,
+  syncActiveVerticalPacksMirror,
   PackActivationRepository,
   validateActivationInput,
 } from '../settings/pack-activation';
+import type { SettingsRepository } from '../settings/settings';
 import { VerticalPackRegistry } from '../shared/vertical-pack-registry';
 import { AuditRepository } from '../audit/audit';
 
 export function createPackActivationRouter(
   packActivationRepo: PackActivationRepository,
   verticalPackRegistry: VerticalPackRegistry,
-  auditRepo: AuditRepository
+  auditRepo: AuditRepository,
+  settingsRepo: Pick<SettingsRepository, 'update'>
 ): Router {
   const router = Router();
 
@@ -63,6 +66,10 @@ export function createPackActivationRouter(
         auditRepo,
         { actorId: req.auth!.userId, actorRole: req.auth!.role }
       );
+      // pack_activations is authoritative; keep the tenant_settings
+      // `_activeVerticalPacks` mirror (Templates page + public intake) in
+      // sync in the same request transaction so the two never drift.
+      await syncActiveVerticalPacksMirror(tenantId, packActivationRepo, settingsRepo);
       res.status(201).json(activation);
     })
   );
@@ -88,6 +95,9 @@ export function createPackActivationRouter(
         return;
       }
 
+      // Mirror the deactivation into tenant_settings so the Templates page
+      // and public intake drop the pack too (authoritative → mirror).
+      await syncActiveVerticalPacksMirror(tenantId, packActivationRepo, settingsRepo);
       res.json(result);
     })
   );

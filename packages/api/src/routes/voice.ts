@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import type { Pool } from 'pg';
+import { z } from 'zod';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { createRateLimitStore } from '../middleware/rate-limit-store';
 import { asyncRoute } from '../middleware/async-route';
@@ -20,15 +21,18 @@ import { Queue } from '../queues/queue';
 import {
   mintDeepgramStreamToken,
   DeepgramTokenUnavailableError,
+  DeepgramTokenPermissionError,
 } from '../voice/deepgram-token';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { Logger } from '../logging/logger';
 import type { FileRepository, StorageProvider } from '../files/file-service';
+import type { JobRepository } from '../jobs/job';
 
 interface CreateVoiceRecordingBody {
   fileId: string;
   conversationId?: string;
   audioUrl: string;
+  jobId?: string;
 }
 
 interface RetryTranscriptionBody {
@@ -37,6 +41,7 @@ interface RetryTranscriptionBody {
 
 const MAX_AUDIO_SIZE = 25 * 1024 * 1024; // 25 MB
 const MAX_DURATION_SECONDS = 300; // 5 minute max recording
+const JOB_ID_SCHEMA = z.string().uuid();
 
 const ALLOWED_MIME_TYPES = new Set([
   'audio/webm', 'audio/ogg', 'audio/wav', 'audio/mpeg',
@@ -60,6 +65,8 @@ export interface VoiceRouterOpts {
    */
   fileRepo?: FileRepository;
   storage?: StorageProvider;
+  /** Tenant-scoped job lookup for optional mobile job-context verification. */
+  jobRepo?: Pick<JobRepository, 'findById'>;
 }
 
 export function createVoiceRouter(
@@ -148,6 +155,19 @@ export function createVoiceRouter(
           res.status(503).json({
             error: 'NOT_CONFIGURED',
             message: 'Live transcription is not configured',
+          });
+          return;
+        }
+        if (err instanceof DeepgramTokenPermissionError) {
+          // Key is set but cannot mint browser grant tokens (needs Member+).
+          // Same operator-facing posture as NOT_CONFIGURED: not a transient retry.
+          logger?.error('voice.stream-token: key lacks grant permissions', {
+            error: err.message,
+          });
+          res.status(503).json({
+            error: 'NOT_CONFIGURED',
+            message:
+              'Live transcription is misconfigured: Deepgram API key needs Member permissions',
           });
           return;
         }
@@ -334,6 +354,31 @@ export function createVoiceRouter(
         return;
       }
 
+      let verifiedJobId: string | undefined;
+      if (body.jobId !== undefined) {
+        const parsedJobId = JOB_ID_SCHEMA.safeParse(body.jobId);
+        if (!parsedJobId.success) {
+          res.status(400).json({
+            error: 'VALIDATION_ERROR',
+            message: 'jobId must be a valid UUID',
+          });
+          return;
+        }
+        if (!opts?.jobRepo) {
+          res.status(503).json({
+            error: 'NOT_CONFIGURED',
+            message: 'Job verification is not configured',
+          });
+          return;
+        }
+        const job = await opts.jobRepo.findById(req.auth!.tenantId, parsedJobId.data);
+        if (!job) {
+          res.status(404).json({ error: 'NOT_FOUND', message: 'Job not found' });
+          return;
+        }
+        verifiedJobId = parsedJobId.data;
+      }
+
       const recording = await voiceRepo.create(
         createVoiceRecording({
           tenantId: req.auth!.tenantId,
@@ -350,6 +395,7 @@ export function createVoiceRouter(
           recordingId: recording.id,
           audioUrl: body.audioUrl,
           conversationId: body.conversationId,
+          ...(verifiedJobId ? { jobId: verifiedJobId } : {}),
         },
         `${req.auth!.tenantId}:${recording.id}:transcription:create`
       );

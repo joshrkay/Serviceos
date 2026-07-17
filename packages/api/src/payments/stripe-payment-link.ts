@@ -27,12 +27,17 @@ export class StripePaymentLinkProvider implements PaymentLinkProvider {
     // invoice.stripePaymentLinkUrl before calling generateLink, and persists
     // the returned linkId/linkUrl back onto the invoice. The provider stays
     // stateless so a restart can't desync from the durable invoice row.
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${this.config.apiKey}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    };
+    if (request.stripeAccountId?.trim()) {
+      headers['Stripe-Account'] = request.stripeAccountId.trim();
+    }
+
     const res = await fetch('https://api.stripe.com/v1/payment_links', {
       method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${this.config.apiKey}`,
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
+      headers,
       body: new URLSearchParams({
         'line_items[0][price_data][currency]': 'usd',
         'line_items[0][price_data][product_data][name]': `Invoice ${request.invoiceId}`,
@@ -40,6 +45,11 @@ export class StripePaymentLinkProvider implements PaymentLinkProvider {
         'line_items[0][quantity]': '1',
         'metadata[tenant_id]': request.tenantId,
         'metadata[invoice_id]': request.invoiceId,
+        // Single completed checkout only — Stripe itself refuses a 2nd paid
+        // session on this link, so a replayed/saved link can't double-charge a
+        // card after the invoice is already settled (the webhook would silently
+        // drop the 2nd charge as "already settled").
+        'restrictions[completed_sessions][limit]': '1',
       }),
       signal: AbortSignal.timeout(STRIPE_REQUEST_TIMEOUT_MS),
     });
@@ -68,13 +78,17 @@ export class StripePaymentLinkProvider implements PaymentLinkProvider {
     };
   }
 
-  async deactivateLink(linkId: string): Promise<void> {
+  async deactivateLink(linkId: string, stripeAccountId?: string): Promise<void> {
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${this.config.apiKey}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    };
+    if (stripeAccountId?.trim()) {
+      headers['Stripe-Account'] = stripeAccountId.trim();
+    }
     const res = await fetch(`https://api.stripe.com/v1/payment_links/${linkId}`, {
       method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${this.config.apiKey}`,
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
+      headers,
       body: new URLSearchParams({ active: 'false' }),
       signal: AbortSignal.timeout(STRIPE_REQUEST_TIMEOUT_MS),
     });

@@ -5,8 +5,9 @@ import { assessConfidence, getConfidenceLevel } from '../guardrails/confidence';
 import type { ProposalConfidenceMeta } from '../../proposals/contracts';
 import { SlotConflictChecker, SlotConflictResult } from './slot-conflict-checker';
 import { AvailabilityFinder, OpenSlot } from './availability-finder';
-import { AppointmentRepository, createAppointment } from '../../appointments/appointment';
+import { AppointmentRepository } from '../../appointments/appointment';
 import { JobRepository } from '../../jobs/job';
+import { placeAppointmentHold } from '../scheduling/place-hold';
 import {
   resolveDateTime,
   formatForReadback,
@@ -83,9 +84,6 @@ Rules:
 
 /** A tentative hold survives 24h before the availability finder treats it as free. */
 const HOLD_WINDOW_MS = 24 * 60 * 60 * 1000;
-
-/** RFC-4122 UUID matcher — validates the LLM-extracted jobId before any DB read. */
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function tryParseJson(content: string): Record<string, unknown> | null {
   try {
@@ -499,68 +497,63 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
       // the approval-gated create_appointment proposal rather than writing a
       // hold against an unverified job. (No jobRepo → cannot check → the legacy
       // held path is unchanged.)
-      if (this.jobRepo) {
-        // Fallback for every case where we cannot positively attribute the
-        // LLM-supplied jobId to the verified caller. It MUST NOT auto-execute:
-        // `input` carries sourceTrustTier:'autonomous', so for a supervised,
-        // high-confidence tenant the create_appointment would auto-approve and
-        // CreateAppointmentExecutionHandler (which only checks jobId is a
-        // string) would book against the unverified job. Dropping the trust
-        // tier lands it in 'draft' so a human reviews the booking first.
-        const reviewGatedFallback = (): TaskResult => ({
-          proposal: createProposal({ ...input, sourceTrustTier: undefined }),
-          taskType: this.taskType,
-        });
-        if (!UUID_RE.test(payload.jobId) || !context.customerId) {
-          return reviewGatedFallback();
-        }
-        const ownedJob = await this.jobRepo
-          .findById(context.tenantId, payload.jobId)
-          .catch(() => null);
-        if (!ownedJob || ownedJob.customerId !== context.customerId) {
-          return reviewGatedFallback();
-        }
+      // Fallback for every case where we cannot positively attribute the
+      // LLM-supplied jobId to the verified caller. It MUST NOT auto-execute:
+      // `input` carries sourceTrustTier:'autonomous', so for a supervised,
+      // high-confidence tenant the create_appointment would auto-approve and
+      // CreateAppointmentExecutionHandler (which only checks jobId is a string)
+      // would book against the unverified job. Dropping the trust tier lands it
+      // in 'draft' so a human reviews the booking first.
+      const reviewGatedFallback = (): TaskResult => ({
+        proposal: createProposal({ ...input, sourceTrustTier: undefined }),
+        taskType: this.taskType,
+      });
+      // WS18 — the ownership guard + tentative-hold write now live in the shared
+      // placeAppointmentHold helper (ai/scheduling/place-hold.ts) so the live
+      // call close flow places the identical hold. Behavior-preserving.
+      const holdResult = await placeAppointmentHold(
+        {
+          appointmentRepo: repo,
+          ...(this.jobRepo ? { jobRepo: this.jobRepo } : {}),
+        },
+        {
+          tenantId: context.tenantId,
+          jobId: payload.jobId,
+          ...(context.customerId ? { customerId: context.customerId } : {}),
+          scheduledStart: new Date(scheduledStart),
+          scheduledEnd: new Date(scheduledEnd),
+          // FIX: persist the tenant's real display timezone, not 'UTC'.
+          timezone: resolved.timezone,
+          ...(arrival ? { arrival } : {}),
+          ...(typeof payload.summary === 'string' ? { notes: payload.summary } : {}),
+          // buildPayload only sets appointmentType to an enum-valid value.
+          ...(payload.appointmentType
+            ? { appointmentType: payload.appointmentType as AppointmentTypeValue }
+            : {}),
+          createdBy: context.userId,
+          holdWindowMs: HOLD_WINDOW_MS,
+          // Deterministic per-recording key: a redelivered voice message returns
+          // the existing hold instead of inserting a second one.
+          ...(context.recordingId
+            ? { idempotencyKey: voiceHoldIdempotencyKey(context.recordingId) }
+            : {}),
+        },
+      );
+      if (!holdResult.ok) {
+        // job_not_owned → the review-gated create_appointment (unverified job,
+        // reachable only with a jobRepo wired); hold_write_failed → the legacy
+        // create_appointment (repo/validation error), rather than failing the call.
+        return holdResult.failed === 'job_not_owned'
+          ? reviewGatedFallback()
+          : { proposal: createProposal(input), taskType: this.taskType };
       }
-      const holdExpiryAt = new Date(Date.now() + HOLD_WINDOW_MS);
-      let held;
-      try {
-        held = await createAppointment(
-          {
-            tenantId: context.tenantId,
-            jobId: payload.jobId,
-            scheduledStart: new Date(scheduledStart),
-            scheduledEnd: new Date(scheduledEnd),
-            // FIX: persist the tenant's real display timezone, not 'UTC'.
-            timezone: resolved.timezone,
-            ...(arrival
-              ? {
-                  arrivalWindowStart: new Date(arrival.startUtc),
-                  arrivalWindowEnd: new Date(arrival.endUtc),
-                }
-              : {}),
-            notes: typeof payload.summary === 'string' ? payload.summary : undefined,
-            // buildPayload only sets appointmentType to an enum-valid value.
-            appointmentType: payload.appointmentType as AppointmentTypeValue | undefined,
-            createdBy: context.userId,
-            holdPendingApproval: true,
-            holdExpiryAt,
-            // Deterministic per-recording key: a redelivered voice message
-            // returns the existing hold instead of inserting a second one
-            // (closes the concurrent-redelivery double-booking window).
-            ...(context.recordingId
-              ? { idempotencyKey: voiceHoldIdempotencyKey(context.recordingId) }
-              : {}),
-          },
-          repo,
-        );
-      } catch {
-        // Repo error or validation failure — degrade to the legacy
-        // create_appointment proposal rather than failing the call.
-        return { proposal: createProposal(input), taskType: this.taskType };
-      }
-      // Same confidence marker as the create_appointment payload — the
-      // booking proposal can auto-approve on the same score.
-      const bookingPayload: Record<string, unknown> = { appointmentId: held.id, _meta: meta };
+      const holdExpiryAt = holdResult.holdExpiryAt;
+      // Same confidence marker as the create_appointment payload — the booking
+      // proposal can auto-approve on the same score.
+      const bookingPayload: Record<string, unknown> = {
+        appointmentId: holdResult.appointmentId,
+        _meta: meta,
+      };
 
       // UB-D / D-015 — autonomous booking lane. When the entry-point threaded
       // lane inputs, evaluate EVERY gate against the real values from the
@@ -579,6 +572,7 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
           new Date(scheduledStart),
         ).isOpen;
         laneEvaluation = evaluateAutonomousBookingLane({
+          platformDisabled: context.autonomousBooking.platformDisabled,
           settings: context.autonomousBooking.settings,
           proposalType: 'create_booking',
           inboundReceptionistSource: context.autonomousBooking.inboundReceptionistSource,

@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { v4 as uuidv4 } from 'uuid';
 import { SendService } from '../../src/notifications/send-service';
 import { InMemoryDeliveryProvider } from '../../src/notifications/delivery-provider';
+import { GatedMessageDelivery } from '../../src/notifications/gated-message-delivery';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemoryDispatchRepository } from '../../src/notifications/dispatch-repository';
 import {
   InMemoryCustomerRepository,
@@ -144,15 +146,24 @@ async function buildHarness(): Promise<Harness> {
     updatedAt: new Date(),
   });
 
+  // WS1 — the consent/DNC gate now lives in the delivery wrapper, so the
+  // SendService is handed a GatedMessageDelivery (enforcement 'block') over the
+  // raw in-memory double. Assertions still inspect the raw `delivery` (sentSms).
+  const gatedDelivery = new GatedMessageDelivery({
+    base: delivery,
+    dnc,
+    auditRepo: new InMemoryAuditRepository(),
+    enforcement: 'block',
+  });
+
   const send = new SendService({
-    delivery,
+    delivery: gatedDelivery,
     estimateRepo: estimate,
     invoiceRepo: invoice,
     jobRepo: job,
     customerRepo: customer,
     settingsRepo: settings,
     dispatchRepo: dispatch,
-    dncRepo: dnc,
     publicBaseUrl: 'https://app.example.com',
   });
   return { send, delivery, dispatch, customer, job, estimate, invoice, settings, dnc };
@@ -421,7 +432,6 @@ describe('SendService — failure audit and idempotency', () => {
       customerRepo: h.customer,
       settingsRepo: h.settings,
       dispatchRepo: h.dispatch,
-      dncRepo: h.dnc,
       publicBaseUrl: 'https://app.example.com',
     });
 

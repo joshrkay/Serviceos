@@ -1,5 +1,6 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { Proposal, ProposalStatus, Role, hasPermission } from '../../types/conversation';
+import { track } from '../../lib/analytics';
 
 export interface ProposalCardProps {
   proposal: Proposal;
@@ -28,6 +29,13 @@ export function ProposalCard({
 }: ProposalCardProps) {
   const canApprove = canApproveProposal(userRole);
   const isPending = proposal.status === 'pending';
+
+  // proposal_viewed (U6) — fires once per distinct proposal shown, not on every
+  // re-render (keyed on id). IDs/enums only — no summary/customer text.
+  useEffect(() => {
+    track('proposal_viewed', { proposal_type: proposal.type, status: proposal.status });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [proposal.id]);
 
   return (
     <div className="proposal-card" data-testid="proposal-card" data-status={proposal.status}>

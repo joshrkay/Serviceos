@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useAuth } from '@clerk/clerk-react';
+import { fetchWithAuthRetry, isAuthRejectedStatus } from '../lib/streamAuth';
 
 export interface EscalationPanelData {
   header?: { title: string; callerName: string; callerPhone: string };
@@ -44,9 +45,13 @@ export function useEscalationStream(): UseEscalationStream {
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
     // Backoff floor for a persistent auth rejection — slower than the
-    // ordinary reconnect so a wrong/expired token doesn't hammer the API,
-    // but NOT permanent (the previous code gave up for the page lifetime on
-    // a single 401, silently killing escalations for the dispatcher).
+    // ordinary reconnect so a wrong/expired token doesn't hammer the API.
+    // ARCH-30 — a persistent rejection now also goes through
+    // fetchWithAuthRetry's handleAuthFailure() (Clerk sign-out / login
+    // redirect), so this is a fallback in case that navigation hasn't
+    // completed yet (e.g. latched behind a concurrent 401 elsewhere) rather
+    // than the sole recovery path — the previous code retried forever here
+    // and never signed the user out.
     const AUTH_RETRY_MS = 60_000;
     const backoff = (attempt: number) => Math.min(1000 * Math.pow(2, attempt), 30_000);
 
@@ -56,36 +61,17 @@ export function useEscalationStream(): UseEscalationStream {
       const controller = new AbortController();
       sseAbortRef.current = controller;
 
-      const openStream = async (skipCache: boolean): Promise<Response | null> => {
-        const token = await getToken({ template: 'serviceos', skipCache });
-        // Never send an unauthenticated request — a null token means Clerk is
-        // mid-refresh or signing out; the caller retries after a short delay.
-        if (!token) return null;
-        return fetch('/api/escalations/events', {
-          method: 'GET',
-          headers: { Accept: 'text/event-stream', Authorization: `Bearer ${token}` },
-          signal: controller.signal,
-        });
-      };
-
       try {
-        let response = await openStream(false);
+        const response = await fetchWithAuthRetry(
+          (opts) => getToken({ template: 'serviceos', ...opts }),
+          '/api/escalations/events',
+          { method: 'GET', headers: { Accept: 'text/event-stream' }, signal: controller.signal },
+        );
         if (cancelled) return;
-        if (!response) {
-          // No token yet — retry shortly rather than firing without auth.
-          reconnectTimer = setTimeout(() => void subscribe(attempt + 1), backoff(attempt));
-          return;
-        }
 
-        if (response.status === 401 || response.status === 403) {
-          // Token rejected — retry once with a force-refreshed token before
-          // backing off, mirroring the fetch clients' 401 handling.
-          response = await openStream(true);
-          if (cancelled) return;
-          if (!response || response.status === 401 || response.status === 403) {
-            reconnectTimer = setTimeout(() => void subscribe(attempt + 1), AUTH_RETRY_MS);
-            return;
-          }
+        if (isAuthRejectedStatus(response.status)) {
+          reconnectTimer = setTimeout(() => void subscribe(attempt + 1), AUTH_RETRY_MS);
+          return;
         }
         if (!response.ok || !response.body) {
           throw new Error(`SSE failed: ${response.status}`);

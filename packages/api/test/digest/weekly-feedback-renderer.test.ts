@@ -59,4 +59,44 @@ describe('renderWeeklyFeedbackEmail', () => {
     expect(email.text).toContain('Wins:');
     expect(email.text).not.toContain('Worth watching:');
   });
+
+  // ─── WS22: "same mistake twice" repeat-corrections line ──────────────────
+
+  describe('repeatCorrections line', () => {
+    it('renders the honest repeat-correction line (singular correction) when present', () => {
+      const withRepeats: WeeklyFeedbackSnapshot = {
+        ...snapshot,
+        repeatCorrections: { total: 6, repeats: 2, rate: 33 },
+      };
+      const email = renderWeeklyFeedbackEmail(withRepeats, suggestions);
+      expect(email.text).toContain(
+        'Of 6 corrections this week, 2 were repeats of an earlier correction (33%).',
+      );
+      expect(email.html).toContain('Of 6 corrections this week, 2 were repeats');
+    });
+
+    it('uses singular "correction"/"was a repeat" wording for total=1, repeats=1', () => {
+      const withRepeats: WeeklyFeedbackSnapshot = {
+        ...snapshot,
+        repeatCorrections: { total: 1, repeats: 1, rate: 100 },
+      };
+      const email = renderWeeklyFeedbackEmail(withRepeats, suggestions);
+      expect(email.text).toContain('Of 1 correction this week, 1 was a repeat of an earlier correction (100%).');
+    });
+
+    it('omits the line entirely when repeatCorrections is absent', () => {
+      const email = renderWeeklyFeedbackEmail(snapshot, suggestions);
+      expect(email.text).not.toContain('correction');
+      expect(email.html).not.toContain('correction');
+    });
+
+    it('omits the line when repeatCorrections.total is 0 (defensive — builder should already omit)', () => {
+      const withZero: WeeklyFeedbackSnapshot = {
+        ...snapshot,
+        repeatCorrections: { total: 0, repeats: 0, rate: 0 },
+      };
+      const email = renderWeeklyFeedbackEmail(withZero, suggestions);
+      expect(email.text).not.toContain('correction');
+    });
+  });
 });

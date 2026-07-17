@@ -64,16 +64,43 @@ and `docs/prod-env-checklist.md`. Deploy target: Railway (`railway.toml`)._
 
 ## 2. Clerk setup (auth + tenant bootstrap)
 
-1. **API keys.** Clerk → API Keys → `CLERK_SECRET_KEY` (backend),
-   `CLERK_PUBLISHABLE_KEY` (also as web build var `VITE_CLERK_PUBLISHABLE_KEY`).
-2. **Webhook endpoint.** Clerk → Webhooks → Add endpoint:
-   - URL: `https://<api-host>/webhooks/clerk` _(handler `webhooks/routes.ts:225`)._
-   - Subscribe to **`user.created`** _(→ `bootstrapTenant`, `routes.ts:486`;
-     creates the tenant + owner row with durable Pg idempotency)._
+> Full checklist (dev + prod, JWT template, failure modes):
+> [`docs/runbooks/clerk-setup.md`](../runbooks/clerk-setup.md).
+
+1. **Use the Production Clerk instance** (keys must be `pk_live_` / `sk_live_`).
+   Mixing test keys with a live frontend (or the reverse) breaks JWKS
+   verification — different hosts.
+2. **API keys.** Clerk → API Keys → `CLERK_SECRET_KEY` (backend),
+   `CLERK_PUBLISHABLE_KEY` (also as web build/runtime var
+   `VITE_CLERK_PUBLISHABLE_KEY`). Same instance for API + web.
+3. **JWT template `serviceos` (required).** Clerk → JWT templates → New →
+   name **exactly** `serviceos`. Claims:
+
+   ```json
+   {
+     "tenant_id": "{{user.public_metadata.tenant_id}}",
+     "role": "{{user.public_metadata.role}}"
+   }
+   ```
+
+   The web/mobile clients call `getToken({ template: 'serviceos' })`. Without
+   this template every authenticated request aborts and the app bounce-loops
+   to `/login`. `role` must be `owner` | `dispatcher` | `technician`.
+4. **Webhook endpoint.** Clerk → Webhooks → Add endpoint:
+   - URL: `https://<api-host>/webhooks/clerk` _(handler `webhooks/routes.ts`)._
+   - Subscribe to **`user.created`** _(→ `bootstrapTenant`; creates the tenant
+     + owner row; PATCHes Clerk `public_metadata` with `{ tenant_id, role }`
+     so the JWT template can mint claims)_ and **`user.deleted`**.
    - Copy the **Signing Secret** → `CLERK_WEBHOOK_SECRET` _(missing → the Clerk
-     webhook 500s, `routes.ts:228`)._
-3. **Google SSO** (optional, per PRD US-001): enable Google as a social
+     webhook 500s)._
+5. **Paths / allowed origins.** Allow the production web origin; sign-in path
+   `/login`, sign-up `/signup` (see `packages/web/src/main.tsx`).
+6. **Google SSO** (optional, per PRD US-001): enable Google as a social
    connection in Clerk → Configure → SSO.
+7. **Refuse local bypass flags in prod.** Do not set `DEV_AUTH_BYPASS` or
+   `CLERK_DEV_HMAC_TOKENS=true` on the production API
+   (`validateEnvSchema` hard-fails the HMAC flag; test-key prefixes also fail
+   unless `ALLOW_CLERK_TEST_KEYS=true` for a staging-shaped deploy).
 
 ---
 

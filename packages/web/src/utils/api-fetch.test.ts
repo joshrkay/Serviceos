@@ -312,7 +312,7 @@ describe('setTokenGetter — backwards-compatible call shape', () => {
     fetchMock
       .mockResolvedValueOnce(new Response(null, { status: 401 }))
       .mockResolvedValueOnce(new Response(null, { status: 200 }));
-    const legacy = vi.fn<[], Promise<string | null>>(async () => TOKEN);
+    const legacy = vi.fn<() => Promise<string | null>>(async () => TOKEN);
     setTokenGetter(legacy);
 
     const res = await apiFetch('/api/jobs');

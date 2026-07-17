@@ -1,6 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { pickActiveAppointment, tenantLocalDate } from '@ai-service-os/shared';
 import { useNavigate } from 'react-router';
 import { apiFetch } from '../../utils/api-fetch';
+import { useTenantTimezone } from '../../hooks/useTenantTimezone';
+import { formatInTenantTz, formatTimeInTenantTz } from '../../utils/formatInTenantTz';
 import { TechnicianProfitCard } from '../../components/technician/TechnicianProfitCard';
 
 export interface TechnicianAppointment {
@@ -54,15 +57,6 @@ function generateIdempotencyKey(): string {
     return crypto.randomUUID();
   }
   return `tech-day-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-}
-
-function formatTime(iso: string): string {
-  return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-}
-
-function toDateInputValue(date: Date): string {
-  const pad = (value: number) => String(value).padStart(2, '0');
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
 }
 
 function toDateTimeInputValue(iso: string): string {
@@ -147,19 +141,25 @@ function computePromptConfidence(history: Coordinates[]): number {
   return clamp((recencyScore * 0.4) + (accuracyScore * 0.4) + (movementConsistency * 0.2));
 }
 
-function answerScheduleQuestion(question: string, appointments: TechnicianAppointment[], now: Date): string {
+// Exported for unit testing: pins that appointment times render in the tenant
+// timezone regardless of the JS runtime timezone (CLAUDE.md: "stored UTC,
+// rendered in tenant timezone").
+export function answerScheduleQuestion(
+  question: string,
+  appointments: TechnicianAppointment[],
+  now: Date,
+  timezone: string,
+): string {
   const normalized = question.toLowerCase();
 
   if (normalized.includes('next appointment') || normalized.includes('where') || normalized.includes('next stop')) {
-    const next = appointments
-      .filter((appt) => new Date(appt.scheduledStart).getTime() >= now.getTime())
-      .sort((a, b) => new Date(a.scheduledStart).getTime() - new Date(b.scheduledStart).getTime())[0];
+    const next = pickActiveAppointment(appointments, now.getTime());
 
     if (!next) {
       return 'You do not have any more appointments scheduled today.';
     }
 
-    return `Your next appointment is with ${next.customerName} at ${formatTime(next.scheduledStart)} (${next.locationAddress}).`;
+    return `Your next appointment is with ${next.customerName} at ${formatTimeInTenantTz(next.scheduledStart, timezone)} (${next.locationAddress}).`;
   }
 
   if (normalized.includes('entire schedule') || normalized.includes('today')) {
@@ -169,7 +169,7 @@ function answerScheduleQuestion(question: string, appointments: TechnicianAppoin
 
     return appointments
       .sort((a, b) => new Date(a.scheduledStart).getTime() - new Date(b.scheduledStart).getTime())
-      .map((appt) => `${formatTime(appt.scheduledStart)} ${appt.customerName}`)
+      .map((appt) => `${formatTimeInTenantTz(appt.scheduledStart, timezone)} ${appt.customerName}`)
       .join(' • ');
   }
 
@@ -178,6 +178,7 @@ function answerScheduleQuestion(question: string, appointments: TechnicianAppoin
 
 export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
   const navigate = useNavigate();
+  const timezone = useTenantTimezone();
   const [appointments, setAppointments] = useState<TechnicianAppointment[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -207,7 +208,7 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
       setIsLoading(true);
       setError(null);
       try {
-        const dateStr = toDateInputValue(selectedDate);
+        const dateStr = tenantLocalDate(selectedDate, timezone);
         const response = await apiFetch(
           `/api/dispatch/technician/${technicianId}/appointments?date=${dateStr}`
         );
@@ -229,11 +230,11 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
     return () => {
       cancelled = true;
     };
-  }, [technicianId, selectedDate, refetchNonce]);
+  }, [technicianId, selectedDate, refetchNonce, timezone]);
 
   // Clear the day when the identity changes so we never paint yesterday's
   // jobs under today's header. Soft refreshes (refetchNonce) keep rows.
-  const dayIdentity = `${technicianId}|${toDateInputValue(selectedDate)}`;
+  const dayIdentity = `${technicianId}|${tenantLocalDate(selectedDate, timezone)}`;
   const lastDayIdentityRef = useRef(dayIdentity);
   useEffect(() => {
     if (lastDayIdentityRef.current === dayIdentity) return;
@@ -278,10 +279,10 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
     [appointments]
   );
 
-  const nextAppointment = useMemo(() => {
-    const now = Date.now();
-    return sortedAppointments.find((appt) => new Date(appt.scheduledStart).getTime() >= now) ?? null;
-  }, [sortedAppointments]);
+  const nextAppointment = useMemo(
+    () => pickActiveAppointment(sortedAppointments, Date.now()),
+    [sortedAppointments],
+  );
 
   useEffect(() => {
     if (positionHistory.length === 0 || sortedAppointments.length === 0 || delayPromptAcknowledged) {
@@ -432,7 +433,7 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
     technicianId,
   ]);
 
-  const today = selectedDate.toLocaleDateString(undefined, {
+  const today = formatInTenantTz(selectedDate, timezone, {
     weekday: 'long',
     month: 'long',
     day: 'numeric',
@@ -622,7 +623,7 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
           className="rounded-2xl border border-primary/20 bg-primary/10 px-4 py-3 text-sm text-foreground"
           data-testid="technician-day-next-appointment"
         >
-          <strong>Next appointment:</strong> {nextAppointment.customerName} at {formatTime(nextAppointment.scheduledStart)}
+          <strong>Next appointment:</strong> {nextAppointment.customerName} at {formatTimeInTenantTz(nextAppointment.scheduledStart, timezone)}
           {' '}
           <a
             href={buildMapsHref(nextAppointment.locationAddress)}
@@ -653,7 +654,7 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
           <button
             type="button"
             className={`${primaryButtonClass} shrink-0`}
-            onClick={() => setAiAnswer(answerScheduleQuestion(aiQuestion, sortedAppointments, new Date()))}
+            onClick={() => setAiAnswer(answerScheduleQuestion(aiQuestion, sortedAppointments, new Date(), timezone))}
             data-testid="technician-day-ask-ai"
           >
             Ask
@@ -756,7 +757,7 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
                 >
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="text-sm font-semibold text-foreground" data-testid="technician-day-time">
-                      {formatTime(appt.scheduledStart)} - {formatTime(appt.scheduledEnd)}
+                      {formatTimeInTenantTz(appt.scheduledStart, timezone)} - {formatTimeInTenantTz(appt.scheduledEnd, timezone)}
                     </div>
                     <div
                       className="inline-flex rounded-full bg-secondary px-2.5 py-0.5 text-xs capitalize text-foreground"

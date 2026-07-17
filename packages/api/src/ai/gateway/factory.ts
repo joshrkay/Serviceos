@@ -278,9 +278,9 @@ function buildGatewayConfig(
       tenantOverrides: {
         [SYSTEM_TENANT_ID]: {
           tiers: {
-            lightweight: { model: defaultModel!, provider: providerName },
-            standard: { model: defaultModel!, provider: providerName },
-            complex: { model: defaultModel!, provider: providerName },
+            lightweight: { model: defaultModel! },
+            standard: { model: defaultModel! },
+            complex: { model: defaultModel! },
           },
         },
       },
@@ -339,6 +339,25 @@ export function createMockLLMGateway(defaultResponse = '{"mock": true}'): {
   provider: MockLLMProvider;
 } {
   const provider = new MockLLMProvider(defaultResponse);
+  const providers = new Map<string, LLMProvider>([['mock', provider]]);
+  const gatewayConfig: LLMGatewayConfig = { defaultProvider: 'mock' };
+  const gateway = new LLMGateway(gatewayConfig, providers);
+  return { gateway, provider };
+}
+
+/**
+ * Hermetic / local-demo gateway used when `AI_PROVIDER_API_KEY` is unset.
+ * Scripts intent classification + free-text drafting so Assistant can create
+ * real proposals without a paid provider key. Unit tests that need a fixed
+ * JSON reply should keep using {@link createMockLLMGateway}.
+ */
+export function createHermeticMockLLMGateway(): {
+  gateway: LLMGateway;
+  provider: MockLLMProvider;
+} {
+  const provider = new MockLLMProvider('{"intentType":"unknown","confidence":0}', {
+    hermetic: true,
+  });
   const providers = new Map<string, LLMProvider>([['mock', provider]]);
   const gatewayConfig: LLMGatewayConfig = { defaultProvider: 'mock' };
   const gateway = new LLMGateway(gatewayConfig, providers);

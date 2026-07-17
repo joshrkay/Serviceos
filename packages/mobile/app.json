@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "ServiceOS",
+    "name": "Rivet",
     "slug": "serviceos-mobile",
     "scheme": "serviceos",
     "version": "1.0.0",
@@ -9,24 +9,92 @@
     "newArchEnabled": true,
     "icon": "./assets/icon.png",
     "splash": {
+      "image": "./assets/splash.png",
       "backgroundColor": "#030213"
     },
     "ios": {
       "supportsTablet": false,
-      "bundleIdentifier": "com.serviceos.app"
+      "bundleIdentifier": "com.serviceos.app",
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "Allow Rivet to use your location for field tracking while Today is open and to enable Tap to Pay and nearby card readers.",
+        "NSBluetoothAlwaysUsageDescription": "Allow Rivet to connect to Stripe Terminal card readers.",
+        "NSBluetoothPeripheralUsageDescription": "Allow Rivet to connect to Stripe Terminal card readers.",
+        "NSLocalNetworkUsageDescription": "Allow Rivet to discover Stripe Terminal readers on your network.",
+        "NSUserNotificationsUsageDescription": "Allow Rivet to send push notifications for approvals, job updates, and the end-of-day digest."
+      }
     },
     "android": {
-      "package": "com.serviceos.app"
+      "package": "com.serviceos.app",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#030213"
+      },
+      "permissions": [
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.BLUETOOTH",
+        "android.permission.BLUETOOTH_ADMIN",
+        "android.permission.BLUETOOTH_CONNECT",
+        "android.permission.BLUETOOTH_SCAN"
+      ]
     },
     "plugins": [
       "expo-router",
       [
         "expo-audio",
         {
-          "microphonePermission": "Allow ServiceOS to use the microphone to capture voice actions."
+          "microphonePermission": "Allow Rivet to use the microphone to capture voice actions and field voice notes."
         }
       ],
-      "expo-notifications"
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow Rivet to use the camera to take job photos.",
+          "barcodeScannerEnabled": false
+        }
+      ],
+      [
+        "expo-location",
+        {
+          "isIosBackgroundLocationEnabled": false,
+          "locationWhenInUsePermission": "Allow Rivet to use your location for field tracking while Today is open and to enable Tap to Pay and nearby card readers."
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/notification-icon.png",
+          "color": "#1F5FD6",
+          "sounds": [],
+          "mode": "production"
+        }
+      ],
+      [
+        "@stripe/stripe-terminal-react-native",
+        {
+          "bluetoothBackgroundMode": true,
+          "locationWhenInUsePermission": "Allow Rivet to use your location to enable Tap to Pay and card readers.",
+          "bluetoothPeripheralPermission": "Allow Rivet to connect to Stripe Terminal card readers.",
+          "bluetoothAlwaysUsagePermission": "Allow Rivet to connect to Stripe Terminal card readers.",
+          "localNetworkUsagePermission": "Allow Rivet to discover Stripe Terminal readers on your network.",
+          "tapToPayCheck": true,
+          "appDelegate": true
+        }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "minSdkVersion": 26,
+            "packagingOptions": {
+              "pickFirst": [
+                "org/bouncycastle/x509/CertPathReviewerMessages.properties",
+                "org/bouncycastle/x509/CertPathReviewerMessages_de.properties"
+              ]
+            }
+          }
+        }
+      ],
+      "expo-font"
     ],
     "experiments": {
       "typedRoutes": true

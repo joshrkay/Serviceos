@@ -116,6 +116,40 @@ export interface InvoiceRepository {
   /** P1-018: paginated `{ data, total }` form for list UIs. */
   listWithMeta?(tenantId: string, options?: InvoiceListOptions): Promise<InvoiceListResult>;
   update(tenantId: string, id: string, updates: Partial<Invoice>): Promise<Invoice | null>;
+  /**
+   * Atomically credit `deltaCents` to the paid balance in a SINGLE UPDATE,
+   * recomputing amount_due and status from the row's own current values — never
+   * from a caller's stale snapshot. Closes the recordPayment lost-update race:
+   * two concurrent legitimate payments (e.g. a manual cash entry and a Stripe/ACH
+   * webhook) otherwise each read the same amount_paid and blind-set it, silently
+   * dropping one credit. Returns the updated invoice, or null if not found.
+   */
+  incrementAmountPaidAtomic(
+    tenantId: string,
+    id: string,
+    deltaCents: number,
+    now: Date,
+  ): Promise<Invoice | null>;
+  /**
+   * Atomically DECREMENT the paid balance by `deltaCents` in a SINGLE UPDATE,
+   * recomputing amount_due and status from the row's OWN current values — the
+   * reversal-side analog of `incrementAmountPaidAtomic`. Closes the
+   * `reversePayment` / in-flight-reversal lost-update race: the old path read
+   * amount_paid into a JS snapshot and blind-set `snapshot − delta`, so a
+   * concurrent credit (or a second reversal) clobbered it. Paid is clamped at 0
+   * (GREATEST) and the reopened status is derived in-SQL: 'open' (nothing left
+   * paid), 'paid' (still fully covered — e.g. one of several payments reversed),
+   * else 'partially_paid'. Guarded to REOPENABLE statuses
+   * ('open','partially_paid','paid') only, so a void/canceled/draft invoice is
+   * left untouched (returns null, exactly as the read-modify-write path skipped
+   * it). Returns the updated invoice, or null if not found OR not reopenable.
+   */
+  decrementAmountPaidAtomic(
+    tenantId: string,
+    id: string,
+    deltaCents: number,
+    now: Date,
+  ): Promise<Invoice | null>;
   /** Look up by unauthenticated view token — no tenant isolation needed (token is the secret). */
   findByViewToken?(token: string): Promise<Invoice | null>;
   /**
@@ -470,6 +504,68 @@ export class InMemoryInvoiceRepository implements InvoiceRepository {
     const i = this.invoices.get(id);
     if (!i || i.tenantId !== tenantId) return null;
     const updated = { ...i, ...updates };
+    this.invoices.set(id, updated);
+    return { ...updated, lineItems: [...updated.lineItems] };
+  }
+
+  async incrementAmountPaidAtomic(
+    tenantId: string,
+    id: string,
+    deltaCents: number,
+    now: Date,
+  ): Promise<Invoice | null> {
+    const i = this.invoices.get(id);
+    if (!i || i.tenantId !== tenantId) return null;
+    // JS is single-threaded, so read-modify-write here is already atomic; the
+    // Pg impl uses a single UPDATE to get the same guarantee under real
+    // concurrency. Recompute from the stored row, never a caller snapshot.
+    const newPaid = i.amountPaidCents + deltaCents;
+    const newDue = Math.max(0, i.totals.totalCents - newPaid);
+    let status = i.status;
+    if (newDue === 0) status = 'paid';
+    else if (newPaid > 0 && (i.status === 'open' || i.status === 'partially_paid')) {
+      status = 'partially_paid';
+    }
+    const updated: Invoice = {
+      ...i,
+      amountPaidCents: newPaid,
+      amountDueCents: newDue,
+      status,
+      updatedAt: now,
+    };
+    this.invoices.set(id, updated);
+    return { ...updated, lineItems: [...updated.lineItems] };
+  }
+
+  async decrementAmountPaidAtomic(
+    tenantId: string,
+    id: string,
+    deltaCents: number,
+    now: Date,
+  ): Promise<Invoice | null> {
+    const i = this.invoices.get(id);
+    if (!i || i.tenantId !== tenantId) return null;
+    // Only reopenable invoices are decremented; a void/canceled/draft row is
+    // left untouched (null), mirroring the Pg WHERE guard and the prior
+    // read-modify-write, which never touched a terminal invoice on reversal.
+    const REOPENABLE: InvoiceStatus[] = ['open', 'partially_paid', 'paid'];
+    if (!REOPENABLE.includes(i.status)) return null;
+    // JS is single-threaded, so read-modify-write here is already atomic; the
+    // Pg impl uses a single UPDATE to get the same guarantee under real
+    // concurrency. Recompute from the stored row, never a caller snapshot.
+    const newPaid = Math.max(0, i.amountPaidCents - deltaCents);
+    const newDue = Math.max(0, i.totals.totalCents - newPaid);
+    let status: InvoiceStatus;
+    if (newPaid <= 0) status = 'open';
+    else if (newPaid >= i.totals.totalCents) status = 'paid';
+    else status = 'partially_paid';
+    const updated: Invoice = {
+      ...i,
+      amountPaidCents: newPaid,
+      amountDueCents: newDue,
+      status,
+      updatedAt: now,
+    };
     this.invoices.set(id, updated);
     return { ...updated, lineItems: [...updated.lineItems] };
   }

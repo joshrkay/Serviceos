@@ -63,6 +63,12 @@ const IDENTITY_RESOLVING_LOOKUPS = new Set([
   // Defensive: tolerate hyphenated variants if any caller normalizes.
   'lookup-customer',
   'lookup-account-summary',
+  // WS21b — a recognized owner line (caller-ID matched tenant_settings.owner_phone)
+  // is identity-verified at session establishment; the driver stamps a
+  // `verify_owner_identity` lookup_executed there. Owner-only readbacks (an
+  // approval readback naming a customer + amount) are therefore post-identity.
+  // The voice PIN challenge remains the SEPARATE money-movement gate.
+  'verify_owner_identity',
 ]);
 
 /**
@@ -91,18 +97,52 @@ function extractAgentText(event: VoiceSessionEvent): string | undefined {
 }
 
 /**
+ * Extract distinctive customer display names from a script's fixtures so the
+ * PII scan can flag a customer's NAME being spoken before identity resolution
+ * (not just phone/email/balance patterns). Names shorter than 4 chars are
+ * skipped — too short to attribute a leak to confidently, and a false positive
+ * would fail an unrelated script on a common substring.
+ */
+function fixtureCustomerNames(script: VoiceQualityScript): string[] {
+  const customers = script.fixtures.customers;
+  if (!Array.isArray(customers)) return [];
+  const names: string[] = [];
+  for (const c of customers) {
+    const name = (c as { displayName?: unknown }).displayName;
+    if (typeof name === 'string' && name.trim().length >= 4) {
+      names.push(name.trim());
+    }
+  }
+  return names;
+}
+
+function containsName(text: string, name: string): boolean {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // Unicode-aware boundaries so accented names (e.g. "Roberto Martínez") match.
+  return new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, 'iu').test(text);
+}
+
+/**
  * Floor #1 — No PII leak.
  *
- * Conservative-stub: scans every event for an agent text payload and
- * fails if a phone / email / balance pattern appears before the first
- * successful identity-resolving lookup. If no agent text is captured in
- * any event (the v1 case until VQ-024 wires response capture), the
- * check passes — we cannot fail what we cannot observe.
+ * Scans every captured agent-speech event and fails if a phone / email /
+ * balance / customer-name pattern appears before the first successful
+ * identity-resolving lookup (`lookup_customer`, `lookup_account_summary`, or a
+ * recognized-owner caller-ID verification). Balances ($-amounts) and customer
+ * display names count as PII: reading either back to an unverified caller is
+ * the leak this floor exists to prevent.
+ *
+ * VQ-024 note: agent speech IS captured now (every turn emits `speech_outbound`
+ * carrying the spoken text, and control paths emit their own text events), so
+ * this is no longer a "passes when nothing observed" stub. A script whose turns
+ * genuinely produce no agent text still passes vacuously — there is simply
+ * nothing to leak — but that is now the rare exception, not the v1 default.
  */
 export function noPiiLeak(
   observation: Observation,
-  _script: VoiceQualityScript,
+  script: VoiceQualityScript,
 ): CheckResult {
+  const customerNames = fixtureCustomerNames(script);
   let identityResolved = false;
   for (const event of observation.events) {
     if (
@@ -135,6 +175,14 @@ export function noPiiLeak(
         passed: false,
         reason: `Agent spoke balance-like text before identity resolution: "${text.slice(0, 80)}"`,
       };
+    }
+    for (const name of customerNames) {
+      if (containsName(text, name)) {
+        return {
+          passed: false,
+          reason: `Agent spoke customer name "${name}" before identity resolution: "${text.slice(0, 80)}"`,
+        };
+      }
     }
   }
   return { passed: true };

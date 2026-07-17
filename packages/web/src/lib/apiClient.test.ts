@@ -25,7 +25,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
  */
 import { renderHook } from '@testing-library/react';
 import { waitFor } from '@testing-library/react';
-import { clearSignOutHandler, useApiClient } from './apiClient';
+import { clearSignOutHandler, getServiceosToken, useApiClient } from './apiClient';
 
 // ── Clerk mock ───────────────────────────────────────────────────────────────
 const mockGetToken = vi.fn(async () => 'tok-test');
@@ -235,4 +235,34 @@ describe('P20-003 redirectToLogin — URL construction', () => {
       expect(href).toBe('/login?redirect=' + encodeURIComponent('/dashboard'));
     }
   );
+});
+
+describe('getServiceosToken', () => {
+  it('returns the serviceos template token when present', async () => {
+    const getToken = vi.fn(async (opts?: { template?: string }) =>
+      opts?.template === 'serviceos' ? 'tok-serviceos' : 'tok-default',
+    );
+    await expect(getServiceosToken(getToken)).resolves.toBe('tok-serviceos');
+    expect(getToken).toHaveBeenCalledWith({ template: 'serviceos', skipCache: undefined });
+  });
+
+  it('logs a diagnostic when signed in but the serviceos template is missing', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const getToken = vi.fn(async (opts?: { template?: string }) =>
+      opts?.template === 'serviceos' ? null : 'tok-default',
+    );
+    await expect(getServiceosToken(getToken)).resolves.toBeNull();
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringContaining("template: 'serviceos'"),
+    );
+    errSpy.mockRestore();
+  });
+
+  it('returns null without diagnostic when there is no session at all', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const getToken = vi.fn(async () => null);
+    await expect(getServiceosToken(getToken)).resolves.toBeNull();
+    expect(errSpy).not.toHaveBeenCalled();
+    errSpy.mockRestore();
+  });
 });

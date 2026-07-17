@@ -1,4 +1,5 @@
 import { Pool } from 'pg';
+import { z } from 'zod';
 import { Router, Response } from 'express';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { asyncRoute } from '../middleware/async-route';
@@ -151,10 +152,22 @@ export function createInteractionsRouter(deps: InteractionsRouterDeps): Router {
   }));
 
   router.get('/:id', requireAuth, requireTenant, asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+    const { id } = req.params;
+
+    // The query below casts `id` straight into a `uuid` column comparison.
+    // Postgres raises "invalid input syntax for type uuid" for anything
+    // that isn't well-formed, which asyncRoute would otherwise surface as
+    // a 500. Reject malformed ids up front instead (same convention as
+    // users.ts resolvePhoneTarget: 400 BAD_REQUEST for a malformed id,
+    // 404 NOT_FOUND reserved for a well-formed id that doesn't match a row).
+    if (!z.string().uuid().safeParse(id).success) {
+      res.status(400).json({ error: 'BAD_REQUEST', message: 'Invalid interaction id.' });
+      return;
+    }
+
     const client = await pool.connect();
     try {
       const tenantId = req.auth!.tenantId;
-      const { id } = req.params;
 
       await client.query('BEGIN');
       await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);

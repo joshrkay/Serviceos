@@ -53,7 +53,9 @@ steps (`pack`, `billing`) carry only the generic `onboarding_step_*` events.
 
 The launch spec assumed Next.js/Supabase/pnpm; this repo is Vite/React-Router +
 Express + in-code migrations + npm. The **features** were built literally on that
-real stack (the framework was deliberately NOT rewritten — see DECISIONS.md D9):
+real stack — the framework was deliberately not rewritten to match the launch
+spec's assumed stack; the existing Vite/Express/in-code-migration stack was kept
+and the spec's features were mapped onto it instead:
 
 - **Vapi is now a real integration** (`integrations/vapi/*`): fetch-based client
   (no SDK dep, off-by-default), assistant created + linked to the provisioned
@@ -117,7 +119,7 @@ guarantees the event + activation email fire **exactly once per tenant, forever*
 On activation: `first_real_call_received` funnel event + `tenant.activated` audit
 event + a best-effort activation email to the owner. Drives the in-app
 `ActivationCelebrationBanner`. The identity-based variant is deferred (see
-BLOCKED.md).
+docs/archive/2026-07-cleanup/root/BLOCKED.md).
 
 ## Conversion + payment health
 

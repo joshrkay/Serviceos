@@ -1,3 +1,4 @@
+import type { PoolClient } from 'pg';
 import { Proposal, ProposalRepository } from '../proposal';
 import { ProposalExecutionRepository } from '../proposal-execution';
 import { ExecutionResult } from './handlers';
@@ -36,12 +37,15 @@ export class IdempotencyGuard {
 
   async checkAndExecute(
     proposal: Proposal,
-    executeFn: () => Promise<ExecutionResult>
+    executeFn: (client?: PoolClient) => Promise<ExecutionResult>
   ): Promise<{ result: ExecutionResult; alreadyExecuted: boolean }> {
     const keyed = withResolvedIdempotencyKey(proposal);
     const idempotencyKey = keyed.idempotencyKey!;
 
-    return this.lock.withLock(keyed.tenantId, idempotencyKey, async () => {
+    return this.lock.withLock(keyed.tenantId, idempotencyKey, async (client) => {
+      // Read the idempotency marker BEFORE opening any transaction: the
+      // advisory lock serializes callers, and a prior run committed its marker
+      // before releasing the lock, so this read always sees the latest.
       const previous = await this.findPreviousExecution(
         keyed.tenantId,
         idempotencyKey,
@@ -54,7 +58,10 @@ export class IdempotencyGuard {
         };
       }
 
-      const result = await executeFn();
+      // DATA-31: pass the locked connection through so the executor can run the
+      // handler mutation + idempotency record + status transition in one
+      // transaction on this session, committed before the lock releases.
+      const result = await executeFn(client);
       return { result, alreadyExecuted: false };
     });
   }

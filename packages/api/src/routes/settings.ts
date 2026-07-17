@@ -13,10 +13,20 @@ import {
   getSettings,
   updateSettings,
   ensureTenantSettings,
+  resolveEscalationSettings,
   SettingsRepository,
   TenantSettings,
+  EscalationSettings,
   validateTerminologyPreferences,
 } from '../settings/settings';
+import {
+  isEnrollablePin,
+  normalizeEnrollmentPin,
+  hashVoiceApprovalPin,
+  resolveVoiceApprovalPinSecret,
+  MIN_PIN_DIGITS,
+  MAX_PIN_DIGITS,
+} from '../settings/voice-approval-pin';
 
 type Language = 'en' | 'es';
 
@@ -87,6 +97,44 @@ const languagePatchSchema = z.object({
   supportedLanguages: z.array(z.enum(['en', 'es'])).optional(),
 });
 
+// WS21a — the voice-approval PIN enrollment payload. Accepts a raw 4–6 digit
+// string (spaces/dashes tolerated, normalized server-side); the hash is
+// computed here and only the hash is persisted.
+const voiceApprovalPinSchema = z.object({
+  pin: z.string().min(1).max(32),
+});
+
+/**
+ * WS21a — strip the money-approval PIN credential out of any settings payload
+ * returned to a client. Both the HMAC hash and the deprecated plaintext
+ * challenge are secrets; the client only needs to know WHETHER a PIN is
+ * enrolled, surfaced as `voiceApprovalPinEnrolled`.
+ */
+function redactSettingsForResponse(settings: TenantSettings): TenantSettings & {
+  voiceApprovalPinEnrolled: boolean;
+} {
+  const escalation = settings.escalationSettings;
+  const enrolled = !!(
+    escalation?.voice_approval_pin_hash ||
+    (typeof escalation?.voice_approval_challenge === 'string' &&
+      escalation.voice_approval_challenge.trim().length > 0)
+  );
+  let redactedEscalation = escalation;
+  if (escalation) {
+    const {
+      voice_approval_pin_hash: _hash,
+      voice_approval_challenge: _legacy,
+      ...rest
+    } = escalation;
+    redactedEscalation = rest;
+  }
+  return {
+    ...settings,
+    ...(redactedEscalation ? { escalationSettings: redactedEscalation } : {}),
+    voiceApprovalPinEnrolled: enrolled,
+  };
+}
+
 interface SettingsRouterDependencies {
   activationRepo: PackActivationRepository;
   verticalPackRegistry: VerticalPackRegistry;
@@ -106,12 +154,11 @@ export function createSettingsRouter(
     requirePermission('settings:view'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
-        const result = await getSettings(req.auth!.tenantId, settingsRepo);
-        if (!result) {
-          res.status(404).json({ error: 'NOT_FOUND', message: 'Settings not found' });
-          return;
-        }
-        res.json(result);
+        // Lazy-seed so hermetic/dev tenants (and any webhook miss) still
+        // get a usable Settings document instead of a hard 404.
+        const result = await ensureTenantSettings(req.auth!.tenantId, settingsRepo);
+        // WS21a — never echo the money-approval PIN (hash or legacy plaintext).
+        res.json(redactSettingsForResponse(result));
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);
@@ -290,12 +337,136 @@ export function createSettingsRouter(
           );
         }
 
-        res.json(result);
+        res.json(redactSettingsForResponse(result));
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);
       }
     }
+  );
+
+  // ── WS21a — enrolled voice-approval PIN (money-class approvals) ──────────
+  // Set/change or clear the spoken PIN that gates money/irreversible VOICE
+  // approvals on a caller-ID-recognized owner line. The PIN is hashed
+  // (HMAC-SHA256, tenant-salted) server-side and ONLY the hash is stored;
+  // the raw PIN is never persisted and never echoed back. Owner-gated: this
+  // credential protects money movement, so it sits at the same permission
+  // tier as owner_phone (settings:update).
+  router.put(
+    '/voice-approval-pin',
+    requireAuth,
+    requireTenant,
+    requirePermission('settings:update'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const tenantId = req.auth!.tenantId;
+        const { pin } = voiceApprovalPinSchema.parse(req.body ?? {});
+        if (!isEnrollablePin(pin)) {
+          throw new ValidationError(
+            `PIN must be ${MIN_PIN_DIGITS}–${MAX_PIN_DIGITS} digits`,
+            { field: 'pin' },
+          );
+        }
+        const secret = resolveVoiceApprovalPinSecret();
+        if (!secret) {
+          // No server secret configured — refuse rather than store an
+          // unhashable (or weakly hashed) credential.
+          throw new ValidationError(
+            'Voice-approval PIN cannot be set: server encryption key is not configured',
+            { field: 'pin' },
+          );
+        }
+        const digits = normalizeEnrollmentPin(pin);
+        const hash = hashVoiceApprovalPin(digits, tenantId, secret);
+
+        // Merge into the existing escalation blob (the JSONB write REPLACES
+        // the whole object) and drop the deprecated plaintext so exactly one
+        // credential — the hash — remains.
+        const existing = await ensureTenantSettings(tenantId, settingsRepo);
+        const nextEscalation: Partial<EscalationSettings> = {
+          ...(existing.escalationSettings ?? {}),
+          voice_approval_pin_hash: hash,
+        };
+        delete nextEscalation.voice_approval_challenge;
+        const updated = await updateSettings(
+          tenantId,
+          { escalationSettings: nextEscalation },
+          settingsRepo,
+        );
+        if (!updated) {
+          res.status(404).json({ error: 'NOT_FOUND', message: 'Settings not found' });
+          return;
+        }
+
+        if (auditRepo) {
+          await auditRepo.create(
+            createAuditEvent({
+              tenantId,
+              actorId: req.auth!.userId,
+              actorRole: req.auth!.role,
+              eventType: 'settings.voice_approval_pin.set',
+              entityType: 'tenant_settings',
+              entityId: updated.id,
+              // Never log the PIN or its hash — only that enrollment happened.
+              metadata: { enrolled: true },
+            }),
+          );
+        }
+
+        res.status(204).end();
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
+  );
+
+  router.delete(
+    '/voice-approval-pin',
+    requireAuth,
+    requireTenant,
+    requirePermission('settings:update'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const tenantId = req.auth!.tenantId;
+        const existing = await getSettings(tenantId, settingsRepo);
+        if (!existing) {
+          res.status(404).json({ error: 'NOT_FOUND', message: 'Settings not found' });
+          return;
+        }
+        // Remove BOTH the hash and any lingering deprecated plaintext, so a
+        // cleared PIN can never fall back to a stale legacy credential. After
+        // this, money/irreversible voice approvals refuse with the one-tap SMS.
+        const escalation = resolveEscalationSettings(existing);
+        const nextEscalation: Partial<EscalationSettings> = { ...escalation };
+        delete nextEscalation.voice_approval_pin_hash;
+        delete nextEscalation.voice_approval_challenge;
+        const updated = await updateSettings(
+          tenantId,
+          { escalationSettings: nextEscalation },
+          settingsRepo,
+        );
+
+        if (auditRepo && updated) {
+          await auditRepo.create(
+            createAuditEvent({
+              tenantId,
+              actorId: req.auth!.userId,
+              actorRole: req.auth!.role,
+              eventType: 'settings.voice_approval_pin.cleared',
+              entityType: 'tenant_settings',
+              entityId: updated.id,
+              metadata: { enrolled: false },
+            }),
+          );
+        }
+
+        res.status(204).end();
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
   );
 
   return router;

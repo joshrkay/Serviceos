@@ -12,7 +12,7 @@ import type {
   ProposalConfidence,
   ProposalConfidenceLevel,
   ProposalSeverity,
-} from '../../data/mock-data';
+} from '../../types/assistant-ui';
 
 const TYPE_CONFIG: Record<ProposalType, {
   color: string; bg: string; border: string;
@@ -381,15 +381,6 @@ export function AIProposalCard({ proposal, onApprove, onReject }: Props) {
                     </li>
                   ))}
                 </ul>
-              </div>
-            )}
-
-            {/* Screen-tap badge for money / comms / irreversible proposals.
-                When voiceApprovable === false, we make it explicit that
-                voice "yes" is not sufficient here. */}
-            {proposal.voiceApprovable === false && (
-              <div className="mt-2 inline-flex items-center gap-1 rounded-full bg-warning/10 border border-warning/30 px-2.5 py-1">
-                <span className="text-xs text-warning">Tap to confirm on screen</span>
               </div>
             )}
 

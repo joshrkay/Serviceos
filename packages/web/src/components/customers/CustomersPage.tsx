@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { toast } from 'sonner';
 import {
@@ -6,13 +6,14 @@ import {
   AlertTriangle, FileText, Briefcase, ArrowLeft,
   User, Phone, Mail,
 } from 'lucide-react';
-import type { ServiceType } from '../../data/mock-data';
+import type { ServiceType } from '../../types/job-ui';
 import type { Customer, CustomerListItem } from '@ai-service-os/shared';
 import { useListQuery } from '../../hooks/useListQuery';
 import { useMutation } from '../../hooks/useMutation';
 import { nameSimilarity, FUZZY_NAME_THRESHOLD } from '../../utils/name-similarity';
 import { Spinner, EmptyState } from '../ui';
 import { ErrorState } from '../ErrorState';
+import { track } from '../../lib/analytics';
 import { NewEstimateFlow } from '../estimates/NewEstimateFlow';
 import { NewJobFlow } from '../jobs/NewJobFlow';
 
@@ -502,8 +503,21 @@ export function CustomersPage() {
   const [showAdd,      setShowAdd]      = useState(false);
   const [showEstimate, setShowEstimate] = useState(false);
   const [showJob,      setShowJob]      = useState(false);
+  const [searchTerm,   setSearchTerm]   = useState('');
 
   const { data, total, isLoading, error, setSearch, refetch } = useListQuery<CustomerListItem>('/api/customers');
+
+  // customer_search_run (U6) — a debounced "search executed" signal, once the
+  // term settles (and again after the fetch updates `total`). PII GUARDRAIL:
+  // never the query text — only whether a query is present and how many
+  // results it returned.
+  useEffect(() => {
+    if (!searchTerm.trim()) return;
+    const id = setTimeout(() => {
+      track('customer_search_run', { has_query: true, result_count: total });
+    }, 500);
+    return () => clearTimeout(id);
+  }, [searchTerm, total]);
 
   // 4.8 — tags filterable in the list. Distinct tags across the loaded set
   // drive the chips; selection narrows the list (client-side, mirroring the
@@ -543,7 +557,7 @@ export function CustomersPage() {
         <div className="flex items-center gap-2 rounded-xl border border-border bg-card px-3.5 py-2.5 mt-4">
           <Search size={15} className="text-muted-foreground shrink-0" />
           <input
-            onChange={e => setSearch(e.target.value)}
+            onChange={e => { setSearchTerm(e.target.value); setSearch(e.target.value); }}
             placeholder="Search name, address, phone…"
             className="flex-1 text-sm text-foreground placeholder:text-muted-foreground outline-none bg-transparent"
           />

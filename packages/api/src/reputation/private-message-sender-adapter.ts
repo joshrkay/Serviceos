@@ -20,12 +20,14 @@
  */
 import type {
   ReviewPrivateMessageSender,
+  ReviewPrivateMessageResult,
 } from '../proposals/execution/review-response-handler';
 import type {
   DeliveryResult,
   MessageDeliveryProvider,
 } from '../notifications/delivery-provider';
 import type { CustomerRepository } from '../customers/customer';
+import { SmsSuppressedError } from '../notifications/gated-message-delivery';
 
 export interface ReviewPrivateMessageSenderInput {
   tenantId: string;
@@ -48,7 +50,7 @@ export class MessageDeliveryReviewPrivateMessageSender
 
   async send(
     input: ReviewPrivateMessageSenderInput,
-  ): Promise<{ providerMessageId: string }> {
+  ): Promise<ReviewPrivateMessageResult> {
     const customer = await this.customerRepo.findById(
       input.tenantId,
       input.customerId,
@@ -64,12 +66,29 @@ export class MessageDeliveryReviewPrivateMessageSender
       if (!customer.primaryPhone) {
         throw new Error(`missing_phone: customer ${input.customerId}`);
       }
-      result = await this.delivery.sendSms({
-        to: customer.primaryPhone,
-        body: input.body,
-        tenantId: input.tenantId,
-        idempotencyKey: input.idempotencyKey,
-      });
+      // §7 / WS1 — the consent + DNC gate is applied centrally by the
+      // GatedMessageDelivery wrapper. A suppressed send throws
+      // SmsSuppressedError; translate it back into this handler's
+      // {suppressed, reason} contract so an opted-out number is recorded as a
+      // non-failure sub-result (the executor sees the reason in audit metadata).
+      try {
+        result = await this.delivery.sendSms({
+          to: customer.primaryPhone,
+          body: input.body,
+          tenantId: input.tenantId,
+          idempotencyKey: input.idempotencyKey,
+          recipientClass: 'customer',
+          consent: { smsConsent: customer.smsConsent === true, customerId: customer.id },
+        });
+      } catch (err) {
+        if (err instanceof SmsSuppressedError) {
+          return {
+            suppressed: true,
+            reason: err.reason === 'dnc' ? 'dnc' : 'no_consent',
+          };
+        }
+        throw err;
+      }
     } else {
       if (!customer.email) {
         throw new Error(`missing_email: customer ${input.customerId}`);

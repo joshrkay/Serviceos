@@ -8,9 +8,12 @@
  * later assert against".
  *
  * # Lifecycle (per call to `runScript`)
- * 1. Build a fresh `RepoBundle` (memory or pg per `ctx.repoMode`).
- *    `pg` mode is deferred — see `makeRepoBundle`. The PR-CI default is
- *    `memory`.
+ * 1. Build a fresh in-memory `RepoBundle` (see `makeRepoBundle`). Layer 1
+ *    is intentionally memory-only: the LLM is mocked via cassettes, and the
+ *    driver reads several repos (owner-approval settings, catalog, on-call,
+ *    DNC) that the bundle doesn't own, so a "half-pg" bundle would be a
+ *    misleading DB signal rather than a faithful one. A true DB-backed
+ *    Layer-1 harness is tracked as future work (QUALITY-2026-07-12 WS1).
  * 2. Seed `script.fixtures.tenant` (overrides) into a synthesized
  *    `TenantRow` via `buildTenant` from the existing test factories.
  *    Seed `script.fixtures.customers` / `appointments` / `invoices`
@@ -55,7 +58,7 @@
  * (left undefined here) means the call-site is expected to wire the
  * cassette gateway into the driver inside `driverFactory`. We expose
  * the explicit hook so future call-sites that want to override the
- * cassette mode (e.g. nightly Pg job re-records) can plumb a custom
+ * cassette mode (e.g. a scheduled re-record job) can plumb a custom
  * gateway factory through without changing the driver factory.
  */
 import { v4 as uuidv4 } from 'uuid';
@@ -83,7 +86,7 @@ import type { InvoiceRepository } from '../../invoices/invoice';
 import type { EstimateRepository } from '../../estimates/estimate';
 import type { JobRepository } from '../../jobs/job';
 import type { LeadRepository } from '../../leads/lead';
-import type { ProposalRepository } from '../../proposals/proposal';
+import type { Proposal, ProposalRepository } from '../../proposals/proposal';
 import type { AuditRepository } from '../../audit/audit';
 
 // ─── Public types ────────────────────────────────────────────────────────────
@@ -139,8 +142,12 @@ export interface RunScriptContext {
    * different memory than the driver actually reads/writes.
    */
   driverFactory: (ctx: DriverFactoryContext) => AgentDriver;
-  /** PR-CI uses 'memory'; nightly will use 'pg' once VQ-008+ lands the wiring. */
-  repoMode: 'memory' | 'pg';
+  /**
+   * Layer 1 is memory-only (see `makeRepoBundle`). Kept as an explicit field
+   * (rather than dropped entirely) so every call-site states its intent and a
+   * future DB-backed mode can widen this union without touching call-sites.
+   */
+  repoMode: 'memory';
   /** Forwarded to `gatewayFactory`. Reserved for cassette wiring (VQ-005). */
   cassetteMode?: 'replay' | 'record' | 'refresh';
   /** Optional gateway override; default leaves the driver's gateway untouched. */
@@ -171,20 +178,18 @@ export interface RunScriptResult {
 // ─── Repo factory ────────────────────────────────────────────────────────────
 
 /**
- * Build a fresh `RepoBundle` for a single `runScript` invocation.
+ * Build a fresh in-memory `RepoBundle` for a single `runScript` invocation.
+ * Isolation is trivial: each call gets its own bundle.
  *
- * `memory` — every repo is an in-memory implementation; isolation is
- *   trivial since each call gets its own bundle.
- * `pg` — deferred. Spec §5.3.5 calls for testcontainer-backed Pg
- *   variants; that wiring lives in a follow-up story (VQ-009 / Phase-1
- *   nightly job). Until then, calling with `pg` throws so call-sites
- *   surface the gap loudly rather than silently falling back to
- *   memory.
+ * There is no `pg` mode. It was a throwing stub (`'pg mode not yet supported'`)
+ * that the nightly workflow drove behind `continue-on-error`, so the corpus
+ * never actually ran against Postgres — the run errored and was ignored, a
+ * decorative gate. Rather than keep a fake option alive, Layer 1 is memory-only
+ * (QUALITY-2026-07-12 WS1). See the runner header for why a partial Pg bundle
+ * would be a misleading signal; a true DB-backed Layer-1 harness is future work.
  */
-export function makeRepoBundle(mode: 'memory' | 'pg'): RepoBundle {
-  if (mode === 'pg') {
-    throw new Error('pg mode not yet supported in VQ-008; tracked in follow-up');
-  }
+export function makeRepoBundle(mode: 'memory'): RepoBundle {
+  void mode;
   return {
     customerRepo: new InMemoryCustomerRepository(),
     appointmentRepo: new InMemoryAppointmentRepository(),
@@ -247,6 +252,30 @@ function resolveTenantId(script: VoiceQualityScript, tenantRow: TenantRow): stri
  * schema declares them as `unknown` for forward-compat). If a row is
  * malformed, the repo will throw a clear error.
  */
+/**
+ * Coerce a JSON-fixture proposal's ISO-string date fields into real `Date`
+ * objects so seeded rows match the production (Pg-hydrated) domain shape the
+ * approval/resolver code paths assume. Idempotent: already-`Date` values pass
+ * through untouched.
+ */
+export function coerceProposalDates(p: Proposal): Proposal {
+  const toDate = (v: unknown): Date | undefined => {
+    if (v instanceof Date) return v;
+    if (typeof v === 'string' || typeof v === 'number') {
+      const d = new Date(v);
+      if (!Number.isNaN(d.getTime())) return d;
+    }
+    return undefined;
+  };
+  const createdAt = toDate(p.createdAt);
+  const updatedAt = toDate(p.updatedAt);
+  return {
+    ...p,
+    ...(createdAt ? { createdAt } : {}),
+    ...(updatedAt ? { updatedAt } : {}),
+  };
+}
+
 async function seedFixtures(
   script: VoiceQualityScript,
   repos: RepoBundle,
@@ -262,6 +291,24 @@ async function seedFixtures(
   if (script.fixtures.invoices) {
     for (const i of script.fixtures.invoices as Invoice[]) {
       await repos.invoiceRepo.create(i);
+    }
+  }
+  // WS21b — pending proposals so an owner-approval script has real targets to
+  // approve/reject. Seeded into the SAME proposalRepo the driver's approval
+  // dialogue reads/writes, so a script's approve turn flips the seeded
+  // proposal's status and the runner's post-count delta observes it.
+  //
+  // Date fields MUST be coerced to real `Date` objects: fixtures are JSON, so
+  // `createdAt`/`updatedAt` arrive as ISO strings, but `Proposal.createdAt` is
+  // typed `Date` and production (PgProposalRepository) hydrates real Dates.
+  // The pending-proposal resolver sorts by `createdAt.getTime()`
+  // (pending-proposal-resolver.ts) — a batch owner-approval ("what's waiting")
+  // over ≥2 seeded proposals invoked that comparator and threw
+  // `createdAt.getTime is not a function`, dropping the turn. Single-proposal
+  // scripts never tripped it (Array.sort skips the comparator for length 1).
+  if (script.fixtures.proposals) {
+    for (const p of script.fixtures.proposals as Proposal[]) {
+      await repos.proposalRepo.create(coerceProposalDates(p));
     }
   }
   // Estimates / jobs / leads not surfaced in the v1 schema's optional
@@ -352,6 +399,9 @@ export async function runScript(
       tenantId,
       callerId: script.callerId,
       callerIdBlocked: script.callerIdBlocked,
+      // WS21b — unlock the owner-only approval/edit dialogue when the fixture
+      // declares the caller is the owner (or seeds a matching ownerPhone).
+      ...(script.callerIsOwner ? { callerIsOwner: true } : {}),
     });
     sessionId = startResult.sessionId;
 

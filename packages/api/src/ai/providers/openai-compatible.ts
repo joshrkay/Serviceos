@@ -1,5 +1,6 @@
 import OpenAI from 'openai';
 import type { LLMProvider, LLMRequest, LLMResponse, LLMMessage } from '../gateway/gateway';
+import { EmptyProviderResponseError } from '../gateway/retry';
 
 type OpenAIChatMessage = OpenAI.Chat.Completions.ChatCompletionMessageParam;
 type OpenAIContentPart = OpenAI.Chat.Completions.ChatCompletionContentPart;
@@ -147,7 +148,16 @@ export class OpenAICompatibleProvider implements LLMProvider, EmbeddingProvider 
 
     const choice = completion.choices[0];
     if (!choice?.message?.content) {
-      throw new Error(`Provider ${this.name} returned empty content for model ${model}`);
+      // VOX-32: empty/malformed output is a transient LLM hiccup, not a
+      // permanent failure. Throw a typed error so classifyError marks it
+      // 'transient' and runWithRetry retries it within the deadline (a bare
+      // Error has no .status and would fall through to 'permanent' → no retry).
+      // KNOWN LIMITATION (separately tracked): with a single configured provider
+      // the failover list is always empty, so in-deadline retry is the only
+      // recovery path here — there is no cross-provider failover for this yet.
+      throw new EmptyProviderResponseError(
+        `Provider ${this.name} returned empty content for model ${model}`,
+      );
     }
 
     const usage = completion.usage;

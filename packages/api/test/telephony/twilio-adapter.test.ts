@@ -28,6 +28,10 @@ import { InMemoryInvoiceRepository, type Invoice } from '../../src/invoices/invo
 import type { DocumentTotals } from '../../src/shared/billing-engine';
 import { InMemoryDroppedCallRecoveryRepository } from '../../src/sms/recovery/scheduler';
 import { InMemoryConversationRepository } from '../../src/conversations/conversation-service';
+import { OwnerNotificationService } from '../../src/notifications/owner-notification-service';
+import { InMemoryPushDeliveryProvider } from '../../src/notifications/push-delivery-provider';
+import { InMemoryDeviceTokenRepository } from '../../src/push/device-token-service';
+import { setOwnerNotifications } from '../../src/notifications/owner-notifications-instance';
 import type { Pool } from 'pg';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -496,6 +500,114 @@ describe('TwilioGatherAdapter.handleInbound', () => {
     );
     const snap = store.snapshot(ids[0] as string);
     expect(snap?.leadId).toBeUndefined();
+  });
+});
+
+// ─── WS16c — transport convergence (stream gains Gather-parity features) ──────
+
+describe('WS16c — inbound establishment convergence (Media Streams ↔ Gather)', () => {
+  it('owner "incoming call" push fires on stream establishment (divergence #5 converged)', async () => {
+    const repo = new InMemoryDeviceTokenRepository();
+    const provider = new InMemoryPushDeliveryProvider();
+    await repo.register({
+      tenantId: 'tenant-abc',
+      userId: 'owner-1',
+      expoPushToken: 'ExponentPushToken[a]',
+      platform: 'ios',
+    });
+    setOwnerNotifications(new OwnerNotificationService({ deviceTokenRepo: repo, provider }));
+    try {
+      const { adapter } = makeAdapter({ pool: matchedCallerPool('cust-known', 'Jane Smith') });
+      // Phase A (webhook) then Phase B (post-WS-start bootstrap).
+      await adapter.handleInboundForStream({
+        callSid: 'CA-stream-push',
+        from: '+15125550100',
+        tenantId: 'tenant-abc',
+      });
+      await adapter.initializeStreamSession({ callSid: 'CA-stream-push', tenantId: 'tenant-abc' });
+
+      // Exactly one owner push — realtime callers used to get NONE.
+      expect(provider.sent).toHaveLength(1);
+      expect(provider.sent[0].data?.type).toBe('incoming_call');
+      expect(provider.sent[0].data?.screen).toBe('/customers/cust-known');
+      expect(provider.sent[0].body).toContain('Jane Smith');
+    } finally {
+      setOwnerNotifications(undefined);
+    }
+  });
+
+  it('inbound call is logged on the customer timeline on stream establishment (divergence #4 converged)', async () => {
+    const conversationRepo = new InMemoryConversationRepository();
+    const { adapter } = makeAdapter({
+      pool: matchedCallerPool('cust-known', 'Jane Smith'),
+      conversationRepo,
+    });
+    await adapter.handleInboundForStream({
+      callSid: 'CA-stream-log',
+      from: '+15125550100',
+      tenantId: 'tenant-abc',
+    });
+    await adapter.initializeStreamSession({ callSid: 'CA-stream-log', tenantId: 'tenant-abc' });
+
+    const threads = await conversationRepo.findByEntity('tenant-abc', 'customer', 'cust-known');
+    expect(threads).toHaveLength(1);
+    const msgs = await conversationRepo.getMessages('tenant-abc', threads[0].id);
+    const callLog = msgs.find((m) => m.source === 'inbound_call');
+    expect(callLog).toBeTruthy();
+    expect(callLog!.metadata).toMatchObject({
+      direction: 'inbound',
+      channel: 'call',
+      callSid: 'CA-stream-log',
+    });
+  });
+
+  it('identify-guard parity: a blocked/empty caller-id skips identifyCaller on BOTH transports (divergence #3 converged)', async () => {
+    // Count identifyCaller's customers lookup on a shared spy pool.
+    let customersQueries = 0;
+    const pool = {
+      query: async (sql: string) => {
+        if (typeof sql === 'string' && sql.includes('FROM customers')) customersQueries += 1;
+        return { rows: [] };
+      },
+    } as unknown as Pool;
+
+    // Gather, blocked From ('') — previously ran identifyCaller('') anyway.
+    const gather = makeAdapter({ pool });
+    await gather.adapter.handleInbound({
+      callSid: 'CA-blk-g',
+      from: '',
+      to: '+15125550999',
+      tenantId: 'tenant-abc',
+    });
+
+    // Stream, blocked From ('') — already required `from`; stays skipped.
+    const stream = makeAdapter({ pool });
+    await stream.adapter.handleInboundForStream({
+      callSid: 'CA-blk-s',
+      from: '',
+      tenantId: 'tenant-abc',
+    });
+    await stream.adapter.initializeStreamSession({ callSid: 'CA-blk-s', tenantId: 'tenant-abc' });
+
+    // Neither transport hits the DB for a caller with no phone to key on.
+    expect(customersQueries).toBe(0);
+  });
+
+  it('identify-guard parity: a present caller-id DOES identify on the stream transport', async () => {
+    // Positive control so the parity assertion above can't pass by identify
+    // being dead-wired off. A matched pool + real From → known caller push.
+    const { adapter, store } = makeAdapter({ pool: matchedCallerPool('cust-known', 'Jane Smith') });
+    await adapter.handleInboundForStream({
+      callSid: 'CA-stream-known',
+      from: '+15125550100',
+      tenantId: 'tenant-abc',
+    });
+    await adapter.initializeStreamSession({ callSid: 'CA-stream-known', tenantId: 'tenant-abc' });
+
+    const session = store.findByCallSid('CA-stream-known');
+    expect(session?.customerId).toBe('cust-known');
+    // WS16c #2 — callerPhone is now pinned on the stream session too.
+    expect(session?.callerPhone).toBe('+15125550100');
   });
 });
 

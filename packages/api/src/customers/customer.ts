@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { AuditEventInput, AuditRepository, createAuditEvent } from '../audit/audit';
+import type { ConsentEventRepository } from '../compliance/consent-events';
 import {
   checkCustomerDuplicatesPg,
   CustomerDuplicateLoader,
@@ -403,7 +404,12 @@ export async function updateCustomer(
   input: UpdateCustomerInput,
   repository: CustomerRepository,
   actorId?: string,
-  auditRepo?: AuditRepository
+  auditRepo?: AuditRepository,
+  // WS12 (one consent model, D-017) — when wired, a manual sms_consent
+  // toggle also appends to the consent_events ledger so the change is
+  // visible to BOTH outbound gates (a portal/dashboard opt-out suppresses
+  // voice too, not just SMS).
+  consentLedger?: ConsentEventRepository
 ): Promise<Customer | null> {
   const existing = await repository.findById(tenantId, id);
   if (!existing) return null;
@@ -436,6 +442,41 @@ export async function updateCustomer(
   }
 
   const updated = await repository.update(tenantId, id, updates);
+
+  // WS12 — ledger the sms_consent change (kind 'sms', source 'manual') so the
+  // one consent model sees it: a revoke here suppresses BOTH channels at the
+  // gates; a re-grant clears only the sms-kind revocation (never voice
+  // consent — see compliance/resolve-outbound-consent.ts). Skipped when the
+  // customer has no phone — the ledger is keyed by phone_normalized (NOT NULL),
+  // and a phoneless customer can't be texted or called anyway.
+  //
+  // WS3 — consent-ledger integrity: this append is NO LONGER best-effort. A
+  // consent-bearing update whose ledger write fails must FAIL the whole update
+  // rather than leave the sms_consent column and the immutable ledger
+  // disagreeing (the column would say "opted out" while the ledger — the gate's
+  // source of truth for the OTHER channel — never recorded it, or vice versa).
+  // The append runs on the ambient tenant transaction (executor Path A /
+  // request middleware), so a throw here rolls back the customers.update and
+  // the audit event below atomically. For non-consent updates (smsConsent
+  // unchanged) the ledger is never touched.
+  if (
+    consentLedger &&
+    updated &&
+    input.smsConsent !== undefined &&
+    input.smsConsent !== existing.smsConsent
+  ) {
+    const phone = updated.primaryPhone ?? existing.primaryPhone;
+    if (phone) {
+      await consentLedger.append({
+        tenantId,
+        customerId: id,
+        phone,
+        kind: 'sms',
+        state: input.smsConsent ? 'granted' : 'revoked',
+        source: 'manual',
+      });
+    }
+  }
 
   if (auditRepo && actorId && updated) {
     const event = createAuditEvent({

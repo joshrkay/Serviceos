@@ -5,7 +5,7 @@
  * the PUT /:id virtual-status branch (gated `appointments:update`) always
  * 403'd their running-late notices. These tests pin the technician-reachable
  * endpoint plus PUT backcompat for dispatcher clients — both delegate to the
- * same helper, which is a notification trigger only (no mutation, no audit).
+ * same audited notification-trigger helper.
  */
 import request from 'supertest';
 import { describe, it, expect, vi } from 'vitest';
@@ -20,8 +20,13 @@ import {
 } from '../../src/jobs/job-lifecycle';
 import { AuthenticatedRequest } from '../../src/auth/clerk';
 import { permissiveTenantOwnership } from '../../src/shared/tenant-ownership';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
 
 const TENANT_ID = 'tenant-running-late';
+const TECH_A_ID = '550e8400-e29b-41d4-a716-446655440020';
+const TECH_B_ID = '550e8400-e29b-41d4-a716-446655440021';
+const TECH_A_CLERK_ID = 'user_tech_a_clerk';
+const TECH_B_CLERK_ID = 'user_tech_b_clerk';
 
 function buildRunningLateApp() {
   const app = express();
@@ -29,7 +34,8 @@ function buildRunningLateApp() {
   app.use((req: Request, _res: Response, next: NextFunction) => {
     const role = (req.header('x-test-role') as 'owner' | 'dispatcher' | 'technician') ?? 'technician';
     (req as AuthenticatedRequest).auth = {
-      userId: req.header('x-test-user-id') ?? 'tech-1',
+      userId: req.header('x-test-user-id') ?? TECH_A_CLERK_ID,
+      canonicalUserId: req.header('x-test-canonical-user-id') ?? TECH_A_ID,
       sessionId: 'session-running-late-test',
       tenantId: TENANT_ID,
       role,
@@ -40,15 +46,16 @@ function buildRunningLateApp() {
   const appointmentRepo = new InMemoryAppointmentRepository();
   const jobRepo = new InMemoryJobRepository();
   const timelineRepo = new InMemoryJobTimelineRepository();
+  const auditRepo = new InMemoryAuditRepository();
   const enqueueDelayNotice = vi.fn().mockResolvedValue('delay-key-1');
   const coordinator: DelayNotificationEnqueuer = { enqueueDelayNotice };
   app.use(
     '/api/appointments',
     createAppointmentRouter(appointmentRepo, permissiveTenantOwnership(), jobRepo, timelineRepo, {
       delayNotificationCoordinator: coordinator,
-    }),
+    }, auditRepo),
   );
-  return { app, jobRepo, timelineRepo, enqueueDelayNotice };
+  return { app, jobRepo, timelineRepo, enqueueDelayNotice, auditRepo };
 }
 
 /**
@@ -58,7 +65,7 @@ function buildRunningLateApp() {
 async function seedAppointment(
   app: Express,
   jobRepo: InMemoryJobRepository,
-  assignedTechnicianId: string = 'tech-1',
+  assignedTechnicianId: string = TECH_A_ID,
 ): Promise<{ appointmentId: string; jobId: string }> {
   await jobRepo.create({
     id: 'job-running-late',
@@ -87,7 +94,7 @@ async function seedAppointment(
 }
 
 describe('POST /api/appointments/:id/running-late', () => {
-  it('lets a technician send a running-late notice, defaulting to 20 minutes', async () => {
+  it('lets a technician send a running-late notice for their canonical users.id', async () => {
     const { app, jobRepo, enqueueDelayNotice } = buildRunningLateApp();
     const { appointmentId } = await seedAppointment(app, jobRepo);
 
@@ -107,15 +114,40 @@ describe('POST /api/appointments/:id/running-late', () => {
     });
   });
 
+  it('audits the running-late trigger using the delay idempotency key', async () => {
+    const { app, jobRepo, auditRepo } = buildRunningLateApp();
+    const { appointmentId, jobId } = await seedAppointment(app, jobRepo);
+
+    const res = await request(app)
+      .post(`/api/appointments/${appointmentId}/running-late`)
+      .set('x-test-role', 'technician')
+      .send({ delayMinutes: 20 });
+
+    expect(res.status).toBe(200);
+    const events = auditRepo
+      .getAll()
+      .filter((event) => event.eventType === 'appointment.running_late_triggered');
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      tenantId: TENANT_ID,
+      actorId: TECH_A_CLERK_ID,
+      actorRole: 'technician',
+      entityType: 'appointment',
+      entityId: appointmentId,
+      correlationId: 'delay-key-1',
+      metadata: { jobId, delayMinutes: 20, delayVersion: 0 },
+    });
+  });
+
   it('passes explicit delayMinutes and derives delayVersion from running-behind history', async () => {
     const { app, jobRepo, timelineRepo, enqueueDelayNotice } = buildRunningLateApp();
     const { appointmentId, jobId } = await seedAppointment(app, jobRepo);
 
-    await addDelayAcknowledgmentTimelineEntry(TENANT_ID, jobId, 'tech-1', 'technician', timelineRepo, {
+    await addDelayAcknowledgmentTimelineEntry(TENANT_ID, jobId, TECH_A_ID, 'technician', timelineRepo, {
       appointmentId,
       isRunningBehind: true,
       delayMinutes: 15,
-      actorId: 'tech-1',
+      actorId: TECH_A_ID,
       actorRole: 'technician',
       timestamp: new Date().toISOString(),
       inferredTriggerState: 'running_behind',
@@ -183,14 +215,36 @@ describe('POST /api/appointments/:id/running-late', () => {
   });
 
   it('403s a technician who is not the assigned tech (no notices for others’ jobs)', async () => {
-    const { app, jobRepo, enqueueDelayNotice } = buildRunningLateApp();
-    // Job assigned to tech-1; the request comes from tech-2.
-    const { appointmentId } = await seedAppointment(app, jobRepo, 'tech-1');
+    const { app, jobRepo, enqueueDelayNotice, auditRepo } = buildRunningLateApp();
+    // Job assigned to tech A's users.id; the request comes from tech B's Clerk subject.
+    const { appointmentId } = await seedAppointment(app, jobRepo, TECH_A_ID);
 
     const res = await request(app)
       .post(`/api/appointments/${appointmentId}/running-late`)
       .set('x-test-role', 'technician')
-      .set('x-test-user-id', 'tech-2')
+      .set('x-test-user-id', TECH_B_CLERK_ID)
+      .set('x-test-canonical-user-id', TECH_B_ID)
+      .send({});
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('FORBIDDEN');
+    expect(enqueueDelayNotice).not.toHaveBeenCalled();
+    expect(
+      auditRepo.getAll().filter(
+        (event) => event.eventType === 'appointment.running_late_triggered',
+      ),
+    ).toHaveLength(0);
+  });
+
+  it('fails closed when the technician canonical identity is unavailable', async () => {
+    const { app, jobRepo, enqueueDelayNotice } = buildRunningLateApp();
+    const { appointmentId } = await seedAppointment(app, jobRepo, TECH_A_ID);
+
+    const res = await request(app)
+      .post(`/api/appointments/${appointmentId}/running-late`)
+      .set('x-test-role', 'technician')
+      .set('x-test-user-id', TECH_A_CLERK_ID)
+      .set('x-test-canonical-user-id', '')
       .send({});
 
     expect(res.status).toBe(403);

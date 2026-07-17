@@ -9,6 +9,7 @@ import {
 } from '../../src/telephony/outbound-call-service';
 import { InMemoryConversationRepository } from '../../src/conversations/conversation-service';
 import { InMemoryDncRepository } from '../../src/compliance/dnc';
+import { isOutboundAllowed } from '../../src/voice/outbound-allowlist';
 
 const TENANT = 'tenant-call-1';
 const CUSTOMER = 'cust-1';
@@ -150,6 +151,110 @@ describe('initiateOutboundCall', () => {
   it('throws OutboundCallError instances', async () => {
     const e = buildDeps({ customer: null });
     await expect(initiateOutboundCall(e.deps, input)).rejects.toBeInstanceOf(OutboundCallError);
+  });
+});
+
+describe('initiateOutboundCall — TCPA consent gate (TCPA_CONSENT_ENFORCEMENT)', () => {
+  const DENIED = { allowed: false as const, reason: 'customer_not_found' as const, message: 'No consent on file' };
+
+  function auditRepo() {
+    const events: Array<Record<string, unknown>> = [];
+    return { repo: { create: vi.fn(async (e: Record<string, unknown>) => { events.push(e); return e; }) }, events };
+  }
+
+  it("'off' (default): places the call even without consent and never runs the gate (prod-parity)", async () => {
+    const checkConsent = vi.fn().mockResolvedValue(DENIED);
+    const { repo, events } = auditRepo();
+    // consentEnforcement omitted → defaults to 'off'.
+    const e = buildDeps({ checkConsent, auditRepo: repo });
+    const result = await initiateOutboundCall(e.deps, input);
+
+    expect(result.callSid).toBe('CA123');
+    expect(e.fetchMock).toHaveBeenCalledTimes(1);
+    // Gate is skipped entirely when off — checkConsent is never consulted.
+    expect(checkConsent).not.toHaveBeenCalled();
+    // No consent audit events emitted in off mode.
+    expect(events.some((ev) => String(ev.eventType).startsWith('call.consent_'))).toBe(false);
+  });
+
+  it("'block': refuses a non-consented number with consent_blocked, never calls Twilio, audits the block", async () => {
+    const checkConsent = vi.fn().mockResolvedValue(DENIED);
+    const { repo, events } = auditRepo();
+    const logger = { warn: vi.fn(), info: vi.fn(), error: vi.fn(), debug: vi.fn() };
+    const e = buildDeps({ consentEnforcement: 'block', checkConsent, auditRepo: repo, logger: logger as never });
+
+    await expect(initiateOutboundCall(e.deps, input)).rejects.toMatchObject({ code: 'consent_blocked' });
+    expect(checkConsent).toHaveBeenCalledTimes(1);
+    // A block must never reach Twilio and must not log a call message.
+    expect(e.fetchMock).not.toHaveBeenCalled();
+    const convs = await e.conversationRepo.findByEntity(TENANT, 'customer', CUSTOMER);
+    expect(convs).toHaveLength(0);
+    // Block is audited + logged.
+    const blocked = events.find((ev) => ev.eventType === 'call.consent_blocked');
+    expect(blocked).toBeDefined();
+    expect(blocked!.metadata).toMatchObject({ mode: 'block', decision: 'blocked', reason: 'customer_not_found' });
+    expect(logger.warn).toHaveBeenCalled();
+  });
+
+  it("'warn': proceeds for a non-consented number but logs + audits the would-be block", async () => {
+    const checkConsent = vi.fn().mockResolvedValue(DENIED);
+    const { repo, events } = auditRepo();
+    const logger = { warn: vi.fn(), info: vi.fn(), error: vi.fn(), debug: vi.fn() };
+    const e = buildDeps({ consentEnforcement: 'warn', checkConsent, auditRepo: repo, logger: logger as never });
+
+    const result = await initiateOutboundCall(e.deps, input);
+
+    expect(result.callSid).toBe('CA123');
+    // Warn mode still places the call (observability without breaking prod).
+    expect(e.fetchMock).toHaveBeenCalledTimes(1);
+    expect(checkConsent).toHaveBeenCalledTimes(1);
+    const warned = events.find((ev) => ev.eventType === 'call.consent_warned');
+    expect(warned).toBeDefined();
+    expect(warned!.metadata).toMatchObject({ mode: 'warn', decision: 'warned' });
+    expect(logger.warn).toHaveBeenCalled();
+  });
+
+  it("'block': normalizes a formatted stored number to E.164 before the gate (not refused as malformed)", async () => {
+    // Regression: the raw `customers.primaryPhone` was passed to the gate, whose
+    // format filter (isOutboundAllowed) requires strict `+1XXXXXXXXXX`. A
+    // validly-stored formatted number was refused as `malformed` in block mode.
+    // The service now normalizes to E.164 first. `checkConsent` here runs the
+    // REAL isOutboundAllowed so a non-normalized value would still block.
+    const checkConsent = vi.fn(async (ctx: { phoneE164: string }) => {
+      const fmt = isOutboundAllowed(ctx.phoneE164);
+      return fmt.allowed
+        ? { allowed: true as const }
+        : { allowed: false as const, reason: fmt.reason, message: 'blocked' };
+    });
+    const { repo } = auditRepo();
+    const e = buildDeps({
+      customer: { id: CUSTOMER, primaryPhone: '(555) 111-2222' },
+      consentEnforcement: 'block',
+      checkConsent,
+      auditRepo: repo,
+    });
+
+    // Must NOT throw consent_blocked — the number is valid once normalized.
+    const result = await initiateOutboundCall(e.deps, input);
+    expect(result.callSid).toBe('CA123');
+    expect(e.fetchMock).toHaveBeenCalledTimes(1);
+    // The gate received the normalized E.164, never the raw formatted string.
+    expect(checkConsent).toHaveBeenCalledTimes(1);
+    expect(checkConsent.mock.calls[0][0]).toMatchObject({ phoneE164: '+15551112222' });
+  });
+
+  it("'block' with consent granted: places the call and audits the grant", async () => {
+    const checkConsent = vi.fn().mockResolvedValue({ allowed: true });
+    const { repo, events } = auditRepo();
+    const e = buildDeps({ consentEnforcement: 'block', checkConsent, auditRepo: repo });
+
+    const result = await initiateOutboundCall(e.deps, input);
+
+    expect(result.callSid).toBe('CA123');
+    expect(e.fetchMock).toHaveBeenCalledTimes(1);
+    const granted = events.find((ev) => ev.eventType === 'call.consent_granted');
+    expect(granted).toBeDefined();
+    expect(granted!.metadata).toMatchObject({ mode: 'block', decision: 'granted' });
   });
 });
 

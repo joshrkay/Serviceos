@@ -12,7 +12,7 @@ import {
   failAiRun,
   AiRun,
 } from '../ai-run';
-import { AIRoutingConfig, isVisionCapableModel } from '../../config/ai-routing';
+import { AIRoutingConfig, isVisionCapableModel, resolveTierDeadlineMs, TASK_TYPES } from '../../config/ai-routing';
 import {
   resolveRouting,
   shouldWarnForUnmappedTaskType,
@@ -95,6 +95,15 @@ export interface LLMResponse {
   providerPath?: string[];
   /** Hint to clients when degraded; ms until they should retry. */
   retryAfterMs?: number;
+  /**
+   * Id of the persisted `ai_runs` row for THIS completion. Present only when
+   * an `AiRunRepository` is wired AND the row was created successfully
+   * (creation is best-effort). Callers thread this into downstream records —
+   * e.g. the voice classifier surfaces it so a voice proposal can satisfy
+   * `proposals.ai_run_id`'s FK with a REAL run id instead of null. Undefined
+   * when no repo is configured or the best-effort create failed.
+   */
+  aiRunId?: string;
 }
 
 export interface LLMProvider {
@@ -124,6 +133,53 @@ export interface LLMGatewayLogger {
 
 /** Sentinel tenant ID used when a request carries no tenantId. */
 export const SYSTEM_TENANT_ID = 'system';
+
+/**
+ * Known tenant-scoped task types — the canonical `TASK_TYPES` list from
+ * `config/ai-routing.ts` (every value a real call site passes to
+ * `gateway.complete({ taskType })`). Every one of these is per-tenant voice/AI
+ * work; none of them is a legitimately system-level task. Used only as a
+ * conservative allow-list for `warnIfMissingTopLevelTenantId` below —
+ * dynamically-constructed taskTypes (e.g. the `assistant.*` namespace) are
+ * intentionally excluded so we don't emit false-positive warnings for
+ * taskTypes this list doesn't know about.
+ */
+const TENANT_SCOPED_TASK_TYPES: ReadonlySet<string> = new Set(TASK_TYPES);
+
+/**
+ * P0 scaling bug guard: a tenant-scoped taskType dispatched with no
+ * top-level `tenantId` silently falls back to the shared `SYSTEM_TENANT_ID`
+ * bucket in the resilience wrappers (`ProviderTenantQuotaWrapper` /
+ * `CachingGatewayWrapper` both key on `request.tenantId`, not
+ * `request.metadata.tenantId`) — collapsing every tenant's concurrency quota
+ * onto one process-global bucket, and (if the gateway cache is ever enabled)
+ * leaking cached classifications/entities across tenants.
+ *
+ * This is a WARNING, not a hard throw: several other call sites are known to
+ * still omit the top-level field (being fixed separately) and a throw here
+ * would take down those flows. The goal is to make the silent-fallback class
+ * of bug visible in logs so it can't recur unnoticed, not to enforce it yet.
+ */
+function warnIfMissingTopLevelTenantId(
+  request: LLMRequest,
+  logger?: LLMGatewayLogger,
+): void {
+  if (request.tenantId) return;
+  if (!TENANT_SCOPED_TASK_TYPES.has(request.taskType)) return;
+  const metadataTenantId =
+    request.metadata && typeof request.metadata === 'object'
+      ? (request.metadata as Record<string, unknown>).tenantId
+      : undefined;
+  logger?.info(
+    'LLM request for a tenant-scoped taskType is missing a top-level tenantId — ' +
+      'falling back to the shared "system" quota/cache bucket for this call',
+    {
+      level: 'warn',
+      taskType: request.taskType,
+      hasMetadataTenantId: metadataTenantId !== undefined,
+    },
+  );
+}
 
 // Accepts an image data URL with optional RFC-2397 params before ;base64,
 // e.g. "data:image/png;base64," and "data:image/png;name=x.png;base64,".
@@ -267,6 +323,8 @@ export class LLMGateway {
       throw new ValidationError('Invalid LLM request', { errors: validationErrors });
     }
 
+    warnIfMissingTopLevelTenantId(request, this.logger);
+
     const providerName = this.resolveProvider(request.taskType);
     const provider = this.providers.get(providerName);
     if (!provider) {
@@ -287,6 +345,13 @@ export class LLMGateway {
       model: resolvedModel,
       maxTokens: routingDecision.maxTokens,
       temperature: routingDecision.temperature,
+      // VOX-34: apply the resolved tier's default end-to-end deadline when the
+      // caller didn't set one. Without this, every request (including
+      // classify_intent on the voice hot path) inherited the universal 8s
+      // fallback in ProviderRetryDeadlineWrapper — far above the turn SLO.
+      // An explicit request.deadlineMs always wins. The retry layer still
+      // enforces MIN_RETRY_BUDGET_MS against this (now tighter) budget.
+      deadlineMs: request.deadlineMs ?? resolveTierDeadlineMs(routingDecision.resolvedTier),
     };
 
     // Fail fast: an image-bearing request must resolve to a vision-capable
@@ -361,6 +426,10 @@ export class LLMGateway {
       const result: LLMResponse = {
         ...response,
         latencyMs,
+        // Surface the persisted ai_runs id so callers can link downstream
+        // records (e.g. proposals.ai_run_id) to a REAL run row. Present only
+        // when the best-effort create above succeeded.
+        ...(aiRun ? { aiRunId: aiRun.id } : {}),
       };
 
       const labels = {

@@ -82,7 +82,7 @@ describe('Integration — voice create_customer via ProposalExecutor', () => {
       ['create_customer', new CreateCustomerVoiceExecutionHandler(customerRepo, auditRepo)],
     ]);
     const guard = new IdempotencyGuard(executionRepo, proposalRepo);
-    const executor = new ProposalExecutor(handlers, proposalRepo, guard);
+    const executor = new ProposalExecutor(handlers, proposalRepo, guard, auditRepo);
 
     const proposal = makeApprovedProposal();
     await proposalRepo.create(proposal);
@@ -100,5 +100,22 @@ describe('Integration — voice create_customer via ProposalExecutor', () => {
     expect(res.body.firstName).toBe('Jane');
     expect(res.body.lastName).toBe('Doe');
     expect(res.body.email).toBe('jane@example.com');
+
+    // Audit certification: createCustomer emits customer.created, and the
+    // handler emits a proposal.executed join-row (AC-4) tying the executed
+    // proposal to the created customer. The executor ALSO emits its own
+    // proposal.executed row (entityType 'proposal'), so scope by entityType
+    // to pin the handler's customer-scoped row specifically.
+    const audits = auditRepo.getAll();
+    const createdEvents = audits.filter(
+      (e) => e.eventType === 'customer.created' && e.entityId === result.resultEntityId,
+    );
+    expect(createdEvents).toHaveLength(1);
+
+    const executedEvents = audits.filter(
+      (e) => e.eventType === 'proposal.executed' && e.entityType === 'customer',
+    );
+    expect(executedEvents).toHaveLength(1);
+    expect((executedEvents[0].metadata as Record<string, unknown>).proposalId).toBe(proposal.id);
   });
 });

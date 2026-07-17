@@ -547,23 +547,25 @@ export async function recordPayment(
     throw err;
   }
 
-  // Update invoice balances
-  const newAmountPaid = invoice.amountPaidCents + input.amountCents;
-  const newAmountDue = Math.max(0, invoice.totals.totalCents - newAmountPaid);
-
-  let newStatus = invoice.status;
-  if (newAmountDue === 0) {
-    newStatus = 'paid';
-  } else if (newAmountPaid > 0 && ['open', 'partially_paid'].includes(invoice.status)) {
-    newStatus = 'partially_paid';
+  // Credit the invoice ATOMICALLY. The old path read amountPaidCents into a
+  // snapshot above and blind-set amountPaidCents = snapshot + delta — so two
+  // concurrent legitimate payments (e.g. a manual cash entry racing a Stripe/ACH
+  // webhook, each with a DISTINCT providerReference that clears the insert
+  // dedup) both read the same paid balance and the second write clobbered the
+  // first, silently dropping one payment from the invoice. incrementAmountPaidAtomic
+  // derives the new paid/due/status from the row's own current value in one
+  // UPDATE, so both credits apply.
+  const updatedInvoice = await invoiceRepo.incrementAmountPaidAtomic(
+    input.tenantId,
+    input.invoiceId,
+    input.amountCents,
+    new Date(),
+  );
+  if (!updatedInvoice) {
+    // The invoice was deleted between the payable check and the atomic credit —
+    // surface rather than proceeding (or crediting) against a missing row.
+    throw new ValidationError('Invoice not found');
   }
-
-  const updatedInvoice = await invoiceRepo.update(input.tenantId, input.invoiceId, {
-    amountPaidCents: newAmountPaid,
-    amountDueCents: newAmountDue,
-    status: newStatus,
-    updatedAt: new Date(),
-  });
 
   // Audit trail + money-state rollup + receipt/owner push. The audit write is
   // emitted before the best-effort rollup so that — on authenticated /api
@@ -583,7 +585,7 @@ export async function recordPayment(
     customerNameResolver,
   });
 
-  return { payment, invoice: updatedInvoice! };
+  return { payment, invoice: updatedInvoice };
 }
 
 export async function getPaymentsByInvoice(

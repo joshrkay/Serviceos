@@ -299,6 +299,111 @@ describe('provision-twilio worker — number picker', () => {
     expect(fetchFn).not.toHaveBeenCalled();
   });
 
+  // ─── WS14: VOICE_PUBLIC_URL — three-service topology webhook targeting ────
+
+  it('VOICE_PUBLIC_URL set → VoiceUrl + status callback use the voice domain; SMS + Vapi stay on baseUrl', async () => {
+    configureTwilio();
+    setEnv('VAPI_API_KEY', undefined);
+    setEnv('VOICE_PUBLIC_URL', 'https://voice.test/'); // trailing slash must be trimmed
+    const fetchFn = mockFetch(...twilioHappyPath());
+
+    const { pool } = makePool({
+      settingsRow: {
+        business_name: "Bob's Plumbing",
+        voice_greeting: null,
+        voice_id: 'adam',
+        services_offered: [],
+        vapi_assistant_id: null,
+      },
+    });
+    const vapi = makeVapiMock();
+    const worker = createProvisionTwilioWorker({ pool, vapiClient: vapi.client });
+
+    await worker.handle(
+      buildMessage({
+        tenantId: TENANT,
+        region: null,
+        baseUrl: 'https://api.test',
+        phoneNumber: '+15125550123',
+      }),
+      logger,
+    );
+
+    // Voice-call surfaces → voice domain (the live call must ride the
+    // dedicated voice service, never the web service's drain window).
+    const purchaseCall = fetchFn.mock.calls.find(
+      (c) =>
+        String(c[0]).includes('/IncomingPhoneNumbers.json') &&
+        (c[1] as RequestInit | undefined)?.method === 'POST',
+    );
+    expect(purchaseCall).toBeDefined();
+    const purchaseBody = String((purchaseCall![1] as RequestInit).body);
+    expect(purchaseBody).toContain(
+      `VoiceUrl=${encodeURIComponent('https://voice.test/api/telephony/voice')}`,
+    );
+    expect(purchaseBody).toContain(
+      `StatusCallback=${encodeURIComponent(`https://voice.test/webhooks/twilio/status/${TENANT}`)}`,
+    );
+
+    // SMS inbound stays on the web domain — not a live-call surface.
+    const msgServiceCall = fetchFn.mock.calls.find((c) =>
+      String((c[1] as RequestInit | undefined)?.body ?? '').includes('InboundRequestUrl'),
+    );
+    expect(msgServiceCall).toBeDefined();
+    expect(String((msgServiceCall![1] as RequestInit).body)).toContain(
+      `InboundRequestUrl=${encodeURIComponent(`https://api.test/webhooks/twilio/sms/${TENANT}`)}`,
+    );
+
+    // Vapi event webhook stays on the web domain — Vapi calls live on Vapi's
+    // infra, and the webhook is verified by per-tenant HMAC, not URL base.
+    expect(vapi.createAssistant).toHaveBeenCalledTimes(1);
+    expect(vapi.createAssistant.mock.calls[0][0].serverUrl).toBe(
+      `https://api.test/webhooks/vapi/${TENANT}`,
+    );
+  });
+
+  it('VOICE_PUBLIC_URL unset → every URL uses baseUrl exactly as today (single/two-service topology)', async () => {
+    configureTwilio();
+    setEnv('VAPI_API_KEY', undefined);
+    setEnv('VOICE_PUBLIC_URL', undefined);
+    const fetchFn = mockFetch(...twilioHappyPath());
+
+    const { pool } = makePool();
+    const worker = createProvisionTwilioWorker({ pool });
+
+    await worker.handle(
+      buildMessage({
+        tenantId: TENANT,
+        region: null,
+        baseUrl: 'https://api.test',
+        phoneNumber: '+15125550123',
+      }),
+      logger,
+    );
+
+    const purchaseCall = fetchFn.mock.calls.find(
+      (c) =>
+        String(c[0]).includes('/IncomingPhoneNumbers.json') &&
+        (c[1] as RequestInit | undefined)?.method === 'POST',
+    );
+    expect(purchaseCall).toBeDefined();
+    const purchaseBody = String((purchaseCall![1] as RequestInit).body);
+    expect(purchaseBody).toContain(
+      `VoiceUrl=${encodeURIComponent('https://api.test/api/telephony/voice')}`,
+    );
+    expect(purchaseBody).toContain(
+      `StatusCallback=${encodeURIComponent(`https://api.test/webhooks/twilio/status/${TENANT}`)}`,
+    );
+
+    const msgServiceCall = fetchFn.mock.calls.find((c) =>
+      String((c[1] as RequestInit | undefined)?.body ?? '').includes('InboundRequestUrl'),
+    );
+    expect(msgServiceCall).toBeDefined();
+    expect(String((msgServiceCall![1] as RequestInit).body)).toContain(
+      `InboundRequestUrl=${encodeURIComponent(`https://api.test/webhooks/twilio/sms/${TENANT}`)}`,
+    );
+  });
+
   // ─── Step 4.5: Vapi assistant (the voice agent) creation ──────────────────
 
   it('creates the Vapi assistant, links the number, and persists vapi_assistant_id', async () => {
@@ -341,13 +446,21 @@ describe('provision-twilio worker — number picker', () => {
       }),
     );
 
-    // The assistant id is written back to the tenant so the next run is idempotent…
+    // The assistant id is written back to the tenant so the next run is idempotent,
+    // alongside the per-tenant vapi_webhook_secret.
     const settingsWrite = calls.find(
       (c) =>
-        /UPDATE tenant_settings SET vapi_assistant_id/i.test(c.sql) &&
+        /UPDATE tenant_settings\s+SET vapi_assistant_id/i.test(c.sql) &&
+        /vapi_webhook_secret/i.test(c.sql) &&
         JSON.stringify(c.params).includes('asst_test_123'),
     );
     expect(settingsWrite).toBeDefined();
+    // A random 32-byte hex per-tenant secret is persisted (never the global one).
+    expect(
+      (settingsWrite!.params as unknown[]).some(
+        (p) => typeof p === 'string' && /^[0-9a-f]{64}$/.test(p),
+      ),
+    ).toBe(true);
 
     // …and mirrored onto the integration row's provider_data.
     const integrationWrite = calls.find(
@@ -384,6 +497,83 @@ describe('provision-twilio worker — number picker', () => {
     expect(vapi.createAssistant).not.toHaveBeenCalled();
     expect(vapi.linkPhoneNumber).not.toHaveBeenCalled();
   });
+
+  // ─── Dev/test stub: no Twilio creds ───────────────────────────────────────
+
+  it('writes a stub full_readiness integration in non-production when Twilio creds are absent (so onboarding completes)', async () => {
+    setEnv('NODE_ENV', 'development');
+    setEnv('TWILIO_ACCOUNT_SID', undefined);
+    setEnv('TWILIO_AUTH_TOKEN', undefined);
+    // Any Twilio HTTP call here would be a bug — the stub path must not touch Twilio.
+    const fetchFn = mockFetch();
+
+    const { pool, calls } = makePool();
+    const worker = createProvisionTwilioWorker({ pool });
+
+    await worker.handle(
+      buildMessage({ tenantId: TENANT, region: null, baseUrl: 'https://api.test' }),
+      logger,
+    );
+
+    expect(fetchFn).not.toHaveBeenCalled();
+
+    // A tenant_integrations row was written as 'full_readiness' with the fake
+    // stub number, so deriveOnboardingStatus marks the phone step done.
+    const stubWrite = calls.find(
+      (c) =>
+        /INSERT INTO tenant_integrations/i.test(c.sql) &&
+        JSON.stringify(c.params).includes('full_readiness') &&
+        JSON.stringify(c.params).includes('+15005550006'),
+    );
+    expect(stubWrite).toBeDefined();
+  });
+
+  it('does NOT fabricate a stub in production — still requires real Twilio creds', async () => {
+    setEnv('NODE_ENV', 'production');
+    setEnv('TWILIO_ACCOUNT_SID', undefined);
+    setEnv('TWILIO_AUTH_TOKEN', undefined);
+
+    const { pool, calls } = makePool();
+    const worker = createProvisionTwilioWorker({ pool });
+
+    await expect(
+      worker.handle(
+        buildMessage({ tenantId: TENANT, region: null, baseUrl: 'https://api.test' }),
+        logger,
+      ),
+    ).rejects.toThrow(/TWILIO_ACCOUNT_SID/);
+
+    // No stub number was ever persisted in production.
+    const anyStub = calls.find((c) => JSON.stringify(c.params).includes('+15005550006'));
+    expect(anyStub).toBeUndefined();
+  });
+
+  it.each(['staging', 'prod'])(
+    "does NOT fabricate a stub in %s (production-like) — fails closed like production",
+    async (env) => {
+      // Regression: the stub branch gated on a bare NODE_ENV !== 'production',
+      // so a misconfigured 'prod'/'staging' deploy with missing creds silently
+      // wrote the fake +15005550006 stub and completed onboarding. It must now
+      // throw (fail closed) in every real deployment env.
+      setEnv('NODE_ENV', env);
+      setEnv('TWILIO_ACCOUNT_SID', undefined);
+      setEnv('TWILIO_AUTH_TOKEN', undefined);
+
+      const { pool, calls } = makePool();
+      const worker = createProvisionTwilioWorker({ pool });
+
+      await expect(
+        worker.handle(
+          buildMessage({ tenantId: TENANT, region: null, baseUrl: 'https://api.test' }),
+          logger,
+        ),
+      ).rejects.toThrow(/TWILIO_ACCOUNT_SID/);
+
+      // No stub number was ever persisted in a production-like env.
+      const anyStub = calls.find((c) => JSON.stringify(c.params).includes('+15005550006'));
+      expect(anyStub).toBeUndefined();
+    },
+  );
 
   it('does not fail Twilio provisioning when Vapi assistant creation throws (best-effort)', async () => {
     configureTwilio();

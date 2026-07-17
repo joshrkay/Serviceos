@@ -65,6 +65,9 @@ export interface EmergencySmsSender {
     body: string;
     tenantId?: string;
     idempotencyKey?: string;
+    // WS1 — required on MessageDeliveryProvider.sendSms; emergency pages are
+    // owner/on-call, so the call site sets 'owner' (never customer-gated).
+    recipientClass: 'customer' | 'owner';
   }): Promise<unknown>;
 }
 
@@ -135,6 +138,9 @@ export function composeEmergencyPageSms(opts: {
 
 export class EmergencyDispatchExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'emergency_dispatch';
+  // Awaits smsSender.sendSms (owner page) and notifyOwner (owner push) —
+  // external network I/O alongside the urgent-job + appointment-hold DB writes.
+  performsExternalIo = true;
 
   constructor(
     private readonly jobRepo?: JobRepository,
@@ -321,6 +327,7 @@ export class EmergencyDispatchExecutionHandler implements ExecutionHandler {
         if (ownerPhone) {
           await this.smsSender.sendSms({
             to: ownerPhone,
+            recipientClass: 'owner',
             body: composeEmergencyPageSms({
               businessName: settings?.businessName ?? 'Your shop',
               emergencyDescription: fields.emergencyDescription,

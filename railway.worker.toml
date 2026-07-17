@@ -1,0 +1,45 @@
+# Railway build config — worker service. Same image as the web service
+# (railway.toml); the split is a deploy-topology choice (which process role
+# runs where), not a different build. Link this file to the worker Railway
+# service via its "Config-as-code" service setting (Settings → Config File
+# Path). See docs/deployment.md "Deploy topology (web + worker)".
+[build]
+dockerfilePath = "Dockerfile"
+dockerfileTarget = "api"
+
+[deploy]
+# NO preDeployCommand here. Migrations run exactly once, on the web service
+# (railway.toml's preDeployCommand) — running the same migration twice from
+# two services on every deploy is redundant at best and a race at worst.
+# This means the web service MUST deploy first whenever a release contains
+# a migration: workers tolerate reading against the old schema for the
+# short window until the web deploy lands (additive migrations + the
+# leader-locked sweeps / SKIP LOCKED queue consumers are written to be
+# forward-compatible with that window — see docs/deployment.md).
+startCommand = "node packages/api/dist/src/index.js"
+# The worker still boots the HTTP listener (index.ts does this
+# unconditionally, in every PROCESS_ROLE) purely to serve /health for
+# Railway's probe — it never receives public traffic. /health is always
+# 200 when the process is up, same rationale as railway.toml.
+healthcheckPath = "/health"
+healthcheckTimeout = 60
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3
+# Single worker replica. The background sweeps use leader election
+# (pg_try_advisory_lock) so raising this later is safe (extra replicas
+# just lose the lock and no-op that tick) but there's no throughput reason
+# to do so until a specific sweep is measured to be the bottleneck.
+numReplicas = 1
+# No overlapSeconds: the worker serves no public traffic to drain, so
+# zero-downtime rollout doesn't apply here the way it does for the web
+# service. The app still runs its graceful SIGTERM drain (finishes
+# in-flight sweep work, closes the pg pool) with the same
+# DRAIN_TIMEOUT_MS/SHUTDOWN_FORCE_EXIT_MS backstop as railway.toml —
+# Railway's stop grace period should still exceed that backstop.
+
+# PROCESS_ROLE=worker is set as a dashboard service variable on this
+# service (not here — Railway config-as-code does not set service env
+# vars). The web service sets PROCESS_ROLE=web. A single-service deploy
+# leaves PROCESS_ROLE unset on both, which resolves to 'all' (today's
+# behavior, unchanged) — see docs/deployment.md and
+# docs/prod-env-checklist.md.

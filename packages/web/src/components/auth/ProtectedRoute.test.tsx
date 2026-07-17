@@ -37,6 +37,30 @@ vi.mock('@clerk/clerk-react', () => ({
   useClerk:  () => ({ signOut: vi.fn() }),
 }));
 
+const onboardingState: {
+  data: {
+    steps: Array<{ id: string; status: string }>;
+    isComplete: boolean;
+    currentStep: string | null;
+    voiceAgentLive: boolean;
+    tenantId: string;
+    subscriptionStatus: null;
+  } | null;
+  isLoading: boolean;
+} = {
+  data: null,
+  isLoading: true,
+};
+
+vi.mock('../../hooks/useOnboardingStatus', () => ({
+  useOnboardingStatus: () => ({
+    data: onboardingState.data,
+    isLoading: onboardingState.isLoading,
+    error: null,
+    refetch: async () => undefined,
+  }),
+}));
+
 // Imports that depend on the mock must come AFTER vi.mock above.
 import { ProtectedRoute } from './ProtectedRoute';
 import { extractFromPath, type LocationState } from './LoginPage';
@@ -44,6 +68,8 @@ import { extractFromPath, type LocationState } from './LoginPage';
 beforeEach(() => {
   clerkState.isLoaded = true;
   clerkState.isSignedIn = true;
+  onboardingState.isLoading = true;
+  onboardingState.data = null;
 });
 
 // A simple sentinel to confirm a route's children rendered.
@@ -82,6 +108,76 @@ describe('P0-031 ProtectedRoute — unauthenticated', () => {
 
     expect(screen.getByTestId('login-page')).toBeInTheDocument();
     expect(screen.queryByTestId('protected-content')).toBeNull();
+  });
+
+  it('forwards the signed-out root to the marketing site (no in-app landing)', () => {
+    clerkState.isLoaded = true;
+    clerkState.isSignedIn = false;
+    const originalLocation = window.location;
+    const replaceSpy = vi.fn();
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: { ...originalLocation, search: '', replace: replaceSpy },
+    });
+
+    try {
+      render(
+        <MemoryRouter initialEntries={['/']}>
+          <Routes>
+            <Route path="/login" element={<LoginRouteProbe />} />
+            <Route element={<ProtectedRoute />}>
+              <Route path="/" element={<ProtectedContent />} />
+            </Route>
+          </Routes>
+        </MemoryRouter>
+      );
+
+      expect(replaceSpy).toHaveBeenCalledWith('https://therivetapp.com');
+      // Neither the protected content nor a login flash should render.
+      expect(screen.queryByTestId('protected-content')).toBeNull();
+      expect(screen.queryByTestId('login-page')).toBeNull();
+    } finally {
+      Object.defineProperty(window, 'location', {
+        configurable: true,
+        value: originalLocation,
+      });
+    }
+  });
+
+  it('carries the query string to the marketing site (attribution params)', () => {
+    clerkState.isLoaded = true;
+    clerkState.isSignedIn = false;
+    const originalLocation = window.location;
+    const replaceSpy = vi.fn();
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: {
+        ...originalLocation,
+        search: '?utm_source=google&gclid=abc123',
+        replace: replaceSpy,
+      },
+    });
+
+    try {
+      render(
+        <MemoryRouter initialEntries={['/?utm_source=google&gclid=abc123']}>
+          <Routes>
+            <Route element={<ProtectedRoute />}>
+              <Route path="/" element={<ProtectedContent />} />
+            </Route>
+          </Routes>
+        </MemoryRouter>
+      );
+
+      expect(replaceSpy).toHaveBeenCalledWith(
+        'https://therivetapp.com?utm_source=google&gclid=abc123',
+      );
+    } finally {
+      Object.defineProperty(window, 'location', {
+        configurable: true,
+        value: originalLocation,
+      });
+    }
   });
 
   it('preserves the deep link through the sign-in redirect (state.from)', () => {
@@ -124,6 +220,69 @@ describe('P0-031 ProtectedRoute — authenticated', () => {
     );
 
     expect(screen.getByTestId('protected-content')).toBeInTheDocument();
+  });
+
+  it('redirects to /onboarding when identity is not done', () => {
+    clerkState.isLoaded = true;
+    clerkState.isSignedIn = true;
+    onboardingState.isLoading = false;
+    onboardingState.data = {
+      steps: [
+        { id: 'signup', status: 'done' },
+        { id: 'identity', status: 'current' },
+      ],
+      isComplete: false,
+      currentStep: 'identity',
+      voiceAgentLive: false,
+      tenantId: 't-1',
+      subscriptionStatus: null,
+    };
+
+    render(
+      <MemoryRouter initialEntries={['/jobs']}>
+        <Routes>
+          <Route path="/onboarding" element={<div data-testid="onboarding-page">ONBOARDING</div>} />
+          <Route element={<ProtectedRoute />}>
+            <Route path="/jobs" element={<ProtectedContent />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>
+    );
+
+    expect(screen.getByTestId('onboarding-page')).toBeInTheDocument();
+    expect(screen.queryByTestId('protected-content')).toBeNull();
+  });
+
+  it('allows CRM routes once identity is done even if onboarding is incomplete', () => {
+    clerkState.isLoaded = true;
+    clerkState.isSignedIn = true;
+    onboardingState.isLoading = false;
+    onboardingState.data = {
+      steps: [
+        { id: 'signup', status: 'done' },
+        { id: 'identity', status: 'done' },
+        { id: 'billing', status: 'current' },
+      ],
+      isComplete: false,
+      currentStep: 'billing',
+      voiceAgentLive: false,
+      tenantId: 't-1',
+      subscriptionStatus: null,
+    };
+
+    render(
+      <MemoryRouter initialEntries={['/jobs']}>
+        <Routes>
+          <Route path="/onboarding" element={<div data-testid="onboarding-page">ONBOARDING</div>} />
+          <Route element={<ProtectedRoute />}>
+            <Route path="/jobs" element={<ProtectedContent />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>
+    );
+
+    expect(screen.getByTestId('protected-content')).toBeInTheDocument();
+    expect(screen.queryByTestId('onboarding-page')).toBeNull();
   });
 });
 
@@ -194,7 +353,7 @@ describe('P0-031 ProtectedRoute — routes.ts wiring (source-level)', () => {
     const fs = await import('node:fs/promises');
     const path = await import('node:path');
     const src = await fs.readFile(
-      path.resolve(process.cwd(), 'src/routes.ts'),
+      path.resolve(path.dirname((await import('node:url')).fileURLToPath(import.meta.url)), '../../routes.ts'),
       'utf8'
     );
 
@@ -240,6 +399,8 @@ describe('P0-031 ProtectedRoute — routes.ts wiring (source-level)', () => {
       'estimates',
       'invoices',
       'contracts',
+      'inbox',
+      'proposals',
       'interactions',
       'settings',
       'technician/day',

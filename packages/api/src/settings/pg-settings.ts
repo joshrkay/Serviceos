@@ -160,6 +160,15 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
       if (!raw || typeof raw !== 'object' || Object.keys(raw).length === 0) return undefined;
       return raw as TenantSettings['brandVoice'];
     })(),
+    // N-011 — migration 238 bookkeeping columns. NOT NULL DEFAULT 0/false so a
+    // pre-migration row reads version 0 / unlocked; updated_at NULL → null.
+    brandVoiceVersion: (row.brand_voice_version as number | null) ?? 0,
+    brandVoiceLocked: (row.brand_voice_locked as boolean | null) ?? false,
+    brandVoiceUpdatedAt: (() => {
+      const v = row.brand_voice_updated_at as Date | string | null | undefined;
+      if (v == null) return null;
+      return v instanceof Date ? v.toISOString() : String(v);
+    })(),
     // Migration 120. NULL → undefined to match the InMemory repo shape.
     googleReviewUrl: (row.google_review_url as string | null) ?? undefined,
     yelpReviewUrl: (row.yelp_review_url as string | null) ?? undefined,
@@ -201,6 +210,14 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     autonomousBookingThreshold:
       row.autonomous_booking_threshold != null
         ? Number(row.autonomous_booking_threshold)
+        : undefined,
+    // D-018 (WS18) — migration 247. enabled is NOT NULL DEFAULT FALSE so
+    // legacy rows read false; max_cents is a nullable BIGINT (node-pg
+    // returns bigint as a string — convert explicitly).
+    autonomousCloseEnabled: (row.autonomous_close_enabled as boolean | null) ?? false,
+    autonomousCloseMaxCents:
+      row.autonomous_close_max_cents != null
+        ? Number(row.autonomous_close_max_cents)
         : undefined,
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
@@ -401,6 +418,9 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         // null through, so the generic `value ?? null` handler is safe.
         autonomousBookingEnabled: 'autonomous_booking_enabled',
         autonomousBookingThreshold: 'autonomous_booking_threshold',
+        // D-018 (WS18) — migration 247.
+        autonomousCloseEnabled: 'autonomous_close_enabled',
+        autonomousCloseMaxCents: 'autonomous_close_max_cents',
         updatedAt: 'updated_at',
       };
 

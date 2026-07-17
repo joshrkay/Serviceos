@@ -3,10 +3,12 @@ import {
   isTerminalStatus,
   transitionProposal,
   isInUndoWindow,
+  undoExpiresAt,
+  isSystemActor,
   UNDO_WINDOW_MS,
 } from '../../src/proposals/lifecycle';
 import { createProposal, Proposal, CreateProposalInput } from '../../src/proposals/proposal';
-import { ConflictError } from '../../src/shared/errors';
+import { ConflictError, ForbiddenError } from '../../src/shared/errors';
 
 describe('P2-003 — Proposal lifecycle transitions', () => {
   const baseInput: CreateProposalInput = {
@@ -106,6 +108,42 @@ describe('P2-003 — Proposal lifecycle transitions', () => {
     }
   });
 
+  // ── QUALITY-2026-07-12 WS2: human-authority approval guard ─────────
+
+  describe('system actors may never approve (D-019)', () => {
+    it('isSystemActor detects the system: prefix', () => {
+      expect(isSystemActor('system:autonomous-close')).toBe(true);
+      expect(isSystemActor('system:anything')).toBe(true);
+      expect(isSystemActor('one_tap_sms')).toBe(false);
+      expect(isSystemActor('user-1')).toBe(false);
+      // Plain 'system' (no colon) is an audit actor id, not an approver id.
+      expect(isSystemActor('system')).toBe(false);
+    });
+
+    it('rejects a transition to approved by a system: actor', () => {
+      const proposal = makeProposal({ status: 'ready_for_review' });
+      expect(() =>
+        transitionProposal(proposal, 'approved', 'system:autonomous-close'),
+      ).toThrow(ForbiddenError);
+    });
+
+    it('rejects draft → approved by a system: actor', () => {
+      const proposal = makeProposal({ status: 'draft' });
+      expect(() =>
+        transitionProposal(proposal, 'approved', 'system:call-close-drafter'),
+      ).toThrow(ForbiddenError);
+    });
+
+    it('still allows a HUMAN actor to approve, and a system actor to run other transitions', () => {
+      const toApprove = makeProposal({ status: 'ready_for_review' });
+      expect(() => transitionProposal(toApprove, 'approved', 'owner-user')).not.toThrow();
+      // A system actor may still create/stage and drive non-approval transitions
+      // (e.g. the executor marking an owner-approved proposal executed).
+      const approved = makeProposal({ status: 'approved' });
+      expect(() => transitionProposal(approved, 'executed', 'system:executor')).not.toThrow();
+    });
+  });
+
   // ── Decision 9: 5-second undo window ───────────────────────────────
 
   describe('5-second undo window (Decision 9)', () => {
@@ -150,6 +188,20 @@ describe('P2-003 — Proposal lifecycle transitions', () => {
 
     it('UNDO_WINDOW_MS is 5000', () => {
       expect(UNDO_WINDOW_MS).toBe(5000);
+    });
+
+    it('undoExpiresAt = approvedAt + UNDO_WINDOW_MS', () => {
+      const approvedAt = new Date('2026-07-12T10:00:00.000Z');
+      const proposal = makeProposal({ status: 'approved', approvedAt });
+      const expires = undoExpiresAt(proposal);
+      expect(expires).toBeInstanceOf(Date);
+      expect(expires!.getTime()).toBe(approvedAt.getTime() + UNDO_WINDOW_MS);
+    });
+
+    it('undoExpiresAt returns undefined when approvedAt is missing (backward compat)', () => {
+      const proposal = makeProposal({ status: 'approved' });
+      expect(proposal.approvedAt).toBeUndefined();
+      expect(undoExpiresAt(proposal)).toBeUndefined();
     });
 
     it('isInUndoWindow returns false when status is not approved', () => {

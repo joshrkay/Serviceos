@@ -15,6 +15,7 @@ import {
 } from '../../src/verticals/pg-training-assets';
 import { TrainingAssetRedactionService } from '../../src/verticals/training-asset-redaction';
 import { TrainingAssetService } from '../../src/verticals/training-asset-service';
+import { tenantContextStore } from '../../src/middleware/tenant-context';
 import type {
   PrivacyAuditEntry,
   PrivacyAuditRepository,
@@ -1562,5 +1563,83 @@ describe('TrainingAssetService', () => {
     await expect(assetRepo.findById('tenant-1', 'asset-activate-audit-fail')).resolves.toMatchObject({
       status: 'approved',
     });
+  });
+});
+
+describe('TrainingAssetService — request-transaction reuse (PR #669 review)', () => {
+  function makeInput(title: string) {
+    return {
+      verticalType: 'hvac' as const,
+      assetKind: 'prompt_context' as const,
+      title,
+      rawText: 'Caller has no heat.',
+      labels: {},
+      provenance: { source: 'tenant_admin' as const, sourceVersion: '1' },
+    };
+  }
+
+  it('reuses the ambient tenant transaction instead of opening a second pool client', async () => {
+    // /api routes mount withTenantTransaction(pool): the request already holds
+    // a client in tenantContextStore. A second pool.connect() here would let N
+    // concurrent requests starve a size-N pool (outer clients held, all
+    // blocking on inner connects).
+    const pool = new FakeTrainingAssetPool();
+    const service = new TrainingAssetService({
+      assetRepo: new InMemoryTrainingAssetRepository(),
+      privacyAuditRepo: new InMemoryPrivacyAuditRepository(),
+      auditRepo: new InMemoryAuditRepository(),
+      redaction: new TrainingAssetRedactionService(),
+      pool: pool as unknown as Pool,
+      idGenerator: () => 'asset-ambient-1',
+      now: () => new Date('2026-07-12T00:00:00Z'),
+    });
+
+    const ambientClient = { query: async () => ({ rows: [] }) } as unknown as PoolClient;
+    const asset = await tenantContextStore.run(
+      { client: ambientClient, tenantId: 'tenant-1' },
+      () => service.create({ tenantId: 'tenant-1', actorId: 'user-1', input: makeInput('Ambient reuse') }),
+    );
+
+    expect(asset.id).toBe('asset-ambient-1');
+    expect(pool.connectCount).toBe(0); // no second client — ambient tx reused
+  });
+
+  it('still opens its own transaction when no ambient tenant context exists', async () => {
+    const pool = new FakeTrainingAssetPool();
+    const service = new TrainingAssetService({
+      assetRepo: new InMemoryTrainingAssetRepository(),
+      privacyAuditRepo: new InMemoryPrivacyAuditRepository(),
+      auditRepo: new InMemoryAuditRepository(),
+      redaction: new TrainingAssetRedactionService(),
+      pool: pool as unknown as Pool,
+      idGenerator: () => 'asset-own-tx-1',
+      now: () => new Date('2026-07-12T00:00:00Z'),
+    });
+
+    await service.create({ tenantId: 'tenant-1', actorId: 'user-1', input: makeInput('Own transaction') });
+    expect(pool.connectCount).toBe(1);
+    expect(pool.client.releaseCount).toBe(1);
+  });
+
+  it('does not adopt an ambient context belonging to a DIFFERENT tenant', async () => {
+    const pool = new FakeTrainingAssetPool();
+    const service = new TrainingAssetService({
+      assetRepo: new InMemoryTrainingAssetRepository(),
+      privacyAuditRepo: new InMemoryPrivacyAuditRepository(),
+      auditRepo: new InMemoryAuditRepository(),
+      redaction: new TrainingAssetRedactionService(),
+      pool: pool as unknown as Pool,
+      idGenerator: () => 'asset-cross-tenant-1',
+      now: () => new Date('2026-07-12T00:00:00Z'),
+    });
+
+    const ambientClient = { query: async () => ({ rows: [] }) } as unknown as PoolClient;
+    await tenantContextStore.run(
+      { client: ambientClient, tenantId: 'tenant-OTHER' },
+      () => service.create({ tenantId: 'tenant-1', actorId: 'user-1', input: makeInput('Cross tenant') }),
+    );
+    // Wrong-tenant ambient context must NOT be reused — a fresh, correctly
+    // scoped transaction is opened instead.
+    expect(pool.connectCount).toBe(1);
   });
 });

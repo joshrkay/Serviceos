@@ -5,7 +5,7 @@
  * REAL Postgres (pins the columns mocked-DB tests can't). It deliberately uses
  * the no-technician appointment path; the technician assignment / TOCTOU
  * compensation branch is covered separately by
- * test/proposals/execution/create-appointment-handler.test.ts. The three
+ * test/proposals/execution/create-appointment-handler.test.ts. The four
  * things proven here:
  *
  *   1. Routing: a dialed number resolves to its tenant via
@@ -15,10 +15,16 @@
  *   2. Reason capture: a create_appointment proposal carrying the caller's
  *      spoken reason in `summary` (as the voice task handler emits for a
  *      cold call with no jobId) persists that reason to the real
- *      `appointments.notes` column through the production ProposalExecutor +
- *      CreateAppointmentExecutionHandler.
+ *      `appointments.notes` column through the PRODUCTION execution
+ *      registry (createExecutionHandlerRegistry) + ProposalExecutor.
  *   3. Human-approval gate: no appointment row exists until the proposal is
  *      approved and executed.
+ *   4. Audit wiring: obtaining the handler via the production registry (not
+ *      constructing it directly) proves the registry threads auditRepo into
+ *      CreateAppointmentExecutionHandler, so execution emits exactly one
+ *      `appointment.created` row — the fix for the bug where the
+ *      proposal-execution path silently persisted appointments without
+ *      auditing them.
  *
  * Driving the literal Twilio Gather FSM over HTTP is covered by the live-call
  * runbook (docs/runbooks/voice-inbound-appointment-verification.md); CI proves
@@ -28,6 +34,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Pool } from 'pg';
 import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
 import { PgAppointmentRepository } from '../../src/appointments/pg-appointment';
+import { PgAuditRepository } from '../../src/audit/pg-audit';
 import { PgJobRepository } from '../../src/jobs/pg-job';
 import { PgCustomerRepository } from '../../src/customers/pg-customer';
 import { PgLocationRepository } from '../../src/locations/pg-location';
@@ -37,7 +44,6 @@ import {
   CreateProposalInput,
   InMemoryProposalRepository,
   Proposal,
-  ProposalType,
 } from '../../src/proposals/proposal';
 import { InMemoryProposalExecutionRepository } from '../../src/proposals/proposal-execution';
 import { transitionProposal, UNDO_WINDOW_MS } from '../../src/proposals/lifecycle';
@@ -45,8 +51,7 @@ import { ProposalExecutor } from '../../src/proposals/execution/executor';
 import { IdempotencyGuard } from '../../src/proposals/execution/idempotency';
 import {
   ExecutionContext,
-  ExecutionHandler,
-  CreateAppointmentExecutionHandler,
+  createExecutionHandlerRegistry,
 } from '../../src/proposals/execution/handlers';
 
 const TENANT_DID = '+15125550100';
@@ -75,6 +80,8 @@ describe('Integration — inbound voice appointment-setting (real Postgres)', ()
   let pool: Pool;
   let appointmentRepo: PgAppointmentRepository;
   let phoneRepo: PgPhoneNumberRepository;
+  let jobRepo: PgJobRepository;
+  let auditRepo: PgAuditRepository;
   let tenant: { tenantId: string; userId: string };
   let jobId: string;
 
@@ -82,7 +89,8 @@ describe('Integration — inbound voice appointment-setting (real Postgres)', ()
     pool = await getSharedTestDb();
     appointmentRepo = new PgAppointmentRepository(pool);
     phoneRepo = new PgPhoneNumberRepository(pool);
-    const jobRepo = new PgJobRepository(pool);
+    jobRepo = new PgJobRepository(pool);
+    auditRepo = new PgAuditRepository(pool);
     const customerRepo = new PgCustomerRepository(pool);
     const locationRepo = new PgLocationRepository(pool);
     tenant = await createTestTenant(pool);
@@ -177,11 +185,18 @@ describe('Integration — inbound voice appointment-setting (real Postgres)', ()
 
     const proposalRepo = new InMemoryProposalRepository();
     const executionRepo = new InMemoryProposalExecutionRepository();
-    const handlers = new Map<ProposalType, ExecutionHandler>([
-      ['create_appointment', new CreateAppointmentExecutionHandler(appointmentRepo)],
-    ]);
+    // Production registry → proves the registry wires auditRepo into
+    // CreateAppointmentExecutionHandler (the audit-emission fix under test),
+    // the same way test/integration/create-job-execution.test.ts proves it
+    // for CreateJobExecutionHandler.
+    const handlers = createExecutionHandlerRegistry({ appointmentRepo, jobRepo, auditRepo });
     const guard = new IdempotencyGuard(executionRepo, proposalRepo);
-    const executor = new ProposalExecutor(handlers, proposalRepo, guard);
+    const executor = new ProposalExecutor(
+      handlers,
+      proposalRepo,
+      guard,
+      auditRepo,
+    );
     await proposalRepo.create(proposal);
 
     // Gate: nothing booked before execution runs.
@@ -201,5 +216,16 @@ describe('Integration — inbound voice appointment-setting (real Postgres)', ()
     // Stored UTC, tenant display tz preserved.
     expect(new Date(booked!.scheduledStart).toISOString()).toBe(start.toISOString());
     expect(booked!.timezone).toBe('America/Chicago');
+
+    // Regression guard: the executor previously never forwarded auditRepo
+    // into createAppointment on the proposal-execution path, so no
+    // appointment.created row was ever emitted here.
+    const auditRows = await pool.query(
+      `SELECT event_type FROM audit_events
+        WHERE tenant_id = $1 AND event_type = 'appointment.created'
+          AND entity_type = 'appointment' AND entity_id = $2`,
+      [tenant.tenantId, booked!.id],
+    );
+    expect(auditRows.rows).toHaveLength(1);
   });
 });

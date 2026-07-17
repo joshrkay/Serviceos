@@ -21,6 +21,7 @@ vi.mock('@clerk/clerk-react', async (importOriginal) => {
 });
 
 import { TechJobView } from './TechJobView';
+import { TenantTimezoneProvider } from '../../hooks/useTenantTimezone';
 
 const mockJob = {
   id: 'j1',
@@ -319,5 +320,46 @@ describe('TechJobView status flow', () => {
     await waitFor(() =>
       expect(screen.getByText('Compressor squealing on start')).toBeInTheDocument(),
     );
+  });
+});
+
+// Finding 4 (WS6) — the job hero's scheduled date/time was rendered with
+// `new Date(iso).toLocaleDateString()/toLocaleTimeString()` (browser-local), so
+// the same instant showed a different wall clock for every viewer. It must
+// render in the TENANT tz, deterministically, regardless of the JS runtime tz.
+describe('TechJobView tenant-tz scheduled date', () => {
+  // 2026-03-14T14:00:00Z: after US DST start → NY is EDT (UTC-4).
+  const scheduledJob = { ...mockJob, scheduledStart: '2026-03-14T14:00:00Z' };
+
+  beforeEach(() => {
+    mockFetcher.mockReset();
+    mockFetcher.mockImplementation((path: string) => {
+      if (path.startsWith('/api/jobs/')) {
+        return Promise.resolve(new Response(JSON.stringify(scheduledJob), { status: 200 }));
+      }
+      return Promise.resolve(new Response(JSON.stringify([]), { status: 200 }));
+    });
+  });
+
+  function renderInTz(timezone: string) {
+    return render(
+      <TenantTimezoneProvider overrideTimezone={timezone}>
+        <MemoryRouter>
+          <TechJobView id="j1" />
+        </MemoryRouter>
+      </TenantTimezoneProvider>,
+    );
+  }
+
+  it('renders the hero schedule in the tenant tz (NY), independent of process TZ', async () => {
+    renderInTz('America/New_York');
+    // 14:00Z EDT → Mar 14 · 10:00 AM.
+    expect(await screen.findByText(/Mar 14\s*·\s*10:00\s*AM/)).toBeInTheDocument();
+  });
+
+  it('renders the SAME instant differently under a different tenant tz (LA)', async () => {
+    renderInTz('America/Los_Angeles');
+    // Same instant, LA (UTC-7) → Mar 14 · 7:00 AM.
+    expect(await screen.findByText(/Mar 14\s*·\s*7:00\s*AM/)).toBeInTheDocument();
   });
 });

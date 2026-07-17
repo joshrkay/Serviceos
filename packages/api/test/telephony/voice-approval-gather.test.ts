@@ -314,6 +314,79 @@ describe('RV-071 — owner approval over Gather (end to end)', () => {
     expect((await h.proposalRepo.findById(TENANT, estimate.id))?.status).toBe('approved');
   });
 
+  it('WS19 — "what\'s waiting" walks the whole queue over Gather (batch)', async () => {
+    // "what's waiting" classifies as approve_proposal on an owner line; the
+    // deterministic batch trigger (reference/utterance) starts a batch walk.
+    // Only turn 1 classifies — the yes turns are consumed by the in-flight
+    // batch dialogue before the classifier, so one gateway response suffices.
+    const gateway = gatewayReturning([
+      JSON.stringify({
+        intentType: 'approve_proposal',
+        confidence: 0.95,
+        extractedEntities: { proposalReference: "what's waiting" },
+      }),
+    ]);
+    const h = makeHarness({ gateway });
+    const first = await seedPending(h.proposalRepo);
+    const second = createProposal({
+      tenantId: TENANT,
+      proposalType: 'draft_estimate',
+      payload: {
+        customerName: 'Ramirez Roofing',
+        lineItems: [{ description: 'Roof patch', total: 30000 }],
+        totalCents: 30000,
+      },
+      summary: 'Estimate for Ramirez — roof patch',
+      createdBy: 'voice',
+    });
+    await h.proposalRepo.create(second);
+    await h.proposalRepo.updateStatus(TENANT, second.id, 'ready_for_review');
+    const sessionId = await startCall(h, OWNER_PHONE, 'CA-batch-1');
+
+    // Turn 1 — the opener announces the queue size and reads the first item.
+    const twiml1 = await h.adapter.handleGather({
+      sessionId,
+      callSid: 'CA-batch-1',
+      speechResult: "what's waiting",
+      confidence: 0.9,
+      tenantId: TENANT,
+    });
+    expect(twiml1).toContain('You have 2 waiting.');
+    expect(twiml1).toContain('First:');
+    expect(twiml1).toContain('<Gather'); // the call continues
+    const session = h.store.get(sessionId)!;
+    expect(session.voiceApprovalState?.batchQueue).toHaveLength(2);
+
+    // Turn 2 — approve the first item; the agent advances to the next.
+    const twiml2 = await h.adapter.handleGather({
+      sessionId,
+      callSid: 'CA-batch-1',
+      speechResult: 'yes',
+      confidence: 0.9,
+      tenantId: TENANT,
+    });
+    expect(twiml2).toContain('Approved');
+    expect(twiml2).toContain('Next:');
+
+    // Turn 3 — approve the last item; the batch summarizes and closes.
+    const twiml3 = await h.adapter.handleGather({
+      sessionId,
+      callSid: 'CA-batch-1',
+      speechResult: 'yes',
+      confidence: 0.9,
+      tenantId: TENANT,
+    });
+    // (TwiML XML-escapes the apostrophe → assert the apostrophe-free portion.)
+    expect(twiml3).toContain('all of them — 2 approved, 0 skipped.');
+
+    expect((await h.proposalRepo.findById(TENANT, first.id))?.status).toBe('approved');
+    expect((await h.proposalRepo.findById(TENANT, second.id))?.status).toBe('approved');
+    expect(session.voiceApprovalState?.batchQueue).toBeUndefined();
+    expect(session.pendingVoiceApproval).toBeUndefined();
+    // The classifier ran exactly once — the yes turns bypassed it.
+    expect((gateway.complete as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(1);
+  });
+
   it('money-class with no challenge configured → refusal + one-tap SMS, never an approval', async () => {
     const gateway = gatewayReturning([
       JSON.stringify({

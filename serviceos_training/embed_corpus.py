@@ -24,6 +24,7 @@ import os
 from pathlib import Path
 
 from local_embed import vectorize
+import posthog_client as ph
 
 HERE = Path(__file__).resolve().parent
 SAMPLE = HERE / "sample_corpus.jsonl"
@@ -74,6 +75,11 @@ def main(argv: list[str] | None = None) -> int:
 
     OUT.write_text(json.dumps(payload), encoding="utf-8")
     print(f"Embedded {len(rows)} rows ({payload['mode']}) -> {OUT}")
+    ph.capture("corpus_embedded", {
+        "row_count": len(rows),
+        "mode": payload["mode"],
+        "model": payload["model"],
+    })
     return 0
 
 

@@ -31,7 +31,10 @@ interface FakeAuth {
   role: 'owner' | 'dispatcher' | 'technician';
 }
 
-function buildApp(fakeAuth: FakeAuth) {
+function buildApp(
+  fakeAuth: FakeAuth,
+  meOptions?: Parameters<typeof createMeRouter>[2],
+) {
   const service = new InMemoryUserModeService();
   const audit = new InMemoryAuditRepository();
   const app = express();
@@ -45,7 +48,7 @@ function buildApp(fakeAuth: FakeAuth) {
     };
     next();
   });
-  app.use('/api/me', createMeRouter(service, audit));
+  app.use('/api/me', createMeRouter(service, audit, meOptions));
   return { app, service, audit };
 }
 
@@ -86,6 +89,53 @@ describe('P12-001 — /api/me', () => {
     // Permissions sourced from rbac.ts — read-only verification.
     expect(Array.isArray(res.body.permissions)).toBe(true);
     expect(res.body.permissions).toEqual(getPermissions('owner'));
+  });
+
+  // N-011 — the brand-voice flag resolver is tenant-aware and may be async
+  // (tenant override → platform flag). /api/me must AWAIT it so a per-tenant
+  // dark launch actually surfaces `brand_voice_configurator_enabled: true`.
+  it('GET /api/me awaits an async brand-voice resolver (tenant override enabled)', async () => {
+    const seen: string[] = [];
+    const { app, service } = buildApp(
+      { userId: 'user-owner', role: 'owner' },
+      {
+        isBrandVoiceConfiguratorEnabled: async (tenantId: string) => {
+          seen.push(tenantId);
+          return Promise.resolve(true);
+        },
+      },
+    );
+    service.setTenantSettings(TENANT, {
+      backup_supervisor_user_id: null,
+      unsupervised_proposal_routing: 'queue_and_sms',
+    });
+    const res = await request(app).get('/api/me');
+    expect(res.status).toBe(200);
+    // Awaited to the resolved boolean, not a pending Promise (which would
+    // serialize to {}), and the resolver was called with the tenant id.
+    expect(res.body.brand_voice_configurator_enabled).toBe(true);
+    expect(seen).toEqual([TENANT]);
+  });
+
+  it('GET /api/me brand_voice_configurator_enabled is false when the resolver says so or is absent', async () => {
+    const off = buildApp(
+      { userId: 'user-owner', role: 'owner' },
+      { isBrandVoiceConfiguratorEnabled: async () => false },
+    );
+    off.service.setTenantSettings(TENANT, {
+      backup_supervisor_user_id: null,
+      unsupervised_proposal_routing: 'queue_and_sms',
+    });
+    const resOff = await request(off.app).get('/api/me');
+    expect(resOff.body.brand_voice_configurator_enabled).toBe(false);
+
+    const absent = buildApp({ userId: 'user-owner', role: 'owner' });
+    absent.service.setTenantSettings(TENANT, {
+      backup_supervisor_user_id: null,
+      unsupervised_proposal_routing: 'queue_and_sms',
+    });
+    const resAbsent = await request(absent.app).get('/api/me');
+    expect(resAbsent.body.brand_voice_configurator_enabled).toBe(false);
   });
 
   // Sweep-2 S5 — /api/me additively exposes the internal users.id UUID.

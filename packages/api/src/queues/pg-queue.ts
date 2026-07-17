@@ -1,6 +1,6 @@
 import { Pool } from 'pg';
 import { PgBaseRepository } from '../db/pg-base';
-import { Queue, QueueConfig, QueueMessage, DeadLetterEntry, SendOptions, redactForSink, toEnvelopeMeta } from './queue';
+import { Queue, QueueConfig, QueueDepth, QueueMessage, DeadLetterEntry, SendOptions, redactForSink, toEnvelopeMeta } from './queue';
 import { randomUUID } from 'crypto';
 
 /**
@@ -267,6 +267,44 @@ export class PgQueue extends PgBaseRepository implements Queue {
         error: row.error as string,
         failedAt: (row.failed_at as Date).toISOString(),
       }));
+    });
+  }
+
+  /**
+   * Backlog snapshot for the scale-to-1000 depth SLO. Single round-trip: two
+   * correlated COUNTs (main queue + DLQ). Cheap enough to sample on an interval;
+   * never call it on the hot path.
+   */
+  async depth(): Promise<QueueDepth> {
+    return this.withClient(async (client) => {
+      await this.ensureTable(client);
+      const res = await client.query<{ pending: string; dead_letter: string }>(
+        `SELECT
+           (SELECT COUNT(*) FROM _queue_messages) AS pending,
+           (SELECT COUNT(*) FROM _queue_dlq)      AS dead_letter`,
+      );
+      return {
+        pending: Number(res.rows[0].pending),
+        deadLetter: Number(res.rows[0].dead_letter),
+      };
+    });
+  }
+
+  /**
+   * WS15 — pending messages older than `olderThanSeconds` (see Queue
+   * interface). Filters on created_at, not visible_at: a message mid-backoff
+   * is still "sitting in the queue" from the SLO's point of view.
+   */
+  async stalePendingCount(olderThanSeconds: number): Promise<number> {
+    return this.withClient(async (client) => {
+      await this.ensureTable(client);
+      const res = await client.query<{ stale: string }>(
+        `SELECT COUNT(*) AS stale
+           FROM _queue_messages
+          WHERE created_at < NOW() - ($1 || ' seconds')::interval`,
+        [String(Math.max(0, olderThanSeconds))],
+      );
+      return Number(res.rows[0].stale);
     });
   }
 

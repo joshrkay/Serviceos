@@ -55,7 +55,19 @@ function isUuid(value: unknown): value is string {
 export class AddNoteExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'add_note';
 
-  constructor(private readonly noteRepo?: NoteRepository) {}
+  constructor(
+    private readonly noteRepo: NoteRepository | undefined,
+    // WS3 — auditRepo is structurally REQUIRED: a persisted note must always
+    // emit its note.created audit event (createNote forwards it). Non-optional
+    // so a call site cannot wire this handler without an audit sink.
+    private readonly auditRepo: AuditRepository,
+  ) {}
+
+  // WS3 — degrades to nothing without the note repo; boot fails when a pool is
+  // configured but this is false.
+  isFullyWired(): boolean {
+    return Boolean(this.noteRepo);
+  }
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const { payload } = proposal;
@@ -84,10 +96,9 @@ export class AddNoteExecutionHandler implements ExecutionHandler {
     }
 
     if (!this.noteRepo) {
-      // Dev/test wiring without a repo — return a synthetic id so
-      // legacy callers that haven't injected the repo still work.
-      // Production wires the real repo in app.ts.
-      return { success: true, resultEntityId: uuidv4() };
+      // WS3 — no synthetic success: a missing repo is a wiring fault, never a
+      // silent no-op that reports success while persisting nothing.
+      return { success: false, error: 'handler_not_wired:noteRepo' };
     }
 
     try {
@@ -103,7 +114,10 @@ export class AddNoteExecutionHandler implements ExecutionHandler {
           // the notes UI groups by.
           authorRole: 'voice',
         },
-        this.noteRepo
+        this.noteRepo,
+        // WS3 — emit the note.created audit event (joins the ambient tenant
+        // transaction established by the executor / request middleware).
+        this.auditRepo,
       );
       return { success: true, resultEntityId: note.id };
     } catch (err) {
@@ -137,6 +151,12 @@ const VOICE_PAYMENT_METHOD_MAP: Record<string, PaymentMethod> = {
 
 export class RecordPaymentExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'record_payment';
+  // recordPayment() awaits paymentReceiptNotifier.notifyPaymentReceived (customer
+  // SMS/email receipt via the delivery provider) and an owner push — external
+  // network I/O. Its DB writes are already crash-safe outside a shared executor
+  // tx (atomic invoice credit + ledger reconciliation backstop), so run it out
+  // of the executor transaction.
+  performsExternalIo = true;
 
   constructor(
     private readonly paymentRepo?: PaymentRepository,
@@ -145,6 +165,13 @@ export class RecordPaymentExecutionHandler implements ExecutionHandler {
     private readonly paymentReceiptNotifier?: PaymentReceiptNotifier,
     private readonly auditRepo?: AuditRepository,
   ) {}
+
+  // WS3 — degrades to a synthetic-id passthrough (records no payment) without
+  // both the payment repo and the invoice repo. Boot fails when a pool is
+  // configured but this is false.
+  isFullyWired(): boolean {
+    return Boolean(this.paymentRepo) && Boolean(this.invoiceRepo);
+  }
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const { payload } = proposal;
@@ -263,6 +290,8 @@ export class NoopEstimateDeliveryProvider implements EstimateDeliveryProvider {
 
 export class SendEstimateExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'send_estimate';
+  // Awaits provider.send() — outbound estimate email/SMS delivery.
+  performsExternalIo = true;
 
   constructor(private readonly provider?: EstimateDeliveryProvider) {}
 
@@ -306,6 +335,8 @@ export class SendEstimateExecutionHandler implements ExecutionHandler {
 
 export class SendInvoiceExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'send_invoice';
+  // Awaits provider.send() — outbound invoice email/SMS delivery.
+  performsExternalIo = true;
 
   constructor(private readonly provider?: InvoiceDeliveryProvider) {}
 

@@ -329,14 +329,38 @@ describe('GET /api/interactions/:id', () => {
     });
   });
 
-  it('returns 404 when session not found for tenant', async () => {
+  it('returns 404 when session not found for tenant (well-formed uuid, no matching row)', async () => {
     const pool = makePool([[/* empty */]]);
     const app = buildApp(pool);
 
-    const res = await request(app).get('/api/interactions/does-not-exist');
+    // Well-formed UUID that simply has no matching row — distinct from the
+    // malformed-id case below, which must short-circuit before ever
+    // reaching the pool.
+    const res = await request(app).get('/api/interactions/00000000-0000-0000-0000-000000000000');
 
     expect(res.status).toBe(404);
     expect(res.body).toMatchObject({ error: 'NOT_FOUND' });
+  });
+
+  it('returns 400 (not 500) for a malformed id instead of hitting the uuid cast in SQL', async () => {
+    const pool = makePool([[/* unused: rejected before query */]]);
+    const app = buildApp(pool);
+
+    const res = await request(app).get('/api/interactions/dispatch');
+
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({ error: 'BAD_REQUEST' });
+  });
+
+  it('returns 400 for a malformed id and never issues the pool query (no dirty-connection risk)', async () => {
+    const pool = makePool([[/* unused: rejected before query */]]);
+    const app = buildApp(pool);
+
+    const res = await request(app).get('/api/interactions/not-a-uuid');
+
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({ error: 'BAD_REQUEST' });
+    expect(pool.connect).not.toHaveBeenCalled();
   });
 
   it('returns empty transcript array for sessions without transcript', async () => {

@@ -218,6 +218,42 @@ export function createTtsProvider(env: {
 }
 
 /**
+ * P0 boot guard — Twilio Media Streams requires a TtsProvider capable of
+ * emitting raw PCM (`synthesizeStream`). `mediastream-adapter.ts` feeds
+ * `synthesize()`'s buffered result straight into `streamPcmAsMedia`, which
+ * assumes raw PCM16 and does no decoding — a provider that only implements
+ * `synthesize()` returns compressed audio (mp3 for OpenAI/ElevenLabs),
+ * which streams out as inaudible static with no error surfaced anywhere.
+ *
+ * Call this once at boot, right after resolving the shared TTS provider,
+ * so a misconfigured deploy (e.g. TTS_PROVIDER unset/openai with Media
+ * Streams on) fails loud instead of shipping a silent voice outage. Mirrors
+ * the fail-fast style used for DATABASE_URL elsewhere in app.ts.
+ *
+ * No-ops when Media Streams is disabled, and when no provider resolved at
+ * all (that's a distinct "no TTS configured" failure mode already surfaced
+ * via the /health warnings in app.ts).
+ */
+export function assertTtsProviderSupportsMediaStreams(input: {
+  mediaStreamsEnabled: boolean;
+  provider: TtsProvider | undefined;
+  /** Raw TTS_PROVIDER env value, for the error message only. */
+  ttsProviderEnv?: string;
+}): void {
+  if (!input.mediaStreamsEnabled) return;
+  if (!input.provider) return;
+  if (typeof input.provider.synthesizeStream === 'function') return;
+  throw new Error(
+    `TWILIO_MEDIA_STREAMS_ENABLED=true but the resolved TTS provider ` +
+      `(TTS_PROVIDER=${input.ttsProviderEnv ?? 'openai (default)'}) only implements ` +
+      `synthesize(), which returns compressed audio (e.g. mp3) unsuitable for ` +
+      `Twilio's raw-PCM media path. Media Streams requires a provider that ` +
+      `implements synthesizeStream() (raw PCM streaming) — set TTS_PROVIDER=elevenlabs ` +
+      `with ELEVENLABS_API_KEY set, or disable TWILIO_MEDIA_STREAMS_ENABLED.`
+  );
+}
+
+/**
  * Dev/test provider that returns a zero-byte "audio" response so
  * tests can exercise readback plumbing without calling the real API.
  *

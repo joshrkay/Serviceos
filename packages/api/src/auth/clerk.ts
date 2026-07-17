@@ -17,7 +17,15 @@ export interface ClerkUser {
 
 export interface AuthenticatedRequest extends Request {
   auth?: {
+    /** Clerk subject (`sub`) from the verified session token. */
     userId: string;
+    /**
+     * Tenant-scoped canonical `users.id`, populated by the DB authorization
+     * loader after it resolves the Clerk subject. Security-sensitive routes
+     * must fail closed when this is absent rather than treating `userId` as a
+     * canonical entity id.
+     */
+    canonicalUserId?: string;
     sessionId: string;
     tenantId: string;
     role: string;
@@ -205,6 +213,8 @@ export interface ClerkTokenPayload {
   tenant_id: string;
   role: string;
   exp: number;
+  /** Optional — present when the JWT template includes an email claim. */
+  email?: string;
 }
 
 const VALID_ROLES = ['owner', 'dispatcher', 'technician'];
@@ -277,12 +287,21 @@ function validateClerkClaims(
   if (typeof payload.role !== 'string' || !VALID_ROLES.includes(payload.role)) {
     throw new Error('Token missing or invalid role claim');
   }
+  const emailClaim =
+    typeof payload.email === 'string' && payload.email.trim()
+      ? payload.email.trim()
+      : typeof payload.primary_email_address === 'string' &&
+          payload.primary_email_address.trim()
+        ? payload.primary_email_address.trim()
+        : undefined;
+
   return {
     sub: payload.sub,
     sid: typeof payload.sid === 'string' ? payload.sid : '',
     tenant_id: typeof payload.tenant_id === 'string' ? payload.tenant_id : '',
     role: payload.role,
     exp: payload.exp,
+    ...(emailClaim ? { email: emailClaim } : {}),
   };
 }
 
@@ -443,6 +462,19 @@ export function verifyClerkSession(
         tenantId: payload.tenant_id,
         role: payload.role,
       };
+      // Populate clerkUser when the JWT carries an email claim so billing /
+      // onboarding routes can mint Stripe sessions without a DB round-trip.
+      // Absent claim → routes fall back to resolveOwnerEmail(pool).
+      if (payload.email) {
+        req.clerkUser = {
+          id: payload.sub,
+          email: payload.email,
+          publicMetadata: {
+            tenant_id: payload.tenant_id,
+            role: payload.role,
+          },
+        };
+      }
       next();
     } catch (err) {
       // Do NOT set req.auth. Do NOT short-circuit here — the global

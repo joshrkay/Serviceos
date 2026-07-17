@@ -3,10 +3,12 @@ import {
   PortalInvoice,
   formatPortalCents,
   portalApi,
+  PORTAL_FALLBACK_TZ,
 } from '../../api/portal';
 import { PortalCard } from '../../components/portal/PortalCard';
+import { formatDateInTenantTz } from '../../utils/formatInTenantTz';
 
-export function PortalInvoiceList({ token }: { token: string }) {
+export function PortalInvoiceList({ token, timezone = PORTAL_FALLBACK_TZ }: { token: string; timezone?: string }) {
   const [invoices, setInvoices] = useState<PortalInvoice[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -62,11 +64,11 @@ export function PortalInvoiceList({ token }: { token: string }) {
           <div className="flex items-center justify-between gap-2">
             <div className="text-xs text-muted-foreground">
               {inv.dueDate
-                ? `Due ${new Date(inv.dueDate).toLocaleDateString()}`
+                ? `Due ${formatDateInTenantTz(inv.dueDate, timezone, { withYear: true })}`
                 : `Issued ${
                     inv.issuedAt
-                      ? new Date(inv.issuedAt).toLocaleDateString()
-                      : new Date(inv.createdAt).toLocaleDateString()
+                      ? formatDateInTenantTz(inv.issuedAt, timezone, { withYear: true })
+                      : formatDateInTenantTz(inv.createdAt, timezone, { withYear: true })
                   }`}
             </div>
             {inv.payNowUrl && inv.amountDueCents > 0 ? (

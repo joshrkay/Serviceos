@@ -5843,6 +5843,360 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_conversation_links ON conversation_links
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  '234_tenant_settings_vapi_webhook_secret': `
+    -- Per-tenant Vapi webhook secret. Previously every tenant's Vapi assistant
+    -- was provisioned with the SAME global VAPI_WEBHOOK_SECRET, and the
+    -- /webhooks/vapi/:tenantId handler verified only that global secret over the
+    -- body — never binding the signature to the :tenantId path. Anyone holding
+    -- the shared secret could forge call events for ANY tenant. Provisioning now
+    -- generates a random per-tenant secret stored here and passes it as the
+    -- assistant's serverUrlSecret; the webhook verifies against it (a body
+    -- signed for tenant A then fails at tenant B). NULL = assistant not yet
+    -- re-provisioned → the handler falls back to the global secret so live voice
+    -- keeps working during migration. Additive + nullable; inherits
+    -- tenant_settings' FORCE-RLS tenant_isolation policy.
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS vapi_webhook_secret TEXT;
+  `,
+  // Active vertical packs were tracked in TWO places with nothing keeping
+  // them in sync: the authoritative `pack_activations` table (Vertical Packs
+  // settings sheet) and the `tenant_settings.terminology_preferences.
+  // _activeVerticalPacks` mirror (Templates page + public intake form).
+  // Every activate/deactivate through the settings sheet updated only the
+  // table, so the mirror went stale and the Templates page / public intake
+  // showed the wrong packs. The app now re-derives the mirror from the table
+  // on every write (syncActiveVerticalPacksMirror); this one-time backfill
+  // reconciles rows that already drifted before that fix shipped.
+  //
+  // pack_activations is authoritative: for every tenant that has at least
+  // one activation row, rebuild `_activeVerticalPacks` from its ACTIVE rows
+  // (dropping any pack deactivated via the sheet, adding any missed), while
+  // preserving all other terminology keys. Empties the key when no pack is
+  // active, and NULLs the whole column when nothing else remains — matching
+  // buildTerminologyJson's shape. Tenants with no activation rows are left
+  // untouched (JOIN), so a legacy mirror is never wiped. Idempotent:
+  // `IS DISTINCT FROM` makes re-runs (the schema runner re-executes every
+  // migration on each boot) a no-op once reconciled.
+  '236_reconcile_active_vertical_packs_mirror': `
+    UPDATE tenant_settings ts
+    SET terminology_preferences = sub.new_terms
+    FROM (
+      SELECT
+        s.tenant_id,
+        NULLIF(
+          (COALESCE(s.terminology_preferences, '{}'::jsonb) - '_activeVerticalPacks')
+          || CASE
+               WHEN p.active_packs IS NOT NULL AND jsonb_array_length(p.active_packs) > 0
+                 THEN jsonb_build_object('_activeVerticalPacks', p.active_packs)
+               ELSE '{}'::jsonb
+             END,
+          '{}'::jsonb
+        ) AS new_terms
+      FROM tenant_settings s
+      JOIN (
+        SELECT
+          tenant_id,
+          jsonb_agg(pack_id ORDER BY activated_at DESC)
+            FILTER (WHERE status = 'active') AS active_packs
+        FROM pack_activations
+        GROUP BY tenant_id
+      ) p ON p.tenant_id = s.tenant_id
+    ) sub
+    WHERE ts.tenant_id = sub.tenant_id
+      AND ts.terminology_preferences IS DISTINCT FROM sub.new_terms;
+  `,
+
+  // N-011 / P4-015 — Brand-Voice Configurator. Append-only version history for
+  // the per-tenant locked tone profile. Every explicit web edit (and the
+  // onboarding capture) writes a new snapshot row here; rollback re-persists an
+  // older snapshot as a NEW bump (history is never mutated). Each row's
+  // `version` gives outbound utterances a stable brand-voice version to cite.
+  // RLS matches the evaluation_snapshots convention (FORCE + tenant_isolation).
+  '237_brand_voice_versions': `
+    CREATE TABLE IF NOT EXISTS brand_voice_versions (
+      id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id     UUID NOT NULL REFERENCES tenants(id),
+      version       INTEGER NOT NULL,
+      snapshot      JSONB NOT NULL,
+      changed_by    UUID,
+      change_reason TEXT NOT NULL,
+      created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, version)
+    );
+    CREATE INDEX IF NOT EXISTS idx_bvv_tenant_version
+      ON brand_voice_versions(tenant_id, version DESC);
+    ALTER TABLE brand_voice_versions ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE brand_voice_versions FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_brand_voice_versions ON brand_voice_versions;
+    CREATE POLICY tenant_isolation_brand_voice_versions ON brand_voice_versions
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // N-011 / P4-015 — brand-voice bookkeeping columns on tenant_settings so the
+  // composer / lock / cool-down paths read the monotonic version, lock state,
+  // and cool-down anchor WITHOUT digging into the brand_voice JSONB. The
+  // six-field tone data itself stays in the existing brand_voice JSONB column
+  // (additive, no shape migration). All three are additive + defaulted so
+  // legacy rows read version 0 / unlocked / no cool-down. Inherits
+  // tenant_settings' FORCE-RLS tenant_isolation policy.
+  '238_tenant_settings_brand_voice_meta': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS brand_voice_version INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS brand_voice_locked BOOLEAN NOT NULL DEFAULT false;
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS brand_voice_updated_at TIMESTAMPTZ;
+  `,
+
+  // N-005 (F-9) — explicit SMS retry cap. Counts each digest send pass so the
+  // worker can dead-letter after 3 attempts instead of retrying until local
+  // midnight. Additive + defaulted; legacy rows read 0.
+  '239_daily_digests_send_attempts': `
+    ALTER TABLE daily_digests
+      ADD COLUMN IF NOT EXISTS send_attempts INT NOT NULL DEFAULT 0;
+  `,
+
+  // N-005 (F-9) — supports ProposalRepository.findConfidenceMarkedForDay (the
+  // digest "what I wasn't sure about today" query). Partial expression index on
+  // the low/very_low confidence marker; additive, no-op on prod re-runs.
+  '240_proposals_confidence_marker_index': `
+    CREATE INDEX IF NOT EXISTS idx_proposals_tenant_created_confidence
+      ON proposals (tenant_id, created_at)
+      WHERE payload->'_meta'->>'overallConfidence' IN ('low','very_low');
+  `,
+
+  // N-005 (F-9) — supports the digest "quotes sent today" range scan over
+  // estimates.sent_at (EstimateListOptions sentFrom/sentTo). Additive partial
+  // index over sent (non-null sent_at) estimates.
+  '241_estimates_tenant_sent_at_index': `
+    CREATE INDEX IF NOT EXISTS idx_estimates_tenant_sent_at
+      ON estimates (tenant_id, sent_at) WHERE sent_at IS NOT NULL;
+  `,
+
+  // N-004 (P2-037) — Supervisor Agent review pass ledger. One row per
+  // pre-dispatch review (missed-urgency / pricing-anomaly / brand-voice-drift /
+  // account-routing). ai_run_id FKs the single lightweight-tier LLM run the
+  // review made (nullable: deterministic-only reviews never call a model, and
+  // ON DELETE SET NULL keeps the review row if the ai_runs row is pruned).
+  // `shadow=true` marks a computed-but-not-enforced review; `critical` records
+  // a customer-harm finding even when shadow mode did not hold. Follows the
+  // 167_create_supervisor_policies FORCE-RLS + tenant-isolation shape.
+  '242_create_supervisor_reviews': `
+    CREATE TABLE IF NOT EXISTS supervisor_reviews (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      proposal_id UUID NOT NULL REFERENCES proposals(id),
+      ai_run_id UUID REFERENCES ai_runs(id) ON DELETE SET NULL,
+      model TEXT NOT NULL,
+      verdict TEXT NOT NULL CHECK (verdict IN ('pass', 'flag', 'hold', 'timeout', 'error')),
+      critical BOOLEAN NOT NULL DEFAULT false,
+      checks JSONB NOT NULL DEFAULT '{}',
+      flags JSONB NOT NULL DEFAULT '[]',
+      latency_ms INTEGER,
+      shadow BOOLEAN NOT NULL DEFAULT false,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_supervisor_reviews_tenant ON supervisor_reviews(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_supervisor_reviews_proposal ON supervisor_reviews(proposal_id);
+    CREATE INDEX IF NOT EXISTS idx_supervisor_reviews_created ON supervisor_reviews(tenant_id, created_at);
+    ALTER TABLE supervisor_reviews ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE supervisor_reviews FORCE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_supervisor_reviews ON supervisor_reviews
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // N-011 fix — brand_voice_versions.changed_by must hold the actor's auth
+  // subject, which under Clerk is a string id (`user_2abc…`), NOT a UUID.
+  // Migration 237 typed the column UUID, so a real (Clerk) edit/rollback threw
+  // `invalid input syntax for type uuid` at INSERT time — the integration test
+  // passed only because it used a real-UUID actor. Widen to TEXT. Idempotent
+  // (ALTER … TYPE TEXT is a no-op once the column is already TEXT) and additive
+  // (all existing UUID values are valid TEXT).
+  '243_brand_voice_versions_changed_by_text': `
+    ALTER TABLE brand_voice_versions ALTER COLUMN changed_by TYPE TEXT;
+  `,
+
+  // DATA-01 — jobs had no index covering the (tenant_id, assigned_technician_id)
+  // filter that PgJobRepository.buildListWhere adds when `technicianId` is
+  // supplied (reachable via `GET /api/jobs?technicianId=` in routes/jobs.ts,
+  // and via reports/technician-profit.ts). Without this, that predicate fell
+  // back to the existing idx_jobs_tenant (tenant_id-only) index plus a filter
+  // scan, which degrades to a sequential scan on jobs at volume. Plain
+  // composite (not partial) because the column is legitimately queried both
+  // when assigned (technician filter) and the index also serves any future
+  // IS NULL / IS NOT NULL scan without a second index.
+  '244_jobs_tenant_assigned_technician_index': `
+    CREATE INDEX IF NOT EXISTS idx_jobs_tenant_assigned_technician
+      ON jobs(tenant_id, assigned_technician_id);
+  `,
+
+  // DATA-02 — audit_events had no index covering
+  // PgAuditRepository.findByTenant's `SELECT * FROM audit_events WHERE
+  // tenant_id = $1 ORDER BY created_at DESC LIMIT $2` (every mutation emits
+  // an audit event, so this table grows unbounded). The existing idx_audit_tenant
+  // index is tenant_id-only, so the ORDER BY required an expensive Sort once
+  // the index-filtered rows didn't come back pre-sorted. This composite with
+  // created_at DESC lets Postgres satisfy both the filter and the ORDER BY
+  // from the index directly (backward index scan for ASC callers still works).
+  '245_audit_events_tenant_created_at_index': `
+    CREATE INDEX IF NOT EXISTS idx_audit_events_tenant_created_at
+      ON audit_events(tenant_id, created_at DESC);
+  `,
+
+  // WS10 — supports ProposalRepository.findAppliedInstructionsForDay (the
+  // digest "Applied your rule ..." reflection). Partial expression index on
+  // the appliedStandingInstructions marker, mirroring 240's shape; additive,
+  // no-op on prod re-runs. The predicate textually matches the query's FIRST
+  // predicate (the jsonb_array_length check stays a non-indexed residual
+  // filter in the query only) so the planner can use this index.
+  '246_proposals_applied_instructions_index': `
+    CREATE INDEX IF NOT EXISTS idx_proposals_tenant_created_applied_si
+      ON proposals (tenant_id, created_at)
+      WHERE payload->'_meta' ? 'appliedStandingInstructions';
+  `,
+
+  // D-018 — autonomous CLOSE lane. Per-tenant opt-in (default OFF) letting the
+  // live agent close the sale on the call (draft + send estimate + confirm the
+  // held booking), plus a per-tenant cap on the total it may auto-close. Both
+  // additive/nullable-safe; the code floor + platform kill switch
+  // (AUTONOMOUS_CLOSE_DISABLED) live in src/proposals/autonomous-close-lane.ts.
+  '247_tenant_settings_autonomous_close': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS autonomous_close_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS autonomous_close_max_cents BIGINT;
+  `,
+
+  // QUALITY-2026-07-12 WS4 — DB-authoritative authorization. The auth
+  // middleware now resolves a user's role + access from THIS table on every
+  // request (the Clerk JWT is authentication proof only). `status` lets an
+  // operator suspend a teammate's access without deleting the row (deleted_at,
+  // migration 093, covers hard removal). Anything other than 'active' — or a
+  // non-null deleted_at — denies the request. Additive + backfilled 'active',
+  // so existing rows keep working. The composite index serves the exact
+  // per-request lookup (tenant_id + clerk_user_id).
+  '248_users_status': `
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'suspended'));
+    CREATE INDEX IF NOT EXISTS idx_users_tenant_clerk
+      ON users(tenant_id, clerk_user_id);
+  `,
+
+  // QUALITY-2026-07-12 WS4 follow-up (PR #669 review) — backfill OWNER
+  // membership rows for tenants bootstrapped BEFORE the Clerk user.created
+  // handler started creating them. bootstrapTenant historically created only
+  // the tenant + settings, so with authorization now DB-authoritative
+  // (resolveAuthorization) every pre-existing owner would resolve to
+  // no-membership and be locked out with 403s. tenants.owner_id is the
+  // owner's Clerk user id and owner_email their email — exactly the shape the
+  // webhook insert writes. Idempotent: skips tenants whose owner already has
+  // a users row.
+  '249_backfill_owner_memberships': `
+    INSERT INTO users (tenant_id, clerk_user_id, email, role)
+    SELECT t.id, t.owner_id, t.owner_email, 'owner'
+    FROM tenants t
+    WHERE NOT EXISTS (
+      SELECT 1 FROM users u
+      WHERE u.tenant_id = t.id AND u.clerk_user_id = t.owner_id
+    );
+  `,
+
+  // Stripe Terminal Location id on the connected account (direct charges).
+  // Created lazily on first field collect; reused for Tap to Pay / readers.
+  '250_tenants_stripe_terminal_location': `
+    ALTER TABLE tenants
+      ADD COLUMN IF NOT EXISTS stripe_terminal_location_id TEXT;
+  `,
+
+  // QA-MANUAL-0730: optional structured service address on leads so
+  // convertToCustomer can promote it to a primary service_locations row.
+  // All columns nullable — address is optional until convert time.
+  // Numbered 251 because main shipped 250_tenants_stripe_terminal_location.
+  '251_leads_service_address': `
+    ALTER TABLE leads
+      ADD COLUMN IF NOT EXISTS street1 TEXT,
+      ADD COLUMN IF NOT EXISTS street2 TEXT,
+      ADD COLUMN IF NOT EXISTS city TEXT,
+      ADD COLUMN IF NOT EXISTS state TEXT,
+      ADD COLUMN IF NOT EXISTS postal_code TEXT,
+      ADD COLUMN IF NOT EXISTS country TEXT,
+      ADD COLUMN IF NOT EXISTS access_notes TEXT;
+  `,
+
+  // Mobile location batches are retried after transient network failures.
+  // The client-generated UUID makes each ping idempotent within its tenant;
+  // existing rows backfill from their already-unique primary key.
+  '252_technician_location_ping_idempotency': `
+    ALTER TABLE technician_location_pings
+      ADD COLUMN IF NOT EXISTS client_ping_id UUID;
+    UPDATE technician_location_pings
+      SET client_ping_id = id
+      WHERE client_ping_id IS NULL;
+    ALTER TABLE technician_location_pings
+      ALTER COLUMN client_ping_id SET NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_tlp_tenant_client_ping
+      ON technician_location_pings(tenant_id, client_ping_id);
+  `,
+
+  // QUALITY-2026-07-15 — (tenant_id, clerk_user_id) must be unique. Migration
+  // 249 + the Clerk user.created owner insert could both land a row for the
+  // same owner (249 has no unique guard; the webhook uses WHERE NOT EXISTS
+  // but races / replays still doubled). resolveAuthorization LIMIT 1 hid the
+  // dupes; Clerk public_metadata pointing at a phantom tenant_id then 403'd
+  // owners who DID have a real membership under tenants.owner_id. Dedupe,
+  // unique-index, and drop the non-unique predecessor from 248.
+  '253_users_tenant_clerk_unique': `
+    -- Session-scoped temps (migrate.js runs the corpus on one client with no
+    -- wrapping BEGIN). DROP at end so a re-run of the full corpus in the same
+    -- session does not collide on the temp relation names.
+    DROP TABLE IF EXISTS _user_dup_victims;
+    DROP TABLE IF EXISTS _user_dup_keepers;
+    CREATE TEMP TABLE _user_dup_keepers AS
+    SELECT DISTINCT ON (tenant_id, clerk_user_id)
+      id AS keep_id, tenant_id, clerk_user_id
+    FROM users
+    WHERE clerk_user_id IS NOT NULL
+    ORDER BY tenant_id, clerk_user_id, created_at ASC NULLS LAST, id ASC;
+
+    CREATE TEMP TABLE _user_dup_victims AS
+    SELECT u.id AS victim_id, k.keep_id
+    FROM users u
+    JOIN _user_dup_keepers k
+      ON k.tenant_id = u.tenant_id AND k.clerk_user_id = u.clerk_user_id
+    WHERE u.id <> k.keep_id;
+
+    UPDATE appointment_assignments a SET technician_id = v.keep_id
+    FROM _user_dup_victims v WHERE a.technician_id = v.victim_id;
+    UPDATE jobs j SET assigned_technician_id = v.keep_id
+    FROM _user_dup_victims v WHERE j.assigned_technician_id = v.victim_id;
+    UPDATE leads l SET assigned_user_id = v.keep_id
+    FROM _user_dup_victims v WHERE l.assigned_user_id = v.victim_id;
+    UPDATE tech_status_today t SET technician_id = v.keep_id
+    FROM _user_dup_victims v WHERE t.technician_id = v.victim_id;
+    UPDATE tech_unavailable_blocks t SET technician_id = v.keep_id
+    FROM _user_dup_victims v WHERE t.technician_id = v.victim_id;
+    UPDATE technician_working_hours t SET technician_id = v.keep_id
+    FROM _user_dup_victims v WHERE t.technician_id = v.victim_id;
+    UPDATE tenant_oncall_rotation t SET user_id = v.keep_id
+    FROM _user_dup_victims v WHERE t.user_id = v.victim_id;
+    UPDATE tenant_settings t SET backup_supervisor_user_id = v.keep_id
+    FROM _user_dup_victims v WHERE t.backup_supervisor_user_id = v.victim_id;
+    UPDATE voice_sessions vs SET supervisor_user_id = v.keep_id
+    FROM _user_dup_victims v WHERE vs.supervisor_user_id = v.victim_id;
+
+    DELETE FROM users u
+    USING _user_dup_victims v
+    WHERE u.id = v.victim_id;
+
+    DROP TABLE IF EXISTS _user_dup_victims;
+    DROP TABLE IF EXISTS _user_dup_keepers;
+
+    DROP INDEX IF EXISTS idx_users_tenant_clerk;
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_users_tenant_clerk
+      ON users (tenant_id, clerk_user_id);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
