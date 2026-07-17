@@ -132,9 +132,13 @@ describe('AssistantPage', () => {
     expect(screen.getByPlaceholderText('Ask anything or give a command…')).toBeInTheDocument();
   });
 
-  it('renders suggestion chips', () => {
+  it('renders generic, tenant-safe suggestion chips (no seed-data customer names)', () => {
     renderPage();
-    expect(screen.getByText('Invoice the Rodriguez job')).toBeInTheDocument();
+    // Prompts must not reference seed-data customers that don't exist for a
+    // real tenant (the earlier chips named Rodriguez/Thompson/Davis).
+    expect(screen.getByText("What's on today's schedule?")).toBeInTheDocument();
+    expect(screen.getByText('Add a new customer')).toBeInTheDocument();
+    expect(screen.queryByText('Invoice the Rodriguez job')).not.toBeInTheDocument();
   });
 
   it('does not query API when no conversationId in URL', () => {
@@ -153,7 +157,7 @@ describe('AssistantPage', () => {
     renderPage();
 
     // A suggestion chip funnels through the same send() path as typed input.
-    fireEvent.click(screen.getByText('Invoice the Rodriguez job'));
+    fireEvent.click(screen.getByText("What's on today's schedule?"));
 
     await waitFor(() => {
       expect(trackMock.mock.calls.some((c) => c[0] === 'assistant_message_sent')).toBe(true);
@@ -162,7 +166,7 @@ describe('AssistantPage', () => {
     expect(call[1]).toMatchObject({ input_mode: 'text', has_attachment: false });
     expect(typeof (call[1] as { length: number }).length).toBe('number');
     // never the message text
-    expect(JSON.stringify(call[1])).not.toContain('Rodriguez');
+    expect(JSON.stringify(call[1])).not.toContain('schedule');
   });
 });
 

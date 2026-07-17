@@ -6,7 +6,7 @@ import { firstNameFromUser } from '../../utils/greeting';
 import {
   Send, Mic, Paperclip, Sparkles, Check, Zap,
   Square, Image, FileText, X, ThumbsUp, ThumbsDown,
-  Copy, ChevronDown, Clock, Briefcase, Receipt, Calendar,
+  Copy, ChevronDown, Briefcase, Receipt, Calendar,
   AlertCircle, Volume2, VolumeX, PhoneCall,
 } from 'lucide-react';
 import { toast } from 'sonner';
@@ -48,22 +48,18 @@ function mapApiMessage(msg: ApiMessage): Message {
 let msgId = 200;
 const uid = () => `m${++msgId}`;
 
-// ─── Context strip data ─────────────────────────────────────────
-const TODAY_CONTEXT = [
-  { icon: Briefcase, label: '3 active', sub: 'jobs today',   color: 'text-green-600', bg: 'bg-green-50',  border: 'border-green-100' },
-  { icon: Receipt,   label: '$1,850',   sub: 'pending invoice', color: 'text-blue-600',  bg: 'bg-blue-50',   border: 'border-blue-100' },
-  { icon: AlertCircle,label: '2 items', sub: 'need attention',  color: 'text-amber-600', bg: 'bg-amber-50',  border: 'border-amber-100' },
-  { icon: Calendar,  label: '2 jobs',   sub: 'tomorrow',       color: 'text-violet-600',bg: 'bg-violet-50', border: 'border-violet-100' },
-];
-
 // ─── Suggestion chips ───────────────────────────────────────────
+// Generic, tenant-safe starter prompts. Each maps to a real assistant
+// capability (schedule/invoice/estimate queries, create-customer) and names
+// no specific customer or job. The earlier hard-coded prompts referenced
+// seed-data customers (Rodriguez/Thompson/Davis) that don't exist for a real
+// tenant, so they read as broken suggestions in production.
 const SUGGESTIONS = [
-  { text: 'Invoice the Rodriguez job',        icon: Receipt },
-  { text: 'Schedule Thompson exterior paint', icon: Calendar },
-  { text: 'Send follow-up to Davis',          icon: Send },
-  { text: "What's on tomorrow's schedule?",   icon: Clock },
-  { text: 'Who\'s free Thursday morning?',    icon: Briefcase },
-  { text: 'Any overdue invoices?',            icon: AlertCircle },
+  { text: "What's on today's schedule?",     icon: Calendar },
+  { text: 'Any overdue invoices?',           icon: Receipt },
+  { text: 'Which estimates are still open?', icon: FileText },
+  { text: 'Draft an estimate',               icon: Zap },
+  { text: 'Add a new customer',              icon: Briefcase },
 ];
 
 // ─── AI Conversation API ────────────────────────────────────────
@@ -1089,22 +1085,6 @@ export function AssistantPage() {
               <ChevronDown size={12} /> Context
             </button>
           </div>
-        </div>
-      </div>
-
-      {/* ── Today context strip ─────────────────────────────── */}
-      <div className="shrink-0 border-b border-slate-100 bg-white/80 px-4 md:px-6 py-2.5 backdrop-blur-sm">
-        <div className="max-w-3xl mx-auto flex gap-2 overflow-x-auto" style={{ scrollbarWidth: 'none' }}>
-          {TODAY_CONTEXT.map(({ icon: Icon, label, sub, color, bg, border }) => (
-            <div
-              key={sub}
-              className={`shrink-0 flex items-center gap-2 rounded-lg border px-2.5 py-1.5 ${bg} ${border}`}
-            >
-              <Icon size={12} className={color} />
-              <span className={`text-xs ${color}`}>{label}</span>
-              <span className="text-xs text-slate-400">{sub}</span>
-            </div>
-          ))}
         </div>
       </div>
 

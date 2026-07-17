@@ -41,7 +41,7 @@ export type CallingAgentEvent =
   | { type: 'caller_hangup' }
   | { type: 'call_status_updated'; status: string }
   | { type: 'recording_completed'; recordingUrl: string }
-  // In-app voice adapter events (frontend AssistantPage / VoiceUpdatePage → API)
+  // In-app voice adapter events (frontend AssistantPage → API)
   | { type: 'session_started'; userId: string; tenantId: string; conversationId: string }
   | { type: 'text_input'; text: string }
   | { type: 'session_ended' }
