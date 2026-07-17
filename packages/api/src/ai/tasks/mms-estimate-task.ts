@@ -43,6 +43,11 @@ import {
   lineItemConfidenceSignals,
   UNCATALOGUED_CONFIDENCE_CAP,
 } from '../resolution/catalog-resolver';
+import {
+  detectTierRequest,
+  normalizeTierStructure,
+  TIER_GUIDANCE_SECTION,
+} from '../resolution/tier-structure';
 import { TIER_KEYS, type TierKey } from '../skills/triage-rules.schema';
 
 /** Gateway task type — drives model routing to a vision-capable tier. */
@@ -136,13 +141,24 @@ export class MmsEstimateTaskHandler {
 
     const userContent = this.buildUserContent(input);
 
+    // EE-1 — request-only good-better-best. The "request" here is the
+    // customer's text body; a bare photo (no option/add-on cue) drafts flat
+    // with a byte-identical prompt path.
+    const tierSignals = detectTierRequest(input.message ?? '');
+    const systemMessages: Array<{ role: 'system'; content: string }> = [
+      { role: 'system', content: MMS_ESTIMATE_SYSTEM_PROMPT },
+    ];
+    if (tierSignals.tiersRequested || tierSignals.addOnsRequested) {
+      systemMessages.push({ role: 'system', content: TIER_GUIDANCE_SECTION });
+    }
+
     let rawContent: string;
     try {
       const llmResponse = await this.gateway.complete({
         taskType: MMS_ESTIMATE_TASK_TYPE,
         tenantId: input.tenantId,
         messages: [
-          { role: 'system', content: MMS_ESTIMATE_SYSTEM_PROMPT },
+          ...systemMessages,
           { role: 'user', content: userContent.content, parts: userContent.parts },
         ],
         responseFormat: 'json',
@@ -187,7 +203,13 @@ export class MmsEstimateTaskHandler {
         'unitPrice',
         this.catalogRepo ? () => this.catalogRepo!.listByTenant(input.tenantId) : null,
       );
-      payload.lineItems = catalogOutcome.lineItems;
+      // EE-1 — coerce any good-better-best tiers/add-ons into valid structure.
+      // Flag-only + runs AFTER grounding and BEFORE assertValidProposalPayload
+      // (below) so the structure refine sees normalized output; a no-op on flat
+      // drafts, and index-aligned with the confidence signals.
+      payload.lineItems = normalizeTierStructure(catalogOutcome.lineItems, {
+        addOnsRequested: tierSignals.addOnsRequested,
+      });
     }
 
     const confidence = assessConfidence(parsed);

@@ -637,6 +637,43 @@ describe('PublicEstimateService — Tier 4 deposit (PR 3b: before_approval gate 
     expect(after.depositStatus).toBe('paid');
   });
 
+  it('does not trap a paying customer who upgrades to a pricier tier (before_approval + good-better-best)', async () => {
+    await h.settings.update(TENANT, {
+      depositStrategy: 'percentage',
+      depositPercentageBps: 2500,
+      depositTimingPolicy: 'before_approval',
+    });
+    // Tiered estimate: the default (Good, 10,000) is the stored headline total,
+    // so the customer is QUOTED a 25% deposit of 2,500.
+    const j = (await h.job.findByTenant(TENANT))[0];
+    const est = makeEstimate(j.id, {
+      totals: {
+        subtotalCents: 10000, taxableSubtotalCents: 10000, discountCents: 0,
+        taxRateBps: 0, taxCents: 0, totalCents: 10000,
+      },
+      lineItems: [
+        { id: 'good', description: 'Good', quantity: 1, unitPriceCents: 10000, totalCents: 10000, sortOrder: 1, taxable: true, groupKey: 'tier', groupLabel: 'Plan', isOptional: true, isDefaultSelected: true },
+        { id: 'better', description: 'Better', quantity: 1, unitPriceCents: 20000, totalCents: 20000, sortOrder: 2, taxable: true, groupKey: 'tier', groupLabel: 'Plan', isOptional: true },
+      ],
+    });
+    await h.estimate.create(est);
+
+    // Customer paid exactly the quoted deposit (2,500), then upgrades to Better.
+    await h.job.update(TENANT, j.id, {
+      depositRequiredCents: 2500, depositPaidCents: 2500, depositStatus: 'paid',
+    });
+
+    // Must NOT block just because 25% of the selected 20,000 (5,000) exceeds the
+    // quoted 2,500 — the premium delta settles in the final invoice.
+    const view = await h.service.approve({
+      token: est.viewToken!,
+      acceptedByName: 'Sarah J',
+      selectedLineItemIds: ['better'],
+    });
+    expect(view.status).toBe('accepted');
+    expect(view.totalCents).toBe(20000); // accepted total still reflects the premium tier
+  });
+
   it('after_approval policy permits approve before any deposit is paid', async () => {
     await h.settings.update(TENANT, {
       depositStrategy: 'percentage',

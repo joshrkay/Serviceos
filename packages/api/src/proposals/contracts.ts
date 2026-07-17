@@ -206,18 +206,88 @@ const lineItemSchema = z
     catalogItemId: z.string().uuid().optional(),
     pricingSource: z.enum(['catalog', 'ambiguous', 'uncatalogued', 'manual']).optional(),
     needsPricing: z.boolean().optional(),
+    // Good-better-best grouping (estimates only; inert on invoices). Items
+    // sharing a non-null groupKey are mutually exclusive tiers; isOptional
+    // lines without a groupKey are standalone add-ons. Mirrors the persisted
+    // shape in packages/shared/src/contracts/money.ts. Declared here so the
+    // fields validate explicitly rather than surviving by non-stripping luck.
+    groupKey: z.string().optional(),
+    groupLabel: z.string().optional(),
+    isOptional: z.boolean().optional(),
+    isDefaultSelected: z.boolean().optional(),
   })
   .refine((li) => li.unitPrice !== undefined || li.unitPriceCents != null, {
     message: 'line item requires unitPrice or unitPriceCents',
   });
 
-export const draftEstimatePayloadSchema = z.object({
-  customerId: z.string().uuid(),
-  jobId: z.string().uuid().optional(),
-  lineItems: z.array(lineItemSchema).min(1),
-  notes: z.string().optional(),
-  validUntil: z.string().optional(),
-});
+/**
+ * Structural invariants for good-better-best tier groups on a drafted
+ * estimate, returned as human-readable messages (empty = valid). The
+ * drafting handlers coerce output to satisfy these via
+ * `normalizeTierStructure` (ai/resolution/tier-structure.ts); this is the
+ * backstop that keeps a hand-built or future-refactored payload from
+ * persisting a malformed group. The two MUST agree — a stricter check here
+ * than the normalizer produces would 400 a live draft.
+ *
+ * Invariants: each non-empty `groupKey` group has >= 2 options and exactly
+ * one `isDefaultSelected`; `isDefaultSelected` appears only on a selectable
+ * line (a tier option or an `isOptional` add-on), never on an always-billed
+ * line where it would be meaningless.
+ */
+export function tierStructureIssues(
+  lineItems: ReadonlyArray<{
+    groupKey?: string;
+    isOptional?: boolean;
+    isDefaultSelected?: boolean;
+  }>,
+): string[] {
+  const issues: string[] = [];
+  const groups = new Map<string, number[]>();
+
+  lineItems.forEach((li, i) => {
+    const gk = typeof li.groupKey === 'string' && li.groupKey.length > 0 ? li.groupKey : undefined;
+    if (gk) {
+      const arr = groups.get(gk) ?? [];
+      arr.push(i);
+      groups.set(gk, arr);
+    } else if (li.isDefaultSelected === true && li.isOptional !== true) {
+      issues.push(
+        `Line ${i} is default-selected but is neither a tier option nor an optional add-on`,
+      );
+    }
+  });
+
+  for (const [gk, indices] of groups) {
+    if (indices.length < 2) {
+      issues.push(`Tier group "${gk}" has only one option — a tier group needs at least two`);
+      continue;
+    }
+    const defaults = indices.filter((i) => lineItems[i].isDefaultSelected === true);
+    if (defaults.length !== 1) {
+      issues.push(`Tier group "${gk}" must have exactly one default option (found ${defaults.length})`);
+    }
+  }
+
+  return issues;
+}
+
+export const draftEstimatePayloadSchema = z
+  .object({
+    customerId: z.string().uuid(),
+    jobId: z.string().uuid().optional(),
+    lineItems: z.array(lineItemSchema).min(1),
+    notes: z.string().optional(),
+    validUntil: z.string().optional(),
+  })
+  // Backstop for good-better-best structure. Attached at the array level on
+  // the DRAFT schema only — the edit-action schema (updateEstimatePayloadSchema)
+  // validates one line at a time and has no group-level view, so it stays off
+  // that path.
+  .superRefine((val, ctx) => {
+    for (const message of tierStructureIssues(val.lineItems)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message, path: ['lineItems'] });
+    }
+  });
 
 // Edit-action schema for update_estimate proposals. Same discriminated
 // union shape as invoiceEditActionSchema below. Voice-driven estimate

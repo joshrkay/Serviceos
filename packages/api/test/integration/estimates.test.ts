@@ -5,7 +5,8 @@ import { PgEstimateRepository } from '../../src/estimates/pg-estimate';
 import { PgJobRepository } from '../../src/jobs/pg-job';
 import { PgCustomerRepository } from '../../src/customers/pg-customer';
 import { PgLocationRepository } from '../../src/locations/pg-location';
-import { buildLineItem, calculateDocumentTotals } from '../../src/shared/billing-engine';
+import { buildLineItem, calculateDocumentTotals, LineItem } from '../../src/shared/billing-engine';
+import { createEstimate } from '../../src/estimates/estimate';
 
 describe('Postgres integration — estimates', () => {
   let pool: Pool;
@@ -71,6 +72,36 @@ describe('Postgres integration — estimates', () => {
 
   afterAll(async () => {
     await closeSharedTestDb();
+  });
+
+  describe('EE-1 — good-better-best', () => {
+    it('persists all tier rows and headlines at the default selection', async () => {
+      const items: LineItem[] = [
+        { id: crypto.randomUUID(), description: 'Diagnostic', quantity: 1, unitPriceCents: 5000, totalCents: 5000, sortOrder: 0, taxable: false },
+        { id: crypto.randomUUID(), description: 'Builder heater', quantity: 1, unitPriceCents: 90000, totalCents: 90000, sortOrder: 1, taxable: false, groupKey: 'wh', groupLabel: 'Water heater', isOptional: true, isDefaultSelected: true },
+        { id: crypto.randomUUID(), description: 'Premium heater', quantity: 1, unitPriceCents: 140000, totalCents: 140000, sortOrder: 2, taxable: false, groupKey: 'wh', groupLabel: 'Water heater', isOptional: true, isDefaultSelected: false },
+        { id: crypto.randomUUID(), description: 'Surge protector', quantity: 1, unitPriceCents: 8000, totalCents: 8000, sortOrder: 3, taxable: false, isOptional: true, isDefaultSelected: false },
+      ];
+      const estimate = await createEstimate(
+        { tenantId: tenant.tenantId, jobId, estimateNumber: 'EST-GBB-1', lineItems: items, createdBy: tenant.userId },
+        estimateRepo,
+      );
+
+      // Round-trip through the real estimate_line_items columns (migration 127).
+      const found = await estimateRepo.findById(tenant.tenantId, estimate.id);
+      expect(found).not.toBeNull();
+      expect(found!.lineItems).toHaveLength(4);
+      const builder = found!.lineItems.find((li) => li.description === 'Builder heater')!;
+      expect(builder.groupKey).toBe('wh');
+      expect(builder.isOptional).toBe(true);
+      expect(builder.isDefaultSelected).toBe(true);
+      const premium = found!.lineItems.find((li) => li.description === 'Premium heater')!;
+      expect(premium.groupKey).toBe('wh');
+      expect(premium.isDefaultSelected).toBe(false);
+      // Headline total = Diagnostic (5000) + default Builder tier (90000) only —
+      // NOT the 243000 sum of every option + add-on.
+      expect(found!.totals.totalCents).toBe(95000);
+    });
   });
 
   describe('CRUD', () => {

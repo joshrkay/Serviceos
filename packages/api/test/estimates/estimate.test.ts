@@ -258,3 +258,56 @@ describe('7.10 — EstimateListOptions.jobIds filter', () => {
     expect(data.every((e) => e.jobId === 'job-A')).toBe(true);
   });
 });
+
+// ─── EE-1: default-selection headline totals ─────────────────────────────
+describe('EE-1 — default-selection headline totals', () => {
+  function tieredItems(): LineItem[] {
+    return [
+      { id: 'a', description: 'Diagnostic', quantity: 1, unitPriceCents: 5000, totalCents: 5000, sortOrder: 0, taxable: false },
+      { id: 'b', description: 'Builder heater', quantity: 1, unitPriceCents: 90000, totalCents: 90000, sortOrder: 1, taxable: false, groupKey: 'wh', groupLabel: 'Water heater', isOptional: true, isDefaultSelected: true },
+      { id: 'c', description: 'Premium heater', quantity: 1, unitPriceCents: 140000, totalCents: 140000, sortOrder: 2, taxable: false, groupKey: 'wh', groupLabel: 'Water heater', isOptional: true, isDefaultSelected: false },
+      { id: 'd', description: 'Surge protector', quantity: 1, unitPriceCents: 8000, totalCents: 8000, sortOrder: 3, taxable: false, isOptional: true, isDefaultSelected: false },
+    ];
+  }
+
+  it('headlines a tiered estimate at the default selection, not the sum of all options', async () => {
+    const repo = new InMemoryEstimateRepository();
+    const estimate = await createEstimate(
+      { tenantId: 'tenant-1', jobId: 'job-1', estimateNumber: 'EST-T1', lineItems: tieredItems(), createdBy: 'u-1' },
+      repo,
+    );
+    // Diagnostic (5000, always billed) + Builder heater (90000, default tier).
+    // The Premium tier (140000) and off-by-default add-on (8000) are excluded.
+    expect(estimate.totals.subtotalCents).toBe(95000);
+    expect(estimate.totals.totalCents).toBe(95000);
+    // …but every option/add-on row is still persisted.
+    expect(estimate.lineItems).toHaveLength(4);
+  });
+
+  it('leaves a flat estimate total unchanged (sum of all lines)', async () => {
+    const repo = new InMemoryEstimateRepository();
+    const flat: LineItem[] = [
+      { id: 'a', description: 'Diagnostic', quantity: 1, unitPriceCents: 5000, totalCents: 5000, sortOrder: 0, taxable: false },
+      { id: 'b', description: 'Labor', quantity: 2, unitPriceCents: 5000, totalCents: 10000, sortOrder: 1, taxable: false },
+    ];
+    const estimate = await createEstimate(
+      { tenantId: 'tenant-1', jobId: 'job-1', estimateNumber: 'EST-F1', lineItems: flat, createdBy: 'u-1' },
+      repo,
+    );
+    expect(estimate.totals.totalCents).toBe(15000);
+    expect(estimate.lineItems).toHaveLength(2);
+  });
+
+  it('keeps the default-selection total when a tiered estimate is updated (not re-inflated)', async () => {
+    const repo = new InMemoryEstimateRepository();
+    const created = await createEstimate(
+      { tenantId: 'tenant-1', jobId: 'job-1', estimateNumber: 'EST-T2', lineItems: tieredItems(), createdBy: 'u-1' },
+      repo,
+    );
+    expect(created.totals.totalCents).toBe(95000);
+    // An unrelated edit must not re-sum every option back into the headline.
+    const updated = await updateEstimate('tenant-1', created.id, { internalNotes: 'call first' }, repo);
+    expect(updated!.totals.totalCents).toBe(95000);
+    expect(updated!.lineItems).toHaveLength(4);
+  });
+});
