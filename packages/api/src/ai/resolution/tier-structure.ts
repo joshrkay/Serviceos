@@ -43,6 +43,49 @@
 
 type DraftLine = Record<string, unknown>;
 
+export interface TierRequestSignals {
+  /** The request asked for tiered choices (good-better-best). */
+  tiersRequested: boolean;
+  /** The request asked for optional add-ons / extras. */
+  addOnsRequested: boolean;
+}
+
+// Cues that the customer wants tiered CHOICES. Deliberately conservative —
+// only explicit option/tier language fires, so a plain "replace the water
+// heater" stays a flat draft and the prompt path is byte-identical (R7).
+const TIER_CUES: RegExp[] = [
+  /good[\s,/-]+better[\s,/-]+best/i,
+  /\bg\s*\/\s*b\s*\/\s*b\b/i,
+  /\btier(?:s|ed)?\b/i,
+  /\boptions?\b/i,
+  /\bpackages?\b/i,
+  /\bchoices?\b/i,
+  /good[\s,/-]+better\b/i,
+];
+
+// Cues for standalone optional add-ons / upsells.
+const ADDON_CUES: RegExp[] = [
+  /\badd[\s-]?ons?\b/i,
+  /\bupsell\b/i,
+  /\boptional (?:extra|add|upgrade|item|line)/i,
+  /\balso offer\b/i,
+];
+
+/**
+ * Detect whether a drafting request calls for tiered options and/or optional
+ * add-ons. Drives BOTH the conditional tier-guidance prompt injection (so the
+ * flat path stays byte-identical) and the normalizer's `addOnsRequested`
+ * signal. Text-only heuristic — request-triggered by design (see the EE-1
+ * plan): the drafting LLM cannot see the catalog, so we never proactively tier.
+ */
+export function detectTierRequest(message: string): TierRequestSignals {
+  const text = message ?? '';
+  return {
+    tiersRequested: TIER_CUES.some((re) => re.test(text)),
+    addOnsRequested: ADDON_CUES.some((re) => re.test(text)),
+  };
+}
+
 export interface NormalizeTierOptions {
   /**
    * True when the drafting request explicitly asked for optional add-ons
