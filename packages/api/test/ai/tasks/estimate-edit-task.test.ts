@@ -29,6 +29,8 @@ import {
   createCatalogItem,
 } from '../../../src/catalog/catalog-item';
 import { UNCATALOGUED_CONFIDENCE_CAP } from '../../../src/ai/resolution/catalog-resolver';
+import { approveProposal } from '../../../src/proposals/actions';
+import { InMemoryProposalRepository } from '../../../src/proposals/proposal';
 
 function mockGateway(jsonContent: string): LLMGateway {
   return {
@@ -152,7 +154,15 @@ describe('EstimateEditTaskHandler', () => {
       message: 'add a fee',
       conversationId: 'conv-7',
     });
-    expect(result.proposal.sourceContext).toEqual({ conversationId: 'conv-7' });
+    // PR review finding (2026-07): a free-text estimateReference with no
+    // estimateRepo wired now gates missingFields — this proposal used to
+    // be silently approvable and then fail at execution (doomed-approval
+    // → gated is strictly safer; see the "estimateId resolution" describe
+    // block below).
+    expect(result.proposal.sourceContext).toEqual({
+      conversationId: 'conv-7',
+      missingFields: ['estimateId'],
+    });
   });
 
   it('sends update_estimate as the LLM task type', async () => {
@@ -173,6 +183,182 @@ describe('EstimateEditTaskHandler', () => {
     const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
     expect(call.taskType).toBe('update_estimate');
     expect(call.responseFormat).toBe('json');
+  });
+
+  // PR review finding (2026-07): UpdateEstimateExecutionHandler
+  // (proposals/execution/update-estimate-handler.ts) strictly requires
+  // payload.estimateId to already be a string id and has no reference
+  // resolution of its own. Previously this handler never gated
+  // missingFields on a free-text estimateReference, so "add a trip fee to
+  // the Johnson estimate" was approvable straight from drafting and
+  // execution then failed on the unresolved reference. Mirrors the
+  // update_invoice fix (InvoiceEditTaskHandler.resolveInvoiceId in
+  // invoice-edit-task.ts): reference resolution now runs at drafting time
+  // via resolveEstimateIdGate (which reuses resolveTargetEstimate's
+  // search — the same one that powers the RV-042 marker above) and an
+  // unresolved reference gates the proposal.
+  describe('estimateId resolution / missingFields gating', () => {
+    function makeEstimate(overrides: Partial<Estimate> = {}): Estimate {
+      const lineItems: LineItem[] = [
+        buildLineItem('li-1', 'Service call', 1, 12500, 0, true, 'labor'),
+      ];
+      return {
+        id: 'est-1',
+        tenantId,
+        jobId: 'job-1',
+        estimateNumber: 'EST-0001',
+        status: 'draft',
+        lineItems,
+        totals: calculateDocumentTotals(lineItems, 0, 0),
+        version: 1,
+        createdBy: userId,
+        createdAt: new Date('2026-07-01T00:00:00Z'),
+        updatedAt: new Date('2026-07-01T00:00:00Z'),
+        ...overrides,
+      };
+    }
+
+    function editGateway(estimateReference = 'EST-0001'): LLMGateway {
+      return mockGateway(
+        JSON.stringify({
+          estimateReference,
+          editActions: [
+            { type: 'add_line_item', lineItem: { description: 'Trip fee', quantity: 1, unitPrice: 7500 } },
+          ],
+          confidence_score: 0.9,
+        }),
+      );
+    }
+
+    it('an unresolvable free-text reference (no estimateRepo wired) gates missingFields and blocks approval', async () => {
+      const proposalRepo = new InMemoryProposalRepository();
+      const handler = new EstimateEditTaskHandler(editGateway());
+      const result = await handler.handle({
+        tenantId,
+        userId,
+        message: 'Add a trip fee to the Johnson estimate',
+      });
+
+      const payload = result.proposal.payload as Record<string, unknown>;
+      expect(payload.estimateId).toBeUndefined();
+      expect(payload.estimateReference).toBe('EST-0001');
+      expect(result.proposal.sourceContext).toMatchObject({ missingFields: ['estimateId'] });
+
+      await proposalRepo.create(result.proposal);
+      await expect(
+        approveProposal(proposalRepo, tenantId, result.proposal.id, userId, 'owner'),
+      ).rejects.toThrow(/unfilled required fields/);
+    });
+
+    it('a reference that resolves to exactly one estimate via estimateRepo search is stamped onto payload.estimateId, but STAYS gated', async () => {
+      // See resolveEstimateIdGate's doc comment in estimate-edit-task.ts:
+      // a search-resolved id is deliberately still gated because
+      // assistant.ts's dropUnverifiedIds strips any id-shaped payload
+      // field that isn't literally present in the operator's raw text —
+      // a DB-resolved id from a free-text search never is. Only a
+      // reference that is already a literal UUID is trusted to bypass
+      // review (next test).
+      const estimateRepo = new InMemoryEstimateRepository();
+      const estimate = await estimateRepo.create(makeEstimate());
+
+      const proposalRepo = new InMemoryProposalRepository();
+      const handler = new EstimateEditTaskHandler(editGateway(), estimateRepo);
+      const result = await handler.handle({
+        tenantId,
+        userId,
+        message: 'Add a trip fee to EST-0001',
+      });
+
+      const payload = result.proposal.payload as Record<string, unknown>;
+      expect(payload.estimateId).toBe(estimate.id);
+      expect(payload.estimateReference).toBe('EST-0001');
+      expect(result.proposal.sourceContext).toMatchObject({ missingFields: ['estimateId'] });
+
+      await proposalRepo.create(result.proposal);
+      await expect(
+        approveProposal(proposalRepo, tenantId, result.proposal.id, userId, 'owner'),
+      ).rejects.toThrow(/unfilled required fields/);
+    });
+
+    it('an ambiguous reference (>1 match via estimateRepo search) gates missingFields and does not set estimateId', async () => {
+      const estimateRepo = new InMemoryEstimateRepository();
+      // Same estimate number on two rows is the simplest way to force >1
+      // search hits for this in-memory repo's ILIKE-style match.
+      await estimateRepo.create(makeEstimate({ id: 'est-1', estimateNumber: 'EST-0001' }));
+      await estimateRepo.create(makeEstimate({ id: 'est-2', estimateNumber: 'EST-0001' }));
+
+      const handler = new EstimateEditTaskHandler(editGateway(), estimateRepo);
+      const result = await handler.handle({
+        tenantId,
+        userId,
+        message: 'Add a trip fee to EST-0001',
+      });
+
+      const payload = result.proposal.payload as Record<string, unknown>;
+      expect(payload.estimateId).toBeUndefined();
+      expect(result.proposal.sourceContext).toMatchObject({ missingFields: ['estimateId'] });
+    });
+
+    it('an already-UUID reference lands directly on payload.estimateId with no gate', async () => {
+      const proposalRepo = new InMemoryProposalRepository();
+      const uuidRef = '00000000-0000-4000-8000-000000000001';
+      const handler = new EstimateEditTaskHandler(editGateway(uuidRef));
+      const result = await handler.handle({
+        tenantId,
+        userId,
+        message: `Add a trip fee to estimate ${uuidRef}`,
+      });
+
+      const payload = result.proposal.payload as Record<string, unknown>;
+      expect(payload.estimateId).toBe(uuidRef);
+      expect(result.proposal.sourceContext ?? {}).not.toHaveProperty('missingFields');
+
+      // Approval is not blocked by a missing estimateId (may still be
+      // gated by other rules, e.g. uncatalogued pricing — not the concern
+      // of this test); the key assertion is missingFields is absent.
+      await proposalRepo.create(result.proposal);
+    });
+
+    it('a reference that matches zero estimates gates missingFields and does not set estimateId', async () => {
+      const estimateRepo = new InMemoryEstimateRepository();
+      // Repo has estimates, but none matching "EST-0001".
+      await estimateRepo.create(makeEstimate({ id: 'est-9', estimateNumber: 'EST-9999' }));
+
+      const handler = new EstimateEditTaskHandler(editGateway(), estimateRepo);
+      const result = await handler.handle({
+        tenantId,
+        userId,
+        message: 'Add a trip fee to EST-0001',
+      });
+
+      const payload = result.proposal.payload as Record<string, unknown>;
+      expect(payload.estimateId).toBeUndefined();
+      expect(result.proposal.sourceContext).toMatchObject({ missingFields: ['estimateId'] });
+    });
+
+    it('the RV-042 acceptance-void marker still fires alongside the new estimateId gating', async () => {
+      // Proves the two behaviors compose: an accepted estimate resolved via
+      // free-text search gets BOTH the acceptance-void marker (RV-042,
+      // review-time visibility) AND missingFields: ['estimateId'] (this
+      // fix, approval gating) — neither suppresses the other.
+      const estimateRepo = new InMemoryEstimateRepository();
+      await estimateRepo.create(
+        makeEstimate({ status: 'accepted', acceptedAt: new Date('2026-06-05T12:00:00Z') }),
+      );
+
+      const handler = new EstimateEditTaskHandler(editGateway(), estimateRepo);
+      const result = await handler.handle({
+        tenantId,
+        userId,
+        message: 'Add a trip fee to EST-0001',
+      });
+
+      const payload = result.proposal.payload as Record<string, unknown>;
+      expect(payload.estimateId).toBe('est-1');
+      const meta = payload._meta as { markers?: Array<{ path: string; reason: string }> } | undefined;
+      expect(meta?.markers).toContainEqual(ACCEPTANCE_VOID_MARKER);
+      expect(result.proposal.sourceContext).toMatchObject({ missingFields: ['estimateId'] });
+    });
   });
 
   describe('RV-042 — acceptance-void marker at proposal creation', () => {
@@ -351,10 +537,11 @@ describe('EstimateEditTaskHandler', () => {
     function editResponse(
       lineItem: Record<string, unknown>,
       confidence = 0.9,
+      estimateReference = 'EST-0001',
     ): LLMGateway {
       return mockGateway(
         JSON.stringify({
-          estimateReference: 'EST-0001',
+          estimateReference,
           editActions: [{ type: 'add_line_item', lineItem }],
           confidence_score: confidence,
         }),
@@ -377,6 +564,16 @@ describe('EstimateEditTaskHandler', () => {
         // 15050 is within 100¢ of the catalog's 15000 → snap, not a conflict.
         { description: 'site visit', quantity: 1, unitPrice: 15050 },
         0.9,
+        // PR review finding (2026-07): a free-text estimateReference
+        // ("EST-0001") now gates missingFields: ['estimateId'] regardless
+        // of confidence (UpdateEstimateExecutionHandler has no reference
+        // resolution of its own — see resolveEstimateIdGate in
+        // estimate-edit-task.ts). This test's purpose is catalog-pricing
+        // auto-approval behavior, not estimateId resolution, so it uses an
+        // already-resolved UUID reference — exactly what
+        // resolveEstimateIdGate treats as "already a resolved id" — to
+        // keep the estimateId gate out of the picture.
+        '00000000-0000-4000-8000-000000000001',
       );
       const handler = new EstimateEditTaskHandler(gateway, undefined, repo);
       const result = await handler.handle({ tenantId, userId, message: 'edit', ...supervised });

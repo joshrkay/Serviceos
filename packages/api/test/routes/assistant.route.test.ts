@@ -23,6 +23,8 @@ import { InMemoryConversationRepository } from '../../src/conversations/conversa
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
 import { InMemoryInvoiceRepository, createInvoice } from '../../src/invoices/invoice';
+import { InMemoryEstimateRepository, createEstimate } from '../../src/estimates/estimate';
+import { buildLineItem } from '../../src/shared/billing-engine';
 
 const TEST_TENANT = 'tenant-ast-01b';
 const TEST_USER = 'user-ast-01b';
@@ -1140,5 +1142,138 @@ describe('money-path handler wiring — update_estimate is catalog-grounded (bot
         expect.objectContaining({ path: 'editActions[0].lineItem.unitPrice' }),
       ]),
     );
+  });
+});
+
+// PR review finding (2026-07): sibling of the update_invoice gating fix
+// (see the "money-path handler wiring — update_invoice/send_invoice/
+// issue_invoice" describe block above). UpdateEstimateExecutionHandler
+// (proposals/execution/update-estimate-handler.ts) requires
+// payload.estimateId to ALREADY be a resolved id and has no
+// reference-resolution step of its own. EstimateEditTaskHandler used to
+// leave missingFields empty for any free-text estimateReference
+// ("EST-0001", never an id), so this proposal was approvable straight
+// from the assistant surface and execution would then fail on the
+// unresolved reference. See resolveEstimateIdGate in
+// ai/tasks/estimate-edit-task.ts for the fix.
+describe('update_estimate target resolution / missingFields gating', () => {
+  function buildAppFor(gateway: LLMGateway, proposalRepo: InMemoryProposalRepository) {
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: TEST_USER,
+        sessionId: 'sess-1',
+        tenantId: TEST_TENANT,
+        role: 'owner',
+      };
+      next();
+    });
+    app.use('/api/assistant', createAssistantRouter({ gateway, proposalRepo }));
+    return app;
+  }
+
+  it('single-intent path: a reference-only update_estimate (estimate number, no estimateRepo wired) is gated with missingFields so it cannot be approved unresolved', async () => {
+    const gateway = scriptedGateway([
+      JSON.stringify({ intentType: 'update_estimate', confidence: 0.9, extractedEntities: {} }),
+      JSON.stringify({
+        estimateReference: 'EST-0001',
+        editActions: [
+          { type: 'add_line_item', lineItem: { description: 'Trip fee', quantity: 1, unitPrice: 7500 } },
+        ],
+        confidence_score: 0.9,
+      }),
+    ]);
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildAppFor(gateway, proposalRepo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Add a trip fee to estimate EST-0001' }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.message.proposal.missingFields).toEqual(['estimateId']);
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted[0].payload).not.toHaveProperty('estimateId');
+    await expect(
+      approveProposal(proposalRepo, TEST_TENANT, persisted[0].id, TEST_USER, 'owner'),
+    ).rejects.toThrow(/unfilled required fields/);
+  });
+
+  // Regression test for the same landmine caught while building the
+  // update_invoice fix: dropUnverifiedIds (routes/assistant.ts) deletes any
+  // id-shaped payload field (jobId/customerId/estimateId/invoiceId/
+  // appointmentId) that isn't literally present in the operator's raw
+  // text/classifier entities — it exists to catch LLM-hallucinated ids and
+  // can't tell those apart from a genuinely repo-verified estimateId. A
+  // naive "resolved via estimateRepo search ⇒ ungated" design would have
+  // this route silently strip the resolved estimateId while leaving
+  // missingFields empty, reintroducing the exact doomed-approval bug on
+  // this surface only. EstimateEditTaskHandler therefore only lifts the
+  // gate when the reference/id is ALREADY a literal UUID (guaranteed to
+  // survive dropUnverifiedIds); a free-text reference stays gated even
+  // when estimateRepo resolves it unambiguously.
+  it('single-intent path: an unambiguous estimateRepo match for a free-text reference still gates (dropUnverifiedIds would silently strip a resolved id)', async () => {
+    const estimateRepo = new InMemoryEstimateRepository();
+    // createEstimate (not a manually-assigned short id) so the persisted
+    // estimate.id is a real uuidv4 — dropUnverifiedIds only strips
+    // id-shaped payload fields of length >= 32, so the test needs a
+    // realistic id to actually exercise the landmine it's regression
+    // testing (same reason the update_invoice regression test above uses
+    // createInvoice rather than a hand-rolled short id).
+    const estimate = await createEstimate(
+      {
+        tenantId: TEST_TENANT,
+        jobId: 'job-1',
+        estimateNumber: 'EST-0001',
+        lineItems: [buildLineItem('li-1', 'Service call', 1, 10000, 0, true, 'labor')],
+        taxRateBps: 0,
+        createdBy: TEST_USER,
+      },
+      estimateRepo,
+    );
+
+    const gateway = scriptedGateway([
+      JSON.stringify({ intentType: 'update_estimate', confidence: 0.9, extractedEntities: {} }),
+      JSON.stringify({
+        estimateReference: 'EST-0001',
+        editActions: [
+          { type: 'add_line_item', lineItem: { description: 'Trip fee', quantity: 1, unitPrice: 7500 } },
+        ],
+        confidence_score: 0.9,
+      }),
+    ]);
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: TEST_USER,
+        sessionId: 'sess-1',
+        tenantId: TEST_TENANT,
+        role: 'owner',
+      };
+      next();
+    });
+    app.use('/api/assistant', createAssistantRouter({ gateway, proposalRepo, estimateRepo }));
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Add a trip fee to estimate EST-0001' }] });
+
+    expect(res.status).toBe(200);
+    // Still gated — never approvable straight from drafting, regardless of
+    // whether estimateRepo could resolve the reference.
+    expect(res.body.message.proposal.missingFields).toEqual(['estimateId']);
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    // dropUnverifiedIds strips the search-resolved estimateId (not
+    // literally in the operator's text) — proving the id never reaches
+    // persistence unverified on this surface, which is exactly why the
+    // gate can't depend on it.
+    expect(persisted[0].payload).not.toHaveProperty('estimateId');
+    expect(estimate.id).toBeTruthy();
+    await expect(
+      approveProposal(proposalRepo, TEST_TENANT, persisted[0].id, TEST_USER, 'owner'),
+    ).rejects.toThrow(/unfilled required fields/);
   });
 });
