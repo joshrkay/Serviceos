@@ -84,7 +84,7 @@ EE-2 → EE-3 (margin) → EE-4 (visuals) → EE-5 (cadence).
 | AI Buildability | Medium |
 | Human Review | Heavy (money + AI behaviour) |
 | Dependencies | Shipped GBB schema + customer selection UI + catalog grounding (no new deps) |
-| Allowed Files | `packages/api/src/ai/tasks/estimate-task.ts`, `packages/api/src/ai/tasks/mms-estimate-task.ts`, `packages/api/src/ai/clarification/estimate-clarification.ts`, `packages/api/test/ai/estimate-task.test.ts`, `packages/api/test/ai/tasks/mms-estimate-task.test.ts` |
+| Allowed Files | New `packages/api/src/ai/resolution/tier-structure.ts` (normalizer + request detector); `packages/api/src/ai/tasks/estimate-task.ts`; `packages/api/src/ai/tasks/mms-estimate-task.ts`; `packages/api/src/proposals/contracts.ts` (grouping fields + draft-refine); `packages/api/src/estimates/estimate.ts` (default-selection totals); `packages/web/src/components/inbox/InboxPage.tsx` (operator grouped review); plus the co-located tests. See the authoritative per-unit file list in `docs/plans/2026-07-17-001-feat-ai-good-better-best-estimates-plan.md`. |
 
 **Build prompt:** Teach `draft_estimate` (and the MMS/photo estimate handler) to
 optionally emit **tiered options** and **optional add-ons** into the existing
