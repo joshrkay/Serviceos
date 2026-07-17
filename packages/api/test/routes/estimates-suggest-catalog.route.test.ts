@@ -31,8 +31,10 @@ const TENANT_ID = 'tenant-suggest-1';
 const USER_ID = 'user-suggest-1';
 
 // The LLM invents a price that is NOT the catalog price. Grounding must
-// overwrite it with the real catalog unitPriceCents (7500).
-const LLM_INVENTED_PRICE = 99999;
+// overwrite it with the real catalog unitPriceCents (7500). Must stay within
+// PRICE_CONFLICT tolerance of the catalog price — a larger deviation is a
+// "did you mean" conflict (surfaced for one-tap resolution), not a snap.
+const LLM_INVENTED_PRICE = 7440;
 const CATALOG_PRICE = 7500;
 
 function makeGateway(): LLMGateway {

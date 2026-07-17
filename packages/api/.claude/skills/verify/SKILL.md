@@ -57,3 +57,19 @@ NODE_ENV=dev DEV_AUTH_BYPASS=true PORT=3101 LOG_LEVEL=warn EMAIL_ENABLED=false \
 - Session continuation: `/voice` then `POST /voice/gather-fallback` with the
   same CallSid → repair-prompt Gather TwiML whose action re-enters
   `/gather?sid=<same session id>`.
+- Full async voice pipeline WITHOUT any AI keys (dev-fallback STT makes this
+  work end-to-end in-memory): forge an unsigned JWT (`{"alg":"none"}` header,
+  body with `sub`/`email`/far-future `exp`, any signature segment — the
+  DEV_AUTH_BYPASS decoder doesn't verify) and send it as Bearer. Then
+  `POST /api/files/upload-url` (JSON: filename/contentType/sizeBytes) →
+  `POST /api/voice/recordings` `{fileId, audioUrl}` (202) → the in-process
+  transcription worker stamps a `[Dev mode]` placeholder transcript →
+  voice-action-router consumes it, the classifier degrades to 0.2/unknown
+  with no LLM gateway, and a `voice_clarification` proposal appears in
+  `GET /api/proposals` within ~1s. Whole recording→router→proposal seam,
+  observable at HTTP. LLM-dependent branches past classification (entity
+  annotate, handlers) still need a real gateway key.
+- `POST /api/voice/stream-token` failure matrix: no `DEEPGRAM_API_KEY` →
+  503 `NOT_CONFIGURED`; a fake key → Deepgram REST really returns 403 →
+  503 "Member permissions" (permission_denied branch). The provider_error
+  502 branch needs a network-level failure — not reachable by env alone.

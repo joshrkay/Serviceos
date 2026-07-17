@@ -315,7 +315,9 @@ describe('P22-001 invoice-edit-catalog', () => {
       const [gasket] = await seedCatalog(repo, TENANT, [{ name: 'Gasket', unitPriceCents: 450 }]);
 
       const gateway = mockGateway(
-        draftResponse([{ description: 'gaskets', quantity: 3, unitPrice: 9999 }]),
+        // 460 is within PRICE_CONFLICT_MIN_ABS_CENTS (100¢) of the catalog's
+        // 450 — a snap/overwrite, not a "did you mean" price conflict.
+        draftResponse([{ description: 'gaskets', quantity: 3, unitPrice: 460 }]),
       );
       const handler = new InvoiceTaskHandler(gateway, { catalogRepo: repo });
       const result = await handler.handle({ tenantId: TENANT, userId: 'u-1', message: 'invoice it' });
@@ -347,6 +349,41 @@ describe('P22-001 invoice-edit-catalog', () => {
       const payload = result.proposal.payload as { lineItems: Array<Record<string, unknown>> };
       expect(payload.lineItems[0].needsPricing).toBe(true);
       expect(payload.lineItems[0].catalogItemId).toBeUndefined();
+    });
+
+    // requiresReview (structural gate on CatalogPricingOutcome) is anyUncatalogued
+    // OR missingFields.length > 0. An ambiguous-only line (never uncatalogued)
+    // proves the gate now drives `_meta.overallConfidence`, not just proposal
+    // status via missingFields — a reviewer must never see "high confidence" on
+    // a line that needs an operator pick.
+    it('an ambiguous-only line keeps score-derived confidence (gated by missingFields, not a sticky low stamp)', async () => {
+      const repo = new InMemoryCatalogItemRepository();
+      await seedCatalog(repo, TENANT, [
+        { name: 'Ball Valve', unitPriceCents: 3200 },
+        { name: 'Gate Valve', unitPriceCents: 4100 },
+      ]);
+
+      // draftResponse defaults confidence_score to 0.9, which maps to 'high'
+      // — and must STAY 'high' for an ambiguous-only line: a persisted 'low'
+      // stamp is never lifted by line resolution, so it would keep blocking
+      // chain-set/SMS approval after the operator picks a candidate.
+      const gateway = mockGateway(
+        draftResponse([{ description: 'valve', quantity: 1, unitPrice: 3500 }]),
+      );
+      const handler = new InvoiceTaskHandler(gateway, { catalogRepo: repo });
+      const result = await handler.handle({ tenantId: TENANT, userId: 'u-1', message: 'invoice it' });
+
+      const payload = result.proposal.payload as {
+        lineItems: Array<Record<string, unknown>>;
+        _meta?: { overallConfidence?: string };
+      };
+      expect(payload.lineItems[0].pricingSource).toBe('ambiguous');
+      // Not uncatalogued — the LLM's high self-reported confidence is NOT
+      // pulled down by the UNCATALOGUED_CONFIDENCE_CAP path.
+      expect(result.proposal.confidenceFactors).not.toContain('uncatalogued_line_item');
+      // The stamp stays score-derived; the structural gate is missingFields.
+      expect(payload._meta?.overallConfidence).toBe('high');
+      expect(result.proposal.status).not.toBe('approved');
     });
 
     // Money-safety regression (bug: empty/unwired/erroring catalog silently

@@ -34,14 +34,16 @@ class EstimateMockGateway extends LLMGateway {
       };
     }
     if (request.taskType === 'draft_estimate') {
-      // The LLM invents $50; the catalog must override it to $1,850.
+      // The LLM drafts $1,830 (within PRICE_CONFLICT tolerance of the
+      // catalog's $1,850 — a larger deviation would surface a "did you
+      // mean" conflict instead); the catalog must override it to $1,850.
       return {
         ...base,
         content: JSON.stringify({
           customerName: 'Jane Smith',
           summary: 'Water heater estimate',
           confidence_score: 0.9,
-          lineItems: [{ description: 'Water heater install', unitPrice: 5000 }],
+          lineItems: [{ description: 'Water heater install', unitPrice: 183000 }],
         }),
       };
     }
