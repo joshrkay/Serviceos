@@ -140,6 +140,35 @@ describe('POST /api/assistant/chat — create_customer path', () => {
     expect(byKey.phone).toBe('');
   });
 
+  it('asks for the name (no proposal) when create_customer is classified without one', async () => {
+    // The "Add a new customer" suggestion chip sends bare text that classifies
+    // as create_customer with NO extracted name. Drafting an empty-payload
+    // proposal is a dead-end — it either approves into a hard execution failure
+    // ("Payload must include a non-empty name"), or a missingFields marker
+    // blocks Approve with no way to clear it (editProposal touches payload only,
+    // so approveProposal keeps rejecting). So the assistant asks for the name
+    // instead of persisting a proposal.
+    const gateway = scriptedGateway([
+      JSON.stringify({
+        intentType: 'create_customer',
+        confidence: 0.9,
+        extractedEntities: {},
+      }),
+    ]);
+    const app = buildApp(gateway, proposalRepo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Add a new customer' }] });
+
+    expect(res.status).toBe(200);
+    // No proposal is drafted or persisted — nothing to approve into a failure.
+    expect(res.body?.message?.proposal).toBeUndefined();
+    expect(await proposalRepo.findByTenant(TEST_TENANT)).toHaveLength(0);
+    // Instead the assistant asks for the customer's name conversationally.
+    expect(res.body?.message?.content).toMatch(/name/i);
+  });
+
   // §3B/3D/3E — assistant chat must thread the vertical resolver
   // through to the classifier so the operator's text commands see the
   // same HVAC/plumbing terminology the voice path already gets.
