@@ -893,6 +893,43 @@ describe('voice-action-router worker', () => {
     );
   });
 
+  // B7 (feat: voice-transcript-and-agent-paths) — update_job. The task
+  // handler makes its own dedicated LLM call to extract the field delta, so
+  // this needs a SECOND scripted gateway response after classify_intent.
+  it('routes update_job when the classifier returns a jobReference, gated on jobId (no jobRepo wired)', async () => {
+    const gateway = gatewayReturning([
+      JSON.stringify({
+        intentType: 'update_job',
+        confidence: 0.9,
+        extractedEntities: { jobReference: 'the Henderson job' },
+      }),
+      JSON.stringify({
+        jobReference: 'the Henderson job',
+        status: 'in_progress',
+        confidence_score: 0.9,
+      }),
+    ]);
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+
+    await worker.handle(
+      msg({
+        tenantId: 't-1',
+        userId: 'u-1',
+        transcript: 'Mark the Henderson job in progress',
+      }),
+      silentLogger()
+    );
+
+    const byTenant = await proposalRepo.findByTenant('t-1');
+    expect(byTenant).toHaveLength(1);
+    expect(byTenant[0].proposalType).toBe('update_job');
+    const payload = byTenant[0].payload as Record<string, unknown>;
+    expect(payload.status).toBe('in_progress');
+    expect(byTenant[0].sourceContext?.missingFields).toEqual(
+      expect.arrayContaining(['jobId'])
+    );
+  });
+
   it('passes tenantId to the gateway in request metadata', async () => {
     const completeMock = vi.fn(async (_request: unknown) => ({
       content: JSON.stringify({ intentType: 'create_invoice', confidence: 0.9 }),

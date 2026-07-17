@@ -26,7 +26,7 @@ exist today.
 
 ## A) Speakable today — intent + proposal + execution handler all exist
 
-These 34 actions can be spoken, drafted as a proposal, approved, and executed.
+These 35 actions can be spoken, drafted as a proposal, approved, and executed.
 "Persistence proof" = a Docker-gated integration test that proves the row +
 audit event actually land in Postgres (vs. mocked-DB-only coverage, which cannot
 catch schema drift or a missing dependency).
@@ -42,6 +42,7 @@ catch schema drift or a missing dependency).
 | "Invoice all my completed jobs" | `batch_invoice` | `batch_invoice` | capture | handler-level |
 | "New customer Maria Alvarez, 480-555-0102" | `create_customer` | `create_customer` | capture | integration (`integration/voice-create-customer.test.ts`) |
 | "Open a job for Alvarez, no AC" | `create_job` | `create_job` | capture | integration (`integration/create-job-execution.test.ts`) |
+| "Mark the Henderson job in progress" | `update_job` | `update_job` | capture | integration (`integration/update-job-execution.test.ts`) |
 | "Move the Garcia job to Thursday 10" | `reschedule_appointment` | `reschedule_appointment` | capture | unit |
 | "Cancel Tuesday's Garcia appointment" | `cancel_appointment` | `cancel_appointment` | irreversible | unit |
 | "Put Carlos on the Garcia job instead of me" | `reassign_appointment` | `reassign_appointment` | capture | unit |
@@ -76,6 +77,21 @@ catch schema drift or a missing dependency).
 > an ambiguous name ("two Carloses") becomes a one-tap `voice_clarification`
 > picker; an unmatched name keeps the pre-U1 behavior — the id stays in
 > `missingFields` and the review UI resolves it before approval.
+
+Notes on the taxonomy-1.3.0 row:
+
+- `update_job` — deliberately scoped to SAFE field edits (status, priority,
+  title/description) — never money or schedule (those keep their own
+  intents/paths). The `jobId` target resolves the SAME way
+  `update_estimate`/`update_invoice` resolve their reference: a literal UUID
+  ungates the proposal; a free-text reference is best-effort resolved via a
+  jobRepo search (stamped for review-card context, candidates offered) but
+  ALWAYS stays gated behind `missingFields: ['jobId']`. Execution is a raw
+  field write via the `updateJob` domain function (jobs/job.ts) — NOT the
+  governed lifecycle transition (`transitionJobStatus`) POST
+  `/api/jobs/:id/transition` uses, which adds forward/backward-move
+  validation, a timeline entry, and completion side effects. Emits
+  `job.updated` (not a new audit event type).
 
 Notes on the taxonomy-1.2.0 rows:
 
@@ -158,6 +174,7 @@ approves by screen/SMS tap).
     { "intent": "batch_invoice", "proposalType": "batch_invoice", "actionClass": "capture" },
     { "intent": "create_customer", "proposalType": "create_customer", "actionClass": "capture" },
     { "intent": "create_job", "proposalType": "create_job", "actionClass": "capture" },
+    { "intent": "update_job", "proposalType": "update_job", "actionClass": "capture" },
     { "intent": "reschedule_appointment", "proposalType": "reschedule_appointment", "actionClass": "capture" },
     { "intent": "cancel_appointment", "proposalType": "cancel_appointment", "actionClass": "irreversible" },
     { "intent": "reassign_appointment", "proposalType": "reassign_appointment", "actionClass": "capture" },

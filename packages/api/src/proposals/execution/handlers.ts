@@ -10,6 +10,7 @@ import { IssueInvoiceExecutionHandler } from './issue-invoice-handler';
 import { SendPaymentReminderExecutionHandler } from './send-payment-reminder-handler';
 import { ApplyLateFeeExecutionHandler } from './apply-late-fee-handler';
 import { UpdateEstimateExecutionHandler } from './update-estimate-handler';
+import { UpdateJobExecutionHandler } from './update-job-handler';
 import { ReassignAppointmentExecutionHandler } from './reassignment-handler';
 import { RescheduleAppointmentExecutionHandler } from './reschedule-handler';
 import { AddCrewMemberExecutionHandler, RemoveCrewMemberExecutionHandler } from './crew-handler';
@@ -1160,6 +1161,12 @@ export function createExecutionHandlerRegistry(deps?: {
       // Fail-closed inside the handler when the repo is absent.
       deps.jobRepo,
     ));
+  }
+  // B7 — update_job mutates an EXISTING job; only registered when the job
+  // repo is wired (mirrors update_estimate/update_invoice above — no
+  // synthetic-id passthrough for an edit to a real, already-created entity).
+  if (deps?.jobRepo) {
+    handlers.push(new UpdateJobExecutionHandler(deps.jobRepo, deps.auditRepo));
   }
 
   const registry = new Map<ProposalType, ExecutionHandler>();

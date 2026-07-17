@@ -29,10 +29,15 @@
  */
 import type { Invoice, InvoiceRepository } from '../../invoices/invoice';
 import type { Estimate, EstimateRepository } from '../../estimates/estimate';
+import type { Job, JobRepository } from '../../jobs/job';
 import type { EntityCandidate } from './entity-resolver';
 
-/** The two money-reference kinds this module resolves candidates for. */
-export type ReferenceCandidateKind = 'invoice' | 'estimate';
+/**
+ * The reference kinds this module resolves candidates for. B7 adds `job`
+ * (update_job's jobReference gate) alongside the original money kinds —
+ * same ILIKE-search-to-candidate-list technique, no money involved.
+ */
+export type ReferenceCandidateKind = 'invoice' | 'estimate' | 'job';
 
 export interface CandidatesForReferenceInput {
   tenantId: string;
@@ -41,6 +46,8 @@ export interface CandidatesForReferenceInput {
   kind: ReferenceCandidateKind;
   invoiceRepo?: Pick<InvoiceRepository, 'findByTenant'>;
   estimateRepo?: Pick<EstimateRepository, 'findByTenant'>;
+  /** B7 — jobRepo for kind: 'job' (update_job's jobReference gate). */
+  jobRepo?: Pick<JobRepository, 'findByTenant'>;
   /** Result cap — defaults to 5 (a one-tap picker's practical list size). */
   limit?: number;
 }
@@ -90,6 +97,23 @@ export function mapEstimatesToCandidates(
 }
 
 /**
+ * B7 — job counterpart of `mapInvoicesToCandidates`. Jobs have no
+ * `customerMessage`; `summary` (the job's one-line description) fills the
+ * same hint role.
+ */
+export function mapJobsToCandidates(
+  jobs: Array<Pick<Job, 'id' | 'jobNumber' | 'status' | 'summary'>>,
+): EntityCandidate[] {
+  return jobs.map((job) => ({
+    id: job.id,
+    kind: 'job' as const,
+    label: job.jobNumber,
+    hint: hintFor(job.status, job.summary),
+    score: 1,
+  }));
+}
+
+/**
  * Resolve a free-text invoice/estimate reference to a list of candidate
  * entities via the repo's existing ILIKE `search` option. Returns `[]` when:
  *   - the reference is empty/missing,
@@ -103,7 +127,7 @@ export function mapEstimatesToCandidates(
 export async function candidatesForReference(
   input: CandidatesForReferenceInput,
 ): Promise<EntityCandidate[]> {
-  const { tenantId, reference, kind, invoiceRepo, estimateRepo, limit = DEFAULT_CANDIDATE_LIMIT } = input;
+  const { tenantId, reference, kind, invoiceRepo, estimateRepo, jobRepo, limit = DEFAULT_CANDIDATE_LIMIT } = input;
 
   if (typeof reference !== 'string' || reference.trim().length === 0) {
     return [];
@@ -121,6 +145,12 @@ export async function candidatesForReference(
       if (!estimateRepo) return [];
       const matches = await estimateRepo.findByTenant(tenantId, { search, limit });
       return mapEstimatesToCandidates(matches);
+    }
+
+    if (kind === 'job') {
+      if (!jobRepo) return [];
+      const matches = await jobRepo.findByTenant(tenantId, { search, limit });
+      return mapJobsToCandidates(matches);
     }
 
     return [];

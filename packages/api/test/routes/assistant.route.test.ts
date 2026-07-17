@@ -1489,6 +1489,41 @@ describe('B5 — scheduling / create_job / invoice-follow-up intents wired onto 
     expect(res.body.message.proposal.missingFields).toContain('customerId');
   });
 
+  // B7 (feat: voice-transcript-and-agent-paths) — update_job. The task
+  // handler makes its own dedicated LLM call to extract the field delta
+  // (mirrors update_estimate/update_invoice above), so this needs a SECOND
+  // scripted gateway response after the classify_intent call.
+  it('single-intent path: update_job drafts an update_job proposal, gated on jobId (no jobRepo wired)', async () => {
+    const gateway = scriptedGateway([
+      JSON.stringify({
+        intentType: 'update_job',
+        confidence: 0.9,
+        extractedEntities: { jobReference: 'the Henderson job' },
+      }),
+      JSON.stringify({
+        jobReference: 'the Henderson job',
+        status: 'in_progress',
+        confidence_score: 0.9,
+      }),
+    ]);
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildB5App(gateway, proposalRepo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Mark the Henderson job in progress' }] });
+
+    expect(res.status).toBe(200);
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0].proposalType).toBe('update_job');
+    const payload = persisted[0].payload as Record<string, unknown>;
+    expect(payload.status).toBe('in_progress');
+    // Gated, not doomed — a free-text job reference with no resolved id
+    // (no jobRepo wired on this surface's fixture).
+    expect(res.body.message.proposal.missingFields).toContain('jobId');
+  });
+
   it('single-intent path: record_payment drafts a record_payment proposal with amount as integer cents', async () => {
     const gateway = scriptedGateway([
       JSON.stringify({

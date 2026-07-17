@@ -48,6 +48,8 @@ const EXPECTED_PROPOSAL_TYPES: ProposalType[] = [
   'update_estimate',
   'create_customer',
   'create_job',
+  // B7 (feat: voice-transcript-and-agent-paths) — update_job.
+  'update_job',
   'reschedule_appointment',
   'cancel_appointment',
   'reassign_appointment',
@@ -102,9 +104,14 @@ describe('ai/orchestration/handler-registry — buildTaskHandlers', () => {
       // "construction + handle() never throws for the deterministic
       // passthrough handlers", so skip the LLM-drafting ones here.
       if (
-        ['draft_invoice', 'draft_estimate', 'update_invoice', 'update_estimate', 'create_appointment'].includes(
-          type,
-        )
+        [
+          'draft_invoice',
+          'draft_estimate',
+          'update_invoice',
+          'update_estimate',
+          'update_job',
+          'create_appointment',
+        ].includes(type)
       ) {
         continue;
       }
@@ -183,5 +190,46 @@ describe('ai/orchestration/handler-registry — buildTaskHandlers', () => {
     expect((empty.payload as Record<string, unknown>).classifierReasoning).toBe(
       'You have no completed jobs waiting to be invoiced right now.',
     );
+  });
+
+  // B7 (feat: voice-transcript-and-agent-paths) — the registry wires
+  // deps.jobRepo into UpdateJobTaskHandler so a resolvable free-text job
+  // reference is stamped onto payload.jobId (still gated — see
+  // job-edit-task.test.ts for the full gating contract).
+  it('threads jobRepo into update_job so a resolvable free-text reference stamps payload.jobId', async () => {
+    const jobRepo = new InMemoryJobRepository();
+    const job: Job = {
+      id: 'job-1',
+      tenantId: 't-1',
+      customerId: 'cust-1',
+      locationId: 'loc-1',
+      jobNumber: 'JOB-0001',
+      summary: 'Water heater replacement',
+      status: 'scheduled',
+      priority: 'normal',
+      createdBy: 'u-1',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    await jobRepo.create(job);
+
+    const gateway: LLMGateway = {
+      complete: async () =>
+        ({
+          content: JSON.stringify({ jobReference: 'JOB-0001', status: 'in_progress', confidence_score: 0.9 }),
+          model: 'mock',
+          provider: 'mock',
+          tokenUsage: { input: 0, output: 0, total: 0 },
+          latencyMs: 0,
+        }) satisfies LLMResponse,
+    } as unknown as LLMGateway;
+
+    const handlers = buildTaskHandlers({ gateway, jobRepo });
+    const { proposal } = await handlers.get('update_job')!.handle(ctx());
+    const payload = proposal.payload as Record<string, unknown>;
+    expect(payload.jobId).toBe('job-1');
+    // Still gated — a search-resolved id never lifts the missingFields gate
+    // (see resolveJobIdGate's doc comment in job-edit-task.ts).
+    expect(proposal.sourceContext).toMatchObject({ missingFields: ['jobId'] });
   });
 });

@@ -37,6 +37,9 @@ const TYPE_PRIORITY: Record<ProposalType, number> = {
   // After-hours callback requests surface alongside booking work.
   callback: 2,
   create_job: 3,
+  // B7 — a safe field edit (status/priority/title/description) to an
+  // existing job is the same priority tier as opening one.
+  update_job: 3,
   create_customer: 4,
   update_customer: 5,
   reassign_appointment: 1,

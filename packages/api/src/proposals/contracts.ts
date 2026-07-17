@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { appointmentTypeSchema } from '@ai-service-os/shared';
+import { appointmentTypeSchema, jobStatusSchema, jobPrioritySchema } from '@ai-service-os/shared';
 import { ProposalType } from './proposal';
 import { ValidationError } from '../shared/errors';
 import { reassignAppointmentPayloadSchema } from './contracts/reassignment';
@@ -136,6 +136,39 @@ export const createJobPayloadSchema = z.object({
   scheduledDate: z.string().optional(),
   priority: z.enum(['low', 'medium', 'high', 'urgent']).optional(),
 });
+
+// B7 (feat: voice-transcript-and-agent-paths) — update_job: a bounded,
+// SAFE field edit to an EXISTING job. `jobId` mirrors the update_estimate /
+// update_invoice pattern (required uuid; a free-text `jobReference` the
+// task handler couldn't resolve to a UUID stays gated via
+// sourceContext.missingFields — see ai/tasks/job-edit-task.ts
+// resolveJobIdGate — so this schema is deliberately NOT consulted by
+// createProposal, only by editProposal / the assistant Edit form, exactly
+// like its update_estimate/update_invoice siblings). `status` and
+// `priority` reuse the canonical shared enums (jobStatusSchema /
+// jobPrioritySchema) so this contract can never drift from the Job domain
+// type or the jobs table CHECK constraint. Deliberately excludes money
+// (deposit/pricing) and schedule (appointment) fields — those have their
+// own proposal paths (draft_estimate/draft_invoice edits,
+// reschedule_appointment).
+export const updateJobPayloadSchema = z
+  .object({
+    jobId: z.string().uuid(),
+    /** Free-text hint carried for review-card context; never trusted as an id. */
+    jobReference: z.string().min(1).optional(),
+    status: jobStatusSchema.optional(),
+    priority: jobPrioritySchema.optional(),
+    title: z.string().min(1).optional(),
+    description: z.string().optional(),
+  })
+  .refine(
+    (v) =>
+      v.status !== undefined ||
+      v.priority !== undefined ||
+      v.title !== undefined ||
+      v.description !== undefined,
+    { message: 'update_job requires at least one field to change: status, priority, title, or description' },
+  );
 
 export const createAppointmentPayloadSchema = z
   .object({
@@ -504,6 +537,7 @@ export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
   create_customer: createCustomerPayloadSchema,
   update_customer: updateCustomerPayloadSchema,
   create_job: createJobPayloadSchema,
+  update_job: updateJobPayloadSchema,
   create_appointment: createAppointmentPayloadSchema,
   create_booking: createBookingPayloadSchema,
   // A callback request captured when the agent cannot complete an action

@@ -396,6 +396,7 @@ export const INTENT_TO_PROPOSAL_TYPE: Partial<Record<Exclude<IntentType, 'unknow
   batch_invoice: 'batch_invoice',
   create_customer: 'create_customer',
   create_job: 'create_job',
+  update_job: 'update_job',
   reschedule_appointment: 'reschedule_appointment',
   cancel_appointment: 'cancel_appointment',
   reassign_appointment: 'reassign_appointment',

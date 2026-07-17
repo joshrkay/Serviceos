@@ -11,6 +11,7 @@ import { JobRepository } from '../../jobs/job';
 import { CatalogItemRepository } from '../../catalog/catalog-item';
 import { InvoiceEditTaskHandler } from '../tasks/invoice-edit-task';
 import { EstimateEditTaskHandler } from '../tasks/estimate-edit-task';
+import { UpdateJobTaskHandler } from '../tasks/job-edit-task';
 import type { EstimateRepository } from '../../estimates/estimate';
 import type { InvoiceRepository } from '../../invoices/invoice';
 import { InvoicingQueueDeps } from '../../invoices/invoicing-queue';
@@ -80,7 +81,8 @@ export interface HandlerRegistryDeps {
   /**
    * Scopes appointment resolution to the verified caller's own appointments
    * (appointment → job → customerId) and feeds send_payment_reminder's
-   * dedup marker.
+   * dedup marker. B7 — also powers update_job's jobId reference
+   * resolution/gate (UpdateJobTaskHandler.resolveJobIdGate).
    */
   jobRepo?: JobRepository;
   /**
@@ -135,6 +137,10 @@ export function buildTaskHandlers(deps: HandlerRegistryDeps): Map<ProposalType, 
   handlers.set('update_estimate', new EstimateEditTaskHandler(deps.gateway, deps.estimateRepo, deps.catalogRepo));
   handlers.set('create_customer', new CreateCustomerTaskHandler());
   handlers.set('create_job', new CreateJobVoiceTaskHandler());
+  // B7 — update_job: bounded, safe field edit (status/priority/title/
+  // description) to an EXISTING job. jobRepo powers the jobId gate
+  // (resolveJobIdGate); absent → every reference stays gated.
+  handlers.set('update_job', new UpdateJobTaskHandler(deps.gateway, deps.jobRepo));
   handlers.set(
     'reschedule_appointment',
     new RescheduleAppointmentTaskHandler(deps.gateway, deps.appointmentRepo, deps.jobRepo),

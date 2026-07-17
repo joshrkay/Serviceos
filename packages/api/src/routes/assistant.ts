@@ -747,6 +747,9 @@ async function generateAssistantReply(
             reassign_appointment: () => sharedHandlers.get('reassign_appointment')!,
             confirm_appointment: () => sharedHandlers.get('confirm_appointment')!,
             create_job: () => sharedHandlers.get('create_job')!,
+            // B7 — update_job (status/priority/title/description edit to an
+            // existing job); same shared registry, same gate as the worker.
+            update_job: () => sharedHandlers.get('update_job')!,
             send_payment_reminder: () => sharedHandlers.get('send_payment_reminder')!,
             apply_late_fee: () => sharedHandlers.get('apply_late_fee')!,
             send_estimate_nudge: () => sharedHandlers.get('send_estimate_nudge')!,
@@ -845,6 +848,9 @@ async function generateAssistantReply(
         reassign_appointment: () => sharedHandlers.get('reassign_appointment')!,
         confirm_appointment: () => sharedHandlers.get('confirm_appointment')!,
         create_job: () => sharedHandlers.get('create_job')!,
+        // B7 — update_job (status/priority/title/description edit to an
+        // existing job); same shared registry, same gate as the worker.
+        update_job: () => sharedHandlers.get('update_job')!,
         send_payment_reminder: () => sharedHandlers.get('send_payment_reminder')!,
         apply_late_fee: () => sharedHandlers.get('apply_late_fee')!,
         send_estimate_nudge: () => sharedHandlers.get('send_estimate_nudge')!,

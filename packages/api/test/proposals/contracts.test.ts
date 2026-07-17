@@ -6,6 +6,7 @@ import {
   PROPOSAL_TYPE_SCHEMAS,
   createCustomerPayloadSchema,
   createJobPayloadSchema,
+  updateJobPayloadSchema,
   createAppointmentPayloadSchema,
   draftEstimatePayloadSchema,
   updateCustomerPayloadSchema,
@@ -114,6 +115,82 @@ describe('P2-002 — Typed proposal contracts', () => {
     });
     expect(result.valid).toBe(true);
     expect(result.errors).toBeUndefined();
+  });
+
+  // B7 (feat: voice-transcript-and-agent-paths) — update_job.
+  describe('update_job payload contract', () => {
+    it('happy path — status only', () => {
+      const result = validateProposalPayload('update_job', {
+        jobId: validJobId,
+        status: 'in_progress',
+      });
+      expect(result.valid).toBe(true);
+      expect(result.errors).toBeUndefined();
+    });
+
+    it('happy path — every editable field together', () => {
+      const result = validateProposalPayload('update_job', {
+        jobId: validJobId,
+        jobReference: 'JOB-0001',
+        status: 'completed',
+        priority: 'urgent',
+        title: 'Renamed job',
+        description: 'Updated notes',
+      });
+      expect(result.valid).toBe(true);
+    });
+
+    it('rejects a payload missing jobId', () => {
+      const result = validateProposalPayload('update_job', { status: 'completed' });
+      expect(result.valid).toBe(false);
+    });
+
+    it('rejects a non-uuid jobId', () => {
+      const result = validateProposalPayload('update_job', {
+        jobId: 'not-a-uuid',
+        status: 'completed',
+      });
+      expect(result.valid).toBe(false);
+    });
+
+    it('rejects a payload with jobId but no editable field (the refine gate)', () => {
+      const result = updateJobPayloadSchema.safeParse({ jobId: validJobId });
+      expect(result.success).toBe(false);
+    });
+
+    it('rejects an invalid status enum value', () => {
+      const result = validateProposalPayload('update_job', {
+        jobId: validJobId,
+        status: 'super_urgent',
+      });
+      expect(result.valid).toBe(false);
+    });
+
+    it('rejects an invalid priority enum value', () => {
+      // 'medium' is create_job's (mismatched, pre-existing) priority enum —
+      // NOT a valid Job domain priority (low/normal/high/urgent).
+      const result = validateProposalPayload('update_job', {
+        jobId: validJobId,
+        priority: 'medium',
+      });
+      expect(result.valid).toBe(false);
+    });
+
+    it('accepts an empty-string description (clearing the field is allowed)', () => {
+      const result = validateProposalPayload('update_job', {
+        jobId: validJobId,
+        description: '',
+      });
+      expect(result.valid).toBe(true);
+    });
+
+    it('rejects an empty-string title (min length 1 — use description to clear, not title)', () => {
+      const result = validateProposalPayload('update_job', {
+        jobId: validJobId,
+        title: '',
+      });
+      expect(result.valid).toBe(false);
+    });
   });
 
   // P1 fix — remove_line_item/update_line_item must accept EITHER a

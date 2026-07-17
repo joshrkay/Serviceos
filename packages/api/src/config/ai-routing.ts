@@ -100,6 +100,12 @@ export const TASK_TYPES = [
   'mms_estimate',
   'draft_invoice',
   'update_invoice',
+  // B7 — update_job (status/priority/title/description edit to an
+  // existing job). Mirrors its update_estimate/update_invoice siblings
+  // (same *-edit-task.ts structure, same jobId-gate pattern) rather than
+  // the lighter deterministic handlers (create_job/update_customer),
+  // which aren't in this taxonomy at all.
+  'update_job',
 ] as const;
 
 export type TaskType = (typeof TASK_TYPES)[number];
@@ -152,6 +158,7 @@ const DEFAULT_TASK_TIER_MAPPING: Record<TaskType, ModelTier> = {
   mms_estimate: 'complex',
   draft_invoice: 'complex',
   update_invoice: 'complex',
+  update_job: 'complex',
 };
 
 export const DEFAULT_AI_ROUTING_CONFIG: AIRoutingConfig = {
