@@ -298,6 +298,7 @@ import { InMemoryEditDeltaRepository } from './estimates/edit-delta';
 import { InMemoryPackActivationRepository } from './settings/pack-activation';
 import { buildVerticalPromptResolver } from './verticals/resolve-active-pack';
 import { VerticalTerminologyProvider } from './voice/vertical-terminology-provider';
+import { TenantGlossaryProvider } from './voice/tenant-glossary-provider';
 import { FillerEngine } from './ai/agents/customer-calling/filler-engine';
 import { FillerAudioCache } from './ai/agents/customer-calling/filler-audio-cache';
 import { classifyTurnSentiment } from './ai/agents/customer-calling/sentiment-classifier';
@@ -1613,10 +1614,30 @@ export function createApp(): AppWithLifecycle {
     level: process.env.LOG_LEVEL === 'debug' ? 'debug' : 'info',
   });
 
+  // A1 — tenant-scoped vocabulary (catalog item names, active customer
+  // names, technician/user names) for the transcription-correction pass.
+  // Reuses the same catalogRepo/customerRepo/userRepo already constructed
+  // above for the rest of the app; best-effort (never throws — see
+  // TenantGlossaryProvider's own doc comment).
+  const transcriptionGlossaryProvider = new TenantGlossaryProvider({
+    catalogRepo,
+    customerRepo,
+    userRepo,
+  });
+
   const transcriptionWorker = createTranscriptionWorker(
     voiceRepo,
     transcriptionProvider,
     {
+      // Wires the correction pass (workers/transcription.ts's
+      // `if (options.gateway …)` block) live — previously only
+      // onTranscribed + rawTranscriptEncryptionKey were passed here, so
+      // correction never ran regardless of AI_PROVIDER_API_KEY. llmGateway
+      // is always defined (real gateway or hermetic mock — see its
+      // construction above), so correction now runs unconditionally,
+      // falling back safely to the raw transcript on any gateway failure.
+      gateway: llmGateway,
+      glossary: transcriptionGlossaryProvider,
       onTranscribed: async (event, hookLogger) => {
         // Enqueue the downstream voice-action-router job. A separate
         // poll loop (below) picks it up and runs intent classification.
