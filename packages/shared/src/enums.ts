@@ -167,6 +167,9 @@ export enum ProposalType {
   CREATE_CUSTOMER = 'create_customer',
   UPDATE_CUSTOMER = 'update_customer',
   CREATE_JOB = 'create_job',
+  // B7 — safe job field edits (status/priority/title/description) via the
+  // propose→approve→execute chain; mirrors the API's update_job proposal type.
+  UPDATE_JOB = 'update_job',
   CREATE_APPOINTMENT = 'create_appointment',
   CREATE_BOOKING = 'create_booking',
   CALLBACK = 'callback',

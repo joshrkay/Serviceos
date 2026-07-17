@@ -20,6 +20,9 @@ export const CAPTURE_PROPOSAL_TYPES: ReadonlySet<string> = new Set<string>([
   ProposalType.CREATE_CUSTOMER,
   ProposalType.UPDATE_CUSTOMER,
   ProposalType.CREATE_JOB,
+  // B7 — safe job field edits; capture-class in the API's
+  // actionClassForProposalType.
+  ProposalType.UPDATE_JOB,
   ProposalType.CREATE_APPOINTMENT,
   ProposalType.CREATE_BOOKING,
   ProposalType.CALLBACK,
