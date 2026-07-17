@@ -335,7 +335,14 @@ export class PublicEstimateService {
     const settings = await this.deps.settingsRepo.findByTenant(estimate.tenantId);
     const policy = settings?.depositTimingPolicy ?? 'after_approval';
     if (policy === 'before_approval' && settings) {
-      const requiredFromRule = evaluateDepositRule(settings, acceptedTotals.totalCents);
+      // EE-1 — gate on the deposit the customer was actually QUOTED at
+      // checkout, which is computed from the stored `estimate.totals`
+      // (toView, below). With good-better-best, `acceptedTotals` can exceed
+      // `estimate.totals` when the customer picks a pricier tier; requiring the
+      // higher post-selection figure here would trap a customer who paid the
+      // quoted deposit and then upgraded — the premium delta settles in the
+      // final invoice, not this pre-approval gate.
+      const requiredFromRule = evaluateDepositRule(settings, estimate.totals.totalCents);
       if (requiredFromRule > 0) {
         const job = await this.deps.jobRepo.findById(estimate.tenantId, estimate.jobId);
         const paid = job?.depositPaidCents ?? 0;
