@@ -20,7 +20,16 @@ describe('board-revision', () => {
     expect(after).not.toBe(before);
   });
 
-  it('derives board date from appointment', () => {
+  it('derives board date from appointment (UTC day when no tz given)', () => {
     expect(boardDateFromAppointment(new Date('2026-05-20T15:00:00Z'))).toBe('2026-05-20');
+  });
+
+  it('keys the board date by the TENANT-LOCAL day when a timezone is given', () => {
+    // 2026-07-03 06:00Z is 11 PM Jul 2 in America/Los_Angeles. The UTC day
+    // (Jul 3) would notify the wrong board; the tenant-local day is Jul 2.
+    const lateNightPt = new Date('2026-07-03T06:00:00Z');
+    expect(boardDateFromAppointment(lateNightPt)).toBe('2026-07-03'); // legacy/UTC
+    expect(boardDateFromAppointment(lateNightPt, 'America/Los_Angeles')).toBe('2026-07-02');
+    expect(boardDateFromAppointment(lateNightPt, 'UTC')).toBe('2026-07-03');
   });
 });

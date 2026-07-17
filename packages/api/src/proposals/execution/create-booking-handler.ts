@@ -129,7 +129,7 @@ export class CreateBookingExecutionHandler implements ExecutionHandler {
 
     // Spatial board sync: confirming a hold flips its visual state from
     // tentative to booked on any open dispatch board for that day.
-    notifyDispatchBoardChanged(context.tenantId, updated.scheduledStart);
+    notifyDispatchBoardChanged(context.tenantId, updated.scheduledStart, updated.timezone);
 
     return { success: true, resultEntityId: appointmentId };
   }

@@ -21,6 +21,7 @@ import {
   tenantContextStore,
   currentTenantContext,
   withRequestSavepoint,
+  runAfterCommit,
 } from '../../src/middleware/tenant-context';
 import { PgBaseRepository } from '../../src/db/pg-base';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
@@ -672,6 +673,59 @@ describe('P0-024 — tenant-context middleware (withTenantTransaction)', () => {
     );
 
     expect(currentTenantContext()).toBeUndefined();
+  });
+});
+
+describe('runAfterCommit', () => {
+  it('runs the effect AFTER the transaction COMMITs (2xx)', async () => {
+    const { pool, calls } = makeMockPool();
+    let hookRan = false;
+    let commitSeenWhenHookRan: boolean | undefined;
+    const app = buildApp(pool, async (_req, res) => {
+      const ctx = currentTenantContext();
+      await ctx!.client.query('INSERT INTO things (id) VALUES (9)');
+      runAfterCommit(res, () => {
+        hookRan = true;
+        // The effect must observe COMMIT already issued on the connection.
+        commitSeenWhenHookRan = calls.some((c) => /^COMMIT/i.test(c.sql));
+      });
+      res.json({ ok: true });
+    });
+
+    const response = await request(app).get('/protected/echo').set('x-test-tenant', TENANT_A);
+    expect(response.status).toBe(200);
+    await new Promise((r) => setImmediate(r));
+
+    expect(hookRan).toBe(true);
+    expect(commitSeenWhenHookRan).toBe(true);
+  });
+
+  it('does NOT run the effect when the request rolls back (4xx)', async () => {
+    const { pool } = makeMockPool();
+    let hookRan = false;
+    const app = buildApp(pool, async (_req, res) => {
+      const ctx = currentTenantContext();
+      await ctx!.client.query('INSERT INTO things (id) VALUES (10)');
+      runAfterCommit(res, () => {
+        hookRan = true;
+      });
+      res.status(409).json({ error: 'CONFLICT' });
+    });
+
+    const response = await request(app).get('/protected/echo').set('x-test-tenant', TENANT_A);
+    expect(response.status).toBe(409);
+    await new Promise((r) => setImmediate(r));
+
+    expect(hookRan).toBe(false);
+  });
+
+  it('runs the effect immediately when there is no request transaction (no store)', () => {
+    let ran = false;
+    const res = { locals: {} } as unknown as express.Response;
+    runAfterCommit(res, () => {
+      ran = true;
+    });
+    expect(ran).toBe(true);
   });
 });
 

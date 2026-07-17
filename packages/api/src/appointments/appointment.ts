@@ -40,8 +40,13 @@ export interface Appointment {
    * voice message). Unique per tenant via a partial index; when set, a
    * second create with the same key returns the existing appointment
    * instead of inserting a duplicate.
+   *
+   * Explicit `null` is a write-time signal to RELEASE the key (set the
+   * column to SQL NULL) — used when an appointment is canceled so a later
+   * write can reuse the same canonical key without deduping back into the
+   * canceled row. Reads still surface `undefined` for an unset column.
    */
-  idempotencyKey?: string;
+  idempotencyKey?: string | null;
   notes?: string;
   /**
    * Typed visit kind (estimate/repair/install/maintenance/diagnostic).
@@ -105,6 +110,11 @@ export interface UpdateAppointmentInput {
   status?: AppointmentStatus;
   holdPendingApproval?: boolean;
   holdExpiryAt?: Date;
+  /**
+   * Pass `null` to release the dedup key (e.g. on cancel); `string` to set
+   * it. The pg repo maps this onto the `idempotency_key` column.
+   */
+  idempotencyKey?: string | null;
 }
 
 export interface AppointmentListOptions {

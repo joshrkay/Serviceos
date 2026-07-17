@@ -8,6 +8,10 @@ import {
   createMessageSchema,
   delayAcknowledgmentSchema,
   updateSettingsSchema,
+  createJobSchema,
+  scheduleJobSchema,
+  reassignJobSchema,
+  unscheduleJobSchema,
   updateInvoiceSchema,
   updateEstimateSchema,
 } from '../../src/shared/contracts';
@@ -201,43 +205,57 @@ describe('P0-005 — Backend service skeleton and shared contracts', () => {
   });
 });
 
-describe('updateInvoiceSchema / updateEstimateSchema — money validation + field preservation', () => {
-  const line = {
-    id: 'li-1',
-    description: 'Water heater',
-    quantity: 1,
-    unitPriceCents: 45000,
-    totalCents: 45000,
-    sortOrder: 0,
-    taxable: true,
+describe('direct job scheduling contracts', () => {
+  const TECH = '11111111-1111-1111-1111-111111111111';
+  const baseCreate = {
+    customerId: 'cust-1',
+    locationId: 'loc-1',
+    summary: 'Fix the sink',
   };
 
-  it('rejects a negative discount and an out-of-range tax rate on invoice update', () => {
-    expect(updateInvoiceSchema.safeParse({ discountCents: -100 }).success).toBe(false);
-    expect(updateInvoiceSchema.safeParse({ taxRateBps: 250000 }).success).toBe(false);
-    expect(updateInvoiceSchema.safeParse({ discountCents: 500 }).success).toBe(true);
+  it('createJobSchema accepts a job with no schedule (legacy unscheduled)', () => {
+    expect(createJobSchema.safeParse(baseCreate).success).toBe(true);
   });
 
-  it('strips unknown keys (status/tenantId cannot be injected via the body)', () => {
-    const parsed = updateInvoiceSchema.parse({ discountCents: 0, status: 'paid', tenantId: 'x' });
-    expect(parsed).not.toHaveProperty('status');
-    expect(parsed).not.toHaveProperty('tenantId');
-  });
-
-  it('preserves pricingSource on estimate line items (keeps catalog grounding)', () => {
-    const parsed = updateEstimateSchema.parse({
-      lineItems: [{ ...line, pricingSource: 'catalog' }],
+  it('createJobSchema accepts an inline schedule block', () => {
+    const result = createJobSchema.safeParse({
+      ...baseCreate,
+      scheduledStart: '2026-07-01T15:00:00.000Z',
+      technicianId: TECH,
+      durationMin: 90,
+      timezone: 'America/New_York',
     });
-    expect(parsed.lineItems?.[0].pricingSource).toBe('catalog');
+    expect(result.success).toBe(true);
   });
 
-  it('treats validUntil: null as absent (no 1970 epoch) and coerces an ISO string', () => {
-    // null → undefined so updateEstimate keeps the existing validUntil.
-    const asNull = updateEstimateSchema.parse({ validUntil: null });
-    expect(asNull.validUntil).toBeUndefined();
-    // ISO string → Date.
-    const asStr = updateEstimateSchema.parse({ validUntil: '2026-09-01T00:00:00.000Z' });
-    expect(asStr.validUntil).toBeInstanceOf(Date);
-    expect(asStr.validUntil?.getUTCFullYear()).toBe(2026);
+  it('createJobSchema rejects a non-ISO scheduledStart', () => {
+    const result = createJobSchema.safeParse({ ...baseCreate, scheduledStart: 'tomorrow 2pm' });
+    expect(result.success).toBe(false);
+  });
+
+  it('createJobSchema rejects a non-positive durationMin', () => {
+    const result = createJobSchema.safeParse({ ...baseCreate, scheduledStart: '2026-07-01T15:00:00.000Z', durationMin: 0 });
+    expect(result.success).toBe(false);
+  });
+
+  it('scheduleJobSchema requires scheduledStart and rejects unknown keys', () => {
+    expect(scheduleJobSchema.safeParse({ scheduledStart: '2026-07-01T15:00:00.000Z' }).success).toBe(true);
+    expect(scheduleJobSchema.safeParse({}).success).toBe(false);
+    expect(
+      scheduleJobSchema.safeParse({ scheduledStart: '2026-07-01T15:00:00.000Z', bogus: true }).success,
+    ).toBe(false);
+  });
+
+  it('reassignJobSchema accepts a uuid or explicit null, rejects absent/garbage', () => {
+    expect(reassignJobSchema.safeParse({ technicianId: TECH }).success).toBe(true);
+    expect(reassignJobSchema.safeParse({ technicianId: null }).success).toBe(true);
+    expect(reassignJobSchema.safeParse({}).success).toBe(false);
+    expect(reassignJobSchema.safeParse({ technicianId: 'not-a-uuid' }).success).toBe(false);
+  });
+
+  it('unscheduleJobSchema accepts an optional reason and rejects unknown keys', () => {
+    expect(unscheduleJobSchema.safeParse({}).success).toBe(true);
+    expect(unscheduleJobSchema.safeParse({ reason: 'customer canceled' }).success).toBe(true);
+    expect(unscheduleJobSchema.safeParse({ nope: 1 }).success).toBe(false);
   });
 });

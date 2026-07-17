@@ -212,7 +212,53 @@ export const createJobSchema = z.object({
    * a new ad campaign).
    */
   originatingLeadId: z.string().uuid().optional(),
+  /**
+   * Optional direct scheduling. When `scheduledStart` is present the job is
+   * scheduled in the same request: a linked appointment (+ optional primary
+   * technician assignment) is created so it reaches the dispatch board, and
+   * the job advances new → scheduled. Absent ⇒ an unscheduled job (legacy
+   * behavior). `durationMin` defaults to 60; `timezone` is display context
+   * only (times persist UTC).
+   */
+  scheduledStart: z.string().datetime().optional(),
+  technicianId: z.string().uuid().optional(),
+  durationMin: z.number().int().positive().optional(),
+  timezone: z.string().min(1).optional(),
 });
+
+/**
+ * Body for `POST /api/jobs/:id/schedule` — initial schedule OR reschedule of
+ * an existing job (idempotent upsert of the canonical `job-schedule:` visit).
+ */
+export const scheduleJobSchema = z
+  .object({
+    scheduledStart: z.string().datetime(),
+    technicianId: z.string().uuid().optional(),
+    durationMin: z.number().int().positive().optional(),
+    timezone: z.string().min(1).optional(),
+  })
+  .strict();
+
+/**
+ * Body for `POST /api/jobs/:id/reassign` — change or CLEAR (null) the primary
+ * technician on the job's appointment, keeping the slot. `null` moves the
+ * appointment to the dispatch board's unassigned queue.
+ */
+export const reassignJobSchema = z
+  .object({
+    technicianId: z.string().uuid().nullable(),
+  })
+  .strict();
+
+/**
+ * Body for `POST /api/jobs/:id/unschedule` — cancel the job's appointment and
+ * revert the job scheduled → new. `reason` is recorded on the audit trail.
+ */
+export const unscheduleJobSchema = z
+  .object({
+    reason: z.string().min(1).optional(),
+  })
+  .strict();
 
 export const createEstimateSchema = z.object({
   jobId: z.string().min(1),

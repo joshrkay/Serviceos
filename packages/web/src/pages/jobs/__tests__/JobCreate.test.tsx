@@ -37,47 +37,38 @@ describe('JobCreate (P11-006)', () => {
     await waitFor(() => {
       expect(screen.getByRole('alert')).toHaveTextContent(/Customer is required/i);
     });
-    expect(vi.mocked(apiFetch)).not.toHaveBeenCalled();
+    // The form never POSTs a job when validation blocks submission. (A GET
+    // /api/users fires on mount to load the technician roster — that's not a
+    // submission.)
+    const postCall = vi
+      .mocked(apiFetch)
+      .mock.calls.find((c) => (c[1] as RequestInit | undefined)?.method === 'POST');
+    expect(postCall).toBeUndefined();
   });
 
   it('POSTs to /api/jobs with customerId from picker selection', async () => {
-    // First call: customer search.
-    vi.mocked(apiFetch).mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      json: async () => ({ data: [{ id: 'cust-1', firstName: 'Carol' }] }),
-    } as unknown as Response);
-    // Second call: locations for selected customer.
-    vi.mocked(apiFetch).mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      json: async () => [
-        {
-          id: 'loc-1',
-          label: 'Home',
-          street1: '100 Main St',
-          city: 'Austin',
-          state: 'TX',
-          postalCode: '78701',
-          isPrimary: true,
-        },
-        {
-          id: 'loc-2',
-          label: 'Rental',
-          street1: '200 Rental Rd',
-          city: 'Austin',
-          state: 'TX',
-          postalCode: '78702',
-          isPrimary: false,
-        },
-      ],
-    } as unknown as Response);
-    // Third call: POST /api/jobs.
-    vi.mocked(apiFetch).mockResolvedValueOnce({
-      ok: true,
-      status: 201,
-      json: async () => ({ id: 'job-99' }),
-    } as unknown as Response);
+    // URL-aware so it's robust to the mount-time GET /api/users (technician
+    // roster) the form fires alongside the customer search / location load.
+    const locations = [
+      { id: 'loc-1', label: 'Home', street1: '100 Main St', city: 'Austin', state: 'TX', postalCode: '78701', isPrimary: true },
+      { id: 'loc-2', label: 'Rental', street1: '200 Rental Rd', city: 'Austin', state: 'TX', postalCode: '78702', isPrimary: false },
+    ];
+    vi.mocked(apiFetch).mockImplementation(async (url: RequestInfo | URL, opts?: RequestInit) => {
+      const u = String(url);
+      if (u.startsWith('/api/customers')) {
+        return { ok: true, status: 200, json: async () => ({ data: [{ id: 'cust-1', firstName: 'Carol' }] }) } as unknown as Response;
+      }
+      if (u.startsWith('/api/locations')) {
+        return { ok: true, status: 200, json: async () => locations } as unknown as Response;
+      }
+      if (u.startsWith('/api/users')) {
+        return { ok: true, status: 200, json: async () => ({ data: [] }) } as unknown as Response;
+      }
+      if (u === '/api/jobs' && opts?.method === 'POST') {
+        return { ok: true, status: 201, json: async () => ({ id: 'job-99' }) } as unknown as Response;
+      }
+      return { ok: true, status: 200, json: async () => ({}) } as unknown as Response;
+    });
 
     render(
       <MemoryRouter>

@@ -4440,7 +4440,11 @@ export function createApp(): AppWithLifecycle {
     userRepo,
     invoiceRepo,
     auditRepo,
-  }, appointmentRepo));
+  }, {
+    appointmentRepo,
+    assignmentRepo,
+    userRepo,
+  }));
   app.use(
     '/api/jobs',
     createJobFilesRouter({

@@ -81,7 +81,7 @@ describe('Clerk user.created — invitee join with pool not wired (PR 319 P2)', 
     );
   });
 
-  it('does not mark the invitation accepted and fails the webhook for Clerk retry', async () => {
+  it('fails the webhook for Clerk retry without consuming the invitation or bootstrapping', async () => {
     const payload = {
       type: 'user.created',
       data: { id: 'user_new', email_addresses: [{ email_address: 'invitee@example.com' }] },
@@ -98,13 +98,14 @@ describe('Clerk user.created — invitee join with pool not wired (PR 319 P2)', 
       .set('content-type', 'application/json')
       .send(payload);
 
-    // The join can't proceed (no pool), so the webhook fails closed with a 500
-    // to trigger a Clerk retry once the pool is wired.
+    // Pool not wired → the invitee join can't complete. The handler FAILS the
+    // webhook (500) so Clerk re-delivers once the pool is available (see
+    // webhooks/routes.ts "failing webhook for Clerk retry"), rather than
+    // consuming the invitation or bootstrapping a separate tenant.
     expect(res.status).toBe(500);
     // Critical invariant: the invitation was NOT consumed.
     expect(markAccepted).not.toHaveBeenCalled();
-    // And no brand-new tenant was bootstrapped for an invitee (the handler
-    // returns before the bootstrap path).
+    // Did NOT bootstrap a (wrong) standalone tenant for the invited user.
     expect(tenantRepo.created).toHaveLength(0);
   });
 });

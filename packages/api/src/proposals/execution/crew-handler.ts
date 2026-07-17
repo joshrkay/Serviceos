@@ -102,7 +102,7 @@ export class AddCrewMemberExecutionHandler implements ExecutionHandler {
 
       if (this.appointmentRepo) {
         const appt = await this.appointmentRepo.findById(context.tenantId, appointmentId);
-        if (appt) notifyDispatchBoardChanged(context.tenantId, appt.scheduledStart);
+        if (appt) notifyDispatchBoardChanged(context.tenantId, appt.scheduledStart, appt.timezone);
       }
 
       return {
@@ -182,7 +182,7 @@ export class RemoveCrewMemberExecutionHandler implements ExecutionHandler {
 
     if (this.appointmentRepo) {
       const appt = await this.appointmentRepo.findById(context.tenantId, appointmentId);
-      if (appt) notifyDispatchBoardChanged(context.tenantId, appt.scheduledStart);
+      if (appt) notifyDispatchBoardChanged(context.tenantId, appt.scheduledStart, appt.timezone);
     }
 
     return { success: true, resultEntityId: match.id };

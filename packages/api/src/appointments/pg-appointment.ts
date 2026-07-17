@@ -249,6 +249,11 @@ export class PgAppointmentRepository extends PgBaseRepository implements Appoint
         holdPendingApproval: 'hold_pending_approval',
         holdExpiryAt: 'hold_expiry_at',
         notes: 'notes',
+        // Releasable on cancel: `update({ idempotencyKey: null })` writes SQL
+        // NULL here (value ?? null below), freeing the canonical job-schedule
+        // key so a later reschedule creates a fresh row instead of deduping
+        // back into the canceled appointment.
+        idempotencyKey: 'idempotency_key',
         updatedAt: 'updated_at',
       };
 

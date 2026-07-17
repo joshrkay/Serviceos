@@ -9,6 +9,7 @@ import {
   dateKeyInTz,
   dayWindowUtc,
   utcToTenantWallClock,
+  datetimeLocalToUtc,
 } from './formatInTenantTz';
 
 /**
@@ -268,6 +269,32 @@ describe('utcToTenantWallClock', () => {
       const local = utcToTenantWallClock(iso, tz);
       const [date, time] = local.split('T');
       expect(tenantWallClockToUtc(date, time, tz).toISOString()).toBe(iso);
+    }
+  });
+});
+
+describe('datetimeLocalToUtc', () => {
+  it('interprets a datetime-local wall clock in the TENANT tz, not the browser', () => {
+    // 14:00 entered on the schedule form must map to 14:00 tenant-local.
+    expect(datetimeLocalToUtc('2026-07-02T14:00', NY).toISOString()).toBe('2026-07-02T18:00:00.000Z');
+    expect(datetimeLocalToUtc('2026-07-02T14:00', LA).toISOString()).toBe('2026-07-02T21:00:00.000Z');
+    expect(datetimeLocalToUtc('2026-07-02T14:00', 'UTC').toISOString()).toBe('2026-07-02T14:00:00.000Z');
+  });
+
+  it('defaults a missing time part to midnight and rejects empty/malformed input', () => {
+    expect(datetimeLocalToUtc('2026-07-02', 'UTC').toISOString()).toBe('2026-07-02T00:00:00.000Z');
+    expect(Number.isNaN(datetimeLocalToUtc('', NY).getTime())).toBe(true);
+  });
+
+  it('is the exact inverse of utcToTenantWallClock (round-trips to the minute)', () => {
+    const cases: Array<[string, string]> = [
+      ['2026-07-02T18:30:00.000Z', NY],
+      ['2026-01-15T09:05:00.000Z', LA],
+      ['2026-03-08T15:30:00.000Z', NY], // spring forward
+      ['2026-11-01T18:15:00.000Z', NY], // fall back
+    ];
+    for (const [iso, tz] of cases) {
+      expect(datetimeLocalToUtc(utcToTenantWallClock(iso, tz), tz).toISOString()).toBe(iso);
     }
   });
 });
