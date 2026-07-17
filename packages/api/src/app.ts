@@ -1632,12 +1632,27 @@ export function createApp(): AppWithLifecycle {
       // Wires the correction pass (workers/transcription.ts's
       // `if (options.gateway …)` block) live — previously only
       // onTranscribed + rawTranscriptEncryptionKey were passed here, so
-      // correction never ran regardless of AI_PROVIDER_API_KEY. llmGateway
-      // is always defined (real gateway or hermetic mock — see its
-      // construction above), so correction now runs unconditionally,
-      // falling back safely to the raw transcript on any gateway failure.
-      gateway: llmGateway,
-      glossary: transcriptionGlossaryProvider,
+      // correction never ran regardless of AI_PROVIDER_API_KEY.
+      //
+      // llmGateway is NOT always the real provider — it falls back to a
+      // hermetic MockLLMProvider when AI_PROVIDER_API_KEY is unset (see its
+      // construction above). But transcriptionProvider (Whisper, via
+      // createWhisperTranscriptionProvider) is gated on a DIFFERENT env var
+      // (OPENAI_API_KEY alone) and runs for REAL regardless of
+      // AI_PROVIDER_API_KEY. That asymmetry meant a deployment with
+      // OPENAI_API_KEY but no AI_PROVIDER_API_KEY got real Whisper
+      // transcripts silently replaced: the hermetic mock's scripted
+      // catch-all response for transcription_correction is an ~84-char JSON
+      // blob (`{"ok":true,"mock":true,...}`) that clears the 40%-length
+      // floor in transcription.ts's correctTranscript() for any real
+      // transcript ≤210 chars — corrupting genuine voice-memo transcripts
+      // with mock JSON before downstream intent classification ever runs
+      // (observed live). Only pass gateway/glossary when the REAL gateway
+      // was built, so correction is skipped cleanly (raw transcript kept)
+      // for keyless-gateway deployments — matching pre-branch behavior.
+      ...(config.AI_PROVIDER_API_KEY
+        ? { gateway: llmGateway, glossary: transcriptionGlossaryProvider }
+        : {}),
       onTranscribed: async (event, hookLogger) => {
         // Enqueue the downstream voice-action-router job. A separate
         // poll loop (below) picks it up and runs intent classification.
@@ -1958,6 +1973,10 @@ export function createApp(): AppWithLifecycle {
   const executionHandlers = createExecutionHandlerRegistry({
     customerRepo,
     jobRepo,
+    // B7 (money-loss fix) — update_job routes status changes through
+    // transitionJobStatus (timeline + completedAt) and runs completion effects.
+    timelineRepo,
+    timeEntryRepo,
     locationRepo,
     appointmentRepo,
     assignmentRepo,

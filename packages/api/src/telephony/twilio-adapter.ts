@@ -91,7 +91,7 @@ import { extractPriorTurns } from '../ai/agents/customer-calling/transcript-turn
 // that got reverted in a subsequent merge to main.
 import { deriveCallOutcome as deriveCallOutcomeFromState } from '../ai/agents/customer-calling/outcome-mapper';
 import type { VoiceSessionRepository } from '../voice/voice-session';
-import type { ProposalRepository, ProposalType } from '../proposals/proposal';
+import type { ProposalRepository } from '../proposals/proposal';
 import { createProposal as buildProposal } from '../proposals/proposal';
 import type { LeadRepository } from '../leads/lead';
 import type { AuditRepository } from '../audit/audit';
@@ -484,37 +484,6 @@ export function buildTelephonyGreeting(
     : t('greeting.opener_default', language, { business: businessName });
   const assembled = disclosure ? `${opener} ${disclosure}`.trim() : opener;
   return assembled.endsWith('?') ? assembled : `${assembled} ${t('greeting.cta', language)}`;
-}
-
-function intentToProposalType(intent: string | undefined): ProposalType {
-  switch (intent) {
-    case 'create_invoice': return 'draft_invoice';
-    case 'update_invoice': return 'update_invoice';
-    case 'issue_invoice': return 'issue_invoice';
-    case 'send_invoice': return 'send_invoice';
-    case 'send_estimate': return 'send_estimate';
-    case 'record_payment': return 'record_payment';
-    case 'draft_estimate': return 'draft_estimate';
-    case 'update_estimate': return 'update_estimate';
-    case 'create_appointment': return 'create_appointment';
-    case 'reschedule_appointment': return 'reschedule_appointment';
-    case 'cancel_appointment': return 'cancel_appointment';
-    case 'reassign_appointment': return 'reassign_appointment';
-    case 'create_customer': return 'create_customer';
-    case 'create_job': return 'create_job';
-    case 'add_note': return 'add_note';
-    case 'emergency_dispatch': return 'emergency_dispatch';
-    case 'update_customer': return 'update_customer';
-    case 'log_expense': return 'log_expense';
-    case 'convert_lead': return 'convert_lead';
-    case 'confirm_appointment': return 'confirm_appointment';
-    case 'mark_lead_lost': return 'mark_lead_lost';
-    case 'add_service_location': return 'add_service_location';
-    case 'log_time_entry': return 'log_time_entry';
-    case 'notify_delay': return 'notify_delay';
-    case 'request_feedback': return 'request_feedback';
-    default: return 'voice_clarification';
-  }
 }
 
 // ─── XML helpers ─────────────────────────────────────────────────────────────

@@ -104,6 +104,83 @@ describe('createTranscriptionWorker — correction pass wiring', () => {
     );
   });
 
+  it('falls back to the raw transcript when the "corrected" output is JSON but the raw was not (defense-in-depth against a misconfigured/mock gateway)', async () => {
+    const voiceRepo = makeVoiceRepo();
+    // Long enough that a short JSON blob still clears the 40%-length floor
+    // (this is the exact shape of the transcript-corruption bug: a
+    // hermetic mock's scripted catch-all response replacing a real prose
+    // transcript because it happens to pass the length guard).
+    const raw =
+      'Went out to the Henderson property this morning to check on the water heater before we replace it';
+    const jsonBlob = JSON.stringify({
+      ok: true,
+      mock: true,
+      taskType: 'transcription_correction',
+      note: 'hermetic-mock',
+    });
+    // Sanity check this fixture actually exercises the scenario: the JSON
+    // blob must be at least as long as the length floor, or the existing
+    // length guard (not the new JSON guard) would be what rejects it.
+    const floor = Math.max(4, Math.ceil(raw.length * 0.4));
+    expect(jsonBlob.length).toBeGreaterThanOrEqual(floor);
+
+    const transcriptionProvider: TranscriptionProvider = {
+      transcribe: vi.fn().mockResolvedValue({ transcript: raw, metadata: {} }),
+    };
+    const gateway = {
+      complete: vi.fn().mockResolvedValue({ content: jsonBlob, model: 'mock-model' }),
+    } as unknown as LLMGateway;
+    const glossary = { termsForTenant: vi.fn().mockResolvedValue([]) };
+
+    const worker = createTranscriptionWorker(voiceRepo, transcriptionProvider, {
+      gateway,
+      glossary,
+    });
+
+    await worker.handle(makeMessage(), logger);
+
+    expect(voiceRepo.updateStatus).toHaveBeenCalledWith(
+      'tenant-1',
+      'rec-1',
+      'completed',
+      expect.objectContaining({
+        transcript: raw,
+        metadata: expect.objectContaining({ correctionApplied: false }),
+      })
+    );
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('JSON for prose input'),
+      expect.objectContaining({ rawLen: raw.length })
+    );
+  });
+
+  it('does NOT reject a genuinely JSON-shaped correction when the raw transcript was also JSON-shaped', async () => {
+    const voiceRepo = makeVoiceRepo();
+    const raw = '{"note": "customer said replace the valve"}';
+    const corrected = '{"note": "customer said replace the valve, PEX pipe"}';
+    const transcriptionProvider: TranscriptionProvider = {
+      transcribe: vi.fn().mockResolvedValue({ transcript: raw, metadata: {} }),
+    };
+    const gateway = {
+      complete: vi.fn().mockResolvedValue({ content: corrected, model: 'mock-model' }),
+    } as unknown as LLMGateway;
+    const glossary = { termsForTenant: vi.fn().mockResolvedValue([]) };
+
+    const worker = createTranscriptionWorker(voiceRepo, transcriptionProvider, {
+      gateway,
+      glossary,
+    });
+
+    await worker.handle(makeMessage(), logger);
+
+    expect(voiceRepo.updateStatus).toHaveBeenCalledWith(
+      'tenant-1',
+      'rec-1',
+      'completed',
+      expect.objectContaining({ transcript: corrected })
+    );
+  });
+
   it('falls back to the raw transcript when the gateway call throws', async () => {
     const voiceRepo = makeVoiceRepo();
     const raw = 'raw transcript text';

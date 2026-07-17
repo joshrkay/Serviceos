@@ -292,6 +292,8 @@ function intentToProposalType(intent: string | undefined): ProposalType {
       return 'create_job';
     case 'add_note':
       return 'add_note';
+    case 'update_job':
+      return 'update_job';
     case 'emergency_dispatch':
       return 'emergency_dispatch';
     default:
