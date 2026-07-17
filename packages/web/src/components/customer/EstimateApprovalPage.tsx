@@ -53,6 +53,8 @@ interface PublicEstimateView {
     groupLabel?: string;
     isOptional?: boolean;
     isDefaultSelected?: boolean;
+    /** EE-4 — signed thumbnail URL resolved by the public service (U6), or absent. */
+    imageUrl?: string;
   }>;
   /** True when the estimate has tier options or optional add-ons to choose. */
   hasSelectableItems?: boolean;
@@ -838,6 +840,7 @@ export function EstimateApprovalPage() {
     description: li.description,
     qty: li.quantity,
     rate: li.unitPriceCents / 100,
+    imageUrl: li.imageUrl,
   }));
   const visItems = showAllItems ? lineItems : lineItems.slice(0, 3);
   const total           = (hasSelectable ? previewTotalCents : apiView.totalCents) / 100;
@@ -997,6 +1000,14 @@ export function EstimateApprovalPage() {
                             <span className={`flex size-4 shrink-0 items-center justify-center rounded-full border ${isSel ? 'border-blue-600 bg-blue-600' : 'border-slate-300'}`}>
                               {isSel && <span className="size-1.5 rounded-full bg-white" />}
                             </span>
+                            {item.imageUrl && (
+                              <img
+                                src={item.imageUrl}
+                                alt=""
+                                loading="lazy"
+                                className="h-9 w-9 shrink-0 rounded-md border border-slate-100 object-cover"
+                              />
+                            )}
                             <span className="text-sm text-slate-800 truncate">{item.description}</span>
                           </span>
                           <span className="text-sm text-slate-900 shrink-0">${(item.totalCents / 100).toLocaleString()}</span>
@@ -1026,6 +1037,14 @@ export function EstimateApprovalPage() {
                             <span className={`flex size-4 shrink-0 items-center justify-center rounded border ${isSel ? 'border-blue-600 bg-blue-600' : 'border-slate-300'}`}>
                               {isSel && <Check size={11} className="text-white" />}
                             </span>
+                            {item.imageUrl && (
+                              <img
+                                src={item.imageUrl}
+                                alt=""
+                                loading="lazy"
+                                className="h-9 w-9 shrink-0 rounded-md border border-slate-100 object-cover"
+                              />
+                            )}
                             <span className="text-sm text-slate-800 truncate">{item.description}</span>
                           </span>
                           <span className="text-sm text-slate-900 shrink-0">+${(item.totalCents / 100).toLocaleString()}</span>
@@ -1054,7 +1073,18 @@ export function EstimateApprovalPage() {
             <div className="divide-y divide-slate-50">
               {visItems.map((item, i) => (
                 <div key={i} className="grid grid-cols-[minmax(0,1fr)_2rem_4rem_4.5rem] sm:grid-cols-[minmax(0,1fr)_40px_72px_72px] gap-x-2 px-5 py-3 items-start">
-                  <p className="text-sm text-slate-800 min-w-0 break-words">{item.description}</p>
+                  <div className="flex min-w-0 items-start gap-2">
+                    {item.imageUrl && (
+                      <img
+                        src={item.imageUrl}
+                        alt=""
+                        loading="lazy"
+                        data-testid={`line-item-thumb-${i}`}
+                        className="h-10 w-10 shrink-0 rounded-md border border-slate-100 object-cover"
+                      />
+                    )}
+                    <p className="text-sm text-slate-800 min-w-0 break-words">{item.description}</p>
+                  </div>
                   <p className="text-sm text-slate-500 text-right tabular-nums">{item.qty}</p>
                   <p className="text-sm text-slate-500 text-right tabular-nums">${fmtUsd(item.rate)}</p>
                   <p className="text-sm text-slate-800 text-right tabular-nums">${fmtUsd(item.qty * item.rate)}</p>
@@ -1083,7 +1113,7 @@ export function EstimateApprovalPage() {
               businessContact: businessPhone,
               description,
               validUntil: validUntilText,
-              lineItems: lineItems.map((i) => ({ description: i.description, qty: i.qty, rate: i.rate })),
+              lineItems: lineItems.map((i) => ({ description: i.description, qty: i.qty, rate: i.rate, imageUrl: i.imageUrl })),
               totalDollars: total,
             })}
             className="mb-4 flex min-h-11 items-center justify-center gap-1.5 w-full rounded-xl border border-slate-200 bg-white py-2.5 text-xs text-slate-500 hover:bg-slate-50 transition-colors"

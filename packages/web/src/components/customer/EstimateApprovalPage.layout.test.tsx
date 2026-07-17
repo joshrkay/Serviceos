@@ -83,7 +83,9 @@ describe('EstimateApprovalPage — mobile layout contract', () => {
   it('line-items grid tracks use minmax(0,1fr) so descriptions can shrink', async () => {
     renderPage();
     const desc = await screen.findByText(LONG_DESCRIPTION);
-    const row = desc.parentElement as HTMLElement;
+    // The description sits inside a flex "item" cell (EE-4 thumbnail + text);
+    // the grid row is the nearest .grid ancestor.
+    const row = desc.closest('div.grid') as HTMLElement;
     expect(row.className).toContain('minmax(0,1fr)');
     // Header row carries the same track contract.
     const header = screen.getByText('Item').parentElement as HTMLElement;
@@ -100,8 +102,9 @@ describe('EstimateApprovalPage — mobile layout contract', () => {
   it('money cells use tabular-nums and all four columns render for the long row', async () => {
     renderPage();
     const desc = await screen.findByText(LONG_DESCRIPTION);
-    const row = desc.parentElement as HTMLElement;
+    const row = desc.closest('div.grid') as HTMLElement;
     const cells = Array.from(row.children) as HTMLElement[];
+    // Cell 0 is the flex item cell (thumbnail + description); 1-3 are money.
     expect(cells).toHaveLength(4);
     expect(cells[1].className).toContain('tabular-nums');
     expect(cells[2].className).toContain('tabular-nums');
@@ -116,6 +119,39 @@ describe('EstimateApprovalPage — mobile layout contract', () => {
     expect(toggle.className).toContain('min-h-11');
     const pdf = screen.getByRole('button', { name: /download pdf/i });
     expect(pdf.className).toContain('min-h-11');
+  });
+
+  it('EE-4 — renders a fixed-size thumbnail for a line with an imageUrl', async () => {
+    apiFetchMock.mockImplementation(async (_url: string, init?: RequestInit) => {
+      if (!init || init.method === undefined) {
+        return jsonResponse({
+          ...view,
+          lineItems: [
+            { description: 'Tankless heater', quantity: 1, unitPriceCents: 250000, totalCents: 250000, imageUrl: 'https://cdn/x.jpg' },
+            { description: 'Labor', quantity: 1, unitPriceCents: 15000, totalCents: 15000 },
+          ],
+        });
+      }
+      return jsonResponse({});
+    });
+    renderPage();
+    const thumb = (await screen.findByTestId('line-item-thumb-0')) as HTMLImageElement;
+    expect(thumb).toHaveAttribute('src', 'https://cdn/x.jpg');
+    // Fixed size + shrink-0 + object-cover so a wide photo can't break the
+    // ≤320px grid; decorative alt keeps it out of the row's accessible name.
+    expect(thumb.className).toContain('h-10');
+    expect(thumb.className).toContain('w-10');
+    expect(thumb.className).toContain('shrink-0');
+    expect(thumb.className).toContain('object-cover');
+    expect(thumb).toHaveAttribute('alt', '');
+    // The image-less line renders no thumbnail.
+    expect(screen.queryByTestId('line-item-thumb-1')).not.toBeInTheDocument();
+  });
+
+  it('EE-4 — a legacy estimate with no images renders exactly as before (no thumbnails)', async () => {
+    renderPage(); // default `view` has no imageUrl on any line
+    await screen.findByText('AC tune-up');
+    expect(screen.queryByTestId('line-item-thumb-0')).not.toBeInTheDocument();
   });
 
   it('renders the tenant terminology label (Quote) instead of "Estimate"', async () => {
