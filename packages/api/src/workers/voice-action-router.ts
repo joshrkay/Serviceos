@@ -427,79 +427,6 @@ export const INTENT_TO_PROPOSAL_TYPE: Partial<Record<Exclude<IntentType, 'unknow
   create_standing_instruction: 'create_standing_instruction',
 };
 
-/**
- * Handles "send/issue invoice" voice commands. No LLM call needed —
- * the payload is just { invoiceId }. The invoice ID is resolved from:
- *   1. extractedEntities.jobReference (explicit mention like "invoice 1024")
- *   2. The most recent draft_invoice proposal in the same conversation
- *      (handles "the one we just drafted")
- * If neither resolves, the proposal is created with an empty invoiceId
- * so the execution handler can return a clear validation failure.
- */
-class IssueInvoiceTaskHandler implements TaskHandler {
-  readonly taskType: ProposalType = 'issue_invoice';
-
-  constructor(
-    private readonly proposalRepo: ProposalRepository,
-    private readonly thresholdResolver?: (tenantId: string) => Promise<
-      Partial<Record<'supervisor' | 'tech' | 'both', number>> | undefined
-    >,
-  ) {}
-
-  async handle(context: TaskContext): Promise<TaskResult> {
-    let invoiceId: string | undefined;
-
-    if (
-      context.existingEntities?.jobReference &&
-      typeof context.existingEntities.jobReference === 'string'
-    ) {
-      invoiceId = context.existingEntities.jobReference;
-    }
-
-    if (!invoiceId && context.conversationId) {
-      const all = await this.proposalRepo.findByTenant(context.tenantId);
-      const recentDraft = all
-        .filter(
-          (p) =>
-            p.proposalType === 'draft_invoice' &&
-            p.sourceContext?.conversationId === context.conversationId &&
-            p.resultEntityId
-        )
-        .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0];
-      if (recentDraft?.resultEntityId) {
-        invoiceId = recentDraft.resultEntityId;
-      }
-    }
-
-    // Codex P2 (PR #316): prefer the override the router already
-    // resolved at request entry. Re-resolving here means a transient
-    // failure on this single handler can desync issue_invoice from
-    // the rest of the request's intents (which use context). Fall
-    // back to the resolver only when context didn't carry one (e.g.
-    // legacy callers that don't go through voice-action-router).
-    const tenantThresholdOverride =
-      context.tenantThresholdOverride
-      ?? (this.thresholdResolver
-        ? await this.thresholdResolver(context.tenantId).catch(() => undefined)
-        : undefined);
-
-    const input: CreateProposalInput = {
-      tenantId: context.tenantId,
-      proposalType: 'issue_invoice',
-      payload: invoiceId ? { invoiceId } : {},
-      summary: invoiceId
-        ? `Issue invoice ${invoiceId}`
-        : context.message,
-      sourceContext: context.conversationId ? { conversationId: context.conversationId } : undefined,
-      createdBy: context.userId,
-      ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
-    };
-
-    const proposal = createProposal(input);
-    return { proposal, taskType: 'issue_invoice' };
-  }
-}
-
 function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandler> {
   // B5 — the "core" taxonomy (draft/edit/send/schedule/CRM/collections
   // intents) is built by the shared registry. PR review finding (2026-07):
@@ -509,6 +436,12 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
   // than adding a new top-level dep — see InvoiceEditTaskDeps /
   // SendInvoiceTaskDeps doc comments (ai/tasks/*.ts): candidates only, the
   // missingFields gate is untouched.
+  //
+  // B4 — issue_invoice is now built by the shared registry too (proposalRepo
+  // + thresholdResolver threaded through), so it's the SAME handler instance
+  // shape routes/assistant.ts constructs — no more worker-local divergence.
+  // See the doc comment on IssueInvoiceTaskHandler (ai/orchestration/
+  // task-router.ts) for the resolution ladder.
   const handlers = buildTaskHandlers({
     gateway: deps.gateway,
     catalogRepo: deps.catalogRepo,
@@ -520,11 +453,12 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
     estimateRepo: deps.estimateRepo,
     dunningEventRepo: deps.dunningEventRepo,
     invoicingDeps: deps.invoicingDeps,
+    proposalRepo: deps.proposalRepo,
+    thresholdResolver: deps.thresholdResolver,
   });
   // The handlers below stay surface-specific by design — see the doc
   // comment on HandlerRegistryDeps (ai/orchestration/handler-registry.ts)
   // for why each is excluded from the shared registry.
-  handlers.set('issue_invoice', new IssueInvoiceTaskHandler(deps.proposalRepo, deps.thresholdResolver));
   // U3 — "respond to that 1-star review": resolve the review, dedup against
   // the polling worker's auto-draft, else draft with the same deps it uses.
   handlers.set(

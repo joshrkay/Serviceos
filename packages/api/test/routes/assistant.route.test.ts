@@ -13,9 +13,10 @@ import {
   createAssistantRouter,
   proposalSignals,
   editFieldsForMissing,
+  dropUnverifiedIds,
   VOICE_APPROVAL_REFUSAL,
 } from '../../src/routes/assistant';
-import { InMemoryProposalRepository } from '../../src/proposals/proposal';
+import { InMemoryProposalRepository, createProposal } from '../../src/proposals/proposal';
 import { approveProposal } from '../../src/proposals/actions';
 import { ValidationError } from '../../src/shared/errors';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
@@ -523,6 +524,63 @@ describe('B1 — editFieldsForMissing helper (pure mapper)', () => {
   });
 });
 
+/**
+ * B4 (feat: voice-transcript-and-agent-paths) — the verifiedIds allowlist
+ * this unit adds to dropUnverifiedIds. This is B4's main review surface
+ * (see the doc comment on dropUnverifiedIds and on IssueInvoiceTaskHandler
+ * in ai/orchestration/task-router.ts): verifiedIds is stamped ONLY by a
+ * handler's repo-lookup code path, never copied from LLM/classifier JSON,
+ * so it's safe to trust as an allowlist here. These tests pin the exact-match
+ * semantics directly, independent of any one handler's wiring.
+ */
+describe('B4 — dropUnverifiedIds verifiedIds allowlist (security pin)', () => {
+  const RESOLVED_ID = 'aaaaaaaa-1111-2222-3333-444444444444';
+  const HALLUCINATED_ID = 'bbbbbbbb-9999-8888-7777-666666666666';
+
+  it('keeps an id that exactly matches sourceContext.verifiedIds, even though it never appears in the operator text or entities', () => {
+    const payload: Record<string, unknown> = { invoiceId: RESOLVED_ID };
+    dropUnverifiedIds(payload, 'issue the one we just drafted', {}, {
+      verifiedIds: { invoiceId: RESOLVED_ID },
+    });
+    expect(payload.invoiceId).toBe(RESOLVED_ID);
+  });
+
+  it('SECURITY: still strips a hallucinated id that does not match verifiedIds, even when verifiedIds is present for a DIFFERENT value', () => {
+    const payload: Record<string, unknown> = { invoiceId: HALLUCINATED_ID };
+    dropUnverifiedIds(payload, 'issue the one we just drafted', {}, {
+      verifiedIds: { invoiceId: RESOLVED_ID },
+    });
+    expect(payload.invoiceId).toBeUndefined();
+  });
+
+  it('SECURITY: still strips a hallucinated id when verifiedIds only covers a DIFFERENT key', () => {
+    const payload: Record<string, unknown> = { invoiceId: HALLUCINATED_ID };
+    dropUnverifiedIds(payload, 'some text', {}, {
+      verifiedIds: { jobId: RESOLVED_ID },
+    });
+    expect(payload.invoiceId).toBeUndefined();
+  });
+
+  it('SECURITY: still strips a hallucinated id when sourceContext is present but has no verifiedIds at all', () => {
+    const payload: Record<string, unknown> = { invoiceId: HALLUCINATED_ID };
+    dropUnverifiedIds(payload, 'some text', {}, { conversationId: 'conv-1' });
+    expect(payload.invoiceId).toBeUndefined();
+  });
+
+  it('the ordinary haystack check still applies independently of verifiedIds — an id literally in the operator text survives with no verifiedIds at all', () => {
+    const payload: Record<string, unknown> = { invoiceId: RESOLVED_ID };
+    dropUnverifiedIds(payload, `Issue invoice ${RESOLVED_ID}`, {});
+    expect(payload.invoiceId).toBe(RESOLVED_ID);
+  });
+
+  it('a verifiedIds entry for one key never verifies an unrelated key on the same payload', () => {
+    const payload: Record<string, unknown> = { invoiceId: RESOLVED_ID, jobId: HALLUCINATED_ID };
+    dropUnverifiedIds(payload, 'issue it', {}, { verifiedIds: { invoiceId: RESOLVED_ID } });
+    expect(payload.invoiceId).toBe(RESOLVED_ID);
+    expect(payload.jobId).toBeUndefined();
+  });
+});
+
 describe('U7 — POST /api/assistant/chat surfaces pricing signals on the card', () => {
   function catalogRepo(items: CatalogItem[]): CatalogItemRepository {
     return {
@@ -1014,6 +1072,84 @@ describe('money-path handler wiring — update_invoice/send_invoice/issue_invoic
     expect(persisted).toHaveLength(1);
     expect(persisted[0].proposalType).toBe('issue_invoice');
     expect(persisted[0].payload).toEqual({ invoiceId: 'INV-0042' });
+  });
+
+  // B4 (feat: voice-transcript-and-agent-paths) — before this unit the
+  // assistant surface's IssueInvoiceTaskHandler had NO conversation-context
+  // resolution rung at all (only the voice worker did, and its version had
+  // no missingFields gate). This proves the SAME handler now resolves "the
+  // one we just drafted" here too, AND that the resolved id survives
+  // dropUnverifiedIds (it's not literally in the operator's text — the scrub
+  // must special-case it via sourceContext.verifiedIds, not just skip it).
+  it('issue_invoice resolves "the one we just drafted" from a same-conversation draft_invoice, and the resolved id survives dropUnverifiedIds', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    // Seed a prior draft_invoice in the same conversation, already carrying
+    // a resultEntityId (as if drafted and then approved/executed earlier in
+    // the same chat thread).
+    const draft = createProposal({
+      tenantId: TEST_TENANT,
+      proposalType: 'draft_invoice',
+      payload: { customerId: 'cust-1' },
+      summary: 'Draft invoice for Henderson',
+      sourceContext: { conversationId: 'conv-resolve-1' },
+      createdBy: TEST_USER,
+    });
+    draft.resultEntityId = 'aaaaaaaa-1111-2222-3333-444444444444';
+    await proposalRepo.create(draft);
+
+    const gateway = scriptedGateway([
+      JSON.stringify({ intentType: 'issue_invoice', confidence: 0.9, extractedEntities: {} }),
+    ]);
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: TEST_USER,
+        sessionId: 'sess-1',
+        tenantId: TEST_TENANT,
+        role: 'owner',
+      };
+      next();
+    });
+    app.use('/api/assistant', createAssistantRouter({ gateway, proposalRepo }));
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({
+        messages: [{ role: 'user', content: 'Issue the invoice we just drafted' }],
+        conversationId: 'conv-resolve-1',
+      });
+
+    expect(res.status).toBe(200);
+    const persisted = (await proposalRepo.findByTenant(TEST_TENANT)).find(
+      (p) => p.proposalType === 'issue_invoice',
+    );
+    expect(persisted).toBeDefined();
+    // Resolved id present and NOT stripped by dropUnverifiedIds, even though
+    // it never appears in the operator's raw text.
+    expect(persisted!.payload.invoiceId).toBe('aaaaaaaa-1111-2222-3333-444444444444');
+    expect(persisted!.sourceContext?.missingFields).toBeUndefined();
+  });
+
+  it('issue_invoice with no reference and no matching conversation history lands GATED (never a doomed empty-payload approval)', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const gateway = scriptedGateway([
+      JSON.stringify({ intentType: 'issue_invoice', confidence: 0.9, extractedEntities: {} }),
+    ]);
+    const app = buildApp(gateway, proposalRepo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Issue the invoice' }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.message.proposal.missingFields).toEqual(['invoiceId']);
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0].payload).toEqual({});
+    await expect(
+      approveProposal(proposalRepo, TEST_TENANT, persisted[0].id, TEST_USER, 'owner'),
+    ).rejects.toBeInstanceOf(ValidationError);
   });
 
   it('chain path ("X then Y"): update_invoice and issue_invoice steps each route to their own handler', async () => {

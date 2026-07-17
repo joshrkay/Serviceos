@@ -8,6 +8,7 @@ import { AppError } from '../../shared/errors';
 import {
   Proposal,
   ProposalType,
+  ProposalRepository,
   CreateProposalInput,
   createProposal,
 } from '../../proposals/proposal';
@@ -17,6 +18,11 @@ import {
   ConfidencePolicy,
   DEFAULT_CONFIDENCE_POLICY,
 } from '../guardrails/low-confidence';
+import type { InvoiceRepository } from '../../invoices/invoice';
+import {
+  candidatesForReference,
+  mapInvoicesToCandidates,
+} from '../resolution/reference-candidates';
 
 // P2-007 — single entry point that dispatches one classified conversational
 // intent to exactly one task handler, producing one bounded Proposal.
@@ -47,43 +53,187 @@ export class TaskRouter {
   }
 }
 
+// A classifier-extracted reference that already IS a usable invoice
+// identifier for the execution handler's resolveInvoice() (UUID or a bare/
+// "INV-0042"-style invoice number — see issue-invoice-handler.ts). Anything
+// else (e.g. "the Henderson invoice") is free text the execution handler
+// cannot resolve on its own, so it must NOT be handed through ungated —
+// it falls to rung 2/3 of the resolution ladder below instead.
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const INVOICE_NUMBER_RE = /^(?:INV-)?\d+$/i;
+
+function looksLikeResolvedInvoiceRef(value: string): boolean {
+  return UUID_RE.test(value) || INVOICE_NUMBER_RE.test(value);
+}
+
+export interface IssueInvoiceTaskDeps {
+  /**
+   * B4 — when present, an unresolved reference falls back to "the invoice
+   * we just drafted in this conversation": the most recent same-conversation
+   * `draft_invoice` proposal with a `resultEntityId`. Only `findByTenant` is
+   * required; `findByConversation` (optional on ProposalRepository) is used
+   * when available for a SQL-filtered lookup instead of a full tenant scan
+   * (mirrors the `draft_estimate` clarification-loop lookup in
+   * workers/voice-action-router.ts).
+   */
+  proposalRepo?: Pick<ProposalRepository, 'findByTenant' | 'findByConversation'>;
+  /**
+   * B4 — when present, powers two things: (1) B2-style `entityCandidates`
+   * for a gated card with a free-text reference that didn't resolve via
+   * conversation context, and (2) a "recent drafts" fallback when there is
+   * no reference at all. Optional; absent → the gate carries no candidates
+   * (Edit-field fallback only, same as before B4).
+   */
+  invoiceRepo?: Pick<InvoiceRepository, 'findByTenant'>;
+  /**
+   * Per-tenant auto-approve threshold override. Mirrors the worker's
+   * `thresholdResolver` (see VoiceActionRouterDeps) so both surfaces apply
+   * the same tenant-configured threshold to this proposal type.
+   */
+  thresholdResolver?: (
+    tenantId: string,
+  ) => Promise<Partial<Record<'supervisor' | 'tech' | 'both', number>> | undefined>;
+}
+
 /**
- * P22-002 — dep-free `issue_invoice` task handler for the default router.
+ * B4 (feat: voice-transcript-and-agent-paths) — THE `issue_invoice` task
+ * handler, used by both the assistant chat route and the voice worker (see
+ * handler-registry.ts / assistant.ts / voice-action-router.ts). Before this
+ * unit there were two divergent handlers: a dep-free one here (gated via
+ * missingFields, no conversation-context resolution) and a repo-backed one
+ * in voice-action-router.ts ("the one we just drafted" resolution, but
+ * ungated — it emitted an empty payload with no missingFields, so an
+ * unresolvable voice "issue the invoice" landed approvable and doomed at
+ * execution). This handler unifies both behaviors with NEITHER gap:
  *
- * No LLM call needed: the payload is just `{ invoiceId }`, taken from the
- * classifier's extracted invoice reference (jobReference / invoiceReference,
- * UUID or "INV-0042"-style number — the execution handler resolves either).
- * When no reference was extracted the proposal carries an empty payload AND
- * `missingFields: ['invoiceId']` (mirrors SendInvoiceTaskHandler in
- * voice-extended-tasks.ts) so `decideInitialStatus`/`approveProposal` block
- * the proposal from ever reaching 'approved' — the review card prompts the
- * operator for the missing reference instead of the proposal auto-promoting
- * to ready_for_review and dying at execution on the absent invoiceId. The
- * richer conversation-context resolution ("the one we just drafted") lives
- * in the voice-action-router's repo-backed handler.
+ * Resolution ladder:
+ *   1. `existingEntities.invoiceReference`/`jobReference` already looks like
+ *      a usable id (UUID or "INV-0042"/bare-number) → `payload.invoiceId`,
+ *      ungated (the execution handler resolves either shape directly).
+ *   2. Else, `conversationId` + `proposalRepo` wired → the most recent
+ *      same-conversation `draft_invoice` proposal with a `resultEntityId` →
+ *      `payload.invoiceId`, ungated, AND `sourceContext.verifiedIds =
+ *      { invoiceId }`. CRITICAL SECURITY: `verifiedIds` is stamped ONLY
+ *      here, from a proposalRepo lookup — never copied from `existingEntities`
+ *      (LLM/classifier output). `routes/assistant.ts`'s `dropUnverifiedIds`
+ *      trusts this allowlist to survive its scrub; a hallucinated id must
+ *      still be stripped there, so this handler must never let LLM-sourced
+ *      text reach `verifiedIds`.
+ *   3. Else → empty payload + `missingFields: ['invoiceId']` (blocks
+ *      'approved' via decideInitialStatus/approveProposal exactly as
+ *      before), plus B2-style `sourceContext.entityCandidates` from either
+ *      a free-text reference search or (no reference at all) the tenant's
+ *      most recent draft invoices — candidates are a UX affordance layered
+ *      ON TOP of the gate, never a substitute for it.
  */
 export class IssueInvoiceTaskHandler implements TaskHandler {
   readonly taskType: ProposalType = 'issue_invoice';
+
+  constructor(private readonly deps: IssueInvoiceTaskDeps = {}) {}
+
+  private async resolveFromConversation(
+    tenantId: string,
+    conversationId: string,
+  ): Promise<string | undefined> {
+    const proposalRepo = this.deps.proposalRepo;
+    if (!proposalRepo) return undefined;
+    try {
+      const candidates = await (proposalRepo.findByConversation
+        ? proposalRepo.findByConversation(tenantId, conversationId)
+        : proposalRepo.findByTenant(tenantId));
+      const recentDraft = candidates
+        .filter(
+          (p) =>
+            p.proposalType === 'draft_invoice' &&
+            p.sourceContext?.conversationId === conversationId &&
+            p.resultEntityId,
+        )
+        .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0];
+      return recentDraft?.resultEntityId ?? undefined;
+    } catch {
+      return undefined;
+    }
+  }
 
   async handle(context: TaskContext): Promise<TaskResult> {
     const ref =
       context.existingEntities?.invoiceReference ??
       context.existingEntities?.jobReference;
-    const invoiceId = typeof ref === 'string' && ref.trim() ? ref.trim() : undefined;
+    const trimmedRef = typeof ref === 'string' && ref.trim() ? ref.trim() : undefined;
+
+    let invoiceId: string | undefined;
+    const missing: string[] = [];
+    const extraSourceContext: Record<string, unknown> = {};
+
+    if (trimmedRef && looksLikeResolvedInvoiceRef(trimmedRef)) {
+      // Rung 1 — already a usable reference; resolveInvoice() at execution
+      // time handles the UUID/number-vs-lookup split.
+      invoiceId = trimmedRef;
+    } else if (context.conversationId) {
+      // Rung 2 — "the one we just drafted" conversation-context resolution.
+      // A repo-resolved id is verifiable by construction (it came from a DB
+      // lookup, not LLM text), so it's stamped into `verifiedIds` alongside
+      // the payload — never the reverse.
+      const resolved = await this.resolveFromConversation(context.tenantId, context.conversationId);
+      if (resolved) {
+        invoiceId = resolved;
+        extraSourceContext.verifiedIds = { invoiceId: resolved };
+      }
+    }
+
+    if (!invoiceId) {
+      // Rung 3 — gated. Layer candidates on top; the gate itself is
+      // unconditional whenever no id was resolved above.
+      missing.push('invoiceId');
+
+      let candidates = await candidatesForReference({
+        tenantId: context.tenantId,
+        reference: trimmedRef,
+        kind: 'invoice',
+        invoiceRepo: this.deps.invoiceRepo,
+      });
+      if (candidates.length === 0 && !trimmedRef && this.deps.invoiceRepo) {
+        // No reference at all ("issue the invoice") — offer the tenant's
+        // most recent DRAFT invoices (only drafts are issuable; anything
+        // else would just fail InvoiceNotDraftError at execution) as a
+        // one-tap starting point instead of a dead-end card.
+        try {
+          const recentDrafts = await this.deps.invoiceRepo.findByTenant(context.tenantId, {
+            status: 'draft',
+            limit: 5,
+            sort: 'desc',
+          });
+          candidates = mapInvoicesToCandidates(recentDrafts);
+        } catch {
+          // Failure-soft — candidates are a nicety, never load-bearing.
+        }
+      }
+      if (candidates.length > 0) {
+        extraSourceContext.entityCandidates = candidates;
+        extraSourceContext.entityKind = 'invoice';
+        if (trimmedRef) extraSourceContext.entityReference = trimmedRef;
+      }
+    }
+
+    const tenantThresholdOverride =
+      context.tenantThresholdOverride ??
+      (this.deps.thresholdResolver
+        ? await this.deps.thresholdResolver(context.tenantId).catch(() => undefined)
+        : undefined);
+
+    const baseSourceContext = context.conversationId ? { conversationId: context.conversationId } : {};
+    const sourceContext = { ...baseSourceContext, ...extraSourceContext };
 
     const input: CreateProposalInput = {
       tenantId: context.tenantId,
       proposalType: this.taskType,
       payload: invoiceId ? { invoiceId } : {},
       summary: invoiceId ? `Issue invoice ${invoiceId}` : context.message,
-      sourceContext: context.conversationId
-        ? { conversationId: context.conversationId }
-        : undefined,
+      sourceContext: Object.keys(sourceContext).length > 0 ? sourceContext : undefined,
       createdBy: context.userId,
-      missingFields: invoiceId ? undefined : ['invoiceId'],
-      ...(context.tenantThresholdOverride
-        ? { tenantThresholdOverride: context.tenantThresholdOverride }
-        : {}),
+      missingFields: missing.length > 0 ? missing : undefined,
+      ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
     };
 
     const proposal = createProposal(input);

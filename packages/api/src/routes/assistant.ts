@@ -23,11 +23,12 @@ import { EstimateEditTaskHandler } from '../ai/tasks/estimate-edit-task';
 import { InvoiceTaskHandler } from '../ai/tasks/invoice-task';
 import { InvoiceEditTaskHandler } from '../ai/tasks/invoice-edit-task';
 import { SendInvoiceTaskHandler } from '../ai/tasks/voice-extended-tasks';
-import { IssueInvoiceTaskHandler } from '../ai/orchestration/task-router';
 // B5 — the scheduling-family / create_job / invoice-follow-up intents this
 // route was missing (12 in total) are drafted by the SAME handler-registry
 // builder workers/voice-action-router.ts's buildHandlers uses, so the two
 // surfaces can't diverge again — see the doc comment on HandlerRegistryDeps.
+// B4 — issue_invoice joined this shared registry too (see
+// HandlerRegistryDeps.proposalRepo in ai/orchestration/handler-registry.ts).
 import { buildTaskHandlers } from '../ai/orchestration/handler-registry';
 import type { InvoiceRepository } from '../invoices/invoice';
 import type { CatalogItemRepository } from '../catalog/catalog-item';
@@ -416,18 +417,40 @@ function customerProposalToUI(
  * payloads must literally appear in the operator's message (or classifier
  * entities); the model may not invent them (live: hallucinated textbook
  * UUIDs sent executions into doomed lookups).
+ *
+ * B4 — extended with a `sourceContext.verifiedIds` allowlist: an id a task
+ * handler resolved via a REPO LOOKUP (not LLM text) — e.g.
+ * IssueInvoiceTaskHandler's conversation-context resolution of "the one we
+ * just drafted" — is verifiable by construction even though it never
+ * literally appears in the operator's words. `verifiedIds` must be stamped
+ * ONLY by such repo-lookup code paths (see the doc comment on
+ * IssueInvoiceTaskHandler in ai/orchestration/task-router.ts); this function
+ * trusts whatever is there, so a handler that ever copied LLM/classifier
+ * output into `verifiedIds` would reopen the exact hallucinated-id hole this
+ * scrub exists to close. A key present in `payload` but ABSENT from
+ * `verifiedIds` (or not exactly matching the verified value) still gets the
+ * ordinary haystack check — a hallucinated id is stripped regardless of
+ * whether some other key happened to get verified.
  */
-function dropUnverifiedIds(
+// Exported for a direct unit pin on the verifiedIds allowlist semantics
+// (test/routes/assistant.route.test.ts) — this is B4's main review surface.
+export function dropUnverifiedIds(
   payload: Record<string, unknown>,
   operatorText: string,
-  entities: Record<string, unknown>
+  entities: Record<string, unknown>,
+  sourceContext?: Record<string, unknown>
 ): void {
   const haystack = (operatorText + ' ' + JSON.stringify(entities)).toLowerCase();
+  const verifiedIds =
+    sourceContext?.verifiedIds && typeof sourceContext.verifiedIds === 'object'
+      ? (sourceContext.verifiedIds as Record<string, unknown>)
+      : undefined;
   for (const key of ['jobId', 'customerId', 'estimateId', 'invoiceId', 'appointmentId']) {
     const v = payload[key];
-    if (typeof v === 'string' && v.length >= 32 && !haystack.includes(v.toLowerCase())) {
-      delete payload[key];
-    }
+    if (typeof v !== 'string' || v.length < 32) continue;
+    if (haystack.includes(v.toLowerCase())) continue;
+    if (verifiedIds && verifiedIds[key] === v) continue;
+    delete payload[key];
   }
 }
 
@@ -588,6 +611,16 @@ async function generateAssistantReply(
   deps: AssistantRouterDeps,
   correlationId: string,
   inputMode?: 'voice' | 'text',
+  // B4 — the client-pinned conversation id (parsed.conversationId), threaded
+  // into every task handler's TaskContext so conversation-scoped resolution
+  // (e.g. IssueInvoiceTaskHandler's "the one we just drafted") can fire on
+  // this surface. Undefined on a conversation's first turn — the same
+  // rung-2-only-fires-with-a-conversationId behavior the voice worker has
+  // always had. Note: this is the id the CLIENT sent in, not the (possibly
+  // freshly-minted) id `recordAssistantTurn` returns after this function's
+  // caller persists the turn — a brand-new conversation has no prior drafts
+  // to resolve against yet, so that ordering is never a gap.
+  conversationId?: string,
 ) {
   const lastUser = [...messages].reverse().find((m) => m.role === 'user');
   const lastUserText = lastUser?.content ?? '';
@@ -693,6 +726,10 @@ async function generateAssistantReply(
       // findJobsRequiringInvoicing needs) and is only passed when all
       // three repos are wired — absent, batch_invoice degrades to its own
       // "not available" clarification rather than throwing.
+      // B4 — issue_invoice is now built by the shared registry too
+      // (proposalRepo threaded through), so "issue the one we just drafted"
+      // resolves from conversation context on THIS surface the same way it
+      // does on the voice worker — same handler instance shape, same gate.
       const sharedHandlers = buildTaskHandlers({
         gateway: deps.gateway,
         catalogRepo: deps.catalogRepo,
@@ -705,6 +742,7 @@ async function generateAssistantReply(
           deps.jobRepo && deps.invoiceRepo && deps.estimateRepo
             ? { jobRepo: deps.jobRepo, invoiceRepo: deps.invoiceRepo, estimateRepo: deps.estimateRepo }
             : undefined,
+        proposalRepo: deps.proposalRepo,
       });
 
       // QA-2026-06-05 (AST-07, scoped): multi-step asks ("…, then …") are
@@ -736,7 +774,7 @@ async function generateAssistantReply(
             update_estimate: () => new EstimateEditTaskHandler(deps.gateway, deps.estimateRepo, deps.catalogRepo),
             create_invoice: () => new InvoiceTaskHandler(deps.gateway, deps.catalogRepo),
             send_invoice: () => new SendInvoiceTaskHandler({ invoiceRepo: deps.invoiceRepo }),
-            issue_invoice: () => new IssueInvoiceTaskHandler(),
+            issue_invoice: () => sharedHandlers.get('issue_invoice')!,
             update_invoice: () => new InvoiceEditTaskHandler(deps.gateway, { catalogRepo: deps.catalogRepo, invoiceRepo: deps.invoiceRepo }),
             // B5 — the 12 intents this route was silently dropping to a
             // conversational LLM reply (no draft at all). Drawn from
@@ -774,13 +812,14 @@ async function generateAssistantReply(
             tenantId,
             userId,
             message: segment,
+            conversationId,
             existingEntities: segEntities,
             ...(segStandingInstructions
               ? { standingInstructions: segStandingInstructions }
               : {}),
           });
           if (!proposal) continue;
-          dropUnverifiedIds(proposal.payload, segment, segEntities);
+          dropUnverifiedIds(proposal.payload, segment, segEntities, proposal.sourceContext);
           proposal.sourceContext = { ...(proposal.sourceContext ?? {}), chainId, chainStep: chainCards.length + 1 };
           // Dependency gate: steps after the first reference results that
           // don't exist yet (the customer, their job). Auto-approval would
@@ -840,7 +879,7 @@ async function generateAssistantReply(
         update_estimate: () => new EstimateEditTaskHandler(deps.gateway, deps.estimateRepo, deps.catalogRepo),
         create_invoice: () => new InvoiceTaskHandler(deps.gateway, deps.catalogRepo),
         send_invoice: () => new SendInvoiceTaskHandler(),
-        issue_invoice: () => new IssueInvoiceTaskHandler(),
+        issue_invoice: () => sharedHandlers.get('issue_invoice')!,
         update_invoice: () => new InvoiceEditTaskHandler(deps.gateway, { catalogRepo: deps.catalogRepo, invoiceRepo: deps.invoiceRepo }),
         // B5 — same 12 intents as the chain map above, same shared registry.
         reschedule_appointment: () => sharedHandlers.get('reschedule_appointment')!,
@@ -872,10 +911,16 @@ async function generateAssistantReply(
           tenantId,
           userId,
           message: lastUserText,
+          conversationId,
           existingEntities: { ...(classification.extractedEntities ?? {}) },
           ...(standingInstructions ? { standingInstructions } : {}),
         });
-        dropUnverifiedIds(proposal.payload, lastUserText, { ...(classification.extractedEntities ?? {}) });
+        dropUnverifiedIds(
+          proposal.payload,
+          lastUserText,
+          { ...(classification.extractedEntities ?? {}) },
+          proposal.sourceContext,
+        );
         await deps.proposalRepo.create(proposal);
         if (proposal.status === 'draft') {
           await deps.proposalRepo.updateStatus(tenantId, proposal.id, 'ready_for_review');
@@ -1062,6 +1107,11 @@ export function createAssistantRouter(deps: AssistantRouterDeps): Router {
           deps,
           correlationId,
           parsed.inputMode,
+          // B4 — the client-pinned conversation id (undefined on a fresh
+          // conversation's first turn); threads into TaskContext.conversationId
+          // for handlers like IssueInvoiceTaskHandler that resolve "the one we
+          // just drafted" from same-conversation proposal history.
+          parsed.conversationId,
         );
 
         // Story 3.11 — persist the turn so the conversation survives reload and

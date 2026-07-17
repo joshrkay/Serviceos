@@ -799,6 +799,113 @@ describe('voice-action-router worker', () => {
     expect(payload.invoiceReference).toBe('INV-0042');
   });
 
+  // B4 (feat: voice-transcript-and-agent-paths) — the worker's issue_invoice
+  // now routes through the SAME handler the assistant surface uses
+  // (ai/orchestration/task-router.ts's IssueInvoiceTaskHandler), built by the
+  // shared registry with proposalRepo threaded through. Before this unit the
+  // worker's local handler had NO missingFields gate at all: an unresolvable
+  // "issue the invoice" landed with an empty payload and status draft/
+  // ready_for_review with nothing blocking Approve, so approval succeeded
+  // and execution then failed on the empty invoiceId. This is a deliberate
+  // BEHAVIOR CHANGE: the same case now lands gated.
+  describe('issue_invoice — unified handler parity with the assistant surface', () => {
+    it('an INV-number reference resolves ungated (rung 1)', async () => {
+      const gateway = gatewayReturning([
+        JSON.stringify({
+          intentType: 'issue_invoice',
+          confidence: 0.95,
+          extractedEntities: { jobReference: 'INV-0042' },
+        }),
+      ]);
+      const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+
+      await worker.handle(
+        msg({ tenantId: 't-1', userId: 'u-1', transcript: 'Issue invoice INV-0042' }),
+        silentLogger(),
+      );
+
+      const byTenant = await proposalRepo.findByTenant('t-1');
+      expect(byTenant).toHaveLength(1);
+      expect(byTenant[0].proposalType).toBe('issue_invoice');
+      expect(missingFieldsFor(byTenant[0])).toEqual([]);
+      expect((byTenant[0].payload as Record<string, unknown>).invoiceId).toBe('INV-0042');
+    });
+
+    // BEHAVIOR CHANGE (see describe-block comment): previously ungated.
+    it('an unresolvable reference ("issue the invoice", no conversation match) now lands GATED, not ungated-and-doomed', async () => {
+      const gateway = gatewayReturning([
+        JSON.stringify({ intentType: 'issue_invoice', confidence: 0.9, extractedEntities: {} }),
+      ]);
+      const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+
+      await worker.handle(
+        msg({ tenantId: 't-1', userId: 'u-1', transcript: 'Issue the invoice' }),
+        silentLogger(),
+      );
+
+      const byTenant = await proposalRepo.findByTenant('t-1');
+      expect(byTenant).toHaveLength(1);
+      expect(byTenant[0].proposalType).toBe('issue_invoice');
+      expect(byTenant[0].payload).toEqual({});
+      expect(missingFieldsFor(byTenant[0])).toEqual(['invoiceId']);
+      expect(byTenant[0].status).toBe('draft');
+    });
+
+    it('"the one we just drafted" resolves from same-conversation draft_invoice history — ungated, verifiedIds stamped', async () => {
+      const draftGateway = gatewayReturning([
+        JSON.stringify({
+          intentType: 'create_invoice',
+          confidence: 0.9,
+          extractedEntities: { customerName: 'Acme' },
+        }),
+        JSON.stringify({
+          customerId: 'cust-1',
+          jobId: 'job-1',
+          lineItems: [{ description: 'Pipe repair', quantity: 1, unitPrice: 45000 }],
+          confidence_score: 0.9,
+        }),
+      ]);
+      const draftWorker = createVoiceActionRouterWorker({ gateway: draftGateway, proposalRepo });
+      await draftWorker.handle(
+        msg({
+          tenantId: 't-1',
+          userId: 'u-1',
+          transcript: 'Create an invoice for Acme for 450 dollars',
+          conversationId: 'conv-1',
+        }),
+        silentLogger(),
+      );
+      const drafted = (await proposalRepo.findByTenant('t-1')).find((p) => p.proposalType === 'draft_invoice')!;
+      expect(drafted).toBeDefined();
+      // The execution handler stamps resultEntityId on approve/execute — this
+      // unit only tests drafting, so simulate that stamp directly (mirrors
+      // how other worker tests seed prior conversation state).
+      await proposalRepo.update('t-1', drafted.id, { resultEntityId: 'invoice-drafted-123' });
+
+      const issueGateway = gatewayReturning([
+        JSON.stringify({ intentType: 'issue_invoice', confidence: 0.9, extractedEntities: {} }),
+      ]);
+      const issueWorker = createVoiceActionRouterWorker({ gateway: issueGateway, proposalRepo });
+      await issueWorker.handle(
+        msg({
+          tenantId: 't-1',
+          userId: 'u-1',
+          transcript: 'Issue the invoice we just drafted',
+          conversationId: 'conv-1',
+        }),
+        silentLogger(),
+      );
+
+      const issued = (await proposalRepo.findByTenant('t-1')).find(
+        (p) => p.proposalType === 'issue_invoice',
+      )!;
+      expect(issued).toBeDefined();
+      expect(missingFieldsFor(issued)).toEqual([]);
+      expect((issued.payload as Record<string, unknown>).invoiceId).toBe('invoice-drafted-123');
+      expect(issued.sourceContext?.verifiedIds).toEqual({ invoiceId: 'invoice-drafted-123' });
+    });
+  });
+
   it('routes send_estimate as comms (draft-only, never auto-approves)', async () => {
     const gateway = gatewayReturning([
       JSON.stringify({

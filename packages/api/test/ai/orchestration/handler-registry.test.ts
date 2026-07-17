@@ -37,9 +37,15 @@ function ctx(overrides: Partial<TaskContext> = {}): TaskContext {
 // The full "core" taxonomy the registry is expected to register — every
 // ProposalType both the worker and the assistant route need a REAL drafting
 // handler for. Deliberately excludes the surface-specific handlers
-// (issue_invoice, review_response_proposal, create_standing_instruction, the
+// (review_response_proposal, create_standing_instruction, the
 // _complaint/_negotiation synthetic keys) documented as out-of-scope on
 // HandlerRegistryDeps.
+//
+// B4 (feat: voice-transcript-and-agent-paths) — issue_invoice joined this
+// list. It used to be excluded as a "known, tracked divergence" (the worker
+// and the assistant route each had their own local handler); B4 unified them
+// into ai/orchestration/task-router.ts's IssueInvoiceTaskHandler, registered
+// here like every other core intent.
 const EXPECTED_PROPOSAL_TYPES: ProposalType[] = [
   'draft_invoice',
   'draft_estimate',
@@ -74,6 +80,7 @@ const EXPECTED_PROPOSAL_TYPES: ProposalType[] = [
   'request_feedback',
   'batch_invoice',
   'create_invoice_schedule',
+  'issue_invoice',
 ];
 
 describe('ai/orchestration/handler-registry — buildTaskHandlers', () => {
@@ -86,13 +93,50 @@ describe('ai/orchestration/handler-registry — buildTaskHandlers', () => {
     expect(handlers.size).toBe(EXPECTED_PROPOSAL_TYPES.length);
   });
 
-  it('does NOT register the surface-specific handlers (issue_invoice, review_response_proposal, create_standing_instruction, the complaint/negotiation synthetic keys) — those stay owned by each call site', () => {
+  it('does NOT register the surface-specific handlers (review_response_proposal, create_standing_instruction, the complaint/negotiation synthetic keys) — those stay owned by each call site', () => {
     const handlers = buildTaskHandlers({ gateway: noopGateway() });
-    expect(handlers.get('issue_invoice')).toBeUndefined();
     expect(handlers.get('review_response_proposal')).toBeUndefined();
     expect(handlers.get('create_standing_instruction')).toBeUndefined();
     expect(handlers.get('_complaint' as ProposalType)).toBeUndefined();
     expect(handlers.get('_negotiation' as ProposalType)).toBeUndefined();
+  });
+
+  // B4 — issue_invoice with no proposalRepo/invoiceRepo wired still gates
+  // cleanly (rung 3: missingFields, no candidates) rather than throwing —
+  // proven separately from the loop below because its `.handle()` needs no
+  // gateway call at all (deterministic, unlike the LLM-drafting handlers).
+  it('issue_invoice gates cleanly (no throw) with no deps wired', async () => {
+    const handlers = buildTaskHandlers({ gateway: noopGateway() });
+    const { proposal } = await handlers.get('issue_invoice')!.handle(ctx());
+    expect(proposal.payload).toEqual({});
+    expect(proposal.sourceContext).toMatchObject({ missingFields: ['invoiceId'] });
+  });
+
+  // B4 — proposalRepo threaded into buildTaskHandlers reaches
+  // IssueInvoiceTaskHandler's conversation-context resolution rung, proving
+  // the shared registry — not a surface-local construction — is what both
+  // callers now get.
+  it('threads proposalRepo into issue_invoice so a same-conversation draft_invoice resolves "the one we just drafted"', async () => {
+    const { InMemoryProposalRepository, createProposal } = await import('../../../src/proposals/proposal');
+    const proposalRepo = new InMemoryProposalRepository();
+    const draft = createProposal({
+      tenantId: 't-1',
+      proposalType: 'draft_invoice',
+      payload: {},
+      summary: 'Draft invoice',
+      sourceContext: { conversationId: 'conv-1' },
+      createdBy: 'u-1',
+    });
+    draft.resultEntityId = 'invoice-xyz';
+    await proposalRepo.create(draft);
+
+    const handlers = buildTaskHandlers({ gateway: noopGateway(), proposalRepo });
+    const { proposal } = await handlers
+      .get('issue_invoice')!
+      .handle(ctx({ conversationId: 'conv-1', message: 'issue the one we just drafted' }));
+
+    expect(proposal.payload).toEqual({ invoiceId: 'invoice-xyz' });
+    expect(proposal.sourceContext?.verifiedIds).toEqual({ invoiceId: 'invoice-xyz' });
   });
 
   it('every handler tolerates a fully-absent dep bundle — gates instead of throwing', async () => {

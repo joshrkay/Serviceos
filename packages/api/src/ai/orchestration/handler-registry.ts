@@ -12,8 +12,10 @@ import { CatalogItemRepository } from '../../catalog/catalog-item';
 import { InvoiceEditTaskHandler } from '../tasks/invoice-edit-task';
 import { EstimateEditTaskHandler } from '../tasks/estimate-edit-task';
 import { UpdateJobTaskHandler } from '../tasks/job-edit-task';
+import { IssueInvoiceTaskHandler } from './task-router';
 import type { EstimateRepository } from '../../estimates/estimate';
 import type { InvoiceRepository } from '../../invoices/invoice';
+import type { ProposalRepository } from '../../proposals/proposal';
 import { InvoicingQueueDeps } from '../../invoices/invoicing-queue';
 import { DunningEventRepository } from '../../invoices/dunning-config';
 import {
@@ -54,11 +56,17 @@ import {
  * the voice worker drafted them — see B5 in
  * docs/plans/2026-07-17-001-feat-voice-transcript-and-agent-paths-plan.md.
  *
- * Deliberately EXCLUDES handlers that stay surface-specific by design and
- * are out of this taxonomy:
- *   - `issue_invoice` — the worker's local `IssueInvoiceTaskHandler` and
- *     the assistant's `ai/orchestration/task-router.ts` one are a KNOWN,
- *     tracked divergence (unification is B4's job, not this module's).
+ * B4 — `issue_invoice` now lives HERE too (it used to be excluded as a
+ * "known, tracked divergence": the worker had a repo-backed handler with
+ * conversation-context resolution but no missingFields gate, the assistant
+ * route had a dep-free gated one with no resolution). `ai/orchestration/
+ * task-router.ts`'s `IssueInvoiceTaskHandler` is now the single
+ * implementation for both — gated AND context-aware — registered here with
+ * `proposalRepo`/`invoiceRepo`/`thresholdResolver` from `HandlerRegistryDeps`
+ * so neither surface can re-diverge on it.
+ *
+ * Deliberately still EXCLUDES handlers that stay surface-specific by design
+ * and are out of this taxonomy:
  *   - `review_response_proposal` / `create_standing_instruction` / the
  *     synthetic `_complaint` / `_negotiation` keys — voice-only intents
  *     outside B5's nine-path scope, needing deps (reviewRepo,
@@ -103,6 +111,22 @@ export interface HandlerRegistryDeps {
    * clarification (never throws).
    */
   invoicingDeps?: InvoicingQueueDeps;
+  /**
+   * B4 — issue_invoice's conversation-context resolution ("the one we just
+   * drafted"): the most recent same-conversation `draft_invoice` proposal
+   * with a `resultEntityId`. Optional; absent → that rung of the resolution
+   * ladder never fires and the proposal falls through to the missingFields
+   * gate (see IssueInvoiceTaskHandler in ./task-router.ts).
+   */
+  proposalRepo?: ProposalRepository;
+  /**
+   * B4 — per-tenant auto-approve threshold override for issue_invoice,
+   * mirroring the worker's `thresholdResolver`. Optional; absent falls
+   * through to DEFAULT_AUTO_APPROVE_THRESHOLDS.
+   */
+  thresholdResolver?: (
+    tenantId: string,
+  ) => Promise<Partial<Record<'supervisor' | 'tech' | 'both', number>> | undefined>;
 }
 
 /**
@@ -180,5 +204,16 @@ export function buildTaskHandlers(deps: HandlerRegistryDeps): Map<ProposalType, 
   // U2 — milestone billing plan from a spoken sentence (deterministic
   // parser; no LLM drafting call).
   handlers.set('create_invoice_schedule', new CreateInvoiceScheduleTaskHandler());
+  // B4 — unified issue_invoice: gated missingFields ladder (rung 3) PLUS
+  // conversation-context resolution (rung 2, needs proposalRepo). See the
+  // class doc comment in ./task-router.ts for the full resolution ladder.
+  handlers.set(
+    'issue_invoice',
+    new IssueInvoiceTaskHandler({
+      proposalRepo: deps.proposalRepo,
+      invoiceRepo: deps.invoiceRepo,
+      thresholdResolver: deps.thresholdResolver,
+    }),
+  );
   return handlers;
 }
