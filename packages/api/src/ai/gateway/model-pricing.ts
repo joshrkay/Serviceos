@@ -99,6 +99,11 @@ function isValidRates(v: unknown): v is ModelPriceRates {
   );
 }
 
+/** Lowercase the model id and drop a provider namespace prefix ("openai/gpt-4o" -> "gpt-4o"). */
+function lastSegment(id: string): string {
+  return id.toLowerCase().split('/').pop() ?? '';
+}
+
 /**
  * Env-overridable pricing, mirroring the model-id override pattern in
  * `config/ai-routing.ts` (AI_LIGHTWEIGHT_MODEL etc.) and
@@ -111,6 +116,18 @@ function isValidRates(v: unknown): v is ModelPriceRates {
  * an invalid per-model entry is dropped with a stderr warning rather than
  * crashing boot or poisoning pricing with NaN — pricing errors must fail
  * safe to "unknown cost", never to a wrong cost.
+ *
+ * Override keys are normalized with the SAME `lastSegment()` function used
+ * to normalize the runtime model id at lookup time (lowercased, provider
+ * namespace stripped). Without this, an override keyed
+ * `"openai/gpt-4o-mini"` (the natural shape when AI_DEFAULT_MODEL is an
+ * OpenRouter-style namespaced id) would be stored verbatim and never match
+ * the bare `"gpt-4o-mini"` produced by `resolveModelPricing()`, silently
+ * resolving to a null cost despite ops having provided a rate. Namespaced
+ * and bare override keys for the same model both resolve to the same
+ * normalized key; if both are present, whichever is encountered last in
+ * `Object.entries()` iteration order wins — the same "last one wins"
+ * collision rule as any other object-key merge in this module.
  */
 function loadPricingOverrides(): Record<string, ModelPriceRates> {
   const raw = process.env.AI_MODEL_PRICING_JSON;
@@ -138,7 +155,7 @@ function loadPricingOverrides(): Record<string, ModelPriceRates> {
       );
       continue;
     }
-    overrides[key.toLowerCase()] = value;
+    overrides[lastSegment(key)] = value;
   }
   return overrides;
 }
@@ -153,11 +170,6 @@ export const MODEL_PRICING: Readonly<Record<string, ModelPriceRates>> = {
   ...DEFAULT_MODEL_PRICING,
   ...loadPricingOverrides(),
 };
-
-/** Lowercase the model id and drop a provider namespace prefix ("openai/gpt-4o" -> "gpt-4o"). */
-function lastSegment(id: string): string {
-  return id.toLowerCase().split('/').pop() ?? '';
-}
 
 /**
  * Resolve pricing for a model id. Matches the exact normalized id first,

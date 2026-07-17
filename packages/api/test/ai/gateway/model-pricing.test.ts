@@ -220,5 +220,42 @@ describe('model-pricing — integer micro-cent cost accounting', () => {
         outputCentsPerMillionTokens: 1500,
       });
     });
+
+    it('a namespaced override key ("openai/gpt-4o-mini") matches the bare runtime id ops actually sees', async () => {
+      // The natural shape for an OpenRouter-style AI_DEFAULT_MODEL — ops
+      // writes the override with the same namespace the model id carries in
+      // config, but resolveModelPricing() only ever sees/looks up the bare
+      // last-segment id at call time.
+      process.env[ENV_KEY] = JSON.stringify({
+        'openai/gpt-4o-mini': { inputCentsPerMillionTokens: 15, outputCentsPerMillionTokens: 60 },
+      });
+      const { resolveModelPricing } = await freshModule();
+      expect(resolveModelPricing('gpt-4o-mini')).toEqual({
+        inputCentsPerMillionTokens: 15,
+        outputCentsPerMillionTokens: 60,
+      });
+    });
+
+    it('a bare override key ("gpt-4o-mini") matches a namespaced runtime id', async () => {
+      process.env[ENV_KEY] = JSON.stringify({
+        'gpt-4o-mini': { inputCentsPerMillionTokens: 15, outputCentsPerMillionTokens: 60 },
+      });
+      const { resolveModelPricing } = await freshModule();
+      expect(resolveModelPricing('openai/gpt-4o-mini')).toEqual({
+        inputCentsPerMillionTokens: 15,
+        outputCentsPerMillionTokens: 60,
+      });
+    });
+
+    it('normalizes override keys case-insensitively too, mirroring the lookup path', async () => {
+      process.env[ENV_KEY] = JSON.stringify({
+        'OpenAI/GPT-4o-Mini': { inputCentsPerMillionTokens: 15, outputCentsPerMillionTokens: 60 },
+      });
+      const { resolveModelPricing } = await freshModule();
+      expect(resolveModelPricing('gpt-4o-mini')).toEqual({
+        inputCentsPerMillionTokens: 15,
+        outputCentsPerMillionTokens: 60,
+      });
+    });
   });
 });
