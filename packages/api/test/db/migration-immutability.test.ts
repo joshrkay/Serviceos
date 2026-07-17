@@ -416,6 +416,13 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['251_leads_service_address', '0033dc709e9d1fb22584a20873826d59fa2430c6554c0846e4f9c86e60c4f82b'],
   ['252_technician_location_ping_idempotency', '5f309f1a77d6c208f6a8eb5ca0fe34eb8db2c86f7ebe47a814275d3ba4d9ed5d'],
   ['253_users_tenant_clerk_unique', 'b96f4d052f79ac1b8a30a9073fb42d323ee98a72193e3c9206ffc14c40bb864b'],
+  // EE-4 (visual proposals): optional image_file_id on catalog_items — the
+  // catalog-side reference an equipment photo is uploaded against.
+  ['254_catalog_items_image_file_id', 'f6b2878b3de9e8b189c405fe4f68ca864484ed853b67126416383b9d3f0c5ced'],
+  // EE-4 (visual proposals): frozen image_file_id snapshot on
+  // estimate_line_items — carries the photo onto the customer-facing proposal
+  // for both manual and AI-drafted lines.
+  ['255_estimate_line_items_image_file_id', 'e72794dcb73addfe34c11844cb7f8bd1bd00314266b246dcaeb97fcebd9dae93'],
 ];
 
 function hashMigration(value: string): string {
