@@ -3,7 +3,6 @@ import {
   CreateCustomerTaskHandler,
   CreateJobTaskHandler,
   CreateAppointmentTaskHandler,
-  DraftEstimateTaskHandler,
 } from '../tasks/task-handlers';
 import { AppError } from '../../shared/errors';
 import {
@@ -92,7 +91,15 @@ export function createDefaultTaskRouter(): TaskRouter {
   router.register(new CreateCustomerTaskHandler());
   router.register(new CreateJobTaskHandler());
   router.register(new CreateAppointmentTaskHandler());
-  router.register(new DraftEstimateTaskHandler());
+  // draft_estimate intentionally NOT registered here: the only stub handler
+  // for it (DraftEstimateTaskHandler, removed) was a no-LLM, no-catalog
+  // passthrough that echoed context.existingEntities straight into the
+  // proposal payload — an ungrounded-price hazard under the money-path
+  // catalog-grounding rule. This router has no production callers (verified
+  // by repo-wide grep); the real draft_estimate path is
+  // ai/tasks/estimate-task.ts's EstimateTaskHandler, wired in
+  // routes/assistant.ts and workers/voice-action-router.ts with LLM +
+  // catalog grounding.
   router.register(new IssueInvoiceTaskHandler());
   return router;
 }

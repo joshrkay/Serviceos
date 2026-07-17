@@ -21,6 +21,9 @@ import type { TaskHandler } from '../ai/tasks/task-handlers';
 import { EstimateTaskHandler } from '../ai/tasks/estimate-task';
 import { EstimateEditTaskHandler } from '../ai/tasks/estimate-edit-task';
 import { InvoiceTaskHandler } from '../ai/tasks/invoice-task';
+import { InvoiceEditTaskHandler } from '../ai/tasks/invoice-edit-task';
+import { SendInvoiceTaskHandler } from '../ai/tasks/voice-extended-tasks';
+import { IssueInvoiceTaskHandler } from '../ai/orchestration/task-router';
 import type { InvoiceRepository } from '../invoices/invoice';
 import type { CatalogItemRepository } from '../catalog/catalog-item';
 import type { EstimateRepository } from '../estimates/estimate';
@@ -409,7 +412,9 @@ function proposalToUI(
     draft_estimate: 'Estimate',
     update_estimate: 'Estimate',
     draft_invoice: 'Invoice',
+    update_invoice: 'Invoice',
     send_invoice: 'Invoice',
+    issue_invoice: 'Invoice',
     create_customer: 'Customer',
     update_customer: 'Customer',
   };
@@ -581,11 +586,11 @@ async function generateAssistantReply(
           const chainHandlers: Record<string, (() => TaskHandler) | undefined> = {
             create_customer: () => new CreateCustomerTaskHandler(),
             draft_estimate: () => new EstimateTaskHandler(deps.gateway, deps.catalogRepo),
-            update_estimate: () => new EstimateEditTaskHandler(deps.gateway, deps.estimateRepo),
+            update_estimate: () => new EstimateEditTaskHandler(deps.gateway, deps.estimateRepo, deps.catalogRepo),
             create_invoice: () => new InvoiceTaskHandler(deps.gateway, deps.catalogRepo),
-            send_invoice: () => new InvoiceTaskHandler(deps.gateway, deps.catalogRepo),
-            issue_invoice: () => new InvoiceTaskHandler(deps.gateway, deps.catalogRepo),
-            update_invoice: () => new InvoiceTaskHandler(deps.gateway, deps.catalogRepo),
+            send_invoice: () => new SendInvoiceTaskHandler(),
+            issue_invoice: () => new IssueInvoiceTaskHandler(),
+            update_invoice: () => new InvoiceEditTaskHandler(deps.gateway, { catalogRepo: deps.catalogRepo }),
           };
           const factory = chainHandlers[segClass.intentType];
           if (!factory) continue;
@@ -666,11 +671,11 @@ async function generateAssistantReply(
       // unpersisted JSON cards whose ids 404'd on approve.
       const proposalHandlers: Record<string, () => TaskHandler> = {
         draft_estimate: () => new EstimateTaskHandler(deps.gateway, deps.catalogRepo),
-        update_estimate: () => new EstimateEditTaskHandler(deps.gateway, deps.estimateRepo),
+        update_estimate: () => new EstimateEditTaskHandler(deps.gateway, deps.estimateRepo, deps.catalogRepo),
         create_invoice: () => new InvoiceTaskHandler(deps.gateway, deps.catalogRepo),
-        send_invoice: () => new InvoiceTaskHandler(deps.gateway, deps.catalogRepo),
-        issue_invoice: () => new InvoiceTaskHandler(deps.gateway, deps.catalogRepo),
-        update_invoice: () => new InvoiceTaskHandler(deps.gateway, deps.catalogRepo),
+        send_invoice: () => new SendInvoiceTaskHandler(),
+        issue_invoice: () => new IssueInvoiceTaskHandler(),
+        update_invoice: () => new InvoiceEditTaskHandler(deps.gateway, { catalogRepo: deps.catalogRepo }),
       };
       const handlerFactory = proposalHandlers[classification.intentType];
       if (handlerFactory) {

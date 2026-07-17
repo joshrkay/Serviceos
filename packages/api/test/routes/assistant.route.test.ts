@@ -12,6 +12,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createAssistantRouter, proposalSignals, VOICE_APPROVAL_REFUSAL } from '../../src/routes/assistant';
 import { InMemoryProposalRepository } from '../../src/proposals/proposal';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
+import {
+  InMemoryCatalogItemRepository,
+  createCatalogItem,
+} from '../../src/catalog/catalog-item';
 import type { CatalogItem, CatalogItemRepository } from '../../src/catalog/catalog-item';
 import { InMemoryConversationRepository } from '../../src/conversations/conversation-service';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
@@ -698,5 +702,265 @@ describe('UC-2 — chat holds no request transaction across the LLM call', () =>
       expect(p.store).toBeUndefined();
       expect(p.connects).toBe(0);
     }
+  });
+});
+
+// ─── Money-path handler wiring: assistant chat intents must route to the
+// DEDICATED task handler for their proposal type (not a same-family
+// draft handler that mints the wrong proposalType / skips catalog
+// grounding). Covers both dispatch paths in routes/assistant.ts:
+// the single-intent `proposalHandlers` map and the multi-step
+// `chainHandlers` map used by "X then Y" transcripts. ─────────────────────
+
+describe('money-path handler wiring — update_invoice/send_invoice/issue_invoice route to their own handler', () => {
+  function buildAppFor(gateway: LLMGateway, proposalRepo: InMemoryProposalRepository) {
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: TEST_USER,
+        sessionId: 'sess-1',
+        tenantId: TEST_TENANT,
+        role: 'owner',
+      };
+      next();
+    });
+    app.use('/api/assistant', createAssistantRouter({ gateway, proposalRepo }));
+    return app;
+  }
+
+  it('single-intent path: update_invoice yields an update_invoice proposal, not draft_invoice', async () => {
+    const gateway = scriptedGateway([
+      JSON.stringify({ intentType: 'update_invoice', confidence: 0.9, extractedEntities: {} }),
+      JSON.stringify({
+        invoiceReference: 'INV-0042',
+        editActions: [
+          { type: 'add_line_item', lineItem: { description: 'Trip fee', quantity: 1, unitPrice: 7500 } },
+        ],
+        confidence_score: 0.9,
+      }),
+    ]);
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildAppFor(gateway, proposalRepo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Add a trip fee to invoice INV-0042' }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.taskType).toBe('assistant.update_invoice');
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0].proposalType).toBe('update_invoice');
+  });
+
+  it('single-intent path: send_invoice yields a send_invoice proposal, not draft_invoice', async () => {
+    const gateway = scriptedGateway([
+      JSON.stringify({
+        intentType: 'send_invoice',
+        confidence: 0.9,
+        extractedEntities: { jobReference: 'INV-0042' },
+      }),
+    ]);
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildAppFor(gateway, proposalRepo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Send invoice INV-0042 to the customer' }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.taskType).toBe('assistant.send_invoice');
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0].proposalType).toBe('send_invoice');
+    // SendInvoiceTaskHandler makes no LLM call of its own — only the
+    // classifier reaches the gateway.
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+  });
+
+  it('single-intent path: issue_invoice yields an issue_invoice proposal, not draft_invoice', async () => {
+    const gateway = scriptedGateway([
+      JSON.stringify({
+        intentType: 'issue_invoice',
+        confidence: 0.9,
+        extractedEntities: { jobReference: 'INV-0042' },
+      }),
+    ]);
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildAppFor(gateway, proposalRepo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Issue invoice INV-0042' }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.taskType).toBe('assistant.issue_invoice');
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0].proposalType).toBe('issue_invoice');
+    expect(persisted[0].payload).toEqual({ invoiceId: 'INV-0042' });
+  });
+
+  it('chain path ("X then Y"): update_invoice and issue_invoice steps each route to their own handler', async () => {
+    const gateway = scriptedGateway([
+      // generateAssistantReply classifies the FULL message once before it
+      // detects the "then" chain and re-classifies per segment; content
+      // doesn't matter here since the chain branch returns before this
+      // whole-message classification is used.
+      JSON.stringify({ intentType: 'unknown', confidence: 0.5 }),
+      // Step 1 classify → update_invoice
+      JSON.stringify({ intentType: 'update_invoice', confidence: 0.9, extractedEntities: {} }),
+      // Step 1 handler (InvoiceEditTaskHandler) LLM call
+      JSON.stringify({
+        invoiceReference: 'INV-0042',
+        editActions: [
+          { type: 'add_line_item', lineItem: { description: 'Trip fee', quantity: 1, unitPrice: 7500 } },
+        ],
+        confidence_score: 0.9,
+      }),
+      // Step 2 classify → issue_invoice (IssueInvoiceTaskHandler makes no LLM call)
+      JSON.stringify({
+        intentType: 'issue_invoice',
+        confidence: 0.9,
+        extractedEntities: { jobReference: 'INV-0042' },
+      }),
+    ]);
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildAppFor(gateway, proposalRepo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({
+        messages: [
+          { role: 'user', content: 'Add a trip fee to invoice INV-0042, then issue invoice INV-0042' },
+        ],
+      });
+
+    expect(res.status).toBe(200);
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted.map((p) => p.proposalType).sort()).toEqual(['issue_invoice', 'update_invoice']);
+    // Neither chain step should have fallen back to the draft_invoice handler.
+    expect(persisted.some((p) => p.proposalType === 'draft_invoice')).toBe(false);
+  });
+});
+
+describe('money-path handler wiring — update_estimate is catalog-grounded (both dispatch paths)', () => {
+  async function seedSiteVisit(): Promise<{ repo: InMemoryCatalogItemRepository; itemId: string }> {
+    const repo = new InMemoryCatalogItemRepository();
+    const item = await repo.create(
+      createCatalogItem({
+        tenantId: TEST_TENANT,
+        name: 'Site Visit',
+        category: 'Labor',
+        unit: 'each',
+        unitPriceCents: 15000,
+      }),
+    );
+    return { repo, itemId: item.id };
+  }
+
+  function buildAppWithCatalog(
+    gateway: LLMGateway,
+    proposalRepo: InMemoryProposalRepository,
+    catalogRepo: CatalogItemRepository,
+  ) {
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: TEST_USER,
+        sessionId: 'sess-1',
+        tenantId: TEST_TENANT,
+        role: 'owner',
+      };
+      next();
+    });
+    app.use('/api/assistant', createAssistantRouter({ gateway, proposalRepo, catalogRepo }));
+    return app;
+  }
+
+  // The LLM invents a price ($999.99) for a line that matches an existing
+  // catalog item ("Site Visit", $150.00). If EstimateEditTaskHandler was
+  // constructed without deps.catalogRepo (the pre-fix bug — the 3rd
+  // constructor arg was omitted), this line would never resolve against the
+  // catalog and would ride the LLM's invented price as 'uncatalogued'
+  // instead of being overwritten by the grounded catalog price.
+  it('single-intent path: a catalog-matching update_estimate line takes the catalog price, not the LLM guess', async () => {
+    const { repo } = await seedSiteVisit();
+    const gateway = scriptedGateway([
+      JSON.stringify({ intentType: 'update_estimate', confidence: 0.9, extractedEntities: {} }),
+      JSON.stringify({
+        estimateReference: 'EST-0001',
+        editActions: [
+          { type: 'add_line_item', lineItem: { description: 'site visit', quantity: 1, unitPrice: 99999 } },
+        ],
+        confidence_score: 0.9,
+      }),
+    ]);
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildAppWithCatalog(gateway, proposalRepo, repo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Add a site visit to estimate EST-0001' }] });
+
+    expect(res.status).toBe(200);
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0].proposalType).toBe('update_estimate');
+    const payload = persisted[0].payload as { editActions: Array<{ lineItem: Record<string, unknown> }> };
+    const lineItem = payload.editActions[0].lineItem;
+    expect(lineItem.pricingSource).toBe('catalog');
+    // Catalog price ($150.00) overwrites the LLM's invented $999.99.
+    expect(lineItem.unitPrice).toBe(15000);
+    expect(lineItem.unitPriceCents).toBe(15000);
+  });
+
+  it('chain path ("X then Y"): the update_estimate step is catalog-grounded and send_invoice routes to its own handler', async () => {
+    const { repo } = await seedSiteVisit();
+    const gateway = scriptedGateway([
+      // generateAssistantReply classifies the FULL message once before it
+      // detects the "then" chain and re-classifies per segment; content
+      // doesn't matter here since the chain branch returns before this
+      // whole-message classification is used.
+      JSON.stringify({ intentType: 'unknown', confidence: 0.5 }),
+      // Step 1 classify → update_estimate
+      JSON.stringify({ intentType: 'update_estimate', confidence: 0.9, extractedEntities: {} }),
+      // Step 1 handler (EstimateEditTaskHandler) LLM call
+      JSON.stringify({
+        estimateReference: 'EST-0001',
+        editActions: [
+          { type: 'add_line_item', lineItem: { description: 'site visit', quantity: 1, unitPrice: 99999 } },
+        ],
+        confidence_score: 0.9,
+      }),
+      // Step 2 classify → send_invoice (SendInvoiceTaskHandler makes no LLM call)
+      JSON.stringify({
+        intentType: 'send_invoice',
+        confidence: 0.9,
+        extractedEntities: { jobReference: 'INV-0042' },
+      }),
+    ]);
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildAppWithCatalog(gateway, proposalRepo, repo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({
+        messages: [
+          { role: 'user', content: 'Add a site visit to estimate EST-0001, then send invoice INV-0042' },
+        ],
+      });
+
+    expect(res.status).toBe(200);
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted.map((p) => p.proposalType).sort()).toEqual(['send_invoice', 'update_estimate']);
+
+    const estimateProposal = persisted.find((p) => p.proposalType === 'update_estimate')!;
+    const payload = estimateProposal.payload as { editActions: Array<{ lineItem: Record<string, unknown> }> };
+    const lineItem = payload.editActions[0].lineItem;
+    expect(lineItem.pricingSource).toBe('catalog');
+    expect(lineItem.unitPrice).toBe(15000);
   });
 });
