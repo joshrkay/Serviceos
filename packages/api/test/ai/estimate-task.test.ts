@@ -590,3 +590,150 @@ describe('RV-007 — EstimateTaskHandler populates payload._meta', () => {
     expect(meta.markers![0].reason).toContain('catalog');
   });
 });
+
+// ─── EE-1: good-better-best tier drafting ────────────────────────────────
+describe('EE-1 — good-better-best tier drafting', () => {
+  const CUSTOMER = '550e8400-e29b-41d4-a716-446655440000';
+
+  const tieredJson = JSON.stringify({
+    customerId: CUSTOMER,
+    lineItems: [
+      { description: 'Builder water heater', quantity: 1, unitPrice: 90000, groupKey: 'wh', groupLabel: 'Water heater' },
+      { description: 'Premium water heater', quantity: 1, unitPrice: 140000, groupKey: 'wh', groupLabel: 'Water heater', isDefaultSelected: true },
+    ],
+    confidence_score: 0.95,
+  });
+
+  async function tierCatalog(includePremium = true): Promise<InMemoryCatalogItemRepository> {
+    const repo = new InMemoryCatalogItemRepository();
+    await repo.create(createCatalogItem({ tenantId: 'tenant-1', name: 'Builder water heater', category: 'Parts', unit: 'each', unitPriceCents: 90000 }));
+    if (includePremium) {
+      await repo.create(createCatalogItem({ tenantId: 'tenant-1', name: 'Premium water heater', category: 'Parts', unit: 'each', unitPriceCents: 140000 }));
+    }
+    return repo;
+  }
+
+  it('emits a normalized, catalog-grounded tier group', async () => {
+    const stub = new StubProvider('stub');
+    stub.setResponse({ content: tieredJson });
+    const handler = new EstimateTaskHandler(makeGateway(stub), await tierCatalog());
+
+    const { proposal } = await handler.handle(
+      makeContext({ message: 'quote a water heater replacement — good, better, best options' }),
+    );
+
+    const items = proposal.payload.lineItems as Array<Record<string, unknown>>;
+    expect(items).toHaveLength(2);
+    expect(items.every((li) => li.groupKey === 'wh')).toBe(true);
+    expect(items.every((li) => li.isOptional === true)).toBe(true);
+    expect(items.map((li) => li.isDefaultSelected)).toEqual([false, true]);
+    expect(items.every((li) => li.pricingSource === 'catalog')).toBe(true);
+    expect(items[0].unitPrice).toBe(90000);
+    expect(items[1].unitPrice).toBe(140000);
+  });
+
+  it('defaults the first tier when the model flags none', async () => {
+    const stub = new StubProvider('stub');
+    stub.setResponse({
+      content: JSON.stringify({
+        customerId: CUSTOMER,
+        lineItems: [
+          { description: 'Builder water heater', quantity: 1, unitPrice: 90000, groupKey: 'wh' },
+          { description: 'Premium water heater', quantity: 1, unitPrice: 140000, groupKey: 'wh' },
+        ],
+        confidence_score: 0.95,
+      }),
+    });
+    const handler = new EstimateTaskHandler(makeGateway(stub), await tierCatalog());
+
+    const { proposal } = await handler.handle(makeContext({ message: 'give them options' }));
+    const items = proposal.payload.lineItems as Array<Record<string, unknown>>;
+    expect(items.map((li) => li.isDefaultSelected)).toEqual([true, false]);
+  });
+
+  it('an uncatalogued tier caps confidence and cannot auto-approve (money-safety)', async () => {
+    const stub = new StubProvider('stub');
+    // Premium tier's description shares no tokens with the catalogued "Builder
+    // water heater", so it resolves to 'none' (uncatalogued), not a fuzzy
+    // 'ambiguous' match — this pins the uncatalogued confidence cap on a tier.
+    stub.setResponse({
+      content: JSON.stringify({
+        customerId: CUSTOMER,
+        lineItems: [
+          { description: 'Builder water heater', quantity: 1, unitPrice: 90000, groupKey: 'wh', groupLabel: 'Water heater', isDefaultSelected: true },
+          { description: 'Premium tankless system', quantity: 1, unitPrice: 140000, groupKey: 'wh', groupLabel: 'Water heater' },
+        ],
+        confidence_score: 0.95,
+      }),
+    });
+    const handler = new EstimateTaskHandler(makeGateway(stub), await tierCatalog(false));
+
+    const { proposal } = await handler.handle(
+      makeContext({ message: 'water heater options, good better best' }),
+    );
+
+    const items = proposal.payload.lineItems as Array<Record<string, unknown>>;
+    const premium = items.find((li) => li.description === 'Premium tankless system');
+    expect(premium?.pricingSource).toBe('uncatalogued');
+    expect(premium?.groupKey).toBe('wh'); // still a tier option
+    expect(proposal.confidenceScore).toBeLessThanOrEqual(0.85);
+    expect(proposal.status).not.toBe('approved');
+    expect(proposal.confidenceFactors).toContain('uncatalogued_line_item');
+  });
+
+  it('injects tier guidance only when the request implies options', async () => {
+    const stub = new StubProvider('stub');
+    stub.setResponse({ content: validEstimateJson });
+    const handler = new EstimateTaskHandler(makeGateway(stub), await groundedCatalog());
+
+    await handler.handle(makeContext({ message: 'give the customer good, better, best options' }));
+    const msgs = stub.getLastRequest()!.messages;
+    expect(msgs.filter((m) => m.role === 'system')).toHaveLength(2);
+    expect(msgs.some((m) => m.role === 'system' && m.content.includes('groupKey'))).toBe(true);
+  });
+
+  it('keeps the flat request prompt byte-identical (no tier guidance, no grouping)', async () => {
+    const stub = new StubProvider('stub');
+    stub.setResponse({ content: validEstimateJson });
+    const handler = new EstimateTaskHandler(makeGateway(stub), await groundedCatalog());
+
+    const { proposal } = await handler.handle(makeContext()); // default flat message
+    const msgs = stub.getLastRequest()!.messages;
+    expect(msgs).toHaveLength(2); // base system + user only
+    expect(msgs.some((m) => m.content.includes('groupKey'))).toBe(false);
+    const items = proposal.payload.lineItems as Array<Record<string, unknown>>;
+    expect(items.every((li) => li.groupKey === undefined)).toBe(true);
+  });
+
+  it('leaves an add-on off by default unless add-ons were requested', async () => {
+    const addonJson = JSON.stringify({
+      customerId: CUSTOMER,
+      lineItems: [
+        { description: 'Pipe repair', quantity: 1, unitPrice: 7500 },
+        { description: 'Surge protector', quantity: 1, unitPrice: 5000, isOptional: true, isDefaultSelected: true },
+      ],
+      confidence_score: 0.95,
+    });
+    async function addonCatalog(): Promise<InMemoryCatalogItemRepository> {
+      const repo = await groundedCatalog();
+      await repo.create(createCatalogItem({ tenantId: 'tenant-1', name: 'Surge protector', category: 'Parts', unit: 'each', unitPriceCents: 5000 }));
+      return repo;
+    }
+
+    const stub = new StubProvider('stub');
+    stub.setResponse({ content: addonJson });
+
+    // No add-on cue → the model's pre-check is overridden off.
+    const h1 = new EstimateTaskHandler(makeGateway(stub), await addonCatalog());
+    const { proposal: p1 } = await h1.handle(makeContext({ message: 'estimate for a pipe repair' }));
+    const addon1 = (p1.payload.lineItems as Array<Record<string, unknown>>).find((li) => li.description === 'Surge protector');
+    expect(addon1?.isOptional).toBe(true);
+    expect(addon1?.isDefaultSelected).toBe(false);
+
+    // Explicit add-on request → the model's pre-check is honored.
+    const h2 = new EstimateTaskHandler(makeGateway(stub), await addonCatalog());
+    const { proposal: p2 } = await h2.handle(makeContext({ message: 'pipe repair, also offer an optional surge protector add-on' }));
+    const addon2 = (p2.payload.lineItems as Array<Record<string, unknown>>).find((li) => li.description === 'Surge protector');
+    expect(addon2?.isDefaultSelected).toBe(true);
+  });
+});
