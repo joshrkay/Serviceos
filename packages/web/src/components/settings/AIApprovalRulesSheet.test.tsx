@@ -29,7 +29,7 @@ function jsonResponse(body: unknown, init: { ok?: boolean; status?: number } = {
   } as unknown as Response;
 }
 
-describe('AIApprovalRulesSheet — Tier 4 stub closure (PR A: data plane only)', () => {
+describe('AIApprovalRulesSheet', () => {
   beforeEach(() => {
     apiFetchMock.mockReset();
     toastSuccess.mockReset();

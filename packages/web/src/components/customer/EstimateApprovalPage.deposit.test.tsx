@@ -56,7 +56,7 @@ function renderPageAtToken(token: string) {
   );
 }
 
-describe('EstimateApprovalPage — Tier 4 deposit notice (PR 3a)', () => {
+describe('EstimateApprovalPage — deposit notice', () => {
   beforeEach(() => {
     apiFetchMock.mockReset();
   });
@@ -112,7 +112,7 @@ describe('EstimateApprovalPage — Tier 4 deposit notice (PR 3a)', () => {
   });
 });
 
-describe('EstimateApprovalPage — Tier 4 deposit (PR 3b: before_approval gate + Pay deposit CTA)', () => {
+describe('EstimateApprovalPage — deposit before_approval gate + Pay deposit CTA', () => {
   beforeEach(() => {
     apiFetchMock.mockReset();
   });

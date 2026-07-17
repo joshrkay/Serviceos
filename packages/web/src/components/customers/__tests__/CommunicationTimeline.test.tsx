@@ -92,6 +92,35 @@ describe('P9-002 — CommunicationTimeline', () => {
     expect(links[0].getAttribute('href')).toContain('/jobs/job-1');
   });
 
+  it('deep-links appointments to edit and messages to comms-inbox', async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      events: [
+        ev('appointment_scheduled', '2026-04-02T10:00:00Z', {
+          summary: 'Appt booked',
+          sourceEntityId: 'appt-9',
+        }),
+        ev('sms_received', '2026-04-03T10:00:00Z', {
+          summary: 'Customer texted',
+          sourceEntityId: 'msg-1',
+          metadata: { conversationId: 'conv-42' },
+        }),
+      ],
+      nextCursor: null,
+    } as CustomerTimelineResponse);
+
+    render(<CommunicationTimeline customerId="c1" fetcher={fetcher} />);
+
+    await waitFor(() =>
+      expect(screen.getByText('Appt booked')).toBeInTheDocument()
+    );
+
+    const links = screen.getAllByTestId('timeline-source-link');
+    expect(links.map((l) => l.getAttribute('href'))).toEqual([
+      '/appointments/appt-9/edit',
+      '/comms-inbox?conversation=conv-42',
+    ]);
+  });
+
   it('filter chips toggle visible kinds', async () => {
     const user = userEvent.setup();
     const fetcher = vi.fn().mockResolvedValue({

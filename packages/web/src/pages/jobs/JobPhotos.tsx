@@ -4,8 +4,8 @@
  * Composes the uploader + gallery and owns the data fetch lifecycle.
  * Wired into the router as a separate page so the per-job photo
  * surface can be deep-linked and tested in isolation; the integration
- * into JobDetail.tsx is intentionally deferred per the story's
- * "do NOT touch JobDetail" constraint.
+ * into the canonical job detail (`components/jobs/JobDetail.tsx`) is
+ * intentionally deferred per the story's "do NOT touch JobDetail" constraint.
  */
 import React, { useCallback, useEffect, useState } from 'react';
 import { JobPhotoGallery } from '../../components/jobs/JobPhotoGallery';

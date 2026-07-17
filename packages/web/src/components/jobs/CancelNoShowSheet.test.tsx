@@ -5,7 +5,7 @@ vi.mock('../../utils/api-fetch', () => ({ apiFetch: vi.fn() }));
 
 import { apiFetch } from '../../utils/api-fetch';
 import { CancelNoShowSheet } from './CancelNoShowSheet';
-import type { Job } from '../../data/mock-data';
+import type { Job } from '../../types/job-ui';
 
 const mockApiFetch = vi.mocked(apiFetch);
 

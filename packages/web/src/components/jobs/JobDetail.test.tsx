@@ -14,11 +14,6 @@ vi.mock('../../lib/apiClient', async (importOriginal) => {
 
 vi.mock('../../hooks/useDetailQuery', () => ({ useDetailQuery: vi.fn() }));
 vi.mock('../../hooks/useMutation', () => ({ useMutation: vi.fn() }));
-vi.mock('../../data/mock-data', () => ({
-  calcMaterialsTotal: vi.fn(() => 0),
-  calcEstimateTotal: vi.fn(() => 0),
-  estimates: [],
-}));
 vi.mock('./ActivityTimeline', () => ({ ActivityTimeline: () => null }));
 vi.mock('./AddEntrySheet', () => ({ AddEntrySheet: () => null }));
 vi.mock('./MaterialsSheet', () => ({ MaterialsSheet: () => null }));

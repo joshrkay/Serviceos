@@ -1,9 +1,6 @@
 /**
- * Tier 4 (AI approval rules — PR A: data plane only).
- *
- * Closes the "AI approval rules" stub in SettingsPage. Lets the
- * tenant tune how confident the AI must be before a proposal
- * auto-approves, broken down by who's on shift:
+ * AI approval rules — confidence thresholds for auto-approve, by
+ * who's on shift:
  *
  *   - Supervisor present (default 0.9)
  *   - Hybrid / "both" mode (default 0.92)
@@ -16,11 +13,8 @@
  *   - "Advanced" reveal — three number inputs (0.50–0.99) for tenants
  *     who want per-mode tuning.
  *
- * Backend: PUT /api/settings { autoApproveThreshold: {...} }. The
- * value persists end-to-end through the Settings UI and DB. The
- * actual flow into createProposal's threshold decision is wired in
- * a separate PR (PR B) — this PR is data-plane only, behavior
- * unchanged.
+ * Backend: PUT /api/settings { autoApproveThreshold: {...} }.
+ * Thresholds feed createProposal's auto-approve decision.
  */
 import { useEffect, useState } from 'react';
 import { X, Zap, ChevronDown } from 'lucide-react';

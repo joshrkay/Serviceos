@@ -29,7 +29,7 @@ function jsonResponse(body: unknown, init: { ok?: boolean; status?: number } = {
   } as unknown as Response;
 }
 
-describe('CalendarSyncSheet — Tier 4 Calendar sync (PR 1)', () => {
+describe('CalendarSyncSheet', () => {
   beforeEach(() => {
     apiFetchMock.mockReset();
     toastSuccess.mockReset();
