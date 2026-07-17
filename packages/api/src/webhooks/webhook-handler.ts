@@ -62,6 +62,40 @@ export function verifyWebhookSignature(
   }
 }
 
+/**
+ * Parse a webhook signing-secret env value into the list of secrets to accept.
+ *
+ * Stripe issues a DISTINCT signing secret per webhook endpoint, and full
+ * coverage requires two endpoints — one platform-scoped (SaaS subscriptions,
+ * platform `account.updated`) and one connected-accounts-scoped (the customer
+ * payment events that settle invoices as Connect direct charges). Verifying
+ * against a single secret would 401 every event from the other endpoint. So
+ * `STRIPE_WEBHOOK_SECRET` accepts a COMMA-SEPARATED list of secrets; a single
+ * value is the common case and behaves exactly as before. See
+ * docs/runbooks/stripe-go-live.md and docs/ops/stripe-connect-webhooks.md.
+ */
+export function parseWebhookSecrets(raw: string | undefined): string[] {
+  if (!raw) return [];
+  return raw
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
+/**
+ * True if `signature` verifies against ANY of `secrets` (see
+ * `parseWebhookSecrets` for why more than one is accepted). Short-circuits on
+ * the first match; an empty list can never verify.
+ */
+export function verifyWebhookSignatureAny(
+  payload: string,
+  signature: string,
+  secrets: string[],
+  toleranceSeconds: number = 300,
+): boolean {
+  return secrets.some((secret) => verifyWebhookSignature(payload, signature, secret, toleranceSeconds));
+}
+
 export function createWebhookSignature(payload: string, secret: string, timestamp?: number): string {
   const ts = timestamp || Math.floor(Date.now() / 1000);
   const sig = crypto

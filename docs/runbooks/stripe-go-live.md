@@ -26,7 +26,7 @@ Run every section. Do **not** onboard a paying tenant until Section D passes.
 | Var | Where | How it's verified |
 |-----|-------|-------------------|
 | `STRIPE_SECRET_KEY` (or legacy `STRIPE_API_KEY`) | API service | **Boot-fail.** `createPaymentLinkProvider` (`packages/api/src/payments/payment-link-provider.ts`) throws in prod/staging when unset — it refuses to fall back to the mock provider that mints synthetic `pay.mock.com` URLs. Pinned by `test/payments/payment-link-provider.test.ts`. |
-| `STRIPE_WEBHOOK_SECRET` | API service | **Boot-fail (SEC-43).** `validateProductionConfig` (`packages/api/src/shared/config.ts`) throws in prod/staging when unset. Without it the webhook handler rejects every event → charges succeed but invoices never settle. Pinned by `test/shared/config.test.ts` ("SEC-43"). |
+| `STRIPE_WEBHOOK_SECRET` | API service | **Boot-fail (SEC-43).** `validateProductionConfig` (`packages/api/src/shared/config.ts`) throws in prod/staging when unset. Without it the webhook handler rejects every event → charges succeed but invoices never settle. Pinned by `test/shared/config.test.ts` ("SEC-43"). **Accepts a comma-separated list** of secrets (one per Stripe endpoint) — see Section B; a single value is unchanged. |
 | `VITE_STRIPE_PUBLISHABLE_KEY` | **Web build** | Not boot-enforced (it's a Vite build-time var, invisible to the API). The pay page reads it at `packages/web/src/components/customer/InvoicePaymentPage.tsx` and degrades to "Online payment is temporarily unavailable" rather than erroring — so a missing key is a *silent* "customers can't pay". **Manually confirm** it is set on the web service and belongs to the **same Stripe account** as `STRIPE_SECRET_KEY` (both live, or both test). |
 
 **Check:**
@@ -51,8 +51,8 @@ the same URL: `https://<API_HOST>/webhooks/stripe`.
 - [ ] **"Your account"** destination — SaaS subscriptions, platform-fallback charges, `account.updated`.
 - [ ] **"Connected accounts"** destination — payment intents, checkout sessions, setup intents, refunds, disputes on Express accounts.
 - [ ] Both enable at minimum: `payment_intent.processing`, `payment_intent.succeeded`, `payment_intent.payment_failed`, `checkout.session.completed`, `checkout.session.expired`, `setup_intent.succeeded`, `charge.refunded`, `charge.refund.updated`, `charge.dispute.created`, `account.updated`, `customer.subscription.created|updated|deleted`.
-- [ ] The signing secret for **this environment's** destinations is copied into `STRIPE_WEBHOOK_SECRET`.
-- [ ] Repeated for **both** Test and Live (they have independent secrets).
+- [ ] **Both destinations' signing secrets** are copied into `STRIPE_WEBHOOK_SECRET` as a **comma-separated list** (`whsec_platform,whsec_connected`). Stripe issues a distinct secret per endpoint, and the handler verifies each request against every secret in the list — so setting only one destination's secret would 401 the other's events (silently breaking either settlement or SaaS billing). A single value still works when you truly have one endpoint.
+- [ ] Repeated for **both** Test and Live (each mode has its own two secrets).
 
 > `stripe listen` is **not** sufficient for production Connect coverage — it does
 > not stand in for the connected-accounts destination.
@@ -97,6 +97,7 @@ Do this against an onboarded **test-mode** connected account before trusting Liv
 |---|---|---|
 | API won't boot, log names `STRIPE_WEBHOOK_SECRET` / Stripe key | Boot guard (Section A) — working as intended | Set the missing var. |
 | Customer charged, invoice stuck `open` | Connected-accounts webhook destination missing (Section B) | Add the connected-accounts destination for this mode; re-deliver the event. |
+| `Stripe webhook signature verification failed` (401) for one endpoint's events only | Only one destination's secret is in `STRIPE_WEBHOOK_SECRET` | Add BOTH secrets, comma-separated (Section B); re-deliver. |
 | Pay page shows "temporarily unavailable" | `VITE_STRIPE_PUBLISHABLE_KEY` unset/mismatched, or API returned `503 STRIPE_NOT_CONFIGURED` | Set the web publishable key (matching mode); confirm `STRIPE_SECRET_KEY`. |
 | Payment succeeds but lands in the platform account | Tenant not `charges_enabled` (Section C) | Complete Connect onboarding; re-check `GET /api/billing/connect`. |
 | `account.updated` never flips `chargesEnabled` | Platform "Your account" destination missing `account.updated` | Add the event to the platform destination. |

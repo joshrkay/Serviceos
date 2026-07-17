@@ -14,7 +14,7 @@
 | `AI_PROVIDER_API_KEY` | Always prod/staging | `validateProductionConfig` |
 | `CORS_ORIGIN` | Always prod/staging | Explicit origin, not wildcard |
 | `STRIPE_SECRET_KEY` or `STRIPE_API_KEY` | Always prod/staging | `createPaymentLinkProvider` forbids mock (`payments/payment-link-provider.ts`; pinned by `test/payments/payment-link-provider.test.ts`) |
-| `STRIPE_WEBHOOK_SECRET` | Always prod/staging (SEC-43) | `validateProductionConfig` (`shared/config.ts`); pinned by `test/shared/config.test.ts` "SEC-43". Without it the Stripe webhook handler 400s/503s on the first real event — **the customer is charged but the invoice never settles**. Fail-fast at boot instead. Go-live gate: `docs/runbooks/stripe-go-live.md` |
+| `STRIPE_WEBHOOK_SECRET` | Always prod/staging (SEC-43) | `validateProductionConfig` (`shared/config.ts`); pinned by `test/shared/config.test.ts` "SEC-43". Without it the Stripe webhook handler 400s/503s on the first real event — **the customer is charged but the invoice never settles**. Fail-fast at boot instead. **Accepts a comma-separated list** (one secret per Stripe endpoint — platform + connected accounts). Go-live gate: `docs/runbooks/stripe-go-live.md` |
 | `RLS_RUNTIME_ROLE=true` | Always prod/staging (SEC-01; no opt-out) | `validateFeatureRequiredConfig`; boot probe `verifyRlsRuntimeRole` also fails fast if `rls_app_runtime` (migration 217) is unprovisioned. See `docs/runbooks/rls-runtime-role-rollout.md` |
 | `TWILIO_ACCOUNT_SID` | Unless `TELEPHONY_ENABLED=false` and `EMAIL_ENABLED=false` | `validateFeatureRequiredConfig` |
 | `TWILIO_AUTH_TOKEN` | Same | Feature gate |
