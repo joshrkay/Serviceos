@@ -369,12 +369,13 @@ describe('EstimateEditTaskHandler', () => {
       tenantThresholdOverride: { supervisor: 0.5 },
     };
 
-    it('(a) a catalogued edit line takes the catalog price, overwriting the LLM guess, and auto-approves', async () => {
+    it('(a) a catalogued edit line takes the catalog price (both price fields), snapping a sub-tolerance mishear, and auto-approves', async () => {
       const repo = new InMemoryCatalogItemRepository();
       const [siteVisit] = await seedCatalog(repo, [{ name: 'Site Visit', unitPriceCents: 15000 }]);
 
       const gateway = editResponse(
-        { description: 'site visit', quantity: 1, unitPrice: 99999 },
+        // 15050 is within 100¢ of the catalog's 15000 → snap, not a conflict.
+        { description: 'site visit', quantity: 1, unitPrice: 15050 },
         0.9,
       );
       const handler = new EstimateEditTaskHandler(gateway, undefined, repo);
@@ -385,13 +386,42 @@ describe('EstimateEditTaskHandler', () => {
         _meta?: { overallConfidence?: string };
       };
       const lineItem = payload.editActions[0].lineItem as Record<string, unknown>;
-      expect(lineItem.unitPrice).toBe(15000); // catalog overwrites the LLM's 99999
+      // Estimate edits execute against `unitPrice`; `unitPriceCents` mirrors.
+      expect(lineItem.unitPrice).toBe(15000); // catalog snaps the LLM's 15050
       expect(lineItem.unitPriceCents).toBe(15000);
       expect(lineItem.catalogItemId).toBe(siteVisit.id);
       expect(lineItem.pricingSource).toBe('catalog');
       expect(result.proposal.confidenceScore).toBe(0.9); // not force-capped
       expect(payload._meta?.overallConfidence).not.toBe('low');
       expect(result.proposal.status).toBe('approved');
+    });
+
+    it('(a2) surfaces a price conflict (large deviation) instead of silently snapping — keeps spoken price, flags for review', async () => {
+      const repo = new InMemoryCatalogItemRepository();
+      await seedCatalog(repo, [{ name: 'Site Visit', unitPriceCents: 15000 }]);
+
+      const gateway = editResponse(
+        // Deviates from the catalog's 15000 by ≥10% AND ≥$1 — a deliberate
+        // custom price ("half price for Mrs. Henderson"), not a mishear.
+        { description: 'site visit', quantity: 1, unitPrice: 7500 },
+        0.98,
+      );
+      const handler = new EstimateEditTaskHandler(gateway, undefined, repo);
+      const result = await handler.handle({ tenantId, userId, message: 'edit', ...supervised });
+
+      const payload = result.proposal.payload as {
+        editActions: Array<Record<string, unknown>>;
+        _meta?: { overallConfidence?: string };
+      };
+      const lineItem = payload.editActions[0].lineItem as Record<string, unknown>;
+      expect(lineItem.unitPrice).toBe(7500); // spoken price KEPT, not snapped
+      expect(lineItem.unitPriceCents).toBeNull();
+      expect(lineItem.pricingSource).toBe('ambiguous');
+      expect(lineItem.needsPricing).toBe(true);
+      expect(lineItem.catalogItemId).toBeUndefined();
+      expect(payload._meta?.overallConfidence).toBe('low');
+      expect(result.proposal.confidenceScore).toBeLessThanOrEqual(UNCATALOGUED_CONFIDENCE_CAP);
+      expect(result.proposal.status).not.toBe('approved');
     });
 
     it('(b) an uncatalogued edit line with LLM confidence 0.98 carries _meta.overallConfidence low and does NOT auto-approve', async () => {

@@ -431,7 +431,7 @@ function contractCategory(item: CatalogItem): string {
  * compared against a fixed threshold, never itself stored or summed as
  * money).
  */
-function isPriceConflict(draftedCents: number, catalogCents: number): boolean {
+export function isPriceConflict(draftedCents: number, catalogCents: number): boolean {
   const diffCents = Math.abs(draftedCents - catalogCents);
   if (diffCents < PRICE_CONFLICT_MIN_ABS_CENTS) return false;
   if (catalogCents <= 0) return true; // abs threshold alone already cleared

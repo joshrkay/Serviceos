@@ -67,7 +67,7 @@ function editResponse(
 }
 
 describe('P22-001 invoice-edit-catalog', () => {
-  it('overwrites a deliberately wrong LLM-hallucinated price with the exact catalog price', async () => {
+  it('snaps a sub-tolerance mishear to the exact catalog price (both price fields)', async () => {
     const repo = new InMemoryCatalogItemRepository();
     const [gasket] = await seedCatalog(repo, TENANT, [{ name: 'Gasket', unitPriceCents: 450 }]);
 
@@ -75,8 +75,10 @@ describe('P22-001 invoice-edit-catalog', () => {
       editResponse([
         {
           type: 'add_line_item',
-          // LLM hallucinated $99.99 — catalog says $4.50.
-          lineItem: { description: 'gasket', quantity: 3, unitPrice: 9999 },
+          // 470¢ is within PRICE_CONFLICT_MIN_ABS_CENTS (100¢) of the catalog's
+          // 450 — a mishear that SNAPS to the catalog price, not a "did you
+          // mean" conflict.
+          lineItem: { description: 'gasket', quantity: 3, unitPrice: 470 },
         },
       ]),
     );
@@ -90,12 +92,61 @@ describe('P22-001 invoice-edit-catalog', () => {
 
     const payload = result.proposal.payload as { editActions: Array<Record<string, unknown>> };
     const lineItem = payload.editActions[0].lineItem as Record<string, unknown>;
+    // Invoice edits execute against `unitPrice` (invoice-editor.ts reads it);
+    // `unitPriceCents` is the review mirror. BOTH carry the catalog price.
     expect(lineItem.unitPrice).toBe(450);
     expect(lineItem.unitPriceCents).toBe(450);
     expect(lineItem.catalogItemId).toBe(gasket.id);
+    expect(lineItem.pricingSource).toBe('catalog');
     expect(lineItem.needsPricing).toBe(false);
     expect(lineItem.quantity).toBe(3);
     expect(lineItem.description).toBe('Gasket');
+  });
+
+  it('surfaces a price conflict (large deviation) instead of silently snapping — keeps the spoken price, flags for review', async () => {
+    const repo = new InMemoryCatalogItemRepository();
+    await seedCatalog(repo, TENANT, [{ name: 'Gasket', unitPriceCents: 450 }]);
+
+    const gateway = mockGateway(
+      editResponse(
+        [
+          {
+            type: 'add_line_item',
+            // $99.99 deviates from the catalog's $4.50 by ≥10% AND ≥$1 — a
+            // "did you mean" conflict (maybe a deliberate custom price), not a
+            // mishear. The spoken price must NOT be silently overwritten.
+            lineItem: { description: 'gasket', quantity: 3, unitPrice: 9999 },
+          },
+        ],
+        0.98,
+      ),
+    );
+
+    const handler = new InvoiceEditTaskHandler(gateway, { catalogRepo: repo });
+    const result = await handler.handle({
+      tenantId: TENANT,
+      userId: 'u-1',
+      message: 'Add three gaskets at $99.99 to INV-0042',
+      supervisorPresent: true,
+      supervisorMode: 'supervisor',
+      tenantThresholdOverride: { supervisor: 0.5 },
+    });
+
+    const payload = result.proposal.payload as {
+      editActions: Array<Record<string, unknown>>;
+      _meta?: { overallConfidence?: string };
+    };
+    const lineItem = payload.editActions[0].lineItem as Record<string, unknown>;
+    // Spoken price KEPT on the executable field; not overwritten to 450.
+    expect(lineItem.unitPrice).toBe(9999);
+    expect(lineItem.unitPriceCents).toBeNull();
+    expect(lineItem.pricingSource).toBe('ambiguous');
+    expect(lineItem.needsPricing).toBe(true);
+    expect(lineItem.catalogItemId).toBeUndefined();
+    // Routed to review — the structural gate hard-blocks auto-approval.
+    expect(payload._meta?.overallConfidence).toBe('low');
+    expect(result.proposal.confidenceScore).toBeLessThanOrEqual(UNCATALOGUED_CONFIDENCE_CAP);
+    expect(result.proposal.status).not.toBe('approved');
   });
 
   it('resolves "service call + three gaskets" with catalog prices on both items', async () => {
@@ -107,8 +158,9 @@ describe('P22-001 invoice-edit-catalog', () => {
 
     const gateway = mockGateway(
       editResponse([
-        { type: 'add_line_item', lineItem: { description: 'service call', quantity: 1, unitPrice: 100 } },
-        { type: 'add_line_item', lineItem: { description: 'gaskets', quantity: 3, unitPrice: 100 } },
+        // Both drafted prices are within 100¢ of their catalog match → snap.
+        { type: 'add_line_item', lineItem: { description: 'service call', quantity: 1, unitPrice: 12450 } },
+        { type: 'add_line_item', lineItem: { description: 'gaskets', quantity: 3, unitPrice: 500 } },
       ]),
     );
 
@@ -266,7 +318,11 @@ describe('P22-001 invoice-edit-catalog', () => {
     );
 
     const gateway = mockGateway(editResponse([
-      { type: 'add_line_item', lineItem: { description: 'part 001', quantity: 1, unitPrice: 1 } },
+      // The resolver drops digit-only tokens ("001" is a quantity, not item
+      // identity), so "part 001" normalizes to just "part" — which collides
+      // across all 180 "Part NNN" items → ambiguous, resolved against the
+      // FULL catalog (not just the 150 shown in the prompt) without crashing.
+      { type: 'add_line_item', lineItem: { description: 'part 001', quantity: 1, unitPrice: 120 } },
     ]));
     const handler = new InvoiceEditTaskHandler(gateway, { catalogRepo: repo });
     const result = await handler.handle({ tenantId: TENANT, userId: 'u-1', message: 'edit' });
@@ -277,11 +333,13 @@ describe('P22-001 invoice-edit-catalog', () => {
     expect(userContent.split('\n').filter((l: string) => l.startsWith('- '))).toHaveLength(150);
     expect(userContent).toContain('catalog truncated');
 
-    // Resolution still works against the FULL catalog (no crash, exact price).
+    // Resolution runs against the FULL catalog (no crash). An ambiguous match
+    // is untrusted, not silently priced.
     const payload = result.proposal.payload as { editActions: Array<Record<string, unknown>> };
     const lineItem = payload.editActions[0].lineItem as Record<string, unknown>;
-    expect(lineItem.unitPrice).toBe(101);
-    expect(lineItem.needsPricing).toBe(false);
+    expect(lineItem.needsPricing).toBe(true);
+    expect(lineItem.unitPriceCents).toBeNull();
+    expect(lineItem.catalogItemId).toBeUndefined();
   });
 
   it('ignores archived catalog items', async () => {
@@ -496,7 +554,8 @@ describe('P22-001 invoice-edit-catalog', () => {
 
       const gateway = mockGateway(
         editResponse(
-          [{ type: 'add_line_item', lineItem: { description: 'gasket', quantity: 1, unitPrice: 9999 } }],
+          // Within 100¢ of the catalog's 450 → a clean snap, not a conflict.
+          [{ type: 'add_line_item', lineItem: { description: 'gasket', quantity: 1, unitPrice: 460 } }],
           0.9,
         ),
       );
@@ -508,7 +567,7 @@ describe('P22-001 invoice-edit-catalog', () => {
         _meta?: { overallConfidence?: string };
       };
       const lineItem = payload.editActions[0].lineItem as Record<string, unknown>;
-      expect(lineItem.unitPrice).toBe(450); // catalog overwrites the LLM's 9999
+      expect(lineItem.unitPrice).toBe(450); // catalog snaps the LLM's 460
       expect(lineItem.catalogItemId).toBe(gasket.id);
       expect(lineItem.pricingSource).toBe('catalog');
       // Not uncatalogued → confidence untouched, marker not forced low.
