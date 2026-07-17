@@ -29,7 +29,17 @@ import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
 import { InMemoryInvoiceRepository, createInvoice } from '../../src/invoices/invoice';
 import { InMemoryEstimateRepository, createEstimate } from '../../src/estimates/estimate';
-import { buildLineItem } from '../../src/shared/billing-engine';
+import { buildLineItem, calculateDocumentTotals } from '../../src/shared/billing-engine';
+// B5 — the shared handler-registry parity tests below run the SAME
+// transcript through the voice worker to prove the assistant surface can no
+// longer silently diverge on the 12 intents it was dropping.
+import { createVoiceActionRouterWorker } from '../../src/workers/voice-action-router';
+import { InMemoryAppointmentRepository } from '../../src/appointments/in-memory-appointment';
+import { InMemoryJobRepository } from '../../src/jobs/job';
+import type { Job } from '../../src/jobs/job';
+import type { Estimate } from '../../src/estimates/estimate';
+import type { QueueMessage } from '../../src/queues/queue';
+import type { Logger } from '../../src/logging/logger';
 
 const TEST_TENANT = 'tenant-ast-01b';
 const TEST_USER = 'user-ast-01b';
@@ -1189,9 +1199,16 @@ describe('money-path handler wiring — update_estimate is catalog-grounded (bot
     expect(lineItem.unitPriceCents).toBeNull();
     expect(lineItem.needsPricing).toBe(true);
     expect(lineItem.catalogItemId).toBeUndefined();
-    // Untrusted price hard-blocks auto-approval via _meta.overallConfidence,
-    // independent of the numeric confidence score / any tenant threshold.
-    expect(payload._meta?.overallConfidence).toBe('low');
+    // B3: a resolvable price conflict is no longer stamped sticky-'low'.
+    // The spoken price is kept and the line is gated for one-tap resolution
+    // (catalog price vs keep-spoken) via a missingFields entry; auto-approval
+    // is blocked by that gate rather than the confidence stamp, so
+    // overallConfidence stays 'high' (only genuinely uncatalogued lines keep
+    // the sticky-low cap).
+    expect(payload._meta?.overallConfidence).toBe('high');
+    expect(estimateProposal.sourceContext?.missingFields).toEqual(
+      expect.arrayContaining(['editActions[0].lineItem.catalogItemId']),
+    );
     expect(payload._meta?.markers).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ path: 'editActions[0].lineItem.unitPrice' }),
@@ -1330,5 +1347,417 @@ describe('update_estimate target resolution / missingFields gating', () => {
     await expect(
       approveProposal(proposalRepo, TEST_TENANT, persisted[0].id, TEST_USER, 'owner'),
     ).rejects.toThrow(/unfilled required fields/);
+  });
+});
+
+// ───────────── B5 — the nine-path/12-intent assistant wiring ─────────────
+//
+// Before this unit, `routes/assistant.ts` silently dropped
+// reschedule_appointment / cancel_appointment / reassign_appointment /
+// confirm_appointment / create_job / send_payment_reminder / apply_late_fee /
+// send_estimate_nudge / batch_invoice / create_invoice_schedule /
+// record_payment / notify_delay to a bare conversational LLM reply — no
+// proposal at all. Both this route and workers/voice-action-router.ts now
+// draft these intents via the SAME shared registry
+// (ai/orchestration/handler-registry.ts buildTaskHandlers), so a divergence
+// here would mean the registry itself regressed.
+
+function silentLogger(): Logger {
+  const noop = (..._args: unknown[]) => {};
+  const base = {
+    debug: noop,
+    info: noop,
+    warn: noop,
+    error: noop,
+    child: () => base,
+  } as unknown as Logger;
+  return base;
+}
+
+function workerMsg<T>(payload: T): QueueMessage<T> {
+  return {
+    id: 'msg-1',
+    type: 'voice_action_router',
+    payload,
+    attempts: 1,
+    maxAttempts: 3,
+    idempotencyKey: 'idem-1',
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function buildB5App(gateway: LLMGateway, proposalRepo: InMemoryProposalRepository) {
+  const app = express();
+  app.use(express.json());
+  app.use((req: Request, _res: Response, next: NextFunction) => {
+    (req as AuthenticatedRequest).auth = {
+      userId: TEST_USER,
+      sessionId: 'sess-1',
+      tenantId: TEST_TENANT,
+      role: 'owner',
+    };
+    next();
+  });
+  app.use('/api/assistant', createAssistantRouter({ gateway, proposalRepo }));
+  return app;
+}
+
+describe('B5 — scheduling / create_job / invoice-follow-up intents wired onto the assistant surface', () => {
+  it('single-intent path: reschedule_appointment drafts a reschedule_appointment proposal, gated (not doomed) with no appointmentRepo wired', async () => {
+    const gateway = scriptedGateway([
+      JSON.stringify({
+        intentType: 'reschedule_appointment',
+        confidence: 0.92,
+        extractedEntities: {
+          appointmentReference: 'the Miller job',
+          newDateTimeDescription: 'Thursday at 2pm',
+        },
+      }),
+    ]);
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildB5App(gateway, proposalRepo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Move the Miller job to Thursday at 2pm' }] });
+
+    expect(res.status).toBe(200);
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0].proposalType).toBe('reschedule_appointment');
+    // Gated, not doomed: no appointmentRepo wired, so the concrete
+    // appointment id is unresolved — missingFields blocks Approve rather
+    // than the proposal landing empty/approvable-but-broken.
+    expect(res.body.message.proposal.missingFields).toContain('appointmentId');
+    expect(res.body.message.proposal.type).toBe('Schedule');
+  });
+
+  it('single-intent path: cancel_appointment drafts a cancel_appointment proposal', async () => {
+    const gateway = scriptedGateway([
+      JSON.stringify({
+        intentType: 'cancel_appointment',
+        confidence: 0.98,
+        extractedEntities: {
+          appointmentReference: 'tomorrow 3pm',
+          cancellationReason: 'customer called out',
+          cancellationType: 'customer_request',
+        },
+      }),
+    ]);
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildB5App(gateway, proposalRepo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: "Cancel tomorrow's 3pm, the customer called out" }] });
+
+    expect(res.status).toBe(200);
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0].proposalType).toBe('cancel_appointment');
+    const payload = persisted[0].payload as Record<string, unknown>;
+    expect(payload.cancellationType).toBe('customer_request');
+    expect(res.body.message.proposal.type).toBe('Schedule');
+  });
+
+  it('single-intent path: create_job drafts a create_job proposal, gated on customerId (no entity resolver on this surface)', async () => {
+    const gateway = scriptedGateway([
+      JSON.stringify({
+        intentType: 'create_job',
+        confidence: 0.9,
+        extractedEntities: {
+          customerName: 'Smith',
+          jobTitle: 'Kitchen drain replacement',
+        },
+      }),
+    ]);
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildB5App(gateway, proposalRepo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Start a new job for Smith — kitchen drain replacement' }] });
+
+    expect(res.status).toBe(200);
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0].proposalType).toBe('create_job');
+    const payload = persisted[0].payload as Record<string, unknown>;
+    expect(payload.title).toBe('Kitchen drain replacement');
+    expect(payload.customerReference).toBe('Smith');
+    // Gated, not doomed — a free-text customer name with no resolved id.
+    expect(res.body.message.proposal.missingFields).toContain('customerId');
+  });
+
+  it('single-intent path: record_payment drafts a record_payment proposal with amount as integer cents', async () => {
+    const gateway = scriptedGateway([
+      JSON.stringify({
+        intentType: 'record_payment',
+        confidence: 0.96,
+        extractedEntities: {
+          jobReference: 'INV-0042',
+          amount: 45000,
+          paymentMethod: 'cash',
+        },
+      }),
+    ]);
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildB5App(gateway, proposalRepo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Mark INV-0042 paid — 450 cash' }] });
+
+    expect(res.status).toBe(200);
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0].proposalType).toBe('record_payment');
+    const payload = persisted[0].payload as Record<string, unknown>;
+    expect(payload.amountCents).toBe(45000);
+    expect(payload.paymentMethod).toBe('cash');
+    expect(res.body.message.proposal.type).toBe('Invoice');
+  });
+
+  it('single-intent path: send_payment_reminder drafts a send_payment_reminder proposal, gated on invoiceId', async () => {
+    const gateway = scriptedGateway([
+      JSON.stringify({
+        intentType: 'send_payment_reminder',
+        confidence: 0.9,
+        extractedEntities: { jobReference: 'INV-0099' },
+      }),
+    ]);
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildB5App(gateway, proposalRepo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Chase INV-0099 for payment' }] });
+
+    expect(res.status).toBe(200);
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0].proposalType).toBe('send_payment_reminder');
+    expect(res.body.message.proposal.missingFields).toContain('invoiceId');
+    expect(res.body.message.proposal.type).toBe('Invoice');
+  });
+
+  it('single-intent path: batch_invoice enumerates completed-unbilled jobs into ONE batch_invoice proposal when jobRepo/invoiceRepo/estimateRepo are wired', async () => {
+    const jobRepo = new InMemoryJobRepository();
+    const invoiceRepo = new InMemoryInvoiceRepository();
+    const estimateRepo = new InMemoryEstimateRepository();
+
+    const job: Job = {
+      id: 'job-b5-1',
+      tenantId: TEST_TENANT,
+      customerId: 'cust-b5-1',
+      locationId: 'loc-b5-1',
+      jobNumber: 'JOB-0001',
+      summary: 'Kitchen remodel',
+      status: 'completed',
+      priority: 'normal',
+      moneyState: 'estimate_accepted',
+      createdBy: TEST_USER,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    await jobRepo.create(job);
+
+    const acceptedLineItems = [buildLineItem('1', 'Labor', 1, 10000, 1, true, 'labor')];
+    const acceptedEstimate: Estimate = {
+      id: 'est-b5-1',
+      tenantId: TEST_TENANT,
+      jobId: job.id,
+      estimateNumber: 'EST-0001',
+      status: 'accepted',
+      lineItems: acceptedLineItems,
+      totals: calculateDocumentTotals(acceptedLineItems, 0, 0),
+      version: 1,
+      createdBy: TEST_USER,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    await estimateRepo.create(acceptedEstimate);
+
+    const gateway = scriptedGateway([
+      JSON.stringify({ intentType: 'batch_invoice', confidence: 0.9, extractedEntities: {} }),
+    ]);
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: TEST_USER,
+        sessionId: 'sess-1',
+        tenantId: TEST_TENANT,
+        role: 'owner',
+      };
+      next();
+    });
+    app.use(
+      '/api/assistant',
+      createAssistantRouter({ gateway, proposalRepo, jobRepo, invoiceRepo, estimateRepo }),
+    );
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Invoice all my completed jobs' }] });
+
+    expect(res.status).toBe(200);
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0].proposalType).toBe('batch_invoice');
+    const payload = persisted[0].payload as { jobs: Array<{ jobId: string }> };
+    expect(payload.jobs).toHaveLength(1);
+    expect(payload.jobs[0].jobId).toBe(job.id);
+  });
+
+  // Parity — the same transcript must classify to the SAME proposal type on
+  // both surfaces, since both now draft it via the identical shared
+  // registry. This is the regression the shared-registry extraction exists
+  // to prevent (this branch exists because the two surfaces had already
+  // diverged once).
+  it('parity: "reschedule the Miller job to Thursday at 2pm" yields reschedule_appointment on both the assistant route and the voice worker', async () => {
+    const classifierResponse = JSON.stringify({
+      intentType: 'reschedule_appointment',
+      confidence: 0.92,
+      extractedEntities: {
+        appointmentReference: 'the Miller job',
+        newDateTimeDescription: 'Thursday at 2pm',
+      },
+    });
+    const transcript = 'Move the Miller job to Thursday at 2pm';
+
+    const assistantProposalRepo = new InMemoryProposalRepository();
+    const assistantApp = buildB5App(scriptedGateway([classifierResponse]), assistantProposalRepo);
+    const assistantRes = await request(assistantApp)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: transcript }] });
+    expect(assistantRes.status).toBe(200);
+
+    const workerProposalRepo = new InMemoryProposalRepository();
+    const worker = createVoiceActionRouterWorker({
+      gateway: scriptedGateway([classifierResponse]),
+      proposalRepo: workerProposalRepo,
+    });
+    await worker.handle(
+      workerMsg({ tenantId: TEST_TENANT, userId: TEST_USER, transcript }),
+      silentLogger(),
+    );
+
+    const assistantPersisted = await assistantProposalRepo.findByTenant(TEST_TENANT);
+    const workerPersisted = await workerProposalRepo.findByTenant(TEST_TENANT);
+    expect(assistantPersisted).toHaveLength(1);
+    expect(workerPersisted).toHaveLength(1);
+    expect(assistantPersisted[0].proposalType).toBe(workerPersisted[0].proposalType);
+    expect(assistantPersisted[0].proposalType).toBe('reschedule_appointment');
+  });
+
+  it('parity: "start a new job for Smith" yields create_job on both the assistant route and the voice worker', async () => {
+    const classifierResponse = JSON.stringify({
+      intentType: 'create_job',
+      confidence: 0.9,
+      extractedEntities: {
+        customerName: 'Smith',
+        jobTitle: 'Kitchen drain replacement',
+      },
+    });
+    const transcript = 'Start a new job for Smith — kitchen drain replacement';
+
+    const assistantProposalRepo = new InMemoryProposalRepository();
+    const assistantApp = buildB5App(scriptedGateway([classifierResponse]), assistantProposalRepo);
+    const assistantRes = await request(assistantApp)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: transcript }] });
+    expect(assistantRes.status).toBe(200);
+
+    const workerProposalRepo = new InMemoryProposalRepository();
+    const worker = createVoiceActionRouterWorker({
+      gateway: scriptedGateway([classifierResponse]),
+      proposalRepo: workerProposalRepo,
+    });
+    await worker.handle(
+      workerMsg({ tenantId: TEST_TENANT, userId: TEST_USER, transcript }),
+      silentLogger(),
+    );
+
+    const assistantPersisted = await assistantProposalRepo.findByTenant(TEST_TENANT);
+    const workerPersisted = await workerProposalRepo.findByTenant(TEST_TENANT);
+    expect(assistantPersisted).toHaveLength(1);
+    expect(workerPersisted).toHaveLength(1);
+    expect(assistantPersisted[0].proposalType).toBe(workerPersisted[0].proposalType);
+    expect(assistantPersisted[0].proposalType).toBe('create_job');
+  });
+
+  // Confirms the appointmentRepo/jobRepo threading actually reaches the
+  // handler on this surface (not just that it degrades gracefully without
+  // them, covered above) — mirrors the worker's own
+  // InMemoryAppointmentRepository-backed reschedule test.
+  it('single-intent path: reschedule_appointment resolves a concrete appointmentId when appointmentRepo + jobRepo are wired', async () => {
+    const appointmentRepo = new InMemoryAppointmentRepository();
+    const jobRepo = new InMemoryJobRepository();
+    const job: Job = {
+      id: 'job-b5-2',
+      tenantId: TEST_TENANT,
+      customerId: 'cust-b5-2',
+      locationId: 'loc-b5-2',
+      jobNumber: 'JOB-0002',
+      summary: 'Miller job',
+      status: 'scheduled',
+      priority: 'normal',
+      createdBy: TEST_USER,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    await jobRepo.create(job);
+    const appointment = await appointmentRepo.create({
+      id: 'appt-b5-2',
+      tenantId: TEST_TENANT,
+      jobId: job.id,
+      scheduledStart: new Date(Date.now() + 86_400_000),
+      scheduledEnd: new Date(Date.now() + 90_000_000),
+      timezone: 'America/New_York',
+      status: 'scheduled',
+      holdPendingApproval: false,
+      createdBy: TEST_USER,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    } as never);
+
+    const gateway = scriptedGateway([
+      JSON.stringify({
+        intentType: 'reschedule_appointment',
+        confidence: 0.92,
+        extractedEntities: {
+          appointmentReference: 'the Miller job',
+          newDateTimeDescription: 'Thursday at 2pm',
+        },
+      }),
+    ]);
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: TEST_USER,
+        sessionId: 'sess-1',
+        tenantId: TEST_TENANT,
+        role: 'owner',
+      };
+      next();
+    });
+    app.use(
+      '/api/assistant',
+      createAssistantRouter({ gateway, proposalRepo, appointmentRepo, jobRepo }),
+    );
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Move the Miller job to Thursday at 2pm' }] });
+
+    expect(res.status).toBe(200);
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0].proposalType).toBe('reschedule_appointment');
+    expect(appointment.id).toBeTruthy();
   });
 });

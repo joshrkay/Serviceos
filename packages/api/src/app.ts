@@ -5200,6 +5200,12 @@ export function createApp(): AppWithLifecycle {
       estimateRepo,
       // P22 — catalog grounding for assistant-drafted invoices/estimates.
       catalogRepo,
+      // B5 — the scheduling / invoice-follow-up intents wired into the
+      // assistant surface need the same repos the voice worker passes so
+      // their handlers resolve concrete ids instead of degrading to gated.
+      appointmentRepo,
+      jobRepo,
+      dunningEventRepo,
       // §3B/3D/3E — assistant chat shares the operator-side resolver
       // shim with the voice-action-router so the same vertical context
       // reaches both text and voice classification paths.

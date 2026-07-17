@@ -24,9 +24,17 @@ import { InvoiceTaskHandler } from '../ai/tasks/invoice-task';
 import { InvoiceEditTaskHandler } from '../ai/tasks/invoice-edit-task';
 import { SendInvoiceTaskHandler } from '../ai/tasks/voice-extended-tasks';
 import { IssueInvoiceTaskHandler } from '../ai/orchestration/task-router';
+// B5 — the scheduling-family / create_job / invoice-follow-up intents this
+// route was missing (12 in total) are drafted by the SAME handler-registry
+// builder workers/voice-action-router.ts's buildHandlers uses, so the two
+// surfaces can't diverge again — see the doc comment on HandlerRegistryDeps.
+import { buildTaskHandlers } from '../ai/orchestration/handler-registry';
 import type { InvoiceRepository } from '../invoices/invoice';
 import type { CatalogItemRepository } from '../catalog/catalog-item';
 import type { EstimateRepository } from '../estimates/estimate';
+import type { AppointmentRepository } from '../appointments/appointment';
+import type { JobRepository } from '../jobs/job';
+import type { DunningEventRepository } from '../invoices/dunning-config';
 import type { StandingInstruction } from '../instructions/standing-instructions';
 import { selectInjectedStandingInstructions } from '../ai/standing-instructions-context';
 import { createLogger } from '../logging/logger';
@@ -220,8 +228,38 @@ export interface AssistantRouterDeps {
    * update_estimate task handler read the targeted estimate and stamp the
    * `_meta.markers` acceptance-void warning when it is currently accepted.
    * Optional; absent -> marker skipped.
+   *
+   * B5 — widened from a narrow `Pick` to the full repository so the SAME
+   * value can also feed batch_invoice's completed-unbilled enumeration
+   * (`findJobsRequiringInvoicing`, which needs `EstimateRepository` in
+   * full — see `HandlerRegistryDeps.invoicingDeps` in
+   * ai/orchestration/handler-registry.ts). Every existing caller already
+   * passes a real repository implementation (Pg or in-memory), which
+   * satisfies both the old narrow shape and this one, so this is
+   * source-compatible.
    */
-  estimateRepo?: Pick<EstimateRepository, 'findById' | 'findByTenant'>;
+  estimateRepo?: EstimateRepository;
+  /**
+   * B5 — appointment resolution for the scheduling-family intents this
+   * route was missing (reschedule/cancel/confirm/notify_delay), mirroring
+   * `workers/voice-action-router.ts`'s `appointmentRepo`. Optional: absent
+   * → those proposals draft gated (`missingFields: ['appointmentId']`)
+   * instead of resolving a concrete appointment — the same fail-open
+   * posture every other optional dep here already has.
+   */
+  appointmentRepo?: AppointmentRepository;
+  /**
+   * B5 — paired with `appointmentRepo` (scopes appointment resolution to
+   * appointment → job → customerId) and with `invoiceRepo` + `estimateRepo`
+   * for batch_invoice's completed-unbilled enumeration.
+   */
+  jobRepo?: JobRepository;
+  /**
+   * B5 — send_payment_reminder's Layer-3 advisory duplicate-reminder
+   * marker (draft-time only; never blocks). Optional; absent → no marker,
+   * exact pre-B5 drafting.
+   */
+  dunningEventRepo?: DunningEventRepository;
   /**
    * Story 3.11 — persist each chat turn (operator message + agent reply) so the
    * running conversation survives reload and is searchable. Optional so tests
@@ -482,6 +520,22 @@ function proposalToUI(
     issue_invoice: 'Invoice',
     create_customer: 'Customer',
     update_customer: 'Customer',
+    // B5 — the 12 newly-wired intents need a sensible card type too:
+    // scheduling family → Schedule; invoice-adjacent follow-ups → Invoice;
+    // the estimate follow-up → Estimate. `create_job` has no dedicated
+    // type — it falls through to the generic 'Follow-up' default below,
+    // same as add_note/log_expense/every other CRM-ish intent.
+    reschedule_appointment: 'Schedule',
+    cancel_appointment: 'Schedule',
+    reassign_appointment: 'Schedule',
+    confirm_appointment: 'Schedule',
+    notify_delay: 'Schedule',
+    send_payment_reminder: 'Invoice',
+    apply_late_fee: 'Invoice',
+    record_payment: 'Invoice',
+    batch_invoice: 'Invoice',
+    create_invoice_schedule: 'Invoice',
+    send_estimate_nudge: 'Estimate',
   };
   const cardType = typeMap[proposal.proposalType] ?? 'Follow-up';
   const total = typeof proposal.payload.totalCents === 'number'
@@ -629,6 +683,30 @@ async function generateAssistantReply(
         };
       }
 
+      // B5 — the scheduling family / create_job / invoice-follow-up intents
+      // this route was missing draft through the SAME shared registry the
+      // voice worker uses (see the import comment above). Built once per
+      // turn — handler construction here does no I/O, matching how the
+      // maps below already rebuild handlers per request. `invoicingDeps`
+      // is assembled inline (mirrors VoiceActionRouterDeps' separation of
+      // the narrow estimateRepo/invoiceRepo from the full trio
+      // findJobsRequiringInvoicing needs) and is only passed when all
+      // three repos are wired — absent, batch_invoice degrades to its own
+      // "not available" clarification rather than throwing.
+      const sharedHandlers = buildTaskHandlers({
+        gateway: deps.gateway,
+        catalogRepo: deps.catalogRepo,
+        estimateRepo: deps.estimateRepo,
+        invoiceRepo: deps.invoiceRepo,
+        appointmentRepo: deps.appointmentRepo,
+        jobRepo: deps.jobRepo,
+        dunningEventRepo: deps.dunningEventRepo,
+        invoicingDeps:
+          deps.jobRepo && deps.invoiceRepo && deps.estimateRepo
+            ? { jobRepo: deps.jobRepo, invoiceRepo: deps.invoiceRepo, estimateRepo: deps.estimateRepo }
+            : undefined,
+      });
+
       // QA-2026-06-05 (AST-07, scoped): multi-step asks ("…, then …") are
       // decomposed into SEQUENTIAL linked proposals sharing a chainId in
       // sourceContext. Each step executes per its action class: capture
@@ -660,6 +738,22 @@ async function generateAssistantReply(
             send_invoice: () => new SendInvoiceTaskHandler({ invoiceRepo: deps.invoiceRepo }),
             issue_invoice: () => new IssueInvoiceTaskHandler(),
             update_invoice: () => new InvoiceEditTaskHandler(deps.gateway, { catalogRepo: deps.catalogRepo, invoiceRepo: deps.invoiceRepo }),
+            // B5 — the 12 intents this route was silently dropping to a
+            // conversational LLM reply (no draft at all). Drawn from
+            // `sharedHandlers` so this surface can't drift from the voice
+            // worker's construction of the same handlers.
+            reschedule_appointment: () => sharedHandlers.get('reschedule_appointment')!,
+            cancel_appointment: () => sharedHandlers.get('cancel_appointment')!,
+            reassign_appointment: () => sharedHandlers.get('reassign_appointment')!,
+            confirm_appointment: () => sharedHandlers.get('confirm_appointment')!,
+            create_job: () => sharedHandlers.get('create_job')!,
+            send_payment_reminder: () => sharedHandlers.get('send_payment_reminder')!,
+            apply_late_fee: () => sharedHandlers.get('apply_late_fee')!,
+            send_estimate_nudge: () => sharedHandlers.get('send_estimate_nudge')!,
+            batch_invoice: () => sharedHandlers.get('batch_invoice')!,
+            create_invoice_schedule: () => sharedHandlers.get('create_invoice_schedule')!,
+            record_payment: () => sharedHandlers.get('record_payment')!,
+            notify_delay: () => sharedHandlers.get('notify_delay')!,
           };
           const factory = chainHandlers[segClass.intentType];
           if (!factory) continue;
@@ -745,6 +839,19 @@ async function generateAssistantReply(
         send_invoice: () => new SendInvoiceTaskHandler(),
         issue_invoice: () => new IssueInvoiceTaskHandler(),
         update_invoice: () => new InvoiceEditTaskHandler(deps.gateway, { catalogRepo: deps.catalogRepo, invoiceRepo: deps.invoiceRepo }),
+        // B5 — same 12 intents as the chain map above, same shared registry.
+        reschedule_appointment: () => sharedHandlers.get('reschedule_appointment')!,
+        cancel_appointment: () => sharedHandlers.get('cancel_appointment')!,
+        reassign_appointment: () => sharedHandlers.get('reassign_appointment')!,
+        confirm_appointment: () => sharedHandlers.get('confirm_appointment')!,
+        create_job: () => sharedHandlers.get('create_job')!,
+        send_payment_reminder: () => sharedHandlers.get('send_payment_reminder')!,
+        apply_late_fee: () => sharedHandlers.get('apply_late_fee')!,
+        send_estimate_nudge: () => sharedHandlers.get('send_estimate_nudge')!,
+        batch_invoice: () => sharedHandlers.get('batch_invoice')!,
+        create_invoice_schedule: () => sharedHandlers.get('create_invoice_schedule')!,
+        record_payment: () => sharedHandlers.get('record_payment')!,
+        notify_delay: () => sharedHandlers.get('notify_delay')!,
       };
       const handlerFactory = proposalHandlers[classification.intentType];
       if (handlerFactory) {

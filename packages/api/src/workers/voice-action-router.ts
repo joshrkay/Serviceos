@@ -45,9 +45,6 @@ import {
   payloadPathFor,
 } from '../proposals/chain';
 import { v4 as uuidv4 } from 'uuid';
-import { InvoiceTaskHandler } from '../ai/tasks/invoice-task';
-import { EstimateTaskHandler } from '../ai/tasks/estimate-task';
-import { CreateAppointmentAITaskHandler } from '../ai/tasks/create-appointment-task';
 import { DEFAULT_TENANT_TIMEZONE } from '../ai/scheduling/resolve-datetime';
 import { SlotConflictChecker } from '../ai/tasks/slot-conflict-checker';
 import { AvailabilityFinder } from '../ai/tasks/availability-finder';
@@ -61,38 +58,16 @@ import {
   EntityKind,
   EntityResolver,
 } from '../ai/resolution/entity-resolver';
-import { InvoiceEditTaskHandler } from '../ai/tasks/invoice-edit-task';
-import { EstimateEditTaskHandler } from '../ai/tasks/estimate-edit-task';
-import { CreateCustomerTaskHandler, TaskHandler, TaskContext, TaskResult } from '../ai/tasks/task-handlers';
+import { TaskHandler, TaskContext, TaskResult } from '../ai/tasks/task-handlers';
 import type { StandingInstruction } from '../instructions/standing-instructions';
 import { selectInjectedStandingInstructions } from '../ai/standing-instructions-context';
-import {
-  RescheduleAppointmentTaskHandler,
-  CancelAppointmentTaskHandler,
-  ReassignAppointmentTaskHandler,
-  AddCrewMemberTaskHandler,
-  RemoveCrewMemberTaskHandler,
-  AddNoteTaskHandler,
-  SendInvoiceTaskHandler,
-  SendEstimateTaskHandler,
-  SendEstimateNudgeTaskHandler,
-  SendPaymentReminderTaskHandler,
-  ApplyLateFeeTaskHandler,
-  RecordPaymentTaskHandler,
-  CreateJobVoiceTaskHandler,
-  EmergencyDispatchTaskHandler,
-  UpdateCustomerTaskHandler,
-  LogExpenseTaskHandler,
-  ConvertLeadTaskHandler,
-  ConfirmAppointmentTaskHandler,
-  MarkLeadLostTaskHandler,
-  AddServiceLocationTaskHandler,
-  LogTimeEntryTaskHandler,
-  NotifyDelayTaskHandler,
-  RequestFeedbackTaskHandler,
-  BatchInvoiceTaskHandler,
-  CreateInvoiceScheduleTaskHandler,
-} from '../ai/tasks/voice-extended-tasks';
+// B5 — the "core" intent taxonomy's task handlers are now built by the
+// SHARED registry both this worker and routes/assistant.ts call, so the
+// two surfaces can't diverge again (see ai/orchestration/handler-registry.ts
+// doc comment). Only the handlers that stay surface-specific by design
+// (issue_invoice, review_response_proposal, create_standing_instruction,
+// the complaint/negotiation synthetic keys) are still imported directly here.
+import { buildTaskHandlers } from '../ai/orchestration/handler-registry';
 import { RespondToReviewTaskHandler } from '../ai/tasks/review-response-task';
 import { CreateStandingInstructionTaskHandler } from '../ai/tasks/standing-instruction-task';
 import type { ReviewRepository } from '../reputation/review';
@@ -525,81 +500,30 @@ class IssueInvoiceTaskHandler implements TaskHandler {
 }
 
 function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandler> {
-  const handlers = new Map<ProposalType, TaskHandler>();
-  handlers.set('draft_invoice', new InvoiceTaskHandler(deps.gateway, deps.catalogRepo));
-  handlers.set('draft_estimate', new EstimateTaskHandler(deps.gateway, deps.catalogRepo));
-  handlers.set(
-    'create_appointment',
-    new CreateAppointmentAITaskHandler(
-      deps.gateway,
-      deps.slotConflictChecker,
-      deps.availabilityFinder,
-      deps.appointmentRepo,
-      deps.jobRepo,
-    ),
-  );
-  handlers.set(
-    'update_invoice',
-    new InvoiceEditTaskHandler(deps.gateway, {
-      catalogRepo: deps.catalogRepo,
-      // PR review finding (2026-07) — invoiceReference → invoiceId
-      // resolution (see InvoiceEditTaskDeps in ai/tasks/invoice-edit-task.ts).
-      // Reuses the same InvoiceRepository already wired for the
-      // batch_invoice / send_payment_reminder on-ramps rather than adding a
-      // new top-level dep.
-      invoiceRepo: deps.invoicingDeps?.invoiceRepo,
-    }),
-  );
-  handlers.set('update_estimate', new EstimateEditTaskHandler(deps.gateway, deps.estimateRepo, deps.catalogRepo));
+  // B5 — the "core" taxonomy (draft/edit/send/schedule/CRM/collections
+  // intents) is built by the shared registry. PR review finding (2026-07):
+  // invoiceReference → invoiceId resolution on update_invoice / send_invoice
+  // / send_payment_reminder reuses the SAME InvoiceRepository already wired
+  // for the batch_invoice on-ramp (deps.invoicingDeps?.invoiceRepo) rather
+  // than adding a new top-level dep — see InvoiceEditTaskDeps /
+  // SendInvoiceTaskDeps doc comments (ai/tasks/*.ts): candidates only, the
+  // missingFields gate is untouched.
+  const handlers = buildTaskHandlers({
+    gateway: deps.gateway,
+    catalogRepo: deps.catalogRepo,
+    slotConflictChecker: deps.slotConflictChecker,
+    availabilityFinder: deps.availabilityFinder,
+    appointmentRepo: deps.appointmentRepo,
+    jobRepo: deps.jobRepo,
+    invoiceRepo: deps.invoicingDeps?.invoiceRepo,
+    estimateRepo: deps.estimateRepo,
+    dunningEventRepo: deps.dunningEventRepo,
+    invoicingDeps: deps.invoicingDeps,
+  });
+  // The handlers below stay surface-specific by design — see the doc
+  // comment on HandlerRegistryDeps (ai/orchestration/handler-registry.ts)
+  // for why each is excluded from the shared registry.
   handlers.set('issue_invoice', new IssueInvoiceTaskHandler(deps.proposalRepo, deps.thresholdResolver));
-  handlers.set('create_customer', new CreateCustomerTaskHandler());
-  handlers.set('create_job', new CreateJobVoiceTaskHandler());
-  handlers.set(
-    'reschedule_appointment',
-    new RescheduleAppointmentTaskHandler(deps.gateway, deps.appointmentRepo, deps.jobRepo),
-  );
-  handlers.set(
-    'cancel_appointment',
-    new CancelAppointmentTaskHandler(deps.appointmentRepo, deps.jobRepo),
-  );
-  handlers.set('reassign_appointment', new ReassignAppointmentTaskHandler());
-  handlers.set('add_crew_member', new AddCrewMemberTaskHandler());
-  handlers.set('remove_crew_member', new RemoveCrewMemberTaskHandler());
-  handlers.set('add_note', new AddNoteTaskHandler());
-  handlers.set(
-    'send_invoice',
-    // B2 — reuses the same InvoiceRepository already wired for
-    // update_invoice above (deps.invoicingDeps?.invoiceRepo) rather than
-    // adding a new top-level dep. See SendInvoiceTaskDeps doc comment
-    // (voice-extended-tasks.ts): candidates only, the gate is untouched.
-    new SendInvoiceTaskHandler({ invoiceRepo: deps.invoicingDeps?.invoiceRepo }),
-  );
-  handlers.set('send_estimate', new SendEstimateTaskHandler());
-  handlers.set('send_estimate_nudge', new SendEstimateNudgeTaskHandler());
-  handlers.set(
-    'send_payment_reminder',
-    new SendPaymentReminderTaskHandler({
-      dunningEventRepo: deps.dunningEventRepo,
-      invoiceRepo: deps.invoicingDeps?.invoiceRepo,
-      jobRepo: deps.jobRepo,
-    }),
-  );
-  handlers.set('apply_late_fee', new ApplyLateFeeTaskHandler());
-  handlers.set('record_payment', new RecordPaymentTaskHandler());
-  handlers.set('emergency_dispatch', new EmergencyDispatchTaskHandler());
-  handlers.set('update_customer', new UpdateCustomerTaskHandler());
-  handlers.set('log_expense', new LogExpenseTaskHandler());
-  handlers.set('convert_lead', new ConvertLeadTaskHandler());
-  handlers.set('confirm_appointment', new ConfirmAppointmentTaskHandler(deps.appointmentRepo, deps.jobRepo));
-  handlers.set('mark_lead_lost', new MarkLeadLostTaskHandler());
-  handlers.set('add_service_location', new AddServiceLocationTaskHandler());
-  handlers.set('log_time_entry', new LogTimeEntryTaskHandler());
-  handlers.set('notify_delay', new NotifyDelayTaskHandler(deps.appointmentRepo, deps.jobRepo));
-  handlers.set('request_feedback', new RequestFeedbackTaskHandler());
-  handlers.set('batch_invoice', new BatchInvoiceTaskHandler(deps.invoicingDeps));
-  // U2 — milestone billing plan from a spoken sentence (deterministic
-  // parser; no LLM drafting call).
-  handlers.set('create_invoice_schedule', new CreateInvoiceScheduleTaskHandler());
   // U3 — "respond to that 1-star review": resolve the review, dedup against
   // the polling worker's auto-draft, else draft with the same deps it uses.
   handlers.set(
