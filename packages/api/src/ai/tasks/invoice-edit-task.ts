@@ -8,6 +8,8 @@ import type { InvoiceRepository } from '../../invoices/invoice';
 import { buildCatalogPromptSection } from './catalog-resolution';
 import { UNCATALOGUED_CONFIDENCE_CAP } from '../resolution/catalog-resolver';
 import { groundEditActionPricing } from '../resolution/edit-action-grounding';
+import { candidatesForReference } from '../resolution/reference-candidates';
+import type { EntityCandidate } from '../resolution/entity-resolver';
 
 // Mirrors the execution-side check (isUuid in
 // proposals/execution/voice-extended-handlers.ts / UUID_RE in
@@ -206,11 +208,18 @@ export class InvoiceEditTaskHandler implements TaskHandler {
    * Never throws: a repo hiccup or an ambiguous match simply leaves the
    * proposal gated, same failure posture as
    * EstimateEditTaskHandler.resolveTargetEstimate.
+   *
+   * B2 — the search that identifies an unambiguous single match now also
+   * doubles as the candidate list for the review card's one-tap
+   * AmbiguityPicker (widened from the original limit:2 ambiguous-vs-
+   * singular check to `candidatesForReference`'s top-5). Candidates are
+   * returned alongside missingFields for the caller to stamp onto
+   * `sourceContext` — they NEVER lift the gate on their own; see above.
    */
   private async resolveInvoiceId(
     tenantId: string,
     payload: Record<string, unknown>,
-  ): Promise<string[]> {
+  ): Promise<{ missingFields: string[]; candidates: EntityCandidate[] }> {
     const reference = payload.invoiceReference;
 
     if (isUuid(reference)) {
@@ -218,30 +227,30 @@ export class InvoiceEditTaskHandler implements TaskHandler {
       // repo round-trip needed, and safe to ungate: this literal string is
       // present in the classifier entities/text dropUnverifiedIds checks.
       payload.invoiceId = reference;
-      return [];
+      return { missingFields: [], candidates: [] };
     }
 
+    let candidates: EntityCandidate[] = [];
     if (typeof reference === 'string' && reference.trim().length > 0 && this.deps.invoiceRepo) {
-      try {
-        // ILIKE search on invoice_number / customer_message; only an
-        // UNAMBIGUOUS single match identifies the target — mirrors
-        // EstimateEditTaskHandler.resolveTargetEstimate's search.
-        const matches = await this.deps.invoiceRepo.findByTenant(tenantId, {
-          search: reference.trim(),
-          limit: 2,
-        });
-        if (matches.length === 1) {
-          payload.invoiceId = matches[0].id;
-        }
-      } catch {
-        // Resolution must never block proposal creation.
+      // ILIKE search on invoice_number / customer_message (failure-soft —
+      // see candidatesForReference's own doc comment); only an UNAMBIGUOUS
+      // single match identifies the target — mirrors
+      // EstimateEditTaskHandler.resolveTargetEstimate's search.
+      candidates = await candidatesForReference({
+        tenantId,
+        reference,
+        kind: 'invoice',
+        invoiceRepo: this.deps.invoiceRepo,
+      });
+      if (candidates.length === 1) {
+        payload.invoiceId = candidates[0].id;
       }
     }
 
     // Free-text reference (resolved or not) — always gated. See the
     // method doc comment for why "resolved via search" doesn't bypass
     // this on its own.
-    return ['invoiceId'];
+    return { missingFields: ['invoiceId'], candidates };
   }
 
   async handle(context: TaskContext): Promise<TaskResult> {
@@ -300,7 +309,22 @@ export class InvoiceEditTaskHandler implements TaskHandler {
     // instead of letting an unresolved edit reach
     // UpdateInvoiceExecutionHandler, which has no resolution step of its
     // own and would fail after approval.
-    const missingFields = await this.resolveInvoiceId(context.tenantId, payload);
+    const { missingFields, candidates } = await this.resolveInvoiceId(context.tenantId, payload);
+
+    // B2 — layer the resolved candidate list ON TOP of the gate (never a
+    // substitute for it): only recorded while the gate is still present, so
+    // the AmbiguityPicker only ever appears on a card the operator still
+    // needs to act on.
+    const sourceContext: Record<string, unknown> = {
+      ...(context.conversationId ? { conversationId: context.conversationId } : {}),
+      ...(missingFields.length > 0 && candidates.length > 0
+        ? {
+            entityCandidates: candidates,
+            entityKind: 'invoice',
+            entityReference: payload.invoiceReference,
+          }
+        : {}),
+    };
 
     const input: CreateProposalInput = {
       tenantId: context.tenantId,
@@ -309,7 +333,7 @@ export class InvoiceEditTaskHandler implements TaskHandler {
       summary: context.message,
       confidenceScore,
       confidenceFactors,
-      sourceContext: context.conversationId ? { conversationId: context.conversationId } : undefined,
+      sourceContext: Object.keys(sourceContext).length > 0 ? sourceContext : undefined,
       createdBy: context.userId,
       // update_invoice touches an existing entity but the target is
       // still a draft (non-draft invoices are blocked at execute time).

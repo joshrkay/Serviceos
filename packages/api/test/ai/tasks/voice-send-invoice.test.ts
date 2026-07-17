@@ -13,7 +13,7 @@
  * already a usable id, mirroring SendPaymentReminderTaskHandler /
  * ApplyLateFeeTaskHandler / SendEstimateNudgeTaskHandler.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { SendInvoiceTaskHandler } from '../../../src/ai/tasks/voice-extended-tasks';
 import { TaskContext } from '../../../src/ai/tasks/task-handlers';
 import { missingFieldsFor } from '../../../src/proposals/proposal';
@@ -78,5 +78,75 @@ describe('SendInvoiceTaskHandler', () => {
       ctx({ existingEntities: { customerName: 'Henderson' } }),
     );
     expect(res.proposal.payload.channel).toBe('email');
+  });
+});
+
+// ── B2 — reference→candidates lights up the picker (gate untouched) ────────
+describe('SendInvoiceTaskHandler — B2 candidatesForReference', () => {
+  const INV_A = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+  const INV_B = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+
+  it('records candidates on sourceContext (never payload) while the gate stays present', async () => {
+    const findByTenant = vi.fn().mockResolvedValue([
+      { id: INV_A, invoiceNumber: 'INV-0042', status: 'open', customerMessage: undefined },
+      { id: INV_B, invoiceNumber: 'INV-0043', status: 'draft', customerMessage: undefined },
+    ]);
+    const res = await new SendInvoiceTaskHandler({ invoiceRepo: { findByTenant } as never }).handle(
+      ctx({ existingEntities: { customerName: 'Henderson' } }),
+    );
+
+    expect(findByTenant).toHaveBeenCalledWith('t-1', { search: 'Henderson', limit: 5 });
+    // Gate still present — candidates are layered on top, never a substitute.
+    expect(missingFieldsFor(res.proposal)).toContain('invoiceId');
+    expect(res.proposal.payload.invoiceId).toBeUndefined();
+    expect((res.proposal.payload as Record<string, unknown>).entityCandidates).toBeUndefined();
+
+    const sc = res.proposal.sourceContext as Record<string, unknown>;
+    expect(sc.entityKind).toBe('invoice');
+    expect(sc.entityReference).toBe('Henderson');
+    expect(sc.entityCandidates).toEqual([
+      { id: INV_A, kind: 'invoice', label: 'INV-0042', hint: 'open', score: 1 },
+      { id: INV_B, kind: 'invoice', label: 'INV-0043', hint: 'draft', score: 1 },
+    ]);
+  });
+
+  it('zero-match search → gate present, no candidates recorded (Edit fallback)', async () => {
+    const findByTenant = vi.fn().mockResolvedValue([]);
+    const res = await new SendInvoiceTaskHandler({ invoiceRepo: { findByTenant } as never }).handle(
+      ctx({ existingEntities: { customerName: 'Henderson' } }),
+    );
+
+    expect(missingFieldsFor(res.proposal)).toContain('invoiceId');
+    const sc = res.proposal.sourceContext as Record<string, unknown> | undefined;
+    expect(sc?.entityCandidates).toBeUndefined();
+  });
+
+  it('no invoiceRepo dep → gate present, no candidates, never throws', async () => {
+    const res = await new SendInvoiceTaskHandler().handle(
+      ctx({ existingEntities: { customerName: 'Henderson' } }),
+    );
+    expect(missingFieldsFor(res.proposal)).toContain('invoiceId');
+    const sc = res.proposal.sourceContext as Record<string, unknown> | undefined;
+    expect(sc?.entityCandidates).toBeUndefined();
+  });
+
+  it('a UUID reference bypasses the gate entirely — no candidate search attempted', async () => {
+    const uuid = '11111111-1111-1111-1111-111111111111';
+    const findByTenant = vi.fn().mockResolvedValue([]);
+    const res = await new SendInvoiceTaskHandler({ invoiceRepo: { findByTenant } as never }).handle(
+      ctx({ existingEntities: { jobReference: uuid } }),
+    );
+    expect(findByTenant).not.toHaveBeenCalled();
+    expect(missingFieldsFor(res.proposal)).not.toContain('invoiceId');
+  });
+
+  it('a repo error degrades to the gate with no candidates (failure-soft)', async () => {
+    const findByTenant = vi.fn().mockRejectedValue(new Error('db down'));
+    const res = await new SendInvoiceTaskHandler({ invoiceRepo: { findByTenant } as never }).handle(
+      ctx({ existingEntities: { customerName: 'Henderson' } }),
+    );
+    expect(missingFieldsFor(res.proposal)).toContain('invoiceId');
+    const sc = res.proposal.sourceContext as Record<string, unknown> | undefined;
+    expect(sc?.entityCandidates).toBeUndefined();
   });
 });

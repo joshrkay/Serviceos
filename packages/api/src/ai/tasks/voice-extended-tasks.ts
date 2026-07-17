@@ -36,6 +36,7 @@ import {
   DUNNING_MARKER_WINDOW_MS,
 } from '../../invoices/dunning-config';
 import { parseMilestoneSentence } from '../../invoices/milestone-sentence-parser';
+import { candidatesForReference } from '../resolution/reference-candidates';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -165,14 +166,25 @@ function inputFor(
   proposalType: ProposalType,
   payload: Record<string, unknown>,
   missingFields: string[],
-  opts?: { trust?: 'autonomous' | undefined }
+  opts?: {
+    trust?: 'autonomous' | undefined;
+    /**
+     * B2 — additional sourceContext entries to merge on top of
+     * baseSourceContext (e.g. entityCandidates/entityKind/entityReference).
+     * Optional and additive; existing call sites are unaffected.
+     */
+    sourceContext?: Record<string, unknown>;
+  }
 ): CreateProposalInput {
+  const base = baseSourceContext(context);
+  const extra = opts?.sourceContext;
+  const sourceContext = extra ? { ...(base ?? {}), ...extra } : base;
   return {
     tenantId: context.tenantId,
     proposalType,
     payload,
     summary: context.message,
-    sourceContext: baseSourceContext(context),
+    sourceContext,
     createdBy: context.userId,
     missingFields: missingFields.length > 0 ? missingFields : undefined,
     sourceTrustTier: opts?.trust,
@@ -478,8 +490,25 @@ export class AddNoteTaskHandler implements TaskHandler {
 // SendEstimateNudgeTaskHandler, SendPaymentReminderTaskHandler,
 // ReassignAppointmentTaskHandler): always gate the id for review-time
 // resolution unless the extracted reference already IS a usable id.
+export interface SendInvoiceTaskDeps {
+  /**
+   * B2 — optional. When present, a gated free-text invoiceReference is
+   * additionally searched (candidatesForReference, the same
+   * findByTenant({search,limit}) ILIKE technique InvoiceEditTaskHandler
+   * uses) so the review card can offer a one-tap AmbiguityPicker instead
+   * of a dead end. Candidates are recorded on sourceContext ONLY — they
+   * NEVER lift the missingFields gate below; see the class doc comment.
+   */
+  invoiceRepo?: Pick<InvoiceRepository, 'findByTenant'>;
+}
+
 export class SendInvoiceTaskHandler implements TaskHandler {
   readonly taskType = 'send_invoice' as const;
+  private readonly deps: SendInvoiceTaskDeps;
+
+  constructor(deps: SendInvoiceTaskDeps = {}) {
+    this.deps = deps;
+  }
 
   async handle(context: TaskContext): Promise<TaskResult> {
     const ee = entitiesFrom(context);
@@ -487,6 +516,7 @@ export class SendInvoiceTaskHandler implements TaskHandler {
       channel: ee.sendChannel ?? 'email',
     };
     const missing: string[] = [];
+    let extraSourceContext: Record<string, unknown> | undefined;
 
     const reference = ee.jobReference ?? ee.customerName;
     if (isUuid(reference)) {
@@ -496,10 +526,35 @@ export class SendInvoiceTaskHandler implements TaskHandler {
     } else {
       if (reference) payload.invoiceReference = reference;
       missing.push('invoiceId');
+
+      // B2 — layer candidates ON TOP of the gate above; never a substitute
+      // for it (a search match, even a single unambiguous one, still does
+      // not lift missingFields — see SendInvoiceTaskDeps doc comment).
+      // Re-reads ee.jobReference/customerName fresh (rather than reusing
+      // `reference` above) so this isn't subject to isUuid's type-predicate
+      // narrowing of that binding to `undefined` in this branch.
+      const searchReference = ee.jobReference ?? ee.customerName;
+      if (typeof searchReference === 'string' && searchReference.trim().length > 0) {
+        const candidates = await candidatesForReference({
+          tenantId: context.tenantId,
+          reference: searchReference,
+          kind: 'invoice',
+          invoiceRepo: this.deps.invoiceRepo,
+        });
+        if (candidates.length > 0) {
+          extraSourceContext = {
+            entityCandidates: candidates,
+            entityKind: 'invoice',
+            entityReference: searchReference,
+          };
+        }
+      }
     }
 
     return {
-      proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      proposal: createProposal(
+        inputFor(context, this.taskType, payload, missing, { sourceContext: extraSourceContext }),
+      ),
       taskType: this.taskType,
     };
   }

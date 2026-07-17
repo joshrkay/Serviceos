@@ -366,6 +366,97 @@ describe('EstimateEditTaskHandler', () => {
       expect(result.proposal.sourceContext).toMatchObject({ missingFields: ['estimateId'] });
     });
 
+    // B2 — the same search that identifies (or fails to identify) a single
+    // unambiguous match now also doubles as the AmbiguityPicker's candidate
+    // list. The gate above is untouched by any of this.
+    describe('B2 candidatesForReference', () => {
+      it('an ambiguous reference (>1 match) records candidates on sourceContext while staying gated', async () => {
+        const estimateRepo = new InMemoryEstimateRepository();
+        const estA = await estimateRepo.create(makeEstimate({ id: 'est-1', estimateNumber: 'EST-0001' }));
+        const estB = await estimateRepo.create(makeEstimate({ id: 'est-2', estimateNumber: 'EST-0001' }));
+
+        const handler = new EstimateEditTaskHandler(editGateway(), estimateRepo);
+        const result = await handler.handle({
+          tenantId,
+          userId,
+          message: 'Add a trip fee to EST-0001',
+        });
+
+        const payload = result.proposal.payload as Record<string, unknown>;
+        expect(payload.estimateId).toBeUndefined();
+        expect(result.proposal.sourceContext).toMatchObject({ missingFields: ['estimateId'] });
+
+        const sc = result.proposal.sourceContext as Record<string, unknown>;
+        expect(sc.entityKind).toBe('estimate');
+        expect(sc.entityReference).toBe('EST-0001');
+        const candidates = sc.entityCandidates as Array<Record<string, unknown>>;
+        expect(candidates.map((c) => c.id).sort()).toEqual([estA.id, estB.id].sort());
+        expect(candidates.every((c) => c.kind === 'estimate')).toBe(true);
+      });
+
+      it('a single unambiguous match records ONE candidate while STAYING gated (search-resolved ≠ ungated)', async () => {
+        const estimateRepo = new InMemoryEstimateRepository();
+        const estimate = await estimateRepo.create(makeEstimate());
+
+        const handler = new EstimateEditTaskHandler(editGateway(), estimateRepo);
+        const result = await handler.handle({
+          tenantId,
+          userId,
+          message: 'Add a trip fee to EST-0001',
+        });
+
+        expect(result.proposal.sourceContext).toMatchObject({ missingFields: ['estimateId'] });
+        const sc = result.proposal.sourceContext as Record<string, unknown>;
+        expect(sc.entityCandidates).toEqual([
+          expect.objectContaining({ id: estimate.id, kind: 'estimate', label: 'EST-0001' }),
+        ]);
+      });
+
+      it('zero-match search → gate present, no candidates recorded', async () => {
+        const estimateRepo = new InMemoryEstimateRepository();
+        await estimateRepo.create(makeEstimate({ id: 'est-9', estimateNumber: 'EST-9999' }));
+
+        const handler = new EstimateEditTaskHandler(editGateway(), estimateRepo);
+        const result = await handler.handle({
+          tenantId,
+          userId,
+          message: 'Add a trip fee to EST-0001',
+        });
+
+        expect(result.proposal.sourceContext).toMatchObject({ missingFields: ['estimateId'] });
+        const sc = result.proposal.sourceContext as Record<string, unknown> | undefined;
+        expect(sc?.entityCandidates).toBeUndefined();
+      });
+
+      it('a non-UUID reference with no estimateRepo wired stays gated with no candidates', async () => {
+        const handler = new EstimateEditTaskHandler(editGateway());
+        const result = await handler.handle({
+          tenantId,
+          userId,
+          message: 'Add a trip fee to the Johnson estimate',
+        });
+
+        expect(result.proposal.sourceContext).toMatchObject({ missingFields: ['estimateId'] });
+        const sc = result.proposal.sourceContext as Record<string, unknown> | undefined;
+        expect(sc?.entityCandidates).toBeUndefined();
+      });
+
+      it('an already-UUID reference bypasses the gate entirely — no candidates recorded', async () => {
+        const uuidRef = '00000000-0000-4000-8000-000000000001';
+        const estimateRepo = new InMemoryEstimateRepository();
+
+        const handler = new EstimateEditTaskHandler(editGateway(uuidRef), estimateRepo);
+        const result = await handler.handle({
+          tenantId,
+          userId,
+          message: `Add a trip fee to estimate ${uuidRef}`,
+        });
+
+        expect(result.proposal.sourceContext ?? {}).not.toHaveProperty('missingFields');
+        expect(result.proposal.sourceContext ?? {}).not.toHaveProperty('entityCandidates');
+      });
+    });
+
     it('the RV-042 acceptance-void marker still fires alongside the new estimateId gating', async () => {
       // Proves the two behaviors compose: an accepted estimate resolved via
       // free-text search gets BOTH the acceptance-void marker (RV-042,

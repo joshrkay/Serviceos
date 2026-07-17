@@ -941,3 +941,138 @@ describe('U8/U1 — resolveProposalEntity re-draft via REAL handler factory', ()
     expect(registry.has(result.proposalType)).toBe(true);
   });
 });
+
+// ── B2 — reference→candidates lights up the picker on TYPED money proposals ─
+//
+// SendInvoiceTaskHandler/InvoiceEditTaskHandler/EstimateEditTaskHandler gate a
+// free-text reference via a flat `sourceContext.missingFields` entry and,
+// when candidatesForReference found matches, ALSO stamp
+// `sourceContext.entityCandidates`/`entityKind`/`entityReference` — never
+// `originalIntent` (they are typed proposals from the start, not
+// clarifications awaiting a re-draft). Picking a candidate here must hit the
+// annotate-only path (no redraftHandlerFactory needed, no originalIntent to
+// find), clear ONLY the satisfied gate entry (B1's clear-on-fill), and
+// promote draft→ready_for_review ONLY once nothing is left gated.
+describe('B2 — resolveProposalEntity on a typed money proposal (gate + candidates, no redraft)', () => {
+  const INV_A = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+  const INV_B = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+
+  let repo: InMemoryProposalRepository;
+  let auditRepo: InMemoryAuditRepository;
+
+  beforeEach(() => {
+    repo = new InMemoryProposalRepository();
+    auditRepo = new InMemoryAuditRepository();
+  });
+
+  /** A gated send_invoice exactly as SendInvoiceTaskHandler drafts it once
+   *  candidatesForReference found matches for "Henderson". */
+  function gatedSendInvoice(overrides: {
+    payload?: Record<string, unknown>;
+    sourceContext?: Record<string, unknown>;
+    status?: Proposal['status'];
+  } = {}): Proposal {
+    return {
+      id: PROPOSAL,
+      tenantId: TENANT,
+      proposalType: 'send_invoice',
+      status: overrides.status ?? 'draft',
+      summary: 'send the Henderson invoice',
+      createdBy: OWNER,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      payload: {
+        channel: 'email',
+        invoiceReference: 'Henderson',
+        ...overrides.payload,
+      },
+      sourceContext: {
+        source: 'voice',
+        missingFields: ['invoiceId'],
+        entityCandidates: [
+          { id: INV_A, kind: 'invoice', label: 'INV-0042', hint: 'open', score: 1 },
+          { id: INV_B, kind: 'invoice', label: 'INV-0043', hint: 'draft', score: 1 },
+        ],
+        entityKind: 'invoice',
+        entityReference: 'Henderson',
+        ...overrides.sourceContext,
+      },
+    } as Proposal;
+  }
+
+  const call = (candidateId: string) =>
+    resolveProposalEntity(
+      { tenantId: TENANT, proposalId: PROPOSAL, candidateId, actorId: OWNER, actorRole: 'owner' },
+      { proposalRepo: repo, auditRepo }, // no redraftHandlerFactory — money proposals never carry originalIntent
+    );
+
+  it('picking a candidate stamps payload.invoiceId, clears the invoiceId gate, promotes to ready_for_review, and audits', async () => {
+    await repo.create(gatedSendInvoice());
+
+    const result = await call(INV_A);
+
+    // Stamped onto the field its kind fills — never redrafted (still the
+    // same typed proposal, not re-run through a task handler).
+    expect(result.proposalType).toBe('send_invoice');
+    expect((result.payload as Record<string, unknown>).invoiceId).toBe(INV_A);
+    expect(result.targetEntityId).toBe(INV_A);
+    expect(result.targetEntityType).toBe('invoice');
+
+    // The gate is satisfied and cleared — nothing left blocking approval.
+    const ctx = result.sourceContext as Record<string, unknown>;
+    expect(ctx.missingFields).toBeUndefined();
+    expect(ctx.entityCandidates).toBeUndefined();
+
+    // Promoted for review — never auto-approved (D-004).
+    expect(result.status).toBe('ready_for_review');
+    expect(result.status).not.toBe('approved');
+
+    const audits = await auditRepo.findByEntity(TENANT, 'proposal', PROPOSAL);
+    const ev = audits.find((a) => a.eventType === 'proposal.entity_resolved');
+    expect(ev).toBeDefined();
+    expect(ev!.metadata).toMatchObject({ candidateId: INV_A, entityKind: 'invoice', movedToReview: true });
+  });
+
+  it('idempotent double-tap: resolving the same candidate twice is a successful no-op the second time', async () => {
+    await repo.create(gatedSendInvoice());
+
+    const first = await call(INV_A);
+    const second = await call(INV_A);
+
+    expect(second).toEqual(first);
+    expect(second.status).toBe('ready_for_review');
+    expect((second.payload as Record<string, unknown>).invoiceId).toBe(INV_A);
+
+    // Only ONE entity_resolved audit — the retry short-circuited on the
+    // already-resolved check rather than re-mutating the row.
+    const audits = (await auditRepo.findByEntity(TENANT, 'proposal', PROPOSAL)).filter(
+      (a) => a.eventType === 'proposal.entity_resolved',
+    );
+    expect(audits).toHaveLength(1);
+  });
+
+  it('a proposal with OTHER remaining gates stays in draft after one pick', async () => {
+    await repo.create(
+      gatedSendInvoice({
+        sourceContext: { missingFields: ['invoiceId', 'recipient'] },
+      }),
+    );
+
+    const result = await call(INV_A);
+
+    expect((result.payload as Record<string, unknown>).invoiceId).toBe(INV_A);
+    const ctx = result.sourceContext as Record<string, unknown>;
+    // Only the satisfied entry is cleared — the unrelated gate survives.
+    expect(ctx.missingFields).toEqual(['recipient']);
+    expect(result.status).toBe('draft');
+  });
+
+  it('back-compat: a proposal already in ready_for_review with a gate cleared stays in ready_for_review', async () => {
+    await repo.create(gatedSendInvoice({ status: 'ready_for_review' }));
+
+    const result = await call(INV_A);
+
+    expect(result.status).toBe('ready_for_review');
+    expect((result.payload as Record<string, unknown>).invoiceId).toBe(INV_A);
+  });
+});

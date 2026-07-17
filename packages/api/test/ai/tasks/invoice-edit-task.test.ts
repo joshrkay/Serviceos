@@ -18,7 +18,7 @@ import { InMemoryInvoiceRepository } from '../../../src/invoices/invoice';
 import type { Invoice } from '../../../src/invoices/invoice';
 import { calculateDocumentTotals } from '../../../src/shared/billing-engine';
 import { approveProposal } from '../../../src/proposals/actions';
-import { InMemoryProposalRepository } from '../../../src/proposals/proposal';
+import { InMemoryProposalRepository, missingFieldsFor } from '../../../src/proposals/proposal';
 
 function mockGateway(jsonContent: string): LLMGateway {
   return {
@@ -331,6 +331,99 @@ describe('InvoiceEditTaskHandler', () => {
       const payload = result.proposal.payload as Record<string, unknown>;
       expect(payload.invoiceId).toBeUndefined();
       expect(result.proposal.sourceContext).toMatchObject({ missingFields: ['invoiceId'] });
+    });
+
+    // B2 — the same search that identifies (or fails to identify) a single
+    // unambiguous match now also doubles as the AmbiguityPicker's candidate
+    // list. The gate above is untouched by any of this.
+    describe('B2 candidatesForReference', () => {
+      it('an ambiguous reference (>1 match) records candidates on sourceContext while staying gated', async () => {
+        const invoiceRepo = new InMemoryInvoiceRepository();
+        const invA = await invoiceRepo.create(makeInvoice({ id: 'inv-1', invoiceNumber: 'INV-0042' }));
+        const invB = await invoiceRepo.create(makeInvoice({ id: 'inv-2', invoiceNumber: 'INV-0042' }));
+
+        const handler = new InvoiceEditTaskHandler(editGateway(), { invoiceRepo });
+        const result = await handler.handle({
+          tenantId,
+          userId,
+          message: 'Add a trip fee to invoice INV-0042',
+        });
+
+        const payload = result.proposal.payload as Record<string, unknown>;
+        expect(payload.invoiceId).toBeUndefined();
+        expect(missingFieldsFor(result.proposal)).toContain('invoiceId');
+
+        const sc = result.proposal.sourceContext as Record<string, unknown>;
+        expect(sc.entityKind).toBe('invoice');
+        expect(sc.entityReference).toBe('INV-0042');
+        const candidates = sc.entityCandidates as Array<Record<string, unknown>>;
+        expect(candidates.map((c) => c.id).sort()).toEqual([invA.id, invB.id].sort());
+        expect(candidates.every((c) => c.kind === 'invoice')).toBe(true);
+      });
+
+      it('a single unambiguous match records ONE candidate while STAYING gated (search-resolved ≠ ungated)', async () => {
+        const invoiceRepo = new InMemoryInvoiceRepository();
+        const invoice = await invoiceRepo.create(makeInvoice());
+
+        const handler = new InvoiceEditTaskHandler(editGateway(), { invoiceRepo });
+        const result = await handler.handle({
+          tenantId,
+          userId,
+          message: 'Add a trip fee to invoice INV-0042',
+        });
+
+        expect(missingFieldsFor(result.proposal)).toContain('invoiceId');
+        const sc = result.proposal.sourceContext as Record<string, unknown>;
+        expect(sc.entityCandidates).toEqual([
+          expect.objectContaining({ id: invoice.id, kind: 'invoice', label: 'INV-0042' }),
+        ]);
+      });
+
+      it('zero-match search → gate present, no candidates recorded', async () => {
+        const invoiceRepo = new InMemoryInvoiceRepository();
+        await invoiceRepo.create(makeInvoice({ id: 'inv-9', invoiceNumber: 'INV-9999' }));
+
+        const handler = new InvoiceEditTaskHandler(editGateway(), { invoiceRepo });
+        const result = await handler.handle({
+          tenantId,
+          userId,
+          message: 'Add a trip fee to invoice INV-0042',
+        });
+
+        expect(missingFieldsFor(result.proposal)).toContain('invoiceId');
+        const sc = result.proposal.sourceContext as Record<string, unknown> | undefined;
+        expect(sc?.entityCandidates).toBeUndefined();
+      });
+
+      it('a non-UUID reference with no invoiceRepo wired stays gated with no candidates', async () => {
+        const handler = new InvoiceEditTaskHandler(editGateway(), {});
+        const result = await handler.handle({
+          tenantId,
+          userId,
+          message: 'Add a trip fee to invoice INV-0042',
+        });
+
+        expect(missingFieldsFor(result.proposal)).toContain('invoiceId');
+        const sc = result.proposal.sourceContext as Record<string, unknown> | undefined;
+        expect(sc?.entityCandidates).toBeUndefined();
+      });
+
+      it('an already-UUID reference bypasses the gate — no candidate search attempted', async () => {
+        const uuidRef = '00000000-0000-4000-8000-000000000042';
+        const invoiceRepo = new InMemoryInvoiceRepository();
+        const findByTenantSpy = vi.spyOn(invoiceRepo, 'findByTenant');
+
+        const handler = new InvoiceEditTaskHandler(editGateway(uuidRef), { invoiceRepo });
+        const result = await handler.handle({
+          tenantId,
+          userId,
+          message: `Add a trip fee to invoice ${uuidRef}`,
+        });
+
+        expect(findByTenantSpy).not.toHaveBeenCalled();
+        expect(result.proposal.sourceContext ?? {}).not.toHaveProperty('entityCandidates');
+        expect(missingFieldsFor(result.proposal)).not.toContain('invoiceId');
+      });
     });
   });
 });

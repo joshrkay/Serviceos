@@ -63,6 +63,7 @@ import type { IntentType } from '../ai/orchestration/intent-classifier';
 import type { TaskContext } from '../ai/tasks/task-handlers';
 import { entitiesForProposal } from '../workers/voice-action-router';
 import type { RedraftHandlerFactory } from './redraft-handler-factory';
+import { clearSatisfiedMissingFields } from './missing-fields';
 
 interface EntityCandidate {
   id: string;
@@ -280,6 +281,17 @@ export async function resolveProposalEntity(
 
   const candidates = readCandidates(payload, sourceContext);
   if (candidates.length === 0) {
+    // B2 — a single-shot annotate-only resolution (no pending ambiguities,
+    // e.g. a gated send_invoice) clears entityCandidates entirely once
+    // resolved, so a retried/double-tapped request finds no live candidate
+    // set here at all (unlike the multi-ambiguity chain, where the NEXT
+    // ambiguity's candidates keep this list non-empty). Mirror the
+    // alreadyResolved idempotency check below: if this exact candidateId was
+    // already resolved earlier in this proposal's history, the retry is a
+    // successful no-op, not an error.
+    if (readResolvedEntities(sourceContext).some((r) => r.id === candidateId)) {
+      return proposal;
+    }
     throw new ValidationError('Proposal is not awaiting an entity choice');
   }
 
@@ -414,6 +426,33 @@ export async function resolveProposalEntity(
     ...(chosen.label ? { label: chosen.label } : {}),
   };
 
+  // B2 — a TYPED money proposal (send_invoice / update_invoice /
+  // update_estimate) reaches this annotate-only path carrying no
+  // originalIntent (verified: none of those handlers stamp it), so it is
+  // NEVER re-drafted here — only annotated. Such a proposal may carry a flat
+  // `sourceContext.missingFields` gate (e.g. ['invoiceId']) stamped by its
+  // drafting handler. This pick just resolved one entry — clear ONLY the
+  // fields this pick actually satisfied (B1's clear-on-fill helper: never a
+  // blanket schema recompute, see missing-fields.ts's doc comment for why
+  // that would silently reopen the doomed-approval bug) and, critically,
+  // promote draft→ready_for_review ONLY when nothing is left gated. A
+  // voice_clarification (the common caller of this path) never carries
+  // missingFields at all, so it keeps promoting unconditionally exactly as
+  // before — this branch is a no-op for that case.
+  const currentMissingFields = Array.isArray(sourceContext.missingFields)
+    ? (sourceContext.missingFields as unknown[]).filter((f): f is string => typeof f === 'string')
+    : undefined;
+  let remainingMissingFields: string[] | undefined;
+  if (currentMissingFields) {
+    const editedKeys = resolvedEntities.map((r) => r.field);
+    remainingMissingFields = clearSatisfiedMissingFields(currentMissingFields, editedKeys, nextPayload);
+    if (remainingMissingFields.length > 0) {
+      nextSourceContext.missingFields = remainingMissingFields;
+    } else {
+      delete nextSourceContext.missingFields;
+    }
+  }
+
   await deps.proposalRepo.update(tenantId, proposalId, {
     payload: nextPayload,
     sourceContext: nextSourceContext,
@@ -422,9 +461,11 @@ export async function resolveProposalEntity(
   });
 
   // Surface for approval — but NEVER approve/execute it (D-004). Only a draft
-  // is promoted; a proposal already in ready_for_review stays there.
+  // is promoted, and only once nothing is left gated; a proposal already in
+  // ready_for_review stays there.
+  const stillGated = remainingMissingFields !== undefined && remainingMissingFields.length > 0;
   let movedToReview = false;
-  if (proposal.status === 'draft') {
+  if (proposal.status === 'draft' && !stillGated) {
     await deps.proposalRepo.updateStatus(tenantId, proposalId, 'ready_for_review', {});
     movedToReview = true;
   }

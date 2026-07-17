@@ -8,6 +8,8 @@ import type { CatalogItem, CatalogItemRepository } from '../../catalog/catalog-i
 import { buildCatalogPromptSection } from './catalog-resolution';
 import { UNCATALOGUED_CONFIDENCE_CAP } from '../resolution/catalog-resolver';
 import { groundEditActionPricing } from '../resolution/edit-action-grounding';
+import { mapEstimatesToCandidates } from '../resolution/reference-candidates';
+import type { EntityCandidate } from '../resolution/entity-resolver';
 
 // Mirrors InvoiceEditTaskHandler's check (invoice-edit-task.ts) / the
 // execution-side isUuid checks (proposals/execution/voice-extended-handlers.ts,
@@ -217,7 +219,7 @@ export class EstimateEditTaskHandler implements TaskHandler {
     // RV-042 acceptance-void marker + VOX-50 catalog markers MERGE into a
     // single `_meta` — overwriting the whole object would clobber whichever
     // path ran, so both contribute. Acceptance marker stays first.
-    const target = await this.resolveTargetEstimate(context.tenantId, payload);
+    const { target, candidates } = await this.resolveTargetEstimate(context.tenantId, payload);
     const accepted = target?.status === 'accepted';
     if (accepted || grounding.anyUncatalogued || grounding.anyCatalogPriced) {
       const markers = [
@@ -250,6 +252,21 @@ export class EstimateEditTaskHandler implements TaskHandler {
     // own and would fail after approval.
     const missingFields = this.resolveEstimateIdGate(payload, target);
 
+    // B2 — layer the resolved candidate list ON TOP of the gate (never a
+    // substitute for it): only recorded while the gate is still present, so
+    // the AmbiguityPicker only ever appears on a card the operator still
+    // needs to act on.
+    const sourceContext: Record<string, unknown> = {
+      ...(context.conversationId ? { conversationId: context.conversationId } : {}),
+      ...(missingFields.length > 0 && candidates.length > 0
+        ? {
+            entityCandidates: candidates,
+            entityKind: 'estimate',
+            entityReference: payload.estimateReference,
+          }
+        : {}),
+    };
+
     const input: CreateProposalInput = {
       tenantId: context.tenantId,
       proposalType: this.taskType,
@@ -257,7 +274,7 @@ export class EstimateEditTaskHandler implements TaskHandler {
       summary: context.message,
       confidenceScore,
       confidenceFactors,
-      sourceContext: context.conversationId ? { conversationId: context.conversationId } : undefined,
+      sourceContext: Object.keys(sourceContext).length > 0 ? sourceContext : undefined,
       createdBy: context.userId,
       // Estimate edits target existing entities but only in editable
       // statuses (draft / ready_for_review). Sent estimates are locked
@@ -284,30 +301,41 @@ export class EstimateEditTaskHandler implements TaskHandler {
    * Best-effort target resolution for the acceptance-void marker. Never
    * throws — a repo hiccup or an ambiguous reference simply skips the
    * marker (the hard guarantees live at execute time).
+   *
+   * B2 — widened from limit:2 (ambiguous-vs-singular check only) to top-5,
+   * and the same fetched rows are mapped (mapEstimatesToCandidates, no
+   * second repo round trip) into the candidate list the review card's
+   * one-tap AmbiguityPicker reads off `sourceContext.entityCandidates`.
+   * `target` (used only for the acceptance-void marker) still requires an
+   * UNAMBIGUOUS single match — candidates are returned regardless, for the
+   * caller to layer on top of the gate; see resolveEstimateIdGate below for
+   * why a search match never lifts the gate itself.
    */
   private async resolveTargetEstimate(
     tenantId: string,
     payload: Record<string, unknown>,
-  ): Promise<Estimate | null> {
-    if (!this.estimateRepo) return null;
+  ): Promise<{ target: Estimate | null; candidates: EntityCandidate[] }> {
+    if (!this.estimateRepo) return { target: null, candidates: [] };
     try {
       if (typeof payload.estimateId === 'string' && payload.estimateId.length > 0) {
-        return await this.estimateRepo.findById(tenantId, payload.estimateId);
+        const target = await this.estimateRepo.findById(tenantId, payload.estimateId);
+        return { target, candidates: [] };
       }
       const reference = payload.estimateReference;
       if (typeof reference === 'string' && reference.trim().length > 0) {
         // ILIKE search on estimate_number / customer_message; only an
-        // UNAMBIGUOUS single match identifies the target.
+        // UNAMBIGUOUS single match identifies the acceptance-marker target.
         const matches = await this.estimateRepo.findByTenant(tenantId, {
           search: reference.trim(),
-          limit: 2,
+          limit: 5,
         });
-        if (matches.length === 1) return matches[0];
+        const candidates = mapEstimatesToCandidates(matches);
+        return { target: matches.length === 1 ? matches[0] : null, candidates };
       }
     } catch {
       // Marker resolution must never block proposal creation.
     }
-    return null;
+    return { target: null, candidates: [] };
   }
 
   /**

@@ -657,7 +657,7 @@ async function generateAssistantReply(
             draft_estimate: () => new EstimateTaskHandler(deps.gateway, deps.catalogRepo),
             update_estimate: () => new EstimateEditTaskHandler(deps.gateway, deps.estimateRepo, deps.catalogRepo),
             create_invoice: () => new InvoiceTaskHandler(deps.gateway, deps.catalogRepo),
-            send_invoice: () => new SendInvoiceTaskHandler(),
+            send_invoice: () => new SendInvoiceTaskHandler({ invoiceRepo: deps.invoiceRepo }),
             issue_invoice: () => new IssueInvoiceTaskHandler(),
             update_invoice: () => new InvoiceEditTaskHandler(deps.gateway, { catalogRepo: deps.catalogRepo, invoiceRepo: deps.invoiceRepo }),
           };

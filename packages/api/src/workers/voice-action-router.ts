@@ -566,7 +566,14 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
   handlers.set('add_crew_member', new AddCrewMemberTaskHandler());
   handlers.set('remove_crew_member', new RemoveCrewMemberTaskHandler());
   handlers.set('add_note', new AddNoteTaskHandler());
-  handlers.set('send_invoice', new SendInvoiceTaskHandler());
+  handlers.set(
+    'send_invoice',
+    // B2 — reuses the same InvoiceRepository already wired for
+    // update_invoice above (deps.invoicingDeps?.invoiceRepo) rather than
+    // adding a new top-level dep. See SendInvoiceTaskDeps doc comment
+    // (voice-extended-tasks.ts): candidates only, the gate is untouched.
+    new SendInvoiceTaskHandler({ invoiceRepo: deps.invoicingDeps?.invoiceRepo }),
+  );
   handlers.set('send_estimate', new SendEstimateTaskHandler());
   handlers.set('send_estimate_nudge', new SendEstimateNudgeTaskHandler());
   handlers.set(
