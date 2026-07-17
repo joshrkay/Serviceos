@@ -240,6 +240,13 @@ describe('U2 — MmsEstimateTaskHandler', () => {
     expect(result.proposal.status).toBe('draft');
     const lineItems = result.proposal.payload.lineItems as Array<Record<string, unknown>>;
     expect(lineItems[0].pricingSource).toBe('ambiguous');
+    // requiresReview (anyUncatalogued=false, missingFields.length>0) hard-blocks
+    // overallConfidence too, not just proposal status — confidence_score 0.9
+    // is high enough that, pre-`requiresReview`, the hand-rolled anyUncatalogued
+    // ternary would have left this at 'high'.
+    expect(result.proposal.confidenceFactors).not.toContain('uncatalogued_line_item');
+    const meta = result.proposal.payload._meta as { overallConfidence?: string };
+    expect(meta.overallConfidence).toBe('low');
   });
 
   it('vision parse failure — non-JSON content → safe fallback (no proposal, no crash)', async () => {

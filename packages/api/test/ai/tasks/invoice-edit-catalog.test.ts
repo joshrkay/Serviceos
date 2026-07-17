@@ -349,6 +349,40 @@ describe('P22-001 invoice-edit-catalog', () => {
       expect(payload.lineItems[0].catalogItemId).toBeUndefined();
     });
 
+    // requiresReview (structural gate on CatalogPricingOutcome) is anyUncatalogued
+    // OR missingFields.length > 0. An ambiguous-only line (never uncatalogued)
+    // proves the gate now drives `_meta.overallConfidence`, not just proposal
+    // status via missingFields — a reviewer must never see "high confidence" on
+    // a line that needs an operator pick.
+    it('an ambiguous-only line (requiresReview true, anyUncatalogued false) forces overallConfidence low', async () => {
+      const repo = new InMemoryCatalogItemRepository();
+      await seedCatalog(repo, TENANT, [
+        { name: 'Ball Valve', unitPriceCents: 3200 },
+        { name: 'Gate Valve', unitPriceCents: 4100 },
+      ]);
+
+      // draftResponse defaults confidence_score to 0.9 — high enough that,
+      // pre-`requiresReview`, the hand-rolled `anyUncatalogued` ternary would
+      // have mapped this straight through to overallConfidence 'high'.
+      const gateway = mockGateway(
+        draftResponse([{ description: 'valve', quantity: 1, unitPrice: 3500 }]),
+      );
+      const handler = new InvoiceTaskHandler(gateway, { catalogRepo: repo });
+      const result = await handler.handle({ tenantId: TENANT, userId: 'u-1', message: 'invoice it' });
+
+      const payload = result.proposal.payload as {
+        lineItems: Array<Record<string, unknown>>;
+        _meta?: { overallConfidence?: string };
+      };
+      expect(payload.lineItems[0].pricingSource).toBe('ambiguous');
+      // Not uncatalogued — the LLM's high self-reported confidence is NOT
+      // pulled down by the UNCATALOGUED_CONFIDENCE_CAP path.
+      expect(result.proposal.confidenceFactors).not.toContain('uncatalogued_line_item');
+      // But requiresReview still hard-blocks the overall confidence marker.
+      expect(payload._meta?.overallConfidence).toBe('low');
+      expect(result.proposal.status).not.toBe('approved');
+    });
+
     // Money-safety regression (bug: empty/unwired/erroring catalog silently
     // skipped the uncatalogued confidence cap, letting a fully LLM-priced
     // draft auto-approve at the autonomous tier). Every "no catalog to ground

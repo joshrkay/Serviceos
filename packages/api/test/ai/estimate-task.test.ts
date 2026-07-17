@@ -385,6 +385,9 @@ describe('P22 — EstimateTaskHandler catalog grounding', () => {
     const { repo } = seededCatalog();
     const stub = new StubProvider('stub');
     stub.setResponse({
+      // confidence 0.95 — high enough that, pre-`requiresReview`, the hand-rolled
+      // `anyUncatalogued` ternary would have left overallConfidence at 'high'
+      // for a purely-ambiguous (not uncatalogued) line.
       content: estimateJson([{ description: 'filter', quantity: 1, unitPrice: 2_500 }]),
     });
     const handler = new EstimateTaskHandler(makeGateway(stub), repo);
@@ -398,6 +401,13 @@ describe('P22 — EstimateTaskHandler catalog grounding', () => {
     const ctx = proposal.sourceContext as Record<string, unknown>;
     expect(ctx.missingFields).toEqual(['lineItems[0].catalogItemId']);
     expect(ctx.catalogResolution).toBeDefined();
+    // requiresReview (anyUncatalogued=false, missingFields.length>0) now hard-
+    // blocks the overall confidence meta too — not just the proposal status —
+    // so a reviewer never sees a "high confidence" stamp on an unresolved,
+    // operator-must-pick line item.
+    expect(proposal.confidenceFactors).not.toContain('uncatalogued_line_item');
+    const meta = proposal.payload._meta as Record<string, unknown>;
+    expect(meta.overallConfidence).toBe('low');
   });
 
   it('uncatalogued line caps confidence below auto-approve', async () => {

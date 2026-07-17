@@ -5,6 +5,7 @@ import {
   resolveLineItemToCatalog,
   resolveLineItems,
   applyCatalogPricing,
+  groundLineItemPricing,
   TAU_HIGH,
   TAU_FLOOR,
   MARGIN,
@@ -12,6 +13,8 @@ import {
   CatalogLineResolution,
 } from '../../../src/ai/resolution/catalog-resolver';
 import { CatalogItem, createCatalogItem } from '../../../src/catalog/catalog-item';
+import { decideInitialStatus } from '../../../src/proposals/proposal';
+import type { ProposalConfidenceMeta } from '../../../src/proposals/contracts';
 
 const TENANT = 'tenant-1';
 
@@ -326,5 +329,129 @@ describe('applyCatalogPricing', () => {
 
   it('the uncatalogued confidence cap sits below the 0.9 auto-approve threshold', () => {
     expect(UNCATALOGUED_CONFIDENCE_CAP).toBeLessThan(0.9);
+  });
+
+  it('uncatalogued line sets requiresReview (structural hard gate)', () => {
+    const out = applyCatalogPricing(
+      [{ description: 'mystery widget', quantity: 1, unitPriceCents: 4_200 }],
+      [{ query: 'mystery widget', tier: 'none' }],
+      'unitPriceCents',
+    );
+    expect(out.requiresReview).toBe(true);
+  });
+
+  it('ambiguous line also sets requiresReview', () => {
+    const air = item('Air Filter', 2_000, { category: 'Parts' });
+    const water = item('Water Filter', 3_500, { category: 'Parts' });
+    const out = applyCatalogPricing(
+      [{ description: 'filter', quantity: 1, unitPriceCents: 2_500 }],
+      [
+        {
+          query: 'filter',
+          tier: 'ambiguous',
+          candidates: [
+            { item: air, score: 0.77, matchType: 'token_overlap' },
+            { item: water, score: 0.77, matchType: 'token_overlap' },
+          ],
+        },
+      ],
+      'unitPriceCents',
+    );
+    expect(out.requiresReview).toBe(true);
+  });
+
+  it('a clean catalog match does NOT set requiresReview', () => {
+    const out = applyCatalogPricing(
+      [{ description: 'Water Heater Install', quantity: 1, unitPriceCents: 1 }],
+      [resolved(heater)],
+      'unitPriceCents',
+    );
+    expect(out.requiresReview).toBe(false);
+  });
+});
+
+describe('groundLineItemPricing — requiresReview hard gate', () => {
+  const heater = item('Water Heater Install', 185_000);
+
+  it('(a) uncatalogued line forces draft even when a tenant lowers the auto-approve threshold to 0.5', async () => {
+    const outcome = await groundLineItemPricing(
+      [{ description: 'mystery widget', quantity: 1, unitPriceCents: 4_200 }],
+      'unitPriceCents',
+      () => Promise.resolve([heater]), // catalog is wired and non-empty; the line just isn't in it
+    );
+    expect(outcome.requiresReview).toBe(true);
+    expect(outcome.anyUncatalogued).toBe(true);
+
+    // Mirror exactly what every real consumer (invoice-task.ts, estimate-task.ts,
+    // mms-estimate-task.ts, create-voice-turn-processor.ts) does with the
+    // outcome: stamp payload._meta.overallConfidence = 'low' whenever
+    // requiresReview is true. This is the RV-007 confidence-marker guard,
+    // which `decideInitialStatus` checks via `confidenceMetaBlocksAutoApprove`
+    // BEFORE resolving any tenant threshold override.
+    const meta: ProposalConfidenceMeta = {
+      overallConfidence: outcome.requiresReview ? 'low' : 'high',
+    };
+    const status = decideInitialStatus({
+      proposalType: 'draft_invoice',
+      sourceTrustTier: 'autonomous',
+      supervisorMode: 'both',
+      // Even a high numeric confidence score (well above a threshold the
+      // tenant has overridden down to 0.5) must not auto-approve.
+      confidenceScore: UNCATALOGUED_CONFIDENCE_CAP,
+      payload: { _meta: meta },
+      tenantThresholdOverride: { both: 0.5 },
+    });
+    expect(status).toBe('draft');
+  });
+
+  it('(b) an exact/high catalog match is still auto-approvable as before', async () => {
+    const outcome = await groundLineItemPricing(
+      [{ description: 'Water Heater Install', quantity: 1, unitPriceCents: 1 }],
+      'unitPriceCents',
+      () => Promise.resolve([heater]),
+    );
+    expect(outcome.requiresReview).toBe(false);
+    expect(outcome.anyUncatalogued).toBe(false);
+
+    const meta: ProposalConfidenceMeta = {
+      overallConfidence: outcome.requiresReview ? 'low' : 'high',
+    };
+    const status = decideInitialStatus({
+      proposalType: 'draft_invoice',
+      sourceTrustTier: 'autonomous',
+      supervisorMode: 'both',
+      confidenceScore: 0.95,
+      payload: { _meta: meta },
+      tenantThresholdOverride: { both: 0.5 },
+    });
+    expect(status).toBe('approved');
+  });
+
+  it('(c) an empty-catalog tenant forces requiresReview for every priced line', async () => {
+    const outcome = await groundLineItemPricing(
+      [
+        { description: 'Water Heater Install', quantity: 1, unitPriceCents: 1 },
+        { description: 'mystery widget', quantity: 1, unitPriceCents: 2 },
+      ],
+      'unitPriceCents',
+      () => Promise.resolve([]), // catalog wired but empty (brand-new tenant)
+    );
+    expect(outcome.requiresReview).toBe(true);
+    expect(outcome.anyUncatalogued).toBe(true);
+    expect(outcome.lineItems.every((li) => li.pricingSource === 'uncatalogued')).toBe(true);
+  });
+
+  it('no catalog repo wired at all → requiresReview forced true', async () => {
+    const outcome = await groundLineItemPricing(
+      [{ description: 'Water Heater Install', quantity: 1, unitPriceCents: 1 }],
+      'unitPriceCents',
+      null,
+    );
+    expect(outcome.requiresReview).toBe(true);
+  });
+
+  it('empty line-item list → requiresReview false (no money risk)', async () => {
+    const outcome = await groundLineItemPricing([], 'unitPriceCents', () => Promise.resolve([heater]));
+    expect(outcome.requiresReview).toBe(false);
   });
 });

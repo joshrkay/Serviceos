@@ -15,8 +15,16 @@
  *     missingFields so the operator picks the right item — an uncertain
  *     match must never silently set a price.
  *   - 'none'            → not in the catalog. The LLM price is kept but
- *     flagged `uncatalogued` and the proposal confidence is capped below
- *     the auto-approve threshold, so a human always reviews it.
+ *     flagged `uncatalogued`, `requiresReview` is forced true, and the
+ *     proposal confidence is capped below the auto-approve threshold — the
+ *     cap is defense in depth, `requiresReview` is the hard, threshold-
+ *     independent gate (a tenant can override the numeric threshold; it
+ *     cannot override this). Consumers thread `requiresReview` into
+ *     `payload._meta.overallConfidence = 'low'`, which `decideInitialStatus`
+ *     (proposals/proposal.ts) blocks on via `confidenceMetaBlocksAutoApprove`
+ *     BEFORE resolving any tenant threshold override — so a human always
+ *     reviews an AI-invented price, no matter how the auto-approve threshold
+ *     is configured.
  *
  * Pure and deterministic — no I/O, no LLM. Operates on a preloaded
  * tenant catalog array (1-5 person shops have small catalogs; one
@@ -341,6 +349,26 @@ export interface CatalogPricingOutcome {
   >;
   anyUncatalogued: boolean;
   anyCatalogPriced: boolean;
+  /**
+   * Structural, threshold-independent hard gate: true whenever ANY line in
+   * this outcome carries an AI-invented (uncatalogued) or operator-unpicked
+   * (ambiguous) price. `true` here means "this outcome must never
+   * auto-approve" — full stop, regardless of confidence score or any tenant
+   * `auto_approve_threshold` override.
+   *
+   * Deliberately NOT folded into `missingFields`: `missingFields` is cleared
+   * only via `resolveProposalLine` (proposals/resolve-line.ts), which
+   * requires a recorded candidate set (only 'ambiguous' lines get one) — an
+   * uncatalogued line has no candidates to pick from, so putting it in
+   * `missingFields` would permanently deadlock approval instead of merely
+   * blocking auto-approval. `requiresReview` is the numeric-cap's structural
+   * companion, not a replacement for `missingFields`: it is `true` whenever
+   * `anyUncatalogued` or `missingFields.length > 0`, equivalent to (but a
+   * single documented boolean instead of a per-consumer-reimplemented
+   * ternary over) the `payload._meta.overallConfidence = 'low'` hard block
+   * every real caller of `groundLineItemPricing` already stamps by hand.
+   */
+  requiresReview: boolean;
 }
 
 /** Catalog categories → the proposal contract's line-item vocabulary. */
@@ -422,6 +450,11 @@ export function applyCatalogPricing(
     ...(missingFields.length > 0 ? { catalogResolution } : {}),
     anyUncatalogued,
     anyCatalogPriced,
+    // Structural hard gate — see CatalogPricingOutcome doc. Ambiguous lines
+    // already force 'draft' via missingFields; uncatalogued lines have no
+    // missingFields entry (nothing to resolve to), so requiresReview is the
+    // signal that blocks their auto-approval instead.
+    requiresReview: anyUncatalogued || missingFields.length > 0,
   };
 }
 
@@ -446,7 +479,13 @@ function markAllUncatalogued(
     }
     return li;
   });
-  return { lineItems: out, missingFields: [], anyUncatalogued, anyCatalogPriced: false };
+  return {
+    lineItems: out,
+    missingFields: [],
+    anyUncatalogued,
+    anyCatalogPriced: false,
+    requiresReview: anyUncatalogued,
+  };
 }
 
 /**
@@ -470,7 +509,13 @@ export async function groundLineItemPricing(
   loadActiveCatalog: (() => Promise<CatalogItem[]>) | null,
 ): Promise<CatalogPricingOutcome> {
   if (lineItems.length === 0) {
-    return { lineItems, missingFields: [], anyUncatalogued: false, anyCatalogPriced: false };
+    return {
+      lineItems,
+      missingFields: [],
+      anyUncatalogued: false,
+      anyCatalogPriced: false,
+      requiresReview: false,
+    };
   }
   if (!loadActiveCatalog) return markAllUncatalogued(lineItems, priceField);
 

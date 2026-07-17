@@ -240,7 +240,7 @@ export class InvoiceTaskHandler implements TaskHandler {
       // of any tenant `auto_approve_threshold` override (a threshold ≤ the 0.85
       // uncatalogued cap would otherwise still auto-approve an AI-invented
       // price). An uncatalogued price must always reach a human.
-      overallConfidence: catalogOutcome?.anyUncatalogued
+      overallConfidence: catalogOutcome?.requiresReview
         ? 'low'
         : getConfidenceLevel(confidenceScore),
       ...(Object.keys(signals.fieldConfidence).length > 0

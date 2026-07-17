@@ -335,8 +335,7 @@ function finalizeGroundedQuote(
     confidenceScore = Math.min(confidenceScore, UNCATALOGUED_CONFIDENCE_CAP);
   }
   const signals = lineItemConfidenceSignals(lineItems, priceField);
-  const groundedClean =
-    catalogAvailable && !outcome.anyUncatalogued && outcome.missingFields.length === 0;
+  const groundedClean = catalogAvailable && !outcome.requiresReview;
   const meta: ProposalConfidenceMeta = {
     overallConfidence:
       groundedClean && typeof confidenceScore === 'number'

@@ -219,7 +219,7 @@ export class MmsEstimateTaskHandler {
       // RV-007 confidence-marker guard — independent of the numeric score AND
       // of any tenant `auto_approve_threshold` override. An uncatalogued price
       // must always reach a human.
-      overallConfidence: catalogOutcome?.anyUncatalogued
+      overallConfidence: catalogOutcome?.requiresReview
         ? 'low'
         : getConfidenceLevel(confidenceScore),
       ...(severity ? { severity } : {}),
