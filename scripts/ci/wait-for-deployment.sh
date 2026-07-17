@@ -13,6 +13,16 @@
 # FAILED/CRASHED/REMOVED or timeout. The health poll + smoke that follow then
 # verify the NEW deployment is actually serving.
 #
+# SKIPPED is also treated as a pass: Railway reports SKIPPED when it detects
+# no changes under this service's configured watch paths for the pushed
+# commit, so it deliberately does not build or deploy a new container — the
+# existing (already-SUCCESS) deployment keeps serving traffic unchanged.
+# There is no new rollout in flight, so the race this script guards against
+# does not apply; the health poll + smoke test that follow still confirm the
+# service is actually up. (2026-07-17 incident: two consecutive prod deploys
+# for the same commit timed out after 600s each because this script had no
+# terminal case for SKIPPED and kept polling until the deadline.)
+#
 # Usage: wait-for-deployment.sh <service-name> <environment> [timeout-seconds]
 # Requires: RAILWAY_TOKEN in the environment (same as `railway up`), jq.
 
@@ -47,6 +57,10 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
   case "$status" in
     SUCCESS)
       echo "Deployment SUCCESS for '$SERVICE'."
+      exit 0
+      ;;
+    SKIPPED)
+      echo "Railway skipped the build for '$SERVICE' (no changes detected in its watch paths for this commit). No new deployment was triggered, so the existing SUCCESS deployment continues serving unchanged. Treating as a pass."
       exit 0
       ;;
     FAILED|CRASHED|REMOVED)
