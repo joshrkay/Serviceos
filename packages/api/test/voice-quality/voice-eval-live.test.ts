@@ -11,11 +11,14 @@
  */
 import { describe, it, expect } from 'vitest';
 import type { LLMGateway } from '../../src/ai/gateway/gateway';
+import { SYSTEM_PROMPT } from '../../src/ai/orchestration/intent-classifier';
 import {
   DEFAULT_COST_CAP_CENTS,
+  EST_SYSTEM_PROMPT_TOKENS,
   LIVE_INTENT_TARGET,
   LIVE_SLOT_TARGET,
   checkCostCap,
+  estimateTokens,
   evaluateGate,
   parseMaxUtterances,
   projectCallCents,
@@ -115,6 +118,23 @@ describe('voice-eval live plumbing — cost cap', () => {
     expect(resolveCostCapCents({ VOICE_EVAL_COST_CAP_CENTS: '250' } as NodeJS.ProcessEnv)).toBe(250);
     expect(resolveCostCapCents({ VOICE_EVAL_COST_CAP_CENTS: 'nope' } as NodeJS.ProcessEnv)).toBe(DEFAULT_COST_CAP_CENTS);
     expect(resolveCostCapCents({ VOICE_EVAL_COST_CAP_CENTS: '0' } as NodeJS.ProcessEnv)).toBe(DEFAULT_COST_CAP_CENTS);
+  });
+
+  // Regression pin for a real PR-review finding: EST_SYSTEM_PROMPT_TOKENS is a
+  // hand-set constant, not a measurement, so nothing stopped it drifting below
+  // the real classifier prompt as the intent taxonomy grew — a
+  // `--max-utterances 200` live run could pass this preflight and still blow
+  // past the cost cap once spending started. The live eval path
+  // (SYNTHETIC_TENANT_ID, no vertical/plan/owner/extended context — see
+  // runLiveIntentEval/runLiveSlotEval defaults) sends exactly the base
+  // SYSTEM_PROMPT and nothing else, so comparing against it directly (with a
+  // safety margin) is the correct bound. If this fails, the real prompt has
+  // outgrown its headroom: bump EST_SYSTEM_PROMPT_TOKENS in live-support.ts,
+  // don't loosen the margin here.
+  it('EST_SYSTEM_PROMPT_TOKENS stays a safe overestimate of the real classifier system prompt', () => {
+    const actualTokens = estimateTokens(SYSTEM_PROMPT);
+    const SAFETY_MARGIN = 1.15;
+    expect(EST_SYSTEM_PROMPT_TOKENS).toBeGreaterThanOrEqual(Math.ceil(actualTokens * SAFETY_MARGIN));
   });
 });
 

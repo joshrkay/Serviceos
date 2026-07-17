@@ -43,6 +43,20 @@ function entitiesFrom(context: TaskContext): ExtractedEntities {
   return (context.existingEntities ?? {}) as ExtractedEntities;
 }
 
+// Mirrors the execution-side check (isUuid in
+// proposals/execution/voice-extended-handlers.ts / UUID_RE in
+// proposals/execution/issue-invoice-handler.ts): a classifier-extracted
+// reference is free text ("the Henderson invoice", "INV-0042") in the
+// overwhelming case, but on rare re-drafts (e.g. a resolved review-card pick
+// carried forward) it may already BE the resolved id. Used to decide whether
+// a task handler can hand the execution handler a usable id directly or must
+// gate the proposal for review-time resolution.
+const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+function isUuid(value: unknown): value is string {
+  return typeof value === 'string' && UUID_RE.test(value);
+}
+
 /** Tolerate both spellings ('canceled' canonical, 'cancelled' from fixtures). */
 function isCancelled(status: unknown): boolean {
   return status === 'canceled' || status === 'cancelled';
@@ -447,6 +461,23 @@ export class AddNoteTaskHandler implements TaskHandler {
 //
 // Comms class — never auto-approves. We don't pass sourceTrustTier so
 // D3 lands it in 'draft' regardless of confidence.
+//
+// PR review finding (2026-07): unlike issue_invoice's execution handler
+// (resolveInvoice() in proposals/execution/issue-invoice-handler.ts, which
+// looks a bare/"INV-0042"-style reference up by repo), SendInvoiceExecutionHandler
+// (proposals/execution/voice-extended-handlers.ts) requires payload.invoiceId
+// to ALREADY be a UUID and never reads invoiceReference at all — there is no
+// resolution step anywhere between drafting and execution for this proposal
+// type. This handler used to flag invoiceId missing only when NO reference
+// was extracted, so e.g. "send the Henderson invoice" landed with
+// invoiceReference: 'Henderson' and an EMPTY missingFields. approveProposal
+// (proposals/actions.ts) only blocks on missingFields, so the proposal was
+// approvable straight from drafting and execution would then fail on the
+// unresolved reference — approval succeeding for an action that can never
+// execute. Mirrors the established sibling convention (ApplyLateFeeTaskHandler,
+// SendEstimateNudgeTaskHandler, SendPaymentReminderTaskHandler,
+// ReassignAppointmentTaskHandler): always gate the id for review-time
+// resolution unless the extracted reference already IS a usable id.
 export class SendInvoiceTaskHandler implements TaskHandler {
   readonly taskType = 'send_invoice' as const;
 
@@ -457,9 +488,15 @@ export class SendInvoiceTaskHandler implements TaskHandler {
     };
     const missing: string[] = [];
 
-    if (ee.jobReference) payload.invoiceReference = ee.jobReference;
-    else if (ee.customerName) payload.invoiceReference = ee.customerName;
-    else missing.push('invoiceId');
+    const reference = ee.jobReference ?? ee.customerName;
+    if (isUuid(reference)) {
+      // Already a resolved id — the execution handler can use it directly,
+      // no review-time resolution needed.
+      payload.invoiceId = reference;
+    } else {
+      if (reference) payload.invoiceReference = reference;
+      missing.push('invoiceId');
+    }
 
     return {
       proposal: createProposal(inputFor(context, this.taskType, payload, missing)),

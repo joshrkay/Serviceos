@@ -11,6 +11,8 @@ import express, { Request, Response, NextFunction } from 'express';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createAssistantRouter, proposalSignals, VOICE_APPROVAL_REFUSAL } from '../../src/routes/assistant';
 import { InMemoryProposalRepository } from '../../src/proposals/proposal';
+import { approveProposal } from '../../src/proposals/actions';
+import { ValidationError } from '../../src/shared/errors';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import {
   InMemoryCatalogItemRepository,
@@ -777,6 +779,43 @@ describe('money-path handler wiring — update_invoice/send_invoice/issue_invoic
     // SendInvoiceTaskHandler makes no LLM call of its own — only the
     // classifier reaches the gateway.
     expect(gateway.complete).toHaveBeenCalledTimes(1);
+  });
+
+  // PR review finding (2026-07): a reference-only send_invoice draft
+  // ("send the Henderson invoice") used to leave missingFields empty, so
+  // approveProposal (which blocks ONLY on missingFields) would let it
+  // through straight from the assistant surface even though
+  // SendInvoiceExecutionHandler requires a resolved invoiceId UUID and has
+  // no reference-resolution step of its own — approval would succeed and
+  // execution would then fail. The review card must surface missingFields
+  // so Approve stays blocked until the operator resolves the reference.
+  it('single-intent path: a reference-only send_invoice (customer name, no id) is gated with missingFields so it cannot be approved unresolved', async () => {
+    const gateway = scriptedGateway([
+      JSON.stringify({
+        intentType: 'send_invoice',
+        confidence: 0.9,
+        extractedEntities: { customerName: 'Henderson' },
+      }),
+    ]);
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildAppFor(gateway, proposalRepo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Send the Henderson invoice' }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.message.proposal.missingFields).toEqual(['invoiceId']);
+
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0].payload.invoiceReference).toBe('Henderson');
+    expect(persisted[0].payload.invoiceId).toBeUndefined();
+    expect(
+      await approveProposal(proposalRepo, TEST_TENANT, persisted[0].id, TEST_USER, 'owner').catch(
+        (err: unknown) => err,
+      ),
+    ).toBeInstanceOf(ValidationError);
   });
 
   it('single-intent path: issue_invoice yields an issue_invoice proposal, not draft_invoice', async () => {

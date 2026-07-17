@@ -522,7 +522,12 @@ export const CLASSIFIER_CONFIDENCE_THRESHOLD = 0.6;
  */
 export const SIGNUP_INTENT_ACT_THRESHOLD = 0.75;
 
-const SYSTEM_PROMPT = `You are an intent classifier for a field service operating system.
+// Exported (not just module-private) so the live-eval cost preflight
+// (packages/voice-eval/live-support.ts EST_SYSTEM_PROMPT_TOKENS) can be pinned
+// against the real prompt size in a test — see
+// packages/api/test/voice-quality/voice-eval-live.test.ts. Never trim this
+// export back to unexported without checking that test doesn't need it.
+export const SYSTEM_PROMPT = `You are an intent classifier for a field service operating system.
 Given a voice transcript from a field service operator, decide which action they intend to take.
 
 Supported intents (return exactly ONE):
