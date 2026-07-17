@@ -7,6 +7,7 @@ import { formatInTenantTz } from '../../utils/formatInTenantTz';
 import { useUndoableApproval, type ApproveResponseLike } from '../../hooks/useUndoableApproval';
 import { UndoToast } from '../common/UndoToast';
 import { ProposalChainCard, ChainRow } from './ProposalChainCard';
+import { TierBreakdown, hasTierBreakdown } from './TierBreakdown';
 import { AmbiguityPicker, type AmbiguityCandidate } from './AmbiguityPicker';
 
 type Urgency = 'critical' | 'high' | 'normal' | 'low';
@@ -268,14 +269,6 @@ const URGENCY_BADGE: Record<Urgency, { label: string; classes: string }> = {
   low: { label: 'Low', classes: 'bg-secondary text-muted-foreground border-border' },
 };
 
-/** Integer cents → "$1,234.50" (2-decimal, matches the estimate money display). */
-function fmtCents(cents: number): string {
-  return `$${(cents / 100).toLocaleString(undefined, {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  })}`;
-}
-
 /**
  * U2 (P2-035) — renders the per-proposal trust signals the backend already
  * sends: the 4-tier confidence bar, per-line pricing-source badges, free-text
@@ -304,23 +297,10 @@ function ProposalMarkers({
     .map((li, idx) => ({ li, idx }))
     .filter(({ li }) => li.pricingSource && li.pricingSource !== 'catalog');
 
-  // EE-1 — good-better-best grouping for the operator's review. Tier options
-  // (shared groupKey) render as a labelled group with the default marked;
-  // standalone optional add-ons render separately. Read-only: the operator
-  // approves the menu, the customer makes the selection.
-  const tierGroupsMap = new Map<string, { key: string; label: string; options: LineItemView[] }>();
-  const addOns: LineItemView[] = [];
-  for (const li of lineItems) {
-    if (li.groupKey) {
-      const g = tierGroupsMap.get(li.groupKey) ?? { key: li.groupKey, label: li.groupLabel ?? 'Options', options: [] };
-      g.options.push(li);
-      tierGroupsMap.set(li.groupKey, g);
-    } else if (li.isOptional) {
-      addOns.push(li);
-    }
-  }
-  const tierGroups = [...tierGroupsMap.values()];
-  const hasSelectable = tierGroups.length > 0 || addOns.length > 0;
+  // EE-1 — good-better-best tiers/add-ons the operator is approving (rendered
+  // read-only via the shared TierBreakdown; the customer selects on the public
+  // estimate).
+  const hasSelectable = hasTierBreakdown(lineItems);
 
   // U8 (E9) — ambiguous entity candidates ("which Bob?") on a
   // voice_clarification card. Read from the payload (where the voice emitter
@@ -381,59 +361,10 @@ function ProposalMarkers({
         </div>
       )}
 
-      {/* EE-1 — good-better-best tiers, so the operator sees the choices they
-          approve. Read-only; the customer selects on the public estimate. */}
-      {tierGroups.map((g) => (
-        <div
-          key={g.key}
-          data-testid="tier-group"
-          className="rounded-lg border border-border bg-secondary/40 px-2.5 py-2"
-        >
-          <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">{g.label}</p>
-          <ul className="mt-1 space-y-0.5">
-            {g.options.map((li, i) => (
-              <li key={li.id ?? i} className="flex items-center justify-between gap-2 text-xs">
-                <span className="flex min-w-0 items-center gap-1.5">
-                  {li.isDefaultSelected && (
-                    <span
-                      data-testid="tier-default"
-                      className="shrink-0 rounded-full bg-primary/15 px-1.5 py-0.5 text-[9px] font-medium text-primary"
-                    >
-                      Default
-                    </span>
-                  )}
-                  <span className="truncate text-foreground">{li.description}</span>
-                </span>
-                {typeof li.unitPrice === 'number' && (
-                  <span className="shrink-0 tabular-nums text-muted-foreground">{fmtCents(li.unitPrice)}</span>
-                )}
-              </li>
-            ))}
-          </ul>
-        </div>
-      ))}
-
-      {addOns.length > 0 && (
-        <div
-          data-testid="tier-addons"
-          className="rounded-lg border border-border bg-secondary/40 px-2.5 py-2"
-        >
-          <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Optional add-ons</p>
-          <ul className="mt-1 space-y-0.5">
-            {addOns.map((li, i) => (
-              <li key={li.id ?? i} className="flex items-center justify-between gap-2 text-xs">
-                <span className="truncate text-foreground">
-                  {li.description}
-                  {li.isDefaultSelected ? ' · pre-selected' : ''}
-                </span>
-                {typeof li.unitPrice === 'number' && (
-                  <span className="shrink-0 tabular-nums text-muted-foreground">{fmtCents(li.unitPrice)}</span>
-                )}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
+      {/* EE-1 — good-better-best tiers/add-ons, so the operator sees the
+          choices they approve. Read-only; the customer selects on the public
+          estimate. Shared with the chained-proposal card. */}
+      <TierBreakdown lineItems={lineItems} />
 
       {markers.map((m, i) => (
         <p key={`${m.path}-${i}`} className="text-xs text-muted-foreground">

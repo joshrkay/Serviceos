@@ -1,4 +1,5 @@
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
+import { TierBreakdown, hasTierBreakdown, TierLine } from './TierBreakdown';
 
 /**
  * ProposalChainCard — renders a multi-action chain (several proposals
@@ -25,6 +26,9 @@ export interface ChainRow {
     expiresAt?: string;
     chainId?: string;
     sourceContext?: Record<string, unknown>;
+    // EE-1 — the full serialized payload rides through on the chain rows; the
+    // step renderer reads its line items to show good-better-best tiers/add-ons.
+    payload?: { lineItems?: TierLine[] };
   };
   urgency: Urgency;
   reason?: string;
@@ -127,6 +131,14 @@ export function ProposalChainCard({ rows, onApproveChain, onRejectChain }: Propo
                   Uses what step {deps.map((d) => d + 1).join(', ')} creates
                 </p>
               )}
+              {/* EE-1 — surface a chained tiered estimate's options so the
+                  operator sees them before approving the whole chain. */}
+              {row.proposal.payload?.lineItems &&
+                hasTierBreakdown(row.proposal.payload.lineItems) && (
+                  <div className="mt-1.5 space-y-1.5">
+                    <TierBreakdown lineItems={row.proposal.payload.lineItems} />
+                  </div>
+                )}
             </li>
           );
         })}
