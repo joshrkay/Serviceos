@@ -12,9 +12,17 @@
  * Invariants:
  *  - Catalog grounding: the chosen `catalogItemId` MUST be one of the line's
  *    own candidates — never an arbitrary off-catalog price (rejected 400).
+ *    This still holds for the `spoken:{index}` carve-out below: it is never
+ *    an arbitrary off-catalog price supplied by the RESOLVE caller — it was
+ *    recorded as a candidate AT GROUNDING TIME (`applyCatalogPricing`) from
+ *    the line's own drafted price, before this endpoint ever saw the
+ *    request. The caller can still only pick from recorded candidates.
  *  - No auto-execute (D-004): resolution caps at `ready_for_review`; it never
  *    approves or executes. Money proposals still need a deliberate approval.
- *  - Integer cents: the stamped price is the catalog item's `unitPriceCents`.
+ *  - Integer cents: the stamped price is the chosen candidate's
+ *    `unitPriceCents` — the catalog item's price, OR (for a `spoken:`
+ *    candidate) the operator-confirmed spoken price recorded at grounding
+ *    time. Either way it's a recorded candidate, never a fresh number.
  *  - Audited: every resolution emits `proposal.line_resolved`.
  */
 import { Role, hasPermission } from '../auth/rbac';
@@ -27,6 +35,15 @@ interface CatalogCandidate {
   name: string;
   unitPriceCents: number;
   score: number;
+  /**
+   * Contract category ('labor' | 'material') of the catalog item this
+   * candidate represents (see catalog-resolver.ts `contractCategory`).
+   * Absent on the synthetic `spoken:` candidate (no catalog identity) and
+   * on candidates recorded by proposals persisted before this field
+   * existed — both cases are handled by leaving the line's own category
+   * untouched.
+   */
+  category?: string;
 }
 
 export interface ResolveLineInput {
@@ -119,9 +136,16 @@ export async function resolveProposalLine(
     );
   }
 
-  // Stamp the catalog item onto the line. Estimate lines carry the integer-
-  // cents price in `unitPrice`; invoice lines in `unitPriceCents` (and a
-  // recomputed `totalCents`).
+  // A `spoken:{index}` candidate is the honest carve-out: the owner
+  // deliberately chose to keep their own quoted price over the catalog's.
+  // It was recorded as a candidate AT GROUNDING TIME (applyCatalogPricing)
+  // from the line's own drafted price — not supplied fresh by this caller
+  // — so the "only pick from recorded candidates" invariant still holds.
+  const isSpokenPriceChoice = catalogItemId.startsWith('spoken:');
+
+  // Stamp the chosen candidate onto the line. Estimate lines carry the
+  // integer-cents price in `unitPrice`; invoice lines in `unitPriceCents`
+  // (and a recomputed `totalCents`).
   const line: Record<string, unknown> = { ...lineItems[lineIndex] };
   // Pick the contract's price field. Estimate lines carry integer cents in
   // `unitPrice`; invoice lines in `unitPriceCents` (+ a recomputed totalCents).
@@ -136,9 +160,24 @@ export async function resolveProposalLine(
     /invoice/.test(proposal.proposalType);
   const priceField = usesCents ? 'unitPriceCents' : 'unitPrice';
   line[priceField] = chosen.unitPriceCents;
-  line.catalogItemId = chosen.id;
-  line.description = chosen.name;
-  line.pricingSource = 'catalog';
+  if (isSpokenPriceChoice) {
+    // Operator-confirmed spoken price — keep the original description and
+    // do NOT claim catalog grounding: this line was never actually matched.
+    delete line.catalogItemId;
+    line.pricingSource = 'manual';
+  } else {
+    line.catalogItemId = chosen.id;
+    line.description = chosen.name;
+    line.pricingSource = 'catalog';
+    // Stamp the catalog item's category onto the line so an operator's
+    // pick can't leave a material/labor line executing under the LLM's
+    // (or the line's prior default) category. Legacy candidates recorded
+    // before this field existed carry no `category` — leave the line's
+    // category untouched rather than clobbering it with undefined.
+    if (chosen.category !== undefined) {
+      line.category = chosen.category;
+    }
+  }
   line.needsPricing = false;
   if (priceField === 'unitPriceCents') {
     // Guard NaN/missing without rebounding a legitimate quantity of 0 to 1
@@ -203,6 +242,7 @@ export async function resolveProposalLine(
           unitPriceCents: chosen.unitPriceCents,
           remainingMissingFields: remainingMissing.length,
           movedToReview: finalProposal !== null,
+          ...(isSpokenPriceChoice ? { priceOverride: true } : {}),
         },
       }),
     );

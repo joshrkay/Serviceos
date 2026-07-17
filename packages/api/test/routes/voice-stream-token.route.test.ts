@@ -137,14 +137,22 @@ describe('UB-B1 — POST /api/voice/stream-token mint hardening', () => {
     expect(bMints).toHaveLength(1);
   });
 
-  it('does not emit a mint audit event when minting fails (503 not-configured)', async () => {
+  it('emits a voice.stream_token_mint_failed audit event when minting fails (503 not-configured)', async () => {
     delete process.env.DEEPGRAM_API_KEY;
     const auditRepo = new InMemoryAuditRepository();
     const app = buildApp(auditRepo);
 
     const res = await request(app).post('/api/voice/stream-token');
     expect(res.status).toBe(503);
-    expect(auditRepo.getAll()).toHaveLength(0);
+
+    const events = auditRepo.getAll();
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      eventType: 'voice.stream_token_mint_failed',
+      tenantId: TENANT_A,
+      actorId: 'user-1',
+      metadata: { reason: 'not_configured' },
+    });
   });
 
   it('returns 503 (not a retryable 502) when Deepgram rejects the key as non-Member', async () => {
@@ -166,6 +174,74 @@ describe('UB-B1 — POST /api/voice/stream-token mint hardening', () => {
       error: 'NOT_CONFIGURED',
       message: expect.stringMatching(/Member permissions/i),
     });
-    expect(auditRepo.getAll()).toHaveLength(0);
+
+    const events = auditRepo.getAll();
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      eventType: 'voice.stream_token_mint_failed',
+      metadata: { reason: 'permission_denied' },
+    });
+  });
+
+  it('emits a voice.stream_token_mint_failed audit event on a generic mint failure (502)', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      throw new Error('ECONNRESET');
+    }));
+    const auditRepo = new InMemoryAuditRepository();
+    const app = buildApp(auditRepo);
+
+    const res = await request(app).post('/api/voice/stream-token');
+    expect(res.status).toBe(502);
+    expect(res.body).toMatchObject({ error: 'TOKEN_MINT_FAILED' });
+
+    const events = auditRepo.getAll();
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      eventType: 'voice.stream_token_mint_failed',
+      metadata: { reason: 'provider_error' },
+    });
+  });
+
+  it('does not fail the mint when the audit write itself throws, and logs the failure', async () => {
+    const auditRepo = new InMemoryAuditRepository();
+    vi.spyOn(auditRepo, 'create').mockRejectedValueOnce(new Error('audit db down'));
+    const warn = vi.fn();
+    const logger = {
+      debug: vi.fn(), info: vi.fn(), warn, error: vi.fn(),
+      child: vi.fn(() => logger),
+    };
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: 'user-1',
+        sessionId: 'sess-1',
+        tenantId: TENANT_A,
+        role: 'owner',
+      } as AuthenticatedRequest['auth'];
+      next();
+    });
+    app.use(
+      '/api/voice',
+      createVoiceRouter(new InMemoryVoiceRepository(), makeQueue(), undefined, auditRepo, logger),
+    );
+
+    const res = await request(app).post('/api/voice/stream-token');
+
+    // The mint itself still succeeds — an audit-write failure is non-fatal.
+    expect(res.status).toBe(200);
+    expect(res.body.token).toBe('dg-temp-token');
+
+    // But the audit failure is observable via a warn-level log, not silently
+    // swallowed.
+    expect(warn).toHaveBeenCalledWith(
+      'voice.stream-token: audit write failed',
+      expect.objectContaining({
+        route: 'POST /api/voice/stream-token',
+        tenantId: TENANT_A,
+        eventType: 'voice.stream_token_minted',
+        error: 'audit db down',
+      }),
+    );
   });
 });

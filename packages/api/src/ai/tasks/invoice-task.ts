@@ -240,6 +240,10 @@ export class InvoiceTaskHandler implements TaskHandler {
       // of any tenant `auto_approve_threshold` override (a threshold ≤ the 0.85
       // uncatalogued cap would otherwise still auto-approve an AI-invented
       // price). An uncatalogued price must always reach a human.
+      // Deliberately `anyUncatalogued`, NOT `requiresReview`: ambiguous lines
+      // are gated by `missingFields`, which one-tap resolution CLEARS — a
+      // persisted 'low' stamp would keep blocking chain-set/SMS approval
+      // after the ambiguity is resolved.
       overallConfidence: catalogOutcome?.anyUncatalogued
         ? 'low'
         : getConfidenceLevel(confidenceScore),

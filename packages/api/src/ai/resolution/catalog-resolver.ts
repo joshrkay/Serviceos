@@ -9,14 +9,33 @@
  * against the tenant's active catalog items:
  *
  *   - 'exact' / 'high'  → the catalog item's `unitPriceCents` is
- *     authoritative; the LLM's number is overwritten.
+ *     authoritative and the LLM's number is overwritten — UNLESS the
+ *     drafted line carries its own positive integer price that deviates
+ *     from the catalog price by more than BOTH `PRICE_CONFLICT_MIN_REL`
+ *     and `PRICE_CONFLICT_MIN_ABS_CENTS` (see `applyCatalogPricing`). A
+ *     deviation that large is a "did you mean" price CONFLICT, not a
+ *     mishear — the owner may have deliberately quoted a custom or
+ *     discounted price ("do it for Mrs. Henderson at half price"). That
+ *     case is surfaced exactly like an 'ambiguous' match instead of being
+ *     silently snapped: the drafted price is kept, `pricingSource:
+ *     'ambiguous'`, and two candidates are recorded — the real catalog
+ *     item and a synthetic "keep spoken price" choice — for the operator
+ *     to pick via the same one-tap resolution as any other ambiguity.
  *   - 'ambiguous'       → two-plus plausible items (or one weak match).
  *     The LLM price is kept but the proposal is forced to 'draft' via
  *     missingFields so the operator picks the right item — an uncertain
  *     match must never silently set a price.
  *   - 'none'            → not in the catalog. The LLM price is kept but
- *     flagged `uncatalogued` and the proposal confidence is capped below
- *     the auto-approve threshold, so a human always reviews it.
+ *     flagged `uncatalogued`, `requiresReview` is forced true, and the
+ *     proposal confidence is capped below the auto-approve threshold — the
+ *     cap is defense in depth, `requiresReview` is the hard, threshold-
+ *     independent gate (a tenant can override the numeric threshold; it
+ *     cannot override this). Consumers thread `requiresReview` into
+ *     `payload._meta.overallConfidence = 'low'`, which `decideInitialStatus`
+ *     (proposals/proposal.ts) blocks on via `confidenceMetaBlocksAutoApprove`
+ *     BEFORE resolving any tenant threshold override — so a human always
+ *     reviews an AI-invented price, no matter how the auto-approve threshold
+ *     is configured.
  *
  * Pure and deterministic — no I/O, no LLM. Operates on a preloaded
  * tenant catalog array (1-5 person shops have small catalogs; one
@@ -52,6 +71,21 @@ export const TAU_HIGH = 0.85;
 export const MARGIN = 0.15;
 /** Scores below this are not candidates at all. */
 export const TAU_FLOOR = 0.6;
+/**
+ * Minimum relative deviation (as a fraction of the catalog price) between
+ * a drafted line's own price and its exact/high catalog match before it's
+ * treated as a "did you mean" price conflict rather than a mishear.
+ */
+export const PRICE_CONFLICT_MIN_REL = 0.1;
+/**
+ * Minimum absolute deviation (integer cents) between a drafted line's own
+ * price and its exact/high catalog match before it's treated as a "did
+ * you mean" price conflict. Paired with `PRICE_CONFLICT_MIN_REL` — BOTH
+ * must be exceeded (a few cents of rounding noise on a $2,000 job is a
+ * huge relative miss but zero real-money risk; a $200 miss on a $5 line
+ * is a huge relative miss AND real money).
+ */
+export const PRICE_CONFLICT_MIN_ABS_CENTS = 100;
 /** Description matches are weaker evidence than name matches. */
 export const DESCRIPTION_WEIGHT = 0.6;
 /** Max candidates surfaced on an ambiguous result. */
@@ -337,15 +371,71 @@ export interface CatalogPricingOutcome {
   /** Ambiguous-line candidates keyed by line index, for the review UI. */
   catalogResolution?: Record<
     number,
-    Array<{ id: string; name: string; unitPriceCents: number; score: number }>
+    Array<{
+      id: string;
+      name: string;
+      unitPriceCents: number;
+      score: number;
+      /**
+       * Contract category ('labor' | 'material') of the catalog item this
+       * candidate represents. Absent on the synthetic `spoken:` "keep
+       * spoken price" candidate — it has no catalog identity, so picking
+       * it must leave the line's own category untouched (resolve-line.ts).
+       */
+      category?: string;
+    }>
   >;
   anyUncatalogued: boolean;
   anyCatalogPriced: boolean;
+  /**
+   * Structural, threshold-independent hard gate: true whenever ANY line in
+   * this outcome carries an AI-invented (uncatalogued) or operator-unpicked
+   * (ambiguous) price. `true` here means "this outcome must never
+   * auto-approve" — full stop, regardless of confidence score or any tenant
+   * `auto_approve_threshold` override.
+   *
+   * Deliberately NOT folded into `missingFields`: `missingFields` is cleared
+   * only via `resolveProposalLine` (proposals/resolve-line.ts), which
+   * requires a recorded candidate set (only 'ambiguous' lines get one) — an
+   * uncatalogued line has no candidates to pick from, so putting it in
+   * `missingFields` would permanently deadlock approval instead of merely
+   * blocking auto-approval. `requiresReview` is the numeric-cap's structural
+   * companion, not a replacement for `missingFields`: it is `true` whenever
+   * `anyUncatalogued` or `missingFields.length > 0`.
+   *
+   * NOTE for consumers: use this for STATUS gates (force 'draft' /
+   * groundedClean checks). Do NOT drive the persisted
+   * `payload._meta.overallConfidence = 'low'` stamp from it — that stamp is
+   * never lifted by line resolution, so stamping ambiguous-only outcomes
+   * 'low' would keep blocking chain-set/SMS approval after the operator
+   * resolves the ambiguity. Drive the stamp from `anyUncatalogued` (an
+   * uncatalogued line has nothing to resolve, so its block is rightly
+   * permanent); ambiguity is gated by `missingFields`, which resolution
+   * clears.
+   */
+  requiresReview: boolean;
 }
 
 /** Catalog categories → the proposal contract's line-item vocabulary. */
 function contractCategory(item: CatalogItem): string {
   return item.category === 'Labor' ? 'labor' : 'material';
+}
+
+/**
+ * True when a drafted line's own price and its exact/high catalog match
+ * disagree enough to be a "did you mean" conflict rather than noise.
+ * Requires BOTH the absolute (integer cents) and relative (fraction of
+ * the catalog price) thresholds to be exceeded — the absolute check is
+ * plain integer comparison; the ratio is computed with division (the
+ * clearly-safe use of float per the money-safety invariant: only ever
+ * compared against a fixed threshold, never itself stored or summed as
+ * money).
+ */
+function isPriceConflict(draftedCents: number, catalogCents: number): boolean {
+  const diffCents = Math.abs(draftedCents - catalogCents);
+  if (diffCents < PRICE_CONFLICT_MIN_ABS_CENTS) return false;
+  if (catalogCents <= 0) return true; // abs threshold alone already cleared
+  return diffCents / catalogCents >= PRICE_CONFLICT_MIN_REL;
 }
 
 /**
@@ -373,6 +463,43 @@ export function applyCatalogPricing(
     }
     if ((resolution.tier === 'exact' || resolution.tier === 'high') && resolution.match) {
       const item = resolution.match;
+      const draftedRaw = li[priceField];
+      // Zero is a REAL drafted price (a comped/free line — the contract's
+      // unitPriceCents is min(0)), so it must be conflict-eligible rather
+      // than silently snapped back to the full catalog price.
+      const draftedPrice =
+        typeof draftedRaw === 'number' && Number.isInteger(draftedRaw) && draftedRaw >= 0
+          ? draftedRaw
+          : null;
+
+      if (draftedPrice !== null && isPriceConflict(draftedPrice, item.unitPriceCents)) {
+        // "Did you mean" — don't overwrite. Keep the drafted line exactly
+        // as spoken and surface the conflict as a one-tap ambiguity: the
+        // real catalog item vs. a synthetic "keep the spoken price"
+        // choice. Nothing is priced yet, so `anyCatalogPriced` stays
+        // false for this line.
+        out.push({
+          ...li,
+          pricingSource: 'ambiguous' satisfies PricingSource,
+          needsPricing: true,
+        });
+        missingFields.push(`lineItems[${idx}].catalogItemId`);
+        catalogResolution[idx] = [
+          {
+            id: item.id,
+            name: item.name,
+            unitPriceCents: item.unitPriceCents,
+            score: 1,
+            category: contractCategory(item),
+          },
+          // Synthetic "keep spoken price" choice has no catalog identity —
+          // no category is stamped, so picking it leaves the line's own
+          // category untouched (see resolve-line.ts).
+          { id: `spoken:${idx}`, name: 'Keep spoken price', unitPriceCents: draftedPrice, score: 0 },
+        ];
+        return;
+      }
+
       const next: Record<string, unknown> = {
         ...li,
         description: item.name,
@@ -405,6 +532,7 @@ export function applyCatalogPricing(
         name: c.item.name,
         unitPriceCents: c.item.unitPriceCents,
         score: c.score,
+        category: contractCategory(c.item),
       }));
       return;
     }
@@ -422,6 +550,11 @@ export function applyCatalogPricing(
     ...(missingFields.length > 0 ? { catalogResolution } : {}),
     anyUncatalogued,
     anyCatalogPriced,
+    // Structural hard gate — see CatalogPricingOutcome doc. Ambiguous lines
+    // already force 'draft' via missingFields; uncatalogued lines have no
+    // missingFields entry (nothing to resolve to), so requiresReview is the
+    // signal that blocks their auto-approval instead.
+    requiresReview: anyUncatalogued || missingFields.length > 0,
   };
 }
 
@@ -446,7 +579,13 @@ function markAllUncatalogued(
     }
     return li;
   });
-  return { lineItems: out, missingFields: [], anyUncatalogued, anyCatalogPriced: false };
+  return {
+    lineItems: out,
+    missingFields: [],
+    anyUncatalogued,
+    anyCatalogPriced: false,
+    requiresReview: anyUncatalogued,
+  };
 }
 
 /**
@@ -470,7 +609,13 @@ export async function groundLineItemPricing(
   loadActiveCatalog: (() => Promise<CatalogItem[]>) | null,
 ): Promise<CatalogPricingOutcome> {
   if (lineItems.length === 0) {
-    return { lineItems, missingFields: [], anyUncatalogued: false, anyCatalogPriced: false };
+    return {
+      lineItems,
+      missingFields: [],
+      anyUncatalogued: false,
+      anyCatalogPriced: false,
+      requiresReview: false,
+    };
   }
   if (!loadActiveCatalog) return markAllUncatalogued(lineItems, priceField);
 

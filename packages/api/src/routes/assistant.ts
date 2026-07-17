@@ -719,6 +719,31 @@ async function generateAssistantReply(
         if (entities?.email) customerPayload.email = entities.email;
         if (entities?.phone) customerPayload.phone = entities.phone;
 
+        // A create_customer intent classified from an under-specified command
+        // ("Add a new customer" — e.g. the one-tap assistant suggestion chip)
+        // extracts no name. Drafting from the empty payload is a dead-end: the
+        // review card would either let the operator Approve it into a hard
+        // execution failure ("Payload must include a non-empty name"), or — if
+        // we marked it missingFields — block Approve with no way to clear the
+        // marker (editProposal updates payload only, so approveProposal keeps
+        // rejecting on the stale sourceContext.missingFields). Ask for the name
+        // conversationally instead; the operator's reply re-enters
+        // create_customer WITH a name and drafts a real, approvable proposal.
+        if (!customerPayload.name) {
+          return {
+            taskType: 'assistant.create_customer.needs_name',
+            model: 'intent-classifier',
+            usage: { input: 0, output: 0, total: 0 },
+            message: {
+              role: 'assistant' as const,
+              content:
+                "Sure — what's the customer's name? Share it (and their phone or email if you have them) and I'll draft the new customer for you to approve.",
+              reasoning:
+                'create_customer intent without an extracted name — asking for it instead of drafting an unapprovable empty proposal.',
+            },
+          };
+        }
+
         const { proposal } = await handler.handle({
           tenantId,
           userId,

@@ -30,6 +30,8 @@ import hashlib
 import json
 from pathlib import Path
 
+import posthog_client as ph
+
 OUTPUT_DIR = Path(__file__).parent.parent / "output"
 
 PLUMBING_KEYWORDS = {
@@ -327,6 +329,19 @@ def main():
     print(f"  Output: {output_file}")
     print(f"  Stats: {stats_file}")
 
+    per_source = {src: sum(sum(rt.values()) for rt in cats.values()) for src, cats in stats.items()}
+    ph.capture("corpus_merge_completed", {
+        "total_records": total,
+        "source_count": len(stats),
+        "min_length": args.min_length,
+        **{f"source_{k}_count": v for k, v in per_source.items()},
+    })
+
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as exc:
+        ph.capture_exception(exc)
+        ph.capture("corpus_merge_failed", {"error_type": type(exc).__name__})
+        raise

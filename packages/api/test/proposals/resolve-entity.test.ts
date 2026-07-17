@@ -471,6 +471,267 @@ describe('U8/U1 — resolveProposalEntity re-draft', () => {
   });
 });
 
+// ── P8/U-multi — multi-ambiguity clarification loop ─────────────────────────
+//
+// "invoice Bob for the Rodriguez job" can be ambiguous on BOTH the customer
+// name AND the job reference. The producer (voice-action-router's
+// emitClarification) surfaces the first ambiguity and queues the rest on
+// `sourceContext.pendingEntityAmbiguities`, promising the operator "1 more
+// reference will need picking after this." These tests pin that promise:
+// resolving the first pick must surface the SECOND picker (not silently
+// drop it or guess), and only once every queued ambiguity is resolved does
+// the real redraft happen — with every resolved entity applied, not just
+// the last one.
+describe('U8/U1 — resolveProposalEntity multi-ambiguity chain (P8/U-multi)', () => {
+  const CUST_A = '11111111-1111-1111-1111-111111111111';
+  const CUST_B = '22222222-2222-2222-2222-222222222222';
+  const JOB_A = '33333333-3333-3333-3333-333333333333';
+  const JOB_B = '44444444-4444-4444-4444-444444444444';
+
+  let repo: InMemoryProposalRepository;
+  let auditRepo: InMemoryAuditRepository;
+
+  beforeEach(() => {
+    repo = new InMemoryProposalRepository();
+    auditRepo = new InMemoryAuditRepository();
+  });
+
+  /**
+   * A clarification surfacing the FIRST of two ambiguous references
+   * ("Bob" — customer), with the second ("Rodriguez job" — job) queued on
+   * `pendingEntityAmbiguities` exactly as emitClarification persists it.
+   */
+  function twoAmbiguityProposal(overrides: Partial<Proposal> = {}): Proposal {
+    return {
+      id: PROPOSAL,
+      tenantId: TENANT,
+      proposalType: 'voice_clarification',
+      status: 'draft',
+      summary: 'Which customer? "Bob" matched 2 records',
+      explanation:
+        'Heard the request, but "Bob" matches more than one customer. Tap the right one below. (1 more reference will need picking after this.)',
+      createdBy: OWNER,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      payload: {
+        transcript: 'invoice Bob for the Rodriguez job',
+        reason: 'ambiguous_entity',
+        entityReference: 'Bob',
+        entityCandidates: [
+          { id: CUST_A, label: 'Bob Smith', score: 0.82 },
+          { id: CUST_B, label: 'Bob Jones', score: 0.81 },
+        ],
+      },
+      sourceContext: {
+        source: 'voice',
+        transcript: 'invoice Bob for the Rodriguez job',
+        conversationId: 'conv-multi-1',
+        entityKind: 'customer',
+        entityReference: 'Bob',
+        entityCandidates: [
+          { id: CUST_A, kind: 'customer', label: 'Bob Smith', score: 0.82 },
+          { id: CUST_B, kind: 'customer', label: 'Bob Jones', score: 0.81 },
+        ],
+        originalIntent: {
+          intentType: 'create_invoice',
+          extractedEntities: { customerName: 'Bob', jobReference: 'Rodriguez job' },
+        },
+        pendingEntityAmbiguities: [
+          {
+            entityKind: 'job',
+            reference: 'Rodriguez job',
+            candidates: [
+              { id: JOB_A, kind: 'job', label: 'Rodriguez — kitchen', score: 0.8 },
+              { id: JOB_B, kind: 'job', label: 'Rodriguez — bath', score: 0.79 },
+            ],
+          },
+        ],
+      },
+      ...overrides,
+    } as Proposal;
+  }
+
+  function mockHandler(
+    taskType: Proposal['proposalType'],
+    buildPayload: (ctx: TaskContext) => Record<string, unknown>,
+  ): { handler: TaskHandler; calls: TaskContext[] } {
+    const calls: TaskContext[] = [];
+    const handler: TaskHandler = {
+      taskType,
+      handle: vi.fn(async (ctx: TaskContext) => {
+        calls.push(ctx);
+        const proposal = createProposal({
+          tenantId: ctx.tenantId,
+          proposalType: taskType,
+          payload: buildPayload(ctx),
+          summary: `Drafted ${taskType}`,
+          createdBy: ctx.userId,
+          ...(ctx.conversationId ? { sourceContext: { conversationId: ctx.conversationId } } : {}),
+        });
+        return { proposal, taskType };
+      }),
+    };
+    return { handler, calls };
+  }
+
+  const factoryOf = (handler: TaskHandler): RedraftHandlerFactory => () => handler;
+
+  const call = (candidateId: string, factory: RedraftHandlerFactory) =>
+    resolveProposalEntity(
+      { tenantId: TENANT, proposalId: PROPOSAL, candidateId, actorId: OWNER, actorRole: 'owner' },
+      { proposalRepo: repo, auditRepo, redraftHandlerFactory: factory },
+    );
+
+  it('first pick surfaces a NEW voice_clarification for the second ambiguity — no redraft yet', async () => {
+    await repo.create(twoAmbiguityProposal());
+    const { handler } = mockHandler('draft_invoice', () => ({}));
+
+    const result = await call(CUST_B, factoryOf(handler));
+
+    // Still a clarification — the promised second picker, not the real action.
+    expect(result.proposalType).toBe('voice_clarification');
+    expect(handler.handle).not.toHaveBeenCalled();
+
+    // The picker now shows the JOB candidates, not the customer ones.
+    const payload = result.payload as Record<string, unknown>;
+    expect(payload.entityReference).toBe('Rodriguez job');
+    expect(payload.entityCandidates).toEqual([
+      { id: JOB_A, label: 'Rodriguez — kitchen', score: 0.8 },
+      { id: JOB_B, label: 'Rodriguez — bath', score: 0.79 },
+    ]);
+
+    const ctx = result.sourceContext as Record<string, unknown>;
+    expect(ctx.entityKind).toBe('job');
+    expect(ctx.entityReference).toBe('Rodriguez job');
+    // The queue is drained — nothing left pending behind this one.
+    expect(ctx.pendingEntityAmbiguities).toBeUndefined();
+    // The customer pick is preserved for the eventual redraft.
+    expect(ctx.resolvedEntities).toEqual([
+      { id: CUST_B, field: 'customerId', kind: 'customer', label: 'Bob Jones' },
+    ]);
+    // originalIntent must survive — the final redraft still needs it.
+    expect(ctx.originalIntent).toBeDefined();
+
+    // Not resolved yet — still awaiting a pick, so no ready_for_review promotion.
+    expect(result.status).toBe('draft');
+
+    const audits = await auditRepo.findByEntity(TENANT, 'proposal', PROPOSAL);
+    const ev = audits.find((a) => a.eventType === 'proposal.entity_resolved');
+    expect(ev).toBeDefined();
+    expect(ev!.metadata).toMatchObject({
+      candidateId: CUST_B,
+      entityKind: 'customer',
+      movedToReview: false,
+      nextEntityKind: 'job',
+      remainingAmbiguities: 0,
+    });
+  });
+
+  it('second pick (after the first) redrafts with BOTH entities resolved; audit covers both steps', async () => {
+    await repo.create(twoAmbiguityProposal());
+    const { handler, calls } = mockHandler('draft_invoice', (ctx) => ({
+      customerId: (ctx.existingEntities as Record<string, unknown>).customerId,
+      jobId: (ctx.existingEntities as Record<string, unknown>).jobId,
+      lineItems: [{ description: 'Water heater', quantity: 1, unitPrice: 45000 }],
+    }));
+
+    await call(CUST_B, factoryOf(handler)); // first pick — advances to the job picker
+    const result = await call(JOB_B, factoryOf(handler)); // second pick — resolves the chain
+
+    // NOW the real redraft happened.
+    expect(handler.handle).toHaveBeenCalledTimes(1);
+    expect((calls[0].existingEntities as Record<string, unknown>).customerId).toBe(CUST_B);
+    expect((calls[0].existingEntities as Record<string, unknown>).jobId).toBe(JOB_B);
+    // Both competing free-text references were dropped.
+    expect((calls[0].existingEntities as Record<string, unknown>).customerName).toBeUndefined();
+    expect((calls[0].existingEntities as Record<string, unknown>).jobReference).toBeUndefined();
+
+    expect(result.proposalType).toBe('draft_invoice');
+    expect((result.payload as Record<string, unknown>).customerId).toBe(CUST_B);
+    expect((result.payload as Record<string, unknown>).jobId).toBe(JOB_B);
+    expect(result.status).toBe('ready_for_review');
+    expect(result.status).not.toBe('approved');
+
+    const ctx = result.sourceContext as Record<string, unknown>;
+    expect(ctx.entityCandidates).toBeUndefined();
+    expect(ctx.pendingEntityAmbiguities).toBeUndefined();
+    expect(ctx.resolvedEntities).toEqual([
+      { id: CUST_B, field: 'customerId', kind: 'customer', label: 'Bob Jones' },
+      { id: JOB_B, field: 'jobId', kind: 'job', label: 'Rodriguez — bath' },
+    ]);
+
+    // Audit trail covers BOTH steps: the intermediate advance and the final redraft.
+    const audits = (await auditRepo.findByEntity(TENANT, 'proposal', PROPOSAL)).filter(
+      (a) => a.eventType === 'proposal.entity_resolved',
+    );
+    expect(audits).toHaveLength(2);
+    expect(audits[0].metadata).toMatchObject({ candidateId: CUST_B, movedToReview: false });
+    expect(audits[1].metadata).toMatchObject({
+      candidateId: JOB_B,
+      movedToReview: true,
+      toProposalType: 'draft_invoice',
+      resolvedCount: 2,
+    });
+  });
+
+  it('single-ambiguity flow is unchanged: one pick redrafts immediately, no extra clarification', async () => {
+    // Same fixture, minus the queued job ambiguity.
+    const single = twoAmbiguityProposal();
+    const singleSourceContext = { ...(single.sourceContext as Record<string, unknown>) };
+    delete singleSourceContext.pendingEntityAmbiguities;
+    await repo.create({ ...single, sourceContext: singleSourceContext });
+
+    const { handler, calls } = mockHandler('draft_invoice', (ctx) => ({
+      customerId: (ctx.existingEntities as Record<string, unknown>).customerId,
+      jobId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+      lineItems: [{ description: 'x', quantity: 1, unitPrice: 100 }],
+    }));
+
+    const result = await call(CUST_B, factoryOf(handler));
+
+    expect(handler.handle).toHaveBeenCalledTimes(1);
+    expect(result.proposalType).toBe('draft_invoice');
+    expect(result.status).toBe('ready_for_review');
+    expect((calls[0].existingEntities as Record<string, unknown>).customerId).toBe(CUST_B);
+
+    const audits = await auditRepo.findByEntity(TENANT, 'proposal', PROPOSAL);
+    expect(audits.filter((a) => a.eventType === 'proposal.entity_resolved')).toHaveLength(1);
+  });
+
+  it('double-tap on the first pick does not create two different second-pickers', async () => {
+    await repo.create(twoAmbiguityProposal());
+    const { handler } = mockHandler('draft_invoice', () => ({}));
+
+    const first = await call(CUST_B, factoryOf(handler));
+    const second = await call(CUST_B, factoryOf(handler)); // retried/double-tapped
+
+    // Same row, same second-picker state both times — never redrafted, never
+    // a second distinct "which job?" clarification spawned.
+    expect(second.id).toBe(first.id);
+    expect(second.proposalType).toBe('voice_clarification');
+    expect((second.payload as Record<string, unknown>).entityReference).toBe('Rodriguez job');
+    expect(second.payload).toEqual(first.payload);
+    expect(second.sourceContext).toEqual(first.sourceContext);
+    expect(handler.handle).not.toHaveBeenCalled();
+
+    // The retry was a no-op — only ONE entity_resolved audit event, not two.
+    const audits = (await auditRepo.findByEntity(TENANT, 'proposal', PROPOSAL)).filter(
+      (a) => a.eventType === 'proposal.entity_resolved',
+    );
+    expect(audits).toHaveLength(1);
+
+    // The job picker still resolves normally afterward.
+    const { handler: finalHandler } = mockHandler('draft_invoice', (ctx) => ({
+      customerId: (ctx.existingEntities as Record<string, unknown>).customerId,
+      jobId: (ctx.existingEntities as Record<string, unknown>).jobId,
+      lineItems: [{ description: 'x', quantity: 1, unitPrice: 100 }],
+    }));
+    const final = await call(JOB_A, factoryOf(finalHandler));
+    expect(final.proposalType).toBe('draft_invoice');
+    expect((final.payload as Record<string, unknown>).jobId).toBe(JOB_A);
+  });
+});
+
 // ── U8/U1 re-draft with the REAL factory (the proof) ────────────────────────
 //
 // The mock-handler tests above hand-roll a handler that always returns a

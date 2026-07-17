@@ -218,7 +218,9 @@ export class MmsEstimateTaskHandler {
       // Hard-block auto-approval for any ungrounded (LLM-priced) line via the
       // RV-007 confidence-marker guard — independent of the numeric score AND
       // of any tenant `auto_approve_threshold` override. An uncatalogued price
-      // must always reach a human.
+      // must always reach a human. Deliberately `anyUncatalogued`, NOT
+      // `requiresReview` — ambiguous lines are gated by `missingFields`,
+      // which one-tap resolution clears.
       overallConfidence: catalogOutcome?.anyUncatalogued
         ? 'low'
         : getConfidenceLevel(confidenceScore),

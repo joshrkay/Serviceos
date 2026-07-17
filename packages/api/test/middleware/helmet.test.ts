@@ -63,6 +63,18 @@ describe('D1-3 — helmet hardening headers', () => {
       expect(connectDirective).toContain('https://us-assets.i.posthog.com');
     });
 
+    it('allows the Deepgram STT WebSocket in connect-src (else in-app voice dictation is CSP-blocked)', async () => {
+      // The browser streams mic audio straight to wss://api.deepgram.com/v1/
+      // listen (useDeepgramDictation). connect-src governs WebSocket targets,
+      // so without this the assistant's conversation/dictation mode fails in
+      // production even with DEEPGRAM_API_KEY configured server-side.
+      const res = await request(app).get('/health');
+      const csp = res.headers['content-security-policy'] ?? '';
+      const connectDirective =
+        csp.split(';').find((d) => d.trim().startsWith('connect-src')) ?? '';
+      expect(connectDirective).toContain('wss://api.deepgram.com');
+    });
+
     it('emits Strict-Transport-Security = 1 year + includeSubDomains, no preload', async () => {
       const res = await request(app).get('/health');
       const hsts = res.headers['strict-transport-security'];

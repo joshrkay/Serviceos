@@ -32,8 +32,12 @@ const validEstimateJson = JSON.stringify({
   customerId: '550e8400-e29b-41d4-a716-446655440000',
   jobId: '660e8400-e29b-41d4-a716-446655440000',
   lineItems: [
-    { description: 'Pipe repair', quantity: 2, unitPrice: 75.0, category: 'plumbing' },
-    { description: 'Labor', quantity: 3, unitPrice: 50.0 },
+    // Prices stay within PRICE_CONFLICT_MIN_ABS_CENTS (100¢) of the
+    // groundedCatalog() price (7500) so these lines snap cleanly to the
+    // catalog instead of tripping the "did you mean" price-conflict path —
+    // several tests reusing this fixture assert clean grounding.
+    { description: 'Pipe repair', quantity: 2, unitPrice: 7460, category: 'plumbing' },
+    { description: 'Labor', quantity: 3, unitPrice: 7540 },
   ],
   notes: 'Estimate for kitchen plumbing',
   validUntil: '2026-04-15',
@@ -194,7 +198,9 @@ describe('P2-016 — Estimate draft proposal generation', () => {
         customerId: '550e8400-e29b-41d4-a716-446655440000',
         jobId: '660e8400-e29b-41d4-a716-446655440000',
         lineItems: [
-          { description: 'Pipe repair', quantity: 1, unitPrice: 75.0 },
+          // Within PRICE_CONFLICT tolerance (< 100¢) of groundedCatalog()'s
+          // 7500 so the line snaps to the catalog instead of conflicting.
+          { description: 'Pipe repair', quantity: 1, unitPrice: 7460 },
         ],
         confidence_score: 0.95,
       }),
@@ -367,7 +373,10 @@ describe('P22 — EstimateTaskHandler catalog grounding', () => {
     const { repo, heater } = seededCatalog();
     const stub = new StubProvider('stub');
     stub.setResponse({
-      content: estimateJson([{ description: 'Water Heater Install', quantity: 1, unitPrice: 999 }]),
+      // 183_000 is within PRICE_CONFLICT tolerance (~1.1% deviation) of the
+      // catalog's 185_000 — close enough that this is a snap/overwrite, not
+      // a "did you mean" price conflict.
+      content: estimateJson([{ description: 'Water Heater Install', quantity: 1, unitPrice: 183_000 }]),
     });
     const handler = new EstimateTaskHandler(makeGateway(stub), repo);
 
@@ -381,10 +390,63 @@ describe('P22 — EstimateTaskHandler catalog grounding', () => {
     expect(proposal.confidenceFactors).toContain('catalog_priced');
   });
 
+  it('a drafted price that conflicts with an exact catalog match keeps the spoken price and forces review', async () => {
+    const { repo, heater } = seededCatalog();
+    const stub = new StubProvider('stub');
+    stub.setResponse({
+      // 99_900 vs the catalog's 185_000 is a "did you mean" price conflict
+      // (well past both PRICE_CONFLICT thresholds), not a mishear — the
+      // operator may have deliberately quoted a custom price.
+      content: estimateJson(
+        [{ description: 'Water Heater Install', quantity: 1, unitPrice: 99_900 }],
+        0.95,
+      ),
+    });
+    const handler = new EstimateTaskHandler(makeGateway(stub), repo);
+
+    const { proposal } = await handler.handle(makeContext());
+
+    const line = (proposal.payload.lineItems as Array<Record<string, unknown>>)[0];
+    // Spoken price kept verbatim — never silently overwritten.
+    expect(line.unitPrice).toBe(99_900);
+    expect(line.pricingSource).toBe('ambiguous');
+    expect(line.needsPricing).toBe(true);
+    // Never approved, even at model confidence 0.95.
+    expect(proposal.status).toBe('draft');
+
+    const ctx = proposal.sourceContext as Record<string, unknown>;
+    expect(ctx.missingFields).toEqual(['lineItems[0].catalogItemId']);
+    const candidates = (
+      ctx.catalogResolution as Record<
+        number,
+        Array<{ id: string; name: string; unitPriceCents: number; score: number }>
+      >
+    )[0];
+    const ids = candidates.map((c) => c.id).sort();
+    expect(ids).toEqual([heater.id, 'spoken:0'].sort());
+    const catalogCandidate = candidates.find((c) => c.id === heater.id);
+    expect(catalogCandidate?.unitPriceCents).toBe(185_000);
+    expect(catalogCandidate?.score).toBe(1);
+    const spokenCandidate = candidates.find((c) => c.id === 'spoken:0');
+    expect(spokenCandidate?.unitPriceCents).toBe(99_900);
+    expect(spokenCandidate?.score).toBe(0);
+
+    // The conflict gates via missingFields (cleared by one-tap resolution),
+    // NOT a persisted 'low' stamp — that stamp is never lifted by resolution
+    // and would keep blocking chain-set/SMS approval after the pick. The
+    // estimate handler's clarification cap maps the ambiguous draft to
+    // 'medium' — score-derived, NOT the sticky 'low'.
+    const meta = proposal.payload._meta as Record<string, unknown>;
+    expect(meta.overallConfidence).toBe('medium');
+  });
+
   it('ambiguous match forces draft with missingFields + candidates', async () => {
     const { repo } = seededCatalog();
     const stub = new StubProvider('stub');
     stub.setResponse({
+      // confidence 0.95 — high enough that, pre-`requiresReview`, the hand-rolled
+      // `anyUncatalogued` ternary would have left overallConfidence at 'high'
+      // for a purely-ambiguous (not uncatalogued) line.
       content: estimateJson([{ description: 'filter', quantity: 1, unitPrice: 2_500 }]),
     });
     const handler = new EstimateTaskHandler(makeGateway(stub), repo);
@@ -398,6 +460,15 @@ describe('P22 — EstimateTaskHandler catalog grounding', () => {
     const ctx = proposal.sourceContext as Record<string, unknown>;
     expect(ctx.missingFields).toEqual(['lineItems[0].catalogItemId']);
     expect(ctx.catalogResolution).toBeDefined();
+    // Ambiguous-only lines keep their score-derived confidence: the gate is
+    // missingFields (cleared by one-tap resolution), NOT a persisted 'low'
+    // stamp, which resolution never lifts and would keep blocking
+    // chain-set/SMS approval after the operator picks.
+    expect(proposal.confidenceFactors).not.toContain('uncatalogued_line_item');
+    // Score-derived via the estimate handler's clarification cap ('medium'),
+    // NOT the sticky 'low' that resolution could never lift.
+    const meta = proposal.payload._meta as Record<string, unknown>;
+    expect(meta.overallConfidence).toBe('medium');
   });
 
   it('uncatalogued line caps confidence below auto-approve', async () => {
@@ -473,8 +544,10 @@ describe('RV-007 — EstimateTaskHandler populates payload._meta', () => {
       content: JSON.stringify({
         customerId: '550e8400-e29b-41d4-a716-446655440000',
         // Catalog-grounded (see groundedCatalog) so the score→level mapping is
-        // what's under test — an uncatalogued line would force 'low'.
-        lineItems: [{ description: 'Labor', quantity: 1, unitPrice: 50 }],
+        // what's under test — an uncatalogued line would force 'low'. Kept
+        // within PRICE_CONFLICT tolerance (< 100¢) of the catalog's 7500 so
+        // the line snaps cleanly instead of conflicting.
+        lineItems: [{ description: 'Labor', quantity: 1, unitPrice: 7460 }],
         confidence_score: 0.6,
       }),
     });
@@ -492,7 +565,10 @@ describe('RV-007 — EstimateTaskHandler populates payload._meta', () => {
       content: JSON.stringify({
         customerId: '550e8400-e29b-41d4-a716-446655440000',
         lineItems: [
-          { description: 'Water Heater Install', quantity: 1, unitPrice: 999 },
+          // 183_000 is within PRICE_CONFLICT tolerance of the catalog's
+          // 185_000 — this line must ground cleanly so only the flux
+          // capacitor line (uncatalogued) carries a low-confidence signal.
+          { description: 'Water Heater Install', quantity: 1, unitPrice: 183_000 },
           { description: 'mystery flux capacitor', quantity: 1, unitPrice: 9_900 },
         ],
         confidence_score: 0.95,

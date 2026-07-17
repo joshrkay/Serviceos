@@ -113,8 +113,14 @@ def main() -> int:
     if not args.query:
         print("usage: search_corpus.py <query> | --selftest", file=sys.stderr)
         return 2
-    for score, row in search(args.query, args.k):
+    results = search(args.query, args.k)
+    for score, row in results:
         print(f"  {score:.3f}  [{row['trade']}/{row['triage']}] {row['id']}: {row['text'][:90]}")
+    ph.capture("corpus_search_queried", {
+        "query_length": len(args.query),
+        "top_k": args.k,
+        "result_count": len(results),
+    })
     return 0
 
 
