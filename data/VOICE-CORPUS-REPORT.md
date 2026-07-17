@@ -71,6 +71,46 @@ and `academictorrents.com` return HTTP 403; no DB.
    documented at the bottom of `generate-utterances.ts`; ≥20% human review before
    rows enter the eval split.
 
+## Per-surface transcript accuracy (WER) — dialect/accent harness (A4)
+
+`packages/api/src/ai/voice-quality/dialect/` grades ASR accuracy per accent
+(`wer.ts` canonical edit-distance WER, `dialect-report.ts` per-dialect
+rollup + gate). As of this pass it also grades per SURFACE — which ASR
+engine produced the transcript — via `DialectEvalResult.surface` +
+`buildSurfaceRollup`, so Whisper (batch) and Deepgram (live media-streams)
+accuracy are no longer conflated into one number.
+
+| Surface | Engine / path | Mode | Offline-measurable? | Status |
+|---|---|---|---|---|
+| Whisper (batch) | `WhisperTranscriptionProvider` via `makeWhisperDialectTranscriber` | buffer-in, batch REST | Yes — pure WER math, no network to grade a canned/replayed hypothesis | Harness code path ✅ (57 dialect-suite tests incl. surface rollup); **no committed real-audio dialect corpus yet** (see below), so there is no live numeric WER baseline to report for this pass — reporting one would be fabricated |
+| Deepgram (streaming) | `DeepgramStreamingProvider` via `makeDeepgramDialectTranscriber` (A4, new this pass) | WS streaming, requires `DEEPGRAM_API_KEY` | No — the production engine is a live WebSocket session; grading it means paying for a real Deepgram call per case | Credential-gated: `resolveDeepgramApiKey()` returns `null` when `DEEPGRAM_API_KEY` is unset, so a report-refresh run skips this surface rather than spend in PR CI (mirrors the `ANTHROPIC_API_KEY` gate in `voice-eval-live.yml`). Engine mocked in unit tests — WER math + surface attribution pinned, zero live spend |
+| Gather (Twilio speech-to-text) | Twilio's own ASR inside `<Gather>` | Twilio-hosted, no buffer-in seam | No — Twilio does not expose an offline batch-transcribe API; the only signal is the `Confidence` attribute on a live callback | **Not offline-measurable at all** — out of scope for this harness; A3 (`mediastream-adapter.ts` / `twilio-adapter.ts`) instead reads Twilio's per-call `Confidence` to gate a reprompt, which is the closest available signal |
+| Live call (in-call, either engine) | whichever engine handles the active call | real-time, in-call | No — by definition requires a live phone call | Same reasoning as Gather; live-call accuracy is only inferable indirectly (acoustic-confidence reprompt rate, A3) |
+
+**Why no Whisper number is published yet:** the dialect eval's scoring core
+(`wer.ts`, `dialect-report.ts`, `dialect-runner.ts`) is real and unit-tested
+(deterministic edit-distance WER, per-dialect gate, now per-surface rollup),
+but the **real-audio dialect fixture corpus is still pending** — confirmed
+via `docs/research/voice-feature-parity-tracker.md` row 7
+("dialect grading core ✅, real-audio fixtures pending") and a repo-wide
+search that found zero committed audio assets (`*.wav`/`*.ulaw`) anywhere
+under `packages/api/src/ai/voice-quality/`. `audio-degradation.ts` can turn
+a labeled call + clean audio into a telephony-muffled `DialectEvalCase`
+once that labeling step lands, and this environment additionally has no
+`OPENAI_API_KEY`/`DEEPGRAM_API_KEY` to synthesize or transcribe real audio
+even if it did. Once the fixture corpus + a credential exist, run:
+
+```bash
+# Whisper surface only (offline once fixtures exist — no live key needed beyond
+# whatever the production WhisperTranscriptionProvider itself requires):
+npx vitest run test/voice-quality/dialect/  # proves the harness math, not a live number
+
+# Multi-surface (Whisper + Deepgram) once a real corpus + DEEPGRAM_API_KEY exist —
+# wire makeWhisperDialectTranscriber + makeDeepgramDialectTranscriber into
+# runMultiSurfaceDialectEval(cases, { whisper, deepgram }) and read
+# outcome.surfaceRollup / outcome.bySurface[surface].report for the committed number.
+```
+
 ## Taxonomy gaps surfaced
 
 See `data/behaviors-gap-analysis.md`. Headlines: the real taxonomy is **41**, not
