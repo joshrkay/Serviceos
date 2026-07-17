@@ -53,10 +53,14 @@ export class TaskRouter {
  * No LLM call needed: the payload is just `{ invoiceId }`, taken from the
  * classifier's extracted invoice reference (jobReference / invoiceReference,
  * UUID or "INV-0042"-style number — the execution handler resolves either).
- * When no reference was extracted the proposal carries an empty payload so
- * the execution handler returns a clear validation failure instead of
- * guessing. The richer conversation-context resolution ("the one we just
- * drafted") lives in the voice-action-router's repo-backed handler.
+ * When no reference was extracted the proposal carries an empty payload AND
+ * `missingFields: ['invoiceId']` (mirrors SendInvoiceTaskHandler in
+ * voice-extended-tasks.ts) so `decideInitialStatus`/`approveProposal` block
+ * the proposal from ever reaching 'approved' — the review card prompts the
+ * operator for the missing reference instead of the proposal auto-promoting
+ * to ready_for_review and dying at execution on the absent invoiceId. The
+ * richer conversation-context resolution ("the one we just drafted") lives
+ * in the voice-action-router's repo-backed handler.
  */
 export class IssueInvoiceTaskHandler implements TaskHandler {
   readonly taskType: ProposalType = 'issue_invoice';
@@ -76,6 +80,7 @@ export class IssueInvoiceTaskHandler implements TaskHandler {
         ? { conversationId: context.conversationId }
         : undefined,
       createdBy: context.userId,
+      missingFields: invoiceId ? undefined : ['invoiceId'],
       ...(context.tenantThresholdOverride
         ? { tenantThresholdOverride: context.tenantThresholdOverride }
         : {}),

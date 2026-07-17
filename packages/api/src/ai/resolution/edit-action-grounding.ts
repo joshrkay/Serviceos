@@ -207,6 +207,21 @@ export function groundEditActionPricing(
           category: contractCategory(item),
           pricingSource: 'catalog' satisfies PricingSource,
           needsPricing: false,
+          // Parity with the old per-task `groundEditActionPricing` (via
+          // resolveSpokenLineItems in ai/tasks/catalog-resolution.ts):
+          // catalog-RESOLVED lines default an unstated/invalid quantity to
+          // 1 ("add a trip fee") so the required `quantity` field the
+          // editors' `validateBillingLineItem` demands is always present.
+          // Uncatalogued/ambiguous lines are intentionally NOT defaulted
+          // here — the old resolver only defaulted quantity on the
+          // `resolved` branch; unresolved items were pushed through
+          // unchanged.
+          quantity:
+            typeof lineItem.quantity === 'number' &&
+            Number.isFinite(lineItem.quantity) &&
+            lineItem.quantity > 0
+              ? lineItem.quantity
+              : 1,
         },
       };
     }

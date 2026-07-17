@@ -19,6 +19,10 @@ import {
 } from '../../../src/ai/orchestration/task-router';
 import { LLMGateway, LLMResponse } from '../../../src/ai/gateway/gateway';
 import { issueInvoicePayloadSchema } from '../../../src/proposals/contracts/issue-invoice';
+import { missingFieldsFor } from '../../../src/proposals/proposal';
+import { approveProposal } from '../../../src/proposals/actions';
+import { InMemoryProposalRepository } from '../../../src/proposals/proposal';
+import { ValidationError } from '../../../src/shared/errors';
 
 function mockGateway(jsonContent: string): LLMGateway {
   return {
@@ -144,5 +148,50 @@ describe('P22-002 invoice-intents — task router issue_invoice route', () => {
       message: 'Issue the invoice',
     });
     expect(issueInvoicePayloadSchema.safeParse(proposal.payload).success).toBe(false);
+  });
+
+  it('gates the no-reference case with missingFields so it never lands approved', async () => {
+    const handler = new IssueInvoiceTaskHandler();
+    const { proposal } = await handler.handle({
+      tenantId: 't-1',
+      userId: 'u-1',
+      message: 'Issue the invoice',
+    });
+
+    expect(missingFieldsFor(proposal)).toEqual(['invoiceId']);
+    // decideInitialStatus forces 'draft' regardless of trust tier/confidence
+    // whenever missingFields is non-empty.
+    expect(proposal.status).toBe('draft');
+
+    // Simulate the assistant route's "promote drafts to ready_for_review"
+    // step, then confirm approveProposal still refuses it — the operator
+    // must fill the gap (e.g. via editProposal) before the invoice can be
+    // issued; it can never reach a doomed execution.
+    const repo = new InMemoryProposalRepository();
+    await repo.create(proposal);
+    await repo.updateStatus('t-1', proposal.id, 'ready_for_review');
+
+    await expect(
+      approveProposal(repo, 't-1', proposal.id, 'u-1', 'owner'),
+    ).rejects.toBeInstanceOf(ValidationError);
+  });
+
+  it('with a reference extracted, the proposal is unaffected by the missingFields gate', async () => {
+    const handler = new IssueInvoiceTaskHandler();
+    const { proposal } = await handler.handle({
+      tenantId: 't-1',
+      userId: 'u-1',
+      message: 'Issue invoice INV-0042',
+      existingEntities: { jobReference: 'INV-0042' },
+    });
+
+    expect(missingFieldsFor(proposal)).toEqual([]);
+
+    const repo = new InMemoryProposalRepository();
+    await repo.create(proposal);
+    await repo.updateStatus('t-1', proposal.id, 'ready_for_review');
+
+    const approved = await approveProposal(repo, 't-1', proposal.id, 'u-1', 'owner');
+    expect(approved.status).toBe('approved');
   });
 });

@@ -11,6 +11,14 @@
 import { describe, it, expect } from 'vitest';
 import { CatalogItem, createCatalogItem } from '../../../src/catalog/catalog-item';
 import { groundEditActionPricing } from '../../../src/ai/resolution/edit-action-grounding';
+import { applyInvoiceEdits, InvoiceEditAction } from '../../../src/invoices/invoice-editor';
+import { Invoice } from '../../../src/invoices/invoice';
+import {
+  LineItem,
+  PricingSource,
+  calculateDocumentTotals,
+  buildLineItem,
+} from '../../../src/shared/billing-engine';
 
 const TENANT = 'tenant-1';
 
@@ -192,5 +200,111 @@ describe('groundEditActionPricing', () => {
       'editActions[1].lineItem.unitPrice',
       'editActions[2].lineItem.unitPrice',
     ]);
+  });
+
+  // Parity with the old per-task `groundEditActionPricing` (deleted on this
+  // branch — recovered from git history at 6cc376a^ in
+  // ai/tasks/invoice-edit-task.ts / estimate-edit-task.ts), which routed
+  // through `resolveSpokenLineItems` (ai/tasks/catalog-resolution.ts). That
+  // resolver defaults quantity to 1 ONLY on its `resolved` (single
+  // catalog-candidate) branch — unresolved/no-match items are pushed
+  // through with whatever quantity (or lack of one) the LLM gave.
+  describe('quantity defaulting parity (old resolveSpokenLineItems behavior)', () => {
+    it('defaults a catalog-matched line with omitted quantity to 1 ("add a trip fee")', () => {
+      const { lineItems } = ground(
+        [addAction({ description: 'water heater install', unitPrice: 15_000 })],
+        [heater],
+      );
+      expect(lineItems[0].pricingSource).toBe('catalog');
+      expect(lineItems[0].quantity).toBe(1);
+    });
+
+    it('defaults a catalog-matched line with an invalid quantity (0/negative/non-number) to 1', () => {
+      for (const bad of [0, -1, 'two', null, undefined]) {
+        const { lineItems } = ground(
+          [addAction({ description: 'water heater install', quantity: bad, unitPrice: 15_000 })],
+          [heater],
+        );
+        expect(lineItems[0].pricingSource).toBe('catalog');
+        expect(lineItems[0].quantity).toBe(1);
+      }
+    });
+
+    it('keeps an explicit valid quantity on a catalog-matched line', () => {
+      const { lineItems } = ground(
+        [addAction({ description: 'water heater install', quantity: 3, unitPrice: 15_000 })],
+        [heater],
+      );
+      expect(lineItems[0].pricingSource).toBe('catalog');
+      expect(lineItems[0].quantity).toBe(3);
+    });
+
+    it('does NOT default quantity for an uncatalogued line with omitted quantity — old resolver left unresolved items untouched', () => {
+      const { lineItems } = ground(
+        [addAction({ description: 'premium widget', unitPrice: 12_345 })],
+        [heater],
+      );
+      expect(lineItems[0].pricingSource).toBe('uncatalogued');
+      expect(lineItems[0].quantity).toBeUndefined();
+    });
+
+    it('does NOT default quantity for an ambiguous ("did you mean") line with omitted quantity', () => {
+      const { lineItems } = ground(
+        [addAction({ description: 'water heater install', unitPrice: 7_500 })],
+        [heater],
+      );
+      expect(lineItems[0].pricingSource).toBe('ambiguous');
+      expect(lineItems[0].quantity).toBeUndefined();
+    });
+  });
+
+  describe('end-to-end: a grounded catalog-matched add with omitted quantity survives applyInvoiceEdits validation', () => {
+    function makeInvoice(): Invoice {
+      const lineItems: LineItem[] = [
+        buildLineItem('li-1', 'Diagnostic visit', 1, 12500, 0, true, 'labor'),
+      ];
+      const totals = calculateDocumentTotals(lineItems, 0, 0);
+      return {
+        id: 'inv-1',
+        tenantId: TENANT,
+        jobId: 'job-1',
+        invoiceNumber: 'INV-0001',
+        status: 'draft',
+        lineItems,
+        totals,
+        amountPaidCents: 0,
+        amountDueCents: totals.totalCents,
+        createdBy: 'u-1',
+        createdAt: new Date('2026-04-01T00:00:00Z'),
+        updatedAt: new Date('2026-04-01T00:00:00Z'),
+      };
+    }
+
+    it('a voice "add a trip fee" edit action (LLM omits quantity) applies cleanly once grounded', () => {
+      // Simulate the LLM output for "add a trip fee" — no quantity field at all.
+      const { result } = ground(
+        [addAction({ description: 'water heater install', unitPrice: 15_000 })],
+        [heater],
+      );
+      const groundedLineItem = (
+        result.payload.editActions as Array<Record<string, unknown>>
+      )[0].lineItem as Record<string, unknown>;
+      expect(groundedLineItem.quantity).toBe(1); // pre-condition: grounding defaulted it
+
+      const action: InvoiceEditAction = {
+        type: 'add_line_item',
+        lineItem: {
+          description: groundedLineItem.description as string,
+          quantity: groundedLineItem.quantity as number,
+          unitPrice: groundedLineItem.unitPrice as number,
+          pricingSource: groundedLineItem.pricingSource as PricingSource,
+        },
+      };
+
+      const { updatedInvoice } = applyInvoiceEdits(makeInvoice(), [action]);
+      expect(updatedInvoice.lineItems).toHaveLength(2);
+      expect(updatedInvoice.lineItems[1].quantity).toBe(1);
+      expect(updatedInvoice.lineItems[1].totalCents).toBe(15_000);
+    });
   });
 });
