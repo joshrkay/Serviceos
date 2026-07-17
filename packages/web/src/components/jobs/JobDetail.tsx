@@ -9,7 +9,7 @@ import {
   CheckCircle2, Circle, MoreHorizontal, Zap, Calendar, User, Clock,
   ChevronDown,
 } from 'lucide-react';
-import type { Job, JobActivity, MaterialItem, Customer, Technician } from '../../data/mock-data';
+import type { Job, JobActivity, MaterialItem, Customer, Technician } from '../../types/job-ui';
 import type { JobDetailResponse } from '@ai-service-os/shared';
 import { calcMaterialsTotal, formatAppointmentDurationLabel } from '../../utils/job-ui-math';
 import { formatCurrency } from '../../utils/currency';

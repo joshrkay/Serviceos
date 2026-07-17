@@ -12,7 +12,7 @@ import type {
   ProposalConfidence,
   ProposalConfidenceLevel,
   ProposalSeverity,
-} from '../../data/mock-data';
+} from '../../types/assistant-ui';
 
 const TYPE_CONFIG: Record<ProposalType, {
   color: string; bg: string; border: string;

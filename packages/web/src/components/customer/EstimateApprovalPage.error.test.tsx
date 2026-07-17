@@ -66,7 +66,7 @@ const REAL_VIEW = {
 
 /**
  * Blocker 8 — the public estimate page must never fall back to fixture
- * data. A failed load used to render `estimates[0]` from mock-data, leaking
+ * data. A failed load used to render a fixture estimate, leaking
  * another customer's name, address, and pricing on a public URL.
  */
 describe('EstimateApprovalPage — Blocker 8: no fixture-data leak on failure', () => {

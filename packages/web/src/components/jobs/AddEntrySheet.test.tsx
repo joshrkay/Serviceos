@@ -2,7 +2,7 @@ import React from 'react';
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { AddEntrySheet } from './AddEntrySheet';
-import type { JobActivity } from '../../data/mock-data';
+import type { JobActivity } from '../../types/job-ui';
 
 // Keep the sheet chrome trivial — we only care about the photo pipeline here.
 vi.mock('./JobSheets', () => ({

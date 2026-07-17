@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router';
 import { ConversationThread } from './ConversationThread';
 import { SearchBar } from '../../components/conversations/SearchBar';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
@@ -33,11 +34,14 @@ function threadLabel(thread: InboxThread): string {
 
 export function CommsInboxPage(): React.ReactElement {
   const timezone = useTenantTimezone();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const conversationFromUrl = searchParams.get('conversation');
+
   const [threads, setThreads] = useState<InboxThread[]>([]);
   const [loadingThreads, setLoadingThreads] = useState(true);
   const [threadsError, setThreadsError] = useState<string | null>(null);
 
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(conversationFromUrl);
   const [messages, setMessages] = useState<Message[]>([]);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
@@ -85,6 +89,27 @@ export function CommsInboxPage(): React.ReactElement {
   useEffect(() => {
     void loadThreads();
   }, [loadThreads]);
+
+  // Deep link: `/comms-inbox?conversation=<id>` selects that thread.
+  useEffect(() => {
+    if (conversationFromUrl) setSelectedId(conversationFromUrl);
+  }, [conversationFromUrl]);
+
+  const selectThread = useCallback(
+    (id: string | null) => {
+      setSelectedId(id);
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          if (id) next.set('conversation', id);
+          else next.delete('conversation');
+          return next;
+        },
+        { replace: true },
+      );
+    },
+    [setSearchParams],
+  );
 
   const loadMessages = useCallback(async (conversationId: string) => {
     setLoadingMessages(true);
@@ -194,7 +219,7 @@ export function CommsInboxPage(): React.ReactElement {
                 <li key={id}>
                   <button
                     type="button"
-                    onClick={() => setSelectedId(id)}
+                    onClick={() => selectThread(id)}
                     aria-current={active ? 'true' : undefined}
                     data-testid="comms-thread-row"
                     className={`flex min-h-11 w-full items-start gap-3 px-3 py-3 text-left hover:bg-gray-50 ${
@@ -244,7 +269,7 @@ export function CommsInboxPage(): React.ReactElement {
             <div className="min-w-0">
               <button
                 type="button"
-                onClick={() => setSelectedId(null)}
+                onClick={() => selectThread(null)}
                 className="mb-3 flex min-h-11 items-center text-sm text-blue-600 md:hidden"
                 data-testid="comms-thread-back"
               >

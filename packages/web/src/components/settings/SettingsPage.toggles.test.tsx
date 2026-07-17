@@ -46,7 +46,7 @@ function renderPage() {
   );
 }
 
-describe('SettingsPage Quick toggles persistence (Tier 4 fix)', () => {
+describe('SettingsPage Quick toggles persistence', () => {
   beforeEach(() => {
     apiFetchMock.mockReset();
     fetchLanguageMock.mockReset();

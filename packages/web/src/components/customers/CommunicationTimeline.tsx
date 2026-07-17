@@ -138,10 +138,12 @@ function sourceHref(ev: TimelineEvent): string | null {
     }
     case 'message': {
       const cId = ev.metadata['conversationId'];
-      return typeof cId === 'string' ? `/conversations/${cId}` : null;
+      return typeof cId === 'string'
+        ? `/comms-inbox?conversation=${encodeURIComponent(cId)}`
+        : null;
     }
     case 'appointment':
-      return `/appointments/${ev.sourceEntityId}`;
+      return `/appointments/${ev.sourceEntityId}/edit`;
     case 'note':
     default:
       return null;

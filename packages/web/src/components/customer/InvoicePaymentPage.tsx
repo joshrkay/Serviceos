@@ -47,7 +47,7 @@ interface PublicInvoiceView {
   viewCount: number;
   stripePaymentLinkUrl?: string;
   /**
-   * Tier 4 (Deposit rules — PR 3c). Total deposit credit applied to
+   * Total deposit credit applied to
    * this invoice. Surfaced as a discrete totals row so the customer
    * can see the credit explicitly; the credit is also baked into
    * amountPaidCents so amountDueCents already reflects the reduction.
