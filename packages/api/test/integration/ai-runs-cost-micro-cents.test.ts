@@ -143,4 +143,61 @@ describe('Postgres integration — ai_runs.cost_micro_cents (migration 254)', ()
     });
     expect(afterExplicitNull?.costMicroCents).toBeUndefined();
   });
+
+  it('updateStatus() overwrites model on a failover — the resolved-route model at create() is replaced by the actually-served model', async () => {
+    // Row is created with the resolved route (Sonnet). A Sonnet -> Haiku
+    // failover means costMicroCents ends up priced at Haiku's rates; the
+    // completion update must also overwrite `model` so the row's model and
+    // cost columns agree — a mocked Pool can't catch a wrong real column
+    // name here (CLAUDE.md's testing rule this file exists to satisfy).
+    const pending = createAiRun({
+      tenantId: tenant.tenantId,
+      taskType: 'summarize_conversation',
+      model: 'claude-sonnet-4-6',
+      inputSnapshot: { messages: [] },
+      createdBy: 'test',
+    });
+    await repo.create(pending);
+
+    const completed = completeAiRun(
+      pending,
+      { content: 'ok' },
+      { input: 500, output: 200, total: 700 },
+      150_000,
+    );
+    const updated = await repo.updateStatus(tenant.tenantId, pending.id, 'completed', {
+      outputSnapshot: completed.outputSnapshot,
+      tokenUsage: completed.tokenUsage,
+      completedAt: completed.completedAt,
+      durationMs: completed.durationMs,
+      costMicroCents: 150_000,
+      model: 'claude-haiku-4-5-20251001',
+    });
+
+    expect(updated?.model).toBe('claude-haiku-4-5-20251001');
+    expect(updated?.costMicroCents).toBe(150_000);
+
+    const { rows } = await pool.query(
+      'SELECT model FROM ai_runs WHERE tenant_id = $1 AND id = $2',
+      [tenant.tenantId, pending.id],
+    );
+    expect(rows[0].model).toBe('claude-haiku-4-5-20251001');
+  });
+
+  it('updateStatus() omitting model leaves the existing column value alone', async () => {
+    const pending = createAiRun({
+      tenantId: tenant.tenantId,
+      taskType: 'summarize_conversation',
+      model: 'claude-sonnet-4-6',
+      inputSnapshot: { messages: [] },
+      createdBy: 'test',
+    });
+    await repo.create(pending);
+
+    const updated = await repo.updateStatus(tenant.tenantId, pending.id, 'completed', {
+      costMicroCents: 450_000,
+    });
+
+    expect(updated?.model).toBe('claude-sonnet-4-6');
+  });
 });

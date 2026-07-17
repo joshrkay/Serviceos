@@ -565,6 +565,11 @@ export class LLMGateway {
             completedAt: completedRun.completedAt,
             durationMs: completedRun.durationMs,
             costMicroCents,
+            // Persist the model that actually served the request (post-
+            // failover) so per-model spend aggregations over ai_runs match
+            // costMicroCents, which is priced at costModel's rates — not
+            // resolvedModel, which the row was created with before dispatch.
+            model: costModel,
           });
         } catch (repoErr) {
           this.logger?.error('AI-run completion logging failed (best-effort)', {

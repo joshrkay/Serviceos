@@ -67,6 +67,8 @@ describe('gateway.complete() — per-call cost accounting', () => {
     expect(runs).toHaveLength(1);
     expect(runs[0].status).toBe('completed');
     expect(runs[0].costMicroCents).toBe(450_000);
+    // Non-failover run: model on the row stays the resolved/requested model.
+    expect(runs[0].model).toBe('claude-sonnet-4-6');
   });
 
   it('increments gateway_request_cost_micro_cents_total with the documented labels', async () => {
@@ -210,6 +212,32 @@ describe('gateway.complete() — per-call cost accounting', () => {
     expect(haikuRow?.value).toBe(150_000);
     // Never attributed to the un-served Sonnet route.
     expect(value.values.find((v) => v.labels.model === 'claude-sonnet-4-6')).toBeUndefined();
+  });
+
+  it('persists the post-failover serving model on the ai_runs row, not the resolved route', async () => {
+    // ai_runs.model is written as 'claude-sonnet-4-6' at create() time (the
+    // resolved route), before the primary call fails over to Haiku. The
+    // completion update must overwrite it with the model costMicroCents was
+    // actually priced at — otherwise per-model spend aggregations over
+    // ai_runs misattribute failover traffic to Sonnet's rate.
+    const aiRunRepo = new InMemoryAiRunRepository();
+    const providers = new Map<string, LLMProvider>([
+      ['primary', failoverProvider('claude-haiku-4-5-20251001', 'openai-compat')],
+    ]);
+    const gateway = makeGateway(providers, { defaultProvider: 'primary' }, aiRunRepo);
+
+    await gateway.complete(
+      makeRequest({
+        model: 'claude-sonnet-4-6',
+        tenantId: 'tenant-1',
+        taskType: 'summarize_conversation',
+      })
+    );
+
+    const runs = await aiRunRepo.findByTaskType('tenant-1', 'summarize_conversation');
+    expect(runs).toHaveLength(1);
+    expect(runs[0].costMicroCents).toBe(150_000);
+    expect(runs[0].model).toBe('claude-haiku-4-5-20251001');
   });
 
   it('records cost when an unpriced route fails over to a priced model', async () => {

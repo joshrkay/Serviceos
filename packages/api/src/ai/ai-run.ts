@@ -53,6 +53,15 @@ export interface AiRunRepository {
       completedAt?: Date;
       durationMs?: number;
       costMicroCents?: number | null;
+      /**
+       * The model that actually served the request (post-failover), e.g.
+       * `response.model` from the gateway. When a failover swaps the serving
+       * model (Sonnet -> Haiku), the row's `model` column — set to
+       * `resolvedModel` at create() time — must be updated to match, since
+       * `costMicroCents` is priced at this model's rates. Omit to leave the
+       * existing value alone.
+       */
+      model?: string;
     }
   ): Promise<AiRun | null>;
 }
@@ -148,6 +157,7 @@ export class InMemoryAiRunRepository implements AiRunRepository {
       completedAt?: Date;
       durationMs?: number;
       costMicroCents?: number | null;
+      model?: string;
     }
   ): Promise<AiRun | null> {
     const run = this.runs.get(id);
@@ -174,6 +184,7 @@ export class InMemoryAiRunRepository implements AiRunRepository {
     // costMicroCents is legitimately `null` (priced model unknown) — only
     // skip the assignment when the caller didn't pass the field at all.
     if (result && 'costMicroCents' in result) run.costMicroCents = result.costMicroCents;
+    if (result?.model) run.model = result.model;
 
     this.runs.set(id, run);
     return { ...run };

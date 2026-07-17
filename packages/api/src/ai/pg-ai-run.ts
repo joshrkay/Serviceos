@@ -123,6 +123,7 @@ export class PgAiRunRepository extends PgBaseRepository implements AiRunReposito
       completedAt?: Date;
       durationMs?: number;
       costMicroCents?: number | null;
+      model?: string;
     }
   ): Promise<AiRun | null> {
     return this.withTenant(tenantId, async (client) => {
@@ -154,7 +155,8 @@ export class PgAiRunRepository extends PgBaseRepository implements AiRunReposito
                EXTRACT(EPOCH FROM ($5::timestamptz - started_at)) * 1000
              ELSE duration_ms
            END,
-           cost_micro_cents = CASE WHEN $11 THEN $12 ELSE cost_micro_cents END
+           cost_micro_cents = CASE WHEN $11 THEN $12 ELSE cost_micro_cents END,
+           model = COALESCE($13, model)
          WHERE tenant_id = $1 AND id = $2
          RETURNING *`,
         [
@@ -170,6 +172,7 @@ export class PgAiRunRepository extends PgBaseRepository implements AiRunReposito
           hasDurationMs ? result!.durationMs : null,
           hasCostMicroCents,
           hasCostMicroCents ? result!.costMicroCents : null,
+          result?.model ?? null,
         ]
       );
 
