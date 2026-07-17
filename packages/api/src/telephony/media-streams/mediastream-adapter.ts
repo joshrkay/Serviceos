@@ -66,6 +66,8 @@ import {
 import {
   renderTtsText,
   LANGUAGE_SWITCH_ACK,
+  SPEECH_TURN_FAILURE_REPROMPT_COPY,
+  SPEECH_TURN_FAILURE_ESCALATION_COPY,
   type SessionLanguage,
 } from '../../ai/agents/customer-calling/tts-copy';
 import { detectEmergency } from '../../ai/agents/customer-calling/emergency-detector';
@@ -393,6 +395,17 @@ const SENTIMENT_MAX_BUDGET_RATIO = 0.8;
  */
 const MAX_LANGUAGE_SWITCHES_PER_CALL = 2;
 
+/**
+ * VOX-35c — after this many CONSECUTIVE `speechTurn` failures the adapter
+ * stops apologizing and hands the caller off gracefully (spoken escalation
+ * line + clean end) instead of looping "my apologies, let me try again"
+ * forever. A single successful turn resets the counter. Two mirrors the
+ * language-switch flap budget: one transient blip earns a retry, a second
+ * back-to-back failure is a real outage and the caller should not stay
+ * trapped talking to a broken agent.
+ */
+const MAX_CONSECUTIVE_SPEECH_TURN_FAILURES = 2;
+
 interface RuntimeState {
   ws: WsLike;
   streamSid: string | null;
@@ -543,6 +556,15 @@ interface RuntimeState {
    * trap). Init false in the constructor.
    */
   circuitRecorded: boolean;
+  /**
+   * VOX-35c — number of CONSECUTIVE `speechTurn` failures on this leg. Bumped
+   * each time the dispatch throws inside the session lock; reset to 0 after
+   * any successful turn. When it reaches
+   * {@link MAX_CONSECUTIVE_SPEECH_TURN_FAILURES} the adapter escalates/hands
+   * off instead of speaking another apology, so a persistently broken turn
+   * pipeline can't trap the caller in an apology loop. Init 0.
+   */
+  consecutiveSpeechTurnFailures: number;
 }
 
 const TWILIO_QUEUE_MAX_MSGS = 200;
@@ -678,6 +700,7 @@ export class TwilioMediaStreamAdapter {
       degradedToGather: false,
       firstFinalLanguageChecked: false,
       circuitRecorded: false,
+      consecutiveSpeechTurnFailures: 0,
     };
   }
 
@@ -1146,8 +1169,20 @@ export class TwilioMediaStreamAdapter {
         error: err instanceof Error ? err.message : String(err),
         sessionId: session.id,
       });
+      // VOX-35c — the turn threw inside the session lock. The old code just
+      // returned, so the caller heard pure silence for this turn (the
+      // inbound analogue of the VOX-35b mid-stream dead-air bug). Speak a
+      // language-aware apology + reprompt through the normal outbound-turn
+      // path instead, and after repeated back-to-back failures hand the
+      // caller off gracefully rather than looping apologies forever.
+      await this.recoverFromSpeechTurnFailure(session);
       return;
     }
+
+    // speechTurn succeeded — clear the consecutive-failure counter so a
+    // later isolated blip still gets its own apology+reprompt (not an
+    // immediate escalation off a stale count).
+    this.state.consecutiveSpeechTurnFailures = 0;
 
     await this.emitSideEffects(sideEffects);
 
@@ -1276,6 +1311,77 @@ export class TwilioMediaStreamAdapter {
 
     this.state.interimEmergencyFired = true;
     await this.emitSideEffects(effects);
+  }
+
+  /**
+   * VOX-35c — recover a caller turn whose `speechTurn` dispatch threw inside
+   * the session lock. Before this the catch simply `return`ed and the caller
+   * heard dead air for the whole turn.
+   *
+   * Failure 1 (and any isolated blip): speak a language-aware apology +
+   * reprompt through the SAME outbound-turn path as any agent line
+   * (`emitSideEffects` → `runTurnWithFiller`). That reuse is deliberate — it
+   * bumps `outboundTurnId`, consumes the dangling `awaitingFirstAudioFrame`/
+   * TTFA markers armed before the failed dispatch, and makes barge-in during
+   * the apology behave exactly like barge-in during any other agent speech.
+   *
+   * Failure {@link MAX_CONSECUTIVE_SPEECH_TURN_FAILURES} (back-to-back): the
+   * turn pipeline is really down, so stop apologizing — speak the FSM's own
+   * system-failure hand-off line and end the call gracefully via the existing
+   * `end_session` close path (which finalizes the leg as a `failed` outcome
+   * and arms the durable dropped-call recovery follow-up) rather than trapping
+   * the caller in an apology loop.
+   *
+   * The counter is bumped here and reset to 0 by any successful turn.
+   */
+  private async recoverFromSpeechTurnFailure(session: VoiceSession): Promise<void> {
+    this.state.consecutiveSpeechTurnFailures += 1;
+
+    if (
+      this.state.consecutiveSpeechTurnFailures >= MAX_CONSECUTIVE_SPEECH_TURN_FAILURES
+    ) {
+      await this.speakAndEndAfterRepeatedSpeechTurnFailures(session);
+      return;
+    }
+
+    await this.speakRecoveryLine(session, SPEECH_TURN_FAILURE_REPROMPT_COPY);
+  }
+
+  /**
+   * VOX-35c — repeated-failure branch: speak the localized hand-off line then
+   * tear the call down through the normal `end_session` path. The synthetic
+   * `end_session` effect is stashed so `finalizeOnClose` reads its
+   * `payload.reason` (system_failure:* → `failed` outcome) exactly as it would
+   * for an FSM-emitted end_session.
+   */
+  private async speakAndEndAfterRepeatedSpeechTurnFailures(
+    session: VoiceSession,
+  ): Promise<void> {
+    await this.speakRecoveryLine(session, SPEECH_TURN_FAILURE_ESCALATION_COPY);
+    if (this.state.closed) return;
+    this.state.pendingFinalizeEffects = [
+      {
+        type: 'end_session',
+        payload: { reason: 'system_failure:speech_turn_repeated_failure' },
+      },
+    ];
+    this.handleClose('end_session');
+  }
+
+  /**
+   * VOX-35c — render one recovery line through the normal outbound-turn path
+   * and keep the transcript faithful by appending the spoken (localized) copy
+   * as an agent line. `rawText` is an English catalog key that
+   * `renderTtsText` localizes to the session's active language (en/es).
+   */
+  private async speakRecoveryLine(session: VoiceSession, rawText: string): Promise<void> {
+    if (this.state.closed) return;
+    await this.emitSideEffects([{ type: 'tts_play', payload: { text: rawText } }]);
+    this.deps.store.appendTranscript(session.id, {
+      speaker: 'agent',
+      text: renderTtsText(rawText, {}, this.currentSpokenLanguage()),
+      ts: Date.now(),
+    });
   }
 
   // ─── UB-C1 — live language switching ───────────────────────────────────────

@@ -25,6 +25,11 @@ import type {
   StreamingTranscriptEvent,
 } from '../../../src/voice/transcription-providers';
 import type { TtsProvider, TtsSynthesizeInput, TtsSynthesizeResult } from '../../../src/ai/tts/tts-provider';
+import {
+  renderTtsText,
+  SPEECH_TURN_FAILURE_REPROMPT_COPY,
+  SPEECH_TURN_FAILURE_ESCALATION_COPY,
+} from '../../../src/ai/agents/customer-calling/tts-copy';
 import type { SideEffect, EscalateWithContextPayload } from '../../../src/ai/agents/customer-calling/types';
 import { escalateWithContextPayloadSchema } from '../../../src/ai/agents/customer-calling/types';
 import { decodeTwilioInboundFrame } from '../../../src/telephony/media-streams/mulaw-codec';
@@ -2214,5 +2219,193 @@ describe('WS26 voice_turn_latency_ms', () => {
     } finally {
       observeSpy.mockRestore();
     }
+  });
+});
+
+// ─── VOX-35c — speechTurn-failure recovery (no silent dead-air turn) ──────────
+//
+// Before this fix, when `speechTurn` threw inside the session lock the catch
+// only logged a warn and returned — the caller heard pure silence for the
+// whole turn (the inbound analogue of the VOX-35b mid-stream dead-air bug).
+// These pins assert the recovery: an apology+reprompt is spoken through the
+// normal outbound-turn path, the counter resets on a good turn, and repeated
+// back-to-back failures hand the caller off gracefully instead of looping
+// apologies forever.
+describe('VOX-35c speechTurn-failure recovery', () => {
+  /** TTS double that records the (already-localized) text handed to synthesize. */
+  function makeCapturingTts(): { tts: TtsProvider; texts: string[] } {
+    const texts: string[] = [];
+    const tts: TtsProvider = {
+      synthesize: vi.fn(async (input: TtsSynthesizeInput): Promise<TtsSynthesizeResult> => {
+        texts.push(input.text);
+        return { audio: Buffer.alloc(640), contentType: 'audio/pcm', provider: 'test' };
+      }),
+    };
+    return { tts, texts };
+  }
+
+  it('speaks an apology+reprompt (not silence) when speechTurn throws once, and resets the counter after a good turn', async () => {
+    store.create('t', 'telephony', { callSid: 'CA-recover-1' });
+    const ws = new FakeWs();
+    const { provider, handle } = makeStreamingProvider();
+    const { tts, texts } = makeCapturingTts();
+    // Throw on the 1st + 3rd turns, succeed on the 2nd. If the counter did
+    // NOT reset after the good 2nd turn, the 3rd throw would be the "2nd
+    // consecutive" and escalate+close instead of apologizing again.
+    const speechTurn = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('gateway 500'))
+      .mockResolvedValueOnce([])
+      .mockRejectedValueOnce(new Error('gateway 500 again'));
+    const finalizeOnClose = vi.fn();
+    const adapter = new TwilioMediaStreamAdapter(
+      { store, streamingProvider: provider, speechTurn, ttsProvider: tts, finalizeOnClose },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-recover-1',
+      start: { callSid: 'CA-recover-1', accountSid: 'AC', streamSid: 'MZ-recover-1', tracks: ['inbound'] },
+    });
+    await new Promise((r) => setImmediate(r));
+
+    // Turn 1: speechTurn throws → apology audio (not silence).
+    handle.emit({ type: 'final', isFinal: true, transcript: 'hello', confidence: 0.95 });
+    await new Promise((r) => setImmediate(r));
+    let mediaFrames = ws.sent.filter((m) => (m as Record<string, unknown>).event === 'media');
+    expect(mediaFrames.length).toBeGreaterThanOrEqual(1);
+    expect(texts).toEqual([renderTtsText(SPEECH_TURN_FAILURE_REPROMPT_COPY, {}, 'en')]);
+    expect(ws.closed).toBe(false);
+
+    // Turn 2: speechTurn succeeds → resets the consecutive-failure counter.
+    handle.emit({ type: 'final', isFinal: true, transcript: 'i need an appointment', confidence: 0.95 });
+    await new Promise((r) => setImmediate(r));
+
+    // Turn 3: speechTurn throws again — because the counter reset, this is
+    // treated as a fresh 1st failure → another APOLOGY, not an escalation.
+    handle.emit({ type: 'final', isFinal: true, transcript: 'still there?', confidence: 0.95 });
+    await new Promise((r) => setImmediate(r));
+
+    expect(texts).toEqual([
+      renderTtsText(SPEECH_TURN_FAILURE_REPROMPT_COPY, {}, 'en'),
+      renderTtsText(SPEECH_TURN_FAILURE_REPROMPT_COPY, {}, 'en'),
+    ]);
+    // Never escalated/closed — the call is still live for the caller to retry.
+    expect(ws.closed).toBe(false);
+    expect(finalizeOnClose).not.toHaveBeenCalled();
+  });
+
+  it('speaks the apology in the session active language (es)', async () => {
+    const session = store.create('t', 'telephony', { callSid: 'CA-recover-es' });
+    session.language = 'es';
+    const ws = new FakeWs();
+    const { provider, handle } = makeStreamingProvider();
+    const { tts, texts } = makeCapturingTts();
+    const speechTurn = vi.fn().mockRejectedValue(new Error('gateway 500'));
+    const adapter = new TwilioMediaStreamAdapter(
+      { store, streamingProvider: provider, speechTurn, ttsProvider: tts },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-recover-es',
+      start: { callSid: 'CA-recover-es', accountSid: 'AC', streamSid: 'MZ-recover-es', tracks: ['inbound'] },
+    });
+    await new Promise((r) => setImmediate(r));
+
+    handle.emit({ type: 'final', isFinal: true, transcript: 'hola necesito ayuda', confidence: 0.95 });
+    await new Promise((r) => setImmediate(r));
+
+    const esReprompt = renderTtsText(SPEECH_TURN_FAILURE_REPROMPT_COPY, {}, 'es');
+    expect(texts).toEqual([esReprompt]);
+    // Sanity: the es rendering actually differs from the raw English key.
+    expect(esReprompt).not.toBe(SPEECH_TURN_FAILURE_REPROMPT_COPY);
+  });
+
+  it('escalates + ends gracefully after two consecutive failures (no third apology loop)', async () => {
+    store.create('t', 'telephony', { callSid: 'CA-recover-2' });
+    const ws = new FakeWs();
+    const { provider, handle } = makeStreamingProvider();
+    const { tts, texts } = makeCapturingTts();
+    const speechTurn = vi.fn().mockRejectedValue(new Error('gateway down'));
+    const finalizeOnClose = vi.fn();
+    const adapter = new TwilioMediaStreamAdapter(
+      { store, streamingProvider: provider, speechTurn, ttsProvider: tts, finalizeOnClose },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-recover-2',
+      start: { callSid: 'CA-recover-2', accountSid: 'AC', streamSid: 'MZ-recover-2', tracks: ['inbound'] },
+    });
+    await new Promise((r) => setImmediate(r));
+
+    // Failure 1 → apology; call stays live.
+    handle.emit({ type: 'final', isFinal: true, transcript: 'hello', confidence: 0.95 });
+    await new Promise((r) => setImmediate(r));
+    expect(ws.closed).toBe(false);
+
+    // Failure 2 (consecutive) → spoken hand-off line + graceful end.
+    handle.emit({ type: 'final', isFinal: true, transcript: 'anyone there', confidence: 0.95 });
+    await new Promise((r) => setImmediate(r));
+
+    // Exactly two turns were attempted — no third apology loop.
+    expect(speechTurn).toHaveBeenCalledTimes(2);
+    // The two spoken lines: apology, then the escalation hand-off.
+    expect(texts).toEqual([
+      renderTtsText(SPEECH_TURN_FAILURE_REPROMPT_COPY, {}, 'en'),
+      renderTtsText(SPEECH_TURN_FAILURE_ESCALATION_COPY, {}, 'en'),
+    ]);
+    // Graceful end through the existing end_session close path.
+    expect(ws.closed).toBe(true);
+    expect(finalizeOnClose).toHaveBeenCalledTimes(1);
+    const [, reason, sideEffects] = finalizeOnClose.mock.calls[0];
+    expect(reason).toBe('session_ended');
+    expect(sideEffects).toEqual([
+      { type: 'end_session', payload: { reason: 'system_failure:speech_turn_repeated_failure' } },
+    ]);
+  });
+
+  it('barge-in during the recovery apology behaves like normal barge-in', async () => {
+    store.create('t', 'telephony', { callSid: 'CA-recover-barge' });
+    const ws = new FakeWs();
+    const { provider, handle } = makeStreamingProvider();
+    // Hang the apology synth so it is in-flight when the caller barges in.
+    const tts: TtsProvider = {
+      synthesize: vi.fn(
+        () =>
+          new Promise(() => {
+            /* never resolves */
+          }),
+      ),
+    };
+    const speechTurn = vi.fn().mockRejectedValue(new Error('gateway 500'));
+    const adapter = new TwilioMediaStreamAdapter(
+      { store, streamingProvider: provider, speechTurn, ttsProvider: tts },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-recover-barge',
+      start: { callSid: 'CA-recover-barge', accountSid: 'AC', streamSid: 'MZ-recover-barge', tracks: ['inbound'] },
+    });
+    await new Promise((r) => setImmediate(r));
+
+    // Final → speechTurn throws → apology synth starts and hangs (agentSpeaking).
+    handle.emit({ type: 'final', isFinal: true, transcript: 'hello', confidence: 0.95 });
+    await new Promise((r) => setImmediate(r));
+
+    // Caller barges in over the apology.
+    handle.emit({ type: 'partial', isFinal: false, transcript: 'wait', confidence: 0.5 });
+    await new Promise((r) => setImmediate(r));
+
+    const clearFrames = ws.sent.filter((m) => (m as Record<string, unknown>).event === 'clear');
+    expect(clearFrames.length).toBeGreaterThanOrEqual(1);
+    const mediaFrames = ws.sent.filter((m) => (m as Record<string, unknown>).event === 'media');
+    expect(mediaFrames.length).toBe(0);
   });
 });
