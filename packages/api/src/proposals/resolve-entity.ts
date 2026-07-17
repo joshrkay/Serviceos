@@ -36,12 +36,29 @@
  *  - Audited: every resolution emits `proposal.entity_resolved` (and records the
  *    type transition).
  *  - Tenant-scoped: every read/write goes through the tenant-scoped repo.
+ *
+ * P8/U-multi (multi-ambiguity chain): a single utterance can carry MORE than
+ * one ambiguous reference ("invoice Bob for the Rodriguez job" where both
+ * "Bob" and "Rodriguez job" match several records). The producer
+ * (voice-action-router's emitClarification) can only surface one candidate
+ * list per voice_clarification, so it persists the rest on
+ * `sourceContext.pendingEntityAmbiguities` and warns the operator more picks
+ * are coming. Consuming that queue lives HERE: after applying a pick, if
+ * `pendingEntityAmbiguities` is still non-empty, resolution does NOT redraft
+ * — it pops the next queued ambiguity and turns THIS SAME proposal row back
+ * into a fresh voice_clarification for it (mirroring emitClarification's
+ * payload/summary/explanation/sourceContext shape), carrying every
+ * already-resolved entity forward on `sourceContext.resolvedEntities` so the
+ * eventual redraft (once the queue drains) has all of them, not just the
+ * last one. Reusing the same proposal id — rather than creating a new
+ * proposal per queued ambiguity — is also what makes a retried/double-tapped
+ * pick safe: see the `alreadyResolved` check in `resolveProposalEntity`.
  */
 import { Role, hasPermission } from '../auth/rbac';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { ForbiddenError, NotFoundError, ValidationError } from '../shared/errors';
 import { Proposal, ProposalRepository, missingFieldsFor } from './proposal';
-import { validateProposalPayload } from './contracts';
+import { assertValidProposalPayload, validateProposalPayload } from './contracts';
 import type { IntentType } from '../ai/orchestration/intent-classifier';
 import type { TaskContext } from '../ai/tasks/task-handlers';
 import { entitiesForProposal } from '../workers/voice-action-router';
@@ -140,20 +157,13 @@ function payloadFieldForKind(kind: string | undefined): string {
   }
 }
 
-/** Read the candidate set from payload (where the emitter writes it) or, as a
- *  fallback, sourceContext. */
-function readCandidates(
-  payload: Record<string, unknown>,
-  sourceContext: Record<string, unknown>,
-): EntityCandidate[] {
-  const fromPayload = payload.entityCandidates;
-  const fromContext = sourceContext.entityCandidates;
-  const raw = Array.isArray(fromPayload)
-    ? fromPayload
-    : Array.isArray(fromContext)
-      ? fromContext
-      : [];
-  return raw
+/** Defensively parse a raw candidate array (payload/sourceContext copy, or a
+ *  queued ambiguity's candidate list) into the local, relaxed shape. Shared by
+ *  `readCandidates` and `readPendingAmbiguities` so both tolerate the same
+ *  malformed/legacy shapes. */
+function parseCandidateList(raw: unknown): EntityCandidate[] {
+  const arr = Array.isArray(raw) ? raw : [];
+  return arr
     .filter((c): c is Record<string, unknown> => c !== null && typeof c === 'object')
     .map((c) => ({
       id: typeof c.id === 'string' ? c.id : '',
@@ -163,6 +173,63 @@ function readCandidates(
       score: typeof c.score === 'number' ? c.score : undefined,
     }))
     .filter((c) => c.id.length > 0);
+}
+
+/** Read the candidate set from payload (where the emitter writes it) or, as a
+ *  fallback, sourceContext. */
+function readCandidates(
+  payload: Record<string, unknown>,
+  sourceContext: Record<string, unknown>,
+): EntityCandidate[] {
+  const fromPayload = Array.isArray(payload.entityCandidates) ? payload.entityCandidates : undefined;
+  return parseCandidateList(fromPayload ?? sourceContext.entityCandidates);
+}
+
+/** One already-resolved entity along a multi-ambiguity resolution chain,
+ *  accumulated on `sourceContext.resolvedEntities` across pops. `field` is
+ *  the payload field this entity's id fills (see `payloadFieldForKind`) —
+ *  persisting it means the eventual redraft doesn't have to re-derive it. */
+interface ResolvedEntityRecord {
+  id: string;
+  field: string;
+  kind?: string;
+  label?: string;
+}
+
+function readResolvedEntities(sourceContext: Record<string, unknown>): ResolvedEntityRecord[] {
+  const raw = sourceContext.resolvedEntities;
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((r): r is Record<string, unknown> => r !== null && typeof r === 'object')
+    .map((r) => ({
+      id: typeof r.id === 'string' ? r.id : '',
+      field: typeof r.field === 'string' ? r.field : '',
+      kind: typeof r.kind === 'string' ? r.kind : undefined,
+      label: typeof r.label === 'string' ? r.label : undefined,
+    }))
+    .filter((r) => r.id.length > 0 && r.field.length > 0);
+}
+
+/** A queued ambiguous reference from the SAME utterance, not yet surfaced —
+ *  mirrors voice-action-router's `SingleEntityAmbiguity`, read back off
+ *  `sourceContext.pendingEntityAmbiguities` (see emitClarification). */
+interface PendingEntityAmbiguity {
+  entityKind: string;
+  reference: string;
+  candidates: EntityCandidate[];
+}
+
+function readPendingAmbiguities(sourceContext: Record<string, unknown>): PendingEntityAmbiguity[] {
+  const raw = sourceContext.pendingEntityAmbiguities;
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((a): a is Record<string, unknown> => a !== null && typeof a === 'object')
+    .map((a) => ({
+      entityKind: typeof a.entityKind === 'string' ? a.entityKind : '',
+      reference: typeof a.reference === 'string' ? a.reference : '',
+      candidates: parseCandidateList(a.candidates),
+    }))
+    .filter((a) => a.entityKind.length > 0 && a.candidates.length > 0);
 }
 
 /**
@@ -220,6 +287,20 @@ export async function resolveProposalEntity(
   // never an arbitrary off-list id.
   const chosen = candidates.find((c) => c.id === candidateId);
   if (!chosen) {
+    // Idempotency (mirrors the router's createDeduped: a redelivered/
+    // double-tapped request is a successful no-op, not an error). Resolution
+    // mutates a SINGLE proposal row across the whole multi-ambiguity chain
+    // (see the pending-ambiguity branch below) rather than creating a new
+    // row per pick — so once a pick has been applied, its candidateId no
+    // longer appears in the CURRENT candidate set (the row has moved on to
+    // the next ambiguity, or been redrafted away entirely). If the id
+    // matches an entity we already resolved earlier in this chain, this is
+    // that same pick arriving twice: return the current state untouched
+    // instead of 400ing a request that already succeeded once.
+    const alreadyResolved = readResolvedEntities(sourceContext).some((r) => r.id === candidateId);
+    if (alreadyResolved) {
+      return proposal;
+    }
     throw new ValidationError('candidateId is not among this proposal’s candidates');
   }
 
@@ -230,6 +311,48 @@ export async function resolveProposalEntity(
     chosen.kind ??
     (typeof sourceContext.entityKind === 'string' ? sourceContext.entityKind : undefined);
   const field = payloadFieldForKind(entityKind);
+
+  // Accumulate this pick. The eventual redraft (once the pending-ambiguity
+  // queue drains, see below) needs EVERY resolved entity from this chain,
+  // not just the last one.
+  const resolvedEntities: ResolvedEntityRecord[] = [
+    ...readResolvedEntities(sourceContext),
+    {
+      id: chosen.id,
+      field,
+      ...(entityKind ? { kind: entityKind } : {}),
+      ...(chosen.label ? { label: chosen.label } : {}),
+    },
+  ];
+
+  // P8/U-multi — more ambiguous references from the SAME utterance are
+  // queued behind this one (producer: emitClarification's
+  // additionalAmbiguities → sourceContext.pendingEntityAmbiguities). Core
+  // Pattern: ambiguity on a voice path is always a clarification, never a
+  // guess — so as long as ANY reference is still unresolved, advance to the
+  // next picker instead of redrafting/annotating with the others left as
+  // free text (or silently dropped).
+  const pending = readPendingAmbiguities(sourceContext);
+  if (pending.length > 0) {
+    const [next, ...rest] = pending;
+    return advanceToNextAmbiguity({
+      tenantId,
+      proposalId,
+      actorId,
+      actorRole,
+      proposal,
+      payload,
+      sourceContext,
+      chosen,
+      entityKind,
+      field,
+      candidateId,
+      resolvedEntities,
+      next,
+      rest,
+      deps,
+    });
+  }
 
   // U1 (E9) — re-draft path: when the producer persisted the original intent
   // AND a handler factory is wired, re-run the ORIGINAL task handler with the
@@ -254,6 +377,7 @@ export async function resolveProposalEntity(
       entityKind,
       field,
       candidateId,
+      resolvedEntities,
       originalIntent,
       handler: redraftHandler,
       deps,
@@ -261,14 +385,14 @@ export async function resolveProposalEntity(
   }
 
   // ── Annotate-only fallback (no originalIntent / no factory) ───────────────
-  // Re-draft: resolve the reference to the chosen id. We stamp it onto the
-  // payload (the field its kind fills) so the executor reads a verified id
-  // instead of the free text it choked on, and onto targetEntityId for the
-  // detail/deep-link surfaces.
-  const nextPayload: Record<string, unknown> = {
-    ...payload,
-    [field]: chosen.id,
-  };
+  // Re-draft: resolve every reference gathered across this chain to its
+  // chosen id. We stamp each onto the payload (the field its kind fills) so
+  // the executor reads verified ids instead of the free text it choked on,
+  // and the LAST one onto targetEntityId for the detail/deep-link surfaces.
+  const nextPayload: Record<string, unknown> = { ...payload };
+  for (const resolved of resolvedEntities) {
+    nextPayload[resolved.field] = resolved.id;
+  }
   // The clarification is resolved — drop the candidate list and the
   // ambiguity markers so the card no longer renders a picker.
   delete nextPayload.entityCandidates;
@@ -279,8 +403,11 @@ export async function resolveProposalEntity(
   delete nextSourceContext.entityReference;
   delete nextSourceContext.entityKind;
   delete nextSourceContext.originalIntent;
-  // Record the resolution so the re-drafted action (and any later audit) can
-  // trace which reference was resolved to which id.
+  delete nextSourceContext.pendingEntityAmbiguities;
+  // Record every resolution (and, back-compat, the last one alone under the
+  // singular key) so the re-drafted action (and any later audit) can trace
+  // which reference(s) were resolved to which id(s).
+  nextSourceContext.resolvedEntities = resolvedEntities;
   nextSourceContext.resolvedEntity = {
     id: chosen.id,
     ...(entityKind ? { kind: entityKind } : {}),
@@ -342,6 +469,10 @@ async function redraftResolvedProposal(args: {
   entityKind: string | undefined;
   field: string;
   candidateId: string;
+  /** Every entity resolved across this chain (this pick included) — see the
+   *  module doc comment (P8/U-multi). Single-ambiguity callers pass a
+   *  one-element array, so this subsumes the old chosen-only behavior. */
+  resolvedEntities: ResolvedEntityRecord[];
   originalIntent: OriginalIntent;
   handler: import('../ai/tasks/task-handlers').TaskHandler;
   deps: ResolveEntityDeps;
@@ -357,6 +488,7 @@ async function redraftResolvedProposal(args: {
     entityKind,
     field,
     candidateId,
+    resolvedEntities,
     originalIntent,
     handler,
     deps,
@@ -377,14 +509,21 @@ async function redraftResolvedProposal(args: {
             originalIntent.extractedEntities as never,
           ) ?? {}),
         };
-  const existingEntities: Record<string, unknown> = {
-    ...mappedEntities,
-    [field]: chosen.id,
-  };
+  // P8/U-multi — stamp EVERY resolved entity from this chain, not just the
+  // one that triggered this call. A two-ambiguity utterance ("Bob" +
+  // "Rodriguez job") resolves customerId on the first pick and jobId on the
+  // second; by the time we get here (no pending ambiguities left) both must
+  // land, or the first resolution would silently regress to free text.
+  const existingEntities: Record<string, unknown> = { ...mappedEntities };
+  for (const resolved of resolvedEntities) {
+    existingEntities[resolved.field] = resolved.id;
+  }
   // The ambiguous free-text reference is now resolved — don't carry it forward
   // as a competing name on the same kind.
-  if (entityKind === 'customer') delete existingEntities.customerName;
-  if (entityKind === 'job') delete existingEntities.jobReference;
+  for (const resolved of resolvedEntities) {
+    if (resolved.kind === 'customer') delete existingEntities.customerName;
+    if (resolved.kind === 'job') delete existingEntities.jobReference;
+  }
 
   // Stored transcript is the original message — re-draft against it, not the
   // clarification summary.
@@ -392,6 +531,9 @@ async function redraftResolvedProposal(args: {
     typeof sourceContext.transcript === 'string' ? sourceContext.transcript : proposal.summary;
   const conversationId =
     typeof sourceContext.conversationId === 'string' ? sourceContext.conversationId : undefined;
+  // A verified customer id may have been resolved on ANY pick in the chain
+  // (not necessarily this one) — find it among everything resolved so far.
+  const resolvedCustomerId = resolvedEntities.find((r) => r.kind === 'customer')?.id;
 
   const context: TaskContext = {
     tenantId,
@@ -401,7 +543,7 @@ async function redraftResolvedProposal(args: {
     existingEntities,
     // A verified customer id flows onto the context too (some handlers read
     // context.customerId), mirroring the non-ambiguous path.
-    ...(entityKind === 'customer' ? { customerId: chosen.id } : {}),
+    ...(resolvedCustomerId ? { customerId: resolvedCustomerId } : {}),
   };
 
   const { proposal: drafted } = await handler.handle(context);
@@ -429,6 +571,10 @@ async function redraftResolvedProposal(args: {
   delete nextSourceContext.entityReference;
   delete nextSourceContext.entityKind;
   delete nextSourceContext.originalIntent;
+  delete nextSourceContext.pendingEntityAmbiguities;
+  // Record every resolution from this chain (and, back-compat, the last one
+  // alone under the singular key).
+  nextSourceContext.resolvedEntities = resolvedEntities;
   nextSourceContext.resolvedEntity = {
     id: chosen.id,
     ...(entityKind ? { kind: entityKind } : {}),
@@ -493,6 +639,174 @@ async function redraftResolvedProposal(args: {
           toProposalType: drafted.proposalType,
           intentType: originalIntent.intentType,
           movedToReview: true,
+          // P8/U-multi trace: how many entity references this utterance's
+          // chain resolved in total (1 for the common single-ambiguity case).
+          resolvedCount: resolvedEntities.length,
+        },
+      }),
+    );
+  }
+
+  const fresh = await deps.proposalRepo.findById(tenantId, proposalId);
+  return fresh ?? proposal;
+}
+
+/**
+ * P8/U-multi — advance a multi-entity-ambiguity clarification to the NEXT
+ * queued ambiguity instead of redrafting/annotating.
+ *
+ * Mirrors emitClarification's entity-ambiguity payload/summary/explanation/
+ * sourceContext shape (voice-action-router.ts) so the surfaced picker is
+ * indistinguishable from one the producer emitted directly — the operator
+ * sees "which job?" appear right after tapping "which customer?", exactly as
+ * the first clarification's explanation promised ("N more references will
+ * need picking after this").
+ *
+ * Deliberately mutates the SAME proposal row (rather than creating a new
+ * one) instead of the producer's create-a-new-proposal pattern: this one
+ * utterance already has exactly one live proposal representing "the question
+ * the operator still owes an answer to", and there is never more than one
+ * such question in flight at a time (the payload contract only ever holds
+ * one candidate list). Reusing the row is also what makes a retried pick
+ * idempotent — see the `alreadyResolved` check in `resolveProposalEntity`,
+ * which this makes possible: once this runs, the prior pick's candidateId is
+ * gone from the proposal's live candidate set, so a duplicate request can
+ * never re-trigger it.
+ */
+async function advanceToNextAmbiguity(args: {
+  tenantId: string;
+  proposalId: string;
+  actorId: string;
+  actorRole: Role;
+  proposal: Proposal;
+  payload: Record<string, unknown>;
+  sourceContext: Record<string, unknown>;
+  chosen: EntityCandidate;
+  entityKind: string | undefined;
+  field: string;
+  candidateId: string;
+  resolvedEntities: ResolvedEntityRecord[];
+  next: PendingEntityAmbiguity;
+  rest: PendingEntityAmbiguity[];
+  deps: ResolveEntityDeps;
+}): Promise<Proposal> {
+  const {
+    tenantId,
+    proposalId,
+    actorId,
+    actorRole,
+    proposal,
+    payload,
+    sourceContext,
+    chosen,
+    entityKind,
+    field,
+    candidateId,
+    resolvedEntities,
+    next,
+    rest,
+    deps,
+  } = args;
+
+  // Payload contract (voiceClarificationPayloadSchema) requires label/score
+  // on each candidate. Queued candidates always came from a real
+  // EntityCandidate (producer-side, both required) — the fallbacks here only
+  // guard against a malformed/legacy persisted shape, mirroring the
+  // defensive parsing in readPendingAmbiguities.
+  const nextPayloadCandidates = next.candidates.map((c) => ({
+    id: c.id,
+    label: c.label ?? c.id,
+    ...(c.hint ? { hint: c.hint } : {}),
+    score: c.score ?? 0,
+  }));
+  const nextPayload: Record<string, unknown> = {
+    ...payload,
+    entityReference: next.reference,
+    entityCandidates: nextPayloadCandidates,
+  };
+  // P2-002 AI-safety gate — same guard emitClarification applies before
+  // persisting a voice_clarification, so a future edit that breaks the
+  // contract trips here instead of writing a malformed proposal.
+  assertValidProposalPayload('voice_clarification', nextPayload);
+
+  // Summary/explanation mirror emitClarification's entityAmbiguity branch
+  // (voice-action-router.ts) so this reads exactly like a freshly emitted
+  // clarification for the next reference.
+  const moreCount = rest.length;
+  const summary = `Which ${next.entityKind}? "${next.reference}" matched ${next.candidates.length} records`;
+  const explanation =
+    `Heard the request, but "${next.reference}" matches more than one ${next.entityKind}. Tap the right one below.` +
+    (moreCount > 0
+      ? ` (${moreCount} more reference${moreCount === 1 ? '' : 's'} will need picking after this.)`
+      : '');
+
+  const nextSourceContext: Record<string, unknown> = { ...sourceContext };
+  nextSourceContext.entityKind = next.entityKind;
+  nextSourceContext.entityReference = next.reference;
+  nextSourceContext.entityCandidates = next.candidates.map((c) => ({
+    id: c.id,
+    kind: c.kind ?? next.entityKind,
+    label: c.label,
+    ...(c.hint ? { hint: c.hint } : {}),
+    score: c.score,
+  }));
+  if (rest.length > 0) {
+    nextSourceContext.pendingEntityAmbiguities = rest.map((a) => ({
+      entityKind: a.entityKind,
+      reference: a.reference,
+      candidates: a.candidates.map((c) => ({
+        id: c.id,
+        kind: c.kind,
+        label: c.label,
+        ...(c.hint ? { hint: c.hint } : {}),
+        score: c.score,
+      })),
+    }));
+  } else {
+    delete nextSourceContext.pendingEntityAmbiguities;
+  }
+  // originalIntent rides forward untouched — the eventual redraft still
+  // needs it. Accumulate this pick so the eventual redraft (or annotate
+  // fallback) sees every resolution from the chain, not just the last one.
+  nextSourceContext.resolvedEntities = resolvedEntities;
+  nextSourceContext.resolvedEntity = resolvedEntities[resolvedEntities.length - 1];
+
+  await deps.proposalRepo.update(tenantId, proposalId, {
+    payload: nextPayload,
+    summary,
+    explanation,
+    sourceContext: nextSourceContext,
+    // Best-effort deep-link target for THIS pick — the redraft overwrites it
+    // with whichever entity is resolved last, same as the single-ambiguity
+    // path always did.
+    targetEntityId: chosen.id,
+    ...(entityKind ? { targetEntityType: entityKind } : {}),
+  });
+  // Deliberately no status transition: this proposal is not resolved, it's
+  // still awaiting an operator pick — exactly the state a freshly emitted
+  // voice_clarification starts in (emitClarification never sets
+  // sourceTrustTier, so it always lands in 'draft'). Promoting to
+  // 'ready_for_review' here would misrepresent an open question as an
+  // approvable action.
+
+  if (deps.auditRepo) {
+    await deps.auditRepo.create(
+      createAuditEvent({
+        tenantId,
+        actorId,
+        actorRole,
+        eventType: 'proposal.entity_resolved',
+        entityType: 'proposal',
+        entityId: proposalId,
+        metadata: {
+          candidateId,
+          ...(entityKind ? { entityKind } : {}),
+          field,
+          movedToReview: false,
+          // Trace which ambiguity this chain advanced to and how many are
+          // still queued behind it.
+          nextEntityKind: next.entityKind,
+          remainingAmbiguities: rest.length,
         },
       }),
     );
