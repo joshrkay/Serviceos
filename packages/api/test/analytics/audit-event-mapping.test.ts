@@ -232,6 +232,111 @@ describe('broadened domains (jobs / customers / voice / ai)', () => {
   });
 });
 
+describe('remaining domains (catalog / settings / integrations / agreements / feedback / notes / files)', () => {
+  it('catalog: keeps category/unit/price, drops the business name', () => {
+    const pe = auditEventToProductEvent(
+      ev({
+        eventType: 'catalog_item.created',
+        entityType: 'catalog_item',
+        metadata: { name: 'Premium HVAC Tune-Up', category: 'hvac', unit: 'each', unitPriceCents: 12900 },
+      }),
+    );
+    expect(pe!.name).toBe('catalog_item_created');
+    expect(pe!.properties.feature_domain).toBe('catalog');
+    expect(pe!.properties).toMatchObject({ category: 'hvac', unit: 'each', unit_price_cents: 12900 });
+    expect(Object.keys(pe!.properties)).not.toContain('name');
+    expect(Object.values(pe!.properties)).not.toContain('Premium HVAC Tune-Up');
+  });
+
+  it('integrations: forward the provider only, never ip/userAgent/realm', () => {
+    const acct = auditEventToProductEvent(
+      ev({
+        eventType: 'accounting_integration.connected',
+        entityType: 'accounting_integration',
+        actorRole: 'system',
+        metadata: { provider: 'quickbooks', realmId: 'r_123', ipAddress: '198.51.100.9', userAgent: 'Chrome' },
+      }),
+    );
+    expect(acct!.name).toBe('accounting_integration_connected');
+    expect(acct!.properties.feature_domain).toBe('integration');
+    expect(acct!.properties.provider).toBe('quickbooks');
+    for (const leak of ['realmId', 'realm_id', 'ipAddress', 'ip_address', 'userAgent', 'user_agent']) {
+      expect(Object.keys(acct!.properties)).not.toContain(leak);
+    }
+    expect(Object.values(acct!.properties)).not.toContain('198.51.100.9');
+
+    const cal = auditEventToProductEvent(
+      ev({ eventType: 'calendar_integration.connected', entityType: 'oauth_state', metadata: { provider: 'google', ipAddress: '203.0.113.1', userAgent: 'x' } }),
+    );
+    expect(cal!.properties).toEqual(
+      expect.objectContaining({ provider: 'google', feature_domain: 'integration' }),
+    );
+    expect(Object.values(cal!.properties)).not.toContain('203.0.113.1');
+  });
+
+  it('settings: standing instruction drops the free-text instruction body', () => {
+    const pe = auditEventToProductEvent(
+      ev({
+        eventType: 'standing_instruction.created',
+        entityType: 'standing_instruction',
+        metadata: { instruction: 'Always call Mrs. Kim on her cell before arriving, gate code 4417', scope: 'tenant', source: 'web' },
+      }),
+    );
+    expect(pe!.name).toBe('standing_instruction_created');
+    expect(pe!.properties.feature_domain).toBe('settings');
+    expect(pe!.properties).toMatchObject({ scope: 'tenant', source: 'web' });
+    expect(Object.keys(pe!.properties)).not.toContain('instruction');
+    expect(Object.values(pe!.properties).join(' ')).not.toContain('gate code 4417');
+  });
+
+  it('feedback: keeps rating + has_comment, drops ip/userAgent and never the comment text', () => {
+    const pe = auditEventToProductEvent(
+      ev({
+        eventType: 'feedback_response.submitted',
+        entityType: 'feedback_response',
+        actorRole: 'customer',
+        metadata: { requestId: 'req1', jobId: 'j1', rating: 5, hasComment: true, ipAddress: '192.0.2.5', userAgent: 'Safari' },
+      }),
+    );
+    expect(pe!.name).toBe('feedback_submitted');
+    expect(pe!.properties.feature_domain).toBe('feedback');
+    expect(pe!.properties).toMatchObject({ job_id: 'j1', rating: 5, has_comment: true });
+    for (const leak of ['ipAddress', 'ip_address', 'userAgent', 'user_agent', 'comment']) {
+      expect(Object.keys(pe!.properties)).not.toContain(leak);
+    }
+    expect(Object.values(pe!.properties)).not.toContain('192.0.2.5');
+  });
+
+  it('agreements: maintenance contract keeps cadence, drops the free-text title', () => {
+    const pe = auditEventToProductEvent(
+      ev({ eventType: 'maintenance_contract.created', entityType: 'maintenance_contract', metadata: { title: "Bob's Diner quarterly HVAC", cadence: 'quarterly' } }),
+    );
+    expect(pe!.name).toBe('maintenance_contract_created');
+    expect(pe!.properties.feature_domain).toBe('agreement');
+    expect(pe!.properties.cadence).toBe('quarterly');
+    expect(Object.keys(pe!.properties)).not.toContain('title');
+    expect(Object.values(pe!.properties)).not.toContain("Bob's Diner quarterly HVAC");
+  });
+
+  it('notes: only the target entity ref (never the note body), in the customer domain', () => {
+    const pe = auditEventToProductEvent(
+      ev({ eventType: 'note.created', entityType: 'note', metadata: { entityType: 'customer', entityId: 'cust_1' } }),
+    );
+    expect(pe!.name).toBe('note_created');
+    expect(pe!.properties.feature_domain).toBe('customer');
+    expect(pe!.properties).toMatchObject({ note_target_type: 'customer', note_target_id: 'cust_1' });
+  });
+
+  it('job photos map to the job domain (category only)', () => {
+    const pe = auditEventToProductEvent(
+      ev({ eventType: 'job.photo.attached', entityType: 'job', metadata: { photoId: 'p1', fileId: 'f1', category: 'before' } }),
+    );
+    expect(pe!.name).toBe('job_photo_attached');
+    expect(pe!.properties.feature_domain).toBe('job');
+    expect(pe!.properties.category).toBe('before');
+  });
+});
+
 describe('distinctIdFor', () => {
   it('passes human actor ids through', () => {
     expect(distinctIdFor(ev({ eventType: 'proposal.approved', actorRole: 'owner', actorId: 'clerk_owner' }))).toBe(

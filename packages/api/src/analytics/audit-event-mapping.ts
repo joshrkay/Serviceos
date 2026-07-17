@@ -217,6 +217,100 @@ const ALLOWLIST: Record<string, Mapping> = {
     domain: 'ai',
     props: (e) => pickMeta(e.metadata, { channel: 'channel', phase: 'phase' }),
   },
+
+  // Catalog (NOT the item/bundle `name` — business label, kept out uniformly)
+  'catalog_item.created': {
+    name: 'catalog_item_created',
+    domain: 'catalog',
+    props: (e) => pickMeta(e.metadata, { category: 'category', unit: 'unit', unit_price_cents: 'unitPriceCents' }),
+  },
+  'catalog_item.updated': { name: 'catalog_item_updated', domain: 'catalog' },
+  'service_bundle.created': {
+    name: 'service_bundle_created',
+    domain: 'catalog',
+    props: (e) => pickMeta(e.metadata, { vertical_type: 'verticalType' }),
+  },
+
+  // Settings
+  'settings.tenant.updated': { name: 'settings_updated', domain: 'settings' },
+  'message_template.created': {
+    name: 'message_template_created',
+    domain: 'settings',
+    props: (e) => pickMeta(e.metadata, { channel: 'channel', category: 'category' }),
+  },
+  'standing_instruction.created': {
+    name: 'standing_instruction_created',
+    domain: 'settings',
+    // NOT `instruction` (free text).
+    props: (e) => pickMeta(e.metadata, { scope: 'scope', source: 'source' }),
+  },
+  'mode_switched': {
+    name: 'mode_switched',
+    domain: 'settings',
+    props: (e) => pickMeta(e.metadata, { from_mode: 'from_mode', to_mode: 'to_mode' }),
+  },
+  'pack_activation.activated': {
+    name: 'pack_activated',
+    domain: 'settings',
+    props: (e) => pickMeta(e.metadata, { pack_id: 'packId', reactivated: 'reactivated' }),
+  },
+
+  // Integrations (provider only — NOT ipAddress / userAgent / realmId / redirect)
+  'accounting_integration.connected': {
+    name: 'accounting_integration_connected',
+    domain: 'integration',
+    props: (e) => pickMeta(e.metadata, { provider: 'provider' }),
+  },
+  'calendar_integration.connected': {
+    name: 'calendar_integration_connected',
+    domain: 'integration',
+    props: (e) => pickMeta(e.metadata, { provider: 'provider' }),
+  },
+  'calendar_integration.disconnected': {
+    name: 'calendar_integration_disconnected',
+    domain: 'integration',
+    props: (e) => pickMeta(e.metadata, { provider: 'provider' }),
+  },
+
+  // Agreements / contracts
+  'service_agreement.created': { name: 'service_agreement_created', domain: 'agreement' },
+  'service_agreement.renewed': {
+    name: 'service_agreement_renewed',
+    domain: 'agreement',
+    props: (e) => pickMeta(e.metadata, { renewal_count: 'renewalCount' }),
+  },
+  'maintenance_contract.created': {
+    name: 'maintenance_contract_created',
+    domain: 'agreement',
+    // NOT `title` (free-text contract title).
+    props: (e) => pickMeta(e.metadata, { cadence: 'cadence' }),
+  },
+
+  // Feedback (NOT ipAddress / userAgent; comment presence only, never the text)
+  'feedback_response.submitted': {
+    name: 'feedback_submitted',
+    domain: 'feedback',
+    props: (e) => pickMeta(e.metadata, { job_id: 'jobId', rating: 'rating', has_comment: 'hasComment' }),
+  },
+  'review_response.executed': {
+    name: 'review_response_executed',
+    domain: 'feedback',
+    props: (e) => pickMeta(e.metadata, { proposal_type: 'proposalType', review_id: 'reviewId' }),
+  },
+
+  // Notes — CRM activity; only the target entity reference, never the note body
+  'note.created': {
+    name: 'note_created',
+    domain: 'customer',
+    props: (e) => pickMeta(e.metadata, { note_target_type: 'entityType', note_target_id: 'entityId' }),
+  },
+
+  // Job files / photos
+  'job.photo.attached': {
+    name: 'job_photo_attached',
+    domain: 'job',
+    props: (e) => pickMeta(e.metadata, { category: 'category' }),
+  },
 };
 
 const SERVER_DISTINCT_ID: Record<'agent' | 'system', string> = {

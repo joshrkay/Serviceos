@@ -52,7 +52,32 @@ export type ProductEventName =
   // AI agent activity
   | 'unsupervised_proposal_routed'
   | 'escalation_requested'
-  | 'autonomous_booking_undone';
+  | 'autonomous_booking_undone'
+  // Catalog
+  | 'catalog_item_created'
+  | 'catalog_item_updated'
+  | 'service_bundle_created'
+  // Settings
+  | 'settings_updated'
+  | 'message_template_created'
+  | 'standing_instruction_created'
+  | 'mode_switched'
+  | 'pack_activated'
+  // Integrations
+  | 'accounting_integration_connected'
+  | 'calendar_integration_connected'
+  | 'calendar_integration_disconnected'
+  // Agreements / contracts
+  | 'service_agreement_created'
+  | 'service_agreement_renewed'
+  | 'maintenance_contract_created'
+  // Feedback
+  | 'feedback_submitted'
+  | 'review_response_executed'
+  // Notes (CRM activity)
+  | 'note_created'
+  // Job files / photos
+  | 'job_photo_attached';
 
 /**
  * Runtime list of every catalogued product-event name. Kept in lockstep with
@@ -90,6 +115,24 @@ export const PRODUCT_EVENT_NAMES: readonly ProductEventName[] = [
   'unsupervised_proposal_routed',
   'escalation_requested',
   'autonomous_booking_undone',
+  'catalog_item_created',
+  'catalog_item_updated',
+  'service_bundle_created',
+  'settings_updated',
+  'message_template_created',
+  'standing_instruction_created',
+  'mode_switched',
+  'pack_activated',
+  'accounting_integration_connected',
+  'calendar_integration_connected',
+  'calendar_integration_disconnected',
+  'service_agreement_created',
+  'service_agreement_renewed',
+  'maintenance_contract_created',
+  'feedback_submitted',
+  'review_response_executed',
+  'note_created',
+  'job_photo_attached',
 ] as const;
 
 // Compile-time guard: every union member must appear in PRODUCT_EVENT_NAMES
