@@ -98,6 +98,7 @@ import { CreateStandingInstructionTaskHandler } from '../ai/tasks/standing-instr
 import type { ReviewRepository } from '../reputation/review';
 import type { BuildReviewResponseProposalDeps } from '../reputation/build-proposal';
 import { instrument } from '../monitoring/instrumentation';
+import { recordVoiceError } from '../analytics/posthog';
 import {
   ComplaintTaskHandler,
   complaintSeverity,
@@ -2052,54 +2053,83 @@ export function createVoiceActionRouterWorker(
         }
 
         if (decomposition && decomposition.isMultiAction) {
-          await processChain(
-            deps,
-            handlers,
-            decomposition.segments,
-            {
-              tenantId,
-              userId,
-              conversationId,
-              recordingId,
-              customerId,
-              ...(jobId ? { jobId } : {}),
-              verticalPromptSection,
-              ...(activeStandingInstructions ? { activeStandingInstructions } : {}),
-              ...(extendedIntents ? { extendedIntents: true } : {}),
-            },
-            log,
-          );
+          try {
+            await processChain(
+              deps,
+              handlers,
+              decomposition.segments,
+              {
+                tenantId,
+                userId,
+                conversationId,
+                recordingId,
+                customerId,
+                ...(jobId ? { jobId } : {}),
+                verticalPromptSection,
+                ...(activeStandingInstructions ? { activeStandingInstructions } : {}),
+                ...(extendedIntents ? { extendedIntents: true } : {}),
+              },
+              log,
+            );
+          } catch (err) {
+            // OBS — fired before rethrow so the queue's retry semantics
+            // (instrument() above tags+captures to Sentry, the worker
+            // runtime retries) are completely unchanged.
+            recordVoiceError({ errorKind: 'action_router_failed', channel: 'worker', tenantId });
+            throw err;
+          }
           return;
         }
       }
 
-      const outcome = await processSegment(
-        deps,
-        handlers,
-        {
-          tenantId,
-          userId,
-          segmentText: effectiveTranscript,
-          conversationId,
-          recordingId,
-          customerId,
-          ...(jobId ? { jobId } : {}),
-          verticalPromptSection,
-          ...(activeStandingInstructions ? { activeStandingInstructions } : {}),
-          ...(extendedIntents ? { extendedIntents: true } : {}),
-          // Single-action path: apply the per-recording dedup keys.
-          applyDedup: true,
-        },
-        log,
-      );
-
-      if (outcome.kind === 'proposal') {
-        await createDeduped(
-          deps.proposalRepo,
-          stampSingleActionDedup(outcome.proposal, recordingId),
-          recordingId,
+      let outcome: Awaited<ReturnType<typeof processSegment>>;
+      try {
+        outcome = await processSegment(
+          deps,
+          handlers,
+          {
+            tenantId,
+            userId,
+            segmentText: effectiveTranscript,
+            conversationId,
+            recordingId,
+            customerId,
+            ...(jobId ? { jobId } : {}),
+            verticalPromptSection,
+            ...(activeStandingInstructions ? { activeStandingInstructions } : {}),
+            ...(extendedIntents ? { extendedIntents: true } : {}),
+            // Single-action path: apply the per-recording dedup keys.
+            applyDedup: true,
+          },
           log,
         );
+      } catch (err) {
+        // OBS — fired before rethrow; the queue's retry semantics
+        // (§11 H3's instrument() + worker runtime) are unchanged.
+        recordVoiceError({ errorKind: 'action_router_failed', channel: 'worker', tenantId });
+        throw err;
+      }
+
+      if (outcome.kind === 'proposal') {
+        try {
+          await createDeduped(
+            deps.proposalRepo,
+            stampSingleActionDedup(outcome.proposal, recordingId),
+            recordingId,
+            log,
+          );
+        } catch (err) {
+          // OBS — fired before rethrow; a proposalRepo failure here still
+          // propagates unchanged so the queue retries (pinned by the
+          // existing "propagates proposalRepo errors" test).
+          recordVoiceError({
+            errorKind: 'action_router_failed',
+            channel: 'worker',
+            tenantId,
+            taskType: outcome.proposal.proposalType,
+          });
+          throw err;
+        }
         log.info('voice-action-router: proposal created from voice', {
           proposalId: outcome.proposal.id,
           proposalType: outcome.proposal.proposalType,

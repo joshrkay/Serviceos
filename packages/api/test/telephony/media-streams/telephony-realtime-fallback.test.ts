@@ -16,11 +16,22 @@
  *   global ON, all healthy          → Stream
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import express from 'express';
 import request from 'supertest';
 import twilio from 'twilio';
+
+// OBS — capture recordVoiceError calls without touching the real PostHog SDK.
+const recordVoiceErrorMock = vi.fn();
+vi.mock('../../../src/analytics/posthog', () => ({
+  recordVoiceError: (...args: unknown[]) => recordVoiceErrorMock(...args),
+}));
+
 import { createTelephonyRouter } from '../../../src/routes/telephony';
+
+beforeEach(() => {
+  recordVoiceErrorMock.mockClear();
+});
 
 const AUTH_TOKEN = 'test-ws3-fallback-token';
 const PUBLIC_BASE_URL = 'https://api.test';
@@ -162,6 +173,15 @@ describe('WS3 /voice realtime-vs-Gather decision matrix', () => {
     expect(handleInbound).toHaveBeenCalledTimes(1);
     expect(handleInboundForStream).not.toHaveBeenCalled();
     expect(isEnabled).not.toHaveBeenCalled();
+    // OBS — fired after the Gather-fallback decision is already made above.
+    expect(recordVoiceErrorMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        errorKind: 'realtime_circuit_open',
+        channel: 'gather',
+        callSid: 'CA-ws3',
+        tenantId: 'tenant-1',
+      }),
+    );
   });
 
   it('global ON, flag read THROWS → Gather (fail toward the proven path)', async () => {
@@ -187,5 +207,36 @@ describe('WS3 /voice realtime-vs-Gather decision matrix', () => {
     expect(res.status).toBe(200);
     expect(handleInboundForStream).toHaveBeenCalledTimes(1);
     expect(handleInbound).not.toHaveBeenCalled();
+  });
+});
+
+// ─── OBS — the handleInbound catch never 5xxs by design (graceful hangup
+// TwiML so Twilio doesn't retry), which makes it invisible to recordApiError.
+// voice_error(inbound_handler_failed) is the only backend signal for it. ────
+describe('WS3/OBS voice_error — inbound handler failure', () => {
+  it('adapter.handleInbound throws → still 200s graceful hangup TwiML, and fires voice_error', async () => {
+    const handleInbound = vi.fn().mockRejectedValue(new Error('adapter boom'));
+    const handleInboundForStream = vi.fn();
+    const { app } = mountRouter({
+      // mediaStreamsEnabled omitted → Gather path, exercises handleInbound.
+      adapter: {
+        handleInbound,
+        handleInboundForStream,
+        handleGather: vi.fn(),
+      } as unknown as Parameters<typeof createTelephonyRouter>[0]['adapter'],
+    });
+    const res = await signedVoicePost(app, VOICE_PARAMS);
+
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('technical difficulties');
+    // OBS — fired after the graceful hangup TwiML is already queued above.
+    expect(recordVoiceErrorMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        errorKind: 'inbound_handler_failed',
+        channel: 'gather',
+        callSid: 'CA-ws3',
+        tenantId: 'tenant-1',
+      }),
+    );
   });
 });

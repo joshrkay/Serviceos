@@ -13,6 +13,14 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+// OBS — capture recordVoiceError calls without touching the real PostHog
+// SDK. Mirrors the vi.mock pattern already used in test/voice/activation.test.ts.
+const recordVoiceErrorMock = vi.fn();
+vi.mock('../../../src/analytics/posthog', () => ({
+  recordVoiceError: (...args: unknown[]) => recordVoiceErrorMock(...args),
+}));
+
 import {
   TwilioMediaStreamAdapter,
   type WsLike,
@@ -125,6 +133,7 @@ let store: VoiceSessionStore;
 
 beforeEach(() => {
   store = new VoiceSessionStore({ startInterval: false });
+  recordVoiceErrorMock.mockClear();
 });
 
 describe('P8-012 TwilioMediaStreamAdapter', () => {
@@ -1047,6 +1056,15 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
       // …and its PCM reached the wire (no dead air).
       const mediaFrames = ws.sent.filter((f: unknown) => (f as { event?: string }).event === 'media');
       expect(mediaFrames.length).toBeGreaterThan(0);
+      // OBS — fired after the recovery already ran (PCM already on the wire).
+      expect(recordVoiceErrorMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          errorKind: 'tts_stream_recovered',
+          channel: 'media_streams',
+          callSid: 'CA-fallback-pcm',
+          tenantId: 't',
+        }),
+      );
     });
 
     it('drops a non-PCM buffered fallback and plays a filler clip instead of static', async () => {
@@ -2277,6 +2295,16 @@ describe('VOX-35c speechTurn-failure recovery', () => {
     expect(mediaFrames.length).toBeGreaterThanOrEqual(1);
     expect(texts).toEqual([renderTtsText(SPEECH_TURN_FAILURE_REPROMPT_COPY, {}, 'en')]);
     expect(ws.closed).toBe(false);
+    // OBS — a single speechTurn failure fires voice_error(speech_turn_failed),
+    // AFTER the apology was already spoken above.
+    expect(recordVoiceErrorMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        errorKind: 'speech_turn_failed',
+        channel: 'media_streams',
+        callSid: 'CA-recover-1',
+        tenantId: 't',
+      }),
+    );
 
     // Turn 2: speechTurn succeeds → resets the consecutive-failure counter.
     handle.emit({ type: 'final', isFinal: true, transcript: 'i need an appointment', confidence: 0.95 });
@@ -2367,6 +2395,16 @@ describe('VOX-35c speechTurn-failure recovery', () => {
     expect(sideEffects).toEqual([
       { type: 'end_session', payload: { reason: 'system_failure:speech_turn_repeated_failure' } },
     ]);
+    // OBS — the repeated-failure hand-off fires its own distinct error_kind,
+    // AFTER the hand-off line was spoken and the call torn down above.
+    expect(recordVoiceErrorMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        errorKind: 'speech_turn_repeated_failure',
+        channel: 'media_streams',
+        callSid: 'CA-recover-2',
+        tenantId: 't',
+      }),
+    );
   });
 
   it('barge-in during the recovery apology behaves like normal barge-in', async () => {

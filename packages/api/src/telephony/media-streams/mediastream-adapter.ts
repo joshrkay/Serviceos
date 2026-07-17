@@ -42,6 +42,7 @@ import {
 } from './mulaw-codec';
 import { BoundedSendQueue, type Priority } from '../../ws/bounded-send-queue';
 import { wsDisconnectTotal, voiceTurnLatencyMs } from '../../monitoring/metrics';
+import { recordVoiceError } from '../../analytics/posthog';
 import {
   ConnectionRegistry,
   ConnectionLease,
@@ -1072,6 +1073,14 @@ export class TwilioMediaStreamAdapter {
     // finalizeOnClose (a terminal outcome stamped now would be mid-call).
     this.state.degradedToGather = true;
     this.closeWs(1000, 'degraded_to_gather');
+    // OBS — fire-and-forget after the degrade has actually happened; never
+    // alters the redirect/close behavior above.
+    recordVoiceError({
+      errorKind: 'degraded_to_gather',
+      channel: 'media_streams',
+      callSid,
+      tenantId: this.state.tenantId,
+    });
     return true;
   }
 
@@ -1341,10 +1350,26 @@ export class TwilioMediaStreamAdapter {
       this.state.consecutiveSpeechTurnFailures >= MAX_CONSECUTIVE_SPEECH_TURN_FAILURES
     ) {
       await this.speakAndEndAfterRepeatedSpeechTurnFailures(session);
+      // OBS — fired after the hand-off is spoken/the call is torn down;
+      // never alters the recovery behavior above.
+      recordVoiceError({
+        errorKind: 'speech_turn_repeated_failure',
+        channel: 'media_streams',
+        callSid: this.state.callSid,
+        tenantId: this.state.tenantId,
+      });
       return;
     }
 
     await this.speakRecoveryLine(session, SPEECH_TURN_FAILURE_REPROMPT_COPY);
+    // OBS — fired after the apology/reprompt is spoken; never alters the
+    // recovery behavior above.
+    recordVoiceError({
+      errorKind: 'speech_turn_failed',
+      channel: 'media_streams',
+      callSid: this.state.callSid,
+      tenantId: this.state.tenantId,
+    });
   }
 
   /**
@@ -2011,6 +2036,14 @@ export class TwilioMediaStreamAdapter {
             if (fillerTimer) clearTimeout(fillerTimer);
             cancelActiveFiller();
             await this.recoverTurnAfterStreamFailure(ttsProvider, text, lang, turnId);
+            // OBS — fired after the recovery attempt (buffered synth /
+            // filler / dead-air-avoided) has already run; never alters it.
+            recordVoiceError({
+              errorKind: 'tts_stream_recovered',
+              channel: 'media_streams',
+              callSid: this.state.callSid,
+              tenantId: this.state.tenantId,
+            });
           }
         }
       } else {

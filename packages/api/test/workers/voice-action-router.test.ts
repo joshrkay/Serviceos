@@ -8,6 +8,13 @@
  * surprised by actions they didn't clearly request.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+// OBS — capture recordVoiceError calls without touching the real PostHog SDK.
+const recordVoiceErrorMock = vi.fn();
+vi.mock('../../src/analytics/posthog', () => ({
+  recordVoiceError: (...args: unknown[]) => recordVoiceErrorMock(...args),
+}));
+
 import { createVoiceActionRouterWorker } from '../../src/workers/voice-action-router';
 import { InMemoryProposalRepository, Proposal } from '../../src/proposals/proposal';
 import {
@@ -73,6 +80,7 @@ describe('voice-action-router worker', () => {
 
   beforeEach(() => {
     proposalRepo = new InMemoryProposalRepository();
+    recordVoiceErrorMock.mockClear();
   });
 
   afterEach(() => {
@@ -965,6 +973,39 @@ describe('voice-action-router worker', () => {
         silentLogger()
       )
     ).rejects.toThrow(/db down/);
+    // OBS — fired before the rethrow above; the queue-retry behavior pinned
+    // by the assertion above is unchanged by adding this analytics call.
+    expect(recordVoiceErrorMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        errorKind: 'action_router_failed',
+        channel: 'worker',
+        tenantId: 't-1',
+        taskType: 'draft_invoice',
+      }),
+    );
+  });
+
+  it('propagates classifier/gateway errors so the queue can retry, and fires voice_error(action_router_failed)', async () => {
+    const gateway = {
+      complete: vi.fn().mockRejectedValue(new Error('gateway timeout')),
+    } as unknown as LLMGateway;
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+
+    await expect(
+      worker.handle(
+        msg({ tenantId: 't-2', userId: 'u-1', transcript: 'create an invoice for Acme' }),
+        silentLogger()
+      )
+    ).rejects.toThrow(/gateway timeout/);
+    expect(recordVoiceErrorMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        errorKind: 'action_router_failed',
+        channel: 'worker',
+        tenantId: 't-2',
+      }),
+    );
+    // No proposal was persisted for the failed classification.
+    expect(await proposalRepo.findByTenant('t-2')).toHaveLength(0);
   });
 
   // §3B/3D/3E — operator voice path must see the same vertical context
