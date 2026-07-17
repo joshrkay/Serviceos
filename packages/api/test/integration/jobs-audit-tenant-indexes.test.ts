@@ -102,7 +102,16 @@ describe('DATA-01/02: jobs + audit_events tenant composite indexes', () => {
 
     it('EXPLAIN for the audit-events recent-events read uses idx_audit_events_tenant_created_at', async () => {
       const tenant = await createTestTenant(pool);
-      await seedAuditEvents(pool, tenant.tenantId, 20);
+      // Seed MORE than the query's LIMIT (50) and ANALYZE so the planner's row
+      // estimate is accurate. With >LIMIT rows the composite (tenant_id,
+      // created_at DESC) index can walk in order and stop after 50, which is
+      // decisively cheaper than the tenant-only index's scan-all + Sort — so
+      // the planner reliably picks it. Without this (e.g. only 20 rows) the two
+      // plans cost within a hair of each other and the choice is non-
+      // deterministic across environments (a competing idx_audit_tenant wins on
+      // CI while losing locally).
+      await seedAuditEvents(pool, tenant.tenantId, 200);
+      await pool.query('ANALYZE audit_events');
 
       const client = await pool.connect();
       try {
@@ -163,20 +172,14 @@ async function seedJob(pool: Pool, tenantId: string, technicianId: string): Prom
 }
 
 async function seedAuditEvents(pool: Pool, tenantId: string, count: number): Promise<void> {
-  for (let i = 0; i < count; i++) {
-    await pool.query(
-      `INSERT INTO audit_events (id, tenant_id, actor_id, actor_role, event_type, entity_type, entity_id, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, NOW() - ($8 || ' seconds')::interval)`,
-      [
-        crypto.randomUUID(),
-        tenantId,
-        'test-actor',
-        'owner',
-        'test.event',
-        'job',
-        crypto.randomUUID(),
-        i,
-      ],
-    );
-  }
+  // Batched set-based insert (generate_series) so seeding hundreds of rows for
+  // the planner-estimate test stays fast. Each row gets a distinct created_at
+  // (NOW() - N seconds) so the ORDER BY created_at DESC has a real ordering.
+  await pool.query(
+    `INSERT INTO audit_events (id, tenant_id, actor_id, actor_role, event_type, entity_type, entity_id, created_at)
+     SELECT gen_random_uuid(), $1, 'test-actor', 'owner', 'test.event', 'job', gen_random_uuid(),
+            NOW() - (g || ' seconds')::interval
+     FROM generate_series(0, $2 - 1) AS g`,
+    [tenantId, count],
+  );
 }
