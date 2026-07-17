@@ -165,10 +165,14 @@ describe('U2 — MmsEstimateTaskHandler', () => {
   it('catalog grounding — overrides the model price with the matched catalog price', async () => {
     const stub = new StubProvider('stub');
     stub.setResponse({ content: validVisionJson });
-    // Catalog priced at 95000c; the model emitted 120000c — catalog wins.
+    // validVisionJson drafts the heater at 120000c and the valve at 4500c.
+    // Catalog prices below are within PRICE_CONFLICT tolerance of those
+    // drafted prices (< 100¢ or < 10% deviation) so both lines snap to the
+    // catalog instead of tripping the "did you mean" price-conflict path —
+    // catalog still wins over the model's number.
     const catalogRepo = await catalogWith([
-      { name: 'Water heater replacement', unitPriceCents: 95000, category: 'Labor' },
-      { name: 'Pressure relief valve', unitPriceCents: 4000, category: 'Parts' },
+      { name: 'Water heater replacement', unitPriceCents: 119000, category: 'Labor' },
+      { name: 'Pressure relief valve', unitPriceCents: 4450, category: 'Parts' },
     ]);
     const handler = new MmsEstimateTaskHandler(makeGateway(stub), catalogRepo);
 
@@ -177,7 +181,7 @@ describe('U2 — MmsEstimateTaskHandler', () => {
 
     const lineItems = result.proposal.payload.lineItems as Array<Record<string, unknown>>;
     const heater = lineItems.find((li) => String(li.description).includes('Water heater'));
-    expect(heater?.unitPrice).toBe(95000);
+    expect(heater?.unitPrice).toBe(119000);
     expect(heater?.pricingSource).toBe('catalog');
     expect(result.proposal.confidenceFactors).toContain('catalog_priced');
   });

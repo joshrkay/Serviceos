@@ -306,7 +306,10 @@ describe('P22 — InvoiceTaskHandler catalog grounding', () => {
   it('catalog match OVERRIDES the LLM-invented price and recomputes totalCents', async () => {
     const { repo, heater } = seededCatalog();
     const gateway = createMockGateway(
-      aiOutput([{ description: 'Water Heater Install', quantity: 2, unitPrice: 99_900 }]),
+      // 183_000 is within PRICE_CONFLICT tolerance (~1.1% deviation) of the
+      // catalog's 185_000 — close enough that this is a snap/overwrite, not
+      // a "did you mean" price conflict.
+      aiOutput([{ description: 'Water Heater Install', quantity: 2, unitPrice: 183_000 }]),
     );
     const handler = new InvoiceTaskHandler(gateway, repo);
 
@@ -321,6 +324,47 @@ describe('P22 — InvoiceTaskHandler catalog grounding', () => {
     expect(proposal.confidenceFactors).toContain('catalog_priced');
     // Catalog-grounded, unambiguous, 0.95 confidence → still auto-approves.
     expect(proposal.status).toBe('approved');
+  });
+
+  it('a drafted price that conflicts with an exact catalog match keeps the spoken price and forces review', async () => {
+    const { repo, heater } = seededCatalog();
+    const gateway = createMockGateway(
+      // 99_900 vs the catalog's 185_000 is a "did you mean" price conflict
+      // (well past both PRICE_CONFLICT thresholds), not a mishear — the
+      // operator may have deliberately quoted a custom price.
+      aiOutput([{ description: 'Water Heater Install', quantity: 1, unitPrice: 99_900 }]),
+    );
+    const handler = new InvoiceTaskHandler(gateway, repo);
+
+    const { proposal } = await handler.handle(baseContext);
+
+    const line = (proposal.payload.lineItems as Array<Record<string, unknown>>)[0];
+    // Spoken price kept verbatim — never silently overwritten.
+    expect(line.unitPriceCents).toBe(99_900);
+    expect(line.pricingSource).toBe('ambiguous');
+    expect(line.needsPricing).toBe(true);
+    // Never approved, even at model confidence 0.95.
+    expect(proposal.status).toBe('draft');
+
+    const ctx = proposal.sourceContext as Record<string, unknown>;
+    expect(ctx.missingFields).toEqual(['lineItems[0].catalogItemId']);
+    const candidates = (
+      ctx.catalogResolution as Record<
+        number,
+        Array<{ id: string; name: string; unitPriceCents: number; score: number }>
+      >
+    )[0];
+    const ids = candidates.map((c) => c.id).sort();
+    expect(ids).toEqual([heater.id, 'spoken:0'].sort());
+    const catalogCandidate = candidates.find((c) => c.id === heater.id);
+    expect(catalogCandidate?.unitPriceCents).toBe(185_000);
+    expect(catalogCandidate?.score).toBe(1);
+    const spokenCandidate = candidates.find((c) => c.id === 'spoken:0');
+    expect(spokenCandidate?.unitPriceCents).toBe(99_900);
+    expect(spokenCandidate?.score).toBe(0);
+
+    const meta = proposal.payload._meta as Record<string, unknown>;
+    expect(meta.overallConfidence).toBe('low');
   });
 
   it('ambiguous match keeps the LLM price, forces draft, and surfaces candidates', async () => {
@@ -472,7 +516,10 @@ describe('RV-007 — InvoiceTaskHandler populates payload._meta', () => {
       JSON.stringify({
         ...validAiOutput,
         lineItems: [
-          { description: 'Water Heater Install', quantity: 1, unitPrice: 999 },
+          // 183_000 is within PRICE_CONFLICT tolerance of the catalog's
+          // 185_000 — this line must ground cleanly so only the flux
+          // capacitor line (uncatalogued) carries a low-confidence signal.
+          { description: 'Water Heater Install', quantity: 1, unitPrice: 183_000 },
           { description: 'mystery flux capacitor', quantity: 1, unitPrice: 42_000 },
         ],
         confidence_score: 0.95,

@@ -315,7 +315,9 @@ describe('P22-001 invoice-edit-catalog', () => {
       const [gasket] = await seedCatalog(repo, TENANT, [{ name: 'Gasket', unitPriceCents: 450 }]);
 
       const gateway = mockGateway(
-        draftResponse([{ description: 'gaskets', quantity: 3, unitPrice: 9999 }]),
+        // 460 is within PRICE_CONFLICT_MIN_ABS_CENTS (100¢) of the catalog's
+        // 450 — a snap/overwrite, not a "did you mean" price conflict.
+        draftResponse([{ description: 'gaskets', quantity: 3, unitPrice: 460 }]),
       );
       const handler = new InvoiceTaskHandler(gateway, { catalogRepo: repo });
       const result = await handler.handle({ tenantId: TENANT, userId: 'u-1', message: 'invoice it' });

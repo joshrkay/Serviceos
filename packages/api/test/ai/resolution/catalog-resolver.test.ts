@@ -10,6 +10,8 @@ import {
   TAU_FLOOR,
   MARGIN,
   UNCATALOGUED_CONFIDENCE_CAP,
+  PRICE_CONFLICT_MIN_REL,
+  PRICE_CONFLICT_MIN_ABS_CENTS,
   CatalogLineResolution,
 } from '../../../src/ai/resolution/catalog-resolver';
 import { CatalogItem, createCatalogItem } from '../../../src/catalog/catalog-item';
@@ -227,8 +229,12 @@ describe('applyCatalogPricing', () => {
   }
 
   it('overwrites the LLM price with the catalog price (unitPriceCents mode) and recomputes totalCents', () => {
+    // Deviation is within tolerance (transcription noise, not a deliberate
+    // custom quote) — this is the ordinary snap-to-catalog path, not a
+    // price conflict; see the `applyCatalogPricing — price conflict` block
+    // below for the deliberately-large-deviation "did you mean" path.
     const out = applyCatalogPricing(
-      [{ description: 'Water Heater Install', quantity: 2, unitPriceCents: 99_900, totalCents: 199_800 }],
+      [{ description: 'Water Heater Install', quantity: 2, unitPriceCents: 184_500, totalCents: 369_000 }],
       [resolved(heater)],
       'unitPriceCents',
     );
@@ -246,7 +252,7 @@ describe('applyCatalogPricing', () => {
 
   it('writes the catalog price into unitPrice in estimate mode', () => {
     const out = applyCatalogPricing(
-      [{ description: 'Water Heater Install', quantity: 1, unitPrice: 12_345 }],
+      [{ description: 'Water Heater Install', quantity: 1, unitPrice: 184_000 }],
       [resolved(heater)],
       'unitPrice',
     );
@@ -261,7 +267,7 @@ describe('applyCatalogPricing', () => {
   it('maps Parts/Materials categories to material', () => {
     const coil = item('Condenser Coil', 62_000, { category: 'Parts' });
     const out = applyCatalogPricing(
-      [{ description: 'Condenser Coil', quantity: 1, unitPriceCents: 1 }],
+      [{ description: 'Condenser Coil', quantity: 1, unitPriceCents: 61_950 }],
       [resolved(coil)],
       'unitPriceCents',
     );
@@ -307,7 +313,7 @@ describe('applyCatalogPricing', () => {
     const air = item('Air Filter', 2_000, { category: 'Parts' });
     const out = applyCatalogPricing(
       [
-        { description: 'Water Heater Install', quantity: 1, unitPriceCents: 1 },
+        { description: 'Water Heater Install', quantity: 1, unitPriceCents: 184_900 },
         { description: 'filter', quantity: 1, unitPriceCents: 2 },
         { description: 'mystery widget', quantity: 1, unitPriceCents: 3 },
       ],
@@ -362,11 +368,107 @@ describe('applyCatalogPricing', () => {
 
   it('a clean catalog match does NOT set requiresReview', () => {
     const out = applyCatalogPricing(
-      [{ description: 'Water Heater Install', quantity: 1, unitPriceCents: 1 }],
+      [{ description: 'Water Heater Install', quantity: 1, unitPriceCents: 184_900 }],
       [resolved(heater)],
       'unitPriceCents',
     );
     expect(out.requiresReview).toBe(false);
+  });
+});
+
+describe('applyCatalogPricing — price conflict ("did you mean")', () => {
+  const heater = item('Water Heater Install', 15_000);
+
+  function resolved(match: CatalogItem): CatalogLineResolution {
+    return { query: match.name, tier: 'high', match };
+  }
+
+  it('a large deviation (both thresholds exceeded) surfaces a "did you mean" instead of snapping', () => {
+    const out = applyCatalogPricing(
+      [{ description: 'Water Heater Install', quantity: 1, unitPriceCents: 7_500 }],
+      [resolved(heater)],
+      'unitPriceCents',
+    );
+    expect(out.lineItems[0]).toMatchObject({
+      description: 'Water Heater Install',
+      unitPriceCents: 7_500, // the spoken price is preserved, NOT overwritten
+      pricingSource: 'ambiguous',
+      needsPricing: true,
+    });
+    expect(out.lineItems[0]).not.toHaveProperty('catalogItemId');
+    expect(out.missingFields).toEqual(['lineItems[0].catalogItemId']);
+    expect(out.catalogResolution![0]).toEqual([
+      { id: heater.id, name: 'Water Heater Install', unitPriceCents: 15_000, score: 1 },
+      { id: 'spoken:0', name: 'Keep spoken price', unitPriceCents: 7_500, score: 0 },
+    ]);
+    expect(out.anyCatalogPriced).toBe(false);
+    expect(out.requiresReview).toBe(true);
+  });
+
+  it('a small deviation (below both thresholds) snaps to catalog exactly as before', () => {
+    const out = applyCatalogPricing(
+      [{ description: 'Water Heater Install', quantity: 1, unitPriceCents: 14_900 }],
+      [resolved(heater)],
+      'unitPriceCents',
+    );
+    expect(out.lineItems[0]).toMatchObject({
+      unitPriceCents: 15_000,
+      catalogItemId: heater.id,
+      pricingSource: 'catalog',
+    });
+    expect(out.catalogResolution).toBeUndefined();
+    expect(out.anyCatalogPriced).toBe(true);
+    expect(out.requiresReview).toBe(false);
+  });
+
+  it('a price-less line with an exact/high match snaps to catalog unchanged', () => {
+    const out = applyCatalogPricing(
+      [{ description: 'Water Heater Install', quantity: 1 }],
+      [resolved(heater)],
+      'unitPriceCents',
+    );
+    expect(out.lineItems[0]).toMatchObject({
+      unitPriceCents: 15_000,
+      catalogItemId: heater.id,
+      pricingSource: 'catalog',
+    });
+    expect(out.anyCatalogPriced).toBe(true);
+  });
+
+  it('a non-integer price never triggers a conflict — snaps to catalog', () => {
+    const out = applyCatalogPricing(
+      [{ description: 'Water Heater Install', quantity: 1, unitPriceCents: 7_500.5 }],
+      [resolved(heater)],
+      'unitPriceCents',
+    );
+    expect(out.lineItems[0]).toMatchObject({
+      unitPriceCents: 15_000,
+      catalogItemId: heater.id,
+      pricingSource: 'catalog',
+    });
+  });
+
+  it('deviation large in % but under the absolute-cents floor still snaps (small-dollar line)', () => {
+    const cheapItem = item('Filter Swap', 500);
+    const out = applyCatalogPricing(
+      [{ description: 'Filter Swap', quantity: 1, unitPriceCents: 420 }],
+      [{ query: 'Filter Swap', tier: 'high', match: cheapItem }],
+      'unitPriceCents',
+    );
+    // |500-420| = 80% relative deviation, well over PRICE_CONFLICT_MIN_REL,
+    // but the 80-cent absolute gap is under PRICE_CONFLICT_MIN_ABS_CENTS —
+    // real-money risk is negligible, so it snaps rather than interrupting.
+    expect(out.lineItems[0]).toMatchObject({
+      unitPriceCents: 500,
+      catalogItemId: cheapItem.id,
+      pricingSource: 'catalog',
+    });
+    expect(out.requiresReview).toBe(false);
+  });
+
+  it('threshold constants are pinned', () => {
+    expect(PRICE_CONFLICT_MIN_REL).toBe(0.1);
+    expect(PRICE_CONFLICT_MIN_ABS_CENTS).toBe(100);
   });
 });
 
@@ -406,7 +508,7 @@ describe('groundLineItemPricing — requiresReview hard gate', () => {
 
   it('(b) an exact/high catalog match is still auto-approvable as before', async () => {
     const outcome = await groundLineItemPricing(
-      [{ description: 'Water Heater Install', quantity: 1, unitPriceCents: 1 }],
+      [{ description: 'Water Heater Install', quantity: 1, unitPriceCents: 184_900 }],
       'unitPriceCents',
       () => Promise.resolve([heater]),
     );

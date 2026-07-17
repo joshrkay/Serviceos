@@ -9,7 +9,18 @@
  * against the tenant's active catalog items:
  *
  *   - 'exact' / 'high'  → the catalog item's `unitPriceCents` is
- *     authoritative; the LLM's number is overwritten.
+ *     authoritative and the LLM's number is overwritten — UNLESS the
+ *     drafted line carries its own positive integer price that deviates
+ *     from the catalog price by more than BOTH `PRICE_CONFLICT_MIN_REL`
+ *     and `PRICE_CONFLICT_MIN_ABS_CENTS` (see `applyCatalogPricing`). A
+ *     deviation that large is a "did you mean" price CONFLICT, not a
+ *     mishear — the owner may have deliberately quoted a custom or
+ *     discounted price ("do it for Mrs. Henderson at half price"). That
+ *     case is surfaced exactly like an 'ambiguous' match instead of being
+ *     silently snapped: the drafted price is kept, `pricingSource:
+ *     'ambiguous'`, and two candidates are recorded — the real catalog
+ *     item and a synthetic "keep spoken price" choice — for the operator
+ *     to pick via the same one-tap resolution as any other ambiguity.
  *   - 'ambiguous'       → two-plus plausible items (or one weak match).
  *     The LLM price is kept but the proposal is forced to 'draft' via
  *     missingFields so the operator picks the right item — an uncertain
@@ -60,6 +71,21 @@ export const TAU_HIGH = 0.85;
 export const MARGIN = 0.15;
 /** Scores below this are not candidates at all. */
 export const TAU_FLOOR = 0.6;
+/**
+ * Minimum relative deviation (as a fraction of the catalog price) between
+ * a drafted line's own price and its exact/high catalog match before it's
+ * treated as a "did you mean" price conflict rather than a mishear.
+ */
+export const PRICE_CONFLICT_MIN_REL = 0.1;
+/**
+ * Minimum absolute deviation (integer cents) between a drafted line's own
+ * price and its exact/high catalog match before it's treated as a "did
+ * you mean" price conflict. Paired with `PRICE_CONFLICT_MIN_REL` — BOTH
+ * must be exceeded (a few cents of rounding noise on a $2,000 job is a
+ * huge relative miss but zero real-money risk; a $200 miss on a $5 line
+ * is a huge relative miss AND real money).
+ */
+export const PRICE_CONFLICT_MIN_ABS_CENTS = 100;
 /** Description matches are weaker evidence than name matches. */
 export const DESCRIPTION_WEIGHT = 0.6;
 /** Max candidates surfaced on an ambiguous result. */
@@ -377,6 +403,23 @@ function contractCategory(item: CatalogItem): string {
 }
 
 /**
+ * True when a drafted line's own price and its exact/high catalog match
+ * disagree enough to be a "did you mean" conflict rather than noise.
+ * Requires BOTH the absolute (integer cents) and relative (fraction of
+ * the catalog price) thresholds to be exceeded — the absolute check is
+ * plain integer comparison; the ratio is computed with division (the
+ * clearly-safe use of float per the money-safety invariant: only ever
+ * compared against a fixed threshold, never itself stored or summed as
+ * money).
+ */
+function isPriceConflict(draftedCents: number, catalogCents: number): boolean {
+  const diffCents = Math.abs(draftedCents - catalogCents);
+  if (diffCents < PRICE_CONFLICT_MIN_ABS_CENTS) return false;
+  if (catalogCents <= 0) return true; // abs threshold alone already cleared
+  return diffCents / catalogCents >= PRICE_CONFLICT_MIN_REL;
+}
+
+/**
  * Merge resolutions into LLM-drafted line items. Shared by the invoice
  * handler (priceField 'unitPriceCents', recomputes totalCents) and the
  * estimate handler (priceField 'unitPrice' — that contract's integer-
@@ -401,6 +444,31 @@ export function applyCatalogPricing(
     }
     if ((resolution.tier === 'exact' || resolution.tier === 'high') && resolution.match) {
       const item = resolution.match;
+      const draftedRaw = li[priceField];
+      const draftedPrice =
+        typeof draftedRaw === 'number' && Number.isInteger(draftedRaw) && draftedRaw > 0
+          ? draftedRaw
+          : null;
+
+      if (draftedPrice !== null && isPriceConflict(draftedPrice, item.unitPriceCents)) {
+        // "Did you mean" — don't overwrite. Keep the drafted line exactly
+        // as spoken and surface the conflict as a one-tap ambiguity: the
+        // real catalog item vs. a synthetic "keep the spoken price"
+        // choice. Nothing is priced yet, so `anyCatalogPriced` stays
+        // false for this line.
+        out.push({
+          ...li,
+          pricingSource: 'ambiguous' satisfies PricingSource,
+          needsPricing: true,
+        });
+        missingFields.push(`lineItems[${idx}].catalogItemId`);
+        catalogResolution[idx] = [
+          { id: item.id, name: item.name, unitPriceCents: item.unitPriceCents, score: 1 },
+          { id: `spoken:${idx}`, name: 'Keep spoken price', unitPriceCents: draftedPrice, score: 0 },
+        ];
+        return;
+      }
+
       const next: Record<string, unknown> = {
         ...li,
         description: item.name,
