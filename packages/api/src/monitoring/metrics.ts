@@ -62,6 +62,30 @@ export const gatewayRequestLatencyMs = new Histogram({
   registers: [metricsRegistry],
 });
 
+/**
+ * Per-call LLM cost, accumulated in micro-cents (1 cent = 1,000,000
+ * micro-cents — see ai/gateway/model-pricing.ts for the precision
+ * rationale: this avoids every sub-cent call rounding to a 0 increment).
+ * Divide the aggregate by 1,000,000 to get cents in a dashboard/alert query.
+ *
+ * Only incremented when the resolved model has a known price — an unpriced
+ * model contributes nothing here rather than a guessed cost (spend
+ * dashboards under-count unpriced traffic instead of silently fabricating
+ * numbers for it; see gatewayRequestsTotal for the always-incremented
+ * request count to cross-check coverage).
+ *
+ * Labels mirror gatewayRequestsTotal's existing tenant_tier/model/provider
+ * convention plus task_type (bounded — the canonical TASK_TYPES enum in
+ * config/ai-routing.ts, ~30 values) so spend can be sliced per task without
+ * per-tenant cardinality (raw tenant_id is deliberately NOT a label).
+ */
+export const gatewayRequestCostMicroCentsTotal = new Counter({
+  name: 'gateway_request_cost_micro_cents_total',
+  help: 'Cumulative LLM gateway request cost in micro-cents (1 micro-cent = 1e-6 cent; divide by 1,000,000 for cents). Only incremented for models with a known price.',
+  labelNames: ['tenant_tier', 'task_type', 'model', 'provider'],
+  registers: [metricsRegistry],
+});
+
 // BREAKING CHANGE (P2-029): labels changed from {provider, reason} to
 // {provider, taskType, outcome}. Update any dashboards or alerts that
 // reference the old 'reason' label.

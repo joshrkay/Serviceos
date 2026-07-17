@@ -798,6 +798,12 @@ async function generateAssistantReply(
   try {
     const response = await deps.gateway.complete({
       taskType,
+      // Top-level tenantId — the quota/cache resilience wrappers key on
+      // this, not metadata.tenantId (see gateway.ts's tenant-id guard).
+      // `assistant.*` taskTypes aren't in the guard's tracked TASK_TYPES
+      // allow-list (they're dynamically constructed), but this route is
+      // still genuinely per-tenant chat traffic.
+      tenantId,
       responseFormat: 'json',
       messages: [
         { role: 'system', content: `${systemPrompt}\n\n${outputContract}` },

@@ -1,0 +1,169 @@
+/**
+ * Per-call LLM cost accounting in the production gateway (gateway.ts +
+ * model-pricing.ts): response.costMicroCents, the persisted
+ * ai_runs.cost_micro_cents value, and the Prometheus
+ * gateway_request_cost_micro_cents_total counter.
+ */
+import { describe, it, expect, afterEach } from 'vitest';
+import { LLMGateway } from '../../../src/ai/gateway/gateway';
+import type { LLMProvider, LLMRequest, LLMGatewayConfig } from '../../../src/ai/gateway/gateway';
+import { StubProvider } from '../../../src/ai/gateway/providers';
+import { InMemoryAiRunRepository } from '../../../src/ai/ai-run';
+import { metricsRegistry, gatewayRequestCostMicroCentsTotal } from '../../../src/monitoring/metrics';
+
+function makeRequest(overrides: Partial<LLMRequest> = {}): LLMRequest {
+  return {
+    taskType: 'summarize_conversation',
+    messages: [{ role: 'user', content: 'Hello' }],
+    tenantId: 'tenant-1',
+    ...overrides,
+  };
+}
+
+function makeGateway(
+  providers: Map<string, LLMProvider>,
+  config: Partial<LLMGatewayConfig> = {},
+  aiRunRepo?: InMemoryAiRunRepository
+): LLMGateway {
+  const fullConfig: LLMGatewayConfig = {
+    defaultProvider: 'stub',
+    ...config,
+  };
+  return new LLMGateway(fullConfig, providers, undefined, aiRunRepo);
+}
+
+describe('gateway.complete() — per-call cost accounting', () => {
+  afterEach(() => {
+    metricsRegistry.resetMetrics();
+  });
+
+  it('computes costMicroCents on the response for a known-priced model', async () => {
+    const stub = new StubProvider('stub');
+    stub.setResponse({ content: 'ok', tokenUsage: { input: 500, output: 200, total: 700 } });
+    const providers = new Map<string, LLMProvider>([['stub', stub]]);
+    const gateway = makeGateway(providers);
+
+    const response = await gateway.complete(
+      makeRequest({ model: 'claude-sonnet-4-6', tenantId: 'tenant-1' })
+    );
+
+    // claude-sonnet-4-6: 300 cents/M input, 1500 cents/M output.
+    // 500 * 300 + 200 * 1500 = 150,000 + 300,000 = 450,000 micro-cents.
+    expect(response.costMicroCents).toBe(450_000);
+  });
+
+  it('persists costMicroCents on the completed ai_runs row', async () => {
+    const aiRunRepo = new InMemoryAiRunRepository();
+    const stub = new StubProvider('stub');
+    stub.setResponse({ content: 'ok', tokenUsage: { input: 500, output: 200, total: 700 } });
+    const providers = new Map<string, LLMProvider>([['stub', stub]]);
+    const gateway = makeGateway(providers, {}, aiRunRepo);
+
+    await gateway.complete(
+      makeRequest({ model: 'claude-sonnet-4-6', tenantId: 'tenant-1', taskType: 'summarize_conversation' })
+    );
+
+    const runs = await aiRunRepo.findByTaskType('tenant-1', 'summarize_conversation');
+    expect(runs).toHaveLength(1);
+    expect(runs[0].status).toBe('completed');
+    expect(runs[0].costMicroCents).toBe(450_000);
+  });
+
+  it('increments gateway_request_cost_micro_cents_total with the documented labels', async () => {
+    const stub = new StubProvider('stub');
+    stub.setResponse({ content: 'ok', tokenUsage: { input: 1000, output: 0, total: 1000 } });
+    const providers = new Map<string, LLMProvider>([['stub', stub]]);
+    const gateway = makeGateway(providers);
+
+    await gateway.complete(
+      makeRequest({
+        model: 'claude-sonnet-4-6',
+        tenantId: 'tenant-1',
+        tenantTier: 'premium',
+        taskType: 'summarize_conversation',
+      })
+    );
+
+    // 1000 input tokens * 300 cents/M = 300,000 micro-cents; 0 output.
+    const value = await gatewayRequestCostMicroCentsTotal.get();
+    const sample = value.values.find(
+      (v) =>
+        v.labels.tenant_tier === 'premium' &&
+        v.labels.task_type === 'summarize_conversation' &&
+        v.labels.model === 'claude-sonnet-4-6' &&
+        v.labels.provider === 'stub'
+    );
+    expect(sample).toBeDefined();
+    expect(sample?.value).toBe(300_000);
+  });
+
+  it('accumulates across multiple calls for the same label set (never rounds per-call)', async () => {
+    const stub = new StubProvider('stub');
+    // 1 input token = 100 micro-cents on Haiku 4.5 (100 cents/M) — a
+    // sub-cent amount that would round to 0 if accumulated as whole cents.
+    stub.setResponse({ content: 'ok', tokenUsage: { input: 1, output: 0, total: 1 } });
+    const providers = new Map<string, LLMProvider>([['stub', stub]]);
+    const gateway = makeGateway(providers);
+
+    for (let i = 0; i < 5; i++) {
+      await gateway.complete(
+        makeRequest({ model: 'claude-haiku-4-5-20251001', tenantId: 'tenant-1', taskType: 'classify_intent' })
+      );
+    }
+
+    const value = await gatewayRequestCostMicroCentsTotal.get();
+    const sample = value.values.find(
+      (v) => v.labels.task_type === 'classify_intent' && v.labels.model === 'claude-haiku-4-5-20251001'
+    );
+    expect(sample?.value).toBe(500); // 5 calls * 100 micro-cents, exact
+  });
+
+  it('does not fabricate a cost for an unpriced model — null on response, no counter increment, null on ai_runs', async () => {
+    const aiRunRepo = new InMemoryAiRunRepository();
+    const stub = new StubProvider('stub');
+    stub.setResponse({ content: 'ok', tokenUsage: { input: 500, output: 200, total: 700 } });
+    const providers = new Map<string, LLMProvider>([['stub', stub]]);
+    const gateway = makeGateway(providers, {}, aiRunRepo);
+
+    const response = await gateway.complete(
+      makeRequest({ model: 'gpt-4o-mini', tenantId: 'tenant-1', taskType: 'summarize_conversation' })
+    );
+
+    expect(response.costMicroCents).toBeNull();
+
+    const runs = await aiRunRepo.findByTaskType('tenant-1', 'summarize_conversation');
+    expect(runs[0].costMicroCents).toBeNull();
+
+    const value = await gatewayRequestCostMicroCentsTotal.get();
+    const sample = value.values.find((v) => v.labels.model === 'gpt-4o-mini');
+    expect(sample).toBeUndefined();
+  });
+
+  it('does not record cost on the error path (no tokenUsage to price)', async () => {
+    const aiRunRepo = new InMemoryAiRunRepository();
+    const failingProvider: LLMProvider = {
+      name: 'failing',
+      async complete() {
+        throw new Error('boom');
+      },
+      async isAvailable() {
+        return true;
+      },
+    };
+    const providers = new Map<string, LLMProvider>([['failing', failingProvider]]);
+    const gateway = makeGateway(providers, { defaultProvider: 'failing' }, aiRunRepo);
+
+    await expect(
+      gateway.complete(
+        makeRequest({ model: 'claude-sonnet-4-6', tenantId: 'tenant-1', taskType: 'summarize_conversation' })
+      )
+    ).rejects.toThrow();
+
+    const runs = await aiRunRepo.findByTaskType('tenant-1', 'summarize_conversation');
+    expect(runs[0].status).toBe('failed');
+    expect(runs[0].costMicroCents).toBeUndefined();
+
+    const value = await gatewayRequestCostMicroCentsTotal.get();
+    expect(value.values.find((v) => v.labels.model === 'claude-sonnet-4-6')).toBeUndefined();
+  });
+});

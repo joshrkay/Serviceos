@@ -175,6 +175,9 @@ async function correctTranscript(input: {
 
     const response = await gateway.complete({
       taskType: 'transcription_correction',
+      // Top-level tenantId — the quota/cache resilience wrappers key on
+      // this, not metadata.tenantId (see gateway.ts's tenant-id guard).
+      tenantId,
       messages: [
         { role: 'system', content: TRANSCRIPTION_CORRECTION_SYSTEM_PROMPT },
         { role: 'user', content: userPrompt },

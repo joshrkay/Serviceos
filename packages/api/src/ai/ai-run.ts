@@ -16,6 +16,13 @@ export interface AiRun {
   completedAt?: Date;
   durationMs?: number;
   tokenUsage?: { input?: number; output?: number; total?: number };
+  /**
+   * Cost of this run in micro-cents (1 cent = 1,000,000 micro-cents — see
+   * `ai/gateway/model-pricing.ts` for the precision rationale). Undefined
+   * when the run hasn't completed yet; `null` once completed but the model
+   * has no known price (never a guessed cost).
+   */
+  costMicroCents?: number | null;
   correlationId?: string;
   createdBy: string;
   createdAt: Date;
@@ -45,6 +52,7 @@ export interface AiRunRepository {
       tokenUsage?: { input?: number; output?: number; total?: number };
       completedAt?: Date;
       durationMs?: number;
+      costMicroCents?: number | null;
     }
   ): Promise<AiRun | null>;
 }
@@ -83,7 +91,8 @@ export function startAiRun(run: AiRun): AiRun {
 export function completeAiRun(
   run: AiRun,
   output: Record<string, unknown>,
-  tokenUsage?: { input?: number; output?: number; total?: number }
+  tokenUsage?: { input?: number; output?: number; total?: number },
+  costMicroCents?: number | null
 ): AiRun {
   const now = new Date();
   return {
@@ -93,6 +102,7 @@ export function completeAiRun(
     completedAt: now,
     durationMs: run.startedAt ? now.getTime() - run.startedAt.getTime() : undefined,
     tokenUsage,
+    costMicroCents,
   };
 }
 
@@ -137,6 +147,7 @@ export class InMemoryAiRunRepository implements AiRunRepository {
       tokenUsage?: { input?: number; output?: number; total?: number };
       completedAt?: Date;
       durationMs?: number;
+      costMicroCents?: number | null;
     }
   ): Promise<AiRun | null> {
     const run = this.runs.get(id);
@@ -160,6 +171,9 @@ export class InMemoryAiRunRepository implements AiRunRepository {
     if (result?.outputSnapshot) run.outputSnapshot = result.outputSnapshot;
     if (result?.error) run.errorMessage = result.error;
     if (result?.tokenUsage) run.tokenUsage = result.tokenUsage;
+    // costMicroCents is legitimately `null` (priced model unknown) — only
+    // skip the assignment when the caller didn't pass the field at all.
+    if (result && 'costMicroCents' in result) run.costMicroCents = result.costMicroCents;
 
     this.runs.set(id, run);
     return { ...run };
