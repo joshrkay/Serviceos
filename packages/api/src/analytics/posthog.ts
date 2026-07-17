@@ -208,6 +208,39 @@ export function recordTenantGroup(tenantId: string, traits?: EventProps): void {
 }
 
 /**
+ * Record a server-side error event (U7) for API 5xx responses. Off-by-default
+ * and never throws. IDs/enums only — the caller passes an already-redacted
+ * route and the tenant id; NO request body, headers, or error message.
+ *
+ * Attributed to the tenant group when a tenant id is present so "errors by
+ * tenant" is answerable; the distinct id is the acting user when known, else a
+ * stable server sentinel (so anonymous 5xx don't mint junk persons).
+ */
+export function recordApiError(input: {
+  route: string;
+  status: number;
+  tenantId?: string | null;
+  userId?: string | null;
+}): void {
+  const tenantId =
+    typeof input.tenantId === 'string' && input.tenantId !== '' ? input.tenantId : undefined;
+  const distinctId =
+    typeof input.userId === 'string' && input.userId !== '' ? input.userId : 'server:error';
+  captureServer({
+    distinctId,
+    event: 'api_error',
+    properties: {
+      route: input.route,
+      status: input.status,
+      source: 'server',
+      timestamp: new Date().toISOString(),
+      ...(tenantId ? { tenant_id: tenantId } : {}),
+    },
+    ...(tenantId ? { groups: { tenant: tenantId } } : {}),
+  });
+}
+
+/**
  * Flush queued events on graceful shutdown. Called from the API
  * process's SIGTERM / SIGINT handler so deploys don't drop in-flight
  * funnel events.

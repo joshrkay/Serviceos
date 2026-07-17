@@ -339,6 +339,7 @@ import { PgConversationRepository } from './conversations/pg-conversation';
 import { PgSettingsRepository } from './settings/pg-settings';
 import { PgAuditRepository } from './audit/pg-audit';
 import { ForwardingAuditRepository } from './audit/forwarding-audit-repository';
+import { recordApiError } from './analytics/posthog';
 import { PgEstimateTemplateRepository } from './templates/pg-estimate-template';
 import { PgServiceBundleRepository } from './verticals/pg-bundles';
 import {
@@ -6455,8 +6456,28 @@ export function createApp(): AppWithLifecycle {
   app.use(captureRequestError());
 
   // Global error handler
-  app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  app.use((err: Error, req: express.Request, res: express.Response, _next: express.NextFunction) => {
     const { statusCode, body } = toErrorResponse(err);
+    // OBS — surface server 5xx in PostHog (api_error), attributable to the
+    // already-redacted route + tenant, so "where are customers hitting bugs"
+    // covers the backend too. Off-by-default; wrapped so analytics can never
+    // turn an error response into a thrown handler. No body/headers/message.
+    if (statusCode >= 500) {
+      try {
+        const anyReq = req as unknown as {
+          safeRequestLog?: { route?: string };
+          auth?: { tenantId?: string; userId?: string };
+        };
+        recordApiError({
+          route: anyReq.safeRequestLog?.route ?? req.path,
+          status: statusCode,
+          tenantId: anyReq.auth?.tenantId ?? null,
+          userId: anyReq.auth?.userId ?? null,
+        });
+      } catch {
+        // analytics must never break the error response
+      }
+    }
     res.status(statusCode).json(body);
   });
 

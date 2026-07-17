@@ -3,6 +3,7 @@ import {
   recordFunnelEvent,
   recordProductEvent,
   recordTenantGroup,
+  recordApiError,
   isFunnelAnalyticsEnabled,
   isProductAnalyticsEnabled,
   __resetAnalyticsForTests,
@@ -206,5 +207,63 @@ describe('product events + group analytics', () => {
     expect(() =>
       recordProductEvent('estimate_created', { tenantId: 't', distinctId: 'd' }),
     ).not.toThrow();
+  });
+});
+
+describe('recordApiError', () => {
+  beforeEach(() => {
+    __resetAnalyticsForTests();
+    captureSpy.mockClear();
+    process.env.POSTHOG_API_KEY = 'phc_test';
+    __setClientForTests(fakeClient);
+  });
+
+  afterEach(() => {
+    __resetAnalyticsForTests();
+    delete process.env.POSTHOG_API_KEY;
+  });
+
+  it('emits api_error with route/status, tenant group, and no PII', () => {
+    recordApiError({ route: '/api/jobs/123', status: 500, tenantId: 't_1', userId: 'clerk_owner' });
+
+    expect(captureSpy).toHaveBeenCalledTimes(1);
+    const arg = captureSpy.mock.calls[0][0] as {
+      distinctId: string;
+      event: string;
+      properties: Record<string, unknown>;
+      groups?: Record<string, string>;
+    };
+    expect(arg.event).toBe('api_error');
+    expect(arg.distinctId).toBe('clerk_owner');
+    expect(arg.groups).toEqual({ tenant: 't_1' });
+    expect(arg.properties).toMatchObject({
+      route: '/api/jobs/123',
+      status: 500,
+      source: 'server',
+      tenant_id: 't_1',
+    });
+    // no body / headers / message keys
+    expect(Object.keys(arg.properties)).not.toContain('message');
+    expect(Object.keys(arg.properties)).not.toContain('body');
+  });
+
+  it('uses a stable server sentinel distinctId and no group when tenant/user absent', () => {
+    recordApiError({ route: '/api/x', status: 503 });
+
+    const arg = captureSpy.mock.calls[0][0] as {
+      distinctId: string;
+      properties: Record<string, unknown>;
+      groups?: Record<string, string>;
+    };
+    expect(arg.distinctId).toBe('server:error');
+    expect(arg.groups).toBeUndefined();
+    expect(arg.properties.tenant_id).toBeUndefined();
+  });
+
+  it('off-by-default: no key → no-op', () => {
+    delete process.env.POSTHOG_API_KEY;
+    __resetAnalyticsForTests();
+    recordApiError({ route: '/api/x', status: 500, tenantId: 't' });
+    expect(captureSpy).not.toHaveBeenCalled();
   });
 });
