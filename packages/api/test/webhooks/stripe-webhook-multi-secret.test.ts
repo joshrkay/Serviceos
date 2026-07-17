@@ -64,6 +64,25 @@ describe('verifyWebhookSignatureAny', () => {
     const sig = createWebhookSignature(payload, PLATFORM_SECRET);
     expect(verifyWebhookSignatureAny(payload, sig, [])).toBe(false);
   });
+
+  // Stripe secret rotation: the header carries multiple `v1=` signatures, and
+  // the one matching the configured secret may NOT be first. Both the single
+  // verify and the any-of verify must accept it.
+  it('verifies when a LATER v1 signature matches (secret-rotation header)', () => {
+    const ts = 1_800_000_000; // fixed; within tolerance is asserted separately
+    const v1Of = (secret: string) =>
+      createWebhookSignature(payload, secret, ts).split(',').find((p) => p.startsWith('v1='))!;
+    // First v1 belongs to an unconfigured (old) secret; second is the real one.
+    const header = `t=${ts},${v1Of(WRONG_SECRET)},${v1Of(CONNECTED_SECRET)}`;
+
+    // Tolerance would reject the fixed ts, so verify with a wide tolerance to
+    // isolate the multi-signature behavior from the timestamp check.
+    const wide = 10 ** 12;
+    expect(verifyWebhookSignatureAny(payload, header, [CONNECTED_SECRET], wide)).toBe(true);
+    // A header whose v1s match none of the configured secrets still fails.
+    const noneHeader = `t=${ts},${v1Of(WRONG_SECRET)},${v1Of('whsec_also_wrong')}`;
+    expect(verifyWebhookSignatureAny(payload, noneHeader, [CONNECTED_SECRET, PLATFORM_SECRET], wide)).toBe(false);
+  });
 });
 
 describe('POST /webhooks/stripe — multi-secret signature verification', () => {

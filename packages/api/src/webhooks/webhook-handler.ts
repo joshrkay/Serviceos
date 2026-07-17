@@ -34,15 +34,20 @@ export function verifyWebhookSignature(
 
   const parts = signature.split(',');
   const timestampPart = parts.find((p) => p.startsWith('t='));
-  const signaturePart = parts.find((p) => p.startsWith('v1='));
+  // Stripe's `Stripe-Signature` header can carry MULTIPLE `v1=` signatures for
+  // the same payload — notably during endpoint secret rotation, when events are
+  // signed with both the old and new secret. Check EVERY v1 against the expected
+  // signature, not just the first: if the first v1 belongs to the other secret
+  // and a later v1 matches `secret`, a legitimate event would otherwise 401.
+  const providedSigs = parts
+    .filter((p) => p.startsWith('v1='))
+    .map((p) => p.substring(3))
+    .filter((s) => s.length > 0);
 
-  if (!timestampPart || !signaturePart) return false;
+  if (!timestampPart || providedSigs.length === 0) return false;
 
   const timestamp = parseInt(timestampPart.substring(2), 10);
   if (isNaN(timestamp)) return false;
-
-  const providedSig = signaturePart.substring(3);
-  if (!providedSig) return false;
 
   const now = Math.floor(Date.now() / 1000);
   if (Math.abs(now - timestamp) > toleranceSeconds) return false;
@@ -51,15 +56,17 @@ export function verifyWebhookSignature(
     .createHmac('sha256', secret)
     .update(`${timestamp}.${payload}`)
     .digest('hex');
+  const expectedBuf = Buffer.from(expectedSig, 'hex');
 
-  try {
-    const providedBuf = Buffer.from(providedSig, 'hex');
-    const expectedBuf = Buffer.from(expectedSig, 'hex');
-    if (providedBuf.length !== expectedBuf.length) return false;
-    return crypto.timingSafeEqual(providedBuf, expectedBuf);
-  } catch {
-    return false;
-  }
+  return providedSigs.some((providedSig) => {
+    try {
+      const providedBuf = Buffer.from(providedSig, 'hex');
+      if (providedBuf.length !== expectedBuf.length) return false;
+      return crypto.timingSafeEqual(providedBuf, expectedBuf);
+    } catch {
+      return false;
+    }
+  });
 }
 
 /**
