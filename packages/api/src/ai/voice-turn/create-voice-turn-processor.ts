@@ -336,9 +336,16 @@ function finalizeGroundedQuote(
   }
   const signals = lineItemConfidenceSignals(lineItems, priceField);
   const groundedClean = catalogAvailable && !outcome.requiresReview;
+  // The persisted 'low' stamp derives from anyUncatalogued (like the task
+  // handlers), NOT requiresReview/groundedClean: resolveProposalLine clears
+  // missingFields but never lifts the stamp, so stamping a missingFields-only
+  // outcome (ambiguity / price conflict) 'low' would keep chain-set/SMS
+  // approval blocked after the operator resolves it. groundedClean stays on
+  // requiresReview for the STRUCTURAL gates (autonomous close, quote flow).
+  const stampClean = catalogAvailable && !outcome.anyUncatalogued;
   const meta: ProposalConfidenceMeta = {
     overallConfidence:
-      groundedClean && typeof confidenceScore === 'number'
+      stampClean && typeof confidenceScore === 'number'
         ? getConfidenceLevel(confidenceScore)
         : 'low',
     ...(Object.keys(signals.fieldConfidence).length > 0
