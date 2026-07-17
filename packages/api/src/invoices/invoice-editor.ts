@@ -3,6 +3,7 @@ import { Invoice } from './invoice';
 import {
   LineItem,
   LineItemCategory,
+  PricingSource,
   buildLineItem,
   calculateDocumentTotals,
   validateLineItem as validateBillingLineItem,
@@ -35,6 +36,14 @@ export interface InvoiceEditLineItemInput {
   unitPrice: number; // integer cents
   category?: LineItemCategory;
   taxable?: boolean;
+  /**
+   * Catalog-grounding provenance stamped by
+   * ai/resolution/edit-action-grounding.ts before this action reaches the
+   * executor. Absent (undefined) means "no grounding signal" — persisted
+   * as NULL, never defaulted to 'manual' (see billing-engine.ts
+   * PricingSource doc + migration 255).
+   */
+  pricingSource?: PricingSource;
 }
 
 export type InvoiceEditAction =
@@ -59,7 +68,8 @@ function toBillingLineItem(
     input.unitPrice,
     sortOrder,
     input.taxable ?? true,
-    input.category
+    input.category,
+    input.pricingSource
   );
 }
 

@@ -184,3 +184,58 @@ describe('applyEstimateEdits — empty actions', () => {
     expect(() => applyEstimateEdits(makeEstimate(), [])).toThrow(/at least one/i);
   });
 });
+
+describe('applyEstimateEdits — pricingSource provenance', () => {
+  it('carries pricingSource through add_line_item when the grounder stamped one', () => {
+    const estimate = makeEstimate();
+    const { updatedEstimate } = applyEstimateEdits(estimate, [
+      {
+        type: 'add_line_item',
+        lineItem: {
+          description: 'Catalog-grounded part',
+          quantity: 1,
+          unitPrice: 4200,
+          category: 'material',
+          pricingSource: 'catalog',
+        } satisfies EstimateEditLineItemInput,
+      },
+    ]);
+
+    expect(updatedEstimate.lineItems[2].pricingSource).toBe('catalog');
+  });
+
+  it('carries pricingSource through update_line_item when the grounder stamped one', () => {
+    const estimate = makeEstimate();
+    const { updatedEstimate } = applyEstimateEdits(estimate, [
+      {
+        type: 'update_line_item',
+        index: 1,
+        lineItem: {
+          description: 'Tankless heater',
+          quantity: 1,
+          unitPrice: 145000,
+          category: 'material',
+          pricingSource: 'ambiguous',
+        } satisfies EstimateEditLineItemInput,
+      },
+    ]);
+
+    expect(updatedEstimate.lineItems[1].pricingSource).toBe('ambiguous');
+  });
+
+  it('leaves pricingSource undefined when the action carries no grounding signal', () => {
+    const estimate = makeEstimate();
+    const { updatedEstimate } = applyEstimateEdits(estimate, [
+      {
+        type: 'add_line_item',
+        lineItem: {
+          description: 'Manually entered line',
+          quantity: 1,
+          unitPrice: 1000,
+        } satisfies EstimateEditLineItemInput,
+      },
+    ]);
+
+    expect(updatedEstimate.lineItems[2].pricingSource).toBeUndefined();
+  });
+});

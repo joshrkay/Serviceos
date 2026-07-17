@@ -253,7 +253,13 @@ export function buildLineItem(
   unitPriceCents: number,
   sortOrder: number,
   taxable: boolean = true,
-  category?: LineItemCategory
+  category?: LineItemCategory,
+  // Catalog-grounding provenance (see PricingSource doc comment above).
+  // Optional trailing param so existing callers (seed-runner,
+  // estimate-template, schedule-completion, apply-late-fee-handler,
+  // invoice-schedule-handler) are unaffected — they simply don't pass it
+  // and the line persists with NULL provenance, same as before.
+  pricingSource?: PricingSource
 ): LineItem {
   return {
     id,
@@ -264,5 +270,6 @@ export function buildLineItem(
     totalCents: calculateLineItemTotal(quantity, unitPriceCents),
     sortOrder,
     taxable,
+    ...(pricingSource !== undefined ? { pricingSource } : {}),
   };
 }

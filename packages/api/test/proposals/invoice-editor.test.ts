@@ -194,3 +194,58 @@ describe('applyInvoiceEdits — empty actions', () => {
     expect(() => applyInvoiceEdits(invoice, [])).toThrow(/at least one/i);
   });
 });
+
+describe('applyInvoiceEdits — pricingSource provenance', () => {
+  it('carries pricingSource through add_line_item when the grounder stamped one', () => {
+    const invoice = makeInvoice();
+    const { updatedInvoice } = applyInvoiceEdits(invoice, [
+      {
+        type: 'add_line_item',
+        lineItem: {
+          description: 'Catalog-grounded part',
+          quantity: 1,
+          unitPrice: 4200,
+          category: 'material',
+          pricingSource: 'catalog',
+        } satisfies InvoiceEditLineItemInput,
+      },
+    ]);
+
+    expect(updatedInvoice.lineItems[2].pricingSource).toBe('catalog');
+  });
+
+  it('carries pricingSource through update_line_item when the grounder stamped one', () => {
+    const invoice = makeInvoice();
+    const { updatedInvoice } = applyInvoiceEdits(invoice, [
+      {
+        type: 'update_line_item',
+        index: 1,
+        lineItem: {
+          description: 'Premium filter',
+          quantity: 2,
+          unitPrice: 5500,
+          category: 'material',
+          pricingSource: 'uncatalogued',
+        } satisfies InvoiceEditLineItemInput,
+      },
+    ]);
+
+    expect(updatedInvoice.lineItems[1].pricingSource).toBe('uncatalogued');
+  });
+
+  it('leaves pricingSource undefined when the action carries no grounding signal', () => {
+    const invoice = makeInvoice();
+    const { updatedInvoice } = applyInvoiceEdits(invoice, [
+      {
+        type: 'add_line_item',
+        lineItem: {
+          description: 'Manually entered line',
+          quantity: 1,
+          unitPrice: 1000,
+        } satisfies InvoiceEditLineItemInput,
+      },
+    ]);
+
+    expect(updatedInvoice.lineItems[2].pricingSource).toBeUndefined();
+  });
+});
