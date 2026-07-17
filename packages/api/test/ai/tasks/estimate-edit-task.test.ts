@@ -329,8 +329,50 @@ describe('EstimateEditTaskHandler', () => {
       expect(result.proposal.sourceContext).toMatchObject({ missingFields: ['estimateId'] });
     });
 
-    it('an already-UUID reference lands directly on payload.estimateId with no gate', async () => {
+    // Verify-or-gate (2026-07 review): a UUID estimateReference is an
+    // ASSUMPTION about LLM output (buildPayload copies it verbatim), so it is
+    // only trusted after the repo confirms it via findById.
+    it('a repo-VERIFIED UUID reference lands on payload.estimateId, ungates, and rides the verifiedIds allowlist', async () => {
+      const uuidRef = '00000000-0000-4000-8000-000000000001';
+      const estimateRepo = new InMemoryEstimateRepository();
+      await estimateRepo.create(makeEstimate({ id: uuidRef }));
+
       const proposalRepo = new InMemoryProposalRepository();
+      const handler = new EstimateEditTaskHandler(editGateway(uuidRef), estimateRepo);
+      const result = await handler.handle({
+        tenantId,
+        userId,
+        message: `Add a trip fee to estimate ${uuidRef}`,
+      });
+
+      const payload = result.proposal.payload as Record<string, unknown>;
+      expect(payload.estimateId).toBe(uuidRef);
+      const sc = result.proposal.sourceContext as Record<string, unknown>;
+      expect(sc).not.toHaveProperty('missingFields');
+      expect(sc.verifiedIds).toEqual({ estimateId: uuidRef });
+
+      await proposalRepo.create(result.proposal);
+    });
+
+    it('a HALLUCINATED UUID reference that misses the repo is GATED (not trusted blind)', async () => {
+      const uuidRef = '00000000-0000-4000-8000-000000000001';
+      const estimateRepo = new InMemoryEstimateRepository();
+      await estimateRepo.create(makeEstimate({ id: 'est-real', estimateNumber: 'EST-9999' }));
+
+      const handler = new EstimateEditTaskHandler(editGateway(uuidRef), estimateRepo);
+      const result = await handler.handle({
+        tenantId,
+        userId,
+        message: 'Add a trip fee to that estimate',
+      });
+
+      const payload = result.proposal.payload as Record<string, unknown>;
+      expect(payload.estimateId).toBeUndefined();
+      expect(result.proposal.sourceContext).toMatchObject({ missingFields: ['estimateId'] });
+      expect(result.proposal.sourceContext ?? {}).not.toHaveProperty('verifiedIds');
+    });
+
+    it('a UUID reference with NO estimateRepo wired fails closed (gated)', async () => {
       const uuidRef = '00000000-0000-4000-8000-000000000001';
       const handler = new EstimateEditTaskHandler(editGateway(uuidRef));
       const result = await handler.handle({
@@ -340,13 +382,8 @@ describe('EstimateEditTaskHandler', () => {
       });
 
       const payload = result.proposal.payload as Record<string, unknown>;
-      expect(payload.estimateId).toBe(uuidRef);
-      expect(result.proposal.sourceContext ?? {}).not.toHaveProperty('missingFields');
-
-      // Approval is not blocked by a missing estimateId (may still be
-      // gated by other rules, e.g. uncatalogued pricing — not the concern
-      // of this test); the key assertion is missingFields is absent.
-      await proposalRepo.create(result.proposal);
+      expect(payload.estimateId).toBeUndefined();
+      expect(result.proposal.sourceContext).toMatchObject({ missingFields: ['estimateId'] });
     });
 
     it('a reference that matches zero estimates gates missingFields and does not set estimateId', async () => {
@@ -441,9 +478,11 @@ describe('EstimateEditTaskHandler', () => {
         expect(sc?.entityCandidates).toBeUndefined();
       });
 
-      it('an already-UUID reference bypasses the gate entirely — no candidates recorded', async () => {
+      it('a repo-verified UUID reference bypasses the gate via findById — no candidate search recorded', async () => {
         const uuidRef = '00000000-0000-4000-8000-000000000001';
         const estimateRepo = new InMemoryEstimateRepository();
+        await estimateRepo.create(makeEstimate({ id: uuidRef }));
+        const findByTenantSpy = vi.spyOn(estimateRepo, 'findByTenant');
 
         const handler = new EstimateEditTaskHandler(editGateway(uuidRef), estimateRepo);
         const result = await handler.handle({
@@ -452,6 +491,8 @@ describe('EstimateEditTaskHandler', () => {
           message: `Add a trip fee to estimate ${uuidRef}`,
         });
 
+        // UUID verification uses findById, never the ILIKE findByTenant search.
+        expect(findByTenantSpy).not.toHaveBeenCalled();
         expect(result.proposal.sourceContext ?? {}).not.toHaveProperty('missingFields');
         expect(result.proposal.sourceContext ?? {}).not.toHaveProperty('entityCandidates');
       });
@@ -669,6 +710,31 @@ describe('EstimateEditTaskHandler', () => {
       );
     }
 
+    // Verify-or-gate (2026-07 review): tests that use a UUID estimateReference
+    // to keep the estimateId gate out of the picture must now wire an
+    // estimateRepo the UUID actually resolves against (a bare UUID is no
+    // longer trusted blind). Seed a plain draft estimate under that id.
+    async function seedEstimateWithId(id: string): Promise<InMemoryEstimateRepository> {
+      const estimateRepo = new InMemoryEstimateRepository();
+      const lineItems: LineItem[] = [
+        buildLineItem('li-seed', 'Existing line', 1, 10000, 0, true, 'labor'),
+      ];
+      await estimateRepo.create({
+        id,
+        tenantId,
+        jobId: 'job-1',
+        estimateNumber: 'EST-0001',
+        status: 'draft',
+        lineItems,
+        totals: calculateDocumentTotals(lineItems, 0, 0),
+        version: 1,
+        createdBy: userId,
+        createdAt: new Date('2026-07-01T00:00:00Z'),
+        updatedAt: new Date('2026-07-01T00:00:00Z'),
+      } as Estimate);
+      return estimateRepo;
+    }
+
     // Supervisor present + low tenant threshold so ONLY the low-confidence
     // marker (not a missing supervisor) can block the uncatalogued case.
     const supervised = {
@@ -692,11 +758,13 @@ describe('EstimateEditTaskHandler', () => {
         // estimate-edit-task.ts). This test's purpose is catalog-pricing
         // auto-approval behavior, not estimateId resolution, so it uses an
         // already-resolved UUID reference — exactly what
-        // resolveEstimateIdGate treats as "already a resolved id" — to
-        // keep the estimateId gate out of the picture.
+        // resolveEstimateIdGate treats as a resolved id ONCE the repo
+        // confirms it (verify-or-gate) — to keep the estimateId gate out of
+        // the picture.
         '00000000-0000-4000-8000-000000000001',
       );
-      const handler = new EstimateEditTaskHandler(gateway, undefined, repo);
+      const estimateRepo = await seedEstimateWithId('00000000-0000-4000-8000-000000000001');
+      const handler = new EstimateEditTaskHandler(gateway, estimateRepo, repo);
       const result = await handler.handle({ tenantId, userId, message: 'edit', ...supervised });
 
       const payload = result.proposal.payload as {
@@ -723,12 +791,13 @@ describe('EstimateEditTaskHandler', () => {
         // custom price ("half price for Mrs. Henderson"), not a mishear.
         { description: 'site visit', quantity: 1, unitPrice: 7500 },
         0.98,
-        // An already-resolved UUID estimateReference keeps the estimateId
-        // gate (B2) out of the picture — this test is about the editAction
-        // gate specifically.
+        // A repo-verified UUID estimateReference keeps the estimateId gate
+        // (B2) out of the picture — this test is about the editAction gate
+        // specifically.
         '00000000-0000-4000-8000-000000000002',
       );
-      const handler = new EstimateEditTaskHandler(gateway, undefined, repo);
+      const estimateRepo = await seedEstimateWithId('00000000-0000-4000-8000-000000000002');
+      const handler = new EstimateEditTaskHandler(gateway, estimateRepo, repo);
       const result = await handler.handle({ tenantId, userId, message: 'edit', ...supervised });
 
       const payload = result.proposal.payload as {

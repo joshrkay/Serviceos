@@ -262,7 +262,10 @@ export class EstimateEditTaskHandler implements TaskHandler {
     // blocks it instead of letting an unresolved edit reach
     // UpdateEstimateExecutionHandler, which has no resolution step of its
     // own and would fail after approval.
-    const estimateIdMissingFields = this.resolveEstimateIdGate(payload, target);
+    const { missingFields: estimateIdMissingFields, verifiedIds } = this.resolveEstimateIdGate(
+      payload,
+      target,
+    );
 
     // B3 — the estimateId gate (B2) and the editAction catalog gates
     // (edit-action-grounding.ts) are disjoint string sets (`estimateId` vs
@@ -277,6 +280,10 @@ export class EstimateEditTaskHandler implements TaskHandler {
     // needs to act on.
     const sourceContext: Record<string, unknown> = {
       ...(context.conversationId ? { conversationId: context.conversationId } : {}),
+      // Verify-or-gate: a repo-confirmed estimateId rides the B4 allowlist so
+      // it survives assistant.ts's dropUnverifiedIds (repo-verified by
+      // construction — never copied from LLM/classifier text).
+      ...(verifiedIds ? { verifiedIds } : {}),
       ...(estimateIdMissingFields.length > 0 && candidates.length > 0
         ? {
             entityCandidates: candidates,
@@ -345,6 +352,15 @@ export class EstimateEditTaskHandler implements TaskHandler {
         return { target, candidates: [] };
       }
       const reference = payload.estimateReference;
+      if (isUuid(reference)) {
+        // Verify-or-gate: an id-shaped estimateReference from the LLM is an
+        // ASSUMPTION, not a fact — VERIFY it via findById (an ILIKE search on
+        // a UUID string could never match an estimate number anyway). A hit
+        // both powers the acceptance-void marker and lets resolveEstimateIdGate
+        // trust + allowlist the id; a miss leaves target null → gated.
+        const target = await this.estimateRepo.findById(tenantId, reference);
+        return { target, candidates: [] };
+      }
       if (typeof reference === 'string' && reference.trim().length > 0) {
         // ILIKE search on estimate_number / customer_message; only an
         // UNAMBIGUOUS single match identifies the acceptance-marker target.
@@ -373,57 +389,62 @@ export class EstimateEditTaskHandler implements TaskHandler {
    * proposal is safe to approve, mirroring the update_invoice fix
    * (InvoiceEditTaskHandler.resolveInvoiceId in invoice-edit-task.ts).
    *
-   * Gating rule: missingFields is cleared ONLY when the reference/id is
-   * ALREADY a literal UUID (isUuid) — never merely because
-   * resolveTargetEstimate's search resolved a free-text reference
-   * unambiguously.
+   * Verify-or-gate rule: the gate is lifted ONLY when the wired repo
+   * confirms the id — i.e. `resolveTargetEstimate`'s findById actually
+   * returned the estimate whose id equals the UUID candidate. A UUID that
+   * merely "looks right" is NOT trusted on its own.
    *
-   * This is deliberately more conservative than "resolved ⇒ ungated". The
-   * reason: assistant.ts's `dropUnverifiedIds` guard deletes any
-   * id-shaped payload field (jobId/customerId/estimateId/invoiceId/
-   * appointmentId) that doesn't appear literally in the operator's raw
-   * text or classifier entities — it exists to catch LLM-hallucinated ids
-   * and can't distinguish those from a genuinely repo-verified
-   * estimateId. A DB-resolved id from a free-text search is NEVER
-   * literally in that text, so it gets silently stripped on the
-   * assistant chat surface right before persistence, while an "ungated"
-   * missingFields would leave the proposal approvable with estimateId
-   * gone — reintroducing the exact doomed-approval bug this fix closes
-   * (empirically verified against the live assistant router for the
-   * update_invoice sibling of this bug). voice-action-router.ts has no
-   * such guard, but the two surfaces must gate identically or the same
-   * transcript would behave differently depending on which one drafted
-   * it. So: only a reference/id that is ALREADY a UUID (guaranteed
-   * present in extractedEntities/text, so dropUnverifiedIds always keeps
-   * it) is trusted to bypass review. The estimateRepo search inside
-   * resolveTargetEstimate still runs and its result still stamps
-   * payload.estimateId when it resolves unambiguously — useful
-   * review-card context and a correct id on the surface without the
-   * guard — but it never lifts the gate.
+   * Why a bare UUID is NOT trusted: `buildPayload` copies the
+   * estimateId/estimateReference straight from the LLM's JSON, so an
+   * id-shaped value is an ASSUMPTION about model output, not a fact. The
+   * old rule ("a literal UUID is guaranteed present in text/entities so
+   * dropUnverifiedIds keeps it") does not hold for a HALLUCINATED UUID the
+   * model invented from nowhere in the operator's words. On the assistant
+   * surface `dropUnverifiedIds` would strip that fabricated id (not in the
+   * haystack, not in verifiedIds), leaving an APPROVABLE proposal with NO
+   * estimateId and NO gate — nothing re-gates post-scrub, and
+   * approveProposal only checks missingFields. So a UUID is VERIFIED
+   * against the repo (findById in resolveTargetEstimate, reused here — no
+   * second round-trip); a repo-confirmed id is stamped onto
+   * payload.estimateId AND recorded in `verifiedIds` ({ estimateId }) — the
+   * B4 allowlist dropUnverifiedIds honors, safe because it came from a repo
+   * lookup, not LLM text. A miss (or an absent repo → null target) fails
+   * closed: nothing trusted is stamped and the proposal is gated.
    *
-   * Never throws: mutates `payload` in place and returns the
-   * missingFields array to stamp on the proposal; a null `target` (no
-   * repo, ambiguous match, zero match, or a repo hiccup already
-   * swallowed by resolveTargetEstimate) simply leaves the proposal
-   * gated. `estimateReference` is left untouched either way so the
-   * review card can always show what the operator said.
+   * A free-text reference resolved unambiguously by resolveTargetEstimate's
+   * search still stamps payload.estimateId for review-card context, but per
+   * the rule above never lifts the gate (dropUnverifiedIds strips a
+   * search-resolved id since it isn't literally in the operator's text).
+   * voice-action-router.ts has no such guard, but the two surfaces must
+   * gate identically or the same transcript would behave differently
+   * depending on which one drafted it.
+   *
+   * Never throws: mutates `payload` in place and returns the missingFields
+   * array (plus, on a verified id, a `verifiedIds` allowlist entry) to
+   * stamp on the proposal. `estimateReference` is left untouched either way
+   * so the review card can always show what the operator said.
    */
   private resolveEstimateIdGate(
     payload: Record<string, unknown>,
     target: Estimate | null,
-  ): string[] {
-    if (isUuid(payload.estimateId)) {
-      // Already a resolved id (e.g. a re-draft carrying a prior pick, or a
-      // classifier hint that was itself a verified UUID) — safe to
-      // ungate: this literal string is present in the classifier
-      // entities/text dropUnverifiedIds checks.
-      return [];
-    }
+  ): { missingFields: string[]; verifiedIds?: Record<string, string> } {
+    const uuidCandidate = isUuid(payload.estimateId)
+      ? (payload.estimateId as string)
+      : isUuid(payload.estimateReference)
+        ? (payload.estimateReference as string)
+        : undefined;
 
-    const reference = payload.estimateReference;
-    if (isUuid(reference)) {
-      payload.estimateId = reference;
-      return [];
+    if (uuidCandidate) {
+      // Trust the UUID ONLY when resolveTargetEstimate's findById returned
+      // it. A hallucinated UUID (repo miss) or an absent repo → null target.
+      if (target && target.id === uuidCandidate) {
+        payload.estimateId = uuidCandidate;
+        return { missingFields: [], verifiedIds: { estimateId: uuidCandidate } };
+      }
+      // Unverifiable — drop a bare unverified estimateId so nothing untrusted
+      // rides the payload, and gate (fail closed).
+      if (payload.estimateId === uuidCandidate) delete payload.estimateId;
+      return { missingFields: ['estimateId'] };
     }
 
     // A free-text reference resolved unambiguously by
@@ -435,10 +456,8 @@ export class EstimateEditTaskHandler implements TaskHandler {
       payload.estimateId = target.id;
     }
 
-    // Free-text reference (resolved or not) — always gated. See the
-    // method doc comment for why "resolved via search" doesn't bypass
-    // this on its own.
-    return ['estimateId'];
+    // Free-text reference (resolved or not) — always gated.
+    return { missingFields: ['estimateId'] };
   }
 
   private buildUserMessage(context: TaskContext, catalogItems: CatalogItem[] = []): string {

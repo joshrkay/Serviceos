@@ -234,8 +234,50 @@ describe('UpdateJobTaskHandler', () => {
       expect((sc.entityCandidates as unknown[]).length).toBe(2);
     });
 
-    it('an already-UUID reference lands directly on payload.jobId with no gate', async () => {
+    // Verify-or-gate (2026-07 review): a UUID jobReference is an ASSUMPTION
+    // about LLM output (buildPayload copies it verbatim), so it is only
+    // trusted after jobRepo confirms it via findById.
+    it('a repo-VERIFIED UUID reference lands on payload.jobId, ungates, and rides the verifiedIds allowlist', async () => {
+      const uuidRef = '00000000-0000-4000-8000-000000000001';
+      const jobRepo = new InMemoryJobRepository();
+      await jobRepo.create(makeJob({ id: uuidRef }));
+
       const proposalRepo = new InMemoryProposalRepository();
+      const handler = new UpdateJobTaskHandler(editGateway(uuidRef), jobRepo);
+      const result = await handler.handle({
+        tenantId,
+        userId,
+        message: `Mark job ${uuidRef} in progress`,
+      });
+
+      const payload = result.proposal.payload as Record<string, unknown>;
+      expect(payload.jobId).toBe(uuidRef);
+      const sc = result.proposal.sourceContext as Record<string, unknown>;
+      expect(sc).not.toHaveProperty('missingFields');
+      expect(sc.verifiedIds).toEqual({ jobId: uuidRef });
+
+      await proposalRepo.create(result.proposal);
+    });
+
+    it('a HALLUCINATED UUID reference that misses the repo is GATED (not trusted blind)', async () => {
+      const uuidRef = '00000000-0000-4000-8000-000000000001';
+      const jobRepo = new InMemoryJobRepository();
+      await jobRepo.create(makeJob({ id: 'job-real', jobNumber: 'JOB-9999' }));
+
+      const handler = new UpdateJobTaskHandler(editGateway(uuidRef), jobRepo);
+      const result = await handler.handle({
+        tenantId,
+        userId,
+        message: 'Mark that job in progress',
+      });
+
+      const payload = result.proposal.payload as Record<string, unknown>;
+      expect(payload.jobId).toBeUndefined();
+      expect(result.proposal.sourceContext).toMatchObject({ missingFields: ['jobId'] });
+      expect(result.proposal.sourceContext ?? {}).not.toHaveProperty('verifiedIds');
+    });
+
+    it('a UUID reference with NO jobRepo wired fails closed (gated)', async () => {
       const uuidRef = '00000000-0000-4000-8000-000000000001';
       const handler = new UpdateJobTaskHandler(editGateway(uuidRef));
       const result = await handler.handle({
@@ -245,10 +287,8 @@ describe('UpdateJobTaskHandler', () => {
       });
 
       const payload = result.proposal.payload as Record<string, unknown>;
-      expect(payload.jobId).toBe(uuidRef);
-      expect(result.proposal.sourceContext ?? {}).not.toHaveProperty('missingFields');
-
-      await proposalRepo.create(result.proposal);
+      expect(payload.jobId).toBeUndefined();
+      expect(result.proposal.sourceContext).toMatchObject({ missingFields: ['jobId'] });
     });
 
     it('a reference that matches zero jobs gates missingFields and does not set jobId', async () => {

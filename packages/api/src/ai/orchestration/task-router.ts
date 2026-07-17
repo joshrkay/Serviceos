@@ -54,16 +54,27 @@ export class TaskRouter {
 }
 
 // A classifier-extracted reference that already IS a usable invoice
-// identifier for the execution handler's resolveInvoice() (UUID or a bare/
-// "INV-0042"-style invoice number — see issue-invoice-handler.ts). Anything
-// else (e.g. "the Henderson invoice") is free text the execution handler
-// cannot resolve on its own, so it must NOT be handed through ungated —
-// it falls to rung 2/3 of the resolution ladder below instead.
+// identifier for the execution handler's resolveInvoice() (a UUID, a bare
+// number like "0042", or a "<prefix>-<digits>" invoice number — see
+// issue-invoice-handler.ts). Invoice numbers are minted as
+// `${settings.invoicePrefix}${padded}` with a tenant-editable prefix (settings.ts),
+// so the shape must accept ANY alpha[alnum]-digits prefix ("INV-0042",
+// "ACME-0042"), not just a hard-coded "INV-". Execution's resolveInvoice()
+// matches invoiceNumber EXACTLY, so we do NOT try to fetch tenant settings
+// here — we only need the reference to be shaped like a resolvable id.
+// Anything else (e.g. "the Henderson invoice") is free text the execution
+// handler cannot resolve on its own, so it must NOT be handed through
+// ungated — it falls to rung 3 of the resolution ladder below instead.
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const INVOICE_NUMBER_RE = /^(?:INV-)?\d+$/i;
+const INVOICE_NUMBER_RE = /^(?:[A-Za-z][A-Za-z0-9]*-)?\d+$/;
 
-function looksLikeResolvedInvoiceRef(value: string): boolean {
+// Exported for direct predicate unit tests (invoice-intents.test.ts). A
+// resolvable ref is a UUID, a bare number ("0042"), or a
+// "<alpha><alnum>*-<digits>" invoice number for ANY tenant prefix
+// ("INV-0042", "ACME-0042"). Free-text names ("the Henderson invoice",
+// "Henderson") are NOT resolvable and must fall to the gated rung.
+export function looksLikeResolvedInvoiceRef(value: string): boolean {
   return UUID_RE.test(value) || INVOICE_NUMBER_RE.test(value);
 }
 
@@ -111,8 +122,9 @@ export interface IssueInvoiceTaskDeps {
  *   1. `existingEntities.invoiceReference`/`jobReference` already looks like
  *      a usable id (UUID or "INV-0042"/bare-number) → `payload.invoiceId`,
  *      ungated (the execution handler resolves either shape directly).
- *   2. Else, `conversationId` + `proposalRepo` wired → the most recent
- *      same-conversation `draft_invoice` proposal with a `resultEntityId` →
+ *   2. Else, when NO reference was extracted and `conversationId` +
+ *      `proposalRepo` are wired → the most recent same-conversation
+ *      `draft_invoice` proposal with a `resultEntityId` →
  *      `payload.invoiceId`, ungated, AND `sourceContext.verifiedIds =
  *      { invoiceId }`. CRITICAL SECURITY: `verifiedIds` is stamped ONLY
  *      here, from a proposalRepo lookup — never copied from `existingEntities`
@@ -170,8 +182,15 @@ export class IssueInvoiceTaskHandler implements TaskHandler {
       // Rung 1 — already a usable reference; resolveInvoice() at execution
       // time handles the UUID/number-vs-lookup split.
       invoiceId = trimmedRef;
-    } else if (context.conversationId) {
+    } else if (!trimmedRef && context.conversationId) {
       // Rung 2 — "the one we just drafted" conversation-context resolution.
+      // GUARDED on `!trimmedRef`: this rung ignores any reference and just
+      // grabs the most-recent same-conversation draft_invoice, so it may run
+      // ONLY when NO reference was extracted. A PRESENT-but-unresolvable
+      // reference ("issue the Henderson invoice") must NOT silently resolve
+      // to whatever was last drafted in this conversation — that could issue
+      // the wrong customer's invoice on a single approval. It falls through
+      // to the gated rung 3 instead (missingFields + candidates on the ref).
       // A repo-resolved id is verifiable by construction (it came from a DB
       // lookup, not LLM text), so it's stamped into `verifiedIds` alongside
       // the payload — never the reverse.

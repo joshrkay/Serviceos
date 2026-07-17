@@ -1295,6 +1295,186 @@ describe('money-path handler wiring — update_invoice/send_invoice/issue_invoic
     // Neither chain step should have fallen back to the draft_invoice handler.
     expect(persisted.some((p) => p.proposalType === 'draft_invoice')).toBe(false);
   });
+
+  // Verify-or-gate (2026-07 review) — the hallucinated-UUID gate bypass this
+  // fix closes, pinned end-to-end on the assistant surface. Pre-fix an edit
+  // handler stamped payload.invoiceId from ANY UUID-shaped invoiceReference
+  // (no repo check) and ungated; on this surface dropUnverifiedIds then
+  // stripped a FABRICATED UUID (absent from operator text, absent from
+  // verifiedIds), leaving an APPROVABLE proposal with NO id and NO gate.
+  it('single-intent path: a HALLUCINATED update_invoice UUID (absent from operator text, missing from the repo) is GATED and never approvable', async () => {
+    const FABRICATED = 'deadbeef-dead-4bee-8bee-deadbeefdead';
+    const invoiceRepo = new InMemoryInvoiceRepository();
+    // Repo has a real invoice, but NOT one with the fabricated id.
+    await createInvoice(
+      {
+        tenantId: TEST_TENANT,
+        jobId: 'job-1',
+        customerId: 'cust-1',
+        invoiceNumber: 'INV-9999',
+        lineItems: [{ description: 'Service call', quantity: 1, unitPriceCents: 10000 }],
+        taxRateBps: 0,
+        createdBy: TEST_USER,
+      } as never,
+      invoiceRepo,
+    );
+
+    const gateway = scriptedGateway([
+      JSON.stringify({ intentType: 'update_invoice', confidence: 0.9, extractedEntities: {} }),
+      JSON.stringify({
+        // The LLM fabricates a UUID that appears NOWHERE in the operator's words.
+        invoiceReference: FABRICATED,
+        editActions: [
+          { type: 'add_line_item', lineItem: { description: 'Trip fee', quantity: 1, unitPrice: 7500 } },
+        ],
+        confidence_score: 0.9,
+      }),
+    ]);
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: TEST_USER,
+        sessionId: 'sess-1',
+        tenantId: TEST_TENANT,
+        role: 'owner',
+      };
+      next();
+    });
+    app.use('/api/assistant', createAssistantRouter({ gateway, proposalRepo, invoiceRepo }));
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Add a trip fee to that invoice' }] });
+
+    expect(res.status).toBe(200);
+    // Gated — the fabricated id was never trusted, so the card blocks Approve.
+    expect(res.body.message.proposal.missingFields).toEqual(['invoiceId']);
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0].payload).not.toHaveProperty('invoiceId');
+    await expect(
+      approveProposal(proposalRepo, TEST_TENANT, persisted[0].id, TEST_USER, 'owner'),
+    ).rejects.toThrow(/unfilled required fields/);
+  });
+
+  it('single-intent path: a repo-VERIFIED update_invoice UUID survives dropUnverifiedIds end-to-end (ungated, id kept via verifiedIds)', async () => {
+    const invoiceRepo = new InMemoryInvoiceRepository();
+    const invoice = await createInvoice(
+      {
+        tenantId: TEST_TENANT,
+        jobId: 'job-1',
+        customerId: 'cust-1',
+        invoiceNumber: 'INV-0042',
+        lineItems: [{ description: 'Service call', quantity: 1, unitPriceCents: 10000 }],
+        taxRateBps: 0,
+        createdBy: TEST_USER,
+      } as never,
+      invoiceRepo,
+    );
+
+    const gateway = scriptedGateway([
+      JSON.stringify({ intentType: 'update_invoice', confidence: 0.9, extractedEntities: {} }),
+      JSON.stringify({
+        // A re-draft carrying the real invoice id — verified against the repo.
+        invoiceReference: invoice.id,
+        editActions: [
+          { type: 'add_line_item', lineItem: { description: 'Trip fee', quantity: 1, unitPrice: 7500 } },
+        ],
+        confidence_score: 0.9,
+      }),
+    ]);
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: TEST_USER,
+        sessionId: 'sess-1',
+        tenantId: TEST_TENANT,
+        role: 'owner',
+      };
+      next();
+    });
+    app.use('/api/assistant', createAssistantRouter({ gateway, proposalRepo, invoiceRepo }));
+
+    // The invoice id appears NOWHERE in the operator's words — only the
+    // verifiedIds allowlist keeps dropUnverifiedIds from stripping it.
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Add a trip fee to that invoice' }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.message.proposal.missingFields ?? undefined).toBeUndefined();
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted).toHaveLength(1);
+    // Survived dropUnverifiedIds via sourceContext.verifiedIds.
+    expect(persisted[0].payload.invoiceId).toBe(invoice.id);
+    expect(persisted[0].sourceContext?.verifiedIds).toEqual({ invoiceId: invoice.id });
+    expect(persisted[0].sourceContext?.missingFields).toBeUndefined();
+  });
+
+  // Map-drift prevention (2026-07 review) — the single-intent map previously
+  // built `new SendInvoiceTaskHandler()` with NO invoiceRepo while the chain
+  // map passed it, so a single-message "send the Henderson invoice" lost the
+  // candidate picker. Both maps now resolve send_invoice from the ONE shared
+  // registry (built once in createAssistantRouter), so the single-intent path
+  // yields entityCandidates whenever the repo matches — same as the chain.
+  it('single-intent path: send_invoice records entityCandidates when invoiceRepo matches (no map drift vs the chain path)', async () => {
+    const invoiceRepo = new InMemoryInvoiceRepository();
+    await createInvoice(
+      {
+        tenantId: TEST_TENANT,
+        jobId: 'job-1',
+        customerId: 'cust-1',
+        invoiceNumber: 'INV-0042',
+        lineItems: [{ description: 'Service call', quantity: 1, unitPriceCents: 10000 }],
+        taxRateBps: 0,
+        createdBy: TEST_USER,
+      } as never,
+      invoiceRepo,
+    );
+
+    const gateway = scriptedGateway([
+      JSON.stringify({
+        intentType: 'send_invoice',
+        confidence: 0.9,
+        extractedEntities: { jobReference: 'INV-0042' },
+      }),
+    ]);
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: TEST_USER,
+        sessionId: 'sess-1',
+        tenantId: TEST_TENANT,
+        role: 'owner',
+      };
+      next();
+    });
+    app.use('/api/assistant', createAssistantRouter({ gateway, proposalRepo, invoiceRepo }));
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Send invoice INV-0042 to the customer' }] });
+
+    expect(res.status).toBe(200);
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0].proposalType).toBe('send_invoice');
+    // The picker is populated — proof the single-intent map now passes the
+    // invoiceRepo (pre-fix it built the handler with no repo → no candidates).
+    const sc = persisted[0].sourceContext as Record<string, unknown>;
+    const candidates = sc.entityCandidates as Array<Record<string, unknown>>;
+    expect(Array.isArray(candidates)).toBe(true);
+    expect(candidates.length).toBeGreaterThanOrEqual(1);
+    expect(candidates.every((c) => c.kind === 'invoice')).toBe(true);
+    // Still gated — candidates never lift the gate.
+    expect(res.body.message.proposal.missingFields).toEqual(['invoiceId']);
+  });
 });
 
 describe('money-path handler wiring — update_estimate is catalog-grounded (both dispatch paths)', () => {

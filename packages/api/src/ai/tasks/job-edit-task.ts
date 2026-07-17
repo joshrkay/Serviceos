@@ -46,11 +46,12 @@ const VALID_PRIORITIES = new Set(['low', 'normal', 'high', 'urgent']);
  *
  * The LLM returns a `jobReference` (a string the operator/review UI
  * resolves to a real job id) plus whichever fields the operator asked to
- * change. jobId resolution follows the SAME gate pattern as
+ * change. jobId resolution follows the SAME verify-or-gate pattern as
  * EstimateEditTaskHandler.resolveEstimateIdGate (estimate-edit-task.ts):
- * a literal UUID reference is trusted and ungates the proposal; a
- * free-text reference is best-effort resolved via jobRepo search (stamped
- * onto payload.jobId for review-card context) but ALWAYS stays gated via
+ * a UUID reference/id is trusted and ungates the proposal ONLY when the
+ * jobRepo confirms it via findById (stamping the B4 `verifiedIds`
+ * allowlist so it survives dropUnverifiedIds); a fabricated UUID that
+ * misses the repo, and any free-text reference, stays gated via
  * `missingFields: ['jobId']` — see that method's doc comment for the
  * `dropUnverifiedIds` hazard this avoids.
  */
@@ -172,7 +173,7 @@ export class UpdateJobTaskHandler implements TaskHandler {
     // approveProposal blocks it instead of letting an unresolved edit
     // reach UpdateJobExecutionHandler, which has no resolution step of its
     // own and would fail after approval.
-    const jobIdMissingFields = this.resolveJobIdGate(payload, target);
+    const { missingFields: jobIdMissingFields, verifiedIds } = this.resolveJobIdGate(payload, target);
 
     // B2 pattern — layer the resolved candidate list ON TOP of the gate
     // (never a substitute for it): only recorded while the gate is still
@@ -180,6 +181,10 @@ export class UpdateJobTaskHandler implements TaskHandler {
     // operator still needs to act on.
     const sourceContext: Record<string, unknown> = {
       ...(context.conversationId ? { conversationId: context.conversationId } : {}),
+      // Verify-or-gate: a repo-confirmed jobId rides the B4 allowlist so it
+      // survives assistant.ts's dropUnverifiedIds (repo-verified by
+      // construction — never copied from LLM/classifier text).
+      ...(verifiedIds ? { verifiedIds } : {}),
       ...(jobIdMissingFields.length > 0 && candidates.length > 0
         ? {
             entityCandidates: candidates,
@@ -243,6 +248,15 @@ export class UpdateJobTaskHandler implements TaskHandler {
         return { target, candidates: [] };
       }
       const reference = payload.jobReference;
+      if (isUuid(reference)) {
+        // Verify-or-gate: an id-shaped jobReference from the LLM is an
+        // ASSUMPTION, not a fact — VERIFY it via findById (an ILIKE search on
+        // a UUID string could never match a job number anyway). A hit lets
+        // resolveJobIdGate trust + allowlist the id; a miss leaves target
+        // null → gated.
+        const target = await this.jobRepo.findById(tenantId, reference);
+        return { target, candidates: [] };
+      }
       if (typeof reference === 'string' && reference.trim().length > 0) {
         // ILIKE search on summary / job_number; only an UNAMBIGUOUS single
         // match identifies the target.
@@ -261,41 +275,58 @@ export class UpdateJobTaskHandler implements TaskHandler {
   }
 
   /**
-   * Gating rule — mirrors EstimateEditTaskHandler.resolveEstimateIdGate
-   * verbatim (see its doc comment in estimate-edit-task.ts for the full
-   * `dropUnverifiedIds` rationale): missingFields is cleared ONLY when the
-   * reference/id is ALREADY a literal UUID — never merely because
-   * resolveTargetJob's search resolved a free-text reference
-   * unambiguously. A DB-resolved id from a free-text search is never
-   * literally present in the operator's raw text, so the assistant
-   * surface's `dropUnverifiedIds` guard would silently strip it right
-   * before persistence — an "ungated" missingFields would then leave the
-   * proposal approvable with jobId gone, reintroducing the exact
-   * doomed-approval bug that fix closed. voice-action-router.ts has no
-   * such guard, but the two surfaces must gate identically or the same
-   * transcript would behave differently depending on which one drafted
-   * it.
+   * Verify-or-gate rule — mirrors EstimateEditTaskHandler.resolveEstimateIdGate
+   * (see its doc comment in estimate-edit-task.ts for the full
+   * `dropUnverifiedIds` rationale): the gate is lifted ONLY when the wired
+   * repo CONFIRMS the id — i.e. resolveTargetJob's findById actually
+   * returned the job whose id equals the UUID candidate — never merely
+   * because the reference/id "looks like" a UUID.
    *
-   * Never throws: mutates `payload` in place and returns the
-   * missingFields array to stamp on the proposal; a null `target` (no
-   * repo, ambiguous match, zero match, or a repo hiccup already swallowed
-   * by resolveTargetJob) simply leaves the proposal gated.
+   * `buildPayload` copies jobId/jobReference straight from the LLM's JSON,
+   * so an id-shaped value is an ASSUMPTION about model output. A
+   * HALLUCINATED UUID the model invented appears nowhere in the operator's
+   * words, so on the assistant surface `dropUnverifiedIds` would strip it,
+   * leaving an APPROVABLE proposal with NO jobId and NO gate (nothing
+   * re-gates post-scrub; approveProposal only checks missingFields). So a
+   * UUID is VERIFIED against the repo (findById in resolveTargetJob, reused
+   * here — no second round-trip); a repo-confirmed id is stamped onto
+   * payload.jobId AND recorded in `verifiedIds` ({ jobId }) — the B4
+   * allowlist dropUnverifiedIds honors, safe because it came from a repo
+   * lookup, not LLM text. A miss (or an absent repo → null target) fails
+   * closed: nothing trusted is stamped and the proposal is gated.
+   *
+   * A free-text reference resolved unambiguously by resolveTargetJob's
+   * search still stamps payload.jobId for review-card context, but never
+   * lifts the gate. voice-action-router.ts has no such guard, but the two
+   * surfaces must gate identically or the same transcript would behave
+   * differently depending on which one drafted it.
+   *
+   * Never throws: mutates `payload` in place and returns the missingFields
+   * array (plus, on a verified id, a `verifiedIds` allowlist entry).
    * `jobReference` is left untouched either way so the review card can
    * always show what the operator said.
    */
-  private resolveJobIdGate(payload: Record<string, unknown>, target: { id: string } | null): string[] {
-    if (isUuid(payload.jobId)) {
-      // Already a resolved id (e.g. a re-draft carrying a prior pick, or a
-      // classifier hint that was itself a verified UUID) — safe to
-      // ungate: this literal string is present in the classifier
-      // entities/text dropUnverifiedIds checks.
-      return [];
-    }
+  private resolveJobIdGate(
+    payload: Record<string, unknown>,
+    target: { id: string } | null,
+  ): { missingFields: string[]; verifiedIds?: Record<string, string> } {
+    const uuidCandidate = isUuid(payload.jobId)
+      ? (payload.jobId as string)
+      : isUuid(payload.jobReference)
+        ? (payload.jobReference as string)
+        : undefined;
 
-    const reference = payload.jobReference;
-    if (isUuid(reference)) {
-      payload.jobId = reference;
-      return [];
+    if (uuidCandidate) {
+      // Trust the UUID ONLY when resolveTargetJob's findById returned it. A
+      // hallucinated UUID (repo miss) or an absent repo → null target.
+      if (target && target.id === uuidCandidate) {
+        payload.jobId = uuidCandidate;
+        return { missingFields: [], verifiedIds: { jobId: uuidCandidate } };
+      }
+      // Unverifiable — drop a bare unverified jobId so nothing untrusted
+      // rides the payload, and gate (fail closed).
+      if (payload.jobId === uuidCandidate) delete payload.jobId;
+      return { missingFields: ['jobId'] };
     }
 
     // A free-text reference resolved unambiguously by resolveTargetJob's
@@ -306,10 +337,8 @@ export class UpdateJobTaskHandler implements TaskHandler {
       payload.jobId = target.id;
     }
 
-    // Free-text reference (resolved or not) — always gated. See the
-    // method doc comment for why "resolved via search" doesn't bypass
-    // this on its own.
-    return ['jobId'];
+    // Free-text reference (resolved or not) — always gated.
+    return { missingFields: ['jobId'] };
   }
 
   private buildUserMessage(context: TaskContext): string {

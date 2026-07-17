@@ -16,6 +16,7 @@ import {
 import {
   createDefaultTaskRouter,
   IssueInvoiceTaskHandler,
+  looksLikeResolvedInvoiceRef,
 } from '../../../src/ai/orchestration/task-router';
 import { LLMGateway, LLMResponse } from '../../../src/ai/gateway/gateway';
 import { issueInvoicePayloadSchema } from '../../../src/proposals/contracts/issue-invoice';
@@ -206,6 +207,24 @@ describe('P22-002 invoice-intents — task router issue_invoice route', () => {
  * voice worker's local handler had rung 2 but no gate on rung 3 — this suite
  * pins both together on the ONE handler both surfaces now share.
  */
+describe('looksLikeResolvedInvoiceRef — resolvable-id-shape predicate', () => {
+  it.each([
+    ['ACME-0042', true], // tenant-prefixed invoice number (was broken by the hard-coded INV- shape)
+    ['INV-0042', true], // default-prefix invoice number
+    ['0042', true], // bare invoice number
+    ['11111111-1111-1111-1111-111111111111', true], // UUID
+  ])('accepts a resolvable ref: %s', (value, expected) => {
+    expect(looksLikeResolvedInvoiceRef(value as string)).toBe(expected);
+  });
+
+  it.each([
+    ['the Henderson invoice', false], // free-text phrase (spaces, no digits)
+    ['Henderson', false], // bare customer name
+  ])('rejects free text so it falls to the gated rung: %s', (value, expected) => {
+    expect(looksLikeResolvedInvoiceRef(value as string)).toBe(expected);
+  });
+});
+
 describe('B4 — IssueInvoiceTaskHandler resolution ladder', () => {
   it('rung 1: a UUID reference resolves ungated, with no proposalRepo/invoiceRepo needed', async () => {
     const handler = new IssueInvoiceTaskHandler();
@@ -235,21 +254,87 @@ describe('B4 — IssueInvoiceTaskHandler resolution ladder', () => {
     expect(missingFieldsFor(proposal)).toEqual([]);
   });
 
-  it('rung 2: a free-text reference ("the Henderson invoice") does NOT resolve ungated even with a conversationId — it is not a usable id shape', async () => {
+  it('rung 2 is REFERENCE-GATED: a present-but-unresolvable free-text reference ("the Henderson invoice") does NOT resolve to the most-recent same-conversation draft — it lands gated with candidates on the free text (wrong-invoice guard)', async () => {
+    // Seed a REAL same-conversation draft_invoice with a resultEntityId, so
+    // the rung-2 lookup WOULD find a draft to resolve to if it ran. It must
+    // NOT run here, because a reference WAS extracted — resolving the named
+    // "Henderson" reference to whatever we last drafted could issue the wrong
+    // customer's invoice on a single approval.
     const proposalRepo = new InMemoryProposalRepository();
-    const handler = new IssueInvoiceTaskHandler({ proposalRepo });
+    const seededDraft = createProposal({
+      tenantId: 't-1',
+      proposalType: 'draft_invoice',
+      payload: { customerId: 'cust-other' },
+      summary: 'Draft invoice for someone else',
+      sourceContext: { conversationId: 'conv-1' },
+      createdBy: 'u-1',
+    });
+    seededDraft.resultEntityId = 'invoice-SEEDED-DRAFT';
+    await proposalRepo.create(seededDraft);
+
+    // An invoiceRepo that actually matches "Henderson", so we can also assert
+    // the gate carries B2-style candidates on the free-text reference.
+    const invoiceRepo = new InMemoryInvoiceRepository();
+    await createInvoice(
+      {
+        tenantId: 't-1',
+        jobId: 'job-h',
+        customerId: 'cust-henderson',
+        invoiceNumber: 'INV-0077',
+        lineItems: [{ description: 'Water heater', quantity: 1, unitPriceCents: 20000 }],
+        taxRateBps: 0,
+        customerMessage: 'Henderson water heater',
+        createdBy: 'u-1',
+      } as never,
+      invoiceRepo,
+    );
+
+    const handler = new IssueInvoiceTaskHandler({ proposalRepo, invoiceRepo });
     const { proposal } = await handler.handle({
       tenantId: 't-1',
       userId: 'u-1',
       message: 'Issue the Henderson invoice',
       conversationId: 'conv-1',
-      existingEntities: { jobReference: 'the Henderson invoice' },
+      existingEntities: { jobReference: 'Henderson' },
     });
 
-    // No conversation history to resolve against, and "the Henderson
-    // invoice" isn't UUID/number-shaped, so this lands gated.
+    // GATED — not silently resolved to the seeded draft.
     expect(missingFieldsFor(proposal)).toEqual(['invoiceId']);
     expect(proposal.payload).toEqual({});
+    expect(proposal.sourceContext?.verifiedIds).toBeUndefined();
+    // And critically NOT the seeded draft's id anywhere in the payload.
+    expect(JSON.stringify(proposal.payload)).not.toContain('invoice-SEEDED-DRAFT');
+    // Candidates are searched on the FREE TEXT reference, not the draft.
+    const candidates = proposal.sourceContext?.entityCandidates as Array<{ label: string }> | undefined;
+    expect(candidates?.some((c) => c.label === 'INV-0077')).toBe(true);
+    expect(proposal.sourceContext?.entityReference).toBe('Henderson');
+  });
+
+  it('rung 2 vs the guard: with the SAME seeded conversation draft but NO reference, a referenceless "issue the one we just drafted" DOES resolve via rung 2 (existing behavior preserved)', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const seededDraft = createProposal({
+      tenantId: 't-1',
+      proposalType: 'draft_invoice',
+      payload: { customerId: 'cust-1' },
+      summary: 'Draft invoice for Henderson',
+      sourceContext: { conversationId: 'conv-1' },
+      createdBy: 'u-1',
+    });
+    seededDraft.resultEntityId = 'invoice-SEEDED-DRAFT';
+    await proposalRepo.create(seededDraft);
+
+    const handler = new IssueInvoiceTaskHandler({ proposalRepo });
+    const { proposal } = await handler.handle({
+      tenantId: 't-1',
+      userId: 'u-1',
+      message: 'Issue the one we just drafted',
+      conversationId: 'conv-1',
+      // No existingEntities → no reference extracted → rung 2 may run.
+    });
+
+    expect(missingFieldsFor(proposal)).toEqual([]);
+    expect(proposal.payload).toEqual({ invoiceId: 'invoice-SEEDED-DRAFT' });
+    expect(proposal.sourceContext?.verifiedIds).toEqual({ invoiceId: 'invoice-SEEDED-DRAFT' });
   });
 
   it('rung 2: with no reference, "issue the one we just drafted" resolves from the most recent same-conversation draft_invoice — ungated, with verifiedIds stamped', async () => {

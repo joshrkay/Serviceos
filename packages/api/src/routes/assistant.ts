@@ -5,7 +5,7 @@ import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { toErrorResponse } from '../shared/errors';
 import { LLMGateway } from '../ai/gateway/gateway';
-import { ProposalRepository } from '../proposals/proposal';
+import { ProposalRepository, ProposalType } from '../proposals/proposal';
 import { createAuditEvent, type AuditRepository } from '../audit/audit';
 import {
   recordAssistantTurn,
@@ -17,11 +17,8 @@ import {
   isVoiceEditIntent,
 } from '../ai/orchestration/intent-classifier';
 import type { TaskHandler } from '../ai/tasks/task-handlers';
-import { EstimateTaskHandler } from '../ai/tasks/estimate-task';
-import { EstimateEditTaskHandler } from '../ai/tasks/estimate-edit-task';
-import { InvoiceTaskHandler } from '../ai/tasks/invoice-task';
-import { InvoiceEditTaskHandler } from '../ai/tasks/invoice-edit-task';
-import { SendInvoiceTaskHandler } from '../ai/tasks/voice-extended-tasks';
+// Money/edit/send handlers are no longer constructed inline here — both
+// dispatch maps resolve them from the shared handler-registry below.
 // B5 — the scheduling-family / create_job / invoice-follow-up intents this
 // route was missing (12 in total) are drafted by the SAME handler-registry
 // builder workers/voice-action-router.ts's buildHandlers uses, so the two
@@ -618,6 +615,15 @@ async function generateAssistantReply(
   userId: string,
   deps: AssistantRouterDeps,
   correlationId: string,
+  // Map drift fix (2026-07): the shared task-handler registry, built ONCE at
+  // composition time in createAssistantRouter (the voice worker already does
+  // this — see createVoiceActionRouterWorker). BOTH dispatch maps below
+  // resolve every registry-covered proposal type from THIS map instead of
+  // constructing handlers inline, so the single-intent and chain surfaces
+  // can no longer drift on how a shared intent is built (e.g. the
+  // single-intent send_invoice losing its invoiceRepo). Positioned before
+  // the optional params (required-after-optional is a TS error).
+  sharedHandlers: Map<ProposalType, TaskHandler>,
   inputMode?: 'voice' | 'text',
   // B4 — the client-pinned conversation id (parsed.conversationId), threaded
   // into every task handler's TaskContext so conversation-scoped resolution
@@ -724,37 +730,6 @@ async function generateAssistantReply(
         };
       }
 
-      // B5 — the scheduling family / create_job / invoice-follow-up intents
-      // this route was missing draft through the SAME shared registry the
-      // voice worker uses (see the import comment above). Built once per
-      // turn — handler construction here does no I/O, matching how the
-      // maps below already rebuild handlers per request. `invoicingDeps`
-      // is assembled inline (mirrors VoiceActionRouterDeps' separation of
-      // the narrow estimateRepo/invoiceRepo from the full trio
-      // findJobsRequiringInvoicing needs) and is only passed when all
-      // three repos are wired — absent, batch_invoice degrades to its own
-      // "not available" clarification rather than throwing.
-      // B4 — issue_invoice is now built by the shared registry too
-      // (proposalRepo threaded through), so "issue the one we just drafted"
-      // resolves from conversation context on THIS surface the same way it
-      // does on the voice worker — same handler instance shape, same gate.
-      const sharedHandlers = buildTaskHandlers({
-        gateway: deps.gateway,
-        catalogRepo: deps.catalogRepo,
-        estimateRepo: deps.estimateRepo,
-        invoiceRepo: deps.invoiceRepo,
-        appointmentRepo: deps.appointmentRepo,
-        jobRepo: deps.jobRepo,
-        dunningEventRepo: deps.dunningEventRepo,
-        invoicingDeps:
-          deps.jobRepo && deps.invoiceRepo && deps.estimateRepo
-            ? { jobRepo: deps.jobRepo, invoiceRepo: deps.invoiceRepo, estimateRepo: deps.estimateRepo }
-            : undefined,
-        proposalRepo: deps.proposalRepo,
-        // B8 — create_customer draft-time duplicate detection parity.
-        customerRepo: deps.customerRepo,
-      });
-
       // QA-2026-06-05 (AST-07, scoped): multi-step asks ("…, then …") are
       // decomposed into SEQUENTIAL linked proposals sharing a chainId in
       // sourceContext. Each step executes per its action class: capture
@@ -779,15 +754,20 @@ async function generateAssistantReply(
             continue;
           }
           const chainHandlers: Record<string, (() => TaskHandler) | undefined> = {
-            // B8 — dedup-aware handler (same construction as the telephony
-            // FSM), drawn from sharedHandlers like the other 12 intents below.
+            // Every registry-covered proposal type resolves from the shared
+            // registry (built once at composition time) so this chain map and
+            // the single-intent map below construct the SAME handler instances
+            // — no surface-specific `new X(...)` that could drift (the
+            // single-intent send_invoice previously lost its invoiceRepo this
+            // way). `create_invoice` is the classifier intent alias for the
+            // `draft_invoice` registry key.
             create_customer: () => sharedHandlers.get('create_customer')!,
-            draft_estimate: () => new EstimateTaskHandler(deps.gateway, deps.catalogRepo),
-            update_estimate: () => new EstimateEditTaskHandler(deps.gateway, deps.estimateRepo, deps.catalogRepo),
-            create_invoice: () => new InvoiceTaskHandler(deps.gateway, deps.catalogRepo),
-            send_invoice: () => new SendInvoiceTaskHandler({ invoiceRepo: deps.invoiceRepo }),
+            draft_estimate: () => sharedHandlers.get('draft_estimate')!,
+            update_estimate: () => sharedHandlers.get('update_estimate')!,
+            create_invoice: () => sharedHandlers.get('draft_invoice')!,
+            send_invoice: () => sharedHandlers.get('send_invoice')!,
             issue_invoice: () => sharedHandlers.get('issue_invoice')!,
-            update_invoice: () => new InvoiceEditTaskHandler(deps.gateway, { catalogRepo: deps.catalogRepo, invoiceRepo: deps.invoiceRepo }),
+            update_invoice: () => sharedHandlers.get('update_invoice')!,
             // B5 — the 12 intents this route was silently dropping to a
             // conversational LLM reply (no draft at all). Drawn from
             // `sharedHandlers` so this surface can't drift from the voice
@@ -887,12 +867,20 @@ async function generateAssistantReply(
       // the REAL task handlers and persist — the generic LLM path returned
       // unpersisted JSON cards whose ids 404'd on approve.
       const proposalHandlers: Record<string, () => TaskHandler> = {
-        draft_estimate: () => new EstimateTaskHandler(deps.gateway, deps.catalogRepo),
-        update_estimate: () => new EstimateEditTaskHandler(deps.gateway, deps.estimateRepo, deps.catalogRepo),
-        create_invoice: () => new InvoiceTaskHandler(deps.gateway, deps.catalogRepo),
-        send_invoice: () => new SendInvoiceTaskHandler(),
+        // Same shared registry as the chain map above — every registry-covered
+        // type resolves from `sharedHandlers` (built once at composition time)
+        // so the two maps can't drift. `create_invoice` is the classifier
+        // intent alias for the `draft_invoice` registry key. NOTE: this is the
+        // map where single-intent `send_invoice` previously constructed
+        // `new SendInvoiceTaskHandler()` with NO invoiceRepo (dropping the
+        // candidate picker) while the chain map passed it — that drift is what
+        // resolving both from one registry closes.
+        draft_estimate: () => sharedHandlers.get('draft_estimate')!,
+        update_estimate: () => sharedHandlers.get('update_estimate')!,
+        create_invoice: () => sharedHandlers.get('draft_invoice')!,
+        send_invoice: () => sharedHandlers.get('send_invoice')!,
         issue_invoice: () => sharedHandlers.get('issue_invoice')!,
-        update_invoice: () => new InvoiceEditTaskHandler(deps.gateway, { catalogRepo: deps.catalogRepo, invoiceRepo: deps.invoiceRepo }),
+        update_invoice: () => sharedHandlers.get('update_invoice')!,
         // B5 — same 12 intents as the chain map above, same shared registry.
         reschedule_appointment: () => sharedHandlers.get('reschedule_appointment')!,
         cancel_appointment: () => sharedHandlers.get('cancel_appointment')!,
@@ -1101,6 +1089,40 @@ function writeSse(res: Response, event: string, data: unknown): void {
 export function createAssistantRouter(deps: AssistantRouterDeps): Router {
   const router = Router();
 
+  // B5 — the scheduling family / create_job / invoice-follow-up intents this
+  // route was missing draft through the SAME shared registry the voice worker
+  // uses (see the import comment above). Built ONCE at composition time
+  // (handler construction does no I/O) — the registry doc says
+  // composition-time, and the voice worker already does this in
+  // createVoiceActionRouterWorker. Building it here (rather than per-turn
+  // inside generateAssistantReply) is also what lets BOTH dispatch maps draw
+  // every registry-covered type from ONE map, so the single-intent and chain
+  // surfaces can't drift on handler construction. `invoicingDeps` is assembled
+  // inline (mirrors VoiceActionRouterDeps' separation of the narrow
+  // estimateRepo/invoiceRepo from the full trio findJobsRequiringInvoicing
+  // needs) and is only passed when all three repos are wired — absent,
+  // batch_invoice degrades to its own "not available" clarification.
+  // B4 — issue_invoice is built by the shared registry too (proposalRepo
+  // threaded through), so "issue the one we just drafted" resolves from
+  // conversation context on THIS surface the same way it does on the voice
+  // worker — same handler instance shape, same gate.
+  const sharedHandlers = buildTaskHandlers({
+    gateway: deps.gateway,
+    catalogRepo: deps.catalogRepo,
+    estimateRepo: deps.estimateRepo,
+    invoiceRepo: deps.invoiceRepo,
+    appointmentRepo: deps.appointmentRepo,
+    jobRepo: deps.jobRepo,
+    dunningEventRepo: deps.dunningEventRepo,
+    invoicingDeps:
+      deps.jobRepo && deps.invoiceRepo && deps.estimateRepo
+        ? { jobRepo: deps.jobRepo, invoiceRepo: deps.invoiceRepo, estimateRepo: deps.estimateRepo }
+        : undefined,
+    proposalRepo: deps.proposalRepo,
+    // B8 — create_customer draft-time duplicate detection parity.
+    customerRepo: deps.customerRepo,
+  });
+
   router.post(
     '/chat',
     requireAuth,
@@ -1120,6 +1142,7 @@ export function createAssistantRouter(deps: AssistantRouterDeps): Router {
           req.auth!.userId,
           deps,
           correlationId,
+          sharedHandlers,
           parsed.inputMode,
           // B4 — the client-pinned conversation id (undefined on a fresh
           // conversation's first turn); threads into TaskContext.conversationId

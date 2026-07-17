@@ -296,8 +296,52 @@ describe('InvoiceEditTaskHandler', () => {
       expect(result.proposal.sourceContext).toMatchObject({ missingFields: ['invoiceId'] });
     });
 
-    it('an already-UUID reference lands directly on payload.invoiceId with no gate', async () => {
+    // Verify-or-gate (2026-07 review): a UUID invoiceReference is an
+    // ASSUMPTION about LLM output (buildPayload copies it verbatim), so it is
+    // only trusted after the repo confirms it via findById.
+    it('a repo-VERIFIED UUID reference lands on payload.invoiceId, ungates, and rides the verifiedIds allowlist', async () => {
+      const uuidRef = '00000000-0000-4000-8000-000000000042';
+      const invoiceRepo = new InMemoryInvoiceRepository();
+      await invoiceRepo.create(makeInvoice({ id: uuidRef }));
+
       const proposalRepo = new InMemoryProposalRepository();
+      const handler = new InvoiceEditTaskHandler(editGateway(uuidRef), { invoiceRepo });
+      const result = await handler.handle({
+        tenantId,
+        userId,
+        message: `Add a trip fee to invoice ${uuidRef}`,
+      });
+
+      const payload = result.proposal.payload as Record<string, unknown>;
+      expect(payload.invoiceId).toBe(uuidRef);
+      const sc = result.proposal.sourceContext as Record<string, unknown>;
+      expect(sc).not.toHaveProperty('missingFields');
+      // The repo-verified id is allowlisted so it survives dropUnverifiedIds.
+      expect(sc.verifiedIds).toEqual({ invoiceId: uuidRef });
+
+      await proposalRepo.create(result.proposal);
+    });
+
+    it('a HALLUCINATED UUID reference that misses the repo is GATED (not trusted blind)', async () => {
+      const uuidRef = '00000000-0000-4000-8000-000000000042';
+      const invoiceRepo = new InMemoryInvoiceRepository();
+      // Repo has an invoice, but NOT one with the fabricated id.
+      await invoiceRepo.create(makeInvoice({ id: 'inv-real', invoiceNumber: 'INV-9999' }));
+
+      const handler = new InvoiceEditTaskHandler(editGateway(uuidRef), { invoiceRepo });
+      const result = await handler.handle({
+        tenantId,
+        userId,
+        message: 'Add a trip fee to that invoice',
+      });
+
+      const payload = result.proposal.payload as Record<string, unknown>;
+      expect(payload.invoiceId).toBeUndefined();
+      expect(result.proposal.sourceContext).toMatchObject({ missingFields: ['invoiceId'] });
+      expect(result.proposal.sourceContext ?? {}).not.toHaveProperty('verifiedIds');
+    });
+
+    it('a UUID reference with NO invoiceRepo wired fails closed (gated)', async () => {
       const uuidRef = '00000000-0000-4000-8000-000000000042';
       const handler = new InvoiceEditTaskHandler(editGateway(uuidRef), {});
       const result = await handler.handle({
@@ -307,13 +351,8 @@ describe('InvoiceEditTaskHandler', () => {
       });
 
       const payload = result.proposal.payload as Record<string, unknown>;
-      expect(payload.invoiceId).toBe(uuidRef);
-      expect(result.proposal.sourceContext ?? {}).not.toHaveProperty('missingFields');
-
-      // Approval is not blocked by a missing invoiceId (may still be
-      // gated by other rules, e.g. uncatalogued pricing — not the concern
-      // of this test); the key assertion is missingFields is absent.
-      await proposalRepo.create(result.proposal);
+      expect(payload.invoiceId).toBeUndefined();
+      expect(result.proposal.sourceContext).toMatchObject({ missingFields: ['invoiceId'] });
     });
 
     it('a reference that matches zero invoices gates missingFields and does not set invoiceId', async () => {
@@ -408,9 +447,10 @@ describe('InvoiceEditTaskHandler', () => {
         expect(sc?.entityCandidates).toBeUndefined();
       });
 
-      it('an already-UUID reference bypasses the gate — no candidate search attempted', async () => {
+      it('a repo-verified UUID reference ungates via findById — no candidate (findByTenant) search attempted', async () => {
         const uuidRef = '00000000-0000-4000-8000-000000000042';
         const invoiceRepo = new InMemoryInvoiceRepository();
+        await invoiceRepo.create(makeInvoice({ id: uuidRef }));
         const findByTenantSpy = vi.spyOn(invoiceRepo, 'findByTenant');
 
         const handler = new InvoiceEditTaskHandler(editGateway(uuidRef), { invoiceRepo });
@@ -420,6 +460,7 @@ describe('InvoiceEditTaskHandler', () => {
           message: `Add a trip fee to invoice ${uuidRef}`,
         });
 
+        // UUID verification uses findById, never the ILIKE findByTenant search.
         expect(findByTenantSpy).not.toHaveBeenCalled();
         expect(result.proposal.sourceContext ?? {}).not.toHaveProperty('entityCandidates');
         expect(missingFieldsFor(result.proposal)).not.toContain('invoiceId');

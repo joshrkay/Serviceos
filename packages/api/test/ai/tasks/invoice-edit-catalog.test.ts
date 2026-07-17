@@ -17,9 +17,32 @@ import {
 } from '../../../src/catalog/catalog-item';
 import { updateInvoicePayloadSchema } from '../../../src/proposals/contracts';
 import { UNCATALOGUED_CONFIDENCE_CAP } from '../../../src/ai/resolution/catalog-resolver';
+import { InMemoryInvoiceRepository } from '../../../src/invoices/invoice';
 
 const TENANT = 'tenant-1';
 const OTHER_TENANT = 'tenant-2';
+
+// Verify-or-gate (2026-07 review): tests that use a UUID invoiceReference to
+// keep the invoiceId gate out of the picture must now wire an invoiceRepo the
+// UUID actually resolves against (a bare UUID is no longer trusted blind).
+async function invoiceRepoWithId(id: string): Promise<InMemoryInvoiceRepository> {
+  const repo = new InMemoryInvoiceRepository();
+  await repo.create({
+    id,
+    tenantId: TENANT,
+    jobId: 'job-1',
+    invoiceNumber: 'INV-0042',
+    status: 'draft',
+    lineItems: [],
+    totals: { subtotalCents: 0, taxCents: 0, totalCents: 0, discountCents: 0 },
+    amountPaidCents: 0,
+    amountDueCents: 0,
+    createdBy: 'u-1',
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  } as never);
+  return repo;
+}
 
 function mockGateway(jsonContent: string): LLMGateway {
   return {
@@ -120,13 +143,14 @@ describe('P22-001 invoice-edit-catalog', () => {
           },
         ],
         0.98,
-        // An already-resolved UUID invoiceReference keeps the invoiceId gate
-        // (B2) out of the picture — this test is about the editAction gate.
+        // A repo-verified UUID invoiceReference keeps the invoiceId gate (B2)
+        // out of the picture — this test is about the editAction gate.
         '00000000-0000-4000-8000-000000000042',
       ),
     );
 
-    const handler = new InvoiceEditTaskHandler(gateway, { catalogRepo: repo });
+    const invoiceRepo = await invoiceRepoWithId('00000000-0000-4000-8000-000000000042');
+    const handler = new InvoiceEditTaskHandler(gateway, { catalogRepo: repo, invoiceRepo });
     const result = await handler.handle({
       tenantId: TENANT,
       userId: 'u-1',
@@ -378,12 +402,21 @@ describe('P22-001 invoice-edit-catalog', () => {
       })),
     );
 
+    // "Part 120" (i=120) has unitPriceCents = 100 + 120 = 220. Drafting it at
+    // 220 is a clean, in-tolerance snap (no price conflict).
+    const part120 = (await repo.listByTenant(TENANT)).find((i) => i.name === 'Part 120')!;
     const gateway = mockGateway(editResponse([
-      // The resolver drops digit-only tokens ("001" is a quantity, not item
-      // identity), so "part 001" normalizes to just "part" — which collides
-      // across all 180 "Part NNN" items → ambiguous, resolved against the
-      // FULL catalog (not just the 150 shown in the prompt) without crashing.
-      { type: 'add_line_item', lineItem: { description: 'part 001', quantity: 1, unitPrice: 120 } },
+      // NUMBERED-SKU EXACTNESS PIN (regression restored). The branch's earlier
+      // assertion here (commit 6cc376a) claimed "part 001" normalizes to just
+      // "part" and collides across all 180 "Part NNN" items → ambiguous. That
+      // WAS the regression: the resolver's digit-dropping normalizer treated
+      // the SKU number as a quantity, so the item the operator actually named
+      // was unreachable from the picker. The resolver now runs a digit-aware
+      // EXACT pass first — "part 120" keeps its SKU token and full-string-
+      // matches exactly one catalog item → exact tier, catalog-priced, no
+      // review needed. Resolution runs against the FULL catalog (all 180), not
+      // just the 150 shown in the prompt.
+      { type: 'add_line_item', lineItem: { description: 'part 120', quantity: 1, unitPrice: 220 } },
     ]));
     const handler = new InvoiceEditTaskHandler(gateway, { catalogRepo: repo });
     const result = await handler.handle({ tenantId: TENANT, userId: 'u-1', message: 'edit' });
@@ -394,13 +427,16 @@ describe('P22-001 invoice-edit-catalog', () => {
     expect(userContent.split('\n').filter((l: string) => l.startsWith('- '))).toHaveLength(150);
     expect(userContent).toContain('catalog truncated');
 
-    // Resolution runs against the FULL catalog (no crash). An ambiguous match
-    // is untrusted, not silently priced.
+    // The digit-aware exact pass reaches the exact SKU and prices it from the
+    // catalog — not the LLM guess — with no review gate.
     const payload = result.proposal.payload as { editActions: Array<Record<string, unknown>> };
     const lineItem = payload.editActions[0].lineItem as Record<string, unknown>;
-    expect(lineItem.needsPricing).toBe(true);
-    expect(lineItem.unitPriceCents).toBeNull();
-    expect(lineItem.catalogItemId).toBeUndefined();
+    expect(lineItem.pricingSource).toBe('catalog');
+    expect(lineItem.needsPricing).toBe(false);
+    expect(lineItem.unitPrice).toBe(220); // executable field, catalog price
+    expect(lineItem.unitPriceCents).toBe(220); // review mirror
+    expect(lineItem.catalogItemId).toBe(part120.id);
+    expect(lineItem.description).toBe('Part 120');
   });
 
   it('ignores archived catalog items', async () => {
@@ -624,12 +660,13 @@ describe('P22-001 invoice-edit-catalog', () => {
           // resolution of its own — see invoice-edit-task.ts). This test's
           // purpose is confidence/catalog-pricing behavior, not invoiceId
           // resolution, so it uses an already-resolved UUID reference —
-          // exactly what SendInvoiceTaskHandler treats as "already a
-          // resolved id" — to keep the invoiceId gate out of the picture.
+          // exactly what resolveInvoiceId trusts ONCE the repo confirms it
+          // (verify-or-gate) — to keep the invoiceId gate out of the picture.
           '00000000-0000-4000-8000-000000000042',
         ),
       );
-      const handler = new InvoiceEditTaskHandler(gateway, { catalogRepo: repo });
+      const invoiceRepo = await invoiceRepoWithId('00000000-0000-4000-8000-000000000042');
+      const handler = new InvoiceEditTaskHandler(gateway, { catalogRepo: repo, invoiceRepo });
       const result = await handler.handle({ tenantId: TENANT, userId: 'u-1', message: 'edit', ...supervised });
 
       const payload = result.proposal.payload as {

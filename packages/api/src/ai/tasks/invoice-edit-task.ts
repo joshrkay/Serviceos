@@ -133,14 +133,19 @@ export interface InvoiceEditTaskDeps {
    * payload.invoiceId to ALREADY be a string id and never reads
    * invoiceReference — there is no resolution step between drafting and
    * execution. Mirrors the send_invoice fix (SendInvoiceTaskHandler in
-   * voice-extended-tasks.ts): a reference that is already a UUID lands
-   * directly on payload.invoiceId; when this repo is wired, a free-text
-   * reference ("INV-0042", a customer name) is additionally looked up —
-   * an unambiguous single match also resolves onto payload.invoiceId.
-   * Anything that doesn't resolve cleanly (no repo, no match, >1 match)
-   * stamps missingFields: ['invoiceId'] so approveProposal blocks until
-   * the operator resolves it on the review card, instead of the card
-   * being approvable and execution failing on the unresolved reference.
+   * voice-extended-tasks.ts).
+   *
+   * Verify-or-gate (2026-07 review): an id is trusted onto payload.invoiceId
+   * ONLY when this repo confirms it (findById, tenant-scoped) — whether it
+   * arrived as an already-UUID reference OR as an unambiguous free-text
+   * search match. A repo-confirmed id additionally stamps
+   * `sourceContext.verifiedIds` (the B4 allowlist) so it survives
+   * assistant.ts's dropUnverifiedIds. Anything that doesn't resolve
+   * against the repo (no repo, no match, >1 match, or a fabricated UUID
+   * that misses findById) stamps missingFields: ['invoiceId'] so
+   * approveProposal blocks until the operator resolves it on the review
+   * card, instead of the card being approvable and execution failing on
+   * the unresolved reference.
    */
   invoiceRepo?: Pick<InvoiceRepository, 'findById' | 'findByTenant'>;
 }
@@ -172,70 +177,81 @@ export class InvoiceEditTaskHandler implements TaskHandler {
 
   /**
    * Best-effort invoiceReference → invoiceId resolution. Returns the
-   * missingFields array to stamp on the proposal. Mutates `payload` in
-   * place (adds invoiceId) whenever resolution succeeds; invoiceReference
-   * is left untouched either way so the review card can always show what
-   * the operator said.
+   * missingFields array (and, on a repo-verified id, a `verifiedIds`
+   * allowlist entry) to stamp on the proposal. Mutates `payload` in place
+   * (adds invoiceId) whenever resolution succeeds; invoiceReference is left
+   * untouched either way so the review card can always show what the
+   * operator said.
    *
-   * Gating rule: missingFields is cleared ONLY when the reference is
-   * ALREADY a literal UUID (isUuid) — never merely because an
-   * invoiceRepo search resolved a free-text reference unambiguously.
+   * Verify-or-gate rule: the gate is lifted ONLY when the wired repo
+   * confirms the id via findById (tenant-scoped) — never merely because
+   * the reference "looks like" a UUID.
    *
-   * This is deliberately more conservative than "resolved ⇒ ungated"
-   * (which is what EstimateEditTaskHandler.resolveTargetEstimate's
-   * search technique is mirrored from). The reason: assistant.ts's
-   * `dropUnverifiedIds` guard deletes any id-shaped payload field
-   * (jobId/customerId/estimateId/invoiceId/appointmentId) that doesn't
-   * appear literally in the operator's raw text or classifier entities —
-   * it exists to catch LLM-hallucinated ids and can't distinguish those
-   * from a genuinely repo-verified invoiceId. A DB-resolved id from a
-   * free-text search is NEVER literally in that text, so it gets
-   * silently stripped on the assistant chat surface right before
-   * persistence, while an "ungated" missingFields would leave the
-   * proposal approvable with invoiceId gone — reintroducing the exact
-   * doomed-approval bug this fix closes (confirmed empirically against
-   * the live assistant router). voice-action-router.ts has no such
-   * guard, but the two surfaces must gate identically or the same
-   * transcript would behave differently depending on which one drafted
-   * it. So: only a reference that is ALREADY a UUID (guaranteed present
-   * in extractedEntities/text, so dropUnverifiedIds always keeps it) is
-   * trusted to bypass review — exactly SendInvoiceTaskHandler's rule
-   * (voice-extended-tasks.ts). The invoiceRepo search still runs and
-   * still stamps payload.invoiceId when it resolves unambiguously —
-   * useful review-card context and a correct id on the surface without
-   * the guard — but it never lifts the gate.
+   * Why a bare UUID is NOT trusted on its own: `buildPayload` copies
+   * `invoiceReference` straight from the LLM's JSON, so an id-shaped
+   * reference is an ASSUMPTION about model output, not a fact. The old
+   * rule ("a literal UUID is guaranteed present in text/entities, so
+   * dropUnverifiedIds keeps it") does not hold for a HALLUCINATED UUID:
+   * the model can emit an id that appears nowhere in the operator's words.
+   * On the assistant surface `dropUnverifiedIds` would then strip that
+   * fabricated id (not in the haystack, not in verifiedIds), leaving an
+   * APPROVABLE proposal with NO invoiceId and NO gate — nothing re-gates
+   * post-scrub, and approveProposal only checks missingFields. So a UUID
+   * reference is VERIFIED against the repo; a repo-confirmed id is both
+   * stamped onto payload.invoiceId AND recorded in `verifiedIds`
+   * ({ invoiceId }) — the B4 allowlist dropUnverifiedIds honors, safe
+   * precisely because it was produced by a repo lookup, not LLM text. A
+   * miss (or an absent repo) fails closed: nothing trusted is stamped and
+   * the proposal is gated, exactly like a free-text reference.
    *
-   * Never throws: a repo hiccup or an ambiguous match simply leaves the
-   * proposal gated, same failure posture as
-   * EstimateEditTaskHandler.resolveTargetEstimate.
+   * A free-text (non-UUID) reference is still best-effort searched: an
+   * unambiguous single match stamps payload.invoiceId for review-card
+   * context but NEVER lifts the gate (dropUnverifiedIds strips a
+   * search-resolved id since it isn't literally in the operator's text —
+   * that's why the gate can't depend on it). voice-action-router.ts has
+   * no such guard, but the two surfaces must gate identically or the same
+   * transcript would behave differently depending on which one drafted it.
    *
-   * B2 — the search that identifies an unambiguous single match now also
-   * doubles as the candidate list for the review card's one-tap
-   * AmbiguityPicker (widened from the original limit:2 ambiguous-vs-
-   * singular check to `candidatesForReference`'s top-5). Candidates are
+   * Never throws: a repo hiccup, a UUID miss, or an ambiguous match simply
+   * leaves the proposal gated.
+   *
+   * B2 — the free-text search that identifies an unambiguous single match
+   * also doubles as the candidate list for the review card's one-tap
+   * AmbiguityPicker (`candidatesForReference`'s top-5). Candidates are
    * returned alongside missingFields for the caller to stamp onto
-   * `sourceContext` — they NEVER lift the gate on their own; see above.
+   * `sourceContext` — they NEVER lift the gate on their own.
    */
   private async resolveInvoiceId(
     tenantId: string,
     payload: Record<string, unknown>,
-  ): Promise<{ missingFields: string[]; candidates: EntityCandidate[] }> {
+  ): Promise<{
+    missingFields: string[];
+    candidates: EntityCandidate[];
+    verifiedIds?: Record<string, string>;
+  }> {
     const reference = payload.invoiceReference;
 
     if (isUuid(reference)) {
-      // Already a resolved id (e.g. a re-draft carrying a prior pick) — no
-      // repo round-trip needed, and safe to ungate: this literal string is
-      // present in the classifier entities/text dropUnverifiedIds checks.
-      payload.invoiceId = reference;
-      return { missingFields: [], candidates: [] };
+      // Verify-or-gate: a UUID in LLM JSON is an assumption, not a fact.
+      // Confirm it against the repo before trusting it; a repo-confirmed id
+      // is allowlisted via verifiedIds so it survives dropUnverifiedIds.
+      if (this.deps.invoiceRepo) {
+        const match = await this.deps.invoiceRepo.findById(tenantId, reference).catch(() => null);
+        if (match) {
+          payload.invoiceId = reference;
+          return { missingFields: [], candidates: [], verifiedIds: { invoiceId: reference } };
+        }
+      }
+      // No repo, or the UUID misses findById (fabricated/unverifiable) —
+      // fail closed: stamp nothing trusted and gate.
+      return { missingFields: ['invoiceId'], candidates: [] };
     }
 
     let candidates: EntityCandidate[] = [];
     if (typeof reference === 'string' && reference.trim().length > 0 && this.deps.invoiceRepo) {
       // ILIKE search on invoice_number / customer_message (failure-soft —
-      // see candidatesForReference's own doc comment); only an UNAMBIGUOUS
-      // single match identifies the target — mirrors
-      // EstimateEditTaskHandler.resolveTargetEstimate's search.
+      // see candidatesForReference's own doc comment); an UNAMBIGUOUS single
+      // match stamps payload.invoiceId for review-card context only.
       candidates = await candidatesForReference({
         tenantId,
         reference,
@@ -315,10 +331,8 @@ export class InvoiceEditTaskHandler implements TaskHandler {
     // instead of letting an unresolved edit reach
     // UpdateInvoiceExecutionHandler, which has no resolution step of its
     // own and would fail after approval.
-    const { missingFields: invoiceIdMissingFields, candidates } = await this.resolveInvoiceId(
-      context.tenantId,
-      payload,
-    );
+    const { missingFields: invoiceIdMissingFields, candidates, verifiedIds } =
+      await this.resolveInvoiceId(context.tenantId, payload);
 
     // B3 — the invoiceId gate (B2) and the editAction catalog gates
     // (edit-action-grounding.ts) are disjoint string sets (`invoiceId` vs
@@ -333,6 +347,10 @@ export class InvoiceEditTaskHandler implements TaskHandler {
     // needs to act on.
     const sourceContext: Record<string, unknown> = {
       ...(context.conversationId ? { conversationId: context.conversationId } : {}),
+      // Verify-or-gate: a repo-confirmed invoiceId rides the B4 allowlist so
+      // it survives assistant.ts's dropUnverifiedIds (repo-verified by
+      // construction — never copied from LLM/classifier text).
+      ...(verifiedIds ? { verifiedIds } : {}),
       ...(invoiceIdMissingFields.length > 0 && candidates.length > 0
         ? {
             entityCandidates: candidates,
