@@ -241,6 +241,21 @@ describe('Postgres integration — job-appointment sync', () => {
     expect(activeOnBoard(await board(), jobId)).toHaveLength(0);
   });
 
+  it('cancelForJob reclaims an IN_PROGRESS visit — no live card left on the board', async () => {
+    const jobId = await newJob();
+    const first = await syncJobSchedule(deps, scheduleInput(jobId, T10, techId));
+    // The visit starts (appointment lifecycle moves it to in_progress).
+    await appointmentRepo.update(tenantId, first.appointment!.id, { status: 'in_progress' });
+
+    await syncJobSchedule(deps, { operation: 'cancelForJob', tenantId, jobId, actorId: ownerId, actorRole: 'owner' });
+
+    const appt = await appointmentRepo.findById(tenantId, first.appointment!.id);
+    expect(appt!.status).toBe('canceled');
+    expect(appt!.idempotencyKey ?? null).toBeNull();
+    expect(await activeAppointments(jobId)).toHaveLength(0);
+    expect(activeOnBoard(await board(), jobId)).toHaveLength(0);
+  });
+
   it('reschedule + switch to a FREE tech succeeds even when the old tech is busy at the new time', async () => {
     const techB = await newTech();
 

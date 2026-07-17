@@ -316,6 +316,41 @@ describe('U2 — syncJobSchedule', () => {
     expect(auditRepo.getAll().some((e) => e.eventType === 'job.unscheduled')).toBe(false);
   });
 
+  it('cancelForJob cancels an IN_PROGRESS canonical appointment (a canceled job leaves no live board card)', async () => {
+    const job = await newJob();
+    const first = await syncJobSchedule(deps([tech(TECH_1)]), scheduleInput(job.id));
+    // The visit starts via the appointment lifecycle (a different path).
+    await appointmentRepo.update(TENANT, first.appointment!.id, { status: 'in_progress' });
+
+    await syncJobSchedule(deps([tech(TECH_1)]), {
+      operation: 'cancelForJob', tenantId: TENANT, jobId: job.id, actorId: 'owner-1', actorRole: 'owner',
+    });
+
+    // The started visit is reclaimed: canceled + key released + slot freed.
+    const appt = await appointmentRepo.findById(TENANT, first.appointment!.id);
+    expect(appt!.status).toBe('canceled');
+    expect(appt!.idempotencyKey ?? null).toBeNull();
+    expect(await activeAppointments(job.id)).toHaveLength(0);
+    const primaries = (await assignmentRepo.findByAppointment(TENANT, first.appointment!.id)).filter((a) => a.isPrimary);
+    expect(primaries).toHaveLength(0);
+  });
+
+  it('unschedule does NOT touch an in_progress appointment (only cancelForJob reclaims a started visit)', async () => {
+    const job = await newJob();
+    const first = await syncJobSchedule(deps([tech(TECH_1)]), scheduleInput(job.id));
+    await appointmentRepo.update(TENANT, first.appointment!.id, { status: 'in_progress' });
+
+    const res = await syncJobSchedule(deps([tech(TECH_1)]), {
+      operation: 'unschedule', tenantId: TENANT, jobId: job.id, actorId: 'owner-1', actorRole: 'owner',
+    });
+
+    // No schedulable canonical row → no-op; the active visit is left to the
+    // appointment lifecycle, not cleared out from under the technician.
+    expect(res.appointment).toBeNull();
+    const appt = await appointmentRepo.findById(TENANT, first.appointment!.id);
+    expect(appt!.status).toBe('in_progress');
+  });
+
   it('does not re-transition an already-scheduled job on a repeated save', async () => {
     const job = await newJob();
     await syncJobSchedule(deps([tech(TECH_1)]), scheduleInput(job.id));

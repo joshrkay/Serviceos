@@ -44,12 +44,26 @@ import { JobTimelineRepository, isPostCompletionStatus, transitionJobStatus } fr
 const DEFAULT_DURATION_MIN = 60;
 const DEFAULT_TIMEZONE = 'UTC';
 
-// The direct-schedule path only manages an appointment that has not yet started
-// — once it's in_progress / completed / no_show / canceled it is owned by the
-// appointment lifecycle, not this projection, and must never be force-mutated.
+// The direct-schedule path only RESCHEDULES/REASSIGNS an appointment that has
+// not yet started — once it's in_progress / completed / no_show / canceled it
+// is owned by the appointment lifecycle, not this projection, and must never be
+// force-moved.
 const SCHEDULABLE_STATUSES: ReadonlySet<AppointmentStatus> = new Set<AppointmentStatus>([
   'scheduled',
   'confirmed',
+]);
+
+// Canceling the JOB (cancelForJob) must reclaim an already-STARTED visit too:
+// a canceled job may not leave a live in_progress card on the (status-blind,
+// date-based) dispatch board, and the appointment lifecycle permits
+// in_progress -> canceled. Completed / no_show / canceled are terminal and left
+// alone (force-canceling a finished visit would rewrite history). This scope is
+// used ONLY by cancelForJob — never by reschedule/reassign/unschedule, which
+// keep the stricter schedulable-only scope above.
+const CANCELABLE_FOR_JOB_STATUSES: ReadonlySet<AppointmentStatus> = new Set<AppointmentStatus>([
+  'scheduled',
+  'confirmed',
+  'in_progress',
 ]);
 
 /** Stable, tech/slot-independent idempotency key for a job's canonical schedule. */
@@ -127,6 +141,22 @@ async function findCanonicalAppointment(
   // or cancelable here. An in_progress/completed/no_show visit under the same
   // key is left to the appointment lifecycle — never force-mutated.
   return all.find((a) => a.idempotencyKey === key && SCHEDULABLE_STATUSES.has(a.status));
+}
+
+/**
+ * Resolve the canonical appointment that a JOB cancellation should reclaim —
+ * scheduled/confirmed OR in_progress (see CANCELABLE_FOR_JOB_STATUSES). Broader
+ * than `findCanonicalAppointment` so canceling a job also cancels a live visit
+ * and clears its board card; used ONLY by cancelForJob.
+ */
+async function findCancelableAppointment(
+  deps: JobAppointmentSyncDeps,
+  tenantId: string,
+  jobId: string,
+): Promise<Appointment | undefined> {
+  const key = jobScheduleKey(jobId);
+  const all = await deps.appointmentRepo.findByJob(tenantId, jobId);
+  return all.find((a) => a.idempotencyKey === key && CANCELABLE_FOR_JOB_STATUSES.has(a.status));
 }
 
 /**
@@ -393,17 +423,24 @@ export async function syncJobSchedule(
     return { appointment: existing, timezone: existing.timezone };
   }
 
-  // unschedule | cancelForJob — both cancel the canonical appointment.
-  if (!existing) {
-    // Idempotent no-op: nothing scheduled to cancel.
+  // unschedule | cancelForJob — both cancel the canonical appointment. Canceling
+  // the JOB reclaims a started (in_progress) visit too; unschedule keeps the
+  // stricter schedulable-only scope so it never clears an active visit's slot
+  // out from under the technician.
+  const cancelTarget =
+    input.operation === 'cancelForJob'
+      ? await findCancelableAppointment(deps, tenantId, jobId)
+      : existing;
+  if (!cancelTarget) {
+    // Idempotent no-op: nothing (in the applicable scope) to cancel.
     return { appointment: null };
   }
 
-  const previousScheduledStart = existing.scheduledStart;
+  const previousScheduledStart = cancelTarget.scheduledStart;
 
   // Cancel via the REPO update (not the validating wrapper) and release the
   // key so a future schedule creates a fresh row.
-  await deps.appointmentRepo.update(tenantId, existing.id, {
+  await deps.appointmentRepo.update(tenantId, cancelTarget.id, {
     status: 'canceled',
     idempotencyKey: null,
     updatedAt: new Date(),
@@ -411,18 +448,18 @@ export async function syncJobSchedule(
 
   // Drop the primary assignment so the slot frees and the denormalized
   // technician on the job is cleared.
-  const assignments = await deps.assignmentRepo.findByAppointment(tenantId, existing.id);
+  const assignments = await deps.assignmentRepo.findByAppointment(tenantId, cancelTarget.id);
   const primary = assignments.find((a) => a.isPrimary);
   if (primary) {
     await unassignTechnician(tenantId, primary.id, deps.assignmentRepo, {
       auditRepo: deps.auditRepo,
       actorId,
       actorRole,
-      appointmentId: existing.id,
+      appointmentId: cancelTarget.id,
       technicianId: primary.technicianId,
     });
   }
-  await syncJobAssignment(tenantId, jobId, existing.id, deps.assignmentRepo, deps.jobRepo);
+  await syncJobAssignment(tenantId, jobId, cancelTarget.id, deps.assignmentRepo, deps.jobRepo);
 
   if (input.operation === 'unschedule') {
     // Structural revert to new (system-authorized backward move). Covers any
@@ -445,11 +482,11 @@ export async function syncJobSchedule(
       );
     }
     await emitJobScheduleAudit(deps, tenantId, jobId, actorId, actorRole, 'job.unscheduled', {
-      appointmentId: existing.id,
+      appointmentId: cancelTarget.id,
     });
   }
 
-  return { appointment: null, previousScheduledStart, timezone: existing.timezone };
+  return { appointment: null, previousScheduledStart, timezone: cancelTarget.timezone };
 }
 
 /** First-time schedule advances new → scheduled (forward; any role). Idempotent. */
