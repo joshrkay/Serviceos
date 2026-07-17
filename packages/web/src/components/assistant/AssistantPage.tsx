@@ -21,6 +21,7 @@ import { useConversationVoice } from '../../hooks/useConversationVoice';
 import { useUndoableApproval, type StartUndoInput, type ApproveResponseLike } from '../../hooks/useUndoableApproval';
 import { emitProposalsChanged } from '../../lib/proposal-events';
 import { reportError, toSafeErrorShape } from '../../lib/errorReporter';
+import { track } from '../../lib/analytics';
 
 interface ApiMessage {
   id: string;
@@ -880,6 +881,16 @@ export function AssistantPage() {
 
   const send = useCallback(async (text: string, opts?: { inputMode?: 'voice' | 'photo'; voiceDuration?: number; attachments?: Message['attachments'] }) => {
     if (!text.trim() && !opts?.attachments?.length) return;
+
+    // assistant_message_sent (U6) — every assistant turn funnels through here
+    // (typed, voice, suggestion chip, retry). Enums/counts only — never the
+    // message text.
+    track('assistant_message_sent', {
+      input_mode: opts?.inputMode ?? 'text',
+      length: text.trim().length,
+      has_attachment: (opts?.attachments?.length ?? 0) > 0,
+    });
+
     const t = now();
     lastInputWasVoiceRef.current = opts?.inputMode === 'voice';
 
