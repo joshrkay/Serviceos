@@ -751,12 +751,30 @@ interface EntityAnnotation {
   resolved: { customerId?: string; jobId?: string; technicianId?: string };
   pendingReferences: Array<{ kind: EntityKind; reference: string }>;
 }
-/** An ambiguous reference that must be clarified before drafting. */
-interface EntityAmbiguity {
-  kind: 'ambiguous';
+/** A single ambiguous reference — one free-text mention that matched several
+ *  tenant records. */
+interface SingleEntityAmbiguity {
   entityKind: EntityKind;
   reference: string;
   candidates: EntityCandidate[];
+}
+
+/**
+ * An ambiguous reference that must be clarified before drafting.
+ *
+ * The `voice_clarification` payload contract (proposals/contracts.ts)
+ * carries exactly one entity's candidate list — it predates multi-entity
+ * ambiguity and is out of scope to widen here. So when an utterance has
+ * MORE than one ambiguous reference (e.g. both an ambiguous customer name
+ * and an ambiguous technician name), the first becomes the surfaced
+ * clarification and every other one rides along in
+ * `additionalAmbiguities` instead of being silently dropped or
+ * downgraded to `not_found` — see `annotateResolvedEntities`.
+ */
+interface EntityAmbiguity extends SingleEntityAmbiguity {
+  kind: 'ambiguous';
+  /** Ambiguous references beyond the first, in original lookup order. */
+  additionalAmbiguities?: SingleEntityAmbiguity[];
 }
 
 /**
@@ -797,22 +815,45 @@ async function annotateResolvedEntities(
     lookups.push({ kind: 'technician', reference: params.entities.targetTechnicianName });
   }
 
-  for (const lookup of lookups) {
-    let result;
-    try {
-      result = await resolver.resolve({
-        tenantId: params.tenantId,
-        reference: lookup.reference,
-        kind: lookup.kind,
-      });
-    } catch (err) {
-      const error = err instanceof Error ? err : new Error(String(err));
-      log.warn('voice-action-router: entity resolver failed, continuing unresolved', {
-        entityKind: lookup.kind,
-        error: error.message,
-      });
-      continue;
-    }
+  // The lookups are independent of one another (each hits the resolver
+  // with a different free-text reference/kind), so resolve them all
+  // concurrently instead of one at a time. Promise.all preserves the
+  // array's order in its results regardless of which settles first, so
+  // downstream processing below still iterates in the original,
+  // deterministic reference order. Each lookup keeps its EXACT
+  // pre-existing failure behavior (log.warn + treat as unresolved) by
+  // catching inside the mapped promise rather than letting a rejection
+  // reach Promise.all.
+  const results = await Promise.all(
+    lookups.map(async (lookup) => {
+      try {
+        return await resolver.resolve({
+          tenantId: params.tenantId,
+          reference: lookup.reference,
+          kind: lookup.kind,
+        });
+      } catch (err) {
+        const error = err instanceof Error ? err : new Error(String(err));
+        log.warn('voice-action-router: entity resolver failed, continuing unresolved', {
+          entityKind: lookup.kind,
+          error: error.message,
+        });
+        return undefined;
+      }
+    }),
+  );
+
+  // P8/U-multi — collect EVERY ambiguous reference, never just the first.
+  // A prior version returned as soon as it hit one ambiguity, which
+  // silently skipped resolving any references after it (they never even
+  // reached 'not_found' — they were simply never looked at). Ambiguity on
+  // a voice path must always become a clarification, never a guess or a
+  // silent drop, so every ambiguous lookup is recorded here.
+  const ambiguities: SingleEntityAmbiguity[] = [];
+  for (let i = 0; i < lookups.length; i++) {
+    const lookup = lookups[i];
+    const result = results[i];
+    if (!result) continue; // resolver failure — already logged above
     switch (result.kind) {
       case 'resolved':
         if (lookup.kind === 'customer') ok.resolved.customerId = result.candidate.id;
@@ -820,20 +861,32 @@ async function annotateResolvedEntities(
         else ok.resolved.jobId = result.candidate.id;
         break;
       case 'ambiguous':
-        // First ambiguity wins — one clarification per utterance keeps
-        // the operator's feed to a single, answerable question.
-        return {
-          kind: 'ambiguous',
+        ambiguities.push({
           entityKind: lookup.kind,
           reference: lookup.reference,
           candidates: result.candidates,
-        };
+        });
+        break;
       case 'not_found':
         ok.pendingReferences.push({ kind: lookup.kind, reference: lookup.reference });
         break;
       case 'skipped':
         break;
     }
+  }
+
+  if (ambiguities.length > 0) {
+    // The payload contract carries one entity's candidates per
+    // clarification (see EntityAmbiguity doc comment above), so the
+    // first ambiguity is what gets surfaced as the clarification;
+    // anything past it rides in `additionalAmbiguities` so it is
+    // persisted (see emitClarification) rather than lost.
+    const [first, ...rest] = ambiguities;
+    return {
+      kind: 'ambiguous',
+      ...first,
+      ...(rest.length > 0 ? { additionalAmbiguities: rest } : {}),
+    };
   }
   return ok;
 }
@@ -956,6 +1009,17 @@ async function emitClarification(
       entityKind: EntityKind;
       reference: string;
       candidates: EntityCandidate[];
+      /**
+       * Ambiguous references beyond the one surfaced above. The
+       * voice_clarification payload contract carries only one entity's
+       * candidate list, so these can't ALSO become picker candidates on
+       * this clarification — but they still must never be silently
+       * dropped or downgraded to not_found (Core Pattern: ambiguity is
+       * always a clarification, never a guess). They're persisted onto
+       * sourceContext (see below) so a redraft after this clarification
+       * is resolved can re-surface the next one instead of stalling.
+       */
+      additionalAmbiguities?: SingleEntityAmbiguity[];
     };
   },
   log: Logger
@@ -1015,11 +1079,18 @@ async function emitClarification(
 
   // Entity ambiguity is a different question than "didn't catch that" —
   // the intent was understood; the operator just picks WHICH record.
+  const moreAmbiguitiesCount = input.entityAmbiguity?.additionalAmbiguities?.length ?? 0;
   const summary = input.entityAmbiguity
     ? `Which ${input.entityAmbiguity.entityKind}? "${input.entityAmbiguity.reference}" matched ${input.entityAmbiguity.candidates.length} records`
     : clarificationSummary(transcript);
   const explanation = input.entityAmbiguity
-    ? `Heard the request, but "${input.entityAmbiguity.reference}" matches more than one ${input.entityAmbiguity.entityKind}. Tap the right one below.`
+    ? `Heard the request, but "${input.entityAmbiguity.reference}" matches more than one ${input.entityAmbiguity.entityKind}. Tap the right one below.` +
+      // Flag that resolving this one won't be the end of it — another
+      // ambiguous reference is queued behind it, so the operator isn't
+      // surprised when the redraft asks again.
+      (moreAmbiguitiesCount > 0
+        ? ` (${moreAmbiguitiesCount} more reference${moreAmbiguitiesCount === 1 ? '' : 's'} will need picking after this.)`
+        : '')
     : clarificationExplanation(classification);
 
   const proposal = createProposal({
@@ -1060,6 +1131,33 @@ async function emitClarification(
               intentType: classification.intentType,
               extractedEntities: sanitizeExtractedEntities(classification.extractedEntities),
             },
+            // P8/U-multi — any ambiguous references beyond the one this
+            // clarification surfaces. The payload contract has no room for
+            // a second candidate list on THIS proposal, so they ride here
+            // instead of being dropped: once this clarification resolves,
+            // a redraft can read this field and immediately re-surface the
+            // next ambiguity rather than the reference silently falling
+            // through to not_found. (Consuming this on the redraft path is
+            // proposals/resolve-entity.ts, out of scope for this change —
+            // it already forwards unrecognized sourceContext keys through
+            // untouched, so this rides forward intact.)
+            ...(input.entityAmbiguity.additionalAmbiguities?.length
+              ? {
+                  pendingEntityAmbiguities: input.entityAmbiguity.additionalAmbiguities.map(
+                    (a) => ({
+                      entityKind: a.entityKind,
+                      reference: a.reference,
+                      candidates: a.candidates.map((c) => ({
+                        id: c.id,
+                        kind: c.kind,
+                        label: c.label,
+                        ...(c.hint ? { hint: c.hint } : {}),
+                        score: c.score,
+                      })),
+                    }),
+                  ),
+                }
+              : {}),
           }
         : {}),
     },
@@ -1323,6 +1421,9 @@ async function processSegment(
           entityKind: annotation.entityKind,
           reference: annotation.reference,
           candidates: annotation.candidates,
+          ...(annotation.additionalAmbiguities
+            ? { additionalAmbiguities: annotation.additionalAmbiguities }
+            : {}),
         },
         ...(params.applyDedup && recordingId
           ? { idempotencyKey: voiceProposalIdempotencyKey(recordingId) }
@@ -1333,34 +1434,47 @@ async function processSegment(
     return { kind: 'clarified', classification };
   }
 
-  const tenantThresholdOverride = deps.thresholdResolver
-    ? await deps.thresholdResolver(tenantId).catch(() => undefined)
-    : undefined;
-
-  // Resolve the tenant's timezone (best-effort) so the create/reschedule
-  // appointment handlers translate spoken times against the right zone
-  // instead of a hardcoded one. Falls back to the product default.
-  const scheduling = deps.tenantSchedulingResolver
-    ? await deps.tenantSchedulingResolver(tenantId).catch(() => undefined)
-    : undefined;
-
-  // UB-D / D-015 — resolve the autonomous booking lane settings ONLY for
-  // booking-classified segments (never a settings read on other intents).
-  // Best-effort: a resolver failure means the lane simply doesn't engage.
-  const autonomousBookingSettings =
+  // These four reads are mutually independent (none consumes another's
+  // result), so they run concurrently via Promise.all instead of
+  // sequential awaits. Each retains its EXACT pre-existing failure
+  // behavior (per-call .catch(() => undefined), or — for
+  // isSupervisorPresent — its own internal try/catch that already
+  // degrades to the permissive default) by wrapping the promise itself
+  // rather than the await; that keeps Promise.all from ever rejecting
+  // where a sequential await previously wouldn't have thrown.
+  const [
+    tenantThresholdOverride,
+    scheduling,
+    autonomousBookingSettings,
+    supervisorPresent,
+  ] = await Promise.all([
+    // Tier 4 / PR B — per-tenant auto-approve threshold override.
+    deps.thresholdResolver
+      ? deps.thresholdResolver(tenantId).catch(() => undefined)
+      : Promise.resolve(undefined),
+    // Resolve the tenant's timezone (best-effort) so the create/reschedule
+    // appointment handlers translate spoken times against the right zone
+    // instead of a hardcoded one. Falls back to the product default.
+    deps.tenantSchedulingResolver
+      ? deps.tenantSchedulingResolver(tenantId).catch(() => undefined)
+      : Promise.resolve(undefined),
+    // UB-D / D-015 — resolve the autonomous booking lane settings ONLY for
+    // booking-classified segments (never a settings read on other intents).
+    // Best-effort: a resolver failure means the lane simply doesn't engage.
     deps.autonomousBookingResolver && handler.taskType === 'create_appointment'
-      ? await deps.autonomousBookingResolver(tenantId).catch(() => undefined)
-      : undefined;
-
-  // Phase 12 supervisor gate. Resolve presence once per request and thread
-  // it onto the context so an autonomous, capture-class proposal (today:
-  // create_appointment / create_booking) can only auto-approve when a
-  // supervisor is actually on the wall. Reads the singleton wired in app.ts
-  // (pgSupervisorPresenceLoader); in tests with no loader it returns the
-  // permissive default, preserving existing fixtures. Without this the
-  // proposal-status decision used a permissive default and voice bookings
-  // auto-executed with no human in the loop.
-  const supervisorPresent = await isSupervisorPresent(tenantId);
+      ? deps.autonomousBookingResolver(tenantId).catch(() => undefined)
+      : Promise.resolve(undefined),
+    // Phase 12 supervisor gate. Resolve presence once per request and thread
+    // it onto the context so an autonomous, capture-class proposal (today:
+    // create_appointment / create_booking) can only auto-approve when a
+    // supervisor is actually on the wall. Reads the singleton wired in app.ts
+    // (pgSupervisorPresenceLoader); in tests with no loader it returns the
+    // permissive default, preserving existing fixtures. Without this the
+    // proposal-status decision used a permissive default and voice bookings
+    // auto-executed with no human in the loop. (isSupervisorPresent never
+    // rejects — a loader error is caught internally and degrades to `true`.)
+    isSupervisorPresent(tenantId),
+  ]);
 
   // Story 7.2 — Estimate Agent clarification-loop count. Derive how many times
   // we've already asked clarifying questions for an estimate in this

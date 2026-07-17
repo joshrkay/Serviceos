@@ -1410,6 +1410,180 @@ describe('voice-action-router entity resolution', () => {
     expect((proposals[0].sourceContext as Record<string, unknown> | undefined)?.pendingReference)
       .toBeUndefined();
   });
+
+  it('TWO ambiguous references in the same utterance: both are surfaced, neither is silently downgraded', async () => {
+    // customerName ("Bob") and jobReference ("the water heater job") are
+    // BOTH ambiguous. Before this change the resolver loop returned as soon
+    // as it hit the FIRST ambiguity — the job lookup was never even
+    // attempted, so the second reference vanished with no trace. It must
+    // now be tracked and persisted rather than silently dropped.
+    const gateway = gatewayReturning([
+      classifierJson({ customerName: 'Bob', jobReference: 'the water heater job' }),
+      invoiceJson,
+    ]);
+    const resolver = fakeResolver(async ({ kind }) => {
+      if (kind === 'customer') {
+        return {
+          kind: 'ambiguous',
+          candidates: [
+            { id: 'cust-1', kind: 'customer', label: 'Bob Smith (555-0100)', score: 0.9 },
+            { id: 'cust-2', kind: 'customer', label: 'Bob Stone (555-0200)', score: 0.88 },
+          ],
+        };
+      }
+      return {
+        kind: 'ambiguous',
+        candidates: [
+          { id: 'job-1', kind: 'job', label: 'Water heater — 12 Elm St', score: 0.85 },
+          { id: 'job-2', kind: 'job', label: 'Water heater — 40 Oak Ave', score: 0.82 },
+        ],
+      };
+    });
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo, entityResolver: resolver });
+
+    await worker.handle(
+      msg({ tenantId: 't-1', userId: 'u-1', transcript: 'Invoice Bob for the water heater job' }),
+      silentLogger(),
+    );
+
+    // Exactly ONE clarification proposal — the voice_clarification payload
+    // contract carries a single entity's candidate list — but it must carry
+    // BOTH ambiguities so the operator's second answer isn't stalled behind
+    // a reference that quietly turned into a guess or a dropped not_found.
+    const proposals = await proposalRepo.findByTenant('t-1');
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0].proposalType).toBe('voice_clarification');
+    // The classifier call only — drafting never ran (same as the
+    // single-ambiguity case above).
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+
+    // The FIRST ambiguity (customer — lookup order: customer, job,
+    // technician) is what the payload's one-tap picker renders.
+    const payload = proposals[0].payload as Record<string, unknown>;
+    expect(payload.reason).toBe('ambiguous_entity');
+    expect(payload.entityReference).toBe('Bob');
+    expect(payload.entityCandidates).toEqual([
+      { id: 'cust-1', label: 'Bob Smith (555-0100)', score: 0.9 },
+      { id: 'cust-2', label: 'Bob Stone (555-0200)', score: 0.88 },
+    ]);
+
+    // The SECOND ambiguity (job) is never dropped or downgraded to
+    // not_found: it's persisted on sourceContext so a redraft after this
+    // clarification resolves can immediately re-surface it instead of
+    // stalling silently.
+    const ctx = proposals[0].sourceContext as Record<string, unknown>;
+    expect(ctx.originalIntent).toBeTruthy();
+    expect(ctx.pendingEntityAmbiguities).toEqual([
+      {
+        entityKind: 'job',
+        reference: 'the water heater job',
+        candidates: [
+          { id: 'job-1', kind: 'job', label: 'Water heater — 12 Elm St', score: 0.85 },
+          { id: 'job-2', kind: 'job', label: 'Water heater — 40 Oak Ave', score: 0.82 },
+        ],
+      },
+    ]);
+    // The not_found bucket must stay empty — this is an ambiguity, not a miss.
+    expect(ctx.pendingReference).toBeUndefined();
+  });
+});
+
+describe('P8/latency — per-segment resolver reads run concurrently', () => {
+  let proposalRepo: InMemoryProposalRepository;
+
+  beforeEach(() => {
+    proposalRepo = new InMemoryProposalRepository();
+  });
+
+  afterEach(() => {
+    _resetSupervisorPresenceCache();
+    setSupervisorPresenceLoader(null);
+  });
+
+  const JOB_ID = '33333333-3333-3333-3333-333333333333';
+
+  function bookingGateway(): LLMGateway {
+    return gatewayReturning([
+      JSON.stringify({
+        intentType: 'create_appointment',
+        confidence: 0.9,
+        extractedEntities: { dateTimeDescription: 'tomorrow at 2pm' },
+      } satisfies IntentClassification),
+      JSON.stringify({
+        dateTimePhrase: 'tomorrow at 2pm',
+        jobId: JOB_ID,
+        summary: 'AC repair',
+        confidence_score: 0.9,
+      }),
+    ]);
+  }
+
+  it('a rejecting thresholdResolver/autonomousBookingResolver does not poison the sibling reads run in the same Promise.all batch', async () => {
+    setSupervisorPresenceLoader(async () => true);
+    const worker = createVoiceActionRouterWorker({
+      gateway: bookingGateway(),
+      proposalRepo,
+      // Both reject outright (not just resolve to undefined) — proving the
+      // per-call `.catch(() => undefined)` still applies INSIDE the
+      // Promise.all batch rather than letting the rejection propagate and
+      // take down the other concurrent reads.
+      thresholdResolver: async () => {
+        throw new Error('settings db down');
+      },
+      autonomousBookingResolver: async () => {
+        throw new Error('settings db down');
+      },
+      // Resolves fine — must come through untouched despite its two
+      // Promise.all siblings rejecting.
+      tenantSchedulingResolver: async () => ({ timezone: 'America/Denver' }),
+    });
+
+    await worker.handle(
+      msg({ tenantId: 't-1', userId: 'u-1', transcript: 'Book the AC repair tomorrow at 2pm' }),
+      silentLogger(),
+    );
+
+    const proposals = await proposalRepo.findByTenant('t-1');
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0].proposalType).toBe('create_appointment');
+
+    // The scheduling resolver's result rode through the parallel batch
+    // intact — degraded reads on the other two promises didn't blank it.
+    const payload = proposals[0].payload as Record<string, unknown>;
+    expect(payload.timezone).toBe('America/Denver');
+    // The 4th parallel read (isSupervisorPresent, which never rejects) also
+    // came through correctly and drove the auto-approve decision — proving
+    // the two rejecting siblings didn't stall or corrupt it either.
+    expect(proposals[0].status).toBe('approved');
+  });
+
+  it('all four resolvers succeed: context reflects every one of them (parallelization is behavior-preserving on the happy path)', async () => {
+    // Unsupervised (false) — combined with the other three resolvers all
+    // succeeding, this proves every one of the four concurrent reads landed
+    // in the right place: an unsupervised tenant's booking is held for
+    // review (not auto-approved) even though confidence (0.9) clears the
+    // legacy auto-approve bar, AND the scheduling resolver's timezone still
+    // rode through in the same batch.
+    setSupervisorPresenceLoader(async () => false);
+    const worker = createVoiceActionRouterWorker({
+      gateway: bookingGateway(),
+      proposalRepo,
+      thresholdResolver: async () => ({ tech: 0.7 }),
+      tenantSchedulingResolver: async () => ({ timezone: 'America/Chicago' }),
+      autonomousBookingResolver: async () => ({ enabled: false }),
+    });
+
+    await worker.handle(
+      msg({ tenantId: 't-1', userId: 'u-1', transcript: 'Book the AC repair tomorrow at 2pm' }),
+      silentLogger(),
+    );
+
+    const proposals = await proposalRepo.findByTenant('t-1');
+    expect(proposals).toHaveLength(1);
+    const payload = proposals[0].payload as Record<string, unknown>;
+    expect(payload.timezone).toBe('America/Chicago');
+    expect(proposals[0].status).toBe('ready_for_review');
+  });
 });
 
 // ─── RV-071 / RV-225 — owner approval & edit intents are NOT routable here ───
