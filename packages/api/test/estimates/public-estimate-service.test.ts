@@ -17,6 +17,7 @@ import {
   InMemoryJobRepository,
 } from '../../src/jobs/job';
 import { InMemorySettingsRepository } from '../../src/settings/settings';
+import type { FileRepository, StorageProvider } from '../../src/files/file-service';
 
 const TENANT = 'tenant-test-1';
 
@@ -1020,5 +1021,81 @@ describe('PublicEstimateService — accepted view narrows to selection', () => {
     expect(view.hasSelectableItems).toBe(false);
     expect(view.lineItems.map((li) => li.description).sort()).toEqual(['Better', 'Diagnostic']);
     expect(view.totalCents).toBe(25000);
+  });
+});
+
+// ─── EE-4: line image resolution (tenant-scoped signed URLs) ─────────────
+describe('PublicEstimateService — EE-4 line images', () => {
+  let h: Harness;
+  beforeEach(async () => {
+    h = await buildHarness();
+  });
+
+  function serviceWithFiles(
+    files: Array<{ id: string; tenantId: string; storageBucket: string; storageKey: string; thumbnailS3Key?: string }>,
+  ): PublicEstimateService {
+    const fileRepo = {
+      findById: async (tenantId: string, id: string) =>
+        files.find((f) => f.id === id && f.tenantId === tenantId) ?? null,
+    } as unknown as FileRepository;
+    const storage = {
+      generateDownloadUrl: async (bucket: string, key: string) => `https://signed.example/${bucket}/${key}`,
+    } as unknown as StorageProvider;
+    return new PublicEstimateService({
+      estimateRepo: h.estimate,
+      customerRepo: h.customer,
+      jobRepo: h.job,
+      settingsRepo: h.settings,
+      fileRepo,
+      storage,
+    });
+  }
+
+  async function seedWithImage(imageFileId?: string): Promise<Estimate> {
+    const j = (await h.job.findByTenant(TENANT))[0];
+    const est = makeEstimate(j.id, {
+      lineItems: [
+        {
+          id: uuidv4(),
+          description: 'Water heater',
+          quantity: 1,
+          unitPriceCents: 90000,
+          totalCents: 90000,
+          sortOrder: 0,
+          taxable: true,
+          ...(imageFileId ? { imageFileId } : {}),
+        },
+      ],
+    });
+    await h.estimate.create(est);
+    return est;
+  }
+
+  it('resolves a tenant-owned image_file_id to a signed URL (prefers the thumbnail)', async () => {
+    const est = await seedWithImage('file-1');
+    const svc = serviceWithFiles([
+      { id: 'file-1', tenantId: TENANT, storageBucket: 'bucket', storageKey: 'full-k', thumbnailS3Key: 'thumb-k' },
+    ]);
+    const view = await svc.getByToken(est.viewToken!);
+    expect(view.lineItems[0].imageUrl).toBe('https://signed.example/bucket/thumb-k');
+  });
+
+  it('SECURITY — never mints a URL for a file id owned by another tenant', async () => {
+    const est = await seedWithImage('file-foreign');
+    // The file exists, but under a DIFFERENT tenant — findById(TENANT, …) misses.
+    const svc = serviceWithFiles([
+      { id: 'file-foreign', tenantId: 'other-tenant-999', storageBucket: 'bucket', storageKey: 'k' },
+    ]);
+    const view = await svc.getByToken(est.viewToken!);
+    expect(view.lineItems[0].imageUrl).toBeUndefined();
+  });
+
+  it('leaves imageUrl absent for a line with no image and for an unresolvable file id', async () => {
+    const noImg = await seedWithImage(undefined);
+    const svc = serviceWithFiles([]);
+    expect((await svc.getByToken(noImg.viewToken!)).lineItems[0].imageUrl).toBeUndefined();
+
+    const dangling = await seedWithImage('file-missing');
+    expect((await svc.getByToken(dangling.viewToken!)).lineItems[0].imageUrl).toBeUndefined();
   });
 });

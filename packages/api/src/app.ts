@@ -2711,6 +2711,10 @@ export function createApp(): AppWithLifecycle {
     customerRepo,
     locationRepo,
     settingsRepo,
+    // EE-4 — resolve each line's frozen image_file_id to a signed URL
+    // (tenant-scoped via fileRepo.findById). Absent → no thumbnails.
+    fileRepo,
+    storage: storageProvider,
     stripeConfig: process.env.STRIPE_SECRET_KEY
       ? { apiKey: process.env.STRIPE_SECRET_KEY }
       : null,
