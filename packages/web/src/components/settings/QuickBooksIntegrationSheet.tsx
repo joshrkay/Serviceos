@@ -1,8 +1,6 @@
 /**
- * Tier 4 (QuickBooks — F17 / P15-001).
- *
- * Closes the QuickBooks stub on Settings. Operators connect via OAuth,
- * view sync status, trigger manual sync, and disconnect.
+ * QuickBooks integration — OAuth connect, sync status, manual sync,
+ * and disconnect (F17 / P15-001).
  */
 import { X } from 'lucide-react';
 import { QuickBooksConnect } from '../integrations/QuickBooksConnect';

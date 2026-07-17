@@ -1,4 +1,4 @@
-import type { JobStatus, EstimateStatus, InvoiceStatus } from '../../data/mock-data';
+import type { JobStatus, EstimateStatus, InvoiceStatus } from '../../types/job-ui';
 
 type Status = JobStatus | EstimateStatus | InvoiceStatus | 'Urgent' | 'Normal';
 

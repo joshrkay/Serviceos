@@ -3,7 +3,7 @@ import { X, AlertTriangle, UserX, PhoneOff, RefreshCw, MessageSquare, Check, Ale
 import { SheetOverlay } from './JobSheets';
 import { Textarea } from '../ui';
 import { apiFetch } from '../../utils/api-fetch';
-import type { Job } from '../../data/mock-data';
+import type { Job } from '../../types/job-ui';
 
 type IssueType = 'cancel' | 'noshow' | 'other';
 

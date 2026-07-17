@@ -6,7 +6,7 @@ import {
   AlertTriangle, FileText, Briefcase, ArrowLeft,
   User, Phone, Mail,
 } from 'lucide-react';
-import type { ServiceType } from '../../data/mock-data';
+import type { ServiceType } from '../../types/job-ui';
 import type { Customer, CustomerListItem } from '@ai-service-os/shared';
 import { useListQuery } from '../../hooks/useListQuery';
 import { useMutation } from '../../hooks/useMutation';

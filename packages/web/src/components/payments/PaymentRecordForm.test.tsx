@@ -153,7 +153,7 @@ describe('U5 PaymentRecordForm — double-submit guard + integer cents', () => {
     vi.unstubAllGlobals();
   });
 
-  /** Mirrors the real consumer (pages/invoices/InvoiceDetail.tsx): onSubmit
+  /** Mirrors the real consumer (InvoicesPage inline detail): onSubmit
    *  POSTs to /api/payments and resolves when the server responds. */
   function postingOnSubmit() {
     return (data: PaymentFormData) =>
