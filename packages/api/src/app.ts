@@ -11,6 +11,7 @@ import { createPool, createDirectPool } from './db/pool';
 import { verifyRlsRuntimeRole } from './db/rls-runtime-role';
 import { loadConfig, resolveMediaStreamsEnabled } from './shared/config';
 import { resolveWebDistDir } from './web-static-path';
+import { registerMarketingRedirects } from './marketing-redirects';
 import { createWebhookRouter } from './webhooks/routes';
 import { createIntegrationResolver, createVapiSecretResolver } from './webhooks/integration-resolver';
 import { createTelephonyRouter } from './routes/telephony';
@@ -338,6 +339,8 @@ import { PgNoteRepository } from './notes/pg-note';
 import { PgConversationRepository } from './conversations/pg-conversation';
 import { PgSettingsRepository } from './settings/pg-settings';
 import { PgAuditRepository } from './audit/pg-audit';
+import { ForwardingAuditRepository } from './audit/forwarding-audit-repository';
+import { recordApiError } from './analytics/posthog';
 import { PgEstimateTemplateRepository } from './templates/pg-estimate-template';
 import { PgServiceBundleRepository } from './verticals/pg-bundles';
 import {
@@ -1032,7 +1035,14 @@ export function createApp(): AppWithLifecycle {
   // Queue constructed here (before webhook router) so new-tenant webhooks can
   // enqueue provisioning jobs synchronously during the request.
   const queue = pool ? new PgQueue(pool) : new InMemoryQueue();
-  const webhookAuditRepo = pool ? new PgAuditRepository(pool) : new InMemoryAuditRepository();
+  // Wrap the single audit-repo instance in the PostHog forwarding decorator at
+  // the composition root: every mutation's audit write (~270 sites, all
+  // domains) is threaded through `auditRepo`, so this one wrap gives full
+  // in-app product-event coverage. Off-by-default — a no-op forward until
+  // POSTHOG_API_KEY is set, and it can never break a mutation.
+  const webhookAuditRepo = new ForwardingAuditRepository(
+    pool ? new PgAuditRepository(pool) : new InMemoryAuditRepository(),
+  );
   const webhookEventRepo = pool ? new PgWebhookEventRepository(pool) : new InMemoryWebhookEventRepository();
   // Blocker 1 — durable idempotency store for the Stripe/Clerk dedup path
   // (handleWebhookEvent). Postgres-backed in real deploys; left undefined
@@ -6447,10 +6457,35 @@ export function createApp(): AppWithLifecycle {
   app.use(captureRequestError());
 
   // Global error handler
-  app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  app.use((err: Error, req: express.Request, res: express.Response, _next: express.NextFunction) => {
     const { statusCode, body } = toErrorResponse(err);
+    // OBS — surface server 5xx in PostHog (api_error), attributable to the
+    // already-redacted route + tenant, so "where are customers hitting bugs"
+    // covers the backend too. Off-by-default; wrapped so analytics can never
+    // turn an error response into a thrown handler. No body/headers/message.
+    if (statusCode >= 500) {
+      try {
+        const anyReq = req as unknown as {
+          safeRequestLog?: { route?: string };
+          auth?: { tenantId?: string; userId?: string };
+        };
+        recordApiError({
+          route: anyReq.safeRequestLog?.route ?? req.path,
+          status: statusCode,
+          tenantId: anyReq.auth?.tenantId ?? null,
+          userId: anyReq.auth?.userId ?? null,
+        });
+      } catch {
+        // analytics must never break the error response
+      }
+    }
     res.status(statusCode).json(body);
   });
+
+  // Marketing/legal pages moved to the standalone marketing site — forward
+  // the retired in-app paths (/pricing, /privacy, …) there before the SPA
+  // catch-all can serve index.html for them.
+  registerMarketingRedirects(app);
 
   // Catch-all route for client-side routing — serves index.html for all non-API routes
   // This allows the React SPA to handle routing on the client side.

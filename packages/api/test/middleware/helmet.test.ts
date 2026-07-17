@@ -47,6 +47,20 @@ describe('D1-3 — helmet hardening headers', () => {
       expect(csp).toContain('https://*.ingest.sentry.io');
       expect(csp).toContain("frame-ancestors 'none'");
       expect(csp).toContain("object-src 'none'");
+      // PostHog analytics — without these in connect-src (and the assets host
+      // in script-src) posthog-js is silently CSP-blocked in prod and NO
+      // browser events reach PostHog even with the key configured.
+      expect(csp).toContain('https://us.i.posthog.com');
+      expect(csp).toContain('https://us-assets.i.posthog.com');
+    });
+
+    it('allows PostHog ingestion in connect-src (else browser events are CSP-blocked)', async () => {
+      const res = await request(app).get('/health');
+      const csp = res.headers['content-security-policy'] ?? '';
+      const connectDirective =
+        csp.split(';').find((d) => d.trim().startsWith('connect-src')) ?? '';
+      expect(connectDirective).toContain('https://us.i.posthog.com');
+      expect(connectDirective).toContain('https://us-assets.i.posthog.com');
     });
 
     it('emits Strict-Transport-Security = 1 year + includeSubDomains, no preload', async () => {
