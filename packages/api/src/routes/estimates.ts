@@ -44,7 +44,7 @@ import { InvoiceRepository } from '../invoices/invoice';
 import { PaymentRepository } from '../invoices/payment';
 import { convertEstimateToInvoice } from '../invoices/convert-estimate';
 import { RefreshJobMoneyStateDeps, refreshJobMoneyStateSafe } from '../jobs/job-money-state';
-import { applyBps } from '../shared/billing-engine';
+import { applyBps, resolveSelectedLineItems } from '../shared/billing-engine';
 import { AgreementRepository } from '../agreements/agreement';
 import { getCustomerMemberDiscountBps } from '../agreements/member-pricing';
 import { Customer, CustomerRepository } from '../customers/customer';
@@ -231,7 +231,14 @@ export function createEstimateRouter(
           if (job) {
             const bps = await getCustomerMemberDiscountBps(tenantId, job.customerId, agreementRepo);
             if (bps > 0) {
-              const subtotalCents = parsed.lineItems.reduce((sum, li) => sum + li.totalCents, 0);
+              // EE-1 — base the member discount on the DEFAULT selection, the
+              // same subset createEstimate headlines. Summing every tier option
+              // here would over-discount a tiered estimate (a discount computed
+              // on the full menu but applied to only the default tier).
+              const subtotalCents = resolveSelectedLineItems(parsed.lineItems).reduce(
+                (sum, li) => sum + li.totalCents,
+                0,
+              );
               const cents = applyBps(subtotalCents, bps);
               if (cents > 0) {
                 discountCents += cents;
