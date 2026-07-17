@@ -9,7 +9,12 @@
 import request from 'supertest';
 import express, { Request, Response, NextFunction } from 'express';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { createAssistantRouter, proposalSignals, VOICE_APPROVAL_REFUSAL } from '../../src/routes/assistant';
+import {
+  createAssistantRouter,
+  proposalSignals,
+  editFieldsForMissing,
+  VOICE_APPROVAL_REFUSAL,
+} from '../../src/routes/assistant';
 import { InMemoryProposalRepository } from '../../src/proposals/proposal';
 import { approveProposal } from '../../src/proposals/actions';
 import { ValidationError } from '../../src/shared/errors';
@@ -468,6 +473,46 @@ describe('U7 — proposalSignals helper (pure mapper passthrough)', () => {
   });
 });
 
+// ─── B1 — editFieldsForMissing: turns sourceContext.missingFields into the
+// AIProposalCard editFields shape so a gated assistant card renders a
+// working Edit control (previously: no editFields, no way to unblock
+// Approve). ─────────────────────────────────────────────────────────────
+
+describe('B1 — editFieldsForMissing helper (pure mapper)', () => {
+  it('emits a labelled, keyed field for a flat missingFields entry, prefilled from its reference field', () => {
+    const out = editFieldsForMissing(['invoiceId'], { invoiceReference: 'Henderson', channel: 'email' });
+    expect(out).toEqual([{ label: 'Invoice # or ID', key: 'invoiceId', value: 'Henderson' }]);
+  });
+
+  it('prefers an existing string payload value over the reference field', () => {
+    const out = editFieldsForMissing(['invoiceId'], { invoiceId: 'partial-typed-value', invoiceReference: 'Henderson' });
+    expect(out).toEqual([{ label: 'Invoice # or ID', key: 'invoiceId', value: 'partial-typed-value' }]);
+  });
+
+  it('falls back to the raw key as the label and an empty value when nothing is known', () => {
+    const out = editFieldsForMissing(['title'], {});
+    expect(out).toEqual([{ label: 'title', key: 'title', value: '' }]);
+  });
+
+  it('skips path-shaped entries — those are resolve-line/candidate-picker territory, not a plain text field', () => {
+    const out = editFieldsForMissing(
+      ['invoiceId', 'lineItems[0].catalogItemId', 'editActions[0].lineItem.catalogItemId'],
+      { invoiceReference: 'Henderson' },
+    );
+    expect(out).toEqual([{ label: 'Invoice # or ID', key: 'invoiceId', value: 'Henderson' }]);
+  });
+
+  it('returns undefined when every missingFields entry is path-shaped', () => {
+    const out = editFieldsForMissing(['lineItems[0].catalogItemId'], {});
+    expect(out).toBeUndefined();
+  });
+
+  it('returns undefined for an empty or absent missingFields list', () => {
+    expect(editFieldsForMissing([], { invoiceId: 'x' })).toBeUndefined();
+    expect(editFieldsForMissing(undefined, { invoiceId: 'x' })).toBeUndefined();
+  });
+});
+
 describe('U7 — POST /api/assistant/chat surfaces pricing signals on the card', () => {
   function catalogRepo(items: CatalogItem[]): CatalogItemRepository {
     return {
@@ -916,6 +961,16 @@ describe('money-path handler wiring — update_invoice/send_invoice/issue_invoic
 
     expect(res.status).toBe(200);
     expect(res.body.message.proposal.missingFields).toEqual(['invoiceId']);
+    // B1 — a gated card must carry an editFields entry keyed by the exact
+    // payload field name (`invoiceId`) so AIProposalCard's edit-then-approve
+    // flow (PUT /api/proposals/:id { edits: { invoiceId: ... } }) can fill
+    // it. Prefilled from the free-text invoiceReference as context, never
+    // as a stand-in value the operator could approve unedited.
+    expect(res.body.message.proposal.editFields).toEqual(
+      expect.arrayContaining([
+        { label: 'Invoice # or ID', key: 'invoiceId', value: 'Henderson' },
+      ]),
+    );
 
     const persisted = await proposalRepo.findByTenant(TEST_TENANT);
     expect(persisted).toHaveLength(1);

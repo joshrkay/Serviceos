@@ -394,6 +394,71 @@ function dropUnverifiedIds(
 }
 
 /**
+ * B1 — friendly labels for the flat id-shaped keys the money-path task
+ * handlers gate on. Falls back to the raw key (see `editFieldsForMissing`)
+ * for any missingFields entry not listed here (e.g. `title`, `jobId`), so a
+ * newly-added gate never silently loses its Edit control.
+ */
+const MISSING_FIELD_LABELS: Record<string, string> = {
+  invoiceId: 'Invoice # or ID',
+  estimateId: 'Estimate # or ID',
+  jobId: 'Job # or ID',
+  customerId: 'Customer name or ID',
+  appointmentId: 'Appointment # or ID',
+  leadId: 'Lead name or ID',
+};
+
+/**
+ * B1 — the free-text reference field each gated id is paired with on the
+ * money/reference-carrying proposal types (see contracts.ts:
+ * `sendInvoicePayloadSchema`, `sendEstimateNudgePayloadSchema`,
+ * `confirmAppointmentPayloadSchema`, etc.). Used only to prefill the Edit
+ * input with context — never copied into the payload itself.
+ */
+const REFERENCE_FIELD_FOR_MISSING: Record<string, string> = {
+  invoiceId: 'invoiceReference',
+  estimateId: 'estimateReference',
+  jobId: 'jobReference',
+  customerId: 'customerReference',
+  appointmentId: 'appointmentReference',
+  leadId: 'leadReference',
+};
+
+/**
+ * B1 — turn `sourceContext.missingFields` into the same `editFields` shape
+ * `customerProposalToUI` already emits, so the existing edit-then-approve UI
+ * (AIProposalCard → PUT /api/proposals/:id { edits }) can fill a gated field
+ * without any client-side change. Path-shaped entries
+ * (`lineItems[0].catalogItemId`, `editActions[0].lineItem.catalogItemId`)
+ * are owned by resolve-line's candidate picker (B2/B3), not this generic
+ * text-input form, so they're skipped here exactly as
+ * `clearSatisfiedMissingFields` (proposals/missing-fields.ts) skips them.
+ */
+export function editFieldsForMissing(
+  missingFields: string[] | undefined,
+  payload: Record<string, unknown>,
+): AssistantProposal['editFields'] {
+  if (!missingFields || missingFields.length === 0) return undefined;
+
+  const fields = missingFields
+    .filter((key) => !key.includes('[') && !key.includes('.'))
+    .map((key) => {
+      const existing = payload[key];
+      const referenceKey = REFERENCE_FIELD_FOR_MISSING[key];
+      const referenceValue = referenceKey ? payload[referenceKey] : undefined;
+      const value =
+        typeof existing === 'string'
+          ? existing
+          : typeof referenceValue === 'string'
+            ? referenceValue
+            : '';
+      return { label: MISSING_FIELD_LABELS[key] ?? key, key, value };
+    });
+
+  return fields.length > 0 ? fields : undefined;
+}
+
+/**
  * QA-2026-06-05 (AST-02/03/04): map any persisted proposal to the UI card
  * shape — estimates/invoices were previously unpersisted LLM JSON.
  */
@@ -422,6 +487,7 @@ function proposalToUI(
   const total = typeof proposal.payload.totalCents === 'number'
     ? ` — $${(proposal.payload.totalCents / 100).toFixed(2)}`
     : '';
+  const signals = proposalSignals(proposal.payload, proposal.sourceContext);
   return {
     id: proposal.id,
     title: `${cardType}: ${proposal.summary.slice(0, 80)}${total}`,
@@ -432,7 +498,10 @@ function proposalToUI(
     status: 'Pending',
     // E10 (U7) — surface AI-pricing / confidence / missing-field warnings so
     // the card can render them and block Approve on unresolved lines.
-    ...proposalSignals(proposal.payload, proposal.sourceContext),
+    ...signals,
+    // B1 — a gated card otherwise has no way to unblock Approve on this
+    // surface: render an Edit input for every flat missingFields entry.
+    editFields: editFieldsForMissing(signals.missingFields, proposal.payload),
   };
 }
 
