@@ -1663,6 +1663,7 @@ export class TwilioMediaStreamAdapter {
         transcript,
         priorTurns,
         intent,
+        tenantId: session.tenantId,
       },
       {
         costTracker: session.costTracker,

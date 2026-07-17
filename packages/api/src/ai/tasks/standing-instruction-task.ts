@@ -108,6 +108,9 @@ export class CreateStandingInstructionTaskHandler implements TaskHandler {
     try {
       const response = await this.gateway.complete({
         taskType: 'create_standing_instruction',
+        // Top-level tenantId so the gateway keys this tenant's concurrency
+        // quota / cache bucket correctly (never the shared SYSTEM_TENANT_ID).
+        tenantId: context.tenantId,
         messages: [
           { role: 'system', content: STANDING_INSTRUCTION_SYSTEM_PROMPT },
           {

@@ -85,6 +85,7 @@ export const TASK_TYPES = [
   // ── Standard: moderate generation / customer-facing writing where output
   //    quality matters more than latency or cost.
   'create_appointment',
+  'create_standing_instruction',
   'suggest_reply',
   'brand_voice_v1',
   'review_private_followup',
@@ -124,6 +125,11 @@ const DEFAULT_TASK_TIER_MAPPING: Record<TaskType, ModelTier> = {
   proposal_sms_edit: 'lightweight',
   // Standard
   create_appointment: 'standard',
+  // Normalizes a spoken directive into a concise imperative + structured
+  // scope (intents/trade categories/customer segment) — judgment-call
+  // extraction like extract_business_profile/extract_categories/
+  // extract_pricing below, not a deterministic lite-extraction task.
+  create_standing_instruction: 'standard',
   suggest_reply: 'standard',
   brand_voice_v1: 'standard',
   review_private_followup: 'standard',

@@ -3913,6 +3913,10 @@ export function createApp(): AppWithLifecycle {
                 complete: async ({ prompt }: { prompt: string }) => {
                   const res = await llmGateway.complete({
                     taskType: 'call_sentiment',
+                    // Top-level tenantId so the gateway keys this tenant's
+                    // concurrency quota / cache bucket correctly (never the
+                    // shared SYSTEM_TENANT_ID).
+                    tenantId: input.tenantId,
                     messages: [{ role: 'user' as const, content: prompt }],
                   });
                   return { text: res.content };
@@ -3957,6 +3961,10 @@ export function createApp(): AppWithLifecycle {
                   complete: async ({ prompt }: { prompt: string }) => {
                     const res = await llmGateway.complete({
                       taskType: 'grade_vulnerability',
+                      // Top-level tenantId so the gateway keys this tenant's
+                      // concurrency quota / cache bucket correctly (never the
+                      // shared SYSTEM_TENANT_ID).
+                      tenantId: input.tenantId,
                       messages: [{ role: 'user' as const, content: prompt }],
                     });
                     return { text: res.content };
