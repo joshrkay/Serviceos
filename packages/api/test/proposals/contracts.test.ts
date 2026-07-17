@@ -13,6 +13,7 @@ import {
   updateEstimatePayloadSchema,
   invoiceEditActionSchema,
   estimateEditActionSchema,
+  tierStructureIssues,
 } from '../../src/proposals/contracts';
 import { normalizeTierStructure } from '../../src/ai/resolution/tier-structure';
 import { ValidationError } from '../../src/shared/errors';
