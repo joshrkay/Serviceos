@@ -11,6 +11,11 @@ import {
   UNCATALOGUED_CONFIDENCE_CAP,
 } from '../resolution/catalog-resolver';
 import {
+  detectTierRequest,
+  normalizeTierStructure,
+  TIER_GUIDANCE_SECTION,
+} from '../resolution/tier-structure';
+import {
   detectEstimateAmbiguities,
   decideEstimateClarification,
   EstimateDraftSignals,
@@ -102,6 +107,12 @@ export class EstimateTaskHandler implements TaskHandler {
   async handle(context: TaskContext): Promise<TaskResult> {
     const userMessage = this.buildUserMessage(context);
 
+    // EE-1 — detect whether the request calls for tiered choices / add-ons.
+    // Drives both the conditional tier-guidance injection below and the
+    // normalizer's addOnsRequested signal after grounding. A flat request
+    // triggers neither, so its prompt path stays byte-identical.
+    const tierSignals = detectTierRequest(context.message ?? '');
+
     // UB-A3 — owner standing instructions ride a SEPARATE, delimited system
     // message (mirroring the classifier's vertical-context injection) so the
     // base prompt stays byte-identical when none apply. Content-only: the
@@ -109,6 +120,12 @@ export class EstimateTaskHandler implements TaskHandler {
     const systemMessages: Array<{ role: 'system'; content: string }> = [
       { role: 'system', content: ESTIMATE_SYSTEM_PROMPT },
     ];
+    // EE-1 — good-better-best guidance is likewise a separate system message,
+    // injected ONLY when the request calls for choices/add-ons so the flat
+    // path's prompt stays byte-identical.
+    if (tierSignals.tiersRequested || tierSignals.addOnsRequested) {
+      systemMessages.push({ role: 'system', content: TIER_GUIDANCE_SECTION });
+    }
     const injectedInstructions = context.standingInstructions ?? [];
     if (injectedInstructions.length > 0) {
       systemMessages.push({
@@ -147,7 +164,14 @@ export class EstimateTaskHandler implements TaskHandler {
         'unitPrice',
         this.catalogRepo ? () => this.catalogRepo!.listByTenant(context.tenantId) : null,
       );
-      payload.lineItems = catalogOutcome.lineItems;
+      // EE-1 — coerce any good-better-best tiers/add-ons the model emitted into
+      // valid structure (exactly one default per group, add-ons off unless
+      // requested, singleton groups demoted to always-billed). Flag-only and
+      // runs AFTER grounding so lineItems[i] indices stay aligned with the
+      // confidence/clarification passes below; a no-op on flat drafts.
+      payload.lineItems = normalizeTierStructure(catalogOutcome.lineItems, {
+        addOnsRequested: tierSignals.addOnsRequested,
+      });
     }
 
     const confidence = assessConfidence(parsed ?? {});

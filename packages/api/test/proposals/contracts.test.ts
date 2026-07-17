@@ -14,6 +14,7 @@ import {
   invoiceEditActionSchema,
   estimateEditActionSchema,
 } from '../../src/proposals/contracts';
+import { normalizeTierStructure } from '../../src/ai/resolution/tier-structure';
 import { ValidationError } from '../../src/shared/errors';
 
 describe('P2-002 — Typed proposal contracts', () => {
@@ -652,5 +653,107 @@ describe('PROPOSAL_TYPE_SCHEMAS — no strict-mode schemas', () => {
       }
     }
     expect(strictSchemas).toEqual([]);
+  });
+});
+
+describe('EE-1 — good-better-best tier structure', () => {
+  const customerId = uuidv4();
+
+  function draft(lineItems: Array<Record<string, unknown>>) {
+    return { customerId, lineItems };
+  }
+
+  describe('tierStructureIssues', () => {
+    it('accepts a flat payload (no groups) as valid', () => {
+      expect(tierStructureIssues([{ description: 'Labor' }, { description: 'Parts' }])).toEqual([]);
+    });
+
+    it('accepts a well-formed tier group (>=2 options, exactly one default)', () => {
+      expect(
+        tierStructureIssues([
+          { groupKey: 'wh', isOptional: true, isDefaultSelected: true },
+          { groupKey: 'wh', isOptional: true, isDefaultSelected: false },
+        ]),
+      ).toEqual([]);
+    });
+
+    it('flags a singleton group', () => {
+      const issues = tierStructureIssues([{ groupKey: 'solo', isOptional: true, isDefaultSelected: true }]);
+      expect(issues).toHaveLength(1);
+      expect(issues[0]).toMatch(/only one option/);
+    });
+
+    it('flags a group with two defaults', () => {
+      const issues = tierStructureIssues([
+        { groupKey: 'g', isOptional: true, isDefaultSelected: true },
+        { groupKey: 'g', isOptional: true, isDefaultSelected: true },
+      ]);
+      expect(issues).toHaveLength(1);
+      expect(issues[0]).toMatch(/exactly one default/);
+    });
+
+    it('flags a group with zero defaults', () => {
+      const issues = tierStructureIssues([
+        { groupKey: 'g', isOptional: true },
+        { groupKey: 'g', isOptional: true },
+      ]);
+      expect(issues[0]).toMatch(/exactly one default/);
+    });
+
+    it('flags isDefaultSelected on an always-billed line', () => {
+      const issues = tierStructureIssues([{ description: 'Labor', isDefaultSelected: true }]);
+      expect(issues).toHaveLength(1);
+      expect(issues[0]).toMatch(/neither a tier option nor an optional add-on/);
+    });
+
+    it('allows a pre-checked optional add-on (isDefaultSelected on isOptional line)', () => {
+      expect(tierStructureIssues([{ description: 'Membership', isOptional: true, isDefaultSelected: true }])).toEqual([]);
+    });
+  });
+
+  describe('draftEstimatePayloadSchema refine', () => {
+    it('accepts a valid tiered draft via validateProposalPayload', () => {
+      const result = validateProposalPayload(
+        'draft_estimate',
+        draft([
+          { description: 'Builder heater', quantity: 1, unitPrice: 90000, groupKey: 'wh', isOptional: true, isDefaultSelected: true },
+          { description: 'Premium heater', quantity: 1, unitPrice: 140000, groupKey: 'wh', isOptional: true },
+        ]),
+      );
+      expect(result.valid).toBe(true);
+    });
+
+    it('rejects a malformed tiered draft (two defaults)', () => {
+      const result = validateProposalPayload(
+        'draft_estimate',
+        draft([
+          { description: 'A', quantity: 1, unitPrice: 100, groupKey: 'g', isOptional: true, isDefaultSelected: true },
+          { description: 'B', quantity: 1, unitPrice: 200, groupKey: 'g', isOptional: true, isDefaultSelected: true },
+        ]),
+      );
+      expect(result.valid).toBe(false);
+    });
+
+    it('leaves the flat draft path valid (backstop is inert without groups)', () => {
+      const result = validateProposalPayload(
+        'draft_estimate',
+        draft([{ description: 'Labor', quantity: 2, unitPrice: 7500 }]),
+      );
+      expect(result.valid).toBe(true);
+    });
+  });
+
+  it('agreement — normalizeTierStructure output always passes tierStructureIssues', () => {
+    // A deliberately malformed draft: a group with no default + extra default,
+    // a singleton group, and a pre-checked add-on with no request.
+    const messy: Array<Record<string, unknown>> = [
+      { description: 'Good', quantity: 1, unitPrice: 100, groupKey: 'g' },
+      { description: 'Better', quantity: 1, unitPrice: 200, groupKey: 'g', isDefaultSelected: true },
+      { description: 'Best', quantity: 1, unitPrice: 300, groupKey: 'g', isDefaultSelected: true },
+      { description: 'Solo', quantity: 1, unitPrice: 50, groupKey: 'solo' },
+      { description: 'Add-on', quantity: 1, unitPrice: 25, isOptional: true, isDefaultSelected: true },
+    ];
+    const normalized = normalizeTierStructure(messy);
+    expect(tierStructureIssues(normalized)).toEqual([]);
   });
 });

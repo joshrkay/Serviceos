@@ -176,6 +176,32 @@ export function defaultSelectionIds(lineItems: LineItem[]): string[] {
 }
 
 /**
+ * EE-1 — headline document totals for an ESTIMATE that may carry
+ * good-better-best tiers / optional add-ons. Totals the DEFAULT selection
+ * (each group's default tier + pre-checked add-ons + always-billed lines)
+ * rather than the sum of every option. Identical to `calculateDocumentTotals`
+ * for a flat document (no selectable lines → all items selected). Use this at
+ * EVERY estimate headline-total site (create / update / revise / duplicate /
+ * voice-edit) so a tiered estimate stays consistent — computing raw
+ * `calculateDocumentTotals` over all lines re-inflates the headline. The
+ * accept path stays separate: it resolves the customer's chosen selection, not
+ * the default.
+ */
+export function calculateSelectedDocumentTotals(
+  lineItems: LineItem[],
+  discountCents: number,
+  taxRateBps: number,
+  processingFeeBps: number = 0,
+): DocumentTotals {
+  return calculateDocumentTotals(
+    resolveSelectedLineItems(lineItems),
+    discountCents,
+    taxRateBps,
+    processingFeeBps,
+  );
+}
+
+/**
  * Validate a customer selection against the estimate's line items.
  * Enforces: every selected id exists; each tier group (group_key) has
  * exactly one selected option. Returns a list of human-readable errors

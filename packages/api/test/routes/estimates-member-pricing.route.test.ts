@@ -115,4 +115,32 @@ describe('POST /api/estimates — member pricing', () => {
     expect(res.status).toBe(201);
     expect(res.body.totals.discountCents).toBe(0);
   });
+
+  it('bases the member discount on the default tier selection, not every option (EE-1)', async () => {
+    const customerId = 'cust-member-tiered';
+    await seedMembership(customerId, 1_000); // 10%
+    const jobId = await seedJob(customerId);
+
+    // Always-billed diagnostic + a good-better-best group. The default
+    // selection is the diagnostic (20,000) + the Builder default tier (90,000)
+    // = 110,000 — the Premium option (140,000) is not billed by default.
+    const tiered = [
+      { id: 'li-1', description: 'AC tune-up', quantity: 1, unitPriceCents: 20_000, totalCents: 20_000, sortOrder: 0, taxable: true },
+      { id: 'li-2', description: 'Builder heater', quantity: 1, unitPriceCents: 90_000, totalCents: 90_000, sortOrder: 1, taxable: true, groupKey: 'wh', groupLabel: 'Water heater', isOptional: true, isDefaultSelected: true },
+      { id: 'li-3', description: 'Premium heater', quantity: 1, unitPriceCents: 140_000, totalCents: 140_000, sortOrder: 2, taxable: true, groupKey: 'wh', groupLabel: 'Water heater', isOptional: true },
+    ];
+
+    const res = await request(h.app)
+      .post('/api/estimates')
+      .send({ jobId, lineItems: tiered, taxRateBps: 0 });
+
+    expect(res.status).toBe(201);
+    // 10% of the DEFAULT selection (110,000) = 11,000 — NOT 10% of the full
+    // 250,000 menu (which would over-discount to 25,000).
+    expect(res.body.totals.discountCents).toBe(11_000);
+    expect(res.body.totals.totalCents).toBe(110_000 - 11_000);
+    const events = await h.auditRepo.findByEntity(TEST_TENANT_ID, 'estimate', res.body.id);
+    const applied = events.find((e) => e.eventType === 'estimate.member_discount_applied');
+    expect(applied?.metadata).toMatchObject({ memberDiscountCents: 11_000 });
+  });
 });

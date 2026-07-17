@@ -254,6 +254,51 @@ describe('InboxPage', () => {
     expect(screen.getByTestId('severity-badge')).toHaveTextContent('Emergency');
   });
 
+  it('renders good-better-best tiers and add-ons so the operator sees the choices (EE-1)', async () => {
+    apiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        data: [
+          {
+            proposal: {
+              id: 'p-gbb',
+              proposalType: 'draft_estimate',
+              summary: 'Water heater options for the Diaz job',
+              status: 'draft',
+              createdAt: new Date().toISOString(),
+              payload: {
+                lineItems: [
+                  { id: 'l1', description: 'Diagnostic', unitPrice: 5000, pricingSource: 'catalog' },
+                  { id: 'l2', description: 'Builder heater', unitPrice: 90000, pricingSource: 'catalog', groupKey: 'wh', groupLabel: 'Water heater', isOptional: true, isDefaultSelected: true },
+                  { id: 'l3', description: 'Premium heater', unitPrice: 140000, pricingSource: 'catalog', groupKey: 'wh', groupLabel: 'Water heater', isOptional: true },
+                  { id: 'l4', description: 'Surge protector', unitPrice: 8000, pricingSource: 'catalog', isOptional: true },
+                ],
+              },
+              sourceContext: {},
+            },
+            urgency: 'normal',
+            reason: 'Awaiting review',
+          },
+        ],
+        summary: { totalCount: 1, criticalCount: 0, highCount: 0, normalCount: 1, lowCount: 0, truncated: false },
+      }),
+    );
+
+    render(<InboxPage />);
+
+    await waitFor(() => screen.getByText('Water heater options for the Diaz job'));
+    const group = screen.getByTestId('tier-group');
+    expect(group).toHaveTextContent('Water heater');
+    expect(group).toHaveTextContent('Builder heater');
+    expect(group).toHaveTextContent('Premium heater');
+    // Exactly one option is marked default, and it is the Builder tier.
+    expect(within(group).getByTestId('tier-default').closest('li')).toHaveTextContent('Builder heater');
+    // Catalog-grounded prices are shown per option.
+    expect(group).toHaveTextContent('$900.00');
+    expect(group).toHaveTextContent('$1,400.00');
+    // The standalone optional add-on renders in its own block.
+    expect(screen.getByTestId('tier-addons')).toHaveTextContent('Surge protector');
+  });
+
   it('renders a "Standing instruction applied" chip per applied instruction (UB-A3)', async () => {
     apiFetch.mockResolvedValueOnce(
       jsonResponse({

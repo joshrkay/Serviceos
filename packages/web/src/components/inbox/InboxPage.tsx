@@ -7,6 +7,7 @@ import { formatInTenantTz } from '../../utils/formatInTenantTz';
 import { useUndoableApproval, type ApproveResponseLike } from '../../hooks/useUndoableApproval';
 import { UndoToast } from '../common/UndoToast';
 import { ProposalChainCard, ChainRow } from './ProposalChainCard';
+import { TierBreakdown, hasTierBreakdown } from './TierBreakdown';
 import { AmbiguityPicker, type AmbiguityCandidate } from './AmbiguityPicker';
 
 type Urgency = 'critical' | 'high' | 'normal' | 'low';
@@ -45,6 +46,15 @@ interface LineItemView {
   id?: string;
   description?: string;
   pricingSource?: PricingSource;
+  /** Per-unit price in integer cents (estimate payloads use `unitPrice`). */
+  unitPrice?: number;
+  // EE-1 good-better-best. The inbox serializes the full payload, so these
+  // ride through already — the review card just needs to read them to show
+  // the operator the tiers/add-ons they're approving.
+  groupKey?: string;
+  groupLabel?: string;
+  isOptional?: boolean;
+  isDefaultSelected?: boolean;
 }
 
 // B3 — update_invoice / update_estimate proposals carry `editActions`, not
@@ -315,6 +325,11 @@ function ProposalMarkers({
         li?.pricingSource === 'ambiguous' && (catalogResolution[String(idx)]?.length ?? 0) > 0,
     );
 
+  // EE-1 — good-better-best tiers/add-ons the operator is approving (rendered
+  // read-only via the shared TierBreakdown; the customer selects on the public
+  // estimate).
+  const hasSelectable = hasTierBreakdown(lineItems);
+
   // U8 (E9) — ambiguous entity candidates ("which Bob?") on a
   // voice_clarification card. Read from the payload (where the voice emitter
   // writes them), falling back to sourceContext.
@@ -332,7 +347,8 @@ function ProposalMarkers({
     markers.length === 0 &&
     !severity &&
     appliedInstructions.length === 0 &&
-    entityCandidates.length === 0
+    entityCandidates.length === 0 &&
+    !hasSelectable
   )
     return null;
 
@@ -373,6 +389,11 @@ function ProposalMarkers({
           })}
         </div>
       )}
+
+      {/* EE-1 — good-better-best tiers/add-ons, so the operator sees the
+          choices they approve. Read-only; the customer selects on the public
+          estimate. Shared with the chained-proposal card. */}
+      <TierBreakdown lineItems={lineItems} />
 
       {markers.map((m, i) => (
         <p key={`${m.path}-${i}`} className="text-xs text-muted-foreground">
