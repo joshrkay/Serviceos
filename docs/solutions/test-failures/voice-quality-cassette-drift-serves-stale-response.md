@@ -84,6 +84,21 @@ phrase the current resolver can parse into the golden slots
 (`2026-05-13T21:00:00Z` / `23:00:00Z`). No production code changes; the fix is
 test-fixture data brought back in sync with the mock contract.
 
+## Update (2026-07-17) — the drift fallback is now STRICT-BY-DEFAULT
+The silent-fallback hazard described below is now closed at the source. Since
+this change, `CassetteLLMGateway.replay()` **throws on a hash miss by default**
+with an actionable message ("cassette drift … run `npm run
+voice-quality:refresh`"). The loose `(schema, system-prompt first-sentence,
+last-user-message)` fallback is **opt-in**: set
+`VOICE_QUALITY_ALLOW_CASSETTE_FALLBACK=1` (or pass `allowFallback: true` to the
+gateway) to restore the old behavior for local iteration. A green Layer-1 gate
+therefore once again PROVES cassettes match the current prompts — drift can no
+longer hide behind the fallback. The full 58/40-script corpus re-verified
+**green under strict mode with zero drift** at the time of this change, so no
+re-record was needed. If a future prompt edit turns the gate red with a
+`cassette drift` throw, the fix is unchanged: re-record offline via
+`voice-quality:refresh` (deterministic mock, no API key).
+
 ## Prevention
 - **Treat the drift fallback as a safety net, not a baseline.** It returns a
   recorded response by user-content match even when the system prompt changed.

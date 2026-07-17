@@ -43,6 +43,7 @@
 import { createHash } from 'crypto';
 import { z } from 'zod';
 import type { LLMGateway } from '../../gateway/gateway';
+import { SYSTEM_TENANT_ID } from '../../gateway/gateway';
 import type { Observation } from '../observation';
 import type { VoiceQualityScript } from '../schema';
 import type { Proposal } from '../../../proposals/proposal';
@@ -259,6 +260,10 @@ async function callJudge(
 ): Promise<JudgeResponse> {
   const response = await gateway.complete({
     taskType: 'voice_quality_judge',
+    // voice_quality_judge is tenant-scoped; the gateway enforces a top-level
+    // tenantId in strict (test/CI) mode. The judge is a harness-internal grader
+    // with no real tenant, so it uses the shared system tenant bucket.
+    tenantId: SYSTEM_TENANT_ID,
     messages: [
       { role: 'system', content: JUDGE_SYSTEM },
       { role: 'user', content: buildUserPrompt(input) },

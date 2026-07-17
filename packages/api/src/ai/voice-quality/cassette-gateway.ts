@@ -102,6 +102,33 @@ export interface CassetteLLMGatewayOptions {
   realGateway?: LLMGateway;
   /** Defaults to 'v1'. */
   rubricVersion?: string;
+  /**
+   * Opt-in for the loose drift fallback on a replay hash miss. When false
+   * (the default), a hash miss is a HARD FAILURE with an actionable message
+   * — a green gate then actually proves cassettes match the current prompts.
+   * When true, a hash miss falls back to a (schema, system-prompt
+   * first-sentence, last-user-message) match and serves the recorded response
+   * (the pre-strict behavior, useful for local iteration). Defaults to
+   * {@link cassetteFallbackAllowedFromEnv} (`VOICE_QUALITY_ALLOW_CASSETTE_FALLBACK=1`).
+   */
+  allowFallback?: boolean;
+}
+
+/**
+ * Reads `VOICE_QUALITY_ALLOW_CASSETTE_FALLBACK` from the environment. When set
+ * to `1`/`true`, a replay hash miss may fall back to the loose drift match
+ * (the pre-strict behavior). Default (unset) is strict: a hash miss throws.
+ *
+ * Rationale: since `a6a480cb` the loose fallback silently served the recorded
+ * response on any hash miss, so a green Layer-1 gate no longer proved cassettes
+ * matched the current prompts (a changed response contract could serve a stale,
+ * wrong response). Making the fallback opt-in restores "green gate ⇒ cassettes
+ * in sync"; local iteration re-enables it explicitly. See
+ * docs/solutions/test-failures/voice-quality-cassette-drift-serves-stale-response.md.
+ */
+export function cassetteFallbackAllowedFromEnv(): boolean {
+  const raw = process.env.VOICE_QUALITY_ALLOW_CASSETTE_FALLBACK;
+  return raw === '1' || raw === 'true';
 }
 
 const CASSETTE_VERSION = 1;
@@ -135,6 +162,7 @@ export class CassetteLLMGateway extends LLMGateway {
   private readonly mode: CassetteMode;
   private readonly realGateway?: LLMGateway;
   private readonly rubricVersion: string;
+  private readonly allowFallback: boolean;
   /** Throttle the drift warning to once per gateway instance. */
   private driftWarned = false;
 
@@ -150,6 +178,7 @@ export class CassetteLLMGateway extends LLMGateway {
     this.mode = opts.mode;
     this.realGateway = opts.realGateway;
     this.rubricVersion = opts.rubricVersion ?? 'v1';
+    this.allowFallback = opts.allowFallback ?? cassetteFallbackAllowedFromEnv();
   }
 
   override async complete(request: LLMRequest): Promise<LLMResponse> {
@@ -177,30 +206,34 @@ export class CassetteLLMGateway extends LLMGateway {
     const entry = cassette.entries.find((e) => e.requestHash === hash);
     if (entry) return entry.response;
 
-    // Hash miss — fall back to a stable signature based on the schema +
-    // last user message. The recorded responses are still correct for
-    // the same user input even after a system-prompt extension (e.g.
-    // adding intents to the classifier rubric), and this lets the CI
-    // gate keep working without an unrecorded LLM round-trip. A full
-    // refresh via VOICE_QUALITY_CASSETTE_MODE=record/refresh remains
-    // the canonical fix.
-    const fallback = this.findFallbackEntry(request, cassette);
-    if (fallback) {
-      if (!this.driftWarned) {
-        this.driftWarned = true;
-        // eslint-disable-next-line no-console
-        console.warn(
-          `cassette drift: scriptId=${this.scriptId} hash=${hash} — ` +
-            `falling back to user-content match. Refresh with ` +
-            `VOICE_QUALITY_CASSETTE_MODE=refresh when convenient.`
-        );
+    // Hash miss. Strict by default (allowFallback=false): a miss is a HARD
+    // FAILURE so a green gate proves cassettes match the current prompts. The
+    // loose drift fallback (schema + system-prompt first-sentence + last-user
+    // message) is opt-in — it silently served the recorded response on ANY
+    // miss, which masks drift and can serve a stale, wrong response after a
+    // response-contract change. Re-enable it only for local iteration via
+    // VOICE_QUALITY_ALLOW_CASSETTE_FALLBACK=1.
+    if (this.allowFallback) {
+      const fallback = this.findFallbackEntry(request, cassette);
+      if (fallback) {
+        if (!this.driftWarned) {
+          this.driftWarned = true;
+          // eslint-disable-next-line no-console
+          console.warn(
+            `cassette drift: scriptId=${this.scriptId} hash=${hash} — ` +
+              `falling back to user-content match (VOICE_QUALITY_ALLOW_CASSETTE_FALLBACK=1). ` +
+              `Refresh with VOICE_QUALITY_CASSETTE_MODE=refresh when convenient.`
+          );
+        }
+        return fallback.response;
       }
-      return fallback.response;
     }
 
     throw new Error(
-      `cassette stale, refresh needed for scriptId=${this.scriptId} requestHash=${hash} ` +
-        `(re-run with VOICE_QUALITY_CASSETTE_MODE=record or refresh)`
+      `cassette drift: scriptId=${this.scriptId} requestHash=${hash} — no entry matches the ` +
+        `current request. The prompt/model likely changed since this cassette was recorded. ` +
+        `Run 'npm run voice-quality:refresh' to re-record (offline; no API key needed). ` +
+        `To tolerate drift locally instead, set VOICE_QUALITY_ALLOW_CASSETTE_FALLBACK=1.`
     );
   }
 
