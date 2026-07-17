@@ -23,6 +23,9 @@ export function mapLineItemRow(row: Record<string, any>): LineItem {
     // not exist on invoice_line_items, so row.pricing_source is undefined
     // there → undefined here, leaving invoice lines untouched).
     pricingSource: row.pricing_source ?? undefined,
+    // EE-4 — frozen image snapshot (estimate_line_items only; the column does
+    // not exist on invoice_line_items → undefined there).
+    imageFileId: row.image_file_id ?? undefined,
   };
 }
 

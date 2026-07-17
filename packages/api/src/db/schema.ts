@@ -6203,6 +6203,13 @@ export const MIGRATIONS = {
   '254_catalog_items_image_file_id': `
     ALTER TABLE catalog_items ADD COLUMN IF NOT EXISTS image_file_id UUID;
   `,
+
+  // EE-4 — the FROZEN image snapshot on an estimate line: the catalog item's
+  // image_file_id at draft/create time, so a later catalog-photo change never
+  // alters an already-sent estimate. Nullable/additive.
+  '255_estimate_line_items_image_file_id': `
+    ALTER TABLE estimate_line_items ADD COLUMN IF NOT EXISTS image_file_id UUID;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

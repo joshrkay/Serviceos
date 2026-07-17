@@ -382,8 +382,8 @@ export class PgEstimateRepository extends PgBaseRepository implements EstimateRe
           id, tenant_id, estimate_id, description, category,
           quantity, unit_price_cents, total_cents, sort_order, taxable,
           group_key, group_label, is_optional, is_default_selected,
-          pricing_source
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+          pricing_source, image_file_id
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
         [
           rowId,
           tenantId,
@@ -403,6 +403,9 @@ export class PgEstimateRepository extends PgBaseRepository implements EstimateRe
           // (set by the catalog resolver). Undefined on legacy/manual
           // creates → SQL NULL → treated as NOT grounded.
           item.pricingSource ?? null,
+          // EE-4 — frozen catalog image snapshot; undefined on manual/legacy
+          // lines → SQL NULL (no image).
+          item.imageFileId ?? null,
         ],
       );
     }
