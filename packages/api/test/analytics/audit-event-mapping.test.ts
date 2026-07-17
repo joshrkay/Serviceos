@@ -233,17 +233,17 @@ describe('broadened domains (jobs / customers / voice / ai)', () => {
 });
 
 describe('remaining domains (catalog / settings / integrations / agreements / feedback / notes / files)', () => {
-  it('catalog: keeps category/unit/price, drops the business name', () => {
+  it('catalog: keeps category/unit/price + has_image, drops the business name', () => {
     const pe = auditEventToProductEvent(
       ev({
         eventType: 'catalog_item.created',
         entityType: 'catalog_item',
-        metadata: { name: 'Premium HVAC Tune-Up', category: 'hvac', unit: 'each', unitPriceCents: 12900 },
+        metadata: { name: 'Premium HVAC Tune-Up', category: 'hvac', unit: 'each', unitPriceCents: 12900, hasImage: true },
       }),
     );
     expect(pe!.name).toBe('catalog_item_created');
     expect(pe!.properties.feature_domain).toBe('catalog');
-    expect(pe!.properties).toMatchObject({ category: 'hvac', unit: 'each', unit_price_cents: 12900 });
+    expect(pe!.properties).toMatchObject({ category: 'hvac', unit: 'each', unit_price_cents: 12900, has_image: true });
     expect(Object.keys(pe!.properties)).not.toContain('name');
     expect(Object.values(pe!.properties)).not.toContain('Premium HVAC Tune-Up');
   });
@@ -334,6 +334,117 @@ describe('remaining domains (catalog / settings / integrations / agreements / fe
     expect(pe!.name).toBe('job_photo_attached');
     expect(pe!.properties.feature_domain).toBe('job');
     expect(pe!.properties.category).toBe('before');
+  });
+});
+
+describe('EE-4 images + EE-1 tiers on the estimate funnel', () => {
+  it('estimate.created forwards image + tier counts (bools/ints only)', () => {
+    const pe = auditEventToProductEvent(
+      ev({
+        eventType: 'estimate.created',
+        entityType: 'estimate',
+        metadata: {
+          lineItemsTotal: 5,
+          lineItemsWithImage: 2,
+          hasTiers: true,
+          tierGroupCount: 1,
+          addonCount: 2,
+        },
+      }),
+    );
+    expect(pe!.name).toBe('estimate_created');
+    expect(pe!.properties.feature_domain).toBe('estimate');
+    expect(pe!.properties).toMatchObject({
+      line_items_total: 5,
+      line_items_with_image: 2,
+      has_tiers: true,
+      tier_group_count: 1,
+      addon_count: 2,
+    });
+  });
+
+  it('a flat, image-less estimate.created emits zeros/false', () => {
+    const pe = auditEventToProductEvent(
+      ev({
+        eventType: 'estimate.created',
+        entityType: 'estimate',
+        metadata: { lineItemsTotal: 3, lineItemsWithImage: 0, hasTiers: false, tierGroupCount: 0, addonCount: 0 },
+      }),
+    );
+    expect(pe!.properties).toMatchObject({
+      line_items_with_image: 0,
+      has_tiers: false,
+      tier_group_count: 0,
+      addon_count: 0,
+    });
+  });
+
+  it('public_estimate.approved forwards image/tier/upsell flags alongside the number/total', () => {
+    const pe = auditEventToProductEvent(
+      ev({
+        eventType: 'public_estimate.approved',
+        entityType: 'estimate',
+        actorRole: 'customer',
+        metadata: {
+          estimateNumber: 'EST-2002',
+          totalCents: 300000,
+          acceptedByName: 'Sam Buyer',
+          hadLineItemImages: true,
+          hadTiers: true,
+          upsoldAboveDefault: true,
+        },
+      }),
+    );
+    expect(pe!.name).toBe('estimate_approved');
+    expect(pe!.properties).toMatchObject({
+      estimate_number: 'EST-2002',
+      total_cents: 300000,
+      had_line_item_images: true,
+      had_tiers: true,
+      upsold_above_default: true,
+    });
+    // PII still never leaks even with the new props present.
+    expect(Object.values(pe!.properties)).not.toContain('Sam Buyer');
+  });
+
+  it('never forwards a file id or URL through the image props (only counts/bools)', () => {
+    // Even if an emitter mistakenly stashed a raw id/url under a non-whitelisted
+    // key, the mapper picks ONLY the named count/bool keys.
+    const pe = auditEventToProductEvent(
+      ev({
+        eventType: 'estimate.created',
+        entityType: 'estimate',
+        metadata: {
+          lineItemsTotal: 1,
+          lineItemsWithImage: 1,
+          imageFileId: '11111111-2222-3333-4444-555555555555',
+          imageUrl: 'https://s3.example.com/signed?token=leak',
+        },
+      }),
+    );
+    expect(pe!.properties.line_items_with_image).toBe(1);
+    const keys = Object.keys(pe!.properties);
+    expect(keys).not.toContain('image_file_id');
+    expect(keys).not.toContain('imageFileId');
+    expect(keys).not.toContain('image_url');
+    const values = Object.values(pe!.properties);
+    expect(values).not.toContain('11111111-2222-3333-4444-555555555555');
+    expect(values).not.toContain('https://s3.example.com/signed?token=leak');
+  });
+
+  it('catalog_item.updated forwards has_image', () => {
+    const pe = auditEventToProductEvent(
+      ev({
+        eventType: 'catalog_item.updated',
+        entityType: 'catalog_item',
+        metadata: { changes: ['imageFileId'], hasImage: true },
+      }),
+    );
+    expect(pe!.name).toBe('catalog_item_updated');
+    expect(pe!.properties.feature_domain).toBe('catalog');
+    expect(pe!.properties.has_image).toBe(true);
+    // the `changes` array (non-primitive) is never forwarded.
+    expect(Object.keys(pe!.properties)).not.toContain('changes');
   });
 });
 

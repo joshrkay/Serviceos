@@ -17,6 +17,7 @@ import {
   InMemoryJobRepository,
 } from '../../src/jobs/job';
 import { InMemorySettingsRepository } from '../../src/settings/settings';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
 import type { FileRepository, StorageProvider } from '../../src/files/file-service';
 
 const TENANT = 'tenant-test-1';
@@ -73,6 +74,7 @@ interface Harness {
   customer: InMemoryCustomerRepository;
   job: InMemoryJobRepository;
   settings: InMemorySettingsRepository;
+  audit: InMemoryAuditRepository;
 }
 
 async function buildHarness(): Promise<Harness> {
@@ -80,6 +82,7 @@ async function buildHarness(): Promise<Harness> {
   const customer = new InMemoryCustomerRepository();
   const job = new InMemoryJobRepository();
   const settings = new InMemorySettingsRepository();
+  const audit = new InMemoryAuditRepository();
 
   await settings.create({
     id: uuidv4(),
@@ -134,9 +137,10 @@ async function buildHarness(): Promise<Harness> {
     customerRepo: customer,
     jobRepo: job,
     settingsRepo: settings,
+    auditRepo: audit,
   });
 
-  return { service, estimate, customer, job, settings };
+  return { service, estimate, customer, job, settings, audit };
 }
 
 describe('PublicEstimateService.getByToken', () => {
@@ -944,6 +948,70 @@ describe('PublicEstimateService — good-better-best selection', () => {
 
     const stored = await h.estimate.findById(TENANT, est.id);
     expect(stored?.acceptedSelection?.sort()).toEqual(['base', 'better']);
+  });
+});
+
+describe('PublicEstimateService — EE-4/EE-1 approve audit metadata (PostHog props)', () => {
+  let h: Harness;
+  beforeEach(async () => {
+    h = await buildHarness();
+  });
+
+  // A tiered estimate whose stored total matches the DEFAULT selection
+  // (base 5000 + good 10000 = 15000) so `upsoldAboveDefault` is meaningful.
+  function tieredEstimate(jobId: string, token: string): Estimate {
+    return makeEstimate(jobId, {
+      viewToken: token,
+      lineItems: [
+        { id: 'base', description: 'Diagnostic', quantity: 1, unitPriceCents: 5000, totalCents: 5000, sortOrder: 0, taxable: true, imageFileId: 'file-hero' },
+        { id: 'good', description: 'Good', quantity: 1, unitPriceCents: 10000, totalCents: 10000, sortOrder: 1, taxable: true, groupKey: 'tier', groupLabel: 'Plan', isOptional: true, isDefaultSelected: true },
+        { id: 'better', description: 'Better', quantity: 1, unitPriceCents: 20000, totalCents: 20000, sortOrder: 2, taxable: true, groupKey: 'tier', groupLabel: 'Plan', isOptional: true },
+      ],
+      totals: { subtotalCents: 15000, taxableSubtotalCents: 15000, discountCents: 0, taxRateBps: 0, taxCents: 0, totalCents: 15000 },
+    });
+  }
+
+  function approvedMeta(): Record<string, unknown> {
+    const ev = h.audit.getAll().find((e) => e.eventType === 'public_estimate.approved');
+    expect(ev).toBeDefined();
+    return ev!.metadata as Record<string, unknown>;
+  }
+
+  it('picking a pricier tier records had_tiers + had_line_item_images + upsold', async () => {
+    const j = (await h.job.findByTenant(TENANT))[0];
+    const est = tieredEstimate(j.id, 'token-upsell-eeeeeeeeeeeeee');
+    await h.estimate.create(est);
+
+    await h.service.approve({ token: est.viewToken!, acceptedByName: 'Sarah', selectedLineItemIds: ['better'] });
+    expect(approvedMeta()).toMatchObject({
+      hadTiers: true,
+      hadLineItemImages: true,
+      upsoldAboveDefault: true,
+    });
+    // the file id is never in the audit metadata (only the boolean).
+    expect(Object.values(approvedMeta())).not.toContain('file-hero');
+  });
+
+  it('picking the default tier records upsoldAboveDefault: false', async () => {
+    const j = (await h.job.findByTenant(TENANT))[0];
+    const est = tieredEstimate(j.id, 'token-default-ffffffffffff');
+    await h.estimate.create(est);
+
+    await h.service.approve({ token: est.viewToken!, acceptedByName: 'Sarah', selectedLineItemIds: ['good'] });
+    expect(approvedMeta()).toMatchObject({ hadTiers: true, upsoldAboveDefault: false });
+  });
+
+  it('a flat, image-less estimate records all EE flags false', async () => {
+    const j = (await h.job.findByTenant(TENANT))[0];
+    const est = makeEstimate(j.id, { viewToken: 'token-flat-gggggggggggggg' });
+    await h.estimate.create(est);
+
+    await h.service.approve({ token: est.viewToken!, acceptedByName: 'Sarah' });
+    expect(approvedMeta()).toMatchObject({
+      hadTiers: false,
+      hadLineItemImages: false,
+      upsoldAboveDefault: false,
+    });
   });
 });
 

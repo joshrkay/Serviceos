@@ -14,6 +14,7 @@ import { FileRepository, StorageProvider } from '../files/file-service';
 import { evaluateDepositRule, deriveDepositStatus, isDepositPayable } from '../jobs/deposit-rule';
 import { ValidationError, NotFoundError, ConflictError } from '../shared/errors';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { estimateApprovedProps } from '../analytics/estimate-event-props';
 import { publicActorFromToken } from '../feedback/feedback-response';
 import type { ConnectAccountResolver } from '../invoices/public-invoice-service';
 
@@ -449,6 +450,14 @@ export class PublicEstimateService {
             totalCents: updated.totals.totalCents,
             ipAddress: input.ip,
             userAgent: input.userAgent,
+            // EE-4 images + EE-1 tiers/upsell: booleans forwarded to PostHog by
+            // the mapper. `upsoldAboveDefault` compares the server-resolved
+            // accepted total to the stored (default-selection) quoted total.
+            ...estimateApprovedProps({
+              lineItems: estimate.lineItems,
+              quotedTotalCents: estimate.totals.totalCents,
+              acceptedTotalCents: acceptedTotals.totalCents,
+            }),
           },
         }),
       );

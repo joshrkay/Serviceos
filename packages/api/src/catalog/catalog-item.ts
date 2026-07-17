@@ -104,6 +104,8 @@ export async function persistCatalogItem(
         category: created.category,
         unit: created.unit,
         unitPriceCents: created.unitPriceCents,
+        // EE-4: price-book photo adoption (boolean only — never the file id).
+        hasImage: Boolean(created.imageFileId),
       },
     });
     await auditRepo.create(event);
@@ -135,7 +137,8 @@ export async function updateCatalogItem(
       eventType: 'catalog_item.updated',
       entityType: 'catalog_item',
       entityId: id,
-      metadata: { changes: Object.keys(updates) },
+      // EE-4: current photo state after the update (boolean only, no file id).
+      metadata: { changes: Object.keys(updates), hasImage: Boolean(updated.imageFileId) },
     });
     await auditRepo.create(event);
   }
