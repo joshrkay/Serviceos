@@ -236,6 +236,86 @@ describe('Postgres integration — invoice_line_items.pricing_source (migration 
     expect(rows[0]?.pricing_source).toBe('catalog');
   });
 
+  it('P1 fix — description-based remove_line_item removes the CORRECT line from a real multi-line invoice', async () => {
+    // Pins the fixed corruption path against real columns: a description
+    // that resolves to a UNIQUE line item must remove exactly that line,
+    // not the first one in the array (the old `splice(undefined, 1)` bug).
+    const seedLines = [
+      buildLineItem(crypto.randomUUID(), 'Diagnostic visit', 1, 12_500, 0, true, 'labor'),
+      buildLineItem(crypto.randomUUID(), 'Replacement filter', 2, 3_500, 1, true, 'material'),
+      buildLineItem(crypto.randomUUID(), 'Trip fee', 1, 5_000, 2, true, 'other'),
+    ];
+    const seedTotals = calculateDocumentTotals(seedLines, 0, 0);
+    const created = await invoiceRepo.create({
+      id: crypto.randomUUID(),
+      tenantId: tenant.tenantId,
+      jobId,
+      invoiceNumber: 'INV-PS-DESC-1',
+      status: 'draft',
+      lineItems: seedLines,
+      totals: seedTotals,
+      amountPaidCents: 0,
+      amountDueCents: seedTotals.totalCents,
+      createdBy: tenant.userId,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    // Target the MIDDLE line by description — if the old bug were still
+    // present this would silently remove "Diagnostic visit" (index 0)
+    // instead.
+    const editActions: InvoiceEditAction[] = [
+      { type: 'remove_line_item', description: 'replacement filter' },
+    ];
+    const { updatedInvoice } = applyInvoiceEdits(created, editActions);
+    await invoiceRepo.update(tenant.tenantId, created.id, {
+      lineItems: updatedInvoice.lineItems,
+      totals: updatedInvoice.totals,
+      amountDueCents: updatedInvoice.amountDueCents,
+      updatedAt: updatedInvoice.updatedAt,
+    });
+
+    const found = await invoiceRepo.findById(tenant.tenantId, created.id);
+    const descriptions = found!.lineItems.map((li) => li.description).sort();
+    expect(descriptions).toEqual(['Diagnostic visit', 'Trip fee']);
+
+    const { rows } = await pool.query(
+      `SELECT description FROM invoice_line_items
+       WHERE invoice_id = $1 AND tenant_id = $2 ORDER BY sort_order`,
+      [created.id, tenant.tenantId],
+    );
+    expect(rows.map((r) => r.description)).toEqual(['Diagnostic visit', 'Trip fee']);
+  });
+
+  it('P1 fix — an ambiguous description throws a clean error and leaves the invoice untouched', async () => {
+    const seedLines = [
+      buildLineItem(crypto.randomUUID(), 'Filter A', 1, 1_000, 0, true, 'material'),
+      buildLineItem(crypto.randomUUID(), 'Filter B', 1, 2_000, 1, true, 'material'),
+    ];
+    const seedTotals = calculateDocumentTotals(seedLines, 0, 0);
+    const created = await invoiceRepo.create({
+      id: crypto.randomUUID(),
+      tenantId: tenant.tenantId,
+      jobId,
+      invoiceNumber: 'INV-PS-DESC-2',
+      status: 'draft',
+      lineItems: seedLines,
+      totals: seedTotals,
+      amountPaidCents: 0,
+      amountDueCents: seedTotals.totalCents,
+      createdBy: tenant.userId,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    const editActions: InvoiceEditAction[] = [{ type: 'remove_line_item', description: 'Filter' }];
+    expect(() => applyInvoiceEdits(created, editActions)).toThrow(/matches 2 line items/i);
+
+    // Untouched in the DB — the throw happened before any write.
+    const found = await invoiceRepo.findById(tenant.tenantId, created.id);
+    expect(found!.lineItems.map((li) => li.description).sort()).toEqual(['Filter A', 'Filter B']);
+  });
+
   it('rejects an out-of-vocabulary pricing_source via the CHECK constraint', async () => {
     await expect(
       pool.query(

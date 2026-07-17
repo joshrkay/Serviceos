@@ -31,6 +31,7 @@ import {
 import { UNCATALOGUED_CONFIDENCE_CAP } from '../../../src/ai/resolution/catalog-resolver';
 import { approveProposal } from '../../../src/proposals/actions';
 import { InMemoryProposalRepository } from '../../../src/proposals/proposal';
+import { updateEstimatePayloadSchema } from '../../../src/proposals/contracts';
 
 function mockGateway(jsonContent: string): LLMGateway {
   return {
@@ -95,6 +96,35 @@ describe('EstimateEditTaskHandler', () => {
     const actions = payload.editActions as Array<Record<string, unknown>>;
     expect(actions[0].type).toBe('remove_line_item');
     expect(actions[0].description).toBe('disposal fee');
+  });
+
+  it('P1 fix — a description-based remove_line_item action is contract-valid (index-or-description)', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({
+        estimateReference: 'EST-0001',
+        editActions: [
+          { type: 'remove_line_item', description: 'disposal fee' },
+          {
+            type: 'update_line_item',
+            description: 'site visit',
+            lineItem: { description: 'Extended site visit', quantity: 1, unitPrice: 20000 },
+          },
+        ],
+        confidence_score: 0.85,
+      })
+    );
+    const handler = new EstimateEditTaskHandler(gateway);
+    const result = await handler.handle({
+      tenantId,
+      userId,
+      message: 'Remove the disposal fee and extend the site visit on EST-0001',
+    });
+    const payload = result.proposal.payload as Record<string, unknown>;
+    const parsed = updateEstimatePayloadSchema.safeParse({
+      estimateId: '00000000-0000-4000-8000-000000000001',
+      editActions: payload.editActions,
+    });
+    expect(parsed.success).toBe(true);
   });
 
   it('supports chained edits', async () => {

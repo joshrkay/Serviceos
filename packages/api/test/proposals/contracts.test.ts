@@ -10,6 +10,8 @@ import {
   draftEstimatePayloadSchema,
   updateCustomerPayloadSchema,
   updateEstimatePayloadSchema,
+  invoiceEditActionSchema,
+  estimateEditActionSchema,
 } from '../../src/proposals/contracts';
 import { ValidationError } from '../../src/shared/errors';
 
@@ -112,6 +114,100 @@ describe('P2-002 — Typed proposal contracts', () => {
     });
     expect(result.valid).toBe(true);
     expect(result.errors).toBeUndefined();
+  });
+
+  // P1 fix — remove_line_item/update_line_item must accept EITHER a
+  // numeric index OR a free-text description (the edit-task LLM prompt
+  // emits description-only actions; see
+  // ai/tasks/invoice-edit-task.ts / estimate-edit-task.ts), but reject a
+  // payload that carries neither — the exact shape that used to reach
+  // the editor as `action.index === undefined` and silently corrupt the
+  // first line item.
+  describe('invoiceEditActionSchema / estimateEditActionSchema — index-or-description', () => {
+    it('invoice: index-only remove_line_item is valid', () => {
+      expect(invoiceEditActionSchema.safeParse({ type: 'remove_line_item', index: 0 }).success).toBe(
+        true,
+      );
+    });
+
+    it('invoice: description-only remove_line_item is valid', () => {
+      expect(
+        invoiceEditActionSchema.safeParse({ type: 'remove_line_item', description: 'gasket' }).success,
+      ).toBe(true);
+    });
+
+    it('invoice: remove_line_item with neither index nor description is invalid', () => {
+      expect(invoiceEditActionSchema.safeParse({ type: 'remove_line_item' }).success).toBe(false);
+    });
+
+    it('invoice: update_line_item with neither index nor description is invalid', () => {
+      expect(
+        invoiceEditActionSchema.safeParse({
+          type: 'update_line_item',
+          lineItem: { description: 'Gasket', quantity: 1, unitPrice: 450 },
+        }).success,
+      ).toBe(false);
+    });
+
+    it('invoice: update_line_item with description (no index) is valid', () => {
+      expect(
+        invoiceEditActionSchema.safeParse({
+          type: 'update_line_item',
+          description: 'gasket',
+          lineItem: { description: 'Gasket', quantity: 1, unitPrice: 450 },
+        }).success,
+      ).toBe(true);
+    });
+
+    it('estimate: index-only remove_line_item is valid', () => {
+      expect(
+        estimateEditActionSchema.safeParse({ type: 'remove_line_item', index: 0 }).success,
+      ).toBe(true);
+    });
+
+    it('estimate: description-only remove_line_item is valid', () => {
+      expect(
+        estimateEditActionSchema.safeParse({ type: 'remove_line_item', description: 'disposal fee' })
+          .success,
+      ).toBe(true);
+    });
+
+    it('estimate: remove_line_item with neither index nor description is invalid', () => {
+      expect(estimateEditActionSchema.safeParse({ type: 'remove_line_item' }).success).toBe(false);
+    });
+
+    it('estimate: update_line_item with neither index nor description is invalid', () => {
+      expect(
+        estimateEditActionSchema.safeParse({
+          type: 'update_line_item',
+          lineItem: { description: 'Tankless heater', quantity: 1, unitPrice: 145000 },
+        }).success,
+      ).toBe(false);
+    });
+
+    it('add_line_item never requires index or description', () => {
+      expect(
+        invoiceEditActionSchema.safeParse({
+          type: 'add_line_item',
+          lineItem: { description: 'Trip fee', quantity: 1, unitPrice: 7500 },
+        }).success,
+      ).toBe(true);
+      expect(
+        estimateEditActionSchema.safeParse({
+          type: 'add_line_item',
+          lineItem: { description: 'Trip fee', quantity: 1, unitPrice: 7500 },
+        }).success,
+      ).toBe(true);
+    });
+
+    it('update_estimate payload with a description-based remove_line_item validates end to end', () => {
+      const result = validateProposalPayload('update_estimate', {
+        estimateId: validEstimateId,
+        editActions: [{ type: 'remove_line_item', description: 'disposal fee' }],
+      });
+      expect(result.valid).toBe(true);
+      expect(result.errors).toBeUndefined();
+    });
   });
 
   it('validation — rejects invalid create_customer payload', () => {

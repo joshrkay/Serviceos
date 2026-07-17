@@ -219,25 +219,42 @@ export const draftEstimatePayloadSchema = z.object({
   validUntil: z.string().optional(),
 });
 
-// Edit-action schema for update_estimate proposals. Same discriminated
-// union shape as invoiceEditActionSchema below. Voice-driven estimate
-// edits = add / remove / update a single line item; notes/wording edits
-// stay at draft_estimate creation time.
-export const estimateEditActionSchema = z.discriminatedUnion('type', [
-  z.object({
-    type: z.literal('add_line_item'),
-    lineItem: lineItemSchema,
-  }),
-  z.object({
-    type: z.literal('remove_line_item'),
-    index: z.number().int().min(0),
-  }),
-  z.object({
-    type: z.literal('update_line_item'),
-    index: z.number().int().min(0),
-    lineItem: lineItemSchema,
-  }),
-]);
+// remove_line_item / update_line_item target an existing line item by
+// EITHER a numeric index (preferred, e.g. a re-draft carrying a prior
+// resolution) OR a free-text description (what the edit-task LLM prompt
+// actually emits — see ai/tasks/estimate-edit-task.ts). At least one is
+// required; estimates/estimate-editor.ts's resolveActionIndex resolves
+// whichever is present to a concrete index (or throws a clear execution
+// error — no silent guessing). Note: z.discriminatedUnion requires each
+// branch to be a plain ZodObject (not a `.and()`/`.refine()`-wrapped
+// schema — that breaks its discriminant introspection), so the
+// index-or-description invariant is enforced with a `.refine` on the
+// FINISHED union below rather than folded into each branch.
+export const estimateEditActionSchema = z
+  .discriminatedUnion('type', [
+    z.object({
+      type: z.literal('add_line_item'),
+      lineItem: lineItemSchema,
+    }),
+    z.object({
+      type: z.literal('remove_line_item'),
+      index: z.number().int().min(0).optional(),
+      description: z.string().min(1).optional(),
+    }),
+    z.object({
+      type: z.literal('update_line_item'),
+      index: z.number().int().min(0).optional(),
+      description: z.string().min(1).optional(),
+      lineItem: lineItemSchema,
+    }),
+  ])
+  .refine(
+    (action) =>
+      action.type === 'add_line_item' ||
+      action.index !== undefined ||
+      action.description !== undefined,
+    { message: 'remove_line_item/update_line_item requires index or description' }
+  );
 
 export const updateEstimatePayloadSchema = z.object({
   estimateId: z.string().uuid(),
@@ -261,21 +278,34 @@ export const draftInvoicePayloadSchema = z.object({
 // voice flows only add, remove, or replace a line item. Notes/wording
 // edits are out of scope for this iteration — the draft_invoice path
 // still owns those at creation time.
-export const invoiceEditActionSchema = z.discriminatedUnion('type', [
-  z.object({
-    type: z.literal('add_line_item'),
-    lineItem: lineItemSchema,
-  }),
-  z.object({
-    type: z.literal('remove_line_item'),
-    index: z.number().int().min(0),
-  }),
-  z.object({
-    type: z.literal('update_line_item'),
-    index: z.number().int().min(0),
-    lineItem: lineItemSchema,
-  }),
-]);
+// See estimateEditActionSchema above for why the index-or-description
+// invariant is a `.refine` on the finished union rather than folded into
+// each discriminatedUnion branch.
+export const invoiceEditActionSchema = z
+  .discriminatedUnion('type', [
+    z.object({
+      type: z.literal('add_line_item'),
+      lineItem: lineItemSchema,
+    }),
+    z.object({
+      type: z.literal('remove_line_item'),
+      index: z.number().int().min(0).optional(),
+      description: z.string().min(1).optional(),
+    }),
+    z.object({
+      type: z.literal('update_line_item'),
+      index: z.number().int().min(0).optional(),
+      description: z.string().min(1).optional(),
+      lineItem: lineItemSchema,
+    }),
+  ])
+  .refine(
+    (action) =>
+      action.type === 'add_line_item' ||
+      action.index !== undefined ||
+      action.description !== undefined,
+    { message: 'remove_line_item/update_line_item requires index or description' }
+  );
 
 export const updateInvoicePayloadSchema = z.object({
   invoiceId: z.string().uuid(),

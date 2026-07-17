@@ -117,6 +117,112 @@ describe('applyInvoiceEdits — remove_line_item', () => {
   });
 });
 
+// P1 data-corruption regression — the LLM edit-task prompt
+// (ai/tasks/invoice-edit-task.ts) has always emitted description-based
+// remove_line_item/update_line_item actions with NO numeric index. The
+// old range guard (`index < 0 || index >= length`) let `undefined`
+// through both comparisons (both are `false` for `undefined`), so
+// `lineItems.splice(undefined, 1)` silently coerced to `splice(0, 1)` —
+// deleting the FIRST line item instead of the one the operator named.
+describe('applyInvoiceEdits — index-or-description resolution', () => {
+  it('CORRUPTION REGRESSION: an undefined index throws instead of silently removing the first line item', () => {
+    const invoice = makeInvoice();
+    expect(() =>
+      applyInvoiceEdits(invoice, [{ type: 'remove_line_item', index: undefined as unknown as number }])
+    ).toThrow(ValidationError);
+    // Original invoice must be completely untouched — no mutation, no
+    // partial splice, before the throw.
+    expect(invoice.lineItems).toHaveLength(2);
+    expect(invoice.lineItems[0].description).toBe('Diagnostic visit');
+    expect(invoice.lineItems[1].description).toBe('Replacement filter');
+  });
+
+  it('CORRUPTION REGRESSION: a non-integer index (NaN) throws instead of coercing', () => {
+    const invoice = makeInvoice();
+    expect(() =>
+      applyInvoiceEdits(invoice, [{ type: 'remove_line_item', index: NaN }])
+    ).toThrow(ValidationError);
+    expect(invoice.lineItems).toHaveLength(2);
+  });
+
+  it('CORRUPTION REGRESSION: a float index throws instead of truncating', () => {
+    const invoice = makeInvoice();
+    expect(() =>
+      applyInvoiceEdits(invoice, [{ type: 'update_line_item', index: 0.5, lineItem: { description: 'x', quantity: 1, unitPrice: 100 } }])
+    ).toThrow(ValidationError);
+    expect(invoice.lineItems).toHaveLength(2);
+  });
+
+  it('remove_line_item with neither index nor description throws a clear error, not a silent first-item removal', () => {
+    const invoice = makeInvoice();
+    expect(() =>
+      applyInvoiceEdits(invoice, [{ type: 'remove_line_item' } as InvoiceEditAction])
+    ).toThrow(/numeric index or a description/i);
+    expect(invoice.lineItems).toHaveLength(2);
+  });
+
+  it('description resolves to the unique matching line item (remove)', () => {
+    const invoice = makeInvoice();
+    const { updatedInvoice } = applyInvoiceEdits(invoice, [
+      { type: 'remove_line_item', description: 'Diagnostic visit' },
+    ]);
+    expect(updatedInvoice.lineItems).toHaveLength(1);
+    expect(updatedInvoice.lineItems[0].description).toBe('Replacement filter');
+  });
+
+  it('description resolves case-insensitively and via substring match (remove)', () => {
+    const invoice = makeInvoice();
+    const { updatedInvoice } = applyInvoiceEdits(invoice, [
+      { type: 'remove_line_item', description: 'diagnostic' },
+    ]);
+    expect(updatedInvoice.lineItems).toHaveLength(1);
+    expect(updatedInvoice.lineItems[0].description).toBe('Replacement filter');
+  });
+
+  it('description resolves to the unique matching line item (update)', () => {
+    const invoice = makeInvoice();
+    const originalId = invoice.lineItems[0].id;
+    const { updatedInvoice } = applyInvoiceEdits(invoice, [
+      {
+        type: 'update_line_item',
+        description: 'diagnostic visit',
+        lineItem: { description: 'Extended diagnostic', quantity: 1, unitPrice: 15000, category: 'labor' },
+      },
+    ]);
+    expect(updatedInvoice.lineItems[0].id).toBe(originalId);
+    expect(updatedInvoice.lineItems[0].description).toBe('Extended diagnostic');
+    expect(updatedInvoice.lineItems[1].description).toBe('Replacement filter');
+  });
+
+  it('description with zero matches throws a clear "no line item matching" error', () => {
+    const invoice = makeInvoice();
+    expect(() =>
+      applyInvoiceEdits(invoice, [{ type: 'remove_line_item', description: 'nonexistent widget' }])
+    ).toThrow(/no line item matching/i);
+    expect(invoice.lineItems).toHaveLength(2);
+  });
+
+  it('description with 2+ matches throws an ambiguity error instead of guessing', () => {
+    const invoice = makeInvoice({
+      lineItems: [
+        buildLineItem('li-1', 'Filter A', 1, 1000, 0, true, 'material'),
+        buildLineItem('li-2', 'Filter B', 1, 2000, 1, true, 'material'),
+      ],
+    });
+    expect(() =>
+      applyInvoiceEdits(invoice, [{ type: 'remove_line_item', description: 'Filter' }])
+    ).toThrow(/matches 2 line items/i);
+    expect(invoice.lineItems).toHaveLength(2);
+  });
+
+  it('numeric index still works (backward compat) even though description is now also supported', () => {
+    const invoice = makeInvoice();
+    const { updatedInvoice } = applyInvoiceEdits(invoice, [{ type: 'remove_line_item', index: 0 }]);
+    expect(updatedInvoice.lineItems).toHaveLength(1);
+    expect(updatedInvoice.lineItems[0].description).toBe('Replacement filter');
+  });
+});
+
 describe('applyInvoiceEdits — update_line_item', () => {
   it('replaces a line item and keeps its id', () => {
     const invoice = makeInvoice();

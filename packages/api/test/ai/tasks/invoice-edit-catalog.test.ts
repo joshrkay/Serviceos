@@ -239,6 +239,52 @@ describe('P22-001 invoice-edit-catalog', () => {
     expect(parsed.success).toBe(true);
   });
 
+  it('P1 fix — a description-based remove/update action survives grounding untouched and is contract-valid', async () => {
+    const repo = new InMemoryCatalogItemRepository();
+    await seedCatalog(repo, TENANT, [{ name: 'Gasket', unitPriceCents: 450 }]);
+
+    const gateway = mockGateway(
+      editResponse([
+        { type: 'remove_line_item', description: 'plumbing repair' },
+        {
+          type: 'update_line_item',
+          description: 'diagnostic',
+          lineItem: { description: 'gasket', quantity: 1, unitPrice: 470 },
+        },
+      ]),
+    );
+
+    const handler = new InvoiceEditTaskHandler(gateway, { catalogRepo: repo });
+    const result = await handler.handle({
+      tenantId: TENANT,
+      userId: 'u-1',
+      message: 'Remove the plumbing repair and change the diagnostic to a gasket on INV-0042',
+    });
+
+    const payload = result.proposal.payload as { editActions: Array<Record<string, unknown>> };
+
+    // remove_line_item is untouched by grounding (no lineItem to price) —
+    // the description passes straight through, no index fabricated.
+    expect(payload.editActions[0]).toEqual({ type: 'remove_line_item', description: 'plumbing repair' });
+
+    // update_line_item keeps its description target AND gets its price
+    // grounded exactly like an add_line_item would.
+    const updateAction = payload.editActions[1] as Record<string, unknown>;
+    expect(updateAction.description).toBe('diagnostic');
+    expect(updateAction.index).toBeUndefined();
+    const updatedLine = updateAction.lineItem as Record<string, unknown>;
+    expect(updatedLine.unitPrice).toBe(450); // catalog-snapped
+    expect(updatedLine.pricingSource).toBe('catalog');
+
+    // The whole payload validates against the update_invoice Zod contract
+    // now that index-or-description is allowed.
+    const parsed = updateInvoicePayloadSchema.safeParse({
+      invoiceId: '00000000-0000-4000-8000-000000000001',
+      editActions: payload.editActions,
+    });
+    expect(parsed.success).toBe(true);
+  });
+
   it('flags an empty catalog as uncatalogued and hard-blocks auto-approve (VOX-51)', async () => {
     const repo = new InMemoryCatalogItemRepository();
     const gateway = mockGateway(
