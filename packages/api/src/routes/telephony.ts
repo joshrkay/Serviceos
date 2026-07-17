@@ -542,7 +542,13 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
     const body = req.body as Record<string, string | undefined>;
     const callSid = body.CallSid ?? '';
     const speechResult = body.SpeechResult ?? '';
-    const confidence = body.Confidence ? Number(body.Confidence) : 0;
+    // A3 — Twilio omits `Confidence` when it has no opinion (e.g. very
+    // short/silent utterances); that must read as "no signal", NOT as a
+    // confidently-zero score — a `0` here fed into the low-confidence gate
+    // would reprompt every such turn. `undefined` flows through as HIGH
+    // confidence (never blocks a turn on absent data) per handleGather's
+    // acoustic-confidence gate.
+    const confidence = body.Confidence ? Number(body.Confidence) : undefined;
 
     const sessionId = (req.query.sid as string | undefined) ?? '';
     if (!sessionId) {
@@ -583,7 +589,7 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
         sessionId,
         callSid,
         speechResult,
-        confidence: Number.isFinite(confidence) ? confidence : 0,
+        confidence: confidence !== undefined && Number.isFinite(confidence) ? confidence : undefined,
         tenantId,
       });
       res.status(200).type('text/xml').send(twiml);

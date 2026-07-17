@@ -268,7 +268,15 @@ export type VoiceErrorKind =
   | 'tts_stream_recovered'
   // The voice-action-router worker failed to turn a transcript into a
   // proposal (classifier/dispatch/persist throw); the queue will retry.
-  | 'action_router_failed';
+  | 'action_router_failed'
+  // A3 — a FINAL transcript's STT acoustic confidence (Deepgram
+  // `confidence` / Twilio Gather `Confidence`) came back below
+  // VOICE_MIN_STT_CONFIDENCE; the caller was reprompted instead of the
+  // turn being dispatched.
+  | 'low_stt_confidence'
+  // A3 — MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS back-to-back low-confidence
+  // finals; the caller was handed off gracefully instead of being looped.
+  | 'low_stt_confidence_repeated';
 
 /** Which transport/surface the voice error occurred on. */
 export type VoiceErrorChannel = 'media_streams' | 'gather' | 'worker';

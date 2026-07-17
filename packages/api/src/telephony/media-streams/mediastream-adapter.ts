@@ -69,6 +69,7 @@ import {
   LANGUAGE_SWITCH_ACK,
   SPEECH_TURN_FAILURE_REPROMPT_COPY,
   SPEECH_TURN_FAILURE_ESCALATION_COPY,
+  LOW_STT_CONFIDENCE_REPROMPT_COPY,
   type SessionLanguage,
 } from '../../ai/agents/customer-calling/tts-copy';
 import { detectEmergency } from '../../ai/agents/customer-calling/emergency-detector';
@@ -407,6 +408,44 @@ const MAX_LANGUAGE_SWITCHES_PER_CALL = 2;
  */
 const MAX_CONSECUTIVE_SPEECH_TURN_FAILURES = 2;
 
+/**
+ * A3 — minimum Deepgram acoustic `confidence` (0..1, on FINAL transcripts
+ * only) the adapter requires before treating a transcript as heard correctly
+ * and dispatching it into the FSM. Below this, the turn is NOT dispatched —
+ * the caller is asked to repeat instead (see {@link LOW_STT_CONFIDENCE_REPROMPT_COPY}).
+ * A misheard turn acted on as if correct is worse than one extra reprompt
+ * (e.g. "cancel" dispatched from a misheard "confirm").
+ *
+ * 0.5 is a conservative default: Deepgram Nova-3's acoustic confidence for
+ * ordinary, clearly-heard speech is typically well above 0.7-0.8, while a
+ * genuinely garbled/crosstalk/very-noisy-line utterance tends to fall well
+ * below 0.5. A conservative (low) floor means we mostly catch the clearly-bad
+ * tail rather than second-guessing ordinary accented or slightly-quiet audio.
+ * Env-overridable per deployment (e.g. a noisier vertical may want it lower).
+ * Invalid/out-of-range overrides fall back to the default rather than
+ * disabling or over-triggering the gate.
+ */
+// Exported (not just module-local) so the Gather/PSTN fallback adapter
+// (twilio-adapter.ts `_handleGatherLocked`) gates Twilio's `Confidence` field
+// against the SAME threshold and cap as the media-streams/Deepgram path —
+// one env var, one number, for both surfaces.
+export const MIN_STT_CONFIDENCE = ((): number => {
+  const raw = process.env.VOICE_MIN_STT_CONFIDENCE;
+  if (raw === undefined) return 0.5;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 && parsed <= 1 ? parsed : 0.5;
+})();
+
+/**
+ * A3 — after this many CONSECUTIVE low-acoustic-confidence finals the
+ * adapter stops reprompting and hands the caller off gracefully, mirroring
+ * {@link MAX_CONSECUTIVE_SPEECH_TURN_FAILURES}: a caller on a persistently
+ * noisy/unintelligible line should not be trapped in a "could you repeat
+ * that" loop forever. Exported for the same cross-surface reason as
+ * {@link MIN_STT_CONFIDENCE}.
+ */
+export const MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS = 2;
+
 interface RuntimeState {
   ws: WsLike;
   streamSid: string | null;
@@ -566,6 +605,15 @@ interface RuntimeState {
    * pipeline can't trap the caller in an apology loop. Init 0.
    */
   consecutiveSpeechTurnFailures: number;
+  /**
+   * A3 — number of CONSECUTIVE FINAL transcripts on this leg whose Deepgram
+   * acoustic `confidence` fell below {@link MIN_STT_CONFIDENCE}. Bumped each
+   * time a final is reprompted instead of dispatched; reset to 0 by any
+   * dispatched (high-enough-confidence, or confidence-absent) turn. When it
+   * reaches {@link MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS} the adapter hands
+   * off gracefully instead of reprompting again. Init 0.
+   */
+  consecutiveLowConfidenceTurns: number;
 }
 
 const TWILIO_QUEUE_MAX_MSGS = 200;
@@ -702,6 +750,7 @@ export class TwilioMediaStreamAdapter {
       firstFinalLanguageChecked: false,
       circuitRecorded: false,
       consecutiveSpeechTurnFailures: 0,
+      consecutiveLowConfidenceTurns: 0,
     };
   }
 
@@ -1152,6 +1201,32 @@ export class TwilioMediaStreamAdapter {
     // language. Does NOT consume the turn.
     await this.maybeRunFirstFinalLanguageDetection(event.transcript);
 
+    // A3 — low acoustic STT confidence gate. Runs AFTER the life-safety
+    // (interim emergency scan, above) and explicit-language-switch checks —
+    // neither must ever be suppressed by a shaky confidence score — but
+    // BEFORE the turn is dispatched into the FSM. A FINAL Deepgram
+    // transcript whose acoustic `confidence` is below MIN_STT_CONFIDENCE is
+    // likely mis-heard; dispatching it risks acting on the WRONG intent
+    // (e.g. "cancel" dispatched from a misheard "confirm"), so it is
+    // reprompted instead. `confidence` is non-optional on
+    // StreamingTranscriptEvent and DeepgramStreamingProvider always supplies
+    // a number (defaulting to 1 when Deepgram omits it — see
+    // transcription-providers.ts), but the check is still defensive: a
+    // missing/non-finite value is treated as HIGH so it can never block a
+    // turn on absent data (requirement: never block on absent confidence).
+    if (
+      typeof event.confidence === 'number' &&
+      Number.isFinite(event.confidence) &&
+      event.confidence < MIN_STT_CONFIDENCE
+    ) {
+      await this.recoverFromLowSttConfidence(session);
+      return;
+    }
+    // A dispatched (high-confidence, or confidence-absent) final resets the
+    // low-confidence streak — mirrors consecutiveSpeechTurnFailures being
+    // cleared after a successful turn below.
+    this.state.consecutiveLowConfidenceTurns = 0;
+
     // VQ2-004: TTFA-start. Stamp the moment the STT provider returned a
     // final transcript on the session bus and arm the per-turn
     // first-frame guard so the next outbound chunk emits
@@ -1378,19 +1453,87 @@ export class TwilioMediaStreamAdapter {
    * `end_session` effect is stashed so `finalizeOnClose` reads its
    * `payload.reason` (system_failure:* → `failed` outcome) exactly as it would
    * for an FSM-emitted end_session.
+   *
+   * A3 reuses this exact hand-off (speak the escalation line, stash a
+   * synthetic `end_session`, close) for repeated low-STT-confidence turns —
+   * same graceful-hand-off shape, different root cause — so it takes an
+   * optional `endSessionReason` to keep `voice_sessions.terminal_reason`
+   * accurate for each caller rather than mislabeling a noisy-line hand-off
+   * as a pipeline failure. `deriveCallOutcome` doesn't special-case either
+   * string beyond the shared `system_failure:` prefix check (which neither
+   * of these calls exercises — finalState here is never `escalating`), so
+   * both fall through to the same `failed` outcome; the string only affects
+   * the persisted reason.
    */
   private async speakAndEndAfterRepeatedSpeechTurnFailures(
     session: VoiceSession,
+    endSessionReason: string = 'system_failure:speech_turn_repeated_failure',
   ): Promise<void> {
     await this.speakRecoveryLine(session, SPEECH_TURN_FAILURE_ESCALATION_COPY);
     if (this.state.closed) return;
     this.state.pendingFinalizeEffects = [
       {
         type: 'end_session',
-        payload: { reason: 'system_failure:speech_turn_repeated_failure' },
+        payload: { reason: endSessionReason },
       },
     ];
     this.handleClose('end_session');
+  }
+
+  /**
+   * A3 — recover a FINAL transcript whose Deepgram acoustic `confidence`
+   * came back below {@link MIN_STT_CONFIDENCE}. Unlike
+   * {@link recoverFromSpeechTurnFailure} (the turn PIPELINE threw), here the
+   * pipeline is healthy but the STT engine itself flagged the audio as
+   * likely mis-heard — dispatching it risks acting on the WRONG intent
+   * (e.g. "cancel" dispatched from a misheard "confirm").
+   *
+   * Streak 1 (and any isolated blip): speak a distinct, language-aware
+   * "didn't catch that" reprompt ({@link LOW_STT_CONFIDENCE_REPROMPT_COPY})
+   * through the SAME outbound-turn path VOX-35c uses
+   * ({@link speakRecoveryLine}) — barge-in/TTFA/transcript bookkeeping
+   * behave identically to any other agent line.
+   *
+   * Streak {@link MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS} (back-to-back): the
+   * line itself is the problem (noisy/crosstalk/bad connection), not a
+   * one-off blip — stop reprompting and hand off through the SAME
+   * escalation/`end_session` path VOX-35c uses for a persistently broken
+   * turn pipeline ({@link speakAndEndAfterRepeatedSpeechTurnFailures}),
+   * rather than trapping the caller in a "could you repeat that" loop.
+   *
+   * The streak is bumped here and reset to 0 by any dispatched
+   * (high-confidence, or confidence-absent) final.
+   */
+  private async recoverFromLowSttConfidence(session: VoiceSession): Promise<void> {
+    this.state.consecutiveLowConfidenceTurns += 1;
+
+    if (
+      this.state.consecutiveLowConfidenceTurns >= MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS
+    ) {
+      await this.speakAndEndAfterRepeatedSpeechTurnFailures(
+        session,
+        'low_stt_confidence_max_retries',
+      );
+      // OBS — fired after the hand-off is spoken/the call is torn down;
+      // never alters the recovery behavior above.
+      recordVoiceError({
+        errorKind: 'low_stt_confidence_repeated',
+        channel: 'media_streams',
+        callSid: this.state.callSid,
+        tenantId: this.state.tenantId,
+      });
+      return;
+    }
+
+    await this.speakRecoveryLine(session, LOW_STT_CONFIDENCE_REPROMPT_COPY);
+    // OBS — fired after the reprompt is spoken; never alters the recovery
+    // behavior above.
+    recordVoiceError({
+      errorKind: 'low_stt_confidence',
+      channel: 'media_streams',
+      callSid: this.state.callSid,
+      tenantId: this.state.tenantId,
+    });
   }
 
   /**

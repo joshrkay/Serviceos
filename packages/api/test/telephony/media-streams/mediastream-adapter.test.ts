@@ -37,6 +37,7 @@ import {
   renderTtsText,
   SPEECH_TURN_FAILURE_REPROMPT_COPY,
   SPEECH_TURN_FAILURE_ESCALATION_COPY,
+  LOW_STT_CONFIDENCE_REPROMPT_COPY,
 } from '../../../src/ai/agents/customer-calling/tts-copy';
 import type { SideEffect, EscalateWithContextPayload } from '../../../src/ai/agents/customer-calling/types';
 import { escalateWithContextPayloadSchema } from '../../../src/ai/agents/customer-calling/types';
@@ -2445,5 +2446,216 @@ describe('VOX-35c speechTurn-failure recovery', () => {
     expect(clearFrames.length).toBeGreaterThanOrEqual(1);
     const mediaFrames = ws.sent.filter((m) => (m as Record<string, unknown>).event === 'media');
     expect(mediaFrames.length).toBe(0);
+  });
+});
+
+// ─── A3 — low acoustic STT confidence gate ─────────────────────────────────
+//
+// Before this fix, Deepgram's `confidence` on a FINAL transcript was received
+// and completely ignored — a mumbled/misheard turn was dispatched into the
+// FSM exactly like a clean one. These pins assert the gate: a low-confidence
+// final is reprompted (not dispatched), the reprompt is localized, the
+// consecutive-low-confidence streak resets on a good turn, repeated low
+// confidence hands the caller off gracefully instead of looping, and a
+// missing confidence value is never treated as low.
+describe('A3 low acoustic STT confidence gate', () => {
+  /** TTS double that records the (already-localized) text handed to synthesize. */
+  function makeCapturingTts(): { tts: TtsProvider; texts: string[] } {
+    const texts: string[] = [];
+    const tts: TtsProvider = {
+      synthesize: vi.fn(async (input: TtsSynthesizeInput): Promise<TtsSynthesizeResult> => {
+        texts.push(input.text);
+        return { audio: Buffer.alloc(640), contentType: 'audio/pcm', provider: 'test' };
+      }),
+    };
+    return { tts, texts };
+  }
+
+  it('a low-confidence final is reprompted (localized), not dispatched as a speechTurn', async () => {
+    store.create('t', 'telephony', { callSid: 'CA-lowconf-1' });
+    const ws = new FakeWs();
+    const { provider, handle } = makeStreamingProvider();
+    const { tts, texts } = makeCapturingTts();
+    const speechTurn = vi.fn().mockResolvedValue([]);
+    const adapter = new TwilioMediaStreamAdapter(
+      { store, streamingProvider: provider, speechTurn, ttsProvider: tts },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-lowconf-1',
+      start: { callSid: 'CA-lowconf-1', accountSid: 'AC', streamSid: 'MZ-lowconf-1', tracks: ['inbound'] },
+    });
+    await new Promise((r) => setImmediate(r));
+
+    // Below the default 0.5 floor — mumbled/misheard.
+    handle.emit({ type: 'final', isFinal: true, transcript: 'mmuh unh', confidence: 0.35 });
+    await new Promise((r) => setImmediate(r));
+
+    expect(speechTurn).not.toHaveBeenCalled();
+    expect(texts).toEqual([renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en')]);
+    expect(ws.closed).toBe(false);
+    expect(recordVoiceErrorMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        errorKind: 'low_stt_confidence',
+        channel: 'media_streams',
+        callSid: 'CA-lowconf-1',
+        tenantId: 't',
+      }),
+    );
+  });
+
+  it('speaks the low-confidence reprompt in the session active language (es)', async () => {
+    const session = store.create('t', 'telephony', { callSid: 'CA-lowconf-es' });
+    session.language = 'es';
+    const ws = new FakeWs();
+    const { provider, handle } = makeStreamingProvider();
+    const { tts, texts } = makeCapturingTts();
+    const speechTurn = vi.fn().mockResolvedValue([]);
+    const adapter = new TwilioMediaStreamAdapter(
+      { store, streamingProvider: provider, speechTurn, ttsProvider: tts },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-lowconf-es',
+      start: { callSid: 'CA-lowconf-es', accountSid: 'AC', streamSid: 'MZ-lowconf-es', tracks: ['inbound'] },
+    });
+    await new Promise((r) => setImmediate(r));
+
+    handle.emit({ type: 'final', isFinal: true, transcript: 'mmuh unh', confidence: 0.35 });
+    await new Promise((r) => setImmediate(r));
+
+    const esReprompt = renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'es');
+    expect(texts).toEqual([esReprompt]);
+    // Sanity: the es rendering actually differs from the raw English key.
+    expect(esReprompt).not.toBe(LOW_STT_CONFIDENCE_REPROMPT_COPY);
+    expect(speechTurn).not.toHaveBeenCalled();
+  });
+
+  it('two consecutive low-confidence finals hand off gracefully instead of looping', async () => {
+    store.create('t', 'telephony', { callSid: 'CA-lowconf-2' });
+    const ws = new FakeWs();
+    const { provider, handle } = makeStreamingProvider();
+    const { tts, texts } = makeCapturingTts();
+    const speechTurn = vi.fn().mockResolvedValue([]);
+    const finalizeOnClose = vi.fn();
+    const adapter = new TwilioMediaStreamAdapter(
+      { store, streamingProvider: provider, speechTurn, ttsProvider: tts, finalizeOnClose },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-lowconf-2',
+      start: { callSid: 'CA-lowconf-2', accountSid: 'AC', streamSid: 'MZ-lowconf-2', tracks: ['inbound'] },
+    });
+    await new Promise((r) => setImmediate(r));
+
+    // Low-confidence final 1 → reprompt; call stays live.
+    handle.emit({ type: 'final', isFinal: true, transcript: 'mmuh', confidence: 0.35 });
+    await new Promise((r) => setImmediate(r));
+    expect(ws.closed).toBe(false);
+
+    // Low-confidence final 2 (consecutive) → spoken hand-off + graceful end.
+    handle.emit({ type: 'final', isFinal: true, transcript: 'unh', confidence: 0.2 });
+    await new Promise((r) => setImmediate(r));
+
+    // speechTurn was never dispatched for either low-confidence turn.
+    expect(speechTurn).not.toHaveBeenCalled();
+    expect(texts).toEqual([
+      renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en'),
+      renderTtsText(SPEECH_TURN_FAILURE_ESCALATION_COPY, {}, 'en'),
+    ]);
+    expect(ws.closed).toBe(true);
+    expect(finalizeOnClose).toHaveBeenCalledTimes(1);
+    const [, reason, sideEffects] = finalizeOnClose.mock.calls[0];
+    expect(reason).toBe('session_ended');
+    expect(sideEffects).toEqual([
+      { type: 'end_session', payload: { reason: 'low_stt_confidence_max_retries' } },
+    ]);
+    expect(recordVoiceErrorMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        errorKind: 'low_stt_confidence_repeated',
+        channel: 'media_streams',
+        callSid: 'CA-lowconf-2',
+        tenantId: 't',
+      }),
+    );
+  });
+
+  it('resets the low-confidence streak after a good (dispatched) turn', async () => {
+    store.create('t', 'telephony', { callSid: 'CA-lowconf-3' });
+    const ws = new FakeWs();
+    const { provider, handle } = makeStreamingProvider();
+    const { tts, texts } = makeCapturingTts();
+    const speechTurn = vi.fn().mockResolvedValue([]);
+    const finalizeOnClose = vi.fn();
+    const adapter = new TwilioMediaStreamAdapter(
+      { store, streamingProvider: provider, speechTurn, ttsProvider: tts, finalizeOnClose },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-lowconf-3',
+      start: { callSid: 'CA-lowconf-3', accountSid: 'AC', streamSid: 'MZ-lowconf-3', tracks: ['inbound'] },
+    });
+    await new Promise((r) => setImmediate(r));
+
+    // Low-confidence 1 → reprompt.
+    handle.emit({ type: 'final', isFinal: true, transcript: 'mmuh', confidence: 0.35 });
+    await new Promise((r) => setImmediate(r));
+
+    // A clean, high-confidence turn → dispatched normally, resets the streak.
+    handle.emit({ type: 'final', isFinal: true, transcript: 'book an appointment', confidence: 0.95 });
+    await new Promise((r) => setImmediate(r));
+
+    // Low-confidence again → because the streak reset, this is a fresh 1st
+    // low-confidence turn → another REPROMPT, not an escalation.
+    handle.emit({ type: 'final', isFinal: true, transcript: 'unh', confidence: 0.35 });
+    await new Promise((r) => setImmediate(r));
+
+    expect(speechTurn).toHaveBeenCalledTimes(1);
+    expect(texts).toEqual([
+      renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en'),
+      renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en'),
+    ]);
+    expect(ws.closed).toBe(false);
+    expect(finalizeOnClose).not.toHaveBeenCalled();
+  });
+
+  it('a missing confidence value is treated as HIGH — dispatched normally, never blocks the turn', async () => {
+    store.create('t', 'telephony', { callSid: 'CA-lowconf-missing' });
+    const ws = new FakeWs();
+    const { provider, handle } = makeStreamingProvider();
+    const speechTurn = vi.fn().mockResolvedValue([]);
+    const adapter = new TwilioMediaStreamAdapter(
+      { store, streamingProvider: provider, speechTurn },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-lowconf-missing',
+      start: {
+        callSid: 'CA-lowconf-missing',
+        accountSid: 'AC',
+        streamSid: 'MZ-lowconf-missing',
+        tracks: ['inbound'],
+      },
+    });
+    await new Promise((r) => setImmediate(r));
+
+    // No `confidence` field at all (some providers/fixtures omit it).
+    handle.emit({ type: 'final', isFinal: true, transcript: 'book an appointment' } as unknown as StreamingTranscriptEvent);
+    await new Promise((r) => setImmediate(r));
+
+    expect(speechTurn).toHaveBeenCalledTimes(1);
+    expect(recordVoiceErrorMock).not.toHaveBeenCalledWith(
+      expect.objectContaining({ errorKind: 'low_stt_confidence' }),
+    );
   });
 });

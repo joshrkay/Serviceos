@@ -118,7 +118,17 @@ import type { CurrentQuoteResolver } from '../conversations/negotiation/current-
 import type { RepairTemplate } from '../verticals/registry';
 import { detectFrustration } from '../ai/agents/customer-calling/frustration-detector';
 import { detectEmergency } from '../ai/agents/customer-calling/emergency-detector';
-import { renderTtsText, type SessionLanguage } from '../ai/agents/customer-calling/tts-copy';
+import {
+  renderTtsText,
+  LOW_STT_CONFIDENCE_REPROMPT_COPY,
+  SPEECH_TURN_FAILURE_ESCALATION_COPY,
+  type SessionLanguage,
+} from '../ai/agents/customer-calling/tts-copy';
+import {
+  MIN_STT_CONFIDENCE,
+  MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS,
+} from './media-streams/mediastream-adapter';
+import { recordVoiceError } from '../analytics/posthog';
 import {
   detectRecordingObjection,
   RECORDING_OBJECTION_ACK,
@@ -735,6 +745,23 @@ export class TwilioGatherAdapter {
    * "missing" (never recorded) from "explicitly blocked".
    */
   private readonly callerIdBySession = new Map<string, string>();
+
+  /**
+   * A3 — consecutive-low-Gather-`Confidence`-turn streak, keyed by
+   * sessionId. Each `/gather` POST is a stateless HTTP request, so this
+   * can't live on the request; `VoiceSession` (the DB-backed session
+   * object) also has no field for it, so — same lifetime/leak posture as
+   * {@link callerIdBySession} above — it's tracked in-memory on the adapter.
+   * Bumped when a Gather turn's `Confidence` is below
+   * {@link MIN_STT_CONFIDENCE}; cleared by any turn that clears the gate
+   * (high confidence OR confidence absent). Reaching
+   * {@link MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS} hands the caller off
+   * instead of reprompting again (see `maybeHandleLowSttConfidenceGather`).
+   * Limitation: this streak is process-local — a mid-call replica
+   * restart/redeploy silently resets it to 0. Acceptable for a short,
+   * bounded reprompt budget (2 turns) rather than a durable guarantee.
+   */
+  private readonly lowConfidenceGatherStreak = new Map<string, number>();
 
   /**
    * Closure-captured agent loop (P38-FOLLOWUP). Owns `speechTurn`,
@@ -1716,7 +1743,7 @@ export class TwilioGatherAdapter {
     sessionId: string;
     callSid: string;
     speechResult: string;
-    confidence: number;
+    confidence: number | undefined;
     tenantId: string;
   }): Promise<string> {
     // Per-session lock: Twilio retries (or duplicate webhook deliveries)
@@ -1729,7 +1756,7 @@ export class TwilioGatherAdapter {
     sessionId: string;
     callSid: string;
     speechResult: string;
-    confidence: number;
+    confidence: number | undefined;
     tenantId: string;
   }): Promise<string> {
     const session = this.deps.store.get(opts.sessionId);
@@ -1808,6 +1835,21 @@ export class TwilioGatherAdapter {
       );
       await this.processor.executeSideEffects(session, sideEffectsAll, opts.tenantId);
       return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
+    }
+
+    // A3 — low acoustic STT confidence gate. Twilio's Gather `Confidence` on
+    // a NON-empty utterance below MIN_STT_CONFIDENCE means Twilio itself is
+    // flagging the recognition as unreliable — dispatching it (running the
+    // classifier / advancing FSM state) risks acting on words the caller
+    // didn't say. Return a reprompt (or, after repeated low-confidence
+    // turns, a graceful hand-off) directly, bypassing classification and
+    // state-branching entirely, same as the empty-SpeechResult early return
+    // above. Runs AFTER the deterministic safety scan / frustration check /
+    // pending-approval-turn handling above — none of those must ever be
+    // suppressed by a shaky confidence score.
+    const lowConfidenceTwiml = await this.maybeHandleLowSttConfidenceGather(session, opts);
+    if (lowConfidenceTwiml !== null) {
+      return lowConfidenceTwiml;
     }
 
     // U4 — per-turn vulnerability triage on the Gather path, fire-and-forget
@@ -2086,6 +2128,81 @@ export class TwilioGatherAdapter {
 
     await this.processor.executeSideEffects(session, sideEffectsAll, opts.tenantId);
     return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
+  }
+
+  /**
+   * A3 — gate a Gather turn on Twilio's acoustic `Confidence`. Returns the
+   * reprompt/hand-off TwiML string when the gate fires (caller: return it
+   * directly, do NOT fall through to classification), or `null` when the
+   * turn should proceed normally (confidence high enough, or absent —
+   * absent is treated as HIGH so a turn is never blocked on missing data;
+   * Twilio omits `Confidence` for some valid recognitions).
+   *
+   * Mirrors the media-streams adapter's `recoverFromLowSttConfidence`
+   * shape: reprompt on an isolated low-confidence turn using
+   * {@link LOW_STT_CONFIDENCE_REPROMPT_COPY}; after
+   * {@link MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS} back-to-back, speak the
+   * SAME escalation line VOX-35c uses
+   * ({@link SPEECH_TURN_FAILURE_ESCALATION_COPY}) and end the call
+   * gracefully via a synthetic `end_session` side effect + explicit
+   * `finalizeTerminatedSession` call (this path never touches the FSM, so
+   * `finalizeTwiml`'s own `currentState === 'terminated'` finalize check
+   * would never fire — the manual call here is required, same pattern
+   * `/dial-result`'s successful-transfer branch already uses).
+   */
+  private async maybeHandleLowSttConfidenceGather(
+    session: VoiceSession,
+    opts: { sessionId: string; confidence: number | undefined },
+  ): Promise<string | null> {
+    const { confidence } = opts;
+    if (typeof confidence !== 'number' || !Number.isFinite(confidence) || confidence >= MIN_STT_CONFIDENCE) {
+      // High confidence (or no signal at all) clears the streak so a later
+      // isolated blip on this session gets its own reprompt budget.
+      this.lowConfidenceGatherStreak.delete(opts.sessionId);
+      return null;
+    }
+
+    const lang: SessionLanguage = session.language === 'es' ? 'es' : 'en';
+    const streak = (this.lowConfidenceGatherStreak.get(opts.sessionId) ?? 0) + 1;
+
+    if (streak >= MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS) {
+      this.lowConfidenceGatherStreak.delete(opts.sessionId);
+      const effects: SideEffect[] = [
+        {
+          type: 'tts_play',
+          payload: { text: renderTtsText(SPEECH_TURN_FAILURE_ESCALATION_COPY, {}, lang) },
+        },
+        { type: 'end_session', payload: { reason: 'low_stt_confidence_max_retries' } },
+      ];
+      const twiml = await this.finalizeTwiml(session, effects, opts.sessionId);
+      if (!session.ended) {
+        session.ended = true;
+        this.finalizeTerminatedSession(session, effects, 'low_stt_confidence_max_retries');
+      }
+      recordVoiceError({
+        errorKind: 'low_stt_confidence_repeated',
+        channel: 'gather',
+        callSid: session.callSid ?? undefined,
+        tenantId: session.tenantId,
+      });
+      return twiml;
+    }
+
+    this.lowConfidenceGatherStreak.set(opts.sessionId, streak);
+    const effects: SideEffect[] = [
+      {
+        type: 'tts_play',
+        payload: { text: renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, lang) },
+      },
+    ];
+    const twiml = await this.finalizeTwiml(session, effects, opts.sessionId);
+    recordVoiceError({
+      errorKind: 'low_stt_confidence',
+      channel: 'gather',
+      callSid: session.callSid ?? undefined,
+      tenantId: session.tenantId,
+    });
+    return twiml;
   }
 
   /**

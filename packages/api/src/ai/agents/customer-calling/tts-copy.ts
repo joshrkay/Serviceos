@@ -101,6 +101,24 @@ export const SPEECH_TURN_FAILURE_ESCALATION_COPY =
   "I'm having trouble completing that. Let me connect you with a team member.";
 
 /**
+ * A3 — spoken when a FINAL transcript's STT acoustic confidence (Deepgram
+ * `confidence` on media-streams; Twilio Gather `Confidence`) comes back
+ * below the configured floor. Distinct from
+ * {@link SPEECH_TURN_FAILURE_REPROMPT_COPY} on purpose: that line covers the
+ * turn PIPELINE throwing (something broke); this one covers the STT ENGINE
+ * itself flagging the audio as likely mis-heard (nothing broke — the words
+ * probably weren't the ones acted on). Acting on a misheard transcript risks
+ * the wrong intent (e.g. "cancel" heard from "confirm"), so the caller is
+ * asked to repeat rather than having the turn dispatched. The repeated-low-
+ * confidence hand-off reuses {@link SPEECH_TURN_FAILURE_ESCALATION_COPY} —
+ * "trouble completing that" reads naturally for "I can't reliably hear you"
+ * too, and keeping one escalation line avoids a second string to translate
+ * and keep in sync.
+ */
+export const LOW_STT_CONFIDENCE_REPROMPT_COPY =
+  "I didn't quite catch that — could you say that again?";
+
+/**
  * es translations for the FSM's hardcoded sentences (exact-match). Kept
  * small and literal — anything not listed passes through in English rather
  * than risking a bad machine paraphrase.
@@ -141,6 +159,9 @@ const SENTENCE_CATALOG_ES: Record<string, string> = {
     'Permítame asegurarme de entender — ¿qué le gustaría hacer?',
   [SPEECH_TURN_FAILURE_REPROMPT_COPY]:
     'Mis disculpas — intentemos de nuevo. ¿Qué le gustaría hacer?',
+  // A3 — low acoustic STT confidence reprompt.
+  [LOW_STT_CONFIDENCE_REPROMPT_COPY]:
+    'No alcancé a escuchar bien eso — ¿podría repetirlo, por favor?',
   'Of course! What else can I help you with?':
     '¡Por supuesto! ¿En qué más puedo ayudarle?',
   'This call has been terminated due to policy violations.':

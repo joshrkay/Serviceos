@@ -7,6 +7,11 @@ import {
   injectSafetySayLines,
 } from '../../src/telephony/twilio-adapter';
 import { VoiceSessionStore } from '../../src/ai/agents/customer-calling/voice-session-store';
+import {
+  renderTtsText,
+  LOW_STT_CONFIDENCE_REPROMPT_COPY,
+  SPEECH_TURN_FAILURE_ESCALATION_COPY,
+} from '../../src/ai/agents/customer-calling/tts-copy';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import { DefaultTwilioCallControl } from '../../src/telephony/twilio-call-control';
 import {
@@ -1054,17 +1059,158 @@ describe('TwilioGatherAdapter.handleGather', () => {
       sess.machine.dispatch({ type: 'caller_known', customerId: 'c1' });
     }
 
+    // A3 — Gather `Confidence` (acoustic) is intentionally HIGH here so this
+    // test exercises the CLASSIFIER low-confidence reprompt path (the
+    // gateway mock above returns intentType 'unknown' with confidence 0.2).
+    // A low acoustic Confidence would instead trip the acoustic-confidence
+    // gate before the classifier even runs — see
+    // "low acoustic Gather Confidence" tests below for that path.
     const xml = await a2.handleGather({
       sessionId: sid,
       callSid: 'CA-low',
       speechResult: 'mmm uh',
-      confidence: 0.2,
+      confidence: 0.95,
       tenantId: 'tenant-abc',
     });
 
     const snap = await s2.snapshot(sid);
     expect(snap?.state).toBe('intent_capture'); // reprompt, not escalated yet
     expect(xml).toContain('<Gather');
+  });
+
+  // ─── A3 — low acoustic Gather `Confidence` gate ────────────────────────────
+  //
+  // Before this fix, Twilio's Gather `Confidence` was parsed and completely
+  // ignored — a low-confidence recognition was classified and dispatched
+  // exactly like a clean one. These pin the gate: a low-confidence non-empty
+  // utterance is reprompted WITHOUT running the classifier, a normal/missing
+  // Confidence is processed as before, and repeated low confidence hands the
+  // caller off instead of looping.
+  describe('low acoustic Gather Confidence', () => {
+    it('reprompts without running the classifier when Confidence is below the floor', async () => {
+      const xml = await adapter.handleGather({
+        sessionId,
+        callSid: 'CA-gx',
+        speechResult: 'mumbled garbage',
+        confidence: 0.3,
+        tenantId: 'tenant-abc',
+      });
+
+      expect((gateway.complete as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+      expect(xml).toContain('<Gather');
+      expect(xml).toContain(
+        xmlEscape(renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en')),
+      );
+      const snap = await store.snapshot(sessionId);
+      expect(snap?.state).toBe('intent_capture');
+    });
+
+    it('processes the turn normally when Confidence is high', async () => {
+      const xml = await adapter.handleGather({
+        sessionId,
+        callSid: 'CA-gx',
+        speechResult: 'Create an invoice for Acme for 450 dollars',
+        confidence: 0.95,
+        tenantId: 'tenant-abc',
+      });
+
+      expect((gateway.complete as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(1);
+      const snap = await store.snapshot(sessionId);
+      expect(snap?.state).toBe('intent_confirm');
+      expect(xml).toMatch(/<Say.*confirm/i);
+    });
+
+    it('treats a missing Confidence as HIGH — processes the turn normally, never blocks it', async () => {
+      const xml = await adapter.handleGather({
+        sessionId,
+        callSid: 'CA-gx',
+        speechResult: 'Create an invoice for Acme for 450 dollars',
+        confidence: undefined,
+        tenantId: 'tenant-abc',
+      });
+
+      expect((gateway.complete as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(1);
+      const snap = await store.snapshot(sessionId);
+      expect(snap?.state).toBe('intent_confirm');
+      expect(xml).toMatch(/<Say.*confirm/i);
+    });
+
+    it('two consecutive low-Confidence turns hand off gracefully instead of looping', async () => {
+      const xml1 = await adapter.handleGather({
+        sessionId,
+        callSid: 'CA-gx',
+        speechResult: 'mumbled one',
+        confidence: 0.3,
+        tenantId: 'tenant-abc',
+      });
+      expect(xml1).toContain('<Gather');
+      let snap = await store.snapshot(sessionId);
+      expect(snap?.state).toBe('intent_capture');
+
+      const session = await store.get(sessionId);
+      expect(session?.ended).toBe(false);
+
+      const xml2 = await adapter.handleGather({
+        sessionId,
+        callSid: 'CA-gx',
+        speechResult: 'mumbled two',
+        confidence: 0.2,
+        tenantId: 'tenant-abc',
+      });
+
+      // The classifier never ran for either low-confidence turn.
+      expect((gateway.complete as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+      expect(xml2).toContain(
+        xmlEscape(renderTtsText(SPEECH_TURN_FAILURE_ESCALATION_COPY, {}, 'en')),
+      );
+      expect(xml2).toContain('<Hangup');
+      expect(xml2).not.toContain('<Gather');
+      expect(session?.ended).toBe(true);
+      expect(session?.terminalOutcome).toBeDefined();
+    });
+
+    it('resets the low-confidence streak after a good (classified) turn', async () => {
+      // Turn 1: low confidence → reprompt, streak = 1.
+      await adapter.handleGather({
+        sessionId,
+        callSid: 'CA-gx',
+        speechResult: 'mumbled one',
+        confidence: 0.3,
+        tenantId: 'tenant-abc',
+      });
+
+      // Turn 2: clean, high-confidence turn → classified normally, and
+      // resets the streak. Advances to intent_confirm.
+      await adapter.handleGather({
+        sessionId,
+        callSid: 'CA-gx',
+        speechResult: 'Create an invoice for Acme for 450 dollars',
+        confidence: 0.95,
+        tenantId: 'tenant-abc',
+      });
+      expect((gateway.complete as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(1);
+      const midSnap = await store.snapshot(sessionId);
+      expect(midSnap?.state).toBe('intent_confirm');
+
+      // Turn 3: low confidence again — because the streak reset on turn 2,
+      // this is a fresh 1st low-confidence turn → another REPROMPT, not an
+      // escalation. The gate runs regardless of FSM state (a misheard
+      // confirm reply is just as unsafe to act on as a misheard intent), so
+      // the confirmIntent skill (which would otherwise fire in
+      // intent_confirm) is never reached — gateway.complete stays at 1 call.
+      const xml3 = await adapter.handleGather({
+        sessionId,
+        callSid: 'CA-gx',
+        speechResult: 'huh what',
+        confidence: 0.3,
+        tenantId: 'tenant-abc',
+      });
+      expect((gateway.complete as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(1);
+      expect(xml3).toContain('<Gather');
+      expect(xml3).not.toContain('<Hangup');
+      const finalSnap = await store.snapshot(sessionId);
+      expect(finalSnap?.state).toBe('intent_confirm'); // untouched by the gate
+    });
   });
 
   it('flag-off live calls omit extendedIntents from classifier context and resolve the flag once per call', async () => {
