@@ -166,4 +166,64 @@ describe('gateway.complete() — per-call cost accounting', () => {
     const value = await gatewayRequestCostMicroCentsTotal.get();
     expect(value.values.find((v) => v.labels.model === 'claude-sonnet-4-6')).toBeUndefined();
   });
+
+  // A provider whose response reports a DIFFERENT model/provider than the
+  // request resolved to — the shape the resilience layer produces after a
+  // cheaper-model or fallback-provider failover.
+  function failoverProvider(actualModel: string, actualProvider = 'fallback'): LLMProvider {
+    return {
+      name: 'primary',
+      async complete(req: LLMRequest) {
+        return {
+          content: 'ok',
+          model: actualModel,
+          provider: actualProvider,
+          tokenUsage: { input: 500, output: 200, total: 700 },
+          latencyMs: 1,
+        };
+      },
+      async isAvailable() {
+        return true;
+      },
+    };
+  }
+
+  it('prices a failover by the model that actually ran, not the resolved route', async () => {
+    // Route resolves to Sonnet (300/1500 c/M) but the call fails over to
+    // Haiku (100/500 c/M): cost must be Haiku's, not Sonnet's.
+    const providers = new Map<string, LLMProvider>([
+      ['primary', failoverProvider('claude-haiku-4-5-20251001', 'openai-compat')],
+    ]);
+    const gateway = makeGateway(providers, { defaultProvider: 'primary' });
+
+    const response = await gateway.complete(
+      makeRequest({ model: 'claude-sonnet-4-6', tenantId: 'tenant-1' })
+    );
+
+    // Haiku: 500 * 100 + 200 * 500 = 50,000 + 100,000 = 150,000 micro-cents
+    // (NOT the Sonnet figure of 450,000).
+    expect(response.costMicroCents).toBe(150_000);
+    const value = await gatewayRequestCostMicroCentsTotal.get();
+    const haikuRow = value.values.find(
+      (v) => v.labels.model === 'claude-haiku-4-5-20251001'
+    );
+    expect(haikuRow?.value).toBe(150_000);
+    // Never attributed to the un-served Sonnet route.
+    expect(value.values.find((v) => v.labels.model === 'claude-sonnet-4-6')).toBeUndefined();
+  });
+
+  it('records cost when an unpriced route fails over to a priced model', async () => {
+    // Resolved route is an unpriced model; the failover lands on a priced
+    // one, so cost is non-null (was recorded as null before the fix).
+    const providers = new Map<string, LLMProvider>([
+      ['primary', failoverProvider('claude-haiku-4-5-20251001')],
+    ]);
+    const gateway = makeGateway(providers, { defaultProvider: 'primary' });
+
+    const response = await gateway.complete(
+      makeRequest({ model: 'some-unpriced-model', tenantId: 'tenant-1' })
+    );
+
+    expect(response.costMicroCents).toBe(150_000);
+  });
 });

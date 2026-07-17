@@ -483,11 +483,18 @@ export class LLMGateway {
       const latencyMs = Date.now() - startTime;
 
       // Cost accounting (per-tenant/per-task spend telemetry). Computed from
-      // the RESOLVED model (what actually ran) and the provider's reported
-      // token usage — never a guess. null when the model has no known price
-      // (see model-pricing.ts); the metric below is simply not incremented
-      // in that case rather than incrementing by a fabricated amount.
-      const costMicroCents = computeCostMicroCents(resolvedModel, response.tokenUsage);
+      // the model that ACTUALLY served the request — `response.model`, which
+      // the resilience layer rewrites on a cheaper-model or fallback-provider
+      // failover (e.g. a Sonnet route that fails over to Haiku) — not the
+      // originally-resolved route. Using resolvedModel here would bill a
+      // failover at the wrong rate, or record null when an unpriced primary
+      // succeeded on a priced fallback. Falls back to resolvedModel only if a
+      // provider omitted the field. null when the model has no known price
+      // (see model-pricing.ts); the metric below is simply not incremented in
+      // that case rather than by a fabricated amount.
+      const costModel = response.model || resolvedModel;
+      const costProvider = response.provider || providerName;
+      const costMicroCents = computeCostMicroCents(costModel, response.tokenUsage);
 
       const result: LLMResponse = {
         ...response,
@@ -508,12 +515,14 @@ export class LLMGateway {
       gatewayRequestsTotal.inc(labels);
       gatewayRequestLatencyMs.observe(labels, latencyMs);
       if (costMicroCents !== null) {
+        // Attribute spend to the model/provider that actually served the
+        // request (post-failover), matching the cost figure above.
         gatewayRequestCostMicroCentsTotal.inc(
           {
             tenant_tier: tier,
             task_type: request.taskType,
-            model: resolvedModel,
-            provider: providerName,
+            model: costModel,
+            provider: costProvider,
           },
           costMicroCents,
         );
