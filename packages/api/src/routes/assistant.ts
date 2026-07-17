@@ -590,7 +590,7 @@ async function generateAssistantReply(
             create_invoice: () => new InvoiceTaskHandler(deps.gateway, deps.catalogRepo),
             send_invoice: () => new SendInvoiceTaskHandler(),
             issue_invoice: () => new IssueInvoiceTaskHandler(),
-            update_invoice: () => new InvoiceEditTaskHandler(deps.gateway, { catalogRepo: deps.catalogRepo }),
+            update_invoice: () => new InvoiceEditTaskHandler(deps.gateway, { catalogRepo: deps.catalogRepo, invoiceRepo: deps.invoiceRepo }),
           };
           const factory = chainHandlers[segClass.intentType];
           if (!factory) continue;
@@ -675,7 +675,7 @@ async function generateAssistantReply(
         create_invoice: () => new InvoiceTaskHandler(deps.gateway, deps.catalogRepo),
         send_invoice: () => new SendInvoiceTaskHandler(),
         issue_invoice: () => new IssueInvoiceTaskHandler(),
-        update_invoice: () => new InvoiceEditTaskHandler(deps.gateway, { catalogRepo: deps.catalogRepo }),
+        update_invoice: () => new InvoiceEditTaskHandler(deps.gateway, { catalogRepo: deps.catalogRepo, invoiceRepo: deps.invoiceRepo }),
       };
       const handlerFactory = proposalHandlers[classification.intentType];
       if (handlerFactory) {

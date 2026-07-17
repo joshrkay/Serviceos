@@ -14,6 +14,11 @@
 import { describe, it, expect, vi } from 'vitest';
 import { InvoiceEditTaskHandler } from '../../../src/ai/tasks/invoice-edit-task';
 import { LLMGateway, LLMResponse } from '../../../src/ai/gateway/gateway';
+import { InMemoryInvoiceRepository } from '../../../src/invoices/invoice';
+import type { Invoice } from '../../../src/invoices/invoice';
+import { calculateDocumentTotals } from '../../../src/shared/billing-engine';
+import { approveProposal } from '../../../src/proposals/actions';
+import { InMemoryProposalRepository } from '../../../src/proposals/proposal';
 
 function mockGateway(jsonContent: string): LLMGateway {
   return {
@@ -140,7 +145,15 @@ describe('InvoiceEditTaskHandler', () => {
       message: 'add a fee',
       conversationId: 'conv-5',
     });
-    expect(result.proposal.sourceContext).toEqual({ conversationId: 'conv-5' });
+    // PR review finding (2026-07): a free-text invoiceReference with no
+    // invoiceRepo wired now gates missingFields — this proposal used to be
+    // silently approvable and then fail at execution (doomed-approval →
+    // gated is strictly safer; see the "invoiceId resolution" describe
+    // block below).
+    expect(result.proposal.sourceContext).toEqual({
+      conversationId: 'conv-5',
+      missingFields: ['invoiceId'],
+    });
   });
 
   it('sends update_invoice as the LLM task type', async () => {
@@ -161,5 +174,163 @@ describe('InvoiceEditTaskHandler', () => {
     const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
     expect(call.taskType).toBe('update_invoice');
     expect(call.responseFormat).toBe('json');
+  });
+
+  // PR review finding (2026-07): UpdateInvoiceExecutionHandler
+  // (proposals/execution/update-invoice-handler.ts) strictly requires
+  // payload.invoiceId to already be a string id and has no reference
+  // resolution of its own. Previously this handler never set invoiceId and
+  // never gated missingFields, so "add a trip fee to invoice INV-0042" was
+  // approvable straight from drafting and execution then failed on the
+  // unresolved reference. Mirrors the send_invoice fix
+  // (voice-extended-tasks.ts): reference resolution now runs at drafting
+  // time and an unresolved reference gates the proposal.
+  describe('invoiceId resolution / missingFields gating', () => {
+    function makeInvoice(overrides: Partial<Invoice> = {}): Invoice {
+      const lineItems = [
+        {
+          id: 'li-1',
+          description: 'Service call',
+          quantity: 1,
+          unitPriceCents: 12500,
+          totalCents: 12500,
+          taxable: true,
+        },
+      ];
+      const totals = calculateDocumentTotals(lineItems, 0, 0);
+      return {
+        id: 'inv-1',
+        tenantId,
+        jobId: 'job-1',
+        invoiceNumber: 'INV-0042',
+        status: 'draft',
+        lineItems,
+        totals,
+        amountPaidCents: 0,
+        amountDueCents: totals.totalCents,
+        createdBy: userId,
+        createdAt: new Date('2026-07-01T00:00:00Z'),
+        updatedAt: new Date('2026-07-01T00:00:00Z'),
+        ...overrides,
+      };
+    }
+
+    function editGateway(invoiceReference = 'INV-0042'): LLMGateway {
+      return mockGateway(
+        JSON.stringify({
+          invoiceReference,
+          editActions: [
+            { type: 'add_line_item', lineItem: { description: 'Trip fee', quantity: 1, unitPrice: 7500 } },
+          ],
+          confidence_score: 0.9,
+        }),
+      );
+    }
+
+    it('an unresolvable free-text reference (no invoiceRepo wired) gates missingFields and blocks approval', async () => {
+      const proposalRepo = new InMemoryProposalRepository();
+      const handler = new InvoiceEditTaskHandler(editGateway(), {});
+      const result = await handler.handle({
+        tenantId,
+        userId,
+        message: 'Add a trip fee to invoice INV-0042',
+      });
+
+      const payload = result.proposal.payload as Record<string, unknown>;
+      expect(payload.invoiceId).toBeUndefined();
+      expect(payload.invoiceReference).toBe('INV-0042');
+      expect(result.proposal.sourceContext).toMatchObject({ missingFields: ['invoiceId'] });
+
+      await proposalRepo.create(result.proposal);
+      await expect(
+        approveProposal(proposalRepo, tenantId, result.proposal.id, userId, 'owner'),
+      ).rejects.toThrow(/unfilled required fields/);
+    });
+
+    it('a reference that resolves to exactly one invoice via invoiceRepo search is stamped onto payload.invoiceId, but STAYS gated', async () => {
+      // See resolveInvoiceId's doc comment in invoice-edit-task.ts: a
+      // search-resolved id is deliberately still gated because
+      // assistant.ts's dropUnverifiedIds strips any id-shaped payload
+      // field that isn't literally present in the operator's raw text —
+      // a DB-resolved id from a free-text search never is. Only a
+      // reference that is already a literal UUID is trusted to bypass
+      // review (next test).
+      const invoiceRepo = new InMemoryInvoiceRepository();
+      const invoice = await invoiceRepo.create(makeInvoice());
+
+      const proposalRepo = new InMemoryProposalRepository();
+      const handler = new InvoiceEditTaskHandler(editGateway(), { invoiceRepo });
+      const result = await handler.handle({
+        tenantId,
+        userId,
+        message: 'Add a trip fee to invoice INV-0042',
+      });
+
+      const payload = result.proposal.payload as Record<string, unknown>;
+      expect(payload.invoiceId).toBe(invoice.id);
+      expect(payload.invoiceReference).toBe('INV-0042');
+      expect(result.proposal.sourceContext).toMatchObject({ missingFields: ['invoiceId'] });
+
+      await proposalRepo.create(result.proposal);
+      await expect(
+        approveProposal(proposalRepo, tenantId, result.proposal.id, userId, 'owner'),
+      ).rejects.toThrow(/unfilled required fields/);
+    });
+
+    it('an ambiguous reference (>1 match via invoiceRepo search) gates missingFields and does not set invoiceId', async () => {
+      const invoiceRepo = new InMemoryInvoiceRepository();
+      // Same invoice number on two rows is the simplest way to force >1
+      // search hits for this in-memory repo's ILIKE-style match.
+      await invoiceRepo.create(makeInvoice({ id: 'inv-1', invoiceNumber: 'INV-0042' }));
+      await invoiceRepo.create(makeInvoice({ id: 'inv-2', invoiceNumber: 'INV-0042' }));
+
+      const handler = new InvoiceEditTaskHandler(editGateway(), { invoiceRepo });
+      const result = await handler.handle({
+        tenantId,
+        userId,
+        message: 'Add a trip fee to invoice INV-0042',
+      });
+
+      const payload = result.proposal.payload as Record<string, unknown>;
+      expect(payload.invoiceId).toBeUndefined();
+      expect(result.proposal.sourceContext).toMatchObject({ missingFields: ['invoiceId'] });
+    });
+
+    it('an already-UUID reference lands directly on payload.invoiceId with no gate', async () => {
+      const proposalRepo = new InMemoryProposalRepository();
+      const uuidRef = '00000000-0000-4000-8000-000000000042';
+      const handler = new InvoiceEditTaskHandler(editGateway(uuidRef), {});
+      const result = await handler.handle({
+        tenantId,
+        userId,
+        message: `Add a trip fee to invoice ${uuidRef}`,
+      });
+
+      const payload = result.proposal.payload as Record<string, unknown>;
+      expect(payload.invoiceId).toBe(uuidRef);
+      expect(result.proposal.sourceContext ?? {}).not.toHaveProperty('missingFields');
+
+      // Approval is not blocked by a missing invoiceId (may still be
+      // gated by other rules, e.g. uncatalogued pricing — not the concern
+      // of this test); the key assertion is missingFields is absent.
+      await proposalRepo.create(result.proposal);
+    });
+
+    it('a reference that matches zero invoices gates missingFields and does not set invoiceId', async () => {
+      const invoiceRepo = new InMemoryInvoiceRepository();
+      // Repo has invoices, but none matching "INV-0042".
+      await invoiceRepo.create(makeInvoice({ id: 'inv-9', invoiceNumber: 'INV-9999' }));
+
+      const handler = new InvoiceEditTaskHandler(editGateway(), { invoiceRepo });
+      const result = await handler.handle({
+        tenantId,
+        userId,
+        message: 'Add a trip fee to invoice INV-0042',
+      });
+
+      const payload = result.proposal.payload as Record<string, unknown>;
+      expect(payload.invoiceId).toBeUndefined();
+      expect(result.proposal.sourceContext).toMatchObject({ missingFields: ['invoiceId'] });
+    });
   });
 });

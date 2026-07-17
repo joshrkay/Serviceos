@@ -538,7 +538,18 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
       deps.jobRepo,
     ),
   );
-  handlers.set('update_invoice', new InvoiceEditTaskHandler(deps.gateway, { catalogRepo: deps.catalogRepo }));
+  handlers.set(
+    'update_invoice',
+    new InvoiceEditTaskHandler(deps.gateway, {
+      catalogRepo: deps.catalogRepo,
+      // PR review finding (2026-07) — invoiceReference → invoiceId
+      // resolution (see InvoiceEditTaskDeps in ai/tasks/invoice-edit-task.ts).
+      // Reuses the same InvoiceRepository already wired for the
+      // batch_invoice / send_payment_reminder on-ramps rather than adding a
+      // new top-level dep.
+      invoiceRepo: deps.invoicingDeps?.invoiceRepo,
+    }),
+  );
   handlers.set('update_estimate', new EstimateEditTaskHandler(deps.gateway, deps.estimateRepo, deps.catalogRepo));
   handlers.set('issue_invoice', new IssueInvoiceTaskHandler(deps.proposalRepo, deps.thresholdResolver));
   handlers.set('create_customer', new CreateCustomerTaskHandler());

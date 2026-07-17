@@ -4,9 +4,21 @@ import { LLMGateway } from '../gateway/gateway';
 import { assessConfidence, getConfidenceLevel } from '../guardrails/confidence';
 import type { ProposalConfidenceMeta } from '../../proposals/contracts';
 import type { CatalogItem, CatalogItemRepository } from '../../catalog/catalog-item';
+import type { InvoiceRepository } from '../../invoices/invoice';
 import { buildCatalogPromptSection } from './catalog-resolution';
 import { UNCATALOGUED_CONFIDENCE_CAP } from '../resolution/catalog-resolver';
 import { groundEditActionPricing } from '../resolution/edit-action-grounding';
+
+// Mirrors the execution-side check (isUuid in
+// proposals/execution/voice-extended-handlers.ts / UUID_RE in
+// proposals/execution/issue-invoice-handler.ts): a classifier/LLM-extracted
+// reference is free text ("invoice INV-0042", "the Henderson invoice") in
+// the overwhelming case, but may already BE the resolved id on a re-draft.
+const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+function isUuid(value: unknown): value is string {
+  return typeof value === 'string' && UUID_RE.test(value);
+}
 
 /**
  * InvoiceEditTaskHandler — produces `update_invoice` proposals from
@@ -113,6 +125,22 @@ export interface InvoiceEditTaskDeps {
    * (P22-001). When absent, behavior is identical to pre-P22.
    */
   catalogRepo?: CatalogItemRepository;
+  /**
+   * PR review finding (2026-07): UpdateInvoiceExecutionHandler
+   * (proposals/execution/update-invoice-handler.ts) requires
+   * payload.invoiceId to ALREADY be a string id and never reads
+   * invoiceReference — there is no resolution step between drafting and
+   * execution. Mirrors the send_invoice fix (SendInvoiceTaskHandler in
+   * voice-extended-tasks.ts): a reference that is already a UUID lands
+   * directly on payload.invoiceId; when this repo is wired, a free-text
+   * reference ("INV-0042", a customer name) is additionally looked up —
+   * an unambiguous single match also resolves onto payload.invoiceId.
+   * Anything that doesn't resolve cleanly (no repo, no match, >1 match)
+   * stamps missingFields: ['invoiceId'] so approveProposal blocks until
+   * the operator resolves it on the review card, instead of the card
+   * being approvable and execution failing on the unresolved reference.
+   */
+  invoiceRepo?: Pick<InvoiceRepository, 'findById' | 'findByTenant'>;
 }
 
 export class InvoiceEditTaskHandler implements TaskHandler {
@@ -138,6 +166,82 @@ export class InvoiceEditTaskHandler implements TaskHandler {
     } catch {
       return [];
     }
+  }
+
+  /**
+   * Best-effort invoiceReference → invoiceId resolution. Returns the
+   * missingFields array to stamp on the proposal. Mutates `payload` in
+   * place (adds invoiceId) whenever resolution succeeds; invoiceReference
+   * is left untouched either way so the review card can always show what
+   * the operator said.
+   *
+   * Gating rule: missingFields is cleared ONLY when the reference is
+   * ALREADY a literal UUID (isUuid) — never merely because an
+   * invoiceRepo search resolved a free-text reference unambiguously.
+   *
+   * This is deliberately more conservative than "resolved ⇒ ungated"
+   * (which is what EstimateEditTaskHandler.resolveTargetEstimate's
+   * search technique is mirrored from). The reason: assistant.ts's
+   * `dropUnverifiedIds` guard deletes any id-shaped payload field
+   * (jobId/customerId/estimateId/invoiceId/appointmentId) that doesn't
+   * appear literally in the operator's raw text or classifier entities —
+   * it exists to catch LLM-hallucinated ids and can't distinguish those
+   * from a genuinely repo-verified invoiceId. A DB-resolved id from a
+   * free-text search is NEVER literally in that text, so it gets
+   * silently stripped on the assistant chat surface right before
+   * persistence, while an "ungated" missingFields would leave the
+   * proposal approvable with invoiceId gone — reintroducing the exact
+   * doomed-approval bug this fix closes (confirmed empirically against
+   * the live assistant router). voice-action-router.ts has no such
+   * guard, but the two surfaces must gate identically or the same
+   * transcript would behave differently depending on which one drafted
+   * it. So: only a reference that is ALREADY a UUID (guaranteed present
+   * in extractedEntities/text, so dropUnverifiedIds always keeps it) is
+   * trusted to bypass review — exactly SendInvoiceTaskHandler's rule
+   * (voice-extended-tasks.ts). The invoiceRepo search still runs and
+   * still stamps payload.invoiceId when it resolves unambiguously —
+   * useful review-card context and a correct id on the surface without
+   * the guard — but it never lifts the gate.
+   *
+   * Never throws: a repo hiccup or an ambiguous match simply leaves the
+   * proposal gated, same failure posture as
+   * EstimateEditTaskHandler.resolveTargetEstimate.
+   */
+  private async resolveInvoiceId(
+    tenantId: string,
+    payload: Record<string, unknown>,
+  ): Promise<string[]> {
+    const reference = payload.invoiceReference;
+
+    if (isUuid(reference)) {
+      // Already a resolved id (e.g. a re-draft carrying a prior pick) — no
+      // repo round-trip needed, and safe to ungate: this literal string is
+      // present in the classifier entities/text dropUnverifiedIds checks.
+      payload.invoiceId = reference;
+      return [];
+    }
+
+    if (typeof reference === 'string' && reference.trim().length > 0 && this.deps.invoiceRepo) {
+      try {
+        // ILIKE search on invoice_number / customer_message; only an
+        // UNAMBIGUOUS single match identifies the target — mirrors
+        // EstimateEditTaskHandler.resolveTargetEstimate's search.
+        const matches = await this.deps.invoiceRepo.findByTenant(tenantId, {
+          search: reference.trim(),
+          limit: 2,
+        });
+        if (matches.length === 1) {
+          payload.invoiceId = matches[0].id;
+        }
+      } catch {
+        // Resolution must never block proposal creation.
+      }
+    }
+
+    // Free-text reference (resolved or not) — always gated. See the
+    // method doc comment for why "resolved via search" doesn't bypass
+    // this on its own.
+    return ['invoiceId'];
   }
 
   async handle(context: TaskContext): Promise<TaskResult> {
@@ -188,6 +292,16 @@ export class InvoiceEditTaskHandler implements TaskHandler {
       payload._meta = meta;
     }
 
+    // PR review finding (2026-07): resolve the free-text invoiceReference
+    // onto payload.invoiceId (direct UUID, or an unambiguous invoiceRepo
+    // match) before this proposal can be approved — see resolveInvoiceId /
+    // InvoiceEditTaskDeps.invoiceRepo above. Anything that doesn't resolve
+    // gates the proposal via missingFields so approveProposal blocks it
+    // instead of letting an unresolved edit reach
+    // UpdateInvoiceExecutionHandler, which has no resolution step of its
+    // own and would fail after approval.
+    const missingFields = await this.resolveInvoiceId(context.tenantId, payload);
+
     const input: CreateProposalInput = {
       tenantId: context.tenantId,
       proposalType: this.taskType,
@@ -202,6 +316,7 @@ export class InvoiceEditTaskHandler implements TaskHandler {
       // Classified as `capture`, same as draft_invoice. The high
       // confidence threshold + operator review prevent surprise edits.
       sourceTrustTier: 'autonomous',
+      ...(missingFields.length > 0 ? { missingFields } : {}),
       // PR B — propagate tenant override from context.
       ...(context.tenantThresholdOverride
         ? { tenantThresholdOverride: context.tenantThresholdOverride }

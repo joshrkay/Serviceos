@@ -58,9 +58,10 @@ async function seedCatalog(
 function editResponse(
   actions: Array<Record<string, unknown>>,
   confidence = 0.9,
+  invoiceReference = 'INV-0042',
 ): string {
   return JSON.stringify({
-    invoiceReference: 'INV-0042',
+    invoiceReference,
     editActions: actions,
     confidence_score: confidence,
   });
@@ -557,6 +558,15 @@ describe('P22-001 invoice-edit-catalog', () => {
           // Within 100¢ of the catalog's 450 → a clean snap, not a conflict.
           [{ type: 'add_line_item', lineItem: { description: 'gasket', quantity: 1, unitPrice: 460 } }],
           0.9,
+          // PR review finding (2026-07): a free-text invoiceReference
+          // ("INV-0042") now gates missingFields: ['invoiceId'] regardless
+          // of confidence (UpdateInvoiceExecutionHandler has no reference
+          // resolution of its own — see invoice-edit-task.ts). This test's
+          // purpose is confidence/catalog-pricing behavior, not invoiceId
+          // resolution, so it uses an already-resolved UUID reference —
+          // exactly what SendInvoiceTaskHandler treats as "already a
+          // resolved id" — to keep the invoiceId gate out of the picture.
+          '00000000-0000-4000-8000-000000000042',
         ),
       );
       const handler = new InvoiceEditTaskHandler(gateway, { catalogRepo: repo });

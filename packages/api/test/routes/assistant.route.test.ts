@@ -22,6 +22,7 @@ import type { CatalogItem, CatalogItemRepository } from '../../src/catalog/catal
 import { InMemoryConversationRepository } from '../../src/conversations/conversation-service';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
+import { InMemoryInvoiceRepository, createInvoice } from '../../src/invoices/invoice';
 
 const TEST_TENANT = 'tenant-ast-01b';
 const TEST_USER = 'user-ast-01b';
@@ -754,6 +755,113 @@ describe('money-path handler wiring — update_invoice/send_invoice/issue_invoic
     const persisted = await proposalRepo.findByTenant(TEST_TENANT);
     expect(persisted).toHaveLength(1);
     expect(persisted[0].proposalType).toBe('update_invoice');
+  });
+
+  // PR review finding (2026-07): UpdateInvoiceExecutionHandler
+  // (proposals/execution/update-invoice-handler.ts) requires payload.invoiceId
+  // to ALREADY be a resolved id and has no reference-resolution step of its
+  // own. InvoiceEditTaskHandler used to leave missingFields empty for any
+  // free-text invoiceReference ("INV-0042", never an id), so this proposal
+  // was approvable straight from the assistant surface and execution would
+  // then fail on the unresolved reference. Mirrors the send_invoice gated
+  // test below — the review card must surface missingFields so Approve
+  // stays blocked until the operator resolves the reference.
+  it('single-intent path: a reference-only update_invoice (invoice number, no invoiceRepo wired) is gated with missingFields so it cannot be approved unresolved', async () => {
+    const gateway = scriptedGateway([
+      JSON.stringify({ intentType: 'update_invoice', confidence: 0.9, extractedEntities: {} }),
+      JSON.stringify({
+        invoiceReference: 'INV-0042',
+        editActions: [
+          { type: 'add_line_item', lineItem: { description: 'Trip fee', quantity: 1, unitPrice: 7500 } },
+        ],
+        confidence_score: 0.9,
+      }),
+    ]);
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildAppFor(gateway, proposalRepo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Add a trip fee to invoice INV-0042' }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.message.proposal.missingFields).toEqual(['invoiceId']);
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted[0].payload).not.toHaveProperty('invoiceId');
+    await expect(
+      approveProposal(proposalRepo, TEST_TENANT, persisted[0].id, TEST_USER, 'owner'),
+    ).rejects.toThrow(/unfilled required fields/);
+  });
+
+  // Regression test for a landmine found while building the fix above:
+  // dropUnverifiedIds (this file) deletes any id-shaped payload field
+  // (jobId/customerId/estimateId/invoiceId/appointmentId) that isn't
+  // literally present in the operator's raw text/classifier entities — it
+  // exists to catch LLM-hallucinated ids and can't tell those apart from a
+  // genuinely repo-verified invoiceId. A naive "resolved via invoiceRepo
+  // search ⇒ ungated" design would have this route silently strip the
+  // resolved invoiceId while leaving missingFields empty, reintroducing the
+  // exact doomed-approval bug on this surface only. InvoiceEditTaskHandler
+  // therefore only lifts the gate when invoiceReference is ALREADY a
+  // literal UUID (guaranteed to survive dropUnverifiedIds); a free-text
+  // reference stays gated even when invoiceRepo resolves it unambiguously.
+  it('single-intent path: an unambiguous invoiceRepo match for a free-text reference still gates (dropUnverifiedIds would silently strip a resolved id)', async () => {
+    const invoiceRepo = new InMemoryInvoiceRepository();
+    const invoice = await createInvoice(
+      {
+        tenantId: TEST_TENANT,
+        jobId: 'job-1',
+        customerId: 'cust-1',
+        invoiceNumber: 'INV-0042',
+        lineItems: [{ description: 'Service call', quantity: 1, unitPriceCents: 10000 }],
+        taxRateBps: 0,
+        createdBy: TEST_USER,
+      } as never,
+      invoiceRepo,
+    );
+
+    const gateway = scriptedGateway([
+      JSON.stringify({ intentType: 'update_invoice', confidence: 0.9, extractedEntities: {} }),
+      JSON.stringify({
+        invoiceReference: 'INV-0042',
+        editActions: [
+          { type: 'add_line_item', lineItem: { description: 'Trip fee', quantity: 1, unitPrice: 7500 } },
+        ],
+        confidence_score: 0.9,
+      }),
+    ]);
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: TEST_USER,
+        sessionId: 'sess-1',
+        tenantId: TEST_TENANT,
+        role: 'owner',
+      };
+      next();
+    });
+    app.use('/api/assistant', createAssistantRouter({ gateway, proposalRepo, invoiceRepo }));
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Add a trip fee to invoice INV-0042' }] });
+
+    expect(res.status).toBe(200);
+    // Still gated — never approvable straight from drafting, regardless of
+    // whether invoiceRepo could resolve the reference.
+    expect(res.body.message.proposal.missingFields).toEqual(['invoiceId']);
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    // dropUnverifiedIds strips the search-resolved invoiceId (not literally
+    // in the operator's text) — proving the id never reaches persistence
+    // unverified on this surface, which is exactly why the gate can't
+    // depend on it.
+    expect(persisted[0].payload).not.toHaveProperty('invoiceId');
+    expect(invoice.id).toBeTruthy();
+    await expect(
+      approveProposal(proposalRepo, TEST_TENANT, persisted[0].id, TEST_USER, 'owner'),
+    ).rejects.toThrow(/unfilled required fields/);
   });
 
   it('single-intent path: send_invoice yields a send_invoice proposal, not draft_invoice', async () => {
