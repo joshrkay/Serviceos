@@ -305,3 +305,58 @@ describe('U2 — MmsEstimateTaskHandler', () => {
     expect(result.reason).toBe('invalid_payload');
   });
 });
+
+// ─── EE-1: good-better-best from a photo ─────────────────────────────────
+describe('EE-1 — MMS good-better-best tier drafting', () => {
+  const tieredVisionJson = JSON.stringify({
+    lineItems: [
+      { description: 'Standard water heater', quantity: 1, unitPrice: 90000, groupKey: 'wh', groupLabel: 'Water heater' },
+      { description: 'Premium water heater', quantity: 1, unitPrice: 140000, groupKey: 'wh', groupLabel: 'Water heater', isDefaultSelected: true },
+    ],
+    notes: 'Corroded tank — offering replacement tiers.',
+    confidence_score: 0.9,
+  });
+
+  it('drafts a normalized, catalog-grounded tier group from a photo when options are requested', async () => {
+    const stub = new StubProvider('stub');
+    stub.setResponse({ content: tieredVisionJson });
+    const repo = await catalogWith([
+      { name: 'Standard water heater', unitPriceCents: 90000, category: 'Materials' },
+      { name: 'Premium water heater', unitPriceCents: 140000, category: 'Materials' },
+    ]);
+    const handler = new MmsEstimateTaskHandler(makeGateway(stub), repo);
+
+    const result = await handler.handle(
+      makeInput({ message: 'give me good, better, best options to fix this' }),
+    );
+    // 'drafted' proves the normalized structure passed assertValidProposalPayload
+    // (the U2 refine) — a malformed group would have fallen back to parse_failed.
+    expect(result.status).toBe('drafted');
+    if (result.status !== 'drafted') return;
+
+    const items = result.proposal.payload.lineItems as Array<Record<string, unknown>>;
+    expect(items).toHaveLength(2);
+    expect(items.every((li) => li.groupKey === 'wh')).toBe(true);
+    expect(items.every((li) => li.isOptional === true)).toBe(true);
+    expect(items.map((li) => li.isDefaultSelected)).toEqual([false, true]);
+    expect(items.every((li) => li.pricingSource === 'catalog')).toBe(true);
+  });
+
+  it('injects tier guidance only when the customer text asks for options', async () => {
+    const stub = new StubProvider('stub');
+    stub.setResponse({ content: validVisionJson });
+    const handler = new MmsEstimateTaskHandler(makeGateway(stub));
+
+    // Bare photo, no cue → base MMS prompt only (byte-identical path).
+    await handler.handle(makeInput());
+    const flat = stub.getLastRequest()!.messages;
+    expect(flat.filter((m) => m.role === 'system')).toHaveLength(1);
+    expect(flat.some((m) => m.content.includes('groupKey'))).toBe(false);
+
+    // Cued text → guidance injected as a second system message.
+    await handler.handle(makeInput({ message: 'can you give me a few options?' }));
+    const cued = stub.getLastRequest()!.messages;
+    expect(cued.filter((m) => m.role === 'system')).toHaveLength(2);
+    expect(cued.some((m) => m.role === 'system' && m.content.includes('groupKey'))).toBe(true);
+  });
+});

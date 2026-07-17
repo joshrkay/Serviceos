@@ -86,6 +86,20 @@ export function detectTierRequest(message: string): TierRequestSignals {
   };
 }
 
+/**
+ * Good-better-best guidance, injected as a SEPARATE system message by the
+ * drafting handlers only when detectTierRequest fires — kept off the base
+ * prompt so a flat request's prompt path stays byte-identical (R7). Content
+ * guidance only: it never overrides pricing (every option is still
+ * catalog-grounded), confidence, or the approval gate. Shared verbatim by the
+ * voice/chat and MMS/photo handlers.
+ */
+export const TIER_GUIDANCE_SECTION = `The request calls for choices or optional extras. You MAY structure line items into good-better-best tiers and/or optional add-ons:
+- Tiers: give 2+ mutually-exclusive options the SAME short "groupKey" slug plus a human "groupLabel" (e.g. "Water heater"), and mark exactly ONE option "isDefaultSelected": true. Each option must be a genuinely distinct product or scope — never near-duplicates.
+- Add-ons: set "isOptional": true with NO groupKey. Do not set "isDefaultSelected" unless the request explicitly asks to pre-check it.
+- Every option and add-on is an ordinary line item — give each a real catalog description and price; they are grounded and reviewed exactly like any other line.
+If the request does not actually call for choices, return flat line items as usual.`;
+
 export interface NormalizeTierOptions {
   /**
    * True when the drafting request explicitly asked for optional add-ons
