@@ -15,6 +15,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Pool } from 'pg';
+import crypto from 'crypto';
 import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
 import { PgCustomerRepository } from '../../src/customers/pg-customer';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
@@ -32,6 +33,22 @@ import {
   createExecutionHandlerRegistry,
   ExecutionContext,
 } from '../../src/proposals/execution/handlers';
+import { buildTaskHandlers } from '../../src/ai/orchestration/handler-registry';
+import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
+import type { TaskContext } from '../../src/ai/tasks/task-handlers';
+
+function noopGateway(): LLMGateway {
+  return {
+    complete: async () =>
+      ({
+        content: '{}',
+        model: 'mock',
+        provider: 'mock',
+        tokenUsage: { input: 0, output: 0, total: 0 },
+        latencyMs: 0,
+      }) satisfies LLMResponse,
+  } as unknown as LLMGateway;
+}
 
 describe('Postgres integration — voice create_customer → approve → execute → persist + audit', () => {
   let pool: Pool;
@@ -121,5 +138,85 @@ describe('Postgres integration — voice create_customer → approve → execute
     const other = await createTestTenant(pool);
     const found = await customerRepo.findById(other.tenantId, customerId);
     expect(found).toBeNull();
+  });
+});
+
+/**
+ * B8 (feat: voice-transcript-and-agent-paths) — create_customer draft-time
+ * duplicate detection parity, pinned against REAL Postgres.
+ *
+ * `PgCustomerRepository.findDuplicates` is exercised through the SAME
+ * `buildTaskHandlers` registry the voice worker and assistant chat use
+ * (ai/orchestration/handler-registry.ts), not a mocked repo — the whole
+ * point of a Docker-gated test here is that a mocked-DB unit test could not
+ * have caught a real-column mismatch in the dedup SQL (the entity resolver
+ * shipped with exactly that bug once — see CLAUDE.md's Code Hygiene note).
+ */
+describe('Postgres integration — create_customer draft-time duplicate detection (B8)', () => {
+  let pool: Pool;
+  let customerRepo: PgCustomerRepository;
+  let tenant: { tenantId: string; userId: string };
+
+  beforeAll(async () => {
+    pool = await getSharedTestDb();
+    customerRepo = new PgCustomerRepository(pool);
+    tenant = await createTestTenant(pool);
+
+    // Seed an existing customer so the draft below finds a near-duplicate
+    // by phone.
+    await customerRepo.create({
+      id: crypto.randomUUID(),
+      tenantId: tenant.tenantId,
+      firstName: 'Alex',
+      lastName: 'Smith',
+      displayName: 'Alex Smith',
+      primaryPhone: '+15551230100',
+      preferredChannel: 'phone',
+      smsConsent: false,
+      isArchived: false,
+      createdBy: tenant.userId,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+  });
+
+  afterAll(async () => {
+    await closeSharedTestDb();
+  });
+
+  function draftContext(entities: Record<string, unknown>): TaskContext {
+    return {
+      tenantId: tenant.tenantId,
+      userId: tenant.userId,
+      message: 'Add customer Alex Smith, phone 555-0100',
+      existingEntities: entities,
+    };
+  }
+
+  it('surfaces the advisory _meta.markers duplicate warning on the draft — status stays approvable', async () => {
+    const handlers = buildTaskHandlers({ gateway: noopGateway(), customerRepo });
+    const { proposal } = await handlers
+      .get('create_customer')!
+      .handle(draftContext({ displayName: 'Alex Smith', phone: '+15551230100' }));
+
+    expect(proposal.proposalType).toBe('create_customer');
+    // Advisory only — never blocks. create_customer always lands 'draft'
+    // (identity creation is human-gated regardless of confidence, D3).
+    expect(proposal.status).toBe('draft');
+    const payload = proposal.payload as Record<string, unknown>;
+    const meta = payload._meta as { markers?: Array<{ path: string; reason: string }> } | undefined;
+    expect(meta?.markers?.length ?? 0).toBeGreaterThanOrEqual(1);
+    expect(meta!.markers!.some((m) => /duplicate|match/i.test(m.reason))).toBe(true);
+  });
+
+  it('drafts cleanly (no marker) for a genuinely new customer', async () => {
+    const handlers = buildTaskHandlers({ gateway: noopGateway(), customerRepo });
+    const { proposal } = await handlers.get('create_customer')!.handle(
+      draftContext({ displayName: 'Someone Entirely New', phone: '+15559998888' }),
+    );
+
+    expect(proposal.proposalType).toBe('create_customer');
+    const payload = proposal.payload as Record<string, unknown>;
+    expect(payload._meta).toBeUndefined();
   });
 });

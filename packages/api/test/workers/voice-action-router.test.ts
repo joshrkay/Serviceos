@@ -25,6 +25,7 @@ import { complaintSeverity } from '../../src/workers/voice-action-router';
 import { assertValidProposalPayload } from '../../src/proposals/contracts';
 import { missingFieldsFor } from '../../src/proposals/proposal';
 import { InMemoryAppointmentRepository } from '../../src/appointments/in-memory-appointment';
+import { InMemoryCustomerRepository } from '../../src/customers/customer';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import type { IntentClassification } from '../../src/ai/orchestration/intent-classifier';
 import type { QueueMessage } from '../../src/queues/queue';
@@ -493,6 +494,135 @@ describe('voice-action-router worker', () => {
     expect(payload.email).toBe('alex@acme.com');
     expect(payload.phone).toBe('555-0100');
     expect(payload.displayName).toBeUndefined();
+  });
+
+  // B8 (feat: voice-transcript-and-agent-paths) — the worker now routes
+  // create_customer through the SAME dedup-aware handler the telephony FSM
+  // uses (CreateCustomerVoiceTaskHandler via the shared handler-registry),
+  // instead of the thin passthrough. A near-duplicate customer must surface
+  // an advisory `_meta.markers` entry on the draft, before approval.
+  describe('B8 — create_customer draft-time duplicate detection', () => {
+    it('stamps an advisory duplicate marker when a near-duplicate customer already exists — draft stays approvable', async () => {
+      const customerRepo = new InMemoryCustomerRepository();
+      await customerRepo.create({
+        id: 'existing-cust-1',
+        tenantId: 't-1',
+        firstName: 'Acme',
+        lastName: 'Corp',
+        displayName: 'Acme Corp',
+        primaryPhone: '555-0100',
+        preferredChannel: 'phone',
+        smsConsent: false,
+        isArchived: false,
+        createdBy: 'u-1',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      const gateway = gatewayReturning([
+        JSON.stringify({
+          intentType: 'create_customer',
+          confidence: 0.93,
+          extractedEntities: {
+            displayName: 'Acme Corp',
+            phone: '555-0100',
+          },
+        } satisfies IntentClassification),
+      ]);
+      const worker = createVoiceActionRouterWorker({ gateway, proposalRepo, customerRepo });
+
+      await worker.handle(
+        msg({
+          tenantId: 't-1',
+          userId: 'u-1',
+          transcript: 'Add customer Acme Corp, phone 555-0100',
+        }),
+        silentLogger(),
+      );
+
+      const byTenant = await proposalRepo.findByTenant('t-1');
+      expect(byTenant).toHaveLength(1);
+      expect(byTenant[0].proposalType).toBe('create_customer');
+      // Advisory only — never blocks. Still 'draft', same as an unflagged
+      // create_customer proposal (create_customer never auto-approves).
+      expect(byTenant[0].status).toBe('draft');
+      const payload = byTenant[0].payload as Record<string, unknown>;
+      const meta = payload._meta as { markers?: Array<{ path: string; reason: string }> } | undefined;
+      expect(meta?.markers?.length ?? 0).toBeGreaterThanOrEqual(1);
+      expect(meta!.markers![0].reason).toMatch(/duplicate|match/i);
+    });
+
+    it('drafts cleanly (no marker) when no near-duplicate exists', async () => {
+      const customerRepo = new InMemoryCustomerRepository();
+      const gateway = gatewayReturning([
+        JSON.stringify({
+          intentType: 'create_customer',
+          confidence: 0.93,
+          extractedEntities: { displayName: 'Brand New Co', phone: '555-9999' },
+        } satisfies IntentClassification),
+      ]);
+      const worker = createVoiceActionRouterWorker({ gateway, proposalRepo, customerRepo });
+
+      await worker.handle(
+        msg({ tenantId: 't-1', userId: 'u-1', transcript: 'Add customer Brand New Co, phone 555-9999' }),
+        silentLogger(),
+      );
+
+      const byTenant = await proposalRepo.findByTenant('t-1');
+      expect(byTenant).toHaveLength(1);
+      const payload = byTenant[0].payload as Record<string, unknown>;
+      expect(payload._meta).toBeUndefined();
+    });
+
+    it('omits the marker (failure-soft) when the customerRepo dedup lookup throws', async () => {
+      const customerRepo = new InMemoryCustomerRepository();
+      // Force findDuplicates to throw so checkCustomerDuplicatesPg's catch
+      // path is exercised — the create_customer draft must still succeed.
+      vi.spyOn(customerRepo, 'findDuplicates').mockRejectedValue(new Error('db down'));
+
+      const gateway = gatewayReturning([
+        JSON.stringify({
+          intentType: 'create_customer',
+          confidence: 0.93,
+          extractedEntities: { displayName: 'Acme Corp', phone: '555-0100' },
+        } satisfies IntentClassification),
+      ]);
+      const worker = createVoiceActionRouterWorker({ gateway, proposalRepo, customerRepo });
+
+      await worker.handle(
+        msg({ tenantId: 't-1', userId: 'u-1', transcript: 'Add customer Acme Corp, phone 555-0100' }),
+        silentLogger(),
+      );
+
+      const byTenant = await proposalRepo.findByTenant('t-1');
+      expect(byTenant).toHaveLength(1);
+      expect(byTenant[0].proposalType).toBe('create_customer');
+      const payload = byTenant[0].payload as Record<string, unknown>;
+      expect(payload._meta).toBeUndefined();
+    });
+
+    it('drafts a phone-less create_customer proposal instead of a needs_callback clarification (no caller-ID on this surface)', async () => {
+      const gateway = gatewayReturning([
+        JSON.stringify({
+          intentType: 'create_customer',
+          confidence: 0.9,
+          extractedEntities: { displayName: 'Sarah' },
+        } satisfies IntentClassification),
+      ]);
+      const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+
+      await worker.handle(
+        msg({ tenantId: 't-1', userId: 'u-1', transcript: 'Add customer Sarah' }),
+        silentLogger(),
+      );
+
+      const byTenant = await proposalRepo.findByTenant('t-1');
+      expect(byTenant).toHaveLength(1);
+      expect(byTenant[0].proposalType).toBe('create_customer');
+      const payload = byTenant[0].payload as Record<string, unknown>;
+      expect(payload.name).toBe('Sarah');
+      expect(payload.phone).toBeUndefined();
+    });
   });
 
   it('emits voice_clarification on low-confidence classification with the guessed intent as a suggestion', async () => {

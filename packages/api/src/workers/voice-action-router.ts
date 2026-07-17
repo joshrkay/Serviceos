@@ -53,6 +53,7 @@ import { JobRepository } from '../jobs/job';
 import { CatalogItemRepository } from '../catalog/catalog-item';
 import { InvoicingQueueDeps } from '../invoices/invoicing-queue';
 import { DunningEventRepository } from '../invoices/dunning-config';
+import type { CustomerRepository } from '../customers/customer';
 import {
   EntityCandidate,
   EntityKind,
@@ -380,6 +381,14 @@ export interface VoiceActionRouterDeps {
    * a poll-initiated one. Optional: absent → clarification instead of draft.
    */
   reviewResponseDraftDeps?: BuildReviewResponseProposalDeps;
+  /**
+   * B8 — create_customer draft-time duplicate detection parity: threaded
+   * into `buildTaskHandlers` so this worker's create_customer proposals get
+   * the SAME dedup-aware `CreateCustomerVoiceTaskHandler` the telephony FSM
+   * already uses (`twilio-adapter.ts`), instead of the thin passthrough.
+   * Optional; absent → drafts with no dedup check (pre-B8 behavior).
+   */
+  customerRepo?: CustomerRepository;
 }
 
 // P11-001: lookup_* intents are READ-ONLY and never produce a
@@ -455,6 +464,8 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
     invoicingDeps: deps.invoicingDeps,
     proposalRepo: deps.proposalRepo,
     thresholdResolver: deps.thresholdResolver,
+    // B8 — create_customer draft-time duplicate detection parity.
+    customerRepo: deps.customerRepo,
   });
   // The handlers below stay surface-specific by design — see the doc
   // comment on HandlerRegistryDeps (ai/orchestration/handler-registry.ts)

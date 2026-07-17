@@ -1,6 +1,7 @@
 import { ProposalType } from '../../proposals/proposal';
 import { LLMGateway } from '../gateway/gateway';
-import { TaskHandler, CreateCustomerTaskHandler } from '../tasks/task-handlers';
+import { TaskHandler } from '../tasks/task-handlers';
+import { CreateCustomerVoiceTaskHandler } from '../tasks/create-customer-task';
 import { InvoiceTaskHandler } from '../tasks/invoice-task';
 import { EstimateTaskHandler } from '../tasks/estimate-task';
 import { CreateAppointmentAITaskHandler } from '../tasks/create-appointment-task';
@@ -18,6 +19,8 @@ import type { InvoiceRepository } from '../../invoices/invoice';
 import type { ProposalRepository } from '../../proposals/proposal';
 import { InvoicingQueueDeps } from '../../invoices/invoicing-queue';
 import { DunningEventRepository } from '../../invoices/dunning-config';
+import type { CustomerRepository } from '../../customers/customer';
+import { isCustomerDuplicateLoader } from '../../customers/dedup';
 import {
   RescheduleAppointmentTaskHandler,
   CancelAppointmentTaskHandler,
@@ -127,6 +130,23 @@ export interface HandlerRegistryDeps {
   thresholdResolver?: (
     tenantId: string,
   ) => Promise<Partial<Record<'supervisor' | 'tech' | 'both', number>> | undefined>;
+  /**
+   * B8 (feat: voice-transcript-and-agent-paths) — create_customer draft-time
+   * duplicate detection parity. Previously only the telephony FSM
+   * (`twilio-adapter.ts`) constructed `CreateCustomerVoiceTaskHandler` with a
+   * `duplicateLoader`; the voice worker and assistant chat used the thin
+   * passthrough `CreateCustomerTaskHandler`, so a near-duplicate customer
+   * created from a voice memo or the assistant chat surfaced no warning
+   * until execution (`customers/customer.ts`'s non-blocking `createCustomer`
+   * check). Wiring `customerRepo` here — the SAME repo every other surface
+   * already has — lets this registry build the SAME dedup-aware handler the
+   * FSM uses (`isCustomerDuplicateLoader` narrows it to a
+   * `CustomerDuplicateLoader` exactly like `twilio-adapter.ts` does), so all
+   * three surfaces share one construction site. Optional; absent → the
+   * handler drafts with no dedup check (byte-identical to the pre-B8 thin
+   * handler's always-clean draft).
+   */
+  customerRepo?: CustomerRepository;
 }
 
 /**
@@ -159,7 +179,21 @@ export function buildTaskHandlers(deps: HandlerRegistryDeps): Map<ProposalType, 
     }),
   );
   handlers.set('update_estimate', new EstimateEditTaskHandler(deps.gateway, deps.estimateRepo, deps.catalogRepo));
-  handlers.set('create_customer', new CreateCustomerTaskHandler());
+  // B8 — dedup-aware handler for BOTH the voice worker and assistant chat,
+  // matching the telephony FSM's construction in twilio-adapter.ts. Only the
+  // `duplicateLoader` differs by availability of `deps.customerRepo`;
+  // `requirePhone: false` because neither surface has a caller-ID phone —
+  // see CreateCustomerTaskDeps.requirePhone in ai/tasks/create-customer-task.ts.
+  handlers.set(
+    'create_customer',
+    new CreateCustomerVoiceTaskHandler({
+      duplicateLoader:
+        deps.customerRepo && isCustomerDuplicateLoader(deps.customerRepo)
+          ? deps.customerRepo
+          : undefined,
+      requirePhone: false,
+    }),
+  );
   handlers.set('create_job', new CreateJobVoiceTaskHandler());
   // B7 — update_job: bounded, safe field edit (status/priority/title/
   // description) to an EXISTING job. jobRepo powers the jobId gate

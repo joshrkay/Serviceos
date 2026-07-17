@@ -51,6 +51,23 @@ export interface CreateCustomerTaskDeps {
    * read-only — the handler still mutates no state and never auto-executes.
    */
   duplicateLoader?: CustomerDuplicateLoader;
+  /**
+   * B8 (feat: voice-transcript-and-agent-paths) — whether a missing phone
+   * escalates to `needs_callback`. Defaults to `true`, preserving the
+   * telephony FSM's original behavior (`twilio-adapter.ts`): on a live
+   * call, the caller's phone IS the point — if caller-ID is blocked and
+   * they didn't state a callback, the FSM must ask for one.
+   *
+   * The voice worker (pre-recorded memos) and assistant chat have no
+   * caller-ID concept at all, so that same gate would reject perfectly
+   * valid phone-less create_customer proposals (e.g. "add customer Sarah",
+   * name + email only) that the thin passthrough handler always allowed.
+   * The shared handler-registry (`ai/orchestration/handler-registry.ts`)
+   * constructs this handler with `requirePhone: false` for exactly that
+   * reason — a missing phone there just means the proposal omits it,
+   * same as before.
+   */
+  requirePhone?: boolean;
 }
 
 /**
@@ -97,6 +114,15 @@ export interface CreateCustomerTaskOutcome {
  */
 export const CREATE_CUSTOMER_CONFIRMATION_TTS =
   "Got it, I've sent your info to the office; we'll send you a confirmation.";
+
+/**
+ * B8 (feat: voice-transcript-and-agent-paths) — synthetic `_meta.markers`
+ * path for the advisory duplicate-customer warning. The warning concerns
+ * the whole proposal (name/phone/email jointly), not one payload field, so
+ * it uses a synthetic path — same convention as
+ * `proposals/supervisor/marker.ts`'s `SUPERVISOR_MARKER_PATH`.
+ */
+export const DUPLICATE_CUSTOMER_MARKER_PATH = '_duplicate';
 
 /**
  * Resolve the canonical phone for a new-customer proposal: prefer the
@@ -164,9 +190,11 @@ function readEntities(context: TaskContext): CreateCustomerEntities {
 export class CreateCustomerVoiceTaskHandler implements TaskHandler {
   readonly taskType: ProposalType = 'create_customer';
   private readonly duplicateLoader?: CustomerDuplicateLoader;
+  private readonly requirePhone: boolean;
 
   constructor(deps: CreateCustomerTaskDeps = {}) {
     this.duplicateLoader = deps.duplicateLoader;
+    this.requirePhone = deps.requirePhone ?? true;
   }
 
   async handle(context: TaskContext): Promise<TaskResult> {
@@ -222,8 +250,12 @@ export class CreateCustomerVoiceTaskHandler implements TaskHandler {
 
     const { phone, phoneSource } = resolvePhone(ents);
     // Path 4: phone blocked and no spoken callback — escalate via
-    // needs_callback so the FSM asks for a callback number.
-    if (!phone) {
+    // needs_callback so the FSM asks for a callback number. Only the
+    // telephony surface requires this (see CreateCustomerTaskDeps.requirePhone
+    // doc comment) — the voice worker and assistant chat have no caller-ID
+    // concept and allow a phone-less proposal, same as the pre-B8 thin
+    // passthrough handler did.
+    if (!phone && this.requirePhone) {
       return {
         status: 'needs_callback',
         message: 'Caller-ID is blocked and no callback number was provided',
@@ -305,8 +337,9 @@ export class CreateCustomerVoiceTaskHandler implements TaskHandler {
         : {}),
     };
 
+    const summaryPhone = phone ? ` (${phone})` : '';
     const summaryEmail = payload.email ? `, ${payload.email}` : '';
-    const summary = `New customer from inbound call: ${payload.name} (${phone})${summaryEmail}`;
+    const summary = `New customer from inbound call: ${payload.name}${summaryPhone}${summaryEmail}`;
     const explanation = ents.existingLeadId
       ? `Caller phone matches lead ${ents.existingLeadId}. Approve to convert to customer; reject to keep as lead.`
       : 'Caller asked to sign up as a new customer. Approve to add them to the CRM.';
@@ -322,6 +355,43 @@ export class CreateCustomerVoiceTaskHandler implements TaskHandler {
         ? { _meta: { overallConfidence: getConfidenceLevel(ents.classifierConfidence) } }
         : {}),
     };
+
+    // B8 (feat: voice-transcript-and-agent-paths) — draft-time duplicate
+    // detection parity: the FSM already produced `sourceContext.
+    // duplicateWarnings` above, but nothing renders that channel — the
+    // review card (AIProposalCard / InboxPage, both web and mobile) reads
+    // `payload._meta.markers` (RV-007). Stamp the SAME advisory here, once,
+    // so every surface that routes through this handler (telephony FSM,
+    // voice worker, assistant chat) shows "possible duplicate" on the draft
+    // BEFORE approval. Advisory only — never blocks; `decideInitialStatus`
+    // and `approveProposal` never inspect `_meta.markers`.
+    if (duplicateWarnings.length > 0) {
+      const existingMeta =
+        payloadRecord._meta && typeof payloadRecord._meta === 'object' && !Array.isArray(payloadRecord._meta)
+          ? (payloadRecord._meta as Record<string, unknown>)
+          : {};
+      const existingMarkers = Array.isArray(existingMeta.markers)
+        ? (existingMeta.markers as unknown[])
+        : [];
+      const CONFIDENCE_LEVEL_VALUES = new Set(['high', 'medium', 'low', 'very_low']);
+      const overallConfidence =
+        typeof existingMeta.overallConfidence === 'string' &&
+        CONFIDENCE_LEVEL_VALUES.has(existingMeta.overallConfidence)
+          ? existingMeta.overallConfidence
+          : 'medium'; // synthesized envelope; the advisory layer only asserts the neutral level
+      const sorted = [...duplicateWarnings].sort((a, b) => b.score - a.score);
+      const top = sorted[0];
+      const extra = sorted.length - 1;
+      const reason =
+        extra > 0
+          ? `${top.message} (+${extra} more possible match${extra > 1 ? 'es' : ''})`
+          : top.message;
+      payloadRecord._meta = {
+        ...existingMeta,
+        overallConfidence,
+        markers: [...existingMarkers, { path: DUPLICATE_CUSTOMER_MARKER_PATH, reason }],
+      };
+    }
 
     const input: CreateProposalInput = {
       tenantId: context.tenantId,

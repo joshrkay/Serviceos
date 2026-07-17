@@ -2469,6 +2469,11 @@ export function createApp(): AppWithLifecycle {
   const voiceActionRouterWorker = createVoiceActionRouterWorker({
     gateway: llmGateway,
     proposalRepo,
+    // B8 — create_customer draft-time duplicate detection parity: the SAME
+    // customerRepo the telephony FSM (twilio-adapter.ts) already uses to
+    // build its duplicateLoader, so the worker's create_customer proposals
+    // get the identical dedup-aware handler.
+    customerRepo,
     ...(customerNegotiationContextProvider ? { customerNegotiationContextProvider } : {}),
     // P2-036 V2 — additive discount engine; fail-closed (dormant until a tenant
     // configures a discount policy via settings).
@@ -5206,6 +5211,9 @@ export function createApp(): AppWithLifecycle {
       appointmentRepo,
       jobRepo,
       dunningEventRepo,
+      // B8 — create_customer draft-time duplicate detection parity, same
+      // customerRepo the voice worker and telephony FSM already use.
+      customerRepo,
       // §3B/3D/3E — assistant chat shares the operator-side resolver
       // shim with the voice-action-router so the same vertical context
       // reaches both text and voice classification paths.

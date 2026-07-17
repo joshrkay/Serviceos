@@ -36,6 +36,7 @@ import { buildLineItem, calculateDocumentTotals } from '../../src/shared/billing
 // longer silently diverge on the 12 intents it was dropping.
 import { createVoiceActionRouterWorker } from '../../src/workers/voice-action-router';
 import { InMemoryAppointmentRepository } from '../../src/appointments/in-memory-appointment';
+import { InMemoryCustomerRepository } from '../../src/customers/customer';
 import { InMemoryJobRepository } from '../../src/jobs/job';
 import type { Job } from '../../src/jobs/job';
 import type { Estimate } from '../../src/estimates/estimate';
@@ -49,6 +50,10 @@ function buildApp(
   gateway: LLMGateway,
   proposalRepo: InMemoryProposalRepository,
   verticalPromptResolver?: (tenantId: string) => Promise<string | undefined>,
+  // B8 — optional customerRepo so tests can pin the create_customer
+  // draft-time duplicate detection wiring without touching every other
+  // buildApp() call site in this file.
+  customerRepo?: import('../../src/customers/customer').CustomerRepository,
 ) {
   const app = express();
   app.use(express.json());
@@ -67,6 +72,7 @@ function buildApp(
       gateway,
       proposalRepo,
       ...(verticalPromptResolver ? { verticalPromptResolver } : {}),
+      ...(customerRepo ? { customerRepo } : {}),
     }),
   );
   return app;
@@ -163,6 +169,102 @@ describe('POST /api/assistant/chat — create_customer path', () => {
     );
     expect(byKey.email).toBe('');
     expect(byKey.phone).toBe('');
+  });
+
+  // B8 (feat: voice-transcript-and-agent-paths) — the assistant route now
+  // routes create_customer through the SAME dedup-aware handler the
+  // telephony FSM uses (CreateCustomerVoiceTaskHandler via the shared
+  // handler-registry), instead of the thin passthrough that only warned at
+  // execution time (customers/customer.ts's non-blocking createCustomer
+  // check). A near-duplicate must surface an advisory marker on the DRAFT.
+  it('B8 — stamps an advisory duplicate marker when a near-duplicate customer already exists; the draft is still approvable', async () => {
+    const customerRepo = new InMemoryCustomerRepository();
+    await customerRepo.create({
+      id: 'existing-cust-1',
+      tenantId: TEST_TENANT,
+      firstName: 'Alex',
+      lastName: undefined,
+      displayName: 'Alex',
+      email: 'alex@example.com',
+      preferredChannel: 'email',
+      smsConsent: false,
+      isArchived: false,
+      createdBy: 'u',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    } as never);
+
+    const gateway = scriptedGateway([
+      JSON.stringify({
+        intentType: 'create_customer',
+        confidence: 0.93,
+        extractedEntities: { displayName: 'Alex', email: 'alex@example.com' },
+      }),
+    ]);
+    const app = buildApp(gateway, proposalRepo, undefined, customerRepo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Create a new customer named Alex, email alex@example.com' }] });
+
+    expect(res.status).toBe(200);
+    const proposal = res.body?.message?.proposal;
+    expect(proposal?.type).toBe('Customer');
+    // Advisory only — never blocks. Still "Pending" (approvable), same as
+    // an unflagged create_customer proposal.
+    expect(proposal?.status).toBe('Pending');
+    expect(proposal?.meta?.markers?.length ?? 0).toBeGreaterThanOrEqual(1);
+
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted).toHaveLength(1);
+    const meta = (persisted[0].payload as Record<string, unknown>)._meta as
+      | { markers?: Array<{ path: string; reason: string }> }
+      | undefined;
+    expect(meta?.markers?.length ?? 0).toBeGreaterThanOrEqual(1);
+  });
+
+  it('B8 — no marker on the draft when no near-duplicate customer exists', async () => {
+    const customerRepo = new InMemoryCustomerRepository();
+    const gateway = scriptedGateway([
+      JSON.stringify({
+        intentType: 'create_customer',
+        confidence: 0.93,
+        extractedEntities: { displayName: 'Brand New Person', email: 'brand.new@example.com' },
+      }),
+    ]);
+    const app = buildApp(gateway, proposalRepo, undefined, customerRepo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Create a new customer named Brand New Person' }] });
+
+    expect(res.status).toBe(200);
+    const proposal = res.body?.message?.proposal;
+    expect(proposal?.meta?.markers ?? undefined).toBeUndefined();
+  });
+
+  it('B8 — omits the marker (failure-soft) when the customerRepo dedup lookup throws', async () => {
+    const customerRepo = new InMemoryCustomerRepository();
+    vi.spyOn(customerRepo, 'findDuplicates').mockRejectedValue(new Error('db down'));
+
+    const gateway = scriptedGateway([
+      JSON.stringify({
+        intentType: 'create_customer',
+        confidence: 0.93,
+        extractedEntities: { displayName: 'Alex', email: 'alex@example.com' },
+      }),
+    ]);
+    const app = buildApp(gateway, proposalRepo, undefined, customerRepo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Create a new customer named Alex, email alex@example.com' }] });
+
+    expect(res.status).toBe(200);
+    const proposal = res.body?.message?.proposal;
+    expect(proposal?.type).toBe('Customer');
+    expect(proposal?.status).toBe('Pending');
+    expect(proposal?.meta?.markers ?? undefined).toBeUndefined();
   });
 
   it('asks for the name (no proposal) when create_customer is classified without one', async () => {

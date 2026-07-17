@@ -16,7 +16,6 @@ import {
   isVoiceApprovalIntent,
   isVoiceEditIntent,
 } from '../ai/orchestration/intent-classifier';
-import { CreateCustomerTaskHandler } from '../ai/tasks/task-handlers';
 import type { TaskHandler } from '../ai/tasks/task-handlers';
 import { EstimateTaskHandler } from '../ai/tasks/estimate-task';
 import { EstimateEditTaskHandler } from '../ai/tasks/estimate-edit-task';
@@ -36,6 +35,7 @@ import type { EstimateRepository } from '../estimates/estimate';
 import type { AppointmentRepository } from '../appointments/appointment';
 import type { JobRepository } from '../jobs/job';
 import type { DunningEventRepository } from '../invoices/dunning-config';
+import type { CustomerRepository } from '../customers/customer';
 import type { StandingInstruction } from '../instructions/standing-instructions';
 import { selectInjectedStandingInstructions } from '../ai/standing-instructions-context';
 import { createLogger } from '../logging/logger';
@@ -261,6 +261,14 @@ export interface AssistantRouterDeps {
    * exact pre-B5 drafting.
    */
   dunningEventRepo?: DunningEventRepository;
+  /**
+   * B8 — create_customer draft-time duplicate detection parity: threaded
+   * into `buildTaskHandlers` so this route's create_customer proposals get
+   * the SAME dedup-aware `CreateCustomerVoiceTaskHandler` the telephony FSM
+   * already uses (`twilio-adapter.ts`), instead of the thin passthrough.
+   * Optional; absent → drafts with no dedup check (pre-B8 behavior).
+   */
+  customerRepo?: CustomerRepository;
   /**
    * Story 3.11 — persist each chat turn (operator message + agent reply) so the
    * running conversation survives reload and is searchable. Optional so tests
@@ -743,6 +751,8 @@ async function generateAssistantReply(
             ? { jobRepo: deps.jobRepo, invoiceRepo: deps.invoiceRepo, estimateRepo: deps.estimateRepo }
             : undefined,
         proposalRepo: deps.proposalRepo,
+        // B8 — create_customer draft-time duplicate detection parity.
+        customerRepo: deps.customerRepo,
       });
 
       // QA-2026-06-05 (AST-07, scoped): multi-step asks ("…, then …") are
@@ -769,7 +779,9 @@ async function generateAssistantReply(
             continue;
           }
           const chainHandlers: Record<string, (() => TaskHandler) | undefined> = {
-            create_customer: () => new CreateCustomerTaskHandler(),
+            // B8 — dedup-aware handler (same construction as the telephony
+            // FSM), drawn from sharedHandlers like the other 12 intents below.
+            create_customer: () => sharedHandlers.get('create_customer')!,
             draft_estimate: () => new EstimateTaskHandler(deps.gateway, deps.catalogRepo),
             update_estimate: () => new EstimateEditTaskHandler(deps.gateway, deps.estimateRepo, deps.catalogRepo),
             create_invoice: () => new InvoiceTaskHandler(deps.gateway, deps.catalogRepo),
@@ -940,12 +952,14 @@ async function generateAssistantReply(
       }
 
       if (classification.intentType === 'create_customer') {
-        const handler = new CreateCustomerTaskHandler();
+        // B8 — dedup-aware handler (same construction as the telephony FSM
+        // and the chain map above), drawn from sharedHandlers so this
+        // surface can't drift from the worker's create_customer handling.
+        const handler = sharedHandlers.get('create_customer')!;
         const entities = classification.extractedEntities;
         // Same translation the voice-action-router does: classifier
         // surfaces `displayName`, the create_customer contract wants
-        // `name`. Keeping the mapping here means the task handler stays
-        // a dumb passthrough.
+        // `name`.
         const customerPayload: Record<string, unknown> = {};
         if (entities?.displayName) customerPayload.name = entities.displayName;
         if (entities?.email) customerPayload.email = entities.email;

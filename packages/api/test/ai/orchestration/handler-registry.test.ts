@@ -276,4 +276,81 @@ describe('ai/orchestration/handler-registry — buildTaskHandlers', () => {
     // (see resolveJobIdGate's doc comment in job-edit-task.ts).
     expect(proposal.sourceContext).toMatchObject({ missingFields: ['jobId'] });
   });
+
+  // B8 (feat: voice-transcript-and-agent-paths) — create_customer draft-time
+  // duplicate detection parity. Before B8, only the telephony FSM
+  // (twilio-adapter.ts) constructed CreateCustomerVoiceTaskHandler with a
+  // duplicateLoader; this registry built the thin passthrough instead, so
+  // the voice worker and assistant chat surfaced no advisory. These tests
+  // pin that buildTaskHandlers now constructs the SAME dedup-aware handler
+  // for both surfaces, wired from `customerRepo`.
+  describe('B8 — create_customer dedup-aware wiring', () => {
+    function customerRepoWithMatch(): {
+      findDuplicates: (
+        tenantId: string,
+        criteria: { phone?: string; email?: string; name?: string },
+      ) => Promise<Array<Record<string, unknown>>>;
+    } {
+      return {
+        findDuplicates: async (tenantId: string) => [
+          {
+            id: 'existing-cust-1',
+            tenantId,
+            firstName: 'Alex',
+            lastName: 'Smith',
+            displayName: 'Alex Smith',
+            primaryPhone: '+15551230100',
+            preferredChannel: 'phone',
+            smsConsent: false,
+            isArchived: false,
+            createdBy: 'u',
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          },
+        ],
+      };
+    }
+
+    it('constructs create_customer as CreateCustomerVoiceTaskHandler (not the thin passthrough)', () => {
+      const handlers = buildTaskHandlers({ gateway: noopGateway() });
+      const handler = handlers.get('create_customer');
+      expect(handler?.constructor.name).toBe('CreateCustomerVoiceTaskHandler');
+    });
+
+    it('threads customerRepo into create_customer as the duplicateLoader — a near-duplicate stamps the advisory marker', async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const customerRepo = customerRepoWithMatch() as any;
+      const handlers = buildTaskHandlers({ gateway: noopGateway(), customerRepo });
+      const { proposal } = await handlers.get('create_customer')!.handle(
+        ctx({
+          existingEntities: { displayName: 'Alex Smith', callerIdPhone: '+15551230100' },
+        }),
+      );
+      expect(proposal.proposalType).toBe('create_customer');
+      const meta = (proposal.payload as Record<string, unknown>)._meta as
+        | { markers?: Array<{ path: string; reason: string }> }
+        | undefined;
+      expect(meta?.markers?.length ?? 0).toBeGreaterThanOrEqual(1);
+    });
+
+    it('omits the advisory marker with no customerRepo wired (clean draft, unchanged from pre-B8)', async () => {
+      const handlers = buildTaskHandlers({ gateway: noopGateway() });
+      const { proposal } = await handlers.get('create_customer')!.handle(
+        ctx({
+          existingEntities: { displayName: 'Alex Smith', callerIdPhone: '+15551230100' },
+        }),
+      );
+      expect(proposal.proposalType).toBe('create_customer');
+      expect((proposal.payload as Record<string, unknown>)._meta).toBeUndefined();
+    });
+
+    it('drafts a phone-less create_customer proposal (requirePhone: false — no caller-ID concept on the worker/assistant surfaces)', async () => {
+      const handlers = buildTaskHandlers({ gateway: noopGateway() });
+      const { proposal } = await handlers.get('create_customer')!.handle(
+        ctx({ existingEntities: { displayName: 'Sarah', email: 'sarah@example.com' } }),
+      );
+      expect(proposal.proposalType).toBe('create_customer');
+      expect((proposal.payload as Record<string, unknown>).name).toBe('Sarah');
+    });
+  });
 });
