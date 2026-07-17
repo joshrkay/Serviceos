@@ -75,7 +75,9 @@ function makeStorage(): StorageProvider & {
 }
 
 const validVisionJson = JSON.stringify({
-  lineItems: [{ description: 'Drywall patch', quantity: 1, unitPrice: 18000, category: 'labor' }],
+  // Within PRICE_CONFLICT tolerance of the 15000¢ catalog price — a larger
+  // deviation is a "did you mean" conflict, not a silent snap.
+  lineItems: [{ description: 'Drywall patch', quantity: 1, unitPrice: 15600, category: 'labor' }],
   notes: 'Hole near the outlet.',
   confidence_score: 0.7,
 });
