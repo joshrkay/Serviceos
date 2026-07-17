@@ -1,5 +1,10 @@
 import { v4 as uuidv4 } from 'uuid';
-import { LineItem, DocumentTotals, calculateDocumentTotals } from '../shared/billing-engine';
+import {
+  LineItem,
+  DocumentTotals,
+  calculateDocumentTotals,
+  resolveSelectedLineItems,
+} from '../shared/billing-engine';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { ValidationError, ConflictError } from '../shared/errors';
 import { RefreshJobMoneyStateDeps, refreshJobMoneyStateSafe } from '../jobs/job-money-state';
@@ -254,8 +259,16 @@ export async function createEstimate(
   const errors = validateEstimateInput(input);
   if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
 
+  // EE-1 — a tiered estimate's headline total reflects the DEFAULT selection
+  // (each group's default tier + pre-checked add-ons + always-billed lines),
+  // not the sum of every option. resolveSelectedLineItems returns ALL items
+  // when there are no selectable groups, so a flat estimate's total is
+  // byte-identical. Every line item is still persisted (input.lineItems below);
+  // only the headline total narrows. Accept-time recompute
+  // (public-estimate-service) uses the same resolve-then-total shape over the
+  // customer's chosen selection.
   const totals = calculateDocumentTotals(
-    input.lineItems,
+    resolveSelectedLineItems(input.lineItems),
     input.discountCents ?? 0,
     input.taxRateBps ?? 0
   );
