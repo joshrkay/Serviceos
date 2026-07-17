@@ -293,8 +293,8 @@ describe('applyCatalogPricing', () => {
     expect(out.lineItems[0]).toMatchObject({ unitPriceCents: 2_500, pricingSource: 'ambiguous' });
     expect(out.missingFields).toEqual(['lineItems[0].catalogItemId']);
     expect(out.catalogResolution![0]).toEqual([
-      { id: air.id, name: 'Air Filter', unitPriceCents: 2_000, score: 0.77 },
-      { id: water.id, name: 'Water Filter', unitPriceCents: 3_500, score: 0.77 },
+      { id: air.id, name: 'Air Filter', unitPriceCents: 2_000, score: 0.77, category: 'material' },
+      { id: water.id, name: 'Water Filter', unitPriceCents: 3_500, score: 0.77, category: 'material' },
     ]);
   });
 
@@ -398,7 +398,13 @@ describe('applyCatalogPricing — price conflict ("did you mean")', () => {
     expect(out.lineItems[0]).not.toHaveProperty('catalogItemId');
     expect(out.missingFields).toEqual(['lineItems[0].catalogItemId']);
     expect(out.catalogResolution![0]).toEqual([
-      { id: heater.id, name: 'Water Heater Install', unitPriceCents: 15_000, score: 1 },
+      {
+        id: heater.id,
+        name: 'Water Heater Install',
+        unitPriceCents: 15_000,
+        score: 1,
+        category: 'labor',
+      },
       { id: 'spoken:0', name: 'Keep spoken price', unitPriceCents: 7_500, score: 0 },
     ]);
     expect(out.anyCatalogPriced).toBe(false);
@@ -447,7 +453,13 @@ describe('applyCatalogPricing — price conflict ("did you mean")', () => {
       needsPricing: true,
     });
     expect(out.catalogResolution![0]).toEqual([
-      { id: heater.id, name: 'Water Heater Install', unitPriceCents: 15_000, score: 1 },
+      {
+        id: heater.id,
+        name: 'Water Heater Install',
+        unitPriceCents: 15_000,
+        score: 1,
+        category: 'labor',
+      },
       { id: 'spoken:0', name: 'Keep spoken price', unitPriceCents: 0, score: 0 },
     ]);
     expect(out.requiresReview).toBe(true);

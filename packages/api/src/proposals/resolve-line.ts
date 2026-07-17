@@ -35,6 +35,15 @@ interface CatalogCandidate {
   name: string;
   unitPriceCents: number;
   score: number;
+  /**
+   * Contract category ('labor' | 'material') of the catalog item this
+   * candidate represents (see catalog-resolver.ts `contractCategory`).
+   * Absent on the synthetic `spoken:` candidate (no catalog identity) and
+   * on candidates recorded by proposals persisted before this field
+   * existed — both cases are handled by leaving the line's own category
+   * untouched.
+   */
+  category?: string;
 }
 
 export interface ResolveLineInput {
@@ -160,6 +169,14 @@ export async function resolveProposalLine(
     line.catalogItemId = chosen.id;
     line.description = chosen.name;
     line.pricingSource = 'catalog';
+    // Stamp the catalog item's category onto the line so an operator's
+    // pick can't leave a material/labor line executing under the LLM's
+    // (or the line's prior default) category. Legacy candidates recorded
+    // before this field existed carry no `category` — leave the line's
+    // category untouched rather than clobbering it with undefined.
+    if (chosen.category !== undefined) {
+      line.category = chosen.category;
+    }
   }
   line.needsPricing = false;
   if (priceField === 'unitPriceCents') {

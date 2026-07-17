@@ -87,6 +87,80 @@ describe('U2 — resolveProposalLine', () => {
     expect(audits.some((a) => a.eventType === 'proposal.line_resolved')).toBe(true);
   });
 
+  it('stamps the chosen candidate’s category onto the line when the candidate carries one', async () => {
+    await repo.create(
+      ambiguousProposal({
+        payload: {
+          lineItems: [
+            {
+              id: 'l1',
+              description: 'flush valve',
+              quantity: 1,
+              unitPrice: 0,
+              category: 'labor', // wrong default the LLM/draft stamped
+              pricingSource: 'ambiguous',
+              needsPricing: true,
+            },
+          ],
+        },
+        sourceContext: {
+          missingFields: ['lineItems[0].catalogItemId'],
+          catalogResolution: {
+            0: [
+              {
+                id: 'cat-a',
+                name: 'Flush valve (standard)',
+                unitPriceCents: 4500,
+                score: 0.7,
+                category: 'material',
+              },
+              {
+                id: 'cat-b',
+                name: 'Flush valve (premium)',
+                unitPriceCents: 8200,
+                score: 0.6,
+                category: 'material',
+              },
+            ],
+          },
+        },
+      }),
+    );
+
+    const result = await call('cat-b');
+
+    const line = (result.payload.lineItems as Array<Record<string, unknown>>)[0];
+    expect(line.category).toBe('material');
+  });
+
+  it('leaves line.category untouched when the chosen candidate is a legacy record with no category (pre-fix proposals)', async () => {
+    await repo.create(
+      ambiguousProposal({
+        payload: {
+          lineItems: [
+            {
+              id: 'l1',
+              description: 'flush valve',
+              quantity: 1,
+              unitPrice: 0,
+              category: 'material', // set before this fix shipped
+              pricingSource: 'ambiguous',
+              needsPricing: true,
+            },
+          ],
+        },
+        // No `category` field on the candidates — mirrors a proposal
+        // persisted before this fix, which recorded candidates without it.
+      }),
+    );
+
+    const result = await call('cat-b');
+
+    const line = (result.payload.lineItems as Array<Record<string, unknown>>)[0];
+    expect(line.category).toBe('material'); // untouched, not clobbered to undefined
+    expect(line.pricingSource).toBe('catalog'); // resolution still proceeds normally
+  });
+
   it('rejects a catalogItemId that is not one of the line candidates (grounding invariant)', async () => {
     await repo.create(ambiguousProposal());
     await expect(call('cat-not-a-candidate')).rejects.toBeInstanceOf(ValidationError);
@@ -284,6 +358,49 @@ describe('U2 — resolveProposalLine — price-conflict "did you mean"', () => {
     await expect(call('spoken:99')).rejects.toBeInstanceOf(ValidationError);
     const after = await repo.findById(TENANT, PROPOSAL);
     expect(after?.status).toBe('draft'); // untouched
+  });
+
+  it('picking spoken:0 does NOT alter the line’s category, even when the real catalog candidate carries one', async () => {
+    await repo.create(
+      conflictProposal({
+        payload: {
+          lineItems: [
+            {
+              id: 'l1',
+              description: 'Water Heater Install',
+              quantity: 1,
+              unitPriceCents: 7_500,
+              totalCents: 7_500,
+              category: 'labor', // the line's own (pre-resolution) category
+              pricingSource: 'ambiguous',
+              needsPricing: true,
+            },
+          ],
+          _meta: { overallConfidence: 'low' },
+        },
+        sourceContext: {
+          missingFields: ['lineItems[0].catalogItemId'],
+          catalogResolution: {
+            0: [
+              {
+                id: 'cat-heater',
+                name: 'Water Heater Install',
+                unitPriceCents: 15_000,
+                score: 1,
+                category: 'material', // the catalog item's category — must NOT leak in
+              },
+              { id: 'spoken:0', name: 'Keep spoken price', unitPriceCents: 7_500, score: 0 },
+            ],
+          },
+        },
+      }),
+    );
+
+    const result = await call('spoken:0');
+
+    const line = (result.payload.lineItems as Array<Record<string, unknown>>)[0];
+    expect(line.pricingSource).toBe('manual');
+    expect(line.category).toBe('labor'); // unchanged — the spoken carve-out has no catalog identity
   });
 
   it('the ordinary catalog resolution path does NOT stamp priceOverride in the audit', async () => {

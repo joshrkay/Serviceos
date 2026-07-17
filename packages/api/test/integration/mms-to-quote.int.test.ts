@@ -46,7 +46,9 @@ function gatewayReturning(content: string): LLMGateway {
 
 const visionJson = JSON.stringify({
   lineItems: [
-    { description: 'Drywall patch', quantity: 1, unitPrice: 22000, category: 'labor' },
+    // Within PRICE_CONFLICT tolerance of the 15000¢ catalog price — a larger
+    // deviation is a "did you mean" conflict, not a silent snap.
+    { description: 'Drywall patch', quantity: 1, unitPrice: 15600, category: 'labor' },
     { description: 'Bespoke trim work', quantity: 1, unitPrice: 7500, category: 'material' },
   ],
   notes: 'Hole near the window.',

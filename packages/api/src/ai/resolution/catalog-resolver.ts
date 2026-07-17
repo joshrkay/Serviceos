@@ -371,7 +371,19 @@ export interface CatalogPricingOutcome {
   /** Ambiguous-line candidates keyed by line index, for the review UI. */
   catalogResolution?: Record<
     number,
-    Array<{ id: string; name: string; unitPriceCents: number; score: number }>
+    Array<{
+      id: string;
+      name: string;
+      unitPriceCents: number;
+      score: number;
+      /**
+       * Contract category ('labor' | 'material') of the catalog item this
+       * candidate represents. Absent on the synthetic `spoken:` "keep
+       * spoken price" candidate — it has no catalog identity, so picking
+       * it must leave the line's own category untouched (resolve-line.ts).
+       */
+      category?: string;
+    }>
   >;
   anyUncatalogued: boolean;
   anyCatalogPriced: boolean;
@@ -473,7 +485,16 @@ export function applyCatalogPricing(
         });
         missingFields.push(`lineItems[${idx}].catalogItemId`);
         catalogResolution[idx] = [
-          { id: item.id, name: item.name, unitPriceCents: item.unitPriceCents, score: 1 },
+          {
+            id: item.id,
+            name: item.name,
+            unitPriceCents: item.unitPriceCents,
+            score: 1,
+            category: contractCategory(item),
+          },
+          // Synthetic "keep spoken price" choice has no catalog identity —
+          // no category is stamped, so picking it leaves the line's own
+          // category untouched (see resolve-line.ts).
           { id: `spoken:${idx}`, name: 'Keep spoken price', unitPriceCents: draftedPrice, score: 0 },
         ];
         return;
@@ -511,6 +532,7 @@ export function applyCatalogPricing(
         name: c.item.name,
         unitPriceCents: c.item.unitPriceCents,
         score: c.score,
+        category: contractCategory(c.item),
       }));
       return;
     }
