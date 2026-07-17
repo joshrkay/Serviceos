@@ -3,6 +3,11 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { JobSchedulePanel } from './JobSchedulePanel';
 
 vi.mock('../../utils/api-fetch', () => ({ apiFetch: vi.fn() }));
+// Pin a tenant tz distinct from UTC so the current-schedule label + the
+// datetime-local input are asserted to render in TENANT-local time.
+vi.mock('../../hooks/useTenantTimezone', () => ({
+  useTenantTimezone: () => 'America/Los_Angeles',
+}));
 import { apiFetch } from '../../utils/api-fetch';
 
 const APPT = {
@@ -60,7 +65,13 @@ describe('JobSchedulePanel (U8)', () => {
     mockApi([APPT]);
     render(<JobSchedulePanel jobId="job-1" assignedTechnicianId="tech-9" />);
 
-    expect(await screen.findByTestId('current-schedule')).toHaveTextContent(/Scheduled for/);
+    // 2030-07-01T15:00:00Z is 8:00 AM in America/Los_Angeles (PDT). The label
+    // must render the TENANT-local time (8:00 AM), not the browser/UTC 3:00 PM.
+    const current = await screen.findByTestId('current-schedule');
+    expect(current).toHaveTextContent(/Scheduled for/);
+    expect(current).toHaveTextContent(/8:00\s*AM/);
+    // The reschedule input is seeded with the same tenant-local wall clock.
+    expect(screen.getByLabelText(/Reschedule start/)).toHaveValue('2030-07-01T08:00');
     expect(screen.getByLabelText(/Reschedule start/)).toHaveClass('min-h-11');
     expect(screen.getByLabelText(/Technician/)).toHaveClass('min-h-11');
     expect(screen.getByRole('button', { name: 'Reschedule' })).toHaveClass('min-h-11');

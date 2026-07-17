@@ -1171,7 +1171,14 @@ export function JobDetailView({
         <JobSchedulePanel
           jobId={id}
           assignedTechnicianId={apiJob?.assignedTechnicianId ?? apiJob?.technician?.id}
-          onChanged={refetchJob}
+          // Refetch BOTH the job (status/tech) and the linked appointment docs —
+          // the header ScheduleTechCard renders scheduledDate/Time from
+          // appointmentStart (loadLinkedDocs → /api/appointments), so without
+          // this it would show a stale slot / "Not scheduled" until reload.
+          onChanged={() => {
+            void refetchJob();
+            void loadLinkedDocs();
+          }}
         />
       </div>
       <DescriptionCard job={job} />

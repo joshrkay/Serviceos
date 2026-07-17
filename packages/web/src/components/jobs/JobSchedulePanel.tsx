@@ -3,7 +3,11 @@ import { apiFetch } from '../../utils/api-fetch';
 import { Input, Select, Field, Button } from '../ui';
 import { useTechnicianRoster } from '../../hooks/useTechnicianRoster';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
-import { datetimeLocalToUtc, utcToTenantWallClock } from '../../utils/formatInTenantTz';
+import {
+  datetimeLocalToUtc,
+  utcToTenantWallClock,
+  formatDateTimeInTenantTz,
+} from '../../utils/formatInTenantTz';
 
 interface Appointment {
   id: string;
@@ -146,7 +150,7 @@ export function JobSchedulePanel({ jobId, assignedTechnicianId, onChanged }: Job
 
       <p className="text-sm text-foreground" data-testid="current-schedule">
         {appointment
-          ? `Scheduled for ${new Date(appointment.scheduledStart).toLocaleString()} · ${techName}`
+          ? `Scheduled for ${formatDateTimeInTenantTz(appointment.scheduledStart, timezone)} · ${techName}`
           : 'Not scheduled.'}
       </p>
 
