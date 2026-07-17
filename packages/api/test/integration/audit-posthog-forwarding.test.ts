@@ -70,18 +70,22 @@ describe('audit → PostHog forwarding (integration)', () => {
       record,
     });
 
+    // `customer.updated` is intentionally NOT allowlisted (only
+    // customer.created / merged / created_from_lead are), so it persists but
+    // does not forward. Keep this fixture on an eventType that stays outside
+    // the allowlist even as domains are added.
     await repo.create(
       createAuditEvent({
         tenantId,
         actorId: userId,
         actorRole: 'owner',
-        eventType: 'note.created',
-        entityType: 'note',
-        entityId: 'n_integration_1',
+        eventType: 'customer.updated',
+        entityType: 'customer',
+        entityId: 'c_integration_1',
       }),
     );
 
-    const rows = await repo.findByEntity(tenantId, 'note', 'n_integration_1');
+    const rows = await repo.findByEntity(tenantId, 'customer', 'c_integration_1');
     expect(rows).toHaveLength(1); // audit still written
     expect(record).not.toHaveBeenCalled(); // but not forwarded
   });
