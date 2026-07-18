@@ -25,9 +25,9 @@ export type Permission =
   | 'audit:view'
   | 'reports:view'
   | 'proposals:approve'
+  | 'proposals:create'
   | 'proposals:edit'
   | 'proposals:view'
-  | 'proposals:edit'
   // Phase 1 permissions
   | 'customers:create'
   | 'customers:view'
@@ -94,6 +94,7 @@ const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     'audit:view',
     'reports:view',
     'proposals:approve',
+    'proposals:create',
     'proposals:edit',
     'proposals:view',
     // Phase 1
@@ -148,6 +149,7 @@ const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     'ai:run',
     'reports:view',
     'proposals:approve',
+    'proposals:create',
     'proposals:edit',
     'proposals:view',
     // Phase 1

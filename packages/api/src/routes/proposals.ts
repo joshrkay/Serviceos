@@ -98,6 +98,7 @@ export function createProposalsRouter(
     '/',
     requireAuth,
     requireTenant,
+    requirePermission('proposals:create'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const body = req.body as { proposalType?: string; payload?: any; summary?: string; appointmentVersion?: string };
       const SUPPORTED_TYPES = [
