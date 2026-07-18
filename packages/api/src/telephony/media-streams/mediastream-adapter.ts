@@ -2636,20 +2636,32 @@ export class TwilioMediaStreamAdapter {
     this.state.silenceRepromptTimer = setTimeout(() => {
       this.state.silenceRepromptTimer = null;
       const session = this.state.session;
-      if (
-        this.state.closed ||
-        !session ||
-        turnId !== this.state.outboundTurnId ||
-        this.state.agentSpeaking
-      ) {
-        return;
-      }
-      void this.recoverFromSilenceExpiry(session).catch((err) => {
-        logger.warn('mediastream: silence reprompt failed', {
-          error: err instanceof Error ? err.message : String(err),
-          callSid: this.state.callSid,
+      if (!session) return;
+      // Codex P2 (PR #702) — serialize the expiry with concurrent turns.
+      // A final transcript that races this timer runs its `speechTurn` under
+      // `withSessionLock` and mutates the SAME `pendingVoiceApproval` /
+      // `pendingConsentCapture` this expiry may consume. Clearing the timer
+      // can't stop a callback already inside the awaited hook, so take the
+      // lock and RE-CHECK the guards inside it: if the racing turn ran first
+      // (advanced `outboundTurnId`, resumed `agentSpeaking`, closed the call,
+      // or already consumed the dialogue) the expiry is now stale → no-op.
+      void this.deps.store
+        .withSessionLock(session.id, async () => {
+          if (
+            this.state.closed ||
+            turnId !== this.state.outboundTurnId ||
+            this.state.agentSpeaking
+          ) {
+            return;
+          }
+          await this.recoverFromSilenceExpiry(session);
+        })
+        .catch((err) => {
+          logger.warn('mediastream: silence reprompt failed', {
+            error: err instanceof Error ? err.message : String(err),
+            callSid: this.state.callSid,
+          });
         });
-      });
     }, ms);
     if (typeof this.state.silenceRepromptTimer.unref === 'function') {
       this.state.silenceRepromptTimer.unref();

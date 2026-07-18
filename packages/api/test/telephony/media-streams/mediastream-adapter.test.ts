@@ -3207,4 +3207,39 @@ describe('T2-F05 caller-silence reprompt timer', () => {
     expect(streak(adapter)).toBe(1);
     expect(ws.closed).toBe(false);
   });
+
+  it('serialization: a racing turn holding the session lock makes the expiry a stale no-op (no double-consume)', async () => {
+    // Codex P2 — a final transcript that races the silence timer runs under
+    // withSessionLock and could mutate the same pending dialogue the expiry
+    // consumes. Simulate that: hold the lock and advance the outbound turn
+    // while held; the expiry must acquire the lock AFTER, re-check, see the
+    // stale turnId, and no-op — never invoking the pending-dialogue handler.
+    const handlePendingDialogueSilence = makePendingDialogueSilenceHandler();
+    const { adapter, ws, handle, texts, session } = await setupSilenceCall('CA-sil-race', {
+      handlePendingDialogueSilence,
+    });
+    await completeAgentTurn(adapter, ws, handle);
+    session.pendingVoiceApproval = { action: 'approve', stage: 'confirm' };
+
+    let release!: () => void;
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    const racingTurn = store.withSessionLock(session.id, async () => {
+      // A newer outbound turn started under the lock — invalidates the expiry.
+      (adapter as unknown as { state: { outboundTurnId: number } }).state.outboundTurnId += 1;
+      await held;
+    });
+
+    // Fire the timer: its callback queues behind the racing turn on the lock.
+    await vi.advanceTimersByTimeAsync(DEFAULT_SILENCE_REPROMPT_MS);
+    release();
+    await racingTurn;
+    await flush();
+
+    expect(handlePendingDialogueSilence).not.toHaveBeenCalled();
+    expect(texts).toEqual([AGENT_LINE]); // no reprompt, no dialogue copy
+    expect(session.pendingVoiceApproval).toBeDefined(); // left intact for the real turn
+    expect(ws.closed).toBe(false);
+  });
 });
