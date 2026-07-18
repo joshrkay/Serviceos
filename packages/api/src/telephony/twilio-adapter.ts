@@ -1794,12 +1794,18 @@ export class TwilioGatherAdapter {
     }
 
     // 1. Append caller utterance to transcript first — must happen before
-    //    any early-exit path so the utterance is never lost.
-    this.deps.store.appendTranscript(opts.sessionId, {
-      speaker: 'caller',
-      text: opts.speechResult,
-      ts: Date.now(),
-    });
+    //    any early-exit path so the utterance is never lost. EXCEPT an empty
+    //    SpeechResult (actionOnEmptyResult no-speech timeout): an empty
+    //    `caller:` line would make deriveCallOutcome read a fully silent
+    //    call as caller speech and classify/summarize it as a spoken
+    //    no-intent call instead of a silent one.
+    if (opts.speechResult.trim().length > 0) {
+      this.deps.store.appendTranscript(opts.sessionId, {
+        speaker: 'caller',
+        text: opts.speechResult,
+        ts: Date.now(),
+      });
+    }
 
     // RV-140 — shared deterministic safety scan (see
     // runDeterministicSafetyScan). Runs after the transcript append so the

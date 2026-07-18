@@ -1453,6 +1453,12 @@ describe('TwilioGatherAdapter.handleGather', () => {
       expect(xml).not.toContain('<Hangup');
       const session = await store.get(sessionId);
       expect(session?.ended).toBe(false);
+      // A no-speech timeout must NOT record an empty `caller:` transcript
+      // line — deriveCallOutcome reads any caller line as caller speech and
+      // would classify a fully silent call as a spoken no-intent call.
+      expect(session?.transcript.some((t) => t.speaker === 'caller' && t.text.trim() === '')).toBe(
+        false,
+      );
     });
 
     it('two consecutive silent turns escalate gracefully and end the session', async () => {
