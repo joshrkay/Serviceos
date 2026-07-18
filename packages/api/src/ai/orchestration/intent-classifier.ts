@@ -24,6 +24,10 @@ export type IntentType =
   | 'batch_invoice'
   | 'create_customer'
   | 'create_job'
+  // B7 (feat: voice-transcript-and-agent-paths) — bounded, safe field edit
+  // to an EXISTING job: status/priority/title/description. NOT money, NOT
+  // schedule — those keep their own intents.
+  | 'update_job'
   | 'reschedule_appointment'
   | 'cancel_appointment'
   | 'reassign_appointment'
@@ -156,6 +160,7 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
   'batch_invoice',
   'create_customer',
   'create_job',
+  'update_job',
   'reschedule_appointment',
   'cancel_appointment',
   'reassign_appointment',
@@ -229,8 +234,12 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
  *           drafting), create_standing_instruction (UB-A2, persistent
  *           directives). One coordinated bump — see
  *           docs/reference/voice-action-catalog.md.
+ *   1.3.0 — B7 (feat: voice-transcript-and-agent-paths): update_job
+ *           (additive) — a bounded, safe field edit (status/priority/
+ *           title/description) to an existing job, distinct from
+ *           create_job / reschedule_appointment / add_note.
  */
-export const INTENT_TAXONOMY_VERSION = '1.2.0';
+export const INTENT_TAXONOMY_VERSION = '1.3.0';
 
 /**
  * P11-001: convenience predicate the FSM adapter uses to route
@@ -522,7 +531,12 @@ export const CLASSIFIER_CONFIDENCE_THRESHOLD = 0.6;
  */
 export const SIGNUP_INTENT_ACT_THRESHOLD = 0.75;
 
-const SYSTEM_PROMPT = `You are an intent classifier for a field service operating system.
+// Exported (not just module-private) so the live-eval cost preflight
+// (packages/voice-eval/live-support.ts EST_SYSTEM_PROMPT_TOKENS) can be pinned
+// against the real prompt size in a test — see
+// packages/api/test/voice-quality/voice-eval-live.test.ts. Never trim this
+// export back to unexported without checking that test doesn't need it.
+export const SYSTEM_PROMPT = `You are an intent classifier for a field service operating system.
 Given a voice transcript from a field service operator, decide which action they intend to take.
 
 Supported intents (return exactly ONE):
@@ -606,6 +620,25 @@ Supported intents (return exactly ONE):
                            and jobTitle.
                            Examples: "Start a new job for Bob's water heater"
                                      "Create a job for Smith plumbing — kitchen drain"
+- "update_job"          — user wants to change a SAFE field on an EXISTING
+                           job: its status, priority, or title/description.
+                           NOT money (estimates/invoices/pricing — those are
+                           update_estimate/update_invoice) and NOT the
+                           appointment/visit time (that's
+                           reschedule_appointment). A freeform annotation
+                           that doesn't change a tracked field is add_note,
+                           not this. Extract jobReference (the job number or
+                           customer/job descriptor).
+                           Examples: "Mark the Henderson job in progress"
+                                     "Change JOB-0012's priority to urgent"
+                                     "Rename the Smith job to water heater replacement"
+                                     "Set the Davis job back to scheduled"
+                           NOT update_job: "Start a new job for Bob's water
+                           heater" (create_job — no existing job referenced);
+                           "Move the Miller job to Thursday at 2pm"
+                           (reschedule_appointment — a time, not a job
+                           field); "Add a trip fee to the Smith invoice"
+                           (update_invoice — money).
 - "reschedule_appointment" — user wants to move an EXISTING appointment to a
                            different time. Extract appointmentReference
                            (the old slot or the job/customer identifier)

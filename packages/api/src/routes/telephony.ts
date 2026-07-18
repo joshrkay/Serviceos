@@ -56,6 +56,7 @@ import { t, type Language } from '../ai/i18n/i18n';
 import type { CallMeBackRepository } from '../voice/call-me-back/call-me-back';
 import { createAuditEvent } from '../audit/audit';
 import { isValidTenantId } from '../db/schema';
+import { recordVoiceError } from '../analytics/posthog';
 
 const logger = createLogger({
   service: 'routes.telephony',
@@ -449,6 +450,15 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
         .send(
           `<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="Polly.Joanna">We're experiencing technical difficulties. Please try again later.</Say><Hangup/></Response>`
         );
+      // OBS — this handler never 5xxs by design (see comment above), so it's
+      // otherwise invisible to recordApiError. Fired after the graceful
+      // hangup TwiML is already queued; never alters the response.
+      recordVoiceError({
+        errorKind: 'inbound_handler_failed',
+        channel: 'gather',
+        callSid,
+        tenantId,
+      });
     }
   });
 
@@ -532,7 +542,13 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
     const body = req.body as Record<string, string | undefined>;
     const callSid = body.CallSid ?? '';
     const speechResult = body.SpeechResult ?? '';
-    const confidence = body.Confidence ? Number(body.Confidence) : 0;
+    // A3 — Twilio omits `Confidence` when it has no opinion (e.g. very
+    // short/silent utterances); that must read as "no signal", NOT as a
+    // confidently-zero score — a `0` here fed into the low-confidence gate
+    // would reprompt every such turn. `undefined` flows through as HIGH
+    // confidence (never blocks a turn on absent data) per handleGather's
+    // acoustic-confidence gate.
+    const confidence = body.Confidence ? Number(body.Confidence) : undefined;
 
     const sessionId = (req.query.sid as string | undefined) ?? '';
     if (!sessionId) {
@@ -573,7 +589,7 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
         sessionId,
         callSid,
         speechResult,
-        confidence: Number.isFinite(confidence) ? confidence : 0,
+        confidence: confidence !== undefined && Number.isFinite(confidence) ? confidence : undefined,
         tenantId,
       });
       res.status(200).type('text/xml').send(twiml);
@@ -997,6 +1013,14 @@ async function shouldUseRealtimeStream(opts: {
   // (b) health circuit — recent realtime session failures pin new calls to Gather.
   if (deps.realtimeCircuit?.isOpen()) {
     logger.warn('telephony/voice: realtime circuit open → Gather fallback', { callSid });
+    // OBS — fired after the Gather-fallback decision is already made; never
+    // alters it.
+    recordVoiceError({
+      errorKind: 'realtime_circuit_open',
+      channel: 'gather',
+      callSid,
+      tenantId,
+    });
     return false;
   }
 

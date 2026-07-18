@@ -6197,6 +6197,34 @@ export const MIGRATIONS = {
     CREATE UNIQUE INDEX IF NOT EXISTS uq_users_tenant_clerk
       ON users (tenant_id, clerk_user_id);
   `,
+
+  // Per-call LLM cost accounting (gateway.ts cost-in-cents work). Micro-cents
+  // (1 cent = 1,000,000 micro-cents) so the column never rounds a sub-cent
+  // call to 0 — see ai/gateway/model-pricing.ts for the precision rationale.
+  // Nullable: unpriced models (no verified rate in the pricing table) persist
+  // NULL rather than a guessed cost. BIGINT because a tenant's cumulative
+  // cost across many runs could exceed the INTEGER range in micro-cents.
+  '254_ai_runs_cost_micro_cents': `
+    ALTER TABLE ai_runs ADD COLUMN IF NOT EXISTS cost_micro_cents BIGINT;
+  `,
+
+  '255_invoice_line_items_pricing_source': `
+    -- Persist the per-line catalog-grounding signal the catalog resolver
+    -- stamps on PROPOSAL line items (pricingSource: catalog | ambiguous |
+    -- uncatalogued | manual) on INVOICE lines too. Migration 179 added this
+    -- column to estimate_line_items, but invoice_line_items had none, so the
+    -- provenance was DROPPED at persistence and invoice audit trails could
+    -- not show where a price came from. Mirrors 179 exactly.
+    --
+    -- NULLABLE with no DEFAULT: additive no-op for every existing row. A NULL
+    -- reads as "no grounding signal" — legacy rows and any manual-create path
+    -- that doesn't set it are treated as NOT grounded (the conservative
+    -- posture). The CHECK guards shape only and admits NULL.
+    ALTER TABLE invoice_line_items
+      ADD COLUMN IF NOT EXISTS pricing_source TEXT
+        CHECK (pricing_source IS NULL
+               OR pricing_source IN ('catalog','ambiguous','uncatalogued','manual'));
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

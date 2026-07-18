@@ -56,6 +56,7 @@ describe('MockLLMProvider hermetic mode', () => {
     expect(provider.name).toBe('mock');
     const res = await gateway.complete({
       taskType: 'classify_intent',
+      tenantId: 'tenant-hermetic-test',
       messages: [{ role: 'user', content: 'Create a customer named Pat Lee' }],
     });
     expect(JSON.parse(res.content).intentType).toBe('create_customer');

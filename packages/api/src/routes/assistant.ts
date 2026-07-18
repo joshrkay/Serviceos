@@ -5,7 +5,7 @@ import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { toErrorResponse } from '../shared/errors';
 import { LLMGateway } from '../ai/gateway/gateway';
-import { ProposalRepository } from '../proposals/proposal';
+import { ProposalRepository, ProposalType } from '../proposals/proposal';
 import { createAuditEvent, type AuditRepository } from '../audit/audit';
 import {
   recordAssistantTurn,
@@ -16,14 +16,23 @@ import {
   isVoiceApprovalIntent,
   isVoiceEditIntent,
 } from '../ai/orchestration/intent-classifier';
-import { CreateCustomerTaskHandler } from '../ai/tasks/task-handlers';
 import type { TaskHandler } from '../ai/tasks/task-handlers';
-import { EstimateTaskHandler } from '../ai/tasks/estimate-task';
-import { EstimateEditTaskHandler } from '../ai/tasks/estimate-edit-task';
-import { InvoiceTaskHandler } from '../ai/tasks/invoice-task';
+// Money/edit/send handlers are no longer constructed inline here — both
+// dispatch maps resolve them from the shared handler-registry below.
+// B5 — the scheduling-family / create_job / invoice-follow-up intents this
+// route was missing (12 in total) are drafted by the SAME handler-registry
+// builder workers/voice-action-router.ts's buildHandlers uses, so the two
+// surfaces can't diverge again — see the doc comment on HandlerRegistryDeps.
+// B4 — issue_invoice joined this shared registry too (see
+// HandlerRegistryDeps.proposalRepo in ai/orchestration/handler-registry.ts).
+import { buildTaskHandlers } from '../ai/orchestration/handler-registry';
 import type { InvoiceRepository } from '../invoices/invoice';
 import type { CatalogItemRepository } from '../catalog/catalog-item';
 import type { EstimateRepository } from '../estimates/estimate';
+import type { AppointmentRepository } from '../appointments/appointment';
+import type { JobRepository } from '../jobs/job';
+import type { DunningEventRepository } from '../invoices/dunning-config';
+import type { CustomerRepository } from '../customers/customer';
 import type { StandingInstruction } from '../instructions/standing-instructions';
 import { selectInjectedStandingInstructions } from '../ai/standing-instructions-context';
 import { createLogger } from '../logging/logger';
@@ -217,8 +226,46 @@ export interface AssistantRouterDeps {
    * update_estimate task handler read the targeted estimate and stamp the
    * `_meta.markers` acceptance-void warning when it is currently accepted.
    * Optional; absent -> marker skipped.
+   *
+   * B5 — widened from a narrow `Pick` to the full repository so the SAME
+   * value can also feed batch_invoice's completed-unbilled enumeration
+   * (`findJobsRequiringInvoicing`, which needs `EstimateRepository` in
+   * full — see `HandlerRegistryDeps.invoicingDeps` in
+   * ai/orchestration/handler-registry.ts). Every existing caller already
+   * passes a real repository implementation (Pg or in-memory), which
+   * satisfies both the old narrow shape and this one, so this is
+   * source-compatible.
    */
-  estimateRepo?: Pick<EstimateRepository, 'findById' | 'findByTenant'>;
+  estimateRepo?: EstimateRepository;
+  /**
+   * B5 — appointment resolution for the scheduling-family intents this
+   * route was missing (reschedule/cancel/confirm/notify_delay), mirroring
+   * `workers/voice-action-router.ts`'s `appointmentRepo`. Optional: absent
+   * → those proposals draft gated (`missingFields: ['appointmentId']`)
+   * instead of resolving a concrete appointment — the same fail-open
+   * posture every other optional dep here already has.
+   */
+  appointmentRepo?: AppointmentRepository;
+  /**
+   * B5 — paired with `appointmentRepo` (scopes appointment resolution to
+   * appointment → job → customerId) and with `invoiceRepo` + `estimateRepo`
+   * for batch_invoice's completed-unbilled enumeration.
+   */
+  jobRepo?: JobRepository;
+  /**
+   * B5 — send_payment_reminder's Layer-3 advisory duplicate-reminder
+   * marker (draft-time only; never blocks). Optional; absent → no marker,
+   * exact pre-B5 drafting.
+   */
+  dunningEventRepo?: DunningEventRepository;
+  /**
+   * B8 — create_customer draft-time duplicate detection parity: threaded
+   * into `buildTaskHandlers` so this route's create_customer proposals get
+   * the SAME dedup-aware `CreateCustomerVoiceTaskHandler` the telephony FSM
+   * already uses (`twilio-adapter.ts`), instead of the thin passthrough.
+   * Optional; absent → drafts with no dedup check (pre-B8 behavior).
+   */
+  customerRepo?: CustomerRepository;
   /**
    * Story 3.11 — persist each chat turn (operator message + agent reply) so the
    * running conversation survives reload and is searchable. Optional so tests
@@ -375,19 +422,106 @@ function customerProposalToUI(
  * payloads must literally appear in the operator's message (or classifier
  * entities); the model may not invent them (live: hallucinated textbook
  * UUIDs sent executions into doomed lookups).
+ *
+ * B4 — extended with a `sourceContext.verifiedIds` allowlist: an id a task
+ * handler resolved via a REPO LOOKUP (not LLM text) — e.g.
+ * IssueInvoiceTaskHandler's conversation-context resolution of "the one we
+ * just drafted" — is verifiable by construction even though it never
+ * literally appears in the operator's words. `verifiedIds` must be stamped
+ * ONLY by such repo-lookup code paths (see the doc comment on
+ * IssueInvoiceTaskHandler in ai/orchestration/task-router.ts); this function
+ * trusts whatever is there, so a handler that ever copied LLM/classifier
+ * output into `verifiedIds` would reopen the exact hallucinated-id hole this
+ * scrub exists to close. A key present in `payload` but ABSENT from
+ * `verifiedIds` (or not exactly matching the verified value) still gets the
+ * ordinary haystack check — a hallucinated id is stripped regardless of
+ * whether some other key happened to get verified.
  */
-function dropUnverifiedIds(
+// Exported for a direct unit pin on the verifiedIds allowlist semantics
+// (test/routes/assistant.route.test.ts) — this is B4's main review surface.
+export function dropUnverifiedIds(
   payload: Record<string, unknown>,
   operatorText: string,
-  entities: Record<string, unknown>
+  entities: Record<string, unknown>,
+  sourceContext?: Record<string, unknown>
 ): void {
   const haystack = (operatorText + ' ' + JSON.stringify(entities)).toLowerCase();
+  const verifiedIds =
+    sourceContext?.verifiedIds && typeof sourceContext.verifiedIds === 'object'
+      ? (sourceContext.verifiedIds as Record<string, unknown>)
+      : undefined;
   for (const key of ['jobId', 'customerId', 'estimateId', 'invoiceId', 'appointmentId']) {
     const v = payload[key];
-    if (typeof v === 'string' && v.length >= 32 && !haystack.includes(v.toLowerCase())) {
-      delete payload[key];
-    }
+    if (typeof v !== 'string' || v.length < 32) continue;
+    if (haystack.includes(v.toLowerCase())) continue;
+    if (verifiedIds && verifiedIds[key] === v) continue;
+    delete payload[key];
   }
+}
+
+/**
+ * B1 — friendly labels for the flat id-shaped keys the money-path task
+ * handlers gate on. Falls back to the raw key (see `editFieldsForMissing`)
+ * for any missingFields entry not listed here (e.g. `title`, `jobId`), so a
+ * newly-added gate never silently loses its Edit control.
+ */
+const MISSING_FIELD_LABELS: Record<string, string> = {
+  invoiceId: 'Invoice # or ID',
+  estimateId: 'Estimate # or ID',
+  jobId: 'Job # or ID',
+  customerId: 'Customer name or ID',
+  appointmentId: 'Appointment # or ID',
+  leadId: 'Lead name or ID',
+};
+
+/**
+ * B1 — the free-text reference field each gated id is paired with on the
+ * money/reference-carrying proposal types (see contracts.ts:
+ * `sendInvoicePayloadSchema`, `sendEstimateNudgePayloadSchema`,
+ * `confirmAppointmentPayloadSchema`, etc.). Used only to prefill the Edit
+ * input with context — never copied into the payload itself.
+ */
+const REFERENCE_FIELD_FOR_MISSING: Record<string, string> = {
+  invoiceId: 'invoiceReference',
+  estimateId: 'estimateReference',
+  jobId: 'jobReference',
+  customerId: 'customerReference',
+  appointmentId: 'appointmentReference',
+  leadId: 'leadReference',
+};
+
+/**
+ * B1 — turn `sourceContext.missingFields` into the same `editFields` shape
+ * `customerProposalToUI` already emits, so the existing edit-then-approve UI
+ * (AIProposalCard → PUT /api/proposals/:id { edits }) can fill a gated field
+ * without any client-side change. Path-shaped entries
+ * (`lineItems[0].catalogItemId`, `editActions[0].lineItem.catalogItemId`)
+ * are owned by resolve-line's candidate picker (B2/B3), not this generic
+ * text-input form, so they're skipped here exactly as
+ * `clearSatisfiedMissingFields` (proposals/missing-fields.ts) skips them.
+ */
+export function editFieldsForMissing(
+  missingFields: string[] | undefined,
+  payload: Record<string, unknown>,
+): AssistantProposal['editFields'] {
+  if (!missingFields || missingFields.length === 0) return undefined;
+
+  const fields = missingFields
+    .filter((key) => !key.includes('[') && !key.includes('.'))
+    .map((key) => {
+      const existing = payload[key];
+      const referenceKey = REFERENCE_FIELD_FOR_MISSING[key];
+      const referenceValue = referenceKey ? payload[referenceKey] : undefined;
+      const value =
+        typeof existing === 'string'
+          ? existing
+          : typeof referenceValue === 'string'
+            ? referenceValue
+            : '';
+      return { label: MISSING_FIELD_LABELS[key] ?? key, key, value };
+    });
+
+  return fields.length > 0 ? fields : undefined;
 }
 
 /**
@@ -409,14 +543,33 @@ function proposalToUI(
     draft_estimate: 'Estimate',
     update_estimate: 'Estimate',
     draft_invoice: 'Invoice',
+    update_invoice: 'Invoice',
     send_invoice: 'Invoice',
+    issue_invoice: 'Invoice',
     create_customer: 'Customer',
     update_customer: 'Customer',
+    // B5 — the 12 newly-wired intents need a sensible card type too:
+    // scheduling family → Schedule; invoice-adjacent follow-ups → Invoice;
+    // the estimate follow-up → Estimate. `create_job` has no dedicated
+    // type — it falls through to the generic 'Follow-up' default below,
+    // same as add_note/log_expense/every other CRM-ish intent.
+    reschedule_appointment: 'Schedule',
+    cancel_appointment: 'Schedule',
+    reassign_appointment: 'Schedule',
+    confirm_appointment: 'Schedule',
+    notify_delay: 'Schedule',
+    send_payment_reminder: 'Invoice',
+    apply_late_fee: 'Invoice',
+    record_payment: 'Invoice',
+    batch_invoice: 'Invoice',
+    create_invoice_schedule: 'Invoice',
+    send_estimate_nudge: 'Estimate',
   };
   const cardType = typeMap[proposal.proposalType] ?? 'Follow-up';
   const total = typeof proposal.payload.totalCents === 'number'
     ? ` — $${(proposal.payload.totalCents / 100).toFixed(2)}`
     : '';
+  const signals = proposalSignals(proposal.payload, proposal.sourceContext);
   return {
     id: proposal.id,
     title: `${cardType}: ${proposal.summary.slice(0, 80)}${total}`,
@@ -427,7 +580,10 @@ function proposalToUI(
     status: 'Pending',
     // E10 (U7) — surface AI-pricing / confidence / missing-field warnings so
     // the card can render them and block Approve on unresolved lines.
-    ...proposalSignals(proposal.payload, proposal.sourceContext),
+    ...signals,
+    // B1 — a gated card otherwise has no way to unblock Approve on this
+    // surface: render an Edit input for every flat missingFields entry.
+    editFields: editFieldsForMissing(signals.missingFields, proposal.payload),
   };
 }
 
@@ -459,7 +615,26 @@ async function generateAssistantReply(
   userId: string,
   deps: AssistantRouterDeps,
   correlationId: string,
+  // Map drift fix (2026-07): the shared task-handler registry, built ONCE at
+  // composition time in createAssistantRouter (the voice worker already does
+  // this — see createVoiceActionRouterWorker). BOTH dispatch maps below
+  // resolve every registry-covered proposal type from THIS map instead of
+  // constructing handlers inline, so the single-intent and chain surfaces
+  // can no longer drift on how a shared intent is built (e.g. the
+  // single-intent send_invoice losing its invoiceRepo). Positioned before
+  // the optional params (required-after-optional is a TS error).
+  sharedHandlers: Map<ProposalType, TaskHandler>,
   inputMode?: 'voice' | 'text',
+  // B4 — the client-pinned conversation id (parsed.conversationId), threaded
+  // into every task handler's TaskContext so conversation-scoped resolution
+  // (e.g. IssueInvoiceTaskHandler's "the one we just drafted") can fire on
+  // this surface. Undefined on a conversation's first turn — the same
+  // rung-2-only-fires-with-a-conversationId behavior the voice worker has
+  // always had. Note: this is the id the CLIENT sent in, not the (possibly
+  // freshly-minted) id `recordAssistantTurn` returns after this function's
+  // caller persists the turn — a brand-new conversation has no prior drafts
+  // to resolve against yet, so that ordering is never a gap.
+  conversationId?: string,
 ) {
   const lastUser = [...messages].reverse().find((m) => m.role === 'user');
   const lastUserText = lastUser?.content ?? '';
@@ -579,13 +754,39 @@ async function generateAssistantReply(
             continue;
           }
           const chainHandlers: Record<string, (() => TaskHandler) | undefined> = {
-            create_customer: () => new CreateCustomerTaskHandler(),
-            draft_estimate: () => new EstimateTaskHandler(deps.gateway, deps.catalogRepo),
-            update_estimate: () => new EstimateEditTaskHandler(deps.gateway, deps.estimateRepo),
-            create_invoice: () => new InvoiceTaskHandler(deps.gateway, deps.catalogRepo),
-            send_invoice: () => new InvoiceTaskHandler(deps.gateway, deps.catalogRepo),
-            issue_invoice: () => new InvoiceTaskHandler(deps.gateway, deps.catalogRepo),
-            update_invoice: () => new InvoiceTaskHandler(deps.gateway, deps.catalogRepo),
+            // Every registry-covered proposal type resolves from the shared
+            // registry (built once at composition time) so this chain map and
+            // the single-intent map below construct the SAME handler instances
+            // — no surface-specific `new X(...)` that could drift (the
+            // single-intent send_invoice previously lost its invoiceRepo this
+            // way). `create_invoice` is the classifier intent alias for the
+            // `draft_invoice` registry key.
+            create_customer: () => sharedHandlers.get('create_customer')!,
+            draft_estimate: () => sharedHandlers.get('draft_estimate')!,
+            update_estimate: () => sharedHandlers.get('update_estimate')!,
+            create_invoice: () => sharedHandlers.get('draft_invoice')!,
+            send_invoice: () => sharedHandlers.get('send_invoice')!,
+            issue_invoice: () => sharedHandlers.get('issue_invoice')!,
+            update_invoice: () => sharedHandlers.get('update_invoice')!,
+            // B5 — the 12 intents this route was silently dropping to a
+            // conversational LLM reply (no draft at all). Drawn from
+            // `sharedHandlers` so this surface can't drift from the voice
+            // worker's construction of the same handlers.
+            reschedule_appointment: () => sharedHandlers.get('reschedule_appointment')!,
+            cancel_appointment: () => sharedHandlers.get('cancel_appointment')!,
+            reassign_appointment: () => sharedHandlers.get('reassign_appointment')!,
+            confirm_appointment: () => sharedHandlers.get('confirm_appointment')!,
+            create_job: () => sharedHandlers.get('create_job')!,
+            // B7 — update_job (status/priority/title/description edit to an
+            // existing job); same shared registry, same gate as the worker.
+            update_job: () => sharedHandlers.get('update_job')!,
+            send_payment_reminder: () => sharedHandlers.get('send_payment_reminder')!,
+            apply_late_fee: () => sharedHandlers.get('apply_late_fee')!,
+            send_estimate_nudge: () => sharedHandlers.get('send_estimate_nudge')!,
+            batch_invoice: () => sharedHandlers.get('batch_invoice')!,
+            create_invoice_schedule: () => sharedHandlers.get('create_invoice_schedule')!,
+            record_payment: () => sharedHandlers.get('record_payment')!,
+            notify_delay: () => sharedHandlers.get('notify_delay')!,
           };
           const factory = chainHandlers[segClass.intentType];
           if (!factory) continue;
@@ -603,13 +804,14 @@ async function generateAssistantReply(
             tenantId,
             userId,
             message: segment,
+            conversationId,
             existingEntities: segEntities,
             ...(segStandingInstructions
               ? { standingInstructions: segStandingInstructions }
               : {}),
           });
           if (!proposal) continue;
-          dropUnverifiedIds(proposal.payload, segment, segEntities);
+          dropUnverifiedIds(proposal.payload, segment, segEntities, proposal.sourceContext);
           proposal.sourceContext = { ...(proposal.sourceContext ?? {}), chainId, chainStep: chainCards.length + 1 };
           // Dependency gate: steps after the first reference results that
           // don't exist yet (the customer, their job). Auto-approval would
@@ -665,12 +867,36 @@ async function generateAssistantReply(
       // the REAL task handlers and persist — the generic LLM path returned
       // unpersisted JSON cards whose ids 404'd on approve.
       const proposalHandlers: Record<string, () => TaskHandler> = {
-        draft_estimate: () => new EstimateTaskHandler(deps.gateway, deps.catalogRepo),
-        update_estimate: () => new EstimateEditTaskHandler(deps.gateway, deps.estimateRepo),
-        create_invoice: () => new InvoiceTaskHandler(deps.gateway, deps.catalogRepo),
-        send_invoice: () => new InvoiceTaskHandler(deps.gateway, deps.catalogRepo),
-        issue_invoice: () => new InvoiceTaskHandler(deps.gateway, deps.catalogRepo),
-        update_invoice: () => new InvoiceTaskHandler(deps.gateway, deps.catalogRepo),
+        // Same shared registry as the chain map above — every registry-covered
+        // type resolves from `sharedHandlers` (built once at composition time)
+        // so the two maps can't drift. `create_invoice` is the classifier
+        // intent alias for the `draft_invoice` registry key. NOTE: this is the
+        // map where single-intent `send_invoice` previously constructed
+        // `new SendInvoiceTaskHandler()` with NO invoiceRepo (dropping the
+        // candidate picker) while the chain map passed it — that drift is what
+        // resolving both from one registry closes.
+        draft_estimate: () => sharedHandlers.get('draft_estimate')!,
+        update_estimate: () => sharedHandlers.get('update_estimate')!,
+        create_invoice: () => sharedHandlers.get('draft_invoice')!,
+        send_invoice: () => sharedHandlers.get('send_invoice')!,
+        issue_invoice: () => sharedHandlers.get('issue_invoice')!,
+        update_invoice: () => sharedHandlers.get('update_invoice')!,
+        // B5 — same 12 intents as the chain map above, same shared registry.
+        reschedule_appointment: () => sharedHandlers.get('reschedule_appointment')!,
+        cancel_appointment: () => sharedHandlers.get('cancel_appointment')!,
+        reassign_appointment: () => sharedHandlers.get('reassign_appointment')!,
+        confirm_appointment: () => sharedHandlers.get('confirm_appointment')!,
+        create_job: () => sharedHandlers.get('create_job')!,
+        // B7 — update_job (status/priority/title/description edit to an
+        // existing job); same shared registry, same gate as the worker.
+        update_job: () => sharedHandlers.get('update_job')!,
+        send_payment_reminder: () => sharedHandlers.get('send_payment_reminder')!,
+        apply_late_fee: () => sharedHandlers.get('apply_late_fee')!,
+        send_estimate_nudge: () => sharedHandlers.get('send_estimate_nudge')!,
+        batch_invoice: () => sharedHandlers.get('batch_invoice')!,
+        create_invoice_schedule: () => sharedHandlers.get('create_invoice_schedule')!,
+        record_payment: () => sharedHandlers.get('record_payment')!,
+        notify_delay: () => sharedHandlers.get('notify_delay')!,
       };
       const handlerFactory = proposalHandlers[classification.intentType];
       if (handlerFactory) {
@@ -685,10 +911,16 @@ async function generateAssistantReply(
           tenantId,
           userId,
           message: lastUserText,
+          conversationId,
           existingEntities: { ...(classification.extractedEntities ?? {}) },
           ...(standingInstructions ? { standingInstructions } : {}),
         });
-        dropUnverifiedIds(proposal.payload, lastUserText, { ...(classification.extractedEntities ?? {}) });
+        dropUnverifiedIds(
+          proposal.payload,
+          lastUserText,
+          { ...(classification.extractedEntities ?? {}) },
+          proposal.sourceContext,
+        );
         await deps.proposalRepo.create(proposal);
         if (proposal.status === 'draft') {
           await deps.proposalRepo.updateStatus(tenantId, proposal.id, 'ready_for_review');
@@ -708,12 +940,14 @@ async function generateAssistantReply(
       }
 
       if (classification.intentType === 'create_customer') {
-        const handler = new CreateCustomerTaskHandler();
+        // B8 — dedup-aware handler (same construction as the telephony FSM
+        // and the chain map above), drawn from sharedHandlers so this
+        // surface can't drift from the worker's create_customer handling.
+        const handler = sharedHandlers.get('create_customer')!;
         const entities = classification.extractedEntities;
         // Same translation the voice-action-router does: classifier
         // surfaces `displayName`, the create_customer contract wants
-        // `name`. Keeping the mapping here means the task handler stays
-        // a dumb passthrough.
+        // `name`.
         const customerPayload: Record<string, unknown> = {};
         if (entities?.displayName) customerPayload.name = entities.displayName;
         if (entities?.email) customerPayload.email = entities.email;
@@ -793,6 +1027,12 @@ async function generateAssistantReply(
   try {
     const response = await deps.gateway.complete({
       taskType,
+      // Top-level tenantId — the quota/cache resilience wrappers key on
+      // this, not metadata.tenantId (see gateway.ts's tenant-id guard).
+      // `assistant.*` taskTypes aren't in the guard's tracked TASK_TYPES
+      // allow-list (they're dynamically constructed), but this route is
+      // still genuinely per-tenant chat traffic.
+      tenantId,
       responseFormat: 'json',
       messages: [
         { role: 'system', content: `${systemPrompt}\n\n${outputContract}` },
@@ -849,6 +1089,40 @@ function writeSse(res: Response, event: string, data: unknown): void {
 export function createAssistantRouter(deps: AssistantRouterDeps): Router {
   const router = Router();
 
+  // B5 — the scheduling family / create_job / invoice-follow-up intents this
+  // route was missing draft through the SAME shared registry the voice worker
+  // uses (see the import comment above). Built ONCE at composition time
+  // (handler construction does no I/O) — the registry doc says
+  // composition-time, and the voice worker already does this in
+  // createVoiceActionRouterWorker. Building it here (rather than per-turn
+  // inside generateAssistantReply) is also what lets BOTH dispatch maps draw
+  // every registry-covered type from ONE map, so the single-intent and chain
+  // surfaces can't drift on handler construction. `invoicingDeps` is assembled
+  // inline (mirrors VoiceActionRouterDeps' separation of the narrow
+  // estimateRepo/invoiceRepo from the full trio findJobsRequiringInvoicing
+  // needs) and is only passed when all three repos are wired — absent,
+  // batch_invoice degrades to its own "not available" clarification.
+  // B4 — issue_invoice is built by the shared registry too (proposalRepo
+  // threaded through), so "issue the one we just drafted" resolves from
+  // conversation context on THIS surface the same way it does on the voice
+  // worker — same handler instance shape, same gate.
+  const sharedHandlers = buildTaskHandlers({
+    gateway: deps.gateway,
+    catalogRepo: deps.catalogRepo,
+    estimateRepo: deps.estimateRepo,
+    invoiceRepo: deps.invoiceRepo,
+    appointmentRepo: deps.appointmentRepo,
+    jobRepo: deps.jobRepo,
+    dunningEventRepo: deps.dunningEventRepo,
+    invoicingDeps:
+      deps.jobRepo && deps.invoiceRepo && deps.estimateRepo
+        ? { jobRepo: deps.jobRepo, invoiceRepo: deps.invoiceRepo, estimateRepo: deps.estimateRepo }
+        : undefined,
+    proposalRepo: deps.proposalRepo,
+    // B8 — create_customer draft-time duplicate detection parity.
+    customerRepo: deps.customerRepo,
+  });
+
   router.post(
     '/chat',
     requireAuth,
@@ -868,7 +1142,13 @@ export function createAssistantRouter(deps: AssistantRouterDeps): Router {
           req.auth!.userId,
           deps,
           correlationId,
+          sharedHandlers,
           parsed.inputMode,
+          // B4 — the client-pinned conversation id (undefined on a fresh
+          // conversation's first turn); threads into TaskContext.conversationId
+          // for handlers like IssueInvoiceTaskHandler that resolve "the one we
+          // just drafted" from same-conversation proposal history.
+          parsed.conversationId,
         );
 
         // Story 3.11 — persist the turn so the conversation survives reload and

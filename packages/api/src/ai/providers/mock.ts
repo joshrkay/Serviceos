@@ -113,6 +113,20 @@ export function scriptHermeticResponse(request: LLMRequest): string {
   const text = lastUserText(request);
   const lower = text.toLowerCase();
 
+  if (taskType === 'transcription_correction') {
+    // Echo the raw transcript back verbatim instead of falling through to
+    // the generic `{"ok":true,"mock":true,...}` catch-all below. That blob
+    // is prose-shaped JSON that could pass length-floor checks and get
+    // mistaken for a real (if unhelpful) correction; echoing the raw text
+    // lets hermetic dev exercise the correction seam harmlessly while
+    // staying trivially inert. correctTranscript()'s user prompt is either
+    // `Raw transcript: ${raw}` or `Tenant-specific vocabulary (...): ...\n\n
+    // Raw transcript: ${raw}` — pull everything after the last marker.
+    const marker = 'Raw transcript: ';
+    const idx = text.lastIndexOf(marker);
+    return idx >= 0 ? text.slice(idx + marker.length) : text;
+  }
+
   if (taskType === 'classify_intent' || taskType.startsWith('classify')) {
     if (
       /\b(create|add|new)\b.*\bcustomer\b/.test(lower) ||

@@ -91,7 +91,7 @@ import { extractPriorTurns } from '../ai/agents/customer-calling/transcript-turn
 // that got reverted in a subsequent merge to main.
 import { deriveCallOutcome as deriveCallOutcomeFromState } from '../ai/agents/customer-calling/outcome-mapper';
 import type { VoiceSessionRepository } from '../voice/voice-session';
-import type { ProposalRepository, ProposalType } from '../proposals/proposal';
+import type { ProposalRepository } from '../proposals/proposal';
 import { createProposal as buildProposal } from '../proposals/proposal';
 import type { LeadRepository } from '../leads/lead';
 import type { AuditRepository } from '../audit/audit';
@@ -118,7 +118,17 @@ import type { CurrentQuoteResolver } from '../conversations/negotiation/current-
 import type { RepairTemplate } from '../verticals/registry';
 import { detectFrustration } from '../ai/agents/customer-calling/frustration-detector';
 import { detectEmergency } from '../ai/agents/customer-calling/emergency-detector';
-import { renderTtsText, type SessionLanguage } from '../ai/agents/customer-calling/tts-copy';
+import {
+  renderTtsText,
+  LOW_STT_CONFIDENCE_REPROMPT_COPY,
+  SPEECH_TURN_FAILURE_ESCALATION_COPY,
+  type SessionLanguage,
+} from '../ai/agents/customer-calling/tts-copy';
+import {
+  MIN_STT_CONFIDENCE,
+  MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS,
+} from './media-streams/mediastream-adapter';
+import { recordVoiceError } from '../analytics/posthog';
 import {
   detectRecordingObjection,
   RECORDING_OBJECTION_ACK,
@@ -141,6 +151,7 @@ import type { UserRepository } from '../users/user';
 import { isApproverPhone } from '../proposals/approver-identity';
 import type { ProposalSmsEventRepository } from '../proposals/sms/sms-event';
 import type { OneTapFallbackDeps } from '../ai/tasks/proposal-approval-task';
+import { TenantGlossaryProvider } from '../voice/tenant-glossary-provider';
 
 const logger = createLogger({
   service: 'telephony.twilio-adapter',
@@ -339,6 +350,18 @@ export interface TwilioAdapterDeps {
    */
   repairTemplatesResolver?: (tenantId: string) => Promise<ReadonlyArray<RepairTemplate>>;
   /**
+   * A2 — resolves the `<Gather hints="...">` boost terms for a tenant
+   * (e.g. vertical `sttKeywords` in addition to the tenant glossary).
+   * Optional override: when unset, the adapter falls back to a
+   * `TenantGlossaryProvider` built from `catalogRepo`/`customerRepo`/
+   * `userRepo` (below) when all three are wired, so Gather still gets
+   * tenant-specific hints (catalog items, customer/technician names)
+   * without requiring this resolver. Vertical `sttKeywords` are not
+   * reachable from this adapter today (no vertical-pack dep here) — a
+   * caller can wire this resolver to add them; see A2 follow-up notes.
+   */
+  sttHintsResolver?: (tenantId: string) => Promise<ReadonlyArray<string>>;
+  /**
    * F8 — per-tenant escalation settings repository. When wired, the
    * processor loads channel preferences before each `escalateToHuman`
    * call. Optional so existing test fixtures continue to work.
@@ -463,37 +486,6 @@ export function buildTelephonyGreeting(
   return assembled.endsWith('?') ? assembled : `${assembled} ${t('greeting.cta', language)}`;
 }
 
-function intentToProposalType(intent: string | undefined): ProposalType {
-  switch (intent) {
-    case 'create_invoice': return 'draft_invoice';
-    case 'update_invoice': return 'update_invoice';
-    case 'issue_invoice': return 'issue_invoice';
-    case 'send_invoice': return 'send_invoice';
-    case 'send_estimate': return 'send_estimate';
-    case 'record_payment': return 'record_payment';
-    case 'draft_estimate': return 'draft_estimate';
-    case 'update_estimate': return 'update_estimate';
-    case 'create_appointment': return 'create_appointment';
-    case 'reschedule_appointment': return 'reschedule_appointment';
-    case 'cancel_appointment': return 'cancel_appointment';
-    case 'reassign_appointment': return 'reassign_appointment';
-    case 'create_customer': return 'create_customer';
-    case 'create_job': return 'create_job';
-    case 'add_note': return 'add_note';
-    case 'emergency_dispatch': return 'emergency_dispatch';
-    case 'update_customer': return 'update_customer';
-    case 'log_expense': return 'log_expense';
-    case 'convert_lead': return 'convert_lead';
-    case 'confirm_appointment': return 'confirm_appointment';
-    case 'mark_lead_lost': return 'mark_lead_lost';
-    case 'add_service_location': return 'add_service_location';
-    case 'log_time_entry': return 'log_time_entry';
-    case 'notify_delay': return 'notify_delay';
-    case 'request_feedback': return 'request_feedback';
-    default: return 'voice_clarification';
-  }
-}
-
 // ─── XML helpers ─────────────────────────────────────────────────────────────
 
 /**
@@ -585,12 +577,26 @@ interface BuildTwimlOpts {
    * `language`.
    */
   voiceOverride?: string;
+  /**
+   * A2 — STT boost terms (vertical + tenant glossary) rendered as
+   * `<Gather hints="term1,term2,...">`. Twilio's built-in recognizer uses
+   * `hints` as a single comma-separated phrase list (unlike Deepgram's
+   * repeated `keyterm=`/`keywords=` params) — a plain term list works for
+   * both languages so no per-language filtering is applied here. Omitted
+   * entirely when empty/absent, same fail-open posture as the rest of
+   * this builder.
+   */
+  hints?: ReadonlyArray<string>;
 }
 
 const GATHER_VOICE_EN = 'Polly.Joanna';
 const GATHER_VOICE_ES = 'Polly.Mia-Neural';
 const GATHER_LOCALE_EN = 'en-US';
 const GATHER_LOCALE_ES = 'es-US';
+/** A2 — mirrors VerticalTerminologyProvider/TenantGlossaryProvider's caps; protects Gather URL/TwiML size. */
+const GATHER_HINTS_MAX = 50;
+/** Twilio speech recognition tuned for phone-quality audio (vs. the default model). */
+const GATHER_SPEECH_MODEL = 'phone_call';
 
 /**
  * Translate FSM side effects into a TwiML string.
@@ -661,8 +667,13 @@ export function buildTwiML(
     // P11-002: thread the session language to Twilio's built-in STT so
     // Spanish callers don't get transcribed against the English model.
     const gatherLang = opts.language === 'es' ? GATHER_LOCALE_ES : GATHER_LOCALE_EN;
+    // A2 — hints= biases Twilio's recognizer toward tenant/vertical terms,
+    // same intent as Deepgram's keyterm boosting on the other transports.
+    // Capped defensively even though callers are expected to cap upstream.
+    const hints = opts.hints && opts.hints.length > 0 ? opts.hints.slice(0, GATHER_HINTS_MAX) : undefined;
+    const hintsAttr = hints ? ` hints="${xmlEscape(hints.join(','))}"` : '';
     parts.push(
-      `<Gather input="speech" speechTimeout="auto" language="${gatherLang}" action="${xmlEscape(
+      `<Gather input="speech" speechTimeout="auto" language="${gatherLang}" speechModel="${GATHER_SPEECH_MODEL}"${hintsAttr} action="${xmlEscape(
         opts.gatherActionUrl
       )}" method="POST"/>`
     );
@@ -735,6 +746,35 @@ export class TwilioGatherAdapter {
    * "missing" (never recorded) from "explicitly blocked".
    */
   private readonly callerIdBySession = new Map<string, string>();
+
+  /**
+   * A3 — consecutive-low-Gather-`Confidence`-turn streak, keyed by
+   * sessionId. Each `/gather` POST is a stateless HTTP request, so this
+   * can't live on the request; `VoiceSession` (the DB-backed session
+   * object) also has no field for it, so — same lifetime/leak posture as
+   * {@link callerIdBySession} above — it's tracked in-memory on the adapter.
+   * Bumped when a Gather turn's `Confidence` is below
+   * {@link MIN_STT_CONFIDENCE}; cleared by any turn that clears the gate
+   * (high confidence OR confidence absent). Reaching
+   * {@link MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS} hands the caller off
+   * instead of reprompting again (see `maybeHandleLowSttConfidenceGather`).
+   * Limitation: this streak is process-local — a mid-call replica
+   * restart/redeploy silently resets it to 0. Acceptable for a short,
+   * bounded reprompt budget (2 turns) rather than a durable guarantee.
+   */
+  private readonly lowConfidenceGatherStreak = new Map<string, number>();
+
+  /**
+   * A2 — lazily-constructed fallback source for `<Gather hints="...">`
+   * when `deps.sttHintsResolver` is not wired. Built once (not per-call)
+   * from `catalogRepo`/`customerRepo`/`userRepo` — the same three repos
+   * `TenantGlossaryProvider` (A1) already reads for the transcription-
+   * correction pass — so Gather gets tenant-specific hints (catalog item
+   * names, customer/technician names) purely from deps this adapter
+   * already carries. `undefined` (checked, never rebuilt) when any of
+   * the three repos is missing.
+   */
+  private glossaryProvider: TenantGlossaryProvider | undefined | null = null;
 
   /**
    * Closure-captured agent loop (P38-FOLLOWUP). Owns `speechTurn`,
@@ -1654,12 +1694,14 @@ export class TwilioGatherAdapter {
         callSid: opts.callSid,
         sessionId: session.id,
       });
+      const replayHints = await this.resolveGatherHints(opts.tenantId);
       return buildTwiML(
         [{ type: 'tts_play', payload: { text: t('greeting.one_moment', session.language ?? 'en') } }],
         {
           gatherActionUrl: this.gatherUrl(session.id),
           ...(session.language ? { language: session.language } : {}),
           ...(session.ttsVoice ? { voiceOverride: session.ttsVoice } : {}),
+          ...(replayHints ? { hints: replayHints } : {}),
         },
       );
     }
@@ -1683,6 +1725,7 @@ export class TwilioGatherAdapter {
     //    set on the initial inbound response so Twilio doesn't start a
     //    second concurrent recording on each <Gather> turn (P8-014).
     const transferTwiml = this.takePendingTransferTwiml(session.id);
+    const inboundHints = transferTwiml ? undefined : await this.resolveGatherHints(opts.tenantId);
     const twiml =
       transferTwiml ??
       buildTwiML(expanded, {
@@ -1692,6 +1735,7 @@ export class TwilioGatherAdapter {
         ...(this.deps.recordingCallbackPath
           ? { recordingStatusCallback: this.recordingCallbackUrl() }
           : {}),
+        ...(inboundHints ? { hints: inboundHints } : {}),
       });
 
     // 8. If the FSM drove straight to 'terminated' (escalation chain
@@ -1716,7 +1760,7 @@ export class TwilioGatherAdapter {
     sessionId: string;
     callSid: string;
     speechResult: string;
-    confidence: number;
+    confidence: number | undefined;
     tenantId: string;
   }): Promise<string> {
     // Per-session lock: Twilio retries (or duplicate webhook deliveries)
@@ -1729,7 +1773,7 @@ export class TwilioGatherAdapter {
     sessionId: string;
     callSid: string;
     speechResult: string;
-    confidence: number;
+    confidence: number | undefined;
     tenantId: string;
   }): Promise<string> {
     const session = this.deps.store.get(opts.sessionId);
@@ -1808,6 +1852,21 @@ export class TwilioGatherAdapter {
       );
       await this.processor.executeSideEffects(session, sideEffectsAll, opts.tenantId);
       return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
+    }
+
+    // A3 — low acoustic STT confidence gate. Twilio's Gather `Confidence` on
+    // a NON-empty utterance below MIN_STT_CONFIDENCE means Twilio itself is
+    // flagging the recognition as unreliable — dispatching it (running the
+    // classifier / advancing FSM state) risks acting on words the caller
+    // didn't say. Return a reprompt (or, after repeated low-confidence
+    // turns, a graceful hand-off) directly, bypassing classification and
+    // state-branching entirely, same as the empty-SpeechResult early return
+    // above. Runs AFTER the deterministic safety scan / frustration check /
+    // pending-approval-turn handling above — none of those must ever be
+    // suppressed by a shaky confidence score.
+    const lowConfidenceTwiml = await this.maybeHandleLowSttConfidenceGather(session, opts);
+    if (lowConfidenceTwiml !== null) {
+      return lowConfidenceTwiml;
     }
 
     // U4 — per-turn vulnerability triage on the Gather path, fire-and-forget
@@ -2089,6 +2148,115 @@ export class TwilioGatherAdapter {
   }
 
   /**
+   * A3 — gate a Gather turn on Twilio's acoustic `Confidence`. Returns the
+   * reprompt/hand-off TwiML string when the gate fires (caller: return it
+   * directly, do NOT fall through to classification), or `null` when the
+   * turn should proceed normally (confidence high enough, or absent —
+   * absent is treated as HIGH so a turn is never blocked on missing data;
+   * Twilio omits `Confidence` for some valid recognitions).
+   *
+   * Mirrors the media-streams adapter's `recoverFromLowSttConfidence`
+   * shape: reprompt on an isolated low-confidence turn using
+   * {@link LOW_STT_CONFIDENCE_REPROMPT_COPY}; after
+   * {@link MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS} back-to-back, speak the
+   * SAME escalation line VOX-35c uses
+   * ({@link SPEECH_TURN_FAILURE_ESCALATION_COPY}) and end the call
+   * gracefully via a synthetic `end_session` side effect + explicit
+   * `finalizeTerminatedSession` call (this path never touches the FSM, so
+   * `finalizeTwiml`'s own `currentState === 'terminated'` finalize check
+   * would never fire — the manual call here is required, same pattern
+   * `/dial-result`'s successful-transfer branch already uses).
+   */
+  private async maybeHandleLowSttConfidenceGather(
+    session: VoiceSession,
+    opts: { sessionId: string; confidence: number | undefined },
+  ): Promise<string | null> {
+    const { confidence } = opts;
+    if (typeof confidence !== 'number' || !Number.isFinite(confidence) || confidence >= MIN_STT_CONFIDENCE) {
+      // High confidence (or no signal at all) clears the streak so a later
+      // isolated blip on this session gets its own reprompt budget.
+      this.lowConfidenceGatherStreak.delete(opts.sessionId);
+      return null;
+    }
+
+    const lang: SessionLanguage = session.language === 'es' ? 'es' : 'en';
+    const streak = (this.lowConfidenceGatherStreak.get(opts.sessionId) ?? 0) + 1;
+
+    if (streak >= MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS) {
+      this.lowConfidenceGatherStreak.delete(opts.sessionId);
+      const effects: SideEffect[] = [
+        {
+          type: 'tts_play',
+          payload: { text: renderTtsText(SPEECH_TURN_FAILURE_ESCALATION_COPY, {}, lang) },
+        },
+        { type: 'end_session', payload: { reason: 'low_stt_confidence_max_retries' } },
+      ];
+      const twiml = await this.finalizeTwiml(session, effects, opts.sessionId);
+      if (!session.ended) {
+        session.ended = true;
+        this.finalizeTerminatedSession(session, effects, 'low_stt_confidence_max_retries');
+      }
+      recordVoiceError({
+        errorKind: 'low_stt_confidence_repeated',
+        channel: 'gather',
+        callSid: session.callSid ?? undefined,
+        tenantId: session.tenantId,
+      });
+      return twiml;
+    }
+
+    this.lowConfidenceGatherStreak.set(opts.sessionId, streak);
+    const effects: SideEffect[] = [
+      {
+        type: 'tts_play',
+        payload: { text: renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, lang) },
+      },
+    ];
+    const twiml = await this.finalizeTwiml(session, effects, opts.sessionId);
+    recordVoiceError({
+      errorKind: 'low_stt_confidence',
+      channel: 'gather',
+      callSid: session.callSid ?? undefined,
+      tenantId: session.tenantId,
+    });
+    return twiml;
+  }
+
+  /**
+   * A2 — resolve the `<Gather hints="...">` boost terms for `tenantId`.
+   * Prefers `deps.sttHintsResolver` (a caller-supplied source, e.g. one
+   * that also merges vertical `sttKeywords`); falls back to a
+   * `TenantGlossaryProvider` built from `catalogRepo`/`customerRepo`/
+   * `userRepo` when all three are wired. Failure-soft like every other
+   * boost source in this branch — a lookup error never blocks a Gather
+   * turn, it just omits hints.
+   */
+  private async resolveGatherHints(tenantId: string): Promise<ReadonlyArray<string> | undefined> {
+    try {
+      if (this.deps.sttHintsResolver) {
+        const hints = await this.deps.sttHintsResolver(tenantId);
+        return hints.length > 0 ? hints : undefined;
+      }
+      if (this.glossaryProvider === null) {
+        const { catalogRepo, customerRepo, userRepo } = this.deps;
+        this.glossaryProvider =
+          catalogRepo && customerRepo && userRepo
+            ? new TenantGlossaryProvider({ catalogRepo, customerRepo, userRepo })
+            : undefined;
+      }
+      if (!this.glossaryProvider) return undefined;
+      const terms = await this.glossaryProvider.termsForTenant(tenantId);
+      return terms.length > 0 ? terms : undefined;
+    } catch (err) {
+      logger.warn('twilio-adapter: gather hints resolution failed — proceeding without hints', {
+        tenantId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return undefined;
+    }
+  }
+
+  /**
    * Build TwiML and, when the FSM has reached `terminated`, kick off
    * the end-of-call summary in the background. Centralizes the
    * end-of-handler wrap-up shared by handleGather and handleInbound.
@@ -2118,10 +2286,12 @@ export class TwilioGatherAdapter {
       });
     }
 
+    const hints = await this.resolveGatherHints(session.tenantId);
     const twiml = buildTwiML(sideEffects, {
       gatherActionUrl: this.gatherUrl(sessionId),
       ...(session.language ? { language: session.language } : {}),
       ...(session.ttsVoice ? { voiceOverride: session.ttsVoice } : {}),
+      ...(hints ? { hints } : {}),
     });
     // Capture the agent's reply so summarizeSession sees both sides
     // of the conversation, not just the caller turns.

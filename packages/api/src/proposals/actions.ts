@@ -15,6 +15,7 @@ import type { ConfigPorts } from '../learning/corrections/lesson-applicator';
 import { createLogger } from '../logging/logger';
 import { computeCorrections } from './corrections/correction';
 import type { CorrectionRepository } from './corrections/correction';
+import { clearSatisfiedMissingFields } from './missing-fields';
 
 const logger = createLogger({
   service: 'proposals.actions',
@@ -587,8 +588,32 @@ export async function editProposal(
     (key) => JSON.stringify(proposal.payload[key]) !== JSON.stringify(edits[key])
   );
 
+  // B1 — clear-on-fill: lift only the missingFields entries this edit
+  // actually satisfied (exact flat key edited + now non-empty). See
+  // missing-fields.ts for why this is not a full schema recompute.
+  const currentMissingFields = missingFieldsFor(proposal);
+  let clearedMissingFields: string[] = [];
+  let sourceContextUpdate: Record<string, unknown> | undefined;
+  if (currentMissingFields.length > 0) {
+    const remainingMissingFields = clearSatisfiedMissingFields(
+      currentMissingFields,
+      editedFields,
+      updatedPayload,
+    );
+    clearedMissingFields = currentMissingFields.filter(
+      (field) => !remainingMissingFields.includes(field),
+    );
+    if (clearedMissingFields.length > 0) {
+      sourceContextUpdate = {
+        ...(proposal.sourceContext ?? {}),
+        missingFields: remainingMissingFields,
+      };
+    }
+  }
+
   const updated = await proposalRepo.update(tenantId, proposalId, {
     payload: updatedPayload,
+    ...(sourceContextUpdate ? { sourceContext: sourceContextUpdate } : {}),
   });
   if (!updated) {
     throw new NotFoundError('Proposal', proposalId);
@@ -610,6 +635,11 @@ export async function editProposal(
           proposalType: updated.proposalType,
           status: updated.status,
           editedFields,
+          // B1 — which missingFields gate entries this edit lifted, if
+          // any. Omitted (not an empty array) when nothing was cleared,
+          // matching the RV-073 "omit rather than default" convention
+          // used elsewhere in this file's audit metadata.
+          ...(clearedMissingFields.length > 0 ? { clearedMissingFields } : {}),
         },
       }),
     );

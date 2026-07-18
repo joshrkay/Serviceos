@@ -8,6 +8,13 @@
  * surprised by actions they didn't clearly request.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+// OBS — capture recordVoiceError calls without touching the real PostHog SDK.
+const recordVoiceErrorMock = vi.fn();
+vi.mock('../../src/analytics/posthog', () => ({
+  recordVoiceError: (...args: unknown[]) => recordVoiceErrorMock(...args),
+}));
+
 import { createVoiceActionRouterWorker } from '../../src/workers/voice-action-router';
 import { InMemoryProposalRepository, Proposal } from '../../src/proposals/proposal';
 import {
@@ -18,6 +25,7 @@ import { complaintSeverity } from '../../src/workers/voice-action-router';
 import { assertValidProposalPayload } from '../../src/proposals/contracts';
 import { missingFieldsFor } from '../../src/proposals/proposal';
 import { InMemoryAppointmentRepository } from '../../src/appointments/in-memory-appointment';
+import { InMemoryCustomerRepository } from '../../src/customers/customer';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import type { IntentClassification } from '../../src/ai/orchestration/intent-classifier';
 import type { QueueMessage } from '../../src/queues/queue';
@@ -73,6 +81,7 @@ describe('voice-action-router worker', () => {
 
   beforeEach(() => {
     proposalRepo = new InMemoryProposalRepository();
+    recordVoiceErrorMock.mockClear();
   });
 
   afterEach(() => {
@@ -487,6 +496,135 @@ describe('voice-action-router worker', () => {
     expect(payload.displayName).toBeUndefined();
   });
 
+  // B8 (feat: voice-transcript-and-agent-paths) — the worker now routes
+  // create_customer through the SAME dedup-aware handler the telephony FSM
+  // uses (CreateCustomerVoiceTaskHandler via the shared handler-registry),
+  // instead of the thin passthrough. A near-duplicate customer must surface
+  // an advisory `_meta.markers` entry on the draft, before approval.
+  describe('B8 — create_customer draft-time duplicate detection', () => {
+    it('stamps an advisory duplicate marker when a near-duplicate customer already exists — draft stays approvable', async () => {
+      const customerRepo = new InMemoryCustomerRepository();
+      await customerRepo.create({
+        id: 'existing-cust-1',
+        tenantId: 't-1',
+        firstName: 'Acme',
+        lastName: 'Corp',
+        displayName: 'Acme Corp',
+        primaryPhone: '555-0100',
+        preferredChannel: 'phone',
+        smsConsent: false,
+        isArchived: false,
+        createdBy: 'u-1',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      const gateway = gatewayReturning([
+        JSON.stringify({
+          intentType: 'create_customer',
+          confidence: 0.93,
+          extractedEntities: {
+            displayName: 'Acme Corp',
+            phone: '555-0100',
+          },
+        } satisfies IntentClassification),
+      ]);
+      const worker = createVoiceActionRouterWorker({ gateway, proposalRepo, customerRepo });
+
+      await worker.handle(
+        msg({
+          tenantId: 't-1',
+          userId: 'u-1',
+          transcript: 'Add customer Acme Corp, phone 555-0100',
+        }),
+        silentLogger(),
+      );
+
+      const byTenant = await proposalRepo.findByTenant('t-1');
+      expect(byTenant).toHaveLength(1);
+      expect(byTenant[0].proposalType).toBe('create_customer');
+      // Advisory only — never blocks. Still 'draft', same as an unflagged
+      // create_customer proposal (create_customer never auto-approves).
+      expect(byTenant[0].status).toBe('draft');
+      const payload = byTenant[0].payload as Record<string, unknown>;
+      const meta = payload._meta as { markers?: Array<{ path: string; reason: string }> } | undefined;
+      expect(meta?.markers?.length ?? 0).toBeGreaterThanOrEqual(1);
+      expect(meta!.markers![0].reason).toMatch(/duplicate|match/i);
+    });
+
+    it('drafts cleanly (no marker) when no near-duplicate exists', async () => {
+      const customerRepo = new InMemoryCustomerRepository();
+      const gateway = gatewayReturning([
+        JSON.stringify({
+          intentType: 'create_customer',
+          confidence: 0.93,
+          extractedEntities: { displayName: 'Brand New Co', phone: '555-9999' },
+        } satisfies IntentClassification),
+      ]);
+      const worker = createVoiceActionRouterWorker({ gateway, proposalRepo, customerRepo });
+
+      await worker.handle(
+        msg({ tenantId: 't-1', userId: 'u-1', transcript: 'Add customer Brand New Co, phone 555-9999' }),
+        silentLogger(),
+      );
+
+      const byTenant = await proposalRepo.findByTenant('t-1');
+      expect(byTenant).toHaveLength(1);
+      const payload = byTenant[0].payload as Record<string, unknown>;
+      expect(payload._meta).toBeUndefined();
+    });
+
+    it('omits the marker (failure-soft) when the customerRepo dedup lookup throws', async () => {
+      const customerRepo = new InMemoryCustomerRepository();
+      // Force findDuplicates to throw so checkCustomerDuplicatesPg's catch
+      // path is exercised — the create_customer draft must still succeed.
+      vi.spyOn(customerRepo, 'findDuplicates').mockRejectedValue(new Error('db down'));
+
+      const gateway = gatewayReturning([
+        JSON.stringify({
+          intentType: 'create_customer',
+          confidence: 0.93,
+          extractedEntities: { displayName: 'Acme Corp', phone: '555-0100' },
+        } satisfies IntentClassification),
+      ]);
+      const worker = createVoiceActionRouterWorker({ gateway, proposalRepo, customerRepo });
+
+      await worker.handle(
+        msg({ tenantId: 't-1', userId: 'u-1', transcript: 'Add customer Acme Corp, phone 555-0100' }),
+        silentLogger(),
+      );
+
+      const byTenant = await proposalRepo.findByTenant('t-1');
+      expect(byTenant).toHaveLength(1);
+      expect(byTenant[0].proposalType).toBe('create_customer');
+      const payload = byTenant[0].payload as Record<string, unknown>;
+      expect(payload._meta).toBeUndefined();
+    });
+
+    it('drafts a phone-less create_customer proposal instead of a needs_callback clarification (no caller-ID on this surface)', async () => {
+      const gateway = gatewayReturning([
+        JSON.stringify({
+          intentType: 'create_customer',
+          confidence: 0.9,
+          extractedEntities: { displayName: 'Sarah' },
+        } satisfies IntentClassification),
+      ]);
+      const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+
+      await worker.handle(
+        msg({ tenantId: 't-1', userId: 'u-1', transcript: 'Add customer Sarah' }),
+        silentLogger(),
+      );
+
+      const byTenant = await proposalRepo.findByTenant('t-1');
+      expect(byTenant).toHaveLength(1);
+      expect(byTenant[0].proposalType).toBe('create_customer');
+      const payload = byTenant[0].payload as Record<string, unknown>;
+      expect(payload.name).toBe('Sarah');
+      expect(payload.phone).toBeUndefined();
+    });
+  });
+
   it('emits voice_clarification on low-confidence classification with the guessed intent as a suggestion', async () => {
     const gateway = gatewayReturning([
       JSON.stringify({
@@ -791,6 +929,113 @@ describe('voice-action-router worker', () => {
     expect(payload.invoiceReference).toBe('INV-0042');
   });
 
+  // B4 (feat: voice-transcript-and-agent-paths) — the worker's issue_invoice
+  // now routes through the SAME handler the assistant surface uses
+  // (ai/orchestration/task-router.ts's IssueInvoiceTaskHandler), built by the
+  // shared registry with proposalRepo threaded through. Before this unit the
+  // worker's local handler had NO missingFields gate at all: an unresolvable
+  // "issue the invoice" landed with an empty payload and status draft/
+  // ready_for_review with nothing blocking Approve, so approval succeeded
+  // and execution then failed on the empty invoiceId. This is a deliberate
+  // BEHAVIOR CHANGE: the same case now lands gated.
+  describe('issue_invoice — unified handler parity with the assistant surface', () => {
+    it('an INV-number reference resolves ungated (rung 1)', async () => {
+      const gateway = gatewayReturning([
+        JSON.stringify({
+          intentType: 'issue_invoice',
+          confidence: 0.95,
+          extractedEntities: { jobReference: 'INV-0042' },
+        }),
+      ]);
+      const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+
+      await worker.handle(
+        msg({ tenantId: 't-1', userId: 'u-1', transcript: 'Issue invoice INV-0042' }),
+        silentLogger(),
+      );
+
+      const byTenant = await proposalRepo.findByTenant('t-1');
+      expect(byTenant).toHaveLength(1);
+      expect(byTenant[0].proposalType).toBe('issue_invoice');
+      expect(missingFieldsFor(byTenant[0])).toEqual([]);
+      expect((byTenant[0].payload as Record<string, unknown>).invoiceId).toBe('INV-0042');
+    });
+
+    // BEHAVIOR CHANGE (see describe-block comment): previously ungated.
+    it('an unresolvable reference ("issue the invoice", no conversation match) now lands GATED, not ungated-and-doomed', async () => {
+      const gateway = gatewayReturning([
+        JSON.stringify({ intentType: 'issue_invoice', confidence: 0.9, extractedEntities: {} }),
+      ]);
+      const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+
+      await worker.handle(
+        msg({ tenantId: 't-1', userId: 'u-1', transcript: 'Issue the invoice' }),
+        silentLogger(),
+      );
+
+      const byTenant = await proposalRepo.findByTenant('t-1');
+      expect(byTenant).toHaveLength(1);
+      expect(byTenant[0].proposalType).toBe('issue_invoice');
+      expect(byTenant[0].payload).toEqual({});
+      expect(missingFieldsFor(byTenant[0])).toEqual(['invoiceId']);
+      expect(byTenant[0].status).toBe('draft');
+    });
+
+    it('"the one we just drafted" resolves from same-conversation draft_invoice history — ungated, verifiedIds stamped', async () => {
+      const draftGateway = gatewayReturning([
+        JSON.stringify({
+          intentType: 'create_invoice',
+          confidence: 0.9,
+          extractedEntities: { customerName: 'Acme' },
+        }),
+        JSON.stringify({
+          customerId: 'cust-1',
+          jobId: 'job-1',
+          lineItems: [{ description: 'Pipe repair', quantity: 1, unitPrice: 45000 }],
+          confidence_score: 0.9,
+        }),
+      ]);
+      const draftWorker = createVoiceActionRouterWorker({ gateway: draftGateway, proposalRepo });
+      await draftWorker.handle(
+        msg({
+          tenantId: 't-1',
+          userId: 'u-1',
+          transcript: 'Create an invoice for Acme for 450 dollars',
+          conversationId: 'conv-1',
+        }),
+        silentLogger(),
+      );
+      const drafted = (await proposalRepo.findByTenant('t-1')).find((p) => p.proposalType === 'draft_invoice')!;
+      expect(drafted).toBeDefined();
+      // The execution handler stamps resultEntityId on approve/execute — this
+      // unit only tests drafting, so simulate that stamp directly (mirrors
+      // how other worker tests seed prior conversation state).
+      await proposalRepo.update('t-1', drafted.id, { resultEntityId: 'invoice-drafted-123' });
+
+      const issueGateway = gatewayReturning([
+        JSON.stringify({ intentType: 'issue_invoice', confidence: 0.9, extractedEntities: {} }),
+      ]);
+      const issueWorker = createVoiceActionRouterWorker({ gateway: issueGateway, proposalRepo });
+      await issueWorker.handle(
+        msg({
+          tenantId: 't-1',
+          userId: 'u-1',
+          transcript: 'Issue the invoice we just drafted',
+          conversationId: 'conv-1',
+        }),
+        silentLogger(),
+      );
+
+      const issued = (await proposalRepo.findByTenant('t-1')).find(
+        (p) => p.proposalType === 'issue_invoice',
+      )!;
+      expect(issued).toBeDefined();
+      expect(missingFieldsFor(issued)).toEqual([]);
+      expect((issued.payload as Record<string, unknown>).invoiceId).toBe('invoice-drafted-123');
+      expect(issued.sourceContext?.verifiedIds).toEqual({ invoiceId: 'invoice-drafted-123' });
+    });
+  });
+
   it('routes send_estimate as comms (draft-only, never auto-approves)', async () => {
     const gateway = gatewayReturning([
       JSON.stringify({
@@ -885,6 +1130,43 @@ describe('voice-action-router worker', () => {
     );
   });
 
+  // B7 (feat: voice-transcript-and-agent-paths) — update_job. The task
+  // handler makes its own dedicated LLM call to extract the field delta, so
+  // this needs a SECOND scripted gateway response after classify_intent.
+  it('routes update_job when the classifier returns a jobReference, gated on jobId (no jobRepo wired)', async () => {
+    const gateway = gatewayReturning([
+      JSON.stringify({
+        intentType: 'update_job',
+        confidence: 0.9,
+        extractedEntities: { jobReference: 'the Henderson job' },
+      }),
+      JSON.stringify({
+        jobReference: 'the Henderson job',
+        status: 'in_progress',
+        confidence_score: 0.9,
+      }),
+    ]);
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+
+    await worker.handle(
+      msg({
+        tenantId: 't-1',
+        userId: 'u-1',
+        transcript: 'Mark the Henderson job in progress',
+      }),
+      silentLogger()
+    );
+
+    const byTenant = await proposalRepo.findByTenant('t-1');
+    expect(byTenant).toHaveLength(1);
+    expect(byTenant[0].proposalType).toBe('update_job');
+    const payload = byTenant[0].payload as Record<string, unknown>;
+    expect(payload.status).toBe('in_progress');
+    expect(byTenant[0].sourceContext?.missingFields).toEqual(
+      expect.arrayContaining(['jobId'])
+    );
+  });
+
   it('passes tenantId to the gateway in request metadata', async () => {
     const completeMock = vi.fn(async (_request: unknown) => ({
       content: JSON.stringify({ intentType: 'create_invoice', confidence: 0.9 }),
@@ -965,6 +1247,39 @@ describe('voice-action-router worker', () => {
         silentLogger()
       )
     ).rejects.toThrow(/db down/);
+    // OBS — fired before the rethrow above; the queue-retry behavior pinned
+    // by the assertion above is unchanged by adding this analytics call.
+    expect(recordVoiceErrorMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        errorKind: 'action_router_failed',
+        channel: 'worker',
+        tenantId: 't-1',
+        taskType: 'draft_invoice',
+      }),
+    );
+  });
+
+  it('propagates classifier/gateway errors so the queue can retry, and fires voice_error(action_router_failed)', async () => {
+    const gateway = {
+      complete: vi.fn().mockRejectedValue(new Error('gateway timeout')),
+    } as unknown as LLMGateway;
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+
+    await expect(
+      worker.handle(
+        msg({ tenantId: 't-2', userId: 'u-1', transcript: 'create an invoice for Acme' }),
+        silentLogger()
+      )
+    ).rejects.toThrow(/gateway timeout/);
+    expect(recordVoiceErrorMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        errorKind: 'action_router_failed',
+        channel: 'worker',
+        tenantId: 't-2',
+      }),
+    );
+    // No proposal was persisted for the failed classification.
+    expect(await proposalRepo.findByTenant('t-2')).toHaveLength(0);
   });
 
   // §3B/3D/3E — operator voice path must see the same vertical context

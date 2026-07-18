@@ -16,6 +16,16 @@ import { apiFetch } from '../utils/api-fetch';
  *   4. Interim results update `partial` live; finalized segments accumulate and
  *      are delivered to the agent via `onFinal` when recording stops.
  *
+ * A2 — the WS previously carried neither a language pin nor any keyterm
+ * boosting, unlike every other STT surface in the voice pipeline. `opts.
+ * language` threads the operator's session/tenant language onto both the
+ * `/stream-token` mint call (audit parity with the `/transcribe` route's
+ * `languageHint` pattern) and the Deepgram WS URL itself. `opts.keyterms`
+ * threads Nova-3 keyterm boosting (same param `transcription-providers.ts`
+ * emits for telephony) when the caller has terms to offer; the token route
+ * itself has no tenant-glossary/vertical repo access today, so sourcing a
+ * default keyterm list server-side is a follow-up — see A2 notes.
+ *
  * The hook is defensive: every browser API it touches is feature-detected and
  * mockable, so it unit-tests in jsdom.
  */
@@ -48,7 +58,16 @@ export function dictationSupported(): boolean {
   );
 }
 
-function buildStreamUrl(model: string, utteranceEndMs?: number): string {
+function buildStreamUrl(
+  model: string,
+  opts: {
+    utteranceEndMs?: number;
+    /** A2 — pins Deepgram's recognition language; omitted lets Deepgram auto-detect. */
+    language?: 'en' | 'es';
+    /** A2 — Nova-3 keyterm prompting; repeated `keyterm=` params (same shape transcription-providers.ts emits for telephony). */
+    keyterms?: ReadonlyArray<string>;
+  } = {},
+): string {
   const params = new URLSearchParams({
     model: model || 'nova-3',
     interim_results: 'true',
@@ -58,9 +77,17 @@ function buildStreamUrl(model: string, utteranceEndMs?: number): string {
   // UB-B2 — conversation mode: ask Deepgram to emit UtteranceEnd events after
   // this much trailing silence so per-utterance finals fire while the mic
   // stays open (requires interim_results, which is already pinned above).
-  if (utteranceEndMs !== undefined) {
-    params.set('utterance_end_ms', String(utteranceEndMs));
+  if (opts.utteranceEndMs !== undefined) {
+    params.set('utterance_end_ms', String(opts.utteranceEndMs));
     params.set('vad_events', 'true');
+  }
+  if (opts.language) {
+    params.set('language', opts.language);
+  }
+  if (opts.keyterms) {
+    for (const term of opts.keyterms) {
+      if (term) params.append('keyterm', term);
+    }
   }
   return `${DEEPGRAM_WS_BASE}?${params.toString()}`;
 }
@@ -78,6 +105,20 @@ export function useDeepgramDictation(opts: {
   onUtteranceEnd?: (text: string) => void;
   /** Trailing-silence window (ms) for UtteranceEnd events. Default 1000. */
   utteranceEndMs?: number;
+  /**
+   * A2 — the operator's session/tenant language. Threaded onto both the
+   * `/stream-token` mint call (query param, audit parity with `/transcribe`'s
+   * `languageHint`) and the Deepgram WS URL. Omitted (Deepgram auto-detect)
+   * when the caller doesn't know it.
+   */
+  language?: 'en' | 'es';
+  /**
+   * A2 — Nova-3 keyterm boost terms (e.g. tenant catalog/customer/technician
+   * names). Purely a pass-through: the caller is responsible for sourcing
+   * the list (the `/stream-token` route has no tenant-glossary/vertical
+   * repo access today — see the module doc comment).
+   */
+  keyterms?: ReadonlyArray<string>;
 }): UseDeepgramDictation {
   // Keep the latest callbacks in refs so `start`/`stop` keep a stable identity
   // even when the caller passes a fresh `opts` object literal on every render
@@ -93,6 +134,13 @@ export function useDeepgramDictation(opts: {
   const utteranceEndMsRef = useRef<number | undefined>(undefined);
   continuousRef.current = opts.onUtteranceEnd !== undefined;
   utteranceEndMsRef.current = continuousRef.current ? (opts.utteranceEndMs ?? 1000) : undefined;
+  // A2 — language/keyterms mirrored the same way so `start` (a stable
+  // callback) always reads the latest values without being in its own
+  // dependency array.
+  const languageRef = useRef<'en' | 'es' | undefined>(opts.language);
+  const keytermsRef = useRef<ReadonlyArray<string> | undefined>(opts.keyterms);
+  languageRef.current = opts.language;
+  keytermsRef.current = opts.keyterms;
 
   const [isRecording, setIsRecording] = useState(false);
   const [partial, setPartial] = useState('');
@@ -167,7 +215,11 @@ export function useDeepgramDictation(opts: {
     }
 
     try {
-      const res = await apiFetch('/api/voice/stream-token', { method: 'POST' });
+      // A2 — thread the session/tenant language onto the mint call so the
+      // server-side audit trail (voice.stream_token_minted/_failed) records
+      // it, mirroring /transcribe's `languageHint` query param.
+      const tokenQs = languageRef.current ? `?language=${encodeURIComponent(languageRef.current)}` : '';
+      const res = await apiFetch(`/api/voice/stream-token${tokenQs}`, { method: 'POST' });
       if (!res.ok) {
         let serverMessage: string | undefined;
         try {
@@ -190,7 +242,14 @@ export function useDeepgramDictation(opts: {
 
       // Deepgram browser auth: pass the short-lived token via the `bearer`
       // WebSocket subprotocol (browsers can't set Authorization headers on WS).
-      const ws = new WebSocket(buildStreamUrl(model, utteranceEndMsRef.current), ['bearer', token]);
+      const ws = new WebSocket(
+        buildStreamUrl(model, {
+          utteranceEndMs: utteranceEndMsRef.current,
+          language: languageRef.current,
+          keyterms: keytermsRef.current,
+        }),
+        ['bearer', token],
+      );
       wsRef.current = ws;
 
       ws.onopen = () => {

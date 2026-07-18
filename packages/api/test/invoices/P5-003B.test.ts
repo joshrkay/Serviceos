@@ -55,11 +55,14 @@ describe('P5-003B — Invoice proposal schema validation', () => {
       expect(result.errors!.some((e) => e.includes('customerId'))).toBe(true);
     });
 
-    it('validation — missing jobId rejected', () => {
+    it('validation — missing jobId accepted (optional; job auto-created at execution)', () => {
+      // B6: draft_invoice reached parity with draft_estimate — jobId is
+      // optional in draftInvoicePayloadSchema and CreateInvoiceExecutionHandler
+      // auto-opens a job for the customer when it is absent. A customer-only
+      // payload is therefore valid at draft time; customerId stays required.
       const { jobId, ...rest } = validPayload;
       const result = validateInvoiceProposal(rest);
-      expect(result.valid).toBe(false);
-      expect(result.errors!.some((e) => e.includes('jobId'))).toBe(true);
+      expect(result.valid).toBe(true);
     });
 
     it('validation — missing lineItems rejected', () => {

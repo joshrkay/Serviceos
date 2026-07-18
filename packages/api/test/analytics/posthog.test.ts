@@ -4,6 +4,7 @@ import {
   recordProductEvent,
   recordTenantGroup,
   recordApiError,
+  recordVoiceError,
   isFunnelAnalyticsEnabled,
   isProductAnalyticsEnabled,
   __resetAnalyticsForTests,
@@ -265,5 +266,98 @@ describe('recordApiError', () => {
     __resetAnalyticsForTests();
     recordApiError({ route: '/api/x', status: 500, tenantId: 't' });
     expect(captureSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('recordVoiceError', () => {
+  beforeEach(() => {
+    __resetAnalyticsForTests();
+    captureSpy.mockClear();
+    process.env.POSTHOG_API_KEY = 'phc_test';
+    __setClientForTests(fakeClient);
+  });
+
+  afterEach(() => {
+    __resetAnalyticsForTests();
+    delete process.env.POSTHOG_API_KEY;
+  });
+
+  it('emits voice_error with the server sentinel distinctId and the tenant group when tenantId is present', () => {
+    recordVoiceError({
+      errorKind: 'speech_turn_failed',
+      channel: 'media_streams',
+      callSid: 'CA123',
+      tenantId: 't_1',
+    });
+
+    expect(captureSpy).toHaveBeenCalledTimes(1);
+    const arg = captureSpy.mock.calls[0][0] as {
+      distinctId: string;
+      event: string;
+      properties: Record<string, unknown>;
+      groups?: Record<string, string>;
+    };
+    expect(arg.event).toBe('voice_error');
+    // Voice callers must never mint a PostHog person — always the sentinel.
+    expect(arg.distinctId).toBe('server:voice');
+    expect(arg.groups).toEqual({ tenant: 't_1' });
+    expect(arg.properties).toMatchObject({
+      error_kind: 'speech_turn_failed',
+      channel: 'media_streams',
+      call_sid: 'CA123',
+      tenant_id: 't_1',
+      source: 'server',
+    });
+    expect(typeof arg.properties.timestamp).toBe('string');
+  });
+
+  it('carries task_type only when supplied, and pins the exact property shape (no PII surface)', () => {
+    recordVoiceError({
+      errorKind: 'action_router_failed',
+      channel: 'worker',
+      tenantId: 't_2',
+      taskType: 'issue_invoice',
+    });
+
+    const arg = captureSpy.mock.calls[0][0] as {
+      properties: Record<string, unknown>;
+    };
+    expect(arg.properties.task_type).toBe('issue_invoice');
+    // Only the documented keys leave the function — no transcript, message,
+    // phone number, or other free text can ride along.
+    expect(Object.keys(arg.properties).sort()).toEqual(
+      ['channel', 'error_kind', 'source', 'task_type', 'tenant_id', 'timestamp'].sort(),
+    );
+  });
+
+  it('omits call_sid/task_type/tenant_id and the group when not supplied', () => {
+    recordVoiceError({ errorKind: 'realtime_circuit_open', channel: 'gather' });
+
+    const arg = captureSpy.mock.calls[0][0] as {
+      distinctId: string;
+      properties: Record<string, unknown>;
+      groups?: Record<string, string>;
+    };
+    expect(arg.distinctId).toBe('server:voice');
+    expect(arg.groups).toBeUndefined();
+    expect(arg.properties.call_sid).toBeUndefined();
+    expect(arg.properties.task_type).toBeUndefined();
+    expect(arg.properties.tenant_id).toBeUndefined();
+  });
+
+  it('off-by-default: no key → no-op', () => {
+    delete process.env.POSTHOG_API_KEY;
+    __resetAnalyticsForTests();
+    recordVoiceError({ errorKind: 'degraded_to_gather', channel: 'media_streams', tenantId: 't' });
+    expect(captureSpy).not.toHaveBeenCalled();
+  });
+
+  it('never throws when capture throws', () => {
+    captureSpy.mockImplementationOnce(() => {
+      throw new Error('boom');
+    });
+    expect(() =>
+      recordVoiceError({ errorKind: 'tts_stream_recovered', channel: 'media_streams' }),
+    ).not.toThrow();
   });
 });

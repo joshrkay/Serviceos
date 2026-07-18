@@ -557,3 +557,185 @@ describe('4.3 — duplicate check before the proposal card', () => {
     expect(out.proposal).toBeDefined();
   });
 });
+
+// ─── B8 — draft-time duplicate detection parity ───────────────────────────
+// Prior to B8, the advisory `duplicateWarnings` computed above only ever
+// landed in `sourceContext` — nothing in the review card (AIProposalCard /
+// InboxPage, both surfaces read `payload._meta.markers`) rendered it. B8
+// stamps the SAME advisory into `_meta.markers` so a near-duplicate is
+// visible on the draft BEFORE approval, on every surface that routes
+// through this handler (telephony FSM, voice worker, assistant chat).
+describe('B8 — advisory duplicate marker in payload._meta', () => {
+  function loaderWithMatch(): {
+    findDuplicates: (
+      tenantId: string,
+      criteria: { phone?: string; email?: string; name?: string }
+    ) => Promise<Array<Record<string, unknown>>>;
+  } {
+    return {
+      findDuplicates: async (tenantId: string) => [
+        {
+          id: 'existing-cust-1',
+          tenantId,
+          firstName: 'Alex',
+          lastName: 'Smith',
+          displayName: 'Alex Smith',
+          primaryPhone: '+15551230100',
+          preferredChannel: 'phone',
+          smsConsent: false,
+          isArchived: false,
+          createdBy: 'u',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        },
+      ],
+    };
+  }
+
+  it('stamps a _meta.markers advisory when a near-duplicate name exists — draft stays approvable', async () => {
+    const handler = new CreateCustomerVoiceTaskHandler({
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      duplicateLoader: loaderWithMatch() as any,
+    });
+    const out = await handler.run({
+      tenantId: TENANT,
+      message: "I'd like to sign up as a new customer",
+      conversationId: SESSION,
+      userId: SYSTEM_USER,
+      existingEntities: {
+        displayName: 'Alex Smith',
+        callerIdPhone: '+15551230100',
+      },
+    });
+    expect(out.status).toBe('proposal_drafted');
+    const proposal = out.proposal!;
+    // Advisory only — never blocks. The proposal still lands 'draft'
+    // (create_customer omits sourceTrustTier unconditionally, D3) and is
+    // approvable exactly as an unflagged proposal would be.
+    expect(proposal.status).toBe('draft');
+    const meta = proposal.payload._meta as { overallConfidence?: string; markers?: Array<{ path: string; reason: string }> };
+    expect(meta.markers).toBeDefined();
+    expect(meta.markers!.length).toBeGreaterThanOrEqual(1);
+    expect(meta.markers![0].reason).toMatch(/duplicate|match/i);
+    expect(meta.overallConfidence).toBeDefined();
+  });
+
+  it('leaves payload._meta clean when no duplicate match exists', async () => {
+    const handler = new CreateCustomerVoiceTaskHandler({
+      duplicateLoader: { findDuplicates: async () => [] },
+    });
+    const out = await handler.run({
+      tenantId: TENANT,
+      message: "I'd like to sign up as a new customer",
+      conversationId: SESSION,
+      userId: SYSTEM_USER,
+      existingEntities: {
+        displayName: 'Brand New Customer',
+        callerIdPhone: '+15559990000',
+      },
+    });
+    expect(out.status).toBe('proposal_drafted');
+    expect(out.proposal!.payload._meta).toBeUndefined();
+  });
+
+  it('omits the marker (failure-soft) when the duplicateLoader throws', async () => {
+    const handler = new CreateCustomerVoiceTaskHandler({
+      duplicateLoader: {
+        findDuplicates: async () => {
+          throw new Error('db down');
+        },
+      },
+    });
+    const out = await handler.run({
+      tenantId: TENANT,
+      message: "I'd like to sign up as a new customer",
+      conversationId: SESSION,
+      userId: SYSTEM_USER,
+      existingEntities: {
+        displayName: 'Alex Smith',
+        callerIdPhone: '+15551230100',
+      },
+    });
+    expect(out.status).toBe('proposal_drafted');
+    expect(out.proposal!.payload._meta).toBeUndefined();
+  });
+
+  it('preserves a real overallConfidence (from classifierConfidence) instead of stomping it to medium', async () => {
+    const handler = new CreateCustomerVoiceTaskHandler({
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      duplicateLoader: loaderWithMatch() as any,
+    });
+    const out = await handler.run({
+      tenantId: TENANT,
+      message: "I'd like to sign up as a new customer",
+      conversationId: SESSION,
+      userId: SYSTEM_USER,
+      existingEntities: {
+        displayName: 'Alex Smith',
+        callerIdPhone: '+15551230100',
+        classifierConfidence: 0.95, // maps to 'high' via getConfidenceLevel
+      },
+    });
+    const meta = out.proposal!.payload._meta as { overallConfidence?: string };
+    expect(meta.overallConfidence).toBe('high');
+  });
+});
+
+// ─── B8 — requirePhone: false (worker + assistant surfaces) ───────────────
+// The telephony FSM (twilio-adapter.ts) constructs this handler with the
+// default `requirePhone: true` — a live caller IS reachable by phone, so a
+// blocked caller-ID with no stated callback must escalate. The shared
+// handler-registry (ai/orchestration/handler-registry.ts), which builds the
+// handler for the voice worker and assistant chat, passes
+// `requirePhone: false` — neither surface has a caller-ID concept, so a
+// missing phone must NOT block drafting (parity with the pre-B8 thin
+// passthrough handler, which never required a phone at all).
+describe('B8 — requirePhone: false (non-telephony surfaces)', () => {
+  it('drafts a phone-less proposal instead of needs_callback when requirePhone is false', async () => {
+    const handler = new CreateCustomerVoiceTaskHandler({ requirePhone: false });
+    const out = await handler.run({
+      tenantId: TENANT,
+      message: 'Add customer Sarah, email sarah@example.com',
+      userId: SYSTEM_USER,
+      existingEntities: {
+        displayName: 'Sarah',
+        email: 'sarah@example.com',
+        // No phone, no callerIdPhone — a live call would escalate here.
+      },
+    });
+    expect(out.status).toBe('proposal_drafted');
+    expect(out.proposal!.payload.name).toBe('Sarah');
+    expect(out.proposal!.payload.phone).toBeUndefined();
+    // No "(undefined)" leaking into the summary when phone is absent.
+    expect(out.proposal!.summary).not.toMatch(/undefined/);
+  });
+
+  it('still escalates to needs_callback by default (requirePhone true) — telephony FSM behavior unchanged', async () => {
+    const handler = new CreateCustomerVoiceTaskHandler();
+    const out = await handler.run({
+      tenantId: TENANT,
+      message: "I'd like to sign up",
+      userId: SYSTEM_USER,
+      existingEntities: {
+        displayName: 'Sarah',
+        phoneBlocked: true,
+      },
+    });
+    expect(out.status).toBe('needs_callback');
+  });
+
+  it('still uses a spoken/caller-id phone when present, even with requirePhone: false', async () => {
+    const handler = new CreateCustomerVoiceTaskHandler({ requirePhone: false });
+    const out = await handler.run({
+      tenantId: TENANT,
+      message: 'Add customer Sarah, phone 555-0199',
+      userId: SYSTEM_USER,
+      existingEntities: {
+        displayName: 'Sarah',
+        phone: '555-0199',
+      },
+    });
+    expect(out.status).toBe('proposal_drafted');
+    expect(out.proposal!.payload.phone).toBe('555-0199');
+  });
+});

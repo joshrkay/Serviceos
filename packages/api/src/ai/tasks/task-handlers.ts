@@ -187,27 +187,3 @@ export class CreateAppointmentTaskHandler implements TaskHandler {
     return { proposal, taskType: this.taskType };
   }
 }
-
-export class DraftEstimateTaskHandler implements TaskHandler {
-  readonly taskType: ProposalType = 'draft_estimate';
-
-  async handle(context: TaskContext): Promise<TaskResult> {
-    const input: CreateProposalInput = {
-      tenantId: context.tenantId,
-      proposalType: this.taskType,
-      payload: context.existingEntities ?? {
-        lineItems: [],
-        total: 0,
-      },
-      summary: context.message,
-      sourceContext: context.conversationId ? { conversationId: context.conversationId } : undefined,
-      createdBy: context.userId,
-      ...(context.tenantThresholdOverride
-        ? { tenantThresholdOverride: context.tenantThresholdOverride }
-        : {}),
-    };
-
-    const proposal = createProposal(input);
-    return { proposal, taskType: this.taskType };
-  }
-}

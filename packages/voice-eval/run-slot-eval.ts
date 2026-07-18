@@ -1,31 +1,57 @@
 #!/usr/bin/env npx tsx
 /**
- * run-slot-eval.ts — slot-extraction precision/recall/F1 on the critical slots
- * (name, address, service_type, time_window, problem_description), using the
- * transcript fixtures' expected_entities as gold.
+ * run-slot-eval.ts — slot-extraction precision/recall/F1 on the critical slots,
+ * using the transcript fixtures' expected_entities as gold.
  *
- *   npx tsx packages/voice-eval/run-slot-eval.ts          # offline baseline
- *   npx tsx packages/voice-eval/run-slot-eval.ts --live   # production extractor
- *   npx tsx packages/voice-eval/run-slot-eval.ts --gate   # enforce threshold
+ *   npx tsx packages/voice-eval/run-slot-eval.ts                  # offline baseline
+ *   npx tsx packages/voice-eval/run-slot-eval.ts --live           # production path
+ *   npx tsx packages/voice-eval/run-slot-eval.ts --live --gate    # enforce 0.88 target
+ *   npx tsx packages/voice-eval/run-slot-eval.ts --live --max-utterances 100
  *
  * Matching per slot:
- *   - name / address / service_type : normalized exact match
+ *   - name / address / service_type : normalized exact / containment match
  *   - time_window / problem_description : token-overlap (Jaccard) >= 0.3, since
  *     these are free-text and phrasing varies.
  *
- * Offline reports + low floor; LIVE enforces F1 >= 0.88 (the goal).
+ * OFFLINE (default): heuristic baseline (slot-extractor.ts) over all 5 critical
+ *   slots. Reports + low floor; --gate enforces the floor.
+ * LIVE (--live): routes each transcript through the PRODUCTION classifier
+ *   (classifyIntent) and projects entities via `extractLaunchSlots` — the real
+ *   production slot projection. Requires ANTHROPIC_API_KEY (or AI_PROVIDER_API_KEY);
+ *   fails fast (exit 2) when absent. Enforces LIVE_SLOT_TARGET (0.88) with --gate.
+ *
+ *   IMPORTANT — service_type is EXCLUDED from the live micro-F1. The classifier
+ *   does not emit it: `extractLaunchSlots` fills service_type from
+ *   `input.serviceType` (resolved from the tenant vertical pack) and phone from
+ *   caller-ID, neither of which is an LLM output. Injecting the gold service_type
+ *   as input would rig the metric; leaving it empty would structurally fail an
+ *   otherwise-perfect run. So live measures only the four LLM-derived slots
+ *   (name, address, time_window, problem_description). service_type live
+ *   coverage is a separate, out-of-scope concern (the vertical resolver).
  */
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { slotReport } from './metrics';
 import { extractSlots } from './slot-extractor';
+import {
+  LIVE_SLOTS,
+  LIVE_SLOT_TARGET,
+  SYNTHETIC_TENANT_ID,
+  checkCostCap,
+  evaluateGate,
+  parseMaxUtterances,
+  resolveCostCapCents,
+  resolveLiveApiKey,
+  runLiveSlotEval,
+  sampleDeterministic,
+  type SlotExample,
+} from './live-support';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TRANSCRIPTS = resolve(__dirname, '../../data/fixtures/transcripts');
 
 const CRITICAL = ['name', 'address', 'service_type', 'time_window', 'problem_description'];
-const LIVE_TARGET = 0.88;
 const OFFLINE_FLOOR = 0.50;
 
 function norm(s: string): string {
@@ -46,49 +72,98 @@ function matchFn(slot: string, gold: string, pred: string): boolean {
 
 interface Transcript { transcript: string; service_type?: string; expected_entities?: Record<string, string> }
 
-function loadGold(): { gold: Record<string, string>; pred: Record<string, string> }[] {
-  const out: { gold: Record<string, string>; pred: Record<string, string> }[] = [];
-  for (const f of readdirSync(TRANSCRIPTS).filter((x) => x.endsWith('.json'))) {
-    const t = JSON.parse(readFileSync(join(TRANSCRIPTS, f), 'utf8')) as Transcript;
-    const e = t.expected_entities ?? {};
-    const gold: Record<string, string> = {
-      name: e.customer_name ?? '',
-      address: e.address ?? '',
-      service_type: t.service_type ?? '',
-      time_window: e.appointment_window ?? '',
-      problem_description: e.issue ?? '',
-    };
+function goldSlots(t: Transcript): Record<string, string> {
+  const e = t.expected_entities ?? {};
+  return {
+    name: e.customer_name ?? '',
+    address: e.address ?? '',
+    service_type: t.service_type ?? '',
+    time_window: e.appointment_window ?? '',
+    problem_description: e.issue ?? '',
+  };
+}
+
+function loadTranscripts(): Transcript[] {
+  return readdirSync(TRANSCRIPTS)
+    .filter((x) => x.endsWith('.json'))
+    .map((f) => JSON.parse(readFileSync(join(TRANSCRIPTS, f), 'utf8')) as Transcript);
+}
+
+const LIVE_NO_KEY =
+  '--live is wired but credential-gated: no ANTHROPIC_API_KEY (or AI_PROVIDER_API_KEY) is set.\n' +
+  '   Live slot eval routes each transcript through the production classifier\n' +
+  '   (classifyIntent) and projects entities via extractLaunchSlots. Set\n' +
+  '   ANTHROPIC_API_KEY to run it. See data/VOICE-CORPUS-REPORT.md → credential-gated step 3.';
+
+async function runLive(gate: boolean): Promise<void> {
+  const key = resolveLiveApiKey();
+  if (!key) { console.error(`ℹ️  ${LIVE_NO_KEY}`); process.exit(2); }
+
+  const maxUtterances = parseMaxUtterances(process.argv);
+  const all = loadTranscripts();
+  if (all.length === 0) { console.error('❌ no transcripts found'); process.exit(1); }
+  const sampled = sampleDeterministic(all, (t) => t.transcript, maxUtterances);
+
+  const capCents = resolveCostCapCents();
+  const cost = checkCostCap(sampled.map((t) => t.transcript), capCents);
+  console.log(`\n🧩 Slot extraction eval — LIVE (production classifier + extractLaunchSlots)`);
+  console.log(`   key source:      ${key.source}`);
+  console.log(`   transcripts:     ${all.length}${maxUtterances ? ` (sampled ${sampled.length})` : ''}`);
+  console.log(`   projected cost:  ${cost.projectedCents.toFixed(1)}c (cap ${capCents}c, conservative/no-cache)`);
+  if (!cost.withinCap) {
+    console.error(
+      `\n❌ ABORT: projected ${cost.projectedCents.toFixed(1)}c exceeds cap ${capCents}c.\n` +
+      `   Lower the sample with --max-utterances N, or raise VOICE_EVAL_COST_CAP_CENTS.`,
+    );
+    process.exit(3);
+  }
+
+  const { createRealLayerTwoGateway } = await import('../api/src/ai/gateway/real-layer-two-factory');
+  const { AgentEventBus } = await import('../api/src/ai/voice-quality/event-bus');
+  let spentCents = 0;
+  const gateway = createRealLayerTwoGateway({
+    apiKey: key.key,
+    bus: new AgentEventBus(),
+    costTracker: { addCents: (n) => { spentCents += n; }, totalCents: () => spentCents },
+  });
+
+  const examples: SlotExample[] = sampled.map((t) => ({ transcript: t.transcript, gold: goldSlots(t) }));
+  const { examples: results, fastPathHits, llmCalls } = await runLiveSlotEval(examples, gateway, {
+    tenantId: SYNTHETIC_TENANT_ID,
+  });
+
+  const slots = [...LIVE_SLOTS];
+  const report = slotReport(results, slots, matchFn);
+  console.log(`   evaluated:       ${results.length}`);
+  console.log(`   slots (live):    ${slots.join(', ')}`);
+  console.log(`   note:            service_type EXCLUDED — not classifier-sourced (vertical resolver)`);
+  for (const s of slots) {
+    const m = report.perSlot[s];
+    console.log(`   ${s.padEnd(22)} P=${(m.precision * 100).toFixed(0)}% R=${(m.recall * 100).toFixed(0)}% F1=${(m.f1 * 100).toFixed(1)}%  (tp=${m.tp} fp=${m.fp} fn=${m.fn})`);
+  }
+  console.log(`   micro F1:        ${(report.microF1 * 100).toFixed(1)}%`);
+  console.log(`   fast-path hits:  ${fastPathHits}/${results.length} (${llmCalls} LLM calls)`);
+  console.log(`   actual spend:    ${spentCents.toFixed(1)}c`);
+
+  const g = evaluateGate(report.microF1, LIVE_SLOT_TARGET, gate);
+  console.log(`   ${gate ? 'threshold' : 'reference target'}: ${(g.target * 100).toFixed(0)}%`);
+  if (!g.pass) {
+    console.error(`\n❌ FAIL: micro F1 ${(report.microF1 * 100).toFixed(1)}% < ${(g.target * 100).toFixed(0)}%`);
+    process.exit(1);
+  }
+  console.log(`\n✅ ${gate ? 'PASS (live, gated)' : 'reported (live, not gated)'}.\n`);
+}
+
+function runOffline(gate: boolean): void {
+  const examples = loadTranscripts().map((t) => {
+    const gold = goldSlots(t);
     const ex = extractSlots(t.transcript);
     const pred: Record<string, string> = {
       name: ex.name ?? '', address: ex.address ?? '', service_type: ex.service_type ?? '',
       time_window: ex.time_window ?? '', problem_description: ex.problem_description ?? '',
     };
-    out.push({ gold, pred });
-  }
-  return out;
-}
-
-// LIVE (--live) is intentionally NOT wired in this build (see run-intent-eval.ts
-// and data/VOICE-CORPUS-REPORT.md credential-gated step 3): there is no single
-// production "extract these 5 slots" function — the inbound entity resolver would
-// need adapting to the eval's slot set — and the offline harness deliberately
-// avoids importing the gateway/runtime. This is the wiring point + gate.
-const LIVE_NOT_WIRED =
-  '--live is not wired in this build.\n' +
-  '   The >=0.88 live gate needs a production slot extractor adapted to the eval\'s\n' +
-  '   5 critical slots (name, address, service_type, time_window, problem_description)\n' +
-  '   behind a constructed LLMGateway. Wire it here to enable --live.\n' +
-  '   See data/VOICE-CORPUS-REPORT.md → credential-gated step 3.';
-
-function main(): void {
-  const live = process.argv.includes('--live');
-  const gate = process.argv.includes('--gate');
-
-  // Fail fast and explicitly on --live rather than starting a run that cannot
-  // evaluate the production extractor (exit 2 = not-implemented, not a gate fail).
-  if (live) { console.error(`ℹ️  ${LIVE_NOT_WIRED}`); process.exit(2); }
-
-  const examples = loadGold();
+    return { gold, pred };
+  });
   const report = slotReport(examples, CRITICAL, matchFn);
 
   console.log(`\n🧩 Slot extraction eval — OFFLINE (heuristic baseline)`);
@@ -99,15 +174,20 @@ function main(): void {
   }
   console.log(`   micro F1: ${(report.microF1 * 100).toFixed(1)}%`);
 
-  const target = OFFLINE_FLOOR;
-  const enforce = gate;
-  console.log(`   ${enforce ? 'threshold' : 'reference target'}: ${(target * 100).toFixed(0)}%  (LIVE target ${LIVE_TARGET * 100}% / offline floor ${OFFLINE_FLOOR * 100}%)`);
-
-  if (enforce && report.microF1 < target) {
-    console.error(`\n❌ FAIL: micro F1 ${(report.microF1 * 100).toFixed(1)}% < ${(target * 100).toFixed(0)}%`);
+  const g = evaluateGate(report.microF1, OFFLINE_FLOOR, gate);
+  console.log(`   ${gate ? 'threshold' : 'reference target'}: ${(g.target * 100).toFixed(0)}%  (LIVE target ${LIVE_SLOT_TARGET * 100}% / offline floor ${OFFLINE_FLOOR * 100}%)`);
+  if (!g.pass) {
+    console.error(`\n❌ FAIL: micro F1 ${(report.microF1 * 100).toFixed(1)}% < ${(g.target * 100).toFixed(0)}%`);
     process.exit(1);
   }
-  console.log(`\n✅ ${enforce ? 'PASS' : 'reported (offline, not gated)'}.\n`);
+  console.log(`\n✅ ${gate ? 'PASS' : 'reported (offline, not gated)'}.\n`);
 }
 
-main();
+async function main(): Promise<void> {
+  const live = process.argv.includes('--live');
+  const gate = process.argv.includes('--gate');
+  if (live) await runLive(gate);
+  else runOffline(gate);
+}
+
+main().catch((e) => { console.error(e); process.exit(1); });

@@ -147,6 +147,7 @@ describe('VOX-34 — per-tier default deadline', () => {
 
     await gateway.complete({
       taskType: 'classify_intent',
+      tenantId: 'tenant-vox-34',
       messages: [{ role: 'user', content: 'book me tuesday' }],
     });
 
@@ -163,6 +164,7 @@ describe('VOX-34 — per-tier default deadline', () => {
 
     await gateway.complete({
       taskType: 'draft_estimate',
+      tenantId: 'tenant-vox-34',
       messages: [{ role: 'user', content: 'quote a bathroom remodel' }],
     });
 
@@ -179,6 +181,7 @@ describe('VOX-34 — per-tier default deadline', () => {
 
     await gateway.complete({
       taskType: 'classify_intent',
+      tenantId: 'tenant-vox-34',
       messages: [{ role: 'user', content: 'hi' }],
       deadlineMs: 250,
     });

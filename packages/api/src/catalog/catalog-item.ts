@@ -40,6 +40,8 @@ export interface ListCatalogItemOptions {
   search?: string;
   category?: CatalogCategory;
   includeArchived?: boolean;
+  /** Cap the number of rows returned. Omit to return every matching row. */
+  limit?: number;
 }
 
 export interface CatalogItemRepository {
@@ -170,7 +172,7 @@ export class InMemoryCatalogItemRepository implements CatalogItemRepository {
   async listByTenant(tenantId: string, options: ListCatalogItemOptions = {}): Promise<CatalogItem[]> {
     const search = options.search?.trim().toLowerCase() ?? '';
 
-    return Array.from(this.items.values())
+    const results = Array.from(this.items.values())
       .filter((item) => {
         if (item.tenantId !== tenantId) return false;
         if (!options.includeArchived && item.archivedAt) return false;
@@ -181,8 +183,12 @@ export class InMemoryCatalogItemRepository implements CatalogItemRepository {
         }
         return true;
       })
-      .sort((a, b) => a.name.localeCompare(b.name))
-      .map((item) => structuredClone(item));
+      // Stable order — must match the pg implementation's `ORDER BY name ASC`
+      // so a SQL `LIMIT` window and this in-memory `.slice` agree.
+      .sort((a, b) => a.name.localeCompare(b.name));
+
+    const bounded = options.limit !== undefined ? results.slice(0, Math.max(0, options.limit)) : results;
+    return bounded.map((item) => structuredClone(item));
   }
 
   async findById(tenantId: string, id: string): Promise<CatalogItem | null> {
