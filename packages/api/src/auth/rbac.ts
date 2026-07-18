@@ -187,6 +187,11 @@ const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     'conversations:create',
     'files:upload',
     'files:view',
+    // Technicians deliberately lack appointments:update — the day-view
+    // reschedule flow (TechnicianDayView.saveAppointmentTimes) routes edits
+    // through the human-approval-gated proposal path instead, so creating a
+    // proposal is the LOW-privilege action here and must stay available.
+    'proposals:create',
     'proposals:view',
     // Phase 1
     'customers:view',

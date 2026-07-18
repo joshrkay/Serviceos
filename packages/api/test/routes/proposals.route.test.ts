@@ -158,7 +158,11 @@ describe('GET /api/proposals', () => {
 });
 
 describe('POST /api/proposals/ — proposals:create permission gating', () => {
-  it('technician role → 403 FORBIDDEN, proposal not created', async () => {
+  it('technician role → 200: the day-view reschedule flow must keep working (techs propose, owners approve)', async () => {
+    // Regression pin for the TechnicianDayView.saveAppointmentTimes flow:
+    // technicians lack appointments:update BY DESIGN and route edits through
+    // this human-approval-gated proposal path — the permission gate must not
+    // cut off the low-privilege action it exists to channel people into.
     const { app, proposalRepo, appointment } = await buildSchedulingAppWithRole('technician' as Role);
 
     const res = await request(app)
@@ -174,9 +178,8 @@ describe('POST /api/proposals/ — proposals:create permission gating', () => {
         summary: 'reschedule via test',
       });
 
-    expect(res.status).toBe(403);
-    expect(res.body.error).toBe('FORBIDDEN');
-    expect((await proposalRepo.findByStatus(TEST_TENANT_ID, 'draft')).length).toBe(0);
+    expect(res.status).toBe(200);
+    expect((await proposalRepo.findByStatus(TEST_TENANT_ID, 'draft')).length).toBe(1);
   });
 
   it('dispatcher role → 200 with created proposal', async () => {
