@@ -82,22 +82,30 @@ function claimAwarePool(claims: Map<string, ClaimRow> = new Map()): { pool: Pool
   return { pool: { query } as unknown as Pool, claims };
 }
 
-describe('dispatchEstimateNudge', () => {
-  let estimateRepo: InMemoryEstimateRepository;
-  let auditRepo: InMemoryAuditRepository;
-  let sendEstimate: ReturnType<typeof vi.fn>;
-  let sendService: Pick<SendService, 'sendEstimate'>;
-
-  beforeEach(async () => {
-    estimateRepo = new InMemoryEstimateRepository();
-    auditRepo = new InMemoryAuditRepository();
-    sendEstimate = vi.fn().mockResolvedValue({
+function makeSendService(): Pick<SendService, 'sendEstimate'> & {
+  sendEstimate: ReturnType<typeof vi.fn>;
+} {
+  return {
+    sendEstimate: vi.fn().mockResolvedValue({
       estimateId: ESTIMATE_ID,
       viewUrl: 'https://x/e/tok',
       viewToken: 'tok',
       channelsSent: [],
-    });
-    sendService = { sendEstimate };
+    }),
+  };
+}
+
+describe('dispatchEstimateNudge', () => {
+  let estimateRepo: InMemoryEstimateRepository;
+  let auditRepo: InMemoryAuditRepository;
+  let sendService: ReturnType<typeof makeSendService>;
+  let sendEstimate: ReturnType<typeof makeSendService>['sendEstimate'];
+
+  beforeEach(async () => {
+    estimateRepo = new InMemoryEstimateRepository();
+    auditRepo = new InMemoryAuditRepository();
+    sendService = makeSendService();
+    sendEstimate = sendService.sendEstimate;
     await estimateRepo.create(makeEstimate());
   });
 

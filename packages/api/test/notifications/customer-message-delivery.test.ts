@@ -1,12 +1,10 @@
 /**
  * Unit tests for sendCustomerMessage — the sms_consent + DNC gates, the
- * independent email channel, and the per-channel idempotency keys.
- *
- * Behavior note: when consent is absent or the number is on the DNC list the
- * SMS is simply not sent and NO dispatch row is written (the function gates
- * before logging a dispatch); the email channel is unaffected.
+ * independent email channel, the per-channel idempotency keys, and (T4-F01)
+ * the claim-before-send gate + the no-longer-silent failure path (R5).
  */
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import type { Pool, QueryResult } from 'pg';
 import { sendCustomerMessage } from '../../src/notifications/customer-message-delivery';
 import { InMemoryDeliveryProvider } from '../../src/notifications/delivery-provider';
 import { GatedMessageDelivery } from '../../src/notifications/gated-message-delivery';
@@ -14,6 +12,7 @@ import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemoryDispatchRepository } from '../../src/notifications/dispatch-repository';
 import { InMemoryDncRepository, normalizePhone } from '../../src/compliance/dnc';
 import { Customer } from '../../src/customers/customer';
+import type { Logger } from '../../src/logging/logger';
 
 const TENANT = 'tenant-1';
 
@@ -36,6 +35,22 @@ function makeCustomer(overrides: Partial<Customer> = {}): Customer {
   };
 }
 
+function makeLogger(): Logger & {
+  debug: ReturnType<typeof vi.fn>;
+  info: ReturnType<typeof vi.fn>;
+  warn: ReturnType<typeof vi.fn>;
+  error: ReturnType<typeof vi.fn>;
+} {
+  const logger = {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    child: vi.fn(() => logger),
+  };
+  return logger as unknown as Logger & typeof logger;
+}
+
 // WS1 — the consent/DNC gate now lives in the delivery wrapper. sendCustomerMessage
 // is handed a GatedMessageDelivery (enforcement 'block') over the raw in-memory
 // double; assertions still inspect the raw `delivery` (sentSms).
@@ -43,6 +58,7 @@ function makeDeps() {
   const delivery = new InMemoryDeliveryProvider();
   const dispatchRepo = new InMemoryDispatchRepository();
   const dncRepo = new InMemoryDncRepository();
+  const logger = makeLogger();
   const gated = new GatedMessageDelivery({
     base: delivery,
     dnc: dncRepo,
@@ -53,8 +69,48 @@ function makeDeps() {
     delivery,
     dispatchRepo,
     dncRepo,
-    sendDeps: { delivery: gated, dispatchRepo },
+    logger,
+    sendDeps: { delivery: gated, dispatchRepo, pool: null, logger },
   };
+}
+
+interface ClaimRow {
+  status: 'claimed' | 'sent';
+  claimedAt: number;
+}
+
+/** T4-F01 claim-aware fake pool — see test/workers/thank-you-sms-worker.test.ts for the same pattern. */
+function claimAwarePool(claims: Map<string, ClaimRow> = new Map()): { pool: Pool; claims: Map<string, ClaimRow> } {
+  const query = vi.fn(async (sql: string, params: unknown[]) => {
+    if (!sql.includes('send_claims')) return { rows: [], rowCount: 0 } as unknown as QueryResult;
+    const key = `${params[0]}::${params[1]}`;
+    if (sql.trim().startsWith('INSERT')) {
+      const staleMinutes = Number(params[2]);
+      const existing = claims.get(key);
+      if (!existing) {
+        claims.set(key, { status: 'claimed', claimedAt: Date.now() });
+        return { rows: [{ claim_key: params[1] }], rowCount: 1 } as unknown as QueryResult;
+      }
+      const staleMs = staleMinutes * 60_000;
+      if (existing.status === 'claimed' && Date.now() - existing.claimedAt >= staleMs) {
+        existing.claimedAt = Date.now();
+        return { rows: [{ claim_key: params[1] }], rowCount: 1 } as unknown as QueryResult;
+      }
+      return { rows: [], rowCount: 0 } as unknown as QueryResult;
+    }
+    if (sql.trim().startsWith('UPDATE')) {
+      const existing = claims.get(key);
+      if (existing) existing.status = 'sent';
+      return { rows: [], rowCount: existing ? 1 : 0 } as unknown as QueryResult;
+    }
+    if (sql.trim().startsWith('DELETE')) {
+      const existing = claims.get(key);
+      if (existing?.status === 'claimed') claims.delete(key);
+      return { rows: [], rowCount: 1 } as unknown as QueryResult;
+    }
+    return { rows: [], rowCount: 0 } as unknown as QueryResult;
+  });
+  return { pool: { query } as unknown as Pool, claims };
 }
 
 const baseInput = {
@@ -101,7 +157,7 @@ describe('sendCustomerMessage — SMS consent + DNC gates', () => {
     expect(rows.map((r) => r.channel)).toEqual(['email']);
   });
 
-  it('skips SMS (no row) when the number is on the DNC list', async () => {
+  it('skips SMS (no row) when the number is on the DNC list, and logs the suppression at info (not silent, not a warn)', async () => {
     const deps = makeDeps();
     await deps.dncRepo.addToDnc(TENANT, normalizePhone('+15559876543'), 'test');
     await sendCustomerMessage(deps.sendDeps, {
@@ -111,6 +167,11 @@ describe('sendCustomerMessage — SMS consent + DNC gates', () => {
     });
     expect(deps.delivery.sentSms).toHaveLength(0);
     expect(await deps.dispatchRepo.findByEntity(TENANT, 'estimate', 'est-1')).toHaveLength(0);
+    expect(deps.logger.info).toHaveBeenCalledWith(
+      'Customer SMS suppressed by the consent/DNC gate',
+      expect.objectContaining({ tenantId: TENANT, channel: 'sms' }),
+    );
+    expect(deps.logger.warn).not.toHaveBeenCalled();
   });
 
   it('skips SMS when the customer has no primary phone', async () => {
@@ -144,5 +205,96 @@ describe('sendCustomerMessage — email requirements', () => {
     });
     expect(deps.delivery.sentSms).toHaveLength(1);
     expect(deps.delivery.sentEmails).toHaveLength(0);
+  });
+});
+
+describe('sendCustomerMessage — no-longer-silent failure path (R5)', () => {
+  it('a genuine provider error is caught, logged as a warn, and the function still resolves (never blocks the caller)', async () => {
+    const deps = makeDeps();
+    vi.spyOn(deps.delivery, 'sendSms').mockRejectedValueOnce(new Error('Twilio 500'));
+
+    await expect(
+      sendCustomerMessage(deps.sendDeps, {
+        ...baseInput,
+        customer: makeCustomer(),
+        channels: ['sms'],
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(deps.logger.warn).toHaveBeenCalledWith(
+      'Customer message send failed',
+      expect.objectContaining({ tenantId: TENANT, channel: 'sms', error: 'Twilio 500' }),
+    );
+    expect(await deps.dispatchRepo.findByEntity(TENANT, 'estimate', 'est-1')).toHaveLength(0);
+  });
+});
+
+describe('sendCustomerMessage — T4-F01 claim-before-send', () => {
+  it('crash-between-claim-and-send recovery: a stale claim is reclaimed and the send + dispatch row proceed', async () => {
+    const deps = makeDeps();
+    const { pool, claims } = claimAwarePool();
+    claims.set(`${TENANT}::estimate:est-1:send:sms`, {
+      status: 'claimed',
+      claimedAt: Date.now() - 20 * 60_000,
+    });
+
+    await sendCustomerMessage(
+      { ...deps.sendDeps, pool },
+      { ...baseInput, customer: makeCustomer(), channels: ['sms'] },
+    );
+
+    expect(deps.delivery.sentSms).toHaveLength(1);
+    const rows = await deps.dispatchRepo.findByEntity(TENANT, 'estimate', 'est-1');
+    expect(rows).toHaveLength(1);
+  });
+
+  it('crash-between-send-and-mark: a "sent" claim with no dispatch row is NOT resent, and warns about the inconsistency', async () => {
+    const deps = makeDeps();
+    const { pool, claims } = claimAwarePool();
+    claims.set(`${TENANT}::estimate:est-1:send:sms`, { status: 'sent', claimedAt: Date.now() });
+
+    await sendCustomerMessage(
+      { ...deps.sendDeps, pool },
+      { ...baseInput, customer: makeCustomer(), channels: ['sms'] },
+    );
+
+    expect(deps.delivery.sentSms).toHaveLength(0);
+    expect(await deps.dispatchRepo.findByEntity(TENANT, 'estimate', 'est-1')).toHaveLength(0);
+    expect(deps.logger.warn).toHaveBeenCalledWith(
+      expect.stringMatching(/claim is "sent" but no dispatch row exists/),
+      expect.objectContaining({ tenantId: TENANT, channel: 'sms' }),
+    );
+  });
+
+  it('concurrent calls with the same idempotencyKeyPrefix: exactly one send', async () => {
+    const deps = makeDeps();
+    const { pool } = claimAwarePool();
+    const send = () =>
+      sendCustomerMessage(
+        { ...deps.sendDeps, pool },
+        { ...baseInput, customer: makeCustomer(), channels: ['sms'] },
+      );
+
+    await Promise.all([send(), send()]);
+    expect(deps.delivery.sentSms).toHaveLength(1);
+  });
+
+  it('a provider throw releases the claim so an immediate retry can send', async () => {
+    const deps = makeDeps();
+    const { pool, claims } = claimAwarePool();
+    vi.spyOn(deps.delivery, 'sendSms').mockRejectedValueOnce(new Error('Twilio 503'));
+
+    await sendCustomerMessage(
+      { ...deps.sendDeps, pool },
+      { ...baseInput, customer: makeCustomer(), channels: ['sms'] },
+    );
+    expect(deps.delivery.sentSms).toHaveLength(0);
+    expect(claims.has(`${TENANT}::estimate:est-1:send:sms`)).toBe(false);
+
+    await sendCustomerMessage(
+      { ...deps.sendDeps, pool },
+      { ...baseInput, customer: makeCustomer(), channels: ['sms'] },
+    );
+    expect(deps.delivery.sentSms).toHaveLength(1);
   });
 });

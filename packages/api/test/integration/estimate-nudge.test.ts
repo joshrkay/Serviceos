@@ -60,6 +60,7 @@ describe('dispatchEstimateNudge (integration) — claim-before-send against real
       state: 'TX',
       postalCode: '78701',
       country: 'USA',
+      addressType: 'service',
       isPrimary: true,
       isArchived: false,
       createdAt: new Date(),

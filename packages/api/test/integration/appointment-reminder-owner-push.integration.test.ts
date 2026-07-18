@@ -70,6 +70,8 @@ describe('Postgres integration — appointment-reminder owner push (U4)', () => 
       customerRepo,
       settingsRepo,
       invoiceRepo: new PgInvoiceRepository(pool),
+      pool,
+      logger,
     });
   });
 

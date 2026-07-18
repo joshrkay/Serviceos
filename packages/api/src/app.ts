@@ -1905,6 +1905,10 @@ export function createApp(): AppWithLifecycle {
   const dispatchAnalyticsRepo = pool
     ? new PgDispatchAnalyticsRepository(pool)
     : new InMemoryDispatchAnalyticsRepository();
+  const transactionalCommsLogger = createLogger({
+    service: 'transactional-comms',
+    environment: process.env.NODE_ENV || 'development',
+  });
   const transactionalComms = messageDelivery
     ? new TransactionalCommsService({
         delivery: messageDelivery,
@@ -1914,6 +1918,9 @@ export function createApp(): AppWithLifecycle {
         settingsRepo,
         invoiceRepo,
         dispatchRepo,
+        // T4-F01 — claim-before-send pool for sendCustomerMessage's gate.
+        pool: pool ?? null,
+        logger: transactionalCommsLogger,
       })
     : undefined;
   if (transactionalComms) {
@@ -2825,6 +2832,9 @@ export function createApp(): AppWithLifecycle {
             customerMessageDeps: {
               delivery: messageDelivery,
               dispatchRepo,
+              // T4-F01 — claim-before-send pool for the apology SMS.
+              pool: pool ?? null,
+              logger: transactionalCommsLogger,
             },
           }
         : {}),
