@@ -2225,18 +2225,9 @@ export class TwilioMediaStreamAdapter {
           }
           // T2-F05 — all of this turn's audio is now enqueued. Arm the
           // silence countdown on a single dedicated end-of-utterance mark,
-          // not on the per-chunk `turn-${turnId}` marks emitted inside
-          // streamPcmAsMedia() above (one per chunk for a multi-chunk
-          // stream). Guard on turn ownership so a barge-in or a newer turn
-          // that superseded this one does not arm a stale countdown.
-          if (turnId === this.state.outboundTurnId && this.state.agentSpeaking) {
-            this.enqueueOutbound('control', {
-              event: 'mark',
-              streamSid: this.state.streamSid,
-              mark: { name: `silence-arm-${turnId}` },
-            });
-            this.state.pendingSilenceRepromptTurnId = turnId;
-          }
+          // not the per-chunk `turn-${turnId}` marks emitted inside
+          // streamPcmAsMedia() above (one per chunk for a multi-chunk stream).
+          this.armSilenceOnTurnEnd(turnId);
         } catch (streamErr) {
           // VOX-35b — a WS blip or a VOX-33 inactivity stall surfaces here
           // as a thrown rejection. The old caller only logged.warn, so the
@@ -2292,16 +2283,9 @@ export class TwilioMediaStreamAdapter {
           );
         } else if (turnId === this.state.outboundTurnId && this.state.agentSpeaking) {
           await this.streamPcmAsMedia(result.audio, turnId);
-          // T2-F05 — same single end-of-utterance arm as the streaming path
-          // above, for the buffered (non-streaming) TTS fallback.
-          if (turnId === this.state.outboundTurnId && this.state.agentSpeaking) {
-            this.enqueueOutbound('control', {
-              event: 'mark',
-              streamSid: this.state.streamSid,
-              mark: { name: `silence-arm-${turnId}` },
-            });
-            this.state.pendingSilenceRepromptTurnId = turnId;
-          }
+          // T2-F05 — same single end-of-utterance arm as the streaming path,
+          // for the buffered (non-streaming) TTS fallback.
+          this.armSilenceOnTurnEnd(turnId);
         }
       }
     } finally {
@@ -2360,6 +2344,10 @@ export class TwilioMediaStreamAdapter {
       this.state.agentSpeaking
     ) {
       await this.streamPcmAsMedia(result.audio, turnId);
+      // T2-F05 — recovery still played a full agent turn, so a silent caller
+      // after it must still get the bounded reprompt (handleMessage ignores
+      // the per-chunk turn-* marks for arming).
+      this.armSilenceOnTurnEnd(turnId);
       return;
     }
     if (result && !isRawPcmContentType(result.contentType)) {
@@ -2382,6 +2370,9 @@ export class TwilioMediaStreamAdapter {
       const pcm = filler ? cache.get(filler.id) : undefined;
       if (pcm) {
         await this.streamPcmAsMedia(pcm, turnId, /* isFiller */ true);
+        // T2-F05 — the apology filler is the last thing the caller hears on
+        // this turn; arm so their silence after it still reprompts/escalates.
+        this.armSilenceOnTurnEnd(turnId);
         return;
       }
     }
@@ -2595,6 +2586,24 @@ export class TwilioMediaStreamAdapter {
     if (typeof this.state.silenceRepromptTimer.unref === 'function') {
       this.state.silenceRepromptTimer.unref();
     }
+  }
+
+  /**
+   * T2-F05 — enqueue the single end-of-utterance `silence-arm-${turnId}` mark
+   * (once all of this turn's audio is queued) so its ack starts the silence
+   * countdown. Every path that finishes playing an agent turn's audio must
+   * call this — streaming success, buffered fallback, AND stream-failure
+   * recovery — or a silent caller after that turn gets no bounded reprompt.
+   * Re-guarded on turn ownership: a barge-in / newer turn must not arm.
+   */
+  private armSilenceOnTurnEnd(turnId: number): void {
+    if (turnId !== this.state.outboundTurnId || !this.state.agentSpeaking) return;
+    this.enqueueOutbound('control', {
+      event: 'mark',
+      streamSid: this.state.streamSid,
+      mark: { name: `silence-arm-${turnId}` },
+    });
+    this.state.pendingSilenceRepromptTurnId = turnId;
   }
 
   private clearSilenceRepromptTimer(): void {

@@ -671,6 +671,10 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
     publicBaseUrl?: string;
     callControl?: { dialDispatcher(callSid: string, phone: string, opts: { actionUrl: string; whisperUrl?: string; timeoutSeconds?: number }): string };
     setPendingTransferTwiml?: (sessionId: string, twiml: string) => void;
+    // Isolate from the process-wide connection registry (perTenantMax 50)
+    // when a test adds capacity the shared singleton would otherwise leak
+    // across the file.
+    connectionRegistry?: InMemoryConnectionRegistry;
   } = {}): {
     adapter: TwilioMediaStreamAdapter;
     ws: FakeWs;
@@ -696,6 +700,7 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
         publicBaseUrl: opts.publicBaseUrl,
         callControl: opts.callControl as never,
         setPendingTransferTwiml: opts.setPendingTransferTwiml,
+        ...(opts.connectionRegistry ? { connectionRegistry: opts.connectionRegistry } : {}),
       },
       ws,
     );
@@ -1116,6 +1121,55 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
       // The mp3 was NOT streamed as static, but the filler clip WAS played.
       const mediaFrames = ws.sent.filter((f: unknown) => (f as { event?: string }).event === 'media');
       expect(mediaFrames.length).toBeGreaterThan(0);
+    });
+
+    it('T2-F05: arms the silence countdown after a recovered (buffered PCM) turn', async () => {
+      // handleMessage arms only on silence-arm-* marks, so the recovery path
+      // must emit one too — else a silent caller after a recovered TTS blip
+      // never gets the bounded reprompt.
+      const synthesize = vi.fn(
+        async (): Promise<TtsSynthesizeResult> => ({
+          audio: Buffer.alloc(640 * 2),
+          contentType: 'audio/pcm',
+          provider: 'fallback-rest',
+        }),
+      );
+      const failingStreamProvider: TtsProvider = {
+        synthesize,
+        synthesizeStream: vi.fn(() => ({
+          // eslint-disable-next-line require-yield
+          async *[Symbol.asyncIterator]() {
+            throw new Error('ElevenLabs WS error');
+          },
+        })),
+      };
+      const { adapter, ws } = setupAdapter({
+        ttsProvider: failingStreamProvider,
+        callSid: 'CA-recover-arm',
+        connectionRegistry: new InMemoryConnectionRegistry(),
+      });
+      ws.inboundJson({
+        event: 'start',
+        streamSid: 'MZ-recover-arm',
+        start: { callSid: 'CA-recover-arm', accountSid: 'AC', streamSid: 'MZ-recover-arm', tracks: ['inbound'] },
+      });
+      await new Promise((r) => setImmediate(r));
+
+      await (adapter as unknown as { emitSideEffects: (fx: unknown[]) => Promise<void> }).emitSideEffects([
+        { type: 'tts_play', payload: { text: 'Your appointment is confirmed for Tuesday.' } },
+      ]);
+
+      // Recovery must have enqueued a silence-arm mark and recorded the pending turn.
+      const pendingTurn = (
+        adapter as unknown as { state: { pendingSilenceRepromptTurnId: number | null } }
+      ).state.pendingSilenceRepromptTurnId;
+      expect(pendingTurn).not.toBeNull();
+      const armMark = ws.sent.find(
+        (f: unknown) =>
+          (f as { event?: string }).event === 'mark' &&
+          (f as { mark?: { name?: string } }).mark?.name === `silence-arm-${pendingTurn}`,
+      );
+      expect(armMark).toBeDefined();
     });
   });
 
