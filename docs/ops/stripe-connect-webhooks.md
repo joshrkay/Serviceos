@@ -17,7 +17,7 @@ Customer charges may be **Connect direct charges** (`Stripe-Account`). Those obj
    ```
 3. Create **two** destinations (or equivalent scope), both hitting the same URL if desired:
    - **Your account** — SaaS subscriptions, platform fallback charges, `account.updated` from the platform perspective as applicable.
-   - **Connected accounts** — payment intents, checkout sessions, setup intents, refunds, disputes on Express accounts.
+   - **Connected accounts** — payment intents, checkout sessions, setup intents, refunds, disputes, and each tenant's `account.updated` (onboarding completion → `charges_enabled`, delivered with a top-level `account: acct_…`) on Express accounts.
 4. Enable at least:
    - `payment_intent.processing`
    - `payment_intent.succeeded`

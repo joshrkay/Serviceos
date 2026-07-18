@@ -48,8 +48,8 @@ unpaid in Rivet even though the money settled. See
 Configure **separately in Test and Live** Dashboards. Both destinations point at
 the same URL: `https://<API_HOST>/webhooks/stripe`.
 
-- [ ] **"Your account"** destination — SaaS subscriptions, platform-fallback charges, `account.updated`.
-- [ ] **"Connected accounts"** destination — payment intents, checkout sessions, setup intents, refunds, disputes on Express accounts.
+- [ ] **"Your account"** destination — SaaS subscriptions, platform-fallback charges, and the platform account's own `account.updated`.
+- [ ] **"Connected accounts"** destination — payment intents, checkout sessions, setup intents, refunds, disputes, **and each tenant's `account.updated`** (onboarding completion → `charges_enabled`; delivered with a top-level `account: acct_…`, which is what flips the tenant's cached status).
 - [ ] Both enable at minimum: `payment_intent.processing`, `payment_intent.succeeded`, `payment_intent.payment_failed`, `checkout.session.completed`, `checkout.session.expired`, `setup_intent.succeeded`, `charge.refunded`, `charge.refund.updated`, `charge.dispute.created`, `account.updated`, `customer.subscription.created|updated|deleted`.
 - [ ] **Both destinations' signing secrets** are copied into `STRIPE_WEBHOOK_SECRET` as a **comma-separated list** (`whsec_platform,whsec_connected`). Stripe issues a distinct secret per endpoint, and the handler verifies each request against every secret in the list — so setting only one destination's secret would 401 the other's events (silently breaking either settlement or SaaS billing). A single value still works when you truly have one endpoint.
 - [ ] Repeated for **both** Test and Live (each mode has its own two secrets).
@@ -100,4 +100,4 @@ Do this against an onboarded **test-mode** connected account before trusting Liv
 | `Stripe webhook signature verification failed` (401) for one endpoint's events only | Only one destination's secret is in `STRIPE_WEBHOOK_SECRET` | Add BOTH secrets, comma-separated (Section B); re-deliver. |
 | Pay page shows "temporarily unavailable" | `VITE_STRIPE_PUBLISHABLE_KEY` unset/mismatched, or API returned `503 STRIPE_NOT_CONFIGURED` | Set the web publishable key (matching mode); confirm `STRIPE_SECRET_KEY`. |
 | Payment succeeds but lands in the platform account | Tenant not `charges_enabled` (Section C) | Complete Connect onboarding; re-check `GET /api/billing/connect`. |
-| `account.updated` never flips `chargesEnabled` | Platform "Your account" destination missing `account.updated` | Add the event to the platform destination. |
+| `account.updated` never flips `chargesEnabled` | A tenant's onboarding-completion `account.updated` is a **connected-account** event (top-level `account: acct_…`), so it arrives on the **Connected accounts** destination — not the platform "Your account" one | Enable `account.updated` on the **Connected accounts** destination (Section B), then re-deliver the event. |
