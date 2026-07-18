@@ -32,6 +32,7 @@ from corpus_io import (  # noqa: E402
     EVAL_RESULTS_DIR,
     SLOT_DIR,
     load_jsonl,
+    require_id,
     split_of,
 )
 from classifier import BOOKING_INTENTS, classify_intent, handle_edge  # noqa: E402
@@ -99,7 +100,7 @@ def eval_lang_accuracy(rows: list[dict], lang: str) -> float:
 def eval_slots(failures: list[dict]) -> dict:
     out: dict[str, dict] = {}
     for slot_type, extractor in EXTRACTORS.items():
-        rows = load_jsonl(os.path.join(SLOT_DIR, f"{slot_type}.jsonl"))
+        rows = require_id(load_jsonl(os.path.join(SLOT_DIR, f"{slot_type}.jsonl")))
         test = [r for r in rows if split_of(r["id"]) == "test"]
         tp = fp = fn = 0
         for r in test:
@@ -162,7 +163,7 @@ def eval_negatives(failures: list[dict]) -> dict:
 def load_corpora() -> list[dict]:
     rows = load_jsonl(os.path.join(CORPUS_DIR, "utterances.jsonl"))
     rows += load_jsonl(os.path.join(CORPUS_DIR, "utterances_es.jsonl"))
-    return rows
+    return require_id(rows)
 
 
 def top_failures(failures: list[dict], k: int = 20) -> list[dict]:

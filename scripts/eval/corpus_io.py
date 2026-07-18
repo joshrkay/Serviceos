@@ -68,3 +68,19 @@ def split_of(row_id: str, holdout_ratio: int = 5) -> str:
     test set stays frozen across corpus revisions (regression-safe).
     """
     return "test" if fnv1a(row_id) % holdout_ratio == 0 else "train"
+
+
+def require_id(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Fail loudly if any row is missing 'id', instead of letting split_of
+    raise a bare KeyError deep inside a loop somewhere downstream.
+
+    Defensive hardening only: after the T6-F01 corpus migration every row in
+    data/corpus/utterances.jsonl has a stable id (canonical or
+    legacy-<sha1>). This guard exists so a future regression (a new row
+    landing without one) produces a clear, actionable error message instead
+    of a cryptic KeyError stack trace.
+    """
+    for row in rows:
+        if "id" not in row:
+            raise ValueError(f"row missing 'id': {row}")
+    return rows
