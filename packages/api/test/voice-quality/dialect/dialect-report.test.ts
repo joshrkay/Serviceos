@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   scoreDialectCase,
   buildDialectReport,
+  buildSurfaceRollup,
   DEFAULT_DIALECT_THRESHOLDS,
   type DialectEvalCase,
   type DialectEvalResult,
@@ -119,5 +120,61 @@ describe('dialect report — buildDialectReport', () => {
     const report = buildDialectReport([]);
     expect(report).toMatchObject({ totalCases: 0, overallMeanWer: 0, perDialect: [], pass: true });
     expect(report.thresholds).toEqual(DEFAULT_DIALECT_THRESHOLDS);
+  });
+});
+
+// A4 — per-surface rollup (whisper vs deepgram), independent of the
+// per-dialect axis above: the same result set groups differently by
+// `surface` than by `dialect`.
+describe('dialect report — buildSurfaceRollup', () => {
+  const surfaceResult = (
+    surface: string | undefined,
+    wer: number,
+    intentMatched: boolean | null = null,
+    clarified = false,
+  ): DialectEvalResult => ({
+    caseId: `${surface ?? 'none'}-${wer}`,
+    dialect: 'southern-us',
+    ...(surface !== undefined ? { surface } : {}),
+    wer: { wer, substitutions: 0, deletions: 0, insertions: 0, hits: 0, referenceWords: 10 },
+    intentMatched,
+    clarified,
+  });
+
+  it('aggregates per surface: mean/median WER, intent accuracy, clarification rate', () => {
+    const rollup = buildSurfaceRollup([
+      surfaceResult('whisper', 0.1, true, true),
+      surfaceResult('whisper', 0.2, false, false),
+      surfaceResult('deepgram', 0.05, true, true),
+    ]);
+
+    expect(rollup.map((s) => s.surface)).toEqual(['deepgram', 'whisper']); // sorted
+
+    const whisper = rollup.find((s) => s.surface === 'whisper')!;
+    expect(whisper.cases).toBe(2);
+    expect(whisper.meanWer).toBeCloseTo(0.15);
+    expect(whisper.medianWer).toBeCloseTo(0.15);
+    expect(whisper.intentAccuracy).toBeCloseTo(0.5);
+    expect(whisper.clarificationRate).toBeCloseTo(0.5);
+
+    const deepgram = rollup.find((s) => s.surface === 'deepgram')!;
+    expect(deepgram.cases).toBe(1);
+    expect(deepgram.meanWer).toBeCloseTo(0.05);
+    expect(deepgram.intentAccuracy).toBe(1);
+  });
+
+  it('groups results with no surface under "unknown" (never silently drops rows)', () => {
+    const rollup = buildSurfaceRollup([surfaceResult(undefined, 0.1), surfaceResult('whisper', 0.2)]);
+    expect(rollup.map((s) => s.surface).sort()).toEqual(['unknown', 'whisper']);
+    expect(rollup.find((s) => s.surface === 'unknown')!.cases).toBe(1);
+  });
+
+  it('intentAccuracy is null for a surface with no intent-bearing cases', () => {
+    const rollup = buildSurfaceRollup([surfaceResult('deepgram', 0.05, null), surfaceResult('deepgram', 0.08, null)]);
+    expect(rollup[0].intentAccuracy).toBeNull();
+  });
+
+  it('empty input → empty rollup', () => {
+    expect(buildSurfaceRollup([])).toEqual([]);
   });
 });

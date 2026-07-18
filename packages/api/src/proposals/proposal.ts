@@ -26,12 +26,13 @@ export type ProposalStatus =
   // or re-executed. If the operator wants to proceed after undoing,
   // they draft a new proposal. Decision 9 ("5-second undo window").
   | 'undone';
-export type ProposalType = 'create_customer' | 'update_customer' | 'create_job' | 'create_appointment' | 'create_booking' | 'callback' | 'draft_estimate' | 'update_estimate' | 'draft_invoice' | 'update_invoice' | 'issue_invoice' | 'create_invoice_schedule' | 'batch_invoice' | 'reassign_appointment' | 'reschedule_appointment' | 'add_crew_member' | 'remove_crew_member' | 'cancel_appointment' | 'voice_clarification' | 'add_note' | 'send_invoice' | 'send_estimate' | 'send_estimate_nudge' | 'record_payment' | 'log_expense' | 'convert_lead' | 'confirm_appointment' | 'mark_lead_lost' | 'add_service_location' | 'log_time_entry' | 'notify_delay' | 'request_feedback' | 'emergency_dispatch' | 'onboarding_tenant_settings' | 'onboarding_service_category' | 'onboarding_estimate_template' | 'onboarding_team_member' | 'onboarding_schedule' | 'review_response_proposal' | 'send_payment_reminder' | 'apply_late_fee' | 'create_standing_instruction' | 'update_catalog_item';
+export type ProposalType = 'create_customer' | 'update_customer' | 'create_job' | 'update_job' | 'create_appointment' | 'create_booking' | 'callback' | 'draft_estimate' | 'update_estimate' | 'draft_invoice' | 'update_invoice' | 'issue_invoice' | 'create_invoice_schedule' | 'batch_invoice' | 'reassign_appointment' | 'reschedule_appointment' | 'add_crew_member' | 'remove_crew_member' | 'cancel_appointment' | 'voice_clarification' | 'add_note' | 'send_invoice' | 'send_estimate' | 'send_estimate_nudge' | 'record_payment' | 'log_expense' | 'convert_lead' | 'confirm_appointment' | 'mark_lead_lost' | 'add_service_location' | 'log_time_entry' | 'notify_delay' | 'request_feedback' | 'emergency_dispatch' | 'onboarding_tenant_settings' | 'onboarding_service_category' | 'onboarding_estimate_template' | 'onboarding_team_member' | 'onboarding_schedule' | 'review_response_proposal' | 'send_payment_reminder' | 'apply_late_fee' | 'create_standing_instruction' | 'update_catalog_item';
 
 export const VALID_PROPOSAL_TYPES: ProposalType[] = [
   'create_customer',
   'update_customer',
   'create_job',
+  'update_job',
   'create_appointment',
   'create_booking',
   'callback',
@@ -282,6 +283,12 @@ export function actionClassForProposalType(type: ProposalType): ActionClass {
     case 'create_customer':
     case 'update_customer':
     case 'create_job':
+    // B7 — update_job is a bounded, safe field edit (status/priority/
+    // title/description) to an EXISTING job — no money, no schedule (those
+    // have their own proposal paths). Mirrors update_estimate/
+    // update_invoice's capture classification: an AI-drafted edit to an
+    // existing entity, always human-approved before execution.
+    case 'update_job':
     case 'create_appointment':
     case 'create_booking':
     // A callback request is a low-risk capture: it asks an operator to

@@ -7,6 +7,11 @@ import {
   injectSafetySayLines,
 } from '../../src/telephony/twilio-adapter';
 import { VoiceSessionStore } from '../../src/ai/agents/customer-calling/voice-session-store';
+import {
+  renderTtsText,
+  LOW_STT_CONFIDENCE_REPROMPT_COPY,
+  SPEECH_TURN_FAILURE_ESCALATION_COPY,
+} from '../../src/ai/agents/customer-calling/tts-copy';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import { DefaultTwilioCallControl } from '../../src/telephony/twilio-call-control';
 import {
@@ -176,6 +181,50 @@ describe('buildTwiML', () => {
     );
     expect(xml).not.toContain('"><Hangup/>');
     expect(xml).toContain('a&quot;&gt;&lt;Hangup/&gt;');
+  });
+
+  // ─── A2: Gather hints + speechModel ────────────────────────────────────────
+
+  describe('A2 — Gather hints + speechModel', () => {
+    it('always emits speechModel="phone_call" on the <Gather>', () => {
+      const xml = buildTwiML([], { gatherActionUrl: '/g' });
+      expect(xml).toContain('speechModel="phone_call"');
+    });
+
+    it('renders a comma-separated hints attribute when hints are provided', () => {
+      const xml = buildTwiML([], { gatherActionUrl: '/g', hints: ['furnace', 'Henderson HOA'] });
+      expect(xml).toContain('hints="furnace,Henderson HOA"');
+    });
+
+    it('omits the hints attribute when hints is absent or empty', () => {
+      const withoutOpt = buildTwiML([], { gatherActionUrl: '/g' });
+      expect(withoutOpt).not.toContain('hints=');
+      const withEmpty = buildTwiML([], { gatherActionUrl: '/g', hints: [] });
+      expect(withEmpty).not.toContain('hints=');
+    });
+
+    it('caps hints at 50 terms even if the caller passes more', () => {
+      const many = Array.from({ length: 60 }, (_, i) => `term${i}`);
+      const xml = buildTwiML([], { gatherActionUrl: '/g', hints: many });
+      const match = /hints="([^"]*)"/.exec(xml);
+      expect(match).not.toBeNull();
+      expect(match![1].split(',')).toHaveLength(50);
+    });
+
+    it('XML-escapes hints so a malformed term cannot break TwiML', () => {
+      const xml = buildTwiML([], { gatherActionUrl: '/g', hints: ['a"><Hangup/>'] });
+      expect(xml).not.toContain('"><Hangup/>');
+      expect(xml).toContain('a&quot;&gt;&lt;Hangup/&gt;');
+    });
+
+    it('omits the hints attribute (but still ends the call cleanly) when the turn ends', () => {
+      const xml = buildTwiML(
+        [{ type: 'end_session', payload: { reason: 'normal_close' } }],
+        { gatherActionUrl: '/g', hints: ['furnace'] },
+      );
+      expect(xml).not.toContain('<Gather');
+      expect(xml).not.toContain('hints=');
+    });
   });
 
   // ─── P8-014: recordingStatusCallback wiring ────────────────────────────────
@@ -500,6 +549,168 @@ describe('TwilioGatherAdapter.handleInbound', () => {
     );
     const snap = store.snapshot(ids[0] as string);
     expect(snap?.leadId).toBeUndefined();
+  });
+});
+
+// ─── A2 — Gather hints wiring (sttHintsResolver + TenantGlossaryProvider fallback) ─
+
+describe('A2 — TwilioGatherAdapter Gather hints wiring', () => {
+  it('uses sttHintsResolver when wired, and threads its output into <Gather hints>', async () => {
+    const store = new VoiceSessionStore();
+    const gateway = makeGatewayReturning('{"intentType":"unknown","confidence":0,"reasoning":"x"}');
+    const sttHintsResolver = vi.fn(async (tenantId: string) => {
+      expect(tenantId).toBe('tenant-abc');
+      return ['furnace', 'compressor'];
+    });
+    const adapter = new TwilioGatherAdapter({
+      store,
+      gateway,
+      businessName: 'Acme Plumbing',
+      publicBaseUrl: 'https://example.com',
+      sttHintsResolver,
+    });
+    const xml = await adapter.handleInbound({
+      callSid: 'CA-hints-resolver',
+      from: '+15125550100',
+      to: '+15125550999',
+      tenantId: 'tenant-abc',
+    });
+    expect(sttHintsResolver).toHaveBeenCalledWith('tenant-abc');
+    expect(xml).toContain('hints="furnace,compressor"');
+    expect(xml).toContain('speechModel="phone_call"');
+  });
+
+  it('falls back to a TenantGlossaryProvider built from catalogRepo/customerRepo/userRepo when no sttHintsResolver is wired', async () => {
+    const store = new VoiceSessionStore();
+    const gateway = makeGatewayReturning('{"intentType":"unknown","confidence":0,"reasoning":"x"}');
+    const catalogRepo = {
+      listByTenant: vi.fn(async () => [{ name: 'Widget Deluxe' }]),
+    } as unknown as import('../../src/catalog/catalog-item').CatalogItemRepository;
+    const customerRepo = {
+      findByTenant: vi.fn(async () => [{ displayName: 'Henderson HOA' }]),
+    } as unknown as import('../../src/customers/customer').CustomerRepository;
+    const userRepo = {
+      findByTenant: vi.fn(async () => [{ firstName: 'Sam', lastName: 'Lee' }]),
+    } as unknown as import('../../src/users/user').UserRepository;
+    const adapter = new TwilioGatherAdapter({
+      store,
+      gateway,
+      businessName: 'Acme Plumbing',
+      publicBaseUrl: 'https://example.com',
+      catalogRepo,
+      customerRepo,
+      userRepo,
+    });
+    const xml = await adapter.handleInbound({
+      callSid: 'CA-hints-glossary',
+      from: '+15125550100',
+      to: '+15125550999',
+      tenantId: 'tenant-abc',
+    });
+    expect(xml).toContain('hints="Widget Deluxe,Henderson HOA,Sam Lee"');
+  });
+
+  it('omits hints (but still emits a valid <Gather>) when neither sttHintsResolver nor the three glossary repos are wired', async () => {
+    const { adapter } = makeAdapter();
+    const xml = await adapter.handleInbound({
+      callSid: 'CA-no-hints',
+      from: '+15125550100',
+      to: '+15125550999',
+      tenantId: 'tenant-abc',
+    });
+    expect(xml).not.toContain('hints=');
+    expect(xml).toContain('<Gather input="speech"');
+  });
+
+  it('failure-soft: an sttHintsResolver error never blocks the Gather turn — hints just omitted', async () => {
+    const store = new VoiceSessionStore();
+    const gateway = makeGatewayReturning('{"intentType":"unknown","confidence":0,"reasoning":"x"}');
+    const adapter = new TwilioGatherAdapter({
+      store,
+      gateway,
+      businessName: 'Acme Plumbing',
+      publicBaseUrl: 'https://example.com',
+      sttHintsResolver: async () => {
+        throw new Error('boom');
+      },
+    });
+    const xml = await adapter.handleInbound({
+      callSid: 'CA-hints-fail',
+      from: '+15125550100',
+      to: '+15125550999',
+      tenantId: 'tenant-abc',
+    });
+    expect(xml).not.toContain('hints=');
+    expect(xml).toContain('<Gather input="speech"');
+  });
+
+  // U3 — app.ts now wires a shared TenantGlossaryProvider's termsForTenant
+  // as sttHintsResolver unconditionally (no LLM dependency). Pin: the
+  // wired resolver is preferred over the catalogRepo/customerRepo/userRepo
+  // fallback (the fallback repos are never queried when a resolver is
+  // wired), and the resolver is invoked once per Gather turn.
+  it('prefers a wired sttHintsResolver over the glossary-repo fallback, and calls it once per Gather turn', async () => {
+    const store = new VoiceSessionStore();
+    const gateway = makeGatewayReturning('{"intentType":"unknown","confidence":0,"reasoning":"x"}');
+    const sttHintsResolver = vi.fn(async () => ['furnace', 'compressor']);
+    const catalogRepo = {
+      listByTenant: vi.fn(async () => [{ name: 'Should not be used' }]),
+    } as unknown as import('../../src/catalog/catalog-item').CatalogItemRepository;
+    const customerRepo = {
+      findByTenant: vi.fn(async () => [{ displayName: 'Should not be used' }]),
+    } as unknown as import('../../src/customers/customer').CustomerRepository;
+    const userRepo = {
+      findByTenant: vi.fn(async () => [{ firstName: 'Should', lastName: 'NotBeUsed' }]),
+    } as unknown as import('../../src/users/user').UserRepository;
+    const adapter = new TwilioGatherAdapter({
+      store,
+      gateway,
+      businessName: 'Acme Plumbing',
+      publicBaseUrl: 'https://example.com',
+      sttHintsResolver,
+      catalogRepo,
+      customerRepo,
+      userRepo,
+    });
+
+    const xml1 = await adapter.handleInbound({
+      callSid: 'CA-hints-preferred',
+      from: '+15125550100',
+      to: '+15125550999',
+      tenantId: 'tenant-abc',
+    });
+    expect(xml1).toContain('hints="furnace,compressor"');
+    expect(xml1).not.toContain('Should not be used');
+    expect(sttHintsResolver).toHaveBeenCalledTimes(1);
+
+    const ids = Array.from(
+      (store as unknown as { sessions: Map<string, unknown> }).sessions.keys()
+    );
+    const sessionId = ids[0] as string;
+    const session = await store.get(sessionId);
+    if (session && session.machine.currentState === 'ask_caller') {
+      session.machine.dispatch({ type: 'caller_known', customerId: 'cust-1' });
+    }
+
+    const xml2 = await adapter.handleGather({
+      sessionId,
+      callSid: 'CA-hints-preferred',
+      speechResult: 'I need service',
+      confidence: 0.9,
+      tenantId: 'tenant-abc',
+    });
+    expect(xml2).toContain('hints="furnace,compressor"');
+    expect(sttHintsResolver).toHaveBeenCalledTimes(2);
+
+    // The TenantGlossaryProvider fallback (built from
+    // catalogRepo/customerRepo/userRepo inside resolveGatherHints) is never
+    // consulted while a resolver is wired — customerRepo.findByTenant and
+    // userRepo.findByTenant are ONLY reachable via that fallback in this
+    // minimal dep set (catalogRepo.listByTenant is also legitimately called
+    // by the unrelated session-catalog preload on inbound, so it's not a
+    // useful signal here).
+    expect(customerRepo.findByTenant).not.toHaveBeenCalled();
+    expect(userRepo.findByTenant).not.toHaveBeenCalled();
   });
 });
 
@@ -1054,17 +1265,158 @@ describe('TwilioGatherAdapter.handleGather', () => {
       sess.machine.dispatch({ type: 'caller_known', customerId: 'c1' });
     }
 
+    // A3 — Gather `Confidence` (acoustic) is intentionally HIGH here so this
+    // test exercises the CLASSIFIER low-confidence reprompt path (the
+    // gateway mock above returns intentType 'unknown' with confidence 0.2).
+    // A low acoustic Confidence would instead trip the acoustic-confidence
+    // gate before the classifier even runs — see
+    // "low acoustic Gather Confidence" tests below for that path.
     const xml = await a2.handleGather({
       sessionId: sid,
       callSid: 'CA-low',
       speechResult: 'mmm uh',
-      confidence: 0.2,
+      confidence: 0.95,
       tenantId: 'tenant-abc',
     });
 
     const snap = await s2.snapshot(sid);
     expect(snap?.state).toBe('intent_capture'); // reprompt, not escalated yet
     expect(xml).toContain('<Gather');
+  });
+
+  // ─── A3 — low acoustic Gather `Confidence` gate ────────────────────────────
+  //
+  // Before this fix, Twilio's Gather `Confidence` was parsed and completely
+  // ignored — a low-confidence recognition was classified and dispatched
+  // exactly like a clean one. These pin the gate: a low-confidence non-empty
+  // utterance is reprompted WITHOUT running the classifier, a normal/missing
+  // Confidence is processed as before, and repeated low confidence hands the
+  // caller off instead of looping.
+  describe('low acoustic Gather Confidence', () => {
+    it('reprompts without running the classifier when Confidence is below the floor', async () => {
+      const xml = await adapter.handleGather({
+        sessionId,
+        callSid: 'CA-gx',
+        speechResult: 'mumbled garbage',
+        confidence: 0.3,
+        tenantId: 'tenant-abc',
+      });
+
+      expect((gateway.complete as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+      expect(xml).toContain('<Gather');
+      expect(xml).toContain(
+        xmlEscape(renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en')),
+      );
+      const snap = await store.snapshot(sessionId);
+      expect(snap?.state).toBe('intent_capture');
+    });
+
+    it('processes the turn normally when Confidence is high', async () => {
+      const xml = await adapter.handleGather({
+        sessionId,
+        callSid: 'CA-gx',
+        speechResult: 'Create an invoice for Acme for 450 dollars',
+        confidence: 0.95,
+        tenantId: 'tenant-abc',
+      });
+
+      expect((gateway.complete as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(1);
+      const snap = await store.snapshot(sessionId);
+      expect(snap?.state).toBe('intent_confirm');
+      expect(xml).toMatch(/<Say.*confirm/i);
+    });
+
+    it('treats a missing Confidence as HIGH — processes the turn normally, never blocks it', async () => {
+      const xml = await adapter.handleGather({
+        sessionId,
+        callSid: 'CA-gx',
+        speechResult: 'Create an invoice for Acme for 450 dollars',
+        confidence: undefined,
+        tenantId: 'tenant-abc',
+      });
+
+      expect((gateway.complete as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(1);
+      const snap = await store.snapshot(sessionId);
+      expect(snap?.state).toBe('intent_confirm');
+      expect(xml).toMatch(/<Say.*confirm/i);
+    });
+
+    it('two consecutive low-Confidence turns hand off gracefully instead of looping', async () => {
+      const xml1 = await adapter.handleGather({
+        sessionId,
+        callSid: 'CA-gx',
+        speechResult: 'mumbled one',
+        confidence: 0.3,
+        tenantId: 'tenant-abc',
+      });
+      expect(xml1).toContain('<Gather');
+      let snap = await store.snapshot(sessionId);
+      expect(snap?.state).toBe('intent_capture');
+
+      const session = await store.get(sessionId);
+      expect(session?.ended).toBe(false);
+
+      const xml2 = await adapter.handleGather({
+        sessionId,
+        callSid: 'CA-gx',
+        speechResult: 'mumbled two',
+        confidence: 0.2,
+        tenantId: 'tenant-abc',
+      });
+
+      // The classifier never ran for either low-confidence turn.
+      expect((gateway.complete as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+      expect(xml2).toContain(
+        xmlEscape(renderTtsText(SPEECH_TURN_FAILURE_ESCALATION_COPY, {}, 'en')),
+      );
+      expect(xml2).toContain('<Hangup');
+      expect(xml2).not.toContain('<Gather');
+      expect(session?.ended).toBe(true);
+      expect(session?.terminalOutcome).toBeDefined();
+    });
+
+    it('resets the low-confidence streak after a good (classified) turn', async () => {
+      // Turn 1: low confidence → reprompt, streak = 1.
+      await adapter.handleGather({
+        sessionId,
+        callSid: 'CA-gx',
+        speechResult: 'mumbled one',
+        confidence: 0.3,
+        tenantId: 'tenant-abc',
+      });
+
+      // Turn 2: clean, high-confidence turn → classified normally, and
+      // resets the streak. Advances to intent_confirm.
+      await adapter.handleGather({
+        sessionId,
+        callSid: 'CA-gx',
+        speechResult: 'Create an invoice for Acme for 450 dollars',
+        confidence: 0.95,
+        tenantId: 'tenant-abc',
+      });
+      expect((gateway.complete as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(1);
+      const midSnap = await store.snapshot(sessionId);
+      expect(midSnap?.state).toBe('intent_confirm');
+
+      // Turn 3: low confidence again — because the streak reset on turn 2,
+      // this is a fresh 1st low-confidence turn → another REPROMPT, not an
+      // escalation. The gate runs regardless of FSM state (a misheard
+      // confirm reply is just as unsafe to act on as a misheard intent), so
+      // the confirmIntent skill (which would otherwise fire in
+      // intent_confirm) is never reached — gateway.complete stays at 1 call.
+      const xml3 = await adapter.handleGather({
+        sessionId,
+        callSid: 'CA-gx',
+        speechResult: 'huh what',
+        confidence: 0.3,
+        tenantId: 'tenant-abc',
+      });
+      expect((gateway.complete as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(1);
+      expect(xml3).toContain('<Gather');
+      expect(xml3).not.toContain('<Hangup');
+      const finalSnap = await store.snapshot(sessionId);
+      expect(finalSnap?.state).toBe('intent_confirm'); // untouched by the gate
+    });
   });
 
   it('flag-off live calls omit extendedIntents from classifier context and resolve the flag once per call', async () => {

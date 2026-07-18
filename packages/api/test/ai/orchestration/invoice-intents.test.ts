@@ -16,9 +16,15 @@ import {
 import {
   createDefaultTaskRouter,
   IssueInvoiceTaskHandler,
+  looksLikeResolvedInvoiceRef,
 } from '../../../src/ai/orchestration/task-router';
 import { LLMGateway, LLMResponse } from '../../../src/ai/gateway/gateway';
 import { issueInvoicePayloadSchema } from '../../../src/proposals/contracts/issue-invoice';
+import { missingFieldsFor, createProposal } from '../../../src/proposals/proposal';
+import { approveProposal } from '../../../src/proposals/actions';
+import { InMemoryProposalRepository } from '../../../src/proposals/proposal';
+import { InMemoryInvoiceRepository, createInvoice } from '../../../src/invoices/invoice';
+import { ValidationError } from '../../../src/shared/errors';
 
 function mockGateway(jsonContent: string): LLMGateway {
   return {
@@ -144,5 +150,342 @@ describe('P22-002 invoice-intents — task router issue_invoice route', () => {
       message: 'Issue the invoice',
     });
     expect(issueInvoicePayloadSchema.safeParse(proposal.payload).success).toBe(false);
+  });
+
+  it('gates the no-reference case with missingFields so it never lands approved', async () => {
+    const handler = new IssueInvoiceTaskHandler();
+    const { proposal } = await handler.handle({
+      tenantId: 't-1',
+      userId: 'u-1',
+      message: 'Issue the invoice',
+    });
+
+    expect(missingFieldsFor(proposal)).toEqual(['invoiceId']);
+    // decideInitialStatus forces 'draft' regardless of trust tier/confidence
+    // whenever missingFields is non-empty.
+    expect(proposal.status).toBe('draft');
+
+    // Simulate the assistant route's "promote drafts to ready_for_review"
+    // step, then confirm approveProposal still refuses it — the operator
+    // must fill the gap (e.g. via editProposal) before the invoice can be
+    // issued; it can never reach a doomed execution.
+    const repo = new InMemoryProposalRepository();
+    await repo.create(proposal);
+    await repo.updateStatus('t-1', proposal.id, 'ready_for_review');
+
+    await expect(
+      approveProposal(repo, 't-1', proposal.id, 'u-1', 'owner'),
+    ).rejects.toBeInstanceOf(ValidationError);
+  });
+
+  it('with a reference extracted, the proposal is unaffected by the missingFields gate', async () => {
+    const handler = new IssueInvoiceTaskHandler();
+    const { proposal } = await handler.handle({
+      tenantId: 't-1',
+      userId: 'u-1',
+      message: 'Issue invoice INV-0042',
+      existingEntities: { jobReference: 'INV-0042' },
+    });
+
+    expect(missingFieldsFor(proposal)).toEqual([]);
+
+    const repo = new InMemoryProposalRepository();
+    await repo.create(proposal);
+    await repo.updateStatus('t-1', proposal.id, 'ready_for_review');
+
+    const approved = await approveProposal(repo, 't-1', proposal.id, 'u-1', 'owner');
+    expect(approved.status).toBe('approved');
+  });
+});
+
+/**
+ * B4 (feat: voice-transcript-and-agent-paths) — the unified resolution
+ * ladder: (1) UUID/INV-number reference → ungated, (2) conversation-context
+ * resolution ("the one we just drafted") → ungated + verifiedIds, (3)
+ * nothing resolvable → gated + entityCandidates. Before this unit the
+ * assistant surface's IssueInvoiceTaskHandler had no rung 2 at all, and the
+ * voice worker's local handler had rung 2 but no gate on rung 3 — this suite
+ * pins both together on the ONE handler both surfaces now share.
+ */
+describe('looksLikeResolvedInvoiceRef — resolvable-id-shape predicate', () => {
+  it.each([
+    ['ACME-0042', true], // tenant-prefixed invoice number (was broken by the hard-coded INV- shape)
+    ['INV-0042', true], // default-prefix invoice number
+    ['0042', true], // bare invoice number
+    ['11111111-1111-1111-1111-111111111111', true], // UUID
+  ])('accepts a resolvable ref: %s', (value, expected) => {
+    expect(looksLikeResolvedInvoiceRef(value as string)).toBe(expected);
+  });
+
+  it.each([
+    ['the Henderson invoice', false], // free-text phrase (spaces, no digits)
+    ['Henderson', false], // bare customer name
+  ])('rejects free text so it falls to the gated rung: %s', (value, expected) => {
+    expect(looksLikeResolvedInvoiceRef(value as string)).toBe(expected);
+  });
+});
+
+describe('B4 — IssueInvoiceTaskHandler resolution ladder', () => {
+  it('rung 1: a UUID reference resolves ungated, with no proposalRepo/invoiceRepo needed', async () => {
+    const handler = new IssueInvoiceTaskHandler();
+    const uuid = '11111111-1111-1111-1111-111111111111';
+    const { proposal } = await handler.handle({
+      tenantId: 't-1',
+      userId: 'u-1',
+      message: `Issue invoice ${uuid}`,
+      existingEntities: { jobReference: uuid },
+    });
+
+    expect(proposal.payload).toEqual({ invoiceId: uuid });
+    expect(missingFieldsFor(proposal)).toEqual([]);
+    expect(proposal.sourceContext?.verifiedIds).toBeUndefined();
+  });
+
+  it('rung 1: an "INV-0042"-style bare number resolves ungated', async () => {
+    const handler = new IssueInvoiceTaskHandler();
+    const { proposal } = await handler.handle({
+      tenantId: 't-1',
+      userId: 'u-1',
+      message: 'Issue invoice 0042',
+      existingEntities: { jobReference: '0042' },
+    });
+
+    expect(proposal.payload).toEqual({ invoiceId: '0042' });
+    expect(missingFieldsFor(proposal)).toEqual([]);
+  });
+
+  it('rung 2 is REFERENCE-GATED: a present-but-unresolvable free-text reference ("the Henderson invoice") does NOT resolve to the most-recent same-conversation draft — it lands gated with candidates on the free text (wrong-invoice guard)', async () => {
+    // Seed a REAL same-conversation draft_invoice with a resultEntityId, so
+    // the rung-2 lookup WOULD find a draft to resolve to if it ran. It must
+    // NOT run here, because a reference WAS extracted — resolving the named
+    // "Henderson" reference to whatever we last drafted could issue the wrong
+    // customer's invoice on a single approval.
+    const proposalRepo = new InMemoryProposalRepository();
+    const seededDraft = createProposal({
+      tenantId: 't-1',
+      proposalType: 'draft_invoice',
+      payload: { customerId: 'cust-other' },
+      summary: 'Draft invoice for someone else',
+      sourceContext: { conversationId: 'conv-1' },
+      createdBy: 'u-1',
+    });
+    seededDraft.resultEntityId = 'invoice-SEEDED-DRAFT';
+    await proposalRepo.create(seededDraft);
+
+    // An invoiceRepo that actually matches "Henderson", so we can also assert
+    // the gate carries B2-style candidates on the free-text reference.
+    const invoiceRepo = new InMemoryInvoiceRepository();
+    await createInvoice(
+      {
+        tenantId: 't-1',
+        jobId: 'job-h',
+        customerId: 'cust-henderson',
+        invoiceNumber: 'INV-0077',
+        lineItems: [{ description: 'Water heater', quantity: 1, unitPriceCents: 20000 }],
+        taxRateBps: 0,
+        customerMessage: 'Henderson water heater',
+        createdBy: 'u-1',
+      } as never,
+      invoiceRepo,
+    );
+
+    const handler = new IssueInvoiceTaskHandler({ proposalRepo, invoiceRepo });
+    const { proposal } = await handler.handle({
+      tenantId: 't-1',
+      userId: 'u-1',
+      message: 'Issue the Henderson invoice',
+      conversationId: 'conv-1',
+      existingEntities: { jobReference: 'Henderson' },
+    });
+
+    // GATED — not silently resolved to the seeded draft.
+    expect(missingFieldsFor(proposal)).toEqual(['invoiceId']);
+    expect(proposal.payload).toEqual({});
+    expect(proposal.sourceContext?.verifiedIds).toBeUndefined();
+    // And critically NOT the seeded draft's id anywhere in the payload.
+    expect(JSON.stringify(proposal.payload)).not.toContain('invoice-SEEDED-DRAFT');
+    // Candidates are searched on the FREE TEXT reference, not the draft.
+    const candidates = proposal.sourceContext?.entityCandidates as Array<{ label: string }> | undefined;
+    expect(candidates?.some((c) => c.label === 'INV-0077')).toBe(true);
+    expect(proposal.sourceContext?.entityReference).toBe('Henderson');
+  });
+
+  it('rung 2 vs the guard: with the SAME seeded conversation draft but NO reference, a referenceless "issue the one we just drafted" DOES resolve via rung 2 (existing behavior preserved)', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const seededDraft = createProposal({
+      tenantId: 't-1',
+      proposalType: 'draft_invoice',
+      payload: { customerId: 'cust-1' },
+      summary: 'Draft invoice for Henderson',
+      sourceContext: { conversationId: 'conv-1' },
+      createdBy: 'u-1',
+    });
+    seededDraft.resultEntityId = 'invoice-SEEDED-DRAFT';
+    await proposalRepo.create(seededDraft);
+
+    const handler = new IssueInvoiceTaskHandler({ proposalRepo });
+    const { proposal } = await handler.handle({
+      tenantId: 't-1',
+      userId: 'u-1',
+      message: 'Issue the one we just drafted',
+      conversationId: 'conv-1',
+      // No existingEntities → no reference extracted → rung 2 may run.
+    });
+
+    expect(missingFieldsFor(proposal)).toEqual([]);
+    expect(proposal.payload).toEqual({ invoiceId: 'invoice-SEEDED-DRAFT' });
+    expect(proposal.sourceContext?.verifiedIds).toEqual({ invoiceId: 'invoice-SEEDED-DRAFT' });
+  });
+
+  it('rung 2: with no reference, "issue the one we just drafted" resolves from the most recent same-conversation draft_invoice — ungated, with verifiedIds stamped', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const draft = createProposal({
+      tenantId: 't-1',
+      proposalType: 'draft_invoice',
+      payload: { customerId: 'cust-1' },
+      summary: 'Draft invoice for Henderson',
+      sourceContext: { conversationId: 'conv-1' },
+      createdBy: 'u-1',
+    });
+    draft.resultEntityId = 'invoice-abc-123';
+    await proposalRepo.create(draft);
+
+    const handler = new IssueInvoiceTaskHandler({ proposalRepo });
+    const { proposal } = await handler.handle({
+      tenantId: 't-1',
+      userId: 'u-1',
+      message: 'Issue the invoice we just drafted',
+      conversationId: 'conv-1',
+    });
+
+    expect(proposal.payload).toEqual({ invoiceId: 'invoice-abc-123' });
+    expect(missingFieldsFor(proposal)).toEqual([]);
+    // CRITICAL SECURITY — verifiedIds is stamped ONLY from this repo lookup.
+    expect(proposal.sourceContext?.verifiedIds).toEqual({ invoiceId: 'invoice-abc-123' });
+  });
+
+  it('rung 2 only resolves within the SAME conversation — a draft_invoice from a different conversation is ignored', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const draft = createProposal({
+      tenantId: 't-1',
+      proposalType: 'draft_invoice',
+      payload: {},
+      summary: 'Draft invoice',
+      sourceContext: { conversationId: 'conv-OTHER' },
+      createdBy: 'u-1',
+    });
+    draft.resultEntityId = 'invoice-wrong-conversation';
+    await proposalRepo.create(draft);
+
+    const handler = new IssueInvoiceTaskHandler({ proposalRepo });
+    const { proposal } = await handler.handle({
+      tenantId: 't-1',
+      userId: 'u-1',
+      message: 'Issue the invoice',
+      conversationId: 'conv-1',
+    });
+
+    expect(proposal.payload).toEqual({});
+    expect(missingFieldsFor(proposal)).toEqual(['invoiceId']);
+  });
+
+  it('rung 3: nothing resolvable and no invoiceRepo → gated, no candidates (Edit fallback only)', async () => {
+    const handler = new IssueInvoiceTaskHandler();
+    const { proposal } = await handler.handle({
+      tenantId: 't-1',
+      userId: 'u-1',
+      message: 'Issue the invoice',
+    });
+
+    expect(missingFieldsFor(proposal)).toEqual(['invoiceId']);
+    expect(proposal.sourceContext?.entityCandidates).toBeUndefined();
+  });
+
+  it('rung 3: a free-text reference with invoiceRepo wired records B2-style entityCandidates on top of the gate', async () => {
+    const invoiceRepo = new InMemoryInvoiceRepository();
+    await createInvoice(
+      {
+        tenantId: 't-1',
+        jobId: 'job-1',
+        customerId: 'cust-1',
+        invoiceNumber: 'INV-0099',
+        lineItems: [{ description: 'Service call', quantity: 1, unitPriceCents: 10000 }],
+        taxRateBps: 0,
+        customerMessage: 'Henderson water heater',
+        createdBy: 'u-1',
+      } as never,
+      invoiceRepo,
+    );
+
+    const handler = new IssueInvoiceTaskHandler({ invoiceRepo });
+    const { proposal } = await handler.handle({
+      tenantId: 't-1',
+      userId: 'u-1',
+      message: 'Issue the Henderson invoice',
+      existingEntities: { jobReference: 'Henderson' },
+    });
+
+    expect(missingFieldsFor(proposal)).toEqual(['invoiceId']);
+    expect(proposal.payload).toEqual({});
+    const candidates = proposal.sourceContext?.entityCandidates as Array<{ id: string }> | undefined;
+    expect(candidates).toBeDefined();
+    expect(candidates?.some((c) => c.id)).toBe(true);
+    expect(proposal.sourceContext?.entityKind).toBe('invoice');
+  });
+
+  it('rung 3: no reference at all, with invoiceRepo wired, offers recent DRAFT invoices as candidates (only drafts are issuable)', async () => {
+    const invoiceRepo = new InMemoryInvoiceRepository();
+    await createInvoice(
+      {
+        tenantId: 't-1',
+        jobId: 'job-1',
+        customerId: 'cust-1',
+        invoiceNumber: 'INV-0100',
+        lineItems: [{ description: 'Service call', quantity: 1, unitPriceCents: 5000 }],
+        taxRateBps: 0,
+        createdBy: 'u-1',
+      } as never,
+      invoiceRepo,
+    );
+
+    const handler = new IssueInvoiceTaskHandler({ invoiceRepo });
+    const { proposal } = await handler.handle({
+      tenantId: 't-1',
+      userId: 'u-1',
+      message: 'Issue the invoice',
+    });
+
+    expect(missingFieldsFor(proposal)).toEqual(['invoiceId']);
+    const candidates = proposal.sourceContext?.entityCandidates as Array<{ label: string }> | undefined;
+    expect(candidates?.some((c) => c.label === 'INV-0100')).toBe(true);
+  });
+
+  it('calls thresholdResolver when context carries no tenantThresholdOverride', async () => {
+    const thresholdResolver = vi.fn(async () => ({ supervisor: 0.5 }));
+    const handler = new IssueInvoiceTaskHandler({ thresholdResolver });
+    const uuid = '22222222-2222-2222-2222-222222222222';
+    await handler.handle({
+      tenantId: 't-1',
+      userId: 'u-1',
+      message: `Issue invoice ${uuid}`,
+      existingEntities: { jobReference: uuid },
+    });
+
+    expect(thresholdResolver).toHaveBeenCalledWith('t-1');
+  });
+
+  it('prefers context.tenantThresholdOverride over thresholdResolver (avoids a redundant resolver call when the router already resolved one)', async () => {
+    const thresholdResolver = vi.fn(async () => ({ supervisor: 0.5 }));
+    const handler = new IssueInvoiceTaskHandler({ thresholdResolver });
+    const uuid = '33333333-3333-3333-3333-333333333333';
+    await handler.handle({
+      tenantId: 't-1',
+      userId: 'u-1',
+      message: `Issue invoice ${uuid}`,
+      existingEntities: { jobReference: uuid },
+      tenantThresholdOverride: { supervisor: 0.7 },
+    });
+
+    expect(thresholdResolver).not.toHaveBeenCalled();
   });
 });

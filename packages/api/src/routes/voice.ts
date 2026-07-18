@@ -122,6 +122,15 @@ export function createVoiceRouter(
       const tenantId = authReq.auth!.tenantId;
       const actorId = authReq.auth!.userId;
       const routeName = 'POST /api/voice/stream-token';
+      // A2 — session/tenant language hint for the dictation WS, same
+      // `?language=` query-param convention as /transcribe's languageHint
+      // below. Not used to alter minting (the Deepgram grant token is not
+      // language-scoped) — recorded on the audit trail only, so a future
+      // per-surface WER/keyterm rollup can attribute mints by language.
+      // The browser threads the same value onto the Deepgram WS URL itself
+      // (see useDeepgramDictation.ts) independently of this audit record.
+      const languageParam = typeof req.query.language === 'string' ? req.query.language : undefined;
+      const language = languageParam === 'en' || languageParam === 'es' ? languageParam : undefined;
 
       // UB-B1 — audit trail for every mint attempt (mirrors the
       // voice.transcription.completed/.failed emission in /transcribe below):
@@ -157,6 +166,7 @@ export function createVoiceRouter(
         await auditMint('voice.stream_token_minted', {
           model: minted.model,
           expiresInSeconds: minted.expiresInSeconds,
+          ...(language ? { language } : {}),
         });
         res.json({
           token: minted.token,
@@ -165,7 +175,10 @@ export function createVoiceRouter(
         });
       } catch (err) {
         if (err instanceof DeepgramTokenUnavailableError) {
-          await auditMint('voice.stream_token_mint_failed', { reason: 'not_configured' });
+          await auditMint('voice.stream_token_mint_failed', {
+            reason: 'not_configured',
+            ...(language ? { language } : {}),
+          });
           res.status(503).json({
             error: 'NOT_CONFIGURED',
             message: 'Live transcription is not configured',
@@ -178,7 +191,10 @@ export function createVoiceRouter(
           logger?.error('voice.stream-token: key lacks grant permissions', {
             error: err.message,
           });
-          await auditMint('voice.stream_token_mint_failed', { reason: 'permission_denied' });
+          await auditMint('voice.stream_token_mint_failed', {
+            reason: 'permission_denied',
+            ...(language ? { language } : {}),
+          });
           res.status(503).json({
             error: 'NOT_CONFIGURED',
             message:
@@ -188,7 +204,11 @@ export function createVoiceRouter(
         }
         const errMsg = err instanceof Error ? err.message : String(err);
         logger?.error('voice.stream-token: mint failed', { error: errMsg });
-        await auditMint('voice.stream_token_mint_failed', { reason: 'provider_error', error: errMsg });
+        await auditMint('voice.stream_token_mint_failed', {
+          reason: 'provider_error',
+          error: errMsg,
+          ...(language ? { language } : {}),
+        });
         res.status(502).json({
           error: 'TOKEN_MINT_FAILED',
           message: 'Could not start live transcription. Please try again.',

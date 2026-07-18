@@ -298,6 +298,7 @@ import { InMemoryEditDeltaRepository } from './estimates/edit-delta';
 import { InMemoryPackActivationRepository } from './settings/pack-activation';
 import { buildVerticalPromptResolver } from './verticals/resolve-active-pack';
 import { VerticalTerminologyProvider } from './voice/vertical-terminology-provider';
+import { TenantGlossaryProvider } from './voice/tenant-glossary-provider';
 import { FillerEngine } from './ai/agents/customer-calling/filler-engine';
 import { FillerAudioCache } from './ai/agents/customer-calling/filler-audio-cache';
 import { classifyTurnSentiment } from './ai/agents/customer-calling/sentiment-classifier';
@@ -1613,10 +1614,45 @@ export function createApp(): AppWithLifecycle {
     level: process.env.LOG_LEVEL === 'debug' ? 'debug' : 'info',
   });
 
+  // A1 — tenant-scoped vocabulary (catalog item names, active customer
+  // names, technician/user names) for the transcription-correction pass.
+  // Reuses the same catalogRepo/customerRepo/userRepo already constructed
+  // above for the rest of the app; best-effort (never throws — see
+  // TenantGlossaryProvider's own doc comment).
+  const transcriptionGlossaryProvider = new TenantGlossaryProvider({
+    catalogRepo,
+    customerRepo,
+    userRepo,
+  });
+
   const transcriptionWorker = createTranscriptionWorker(
     voiceRepo,
     transcriptionProvider,
     {
+      // Wires the correction pass (workers/transcription.ts's
+      // `if (options.gateway …)` block) live — previously only
+      // onTranscribed + rawTranscriptEncryptionKey were passed here, so
+      // correction never ran regardless of AI_PROVIDER_API_KEY.
+      //
+      // llmGateway is NOT always the real provider — it falls back to a
+      // hermetic MockLLMProvider when AI_PROVIDER_API_KEY is unset (see its
+      // construction above). But transcriptionProvider (Whisper, via
+      // createWhisperTranscriptionProvider) is gated on a DIFFERENT env var
+      // (OPENAI_API_KEY alone) and runs for REAL regardless of
+      // AI_PROVIDER_API_KEY. That asymmetry meant a deployment with
+      // OPENAI_API_KEY but no AI_PROVIDER_API_KEY got real Whisper
+      // transcripts silently replaced: the hermetic mock's scripted
+      // catch-all response for transcription_correction is an ~84-char JSON
+      // blob (`{"ok":true,"mock":true,...}`) that clears the 40%-length
+      // floor in transcription.ts's correctTranscript() for any real
+      // transcript ≤210 chars — corrupting genuine voice-memo transcripts
+      // with mock JSON before downstream intent classification ever runs
+      // (observed live). Only pass gateway/glossary when the REAL gateway
+      // was built, so correction is skipped cleanly (raw transcript kept)
+      // for keyless-gateway deployments — matching pre-branch behavior.
+      ...(config.AI_PROVIDER_API_KEY
+        ? { gateway: llmGateway, glossary: transcriptionGlossaryProvider }
+        : {}),
       onTranscribed: async (event, hookLogger) => {
         // Enqueue the downstream voice-action-router job. A separate
         // poll loop (below) picks it up and runs intent classification.
@@ -1937,6 +1973,10 @@ export function createApp(): AppWithLifecycle {
   const executionHandlers = createExecutionHandlerRegistry({
     customerRepo,
     jobRepo,
+    // B7 (money-loss fix) — update_job routes status changes through
+    // transitionJobStatus (timeline + completedAt) and runs completion effects.
+    timelineRepo,
+    timeEntryRepo,
     locationRepo,
     appointmentRepo,
     assignmentRepo,
@@ -2448,6 +2488,11 @@ export function createApp(): AppWithLifecycle {
   const voiceActionRouterWorker = createVoiceActionRouterWorker({
     gateway: llmGateway,
     proposalRepo,
+    // B8 — create_customer draft-time duplicate detection parity: the SAME
+    // customerRepo the telephony FSM (twilio-adapter.ts) already uses to
+    // build its duplicateLoader, so the worker's create_customer proposals
+    // get the identical dedup-aware handler.
+    customerRepo,
     ...(customerNegotiationContextProvider ? { customerNegotiationContextProvider } : {}),
     // P2-036 V2 — additive discount engine; fail-closed (dormant until a tenant
     // configures a discount policy via settings).
@@ -3377,6 +3422,14 @@ export function createApp(): AppWithLifecycle {
     voiceSessionRepo,
     voiceRepo,
     voicePersonaResolver,
+    // U3 — share the same TenantGlossaryProvider instance (and its per-
+    // tenant TTL cache) between the Gather-hints path and the
+    // transcription-correction worker, instead of the adapter lazily
+    // building its own fallback provider. No LLM dependency here (unlike
+    // the correction pass above, which is gated on AI_PROVIDER_API_KEY) —
+    // wired unconditionally so Gather hints work even in a keyless-gateway
+    // deployment.
+    sttHintsResolver: (tenantId: string) => transcriptionGlossaryProvider.termsForTenant(tenantId),
     // §10 onboarding — fire the 30-minute upgrade nudge after every
     // inbound call ends. Pool-gated (no-op when running in-memory).
     ...(pool
@@ -3913,6 +3966,10 @@ export function createApp(): AppWithLifecycle {
                 complete: async ({ prompt }: { prompt: string }) => {
                   const res = await llmGateway.complete({
                     taskType: 'call_sentiment',
+                    // Top-level tenantId so the gateway keys this tenant's
+                    // concurrency quota / cache bucket correctly (never the
+                    // shared SYSTEM_TENANT_ID).
+                    tenantId: input.tenantId,
                     messages: [{ role: 'user' as const, content: prompt }],
                   });
                   return { text: res.content };
@@ -3957,6 +4014,10 @@ export function createApp(): AppWithLifecycle {
                   complete: async ({ prompt }: { prompt: string }) => {
                     const res = await llmGateway.complete({
                       taskType: 'grade_vulnerability',
+                      // Top-level tenantId so the gateway keys this tenant's
+                      // concurrency quota / cache bucket correctly (never the
+                      // shared SYSTEM_TENANT_ID).
+                      tenantId: input.tenantId,
                       messages: [{ role: 'user' as const, content: prompt }],
                     });
                     return { text: res.content };
@@ -5171,6 +5232,15 @@ export function createApp(): AppWithLifecycle {
       estimateRepo,
       // P22 — catalog grounding for assistant-drafted invoices/estimates.
       catalogRepo,
+      // B5 — the scheduling / invoice-follow-up intents wired into the
+      // assistant surface need the same repos the voice worker passes so
+      // their handlers resolve concrete ids instead of degrading to gated.
+      appointmentRepo,
+      jobRepo,
+      dunningEventRepo,
+      // B8 — create_customer draft-time duplicate detection parity, same
+      // customerRepo the voice worker and telephony FSM already use.
+      customerRepo,
       // §3B/3D/3E — assistant chat shares the operator-side resolver
       // shim with the voice-action-router so the same vertical context
       // reaches both text and voice classification paths.

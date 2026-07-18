@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   normalizeForMatch,
+  normalizeForMatchKeepDigits,
   singularizeToken,
   resolveLineItemToCatalog,
   resolveLineItems,
@@ -60,6 +61,24 @@ describe('normalizeForMatch', () => {
     expect(normalizeForMatch('')).toEqual([]);
     expect(normalizeForMatch('   ')).toEqual([]);
     expect(normalizeForMatch('!!! ### 🚚')).toEqual([]);
+  });
+});
+
+describe('normalizeForMatchKeepDigits', () => {
+  it('KEEPS digit-only tokens (SKU identity), unlike normalizeForMatch', () => {
+    expect(normalizeForMatchKeepDigits('Part 120')).toEqual(['part', '120']);
+    // The digit-dropping normalizer collapses the same input to just 'part'.
+    expect(normalizeForMatch('Part 120')).toEqual(['part']);
+  });
+
+  it('still drops stopwords and sub-2-char tokens, folds accents, singularizes', () => {
+    // 'a' stopword, '2' sub-2-char dropped; 'filters' singularized.
+    expect(normalizeForMatchKeepDigits('a 2 café filters')).toEqual(['cafe', 'filter']);
+  });
+
+  it('preserves multi-digit SKU tokens distinctly (12 ≠ 012)', () => {
+    expect(normalizeForMatchKeepDigits('part 12').join(' ')).toBe('part 12');
+    expect(normalizeForMatchKeepDigits('Part 012').join(' ')).toBe('part 012');
   });
 });
 
@@ -195,6 +214,93 @@ describe('resolveLineItemToCatalog — ambiguity & tie-breakers', () => {
     const r = resolveLineItemToCatalog('filter', items);
     expect(r.tier).toBe('ambiguous');
     expect(r.candidates!.length).toBe(3);
+  });
+});
+
+describe('resolveLineItemToCatalog — digit-aware SKU pass (numbered families)', () => {
+  // A numbered catalog family: every name digit-DROP-normalizes to just
+  // 'part', so without the digit-aware pass they are mutually ambiguous and
+  // the named item is unreachable from a MAX_CANDIDATES=3 picker.
+  const family = Array.from({ length: 180 }, (_, i) =>
+    item(`Part ${String(i).padStart(3, '0')}`, 100 + i, { category: 'Parts' }),
+  );
+
+  it('a unique digit-aware match resolves to exact tier with the named item', () => {
+    const r = resolveLineItemToCatalog('part 120', family);
+    expect(r.tier).toBe('exact');
+    expect(r.match?.name).toBe('Part 120');
+    expect(r.match?.unitPriceCents).toBe(220); // 100 + 120
+  });
+
+  it('a digit-aware exact match still honors the price-conflict carve-out (not a silent snap)', () => {
+    const r = resolveLineItemToCatalog('part 120', family);
+    expect(r.tier).toBe('exact');
+    // The resolver returns the exact item; the "did you mean" conflict check
+    // lives in applyCatalogPricing. A ≥10% + ≥$1 spoken-price deviation must
+    // still surface the two conflict candidates rather than snapping.
+    const out = applyCatalogPricing(
+      [{ description: 'part 120', quantity: 1, unitPriceCents: 500 }],
+      [r],
+      'unitPriceCents',
+    );
+    expect(out.lineItems[0]).toMatchObject({
+      unitPriceCents: 500, // spoken price preserved, NOT snapped to 220
+      pricingSource: 'ambiguous',
+      needsPricing: true,
+    });
+    expect(out.catalogResolution![0]).toEqual([
+      { id: r.match!.id, name: 'Part 120', unitPriceCents: 220, score: 1, category: 'material' },
+      { id: 'spoken:0', name: 'Keep spoken price', unitPriceCents: 500, score: 0 },
+    ]);
+    expect(out.requiresReview).toBe(true);
+  });
+
+  it('a digit-aware exact match with an in-tolerance price snaps to the catalog price', () => {
+    const r = resolveLineItemToCatalog('part 120', family);
+    const out = applyCatalogPricing(
+      [{ description: 'part 120', quantity: 1, unitPriceCents: 230 }], // within 100¢ of 220
+      [r],
+      'unitPriceCents',
+    );
+    expect(out.lineItems[0]).toMatchObject({
+      unitPriceCents: 220,
+      catalogItemId: r.match!.id,
+      pricingSource: 'catalog',
+      needsPricing: false,
+    });
+  });
+
+  it('the bare family stem ("part", no digits) is still genuinely ambiguous', () => {
+    const r = resolveLineItemToCatalog('part', family);
+    expect(r.tier).toBe('ambiguous');
+    expect(r.candidates!.length).toBe(3); // MAX_CANDIDATES preserved
+  });
+
+  it('a mismatched SKU number does not collide (12 ≠ 012) — falls through to ambiguous', () => {
+    // 'part 12' keeps ['part','12']; no family name normalizes to 'part 12'
+    // (they are zero-padded 'part 0NN'), so the digit-aware pass finds zero
+    // matches and the digit-dropping path treats it as the ambiguous stem.
+    const r = resolveLineItemToCatalog('part 12', family);
+    expect(r.tier).toBe('ambiguous');
+  });
+
+  it('a quantity phrase never false-positives through the digit pass', () => {
+    const hvacFilter = item('HVAC Filter', 4_500, { category: 'Parts' });
+    // '12' is a real digit token, so the digit-aware pass runs — but it
+    // requires the FULL string to match, and 'part 12 hvac filter' ≠
+    // 'hvac filter', so it can't snap. Falls through to the ordinary path.
+    const r = resolveLineItemToCatalog('add 12 hvac filters', [hvacFilter]);
+    expect(r.tier).not.toBe('exact');
+  });
+
+  it('quantity robustness preserved: "2 gaskets" still snaps to "Gasket"', () => {
+    const gasket = item('Gasket', 450, { category: 'Parts' });
+    // '2' is sub-2-char and dropped from BOTH normalizers, so no digit token
+    // survives → the digit-aware pass is skipped and the digit-dropping path
+    // exact-matches the singularized 'gasket'.
+    const r = resolveLineItemToCatalog('2 gaskets', [gasket]);
+    expect(r.tier).toBe('exact');
+    expect(r.match?.id).toBe(gasket.id);
   });
 });
 

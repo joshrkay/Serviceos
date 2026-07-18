@@ -155,6 +155,9 @@ Return JSON: { "summary": "..." }
   // Throws on timeout / provider error — callers handle retry.
   const response = await gateway.complete({
     taskType: 'summarize_conversation',
+    // Top-level tenantId — the quota/cache resilience wrappers key on
+    // this, not metadata.tenantId (see gateway.ts's tenant-id guard).
+    tenantId,
     messages: [{ role: 'user', content: prompt }],
     responseFormat: 'json',
     temperature: 0.2,

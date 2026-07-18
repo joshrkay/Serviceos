@@ -241,6 +241,89 @@ export function recordApiError(input: {
 }
 
 /**
+ * Closed union of voice-path failure classes we've instrumented. Deliberately
+ * NOT `err.message` or any free text — each member is a taxonomy bucket the
+ * caller picks, matching the deny-by-default discipline the rest of this
+ * module uses for PII. Extend by adding a member here + a call site, never by
+ * passing a raw string through.
+ */
+export type VoiceErrorKind =
+  // Twilio webhook handler threw; the caller still gets graceful hangup
+  // TwiML (200, not 5xx) so Twilio doesn't retry — see routes/telephony.ts.
+  | 'inbound_handler_failed'
+  // WS3 — the pre-connect health circuit was open, so a new inbound call was
+  // steered to Gather instead of the realtime (Media Streams) path.
+  | 'realtime_circuit_open'
+  // WS7 — a LIVE realtime call was steered to Gather mid-call via the REST
+  // redirect (Deepgram/transport failure recovered without dead air).
+  | 'degraded_to_gather'
+  // VOX-35c — a single speechTurn dispatch threw inside the session lock;
+  // recovered with a spoken apology + reprompt (call stays live).
+  | 'speech_turn_failed'
+  // VOX-35c — MAX_CONSECUTIVE_SPEECH_TURN_FAILURES back-to-back speechTurn
+  // failures; the caller was handed off gracefully and the call ended.
+  | 'speech_turn_repeated_failure'
+  // VOX-35b — mid-turn streaming TTS failed and was recovered via buffered
+  // REST synth or a filler clip instead of dead air.
+  | 'tts_stream_recovered'
+  // The voice-action-router worker failed to turn a transcript into a
+  // proposal (classifier/dispatch/persist throw); the queue will retry.
+  | 'action_router_failed'
+  // A3 — a FINAL transcript's STT acoustic confidence (Deepgram
+  // `confidence` / Twilio Gather `Confidence`) came back below
+  // VOICE_MIN_STT_CONFIDENCE; the caller was reprompted instead of the
+  // turn being dispatched.
+  | 'low_stt_confidence'
+  // A3 — MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS back-to-back low-confidence
+  // finals; the caller was handed off gracefully instead of being looped.
+  | 'low_stt_confidence_repeated';
+
+/** Which transport/surface the voice error occurred on. */
+export type VoiceErrorChannel = 'media_streams' | 'gather' | 'worker';
+
+/**
+ * Record a voice-path failure/recovery event (`voice_error`). Off-by-default
+ * and never throws. IDs/enums only — NO transcript, error message, phone
+ * number, or free text ever leaves this function. `callSid` is a Twilio
+ * identifier, not PII.
+ *
+ * Voice callers must never mint PostHog persons: the distinct id is always
+ * the fixed server sentinel `server:voice`, regardless of tenant/call — this
+ * event answers "where does the voice product break," not "who called."
+ * Attributed to the tenant group when a tenant id is present so "errors by
+ * tenant" is answerable for voice the same way `recordApiError` answers it
+ * for HTTP 5xx.
+ */
+export function recordVoiceError(input: {
+  errorKind: VoiceErrorKind;
+  channel: VoiceErrorChannel;
+  callSid?: string | null;
+  taskType?: string | null;
+  tenantId?: string | null;
+}): void {
+  const tenantId =
+    typeof input.tenantId === 'string' && input.tenantId !== '' ? input.tenantId : undefined;
+  const callSid =
+    typeof input.callSid === 'string' && input.callSid !== '' ? input.callSid : undefined;
+  const taskType =
+    typeof input.taskType === 'string' && input.taskType !== '' ? input.taskType : undefined;
+  captureServer({
+    distinctId: 'server:voice',
+    event: 'voice_error',
+    properties: {
+      error_kind: input.errorKind,
+      channel: input.channel,
+      source: 'server',
+      timestamp: new Date().toISOString(),
+      ...(callSid ? { call_sid: callSid } : {}),
+      ...(taskType ? { task_type: taskType } : {}),
+      ...(tenantId ? { tenant_id: tenantId } : {}),
+    },
+    ...(tenantId ? { groups: { tenant: tenantId } } : {}),
+  });
+}
+
+/**
  * Flush queued events on graceful shutdown. Called from the API
  * process's SIGTERM / SIGINT handler so deploys don't drop in-flight
  * funnel events.

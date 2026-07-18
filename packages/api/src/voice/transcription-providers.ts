@@ -284,16 +284,50 @@ export interface StreamingTranscriptionProvider {
  */
 export const DEEPGRAM_OPEN_TIMEOUT_MS = 5_000;
 
+/**
+ * A2 — true for any Nova-3 variant (`nova-3`, `nova-3-general`, etc.).
+ * Nova-3 models understand Deepgram's `keyterm` prompting param; everything
+ * else (Nova-2 pins, base/enhanced) falls back to the legacy `keywords`
+ * param that `buildWsUrl` used unconditionally before this fix.
+ */
+function isNova3ModelFamily(model: string): boolean {
+  return model.toLowerCase().startsWith('nova-3');
+}
+
+/**
+ * A2 follow-up — strip a trailing `:<digits>` weight suffix before a term
+ * is emitted under Deepgram's `keyterm` param. `term:weight` is the legacy
+ * `keywords` (Nova-2) boost format; Deepgram's Nova-3 `keyterm` prompting
+ * docs do not describe weight-suffix support, so passing 'P-trap:3' through
+ * unchanged risks sending the literal junk phrase "P-trap:3" instead of
+ * boosting "P-trap". Only a FINAL ':<digits>' is stripped, so a term with a
+ * legitimate internal colon (none in today's packs, but handled
+ * defensively) keeps everything except a trailing numeric suffix.
+ * `keywords` (Nova-2 path) is untouched — Nova-2 documents weights.
+ */
+function stripKeytermWeightSuffix(term: string): string {
+  return term.replace(/:\d+$/, '');
+}
+
 export class DeepgramStreamingProvider implements StreamingTranscriptionProvider {
   private readonly defaultLanguage: 'en' | 'es';
+  /** A2 — Deepgram model pin; drives which boost param buildWsUrl emits. */
+  private readonly model: string;
 
   constructor(
     private readonly apiKey: string,
     /** P11-002: per-session default; openSession() can override per-call. */
-    defaultLanguage: 'en' | 'es' = 'en'
+    defaultLanguage: 'en' | 'es' = 'en',
+    /**
+     * A2 — Deepgram model pin. Defaults to 'nova-3' (this provider's only
+     * supported model until now). Exposed so a future Nova-2 pin can still
+     * request term boosting through the param it actually supports.
+     */
+    model: string = 'nova-3'
   ) {
     if (!apiKey) throw new Error('DeepgramStreamingProvider requires DEEPGRAM_API_KEY');
     this.defaultLanguage = defaultLanguage;
+    this.model = model;
   }
 
   /** Build the Deepgram WS URL for a given language. Exposed for testing. */
@@ -304,11 +338,37 @@ export class DeepgramStreamingProvider implements StreamingTranscriptionProvider
     const endpointing = options.endpointingMs ?? 600;
     let url =
       'wss://api.deepgram.com/v1/listen' +
-      `?model=nova-3&language=${language}&encoding=linear16&sample_rate=16000` +
+      `?model=${this.model}&language=${language}&encoding=linear16&sample_rate=16000` +
       `&channels=1&interim_results=true&smart_format=true&endpointing=${endpointing}`;
     if (options.keywords && options.keywords.length > 0) {
+      // A2 — Nova-3 replaced Deepgram's legacy `keywords` boost param with
+      // `keyterm` prompting; `keywords` is a Nova-2-era feature that Nova-3
+      // silently ignores (no error, no boost — a no-op worse than sending
+      // nothing, since it looks wired but does nothing). Detect the model
+      // family so a future Nova-2 pin still boosts through the param IT
+      // supports.
+      //
+      // Term format is NOT unchanged across the flip: callers (vertical
+      // packs) supply `term:weight` (e.g. 'P-trap:3'), which is `keywords`'
+      // documented weighted-boost format on Nova-2. `keyterm` prompting on
+      // Nova-3 does not document weight-suffix support, so a trailing
+      // `:<digits>` is stripped for the keyterm path only — see
+      // stripKeytermWeightSuffix. `keywords` keeps the weight suffix as-is
+      // since Nova-2 supports it. URL-encoding is unchanged either way.
+      //
+      // NOTE: keyterm prompting's Deepgram docs describe it as English-only
+      // support at this time; this provider still sends the same boost
+      // terms on `language=es` sessions (deliberate on this branch — no
+      // Spanish-specific term list exists yet). TODO: live-check against
+      // Deepgram whether es keyterm requests are silently ignored (mirroring
+      // the keywords no-op above) or rejected, and gate/translate
+      // accordingly once confirmed.
+      const paramName = isNova3ModelFamily(this.model) ? 'keyterm' : 'keywords';
       const params = options.keywords
-        .map((k) => `keywords=${encodeURIComponent(k)}`)
+        .map((k) => {
+          const term = paramName === 'keyterm' ? stripKeytermWeightSuffix(k) : k;
+          return `${paramName}=${encodeURIComponent(term)}`;
+        })
         .join('&');
       url += `&${params}`;
     }

@@ -7,10 +7,11 @@ export type LineItemCategory = 'labor' | 'material' | 'equipment' | 'other';
  * Where a line item's price came from, carried from proposal drafting
  * (the catalog resolver stamps it — see
  * ai/resolution/catalog-resolver.ts) through to persistence on
- * estimate_line_items.pricing_source. ESTIMATES ONLY: invoices never set
- * this (the column lives on estimate_line_items), so it stays optional
- * and reads back undefined on invoice lines. A later step uses it to
- * decide whether an estimate's pricing is catalog-grounded enough to
+ * estimate_line_items.pricing_source AND invoice_line_items.pricing_source
+ * (migration 254). Stays optional: legacy rows and manual-create paths
+ * that don't set it read back undefined (treated as NOT grounded). Used
+ * to show a price's provenance in the review UI / audit trail and to
+ * decide whether a document's pricing is catalog-grounded enough to
  * auto-allow a discount.
  */
 export type PricingSource = 'catalog' | 'ambiguous' | 'uncatalogued' | 'manual';
@@ -25,10 +26,11 @@ export interface LineItem {
   sortOrder: number;
   taxable: boolean;
   /**
-   * Catalog-grounding signal (estimates only). Set by the catalog
-   * resolver during proposal drafting and persisted on estimate line
-   * items; undefined/absent on invoice lines and on legacy estimate rows
-   * (treated as NOT grounded — see isEstimateCatalogGrounded).
+   * Catalog-grounding signal. Set by the catalog resolver during proposal
+   * drafting and persisted on estimate_line_items.pricing_source and
+   * invoice_line_items.pricing_source (migration 254);
+   * undefined/absent on legacy rows and manual-create paths that don't set
+   * it (treated as NOT grounded — see isEstimateCatalogGrounded).
    */
   pricingSource?: PricingSource;
   /**
@@ -277,7 +279,13 @@ export function buildLineItem(
   unitPriceCents: number,
   sortOrder: number,
   taxable: boolean = true,
-  category?: LineItemCategory
+  category?: LineItemCategory,
+  // Catalog-grounding provenance (see PricingSource doc comment above).
+  // Optional trailing param so existing callers (seed-runner,
+  // estimate-template, schedule-completion, apply-late-fee-handler,
+  // invoice-schedule-handler) are unaffected — they simply don't pass it
+  // and the line persists with NULL provenance, same as before.
+  pricingSource?: PricingSource
 ): LineItem {
   return {
     id,
@@ -288,5 +296,6 @@ export function buildLineItem(
     totalCents: calculateLineItemTotal(quantity, unitPriceCents),
     sortOrder,
     taxable,
+    ...(pricingSource !== undefined ? { pricingSource } : {}),
   };
 }

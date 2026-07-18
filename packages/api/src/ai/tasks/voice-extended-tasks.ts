@@ -36,11 +36,26 @@ import {
   DUNNING_MARKER_WINDOW_MS,
 } from '../../invoices/dunning-config';
 import { parseMilestoneSentence } from '../../invoices/milestone-sentence-parser';
+import { candidatesForReference } from '../resolution/reference-candidates';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 function entitiesFrom(context: TaskContext): ExtractedEntities {
   return (context.existingEntities ?? {}) as ExtractedEntities;
+}
+
+// Mirrors the execution-side check (isUuid in
+// proposals/execution/voice-extended-handlers.ts / UUID_RE in
+// proposals/execution/issue-invoice-handler.ts): a classifier-extracted
+// reference is free text ("the Henderson invoice", "INV-0042") in the
+// overwhelming case, but on rare re-drafts (e.g. a resolved review-card pick
+// carried forward) it may already BE the resolved id. Used to decide whether
+// a task handler can hand the execution handler a usable id directly or must
+// gate the proposal for review-time resolution.
+const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+function isUuid(value: unknown): value is string {
+  return typeof value === 'string' && UUID_RE.test(value);
 }
 
 /** Tolerate both spellings ('canceled' canonical, 'cancelled' from fixtures). */
@@ -151,14 +166,25 @@ function inputFor(
   proposalType: ProposalType,
   payload: Record<string, unknown>,
   missingFields: string[],
-  opts?: { trust?: 'autonomous' | undefined }
+  opts?: {
+    trust?: 'autonomous' | undefined;
+    /**
+     * B2 — additional sourceContext entries to merge on top of
+     * baseSourceContext (e.g. entityCandidates/entityKind/entityReference).
+     * Optional and additive; existing call sites are unaffected.
+     */
+    sourceContext?: Record<string, unknown>;
+  }
 ): CreateProposalInput {
+  const base = baseSourceContext(context);
+  const extra = opts?.sourceContext;
+  const sourceContext = extra ? { ...(base ?? {}), ...extra } : base;
   return {
     tenantId: context.tenantId,
     proposalType,
     payload,
     summary: context.message,
-    sourceContext: baseSourceContext(context),
+    sourceContext,
     createdBy: context.userId,
     missingFields: missingFields.length > 0 ? missingFields : undefined,
     sourceTrustTier: opts?.trust,
@@ -447,8 +473,42 @@ export class AddNoteTaskHandler implements TaskHandler {
 //
 // Comms class — never auto-approves. We don't pass sourceTrustTier so
 // D3 lands it in 'draft' regardless of confidence.
+//
+// PR review finding (2026-07): unlike issue_invoice's execution handler
+// (resolveInvoice() in proposals/execution/issue-invoice-handler.ts, which
+// looks a bare/"INV-0042"-style reference up by repo), SendInvoiceExecutionHandler
+// (proposals/execution/voice-extended-handlers.ts) requires payload.invoiceId
+// to ALREADY be a UUID and never reads invoiceReference at all — there is no
+// resolution step anywhere between drafting and execution for this proposal
+// type. This handler used to flag invoiceId missing only when NO reference
+// was extracted, so e.g. "send the Henderson invoice" landed with
+// invoiceReference: 'Henderson' and an EMPTY missingFields. approveProposal
+// (proposals/actions.ts) only blocks on missingFields, so the proposal was
+// approvable straight from drafting and execution would then fail on the
+// unresolved reference — approval succeeding for an action that can never
+// execute. Mirrors the established sibling convention (ApplyLateFeeTaskHandler,
+// SendEstimateNudgeTaskHandler, SendPaymentReminderTaskHandler,
+// ReassignAppointmentTaskHandler): always gate the id for review-time
+// resolution unless the extracted reference already IS a usable id.
+export interface SendInvoiceTaskDeps {
+  /**
+   * B2 — optional. When present, a gated free-text invoiceReference is
+   * additionally searched (candidatesForReference, the same
+   * findByTenant({search,limit}) ILIKE technique InvoiceEditTaskHandler
+   * uses) so the review card can offer a one-tap AmbiguityPicker instead
+   * of a dead end. Candidates are recorded on sourceContext ONLY — they
+   * NEVER lift the missingFields gate below; see the class doc comment.
+   */
+  invoiceRepo?: Pick<InvoiceRepository, 'findByTenant'>;
+}
+
 export class SendInvoiceTaskHandler implements TaskHandler {
   readonly taskType = 'send_invoice' as const;
+  private readonly deps: SendInvoiceTaskDeps;
+
+  constructor(deps: SendInvoiceTaskDeps = {}) {
+    this.deps = deps;
+  }
 
   async handle(context: TaskContext): Promise<TaskResult> {
     const ee = entitiesFrom(context);
@@ -456,13 +516,45 @@ export class SendInvoiceTaskHandler implements TaskHandler {
       channel: ee.sendChannel ?? 'email',
     };
     const missing: string[] = [];
+    let extraSourceContext: Record<string, unknown> | undefined;
 
-    if (ee.jobReference) payload.invoiceReference = ee.jobReference;
-    else if (ee.customerName) payload.invoiceReference = ee.customerName;
-    else missing.push('invoiceId');
+    const reference = ee.jobReference ?? ee.customerName;
+    if (isUuid(reference)) {
+      // Already a resolved id — the execution handler can use it directly,
+      // no review-time resolution needed.
+      payload.invoiceId = reference;
+    } else {
+      if (reference) payload.invoiceReference = reference;
+      missing.push('invoiceId');
+
+      // B2 — layer candidates ON TOP of the gate above; never a substitute
+      // for it (a search match, even a single unambiguous one, still does
+      // not lift missingFields — see SendInvoiceTaskDeps doc comment).
+      // Re-reads ee.jobReference/customerName fresh (rather than reusing
+      // `reference` above) so this isn't subject to isUuid's type-predicate
+      // narrowing of that binding to `undefined` in this branch.
+      const searchReference = ee.jobReference ?? ee.customerName;
+      if (typeof searchReference === 'string' && searchReference.trim().length > 0) {
+        const candidates = await candidatesForReference({
+          tenantId: context.tenantId,
+          reference: searchReference,
+          kind: 'invoice',
+          invoiceRepo: this.deps.invoiceRepo,
+        });
+        if (candidates.length > 0) {
+          extraSourceContext = {
+            entityCandidates: candidates,
+            entityKind: 'invoice',
+            entityReference: searchReference,
+          };
+        }
+      }
+    }
 
     return {
-      proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      proposal: createProposal(
+        inputFor(context, this.taskType, payload, missing, { sourceContext: extraSourceContext }),
+      ),
       taskType: this.taskType,
     };
   }
@@ -1178,10 +1270,15 @@ export class RequestFeedbackTaskHandler implements TaskHandler {
 //
 // The task-handlers.ts CreateJobTaskHandler is a plain passthrough
 // that expects a pre-built payload. This voice variant maps the
-// classifier's extracted fields to the required schema shape. Like
-// ReassignAppointmentTaskHandler, customerId is always listed as
-// missing because the classifier returns a customer NAME, never a
-// UUID — the review UI resolves the reference before approval.
+// classifier's extracted fields to the required schema shape.
+//
+// B6 fix — the router's entity resolver (P8) already resolves the
+// free-text customerName to a verified customerId on
+// context.existingEntities.customerId when the match is unique — but
+// this handler used to DROP it and unconditionally gate customerId,
+// so every create_job stalled at review even on an unambiguous
+// resolution. Mirror LogTimeEntryTaskHandler/CreateInvoiceScheduleTaskHandler:
+// consume the resolved id when present, only gate when genuinely absent.
 export class CreateJobVoiceTaskHandler implements TaskHandler {
   readonly taskType = 'create_job' as const;
 
@@ -1190,10 +1287,14 @@ export class CreateJobVoiceTaskHandler implements TaskHandler {
     const payload: Record<string, unknown> = {};
     const missing: string[] = [];
 
+    // P8 — verified customerId resolved by the router from the spoken name.
+    const resolvedCustomerId =
+      typeof context.existingEntities?.customerId === 'string'
+        ? context.existingEntities.customerId
+        : undefined;
+    if (resolvedCustomerId) payload.customerId = resolvedCustomerId;
     if (ee.customerName) payload.customerReference = ee.customerName;
-    // Always require customerId — the reference alone isn't enough
-    // to execute.
-    missing.push('customerId');
+    if (!resolvedCustomerId) missing.push('customerId');
 
     if (ee.jobTitle) payload.title = ee.jobTitle;
     else if (ee.jobReference) payload.title = ee.jobReference;

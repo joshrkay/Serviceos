@@ -132,6 +132,9 @@ export class InvoiceTaskHandler implements TaskHandler {
 
     const llmResponse = await this.gateway.complete({
       taskType: 'draft_invoice',
+      // Top-level tenantId so the gateway keys this tenant's concurrency
+      // quota / cache bucket correctly (never the shared SYSTEM_TENANT_ID).
+      tenantId: context.tenantId,
       messages: [...systemMessages, { role: 'user', content: userMessage }],
       responseFormat: 'json',
     });

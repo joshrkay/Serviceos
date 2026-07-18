@@ -146,6 +146,22 @@ export interface UpdateJobInput {
   problemDescription?: string;
   priority?: JobPriority;
   assignedTechnicianId?: string;
+  /**
+   * B7 (feat: voice-transcript-and-agent-paths) — raw status field write,
+   * exposed for the `update_job` proposal's capture-class field edit
+   * (proposals/execution/update-job-handler.ts). Mirrors the existing (if
+   * previously untyped) capability of `PUT /api/jobs/:id` — routes/jobs.ts
+   * already forwards `req.body` verbatim into `updateJob`, so a client
+   * could already set `status` this way; this just types what was already
+   * possible. This is NOT the governed lifecycle transition
+   * (`transitionJobStatus` in job-lifecycle.ts, used by
+   * `POST /api/jobs/:id/transition`): no forward/backward-move validation,
+   * no timeline entry, no completion side effects (auto-invoice, milestone
+   * billing, feedback sweep). Reserved for a human-approved correction a
+   * proposal review card already vetted — never a substitute for the
+   * governed transition endpoint.
+   */
+  status?: JobStatus;
 }
 
 export interface JobListOptions {

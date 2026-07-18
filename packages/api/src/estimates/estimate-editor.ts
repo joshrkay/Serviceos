@@ -3,6 +3,7 @@ import { Estimate, assertEstimateEditable } from './estimate';
 import {
   LineItem,
   LineItemCategory,
+  PricingSource,
   buildLineItem,
   calculateSelectedDocumentTotals,
   validateLineItem as validateBillingLineItem,
@@ -32,12 +33,33 @@ export interface EstimateEditLineItemInput {
   unitPrice: number; // integer cents
   category?: LineItemCategory;
   taxable?: boolean;
+  /**
+   * Catalog-grounding provenance stamped by
+   * ai/resolution/edit-action-grounding.ts before this action reaches the
+   * executor. Absent (undefined) means "no grounding signal" — persisted
+   * as NULL, never defaulted to 'manual' (see billing-engine.ts
+   * PricingSource doc + migration 255).
+   */
+  pricingSource?: PricingSource;
 }
 
+// `index` (numeric, preferred) and `description` (free-text) are BOTH
+// optional at the type level because the LLM edit-task prompt
+// (ai/tasks/estimate-edit-task.ts) emits description-only actions — it
+// never had index in the first place, despite the (now-implemented)
+// prompt comment promising description→index resolution. Exactly one of
+// the two must be present at runtime; `resolveActionIndex` below enforces
+// that and is the ONLY place allowed to turn either into a concrete
+// array index. Mirrors invoices/invoice-editor.ts exactly.
 export type EstimateEditAction =
   | { type: 'add_line_item'; lineItem: EstimateEditLineItemInput }
-  | { type: 'remove_line_item'; index: number }
-  | { type: 'update_line_item'; index: number; lineItem: EstimateEditLineItemInput };
+  | { type: 'remove_line_item'; index?: number; description?: string }
+  | {
+      type: 'update_line_item';
+      index?: number;
+      description?: string;
+      lineItem: EstimateEditLineItemInput;
+    };
 
 export interface ApplyEstimateEditsResult {
   updatedEstimate: Estimate;
@@ -56,7 +78,8 @@ function toBillingLineItem(
     input.unitPrice,
     sortOrder,
     input.taxable ?? true,
-    input.category
+    input.category,
+    input.pricingSource
   );
 }
 
@@ -70,6 +93,88 @@ function validateInput(input: EstimateEditLineItemInput): void {
   if (errors.length > 0) {
     throw new ValidationError(`Invalid line item: ${errors.join(', ')}`);
   }
+}
+
+/**
+ * Resolve a `remove_line_item` / `update_line_item` action to a concrete
+ * `lineItems` array index. Mirrors invoices/invoice-editor.ts exactly —
+ * see that file's doc comment for the full corruption-bug writeup. In
+ * short: `undefined < 0` and `undefined >= lineItems.length` are both
+ * `false`, so the old range guard let an index-less description-based
+ * action (exactly what ai/tasks/estimate-edit-task.ts's prompt emits)
+ * fall through to `lineItems.splice(undefined, 1)`, which coerces to
+ * `splice(0, 1)` — silently deleting the FIRST line item. This function
+ * makes that impossible: a non-integer/undefined index is always
+ * rejected, and a description that doesn't resolve to exactly one line
+ * throws instead of guessing.
+ */
+function resolveActionIndex(
+  lineItems: LineItem[],
+  action: { index?: number; description?: string },
+  actionType: 'remove_line_item' | 'update_line_item'
+): number {
+  if (action.index !== undefined) {
+    // Hardened guard: reject any non-integer index (undefined, NaN,
+    // floats, etc.) in addition to the pre-existing out-of-range check.
+    // A `splice(undefined, 1)` must never silently happen.
+    if (
+      !Number.isInteger(action.index) ||
+      action.index < 0 ||
+      action.index >= lineItems.length
+    ) {
+      throw new ValidationError(
+        `${actionType} index ${action.index} is out of range (0..${lineItems.length - 1})`
+      );
+    }
+    return action.index;
+  }
+
+  if (typeof action.description === 'string' && action.description.trim().length > 0) {
+    return resolveIndexByDescription(lineItems, action.description, actionType);
+  }
+
+  throw new ValidationError(
+    `${actionType} requires either a numeric index or a description matching an existing line item`
+  );
+}
+
+/**
+ * Resolve a free-text description to a line-item index. Mirrors
+ * invoices/invoice-editor.ts's resolveIndexByDescription exactly.
+ *
+ * Matching rule (documented, least-surprising): normalize both sides by
+ * trimming and lowercasing, then prefer an EXACT match; only if there are
+ * zero exact matches do we fall back to a substring ("contains") match.
+ * At either tier, exactly one match is required — zero or 2+ matches
+ * throw rather than guess, per CLAUDE.md's rule that ambiguity on a
+ * free-text entity reference must surface as a clarification, never a
+ * silent pick.
+ */
+function resolveIndexByDescription(
+  lineItems: LineItem[],
+  description: string,
+  actionType: string
+): number {
+  const query = description.trim().toLowerCase();
+  const normalized = lineItems.map((li, idx) => ({ idx, desc: li.description.trim().toLowerCase() }));
+
+  const exact = normalized.filter((l) => l.desc === query);
+  if (exact.length === 1) return exact[0].idx;
+  if (exact.length > 1) {
+    throw new ValidationError(
+      `${actionType}: description "${description}" matches ${exact.length} line items — cannot determine which one to edit`
+    );
+  }
+
+  const contains = normalized.filter((l) => l.desc.includes(query));
+  if (contains.length === 1) return contains[0].idx;
+  if (contains.length > 1) {
+    throw new ValidationError(
+      `${actionType}: description "${description}" matches ${contains.length} line items — cannot determine which one to edit`
+    );
+  }
+
+  throw new ValidationError(`${actionType}: no line item matching "${description}"`);
 }
 
 export function applyEstimateEdits(
@@ -100,26 +205,18 @@ export function applyEstimateEdits(
         break;
       }
       case 'remove_line_item': {
-        if (action.index < 0 || action.index >= lineItems.length) {
-          throw new ValidationError(
-            `remove_line_item index ${action.index} is out of range (0..${lineItems.length - 1})`
-          );
-        }
-        lineItems.splice(action.index, 1);
+        const idx = resolveActionIndex(lineItems, action, 'remove_line_item');
+        lineItems.splice(idx, 1);
         editedFields.push('lineItems');
         break;
       }
       case 'update_line_item': {
-        if (action.index < 0 || action.index >= lineItems.length) {
-          throw new ValidationError(
-            `update_line_item index ${action.index} is out of range (0..${lineItems.length - 1})`
-          );
-        }
+        const idx = resolveActionIndex(lineItems, action, 'update_line_item');
         validateInput(action.lineItem);
-        const existing = lineItems[action.index];
+        const existing = lineItems[idx];
         const replaced = toBillingLineItem(action.lineItem, existing.id, existing.sortOrder);
-        lineItems[action.index] = replaced;
-        editedFields.push(`lineItems[${action.index}]`);
+        lineItems[idx] = replaced;
+        editedFields.push(`lineItems[${idx}]`);
         break;
       }
     }

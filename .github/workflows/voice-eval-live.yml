@@ -1,0 +1,81 @@
+# Voice Eval — LIVE intent + slot accuracy against the production model.
+#
+# The 92% intent-accuracy / 0.88 slot-micro-F1 quality bar is only meaningful
+# when measured against the REAL model. The PR-time voice-quality gate replays
+# cassettes (a canned classifier), so real-model regressions are invisible until
+# the Layer-2 release gate. This scheduled job closes that gap: it routes a
+# held-out corpus sample through the production classifier (classifyIntent)
+# behind the Layer-2 real gateway and enforces the thresholds with --gate.
+#
+# NOT PR-blocking — it runs on a weekly cron + manual dispatch, never on
+# pull_request. A --gate failure turns this run red (a visible quality
+# regression signal); it does not block merges.
+#
+# Cost shape: each run hits the real Anthropic API for the classify calls.
+# Spend is bounded two ways: --max-utterances caps the sample size, and
+# VOICE_EVAL_COST_CAP_CENTS makes each script abort (exit 3) BEFORE spending if
+# its conservative projection exceeds the cap. No Postgres/Docker/ffmpeg — the
+# classifier with a gateway needs no DB (repo deps are not exercised).
+name: Voice Eval Live (intent + slot)
+
+on:
+  schedule:
+    - cron: '0 7 * * 1'   # Monday 07:00 UTC (offset from the Layer-2 weekly at 06:00)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  live-eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # Same secret names the Layer-2 workflows use. The eval only needs the
+      # Anthropic key (LLM classify); OPENAI_API_KEY is threaded for parity in
+      # case a future eval path exercises an OpenAI-backed provider.
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      # Per-script cost ceiling (cents). Each runner projects cost conservatively
+      # (no cache) and aborts before spending if the sample would exceed this.
+      VOICE_EVAL_COST_CAP_CENTS: '500'   # $5 per script
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check for API key (fork safety)
+        id: check
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "::warning::ANTHROPIC_API_KEY is not set — skipping the live voice eval."
+            echo "This is expected on forks / when the secret is unavailable; a skipped run is NOT a passing gate."
+            echo "has_key=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "API key present."
+            echo "has_key=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/setup-node@v5
+        if: steps.check.outputs.has_key == 'true'
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - name: Install deps
+        if: steps.check.outputs.has_key == 'true'
+        run: npm ci
+      - name: Live intent eval (gated, sampled)
+        if: steps.check.outputs.has_key == 'true'
+        run: |
+          set -o pipefail
+          npx tsx packages/voice-eval/run-intent-eval.ts --live --gate --max-utterances 200 \
+            | tee voice-eval-live-report.txt
+      - name: Live slot eval (gated, sampled)
+        if: steps.check.outputs.has_key == 'true'
+        run: |
+          set -o pipefail
+          npx tsx packages/voice-eval/run-slot-eval.ts --live --gate --max-utterances 100 \
+            | tee -a voice-eval-live-report.txt
+      - name: Upload eval report
+        if: always() && steps.check.outputs.has_key == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: voice-eval-live-report
+          path: voice-eval-live-report.txt
+          retention-days: 90

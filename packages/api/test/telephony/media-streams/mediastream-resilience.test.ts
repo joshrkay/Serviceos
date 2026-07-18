@@ -11,6 +11,13 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+// OBS — capture recordVoiceError calls without touching the real PostHog SDK.
+const recordVoiceErrorMock = vi.fn();
+vi.mock('../../../src/analytics/posthog', () => ({
+  recordVoiceError: (...args: unknown[]) => recordVoiceErrorMock(...args),
+}));
+
 import {
   TwilioMediaStreamAdapter,
   type WsLike,
@@ -167,6 +174,7 @@ const flush = () => new Promise((r) => setImmediate(r));
 let store: VoiceSessionStore;
 beforeEach(() => {
   store = new VoiceSessionStore({ startInterval: false });
+  recordVoiceErrorMock.mockClear();
 });
 
 describe('WS3 mediastream resilience — Deepgram open failure', () => {
@@ -268,6 +276,16 @@ describe('WS7 mediastream resilience — mid-call degrade to Gather (REST redire
       (c) => c[0].eventType === 'voice.realtime.degraded_to_gather',
     )![0];
     expect(degraded.tenantId).toBe('tenant-r1');
+    // OBS — fired after the redirect succeeded and the WS was already
+    // closed 1000 above.
+    expect(recordVoiceErrorMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        errorKind: 'degraded_to_gather',
+        channel: 'media_streams',
+        callSid: 'CA-r1',
+        tenantId: 'tenant-r1',
+      }),
+    );
     expect(degraded.entityId).toBe('CA-r1');
   });
 
@@ -301,6 +319,11 @@ describe('WS7 mediastream resilience — mid-call degrade to Gather (REST redire
     const types = createSpy.mock.calls.map((c) => c[0].eventType);
     expect(types).toContain('voice.realtime.session_failed');
     expect(types).not.toContain('voice.realtime.degraded_to_gather');
+    // OBS — the degrade attempt failed, so no degraded_to_gather voice_error
+    // fires either (only the successful path is instrumented).
+    expect(recordVoiceErrorMock).not.toHaveBeenCalledWith(
+      expect.objectContaining({ errorKind: 'degraded_to_gather' }),
+    );
   });
 
   it('Deepgram open failure, no redirector wired → 1011 close (unchanged)', async () => {

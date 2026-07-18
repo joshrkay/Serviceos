@@ -16,6 +16,7 @@ import * as os from 'os';
 import { randomUUID } from 'crypto';
 import {
   CassetteLLMGateway,
+  cassetteFallbackAllowedFromEnv,
   defaultCassettesDir,
   pickNewestRecording,
   type CassetteFile,
@@ -28,6 +29,12 @@ function makeRequest(
   overrides: Partial<LLMRequest> = {}
 ): LLMRequest {
   return {
+    // classify_intent is tenant-scoped; the gateway enforces a top-level
+    // tenantId in strict (test/CI) mode. Record-mode passes through to the
+    // real gateway, so supply one. tenantId is NOT part of the cassette hash
+    // (snapshotRequest keys on model+prompt+schema only), so replay matches
+    // are unaffected.
+    tenantId: 'system',
     taskType: 'classify_intent',
     model: 'gpt-4o-mini',
     messages: [
@@ -132,7 +139,7 @@ describe('VQ-005 — CassetteLLMGateway', () => {
       mode: 'replay',
     });
     await expect(replayer.complete(makeRequest())).rejects.toThrow(
-      /cassette stale, refresh needed/
+      /cassette drift/
     );
   });
 
@@ -157,11 +164,13 @@ describe('VQ-005 — CassetteLLMGateway', () => {
     );
 
     // Replay with an EXTENDED system prompt (same transcript) — hash misses
-    // but the fallback should return the recorded response.
+    // but the fallback should return the recorded response. The loose drift
+    // fallback is opt-in now (strict-by-default); enable it explicitly.
     const replayer = new CassetteLLMGateway({
       scriptId,
       cassettesDir: tempDir,
       mode: 'replay',
+      allowFallback: true,
     });
     const driftedRequest = makeRequest({
       messages: [
@@ -214,11 +223,13 @@ describe('VQ-005 — CassetteLLMGateway', () => {
 
     // Replay with drifted system prompts. The slot-extractor fallback
     // must return the SLOT response, not the intent response, even
-    // though both entries share the user transcript + schema.
+    // though both entries share the user transcript + schema. Loose fallback
+    // is opt-in (strict-by-default); enable it explicitly.
     const replayer = new CassetteLLMGateway({
       scriptId,
       cassettesDir: tempDir,
       mode: 'replay',
+      allowFallback: true,
     });
     const slotRequest = makeRequest({
       messages: [
@@ -287,11 +298,13 @@ describe('VQ-005 — CassetteLLMGateway', () => {
     );
 
     // LIVE request: a further-drifted prompt, so it hash-misses BOTH
-    // recordings and falls through to the newest-recording selection.
+    // recordings and falls through to the newest-recording selection. Loose
+    // fallback is opt-in (strict-by-default); enable it explicitly.
     const replayer = new CassetteLLMGateway({
       scriptId,
       cassettesDir: tempDir,
       mode: 'replay',
+      allowFallback: true,
     });
     const drifted = makeRequest({
       messages: [
@@ -400,8 +413,72 @@ describe('VQ-005 — CassetteLLMGateway', () => {
       mode: 'replay',
     });
     await expect(replayer.complete(makeRequest())).rejects.toThrow(
-      /cassette stale, refresh needed for scriptId=partial-cassette/
+      /cassette drift: scriptId=partial-cassette/
     );
+  });
+
+  describe('strict drift mode (VOICE_QUALITY_ALLOW_CASSETTE_FALLBACK)', () => {
+    // Records one entry under an OLD prompt, then replays a same-transcript
+    // request under a DRIFTED (extended) prompt that hash-misses but WOULD
+    // loose-match. Proves: default = hard failure; flag = loose match.
+    async function recordDrift(scriptId: string): Promise<{ drifted: LLMRequest }> {
+      const { gateway: realGateway, provider } = createMockLLMGateway();
+      provider.setDefaultResponse('{"intentType":"create_appointment","confidence":0.9}');
+      const recorder = new CassetteLLMGateway({
+        scriptId, cassettesDir: tempDir, mode: 'record', realGateway,
+      });
+      await recorder.complete(makeRequest({
+        messages: [
+          { role: 'system', content: 'You are an intent classifier for ServiceOS.' },
+          { role: 'user', content: 'schedule a visit next Tuesday at 2pm' },
+        ],
+      }));
+      const drifted = makeRequest({
+        messages: [
+          { role: 'system', content: 'You are an intent classifier for ServiceOS. Many new intents appended since recording.' },
+          { role: 'user', content: 'schedule a visit next Tuesday at 2pm' },
+        ],
+      });
+      return { drifted };
+    }
+
+    it('DEFAULT: a hash miss is a hard failure even when a loose match exists', async () => {
+      const { drifted } = await recordDrift('strict-default-drift');
+      const replayer = new CassetteLLMGateway({
+        scriptId: 'strict-default-drift', cassettesDir: tempDir, mode: 'replay',
+        // allowFallback omitted → strict (env flag is unset in this suite).
+      });
+      await expect(replayer.complete(drifted)).rejects.toThrow(
+        /cassette drift[\s\S]*voice-quality:refresh/
+      );
+    });
+
+    it('FLAG (allowFallback:true): a hash miss loose-matches and serves the recording', async () => {
+      const { drifted } = await recordDrift('strict-flag-drift');
+      const replayer = new CassetteLLMGateway({
+        scriptId: 'strict-flag-drift', cassettesDir: tempDir, mode: 'replay',
+        allowFallback: true,
+      });
+      const res = await replayer.complete(drifted);
+      expect(res.content).toBe('{"intentType":"create_appointment","confidence":0.9}');
+    });
+
+    it('cassetteFallbackAllowedFromEnv reads VOICE_QUALITY_ALLOW_CASSETTE_FALLBACK', () => {
+      const prev = process.env.VOICE_QUALITY_ALLOW_CASSETTE_FALLBACK;
+      try {
+        delete process.env.VOICE_QUALITY_ALLOW_CASSETTE_FALLBACK;
+        expect(cassetteFallbackAllowedFromEnv()).toBe(false);
+        process.env.VOICE_QUALITY_ALLOW_CASSETTE_FALLBACK = '1';
+        expect(cassetteFallbackAllowedFromEnv()).toBe(true);
+        process.env.VOICE_QUALITY_ALLOW_CASSETTE_FALLBACK = 'true';
+        expect(cassetteFallbackAllowedFromEnv()).toBe(true);
+        process.env.VOICE_QUALITY_ALLOW_CASSETTE_FALLBACK = '0';
+        expect(cassetteFallbackAllowedFromEnv()).toBe(false);
+      } finally {
+        if (prev === undefined) delete process.env.VOICE_QUALITY_ALLOW_CASSETTE_FALLBACK;
+        else process.env.VOICE_QUALITY_ALLOW_CASSETTE_FALLBACK = prev;
+      }
+    });
   });
 
   it('VQ-005 — record mode writes new entry to cassette + returns real response', async () => {

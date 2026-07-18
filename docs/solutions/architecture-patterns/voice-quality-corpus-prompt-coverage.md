@@ -23,6 +23,14 @@ cross-referenced test-failures doc). Re-recording is **offline** via the in-repo
 `ScriptAwareMockGateway` (`voice-quality:refresh`); it does **not** need
 live-LLM access.
 
+> **Update (2026-07-17):** the loose drift fallback is now **strict-by-default**
+> — a hash miss THROWS unless `VOICE_QUALITY_ALLOW_CASSETTE_FALLBACK=1` is set
+> (see the cross-referenced test-failures doc). So a green gate again proves the
+> cassettes match the current prompts. The guidance below (which prompts are
+> cassette-covered, and re-recording on edit) still holds; the difference is that
+> an un-recorded prompt edit the corpus drives will now surface as a red gate
+> ("cassette drift" throw) instead of silently serving the old recording.
+
 ## Guidance
 **Two LLM prompts on the create-appointment path are cassette-covered, not one.**
 The corpus runner (`voice-quality/text-mode-driver.ts` → the `voice-action-router`

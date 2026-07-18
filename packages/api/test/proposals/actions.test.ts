@@ -189,6 +189,171 @@ describe('P2-005 — Approve / reject / edit interactions', () => {
     ).rejects.toThrow(ValidationError);
   });
 
+  // B1 — resolution-loop foundation: editProposal must clear a satisfied
+  // missingFields gate on fill, and never via a schema recompute (see
+  // proposals/missing-fields.ts for why a recompute reopens the doomed-
+  // approval bug this branch's gates exist to close).
+  describe('B1 — editProposal clears satisfied missingFields', () => {
+    function gatedSendInvoice() {
+      return createProposal({
+        tenantId,
+        proposalType: 'send_invoice',
+        payload: { invoiceReference: 'Henderson', channel: 'email' },
+        summary: 'Send the Henderson invoice',
+        createdBy: actorId,
+        missingFields: ['invoiceId'],
+      });
+    }
+
+    it('edit that fills the gated invoiceId clears the gate and unblocks approval', async () => {
+      const repo = makeRepo();
+      const proposal = gatedSendInvoice();
+      await repo.create(proposal);
+
+      const { proposal: updated } = await editProposal(
+        repo, tenantId, proposal.id, actorId, 'owner',
+        { invoiceId: '550e8400-e29b-41d4-a716-446655440000' },
+      );
+
+      expect(updated.sourceContext?.missingFields).toEqual([]);
+      const approved = await approveProposal(repo, tenantId, proposal.id, actorId, 'owner');
+      expect(approved.status).toBe('approved');
+    });
+
+    it('edit of an unrelated field leaves the gate intact and approval still blocked', async () => {
+      const repo = makeRepo();
+      const proposal = gatedSendInvoice();
+      await repo.create(proposal);
+
+      const { proposal: updated } = await editProposal(
+        repo, tenantId, proposal.id, actorId, 'owner',
+        { channel: 'sms' },
+      );
+
+      expect(updated.sourceContext?.missingFields).toEqual(['invoiceId']);
+      await expect(
+        approveProposal(repo, tenantId, proposal.id, actorId, 'owner')
+      ).rejects.toThrow(/unfilled required fields/);
+    });
+
+    // Pins the exact trap the B1 plan calls out: send_invoice's Zod schema
+    // (`sendInvoicePayloadSchema`) is satisfied by `invoiceReference` ALONE
+    // (its `.refine` accepts either field) — a schema-recompute-based clear
+    // would see the edited payload validate cleanly and wrongly drop the
+    // invoiceId gate even though no id was ever resolved, reopening the
+    // doomed-approval bug (approve succeeds, execution then fails on the
+    // unresolved reference). Editing invoiceReference itself — still no
+    // invoiceId — must leave the gate untouched.
+    it('editing invoiceReference (schema-satisfied, execution-gated) does NOT wrongly clear the invoiceId gate', async () => {
+      const repo = makeRepo();
+      const proposal = gatedSendInvoice();
+      await repo.create(proposal);
+
+      const { proposal: updated } = await editProposal(
+        repo, tenantId, proposal.id, actorId, 'owner',
+        { invoiceReference: 'Henderson Plumbing Co' },
+      );
+
+      // The edit itself succeeds — proving this really is a "schema
+      // satisfied" case, not a validation failure — yet the gate survives.
+      expect(updated.payload.invoiceReference).toBe('Henderson Plumbing Co');
+      expect(updated.sourceContext?.missingFields).toEqual(['invoiceId']);
+      await expect(
+        approveProposal(repo, tenantId, proposal.id, actorId, 'owner')
+      ).rejects.toThrow(/unfilled required fields/);
+    });
+
+    it('records clearedMissingFields in the proposal.edited audit metadata', async () => {
+      const repo = makeRepo();
+      const auditRepo = new InMemoryAuditRepository();
+      const proposal = gatedSendInvoice();
+      await repo.create(proposal);
+
+      await editProposal(
+        repo, tenantId, proposal.id, actorId, 'owner',
+        { invoiceId: '550e8400-e29b-41d4-a716-446655440000' },
+        auditRepo,
+      );
+
+      const editEvent = auditRepo.getAll().find((e) => e.eventType === 'proposal.edited');
+      expect(editEvent?.metadata).toMatchObject({ clearedMissingFields: ['invoiceId'] });
+    });
+
+    it('omits clearedMissingFields from audit metadata when nothing was cleared', async () => {
+      const repo = makeRepo();
+      const auditRepo = new InMemoryAuditRepository();
+      const proposal = gatedSendInvoice();
+      await repo.create(proposal);
+
+      await editProposal(
+        repo, tenantId, proposal.id, actorId, 'owner',
+        { channel: 'sms' },
+        auditRepo,
+      );
+
+      const editEvent = auditRepo.getAll().find((e) => e.eventType === 'proposal.edited');
+      expect(editEvent?.metadata).not.toHaveProperty('clearedMissingFields');
+    });
+
+    // Documented, not a surprise (per the B1 plan): update_invoice's
+    // contract requires invoiceId as a non-optional UUID (unlike
+    // send_invoice, whose `.refine` accepts invoiceReference alone) — an
+    // edit that leaves invoiceId unset still fails schema validation before
+    // the missingFields clear logic even runs.
+    it('update_invoice: an edit that never supplies invoiceId 400s on the required-uuid schema', async () => {
+      const repo = makeRepo();
+      const proposal = createProposal({
+        tenantId,
+        proposalType: 'update_invoice',
+        payload: {
+          invoiceReference: 'INV-0042',
+          editActions: [
+            { type: 'add_line_item', lineItem: { description: 'Trip fee', quantity: 1, unitPrice: 7500 } },
+          ],
+        },
+        summary: 'Add a trip fee to invoice INV-0042',
+        createdBy: actorId,
+        missingFields: ['invoiceId'],
+      });
+      await repo.create(proposal);
+
+      await expect(
+        editProposal(repo, tenantId, proposal.id, actorId, 'owner', {
+          editActions: [
+            { type: 'add_line_item', lineItem: { description: 'Second trip fee', quantity: 1, unitPrice: 5000 } },
+          ],
+        }),
+      ).rejects.toThrow(ValidationError);
+    });
+
+    it('a path-shaped missingFields entry is never cleared by a flat edit', async () => {
+      const repo = makeRepo();
+      const proposal = createProposal({
+        tenantId,
+        proposalType: 'update_invoice',
+        payload: {
+          invoiceId: '550e8400-e29b-41d4-a716-446655440000',
+          editActions: [
+            { type: 'update_line_item', index: 0, lineItem: { description: 'Repair', quantity: 1, unitPrice: 100 } },
+          ],
+        },
+        summary: 'Edit invoice line item',
+        createdBy: actorId,
+        missingFields: ['editActions[0].lineItem.catalogItemId'],
+      });
+      await repo.create(proposal);
+
+      const { proposal: updated } = await editProposal(
+        repo, tenantId, proposal.id, actorId, 'owner',
+        { 'editActions[0].lineItem.catalogItemId': 'cat-123' },
+      );
+
+      expect(updated.sourceContext?.missingFields).toEqual([
+        'editActions[0].lineItem.catalogItemId',
+      ]);
+    });
+  });
+
   it('validation — proposal not found returns error', async () => {
     const repo = makeRepo();
 

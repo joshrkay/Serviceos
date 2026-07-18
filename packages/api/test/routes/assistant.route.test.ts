@@ -9,13 +9,39 @@
 import request from 'supertest';
 import express, { Request, Response, NextFunction } from 'express';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { createAssistantRouter, proposalSignals, VOICE_APPROVAL_REFUSAL } from '../../src/routes/assistant';
-import { InMemoryProposalRepository } from '../../src/proposals/proposal';
+import {
+  createAssistantRouter,
+  proposalSignals,
+  editFieldsForMissing,
+  dropUnverifiedIds,
+  VOICE_APPROVAL_REFUSAL,
+} from '../../src/routes/assistant';
+import { InMemoryProposalRepository, createProposal } from '../../src/proposals/proposal';
+import { approveProposal } from '../../src/proposals/actions';
+import { ValidationError } from '../../src/shared/errors';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
+import {
+  InMemoryCatalogItemRepository,
+  createCatalogItem,
+} from '../../src/catalog/catalog-item';
 import type { CatalogItem, CatalogItemRepository } from '../../src/catalog/catalog-item';
 import { InMemoryConversationRepository } from '../../src/conversations/conversation-service';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
+import { InMemoryInvoiceRepository, createInvoice } from '../../src/invoices/invoice';
+import { InMemoryEstimateRepository, createEstimate } from '../../src/estimates/estimate';
+import { buildLineItem, calculateDocumentTotals } from '../../src/shared/billing-engine';
+// B5 — the shared handler-registry parity tests below run the SAME
+// transcript through the voice worker to prove the assistant surface can no
+// longer silently diverge on the 12 intents it was dropping.
+import { createVoiceActionRouterWorker } from '../../src/workers/voice-action-router';
+import { InMemoryAppointmentRepository } from '../../src/appointments/in-memory-appointment';
+import { InMemoryCustomerRepository } from '../../src/customers/customer';
+import { InMemoryJobRepository } from '../../src/jobs/job';
+import type { Job } from '../../src/jobs/job';
+import type { Estimate } from '../../src/estimates/estimate';
+import type { QueueMessage } from '../../src/queues/queue';
+import type { Logger } from '../../src/logging/logger';
 
 const TEST_TENANT = 'tenant-ast-01b';
 const TEST_USER = 'user-ast-01b';
@@ -24,6 +50,10 @@ function buildApp(
   gateway: LLMGateway,
   proposalRepo: InMemoryProposalRepository,
   verticalPromptResolver?: (tenantId: string) => Promise<string | undefined>,
+  // B8 — optional customerRepo so tests can pin the create_customer
+  // draft-time duplicate detection wiring without touching every other
+  // buildApp() call site in this file.
+  customerRepo?: import('../../src/customers/customer').CustomerRepository,
 ) {
   const app = express();
   app.use(express.json());
@@ -42,6 +72,7 @@ function buildApp(
       gateway,
       proposalRepo,
       ...(verticalPromptResolver ? { verticalPromptResolver } : {}),
+      ...(customerRepo ? { customerRepo } : {}),
     }),
   );
   return app;
@@ -138,6 +169,102 @@ describe('POST /api/assistant/chat — create_customer path', () => {
     );
     expect(byKey.email).toBe('');
     expect(byKey.phone).toBe('');
+  });
+
+  // B8 (feat: voice-transcript-and-agent-paths) — the assistant route now
+  // routes create_customer through the SAME dedup-aware handler the
+  // telephony FSM uses (CreateCustomerVoiceTaskHandler via the shared
+  // handler-registry), instead of the thin passthrough that only warned at
+  // execution time (customers/customer.ts's non-blocking createCustomer
+  // check). A near-duplicate must surface an advisory marker on the DRAFT.
+  it('B8 — stamps an advisory duplicate marker when a near-duplicate customer already exists; the draft is still approvable', async () => {
+    const customerRepo = new InMemoryCustomerRepository();
+    await customerRepo.create({
+      id: 'existing-cust-1',
+      tenantId: TEST_TENANT,
+      firstName: 'Alex',
+      lastName: undefined,
+      displayName: 'Alex',
+      email: 'alex@example.com',
+      preferredChannel: 'email',
+      smsConsent: false,
+      isArchived: false,
+      createdBy: 'u',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    } as never);
+
+    const gateway = scriptedGateway([
+      JSON.stringify({
+        intentType: 'create_customer',
+        confidence: 0.93,
+        extractedEntities: { displayName: 'Alex', email: 'alex@example.com' },
+      }),
+    ]);
+    const app = buildApp(gateway, proposalRepo, undefined, customerRepo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Create a new customer named Alex, email alex@example.com' }] });
+
+    expect(res.status).toBe(200);
+    const proposal = res.body?.message?.proposal;
+    expect(proposal?.type).toBe('Customer');
+    // Advisory only — never blocks. Still "Pending" (approvable), same as
+    // an unflagged create_customer proposal.
+    expect(proposal?.status).toBe('Pending');
+    expect(proposal?.meta?.markers?.length ?? 0).toBeGreaterThanOrEqual(1);
+
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted).toHaveLength(1);
+    const meta = (persisted[0].payload as Record<string, unknown>)._meta as
+      | { markers?: Array<{ path: string; reason: string }> }
+      | undefined;
+    expect(meta?.markers?.length ?? 0).toBeGreaterThanOrEqual(1);
+  });
+
+  it('B8 — no marker on the draft when no near-duplicate customer exists', async () => {
+    const customerRepo = new InMemoryCustomerRepository();
+    const gateway = scriptedGateway([
+      JSON.stringify({
+        intentType: 'create_customer',
+        confidence: 0.93,
+        extractedEntities: { displayName: 'Brand New Person', email: 'brand.new@example.com' },
+      }),
+    ]);
+    const app = buildApp(gateway, proposalRepo, undefined, customerRepo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Create a new customer named Brand New Person' }] });
+
+    expect(res.status).toBe(200);
+    const proposal = res.body?.message?.proposal;
+    expect(proposal?.meta?.markers ?? undefined).toBeUndefined();
+  });
+
+  it('B8 — omits the marker (failure-soft) when the customerRepo dedup lookup throws', async () => {
+    const customerRepo = new InMemoryCustomerRepository();
+    vi.spyOn(customerRepo, 'findDuplicates').mockRejectedValue(new Error('db down'));
+
+    const gateway = scriptedGateway([
+      JSON.stringify({
+        intentType: 'create_customer',
+        confidence: 0.93,
+        extractedEntities: { displayName: 'Alex', email: 'alex@example.com' },
+      }),
+    ]);
+    const app = buildApp(gateway, proposalRepo, undefined, customerRepo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Create a new customer named Alex, email alex@example.com' }] });
+
+    expect(res.status).toBe(200);
+    const proposal = res.body?.message?.proposal;
+    expect(proposal?.type).toBe('Customer');
+    expect(proposal?.status).toBe('Pending');
+    expect(proposal?.meta?.markers ?? undefined).toBeUndefined();
   });
 
   it('asks for the name (no proposal) when create_customer is classified without one', async () => {
@@ -459,6 +586,103 @@ describe('U7 — proposalSignals helper (pure mapper passthrough)', () => {
   });
 });
 
+// ─── B1 — editFieldsForMissing: turns sourceContext.missingFields into the
+// AIProposalCard editFields shape so a gated assistant card renders a
+// working Edit control (previously: no editFields, no way to unblock
+// Approve). ─────────────────────────────────────────────────────────────
+
+describe('B1 — editFieldsForMissing helper (pure mapper)', () => {
+  it('emits a labelled, keyed field for a flat missingFields entry, prefilled from its reference field', () => {
+    const out = editFieldsForMissing(['invoiceId'], { invoiceReference: 'Henderson', channel: 'email' });
+    expect(out).toEqual([{ label: 'Invoice # or ID', key: 'invoiceId', value: 'Henderson' }]);
+  });
+
+  it('prefers an existing string payload value over the reference field', () => {
+    const out = editFieldsForMissing(['invoiceId'], { invoiceId: 'partial-typed-value', invoiceReference: 'Henderson' });
+    expect(out).toEqual([{ label: 'Invoice # or ID', key: 'invoiceId', value: 'partial-typed-value' }]);
+  });
+
+  it('falls back to the raw key as the label and an empty value when nothing is known', () => {
+    const out = editFieldsForMissing(['title'], {});
+    expect(out).toEqual([{ label: 'title', key: 'title', value: '' }]);
+  });
+
+  it('skips path-shaped entries — those are resolve-line/candidate-picker territory, not a plain text field', () => {
+    const out = editFieldsForMissing(
+      ['invoiceId', 'lineItems[0].catalogItemId', 'editActions[0].lineItem.catalogItemId'],
+      { invoiceReference: 'Henderson' },
+    );
+    expect(out).toEqual([{ label: 'Invoice # or ID', key: 'invoiceId', value: 'Henderson' }]);
+  });
+
+  it('returns undefined when every missingFields entry is path-shaped', () => {
+    const out = editFieldsForMissing(['lineItems[0].catalogItemId'], {});
+    expect(out).toBeUndefined();
+  });
+
+  it('returns undefined for an empty or absent missingFields list', () => {
+    expect(editFieldsForMissing([], { invoiceId: 'x' })).toBeUndefined();
+    expect(editFieldsForMissing(undefined, { invoiceId: 'x' })).toBeUndefined();
+  });
+});
+
+/**
+ * B4 (feat: voice-transcript-and-agent-paths) — the verifiedIds allowlist
+ * this unit adds to dropUnverifiedIds. This is B4's main review surface
+ * (see the doc comment on dropUnverifiedIds and on IssueInvoiceTaskHandler
+ * in ai/orchestration/task-router.ts): verifiedIds is stamped ONLY by a
+ * handler's repo-lookup code path, never copied from LLM/classifier JSON,
+ * so it's safe to trust as an allowlist here. These tests pin the exact-match
+ * semantics directly, independent of any one handler's wiring.
+ */
+describe('B4 — dropUnverifiedIds verifiedIds allowlist (security pin)', () => {
+  const RESOLVED_ID = 'aaaaaaaa-1111-2222-3333-444444444444';
+  const HALLUCINATED_ID = 'bbbbbbbb-9999-8888-7777-666666666666';
+
+  it('keeps an id that exactly matches sourceContext.verifiedIds, even though it never appears in the operator text or entities', () => {
+    const payload: Record<string, unknown> = { invoiceId: RESOLVED_ID };
+    dropUnverifiedIds(payload, 'issue the one we just drafted', {}, {
+      verifiedIds: { invoiceId: RESOLVED_ID },
+    });
+    expect(payload.invoiceId).toBe(RESOLVED_ID);
+  });
+
+  it('SECURITY: still strips a hallucinated id that does not match verifiedIds, even when verifiedIds is present for a DIFFERENT value', () => {
+    const payload: Record<string, unknown> = { invoiceId: HALLUCINATED_ID };
+    dropUnverifiedIds(payload, 'issue the one we just drafted', {}, {
+      verifiedIds: { invoiceId: RESOLVED_ID },
+    });
+    expect(payload.invoiceId).toBeUndefined();
+  });
+
+  it('SECURITY: still strips a hallucinated id when verifiedIds only covers a DIFFERENT key', () => {
+    const payload: Record<string, unknown> = { invoiceId: HALLUCINATED_ID };
+    dropUnverifiedIds(payload, 'some text', {}, {
+      verifiedIds: { jobId: RESOLVED_ID },
+    });
+    expect(payload.invoiceId).toBeUndefined();
+  });
+
+  it('SECURITY: still strips a hallucinated id when sourceContext is present but has no verifiedIds at all', () => {
+    const payload: Record<string, unknown> = { invoiceId: HALLUCINATED_ID };
+    dropUnverifiedIds(payload, 'some text', {}, { conversationId: 'conv-1' });
+    expect(payload.invoiceId).toBeUndefined();
+  });
+
+  it('the ordinary haystack check still applies independently of verifiedIds — an id literally in the operator text survives with no verifiedIds at all', () => {
+    const payload: Record<string, unknown> = { invoiceId: RESOLVED_ID };
+    dropUnverifiedIds(payload, `Issue invoice ${RESOLVED_ID}`, {});
+    expect(payload.invoiceId).toBe(RESOLVED_ID);
+  });
+
+  it('a verifiedIds entry for one key never verifies an unrelated key on the same payload', () => {
+    const payload: Record<string, unknown> = { invoiceId: RESOLVED_ID, jobId: HALLUCINATED_ID };
+    dropUnverifiedIds(payload, 'issue it', {}, { verifiedIds: { invoiceId: RESOLVED_ID } });
+    expect(payload.invoiceId).toBe(RESOLVED_ID);
+    expect(payload.jobId).toBeUndefined();
+  });
+});
+
 describe('U7 — POST /api/assistant/chat surfaces pricing signals on the card', () => {
   function catalogRepo(items: CatalogItem[]): CatalogItemRepository {
     return {
@@ -698,5 +922,1295 @@ describe('UC-2 — chat holds no request transaction across the LLM call', () =>
       expect(p.store).toBeUndefined();
       expect(p.connects).toBe(0);
     }
+  });
+});
+
+// ─── Money-path handler wiring: assistant chat intents must route to the
+// DEDICATED task handler for their proposal type (not a same-family
+// draft handler that mints the wrong proposalType / skips catalog
+// grounding). Covers both dispatch paths in routes/assistant.ts:
+// the single-intent `proposalHandlers` map and the multi-step
+// `chainHandlers` map used by "X then Y" transcripts. ─────────────────────
+
+describe('money-path handler wiring — update_invoice/send_invoice/issue_invoice route to their own handler', () => {
+  function buildAppFor(gateway: LLMGateway, proposalRepo: InMemoryProposalRepository) {
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: TEST_USER,
+        sessionId: 'sess-1',
+        tenantId: TEST_TENANT,
+        role: 'owner',
+      };
+      next();
+    });
+    app.use('/api/assistant', createAssistantRouter({ gateway, proposalRepo }));
+    return app;
+  }
+
+  it('single-intent path: update_invoice yields an update_invoice proposal, not draft_invoice', async () => {
+    const gateway = scriptedGateway([
+      JSON.stringify({ intentType: 'update_invoice', confidence: 0.9, extractedEntities: {} }),
+      JSON.stringify({
+        invoiceReference: 'INV-0042',
+        editActions: [
+          { type: 'add_line_item', lineItem: { description: 'Trip fee', quantity: 1, unitPrice: 7500 } },
+        ],
+        confidence_score: 0.9,
+      }),
+    ]);
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildAppFor(gateway, proposalRepo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Add a trip fee to invoice INV-0042' }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.taskType).toBe('assistant.update_invoice');
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0].proposalType).toBe('update_invoice');
+  });
+
+  // PR review finding (2026-07): UpdateInvoiceExecutionHandler
+  // (proposals/execution/update-invoice-handler.ts) requires payload.invoiceId
+  // to ALREADY be a resolved id and has no reference-resolution step of its
+  // own. InvoiceEditTaskHandler used to leave missingFields empty for any
+  // free-text invoiceReference ("INV-0042", never an id), so this proposal
+  // was approvable straight from the assistant surface and execution would
+  // then fail on the unresolved reference. Mirrors the send_invoice gated
+  // test below — the review card must surface missingFields so Approve
+  // stays blocked until the operator resolves the reference.
+  it('single-intent path: a reference-only update_invoice (invoice number, no invoiceRepo wired) is gated with missingFields so it cannot be approved unresolved', async () => {
+    const gateway = scriptedGateway([
+      JSON.stringify({ intentType: 'update_invoice', confidence: 0.9, extractedEntities: {} }),
+      JSON.stringify({
+        invoiceReference: 'INV-0042',
+        editActions: [
+          { type: 'add_line_item', lineItem: { description: 'Trip fee', quantity: 1, unitPrice: 7500 } },
+        ],
+        confidence_score: 0.9,
+      }),
+    ]);
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildAppFor(gateway, proposalRepo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Add a trip fee to invoice INV-0042' }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.message.proposal.missingFields).toEqual(['invoiceId']);
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted[0].payload).not.toHaveProperty('invoiceId');
+    await expect(
+      approveProposal(proposalRepo, TEST_TENANT, persisted[0].id, TEST_USER, 'owner'),
+    ).rejects.toThrow(/unfilled required fields/);
+  });
+
+  // Regression test for a landmine found while building the fix above:
+  // dropUnverifiedIds (this file) deletes any id-shaped payload field
+  // (jobId/customerId/estimateId/invoiceId/appointmentId) that isn't
+  // literally present in the operator's raw text/classifier entities — it
+  // exists to catch LLM-hallucinated ids and can't tell those apart from a
+  // genuinely repo-verified invoiceId. A naive "resolved via invoiceRepo
+  // search ⇒ ungated" design would have this route silently strip the
+  // resolved invoiceId while leaving missingFields empty, reintroducing the
+  // exact doomed-approval bug on this surface only. InvoiceEditTaskHandler
+  // therefore only lifts the gate when invoiceReference is ALREADY a
+  // literal UUID (guaranteed to survive dropUnverifiedIds); a free-text
+  // reference stays gated even when invoiceRepo resolves it unambiguously.
+  it('single-intent path: an unambiguous invoiceRepo match for a free-text reference still gates (dropUnverifiedIds would silently strip a resolved id)', async () => {
+    const invoiceRepo = new InMemoryInvoiceRepository();
+    const invoice = await createInvoice(
+      {
+        tenantId: TEST_TENANT,
+        jobId: 'job-1',
+        customerId: 'cust-1',
+        invoiceNumber: 'INV-0042',
+        lineItems: [{ description: 'Service call', quantity: 1, unitPriceCents: 10000 }],
+        taxRateBps: 0,
+        createdBy: TEST_USER,
+      } as never,
+      invoiceRepo,
+    );
+
+    const gateway = scriptedGateway([
+      JSON.stringify({ intentType: 'update_invoice', confidence: 0.9, extractedEntities: {} }),
+      JSON.stringify({
+        invoiceReference: 'INV-0042',
+        editActions: [
+          { type: 'add_line_item', lineItem: { description: 'Trip fee', quantity: 1, unitPrice: 7500 } },
+        ],
+        confidence_score: 0.9,
+      }),
+    ]);
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: TEST_USER,
+        sessionId: 'sess-1',
+        tenantId: TEST_TENANT,
+        role: 'owner',
+      };
+      next();
+    });
+    app.use('/api/assistant', createAssistantRouter({ gateway, proposalRepo, invoiceRepo }));
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Add a trip fee to invoice INV-0042' }] });
+
+    expect(res.status).toBe(200);
+    // Still gated — never approvable straight from drafting, regardless of
+    // whether invoiceRepo could resolve the reference.
+    expect(res.body.message.proposal.missingFields).toEqual(['invoiceId']);
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    // dropUnverifiedIds strips the search-resolved invoiceId (not literally
+    // in the operator's text) — proving the id never reaches persistence
+    // unverified on this surface, which is exactly why the gate can't
+    // depend on it.
+    expect(persisted[0].payload).not.toHaveProperty('invoiceId');
+    expect(invoice.id).toBeTruthy();
+    await expect(
+      approveProposal(proposalRepo, TEST_TENANT, persisted[0].id, TEST_USER, 'owner'),
+    ).rejects.toThrow(/unfilled required fields/);
+  });
+
+  it('single-intent path: send_invoice yields a send_invoice proposal, not draft_invoice', async () => {
+    const gateway = scriptedGateway([
+      JSON.stringify({
+        intentType: 'send_invoice',
+        confidence: 0.9,
+        extractedEntities: { jobReference: 'INV-0042' },
+      }),
+    ]);
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildAppFor(gateway, proposalRepo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Send invoice INV-0042 to the customer' }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.taskType).toBe('assistant.send_invoice');
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0].proposalType).toBe('send_invoice');
+    // SendInvoiceTaskHandler makes no LLM call of its own — only the
+    // classifier reaches the gateway.
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+  });
+
+  // PR review finding (2026-07): a reference-only send_invoice draft
+  // ("send the Henderson invoice") used to leave missingFields empty, so
+  // approveProposal (which blocks ONLY on missingFields) would let it
+  // through straight from the assistant surface even though
+  // SendInvoiceExecutionHandler requires a resolved invoiceId UUID and has
+  // no reference-resolution step of its own — approval would succeed and
+  // execution would then fail. The review card must surface missingFields
+  // so Approve stays blocked until the operator resolves the reference.
+  it('single-intent path: a reference-only send_invoice (customer name, no id) is gated with missingFields so it cannot be approved unresolved', async () => {
+    const gateway = scriptedGateway([
+      JSON.stringify({
+        intentType: 'send_invoice',
+        confidence: 0.9,
+        extractedEntities: { customerName: 'Henderson' },
+      }),
+    ]);
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildAppFor(gateway, proposalRepo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Send the Henderson invoice' }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.message.proposal.missingFields).toEqual(['invoiceId']);
+    // B1 — a gated card must carry an editFields entry keyed by the exact
+    // payload field name (`invoiceId`) so AIProposalCard's edit-then-approve
+    // flow (PUT /api/proposals/:id { edits: { invoiceId: ... } }) can fill
+    // it. Prefilled from the free-text invoiceReference as context, never
+    // as a stand-in value the operator could approve unedited.
+    expect(res.body.message.proposal.editFields).toEqual(
+      expect.arrayContaining([
+        { label: 'Invoice # or ID', key: 'invoiceId', value: 'Henderson' },
+      ]),
+    );
+
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0].payload.invoiceReference).toBe('Henderson');
+    expect(persisted[0].payload.invoiceId).toBeUndefined();
+    expect(
+      await approveProposal(proposalRepo, TEST_TENANT, persisted[0].id, TEST_USER, 'owner').catch(
+        (err: unknown) => err,
+      ),
+    ).toBeInstanceOf(ValidationError);
+  });
+
+  it('single-intent path: issue_invoice yields an issue_invoice proposal, not draft_invoice', async () => {
+    const gateway = scriptedGateway([
+      JSON.stringify({
+        intentType: 'issue_invoice',
+        confidence: 0.9,
+        extractedEntities: { jobReference: 'INV-0042' },
+      }),
+    ]);
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildAppFor(gateway, proposalRepo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Issue invoice INV-0042' }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.taskType).toBe('assistant.issue_invoice');
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0].proposalType).toBe('issue_invoice');
+    expect(persisted[0].payload).toEqual({ invoiceId: 'INV-0042' });
+  });
+
+  // B4 (feat: voice-transcript-and-agent-paths) — before this unit the
+  // assistant surface's IssueInvoiceTaskHandler had NO conversation-context
+  // resolution rung at all (only the voice worker did, and its version had
+  // no missingFields gate). This proves the SAME handler now resolves "the
+  // one we just drafted" here too, AND that the resolved id survives
+  // dropUnverifiedIds (it's not literally in the operator's text — the scrub
+  // must special-case it via sourceContext.verifiedIds, not just skip it).
+  it('issue_invoice resolves "the one we just drafted" from a same-conversation draft_invoice, and the resolved id survives dropUnverifiedIds', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    // Seed a prior draft_invoice in the same conversation, already carrying
+    // a resultEntityId (as if drafted and then approved/executed earlier in
+    // the same chat thread).
+    const draft = createProposal({
+      tenantId: TEST_TENANT,
+      proposalType: 'draft_invoice',
+      payload: { customerId: 'cust-1' },
+      summary: 'Draft invoice for Henderson',
+      sourceContext: { conversationId: 'conv-resolve-1' },
+      createdBy: TEST_USER,
+    });
+    draft.resultEntityId = 'aaaaaaaa-1111-2222-3333-444444444444';
+    await proposalRepo.create(draft);
+
+    const gateway = scriptedGateway([
+      JSON.stringify({ intentType: 'issue_invoice', confidence: 0.9, extractedEntities: {} }),
+    ]);
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: TEST_USER,
+        sessionId: 'sess-1',
+        tenantId: TEST_TENANT,
+        role: 'owner',
+      };
+      next();
+    });
+    app.use('/api/assistant', createAssistantRouter({ gateway, proposalRepo }));
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({
+        messages: [{ role: 'user', content: 'Issue the invoice we just drafted' }],
+        conversationId: 'conv-resolve-1',
+      });
+
+    expect(res.status).toBe(200);
+    const persisted = (await proposalRepo.findByTenant(TEST_TENANT)).find(
+      (p) => p.proposalType === 'issue_invoice',
+    );
+    expect(persisted).toBeDefined();
+    // Resolved id present and NOT stripped by dropUnverifiedIds, even though
+    // it never appears in the operator's raw text.
+    expect(persisted!.payload.invoiceId).toBe('aaaaaaaa-1111-2222-3333-444444444444');
+    expect(persisted!.sourceContext?.missingFields).toBeUndefined();
+  });
+
+  it('issue_invoice with no reference and no matching conversation history lands GATED (never a doomed empty-payload approval)', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const gateway = scriptedGateway([
+      JSON.stringify({ intentType: 'issue_invoice', confidence: 0.9, extractedEntities: {} }),
+    ]);
+    const app = buildApp(gateway, proposalRepo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Issue the invoice' }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.message.proposal.missingFields).toEqual(['invoiceId']);
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0].payload).toEqual({});
+    await expect(
+      approveProposal(proposalRepo, TEST_TENANT, persisted[0].id, TEST_USER, 'owner'),
+    ).rejects.toBeInstanceOf(ValidationError);
+  });
+
+  it('chain path ("X then Y"): update_invoice and issue_invoice steps each route to their own handler', async () => {
+    const gateway = scriptedGateway([
+      // generateAssistantReply classifies the FULL message once before it
+      // detects the "then" chain and re-classifies per segment; content
+      // doesn't matter here since the chain branch returns before this
+      // whole-message classification is used.
+      JSON.stringify({ intentType: 'unknown', confidence: 0.5 }),
+      // Step 1 classify → update_invoice
+      JSON.stringify({ intentType: 'update_invoice', confidence: 0.9, extractedEntities: {} }),
+      // Step 1 handler (InvoiceEditTaskHandler) LLM call
+      JSON.stringify({
+        invoiceReference: 'INV-0042',
+        editActions: [
+          { type: 'add_line_item', lineItem: { description: 'Trip fee', quantity: 1, unitPrice: 7500 } },
+        ],
+        confidence_score: 0.9,
+      }),
+      // Step 2 classify → issue_invoice (IssueInvoiceTaskHandler makes no LLM call)
+      JSON.stringify({
+        intentType: 'issue_invoice',
+        confidence: 0.9,
+        extractedEntities: { jobReference: 'INV-0042' },
+      }),
+    ]);
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildAppFor(gateway, proposalRepo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({
+        messages: [
+          { role: 'user', content: 'Add a trip fee to invoice INV-0042, then issue invoice INV-0042' },
+        ],
+      });
+
+    expect(res.status).toBe(200);
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted.map((p) => p.proposalType).sort()).toEqual(['issue_invoice', 'update_invoice']);
+    // Neither chain step should have fallen back to the draft_invoice handler.
+    expect(persisted.some((p) => p.proposalType === 'draft_invoice')).toBe(false);
+  });
+
+  // Verify-or-gate (2026-07 review) — the hallucinated-UUID gate bypass this
+  // fix closes, pinned end-to-end on the assistant surface. Pre-fix an edit
+  // handler stamped payload.invoiceId from ANY UUID-shaped invoiceReference
+  // (no repo check) and ungated; on this surface dropUnverifiedIds then
+  // stripped a FABRICATED UUID (absent from operator text, absent from
+  // verifiedIds), leaving an APPROVABLE proposal with NO id and NO gate.
+  it('single-intent path: a HALLUCINATED update_invoice UUID (absent from operator text, missing from the repo) is GATED and never approvable', async () => {
+    const FABRICATED = 'deadbeef-dead-4bee-8bee-deadbeefdead';
+    const invoiceRepo = new InMemoryInvoiceRepository();
+    // Repo has a real invoice, but NOT one with the fabricated id.
+    await createInvoice(
+      {
+        tenantId: TEST_TENANT,
+        jobId: 'job-1',
+        customerId: 'cust-1',
+        invoiceNumber: 'INV-9999',
+        lineItems: [{ description: 'Service call', quantity: 1, unitPriceCents: 10000 }],
+        taxRateBps: 0,
+        createdBy: TEST_USER,
+      } as never,
+      invoiceRepo,
+    );
+
+    const gateway = scriptedGateway([
+      JSON.stringify({ intentType: 'update_invoice', confidence: 0.9, extractedEntities: {} }),
+      JSON.stringify({
+        // The LLM fabricates a UUID that appears NOWHERE in the operator's words.
+        invoiceReference: FABRICATED,
+        editActions: [
+          { type: 'add_line_item', lineItem: { description: 'Trip fee', quantity: 1, unitPrice: 7500 } },
+        ],
+        confidence_score: 0.9,
+      }),
+    ]);
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: TEST_USER,
+        sessionId: 'sess-1',
+        tenantId: TEST_TENANT,
+        role: 'owner',
+      };
+      next();
+    });
+    app.use('/api/assistant', createAssistantRouter({ gateway, proposalRepo, invoiceRepo }));
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Add a trip fee to that invoice' }] });
+
+    expect(res.status).toBe(200);
+    // Gated — the fabricated id was never trusted, so the card blocks Approve.
+    expect(res.body.message.proposal.missingFields).toEqual(['invoiceId']);
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0].payload).not.toHaveProperty('invoiceId');
+    await expect(
+      approveProposal(proposalRepo, TEST_TENANT, persisted[0].id, TEST_USER, 'owner'),
+    ).rejects.toThrow(/unfilled required fields/);
+  });
+
+  it('single-intent path: a repo-VERIFIED update_invoice UUID survives dropUnverifiedIds end-to-end (ungated, id kept via verifiedIds)', async () => {
+    const invoiceRepo = new InMemoryInvoiceRepository();
+    const invoice = await createInvoice(
+      {
+        tenantId: TEST_TENANT,
+        jobId: 'job-1',
+        customerId: 'cust-1',
+        invoiceNumber: 'INV-0042',
+        lineItems: [{ description: 'Service call', quantity: 1, unitPriceCents: 10000 }],
+        taxRateBps: 0,
+        createdBy: TEST_USER,
+      } as never,
+      invoiceRepo,
+    );
+
+    const gateway = scriptedGateway([
+      JSON.stringify({ intentType: 'update_invoice', confidence: 0.9, extractedEntities: {} }),
+      JSON.stringify({
+        // A re-draft carrying the real invoice id — verified against the repo.
+        invoiceReference: invoice.id,
+        editActions: [
+          { type: 'add_line_item', lineItem: { description: 'Trip fee', quantity: 1, unitPrice: 7500 } },
+        ],
+        confidence_score: 0.9,
+      }),
+    ]);
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: TEST_USER,
+        sessionId: 'sess-1',
+        tenantId: TEST_TENANT,
+        role: 'owner',
+      };
+      next();
+    });
+    app.use('/api/assistant', createAssistantRouter({ gateway, proposalRepo, invoiceRepo }));
+
+    // The invoice id appears NOWHERE in the operator's words — only the
+    // verifiedIds allowlist keeps dropUnverifiedIds from stripping it.
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Add a trip fee to that invoice' }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.message.proposal.missingFields ?? undefined).toBeUndefined();
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted).toHaveLength(1);
+    // Survived dropUnverifiedIds via sourceContext.verifiedIds.
+    expect(persisted[0].payload.invoiceId).toBe(invoice.id);
+    expect(persisted[0].sourceContext?.verifiedIds).toEqual({ invoiceId: invoice.id });
+    expect(persisted[0].sourceContext?.missingFields).toBeUndefined();
+  });
+
+  // Map-drift prevention (2026-07 review) — the single-intent map previously
+  // built `new SendInvoiceTaskHandler()` with NO invoiceRepo while the chain
+  // map passed it, so a single-message "send the Henderson invoice" lost the
+  // candidate picker. Both maps now resolve send_invoice from the ONE shared
+  // registry (built once in createAssistantRouter), so the single-intent path
+  // yields entityCandidates whenever the repo matches — same as the chain.
+  it('single-intent path: send_invoice records entityCandidates when invoiceRepo matches (no map drift vs the chain path)', async () => {
+    const invoiceRepo = new InMemoryInvoiceRepository();
+    await createInvoice(
+      {
+        tenantId: TEST_TENANT,
+        jobId: 'job-1',
+        customerId: 'cust-1',
+        invoiceNumber: 'INV-0042',
+        lineItems: [{ description: 'Service call', quantity: 1, unitPriceCents: 10000 }],
+        taxRateBps: 0,
+        createdBy: TEST_USER,
+      } as never,
+      invoiceRepo,
+    );
+
+    const gateway = scriptedGateway([
+      JSON.stringify({
+        intentType: 'send_invoice',
+        confidence: 0.9,
+        extractedEntities: { jobReference: 'INV-0042' },
+      }),
+    ]);
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: TEST_USER,
+        sessionId: 'sess-1',
+        tenantId: TEST_TENANT,
+        role: 'owner',
+      };
+      next();
+    });
+    app.use('/api/assistant', createAssistantRouter({ gateway, proposalRepo, invoiceRepo }));
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Send invoice INV-0042 to the customer' }] });
+
+    expect(res.status).toBe(200);
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0].proposalType).toBe('send_invoice');
+    // The picker is populated — proof the single-intent map now passes the
+    // invoiceRepo (pre-fix it built the handler with no repo → no candidates).
+    const sc = persisted[0].sourceContext as Record<string, unknown>;
+    const candidates = sc.entityCandidates as Array<Record<string, unknown>>;
+    expect(Array.isArray(candidates)).toBe(true);
+    expect(candidates.length).toBeGreaterThanOrEqual(1);
+    expect(candidates.every((c) => c.kind === 'invoice')).toBe(true);
+    // Still gated — candidates never lift the gate.
+    expect(res.body.message.proposal.missingFields).toEqual(['invoiceId']);
+  });
+});
+
+describe('money-path handler wiring — update_estimate is catalog-grounded (both dispatch paths)', () => {
+  async function seedSiteVisit(): Promise<{ repo: InMemoryCatalogItemRepository; itemId: string }> {
+    const repo = new InMemoryCatalogItemRepository();
+    const item = await repo.create(
+      createCatalogItem({
+        tenantId: TEST_TENANT,
+        name: 'Site Visit',
+        category: 'Labor',
+        unit: 'each',
+        unitPriceCents: 15000,
+      }),
+    );
+    return { repo, itemId: item.id };
+  }
+
+  function buildAppWithCatalog(
+    gateway: LLMGateway,
+    proposalRepo: InMemoryProposalRepository,
+    catalogRepo: CatalogItemRepository,
+  ) {
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: TEST_USER,
+        sessionId: 'sess-1',
+        tenantId: TEST_TENANT,
+        role: 'owner',
+      };
+      next();
+    });
+    app.use('/api/assistant', createAssistantRouter({ gateway, proposalRepo, catalogRepo }));
+    return app;
+  }
+
+  // The LLM mishears the price ($150.50) for a line that matches an
+  // existing catalog item ("Site Visit", $150.00). The deviation (50c) is
+  // BELOW both PRICE_CONFLICT_MIN_ABS_CENTS (100c) and PRICE_CONFLICT_MIN_REL
+  // (10%), so per edit-action-grounding.ts this is a sub-tolerance mishear,
+  // not a deliberate custom price — it snaps to the catalog price. If
+  // EstimateEditTaskHandler was constructed without deps.catalogRepo (the
+  // pre-fix bug — the 3rd constructor arg was omitted), this line would
+  // never resolve against the catalog and would ride the LLM's price as
+  // 'uncatalogued' instead of being grounded/snapped to the catalog price.
+  it('single-intent path: a catalog-matching update_estimate line takes the catalog price, not the LLM guess', async () => {
+    const { repo } = await seedSiteVisit();
+    const gateway = scriptedGateway([
+      JSON.stringify({ intentType: 'update_estimate', confidence: 0.9, extractedEntities: {} }),
+      JSON.stringify({
+        estimateReference: 'EST-0001',
+        editActions: [
+          { type: 'add_line_item', lineItem: { description: 'site visit', quantity: 1, unitPrice: 15050 } },
+        ],
+        confidence_score: 0.9,
+      }),
+    ]);
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildAppWithCatalog(gateway, proposalRepo, repo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Add a site visit to estimate EST-0001' }] });
+
+    expect(res.status).toBe(200);
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0].proposalType).toBe('update_estimate');
+    const payload = persisted[0].payload as { editActions: Array<{ lineItem: Record<string, unknown> }> };
+    const lineItem = payload.editActions[0].lineItem;
+    expect(lineItem.pricingSource).toBe('catalog');
+    // Catalog price ($150.00) snaps the LLM's near-miss $150.50 — a
+    // sub-tolerance mishear, not a price conflict.
+    expect(lineItem.unitPrice).toBe(15000);
+    expect(lineItem.unitPriceCents).toBe(15000);
+  });
+
+  // The LLM invents a price ($999.99) for a line that matches an existing
+  // catalog item ("Site Visit", $150.00). The deviation (84999c, ~567%) is
+  // far past BOTH PRICE_CONFLICT_MIN_ABS_CENTS and PRICE_CONFLICT_MIN_REL,
+  // so per edit-action-grounding.ts this is a "did you mean" price
+  // conflict, not a mishear — the spoken price is KEPT (never silently
+  // overwritten; the owner may have deliberately quoted a custom price)
+  // and the line is routed to review. This still proves the assistant path
+  // passes catalogRepo so grounding actually runs: without it, this line
+  // would ride as 'uncatalogued' instead of 'ambiguous', and the catalog
+  // match/markers below would never be produced at all.
+  it('chain path ("X then Y"): the update_estimate step is catalog-grounded and send_invoice routes to its own handler', async () => {
+    const { repo } = await seedSiteVisit();
+    const gateway = scriptedGateway([
+      // generateAssistantReply classifies the FULL message once before it
+      // detects the "then" chain and re-classifies per segment; content
+      // doesn't matter here since the chain branch returns before this
+      // whole-message classification is used.
+      JSON.stringify({ intentType: 'unknown', confidence: 0.5 }),
+      // Step 1 classify → update_estimate
+      JSON.stringify({ intentType: 'update_estimate', confidence: 0.9, extractedEntities: {} }),
+      // Step 1 handler (EstimateEditTaskHandler) LLM call
+      JSON.stringify({
+        estimateReference: 'EST-0001',
+        editActions: [
+          { type: 'add_line_item', lineItem: { description: 'site visit', quantity: 1, unitPrice: 99999 } },
+        ],
+        confidence_score: 0.9,
+      }),
+      // Step 2 classify → send_invoice (SendInvoiceTaskHandler makes no LLM call)
+      JSON.stringify({
+        intentType: 'send_invoice',
+        confidence: 0.9,
+        extractedEntities: { jobReference: 'INV-0042' },
+      }),
+    ]);
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildAppWithCatalog(gateway, proposalRepo, repo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({
+        messages: [
+          { role: 'user', content: 'Add a site visit to estimate EST-0001, then send invoice INV-0042' },
+        ],
+      });
+
+    expect(res.status).toBe(200);
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted.map((p) => p.proposalType).sort()).toEqual(['send_invoice', 'update_estimate']);
+
+    const estimateProposal = persisted.find((p) => p.proposalType === 'update_estimate')!;
+    const payload = estimateProposal.payload as {
+      editActions: Array<{ lineItem: Record<string, unknown> }>;
+      _meta?: { overallConfidence?: string; markers?: Array<{ path: string; reason: string }> };
+    };
+    const lineItem = payload.editActions[0].lineItem;
+    // Price conflict: the spoken $999.99 is KEPT, not snapped to the
+    // catalog's $150.00 — grounding never silently overwrites a deliberate
+    // custom price.
+    expect(lineItem.pricingSource).toBe('ambiguous');
+    expect(lineItem.unitPrice).toBe(99999);
+    expect(lineItem.unitPriceCents).toBeNull();
+    expect(lineItem.needsPricing).toBe(true);
+    expect(lineItem.catalogItemId).toBeUndefined();
+    // B3: a resolvable price conflict is no longer stamped sticky-'low'.
+    // The spoken price is kept and the line is gated for one-tap resolution
+    // (catalog price vs keep-spoken) via a missingFields entry; auto-approval
+    // is blocked by that gate rather than the confidence stamp, so
+    // overallConfidence stays 'high' (only genuinely uncatalogued lines keep
+    // the sticky-low cap).
+    expect(payload._meta?.overallConfidence).toBe('high');
+    expect(estimateProposal.sourceContext?.missingFields).toEqual(
+      expect.arrayContaining(['editActions[0].lineItem.catalogItemId']),
+    );
+    expect(payload._meta?.markers).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ path: 'editActions[0].lineItem.unitPrice' }),
+      ]),
+    );
+  });
+});
+
+// PR review finding (2026-07): sibling of the update_invoice gating fix
+// (see the "money-path handler wiring — update_invoice/send_invoice/
+// issue_invoice" describe block above). UpdateEstimateExecutionHandler
+// (proposals/execution/update-estimate-handler.ts) requires
+// payload.estimateId to ALREADY be a resolved id and has no
+// reference-resolution step of its own. EstimateEditTaskHandler used to
+// leave missingFields empty for any free-text estimateReference
+// ("EST-0001", never an id), so this proposal was approvable straight
+// from the assistant surface and execution would then fail on the
+// unresolved reference. See resolveEstimateIdGate in
+// ai/tasks/estimate-edit-task.ts for the fix.
+describe('update_estimate target resolution / missingFields gating', () => {
+  function buildAppFor(gateway: LLMGateway, proposalRepo: InMemoryProposalRepository) {
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: TEST_USER,
+        sessionId: 'sess-1',
+        tenantId: TEST_TENANT,
+        role: 'owner',
+      };
+      next();
+    });
+    app.use('/api/assistant', createAssistantRouter({ gateway, proposalRepo }));
+    return app;
+  }
+
+  it('single-intent path: a reference-only update_estimate (estimate number, no estimateRepo wired) is gated with missingFields so it cannot be approved unresolved', async () => {
+    const gateway = scriptedGateway([
+      JSON.stringify({ intentType: 'update_estimate', confidence: 0.9, extractedEntities: {} }),
+      JSON.stringify({
+        estimateReference: 'EST-0001',
+        editActions: [
+          { type: 'add_line_item', lineItem: { description: 'Trip fee', quantity: 1, unitPrice: 7500 } },
+        ],
+        confidence_score: 0.9,
+      }),
+    ]);
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildAppFor(gateway, proposalRepo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Add a trip fee to estimate EST-0001' }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.message.proposal.missingFields).toEqual(['estimateId']);
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted[0].payload).not.toHaveProperty('estimateId');
+    await expect(
+      approveProposal(proposalRepo, TEST_TENANT, persisted[0].id, TEST_USER, 'owner'),
+    ).rejects.toThrow(/unfilled required fields/);
+  });
+
+  // Regression test for the same landmine caught while building the
+  // update_invoice fix: dropUnverifiedIds (routes/assistant.ts) deletes any
+  // id-shaped payload field (jobId/customerId/estimateId/invoiceId/
+  // appointmentId) that isn't literally present in the operator's raw
+  // text/classifier entities — it exists to catch LLM-hallucinated ids and
+  // can't tell those apart from a genuinely repo-verified estimateId. A
+  // naive "resolved via estimateRepo search ⇒ ungated" design would have
+  // this route silently strip the resolved estimateId while leaving
+  // missingFields empty, reintroducing the exact doomed-approval bug on
+  // this surface only. EstimateEditTaskHandler therefore only lifts the
+  // gate when the reference/id is ALREADY a literal UUID (guaranteed to
+  // survive dropUnverifiedIds); a free-text reference stays gated even
+  // when estimateRepo resolves it unambiguously.
+  it('single-intent path: an unambiguous estimateRepo match for a free-text reference still gates (dropUnverifiedIds would silently strip a resolved id)', async () => {
+    const estimateRepo = new InMemoryEstimateRepository();
+    // createEstimate (not a manually-assigned short id) so the persisted
+    // estimate.id is a real uuidv4 — dropUnverifiedIds only strips
+    // id-shaped payload fields of length >= 32, so the test needs a
+    // realistic id to actually exercise the landmine it's regression
+    // testing (same reason the update_invoice regression test above uses
+    // createInvoice rather than a hand-rolled short id).
+    const estimate = await createEstimate(
+      {
+        tenantId: TEST_TENANT,
+        jobId: 'job-1',
+        estimateNumber: 'EST-0001',
+        lineItems: [buildLineItem('li-1', 'Service call', 1, 10000, 0, true, 'labor')],
+        taxRateBps: 0,
+        createdBy: TEST_USER,
+      },
+      estimateRepo,
+    );
+
+    const gateway = scriptedGateway([
+      JSON.stringify({ intentType: 'update_estimate', confidence: 0.9, extractedEntities: {} }),
+      JSON.stringify({
+        estimateReference: 'EST-0001',
+        editActions: [
+          { type: 'add_line_item', lineItem: { description: 'Trip fee', quantity: 1, unitPrice: 7500 } },
+        ],
+        confidence_score: 0.9,
+      }),
+    ]);
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: TEST_USER,
+        sessionId: 'sess-1',
+        tenantId: TEST_TENANT,
+        role: 'owner',
+      };
+      next();
+    });
+    app.use('/api/assistant', createAssistantRouter({ gateway, proposalRepo, estimateRepo }));
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Add a trip fee to estimate EST-0001' }] });
+
+    expect(res.status).toBe(200);
+    // Still gated — never approvable straight from drafting, regardless of
+    // whether estimateRepo could resolve the reference.
+    expect(res.body.message.proposal.missingFields).toEqual(['estimateId']);
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    // dropUnverifiedIds strips the search-resolved estimateId (not
+    // literally in the operator's text) — proving the id never reaches
+    // persistence unverified on this surface, which is exactly why the
+    // gate can't depend on it.
+    expect(persisted[0].payload).not.toHaveProperty('estimateId');
+    expect(estimate.id).toBeTruthy();
+    await expect(
+      approveProposal(proposalRepo, TEST_TENANT, persisted[0].id, TEST_USER, 'owner'),
+    ).rejects.toThrow(/unfilled required fields/);
+  });
+});
+
+// ───────────── B5 — the nine-path/12-intent assistant wiring ─────────────
+//
+// Before this unit, `routes/assistant.ts` silently dropped
+// reschedule_appointment / cancel_appointment / reassign_appointment /
+// confirm_appointment / create_job / send_payment_reminder / apply_late_fee /
+// send_estimate_nudge / batch_invoice / create_invoice_schedule /
+// record_payment / notify_delay to a bare conversational LLM reply — no
+// proposal at all. Both this route and workers/voice-action-router.ts now
+// draft these intents via the SAME shared registry
+// (ai/orchestration/handler-registry.ts buildTaskHandlers), so a divergence
+// here would mean the registry itself regressed.
+
+function silentLogger(): Logger {
+  const noop = (..._args: unknown[]) => {};
+  const base = {
+    debug: noop,
+    info: noop,
+    warn: noop,
+    error: noop,
+    child: () => base,
+  } as unknown as Logger;
+  return base;
+}
+
+function workerMsg<T>(payload: T): QueueMessage<T> {
+  return {
+    id: 'msg-1',
+    type: 'voice_action_router',
+    payload,
+    attempts: 1,
+    maxAttempts: 3,
+    idempotencyKey: 'idem-1',
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function buildB5App(gateway: LLMGateway, proposalRepo: InMemoryProposalRepository) {
+  const app = express();
+  app.use(express.json());
+  app.use((req: Request, _res: Response, next: NextFunction) => {
+    (req as AuthenticatedRequest).auth = {
+      userId: TEST_USER,
+      sessionId: 'sess-1',
+      tenantId: TEST_TENANT,
+      role: 'owner',
+    };
+    next();
+  });
+  app.use('/api/assistant', createAssistantRouter({ gateway, proposalRepo }));
+  return app;
+}
+
+describe('B5 — scheduling / create_job / invoice-follow-up intents wired onto the assistant surface', () => {
+  it('single-intent path: reschedule_appointment drafts a reschedule_appointment proposal, gated (not doomed) with no appointmentRepo wired', async () => {
+    const gateway = scriptedGateway([
+      JSON.stringify({
+        intentType: 'reschedule_appointment',
+        confidence: 0.92,
+        extractedEntities: {
+          appointmentReference: 'the Miller job',
+          newDateTimeDescription: 'Thursday at 2pm',
+        },
+      }),
+    ]);
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildB5App(gateway, proposalRepo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Move the Miller job to Thursday at 2pm' }] });
+
+    expect(res.status).toBe(200);
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0].proposalType).toBe('reschedule_appointment');
+    // Gated, not doomed: no appointmentRepo wired, so the concrete
+    // appointment id is unresolved — missingFields blocks Approve rather
+    // than the proposal landing empty/approvable-but-broken.
+    expect(res.body.message.proposal.missingFields).toContain('appointmentId');
+    expect(res.body.message.proposal.type).toBe('Schedule');
+  });
+
+  it('single-intent path: cancel_appointment drafts a cancel_appointment proposal', async () => {
+    const gateway = scriptedGateway([
+      JSON.stringify({
+        intentType: 'cancel_appointment',
+        confidence: 0.98,
+        extractedEntities: {
+          appointmentReference: 'tomorrow 3pm',
+          cancellationReason: 'customer called out',
+          cancellationType: 'customer_request',
+        },
+      }),
+    ]);
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildB5App(gateway, proposalRepo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: "Cancel tomorrow's 3pm, the customer called out" }] });
+
+    expect(res.status).toBe(200);
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0].proposalType).toBe('cancel_appointment');
+    const payload = persisted[0].payload as Record<string, unknown>;
+    expect(payload.cancellationType).toBe('customer_request');
+    expect(res.body.message.proposal.type).toBe('Schedule');
+  });
+
+  it('single-intent path: create_job drafts a create_job proposal, gated on customerId (no entity resolver on this surface)', async () => {
+    const gateway = scriptedGateway([
+      JSON.stringify({
+        intentType: 'create_job',
+        confidence: 0.9,
+        extractedEntities: {
+          customerName: 'Smith',
+          jobTitle: 'Kitchen drain replacement',
+        },
+      }),
+    ]);
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildB5App(gateway, proposalRepo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Start a new job for Smith — kitchen drain replacement' }] });
+
+    expect(res.status).toBe(200);
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0].proposalType).toBe('create_job');
+    const payload = persisted[0].payload as Record<string, unknown>;
+    expect(payload.title).toBe('Kitchen drain replacement');
+    expect(payload.customerReference).toBe('Smith');
+    // Gated, not doomed — a free-text customer name with no resolved id.
+    expect(res.body.message.proposal.missingFields).toContain('customerId');
+  });
+
+  // B7 (feat: voice-transcript-and-agent-paths) — update_job. The task
+  // handler makes its own dedicated LLM call to extract the field delta
+  // (mirrors update_estimate/update_invoice above), so this needs a SECOND
+  // scripted gateway response after the classify_intent call.
+  it('single-intent path: update_job drafts an update_job proposal, gated on jobId (no jobRepo wired)', async () => {
+    const gateway = scriptedGateway([
+      JSON.stringify({
+        intentType: 'update_job',
+        confidence: 0.9,
+        extractedEntities: { jobReference: 'the Henderson job' },
+      }),
+      JSON.stringify({
+        jobReference: 'the Henderson job',
+        status: 'in_progress',
+        confidence_score: 0.9,
+      }),
+    ]);
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildB5App(gateway, proposalRepo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Mark the Henderson job in progress' }] });
+
+    expect(res.status).toBe(200);
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0].proposalType).toBe('update_job');
+    const payload = persisted[0].payload as Record<string, unknown>;
+    expect(payload.status).toBe('in_progress');
+    // Gated, not doomed — a free-text job reference with no resolved id
+    // (no jobRepo wired on this surface's fixture).
+    expect(res.body.message.proposal.missingFields).toContain('jobId');
+  });
+
+  it('single-intent path: record_payment drafts a record_payment proposal with amount as integer cents', async () => {
+    const gateway = scriptedGateway([
+      JSON.stringify({
+        intentType: 'record_payment',
+        confidence: 0.96,
+        extractedEntities: {
+          jobReference: 'INV-0042',
+          amount: 45000,
+          paymentMethod: 'cash',
+        },
+      }),
+    ]);
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildB5App(gateway, proposalRepo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Mark INV-0042 paid — 450 cash' }] });
+
+    expect(res.status).toBe(200);
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0].proposalType).toBe('record_payment');
+    const payload = persisted[0].payload as Record<string, unknown>;
+    expect(payload.amountCents).toBe(45000);
+    expect(payload.paymentMethod).toBe('cash');
+    expect(res.body.message.proposal.type).toBe('Invoice');
+  });
+
+  it('single-intent path: send_payment_reminder drafts a send_payment_reminder proposal, gated on invoiceId', async () => {
+    const gateway = scriptedGateway([
+      JSON.stringify({
+        intentType: 'send_payment_reminder',
+        confidence: 0.9,
+        extractedEntities: { jobReference: 'INV-0099' },
+      }),
+    ]);
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildB5App(gateway, proposalRepo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Chase INV-0099 for payment' }] });
+
+    expect(res.status).toBe(200);
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0].proposalType).toBe('send_payment_reminder');
+    expect(res.body.message.proposal.missingFields).toContain('invoiceId');
+    expect(res.body.message.proposal.type).toBe('Invoice');
+  });
+
+  it('single-intent path: batch_invoice enumerates completed-unbilled jobs into ONE batch_invoice proposal when jobRepo/invoiceRepo/estimateRepo are wired', async () => {
+    const jobRepo = new InMemoryJobRepository();
+    const invoiceRepo = new InMemoryInvoiceRepository();
+    const estimateRepo = new InMemoryEstimateRepository();
+
+    const job: Job = {
+      id: 'job-b5-1',
+      tenantId: TEST_TENANT,
+      customerId: 'cust-b5-1',
+      locationId: 'loc-b5-1',
+      jobNumber: 'JOB-0001',
+      summary: 'Kitchen remodel',
+      status: 'completed',
+      priority: 'normal',
+      moneyState: 'estimate_accepted',
+      createdBy: TEST_USER,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    await jobRepo.create(job);
+
+    const acceptedLineItems = [buildLineItem('1', 'Labor', 1, 10000, 1, true, 'labor')];
+    const acceptedEstimate: Estimate = {
+      id: 'est-b5-1',
+      tenantId: TEST_TENANT,
+      jobId: job.id,
+      estimateNumber: 'EST-0001',
+      status: 'accepted',
+      lineItems: acceptedLineItems,
+      totals: calculateDocumentTotals(acceptedLineItems, 0, 0),
+      version: 1,
+      createdBy: TEST_USER,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    await estimateRepo.create(acceptedEstimate);
+
+    const gateway = scriptedGateway([
+      JSON.stringify({ intentType: 'batch_invoice', confidence: 0.9, extractedEntities: {} }),
+    ]);
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: TEST_USER,
+        sessionId: 'sess-1',
+        tenantId: TEST_TENANT,
+        role: 'owner',
+      };
+      next();
+    });
+    app.use(
+      '/api/assistant',
+      createAssistantRouter({ gateway, proposalRepo, jobRepo, invoiceRepo, estimateRepo }),
+    );
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Invoice all my completed jobs' }] });
+
+    expect(res.status).toBe(200);
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0].proposalType).toBe('batch_invoice');
+    const payload = persisted[0].payload as { jobs: Array<{ jobId: string }> };
+    expect(payload.jobs).toHaveLength(1);
+    expect(payload.jobs[0].jobId).toBe(job.id);
+  });
+
+  // Parity — the same transcript must classify to the SAME proposal type on
+  // both surfaces, since both now draft it via the identical shared
+  // registry. This is the regression the shared-registry extraction exists
+  // to prevent (this branch exists because the two surfaces had already
+  // diverged once).
+  it('parity: "reschedule the Miller job to Thursday at 2pm" yields reschedule_appointment on both the assistant route and the voice worker', async () => {
+    const classifierResponse = JSON.stringify({
+      intentType: 'reschedule_appointment',
+      confidence: 0.92,
+      extractedEntities: {
+        appointmentReference: 'the Miller job',
+        newDateTimeDescription: 'Thursday at 2pm',
+      },
+    });
+    const transcript = 'Move the Miller job to Thursday at 2pm';
+
+    const assistantProposalRepo = new InMemoryProposalRepository();
+    const assistantApp = buildB5App(scriptedGateway([classifierResponse]), assistantProposalRepo);
+    const assistantRes = await request(assistantApp)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: transcript }] });
+    expect(assistantRes.status).toBe(200);
+
+    const workerProposalRepo = new InMemoryProposalRepository();
+    const worker = createVoiceActionRouterWorker({
+      gateway: scriptedGateway([classifierResponse]),
+      proposalRepo: workerProposalRepo,
+    });
+    await worker.handle(
+      workerMsg({ tenantId: TEST_TENANT, userId: TEST_USER, transcript }),
+      silentLogger(),
+    );
+
+    const assistantPersisted = await assistantProposalRepo.findByTenant(TEST_TENANT);
+    const workerPersisted = await workerProposalRepo.findByTenant(TEST_TENANT);
+    expect(assistantPersisted).toHaveLength(1);
+    expect(workerPersisted).toHaveLength(1);
+    expect(assistantPersisted[0].proposalType).toBe(workerPersisted[0].proposalType);
+    expect(assistantPersisted[0].proposalType).toBe('reschedule_appointment');
+  });
+
+  it('parity: "start a new job for Smith" yields create_job on both the assistant route and the voice worker', async () => {
+    const classifierResponse = JSON.stringify({
+      intentType: 'create_job',
+      confidence: 0.9,
+      extractedEntities: {
+        customerName: 'Smith',
+        jobTitle: 'Kitchen drain replacement',
+      },
+    });
+    const transcript = 'Start a new job for Smith — kitchen drain replacement';
+
+    const assistantProposalRepo = new InMemoryProposalRepository();
+    const assistantApp = buildB5App(scriptedGateway([classifierResponse]), assistantProposalRepo);
+    const assistantRes = await request(assistantApp)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: transcript }] });
+    expect(assistantRes.status).toBe(200);
+
+    const workerProposalRepo = new InMemoryProposalRepository();
+    const worker = createVoiceActionRouterWorker({
+      gateway: scriptedGateway([classifierResponse]),
+      proposalRepo: workerProposalRepo,
+    });
+    await worker.handle(
+      workerMsg({ tenantId: TEST_TENANT, userId: TEST_USER, transcript }),
+      silentLogger(),
+    );
+
+    const assistantPersisted = await assistantProposalRepo.findByTenant(TEST_TENANT);
+    const workerPersisted = await workerProposalRepo.findByTenant(TEST_TENANT);
+    expect(assistantPersisted).toHaveLength(1);
+    expect(workerPersisted).toHaveLength(1);
+    expect(assistantPersisted[0].proposalType).toBe(workerPersisted[0].proposalType);
+    expect(assistantPersisted[0].proposalType).toBe('create_job');
+  });
+
+  // Confirms the appointmentRepo/jobRepo threading actually reaches the
+  // handler on this surface (not just that it degrades gracefully without
+  // them, covered above) — mirrors the worker's own
+  // InMemoryAppointmentRepository-backed reschedule test.
+  it('single-intent path: reschedule_appointment resolves a concrete appointmentId when appointmentRepo + jobRepo are wired', async () => {
+    const appointmentRepo = new InMemoryAppointmentRepository();
+    const jobRepo = new InMemoryJobRepository();
+    const job: Job = {
+      id: 'job-b5-2',
+      tenantId: TEST_TENANT,
+      customerId: 'cust-b5-2',
+      locationId: 'loc-b5-2',
+      jobNumber: 'JOB-0002',
+      summary: 'Miller job',
+      status: 'scheduled',
+      priority: 'normal',
+      createdBy: TEST_USER,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    await jobRepo.create(job);
+    const appointment = await appointmentRepo.create({
+      id: 'appt-b5-2',
+      tenantId: TEST_TENANT,
+      jobId: job.id,
+      scheduledStart: new Date(Date.now() + 86_400_000),
+      scheduledEnd: new Date(Date.now() + 90_000_000),
+      timezone: 'America/New_York',
+      status: 'scheduled',
+      holdPendingApproval: false,
+      createdBy: TEST_USER,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    } as never);
+
+    const gateway = scriptedGateway([
+      JSON.stringify({
+        intentType: 'reschedule_appointment',
+        confidence: 0.92,
+        extractedEntities: {
+          appointmentReference: 'the Miller job',
+          newDateTimeDescription: 'Thursday at 2pm',
+        },
+      }),
+    ]);
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: TEST_USER,
+        sessionId: 'sess-1',
+        tenantId: TEST_TENANT,
+        role: 'owner',
+      };
+      next();
+    });
+    app.use(
+      '/api/assistant',
+      createAssistantRouter({ gateway, proposalRepo, appointmentRepo, jobRepo }),
+    );
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Move the Miller job to Thursday at 2pm' }] });
+
+    expect(res.status).toBe(200);
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0].proposalType).toBe('reschedule_appointment');
+    expect(appointment.id).toBeTruthy();
   });
 });

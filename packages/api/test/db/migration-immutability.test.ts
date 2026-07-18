@@ -416,6 +416,12 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['251_leads_service_address', '0033dc709e9d1fb22584a20873826d59fa2430c6554c0846e4f9c86e60c4f82b'],
   ['252_technician_location_ping_idempotency', '5f309f1a77d6c208f6a8eb5ca0fe34eb8db2c86f7ebe47a814275d3ba4d9ed5d'],
   ['253_users_tenant_clerk_unique', 'b96f4d052f79ac1b8a30a9073fb42d323ee98a72193e3c9206ffc14c40bb864b'],
+  // Per-call LLM cost accounting — ai_runs.cost_micro_cents (nullable BIGINT).
+  ['254_ai_runs_cost_micro_cents', '7de878660d668a14ee98e68d2b1f8d4911c73940706909cbc6d7f056c67ea150'],
+  // Concurrent branch work (not part of this change) — snapshot entry added
+  // so the immutability test's "every live migration has a snapshot" check
+  // stays green; the migration's SQL content is untouched by this commit.
+  ['255_invoice_line_items_pricing_source', 'ca9cd1c13a324f59c5c67de5abb650f658aa3ef182033a3882be663b4b3134e4'],
 ];
 
 function hashMigration(value: string): string {
