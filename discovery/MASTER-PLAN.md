@@ -101,7 +101,7 @@ Full evidence + plans live in the track docs; this is the ranked register. Blast
 ### Critical
 | ID | Finding | Why it leads | Effort |
 |---|---|---|---|
-| T2-F01 | ElevenLabs streaming output format never pinned; adapter assumes PCM — live realtime agent audio may be static, and **no gate would catch it** | The product's core interaction, unproven end-to-end; 30-minute staging call resolves it either way | S |
+| T2-F01 | ElevenLabs streaming output format never pinned; adapter assumes PCM — **default verified 2026-07-18 as `mp3_44100`** (ElevenLabs API reference + elevenlabs-python #251), so the realtime path emits MP3 into a PCM decoder; no gate would catch it | Near-certain static on any Media-Streams turn; fix is a one-line `output_format=pcm_16000` pin + first-chunk guard | S |
 | T1-F01 | The AI quality gate on the deploy path never calls an LLM (mock echoes expected intents; judge hardwired to pass); real-model evals are weekly/release-only | Every prompt/model change ships to prod on plumbing-only evidence | M |
 | T6-F01 | Corpus file holds 4,854 mixed-schema rows; Python eval + both validators + dedup all crash/fail | The comprehension layer's ground truth is broken-in-place | M |
 | T6-F02 | Zero corpus/PII/dedup/eval gates in CI — which is why F01 shipped silently | Restores the feedback loop that prevents recurrence | S |
@@ -166,7 +166,7 @@ T4-F14 Redis boot-blip permanently degrades cluster rate limiting (S) · T4-F15 
 ## Prioritized Roadmap
 
 **Now — restore truth, stop caller-facing harm (≈1–2 weeks of focused work)**
-1. T2-F01 — one staging call with `voice_realtime` on; pin `output_format=pcm_16000` + first-chunk sanity guard. *A possible total-failure of the flagship path settles for 30 minutes of effort.*
+1. T2-F01 — pin `output_format=pcm_16000` + first-chunk sanity guard (default-format question already resolved: `mp3_44100`); confirm with one staging call / byte-probe using the Railway-held key. *A near-certain total-failure of the flagship realtime path; one-line fix.*
 2. T2-F03 + T2-F05 — silence handling on both transports. *Callers are being hung up on / stranded today.*
 3. T6-F02 → T6-F01 → T6-F03 — corpus CI gates, canonical schema, taxonomy re-sync. *Un-breaks the entire comprehension/eval layer and its trust.*
 4. T1-F01 — cost-capped real-LLM smoke on the PR/deploy path. *Ends LLM-free green lights for prompt changes.*
@@ -201,7 +201,7 @@ What this audit could not verify, what was assumed, and what closes each gap:
 
 | # | Unverified | Assumed for this report | To close |
 |---|---|---|---|
-| 1 | ElevenLabs stream-input default output format (T2-F01 severity hinges on it) | Documented default (mp3) applies → severity Critical | One staging call with `voice_realtime` on, listen to the agent leg |
+| 1 | ~~ElevenLabs stream-input default output format~~ **Resolved 2026-07-18**: `mp3_44100` default confirmed via ElevenLabs API reference + elevenlabs-python issue #251 → T2-F01 Confidence High | Bug near-certain when Media Streams active | Residual: is `voice_realtime` enabled anywhere? Final byte-probe/ear-check with the Railway-held key (probe recipe in doc 02) |
 | 2 | Whether Deepgram accepts `?token=` WS auth (if not, all realtime silently pins to Gather) | It works (calls appear to function) | Staging logs: `deepgram_open_failed` frequency |
 | 3 | GitHub Actions run history — weekly live gate red/green, Layer-2 ever run, `release/*` branches ever cut, voice-smoke secrets populated | Gates run as configured | CI run history access |
 | 4 | Railway env values: `TWILIO_MEDIA_STREAMS_ENABLED`, `RLS_RUNTIME_ROLE`, `AI_CACHE_ENABLED`, `REDIS_URL`, per-tier models, `PROCESS_ROLE`, pool sizes | Code defaults + docs describe intent | Railway dashboard read access |
