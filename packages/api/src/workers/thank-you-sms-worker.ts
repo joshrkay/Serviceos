@@ -44,6 +44,7 @@ import { DncRepository, normalizePhone } from '../compliance/dnc';
 import { resolveCustomerLanguage } from '../i18n/resolve-language';
 import { renderThankYouSms } from '../notifications/templates';
 import { FeedbackDispatcher } from '../feedback/dispatcher';
+import { withSendClaim } from '../notifications/send-claim-ledger';
 
 const HOUR_MS = 60 * 60 * 1000;
 const THANK_YOU_ACTOR = 'system:thank_you_sms';
@@ -128,12 +129,13 @@ export async function runThankYouSmsSweep(
     return result;
   }
 
+  const pool = deps.pool; // narrowed non-null for the rest of this sweep
   const asOf = now();
   const completedBefore = new Date(asOf.getTime() - delayHours * HOUR_MS);
 
   let rows: EligibleRow[];
   try {
-    const queryResult = await deps.pool.query<EligibleRow>(ELIGIBLE_SQL, [completedBefore]);
+    const queryResult = await pool.query<EligibleRow>(ELIGIBLE_SQL, [completedBefore]);
     rows = queryResult.rows;
   } catch (err) {
     deps.logger.error('Thank-you SMS sweep: eligibility query failed', {
@@ -155,7 +157,7 @@ export async function runThankYouSmsSweep(
 
   for (const [tenantId, jobIds] of byTenant) {
     try {
-      await sweepTenant(deps, tenantId, jobIds, result);
+      await sweepTenant(deps, pool, tenantId, jobIds, result);
     } catch (err) {
       // One tenant's failure never stops the loop.
       result.failed += jobIds.length;
@@ -172,6 +174,7 @@ export async function runThankYouSmsSweep(
 
 async function sweepTenant(
   deps: ThankYouSmsWorkerDeps,
+  pool: Pool,
   tenantId: string,
   jobIds: string[],
   result: ThankYouSmsSweepResult,
@@ -186,7 +189,7 @@ async function sweepTenant(
 
   for (const jobId of jobIds) {
     try {
-      const outcome = await sendOneThankYou(deps, tenantId, jobId, businessName);
+      const outcome = await sendOneThankYou(deps, pool, tenantId, jobId, businessName);
       if (outcome === 'sent') result.sent++;
       else if (outcome === 'suppressed') result.suppressed++;
     } catch (err) {
@@ -203,8 +206,14 @@ async function sweepTenant(
 
 type SendOutcome = 'sent' | 'suppressed';
 
+/** T4-F01 claim key — at-most-once per job, matching thankYouSmsSentAt's own scope. */
+function thankYouClaimKey(jobId: string): string {
+  return `thank_you_sms:${jobId}`;
+}
+
 async function sendOneThankYou(
   deps: ThankYouSmsWorkerDeps,
+  pool: Pool,
   tenantId: string,
   jobId: string,
   businessName: string,
@@ -219,6 +228,7 @@ async function sendOneThankYou(
   const customer = await deps.customerRepo.findById(tenantId, job.customerId);
 
   // Permanent suppressions — stamp sent_at so the sweep doesn't re-evaluate.
+  // No claim needed: these paths never call the dispatcher.
   if (!customer?.primaryPhone) {
     await markHandled(deps, tenantId, jobId, customer?.id ?? null, 'no_phone');
     return 'suppressed';
@@ -242,7 +252,27 @@ async function sendOneThankYou(
   });
   const { body } = renderThankYouSms({ businessName, language });
 
-  await deps.dispatcher.send({ to: customer.primaryPhone, body });
+  // T4-F01 — claim BEFORE the dispatcher call so a crash/restart between the
+  // send and the thankYouSmsSentAt write can't resend on the next tick. A
+  // sendFn throw releases the claim (withSendClaim) and rethrows — the outer
+  // per-job catch above leaves thankYouSmsSentAt null so the next sweep retries.
+  const claimResult = await withSendClaim(pool, tenantId, thankYouClaimKey(jobId), () =>
+    deps.dispatcher.send({ to: customer.primaryPhone as string, body }),
+  );
+  if (claimResult.outcome === 'duplicate') {
+    // Another attempt already claimed this job's send. Normally the claim
+    // finalizing to 'sent' and the thankYouSmsSentAt write move together; a
+    // duplicate here (whether a same-tick race or a genuine crash-after-send
+    // stuck state) means thankYouSmsSentAt is NOT set by THIS attempt, so
+    // don't write it — only the attempt that actually completed the send
+    // owns that write. Surfaced at warn since it's worth operator visibility
+    // either way.
+    deps.logger.warn('Thank-you SMS sweep: job already claimed, not resending', {
+      tenantId,
+      jobId,
+    });
+    return 'suppressed';
+  }
 
   await deps.jobRepo.update(tenantId, jobId, {
     thankYouSmsSentAt: (deps.now ?? (() => new Date()))(),
