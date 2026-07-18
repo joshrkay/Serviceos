@@ -143,7 +143,11 @@ export class TenantGlossaryProvider implements TranscriptionGlossaryProvider {
 
   private async safeCatalogTerms(tenantId: string): Promise<string[]> {
     try {
-      const items = await this.deps.catalogRepo.listByTenant(tenantId);
+      const items = await this.deps.catalogRepo.listByTenant(tenantId, {
+        limit: TenantGlossaryProvider.PER_SOURCE_CAP,
+      });
+      // Belt-and-suspenders: still cap in JS in case a repo implementation
+      // (e.g. a test fake) doesn't honor `limit`.
       return cleanTerms(items.map((item) => item.name)).slice(
         0,
         TenantGlossaryProvider.PER_SOURCE_CAP
@@ -170,10 +174,14 @@ export class TenantGlossaryProvider implements TranscriptionGlossaryProvider {
 
   private async safeUserTerms(tenantId: string): Promise<string[]> {
     try {
-      const users = await this.deps.userRepo.findByTenant(tenantId);
+      const users = await this.deps.userRepo.findByTenant(tenantId, {
+        limit: TenantGlossaryProvider.PER_SOURCE_CAP,
+      });
       const names = users.map((user) =>
         [user.firstName, user.lastName].filter((part) => part && part.trim().length > 0).join(' ')
       );
+      // Belt-and-suspenders: still cap in JS in case a repo implementation
+      // (e.g. a test fake) doesn't honor `limit`.
       return cleanTerms(names).slice(0, TenantGlossaryProvider.PER_SOURCE_CAP);
     } catch {
       return [];

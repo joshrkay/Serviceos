@@ -42,16 +42,21 @@ export class PgUserRepository extends PgBaseRepository implements UserRepository
         params.push(options.role);
         where += ` AND role = $${params.length}`;
       }
-      const result = await client.query(
-        `SELECT id, tenant_id, clerk_user_id, email, role, first_name, last_name,
+      // Stable ORDER BY is required before LIMIT so the bounded window is
+      // deterministic across calls (matches InMemoryUserRepository's
+      // `createdAt.getTime()` sort).
+      let sql = `SELECT id, tenant_id, clerk_user_id, email, role, first_name, last_name,
                 COALESCE(can_field_serve, false) AS can_field_serve,
                 mobile_number,
                 created_at, updated_at
          FROM users
          ${where}
-         ORDER BY created_at ASC`,
-        params,
-      );
+         ORDER BY created_at ASC`;
+      if (options?.limit !== undefined) {
+        params.push(Math.max(0, Math.trunc(options.limit)));
+        sql += ` LIMIT $${params.length}`;
+      }
+      const result = await client.query(sql, params);
       return result.rows.map((r) => mapRow(r as Record<string, unknown>));
     });
   }

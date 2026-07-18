@@ -31,12 +31,18 @@ describe('TenantGlossaryProvider', () => {
       'Henderson HOA',
       'Sam Lee',
     ]);
-    expect(catalogRepo.listByTenant).toHaveBeenCalledWith('tenant-1');
+    expect(catalogRepo.listByTenant).toHaveBeenCalledWith(
+      'tenant-1',
+      expect.objectContaining({ limit: 40 })
+    );
     expect(customerRepo.findByTenant).toHaveBeenCalledWith(
       'tenant-1',
       expect.objectContaining({ includeArchived: false })
     );
-    expect(userRepo.findByTenant).toHaveBeenCalledWith('tenant-1');
+    expect(userRepo.findByTenant).toHaveBeenCalledWith(
+      'tenant-1',
+      expect.objectContaining({ limit: 40 })
+    );
   });
 
   it('dedupes case-insensitively across sources, preserving first-seen casing', async () => {
