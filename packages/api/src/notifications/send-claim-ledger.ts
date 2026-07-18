@@ -85,15 +85,28 @@ export async function releaseSendClaim(
   );
 }
 
-export type SendClaimOutcome<T> = { outcome: 'sent'; result: T } | { outcome: 'duplicate' };
+export type SendClaimOutcome<T> =
+  | { outcome: 'sent'; result: T }
+  | {
+      /**
+       * Claim miss. `priorStatus` says why: `'sent'` — permanent tombstone,
+       * this occasion completed earlier; `'claimed'` — another process holds
+       * a still-fresh claim (in flight, or a pre-send crash that the stale
+       * window will reclaim); `'unknown'` — the row vanished between the
+       * claim attempt and the status read (a concurrent release).
+       */
+      outcome: 'duplicate';
+      priorStatus: 'sent' | 'claimed' | 'unknown';
+    };
 
 /**
  * Compose claim → send → finalize/release. Mirrors `sendLifecycleEmail`'s
  * shape: claim first; on a claim-miss, skip `sendFn` entirely and report
- * `'duplicate'`; on `sendFn` throwing, release the claim then rethrow
- * unchanged (the caller's existing try/catch owns retry semantics); on
- * success, finalize the claim to the permanent `'sent'` tombstone and return
- * the send result.
+ * `'duplicate'` (with the losing claim's `priorStatus`, so callers can tell
+ * a completed send from an in-flight one); on `sendFn` throwing, release the
+ * claim then rethrow unchanged (the caller's existing try/catch owns retry
+ * semantics); on success, finalize the claim to the permanent `'sent'`
+ * tombstone and return the send result.
  */
 export async function withSendClaim<T>(
   pool: Pool,
@@ -103,7 +116,17 @@ export async function withSendClaim<T>(
   staleMinutes: number = DEFAULT_STALE_MINUTES,
 ): Promise<SendClaimOutcome<T>> {
   const claimed = await claimSend(pool, tenantId, claimKey, staleMinutes);
-  if (!claimed) return { outcome: 'duplicate' };
+  if (!claimed) {
+    const res = await pool.query(
+      `SELECT status FROM send_claims WHERE tenant_id = $1 AND claim_key = $2`,
+      [tenantId, claimKey],
+    );
+    const status = res.rows[0]?.status;
+    return {
+      outcome: 'duplicate',
+      priorStatus: status === 'sent' || status === 'claimed' ? status : 'unknown',
+    };
+  }
 
   let result: T;
   try {

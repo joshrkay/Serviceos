@@ -119,7 +119,7 @@ describe('send_claims ledger (integration)', () => {
       calledAgain = true;
       return 'sent-result';
     });
-    expect(second).toEqual({ outcome: 'duplicate' });
+    expect(second).toEqual({ outcome: 'duplicate', priorStatus: 'sent' });
     expect(calledAgain).toBe(false);
   });
 

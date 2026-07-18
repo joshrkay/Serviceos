@@ -128,35 +128,44 @@ async function sendOneChannel(
     if (deps.pool) {
       const outcome = await withSendClaim(deps.pool, input.tenantId, claimKey, send);
       if (outcome.outcome === 'duplicate') {
-        // Distinguish the ordinary case (this occasion was already fully
-        // handled — a dispatch row exists) from the genuinely-inconsistent
-        // one (claim tombstoned 'sent' but the dispatch row write never
-        // landed — a crash between the provider call succeeding and the
-        // dispatchRepo.create write). The latter is worth operator
-        // visibility (R5); the former is expected/benign.
-        const existing = await deps.dispatchRepo.findByEntity(
-          input.tenantId,
-          input.entityType,
-          input.entityId,
-        );
-        const hasDispatchRow = existing.some((d) => d.idempotencyKey === claimKey);
-        if (hasDispatchRow) {
-          deps.logger.info('Customer message already claimed — skipping duplicate send', {
+        // Only a 'sent' tombstone with NO dispatch row is inconsistent
+        // (crash between the provider call succeeding and the
+        // dispatchRepo.create write) and worth an operator warn (R5). An
+        // in-flight 'claimed' loser is this ledger working as designed —
+        // the racing process hasn't written its dispatch row YET, so
+        // checking for one here would false-positive the warn.
+        if (outcome.priorStatus !== 'sent') {
+          deps.logger.info('Customer message claim held by another in-flight send — skipping', {
             tenantId: input.tenantId,
             entityType: input.entityType,
             entityId: input.entityId,
             channel,
           });
         } else {
-          deps.logger.warn(
-            'Customer message claim is "sent" but no dispatch row exists — crash between send and dispatch-row write?',
-            {
+          const existing = await deps.dispatchRepo.findByEntity(
+            input.tenantId,
+            input.entityType,
+            input.entityId,
+          );
+          const hasDispatchRow = existing.some((d) => d.idempotencyKey === claimKey);
+          if (hasDispatchRow) {
+            deps.logger.info('Customer message already claimed — skipping duplicate send', {
               tenantId: input.tenantId,
               entityType: input.entityType,
               entityId: input.entityId,
               channel,
-            },
-          );
+            });
+          } else {
+            deps.logger.warn(
+              'Customer message claim is "sent" but no dispatch row exists — crash between send and dispatch-row write?',
+              {
+                tenantId: input.tenantId,
+                entityType: input.entityType,
+                entityId: input.entityId,
+                channel,
+              },
+            );
+          }
         }
       }
     } else {

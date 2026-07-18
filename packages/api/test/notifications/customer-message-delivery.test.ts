@@ -108,6 +108,13 @@ function claimAwarePool(claims: Map<string, ClaimRow> = new Map()): { pool: Pool
       if (existing?.status === 'claimed') claims.delete(key);
       return { rows: [], rowCount: 1 } as unknown as QueryResult;
     }
+    if (sql.trim().startsWith('SELECT')) {
+      const existing = claims.get(key);
+      return {
+        rows: existing ? [{ status: existing.status }] : [],
+        rowCount: existing ? 1 : 0,
+      } as unknown as QueryResult;
+    }
     return { rows: [], rowCount: 0 } as unknown as QueryResult;
   });
   return { pool: { query } as unknown as Pool, claims };
@@ -262,6 +269,26 @@ describe('sendCustomerMessage — T4-F01 claim-before-send', () => {
     expect(await deps.dispatchRepo.findByEntity(TENANT, 'estimate', 'est-1')).toHaveLength(0);
     expect(deps.logger.warn).toHaveBeenCalledWith(
       expect.stringMatching(/claim is "sent" but no dispatch row exists/),
+      expect.objectContaining({ tenantId: TENANT, channel: 'sms' }),
+    );
+  });
+
+  it('in-flight "claimed" loser logs info, never the crash warning (review: false-positive race)', async () => {
+    const deps = makeDeps();
+    const { pool, claims } = claimAwarePool();
+    // Fresh claim held by a concurrent process — its dispatch row doesn't
+    // exist yet, which must NOT be read as a crash inconsistency.
+    claims.set(`${TENANT}::estimate:est-1:send:sms`, { status: 'claimed', claimedAt: Date.now() });
+
+    await sendCustomerMessage(
+      { ...deps.sendDeps, pool },
+      { ...baseInput, customer: makeCustomer(), channels: ['sms'] },
+    );
+
+    expect(deps.delivery.sentSms).toHaveLength(0);
+    expect(deps.logger.warn).not.toHaveBeenCalled();
+    expect(deps.logger.info).toHaveBeenCalledWith(
+      expect.stringMatching(/held by another in-flight send/),
       expect.objectContaining({ tenantId: TENANT, channel: 'sms' }),
     );
   });

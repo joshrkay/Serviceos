@@ -80,13 +80,41 @@ describe('withSendClaim', () => {
     expect(query.mock.calls[1][0]).toMatch(/UPDATE send_claims SET status = 'sent'/);
   });
 
-  it('returns {outcome: "duplicate"} without calling sendFn when the claim is not won', async () => {
-    const { pool, query } = fakePool(0);
+  it('returns duplicate + priorStatus "sent" without calling sendFn when a tombstone owns the key', async () => {
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({ rowCount: 0, rows: [] }) // claim miss
+      .mockResolvedValueOnce({ rowCount: 1, rows: [{ status: 'sent' }] }); // status read
+    const pool = { query } as unknown as Pool;
     const sendFn = vi.fn(async () => 'ok');
     const result = await withSendClaim(pool, TENANT, 'k', sendFn);
-    expect(result).toEqual({ outcome: 'duplicate' });
+    expect(result).toEqual({ outcome: 'duplicate', priorStatus: 'sent' });
     expect(sendFn).not.toHaveBeenCalled();
-    expect(query).toHaveBeenCalledTimes(1); // claim attempt only
+    expect(query).toHaveBeenCalledTimes(2); // claim attempt + status read
+  });
+
+  it('returns duplicate + priorStatus "claimed" when another in-flight claim owns the key', async () => {
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({ rowCount: 0, rows: [] })
+      .mockResolvedValueOnce({ rowCount: 1, rows: [{ status: 'claimed' }] });
+    const pool = { query } as unknown as Pool;
+    const sendFn = vi.fn(async () => 'ok');
+    const result = await withSendClaim(pool, TENANT, 'k', sendFn);
+    expect(result).toEqual({ outcome: 'duplicate', priorStatus: 'claimed' });
+    expect(sendFn).not.toHaveBeenCalled();
+  });
+
+  it('returns duplicate + priorStatus "unknown" when the losing row vanished before the status read', async () => {
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({ rowCount: 0, rows: [] })
+      .mockResolvedValueOnce({ rowCount: 0, rows: [] }); // concurrent release deleted it
+    const pool = { query } as unknown as Pool;
+    const sendFn = vi.fn(async () => 'ok');
+    const result = await withSendClaim(pool, TENANT, 'k', sendFn);
+    expect(result).toEqual({ outcome: 'duplicate', priorStatus: 'unknown' });
+    expect(sendFn).not.toHaveBeenCalled();
   });
 
   it('releases the claim and rethrows unchanged when sendFn throws', async () => {
