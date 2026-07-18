@@ -196,6 +196,13 @@ export class ElevenLabsStreamConnection {
     });
 
     let firstAudioChecked = false;
+    // Runt-prefix buffer for the format guard: the classification must see
+    // the TRUE STREAM START. If the provider splits a compressed header
+    // across messages (e.g. "ff fb" then "90 44 …"), checking each chunk at
+    // its own offset would miss the signature and stream MP3 as PCM static.
+    // Sub-4-byte prefixes are therefore held (not played — 2 bytes of PCM is
+    // ~60µs, inaudible) and prepended to the next chunk before classifying.
+    let pendingFirstAudio: Buffer | null = null;
     ws.addEventListener('message', (msg: MessageEvent) => {
       try {
         const data = JSON.parse(String(msg.data)) as {
@@ -203,34 +210,47 @@ export class ElevenLabsStreamConnection {
           isFinal?: boolean;
         };
         if (data.audio) {
-          const pcm = Buffer.from(data.audio, 'base64');
+          let pcm = Buffer.from(data.audio, 'base64');
           // First-frame format guard (see class doc): compressed audio here
           // means the output_format pin was lost or the provider default
           // changed — fail the turn loudly so the adapter's recovery path
           // runs, instead of mu-law-encoding MP3 bytes into caller static.
-          // Don't consume the one-shot check on a runt frame (<4 bytes) —
-          // it can't be classified, and marking it checked would let a real
-          // MP3 stream slip past on frame two.
-          if (!firstAudioChecked && pcm.length >= 4) {
-            firstAudioChecked = true;
-            if (looksLikeMp3(pcm)) {
-              if (!errorState) {
-                errorState = new Error(
-                  'ElevenLabs stream returned compressed (MP3) audio — expected pcm_16000; refusing to play static',
-                );
-              }
-              try {
-                ws.close();
-              } catch {
-                /* swallow */
-              }
-              finish();
+          if (!firstAudioChecked) {
+            if (pendingFirstAudio) {
+              pcm = Buffer.concat([pendingFirstAudio, pcm]);
+              pendingFirstAudio = null;
+            }
+            if (pcm.length > 0 && pcm.length < 4) {
+              pendingFirstAudio = pcm;
               return;
             }
+            if (pcm.length >= 4) {
+              firstAudioChecked = true;
+              if (looksLikeMp3(pcm)) {
+                if (!errorState) {
+                  errorState = new Error(
+                    'ElevenLabs stream returned compressed (MP3) audio — expected pcm_16000; refusing to play static',
+                  );
+                }
+                try {
+                  ws.close();
+                } catch {
+                  /* swallow */
+                }
+                finish();
+                return;
+              }
+            }
           }
-          push({ pcm, isFinal: false });
+          if (pcm.length > 0) push({ pcm, isFinal: false });
         }
         if (data.isFinal) {
+          // Flush a held runt so no audio is silently dropped at end-of-stream
+          // (a <4-byte total stream can't be classified — deliver as-is).
+          if (pendingFirstAudio) {
+            push({ pcm: pendingFirstAudio, isFinal: false });
+            pendingFirstAudio = null;
+          }
           push({ pcm: Buffer.alloc(0), isFinal: true });
         }
       } catch {
