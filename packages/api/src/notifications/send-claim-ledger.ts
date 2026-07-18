@@ -12,9 +12,27 @@
  * revenue-adjacent touchpoints — an abandoned claim (crash before the send
  * even started) must not block the message forever. So `claimSend` is a
  * bounded stale-claim reclaim: `INSERT ... ON CONFLICT ... DO UPDATE ... WHERE
- * claimed_at < now() - staleInterval`. A `status = 'sent'` row is a permanent
- * tombstone — the WHERE clause only ever matches `status = 'claimed'` rows,
- * so a completed send can never be reclaimed regardless of age.
+ * claimed_at < now() - staleInterval`. Crucially, that reclaim WHERE clause
+ * only ever matches `status = 'claimed'` rows.
+ *
+ * Three states, not two:
+ *  - 'claimed'  — reserved, the provider has NOT been called yet. Safe to
+ *                 stale-reclaim: nothing was sent, so a reclaim + resend
+ *                 cannot duplicate anything.
+ *  - 'sending'  — the provider call is in flight (or the process crashed
+ *                 while it was). NEVER auto-reclaimed by `claimSend`,
+ *                 regardless of age — a resend here could duplicate a
+ *                 provider send that already went out. This is the fix for
+ *                 the post-send crash window: previously a crash between the
+ *                 provider send succeeding and the 'sent' tombstone commit
+ *                 left the row at 'claimed', which the stale window WOULD
+ *                 reclaim, causing a later sweep to re-send. Landing in
+ *                 'sending' first closes that window at the cost of a
+ *                 possibly-stuck (never auto-resolved) row — an intentional
+ *                 tradeoff over a silent duplicate send. See
+ *                 `findStuckSendClaims` for surfacing (not resolving) these.
+ *  - 'sent'     — permanent tombstone. Once here, `claimSend`'s WHERE clause
+ *                 can never match the row again regardless of age.
  *
  * This module is purely the crash-safety layer. It does not replace or
  * duplicate a caller's existing business-level completion fields
@@ -31,8 +49,15 @@ const DEFAULT_STALE_MINUTES = 15;
  * Atomically claim `claimKey` for `tenantId`. Returns true iff this call now
  * owns the right to send: either a fresh row was inserted, or an existing
  * `status = 'claimed'` row was reclaimed because it sat unresolved past
- * `staleMinutes`. Returns false when another (still-fresh) claim or a
- * permanent `status = 'sent'` tombstone already owns the key.
+ * `staleMinutes`. Returns false when another (still-fresh) claim, an
+ * in-flight `status = 'sending'` row, or a permanent `status = 'sent'`
+ * tombstone already owns the key.
+ *
+ * The WHERE clause below intentionally matches ONLY `status = 'claimed'` —
+ * never `'sending'`. A `'sending'` row means a provider call may already be
+ * in flight (or may have already completed before a crash), so reclaiming it
+ * on a timer risks a duplicate send. It is never automatically reclaimed;
+ * see `findStuckSendClaims` for surfacing (not resolving) rows stuck there.
  */
 export async function claimSend(
   pool: Pool,
@@ -54,6 +79,24 @@ export async function claimSend(
 }
 
 /**
+ * Transition a freshly-claimed row to 'sending' — the provider call is about
+ * to start. Scoped to `status = 'claimed'` so this only ever advances a row
+ * this process itself just claimed. Once this commits, `claimSend` can never
+ * reclaim the row again on a timer (see the module doc for why).
+ */
+export async function markSendClaimSending(
+  pool: Pool,
+  tenantId: string,
+  claimKey: string,
+): Promise<void> {
+  await pool.query(
+    `UPDATE send_claims SET status = 'sending'
+     WHERE tenant_id = $1 AND claim_key = $2 AND status = 'claimed'`,
+    [tenantId, claimKey],
+  );
+}
+
+/**
  * Permanently finalize a claim as sent. Idempotent; once a row is `'sent'`,
  * `claimSend`'s guard means it is never matched again for this key.
  */
@@ -71,8 +114,17 @@ export async function markSendClaimComplete(
 
 /**
  * Release a previously-claimed row so the next attempt can re-claim + send.
- * Only ever deletes a `status = 'claimed'` row — a late/duplicate release
- * call after a completed send can never undo the `'sent'` tombstone.
+ * Deletes a `'claimed'` OR `'sending'` row — both are states this process
+ * itself owns after a CAUGHT, pre-completion failure (a claim with no send
+ * attempted yet, or a send attempt that threw before/while calling the
+ * provider). A late/duplicate release call after a completed send can never
+ * undo the `'sent'` tombstone, since that status is excluded here.
+ *
+ * This is deliberately more permissive than `claimSend`'s automatic
+ * stale-reclaim WHERE clause: releasing a `'sending'` row here is safe
+ * because it only happens when THIS process's own `sendFn` threw (so it
+ * knows, first-hand, that the provider call did not succeed) — never as a
+ * blind timer-based guess the way `claimSend`'s reclaim is.
  */
 export async function releaseSendClaim(
   pool: Pool,
@@ -80,9 +132,36 @@ export async function releaseSendClaim(
   claimKey: string,
 ): Promise<void> {
   await pool.query(
-    `DELETE FROM send_claims WHERE tenant_id = $1 AND claim_key = $2 AND status = 'claimed'`,
+    `DELETE FROM send_claims
+     WHERE tenant_id = $1 AND claim_key = $2 AND status IN ('claimed', 'sending')`,
     [tenantId, claimKey],
   );
+}
+
+/**
+ * Surfaces rows genuinely stuck at 'sending' — the process crashed between
+ * the sending UPDATE and either the completion write or a caught-error
+ * release. These are NEVER auto-reclaimed (see module doc) and this helper
+ * does NOT resolve them either; it only reports so a future monitor/operator
+ * can decide (confirm the provider send actually happened, then manually
+ * mark 'sent'; or manually release for a resend). Do not wire this into any
+ * path that silently resolves these rows.
+ */
+export async function findStuckSendClaims(
+  pool: Pool,
+  olderThanMinutes: number,
+): Promise<Array<{ tenantId: string; claimKey: string; claimedAt: Date }>> {
+  const res = await pool.query(
+    `SELECT tenant_id, claim_key, claimed_at FROM send_claims
+     WHERE status = 'sending'
+       AND claimed_at < NOW() - ($1 || ' minutes')::interval`,
+    [String(olderThanMinutes)],
+  );
+  return res.rows.map((row) => ({
+    tenantId: row.tenant_id,
+    claimKey: row.claim_key,
+    claimedAt: row.claimed_at,
+  }));
 }
 
 export type SendClaimOutcome<T> =
@@ -91,21 +170,31 @@ export type SendClaimOutcome<T> =
       /**
        * Claim miss. `priorStatus` says why: `'sent'` — permanent tombstone,
        * this occasion completed earlier; `'claimed'` — another process holds
-       * a still-fresh claim (in flight, or a pre-send crash that the stale
-       * window will reclaim); `'unknown'` — the row vanished between the
-       * claim attempt and the status read (a concurrent release).
+       * a still-fresh pre-send claim (a pre-send crash that the stale window
+       * will reclaim); `'sending'` — another process's provider call is in
+       * flight, or crashed mid-flight (never auto-reclaimed); `'unknown'` —
+       * the row vanished between the claim attempt and the status read (a
+       * concurrent release). Callers that branch on `priorStatus !== 'sent'`
+       * correctly group `'sending'` with `'claimed'` into the same
+       * "in-flight, not a crash" bucket.
        */
       outcome: 'duplicate';
-      priorStatus: 'sent' | 'claimed' | 'unknown';
+      priorStatus: 'sent' | 'claimed' | 'sending' | 'unknown';
     };
 
 /**
- * Compose claim → send → finalize/release. Mirrors `sendLifecycleEmail`'s
- * shape: claim first; on a claim-miss, skip `sendFn` entirely and report
- * `'duplicate'` (with the losing claim's `priorStatus`, so callers can tell
- * a completed send from an in-flight one); on `sendFn` throwing, release the
- * claim then rethrow unchanged (the caller's existing try/catch owns retry
- * semantics); on success, finalize the claim to the permanent `'sent'`
+ * Compose claim → sending → send → finalize/release. Mirrors
+ * `sendLifecycleEmail`'s shape: claim first; on a claim-miss, skip `sendFn`
+ * entirely and report `'duplicate'` (with the losing claim's `priorStatus`,
+ * so callers can tell a completed/in-flight send from a reclaimable one);
+ * otherwise transition the claim to `'sending'` BEFORE invoking `sendFn` —
+ * this is the crash-safety fix: if the process dies after the provider call
+ * succeeds but before `markSendClaimComplete` commits, the row is already at
+ * `'sending'`, which `claimSend` never auto-reclaims, so a later sweep can't
+ * re-send it. On `sendFn` throwing (a CAUGHT failure — the process is still
+ * alive, so we know first-hand the provider call did not succeed), release
+ * the claim then rethrow unchanged (the caller's existing try/catch owns
+ * retry semantics); on success, finalize the claim to the permanent `'sent'`
  * tombstone and return the send result.
  */
 export async function withSendClaim<T>(
@@ -124,12 +213,17 @@ export async function withSendClaim<T>(
     const status = res.rows[0]?.status;
     return {
       outcome: 'duplicate',
-      priorStatus: status === 'sent' || status === 'claimed' ? status : 'unknown',
+      priorStatus:
+        status === 'sent' || status === 'claimed' || status === 'sending' ? status : 'unknown',
     };
   }
 
   let result: T;
   try {
+    // Flip to 'sending' BEFORE the provider call so a crash after a
+    // successful send can never be mistaken for an abandoned pre-send claim
+    // (see module doc + claimSend's WHERE clause).
+    await markSendClaimSending(pool, tenantId, claimKey);
     result = await sendFn();
   } catch (err) {
     await releaseSendClaim(pool, tenantId, claimKey).catch(() => undefined);

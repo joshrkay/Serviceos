@@ -50,7 +50,7 @@ function fakePool(state: FakePoolState): Pool {
  * test/integration/thank-you-sms-worker.test.ts (Docker-gated).
  */
 interface ClaimRow {
-  status: 'claimed' | 'sent';
+  status: 'claimed' | 'sending' | 'sent';
   claimedAt: number;
 }
 
@@ -69,6 +69,9 @@ function claimAwarePool(
           return { rows: [{ claim_key: params[1] }], rowCount: 1 } as unknown as QueryResult;
         }
         const staleMs = staleMinutes * 60_000;
+        // Only ever reclaims 'claimed' rows — a 'sending' row (provider call
+        // in flight or crashed mid-flight) is NEVER auto-reclaimed, matching
+        // claimSend's real WHERE clause.
         if (existing.status === 'claimed' && Date.now() - existing.claimedAt >= staleMs) {
           existing.claimedAt = Date.now();
           return { rows: [{ claim_key: params[1] }], rowCount: 1 } as unknown as QueryResult;
@@ -77,12 +80,14 @@ function claimAwarePool(
       }
       if (sql.trim().startsWith('UPDATE')) {
         const existing = claims.get(key);
-        if (existing) existing.status = 'sent';
+        // Distinguish the sending-transition UPDATE from the completion
+        // UPDATE by SQL text so the fake models the intermediate state.
+        if (existing) existing.status = sql.includes("'sending'") ? 'sending' : 'sent';
         return { rows: [], rowCount: existing ? 1 : 0 } as unknown as QueryResult;
       }
       if (sql.trim().startsWith('DELETE')) {
         const existing = claims.get(key);
-        if (existing?.status === 'claimed') claims.delete(key);
+        if (existing?.status === 'claimed' || existing?.status === 'sending') claims.delete(key);
         return { rows: [], rowCount: 1 } as unknown as QueryResult;
       }
     }

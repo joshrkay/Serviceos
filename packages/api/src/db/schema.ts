@@ -6248,18 +6248,31 @@ export const MIGRATIONS = {
   // table is the atomic claim/reclaim/tombstone gate that closes that window,
   // generalizing lifecycle_emails' (migration 204) permanent-claim pattern
   // with a BOUNDED stale-claim reclaim so an abandoned claim (crash before
-  // the send even started) doesn't block the message forever. status='sent'
-  // is a permanent tombstone — claimSend's WHERE clause never matches it
-  // again regardless of age. Purely a crash-safety layer: it does not
-  // replace or duplicate the existing business-level completion fields,
-  // which keep their current meaning and are written only after a confirmed
-  // send. Tenant-scoped with FORCE RLS, policy shape identical to
-  // lifecycle_emails.
+  // the send even started) doesn't block the message forever.
+  //
+  // Three valid `status` values (edited in place pre-merge to add 'sending' —
+  // PR #705 Codex P1 review — closing a second crash window: a crash AFTER
+  // the provider send succeeds but BEFORE the 'sent' tombstone commits used
+  // to leave the row at 'claimed', which the stale-reclaim window would
+  // later reclaim, causing a duplicate resend):
+  //   'claimed' — reserved, provider not yet called. Safe to stale-reclaim.
+  //   'sending' — provider call in flight (or crashed mid-flight). NEVER
+  //               auto-reclaimed by claimSend's WHERE clause, regardless of
+  //               age — a resend here could duplicate an already-sent
+  //               message. A possibly-stuck row is the accepted tradeoff
+  //               over a silent duplicate; see findStuckSendClaims for
+  //               observability (it reports, never auto-resolves).
+  //   'sent'    — permanent tombstone. claimSend's WHERE clause never
+  //               matches it again regardless of age.
+  // Purely a crash-safety layer: it does not replace or duplicate the
+  // existing business-level completion fields, which keep their current
+  // meaning and are written only after a confirmed send. Tenant-scoped with
+  // FORCE RLS, policy shape identical to lifecycle_emails.
   '258_send_claims': `
     CREATE TABLE IF NOT EXISTS send_claims (
       tenant_id UUID NOT NULL REFERENCES tenants(id),
       claim_key TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'claimed' CHECK (status IN ('claimed', 'sent')),
+      status TEXT NOT NULL DEFAULT 'claimed' CHECK (status IN ('claimed', 'sending', 'sent')),
       claimed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       sent_at TIMESTAMPTZ,
       PRIMARY KEY (tenant_id, claim_key)

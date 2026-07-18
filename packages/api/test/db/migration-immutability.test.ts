@@ -431,7 +431,10 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['257_estimate_line_items_image_file_id', 'e72794dcb73addfe34c11844cb7f8bd1bd00314266b246dcaeb97fcebd9dae93'],
   // T4-F01 — shared claim-before-send ledger (send_claims). New migration,
   // not a rename/mutation of an existing one.
-  ['258_send_claims', 'd0f4da16d41b428335b73925bf0a9cdb3f8d017ea976447c686f06d8d8f94dc4'],
+  // Edited in place (PR #705 Codex P1 review, pre-merge — 258 has not shipped
+  // to any environment yet) to widen the status CHECK with a third state,
+  // 'sending', closing the post-send crash window; hash regenerated.
+  ['258_send_claims', '60e4d9f4b7fb85c5f3feecb518d1cc2df16cb72d2c8b4b6e9ace1fb0f4b981b5'],
 ];
 
 function hashMigration(value: string): string {

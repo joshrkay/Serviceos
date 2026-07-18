@@ -11,7 +11,9 @@ import { Pool } from 'pg';
 import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
 import {
   claimSend,
+  findStuckSendClaims,
   markSendClaimComplete,
+  markSendClaimSending,
   releaseSendClaim,
   withSendClaim,
 } from '../../src/notifications/send-claim-ledger';
@@ -133,5 +135,139 @@ describe('send_claims ledger (integration)', () => {
 
     // Released — immediate re-claim succeeds (no stale wait required).
     expect(await claimSend(pool, tenantId, 'wsc-2')).toBe(true);
+  });
+
+  // --- Three-state crash-safety fix (Codex P1, PR #705) ---------------------
+  // Pins the real Postgres semantics of the new 'sending' state: the
+  // constraint accepts it, claimSend's WHERE clause never reclaims it
+  // (closing the post-send crash window), and release/observability work
+  // against it as designed.
+
+  it('full lifecycle against the real table: claimed -> sending -> sent', async () => {
+    const { tenantId } = await createTestTenant(pool);
+    expect(await claimSend(pool, tenantId, 'lifecycle-1')).toBe(true);
+    let row = (
+      await pool.query(
+        `SELECT status FROM send_claims WHERE tenant_id = $1 AND claim_key = $2`,
+        [tenantId, 'lifecycle-1'],
+      )
+    ).rows[0];
+    expect(row.status).toBe('claimed');
+
+    await markSendClaimSending(pool, tenantId, 'lifecycle-1');
+    row = (
+      await pool.query(
+        `SELECT status FROM send_claims WHERE tenant_id = $1 AND claim_key = $2`,
+        [tenantId, 'lifecycle-1'],
+      )
+    ).rows[0];
+    expect(row.status).toBe('sending');
+
+    await markSendClaimComplete(pool, tenantId, 'lifecycle-1');
+    row = (
+      await pool.query(
+        `SELECT status, sent_at FROM send_claims WHERE tenant_id = $1 AND claim_key = $2`,
+        [tenantId, 'lifecycle-1'],
+      )
+    ).rows[0];
+    expect(row.status).toBe('sent');
+    expect(row.sent_at).not.toBeNull();
+  });
+
+  it('the CHECK constraint accepts "sending" (migration 258 widened it)', async () => {
+    const { tenantId } = await createTestTenant(pool);
+    await expect(
+      pool.query(
+        `INSERT INTO send_claims (tenant_id, claim_key, status) VALUES ($1, $2, 'sending')`,
+        [tenantId, 'check-sending'],
+      ),
+    ).resolves.toBeDefined();
+  });
+
+  it('the post-send crash window is closed: a manually-inserted stale "sending" row is NOT reclaimed', async () => {
+    const { tenantId } = await createTestTenant(pool);
+    // Simulate the exact crash this fix targets: a row parked at 'sending'
+    // (provider call started) whose claimed_at is now well past the default
+    // 15-minute stale window — with the OLD two-state design this row would
+    // have been sitting at 'claimed' and WOULD be reclaimed here, causing a
+    // resend of a message that may have already gone out.
+    await pool.query(
+      `INSERT INTO send_claims (tenant_id, claim_key, status, claimed_at)
+       VALUES ($1, $2, 'sending', NOW() - INTERVAL '1000 minutes')`,
+      [tenantId, 'stuck-sending'],
+    );
+    expect(await claimSend(pool, tenantId, 'stuck-sending')).toBe(false);
+
+    const { rows } = await pool.query(
+      `SELECT status FROM send_claims WHERE tenant_id = $1 AND claim_key = $2`,
+      [tenantId, 'stuck-sending'],
+    );
+    expect(rows[0].status).toBe('sending');
+  });
+
+  it('markSendClaimSending only ever transitions a "claimed" row (no-ops against "sent" or already-"sending")', async () => {
+    const { tenantId } = await createTestTenant(pool);
+    expect(await claimSend(pool, tenantId, 'sending-guard')).toBe(true);
+    await markSendClaimComplete(pool, tenantId, 'sending-guard');
+
+    // A late/duplicate call to markSendClaimSending after completion must
+    // never move a permanent 'sent' tombstone backwards.
+    await markSendClaimSending(pool, tenantId, 'sending-guard');
+    const { rows } = await pool.query(
+      `SELECT status FROM send_claims WHERE tenant_id = $1 AND claim_key = $2`,
+      [tenantId, 'sending-guard'],
+    );
+    expect(rows[0].status).toBe('sent');
+  });
+
+  it('releaseSendClaim deletes a "sending" row too (the caught-error release path)', async () => {
+    const { tenantId } = await createTestTenant(pool);
+    expect(await claimSend(pool, tenantId, 'release-sending')).toBe(true);
+    await markSendClaimSending(pool, tenantId, 'release-sending');
+    await releaseSendClaim(pool, tenantId, 'release-sending');
+
+    // Released — a fresh claim succeeds immediately, no stale wait required.
+    expect(await claimSend(pool, tenantId, 'release-sending')).toBe(true);
+  });
+
+  it('withSendClaim: a caught sendFn error releases from "sending" (not just "claimed") and a retry re-sends', async () => {
+    const { tenantId } = await createTestTenant(pool);
+    await expect(
+      withSendClaim(pool, tenantId, 'wsc-sending-release', async () => {
+        throw new Error('provider outage');
+      }),
+    ).rejects.toThrow('provider outage');
+
+    // If release only matched status='claimed' (the pre-fix behavior), the
+    // row would still be stuck at 'sending' here and this would return false.
+    expect(await claimSend(pool, tenantId, 'wsc-sending-release')).toBe(true);
+  });
+
+  it('findStuckSendClaims surfaces old "sending" rows but not fresh "sending", "claimed", or "sent" rows', async () => {
+    const { tenantId } = await createTestTenant(pool);
+    await pool.query(
+      `INSERT INTO send_claims (tenant_id, claim_key, status, claimed_at)
+       VALUES ($1, 'old-sending', 'sending', NOW() - INTERVAL '120 minutes')`,
+      [tenantId],
+    );
+    await pool.query(
+      `INSERT INTO send_claims (tenant_id, claim_key, status, claimed_at)
+       VALUES ($1, 'fresh-sending', 'sending', NOW())`,
+      [tenantId],
+    );
+    await pool.query(
+      `INSERT INTO send_claims (tenant_id, claim_key, status, claimed_at)
+       VALUES ($1, 'old-claimed', 'claimed', NOW() - INTERVAL '120 minutes')`,
+      [tenantId],
+    );
+    await pool.query(
+      `INSERT INTO send_claims (tenant_id, claim_key, status, claimed_at, sent_at)
+       VALUES ($1, 'old-sent', 'sent', NOW() - INTERVAL '120 minutes', NOW() - INTERVAL '120 minutes')`,
+      [tenantId],
+    );
+
+    const stuck = await findStuckSendClaims(pool, 60);
+    const stuckForTenant = stuck.filter((s) => s.tenantId === tenantId);
+    expect(stuckForTenant.map((s) => s.claimKey)).toEqual(['old-sending']);
   });
 });

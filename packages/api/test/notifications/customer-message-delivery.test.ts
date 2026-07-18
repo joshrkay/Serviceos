@@ -75,7 +75,7 @@ function makeDeps() {
 }
 
 interface ClaimRow {
-  status: 'claimed' | 'sent';
+  status: 'claimed' | 'sending' | 'sent';
   claimedAt: number;
 }
 
@@ -92,6 +92,9 @@ function claimAwarePool(claims: Map<string, ClaimRow> = new Map()): { pool: Pool
         return { rows: [{ claim_key: params[1] }], rowCount: 1 } as unknown as QueryResult;
       }
       const staleMs = staleMinutes * 60_000;
+      // Only ever reclaims 'claimed' rows — a 'sending' row (provider call
+      // in flight or crashed mid-flight) is NEVER auto-reclaimed, matching
+      // claimSend's real WHERE clause.
       if (existing.status === 'claimed' && Date.now() - existing.claimedAt >= staleMs) {
         existing.claimedAt = Date.now();
         return { rows: [{ claim_key: params[1] }], rowCount: 1 } as unknown as QueryResult;
@@ -100,12 +103,17 @@ function claimAwarePool(claims: Map<string, ClaimRow> = new Map()): { pool: Pool
     }
     if (sql.trim().startsWith('UPDATE')) {
       const existing = claims.get(key);
-      if (existing) existing.status = 'sent';
+      // Two distinct UPDATE shapes hit send_claims: the sending-transition
+      // (markSendClaimSending) and the completion tombstone
+      // (markSendClaimComplete) — distinguish by the literal SQL text so the
+      // fake actually models the intermediate 'sending' state rather than
+      // collapsing straight to 'sent'.
+      if (existing) existing.status = sql.includes("'sending'") ? 'sending' : 'sent';
       return { rows: [], rowCount: existing ? 1 : 0 } as unknown as QueryResult;
     }
     if (sql.trim().startsWith('DELETE')) {
       const existing = claims.get(key);
-      if (existing?.status === 'claimed') claims.delete(key);
+      if (existing?.status === 'claimed' || existing?.status === 'sending') claims.delete(key);
       return { rows: [], rowCount: 1 } as unknown as QueryResult;
     }
     if (sql.trim().startsWith('SELECT')) {
@@ -279,6 +287,29 @@ describe('sendCustomerMessage — T4-F01 claim-before-send', () => {
     // Fresh claim held by a concurrent process — its dispatch row doesn't
     // exist yet, which must NOT be read as a crash inconsistency.
     claims.set(`${TENANT}::estimate:est-1:send:sms`, { status: 'claimed', claimedAt: Date.now() });
+
+    await sendCustomerMessage(
+      { ...deps.sendDeps, pool },
+      { ...baseInput, customer: makeCustomer(), channels: ['sms'] },
+    );
+
+    expect(deps.delivery.sentSms).toHaveLength(0);
+    expect(deps.logger.warn).not.toHaveBeenCalled();
+    expect(deps.logger.info).toHaveBeenCalledWith(
+      expect.stringMatching(/held by another in-flight send/),
+      expect.objectContaining({ tenantId: TENANT, channel: 'sms' }),
+    );
+  });
+
+  it('in-flight "sending" loser (post-send-crash fix) logs info, never the crash warning', async () => {
+    const deps = makeDeps();
+    const { pool, claims } = claimAwarePool();
+    // A racing process already flipped the claim to 'sending' — a provider
+    // call may be in flight or may have crashed mid-flight. Either way this
+    // is the ledger working as designed, not the "sent, no dispatch row"
+    // crash-inconsistency case, so it must land in the same info bucket as
+    // a 'claimed' loser, never the warn.
+    claims.set(`${TENANT}::estimate:est-1:send:sms`, { status: 'sending', claimedAt: Date.now() });
 
     await sendCustomerMessage(
       { ...deps.sendDeps, pool },
