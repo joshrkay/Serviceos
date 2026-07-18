@@ -1073,7 +1073,15 @@ export function EstimateApprovalPage() {
             <div className="divide-y divide-slate-50">
               {visItems.map((item, i) => (
                 <div key={i} className="grid grid-cols-[minmax(0,1fr)_2rem_4rem_4.5rem] sm:grid-cols-[minmax(0,1fr)_40px_72px_72px] gap-x-2 px-5 py-3 items-start">
-                  <div className="flex min-w-0 items-start gap-2">
+                  {/* flex-wrap: at the narrowest widths the line's item column
+                      is only ~46px, so a fixed 40px thumbnail beside the text
+                      would starve the description to ~0 width (one char per
+                      line). Wrapping lets the description drop to its own line
+                      under the thumbnail and reclaim the full column width — the
+                      thumbnail becomes purely additive (adds height, not steals
+                      width). At ≥sm the column is wide enough that they sit
+                      side by side without wrapping. */}
+                  <div className="flex min-w-0 flex-wrap items-start gap-2">
                     {item.imageUrl && (
                       <img
                         src={item.imageUrl}

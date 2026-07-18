@@ -161,6 +161,18 @@ test.describe('estimate approval — mobile layout', () => {
       expect(box!.x + box!.width).toBeLessThanOrEqual(320);
       // The thumbnail must not introduce horizontal overflow.
       expect(await horizontalOverflow(page)).toBeLessThanOrEqual(0);
+
+      // Regression guard: the description on the SAME line must not collapse
+      // to ~0 width. Before the flex-wrap fix, the 40px thumbnail starved the
+      // item track and the description rendered one character per line (0px
+      // wide, absurdly tall). It should drop below the thumbnail and keep a
+      // usable width. (overflow=0 and the thumbnail box alone did NOT catch
+      // this — both held while the text was broken.)
+      const desc = page.getByText(LONG_DESCRIPTION);
+      await expect(desc).toBeVisible();
+      const descBox = await desc.boundingBox();
+      expect(descBox).not.toBeNull();
+      expect(descBox!.width).toBeGreaterThan(30);
     });
   });
 

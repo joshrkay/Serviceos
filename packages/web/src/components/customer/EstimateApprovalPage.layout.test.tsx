@@ -144,6 +144,13 @@ describe('EstimateApprovalPage — mobile layout contract', () => {
     expect(thumb.className).toContain('shrink-0');
     expect(thumb.className).toContain('object-cover');
     expect(thumb).toHaveAttribute('alt', '');
+    // Regression guard (a runtime /verify catch): the item cell MUST be
+    // flex-wrap. Without it, at ≤390px the 40px thumbnail starves the
+    // description track to ~0px and the text renders one character per line.
+    // flex-wrap lets the description drop below the thumbnail and reclaim the
+    // full column width. jsdom can't measure the collapse; pin the mechanism.
+    const itemCell = thumb.parentElement as HTMLElement;
+    expect(itemCell.className).toContain('flex-wrap');
     // The image-less line renders no thumbnail.
     expect(screen.queryByTestId('line-item-thumb-1')).not.toBeInTheDocument();
   });
