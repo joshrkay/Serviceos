@@ -2739,8 +2739,10 @@ describe('T2-F05 caller-silence reprompt timer', () => {
 
   /**
    * Drive one confident caller turn so the agent speaks, then ack the
-   * end-of-turn mark — the silence timer arms on playback-completion (the
-   * mark ACK), not at enqueue, so a real Twilio `mark` callback is required.
+   * dedicated end-of-utterance `silence-arm-${turnId}` mark — the silence
+   * timer arms on THAT mark's ack (emitted once, after all of the turn's
+   * audio is enqueued), not on the per-chunk `turn-${turnId}` marks that
+   * streamPcmAsMedia() emits once per streamed chunk.
    */
   async function completeAgentTurn(
     adapter: TwilioMediaStreamAdapter,
@@ -2754,7 +2756,7 @@ describe('T2-F05 caller-silence reprompt timer', () => {
       adapter as unknown as { state: { pendingSilenceRepromptTurnId: number | null } }
     ).state.pendingSilenceRepromptTurnId;
     if (pendingTurn !== null) {
-      ws.inboundJson({ event: 'mark', streamSid: 'MZ', mark: { name: `turn-${pendingTurn}` } });
+      ws.inboundJson({ event: 'mark', streamSid: 'MZ', mark: { name: `silence-arm-${pendingTurn}` } });
       await flush();
     }
   }
@@ -2806,6 +2808,110 @@ describe('T2-F05 caller-silence reprompt timer', () => {
     expect(pendingTurn).not.toBeNull();
   });
 
+  it('a multi-chunk streaming TTS turn only arms the countdown after the LAST chunk, not an earlier chunk mark', async () => {
+    // Regression pin for the Codex P2 finding: streamPcmAsMedia() emits a
+    // `turn-${turnId}` mark at the end of EVERY call, and runTurnWithFiller()
+    // calls streamPcmAsMedia() once PER streamed chunk. If acking any one of
+    // those per-chunk marks armed the countdown, a multi-chunk utterance
+    // could start the 8s window while later audio is still buffered/playing.
+    const { provider: sttProvider, handle } = makeStreamingProvider();
+    let releaseChunk2: () => void = () => undefined;
+    const chunk2Gate = new Promise<void>((resolve) => {
+      releaseChunk2 = resolve;
+    });
+    const texts: string[] = [];
+    const streamingTts: TtsProvider = {
+      synthesize: vi.fn(async (): Promise<TtsSynthesizeResult> => ({
+        audio: Buffer.alloc(640),
+        contentType: 'audio/pcm',
+        provider: 'test',
+      })),
+      synthesizeStream: vi.fn((input: TtsSynthesizeInput) => {
+        texts.push(input.text);
+        return {
+          async *[Symbol.asyncIterator]() {
+            // Chunk 1 of 2 — real audio, not yet the end of the turn.
+            yield { pcm: Buffer.alloc(640), isFinal: false };
+            // Held open until the test explicitly releases it, so the test
+            // can ack chunk 1's mark while chunk 2 is still outstanding.
+            await chunk2Gate;
+            // Chunk 2 of 2 — the actual end of the turn.
+            yield { pcm: Buffer.alloc(640), isFinal: true };
+          },
+        };
+      }),
+    };
+    const speechTurn = vi
+      .fn()
+      .mockResolvedValue([{ type: 'tts_play', payload: { text: AGENT_LINE } }]);
+    const finalizeOnClose = vi.fn();
+    const ws = new FakeWs();
+    store.create('t', 'telephony', { callSid: 'CA-sil-multichunk' });
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: sttProvider,
+        speechTurn,
+        ttsProvider: streamingTts,
+        finalizeOnClose,
+        connectionRegistry: new InMemoryConnectionRegistry(),
+      },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-CA-sil-multichunk',
+      start: {
+        callSid: 'CA-sil-multichunk',
+        accountSid: 'AC',
+        streamSid: 'MZ-CA-sil-multichunk',
+        tracks: ['inbound'],
+      },
+    });
+    await flush();
+
+    handle.emit({ type: 'final', isFinal: true, transcript: 'hello there', confidence: 0.95 });
+    await flush();
+    await flush();
+    expect(texts).toEqual([AGENT_LINE]);
+
+    const state = (
+      adapter as unknown as {
+        state: { outboundTurnId: number; pendingSilenceRepromptTurnId: number | null };
+      }
+    ).state;
+    const turnId = state.outboundTurnId;
+
+    // Chunk 1 has been streamed and its per-chunk `turn-${turnId}` mark
+    // enqueued; chunk 2 is still gated. Acking chunk 1's mark must NOT arm
+    // the countdown.
+    expect(state.pendingSilenceRepromptTurnId).toBeNull();
+    ws.inboundJson({ event: 'mark', streamSid: 'MZ', mark: { name: `turn-${turnId}` } });
+    await flush();
+    expect(state.pendingSilenceRepromptTurnId).toBeNull();
+
+    await vi.advanceTimersByTimeAsync(DEFAULT_SILENCE_REPROMPT_MS * 2);
+    await flush();
+    expect(texts).toEqual([AGENT_LINE]); // still no reprompt — never armed
+
+    // Release chunk 2 — the turn's audio is now fully enqueued, which fires
+    // the single dedicated end-of-utterance `silence-arm-${turnId}` mark.
+    releaseChunk2();
+    await flush();
+    await flush();
+    await flush();
+    expect(state.pendingSilenceRepromptTurnId).toBe(turnId);
+
+    ws.inboundJson({ event: 'mark', streamSid: 'MZ', mark: { name: `silence-arm-${turnId}` } });
+    await flush();
+
+    await vi.advanceTimersByTimeAsync(DEFAULT_SILENCE_REPROMPT_MS);
+    await flush();
+
+    expect(texts).toEqual([AGENT_LINE, renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en')]);
+  });
+
   it('a second consecutive silence expiry escalates and ends the session (low_stt_confidence_max_retries)', async () => {
     // Non-default timeout also pins the deps.silenceRepromptTimeoutMs seam.
     const { adapter, ws, handle, texts, finalizeOnClose } = await setupSilenceCall('CA-sil-2', {
@@ -2823,7 +2929,7 @@ describe('T2-F05 caller-silence reprompt timer', () => {
       adapter as unknown as { state: { pendingSilenceRepromptTurnId: number | null } }
     ).state.pendingSilenceRepromptTurnId;
     expect(repromptTurn).not.toBeNull();
-    ws.inboundJson({ event: 'mark', streamSid: 'MZ', mark: { name: `turn-${repromptTurn}` } });
+    ws.inboundJson({ event: 'mark', streamSid: 'MZ', mark: { name: `silence-arm-${repromptTurn}` } });
     await flush();
 
     // Expiry 2 → cap reached → spoken hand-off + graceful end.

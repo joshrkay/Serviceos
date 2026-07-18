@@ -477,17 +477,24 @@ interface RuntimeState {
   lastMediaAt: number;
   audioIdleTimer: NodeJS.Timeout | null;
   /**
-   * T2-F05 — per-turn caller-silence reprompt timer. Armed when the final
-   * end-of-turn mark of an agent (non-filler) TTS turn is enqueued; cleared
-   * by any transcript event, barge-in, and close. See
+   * T2-F05 — per-turn caller-silence reprompt timer. Armed when the
+   * dedicated end-of-utterance `silence-arm-${turnId}` mark of an agent
+   * (non-filler) TTS turn is ACKed by Twilio; cleared by any transcript
+   * event, barge-in, and close. See
    * {@link TwilioMediaStreamAdapter.armSilenceRepromptTimer}.
    */
   silenceRepromptTimer: NodeJS.Timeout | null;
   /**
-   * Turn whose end-of-turn mark is enqueued but not yet acked by Twilio; the
-   * silence timer arms only when THAT mark's ack arrives (playback actually
-   * finished), not at enqueue — otherwise a long prompt or send backlog
-   * starts the countdown before the caller has heard the agent finish.
+   * Turn whose dedicated `silence-arm-${turnId}` mark is enqueued but not
+   * yet acked by Twilio; the silence timer arms only when THAT mark's ack
+   * arrives (playback of the WHOLE turn's audio actually finished), not at
+   * enqueue — otherwise a long prompt, a send backlog, or (for a
+   * multi-chunk streaming TTS turn) an earlier chunk's own `turn-${turnId}`
+   * mark would start the countdown before the caller has heard the agent
+   * finish. This mark is emitted exactly once per turn, by
+   * `runTurnWithFiller()`, after ALL of that turn's audio has been enqueued
+   * — never by `streamPcmAsMedia()` itself, which may run multiple times
+   * per turn (once per streamed chunk).
    */
   pendingSilenceRepromptTurnId: number | null;
   /** Outbound queue (bounded, priority-aware). */
@@ -833,13 +840,22 @@ export class TwilioMediaStreamAdapter {
         await this.handleMedia(frame);
         return;
       case 'mark':
-        if (this.state.unackedMarks > 0) this.state.unackedMarks--;
-        // The end-of-turn mark's ack means the caller has actually heard the
-        // agent finish — NOW start the no-response countdown (T2-F05). Match
-        // the specific turn name so pacing marks (turn-N-frame) don't arm it.
+        // The dedicated `silence-arm-${turnId}` mark is never counted in
+        // unackedMarks (it isn't part of streamPcmAsMedia's backpressure
+        // accounting), so decrementing on its ack would underflow the
+        // counter. Only decrement for the marks that incremented it.
+        const isSilenceArmMark = frame.mark?.name?.startsWith('silence-arm-') ?? false;
+        if (!isSilenceArmMark && this.state.unackedMarks > 0) this.state.unackedMarks--;
+        // The dedicated end-of-utterance mark's ack means the caller has
+        // actually heard the whole agent turn finish — NOW start the
+        // no-response countdown (T2-F05). This mark is emitted exactly once
+        // per (non-filler) turn, after ALL of the turn's audio has been
+        // enqueued — unlike the per-chunk `turn-${turnId}` marks emitted
+        // inside streamPcmAsMedia(), which fire once per streamed chunk and
+        // must not arm the countdown early on a multi-chunk utterance.
         if (
           this.state.pendingSilenceRepromptTurnId !== null &&
-          frame.mark?.name === `turn-${this.state.pendingSilenceRepromptTurnId}`
+          frame.mark?.name === `silence-arm-${this.state.pendingSilenceRepromptTurnId}`
         ) {
           const turnId = this.state.pendingSilenceRepromptTurnId;
           this.state.pendingSilenceRepromptTurnId = null;
@@ -2207,6 +2223,20 @@ export class TwilioMediaStreamAdapter {
             }
             if (chunk.isFinal) break;
           }
+          // T2-F05 — all of this turn's audio is now enqueued. Arm the
+          // silence countdown on a single dedicated end-of-utterance mark,
+          // not on the per-chunk `turn-${turnId}` marks emitted inside
+          // streamPcmAsMedia() above (one per chunk for a multi-chunk
+          // stream). Guard on turn ownership so a barge-in or a newer turn
+          // that superseded this one does not arm a stale countdown.
+          if (turnId === this.state.outboundTurnId && this.state.agentSpeaking) {
+            this.enqueueOutbound('control', {
+              event: 'mark',
+              streamSid: this.state.streamSid,
+              mark: { name: `silence-arm-${turnId}` },
+            });
+            this.state.pendingSilenceRepromptTurnId = turnId;
+          }
         } catch (streamErr) {
           // VOX-35b — a WS blip or a VOX-33 inactivity stall surfaces here
           // as a thrown rejection. The old caller only logged.warn, so the
@@ -2262,6 +2292,16 @@ export class TwilioMediaStreamAdapter {
           );
         } else if (turnId === this.state.outboundTurnId && this.state.agentSpeaking) {
           await this.streamPcmAsMedia(result.audio, turnId);
+          // T2-F05 — same single end-of-utterance arm as the streaming path
+          // above, for the buffered (non-streaming) TTS fallback.
+          if (turnId === this.state.outboundTurnId && this.state.agentSpeaking) {
+            this.enqueueOutbound('control', {
+              event: 'mark',
+              streamSid: this.state.streamSid,
+              mark: { name: `silence-arm-${turnId}` },
+            });
+            this.state.pendingSilenceRepromptTurnId = turnId;
+          }
         }
       }
     } finally {
@@ -2425,9 +2465,14 @@ export class TwilioMediaStreamAdapter {
         streamSid: this.state.streamSid,
         mark: { name: `turn-${turnId}` },
       });
-      // Defer the silence countdown to this mark's ACK (playback finished),
-      // not enqueue — record the turn; handleMessage's 'mark' case arms it.
-      if (!isFiller) this.state.pendingSilenceRepromptTurnId = turnId;
+      // NOTE: this per-chunk `turn-${turnId}` mark is emitted once per
+      // streamPcmAsMedia() call — and runTurnWithFiller() calls this once
+      // PER streaming TTS chunk. It must NOT arm the silence countdown: for
+      // a multi-chunk utterance the first chunk's mark-ack would fire while
+      // later audio is still buffered/playing. Arming instead happens on a
+      // single dedicated `silence-arm-${turnId}` mark emitted once by
+      // runTurnWithFiller() after ALL of the turn's audio has been enqueued
+      // — see runTurnWithFiller and handleMessage's 'mark' case.
     }
   }
 
@@ -2503,11 +2548,16 @@ export class TwilioMediaStreamAdapter {
    * frames continuously (comfort-noise/silent mu-law) for the whole call, so
    * `lastMediaAt` keeps refreshing and that timer only fires when the
    * transport itself stalls. This timer instead measures caller-turn silence:
-   * armed when Twilio ACKs the agent (non-filler) TTS turn's final
-   * `turn-${turnId}` mark — i.e. the caller has actually heard the turn end,
-   * NOT when the mark was merely enqueued (a long prompt or send backlog
-   * would otherwise start the countdown early and could hang up before the
-   * caller's intended response window). Cleared by any transcript event
+   * armed when Twilio ACKs the agent (non-filler) TTS turn's dedicated,
+   * single, end-of-utterance `silence-arm-${turnId}` mark — emitted once by
+   * `runTurnWithFiller()` after ALL of that turn's audio has been enqueued —
+   * i.e. the caller has actually heard the WHOLE turn end, NOT when the mark
+   * was merely enqueued (a long prompt or send backlog would otherwise start
+   * the countdown early) and NOT on an earlier chunk's own per-chunk
+   * `turn-${turnId}` mark from `streamPcmAsMedia()` (which runs once per
+   * streamed chunk for a multi-chunk streaming TTS turn — acking that mark
+   * early must not start the countdown while later audio is still
+   * buffered/playing). Cleared by any transcript event
    * (interim or final), by barge-in, and by close. Expiry
    * funnels into `recoverFromLowSttConfidence` deliberately: silence shares
    * the `consecutiveLowConfidenceTurns` streak, reprompt copy, and
