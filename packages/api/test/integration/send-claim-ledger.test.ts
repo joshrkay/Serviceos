@@ -220,6 +220,52 @@ describe('send_claims ledger (integration)', () => {
     expect(rows[0].status).toBe('sent');
   });
 
+  // --- Codex P1 (PR #705, round 3) — the sending transition is the CAS that
+  // serializes the stale-reclaim window --------------------------------------
+
+  it('markSendClaimSending returns true only when it actually advanced a "claimed" row (real-DB rowCount)', async () => {
+    const { tenantId } = await createTestTenant(pool);
+    expect(await claimSend(pool, tenantId, 'cas-1')).toBe(true);
+    // First transition wins.
+    expect(await markSendClaimSending(pool, tenantId, 'cas-1')).toBe(true);
+    // Second transition finds the row already 'sending' — 0 rows, returns false.
+    expect(await markSendClaimSending(pool, tenantId, 'cas-1')).toBe(false);
+    // Against a 'sent' tombstone it is also a false no-op.
+    await markSendClaimComplete(pool, tenantId, 'cas-1');
+    expect(await markSendClaimSending(pool, tenantId, 'cas-1')).toBe(false);
+  });
+
+  it('stale-reclaim race, end-to-end: B reclaims A\'s stalled claim and sends once; A\'s sending CAS then returns false so A cannot double-send', async () => {
+    const { tenantId } = await createTestTenant(pool);
+    // Process A claimed 20 minutes ago and stalled before transitioning to
+    // 'sending' — model it as a stale 'claimed' row.
+    await pool.query(
+      `INSERT INTO send_claims (tenant_id, claim_key, status, claimed_at)
+       VALUES ($1, $2, 'claimed', NOW() - INTERVAL '20 minutes')`,
+      [tenantId, 'reclaim-race'],
+    );
+
+    // Process B runs a full withSendClaim: its claimSend reclaims the stale
+    // row, its sending CAS wins, it sends, and it tombstones as 'sent'.
+    let bProvider = 0;
+    const bOutcome = await withSendClaim(pool, tenantId, 'reclaim-race', async () => {
+      bProvider++;
+      return 'B-sent';
+    });
+    expect(bOutcome).toEqual({ outcome: 'sent', result: 'B-sent' });
+    expect(bProvider).toBe(1);
+
+    // Process A resumes and attempts its own claimed→sending transition. The
+    // row is now 'sent', so the CAS matches 0 rows and returns false — the
+    // guard that stops A from calling the provider a second time.
+    expect(await markSendClaimSending(pool, tenantId, 'reclaim-race')).toBe(false);
+    const { rows } = await pool.query(
+      `SELECT status FROM send_claims WHERE tenant_id = $1 AND claim_key = $2`,
+      [tenantId, 'reclaim-race'],
+    );
+    expect(rows[0].status).toBe('sent');
+  });
+
   it('releaseSendClaim deletes a "sending" row too (the caught-error release path)', async () => {
     const { tenantId } = await createTestTenant(pool);
     expect(await claimSend(pool, tenantId, 'release-sending')).toBe(true);

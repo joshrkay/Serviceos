@@ -83,17 +83,28 @@ export async function claimSend(
  * to start. Scoped to `status = 'claimed'` so this only ever advances a row
  * this process itself just claimed. Once this commits, `claimSend` can never
  * reclaim the row again on a timer (see the module doc for why).
+ *
+ * Returns true iff this call actually advanced the row (it was still
+ * `'claimed'`). This is the atomic compare-and-swap that serializes the
+ * stale-reclaim window: two processes can both pass `claimSend` for the same
+ * key when the first stalls past `staleMinutes` and the second reclaims the
+ * still-`'claimed'` row (both then see status `'claimed'`), but only ONE
+ * `claimed → sending` UPDATE can match the row. The loser gets 0 rows here
+ * and MUST abort before calling the provider — `withSendClaim` enforces that.
+ * A bare `void` return (ignoring `rowCount`) would let the loser proceed and
+ * produce exactly the duplicate send this ledger exists to prevent.
  */
 export async function markSendClaimSending(
   pool: Pool,
   tenantId: string,
   claimKey: string,
-): Promise<void> {
-  await pool.query(
+): Promise<boolean> {
+  const res = await pool.query(
     `UPDATE send_claims SET status = 'sending'
      WHERE tenant_id = $1 AND claim_key = $2 AND status = 'claimed'`,
     [tenantId, claimKey],
   );
+  return (res.rowCount ?? 0) > 0;
 }
 
 /**
@@ -193,6 +204,14 @@ export type SendClaimOutcome<T> =
  * `'sending'`, which `claimSend` never auto-reclaims, so a later sweep can't
  * re-send it.
  *
+ * That `claimed → sending` transition doubles as the compare-and-swap that
+ * closes the stale-reclaim race: when this process stalls past `staleMinutes`
+ * a second process can reclaim the still-`'claimed'` row, so both momentarily
+ * hold a claim — but only one wins the transition. If `markSendClaimSending`
+ * reports it advanced 0 rows (someone else already flipped the row, or it was
+ * released/completed), `withSendClaim` returns `'duplicate'` WITHOUT calling
+ * `sendFn`, so the loser never duplicates the winner's send.
+ *
  * `sendFn` receives a `markProviderAccepted()` signal (Codex P1 #2 follow-up
  * to the crash-safety fix above). `sendFn` should call it the instant the
  * PROVIDER has accepted the message — before any post-send bookkeeping the
@@ -248,12 +267,33 @@ export async function withSendClaim<T>(
     providerAccepted = true;
   };
 
+  // Flip to 'sending' BEFORE the provider call so a crash after a successful
+  // send can never be mistaken for an abandoned pre-send claim (see module
+  // doc + claimSend's WHERE clause). This UPDATE is also the compare-and-swap
+  // that resolves the stale-reclaim race: if this process stalled past
+  // `staleMinutes` and a second process reclaimed the still-'claimed' row,
+  // both hold a claim, but only one wins this `claimed → sending` transition.
+  // A false return means we lost — a concurrent process already advanced the
+  // row (or it was released/completed); abort WITHOUT calling the provider so
+  // we don't duplicate its send. Done outside the try so this early return
+  // never trips the catch's release (which would wrongly delete the winner's
+  // in-flight 'sending' row).
+  const advanced = await markSendClaimSending(pool, tenantId, claimKey);
+  if (!advanced) {
+    const res = await pool.query(
+      `SELECT status FROM send_claims WHERE tenant_id = $1 AND claim_key = $2`,
+      [tenantId, claimKey],
+    );
+    const status = res.rows[0]?.status;
+    return {
+      outcome: 'duplicate',
+      priorStatus:
+        status === 'sent' || status === 'claimed' || status === 'sending' ? status : 'unknown',
+    };
+  }
+
   let result: T;
   try {
-    // Flip to 'sending' BEFORE the provider call so a crash after a
-    // successful send can never be mistaken for an abandoned pre-send claim
-    // (see module doc + claimSend's WHERE clause).
-    await markSendClaimSending(pool, tenantId, claimKey);
     result = await sendFn(markProviderAccepted);
   } catch (err) {
     if (providerAccepted) {

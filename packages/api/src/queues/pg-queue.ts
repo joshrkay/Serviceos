@@ -168,6 +168,16 @@ export class PgQueue extends PgBaseRepository implements Queue {
             idempotencyKey: row.idempotency_key as string,
             createdAt: (row.created_at as Date).toISOString(),
           };
+          // Prefer the real handler failure the worker persisted on its last
+          // attempt (T4-F10's last_error, present on `RETURNING *`) — the
+          // crash this reaper handles is precisely "worker recorded the final
+          // failure, then died before moveToDeadLetter". The hardcoded orphan
+          // text is only a fallback for the rarer case where no last_error was
+          // ever written (e.g. a crash before the first failure was recorded).
+          const orphanError =
+            typeof row.last_error === 'string' && row.last_error.length > 0
+              ? row.last_error
+              : 'orphaned: attempts exhausted without completion (worker died mid-processing)';
           await client.query(
             `INSERT INTO _queue_dlq (message_id, type, payload, attempts, idempotency_key, error)
              VALUES ($1, $2, $3, $4, $5, $6)
@@ -183,7 +193,7 @@ export class PgQueue extends PgBaseRepository implements Queue {
               ),
               orphan.attempts,
               orphan.idempotencyKey,
-              'orphaned: attempts exhausted without completion (worker died mid-processing)',
+              orphanError,
             ]
           );
         }

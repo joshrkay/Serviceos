@@ -212,4 +212,60 @@ describe('Postgres integration — PgQueue', () => {
       expect(remaining.rows).toHaveLength(0);
     });
   });
+
+  // Codex P2 (PR #705, round 3) — the crash-orphan reaper must carry the real
+  // recorded failure to the DLQ, not overwrite it with the hardcoded orphan
+  // text. The exact crash it handles is "worker persisted last_error on its
+  // final attempt, then died before moveToDeadLetter".
+  describe('crash-orphan reaper preserves the recorded failure', () => {
+    it('reaps an orphan with its real last_error (not the hardcoded orphan text)', async () => {
+      const singleAttemptQueue = new PgQueue(pool, { maxRetries: 1, visibilityTimeout: 30 });
+      const id = await singleAttemptQueue.send('orphan.job', { n: 1 }, 'orphan-key-1');
+
+      const msg = await singleAttemptQueue.receive(); // attempts 0 -> 1 (== max)
+      expect(msg!.attempts).toBe(1);
+
+      // Worker records the real failure on its final attempt, then CRASHES
+      // before moveToDeadLetter — the row is orphaned in _queue_messages.
+      const realError = 'ETIMEDOUT: handler died on the final attempt';
+      await singleAttemptQueue.recordFailure(id, realError);
+
+      // Simulate the visibility timeout elapsing so the reaper considers it.
+      await pool.query(
+        "UPDATE _queue_messages SET visible_at = NOW() - INTERVAL '1 minute' WHERE id = $1",
+        [id],
+      );
+
+      // Any receiveBatch runs the reaper; the orphan lands in the DLQ carrying
+      // the real handler error.
+      await singleAttemptQueue.receive();
+
+      const dlq = await singleAttemptQueue.listDeadLetter();
+      const ours = dlq.find((d) => d.messageId === id);
+      expect(ours?.error).toBe(realError);
+      expect(ours?.error).not.toMatch(/orphaned: attempts exhausted/);
+
+      // Row is gone from _queue_messages (reaped, not left stuck).
+      const remaining = await pool.query('SELECT 1 FROM _queue_messages WHERE id = $1', [id]);
+      expect(remaining.rows).toHaveLength(0);
+    });
+
+    it('falls back to the hardcoded orphan text when no last_error was ever recorded', async () => {
+      const singleAttemptQueue = new PgQueue(pool, { maxRetries: 1, visibilityTimeout: 30 });
+      const id = await singleAttemptQueue.send('orphan.job.nofail', {}, 'orphan-key-2');
+
+      const msg = await singleAttemptQueue.receive(); // attempts -> 1, no recordFailure
+      expect(msg!.attempts).toBe(1);
+
+      await pool.query(
+        "UPDATE _queue_messages SET visible_at = NOW() - INTERVAL '1 minute' WHERE id = $1",
+        [id],
+      );
+      await singleAttemptQueue.receive(); // reaper runs
+
+      const dlq = await singleAttemptQueue.listDeadLetter();
+      const ours = dlq.find((d) => d.messageId === id);
+      expect(ours?.error).toMatch(/orphaned: attempts exhausted without completion/);
+    });
+  });
 });

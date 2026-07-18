@@ -239,6 +239,34 @@ describe('send_payment_reminder — manual dedup guard', () => {
     expect(comms.calls).toHaveLength(1);
   });
 
+  it('Codex P1 (round 3): a manual send threads the per-proposal occurrence token (manual:<proposalId>), never the bare "manual" discriminator', async () => {
+    // The bare 'manual' would make notifyInvoiceOverdue's send-claim key
+    // invoice-scoped (invoice-overdue:{invoiceId}:manual) and permanently
+    // tombstone every later manual reminder after the first. The token must be
+    // per-proposal so each approved manual send is a distinct claim.
+    const proposal = makeManualProposal('manual-prop-token');
+    const result = await handlerWith(ledger).execute(proposal, ctx);
+    expect(result.success).toBe(true);
+    expect(comms.calls).toHaveLength(1);
+    expect(comms.calls[0].occurrenceToken).toBe(manualReminderStepKey('manual-prop-token'));
+    expect(comms.calls[0].occurrenceToken).not.toBe('manual');
+  });
+
+  it('Codex P1 (round 3): two distinct manual proposals (spaced past the cooldown) thread DISTINCT occurrence tokens — the second is not suppressed by the first', async () => {
+    // First manual send happened 4 days ago (outside the 72h cooldown) under a
+    // different proposal id; its ledger row exists.
+    await seed({ stepKey: manualReminderStepKey('manual-old'), sentAt: FOUR_DAYS_AGO });
+    const second = makeManualProposal('manual-new');
+    const result = await handlerWith(ledger).execute(second, ctx);
+
+    expect(result.success).toBe(true);
+    expect(comms.calls).toHaveLength(1);
+    // The second occurrence carries its own token — downstream the send-claim
+    // ledger keys on this, so the first send's tombstone can't swallow it.
+    expect(comms.calls[0].occurrenceToken).toBe(manualReminderStepKey('manual-new'));
+    expect(comms.calls[0].occurrenceToken).not.toBe(manualReminderStepKey('manual-old'));
+  });
+
   it('no dunningEventRepo → legacy behavior (manual send is not gated, no ledger)', async () => {
     const result = await handlerWith(undefined).execute(makeManualProposal(), ctx);
     expect(result.success).toBe(true);

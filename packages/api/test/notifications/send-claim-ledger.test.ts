@@ -51,13 +51,19 @@ describe('claimSend', () => {
 });
 
 describe('markSendClaimSending', () => {
-  it('issues the sending-transition UPDATE, scoped to a claimed row', async () => {
+  it('issues the sending-transition UPDATE, scoped to a claimed row, returns true when it advanced', async () => {
     const { pool, query } = fakePool(1);
-    await markSendClaimSending(pool, TENANT, 'k');
+    const advanced = await markSendClaimSending(pool, TENANT, 'k');
+    expect(advanced).toBe(true);
     const [sql, params] = query.mock.calls[0];
     expect(sql).toMatch(/UPDATE send_claims SET status = 'sending'/);
     expect(sql).toMatch(/WHERE tenant_id = \$1 AND claim_key = \$2 AND status = 'claimed'/);
     expect(params).toEqual([TENANT, 'k']);
+  });
+
+  it('returns false when the row was no longer "claimed" (0 rows) — the CAS was lost to a concurrent process', async () => {
+    const { pool } = fakePool(0);
+    expect(await markSendClaimSending(pool, TENANT, 'k')).toBe(false);
   });
 });
 
@@ -176,6 +182,29 @@ describe('withSendClaim', () => {
     const result = await withSendClaim(pool, TENANT, 'k', sendFn);
     expect(result).toEqual({ outcome: 'duplicate', priorStatus: 'unknown' });
     expect(sendFn).not.toHaveBeenCalled();
+  });
+
+  it('Codex P1 — aborts to duplicate WITHOUT calling sendFn (and never releases) when the sending CAS is lost after claiming', async () => {
+    // claimSend succeeds (we won a fresh/stale claim), but by the time the
+    // sending UPDATE runs a concurrent process has already advanced the row,
+    // so it affects 0 rows. We must NOT call the provider, and must NOT delete
+    // the winner's in-flight 'sending' row.
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({ rowCount: 1, rows: [] }) // claim INSERT — we won a claim
+      .mockResolvedValueOnce({ rowCount: 0, rows: [] }) // sending UPDATE — lost the CAS
+      .mockResolvedValueOnce({ rowCount: 1, rows: [{ status: 'sending' }] }); // status read
+    const pool = { query } as unknown as Pool;
+    const sendFn = vi.fn(async () => 'ok');
+    const result = await withSendClaim(pool, TENANT, 'k', sendFn);
+    expect(result).toEqual({ outcome: 'duplicate', priorStatus: 'sending' });
+    expect(sendFn).not.toHaveBeenCalled();
+    // claim INSERT + sending UPDATE + status read = 3; NO release DELETE, NO finalize.
+    expect(query).toHaveBeenCalledTimes(3);
+    expect(query.mock.calls[2][0]).toMatch(/SELECT status FROM send_claims/);
+    expect(query.mock.calls.every((c) => !/DELETE FROM send_claims/.test(c[0] as string))).toBe(
+      true,
+    );
   });
 
   it('releases the claim (from "sending") and rethrows unchanged when sendFn throws', async () => {
@@ -337,6 +366,44 @@ describe('withSendClaim + claimSend — three-state crash-safety lifecycle', () 
     const reclaimed = await claimSend(pool, TENANT, 'k', 15);
     expect(reclaimed).toBe(false);
     expect(rows.get(`${TENANT}::k`)?.status).toBe('sending');
+  });
+
+  it('Codex P1 — stale-reclaim race: A passes claimSend then stalls >staleMinutes; B reclaims + fully sends; A\'s sending CAS loses, so A aborts to duplicate and the provider is called exactly ONCE', async () => {
+    const { pool: basePool, rows } = simulatedPool();
+    let aProvider = 0;
+    let bProvider = 0;
+
+    // Wrap the pool handed to process A: the instant A's claimSend INSERT
+    // lands, model A stalling past the stale window (backdate its claimed_at)
+    // and let a SECOND process B run a full withSendClaim in that gap. B
+    // reclaims the now-stale 'claimed' row, wins the sending CAS, sends, and
+    // tombstones as 'sent' — all before A resumes to its own sending CAS.
+    const aPool = {
+      query: vi.fn(async (sql: string, params: unknown[]) => {
+        const res = await (basePool.query as unknown as (s: string, p: unknown[]) => Promise<QueryResult>)(sql, params);
+        if (sql.trim().startsWith('INSERT')) {
+          rows.get(`${TENANT}::k`)!.claimedAt = Date.now() - 60 * 60_000;
+          const bOutcome = await withSendClaim(basePool, TENANT, 'k', async () => {
+            bProvider++;
+            return 'B-sent';
+          });
+          expect(bOutcome).toEqual({ outcome: 'sent', result: 'B-sent' });
+        }
+        return res;
+      }),
+    } as unknown as Pool;
+
+    const aOutcome = await withSendClaim(aPool, TENANT, 'k', async () => {
+      aProvider++;
+      return 'A-sent';
+    });
+
+    // A won its claim but LOST the sending CAS to B, so it must report a
+    // duplicate against B's tombstone and never touch the provider.
+    expect(aOutcome).toEqual({ outcome: 'duplicate', priorStatus: 'sent' });
+    expect(aProvider).toBe(0);
+    expect(bProvider).toBe(1); // exactly one real send despite two claim winners
+    expect(rows.get(`${TENANT}::k`)?.status).toBe('sent');
   });
 
   it('a caught sendFn error releases the claim (from "sending") so an immediate retry can re-claim and resend', async () => {
