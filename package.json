@@ -20,6 +20,7 @@
     "lint": "npm run lint --workspaces",
     "corpus:fixtures": "tsx scripts/data-pipeline/build-edge-negatives.ts && tsx scripts/data-pipeline/build-slots.ts",
     "corpus:merge": "tsx scripts/data-pipeline/merge-corpus.ts",
+    "corpus:manifest": "tsx scripts/data-pipeline/build-manifest.ts",
     "corpus:build": "npm run corpus:generate && npm run corpus:merge && npm run corpus:fixtures",
     "test:corpus-schema": "tsx scripts/data-pipeline/validate-corpus.ts",
     "test:dedup": "tsx scripts/data-pipeline/dedup.ts",
