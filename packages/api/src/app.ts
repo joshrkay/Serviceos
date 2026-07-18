@@ -868,16 +868,14 @@ export function createApp(): AppWithLifecycle {
     '/webhooks/wisetack',
     '/webhooks/sendgrid',
   ];
-  // Segment-boundary match, mirroring how Express mounts the provider
-  // limiter above: '/webhooks/stripefake' must NOT be skipped here (it
-  // escapes the provider limiter's mount, so skipping it would leave the
-  // path rate-limited by nothing).
+  // Segment-boundary match on the SAME string Express used for mount
+  // matching (req.baseUrl + req.path — no query string, same non-
+  // normalization of dot-segments), so "skipped by the general limiter"
+  // and "covered by the provider limiter above" can never diverge:
+  // '/webhooks/stripefake' is neither, '/webhooks/stripe/../x' is both.
   const isProviderWebhookPath = (url: string) =>
     webhookProviderPrefixes.some(
-      (prefix) =>
-        url === prefix ||
-        url.startsWith(`${prefix}/`) ||
-        url.startsWith(`${prefix}?`),
+      (prefix) => url === prefix || url.startsWith(`${prefix}/`),
     );
   const webhookProviderRateMax = Math.max(1, Number(process.env.WEBHOOK_PROVIDER_RATE_LIMIT_MAX) || 600);
   app.use(webhookProviderPrefixes, rateLimit({
@@ -891,8 +889,9 @@ export function createApp(): AppWithLifecycle {
     // Only governs unknown/junk /webhooks/* paths — the six provider
     // prefixes are already rate-limited (at higher throughput) above.
     // NB: req.path is relative to this middleware's '/webhooks' mount point
-    // (e.g. '/stripe'), so match against req.originalUrl for the full path.
-    skip: (req) => isProviderWebhookPath(req.originalUrl),
+    // (e.g. '/stripe'); baseUrl + path reconstructs the full mount-matched
+    // path without the query string.
+    skip: (req) => isProviderWebhookPath(req.baseUrl + req.path),
     store: createRateLimitStore(redisUrl, 'webhooks:'),
   }));
   // Public invoice/estimate pages are unauthenticated but token-gated.
