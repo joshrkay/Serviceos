@@ -36,6 +36,7 @@
 import { createHash } from 'crypto';
 import { z } from 'zod';
 import type { LLMGateway } from '../../gateway/gateway';
+import { SYSTEM_TENANT_ID } from '../../gateway/gateway';
 import type { Observation } from '../observation';
 import type { VoiceQualityScript } from '../schema';
 
@@ -109,6 +110,9 @@ export async function gradePerceivedCompletion(
 
   const response = await input.gateway.complete({
     taskType: 'voice_quality_perceived_completion',
+    // Harness-internal grader with no real tenant; the gateway enforces a
+    // top-level tenantId in strict (test/CI) mode, so use the system bucket.
+    tenantId: SYSTEM_TENANT_ID,
     messages: [
       { role: 'system', content: JUDGE_SYSTEM },
       { role: 'user', content: userPrompt },

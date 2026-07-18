@@ -98,14 +98,10 @@ describe('P2-027 Gap 1 — gateway AI-run logging', () => {
     expect(runs[0].correlationId).toBe(correlationId);
   });
 
-  it('records the resolved model (not provider-echoed model) on AiRun', async () => {
+  it('records the caller-resolved model at creation (P2-028 routing)', async () => {
     const aiRunRepo = new InMemoryAiRunRepository();
     const stub = new StubProvider('stub');
-    // Provider echoes a DIFFERENT model string from the one the caller specified.
-    // With P2-028, caller-supplied request.model wins over tier routing.
-    // This test verifies that the AiRun row records the caller-resolved model,
-    // NOT the provider-echoed value.
-    stub.setResponse({ content: 'ok', model: 'provider-echoed-model' });
+    stub.setResponse({ content: 'ok' });
     const providers = new Map<string, LLMProvider>();
     providers.set('stub', stub);
     const gateway = makeGateway(providers, {}, aiRunRepo);
@@ -116,8 +112,56 @@ describe('P2-027 Gap 1 — gateway AI-run logging', () => {
 
     const runs = await aiRunRepo.findByTaskType('tenant-4', 'summarize');
     expect(runs).toHaveLength(1);
-    // Must record the gateway-resolved model, NOT the provider-echoed value
+    // With P2-028, caller-supplied request.model wins over tier routing at
+    // create() time; the provider here doesn't echo a different model, so
+    // the completion update leaves it as the resolved route.
     expect(runs[0].model).toBe('caller-resolved-model');
+  });
+
+  it('overwrites the AiRun model with the provider-echoed serving model on completion', async () => {
+    // Bug fix: ai_runs rows were created with model: resolvedModel and never
+    // updated, while costMicroCents is computed from the ACTUAL serving
+    // model (response.model, which the resilience layer rewrites on a
+    // cheaper-model or fallback-provider failover). That let a Sonnet ->
+    // Haiku failover persist model='sonnet' with Haiku-priced cost,
+    // misattributing spend in per-model aggregations over ai_runs. The
+    // completion update must now record the same model the cost was priced
+    // at — response.model when the provider supplies one.
+    //
+    // NB: StubProvider deliberately echoes back `request.model` when the
+    // caller supplies one (see providers.ts), so it can't exercise a
+    // provider that serves a genuinely different model than requested —
+    // exactly the failover shape this test needs. Use a bare LLMProvider
+    // instead, mirroring cost-accounting.test.ts's `failoverProvider`.
+    const aiRunRepo = new InMemoryAiRunRepository();
+    const failoverLikeProvider: LLMProvider = {
+      name: 'primary',
+      async complete() {
+        return {
+          content: 'ok',
+          model: 'provider-echoed-model',
+          provider: 'fallback',
+          latencyMs: 1,
+        };
+      },
+      async isAvailable() {
+        return true;
+      },
+    };
+    const providers = new Map<string, LLMProvider>();
+    providers.set('primary', failoverLikeProvider);
+    const gateway = makeGateway(providers, { defaultProvider: 'primary' }, aiRunRepo);
+
+    await gateway.complete(
+      makeRequest({ taskType: 'summarize', tenantId: 'tenant-4b', model: 'caller-resolved-model' })
+    );
+
+    const runs = await aiRunRepo.findByTaskType('tenant-4b', 'summarize');
+    expect(runs).toHaveLength(1);
+    // Row was created with 'caller-resolved-model' but the completion
+    // update must overwrite it with the model that actually served (and
+    // priced) the request.
+    expect(runs[0].model).toBe('provider-echoed-model');
   });
 
   it('does not fail the LLM call if AiRun repository write fails', async () => {

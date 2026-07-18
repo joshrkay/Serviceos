@@ -97,6 +97,38 @@ describe('UB-B1 — POST /api/voice/stream-token mint hardening', () => {
     expect(mint.metadata).toMatchObject({ model: 'nova-3', expiresInSeconds: 30 });
   });
 
+  it('A2: threads a valid ?language= query param onto the mint audit metadata', async () => {
+    const auditRepo = new InMemoryAuditRepository();
+    const app = buildApp(auditRepo);
+
+    const res = await request(app).post('/api/voice/stream-token?language=es');
+
+    expect(res.status).toBe(200);
+    const mint = auditRepo.getAll().find((e) => e.eventType === 'voice.stream_token_minted')!;
+    expect(mint.metadata).toMatchObject({ language: 'es' });
+  });
+
+  it('A2: ignores an invalid ?language= value (never blocks the mint, no bogus language in the audit)', async () => {
+    const auditRepo = new InMemoryAuditRepository();
+    const app = buildApp(auditRepo);
+
+    const res = await request(app).post('/api/voice/stream-token?language=fr');
+
+    expect(res.status).toBe(200);
+    const mint = auditRepo.getAll().find((e) => e.eventType === 'voice.stream_token_minted')!;
+    expect(mint.metadata).not.toHaveProperty('language');
+  });
+
+  it('A2: omits language from the audit metadata when no query param is sent (zero behavior change)', async () => {
+    const auditRepo = new InMemoryAuditRepository();
+    const app = buildApp(auditRepo);
+
+    await request(app).post('/api/voice/stream-token');
+
+    const mint = auditRepo.getAll().find((e) => e.eventType === 'voice.stream_token_minted')!;
+    expect(mint.metadata).not.toHaveProperty('language');
+  });
+
   it('enforces the configurable per-tenant mint limit with a 429 JSON envelope', async () => {
     process.env.VOICE_STREAM_TOKEN_MINTS_PER_MIN = '2';
     const app = buildApp();

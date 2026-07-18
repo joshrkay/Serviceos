@@ -410,12 +410,14 @@ describe('U8/U1 — resolveProposalEntity re-draft', () => {
     expect(after?.proposalType).toBe('voice_clarification');
   });
 
-  it('does NOT throw on an incomplete-but-typed re-draft — tracks gaps via missingFields and gates approval (mirrors canonical path)', async () => {
+  it('does NOT throw on an incomplete-but-typed re-draft — a customer-only draft_invoice has no gaps (B6: jobId is optional)', async () => {
     await repo.create(ambiguousWithIntent());
-    // draft_invoice requires customerId + jobId + ≥1 lineItem. The resolved
-    // customer rides existingEntities; the handler drafts it but leaves jobId
-    // unset (the customer-name ambiguity carried no job). The canonical path
-    // persists this and gates approval on missingFields — it must NOT 400.
+    // B6 — draft_invoice requires only customerId + ≥1 lineItem; jobId is
+    // optional on the schema (CreateInvoiceExecutionHandler auto-opens a job
+    // at execution when absent, mirroring draft_estimate). The resolved
+    // customer rides existingEntities; the handler drafts it with no job
+    // (the customer-name ambiguity carried no job reference). The canonical
+    // path persists this — it must NOT 400 and must NOT gate on jobId.
     const { handler } = mockHandler('draft_invoice', (ctx) => ({
       customerId: (ctx.existingEntities as Record<string, unknown>).customerId,
       lineItems: [{ description: 'Water heater', quantity: 1, unitPrice: 45000 }],
@@ -426,8 +428,8 @@ describe('U8/U1 — resolveProposalEntity re-draft', () => {
     // The type transitioned (not a throw) and surfaced for review.
     expect(result.proposalType).toBe('draft_invoice');
     expect(result.status).toBe('ready_for_review');
-    // The required-but-missing field is carried so approval is blocked.
-    expect(missingFieldsFor(result)).toContain('jobId');
+    // jobId is no longer required — nothing gates approval on it.
+    expect(missingFieldsFor(result)).not.toContain('jobId');
   });
 
   it('preserves chainId when the clarification was a chain member', async () => {
@@ -794,7 +796,7 @@ describe('U8/U1 — resolveProposalEntity re-draft via REAL handler factory', ()
       { proposalRepo: repo, auditRepo, redraftHandlerFactory: factory },
     );
 
-  it('customer-name ambiguity → real draft_invoice (no jobId): no 400, ready_for_review, missingFields has jobId', async () => {
+  it('customer-name ambiguity → real draft_invoice (no jobId): no 400, ready_for_review, no jobId gate (B6)', async () => {
     // The grounded LLM drafts a customer + line item but no job (the ambiguity
     // was a customer name, not a job) — the common case the old code 400'd.
     const gateway = gatewayReturning(
@@ -840,8 +842,9 @@ describe('U8/U1 — resolveProposalEntity re-draft via REAL handler factory', ()
     expect(result.proposalType).toBe('draft_invoice');
     expect(result.status).toBe('ready_for_review');
     expect(result.status).not.toBe('approved');
-    // jobId is required by the schema but absent → tracked, gating approval.
-    expect(missingFieldsFor(result)).toContain('jobId');
+    // B6 — jobId is optional on the schema (job auto-opens at execution),
+    // so an absent job reference no longer gates approval.
+    expect(missingFieldsFor(result)).not.toContain('jobId');
     expect(result.targetEntityId).toBe(CUST_B);
     expect(result.targetEntityType).toBe('customer');
   });
@@ -936,5 +939,140 @@ describe('U8/U1 — resolveProposalEntity re-draft via REAL handler factory', ()
     // The resolved type has a real execution handler (no HANDLER_NOT_FOUND).
     const registry = createExecutionHandlerRegistry();
     expect(registry.has(result.proposalType)).toBe(true);
+  });
+});
+
+// ── B2 — reference→candidates lights up the picker on TYPED money proposals ─
+//
+// SendInvoiceTaskHandler/InvoiceEditTaskHandler/EstimateEditTaskHandler gate a
+// free-text reference via a flat `sourceContext.missingFields` entry and,
+// when candidatesForReference found matches, ALSO stamp
+// `sourceContext.entityCandidates`/`entityKind`/`entityReference` — never
+// `originalIntent` (they are typed proposals from the start, not
+// clarifications awaiting a re-draft). Picking a candidate here must hit the
+// annotate-only path (no redraftHandlerFactory needed, no originalIntent to
+// find), clear ONLY the satisfied gate entry (B1's clear-on-fill), and
+// promote draft→ready_for_review ONLY once nothing is left gated.
+describe('B2 — resolveProposalEntity on a typed money proposal (gate + candidates, no redraft)', () => {
+  const INV_A = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+  const INV_B = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+
+  let repo: InMemoryProposalRepository;
+  let auditRepo: InMemoryAuditRepository;
+
+  beforeEach(() => {
+    repo = new InMemoryProposalRepository();
+    auditRepo = new InMemoryAuditRepository();
+  });
+
+  /** A gated send_invoice exactly as SendInvoiceTaskHandler drafts it once
+   *  candidatesForReference found matches for "Henderson". */
+  function gatedSendInvoice(overrides: {
+    payload?: Record<string, unknown>;
+    sourceContext?: Record<string, unknown>;
+    status?: Proposal['status'];
+  } = {}): Proposal {
+    return {
+      id: PROPOSAL,
+      tenantId: TENANT,
+      proposalType: 'send_invoice',
+      status: overrides.status ?? 'draft',
+      summary: 'send the Henderson invoice',
+      createdBy: OWNER,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      payload: {
+        channel: 'email',
+        invoiceReference: 'Henderson',
+        ...overrides.payload,
+      },
+      sourceContext: {
+        source: 'voice',
+        missingFields: ['invoiceId'],
+        entityCandidates: [
+          { id: INV_A, kind: 'invoice', label: 'INV-0042', hint: 'open', score: 1 },
+          { id: INV_B, kind: 'invoice', label: 'INV-0043', hint: 'draft', score: 1 },
+        ],
+        entityKind: 'invoice',
+        entityReference: 'Henderson',
+        ...overrides.sourceContext,
+      },
+    } as Proposal;
+  }
+
+  const call = (candidateId: string) =>
+    resolveProposalEntity(
+      { tenantId: TENANT, proposalId: PROPOSAL, candidateId, actorId: OWNER, actorRole: 'owner' },
+      { proposalRepo: repo, auditRepo }, // no redraftHandlerFactory — money proposals never carry originalIntent
+    );
+
+  it('picking a candidate stamps payload.invoiceId, clears the invoiceId gate, promotes to ready_for_review, and audits', async () => {
+    await repo.create(gatedSendInvoice());
+
+    const result = await call(INV_A);
+
+    // Stamped onto the field its kind fills — never redrafted (still the
+    // same typed proposal, not re-run through a task handler).
+    expect(result.proposalType).toBe('send_invoice');
+    expect((result.payload as Record<string, unknown>).invoiceId).toBe(INV_A);
+    expect(result.targetEntityId).toBe(INV_A);
+    expect(result.targetEntityType).toBe('invoice');
+
+    // The gate is satisfied and cleared — nothing left blocking approval.
+    const ctx = result.sourceContext as Record<string, unknown>;
+    expect(ctx.missingFields).toBeUndefined();
+    expect(ctx.entityCandidates).toBeUndefined();
+
+    // Promoted for review — never auto-approved (D-004).
+    expect(result.status).toBe('ready_for_review');
+    expect(result.status).not.toBe('approved');
+
+    const audits = await auditRepo.findByEntity(TENANT, 'proposal', PROPOSAL);
+    const ev = audits.find((a) => a.eventType === 'proposal.entity_resolved');
+    expect(ev).toBeDefined();
+    expect(ev!.metadata).toMatchObject({ candidateId: INV_A, entityKind: 'invoice', movedToReview: true });
+  });
+
+  it('idempotent double-tap: resolving the same candidate twice is a successful no-op the second time', async () => {
+    await repo.create(gatedSendInvoice());
+
+    const first = await call(INV_A);
+    const second = await call(INV_A);
+
+    expect(second).toEqual(first);
+    expect(second.status).toBe('ready_for_review');
+    expect((second.payload as Record<string, unknown>).invoiceId).toBe(INV_A);
+
+    // Only ONE entity_resolved audit — the retry short-circuited on the
+    // already-resolved check rather than re-mutating the row.
+    const audits = (await auditRepo.findByEntity(TENANT, 'proposal', PROPOSAL)).filter(
+      (a) => a.eventType === 'proposal.entity_resolved',
+    );
+    expect(audits).toHaveLength(1);
+  });
+
+  it('a proposal with OTHER remaining gates stays in draft after one pick', async () => {
+    await repo.create(
+      gatedSendInvoice({
+        sourceContext: { missingFields: ['invoiceId', 'recipient'] },
+      }),
+    );
+
+    const result = await call(INV_A);
+
+    expect((result.payload as Record<string, unknown>).invoiceId).toBe(INV_A);
+    const ctx = result.sourceContext as Record<string, unknown>;
+    // Only the satisfied entry is cleared — the unrelated gate survives.
+    expect(ctx.missingFields).toEqual(['recipient']);
+    expect(result.status).toBe('draft');
+  });
+
+  it('back-compat: a proposal already in ready_for_review with a gate cleared stays in ready_for_review', async () => {
+    await repo.create(gatedSendInvoice({ status: 'ready_for_review' }));
+
+    const result = await call(INV_A);
+
+    expect(result.status).toBe('ready_for_review');
+    expect((result.payload as Record<string, unknown>).invoiceId).toBe(INV_A);
   });
 });

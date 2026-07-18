@@ -78,12 +78,18 @@ export class PgCatalogItemRepository extends PgBaseRepository implements Catalog
         param += 1;
       }
 
-      const result = await client.query(
-        `SELECT * FROM catalog_items
+      // Stable ORDER BY is required before LIMIT so the bounded window is
+      // deterministic across calls (matches InMemoryCatalogItemRepository's
+      // `name.localeCompare` sort).
+      let sql = `SELECT * FROM catalog_items
          WHERE ${whereClauses.join(' AND ')}
-         ORDER BY name ASC`,
-        values
-      );
+         ORDER BY name ASC`;
+      if (options.limit !== undefined) {
+        sql += ` LIMIT $${param++}`;
+        values.push(Math.max(0, Math.trunc(options.limit)));
+      }
+
+      const result = await client.query(sql, values);
 
       return result.rows.map(mapRow);
     });

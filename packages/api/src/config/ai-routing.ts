@@ -85,6 +85,7 @@ export const TASK_TYPES = [
   // ── Standard: moderate generation / customer-facing writing where output
   //    quality matters more than latency or cost.
   'create_appointment',
+  'create_standing_instruction',
   'suggest_reply',
   'brand_voice_v1',
   'review_private_followup',
@@ -99,6 +100,12 @@ export const TASK_TYPES = [
   'mms_estimate',
   'draft_invoice',
   'update_invoice',
+  // B7 — update_job (status/priority/title/description edit to an
+  // existing job). Mirrors its update_estimate/update_invoice siblings
+  // (same *-edit-task.ts structure, same jobId-gate pattern) rather than
+  // the lighter deterministic handlers (create_job/update_customer),
+  // which aren't in this taxonomy at all.
+  'update_job',
 ] as const;
 
 export type TaskType = (typeof TASK_TYPES)[number];
@@ -124,6 +131,11 @@ const DEFAULT_TASK_TIER_MAPPING: Record<TaskType, ModelTier> = {
   proposal_sms_edit: 'lightweight',
   // Standard
   create_appointment: 'standard',
+  // Normalizes a spoken directive into a concise imperative + structured
+  // scope (intents/trade categories/customer segment) — judgment-call
+  // extraction like extract_business_profile/extract_categories/
+  // extract_pricing below, not a deterministic lite-extraction task.
+  create_standing_instruction: 'standard',
   suggest_reply: 'standard',
   brand_voice_v1: 'standard',
   review_private_followup: 'standard',
@@ -146,6 +158,7 @@ const DEFAULT_TASK_TIER_MAPPING: Record<TaskType, ModelTier> = {
   mms_estimate: 'complex',
   draft_invoice: 'complex',
   update_invoice: 'complex',
+  update_job: 'complex',
 };
 
 export const DEFAULT_AI_ROUTING_CONFIG: AIRoutingConfig = {

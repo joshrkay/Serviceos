@@ -140,6 +140,25 @@ const TRANSCRIPTION_CORRECTION_SYSTEM_PROMPT =
   'Return corrected text only — no commentary.';
 
 /**
+ * Defense-in-depth against a misconfigured/mock gateway silently replacing
+ * a prose transcript with structured output. Genuine correction of a voice
+ * transcript is still prose — it should never parse as JSON unless the raw
+ * input already did. Used to reject cases like a hermetic mock's scripted
+ * catch-all (`{"ok":true,"mock":true,...}`) that happens to clear the
+ * length-floor guard below but is obviously not a transcription.
+ */
+function looksLikeJson(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed || (trimmed[0] !== '{' && trimmed[0] !== '[')) return false;
+  try {
+    JSON.parse(trimmed);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Best-effort transcription correction. Calls the gateway with
  * `taskType: 'transcription_correction'`, sending the system prompt above
  * plus the tenant glossary + raw transcript as the user message. (This
@@ -175,6 +194,9 @@ async function correctTranscript(input: {
 
     const response = await gateway.complete({
       taskType: 'transcription_correction',
+      // Top-level tenantId — the quota/cache resilience wrappers key on
+      // this, not metadata.tenantId (see gateway.ts's tenant-id guard).
+      tenantId,
       messages: [
         { role: 'system', content: TRANSCRIPTION_CORRECTION_SYSTEM_PROMPT },
         { role: 'user', content: userPrompt },
@@ -188,6 +210,21 @@ async function correctTranscript(input: {
     });
 
     const corrected = response.content.trim();
+
+    // Defense-in-depth: reject a "corrected" result that parses as JSON
+    // when the raw transcript did not. This catches ANY future
+    // misconfigured/wrong gateway (e.g. a hermetic mock wired in by
+    // mistake) injecting structured garbage as a transcript, independent
+    // of the length-floor check below — a short JSON blob can easily clear
+    // that floor for a short-to-medium raw transcript.
+    if (looksLikeJson(corrected) && !looksLikeJson(raw)) {
+      logger.warn(
+        'Transcription correction returned JSON for prose input; keeping raw transcript',
+        { rawLen: raw.length, correctedLen: corrected.length }
+      );
+      return { corrected: raw, glossary: terms };
+    }
+
     // Guardrail: correction should not silently truncate. Fall back
     // to the raw transcript when the correction is either
     // proportionally too short (< 40% of raw length, catching obvious

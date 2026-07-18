@@ -214,6 +214,47 @@ describe('createVoiceTurnProcessor.speechTurn', () => {
     expect(session.proposalIds).toEqual([proposals[0]!.id]);
   });
 
+  it('maps an update_job intent to an update_job proposal (not the voice_clarification dead-end)', async () => {
+    // Sequence: classifier (turn 1) → confirmIntent (turn 2). Pins
+    // intentToProposalType's 'update_job' case — this surface previously
+    // fell through to the `default: voice_clarification` branch, unlike
+    // the worker (INTENT_TO_PROPOSAL_TYPE) and assistant (registry) maps,
+    // which already draft real update_job proposals.
+    const gateway = makeGatewayWithSequence([
+      JSON.stringify({
+        intentType: 'update_job',
+        confidence: 0.95,
+        reasoning: 'matches keywords',
+        extractedEntities: { jobRef: 'Henderson', status: 'in_progress' },
+      }),
+      JSON.stringify({ answer: 'yes', reasoning: 'caller said yes' }),
+    ]);
+    const { processor, session, proposalRepo } = makeCtx({
+      gateway,
+      withRepos: true,
+    });
+
+    await processor.speechTurn({
+      session,
+      speechResult: 'mark the Henderson job in progress',
+      callSid: 'CA-test',
+      tenantId: 'tenant-abc',
+    });
+    expect(session.machine.currentState).toBe('intent_confirm');
+
+    await processor.speechTurn({
+      session,
+      speechResult: 'yes that is correct',
+      callSid: 'CA-test',
+      tenantId: 'tenant-abc',
+    });
+
+    const proposals = await proposalRepo.findByTenant('tenant-abc');
+    expect(proposals.length).toBe(1);
+    expect(proposals[0]!.proposalType).toBe('update_job');
+    expect(session.proposalIds).toEqual([proposals[0]!.id]);
+  });
+
   // ─── Part A — real ai_run_id threads classify → event → payload → proposal ──
 
   it("links the persisted proposal to the classify call's REAL ai_run_id", async () => {

@@ -4,6 +4,7 @@ import { AppError, ValidationError } from '../../shared/errors';
 import {
   gatewayRequestLatencyMs,
   gatewayRequestsTotal,
+  gatewayRequestCostMicroCentsTotal,
 } from '../../monitoring/metrics';
 import {
   AiRunRepository,
@@ -17,6 +18,7 @@ import {
   resolveRouting,
   shouldWarnForUnmappedTaskType,
 } from './router';
+import { computeCostMicroCents } from './model-pricing';
 
 /** Image detail hint passed through to vision-capable providers. */
 export type LLMImageDetail = 'low' | 'high' | 'auto';
@@ -104,6 +106,14 @@ export interface LLMResponse {
    * when no repo is configured or the best-effort create failed.
    */
   aiRunId?: string;
+  /**
+   * Cost of this call in micro-cents (1 cent = 1,000,000 micro-cents — see
+   * `ai/gateway/model-pricing.ts` for the precision rationale). `null` when
+   * the resolved model has no known price (never a guessed cost). Absent
+   * only if cost computation itself was skipped (e.g. the error path, which
+   * never populates this field).
+   */
+  costMicroCents?: number | null;
 }
 
 export interface LLMProvider {
@@ -135,16 +145,34 @@ export interface LLMGatewayLogger {
 export const SYSTEM_TENANT_ID = 'system';
 
 /**
+ * taskTypes carried in the canonical `TASK_TYPES` list purely so the
+ * lightweight/standard/complex tier mapping in `config/ai-routing.ts` covers
+ * them, but whose ONLY real call sites are the offline voice-quality eval
+ * harness (`ai/voice-quality/**`) grading synthetic transcripts — never a
+ * live tenant call. Carved out of `TENANT_SCOPED_TASK_TYPES` below so the
+ * guard doesn't demand a tenantId that genuinely doesn't exist for these.
+ * If a real per-tenant call site for one of these is ever added, remove it
+ * from this set (the guard should track it like every other taskType).
+ */
+const HARNESS_ONLY_TASK_TYPES: ReadonlySet<string> = new Set([
+  'voice_quality_judge',
+  'voice_quality_perceived_completion',
+  'voice_quality_reprompt_judge',
+]);
+
+/**
  * Known tenant-scoped task types — the canonical `TASK_TYPES` list from
  * `config/ai-routing.ts` (every value a real call site passes to
- * `gateway.complete({ taskType })`). Every one of these is per-tenant voice/AI
- * work; none of them is a legitimately system-level task. Used only as a
- * conservative allow-list for `warnIfMissingTopLevelTenantId` below —
- * dynamically-constructed taskTypes (e.g. the `assistant.*` namespace) are
- * intentionally excluded so we don't emit false-positive warnings for
- * taskTypes this list doesn't know about.
+ * `gateway.complete({ taskType })`), minus `HARNESS_ONLY_TASK_TYPES` above.
+ * Every remaining entry is per-tenant voice/AI work; none of them is a
+ * legitimately system-level task. Used only as a conservative allow-list for
+ * `enforceTopLevelTenantId` below — dynamically-constructed taskTypes (e.g.
+ * the `assistant.*` namespace) are intentionally excluded so we don't
+ * warn/throw for taskTypes this list doesn't know about.
  */
-const TENANT_SCOPED_TASK_TYPES: ReadonlySet<string> = new Set(TASK_TYPES);
+const TENANT_SCOPED_TASK_TYPES: ReadonlySet<string> = new Set(
+  TASK_TYPES.filter((t) => !HARNESS_ONLY_TASK_TYPES.has(t)),
+);
 
 /**
  * P0 scaling bug guard: a tenant-scoped taskType dispatched with no
@@ -155,17 +183,48 @@ const TENANT_SCOPED_TASK_TYPES: ReadonlySet<string> = new Set(TASK_TYPES);
  * onto one process-global bucket, and (if the gateway cache is ever enabled)
  * leaking cached classifications/entities across tenants.
  *
- * This is a WARNING, not a hard throw: several other call sites are known to
- * still omit the top-level field (being fixed separately) and a throw here
- * would take down those flows. The goal is to make the silent-fallback class
- * of bug visible in logs so it can't recur unnoticed, not to enforce it yet.
+ * Escalation: production defaults to a WARNING, not a hard throw, because
+ * some call sites can still (legitimately, or pending a fix) omit the
+ * top-level field and a throw there would 500 a real user-facing request
+ * rather than degrade to the shared bucket. Test/dev/CI default to a hard
+ * THROW instead — the same silent-fallback bug is far cheaper to catch in a
+ * failing test than in a production quota/cache incident, and every known
+ * call site has been fixed to pass tenantId (see gateway.test.ts's sweep
+ * test). Override either way with `AI_GATEWAY_STRICT_TENANT_ID=true|false`.
  */
-function warnIfMissingTopLevelTenantId(
+function isStrictTenantIdModeEnabled(): boolean {
+  const raw = process.env.AI_GATEWAY_STRICT_TENANT_ID;
+  if (raw === 'true') return true;
+  if (raw === 'false') return false;
+  return (process.env.NODE_ENV ?? 'development') !== 'production';
+}
+
+/** Thrown by `enforceTopLevelTenantId` in strict mode (see above). */
+export class MissingTenantIdError extends ValidationError {
+  constructor(public readonly taskType: string) {
+    super(
+      `LLM request for tenant-scoped taskType "${taskType}" is missing a top-level tenantId. ` +
+        'Pass { tenantId } at the top level of the gateway.complete() request — putting it only ' +
+        'in metadata silently shares the SYSTEM_TENANT_ID quota/cache bucket across every tenant. ' +
+        'Set AI_GATEWAY_STRICT_TENANT_ID=false to downgrade this to a warning (e.g. for a known, ' +
+        'not-yet-fixed call site).',
+      { taskType },
+    );
+    this.name = 'MissingTenantIdError';
+  }
+}
+
+function enforceTopLevelTenantId(
   request: LLMRequest,
   logger?: LLMGatewayLogger,
 ): void {
   if (request.tenantId) return;
   if (!TENANT_SCOPED_TASK_TYPES.has(request.taskType)) return;
+
+  if (isStrictTenantIdModeEnabled()) {
+    throw new MissingTenantIdError(request.taskType);
+  }
+
   const metadataTenantId =
     request.metadata && typeof request.metadata === 'object'
       ? (request.metadata as Record<string, unknown>).tenantId
@@ -323,7 +382,7 @@ export class LLMGateway {
       throw new ValidationError('Invalid LLM request', { errors: validationErrors });
     }
 
-    warnIfMissingTopLevelTenantId(request, this.logger);
+    enforceTopLevelTenantId(request, this.logger);
 
     const providerName = this.resolveProvider(request.taskType);
     const provider = this.providers.get(providerName);
@@ -423,6 +482,20 @@ export class LLMGateway {
       const response = await provider.complete(resolvedRequest);
       const latencyMs = Date.now() - startTime;
 
+      // Cost accounting (per-tenant/per-task spend telemetry). Computed from
+      // the model that ACTUALLY served the request — `response.model`, which
+      // the resilience layer rewrites on a cheaper-model or fallback-provider
+      // failover (e.g. a Sonnet route that fails over to Haiku) — not the
+      // originally-resolved route. Using resolvedModel here would bill a
+      // failover at the wrong rate, or record null when an unpriced primary
+      // succeeded on a priced fallback. Falls back to resolvedModel only if a
+      // provider omitted the field. null when the model has no known price
+      // (see model-pricing.ts); the metric below is simply not incremented in
+      // that case rather than by a fabricated amount.
+      const costModel = response.model || resolvedModel;
+      const costProvider = response.provider || providerName;
+      const costMicroCents = computeCostMicroCents(costModel, response.tokenUsage);
+
       const result: LLMResponse = {
         ...response,
         latencyMs,
@@ -430,6 +503,7 @@ export class LLMGateway {
         // records (e.g. proposals.ai_run_id) to a REAL run row. Present only
         // when the best-effort create above succeeded.
         ...(aiRun ? { aiRunId: aiRun.id } : {}),
+        costMicroCents,
       };
 
       const labels = {
@@ -440,6 +514,19 @@ export class LLMGateway {
       };
       gatewayRequestsTotal.inc(labels);
       gatewayRequestLatencyMs.observe(labels, latencyMs);
+      if (costMicroCents !== null) {
+        // Attribute spend to the model/provider that actually served the
+        // request (post-failover), matching the cost figure above.
+        gatewayRequestCostMicroCentsTotal.inc(
+          {
+            tenant_tier: tier,
+            task_type: request.taskType,
+            model: costModel,
+            provider: costProvider,
+          },
+          costMicroCents,
+        );
+      }
 
       this.logger?.info('LLM completion succeeded', {
         taskType: request.taskType,
@@ -447,6 +534,7 @@ export class LLMGateway {
         model: resolvedModel,
         latencyMs,
         tokenUsage: result.tokenUsage,
+        costMicroCents,
         degraded: result.degraded ?? false,
         fallbackStage: result.fallbackStage,
         providerPath: result.providerPath,
@@ -468,13 +556,20 @@ export class LLMGateway {
           const completedRun = completeAiRun(
             aiRun,
             outputFields,
-            result.tokenUsage
+            result.tokenUsage,
+            costMicroCents
           );
           await this.aiRunRepo.updateStatus(tenantId, aiRun.id, 'completed', {
             outputSnapshot: completedRun.outputSnapshot,
             tokenUsage: result.tokenUsage,
             completedAt: completedRun.completedAt,
             durationMs: completedRun.durationMs,
+            costMicroCents,
+            // Persist the model that actually served the request (post-
+            // failover) so per-model spend aggregations over ai_runs match
+            // costMicroCents, which is priced at costModel's rates — not
+            // resolvedModel, which the row was created with before dispatch.
+            model: costModel,
           });
         } catch (repoErr) {
           this.logger?.error('AI-run completion logging failed (best-effort)', {

@@ -17,6 +17,7 @@ describe('SuggestReplyTask', () => {
       ],
       brandVoice: { formality: 'casual', pronoun: 'we', vibe_words: ['neighborly'] },
       businessName: 'Rivera HVAC',
+      tenantId: 'tenant-suggest-reply-test',
     });
 
     expect(result.draft).toContain('Sandra');
@@ -49,6 +50,7 @@ describe('SuggestReplyTask', () => {
     const task = new SuggestReplyTask(gateway);
     const result = await task.suggest({
       messages: [{ senderRole: 'customer', content: 'What times work?' }],
+      tenantId: 'tenant-suggest-reply-test',
     });
     expect(result.draft).toBe('We can be there Thursday at 9am.');
   });
@@ -65,14 +67,20 @@ describe('SuggestReplyTask', () => {
     const { gateway } = createMockLLMGateway('   ');
     const task = new SuggestReplyTask(gateway);
     await expect(
-      task.suggest({ messages: [{ senderRole: 'customer', content: 'Hello?' }] }),
+      task.suggest({
+        messages: [{ senderRole: 'customer', content: 'Hello?' }],
+        tenantId: 'tenant-suggest-reply-test',
+      }),
     ).rejects.toThrow(/empty draft/i);
   });
 
   it('defaults the pronoun to "we" and falls back to a neutral business name', async () => {
     const { gateway, provider } = createMockLLMGateway('draft');
     const task = new SuggestReplyTask(gateway);
-    await task.suggest({ messages: [{ senderRole: 'customer', content: 'Hi' }] });
+    await task.suggest({
+      messages: [{ senderRole: 'customer', content: 'Hi' }],
+      tenantId: 'tenant-suggest-reply-test',
+    });
     const system = provider.getCalls()[0].messages[0].content;
     expect(system).toContain('the business');
     expect(system).toContain('"we"');

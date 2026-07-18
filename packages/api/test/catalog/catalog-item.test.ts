@@ -206,6 +206,45 @@ describe('InMemoryCatalogItemRepository.listByTenant filters', () => {
   });
 });
 
+describe('InMemoryCatalogItemRepository.listByTenant limit', () => {
+  let repo: InMemoryCatalogItemRepository;
+
+  beforeEach(async () => {
+    repo = new InMemoryCatalogItemRepository();
+    // Names chosen to sort predictably (name ASC): item-0 .. item-4.
+    for (let i = 0; i < 5; i++) {
+      await repo.create(makeItem({ id: `i${i}`, name: `item-${i}`, category: 'Parts' }));
+    }
+  });
+
+  it('returns N of M rows when a limit is given', async () => {
+    const result = await repo.listByTenant(TENANT, { limit: 2 });
+    expect(result.map((i) => i.id)).toEqual(['i0', 'i1']);
+  });
+
+  it('returns every row when limit is omitted (backward compat)', async () => {
+    const result = await repo.listByTenant(TENANT);
+    expect(result).toHaveLength(5);
+  });
+
+  it('composes with category and search filters', async () => {
+    await repo.create(makeItem({ id: 'other-cat', name: 'item-x', category: 'Materials' }));
+    const result = await repo.listByTenant(TENANT, { category: 'Parts', search: 'item', limit: 2 });
+    expect(result.map((i) => i.id)).toEqual(['i0', 'i1']);
+    expect(result.every((i) => i.category === 'Parts')).toBe(true);
+  });
+
+  it('limit 0 returns no rows', async () => {
+    const result = await repo.listByTenant(TENANT, { limit: 0 });
+    expect(result).toEqual([]);
+  });
+
+  it('limit greater than the row count returns all rows', async () => {
+    const result = await repo.listByTenant(TENANT, { limit: 1000 });
+    expect(result).toHaveLength(5);
+  });
+});
+
 describe('createCatalogItemSchema validation (price/name rules live here)', () => {
   const base = { name: 'Pipe', category: 'Parts', unit: 'each', unitPriceCents: 100 };
 

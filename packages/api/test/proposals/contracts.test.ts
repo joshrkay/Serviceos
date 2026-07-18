@@ -6,10 +6,13 @@ import {
   PROPOSAL_TYPE_SCHEMAS,
   createCustomerPayloadSchema,
   createJobPayloadSchema,
+  updateJobPayloadSchema,
   createAppointmentPayloadSchema,
   draftEstimatePayloadSchema,
   updateCustomerPayloadSchema,
   updateEstimatePayloadSchema,
+  invoiceEditActionSchema,
+  estimateEditActionSchema,
   tierStructureIssues,
 } from '../../src/proposals/contracts';
 import { normalizeTierStructure } from '../../src/ai/resolution/tier-structure';
@@ -114,6 +117,176 @@ describe('P2-002 — Typed proposal contracts', () => {
     });
     expect(result.valid).toBe(true);
     expect(result.errors).toBeUndefined();
+  });
+
+  // B7 (feat: voice-transcript-and-agent-paths) — update_job.
+  describe('update_job payload contract', () => {
+    it('happy path — status only', () => {
+      const result = validateProposalPayload('update_job', {
+        jobId: validJobId,
+        status: 'in_progress',
+      });
+      expect(result.valid).toBe(true);
+      expect(result.errors).toBeUndefined();
+    });
+
+    it('happy path — every editable field together', () => {
+      const result = validateProposalPayload('update_job', {
+        jobId: validJobId,
+        jobReference: 'JOB-0001',
+        status: 'completed',
+        priority: 'urgent',
+        title: 'Renamed job',
+        description: 'Updated notes',
+      });
+      expect(result.valid).toBe(true);
+    });
+
+    it('rejects a payload missing jobId', () => {
+      const result = validateProposalPayload('update_job', { status: 'completed' });
+      expect(result.valid).toBe(false);
+    });
+
+    it('rejects a non-uuid jobId', () => {
+      const result = validateProposalPayload('update_job', {
+        jobId: 'not-a-uuid',
+        status: 'completed',
+      });
+      expect(result.valid).toBe(false);
+    });
+
+    it('rejects a payload with jobId but no editable field (the refine gate)', () => {
+      const result = updateJobPayloadSchema.safeParse({ jobId: validJobId });
+      expect(result.success).toBe(false);
+    });
+
+    it('rejects an invalid status enum value', () => {
+      const result = validateProposalPayload('update_job', {
+        jobId: validJobId,
+        status: 'super_urgent',
+      });
+      expect(result.valid).toBe(false);
+    });
+
+    it('rejects an invalid priority enum value', () => {
+      // 'medium' is create_job's (mismatched, pre-existing) priority enum —
+      // NOT a valid Job domain priority (low/normal/high/urgent).
+      const result = validateProposalPayload('update_job', {
+        jobId: validJobId,
+        priority: 'medium',
+      });
+      expect(result.valid).toBe(false);
+    });
+
+    it('accepts an empty-string description (clearing the field is allowed)', () => {
+      const result = validateProposalPayload('update_job', {
+        jobId: validJobId,
+        description: '',
+      });
+      expect(result.valid).toBe(true);
+    });
+
+    it('rejects an empty-string title (min length 1 — use description to clear, not title)', () => {
+      const result = validateProposalPayload('update_job', {
+        jobId: validJobId,
+        title: '',
+      });
+      expect(result.valid).toBe(false);
+    });
+  });
+
+  // P1 fix — remove_line_item/update_line_item must accept EITHER a
+  // numeric index OR a free-text description (the edit-task LLM prompt
+  // emits description-only actions; see
+  // ai/tasks/invoice-edit-task.ts / estimate-edit-task.ts), but reject a
+  // payload that carries neither — the exact shape that used to reach
+  // the editor as `action.index === undefined` and silently corrupt the
+  // first line item.
+  describe('invoiceEditActionSchema / estimateEditActionSchema — index-or-description', () => {
+    it('invoice: index-only remove_line_item is valid', () => {
+      expect(invoiceEditActionSchema.safeParse({ type: 'remove_line_item', index: 0 }).success).toBe(
+        true,
+      );
+    });
+
+    it('invoice: description-only remove_line_item is valid', () => {
+      expect(
+        invoiceEditActionSchema.safeParse({ type: 'remove_line_item', description: 'gasket' }).success,
+      ).toBe(true);
+    });
+
+    it('invoice: remove_line_item with neither index nor description is invalid', () => {
+      expect(invoiceEditActionSchema.safeParse({ type: 'remove_line_item' }).success).toBe(false);
+    });
+
+    it('invoice: update_line_item with neither index nor description is invalid', () => {
+      expect(
+        invoiceEditActionSchema.safeParse({
+          type: 'update_line_item',
+          lineItem: { description: 'Gasket', quantity: 1, unitPrice: 450 },
+        }).success,
+      ).toBe(false);
+    });
+
+    it('invoice: update_line_item with description (no index) is valid', () => {
+      expect(
+        invoiceEditActionSchema.safeParse({
+          type: 'update_line_item',
+          description: 'gasket',
+          lineItem: { description: 'Gasket', quantity: 1, unitPrice: 450 },
+        }).success,
+      ).toBe(true);
+    });
+
+    it('estimate: index-only remove_line_item is valid', () => {
+      expect(
+        estimateEditActionSchema.safeParse({ type: 'remove_line_item', index: 0 }).success,
+      ).toBe(true);
+    });
+
+    it('estimate: description-only remove_line_item is valid', () => {
+      expect(
+        estimateEditActionSchema.safeParse({ type: 'remove_line_item', description: 'disposal fee' })
+          .success,
+      ).toBe(true);
+    });
+
+    it('estimate: remove_line_item with neither index nor description is invalid', () => {
+      expect(estimateEditActionSchema.safeParse({ type: 'remove_line_item' }).success).toBe(false);
+    });
+
+    it('estimate: update_line_item with neither index nor description is invalid', () => {
+      expect(
+        estimateEditActionSchema.safeParse({
+          type: 'update_line_item',
+          lineItem: { description: 'Tankless heater', quantity: 1, unitPrice: 145000 },
+        }).success,
+      ).toBe(false);
+    });
+
+    it('add_line_item never requires index or description', () => {
+      expect(
+        invoiceEditActionSchema.safeParse({
+          type: 'add_line_item',
+          lineItem: { description: 'Trip fee', quantity: 1, unitPrice: 7500 },
+        }).success,
+      ).toBe(true);
+      expect(
+        estimateEditActionSchema.safeParse({
+          type: 'add_line_item',
+          lineItem: { description: 'Trip fee', quantity: 1, unitPrice: 7500 },
+        }).success,
+      ).toBe(true);
+    });
+
+    it('update_estimate payload with a description-based remove_line_item validates end to end', () => {
+      const result = validateProposalPayload('update_estimate', {
+        estimateId: validEstimateId,
+        editActions: [{ type: 'remove_line_item', description: 'disposal fee' }],
+      });
+      expect(result.valid).toBe(true);
+      expect(result.errors).toBeUndefined();
+    });
   });
 
   it('validation — rejects invalid create_customer payload', () => {

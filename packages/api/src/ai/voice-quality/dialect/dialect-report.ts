@@ -35,6 +35,15 @@ export interface DialectEvalCase {
 export interface DialectEvalResult {
   caseId: string;
   dialect: string;
+  /**
+   * A4 — which ASR engine/path produced the hypothesis this result grades,
+   * e.g. 'whisper' | 'deepgram'. Optional so single-surface / legacy call
+   * sites (the original Whisper-only harness, direct `scoreDialectCase`
+   * callers) are unaffected — `runDialectEval` stamps it when the caller
+   * passes `options.surface`; omitted it means "surface not tracked for
+   * this run" rather than a false default.
+   */
+  surface?: string;
   /** WER of the ASR hypothesis vs. the case's reference transcript. */
   wer: WerResult;
   /** Whether the agent acted on the expected intent; null when none was declared. */
@@ -169,6 +178,63 @@ export function buildDialectReport(
     pass: blockers.length === 0,
     thresholds,
   };
+}
+
+/**
+ * A4 — per-surface rollup (whisper vs deepgram vs …), mirroring `DialectStat`
+ * but grouped by `DialectEvalResult.surface` instead of `dialect`. This is a
+ * SEPARATE axis from the per-dialect rollup above — the same case can be
+ * transcribed by multiple engines, so surface and dialect are independent
+ * groupings over the same result set, not a nesting of one inside the other.
+ * Results with no `surface` are grouped under `'unknown'` so a mixed batch
+ * (some surface-tagged, some not) never silently drops rows.
+ */
+export interface SurfaceStat {
+  surface: string;
+  cases: number;
+  meanWer: number;
+  medianWer: number;
+  /** Intent accuracy over cases that declared an expected intent; null when none did. */
+  intentAccuracy: number | null;
+  /** Fraction of cases where the agent clarified instead of guessing. */
+  clarificationRate: number;
+}
+
+/**
+ * Aggregate results into a per-surface WER/intent/clarification rollup.
+ * Sorted by surface label for deterministic output (mirrors `perDialect`).
+ * Pure — no threshold gate here; the surface axis is a measurement rollup,
+ * not (yet) a pass/fail gate like `buildDialectReport`'s per-dialect one.
+ */
+export function buildSurfaceRollup(
+  results: ReadonlyArray<DialectEvalResult>,
+): SurfaceStat[] {
+  const bySurface = new Map<string, DialectEvalResult[]>();
+  for (const r of results) {
+    const key = r.surface ?? 'unknown';
+    const arr = bySurface.get(key) ?? [];
+    arr.push(r);
+    bySurface.set(key, arr);
+  }
+
+  const stats: SurfaceStat[] = [];
+  for (const surface of [...bySurface.keys()].sort()) {
+    const arr = bySurface.get(surface)!;
+    const wers = arr.map((r) => r.wer.wer);
+    const withIntent = arr.filter((r) => r.intentMatched !== null);
+    stats.push({
+      surface,
+      cases: arr.length,
+      meanWer: mean(wers),
+      medianWer: median(wers),
+      intentAccuracy:
+        withIntent.length === 0
+          ? null
+          : withIntent.filter((r) => r.intentMatched === true).length / withIntent.length,
+      clarificationRate: arr.filter((r) => r.clarified).length / arr.length,
+    });
+  }
+  return stats;
 }
 
 function mean(xs: ReadonlyArray<number>): number {

@@ -86,6 +86,39 @@ const TEMPLATE_KEYS = new Set(['intent_confirm', 'greeting', 'confirm_intent', '
  */
 
 /**
+ * VOX-35c — spoken copy for the media-stream/Gather adapters' speechTurn-
+ * failure recovery. The reprompt is spoken after a single transient
+ * speechTurn failure (apology + reprompt instead of dead air); the hand-off
+ * line is spoken before a graceful end after repeated failures. Both are
+ * lines the FSM already emits (a retry reprompt and its system-failure
+ * escalation), so they are NOT new copy — they are named here, and used as
+ * the exact-match keys in the es catalog below, so the English and Spanish
+ * forms can never drift.
+ */
+export const SPEECH_TURN_FAILURE_REPROMPT_COPY =
+  'My apologies — let me try again. What would you like to do?';
+export const SPEECH_TURN_FAILURE_ESCALATION_COPY =
+  "I'm having trouble completing that. Let me connect you with a team member.";
+
+/**
+ * A3 — spoken when a FINAL transcript's STT acoustic confidence (Deepgram
+ * `confidence` on media-streams; Twilio Gather `Confidence`) comes back
+ * below the configured floor. Distinct from
+ * {@link SPEECH_TURN_FAILURE_REPROMPT_COPY} on purpose: that line covers the
+ * turn PIPELINE throwing (something broke); this one covers the STT ENGINE
+ * itself flagging the audio as likely mis-heard (nothing broke — the words
+ * probably weren't the ones acted on). Acting on a misheard transcript risks
+ * the wrong intent (e.g. "cancel" heard from "confirm"), so the caller is
+ * asked to repeat rather than having the turn dispatched. The repeated-low-
+ * confidence hand-off reuses {@link SPEECH_TURN_FAILURE_ESCALATION_COPY} —
+ * "trouble completing that" reads naturally for "I can't reliably hear you"
+ * too, and keeping one escalation line avoids a second string to translate
+ * and keep in sync.
+ */
+export const LOW_STT_CONFIDENCE_REPROMPT_COPY =
+  "I didn't quite catch that — could you say that again?";
+
+/**
  * es translations for the FSM's hardcoded sentences (exact-match). Kept
  * small and literal — anything not listed passes through in English rather
  * than risking a bad machine paraphrase.
@@ -103,7 +136,7 @@ const SENTENCE_CATALOG_ES: Record<string, string> = {
     'Por supuesto — le comunico con una persona ahora mismo.',
   'I understand. Let me get a person on the line for you right away.':
     'Entiendo. Enseguida le paso con una persona.',
-  "I'm having trouble completing that. Let me connect you with a team member.":
+  [SPEECH_TURN_FAILURE_ESCALATION_COPY]:
     'Tengo dificultades para completar eso. Le comunico con un miembro del equipo.',
   "I'm having trouble pulling up your account. Let me connect you with a team member.":
     'Tengo dificultades para acceder a su cuenta. Le comunico con un miembro del equipo.',
@@ -124,8 +157,11 @@ const SENTENCE_CATALOG_ES: Record<string, string> = {
     'Lo siento, no pude encontrar su cuenta. ¿Me puede dar su nombre completo y la dirección de servicio?',
   'Let me make sure I understand — what would you like to do?':
     'Permítame asegurarme de entender — ¿qué le gustaría hacer?',
-  'My apologies — let me try again. What would you like to do?':
+  [SPEECH_TURN_FAILURE_REPROMPT_COPY]:
     'Mis disculpas — intentemos de nuevo. ¿Qué le gustaría hacer?',
+  // A3 — low acoustic STT confidence reprompt.
+  [LOW_STT_CONFIDENCE_REPROMPT_COPY]:
+    'No alcancé a escuchar bien eso — ¿podría repetirlo, por favor?',
   'Of course! What else can I help you with?':
     '¡Por supuesto! ¿En qué más puedo ayudarle?',
   'This call has been terminated due to policy violations.':

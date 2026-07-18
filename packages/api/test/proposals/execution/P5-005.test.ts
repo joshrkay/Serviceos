@@ -6,6 +6,9 @@ import {
   InMemorySettingsRepository,
   TenantSettings,
 } from '../../../src/settings/settings';
+import { InMemoryJobRepository } from '../../../src/jobs/job';
+import { InMemoryLocationRepository, createLocation } from '../../../src/locations/location';
+import { InMemoryCustomerRepository, createCustomer } from '../../../src/customers/customer';
 
 describe('P5-005 — Deterministic invoice proposal execution', () => {
   let handler: CreateInvoiceExecutionHandler;
@@ -54,14 +57,17 @@ describe('P5-005 — Deterministic invoice proposal execution', () => {
     expect(result.error).toBe('Payload must include a valid customerId');
   });
 
-  it('validation — missing jobId returns error', async () => {
+  it('B6 — jobId is optional; a customer-only payload still executes (no auto-create repos wired → synthetic id)', async () => {
     const proposal = makeProposal({
-      payload: { customerId: 'cust-1', lineItems: [{ id: 'li-1' }] },
+      payload: {
+        customerId: 'cust-1',
+        lineItems: [{ id: 'li-1', description: 'Service', quantity: 1, unitPriceCents: 5000 }],
+      },
     });
     const result = await handler.execute(proposal, { tenantId, executedBy: 'user-1' });
 
-    expect(result.success).toBe(false);
-    expect(result.error).toBe('Payload must include a valid jobId');
+    expect(result.success).toBe(true);
+    expect(result.resultEntityId).toBeTruthy();
   });
 
   it('validation — empty lineItems returns error', async () => {
@@ -227,6 +233,122 @@ describe('P5-005 — Deterministic invoice proposal execution', () => {
       expect(r2.success).toBe(true);
       const invoice = await failingRepo.findById(tenantId, r2.resultEntityId!);
       expect(invoice!.invoiceNumber).toBe('INV-0001');
+    });
+  });
+
+  describe('B6 — job auto-create parity with DraftEstimateExecutionHandler (jobId absent)', () => {
+    function makeSettingsRepo(): InMemorySettingsRepository {
+      const repo = new InMemorySettingsRepository();
+      const seeded: TenantSettings = {
+        id: 'settings-1',
+        tenantId,
+        businessName: 'Test Co',
+        timezone: 'UTC',
+        estimatePrefix: 'EST-',
+        invoicePrefix: 'INV-',
+        nextEstimateNumber: 1,
+        nextInvoiceNumber: 1,
+        defaultPaymentTermDays: 30,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      };
+      void repo.create(seeded);
+      return repo;
+    }
+
+    it('opens a job for the customer when jobId is absent and job repos are wired', async () => {
+      const invoiceRepo = new InMemoryInvoiceRepository();
+      const settingsRepo = makeSettingsRepo();
+      const jobRepo = new InMemoryJobRepository();
+      const locationRepo = new InMemoryLocationRepository();
+      const customerRepo = new InMemoryCustomerRepository();
+      const customer = await createCustomer(
+        { tenantId, firstName: 'Inv', lastName: 'Auto', createdBy: 'user-1' },
+        customerRepo,
+      );
+      await createLocation(
+        {
+          tenantId,
+          customerId: customer.id,
+          street1: '9 Draft Way',
+          city: 'Austin',
+          state: 'TX',
+          postalCode: '78701',
+          isPrimary: true,
+        },
+        locationRepo,
+      );
+
+      const handler = new CreateInvoiceExecutionHandler(
+        invoiceRepo,
+        settingsRepo,
+        undefined,
+        jobRepo,
+        locationRepo,
+      );
+      const proposal = makeProposal({
+        payload: {
+          customerId: customer.id,
+          lineItems: [
+            { id: 'li-1', description: 'Service', quantity: 1, unitPriceCents: 5000 },
+          ],
+        },
+      });
+      const result = await handler.execute(proposal, { tenantId, executedBy: 'user-1' });
+
+      expect(result.success).toBe(true);
+      const invoice = await invoiceRepo.findById(tenantId, result.resultEntityId!);
+      expect(invoice).not.toBeNull();
+      const job = await jobRepo.findById(tenantId, invoice!.jobId);
+      expect(job).not.toBeNull();
+      expect(job!.customerId).toBe(customer.id);
+    });
+
+    it('fails with a clear message (not a cast crash) when jobId is absent and job auto-creation is not configured', async () => {
+      const invoiceRepo = new InMemoryInvoiceRepository();
+      const settingsRepo = makeSettingsRepo();
+      // jobRepo/locationRepo intentionally omitted.
+      const handler = new CreateInvoiceExecutionHandler(invoiceRepo, settingsRepo);
+
+      const proposal = makeProposal({
+        payload: {
+          customerId: 'cust-1',
+          lineItems: [
+            { id: 'li-1', description: 'Service', quantity: 1, unitPriceCents: 5000 },
+          ],
+        },
+      });
+      const result = await handler.execute(proposal, { tenantId, executedBy: 'user-1' });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/jobId/);
+    });
+
+    it('fails with a clear message when the customer has no service location', async () => {
+      const invoiceRepo = new InMemoryInvoiceRepository();
+      const settingsRepo = makeSettingsRepo();
+      const jobRepo = new InMemoryJobRepository();
+      const locationRepo = new InMemoryLocationRepository();
+      const handler = new CreateInvoiceExecutionHandler(
+        invoiceRepo,
+        settingsRepo,
+        undefined,
+        jobRepo,
+        locationRepo,
+      );
+
+      const proposal = makeProposal({
+        payload: {
+          customerId: 'cust-no-location',
+          lineItems: [
+            { id: 'li-1', description: 'Service', quantity: 1, unitPriceCents: 5000 },
+          ],
+        },
+      });
+      const result = await handler.execute(proposal, { tenantId, executedBy: 'user-1' });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/service location/);
     });
   });
 });

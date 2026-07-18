@@ -128,7 +128,7 @@ export function singularizeToken(token: string): string {
  * strip combining marks), lowercase, punctuation → spaces, drop
  * stopwords and sub-2-char tokens, singularize.
  */
-export function normalizeForMatch(raw: string): string[] {
+function foldAndSplit(raw: string): string[] {
   const folded = raw
     .trim()
     .normalize('NFKD')
@@ -137,14 +137,41 @@ export function normalizeForMatch(raw: string): string[] {
     .replace(/[^a-z0-9]+/g, ' ')
     .trim();
   if (folded.length === 0) return [];
+  return folded.split(/\s+/);
+}
+
+/**
+ * Normalize free text to comparable tokens: trim, accent-fold (NFKD +
+ * strip combining marks), lowercase, punctuation → spaces, drop
+ * stopwords and sub-2-char tokens, singularize.
+ */
+export function normalizeForMatch(raw: string): string[] {
   return (
-    folded
-      .split(/\s+/)
+    foldAndSplit(raw)
       // Digit-only tokens are quantities ("2 hours labor"), not item
       // identity — quantity already rides the line item's own field.
       .filter((t) => t.length >= 2 && !STOPWORDS.has(t) && !/^\d+$/.test(t))
       .map(singularizeToken)
   );
+}
+
+/**
+ * Like {@link normalizeForMatch} but KEEPS digit-only tokens. Numbered
+ * catalog families ('Part 001'..'Part 180') carry their identity in the
+ * SKU number: dropping the digit token as a "quantity" collapses the whole
+ * family to 'part', making the item the operator actually named
+ * ('part 120') unreachable — it becomes ambiguous against every sibling.
+ * Here the digit token stays, so 'part 120' → ['part', '120'] stays
+ * distinct from 'part 121'. Used only by the digit-aware EXACT pass in
+ * {@link resolveLineItemToCatalog}, which requires the FULL normalized
+ * strings to be equal — so a quantity phrase ('add 12 hvac filters' →
+ * ['add','12','hvac','filter']) can never full-string-equal a bare item
+ * name ('HVAC Filter' → ['hvac','filter']).
+ */
+export function normalizeForMatchKeepDigits(raw: string): string[] {
+  return foldAndSplit(raw)
+    .filter((t) => t.length >= 2 && !STOPWORDS.has(t))
+    .map(singularizeToken);
 }
 
 /**
@@ -310,6 +337,31 @@ export function resolveLineItemToCatalog(
     return { query, tier: 'none' };
   }
 
+  // Digit-aware EXACT pass — runs BEFORE the digit-dropping logic below.
+  // The main path drops digit-only tokens as quantities, so a numbered
+  // catalog family ('Part 001'..'Part 180') all collapses to 'part' and
+  // the item the operator actually named ('part 120') is unreachable —
+  // it lands in a MAX_CANDIDATES=3 alphabetical ambiguity, and the gate
+  // can only be cleared by picking a WRONG sibling. Here, when the query
+  // carries a SKU number, we keep digit tokens and require the FULL
+  // normalized name string to be equal. Exactly one hit → tier 'exact'
+  // with that item; the price-conflict carve-out still applies downstream
+  // (applyCatalogPricing / edit-action-grounding re-check the drafted
+  // price against `match.unitPriceCents`, so a digit-exact match with a
+  // ≥10%+≥$1 deviation still surfaces the "did you mean" candidates rather
+  // than snapping). Zero or multiple hits fall through to the
+  // quantity-robust digit-dropping behavior unchanged.
+  const digitTokens = normalizeForMatchKeepDigits(query);
+  if (digitTokens.some((t) => /\d/.test(t))) {
+    const digitKey = digitTokens.join(' ');
+    const digitExact = activeItems.filter(
+      (item) => normalizeForMatchKeepDigits(item.name).join(' ') === digitKey,
+    );
+    if (digitExact.length === 1) {
+      return { query, tier: 'exact', match: digitExact[0] };
+    }
+  }
+
   const candidates = activeItems
     .map((item) => scoreCandidate(queryTokens, item))
     .filter((c): c is CatalogCandidate => c !== null)
@@ -431,7 +483,7 @@ function contractCategory(item: CatalogItem): string {
  * compared against a fixed threshold, never itself stored or summed as
  * money).
  */
-function isPriceConflict(draftedCents: number, catalogCents: number): boolean {
+export function isPriceConflict(draftedCents: number, catalogCents: number): boolean {
   const diffCents = Math.abs(draftedCents - catalogCents);
   if (diffCents < PRICE_CONFLICT_MIN_ABS_CENTS) return false;
   if (catalogCents <= 0) return true; // abs threshold alone already cleared

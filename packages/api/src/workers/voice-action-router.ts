@@ -45,9 +45,6 @@ import {
   payloadPathFor,
 } from '../proposals/chain';
 import { v4 as uuidv4 } from 'uuid';
-import { InvoiceTaskHandler } from '../ai/tasks/invoice-task';
-import { EstimateTaskHandler } from '../ai/tasks/estimate-task';
-import { CreateAppointmentAITaskHandler } from '../ai/tasks/create-appointment-task';
 import { DEFAULT_TENANT_TIMEZONE } from '../ai/scheduling/resolve-datetime';
 import { SlotConflictChecker } from '../ai/tasks/slot-conflict-checker';
 import { AvailabilityFinder } from '../ai/tasks/availability-finder';
@@ -56,48 +53,28 @@ import { JobRepository } from '../jobs/job';
 import { CatalogItemRepository } from '../catalog/catalog-item';
 import { InvoicingQueueDeps } from '../invoices/invoicing-queue';
 import { DunningEventRepository } from '../invoices/dunning-config';
+import type { CustomerRepository } from '../customers/customer';
 import {
   EntityCandidate,
   EntityKind,
   EntityResolver,
 } from '../ai/resolution/entity-resolver';
-import { InvoiceEditTaskHandler } from '../ai/tasks/invoice-edit-task';
-import { EstimateEditTaskHandler } from '../ai/tasks/estimate-edit-task';
-import { CreateCustomerTaskHandler, TaskHandler, TaskContext, TaskResult } from '../ai/tasks/task-handlers';
+import { TaskHandler, TaskContext, TaskResult } from '../ai/tasks/task-handlers';
 import type { StandingInstruction } from '../instructions/standing-instructions';
 import { selectInjectedStandingInstructions } from '../ai/standing-instructions-context';
-import {
-  RescheduleAppointmentTaskHandler,
-  CancelAppointmentTaskHandler,
-  ReassignAppointmentTaskHandler,
-  AddCrewMemberTaskHandler,
-  RemoveCrewMemberTaskHandler,
-  AddNoteTaskHandler,
-  SendInvoiceTaskHandler,
-  SendEstimateTaskHandler,
-  SendEstimateNudgeTaskHandler,
-  SendPaymentReminderTaskHandler,
-  ApplyLateFeeTaskHandler,
-  RecordPaymentTaskHandler,
-  CreateJobVoiceTaskHandler,
-  EmergencyDispatchTaskHandler,
-  UpdateCustomerTaskHandler,
-  LogExpenseTaskHandler,
-  ConvertLeadTaskHandler,
-  ConfirmAppointmentTaskHandler,
-  MarkLeadLostTaskHandler,
-  AddServiceLocationTaskHandler,
-  LogTimeEntryTaskHandler,
-  NotifyDelayTaskHandler,
-  RequestFeedbackTaskHandler,
-  BatchInvoiceTaskHandler,
-  CreateInvoiceScheduleTaskHandler,
-} from '../ai/tasks/voice-extended-tasks';
+// B5 — the "core" intent taxonomy's task handlers are now built by the
+// SHARED registry both this worker and routes/assistant.ts call, so the
+// two surfaces can't diverge again (see ai/orchestration/handler-registry.ts
+// doc comment). Only the handlers that stay surface-specific by design
+// (issue_invoice, review_response_proposal, create_standing_instruction,
+// the complaint/negotiation synthetic keys) are still imported directly here.
+import { buildTaskHandlers } from '../ai/orchestration/handler-registry';
 import { RespondToReviewTaskHandler } from '../ai/tasks/review-response-task';
 import { CreateStandingInstructionTaskHandler } from '../ai/tasks/standing-instruction-task';
 import type { ReviewRepository } from '../reputation/review';
 import type { BuildReviewResponseProposalDeps } from '../reputation/build-proposal';
 import { instrument } from '../monitoring/instrumentation';
+import { recordVoiceError } from '../analytics/posthog';
 import {
   ComplaintTaskHandler,
   complaintSeverity,
@@ -404,6 +381,14 @@ export interface VoiceActionRouterDeps {
    * a poll-initiated one. Optional: absent → clarification instead of draft.
    */
   reviewResponseDraftDeps?: BuildReviewResponseProposalDeps;
+  /**
+   * B8 — create_customer draft-time duplicate detection parity: threaded
+   * into `buildTaskHandlers` so this worker's create_customer proposals get
+   * the SAME dedup-aware `CreateCustomerVoiceTaskHandler` the telephony FSM
+   * already uses (`twilio-adapter.ts`), instead of the thin passthrough.
+   * Optional; absent → drafts with no dedup check (pre-B8 behavior).
+   */
+  customerRepo?: CustomerRepository;
 }
 
 // P11-001: lookup_* intents are READ-ONLY and never produce a
@@ -420,6 +405,7 @@ export const INTENT_TO_PROPOSAL_TYPE: Partial<Record<Exclude<IntentType, 'unknow
   batch_invoice: 'batch_invoice',
   create_customer: 'create_customer',
   create_job: 'create_job',
+  update_job: 'update_job',
   reschedule_appointment: 'reschedule_appointment',
   cancel_appointment: 'cancel_appointment',
   reassign_appointment: 'reassign_appointment',
@@ -450,137 +436,40 @@ export const INTENT_TO_PROPOSAL_TYPE: Partial<Record<Exclude<IntentType, 'unknow
   create_standing_instruction: 'create_standing_instruction',
 };
 
-/**
- * Handles "send/issue invoice" voice commands. No LLM call needed —
- * the payload is just { invoiceId }. The invoice ID is resolved from:
- *   1. extractedEntities.jobReference (explicit mention like "invoice 1024")
- *   2. The most recent draft_invoice proposal in the same conversation
- *      (handles "the one we just drafted")
- * If neither resolves, the proposal is created with an empty invoiceId
- * so the execution handler can return a clear validation failure.
- */
-class IssueInvoiceTaskHandler implements TaskHandler {
-  readonly taskType: ProposalType = 'issue_invoice';
-
-  constructor(
-    private readonly proposalRepo: ProposalRepository,
-    private readonly thresholdResolver?: (tenantId: string) => Promise<
-      Partial<Record<'supervisor' | 'tech' | 'both', number>> | undefined
-    >,
-  ) {}
-
-  async handle(context: TaskContext): Promise<TaskResult> {
-    let invoiceId: string | undefined;
-
-    if (
-      context.existingEntities?.jobReference &&
-      typeof context.existingEntities.jobReference === 'string'
-    ) {
-      invoiceId = context.existingEntities.jobReference;
-    }
-
-    if (!invoiceId && context.conversationId) {
-      const all = await this.proposalRepo.findByTenant(context.tenantId);
-      const recentDraft = all
-        .filter(
-          (p) =>
-            p.proposalType === 'draft_invoice' &&
-            p.sourceContext?.conversationId === context.conversationId &&
-            p.resultEntityId
-        )
-        .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0];
-      if (recentDraft?.resultEntityId) {
-        invoiceId = recentDraft.resultEntityId;
-      }
-    }
-
-    // Codex P2 (PR #316): prefer the override the router already
-    // resolved at request entry. Re-resolving here means a transient
-    // failure on this single handler can desync issue_invoice from
-    // the rest of the request's intents (which use context). Fall
-    // back to the resolver only when context didn't carry one (e.g.
-    // legacy callers that don't go through voice-action-router).
-    const tenantThresholdOverride =
-      context.tenantThresholdOverride
-      ?? (this.thresholdResolver
-        ? await this.thresholdResolver(context.tenantId).catch(() => undefined)
-        : undefined);
-
-    const input: CreateProposalInput = {
-      tenantId: context.tenantId,
-      proposalType: 'issue_invoice',
-      payload: invoiceId ? { invoiceId } : {},
-      summary: invoiceId
-        ? `Issue invoice ${invoiceId}`
-        : context.message,
-      sourceContext: context.conversationId ? { conversationId: context.conversationId } : undefined,
-      createdBy: context.userId,
-      ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
-    };
-
-    const proposal = createProposal(input);
-    return { proposal, taskType: 'issue_invoice' };
-  }
-}
-
 function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandler> {
-  const handlers = new Map<ProposalType, TaskHandler>();
-  handlers.set('draft_invoice', new InvoiceTaskHandler(deps.gateway, deps.catalogRepo));
-  handlers.set('draft_estimate', new EstimateTaskHandler(deps.gateway, deps.catalogRepo));
-  handlers.set(
-    'create_appointment',
-    new CreateAppointmentAITaskHandler(
-      deps.gateway,
-      deps.slotConflictChecker,
-      deps.availabilityFinder,
-      deps.appointmentRepo,
-      deps.jobRepo,
-    ),
-  );
-  handlers.set('update_invoice', new InvoiceEditTaskHandler(deps.gateway, { catalogRepo: deps.catalogRepo }));
-  handlers.set('update_estimate', new EstimateEditTaskHandler(deps.gateway, deps.estimateRepo, deps.catalogRepo));
-  handlers.set('issue_invoice', new IssueInvoiceTaskHandler(deps.proposalRepo, deps.thresholdResolver));
-  handlers.set('create_customer', new CreateCustomerTaskHandler());
-  handlers.set('create_job', new CreateJobVoiceTaskHandler());
-  handlers.set(
-    'reschedule_appointment',
-    new RescheduleAppointmentTaskHandler(deps.gateway, deps.appointmentRepo, deps.jobRepo),
-  );
-  handlers.set(
-    'cancel_appointment',
-    new CancelAppointmentTaskHandler(deps.appointmentRepo, deps.jobRepo),
-  );
-  handlers.set('reassign_appointment', new ReassignAppointmentTaskHandler());
-  handlers.set('add_crew_member', new AddCrewMemberTaskHandler());
-  handlers.set('remove_crew_member', new RemoveCrewMemberTaskHandler());
-  handlers.set('add_note', new AddNoteTaskHandler());
-  handlers.set('send_invoice', new SendInvoiceTaskHandler());
-  handlers.set('send_estimate', new SendEstimateTaskHandler());
-  handlers.set('send_estimate_nudge', new SendEstimateNudgeTaskHandler());
-  handlers.set(
-    'send_payment_reminder',
-    new SendPaymentReminderTaskHandler({
-      dunningEventRepo: deps.dunningEventRepo,
-      invoiceRepo: deps.invoicingDeps?.invoiceRepo,
-      jobRepo: deps.jobRepo,
-    }),
-  );
-  handlers.set('apply_late_fee', new ApplyLateFeeTaskHandler());
-  handlers.set('record_payment', new RecordPaymentTaskHandler());
-  handlers.set('emergency_dispatch', new EmergencyDispatchTaskHandler());
-  handlers.set('update_customer', new UpdateCustomerTaskHandler());
-  handlers.set('log_expense', new LogExpenseTaskHandler());
-  handlers.set('convert_lead', new ConvertLeadTaskHandler());
-  handlers.set('confirm_appointment', new ConfirmAppointmentTaskHandler(deps.appointmentRepo, deps.jobRepo));
-  handlers.set('mark_lead_lost', new MarkLeadLostTaskHandler());
-  handlers.set('add_service_location', new AddServiceLocationTaskHandler());
-  handlers.set('log_time_entry', new LogTimeEntryTaskHandler());
-  handlers.set('notify_delay', new NotifyDelayTaskHandler(deps.appointmentRepo, deps.jobRepo));
-  handlers.set('request_feedback', new RequestFeedbackTaskHandler());
-  handlers.set('batch_invoice', new BatchInvoiceTaskHandler(deps.invoicingDeps));
-  // U2 — milestone billing plan from a spoken sentence (deterministic
-  // parser; no LLM drafting call).
-  handlers.set('create_invoice_schedule', new CreateInvoiceScheduleTaskHandler());
+  // B5 — the "core" taxonomy (draft/edit/send/schedule/CRM/collections
+  // intents) is built by the shared registry. PR review finding (2026-07):
+  // invoiceReference → invoiceId resolution on update_invoice / send_invoice
+  // / send_payment_reminder reuses the SAME InvoiceRepository already wired
+  // for the batch_invoice on-ramp (deps.invoicingDeps?.invoiceRepo) rather
+  // than adding a new top-level dep — see InvoiceEditTaskDeps /
+  // SendInvoiceTaskDeps doc comments (ai/tasks/*.ts): candidates only, the
+  // missingFields gate is untouched.
+  //
+  // B4 — issue_invoice is now built by the shared registry too (proposalRepo
+  // + thresholdResolver threaded through), so it's the SAME handler instance
+  // shape routes/assistant.ts constructs — no more worker-local divergence.
+  // See the doc comment on IssueInvoiceTaskHandler (ai/orchestration/
+  // task-router.ts) for the resolution ladder.
+  const handlers = buildTaskHandlers({
+    gateway: deps.gateway,
+    catalogRepo: deps.catalogRepo,
+    slotConflictChecker: deps.slotConflictChecker,
+    availabilityFinder: deps.availabilityFinder,
+    appointmentRepo: deps.appointmentRepo,
+    jobRepo: deps.jobRepo,
+    invoiceRepo: deps.invoicingDeps?.invoiceRepo,
+    estimateRepo: deps.estimateRepo,
+    dunningEventRepo: deps.dunningEventRepo,
+    invoicingDeps: deps.invoicingDeps,
+    proposalRepo: deps.proposalRepo,
+    thresholdResolver: deps.thresholdResolver,
+    // B8 — create_customer draft-time duplicate detection parity.
+    customerRepo: deps.customerRepo,
+  });
+  // The handlers below stay surface-specific by design — see the doc
+  // comment on HandlerRegistryDeps (ai/orchestration/handler-registry.ts)
+  // for why each is excluded from the shared registry.
   // U3 — "respond to that 1-star review": resolve the review, dedup against
   // the polling worker's auto-draft, else draft with the same deps it uses.
   handlers.set(
@@ -2052,54 +1941,83 @@ export function createVoiceActionRouterWorker(
         }
 
         if (decomposition && decomposition.isMultiAction) {
-          await processChain(
-            deps,
-            handlers,
-            decomposition.segments,
-            {
-              tenantId,
-              userId,
-              conversationId,
-              recordingId,
-              customerId,
-              ...(jobId ? { jobId } : {}),
-              verticalPromptSection,
-              ...(activeStandingInstructions ? { activeStandingInstructions } : {}),
-              ...(extendedIntents ? { extendedIntents: true } : {}),
-            },
-            log,
-          );
+          try {
+            await processChain(
+              deps,
+              handlers,
+              decomposition.segments,
+              {
+                tenantId,
+                userId,
+                conversationId,
+                recordingId,
+                customerId,
+                ...(jobId ? { jobId } : {}),
+                verticalPromptSection,
+                ...(activeStandingInstructions ? { activeStandingInstructions } : {}),
+                ...(extendedIntents ? { extendedIntents: true } : {}),
+              },
+              log,
+            );
+          } catch (err) {
+            // OBS — fired before rethrow so the queue's retry semantics
+            // (instrument() above tags+captures to Sentry, the worker
+            // runtime retries) are completely unchanged.
+            recordVoiceError({ errorKind: 'action_router_failed', channel: 'worker', tenantId });
+            throw err;
+          }
           return;
         }
       }
 
-      const outcome = await processSegment(
-        deps,
-        handlers,
-        {
-          tenantId,
-          userId,
-          segmentText: effectiveTranscript,
-          conversationId,
-          recordingId,
-          customerId,
-          ...(jobId ? { jobId } : {}),
-          verticalPromptSection,
-          ...(activeStandingInstructions ? { activeStandingInstructions } : {}),
-          ...(extendedIntents ? { extendedIntents: true } : {}),
-          // Single-action path: apply the per-recording dedup keys.
-          applyDedup: true,
-        },
-        log,
-      );
-
-      if (outcome.kind === 'proposal') {
-        await createDeduped(
-          deps.proposalRepo,
-          stampSingleActionDedup(outcome.proposal, recordingId),
-          recordingId,
+      let outcome: Awaited<ReturnType<typeof processSegment>>;
+      try {
+        outcome = await processSegment(
+          deps,
+          handlers,
+          {
+            tenantId,
+            userId,
+            segmentText: effectiveTranscript,
+            conversationId,
+            recordingId,
+            customerId,
+            ...(jobId ? { jobId } : {}),
+            verticalPromptSection,
+            ...(activeStandingInstructions ? { activeStandingInstructions } : {}),
+            ...(extendedIntents ? { extendedIntents: true } : {}),
+            // Single-action path: apply the per-recording dedup keys.
+            applyDedup: true,
+          },
           log,
         );
+      } catch (err) {
+        // OBS — fired before rethrow; the queue's retry semantics
+        // (§11 H3's instrument() + worker runtime) are unchanged.
+        recordVoiceError({ errorKind: 'action_router_failed', channel: 'worker', tenantId });
+        throw err;
+      }
+
+      if (outcome.kind === 'proposal') {
+        try {
+          await createDeduped(
+            deps.proposalRepo,
+            stampSingleActionDedup(outcome.proposal, recordingId),
+            recordingId,
+            log,
+          );
+        } catch (err) {
+          // OBS — fired before rethrow; a proposalRepo failure here still
+          // propagates unchanged so the queue retries (pinned by the
+          // existing "propagates proposalRepo errors" test).
+          recordVoiceError({
+            errorKind: 'action_router_failed',
+            channel: 'worker',
+            tenantId,
+            taskType: outcome.proposal.proposalType,
+          });
+          throw err;
+        }
         log.info('voice-action-router: proposal created from voice', {
           proposalId: outcome.proposal.id,
           proposalType: outcome.proposal.proposalType,

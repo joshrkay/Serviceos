@@ -35,6 +35,7 @@ import {
   createExecutionHandlerRegistry,
   ExecutionContext,
 } from '../../src/proposals/execution/handlers';
+import { CreateInvoiceExecutionHandler } from '../../src/proposals/execution/invoice-execution-handler';
 
 describe('Postgres integration — voice draft_invoice → approve → execute → persist + audit', () => {
   let pool: Pool;
@@ -194,5 +195,235 @@ describe('Postgres integration — voice draft_invoice → approve → execute �
     const other = await createTestTenant(pool);
     const found = await invoiceRepo.findById(other.tenantId, invoiceId);
     expect(found).toBeNull();
+  });
+});
+
+describe('Postgres integration — B6: customer-only draft_invoice (no jobId) auto-opens a job', () => {
+  // B6 fix parity with DraftEstimateExecutionHandler's job auto-create:
+  // draftInvoicePayloadSchema now allows jobId to be absent, and
+  // CreateInvoiceExecutionHandler opens a job for the customer at
+  // execution time. The PRODUCTION registry (createExecutionHandlerRegistry)
+  // does not yet forward jobRepo/locationRepo into CreateInvoiceExecutionHandler
+  // — see the note in invoice-execution-handler.ts — so this test constructs
+  // the handler directly with real Pg repos to prove the auto-create path
+  // against genuine Postgres columns; the jobId-present path above already
+  // proves the registry + audit wiring.
+  let pool: Pool;
+  let invoiceRepo: PgInvoiceRepository;
+  let settingsRepo: PgSettingsRepository;
+  let auditRepo: PgAuditRepository;
+  let jobRepo: PgJobRepository;
+  let locationRepo: PgLocationRepository;
+  let tenant: { tenantId: string; userId: string };
+  let customerId: string;
+  let locationId: string;
+
+  beforeAll(async () => {
+    pool = await getSharedTestDb();
+    invoiceRepo = new PgInvoiceRepository(pool);
+    settingsRepo = new PgSettingsRepository(pool);
+    auditRepo = new PgAuditRepository(pool);
+    jobRepo = new PgJobRepository(pool);
+    locationRepo = new PgLocationRepository(pool);
+    const customerRepo = new PgCustomerRepository(pool);
+    tenant = await createTestTenant(pool);
+
+    customerId = crypto.randomUUID();
+    await customerRepo.create({
+      id: customerId,
+      tenantId: tenant.tenantId,
+      firstName: 'AutoJob',
+      lastName: 'Customer',
+      displayName: 'AutoJob Customer',
+      preferredChannel: 'phone',
+      smsConsent: false,
+      isArchived: false,
+      createdBy: tenant.userId,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    locationId = crypto.randomUUID();
+    await locationRepo.create({
+      id: locationId,
+      tenantId: tenant.tenantId,
+      customerId,
+      street1: '55 Autocreate Ave',
+      city: 'Austin',
+      state: 'TX',
+      postalCode: '78701',
+      country: 'USA',
+      isPrimary: true,
+      isArchived: false,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+  });
+
+  afterAll(async () => {
+    await closeSharedTestDb();
+  });
+
+  it('opens a job for the customer and persists the invoice + audit when jobId is absent', async () => {
+    const handler = new CreateInvoiceExecutionHandler(
+      invoiceRepo,
+      settingsRepo,
+      auditRepo,
+      jobRepo,
+      locationRepo,
+    );
+
+    const input: CreateProposalInput = {
+      tenantId: tenant.tenantId,
+      proposalType: 'draft_invoice',
+      payload: {
+        customerId,
+        lineItems: [buildLineItem('1', 'Drain Cleaning', 1, 15000, 1, true, 'labor')],
+      },
+      summary: 'Draft invoice from voice (customer-only)',
+      createdBy: tenant.userId,
+    };
+    let proposal: Proposal = createProposal(input);
+    proposal = transitionProposal(proposal, 'ready_for_review', tenant.userId);
+    proposal = transitionProposal(proposal, 'approved', tenant.userId);
+    proposal = { ...proposal, approvedAt: new Date(Date.now() - UNDO_WINDOW_MS - 100) };
+
+    const context: ExecutionContext = { tenantId: tenant.tenantId, executedBy: tenant.userId };
+    const result = await handler.execute(proposal, context);
+
+    expect(result.success).toBe(true);
+    expect(result.resultEntityId).toBeDefined();
+    const invoiceId = result.resultEntityId as string;
+
+    const { rows: invoiceRows } = await pool.query(
+      `SELECT job_id, status, total_cents FROM invoices WHERE id = $1`,
+      [invoiceId],
+    );
+    expect(invoiceRows).toHaveLength(1);
+    const jobId = invoiceRows[0].job_id as string;
+    expect(jobId).toBeTruthy();
+    expect(Number(invoiceRows[0].total_cents)).toBe(15000);
+
+    const { rows: jobRows } = await pool.query(
+      `SELECT customer_id, location_id FROM jobs WHERE id = $1`,
+      [jobId],
+    );
+    expect(jobRows).toHaveLength(1);
+    expect(jobRows[0].customer_id).toBe(customerId);
+    expect(jobRows[0].location_id).toBe(locationId);
+
+    const { rows: auditRows } = await pool.query(
+      `SELECT event_type FROM audit_events
+        WHERE entity_type = 'invoice' AND entity_id = $1 AND event_type = 'invoice.created'`,
+      [invoiceId],
+    );
+    expect(auditRows).toHaveLength(1);
+
+    const { rows: jobAuditRows } = await pool.query(
+      `SELECT event_type FROM audit_events
+        WHERE entity_type = 'job' AND entity_id = $1 AND event_type = 'job.created'`,
+      [jobId],
+    );
+    expect(jobAuditRows).toHaveLength(1);
+  });
+
+  it('fails with a clear message when the customer has no service location', async () => {
+    const handler = new CreateInvoiceExecutionHandler(
+      invoiceRepo,
+      settingsRepo,
+      auditRepo,
+      jobRepo,
+      locationRepo,
+    );
+    const customerRepo = new PgCustomerRepository(pool);
+    const noLocationCustomerId = crypto.randomUUID();
+    await customerRepo.create({
+      id: noLocationCustomerId,
+      tenantId: tenant.tenantId,
+      firstName: 'NoLocation',
+      lastName: 'Customer',
+      displayName: 'NoLocation Customer',
+      preferredChannel: 'phone',
+      smsConsent: false,
+      isArchived: false,
+      createdBy: tenant.userId,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    const input: CreateProposalInput = {
+      tenantId: tenant.tenantId,
+      proposalType: 'draft_invoice',
+      payload: {
+        customerId: noLocationCustomerId,
+        lineItems: [buildLineItem('1', 'Drain Cleaning', 1, 15000, 1, true, 'labor')],
+      },
+      summary: 'Draft invoice from voice (no location)',
+      createdBy: tenant.userId,
+    };
+    let proposal: Proposal = createProposal(input);
+    proposal = transitionProposal(proposal, 'ready_for_review', tenant.userId);
+    proposal = transitionProposal(proposal, 'approved', tenant.userId);
+    proposal = { ...proposal, approvedAt: new Date(Date.now() - UNDO_WINDOW_MS - 100) };
+
+    const context: ExecutionContext = { tenantId: tenant.tenantId, executedBy: tenant.userId };
+    const result = await handler.execute(proposal, context);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/service location/);
+  });
+
+  it('the jobId-present path is unchanged (existing job used verbatim, no auto-create)', async () => {
+    const registry = createExecutionHandlerRegistry({
+      invoiceRepo,
+      settingsRepo,
+      auditRepo,
+      jobRepo,
+    });
+    const proposalRepo = new InMemoryProposalRepository();
+    const executionRepo = new InMemoryProposalExecutionRepository();
+    const guard = new IdempotencyGuard(executionRepo, proposalRepo);
+    const executor = new ProposalExecutor(registry, proposalRepo, guard, auditRepo);
+
+    const existingJobId = crypto.randomUUID();
+    await jobRepo.create({
+      id: existingJobId,
+      tenantId: tenant.tenantId,
+      customerId,
+      locationId,
+      jobNumber: 'JOB-B6-1',
+      summary: 'Pre-existing job',
+      status: 'scheduled',
+      priority: 'normal',
+      createdBy: tenant.userId,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    const input: CreateProposalInput = {
+      tenantId: tenant.tenantId,
+      proposalType: 'draft_invoice',
+      payload: {
+        customerId,
+        jobId: existingJobId,
+        lineItems: [buildLineItem('1', 'Drain Cleaning', 1, 15000, 1, true, 'labor')],
+      },
+      summary: 'Draft invoice from voice (jobId present)',
+      createdBy: tenant.userId,
+    };
+    let proposal: Proposal = createProposal(input);
+    proposal = transitionProposal(proposal, 'ready_for_review', tenant.userId);
+    proposal = transitionProposal(proposal, 'approved', tenant.userId);
+    proposal = { ...proposal, approvedAt: new Date(Date.now() - UNDO_WINDOW_MS - 100) };
+    await proposalRepo.create(proposal);
+
+    const context: ExecutionContext = { tenantId: tenant.tenantId, executedBy: tenant.userId };
+    const { result } = await executor.execute(proposal, context);
+
+    expect(result.success).toBe(true);
+    const { rows } = await pool.query(`SELECT job_id FROM invoices WHERE id = $1`, [
+      result.resultEntityId,
+    ]);
+    expect(rows[0].job_id).toBe(existingJobId);
   });
 });

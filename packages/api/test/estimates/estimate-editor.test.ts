@@ -109,6 +109,115 @@ describe('applyEstimateEdits — remove_line_item', () => {
   });
 });
 
+// P1 data-corruption regression — mirrors invoices/invoice-editor.ts
+// exactly. The LLM edit-task prompt (ai/tasks/estimate-edit-task.ts) has
+// always emitted description-based remove_line_item/update_line_item
+// actions with NO numeric index. The old range guard
+// (`index < 0 || index >= length`) let `undefined` through both
+// comparisons, so `lineItems.splice(undefined, 1)` silently coerced to
+// `splice(0, 1)` — deleting the FIRST line item instead of the one the
+// operator named.
+describe('applyEstimateEdits — index-or-description resolution', () => {
+  it('CORRUPTION REGRESSION: an undefined index throws instead of silently removing the first line item', () => {
+    const estimate = makeEstimate();
+    expect(() =>
+      applyEstimateEdits(estimate, [{ type: 'remove_line_item', index: undefined as unknown as number }])
+    ).toThrow(ValidationError);
+    expect(estimate.lineItems).toHaveLength(2);
+    expect(estimate.lineItems[0].description).toBe('Site visit');
+    expect(estimate.lineItems[1].description).toBe('50-gallon heater');
+  });
+
+  it('CORRUPTION REGRESSION: a non-integer index (NaN) throws instead of coercing', () => {
+    const estimate = makeEstimate();
+    expect(() =>
+      applyEstimateEdits(estimate, [{ type: 'remove_line_item', index: NaN }])
+    ).toThrow(ValidationError);
+    expect(estimate.lineItems).toHaveLength(2);
+  });
+
+  it('CORRUPTION REGRESSION: a float index throws instead of truncating', () => {
+    const estimate = makeEstimate();
+    expect(() =>
+      applyEstimateEdits(estimate, [
+        { type: 'update_line_item', index: 0.5, lineItem: { description: 'x', quantity: 1, unitPrice: 100 } },
+      ])
+    ).toThrow(ValidationError);
+    expect(estimate.lineItems).toHaveLength(2);
+  });
+
+  it('remove_line_item with neither index nor description throws a clear error, not a silent first-item removal', () => {
+    const estimate = makeEstimate();
+    expect(() =>
+      applyEstimateEdits(estimate, [{ type: 'remove_line_item' } as EstimateEditAction])
+    ).toThrow(/numeric index or a description/i);
+    expect(estimate.lineItems).toHaveLength(2);
+  });
+
+  it('description resolves to the unique matching line item (remove)', () => {
+    const estimate = makeEstimate();
+    const { updatedEstimate } = applyEstimateEdits(estimate, [
+      { type: 'remove_line_item', description: 'Site visit' },
+    ]);
+    expect(updatedEstimate.lineItems).toHaveLength(1);
+    expect(updatedEstimate.lineItems[0].description).toBe('50-gallon heater');
+  });
+
+  it('description resolves case-insensitively and via substring match (remove)', () => {
+    const estimate = makeEstimate();
+    const { updatedEstimate } = applyEstimateEdits(estimate, [
+      { type: 'remove_line_item', description: 'site' },
+    ]);
+    expect(updatedEstimate.lineItems).toHaveLength(1);
+    expect(updatedEstimate.lineItems[0].description).toBe('50-gallon heater');
+  });
+
+  it('description resolves to the unique matching line item (update)', () => {
+    const estimate = makeEstimate();
+    const originalId = estimate.lineItems[0].id;
+    const { updatedEstimate } = applyEstimateEdits(estimate, [
+      {
+        type: 'update_line_item',
+        description: 'site visit',
+        lineItem: { description: 'Extended site visit', quantity: 1, unitPrice: 20000, category: 'labor' },
+      },
+    ]);
+    expect(updatedEstimate.lineItems[0].id).toBe(originalId);
+    expect(updatedEstimate.lineItems[0].description).toBe('Extended site visit');
+    expect(updatedEstimate.lineItems[1].description).toBe('50-gallon heater');
+  });
+
+  it('description with zero matches throws a clear "no line item matching" error', () => {
+    const estimate = makeEstimate();
+    expect(() =>
+      applyEstimateEdits(estimate, [{ type: 'remove_line_item', description: 'nonexistent widget' }])
+    ).toThrow(/no line item matching/i);
+    expect(estimate.lineItems).toHaveLength(2);
+  });
+
+  it('description with 2+ matches throws an ambiguity error instead of guessing', () => {
+    const estimate = makeEstimate({
+      lineItems: [
+        buildLineItem('li-1', 'Filter A', 1, 1000, 0, true, 'material'),
+        buildLineItem('li-2', 'Filter B', 1, 2000, 1, true, 'material'),
+      ],
+    });
+    expect(() =>
+      applyEstimateEdits(estimate, [{ type: 'remove_line_item', description: 'Filter' }])
+    ).toThrow(/matches 2 line items/i);
+    expect(estimate.lineItems).toHaveLength(2);
+  });
+
+  it('numeric index still works (backward compat) even though description is now also supported', () => {
+    const estimate = makeEstimate();
+    const { updatedEstimate } = applyEstimateEdits(estimate, [
+      { type: 'remove_line_item', index: 0 },
+    ]);
+    expect(updatedEstimate.lineItems).toHaveLength(1);
+    expect(updatedEstimate.lineItems[0].description).toBe('50-gallon heater');
+  });
+});
+
 describe('applyEstimateEdits — update_line_item', () => {
   it('replaces a line item and keeps its id', () => {
     const estimate = makeEstimate();
@@ -182,5 +291,60 @@ describe('applyEstimateEdits — status guard', () => {
 describe('applyEstimateEdits — empty actions', () => {
   it('rejects an empty action list', () => {
     expect(() => applyEstimateEdits(makeEstimate(), [])).toThrow(/at least one/i);
+  });
+});
+
+describe('applyEstimateEdits — pricingSource provenance', () => {
+  it('carries pricingSource through add_line_item when the grounder stamped one', () => {
+    const estimate = makeEstimate();
+    const { updatedEstimate } = applyEstimateEdits(estimate, [
+      {
+        type: 'add_line_item',
+        lineItem: {
+          description: 'Catalog-grounded part',
+          quantity: 1,
+          unitPrice: 4200,
+          category: 'material',
+          pricingSource: 'catalog',
+        } satisfies EstimateEditLineItemInput,
+      },
+    ]);
+
+    expect(updatedEstimate.lineItems[2].pricingSource).toBe('catalog');
+  });
+
+  it('carries pricingSource through update_line_item when the grounder stamped one', () => {
+    const estimate = makeEstimate();
+    const { updatedEstimate } = applyEstimateEdits(estimate, [
+      {
+        type: 'update_line_item',
+        index: 1,
+        lineItem: {
+          description: 'Tankless heater',
+          quantity: 1,
+          unitPrice: 145000,
+          category: 'material',
+          pricingSource: 'ambiguous',
+        } satisfies EstimateEditLineItemInput,
+      },
+    ]);
+
+    expect(updatedEstimate.lineItems[1].pricingSource).toBe('ambiguous');
+  });
+
+  it('leaves pricingSource undefined when the action carries no grounding signal', () => {
+    const estimate = makeEstimate();
+    const { updatedEstimate } = applyEstimateEdits(estimate, [
+      {
+        type: 'add_line_item',
+        lineItem: {
+          description: 'Manually entered line',
+          quantity: 1,
+          unitPrice: 1000,
+        } satisfies EstimateEditLineItemInput,
+      },
+    ]);
+
+    expect(updatedEstimate.lineItems[2].pricingSource).toBeUndefined();
   });
 });

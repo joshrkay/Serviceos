@@ -46,6 +46,8 @@ export interface User {
 export interface UserListOptions {
   /** Filter by role; omit to return every user in the tenant. */
   role?: UserRole;
+  /** Cap the number of rows returned. Omit to return every matching row. */
+  limit?: number;
 }
 
 export interface UpdateUserInput {
@@ -187,10 +189,11 @@ export class InMemoryUserRepository implements UserRepository {
   async findByTenant(tenantId: string, options?: UserListOptions): Promise<User[]> {
     const all = Array.from(this.users.values()).filter((u) => u.tenantId === tenantId);
     const filtered = options?.role ? all.filter((u) => u.role === options.role) : all;
-    return filtered
-      .slice()
-      .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
-      .map((u) => ({ ...u }));
+    // Stable order — must match the pg implementation's `ORDER BY created_at
+    // ASC` so a SQL `LIMIT` window and this in-memory `.slice` agree.
+    const sorted = filtered.slice().sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+    const bounded = options?.limit !== undefined ? sorted.slice(0, Math.max(0, options.limit)) : sorted;
+    return bounded.map((u) => ({ ...u }));
   }
 
   async findById(tenantId: string, id: string): Promise<User | null> {

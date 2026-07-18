@@ -55,16 +55,18 @@ async function loadCatalog(): Promise<Catalog> {
 }
 
 /**
- * Every proposal type that has an execution handler. The two conditional
+ * Every proposal type that has an execution handler. The conditional
  * blocks in createExecutionHandlerRegistry register update_invoice /
- * issue_invoice / apply_late_fee (needs invoiceRepo) and update_estimate
- * (needs estimateRepo), so pass truthy stubs to capture the full set. We
- * only read each handler's `proposalType`, never call it.
+ * issue_invoice / apply_late_fee (needs invoiceRepo), update_estimate
+ * (needs estimateRepo), and update_job (B7, needs jobRepo), so pass truthy
+ * stubs to capture the full set. We only read each handler's
+ * `proposalType`, never call it.
  */
 function allHandlerTypes(): Set<ProposalType> {
   const registry = createExecutionHandlerRegistry({
     invoiceRepo: {} as any,
     estimateRepo: {} as any,
+    jobRepo: {} as any,
   });
   return new Set(registry.keys());
 }

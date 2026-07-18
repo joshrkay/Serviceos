@@ -2,15 +2,25 @@ import { TaskHandler, TaskContext, TaskResult } from './task-handlers';
 import { createProposal, CreateProposalInput } from '../../proposals/proposal';
 import { LLMGateway } from '../gateway/gateway';
 import { assessConfidence, getConfidenceLevel } from '../guardrails/confidence';
-import type { ConfidenceLevel } from '../guardrails/confidence';
 import type { ProposalConfidenceMeta } from '../../proposals/contracts';
 import type { CatalogItem, CatalogItemRepository } from '../../catalog/catalog-item';
-import {
-  buildCatalogPromptSection,
-  resolveSpokenLineItems,
-  CATALOG_PROMPT_ITEM_CAP,
-} from './catalog-resolution';
+import type { InvoiceRepository } from '../../invoices/invoice';
+import { buildCatalogPromptSection } from './catalog-resolution';
 import { UNCATALOGUED_CONFIDENCE_CAP } from '../resolution/catalog-resolver';
+import { groundEditActionPricing } from '../resolution/edit-action-grounding';
+import { candidatesForReference } from '../resolution/reference-candidates';
+import type { EntityCandidate } from '../resolution/entity-resolver';
+
+// Mirrors the execution-side check (isUuid in
+// proposals/execution/voice-extended-handlers.ts / UUID_RE in
+// proposals/execution/issue-invoice-handler.ts): a classifier/LLM-extracted
+// reference is free text ("invoice INV-0042", "the Henderson invoice") in
+// the overwhelming case, but may already BE the resolved id on a re-draft.
+const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+function isUuid(value: unknown): value is string {
+  return typeof value === 'string' && UUID_RE.test(value);
+}
 
 /**
  * InvoiceEditTaskHandler — produces `update_invoice` proposals from
@@ -97,124 +107,18 @@ function buildPayload(parsed: Record<string, unknown> | null): Record<string, un
 }
 
 /**
- * VOX-51 — post-process LLM edit actions through catalog resolution.
- *
- * Runs the SAME money-correctness contract as draft_invoice: an
- * AI-invented price must never be trusted into an auto-approvable
- * proposal. For every `add_line_item` / `update_line_item` action:
- * - resolved against exactly one catalog item → the catalog's
- *   `unitPriceCents` OVERWRITES the LLM's price (never trust LLM
- *   prices), and `catalogItemId` is stamped on the line item.
- * - unresolved (not in catalog, ambiguous, OR no catalog to ground
- *   against) → the LLM price is UNTRUSTED: flagged
- *   `pricingSource:'uncatalogued'` + `needsPricing:true`, `unitPriceCents`
- *   nulled, and the line drives `anyUncatalogued` so the handler caps
- *   confidence AND stamps `_meta.overallConfidence:'low'` (hard-blocks
- *   auto-approval). LLM text kept verbatim — never guessed.
- *
- * Empty catalog is NOT a short-circuit (that was the VOX-51 hole where a
- * new/empty-catalog tenant let an LLM-priced edit auto-approve): with no
- * catalog every priced line is uncatalogued, exactly like the draft
- * path's markAllUncatalogued. The executable `unitPrice` is left numeric
- * so the update_invoice Zod contract (which requires it) still
- * validates; it can never reach execution without a human first
- * reviewing the low-confidence proposal.
+ * VOX-51 — LLM edit actions are grounded through the shared
+ * `groundEditActionPricing` (ai/resolution/edit-action-grounding.ts),
+ * which runs the SAME money-correctness contract as draft_invoice: a
+ * catalog match OVERWRITES the LLM price; an uncatalogued / ambiguous /
+ * price-conflict / no-catalog line is UNTRUSTED — `unitPriceCents` nulled,
+ * `pricingSource` flagged, `needsPricing:true` — and drives
+ * `anyUncatalogued` so the handler caps confidence AND stamps
+ * `_meta.overallConfidence:'low'`, hard-blocking auto-approval. The
+ * executable `unitPrice` is left numeric so the update_invoice Zod
+ * contract (which requires it) still validates; it can never reach
+ * execution without a human first reviewing the low-confidence proposal.
  */
-interface EditGroundingResult {
-  payload: Record<string, unknown>;
-  anyUncatalogued: boolean;
-  anyCatalogPriced: boolean;
-  markers: Array<{ path: string; reason: string }>;
-  fieldConfidence: Record<string, ConfidenceLevel>;
-}
-
-function groundEditActionPricing(
-  payload: Record<string, unknown>,
-  catalogItems: CatalogItem[],
-): EditGroundingResult {
-  const markers: Array<{ path: string; reason: string }> = [];
-  const fieldConfidence: Record<string, ConfidenceLevel> = {};
-  let anyUncatalogued = false;
-  let anyCatalogPriced = false;
-
-  if (!Array.isArray(payload.editActions)) {
-    return { payload, anyUncatalogued, anyCatalogPriced, markers, fieldConfidence };
-  }
-
-  const editActions = (payload.editActions as Array<Record<string, unknown>>).map((action, idx) => {
-    if (
-      !action ||
-      (action.type !== 'add_line_item' && action.type !== 'update_line_item') ||
-      typeof action.lineItem !== 'object' ||
-      action.lineItem === null
-    ) {
-      return action;
-    }
-
-    const lineItem = action.lineItem as Record<string, unknown>;
-    const description = typeof lineItem.description === 'string' ? lineItem.description : '';
-    const quantity = typeof lineItem.quantity === 'number' ? lineItem.quantity : undefined;
-
-    // No catalog to ground against ⇒ every priced line is uncatalogued
-    // (never trust the LLM price), mirroring markAllUncatalogued.
-    const resolved =
-      catalogItems.length > 0
-        ? resolveSpokenLineItems(
-            [{ description, ...(quantity !== undefined ? { quantity } : {}) }],
-            catalogItems,
-          ).resolved
-        : [];
-
-    if (resolved.length === 1) {
-      const match = resolved[0];
-      anyCatalogPriced = true;
-      return {
-        ...action,
-        lineItem: {
-          ...lineItem,
-          description: match.description,
-          quantity: match.quantity,
-          // Catalog price ALWAYS overwrites the LLM's guess. `unitPrice`
-          // (integer cents) is what the invoice editor executes;
-          // `unitPriceCents` mirrors it for the approval UI.
-          unitPrice: match.unitPriceCents,
-          unitPriceCents: match.unitPriceCents,
-          catalogItemId: match.catalogItemId,
-          pricingSource: 'catalog',
-          needsPricing: false,
-        },
-      };
-    }
-
-    // Unresolved / ambiguous / no-catalog: the LLM price is untrusted.
-    anyUncatalogued = true;
-    const path = `editActions[${idx}].lineItem.unitPrice`;
-    fieldConfidence[path] = 'low';
-    markers.push({
-      path,
-      reason: `"${description}" is not in the tenant catalog — the price is AI-estimated and needs review`,
-    });
-    return {
-      ...action,
-      lineItem: {
-        ...lineItem,
-        // Executable `unitPrice` kept numeric for the Zod contract, but the
-        // proposal cannot auto-approve (see _meta low + confidence cap).
-        unitPriceCents: null,
-        pricingSource: 'uncatalogued',
-        needsPricing: true,
-      },
-    };
-  });
-
-  return {
-    payload: { ...payload, editActions },
-    anyUncatalogued,
-    anyCatalogPriced,
-    markers,
-    fieldConfidence,
-  };
-}
 
 export interface InvoiceEditTaskDeps {
   /**
@@ -223,6 +127,27 @@ export interface InvoiceEditTaskDeps {
    * (P22-001). When absent, behavior is identical to pre-P22.
    */
   catalogRepo?: CatalogItemRepository;
+  /**
+   * PR review finding (2026-07): UpdateInvoiceExecutionHandler
+   * (proposals/execution/update-invoice-handler.ts) requires
+   * payload.invoiceId to ALREADY be a string id and never reads
+   * invoiceReference — there is no resolution step between drafting and
+   * execution. Mirrors the send_invoice fix (SendInvoiceTaskHandler in
+   * voice-extended-tasks.ts).
+   *
+   * Verify-or-gate (2026-07 review): an id is trusted onto payload.invoiceId
+   * ONLY when this repo confirms it (findById, tenant-scoped) — whether it
+   * arrived as an already-UUID reference OR as an unambiguous free-text
+   * search match. A repo-confirmed id additionally stamps
+   * `sourceContext.verifiedIds` (the B4 allowlist) so it survives
+   * assistant.ts's dropUnverifiedIds. Anything that doesn't resolve
+   * against the repo (no repo, no match, >1 match, or a fabricated UUID
+   * that misses findById) stamps missingFields: ['invoiceId'] so
+   * approveProposal blocks until the operator resolves it on the review
+   * card, instead of the card being approvable and execution failing on
+   * the unresolved reference.
+   */
+  invoiceRepo?: Pick<InvoiceRepository, 'findById' | 'findByTenant'>;
 }
 
 export class InvoiceEditTaskHandler implements TaskHandler {
@@ -250,11 +175,108 @@ export class InvoiceEditTaskHandler implements TaskHandler {
     }
   }
 
+  /**
+   * Best-effort invoiceReference → invoiceId resolution. Returns the
+   * missingFields array (and, on a repo-verified id, a `verifiedIds`
+   * allowlist entry) to stamp on the proposal. Mutates `payload` in place
+   * (adds invoiceId) whenever resolution succeeds; invoiceReference is left
+   * untouched either way so the review card can always show what the
+   * operator said.
+   *
+   * Verify-or-gate rule: the gate is lifted ONLY when the wired repo
+   * confirms the id via findById (tenant-scoped) — never merely because
+   * the reference "looks like" a UUID.
+   *
+   * Why a bare UUID is NOT trusted on its own: `buildPayload` copies
+   * `invoiceReference` straight from the LLM's JSON, so an id-shaped
+   * reference is an ASSUMPTION about model output, not a fact. The old
+   * rule ("a literal UUID is guaranteed present in text/entities, so
+   * dropUnverifiedIds keeps it") does not hold for a HALLUCINATED UUID:
+   * the model can emit an id that appears nowhere in the operator's words.
+   * On the assistant surface `dropUnverifiedIds` would then strip that
+   * fabricated id (not in the haystack, not in verifiedIds), leaving an
+   * APPROVABLE proposal with NO invoiceId and NO gate — nothing re-gates
+   * post-scrub, and approveProposal only checks missingFields. So a UUID
+   * reference is VERIFIED against the repo; a repo-confirmed id is both
+   * stamped onto payload.invoiceId AND recorded in `verifiedIds`
+   * ({ invoiceId }) — the B4 allowlist dropUnverifiedIds honors, safe
+   * precisely because it was produced by a repo lookup, not LLM text. A
+   * miss (or an absent repo) fails closed: nothing trusted is stamped and
+   * the proposal is gated, exactly like a free-text reference.
+   *
+   * A free-text (non-UUID) reference is still best-effort searched: an
+   * unambiguous single match stamps payload.invoiceId for review-card
+   * context but NEVER lifts the gate (dropUnverifiedIds strips a
+   * search-resolved id since it isn't literally in the operator's text —
+   * that's why the gate can't depend on it). voice-action-router.ts has
+   * no such guard, but the two surfaces must gate identically or the same
+   * transcript would behave differently depending on which one drafted it.
+   *
+   * Never throws: a repo hiccup, a UUID miss, or an ambiguous match simply
+   * leaves the proposal gated.
+   *
+   * B2 — the free-text search that identifies an unambiguous single match
+   * also doubles as the candidate list for the review card's one-tap
+   * AmbiguityPicker (`candidatesForReference`'s top-5). Candidates are
+   * returned alongside missingFields for the caller to stamp onto
+   * `sourceContext` — they NEVER lift the gate on their own.
+   */
+  private async resolveInvoiceId(
+    tenantId: string,
+    payload: Record<string, unknown>,
+  ): Promise<{
+    missingFields: string[];
+    candidates: EntityCandidate[];
+    verifiedIds?: Record<string, string>;
+  }> {
+    const reference = payload.invoiceReference;
+
+    if (isUuid(reference)) {
+      // Verify-or-gate: a UUID in LLM JSON is an assumption, not a fact.
+      // Confirm it against the repo before trusting it; a repo-confirmed id
+      // is allowlisted via verifiedIds so it survives dropUnverifiedIds.
+      if (this.deps.invoiceRepo) {
+        const match = await this.deps.invoiceRepo.findById(tenantId, reference).catch(() => null);
+        if (match) {
+          payload.invoiceId = reference;
+          return { missingFields: [], candidates: [], verifiedIds: { invoiceId: reference } };
+        }
+      }
+      // No repo, or the UUID misses findById (fabricated/unverifiable) —
+      // fail closed: stamp nothing trusted and gate.
+      return { missingFields: ['invoiceId'], candidates: [] };
+    }
+
+    let candidates: EntityCandidate[] = [];
+    if (typeof reference === 'string' && reference.trim().length > 0 && this.deps.invoiceRepo) {
+      // ILIKE search on invoice_number / customer_message (failure-soft —
+      // see candidatesForReference's own doc comment); an UNAMBIGUOUS single
+      // match stamps payload.invoiceId for review-card context only.
+      candidates = await candidatesForReference({
+        tenantId,
+        reference,
+        kind: 'invoice',
+        invoiceRepo: this.deps.invoiceRepo,
+      });
+      if (candidates.length === 1) {
+        payload.invoiceId = candidates[0].id;
+      }
+    }
+
+    // Free-text reference (resolved or not) — always gated. See the
+    // method doc comment for why "resolved via search" doesn't bypass
+    // this on its own.
+    return { missingFields: ['invoiceId'], candidates };
+  }
+
   async handle(context: TaskContext): Promise<TaskResult> {
     const catalogItems = await this.fetchCatalog(context.tenantId);
 
     const llmResponse = await this.gateway.complete({
       taskType: 'update_invoice',
+      // Top-level tenantId so the gateway keys this tenant's concurrency
+      // quota / cache bucket correctly (never the shared SYSTEM_TENANT_ID).
+      tenantId: context.tenantId,
       messages: [
         { role: 'system', content: INVOICE_EDIT_SYSTEM_PROMPT },
         { role: 'user', content: this.buildUserMessage(context, catalogItems) },
@@ -281,8 +303,14 @@ export class InvoiceEditTaskHandler implements TaskHandler {
     // hard-blocks auto-approval via the RV-007 confidence-marker guard,
     // independent of the numeric score AND of any tenant
     // auto_approve_threshold override. An AI-invented edit price must always
-    // reach a human.
-    if (grounding.anyUncatalogued || grounding.anyCatalogPriced) {
+    // reach a human. B3 — `anyAmbiguousWithCandidates` also surfaces markers
+    // here (so the review UI shows why a line needs a pick), but deliberately
+    // does NOT drive `overallConfidence` to 'low' — see edit-action-grounding.ts
+    // "SPLIT REVIEW SIGNAL": that stamp is never lifted by resolveProposalLine,
+    // so stamping a resolvable ambiguity 'low' would keep blocking approval
+    // after the operator resolves it. Only `anyUncatalogued` (nothing to
+    // resolve to) drives the sticky 'low' stamp.
+    if (grounding.anyUncatalogued || grounding.anyCatalogPriced || grounding.anyAmbiguousWithCandidates) {
       const meta: ProposalConfidenceMeta = {
         overallConfidence: grounding.anyUncatalogued
           ? 'low'
@@ -295,6 +323,47 @@ export class InvoiceEditTaskHandler implements TaskHandler {
       payload._meta = meta;
     }
 
+    // PR review finding (2026-07): resolve the free-text invoiceReference
+    // onto payload.invoiceId (direct UUID, or an unambiguous invoiceRepo
+    // match) before this proposal can be approved — see resolveInvoiceId /
+    // InvoiceEditTaskDeps.invoiceRepo above. Anything that doesn't resolve
+    // gates the proposal via missingFields so approveProposal blocks it
+    // instead of letting an unresolved edit reach
+    // UpdateInvoiceExecutionHandler, which has no resolution step of its
+    // own and would fail after approval.
+    const { missingFields: invoiceIdMissingFields, candidates, verifiedIds } =
+      await this.resolveInvoiceId(context.tenantId, payload);
+
+    // B3 — the invoiceId gate (B2) and the editAction catalog gates
+    // (edit-action-grounding.ts) are disjoint string sets (`invoiceId` vs
+    // `editActions[i].lineItem.catalogItemId`); they compose by simple
+    // concatenation, resolved independently by resolve-entity.ts and
+    // resolve-line.ts respectively.
+    const missingFields = [...invoiceIdMissingFields, ...grounding.missingFields];
+
+    // B2 — layer the resolved candidate list ON TOP of the gate (never a
+    // substitute for it): only recorded while the gate is still present, so
+    // the AmbiguityPicker only ever appears on a card the operator still
+    // needs to act on.
+    const sourceContext: Record<string, unknown> = {
+      ...(context.conversationId ? { conversationId: context.conversationId } : {}),
+      // Verify-or-gate: a repo-confirmed invoiceId rides the B4 allowlist so
+      // it survives assistant.ts's dropUnverifiedIds (repo-verified by
+      // construction — never copied from LLM/classifier text).
+      ...(verifiedIds ? { verifiedIds } : {}),
+      ...(invoiceIdMissingFields.length > 0 && candidates.length > 0
+        ? {
+            entityCandidates: candidates,
+            entityKind: 'invoice',
+            entityReference: payload.invoiceReference,
+          }
+        : {}),
+      // B3 — edit-action catalog candidates, keyed by edit-action index;
+      // resolve-line.ts reads this the same way it reads the draft path's
+      // sourceContext.catalogResolution.
+      ...(grounding.catalogResolution ? { catalogResolution: grounding.catalogResolution } : {}),
+    };
+
     const input: CreateProposalInput = {
       tenantId: context.tenantId,
       proposalType: this.taskType,
@@ -302,13 +371,14 @@ export class InvoiceEditTaskHandler implements TaskHandler {
       summary: context.message,
       confidenceScore,
       confidenceFactors,
-      sourceContext: context.conversationId ? { conversationId: context.conversationId } : undefined,
+      sourceContext: Object.keys(sourceContext).length > 0 ? sourceContext : undefined,
       createdBy: context.userId,
       // update_invoice touches an existing entity but the target is
       // still a draft (non-draft invoices are blocked at execute time).
       // Classified as `capture`, same as draft_invoice. The high
       // confidence threshold + operator review prevent surprise edits.
       sourceTrustTier: 'autonomous',
+      ...(missingFields.length > 0 ? { missingFields } : {}),
       // PR B — propagate tenant override from context.
       ...(context.tenantThresholdOverride
         ? { tenantThresholdOverride: context.tenantThresholdOverride }
@@ -337,10 +407,4 @@ export class InvoiceEditTaskHandler implements TaskHandler {
   }
 }
 
-export {
-  INVOICE_EDIT_SYSTEM_PROMPT,
-  tryParseJson,
-  buildPayload,
-  groundEditActionPricing,
-  CATALOG_PROMPT_ITEM_CAP,
-};
+export { INVOICE_EDIT_SYSTEM_PROMPT, tryParseJson, buildPayload };

@@ -10,6 +10,7 @@ import { IssueInvoiceExecutionHandler } from './issue-invoice-handler';
 import { SendPaymentReminderExecutionHandler } from './send-payment-reminder-handler';
 import { ApplyLateFeeExecutionHandler } from './apply-late-fee-handler';
 import { UpdateEstimateExecutionHandler } from './update-estimate-handler';
+import { UpdateJobExecutionHandler } from './update-job-handler';
 import { ReassignAppointmentExecutionHandler } from './reassignment-handler';
 import { RescheduleAppointmentExecutionHandler } from './reschedule-handler';
 import { AddCrewMemberExecutionHandler, RemoveCrewMemberExecutionHandler } from './crew-handler';
@@ -36,6 +37,9 @@ import { AuditRepository, InMemoryAuditRepository, createAuditEvent } from '../.
 import type { ConsentEventRepository } from '../../compliance/consent-events';
 import { ConflictError, ValidationError } from '../../shared/errors';
 import { JobRepository, createJob } from '../../jobs/job';
+import { JobTimelineRepository } from '../../jobs/job-lifecycle';
+import { JobCompletionEffectsDeps } from '../../jobs/completion-effects';
+import { TimeEntryRepository } from '../../time-tracking/time-entry';
 import { RefreshJobMoneyStateDeps } from '../../jobs/job-money-state';
 import { AppointmentRepository, createAppointment } from '../../appointments/appointment';
 import { AssignmentRepository, assignTechnician } from '../../appointments/assignment';
@@ -928,6 +932,12 @@ export class SendEstimateNudgeExecutionHandler implements ExecutionHandler {
 export function createExecutionHandlerRegistry(deps?: {
   customerRepo?: CustomerRepository;
   jobRepo?: JobRepository;
+  // B7 (money-loss fix) — required so update_job routes a status change through
+  // the governed transitionJobStatus (timeline entry + completedAt).
+  timelineRepo?: JobTimelineRepository;
+  // B7 — recompute the labor line from logged time before auto-invoicing on
+  // completion (mirrors the route's autoInvoiceDeps.timeEntryRepo).
+  timeEntryRepo?: TimeEntryRepository;
   locationRepo?: LocationRepository;
   appointmentRepo?: AppointmentRepository;
   assignmentRepo?: AssignmentRepository;
@@ -1024,7 +1034,13 @@ export function createExecutionHandlerRegistry(deps?: {
       deps?.locationRepo,
       deps?.auditRepo,
     ),
-    new CreateInvoiceExecutionHandler(deps?.invoiceRepo, deps?.settingsRepo, deps?.auditRepo),
+    new CreateInvoiceExecutionHandler(
+      deps?.invoiceRepo,
+      deps?.settingsRepo,
+      deps?.auditRepo,
+      deps?.jobRepo,
+      deps?.locationRepo,
+    ),
     new CreateInvoiceScheduleExecutionHandler(deps?.scheduleRepo, deps?.invoiceRepo, deps?.settingsRepo, deps?.estimateRepo),
     new BatchInvoiceExecutionHandler(deps?.proposalRepo),
     new ReassignAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo, deps?.feasibilityDeps, deps?.auditRepo),
@@ -1158,6 +1174,36 @@ export function createExecutionHandlerRegistry(deps?: {
       // Fail-closed inside the handler when the repo is absent.
       deps.jobRepo,
     ));
+  }
+  // B7 — update_job mutates an EXISTING job; only registered when the job
+  // repo is wired (mirrors update_estimate/update_invoice above — no
+  // synthetic-id passthrough for an edit to a real, already-created entity).
+  if (deps?.jobRepo) {
+    // Completion side effects (auto-invoice + milestone minting) fire when a
+    // voice-approved update_job marks a job completed — the SAME effects the
+    // route runs. Built only when the invoice/estimate/proposal/settings deps
+    // are present; scheduleRepo/timeEntryRepo are optional (milestone minting /
+    // labor-from-time-entries degrade off when absent).
+    const jobCompletionDeps: JobCompletionEffectsDeps | undefined =
+      deps.estimateRepo && deps.invoiceRepo && deps.proposalRepo && deps.settingsRepo
+        ? {
+            estimateRepo: deps.estimateRepo,
+            invoiceRepo: deps.invoiceRepo,
+            proposalRepo: deps.proposalRepo,
+            settingsRepo: deps.settingsRepo,
+            ...(deps.auditRepo ? { auditRepo: deps.auditRepo } : {}),
+            ...(deps.scheduleRepo ? { scheduleRepo: deps.scheduleRepo } : {}),
+            ...(deps.timeEntryRepo ? { timeEntryRepo: deps.timeEntryRepo } : {}),
+          }
+        : undefined;
+    handlers.push(
+      new UpdateJobExecutionHandler(
+        deps.jobRepo,
+        deps.auditRepo,
+        deps.timelineRepo,
+        jobCompletionDeps,
+      ),
+    );
   }
 
   const registry = new Map<ProposalType, ExecutionHandler>();

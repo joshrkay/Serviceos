@@ -19,9 +19,10 @@ export function mapLineItemRow(row: Record<string, any>): LineItem {
     groupLabel: row.group_label ?? undefined,
     isOptional: row.is_optional ?? undefined,
     isDefaultSelected: row.is_default_selected ?? undefined,
-    // Catalog-grounding signal (estimate_line_items only; the column does
-    // not exist on invoice_line_items, so row.pricing_source is undefined
-    // there → undefined here, leaving invoice lines untouched).
+    // Catalog-grounding signal — persisted on BOTH estimate_line_items
+    // (migration 179) and invoice_line_items (migration 255). NULL on
+    // legacy rows and manual creates → undefined here (treated as NOT
+    // grounded).
     pricingSource: row.pricing_source ?? undefined,
     // EE-4 — frozen image snapshot (estimate_line_items only; the column does
     // not exist on invoice_line_items → undefined there).

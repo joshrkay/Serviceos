@@ -64,6 +64,24 @@ import { costIncurredEvent } from '../voice-quality/events';
  *   - input:      $3.00 / 1M tokens →   300 cents/M
  *   - output:    $15.00 / 1M tokens →  1500 cents/M
  *   - cache read: $0.30 / 1M tokens →    30 cents/M (90% discount)
+ *
+ * NOT migrated to `ai/gateway/model-pricing.ts` (the production gateway's
+ * pricing table, added alongside per-call cost accounting). Two reasons:
+ *   1. This eval harness prices a THIRD rate class — cached input tokens at
+ *      a 90% discount — that `model-pricing.ts` deliberately doesn't model
+ *      (the production gateway's `OpenAICompatibleProvider` doesn't surface
+ *      `cached_tokens`, so there's nothing to apply the discount to there).
+ *      Bolting cache-rate support onto the production module for this one
+ *      eval-only consumer isn't worth the complexity.
+ *   2. `model-pricing.ts`'s current published rate for Haiku 4.5 is
+ *      $1.00/$5.00 per 1M tokens (see its header) — LOWER than the $3.00/
+ *      $15.00 hard-coded here. Swapping these constants for the shared
+ *      module's would silently change the voice-quality harness's per-run
+ *      cost-cap math and any budget-threshold assertions in its tests. Since
+ *      this file's whole purpose is a stable, eval-specific cost model,
+ *      leaving the (intentionally pinned, if now stale) constants alone beats
+ *      an unreviewed behavior change to those tests as a side effect of
+ *      unrelated production cost-accounting work.
  */
 export const HAIKU_INPUT_CENTS_PER_MTOKEN = 300;
 export const HAIKU_OUTPUT_CENTS_PER_MTOKEN = 1500;

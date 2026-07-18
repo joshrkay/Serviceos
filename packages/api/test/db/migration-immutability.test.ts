@@ -416,13 +416,19 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['251_leads_service_address', '0033dc709e9d1fb22584a20873826d59fa2430c6554c0846e4f9c86e60c4f82b'],
   ['252_technician_location_ping_idempotency', '5f309f1a77d6c208f6a8eb5ca0fe34eb8db2c86f7ebe47a814275d3ba4d9ed5d'],
   ['253_users_tenant_clerk_unique', 'b96f4d052f79ac1b8a30a9073fb42d323ee98a72193e3c9206ffc14c40bb864b'],
+  // Per-call LLM cost accounting — ai_runs.cost_micro_cents (nullable BIGINT).
+  ['254_ai_runs_cost_micro_cents', '7de878660d668a14ee98e68d2b1f8d4911c73940706909cbc6d7f056c67ea150'],
+  // invoice_line_items.pricing_source (mirrors 179 on invoice lines).
+  ['255_invoice_line_items_pricing_source', 'ca9cd1c13a324f59c5c67de5abb650f658aa3ef182033a3882be663b4b3134e4'],
   // EE-4 (visual proposals): optional image_file_id on catalog_items — the
-  // catalog-side reference an equipment photo is uploaded against.
-  ['254_catalog_items_image_file_id', 'f6b2878b3de9e8b189c405fe4f68ca864484ed853b67126416383b9d3f0c5ced'],
+  // catalog-side reference an equipment photo is uploaded against. Renumbered
+  // 254→256 on the main merge (PR #696 claimed 254/255); SQL value unchanged →
+  // hash preserved.
+  ['256_catalog_items_image_file_id', 'f6b2878b3de9e8b189c405fe4f68ca864484ed853b67126416383b9d3f0c5ced'],
   // EE-4 (visual proposals): frozen image_file_id snapshot on
   // estimate_line_items — carries the photo onto the customer-facing proposal
-  // for both manual and AI-drafted lines.
-  ['255_estimate_line_items_image_file_id', 'e72794dcb73addfe34c11844cb7f8bd1bd00314266b246dcaeb97fcebd9dae93'],
+  // for both manual and AI-drafted lines. Renumbered 255→257; hash preserved.
+  ['257_estimate_line_items_image_file_id', 'e72794dcb73addfe34c11844cb7f8bd1bd00314266b246dcaeb97fcebd9dae93'],
 ];
 
 function hashMigration(value: string): string {

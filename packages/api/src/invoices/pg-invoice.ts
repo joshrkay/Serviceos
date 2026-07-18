@@ -415,8 +415,9 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
       await client.query(
         `INSERT INTO invoice_line_items (
           id, tenant_id, invoice_id, description, category,
-          quantity, unit_price_cents, total_cents, sort_order, taxable
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+          quantity, unit_price_cents, total_cents, sort_order, taxable,
+          pricing_source
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
         [
           rowId,
           tenantId,
@@ -428,6 +429,10 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
           item.totalCents,
           item.sortOrder,
           item.taxable,
+          // Catalog-grounding provenance threaded from the proposal payload
+          // (set by the catalog resolver, migration 255). Undefined on
+          // legacy/manual creates → SQL NULL → treated as NOT grounded.
+          item.pricingSource ?? null,
         ],
       );
     }
