@@ -868,8 +868,17 @@ export function createApp(): AppWithLifecycle {
     '/webhooks/wisetack',
     '/webhooks/sendgrid',
   ];
-  const isProviderWebhookPath = (path: string) =>
-    webhookProviderPrefixes.some((prefix) => path.startsWith(prefix));
+  // Segment-boundary match, mirroring how Express mounts the provider
+  // limiter above: '/webhooks/stripefake' must NOT be skipped here (it
+  // escapes the provider limiter's mount, so skipping it would leave the
+  // path rate-limited by nothing).
+  const isProviderWebhookPath = (url: string) =>
+    webhookProviderPrefixes.some(
+      (prefix) =>
+        url === prefix ||
+        url.startsWith(`${prefix}/`) ||
+        url.startsWith(`${prefix}?`),
+    );
   const webhookProviderRateMax = Math.max(1, Number(process.env.WEBHOOK_PROVIDER_RATE_LIMIT_MAX) || 600);
   app.use(webhookProviderPrefixes, rateLimit({
     windowMs: 60 * 1000,      // 1 minute
