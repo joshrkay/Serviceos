@@ -155,6 +155,15 @@ describe('buildTwiML', () => {
     expect(xml).not.toContain('<Hangup');
   });
 
+  it('T2-F03: emits actionOnEmptyResult="true" alongside the pinned Gather attributes', () => {
+    // Without it, Twilio's no-speech timeout falls through the document and
+    // hangs up instead of POSTing an empty SpeechResult back to the action URL.
+    const xml = buildTwiML([], { gatherActionUrl: '/g' });
+    expect(xml).toContain(
+      '<Gather input="speech" speechTimeout="auto" language="en-US" speechModel="phone_call" action="/g" method="POST" actionOnEmptyResult="true"/>'
+    );
+  });
+
   it('P11-002: language=es uses the Spanish Polly voice + es-US Gather locale', () => {
     const xml = buildTwiML(
       [{ type: 'tts_play', payload: { text: 'Hola' } }],
@@ -1416,6 +1425,126 @@ describe('TwilioGatherAdapter.handleGather', () => {
       expect(xml3).not.toContain('<Hangup');
       const finalSnap = await store.snapshot(sessionId);
       expect(finalSnap?.state).toBe('intent_confirm'); // untouched by the gate
+    });
+  });
+
+  // ─── T2-F03 — silent caller (empty SpeechResult via actionOnEmptyResult) ──
+  //
+  // actionOnEmptyResult="true" re-delivers a no-speech timeout here as an
+  // empty-SpeechResult POST, so silence re-enters this loop every timeout.
+  // These pin that silence shares the SAME bounded ladder as low acoustic
+  // confidence: reprompt below the cap, escalation + hangup at it, and a
+  // single combined streak for mixed silence/mumble sequences.
+  describe('silent caller (empty SpeechResult) shares the low-confidence ladder', () => {
+    it('first silent turn reprompts with a new <Gather> and no <Hangup/>', async () => {
+      const xml = await adapter.handleGather({
+        sessionId,
+        callSid: 'CA-gx',
+        speechResult: '',
+        confidence: undefined,
+        tenantId: 'tenant-abc',
+      });
+
+      expect((gateway.complete as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+      expect(xml).toContain(
+        xmlEscape(renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en')),
+      );
+      expect(xml).toContain('<Gather');
+      expect(xml).not.toContain('<Hangup');
+      const session = await store.get(sessionId);
+      expect(session?.ended).toBe(false);
+    });
+
+    it('two consecutive silent turns escalate gracefully and end the session', async () => {
+      const xml1 = await adapter.handleGather({
+        sessionId,
+        callSid: 'CA-gx',
+        speechResult: '',
+        confidence: undefined,
+        tenantId: 'tenant-abc',
+      });
+      expect(xml1).toContain('<Gather');
+
+      const xml2 = await adapter.handleGather({
+        sessionId,
+        callSid: 'CA-gx',
+        speechResult: '   ',
+        confidence: undefined,
+        tenantId: 'tenant-abc',
+      });
+
+      expect((gateway.complete as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+      expect(xml2).toContain(
+        xmlEscape(renderTtsText(SPEECH_TURN_FAILURE_ESCALATION_COPY, {}, 'en')),
+      );
+      expect(xml2).toContain('<Hangup');
+      expect(xml2).not.toContain('<Gather');
+      const session = await store.get(sessionId);
+      expect(session?.ended).toBe(true);
+      expect(session?.terminalOutcome).toBeDefined();
+    });
+
+    it('mixed ladder: a silent turn then a low-Confidence turn terminate at combined streak 2', async () => {
+      await adapter.handleGather({
+        sessionId,
+        callSid: 'CA-gx',
+        speechResult: '',
+        confidence: undefined,
+        tenantId: 'tenant-abc',
+      });
+
+      const xml2 = await adapter.handleGather({
+        sessionId,
+        callSid: 'CA-gx',
+        speechResult: 'mumbled garbage',
+        confidence: 0.3,
+        tenantId: 'tenant-abc',
+      });
+
+      expect((gateway.complete as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+      expect(xml2).toContain(
+        xmlEscape(renderTtsText(SPEECH_TURN_FAILURE_ESCALATION_COPY, {}, 'en')),
+      );
+      expect(xml2).toContain('<Hangup');
+      const session = await store.get(sessionId);
+      expect(session?.ended).toBe(true);
+    });
+
+    it('a confident turn between silences resets the streak — third turn reprompts, not escalates', async () => {
+      // Turn 1: silence → reprompt, streak = 1.
+      await adapter.handleGather({
+        sessionId,
+        callSid: 'CA-gx',
+        speechResult: '',
+        confidence: undefined,
+        tenantId: 'tenant-abc',
+      });
+
+      // Turn 2: clean, high-confidence turn → classified normally, streak cleared.
+      await adapter.handleGather({
+        sessionId,
+        callSid: 'CA-gx',
+        speechResult: 'Create an invoice for Acme for 450 dollars',
+        confidence: 0.95,
+        tenantId: 'tenant-abc',
+      });
+      expect((gateway.complete as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(1);
+
+      // Turn 3: silence again — a fresh 1st strike → reprompt, not escalation.
+      const xml3 = await adapter.handleGather({
+        sessionId,
+        callSid: 'CA-gx',
+        speechResult: '',
+        confidence: undefined,
+        tenantId: 'tenant-abc',
+      });
+      expect(xml3).toContain(
+        xmlEscape(renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en')),
+      );
+      expect(xml3).toContain('<Gather');
+      expect(xml3).not.toContain('<Hangup');
+      const session = await store.get(sessionId);
+      expect(session?.ended).toBe(false);
     });
   });
 

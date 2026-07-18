@@ -672,10 +672,13 @@ export function buildTwiML(
     // Capped defensively even though callers are expected to cap upstream.
     const hints = opts.hints && opts.hints.length > 0 ? opts.hints.slice(0, GATHER_HINTS_MAX) : undefined;
     const hintsAttr = hints ? ` hints="${xmlEscape(hints.join(','))}"` : '';
+    // T2-F03: actionOnEmptyResult makes a no-speech timeout POST back to the
+    // action URL with an empty SpeechResult (reaching the bounded silence
+    // ladder) instead of falling through the document and hanging up.
     parts.push(
       `<Gather input="speech" speechTimeout="auto" language="${gatherLang}" speechModel="${GATHER_SPEECH_MODEL}"${hintsAttr} action="${xmlEscape(
         opts.gatherActionUrl
-      )}" method="POST"/>`
+      )}" method="POST" actionOnEmptyResult="true"/>`
     );
   }
 
@@ -754,8 +757,10 @@ export class TwilioGatherAdapter {
    * object) also has no field for it, so — same lifetime/leak posture as
    * {@link callerIdBySession} above — it's tracked in-memory on the adapter.
    * Bumped when a Gather turn's `Confidence` is below
-   * {@link MIN_STT_CONFIDENCE}; cleared by any turn that clears the gate
-   * (high confidence OR confidence absent). Reaching
+   * {@link MIN_STT_CONFIDENCE} — or when the turn is an empty
+   * `SpeechResult` (silence via `actionOnEmptyResult`; T2-F03) — and
+   * cleared by any turn that clears the gate (high confidence OR
+   * confidence absent). Reaching
    * {@link MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS} hands the caller off
    * instead of reprompting again (see `maybeHandleLowSttConfidenceGather`).
    * Limitation: this streak is process-local — a mid-call replica
@@ -1839,19 +1844,14 @@ export class TwilioGatherAdapter {
     const sideEffectsAll: SideEffect[] = [];
     const currentState = session.machine.currentState;
 
-    // Empty SpeechResult (silent caller / Twilio timeout) maps to a
-    // confidence_low so the bounded reprompt path kicks in instead of
-    // running the classifier on an empty string.
+    // Empty SpeechResult (silent caller — delivered here by the <Gather>'s
+    // actionOnEmptyResult on the no-speech timeout). T2-F03: silence MUST
+    // join the same streak as low-confidence turns — it re-enters this loop
+    // every timeout, so without the shared cap a silent line would be
+    // reprompted forever. Same caller experience as a low-confidence turn:
+    // reprompt below the cap, graceful escalation + hangup at it.
     if (opts.speechResult.trim().length === 0) {
-      sideEffectsAll.push(
-        ...session.machine.dispatch({
-          type: 'confidence_low',
-          threshold: TAU_INT,
-          score: 0,
-        }),
-      );
-      await this.processor.executeSideEffects(session, sideEffectsAll, opts.tenantId);
-      return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
+      return this.runLowSttConfidenceGatherLadder(session, opts.sessionId);
     }
 
     // A3 — low acoustic STT confidence gate. Twilio's Gather `Confidence` on
@@ -2179,11 +2179,27 @@ export class TwilioGatherAdapter {
       return null;
     }
 
+    return this.runLowSttConfidenceGatherLadder(session, opts.sessionId);
+  }
+
+  /**
+   * The bounded reprompt→escalate ladder shared by the two Gather-turn
+   * failure modes: low acoustic `Confidence` (via
+   * {@link maybeHandleLowSttConfidenceGather}) and an empty `SpeechResult`
+   * (silence, delivered by `actionOnEmptyResult`). One streak for both, so
+   * a caller alternating silence and mumbling still terminates at
+   * {@link MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS} — matching the
+   * media-streams ladder semantics.
+   */
+  private async runLowSttConfidenceGatherLadder(
+    session: VoiceSession,
+    sessionId: string,
+  ): Promise<string> {
     const lang: SessionLanguage = session.language === 'es' ? 'es' : 'en';
-    const streak = (this.lowConfidenceGatherStreak.get(opts.sessionId) ?? 0) + 1;
+    const streak = (this.lowConfidenceGatherStreak.get(sessionId) ?? 0) + 1;
 
     if (streak >= MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS) {
-      this.lowConfidenceGatherStreak.delete(opts.sessionId);
+      this.lowConfidenceGatherStreak.delete(sessionId);
       const effects: SideEffect[] = [
         {
           type: 'tts_play',
@@ -2191,7 +2207,7 @@ export class TwilioGatherAdapter {
         },
         { type: 'end_session', payload: { reason: 'low_stt_confidence_max_retries' } },
       ];
-      const twiml = await this.finalizeTwiml(session, effects, opts.sessionId);
+      const twiml = await this.finalizeTwiml(session, effects, sessionId);
       if (!session.ended) {
         session.ended = true;
         this.finalizeTerminatedSession(session, effects, 'low_stt_confidence_max_retries');
@@ -2205,14 +2221,14 @@ export class TwilioGatherAdapter {
       return twiml;
     }
 
-    this.lowConfidenceGatherStreak.set(opts.sessionId, streak);
+    this.lowConfidenceGatherStreak.set(sessionId, streak);
     const effects: SideEffect[] = [
       {
         type: 'tts_play',
         payload: { text: renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, lang) },
       },
     ];
-    const twiml = await this.finalizeTwiml(session, effects, opts.sessionId);
+    const twiml = await this.finalizeTwiml(session, effects, sessionId);
     recordVoiceError({
       errorKind: 'low_stt_confidence',
       channel: 'gather',
