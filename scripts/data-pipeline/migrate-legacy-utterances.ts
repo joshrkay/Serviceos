@@ -35,9 +35,18 @@ interface CanonicalRow {
   confidence?: unknown;
 }
 
-/** Deterministic forever: same utterance text -> same legacy id, always. */
+/**
+ * Deterministic forever: same utterance text -> same legacy id, always.
+ *
+ * Uses an 8-hex-char slice, not 10: pii-leakage.ts's PHONE regex flags any
+ * bare run of 10+ consecutive digit characters, and a 10-char hex slice has
+ * a real (if small) chance of landing all-digit (e.g. "legacy-7943842576"),
+ * tripping a false-positive "non-fictional phone" violation on the id
+ * itself. An 8-char slice can never reach that 10-digit threshold, so this
+ * is a structural guarantee, not a probabilistic one.
+ */
 function legacyId(utterance: string): string {
-  return `legacy-${createHash('sha1').update(utterance).digest('hex').slice(0, 10)}`;
+  return `legacy-${createHash('sha1').update(utterance).digest('hex').slice(0, 8)}`;
 }
 
 function isStr(v: unknown): v is string {
