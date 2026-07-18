@@ -139,7 +139,7 @@ describe('P0-009 — Async job processing with SQS', () => {
     expect(result.error!.split('\n').length).toBeGreaterThan(1);
   });
 
-  it('T4-F10 — the error field is bounded/redacted the same way DLQ payloads are (160-char truncation)', async () => {
+  it('T4-F10 — the error field is scrubbed like a sensitive content field: a bounded ≤160-char excerpt plus a fingerprint, never the full value verbatim', async () => {
     const longMessage = 'x'.repeat(500);
     const handler: WorkerHandler = {
       type: 'test.job',
@@ -158,8 +158,13 @@ describe('P0-009 — Async job processing with SQS', () => {
     };
 
     const result = await processMessage(msg, handler, logger);
-    // sanitizePayloadSnapshot truncates any string over 160 chars.
-    expect(result.error!.length).toBeLessThanOrEqual(161);
+    // Codex P2 (PR #705): routed through the content-scrubbing policy, not just
+    // truncated — a ≤160-char excerpt followed by a sha256 fingerprint.
+    expect(result.error!).toMatch(/^x+ \[sha256:[0-9a-f]{16}\]$/);
+    const excerpt = result.error!.split(' [sha256:')[0];
+    expect(excerpt.length).toBeLessThanOrEqual(160);
+    // The full 500-char value is never persisted verbatim.
+    expect(result.error).not.toContain(longMessage);
   });
 
   it('happy path — idempotency key is set', async () => {

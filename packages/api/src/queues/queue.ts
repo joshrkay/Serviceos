@@ -36,6 +36,25 @@ function sanitizePayloadSnapshot(input: unknown): unknown {
   return out;
 }
 
+/**
+ * Redact a free-text error message for the `last_error` / DLQ sinks. A bare
+ * string handed to `sanitizePayloadSnapshot` only gets length-truncated (the
+ * key-based transcript/content/text scrubbing applies to string VALUES inside
+ * an object), so a handler that throws a provider response body would persist
+ * up to 160 chars of it verbatim. Route the message through the SAME
+ * content-scrubbing policy applied to sensitive payload fields — under a `text`
+ * key so the policy fires — then flatten the `{excerpt, fingerprint}` result
+ * back to a bounded string for the TEXT columns. The fingerprint keeps repeated
+ * identical failures correlatable without storing the full (possibly sensitive)
+ * value (Codex P2, PR #705).
+ */
+function redactErrorForSink(rawError: string): string {
+  const scrubbed = sanitizePayloadSnapshot({ text: rawError }) as {
+    text: { excerpt: string; fingerprint: string };
+  };
+  return `${scrubbed.text.excerpt} [sha256:${scrubbed.text.fingerprint}]`;
+}
+
 export function toEnvelopeMeta(message: QueueMessage<unknown>): Record<string, unknown> {
   const payload = (message.payload ?? {}) as Record<string, unknown>;
   const tenantId = typeof payload.tenantId === 'string' ? payload.tenantId : undefined;
@@ -358,11 +377,11 @@ export async function processMessage<T>(
 
     // T4-F10 — message + a few stack frames (skip the stack's own leading
     // "Error: <message>" line, which would otherwise duplicate error.message),
-    // run through the same redaction/truncation already applied to DLQ
-    // payloads so this can't leak an unbounded or sensitive value.
+    // run through the sensitive-content scrubbing policy before it is persisted
+    // to last_error / the DLQ.
     const stackFrames = error.stack ? error.stack.split('\n').slice(1, 4) : [];
     const rawError = [error.message, ...stackFrames].join('\n');
-    const redactedError = redactForSink(rawError, 'dlq') as string;
+    const redactedError = redactErrorForSink(rawError);
     return { success: false, error: redactedError };
   }
 }

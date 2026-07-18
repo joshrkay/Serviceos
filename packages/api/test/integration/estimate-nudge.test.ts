@@ -151,7 +151,7 @@ describe('dispatchEstimateNudge (integration) — claim-before-send against real
     expect(updated!.reminderCount).toBe(1);
   });
 
-  it('a "sent" claim for the same occurrence throws and does not resend or bump reminder_count (crash between send and mark)', async () => {
+  it('Codex P2 (PR #705) — a "sent" claim for the same occurrence is RECONCILED (no resend, no throw, reminder_count finished) — crash between send and mark', async () => {
     const estimate = await seedSentEstimate('EST-NUDGE-3');
     await pool.query(
       `INSERT INTO send_claims (tenant_id, claim_key, status, claimed_at, sent_at)
@@ -159,20 +159,22 @@ describe('dispatchEstimateNudge (integration) — claim-before-send against real
       [tenant.tenantId, `estimate_nudge:${estimate.id}:v1:1`],
     );
     const { sendService, sendEstimate } = fakeSendService();
+    const asOf = new Date('2026-06-07T00:00:00Z');
 
-    await expect(
-      dispatchEstimateNudge(
-        { estimateRepo, sendService, pool },
-        { tenantId: tenant.tenantId, estimate, channel: 'sms', asOf: new Date(), actorId: 'test' },
-      ),
-    ).rejects.toThrow(EstimateNudgeAlreadyClaimedError);
+    // Must NOT throw — the send already happened; throwing would freeze the
+    // cadence. It reconciles the missing reminder_count bookkeeping instead.
+    await dispatchEstimateNudge(
+      { estimateRepo, sendService, pool },
+      { tenantId: tenant.tenantId, estimate, channel: 'sms', asOf, actorId: 'test' },
+    );
 
     expect(sendEstimate).not.toHaveBeenCalled();
     const updated = await estimateRepo.findById(tenant.tenantId, estimate.id);
-    expect(updated!.reminderCount ?? 0).toBe(0);
+    expect(updated!.reminderCount).toBe(1);
+    expect(updated!.lastReminderAt).toEqual(asOf);
   });
 
-  it('two concurrent dispatchEstimateNudge calls for the same estimate: exactly one send, one claimed-error', async () => {
+  it('two concurrent dispatchEstimateNudge calls for the same estimate: exactly one send, cadence advances once', async () => {
     const estimate = await seedSentEstimate('EST-NUDGE-4');
     const { sendService, sendEstimate } = fakeSendService();
 
@@ -183,13 +185,21 @@ describe('dispatchEstimateNudge (integration) — claim-before-send against real
       );
 
     const results = await Promise.allSettled([attempt(), attempt()]);
+
+    // The invariant that matters: the provider is called exactly once (no
+    // double-send), and reminderCount ends at exactly 1. The loser either
+    // rejects with EstimateNudgeAlreadyClaimedError (it observed the winner's
+    // in-flight 'claimed'/'sending' claim) OR reconciles idempotently (it
+    // observed the winner's completed 'sent' tombstone) — both are correct and
+    // which one happens is a real-DB timing detail, so we don't pin it.
     expect(sendEstimate).toHaveBeenCalledTimes(1);
-    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
     const rejected = results.filter((r) => r.status === 'rejected');
-    expect(rejected).toHaveLength(1);
-    expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(
-      EstimateNudgeAlreadyClaimedError,
-    );
+    expect(rejected.length).toBeLessThanOrEqual(1);
+    for (const r of rejected) {
+      expect((r as PromiseRejectedResult).reason).toBeInstanceOf(EstimateNudgeAlreadyClaimedError);
+    }
+    const updated = await estimateRepo.findById(tenant.tenantId, estimate.id);
+    expect(updated!.reminderCount).toBe(1);
   });
 
   it('repeatability: a second nudge (occurrence 2) after the first completes is a fresh, independent claim', async () => {

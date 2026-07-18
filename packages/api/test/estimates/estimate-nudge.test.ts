@@ -82,6 +82,14 @@ function claimAwarePool(claims: Map<string, ClaimRow> = new Map()): { pool: Pool
       if (existing?.status === 'claimed' || existing?.status === 'sending') claims.delete(key);
       return { rows: [], rowCount: 1 } as unknown as QueryResult;
     }
+    if (sql.trim().startsWith('SELECT')) {
+      // withSendClaim reads the losing claim's status to report priorStatus.
+      const existing = claims.get(key);
+      return {
+        rows: existing ? [{ status: existing.status }] : [],
+        rowCount: existing ? 1 : 0,
+      } as unknown as QueryResult;
+    }
     return { rows: [], rowCount: 0 } as unknown as QueryResult;
   });
   return { pool: { query } as unknown as Pool, claims };
@@ -167,9 +175,34 @@ describe('dispatchEstimateNudge', () => {
       expect(updated!.reminderCount).toBe(1);
     });
 
-    it('crash-between-send-and-mark: a "sent" claim for reminder #1 throws EstimateNudgeAlreadyClaimedError and does not resend', async () => {
+    it('Codex P2 (PR #705) — crash-between-send-and-mark: a "sent" claim for reminder #1 is RECONCILED (no resend, no throw, reminderCount finished)', async () => {
       const { pool, claims } = claimAwarePool();
+      // The prior attempt sent the SMS + tombstoned the claim 'sent' but crashed
+      // before the reminderCount bookkeeping committed (reminderCount still 0).
       claims.set(`${TENANT}::estimate_nudge:${ESTIMATE_ID}:v1:1`, { status: 'sent', claimedAt: Date.now() });
+
+      // Must NOT throw — throwing here would freeze the cadence forever (every
+      // sweep recomputes occurrence 1, re-hits the tombstone, never advances).
+      await dispatchEstimateNudge(deps({ pool }), {
+        tenantId: TENANT,
+        estimate: makeEstimate(),
+        channel: 'sms',
+        asOf: NOW,
+        actorId: 'worker',
+      });
+
+      // No resend (the SMS already went out) but the missing bookkeeping is now
+      // reconciled so the next sweep advances past this occurrence.
+      expect(sendEstimate).not.toHaveBeenCalled();
+      const updated = await estimateRepo.findById(TENANT, ESTIMATE_ID);
+      expect(updated!.reminderCount).toBe(1);
+      expect(updated!.lastReminderAt).toEqual(NOW);
+    });
+
+    it('a "claimed" (in-flight, not sent) duplicate still throws EstimateNudgeAlreadyClaimedError — a concurrent attempt owns the send', async () => {
+      const { pool, claims } = claimAwarePool();
+      // A fresh in-flight claim by another process (NOT stale, NOT sent).
+      claims.set(`${TENANT}::estimate_nudge:${ESTIMATE_ID}:v1:1`, { status: 'claimed', claimedAt: Date.now() });
 
       await expect(
         dispatchEstimateNudge(deps({ pool }), {
@@ -183,7 +216,7 @@ describe('dispatchEstimateNudge', () => {
 
       expect(sendEstimate).not.toHaveBeenCalled();
       const updated = await estimateRepo.findById(TENANT, ESTIMATE_ID);
-      // reminderCount bookkeeping write never ran — this attempt didn't own the send.
+      // The other attempt owns the bookkeeping — this one must not touch it.
       expect(updated!.reminderCount ?? 0).toBe(0);
     });
 
@@ -289,7 +322,7 @@ describe('dispatchEstimateNudge', () => {
       expect(sendEstimate).toHaveBeenCalledTimes(2);
     });
 
-    it('Codex P1 #2: SendService.sendEstimate signals provider-acceptance then its own entity-write throws — the claim ends "sent" (not released), reminderCount is NOT bumped by this attempt, and a retry is a duplicate no-op (never a resend)', async () => {
+    it('Codex P1 #2 + P2: sendEstimate signals provider-acceptance then its entity-write throws — the claim ends "sent" (not released), reminderCount is NOT bumped by this attempt, and a retry RECONCILES it (never a resend)', async () => {
       const { pool, claims } = claimAwarePool();
       // Model SendService.sendEstimate's real shape: it calls
       // options.onProviderAccepted() once the provider channel dispatch
@@ -319,18 +352,21 @@ describe('dispatchEstimateNudge', () => {
       const updated = await estimateRepo.findById(TENANT, ESTIMATE_ID);
       expect(updated!.reminderCount ?? 0).toBe(0);
 
-      // A retry for the same occurrence must be a duplicate no-op, never a
-      // second real send.
-      await expect(
-        dispatchEstimateNudge(deps({ pool }), {
-          tenantId: TENANT,
-          estimate: makeEstimate(),
-          channel: 'sms',
-          asOf: NOW,
-          actorId: 'worker',
-        }),
-      ).rejects.toThrow(EstimateNudgeAlreadyClaimedError);
+      // A retry for the same occurrence must NOT resend — but it also must not
+      // throw forever: the 'sent' tombstone means the send happened, so the
+      // retry reconciles the missing reminderCount bookkeeping the crashed
+      // attempt left behind (Codex P2). This is exactly the stuck-cadence the
+      // reminderCount-still-0 state above would otherwise cause.
+      await dispatchEstimateNudge(deps({ pool }), {
+        tenantId: TENANT,
+        estimate: makeEstimate(),
+        channel: 'sms',
+        asOf: NOW,
+        actorId: 'worker',
+      });
       expect(sendEstimate).toHaveBeenCalledTimes(1); // only the one (failed-bookkeeping) real attempt
+      const reconciled = await estimateRepo.findById(TENANT, ESTIMATE_ID);
+      expect(reconciled!.reminderCount).toBe(1); // cadence advanced, no longer stuck
     });
   });
 });

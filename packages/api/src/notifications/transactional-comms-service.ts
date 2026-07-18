@@ -80,9 +80,12 @@ export class TransactionalCommsService implements SchedulingConfirmationNotifier
    * more than once over its lifetime (same `appointmentId` each time), so an
    * `appointmentId`-only claim key would tombstone this notice after the
    * FIRST reschedule and silently suppress it on every later one.
-   * `occurrenceToken` (the caller passes the new `scheduledStart`, the one
-   * value that's guaranteed to differ across distinct reschedules of the
-   * same appointment) makes the claim key per-occurrence instead.
+   * `occurrenceToken` makes the claim key per-occurrence. Callers must pass a
+   * token unique to each reschedule ACTION — the reschedule handler passes the
+   * approving `proposal.id`. The destination `scheduledStart` is NOT safe: an
+   * appointment moved to slot B, then elsewhere, then back to B would reuse the
+   * same `appt-reschedule:{id}:B` claim and drop the final notification as a
+   * duplicate (Codex P2, PR #705).
    */
   async notifyRescheduled(
     tenantId: string,

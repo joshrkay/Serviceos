@@ -98,8 +98,11 @@ function estimateNudgeClaimKey(estimateId: string, version: number, occurrence: 
 /**
  * Re-send the estimate link and record the nudge. Throws when the send
  * fails (callers own failure isolation / retry semantics), and throws
- * `EstimateNudgeAlreadyClaimedError` when a concurrent attempt already
- * claimed this exact reminder occurrence.
+ * `EstimateNudgeAlreadyClaimedError` when a concurrent attempt is still
+ * in-flight for this exact occurrence (claim 'claimed'/'sending'). A 'sent'
+ * tombstone for the occurrence is instead reconciled: the send already
+ * happened, so this finishes the (possibly-interrupted) reminderCount /
+ * lastReminderAt / audit bookkeeping idempotently rather than throwing.
  */
 export async function dispatchEstimateNudge(
   deps: EstimateNudgeDeps,
@@ -121,7 +124,18 @@ export async function dispatchEstimateNudge(
       deps.sendService.sendEstimate(sendInput, { onProviderAccepted: markProviderAccepted }),
     );
     if (outcome.outcome === 'duplicate') {
-      throw new EstimateNudgeAlreadyClaimedError(estimate.id, occurrence);
+      // A 'claimed'/'sending' loser is a genuine concurrent in-flight attempt —
+      // that other execution owns this occurrence and will do the bookkeeping,
+      // so bail. But a 'sent' tombstone means THIS occurrence already went out
+      // (a prior attempt sent it, then crashed / had its estimate update below
+      // fail before reminderCount advanced). Throwing there would freeze the
+      // cadence forever: every sweep recomputes the same occurrence, re-hits
+      // this branch, and never advances reminderCount/lastReminderAt. So fall
+      // through and finish the idempotent bookkeeping instead of throwing
+      // (Codex P2, PR #705).
+      if (outcome.priorStatus !== 'sent') {
+        throw new EstimateNudgeAlreadyClaimedError(estimate.id, occurrence);
+      }
     }
   } else {
     await deps.sendService.sendEstimate(sendInput);

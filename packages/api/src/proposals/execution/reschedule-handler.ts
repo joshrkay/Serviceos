@@ -199,13 +199,18 @@ export class RescheduleAppointmentExecutionHandler implements ExecutionHandler {
       }
 
       if (this.transactionalComms) {
-        // Codex P1 #1 follow-up — newScheduledStart is the per-occurrence
-        // claim token so a later reschedule of the SAME appointment isn't
-        // silently suppressed by the first one's tombstone.
+        // The proposal id is the per-ACTION claim token so a later reschedule
+        // of the SAME appointment isn't silently suppressed by an earlier
+        // one's tombstone. The destination timestamp (newScheduledStart) is
+        // NOT safe here: moving to slot B, then elsewhere, then back to B
+        // reuses the same appt-reschedule:{id}:B claim, so the final move-back
+        // notification would be dropped as a duplicate. Each approved
+        // reschedule is a distinct proposal, so proposal.id is unique per
+        // occurrence (Codex P2, PR #705).
         await this.transactionalComms.notifyRescheduled(
           context.tenantId,
           appointmentId,
-          newScheduledStart,
+          proposal.id,
         );
       }
 

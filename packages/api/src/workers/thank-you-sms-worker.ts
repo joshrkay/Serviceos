@@ -260,18 +260,29 @@ async function sendOneThankYou(
     deps.dispatcher.send({ to: customer.primaryPhone as string, body }),
   );
   if (claimResult.outcome === 'duplicate') {
-    // Another attempt already claimed this job's send. Normally the claim
-    // finalizing to 'sent' and the thankYouSmsSentAt write move together; a
-    // duplicate here (whether a same-tick race or a genuine crash-after-send
-    // stuck state) means thankYouSmsSentAt is NOT set by THIS attempt, so
-    // don't write it — only the attempt that actually completed the send
-    // owns that write. Surfaced at warn since it's worth operator visibility
-    // either way.
-    deps.logger.warn('Thank-you SMS sweep: job already claimed, not resending', {
-      tenantId,
-      jobId,
-    });
-    return 'suppressed';
+    if (claimResult.priorStatus === 'sent') {
+      // The send for this job already went out (a prior attempt completed the
+      // provider send + 'sent' tombstone but crashed / had its jobRepo.update
+      // below fail before stamping thankYouSmsSentAt). Reconcile the missing
+      // stamp idempotently rather than leaving it null: otherwise the
+      // eligibility query re-selects this job every tick forever and, since it
+      // orders oldest-first under LIMIT 500, enough unreconciled rows can
+      // eventually starve newer eligible jobs (Codex P2, PR #705). Falls
+      // through to the same stamp + audit the happy path runs.
+      deps.logger.info('Thank-you SMS sweep: send already completed, reconciling missing stamp', {
+        tenantId,
+        jobId,
+      });
+    } else {
+      // 'claimed'/'sending' — a genuine concurrent in-flight attempt owns this
+      // job's send and will stamp it; do nothing here (not stuck: the winner
+      // stamps, so the next sweep won't re-select this job).
+      deps.logger.info('Thank-you SMS sweep: send in-flight by another attempt, not resending', {
+        tenantId,
+        jobId,
+      });
+      return 'suppressed';
+    }
   }
 
   await deps.jobRepo.update(tenantId, jobId, {
