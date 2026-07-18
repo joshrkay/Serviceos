@@ -4199,6 +4199,14 @@ export function createApp(): AppWithLifecycle {
             // for non-hangup terminations.
             finalizeOnClose: (session, reason, sideEffects) =>
               twilioAdapter.finalizeTerminatedSession(session, sideEffects, reason),
+            // Codex P2 (PR #702) — T2-F05 silence-timer parity with the
+            // Gather/WS-finals pending-approval (RV-071) / SMS-consent
+            // (WS18) handling: a silent caller mid-dialogue gets
+            // keep-pending / fail-closed semantics instead of being
+            // reprompted and (on a second silence) escalated+end-sessioned
+            // with the dialogue stranded.
+            handlePendingDialogueSilence: (session, tenantId) =>
+              twilioAdapter.handlePendingDialogueSilence(session, tenantId),
             // WS upgrades don't carry AccountSid; fall back to the master
             // token. Per-tenant subaccount auth for media streams is a
             // future-phase change (auth at first `start` message).

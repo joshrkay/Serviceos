@@ -1674,6 +1674,44 @@ export class TwilioGatherAdapter {
   }
 
   /**
+   * Codex P2 (PR #702) — pending-approval/consent parity for the
+   * Media-Streams T2-F05 silence-reprompt timer. Before this, a silent
+   * caller mid owner-approval readback (RV-071) or mid SMS-consent capture
+   * (WS18) got reprompted — and, on a second consecutive silence, ESCALATED
+   * AND END-SESSIONED — by `recoverFromLowSttConfidence`, stranding the
+   * pending dialogue uncleared. The Gather transport and the WS-finals
+   * `speechTurn` path never have this problem: they run
+   * `handlePendingVoiceApproval` (and `speechTurn` also runs
+   * `handlePendingConsentCapture`) BEFORE the empty-speech/low-confidence
+   * branch, so a silent turn is "keep it pending", not a reprompt.
+   *
+   * Drives an EMPTY-utterance turn through the SAME two handlers,
+   * in the SAME order `processSpeechTurn` uses (approval, then consent),
+   * and — mirroring that function — executes each handler's side effects
+   * and records the agent's line on the transcript before returning them.
+   * Returns null when NEITHER dialogue is pending, telling the caller (the
+   * silence timer) to fall through to its normal low-confidence recovery.
+   */
+  async handlePendingDialogueSilence(
+    session: VoiceSession,
+    tenantId: string,
+  ): Promise<SideEffect[] | null> {
+    const approvalTurn = await this.processor.handlePendingVoiceApproval(session, '', tenantId);
+    if (approvalTurn) {
+      await this.processor.executeSideEffects(session, approvalTurn, tenantId);
+      appendAgentTts(this.deps.store, session.id, approvalTurn);
+      return approvalTurn;
+    }
+    const consentTurn = await this.processor.handlePendingConsentCapture(session, '', tenantId);
+    if (consentTurn) {
+      await this.processor.executeSideEffects(session, consentTurn, tenantId);
+      appendAgentTts(this.deps.store, session.id, consentTurn);
+      return consentTurn;
+    }
+    return null;
+  }
+
+  /**
    * Handle the initial `POST /api/telephony/voice` webhook.
    * Creates a session, runs the disclose_recording + identify_caller
    * skills, drives the FSM through `incoming_call`, and returns TwiML.

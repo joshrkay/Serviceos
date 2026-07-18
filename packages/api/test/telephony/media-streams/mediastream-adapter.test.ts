@@ -27,6 +27,7 @@ import {
   type WsLike,
 } from '../../../src/telephony/media-streams/mediastream-adapter';
 import { VoiceSessionStore } from '../../../src/ai/agents/customer-calling/voice-session-store';
+import type { VoiceSession } from '../../../src/ai/agents/customer-calling/voice-session-store';
 import type {
   StreamingSession,
   StreamingTranscriptionProvider,
@@ -2755,9 +2756,15 @@ describe('T2-F05 caller-silence reprompt timer', () => {
 
   async function setupSilenceCall(
     callSid: string,
-    opts: { silenceRepromptTimeoutMs?: number } = {},
+    opts: {
+      silenceRepromptTimeoutMs?: number;
+      handlePendingDialogueSilence?: (
+        session: VoiceSession,
+        tenantId: string,
+      ) => Promise<SideEffect[] | null>;
+    } = {},
   ) {
-    store.create('t', 'telephony', { callSid });
+    const session = store.create('t', 'telephony', { callSid });
     const ws = new FakeWs();
     const { provider, handle } = makeStreamingProvider();
     const { tts, texts } = makeCapturingTts();
@@ -2778,6 +2785,9 @@ describe('T2-F05 caller-silence reprompt timer', () => {
         ...(opts.silenceRepromptTimeoutMs !== undefined
           ? { silenceRepromptTimeoutMs: opts.silenceRepromptTimeoutMs }
           : {}),
+        ...(opts.handlePendingDialogueSilence
+          ? { handlePendingDialogueSilence: opts.handlePendingDialogueSilence }
+          : {}),
       },
       ws,
     );
@@ -2788,7 +2798,7 @@ describe('T2-F05 caller-silence reprompt timer', () => {
       start: { callSid, accountSid: 'AC', streamSid: `MZ-${callSid}`, tracks: ['inbound'] },
     });
     await flush();
-    return { adapter, ws, handle, texts, speechTurn, finalizeOnClose };
+    return { adapter, ws, handle, texts, speechTurn, finalizeOnClose, session };
   }
 
   /**
@@ -3096,5 +3106,105 @@ describe('T2-F05 caller-silence reprompt timer', () => {
     expect(sideEffects).toEqual([
       { type: 'end_session', payload: { reason: 'low_stt_confidence_max_retries' } },
     ]);
+  });
+
+  // ─── Codex P2 (PR #702) — pending-approval/consent parity ────────────────
+  //
+  // Before this fix, a silent caller mid owner-approval readback (RV-071) or
+  // mid SMS-consent capture (WS18) got reprompted by the shared low-STT
+  // ladder — and, on a second consecutive silence, ESCALATED AND ENDED THE
+  // SESSION — stranding the pending dialogue uncleared. These pins assert
+  // the T2-F05 silence timer now defers to `deps.handlePendingDialogueSilence`
+  // first, mirroring `processSpeechTurn`'s handler ordering, and only falls
+  // through to the reprompt/escalation ladder when nothing is pending.
+
+  const PENDING_APPROVAL_COPY = 'Still there? Just say yes to confirm the approval.';
+  const PENDING_CONSENT_COPY = 'Still there? Is it okay to text you the quote?';
+
+  /**
+   * A realistic double: like the production
+   * `TwilioGatherAdapter.handlePendingDialogueSilence`, it inspects the
+   * session's own pending-dialogue fields and returns a distinct copy per
+   * dialogue, or null when neither is pending — so the "no pending dialogue"
+   * regression case exercises the exact same fall-through branch a real
+   * wiring would take.
+   */
+  function makePendingDialogueSilenceHandler() {
+    return vi.fn(async (session: VoiceSession) => {
+      if (session.pendingVoiceApproval) {
+        return [{ type: 'tts_play', payload: { text: PENDING_APPROVAL_COPY } }];
+      }
+      if (session.pendingConsentCapture) {
+        return [{ type: 'tts_play', payload: { text: PENDING_CONSENT_COPY } }];
+      }
+      return null;
+    });
+  }
+
+  it('a pending owner voice-approval consumes the silence expiry — no reprompt, no escalation, session stays open', async () => {
+    const handlePendingDialogueSilence = makePendingDialogueSilenceHandler();
+    const { adapter, ws, handle, texts, finalizeOnClose, session } = await setupSilenceCall(
+      'CA-sil-approval',
+      { handlePendingDialogueSilence },
+    );
+    await completeAgentTurn(adapter, ws, handle);
+    session.pendingVoiceApproval = { action: 'approve', stage: 'confirm' };
+
+    await vi.advanceTimersByTimeAsync(DEFAULT_SILENCE_REPROMPT_MS);
+    await flush();
+
+    expect(handlePendingDialogueSilence).toHaveBeenCalledWith(session, 't');
+    // The pending-approval handler's own copy is spoken — NOT the
+    // low-confidence reprompt.
+    expect(texts).toEqual([AGENT_LINE, PENDING_APPROVAL_COPY]);
+    expect(texts).not.toContain(renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en'));
+    expect(streak(adapter)).toBe(0);
+    expect(ws.closed).toBe(false);
+    expect(finalizeOnClose).not.toHaveBeenCalled();
+    expect(recordVoiceErrorMock).not.toHaveBeenCalledWith(
+      expect.objectContaining({ errorKind: 'low_stt_confidence' }),
+    );
+  });
+
+  it('a pending SMS-consent capture consumes the silence expiry — no reprompt, no escalation, session stays open', async () => {
+    const handlePendingDialogueSilence = makePendingDialogueSilenceHandler();
+    const { adapter, ws, handle, texts, finalizeOnClose, session } = await setupSilenceCall(
+      'CA-sil-consent',
+      { handlePendingDialogueSilence },
+    );
+    await completeAgentTurn(adapter, ws, handle);
+    session.pendingConsentCapture = { customerId: 'cust-1', phone: '+15551234567' };
+
+    await vi.advanceTimersByTimeAsync(DEFAULT_SILENCE_REPROMPT_MS);
+    await flush();
+
+    expect(handlePendingDialogueSilence).toHaveBeenCalledWith(session, 't');
+    expect(texts).toEqual([AGENT_LINE, PENDING_CONSENT_COPY]);
+    expect(texts).not.toContain(renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en'));
+    expect(streak(adapter)).toBe(0);
+    expect(ws.closed).toBe(false);
+    expect(finalizeOnClose).not.toHaveBeenCalled();
+    expect(recordVoiceErrorMock).not.toHaveBeenCalledWith(
+      expect.objectContaining({ errorKind: 'low_stt_confidence' }),
+    );
+  });
+
+  it('regression: with NO pending dialogue, the silence expiry still reprompts as before even with the hook wired', async () => {
+    const handlePendingDialogueSilence = makePendingDialogueSilenceHandler();
+    const { adapter, ws, handle, texts } = await setupSilenceCall('CA-sil-nopending', {
+      handlePendingDialogueSilence,
+    });
+    await completeAgentTurn(adapter, ws, handle);
+    // Neither session.pendingVoiceApproval nor session.pendingConsentCapture
+    // is set — the hook returns null and the timer must fall through to the
+    // existing low-STT-confidence reprompt exactly as before this change.
+
+    await vi.advanceTimersByTimeAsync(DEFAULT_SILENCE_REPROMPT_MS);
+    await flush();
+
+    expect(handlePendingDialogueSilence).toHaveBeenCalledTimes(1);
+    expect(texts).toEqual([AGENT_LINE, renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en')]);
+    expect(streak(adapter)).toBe(1);
+    expect(ws.closed).toBe(false);
   });
 });

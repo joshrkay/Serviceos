@@ -181,6 +181,25 @@ export interface MediaStreamAdapterDeps {
   /** T2-F05 — caller-silence reprompt window after an agent turn ends (ms). Default 8 s. */
   silenceRepromptTimeoutMs?: number;
   /**
+   * Codex P2 (PR #702) — pending-approval/consent parity for the T2-F05
+   * silence timer. Called from the silence-expiry callback BEFORE falling
+   * through to the low-STT-confidence reprompt/escalation ladder. Drives
+   * an empty-utterance turn through the SAME `handlePendingVoiceApproval` /
+   * `handlePendingConsentCapture` handlers `speechTurn` runs (same order),
+   * so a caller who goes silent mid owner-approval readback or mid
+   * SMS-consent capture gets keep-pending / fail-closed semantics instead
+   * of being reprompted and — on a second consecutive silence — escalated
+   * and end-sessioned with the dialogue stranded. Returns the side effects
+   * to render when a dialogue consumed the turn, or null when neither is
+   * pending (the timer proceeds with its normal recovery). Optional —
+   * when omitted, behavior is unchanged (always falls through). Wired in
+   * production via `TwilioGatherAdapter.handlePendingDialogueSilence`.
+   */
+  handlePendingDialogueSilence?: (
+    session: VoiceSession,
+    tenantId: string,
+  ) => Promise<SideEffect[] | null>;
+  /**
    * Per-tenant connection registry. Defaults to the process-wide singleton.
    * Override for tests to keep counters isolated between cases.
    */
@@ -1592,6 +1611,53 @@ export class TwilioMediaStreamAdapter {
   }
 
   /**
+   * Codex P2 (PR #702) — T2-F05 silence-timer entry point. Gives a pending
+   * owner-approval readback (RV-071) or SMS-consent capture (WS18) first
+   * crack at a silence-timer expiry, exactly as `processSpeechTurn` does
+   * for a real empty-utterance turn, BEFORE falling through to the shared
+   * low-STT-confidence reprompt/escalation ladder. Without this, a caller
+   * who went silent mid-dialogue was reprompted by
+   * {@link recoverFromLowSttConfidence} and — on a second consecutive
+   * silence — escalated and end-sessioned with the dialogue stranded
+   * (never cleared, never resolved).
+   *
+   * `deps.handlePendingDialogueSilence` (wired to
+   * `TwilioGatherAdapter.handlePendingDialogueSilence` in production) owns
+   * both the pending-check and the handler dispatch — this method only
+   * renders whatever side effects come back (through the same
+   * `emitSideEffects` + `end_session` check the main turn path uses) and,
+   * when nothing was pending, falls through unchanged to
+   * `recoverFromLowSttConfidence`. Optional dep: omitting it (as every
+   * pre-existing test fixture does) reproduces the exact prior behavior.
+   */
+  private async recoverFromSilenceExpiry(session: VoiceSession): Promise<void> {
+    if (this.state.closed) return;
+    if (this.deps.handlePendingDialogueSilence) {
+      let consumed: SideEffect[] | null = null;
+      try {
+        consumed = await this.deps.handlePendingDialogueSilence(session, session.tenantId);
+      } catch (err) {
+        logger.warn('mediastream: pending-dialogue silence handler failed', {
+          error: err instanceof Error ? err.message : String(err),
+          sessionId: session.id,
+        });
+      }
+      if (consumed) {
+        await this.emitSideEffects(consumed);
+        // Mirrors the main turn path: a pending-dialogue side effect that
+        // itself ends the session (e.g. a challenge-lockout hand-off)
+        // must still close the call.
+        if (consumed.some((fx) => fx.type === 'end_session')) {
+          this.state.pendingFinalizeEffects = consumed;
+          this.handleClose('end_session');
+        }
+        return;
+      }
+    }
+    await this.recoverFromLowSttConfidence(session);
+  }
+
+  /**
    * VOX-35c — render one recovery line through the normal outbound-turn path
    * and keep the transcript faithful by appending the spoken (localized) copy
    * as an agent line. `rawText` is an English catalog key that
@@ -2549,13 +2615,15 @@ export class TwilioMediaStreamAdapter {
    * streamed chunk for a multi-chunk streaming TTS turn — acking that mark
    * early must not start the countdown while later audio is still
    * buffered/playing). Cleared by any transcript event
-   * (interim or final), by barge-in, and by close. Expiry
-   * funnels into `recoverFromLowSttConfidence` deliberately: silence shares
-   * the `consecutiveLowConfidenceTurns` streak, reprompt copy, and
-   * MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS escalation with mumbled turns, so a
-   * caller cannot alternate silence and mumbling to stay on the line
-   * indefinitely and the ladder stays single-sourced. Re-arming after the
-   * reprompt is natural — the reprompt renders through the same
+   * (interim or final), by barge-in, and by close. Expiry routes through
+   * {@link recoverFromSilenceExpiry}, which gives a pending owner-approval
+   * or SMS-consent dialogue first crack at the turn (Codex P2, PR #702)
+   * before funneling into `recoverFromLowSttConfidence` deliberately:
+   * silence shares the `consecutiveLowConfidenceTurns` streak, reprompt
+   * copy, and MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS escalation with mumbled
+   * turns, so a caller cannot alternate silence and mumbling to stay on
+   * the line indefinitely and the ladder stays single-sourced. Re-arming
+   * after the reprompt is natural — the reprompt renders through the same
    * `streamPcmAsMedia` path and enqueues its own end-of-turn mark. The
    * captured `turnId` + agentSpeaking guards make a stale expiry (a newer
    * outbound turn started without a transcript, e.g. an async sentiment
@@ -2576,7 +2644,7 @@ export class TwilioMediaStreamAdapter {
       ) {
         return;
       }
-      void this.recoverFromLowSttConfidence(session).catch((err) => {
+      void this.recoverFromSilenceExpiry(session).catch((err) => {
         logger.warn('mediastream: silence reprompt failed', {
           error: err instanceof Error ? err.message : String(err),
           callSid: this.state.callSid,
