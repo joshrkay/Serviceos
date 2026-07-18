@@ -3242,4 +3242,56 @@ describe('T2-F05 caller-silence reprompt timer', () => {
     expect(session.pendingVoiceApproval).toBeDefined(); // left intact for the real turn
     expect(ws.closed).toBe(false);
   });
+
+  it('serialization (transcript race): a caller answer consumed under the lock bumps the activity generation, so the queued expiry no-ops even though outboundTurnId/agentSpeaking still read the armed turn', async () => {
+    // Codex P2 (round 2) — the load-bearing guard for the transcript race.
+    // onTranscriptEvent → speechTurn consumes the pending dialogue under ITS
+    // OWN lock hold; the next outbound turn only bumps outboundTurnId / sets
+    // agentSpeaking AFTER that lock releases. So when the expiry's queued lock
+    // body runs, those two guards STILL read the armed turn — only the caller-
+    // activity generation has moved. Prove the expiry bails on the generation
+    // alone (the pre-fix guards would have let it double-consume).
+    const handlePendingDialogueSilence = makePendingDialogueSilenceHandler();
+    const { adapter, ws, handle, texts, session } = await setupSilenceCall('CA-sil-txn-race', {
+      handlePendingDialogueSilence,
+    });
+    await completeAgentTurn(adapter, ws, handle);
+    session.pendingVoiceApproval = { action: 'approve', stage: 'confirm' };
+
+    const armedState = (
+      adapter as unknown as {
+        state: { outboundTurnId: number; agentSpeaking: boolean; callerActivityGeneration: number };
+      }
+    ).state;
+    const armedTurnId = armedState.outboundTurnId;
+    const armedSpeaking = armedState.agentSpeaking;
+
+    let release!: () => void;
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    const racingTurn = store.withSessionLock(session.id, async () => {
+      // Model onTranscriptEvent → speechTurn: the caller's real answer bumps
+      // the activity generation and consumes the pending approval, WITHOUT yet
+      // starting the next outbound turn (that would happen after this lock
+      // releases). outboundTurnId / agentSpeaking are deliberately untouched.
+      armedState.callerActivityGeneration += 1;
+      session.pendingVoiceApproval = undefined;
+      await held;
+    });
+
+    // Fire the timer: its callback queues behind the racing turn on the lock.
+    await vi.advanceTimersByTimeAsync(DEFAULT_SILENCE_REPROMPT_MS);
+    release();
+    await racingTurn;
+    await flush();
+
+    // The two pre-fix guards are unchanged from arm time — only the generation
+    // moved, so it is the sole reason the expiry stood down.
+    expect(armedState.outboundTurnId).toBe(armedTurnId);
+    expect(armedState.agentSpeaking).toBe(armedSpeaking);
+    expect(handlePendingDialogueSilence).not.toHaveBeenCalled();
+    expect(texts).toEqual([AGENT_LINE]); // no stale reprompt over the real answer
+    expect(ws.closed).toBe(false);
+  });
 });

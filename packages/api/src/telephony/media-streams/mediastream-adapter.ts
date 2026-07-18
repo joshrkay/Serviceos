@@ -516,6 +516,19 @@ interface RuntimeState {
    * per turn (once per streamed chunk).
    */
   pendingSilenceRepromptTurnId: number | null;
+  /**
+   * Codex P2 (PR #702) — monotonic counter bumped on EVERY caller transcript
+   * (interim or final), the same "any caller audio means not-silent" signal
+   * that clears the silence timer. `armSilenceRepromptTimer` captures its value
+   * at arm time; the expiry's locked body bails if it changed. This closes the
+   * window the `outboundTurnId`/`agentSpeaking` guards miss: a final transcript
+   * that fires between the timeout callback starting and its lock body running
+   * consumes the pending dialogue inside `onTranscriptEvent`'s `speechTurn`
+   * lock, but the new outbound turn (which bumps `outboundTurnId` / sets
+   * `agentSpeaking`) only happens AFTER that lock releases — so those guards
+   * still read stale and would let the expiry double-consume the answer.
+   */
+  callerActivityGeneration: number;
   /** Outbound queue (bounded, priority-aware). */
   queue: BoundedSendQueue;
   draining: boolean;
@@ -775,6 +788,7 @@ export class TwilioMediaStreamAdapter {
       audioIdleTimer: null,
       silenceRepromptTimer: null,
       pendingSilenceRepromptTurnId: null,
+      callerActivityGeneration: 0,
       queue: new BoundedSendQueue({
         surface: 'twilio_media_streams',
         maxMsgs: TWILIO_QUEUE_MAX_MSGS,
@@ -1237,6 +1251,11 @@ export class TwilioMediaStreamAdapter {
     isFinal: boolean;
   }): Promise<void> {
     // T2-F05 — any caller audio (interim or final) means not-silent.
+    // Bump the activity generation FIRST (Codex P2, PR #702): clearing the
+    // timer can't stop a silence expiry whose timeout callback already fired
+    // and is now queued behind this turn's `speechTurn` lock, so the arm-time
+    // generation this bump invalidates is what makes that expiry a no-op.
+    this.state.callerActivityGeneration++;
     this.clearSilenceRepromptTimer();
     // Barge-in: any interim transcript while we're playing TTS aborts
     // the current agent utterance. Empty interim transcripts are
@@ -2633,6 +2652,10 @@ export class TwilioMediaStreamAdapter {
     if (this.state.closed) return;
     this.clearSilenceRepromptTimer();
     const ms = this.deps.silenceRepromptTimeoutMs ?? DEFAULT_SILENCE_REPROMPT_MS;
+    // Snapshot the caller-activity generation at arm time. Any transcript that
+    // arrives before the expiry's locked body runs bumps this, marking the
+    // expiry stale (Codex P2, PR #702).
+    const armedGeneration = this.state.callerActivityGeneration;
     this.state.silenceRepromptTimer = setTimeout(() => {
       this.state.silenceRepromptTimer = null;
       const session = this.state.session;
@@ -2643,14 +2666,19 @@ export class TwilioMediaStreamAdapter {
       // `pendingConsentCapture` this expiry may consume. Clearing the timer
       // can't stop a callback already inside the awaited hook, so take the
       // lock and RE-CHECK the guards inside it: if the racing turn ran first
-      // (advanced `outboundTurnId`, resumed `agentSpeaking`, closed the call,
-      // or already consumed the dialogue) the expiry is now stale → no-op.
+      // the expiry is now stale → no-op. The `callerActivityGeneration` check
+      // is the load-bearing one for the transcript race: `speechTurn` consumes
+      // the dialogue under its OWN lock hold and the new outbound turn only
+      // bumps `outboundTurnId` / sets `agentSpeaking` AFTER that lock releases,
+      // so those two guards still read stale when this queued body runs — but
+      // the transcript already bumped the generation, so we bail correctly.
       void this.deps.store
         .withSessionLock(session.id, async () => {
           if (
             this.state.closed ||
             turnId !== this.state.outboundTurnId ||
-            this.state.agentSpeaking
+            this.state.agentSpeaking ||
+            this.state.callerActivityGeneration !== armedGeneration
           ) {
             return;
           }
