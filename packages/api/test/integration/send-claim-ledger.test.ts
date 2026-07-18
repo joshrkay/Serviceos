@@ -243,6 +243,38 @@ describe('send_claims ledger (integration)', () => {
     expect(await claimSend(pool, tenantId, 'wsc-sending-release')).toBe(true);
   });
 
+  // --- Codex P1 #2 — post-provider-acceptance bookkeeping failure must not
+  // release the claim -----------------------------------------------------
+
+  it('withSendClaim: markProviderAccepted then a throw finalizes "sent" against the real table (not released), and a retry is a duplicate no-op', async () => {
+    const { tenantId } = await createTestTenant(pool);
+    let providerCalls = 0;
+
+    await expect(
+      withSendClaim(pool, tenantId, 'p1-2-real', async (markProviderAccepted) => {
+        providerCalls++;
+        markProviderAccepted(); // the provider genuinely accepted the message
+        throw new Error('dispatch-row write failed'); // then bookkeeping throws
+      }),
+    ).rejects.toThrow('dispatch-row write failed');
+
+    const { rows } = await pool.query(
+      `SELECT status, sent_at FROM send_claims WHERE tenant_id = $1 AND claim_key = $2`,
+      [tenantId, 'p1-2-real'],
+    );
+    expect(rows[0].status).toBe('sent');
+    expect(rows[0].sent_at).not.toBeNull();
+
+    // A retry for the same key must be a clean duplicate — never a resend —
+    // and must not touch the real provider again.
+    const retry = await withSendClaim(pool, tenantId, 'p1-2-real', async () => {
+      providerCalls++;
+      return 'should-not-run';
+    });
+    expect(retry).toEqual({ outcome: 'duplicate', priorStatus: 'sent' });
+    expect(providerCalls).toBe(1);
+  });
+
   it('findStuckSendClaims surfaces old "sending" rows but not fresh "sending", "claimed", or "sent" rows', async () => {
     const { tenantId } = await createTestTenant(pool);
     await pool.query(

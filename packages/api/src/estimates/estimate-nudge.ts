@@ -16,6 +16,18 @@
  * per-OCCURRENCE (`estimate_nudge:{id}:{reminderCount+1}`), not per-estimate —
  * nudges are deliberately repeatable, so a later nudge at a higher
  * reminderCount is a fresh, independent claim.
+ *
+ * Codex P1 #2 follow-up — `sendService.sendEstimate` itself does a
+ * provider-then-entity-write (estimate.sentAt/lastDispatchId/status): if that
+ * internal entity write throws AFTER the provider call already succeeded, a
+ * naive claim wrapper here would release the claim on the rethrow and let a
+ * retry duplicate the send. We thread `withSendClaim`'s
+ * `markProviderAccepted` signal into `sendEstimate` (as `onProviderAccepted`)
+ * so a throw from that internal write finalizes the claim to 'sent' instead
+ * of releasing it — see notifications/send-claim-ledger.ts and
+ * notifications/send-service.ts's `SendEntityOptions` for the full mechanism.
+ * The reminderCount/lastReminderAt bookkeeping BELOW this module owns is
+ * unaffected either way: it only runs once the send has genuinely completed.
  */
 import type { Pool } from 'pg';
 import type { Estimate, EstimateRepository } from './estimate';
@@ -81,22 +93,23 @@ export async function dispatchEstimateNudge(
   const { tenantId, estimate, channel, asOf } = input;
   const occurrence = (estimate.reminderCount ?? 0) + 1;
 
-  const send = () =>
-    deps.sendService.sendEstimate({
-      tenantId,
-      estimateId: estimate.id,
-      channel,
-      ...(input.customMessage !== undefined ? { customMessage: input.customMessage } : {}),
-    });
+  const sendInput = {
+    tenantId,
+    estimateId: estimate.id,
+    channel,
+    ...(input.customMessage !== undefined ? { customMessage: input.customMessage } : {}),
+  };
 
   if (deps.pool) {
     const claimKey = estimateNudgeClaimKey(estimate.id, occurrence);
-    const outcome = await withSendClaim(deps.pool, tenantId, claimKey, send);
+    const outcome = await withSendClaim(deps.pool, tenantId, claimKey, (markProviderAccepted) =>
+      deps.sendService.sendEstimate(sendInput, { onProviderAccepted: markProviderAccepted }),
+    );
     if (outcome.outcome === 'duplicate') {
       throw new EstimateNudgeAlreadyClaimedError(estimate.id, occurrence);
     }
   } else {
-    await send();
+    await deps.sendService.sendEstimate(sendInput);
   }
 
   await deps.estimateRepo.update(tenantId, estimate.id, {

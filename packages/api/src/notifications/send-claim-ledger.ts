@@ -191,17 +191,42 @@ export type SendClaimOutcome<T> =
  * this is the crash-safety fix: if the process dies after the provider call
  * succeeds but before `markSendClaimComplete` commits, the row is already at
  * `'sending'`, which `claimSend` never auto-reclaims, so a later sweep can't
- * re-send it. On `sendFn` throwing (a CAUGHT failure — the process is still
- * alive, so we know first-hand the provider call did not succeed), release
- * the claim then rethrow unchanged (the caller's existing try/catch owns
- * retry semantics); on success, finalize the claim to the permanent `'sent'`
- * tombstone and return the send result.
+ * re-send it.
+ *
+ * `sendFn` receives a `markProviderAccepted()` signal (Codex P1 #2 follow-up
+ * to the crash-safety fix above). `sendFn` should call it the instant the
+ * PROVIDER has accepted the message — before any post-send bookkeeping the
+ * closure also happens to perform. This closes a second, narrower window than
+ * the 'sending' state does: a caught (not crashed) exception from
+ * post-provider-acceptance bookkeeping (e.g. a `dispatchRepo.create` or an
+ * entity-status write throwing after the SMS/email genuinely went out). Most
+ * callers should instead do that bookkeeping AFTER `withSendClaim` returns
+ * `{outcome: 'sent', result}` (see notifications/customer-message-delivery.ts)
+ * so it's structurally impossible to trigger this path — `markProviderAccepted`
+ * exists for callers where the bookkeeping is buried inside a shared method
+ * they don't own end-to-end (see estimates/estimate-nudge.ts wrapping
+ * `SendService.sendEstimate`, which threads it through as an option).
+ *
+ * On `sendFn` throwing:
+ *   - if `markProviderAccepted` was never called (the process is still alive,
+ *     so we know first-hand the provider call itself did not succeed):
+ *     release the claim, then rethrow unchanged (the caller's existing
+ *     try/catch owns retry semantics).
+ *   - if `markProviderAccepted` WAS called before the throw (the provider
+ *     already accepted the message — only the caller's own follow-up
+ *     bookkeeping failed): finalize the claim to the permanent `'sent'`
+ *     tombstone instead of releasing it, then rethrow unchanged. A resend
+ *     here would duplicate a message that already went out; the caller's own
+ *     catch still sees the bookkeeping error so it can log/reconcile.
+ *
+ * On success, finalize the claim to the permanent `'sent'` tombstone and
+ * return the send result.
  */
 export async function withSendClaim<T>(
   pool: Pool,
   tenantId: string,
   claimKey: string,
-  sendFn: () => Promise<T>,
+  sendFn: (markProviderAccepted: () => void) => Promise<T>,
   staleMinutes: number = DEFAULT_STALE_MINUTES,
 ): Promise<SendClaimOutcome<T>> {
   const claimed = await claimSend(pool, tenantId, claimKey, staleMinutes);
@@ -218,14 +243,28 @@ export async function withSendClaim<T>(
     };
   }
 
+  let providerAccepted = false;
+  const markProviderAccepted = () => {
+    providerAccepted = true;
+  };
+
   let result: T;
   try {
     // Flip to 'sending' BEFORE the provider call so a crash after a
     // successful send can never be mistaken for an abandoned pre-send claim
     // (see module doc + claimSend's WHERE clause).
     await markSendClaimSending(pool, tenantId, claimKey);
-    result = await sendFn();
+    result = await sendFn(markProviderAccepted);
   } catch (err) {
+    if (providerAccepted) {
+      // The provider already accepted the message before this error — only
+      // sendFn's post-send bookkeeping threw. Finalize (never release): a
+      // released claim here would let a retry duplicate a send that already
+      // went out. The bookkeeping error still propagates unchanged so the
+      // caller's own catch can log/reconcile it.
+      await markSendClaimComplete(pool, tenantId, claimKey).catch(() => undefined);
+      throw err;
+    }
     await releaseSendClaim(pool, tenantId, claimKey).catch(() => undefined);
     throw err;
   }

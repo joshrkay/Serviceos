@@ -22,15 +22,19 @@ const TENANT = 't-1';
 const INVOICE_ID = 'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa';
 
 class FakeComms {
-  calls: Array<{ tenantId: string; invoiceId: string }> = [];
+  calls: Array<{ tenantId: string; invoiceId: string; occurrenceToken: string }> = [];
   shouldThrow = false;
   /** Optional hook fired synchronously inside the send — lets a test observe
    *  the ledger state AT the moment of send (proves record-before-send). */
   onSend?: (tenantId: string, invoiceId: string) => Promise<void> | void;
-  async notifyInvoiceOverdue(tenantId: string, invoiceId: string): Promise<void> {
+  async notifyInvoiceOverdue(
+    tenantId: string,
+    invoiceId: string,
+    occurrenceToken: string,
+  ): Promise<void> {
     if (this.shouldThrow) throw new Error('delivery failed');
     if (this.onSend) await this.onSend(tenantId, invoiceId);
-    this.calls.push({ tenantId, invoiceId });
+    this.calls.push({ tenantId, invoiceId, occurrenceToken });
   }
 }
 
@@ -69,10 +73,25 @@ describe('send_payment_reminder execution handler', () => {
 
     expect(result.success).toBe(true);
     expect(result.resultEntityId).toBe(INVOICE_ID);
-    expect(comms.calls).toEqual([{ tenantId: TENANT, invoiceId: INVOICE_ID }]);
+    expect(comms.calls).toEqual([
+      { tenantId: TENANT, invoiceId: INVOICE_ID, occurrenceToken: '3:sms' },
+    ]);
 
     const events = await auditRepo.findByEntity(TENANT, 'invoice', INVOICE_ID);
     expect(events.some((e) => e.eventType === 'invoice.reminder_sent')).toBe(true);
+  });
+
+  it('Codex P1 #1: distinct dunning steps (different stepKey) for the SAME invoice thread distinct occurrence tokens, not one entity-scoped key', async () => {
+    await handler.execute(makeProposal({ payload: { invoiceId: INVOICE_ID, stepKey: '3:sms', offsetDays: 3, channel: 'sms' } }), ctx);
+    await handler.execute(
+      makeProposal({
+        id: 'prop-2',
+        payload: { invoiceId: INVOICE_ID, stepKey: '10:email', offsetDays: 10, channel: 'email' },
+      }),
+      ctx,
+    );
+
+    expect(comms.calls.map((c) => c.occurrenceToken)).toEqual(['3:sms', '10:email']);
   });
 
   it('returns a failed result (never throws) when delivery fails', async () => {

@@ -355,4 +355,96 @@ describe('sendCustomerMessage — T4-F01 claim-before-send', () => {
     );
     expect(deps.delivery.sentSms).toHaveLength(1);
   });
+
+  describe('Codex P1 #2 — post-provider-acceptance bookkeeping failure must NOT release the claim', () => {
+    it('provider send succeeds but the dispatch-row write throws: the SMS is not resent, the claim ends "sent", and the failure is logged (not swallowed as a generic send failure)', async () => {
+      const deps = makeDeps();
+      const { pool, claims } = claimAwarePool();
+      vi.spyOn(deps.dispatchRepo, 'create').mockRejectedValueOnce(new Error('db down'));
+
+      await sendCustomerMessage(
+        { ...deps.sendDeps, pool },
+        { ...baseInput, customer: makeCustomer(), channels: ['sms'] },
+      );
+
+      // The provider call genuinely went out...
+      expect(deps.delivery.sentSms).toHaveLength(1);
+      // ...the claim is finalized 'sent', NOT released...
+      expect(claims.get(`${TENANT}::estimate:est-1:send:sms`)?.status).toBe('sent');
+      // ...and the bookkeeping failure is logged distinctly from a provider failure.
+      expect(deps.logger.warn).toHaveBeenCalledWith(
+        'Customer message sent but the dispatch-row write failed',
+        expect.objectContaining({ tenantId: TENANT, channel: 'sms' }),
+      );
+      expect(deps.logger.warn).not.toHaveBeenCalledWith(
+        'Customer message send failed',
+        expect.anything(),
+      );
+
+      // A second invocation with the SAME idempotency prefix must be a clean
+      // duplicate no-op — never a resend — because the claim already ended 'sent'.
+      await sendCustomerMessage(
+        { ...deps.sendDeps, pool },
+        { ...baseInput, customer: makeCustomer(), channels: ['sms'] },
+      );
+      expect(deps.delivery.sentSms).toHaveLength(1); // still just the one send
+    });
+  });
+});
+
+describe('sendCustomerMessage — Codex P1 #1: per-occurrence claim keys', () => {
+  it('two sends with DISTINCT idempotencyKeyPrefix values (e.g. per-paymentId / per-reminder-occurrence) both go out', async () => {
+    const deps = makeDeps();
+    const { pool } = claimAwarePool();
+
+    await sendCustomerMessage(
+      { ...deps.sendDeps, pool },
+      {
+        ...baseInput,
+        idempotencyKeyPrefix: 'payment-receipt:inv-1:pay-AAA',
+        customer: makeCustomer(),
+        channels: ['sms'],
+      },
+    );
+    await sendCustomerMessage(
+      { ...deps.sendDeps, pool },
+      {
+        ...baseInput,
+        idempotencyKeyPrefix: 'payment-receipt:inv-1:pay-BBB',
+        customer: makeCustomer(),
+        channels: ['sms'],
+      },
+    );
+
+    // Distinct occurrence tokens (different paymentIds on the SAME invoice) —
+    // both are legitimate, independent sends and neither is suppressed by the
+    // other's tombstone.
+    expect(deps.delivery.sentSms).toHaveLength(2);
+  });
+
+  it('two sends with the SAME idempotencyKeyPrefix dedupe — the second is a no-op', async () => {
+    const deps = makeDeps();
+    const { pool } = claimAwarePool();
+
+    await sendCustomerMessage(
+      { ...deps.sendDeps, pool },
+      {
+        ...baseInput,
+        idempotencyKeyPrefix: 'invoice-overdue:inv-1:3:sms',
+        customer: makeCustomer(),
+        channels: ['sms'],
+      },
+    );
+    await sendCustomerMessage(
+      { ...deps.sendDeps, pool },
+      {
+        ...baseInput,
+        idempotencyKeyPrefix: 'invoice-overdue:inv-1:3:sms',
+        customer: makeCustomer(),
+        channels: ['sms'],
+      },
+    );
+
+    expect(deps.delivery.sentSms).toHaveLength(1);
+  });
 });

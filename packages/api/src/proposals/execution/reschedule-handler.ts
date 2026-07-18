@@ -199,7 +199,14 @@ export class RescheduleAppointmentExecutionHandler implements ExecutionHandler {
       }
 
       if (this.transactionalComms) {
-        await this.transactionalComms.notifyRescheduled(context.tenantId, appointmentId);
+        // Codex P1 #1 follow-up — newScheduledStart is the per-occurrence
+        // claim token so a later reschedule of the SAME appointment isn't
+        // silently suppressed by the first one's tombstone.
+        await this.transactionalComms.notifyRescheduled(
+          context.tenantId,
+          appointmentId,
+          newScheduledStart,
+        );
       }
 
       // Spatial board sync. When a reschedule crosses calendar days, BOTH

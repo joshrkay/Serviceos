@@ -83,6 +83,43 @@ describe('P1-013 — Payment entity + partial payments', () => {
     expect(invoice.status).toBe('paid');
   });
 
+  it('Codex P1 #1: two partial payments on the SAME invoice thread two DISTINCT paymentIds to the receipt notifier (each partial payment gets its own receipt)', async () => {
+    const receiptCalls: Array<{ invoiceId: string; amountCents: number; paymentId: string }> = [];
+    const notifier = {
+      notifyPaymentReceived: async (
+        _tenantId: string,
+        invId: string,
+        amountCents: number,
+        paymentId: string,
+      ) => {
+        receiptCalls.push({ invoiceId: invId, amountCents, paymentId });
+      },
+    };
+
+    const first = await recordPayment(
+      { tenantId: 'tenant-1', invoiceId, amountCents: 4000, method: 'cash', processedBy: 'u-1' },
+      invoiceRepo,
+      paymentRepo,
+      undefined,
+      notifier,
+    );
+    const second = await recordPayment(
+      { tenantId: 'tenant-1', invoiceId, amountCents: 6000, method: 'check', processedBy: 'u-1' },
+      invoiceRepo,
+      paymentRepo,
+      undefined,
+      notifier,
+    );
+
+    expect(receiptCalls).toHaveLength(2);
+    expect(receiptCalls[0].paymentId).toBe(first.payment.id);
+    expect(receiptCalls[1].paymentId).toBe(second.payment.id);
+    // The two payments (hence their receipt claim tokens) are distinct —
+    // an invoice-scoped-only claim key would have tombstoned the SECOND
+    // receipt after the first.
+    expect(receiptCalls[0].paymentId).not.toBe(receiptCalls[1].paymentId);
+  });
+
   it('payment arithmetic — partial payments keep running balance correct', async () => {
     const first = await recordPayment(
       { tenantId: 'tenant-1', invoiceId, amountCents: 2500, method: 'cash', processedBy: 'u-1' },

@@ -42,6 +42,23 @@ export interface SendInvoiceInput {
   customMessage?: string;
 }
 
+/**
+ * Codex P1 #2 follow-up. Callers that wrap `sendEstimate`/`sendInvoice` in
+ * `withSendClaim` (see estimates/estimate-nudge.ts) thread `withSendClaim`'s
+ * `markProviderAccepted` signal in as `onProviderAccepted`. This method calls
+ * it the instant the customer has actually received the message — i.e. right
+ * after the channel dispatch succeeds, before the entity-write bookkeeping
+ * below (estimate.sentAt / lastDispatchId / status, invoice.sentAt, etc.). If
+ * that bookkeeping write then throws, `withSendClaim` finalizes the claim to
+ * 'sent' instead of releasing it: the provider already accepted the message,
+ * so releasing would let a retry duplicate the send. Callers that don't wrap
+ * this in a claim (the direct "Send Estimate/Invoice" routes, the proposal
+ * delivery adapters) simply omit this option — a no-op.
+ */
+export interface SendEntityOptions {
+  onProviderAccepted?: () => void;
+}
+
 export interface SendResult {
   estimateId?: string;
   invoiceId?: string;
@@ -86,7 +103,7 @@ export interface SendServiceDeps {
 export class SendService {
   constructor(private readonly deps: SendServiceDeps) {}
 
-  async sendEstimate(input: SendEstimateInput): Promise<SendResult> {
+  async sendEstimate(input: SendEstimateInput, options?: SendEntityOptions): Promise<SendResult> {
     const estimate = await this.deps.estimateRepo.findById(
       input.tenantId,
       input.estimateId
@@ -198,6 +215,12 @@ export class SendService {
       );
     }
 
+    // Codex P1 #2 follow-up — the customer has now actually received this
+    // estimate on at least one channel. Signal any claim wrapper BEFORE the
+    // entity write below, so a throw from that write finalizes the claim
+    // instead of releasing it (see SendEntityOptions doc).
+    options?.onProviderAccepted?.();
+
     const now = new Date();
     await this.deps.estimateRepo.update(input.tenantId, estimate.id, {
       viewToken,
@@ -221,7 +244,7 @@ export class SendService {
     };
   }
 
-  async sendInvoice(input: SendInvoiceInput): Promise<SendResult> {
+  async sendInvoice(input: SendInvoiceInput, options?: SendEntityOptions): Promise<SendResult> {
     const invoice = await this.deps.invoiceRepo.findById(
       input.tenantId,
       input.invoiceId
@@ -331,6 +354,12 @@ export class SendService {
         `Invoice send failed on all channels: ${errors.join('; ')}`
       );
     }
+
+    // Codex P1 #2 follow-up — see the matching call in sendEstimate above.
+    // No current caller wraps sendInvoice in withSendClaim (the direct send
+    // routes/adapters are one-shot, not claim-guarded), but this keeps the
+    // method safe to compose that way later without a silent gap.
+    options?.onProviderAccepted?.();
 
     const now = new Date();
     await this.deps.invoiceRepo.update(input.tenantId, invoice.id, {

@@ -259,5 +259,49 @@ describe('dispatchEstimateNudge', () => {
       });
       expect(sendEstimate).toHaveBeenCalledTimes(2);
     });
+
+    it('Codex P1 #2: SendService.sendEstimate signals provider-acceptance then its own entity-write throws — the claim ends "sent" (not released), reminderCount is NOT bumped by this attempt, and a retry is a duplicate no-op (never a resend)', async () => {
+      const { pool, claims } = claimAwarePool();
+      // Model SendService.sendEstimate's real shape: it calls
+      // options.onProviderAccepted() once the provider channel dispatch
+      // succeeds, THEN does its own estimate-entity write (sentAt/status/
+      // lastDispatchId) — which we simulate throwing here.
+      sendEstimate.mockImplementationOnce(
+        async (_input: unknown, options?: { onProviderAccepted?: () => void }) => {
+          options?.onProviderAccepted?.();
+          throw new Error('estimate entity write failed');
+        },
+      );
+
+      await expect(
+        dispatchEstimateNudge(deps({ pool }), {
+          tenantId: TENANT,
+          estimate: makeEstimate(),
+          channel: 'sms',
+          asOf: NOW,
+          actorId: 'worker',
+        }),
+      ).rejects.toThrow('estimate entity write failed');
+
+      // The claim is finalized 'sent' (the customer really did receive the
+      // estimate) — NOT released.
+      expect(claims.get(`${TENANT}::estimate_nudge:${ESTIMATE_ID}:1`)?.status).toBe('sent');
+      // This attempt didn't complete dispatchEstimateNudge's own bookkeeping.
+      const updated = await estimateRepo.findById(TENANT, ESTIMATE_ID);
+      expect(updated!.reminderCount ?? 0).toBe(0);
+
+      // A retry for the same occurrence must be a duplicate no-op, never a
+      // second real send.
+      await expect(
+        dispatchEstimateNudge(deps({ pool }), {
+          tenantId: TENANT,
+          estimate: makeEstimate(),
+          channel: 'sms',
+          asOf: NOW,
+          actorId: 'worker',
+        }),
+      ).rejects.toThrow(EstimateNudgeAlreadyClaimedError);
+      expect(sendEstimate).toHaveBeenCalledTimes(1); // only the one (failed-bookkeeping) real attempt
+    });
   });
 });

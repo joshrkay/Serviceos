@@ -202,6 +202,50 @@ describe('withSendClaim', () => {
     });
     await expect(withSendClaim(pool, TENANT, 'k', sendFn)).rejects.toThrow('provider down');
   });
+
+  describe('Codex P1 #2 — markProviderAccepted signal', () => {
+    it('a post-provider-acceptance bookkeeping throw finalizes the claim to "sent" (never released) and still rethrows', async () => {
+      const { pool, query } = fakePool(1);
+      const sendFn = vi.fn(async (markProviderAccepted: () => void) => {
+        // Provider call succeeds first...
+        markProviderAccepted();
+        // ...then the caller's own post-send bookkeeping throws.
+        throw new Error('dispatch-row write failed');
+      });
+      await expect(withSendClaim(pool, TENANT, 'k', sendFn)).rejects.toThrow(
+        'dispatch-row write failed',
+      );
+      // claim INSERT + sending UPDATE + finalize UPDATE ('sent') — NO release DELETE.
+      expect(query).toHaveBeenCalledTimes(3);
+      expect(query.mock.calls[1][0]).toMatch(/UPDATE send_claims SET status = 'sending'/);
+      expect(query.mock.calls[2][0]).toMatch(/UPDATE send_claims SET status = 'sent'/);
+    });
+
+    it('a throw BEFORE markProviderAccepted still releases the claim (unchanged pre-send-failure behavior)', async () => {
+      const { pool, query } = fakePool(1);
+      const sendFn = vi.fn(async (_markProviderAccepted: () => void) => {
+        throw new Error('provider down');
+      });
+      await expect(withSendClaim(pool, TENANT, 'k', sendFn)).rejects.toThrow('provider down');
+      expect(query.mock.calls[2][0]).toMatch(/DELETE FROM send_claims/);
+    });
+
+    it('swallows a finalize failure after provider-acceptance so the original bookkeeping error still propagates', async () => {
+      const query = vi
+        .fn()
+        .mockResolvedValueOnce({ rowCount: 1, rows: [] }) // claim INSERT
+        .mockResolvedValueOnce({ rowCount: 1, rows: [] }) // sending UPDATE
+        .mockRejectedValueOnce(new Error('db down on finalize')); // finalize UPDATE ('sent')
+      const pool = { query } as unknown as Pool;
+      const sendFn = vi.fn(async (markProviderAccepted: () => void) => {
+        markProviderAccepted();
+        throw new Error('dispatch-row write failed');
+      });
+      await expect(withSendClaim(pool, TENANT, 'k', sendFn)).rejects.toThrow(
+        'dispatch-row write failed',
+      );
+    });
+  });
 });
 
 /**
@@ -305,5 +349,29 @@ describe('withSendClaim + claimSend — three-state crash-safety lifecycle', () 
 
     const outcome = await withSendClaim(pool, TENANT, 'k', async () => 'retried-ok');
     expect(outcome).toEqual({ outcome: 'sent', result: 'retried-ok' });
+  });
+
+  it('Codex P1 #2: provider-accepted-then-bookkeeping-throw ends the row at "sent" (not released), and a second invocation is a duplicate no-op — never a resend', async () => {
+    const { pool, rows } = simulatedPool();
+    let providerCalls = 0;
+    const bookkeepingFails = vi.fn(async (markProviderAccepted: () => void) => {
+      providerCalls++;
+      markProviderAccepted(); // the provider genuinely accepted the message
+      throw new Error('dispatch-row write failed'); // then bookkeeping throws
+    });
+
+    await expect(withSendClaim(pool, TENANT, 'k', bookkeepingFails)).rejects.toThrow(
+      'dispatch-row write failed',
+    );
+    expect(rows.get(`${TENANT}::k`)?.status).toBe('sent');
+    expect(providerCalls).toBe(1);
+
+    // A second invocation for the same key must NOT re-invoke the provider —
+    // the claim is a permanent 'sent' tombstone, so this is a clean duplicate.
+    const secondSendFn = vi.fn(async () => 'should-not-run');
+    const outcome = await withSendClaim(pool, TENANT, 'k', secondSendFn);
+    expect(outcome).toEqual({ outcome: 'duplicate', priorStatus: 'sent' });
+    expect(secondSendFn).not.toHaveBeenCalled();
+    expect(providerCalls).toBe(1); // still just the one real provider call
   });
 });

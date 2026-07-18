@@ -134,7 +134,12 @@ export class SendPaymentReminderExecutionHandler implements ExecutionHandler {
     }
 
     try {
-      await this.transactionalComms.notifyInvoiceOverdue(context.tenantId, invoiceId);
+      // Codex P1 #1 — stepKey ('<offsetDays>:<channel>' for a cadence step,
+      // or 'manual') is the per-occurrence claim token: each dunning step
+      // (and each manual send, already deduped above by proposal id) is a
+      // legitimately distinct send, so the ledger must not tombstone the
+      // invoice after the first reminder.
+      await this.transactionalComms.notifyInvoiceOverdue(context.tenantId, invoiceId, stepKey);
     } catch (err) {
       return {
         success: false,
