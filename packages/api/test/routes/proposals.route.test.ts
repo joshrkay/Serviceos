@@ -182,6 +182,26 @@ describe('POST /api/proposals/ — proposals:create permission gating', () => {
     expect((await proposalRepo.findByStatus(TEST_TENANT_ID, 'draft')).length).toBe(1);
   });
 
+  it('technician role → 403 on a non-reschedule type (reassign): the create grant is reschedule-scoped for techs', async () => {
+    const { app, proposalRepo, appointment } = await buildSchedulingAppWithRole('technician' as Role);
+
+    const res = await request(app)
+      .post('/api/proposals')
+      .set('If-Match', appointment.updatedAt.toISOString())
+      .send({
+        proposalType: 'reassign_appointment',
+        payload: {
+          appointmentId: appointment.id,
+          toTechnicianId: '11111111-1111-1111-1111-111111111111',
+        },
+        summary: 'reassign via test',
+      });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('FORBIDDEN');
+    expect((await proposalRepo.findByStatus(TEST_TENANT_ID, 'draft')).length).toBe(0);
+  });
+
   it('dispatcher role → 200 with created proposal', async () => {
     const { app, appointment } = await buildSchedulingAppWithRole('dispatcher' as Role);
 

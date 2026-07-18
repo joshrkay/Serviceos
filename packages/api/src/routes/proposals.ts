@@ -114,6 +114,15 @@ export function createProposalsRouter(
         return;
       }
       const proposalType = body.proposalType as SupportedType;
+      // Technicians hold proposals:create ONLY for the day-view reschedule
+      // flow (TechnicianDayView); reassign/crew-management are dispatcher/
+      // owner actions. Scope the broad create grant to reschedules for techs
+      // so a crafted reassign/add-crew/remove-crew payload can't ride the
+      // permission that exists purely for the reschedule request.
+      if (req.auth!.role === 'technician' && proposalType !== 'reschedule_appointment') {
+        res.status(403).json({ error: 'FORBIDDEN', proposalType });
+        return;
+      }
       // P2-002 AI-safety gate, reused here for the operator-initiated
       // creation path: validate the payload against its per-type Zod schema
       // before it reaches createSchedulingProposal. Throws ValidationError,
