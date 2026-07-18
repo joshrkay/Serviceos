@@ -643,6 +643,75 @@ describe('A2 — TwilioGatherAdapter Gather hints wiring', () => {
     expect(xml).not.toContain('hints=');
     expect(xml).toContain('<Gather input="speech"');
   });
+
+  // U3 — app.ts now wires a shared TenantGlossaryProvider's termsForTenant
+  // as sttHintsResolver unconditionally (no LLM dependency). Pin: the
+  // wired resolver is preferred over the catalogRepo/customerRepo/userRepo
+  // fallback (the fallback repos are never queried when a resolver is
+  // wired), and the resolver is invoked once per Gather turn.
+  it('prefers a wired sttHintsResolver over the glossary-repo fallback, and calls it once per Gather turn', async () => {
+    const store = new VoiceSessionStore();
+    const gateway = makeGatewayReturning('{"intentType":"unknown","confidence":0,"reasoning":"x"}');
+    const sttHintsResolver = vi.fn(async () => ['furnace', 'compressor']);
+    const catalogRepo = {
+      listByTenant: vi.fn(async () => [{ name: 'Should not be used' }]),
+    } as unknown as import('../../src/catalog/catalog-item').CatalogItemRepository;
+    const customerRepo = {
+      findByTenant: vi.fn(async () => [{ displayName: 'Should not be used' }]),
+    } as unknown as import('../../src/customers/customer').CustomerRepository;
+    const userRepo = {
+      findByTenant: vi.fn(async () => [{ firstName: 'Should', lastName: 'NotBeUsed' }]),
+    } as unknown as import('../../src/users/user').UserRepository;
+    const adapter = new TwilioGatherAdapter({
+      store,
+      gateway,
+      businessName: 'Acme Plumbing',
+      publicBaseUrl: 'https://example.com',
+      sttHintsResolver,
+      catalogRepo,
+      customerRepo,
+      userRepo,
+    });
+
+    const xml1 = await adapter.handleInbound({
+      callSid: 'CA-hints-preferred',
+      from: '+15125550100',
+      to: '+15125550999',
+      tenantId: 'tenant-abc',
+    });
+    expect(xml1).toContain('hints="furnace,compressor"');
+    expect(xml1).not.toContain('Should not be used');
+    expect(sttHintsResolver).toHaveBeenCalledTimes(1);
+
+    const ids = Array.from(
+      (store as unknown as { sessions: Map<string, unknown> }).sessions.keys()
+    );
+    const sessionId = ids[0] as string;
+    const session = await store.get(sessionId);
+    if (session && session.machine.currentState === 'ask_caller') {
+      session.machine.dispatch({ type: 'caller_known', customerId: 'cust-1' });
+    }
+
+    const xml2 = await adapter.handleGather({
+      sessionId,
+      callSid: 'CA-hints-preferred',
+      speechResult: 'I need service',
+      confidence: 0.9,
+      tenantId: 'tenant-abc',
+    });
+    expect(xml2).toContain('hints="furnace,compressor"');
+    expect(sttHintsResolver).toHaveBeenCalledTimes(2);
+
+    // The TenantGlossaryProvider fallback (built from
+    // catalogRepo/customerRepo/userRepo inside resolveGatherHints) is never
+    // consulted while a resolver is wired — customerRepo.findByTenant and
+    // userRepo.findByTenant are ONLY reachable via that fallback in this
+    // minimal dep set (catalogRepo.listByTenant is also legitimately called
+    // by the unrelated session-catalog preload on inbound, so it's not a
+    // useful signal here).
+    expect(customerRepo.findByTenant).not.toHaveBeenCalled();
+    expect(userRepo.findByTenant).not.toHaveBeenCalled();
+  });
 });
 
 // ─── WS16c — transport convergence (stream gains Gather-parity features) ──────

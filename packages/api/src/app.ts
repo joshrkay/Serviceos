@@ -3422,6 +3422,14 @@ export function createApp(): AppWithLifecycle {
     voiceSessionRepo,
     voiceRepo,
     voicePersonaResolver,
+    // U3 — share the same TenantGlossaryProvider instance (and its per-
+    // tenant TTL cache) between the Gather-hints path and the
+    // transcription-correction worker, instead of the adapter lazily
+    // building its own fallback provider. No LLM dependency here (unlike
+    // the correction pass above, which is gated on AI_PROVIDER_API_KEY) —
+    // wired unconditionally so Gather hints work even in a keyless-gateway
+    // deployment.
+    sttHintsResolver: (tenantId: string) => transcriptionGlossaryProvider.termsForTenant(tenantId),
     // §10 onboarding — fire the 30-minute upgrade nudge after every
     // inbound call ends. Pool-gated (no-op when running in-memory).
     ...(pool
