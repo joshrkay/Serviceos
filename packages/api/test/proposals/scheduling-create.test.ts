@@ -92,11 +92,14 @@ describe('POST /api/proposals — scheduling create with version + feasibility g
   });
 
   it('returns 404 before the version check when the appointment does not exist', async () => {
+    // T4-F04 — appointmentId must be UUID-shaped to clear the new per-type
+    // Zod validation gate (proposals.ts) before reaching createSchedulingProposal;
+    // a well-formed but nonexistent id still exercises the not_found path.
     const res = await request(app).post('/api/proposals')
       .set('If-Match', '2026-01-01T00:00:00.000Z')
       .send({
         proposalType: 'reschedule_appointment',
-        payload: { appointmentId: 'missing', newScheduledStart: '2026-05-17T12:00:00Z', newScheduledEnd: '2026-05-17T13:00:00Z' },
+        payload: { appointmentId: '00000000-0000-0000-0000-000000000000', newScheduledStart: '2026-05-17T12:00:00Z', newScheduledEnd: '2026-05-17T13:00:00Z' },
         summary: 'x',
       });
     expect(res.status).toBe(404);

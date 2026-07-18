@@ -32,6 +32,7 @@ import {
 } from '../proposals/proposal-contracts';
 import { FeasibilityDependencies } from '../scheduling/feasibility-types';
 import { createSchedulingProposal } from '../proposals/create-scheduling';
+import { assertValidProposalPayload } from '../proposals/contracts';
 import type { CorrectionRepository } from '../proposals/corrections/correction';
 
 // P2-035 — Batch approval body schema. Lives inline rather than in
@@ -112,6 +113,13 @@ export function createProposalsRouter(
         res.status(400).json({ error: 'UNSUPPORTED_PROPOSAL_TYPE', proposalType: body.proposalType });
         return;
       }
+      const proposalType = body.proposalType as SupportedType;
+      // P2-002 AI-safety gate, reused here for the operator-initiated
+      // creation path: validate the payload against its per-type Zod schema
+      // before it reaches createSchedulingProposal. Throws ValidationError,
+      // mapped to 400 by asyncRoute's toErrorResponse (same convention every
+      // other proposal-mutating route in this file relies on).
+      assertValidProposalPayload(proposalType, body.payload);
       if (!appointmentRepo || !feasibilityDeps) {
         res.status(500).json({ error: 'SCHEDULING_DEPS_UNCONFIGURED' });
         return;
@@ -126,7 +134,7 @@ export function createProposalsRouter(
         {
           tenantId: req.auth!.tenantId,
           actorId: req.auth!.userId,
-          proposalType: body.proposalType as SupportedType,
+          proposalType,
           payload: body.payload,
           summary: body.summary,
           expectedVersion,
