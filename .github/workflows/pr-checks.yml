@@ -165,3 +165,43 @@ jobs:
       - name: Type check Mobile
         run: npm run typecheck
         working-directory: packages/mobile
+
+  # T6-F02 — corpus-integrity gate.
+  #
+  # Nothing in CI ever ran the corpus schema/dedup/PII checks before this
+  # job (grepping `.github/workflows/` for `corpus:|test:dedup|pii-leakage`
+  # returned nothing) — that's exactly how the PR #609 mixed-schema merge
+  # went undetected. Sibling job to `mobile-typecheck`: its own checkout +
+  # setup-node + `npm ci`, no `needs:`, no Docker/Postgres, so it runs in
+  # parallel and stays fast.
+  #
+  # Known pre-existing findings surfaced by fixing these scripts (see
+  # docs/plans/2026-07-18-003-fix-corpus-integrity-plan.md), tracked
+  # separately from this gate's own correctness:
+  #   - `test:corpus-schema` fails today: 1,184 migrated legacy rows use 16
+  #     intents absent from behaviors.yaml's 35-behavior taxonomy — T6-F03
+  #     (taxonomy drift), not a schema bug.
+  #   - `corpus:dedup` fails today: ~600 near-duplicate pairs already existed
+  #     in the original generated EN rows (generate-utterances.ts's
+  #     discourse-prefix augmentation produces near-identical variants of
+  #     templates with no fill slots) — pre-existing, independent of the
+  #     PR #609 schema merge this gate targets; needs its own follow-up.
+  # This job is added and wired per plan; whoever merges should decide
+  # whether to mark it a required check now (and accept it starts red
+  # pending the two follow-ups above) or after they land.
+  corpus-integrity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - name: Corpus schema + floors
+        run: npm run test:corpus-schema
+      - name: Corpus duplicate gate
+        run: npm run corpus:dedup
+      - name: Corpus PII guard
+        run: npm run test:pii-leakage
