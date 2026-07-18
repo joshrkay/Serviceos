@@ -36,6 +36,7 @@ function toApiModel(item: CatalogItem) {
     unitPriceCents: item.unitPriceCents,
     productServiceType: item.productServiceType,
     productServiceTable: item.productServiceType === 'service' ? 'services' : 'products',
+    imageFileId: item.imageFileId ?? null,
     createdAt: item.createdAt,
     updatedAt: item.updatedAt,
   };

@@ -6225,6 +6225,20 @@ export const MIGRATIONS = {
         CHECK (pricing_source IS NULL
                OR pricing_source IN ('catalog','ambiguous','uncatalogued','manual'));
   `,
+
+  // EE-4 — a catalog item's hero photo, stored as a file id into the `files`
+  // table (resolved to a signed URL only at the edge). Nullable/additive.
+  // Renumbered 254→256 on the main merge (PR #696 claimed 254/255).
+  '256_catalog_items_image_file_id': `
+    ALTER TABLE catalog_items ADD COLUMN IF NOT EXISTS image_file_id UUID;
+  `,
+
+  // EE-4 — the FROZEN image snapshot on an estimate line: the catalog item's
+  // image_file_id at draft/create time, so a later catalog-photo change never
+  // alters an already-sent estimate. Nullable/additive. Renumbered 255→257.
+  '257_estimate_line_items_image_file_id': `
+    ALTER TABLE estimate_line_items ADD COLUMN IF NOT EXISTS image_file_id UUID;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

@@ -24,6 +24,9 @@ export function mapLineItemRow(row: Record<string, any>): LineItem {
     // legacy rows and manual creates → undefined here (treated as NOT
     // grounded).
     pricingSource: row.pricing_source ?? undefined,
+    // EE-4 — frozen image snapshot (estimate_line_items only; the column does
+    // not exist on invoice_line_items → undefined there).
+    imageFileId: row.image_file_id ?? undefined,
   };
 }
 

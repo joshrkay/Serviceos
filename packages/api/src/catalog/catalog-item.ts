@@ -14,6 +14,13 @@ export interface CatalogItem {
   unit: CatalogUnit;
   unitPriceCents: number;
   productServiceType: ProductServiceType;
+  /**
+   * EE-4 — hero photo, a file id into the `files` table (null/undefined when
+   * none). Optional so existing CatalogItem literals stay valid; createCatalogItem
+   * and the pg mapper always set it (defaulting to null). Resolved to a signed
+   * URL only at the edge — never store a URL here.
+   */
+  imageFileId?: string | null;
   archivedAt: string | null;
   createdAt: string;
   updatedAt: string;
@@ -26,6 +33,7 @@ export interface CreateCatalogItemInput {
   category: CatalogCategory;
   unit: CatalogUnit;
   unitPriceCents: number;
+  imageFileId?: string | null;
 }
 
 export interface UpdateCatalogItemInput {
@@ -34,6 +42,7 @@ export interface UpdateCatalogItemInput {
   category?: CatalogCategory;
   unit?: CatalogUnit;
   unitPriceCents?: number;
+  imageFileId?: string | null;
 }
 
 export interface ListCatalogItemOptions {
@@ -67,6 +76,7 @@ export function createCatalogItem(input: CreateCatalogItemInput): CatalogItem {
     unit: input.unit,
     unitPriceCents: input.unitPriceCents,
     productServiceType: inferProductServiceType(input.category),
+    imageFileId: input.imageFileId ?? null,
     archivedAt: null,
     createdAt: now,
     updatedAt: now,
@@ -96,6 +106,8 @@ export async function persistCatalogItem(
         category: created.category,
         unit: created.unit,
         unitPriceCents: created.unitPriceCents,
+        // EE-4: price-book photo adoption (boolean only — never the file id).
+        hasImage: Boolean(created.imageFileId),
       },
     });
     await auditRepo.create(event);
@@ -127,7 +139,8 @@ export async function updateCatalogItem(
       eventType: 'catalog_item.updated',
       entityType: 'catalog_item',
       entityId: id,
-      metadata: { changes: Object.keys(updates) },
+      // EE-4: current photo state after the update (boolean only, no file id).
+      metadata: { changes: Object.keys(updates), hasImage: Boolean(updated.imageFileId) },
     });
     await auditRepo.create(event);
   }

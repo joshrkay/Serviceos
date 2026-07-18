@@ -560,6 +560,10 @@ export function applyCatalogPricing(
         pricingSource: 'catalog' satisfies PricingSource,
         needsPricing: false,
         category: contractCategory(item),
+        // EE-4 — carry the catalog item's photo onto the grounded line so
+        // AI-drafted estimates show images with no separate AI code path.
+        // Only when the item has one (else leave absent = no image).
+        ...(item.imageFileId ? { imageFileId: item.imageFileId } : {}),
       };
       if (priceField === 'unitPriceCents') {
         // Invoice contract carries totalCents per line; recompute it from

@@ -91,6 +91,21 @@ describe('persistCatalogItem audit emission', () => {
     expect(auditRepo.getAll()).toHaveLength(0);
     expect(await repo.findById(TENANT, item.id)).not.toBeNull();
   });
+
+  it('EE-4: catalog_item.created carries has_image reflecting the photo state', async () => {
+    // No image → hasImage: false.
+    await persistCatalogItem(repo, makeItem(), ACTOR, auditRepo);
+    expect(auditRepo.getAll()[0].metadata).toMatchObject({ hasImage: false });
+
+    // With an image_file_id → hasImage: true (the file id itself is NEVER in
+    // the audit metadata — only the boolean).
+    auditRepo = new InMemoryAuditRepository();
+    const withImage = makeItem({ imageFileId: '11111111-2222-3333-4444-555555555555' });
+    await persistCatalogItem(repo, withImage, ACTOR, auditRepo);
+    const meta = auditRepo.getAll()[0].metadata!;
+    expect(meta).toMatchObject({ hasImage: true });
+    expect(Object.values(meta)).not.toContain('11111111-2222-3333-4444-555555555555');
+  });
 });
 
 describe('updateCatalogItem', () => {
@@ -110,7 +125,9 @@ describe('updateCatalogItem', () => {
     const events = auditRepo.getAll();
     expect(events).toHaveLength(1);
     expect(events[0].eventType).toBe('catalog_item.updated');
-    expect(events[0].metadata).toEqual({ changes: ['unitPriceCents', 'name'] });
+    // EE-4: `hasImage` reflects the item's photo state after the update (here
+    // the makeItem() fixture has no image and the patch didn't add one).
+    expect(events[0].metadata).toEqual({ changes: ['unitPriceCents', 'name'], hasImage: false });
     // name is trimmed through the patch.
     expect((await repo.findById(TENANT, item.id))!.name).toBe('New');
   });

@@ -89,4 +89,32 @@ describe('printEstimateDocument', () => {
     expect(html).toContain('<title>Quote EST-001</title>');
     expect(html).not.toContain('<div class="label">Estimate</div>');
   });
+
+  it('EE-4 — renders a thumbnail for a line with an imageUrl and none otherwise', () => {
+    const { win, writes } = makeFakeWindow();
+    vi.spyOn(window, 'open').mockReturnValue(win as unknown as Window);
+    printEstimateDocument({
+      ...base,
+      lineItems: [
+        { description: 'Heater', qty: 1, rate: 2500, imageUrl: 'https://cdn/heater.jpg' },
+        { description: 'Labor', qty: 1, rate: 100 },
+      ],
+    });
+    const html = writes.join('');
+    expect(html).toContain('<img class="thumb" src="https://cdn/heater.jpg" alt="" />');
+    // The image-less line renders text only (exactly one thumbnail total).
+    expect(html.match(/class="thumb"/g)).toHaveLength(1);
+  });
+
+  it('EE-4 — escapes a malicious imageUrl (no attribute breakout)', () => {
+    const { win, writes } = makeFakeWindow();
+    vi.spyOn(window, 'open').mockReturnValue(win as unknown as Window);
+    printEstimateDocument({
+      ...base,
+      lineItems: [{ description: 'X', qty: 1, rate: 1, imageUrl: '"><script>alert(1)</script>' }],
+    });
+    const html = writes.join('');
+    expect(html).not.toContain('"><script>alert(1)</script>');
+    expect(html).toContain('&quot;&gt;&lt;script&gt;');
+  });
 });

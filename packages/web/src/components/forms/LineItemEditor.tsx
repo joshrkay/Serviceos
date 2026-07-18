@@ -22,6 +22,8 @@ export interface LineItemDraft {
   isOptional?: boolean;
   groupLabel?: string;
   isDefaultSelected?: boolean;
+  /** EE-4 — catalog photo carried from the Price Book pick (frozen on submit). */
+  imageFileId?: string;
 }
 
 export interface LineItemPayload {
@@ -37,6 +39,8 @@ export interface LineItemPayload {
   groupLabel?: string;
   isOptional?: boolean;
   isDefaultSelected?: boolean;
+  /** EE-4 — frozen catalog photo reference, or undefined for a photo-less line. */
+  imageFileId?: string;
 }
 
 export interface LineItemEditorProps {
@@ -90,6 +94,8 @@ export function toLineItemPayload(
     groupLabel,
     isOptional: draft.isOptional || groupLabel !== undefined ? true : undefined,
     isDefaultSelected: draft.isDefaultSelected ? true : undefined,
+    // EE-4 — forward the frozen catalog photo (undefined ⇒ omitted on the wire).
+    imageFileId: draft.imageFileId,
   };
 }
 

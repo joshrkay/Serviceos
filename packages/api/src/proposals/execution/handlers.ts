@@ -649,6 +649,10 @@ export function normalizeDraftLineItems(raw: unknown[]): {
       ...(typeof li.isDefaultSelected === 'boolean'
         ? { isDefaultSelected: li.isDefaultSelected }
         : {}),
+      // EE-4 — forward the frozen catalog image snapshot; this whitelist would
+      // otherwise drop it between the approved proposal and the persisted line
+      // (the parity bug this unit exists to prevent).
+      ...(typeof li.imageFileId === 'string' ? { imageFileId: li.imageFileId } : {}),
     });
   });
 

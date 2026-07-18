@@ -124,6 +124,11 @@ const lineItemSchema = z.object({
   groupLabel: z.string().min(1).max(200).optional(),
   isOptional: z.boolean().optional(),
   isDefaultSelected: z.boolean().optional(),
+  // EE-4 — frozen catalog photo reference. Must be declared here or Zod strips
+  // it on the estimate create/update/revise routes, so a manually-picked
+  // catalog line's image would silently vanish at the HTTP boundary (the same
+  // trap as pricingSource above). PgEstimateRepository persists image_file_id.
+  imageFileId: z.string().optional(),
 });
 
 export const createCustomerSchema = z.object({
@@ -376,6 +381,8 @@ export const createCatalogItemSchema = z.object({
   category: z.enum(['Labor', 'Parts', 'Materials']),
   unit: z.enum(['each', 'hour', 'sq ft', 'per lb', 'per gal']),
   unitPriceCents: z.number().int().nonnegative(),
+  // EE-4 — hero photo, a file id from the upload flow. `null` clears it.
+  imageFileId: z.string().uuid().nullish(),
 });
 
 export const updateCatalogItemSchema = createCatalogItemSchema.partial();
