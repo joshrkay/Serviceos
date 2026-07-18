@@ -12,7 +12,7 @@
  *    the store closes the WS instead of attaching.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // OBS — capture recordVoiceError calls without touching the real PostHog
 // SDK. Mirrors the vi.mock pattern already used in test/voice/activation.test.ts.
@@ -23,6 +23,7 @@ vi.mock('../../../src/analytics/posthog', () => ({
 
 import {
   TwilioMediaStreamAdapter,
+  DEFAULT_SILENCE_REPROMPT_MS,
   type WsLike,
 } from '../../../src/telephony/media-streams/mediastream-adapter';
 import { VoiceSessionStore } from '../../../src/ai/agents/customer-calling/voice-session-store';
@@ -46,6 +47,7 @@ import { VOICE_EVENT_CHANNEL } from '../../../src/ai/voice-quality/event-bus';
 import { WhisperCache } from '../../../src/telephony/whisper-cache';
 import { DEFAULT_ESCALATION_SETTINGS } from '../../../src/settings/settings';
 import { voiceTurnLatencyMs } from '../../../src/monitoring/metrics';
+import { InMemoryConnectionRegistry } from '../../../src/ws/connection-registry';
 
 // ─── Fakes ─────────────────────────────────────────────────────────────────────────────
 
@@ -2660,5 +2662,240 @@ describe('A3 low acoustic STT confidence gate', () => {
     expect(recordVoiceErrorMock).not.toHaveBeenCalledWith(
       expect.objectContaining({ errorKind: 'low_stt_confidence' }),
     );
+  });
+});
+
+// ─── T2-F05 — caller-silence reprompt timer ─────────────────────────────────
+//
+// Before this fix a Media-Streams caller who simply said NOTHING after the
+// agent finished speaking was stranded forever: Twilio streams silence frames
+// continuously, so the 30-minute audio-idle timer never fires mid-call, and no
+// transcript ever arrives to drive the turn loop. These pins assert the
+// per-turn silence timer: armed at the agent's end-of-turn mark, cleared by
+// any caller audio / barge-in / close, and expiring into the EXISTING
+// low-STT-confidence ladder (shared streak, shared cap, shared escalation).
+describe('T2-F05 caller-silence reprompt timer', () => {
+  const flush = () => new Promise((r) => setImmediate(r));
+
+  beforeEach(() => {
+    // setImmediate stays real so the existing flush() pattern keeps working.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** TTS double that records the (already-localized) text handed to synthesize. */
+  function makeCapturingTts(): { tts: TtsProvider; texts: string[] } {
+    const texts: string[] = [];
+    const tts: TtsProvider = {
+      synthesize: vi.fn(async (input: TtsSynthesizeInput): Promise<TtsSynthesizeResult> => {
+        texts.push(input.text);
+        return { audio: Buffer.alloc(640), contentType: 'audio/pcm', provider: 'test' };
+      }),
+    };
+    return { tts, texts };
+  }
+
+  const AGENT_LINE = 'How can I help you today?';
+
+  async function setupSilenceCall(
+    callSid: string,
+    opts: { silenceRepromptTimeoutMs?: number } = {},
+  ) {
+    store.create('t', 'telephony', { callSid });
+    const ws = new FakeWs();
+    const { provider, handle } = makeStreamingProvider();
+    const { tts, texts } = makeCapturingTts();
+    const speechTurn = vi
+      .fn()
+      .mockResolvedValue([{ type: 'tts_play', payload: { text: AGENT_LINE } }]);
+    const finalizeOnClose = vi.fn();
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: provider,
+        speechTurn,
+        ttsProvider: tts,
+        finalizeOnClose,
+        // Isolated registry: the process-wide singleton is saturated for
+        // tenant 't' by the many earlier adapters in this file.
+        connectionRegistry: new InMemoryConnectionRegistry(),
+        ...(opts.silenceRepromptTimeoutMs !== undefined
+          ? { silenceRepromptTimeoutMs: opts.silenceRepromptTimeoutMs }
+          : {}),
+      },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson({
+      event: 'start',
+      streamSid: `MZ-${callSid}`,
+      start: { callSid, accountSid: 'AC', streamSid: `MZ-${callSid}`, tracks: ['inbound'] },
+    });
+    await flush();
+    return { adapter, ws, handle, texts, speechTurn, finalizeOnClose };
+  }
+
+  /** Drive one confident caller turn so the agent speaks and the timer arms. */
+  async function completeAgentTurn(handle: StreamHandle): Promise<void> {
+    handle.emit({ type: 'final', isFinal: true, transcript: 'hello there', confidence: 0.95 });
+    await flush();
+    await flush();
+  }
+
+  /** White-box read of the private streak counter. */
+  const streak = (adapter: TwilioMediaStreamAdapter): number =>
+    (adapter as unknown as { state: { consecutiveLowConfidenceTurns: number } }).state
+      .consecutiveLowConfidenceTurns;
+
+  it('reprompts a silent caller 8s after the agent turn ends and bumps the shared streak', async () => {
+    const { adapter, ws, handle, texts } = await setupSilenceCall('CA-sil-1');
+    await completeAgentTurn(handle);
+    expect(texts).toEqual([AGENT_LINE]);
+
+    // Just short of the default window: still silent, still no reprompt.
+    await vi.advanceTimersByTimeAsync(DEFAULT_SILENCE_REPROMPT_MS - 1);
+    expect(texts).toEqual([AGENT_LINE]);
+
+    await vi.advanceTimersByTimeAsync(1);
+    await flush();
+
+    expect(texts).toEqual([AGENT_LINE, renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en')]);
+    expect(streak(adapter)).toBe(1);
+    expect(ws.closed).toBe(false);
+    expect(recordVoiceErrorMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        errorKind: 'low_stt_confidence',
+        channel: 'media_streams',
+        callSid: 'CA-sil-1',
+        tenantId: 't',
+      }),
+    );
+  });
+
+  it('a second consecutive silence expiry escalates and ends the session (low_stt_confidence_max_retries)', async () => {
+    // Non-default timeout also pins the deps.silenceRepromptTimeoutMs seam.
+    const { ws, handle, texts, finalizeOnClose } = await setupSilenceCall('CA-sil-2', {
+      silenceRepromptTimeoutMs: 1_000,
+    });
+    await completeAgentTurn(handle);
+
+    // Expiry 1 → reprompt; the reprompt's own turn-end mark re-arms the timer.
+    await vi.advanceTimersByTimeAsync(1_000);
+    await flush();
+    expect(texts).toEqual([AGENT_LINE, renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en')]);
+    expect(ws.closed).toBe(false);
+
+    // Expiry 2 → cap reached → spoken hand-off + graceful end.
+    await vi.advanceTimersByTimeAsync(1_000);
+    await flush();
+
+    expect(texts).toEqual([
+      AGENT_LINE,
+      renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en'),
+      renderTtsText(SPEECH_TURN_FAILURE_ESCALATION_COPY, {}, 'en'),
+    ]);
+    expect(ws.closed).toBe(true);
+    expect(finalizeOnClose).toHaveBeenCalledTimes(1);
+    const [, reason, sideEffects] = finalizeOnClose.mock.calls[0];
+    expect(reason).toBe('session_ended');
+    expect(sideEffects).toEqual([
+      { type: 'end_session', payload: { reason: 'low_stt_confidence_max_retries' } },
+    ]);
+    expect(recordVoiceErrorMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        errorKind: 'low_stt_confidence_repeated',
+        channel: 'media_streams',
+        callSid: 'CA-sil-2',
+        tenantId: 't',
+      }),
+    );
+  });
+
+  it('an interim transcript at 5s disarms the timer — advancing past 8s produces NO reprompt', async () => {
+    const { adapter, ws, handle, texts } = await setupSilenceCall('CA-sil-3');
+    await completeAgentTurn(handle);
+    expect(texts).toEqual([AGENT_LINE]);
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    handle.emit({ type: 'partial', isFinal: false, transcript: 'um let me check', confidence: 0.6 });
+    await flush();
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    await flush();
+
+    expect(texts).toEqual([AGENT_LINE]);
+    expect(streak(adapter)).toBe(0);
+    expect(ws.closed).toBe(false);
+  });
+
+  it('after close, an armed silence timer never fires (no reprompt, no double finalize)', async () => {
+    const { handle, ws, texts, finalizeOnClose } = await setupSilenceCall('CA-sil-4');
+    await completeAgentTurn(handle);
+
+    ws.inboundJson({ event: 'stop', streamSid: 'MZ-CA-sil-4' });
+    await flush();
+    expect(finalizeOnClose).toHaveBeenCalledTimes(1);
+    expect(finalizeOnClose.mock.calls[0][1]).toBe('caller_hangup');
+
+    await vi.advanceTimersByTimeAsync(DEFAULT_SILENCE_REPROMPT_MS * 3);
+    await flush();
+
+    expect(texts).toEqual([AGENT_LINE]);
+    expect(finalizeOnClose).toHaveBeenCalledTimes(1);
+    expect(recordVoiceErrorMock).not.toHaveBeenCalledWith(
+      expect.objectContaining({ errorKind: 'low_stt_confidence' }),
+    );
+  });
+
+  it('expiry while a newer outbound turn is in flight is a no-op', async () => {
+    const { adapter, ws, handle, texts } = await setupSilenceCall('CA-sil-5');
+    await completeAgentTurn(handle);
+
+    // Simulate a transcript-less new outbound turn racing the armed timer
+    // (e.g. an async sentiment-escalation line): the captured turnId is stale
+    // and the agent is speaking again.
+    const state = (
+      adapter as unknown as { state: { outboundTurnId: number; agentSpeaking: boolean } }
+    ).state;
+    state.outboundTurnId += 1;
+    state.agentSpeaking = true;
+
+    await vi.advanceTimersByTimeAsync(DEFAULT_SILENCE_REPROMPT_MS * 2);
+    await flush();
+
+    expect(texts).toEqual([AGENT_LINE]);
+    expect(streak(adapter)).toBe(0);
+    expect(ws.closed).toBe(false);
+  });
+
+  it('timer silence then a low-confidence final terminates at combined streak 2', async () => {
+    const { handle, ws, texts, speechTurn, finalizeOnClose } = await setupSilenceCall('CA-sil-6');
+    await completeAgentTurn(handle);
+
+    // Silence expiry → streak 1 via the shared ladder.
+    await vi.advanceTimersByTimeAsync(DEFAULT_SILENCE_REPROMPT_MS);
+    await flush();
+    expect(texts).toEqual([AGENT_LINE, renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en')]);
+
+    // Then a mumbled final → streak 2 → hand-off, NOT another reprompt.
+    handle.emit({ type: 'final', isFinal: true, transcript: 'mmuh', confidence: 0.2 });
+    await flush();
+    await flush();
+
+    expect(speechTurn).toHaveBeenCalledTimes(1); // only the initial confident turn
+    expect(texts).toEqual([
+      AGENT_LINE,
+      renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en'),
+      renderTtsText(SPEECH_TURN_FAILURE_ESCALATION_COPY, {}, 'en'),
+    ]);
+    expect(ws.closed).toBe(true);
+    expect(finalizeOnClose).toHaveBeenCalledTimes(1);
+    const [, reason, sideEffects] = finalizeOnClose.mock.calls[0];
+    expect(reason).toBe('session_ended');
+    expect(sideEffects).toEqual([
+      { type: 'end_session', payload: { reason: 'low_stt_confidence_max_retries' } },
+    ]);
   });
 });

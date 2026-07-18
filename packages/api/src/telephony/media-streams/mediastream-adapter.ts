@@ -178,6 +178,8 @@ export interface MediaStreamAdapterDeps {
   }) => Promise<SideEffect[] | null>;
   /** Audio inactivity teardown (ms). Default 30 minutes. */
   audioIdleTimeoutMs?: number;
+  /** T2-F05 — caller-silence reprompt window after an agent turn ends (ms). Default 8 s. */
+  silenceRepromptTimeoutMs?: number;
   /**
    * Per-tenant connection registry. Defaults to the process-wide singleton.
    * Override for tests to keep counters isolated between cases.
@@ -474,6 +476,13 @@ interface RuntimeState {
   /** Last time we received an inbound `media` frame. */
   lastMediaAt: number;
   audioIdleTimer: NodeJS.Timeout | null;
+  /**
+   * T2-F05 — per-turn caller-silence reprompt timer. Armed when the final
+   * end-of-turn mark of an agent (non-filler) TTS turn is enqueued; cleared
+   * by any transcript event, barge-in, and close. See
+   * {@link TwilioMediaStreamAdapter.armSilenceRepromptTimer}.
+   */
+  silenceRepromptTimer: NodeJS.Timeout | null;
   /** Outbound queue (bounded, priority-aware). */
   queue: BoundedSendQueue;
   draining: boolean;
@@ -702,6 +711,14 @@ function observeTurnLatency(startMs: number | null): void {
  */
 export const DEFAULT_AUDIO_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 
+/**
+ * T2-F05 — how long after the agent finishes speaking a totally silent caller
+ * waits before the reprompt fires. Default 8 s: long enough for a caller
+ * checking a calendar or conferring with a spouse, short enough that the line
+ * never feels dead. Dep-injectable via `deps.silenceRepromptTimeoutMs`.
+ */
+export const DEFAULT_SILENCE_REPROMPT_MS = 8_000;
+
 export class TwilioMediaStreamAdapter {
   private readonly state: RuntimeState;
 
@@ -723,6 +740,7 @@ export class TwilioMediaStreamAdapter {
       closed: false,
       lastMediaAt: Date.now(),
       audioIdleTimer: null,
+      silenceRepromptTimer: null,
       queue: new BoundedSendQueue({
         surface: 'twilio_media_streams',
         maxMsgs: TWILIO_QUEUE_MAX_MSGS,
@@ -1164,6 +1182,8 @@ export class TwilioMediaStreamAdapter {
     confidence: number;
     isFinal: boolean;
   }): Promise<void> {
+    // T2-F05 — any caller audio (interim or final) means not-silent.
+    this.clearSilenceRepromptTimer();
     // Barge-in: any interim transcript while we're playing TTS aborts
     // the current agent utterance. Empty interim transcripts are
     // already filtered by DeepgramStreamingProvider.
@@ -2386,6 +2406,7 @@ export class TwilioMediaStreamAdapter {
         streamSid: this.state.streamSid,
         mark: { name: `turn-${turnId}` },
       });
+      if (!isFiller) this.armSilenceRepromptTimer(turnId);
     }
   }
 
@@ -2414,6 +2435,7 @@ export class TwilioMediaStreamAdapter {
    * Called when an interim transcript arrives during agent TTS.
    */
   private bargeIn(): void {
+    this.clearSilenceRepromptTimer();
     this.state.ttsController?.abort();
     // If a filler clip was mid-stream when barge-in fires, emit the
     // cancellation event and clear the flag before bumping the turn.
@@ -2451,6 +2473,60 @@ export class TwilioMediaStreamAdapter {
     }, ms);
     if (typeof this.state.audioIdleTimer.unref === 'function') {
       this.state.audioIdleTimer.unref();
+    }
+  }
+
+  /**
+   * T2-F05 — per-turn caller-silence reprompt. The 30-minute audioIdleTimer
+   * can NEVER catch a silent caller: Twilio Media Streams delivers `media`
+   * frames continuously (comfort-noise/silent mu-law) for the whole call, so
+   * `lastMediaAt` keeps refreshing and that timer only fires when the
+   * transport itself stalls. This timer instead measures caller-turn silence:
+   * armed when an agent (non-filler) TTS turn enqueues its final
+   * `turn-${turnId}` mark (NOT the periodic pacing marks), cleared by any
+   * transcript event (interim or final), by barge-in, and by close. Expiry
+   * funnels into `recoverFromLowSttConfidence` deliberately: silence shares
+   * the `consecutiveLowConfidenceTurns` streak, reprompt copy, and
+   * MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS escalation with mumbled turns, so a
+   * caller cannot alternate silence and mumbling to stay on the line
+   * indefinitely and the ladder stays single-sourced. Re-arming after the
+   * reprompt is natural — the reprompt renders through the same
+   * `streamPcmAsMedia` path and enqueues its own end-of-turn mark. The
+   * captured `turnId` + agentSpeaking guards make a stale expiry (a newer
+   * outbound turn started without a transcript, e.g. an async sentiment
+   * escalation) a no-op.
+   */
+  private armSilenceRepromptTimer(turnId: number): void {
+    if (this.state.closed) return;
+    this.clearSilenceRepromptTimer();
+    const ms = this.deps.silenceRepromptTimeoutMs ?? DEFAULT_SILENCE_REPROMPT_MS;
+    this.state.silenceRepromptTimer = setTimeout(() => {
+      this.state.silenceRepromptTimer = null;
+      const session = this.state.session;
+      if (
+        this.state.closed ||
+        !session ||
+        turnId !== this.state.outboundTurnId ||
+        this.state.agentSpeaking
+      ) {
+        return;
+      }
+      void this.recoverFromLowSttConfidence(session).catch((err) => {
+        logger.warn('mediastream: silence reprompt failed', {
+          error: err instanceof Error ? err.message : String(err),
+          callSid: this.state.callSid,
+        });
+      });
+    }, ms);
+    if (typeof this.state.silenceRepromptTimer.unref === 'function') {
+      this.state.silenceRepromptTimer.unref();
+    }
+  }
+
+  private clearSilenceRepromptTimer(): void {
+    if (this.state.silenceRepromptTimer) {
+      clearTimeout(this.state.silenceRepromptTimer);
+      this.state.silenceRepromptTimer = null;
     }
   }
 
@@ -2505,6 +2581,7 @@ export class TwilioMediaStreamAdapter {
       clearTimeout(this.state.audioIdleTimer);
       this.state.audioIdleTimer = null;
     }
+    this.clearSilenceRepromptTimer();
     if (this.state.slowConsumerTimer) {
       clearTimeout(this.state.slowConsumerTimer);
       this.state.slowConsumerTimer = null;
