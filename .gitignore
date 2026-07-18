@@ -59,3 +59,9 @@ packages/api/src/ai/agents/customer-calling/fillers/*.bin
 packages/api/src/ai/agents/customer-calling/fillers/*.pcm
 .fable-verif/
 docs/verification-runs/fable-2026-07-10-artifacts/
+
+# T6-F01 — generate-utterances.ts's regenerable EN staging output.
+# merge-corpus.ts folds this into the committed data/corpus/utterances.jsonl
+# (which also carries frozen legacy-* rows); this file itself is a rebuildable
+# intermediate, not source of truth.
+data/corpus/utterances.generated.jsonl
