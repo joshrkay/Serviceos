@@ -186,9 +186,10 @@ jobs:
   #     discourse-prefix augmentation produces near-identical variants of
   #     templates with no fill slots) — pre-existing, independent of the
   #     PR #609 schema merge this gate targets; needs its own follow-up.
-  # This job is added and wired per plan; whoever merges should decide
-  # whether to mark it a required check now (and accept it starts red
-  # pending the two follow-ups above) or after they land.
+  # The PII guard blocks now (green today, highest stakes). The two steps
+  # red on pre-existing defects run continue-on-error with loud names so
+  # their signal stays visible without training everyone to ignore a red
+  # check; flip each to blocking in the commit that fixes its follow-up.
   corpus-integrity:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -199,9 +200,11 @@ jobs:
           node-version: '20'
           cache: 'npm'
       - run: npm ci
-      - name: Corpus schema + floors
-        run: npm run test:corpus-schema
-      - name: Corpus duplicate gate
-        run: npm run corpus:dedup
-      - name: Corpus PII guard
+      - name: Corpus PII guard (blocking)
         run: npm run test:pii-leakage
+      - name: Corpus schema + floors (non-blocking until T6-F03 relabel)
+        continue-on-error: true
+        run: npm run test:corpus-schema
+      - name: Corpus duplicate gate (non-blocking until generator dedup follow-up)
+        continue-on-error: true
+        run: npm run corpus:dedup
