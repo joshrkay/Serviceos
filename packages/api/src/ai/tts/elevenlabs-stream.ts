@@ -17,6 +17,27 @@ import type { TtsStreamChunk, TtsSynthesizeStreamInput } from './tts-provider';
  */
 export const ELEVENLABS_STREAM_INACTIVITY_MS = 4_000;
 
+/**
+ * Detects an MP3 payload masquerading as raw PCM. Two signatures: an "ID3"
+ * tag prefix, or an MP3 frame-sync (11 set bits) with a *valid* header —
+ * the version/layer/bitrate/sample-rate validity checks matter because raw
+ * PCM16LE near silence legitimately produces 0xFF 0xFF byte runs (sample
+ * value -1), which a bare sync-word check would misflag and kill a healthy
+ * turn. A run of -1 samples fails the bitrate check (0xF nibble = invalid),
+ * so quiet-but-real PCM passes.
+ */
+export function looksLikeMp3(buf: Buffer): boolean {
+  if (buf.length >= 3 && buf[0] === 0x49 && buf[1] === 0x44 && buf[2] === 0x33) return true; // "ID3"
+  if (buf.length >= 4 && buf[0] === 0xff && (buf[1] & 0xe0) === 0xe0) {
+    const versionBits = (buf[1] >> 3) & 0x03; // 01 = reserved → not MP3
+    const layerBits = (buf[1] >> 1) & 0x03; // 00 = reserved → not MP3
+    const bitrateBits = (buf[2] >> 4) & 0x0f; // 1111 = invalid → not MP3
+    const sampleRateBits = (buf[2] >> 2) & 0x03; // 11 = reserved → not MP3
+    return versionBits !== 0x01 && layerBits !== 0x00 && bitrateBits !== 0x0f && sampleRateBits !== 0x03;
+  }
+  return false;
+}
+
 export interface ElevenLabsStreamConnectionOpts {
   apiKey: string;
   voiceId: string;
@@ -36,6 +57,15 @@ export interface ElevenLabsStreamConnectionOpts {
  * or `{ isFinal: true }`. We yield each base64 frame as a Buffer in a PCM
  * stream chunk and emit a final `isFinal=true` chunk when the upstream
  * signals end-of-stream OR the WebSocket closes.
+ *
+ * The URL must pin `output_format=pcm_16000`: the endpoint's default is
+ * mp3_44100, and every consumer of these chunks treats them as raw
+ * PCM16@16k (the media-streams adapter mu-law-encodes the bytes directly),
+ * so an unpinned stream plays as static with no error. The buffered REST
+ * path already guards against this class of bug (`isRawPcmContentType`);
+ * `looksLikeMp3` below is the streaming-side equivalent, checked on the
+ * first frame so a provider-side default change fails loud instead of
+ * playing noise to a live caller.
  *
  * The caller can abort mid-stream by passing an AbortSignal — this closes
  * the WebSocket immediately so we stop paying for audio we will not play.
@@ -64,7 +94,7 @@ export class ElevenLabsStreamConnection {
   ): AsyncIterator<TtsStreamChunk> {
     const url =
       `${baseUrl.replace(/^http/, 'ws')}/v1/text-to-speech/${voiceId}/stream-input` +
-      `?model_id=${modelId}&xi-api-key=${apiKey}`;
+      `?model_id=${modelId}&output_format=pcm_16000&xi-api-key=${apiKey}`;
     const ws = new WebSocket(url);
     const inactivityMs = this.opts.inactivityTimeoutMs ?? ELEVENLABS_STREAM_INACTIVITY_MS;
     const queue: TtsStreamChunk[] = [];
@@ -148,6 +178,7 @@ export class ElevenLabsStreamConnection {
       ws.send(JSON.stringify({ text: '' }));
     });
 
+    let firstAudioChecked = false;
     ws.addEventListener('message', (msg: MessageEvent) => {
       try {
         const data = JSON.parse(String(msg.data)) as {
@@ -155,7 +186,29 @@ export class ElevenLabsStreamConnection {
           isFinal?: boolean;
         };
         if (data.audio) {
-          push({ pcm: Buffer.from(data.audio, 'base64'), isFinal: false });
+          const pcm = Buffer.from(data.audio, 'base64');
+          // First-frame format guard (see class doc): compressed audio here
+          // means the output_format pin was lost or the provider default
+          // changed — fail the turn loudly so the adapter's recovery path
+          // runs, instead of mu-law-encoding MP3 bytes into caller static.
+          if (!firstAudioChecked) {
+            firstAudioChecked = true;
+            if (looksLikeMp3(pcm)) {
+              if (!errorState) {
+                errorState = new Error(
+                  'ElevenLabs stream returned compressed (MP3) audio — expected pcm_16000; refusing to play static',
+                );
+              }
+              try {
+                ws.close();
+              } catch {
+                /* swallow */
+              }
+              finish();
+              return;
+            }
+          }
+          push({ pcm, isFinal: false });
         }
         if (data.isFinal) {
           push({ pcm: Buffer.alloc(0), isFinal: true });
