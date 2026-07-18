@@ -2015,6 +2015,9 @@ export function createApp(): AppWithLifecycle {
     // RV-086 — send_estimate_nudge: re-send via the unified SendService
     // path; message_dispatches backs the 48h cooldown.
     ...(sendService ? { sendService } : {}),
+    // T4-F01 — claim-before-send pool for send_estimate_nudge's
+    // dispatchEstimateNudge call (see estimates/estimate-nudge.ts).
+    pool: pool ?? null,
     dispatchRepo,
     // UB-A2 — create_standing_instruction inserts via the UB-A1 repo
     // (in-memory fallback when no pool, same as the routes above).
@@ -6024,6 +6027,7 @@ export function createApp(): AppWithLifecycle {
           estimateRepo,
           sendService,
           auditRepo,
+          pool: pool ?? null,
           listTenantIds: async () => {
             if (!pool) return [];
             const r = await pool.query('SELECT id FROM tenants');

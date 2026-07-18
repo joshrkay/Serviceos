@@ -4,6 +4,7 @@
  * wiring.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { Pool, QueryResult } from 'pg';
 import {
   SendEstimateNudgeExecutionHandler,
   createExecutionHandlerRegistry,
@@ -128,6 +129,45 @@ describe('send_estimate_nudge action class (comms gate)', () => {
     ).toBe('draft');
   });
 });
+
+interface ClaimRow {
+  status: 'claimed' | 'sent';
+  claimedAt: number;
+}
+
+/** T4-F01 claim-aware fake pool — see test/estimates/estimate-nudge.test.ts for the same pattern. */
+function claimAwarePool(claims: Map<string, ClaimRow> = new Map()): { pool: Pool; claims: Map<string, ClaimRow> } {
+  const query = vi.fn(async (sql: string, params: unknown[]) => {
+    if (!sql.includes('send_claims')) return { rows: [], rowCount: 0 } as unknown as QueryResult;
+    const key = `${params[0]}::${params[1]}`;
+    if (sql.trim().startsWith('INSERT')) {
+      const staleMinutes = Number(params[2]);
+      const existing = claims.get(key);
+      if (!existing) {
+        claims.set(key, { status: 'claimed', claimedAt: Date.now() });
+        return { rows: [{ claim_key: params[1] }], rowCount: 1 } as unknown as QueryResult;
+      }
+      const staleMs = staleMinutes * 60_000;
+      if (existing.status === 'claimed' && Date.now() - existing.claimedAt >= staleMs) {
+        existing.claimedAt = Date.now();
+        return { rows: [{ claim_key: params[1] }], rowCount: 1 } as unknown as QueryResult;
+      }
+      return { rows: [], rowCount: 0 } as unknown as QueryResult;
+    }
+    if (sql.trim().startsWith('UPDATE')) {
+      const existing = claims.get(key);
+      if (existing) existing.status = 'sent';
+      return { rows: [], rowCount: existing ? 1 : 0 } as unknown as QueryResult;
+    }
+    if (sql.trim().startsWith('DELETE')) {
+      const existing = claims.get(key);
+      if (existing?.status === 'claimed') claims.delete(key);
+      return { rows: [], rowCount: 1 } as unknown as QueryResult;
+    }
+    return { rows: [], rowCount: 0 } as unknown as QueryResult;
+  });
+  return { pool: { query } as unknown as Pool, claims };
+}
 
 describe('SendEstimateNudgeExecutionHandler', () => {
   let estimateRepo: InMemoryEstimateRepository;
@@ -345,6 +385,55 @@ describe('SendEstimateNudgeExecutionHandler', () => {
     });
     expect(result.success).toBe(false);
     expect(result.error).toBe('delivery provider failed');
+  });
+
+  describe('T4-F01 — claim-before-send collision', () => {
+    it('refuses (execution failure, distinguishable message) when a concurrent attempt already claimed this reminder occurrence', async () => {
+      const { pool, claims } = claimAwarePool();
+      // Simulate the estimate-reminder sweep having already won the claim for
+      // reminder #1 on this estimate moments earlier (still fresh — not stale).
+      claims.set(`${TENANT}::estimate_nudge:${ESTIMATE_ID}:1`, {
+        status: 'claimed',
+        claimedAt: Date.now(),
+      });
+      const clashHandler = new SendEstimateNudgeExecutionHandler(
+        estimateRepo,
+        sendService,
+        dispatchRepo,
+        auditRepo,
+        () => NOW,
+        pool,
+      );
+
+      const result = await clashHandler.execute(makeProposal({ estimateId: ESTIMATE_ID }), {
+        tenantId: TENANT,
+        executedBy: 'owner-1',
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/already in flight/);
+      expect(sendService.sendEstimate).not.toHaveBeenCalled();
+    });
+
+    it('sends normally when the pool is wired and no concurrent claim exists', async () => {
+      const { pool } = claimAwarePool();
+      const clashHandler = new SendEstimateNudgeExecutionHandler(
+        estimateRepo,
+        sendService,
+        dispatchRepo,
+        auditRepo,
+        () => NOW,
+        pool,
+      );
+
+      const result = await clashHandler.execute(makeProposal({ estimateId: ESTIMATE_ID }), {
+        tenantId: TENANT,
+        executedBy: 'owner-1',
+      });
+
+      expect(result.success).toBe(true);
+      expect(sendService.sendEstimate).toHaveBeenCalledTimes(1);
+    });
   });
 });
 

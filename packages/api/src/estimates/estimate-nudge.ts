@@ -8,16 +8,36 @@
  * estimate (reminder_count / last_reminder_at) + the `estimate.reminder_sent`
  * audit event. Keeping the composition here means the two callers can never
  * drift on what "nudging an estimate" means.
+ *
+ * T4-F01 — the send is claimed BEFORE `sendService.sendEstimate` runs (see
+ * notifications/send-claim-ledger.ts) so a crash/restart between the send and
+ * the reminder_count/last_reminder_at write can't cause the next sweep tick
+ * (or a racing proposal-handler execution) to resend. The claim key is
+ * per-OCCURRENCE (`estimate_nudge:{id}:{reminderCount+1}`), not per-estimate —
+ * nudges are deliberately repeatable, so a later nudge at a higher
+ * reminderCount is a fresh, independent claim.
  */
+import type { Pool } from 'pg';
 import type { Estimate, EstimateRepository } from './estimate';
 import type { SendChannel, SendService } from '../notifications/send-service';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { withSendClaim } from '../notifications/send-claim-ledger';
 
 export interface EstimateNudgeDeps {
   estimateRepo: EstimateRepository;
   sendService: Pick<SendService, 'sendEstimate'>;
   /** Optional audit trail of each nudge. */
   auditRepo?: AuditRepository;
+  /**
+   * T4-F01 claim ledger pool. Null in dev/test without a DB — mirrors the
+   * no-DB-no-op posture elsewhere (e.g. lifecycle-email.ts): the claim
+   * wrapper is skipped entirely and the send proceeds directly, so the many
+   * existing in-memory-repo unit tests without a pool are unaffected. REQUIRED
+   * (not optional) so both production callers (estimate-reminder-worker
+   * sweep, send_estimate_nudge proposal handler) are compiler-forced to
+   * thread a real pool through rather than silently omitting it.
+   */
+  pool: Pool | null;
 }
 
 export interface DispatchEstimateNudgeInput {
@@ -32,25 +52,55 @@ export interface DispatchEstimateNudgeInput {
   customMessage?: string;
 }
 
+/** Thrown when a concurrent attempt already claimed this exact nudge occurrence. */
+export class EstimateNudgeAlreadyClaimedError extends Error {
+  constructor(estimateId: string, occurrence: number) {
+    super(
+      `Estimate nudge already in flight for estimate ${estimateId} (reminder #${occurrence}) — ` +
+        'a concurrent attempt already claimed this occurrence.',
+    );
+    this.name = 'EstimateNudgeAlreadyClaimedError';
+  }
+}
+
+/** T4-F01 claim key — per-occurrence, not per-estimate (nudges are deliberately repeatable). */
+function estimateNudgeClaimKey(estimateId: string, occurrence: number): string {
+  return `estimate_nudge:${estimateId}:${occurrence}`;
+}
+
 /**
  * Re-send the estimate link and record the nudge. Throws when the send
- * fails (callers own failure isolation / retry semantics).
+ * fails (callers own failure isolation / retry semantics), and throws
+ * `EstimateNudgeAlreadyClaimedError` when a concurrent attempt already
+ * claimed this exact reminder occurrence.
  */
 export async function dispatchEstimateNudge(
   deps: EstimateNudgeDeps,
   input: DispatchEstimateNudgeInput,
 ): Promise<void> {
   const { tenantId, estimate, channel, asOf } = input;
+  const occurrence = (estimate.reminderCount ?? 0) + 1;
 
-  await deps.sendService.sendEstimate({
-    tenantId,
-    estimateId: estimate.id,
-    channel,
-    ...(input.customMessage !== undefined ? { customMessage: input.customMessage } : {}),
-  });
+  const send = () =>
+    deps.sendService.sendEstimate({
+      tenantId,
+      estimateId: estimate.id,
+      channel,
+      ...(input.customMessage !== undefined ? { customMessage: input.customMessage } : {}),
+    });
+
+  if (deps.pool) {
+    const claimKey = estimateNudgeClaimKey(estimate.id, occurrence);
+    const outcome = await withSendClaim(deps.pool, tenantId, claimKey, send);
+    if (outcome.outcome === 'duplicate') {
+      throw new EstimateNudgeAlreadyClaimedError(estimate.id, occurrence);
+    }
+  } else {
+    await send();
+  }
 
   await deps.estimateRepo.update(tenantId, estimate.id, {
-    reminderCount: (estimate.reminderCount ?? 0) + 1,
+    reminderCount: occurrence,
     lastReminderAt: asOf,
     updatedAt: asOf,
   });
@@ -66,7 +116,7 @@ export async function dispatchEstimateNudge(
         entityId: estimate.id,
         metadata: {
           estimateNumber: estimate.estimateNumber,
-          reminderCount: (estimate.reminderCount ?? 0) + 1,
+          reminderCount: occurrence,
           channel,
         },
       }),
