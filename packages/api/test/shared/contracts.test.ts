@@ -14,6 +14,7 @@ import {
   unscheduleJobSchema,
   updateInvoiceSchema,
   updateEstimateSchema,
+  createEstimateSchema,
 } from '../../src/shared/contracts';
 import { validate } from '../../src/shared/validation';
 import { AppError, ValidationError, toErrorResponse } from '../../src/shared/errors';
@@ -257,5 +258,34 @@ describe('direct job scheduling contracts', () => {
     expect(unscheduleJobSchema.safeParse({}).success).toBe(true);
     expect(unscheduleJobSchema.safeParse({ reason: 'customer canceled' }).success).toBe(true);
     expect(unscheduleJobSchema.safeParse({ nope: 1 }).success).toBe(false);
+  });
+});
+
+describe('EE-4 — createEstimateSchema preserves imageFileId on line items', () => {
+  const line = (over: Record<string, unknown> = {}) => ({
+    id: 'li-1',
+    description: 'Tankless water heater',
+    quantity: 1,
+    unitPriceCents: 250000,
+    totalCents: 250000,
+    sortOrder: 0,
+    taxable: true,
+    ...over,
+  });
+
+  it('keeps imageFileId when present (would otherwise be stripped at the HTTP boundary)', () => {
+    const result = createEstimateSchema.safeParse({
+      jobId: 'job-1',
+      lineItems: [line({ imageFileId: 'file-123' })],
+    });
+    expect(result.success).toBe(true);
+    // The manual-path image must survive validation and reach persistence.
+    expect(result.success && result.data.lineItems[0].imageFileId).toBe('file-123');
+  });
+
+  it('a line without imageFileId parses and leaves it undefined', () => {
+    const result = createEstimateSchema.safeParse({ jobId: 'job-1', lineItems: [line()] });
+    expect(result.success).toBe(true);
+    expect(result.success && result.data.lineItems[0].imageFileId).toBeUndefined();
   });
 });

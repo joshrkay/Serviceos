@@ -10,9 +10,11 @@ import { CustomerRepository } from '../customers/customer';
 import { JobRepository } from '../jobs/job';
 import { LocationRepository } from '../locations/location';
 import { SettingsRepository } from '../settings/settings';
+import { FileRepository, StorageProvider } from '../files/file-service';
 import { evaluateDepositRule, deriveDepositStatus, isDepositPayable } from '../jobs/deposit-rule';
 import { ValidationError, NotFoundError, ConflictError } from '../shared/errors';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { estimateApprovedProps } from '../analytics/estimate-event-props';
 import { publicActorFromToken } from '../feedback/feedback-response';
 import type { ConnectAccountResolver } from '../invoices/public-invoice-service';
 
@@ -69,6 +71,12 @@ export interface PublicEstimateView {
     isOptional?: boolean;
     /** Pre-selected on first view. */
     isDefaultSelected?: boolean;
+    /**
+     * EE-4 — signed URL for this line's equipment photo, minted fresh per read
+     * from the frozen `image_file_id` (absent when the line has no image or the
+     * file can't be resolved for this tenant).
+     */
+    imageUrl?: string;
   }>;
   /** True when the estimate has tier options or optional add-ons to choose. */
   hasSelectableItems: boolean;
@@ -217,6 +225,14 @@ export interface PublicEstimateServiceDeps {
    * pipeline reflects the lapsed quote. Optional so legacy harnesses build.
    */
   moneyStateDeps?: RefreshJobMoneyStateDeps;
+  /**
+   * EE-4 — resolve a line's frozen `image_file_id` to a signed URL on the
+   * public view. Both optional so legacy harnesses build without image
+   * resolution (then no thumbnails). `fileRepo.findById` is tenant-scoped, so
+   * a foreign/bogus file id can never mint a URL to another tenant's object.
+   */
+  fileRepo?: FileRepository;
+  storage?: StorageProvider;
 }
 
 const TERMINAL_STATUSES = new Set(['accepted', 'rejected', 'expired']);
@@ -434,6 +450,14 @@ export class PublicEstimateService {
             totalCents: updated.totals.totalCents,
             ipAddress: input.ip,
             userAgent: input.userAgent,
+            // EE-4 images + EE-1 tiers/upsell: booleans forwarded to PostHog by
+            // the mapper. `upsoldAboveDefault` compares the server-resolved
+            // accepted total to the stored (default-selection) quoted total.
+            ...estimateApprovedProps({
+              lineItems: estimate.lineItems,
+              quotedTotalCents: estimate.totals.totalCents,
+              acceptedTotalCents: acceptedTotals.totalCents,
+            }),
           },
         }),
       );
@@ -606,6 +630,30 @@ export class PublicEstimateService {
       depositPaidCents < computedRequired;
     const isActionable = baseActionable && !blockedByDeposit;
 
+    // EE-4 — resolve each line's frozen image_file_id to a signed URL, scoped
+    // to THIS estimate's tenant (findById enforces the tenant match, so a
+    // foreign or bogus file id yields no image). Batched; a missing file or a
+    // storage error degrades to "no image" and never breaks the view.
+    const imageUrlByLine = new Map<string, string>();
+    const { fileRepo, storage } = this.deps;
+    if (fileRepo && storage) {
+      await Promise.all(
+        displayItems.map(async (li) => {
+          if (!li.imageFileId) return;
+          try {
+            const file = await fileRepo.findById(estimate.tenantId, li.imageFileId);
+            if (!file) return;
+            imageUrlByLine.set(
+              li.id,
+              await storage.generateDownloadUrl(file.storageBucket, file.thumbnailS3Key ?? file.storageKey),
+            );
+          } catch {
+            // A file/storage failure must never break the estimate view.
+          }
+        }),
+      );
+    }
+
     return {
       id: estimate.id,
       estimateNumber: estimate.estimateNumber,
@@ -634,6 +682,7 @@ export class PublicEstimateService {
         groupLabel: li.groupLabel,
         isOptional: li.isOptional,
         isDefaultSelected: li.isDefaultSelected,
+        imageUrl: imageUrlByLine.get(li.id),
       })),
       // Only offer the picker before acceptance. Once accepted, the line
       // items are already narrowed to the chosen set (above) and the total

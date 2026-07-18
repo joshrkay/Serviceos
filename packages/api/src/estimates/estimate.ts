@@ -5,6 +5,7 @@ import {
   calculateSelectedDocumentTotals,
 } from '../shared/billing-engine';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { estimateCreatedProps } from '../analytics/estimate-event-props';
 import { ValidationError, ConflictError } from '../shared/errors';
 import { RefreshJobMoneyStateDeps, refreshJobMoneyStateSafe } from '../jobs/job-money-state';
 import { DocumentRevisionRepository, createRevision } from '../ai/document-revision';
@@ -296,6 +297,9 @@ export async function createEstimate(
       eventType: 'estimate.created',
       entityType: 'estimate',
       entityId: created.id,
+      // EE-4 images + EE-1 tiers: counts/booleans forwarded to PostHog by the
+      // audit→product-event mapper (never URLs, ids, or line text).
+      metadata: { ...estimateCreatedProps(created.lineItems) },
     });
     await auditRepo.create(event);
   }

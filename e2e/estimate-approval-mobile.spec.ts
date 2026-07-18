@@ -119,6 +119,63 @@ test.describe('estimate approval — mobile layout', () => {
     });
   });
 
+  test.describe('EE-4 line-item photo at 320px', () => {
+    test.use({ viewport: { width: 320, height: 690 } });
+
+    // A 1×1 PNG data URI so the thumbnail actually paints without a network
+    // fetch — the layout box is what we assert, not the pixels.
+    const PIXEL =
+      'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+
+    async function mockWithImage(page: Page): Promise<void> {
+      await page.route('**/public/estimates/**', async (route) => {
+        if (route.request().method() === 'GET') {
+          await route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({
+              ...estimateView,
+              lineItems: [
+                { description: LONG_DESCRIPTION, quantity: 1, unitPriceCents: 250000, totalCents: 250000, imageUrl: PIXEL },
+                ...estimateView.lineItems.slice(1),
+              ],
+            }),
+          });
+          return;
+        }
+        await route.fulfill({ status: 204, body: '' });
+      });
+    }
+
+    test('a wide photo thumbnail renders inside the grid without overflowing', async ({ page }) => {
+      await mockWithImage(page);
+      await page.goto('/e/e2e-test-token');
+      await expect(page.getByText('EST-9001')).toBeVisible();
+
+      const thumb = page.getByTestId('line-item-thumb-0');
+      await expect(thumb).toBeVisible();
+      const box = await thumb.boundingBox();
+      expect(box).not.toBeNull();
+      // Fixed 40px box, fully inside the 320px viewport.
+      expect(box!.width).toBeLessThanOrEqual(48);
+      expect(box!.x + box!.width).toBeLessThanOrEqual(320);
+      // The thumbnail must not introduce horizontal overflow.
+      expect(await horizontalOverflow(page)).toBeLessThanOrEqual(0);
+
+      // Regression guard: the description on the SAME line must not collapse
+      // to ~0 width. Before the flex-wrap fix, the 40px thumbnail starved the
+      // item track and the description rendered one character per line (0px
+      // wide, absurdly tall). It should drop below the thumbnail and keep a
+      // usable width. (overflow=0 and the thumbnail box alone did NOT catch
+      // this — both held while the text was broken.)
+      const desc = page.getByText(LONG_DESCRIPTION);
+      await expect(desc).toBeVisible();
+      const descBox = await desc.boundingBox();
+      expect(descBox).not.toBeNull();
+      expect(descBox!.width).toBeGreaterThan(30);
+    });
+  });
+
   test.describe('1280px (desktop regression)', () => {
     test.use({ viewport: { width: 1280, height: 800 } });
 

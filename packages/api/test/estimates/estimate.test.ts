@@ -45,6 +45,31 @@ describe('P1-009 — Estimate entity + shared line-item schema', () => {
     expect(estimate.totals.totalCents).toBe(32475);
   });
 
+  it('EE-4/EE-1 — estimate.created audit metadata carries image + tier counts', async () => {
+    const tieredWithImage: LineItem[] = [
+      buildLineItem('always-1', 'Diagnostic', 1, 5000, 0, true, 'labor'),
+      { ...buildLineItem('good', 'Good tier', 1, 10000, 1, true, 'material'), groupKey: 'system', isOptional: true, isDefaultSelected: true, imageFileId: 'file-good' },
+      { ...buildLineItem('better', 'Better tier', 1, 15000, 2, true, 'material'), groupKey: 'system', isOptional: true, imageFileId: 'file-better' },
+      { ...buildLineItem('addon', 'Surge protector', 1, 3000, 3, true, 'material'), isOptional: true },
+    ];
+    await createEstimate(
+      { tenantId: 'tenant-1', jobId: 'job-1', estimateNumber: 'EST-IMG', lineItems: tieredWithImage, createdBy: 'u-1' },
+      repo,
+      auditRepo,
+    );
+    const event = auditRepo.getAll().find((e) => e.eventType === 'estimate.created');
+    expect(event).toBeDefined();
+    expect(event!.metadata).toMatchObject({
+      lineItemsTotal: 4,
+      lineItemsWithImage: 2,
+      hasTiers: true,
+      tierGroupCount: 1,
+      addonCount: 1,
+    });
+    // The raw file ids never ride the audit metadata — only counts/bools.
+    expect(Object.values(event!.metadata!)).not.toContain('file-good');
+  });
+
   it('happy path — retrieves estimate', async () => {
     const estimate = await createEstimate(
       { tenantId: 'tenant-1', jobId: 'job-1', estimateNumber: 'EST-0001', lineItems: sampleItems, createdBy: 'u-1' },

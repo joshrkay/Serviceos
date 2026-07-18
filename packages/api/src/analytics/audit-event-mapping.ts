@@ -97,10 +97,31 @@ const ALLOWLIST: Record<string, Mapping> = {
       pickMeta(e.metadata, { channel: 'channel', approved_count: 'approvedCount', skipped_count: 'skippedCount' }),
   },
   // Money path — estimates → invoices → payments → booked work
-  'estimate.created': { name: 'estimate_created' },
+  'estimate.created': {
+    name: 'estimate_created',
+    // EE-4 images + EE-1 tiers: counts/booleans only (never URLs, ids, or
+    // line text) so we can measure adoption/impact without leaking PII.
+    props: (e) =>
+      pickMeta(e.metadata, {
+        line_items_total: 'lineItemsTotal',
+        line_items_with_image: 'lineItemsWithImage',
+        has_tiers: 'hasTiers',
+        tier_group_count: 'tierGroupCount',
+        addon_count: 'addonCount',
+      }),
+  },
   'public_estimate.approved': {
     name: 'estimate_approved',
-    props: (e) => pickMeta(e.metadata, { estimate_number: 'estimateNumber', total_cents: 'totalCents' }),
+    props: (e) =>
+      pickMeta(e.metadata, {
+        estimate_number: 'estimateNumber',
+        total_cents: 'totalCents',
+        // EE-4: did the accepted estimate carry photos? EE-1: did it offer
+        // tiers, and did the customer pick a pricier-than-default config?
+        had_line_item_images: 'hadLineItemImages',
+        had_tiers: 'hadTiers',
+        upsold_above_default: 'upsoldAboveDefault',
+      }),
   },
   'public_estimate.declined': {
     name: 'estimate_declined',
@@ -222,9 +243,21 @@ const ALLOWLIST: Record<string, Mapping> = {
   'catalog_item.created': {
     name: 'catalog_item_created',
     domain: 'catalog',
-    props: (e) => pickMeta(e.metadata, { category: 'category', unit: 'unit', unit_price_cents: 'unitPriceCents' }),
+    // EE-4 `has_image`: price-book photo adoption (boolean, never the file id).
+    props: (e) =>
+      pickMeta(e.metadata, {
+        category: 'category',
+        unit: 'unit',
+        unit_price_cents: 'unitPriceCents',
+        has_image: 'hasImage',
+      }),
   },
-  'catalog_item.updated': { name: 'catalog_item_updated', domain: 'catalog' },
+  'catalog_item.updated': {
+    name: 'catalog_item_updated',
+    domain: 'catalog',
+    // EE-4 `has_image`: whether the item carries a photo after the edit.
+    props: (e) => pickMeta(e.metadata, { has_image: 'hasImage' }),
+  },
   'service_bundle.created': {
     name: 'service_bundle_created',
     domain: 'catalog',

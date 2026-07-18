@@ -41,6 +41,9 @@ export const lineItemSchema = z.object({
   // estimate_line_items.pricing_source. Optional/nullish: invoice lines
   // and legacy estimate rows have no signal and serialize it as absent.
   pricingSource: z.enum(['catalog', 'ambiguous', 'uncatalogued', 'manual']).optional(),
+  // EE-4 — frozen image snapshot (estimates only): the catalog item's file id
+  // at draft/create time. Resolved to a signed URL only at the public edge.
+  imageFileId: z.string().optional(),
 });
 export type LineItem = z.infer<typeof lineItemSchema>;
 

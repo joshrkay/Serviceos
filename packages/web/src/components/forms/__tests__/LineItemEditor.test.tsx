@@ -96,4 +96,25 @@ describe('LineItemEditor (P11-006)', () => {
       ])
     ).toBe(200);
   });
+
+  it('EE-4 — toLineItemPayload forwards imageFileId (and omits it when absent)', () => {
+    const withImage: LineItemDraft = {
+      id: 'x',
+      description: 'Heater',
+      quantity: '1',
+      unitPriceDollars: '2500.00',
+      taxable: true,
+      imageFileId: 'file-hero',
+    };
+    expect(toLineItemPayload(withImage, 0).imageFileId).toBe('file-hero');
+
+    const withoutImage: LineItemDraft = {
+      id: 'y',
+      description: 'Labor',
+      quantity: '1',
+      unitPriceDollars: '100.00',
+      taxable: true,
+    };
+    expect(toLineItemPayload(withoutImage, 0).imageFileId).toBeUndefined();
+  });
 });

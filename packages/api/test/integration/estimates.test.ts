@@ -104,6 +104,27 @@ describe('Postgres integration — estimates', () => {
     });
   });
 
+  describe('EE-4 — line image_file_id', () => {
+    it('persists and round-trips a line image_file_id (real column)', async () => {
+      const fileId = crypto.randomUUID();
+      const items: LineItem[] = [
+        { id: crypto.randomUUID(), description: 'Water heater', quantity: 1, unitPriceCents: 90000, totalCents: 90000, sortOrder: 0, taxable: true, imageFileId: fileId },
+        { id: crypto.randomUUID(), description: 'Labor', quantity: 2, unitPriceCents: 7500, totalCents: 15000, sortOrder: 1, taxable: true },
+      ];
+      const estimate = await createEstimate(
+        { tenantId: tenant.tenantId, jobId, estimateNumber: 'EST-IMG-1', lineItems: items, createdBy: tenant.userId },
+        estimateRepo,
+      );
+
+      const found = await estimateRepo.findById(tenant.tenantId, estimate.id);
+      const heater = found!.lineItems.find((li) => li.description === 'Water heater')!;
+      expect(heater.imageFileId).toBe(fileId);
+      // A line with no image reads back undefined (SQL NULL).
+      const labor = found!.lineItems.find((li) => li.description === 'Labor')!;
+      expect(labor.imageFileId).toBeUndefined();
+    });
+  });
+
   describe('CRUD', () => {
     it('creates estimate and retrieves via findById', async () => {
       const lineItems = [

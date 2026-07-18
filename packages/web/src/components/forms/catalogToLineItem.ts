@@ -14,6 +14,8 @@ export interface CatalogPickItem {
   unit?: string;
   /** Catalog category is PascalCase: 'Labor' | 'Parts' | 'Materials'. */
   category?: string;
+  /** EE-4 — catalog photo reference (UUID into the files table), or null. */
+  imageFileId?: string | null;
 }
 
 /**
@@ -60,5 +62,8 @@ export function catalogItemToDraft(item: CatalogPickItem): LineItemDraft {
     unitPriceDollars: (item.unitPriceCents / 100).toFixed(2),
     taxable: true,
     category: mapCatalogCategory(item.category),
+    // EE-4 — carry the catalog photo onto the manually-picked line so it
+    // freezes on the estimate exactly as the AI path does.
+    imageFileId: item.imageFileId ?? undefined,
   };
 }

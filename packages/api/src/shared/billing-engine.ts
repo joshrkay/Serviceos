@@ -49,6 +49,12 @@ export interface LineItem {
   isOptional?: boolean;
   /** Pre-selected on first view (default tier / pre-checked add-on). */
   isDefaultSelected?: boolean;
+  /**
+   * EE-4 — frozen image snapshot: the catalog item's `image_file_id` stamped
+   * onto the line at draft/create (estimates only; invoice lines have no such
+   * column). Resolved to a signed URL only at the public edge.
+   */
+  imageFileId?: string;
 }
 
 export interface DocumentTotals {
