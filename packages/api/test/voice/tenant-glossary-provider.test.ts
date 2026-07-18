@@ -154,3 +154,142 @@ describe('TenantGlossaryProvider', () => {
     await expect(provider.termsForTenant('tenant-1')).resolves.toEqual([]);
   });
 });
+
+describe('TenantGlossaryProvider — per-tenant TTL cache + coalescing', () => {
+  function makeRepos() {
+    const catalogRepo = { listByTenant: vi.fn(async () => [{ name: 'PEX pipe' } as never]) };
+    const customerRepo = {
+      findByTenant: vi.fn(async () => [{ displayName: 'Maria Rodriguez' } as never]),
+    };
+    const userRepo = { findByTenant: vi.fn(async () => [{ firstName: 'Sam', lastName: 'Lee' } as never]) };
+    return { catalogRepo, customerRepo, userRepo };
+  }
+
+  it('hits the repos once for two sequential calls within the TTL window', async () => {
+    const { catalogRepo, customerRepo, userRepo } = makeRepos();
+    const provider = new TenantGlossaryProvider({ catalogRepo, customerRepo, userRepo });
+
+    const first = await provider.termsForTenant('tenant-1');
+    const second = await provider.termsForTenant('tenant-1');
+
+    expect(first).toEqual(second);
+    expect(catalogRepo.listByTenant).toHaveBeenCalledTimes(1);
+    expect(customerRepo.findByTenant).toHaveBeenCalledTimes(1);
+    expect(userRepo.findByTenant).toHaveBeenCalledTimes(1);
+  });
+
+  it('re-queries once the TTL expires', async () => {
+    vi.useFakeTimers();
+    try {
+      const { catalogRepo, customerRepo, userRepo } = makeRepos();
+      const provider = new TenantGlossaryProvider(
+        { catalogRepo, customerRepo, userRepo },
+        { cacheTtlMs: 1000 }
+      );
+
+      await provider.termsForTenant('tenant-1');
+      expect(catalogRepo.listByTenant).toHaveBeenCalledTimes(1);
+
+      vi.advanceTimersByTime(999);
+      await provider.termsForTenant('tenant-1');
+      expect(catalogRepo.listByTenant).toHaveBeenCalledTimes(1);
+
+      vi.advanceTimersByTime(2);
+      await provider.termsForTenant('tenant-1');
+      expect(catalogRepo.listByTenant).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('coalesces concurrent calls for the same tenant into one query set', async () => {
+    let resolveCatalog!: (items: Array<{ name: string }>) => void;
+    const catalogRepo = {
+      listByTenant: vi.fn(
+        () =>
+          new Promise<Array<{ name: string }>>((resolve) => {
+            resolveCatalog = resolve;
+          }) as never
+      ),
+    };
+    const customerRepo = {
+      findByTenant: vi.fn(async () => [{ displayName: 'Maria Rodriguez' } as never]),
+    };
+    const userRepo = { findByTenant: vi.fn(async () => [{ firstName: 'Sam', lastName: 'Lee' } as never]) };
+    const provider = new TenantGlossaryProvider({ catalogRepo, customerRepo, userRepo });
+
+    const call1 = provider.termsForTenant('tenant-1');
+    const call2 = provider.termsForTenant('tenant-1');
+
+    resolveCatalog([{ name: 'PEX pipe' }]);
+    const [terms1, terms2] = await Promise.all([call1, call2]);
+
+    expect(terms1).toEqual(terms2);
+    expect(catalogRepo.listByTenant).toHaveBeenCalledTimes(1);
+    expect(customerRepo.findByTenant).toHaveBeenCalledTimes(1);
+    expect(userRepo.findByTenant).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps separate cache entries per tenant — no term bleed', async () => {
+    const catalogRepo = {
+      listByTenant: vi.fn(async (tenantId: string) => [{ name: `item-${tenantId}` } as never]),
+    };
+    const customerRepo = { findByTenant: vi.fn(async () => []) };
+    const userRepo = { findByTenant: vi.fn(async () => []) };
+    const provider = new TenantGlossaryProvider({ catalogRepo, customerRepo, userRepo });
+
+    const termsA = await provider.termsForTenant('tenant-a');
+    const termsB = await provider.termsForTenant('tenant-b');
+    // Re-fetch tenant-a — should still be cached (repo hit once for A).
+    const termsAAgain = await provider.termsForTenant('tenant-a');
+
+    expect(termsA).toEqual(['item-tenant-a']);
+    expect(termsB).toEqual(['item-tenant-b']);
+    expect(termsAAgain).toEqual(['item-tenant-a']);
+    expect(catalogRepo.listByTenant).toHaveBeenCalledTimes(2);
+  });
+
+  it('cacheTtlMs: 0 disables caching — repos are hit on every call', async () => {
+    const { catalogRepo, customerRepo, userRepo } = makeRepos();
+    const provider = new TenantGlossaryProvider(
+      { catalogRepo, customerRepo, userRepo },
+      { cacheTtlMs: 0 }
+    );
+
+    await provider.termsForTenant('tenant-1');
+    await provider.termsForTenant('tenant-1');
+    await provider.termsForTenant('tenant-1');
+
+    expect(catalogRepo.listByTenant).toHaveBeenCalledTimes(3);
+    expect(customerRepo.findByTenant).toHaveBeenCalledTimes(3);
+    expect(userRepo.findByTenant).toHaveBeenCalledTimes(3);
+  });
+
+  it('evicts the oldest tenant once the 500-entry bound is exceeded', async () => {
+    const catalogRepo = {
+      listByTenant: vi.fn(async (tenantId: string) => [{ name: `item-${tenantId}` } as never]),
+    };
+    const customerRepo = { findByTenant: vi.fn(async () => []) };
+    const userRepo = { findByTenant: vi.fn(async () => []) };
+    const provider = new TenantGlossaryProvider({ catalogRepo, customerRepo, userRepo });
+
+    // Fill the cache with 500 distinct tenants, then push one more in —
+    // the oldest (tenant-0) should be evicted and re-queried on next call.
+    for (let i = 0; i < 500; i++) {
+      await provider.termsForTenant(`tenant-${i}`);
+    }
+    expect(catalogRepo.listByTenant).toHaveBeenCalledTimes(500);
+
+    await provider.termsForTenant('tenant-500');
+    expect(catalogRepo.listByTenant).toHaveBeenCalledTimes(501);
+
+    // tenant-0 was the oldest entry and was evicted to make room for
+    // tenant-500 — re-fetching it re-queries the repo.
+    await provider.termsForTenant('tenant-0');
+    expect(catalogRepo.listByTenant).toHaveBeenCalledTimes(502);
+
+    // tenant-499 was never evicted — still cached.
+    await provider.termsForTenant('tenant-499');
+    expect(catalogRepo.listByTenant).toHaveBeenCalledTimes(502);
+  });
+});
