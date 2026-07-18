@@ -221,10 +221,11 @@ export class ElevenLabsStreamConnection {
               pendingFirstAudio = null;
             }
             if (pcm.length > 0 && pcm.length < 4) {
+              // Hold the runt, but fall through (no early return): the same
+              // message may also carry isFinal, whose flush below must run.
               pendingFirstAudio = pcm;
-              return;
-            }
-            if (pcm.length >= 4) {
+              pcm = Buffer.alloc(0);
+            } else if (pcm.length >= 4) {
               firstAudioChecked = true;
               if (looksLikeMp3(pcm)) {
                 if (!errorState) {

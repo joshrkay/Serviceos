@@ -231,6 +231,20 @@ describe('ElevenLabsStreamConnection', () => {
     expect(Array.from(first.value.pcm)).toEqual([0x00, 0x01, 0x02, 0x03, 0x04, 0x05]);
   });
 
+  it('T2-F01: a single message carrying both a runt frame and isFinal flushes and terminates', async () => {
+    const conn = new ElevenLabsStreamConnection({ apiKey: 'k', voiceId: 'v', modelId: 'm' });
+    const iter = conn.synthesize({ text: 'hi' })[Symbol.asyncIterator]();
+    await Promise.resolve();
+    ws.fire('message', {
+      data: JSON.stringify({ audio: Buffer.from([0x00, 0x01]).toString('base64'), isFinal: true }),
+    });
+    const first = await iter.next();
+    expect(first.done).toBe(false);
+    expect(first.value.pcm.length).toBe(2); // runt flushed, not dropped
+    const last = await iter.next();
+    expect(last.value.isFinal).toBe(true); // isFinal handling not skipped
+  });
+
   it('T2-F01: a held runt is flushed at end-of-stream rather than silently dropped', async () => {
     const conn = new ElevenLabsStreamConnection({ apiKey: 'k', voiceId: 'v', modelId: 'm' });
     const iter = conn.synthesize({ text: 'hi' })[Symbol.asyncIterator]();
