@@ -836,9 +836,15 @@ export function createApp(): AppWithLifecycle {
   // In dev mode, use a much higher limit to allow QA testing
   const isDev = process.env.NODE_ENV === 'dev' || process.env.NODE_ENV === 'development';
   const redisUrl = process.env.REDIS_URL;
+  // T4-F02: this per-IP limiter is a DoS guard, not the fairness control — a
+  // shared-NAT office can exhaust a low per-IP cap with normal multi-user
+  // traffic. The per-tenant limiter below (API_TENANT_RATE_LIMIT_MAX,
+  // :4372-4384) is the actual fairness/abuse control. Env-configurable so the
+  // ceiling can be tightened without a code change if abuse patterns emerge.
+  const ipRateMax = Math.max(1, Number(process.env.API_IP_RATE_LIMIT_MAX) || 2000);
   app.use('/api', rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
-    max: isDev ? 10000 : 100, // per IP — relaxed in dev for QA testing
+    max: isDev ? 10000 : ipRateMax, // per IP — relaxed in dev for QA testing
     standardHeaders: true,
     legacyHeaders: false,
     skip: () => isDev && process.env.DEV_AUTH_BYPASS === 'true',
@@ -846,9 +852,38 @@ export function createApp(): AppWithLifecycle {
     // replicas = N× the limit). undefined ⇒ default per-process MemoryStore.
     store: createRateLimitStore(redisUrl, 'api:'),
   }));
+  // T4-F02: the six signature-verified provider webhook prefixes need
+  // materially higher throughput than unknown/junk /webhooks/* paths — this
+  // limiter must stay in sync with the raw-body parsers above (:760-790); a
+  // seventh provider added there without a matching prefix here just falls
+  // back to the general /webhooks limit below (fails safe, not open).
+  // Mounted BEFORE the general /webhooks limiter so legitimate provider
+  // bursts aren't 429'd ahead of signature verification (webhook router,
+  // mounted later) at realistic callback volume.
+  const webhookProviderPrefixes = [
+    '/webhooks/stripe',
+    '/webhooks/clerk',
+    '/webhooks/vapi',
+    '/webhooks/twilio',
+    '/webhooks/wisetack',
+    '/webhooks/sendgrid',
+  ];
+  const isProviderWebhookPath = (path: string) =>
+    webhookProviderPrefixes.some((prefix) => path.startsWith(prefix));
+  const webhookProviderRateMax = Math.max(1, Number(process.env.WEBHOOK_PROVIDER_RATE_LIMIT_MAX) || 600);
+  app.use(webhookProviderPrefixes, rateLimit({
+    windowMs: 60 * 1000,      // 1 minute
+    max: webhookProviderRateMax,
+    store: createRateLimitStore(redisUrl, 'webhooks-provider:'),
+  }));
   app.use('/webhooks', rateLimit({
     windowMs: 60 * 1000,      // 1 minute
     max: 30,
+    // Only governs unknown/junk /webhooks/* paths — the six provider
+    // prefixes are already rate-limited (at higher throughput) above.
+    // NB: req.path is relative to this middleware's '/webhooks' mount point
+    // (e.g. '/stripe'), so match against req.originalUrl for the full path.
+    skip: (req) => isProviderWebhookPath(req.originalUrl),
     store: createRateLimitStore(redisUrl, 'webhooks:'),
   }));
   // Public invoice/estimate pages are unauthenticated but token-gated.
