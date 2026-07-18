@@ -6239,6 +6239,36 @@ export const MIGRATIONS = {
   '257_estimate_line_items_image_file_id': `
     ALTER TABLE estimate_line_items ADD COLUMN IF NOT EXISTS image_file_id UUID;
   `,
+
+  // T4-F01 — shared claim-before-send ledger (see
+  // notifications/send-claim-ledger.ts). One row per (tenant_id, claim_key).
+  // A crash between the provider send and the caller's own business-level
+  // "handled" write (job.thank_you_sms_sent_at, estimate.reminder_count,
+  // message_dispatches) must not cause a resend on the next sweep tick — this
+  // table is the atomic claim/reclaim/tombstone gate that closes that window,
+  // generalizing lifecycle_emails' (migration 204) permanent-claim pattern
+  // with a BOUNDED stale-claim reclaim so an abandoned claim (crash before
+  // the send even started) doesn't block the message forever. status='sent'
+  // is a permanent tombstone — claimSend's WHERE clause never matches it
+  // again regardless of age. Purely a crash-safety layer: it does not
+  // replace or duplicate the existing business-level completion fields,
+  // which keep their current meaning and are written only after a confirmed
+  // send. Tenant-scoped with FORCE RLS, policy shape identical to
+  // lifecycle_emails.
+  '258_send_claims': `
+    CREATE TABLE IF NOT EXISTS send_claims (
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      claim_key TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'claimed' CHECK (status IN ('claimed', 'sent')),
+      claimed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      sent_at TIMESTAMPTZ,
+      PRIMARY KEY (tenant_id, claim_key)
+    );
+    ALTER TABLE send_claims ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE send_claims FORCE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_send_claims ON send_claims
+      USING (tenant_id = current_setting('app.current_tenant_id', true)::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
