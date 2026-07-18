@@ -127,7 +127,7 @@ describe('dispatchEstimateNudge (integration) — claim-before-send against real
 
     const claimRow = await pool.query(
       `SELECT status FROM send_claims WHERE tenant_id = $1 AND claim_key = $2`,
-      [tenant.tenantId, `estimate_nudge:${estimate.id}:1`],
+      [tenant.tenantId, `estimate_nudge:${estimate.id}:v1:1`],
     );
     expect(claimRow.rows[0].status).toBe('sent');
   });
@@ -137,7 +137,7 @@ describe('dispatchEstimateNudge (integration) — claim-before-send against real
     await pool.query(
       `INSERT INTO send_claims (tenant_id, claim_key, status, claimed_at)
        VALUES ($1, $2, 'claimed', NOW() - INTERVAL '20 minutes')`,
-      [tenant.tenantId, `estimate_nudge:${estimate.id}:1`],
+      [tenant.tenantId, `estimate_nudge:${estimate.id}:v1:1`],
     );
     const { sendService, sendEstimate } = fakeSendService();
 
@@ -156,7 +156,7 @@ describe('dispatchEstimateNudge (integration) — claim-before-send against real
     await pool.query(
       `INSERT INTO send_claims (tenant_id, claim_key, status, claimed_at, sent_at)
        VALUES ($1, $2, 'sent', NOW(), NOW())`,
-      [tenant.tenantId, `estimate_nudge:${estimate.id}:1`],
+      [tenant.tenantId, `estimate_nudge:${estimate.id}:v1:1`],
     );
     const { sendService, sendEstimate } = fakeSendService();
 
@@ -211,5 +211,45 @@ describe('dispatchEstimateNudge (integration) — claim-before-send against real
     expect(sendEstimate).toHaveBeenCalledTimes(2);
     const afterSecond = await estimateRepo.findById(tenant.tenantId, estimate.id);
     expect(afterSecond!.reminderCount).toBe(2);
+  });
+
+  it('Codex P1 (PR #705): a revised estimate (version bump + reminderCount reset) is re-notified — occurrence 1 does not collide with the prior revision\'s tombstone', async () => {
+    const estimate = await seedSentEstimate('EST-NUDGE-REV');
+    const { sendService, sendEstimate } = fakeSendService();
+
+    // Version 1, reminder #1 — claims + tombstones estimate_nudge:{id}:v1:1.
+    await dispatchEstimateNudge(
+      { estimateRepo, sendService, pool },
+      { tenantId: tenant.tenantId, estimate, channel: 'sms', asOf: new Date(), actorId: 'test' },
+    );
+    const v1Claim = await pool.query(
+      `SELECT status FROM send_claims WHERE tenant_id = $1 AND claim_key = $2`,
+      [tenant.tenantId, `estimate_nudge:${estimate.id}:v1:1`],
+    );
+    expect(v1Claim.rows[0].status).toBe('sent');
+
+    // reviseEstimate's effect: bump version -> 2 and reset reminderCount -> 0
+    // so the revised pricing is re-notified. The next nudge recomputes
+    // occurrence 1; without the version in the key it would hit the v1:1
+    // tombstone and never re-send.
+    const revised = (await estimateRepo.update(tenant.tenantId, estimate.id, {
+      version: 2,
+      reminderCount: 0,
+    }))!;
+
+    await dispatchEstimateNudge(
+      { estimateRepo, sendService, pool },
+      { tenantId: tenant.tenantId, estimate: revised, channel: 'sms', asOf: new Date(), actorId: 'test' },
+    );
+
+    // The revised estimate really was re-sent, under a fresh v2:1 claim.
+    expect(sendEstimate).toHaveBeenCalledTimes(2);
+    const v2Claim = await pool.query(
+      `SELECT status FROM send_claims WHERE tenant_id = $1 AND claim_key = $2`,
+      [tenant.tenantId, `estimate_nudge:${estimate.id}:v2:1`],
+    );
+    expect(v2Claim.rows[0].status).toBe('sent');
+    const afterRevise = await estimateRepo.findById(tenant.tenantId, estimate.id);
+    expect(afterRevise!.reminderCount).toBe(1);
   });
 });

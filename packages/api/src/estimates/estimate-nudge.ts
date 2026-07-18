@@ -13,9 +13,19 @@
  * notifications/send-claim-ledger.ts) so a crash/restart between the send and
  * the reminder_count/last_reminder_at write can't cause the next sweep tick
  * (or a racing proposal-handler execution) to resend. The claim key is
- * per-OCCURRENCE (`estimate_nudge:{id}:{reminderCount+1}`), not per-estimate —
+ * per-OCCURRENCE and per-REVISION
+ * (`estimate_nudge:{id}:v{version}:{reminderCount+1}`), not per-estimate —
  * nudges are deliberately repeatable, so a later nudge at a higher
  * reminderCount is a fresh, independent claim.
+ *
+ * The `v{version}` segment is load-bearing (Codex P1, PR #705): `reviseEstimate`
+ * bumps `version` AND resets `reminderCount` to 0 so the revised pricing is
+ * re-notified (estimates/estimate.ts). Without the version in the key the next
+ * nudge recomputes occurrence 1 and collides with the prior revision's
+ * permanent `'sent'` tombstone — the claim reports duplicate, the revised
+ * estimate is never re-sent, and every subsequent sweep fails identically.
+ * Scoping the key to the revision gives each revised estimate its own fresh
+ * claim namespace.
  *
  * Codex P1 #2 follow-up — `sendService.sendEstimate` itself does a
  * provider-then-entity-write (estimate.sentAt/lastDispatchId/status): if that
@@ -75,9 +85,14 @@ export class EstimateNudgeAlreadyClaimedError extends Error {
   }
 }
 
-/** T4-F01 claim key — per-occurrence, not per-estimate (nudges are deliberately repeatable). */
-function estimateNudgeClaimKey(estimateId: string, occurrence: number): string {
-  return `estimate_nudge:${estimateId}:${occurrence}`;
+/**
+ * T4-F01 claim key — per-revision AND per-occurrence, not per-estimate (nudges
+ * are deliberately repeatable, and a revision resets the occurrence counter).
+ * The `v{version}` segment keeps a revised estimate's occurrence 1 from
+ * colliding with the prior revision's tombstone (Codex P1, PR #705).
+ */
+function estimateNudgeClaimKey(estimateId: string, version: number, occurrence: number): string {
+  return `estimate_nudge:${estimateId}:v${version}:${occurrence}`;
 }
 
 /**
@@ -101,7 +116,7 @@ export async function dispatchEstimateNudge(
   };
 
   if (deps.pool) {
-    const claimKey = estimateNudgeClaimKey(estimate.id, occurrence);
+    const claimKey = estimateNudgeClaimKey(estimate.id, estimate.version, occurrence);
     const outcome = await withSendClaim(deps.pool, tenantId, claimKey, (markProviderAccepted) =>
       deps.sendService.sendEstimate(sendInput, { onProviderAccepted: markProviderAccepted }),
     );

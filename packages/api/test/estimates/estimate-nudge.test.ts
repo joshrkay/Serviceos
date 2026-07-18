@@ -149,7 +149,7 @@ describe('dispatchEstimateNudge', () => {
   describe('with a pool wired (claim-before-send active)', () => {
     it('crash-between-claim-and-send recovery: a stale claim for reminder #1 is reclaimed and sent', async () => {
       const { pool, claims } = claimAwarePool();
-      claims.set(`${TENANT}::estimate_nudge:${ESTIMATE_ID}:1`, {
+      claims.set(`${TENANT}::estimate_nudge:${ESTIMATE_ID}:v1:1`, {
         status: 'claimed',
         claimedAt: Date.now() - 20 * 60_000,
       });
@@ -169,7 +169,7 @@ describe('dispatchEstimateNudge', () => {
 
     it('crash-between-send-and-mark: a "sent" claim for reminder #1 throws EstimateNudgeAlreadyClaimedError and does not resend', async () => {
       const { pool, claims } = claimAwarePool();
-      claims.set(`${TENANT}::estimate_nudge:${ESTIMATE_ID}:1`, { status: 'sent', claimedAt: Date.now() });
+      claims.set(`${TENANT}::estimate_nudge:${ESTIMATE_ID}:v1:1`, { status: 'sent', claimedAt: Date.now() });
 
       await expect(
         dispatchEstimateNudge(deps({ pool }), {
@@ -234,6 +234,35 @@ describe('dispatchEstimateNudge', () => {
       expect(afterSecond!.reminderCount).toBe(2);
     });
 
+    it('Codex P1 (PR #705): a revision (version bump + reminderCount reset to 0) gets a FRESH claim namespace — occurrence 1 does not collide with the prior revision\'s tombstone', async () => {
+      const { pool, claims } = claimAwarePool();
+      // Version 1 already sent reminder #1 — its occurrence-1 claim is a
+      // permanent 'sent' tombstone.
+      claims.set(`${TENANT}::estimate_nudge:${ESTIMATE_ID}:v1:1`, {
+        status: 'sent',
+        claimedAt: Date.now(),
+      });
+
+      // reviseEstimate bumps version -> 2 and resets reminderCount -> 0, so the
+      // next nudge recomputes occurrence 1. Without the version segment this
+      // would collide with v1's tombstone and throw; scoped to v2 it must send.
+      const revised = makeEstimate({ version: 2, reminderCount: 0 });
+      await estimateRepo.update(TENANT, ESTIMATE_ID, { version: 2, reminderCount: 0 });
+
+      await dispatchEstimateNudge(deps({ pool }), {
+        tenantId: TENANT,
+        estimate: revised,
+        channel: 'sms',
+        asOf: NOW,
+        actorId: 'worker',
+      });
+
+      expect(sendEstimate).toHaveBeenCalledTimes(1); // the revised estimate WAS re-notified
+      expect(claims.get(`${TENANT}::estimate_nudge:${ESTIMATE_ID}:v2:1`)?.status).toBe('sent');
+      const updated = await estimateRepo.findById(TENANT, ESTIMATE_ID);
+      expect(updated!.reminderCount).toBe(1);
+    });
+
     it('sendFn throw releases the claim so an immediate retry for the same occurrence can succeed', async () => {
       const { pool, claims } = claimAwarePool();
       sendEstimate.mockRejectedValueOnce(new Error('provider down'));
@@ -248,7 +277,7 @@ describe('dispatchEstimateNudge', () => {
         }),
       ).rejects.toThrow('provider down');
 
-      expect(claims.has(`${TENANT}::estimate_nudge:${ESTIMATE_ID}:1`)).toBe(false);
+      expect(claims.has(`${TENANT}::estimate_nudge:${ESTIMATE_ID}:v1:1`)).toBe(false);
 
       await dispatchEstimateNudge(deps({ pool }), {
         tenantId: TENANT,
@@ -285,7 +314,7 @@ describe('dispatchEstimateNudge', () => {
 
       // The claim is finalized 'sent' (the customer really did receive the
       // estimate) — NOT released.
-      expect(claims.get(`${TENANT}::estimate_nudge:${ESTIMATE_ID}:1`)?.status).toBe('sent');
+      expect(claims.get(`${TENANT}::estimate_nudge:${ESTIMATE_ID}:v1:1`)?.status).toBe('sent');
       // This attempt didn't complete dispatchEstimateNudge's own bookkeeping.
       const updated = await estimateRepo.findById(TENANT, ESTIMATE_ID);
       expect(updated!.reminderCount ?? 0).toBe(0);

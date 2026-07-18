@@ -392,7 +392,7 @@ describe('SendEstimateNudgeExecutionHandler', () => {
       const { pool, claims } = claimAwarePool();
       // Simulate the estimate-reminder sweep having already won the claim for
       // reminder #1 on this estimate moments earlier (still fresh — not stale).
-      claims.set(`${TENANT}::estimate_nudge:${ESTIMATE_ID}:1`, {
+      claims.set(`${TENANT}::estimate_nudge:${ESTIMATE_ID}:v1:1`, {
         status: 'claimed',
         claimedAt: Date.now(),
       });
