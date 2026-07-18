@@ -150,4 +150,66 @@ describe('Postgres integration — PgQueue', () => {
     await queue.delete(claimed[1].id);
     expect((await queue.depth()).pending).toBe(2);
   });
+
+  describe('T4-F10 — recordFailure persists the real handler error', () => {
+    it('recordFailure sets last_error on the real _queue_messages row', async () => {
+      const id = await queue.send('flaky.job', { n: 1 }, 'flaky-key-1');
+      await queue.receive(); // attempts 0 -> 1
+
+      await queue.recordFailure(id, 'handler threw: connection refused');
+
+      const { rows } = await pool.query<{ last_error: string | null }>(
+        'SELECT last_error FROM _queue_messages WHERE id = $1',
+        [id],
+      );
+      expect(rows[0].last_error).toBe('handler threw: connection refused');
+    });
+
+    it('recordFailure is a no-op (never throws) once the message row is gone', async () => {
+      const id = await queue.send('one.shot.fail', {}, 'one-shot-fail-key');
+      await queue.delete(id);
+      await expect(queue.recordFailure(id, 'too late')).resolves.toBeUndefined();
+    });
+
+    it('end-to-end: fail-then-exhaust-then-DLQ ends with the DLQ error matching the real thrown message, not a hardcoded constant', async () => {
+      // maxRetries: 1 + a normal (nonzero) visibilityTimeout so the single
+      // receive() below both claims the message AND exhausts it in one
+      // step, without racing PgQueue's own crash-orphan reaper (which runs
+      // inside every receiveBatch call and would otherwise reap an
+      // already-exhausted, immediately-revisible row before this test gets
+      // to call recordFailure/moveToDeadLetter on it — a visibilityTimeout:
+      // 0 artifact unrelated to what this test is proving).
+      const singleAttemptQueue = new PgQueue(pool, { maxRetries: 1, visibilityTimeout: 30 });
+      const id = await singleAttemptQueue.send('exhausting.job', { n: 1 }, 'exhaust-key-1');
+
+      const msg = await singleAttemptQueue.receive();
+      expect(msg).not.toBeNull();
+      expect(msg!.attempts).toBe(1);
+      expect(msg!.maxAttempts).toBe(1);
+
+      // Mirrors app.ts's handleQueueMessage: processMessage's real error is
+      // persisted via recordFailure BEFORE the maxAttempts check.
+      const realError = 'ECONNRESET: handler threw on the only attempt';
+      await singleAttemptQueue.recordFailure(id, realError);
+
+      const row = await pool.query<{ last_error: string | null }>(
+        'SELECT last_error FROM _queue_messages WHERE id = $1',
+        [id],
+      );
+      expect(row.rows[0].last_error).toBe(realError);
+
+      // attempts (1) >= maxAttempts (1) — the real caller now passes the
+      // real error into moveToDeadLetter instead of a hardcoded string.
+      await singleAttemptQueue.moveToDeadLetter(msg!, realError);
+
+      const dlq = await singleAttemptQueue.listDeadLetter();
+      const ours = dlq.find((d) => d.messageId === id);
+      expect(ours?.error).toBe(realError);
+      expect(ours?.error).not.toBe('max attempts exceeded');
+
+      // The message row is gone — no lingering _queue_messages entry.
+      const remaining = await pool.query('SELECT 1 FROM _queue_messages WHERE id = $1', [id]);
+      expect(remaining.rows).toHaveLength(0);
+    });
+  });
 });

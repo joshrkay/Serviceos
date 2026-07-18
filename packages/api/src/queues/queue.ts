@@ -114,6 +114,12 @@ export interface Queue {
    */
   receiveBatch<T>(max: number): Promise<QueueMessage<T>[]>;
   delete(messageId: string): Promise<void>;
+  /**
+   * T4-F10 — persist the real handler failure reason on a still-retrying
+   * message (before it exhausts attempts and moves to the DLQ), so operators
+   * can see WHY a message keeps retrying without digging through logs.
+   */
+  recordFailure(messageId: string, error: string): Promise<void>;
   moveToDeadLetter(message: QueueMessage, error: string): Promise<void>;
   listDeadLetter(): Promise<DeadLetterEntry[]>;
   /**
@@ -163,6 +169,10 @@ export class InMemoryQueue implements Queue {
   private dlq: DeadLetterEntry[] = [];
   private config: QueueConfig;
   private receiving = false;
+  // T4-F10 — mirrors PgQueue's _queue_messages.last_error column for test
+  // parity. Keyed by message id; survives past receive()/delete() only for
+  // as long as the message row itself would (deleted on delete()).
+  private lastErrors = new Map<string, string>();
 
   constructor(config?: Partial<QueueConfig>) {
     this.config = {
@@ -232,8 +242,19 @@ export class InMemoryQueue implements Queue {
     }
   }
 
-  async delete(_messageId: string): Promise<void> {
+  async delete(messageId: string): Promise<void> {
     // Message already removed on receive in-memory
+    this.lastErrors.delete(messageId);
+  }
+
+  /** T4-F10 — see the Queue interface doc. */
+  async recordFailure(messageId: string, error: string): Promise<void> {
+    this.lastErrors.set(messageId, error);
+  }
+
+  /** Test-only introspection, mirrors size()/dlqSize() below. */
+  getLastError(messageId: string): string | undefined {
+    return this.lastErrors.get(messageId);
   }
 
   async moveToDeadLetter(message: QueueMessage, error: string): Promise<void> {
@@ -254,6 +275,7 @@ export class InMemoryQueue implements Queue {
       failedAt: new Date().toISOString(),
       diagnostics: (diagnostics as Record<string, unknown>) ?? {},
     });
+    this.lastErrors.delete(message.id);
   }
 
   async listDeadLetter(): Promise<DeadLetterEntry[]> {
@@ -288,11 +310,18 @@ export interface WorkerHandler<T = unknown> {
   handle(message: QueueMessage<T>, logger: Logger): Promise<void>;
 }
 
+/** T4-F10 — processMessage's outcome, carrying the real failure reason. */
+export interface ProcessMessageResult {
+  success: boolean;
+  /** Redacted (bounded-truncated) failure reason. Present iff !success. */
+  error?: string;
+}
+
 export async function processMessage<T>(
   message: QueueMessage<T>,
   handler: WorkerHandler<T>,
   logger: Logger
-): Promise<boolean> {
+): Promise<ProcessMessageResult> {
   const envelopeMeta = toEnvelopeMeta(message as QueueMessage<unknown>);
   const boundedDebugMode = parseBoundedDebugMode();
   const log = logger.child({
@@ -302,7 +331,10 @@ export async function processMessage<T>(
 
   if (message.type !== handler.type) {
     log.warn('Message type mismatch', { expected: handler.type, actual: message.type });
-    return false;
+    return {
+      success: false,
+      error: `Message type mismatch: expected '${handler.type}', got '${message.type}'`,
+    };
   }
 
   try {
@@ -311,7 +343,7 @@ export async function processMessage<T>(
     });
     await handler.handle(message, log);
     log.info('Message processed successfully');
-    return true;
+    return { success: true };
   } catch (err) {
     const error = err instanceof Error ? err : new Error(String(err));
     log.error('Message processing failed', {
@@ -323,6 +355,14 @@ export async function processMessage<T>(
     if (message.attempts >= message.maxAttempts) {
       log.error('Message exceeded max attempts, sending to DLQ');
     }
-    return false;
+
+    // T4-F10 — message + a few stack frames (skip the stack's own leading
+    // "Error: <message>" line, which would otherwise duplicate error.message),
+    // run through the same redaction/truncation already applied to DLQ
+    // payloads so this can't leak an unbounded or sensitive value.
+    const stackFrames = error.stack ? error.stack.split('\n').slice(1, 4) : [];
+    const rawError = [error.message, ...stackFrames].join('\n');
+    const redactedError = redactForSink(rawError, 'dlq') as string;
+    return { success: false, error: redactedError };
   }
 }

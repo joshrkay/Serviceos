@@ -68,11 +68,11 @@ describe('P0-009 — Async job processing with SQS', () => {
     };
 
     const result = await processMessage(msg, handler, logger);
-    expect(result).toBe(true);
+    expect(result).toEqual({ success: true });
     expect(handled).toEqual(['value']);
   });
 
-  it('validation — processMessage returns false for type mismatch', async () => {
+  it('validation — processMessage returns {success: false, error} for type mismatch', async () => {
     const handler: WorkerHandler = {
       type: 'other.type',
       async handle() {},
@@ -89,10 +89,11 @@ describe('P0-009 — Async job processing with SQS', () => {
     };
 
     const result = await processMessage(msg, handler, logger);
-    expect(result).toBe(false);
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/type mismatch/i);
   });
 
-  it('validation — processMessage handles handler errors', async () => {
+  it('T4-F10 — processMessage returns {success: false, error} with the real thrown message on a handler failure', async () => {
     const handler: WorkerHandler = {
       type: 'test.job',
       async handle() {
@@ -111,7 +112,54 @@ describe('P0-009 — Async job processing with SQS', () => {
     };
 
     const result = await processMessage(msg, handler, logger);
-    expect(result).toBe(false);
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/handler error/);
+  });
+
+  it('T4-F10 — the error field includes a few stack frames, not just the message', async () => {
+    const handler: WorkerHandler = {
+      type: 'test.job',
+      async handle() {
+        throw new Error('boom with stack');
+      },
+    };
+    const msg: QueueMessage = {
+      id: '1',
+      type: 'test.job',
+      payload: {},
+      attempts: 1,
+      maxAttempts: 3,
+      idempotencyKey: 'idem-1',
+      createdAt: new Date().toISOString(),
+    };
+
+    const result = await processMessage(msg, handler, logger);
+    expect(result.error).toMatch(/boom with stack/);
+    // A stack frame line (from the thrown Error's own stack), not just the message.
+    expect(result.error!.split('\n').length).toBeGreaterThan(1);
+  });
+
+  it('T4-F10 — the error field is bounded/redacted the same way DLQ payloads are (160-char truncation)', async () => {
+    const longMessage = 'x'.repeat(500);
+    const handler: WorkerHandler = {
+      type: 'test.job',
+      async handle() {
+        throw new Error(longMessage);
+      },
+    };
+    const msg: QueueMessage = {
+      id: '1',
+      type: 'test.job',
+      payload: {},
+      attempts: 1,
+      maxAttempts: 3,
+      idempotencyKey: 'idem-1',
+      createdAt: new Date().toISOString(),
+    };
+
+    const result = await processMessage(msg, handler, logger);
+    // sanitizePayloadSnapshot truncates any string over 160 chars.
+    expect(result.error!.length).toBeLessThanOrEqual(161);
   });
 
   it('happy path — idempotency key is set', async () => {
@@ -218,6 +266,34 @@ describe('P0-009 — Async job processing with SQS', () => {
       'boom',
     );
     expect((await queue.depth()).deadLetter).toBe(1);
+  });
+
+  describe('T4-F10 — recordFailure (InMemoryQueue parity)', () => {
+    it('stores the last error, retrievable via getLastError', async () => {
+      await queue.recordFailure('msg-a', 'boom');
+      expect(queue.getLastError('msg-a')).toBe('boom');
+    });
+
+    it('is cleared on delete()', async () => {
+      await queue.recordFailure('msg-b', 'boom');
+      await queue.delete('msg-b');
+      expect(queue.getLastError('msg-b')).toBeUndefined();
+    });
+
+    it('is cleared once the message moves to the DLQ', async () => {
+      const msg: QueueMessage = {
+        id: 'msg-c',
+        type: 'test.job',
+        payload: {},
+        attempts: 3,
+        maxAttempts: 3,
+        idempotencyKey: 'idem-c',
+        createdAt: new Date().toISOString(),
+      };
+      await queue.recordFailure('msg-c', 'boom');
+      await queue.moveToDeadLetter(msg, 'boom');
+      expect(queue.getLastError('msg-c')).toBeUndefined();
+    });
   });
 
   describe('WS15 — stalePendingCount (queue-staleness SLO feed)', () => {
