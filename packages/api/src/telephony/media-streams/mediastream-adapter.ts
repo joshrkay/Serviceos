@@ -483,6 +483,13 @@ interface RuntimeState {
    * {@link TwilioMediaStreamAdapter.armSilenceRepromptTimer}.
    */
   silenceRepromptTimer: NodeJS.Timeout | null;
+  /**
+   * Turn whose end-of-turn mark is enqueued but not yet acked by Twilio; the
+   * silence timer arms only when THAT mark's ack arrives (playback actually
+   * finished), not at enqueue — otherwise a long prompt or send backlog
+   * starts the countdown before the caller has heard the agent finish.
+   */
+  pendingSilenceRepromptTurnId: number | null;
   /** Outbound queue (bounded, priority-aware). */
   queue: BoundedSendQueue;
   draining: boolean;
@@ -741,6 +748,7 @@ export class TwilioMediaStreamAdapter {
       lastMediaAt: Date.now(),
       audioIdleTimer: null,
       silenceRepromptTimer: null,
+      pendingSilenceRepromptTurnId: null,
       queue: new BoundedSendQueue({
         surface: 'twilio_media_streams',
         maxMsgs: TWILIO_QUEUE_MAX_MSGS,
@@ -826,6 +834,17 @@ export class TwilioMediaStreamAdapter {
         return;
       case 'mark':
         if (this.state.unackedMarks > 0) this.state.unackedMarks--;
+        // The end-of-turn mark's ack means the caller has actually heard the
+        // agent finish — NOW start the no-response countdown (T2-F05). Match
+        // the specific turn name so pacing marks (turn-N-frame) don't arm it.
+        if (
+          this.state.pendingSilenceRepromptTurnId !== null &&
+          frame.mark?.name === `turn-${this.state.pendingSilenceRepromptTurnId}`
+        ) {
+          const turnId = this.state.pendingSilenceRepromptTurnId;
+          this.state.pendingSilenceRepromptTurnId = null;
+          this.armSilenceRepromptTimer(turnId);
+        }
         // Mark-ack is the cue to drain any backpressured outbound work.
         void this.flushQueue();
         return;
@@ -2406,7 +2425,9 @@ export class TwilioMediaStreamAdapter {
         streamSid: this.state.streamSid,
         mark: { name: `turn-${turnId}` },
       });
-      if (!isFiller) this.armSilenceRepromptTimer(turnId);
+      // Defer the silence countdown to this mark's ACK (playback finished),
+      // not enqueue — record the turn; handleMessage's 'mark' case arms it.
+      if (!isFiller) this.state.pendingSilenceRepromptTurnId = turnId;
     }
   }
 
@@ -2482,9 +2503,12 @@ export class TwilioMediaStreamAdapter {
    * frames continuously (comfort-noise/silent mu-law) for the whole call, so
    * `lastMediaAt` keeps refreshing and that timer only fires when the
    * transport itself stalls. This timer instead measures caller-turn silence:
-   * armed when an agent (non-filler) TTS turn enqueues its final
-   * `turn-${turnId}` mark (NOT the periodic pacing marks), cleared by any
-   * transcript event (interim or final), by barge-in, and by close. Expiry
+   * armed when Twilio ACKs the agent (non-filler) TTS turn's final
+   * `turn-${turnId}` mark — i.e. the caller has actually heard the turn end,
+   * NOT when the mark was merely enqueued (a long prompt or send backlog
+   * would otherwise start the countdown early and could hang up before the
+   * caller's intended response window). Cleared by any transcript event
+   * (interim or final), by barge-in, and by close. Expiry
    * funnels into `recoverFromLowSttConfidence` deliberately: silence shares
    * the `consecutiveLowConfidenceTurns` streak, reprompt copy, and
    * MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS escalation with mumbled turns, so a
@@ -2524,6 +2548,10 @@ export class TwilioMediaStreamAdapter {
   }
 
   private clearSilenceRepromptTimer(): void {
+    // Also drop a not-yet-armed pending turn: a transcript/barge-in/close
+    // before the end-of-turn ack means the caller spoke or the call ended,
+    // so the ack must not arm a stale countdown.
+    this.state.pendingSilenceRepromptTurnId = null;
     if (this.state.silenceRepromptTimer) {
       clearTimeout(this.state.silenceRepromptTimer);
       this.state.silenceRepromptTimer = null;

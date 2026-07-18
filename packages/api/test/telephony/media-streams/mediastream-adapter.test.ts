@@ -2737,11 +2737,26 @@ describe('T2-F05 caller-silence reprompt timer', () => {
     return { adapter, ws, handle, texts, speechTurn, finalizeOnClose };
   }
 
-  /** Drive one confident caller turn so the agent speaks and the timer arms. */
-  async function completeAgentTurn(handle: StreamHandle): Promise<void> {
+  /**
+   * Drive one confident caller turn so the agent speaks, then ack the
+   * end-of-turn mark — the silence timer arms on playback-completion (the
+   * mark ACK), not at enqueue, so a real Twilio `mark` callback is required.
+   */
+  async function completeAgentTurn(
+    adapter: TwilioMediaStreamAdapter,
+    ws: FakeWs,
+    handle: StreamHandle,
+  ): Promise<void> {
     handle.emit({ type: 'final', isFinal: true, transcript: 'hello there', confidence: 0.95 });
     await flush();
     await flush();
+    const pendingTurn = (
+      adapter as unknown as { state: { pendingSilenceRepromptTurnId: number | null } }
+    ).state.pendingSilenceRepromptTurnId;
+    if (pendingTurn !== null) {
+      ws.inboundJson({ event: 'mark', streamSid: 'MZ', mark: { name: `turn-${pendingTurn}` } });
+      await flush();
+    }
   }
 
   /** White-box read of the private streak counter. */
@@ -2751,7 +2766,7 @@ describe('T2-F05 caller-silence reprompt timer', () => {
 
   it('reprompts a silent caller 8s after the agent turn ends and bumps the shared streak', async () => {
     const { adapter, ws, handle, texts } = await setupSilenceCall('CA-sil-1');
-    await completeAgentTurn(handle);
+    await completeAgentTurn(adapter, ws, handle);
     expect(texts).toEqual([AGENT_LINE]);
 
     // Just short of the default window: still silent, still no reprompt.
@@ -2774,18 +2789,42 @@ describe('T2-F05 caller-silence reprompt timer', () => {
     );
   });
 
+  it('does not start the countdown until Twilio acks the end-of-turn mark (no early reprompt on send backlog)', async () => {
+    const { adapter, handle, texts } = await setupSilenceCall('CA-sil-ack');
+    // Agent turn plays but the end-of-turn mark has NOT been acked yet
+    // (backlogged playback). Advancing well past the window must not reprompt.
+    handle.emit({ type: 'final', isFinal: true, transcript: 'hello there', confidence: 0.95 });
+    await flush();
+    await flush();
+    expect(texts).toEqual([AGENT_LINE]);
+    await vi.advanceTimersByTimeAsync(DEFAULT_SILENCE_REPROMPT_MS * 2);
+    await flush();
+    expect(texts).toEqual([AGENT_LINE]); // still no reprompt — timer never armed
+    const pendingTurn = (
+      adapter as unknown as { state: { pendingSilenceRepromptTurnId: number | null } }
+    ).state.pendingSilenceRepromptTurnId;
+    expect(pendingTurn).not.toBeNull();
+  });
+
   it('a second consecutive silence expiry escalates and ends the session (low_stt_confidence_max_retries)', async () => {
     // Non-default timeout also pins the deps.silenceRepromptTimeoutMs seam.
-    const { ws, handle, texts, finalizeOnClose } = await setupSilenceCall('CA-sil-2', {
+    const { adapter, ws, handle, texts, finalizeOnClose } = await setupSilenceCall('CA-sil-2', {
       silenceRepromptTimeoutMs: 1_000,
     });
-    await completeAgentTurn(handle);
+    await completeAgentTurn(adapter, ws, handle);
 
-    // Expiry 1 → reprompt; the reprompt's own turn-end mark re-arms the timer.
+    // Expiry 1 → reprompt. The reprompt renders through streamPcmAsMedia and
+    // enqueues its own end-of-turn mark, which must be acked to re-arm.
     await vi.advanceTimersByTimeAsync(1_000);
     await flush();
     expect(texts).toEqual([AGENT_LINE, renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en')]);
     expect(ws.closed).toBe(false);
+    const repromptTurn = (
+      adapter as unknown as { state: { pendingSilenceRepromptTurnId: number | null } }
+    ).state.pendingSilenceRepromptTurnId;
+    expect(repromptTurn).not.toBeNull();
+    ws.inboundJson({ event: 'mark', streamSid: 'MZ', mark: { name: `turn-${repromptTurn}` } });
+    await flush();
 
     // Expiry 2 → cap reached → spoken hand-off + graceful end.
     await vi.advanceTimersByTimeAsync(1_000);
@@ -2815,7 +2854,7 @@ describe('T2-F05 caller-silence reprompt timer', () => {
 
   it('an interim transcript at 5s disarms the timer — advancing past 8s produces NO reprompt', async () => {
     const { adapter, ws, handle, texts } = await setupSilenceCall('CA-sil-3');
-    await completeAgentTurn(handle);
+    await completeAgentTurn(adapter, ws, handle);
     expect(texts).toEqual([AGENT_LINE]);
 
     await vi.advanceTimersByTimeAsync(5_000);
@@ -2831,8 +2870,8 @@ describe('T2-F05 caller-silence reprompt timer', () => {
   });
 
   it('after close, an armed silence timer never fires (no reprompt, no double finalize)', async () => {
-    const { handle, ws, texts, finalizeOnClose } = await setupSilenceCall('CA-sil-4');
-    await completeAgentTurn(handle);
+    const { adapter, handle, ws, texts, finalizeOnClose } = await setupSilenceCall('CA-sil-4');
+    await completeAgentTurn(adapter, ws, handle);
 
     ws.inboundJson({ event: 'stop', streamSid: 'MZ-CA-sil-4' });
     await flush();
@@ -2851,7 +2890,7 @@ describe('T2-F05 caller-silence reprompt timer', () => {
 
   it('expiry while a newer outbound turn is in flight is a no-op', async () => {
     const { adapter, ws, handle, texts } = await setupSilenceCall('CA-sil-5');
-    await completeAgentTurn(handle);
+    await completeAgentTurn(adapter, ws, handle);
 
     // Simulate a transcript-less new outbound turn racing the armed timer
     // (e.g. an async sentiment-escalation line): the captured turnId is stale
@@ -2871,8 +2910,8 @@ describe('T2-F05 caller-silence reprompt timer', () => {
   });
 
   it('timer silence then a low-confidence final terminates at combined streak 2', async () => {
-    const { handle, ws, texts, speechTurn, finalizeOnClose } = await setupSilenceCall('CA-sil-6');
-    await completeAgentTurn(handle);
+    const { adapter, handle, ws, texts, speechTurn, finalizeOnClose } = await setupSilenceCall('CA-sil-6');
+    await completeAgentTurn(adapter, ws, handle);
 
     // Silence expiry → streak 1 via the shared ladder.
     await vi.advanceTimersByTimeAsync(DEFAULT_SILENCE_REPROMPT_MS);
