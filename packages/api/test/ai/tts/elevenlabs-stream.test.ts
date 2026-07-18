@@ -185,11 +185,37 @@ describe('ElevenLabsStreamConnection', () => {
 
   it('looksLikeMp3 classifies signatures correctly', () => {
     expect(looksLikeMp3(Buffer.from('ID3rest'))).toBe(true);
-    expect(looksLikeMp3(Buffer.from([0xff, 0xfb, 0x90, 0x44]))).toBe(true); // valid MPEG-1 L3 header
-    expect(looksLikeMp3(Buffer.from([0xff, 0xff, 0xff, 0xff]))).toBe(false); // PCM -1,-1 (invalid bitrate nibble)
+    // Short chunk with a strict MPEG-1 Layer III header — no room to verify
+    // the next sync, so it must still classify as MP3.
+    expect(looksLikeMp3(Buffer.from([0xff, 0xfb, 0x90, 0x44]))).toBe(true);
+    expect(looksLikeMp3(Buffer.from([0xff, 0xff, 0xff, 0xff]))).toBe(false); // PCM -1,-1 (layer bits ≠ III)
+    expect(looksLikeMp3(Buffer.from([0xff, 0xff, 0x40, 0x00]))).toBe(false); // PCM -1 then +64 (review case)
     expect(looksLikeMp3(Buffer.from([0x00, 0x00, 0x00, 0x00]))).toBe(false); // silence
     expect(looksLikeMp3(Buffer.from([0xff, 0xe1, 0x90, 0x44]))).toBe(false); // layer bits 00 = reserved
     expect(looksLikeMp3(Buffer.alloc(2))).toBe(false); // too short to classify
+
+    // Long chunks: MPEG-1 L3 @128kbps/44.1kHz → frame size 417. A real MP3
+    // repeats the sync word at the frame boundary; PCM coincidences don't.
+    const frame = Buffer.alloc(420);
+    frame[0] = 0xff; frame[1] = 0xfb; frame[2] = 0x90; frame[3] = 0x44;
+    frame[417] = 0xff; frame[418] = 0xfb;
+    expect(looksLikeMp3(frame)).toBe(true); // sync repeats → MP3
+    const coincidence = Buffer.alloc(420);
+    coincidence[0] = 0xff; coincidence[1] = 0xfb; coincidence[2] = 0x90; coincidence[3] = 0x44;
+    expect(looksLikeMp3(coincidence)).toBe(false); // no repeat sync → loud PCM, not MP3
+  });
+
+  it('T2-F01: a runt (<4 byte) first frame does not consume the format check', async () => {
+    const conn = new ElevenLabsStreamConnection({ apiKey: 'k', voiceId: 'v', modelId: 'm' });
+    const iter = conn.synthesize({ text: 'hi' })[Symbol.asyncIterator]();
+    await Promise.resolve();
+    ws.fire('message', { data: JSON.stringify({ audio: Buffer.from([0x00, 0x01]).toString('base64') }) });
+    const runt = await iter.next();
+    expect(runt.done).toBe(false); // runt frame still delivered
+    const id3 = Buffer.from('ID3\x04\x00\x00\x00\x00\x00\x00', 'binary').toString('base64');
+    ws.fire('message', { data: JSON.stringify({ audio: id3 }) });
+    // The classifiable second frame must still be checked and rejected.
+    await expect(iter.next()).rejects.toThrow(/compressed \(MP3\) audio/i);
   });
 
   it('aborts mid-stream when the caller signal fires', async () => {

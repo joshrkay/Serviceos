@@ -19,23 +19,40 @@ export const ELEVENLABS_STREAM_INACTIVITY_MS = 4_000;
 
 /**
  * Detects an MP3 payload masquerading as raw PCM. Two signatures: an "ID3"
- * tag prefix, or an MP3 frame-sync (11 set bits) with a *valid* header —
- * the version/layer/bitrate/sample-rate validity checks matter because raw
- * PCM16LE near silence legitimately produces 0xFF 0xFF byte runs (sample
- * value -1), which a bare sync-word check would misflag and kill a healthy
- * turn. A run of -1 samples fails the bitrate check (0xF nibble = invalid),
- * so quiet-but-real PCM passes.
+ * tag prefix, or an MPEG-1 Layer III frame header (0xFF 0xFA/0xFB …) —
+ * the ONLY frame shape ElevenLabs mp3_44100_* streams emit. Restricting to
+ * that exact shape matters because raw PCM16LE near silence legitimately
+ * produces 0xFF/0x00 byte runs (e.g. sample -1 then +64 is FF FF 40 00,
+ * which passes a generic MP3-header validity check); under the MPEG-1
+ * Layer III restriction the second byte must be 0xFA/0xFB, reachable only
+ * from a "loud" first sample of exactly -1025/-1281 — and for that residue
+ * the next-frame sync-word check below rejects the coincidence, since real
+ * MP3 frames repeat the sync at the computed frame boundary and PCM does
+ * not. Free-form (0000) and invalid (1111) bitrates are excluded both as
+ * non-ElevenLabs and because a frame size can't be computed for them.
  */
 export function looksLikeMp3(buf: Buffer): boolean {
   if (buf.length >= 3 && buf[0] === 0x49 && buf[1] === 0x44 && buf[2] === 0x33) return true; // "ID3"
-  if (buf.length >= 4 && buf[0] === 0xff && (buf[1] & 0xe0) === 0xe0) {
-    const versionBits = (buf[1] >> 3) & 0x03; // 01 = reserved → not MP3
-    const layerBits = (buf[1] >> 1) & 0x03; // 00 = reserved → not MP3
-    const bitrateBits = (buf[2] >> 4) & 0x0f; // 1111 = invalid → not MP3
-    const sampleRateBits = (buf[2] >> 2) & 0x03; // 11 = reserved → not MP3
-    return versionBits !== 0x01 && layerBits !== 0x00 && bitrateBits !== 0x0f && sampleRateBits !== 0x03;
+  if (buf.length < 4 || buf[0] !== 0xff || (buf[1] & 0xe0) !== 0xe0) return false;
+  const versionBits = (buf[1] >> 3) & 0x03; // 11 = MPEG-1
+  const layerBits = (buf[1] >> 1) & 0x03; // 01 = Layer III
+  const bitrateBits = (buf[2] >> 4) & 0x0f; // 0000 free / 1111 invalid
+  const sampleRateBits = (buf[2] >> 2) & 0x03; // 11 = reserved
+  if (versionBits !== 0x03 || layerBits !== 0x01 || bitrateBits === 0x00 || bitrateBits === 0x0f || sampleRateBits === 0x03) {
+    return false;
   }
-  return false;
+  const bitrateKbps = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0][bitrateBits];
+  const sampleRate = [44100, 48000, 32000, 0][sampleRateBits];
+  const padding = (buf[2] >> 1) & 0x01;
+  const frameSize = Math.floor((144 * bitrateKbps * 1000) / sampleRate) + padding;
+  if (buf.length >= frameSize + 2) {
+    return buf[frameSize] === 0xff && (buf[frameSize + 1] & 0xe0) === 0xe0;
+  }
+  // Strict MPEG-1 Layer III header but the chunk is too short to verify the
+  // next sync — treat as MP3 (random PCM hitting 0xFF 0xFA/0xFB plus valid
+  // bitrate/rate bits is ~2e-5 per stream, vs. certain static if we let a
+  // real MP3 through).
+  return true;
 }
 
 export interface ElevenLabsStreamConnectionOpts {
@@ -191,7 +208,10 @@ export class ElevenLabsStreamConnection {
           // means the output_format pin was lost or the provider default
           // changed — fail the turn loudly so the adapter's recovery path
           // runs, instead of mu-law-encoding MP3 bytes into caller static.
-          if (!firstAudioChecked) {
+          // Don't consume the one-shot check on a runt frame (<4 bytes) —
+          // it can't be classified, and marking it checked would let a real
+          // MP3 stream slip past on frame two.
+          if (!firstAudioChecked && pcm.length >= 4) {
             firstAudioChecked = true;
             if (looksLikeMp3(pcm)) {
               if (!errorState) {
