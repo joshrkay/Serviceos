@@ -1,10 +1,10 @@
 import { randomBytes } from 'crypto';
 import { CustomerRepository } from '../customers/customer';
 import { EstimateRepository } from '../estimates/estimate';
-import { InvoiceRepository } from '../invoices/invoice';
+import { InvoiceRepository, InvoiceStatus } from '../invoices/invoice';
 import { JobRepository } from '../jobs/job';
 import { SettingsRepository } from '../settings/settings';
-import { ValidationError, NotFoundError } from '../shared/errors';
+import { ValidationError, NotFoundError, ConflictError } from '../shared/errors';
 import { DispatchRepository } from './dispatch-repository';
 import {
   EmailMessage,
@@ -41,6 +41,19 @@ export interface SendInvoiceInput {
   recipientEmail?: string;
   customMessage?: string;
 }
+
+/**
+ * Invoices in these statuses cannot be usefully sent to a customer for
+ * payment. 'draft' hasn't been issued yet (no issuedAt/dueDate), and both
+ * payment-link paths reject anything outside ['open', 'partially_paid'];
+ * 'void'/'canceled' are dead invoices with nothing to collect. See the
+ * sendInvoice() guard below.
+ */
+const UNSENDABLE_INVOICE_STATUSES: ReadonlySet<InvoiceStatus> = new Set([
+  'draft',
+  'void',
+  'canceled',
+]);
 
 export interface SendResult {
   estimateId?: string;
@@ -228,6 +241,27 @@ export class SendService {
     );
     if (!invoice) {
       throw new NotFoundError('Invoice', input.invoiceId);
+    }
+
+    // QA 2026-07-19 — "Send payment link" on a still-draft invoice used to
+    // 202 and silently do nothing: this method only ever stamps
+    // sentAt/viewToken/lastDispatchId (see the status-transition note below),
+    // it never issues the invoice. A 'draft' invoice has no issuedAt/dueDate,
+    // and both payment-link paths (createInvoicePaymentLink in
+    // invoices/invoice-payment-link.ts and
+    // PublicInvoiceService.getOrCreateCheckoutUrl) refuse anything outside
+    // ['open', 'partially_paid'] — so the "view" link we'd email/text the
+    // customer could never produce a working payment link, and nothing told
+    // the operator. 'void'/'canceled' are dead invoices with nothing to
+    // collect — sending a payment prompt for one is actively wrong, not just
+    // ineffective. Fail fast, before attempting any delivery, with a message
+    // that tells the operator exactly what to do next.
+    if (UNSENDABLE_INVOICE_STATUSES.has(invoice.status)) {
+      throw new ConflictError(
+        invoice.status === 'draft'
+          ? `Invoice ${invoice.invoiceNumber} is still a draft — issue it (POST /:id/issue, which sets a due date) before sending a payment link to the customer.`
+          : `Invoice ${invoice.invoiceNumber} is ${invoice.status} — there is nothing to collect, so it cannot be sent to the customer for payment.`
+      );
     }
 
     const job = await this.deps.jobRepo.findById(input.tenantId, invoice.jobId);

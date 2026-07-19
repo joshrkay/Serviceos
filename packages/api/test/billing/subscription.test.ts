@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { BillingService } from '../../src/billing/subscription';
+import { AppError } from '../../src/shared/errors';
 
 const TENANT = '11111111-1111-4111-8111-111111111111';
 
@@ -200,21 +201,88 @@ describe('BillingService', () => {
     expect(body.get('configuration')).toBe('bpc_123');
   });
 
-  it('getOrCreatePortalUrl surfaces portal-session failures and missing urls', async () => {
+  it('getOrCreatePortalUrl surfaces portal-session failures as a logged, actionable AppError', async () => {
+    // QA 2026-07-19: this used to be a bare `throw new Error(...)` that
+    // toErrorResponse flattened to a generic 500 with nothing logged.
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     pool = makePool({ stripe_customer_id: 'cus_existing' });
-    fetchFn.mockResolvedValueOnce(jsonErr(500, { error: { message: 'boom' } }));
+    fetchFn.mockResolvedValueOnce(jsonErr(500, { error: { message: 'boom', code: 'api_error' } }));
     const svc = new BillingService({ pool: pool as never, config: { apiKey: 'sk_test' }, fetchFn });
     const input = {
       tenantId: TENANT,
       ownerEmail: 'o@example.com',
       returnUrl: 'https://app.example.com/settings',
     };
-    await expect(svc.getOrCreatePortalUrl(input)).rejects.toThrow(
-      /Stripe portal session failed \(500\)/,
-    );
+
+    const err = await svc.getOrCreatePortalUrl(input).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(AppError);
+    expect((err as AppError).statusCode).toBe(502);
+    expect((err as AppError).code).toBe('BILLING_PORTAL_FAILED');
+    // The operator sees Stripe's actual, actionable reason — not "unexpected error".
+    expect((err as AppError).message).toMatch(/boom/);
+    expect((err as AppError).details).toMatchObject({ stripeStatus: 500, stripeCode: 'api_error' });
+    expect(errorSpy).toHaveBeenCalledOnce();
+    errorSpy.mockRestore();
 
     fetchFn.mockResolvedValueOnce(jsonOk({}));
     await expect(svc.getOrCreatePortalUrl(input)).rejects.toThrow(/returned no url/);
+  });
+
+  it('getOrCreatePortalUrl surfaces a stale/deleted Stripe customer (resource_missing) instead of a flat 500', async () => {
+    // Exact QA repro: tenants.stripe_customer_id is cached but no longer
+    // resolves under the currently-configured Stripe key/mode (test/live
+    // mismatch, manual deletion in the Dashboard, restored-from-backup
+    // data, etc). getOrCreateStripeCustomer trusts the cached id without
+    // verifying it, so this only surfaces on the portal-session call.
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    pool = makePool({ stripe_customer_id: 'cus_UswJPdKUh7f1eg' });
+    fetchFn.mockResolvedValueOnce(
+      jsonErr(404, {
+        error: {
+          type: 'invalid_request_error',
+          message: "No such customer: 'cus_UswJPdKUh7f1eg'",
+          code: 'resource_missing',
+        },
+      }),
+    );
+    const svc = new BillingService({ pool: pool as never, config: { apiKey: 'sk_test' }, fetchFn });
+
+    const err = await svc
+      .getOrCreatePortalUrl({
+        tenantId: TENANT,
+        ownerEmail: 'o@example.com',
+        returnUrl: 'https://app.example.com/settings',
+      })
+      .catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(AppError);
+    expect((err as AppError).statusCode).toBe(502);
+    expect((err as AppError).code).toBe('BILLING_PORTAL_FAILED');
+    expect((err as AppError).message).toContain("No such customer: 'cus_UswJPdKUh7f1eg'");
+    expect((err as AppError).details).toMatchObject({
+      stripeStatus: 404,
+      stripeCode: 'resource_missing',
+    });
+    // Full Stripe detail (code + message) reached the server logs even
+    // though only a sanitized/derived message reaches the client.
+    expect(errorSpy).toHaveBeenCalledOnce();
+    const [, loggedDetail] = errorSpy.mock.calls[0]!;
+    expect(loggedDetail).toMatchObject({
+      stripeCode: 'resource_missing',
+      stripeMessage: "No such customer: 'cus_UswJPdKUh7f1eg'",
+    });
+    errorSpy.mockRestore();
+
+    // No auto-recreate: the stale id is left as-is (rebinding blindly
+    // would orphan the cached subscription_status/stripe_subscription_id
+    // from the old customer — see the doc comment on
+    // billingPortalStripeFailure). Only ONE fetch call was made — no
+    // second attempt with a freshly created customer.
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    const persistCall = pool.query.mock.calls.find((c: unknown[]) =>
+      typeof c[0] === 'string' && (c[0] as string).includes('SET stripe_customer_id'),
+    );
+    expect(persistCall).toBeUndefined();
   });
 
   it('surfaces a Stripe customer create that returns no id', async () => {

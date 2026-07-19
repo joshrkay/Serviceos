@@ -373,7 +373,8 @@ function SendPaymentSheet({ inv, amountDueCents, paymentLink, onClose, onSent, a
   /** The invoice's real Stripe payment link, when one exists. */
   paymentLink?: string;
   onClose: () => void; onSent: () => void;
-  /** When set, the sheet calls the real /api/invoices/:id/send endpoint. */
+  /** When set, the sheet calls the real /api/invoices/:id/send endpoint
+   *  (and /:id/issue first, when the invoice is still a draft). */
   apiId?: string;
 }) {
   const [channel, setChannel] = useState<'sms' | 'email'>('sms');
@@ -397,12 +398,28 @@ function SendPaymentSheet({ inv, amountDueCents, paymentLink, onClose, onSent, a
     'POST',
     apiId ? `/api/invoices/${apiId}/send` : '/api/invoices/_/send'
   );
+  // A still-draft invoice has no due date and can't produce a working
+  // payment link — POST /:id/send now rejects it outright with a clear
+  // "issue it first" error (notifications/send-service.ts) rather than
+  // silently no-op'ing. There's no separate "Issue" control anywhere in
+  // this UI, so issue it here (same default 30-day term POST /:id/issue
+  // already applies when none is given) as part of the one button this
+  // sheet offers — "Send payment link" still does the one thing its label
+  // promises instead of erroring on a step the operator has no way to
+  // reach.
+  const { mutate: issueInvoice } = useMutation<Record<string, never>, unknown>(
+    'POST',
+    apiId ? `/api/invoices/${apiId}/issue` : '/api/invoices/_/issue'
+  );
 
   async function handleSend() {
     setSending(true);
     setSendError(null);
     try {
       if (apiId) {
+        if (inv.status === 'Draft') {
+          await issueInvoice({});
+        }
         const result = await sendInvoice({
           channel,
           recipientPhone: channel === 'sms' ? recipient : undefined,
@@ -1024,7 +1041,10 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
           paymentLink={paymentLink}
           apiId={inv?.id}
           onClose={() => setSendOpen(false)}
-          onSent={() => {}}
+          // Refetch so a draft invoice's now-issued status (and the
+          // "Payment journey" it drives) is reflected immediately, without
+          // requiring a manual page reload — mirrors MarkPaidSheet's onPaid.
+          onSent={() => { void refetch(); }}
         />
       )}
       {markOpen && (

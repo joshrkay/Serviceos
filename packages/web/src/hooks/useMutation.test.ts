@@ -136,6 +136,65 @@ describe('useMutation — basic behavior', () => {
     expect(result.current.error).toBe('HTTP 422');
   });
 
+  it('surfaces the API-provided message from a JSON error body instead of a generic HTTP status', async () => {
+    // toErrorResponse's wire shape is { error, message, details? }. A
+    // caller-facing 409 like "Invoice INV-0001 is still a draft — issue
+    // it before sending..." used to be discarded entirely in favor of
+    // "HTTP 409" — the operator saw a code, not the actionable reason.
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: false,
+      status: 409,
+      json: async () => ({
+        error: 'CONFLICT',
+        message: 'Invoice INV-0001 is still a draft — issue it before sending a payment link.',
+      }),
+    } as Response);
+
+    const { result } = renderHook(() => useMutation('POST', '/api/invoices/inv-1/send'));
+    await act(async () => {
+      // The status is still exposed for callers that branch on it, alongside
+      // the now-meaningful message.
+      await expect(result.current.mutate({})).rejects.toMatchObject({
+        status: 409,
+        message: 'Invoice INV-0001 is still a draft — issue it before sending a payment link.',
+      });
+    });
+
+    expect(result.current.error).toBe(
+      'Invoice INV-0001 is still a draft — issue it before sending a payment link.',
+    );
+  });
+
+  it('falls back to the generic HTTP status when the error body has no message field', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: false,
+      status: 500,
+      json: async () => ({ error: 'INTERNAL_ERROR' }),
+    } as Response);
+
+    const { result } = renderHook(() => useMutation('POST', '/api/items'));
+    await act(async () => {
+      await expect(result.current.mutate({})).rejects.toThrow('HTTP 500');
+    });
+    expect(result.current.error).toBe('HTTP 500');
+  });
+
+  it('falls back to the generic HTTP status when the error body is not JSON', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: false,
+      status: 502,
+      json: async (): Promise<unknown> => {
+        throw new SyntaxError('Unexpected token < in JSON');
+      },
+    } as Response);
+
+    const { result } = renderHook(() => useMutation('POST', '/api/items'));
+    await act(async () => {
+      await expect(result.current.mutate({})).rejects.toThrow('HTTP 502');
+    });
+    expect(result.current.error).toBe('HTTP 502');
+  });
+
   it('sets error and re-throws on network failure', async () => {
     vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Network error'));
 
