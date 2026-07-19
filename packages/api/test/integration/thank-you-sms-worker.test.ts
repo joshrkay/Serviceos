@@ -243,7 +243,7 @@ describe('thank-you-sms worker — integration', () => {
       expect(claimRow.rows[0].status).toBe('sent');
     });
 
-    it('does NOT resend when a "sent" claim exists but thank_you_sms_sent_at is still NULL (crash between send and mark)', async () => {
+    it('Codex P2 (PR #705) — does NOT resend when a "sent" claim exists but thank_you_sms_sent_at is still NULL, and RECONCILES the missing stamp (crash between send and mark)', async () => {
       const seed = await seedCustomerAndJob({ completedAtAgo: 'four_hours' });
       await pool.query(
         `INSERT INTO send_claims (tenant_id, claim_key, status, claimed_at, sent_at)
@@ -257,9 +257,12 @@ describe('thank-you-sms worker — integration', () => {
         now: () => NOW,
       });
 
+      // No resend (the SMS already went out), but the missing stamp is now
+      // reconciled — otherwise the eligibility query re-selects this job every
+      // tick forever and can starve newer jobs (oldest-first, LIMIT 500).
       expect(calls.some((c) => c.to === seed.phone)).toBe(false);
       const row = await pool.query(`SELECT thank_you_sms_sent_at FROM jobs WHERE id = $1`, [seed.jobId]);
-      expect(row.rows[0].thank_you_sms_sent_at).toBeNull();
+      expect(row.rows[0].thank_you_sms_sent_at).toEqual(NOW);
     });
 
     it('two concurrent sweeps against the same eligible job send exactly once', async () => {
