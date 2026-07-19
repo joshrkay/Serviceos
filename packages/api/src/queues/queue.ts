@@ -37,22 +37,28 @@ function sanitizePayloadSnapshot(input: unknown): unknown {
 }
 
 /**
- * Redact a free-text error message for the `last_error` / DLQ sinks. A bare
- * string handed to `sanitizePayloadSnapshot` only gets length-truncated (the
- * key-based transcript/content/text scrubbing applies to string VALUES inside
- * an object), so a handler that throws a provider response body would persist
- * up to 160 chars of it verbatim. Route the message through the SAME
- * content-scrubbing policy applied to sensitive payload fields — under a `text`
- * key so the policy fires — then flatten the `{excerpt, fingerprint}` result
- * back to a bounded string for the TEXT columns. The fingerprint keeps repeated
- * identical failures correlatable without storing the full (possibly sensitive)
- * value (Codex P2, PR #705).
+ * Build the durable error record persisted to `_queue_messages.last_error`
+ * and the DLQ. Stores ONLY a non-sensitive classification — the error's
+ * constructor name plus a short enum-like `code` when present — and a sha256
+ * fingerprint of the full message+stack. It NEVER persists the message text:
+ * a handler exception can embed a provider response body, an auth token, or
+ * customer PII (e.g. a Twilio error echoing the destination phone number), and
+ * even a 160-char excerpt would leak the leading bytes of that verbatim
+ * (Codex P2, PR #705). The full error is still written to the real-time worker
+ * log sink for live debugging; the fingerprint lets operators correlate
+ * recurring failures and cross-reference that log.
  */
-function redactErrorForSink(rawError: string): string {
-  const scrubbed = sanitizePayloadSnapshot({ text: rawError }) as {
-    text: { excerpt: string; fingerprint: string };
-  };
-  return `${scrubbed.text.excerpt} [sha256:${scrubbed.text.fingerprint}]`;
+function classifyErrorForSink(error: Error, rawText: string): string {
+  const name = error.name.slice(0, 60);
+  const code = (error as { code?: unknown }).code;
+  // Append a code ONLY when it is short and enum-like (Node syscall codes like
+  // ECONNRESET, Postgres SQLSTATE, provider numeric codes) — never a free-form
+  // value that could itself carry sensitive text.
+  const codeSuffix =
+    (typeof code === 'string' || typeof code === 'number') && /^[\w.-]{1,40}$/.test(String(code))
+      ? `:${code}`
+      : '';
+  return `${name}${codeSuffix} [sha256:${hashString(rawText)}]`;
 }
 
 export function toEnvelopeMeta(message: QueueMessage<unknown>): Record<string, unknown> {
@@ -375,13 +381,15 @@ export async function processMessage<T>(
       log.error('Message exceeded max attempts, sending to DLQ');
     }
 
-    // T4-F10 — message + a few stack frames (skip the stack's own leading
-    // "Error: <message>" line, which would otherwise duplicate error.message),
-    // run through the sensitive-content scrubbing policy before it is persisted
-    // to last_error / the DLQ.
+    // T4-F10 — the DURABLE record (last_error / DLQ) carries only a
+    // non-sensitive classification + a fingerprint of the full message+stack;
+    // the readable error is in the worker log sink above. The fingerprint is
+    // computed over message + a few stack frames (skip the stack's own leading
+    // "Error: <message>" line, which duplicates error.message) so the same
+    // failure at the same site correlates across occurrences.
     const stackFrames = error.stack ? error.stack.split('\n').slice(1, 4) : [];
     const rawError = [error.message, ...stackFrames].join('\n');
-    const redactedError = redactErrorForSink(rawError);
+    const redactedError = classifyErrorForSink(error, rawError);
     return { success: false, error: redactedError };
   }
 }

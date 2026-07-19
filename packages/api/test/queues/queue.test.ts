@@ -93,11 +93,11 @@ describe('P0-009 — Async job processing with SQS', () => {
     expect(result.error).toMatch(/type mismatch/i);
   });
 
-  it('T4-F10 — processMessage returns {success: false, error} with the real thrown message on a handler failure', async () => {
+  it('T4-F10 / Codex P2 — the DURABLE error is classification + fingerprint only, never the thrown message text', async () => {
     const handler: WorkerHandler = {
       type: 'test.job',
       async handle() {
-        throw new Error('handler error');
+        throw new Error('handler error with a +15551234567 phone number');
       },
     };
 
@@ -113,14 +113,20 @@ describe('P0-009 — Async job processing with SQS', () => {
 
     const result = await processMessage(msg, handler, logger);
     expect(result.success).toBe(false);
-    expect(result.error).toMatch(/handler error/);
+    // Only the error class + a sha256 fingerprint — the message (which here
+    // carries PII) is never persisted to last_error / the DLQ.
+    expect(result.error).toBe(`Error [sha256:${result.error!.match(/[0-9a-f]{16}/)![0]}]`);
+    expect(result.error).not.toContain('handler error');
+    expect(result.error).not.toContain('+15551234567');
   });
 
-  it('T4-F10 — the error field includes a few stack frames, not just the message', async () => {
+  it('T4-F10 / Codex P2 — appends a short enum-like error code to the classification (e.g. ECONNRESET) but still no message', async () => {
     const handler: WorkerHandler = {
       type: 'test.job',
       async handle() {
-        throw new Error('boom with stack');
+        const err = new Error('connect ECONNRESET 10.0.0.1:5432') as Error & { code?: string };
+        err.code = 'ECONNRESET';
+        throw err;
       },
     };
     const msg: QueueMessage = {
@@ -134,12 +140,11 @@ describe('P0-009 — Async job processing with SQS', () => {
     };
 
     const result = await processMessage(msg, handler, logger);
-    expect(result.error).toMatch(/boom with stack/);
-    // A stack frame line (from the thrown Error's own stack), not just the message.
-    expect(result.error!.split('\n').length).toBeGreaterThan(1);
+    expect(result.error).toMatch(/^Error:ECONNRESET \[sha256:[0-9a-f]{16}\]$/);
+    expect(result.error).not.toContain('10.0.0.1');
   });
 
-  it('T4-F10 — the error field is scrubbed like a sensitive content field: a bounded ≤160-char excerpt plus a fingerprint, never the full value verbatim', async () => {
+  it('T4-F10 / Codex P2 — a huge (potentially sensitive) message is never persisted, verbatim or as an excerpt', async () => {
     const longMessage = 'x'.repeat(500);
     const handler: WorkerHandler = {
       type: 'test.job',
@@ -158,13 +163,9 @@ describe('P0-009 — Async job processing with SQS', () => {
     };
 
     const result = await processMessage(msg, handler, logger);
-    // Codex P2 (PR #705): routed through the content-scrubbing policy, not just
-    // truncated — a ≤160-char excerpt followed by a sha256 fingerprint.
-    expect(result.error!).toMatch(/^x+ \[sha256:[0-9a-f]{16}\]$/);
-    const excerpt = result.error!.split(' [sha256:')[0];
-    expect(excerpt.length).toBeLessThanOrEqual(160);
-    // The full 500-char value is never persisted verbatim.
-    expect(result.error).not.toContain(longMessage);
+    // No excerpt at all — just the classification + fingerprint.
+    expect(result.error!).toMatch(/^Error \[sha256:[0-9a-f]{16}\]$/);
+    expect(result.error).not.toContain('xxxx');
   });
 
   it('happy path — idempotency key is set', async () => {
