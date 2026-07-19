@@ -163,8 +163,8 @@ describe('integration — voice transcription → proposal', () => {
       if (!msg) break;
       const handler = registry.get(msg.type);
       expect(handler).toBeDefined();
-      const ok = await processMessage(msg, handler!, silentLogger());
-      expect(ok).toBe(true);
+      const result = await processMessage(msg, handler!, silentLogger());
+      expect(result.success).toBe(true);
       await queue.delete(msg.id);
     }
 

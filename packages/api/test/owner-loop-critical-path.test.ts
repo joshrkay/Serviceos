@@ -20,6 +20,7 @@ import { InMemoryDeliveryProvider } from '../src/notifications/delivery-provider
 import { InMemoryDispatchRepository } from '../src/notifications/dispatch-repository';
 import { InMemoryDncRepository } from '../src/compliance/dnc';
 import { TransactionalCommsService } from '../src/notifications/transactional-comms-service';
+import { createLogger } from '../src/logging/logger';
 import { createAppointment } from '../src/appointments/appointment';
 import { createProposal } from '../src/proposals/proposal';
 import { transitionProposal } from '../src/proposals/lifecycle';
@@ -110,6 +111,8 @@ describe('owner loop critical path — §11 smoke', () => {
       customerRepo,
       settingsRepo,
       invoiceRepo: new InMemoryInvoiceRepository(),
+      pool: null,
+      logger: createLogger({ service: 'test', environment: 'test', level: 'error' }),
     });
   });
 
@@ -209,6 +212,8 @@ describe('owner loop critical path — §11 smoke', () => {
       customerRepo,
       settingsRepo,
       invoiceRepo,
+      pool: null,
+      logger: createLogger({ service: 'test', environment: 'test', level: 'error' }),
     });
 
     const handler = new RecordPaymentExecutionHandler(

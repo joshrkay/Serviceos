@@ -144,10 +144,14 @@ async function applyPostPaymentSideEffects(params: {
   }
 
   if (updatedInvoice && paymentReceiptNotifier) {
+    // Codex P1 #1 — payment.id is the per-occurrence claim token so a SECOND
+    // partial payment on the same invoice gets its own receipt instead of
+    // being silently suppressed by an invoice-scoped-only claim key.
     await paymentReceiptNotifier.notifyPaymentReceived(
       input.tenantId,
       input.invoiceId,
       payment.amountCents,
+      payment.id,
     );
   }
 
@@ -220,6 +224,14 @@ export interface PaymentReceiptNotifier {
     tenantId: string,
     invoiceId: string,
     amountCents: number,
+    /**
+     * Codex P1 #1 — per-occurrence claim token (see
+     * TransactionalCommsService.notifyPaymentReceived). Required so every
+     * implementation is forced to key its send-claim ledger per payment, not
+     * per invoice — an invoice-scoped-only key would silently suppress the
+     * receipt for a second partial payment on the same invoice.
+     */
+    paymentId: string,
   ): Promise<void>;
 }
 

@@ -22,15 +22,19 @@ const TENANT = 't-1';
 const INVOICE_ID = 'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa';
 
 class FakeComms {
-  calls: Array<{ tenantId: string; invoiceId: string }> = [];
+  calls: Array<{ tenantId: string; invoiceId: string; occurrenceToken: string }> = [];
   shouldThrow = false;
   /** Optional hook fired synchronously inside the send — lets a test observe
    *  the ledger state AT the moment of send (proves record-before-send). */
   onSend?: (tenantId: string, invoiceId: string) => Promise<void> | void;
-  async notifyInvoiceOverdue(tenantId: string, invoiceId: string): Promise<void> {
+  async notifyInvoiceOverdue(
+    tenantId: string,
+    invoiceId: string,
+    occurrenceToken: string,
+  ): Promise<void> {
     if (this.shouldThrow) throw new Error('delivery failed');
     if (this.onSend) await this.onSend(tenantId, invoiceId);
-    this.calls.push({ tenantId, invoiceId });
+    this.calls.push({ tenantId, invoiceId, occurrenceToken });
   }
 }
 
@@ -69,10 +73,25 @@ describe('send_payment_reminder execution handler', () => {
 
     expect(result.success).toBe(true);
     expect(result.resultEntityId).toBe(INVOICE_ID);
-    expect(comms.calls).toEqual([{ tenantId: TENANT, invoiceId: INVOICE_ID }]);
+    expect(comms.calls).toEqual([
+      { tenantId: TENANT, invoiceId: INVOICE_ID, occurrenceToken: '3:sms' },
+    ]);
 
     const events = await auditRepo.findByEntity(TENANT, 'invoice', INVOICE_ID);
     expect(events.some((e) => e.eventType === 'invoice.reminder_sent')).toBe(true);
+  });
+
+  it('Codex P1 #1: distinct dunning steps (different stepKey) for the SAME invoice thread distinct occurrence tokens, not one entity-scoped key', async () => {
+    await handler.execute(makeProposal({ payload: { invoiceId: INVOICE_ID, stepKey: '3:sms', offsetDays: 3, channel: 'sms' } }), ctx);
+    await handler.execute(
+      makeProposal({
+        id: 'prop-2',
+        payload: { invoiceId: INVOICE_ID, stepKey: '10:email', offsetDays: 10, channel: 'email' },
+      }),
+      ctx,
+    );
+
+    expect(comms.calls.map((c) => c.occurrenceToken)).toEqual(['3:sms', '10:email']);
   });
 
   it('returns a failed result (never throws) when delivery fails', async () => {
@@ -218,6 +237,34 @@ describe('send_payment_reminder — manual dedup guard', () => {
     const result = await handlerWith(ledger).execute(makeManualProposal(), ctx);
     expect(result.success).toBe(true);
     expect(comms.calls).toHaveLength(1);
+  });
+
+  it('Codex P1 (round 3): a manual send threads the per-proposal occurrence token (manual:<proposalId>), never the bare "manual" discriminator', async () => {
+    // The bare 'manual' would make notifyInvoiceOverdue's send-claim key
+    // invoice-scoped (invoice-overdue:{invoiceId}:manual) and permanently
+    // tombstone every later manual reminder after the first. The token must be
+    // per-proposal so each approved manual send is a distinct claim.
+    const proposal = makeManualProposal('manual-prop-token');
+    const result = await handlerWith(ledger).execute(proposal, ctx);
+    expect(result.success).toBe(true);
+    expect(comms.calls).toHaveLength(1);
+    expect(comms.calls[0].occurrenceToken).toBe(manualReminderStepKey('manual-prop-token'));
+    expect(comms.calls[0].occurrenceToken).not.toBe('manual');
+  });
+
+  it('Codex P1 (round 3): two distinct manual proposals (spaced past the cooldown) thread DISTINCT occurrence tokens — the second is not suppressed by the first', async () => {
+    // First manual send happened 4 days ago (outside the 72h cooldown) under a
+    // different proposal id; its ledger row exists.
+    await seed({ stepKey: manualReminderStepKey('manual-old'), sentAt: FOUR_DAYS_AGO });
+    const second = makeManualProposal('manual-new');
+    const result = await handlerWith(ledger).execute(second, ctx);
+
+    expect(result.success).toBe(true);
+    expect(comms.calls).toHaveLength(1);
+    // The second occurrence carries its own token — downstream the send-claim
+    // ledger keys on this, so the first send's tombstone can't swallow it.
+    expect(comms.calls[0].occurrenceToken).toBe(manualReminderStepKey('manual-new'));
+    expect(comms.calls[0].occurrenceToken).not.toBe(manualReminderStepKey('manual-old'));
   });
 
   it('no dunningEventRepo → legacy behavior (manual send is not gated, no ledger)', async () => {
