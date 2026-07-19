@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { ElevenLabsStreamConnection } from '../../../src/ai/tts/elevenlabs-stream';
+import { ElevenLabsStreamConnection, looksLikeMp3 } from '../../../src/ai/tts/elevenlabs-stream';
 
 // Minimal WebSocket fake matching the subset of WHATWG WebSocket the
 // connection helper uses (open/message/close/error/send).
@@ -63,6 +63,11 @@ describe('ElevenLabsStreamConnection', () => {
     );
     expect(global.WebSocket).toHaveBeenCalledWith(
       expect.stringContaining('xi-api-key=key-123')
+    );
+    // T2-F01: the endpoint DEFAULTS to mp3_44100 — the PCM pin must be in
+    // the URL or every downstream consumer decodes MP3 bytes as raw PCM.
+    expect(global.WebSocket).toHaveBeenCalledWith(
+      expect.stringContaining('output_format=pcm_16000')
     );
     // Close cleanly so the iterator resolves.
     ws.close();
@@ -143,6 +148,116 @@ describe('ElevenLabsStreamConnection', () => {
     await expect(iter.next()).rejects.toThrow(/ElevenLabs WS error/);
   });
 
+  it('T2-F01: rejects the turn when the first audio frame is MP3 (ID3 tag) instead of PCM', async () => {
+    const conn = new ElevenLabsStreamConnection({ apiKey: 'k', voiceId: 'v', modelId: 'm' });
+    const iter = conn.synthesize({ text: 'hi' })[Symbol.asyncIterator]();
+    await Promise.resolve(); // 'open'
+    const id3 = Buffer.from('ID3\x04\x00\x00\x00\x00\x00\x00', 'binary').toString('base64');
+    ws.fire('message', { data: JSON.stringify({ audio: id3 }) });
+    await expect(iter.next()).rejects.toThrow(/compressed \(MP3\) audio/i);
+    expect(ws.readyState).toBe(3); // socket closed — never plays static
+  });
+
+  it('T2-F01: rejects the turn when the first audio frame carries a valid MP3 frame header', async () => {
+    const conn = new ElevenLabsStreamConnection({ apiKey: 'k', voiceId: 'v', modelId: 'm' });
+    const iter = conn.synthesize({ text: 'hi' })[Symbol.asyncIterator]();
+    await Promise.resolve();
+    // 0xFF 0xFB 0x90 0x44 — MPEG-1 Layer III, 128kbps, 44.1kHz: the typical
+    // first bytes of an ElevenLabs mp3_44100 stream chunk.
+    const mp3 = Buffer.from([0xff, 0xfb, 0x90, 0x44, 0x00, 0x00]).toString('base64');
+    ws.fire('message', { data: JSON.stringify({ audio: mp3 }) });
+    await expect(iter.next()).rejects.toThrow(/compressed \(MP3\) audio/i);
+  });
+
+  it('T2-F01: does NOT misflag near-silent PCM that starts with 0xFF byte runs', async () => {
+    // PCM16LE sample value -1 is bytes FF FF — a bare frame-sync check would
+    // misread a quiet stream start as MP3 and kill a healthy turn. The
+    // bitrate-nibble validity check (0xF = invalid) must let this through.
+    const conn = new ElevenLabsStreamConnection({ apiKey: 'k', voiceId: 'v', modelId: 'm' });
+    const iter = conn.synthesize({ text: 'hi' })[Symbol.asyncIterator]();
+    await Promise.resolve();
+    const quietPcm = Buffer.from([0xff, 0xff, 0xff, 0xff, 0x01, 0x00]).toString('base64');
+    ws.fire('message', { data: JSON.stringify({ audio: quietPcm }) });
+    const first = await iter.next();
+    expect(first.done).toBe(false);
+    expect(first.value.pcm.length).toBe(6);
+  });
+
+  it('looksLikeMp3 classifies signatures correctly', () => {
+    expect(looksLikeMp3(Buffer.from('ID3rest'))).toBe(true);
+    // Short chunk with a strict MPEG-1 Layer III header — no room to verify
+    // the next sync, so it must still classify as MP3.
+    expect(looksLikeMp3(Buffer.from([0xff, 0xfb, 0x90, 0x44]))).toBe(true);
+    expect(looksLikeMp3(Buffer.from([0xff, 0xff, 0xff, 0xff]))).toBe(false); // PCM -1,-1 (layer bits ≠ III)
+    expect(looksLikeMp3(Buffer.from([0xff, 0xff, 0x40, 0x00]))).toBe(false); // PCM -1 then +64 (review case)
+    expect(looksLikeMp3(Buffer.from([0x00, 0x00, 0x00, 0x00]))).toBe(false); // silence
+    expect(looksLikeMp3(Buffer.from([0xff, 0xe1, 0x90, 0x44]))).toBe(false); // layer bits 00 = reserved
+    expect(looksLikeMp3(Buffer.alloc(2))).toBe(false); // too short to classify
+
+    // Long chunks: MPEG-1 L3 @128kbps/44.1kHz → frame size 417. A real MP3
+    // repeats the sync word at the frame boundary; PCM coincidences don't.
+    const frame = Buffer.alloc(420);
+    frame[0] = 0xff; frame[1] = 0xfb; frame[2] = 0x90; frame[3] = 0x44;
+    frame[417] = 0xff; frame[418] = 0xfb;
+    expect(looksLikeMp3(frame)).toBe(true); // sync repeats → MP3
+    const coincidence = Buffer.alloc(420);
+    coincidence[0] = 0xff; coincidence[1] = 0xfb; coincidence[2] = 0x90; coincidence[3] = 0x44;
+    expect(looksLikeMp3(coincidence)).toBe(false); // no repeat sync → loud PCM, not MP3
+  });
+
+  it('T2-F01: an MP3 header split across messages is still rejected (classified from stream start)', async () => {
+    // The provider may split the compressed header across messages: "ff fb"
+    // then "90 44 …". Checking each chunk at its own offset would miss the
+    // signature — the guard must buffer the runt prefix and classify the
+    // concatenation from byte 0.
+    const conn = new ElevenLabsStreamConnection({ apiKey: 'k', voiceId: 'v', modelId: 'm' });
+    const iter = conn.synthesize({ text: 'hi' })[Symbol.asyncIterator]();
+    await Promise.resolve();
+    ws.fire('message', { data: JSON.stringify({ audio: Buffer.from([0xff, 0xfb]).toString('base64') }) });
+    ws.fire('message', { data: JSON.stringify({ audio: Buffer.from([0x90, 0x44, 0x00, 0x00]).toString('base64') }) });
+    await expect(iter.next()).rejects.toThrow(/compressed \(MP3\) audio/i);
+    expect(ws.readyState).toBe(3);
+  });
+
+  it('T2-F01: a runt PCM prefix is held, then delivered concatenated once classifiable', async () => {
+    const conn = new ElevenLabsStreamConnection({ apiKey: 'k', voiceId: 'v', modelId: 'm' });
+    const iter = conn.synthesize({ text: 'hi' })[Symbol.asyncIterator]();
+    await Promise.resolve();
+    ws.fire('message', { data: JSON.stringify({ audio: Buffer.from([0x00, 0x01]).toString('base64') }) });
+    ws.fire('message', { data: JSON.stringify({ audio: Buffer.from([0x02, 0x03, 0x04, 0x05]).toString('base64') }) });
+    const first = await iter.next();
+    expect(first.done).toBe(false);
+    // Nothing was dropped: the held prefix arrives prepended to chunk two.
+    expect(Array.from(first.value.pcm)).toEqual([0x00, 0x01, 0x02, 0x03, 0x04, 0x05]);
+  });
+
+  it('T2-F01: a single message carrying both a runt frame and isFinal flushes and terminates', async () => {
+    const conn = new ElevenLabsStreamConnection({ apiKey: 'k', voiceId: 'v', modelId: 'm' });
+    const iter = conn.synthesize({ text: 'hi' })[Symbol.asyncIterator]();
+    await Promise.resolve();
+    ws.fire('message', {
+      data: JSON.stringify({ audio: Buffer.from([0x00, 0x01]).toString('base64'), isFinal: true }),
+    });
+    const first = await iter.next();
+    expect(first.done).toBe(false);
+    expect(first.value.pcm.length).toBe(2); // runt flushed, not dropped
+    const last = await iter.next();
+    expect(last.value.isFinal).toBe(true); // isFinal handling not skipped
+  });
+
+  it('T2-F01: a held runt is flushed at end-of-stream rather than silently dropped', async () => {
+    const conn = new ElevenLabsStreamConnection({ apiKey: 'k', voiceId: 'v', modelId: 'm' });
+    const iter = conn.synthesize({ text: 'hi' })[Symbol.asyncIterator]();
+    await Promise.resolve();
+    ws.fire('message', { data: JSON.stringify({ audio: Buffer.from([0x00, 0x01]).toString('base64') }) });
+    ws.fire('message', { data: JSON.stringify({ isFinal: true }) });
+    const first = await iter.next();
+    expect(first.done).toBe(false);
+    expect(first.value.pcm.length).toBe(2);
+    const last = await iter.next();
+    expect(last.value.isFinal).toBe(true);
+  });
+
   it('aborts mid-stream when the caller signal fires', async () => {
     const controller = new AbortController();
     const conn = new ElevenLabsStreamConnection({
@@ -158,7 +273,10 @@ describe('ElevenLabsStreamConnection', () => {
       }
     })();
     await Promise.resolve();
-    const audio = Buffer.from([1, 2]).toString('base64');
+    // ≥4 bytes so the first-frame format guard classifies and delivers it
+    // (a runt prefix would be held for classification, never reaching the
+    // consumer loop that triggers the abort).
+    const audio = Buffer.from([1, 2, 3, 4]).toString('base64');
     ws.fire('message', { data: JSON.stringify({ audio }) });
     await collect;
     expect(ws.readyState).toBe(3);

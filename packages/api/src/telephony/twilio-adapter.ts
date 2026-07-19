@@ -672,10 +672,13 @@ export function buildTwiML(
     // Capped defensively even though callers are expected to cap upstream.
     const hints = opts.hints && opts.hints.length > 0 ? opts.hints.slice(0, GATHER_HINTS_MAX) : undefined;
     const hintsAttr = hints ? ` hints="${xmlEscape(hints.join(','))}"` : '';
+    // T2-F03: actionOnEmptyResult makes a no-speech timeout POST back to the
+    // action URL with an empty SpeechResult (reaching the bounded silence
+    // ladder) instead of falling through the document and hanging up.
     parts.push(
       `<Gather input="speech" speechTimeout="auto" language="${gatherLang}" speechModel="${GATHER_SPEECH_MODEL}"${hintsAttr} action="${xmlEscape(
         opts.gatherActionUrl
-      )}" method="POST"/>`
+      )}" method="POST" actionOnEmptyResult="true"/>`
     );
   }
 
@@ -754,8 +757,10 @@ export class TwilioGatherAdapter {
    * object) also has no field for it, so — same lifetime/leak posture as
    * {@link callerIdBySession} above — it's tracked in-memory on the adapter.
    * Bumped when a Gather turn's `Confidence` is below
-   * {@link MIN_STT_CONFIDENCE}; cleared by any turn that clears the gate
-   * (high confidence OR confidence absent). Reaching
+   * {@link MIN_STT_CONFIDENCE} — or when the turn is an empty
+   * `SpeechResult` (silence via `actionOnEmptyResult`; T2-F03) — and
+   * cleared by any turn that clears the gate (high confidence OR
+   * confidence absent). Reaching
    * {@link MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS} hands the caller off
    * instead of reprompting again (see `maybeHandleLowSttConfidenceGather`).
    * Limitation: this streak is process-local — a mid-call replica
@@ -1669,6 +1674,44 @@ export class TwilioGatherAdapter {
   }
 
   /**
+   * Codex P2 (PR #702) — pending-approval/consent parity for the
+   * Media-Streams T2-F05 silence-reprompt timer. Before this, a silent
+   * caller mid owner-approval readback (RV-071) or mid SMS-consent capture
+   * (WS18) got reprompted — and, on a second consecutive silence, ESCALATED
+   * AND END-SESSIONED — by `recoverFromLowSttConfidence`, stranding the
+   * pending dialogue uncleared. The Gather transport and the WS-finals
+   * `speechTurn` path never have this problem: they run
+   * `handlePendingVoiceApproval` (and `speechTurn` also runs
+   * `handlePendingConsentCapture`) BEFORE the empty-speech/low-confidence
+   * branch, so a silent turn is "keep it pending", not a reprompt.
+   *
+   * Drives an EMPTY-utterance turn through the SAME two handlers,
+   * in the SAME order `processSpeechTurn` uses (approval, then consent),
+   * and — mirroring that function — executes each handler's side effects
+   * and records the agent's line on the transcript before returning them.
+   * Returns null when NEITHER dialogue is pending, telling the caller (the
+   * silence timer) to fall through to its normal low-confidence recovery.
+   */
+  async handlePendingDialogueSilence(
+    session: VoiceSession,
+    tenantId: string,
+  ): Promise<SideEffect[] | null> {
+    const approvalTurn = await this.processor.handlePendingVoiceApproval(session, '', tenantId);
+    if (approvalTurn) {
+      await this.processor.executeSideEffects(session, approvalTurn, tenantId);
+      appendAgentTts(this.deps.store, session.id, approvalTurn);
+      return approvalTurn;
+    }
+    const consentTurn = await this.processor.handlePendingConsentCapture(session, '', tenantId);
+    if (consentTurn) {
+      await this.processor.executeSideEffects(session, consentTurn, tenantId);
+      appendAgentTts(this.deps.store, session.id, consentTurn);
+      return consentTurn;
+    }
+    return null;
+  }
+
+  /**
    * Handle the initial `POST /api/telephony/voice` webhook.
    * Creates a session, runs the disclose_recording + identify_caller
    * skills, drives the FSM through `incoming_call`, and returns TwiML.
@@ -1789,12 +1832,18 @@ export class TwilioGatherAdapter {
     }
 
     // 1. Append caller utterance to transcript first — must happen before
-    //    any early-exit path so the utterance is never lost.
-    this.deps.store.appendTranscript(opts.sessionId, {
-      speaker: 'caller',
-      text: opts.speechResult,
-      ts: Date.now(),
-    });
+    //    any early-exit path so the utterance is never lost. EXCEPT an empty
+    //    SpeechResult (actionOnEmptyResult no-speech timeout): an empty
+    //    `caller:` line would make deriveCallOutcome read a fully silent
+    //    call as caller speech and classify/summarize it as a spoken
+    //    no-intent call instead of a silent one.
+    if (opts.speechResult.trim().length > 0) {
+      this.deps.store.appendTranscript(opts.sessionId, {
+        speaker: 'caller',
+        text: opts.speechResult,
+        ts: Date.now(),
+      });
+    }
 
     // RV-140 — shared deterministic safety scan (see
     // runDeterministicSafetyScan). Runs after the transcript append so the
@@ -1839,19 +1888,14 @@ export class TwilioGatherAdapter {
     const sideEffectsAll: SideEffect[] = [];
     const currentState = session.machine.currentState;
 
-    // Empty SpeechResult (silent caller / Twilio timeout) maps to a
-    // confidence_low so the bounded reprompt path kicks in instead of
-    // running the classifier on an empty string.
+    // Empty SpeechResult (silent caller — delivered here by the <Gather>'s
+    // actionOnEmptyResult on the no-speech timeout). T2-F03: silence MUST
+    // join the same streak as low-confidence turns — it re-enters this loop
+    // every timeout, so without the shared cap a silent line would be
+    // reprompted forever. Same caller experience as a low-confidence turn:
+    // reprompt below the cap, graceful escalation + hangup at it.
     if (opts.speechResult.trim().length === 0) {
-      sideEffectsAll.push(
-        ...session.machine.dispatch({
-          type: 'confidence_low',
-          threshold: TAU_INT,
-          score: 0,
-        }),
-      );
-      await this.processor.executeSideEffects(session, sideEffectsAll, opts.tenantId);
-      return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
+      return this.runLowSttConfidenceGatherLadder(session, opts.sessionId);
     }
 
     // A3 — low acoustic STT confidence gate. Twilio's Gather `Confidence` on
@@ -2179,11 +2223,27 @@ export class TwilioGatherAdapter {
       return null;
     }
 
+    return this.runLowSttConfidenceGatherLadder(session, opts.sessionId);
+  }
+
+  /**
+   * The bounded reprompt→escalate ladder shared by the two Gather-turn
+   * failure modes: low acoustic `Confidence` (via
+   * {@link maybeHandleLowSttConfidenceGather}) and an empty `SpeechResult`
+   * (silence, delivered by `actionOnEmptyResult`). One streak for both, so
+   * a caller alternating silence and mumbling still terminates at
+   * {@link MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS} — matching the
+   * media-streams ladder semantics.
+   */
+  private async runLowSttConfidenceGatherLadder(
+    session: VoiceSession,
+    sessionId: string,
+  ): Promise<string> {
     const lang: SessionLanguage = session.language === 'es' ? 'es' : 'en';
-    const streak = (this.lowConfidenceGatherStreak.get(opts.sessionId) ?? 0) + 1;
+    const streak = (this.lowConfidenceGatherStreak.get(sessionId) ?? 0) + 1;
 
     if (streak >= MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS) {
-      this.lowConfidenceGatherStreak.delete(opts.sessionId);
+      this.lowConfidenceGatherStreak.delete(sessionId);
       const effects: SideEffect[] = [
         {
           type: 'tts_play',
@@ -2191,7 +2251,7 @@ export class TwilioGatherAdapter {
         },
         { type: 'end_session', payload: { reason: 'low_stt_confidence_max_retries' } },
       ];
-      const twiml = await this.finalizeTwiml(session, effects, opts.sessionId);
+      const twiml = await this.finalizeTwiml(session, effects, sessionId);
       if (!session.ended) {
         session.ended = true;
         this.finalizeTerminatedSession(session, effects, 'low_stt_confidence_max_retries');
@@ -2205,14 +2265,14 @@ export class TwilioGatherAdapter {
       return twiml;
     }
 
-    this.lowConfidenceGatherStreak.set(opts.sessionId, streak);
+    this.lowConfidenceGatherStreak.set(sessionId, streak);
     const effects: SideEffect[] = [
       {
         type: 'tts_play',
         payload: { text: renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, lang) },
       },
     ];
-    const twiml = await this.finalizeTwiml(session, effects, opts.sessionId);
+    const twiml = await this.finalizeTwiml(session, effects, sessionId);
     recordVoiceError({
       errorKind: 'low_stt_confidence',
       channel: 'gather',

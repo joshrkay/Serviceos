@@ -43,6 +43,8 @@ describe('P0-006 — Secrets/config framework', () => {
       STORAGE_ENABLED: 'false',
       // SEC-01 — required in prod/staging; covered on its own below.
       RLS_RUNTIME_ROLE: 'true',
+      // T4-F06 — required in prod/staging; covered on its own below.
+      TENANT_ENCRYPTION_KEY: 'a'.repeat(64),
     });
     expect(config.NODE_ENV).toBe('staging');
     expect(config.PORT).toBe(8080);
@@ -152,6 +154,8 @@ describe('P0-006 — Secrets/config framework', () => {
         STORAGE_ENABLED: 'false',
         // SEC-01 — required in prod/staging; covered on its own below.
         RLS_RUNTIME_ROLE: 'true',
+        // T4-F06 — required in prod/staging; covered on its own below.
+        TENANT_ENCRYPTION_KEY: 'a'.repeat(64),
       })
     ).not.toThrow();
   });
@@ -182,6 +186,7 @@ describe('P0-006 — Secrets/config framework', () => {
       EMAIL_ENABLED: 'false',
       STORAGE_ENABLED: 'false',
       RLS_RUNTIME_ROLE: 'true',
+      TENANT_ENCRYPTION_KEY: 'a'.repeat(64),
     };
 
     it('prod — fails fast naming STRIPE_WEBHOOK_SECRET when unset', () => {
@@ -221,6 +226,7 @@ describe('P0-006 — Secrets/config framework', () => {
       EMAIL_ENABLED: 'false',
       STORAGE_ENABLED: 'false',
       RLS_RUNTIME_ROLE: 'true',
+      TENANT_ENCRYPTION_KEY: 'a'.repeat(64),
     };
 
     it('financing off (no Wisetack config) — WISETACK_WEBHOOK_SECRET NOT required', () => {
@@ -265,6 +271,7 @@ describe('P0-006 — Secrets/config framework', () => {
       EMAIL_ENABLED: 'false',
       STORAGE_ENABLED: 'false',
       RLS_RUNTIME_ROLE: 'true',
+      TENANT_ENCRYPTION_KEY: 'a'.repeat(64),
     };
 
     it('prod + NUM_REPLICAS=2 + no REDIS_URL — fails fast naming REDIS_URL', () => {
@@ -312,6 +319,8 @@ describe('P0-006 — Secrets/config framework', () => {
       // these feature-gate tests isolate the var under test. The RLS requirement
       // has its own dedicated describe block below.
       RLS_RUNTIME_ROLE: 'true',
+      // T4-F06 — required in prod/staging; its own dedicated describe block below.
+      TENANT_ENCRYPTION_KEY: 'a'.repeat(64),
     };
 
     it('telephony — fails naming each missing TWILIO var when not opted out', () => {
@@ -484,6 +493,7 @@ describe('P0-006 — Secrets/config framework', () => {
       TELEPHONY_ENABLED: 'false',
       EMAIL_ENABLED: 'false',
       STORAGE_ENABLED: 'false',
+      TENANT_ENCRYPTION_KEY: 'a'.repeat(64),
     };
 
     it('prod — fails fast naming RLS_RUNTIME_ROLE when unset', () => {
@@ -528,6 +538,84 @@ describe('P0-006 — Secrets/config framework', () => {
     });
   });
 
+  describe('T4-F06 — TENANT_ENCRYPTION_KEY / TRANSCRIPT_ENCRYPTION_KEY required format in prod/staging', () => {
+    // Base env that passes every OTHER prod gate, so these tests isolate the
+    // encryption-key requirement (features opted out; RLS on; encryption key
+    // deliberately omitted here — set per-test).
+    const baseNoEncKey = {
+      NODE_ENV: 'prod',
+      DATABASE_URL: 'postgres://u:p@h/d',
+      CLERK_SECRET_KEY: 'sk_x',
+      CLERK_PUBLISHABLE_KEY: 'pk_x',
+      CLERK_WEBHOOK_SECRET: 'whsec_x',
+      STRIPE_WEBHOOK_SECRET: 'whsec_stripe_x',
+      AI_PROVIDER_API_KEY: 'ak_x',
+      CORS_ORIGIN: 'https://app.example.com',
+      TELEPHONY_ENABLED: 'false',
+      EMAIL_ENABLED: 'false',
+      STORAGE_ENABLED: 'false',
+      RLS_RUNTIME_ROLE: 'true',
+    };
+
+    it('prod — fails fast naming TENANT_ENCRYPTION_KEY when unset', () => {
+      expect(() => loadConfig({ ...baseNoEncKey })).toThrow(/TENANT_ENCRYPTION_KEY/);
+    });
+
+    it('prod — fails when TENANT_ENCRYPTION_KEY is the wrong length', () => {
+      expect(() =>
+        loadConfig({ ...baseNoEncKey, TENANT_ENCRYPTION_KEY: 'x'.repeat(63) })
+      ).toThrow(/TENANT_ENCRYPTION_KEY/);
+    });
+
+    it('prod — fails when TENANT_ENCRYPTION_KEY is 64 chars but non-hex', () => {
+      expect(() =>
+        loadConfig({ ...baseNoEncKey, TENANT_ENCRYPTION_KEY: 'z'.repeat(64) })
+      ).toThrow(/TENANT_ENCRYPTION_KEY/);
+    });
+
+    it('prod — passes with a valid 64-char hex TENANT_ENCRYPTION_KEY', () => {
+      expect(() =>
+        loadConfig({ ...baseNoEncKey, TENANT_ENCRYPTION_KEY: 'a'.repeat(64) })
+      ).not.toThrow();
+    });
+
+    it('staging — fails fast naming TENANT_ENCRYPTION_KEY when unset', () => {
+      expect(() =>
+        loadConfig({ ...baseNoEncKey, NODE_ENV: 'staging' })
+      ).toThrow(/TENANT_ENCRYPTION_KEY/);
+    });
+
+    it('TRANSCRIPT_ENCRYPTION_KEY unset, TENANT_ENCRYPTION_KEY valid — does not throw (fallback preserved, transcript key stays optional)', () => {
+      expect(() =>
+        loadConfig({ ...baseNoEncKey, TENANT_ENCRYPTION_KEY: 'a'.repeat(64) })
+      ).not.toThrow();
+    });
+
+    it('TRANSCRIPT_ENCRYPTION_KEY set but malformed alongside a valid TENANT_ENCRYPTION_KEY — throws naming TRANSCRIPT_ENCRYPTION_KEY', () => {
+      expect(() =>
+        loadConfig({
+          ...baseNoEncKey,
+          TENANT_ENCRYPTION_KEY: 'a'.repeat(64),
+          TRANSCRIPT_ENCRYPTION_KEY: 'short',
+        })
+      ).toThrow(/TRANSCRIPT_ENCRYPTION_KEY/);
+    });
+
+    it('TRANSCRIPT_ENCRYPTION_KEY valid alongside a valid TENANT_ENCRYPTION_KEY — passes', () => {
+      expect(() =>
+        loadConfig({
+          ...baseNoEncKey,
+          TENANT_ENCRYPTION_KEY: 'a'.repeat(64),
+          TRANSCRIPT_ENCRYPTION_KEY: 'b'.repeat(64),
+        })
+      ).not.toThrow();
+    });
+
+    it('dev — no encryption-key requirement (unset keys are fine locally)', () => {
+      expect(() => loadConfig({ NODE_ENV: 'dev' })).not.toThrow();
+    });
+  });
+
   describe('WS1 — TCPA_CONSENT_ENFORCEMENT prod/staging coercion', () => {
     // Full valid prod env (features opted out, RLS on) so loadConfig reaches the
     // end and we can inspect the resolved enforcement value.
@@ -543,6 +631,7 @@ describe('P0-006 — Secrets/config framework', () => {
       EMAIL_ENABLED: 'false',
       STORAGE_ENABLED: 'false',
       RLS_RUNTIME_ROLE: 'true',
+      TENANT_ENCRYPTION_KEY: 'a'.repeat(64),
     };
 
     it('prod — unset resolves to block', () => {
