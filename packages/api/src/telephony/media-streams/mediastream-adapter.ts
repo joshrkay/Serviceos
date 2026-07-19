@@ -178,6 +178,27 @@ export interface MediaStreamAdapterDeps {
   }) => Promise<SideEffect[] | null>;
   /** Audio inactivity teardown (ms). Default 30 minutes. */
   audioIdleTimeoutMs?: number;
+  /** T2-F05 — caller-silence reprompt window after an agent turn ends (ms). Default 8 s. */
+  silenceRepromptTimeoutMs?: number;
+  /**
+   * Codex P2 (PR #702) — pending-approval/consent parity for the T2-F05
+   * silence timer. Called from the silence-expiry callback BEFORE falling
+   * through to the low-STT-confidence reprompt/escalation ladder. Drives
+   * an empty-utterance turn through the SAME `handlePendingVoiceApproval` /
+   * `handlePendingConsentCapture` handlers `speechTurn` runs (same order),
+   * so a caller who goes silent mid owner-approval readback or mid
+   * SMS-consent capture gets keep-pending / fail-closed semantics instead
+   * of being reprompted and — on a second consecutive silence — escalated
+   * and end-sessioned with the dialogue stranded. Returns the side effects
+   * to render when a dialogue consumed the turn, or null when neither is
+   * pending (the timer proceeds with its normal recovery). Optional —
+   * when omitted, behavior is unchanged (always falls through). Wired in
+   * production via `TwilioGatherAdapter.handlePendingDialogueSilence`.
+   */
+  handlePendingDialogueSilence?: (
+    session: VoiceSession,
+    tenantId: string,
+  ) => Promise<SideEffect[] | null>;
   /**
    * Per-tenant connection registry. Defaults to the process-wide singleton.
    * Override for tests to keep counters isolated between cases.
@@ -474,6 +495,40 @@ interface RuntimeState {
   /** Last time we received an inbound `media` frame. */
   lastMediaAt: number;
   audioIdleTimer: NodeJS.Timeout | null;
+  /**
+   * T2-F05 — per-turn caller-silence reprompt timer. Armed when the
+   * dedicated end-of-utterance `silence-arm-${turnId}` mark of an agent
+   * (non-filler) TTS turn is ACKed by Twilio; cleared by any transcript
+   * event, barge-in, and close. See
+   * {@link TwilioMediaStreamAdapter.armSilenceRepromptTimer}.
+   */
+  silenceRepromptTimer: NodeJS.Timeout | null;
+  /**
+   * Turn whose dedicated `silence-arm-${turnId}` mark is enqueued but not
+   * yet acked by Twilio; the silence timer arms only when THAT mark's ack
+   * arrives (playback of the WHOLE turn's audio actually finished), not at
+   * enqueue — otherwise a long prompt, a send backlog, or (for a
+   * multi-chunk streaming TTS turn) an earlier chunk's own `turn-${turnId}`
+   * mark would start the countdown before the caller has heard the agent
+   * finish. This mark is emitted exactly once per turn, by
+   * `runTurnWithFiller()`, after ALL of that turn's audio has been enqueued
+   * — never by `streamPcmAsMedia()` itself, which may run multiple times
+   * per turn (once per streamed chunk).
+   */
+  pendingSilenceRepromptTurnId: number | null;
+  /**
+   * Codex P2 (PR #702) — monotonic counter bumped on EVERY caller transcript
+   * (interim or final), the same "any caller audio means not-silent" signal
+   * that clears the silence timer. `armSilenceRepromptTimer` captures its value
+   * at arm time; the expiry's locked body bails if it changed. This closes the
+   * window the `outboundTurnId`/`agentSpeaking` guards miss: a final transcript
+   * that fires between the timeout callback starting and its lock body running
+   * consumes the pending dialogue inside `onTranscriptEvent`'s `speechTurn`
+   * lock, but the new outbound turn (which bumps `outboundTurnId` / sets
+   * `agentSpeaking`) only happens AFTER that lock releases — so those guards
+   * still read stale and would let the expiry double-consume the answer.
+   */
+  callerActivityGeneration: number;
   /** Outbound queue (bounded, priority-aware). */
   queue: BoundedSendQueue;
   draining: boolean;
@@ -702,6 +757,14 @@ function observeTurnLatency(startMs: number | null): void {
  */
 export const DEFAULT_AUDIO_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 
+/**
+ * T2-F05 — how long after the agent finishes speaking a totally silent caller
+ * waits before the reprompt fires. Default 8 s: long enough for a caller
+ * checking a calendar or conferring with a spouse, short enough that the line
+ * never feels dead. Dep-injectable via `deps.silenceRepromptTimeoutMs`.
+ */
+export const DEFAULT_SILENCE_REPROMPT_MS = 8_000;
+
 export class TwilioMediaStreamAdapter {
   private readonly state: RuntimeState;
 
@@ -723,6 +786,9 @@ export class TwilioMediaStreamAdapter {
       closed: false,
       lastMediaAt: Date.now(),
       audioIdleTimer: null,
+      silenceRepromptTimer: null,
+      pendingSilenceRepromptTurnId: null,
+      callerActivityGeneration: 0,
       queue: new BoundedSendQueue({
         surface: 'twilio_media_streams',
         maxMsgs: TWILIO_QUEUE_MAX_MSGS,
@@ -807,7 +873,27 @@ export class TwilioMediaStreamAdapter {
         await this.handleMedia(frame);
         return;
       case 'mark':
-        if (this.state.unackedMarks > 0) this.state.unackedMarks--;
+        // The dedicated `silence-arm-${turnId}` mark is never counted in
+        // unackedMarks (it isn't part of streamPcmAsMedia's backpressure
+        // accounting), so decrementing on its ack would underflow the
+        // counter. Only decrement for the marks that incremented it.
+        const isSilenceArmMark = frame.mark?.name?.startsWith('silence-arm-') ?? false;
+        if (!isSilenceArmMark && this.state.unackedMarks > 0) this.state.unackedMarks--;
+        // The dedicated end-of-utterance mark's ack means the caller has
+        // actually heard the whole agent turn finish — NOW start the
+        // no-response countdown (T2-F05). This mark is emitted exactly once
+        // per (non-filler) turn, after ALL of the turn's audio has been
+        // enqueued — unlike the per-chunk `turn-${turnId}` marks emitted
+        // inside streamPcmAsMedia(), which fire once per streamed chunk and
+        // must not arm the countdown early on a multi-chunk utterance.
+        if (
+          this.state.pendingSilenceRepromptTurnId !== null &&
+          frame.mark?.name === `silence-arm-${this.state.pendingSilenceRepromptTurnId}`
+        ) {
+          const turnId = this.state.pendingSilenceRepromptTurnId;
+          this.state.pendingSilenceRepromptTurnId = null;
+          this.armSilenceRepromptTimer(turnId);
+        }
         // Mark-ack is the cue to drain any backpressured outbound work.
         void this.flushQueue();
         return;
@@ -1164,6 +1250,13 @@ export class TwilioMediaStreamAdapter {
     confidence: number;
     isFinal: boolean;
   }): Promise<void> {
+    // T2-F05 — any caller audio (interim or final) means not-silent.
+    // Bump the activity generation FIRST (Codex P2, PR #702): clearing the
+    // timer can't stop a silence expiry whose timeout callback already fired
+    // and is now queued behind this turn's `speechTurn` lock, so the arm-time
+    // generation this bump invalidates is what makes that expiry a no-op.
+    this.state.callerActivityGeneration++;
+    this.clearSilenceRepromptTimer();
     // Barge-in: any interim transcript while we're playing TTS aborts
     // the current agent utterance. Empty interim transcripts are
     // already filtered by DeepgramStreamingProvider.
@@ -1534,6 +1627,53 @@ export class TwilioMediaStreamAdapter {
       callSid: this.state.callSid,
       tenantId: this.state.tenantId,
     });
+  }
+
+  /**
+   * Codex P2 (PR #702) — T2-F05 silence-timer entry point. Gives a pending
+   * owner-approval readback (RV-071) or SMS-consent capture (WS18) first
+   * crack at a silence-timer expiry, exactly as `processSpeechTurn` does
+   * for a real empty-utterance turn, BEFORE falling through to the shared
+   * low-STT-confidence reprompt/escalation ladder. Without this, a caller
+   * who went silent mid-dialogue was reprompted by
+   * {@link recoverFromLowSttConfidence} and — on a second consecutive
+   * silence — escalated and end-sessioned with the dialogue stranded
+   * (never cleared, never resolved).
+   *
+   * `deps.handlePendingDialogueSilence` (wired to
+   * `TwilioGatherAdapter.handlePendingDialogueSilence` in production) owns
+   * both the pending-check and the handler dispatch — this method only
+   * renders whatever side effects come back (through the same
+   * `emitSideEffects` + `end_session` check the main turn path uses) and,
+   * when nothing was pending, falls through unchanged to
+   * `recoverFromLowSttConfidence`. Optional dep: omitting it (as every
+   * pre-existing test fixture does) reproduces the exact prior behavior.
+   */
+  private async recoverFromSilenceExpiry(session: VoiceSession): Promise<void> {
+    if (this.state.closed) return;
+    if (this.deps.handlePendingDialogueSilence) {
+      let consumed: SideEffect[] | null = null;
+      try {
+        consumed = await this.deps.handlePendingDialogueSilence(session, session.tenantId);
+      } catch (err) {
+        logger.warn('mediastream: pending-dialogue silence handler failed', {
+          error: err instanceof Error ? err.message : String(err),
+          sessionId: session.id,
+        });
+      }
+      if (consumed) {
+        await this.emitSideEffects(consumed);
+        // Mirrors the main turn path: a pending-dialogue side effect that
+        // itself ends the session (e.g. a challenge-lockout hand-off)
+        // must still close the call.
+        if (consumed.some((fx) => fx.type === 'end_session')) {
+          this.state.pendingFinalizeEffects = consumed;
+          this.handleClose('end_session');
+        }
+        return;
+      }
+    }
+    await this.recoverFromLowSttConfidence(session);
   }
 
   /**
@@ -2168,6 +2308,11 @@ export class TwilioMediaStreamAdapter {
             }
             if (chunk.isFinal) break;
           }
+          // T2-F05 — all of this turn's audio is now enqueued. Arm the
+          // silence countdown on a single dedicated end-of-utterance mark,
+          // not the per-chunk `turn-${turnId}` marks emitted inside
+          // streamPcmAsMedia() above (one per chunk for a multi-chunk stream).
+          this.armSilenceOnTurnEnd(turnId);
         } catch (streamErr) {
           // VOX-35b — a WS blip or a VOX-33 inactivity stall surfaces here
           // as a thrown rejection. The old caller only logged.warn, so the
@@ -2223,6 +2368,9 @@ export class TwilioMediaStreamAdapter {
           );
         } else if (turnId === this.state.outboundTurnId && this.state.agentSpeaking) {
           await this.streamPcmAsMedia(result.audio, turnId);
+          // T2-F05 — same single end-of-utterance arm as the streaming path,
+          // for the buffered (non-streaming) TTS fallback.
+          this.armSilenceOnTurnEnd(turnId);
         }
       }
     } finally {
@@ -2281,6 +2429,10 @@ export class TwilioMediaStreamAdapter {
       this.state.agentSpeaking
     ) {
       await this.streamPcmAsMedia(result.audio, turnId);
+      // T2-F05 — recovery still played a full agent turn, so a silent caller
+      // after it must still get the bounded reprompt (handleMessage ignores
+      // the per-chunk turn-* marks for arming).
+      this.armSilenceOnTurnEnd(turnId);
       return;
     }
     if (result && !isRawPcmContentType(result.contentType)) {
@@ -2303,6 +2455,9 @@ export class TwilioMediaStreamAdapter {
       const pcm = filler ? cache.get(filler.id) : undefined;
       if (pcm) {
         await this.streamPcmAsMedia(pcm, turnId, /* isFiller */ true);
+        // T2-F05 — the apology filler is the last thing the caller hears on
+        // this turn; arm so their silence after it still reprompts/escalates.
+        this.armSilenceOnTurnEnd(turnId);
         return;
       }
     }
@@ -2386,6 +2541,14 @@ export class TwilioMediaStreamAdapter {
         streamSid: this.state.streamSid,
         mark: { name: `turn-${turnId}` },
       });
+      // NOTE: this per-chunk `turn-${turnId}` mark is emitted once per
+      // streamPcmAsMedia() call — and runTurnWithFiller() calls this once
+      // PER streaming TTS chunk. It must NOT arm the silence countdown: for
+      // a multi-chunk utterance the first chunk's mark-ack would fire while
+      // later audio is still buffered/playing. Arming instead happens on a
+      // single dedicated `silence-arm-${turnId}` mark emitted once by
+      // runTurnWithFiller() after ALL of the turn's audio has been enqueued
+      // — see runTurnWithFiller and handleMessage's 'mark' case.
     }
   }
 
@@ -2414,6 +2577,7 @@ export class TwilioMediaStreamAdapter {
    * Called when an interim transcript arrives during agent TTS.
    */
   private bargeIn(): void {
+    this.clearSilenceRepromptTimer();
     this.state.ttsController?.abort();
     // If a filler clip was mid-stream when barge-in fires, emit the
     // cancellation event and clear the flag before bumping the turn.
@@ -2451,6 +2615,113 @@ export class TwilioMediaStreamAdapter {
     }, ms);
     if (typeof this.state.audioIdleTimer.unref === 'function') {
       this.state.audioIdleTimer.unref();
+    }
+  }
+
+  /**
+   * T2-F05 — per-turn caller-silence reprompt. The 30-minute audioIdleTimer
+   * can NEVER catch a silent caller: Twilio Media Streams delivers `media`
+   * frames continuously (comfort-noise/silent mu-law) for the whole call, so
+   * `lastMediaAt` keeps refreshing and that timer only fires when the
+   * transport itself stalls. This timer instead measures caller-turn silence:
+   * armed when Twilio ACKs the agent (non-filler) TTS turn's dedicated,
+   * single, end-of-utterance `silence-arm-${turnId}` mark — emitted once by
+   * `runTurnWithFiller()` after ALL of that turn's audio has been enqueued —
+   * i.e. the caller has actually heard the WHOLE turn end, NOT when the mark
+   * was merely enqueued (a long prompt or send backlog would otherwise start
+   * the countdown early) and NOT on an earlier chunk's own per-chunk
+   * `turn-${turnId}` mark from `streamPcmAsMedia()` (which runs once per
+   * streamed chunk for a multi-chunk streaming TTS turn — acking that mark
+   * early must not start the countdown while later audio is still
+   * buffered/playing). Cleared by any transcript event
+   * (interim or final), by barge-in, and by close. Expiry routes through
+   * {@link recoverFromSilenceExpiry}, which gives a pending owner-approval
+   * or SMS-consent dialogue first crack at the turn (Codex P2, PR #702)
+   * before funneling into `recoverFromLowSttConfidence` deliberately:
+   * silence shares the `consecutiveLowConfidenceTurns` streak, reprompt
+   * copy, and MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS escalation with mumbled
+   * turns, so a caller cannot alternate silence and mumbling to stay on
+   * the line indefinitely and the ladder stays single-sourced. Re-arming
+   * after the reprompt is natural — the reprompt renders through the same
+   * `streamPcmAsMedia` path and enqueues its own end-of-turn mark. The
+   * captured `turnId` + agentSpeaking guards make a stale expiry (a newer
+   * outbound turn started without a transcript, e.g. an async sentiment
+   * escalation) a no-op.
+   */
+  private armSilenceRepromptTimer(turnId: number): void {
+    if (this.state.closed) return;
+    this.clearSilenceRepromptTimer();
+    const ms = this.deps.silenceRepromptTimeoutMs ?? DEFAULT_SILENCE_REPROMPT_MS;
+    // Snapshot the caller-activity generation at arm time. Any transcript that
+    // arrives before the expiry's locked body runs bumps this, marking the
+    // expiry stale (Codex P2, PR #702).
+    const armedGeneration = this.state.callerActivityGeneration;
+    this.state.silenceRepromptTimer = setTimeout(() => {
+      this.state.silenceRepromptTimer = null;
+      const session = this.state.session;
+      if (!session) return;
+      // Codex P2 (PR #702) — serialize the expiry with concurrent turns.
+      // A final transcript that races this timer runs its `speechTurn` under
+      // `withSessionLock` and mutates the SAME `pendingVoiceApproval` /
+      // `pendingConsentCapture` this expiry may consume. Clearing the timer
+      // can't stop a callback already inside the awaited hook, so take the
+      // lock and RE-CHECK the guards inside it: if the racing turn ran first
+      // the expiry is now stale → no-op. The `callerActivityGeneration` check
+      // is the load-bearing one for the transcript race: `speechTurn` consumes
+      // the dialogue under its OWN lock hold and the new outbound turn only
+      // bumps `outboundTurnId` / sets `agentSpeaking` AFTER that lock releases,
+      // so those two guards still read stale when this queued body runs — but
+      // the transcript already bumped the generation, so we bail correctly.
+      void this.deps.store
+        .withSessionLock(session.id, async () => {
+          if (
+            this.state.closed ||
+            turnId !== this.state.outboundTurnId ||
+            this.state.agentSpeaking ||
+            this.state.callerActivityGeneration !== armedGeneration
+          ) {
+            return;
+          }
+          await this.recoverFromSilenceExpiry(session);
+        })
+        .catch((err) => {
+          logger.warn('mediastream: silence reprompt failed', {
+            error: err instanceof Error ? err.message : String(err),
+            callSid: this.state.callSid,
+          });
+        });
+    }, ms);
+    if (typeof this.state.silenceRepromptTimer.unref === 'function') {
+      this.state.silenceRepromptTimer.unref();
+    }
+  }
+
+  /**
+   * T2-F05 — enqueue the single end-of-utterance `silence-arm-${turnId}` mark
+   * (once all of this turn's audio is queued) so its ack starts the silence
+   * countdown. Every path that finishes playing an agent turn's audio must
+   * call this — streaming success, buffered fallback, AND stream-failure
+   * recovery — or a silent caller after that turn gets no bounded reprompt.
+   * Re-guarded on turn ownership: a barge-in / newer turn must not arm.
+   */
+  private armSilenceOnTurnEnd(turnId: number): void {
+    if (turnId !== this.state.outboundTurnId || !this.state.agentSpeaking) return;
+    this.enqueueOutbound('control', {
+      event: 'mark',
+      streamSid: this.state.streamSid,
+      mark: { name: `silence-arm-${turnId}` },
+    });
+    this.state.pendingSilenceRepromptTurnId = turnId;
+  }
+
+  private clearSilenceRepromptTimer(): void {
+    // Also drop a not-yet-armed pending turn: a transcript/barge-in/close
+    // before the end-of-turn ack means the caller spoke or the call ended,
+    // so the ack must not arm a stale countdown.
+    this.state.pendingSilenceRepromptTurnId = null;
+    if (this.state.silenceRepromptTimer) {
+      clearTimeout(this.state.silenceRepromptTimer);
+      this.state.silenceRepromptTimer = null;
     }
   }
 
@@ -2505,6 +2776,7 @@ export class TwilioMediaStreamAdapter {
       clearTimeout(this.state.audioIdleTimer);
       this.state.audioIdleTimer = null;
     }
+    this.clearSilenceRepromptTimer();
     if (this.state.slowConsumerTimer) {
       clearTimeout(this.state.slowConsumerTimer);
       this.state.slowConsumerTimer = null;

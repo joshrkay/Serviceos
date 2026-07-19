@@ -12,7 +12,7 @@
  *    the store closes the WS instead of attaching.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // OBS — capture recordVoiceError calls without touching the real PostHog
 // SDK. Mirrors the vi.mock pattern already used in test/voice/activation.test.ts.
@@ -23,9 +23,11 @@ vi.mock('../../../src/analytics/posthog', () => ({
 
 import {
   TwilioMediaStreamAdapter,
+  DEFAULT_SILENCE_REPROMPT_MS,
   type WsLike,
 } from '../../../src/telephony/media-streams/mediastream-adapter';
 import { VoiceSessionStore } from '../../../src/ai/agents/customer-calling/voice-session-store';
+import type { VoiceSession } from '../../../src/ai/agents/customer-calling/voice-session-store';
 import type {
   StreamingSession,
   StreamingTranscriptionProvider,
@@ -46,6 +48,7 @@ import { VOICE_EVENT_CHANNEL } from '../../../src/ai/voice-quality/event-bus';
 import { WhisperCache } from '../../../src/telephony/whisper-cache';
 import { DEFAULT_ESCALATION_SETTINGS } from '../../../src/settings/settings';
 import { voiceTurnLatencyMs } from '../../../src/monitoring/metrics';
+import { InMemoryConnectionRegistry } from '../../../src/ws/connection-registry';
 
 // ─── Fakes ─────────────────────────────────────────────────────────────────────────────
 
@@ -669,6 +672,10 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
     publicBaseUrl?: string;
     callControl?: { dialDispatcher(callSid: string, phone: string, opts: { actionUrl: string; whisperUrl?: string; timeoutSeconds?: number }): string };
     setPendingTransferTwiml?: (sessionId: string, twiml: string) => void;
+    // Isolate from the process-wide connection registry (perTenantMax 50)
+    // when a test adds capacity the shared singleton would otherwise leak
+    // across the file.
+    connectionRegistry?: InMemoryConnectionRegistry;
   } = {}): {
     adapter: TwilioMediaStreamAdapter;
     ws: FakeWs;
@@ -694,6 +701,7 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
         publicBaseUrl: opts.publicBaseUrl,
         callControl: opts.callControl as never,
         setPendingTransferTwiml: opts.setPendingTransferTwiml,
+        ...(opts.connectionRegistry ? { connectionRegistry: opts.connectionRegistry } : {}),
       },
       ws,
     );
@@ -1114,6 +1122,55 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
       // The mp3 was NOT streamed as static, but the filler clip WAS played.
       const mediaFrames = ws.sent.filter((f: unknown) => (f as { event?: string }).event === 'media');
       expect(mediaFrames.length).toBeGreaterThan(0);
+    });
+
+    it('T2-F05: arms the silence countdown after a recovered (buffered PCM) turn', async () => {
+      // handleMessage arms only on silence-arm-* marks, so the recovery path
+      // must emit one too — else a silent caller after a recovered TTS blip
+      // never gets the bounded reprompt.
+      const synthesize = vi.fn(
+        async (): Promise<TtsSynthesizeResult> => ({
+          audio: Buffer.alloc(640 * 2),
+          contentType: 'audio/pcm',
+          provider: 'fallback-rest',
+        }),
+      );
+      const failingStreamProvider: TtsProvider = {
+        synthesize,
+        synthesizeStream: vi.fn(() => ({
+          // eslint-disable-next-line require-yield
+          async *[Symbol.asyncIterator]() {
+            throw new Error('ElevenLabs WS error');
+          },
+        })),
+      };
+      const { adapter, ws } = setupAdapter({
+        ttsProvider: failingStreamProvider,
+        callSid: 'CA-recover-arm',
+        connectionRegistry: new InMemoryConnectionRegistry(),
+      });
+      ws.inboundJson({
+        event: 'start',
+        streamSid: 'MZ-recover-arm',
+        start: { callSid: 'CA-recover-arm', accountSid: 'AC', streamSid: 'MZ-recover-arm', tracks: ['inbound'] },
+      });
+      await new Promise((r) => setImmediate(r));
+
+      await (adapter as unknown as { emitSideEffects: (fx: unknown[]) => Promise<void> }).emitSideEffects([
+        { type: 'tts_play', payload: { text: 'Your appointment is confirmed for Tuesday.' } },
+      ]);
+
+      // Recovery must have enqueued a silence-arm mark and recorded the pending turn.
+      const pendingTurn = (
+        adapter as unknown as { state: { pendingSilenceRepromptTurnId: number | null } }
+      ).state.pendingSilenceRepromptTurnId;
+      expect(pendingTurn).not.toBeNull();
+      const armMark = ws.sent.find(
+        (f: unknown) =>
+          (f as { event?: string }).event === 'mark' &&
+          (f as { mark?: { name?: string } }).mark?.name === `silence-arm-${pendingTurn}`,
+      );
+      expect(armMark).toBeDefined();
     });
   });
 
@@ -2660,5 +2717,581 @@ describe('A3 low acoustic STT confidence gate', () => {
     expect(recordVoiceErrorMock).not.toHaveBeenCalledWith(
       expect.objectContaining({ errorKind: 'low_stt_confidence' }),
     );
+  });
+});
+
+// ─── T2-F05 — caller-silence reprompt timer ─────────────────────────────────
+//
+// Before this fix a Media-Streams caller who simply said NOTHING after the
+// agent finished speaking was stranded forever: Twilio streams silence frames
+// continuously, so the 30-minute audio-idle timer never fires mid-call, and no
+// transcript ever arrives to drive the turn loop. These pins assert the
+// per-turn silence timer: armed at the agent's end-of-turn mark, cleared by
+// any caller audio / barge-in / close, and expiring into the EXISTING
+// low-STT-confidence ladder (shared streak, shared cap, shared escalation).
+describe('T2-F05 caller-silence reprompt timer', () => {
+  const flush = () => new Promise((r) => setImmediate(r));
+
+  beforeEach(() => {
+    // setImmediate stays real so the existing flush() pattern keeps working.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** TTS double that records the (already-localized) text handed to synthesize. */
+  function makeCapturingTts(): { tts: TtsProvider; texts: string[] } {
+    const texts: string[] = [];
+    const tts: TtsProvider = {
+      synthesize: vi.fn(async (input: TtsSynthesizeInput): Promise<TtsSynthesizeResult> => {
+        texts.push(input.text);
+        return { audio: Buffer.alloc(640), contentType: 'audio/pcm', provider: 'test' };
+      }),
+    };
+    return { tts, texts };
+  }
+
+  const AGENT_LINE = 'How can I help you today?';
+
+  async function setupSilenceCall(
+    callSid: string,
+    opts: {
+      silenceRepromptTimeoutMs?: number;
+      handlePendingDialogueSilence?: (
+        session: VoiceSession,
+        tenantId: string,
+      ) => Promise<SideEffect[] | null>;
+    } = {},
+  ) {
+    const session = store.create('t', 'telephony', { callSid });
+    const ws = new FakeWs();
+    const { provider, handle } = makeStreamingProvider();
+    const { tts, texts } = makeCapturingTts();
+    const speechTurn = vi
+      .fn()
+      .mockResolvedValue([{ type: 'tts_play', payload: { text: AGENT_LINE } }]);
+    const finalizeOnClose = vi.fn();
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: provider,
+        speechTurn,
+        ttsProvider: tts,
+        finalizeOnClose,
+        // Isolated registry: the process-wide singleton is saturated for
+        // tenant 't' by the many earlier adapters in this file.
+        connectionRegistry: new InMemoryConnectionRegistry(),
+        ...(opts.silenceRepromptTimeoutMs !== undefined
+          ? { silenceRepromptTimeoutMs: opts.silenceRepromptTimeoutMs }
+          : {}),
+        ...(opts.handlePendingDialogueSilence
+          ? { handlePendingDialogueSilence: opts.handlePendingDialogueSilence }
+          : {}),
+      },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson({
+      event: 'start',
+      streamSid: `MZ-${callSid}`,
+      start: { callSid, accountSid: 'AC', streamSid: `MZ-${callSid}`, tracks: ['inbound'] },
+    });
+    await flush();
+    return { adapter, ws, handle, texts, speechTurn, finalizeOnClose, session };
+  }
+
+  /**
+   * Drive one confident caller turn so the agent speaks, then ack the
+   * dedicated end-of-utterance `silence-arm-${turnId}` mark — the silence
+   * timer arms on THAT mark's ack (emitted once, after all of the turn's
+   * audio is enqueued), not on the per-chunk `turn-${turnId}` marks that
+   * streamPcmAsMedia() emits once per streamed chunk.
+   */
+  async function completeAgentTurn(
+    adapter: TwilioMediaStreamAdapter,
+    ws: FakeWs,
+    handle: StreamHandle,
+  ): Promise<void> {
+    handle.emit({ type: 'final', isFinal: true, transcript: 'hello there', confidence: 0.95 });
+    await flush();
+    await flush();
+    const pendingTurn = (
+      adapter as unknown as { state: { pendingSilenceRepromptTurnId: number | null } }
+    ).state.pendingSilenceRepromptTurnId;
+    if (pendingTurn !== null) {
+      ws.inboundJson({ event: 'mark', streamSid: 'MZ', mark: { name: `silence-arm-${pendingTurn}` } });
+      await flush();
+    }
+  }
+
+  /** White-box read of the private streak counter. */
+  const streak = (adapter: TwilioMediaStreamAdapter): number =>
+    (adapter as unknown as { state: { consecutiveLowConfidenceTurns: number } }).state
+      .consecutiveLowConfidenceTurns;
+
+  it('reprompts a silent caller 8s after the agent turn ends and bumps the shared streak', async () => {
+    const { adapter, ws, handle, texts } = await setupSilenceCall('CA-sil-1');
+    await completeAgentTurn(adapter, ws, handle);
+    expect(texts).toEqual([AGENT_LINE]);
+
+    // Just short of the default window: still silent, still no reprompt.
+    await vi.advanceTimersByTimeAsync(DEFAULT_SILENCE_REPROMPT_MS - 1);
+    expect(texts).toEqual([AGENT_LINE]);
+
+    await vi.advanceTimersByTimeAsync(1);
+    await flush();
+
+    expect(texts).toEqual([AGENT_LINE, renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en')]);
+    expect(streak(adapter)).toBe(1);
+    expect(ws.closed).toBe(false);
+    expect(recordVoiceErrorMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        errorKind: 'low_stt_confidence',
+        channel: 'media_streams',
+        callSid: 'CA-sil-1',
+        tenantId: 't',
+      }),
+    );
+  });
+
+  it('does not start the countdown until Twilio acks the end-of-turn mark (no early reprompt on send backlog)', async () => {
+    const { adapter, handle, texts } = await setupSilenceCall('CA-sil-ack');
+    // Agent turn plays but the end-of-turn mark has NOT been acked yet
+    // (backlogged playback). Advancing well past the window must not reprompt.
+    handle.emit({ type: 'final', isFinal: true, transcript: 'hello there', confidence: 0.95 });
+    await flush();
+    await flush();
+    expect(texts).toEqual([AGENT_LINE]);
+    await vi.advanceTimersByTimeAsync(DEFAULT_SILENCE_REPROMPT_MS * 2);
+    await flush();
+    expect(texts).toEqual([AGENT_LINE]); // still no reprompt — timer never armed
+    const pendingTurn = (
+      adapter as unknown as { state: { pendingSilenceRepromptTurnId: number | null } }
+    ).state.pendingSilenceRepromptTurnId;
+    expect(pendingTurn).not.toBeNull();
+  });
+
+  it('a multi-chunk streaming TTS turn only arms the countdown after the LAST chunk, not an earlier chunk mark', async () => {
+    // Regression pin for the Codex P2 finding: streamPcmAsMedia() emits a
+    // `turn-${turnId}` mark at the end of EVERY call, and runTurnWithFiller()
+    // calls streamPcmAsMedia() once PER streamed chunk. If acking any one of
+    // those per-chunk marks armed the countdown, a multi-chunk utterance
+    // could start the 8s window while later audio is still buffered/playing.
+    const { provider: sttProvider, handle } = makeStreamingProvider();
+    let releaseChunk2: () => void = () => undefined;
+    const chunk2Gate = new Promise<void>((resolve) => {
+      releaseChunk2 = resolve;
+    });
+    const texts: string[] = [];
+    const streamingTts: TtsProvider = {
+      synthesize: vi.fn(async (): Promise<TtsSynthesizeResult> => ({
+        audio: Buffer.alloc(640),
+        contentType: 'audio/pcm',
+        provider: 'test',
+      })),
+      synthesizeStream: vi.fn((input: TtsSynthesizeInput) => {
+        texts.push(input.text);
+        return {
+          async *[Symbol.asyncIterator]() {
+            // Chunk 1 of 2 — real audio, not yet the end of the turn.
+            yield { pcm: Buffer.alloc(640), isFinal: false };
+            // Held open until the test explicitly releases it, so the test
+            // can ack chunk 1's mark while chunk 2 is still outstanding.
+            await chunk2Gate;
+            // Chunk 2 of 2 — the actual end of the turn.
+            yield { pcm: Buffer.alloc(640), isFinal: true };
+          },
+        };
+      }),
+    };
+    const speechTurn = vi
+      .fn()
+      .mockResolvedValue([{ type: 'tts_play', payload: { text: AGENT_LINE } }]);
+    const finalizeOnClose = vi.fn();
+    const ws = new FakeWs();
+    store.create('t', 'telephony', { callSid: 'CA-sil-multichunk' });
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: sttProvider,
+        speechTurn,
+        ttsProvider: streamingTts,
+        finalizeOnClose,
+        connectionRegistry: new InMemoryConnectionRegistry(),
+      },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-CA-sil-multichunk',
+      start: {
+        callSid: 'CA-sil-multichunk',
+        accountSid: 'AC',
+        streamSid: 'MZ-CA-sil-multichunk',
+        tracks: ['inbound'],
+      },
+    });
+    await flush();
+
+    handle.emit({ type: 'final', isFinal: true, transcript: 'hello there', confidence: 0.95 });
+    await flush();
+    await flush();
+    expect(texts).toEqual([AGENT_LINE]);
+
+    const state = (
+      adapter as unknown as {
+        state: { outboundTurnId: number; pendingSilenceRepromptTurnId: number | null };
+      }
+    ).state;
+    const turnId = state.outboundTurnId;
+
+    // Chunk 1 has been streamed and its per-chunk `turn-${turnId}` mark
+    // enqueued; chunk 2 is still gated. Acking chunk 1's mark must NOT arm
+    // the countdown.
+    expect(state.pendingSilenceRepromptTurnId).toBeNull();
+    ws.inboundJson({ event: 'mark', streamSid: 'MZ', mark: { name: `turn-${turnId}` } });
+    await flush();
+    expect(state.pendingSilenceRepromptTurnId).toBeNull();
+
+    await vi.advanceTimersByTimeAsync(DEFAULT_SILENCE_REPROMPT_MS * 2);
+    await flush();
+    expect(texts).toEqual([AGENT_LINE]); // still no reprompt — never armed
+
+    // Release chunk 2 — the turn's audio is now fully enqueued, which fires
+    // the single dedicated end-of-utterance `silence-arm-${turnId}` mark.
+    releaseChunk2();
+    await flush();
+    await flush();
+    await flush();
+    expect(state.pendingSilenceRepromptTurnId).toBe(turnId);
+
+    ws.inboundJson({ event: 'mark', streamSid: 'MZ', mark: { name: `silence-arm-${turnId}` } });
+    await flush();
+
+    await vi.advanceTimersByTimeAsync(DEFAULT_SILENCE_REPROMPT_MS);
+    await flush();
+
+    expect(texts).toEqual([AGENT_LINE, renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en')]);
+  });
+
+  it('a second consecutive silence expiry escalates and ends the session (low_stt_confidence_max_retries)', async () => {
+    // Non-default timeout also pins the deps.silenceRepromptTimeoutMs seam.
+    const { adapter, ws, handle, texts, finalizeOnClose } = await setupSilenceCall('CA-sil-2', {
+      silenceRepromptTimeoutMs: 1_000,
+    });
+    await completeAgentTurn(adapter, ws, handle);
+
+    // Expiry 1 → reprompt. The reprompt renders through streamPcmAsMedia and
+    // enqueues its own end-of-turn mark, which must be acked to re-arm.
+    await vi.advanceTimersByTimeAsync(1_000);
+    await flush();
+    expect(texts).toEqual([AGENT_LINE, renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en')]);
+    expect(ws.closed).toBe(false);
+    const repromptTurn = (
+      adapter as unknown as { state: { pendingSilenceRepromptTurnId: number | null } }
+    ).state.pendingSilenceRepromptTurnId;
+    expect(repromptTurn).not.toBeNull();
+    ws.inboundJson({ event: 'mark', streamSid: 'MZ', mark: { name: `silence-arm-${repromptTurn}` } });
+    await flush();
+
+    // Expiry 2 → cap reached → spoken hand-off + graceful end.
+    await vi.advanceTimersByTimeAsync(1_000);
+    await flush();
+
+    expect(texts).toEqual([
+      AGENT_LINE,
+      renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en'),
+      renderTtsText(SPEECH_TURN_FAILURE_ESCALATION_COPY, {}, 'en'),
+    ]);
+    expect(ws.closed).toBe(true);
+    expect(finalizeOnClose).toHaveBeenCalledTimes(1);
+    const [, reason, sideEffects] = finalizeOnClose.mock.calls[0];
+    expect(reason).toBe('session_ended');
+    expect(sideEffects).toEqual([
+      { type: 'end_session', payload: { reason: 'low_stt_confidence_max_retries' } },
+    ]);
+    expect(recordVoiceErrorMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        errorKind: 'low_stt_confidence_repeated',
+        channel: 'media_streams',
+        callSid: 'CA-sil-2',
+        tenantId: 't',
+      }),
+    );
+  });
+
+  it('an interim transcript at 5s disarms the timer — advancing past 8s produces NO reprompt', async () => {
+    const { adapter, ws, handle, texts } = await setupSilenceCall('CA-sil-3');
+    await completeAgentTurn(adapter, ws, handle);
+    expect(texts).toEqual([AGENT_LINE]);
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    handle.emit({ type: 'partial', isFinal: false, transcript: 'um let me check', confidence: 0.6 });
+    await flush();
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    await flush();
+
+    expect(texts).toEqual([AGENT_LINE]);
+    expect(streak(adapter)).toBe(0);
+    expect(ws.closed).toBe(false);
+  });
+
+  it('after close, an armed silence timer never fires (no reprompt, no double finalize)', async () => {
+    const { adapter, handle, ws, texts, finalizeOnClose } = await setupSilenceCall('CA-sil-4');
+    await completeAgentTurn(adapter, ws, handle);
+
+    ws.inboundJson({ event: 'stop', streamSid: 'MZ-CA-sil-4' });
+    await flush();
+    expect(finalizeOnClose).toHaveBeenCalledTimes(1);
+    expect(finalizeOnClose.mock.calls[0][1]).toBe('caller_hangup');
+
+    await vi.advanceTimersByTimeAsync(DEFAULT_SILENCE_REPROMPT_MS * 3);
+    await flush();
+
+    expect(texts).toEqual([AGENT_LINE]);
+    expect(finalizeOnClose).toHaveBeenCalledTimes(1);
+    expect(recordVoiceErrorMock).not.toHaveBeenCalledWith(
+      expect.objectContaining({ errorKind: 'low_stt_confidence' }),
+    );
+  });
+
+  it('expiry while a newer outbound turn is in flight is a no-op', async () => {
+    const { adapter, ws, handle, texts } = await setupSilenceCall('CA-sil-5');
+    await completeAgentTurn(adapter, ws, handle);
+
+    // Simulate a transcript-less new outbound turn racing the armed timer
+    // (e.g. an async sentiment-escalation line): the captured turnId is stale
+    // and the agent is speaking again.
+    const state = (
+      adapter as unknown as { state: { outboundTurnId: number; agentSpeaking: boolean } }
+    ).state;
+    state.outboundTurnId += 1;
+    state.agentSpeaking = true;
+
+    await vi.advanceTimersByTimeAsync(DEFAULT_SILENCE_REPROMPT_MS * 2);
+    await flush();
+
+    expect(texts).toEqual([AGENT_LINE]);
+    expect(streak(adapter)).toBe(0);
+    expect(ws.closed).toBe(false);
+  });
+
+  it('timer silence then a low-confidence final terminates at combined streak 2', async () => {
+    const { adapter, handle, ws, texts, speechTurn, finalizeOnClose } = await setupSilenceCall('CA-sil-6');
+    await completeAgentTurn(adapter, ws, handle);
+
+    // Silence expiry → streak 1 via the shared ladder.
+    await vi.advanceTimersByTimeAsync(DEFAULT_SILENCE_REPROMPT_MS);
+    await flush();
+    expect(texts).toEqual([AGENT_LINE, renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en')]);
+
+    // Then a mumbled final → streak 2 → hand-off, NOT another reprompt.
+    handle.emit({ type: 'final', isFinal: true, transcript: 'mmuh', confidence: 0.2 });
+    await flush();
+    await flush();
+
+    expect(speechTurn).toHaveBeenCalledTimes(1); // only the initial confident turn
+    expect(texts).toEqual([
+      AGENT_LINE,
+      renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en'),
+      renderTtsText(SPEECH_TURN_FAILURE_ESCALATION_COPY, {}, 'en'),
+    ]);
+    expect(ws.closed).toBe(true);
+    expect(finalizeOnClose).toHaveBeenCalledTimes(1);
+    const [, reason, sideEffects] = finalizeOnClose.mock.calls[0];
+    expect(reason).toBe('session_ended');
+    expect(sideEffects).toEqual([
+      { type: 'end_session', payload: { reason: 'low_stt_confidence_max_retries' } },
+    ]);
+  });
+
+  // ─── Codex P2 (PR #702) — pending-approval/consent parity ────────────────
+  //
+  // Before this fix, a silent caller mid owner-approval readback (RV-071) or
+  // mid SMS-consent capture (WS18) got reprompted by the shared low-STT
+  // ladder — and, on a second consecutive silence, ESCALATED AND ENDED THE
+  // SESSION — stranding the pending dialogue uncleared. These pins assert
+  // the T2-F05 silence timer now defers to `deps.handlePendingDialogueSilence`
+  // first, mirroring `processSpeechTurn`'s handler ordering, and only falls
+  // through to the reprompt/escalation ladder when nothing is pending.
+
+  const PENDING_APPROVAL_COPY = 'Still there? Just say yes to confirm the approval.';
+  const PENDING_CONSENT_COPY = 'Still there? Is it okay to text you the quote?';
+
+  /**
+   * A realistic double: like the production
+   * `TwilioGatherAdapter.handlePendingDialogueSilence`, it inspects the
+   * session's own pending-dialogue fields and returns a distinct copy per
+   * dialogue, or null when neither is pending — so the "no pending dialogue"
+   * regression case exercises the exact same fall-through branch a real
+   * wiring would take.
+   */
+  function makePendingDialogueSilenceHandler() {
+    return vi.fn(async (session: VoiceSession) => {
+      if (session.pendingVoiceApproval) {
+        return [{ type: 'tts_play', payload: { text: PENDING_APPROVAL_COPY } }];
+      }
+      if (session.pendingConsentCapture) {
+        return [{ type: 'tts_play', payload: { text: PENDING_CONSENT_COPY } }];
+      }
+      return null;
+    });
+  }
+
+  it('a pending owner voice-approval consumes the silence expiry — no reprompt, no escalation, session stays open', async () => {
+    const handlePendingDialogueSilence = makePendingDialogueSilenceHandler();
+    const { adapter, ws, handle, texts, finalizeOnClose, session } = await setupSilenceCall(
+      'CA-sil-approval',
+      { handlePendingDialogueSilence },
+    );
+    await completeAgentTurn(adapter, ws, handle);
+    session.pendingVoiceApproval = { action: 'approve', stage: 'confirm' };
+
+    await vi.advanceTimersByTimeAsync(DEFAULT_SILENCE_REPROMPT_MS);
+    await flush();
+
+    expect(handlePendingDialogueSilence).toHaveBeenCalledWith(session, 't');
+    // The pending-approval handler's own copy is spoken — NOT the
+    // low-confidence reprompt.
+    expect(texts).toEqual([AGENT_LINE, PENDING_APPROVAL_COPY]);
+    expect(texts).not.toContain(renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en'));
+    expect(streak(adapter)).toBe(0);
+    expect(ws.closed).toBe(false);
+    expect(finalizeOnClose).not.toHaveBeenCalled();
+    expect(recordVoiceErrorMock).not.toHaveBeenCalledWith(
+      expect.objectContaining({ errorKind: 'low_stt_confidence' }),
+    );
+  });
+
+  it('a pending SMS-consent capture consumes the silence expiry — no reprompt, no escalation, session stays open', async () => {
+    const handlePendingDialogueSilence = makePendingDialogueSilenceHandler();
+    const { adapter, ws, handle, texts, finalizeOnClose, session } = await setupSilenceCall(
+      'CA-sil-consent',
+      { handlePendingDialogueSilence },
+    );
+    await completeAgentTurn(adapter, ws, handle);
+    session.pendingConsentCapture = { customerId: 'cust-1', phone: '+15551234567' };
+
+    await vi.advanceTimersByTimeAsync(DEFAULT_SILENCE_REPROMPT_MS);
+    await flush();
+
+    expect(handlePendingDialogueSilence).toHaveBeenCalledWith(session, 't');
+    expect(texts).toEqual([AGENT_LINE, PENDING_CONSENT_COPY]);
+    expect(texts).not.toContain(renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en'));
+    expect(streak(adapter)).toBe(0);
+    expect(ws.closed).toBe(false);
+    expect(finalizeOnClose).not.toHaveBeenCalled();
+    expect(recordVoiceErrorMock).not.toHaveBeenCalledWith(
+      expect.objectContaining({ errorKind: 'low_stt_confidence' }),
+    );
+  });
+
+  it('regression: with NO pending dialogue, the silence expiry still reprompts as before even with the hook wired', async () => {
+    const handlePendingDialogueSilence = makePendingDialogueSilenceHandler();
+    const { adapter, ws, handle, texts } = await setupSilenceCall('CA-sil-nopending', {
+      handlePendingDialogueSilence,
+    });
+    await completeAgentTurn(adapter, ws, handle);
+    // Neither session.pendingVoiceApproval nor session.pendingConsentCapture
+    // is set — the hook returns null and the timer must fall through to the
+    // existing low-STT-confidence reprompt exactly as before this change.
+
+    await vi.advanceTimersByTimeAsync(DEFAULT_SILENCE_REPROMPT_MS);
+    await flush();
+
+    expect(handlePendingDialogueSilence).toHaveBeenCalledTimes(1);
+    expect(texts).toEqual([AGENT_LINE, renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en')]);
+    expect(streak(adapter)).toBe(1);
+    expect(ws.closed).toBe(false);
+  });
+
+  it('serialization: a racing turn holding the session lock makes the expiry a stale no-op (no double-consume)', async () => {
+    // Codex P2 — a final transcript that races the silence timer runs under
+    // withSessionLock and could mutate the same pending dialogue the expiry
+    // consumes. Simulate that: hold the lock and advance the outbound turn
+    // while held; the expiry must acquire the lock AFTER, re-check, see the
+    // stale turnId, and no-op — never invoking the pending-dialogue handler.
+    const handlePendingDialogueSilence = makePendingDialogueSilenceHandler();
+    const { adapter, ws, handle, texts, session } = await setupSilenceCall('CA-sil-race', {
+      handlePendingDialogueSilence,
+    });
+    await completeAgentTurn(adapter, ws, handle);
+    session.pendingVoiceApproval = { action: 'approve', stage: 'confirm' };
+
+    let release!: () => void;
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    const racingTurn = store.withSessionLock(session.id, async () => {
+      // A newer outbound turn started under the lock — invalidates the expiry.
+      (adapter as unknown as { state: { outboundTurnId: number } }).state.outboundTurnId += 1;
+      await held;
+    });
+
+    // Fire the timer: its callback queues behind the racing turn on the lock.
+    await vi.advanceTimersByTimeAsync(DEFAULT_SILENCE_REPROMPT_MS);
+    release();
+    await racingTurn;
+    await flush();
+
+    expect(handlePendingDialogueSilence).not.toHaveBeenCalled();
+    expect(texts).toEqual([AGENT_LINE]); // no reprompt, no dialogue copy
+    expect(session.pendingVoiceApproval).toBeDefined(); // left intact for the real turn
+    expect(ws.closed).toBe(false);
+  });
+
+  it('serialization (transcript race): a caller answer consumed under the lock bumps the activity generation, so the queued expiry no-ops even though outboundTurnId/agentSpeaking still read the armed turn', async () => {
+    // Codex P2 (round 2) — the load-bearing guard for the transcript race.
+    // onTranscriptEvent → speechTurn consumes the pending dialogue under ITS
+    // OWN lock hold; the next outbound turn only bumps outboundTurnId / sets
+    // agentSpeaking AFTER that lock releases. So when the expiry's queued lock
+    // body runs, those two guards STILL read the armed turn — only the caller-
+    // activity generation has moved. Prove the expiry bails on the generation
+    // alone (the pre-fix guards would have let it double-consume).
+    const handlePendingDialogueSilence = makePendingDialogueSilenceHandler();
+    const { adapter, ws, handle, texts, session } = await setupSilenceCall('CA-sil-txn-race', {
+      handlePendingDialogueSilence,
+    });
+    await completeAgentTurn(adapter, ws, handle);
+    session.pendingVoiceApproval = { action: 'approve', stage: 'confirm' };
+
+    const armedState = (
+      adapter as unknown as {
+        state: { outboundTurnId: number; agentSpeaking: boolean; callerActivityGeneration: number };
+      }
+    ).state;
+    const armedTurnId = armedState.outboundTurnId;
+    const armedSpeaking = armedState.agentSpeaking;
+
+    let release!: () => void;
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    const racingTurn = store.withSessionLock(session.id, async () => {
+      // Model onTranscriptEvent → speechTurn: the caller's real answer bumps
+      // the activity generation and consumes the pending approval, WITHOUT yet
+      // starting the next outbound turn (that would happen after this lock
+      // releases). outboundTurnId / agentSpeaking are deliberately untouched.
+      armedState.callerActivityGeneration += 1;
+      session.pendingVoiceApproval = undefined;
+      await held;
+    });
+
+    // Fire the timer: its callback queues behind the racing turn on the lock.
+    await vi.advanceTimersByTimeAsync(DEFAULT_SILENCE_REPROMPT_MS);
+    release();
+    await racingTurn;
+    await flush();
+
+    // The two pre-fix guards are unchanged from arm time — only the generation
+    // moved, so it is the sole reason the expiry stood down.
+    expect(armedState.outboundTurnId).toBe(armedTurnId);
+    expect(armedState.agentSpeaking).toBe(armedSpeaking);
+    expect(handlePendingDialogueSilence).not.toHaveBeenCalled();
+    expect(texts).toEqual([AGENT_LINE]); // no stale reprompt over the real answer
+    expect(ws.closed).toBe(false);
   });
 });
