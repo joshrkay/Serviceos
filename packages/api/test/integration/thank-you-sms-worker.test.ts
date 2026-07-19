@@ -217,4 +217,70 @@ describe('thank-you-sms worker — integration', () => {
     // sanity: timeline ref kept; the JOB_TIMELINE_EVENT_TYPES import is exercised
     expect(JOB_TIMELINE_EVENT_TYPES.STATUS_CHANGE).toBeDefined();
   });
+
+  describe('T4-F01 — claim-before-send against real send_claims', () => {
+    it('reclaims a stale send_claims row and sends (crash between claim and send)', async () => {
+      const seed = await seedCustomerAndJob({ completedAtAgo: 'four_hours' });
+      await pool.query(
+        `INSERT INTO send_claims (tenant_id, claim_key, status, claimed_at)
+         VALUES ($1, $2, 'claimed', NOW() - INTERVAL '20 minutes')`,
+        [tenant.tenantId, `thank_you_sms:${seed.jobId}`],
+      );
+
+      const { dispatcher, calls } = makeCapturingDispatcher();
+      await runThankYouSmsSweep({
+        pool, jobRepo, customerRepo, settingsRepo, dncRepo, dispatcher, auditRepo, logger,
+        now: () => NOW,
+      });
+
+      expect(calls.some((c) => c.to === seed.phone)).toBe(true);
+      const row = await pool.query(`SELECT thank_you_sms_sent_at FROM jobs WHERE id = $1`, [seed.jobId]);
+      expect(row.rows[0].thank_you_sms_sent_at).not.toBeNull();
+      const claimRow = await pool.query(
+        `SELECT status FROM send_claims WHERE tenant_id = $1 AND claim_key = $2`,
+        [tenant.tenantId, `thank_you_sms:${seed.jobId}`],
+      );
+      expect(claimRow.rows[0].status).toBe('sent');
+    });
+
+    it('Codex P2 (PR #705) — does NOT resend when a "sent" claim exists but thank_you_sms_sent_at is still NULL, and RECONCILES the missing stamp (crash between send and mark)', async () => {
+      const seed = await seedCustomerAndJob({ completedAtAgo: 'four_hours' });
+      await pool.query(
+        `INSERT INTO send_claims (tenant_id, claim_key, status, claimed_at, sent_at)
+         VALUES ($1, $2, 'sent', NOW(), NOW())`,
+        [tenant.tenantId, `thank_you_sms:${seed.jobId}`],
+      );
+
+      const { dispatcher, calls } = makeCapturingDispatcher();
+      await runThankYouSmsSweep({
+        pool, jobRepo, customerRepo, settingsRepo, dncRepo, dispatcher, auditRepo, logger,
+        now: () => NOW,
+      });
+
+      // No resend (the SMS already went out), but the missing stamp is now
+      // reconciled — otherwise the eligibility query re-selects this job every
+      // tick forever and can starve newer jobs (oldest-first, LIMIT 500).
+      expect(calls.some((c) => c.to === seed.phone)).toBe(false);
+      const row = await pool.query(`SELECT thank_you_sms_sent_at FROM jobs WHERE id = $1`, [seed.jobId]);
+      expect(row.rows[0].thank_you_sms_sent_at).toEqual(NOW);
+    });
+
+    it('two concurrent sweeps against the same eligible job send exactly once', async () => {
+      const seed = await seedCustomerAndJob({ completedAtAgo: 'four_hours' });
+      const { dispatcher, calls } = makeCapturingDispatcher();
+
+      await Promise.all([
+        runThankYouSmsSweep({
+          pool, jobRepo, customerRepo, settingsRepo, dncRepo, dispatcher, auditRepo, logger,
+          now: () => NOW,
+        }),
+        runThankYouSmsSweep({
+          pool, jobRepo, customerRepo, settingsRepo, dncRepo, dispatcher, auditRepo, logger,
+          now: () => NOW,
+        }),
+      ]);
+
+      expect(calls.filter((c) => c.to === seed.phone)).toHaveLength(1);
+    });
+  });
 });

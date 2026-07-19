@@ -32,6 +32,7 @@ import { createAppointment } from '../../src/appointments/appointment';
 import type { JobRepository } from '../../src/jobs/job';
 import type { Customer, CustomerRepository } from '../../src/customers/customer';
 import type { CustomerMessageDeliveryDeps } from '../../src/notifications/customer-message-delivery';
+import { createLogger } from '../../src/logging/logger';
 
 const TENANT = 't-1';
 const JOB_ID = '00000000-0000-4000-8000-000000000abc';
@@ -110,10 +111,12 @@ async function makeApp(opts: {
     auditRepo,
     enforcement: 'block',
   });
-  const customerMessageDeps = {
+  const customerMessageDeps: CustomerMessageDeliveryDeps = {
     delivery: gatedDelivery,
-    dispatchRepo: { create: vi.fn(async (r: unknown) => r) },
-  } as unknown as CustomerMessageDeliveryDeps;
+    dispatchRepo: { create: vi.fn(async (r: unknown) => r) } as unknown as CustomerMessageDeliveryDeps['dispatchRepo'],
+    pool: null,
+    logger: createLogger({ service: 'test', environment: 'test', level: 'error' }),
+  };
 
   const app = express();
   app.use(

@@ -58,6 +58,16 @@ export class PgQueue extends PgBaseRepository implements Queue {
           failed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
       `);
+      // T4-F10 — the real handler failure, persisted on every failed attempt
+      // (not just the final one) so operators can see WHY a message is still
+      // retrying before it ever reaches the DLQ. _queue_messages/_queue_dlq
+      // are bootstrapped entirely inside this method (never added to
+      // schema.ts's MIGRATIONS registry) — this follows that same existing,
+      // deliberate convention rather than introducing a second path for the
+      // same two tables.
+      await client.query(`
+        ALTER TABLE _queue_messages ADD COLUMN IF NOT EXISTS last_error TEXT;
+      `);
     })();
     try {
       await this.initPromise;
@@ -158,6 +168,16 @@ export class PgQueue extends PgBaseRepository implements Queue {
             idempotencyKey: row.idempotency_key as string,
             createdAt: (row.created_at as Date).toISOString(),
           };
+          // Prefer the real handler failure the worker persisted on its last
+          // attempt (T4-F10's last_error, present on `RETURNING *`) — the
+          // crash this reaper handles is precisely "worker recorded the final
+          // failure, then died before moveToDeadLetter". The hardcoded orphan
+          // text is only a fallback for the rarer case where no last_error was
+          // ever written (e.g. a crash before the first failure was recorded).
+          const orphanError =
+            typeof row.last_error === 'string' && row.last_error.length > 0
+              ? row.last_error
+              : 'orphaned: attempts exhausted without completion (worker died mid-processing)';
           await client.query(
             `INSERT INTO _queue_dlq (message_id, type, payload, attempts, idempotency_key, error)
              VALUES ($1, $2, $3, $4, $5, $6)
@@ -173,7 +193,7 @@ export class PgQueue extends PgBaseRepository implements Queue {
               ),
               orphan.attempts,
               orphan.idempotencyKey,
-              'orphaned: attempts exhausted without completion (worker died mid-processing)',
+              orphanError,
             ]
           );
         }
@@ -209,6 +229,24 @@ export class PgQueue extends PgBaseRepository implements Queue {
       await client.query(
         `DELETE FROM _queue_messages WHERE id = $1`,
         [messageId]
+      );
+    });
+  }
+
+  /**
+   * T4-F10 — persist the real handler failure onto the still-retrying row,
+   * so `_queue_dlq.error` (populated from this same value at exhaustion) is
+   * the actual thrown message/stack, not a hardcoded 'max attempts exceeded'.
+   * A no-op (never throws) if the row was already deleted (e.g. a
+   * concurrent successful retry raced this write) — recording a failure
+   * reason is diagnostic, never load-bearing.
+   */
+  async recordFailure(messageId: string, error: string): Promise<void> {
+    await this.withClient(async (client) => {
+      await this.ensureTable(client);
+      await client.query(
+        `UPDATE _queue_messages SET last_error = $2 WHERE id = $1`,
+        [messageId, error],
       );
     });
   }

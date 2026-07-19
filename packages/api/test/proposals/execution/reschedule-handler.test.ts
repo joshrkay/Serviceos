@@ -1,6 +1,7 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { RescheduleAppointmentExecutionHandler } from '../../../src/proposals/execution/reschedule-handler';
 import { Proposal } from '../../../src/proposals/proposal';
+import type { TransactionalCommsService } from '../../../src/notifications/transactional-comms-service';
 import { InMemoryAppointmentRepository, createAppointment } from '../../../src/appointments/appointment';
 import { FeasibilityDependencies } from '../../../src/scheduling/feasibility-types';
 import { StubSkillMatcher } from '../../../src/scheduling/skill-matcher';
@@ -55,6 +56,35 @@ describe('P6-013 — Execution for reschedule proposals', () => {
     const updated = await appointmentRepo.findById(tenantId, appt.id);
     expect(updated!.scheduledStart.toISOString()).toBe('2026-03-15T10:00:00.000Z');
     expect(updated!.scheduledEnd.toISOString()).toBe('2026-03-15T12:00:00.000Z');
+  });
+
+  it('Codex P2 (PR #705) — passes the proposal id (not the destination timestamp) as the reschedule notification occurrence token', async () => {
+    const appt = await createAppointment({
+      tenantId, jobId: 'job-1',
+      scheduledStart: new Date('2026-03-14T09:00:00Z'),
+      scheduledEnd: new Date('2026-03-14T11:00:00Z'),
+      timezone: 'America/New_York', createdBy: 'user-1',
+    }, appointmentRepo);
+
+    const notifyRescheduled = vi.fn().mockResolvedValue(undefined);
+    const comms = { notifyRescheduled } as unknown as TransactionalCommsService;
+    const handlerWithComms = new RescheduleAppointmentExecutionHandler(
+      appointmentRepo, undefined, undefined, undefined, undefined, comms,
+    );
+
+    const proposal = makeProposal({
+      appointmentId: appt.id,
+      newScheduledStart: '2026-03-15T10:00:00Z',
+      newScheduledEnd: '2026-03-15T12:00:00Z',
+    });
+
+    const result = await handlerWithComms.execute(proposal, context);
+    expect(result.success).toBe(true);
+    // Per-ACTION token = proposal id, NOT the destination timestamp: moving to
+    // a slot, away, then back reuses the timestamp and would drop the final
+    // notification as a duplicate against the prior claim's tombstone.
+    expect(notifyRescheduled).toHaveBeenCalledWith(tenantId, appt.id, 'prop-1');
+    expect(notifyRescheduled).not.toHaveBeenCalledWith(tenantId, appt.id, '2026-03-15T10:00:00Z');
   });
 
   it('refreshes both the old and new day boards on a cross-day move', async () => {

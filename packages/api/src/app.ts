@@ -1948,6 +1948,10 @@ export function createApp(): AppWithLifecycle {
   const dispatchAnalyticsRepo = pool
     ? new PgDispatchAnalyticsRepository(pool)
     : new InMemoryDispatchAnalyticsRepository();
+  const transactionalCommsLogger = createLogger({
+    service: 'transactional-comms',
+    environment: process.env.NODE_ENV || 'development',
+  });
   const transactionalComms = messageDelivery
     ? new TransactionalCommsService({
         delivery: messageDelivery,
@@ -1957,6 +1961,9 @@ export function createApp(): AppWithLifecycle {
         settingsRepo,
         invoiceRepo,
         dispatchRepo,
+        // T4-F01 — claim-before-send pool for sendCustomerMessage's gate.
+        pool: pool ?? null,
+        logger: transactionalCommsLogger,
       })
     : undefined;
   if (transactionalComms) {
@@ -2058,6 +2065,9 @@ export function createApp(): AppWithLifecycle {
     // RV-086 — send_estimate_nudge: re-send via the unified SendService
     // path; message_dispatches backs the 48h cooldown.
     ...(sendService ? { sendService } : {}),
+    // T4-F01 — claim-before-send pool for send_estimate_nudge's
+    // dispatchEstimateNudge call (see estimates/estimate-nudge.ts).
+    pool: pool ?? null,
     dispatchRepo,
     // UB-A2 — create_standing_instruction inserts via the UB-A1 repo
     // (in-memory fallback when no pool, same as the routes above).
@@ -2710,16 +2720,25 @@ export function createApp(): AppWithLifecycle {
         await queue.delete(message.id);
         return;
       }
-      const processed = await processMessage(message, handler, workerLogger);
-      if (processed) {
+      const result = await processMessage(message, handler, workerLogger);
+      if (result.success) {
         await queue.delete(message.id);
-      } else if (message.attempts >= message.maxAttempts) {
-        await queue.moveToDeadLetter(message, 'max attempts exceeded');
-        workerLogger.error('Message moved to DLQ', {
-          messageId: message.id,
-          type: message.type,
-          attempts: message.attempts,
-        });
+      } else {
+        // T4-F10 — persist the real failure reason on every failed attempt
+        // (not only the final one), so an operator inspecting a still-retrying
+        // message can see why without digging through logs.
+        await queue.recordFailure(message.id, result.error ?? 'unknown error');
+        if (message.attempts >= message.maxAttempts) {
+          // Fallback string should not normally trigger — processMessage
+          // always populates `error` on a failure — but guards moveToDeadLetter
+          // against ever receiving undefined.
+          await queue.moveToDeadLetter(message, result.error ?? 'max attempts exceeded');
+          workerLogger.error('Message moved to DLQ', {
+            messageId: message.id,
+            type: message.type,
+            attempts: message.attempts,
+          });
+        }
       }
     } catch (err) {
       workerLogger.error('Queue message processing failed', {
@@ -2865,6 +2884,9 @@ export function createApp(): AppWithLifecycle {
             customerMessageDeps: {
               delivery: messageDelivery,
               dispatchRepo,
+              // T4-F01 — claim-before-send pool for the apology SMS.
+              pool: pool ?? null,
+              logger: transactionalCommsLogger,
             },
           }
         : {}),
@@ -6075,6 +6097,7 @@ export function createApp(): AppWithLifecycle {
           estimateRepo,
           sendService,
           auditRepo,
+          pool: pool ?? null,
           listTenantIds: async () => {
             if (!pool) return [];
             const r = await pool.query('SELECT id FROM tenants');

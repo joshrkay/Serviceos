@@ -126,8 +126,8 @@ describe('UC-5 — durable telephony timers', () => {
     for (;;) {
       const msg = await consumer.receive<EmergencyPageJobPayload>();
       if (msg) {
-        const ok = await processMessage(msg, worker, logger);
-        expect(ok).toBe(true);
+        const result = await processMessage(msg, worker, logger);
+        expect(result.success).toBe(true);
         await consumer.delete(msg.id);
         return;
       }
