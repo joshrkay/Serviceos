@@ -600,6 +600,24 @@ export interface VoiceTurnProcessor {
     tenantId: string,
   ): Promise<SideEffect[] | null>;
   /**
+   * WS18 — consume the turn when an on-call SMS-consent capture is pending
+   * on the session (the caller's utterance is the yes/no answer to "is it
+   * okay to text you the quote?"). Returns the side effects to render, or
+   * null when no capture is pending. Exported (parallel to
+   * `handlePendingVoiceApproval`) so a transport that only owns a bare
+   * `speechTurn` callback — e.g. the media-streams silence-reprompt timer,
+   * which must drive an empty-utterance turn through the SAME pending
+   * handlers `speechTurn` runs, in the SAME order, so a silent caller
+   * mid-dialogue gets keep-pending / fail-closed semantics instead of the
+   * low-STT-confidence reprompt/escalation ladder — can reach it directly
+   * without a full `speechTurn` dispatch.
+   */
+  handlePendingConsentCapture(
+    session: VoiceSession,
+    speechResult: string,
+    tenantId: string,
+  ): Promise<SideEffect[] | null>;
+  /**
    * RV-071 — route a classified `approve_proposal` / `reject_proposal`
    * intent. HARD-GATED on the session's RV-070 `ownerSession` flag (not
    * just the classifier prompt): non-owner callers fall into the FSM's
@@ -2871,6 +2889,7 @@ export function createVoiceTurnProcessor(
     resolveThresholdOverride,
     runSummary,
     handlePendingVoiceApproval,
+    handlePendingConsentCapture,
     handleVoiceApprovalIntent,
     handleVoiceEditIntent,
     handleAskCaller,

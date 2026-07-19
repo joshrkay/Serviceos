@@ -383,6 +383,33 @@ function validateFeatureRequiredConfig(env: Record<string, string | undefined>):
     );
   }
 
+  // T4-F06 — TENANT_ENCRYPTION_KEY/TRANSCRIPT_ENCRYPTION_KEY are load-bearing
+  // for tenant credential (integrations/credentials.ts, calendar-integration.ts,
+  // accounting/token-crypto.ts, workers/provision-twilio.ts) and transcript-at-
+  // rest (transcription.ts) encryption, but were previously validated ONLY at
+  // first use, deep in integrations/crypto.ts's parseKey (64-hex-char/32-byte
+  // contract) — a bad/missing key crashed on first decrypt/encrypt instead of
+  // failing at boot. TENANT_ENCRYPTION_KEY is required in prod/staging (no
+  // opt-out: every deploy resolves tenant credentials); TRANSCRIPT_ENCRYPTION_KEY
+  // stays optional (transcription.ts falls back to TENANT_ENCRYPTION_KEY, see
+  // app.ts) but is format-checked when set so a typo there fails at boot too.
+  // A local regex (not importing integrations/crypto.ts) keeps this config
+  // module's dependency direction unchanged — it runs before most modules are
+  // wired.
+  const HEX_64_KEY = /^[0-9a-f]{64}$/i;
+  if (!env.TENANT_ENCRYPTION_KEY) {
+    missing.push(
+      'TENANT_ENCRYPTION_KEY (required in prod/staging — a 64-char hex string; ' +
+        'encrypts tenant integration credentials, calendar/accounting tokens, and, ' +
+        'by fallback, call transcripts at rest)'
+    );
+  } else if (!HEX_64_KEY.test(env.TENANT_ENCRYPTION_KEY)) {
+    missing.push('TENANT_ENCRYPTION_KEY must be a 64-char hex string (32 bytes)');
+  }
+  if (env.TRANSCRIPT_ENCRYPTION_KEY && !HEX_64_KEY.test(env.TRANSCRIPT_ENCRYPTION_KEY)) {
+    missing.push('TRANSCRIPT_ENCRYPTION_KEY must be a 64-char hex string (32 bytes) when set');
+  }
+
   if (missing.length > 0) {
     throw new Error(
       `Production feature configuration is missing required values:\n  ${missing.join('\n  ')}\n` +
