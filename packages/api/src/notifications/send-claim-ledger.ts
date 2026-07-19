@@ -194,6 +194,59 @@ export type SendClaimOutcome<T> =
     };
 
 /**
+ * Internal sentinel: a deferred-mode `markProviderStarting()` lost the
+ * `claimed → sending` compare-and-swap to a concurrent stale-reclaim winner.
+ * Thrown out through `sendFn` and caught by `withSendClaim`, which converts it
+ * to a `'duplicate'` outcome WITHOUT releasing the winner's in-flight row.
+ */
+class SendClaimLostError extends Error {
+  constructor() {
+    super('send claim lost to a concurrent reclaim');
+    this.name = 'SendClaimLostError';
+  }
+}
+
+/** Options for {@link withSendClaim}. */
+export interface WithSendClaimOptions {
+  /**
+   * Defer the `claimed → sending` transition until `sendFn` calls its
+   * `markProviderStarting()` argument (which it must do immediately before the
+   * actual provider dispatch), instead of transitioning up-front before
+   * `sendFn` runs. Use this for a `sendFn` that does non-trivial PRE-provider
+   * work — repository lookups, view-token persistence, etc. — that should stay
+   * reclaimable if the process crashes DURING it (e.g. estimates/estimate-nudge
+   * wrapping `SendService.sendEstimate`, whose prep includes a view-token DB
+   * write). With the default (false), a crash anywhere inside such a `sendFn` —
+   * even before it touched the provider — would strand the claim at the
+   * never-auto-reclaimed `'sending'` state, so the occurrence's bookkeeping
+   * never advances and every later sweep treats it as in-flight. Deferring
+   * keeps the claim at `'claimed'` (reclaimable after `staleMinutes`) through
+   * preparation and only flips to `'sending'` for the brief window around the
+   * provider call itself. `sendFn`s that are ONLY the provider call don't need
+   * this and should leave it unset.
+   */
+  deferSendingUntilProviderStart?: boolean;
+}
+
+/** Read the losing claim's current status and shape it into a duplicate outcome. */
+async function duplicateOutcome<T>(
+  pool: Pool,
+  tenantId: string,
+  claimKey: string,
+): Promise<SendClaimOutcome<T>> {
+  const res = await pool.query(
+    `SELECT status FROM send_claims WHERE tenant_id = $1 AND claim_key = $2`,
+    [tenantId, claimKey],
+  );
+  const status = res.rows[0]?.status;
+  return {
+    outcome: 'duplicate',
+    priorStatus:
+      status === 'sent' || status === 'claimed' || status === 'sending' ? status : 'unknown',
+  };
+}
+
+/**
  * Compose claim → sending → send → finalize/release. Mirrors
  * `sendLifecycleEmail`'s shape: claim first; on a claim-miss, skip `sendFn`
  * entirely and report `'duplicate'` (with the losing claim's `priorStatus`,
@@ -240,62 +293,86 @@ export type SendClaimOutcome<T> =
  *
  * On success, finalize the claim to the permanent `'sent'` tombstone and
  * return the send result.
+ *
+ * Deferred mode (`options.deferSendingUntilProviderStart`) moves the
+ * `claimed → sending` transition (and its CAS) OUT of the up-front step and
+ * into `sendFn`'s `markProviderStarting()` callback, which the caller invokes
+ * immediately before the provider dispatch. This keeps the claim reclaimable
+ * during `sendFn`'s pre-provider prep (see the option doc): a crash there
+ * leaves `'claimed'`, not a stranded `'sending'`. The CAS still runs exactly
+ * once and still serializes concurrent stale-reclaimers — a loser's
+ * `markProviderStarting()` throws the internal `SendClaimLostError`, which
+ * unwinds `sendFn` before it reaches the provider and is converted here to a
+ * `'duplicate'` outcome (no release, so the winner's `'sending'` row stands).
  */
 export async function withSendClaim<T>(
   pool: Pool,
   tenantId: string,
   claimKey: string,
-  sendFn: (markProviderAccepted: () => void) => Promise<T>,
+  sendFn: (
+    markProviderAccepted: () => void,
+    markProviderStarting: () => Promise<void>,
+  ) => Promise<T>,
   staleMinutes: number = DEFAULT_STALE_MINUTES,
+  options?: WithSendClaimOptions,
 ): Promise<SendClaimOutcome<T>> {
   const claimed = await claimSend(pool, tenantId, claimKey, staleMinutes);
   if (!claimed) {
-    const res = await pool.query(
-      `SELECT status FROM send_claims WHERE tenant_id = $1 AND claim_key = $2`,
-      [tenantId, claimKey],
-    );
-    const status = res.rows[0]?.status;
-    return {
-      outcome: 'duplicate',
-      priorStatus:
-        status === 'sent' || status === 'claimed' || status === 'sending' ? status : 'unknown',
-    };
+    return duplicateOutcome<T>(pool, tenantId, claimKey);
   }
+
+  const defer = options?.deferSendingUntilProviderStart === true;
 
   let providerAccepted = false;
   const markProviderAccepted = () => {
     providerAccepted = true;
   };
 
-  // Flip to 'sending' BEFORE the provider call so a crash after a successful
-  // send can never be mistaken for an abandoned pre-send claim (see module
-  // doc + claimSend's WHERE clause). This UPDATE is also the compare-and-swap
-  // that resolves the stale-reclaim race: if this process stalled past
-  // `staleMinutes` and a second process reclaimed the still-'claimed' row,
-  // both hold a claim, but only one wins this `claimed → sending` transition.
-  // A false return means we lost — a concurrent process already advanced the
-  // row (or it was released/completed); abort WITHOUT calling the provider so
-  // we don't duplicate its send. Done outside the try so this early return
-  // never trips the catch's release (which would wrongly delete the winner's
-  // in-flight 'sending' row).
-  const advanced = await markSendClaimSending(pool, tenantId, claimKey);
-  if (!advanced) {
-    const res = await pool.query(
-      `SELECT status FROM send_claims WHERE tenant_id = $1 AND claim_key = $2`,
-      [tenantId, claimKey],
-    );
-    const status = res.rows[0]?.status;
-    return {
-      outcome: 'duplicate',
-      priorStatus:
-        status === 'sent' || status === 'claimed' || status === 'sending' ? status : 'unknown',
-    };
+  // The `claimed → sending` compare-and-swap (see markSendClaimSending + module
+  // doc). Runs at most once. A false return means a concurrent stale-reclaim
+  // winner already advanced the row, so we throw the internal sentinel to abort
+  // before touching the provider.
+  let transitioned = false;
+  const doSendingCas = async (): Promise<void> => {
+    if (transitioned) return;
+    const advanced = await markSendClaimSending(pool, tenantId, claimKey);
+    if (!advanced) throw new SendClaimLostError();
+    transitioned = true;
+  };
+
+  // Default: transition BEFORE sendFn so a crash after a successful send can't
+  // be mistaken for an abandoned pre-send claim. Deferred mode instead waits
+  // for sendFn's markProviderStarting() right before the provider call, keeping
+  // the claim reclaimable through sendFn's pre-provider prep. Done outside the
+  // try so a lost-CAS early return never trips the catch's release (which would
+  // wrongly delete the winner's in-flight 'sending' row).
+  if (!defer) {
+    try {
+      await doSendingCas();
+    } catch (err) {
+      if (err instanceof SendClaimLostError) {
+        return duplicateOutcome<T>(pool, tenantId, claimKey);
+      }
+      throw err;
+    }
   }
+
+  // Deferred mode: sendFn calls this immediately before the provider dispatch.
+  // A no-op in default mode (already transitioned).
+  const markProviderStarting = async (): Promise<void> => {
+    await doSendingCas();
+  };
 
   let result: T;
   try {
-    result = await sendFn(markProviderAccepted);
+    result = await sendFn(markProviderAccepted, markProviderStarting);
   } catch (err) {
+    if (err instanceof SendClaimLostError) {
+      // Deferred-mode CAS lost inside sendFn, before any provider dispatch: a
+      // concurrent process owns the 'sending' row. Never release it; report a
+      // duplicate so the caller treats this as an already-in-flight send.
+      return duplicateOutcome<T>(pool, tenantId, claimKey);
+    }
     if (providerAccepted) {
       // The provider already accepted the message before this error — only
       // sendFn's post-send bookkeeping threw. Finalize (never release): a
@@ -305,6 +382,11 @@ export async function withSendClaim<T>(
       await markSendClaimComplete(pool, tenantId, claimKey).catch(() => undefined);
       throw err;
     }
+    // sendFn threw before provider acceptance. Release is safe: the row is
+    // either 'sending' (default mode, or deferred after markProviderStarting —
+    // we know first-hand the provider did not accept) or still 'claimed'
+    // (deferred, threw during prep before the CAS). releaseSendClaim covers
+    // both states.
     await releaseSendClaim(pool, tenantId, claimKey).catch(() => undefined);
     throw err;
   }

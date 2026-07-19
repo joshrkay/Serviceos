@@ -155,6 +155,43 @@ describe('dispatchEstimateNudge', () => {
   });
 
   describe('with a pool wired (claim-before-send active)', () => {
+    it('Codex P1 (PR #705): threads onProviderStarting so the claim stays "claimed" during sendEstimate prep and flips to "sending" only at dispatch', async () => {
+      const { pool, claims } = claimAwarePool();
+      const claimKey = `${TENANT}::estimate_nudge:${ESTIMATE_ID}:v1:1`;
+      let statusDuringPrep: string | undefined;
+
+      // Model sendEstimate's real shape: pre-provider prep, THEN signal the
+      // claim wrapper (onProviderStarting) right before the provider dispatch,
+      // THEN onProviderAccepted after the send.
+      sendEstimate.mockImplementationOnce(
+        async (
+          _input: unknown,
+          options?: { onProviderAccepted?: () => void; onProviderStarting?: () => void | Promise<void> },
+        ) => {
+          statusDuringPrep = claims.get(claimKey)?.status; // during prep: must be reclaimable
+          await options?.onProviderStarting?.(); // provider dispatch begins → 'sending'
+          options?.onProviderAccepted?.();
+          return { estimateId: ESTIMATE_ID, viewUrl: 'https://x/e/tok', viewToken: 'tok', channelsSent: [] };
+        },
+      );
+
+      await dispatchEstimateNudge(deps({ pool }), {
+        tenantId: TENANT,
+        estimate: makeEstimate(),
+        channel: 'sms',
+        asOf: NOW,
+        actorId: 'worker',
+      });
+
+      // The claim was still reclaimable ('claimed') during prep — a crash there
+      // would NOT have stranded it at 'sending'.
+      expect(statusDuringPrep).toBe('claimed');
+      expect(sendEstimate).toHaveBeenCalledTimes(1);
+      expect(claims.get(claimKey)?.status).toBe('sent');
+      const updated = await estimateRepo.findById(TENANT, ESTIMATE_ID);
+      expect(updated!.reminderCount).toBe(1);
+    });
+
     it('crash-between-claim-and-send recovery: a stale claim for reminder #1 is reclaimed and sent', async () => {
       const { pool, claims } = claimAwarePool();
       claims.set(`${TENANT}::estimate_nudge:${ESTIMATE_ID}:v1:1`, {

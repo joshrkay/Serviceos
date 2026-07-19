@@ -321,6 +321,69 @@ describe('send_claims ledger (integration)', () => {
     expect(providerCalls).toBe(1);
   });
 
+  // --- Codex P1 (PR #705) — deferred 'sending' transition against real PG ----
+
+  it('deferred withSendClaim: the row is "claimed" during prep and only flips to "sending" when markProviderStarting is called', async () => {
+    const { tenantId } = await createTestTenant(pool);
+    let statusDuringPrep: string | undefined;
+
+    const outcome = await withSendClaim(
+      pool,
+      tenantId,
+      'defer-happy',
+      async (_accepted, markProviderStarting) => {
+        const prep = await pool.query(
+          `SELECT status FROM send_claims WHERE tenant_id = $1 AND claim_key = $2`,
+          [tenantId, 'defer-happy'],
+        );
+        statusDuringPrep = prep.rows[0]?.status;
+        await markProviderStarting();
+        const started = await pool.query(
+          `SELECT status FROM send_claims WHERE tenant_id = $1 AND claim_key = $2`,
+          [tenantId, 'defer-happy'],
+        );
+        expect(started.rows[0].status).toBe('sending');
+        return 'ok';
+      },
+      undefined,
+      { deferSendingUntilProviderStart: true },
+    );
+
+    expect(statusDuringPrep).toBe('claimed');
+    expect(outcome).toEqual({ outcome: 'sent', result: 'ok' });
+    const { rows } = await pool.query(
+      `SELECT status FROM send_claims WHERE tenant_id = $1 AND claim_key = $2`,
+      [tenantId, 'defer-happy'],
+    );
+    expect(rows[0].status).toBe('sent');
+  });
+
+  it('deferred withSendClaim: a throw DURING prep (before markProviderStarting) releases the "claimed" row so an immediate retry re-claims — never stranded at "sending"', async () => {
+    const { tenantId } = await createTestTenant(pool);
+
+    await expect(
+      withSendClaim(
+        pool,
+        tenantId,
+        'defer-prep-crash',
+        async (_accepted, _starting) => {
+          throw new Error('crashed during prep');
+        },
+        undefined,
+        { deferSendingUntilProviderStart: true },
+      ),
+    ).rejects.toThrow('crashed during prep');
+
+    // Row gone (was 'claimed', released) — NOT a stranded 'sending' row.
+    const { rows } = await pool.query(
+      `SELECT status FROM send_claims WHERE tenant_id = $1 AND claim_key = $2`,
+      [tenantId, 'defer-prep-crash'],
+    );
+    expect(rows).toHaveLength(0);
+    // Immediate re-claim succeeds with no stale wait.
+    expect(await claimSend(pool, tenantId, 'defer-prep-crash')).toBe(true);
+  });
+
   it('findStuckSendClaims surfaces old "sending" rows but not fresh "sending", "claimed", or "sent" rows', async () => {
     const { tenantId } = await createTestTenant(pool);
     await pool.query(

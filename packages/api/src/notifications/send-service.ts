@@ -57,6 +57,17 @@ export interface SendInvoiceInput {
  */
 export interface SendEntityOptions {
   onProviderAccepted?: () => void;
+  /**
+   * Codex P1 (PR #705) — awaited immediately before the provider dispatch,
+   * AFTER all pre-provider prep (repo lookups, view-token persistence). A
+   * claim wrapper threads `withSendClaim`'s `markProviderStarting` here so the
+   * `claimed → sending` transition only happens once the provider is actually
+   * about to be called — keeping the claim reclaimable if the process crashes
+   * during prep. May reject (the deferred CAS lost to a concurrent reclaimer);
+   * that rejection propagates out un-caught so the send is aborted before
+   * dispatch. Callers that don't wrap this in a claim omit it — a no-op.
+   */
+  onProviderStarting?: () => void | Promise<void>;
 }
 
 export interface SendResult {
@@ -151,6 +162,13 @@ export class SendService {
       recipientPhone: input.recipientPhone,
       recipientEmail: input.recipientEmail,
     });
+
+    // Codex P1 (PR #705) — the provider dispatch begins NOW. Signal any claim
+    // wrapper so it flips its claim to 'sending' at this instant (not before
+    // the prep above). May reject if the deferred claim CAS was lost to a
+    // concurrent reclaimer, in which case we must NOT dispatch — the rejection
+    // propagates out un-caught and aborts the send before any channel is hit.
+    await options?.onProviderStarting?.();
 
     // Run all channels in parallel — halves p50 latency for channel: 'both'.
     // Any individual channel failure is recorded as a failed dispatch row in

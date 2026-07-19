@@ -441,4 +441,113 @@ describe('withSendClaim + claimSend — three-state crash-safety lifecycle', () 
     expect(secondSendFn).not.toHaveBeenCalled();
     expect(providerCalls).toBe(1); // still just the one real provider call
   });
+
+  // --- Codex P1 (PR #705) — deferred 'sending' transition -------------------
+  // For a sendFn with pre-provider prep, deferSendingUntilProviderStart keeps
+  // the claim reclaimable at 'claimed' during prep and only flips it to
+  // 'sending' when sendFn calls markProviderStarting() right before dispatch.
+  const DEFER = { deferSendingUntilProviderStart: true } as const;
+
+  it('deferred: the claim stays "claimed" through prep and flips to "sending" only when markProviderStarting is called', async () => {
+    const { pool, rows } = simulatedPool();
+    let statusDuringPrep: string | undefined;
+
+    const outcome = await withSendClaim(
+      pool,
+      TENANT,
+      'k',
+      async (_accepted, markProviderStarting) => {
+        // Model sendEstimate's pre-provider prep: the claim must still be
+        // reclaimable ('claimed') here — a crash now must NOT strand it.
+        statusDuringPrep = rows.get(`${TENANT}::k`)?.status;
+        await markProviderStarting(); // provider dispatch begins
+        expect(rows.get(`${TENANT}::k`)?.status).toBe('sending');
+        return 'ok';
+      },
+      undefined,
+      DEFER,
+    );
+
+    expect(statusDuringPrep).toBe('claimed');
+    expect(outcome).toEqual({ outcome: 'sent', result: 'ok' });
+    expect(rows.get(`${TENANT}::k`)?.status).toBe('sent');
+  });
+
+  it('deferred: a throw DURING prep (before markProviderStarting) releases the still-"claimed" row so an immediate retry can re-claim — never stranded at "sending"', async () => {
+    const { pool, rows } = simulatedPool();
+
+    await expect(
+      withSendClaim(
+        pool,
+        TENANT,
+        'k',
+        async (_accepted, _starting) => {
+          // Crash/throw during prep, before the provider transition.
+          throw new Error('crashed during prep');
+        },
+        undefined,
+        DEFER,
+      ),
+    ).rejects.toThrow('crashed during prep');
+
+    // Released (was 'claimed', never 'sending') — NOT stranded.
+    expect(rows.has(`${TENANT}::k`)).toBe(false);
+    // An immediate retry re-claims with no stale wait required.
+    const retry = await withSendClaim(
+      pool,
+      TENANT,
+      'k',
+      async (_a, markProviderStarting) => {
+        await markProviderStarting();
+        return 'retried';
+      },
+      undefined,
+      DEFER,
+    );
+    expect(retry).toEqual({ outcome: 'sent', result: 'retried' });
+  });
+
+  it('deferred stale-reclaim race: A passes claimSend then stalls in prep; B reclaims + sends; A\'s markProviderStarting CAS loses, so A aborts to duplicate WITHOUT releasing B\'s row and the provider is called ONCE', async () => {
+    const { pool, rows } = simulatedPool();
+    let aProvider = 0;
+    let bProvider = 0;
+
+    const aOutcome = await withSendClaim(
+      pool,
+      TENANT,
+      'k',
+      async (_accepted, markProviderStarting) => {
+        // A is now in prep holding a 'claimed' row. Model it stalling past the
+        // stale window and a second process B running a full deferred send in
+        // that gap (B reclaims, transitions to 'sending', sends, tombstones).
+        rows.get(`${TENANT}::k`)!.claimedAt = Date.now() - 60 * 60_000;
+        const bOutcome = await withSendClaim(
+          pool,
+          TENANT,
+          'k',
+          async (_a2, bStarting) => {
+            await bStarting();
+            bProvider++;
+            return 'B-sent';
+          },
+          undefined,
+          DEFER,
+        );
+        expect(bOutcome).toEqual({ outcome: 'sent', result: 'B-sent' });
+
+        // A resumes and reaches its own provider transition — the row is now
+        // 'sent' (B owns it), so the CAS loses and this throws internally.
+        await markProviderStarting();
+        aProvider++; // must never run
+        return 'A-sent';
+      },
+      undefined,
+      DEFER,
+    );
+
+    expect(aOutcome).toEqual({ outcome: 'duplicate', priorStatus: 'sent' });
+    expect(aProvider).toBe(0);
+    expect(bProvider).toBe(1); // exactly one real send despite two claim winners
+    expect(rows.get(`${TENANT}::k`)?.status).toBe('sent');
+  });
 });

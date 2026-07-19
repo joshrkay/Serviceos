@@ -120,8 +120,23 @@ export async function dispatchEstimateNudge(
 
   if (deps.pool) {
     const claimKey = estimateNudgeClaimKey(estimate.id, estimate.version, occurrence);
-    const outcome = await withSendClaim(deps.pool, tenantId, claimKey, (markProviderAccepted) =>
-      deps.sendService.sendEstimate(sendInput, { onProviderAccepted: markProviderAccepted }),
+    // Deferred 'sending' transition (Codex P1, PR #705): sendEstimate does
+    // pre-provider prep (repo lookups + a view-token DB write) before it hits
+    // the delivery provider. We thread markProviderStarting through as
+    // onProviderStarting so the claim only flips to 'sending' at the provider
+    // dispatch — a crash during that prep leaves the claim reclaimable at
+    // 'claimed' instead of stranding it at the never-auto-reclaimed 'sending'.
+    const outcome = await withSendClaim(
+      deps.pool,
+      tenantId,
+      claimKey,
+      (markProviderAccepted, markProviderStarting) =>
+        deps.sendService.sendEstimate(sendInput, {
+          onProviderAccepted: markProviderAccepted,
+          onProviderStarting: markProviderStarting,
+        }),
+      undefined,
+      { deferSendingUntilProviderStart: true },
     );
     if (outcome.outcome === 'duplicate') {
       // A 'claimed'/'sending' loser is a genuine concurrent in-flight attempt —
