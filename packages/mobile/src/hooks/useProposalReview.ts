@@ -50,6 +50,10 @@ function normalize(raw: Record<string, unknown>): ReviewProposal {
         ? (raw.sourceContext as Record<string, unknown>)
         : undefined,
     approvedAt: typeof raw.approvedAt === 'string' ? raw.approvedAt : null,
+    targetEntityType:
+      typeof raw.targetEntityType === 'string' ? raw.targetEntityType : undefined,
+    targetEntityId:
+      typeof raw.targetEntityId === 'string' ? raw.targetEntityId : undefined,
   };
 }
 

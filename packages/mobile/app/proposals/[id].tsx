@@ -18,11 +18,15 @@ import { formatMoneyCents } from '../../src/lib/format';
 import { approveGateFor } from '../../src/proposals/approveGate';
 import {
   ambiguousCatalogLines,
+  callbackView,
+  COMPLAINT_PREFIX,
+  complaintNoteView,
   entityCandidatesFromPayload,
   estimateTierView,
   reviewRows,
   typeLabel,
 } from '../../src/proposals/proposalReview';
+import { useStartCall } from '../../src/calls/useStartCall';
 
 // Proposal review + 5-second undo. The owner taps a proposal in the inbox,
 // reviews the AI's draft, and approves it — then has a 5s window to undo before
@@ -62,6 +66,14 @@ export default function ProposalReviewScreen() {
     }
     setShowApproveConfirm(true);
   }
+
+  // C7 — a complaint arrives as an `add_note` whose body is prefixed
+  // '[COMPLAINT]' (the pinned stand-in). C7/C8 — a complaint follow-up or a
+  // negotiation guardrail arrives as a `callback`. Both render meaningfully
+  // (pinned marker + severity; framing + tap-to-call) instead of a flat dump.
+  const complaint = complaintNoteView(proposal);
+  const callback = callbackView(proposal);
+  const { startCall, isCalling: isCallingBack, error: callbackError } = useStartCall();
 
   const entityCandidates =
     proposal?.proposalType === 'voice_clarification'
@@ -121,6 +133,74 @@ export default function ProposalReviewScreen() {
 
             {proposal.explanation ? (
               <Text className="mt-3 text-base text-mutedForeground">{proposal.explanation}</Text>
+            ) : null}
+
+            {/* C7 — complaint note: the pinned [COMPLAINT] marker + severity. */}
+            {complaint ? (
+              <View className="mt-4 rounded-lg border border-border bg-card p-4">
+                <View className="flex-row flex-wrap items-center gap-2">
+                  <Text className="rounded bg-primary px-2 py-0.5 text-xs font-semibold text-primaryForeground">
+                    {`Pinned · ${COMPLAINT_PREFIX}`}
+                  </Text>
+                  {complaint.severity === 'high' ? (
+                    <Text className="rounded bg-destructive px-2 py-0.5 text-xs font-semibold text-destructiveForeground">
+                      High severity
+                    </Text>
+                  ) : null}
+                </View>
+                <Text className="mt-2 text-base text-foreground">{complaint.body}</Text>
+                <Text className="mt-2 text-xs text-mutedForeground">
+                  Kept pinned to the top of the customer&apos;s history.
+                </Text>
+              </View>
+            ) : null}
+
+            {/* C7/C8 — callback follow-up: framing (the AI did not concede) +
+                tap-to-call. Falls back to opening the customer when the payload
+                carries no resolved customer id (today's common case). */}
+            {callback ? (
+              <View className="mt-4 rounded-lg border border-border bg-card p-4">
+                {callback.severity === 'high' ? (
+                  <Text className="mb-2 self-start rounded bg-destructive px-2 py-0.5 text-xs font-semibold text-destructiveForeground">
+                    High severity
+                  </Text>
+                ) : null}
+                <Text className="text-base text-foreground">{callback.framing}</Text>
+                {callback.askText ? (
+                  <Text className="mt-2 text-sm text-mutedForeground">
+                    They asked: {callback.askText}
+                  </Text>
+                ) : null}
+                {callback.recommendation ? (
+                  <Text className="mt-2 text-sm text-foreground">
+                    Suggested: {callback.recommendation}
+                  </Text>
+                ) : null}
+                {callback.customerId ? (
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Call customer back"
+                    onPress={() => callback.customerId && void startCall(callback.customerId)}
+                    disabled={isCallingBack}
+                    className="mt-3 min-h-11 items-center justify-center rounded-md bg-primary px-4 py-3"
+                  >
+                    {isCallingBack ? (
+                      <ActivityIndicator color="#ffffff" />
+                    ) : (
+                      <Text className="text-base font-semibold text-primaryForeground">
+                        Call customer back
+                      </Text>
+                    )}
+                  </Pressable>
+                ) : (
+                  <Text className="mt-3 text-sm text-mutedForeground">
+                    Open the customer record to call them back.
+                  </Text>
+                )}
+                {callbackError ? (
+                  <Text className="mt-2 text-sm text-destructive">{callbackError}</Text>
+                ) : null}
+              </View>
             ) : null}
 
             {isReschedule && phase === 'review' ? (

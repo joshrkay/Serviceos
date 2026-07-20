@@ -37,6 +37,9 @@ export interface ReviewProposal {
   payload?: Record<string, unknown>;
   sourceContext?: Record<string, unknown>;
   approvedAt?: string | null;
+  /** Record-level target (e.g. 'customer'), when the server stamps one. */
+  targetEntityType?: string;
+  targetEntityId?: string;
 }
 
 export interface EntityCandidate {
@@ -213,6 +216,162 @@ export function estimateTierView(
   const groups = groupOrder.map((k) => groupMap.get(k)!);
   const isTiered = groups.some((g) => g.options.length >= 2) || addOns.length > 0;
   return { isTiered, groups, addOns };
+}
+
+// ── C7/C8 — complaint + negotiation guardrail render helpers ────────────────
+// Complaint and negotiation intents mint no new proposal types: a complaint
+// produces an `add_note` (body prefixed '[COMPLAINT]') + a companion `callback`;
+// a negotiation produces a `callback` (± a discount `voice_clarification`). These
+// arrive in the inbox from the voice/AI path already. The helpers below read the
+// ACTUAL payload fields those tasks emit (packages/api/src/ai/tasks/
+// complaint-task.ts + negotiation-task.ts) so the review screen renders the
+// pinned marker, the severity, and a tap-to-call affordance instead of a flat
+// key/value dump. All are pure and malformed-safe.
+
+/** The add_note contract has no pin flag, so the body carries this stand-in. */
+export const COMPLAINT_PREFIX = '[COMPLAINT]';
+const COMPLAINT_PREFIX_RE = /^\s*\[COMPLAINT\]\s*/i;
+
+/** High-severity marker reason stamped on _meta.markers by the complaint task. */
+export const COMPLAINT_HIGH_SEVERITY_REASON = 'complaint_high_severity';
+/** Marker reason stamped on a negotiation ALLOW callback (discount in policy). */
+export const NEGOTIATION_WITHIN_POLICY_REASON = 'negotiation_discount_within_policy';
+
+export type ProposalSeverity = 'high' | 'normal';
+
+/**
+ * The `reason` strings on `_meta.markers[*]` — the deterministic, auditable
+ * flags the AI tasks attach (never an LLM mood read). Malformed `_meta` → [].
+ */
+export function proposalMarkerReasons(
+  payload: Record<string, unknown> | undefined,
+): string[] {
+  const meta = payload?._meta;
+  if (!isRecord(meta)) return [];
+  const markers = meta.markers;
+  if (!Array.isArray(markers)) return [];
+  const out: string[] = [];
+  for (const m of markers) {
+    if (isRecord(m) && typeof m.reason === 'string') out.push(m.reason);
+  }
+  return out;
+}
+
+export interface ComplaintNoteView {
+  /** The '[COMPLAINT]' prefix is the pinned-note stand-in (no pin flag exists). */
+  pinned: boolean;
+  severity: ProposalSeverity;
+  /** The complaint text with the '[COMPLAINT]' marker stripped. */
+  body: string;
+}
+
+/**
+ * View for a complaint `add_note` proposal — the pinned [COMPLAINT] marker, the
+ * severity (from `_meta.markers`), and the cleaned body. Returns null for any
+ * non-complaint proposal (wrong type, or an add_note without the prefix).
+ */
+export function complaintNoteView(
+  proposal: Pick<ReviewProposal, 'proposalType' | 'payload'> | undefined | null,
+): ComplaintNoteView | null {
+  if (!proposal || proposal.proposalType !== 'add_note') return null;
+  const body = typeof proposal.payload?.body === 'string' ? proposal.payload.body : '';
+  if (!COMPLAINT_PREFIX_RE.test(body)) return null;
+  return {
+    pinned: true,
+    severity: proposalMarkerReasons(proposal.payload).includes(COMPLAINT_HIGH_SEVERITY_REASON)
+      ? 'high'
+      : 'normal',
+    body: body.replace(COMPLAINT_PREFIX_RE, '').trim(),
+  };
+}
+
+export type CallbackKind = 'complaint' | 'negotiation' | 'discount_within_policy' | 'generic';
+
+export interface CallbackView {
+  kind: CallbackKind;
+  severity: ProposalSeverity;
+  /** Owner-facing one-liner explaining why to call back and the AI's stance. */
+  framing: string;
+  /** Negotiation-only: the deterministic owner recommendation. */
+  recommendation?: string;
+  /** Negotiation-only: the customer's ask, verbatim. */
+  askText?: string;
+  /**
+   * Resolved customer for tap-to-call, when the proposal carries one. Today's
+   * complaint/negotiation callback payloads do NOT include a customer id (the
+   * companion note carries the target, not the callback), so this is usually
+   * undefined and the screen falls back to opening the customer record. Read
+   * from payload.customerId → record targetEntity → sourceContext.customerId so
+   * it lights up automatically if the server starts stamping one.
+   */
+  customerId?: string;
+}
+
+function callbackCustomerId(proposal: ReviewProposal): string | undefined {
+  const p = proposal.payload ?? {};
+  if (typeof p.customerId === 'string' && p.customerId) return p.customerId;
+  if (
+    proposal.targetEntityType === 'customer' &&
+    typeof proposal.targetEntityId === 'string' &&
+    proposal.targetEntityId
+  ) {
+    return proposal.targetEntityId;
+  }
+  const sc = proposal.sourceContext ?? {};
+  if (typeof sc.customerId === 'string' && sc.customerId) return sc.customerId;
+  return undefined;
+}
+
+/**
+ * View for a `callback` proposal — the follow-up framing keyed off the payload
+ * `reason` the tasks emit ('customer_complaint_followup' /
+ * 'customer_negotiation_followup'), the severity, and (for negotiation) the
+ * recommendation + ask. The negotiation framing states plainly that the AI did
+ * NOT concede — it only flagged the pushback for the owner. Returns null for any
+ * non-callback proposal.
+ */
+export function callbackView(
+  proposal: ReviewProposal | undefined | null,
+): CallbackView | null {
+  if (!proposal || proposal.proposalType !== 'callback') return null;
+  const p = proposal.payload ?? {};
+  const reasons = proposalMarkerReasons(p);
+  const severity: ProposalSeverity = reasons.includes(COMPLAINT_HIGH_SEVERITY_REASON)
+    ? 'high'
+    : 'normal';
+  const reason = typeof p.reason === 'string' ? p.reason : '';
+  const recommendation = typeof p.recommendation === 'string' ? p.recommendation : undefined;
+  const askText = typeof p.askText === 'string' ? p.askText : undefined;
+  const customerId = callbackCustomerId(proposal);
+
+  let kind: CallbackKind = 'generic';
+  let framing = 'Owner follow-up — call the customer back.';
+  if (reason === 'customer_complaint_followup') {
+    kind = 'complaint';
+    framing =
+      severity === 'high'
+        ? 'High-severity complaint — call the customer back as soon as you can.'
+        : 'Complaint follow-up — call the customer back.';
+  } else if (reason === 'customer_negotiation_followup') {
+    if (reasons.includes(NEGOTIATION_WITHIN_POLICY_REASON)) {
+      kind = 'discount_within_policy';
+      framing =
+        'Discount within your policy — the AI did NOT apply it. Review and call back to confirm on your terms.';
+    } else {
+      kind = 'negotiation';
+      framing =
+        'Price/scope pushback — the AI did NOT negotiate or concede. Call back and decide on your terms.';
+    }
+  }
+
+  return {
+    kind,
+    severity,
+    framing,
+    ...(recommendation ? { recommendation } : {}),
+    ...(askText ? { askText } : {}),
+    ...(customerId ? { customerId } : {}),
+  };
 }
 
 export interface ReviewRow {

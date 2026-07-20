@@ -2,14 +2,29 @@ import { describe, expect, it } from 'vitest';
 import {
   UNDO_WINDOW_MS,
   ambiguousCatalogLines,
+  callbackView,
+  complaintNoteView,
   entityCandidatesFromPayload,
   estimateTierView,
   formatCents,
   humanizeKey,
+  proposalMarkerReasons,
   reviewRows,
+  type ReviewProposal,
   typeLabel,
   undoSecondsLeft,
 } from './proposalReview';
+
+/** Minimal ReviewProposal factory for the render-helper tests. */
+function makeProposal(over: Partial<ReviewProposal>): ReviewProposal {
+  return {
+    id: 'p1',
+    proposalType: 'callback',
+    status: 'ready_for_review',
+    summary: '',
+    ...over,
+  };
+}
 
 describe('typeLabel', () => {
   it('maps known types to friendly labels and de-underscores the rest', () => {
@@ -213,5 +228,132 @@ describe('ambiguousCatalogLines', () => {
         candidates: [{ id: 'cat-b', name: 'Premium valve', unitPriceCents: 8200, score: 0.6 }],
       },
     ]);
+  });
+});
+
+describe('proposalMarkerReasons', () => {
+  it('extracts marker reasons from _meta.markers', () => {
+    expect(
+      proposalMarkerReasons({ _meta: { markers: [{ path: 'body', reason: 'complaint_high_severity' }] } }),
+    ).toEqual(['complaint_high_severity']);
+  });
+
+  it('is malformed-safe (no _meta, non-array markers, missing reason)', () => {
+    expect(proposalMarkerReasons(undefined)).toEqual([]);
+    expect(proposalMarkerReasons({})).toEqual([]);
+    expect(proposalMarkerReasons({ _meta: { markers: 'nope' } })).toEqual([]);
+    expect(proposalMarkerReasons({ _meta: { markers: [{ path: 'x' }, 7] } })).toEqual([]);
+  });
+});
+
+describe('complaintNoteView (C7)', () => {
+  it('surfaces the pinned [COMPLAINT] marker, normal severity, and the cleaned body', () => {
+    const view = complaintNoteView(
+      makeProposal({
+        proposalType: 'add_note',
+        payload: { body: '[COMPLAINT] Tech left the yard gate open', targetKind: 'customer', targetId: 'c1' },
+      }),
+    );
+    expect(view).toEqual({ pinned: true, severity: 'normal', body: 'Tech left the yard gate open' });
+  });
+
+  it('reads high severity from the _meta.markers flag', () => {
+    const view = complaintNoteView(
+      makeProposal({
+        proposalType: 'add_note',
+        payload: {
+          body: '[COMPLAINT] Wants a full refund and is calling a lawyer',
+          _meta: { markers: [{ path: 'body', reason: 'complaint_high_severity' }] },
+        },
+      }),
+    );
+    expect(view?.severity).toBe('high');
+    expect(view?.body).toBe('Wants a full refund and is calling a lawyer');
+  });
+
+  it('returns null for a non-complaint add_note and for non-add_note types', () => {
+    expect(complaintNoteView(makeProposal({ proposalType: 'add_note', payload: { body: 'Regular note' } }))).toBeNull();
+    expect(complaintNoteView(makeProposal({ proposalType: 'callback', payload: { body: '[COMPLAINT] x' } }))).toBeNull();
+    expect(complaintNoteView(makeProposal({ proposalType: 'add_note', payload: {} }))).toBeNull();
+    expect(complaintNoteView(undefined)).toBeNull();
+  });
+});
+
+describe('callbackView (C7/C8)', () => {
+  it('frames a complaint follow-up callback and escalates severity', () => {
+    const normal = callbackView(
+      makeProposal({ proposalType: 'callback', payload: { reason: 'customer_complaint_followup' } }),
+    );
+    expect(normal?.kind).toBe('complaint');
+    expect(normal?.severity).toBe('normal');
+    expect(normal?.framing).toMatch(/Complaint follow-up/);
+
+    const high = callbackView(
+      makeProposal({
+        proposalType: 'callback',
+        payload: {
+          reason: 'customer_complaint_followup',
+          _meta: { markers: [{ path: 'body', reason: 'complaint_high_severity' }] },
+        },
+      }),
+    );
+    expect(high?.severity).toBe('high');
+    expect(high?.framing).toMatch(/High-severity/);
+  });
+
+  it('frames a negotiation callback as the AI having NOT conceded, with the ask + recommendation', () => {
+    const view = callbackView(
+      makeProposal({
+        proposalType: 'callback',
+        payload: {
+          reason: 'customer_negotiation_followup',
+          negotiationAskType: 'discount',
+          askText: 'Can you knock off 10%?',
+          recommendation: 'Hold your price; offer a faster slot instead.',
+          _meta: { markers: [{ path: 'recommendation', reason: 'negotiation_guardrail' }] },
+        },
+      }),
+    );
+    expect(view?.kind).toBe('negotiation');
+    expect(view?.framing).toMatch(/did NOT negotiate or concede/);
+    expect(view?.askText).toBe('Can you knock off 10%?');
+    expect(view?.recommendation).toBe('Hold your price; offer a faster slot instead.');
+  });
+
+  it('distinguishes a discount-within-policy ALLOW callback', () => {
+    const view = callbackView(
+      makeProposal({
+        proposalType: 'callback',
+        payload: {
+          reason: 'customer_negotiation_followup',
+          _meta: { markers: [{ path: 'recommendation', reason: 'negotiation_discount_within_policy' }] },
+        },
+      }),
+    );
+    expect(view?.kind).toBe('discount_within_policy');
+    expect(view?.framing).toMatch(/did NOT apply it/);
+  });
+
+  it('surfaces a tap-to-call customerId from the payload, the record target, or sourceContext', () => {
+    expect(
+      callbackView(makeProposal({ payload: { reason: 'customer_complaint_followup', customerId: 'c1' } }))?.customerId,
+    ).toBe('c1');
+    expect(
+      callbackView(
+        makeProposal({ payload: { reason: 'customer_complaint_followup' }, targetEntityType: 'customer', targetEntityId: 'c2' }),
+      )?.customerId,
+    ).toBe('c2');
+    expect(
+      callbackView(makeProposal({ payload: { reason: 'customer_complaint_followup' }, sourceContext: { customerId: 'c3' } }))
+        ?.customerId,
+    ).toBe('c3');
+    // Today's real complaint/negotiation callback payloads carry no customer id.
+    expect(callbackView(makeProposal({ payload: { reason: 'customer_complaint_followup' } }))?.customerId).toBeUndefined();
+  });
+
+  it('is malformed-safe and returns null for non-callback types', () => {
+    expect(callbackView(makeProposal({ proposalType: 'draft_invoice', payload: { reason: 'x' } }))).toBeNull();
+    expect(callbackView(makeProposal({ proposalType: 'callback', payload: undefined }))?.kind).toBe('generic');
+    expect(callbackView(undefined)).toBeNull();
   });
 });

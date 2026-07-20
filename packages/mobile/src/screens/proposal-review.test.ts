@@ -13,6 +13,7 @@ const h = vi.hoisted(() => ({
   undo: vi.fn(),
   reload: vi.fn(),
   back: vi.fn(),
+  startCall: vi.fn(),
   phase: 'review' as ReviewPhase,
   secondsLeft: 0,
   error: null as string | null,
@@ -40,6 +41,12 @@ vi.mock('../lib/useApiClient', () => ({
 }));
 vi.mock('../hooks/useMe', () => ({
   useMe: () => ({ me: { timezone: 'America/New_York' }, isLoading: false, error: null, switchMode: vi.fn(), refetch: vi.fn() }),
+}));
+// useStartCall pulls in expo-secure-store (native) via callbackStorage — stub it
+// so importing the screen doesn't drag a native binding into jsdom. The callback
+// tap-to-call wiring is asserted against this mock.
+vi.mock('../calls/useStartCall', () => ({
+  useStartCall: () => ({ startCall: h.startCall, isCalling: false, error: null }),
 }));
 // Stub the reschedule picker so this screen test asserts wiring (which type gets
 // the picker, and that a pick edits the proposal); the picker's slot fetching +
@@ -341,5 +348,64 @@ describe('Proposal review screen', () => {
     };
     const { queryByText } = render(createElement(ProposalReviewScreen));
     expect(queryByText('Edit')).toBeNull();
+  });
+
+  // C7 — complaint add_note renders the pinned marker + severity.
+  it('renders a complaint note with the pinned [COMPLAINT] marker and high-severity flag', () => {
+    h.proposal = {
+      id: 'p-comp',
+      proposalType: 'add_note',
+      status: 'ready_for_review',
+      summary: 'HIGH-SEVERITY complaint from the customer',
+      payload: {
+        body: '[COMPLAINT] We were overcharged and want a refund',
+        _meta: { markers: [{ path: 'body', reason: 'complaint_high_severity' }] },
+      },
+      approvedAt: null,
+    };
+    const { getByText } = render(createElement(ProposalReviewScreen));
+    expect(getByText('Pinned · [COMPLAINT]')).toBeTruthy();
+    expect(getByText('High severity')).toBeTruthy();
+    expect(getByText('We were overcharged and want a refund')).toBeTruthy();
+  });
+
+  // C7 — complaint follow-up callback with a resolved customer shows a wired call button.
+  it('renders a callback with a tap-to-call button wired to the customer', () => {
+    h.proposal = {
+      id: 'p-cb',
+      proposalType: 'callback',
+      status: 'ready_for_review',
+      summary: 'Complaint follow-up — call the customer back',
+      payload: { reason: 'customer_complaint_followup', customerId: 'c1' },
+      approvedAt: null,
+    };
+    const { getByText } = render(createElement(ProposalReviewScreen));
+    const call = getByText('Call customer back').closest('button')!;
+    expect(call.className).toMatch(/\bmin-h-11\b/);
+    fireEvent.click(call);
+    expect(h.startCall).toHaveBeenCalledWith('c1');
+  });
+
+  // C8 — negotiation callback states the AI did not concede; no customer id ⇒
+  // fall back to opening the customer record (no wired call button).
+  it('renders a negotiation callback framing without conceding and falls back when no customer id', () => {
+    h.proposal = {
+      id: 'p-neg',
+      proposalType: 'callback',
+      status: 'ready_for_review',
+      summary: "Discount request — AI didn't negotiate; call back",
+      payload: {
+        reason: 'customer_negotiation_followup',
+        askText: 'Can you do 10% off?',
+        recommendation: 'Hold your price.',
+        _meta: { markers: [{ path: 'recommendation', reason: 'negotiation_guardrail' }] },
+      },
+      approvedAt: null,
+    };
+    const { getByText, queryByText } = render(createElement(ProposalReviewScreen));
+    expect(getByText(/did NOT negotiate or concede/)).toBeTruthy();
+    expect(getByText('They asked: Can you do 10% off?')).toBeTruthy();
+    expect(queryByText('Call customer back')).toBeNull();
+    expect(getByText('Open the customer record to call them back.')).toBeTruthy();
   });
 });
