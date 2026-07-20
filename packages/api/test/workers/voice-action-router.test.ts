@@ -1037,7 +1037,7 @@ describe('voice-action-router worker', () => {
     });
   });
 
-  it('routes send_estimate as comms (draft-only, never auto-approves)', async () => {
+  it('routes send_estimate as comms (draft-only, never auto-approves) and gates free-text estimateId', async () => {
     const gateway = gatewayReturning([
       JSON.stringify({
         intentType: 'send_estimate',
@@ -1063,6 +1063,10 @@ describe('voice-action-router worker', () => {
     const payload = byTenant[0].payload as Record<string, unknown>;
     expect(payload.channel).toBe('sms');
     expect(payload.estimateReference).toBe('EST-0042');
+    // Free-text refs must stay gated — execution requires a UUID estimateId
+    // and has no reference-resolution step of its own (doomed-approval fix).
+    expect(missingFieldsFor(byTenant[0])).toEqual(['estimateId']);
+    expect(payload).not.toHaveProperty('estimateId');
   });
 
   it('routes record_payment as money (draft-only) with amount as integer cents', async () => {
