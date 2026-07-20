@@ -26,6 +26,9 @@ export interface UseProposalReviewResult {
   reject: (reason: string, details?: string) => Promise<void>;
   resolveLine: (lineIndex: number, catalogItemId: string) => Promise<void>;
   resolveEntity: (candidateId: string) => Promise<void>;
+  /** U2 (F4) — edit the draft payload before approving. Resolves true on
+   *  success, false on failure (error state is set); never throws. */
+  edit: (edits: Record<string, unknown>) => Promise<boolean>;
   undo: () => Promise<void>;
   reload: () => Promise<void>;
 }
@@ -208,6 +211,40 @@ export function useProposalReview(id: string): UseProposalReviewResult {
     [api, id],
   );
 
+  // U2 (F4) — edit before approving. PUT /api/proposals/:id shallow-merges
+  // `edits` into the payload server-side (revalidated by the type's Zod
+  // contract, audited, corrections captured). Response is the
+  // { proposal, editedFields } envelope from editProposal. Editing never
+  // changes the approval gate server-side — the owner still approves after.
+  const edit = useCallback(
+    async (edits: Record<string, unknown>): Promise<boolean> => {
+      setError(null);
+      try {
+        const res = await api(`/api/proposals/${id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ edits }),
+        });
+        if (!res.ok) throw new Error((await decodeError(res)).message);
+        const body = (await res.json()) as Record<string, unknown>;
+        const raw =
+          body.proposal && typeof body.proposal === 'object'
+            ? (body.proposal as Record<string, unknown>)
+            : body;
+        const p = normalize(raw);
+        setProposal(p);
+        setPhase(phaseForStatus(p.status, p.approvedAt ?? null));
+        return true;
+      } catch (e) {
+        setError(message(e));
+        // Stay on the review screen (not the error phase): the draft is
+        // intact server-side and the owner can retry or approve as-is.
+        return false;
+      }
+    },
+    [api, id],
+  );
+
   const undo = useCallback(async () => {
     setPhase('undoing');
     setError(null);
@@ -242,5 +279,5 @@ export function useProposalReview(id: string): UseProposalReviewResult {
     return () => clearInterval(interval);
   }, [phase]);
 
-  return { proposal, phase, error, secondsLeft, approve, reject, resolveLine, resolveEntity, undo, reload };
+  return { proposal, phase, error, secondsLeft, approve, reject, resolveLine, resolveEntity, edit, undo, reload };
 }

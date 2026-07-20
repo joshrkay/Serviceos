@@ -9,6 +9,7 @@ const h = vi.hoisted(() => ({
   reject: vi.fn().mockResolvedValue(undefined),
   resolveLine: vi.fn().mockResolvedValue(undefined),
   resolveEntity: vi.fn().mockResolvedValue(undefined),
+  edit: vi.fn().mockResolvedValue(true),
   undo: vi.fn(),
   reload: vi.fn(),
   back: vi.fn(),
@@ -30,6 +31,12 @@ const h = vi.hoisted(() => ({
 vi.mock('expo-router', () => ({
   useLocalSearchParams: () => ({ id: 'p1' }),
   useRouter: () => ({ back: h.back, push: vi.fn(), replace: vi.fn() }),
+  usePathname: () => '/proposals/p1',
+}));
+// ProposalEditPanel renders LineItemSheet, whose catalog search runs through
+// the real api client hook — stub it so edit-mode renders don't need auth.
+vi.mock('../lib/useApiClient', () => ({
+  useApiClient: () => vi.fn().mockResolvedValue({ ok: true, json: async () => ({ items: [] }) }),
 }));
 vi.mock('../hooks/useProposalReview', () => ({
   useProposalReview: () => ({
@@ -41,6 +48,7 @@ vi.mock('../hooks/useProposalReview', () => ({
     reject: h.reject,
     resolveLine: h.resolveLine,
     resolveEntity: h.resolveEntity,
+    edit: h.edit,
     undo: h.undo,
     reload: h.reload,
   }),
@@ -223,5 +231,76 @@ describe('Proposal review screen', () => {
     fireEvent.click(getByText('Approve').closest('button')!);
     expect(h.approve).not.toHaveBeenCalled();
     expect(getByText(/review carefully before approving/)).toBeTruthy();
+  });
+
+  // U2 (F4) — edit before approving.
+  it('Edit opens the panel; editing a cents field saves parsed integer cents', async () => {
+    h.proposal = {
+      id: 'p-edit',
+      proposalType: 'draft_invoice',
+      status: 'draft',
+      summary: 'Invoice Acme',
+      payload: { customerName: 'Acme', amountCents: 12345 },
+      approvedAt: null,
+    };
+    const { getByText, getByDisplayValue, findByText } = render(
+      createElement(ProposalReviewScreen),
+    );
+    const editBtn = getByText('Edit').closest('button')!;
+    expect(editBtn.className).toMatch(/\bmin-h-11\b/);
+    fireEvent.click(editBtn);
+    expect(getByText('Edit before approving')).toBeTruthy();
+
+    // The cents field renders as bare dollars ("123.45") ready to edit.
+    fireEvent.change(getByDisplayValue('123.45'), { target: { value: '$1,299.50' } });
+    fireEvent.click(getByText('Save').closest('button')!);
+    await findByText('Edit'); // panel closes back to the action row
+    expect(h.edit).toHaveBeenCalledWith({ amountCents: 129950 });
+  });
+
+  it('Cancel leaves edit mode without saving; no-op save just closes', () => {
+    setProposal('draft_invoice', 'Invoice Acme');
+    const { getByText, queryByText } = render(createElement(ProposalReviewScreen));
+    fireEvent.click(getByText('Edit').closest('button')!);
+    fireEvent.click(getByText('Cancel').closest('button')!);
+    expect(h.edit).not.toHaveBeenCalled();
+    expect(queryByText('Edit before approving')).toBeNull();
+  });
+
+  it('line-item payloads offer the grounded editor (remove + add from price book)', () => {
+    h.proposal = {
+      id: 'p-li',
+      proposalType: 'draft_estimate',
+      status: 'draft',
+      summary: 'Estimate heater',
+      payload: {
+        lineItems: [
+          { catalogItemId: 'c1', description: 'Heater', quantity: 1, unitPriceCents: 72000 },
+        ],
+      },
+      approvedAt: null,
+    };
+    const { getByText } = render(createElement(ProposalReviewScreen));
+    fireEvent.click(getByText('Edit').closest('button')!);
+    expect(getByText('Heater')).toBeTruthy();
+    expect(getByText('Remove')).toBeTruthy();
+    expect(getByText('+ Add from price book')).toBeTruthy();
+    // Removing the row and saving sends the new lineItems array.
+    fireEvent.click(getByText('Remove').closest('button')!);
+    fireEvent.click(getByText('Save').closest('button')!);
+    expect(h.edit).toHaveBeenCalledWith({ lineItems: [] });
+  });
+
+  it('clarifications offer no Edit (they resolve via chips)', () => {
+    h.proposal = {
+      id: 'p-cl',
+      proposalType: 'voice_clarification',
+      status: 'draft',
+      summary: 'Which Bob?',
+      payload: { reason: 'ambiguous_entity', entityCandidates: [{ id: 'c1', label: 'Bob' }] },
+      approvedAt: null,
+    };
+    const { queryByText } = render(createElement(ProposalReviewScreen));
+    expect(queryByText('Edit')).toBeNull();
   });
 });

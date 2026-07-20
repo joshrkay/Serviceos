@@ -104,3 +104,29 @@ export function formatRelativeTime(
   if (day < 7) return `${day}d`;
   return formatShortDate(d, timeZone);
 }
+
+/**
+ * Parse a user-typed money amount ("$1,234.50", "1234.5", "80") to integer
+ * cents. Returns null for anything that isn't a plain non-negative amount with
+ * at most 2 decimal places. String math only — never float multiplication
+ * (0.29 * 100 !== 29 in IEEE754).
+ */
+export function parseMoneyToCents(text: string): number | null {
+  const cleaned = text.trim().replace(/^\$/, '').replace(/,/g, '');
+  if (!/^\d+(\.\d{1,2})?$/.test(cleaned)) return null;
+  const [dollars, frac = ''] = cleaned.split('.');
+  return Number(dollars) * 100 + Number((frac + '00').slice(0, 2));
+}
+
+/**
+ * Integer cents → the bare editable input text ("12345" → "123.45"). The
+ * inverse of {@link parseMoneyToCents}; no "$"/"," so round-tripping an
+ * untouched field never registers as an edit.
+ */
+export function centsToInputValue(cents: number): string {
+  const sign = cents < 0 ? '-' : '';
+  const abs = Math.abs(Math.trunc(cents));
+  const dollars = Math.trunc(abs / 100);
+  const frac = String(abs % 100).padStart(2, '0');
+  return `${sign}${dollars}.${frac}`;
+}

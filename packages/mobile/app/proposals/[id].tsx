@@ -10,6 +10,7 @@ import {
 } from 'react-native';
 import { ClarifyPicker } from '../../src/components/ClarifyPicker';
 import { ErrorState } from '../../src/components/ErrorState';
+import { ProposalEditPanel } from '../../src/components/ProposalEditPanel';
 import { useProposalReview } from '../../src/hooks/useProposalReview';
 import { formatMoneyCents } from '../../src/lib/format';
 import { approveGateFor } from '../../src/proposals/approveGate';
@@ -27,11 +28,22 @@ export default function ProposalReviewScreen() {
   const params = useLocalSearchParams<{ id: string }>();
   const id = Array.isArray(params.id) ? params.id[0] : (params.id ?? '');
   const router = useRouter();
-  const { proposal, phase, error, secondsLeft, approve, reject, resolveLine, resolveEntity, undo, reload } =
+  const { proposal, phase, error, secondsLeft, approve, reject, resolveLine, resolveEntity, edit, undo, reload } =
     useProposalReview(id);
   const [showRejectForm, setShowRejectForm] = useState(false);
   const [rejectReason, setRejectReason] = useState('');
   const [showApproveConfirm, setShowApproveConfirm] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [savingEdit, setSavingEdit] = useState(false);
+
+  // U2 (F4) — save the edited fields, then drop back to review of the fresh
+  // server payload. On failure the panel stays open (error banner shows).
+  async function saveEdits(edits: Record<string, unknown>) {
+    setSavingEdit(true);
+    const ok = await edit(edits);
+    setSavingEdit(false);
+    if (ok) setEditing(false);
+  }
 
   // U1 lane gate — classified from the CURRENT proposal every render, so a
   // voice_clarification that resolves in place into a re-drafted money/comms
@@ -141,10 +153,25 @@ export default function ProposalReviewScreen() {
                 ))
               : null}
 
-            {/* Review → Approve / Reject */}
+            {/* Review → Approve / Edit / Reject */}
             {phase === 'review' || phase === 'approving' || phase === 'rejecting' ? (
               <View className="mt-8 gap-3">
-                {proposal.proposalType !== 'voice_clarification' && !showApproveConfirm ? (
+                {/* U2 (F4) — edit-before-approve panel replaces the action row. */}
+                {editing ? (
+                  <View>
+                    {error ? (
+                      <Text className="mb-2 text-base text-destructive">{error}</Text>
+                    ) : null}
+                    <ProposalEditPanel
+                      payload={proposal.payload}
+                      saving={savingEdit}
+                      onCancel={() => setEditing(false)}
+                      onSave={(e) => void saveEdits(e)}
+                    />
+                  </View>
+                ) : null}
+
+                {!editing && proposal.proposalType !== 'voice_clarification' && !showApproveConfirm ? (
                   <Pressable
                     accessibilityRole="button"
                     accessibilityLabel="Approve"
@@ -162,7 +189,7 @@ export default function ProposalReviewScreen() {
 
                 {/* U1 — explicit confirm for comms/money/irreversible/unknown lanes.
                     Capture one-taps and never reaches here. */}
-                {showApproveConfirm && approveGate?.kind === 'confirm' ? (
+                {!editing && showApproveConfirm && approveGate?.kind === 'confirm' ? (
                   <View className="rounded-lg border border-border bg-card p-4">
                     <Text className="text-base font-medium text-foreground">
                       {approveGate.title}
@@ -208,7 +235,21 @@ export default function ProposalReviewScreen() {
                   </View>
                 ) : null}
 
-                {!showRejectForm ? (
+                {/* U2 (F4) — enter edit mode; hidden mid-confirm and for
+                    clarifications (they resolve via chips, not edits). */}
+                {!editing && !showApproveConfirm && proposal.proposalType !== 'voice_clarification' ? (
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Edit"
+                    onPress={() => setEditing(true)}
+                    disabled={phase !== 'review'}
+                    className="min-h-11 items-center justify-center rounded-md border border-border px-4 py-3"
+                  >
+                    <Text className="text-base font-semibold text-foreground">Edit</Text>
+                  </Pressable>
+                ) : null}
+
+                {editing ? null : !showRejectForm ? (
                   <Pressable
                     accessibilityRole="button"
                     accessibilityLabel="Reject"

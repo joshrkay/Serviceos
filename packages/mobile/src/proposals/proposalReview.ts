@@ -126,7 +126,8 @@ export function humanizeKey(key: string): string {
 /** Money is stored in integer cents; render it as dollars, never float math. */
 export { formatMoneyCents as formatCents } from '../lib/format';
 
-function isCentsKey(key: string): boolean {
+/** True for integer-cents payload keys (amountCents, unitPriceCents, …). */
+export function isCentsKey(key: string): boolean {
   return /cents$/i.test(key);
 }
 

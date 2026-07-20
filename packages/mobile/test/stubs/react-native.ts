@@ -46,6 +46,11 @@ export const Platform = {
   OS: 'ios' as 'ios' | 'android' | 'web',
 };
 
+// Renders children only while `visible` — enough for sheet/dialog flows
+// (LineItemSheet) to be exercised as plain DOM in screen tests.
+export const Modal = ({ children, visible }: Props) =>
+  visible ? createElement('div', { 'data-modal': 'true' }, children as ReactNode) : null;
+
 export const TextInput = ({ onChangeText, value, className, placeholder }: Props) =>
   createElement('input', {
     className,
