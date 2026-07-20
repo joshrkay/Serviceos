@@ -33,7 +33,17 @@ interface CreateVoiceRecordingBody {
   conversationId?: string;
   audioUrl: string;
   jobId?: string;
+  /**
+   * U11 — optional client idempotency key. When present, a replayed create
+   * (same tenant+key) returns the ORIGINAL recording instead of minting a
+   * duplicate. Bounded to keep it index-friendly; the mobile client mints a
+   * UUID today (U12 will make it stable across offline-flush retries).
+   */
+  idempotencyKey?: string;
 }
+
+/** U11 — bound on the client idempotency key length (UUID today; generous headroom). */
+const MAX_IDEMPOTENCY_KEY_LENGTH = 255;
 
 interface RetryTranscriptionBody {
   audioUrl: string;
@@ -385,6 +395,25 @@ export function createVoiceRouter(
         return;
       }
 
+      // U11 — optional client idempotency key. Reject a malformed value up
+      // front (before any repo/queue work); a missing key stays valid and
+      // keeps today's "always mint a new recording" behavior.
+      let idempotencyKey: string | undefined;
+      if (body.idempotencyKey !== undefined) {
+        if (
+          typeof body.idempotencyKey !== 'string' ||
+          body.idempotencyKey.length === 0 ||
+          body.idempotencyKey.length > MAX_IDEMPOTENCY_KEY_LENGTH
+        ) {
+          res.status(400).json({
+            error: 'VALIDATION_ERROR',
+            message: `idempotencyKey must be a non-empty string of at most ${MAX_IDEMPOTENCY_KEY_LENGTH} characters`,
+          });
+          return;
+        }
+        idempotencyKey = body.idempotencyKey;
+      }
+
       const errors = validateVoiceIngest({
         tenantId: req.auth!.tenantId,
         fileId: body.fileId,
@@ -421,26 +450,60 @@ export function createVoiceRouter(
         verifiedJobId = parsedJobId.data;
       }
 
+      // Enqueue the transcription job under the recording's STABLE create
+      // dedupe key. Reused on the replay path below: re-sending with the same
+      // key is a no-op if the original job is still queued, but rescues a
+      // create-then-crash (row written, request died before enqueue) — the
+      // queue's own idempotency makes the re-send safe.
+      const enqueueTranscription = (recordingId: string, conversationId?: string) =>
+        queue.send(
+          'transcription',
+          {
+            tenantId: req.auth!.tenantId,
+            recordingId,
+            audioUrl: body.audioUrl,
+            conversationId,
+            ...(verifiedJobId ? { jobId: verifiedJobId } : {}),
+          },
+          `${req.auth!.tenantId}:${recordingId}:transcription:create`,
+        );
+
+      // U11 — replay guard. A repeated create carrying an idempotency key that
+      // already resolves to a recording in this tenant MUST return the ORIGINAL
+      // recording (never a duplicate) AND re-issue the queue send: if the first
+      // request died between voiceRepo.create and the enqueue, the row would
+      // otherwise be stranded in 'pending' forever (the ~90s client poll times
+      // out). The re-send is dedupe-safe. Not a fresh create, so nothing new to
+      // audit here.
+      if (idempotencyKey) {
+        const existing = await voiceRepo.findByIdempotencyKey(
+          req.auth!.tenantId,
+          idempotencyKey,
+        );
+        if (existing) {
+          const queueMessageId = await enqueueTranscription(
+            existing.id,
+            existing.conversationId,
+          );
+          res.status(202).json({
+            recording: existing,
+            queueMessageId,
+          });
+          return;
+        }
+      }
+
       const recording = await voiceRepo.create(
         createVoiceRecording({
           tenantId: req.auth!.tenantId,
           fileId: body.fileId,
           conversationId: body.conversationId,
           createdBy: req.auth!.userId,
+          idempotencyKey,
         })
       );
 
-      const queueMessageId = await queue.send(
-        'transcription',
-        {
-          tenantId: req.auth!.tenantId,
-          recordingId: recording.id,
-          audioUrl: body.audioUrl,
-          conversationId: body.conversationId,
-          ...(verifiedJobId ? { jobId: verifiedJobId } : {}),
-        },
-        `${req.auth!.tenantId}:${recording.id}:transcription:create`
-      );
+      const queueMessageId = await enqueueTranscription(recording.id, body.conversationId);
 
       res.status(202).json({
         recording,

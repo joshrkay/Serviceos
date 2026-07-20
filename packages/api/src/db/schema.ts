@@ -6305,6 +6305,26 @@ export const MIGRATIONS = {
     ALTER TABLE voice_recordings
       ADD COLUMN IF NOT EXISTS answer JSONB;
   `,
+
+  // U11 (iOS blueprint, offline prerequisite) — client idempotency key on the
+  // in-app voice-note create path. The mobile client already sends
+  // `idempotencyKey` in POST /api/voice/recordings; the server persists it here
+  // so a replayed create (offline flush / retry) resolves to the ORIGINAL
+  // recording instead of minting a duplicate + duplicate transcription job.
+  //
+  // Additive nullable column (no DEFAULT): every existing/legacy row and the
+  // telephony path read NULL = "no client idempotency lifecycle". The partial
+  // unique index scopes uniqueness to (tenant_id, idempotency_key) and EXCLUDES
+  // NULL rows (WHERE idempotency_key IS NOT NULL) so legacy/telephony NULLs
+  // never collide with each other. Tenant scoping / RLS ride the existing
+  // voice_recordings policy (migration 007).
+  '260_voice_recordings_idempotency_key': `
+    ALTER TABLE voice_recordings
+      ADD COLUMN IF NOT EXISTS idempotency_key TEXT;
+    CREATE UNIQUE INDEX IF NOT EXISTS voice_recordings_tenant_idempotency_key_uq
+      ON voice_recordings (tenant_id, idempotency_key)
+      WHERE idempotency_key IS NOT NULL;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
