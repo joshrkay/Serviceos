@@ -17,12 +17,14 @@ import { useProposalReview } from '../../src/hooks/useProposalReview';
 import { formatMoneyCents } from '../../src/lib/format';
 import { approveGateFor } from '../../src/proposals/approveGate';
 import {
+  agreementProposalView,
   ambiguousCatalogLines,
   callbackView,
   COMPLAINT_PREFIX,
   complaintNoteView,
   entityCandidatesFromPayload,
   estimateTierView,
+  reviewResponseView,
   reviewRows,
   typeLabel,
 } from '../../src/proposals/proposalReview';
@@ -74,6 +76,13 @@ export default function ProposalReviewScreen() {
   const complaint = complaintNoteView(proposal);
   const callback = callbackView(proposal);
   const { startCall, isCalling: isCallingBack, error: callbackError } = useStartCall();
+
+  // E9 — a review_response_proposal shows its DRAFTED PUBLIC REPLY prominently
+  // (it posts publicly to Google — comms lane, already gets the U1 comms
+  // confirm). A recurring/agreement-related proposal names the agreement + its
+  // cadence so the approval is unambiguous about WHICH plan it touches.
+  const reviewResponse = reviewResponseView(proposal);
+  const agreement = agreementProposalView(proposal);
 
   const entityCandidates =
     proposal?.proposalType === 'voice_clarification'
@@ -199,6 +208,48 @@ export default function ProposalReviewScreen() {
                 )}
                 {callbackError ? (
                   <Text className="mt-2 text-sm text-destructive">{callbackError}</Text>
+                ) : null}
+              </View>
+            ) : null}
+
+            {/* E9 — recurring/agreement proposal: name the agreement + cadence
+                so the owner sees WHICH plan this approval affects. */}
+            {agreement ? (
+              <View className="mt-4 rounded-lg border border-border bg-card p-4">
+                <Text className="text-xs font-medium uppercase tracking-wide text-mutedForeground">
+                  Agreement
+                </Text>
+                <Text className="mt-1 text-base font-medium text-foreground">
+                  {agreement.name ?? 'Service agreement'}
+                </Text>
+                {agreement.cadence ? (
+                  <Text className="mt-1 text-sm text-mutedForeground">{agreement.cadence}</Text>
+                ) : null}
+              </View>
+            ) : null}
+
+            {/* E9 — review_response_proposal: the drafted PUBLIC reply, shown in
+                full before the comms confirm because it posts publicly. */}
+            {reviewResponse ? (
+              <View className="mt-4 rounded-lg border border-border bg-card p-4">
+                <Text className="text-xs font-medium uppercase tracking-wide text-mutedForeground">
+                  Public reply (posts to Google)
+                </Text>
+                <Text className="mt-2 text-base text-foreground">{reviewResponse.publicReply}</Text>
+                {reviewResponse.privateFollowUp ? (
+                  <View className="mt-3 border-t border-border pt-3">
+                    <Text className="text-xs font-medium uppercase tracking-wide text-mutedForeground">
+                      Private {reviewResponse.privateFollowUp.channel}
+                    </Text>
+                    <Text className="mt-1 text-base text-foreground">
+                      {reviewResponse.privateFollowUp.body}
+                    </Text>
+                  </View>
+                ) : null}
+                {reviewResponse.serviceCreditCents ? (
+                  <Text className="mt-3 text-sm text-mutedForeground">
+                    Service credit: {formatMoneyCents(reviewResponse.serviceCreditCents)}
+                  </Text>
                 ) : null}
               </View>
             ) : null}

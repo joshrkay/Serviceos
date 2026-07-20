@@ -11,7 +11,7 @@ export interface PersonaNavInput {
 
 export interface PersonaQuickLink {
   label: string;
-  route: '/messages' | '/schedule' | '/estimates' | '/invoices' | '/approvals' | '/jobs';
+  route: '/messages' | '/schedule' | '/estimates' | '/invoices' | '/agreements' | '/approvals' | '/jobs';
 }
 
 export interface PersonaNavModel {
@@ -33,6 +33,9 @@ const SUPERVISOR_LINKS: readonly PersonaQuickLink[] = [
   { label: 'Schedule', route: '/schedule' },
   { label: 'Estimates', route: '/estimates' },
   { label: 'Invoices', route: '/invoices' },
+  // U10 (E5b) — agreements is an oversight/owner surface (recurring/membership
+  // billing), so it rides with the supervisor quick links, not tech/both.
+  { label: 'Agreements', route: '/agreements' },
   { label: 'Approvals', route: '/approvals' },
 ];
 

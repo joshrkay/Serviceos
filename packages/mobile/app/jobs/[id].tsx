@@ -99,6 +99,20 @@ export default function JobDetailScreen() {
             ]}
           />
 
+          {/* E8 (request-feedback) — DEFERRED, mirrors the invoice A8/A9 note.
+              request_feedback is a comms proposal type with NO client mint path:
+              POST /api/proposals only accepts the four scheduling types, and no
+              direct POST /api/jobs/:id/request-feedback route exists. The server
+              already auto-asks 24h after completion (review-request sweep). Until
+              a direct route lands, surface the sanctioned voice affordance so the
+              owner can still send it on demand. */}
+          {data.status === 'completed' ? (
+            <Text className="mt-4 text-sm text-mutedForeground">
+              A feedback request goes out automatically the day after completion. To ask now,
+              say it out loud — it lands in Approvals for you to confirm.
+            </Text>
+          ) : null}
+
           <Text className="mb-2 mt-6 text-xs font-medium uppercase tracking-wide text-mutedForeground">
             Job tools
           </Text>

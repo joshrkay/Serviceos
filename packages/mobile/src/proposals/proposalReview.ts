@@ -2,6 +2,7 @@
 // formatting the payload into review rows and the undo-window countdown math.
 // Kept pure so it unit-tests without a renderer.
 import { formatMoneyCents } from '../lib/format';
+import { humanizeRecurrence } from '../api/agreements';
 
 /** The 5s human-approval undo window — mirrors the API's UNDO_WINDOW_MS. */
 export const UNDO_WINDOW_MS = 5000;
@@ -20,6 +21,8 @@ const TYPE_LABEL: Record<string, string> = {
   reschedule_appointment: 'Reschedule',
   create_customer: 'Customer',
   voice_clarification: 'Clarify',
+  review_response_proposal: 'Review response',
+  request_feedback: 'Feedback request',
 };
 
 /** Friendly label for a proposal type (falls back to the de-underscored type). */
@@ -371,6 +374,131 @@ export function callbackView(
     ...(recommendation ? { recommendation } : {}),
     ...(askText ? { askText } : {}),
     ...(customerId ? { customerId } : {}),
+  };
+}
+
+// ── E9 — review_response + recurring/agreement render helpers ───────────────
+// Both proposal shapes arrive in the inbox from the voice/AI/worker paths
+// already (a review_response_proposal from the google-reviews poller or the
+// respond_to_review voice on-ramp; agreement-related proposals when a worker
+// stamps one). These pure helpers read the ACTUAL emitted fields so the review
+// screen renders the drafted reply / the named agreement instead of a flat
+// key/value dump. Malformed-safe; RN-free so they unit-test without a renderer.
+
+export interface ReviewResponseView {
+  /**
+   * The drafted PUBLIC reply text — this posts publicly to Google Business
+   * Profile, so the screen shows it prominently before the (comms-lane) confirm.
+   * (payload.publicResponse.text — see
+   * packages/shared/src/contracts/review-response-proposal.ts.)
+   */
+  publicReply: string;
+  classification?: string;
+  /** Optional 1:1 follow-up to the matched customer (email/SMS). */
+  privateFollowUp?: { channel: string; body: string };
+  /** Optional service credit in integer cents. */
+  serviceCreditCents?: number;
+}
+
+/**
+ * View for a `review_response_proposal` — surfaces the drafted public reply
+ * (and any private follow-up / service credit) so the owner reviews the exact
+ * words that will be posted publicly. Returns null for any other proposal type,
+ * or when the payload carries no reply text.
+ */
+export function reviewResponseView(
+  proposal: Pick<ReviewProposal, 'proposalType' | 'payload'> | undefined | null,
+): ReviewResponseView | null {
+  if (!proposal || proposal.proposalType !== 'review_response_proposal') return null;
+  const p = proposal.payload ?? {};
+  const pub = isRecord(p.publicResponse) ? p.publicResponse : undefined;
+  const publicReply = typeof pub?.text === 'string' ? pub.text.trim() : '';
+  if (!publicReply) return null;
+
+  const view: ReviewResponseView = { publicReply };
+
+  if (typeof p.classification === 'string') view.classification = p.classification;
+
+  const priv = isRecord(p.privateFollowUp) ? p.privateFollowUp : undefined;
+  if (priv && typeof priv.body === 'string' && priv.body.trim()) {
+    view.privateFollowUp = {
+      channel: typeof priv.channel === 'string' ? priv.channel : 'message',
+      body: priv.body.trim(),
+    };
+  }
+
+  const credit = isRecord(p.serviceCredit) ? p.serviceCredit : undefined;
+  if (credit && typeof credit.amountCents === 'number' && credit.amountCents > 0) {
+    view.serviceCreditCents = credit.amountCents;
+  }
+
+  return view;
+}
+
+export interface AgreementProposalView {
+  /** Resolved agreement id, when the proposal carries one (deep-link target). */
+  agreementId?: string;
+  /** Human agreement name, when stamped ("Quarterly HVAC Tune-up"). */
+  name?: string;
+  /** Humanized cadence from a raw RRULE on the payload, when present. */
+  cadence?: string;
+}
+
+/** Read the agreement id from payload → record target → sourceContext. */
+function agreementIdOf(proposal: ReviewProposal): string | undefined {
+  const p = proposal.payload ?? {};
+  if (typeof p.agreementId === 'string' && p.agreementId) return p.agreementId;
+  if (
+    proposal.targetEntityType === 'agreement' &&
+    typeof proposal.targetEntityId === 'string' &&
+    proposal.targetEntityId
+  ) {
+    return proposal.targetEntityId;
+  }
+  const sc = proposal.sourceContext ?? {};
+  if (typeof sc.agreementId === 'string' && sc.agreementId) return sc.agreementId;
+  return undefined;
+}
+
+/**
+ * View for a recurring/agreement-related proposal — names the agreement (id +
+ * label) and its cadence so an approval clearly references WHICH recurring
+ * plan, not a bare payload dump. Gated on a real agreement signal (an
+ * agreementId or a recurrenceRule) so it never false-positives on the many
+ * proposals that carry an unrelated `name`. Returns null otherwise. Mirrors the
+ * callbackCustomerId pattern: reads several locations so it lights up
+ * automatically once the server starts stamping the fields.
+ */
+export function agreementProposalView(
+  proposal: ReviewProposal | undefined | null,
+): AgreementProposalView | null {
+  if (!proposal) return null;
+  const p = proposal.payload ?? {};
+  const sc = proposal.sourceContext ?? {};
+
+  const agreementId = agreementIdOf(proposal);
+  const rawRule =
+    typeof p.recurrenceRule === 'string'
+      ? p.recurrenceRule
+      : typeof sc.recurrenceRule === 'string'
+        ? sc.recurrenceRule
+        : undefined;
+
+  // No agreement signal → not an agreement proposal (avoid `name` false hits).
+  if (!agreementId && !rawRule) return null;
+
+  const name =
+    typeof p.agreementName === 'string' && p.agreementName
+      ? p.agreementName
+      : typeof sc.agreementName === 'string' && sc.agreementName
+        ? sc.agreementName
+        : undefined;
+  const cadence = rawRule ? humanizeRecurrence(rawRule) : undefined;
+
+  return {
+    ...(agreementId ? { agreementId } : {}),
+    ...(name ? { name } : {}),
+    ...(cadence ? { cadence } : {}),
   };
 }
 

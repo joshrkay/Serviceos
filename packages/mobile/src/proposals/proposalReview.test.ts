@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   UNDO_WINDOW_MS,
+  agreementProposalView,
   ambiguousCatalogLines,
   callbackView,
   complaintNoteView,
@@ -9,6 +10,7 @@ import {
   formatCents,
   humanizeKey,
   proposalMarkerReasons,
+  reviewResponseView,
   reviewRows,
   type ReviewProposal,
   typeLabel,
@@ -355,5 +357,87 @@ describe('callbackView (C7/C8)', () => {
     expect(callbackView(makeProposal({ proposalType: 'draft_invoice', payload: { reason: 'x' } }))).toBeNull();
     expect(callbackView(makeProposal({ proposalType: 'callback', payload: undefined }))?.kind).toBe('generic');
     expect(callbackView(undefined)).toBeNull();
+  });
+});
+
+describe('reviewResponseView (E9)', () => {
+  it('surfaces the drafted public reply text prominently', () => {
+    const view = reviewResponseView(
+      makeProposal({
+        proposalType: 'review_response_proposal',
+        payload: {
+          reviewId: 'r1',
+          classification: 'specific_complaint',
+          publicResponse: { text: 'Thank you for the feedback — we will make it right.', approved: false },
+          privateFollowUp: null,
+          serviceCredit: null,
+        },
+      }),
+    );
+    expect(view?.publicReply).toBe('Thank you for the feedback — we will make it right.');
+    expect(view?.classification).toBe('specific_complaint');
+    expect(view?.privateFollowUp).toBeUndefined();
+    expect(view?.serviceCreditCents).toBeUndefined();
+  });
+
+  it('carries the private follow-up and service credit when present', () => {
+    const view = reviewResponseView(
+      makeProposal({
+        proposalType: 'review_response_proposal',
+        payload: {
+          reviewId: 'r1',
+          publicResponse: { text: 'Public reply.', approved: false },
+          privateFollowUp: { customerId: 'c1', channel: 'sms', body: 'Sorry about that!', approved: false },
+          serviceCredit: { customerId: 'c1', amountCents: 2500, approved: false },
+        },
+      }),
+    );
+    expect(view?.privateFollowUp).toEqual({ channel: 'sms', body: 'Sorry about that!' });
+    expect(view?.serviceCreditCents).toBe(2500);
+  });
+
+  it('is malformed-safe and returns null for other types / empty reply', () => {
+    expect(reviewResponseView(makeProposal({ proposalType: 'draft_invoice' }))).toBeNull();
+    expect(
+      reviewResponseView(makeProposal({ proposalType: 'review_response_proposal', payload: {} })),
+    ).toBeNull();
+    expect(
+      reviewResponseView(
+        makeProposal({ proposalType: 'review_response_proposal', payload: { publicResponse: { text: '   ' } } }),
+      ),
+    ).toBeNull();
+    expect(reviewResponseView(undefined)).toBeNull();
+  });
+});
+
+describe('agreementProposalView (E9)', () => {
+  it('names the agreement and humanizes the cadence from the payload', () => {
+    const view = agreementProposalView(
+      makeProposal({
+        proposalType: 'draft_invoice',
+        payload: { agreementId: 'ag1', agreementName: 'Quarterly HVAC Tune-up', recurrenceRule: 'FREQ=QUARTERLY' },
+      }),
+    );
+    expect(view).toEqual({ agreementId: 'ag1', name: 'Quarterly HVAC Tune-up', cadence: 'Quarterly' });
+  });
+
+  it('reads the agreement id from a record target and name/rule from sourceContext', () => {
+    const view = agreementProposalView(
+      makeProposal({
+        targetEntityType: 'agreement',
+        targetEntityId: 'ag2',
+        sourceContext: { agreementName: 'Monthly Lawn Care', recurrenceRule: 'FREQ=MONTHLY;INTERVAL=1' },
+      }),
+    );
+    expect(view).toEqual({ agreementId: 'ag2', name: 'Monthly Lawn Care', cadence: 'Monthly' });
+  });
+
+  it('does NOT false-positive on an unrelated payload name', () => {
+    // create_customer carries `name` but is not agreement-related.
+    expect(
+      agreementProposalView(makeProposal({ proposalType: 'create_customer', payload: { name: 'Jane Doe' } })),
+    ).toBeNull();
+    expect(agreementProposalView(makeProposal({ payload: {} }))).toBeNull();
+    expect(agreementProposalView(undefined)).toBeNull();
   });
 });
