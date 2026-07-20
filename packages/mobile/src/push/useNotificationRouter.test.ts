@@ -109,3 +109,17 @@ describe('useNotificationRouter', () => {
     expect(h.foregroundRemove).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('emergency banner wiring (U4/B7)', () => {
+  it('a foreground escalation/emergency raises the banner store; others do not', async () => {
+    const { __resetEmergencyForTests, currentEmergency } = await import('./emergencyBanner');
+    __resetEmergencyForTests();
+    renderHook(() => useNotificationRouter());
+    (h.foregroundCb as unknown as (d: unknown) => void)({ type: 'emergency', screen: '/approvals' });
+    expect(currentEmergency()?.data.type).toBe('emergency');
+    __resetEmergencyForTests();
+    (h.foregroundCb as unknown as (d: unknown) => void)({ type: 'payment_received' });
+    expect(currentEmergency()).toBeNull();
+    __resetEmergencyForTests();
+  });
+});

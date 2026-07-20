@@ -39,7 +39,13 @@ export function addResponseListener(cb: (data: NotificationData) => void): { rem
   );
 }
 
-/** A notification arriving while the app is foregrounded. */
-export function addForegroundListener(cb: () => void): { remove: () => void } {
-  return Notifications.addNotificationReceivedListener(() => cb());
+/** A notification arriving while the app is foregrounded. Passes the payload
+ *  through so the router can raise the emergency banner (U4/B7) — callers that
+ *  only refresh badges simply ignore the argument. */
+export function addForegroundListener(
+  cb: (data: NotificationData) => void,
+): { remove: () => void } {
+  return Notifications.addNotificationReceivedListener((n) =>
+    cb(n.request.content.data as NotificationData),
+  );
 }
