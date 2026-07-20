@@ -40,6 +40,39 @@ export interface MutationHttpError extends Error {
   status?: number;
 }
 
+/**
+ * Extracts the API's actual `message` from a non-OK JSON error body (the
+ * shape every route sends via `toErrorResponse`: `{ error, message,
+ * details? }`), falling back to a generic `HTTP <status>` when the body
+ * isn't JSON or carries no usable message.
+ *
+ * Before this, every non-OK response collapsed to `Error('HTTP ' + status)`
+ * regardless of what the server actually said — so a backend fix that
+ * turned a silent no-op into a clear, actionable 4xx (e.g. "Invoice
+ * INV-0001 is still a draft — issue it before sending...") still showed
+ * the caller nothing but "HTTP 409". `PortalDashboard.tsx` already reads
+ * `body.message` off its own raw fetch calls for the same reason; this
+ * brings the shared mutation hook in line so every `useMutation` caller
+ * gets it for free.
+ */
+async function extractApiErrorMessage(response: Response): Promise<string> {
+  try {
+    const body: unknown = await response.json();
+    if (
+      body &&
+      typeof body === 'object' &&
+      typeof (body as { message?: unknown }).message === 'string' &&
+      (body as { message: string }).message.trim().length > 0
+    ) {
+      return (body as { message: string }).message;
+    }
+  } catch {
+    // Non-JSON or empty error body (e.g. a proxy/edge 502 HTML page) —
+    // fall through to the generic status-based message below.
+  }
+  return `HTTP ${response.status}`;
+}
+
 function formatErrorMessage(
   err: unknown,
   template: string | false | ((err: unknown) => string) | undefined
@@ -80,7 +113,7 @@ export function useMutation<TBody, TResult>(
         ...(opts?.headers ? { headers: opts.headers } : {}),
       });
       if (!response.ok) {
-        const err: MutationHttpError = new Error(`HTTP ${response.status}`);
+        const err: MutationHttpError = new Error(await extractApiErrorMessage(response));
         err.status = response.status;
         throw err;
       }

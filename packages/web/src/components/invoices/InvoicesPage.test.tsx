@@ -751,4 +751,87 @@ describe('U5 InvoicesPage — line-item save PUTs + stripePaymentLinkUrl', () =>
     await waitFor(() => expect(screen.getByText('https://app.test/pay/tok123')).toBeInTheDocument());
     expect(mutateMock).toHaveBeenCalledWith(expect.objectContaining({ channel: 'sms' }));
   });
+
+  it('QA 2026-07-19: "Send payment link" on a draft invoice issues it first, then sends — no silent no-op', async () => {
+    // Root cause: POST /:id/send never transitioned a draft invoice out of
+    // 'draft' (see notifications/send-service.ts) and this UI has no
+    // separate "Issue" control anywhere, so the ONE button a draft invoice
+    // offers used to 202 and leave the invoice permanently un-payable. The
+    // sheet now issues (default 30-day term) before sending whenever the
+    // invoice is still a draft.
+    const issueMutate = vi.fn().mockResolvedValue({ id: 'i-draft', status: 'open' });
+    const sendMutate = vi.fn().mockResolvedValue({ viewUrl: 'https://app.test/pay/newtok', viewToken: 'newtok' });
+    vi.mocked(useMutation).mockImplementation((_method, path: string) => {
+      if (path.endsWith('/issue')) return { mutate: issueMutate, isLoading: false, error: null };
+      if (path.endsWith('/send')) return { mutate: sendMutate, isLoading: false, error: null };
+      return { mutate: vi.fn(), isLoading: false, error: null };
+    });
+    const refetch = vi.fn();
+    vi.mocked(useDetailQuery).mockReturnValue({ data: draftInvoice, isLoading: false, error: null, refetch });
+
+    renderDetail('i-draft');
+
+    // A draft invoice's outer trigger and the sheet's inner submit button
+    // are BOTH labeled "Send payment link" (unlike open/overdue, where the
+    // trigger reads "Resend"/"Send reminder") — open via the sole match,
+    // then submit via the second (sheet's) match once it renders.
+    fireEvent.click(screen.getByRole('button', { name: /^send payment link$/i }));
+    fireEvent.click(screen.getAllByRole('button', { name: /^send payment link$/i })[1]);
+
+    await waitFor(() => expect(sendMutate).toHaveBeenCalledTimes(1));
+    expect(issueMutate).toHaveBeenCalledTimes(1);
+    expect(issueMutate).toHaveBeenCalledWith({});
+    // Issue completed (awaited) before send was ever attempted.
+    expect(issueMutate.mock.invocationCallOrder[0]).toBeLessThan(
+      sendMutate.mock.invocationCallOrder[0],
+    );
+    expect(sendMutate).toHaveBeenCalledWith(expect.objectContaining({ channel: 'sms' }));
+
+    await waitFor(() => expect(screen.getByText('https://app.test/pay/newtok')).toBeInTheDocument());
+    // The sheet auto-closes ~1.2s after a successful send and refetches so
+    // the now-issued status/journey shows without a manual page reload.
+    await waitFor(() => expect(refetch).toHaveBeenCalled(), { timeout: 2000 });
+  });
+
+  it('does NOT call /issue for a non-draft invoice — only the existing /send path runs', async () => {
+    const issueMutate = vi.fn().mockResolvedValue({});
+    const sendMutate = vi.fn().mockResolvedValue({ viewUrl: 'https://app.test/pay/tok', viewToken: 'tok' });
+    vi.mocked(useMutation).mockImplementation((_method, path: string) => {
+      if (path.endsWith('/issue')) return { mutate: issueMutate, isLoading: false, error: null };
+      if (path.endsWith('/send')) return { mutate: sendMutate, isLoading: false, error: null };
+      return { mutate: vi.fn(), isLoading: false, error: null };
+    });
+    vi.mocked(useDetailQuery).mockReturnValue({ data: openInvoice, isLoading: false, error: null, refetch: vi.fn() });
+
+    renderDetail('i-open');
+
+    fireEvent.click(screen.getByRole('button', { name: /resend payment link/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^send payment link$/i }));
+
+    await waitFor(() => expect(sendMutate).toHaveBeenCalledTimes(1));
+    expect(issueMutate).not.toHaveBeenCalled();
+  });
+
+  it('surfaces a draft-invoice send rejection (e.g. issue itself fails) without a silent no-op', async () => {
+    const issueMutate = vi.fn().mockRejectedValue(new Error('Invalid transition from canceled to open'));
+    const sendMutate = vi.fn();
+    vi.mocked(useMutation).mockImplementation((_method, path: string) => {
+      if (path.endsWith('/issue')) return { mutate: issueMutate, isLoading: false, error: null };
+      if (path.endsWith('/send')) return { mutate: sendMutate, isLoading: false, error: null };
+      return { mutate: vi.fn(), isLoading: false, error: null };
+    });
+    vi.mocked(useDetailQuery).mockReturnValue({ data: draftInvoice, isLoading: false, error: null, refetch: vi.fn() });
+
+    renderDetail('i-draft');
+
+    fireEvent.click(screen.getByRole('button', { name: /^send payment link$/i }));
+    fireEvent.click(screen.getAllByRole('button', { name: /^send payment link$/i })[1]);
+
+    await waitFor(() =>
+      expect(screen.getByText(/send failed: invalid transition from canceled to open/i)).toBeInTheDocument(),
+    );
+    // send was never attempted once issue failed — no message went out for
+    // an invoice that still isn't payable.
+    expect(sendMutate).not.toHaveBeenCalled();
+  });
 });

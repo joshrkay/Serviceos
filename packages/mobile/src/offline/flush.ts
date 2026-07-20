@@ -99,6 +99,14 @@ function statusError(status: number, message: string): Error {
 export interface FlushController {
   /** Drain the queue once (no-op if already draining or offline). */
   flush(): Promise<void>;
+  /**
+   * Reactivate any poison-parked items (fresh retry budget), then drain. This
+   * is the recovery path for work that exhausted its automatic retries; use it
+   * where conditions have plausibly changed — the reconnect edge and an
+   * explicit user retry (pull-to-refresh). Plain {@link flush} (e.g. app
+   * foreground, which fires often) intentionally does NOT reactivate.
+   */
+  retry(): Promise<void>;
   /** Subscribe to reconnect edges; returns an unsubscribe. */
   start(): () => void;
 }
@@ -182,22 +190,41 @@ export function createFlushController(deps: FlushDeps): FlushController {
     }
   }
 
-  async function flush(): Promise<void> {
+  // Single critical section for both plain and reactivating drains. Holding the
+  // `flushing` guard across reactivateParked() AND the drain is load-bearing:
+  // if reactivation ran outside the guard, two concurrent retries (manual
+  // signal + reconnect/fresh-launch) could interleave so one persists a
+  // reactivated `pending` snapshot while the other has already `markDone`d the
+  // item — the stale persist lands last and resurrects a delivered approval.
+  async function runGuarded(reactivate: boolean): Promise<void> {
     if (flushing) return;
     if (!isCurrentlyOnline()) return;
     flushing = true;
     try {
+      // reactivateParked is a no-op (no persist) when nothing is parked, so a
+      // reactivating drain is as cheap as a plain one on the common path.
+      if (reactivate) await deps.queue.reactivateParked();
       await drain();
     } finally {
       flushing = false;
     }
   }
 
+  async function flush(): Promise<void> {
+    await runGuarded(false);
+  }
+
+  async function retry(): Promise<void> {
+    await runGuarded(true);
+  }
+
   function start(): () => void {
+    // Network just came back — retry EVERYTHING, including items that
+    // poison-parked on the failures that preceded the outage.
     return onReconnect(() => {
-      void flush();
+      void retry();
     });
   }
 
-  return { flush, start };
+  return { flush, retry, start };
 }

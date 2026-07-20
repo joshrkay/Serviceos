@@ -202,6 +202,38 @@ describe('OfflineQueue — failures + cancel', () => {
     expect(q.snapshot()[0].attempts).toBe(2);
   });
 
+  it('reactivateParked flips parked → pending with a fresh attempt budget', async () => {
+    const { q } = makeQueue();
+    await q.load();
+    const a = await q.enqueueApproval({ proposalId: 'p1', proposalType: 'add_note', summary: 's' });
+    const b = await q.enqueueApproval({ proposalId: 'p2', proposalType: 'add_note', summary: 's' });
+    // a exhausts its retries and parks; b stays pending.
+    await q.markInflight(a.id);
+    await q.recordFailure(a.id);
+    await q.recordFailure(a.id);
+    await q.markParked(a.id);
+    expect(q.waitingCount()).toBe(1); // a is parked → invisible
+
+    const reactivated = await q.reactivateParked();
+    expect(reactivated).toBe(1);
+    const aAfter = q.snapshot().find((it) => it.id === a.id)!;
+    expect(aAfter.status).toBe('pending');
+    expect(aAfter.attempts).toBe(0); // fresh budget
+    expect(q.waitingCount()).toBe(2); // now visible again
+    // b (already pending) is untouched.
+    expect(q.snapshot().find((it) => it.id === b.id)!.status).toBe('pending');
+  });
+
+  it('reactivateParked is a no-op (no persist) when nothing is parked', async () => {
+    const { q, m } = makeQueue();
+    await q.load();
+    await q.enqueueApproval({ proposalId: 'p1', proposalType: 'add_note', summary: 's' });
+    const movesBefore = m.moves.length;
+    expect(await q.reactivateParked()).toBe(0);
+    // persist() ends with a tmp→journal move; the no-op path must not persist.
+    expect(m.moves.length).toBe(movesBefore);
+  });
+
   it('cancel removes a pending item + its audio, but refuses an inflight one', async () => {
     const { q, m } = makeQueue();
     await q.load();

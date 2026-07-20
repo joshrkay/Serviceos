@@ -1,5 +1,5 @@
 import type { Pool } from 'pg';
-import { ValidationError, NotFoundError } from '../shared/errors';
+import { AppError, ValidationError, NotFoundError } from '../shared/errors';
 
 /**
  * Tier 4 (Subscription — Rivet billing). Service that mints Stripe
@@ -42,6 +42,67 @@ export interface BillingServiceDeps {
   config?: BillingConfig | null;
   /** Stub-able for tests. Defaults to global fetch. */
   fetchFn?: BillingFetch;
+}
+
+/**
+ * Turns a failed "open the billing portal" Stripe REST call into an
+ * operator-facing AppError while preserving the full Stripe reason in the
+ * server logs. Mirrors `connectStripeFailure` in
+ * `billing/stripe-connect.ts` ("fix(connect): surface Stripe onboarding
+ * failures instead of masking them") — same class of bug, same fix shape:
+ *
+ * QA 2026-07-19 — POST /api/billing/portal-session returned a plain 500
+ * for a tenant whose `tenants.stripe_customer_id` was stale (pointed at a
+ * customer that no longer exists on the currently-configured Stripe
+ * account/mode — e.g. a test-mode id under a live-mode key, or the
+ * customer was deleted in the Dashboard). `getOrCreatePortalUrl` trusts
+ * the cached id without verifying it — see `getOrCreateStripeCustomer`
+ * below — so the failure only ever surfaced later, on the portal-session
+ * POST itself, as a bare `throw new Error(...)`. `toErrorResponse`
+ * flattened that to a generic 500 "An unexpected error occurred" with
+ * nothing logged: Stripe's actual `resource_missing: "No such customer:
+ * '...'"` reason reached neither the operator nor the server logs.
+ *
+ * We deliberately do NOT auto-recreate the Stripe customer here the way
+ * `StripeConnectService.createOnboardingLink` lazily creates a missing
+ * Account: `tenants.subscription_status` / `stripe_subscription_id` are
+ * cached from the OLD customer, and silently rebinding
+ * `stripe_customer_id` to a fresh, subscription-less customer would leave
+ * those columns pointing at a subscription the new customer doesn't have
+ * — an operator could keep full product access on a cached "active"
+ * status that's no longer backed by anything in Stripe. That's a billing-
+ * correctness call a human should make (confirm there's really no
+ * matching Stripe subscription before rebinding), not something to paper
+ * over automatically. Surfacing the real reason is the safe, contained
+ * fix; recovery is a follow-up.
+ */
+function billingPortalStripeFailure(context: string, status: number, rawBody: string): AppError {
+  let stripeMessage: string | undefined;
+  let stripeCode: string | undefined;
+  try {
+    const parsed = JSON.parse(rawBody) as { error?: { message?: string; code?: string } } | null;
+    stripeMessage = parsed?.error?.message?.trim() || undefined;
+    stripeCode = parsed?.error?.code?.trim() || undefined;
+  } catch {
+    /* Stripe normally returns JSON; keep the raw body for the log below. */
+  }
+  // eslint-disable-next-line no-console
+  console.error(`[billing-subscription] ${context} failed (${status})`, {
+    stripeCode,
+    stripeMessage,
+    ...(stripeMessage ? {} : { rawBody: rawBody.slice(0, 500) }),
+  });
+  const hint =
+    stripeCode === 'resource_missing'
+      ? ' The saved Stripe customer for this account no longer exists — contact support to re-link billing.'
+      : '';
+  const clientMessage = stripeMessage
+    ? `Stripe couldn't open the billing portal: ${stripeMessage}${hint}`
+    : `Stripe couldn't open the billing portal (HTTP ${status}). Check the API logs for details.`;
+  return new AppError('BILLING_PORTAL_FAILED', clientMessage, 502, {
+    stripeStatus: status,
+    ...(stripeCode ? { stripeCode } : {}),
+  });
 }
 
 export class BillingService {
@@ -119,8 +180,7 @@ export class BillingService {
       body: params,
     });
     if (!sessionRes.ok) {
-      const body = await sessionRes.text();
-      throw new Error(`Stripe portal session failed (${sessionRes.status}): ${body}`);
+      throw billingPortalStripeFailure('portal session', sessionRes.status, await sessionRes.text());
     }
     const session = (await sessionRes.json()) as { url?: string };
     if (!session.url) {
