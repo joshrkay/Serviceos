@@ -23,17 +23,20 @@ import { createRedisCacheStore } from './redis-cache-store';
 /**
  * Create the LLM gateway from application config.
  *
- * Switching providers is purely a .env change:
+ * Switching providers is purely a .env change.
+ *
+ *   Recommended (Option A — OpenRouter managed open models):
+ *     AI_PROVIDER_BASE_URL=https://openrouter.ai/api/v1
+ *     AI_PROVIDER_API_KEY=sk-or-...
+ *     AI_LIGHTWEIGHT_MODEL=meta-llama/llama-3.1-8b-instruct
+ *     AI_STANDARD_MODEL=meta-llama/llama-3.3-70b-instruct
+ *     AI_COMPLEX_MODEL=qwen/qwen-2.5-72b-instruct
+ *     See docs/runbooks/openrouter-ai-provider.md
  *
  *   OpenAI:
  *     AI_PROVIDER_BASE_URL=https://api.openai.com/v1
  *     AI_PROVIDER_API_KEY=sk-...
  *     AI_DEFAULT_MODEL=gpt-4o-mini
- *
- *   OpenRouter:
- *     AI_PROVIDER_BASE_URL=https://openrouter.ai/api/v1
- *     AI_PROVIDER_API_KEY=sk-or-...
- *     AI_DEFAULT_MODEL=openai/gpt-4o-mini
  *
  *   Any other OpenAI-compatible endpoint works the same way.
  */

@@ -72,6 +72,11 @@ deploy. REST CRUD still works; AI drafting does not.
   weaken prod.
 - **Sequence: AI green → top-50 green → merge/deploy #714** — Deploying handler
   gates onto a dead LLM path changes nothing observable for Mike.
+- **Provider choice: Option A — OpenRouter (decided 2026-07-20)** — Managed
+  pay-per-token inference for open models (Llama 3.1 8B / Llama 3.3 70B /
+  Qwen 2.5 72B). Keep ServiceOS on Railway; do not self-host 70B there.
+  Runbook: `docs/runbooks/openrouter-ai-provider.md`. Code defaults and env
+  templates now match this stack.
 
 ## Scope Boundaries
 
@@ -313,8 +318,9 @@ Boot wiring (current, `packages/api/src/app.ts`):
 
 1. Is Mike’s web app (`VITE_API_URL`) pointed at
    `serviceosapi-production` or `serviceosapi-development` today?
-2. Preferred provider for go-live: direct OpenAI vs OpenRouter (affects
-   `AI_PROVIDER_BASE_URL` + model id shape)?
+2. ~~Preferred provider for go-live: direct OpenAI vs OpenRouter?~~
+   **Resolved: OpenRouter (Option A).** See
+   `docs/runbooks/openrouter-ai-provider.md`.
 3. Should the completion probe ever gate Railway deploys (separate
    `/ready` check), or only power operator dashboards / smoke scripts?
 

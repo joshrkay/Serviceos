@@ -12,10 +12,10 @@
  * `MMS_VISION_SMOKE_IMAGE` (default `test/fixtures/mms-smoke.jpg`) — a tiny
  * synthetic image yields no line items and would (correctly) fail the assert.
  *
- * `mms_estimate` routes to the COMPLEX tier (default `claude-sonnet-4-6`); set
- * `AI_COMPLEX_MODEL` to a vision-capable model matching your provider (the
- * workflow pins `gpt-4o` for the default OpenAI-compatible endpoint) so the
- * gateway doesn't send a Claude model name to OpenAI.
+ * `mms_estimate` routes to the COMPLEX tier. Default complex is text-only
+ * (`qwen/qwen-2.5-72b-instruct` via OpenRouter). Set `AI_COMPLEX_MODEL` to a
+ * vision-capable model for this smoke (e.g. `qwen/qwen2.5-vl-72b-instruct` on
+ * OpenRouter, or `gpt-4o` on OpenAI).
  */
 import { describe, it, expect } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';

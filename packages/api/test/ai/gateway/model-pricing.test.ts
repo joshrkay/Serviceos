@@ -42,6 +42,26 @@ describe('model-pricing — integer micro-cent cost accounting', () => {
       });
     });
 
+    it('resolves OpenRouter Option A open-model ids', async () => {
+      const { resolveModelPricing } = await freshModule();
+      expect(resolveModelPricing('meta-llama/llama-3.1-8b-instruct')).toEqual({
+        inputCentsPerMillionTokens: 2,
+        outputCentsPerMillionTokens: 3,
+      });
+      expect(resolveModelPricing('meta-llama/llama-3.3-70b-instruct')).toEqual({
+        inputCentsPerMillionTokens: 10,
+        outputCentsPerMillionTokens: 32,
+      });
+      expect(resolveModelPricing('qwen/qwen-2.5-72b-instruct')).toEqual({
+        inputCentsPerMillionTokens: 36,
+        outputCentsPerMillionTokens: 40,
+      });
+      expect(resolveModelPricing('qwen/qwen2.5-vl-72b-instruct')).toEqual({
+        inputCentsPerMillionTokens: 80,
+        outputCentsPerMillionTokens: 80,
+      });
+    });
+
     it('is case-insensitive', async () => {
       const { resolveModelPricing } = await freshModule();
       expect(resolveModelPricing('CLAUDE-SONNET-4-6')).not.toBeNull();
