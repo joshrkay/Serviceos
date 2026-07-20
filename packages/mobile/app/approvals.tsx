@@ -8,6 +8,7 @@ import { ErrorState } from '../src/components/ErrorState';
 import { ProposalCard } from '../src/components/ProposalCard';
 import { isBatchEligible } from '../src/proposals/proposalEvents';
 import { useApproveBatch } from '../src/proposals/useApproveBatch';
+import { requestOfflineFlush } from '../src/offline/flushSignal';
 
 /** Match owner-operator-app-spec: "Approve all (N)" only when 3+ eligible. */
 const BATCH_APPROVE_MIN = 3;
@@ -64,7 +65,18 @@ export default function Approvals() {
       <FlatList
         data={proposals}
         keyExtractor={(item) => item.id}
-        refreshControl={<RefreshControl refreshing={isLoading} onRefresh={() => void refresh()} />}
+        refreshControl={
+          <RefreshControl
+            refreshing={isLoading}
+            onRefresh={() => {
+              // Re-fetch the inbox AND retry the offline queue (reactivating any
+              // poison-parked voice notes / approvals) — pull-to-refresh is the
+              // owner's "try my waiting actions again" gesture.
+              void refresh();
+              requestOfflineFlush();
+            }}
+          />
+        }
         ListEmptyComponent={
           isLoading ? (
             <ActivityIndicator />

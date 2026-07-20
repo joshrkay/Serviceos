@@ -99,6 +99,14 @@ function statusError(status: number, message: string): Error {
 export interface FlushController {
   /** Drain the queue once (no-op if already draining or offline). */
   flush(): Promise<void>;
+  /**
+   * Reactivate any poison-parked items (fresh retry budget), then drain. This
+   * is the recovery path for work that exhausted its automatic retries; use it
+   * where conditions have plausibly changed — the reconnect edge and an
+   * explicit user retry (pull-to-refresh). Plain {@link flush} (e.g. app
+   * foreground, which fires often) intentionally does NOT reactivate.
+   */
+  retry(): Promise<void>;
   /** Subscribe to reconnect edges; returns an unsubscribe. */
   start(): () => void;
 }
@@ -193,11 +201,21 @@ export function createFlushController(deps: FlushDeps): FlushController {
     }
   }
 
+  async function retry(): Promise<void> {
+    // Reactivate first so the reactivated items are `pending` before the drain
+    // scans for `nextRunnable`. reactivateParked is a no-op (no persist) when
+    // nothing is parked, so this is cheap on the common path.
+    await deps.queue.reactivateParked();
+    await flush();
+  }
+
   function start(): () => void {
+    // Network just came back — retry EVERYTHING, including items that
+    // poison-parked on the failures that preceded the outage.
     return onReconnect(() => {
-      void flush();
+      void retry();
     });
   }
 
-  return { flush, start };
+  return { flush, retry, start };
 }

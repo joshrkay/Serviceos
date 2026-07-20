@@ -281,6 +281,27 @@ export class OfflineQueue {
     });
   }
 
+  /**
+   * Give poison-parked items another full retry budget: `parked` → `pending`
+   * with the attempt counter reset. Returns the number reactivated (0 → no-op,
+   * no persist). This is the ONLY path off `parked` — without it, an item that
+   * exhausted its in-session retries (a network blip or a transient 5xx storm)
+   * would sit on disk forever, invisible to `waitingCount` and never picked up
+   * by `nextRunnable`. Called from the flush controller on the reconnect edge
+   * and on an explicit user retry (pull-to-refresh), where conditions have
+   * plausibly changed and abandoned work deserves a fresh attempt.
+   */
+  async reactivateParked(): Promise<number> {
+    const parked = this.items.filter((it) => it.status === 'parked');
+    if (parked.length === 0) return 0;
+    for (const it of parked) {
+      it.status = 'pending';
+      it.attempts = 0;
+    }
+    await this.persist();
+    return parked.length;
+  }
+
   /** Confirmed flush: remove the item and delete its durable audio. */
   async markDone(id: string): Promise<void> {
     await this.removeInternal(id);
