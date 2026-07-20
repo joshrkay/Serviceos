@@ -59,7 +59,8 @@ describe('approveGateFor (U1 lane-aware confirm gates)', () => {
     const gate = approveGateFor({ proposalType: 'send_invoice' });
     if (gate.kind === 'confirm') expect(gate.title).toMatch(/^Send invoice — /);
     const late = approveGateFor({ proposalType: 'apply_late_fee' });
-    // No TYPE_LABEL entry yet → de-underscored fallback still names the action.
-    if (late.kind === 'confirm') expect(late.title).toMatch(/^apply late fee — /);
+    // U5 added the friendly TYPE_LABEL ("Late fee"); the money-lane confirm now
+    // names the action with it instead of the de-underscored fallback.
+    if (late.kind === 'confirm') expect(late.title).toMatch(/^Late fee — /);
   });
 });

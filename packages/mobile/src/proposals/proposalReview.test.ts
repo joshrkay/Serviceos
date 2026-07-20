@@ -16,6 +16,29 @@ describe('typeLabel', () => {
     expect(typeLabel('record_payment')).toBe('Payment');
     expect(typeLabel('some_new_type')).toBe('some new type');
   });
+
+  it('gives the U5 money-in types real labels, not bare type strings', () => {
+    expect(typeLabel('send_payment_reminder')).toBe('Payment reminder');
+    expect(typeLabel('apply_late_fee')).toBe('Late fee');
+    expect(typeLabel('send_estimate_nudge')).toBe('Estimate nudge');
+  });
+});
+
+describe('reviewRows for U5 money-in proposals', () => {
+  it('renders an apply_late_fee proposal with its recipient and fee amount', () => {
+    // Payload shape from the apply_late_fee task handler
+    // (packages/api/src/ai/tasks/voice-extended-tasks.ts): invoiceReference is
+    // the resolved recipient, feeCents the money (rendered as dollars).
+    const rows = reviewRows({ stepKey: 'manual', invoiceReference: 'Smith roof', feeCents: 2500 });
+    expect(rows).toContainEqual({ label: 'Invoice Reference', value: 'Smith roof' });
+    expect(rows).toContainEqual({ label: 'Fee Cents', value: '$25.00' });
+  });
+
+  it('renders a send_payment_reminder proposal with its recipient and channel, not a bare type', () => {
+    const rows = reviewRows({ stepKey: 'manual', offsetDays: 0, channel: 'sms', invoiceReference: 'Acme Co' });
+    expect(rows).toContainEqual({ label: 'Invoice Reference', value: 'Acme Co' });
+    expect(rows).toContainEqual({ label: 'Channel', value: 'sms' });
+  });
 });
 
 describe('humanizeKey', () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createInvoice, sendInvoice } from './invoices';
+import { createInvoice, issueInvoice, sendInvoice } from './invoices';
 
 const lineItems = [
   { description: 'Service call', quantity: 1, unitPriceCents: 9900, catalogItemId: 'cat-2' },
@@ -64,6 +64,46 @@ describe('createInvoice', () => {
     await expect(createInvoice(client, { jobId: 'j1', lineItems })).rejects.toThrow(
       /createInvoice: 500/,
     );
+  });
+});
+
+describe('issueInvoice', () => {
+  // The server route (packages/api/src/routes/invoices.ts POST /:id/issue)
+  // validates paymentTermDays MANUALLY (integer 0–365, default 30) — there is
+  // no Zod schema to pin against, so these assert the wire body directly.
+  it('POSTs /api/invoices/:id/issue with an empty body when no term is given', async () => {
+    const client = vi.fn().mockResolvedValue(new Response(JSON.stringify({ id: 'inv-1' }), { status: 200 }));
+
+    await expect(issueInvoice(client, 'inv-1')).resolves.toBeUndefined();
+
+    const [path, init] = client.mock.calls[0] as [string, RequestInit];
+    expect(path).toBe('/api/invoices/inv-1/issue');
+    expect(init.method).toBe('POST');
+    // Omitting the term lets the server own the default (30) rather than the
+    // client hard-coding it.
+    expect(JSON.parse(init.body as string)).toEqual({});
+  });
+
+  it('forwards an explicit paymentTermDays', async () => {
+    const client = vi.fn().mockResolvedValue(new Response(JSON.stringify({ id: 'inv-1' }), { status: 200 }));
+
+    await issueInvoice(client, 'inv-1', 15);
+
+    const [, init] = client.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual({ paymentTermDays: 15 });
+  });
+
+  it('rejects with the decoded server error on a non-ok response', async () => {
+    const client = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ error: 'VALIDATION_ERROR', message: 'paymentTermDays must be an integer between 0 and 365' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+
+    await expect(issueInvoice(client, 'inv-1', 999)).rejects.toMatchObject({
+      message: 'paymentTermDays must be an integer between 0 and 365',
+    });
   });
 });
 
