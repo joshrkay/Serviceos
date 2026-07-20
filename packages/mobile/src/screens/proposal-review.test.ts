@@ -167,4 +167,61 @@ describe('Proposal review screen', () => {
     fireEvent.click(getByText('Premium valve').closest('button')!);
     expect(h.resolveLine).toHaveBeenCalledWith(0, 'cat-b');
   });
+
+  // U1 — lane-aware confirm gates. Capture one-taps (covered by the first
+  // test); money/comms/irreversible/unknown require an explicit confirm.
+  function setProposal(proposalType: string, summary = 'Summary line') {
+    h.proposal = {
+      id: 'p-gate',
+      proposalType,
+      status: 'ready_for_review',
+      summary,
+      payload: {},
+      approvedAt: null,
+    };
+  }
+
+  it('money lane: Approve opens a confirm sheet; Confirm approves', () => {
+    setProposal('issue_invoice', 'Issue INV-42 for $1,240');
+    const { getByText } = render(createElement(ProposalReviewScreen));
+    fireEvent.click(getByText('Approve').closest('button')!);
+    expect(h.approve).not.toHaveBeenCalled();
+    expect(getByText('Issue invoice — this moves money.')).toBeTruthy();
+    const confirm = getByText('Confirm').closest('button')!;
+    expect(confirm.className).toMatch(/\bmin-h-11\b/);
+    fireEvent.click(confirm);
+    expect(h.approve).toHaveBeenCalledTimes(1);
+  });
+
+  it('comms lane: Cancel dismisses the sheet without approving', () => {
+    setProposal('send_invoice', 'Send invoice to Rodriguez');
+    const { getByText, queryByText } = render(createElement(ProposalReviewScreen));
+    fireEvent.click(getByText('Approve').closest('button')!);
+    expect(getByText('Send invoice — this messages your customer.')).toBeTruthy();
+    const cancel = getByText('Cancel').closest('button')!;
+    expect(cancel.className).toMatch(/\bmin-h-11\b/);
+    fireEvent.click(cancel);
+    expect(h.approve).not.toHaveBeenCalled();
+    expect(queryByText('Send invoice — this messages your customer.')).toBeNull();
+    expect(getByText('Approve')).toBeTruthy(); // main button is back
+  });
+
+  it('irreversible lane: destructive confirm styling', () => {
+    setProposal('cancel_appointment', 'Cancel Tuesday visit');
+    const { getByText } = render(createElement(ProposalReviewScreen));
+    fireEvent.click(getByText('Approve').closest('button')!);
+    expect(getByText(/can't be undone/)).toBeTruthy();
+    const confirm = getByText('Yes, do it').closest('button')!;
+    expect(confirm.className).toMatch(/\bbg-destructive\b/);
+    fireEvent.click(confirm);
+    expect(h.approve).toHaveBeenCalledTimes(1);
+  });
+
+  it('unknown proposal type fails closed to an explicit confirm — never one-tap', () => {
+    setProposal('some_future_type', 'Mystery action');
+    const { getByText } = render(createElement(ProposalReviewScreen));
+    fireEvent.click(getByText('Approve').closest('button')!);
+    expect(h.approve).not.toHaveBeenCalled();
+    expect(getByText(/review carefully before approving/)).toBeTruthy();
+  });
 });

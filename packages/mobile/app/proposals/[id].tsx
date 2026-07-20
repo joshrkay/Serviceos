@@ -12,6 +12,7 @@ import { ClarifyPicker } from '../../src/components/ClarifyPicker';
 import { ErrorState } from '../../src/components/ErrorState';
 import { useProposalReview } from '../../src/hooks/useProposalReview';
 import { formatMoneyCents } from '../../src/lib/format';
+import { approveGateFor } from '../../src/proposals/approveGate';
 import {
   ambiguousCatalogLines,
   entityCandidatesFromPayload,
@@ -30,6 +31,21 @@ export default function ProposalReviewScreen() {
     useProposalReview(id);
   const [showRejectForm, setShowRejectForm] = useState(false);
   const [rejectReason, setRejectReason] = useState('');
+  const [showApproveConfirm, setShowApproveConfirm] = useState(false);
+
+  // U1 lane gate — classified from the CURRENT proposal every render, so a
+  // voice_clarification that resolves in place into a re-drafted money/comms
+  // proposal gets the right gate, not a mount-time snapshot.
+  const approveGate = proposal ? approveGateFor(proposal) : null;
+
+  function onApprovePress() {
+    if (!approveGate) return;
+    if (approveGate.kind === 'one_tap') {
+      void approve();
+      return;
+    }
+    setShowApproveConfirm(true);
+  }
 
   const entityCandidates =
     proposal?.proposalType === 'voice_clarification'
@@ -128,11 +144,11 @@ export default function ProposalReviewScreen() {
             {/* Review → Approve / Reject */}
             {phase === 'review' || phase === 'approving' || phase === 'rejecting' ? (
               <View className="mt-8 gap-3">
-                {proposal.proposalType !== 'voice_clarification' ? (
+                {proposal.proposalType !== 'voice_clarification' && !showApproveConfirm ? (
                   <Pressable
                     accessibilityRole="button"
                     accessibilityLabel="Approve"
-                    onPress={() => void approve()}
+                    onPress={onApprovePress}
                     disabled={phase === 'approving' || phase === 'rejecting'}
                     className="min-h-11 items-center justify-center rounded-md bg-primary px-4 py-3"
                   >
@@ -142,6 +158,54 @@ export default function ProposalReviewScreen() {
                       <Text className="text-base font-semibold text-primaryForeground">Approve</Text>
                     )}
                   </Pressable>
+                ) : null}
+
+                {/* U1 — explicit confirm for comms/money/irreversible/unknown lanes.
+                    Capture one-taps and never reaches here. */}
+                {showApproveConfirm && approveGate?.kind === 'confirm' ? (
+                  <View className="rounded-lg border border-border bg-card p-4">
+                    <Text className="text-base font-medium text-foreground">
+                      {approveGate.title}
+                    </Text>
+                    <Text className="mt-2 text-base text-mutedForeground">{proposal.summary}</Text>
+                    <View className="mt-3 flex-row gap-3">
+                      <Pressable
+                        accessibilityRole="button"
+                        accessibilityLabel="Cancel approve"
+                        onPress={() => setShowApproveConfirm(false)}
+                        disabled={phase === 'approving'}
+                        className="min-h-11 flex-1 items-center justify-center rounded-md border border-border px-4 py-3"
+                      >
+                        <Text className="text-base text-foreground">Cancel</Text>
+                      </Pressable>
+                      <Pressable
+                        accessibilityRole="button"
+                        accessibilityLabel={approveGate.confirmLabel}
+                        onPress={() => {
+                          setShowApproveConfirm(false);
+                          void approve();
+                        }}
+                        disabled={phase === 'approving'}
+                        className={`min-h-11 flex-1 items-center justify-center rounded-md px-4 py-3 ${
+                          approveGate.destructive ? 'bg-destructive' : 'bg-primary'
+                        }`}
+                      >
+                        {phase === 'approving' ? (
+                          <ActivityIndicator color="#ffffff" />
+                        ) : (
+                          <Text
+                            className={`text-base font-semibold ${
+                              approveGate.destructive
+                                ? 'text-destructiveForeground'
+                                : 'text-primaryForeground'
+                            }`}
+                          >
+                            {approveGate.confirmLabel}
+                          </Text>
+                        )}
+                      </Pressable>
+                    </View>
+                  </View>
                 ) : null}
 
                 {!showRejectForm ? (
