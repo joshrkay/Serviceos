@@ -52,10 +52,14 @@ export const Platform = {
   OS: 'ios' as 'ios' | 'android' | 'web',
 };
 
-export const TextInput = ({ onChangeText, value, className, placeholder }: Props) =>
+export const TextInput = ({ onChangeText, value, className, placeholder, accessibilityLabel }: Props) =>
   createElement('input', {
     className,
     placeholder,
+    // Surface accessibilityLabel as aria-label so getByLabelText finds inputs
+    // that have no visible <label> (the RN pattern is a sibling <Text> + a11y
+    // label), matching how the real TextInput exposes its accessible name.
+    'aria-label': accessibilityLabel as string | undefined,
     value: value ?? '',
     onChange: (e: { target: { value: string } }) =>
       typeof onChangeText === 'function' ? (onChangeText as (t: string) => void)(e.target.value) : undefined,
