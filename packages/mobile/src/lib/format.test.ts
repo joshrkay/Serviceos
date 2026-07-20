@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
+  centsToInputValue,
   deriveDurationSeconds,
   formatDuration,
   formatMoneyCents,
   formatMoneyShort,
   formatShortDate,
   formatWeekdayDate,
+  parseMoneyToCents,
 } from './format';
 
 describe('formatMoneyCents', () => {
@@ -98,5 +100,31 @@ describe('deriveDurationSeconds', () => {
     expect(deriveDurationSeconds(null, null, '2026-06-20T10:05:00Z')).toBeNull();
     expect(deriveDurationSeconds(null, 'bad', '2026-06-20T10:05:00Z')).toBeNull();
     expect(deriveDurationSeconds(null, '2026-06-20T10:05:00Z', '2026-06-20T10:00:00Z')).toBeNull();
+  });
+});
+
+describe('parseMoneyToCents / centsToInputValue (U2 edit inputs)', () => {
+  it('parses plain and formatted amounts to integer cents via string math', () => {
+    expect(parseMoneyToCents('80')).toBe(8000);
+    expect(parseMoneyToCents('123.45')).toBe(12345);
+    expect(parseMoneyToCents('123.4')).toBe(12340);
+    expect(parseMoneyToCents('$1,299.50')).toBe(129950);
+    expect(parseMoneyToCents(' 0.29 ')).toBe(29); // the classic float trap
+  });
+
+  it('rejects anything that is not a plain non-negative money amount', () => {
+    expect(parseMoneyToCents('')).toBeNull();
+    expect(parseMoneyToCents('twelve')).toBeNull();
+    expect(parseMoneyToCents('-5')).toBeNull();
+    expect(parseMoneyToCents('1.234')).toBeNull(); // sub-cent precision
+    expect(parseMoneyToCents('1.2.3')).toBeNull();
+  });
+
+  it('centsToInputValue is the exact inverse rendering', () => {
+    expect(centsToInputValue(12345)).toBe('123.45');
+    expect(centsToInputValue(8000)).toBe('80.00');
+    expect(centsToInputValue(29)).toBe('0.29');
+    expect(centsToInputValue(-2000)).toBe('-20.00');
+    expect(parseMoneyToCents(centsToInputValue(129950))).toBe(129950);
   });
 });

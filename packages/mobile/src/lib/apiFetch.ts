@@ -51,6 +51,22 @@ export function makeUnauthenticatedAbort(): Error {
 }
 
 /**
+ * Terminal-auth error: the 401 retry with a force-refreshed token still failed.
+ * Tagged `name === 'UnauthorizedError'` + `status === 401` so a background flush
+ * (which suppresses `onUnauthenticated` to avoid navigating) can classify it as
+ * a park signal, distinct from the sign-out `AbortError`. The message keeps the
+ * word "Unauthorized" so existing callers matching on it still hold.
+ */
+export function makeUnauthorizedError(): Error {
+  const err = new Error('Unauthorized — re-authentication required') as Error & {
+    status?: number;
+  };
+  err.name = 'UnauthorizedError';
+  err.status = 401;
+  return err;
+}
+
+/**
  * Error a request rejects with when it exceeds {@link DEFAULT_TIMEOUT_MS}.
  * Tagged `name === 'TimeoutError'` (distinct from the sign-out `AbortError`) so
  * `decodeError` classifies it as `timeout` rather than the swallowed sign-out.
@@ -168,6 +184,6 @@ export function createApiFetch(deps: ApiFetchDeps): ApiFetch {
       if (retry.status !== 401) return retry;
     }
     onUnauthenticated?.();
-    throw new Error('Unauthorized — re-authentication required');
+    throw makeUnauthorizedError();
   };
 }

@@ -1,5 +1,6 @@
 import { randomUUID } from 'crypto';
 import type { Pool } from 'pg';
+import type { VoiceAnswerStatus, VoiceLookupAnswer } from '@ai-service-os/shared';
 import { applyTenantContext } from '../db/rls-runtime-role';
 
 export type TranscriptionStatus = 'pending' | 'processing' | 'completed' | 'failed';
@@ -56,6 +57,29 @@ export interface VoiceRecording {
    * answer 410 instead of handing out a URL to a deleted S3 object.
    */
   purgedAt?: Date;
+  /**
+   * U3 (E-lane answers) — routed outcome of the memo. Distinct from
+   * `status` (the audio-file lifecycle): transcription flips
+   * `status='completed'` BEFORE the voice-action-router job even
+   * enqueues, so clients poll `status` first and then this field in a
+   * bounded second phase. `pending` at creation on the in-app memo
+   * path; stamped exactly once by the router (recordAnswer's
+   * pending-guard makes redeliveries no-ops). NULL for rows that
+   * predate the column and for the telephony path (which has a live
+   * voice back-channel and never uses this worker).
+   */
+  answerStatus?: VoiceAnswerStatus;
+  /** U3 — structured lookup answer; present only when answerStatus='answered'. */
+  answer?: VoiceLookupAnswer;
+  /**
+   * U11 (offline prerequisite) — client-supplied idempotency key for the
+   * in-app voice-note create path. UNIQUE PER TENANT (partial unique index,
+   * WHERE idempotency_key IS NOT NULL). A replayed create (same tenant+key)
+   * resolves to the ORIGINAL recording instead of minting a duplicate.
+   * NULL for legacy rows and every server-minted path (telephony) that never
+   * carries a client key.
+   */
+  idempotencyKey?: string;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;
@@ -66,11 +90,24 @@ export interface IngestVoiceInput {
   fileId: string;
   conversationId?: string;
   createdBy: string;
+  /** U11 — optional client idempotency key (unique per tenant when present). */
+  idempotencyKey?: string;
 }
 
 export interface VoiceRepository {
   create(recording: VoiceRecording): Promise<VoiceRecording>;
   findById(tenantId: string, id: string): Promise<VoiceRecording | null>;
+  /**
+   * U11 — resolve an existing recording by its client idempotency key,
+   * scoped to the tenant. Backs the create-path replay guard: a repeat
+   * POST /api/voice/recordings with the same key returns the ORIGINAL
+   * recording instead of minting a duplicate. Returns null when no row in
+   * the tenant carries that key.
+   */
+  findByIdempotencyKey(
+    tenantId: string,
+    idempotencyKey: string,
+  ): Promise<VoiceRecording | null>;
   updateStatus(
     tenantId: string,
     id: string,
@@ -109,6 +146,21 @@ export interface VoiceRepository {
     id: string,
     language: string,
   ): Promise<VoiceRecording | null>;
+  /**
+   * U3 — persist the routed outcome (and, for lookups, the structured
+   * answer) on the recording. Write-once semantics: only rows whose
+   * answer_status is NULL / 'pending' / 'failed' accept the write
+   * ('failed' stays writable so a transcription retry can land a fresh
+   * outcome), so an at-least-once queue redelivery can never overwrite
+   * a terminal outcome. Returns null when the row is missing, belongs
+   * to another tenant, or already carries a terminal outcome. Optional
+   * for repo-interface backwards compatibility (mirrors stampOutcome).
+   */
+  recordAnswer?(
+    tenantId: string,
+    id: string,
+    outcome: { answerStatus: VoiceAnswerStatus; answer?: VoiceLookupAnswer },
+  ): Promise<VoiceRecording | null>;
 }
 
 export interface TranscriptionProvider {
@@ -134,7 +186,12 @@ export function createVoiceRecording(input: IngestVoiceInput): VoiceRecording {
     tenantId: input.tenantId,
     fileId: input.fileId ?? undefined,
     conversationId: input.conversationId,
+    idempotencyKey: input.idempotencyKey,
     status: 'pending',
+    // U3 — the in-app memo path starts its routed-outcome lifecycle at
+    // 'pending' so clients can distinguish "router hasn't landed yet"
+    // from "nothing will ever land" (NULL: telephony / legacy rows).
+    answerStatus: 'pending',
     createdBy: input.createdBy,
     createdAt: new Date(),
     updatedAt: new Date(),
@@ -218,6 +275,18 @@ export class InMemoryVoiceRepository implements VoiceRepository {
     return { ...rec };
   }
 
+  async findByIdempotencyKey(
+    tenantId: string,
+    idempotencyKey: string,
+  ): Promise<VoiceRecording | null> {
+    for (const [, rec] of this.recordings) {
+      if (rec.tenantId === tenantId && rec.idempotencyKey === idempotencyKey) {
+        return { ...rec };
+      }
+    }
+    return null;
+  }
+
   async updateStatus(
     tenantId: string,
     id: string,
@@ -278,6 +347,25 @@ export class InMemoryVoiceRepository implements VoiceRepository {
       }
     }
     return null;
+  }
+
+  async recordAnswer(
+    tenantId: string,
+    id: string,
+    outcome: { answerStatus: VoiceAnswerStatus; answer?: VoiceLookupAnswer },
+  ): Promise<VoiceRecording | null> {
+    const rec = this.recordings.get(id);
+    if (!rec || rec.tenantId !== tenantId) return null;
+    // Write-once guard (mirrors PgVoiceRepository): only pending/unset/failed
+    // rows accept an outcome, so a redelivery can't clobber a terminal state.
+    if (rec.answerStatus && rec.answerStatus !== 'pending' && rec.answerStatus !== 'failed') {
+      return null;
+    }
+    rec.answerStatus = outcome.answerStatus;
+    if (outcome.answer) rec.answer = outcome.answer;
+    rec.updatedAt = new Date();
+    this.recordings.set(id, rec);
+    return { ...rec };
   }
 }
 

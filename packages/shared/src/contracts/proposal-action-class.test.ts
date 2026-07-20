@@ -3,7 +3,14 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { ProposalType } from '../enums.js';
-import { CAPTURE_PROPOSAL_TYPES, isCaptureProposalType } from './proposal-action-class.js';
+import {
+  CAPTURE_PROPOSAL_TYPES,
+  COMMS_PROPOSAL_TYPES,
+  MONEY_PROPOSAL_TYPES,
+  IRREVERSIBLE_PROPOSAL_TYPES,
+  actionClassForProposalType,
+  isCaptureProposalType,
+} from './proposal-action-class.js';
 
 /**
  * Parity guard: the shared CAPTURE_PROPOSAL_TYPES set must exactly mirror the
@@ -21,12 +28,12 @@ const proposalSource = readFileSync(
 );
 
 /** Pull the case literals that map to each ActionClass out of the switch. */
-function apiCaptureTypes(source: string): Set<string> {
+function apiTypesByClass(source: string): Record<string, Set<string>> {
   const body = source.match(
     /export function actionClassForProposalType\([\s\S]*?\)\s*:\s*ActionClass\s*\{([\s\S]*?)\n\}/,
   );
   if (!body) throw new Error('actionClassForProposalType switch not found in proposal.ts');
-  const capture = new Set<string>();
+  const byClass: Record<string, Set<string>> = {};
   let pending: string[] = [];
   for (const line of body[1].split('\n')) {
     const caseM = line.match(/case\s+['"]([^'"]+)['"]\s*:/);
@@ -36,14 +43,25 @@ function apiCaptureTypes(source: string): Set<string> {
     }
     const retM = line.match(/return\s+['"]([^'"]+)['"]\s*;/);
     if (retM) {
-      if (retM[1] === 'capture') for (const t of pending) capture.add(t);
+      const cls = retM[1];
+      byClass[cls] ??= new Set<string>();
+      for (const t of pending) byClass[cls].add(t);
       pending = [];
     }
   }
-  return capture;
+  return byClass;
 }
 
-const apiCapture = apiCaptureTypes(proposalSource);
+const apiByClass = apiTypesByClass(proposalSource);
+const apiCapture = apiByClass['capture'] ?? new Set<string>();
+
+/** The shared sets, keyed the same way as the parsed API switch. */
+const SHARED_SETS: Record<string, ReadonlySet<string>> = {
+  capture: CAPTURE_PROPOSAL_TYPES,
+  comms: COMMS_PROPOSAL_TYPES,
+  money: MONEY_PROPOSAL_TYPES,
+  irreversible: IRREVERSIBLE_PROPOSAL_TYPES,
+};
 
 describe('CAPTURE_PROPOSAL_TYPES ↔ API actionClassForProposalType parity', () => {
   it('parses the API switch', () => {
@@ -74,5 +92,40 @@ describe('isCaptureProposalType', () => {
     expect(isCaptureProposalType(ProposalType.RECORD_PAYMENT)).toBe(false); // money
     expect(isCaptureProposalType(ProposalType.CANCEL_APPOINTMENT)).toBe(false); // irreversible
     expect(isCaptureProposalType('not_a_real_type')).toBe(false);
+  });
+});
+
+describe('all four lanes ↔ API actionClassForProposalType parity (U1)', () => {
+  it('parses every lane from the API switch', () => {
+    for (const cls of ['capture', 'comms', 'money', 'irreversible']) {
+      expect(apiByClass[cls]?.size ?? 0, `no '${cls}' arm parsed`).toBeGreaterThan(0);
+    }
+  });
+
+  it.each(['capture', 'comms', 'money', 'irreversible'])(
+    "shared '%s' set exactly matches the API switch",
+    (cls) => {
+      const shared = SHARED_SETS[cls];
+      const api = apiByClass[cls] ?? new Set<string>();
+      expect([...shared].filter((t) => !api.has(t)), 'extra in shared').toEqual([]);
+      expect([...api].filter((t) => !shared.has(t)), 'missing from shared').toEqual([]);
+    },
+  );
+
+  it('classifies every real ProposalType into a lane — never unknown', () => {
+    const unknowns = Object.values(ProposalType).filter(
+      (t) => actionClassForProposalType(t) === 'unknown',
+    );
+    expect(unknowns).toEqual([]);
+  });
+
+  it('returns unknown for an unrecognized type (fail-closed lane)', () => {
+    expect(actionClassForProposalType('not_a_real_type')).toBe('unknown');
+  });
+
+  it('agrees with isCaptureProposalType', () => {
+    for (const t of Object.values(ProposalType)) {
+      expect(actionClassForProposalType(t) === 'capture').toBe(isCaptureProposalType(t));
+    }
   });
 });

@@ -139,3 +139,61 @@ describe('POST /api/voice/recordings — verified job context', () => {
     expect(queuedPayload).not.toHaveProperty('jobId');
   });
 });
+
+describe('POST /api/voice/recordings — U11 idempotency key', () => {
+  it('stays valid and mints a new recording when no idempotency key is sent (backward compatible)', async () => {
+    const jobRepo = new InMemoryJobRepository();
+    const { app, send, createRecording } = buildApp(jobRepo);
+
+    const response = await request(app)
+      .post('/api/voice/recordings')
+      .send(recordingBody);
+
+    expect(response.status).toBe(202);
+    expect(createRecording).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects a malformed idempotency key before any repo or queue work', async () => {
+    const jobRepo = new InMemoryJobRepository();
+    const { app, send, createRecording } = buildApp(jobRepo);
+
+    const response = await request(app)
+      .post('/api/voice/recordings')
+      .send({ ...recordingBody, idempotencyKey: 42 });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('VALIDATION_ERROR');
+    expect(createRecording).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it('returns the ORIGINAL recording (never a duplicate) on a replay with the same key', async () => {
+    const jobRepo = new InMemoryJobRepository();
+    const { app, send, createRecording } = buildApp(jobRepo);
+    const key = 'idem-key-abc';
+
+    const first = await request(app)
+      .post('/api/voice/recordings')
+      .send({ ...recordingBody, idempotencyKey: key });
+    expect(first.status).toBe(202);
+    const originalId = first.body.recording.id as string;
+
+    const replay = await request(app)
+      .post('/api/voice/recordings')
+      .send({ ...recordingBody, idempotencyKey: key });
+
+    expect(replay.status).toBe(202);
+    // Same recording id in the same 202 envelope — no second row minted.
+    expect(replay.body.recording.id).toBe(originalId);
+    expect(createRecording).toHaveBeenCalledTimes(1);
+    // Both requests re-issue queue.send under the SAME stable create dedupe
+    // key, so a create-then-crash replay still gets transcribed (the queue's
+    // own dedup absorbs the duplicate).
+    expect(send).toHaveBeenCalledTimes(2);
+    const firstKey = send.mock.calls[0][2];
+    const replayKey = send.mock.calls[1][2];
+    expect(replayKey).toBe(firstKey);
+    expect(replayKey).toBe(`${TENANT_ID}:${originalId}:transcription:create`);
+  });
+});

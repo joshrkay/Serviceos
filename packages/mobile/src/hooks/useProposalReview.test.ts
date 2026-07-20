@@ -7,6 +7,9 @@ vi.mock('../lib/useApiClient', () => ({ useApiClient: () => h.api }));
 
 // eslint-disable-next-line import/first
 import { useProposalReview } from './useProposalReview';
+// The REAL server edit schema — pins the PUT wire shape (see the U2 test).
+// eslint-disable-next-line import/first
+import { editProposalBodySchema } from '../../../api/src/proposals/proposal-contracts';
 
 const T0 = Date.UTC(2026, 5, 20, 0, 0, 0);
 
@@ -284,5 +287,65 @@ describe('useProposalReview', () => {
     });
     expect(result.current.phase).toBe('error');
     expect(result.current.error).toBe('Bad candidate');
+  });
+
+  // U2 (F4) — edit before approving.
+  it('edit PUTs a body the real server schema accepts and merges the envelope', async () => {
+    h.api.mockImplementation((url: string, opts?: { method?: string; body?: string }) => {
+      if (url === '/api/proposals/p1' && opts?.method === 'PUT') {
+        return Promise.resolve(
+          okJson({
+            // editProposal returns { proposal, editedFields }, not the bare row.
+            proposal: proposal({ payload: { customerName: 'Acme Corp', amountCents: 129950 } }),
+            editedFields: ['customerName', 'amountCents'],
+          }),
+        );
+      }
+      return Promise.resolve(okJson(proposal()));
+    });
+
+    const { result } = renderHook(() => useProposalReview('p1'));
+    await settle();
+
+    let ok = false;
+    await act(async () => {
+      ok = await result.current.edit({ customerName: 'Acme Corp', amountCents: 129950 });
+    });
+    expect(ok).toBe(true);
+
+    const putCall = h.api.mock.calls.find(
+      (c: unknown[]) => (c[1] as { method?: string } | undefined)?.method === 'PUT',
+    )!;
+    expect(putCall[0]).toBe('/api/proposals/p1');
+    // Pin the wire shape against the REAL server Zod schema — a mocked client
+    // shape alone masked a server rejection before
+    // (docs/solutions/test-failures/mocked-client-shape-masks-server-schema-rejection.md).
+    const body = JSON.parse((putCall[1] as { body: string }).body);
+    expect(editProposalBodySchema.safeParse(body).success).toBe(true);
+    expect(body).toEqual({ edits: { customerName: 'Acme Corp', amountCents: 129950 } });
+
+    // Envelope merged: fresh payload rendered, still reviewable.
+    expect(result.current.proposal?.payload?.customerName).toBe('Acme Corp');
+    expect(result.current.phase).toBe('review');
+  });
+
+  it('edit failure keeps the review phase (draft intact server-side) and reports the message', async () => {
+    h.api.mockImplementation((url: string, opts?: { method?: string }) => {
+      if (opts?.method === 'PUT') {
+        return Promise.resolve(err(400, { error: 'VALIDATION_ERROR', message: 'Invalid payload after edit' }));
+      }
+      return Promise.resolve(okJson(proposal()));
+    });
+
+    const { result } = renderHook(() => useProposalReview('p1'));
+    await settle();
+
+    let ok = true;
+    await act(async () => {
+      ok = await result.current.edit({ amountCents: -1 });
+    });
+    expect(ok).toBe(false);
+    expect(result.current.phase).toBe('review'); // NOT the error phase
+    expect(result.current.error).toBe('Invalid payload after edit');
   });
 });

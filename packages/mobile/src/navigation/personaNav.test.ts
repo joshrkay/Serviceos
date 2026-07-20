@@ -21,6 +21,8 @@ describe('navModelFor', () => {
     });
     expect(nav.quickLinks.map((link) => link.route)).not.toContain('/invoices');
     expect(nav.visibleTabs).not.toContain('settings');
+    // U13 — the assistant is ai:run-gated; technicians never see the entry.
+    expect(nav.quickLinks.map((link) => link.route)).not.toContain('/assistant');
   });
 
   it('emphasizes voice, approvals, and money in supervisor mode', () => {
@@ -40,6 +42,8 @@ describe('navModelFor', () => {
     });
     expect(nav.visibleTabs).toEqual(['index', 'voice', 'customers', 'jobs', 'settings']);
     expect(nav.showModeToggle).toBe(true);
+    // U13 — supervisors hold ai:run, so the assistant entry is present.
+    expect(nav.quickLinks.map((link) => link.route)).toContain('/assistant');
   });
 
   it('blends Today and approvals in both mode', () => {
@@ -59,6 +63,8 @@ describe('navModelFor', () => {
     });
     expect(nav.visibleTabs).toEqual(['today', 'index', 'voice', 'jobs', 'settings']);
     expect(nav.quickLinks.map((link) => link.route)).toContain('/approvals');
+    // U13 — "both" holds ai:run, so the assistant entry is present.
+    expect(nav.quickLinks.map((link) => link.route)).toContain('/assistant');
     expect(nav.showModeToggle).toBe(true);
   });
 

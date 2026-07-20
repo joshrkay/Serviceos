@@ -22,6 +22,10 @@ export function toServerLineItems(items: LineItem[]): Array<{
   sortOrder: number;
   taxable: boolean;
   catalogItemId?: string;
+  groupKey?: string;
+  groupLabel?: string;
+  isOptional?: boolean;
+  isDefaultSelected?: boolean;
 }> {
   return items.map((li, i) => ({
     id: `li-${i + 1}`,
@@ -32,5 +36,13 @@ export function toServerLineItems(items: LineItem[]): Array<{
     sortOrder: i,
     taxable: false,
     ...(li.catalogItemId ? { catalogItemId: li.catalogItemId } : {}),
+    // Good-better-best passthrough. Only spread when present so a flat estimate's
+    // payload stays byte-identical to the pre-tier shape (the server
+    // createEstimateSchema accepts these as optional; groupKey/groupLabel are
+    // min(1), so we only emit non-empty strings from buildTierLineItems).
+    ...(li.groupKey ? { groupKey: li.groupKey } : {}),
+    ...(li.groupLabel ? { groupLabel: li.groupLabel } : {}),
+    ...(li.isOptional !== undefined ? { isOptional: li.isOptional } : {}),
+    ...(li.isDefaultSelected !== undefined ? { isDefaultSelected: li.isDefaultSelected } : {}),
   }));
 }

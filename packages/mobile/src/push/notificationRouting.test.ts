@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { NotificationType } from '@ai-service-os/shared';
-import { routeForNotification } from './notificationRouting';
+import { isEmergencyNotification, routeForNotification } from './notificationRouting';
 
 describe('routeForNotification', () => {
   it('uses an explicit allowlisted screen path when present', () => {
@@ -77,5 +77,22 @@ describe('routeForNotification', () => {
     expect(
       routeForNotification({ type: 'emergency', screen: '/danger', proposalId: 'p7' }),
     ).toBe('/proposals/p7');
+  });
+});
+
+describe('isEmergencyNotification (U4/B7)', () => {
+  it('is true only for escalation/emergency types', () => {
+    expect(isEmergencyNotification({ type: 'emergency' })).toBe(true);
+    expect(isEmergencyNotification({ type: 'escalation' })).toBe(true);
+    // High-priority but with its own surface — must NOT raise the banner.
+    expect(isEmergencyNotification({ type: 'incoming_call' })).toBe(false);
+    expect(isEmergencyNotification({ type: 'proposal_needs_approval' })).toBe(false);
+  });
+
+  it('is false for missing/malformed payloads', () => {
+    expect(isEmergencyNotification(null)).toBe(false);
+    expect(isEmergencyNotification(undefined)).toBe(false);
+    expect(isEmergencyNotification({})).toBe(false);
+    expect(isEmergencyNotification({ type: 42 } as never)).toBe(false);
   });
 });

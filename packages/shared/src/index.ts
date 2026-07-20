@@ -24,3 +24,4 @@ export * from './contracts/technician-field.js';
 export * from './contracts/correction-lesson.js';
 export * from './contracts/negotiation-event.js';
 export * from './contracts/notification.js';
+export * from './contracts/voice-answer.js';

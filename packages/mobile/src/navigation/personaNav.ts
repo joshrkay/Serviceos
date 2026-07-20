@@ -11,7 +11,17 @@ export interface PersonaNavInput {
 
 export interface PersonaQuickLink {
   label: string;
-  route: '/messages' | '/schedule' | '/estimates' | '/invoices' | '/approvals' | '/jobs';
+  route:
+    | '/messages'
+    | '/schedule'
+    | '/estimates'
+    | '/invoices'
+    | '/agreements'
+    | '/approvals'
+    | '/jobs'
+    // U13 — the conversational assistant. ai:run-gated, so it rides only with
+    // personas that hold that permission (supervisor / both), never tech.
+    | '/assistant';
 }
 
 export interface PersonaNavModel {
@@ -33,13 +43,20 @@ const SUPERVISOR_LINKS: readonly PersonaQuickLink[] = [
   { label: 'Schedule', route: '/schedule' },
   { label: 'Estimates', route: '/estimates' },
   { label: 'Invoices', route: '/invoices' },
+  // U10 (E5b) — agreements is an oversight/owner surface (recurring/membership
+  // billing), so it rides with the supervisor quick links, not tech/both.
+  { label: 'Agreements', route: '/agreements' },
   { label: 'Approvals', route: '/approvals' },
+  // U13 — assistant is ai:run-gated; supervisors hold it.
+  { label: 'Assistant', route: '/assistant' },
 ];
 
 const BOTH_LINKS: readonly PersonaQuickLink[] = [
   { label: 'Messages', route: '/messages' },
   { label: 'Schedule', route: '/schedule' },
   { label: 'Approvals', route: '/approvals' },
+  // U13 — the "both" persona holds ai:run too.
+  { label: 'Assistant', route: '/assistant' },
 ];
 
 const TECH_LINKS: readonly PersonaQuickLink[] = [

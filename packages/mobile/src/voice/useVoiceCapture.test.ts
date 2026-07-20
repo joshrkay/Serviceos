@@ -47,7 +47,11 @@ beforeEach(() => {
   h.prepare.mockResolvedValue(undefined);
   h.stop.mockResolvedValue(undefined);
   h.getInfo.mockResolvedValue({ exists: true, size: 2048 });
-  h.upload.mockResolvedValue('reschedule the Tuesday job');
+  // U3 — uploadAndTranscribe now returns { transcript, outcome }.
+  h.upload.mockResolvedValue({
+    transcript: 'reschedule the Tuesday job',
+    outcome: { kind: 'proposal' },
+  });
   h.recorder.prepareToRecordAsync = h.prepare;
   h.recorder.record = h.record;
   h.recorder.stop = h.stop;
@@ -75,6 +79,8 @@ describe('useVoiceCapture', () => {
     expect(h.upload).toHaveBeenCalledTimes(1);
     expect(result.current.phase).toBe('transcript');
     expect(result.current.transcript).toBe('reschedule the Tuesday job');
+    // U3 — the routed outcome is surfaced to the screen.
+    expect(result.current.outcome).toEqual({ kind: 'proposal' });
   });
 
   it('passes a job-scoped capture through to the upload pipeline', async () => {

@@ -26,6 +26,7 @@ import { assertValidProposalPayload } from '../../src/proposals/contracts';
 import { missingFieldsFor } from '../../src/proposals/proposal';
 import { InMemoryAppointmentRepository } from '../../src/appointments/in-memory-appointment';
 import { InMemoryCustomerRepository } from '../../src/customers/customer';
+import { InMemoryVoiceRepository } from '../../src/voice/voice-service';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import type { IntentClassification } from '../../src/ai/orchestration/intent-classifier';
 import type { QueueMessage } from '../../src/queues/queue';
@@ -2427,5 +2428,435 @@ describe('RV-080 — belt-and-braces extended intent dispatch gate', () => {
     const all = await proposalRepo.findByTenant('t-1');
     expect(all.some((p) => p.proposalType === 'add_note')).toBe(true);
     expect(all.some((p) => p.proposalType === 'callback')).toBe(true);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// U3 (iOS blueprint) — E-lane answers on the recorded-memo path. The lookup
+// branch executes the skill via the per-skill adapter, persists the routed
+// outcome on the recording (answer_status + answer), emits lookup_events, and
+// NEVER mints a proposal for an executed lookup.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('voice-action-router U3 lookup answers (recorded-memo path)', () => {
+  const TENANT = 't-1';
+  const RECORDING_ID = '7d3f8a52-1234-4cde-9f00-aaaaaaaaaaaa';
+  const CUSTOMER_ID = '3b6cbf1a-bd8a-45f7-8b84-ce6b43a231d1';
+
+  function classify(intentType: string, extractedEntities?: Record<string, unknown>): string {
+    return JSON.stringify({ intentType, confidence: 0.95, extractedEntities });
+  }
+
+  function seededVoiceRepo(createdBy = 'user-owner'): InMemoryVoiceRepository {
+    const repo = new InMemoryVoiceRepository();
+    void repo.create({
+      id: RECORDING_ID,
+      tenantId: TENANT,
+      fileId: 'file-1',
+      status: 'completed',
+      transcript: 'spoken memo',
+      answerStatus: 'pending',
+      createdBy,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    return repo;
+  }
+
+  function resolverResolving(customerId: string): EntityResolver {
+    return {
+      resolve: vi.fn(async () => ({
+        kind: 'resolved',
+        candidate: { id: customerId, kind: 'customer', label: 'Henderson', score: 0.99 },
+      })) as unknown as EntityResolver['resolve'],
+    };
+  }
+
+  function lookupEventsSpy() {
+    return { record: vi.fn(async () => ({}) as never) };
+  }
+
+  it('executes the lookup skill, stores the answer, emits lookup_events, and mints NO proposal', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const voiceRepo = seededVoiceRepo();
+    const lookupEvents = lookupEventsSpy();
+    const gateway = gatewayReturning([
+      classify('lookup_balance', { customerName: 'Henderson' }),
+    ]);
+    const jobRepo = {
+      findByCustomer: vi.fn(async () => [{ id: 'job-1' }]),
+    };
+    const invoiceRepo = {
+      findByJob: vi.fn(async () => [
+        { id: 'inv-1', amountDueCents: 12300, dueDate: new Date('2026-07-28T00:00:00Z') },
+      ]),
+    };
+
+    const worker = createVoiceActionRouterWorker({
+      gateway,
+      proposalRepo,
+      voiceRepo,
+      entityResolver: resolverResolving(CUSTOMER_ID),
+      jobRepo: jobRepo as never,
+      lookupAnswers: {
+        invoiceRepo: invoiceRepo as never,
+        lookupEvents: lookupEvents as never,
+      },
+    });
+
+    await worker.handle(
+      msg({
+        tenantId: TENANT,
+        userId: 'system',
+        transcript: "what's the Henderson balance",
+        recordingId: RECORDING_ID,
+      }),
+      silentLogger(),
+    );
+
+    // No proposal minted for an executed lookup.
+    expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(0);
+
+    const rec = await voiceRepo.findById(TENANT, RECORDING_ID);
+    expect(rec?.answerStatus).toBe('answered');
+    expect(rec?.answer).toMatchObject({
+      version: 1,
+      intent: 'lookup_balance',
+      result: 'found',
+      entityRef: { kind: 'customer', id: CUSTOMER_ID },
+    });
+    // Money rides the answer as INTEGER CENTS.
+    expect(rec?.answer?.rows).toContainEqual({
+      kind: 'money',
+      label: 'Outstanding balance',
+      amountCents: 12300,
+    });
+    // Analytics row written on the memo path, keyed by the recording id.
+    expect(lookupEvents.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tenantId: TENANT,
+        intent: 'lookup_balance',
+        sessionId: RECORDING_ID,
+        resultStatus: 'found',
+      }),
+    );
+  });
+
+  it('ambiguous customer reference mints a voice_clarification and stamps clarification', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const voiceRepo = seededVoiceRepo();
+    const gateway = gatewayReturning([classify('lookup_balance', { customerName: 'Bob' })]);
+    const ambiguousResolver: EntityResolver = {
+      resolve: vi.fn(async () => ({
+        kind: 'ambiguous',
+        candidates: [
+          { id: 'c-1', kind: 'customer', label: 'Bob Smith', score: 0.9 },
+          { id: 'c-2', kind: 'customer', label: 'Bob Jones', score: 0.88 },
+        ],
+      })) as unknown as EntityResolver['resolve'],
+    };
+
+    const worker = createVoiceActionRouterWorker({
+      gateway,
+      proposalRepo,
+      voiceRepo,
+      entityResolver: ambiguousResolver,
+      jobRepo: { findByCustomer: vi.fn(async () => []) } as never,
+      lookupAnswers: { invoiceRepo: { findByJob: vi.fn(async () => []) } as never },
+    });
+
+    await worker.handle(
+      msg({
+        tenantId: TENANT,
+        userId: 'system',
+        transcript: "what's Bob's balance",
+        recordingId: RECORDING_ID,
+      }),
+      silentLogger(),
+    );
+
+    const proposals = await proposalRepo.findByTenant(TENANT);
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0].proposalType).toBe('voice_clarification');
+    expect((proposals[0].payload as { reason?: string }).reason).toBe('ambiguous_entity');
+
+    const rec = await voiceRepo.findById(TENANT, RECORDING_ID);
+    expect(rec?.answerStatus).toBe('clarification');
+    expect(rec?.answer).toBeUndefined();
+  });
+
+  it('technician-recorded revenue ask gets a refusal answer, never data', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const voiceRepo = seededVoiceRepo('user-tech');
+    const gateway = gatewayReturning([classify('lookup_revenue')]);
+    const query = vi.fn(async () => ({ revenueCents: 500000, outstandingCents: 10000 }));
+    const resolveMemberRole = vi.fn(async () => 'technician');
+
+    const worker = createVoiceActionRouterWorker({
+      gateway,
+      proposalRepo,
+      voiceRepo,
+      lookupAnswers: {
+        moneyDashboardRepo: { query } as never,
+        resolveMemberRole,
+      },
+    });
+
+    await worker.handle(
+      msg({
+        tenantId: TENANT,
+        userId: 'system',
+        transcript: "how's revenue this month",
+        recordingId: RECORDING_ID,
+      }),
+      silentLogger(),
+    );
+
+    // Role resolved from the RECORDING's creator, not the payload userId.
+    expect(resolveMemberRole).toHaveBeenCalledWith(TENANT, 'user-tech');
+    // The refusal short-circuits BEFORE the skill — no data read at all.
+    expect(query).not.toHaveBeenCalled();
+
+    const rec = await voiceRepo.findById(TENANT, RECORDING_ID);
+    expect(rec?.answerStatus).toBe('answered');
+    expect(rec?.answer?.result).toBe('refused');
+    expect(rec?.answer?.rows).toEqual([]);
+    expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(0);
+  });
+
+  it('owner-recorded revenue ask answers with integer-cents rows', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const voiceRepo = seededVoiceRepo('user-owner');
+    const gateway = gatewayReturning([classify('lookup_revenue')]);
+
+    const worker = createVoiceActionRouterWorker({
+      gateway,
+      proposalRepo,
+      voiceRepo,
+      lookupAnswers: {
+        moneyDashboardRepo: {
+          query: vi.fn(async () => ({ revenueCents: 500000, outstandingCents: 10000 })),
+        } as never,
+        resolveMemberRole: vi.fn(async () => 'owner'),
+      },
+    });
+
+    await worker.handle(
+      msg({
+        tenantId: TENANT,
+        userId: 'system',
+        transcript: "how's revenue this month",
+        recordingId: RECORDING_ID,
+      }),
+      silentLogger(),
+    );
+
+    const rec = await voiceRepo.findById(TENANT, RECORDING_ID);
+    expect(rec?.answerStatus).toBe('answered');
+    expect(rec?.answer?.result).toBe('found');
+    expect(rec?.answer?.rows).toContainEqual({
+      kind: 'money',
+      label: 'Revenue this month',
+      amountCents: 500000,
+    });
+  });
+
+  it('non-opted tenant extended lookup keeps the clarification behavior (no answer)', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const voiceRepo = seededVoiceRepo();
+    const gateway = gatewayReturning([classify('lookup_pending_items')]);
+    const digestQuery = vi.fn(async () => []);
+
+    const worker = createVoiceActionRouterWorker({
+      gateway,
+      proposalRepo,
+      voiceRepo,
+      // extendedIntentsEnabled ABSENT → tenant not opted in.
+      lookupAnswers: {
+        estimateRepo: { findByTenant: digestQuery } as never,
+        invoiceRepo: { findByTenant: digestQuery } as never,
+        resolveMemberRole: vi.fn(async () => 'owner'),
+      },
+    });
+
+    await worker.handle(
+      msg({
+        tenantId: TENANT,
+        userId: 'system',
+        transcript: 'what needs my approval',
+        recordingId: RECORDING_ID,
+      }),
+      silentLogger(),
+    );
+
+    const proposals = await proposalRepo.findByTenant(TENANT);
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0].proposalType).toBe('voice_clarification');
+    expect(digestQuery).not.toHaveBeenCalled();
+
+    const rec = await voiceRepo.findById(TENANT, RECORDING_ID);
+    expect(rec?.answerStatus).toBe('clarification');
+  });
+
+  it('opted-in tenant extended lookup executes and answers (digest)', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const voiceRepo = seededVoiceRepo();
+    const gateway = gatewayReturning([classify('lookup_digest')]);
+
+    const worker = createVoiceActionRouterWorker({
+      gateway,
+      proposalRepo,
+      voiceRepo,
+      extendedIntentsEnabled: async () => true,
+      lookupAnswers: {
+        dailyDigestRepo: {
+          findByTenantAndDate: vi.fn(async () => ({
+            digestDate: '2026-07-20',
+            narrative: 'Two jobs completed; one invoice paid.',
+            payload: {},
+          })),
+          findLatest: vi.fn(async () => null),
+        } as never,
+        resolveMemberRole: vi.fn(async () => 'owner'),
+      },
+    });
+
+    await worker.handle(
+      msg({
+        tenantId: TENANT,
+        userId: 'system',
+        transcript: 'read me the digest',
+        recordingId: RECORDING_ID,
+      }),
+      silentLogger(),
+    );
+
+    const rec = await voiceRepo.findById(TENANT, RECORDING_ID);
+    expect(rec?.answerStatus).toBe('answered');
+    expect(rec?.answer?.result).toBe('found');
+    expect(rec?.answer?.summary).toMatch(/Two jobs completed/);
+    expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(0);
+  });
+
+  it('skill failure stamps answer_status=failed with no answer payload', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const voiceRepo = seededVoiceRepo();
+    const gateway = gatewayReturning([classify('lookup_revenue')]);
+
+    const worker = createVoiceActionRouterWorker({
+      gateway,
+      proposalRepo,
+      voiceRepo,
+      lookupAnswers: {
+        moneyDashboardRepo: {
+          query: vi.fn(async () => {
+            throw new Error('db down');
+          }),
+        } as never,
+        resolveMemberRole: vi.fn(async () => 'owner'),
+      },
+    });
+
+    await worker.handle(
+      msg({
+        tenantId: TENANT,
+        userId: 'system',
+        transcript: "how's revenue",
+        recordingId: RECORDING_ID,
+      }),
+      silentLogger(),
+    );
+
+    const rec = await voiceRepo.findById(TENANT, RECORDING_ID);
+    expect(rec?.answerStatus).toBe('failed');
+    expect(rec?.answer).toBeUndefined();
+    expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(0);
+  });
+
+  it('keeps the read-only skip on paths without a recordingId (eval harness / in-app text)', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const voiceRepo = new InMemoryVoiceRepository();
+    const recordAnswer = vi.spyOn(voiceRepo, 'recordAnswer');
+    const gateway = gatewayReturning([classify('lookup_balance', { customerName: 'Henderson' })]);
+
+    const worker = createVoiceActionRouterWorker({
+      gateway,
+      proposalRepo,
+      voiceRepo,
+      entityResolver: resolverResolving(CUSTOMER_ID),
+      jobRepo: { findByCustomer: vi.fn(async () => []) } as never,
+      lookupAnswers: { invoiceRepo: { findByJob: vi.fn(async () => []) } as never },
+    });
+
+    await worker.handle(
+      msg({ tenantId: TENANT, userId: 'u-1', transcript: "what's the Henderson balance" }),
+      silentLogger(),
+    );
+
+    expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(0);
+    expect(recordAnswer).not.toHaveBeenCalled();
+  });
+
+  it('customer-scoped ask with no resolvable customer answers "nothing found" (no guess)', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const voiceRepo = seededVoiceRepo();
+    const gateway = gatewayReturning([classify('lookup_balance', { customerName: 'Zzyzx' })]);
+    const notFoundResolver: EntityResolver = {
+      resolve: vi.fn(async () => ({ kind: 'not_found', reference: 'Zzyzx' })) as never,
+    };
+
+    const worker = createVoiceActionRouterWorker({
+      gateway,
+      proposalRepo,
+      voiceRepo,
+      entityResolver: notFoundResolver,
+      jobRepo: { findByCustomer: vi.fn(async () => []) } as never,
+      lookupAnswers: { invoiceRepo: { findByJob: vi.fn(async () => []) } as never },
+    });
+
+    await worker.handle(
+      msg({
+        tenantId: TENANT,
+        userId: 'system',
+        transcript: "what's the Zzyzx balance",
+        recordingId: RECORDING_ID,
+      }),
+      silentLogger(),
+    );
+
+    const rec = await voiceRepo.findById(TENANT, RECORDING_ID);
+    expect(rec?.answerStatus).toBe('answered');
+    expect(rec?.answer?.result).toBe('none');
+    expect(rec?.answer?.summary).toMatch(/Zzyzx/);
+    expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(0);
+  });
+
+  it('stamps proposal on the recording when a drafting intent lands (two-phase contract)', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const voiceRepo = seededVoiceRepo();
+    const gateway = gatewayReturning([
+      classify('create_invoice', { customerName: 'Acme' }),
+      JSON.stringify({
+        customerId: 'cust-1',
+        jobId: 'job-1',
+        lineItems: [{ description: 'Pipe repair', quantity: 1, unitPrice: 45000 }],
+        confidence_score: 0.9,
+      }),
+    ]);
+
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo, voiceRepo });
+
+    await worker.handle(
+      msg({
+        tenantId: TENANT,
+        userId: 'u-1',
+        transcript: 'Invoice Acme 450 dollars',
+        recordingId: RECORDING_ID,
+      }),
+      silentLogger(),
+    );
+
+    expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(1);
+    const rec = await voiceRepo.findById(TENANT, RECORDING_ID);
+    expect(rec?.answerStatus).toBe('proposal');
   });
 });

@@ -16,6 +16,13 @@ import {
 } from '../../src/components/LineItemSheet';
 import { ScreenShell } from '../../src/components/ScreenShell';
 import { SavePhaseButton } from '../../src/components/SavePhaseButton';
+import {
+  buildTierLineItems,
+  emptyTiers,
+  filledTiers,
+  type TierDraft,
+  type TierId,
+} from '../../src/estimates/estimateTiers';
 import { useListQuery } from '../../src/hooks/useListQuery';
 import { useSavePhase } from '../../src/hooks/useSavePhase';
 import { formatMoneyCents } from '../../src/lib/format';
@@ -55,6 +62,15 @@ export default function NewEstimate() {
   const [jobId, setJobId] = useState('');
   const [lineItems, setLineItems] = useState<LineItem[]>([]);
   const [sheetOpen, setSheetOpen] = useState(false);
+  // A5 good-better-best. Tier mode is offered for NEW estimates only (editing an
+  // existing draft keeps today's flat path exactly). When on, each tier is one
+  // catalog line; the sheet routes its pick to `sheetTarget`.
+  const [tierMode, setTierMode] = useState(false);
+  const [tiers, setTiers] = useState<TierDraft[]>(() => emptyTiers());
+  const [activeTierId, setActiveTierId] = useState<TierId>('good');
+  const [defaultTierId, setDefaultTierId] = useState<TierId>('good');
+  const [sheetTarget, setSheetTarget] = useState<'flat' | TierId>('flat');
+  const tierComposer = tierMode && !editId;
   // Optimistic-lock version of the estimate being edited; threaded back into
   // updateEstimate so a stale write is rejected by the server.
   const [expectedVersion, setExpectedVersion] = useState<number | null>(null);
@@ -118,10 +134,29 @@ export default function NewEstimate() {
     () => customers.find((c) => c.id === customerId),
     [customers, customerId],
   );
-  const totalCents = lineTotal(lineItems);
+  // A5 — assign / clear a tier's single catalog line and keep the default
+  // pointer on a filled tier.
+  const setTierItem = (id: TierId, item: LineItem | null) =>
+    setTiers((prev) => prev.map((t) => (t.id === id ? { ...t, item } : t)));
+
+  const readyTierCount = filledTiers(tiers).length;
+  // The final payload: tier mode assembles a grouped line set (≥2 tiers become a
+  // mutually-exclusive group); otherwise the flat list, exactly as today.
+  const finalLineItems = tierComposer ? buildTierLineItems(tiers, defaultTierId) : lineItems;
+  // Headline reflects the DEFAULT selection (not the sum of all tiers) — matching
+  // the server createEstimate totals seam.
+  const defaultTierItem = tierComposer
+    ? (tiers.find((t) => t.id === defaultTierId)?.item ?? filledTiers(tiers)[0]?.item ?? null)
+    : null;
+  const totalCents = tierComposer
+    ? defaultTierItem
+      ? Math.round(defaultTierItem.unitPriceCents * defaultTierItem.quantity)
+      : 0
+    : lineTotal(lineItems);
+  const canSubmit = Boolean(jobId) && (tierComposer ? readyTierCount >= 2 : lineItems.length > 0);
 
   const onCreateAndSend = () => {
-    if (!jobId || lineItems.length === 0) return;
+    if (!canSubmit) return;
     void run(async () => {
       if (editId) {
         // Editing an existing draft: update in place (not a new estimate),
@@ -139,7 +174,7 @@ export default function NewEstimate() {
       }
       const { id } = await createEstimate(api, {
         jobId,
-        lineItems,
+        lineItems: finalLineItems,
         discountCents,
         taxRateBps,
         customerMessage,
@@ -208,18 +243,116 @@ export default function NewEstimate() {
 
       {step === 3 ? (
         <View>
-          <Text className="mb-2 text-base font-medium text-foreground">Line items</Text>
-          <LineItemList
-            items={lineItems}
-            onRemove={(index) => setLineItems((items) => items.filter((_, i) => i !== index))}
-          />
-          <PrimaryButton label="Add line item" onPress={() => setSheetOpen(true)} className="mt-4" />
+          {/* A5 — good-better-best toggle (new estimates only; editing a draft
+              keeps the flat path). Off by default so single-price estimates are
+              unchanged. */}
+          {!editId ? (
+            <Pressable
+              accessibilityRole="switch"
+              accessibilityState={{ checked: tierMode }}
+              accessibilityLabel="Offer good, better, best options"
+              onPress={() => setTierMode((v) => !v)}
+              className="mb-4 min-h-11 flex-row items-center justify-between rounded-md border border-border px-4 py-3"
+            >
+              <Text className="flex-1 pr-3 text-base text-foreground">
+                Offer good / better / best options
+              </Text>
+              <Text className="text-base font-semibold text-primary">
+                {tierMode ? 'On' : 'Off'}
+              </Text>
+            </Pressable>
+          ) : null}
+
+          {tierComposer ? (
+            <View>
+              <Text className="mb-2 text-base font-medium text-foreground">Tier options</Text>
+              {/* Tier tabs — one catalog line per tier. ≥44px tap targets. */}
+              <View className="flex-row gap-2">
+                {tiers.map((t) => (
+                  <Pressable
+                    key={t.id}
+                    accessibilityRole="tab"
+                    accessibilityState={{ selected: activeTierId === t.id }}
+                    accessibilityLabel={`${t.label} tier`}
+                    onPress={() => setActiveTierId(t.id)}
+                    className={`min-h-11 flex-1 items-center justify-center rounded-md border px-2 py-3 ${
+                      activeTierId === t.id ? 'border-primary bg-primary/10' : 'border-border bg-card'
+                    }`}
+                  >
+                    <Text className="text-base text-foreground">{t.label}</Text>
+                    <Text className="text-xs text-mutedForeground">
+                      {t.item ? formatMoneyCents(Math.round(t.item.unitPriceCents * t.item.quantity)) : 'Empty'}
+                    </Text>
+                  </Pressable>
+                ))}
+              </View>
+
+              {/* Active tier body: the chosen catalog line + default control. */}
+              <View className="mt-4">
+                {(() => {
+                  const active = tiers.find((t) => t.id === activeTierId)!;
+                  return active.item ? (
+                    <View>
+                      <LineItemList items={[active.item]} onRemove={() => setTierItem(active.id, null)} />
+                      <Pressable
+                        accessibilityRole="radio"
+                        accessibilityState={{ selected: defaultTierId === active.id }}
+                        accessibilityLabel={`Pre-select the ${active.label} tier`}
+                        onPress={() => setDefaultTierId(active.id)}
+                        className={`mt-2 min-h-11 flex-row items-center justify-between rounded-md border px-4 py-3 ${
+                          defaultTierId === active.id ? 'border-primary bg-primary/10' : 'border-border'
+                        }`}
+                      >
+                        <Text className="flex-1 pr-3 text-base text-foreground">
+                          Pre-selected for the customer
+                        </Text>
+                        <Text className="text-base font-semibold text-primary">
+                          {defaultTierId === active.id ? 'Default' : 'Set default'}
+                        </Text>
+                      </Pressable>
+                    </View>
+                  ) : (
+                    <PrimaryButton
+                      label={`Add ${active.label} item`}
+                      onPress={() => {
+                        setSheetTarget(active.id);
+                        setSheetOpen(true);
+                      }}
+                    />
+                  );
+                })()}
+              </View>
+
+              <Text className="mt-4 text-sm text-mutedForeground">
+                {readyTierCount < 2
+                  ? 'Add at least two tiers to offer options.'
+                  : `${readyTierCount} tiers · customer picks one.`}
+              </Text>
+            </View>
+          ) : (
+            <View>
+              <Text className="mb-2 text-base font-medium text-foreground">Line items</Text>
+              <LineItemList
+                items={lineItems}
+                onRemove={(index) => setLineItems((items) => items.filter((_, i) => i !== index))}
+              />
+              <PrimaryButton
+                label="Add line item"
+                onPress={() => {
+                  setSheetTarget('flat');
+                  setSheetOpen(true);
+                }}
+                className="mt-4"
+              />
+            </View>
+          )}
+
           <View className="mt-4 flex-row gap-2">
             <SecondaryButton label="Back" onPress={() => setStep(2)} className="flex-1" />
             <PrimaryButton
               label="Review"
               onPress={() => setStep(4)}
-              disabled={lineItems.length === 0}
+              disabled={tierComposer ? readyTierCount < 2 : lineItems.length === 0}
               className="flex-1"
             />
           </View>
@@ -233,7 +366,9 @@ export default function NewEstimate() {
             Customer: {selectedCustomer ? customerName(selectedCustomer) : '—'}
           </Text>
           <Text className="mt-2 text-base text-mutedForeground">
-            {lineItems.length} line item{lineItems.length === 1 ? '' : 's'} · {formatMoneyCents(totalCents)}
+            {tierComposer
+              ? `${readyTierCount} tiers · from ${formatMoneyCents(totalCents)} (pre-selected)`
+              : `${lineItems.length} line item${lineItems.length === 1 ? '' : 's'} · ${formatMoneyCents(totalCents)}`}
           </Text>
           <View className="mt-4 flex-row gap-2">
             <SecondaryButton label="Back" onPress={() => setStep(3)} className="flex-1" />
@@ -245,7 +380,7 @@ export default function NewEstimate() {
                 savingLabel={editId ? 'Saving…' : 'Sending…'}
                 savedLabel={editId ? 'Saved' : 'Sent'}
                 onPress={onCreateAndSend}
-                disabled={!jobId || lineItems.length === 0}
+                disabled={!canSubmit}
               />
             </View>
           </View>
@@ -255,7 +390,14 @@ export default function NewEstimate() {
       <LineItemSheet
         visible={sheetOpen}
         onClose={() => setSheetOpen(false)}
-        onAdd={(item) => setLineItems((items) => [...items, item])}
+        onAdd={(item) => {
+          if (sheetTarget === 'flat') {
+            setLineItems((items) => [...items, item]);
+          } else {
+            // One catalog line per tier — replace whatever was there.
+            setTierItem(sheetTarget, item);
+          }
+        }}
       />
     </ScreenShell>
   );

@@ -69,3 +69,48 @@ export const CAPTURE_PROPOSAL_TYPES: ReadonlySet<string> = new Set<string>([
 export function isCaptureProposalType(type: string): boolean {
   return CAPTURE_PROPOSAL_TYPES.has(type);
 }
+
+/**
+ * The non-capture lanes, mirrored from the same authoritative API switch and
+ * held in lockstep by the per-lane parity test. Consumers (the mobile review
+ * screen's approve gate) use these to pick the explicit-confirm treatment:
+ * comms sends a customer-facing message, money moves money, irreversible
+ * cannot be walked back after execution.
+ */
+export const COMMS_PROPOSAL_TYPES: ReadonlySet<string> = new Set<string>([
+  ProposalType.NOTIFY_DELAY,
+  ProposalType.REQUEST_FEEDBACK,
+  ProposalType.SEND_INVOICE,
+  ProposalType.SEND_ESTIMATE,
+  ProposalType.SEND_ESTIMATE_NUDGE,
+  ProposalType.REVIEW_RESPONSE_PROPOSAL,
+  ProposalType.SEND_PAYMENT_REMINDER,
+]);
+
+export const MONEY_PROPOSAL_TYPES: ReadonlySet<string> = new Set<string>([
+  ProposalType.ISSUE_INVOICE,
+  ProposalType.RECORD_PAYMENT,
+  ProposalType.APPLY_LATE_FEE,
+]);
+
+export const IRREVERSIBLE_PROPOSAL_TYPES: ReadonlySet<string> = new Set<string>([
+  ProposalType.CANCEL_APPOINTMENT,
+  ProposalType.EMERGENCY_DISPATCH,
+]);
+
+/** Mirrors the API's ActionClass union (packages/api/src/proposals/proposal.ts). */
+export type ActionClass = 'capture' | 'comms' | 'money' | 'irreversible';
+
+/**
+ * Total classifier over raw type strings. Returns 'unknown' for any type this
+ * build has not classified — consumers MUST fail closed on 'unknown': treat it
+ * as review-required (explicit confirm), never one-tap, never batch-eligible.
+ * Kept in lockstep with the API switch by the per-lane parity test.
+ */
+export function actionClassForProposalType(type: string): ActionClass | 'unknown' {
+  if (CAPTURE_PROPOSAL_TYPES.has(type)) return 'capture';
+  if (COMMS_PROPOSAL_TYPES.has(type)) return 'comms';
+  if (MONEY_PROPOSAL_TYPES.has(type)) return 'money';
+  if (IRREVERSIBLE_PROPOSAL_TYPES.has(type)) return 'irreversible';
+  return 'unknown';
+}

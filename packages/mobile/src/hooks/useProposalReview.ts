@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { isCaptureProposalType } from '@ai-service-os/shared';
 import { useApiClient } from '../lib/useApiClient';
+import { isCurrentlyOnline } from '../lib/connectivity';
 import { decodeError } from '../lib/appError';
+import { getOfflineQueue } from '../offline/offlineQueue';
 import { type ReviewProposal, undoSecondsLeft } from '../proposals/proposalReview';
 
 export type { ReviewProposal };
@@ -14,6 +17,9 @@ export type ReviewPhase =
   | 'undone'
   | 'rejecting'
   | 'committed' // undo window elapsed; the action will execute
+  // U12 — approved offline: queued (capture-class only), flushes on reconnect.
+  // No fake countdown — the real 5s undo anchors on the server approvedAt at flush.
+  | 'queued'
   | 'error';
 
 export interface UseProposalReviewResult {
@@ -23,9 +29,14 @@ export interface UseProposalReviewResult {
   /** Whole seconds left in the undo window (0 outside 'approved'). */
   secondsLeft: number;
   approve: () => Promise<void>;
+  /** U12 — cancel a still-queued offline approval (before it flushes). */
+  cancelQueued: () => Promise<void>;
   reject: (reason: string, details?: string) => Promise<void>;
   resolveLine: (lineIndex: number, catalogItemId: string) => Promise<void>;
   resolveEntity: (candidateId: string) => Promise<void>;
+  /** U2 (F4) — edit the draft payload before approving. Resolves true on
+   *  success, false on failure (error state is set); never throws. */
+  edit: (edits: Record<string, unknown>) => Promise<boolean>;
   undo: () => Promise<void>;
   reload: () => Promise<void>;
 }
@@ -47,6 +58,10 @@ function normalize(raw: Record<string, unknown>): ReviewProposal {
         ? (raw.sourceContext as Record<string, unknown>)
         : undefined,
     approvedAt: typeof raw.approvedAt === 'string' ? raw.approvedAt : null,
+    targetEntityType:
+      typeof raw.targetEntityType === 'string' ? raw.targetEntityType : undefined,
+    targetEntityId:
+      typeof raw.targetEntityId === 'string' ? raw.targetEntityId : undefined,
   };
 }
 
@@ -93,6 +108,7 @@ export function useProposalReview(id: string): UseProposalReviewResult {
   const [error, setError] = useState<string | null>(null);
   const [secondsLeft, setSecondsLeft] = useState(0);
   const approvedAtRef = useRef<string | null>(null);
+  const queuedItemIdRef = useRef<string | null>(null);
 
   const reload = useCallback(async () => {
     setPhase('loading');
@@ -119,6 +135,25 @@ export function useProposalReview(id: string): UseProposalReviewResult {
   const approve = useCallback(async () => {
     setPhase('approving');
     setError(null);
+    // U12 — offline + capture-class: queue the approval instead of failing. The
+    // shared classifier is the ONLY lane source; anything non-capture (comms /
+    // money / irreversible, edits, resolve, batch, reject, undo) never queues —
+    // it falls through to the normal online path (and errors if offline).
+    if (!isCurrentlyOnline() && proposal && isCaptureProposalType(proposal.proposalType)) {
+      try {
+        const item = await getOfflineQueue().enqueueApproval({
+          proposalId: id,
+          proposalType: proposal.proposalType,
+          summary: proposal.summary,
+        });
+        queuedItemIdRef.current = item.id;
+        setPhase('queued');
+      } catch (e) {
+        setError(message(e));
+        setPhase('error');
+      }
+      return;
+    }
     try {
       const res = await api(`/api/proposals/${id}/approve`, { method: 'POST' });
       if (!res.ok) throw new Error((await decodeError(res)).message);
@@ -138,7 +173,17 @@ export function useProposalReview(id: string): UseProposalReviewResult {
       setError(message(e));
       setPhase('error');
     }
-  }, [api, id]);
+  }, [api, id, proposal]);
+
+  // U12 — cancel a still-queued offline approval. Cancellable until the flush
+  // machine picks it up; the queue refuses a cancel once the item is inflight.
+  const cancelQueued = useCallback(async () => {
+    const itemId = queuedItemIdRef.current;
+    if (!itemId) return;
+    await getOfflineQueue().cancel(itemId);
+    queuedItemIdRef.current = null;
+    setPhase(proposal ? phaseForStatus(proposal.status, proposal.approvedAt ?? null) : 'review');
+  }, [proposal]);
 
   const reject = useCallback(
     async (reason: string, details?: string) => {
@@ -208,6 +253,40 @@ export function useProposalReview(id: string): UseProposalReviewResult {
     [api, id],
   );
 
+  // U2 (F4) — edit before approving. PUT /api/proposals/:id shallow-merges
+  // `edits` into the payload server-side (revalidated by the type's Zod
+  // contract, audited, corrections captured). Response is the
+  // { proposal, editedFields } envelope from editProposal. Editing never
+  // changes the approval gate server-side — the owner still approves after.
+  const edit = useCallback(
+    async (edits: Record<string, unknown>): Promise<boolean> => {
+      setError(null);
+      try {
+        const res = await api(`/api/proposals/${id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ edits }),
+        });
+        if (!res.ok) throw new Error((await decodeError(res)).message);
+        const body = (await res.json()) as Record<string, unknown>;
+        const raw =
+          body.proposal && typeof body.proposal === 'object'
+            ? (body.proposal as Record<string, unknown>)
+            : body;
+        const p = normalize(raw);
+        setProposal(p);
+        setPhase(phaseForStatus(p.status, p.approvedAt ?? null));
+        return true;
+      } catch (e) {
+        setError(message(e));
+        // Stay on the review screen (not the error phase): the draft is
+        // intact server-side and the owner can retry or approve as-is.
+        return false;
+      }
+    },
+    [api, id],
+  );
+
   const undo = useCallback(async () => {
     setPhase('undoing');
     setError(null);
@@ -242,5 +321,5 @@ export function useProposalReview(id: string): UseProposalReviewResult {
     return () => clearInterval(interval);
   }, [phase]);
 
-  return { proposal, phase, error, secondsLeft, approve, reject, resolveLine, resolveEntity, undo, reload };
+  return { proposal, phase, error, secondsLeft, approve, cancelQueued, reject, resolveLine, resolveEntity, edit, undo, reload };
 }

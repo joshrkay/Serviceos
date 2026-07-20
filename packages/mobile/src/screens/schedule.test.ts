@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render } from '@testing-library/react';
+import { cleanup, fireEvent, render } from '@testing-library/react';
 import { createElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MeResponse } from '@ai-service-os/shared';
@@ -9,6 +9,7 @@ interface Appointment {
   scheduledStart?: string;
   status?: string;
   appointmentType?: string;
+  updatedAt?: string;
 }
 
 const SUPERVISOR_ME: MeResponse = {
@@ -40,10 +41,12 @@ const h = vi.hoisted(() => ({
   error: null as string | null,
   me: null as MeResponse | null,
   replace: vi.fn(),
+  push: vi.fn(),
+  sheetProps: null as unknown,
 }));
 
 vi.mock('expo-router', () => ({
-  useRouter: () => ({ push: vi.fn(), back: vi.fn(), replace: h.replace }),
+  useRouter: () => ({ push: h.push, back: vi.fn(), replace: h.replace }),
 }));
 vi.mock('../hooks/useMe', () => ({
   useMe: () => ({
@@ -66,6 +69,15 @@ vi.mock('../hooks/useListQuery', () => ({
     };
   },
 }));
+// Stub the action sheet so the schedule test asserts open/close wiring, not the
+// sheet's internals (those are covered by the component's own tests). Host
+// element only — no dynamic import() (tsc rejects it, TS1323).
+vi.mock('../components/AppointmentActionSheet', () => ({
+  AppointmentActionSheet: (props: { appointment?: { id?: string } }) => {
+    h.sheetProps = props;
+    return createElement('span', null, `sheet-open-${props.appointment?.id ?? ''}`);
+  },
+}));
 
 // eslint-disable-next-line import/first
 import Schedule from '../../app/schedule';
@@ -77,6 +89,7 @@ beforeEach(() => {
   h.isLoading = false;
   h.error = null;
   h.me = { ...SUPERVISOR_ME };
+  h.sheetProps = null;
 });
 
 afterEach(() => cleanup());
@@ -121,5 +134,23 @@ describe('Schedule screen', () => {
   it('shows the empty state when nothing is scheduled', () => {
     const { getByText } = render(createElement(Schedule));
     expect(getByText('Nothing scheduled.')).toBeTruthy();
+  });
+
+  it('navigates to manual booking from the Book header action', () => {
+    const { getByText } = render(createElement(Schedule));
+    fireEvent.click(getByText('Book').closest('button')!);
+    expect(h.push).toHaveBeenCalledWith('/appointments/new');
+  });
+
+  it('opens the action sheet for the tapped appointment (with its version)', () => {
+    h.data = [{ id: 'a1', scheduledStart: '2026-06-22T12:00:00Z', status: 'scheduled', updatedAt: 'v-1' }];
+    const { getByText } = render(createElement(Schedule));
+    // No sheet before a row is tapped.
+    expect(() => getByText('sheet-open-a1')).toThrow();
+    fireEvent.click(getByText('Jun 22, 2026').closest('button')!);
+    expect(getByText('sheet-open-a1')).toBeTruthy();
+    expect(h.sheetProps).toMatchObject({
+      appointment: { id: 'a1', updatedAt: 'v-1', status: 'scheduled' },
+    });
   });
 });

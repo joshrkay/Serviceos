@@ -52,3 +52,17 @@ export function routeForNotification(data: RawNotificationData | null | undefine
   }
   return HOME_ROUTE;
 }
+
+// U4 (B7) — the types that raise the Home emergency banner. Deliberately
+// narrower than HIGH_PRIORITY_NOTIFICATION_TYPES: incoming_call is
+// high-priority for sound/alert purposes but has its own surface (Calls) and
+// would make the banner noisy.
+const EMERGENCY_BANNER_TYPES = new Set(['escalation', 'emergency']);
+
+/** True when a foreground-arrived notification should raise the Home
+ *  emergency banner (B7 — emergency dispatch / on-call escalation). */
+export function isEmergencyNotification(
+  data: RawNotificationData | null | undefined,
+): boolean {
+  return Boolean(data && typeof data.type === 'string' && EMERGENCY_BANNER_TYPES.has(data.type));
+}
