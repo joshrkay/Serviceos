@@ -9,6 +9,16 @@ export interface LineItem {
   description: string;
   quantity: number;
   unitPriceCents: number;
+  // Good-better-best tiers + optional add-ons (estimates only). Items sharing a
+  // non-null `groupKey` are mutually-exclusive tiers; exactly one carries
+  // `isDefaultSelected`. Flat (single-tier) estimates leave all four undefined,
+  // so the create/update payload is byte-identical to today. Mirrors the server
+  // line-item schema (packages/api/src/shared/contracts.ts) and the shared
+  // money contract (packages/shared/src/contracts/money.ts).
+  groupKey?: string;
+  groupLabel?: string;
+  isOptional?: boolean;
+  isDefaultSelected?: boolean;
 }
 
 interface CatalogItem {

@@ -3,6 +3,7 @@ import {
   UNDO_WINDOW_MS,
   ambiguousCatalogLines,
   entityCandidatesFromPayload,
+  estimateTierView,
   formatCents,
   humanizeKey,
   reviewRows,
@@ -21,6 +22,75 @@ describe('typeLabel', () => {
     expect(typeLabel('send_payment_reminder')).toBe('Payment reminder');
     expect(typeLabel('apply_late_fee')).toBe('Late fee');
     expect(typeLabel('send_estimate_nudge')).toBe('Estimate nudge');
+  });
+});
+
+describe('estimateTierView — A5 good-better-best surfacing', () => {
+  // Estimate proposal payloads carry the price in `unitPrice` (integer cents).
+  it('groups tiers with per-tier totals in cents and marks the default', () => {
+    const view = estimateTierView({
+      lineItems: [
+        { description: 'Basic', unitPrice: 500000, quantity: 1, groupKey: 'tier', groupLabel: 'Roof', isOptional: true },
+        { description: 'Standard', unitPrice: 800000, quantity: 1, groupKey: 'tier', groupLabel: 'Roof', isOptional: true, isDefaultSelected: true },
+        { description: 'Premium', unitPrice: 1200000, quantity: 1, groupKey: 'tier', groupLabel: 'Roof', isOptional: true },
+      ],
+    });
+    expect(view.isTiered).toBe(true);
+    expect(view.groups).toHaveLength(1);
+    expect(view.groups[0].label).toBe('Roof');
+    expect(view.groups[0].options.map((o) => o.totalCents)).toEqual([500000, 800000, 1200000]);
+    const def = view.groups[0].options.filter((o) => o.isDefault);
+    expect(def).toHaveLength(1);
+    expect(def[0].description).toBe('Standard');
+  });
+
+  it('multiplies unit price by quantity and reads unitPriceCents when present', () => {
+    const view = estimateTierView({
+      lineItems: [
+        { description: 'A', unitPrice: 10000, quantity: 3, groupKey: 'g', groupLabel: 'Opts', isOptional: true },
+        { description: 'B', unitPriceCents: 25000, quantity: 2, groupKey: 'g', groupLabel: 'Opts', isOptional: true, isDefaultSelected: true },
+      ],
+    });
+    expect(view.groups[0].options.map((o) => o.totalCents)).toEqual([30000, 50000]);
+  });
+
+  it('separates standalone add-ons (isOptional, no groupKey)', () => {
+    const view = estimateTierView({
+      lineItems: [
+        { description: 'Basic', unitPrice: 100, quantity: 1, groupKey: 'tier', groupLabel: 'Opts', isOptional: true, isDefaultSelected: true },
+        { description: 'Better', unitPrice: 200, quantity: 1, groupKey: 'tier', groupLabel: 'Opts', isOptional: true },
+        { description: 'Warranty', unitPrice: 5000, quantity: 1, isOptional: true },
+      ],
+    });
+    expect(view.groups[0].options).toHaveLength(2);
+    expect(view.addOns).toHaveLength(1);
+    expect(view.addOns[0].description).toBe('Warranty');
+    expect(view.addOns[0].totalCents).toBe(5000);
+  });
+
+  it('is not tiered for a flat single-tier estimate (no regression)', () => {
+    const view = estimateTierView({
+      lineItems: [
+        { description: 'Labor', unitPrice: 5000, quantity: 2 },
+        { description: 'Material', unitPrice: 3000, quantity: 1 },
+      ],
+    });
+    expect(view.isTiered).toBe(false);
+    expect(view.groups).toEqual([]);
+    expect(view.addOns).toEqual([]);
+  });
+
+  it('degrades safely on malformed payloads', () => {
+    expect(estimateTierView(undefined)).toEqual({ isTiered: false, groups: [], addOns: [] });
+    expect(estimateTierView({})).toEqual({ isTiered: false, groups: [], addOns: [] });
+    expect(estimateTierView({ lineItems: 'nope' })).toEqual({ isTiered: false, groups: [], addOns: [] });
+    // Non-object rows / missing fields are skipped or defaulted, never thrown.
+    const view = estimateTierView({
+      lineItems: [null, 42, { groupKey: 'g', groupLabel: 'Opts', isOptional: true }, { groupKey: 'g', isOptional: true, unitPrice: 100 }],
+    });
+    expect(view.groups[0].options).toHaveLength(2);
+    expect(view.groups[0].options[0].description).toBe('Line 3');
+    expect(view.groups[0].options[0].totalCents).toBe(0);
   });
 });
 

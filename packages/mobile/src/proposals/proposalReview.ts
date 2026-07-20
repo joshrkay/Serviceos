@@ -111,6 +111,110 @@ export function ambiguousCatalogLines(
   return lines;
 }
 
+/**
+ * A5 — good-better-best tier surfacing for the operator review card. A tiered
+ * `draft_estimate`/`update_estimate` proposal carries its tiers as grouped line
+ * items (items sharing a non-null `groupKey` are mutually-exclusive tiers;
+ * `isOptional` lines without a group are standalone add-ons). This mirrors the
+ * shipped web operator card grouping
+ * (packages/web/src/components/shared/AIProposalCard.tsx) and the customer page
+ * (EstimateApprovalPage.tsx) so the operator reviews the actual menu, not a flat
+ * list. Read-only — the operator approves the menu; the customer selects a tier.
+ */
+export interface TierOption {
+  lineIndex: number;
+  description: string;
+  /** Per-tier total in integer cents (unit price × quantity). */
+  totalCents: number;
+  isDefault: boolean;
+}
+
+export interface TierGroup {
+  key: string;
+  label: string;
+  options: TierOption[];
+}
+
+export interface EstimateTierView {
+  /** True when the payload carries a real tier group (≥2 options) or any add-on. */
+  isTiered: boolean;
+  groups: TierGroup[];
+  addOns: TierOption[];
+}
+
+/**
+ * Per-line total in integer cents. Estimate proposal payloads carry the price in
+ * `unitPrice` (integer cents, despite the name); invoice-shaped lines use
+ * `unitPriceCents`. Normalize both, defaulting quantity to 1. See
+ * docs/solutions/conventions/line-item-price-field-estimate-vs-invoice.md.
+ */
+function lineTotalCents(li: Record<string, unknown>): number {
+  const cents =
+    typeof li.unitPriceCents === 'number'
+      ? li.unitPriceCents
+      : typeof li.unitPrice === 'number'
+        ? li.unitPrice
+        : 0;
+  const qty = typeof li.quantity === 'number' ? li.quantity : 1;
+  return Math.round(cents * qty);
+}
+
+/**
+ * Extract the tier groups + add-ons from a proposal payload's `lineItems`.
+ * Malformed payloads (no array, non-object rows, missing fields) degrade to an
+ * empty, non-tiered view. Group order and per-tier line indices follow the
+ * payload order so the operator sees Good→Better→Best as drafted.
+ */
+export function estimateTierView(
+  payload: Record<string, unknown> | undefined,
+): EstimateTierView {
+  const lineItems = payload?.lineItems;
+  if (!Array.isArray(lineItems)) return { isTiered: false, groups: [], addOns: [] };
+
+  const groupMap = new Map<string, TierGroup>();
+  const groupOrder: string[] = [];
+  const addOns: TierOption[] = [];
+
+  for (let idx = 0; idx < lineItems.length; idx++) {
+    const li = lineItems[idx];
+    if (!isRecord(li)) continue;
+    const groupKey =
+      typeof li.groupKey === 'string' && li.groupKey.length > 0 ? li.groupKey : undefined;
+    const description =
+      typeof li.description === 'string' && li.description.length > 0
+        ? li.description
+        : `Line ${idx + 1}`;
+    const option: TierOption = {
+      lineIndex: idx,
+      description,
+      totalCents: lineTotalCents(li),
+      isDefault: li.isDefaultSelected === true,
+    };
+    if (groupKey) {
+      let group = groupMap.get(groupKey);
+      if (!group) {
+        group = {
+          key: groupKey,
+          label:
+            typeof li.groupLabel === 'string' && li.groupLabel.length > 0
+              ? li.groupLabel
+              : 'Options',
+          options: [],
+        };
+        groupMap.set(groupKey, group);
+        groupOrder.push(groupKey);
+      }
+      group.options.push(option);
+    } else if (li.isOptional === true) {
+      addOns.push(option);
+    }
+  }
+
+  const groups = groupOrder.map((k) => groupMap.get(k)!);
+  const isTiered = groups.some((g) => g.options.length >= 2) || addOns.length > 0;
+  return { isTiered, groups, addOns };
+}
+
 export interface ReviewRow {
   label: string;
   value: string;

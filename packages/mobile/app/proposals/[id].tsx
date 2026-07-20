@@ -17,6 +17,7 @@ import { approveGateFor } from '../../src/proposals/approveGate';
 import {
   ambiguousCatalogLines,
   entityCandidatesFromPayload,
+  estimateTierView,
   reviewRows,
   typeLabel,
 } from '../../src/proposals/proposalReview';
@@ -64,6 +65,13 @@ export default function ProposalReviewScreen() {
       ? entityCandidatesFromPayload(proposal.payload)
       : [];
   const catalogAmbiguities = ambiguousCatalogLines(proposal?.payload, proposal?.sourceContext);
+
+  // A5 — a tiered draft_estimate renders its good-better-best groups (per-tier
+  // totals + default marker) and add-ons, not a flat list. Read-only: the
+  // operator approves the menu; the customer picks a tier at approval.
+  const isEstimateProposal =
+    proposal?.proposalType === 'draft_estimate' || proposal?.proposalType === 'update_estimate';
+  const tierView = isEstimateProposal ? estimateTierView(proposal?.payload) : null;
 
   async function confirmReject() {
     const reason = rejectReason.trim();
@@ -113,6 +121,52 @@ export default function ProposalReviewScreen() {
                     <Text className="text-base text-foreground">{row.value}</Text>
                   </View>
                 ))}
+              </View>
+            ) : null}
+
+            {tierView?.isTiered ? (
+              <View className="mt-5">
+                {tierView.groups.map((group) => (
+                  <View key={group.key} className="mb-4 rounded-lg border border-border">
+                    <Text className="border-b border-border px-4 py-3 text-sm font-medium text-mutedForeground">
+                      {group.label} · customer picks one
+                    </Text>
+                    {group.options.map((opt) => (
+                      <View
+                        key={opt.lineIndex}
+                        className="flex-row items-center justify-between border-b border-border px-4 py-3"
+                      >
+                        <View className="flex-1 pr-3">
+                          <Text className="text-base text-foreground">{opt.description}</Text>
+                          {opt.isDefault ? (
+                            <Text className="text-xs font-medium text-primary">Pre-selected</Text>
+                          ) : null}
+                        </View>
+                        <Text className="text-base text-foreground">
+                          {formatMoneyCents(opt.totalCents)}
+                        </Text>
+                      </View>
+                    ))}
+                  </View>
+                ))}
+                {tierView.addOns.length > 0 ? (
+                  <View className="rounded-lg border border-border">
+                    <Text className="border-b border-border px-4 py-3 text-sm font-medium text-mutedForeground">
+                      Optional add-ons
+                    </Text>
+                    {tierView.addOns.map((opt) => (
+                      <View
+                        key={opt.lineIndex}
+                        className="flex-row items-center justify-between border-b border-border px-4 py-3"
+                      >
+                        <Text className="flex-1 pr-3 text-base text-foreground">{opt.description}</Text>
+                        <Text className="text-base text-foreground">
+                          {formatMoneyCents(opt.totalCents)}
+                        </Text>
+                      </View>
+                    ))}
+                  </View>
+                ) : null}
               </View>
             ) : null}
 
