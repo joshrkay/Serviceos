@@ -152,6 +152,9 @@ Run from `packages/mobile`.
    ```
    Rivet uses only standard HTTPS/TLS (exempt). If you ever add
    non-exempt crypto, flip this and add the required documentation instead.
+   When editing `app.json` keep it **valid JSON** — add the key as a new
+   member of the existing `infoPlist` object (mind the trailing comma; no
+   comments), then re-run the validator below to confirm it still parses.
    - [ ] Key added; `npm run validate:config` still exits 0.
 
 4. **Fill iOS submit credentials** in `eas.json` →
@@ -230,8 +233,8 @@ Trigger from a dev machine or CI with `EXPO_TOKEN` (not this sandbox).
 # profile is rejected by `eas submit`):
 npx eas-cli build --platform ios --profile production
 
-# upload to App Store Connect → TestFlight:
-npx eas-cli submit --platform ios
+# upload to App Store Connect → TestFlight (explicit profile → submit.production.ios):
+npx eas-cli submit --platform ios --profile production
 ```
 - [ ] `production` build succeeds (build number auto-increments server-side;
       marketing version stays `1.0.0`).
