@@ -2,9 +2,10 @@
  * B2 — reference→ID candidates for gated money proposals (see docs/plans/
  * 2026-07-17-001-feat-voice-transcript-and-agent-paths-plan.md, unit B2).
  *
- * The money task handlers (SendInvoiceTaskHandler in voice-extended-tasks.ts,
- * InvoiceEditTaskHandler, EstimateEditTaskHandler) gate a free-text invoice/
- * estimate reference behind a flat `missingFields: ['invoiceId'|'estimateId']`
+ * The money task handlers (SendInvoiceTaskHandler / SendEstimateTaskHandler
+ * in voice-extended-tasks.ts, InvoiceEditTaskHandler, EstimateEditTaskHandler)
+ * gate a free-text invoice/estimate reference behind a flat
+ * `missingFields: ['invoiceId'|'estimateId']`
  * entry — correctly, per each handler's own doc comment on why a
  * search-resolved id must never silently lift that gate (assistant.ts's
  * `dropUnverifiedIds` would strip it right back out on the chat surface,

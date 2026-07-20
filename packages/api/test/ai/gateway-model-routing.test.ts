@@ -89,7 +89,7 @@ describe('P2-028 — gateway model routing integration', () => {
 
     const lastRequest = stub.getLastRequest();
     expect(lastRequest?.model).toBe(
-      process.env.AI_LIGHTWEIGHT_MODEL ?? 'claude-haiku-4-5-20251001'
+      process.env.AI_LIGHTWEIGHT_MODEL ?? 'meta-llama/llama-3.1-8b-instruct'
     );
 
     // Routing decision log should be emitted
@@ -108,7 +108,7 @@ describe('P2-028 — gateway model routing integration', () => {
     await gateway.complete(makeRequest({ taskType: 'create_customer' }));
 
     const lastRequest = stub.getLastRequest();
-    expect(lastRequest?.model).toBe(process.env.AI_STANDARD_MODEL ?? 'claude-sonnet-4-6');
+    expect(lastRequest?.model).toBe(process.env.AI_STANDARD_MODEL ?? 'meta-llama/llama-3.3-70b-instruct');
   });
 
   it('routes complex taskType to complex model', async () => {
@@ -119,7 +119,7 @@ describe('P2-028 — gateway model routing integration', () => {
     await gateway.complete(makeRequest({ taskType: 'draft_estimate' }));
 
     const lastRequest = stub.getLastRequest();
-    expect(lastRequest?.model).toBe(process.env.AI_COMPLEX_MODEL ?? 'claude-sonnet-4-6');
+    expect(lastRequest?.model).toBe(process.env.AI_COMPLEX_MODEL ?? 'qwen/qwen2.5-vl-72b-instruct');
   });
 
   it('routes mms_estimate to a vision-capable complex model (U1)', async () => {
@@ -130,9 +130,7 @@ describe('P2-028 — gateway model routing integration', () => {
     await gateway.complete(makeRequest({ taskType: 'mms_estimate' }));
 
     const model = stub.getLastRequest()?.model;
-    expect(model).toBe(process.env.AI_COMPLEX_MODEL ?? 'claude-sonnet-4-6');
-    // R1: an image task must resolve to a vision-capable model. Pinning to the
-    // complex tier means an AI_STANDARD_MODEL override can't silently strip vision.
+    expect(model).toBe(process.env.AI_COMPLEX_MODEL ?? 'qwen/qwen2.5-vl-72b-instruct');
     expect(isVisionCapableModel(model ?? '')).toBe(true);
   });
 
@@ -213,7 +211,7 @@ describe('P2-028 — gateway model routing integration', () => {
     const lastRequest = stub.getLastRequest();
     // Should be default lightweight model, not the other tenant's override
     expect(lastRequest?.model).toBe(
-      process.env.AI_LIGHTWEIGHT_MODEL ?? 'claude-haiku-4-5-20251001'
+      process.env.AI_LIGHTWEIGHT_MODEL ?? 'meta-llama/llama-3.1-8b-instruct'
     );
   });
 
@@ -226,8 +224,8 @@ describe('P2-028 — gateway model routing integration', () => {
           tiers: {
             // All three tiers required by AIRoutingConfig.tiers type — override complex only
             complex: { model: 'tenant-complex-model', maxTokens: 16384, temperature: 0.7 },
-            lightweight: { model: process.env.AI_LIGHTWEIGHT_MODEL ?? 'claude-haiku-4-5-20251001' },
-            standard: { model: process.env.AI_STANDARD_MODEL ?? 'claude-sonnet-4-6' },
+            lightweight: { model: process.env.AI_LIGHTWEIGHT_MODEL ?? 'meta-llama/llama-3.1-8b-instruct' },
+            standard: { model: process.env.AI_STANDARD_MODEL ?? 'meta-llama/llama-3.3-70b-instruct' },
           },
         },
       },
@@ -261,7 +259,7 @@ describe('P2-028 — gateway model routing integration', () => {
     // so the DEFAULT lightweight model should be used.
     await gateway.complete(makeRequest({ taskType: 'intent_classification', tenantId: 'tenant-partial-only-complex' }));
     expect(stub.getLastRequest()?.model).toBe(
-      process.env.AI_LIGHTWEIGHT_MODEL ?? 'claude-haiku-4-5-20251001'
+      process.env.AI_LIGHTWEIGHT_MODEL ?? 'meta-llama/llama-3.1-8b-instruct'
     );
   });
 
@@ -277,7 +275,7 @@ describe('P2-028 — gateway model routing integration', () => {
     await gateway.complete(makeRequest({ taskType: 'totally_unknown_task_xyz' }));
 
     const lastRequest = stub.getLastRequest();
-    expect(lastRequest?.model).toBe(process.env.AI_STANDARD_MODEL ?? 'claude-sonnet-4-6');
+    expect(lastRequest?.model).toBe(process.env.AI_STANDARD_MODEL ?? 'meta-llama/llama-3.3-70b-instruct');
   });
 
   it('unmapped taskType emits a warning log exactly once across multiple calls', async () => {
@@ -347,7 +345,7 @@ describe('P2-028 — gateway model routing integration', () => {
     const runs = await aiRunRepo.findByTaskType('tenant-run', 'intent_classification');
     expect(runs).toHaveLength(1);
     // Must be the tier-resolved model, NOT the provider-echoed value
-    expect(runs[0].model).toBe(process.env.AI_LIGHTWEIGHT_MODEL ?? 'claude-haiku-4-5-20251001');
+    expect(runs[0].model).toBe(process.env.AI_LIGHTWEIGHT_MODEL ?? 'meta-llama/llama-3.1-8b-instruct');
   });
 
   it('AiRun.model equals caller-supplied model when request.model is set', async () => {

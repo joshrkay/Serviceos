@@ -19,21 +19,26 @@ import {
   type CacheConfig,
 } from './cache';
 import { createRedisCacheStore } from './redis-cache-store';
+import { findProviderModelMismatch } from './provider-model-compat';
+import { DEFAULT_AI_ROUTING_CONFIG } from '../../config/ai-routing';
 
 /**
  * Create the LLM gateway from application config.
  *
- * Switching providers is purely a .env change:
+ * Switching providers is purely a .env change.
+ *
+ *   Recommended (Option A — OpenRouter managed open models):
+ *     AI_PROVIDER_BASE_URL=https://openrouter.ai/api/v1
+ *     AI_PROVIDER_API_KEY=sk-or-...
+ *     AI_LIGHTWEIGHT_MODEL=meta-llama/llama-3.1-8b-instruct
+ *     AI_STANDARD_MODEL=meta-llama/llama-3.3-70b-instruct
+ *     AI_COMPLEX_MODEL=qwen/qwen2.5-vl-72b-instruct
+ *     See docs/runbooks/openrouter-ai-provider.md
  *
  *   OpenAI:
  *     AI_PROVIDER_BASE_URL=https://api.openai.com/v1
  *     AI_PROVIDER_API_KEY=sk-...
  *     AI_DEFAULT_MODEL=gpt-4o-mini
- *
- *   OpenRouter:
- *     AI_PROVIDER_BASE_URL=https://openrouter.ai/api/v1
- *     AI_PROVIDER_API_KEY=sk-or-...
- *     AI_DEFAULT_MODEL=openai/gpt-4o-mini
  *
  *   Any other OpenAI-compatible endpoint works the same way.
  */
@@ -104,6 +109,34 @@ export function createLLMGateway(
       : { logger: loggerOrOpts as LLMGatewayLogger };
 
   const baseURL = config.AI_PROVIDER_BASE_URL ?? 'https://api.openai.com/v1';
+
+  // Static mismatch check (no network). Surfaces the 2026-07-20 failure mode
+  // where Claude model ids were sent to api.openai.com while health stayed green.
+  // Only check models that will actually be used for tenant traffic.
+  const allPerTierSetForCheck =
+    Boolean(process.env.AI_LIGHTWEIGHT_MODEL) &&
+    Boolean(process.env.AI_STANDARD_MODEL) &&
+    Boolean(process.env.AI_COMPLEX_MODEL);
+  const modelsToCheck =
+    config.AI_DEFAULT_MODEL && !allPerTierSetForCheck
+      ? [config.AI_DEFAULT_MODEL]
+      : [
+          DEFAULT_AI_ROUTING_CONFIG.tiers.lightweight.model,
+          DEFAULT_AI_ROUTING_CONFIG.tiers.standard.model,
+          DEFAULT_AI_ROUTING_CONFIG.tiers.complex.model,
+        ];
+  const mismatch = findProviderModelMismatch(baseURL, modelsToCheck);
+  if (mismatch) {
+    const logger = opts.logger;
+    logger?.error('AI provider/model mismatch — completions will fail until env is aligned', {
+      providerHost: mismatch.providerHost,
+      model: mismatch.model,
+      modelFamily: mismatch.modelFamily,
+      reason: mismatch.reason,
+    });
+    // Also stderr so Railway logs show it even without a structured logger.
+    process.stderr.write(`[ERROR] ${mismatch.reason}\n`);
+  }
 
   const primaryProvider = new OpenAICompatibleProvider({
     apiKey: config.AI_PROVIDER_API_KEY,
@@ -241,14 +274,17 @@ function maybeBuildCacheWrapper(
 }
 
 /**
- * Build the LLMGatewayConfig, wiring AI_DEFAULT_MODEL as a system-tenant
- * fallback when per-tier env vars are not all explicitly set.
+ * Build the LLMGatewayConfig, wiring AI_DEFAULT_MODEL as the global default
+ * when per-tier env vars are not all explicitly set.
  *
  * Precedence:
  * 1. Per-tier env vars (AI_LIGHTWEIGHT_MODEL, AI_STANDARD_MODEL, AI_COMPLEX_MODEL)
- *    — take full precedence when all three are explicitly set.
- * 2. AI_DEFAULT_MODEL — applies to all tiers via tenantOverrides[SYSTEM_TENANT_ID]
- *    when set and NOT all per-tier env vars are provided.
+ *    — take full precedence when all three are explicitly set (via
+ *    DEFAULT_AI_ROUTING_CONFIG, which reads those env vars at module load).
+ * 2. AI_DEFAULT_MODEL — stored under tenantOverrides[SYSTEM_TENANT_ID] and
+ *    applied to EVERY tenant that has no explicit override (see
+ *    LLMGateway.complete fallthrough). Without that fallthrough, only
+ *    tenantId=system would see AI_DEFAULT_MODEL — the 2026-07-20 bug.
  * 3. Built-in defaults in DEFAULT_AI_ROUTING_CONFIG.
  *
  * A one-time INFO log is emitted at construction time describing what was wired.

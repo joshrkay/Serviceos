@@ -60,6 +60,11 @@ behaviors:
     description: Open a new job/work order.
     critical_slots: [name, address, service_type, problem_description]
     min_examples: 50
+  - id: update_job
+    category: proposal-driving
+    description: Edit SAFE fields on an existing job (status, priority, title, description) — never money or schedule.
+    critical_slots: [job_ref, status, priority]
+    min_examples: 50
   - id: reschedule_appointment
     category: proposal-driving
     description: Move an existing appointment to a new time.

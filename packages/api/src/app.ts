@@ -965,11 +965,12 @@ export function createApp(): AppWithLifecycle {
   const healthRouter = createHealthRouter('1.0.0', process.env.NODE_ENV || 'development', checks);
   app.use('/', healthRouter);
 
-  // P2-029 — AI provider health endpoint. Public, no auth required.
-  // Uses the shared breaker registry populated by createLLMGateway().
-  // Reading gatewayFactory.sharedBreakerRegistry at request time (not at
-  // mount time) ensures the registry is populated after createLLMGateway()
-  // is called later in the boot sequence.
+  // P2-029 — AI provider health endpoint. Public listing (/ai) needs no auth.
+  // U4 completion probe (/ai/completion) is gated like /metrics.
+  // Uses the shared breaker registry + gateway populated by createLLMGateway()
+  // later in boot — read at request time, not mount time.
+  // Assigned after createLLMGateway() below — request handlers read it lazily.
+  let aiHealthGateway: import('./ai/gateway/gateway').LLMGateway | undefined;
   app.use('/api/health', (req, res, next) => {
     const registry = gatewayFactory.sharedBreakerRegistry;
     if (!registry) {
@@ -978,10 +979,17 @@ export function createApp(): AppWithLifecycle {
         res.status(200).json({ providers: [] });
         return;
       }
+      if (req.path === '/ai/completion') {
+        res.status(503).json({
+          error: 'AI_GATEWAY_UNAVAILABLE',
+          message: 'LLM gateway is not configured (AI_PROVIDER_API_KEY missing).',
+        });
+        return;
+      }
       next();
       return;
     }
-    createAiHealthRouter(registry)(req, res, next);
+    createAiHealthRouter(registry, [], { gateway: aiHealthGateway })(req, res, next);
   });
 
   // Prometheus metrics — gated by `checkMetricsAuth` (METRICS_TOKEN bearer).
@@ -1420,6 +1428,9 @@ export function createApp(): AppWithLifecycle {
   const llmGateway = config.AI_PROVIDER_API_KEY
     ? createLLMGateway(config, { aiRunRepo, shadowStore })
     : createHermeticMockLLMGateway().gateway;
+  // Wire completion probe for GET /api/health/ai/completion (even hermetic mock
+  // — probe then proves the mock path responds, which is useful in local boot).
+  aiHealthGateway = llmGateway;
 
   // Phase 4a-1: dedicated EmbeddingProvider for the RAG corpus. The
   // gateway routes chat completions through shadow/router logic that

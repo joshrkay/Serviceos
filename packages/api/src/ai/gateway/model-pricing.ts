@@ -74,6 +74,12 @@ export interface TokenUsageLike {
  * AI_MODEL_PRICING_JSON during the introductory window if routing real
  * traffic to claude-sonnet-5), Opus 4.6/4.7/4.8 $5.00/$25.00, Fable 5 /
  * Mythos 5 $10.00/$50.00.
+ *
+ * OpenRouter open-model floor prices as of 2026-07-20 (USD per 1,000,000
+ * tokens; aggregator floors — actual billed rate may be higher depending on
+ * the routed provider). Override via AI_MODEL_PRICING_JSON if your routed
+ * provider differs: Llama 3.1 8B $0.02/$0.03, Llama 3.3 70B $0.10/$0.32,
+ * Qwen 2.5 72B $0.36/$0.40, Qwen 2.5 VL 72B $0.80/$0.80.
  */
 export const DEFAULT_MODEL_PRICING: Readonly<Record<string, ModelPriceRates>> = {
   'claude-haiku-4-5': { inputCentsPerMillionTokens: 100, outputCentsPerMillionTokens: 500 },
@@ -84,6 +90,11 @@ export const DEFAULT_MODEL_PRICING: Readonly<Record<string, ModelPriceRates>> = 
   'claude-opus-4-8': { inputCentsPerMillionTokens: 500, outputCentsPerMillionTokens: 2500 },
   'claude-fable-5': { inputCentsPerMillionTokens: 1000, outputCentsPerMillionTokens: 5000 },
   'claude-mythos-5': { inputCentsPerMillionTokens: 1000, outputCentsPerMillionTokens: 5000 },
+  // OpenRouter Option A defaults (keys = lastSegment of the OpenRouter id).
+  'llama-3.1-8b-instruct': { inputCentsPerMillionTokens: 2, outputCentsPerMillionTokens: 3 },
+  'llama-3.3-70b-instruct': { inputCentsPerMillionTokens: 10, outputCentsPerMillionTokens: 32 },
+  'qwen-2.5-72b-instruct': { inputCentsPerMillionTokens: 36, outputCentsPerMillionTokens: 40 },
+  'qwen2.5-vl-72b-instruct': { inputCentsPerMillionTokens: 80, outputCentsPerMillionTokens: 80 },
 };
 
 function isFiniteNonNegativeInteger(n: unknown): n is number {

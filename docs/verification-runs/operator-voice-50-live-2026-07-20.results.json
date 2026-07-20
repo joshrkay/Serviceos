@@ -1,0 +1,3372 @@
+{
+  "started": "2026-07-20T20:02:46.014Z",
+  "finished": "2026-07-20T20:03:31.805Z",
+  "targets": {
+    "api_dev": "https://serviceosapi-development.up.railway.app",
+    "api_prod": "https://serviceosapi-production.up.railway.app",
+    "note": "api_prod rejects HMAC (RS256-only); live probe used api_dev with HMAC matching CLERK_SECRET_KEY"
+  },
+  "tenant": {
+    "id": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+    "clerkUser": "user_3GZQEdOUZSzhUNn7pb57fW5jKyg",
+    "label": "QA Mobile tenant (only membership that accepted our token)"
+  },
+  "platform": {
+    "api_prod_health": {
+      "status": 200,
+      "body": "{\"status\":\"ok\",\"version\":\"1.0.0\",\"environment\":\"development\",\"timestamp\":\"2026-07-20T20:02:46.340Z\",\"checks\":{\"database\":{\"status\":\"ok\"},\"drain\":{\"status\":\"ok\"}}}"
+    },
+    "api_dev_health": {
+      "status": 200,
+      "body": "{\"status\":\"ok\",\"version\":\"1.0.0\",\"environment\":\"development\",\"timestamp\":\"2026-07-20T20:02:46.708Z\",\"checks\":{\"database\":{\"status\":\"ok\"},\"drain\":{\"status\":\"ok\"}}}"
+    },
+    "api_dev_ai_health": {
+      "status": 200,
+      "body": "{\"providers\":[{\"name\":\"api.openai.com\",\"available\":true,\"breakerState\":\"closed\"}]}"
+    },
+    "web_prod": {
+      "status": 200,
+      "body": "<!doctype html>\n<html lang=\"en\">\n  <head>\n    <meta charset=\"UTF-8\" />\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />\n    <title>Rivet &mdash; Your AI"
+    },
+    "web_dev": {
+      "status": 200,
+      "body": "<!doctype html>\n<html lang=\"en\">\n  <head>\n    <meta charset=\"UTF-8\" />\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />\n    <title>Rivet &mdash; Your AI"
+    }
+  },
+  "auth": {
+    "prod": {
+      "meStatus": 401,
+      "me": {
+        "error": "UNAUTHORIZED",
+        "message": "Authentication required"
+      }
+    },
+    "dev": {
+      "meStatus": 200,
+      "me": {
+        "user_id": "user_3GZQEdOUZSzhUNn7pb57fW5jKyg",
+        "internal_user_id": "25abab01-4303-4626-9672-af9a19bf6a64",
+        "tenant_id": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+        "role": "owner",
+        "can_field_serve": true,
+        "current_mode": "supervisor",
+        "mode_changed_at": null,
+        "permissions": [
+          "tenant:manage",
+          "users:invite",
+          "users:remove",
+          "users:list",
+          "users:edit_role",
+          "jobs:create",
+          "jobs:assign",
+          "jobs:view",
+          "jobs:update",
+          "jobs:delete",
+          "conversations:view",
+          "conversations:create",
+          "conversations:manage",
+          "files:upload",
+          "files:view",
+          "files:delete",
+          "ai:run",
+          "ai:configure",
+          "audit:view",
+          "reports:view",
+          "proposals:approve",
+          "proposals:create",
+          "proposals:edit",
+          "proposals:view",
+          "customers:create",
+          "customers:view",
+          "customers:update",
+          "customers:delete",
+          "locations:create",
+          "locations:view",
+          "locations:update",
+          "locations:delete",
+          "estimates:create",
+          "estimates:view",
+          "estimates:update",
+          "estimates:delete",
+          "estimates:approve",
+          "invoices:create",
+          "invoices:view",
+          "invoices:update",
+          "invoices:delete",
+          "payments:create",
+          "payments:view",
+          "appointments:create",
+          "appointments:view",
+          "appointments:update",
+          "appointments:delete",
+          "notes:create",
+          "notes:view",
+          "notes:update",
+          "notes:delete",
+          "settings:view",
+          "settings:update",
+          "dispatch:view",
+          "dispatch:manage",
+          "availability:view",
+          "availability:manage",
+          "vertical_training_assets:approve",
+          "attachments:visibility"
+        ],
+        "backup_supervisor_user_id": null,
+        "unsupervised_proposal_routing": "queue_and_sms",
+        "brand_voice_configurator_enabled": false,
+        "timezone": "America/New_York",
+        "integration_statuses": [
+          {
+            "provider": "twilio",
+            "status": "full_readiness",
+            "updated_at": "2026-07-16T04:35:00.000Z"
+          }
+        ]
+      }
+    }
+  },
+  "seed": {
+    "location": {
+      "status": 201,
+      "id": "3947eb95-aa19-45cc-8a74-c426aa1e70f7"
+    },
+    "job": {
+      "status": 201,
+      "id": "6600a39a-abdf-43bf-aff8-56344e0e6670"
+    },
+    "estimate": {
+      "status": 201,
+      "id": "42adf2d8-e4c1-49a3-8d1d-388d1087f3f7",
+      "number": "EST-0001"
+    },
+    "invoice": {
+      "status": 201,
+      "id": "688baace-a7a7-400a-9ed8-0afd8c01db5a",
+      "number": "INV-0001"
+    }
+  },
+  "inventory": {
+    "/api/customers?limit=20": {
+      "status": 200,
+      "n": 2,
+      "total": 2
+    },
+    "/api/jobs?limit=20": {
+      "status": 200,
+      "n": 1,
+      "total": 1
+    },
+    "/api/estimates?limit=20": {
+      "status": 200,
+      "n": 1,
+      "total": 1
+    },
+    "/api/invoices?limit=20": {
+      "status": 200,
+      "n": 1,
+      "total": 1
+    },
+    "/api/proposals?limit=20": {
+      "status": 200,
+      "n": 0,
+      "total": 0
+    }
+  },
+  "restBaseline": {
+    "list_customers": {
+      "status": 200,
+      "ok": true
+    },
+    "list_jobs": {
+      "status": 200,
+      "ok": true
+    },
+    "list_estimates": {
+      "status": 200,
+      "ok": true
+    },
+    "list_invoices": {
+      "status": 200,
+      "ok": true
+    },
+    "list_proposals": {
+      "status": 200,
+      "ok": true
+    },
+    "list_appointments": {
+      "status": 200,
+      "ok": true
+    },
+    "voice_session_create": {
+      "status": 201,
+      "ok": true
+    }
+  },
+  "assistantCounts": {
+    "PASS": 0,
+    "PARTIAL": 0,
+    "DEGRADED": 50,
+    "FAIL": 0,
+    "BLOCKED": 0
+  },
+  "voiceCounts": {
+    "PASS": 0,
+    "PARTIAL": 0,
+    "DEGRADED": 50,
+    "FAIL": 0,
+    "BLOCKED": 0
+  },
+  "results": [
+    {
+      "id": 1,
+      "cat": "client",
+      "op": "create_client",
+      "utterance": "New customer Maria Alvarez, phone 480-555-0102",
+      "expectProposal": "create_customer",
+      "assistant": {
+        "httpStatus": 200,
+        "verdict": "DEGRADED",
+        "reason": "llm_fallback_envelope",
+        "proposalType": null,
+        "missingFields": [],
+        "degraded": true,
+        "fallbackStage": "error-envelope",
+        "content": "I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.",
+        "model": "fallback",
+        "taskType": "assistant.general"
+      },
+      "voice": {
+        "verdict": "DEGRADED",
+        "reason": "voice_reprompt_no_classify",
+        "state": "intent_capture",
+        "spoken": "",
+        "sideEffectTypes": [
+          "audit_log",
+          "emit_quality_event",
+          "tts_play"
+        ],
+        "httpStatus": 200,
+        "rawSideEffects": [
+          {
+            "type": "audit_log",
+            "payload": {
+              "eventType": "agent.calling.intent_capture.reprompt",
+              "fromState": "intent_capture",
+              "toState": "intent_capture",
+              "sessionId": "30b2085f-2f37-432c-85ae-cac0e0417039",
+              "tenantId": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+              "conversationId": "30b2085f-2f37-432c-85ae-cac0e0417039",
+              "ts": 1784577769717,
+              "threshold": 0.6,
+              "score": 0,
+              "retryCount": 1,
+              "repromptCount": 1
+            }
+          },
+          {
+            "type": "emit_quality_event",
+            "payload": {
+              "eventType": "repair_template_fired",
+              "trigger": "low_audio_confidence",
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          },
+          {
+            "type": "tts_play",
+            "payload": {
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 2,
+      "cat": "client",
+      "op": "create_client",
+      "utterance": "Add customer James Patel, email james@patel.co",
+      "expectProposal": "create_customer",
+      "assistant": {
+        "httpStatus": 200,
+        "verdict": "DEGRADED",
+        "reason": "llm_fallback_envelope",
+        "proposalType": null,
+        "missingFields": [],
+        "degraded": true,
+        "fallbackStage": "error-envelope",
+        "content": "I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.",
+        "model": "fallback",
+        "taskType": "assistant.general"
+      },
+      "voice": {
+        "verdict": "DEGRADED",
+        "reason": "voice_reprompt_no_classify",
+        "state": "intent_capture",
+        "spoken": "",
+        "sideEffectTypes": [
+          "audit_log",
+          "emit_quality_event",
+          "tts_play"
+        ],
+        "httpStatus": 200,
+        "rawSideEffects": [
+          {
+            "type": "audit_log",
+            "payload": {
+              "eventType": "agent.calling.intent_capture.reprompt",
+              "fromState": "intent_capture",
+              "toState": "intent_capture",
+              "sessionId": "78753e29-962e-4f4c-89c2-18eb7e1366b6",
+              "tenantId": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+              "conversationId": "78753e29-962e-4f4c-89c2-18eb7e1366b6",
+              "ts": 1784577770623,
+              "threshold": 0.6,
+              "score": 0,
+              "retryCount": 1,
+              "repromptCount": 1
+            }
+          },
+          {
+            "type": "emit_quality_event",
+            "payload": {
+              "eventType": "repair_template_fired",
+              "trigger": "low_audio_confidence",
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          },
+          {
+            "type": "tts_play",
+            "payload": {
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 3,
+      "cat": "client",
+      "op": "edit_client",
+      "utterance": "Update Alvarez's phone number to 480-555-0199",
+      "expectProposal": "update_customer",
+      "assistant": {
+        "httpStatus": 200,
+        "verdict": "DEGRADED",
+        "reason": "llm_fallback_envelope",
+        "proposalType": null,
+        "missingFields": [],
+        "degraded": true,
+        "fallbackStage": "error-envelope",
+        "content": "I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.",
+        "model": "fallback",
+        "taskType": "assistant.general"
+      },
+      "voice": {
+        "verdict": "DEGRADED",
+        "reason": "voice_reprompt_no_classify",
+        "state": "intent_capture",
+        "spoken": "",
+        "sideEffectTypes": [
+          "audit_log",
+          "emit_quality_event",
+          "tts_play"
+        ],
+        "httpStatus": 200,
+        "rawSideEffects": [
+          {
+            "type": "audit_log",
+            "payload": {
+              "eventType": "agent.calling.intent_capture.reprompt",
+              "fromState": "intent_capture",
+              "toState": "intent_capture",
+              "sessionId": "854885c4-65dc-4cb5-852e-16bd5a1b6bff",
+              "tenantId": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+              "conversationId": "854885c4-65dc-4cb5-852e-16bd5a1b6bff",
+              "ts": 1784577771820,
+              "threshold": 0.6,
+              "score": 0,
+              "retryCount": 1,
+              "repromptCount": 1
+            }
+          },
+          {
+            "type": "emit_quality_event",
+            "payload": {
+              "eventType": "repair_template_fired",
+              "trigger": "low_audio_confidence",
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          },
+          {
+            "type": "tts_play",
+            "payload": {
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 4,
+      "cat": "client",
+      "op": "edit_client",
+      "utterance": "Change the Khan email to office@khan.com",
+      "expectProposal": "update_customer",
+      "assistant": {
+        "httpStatus": 200,
+        "verdict": "DEGRADED",
+        "reason": "llm_fallback_envelope",
+        "proposalType": null,
+        "missingFields": [],
+        "degraded": true,
+        "fallbackStage": "error-envelope",
+        "content": "I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.",
+        "model": "fallback",
+        "taskType": "assistant.general"
+      },
+      "voice": {
+        "verdict": "DEGRADED",
+        "reason": "voice_reprompt_no_classify",
+        "state": "intent_capture",
+        "spoken": "",
+        "sideEffectTypes": [
+          "audit_log",
+          "emit_quality_event",
+          "tts_play"
+        ],
+        "httpStatus": 200,
+        "rawSideEffects": [
+          {
+            "type": "audit_log",
+            "payload": {
+              "eventType": "agent.calling.intent_capture.reprompt",
+              "fromState": "intent_capture",
+              "toState": "intent_capture",
+              "sessionId": "9297f1bd-689a-4586-9e48-888b4ba16890",
+              "tenantId": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+              "conversationId": "9297f1bd-689a-4586-9e48-888b4ba16890",
+              "ts": 1784577773362,
+              "threshold": 0.6,
+              "score": 0,
+              "retryCount": 1,
+              "repromptCount": 1
+            }
+          },
+          {
+            "type": "emit_quality_event",
+            "payload": {
+              "eventType": "repair_template_fired",
+              "trigger": "low_audio_confidence",
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          },
+          {
+            "type": "tts_play",
+            "payload": {
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 5,
+      "cat": "client",
+      "op": "create_client",
+      "utterance": "Onboard Greenfield Property Management as a new customer",
+      "expectProposal": "create_customer",
+      "assistant": {
+        "httpStatus": 200,
+        "verdict": "DEGRADED",
+        "reason": "llm_fallback_envelope",
+        "proposalType": null,
+        "missingFields": [],
+        "degraded": true,
+        "fallbackStage": "error-envelope",
+        "content": "I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.",
+        "model": "fallback",
+        "taskType": "assistant.general"
+      },
+      "voice": {
+        "verdict": "DEGRADED",
+        "reason": "voice_reprompt_no_classify",
+        "state": "intent_capture",
+        "spoken": "",
+        "sideEffectTypes": [
+          "audit_log",
+          "emit_quality_event",
+          "tts_play"
+        ],
+        "httpStatus": 200,
+        "rawSideEffects": [
+          {
+            "type": "audit_log",
+            "payload": {
+              "eventType": "agent.calling.intent_capture.reprompt",
+              "fromState": "intent_capture",
+              "toState": "intent_capture",
+              "sessionId": "ecfc7257-9e1c-415e-ace6-2b6d09791ef3",
+              "tenantId": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+              "conversationId": "ecfc7257-9e1c-415e-ace6-2b6d09791ef3",
+              "ts": 1784577774285,
+              "threshold": 0.6,
+              "score": 0,
+              "retryCount": 1,
+              "repromptCount": 1
+            }
+          },
+          {
+            "type": "emit_quality_event",
+            "payload": {
+              "eventType": "repair_template_fired",
+              "trigger": "low_audio_confidence",
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          },
+          {
+            "type": "tts_play",
+            "payload": {
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 6,
+      "cat": "client",
+      "op": "edit_client",
+      "utterance": "Fix Mrs Lee's address to 88 Palm Court",
+      "expectProposal": "update_customer",
+      "assistant": {
+        "httpStatus": 200,
+        "verdict": "DEGRADED",
+        "reason": "llm_fallback_envelope",
+        "proposalType": null,
+        "missingFields": [],
+        "degraded": true,
+        "fallbackStage": "error-envelope",
+        "content": "I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.",
+        "model": "fallback",
+        "taskType": "assistant.general"
+      },
+      "voice": {
+        "verdict": "DEGRADED",
+        "reason": "voice_reprompt_no_classify",
+        "state": "intent_capture",
+        "spoken": "",
+        "sideEffectTypes": [
+          "audit_log",
+          "emit_quality_event",
+          "tts_play"
+        ],
+        "httpStatus": 200,
+        "rawSideEffects": [
+          {
+            "type": "audit_log",
+            "payload": {
+              "eventType": "agent.calling.intent_capture.reprompt",
+              "fromState": "intent_capture",
+              "toState": "intent_capture",
+              "sessionId": "44106910-4000-41e8-be01-163637f536b2",
+              "tenantId": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+              "conversationId": "44106910-4000-41e8-be01-163637f536b2",
+              "ts": 1784577775175,
+              "threshold": 0.6,
+              "score": 0,
+              "retryCount": 1,
+              "repromptCount": 1
+            }
+          },
+          {
+            "type": "emit_quality_event",
+            "payload": {
+              "eventType": "repair_template_fired",
+              "trigger": "low_audio_confidence",
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          },
+          {
+            "type": "tts_play",
+            "payload": {
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 7,
+      "cat": "client",
+      "op": "lookup",
+      "utterance": "Look up the Khan account",
+      "expectProposal": null,
+      "assistant": {
+        "httpStatus": 200,
+        "verdict": "DEGRADED",
+        "reason": "llm_fallback_envelope",
+        "proposalType": null,
+        "missingFields": [],
+        "degraded": true,
+        "fallbackStage": "error-envelope",
+        "content": "I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.",
+        "model": "fallback",
+        "taskType": "assistant.general"
+      },
+      "voice": {
+        "verdict": "DEGRADED",
+        "reason": "voice_reprompt_no_classify",
+        "state": "intent_capture",
+        "spoken": "",
+        "sideEffectTypes": [
+          "audit_log",
+          "emit_quality_event",
+          "tts_play"
+        ],
+        "httpStatus": 200,
+        "rawSideEffects": [
+          {
+            "type": "audit_log",
+            "payload": {
+              "eventType": "agent.calling.intent_capture.reprompt",
+              "fromState": "intent_capture",
+              "toState": "intent_capture",
+              "sessionId": "95779822-5186-4329-bc43-dfd0f8f401b5",
+              "tenantId": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+              "conversationId": "95779822-5186-4329-bc43-dfd0f8f401b5",
+              "ts": 1784577776071,
+              "threshold": 0.6,
+              "score": 0,
+              "retryCount": 1,
+              "repromptCount": 1
+            }
+          },
+          {
+            "type": "emit_quality_event",
+            "payload": {
+              "eventType": "repair_template_fired",
+              "trigger": "low_audio_confidence",
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          },
+          {
+            "type": "tts_play",
+            "payload": {
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 8,
+      "cat": "client",
+      "op": "convert_lead",
+      "utterance": "Convert the Greenfield lead to a customer",
+      "expectProposal": "convert_lead",
+      "assistant": {
+        "httpStatus": 200,
+        "verdict": "DEGRADED",
+        "reason": "llm_fallback_envelope",
+        "proposalType": null,
+        "missingFields": [],
+        "degraded": true,
+        "fallbackStage": "error-envelope",
+        "content": "I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.",
+        "model": "fallback",
+        "taskType": "assistant.general"
+      },
+      "voice": {
+        "verdict": "DEGRADED",
+        "reason": "voice_reprompt_no_classify",
+        "state": "intent_capture",
+        "spoken": "",
+        "sideEffectTypes": [
+          "audit_log",
+          "emit_quality_event",
+          "tts_play"
+        ],
+        "httpStatus": 200,
+        "rawSideEffects": [
+          {
+            "type": "audit_log",
+            "payload": {
+              "eventType": "agent.calling.intent_capture.reprompt",
+              "fromState": "intent_capture",
+              "toState": "intent_capture",
+              "sessionId": "d8dec7aa-c99c-4e7a-8657-921688a2db33",
+              "tenantId": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+              "conversationId": "d8dec7aa-c99c-4e7a-8657-921688a2db33",
+              "ts": 1784577777027,
+              "threshold": 0.6,
+              "score": 0,
+              "retryCount": 1,
+              "repromptCount": 1
+            }
+          },
+          {
+            "type": "emit_quality_event",
+            "payload": {
+              "eventType": "repair_template_fired",
+              "trigger": "low_audio_confidence",
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          },
+          {
+            "type": "tts_play",
+            "payload": {
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 9,
+      "cat": "job",
+      "op": "create_job",
+      "utterance": "Open a job for Alvarez, no AC",
+      "expectProposal": "create_job",
+      "assistant": {
+        "httpStatus": 200,
+        "verdict": "DEGRADED",
+        "reason": "llm_fallback_envelope",
+        "proposalType": null,
+        "missingFields": [],
+        "degraded": true,
+        "fallbackStage": "error-envelope",
+        "content": "I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.",
+        "model": "fallback",
+        "taskType": "assistant.general"
+      },
+      "voice": {
+        "verdict": "DEGRADED",
+        "reason": "voice_reprompt_no_classify",
+        "state": "intent_capture",
+        "spoken": "",
+        "sideEffectTypes": [
+          "audit_log",
+          "emit_quality_event",
+          "tts_play"
+        ],
+        "httpStatus": 200,
+        "rawSideEffects": [
+          {
+            "type": "audit_log",
+            "payload": {
+              "eventType": "agent.calling.intent_capture.reprompt",
+              "fromState": "intent_capture",
+              "toState": "intent_capture",
+              "sessionId": "62e7d59b-5310-4110-80fa-7ec6eb3e7053",
+              "tenantId": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+              "conversationId": "62e7d59b-5310-4110-80fa-7ec6eb3e7053",
+              "ts": 1784577777922,
+              "threshold": 0.6,
+              "score": 0,
+              "retryCount": 1,
+              "repromptCount": 1
+            }
+          },
+          {
+            "type": "emit_quality_event",
+            "payload": {
+              "eventType": "repair_template_fired",
+              "trigger": "low_audio_confidence",
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          },
+          {
+            "type": "tts_play",
+            "payload": {
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 10,
+      "cat": "job",
+      "op": "create_job",
+      "utterance": "Start a new job for Khan — kitchen drain replacement",
+      "expectProposal": "create_job",
+      "assistant": {
+        "httpStatus": 200,
+        "verdict": "DEGRADED",
+        "reason": "llm_fallback_envelope",
+        "proposalType": null,
+        "missingFields": [],
+        "degraded": true,
+        "fallbackStage": "error-envelope",
+        "content": "I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.",
+        "model": "fallback",
+        "taskType": "assistant.general"
+      },
+      "voice": {
+        "verdict": "DEGRADED",
+        "reason": "voice_reprompt_no_classify",
+        "state": "intent_capture",
+        "spoken": "",
+        "sideEffectTypes": [
+          "audit_log",
+          "emit_quality_event",
+          "tts_play"
+        ],
+        "httpStatus": 200,
+        "rawSideEffects": [
+          {
+            "type": "audit_log",
+            "payload": {
+              "eventType": "agent.calling.intent_capture.reprompt",
+              "fromState": "intent_capture",
+              "toState": "intent_capture",
+              "sessionId": "0fe584b8-d928-4613-9485-c2d9675c0d6c",
+              "tenantId": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+              "conversationId": "0fe584b8-d928-4613-9485-c2d9675c0d6c",
+              "ts": 1784577778783,
+              "threshold": 0.6,
+              "score": 0,
+              "retryCount": 1,
+              "repromptCount": 1
+            }
+          },
+          {
+            "type": "emit_quality_event",
+            "payload": {
+              "eventType": "repair_template_fired",
+              "trigger": "low_audio_confidence",
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          },
+          {
+            "type": "tts_play",
+            "payload": {
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 11,
+      "cat": "job",
+      "op": "edit_job",
+      "utterance": "Mark the Henderson job in progress",
+      "expectProposal": "update_job",
+      "assistant": {
+        "httpStatus": 200,
+        "verdict": "DEGRADED",
+        "reason": "llm_fallback_envelope",
+        "proposalType": null,
+        "missingFields": [],
+        "degraded": true,
+        "fallbackStage": "error-envelope",
+        "content": "I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.",
+        "model": "fallback",
+        "taskType": "assistant.general"
+      },
+      "voice": {
+        "verdict": "DEGRADED",
+        "reason": "voice_reprompt_no_classify",
+        "state": "intent_capture",
+        "spoken": "",
+        "sideEffectTypes": [
+          "audit_log",
+          "emit_quality_event",
+          "tts_play"
+        ],
+        "httpStatus": 200,
+        "rawSideEffects": [
+          {
+            "type": "audit_log",
+            "payload": {
+              "eventType": "agent.calling.intent_capture.reprompt",
+              "fromState": "intent_capture",
+              "toState": "intent_capture",
+              "sessionId": "42d9b535-bb92-4be5-9b5e-cca93db12cec",
+              "tenantId": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+              "conversationId": "42d9b535-bb92-4be5-9b5e-cca93db12cec",
+              "ts": 1784577779773,
+              "threshold": 0.6,
+              "score": 0,
+              "retryCount": 1,
+              "repromptCount": 1
+            }
+          },
+          {
+            "type": "emit_quality_event",
+            "payload": {
+              "eventType": "repair_template_fired",
+              "trigger": "low_audio_confidence",
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          },
+          {
+            "type": "tts_play",
+            "payload": {
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 12,
+      "cat": "job",
+      "op": "edit_job",
+      "utterance": "Set the Garcia job priority to urgent",
+      "expectProposal": "update_job",
+      "assistant": {
+        "httpStatus": 200,
+        "verdict": "DEGRADED",
+        "reason": "llm_fallback_envelope",
+        "proposalType": null,
+        "missingFields": [],
+        "degraded": true,
+        "fallbackStage": "error-envelope",
+        "content": "I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.",
+        "model": "fallback",
+        "taskType": "assistant.general"
+      },
+      "voice": {
+        "verdict": "DEGRADED",
+        "reason": "voice_reprompt_no_classify",
+        "state": "intent_capture",
+        "spoken": "",
+        "sideEffectTypes": [
+          "audit_log",
+          "emit_quality_event",
+          "tts_play"
+        ],
+        "httpStatus": 200,
+        "rawSideEffects": [
+          {
+            "type": "audit_log",
+            "payload": {
+              "eventType": "agent.calling.intent_capture.reprompt",
+              "fromState": "intent_capture",
+              "toState": "intent_capture",
+              "sessionId": "bde8bf2d-b973-4731-90e2-e3c94e18ac37",
+              "tenantId": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+              "conversationId": "bde8bf2d-b973-4731-90e2-e3c94e18ac37",
+              "ts": 1784577780632,
+              "threshold": 0.6,
+              "score": 0,
+              "retryCount": 1,
+              "repromptCount": 1
+            }
+          },
+          {
+            "type": "emit_quality_event",
+            "payload": {
+              "eventType": "repair_template_fired",
+              "trigger": "low_audio_confidence",
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          },
+          {
+            "type": "tts_play",
+            "payload": {
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 13,
+      "cat": "job",
+      "op": "edit_job",
+      "utterance": "Mark JOB-0012 completed",
+      "expectProposal": "update_job",
+      "assistant": {
+        "httpStatus": 200,
+        "verdict": "DEGRADED",
+        "reason": "llm_fallback_envelope",
+        "proposalType": null,
+        "missingFields": [],
+        "degraded": true,
+        "fallbackStage": "error-envelope",
+        "content": "I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.",
+        "model": "fallback",
+        "taskType": "assistant.general"
+      },
+      "voice": {
+        "verdict": "DEGRADED",
+        "reason": "voice_reprompt_no_classify",
+        "state": "intent_capture",
+        "spoken": "",
+        "sideEffectTypes": [
+          "audit_log",
+          "emit_quality_event",
+          "tts_play"
+        ],
+        "httpStatus": 200,
+        "rawSideEffects": [
+          {
+            "type": "audit_log",
+            "payload": {
+              "eventType": "agent.calling.intent_capture.reprompt",
+              "fromState": "intent_capture",
+              "toState": "intent_capture",
+              "sessionId": "3b2c114f-8a49-42bd-a7c1-dec5e9dcc5e2",
+              "tenantId": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+              "conversationId": "3b2c114f-8a49-42bd-a7c1-dec5e9dcc5e2",
+              "ts": 1784577781469,
+              "threshold": 0.6,
+              "score": 0,
+              "retryCount": 1,
+              "repromptCount": 1
+            }
+          },
+          {
+            "type": "emit_quality_event",
+            "payload": {
+              "eventType": "repair_template_fired",
+              "trigger": "low_audio_confidence",
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          },
+          {
+            "type": "tts_play",
+            "payload": {
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 14,
+      "cat": "job",
+      "op": "lookup",
+      "utterance": "What jobs do I have today?",
+      "expectProposal": null,
+      "assistant": {
+        "httpStatus": 200,
+        "verdict": "DEGRADED",
+        "reason": "llm_fallback_envelope",
+        "proposalType": null,
+        "missingFields": [],
+        "degraded": true,
+        "fallbackStage": "error-envelope",
+        "content": "I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.",
+        "model": "fallback",
+        "taskType": "assistant.general"
+      },
+      "voice": {
+        "verdict": "DEGRADED",
+        "reason": "voice_reprompt_no_classify",
+        "state": "intent_capture",
+        "spoken": "",
+        "sideEffectTypes": [
+          "audit_log",
+          "emit_quality_event",
+          "tts_play"
+        ],
+        "httpStatus": 200,
+        "rawSideEffects": [
+          {
+            "type": "audit_log",
+            "payload": {
+              "eventType": "agent.calling.intent_capture.reprompt",
+              "fromState": "intent_capture",
+              "toState": "intent_capture",
+              "sessionId": "a163fa3e-9672-4991-b766-40c1d072af08",
+              "tenantId": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+              "conversationId": "a163fa3e-9672-4991-b766-40c1d072af08",
+              "ts": 1784577782327,
+              "threshold": 0.6,
+              "score": 0,
+              "retryCount": 1,
+              "repromptCount": 1
+            }
+          },
+          {
+            "type": "emit_quality_event",
+            "payload": {
+              "eventType": "repair_template_fired",
+              "trigger": "low_audio_confidence",
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          },
+          {
+            "type": "tts_play",
+            "payload": {
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 15,
+      "cat": "estimate",
+      "op": "create_estimate",
+      "utterance": "Quote the Khan install, 3-ton condenser",
+      "expectProposal": "draft_estimate",
+      "assistant": {
+        "httpStatus": 200,
+        "verdict": "DEGRADED",
+        "reason": "llm_fallback_envelope",
+        "proposalType": null,
+        "missingFields": [],
+        "degraded": true,
+        "fallbackStage": "error-envelope",
+        "content": "I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.",
+        "model": "fallback",
+        "taskType": "assistant.estimate"
+      },
+      "voice": {
+        "verdict": "DEGRADED",
+        "reason": "voice_reprompt_no_classify",
+        "state": "intent_capture",
+        "spoken": "",
+        "sideEffectTypes": [
+          "audit_log",
+          "emit_quality_event",
+          "tts_play"
+        ],
+        "httpStatus": 200,
+        "rawSideEffects": [
+          {
+            "type": "audit_log",
+            "payload": {
+              "eventType": "agent.calling.intent_capture.reprompt",
+              "fromState": "intent_capture",
+              "toState": "intent_capture",
+              "sessionId": "551d96d8-8faa-4abc-9611-eec4856346e0",
+              "tenantId": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+              "conversationId": "551d96d8-8faa-4abc-9611-eec4856346e0",
+              "ts": 1784577783247,
+              "threshold": 0.6,
+              "score": 0,
+              "retryCount": 1,
+              "repromptCount": 1
+            }
+          },
+          {
+            "type": "emit_quality_event",
+            "payload": {
+              "eventType": "repair_template_fired",
+              "trigger": "low_audio_confidence",
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          },
+          {
+            "type": "tts_play",
+            "payload": {
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 16,
+      "cat": "estimate",
+      "op": "create_estimate",
+      "utterance": "Draft an estimate for the Johnson water heater replacement",
+      "expectProposal": "draft_estimate",
+      "assistant": {
+        "httpStatus": 200,
+        "verdict": "DEGRADED",
+        "reason": "llm_fallback_envelope",
+        "proposalType": null,
+        "missingFields": [],
+        "degraded": true,
+        "fallbackStage": "error-envelope",
+        "content": "I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.",
+        "model": "fallback",
+        "taskType": "assistant.estimate"
+      },
+      "voice": {
+        "verdict": "DEGRADED",
+        "reason": "voice_reprompt_no_classify",
+        "state": "intent_capture",
+        "spoken": "",
+        "sideEffectTypes": [
+          "audit_log",
+          "emit_quality_event",
+          "tts_play"
+        ],
+        "httpStatus": 200,
+        "rawSideEffects": [
+          {
+            "type": "audit_log",
+            "payload": {
+              "eventType": "agent.calling.intent_capture.reprompt",
+              "fromState": "intent_capture",
+              "toState": "intent_capture",
+              "sessionId": "24b2b636-3674-42da-949f-bf0b2ae721d7",
+              "tenantId": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+              "conversationId": "24b2b636-3674-42da-949f-bf0b2ae721d7",
+              "ts": 1784577784036,
+              "threshold": 0.6,
+              "score": 0,
+              "retryCount": 1,
+              "repromptCount": 1
+            }
+          },
+          {
+            "type": "emit_quality_event",
+            "payload": {
+              "eventType": "repair_template_fired",
+              "trigger": "low_audio_confidence",
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          },
+          {
+            "type": "tts_play",
+            "payload": {
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 17,
+      "cat": "estimate",
+      "op": "edit_estimate",
+      "utterance": "Change the Khan quote to a 3-ton",
+      "expectProposal": "update_estimate",
+      "assistant": {
+        "httpStatus": 200,
+        "verdict": "DEGRADED",
+        "reason": "llm_fallback_envelope",
+        "proposalType": null,
+        "missingFields": [],
+        "degraded": true,
+        "fallbackStage": "error-envelope",
+        "content": "I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.",
+        "model": "fallback",
+        "taskType": "assistant.estimate"
+      },
+      "voice": {
+        "verdict": "DEGRADED",
+        "reason": "voice_reprompt_no_classify",
+        "state": "intent_capture",
+        "spoken": "",
+        "sideEffectTypes": [
+          "audit_log",
+          "emit_quality_event",
+          "tts_play"
+        ],
+        "httpStatus": 200,
+        "rawSideEffects": [
+          {
+            "type": "audit_log",
+            "payload": {
+              "eventType": "agent.calling.intent_capture.reprompt",
+              "fromState": "intent_capture",
+              "toState": "intent_capture",
+              "sessionId": "cd359ff3-983f-4a7f-a79e-be765efecce7",
+              "tenantId": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+              "conversationId": "cd359ff3-983f-4a7f-a79e-be765efecce7",
+              "ts": 1784577784761,
+              "threshold": 0.6,
+              "score": 0,
+              "retryCount": 1,
+              "repromptCount": 1
+            }
+          },
+          {
+            "type": "emit_quality_event",
+            "payload": {
+              "eventType": "repair_template_fired",
+              "trigger": "low_audio_confidence",
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          },
+          {
+            "type": "tts_play",
+            "payload": {
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 18,
+      "cat": "estimate",
+      "op": "edit_estimate",
+      "utterance": "Add duct sealing to the Khan estimate",
+      "expectProposal": "update_estimate",
+      "assistant": {
+        "httpStatus": 200,
+        "verdict": "DEGRADED",
+        "reason": "llm_fallback_envelope",
+        "proposalType": null,
+        "missingFields": [],
+        "degraded": true,
+        "fallbackStage": "error-envelope",
+        "content": "I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.",
+        "model": "fallback",
+        "taskType": "assistant.estimate"
+      },
+      "voice": {
+        "verdict": "DEGRADED",
+        "reason": "voice_reprompt_no_classify",
+        "state": "intent_capture",
+        "spoken": "",
+        "sideEffectTypes": [
+          "audit_log",
+          "emit_quality_event",
+          "tts_play"
+        ],
+        "httpStatus": 200,
+        "rawSideEffects": [
+          {
+            "type": "audit_log",
+            "payload": {
+              "eventType": "agent.calling.intent_capture.reprompt",
+              "fromState": "intent_capture",
+              "toState": "intent_capture",
+              "sessionId": "3c281c53-51d7-4f10-8c71-7ea8c8cee578",
+              "tenantId": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+              "conversationId": "3c281c53-51d7-4f10-8c71-7ea8c8cee578",
+              "ts": 1784577785557,
+              "threshold": 0.6,
+              "score": 0,
+              "retryCount": 1,
+              "repromptCount": 1
+            }
+          },
+          {
+            "type": "emit_quality_event",
+            "payload": {
+              "eventType": "repair_template_fired",
+              "trigger": "low_audio_confidence",
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          },
+          {
+            "type": "tts_play",
+            "payload": {
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 19,
+      "cat": "estimate",
+      "op": "edit_estimate",
+      "utterance": "Add a trip fee to estimate EST-0001",
+      "expectProposal": "update_estimate",
+      "assistant": {
+        "httpStatus": 200,
+        "verdict": "DEGRADED",
+        "reason": "llm_fallback_envelope",
+        "proposalType": null,
+        "missingFields": [],
+        "degraded": true,
+        "fallbackStage": "error-envelope",
+        "content": "I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.",
+        "model": "fallback",
+        "taskType": "assistant.estimate"
+      },
+      "voice": {
+        "verdict": "DEGRADED",
+        "reason": "voice_reprompt_no_classify",
+        "state": "intent_capture",
+        "spoken": "",
+        "sideEffectTypes": [
+          "audit_log",
+          "emit_quality_event",
+          "tts_play"
+        ],
+        "httpStatus": 200,
+        "rawSideEffects": [
+          {
+            "type": "audit_log",
+            "payload": {
+              "eventType": "agent.calling.intent_capture.reprompt",
+              "fromState": "intent_capture",
+              "toState": "intent_capture",
+              "sessionId": "bb898471-61fb-4d02-b48e-f7d49301d8d1",
+              "tenantId": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+              "conversationId": "bb898471-61fb-4d02-b48e-f7d49301d8d1",
+              "ts": 1784577786373,
+              "threshold": 0.6,
+              "score": 0,
+              "retryCount": 1,
+              "repromptCount": 1
+            }
+          },
+          {
+            "type": "emit_quality_event",
+            "payload": {
+              "eventType": "repair_template_fired",
+              "trigger": "low_audio_confidence",
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          },
+          {
+            "type": "tts_play",
+            "payload": {
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 20,
+      "cat": "estimate",
+      "op": "send_estimate",
+      "utterance": "Send the Khan estimate",
+      "expectProposal": "send_estimate",
+      "assistant": {
+        "httpStatus": 200,
+        "verdict": "DEGRADED",
+        "reason": "llm_fallback_envelope",
+        "proposalType": null,
+        "missingFields": [],
+        "degraded": true,
+        "fallbackStage": "error-envelope",
+        "content": "I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.",
+        "model": "fallback",
+        "taskType": "assistant.estimate"
+      },
+      "voice": {
+        "verdict": "DEGRADED",
+        "reason": "voice_reprompt_no_classify",
+        "state": "intent_capture",
+        "spoken": "",
+        "sideEffectTypes": [
+          "audit_log",
+          "emit_quality_event",
+          "tts_play"
+        ],
+        "httpStatus": 200,
+        "rawSideEffects": [
+          {
+            "type": "audit_log",
+            "payload": {
+              "eventType": "agent.calling.intent_capture.reprompt",
+              "fromState": "intent_capture",
+              "toState": "intent_capture",
+              "sessionId": "6a5e10f1-3d79-4cb4-bc99-627e389d197c",
+              "tenantId": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+              "conversationId": "6a5e10f1-3d79-4cb4-bc99-627e389d197c",
+              "ts": 1784577787119,
+              "threshold": 0.6,
+              "score": 0,
+              "retryCount": 1,
+              "repromptCount": 1
+            }
+          },
+          {
+            "type": "emit_quality_event",
+            "payload": {
+              "eventType": "repair_template_fired",
+              "trigger": "low_audio_confidence",
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          },
+          {
+            "type": "tts_play",
+            "payload": {
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 21,
+      "cat": "estimate",
+      "op": "send_estimate",
+      "utterance": "Text estimate EST-0042 to the customer",
+      "expectProposal": "send_estimate",
+      "assistant": {
+        "httpStatus": 200,
+        "verdict": "DEGRADED",
+        "reason": "llm_fallback_envelope",
+        "proposalType": null,
+        "missingFields": [],
+        "degraded": true,
+        "fallbackStage": "error-envelope",
+        "content": "I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.",
+        "model": "fallback",
+        "taskType": "assistant.estimate"
+      },
+      "voice": {
+        "verdict": "DEGRADED",
+        "reason": "voice_reprompt_no_classify",
+        "state": "intent_capture",
+        "spoken": "",
+        "sideEffectTypes": [
+          "audit_log",
+          "emit_quality_event",
+          "tts_play"
+        ],
+        "httpStatus": 200,
+        "rawSideEffects": [
+          {
+            "type": "audit_log",
+            "payload": {
+              "eventType": "agent.calling.intent_capture.reprompt",
+              "fromState": "intent_capture",
+              "toState": "intent_capture",
+              "sessionId": "d16e815f-1681-4ad7-b0ab-5bc12cfd2a38",
+              "tenantId": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+              "conversationId": "d16e815f-1681-4ad7-b0ab-5bc12cfd2a38",
+              "ts": 1784577787917,
+              "threshold": 0.6,
+              "score": 0,
+              "retryCount": 1,
+              "repromptCount": 1
+            }
+          },
+          {
+            "type": "emit_quality_event",
+            "payload": {
+              "eventType": "repair_template_fired",
+              "trigger": "low_audio_confidence",
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          },
+          {
+            "type": "tts_play",
+            "payload": {
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 22,
+      "cat": "estimate",
+      "op": "send_estimate_nudge",
+      "utterance": "Nudge the Khan estimate again",
+      "expectProposal": "send_estimate_nudge",
+      "assistant": {
+        "httpStatus": 200,
+        "verdict": "DEGRADED",
+        "reason": "llm_fallback_envelope",
+        "proposalType": null,
+        "missingFields": [],
+        "degraded": true,
+        "fallbackStage": "error-envelope",
+        "content": "I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.",
+        "model": "fallback",
+        "taskType": "assistant.estimate"
+      },
+      "voice": {
+        "verdict": "DEGRADED",
+        "reason": "voice_reprompt_no_classify",
+        "state": "intent_capture",
+        "spoken": "",
+        "sideEffectTypes": [
+          "audit_log",
+          "emit_quality_event",
+          "tts_play"
+        ],
+        "httpStatus": 200,
+        "rawSideEffects": [
+          {
+            "type": "audit_log",
+            "payload": {
+              "eventType": "agent.calling.intent_capture.reprompt",
+              "fromState": "intent_capture",
+              "toState": "intent_capture",
+              "sessionId": "1d365dd3-bb7c-404a-8e3d-a72db57b71f1",
+              "tenantId": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+              "conversationId": "1d365dd3-bb7c-404a-8e3d-a72db57b71f1",
+              "ts": 1784577788682,
+              "threshold": 0.6,
+              "score": 0,
+              "retryCount": 1,
+              "repromptCount": 1
+            }
+          },
+          {
+            "type": "emit_quality_event",
+            "payload": {
+              "eventType": "repair_template_fired",
+              "trigger": "low_audio_confidence",
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          },
+          {
+            "type": "tts_play",
+            "payload": {
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 23,
+      "cat": "invoice",
+      "op": "create_invoice",
+      "utterance": "Invoice the Johnson job, 450 dollars capacitor plus labor",
+      "expectProposal": "draft_invoice",
+      "assistant": {
+        "httpStatus": 200,
+        "verdict": "DEGRADED",
+        "reason": "llm_fallback_envelope",
+        "proposalType": null,
+        "missingFields": [],
+        "degraded": true,
+        "fallbackStage": "error-envelope",
+        "content": "I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.",
+        "model": "fallback",
+        "taskType": "assistant.invoice"
+      },
+      "voice": {
+        "verdict": "DEGRADED",
+        "reason": "voice_reprompt_no_classify",
+        "state": "intent_capture",
+        "spoken": "",
+        "sideEffectTypes": [
+          "audit_log",
+          "emit_quality_event",
+          "tts_play"
+        ],
+        "httpStatus": 200,
+        "rawSideEffects": [
+          {
+            "type": "audit_log",
+            "payload": {
+              "eventType": "agent.calling.intent_capture.reprompt",
+              "fromState": "intent_capture",
+              "toState": "intent_capture",
+              "sessionId": "2147a236-de92-46a6-9719-e8d0ab29950f",
+              "tenantId": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+              "conversationId": "2147a236-de92-46a6-9719-e8d0ab29950f",
+              "ts": 1784577789444,
+              "threshold": 0.6,
+              "score": 0,
+              "retryCount": 1,
+              "repromptCount": 1
+            }
+          },
+          {
+            "type": "emit_quality_event",
+            "payload": {
+              "eventType": "repair_template_fired",
+              "trigger": "low_audio_confidence",
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          },
+          {
+            "type": "tts_play",
+            "payload": {
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 24,
+      "cat": "invoice",
+      "op": "create_invoice",
+      "utterance": "Create an invoice for Mrs Lee for 450 dollars cash",
+      "expectProposal": "draft_invoice",
+      "assistant": {
+        "httpStatus": 200,
+        "verdict": "DEGRADED",
+        "reason": "llm_fallback_envelope",
+        "proposalType": null,
+        "missingFields": [],
+        "degraded": true,
+        "fallbackStage": "error-envelope",
+        "content": "I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.",
+        "model": "fallback",
+        "taskType": "assistant.invoice"
+      },
+      "voice": {
+        "verdict": "DEGRADED",
+        "reason": "voice_reprompt_no_classify",
+        "state": "intent_capture",
+        "spoken": "",
+        "sideEffectTypes": [
+          "audit_log",
+          "emit_quality_event",
+          "tts_play"
+        ],
+        "httpStatus": 200,
+        "rawSideEffects": [
+          {
+            "type": "audit_log",
+            "payload": {
+              "eventType": "agent.calling.intent_capture.reprompt",
+              "fromState": "intent_capture",
+              "toState": "intent_capture",
+              "sessionId": "0e1c0ea5-9f80-441d-89b1-1cbf622f4ad7",
+              "tenantId": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+              "conversationId": "0e1c0ea5-9f80-441d-89b1-1cbf622f4ad7",
+              "ts": 1784577790292,
+              "threshold": 0.6,
+              "score": 0,
+              "retryCount": 1,
+              "repromptCount": 1
+            }
+          },
+          {
+            "type": "emit_quality_event",
+            "payload": {
+              "eventType": "repair_template_fired",
+              "trigger": "low_audio_confidence",
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          },
+          {
+            "type": "tts_play",
+            "payload": {
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 25,
+      "cat": "invoice",
+      "op": "edit_invoice",
+      "utterance": "Add a ninety dollar contactor to the Smith invoice",
+      "expectProposal": "update_invoice",
+      "assistant": {
+        "httpStatus": 200,
+        "verdict": "DEGRADED",
+        "reason": "llm_fallback_envelope",
+        "proposalType": null,
+        "missingFields": [],
+        "degraded": true,
+        "fallbackStage": "error-envelope",
+        "content": "I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.",
+        "model": "fallback",
+        "taskType": "assistant.invoice"
+      },
+      "voice": {
+        "verdict": "DEGRADED",
+        "reason": "voice_reprompt_no_classify",
+        "state": "intent_capture",
+        "spoken": "",
+        "sideEffectTypes": [
+          "audit_log",
+          "emit_quality_event",
+          "tts_play"
+        ],
+        "httpStatus": 200,
+        "rawSideEffects": [
+          {
+            "type": "audit_log",
+            "payload": {
+              "eventType": "agent.calling.intent_capture.reprompt",
+              "fromState": "intent_capture",
+              "toState": "intent_capture",
+              "sessionId": "e5b701ee-78f9-4439-a300-d356dea7cc1c",
+              "tenantId": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+              "conversationId": "e5b701ee-78f9-4439-a300-d356dea7cc1c",
+              "ts": 1784577791099,
+              "threshold": 0.6,
+              "score": 0,
+              "retryCount": 1,
+              "repromptCount": 1
+            }
+          },
+          {
+            "type": "emit_quality_event",
+            "payload": {
+              "eventType": "repair_template_fired",
+              "trigger": "low_audio_confidence",
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          },
+          {
+            "type": "tts_play",
+            "payload": {
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 26,
+      "cat": "invoice",
+      "op": "edit_invoice",
+      "utterance": "Add a trip fee to invoice INV-0042",
+      "expectProposal": "update_invoice",
+      "assistant": {
+        "httpStatus": 200,
+        "verdict": "DEGRADED",
+        "reason": "llm_fallback_envelope",
+        "proposalType": null,
+        "missingFields": [],
+        "degraded": true,
+        "fallbackStage": "error-envelope",
+        "content": "I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.",
+        "model": "fallback",
+        "taskType": "assistant.invoice"
+      },
+      "voice": {
+        "verdict": "DEGRADED",
+        "reason": "voice_reprompt_no_classify",
+        "state": "intent_capture",
+        "spoken": "",
+        "sideEffectTypes": [
+          "audit_log",
+          "emit_quality_event",
+          "tts_play"
+        ],
+        "httpStatus": 200,
+        "rawSideEffects": [
+          {
+            "type": "audit_log",
+            "payload": {
+              "eventType": "agent.calling.intent_capture.reprompt",
+              "fromState": "intent_capture",
+              "toState": "intent_capture",
+              "sessionId": "8bf8e6d7-a184-4234-9cac-e2873cc873c5",
+              "tenantId": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+              "conversationId": "8bf8e6d7-a184-4234-9cac-e2873cc873c5",
+              "ts": 1784577791853,
+              "threshold": 0.6,
+              "score": 0,
+              "retryCount": 1,
+              "repromptCount": 1
+            }
+          },
+          {
+            "type": "emit_quality_event",
+            "payload": {
+              "eventType": "repair_template_fired",
+              "trigger": "low_audio_confidence",
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          },
+          {
+            "type": "tts_play",
+            "payload": {
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 27,
+      "cat": "invoice",
+      "op": "send_invoice",
+      "utterance": "Send the Johnson invoice",
+      "expectProposal": "send_invoice",
+      "assistant": {
+        "httpStatus": 200,
+        "verdict": "DEGRADED",
+        "reason": "llm_fallback_envelope",
+        "proposalType": null,
+        "missingFields": [],
+        "degraded": true,
+        "fallbackStage": "error-envelope",
+        "content": "I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.",
+        "model": "fallback",
+        "taskType": "assistant.invoice"
+      },
+      "voice": {
+        "verdict": "DEGRADED",
+        "reason": "voice_reprompt_no_classify",
+        "state": "intent_capture",
+        "spoken": "",
+        "sideEffectTypes": [
+          "audit_log",
+          "emit_quality_event",
+          "tts_play"
+        ],
+        "httpStatus": 200,
+        "rawSideEffects": [
+          {
+            "type": "audit_log",
+            "payload": {
+              "eventType": "agent.calling.intent_capture.reprompt",
+              "fromState": "intent_capture",
+              "toState": "intent_capture",
+              "sessionId": "4ebae6b9-d8a9-4fcb-b7ef-4750e4c26023",
+              "tenantId": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+              "conversationId": "4ebae6b9-d8a9-4fcb-b7ef-4750e4c26023",
+              "ts": 1784577792636,
+              "threshold": 0.6,
+              "score": 0,
+              "retryCount": 1,
+              "repromptCount": 1
+            }
+          },
+          {
+            "type": "emit_quality_event",
+            "payload": {
+              "eventType": "repair_template_fired",
+              "trigger": "low_audio_confidence",
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          },
+          {
+            "type": "tts_play",
+            "payload": {
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 28,
+      "cat": "invoice",
+      "op": "send_invoice",
+      "utterance": "Email invoice INV-0042",
+      "expectProposal": "send_invoice",
+      "assistant": {
+        "httpStatus": 200,
+        "verdict": "DEGRADED",
+        "reason": "llm_fallback_envelope",
+        "proposalType": null,
+        "missingFields": [],
+        "degraded": true,
+        "fallbackStage": "error-envelope",
+        "content": "I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.",
+        "model": "fallback",
+        "taskType": "assistant.invoice"
+      },
+      "voice": {
+        "verdict": "DEGRADED",
+        "reason": "voice_reprompt_no_classify",
+        "state": "intent_capture",
+        "spoken": "",
+        "sideEffectTypes": [
+          "audit_log",
+          "emit_quality_event",
+          "tts_play"
+        ],
+        "httpStatus": 200,
+        "rawSideEffects": [
+          {
+            "type": "audit_log",
+            "payload": {
+              "eventType": "agent.calling.intent_capture.reprompt",
+              "fromState": "intent_capture",
+              "toState": "intent_capture",
+              "sessionId": "a27a803c-f70d-4164-be8b-525b40e8b474",
+              "tenantId": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+              "conversationId": "a27a803c-f70d-4164-be8b-525b40e8b474",
+              "ts": 1784577793535,
+              "threshold": 0.6,
+              "score": 0,
+              "retryCount": 1,
+              "repromptCount": 1
+            }
+          },
+          {
+            "type": "emit_quality_event",
+            "payload": {
+              "eventType": "repair_template_fired",
+              "trigger": "low_audio_confidence",
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          },
+          {
+            "type": "tts_play",
+            "payload": {
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 29,
+      "cat": "invoice",
+      "op": "send_invoice",
+      "utterance": "Text the Smith invoice to the customer",
+      "expectProposal": "send_invoice",
+      "assistant": {
+        "httpStatus": 200,
+        "verdict": "DEGRADED",
+        "reason": "llm_fallback_envelope",
+        "proposalType": null,
+        "missingFields": [],
+        "degraded": true,
+        "fallbackStage": "error-envelope",
+        "content": "I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.",
+        "model": "fallback",
+        "taskType": "assistant.invoice"
+      },
+      "voice": {
+        "verdict": "DEGRADED",
+        "reason": "voice_reprompt_no_classify",
+        "state": "intent_capture",
+        "spoken": "",
+        "sideEffectTypes": [
+          "audit_log",
+          "emit_quality_event",
+          "tts_play"
+        ],
+        "httpStatus": 200,
+        "rawSideEffects": [
+          {
+            "type": "audit_log",
+            "payload": {
+              "eventType": "agent.calling.intent_capture.reprompt",
+              "fromState": "intent_capture",
+              "toState": "intent_capture",
+              "sessionId": "a79cecee-8c61-43de-8dfa-0c6fc0d78b63",
+              "tenantId": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+              "conversationId": "a79cecee-8c61-43de-8dfa-0c6fc0d78b63",
+              "ts": 1784577794268,
+              "threshold": 0.6,
+              "score": 0,
+              "retryCount": 1,
+              "repromptCount": 1
+            }
+          },
+          {
+            "type": "emit_quality_event",
+            "payload": {
+              "eventType": "repair_template_fired",
+              "trigger": "low_audio_confidence",
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          },
+          {
+            "type": "tts_play",
+            "payload": {
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 30,
+      "cat": "invoice",
+      "op": "issue_invoice",
+      "utterance": "Issue the Garcia invoice",
+      "expectProposal": "issue_invoice",
+      "assistant": {
+        "httpStatus": 200,
+        "verdict": "DEGRADED",
+        "reason": "llm_fallback_envelope",
+        "proposalType": null,
+        "missingFields": [],
+        "degraded": true,
+        "fallbackStage": "error-envelope",
+        "content": "I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.",
+        "model": "fallback",
+        "taskType": "assistant.invoice"
+      },
+      "voice": {
+        "verdict": "DEGRADED",
+        "reason": "voice_reprompt_no_classify",
+        "state": "intent_capture",
+        "spoken": "",
+        "sideEffectTypes": [
+          "audit_log",
+          "emit_quality_event",
+          "tts_play"
+        ],
+        "httpStatus": 200,
+        "rawSideEffects": [
+          {
+            "type": "audit_log",
+            "payload": {
+              "eventType": "agent.calling.intent_capture.reprompt",
+              "fromState": "intent_capture",
+              "toState": "intent_capture",
+              "sessionId": "f31ded44-ee45-41fe-994d-cfe3a2c00e6b",
+              "tenantId": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+              "conversationId": "f31ded44-ee45-41fe-994d-cfe3a2c00e6b",
+              "ts": 1784577795027,
+              "threshold": 0.6,
+              "score": 0,
+              "retryCount": 1,
+              "repromptCount": 1
+            }
+          },
+          {
+            "type": "emit_quality_event",
+            "payload": {
+              "eventType": "repair_template_fired",
+              "trigger": "low_audio_confidence",
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          },
+          {
+            "type": "tts_play",
+            "payload": {
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 31,
+      "cat": "invoice",
+      "op": "record_payment",
+      "utterance": "Mark the Jones invoice paid, 450 cash",
+      "expectProposal": "record_payment",
+      "assistant": {
+        "httpStatus": 200,
+        "verdict": "DEGRADED",
+        "reason": "llm_fallback_envelope",
+        "proposalType": null,
+        "missingFields": [],
+        "degraded": true,
+        "fallbackStage": "error-envelope",
+        "content": "I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.",
+        "model": "fallback",
+        "taskType": "assistant.invoice"
+      },
+      "voice": {
+        "verdict": "DEGRADED",
+        "reason": "voice_reprompt_no_classify",
+        "state": "intent_capture",
+        "spoken": "",
+        "sideEffectTypes": [
+          "audit_log",
+          "emit_quality_event",
+          "tts_play"
+        ],
+        "httpStatus": 200,
+        "rawSideEffects": [
+          {
+            "type": "audit_log",
+            "payload": {
+              "eventType": "agent.calling.intent_capture.reprompt",
+              "fromState": "intent_capture",
+              "toState": "intent_capture",
+              "sessionId": "af420eb9-2c0e-44a8-b995-1ac66b822529",
+              "tenantId": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+              "conversationId": "af420eb9-2c0e-44a8-b995-1ac66b822529",
+              "ts": 1784577795826,
+              "threshold": 0.6,
+              "score": 0,
+              "retryCount": 1,
+              "repromptCount": 1
+            }
+          },
+          {
+            "type": "emit_quality_event",
+            "payload": {
+              "eventType": "repair_template_fired",
+              "trigger": "low_audio_confidence",
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          },
+          {
+            "type": "tts_play",
+            "payload": {
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 32,
+      "cat": "invoice",
+      "op": "payment_reminder",
+      "utterance": "Chase the unpaid Smith invoice",
+      "expectProposal": "send_payment_reminder",
+      "assistant": {
+        "httpStatus": 200,
+        "verdict": "DEGRADED",
+        "reason": "llm_fallback_envelope",
+        "proposalType": null,
+        "missingFields": [],
+        "degraded": true,
+        "fallbackStage": "error-envelope",
+        "content": "I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.",
+        "model": "fallback",
+        "taskType": "assistant.invoice"
+      },
+      "voice": {
+        "verdict": "DEGRADED",
+        "reason": "voice_reprompt_no_classify",
+        "state": "intent_capture",
+        "spoken": "",
+        "sideEffectTypes": [
+          "audit_log",
+          "emit_quality_event",
+          "tts_play"
+        ],
+        "httpStatus": 200,
+        "rawSideEffects": [
+          {
+            "type": "audit_log",
+            "payload": {
+              "eventType": "agent.calling.intent_capture.reprompt",
+              "fromState": "intent_capture",
+              "toState": "intent_capture",
+              "sessionId": "a96f79cf-d800-457a-94ed-f3c20b16354a",
+              "tenantId": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+              "conversationId": "a96f79cf-d800-457a-94ed-f3c20b16354a",
+              "ts": 1784577796616,
+              "threshold": 0.6,
+              "score": 0,
+              "retryCount": 1,
+              "repromptCount": 1
+            }
+          },
+          {
+            "type": "emit_quality_event",
+            "payload": {
+              "eventType": "repair_template_fired",
+              "trigger": "low_audio_confidence",
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          },
+          {
+            "type": "tts_play",
+            "payload": {
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 33,
+      "cat": "schedule",
+      "op": "create_appointment",
+      "utterance": "Book Carlos at the Garcia place Tuesday at 2pm",
+      "expectProposal": "create_appointment",
+      "assistant": {
+        "httpStatus": 200,
+        "verdict": "DEGRADED",
+        "reason": "llm_fallback_envelope",
+        "proposalType": null,
+        "missingFields": [],
+        "degraded": true,
+        "fallbackStage": "error-envelope",
+        "content": "I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.",
+        "model": "fallback",
+        "taskType": "assistant.general"
+      },
+      "voice": {
+        "verdict": "DEGRADED",
+        "reason": "voice_reprompt_no_classify",
+        "state": "intent_capture",
+        "spoken": "",
+        "sideEffectTypes": [
+          "audit_log",
+          "emit_quality_event",
+          "tts_play"
+        ],
+        "httpStatus": 200,
+        "rawSideEffects": [
+          {
+            "type": "audit_log",
+            "payload": {
+              "eventType": "agent.calling.intent_capture.reprompt",
+              "fromState": "intent_capture",
+              "toState": "intent_capture",
+              "sessionId": "0f8bdf5e-68a1-4750-bb7c-a423d471af00",
+              "tenantId": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+              "conversationId": "0f8bdf5e-68a1-4750-bb7c-a423d471af00",
+              "ts": 1784577797377,
+              "threshold": 0.6,
+              "score": 0,
+              "retryCount": 1,
+              "repromptCount": 1
+            }
+          },
+          {
+            "type": "emit_quality_event",
+            "payload": {
+              "eventType": "repair_template_fired",
+              "trigger": "low_audio_confidence",
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          },
+          {
+            "type": "tts_play",
+            "payload": {
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 34,
+      "cat": "schedule",
+      "op": "create_appointment",
+      "utterance": "Schedule a furnace tune-up at the Smith house Tuesday at 2pm",
+      "expectProposal": "create_appointment",
+      "assistant": {
+        "httpStatus": 200,
+        "verdict": "DEGRADED",
+        "reason": "llm_fallback_envelope",
+        "proposalType": null,
+        "missingFields": [],
+        "degraded": true,
+        "fallbackStage": "error-envelope",
+        "content": "I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.",
+        "model": "fallback",
+        "taskType": "assistant.schedule"
+      },
+      "voice": {
+        "verdict": "DEGRADED",
+        "reason": "voice_reprompt_no_classify",
+        "state": "intent_capture",
+        "spoken": "",
+        "sideEffectTypes": [
+          "audit_log",
+          "emit_quality_event",
+          "tts_play"
+        ],
+        "httpStatus": 200,
+        "rawSideEffects": [
+          {
+            "type": "audit_log",
+            "payload": {
+              "eventType": "agent.calling.intent_capture.reprompt",
+              "fromState": "intent_capture",
+              "toState": "intent_capture",
+              "sessionId": "4f98536e-66e2-40a5-bc72-9fdc6480082f",
+              "tenantId": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+              "conversationId": "4f98536e-66e2-40a5-bc72-9fdc6480082f",
+              "ts": 1784577798160,
+              "threshold": 0.6,
+              "score": 0,
+              "retryCount": 1,
+              "repromptCount": 1
+            }
+          },
+          {
+            "type": "emit_quality_event",
+            "payload": {
+              "eventType": "repair_template_fired",
+              "trigger": "low_audio_confidence",
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          },
+          {
+            "type": "tts_play",
+            "payload": {
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 35,
+      "cat": "schedule",
+      "op": "reschedule",
+      "utterance": "Move the Garcia job to Thursday 10",
+      "expectProposal": "reschedule_appointment",
+      "assistant": {
+        "httpStatus": 200,
+        "verdict": "DEGRADED",
+        "reason": "llm_fallback_envelope",
+        "proposalType": null,
+        "missingFields": [],
+        "degraded": true,
+        "fallbackStage": "error-envelope",
+        "content": "I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.",
+        "model": "fallback",
+        "taskType": "assistant.general"
+      },
+      "voice": {
+        "verdict": "DEGRADED",
+        "reason": "voice_reprompt_no_classify",
+        "state": "intent_capture",
+        "spoken": "",
+        "sideEffectTypes": [
+          "audit_log",
+          "emit_quality_event",
+          "tts_play"
+        ],
+        "httpStatus": 200,
+        "rawSideEffects": [
+          {
+            "type": "audit_log",
+            "payload": {
+              "eventType": "agent.calling.intent_capture.reprompt",
+              "fromState": "intent_capture",
+              "toState": "intent_capture",
+              "sessionId": "008696d8-add2-438b-8845-47b9915ff781",
+              "tenantId": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+              "conversationId": "008696d8-add2-438b-8845-47b9915ff781",
+              "ts": 1784577798937,
+              "threshold": 0.6,
+              "score": 0,
+              "retryCount": 1,
+              "repromptCount": 1
+            }
+          },
+          {
+            "type": "emit_quality_event",
+            "payload": {
+              "eventType": "repair_template_fired",
+              "trigger": "low_audio_confidence",
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          },
+          {
+            "type": "tts_play",
+            "payload": {
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 36,
+      "cat": "schedule",
+      "op": "cancel",
+      "utterance": "Cancel Tuesday's Garcia appointment",
+      "expectProposal": "cancel_appointment",
+      "assistant": {
+        "httpStatus": 200,
+        "verdict": "DEGRADED",
+        "reason": "llm_fallback_envelope",
+        "proposalType": null,
+        "missingFields": [],
+        "degraded": true,
+        "fallbackStage": "error-envelope",
+        "content": "I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.",
+        "model": "fallback",
+        "taskType": "assistant.general"
+      },
+      "voice": {
+        "verdict": "DEGRADED",
+        "reason": "voice_reprompt_no_classify",
+        "state": "intent_capture",
+        "spoken": "",
+        "sideEffectTypes": [
+          "audit_log",
+          "emit_quality_event",
+          "tts_play"
+        ],
+        "httpStatus": 200,
+        "rawSideEffects": [
+          {
+            "type": "audit_log",
+            "payload": {
+              "eventType": "agent.calling.intent_capture.reprompt",
+              "fromState": "intent_capture",
+              "toState": "intent_capture",
+              "sessionId": "0f083fe9-81ce-4f82-9acb-96601f72179d",
+              "tenantId": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+              "conversationId": "0f083fe9-81ce-4f82-9acb-96601f72179d",
+              "ts": 1784577799689,
+              "threshold": 0.6,
+              "score": 0,
+              "retryCount": 1,
+              "repromptCount": 1
+            }
+          },
+          {
+            "type": "emit_quality_event",
+            "payload": {
+              "eventType": "repair_template_fired",
+              "trigger": "low_audio_confidence",
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          },
+          {
+            "type": "tts_play",
+            "payload": {
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 37,
+      "cat": "schedule",
+      "op": "reassign",
+      "utterance": "Put Carlos on the Garcia job instead of me",
+      "expectProposal": "reassign_appointment",
+      "assistant": {
+        "httpStatus": 200,
+        "verdict": "DEGRADED",
+        "reason": "llm_fallback_envelope",
+        "proposalType": null,
+        "missingFields": [],
+        "degraded": true,
+        "fallbackStage": "error-envelope",
+        "content": "I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.",
+        "model": "fallback",
+        "taskType": "assistant.general"
+      },
+      "voice": {
+        "verdict": "DEGRADED",
+        "reason": "voice_reprompt_no_classify",
+        "state": "intent_capture",
+        "spoken": "",
+        "sideEffectTypes": [
+          "audit_log",
+          "emit_quality_event",
+          "tts_play"
+        ],
+        "httpStatus": 200,
+        "rawSideEffects": [
+          {
+            "type": "audit_log",
+            "payload": {
+              "eventType": "agent.calling.intent_capture.reprompt",
+              "fromState": "intent_capture",
+              "toState": "intent_capture",
+              "sessionId": "289dde9e-9878-4ab6-a0cf-5a9da0a107c8",
+              "tenantId": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+              "conversationId": "289dde9e-9878-4ab6-a0cf-5a9da0a107c8",
+              "ts": 1784577800452,
+              "threshold": 0.6,
+              "score": 0,
+              "retryCount": 1,
+              "repromptCount": 1
+            }
+          },
+          {
+            "type": "emit_quality_event",
+            "payload": {
+              "eventType": "repair_template_fired",
+              "trigger": "low_audio_confidence",
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          },
+          {
+            "type": "tts_play",
+            "payload": {
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 38,
+      "cat": "schedule",
+      "op": "confirm",
+      "utterance": "Confirm the Garcia appointment",
+      "expectProposal": "confirm_appointment",
+      "assistant": {
+        "httpStatus": 200,
+        "verdict": "DEGRADED",
+        "reason": "llm_fallback_envelope",
+        "proposalType": null,
+        "missingFields": [],
+        "degraded": true,
+        "fallbackStage": "error-envelope",
+        "content": "I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.",
+        "model": "fallback",
+        "taskType": "assistant.general"
+      },
+      "voice": {
+        "verdict": "DEGRADED",
+        "reason": "voice_reprompt_no_classify",
+        "state": "intent_capture",
+        "spoken": "",
+        "sideEffectTypes": [
+          "audit_log",
+          "emit_quality_event",
+          "tts_play"
+        ],
+        "httpStatus": 200,
+        "rawSideEffects": [
+          {
+            "type": "audit_log",
+            "payload": {
+              "eventType": "agent.calling.intent_capture.reprompt",
+              "fromState": "intent_capture",
+              "toState": "intent_capture",
+              "sessionId": "455f170f-1bea-48cf-b533-214e5cbdec30",
+              "tenantId": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+              "conversationId": "455f170f-1bea-48cf-b533-214e5cbdec30",
+              "ts": 1784577801215,
+              "threshold": 0.6,
+              "score": 0,
+              "retryCount": 1,
+              "repromptCount": 1
+            }
+          },
+          {
+            "type": "emit_quality_event",
+            "payload": {
+              "eventType": "repair_template_fired",
+              "trigger": "low_audio_confidence",
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          },
+          {
+            "type": "tts_play",
+            "payload": {
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 39,
+      "cat": "schedule",
+      "op": "notify_delay",
+      "utterance": "Text the Garcia customer I'm 20 min late",
+      "expectProposal": "notify_delay",
+      "assistant": {
+        "httpStatus": 200,
+        "verdict": "DEGRADED",
+        "reason": "llm_fallback_envelope",
+        "proposalType": null,
+        "missingFields": [],
+        "degraded": true,
+        "fallbackStage": "error-envelope",
+        "content": "I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.",
+        "model": "fallback",
+        "taskType": "assistant.general"
+      },
+      "voice": {
+        "verdict": "DEGRADED",
+        "reason": "voice_reprompt_no_classify",
+        "state": "intent_capture",
+        "spoken": "",
+        "sideEffectTypes": [
+          "audit_log",
+          "emit_quality_event",
+          "tts_play"
+        ],
+        "httpStatus": 200,
+        "rawSideEffects": [
+          {
+            "type": "audit_log",
+            "payload": {
+              "eventType": "agent.calling.intent_capture.reprompt",
+              "fromState": "intent_capture",
+              "toState": "intent_capture",
+              "sessionId": "c01f8608-3291-4e68-ac26-dd106d5f31d0",
+              "tenantId": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+              "conversationId": "c01f8608-3291-4e68-ac26-dd106d5f31d0",
+              "ts": 1784577801971,
+              "threshold": 0.6,
+              "score": 0,
+              "retryCount": 1,
+              "repromptCount": 1
+            }
+          },
+          {
+            "type": "emit_quality_event",
+            "payload": {
+              "eventType": "repair_template_fired",
+              "trigger": "low_audio_confidence",
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          },
+          {
+            "type": "tts_play",
+            "payload": {
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 40,
+      "cat": "schedule",
+      "op": "lookup",
+      "utterance": "What appointments do I have tomorrow?",
+      "expectProposal": null,
+      "assistant": {
+        "httpStatus": 200,
+        "verdict": "DEGRADED",
+        "reason": "llm_fallback_envelope",
+        "proposalType": null,
+        "missingFields": [],
+        "degraded": true,
+        "fallbackStage": "error-envelope",
+        "content": "I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.",
+        "model": "fallback",
+        "taskType": "assistant.schedule"
+      },
+      "voice": {
+        "verdict": "DEGRADED",
+        "reason": "voice_reprompt_no_classify",
+        "state": "intent_capture",
+        "spoken": "",
+        "sideEffectTypes": [
+          "audit_log",
+          "emit_quality_event",
+          "tts_play"
+        ],
+        "httpStatus": 200,
+        "rawSideEffects": [
+          {
+            "type": "audit_log",
+            "payload": {
+              "eventType": "agent.calling.intent_capture.reprompt",
+              "fromState": "intent_capture",
+              "toState": "intent_capture",
+              "sessionId": "7b3f9c71-b2d5-4acf-96e3-ea83fc77c8a1",
+              "tenantId": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+              "conversationId": "7b3f9c71-b2d5-4acf-96e3-ea83fc77c8a1",
+              "ts": 1784577802837,
+              "threshold": 0.6,
+              "score": 0,
+              "retryCount": 1,
+              "repromptCount": 1
+            }
+          },
+          {
+            "type": "emit_quality_event",
+            "payload": {
+              "eventType": "repair_template_fired",
+              "trigger": "low_audio_confidence",
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          },
+          {
+            "type": "tts_play",
+            "payload": {
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 41,
+      "cat": "ops",
+      "op": "add_note",
+      "utterance": "Note on the Patel job: wants morning visits",
+      "expectProposal": "add_note",
+      "assistant": {
+        "httpStatus": 200,
+        "verdict": "DEGRADED",
+        "reason": "llm_fallback_envelope",
+        "proposalType": null,
+        "missingFields": [],
+        "degraded": true,
+        "fallbackStage": "error-envelope",
+        "content": "I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.",
+        "model": "fallback",
+        "taskType": "assistant.general"
+      },
+      "voice": {
+        "verdict": "DEGRADED",
+        "reason": "voice_reprompt_no_classify",
+        "state": "intent_capture",
+        "spoken": "",
+        "sideEffectTypes": [
+          "audit_log",
+          "emit_quality_event",
+          "tts_play"
+        ],
+        "httpStatus": 200,
+        "rawSideEffects": [
+          {
+            "type": "audit_log",
+            "payload": {
+              "eventType": "agent.calling.intent_capture.reprompt",
+              "fromState": "intent_capture",
+              "toState": "intent_capture",
+              "sessionId": "31e9f916-7330-4f5d-a4c6-501355a89dd6",
+              "tenantId": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+              "conversationId": "31e9f916-7330-4f5d-a4c6-501355a89dd6",
+              "ts": 1784577803608,
+              "threshold": 0.6,
+              "score": 0,
+              "retryCount": 1,
+              "repromptCount": 1
+            }
+          },
+          {
+            "type": "emit_quality_event",
+            "payload": {
+              "eventType": "repair_template_fired",
+              "trigger": "low_audio_confidence",
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          },
+          {
+            "type": "tts_play",
+            "payload": {
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 42,
+      "cat": "ops",
+      "op": "log_expense",
+      "utterance": "Log a 60 dollar parts expense on the Patel job",
+      "expectProposal": "log_expense",
+      "assistant": {
+        "httpStatus": 200,
+        "verdict": "DEGRADED",
+        "reason": "llm_fallback_envelope",
+        "proposalType": null,
+        "missingFields": [],
+        "degraded": true,
+        "fallbackStage": "error-envelope",
+        "content": "I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.",
+        "model": "fallback",
+        "taskType": "assistant.general"
+      },
+      "voice": {
+        "verdict": "DEGRADED",
+        "reason": "voice_reprompt_no_classify",
+        "state": "intent_capture",
+        "spoken": "",
+        "sideEffectTypes": [
+          "audit_log",
+          "emit_quality_event",
+          "tts_play"
+        ],
+        "httpStatus": 200,
+        "rawSideEffects": [
+          {
+            "type": "audit_log",
+            "payload": {
+              "eventType": "agent.calling.intent_capture.reprompt",
+              "fromState": "intent_capture",
+              "toState": "intent_capture",
+              "sessionId": "b9a2c08f-28b1-4559-99a0-f6457fba95aa",
+              "tenantId": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+              "conversationId": "b9a2c08f-28b1-4559-99a0-f6457fba95aa",
+              "ts": 1784577804390,
+              "threshold": 0.6,
+              "score": 0,
+              "retryCount": 1,
+              "repromptCount": 1
+            }
+          },
+          {
+            "type": "emit_quality_event",
+            "payload": {
+              "eventType": "repair_template_fired",
+              "trigger": "low_audio_confidence",
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          },
+          {
+            "type": "tts_play",
+            "payload": {
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 43,
+      "cat": "ops",
+      "op": "log_time",
+      "utterance": "Clock 2 hours on the Patel job",
+      "expectProposal": "log_time_entry",
+      "assistant": {
+        "httpStatus": 200,
+        "verdict": "DEGRADED",
+        "reason": "llm_fallback_envelope",
+        "proposalType": null,
+        "missingFields": [],
+        "degraded": true,
+        "fallbackStage": "error-envelope",
+        "content": "I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.",
+        "model": "fallback",
+        "taskType": "assistant.general"
+      },
+      "voice": {
+        "verdict": "DEGRADED",
+        "reason": "voice_reprompt_no_classify",
+        "state": "intent_capture",
+        "spoken": "",
+        "sideEffectTypes": [
+          "audit_log",
+          "emit_quality_event",
+          "tts_play"
+        ],
+        "httpStatus": 200,
+        "rawSideEffects": [
+          {
+            "type": "audit_log",
+            "payload": {
+              "eventType": "agent.calling.intent_capture.reprompt",
+              "fromState": "intent_capture",
+              "toState": "intent_capture",
+              "sessionId": "a7cce035-9cbd-4251-a01f-800603e1ce21",
+              "tenantId": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+              "conversationId": "a7cce035-9cbd-4251-a01f-800603e1ce21",
+              "ts": 1784577805192,
+              "threshold": 0.6,
+              "score": 0,
+              "retryCount": 1,
+              "repromptCount": 1
+            }
+          },
+          {
+            "type": "emit_quality_event",
+            "payload": {
+              "eventType": "repair_template_fired",
+              "trigger": "low_audio_confidence",
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          },
+          {
+            "type": "tts_play",
+            "payload": {
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 44,
+      "cat": "ops",
+      "op": "emergency",
+      "utterance": "Emergency, no heat at the Hayes place — page me",
+      "expectProposal": "emergency_dispatch",
+      "assistant": {
+        "httpStatus": 200,
+        "verdict": "DEGRADED",
+        "reason": "llm_fallback_envelope",
+        "proposalType": null,
+        "missingFields": [],
+        "degraded": true,
+        "fallbackStage": "error-envelope",
+        "content": "I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.",
+        "model": "fallback",
+        "taskType": "assistant.general"
+      },
+      "voice": {
+        "verdict": "DEGRADED",
+        "reason": "voice_reprompt_no_classify",
+        "state": "intent_capture",
+        "spoken": "",
+        "sideEffectTypes": [
+          "audit_log",
+          "emit_quality_event",
+          "tts_play"
+        ],
+        "httpStatus": 200,
+        "rawSideEffects": [
+          {
+            "type": "audit_log",
+            "payload": {
+              "eventType": "agent.calling.intent_capture.reprompt",
+              "fromState": "intent_capture",
+              "toState": "intent_capture",
+              "sessionId": "ec64e744-76c8-4b2d-93b0-c4d20eda3ded",
+              "tenantId": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+              "conversationId": "ec64e744-76c8-4b2d-93b0-c4d20eda3ded",
+              "ts": 1784577806027,
+              "threshold": 0.6,
+              "score": 0,
+              "retryCount": 1,
+              "repromptCount": 1
+            }
+          },
+          {
+            "type": "emit_quality_event",
+            "payload": {
+              "eventType": "repair_template_fired",
+              "trigger": "low_audio_confidence",
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          },
+          {
+            "type": "tts_play",
+            "payload": {
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 45,
+      "cat": "ops",
+      "op": "batch_invoice",
+      "utterance": "Invoice all my completed jobs",
+      "expectProposal": "batch_invoice",
+      "assistant": {
+        "httpStatus": 200,
+        "verdict": "DEGRADED",
+        "reason": "llm_fallback_envelope",
+        "proposalType": null,
+        "missingFields": [],
+        "degraded": true,
+        "fallbackStage": "error-envelope",
+        "content": "I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.",
+        "model": "fallback",
+        "taskType": "assistant.invoice"
+      },
+      "voice": {
+        "verdict": "DEGRADED",
+        "reason": "voice_reprompt_no_classify",
+        "state": "intent_capture",
+        "spoken": "",
+        "sideEffectTypes": [
+          "audit_log",
+          "emit_quality_event",
+          "tts_play"
+        ],
+        "httpStatus": 200,
+        "rawSideEffects": [
+          {
+            "type": "audit_log",
+            "payload": {
+              "eventType": "agent.calling.intent_capture.reprompt",
+              "fromState": "intent_capture",
+              "toState": "intent_capture",
+              "sessionId": "cc182272-718d-4a20-9df9-bc11a8688067",
+              "tenantId": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+              "conversationId": "cc182272-718d-4a20-9df9-bc11a8688067",
+              "ts": 1784577806820,
+              "threshold": 0.6,
+              "score": 0,
+              "retryCount": 1,
+              "repromptCount": 1
+            }
+          },
+          {
+            "type": "emit_quality_event",
+            "payload": {
+              "eventType": "repair_template_fired",
+              "trigger": "low_audio_confidence",
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          },
+          {
+            "type": "tts_play",
+            "payload": {
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 46,
+      "cat": "ops",
+      "op": "late_fee",
+      "utterance": "Add a 25 dollar late fee to the Smith invoice",
+      "expectProposal": "apply_late_fee",
+      "assistant": {
+        "httpStatus": 200,
+        "verdict": "DEGRADED",
+        "reason": "llm_fallback_envelope",
+        "proposalType": null,
+        "missingFields": [],
+        "degraded": true,
+        "fallbackStage": "error-envelope",
+        "content": "I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.",
+        "model": "fallback",
+        "taskType": "assistant.invoice"
+      },
+      "voice": {
+        "verdict": "DEGRADED",
+        "reason": "voice_reprompt_no_classify",
+        "state": "intent_capture",
+        "spoken": "",
+        "sideEffectTypes": [
+          "audit_log",
+          "emit_quality_event",
+          "tts_play"
+        ],
+        "httpStatus": 200,
+        "rawSideEffects": [
+          {
+            "type": "audit_log",
+            "payload": {
+              "eventType": "agent.calling.intent_capture.reprompt",
+              "fromState": "intent_capture",
+              "toState": "intent_capture",
+              "sessionId": "5aa06f88-26c7-42d5-88ff-2851f29d6601",
+              "tenantId": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+              "conversationId": "5aa06f88-26c7-42d5-88ff-2851f29d6601",
+              "ts": 1784577807569,
+              "threshold": 0.6,
+              "score": 0,
+              "retryCount": 1,
+              "repromptCount": 1
+            }
+          },
+          {
+            "type": "emit_quality_event",
+            "payload": {
+              "eventType": "repair_template_fired",
+              "trigger": "low_audio_confidence",
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          },
+          {
+            "type": "tts_play",
+            "payload": {
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 47,
+      "cat": "ops",
+      "op": "feedback",
+      "utterance": "Ask the Smith customer for a review",
+      "expectProposal": "request_feedback",
+      "assistant": {
+        "httpStatus": 200,
+        "verdict": "DEGRADED",
+        "reason": "llm_fallback_envelope",
+        "proposalType": null,
+        "missingFields": [],
+        "degraded": true,
+        "fallbackStage": "error-envelope",
+        "content": "I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.",
+        "model": "fallback",
+        "taskType": "assistant.general"
+      },
+      "voice": {
+        "verdict": "DEGRADED",
+        "reason": "voice_reprompt_no_classify",
+        "state": "intent_capture",
+        "spoken": "",
+        "sideEffectTypes": [
+          "audit_log",
+          "emit_quality_event",
+          "tts_play"
+        ],
+        "httpStatus": 200,
+        "rawSideEffects": [
+          {
+            "type": "audit_log",
+            "payload": {
+              "eventType": "agent.calling.intent_capture.reprompt",
+              "fromState": "intent_capture",
+              "toState": "intent_capture",
+              "sessionId": "6bb4a106-c8c9-4145-97e8-df4635f50f66",
+              "tenantId": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+              "conversationId": "6bb4a106-c8c9-4145-97e8-df4635f50f66",
+              "ts": 1784577808328,
+              "threshold": 0.6,
+              "score": 0,
+              "retryCount": 1,
+              "repromptCount": 1
+            }
+          },
+          {
+            "type": "emit_quality_event",
+            "payload": {
+              "eventType": "repair_template_fired",
+              "trigger": "low_audio_confidence",
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          },
+          {
+            "type": "tts_play",
+            "payload": {
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 48,
+      "cat": "ops",
+      "op": "standing_instruction",
+      "utterance": "From now on always add a 79 dollar diagnostic fee to AC calls",
+      "expectProposal": "create_standing_instruction",
+      "assistant": {
+        "httpStatus": 200,
+        "verdict": "DEGRADED",
+        "reason": "llm_fallback_envelope",
+        "proposalType": null,
+        "missingFields": [],
+        "degraded": true,
+        "fallbackStage": "error-envelope",
+        "content": "I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.",
+        "model": "fallback",
+        "taskType": "assistant.general"
+      },
+      "voice": {
+        "verdict": "DEGRADED",
+        "reason": "voice_reprompt_no_classify",
+        "state": "intent_capture",
+        "spoken": "",
+        "sideEffectTypes": [
+          "audit_log",
+          "emit_quality_event",
+          "tts_play"
+        ],
+        "httpStatus": 200,
+        "rawSideEffects": [
+          {
+            "type": "audit_log",
+            "payload": {
+              "eventType": "agent.calling.intent_capture.reprompt",
+              "fromState": "intent_capture",
+              "toState": "intent_capture",
+              "sessionId": "f7211d51-2feb-475a-96e1-29bec505d36b",
+              "tenantId": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+              "conversationId": "f7211d51-2feb-475a-96e1-29bec505d36b",
+              "ts": 1784577809195,
+              "threshold": 0.6,
+              "score": 0,
+              "retryCount": 1,
+              "repromptCount": 1
+            }
+          },
+          {
+            "type": "emit_quality_event",
+            "payload": {
+              "eventType": "repair_template_fired",
+              "trigger": "low_audio_confidence",
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          },
+          {
+            "type": "tts_play",
+            "payload": {
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 49,
+      "cat": "ops",
+      "op": "lookup_balance",
+      "utterance": "What does Smith owe?",
+      "expectProposal": null,
+      "assistant": {
+        "httpStatus": 200,
+        "verdict": "DEGRADED",
+        "reason": "llm_fallback_envelope",
+        "proposalType": null,
+        "missingFields": [],
+        "degraded": true,
+        "fallbackStage": "error-envelope",
+        "content": "I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.",
+        "model": "fallback",
+        "taskType": "assistant.general"
+      },
+      "voice": {
+        "verdict": "DEGRADED",
+        "reason": "voice_reprompt_no_classify",
+        "state": "intent_capture",
+        "spoken": "",
+        "sideEffectTypes": [
+          "audit_log",
+          "emit_quality_event",
+          "tts_play"
+        ],
+        "httpStatus": 200,
+        "rawSideEffects": [
+          {
+            "type": "audit_log",
+            "payload": {
+              "eventType": "agent.calling.intent_capture.reprompt",
+              "fromState": "intent_capture",
+              "toState": "intent_capture",
+              "sessionId": "ac2dfc69-ed77-4210-9ff1-1d21c27cf4c4",
+              "tenantId": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+              "conversationId": "ac2dfc69-ed77-4210-9ff1-1d21c27cf4c4",
+              "ts": 1784577809972,
+              "threshold": 0.6,
+              "score": 0,
+              "retryCount": 1,
+              "repromptCount": 1
+            }
+          },
+          {
+            "type": "emit_quality_event",
+            "payload": {
+              "eventType": "repair_template_fired",
+              "trigger": "low_audio_confidence",
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          },
+          {
+            "type": "tts_play",
+            "payload": {
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 50,
+      "cat": "ops",
+      "op": "lookup_revenue",
+      "utterance": "How much did we invoice today?",
+      "expectProposal": null,
+      "assistant": {
+        "httpStatus": 200,
+        "verdict": "DEGRADED",
+        "reason": "llm_fallback_envelope",
+        "proposalType": null,
+        "missingFields": [],
+        "degraded": true,
+        "fallbackStage": "error-envelope",
+        "content": "I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.",
+        "model": "fallback",
+        "taskType": "assistant.invoice"
+      },
+      "voice": {
+        "verdict": "DEGRADED",
+        "reason": "voice_reprompt_no_classify",
+        "state": "intent_capture",
+        "spoken": "",
+        "sideEffectTypes": [
+          "audit_log",
+          "emit_quality_event",
+          "tts_play"
+        ],
+        "httpStatus": 200,
+        "rawSideEffects": [
+          {
+            "type": "audit_log",
+            "payload": {
+              "eventType": "agent.calling.intent_capture.reprompt",
+              "fromState": "intent_capture",
+              "toState": "intent_capture",
+              "sessionId": "10af6d59-23ca-44b1-bc69-6dc096000e4c",
+              "tenantId": "b8e2dc0f-04c2-4ba0-9385-0ebcf3168052",
+              "conversationId": "10af6d59-23ca-44b1-bc69-6dc096000e4c",
+              "ts": 1784577810730,
+              "threshold": 0.6,
+              "score": 0,
+              "retryCount": 1,
+              "repromptCount": 1
+            }
+          },
+          {
+            "type": "emit_quality_event",
+            "payload": {
+              "eventType": "repair_template_fired",
+              "trigger": "low_audio_confidence",
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          },
+          {
+            "type": "tts_play",
+            "payload": {
+              "text": "I want to make sure I got that right — can you say that again?"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -212,7 +212,9 @@ export function buildTaskHandlers(deps: HandlerRegistryDeps): Map<ProposalType, 
   handlers.set('remove_crew_member', new RemoveCrewMemberTaskHandler());
   handlers.set('add_note', new AddNoteTaskHandler());
   handlers.set('send_invoice', new SendInvoiceTaskHandler({ invoiceRepo: deps.invoiceRepo }));
-  handlers.set('send_estimate', new SendEstimateTaskHandler());
+  // Wire estimateRepo so gated free-text refs get AmbiguityPicker candidates
+  // (same B2 pattern as send_invoice). The gate itself never lifts.
+  handlers.set('send_estimate', new SendEstimateTaskHandler({ estimateRepo: deps.estimateRepo }));
   handlers.set('send_estimate_nudge', new SendEstimateNudgeTaskHandler());
   handlers.set(
     'send_payment_reminder',
