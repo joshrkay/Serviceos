@@ -13,6 +13,7 @@
     "test:integration:rls": "RLS_RUNTIME_ROLE=true vitest run --config vitest.integration.config.ts",
     "test:rls": "vitest run --config vitest.integration.config.ts test/integration/rls-tenant-isolation.test.ts",
     "test:voice-fixtures": "vitest run test/ai/orchestration/intent-classifier.launch-fixtures.test.ts test/voice/launch-slots.test.ts",
+    "test:operator-ops-loop": "vitest run test/voice/operator-ops-loop.test.ts",
     "test:coverage": "vitest run --coverage",
     "voice-quality": "ts-node scripts/prepare-voice-quality-run.ts && vitest run -c vitest.voice-quality.config.ts && ts-node scripts/merge-voice-quality-report.ts",
     "voice-quality:watch": "vitest -c vitest.voice-quality.config.ts",
