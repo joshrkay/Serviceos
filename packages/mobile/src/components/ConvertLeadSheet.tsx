@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Modal, ScrollView, Text, TextInput, View } from 'react-native';
 import { convertLead, type ConvertLeadAddress } from '../api/leads';
 import type { AuthedFetch } from '../api/me';
@@ -31,6 +31,13 @@ export function ConvertLeadSheet({
   onConverted,
 }: ConvertLeadSheetProps) {
   const { phase, error, run, reset } = useSavePhase();
+
+  // Clear a stale save phase each time the sheet reopens (it stays mounted; the
+  // parent toggles `visible`), so a prior error/saved state doesn't persist.
+  useEffect(() => {
+    if (visible) reset();
+  }, [visible, reset]);
+
   const [street1, setStreet1] = useState(initial?.street1 ?? '');
   const [street2, setStreet2] = useState(initial?.street2 ?? '');
   const [city, setCity] = useState(initial?.city ?? '');

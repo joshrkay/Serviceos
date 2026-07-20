@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Modal, Pressable, Text, TextInput, View } from 'react-native';
 import { recordInvoicePayment, type InvoicePaymentMethod } from '../api/invoices';
 import type { AuthedFetch } from '../api/me';
@@ -45,6 +45,13 @@ export function RecordPaymentSheet({
   const { phase, error, run, reset } = useSavePhase();
   const [amount, setAmount] = useState('');
   const [method, setMethod] = useState<InvoicePaymentMethod>('cash');
+
+  // The sheet stays mounted across opens (the parent toggles `visible`), so a
+  // prior 'saved' phase would otherwise linger and leave the button disabled on
+  // reopen — e.g. recording a second partial payment. Reset on each open.
+  useEffect(() => {
+    if (visible) reset();
+  }, [visible, reset]);
 
   const enteredCents = parseDollarsToCents(amount);
   const overpay = enteredCents !== null && enteredCents > amountDueCents;

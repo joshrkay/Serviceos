@@ -18,17 +18,19 @@ import { RecordPaymentSheet } from './RecordPaymentSheet';
 
 const client = vi.fn();
 
+function props(visible = true) {
+  return {
+    visible,
+    onClose: h.onClose,
+    client,
+    invoiceId: 'inv-1',
+    amountDueCents: 124000,
+    onRecorded: h.onRecorded,
+  };
+}
+
 function renderSheet() {
-  return render(
-    createElement(RecordPaymentSheet, {
-      visible: true,
-      onClose: h.onClose,
-      client,
-      invoiceId: 'inv-1',
-      amountDueCents: 124000,
-      onRecorded: h.onRecorded,
-    }),
-  );
+  return render(createElement(RecordPaymentSheet, props()));
 }
 
 beforeEach(() => {
@@ -74,6 +76,28 @@ describe('RecordPaymentSheet', () => {
     await waitFor(() => expect(h.recordInvoicePayment).toHaveBeenCalled());
     expect(h.recordInvoicePayment).toHaveBeenCalledWith(client, 'inv-1', {
       amountCents: 10000,
+      method: 'cash',
+    });
+  });
+
+  it('is usable again after a reopen (no lingering saved phase)', async () => {
+    // Record a first (partial) payment; the sheet's phase becomes "saved".
+    const { getByPlaceholderText, getByRole, rerender } = render(createElement(RecordPaymentSheet, props(true)));
+    fireEvent.change(getByPlaceholderText('$1,240.00'), { target: { value: '100' } });
+    fireEvent.click(getByRole('button', { name: 'Record payment' }));
+    await waitFor(() => expect(h.recordInvoicePayment).toHaveBeenCalledTimes(1));
+
+    // Parent closes then reopens the still-mounted sheet.
+    rerender(createElement(RecordPaymentSheet, props(false)));
+    rerender(createElement(RecordPaymentSheet, props(true)));
+
+    // The button is back to "Record payment" (not stuck disabled on "Recorded"),
+    // and a second payment goes through.
+    fireEvent.change(getByPlaceholderText('$1,240.00'), { target: { value: '200' } });
+    fireEvent.click(getByRole('button', { name: 'Record payment' }));
+    await waitFor(() => expect(h.recordInvoicePayment).toHaveBeenCalledTimes(2));
+    expect(h.recordInvoicePayment).toHaveBeenLastCalledWith(client, 'inv-1', {
+      amountCents: 20000,
       method: 'cash',
     });
   });
