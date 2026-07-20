@@ -36,6 +36,13 @@ export default defineConfig({
       exclude: [
         '**/*.test.ts',
         'src/voice/nativeVoiceDeps.ts',
+        // U13 — device-only assistant wiring: `expo/fetch` SSE streaming +
+        // multipart transport and the expo-audio TTS player. The pure SSE
+        // parser and the session hook (with an injected fake transport) carry
+        // the logic; these two only bind it to the device (spike-verified).
+        'src/assistant/expoFetchTransport.ts',
+        'src/assistant/nativeAssistantDeps.ts',
+        'src/assistant/useAssistantController.ts',
         // U12 — native/RN-only offline wiring (adapter + singleton + AppState/
         // Clerk host). The queue + flush LOGIC (queue.ts, flush.ts) is fully
         // unit-tested; these only bind it to the device.
@@ -89,6 +96,10 @@ export default defineConfig({
       // that don't resolve under the jsdom env the hook test uses. They are
       // mocked per test, so alias them to resolve-time stubs.
       'expo-audio': path.resolve(__dirname, './test/stubs/expo-audio.ts'),
+      // `expo/fetch` streaming is native-only; the assistant transport that
+      // uses it is device-only (excluded from coverage). Stubbed so screen
+      // tests that statically import the transport module resolve under jsdom.
+      'expo/fetch': path.resolve(__dirname, './test/stubs/expo-fetch.ts'),
       'expo-camera': path.resolve(__dirname, './test/stubs/expo-camera.ts'),
       'expo-crypto': path.resolve(__dirname, './test/stubs/expo-crypto.ts'),
       'expo-file-system': path.resolve(__dirname, './test/stubs/expo-file-system.ts'),
