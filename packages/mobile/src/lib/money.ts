@@ -23,11 +23,13 @@
 export function parseDollarsToCents(input: string): number | null {
   const trimmed = input.trim().replace(/^\$/, '').replace(/,/g, '');
   if (trimmed === '') return null;
-  // Whole dollars, or dollars with 1–2 decimal places. No sign, no exponent.
-  const match = /^(\d+)(?:\.(\d{1,2}))?$/.exec(trimmed);
-  if (!match) return null;
-  const whole = Number(match[1]);
-  // Pad a single decimal ("50" tenths → "50" cents; "5" → "50") to two places.
+  // Whole dollars and/or 1–2 decimal places, no sign, no exponent. The whole
+  // part is optional so cents-only input (".50", ".5") parses; a bare "." (no
+  // digits either side) is rejected.
+  const match = /^(\d*)(?:\.(\d{1,2}))?$/.exec(trimmed);
+  if (!match || (!match[1] && !match[2])) return null;
+  const whole = match[1] ? Number(match[1]) : 0;
+  // Pad a single decimal ("5" → "50" cents) to two places.
   const fraction = match[2] ? match[2].padEnd(2, '0') : '00';
   return whole * 100 + Number(fraction);
 }

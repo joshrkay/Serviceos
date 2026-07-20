@@ -18,6 +18,16 @@ describe('parseDollarsToCents', () => {
     expect(parseDollarsToCents('12.5')).toBe(1250);
   });
 
+  it('parses cents-only input with no leading whole dollars', () => {
+    expect(parseDollarsToCents('.50')).toBe(50);
+    expect(parseDollarsToCents('.5')).toBe(50);
+    expect(parseDollarsToCents('$.99')).toBe(99);
+  });
+
+  it('rejects a bare decimal point with no digits', () => {
+    expect(parseDollarsToCents('.')).toBeNull();
+  });
+
   it('accepts a leading $ and thousands separators', () => {
     expect(parseDollarsToCents('$1,240.00')).toBe(124000);
     expect(parseDollarsToCents('$85.50')).toBe(8550);

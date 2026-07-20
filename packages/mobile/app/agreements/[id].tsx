@@ -115,6 +115,7 @@ export default function AgreementDetailScreen() {
                 <SecondaryButton
                   label={actionPhase.phase === 'saving' ? 'Working…' : 'Pause'}
                   loading={actionPhase.phase === 'saving'}
+                  disabled={actionPhase.phase === 'saving'}
                   onPress={() => runAction(() => pauseAgreement(client, id))}
                 />
               ) : null}
@@ -123,12 +124,17 @@ export default function AgreementDetailScreen() {
                 <PrimaryButton
                   label={actionPhase.phase === 'saving' ? 'Working…' : 'Resume'}
                   loading={actionPhase.phase === 'saving'}
+                  disabled={actionPhase.phase === 'saving'}
                   onPress={() => runAction(() => resumeAgreement(client, id))}
                 />
               ) : null}
 
               {canCancel && !confirmCancel ? (
-                <SecondaryButton label="Cancel agreement" onPress={() => setConfirmCancel(true)} />
+                <SecondaryButton
+                  label="Cancel agreement"
+                  disabled={actionPhase.phase === 'saving'}
+                  onPress={() => setConfirmCancel(true)}
+                />
               ) : null}
 
               {canCancel && confirmCancel ? (
