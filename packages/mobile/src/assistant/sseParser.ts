@@ -16,8 +16,14 @@ export function createSseParser(): SseParser {
   let buffer = '';
   return {
     push(chunk: string): string[] {
-      // Normalize CRLF so a proxy that rewrites line endings can't break framing.
-      buffer += chunk.replace(/\r\n/g, '\n');
+      // Normalize CRLF on the WHOLE buffer (not per-chunk) so a proxy that
+      // rewrites line endings can't break framing — a \r\n split across a
+      // chunk boundary (\r ending one read, \n starting the next) would
+      // otherwise leave a stray \r between newlines and defeat the \n\n
+      // delimiter search, hanging the stream. A trailing lone \r stays in the
+      // buffer until its \n partner arrives on the next push.
+      buffer += chunk;
+      buffer = buffer.replace(/\r\n/g, '\n');
       const out: string[] = [];
       let idx: number;
       while ((idx = buffer.indexOf('\n\n')) !== -1) {

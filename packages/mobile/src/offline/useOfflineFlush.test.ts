@@ -12,6 +12,7 @@ const h = vi.hoisted(() => ({
     restore: vi.fn(),
     depth: vi.fn(),
     reactivateAuthParked: vi.fn(),
+    reactivateParked: vi.fn(),
   },
 }));
 
@@ -47,6 +48,7 @@ beforeEach(() => {
   h.queue.restore.mockResolvedValue([]);
   h.queue.depth.mockReturnValue(1);
   h.queue.reactivateAuthParked.mockResolvedValue(0);
+  h.queue.reactivateParked.mockResolvedValue(0);
   h.flushQueue.mockResolvedValue({ flushed: 1, dropped: 0 });
 });
 
@@ -103,6 +105,73 @@ describe('useOfflineFlush', () => {
     });
     await settle();
     expect(h.flushQueue).toHaveBeenCalledTimes(2);
+  });
+
+  it('re-activates poison-parked items on manual retry (the only path that does)', async () => {
+    renderHook(() => useOfflineFlush({ enabled: true }));
+    await settle();
+    h.flushQueue.mockClear();
+
+    await act(async () => {
+      requestOfflineFlush();
+    });
+    await settle();
+
+    // Manual retry resets poison-parked items; reconnect/foreground do not.
+    expect(h.queue.reactivateParked).toHaveBeenCalledTimes(1);
+    expect(h.flushQueue).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not re-activate poison-parked items on reconnect or foreground', async () => {
+    renderHook(() => useOfflineFlush({ enabled: true }));
+    await settle();
+
+    await act(async () => {
+      __emitNetInfoForTests({ isConnected: false, isInternetReachable: false });
+      __emitNetInfoForTests({ isConnected: true, isInternetReachable: true });
+      __emitAppState('active');
+    });
+    await settle();
+
+    expect(h.queue.reactivateParked).not.toHaveBeenCalled();
+  });
+
+  it('still drains pending items when reactivateParked fails on manual retry', async () => {
+    h.queue.reactivateParked.mockRejectedValueOnce(new Error('journal write failed'));
+    renderHook(() => useOfflineFlush({ enabled: true }));
+    await settle();
+    h.flushQueue.mockClear();
+
+    await act(async () => {
+      requestOfflineFlush();
+    });
+    await settle();
+
+    expect(h.flushQueue).toHaveBeenCalledTimes(1);
+  });
+
+  it('clears a pending backoff timer when a new trigger supersedes it', async () => {
+    vi.useFakeTimers();
+    try {
+      // First run schedules a retry timer.
+      h.flushQueue.mockResolvedValueOnce({ flushed: 0, dropped: 0, retryAfterMs: 5_000 });
+      renderHook(() => useOfflineFlush({ enabled: true }));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(h.flushQueue).toHaveBeenCalledTimes(1);
+
+      // A reconnect trigger runs immediately AND should cancel the armed timer.
+      h.flushQueue.mockResolvedValue({ flushed: 1, dropped: 0 });
+      __emitNetInfoForTests({ isConnected: false, isInternetReachable: false });
+      __emitNetInfoForTests({ isConnected: true, isInternetReachable: true });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(h.flushQueue).toHaveBeenCalledTimes(2);
+
+      // Past the original backoff: the superseded timer must not fire a 3rd run.
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(h.flushQueue).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('surfaces the drop notice as a toast', async () => {

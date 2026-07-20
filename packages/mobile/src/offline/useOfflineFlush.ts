@@ -71,6 +71,12 @@ export function useOfflineFlush(options: UseOfflineFlushOptions): void {
 
   const trigger = useCallback(() => {
     if (!enabledRef.current) return;
+    // Supersede any pending backoff timer: this run covers whatever it would
+    // have retried, so leaving it armed would just fire a redundant flush.
+    if (retryTimerRef.current) {
+      clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = null;
+    }
     if (flushingRef.current) {
       rerunRef.current = true;
       return;
@@ -123,6 +129,20 @@ export function useOfflineFlush(options: UseOfflineFlushOptions): void {
       });
   }, [enabled, isSignedIn, trigger]);
 
+  // Manual retry (pull-to-refresh) is the ONLY re-activation path for
+  // poison-parked items — reconnect/foreground drain pending items but leave
+  // parked ones stranded on purpose (they exhausted their automatic attempts).
+  // A manual retry is an explicit "try these again", so reset them first.
+  const manualTrigger = useCallback(() => {
+    if (!enabledRef.current) return;
+    void getOfflineQueue()
+      .reactivateParked()
+      .then(() => trigger())
+      // reactivateParked persists the journal; a write failure must not strand
+      // the retry — still drain whatever is already pending.
+      .catch(() => trigger());
+  }, [trigger]);
+
   // Reconnect edge + app foreground + manual retry.
   useEffect(() => {
     if (!enabled) return;
@@ -130,7 +150,7 @@ export function useOfflineFlush(options: UseOfflineFlushOptions): void {
     const appStateSub = AppState.addEventListener('change', (state) => {
       if (state === 'active') trigger();
     });
-    const offManual = onOfflineFlushRequested(trigger);
+    const offManual = onOfflineFlushRequested(manualTrigger);
     return () => {
       offReconnect();
       appStateSub.remove();
@@ -140,5 +160,5 @@ export function useOfflineFlush(options: UseOfflineFlushOptions): void {
         retryTimerRef.current = null;
       }
     };
-  }, [enabled, trigger]);
+  }, [enabled, trigger, manualTrigger]);
 }

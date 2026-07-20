@@ -36,6 +36,15 @@ describe('createSseParser', () => {
     const parser = createSseParser();
     expect(parser.push('data: x\r\n\r\n')).toEqual(['x']);
   });
+
+  it('normalizes a CRLF pair split across a chunk boundary (no hang)', () => {
+    const parser = createSseParser();
+    // \r ends the first read, \n starts the next — per-chunk replace would
+    // leave a stray \r between the newlines and never match \n\n.
+    expect(parser.push('data: x\r')).toEqual([]);
+    expect(parser.push('\n\r')).toEqual([]);
+    expect(parser.push('\n')).toEqual(['x']);
+  });
 });
 
 describe('parseSseJson', () => {
