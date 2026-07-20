@@ -106,4 +106,25 @@ describe('Book appointment screen', () => {
 
     expect(await findByText(/No open slots/)).toBeTruthy();
   });
+
+  it('walks customer → job → time when nothing is pre-filled', async () => {
+    h.params = {};
+    h.customers = [{ id: 'cust-1', displayName: 'Acme HVAC' }];
+    const { getByText } = render(createElement(BookAppointment));
+
+    // Step 1: no availability fetch yet (we're not on the time step).
+    expect(getByText('Pick a customer')).toBeTruthy();
+    expect(h.fetchAvailability).not.toHaveBeenCalled();
+
+    fireEvent.click(getByText('Acme HVAC'));
+    fireEvent.click(getByText('Next: job'));
+
+    // Step 2: the (stubbed) job picker selects a job.
+    fireEvent.click(getByText('Pick job'));
+    fireEvent.click(getByText('Next: time'));
+
+    // Step 3: now availability loads.
+    await waitFor(() => expect(h.fetchAvailability).toHaveBeenCalled());
+    expect(await getByText('2:00 PM')).toBeTruthy();
+  });
 });

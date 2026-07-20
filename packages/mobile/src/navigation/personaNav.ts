@@ -11,7 +11,7 @@ export interface PersonaNavInput {
 
 export interface PersonaQuickLink {
   label: string;
-  route: '/messages' | '/schedule' | '/estimates' | '/invoices' | '/approvals' | '/jobs';
+  route: '/messages' | '/schedule' | '/estimates' | '/invoices' | '/approvals' | '/jobs' | '/agreements';
 }
 
 export interface PersonaNavModel {
@@ -34,6 +34,7 @@ const SUPERVISOR_LINKS: readonly PersonaQuickLink[] = [
   { label: 'Estimates', route: '/estimates' },
   { label: 'Invoices', route: '/invoices' },
   { label: 'Approvals', route: '/approvals' },
+  { label: 'Agreements', route: '/agreements' },
 ];
 
 const BOTH_LINKS: readonly PersonaQuickLink[] = [
