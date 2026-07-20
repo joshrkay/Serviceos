@@ -45,9 +45,10 @@ story is reconnect-heal only (as scoped for v1).
 - R1. Every workflow in the catalog (A1–A10, B1–B7, C1–C8, D1–D3, E1–E9,
   F1–F6) has a working mobile affordance, or an explicit documented
   exclusion in this plan.
-- R2. Money / comms / irreversible proposals require an explicit,
-  lane-aware confirm on mobile (client mirror of the server rule);
-  capture-class stays one-tap.
+- R2. Money / comms / irreversible actions require an explicit,
+  lane-aware confirm on mobile — proposals *and* direct comms/money
+  endpoints (e.g. running-late, send-invoice) — with a server backstop on
+  batch approve; capture-class stays one-tap.
 - R3. Read-only voice asks (E1–E6, D3) return a spoken/onscreen answer in
   the capture flow.
 - R4. Edit-before-approve works end-to-end (`PUT /api/proposals/:id`),
@@ -68,11 +69,17 @@ story is reconnect-heal only (as scoped for v1).
 
 ## Key Technical Decisions
 
-- **Client lane gates consume `packages/shared/src/contracts/proposal-action-class.ts`** —
-  it already mirrors the API's authoritative `actionClassForProposalType`
-  in lockstep (parity-tested against the API source). No new shared work;
-  never re-derive lanes in mobile. (Alternative — new client-side mapping —
-  rejected: guaranteed drift; see
+- **Client lane gates consume `packages/shared/src/contracts/proposal-action-class.ts`,
+  which U1 first extends to the full 4-lane classifier.** Today the shared
+  contract exports only `CAPTURE_PROPOSAL_TYPES` + `isCaptureProposalType`
+  (a capture-membership boolean); the money/comms/irreversible mapping
+  lives solely in the API's `actionClassForProposalType`
+  (`packages/api/src/proposals/proposal.ts:281`), which mobile cannot
+  import. U1 adds a total classifier to shared (returning a fallback for
+  unknown types) and extends the existing parity test to assert all four
+  lanes against the API switch. Never re-derive lanes in mobile.
+  (Alternative — an independent client-side mapping — rejected: guaranteed
+  drift; see
   `docs/solutions/architecture-patterns/derive-shared-status-rule-across-frontends.md`.)
 - **E-lane answers ride the recorded-memo path, not sessions (v1).** The
   worker's lookup branch executes the lookup skill (`ai/skills/lookup-*`
@@ -81,24 +88,37 @@ story is reconnect-heal only (as scoped for v1).
   already does. (Alternative — client re-sends transcript to a text-in
   voice session — rejected for v1: duplicates turn infra, online-only,
   session lifecycle overhead; sessions are the post-v1 assistant's
-  transport, U13.) The recording result *is* the back-channel the worker
-  comment says is missing.
+  transport, U13.) The recording row *becomes* the back-channel — note
+  the router runs *after* transcription flips `status='completed'` and
+  the client poll currently exits on that status, so U3 introduces a
+  second poll phase against a new answer state (mechanism in U3; the web
+  `VoiceBar` polls the same route and must stay compatible).
 - **Manual lifecycle actions use direct, human-initiated endpoints where
   they exist** (e.g. `sendInvoice` in `packages/mobile/src/api/invoices.ts:32`,
   estimate create&send). Proposals remain the AI path; both audit
   server-side. Where no direct endpoint exists (issue invoice, late fee),
   prefer adding the server route over client-minted proposals — see Open
-  Questions.
+  Questions. (Client-minted proposals rejected as the manual path: it
+  overloads the AI-proposal semantics and weakens audit attribution of a
+  direct human action.)
 - **One binary, mode-aware surfaces (D-021).** No separate technician app;
   role/`current_mode` selects the surface. All new screens follow
   `src/navigation/personaNav.ts` gating.
 - **Offline queue (U12) is capture-class-only and journaled in
-  `documentDirectory`.** Approvals flush before voice; a replayed approve
-  that 409s is dropped as "resolved elsewhere" (server `ConflictError` on
-  any invalid transition is the safety proof); voice replay safety
-  requires the U11 server idempotency fix — a hard prerequisite. Audio
-  files move out of the OS-evictable cache dir at enqueue time. Store
-  copy (`app-review-notes.md:51,94`) updates in the same unit (R5).
+  `documentDirectory`.** Approvals flush before voice; a stale replayed
+  approve is dropped as "resolved elsewhere" — the safety proof is the
+  server's `ConflictError` on invalid transitions **or** its
+  pre-transition validation guards (an expired proposal answers **400
+  VALIDATION_ERROR, not 409**), so the flush taxonomy treats any 4xx
+  other than 401/408/429 as a permanent drop. Voice replay safety
+  requires the U11 server idempotency fix — a hard prerequisite — with
+  the key minted **once at enqueue time and persisted in the journal**
+  (today `uploadAndTranscribe` mints a fresh key per call, which would
+  defeat dedup). Audio files move out of the OS-evictable cache dir at
+  enqueue time. Store copy (`app-review-notes.md:51,94`) updates in the
+  same unit (R5). (Journal alternatives — AsyncStorage/SQLite — rejected:
+  the temp-write→move pattern gives atomicity with no native dep and
+  co-locates with the relocated audio files.)
 - **Assistant transport: `expo/fetch` streaming with the Clerk token in the
   `Authorization` header** — zero server change; the `?token=` query
   fallback was deliberately removed server-side (leaks to logs). SSE
@@ -148,9 +168,16 @@ execution; hygiene fixes surfaced by the audit.
 - **Audit events:** all mutations land on existing audited server routes;
   new routes added by U3/U11 (and possibly U5/U7) must audit like their
   siblings.
-- **LLM gateway + catalog resolver + entity resolver:** untouched — U3
-  executes existing lookup skills server-side; no client-side AI calls;
-  clarification chips (F1) already consume the resolver output.
+- **LLM gateway + catalog resolver:** untouched — U3 executes existing
+  lookup skills server-side; no client-side AI calls.
+- **Entity resolver:** U3 *extends its use* to lookup intents on the memo
+  path (customer-scoped lookups require a resolved `customerId`);
+  ambiguity still becomes a `voice_clarification`, never a silent guess.
+  Clarification chips (F1) already consume the resolver output.
+- **RLS / tenant_id:** the new persistence added by U3 (recording answer
+  fields) and U11 (`voice_recordings` idempotency key, unique per tenant)
+  stays tenant-scoped under the existing RLS policies; the named
+  Docker-gated integration tests assert tenant isolation on real columns.
 - **Zod contracts:** new payload shapes (recording answer in U3, queue
   journal in U12) get Zod schemas in `packages/shared` where they cross
   the wire.
@@ -191,7 +218,7 @@ Status: ✅ wired · ◐ partial · ✗ missing. Evidence = repo path the audit 
 | D3 | lookup_job_profit | ✗ | no answer surface (E-lane) | U3 |
 | E1–E6 | read-only voice asks | ◐ | read screens exist; **voice answer never rendered** (server skips lookups on memo path) | U3 |
 | E5b | agreements screen | ✗ | no screen | U10 |
-| E7 | end-of-day digest | ✅ | `app/digest/*` + batch approve | — |
+| E7 | end-of-day digest | ✅ | `app/digest/*` read surfaces (batch approve lives on `app/approvals.tsx`, the app's only batch surface) | — |
 | E8 | request_feedback / review_response | ✗ | no affordance | U10 |
 | E9 | recurring agreements | ✗ | no screen; generic proposal render | U10 |
 | F1 | disambiguation chips | ✅ | `ClarifyPicker` entity+catalog, `useProposalReview.ts:164-209` | — |
@@ -232,29 +259,51 @@ Phase A** — U1 is safety, U2/U3 make existing store claims true.
   stays one-tap. Client mirror of workflows.md §3.
 - **Requirements:** R2
 - **Dependencies:** none
-- **Files:** `packages/mobile/src/proposals/approveGate.ts` (new, pure:
-  lane → gate copy/behavior, consuming shared `proposal-action-class`),
-  `packages/mobile/src/proposals/approveGate.test.ts` (new),
-  `packages/mobile/app/proposals/[id].tsx`,
+- **Files:** `packages/shared/src/contracts/proposal-action-class.ts` +
+  `packages/shared/src/contracts/proposal-action-class.test.ts` (extend:
+  full `ActionClass` type + total classifier; parity test grows from
+  capture-membership to all four lanes against the API switch),
+  `packages/api/src/routes/proposals.ts` (approve-batch server backstop)
+  + `packages/api/test/proposals-approve-batch-lane.test.ts` (new,
+  handler-level), `packages/mobile/src/proposals/approveGate.ts` (new,
+  pure: lane → gate copy/behavior), `packages/mobile/src/proposals/approveGate.test.ts`
+  (new), `packages/mobile/app/proposals/[id].tsx`,
   `packages/mobile/src/screens/proposal-review.test.ts`
-- **Approach:** classify via shared contract; capture → current one-tap;
-  money/comms/irreversible → confirm sheet ("Send $1,240 invoice to
-  Rodriguez?") with distinct destructive styling for irreversible. Batch
-  eligibility (`proposalEvents.ts:53`) already excludes non-capture — do
-  not change it; assert it.
+- **Approach:** first extend the shared contract — today it exports only
+  `CAPTURE_PROPOSAL_TYPES`/`isCaptureProposalType`; add a total
+  `actionClassForProposalType(type): ActionClass | 'unknown'` covering
+  all 44 types. Client: capture → current one-tap; money/comms/
+  irreversible → confirm sheet ("Send $1,240 invoice to Rodriguez?") with
+  destructive styling for irreversible; **unknown → a generic explicit-
+  confirm sheet** (neutral copy, no amount/recipient interpolation,
+  non-destructive styling) and excluded from batch. The gate classifies
+  from the **current** proposal state, not a mount-time snapshot (a
+  `voice_clarification` can resolve in place into a re-drafted money
+  proposal on the same screen). Server: the batch endpoint currently
+  performs **no action-class check** — the client filter
+  (`proposalEvents.ts:53`) is today the only guard — so add a backstop in
+  the approve-batch handler rejecting non-capture ids as per-id `failed`
+  entries.
 - **Patterns to follow:** confirm-sheet pattern of the reject-reason form
-  (`app/proposals/[id].tsx:157-197`); shared-contract consumption per
-  `derive-shared-status-rule-across-frontends.md`.
+  (`app/proposals/[id].tsx:157-197`); shared-contract parity-test pattern
+  already in `proposal-action-class.test.ts`.
 - **Test scenarios:**
   - Happy: capture proposal → one tap → approved + undo banner.
   - Money/comms/irreversible → tap Approve → confirm sheet with action
     summary; confirm → approve; cancel → no call.
-  - Edge: unknown/new proposal type defaults to **review lane, not
-    one-tap** (fail closed).
+  - Edge: unknown/new proposal type → generic confirm sheet, never
+    one-tap, never batch-eligible (classifier returns the fallback rather
+    than throwing).
+  - Edge: `voice_clarification` resolved via `ClarifyPicker` into a
+    money/comms draft → Approve on the re-drafted proposal shows the lane
+    confirm (gate reads post-resolution state).
+  - Server backstop: approve-batch with a money id → that id fails, the
+    capture ids succeed (handler-level).
   - Contract: confirm buttons ≥44px (jsdom class-contract), no overflow at
-    320px (extend `e2e/mobile-viewport.spec.ts`).
+    320px (extend `packages/mobile/e2e/mobile-viewport.spec.ts`).
 - **Verification:** exercising each lane in the app shows the gate;
-  capture flow unchanged; batch approve unaffected.
+  capture flow unchanged; `app/approvals.tsx` (the sole batch surface)
+  still one-taps capture batches and never offers non-capture items.
 
 ### U2. Edit-before-approve (F4)
 - **Goal:** owner edits a draft proposal in-app before approving
@@ -279,8 +328,10 @@ Phase A** — U1 is safety, U2/U3 make existing store claims true.
   - Error: validation rejection from server Zod → inline error, no state
     corruption; offline edit attempt → clear failure (edits are never
     queued — U12 scope note).
-  - Integration: one handler-level test asserting the client payload shape
-    matches the server PUT schema (mocked-client-shape learning:
+  - Integration: assert the client payload shape against the real server
+    PUT Zod schema inside
+    `packages/mobile/src/hooks/useProposalReview.test.ts` (import the
+    shared/api schema — mocked-client-shape learning:
     `docs/solutions/test-failures/mocked-client-shape-masks-server-schema-rejection.md`).
 - **Verification:** dictate an estimate, change a line, approve the edited
   version; store copy now accurate.
@@ -291,39 +342,84 @@ Phase A** — U1 is safety, U2/U3 make existing store claims true.
 - **Requirements:** R3, R1(E1–E6, D3)
 - **Dependencies:** none (parallel with U1/U2)
 - **Files (api):** `packages/api/src/workers/voice-action-router.ts`
-  (lookup branch: execute skill instead of skip),
-  `packages/api/src/db/schema.ts` + migration (persist
-  `{answerSummary, answerData}` on the recording result — exact shape an
-  implementation decision), `packages/api/test/integration/voice-lookup-answer.test.ts`
-  (new, Docker-gated — DB-touching),
+  (lookup branch: execute skill instead of skip; entity resolution for
+  lookup intents), `packages/api/src/app.ts` (worker dep wiring — the
+  router deps today lack `invoiceRepo`, `timeEntryRepo`, `expenseRepo`,
+  `moneyDashboardRepo`, `agreementRepo`, `leadRepo`, `lookupEvents`, and
+  a `voiceRepo`; all must be added),
+  `packages/api/src/voice/voice-service.ts` +
+  `packages/api/src/voice/pg-voice.ts` (answer fields on the
+  `VoiceRecording` model + a repo write method — `updateStatus` today can
+  only write transcript/metadata/error),
+  `packages/api/src/db/schema.ts` + migration (answer persistence —
+  exact shape Open Question 4),
+  `packages/api/test/integration/voice-lookup-answer.test.ts` (new,
+  Docker-gated — DB-touching),
   `packages/shared/src/contracts/` (answer payload schema).
 - **Files (mobile):** `packages/mobile/src/voice/uploadAndTranscribe.ts`
-  (surface the answer outcome), `packages/mobile/app/(tabs)/voice.tsx` +
+  (second poll phase), `packages/mobile/app/(tabs)/voice.tsx` +
   `packages/mobile/src/components/AnswerCard.tsx` (new),
   `packages/mobile/src/screens/voice.test.ts`,
   `packages/mobile/src/voice/uploadAndTranscribe.test.ts`
-- **Approach:** the worker's "no voice back-channel" premise is false for
-  the app — the recording result the client polls *is* the back-channel.
-  Lookup intent → run the `ai/skills/lookup-*` skill (they already return
-  `{status, summary, data}`), persist answer, keep emitting the
-  `lookup_events` analytics row. Client: poll outcome `answered` → render
-  `AnswerCard` (summary + structured data, deep link to the relevant read
-  screen); outcomes `proposal`/`clarification` unchanged.
-- **Patterns to follow:** skill invocation as done on the session path
-  (`InAppVoiceAdapter`); recording poll loop in `uploadAndTranscribe.ts`.
+- **Approach:** the recording row *becomes* the back-channel, but not for
+  free — transcription flips `status='completed'` **before** the router
+  job even enqueues, and both mobile and web polls exit on `completed`.
+  So: (1) persist a distinct routing outcome on the recording (e.g. an
+  `answerStatus`/routed-outcome field: `pending → answered | proposal |
+  clarification | skipped | failed` — shape with Open Question 4); (2)
+  the mobile client adds a **bounded second poll phase** after
+  `completed` — outcome `answered` → `AnswerCard` (summary + structured
+  data; the `lookup_agreements` deep link lands on the U10 screen once it
+  exists, customer detail until then); `proposal`/`clarification` →
+  route to `/approvals` (today's behavior); timeout/`skipped` → today's
+  behavior. The web `VoiceBar` polls the same route — the new fields are
+  additive so web behavior is unchanged (web answer rendering is a
+  follow-up, not this unit). (3) Lookup execution: run the
+  `ai/skills/lookup-*` skill via a **per-skill adapter** mirroring the
+  telephony dispatch (`twilio-adapter.runLookupSkill` /
+  `text-mode-driver.runLookupSkill`) — result shapes are *not* uniform
+  (`lookup_availability` returns message/slots, not `{summary, data}`).
+  (4) **Entity resolution for lookup intents:** customer-scoped skills
+  (`lookup_balance`, `lookup_customer`, `lookup_jobs`, …) require a
+  resolved `customerId` the memo payload doesn't carry — resolve
+  classifier `customerName`/`jobReference` via the entity resolver;
+  ambiguity mints a `voice_clarification` (existing mechanic, never a
+  silent guess); not-found → a "nothing found" answer. (5) **Authorization:**
+  owner-grade lookups (revenue, job profit, pending items, digest —
+  E3/E4/E6/D3) check the memo creator's role before executing; a
+  technician-recorded revenue ask gets a refusal answer, not data.
+  (6) **Extended-intent scoping:** E2/E3/E6 intents
+  (`lookup_day_overview`, `lookup_pending_items`, `lookup_digest`) sit
+  behind the extended-intents tenant opt-in — v1 scopes those answers to
+  opted-in tenants (non-opted tenants keep today's clarification
+  behavior); widening the flag is out of scope. (7) **Start** emitting
+  `lookup_events` analytics on this path (the worker has no `lookupEvents`
+  dep today — it's wired only to the telephony adapter).
+- **Patterns to follow:** `twilio-adapter.runLookupSkill` /
+  `text-mode-driver.runLookupSkill` for skill dispatch; recording poll
+  loop in `uploadAndTranscribe.ts`.
 - **Test scenarios:**
-  - Happy: "what's my balance" memo → recording completes with
-    answerSummary → AnswerCard renders summary + amount (cents formatted).
-  - Edge: lookup skill returns empty data → graceful "nothing found" copy;
-    mixed utterance (action + question) → follows intent classifier's
-    single routed intent (document behavior).
-  - Error: skill failure → recording completes with answer-error state,
-    client offers retry; **integration (Docker):** answer columns persist
-    and RLS-scope correctly on real columns.
-  - Handler-level (api): lookup branch executes skill with mocked gateway
-    and stores summary; no proposal minted; analytics row still written.
+  - Happy: "what's my balance" memo (resolvable customer) → second poll
+    phase lands `answered` → AnswerCard renders summary + amount (cents
+    formatted).
+  - Edge: ambiguous customer in a lookup → `voice_clarification` minted
+    (poll outcome `clarification`); empty skill data → "nothing found"
+    copy; mixed utterance follows the classifier's single routed intent
+    (document behavior); non-opted tenant asking E2/E3/E6 → clarification
+    behavior unchanged.
+  - Authz: technician-recorded "how's revenue" → refusal answer, no data
+    (handler-level).
+  - Error: skill failure → outcome `failed`, client offers retry;
+    **integration (Docker):** answer fields persist, RLS tenant-isolate,
+    and the second-phase poll contract holds on real columns.
+  - Handler-level (api): lookup branch executes the skill with mocked
+    gateway, stores the answer, mints no proposal, emits the
+    `lookup_events` row; the transcription→router enqueue race is covered
+    (client sees `completed` + `answerStatus=pending` before the answer
+    lands).
 - **Verification:** speak "who owes me money?" on device/web-export → an
-  answer card appears without touching /approvals.
+  answer card appears without touching /approvals; web VoiceBar behavior
+  unchanged.
 
 ### U4. Home & Settings surface completion + hygiene
 - **Goal:** B7 emergency alert surface on Home; recent-activity feed;
@@ -344,7 +440,11 @@ Phase A** — U1 is safety, U2/U3 make existing store claims true.
   N). Settings hub: link `brand-voice` and `voice` screens (they exist and
   render) — wiring beats deletion; if product says otherwise, delete both
   files + their tests in the same commit (CLAUDE.md dead-code rule —
-  re-grep usage first).
+  re-grep usage first). Also resolve the mode-toggle placement finding:
+  the toggle lives on Home (`app/(tabs)/index.tsx:175-207`) while
+  Settings shows mode as a read-only label — keep Home as the interactive
+  surface (field-friendly) and make the Settings label link back to it,
+  with a test pinning the placement.
 - **Patterns to follow:** Home card composition in `app/(tabs)/index.tsx`;
   `SettingsSubPage` for links; `mobile-nav-chrome-additive-shell` learning
   for any chrome changes.
@@ -369,8 +469,10 @@ Phase A** — U1 is safety, U2/U3 make existing store claims true.
   review rows for `send_payment_reminder`, `apply_late_fee`,
   `send_estimate_nudge`), `packages/mobile/src/screens/invoices.test.ts`,
   possibly `packages/api/src/routes/invoices.ts` (issue/late-fee routes —
-  see Open Questions; if added: audit events + handler tests, integration
-  test if schema-touching)
+  see Open Questions; if added: audit events + handler tests +
+  `packages/api/test/integration/invoice-lifecycle-actions.test.ts` (new,
+  Docker-gated: audit event emitted, status transition, tenant
+  isolation))
 - **Approach:** status-aware action row on invoice detail (draft → Issue;
   open → Send / Remind / Late fee; each behind the U1 money/comms confirm
   pattern for consistency even on direct endpoints). Use existing
@@ -426,7 +528,10 @@ Phase A** — U1 is safety, U2/U3 make existing store claims true.
   `packages/mobile/app/proposals/[id].tsx` (slot picker for
   `reschedule_appointment` type),
   `packages/mobile/src/screens/schedule.test.ts`, new
-  `packages/mobile/src/screens/appointment-new.test.ts`
+  `packages/mobile/src/screens/appointment-new.test.ts`; if crew-action
+  routes are added server-side:
+  `packages/api/test/integration/appointment-crew-actions.test.ts` (new,
+  Docker-gated)
 - **Approach:** booking form mirrors `customers/new.tsx` form pattern
   (customer picker → time slot → crew); slot picker feeds from the
   availability source (Open Question 2), renders tenant-tz. Reschedule
@@ -452,9 +557,11 @@ Phase A** — U1 is safety, U2/U3 make existing store claims true.
 - **Requirements:** R1(C3–C8)
 - **Dependencies:** U1
 - **Files:** `packages/mobile/app/leads/[id].tsx`,
-  `packages/mobile/src/api/leads.ts` (new client fns),
+  `packages/mobile/src/api/leads.ts` +
+  `packages/mobile/src/api/leads.test.ts` (new),
   `packages/mobile/app/customers/[id].tsx` (location add, note composer),
-  `packages/mobile/src/api/customers.ts`,
+  `packages/mobile/src/api/customers.ts` (+ extend
+  `packages/mobile/src/api/customers.test.ts`),
   `packages/mobile/src/proposals/proposalReview.ts` (complaint `[COMPLAINT]`
   pinned marker, callback affordance, negotiation framing),
   `packages/mobile/src/screens/leads.test.ts`,
@@ -488,20 +595,30 @@ Phase A** — U1 is safety, U2/U3 make existing store claims true.
   `packages/mobile/src/screens/job-expenses.test.ts`
 - **Approach:** expense form (vendor, category, amount-in-cents, photo
   receipt optional via existing job-photo pipeline) on the job detail
-  family, mirroring `app/jobs/[id]/time.tsx`; running-late becomes a
-  three-chip picker (10/20/30m) feeding the same endpoint.
+  family, mirroring `app/jobs/[id]/time.tsx`. **Server surface for the
+  manual form is Open Question 6** — no direct expense write route exists
+  today; either add an audited `POST` route (then add it + a Docker-gated
+  `packages/api/test/integration/job-expenses.test.ts` to this unit) or
+  the form mints a `log_expense` proposal via the existing path.
+  Running-late becomes a three-chip picker (10/20/30m) feeding the same
+  endpoint; per R2, the **chip picker itself constitutes the comms-lane
+  confirm** — it names the action, duration, and recipient before
+  anything sends (B6 is comms-lane "always confirm" in workflows.md §3;
+  the current one-tap ships without this).
 - **Test scenarios:**
   - Happy: log $80 fittings → appears in job costs (cents).
   - Edge: zero/negative amount rejected client-side; offline attempt fails
     clearly (no queue until U12).
-  - Running-late sends the chosen duration; chips ≥44px.
+  - Running-late sends only the explicitly chosen duration (no default
+    fires on a single tap); chips ≥44px.
 - **Verification:** "log 2 hours and $80 of fittings on the Lee job" via
   voice AND manually, both land.
 
 ### U10. Oversight slice completion (E5b/E8/E9)
 - **Goal:** agreements read screen; request-feedback affordance;
   review_response + recurring proposal rendering.
-- **Requirements:** R1(E8, E9)
+- **Requirements:** R1(E5b — the agreements read surface backing E5/E9 —
+  plus E8, E9)
 - **Dependencies:** U1
 - **Files:** `packages/mobile/app/agreements.tsx` +
   `packages/mobile/app/agreements/[id].tsx` (new),
@@ -535,58 +652,111 @@ Phase A** — U1 is safety, U2/U3 make existing store claims true.
   `packages/api/src/voice/` repo layer,
   `packages/api/test/integration/voice-idempotency.test.ts` (new,
   Docker-gated — DB-touching, real columns per CLAUDE.md)
-- **Approach:** the client already sends the key
-  (`uploadAndTranscribe.ts`) — today the server schema silently drops it
-  (`CreateVoiceRecordingBody`, voice.ts:31). Add it to the body schema,
-  persist, unique-per-tenant; on conflict return the existing recording
-  (200/202 with the original id) so the client poll loop just works.
+- **Approach:** the client already *sends* a key
+  (`uploadAndTranscribe.ts:117`) — but mints a fresh `Crypto.randomUUID()`
+  per call, and the server schema silently drops it
+  (`CreateVoiceRecordingBody`, voice.ts:31). Server side: add the key to
+  the body schema, persist, unique-per-tenant. **The conflict path must
+  honor the real client contract:** respond `202` with the same
+  `{recording, queueMessageId}` envelope carrying the *original*
+  recording id, and **re-issue `queue.send` with the existing stable
+  dedupe key** — if the original request died between `voiceRepo.create`
+  and the queue send, returning the row without re-enqueueing strands the
+  recording in `pending` forever (the 90s client poll would time out).
+  The queue's own dedup makes the re-send safe. Client-side key *reuse*
+  across retries is U12's job (key minted at enqueue, persisted in the
+  journal, injected via the `deps.makeIdempotencyKey` seam) — without
+  that, this unit's dedup never triggers.
 - **Test scenarios:**
-  - Integration (Docker): same key twice → one row, same recording id
-    returned, exactly one transcription job enqueued; different tenants
-    may share a key value (tenant-scoped uniqueness); RLS isolation.
+  - Integration (Docker): same key twice → one row, same recording id in
+    the same 202 envelope, exactly one *effective* transcription job
+    (dedupe key absorbs the re-send); create-then-crash replay (row
+    exists, no job) → replay re-enqueues and the recording completes;
+    different tenants may share a key value (tenant-scoped uniqueness);
+    RLS isolation.
   - Handler: missing key remains valid (backward compatible).
-- **Verification:** double-fire the client upload → one proposal, not two.
+- **Verification:** double-fire the client upload **with the same
+  injected key** → one recording, one proposal, not two.
 
 ### U12. Offline voice + approval queue (post-v1)
 - **Goal:** voice recordings and capture-class approvals queue offline and
   flush safely on reconnect; store copy updated to match.
 - **Requirements:** R6, R5
-- **Dependencies:** U11 (hard), U1 (lane classification)
-- **Files:** `packages/mobile/src/offline/queue.ts`,
-  `packages/mobile/src/offline/flush.ts` (+ pure tests for both, new),
+- **Dependencies:** U11 (hard); lane classification comes from the
+  already-shipped shared `proposal-action-class` contract (mobile imports
+  it today) — U1 is only a soft ordering preference for reusing its
+  confirm-sheet copy in the queued-approve UI
+- **Files:** `packages/mobile/src/offline/queue.ts` +
+  `packages/mobile/src/offline/queue.test.ts` (new),
+  `packages/mobile/src/offline/flush.ts` +
+  `packages/mobile/src/offline/flush.test.ts` (new),
+  `packages/mobile/src/offline/audioRelocation.test.ts` (new, jest-expo:
+  cache→document move),
   `packages/mobile/src/voice/uploadAndTranscribe.ts`,
+  `packages/mobile/src/lib/apiFetch.ts` +
+  `packages/mobile/src/lib/useApiClient.ts` (and
+  `packages/mobile/src/lib/appError.ts` if flush uses `decodeError`) —
+  the flush machine needs a terminal-auth signal `apiFetch` doesn't
+  surface today,
   `packages/mobile/src/hooks/useProposalReview.ts`,
   `packages/mobile/src/components/OfflineBanner.tsx` ("N actions
   waiting"), `packages/mobile/store/app-review-notes.md` (lines 51, 94),
-  `packages/mobile/README.md`, one jest-expo test for the cache→document
-  file move
+  `packages/mobile/README.md`
 - **Approach:** per the strategy findings — single JSON journal in
   `FileSystem.documentDirectory`, atomic write (temp→move); items
-  `{id, kind, payload, status, attempts, enqueuedAt}`; enqueue moves audio
-  out of the evictable cache dir; flush on the connectivity reconnect edge
-  + foreground + manual retry, sequential, **approvals before voice**;
+  `{id, kind, payload, status, attempts, enqueuedAt, idempotencyKey,
+  checkpoint?}`. The **voice idempotency key is minted once at enqueue
+  and persisted in the item**; every flush attempt injects that same key
+  into `uploadAndTranscribe` (constant-returning `makeIdempotencyKey`
+  dep or an explicit-key signature) — never re-mint per attempt. **Voice
+  items checkpoint per phase:** after a successful upload+verify, persist
+  `{fileId, audioUrl}` so later attempts skip straight to
+  `POST /api/voice/recordings` instead of re-uploading the audio and
+  minting orphan file rows (a failure before verify restarts the upload;
+  torn-attempt orphan file rows are accepted). Enqueue moves audio out of
+  the evictable cache dir. Flush on the connectivity reconnect edge +
+  foreground + manual retry, sequential, **approvals before voice**;
   `inflight` reverts to `pending` on relaunch (at-least-once; server
-  idempotency/409 gives effectively-once). Approvals: capture-class only;
-  409 → drop as "resolved elsewhere" + inbox re-fetch; 401 → park behind
-  sign-in; 5xx → capped backoff; queued approvals show "Will approve when
-  back online" (no fake countdown; real undo window anchors server
-  `approvedAt` on flush) and are cancellable until flushed. **Never
-  queued:** edits, resolve-line/entity, money/comms/irreversible,
-  batch, reject, undo.
+  idempotency + permanent-4xx drop gives effectively-once). Approvals:
+  capture-class only. **Flush error taxonomy:** 2xx → done; **any 4xx
+  except 401/408/429 → permanent drop** with the "resolved elsewhere / no
+  longer approvable" notice + inbox re-fetch (this covers both the 409
+  `ConflictError` and the **400 `VALIDATION_ERROR` an *expired* proposal
+  returns** — and the expiring schedule types are all capture-class, so
+  the 400 path is the *likely* stale case, not the corner); 401/auth →
+  park behind sign-in; 5xx/timeout/408/429 → capped backoff, then poison-
+  park. **The 401-park needs plumbing:** `apiFetch` today force-refreshes,
+  then fires `onUnauthenticated` (which toasts + navigates to sign-in —
+  hostile during a background flush) and throws an untagged error, and a
+  null Clerk token surfaces as an AbortError — so flush either constructs
+  its own `ApiFetch` with `onUnauthenticated` suppressed or classifies a
+  newly tagged terminal-auth error; both auth-failure shapes (tagged
+  terminal 401, null-token abort) are park signals. Queued approvals show
+  "Will approve when back online" (no fake countdown; the real undo
+  window anchors server `approvedAt` at flush) and are cancellable until
+  flushed. **Never queued:** edits, resolve-line/entity,
+  money/comms/irreversible, batch, reject, undo.
 - **Patterns to follow:** RN-free injected-deps style of
   `uploadAndTranscribe.ts`; `__emitNetInfoForTests` hooks in
   `connectivity.ts`.
 - **Test scenarios:**
   - Pure: enqueue/restore round-trip; FIFO; crash-recovery
-    (inflight→pending); poison item parks after N attempts.
+    (inflight→pending); poison item parks after N attempts; **two flush
+    attempts of one voice item send the identical idempotency key**;
+    resume-from-checkpoint skips the upload phase.
   - Flush machine: reconnect triggers; approvals-before-voice order;
-    409-drop with notice; 401-park; partial-flush persistence.
+    409-drop AND **400-expired-drop** with notice; both 401-park shapes
+    (tagged terminal, null-token abort) with **no navigation side
+    effect**; partial-flush persistence.
   - jest-expo: recorded clip moved to documentDirectory; deletion only
     after confirmed flush.
   - Store copy: review-notes offline passages updated in the same commit
     (R5 assertion is the diff itself).
 - **Verification:** airplane-mode capture + one-tap approve → both flush
-  on reconnect exactly once; banner shows queue depth.
+  on reconnect exactly once; banner shows queue depth. Residual risk,
+  accepted and documented: a queued capture-class `create_booking` whose
+  slot hold lapsed can approve 200 and fail only at execution — the
+  execution-failed card in the inbox is the surface for that.
 
 ### U13. Conversational assistant (post-v1) + F2 approve-by-voice
 - **Goal:** a stateful "talk to the agent" session screen over the
@@ -594,34 +764,57 @@ Phase A** — U1 is safety, U2/U3 make existing store claims true.
 - **Requirements:** R7, R1(F2)
 - **Dependencies:** none on U11/U12 (independent); after Phase A
 - **Files:** `packages/mobile/app/assistant.tsx` (new),
-  `packages/mobile/src/assistant/sseParser.ts` (new, pure,
+  `packages/mobile/src/assistant/sseParser.ts` +
+  `packages/mobile/src/assistant/sseParser.test.ts` (new, pure,
   transport-agnostic), `packages/mobile/src/assistant/useAssistantSession.ts`
-  (new), tests for both (new), `packages/mobile/src/voice/useVoiceCapture.ts`
+  + `packages/mobile/src/assistant/useAssistantSession.test.ts` (new),
+  `packages/mobile/src/navigation/personaNav.ts` (+ its test — assistant
+  entry gating), `packages/mobile/src/voice/useVoiceCapture.ts`
   (extract shared recorder logic),
   `packages/mobile/src/screens/assistant.test.ts` (new),
-  `packages/api/test/` (one handler test asserting header-auth-only SSE)
+  `packages/api/test/voice-sessions-auth.test.ts` (or the existing
+  voice-sessions route test file — header-auth-only SSE assertion)
 - **Approach:** `expo/fetch` streaming reader with the Clerk token in the
   `Authorization` header (port of the web `useVoiceSession` reader; the
   server's `?token=` fallback is gone on purpose — never reintroduce it).
   SSE parsing is a pure module so the transport can swap to
   `react-native-sse` (plan-B) without touching the hook. Degrade path: the
   synchronous `POST /:id/input` already returns the full turn
-  (`{state, ttsText, ttsAudio, proposalIds, ended}`), so a broken stream
-  loses only async pushes. Per-turn STT via the sync
-  `/api/voice/transcribe` endpoint; TTS base64 → cache file → expo-audio
-  player, with explicit record/playback state sequencing. `proposal_created`
-  events render chips deep-linking into the existing review screen —
-  approval semantics (lanes, undo) stay in `useProposalReview`, unchanged.
-  Assistant is online-only (no queue interplay). Run the `expo/fetch`
-  streaming spike (iOS + Android, background/abort semantics) as the
-  unit's first task; a spike failure switches transport to plan-B, not the
+  (`{state, ttsText, ttsAudio, proposalIds, sideEffects, ended}`), so a
+  broken stream loses only async pushes. Sessions **end**: the server
+  idle-reaps after ~30 min and an ended/reaped session answers **410
+  GONE** — reconnect and `AppState` foreground-resume must take the
+  "session ended — start a new one" path, never retry into a 410.
+  **Persona gating:** every session endpoint requires
+  `requirePermission('ai:run')`, which technicians don't hold — gate the
+  assistant entry via `personaNav` and redirect the tech persona in
+  `app/assistant.tsx` (pattern: `app/schedule.tsx` technician redirect),
+  plus graceful 403 handling in the hook. Per-turn STT via the sync
+  `/api/voice/transcribe` endpoint — note it requires
+  `AI_PROVIDER_API_KEY` on the target API (answers **501** otherwise; dev
+  returns a placeholder transcript), and the client falls back to text
+  input on 501. TTS base64 → cache file → expo-audio player: this is
+  **greenfield** (the repo has zero playback prior art — expo-audio is
+  used for recording only) — fold TTS playback into the unit's first-task
+  spike alongside `expo/fetch` streaming: base64 write via
+  `FileSystem.writeAsStringAsync(EncodingType.Base64)`, player
+  load/replace per turn, and the iOS `setAudioModeAsync`
+  `allowsRecording` toggle between recorder and player.
+  `proposal_created` events render chips deep-linking into the existing
+  review screen — approval semantics (lanes, undo) stay in
+  `useProposalReview`, unchanged. Assistant is online-only (no queue
+  interplay). A spike failure switches transport to plan-B, not the
   design.
 - **Test scenarios:**
   - Pure parser: chunk-split events, partial buffers, heartbeats,
     malformed JSON, multi-event chunks.
   - Hook with injected fake transport: start → greeting → input → events →
-    ended; 401 refresh-retry; abort on unmount; stream-drop → degrade to
-    sync round-trip; AppState background → foreground resume/reconnect.
+    ended; 401 refresh-retry; 403 (persona without `ai:run`) surfaces
+    gracefully; abort on unmount; stream-drop → degrade to sync
+    round-trip; **410 from an ended/reaped session (sync input or
+    reconnect, incl. >30 min background resume) → "session ended — start
+    a new one", no retry loop**; AppState background → foreground
+    resume/reconnect.
   - F2: "approve the Rodriguez estimate" turn → proposal chip resolves →
     lane rules still enforced (money still confirms on screen).
   - Playwright web-export smoke: assistant screen renders.
@@ -653,9 +846,11 @@ Phase A** — U1 is safety, U2/U3 make existing store claims true.
 - **Store-copy honesty race (active today):** listing + review notes claim
   "Edit" (F4) which doesn't exist. Mitigation: U2 lands before external
   review, or the copy drops the claim — U14 gates on one of the two.
-- **U3 changes worker semantics:** the lookup skip is load-bearing for
-  telephony surfaces; scope the answer-execution branch strictly to the
-  recorded-memo (mobile) path so phone-call flows are untouched.
+- **U3 changes worker semantics:** telephony does *not* use this worker,
+  but the web `VoiceBar` and the eval harness share it — scope the
+  answer-execution branch via the payload's `recordingId` presence (the
+  memo path) and keep the new recording fields additive so web polling
+  semantics are unchanged.
 - **U5/U7 may need new server routes** (issue-invoice, late-fee, crew
   actions) — each addition carries audit events + handler tests +
   integration tests if schema-touching; budget for it.
@@ -684,6 +879,10 @@ Phase A** — U1 is safety, U2/U3 make existing store claims true.
 5. **Emergency ack semantics (U4):** is dismiss client-local or should an
    acknowledgement round-trip to the server? Default client-local; revisit
    if on-call escalation needs receipts.
+6. **Manual expense write surface (U9):** direct audited `POST` route
+   (then a Docker-gated integration test joins U9) vs minting a
+   `log_expense` proposal from the form. Resolve at U9 start; mirrors
+   Open Question 1's direct-vs-proposal fork.
 
 ## Sources & Research
 
@@ -698,3 +897,12 @@ reflects the newer code); `docs/decisions.md` D-004, D-016, D-021;
 `docs/solutions/test-failures/mocked-client-shape-masks-server-schema-rejection.md`;
 `docs/mobile/ios-app-completion-prompt.md` (release execution);
 `docs/mobile/RELEASE-RUNBOOK.md`.
+
+Note on unit numbering: U-IDs in this plan supersede and do **not**
+correspond to the U-numbers cited in `docs/mobile/workflows.md` §6, which
+reference the retired 2026-06-19 MVP plan (archived in the 2026-07
+cleanup).
+
+An adversarial deepening pass (4 unit-refuters + 2 completeness critics,
+36 findings: 5 blocker / 16 material / 15 minor) ran against this plan on
+2026-07-20; all findings are folded into the text above.
