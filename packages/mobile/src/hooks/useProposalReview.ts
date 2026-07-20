@@ -1,6 +1,9 @@
+import { isCaptureProposalType } from '@ai-service-os/shared';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useApiClient } from '../lib/useApiClient';
 import { decodeError } from '../lib/appError';
+import { isCurrentlyOnline } from '../lib/connectivity';
+import { getOfflineQueue } from '../offline/queueInstance';
 import { type ReviewProposal, undoSecondsLeft } from '../proposals/proposalReview';
 
 export type { ReviewProposal };
@@ -10,6 +13,7 @@ export type ReviewPhase =
   | 'review'
   | 'approving'
   | 'approved' // within the undo window
+  | 'queued' // U12 — approve saved offline; flushes on reconnect, cancellable
   | 'undoing'
   | 'undone'
   | 'rejecting'
@@ -28,6 +32,13 @@ export interface UseProposalReviewResult {
   resolveEntity: (candidateId: string) => Promise<void>;
   undo: () => Promise<void>;
   reload: () => Promise<void>;
+  /** Remove a not-yet-flushed queued approve (only meaningful in 'queued'). */
+  cancelQueuedApprove: () => Promise<void>;
+}
+
+/** RN/Hermes transport failure — the request never reached the server. */
+function isOfflineFetchError(e: unknown): boolean {
+  return e instanceof Error && /network request failed/i.test(e.message);
 }
 
 function normalize(raw: Record<string, unknown>): ReviewProposal {
@@ -102,6 +113,12 @@ export function useProposalReview(id: string): UseProposalReviewResult {
       if (!res.ok) throw new Error((await decodeError(res)).message);
       const p = normalize(await res.json());
       setProposal(p);
+      // U12 — an approve queued offline survives navigating away and back:
+      // while it's journaled the screen shows the queued state, not Approve.
+      if (getOfflineQueue().hasQueuedApproval(id)) {
+        setPhase('queued');
+        return;
+      }
       const initial = phaseForStatus(p.status, p.approvedAt ?? null);
       // Keep the undo countdown anchored when we land mid-window.
       if (initial === 'approved') approvedAtRef.current = p.approvedAt ?? null;
@@ -116,11 +133,46 @@ export function useProposalReview(id: string): UseProposalReviewResult {
     void reload();
   }, [reload]);
 
+  // U12 — journal the approve for the flush machine. Capture-class ONLY:
+  // money/comms/irreversible always need a live, explicit confirm and are
+  // never queued (they fail with the normal offline error instead). No fake
+  // countdown — the real 5s undo window anchors the server `approvedAt`
+  // stamped when the queued approve flushes.
+  const enqueueApprovalOffline = useCallback(
+    async (p: ReviewProposal) => {
+      await getOfflineQueue().enqueueApproval({
+        id: `approval-${p.id}`,
+        idempotencyKey: `approval-${p.id}`,
+        enqueuedAt: new Date().toISOString(),
+        payload: { proposalId: p.id, proposalType: p.proposalType, summary: p.summary },
+      });
+      setPhase('queued');
+    },
+    [],
+  );
+
   const approve = useCallback(async () => {
+    const current = proposal;
+    const offlineQueueable = current !== null && isCaptureProposalType(current.proposalType);
+    if (offlineQueueable && !isCurrentlyOnline()) {
+      await enqueueApprovalOffline(current);
+      return;
+    }
     setPhase('approving');
     setError(null);
     try {
-      const res = await api(`/api/proposals/${id}/approve`, { method: 'POST' });
+      let res: Response;
+      try {
+        res = await api(`/api/proposals/${id}/approve`, { method: 'POST' });
+      } catch (e) {
+        // Connection dropped on the way out — queue instead of failing (the
+        // request never reached the server, so there's nothing to duplicate).
+        if (offlineQueueable && isOfflineFetchError(e)) {
+          await enqueueApprovalOffline(current);
+          return;
+        }
+        throw e;
+      }
       if (!res.ok) throw new Error((await decodeError(res)).message);
       // POST /:id/approve returns the approved Proposal directly (res.json of
       // approveProposal's result). Support a { approved: [...] } wrapper too in
@@ -138,7 +190,13 @@ export function useProposalReview(id: string): UseProposalReviewResult {
       setError(message(e));
       setPhase('error');
     }
-  }, [api, id]);
+  }, [api, enqueueApprovalOffline, id, proposal]);
+
+  // Cancel a queued approve before the flush machine sends it.
+  const cancelQueuedApprove = useCallback(async () => {
+    const removed = await getOfflineQueue().removeApproval(id);
+    if (removed) setPhase('review');
+  }, [id]);
 
   const reject = useCallback(
     async (reason: string, details?: string) => {
@@ -242,5 +300,17 @@ export function useProposalReview(id: string): UseProposalReviewResult {
     return () => clearInterval(interval);
   }, [phase]);
 
-  return { proposal, phase, error, secondsLeft, approve, reject, resolveLine, resolveEntity, undo, reload };
+  return {
+    proposal,
+    phase,
+    error,
+    secondsLeft,
+    approve,
+    reject,
+    resolveLine,
+    resolveEntity,
+    undo,
+    reload,
+    cancelQueuedApprove,
+  };
 }

@@ -11,6 +11,7 @@ const h = vi.hoisted(() => ({
   resolveEntity: vi.fn().mockResolvedValue(undefined),
   undo: vi.fn(),
   reload: vi.fn(),
+  cancelQueuedApprove: vi.fn().mockResolvedValue(undefined),
   back: vi.fn(),
   phase: 'review' as ReviewPhase,
   secondsLeft: 0,
@@ -43,6 +44,7 @@ vi.mock('../hooks/useProposalReview', () => ({
     resolveEntity: h.resolveEntity,
     undo: h.undo,
     reload: h.reload,
+    cancelQueuedApprove: h.cancelQueuedApprove,
   }),
 }));
 
@@ -80,6 +82,17 @@ describe('Proposal review screen', () => {
     expect(undo.className).toMatch(/\bmin-h-11\b/);
     fireEvent.click(undo);
     expect(h.undo).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows the offline-queued state with a >=44px cancel and no countdown (U12)', () => {
+    h.phase = 'queued';
+    const { getByText, queryByText } = render(createElement(ProposalReviewScreen));
+    expect(getByText('Will approve when back online. You can cancel until it sends.')).toBeTruthy();
+    expect(queryByText(/Running in/)).toBeNull(); // no fake countdown
+    const cancel = getByText('Cancel').closest('button')!;
+    expect(cancel.className).toMatch(/\bmin-h-11\b/);
+    fireEvent.click(cancel);
+    expect(h.cancelQueuedApprove).toHaveBeenCalledTimes(1);
   });
 
   it('confirms the approval once the window has committed', () => {

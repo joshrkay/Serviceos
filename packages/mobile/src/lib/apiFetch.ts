@@ -61,6 +61,24 @@ export function makeTimeoutError(): Error {
   return err;
 }
 
+/**
+ * Terminal auth failure: the 401 retry with a force-refreshed token was
+ * exhausted. Tagged so non-interactive callers (the offline flush machine)
+ * can classify it as an auth-park signal instead of a generic failure; the
+ * interactive client additionally gets `onUnauthenticated` (toast + sign-in
+ * navigation) before this is thrown.
+ */
+export function makeTerminalAuthError(): Error {
+  const err = new Error('Unauthorized — re-authentication required');
+  err.name = 'TerminalAuthError';
+  return err;
+}
+
+/** True for the tagged terminal auth failure above. */
+export function isTerminalAuthError(err: unknown): boolean {
+  return err instanceof Error && err.name === 'TerminalAuthError';
+}
+
 /** Default per-request timeout — a hung socket rejects instead of hanging the UI. */
 export const DEFAULT_TIMEOUT_MS = 15_000;
 
@@ -168,6 +186,6 @@ export function createApiFetch(deps: ApiFetchDeps): ApiFetch {
       if (retry.status !== 401) return retry;
     }
     onUnauthenticated?.();
-    throw new Error('Unauthorized — re-authentication required');
+    throw makeTerminalAuthError();
   };
 }

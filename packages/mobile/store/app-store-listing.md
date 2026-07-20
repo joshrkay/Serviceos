@@ -50,8 +50,8 @@ technicians:
   chasing, at a glance.
 • Technician Today — assigned jobs, en route / running late, voice notes,
   and job photos when you're connected.
-• Needs a connection for voice and photos — if you drop offline, Rivet
-  shows a reconnect banner; capture resumes when you're back online.
+• Works in basements — voice actions and safe approvals queue offline and
+  send themselves when you're back online. Photos still need a connection.
 
 Rivet tells you the truth. Every evening you get one text: what got done,
 what got paid, and what Rivet wasn't sure about today. Nothing irreversible

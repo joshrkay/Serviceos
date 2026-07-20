@@ -20,6 +20,7 @@ import { CLERK_PUBLISHABLE_KEY } from '../src/lib/env';
 import { tokenCache } from '../src/lib/tokenCache';
 import { usePushRegistration } from '../src/hooks/usePushRegistration';
 import { usePendingProposals } from '../src/hooks/usePendingProposals';
+import { useOfflineFlush } from '../src/offline/useOfflineFlush';
 import { useNotificationRouter } from '../src/push/useNotificationRouter';
 import { ErrorBoundary } from '../src/components/ErrorBoundary';
 import { ToastProvider } from '../src/components/Toast';
@@ -36,6 +37,9 @@ function AuthGate() {
     enabled: Boolean(isSignedIn),
   });
   useNotificationRouter(refreshPendingProposals);
+  // U12 — drain the offline voice/approval queue on reconnect, foreground,
+  // and sign-in; re-fetch the inbox after anything flushes or drops.
+  useOfflineFlush({ enabled: Boolean(isSignedIn), onInboxRefresh: refreshPendingProposals });
 
   useEffect(() => {
     if (!isLoaded) return;

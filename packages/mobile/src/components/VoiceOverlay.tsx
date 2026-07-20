@@ -45,7 +45,22 @@ export function VoiceOverlay() {
             </Text>
 
             <View className="my-8 items-center">
-              {phase === 'transcript' ? (
+              {phase === 'queued' ? (
+                <View className="w-full">
+                  <Text className="text-lg text-foreground">Saved. Will send when back online.</Text>
+                  <Text className="mt-2 text-base text-mutedForeground">
+                    Your recording sends automatically when you reconnect, then appears in
+                    approvals.
+                  </Text>
+                  <Pressable
+                    accessibilityRole="button"
+                    onPress={close}
+                    className="mt-4 min-h-11 items-center justify-center rounded-md bg-primary px-4 py-3"
+                  >
+                    <Text className="text-base font-semibold text-primaryForeground">Done</Text>
+                  </Pressable>
+                </View>
+              ) : phase === 'transcript' ? (
                 <View className="w-full">
                   <Text className="text-base text-mutedForeground">Heard</Text>
                   <Text className="mt-1 text-lg text-foreground">{transcript}</Text>

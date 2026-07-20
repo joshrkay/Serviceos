@@ -26,8 +26,19 @@ export default function ProposalReviewScreen() {
   const params = useLocalSearchParams<{ id: string }>();
   const id = Array.isArray(params.id) ? params.id[0] : (params.id ?? '');
   const router = useRouter();
-  const { proposal, phase, error, secondsLeft, approve, reject, resolveLine, resolveEntity, undo, reload } =
-    useProposalReview(id);
+  const {
+    proposal,
+    phase,
+    error,
+    secondsLeft,
+    approve,
+    reject,
+    resolveLine,
+    resolveEntity,
+    undo,
+    reload,
+    cancelQueuedApprove,
+  } = useProposalReview(id);
   const [showRejectForm, setShowRejectForm] = useState(false);
   const [rejectReason, setRejectReason] = useState('');
 
@@ -195,6 +206,25 @@ export default function ProposalReviewScreen() {
                     </View>
                   </View>
                 )}
+              </View>
+            ) : null}
+
+            {/* Queued offline (U12) — no fake countdown; the real 5s undo
+                window anchors the server approvedAt stamped at flush. */}
+            {phase === 'queued' ? (
+              <View className="mt-8">
+                <Text className="text-base text-foreground">✓ Saved</Text>
+                <Text className="mt-1 text-base text-mutedForeground">
+                  Will approve when back online. You can cancel until it sends.
+                </Text>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Cancel queued approval"
+                  onPress={() => void cancelQueuedApprove()}
+                  className="mt-3 min-h-11 items-center justify-center rounded-md border border-border px-4 py-3"
+                >
+                  <Text className="text-base font-semibold text-foreground">Cancel</Text>
+                </Pressable>
               </View>
             ) : null}
 

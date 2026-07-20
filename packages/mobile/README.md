@@ -32,6 +32,21 @@ Consequences:
 - **NativeWind v4** (Tailwind v3) driven by the shared design tokens in
   `src/theme/tokens.js` (mirrors `packages/web/src/index.css`).
 
+## Offline queue (`src/offline/`)
+Voice recordings and capture-class approvals captured while offline are
+journaled to a single JSON file in `documentDirectory` (atomic temp→move
+writes; queued audio is moved out of the evictable cache dir at enqueue).
+The flush machine drains on the connectivity reconnect edge, app
+foreground, sign-in, and manual retry — approvals before voice, one item at
+a time. Voice replay is safe because the server dedupes on the journaled
+`idempotencyKey` (minted once at enqueue, replayed on every attempt; see
+`POST /api/voice/recordings`), and each item checkpoints `{fileId,
+audioUrl}` after upload+verify so retries never re-upload audio. Stale
+approvals (any 4xx except 401/408/429) drop with a notice; terminal auth
+failures park items behind sign-in; transient failures back off, then
+poison-park. Money / comms / irreversible approvals, edits, rejects,
+undos, and batch approvals are never queued.
+
 ## Tests
 - Pure-logic tests (tokens, formatters, hooks) run under **Vitest**:
   `npm test` (or, from the repo root, `npx vitest run --root packages/mobile`).

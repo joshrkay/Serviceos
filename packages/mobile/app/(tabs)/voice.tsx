@@ -26,7 +26,22 @@ export default function VoiceScreen() {
       </Text>
 
       <View className="flex-1 items-center justify-center">
-        {phase === 'transcript' ? (
+        {phase === 'queued' ? (
+          <View className="w-full">
+            <Text className="text-lg text-foreground">Saved. Will send when back online.</Text>
+            <Text className="mt-2 text-base text-mutedForeground">
+              Your recording is safe on this phone and sends automatically when you reconnect —
+              then it appears in approvals.
+            </Text>
+            <Pressable
+              accessibilityRole="button"
+              onPress={reset}
+              className="mt-6 min-h-11 items-center justify-center rounded-md border border-border px-4 py-3"
+            >
+              <Text className="text-base text-foreground">Speak again</Text>
+            </Pressable>
+          </View>
+        ) : phase === 'transcript' ? (
           <View className="w-full">
             <Text className="mb-2 text-base text-mutedForeground">Heard</Text>
             <Text className="text-lg text-foreground">{transcript}</Text>

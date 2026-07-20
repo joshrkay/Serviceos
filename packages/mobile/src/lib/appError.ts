@@ -120,6 +120,11 @@ function isSignOutAbort(err: unknown): boolean {
   return err instanceof Error && err.name === 'AbortError';
 }
 
+/** True for the exhausted-401-retry throw (`makeTerminalAuthError`). */
+function isTerminalAuth(err: unknown): boolean {
+  return err instanceof Error && err.name === 'TerminalAuthError';
+}
+
 async function decodeResponse(res: ResponseLike): Promise<AppError> {
   let body: unknown;
   try {
@@ -160,6 +165,7 @@ async function decodeResponse(res: ResponseLike): Promise<AppError> {
 export function decodeError(input: Response | unknown): Promise<AppError> | AppError {
   if (isResponseLike(input)) return decodeResponse(input);
   if (isSignOutAbort(input)) throw input; // preserve the sign-out abort as-is
+  if (isTerminalAuth(input)) return appError('unauthorized');
   if (isTimeoutAbort(input)) return appError('timeout');
   if (isNetworkError(input)) return appError('offline');
   if (input instanceof Error) return appError('unknown', input.message);
