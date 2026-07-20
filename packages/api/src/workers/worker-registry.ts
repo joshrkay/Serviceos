@@ -25,6 +25,7 @@ export class WorkerRegistry {
       logger.error('No handler registered for message type', { type: message.type });
       return false;
     }
-    return processMessage(message, handler, logger);
+    const result = await processMessage(message, handler, logger);
+    return result.success;
   }
 }

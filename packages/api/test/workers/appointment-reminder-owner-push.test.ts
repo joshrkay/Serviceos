@@ -113,6 +113,8 @@ describe('appointment-reminder owner push (U4)', () => {
       customerRepo,
       settingsRepo,
       invoiceRepo: new InMemoryInvoiceRepository(),
+      pool: null,
+      logger,
     });
 
     // Register an owner device + the notifier instance.

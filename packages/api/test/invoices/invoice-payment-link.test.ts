@@ -96,6 +96,64 @@ describe('createInvoicePaymentLink (INV-04)', () => {
     expect(seen[0]?.stripeAccountId).toBe('acct_op_link');
   });
 
+  // U9 invariant (absent side): the operator link must NOT route to Connect
+  // unless charges are enabled — otherwise a half-onboarded tenant's operator
+  // link would 500 (Connect account can't accept charges) or, worse, a stale
+  // account id would misroute funds. Mirrors the platform-fallback guard the
+  // public invoice link already proves in public-invoice-connect.test.ts.
+  async function seenAccountFor(
+    resolver: Parameters<typeof createInvoicePaymentLink>[4],
+  ): Promise<string | undefined> {
+    const repo = new InMemoryInvoiceRepository();
+    const invoice = await repo.create({
+      id: '00000000-0000-4000-8000-000000000014',
+      tenantId,
+      jobId,
+      invoiceNumber: 'INV-0005',
+      status: 'open',
+      lineItems: [{ description: 'Labor', quantity: 1, unitPriceCents: 3000, taxable: true }],
+      totals: calculateDocumentTotals([{ description: 'Labor', quantity: 1, unitPriceCents: 3000, taxable: true }]),
+      amountPaidCents: 0,
+      amountDueCents: 3000,
+      createdBy: 'user-1',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const seen: Array<{ stripeAccountId?: string }> = [];
+    const provider = {
+      generateLink: async (req: { stripeAccountId?: string }) => {
+        seen.push({ stripeAccountId: req.stripeAccountId });
+        return { linkId: 'plink_x', linkUrl: 'https://pay.mock.com/plink_x', providerReference: 'mock_x' };
+      },
+      deactivateLink: async () => undefined,
+    };
+    await createInvoicePaymentLink(tenantId, invoice.id, repo, provider, resolver);
+    return seen[0]?.stripeAccountId;
+  }
+
+  it('does NOT pass stripeAccountId when Connect charges are not enabled (KYC incomplete)', async () => {
+    const account = await seenAccountFor({
+      resolveTenantConnectAccount: async () => ({ accountId: 'acct_pending', chargesEnabled: false }),
+    });
+    expect(account).toBeUndefined();
+  });
+
+  it('does NOT pass stripeAccountId when the tenant has no Connect account (resolver returns null)', async () => {
+    const account = await seenAccountFor({
+      resolveTenantConnectAccount: async () => null,
+    });
+    expect(account).toBeUndefined();
+  });
+
+  it('falls back to platform (no stripeAccountId) when the resolver throws', async () => {
+    const account = await seenAccountFor({
+      resolveTenantConnectAccount: async () => {
+        throw new Error('db hiccup');
+      },
+    });
+    expect(account).toBeUndefined();
+  });
+
   it('rejects draft invoice with 409-class error', async () => {
     const repo = new InMemoryInvoiceRepository();
     const invoice = await repo.create({

@@ -1,4 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
+import type { Pool } from 'pg';
 import { appointmentTypeSchema, type AppointmentTypeValue } from '@ai-service-os/shared';
 import { Proposal, ProposalType, ProposalRepository } from '../proposal';
 import { CreateInvoiceExecutionHandler } from './invoice-execution-handler';
@@ -821,6 +822,12 @@ export class SendEstimateNudgeExecutionHandler implements ExecutionHandler {
     private readonly auditRepo?: AuditRepository,
     /** Injectable clock for deterministic cooldown tests. */
     private readonly now: () => Date = () => new Date(),
+    /**
+     * T4-F01 claim ledger pool, threaded into dispatchEstimateNudge's
+     * claim-before-send gate. Undefined/null in dev/test without a DB —
+     * the claim wrapper no-ops and the send proceeds directly.
+     */
+    private readonly pool?: Pool | null,
   ) {}
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
@@ -906,6 +913,7 @@ export class SendEstimateNudgeExecutionHandler implements ExecutionHandler {
         {
           estimateRepo: this.estimateRepo,
           sendService: this.sendService,
+          pool: this.pool ?? null,
           ...(this.auditRepo ? { auditRepo: this.auditRepo } : {}),
         },
         {
@@ -987,6 +995,9 @@ export function createExecutionHandlerRegistry(deps?: {
   // documented on the handler.
   sendService?: Pick<SendService, 'sendEstimate'>;
   dispatchRepo?: DispatchRepository;
+  // T4-F01 — claim-before-send pool for send_estimate_nudge's
+  // dispatchEstimateNudge call. Absent/null → the claim wrapper no-ops.
+  pool?: Pool | null;
   // UB-A2 — create_standing_instruction inserts via the UB-A1 repo.
   // Absent → the handler degrades to a synthetic-id passthrough.
   standingInstructionRepo?: StandingInstructionRepository;
@@ -1074,6 +1085,8 @@ export function createExecutionHandlerRegistry(deps?: {
       deps?.sendService,
       deps?.dispatchRepo,
       deps?.auditRepo,
+      undefined,
+      deps?.pool,
     ),
     new RecordPaymentExecutionHandler(
       deps?.paymentRepo,

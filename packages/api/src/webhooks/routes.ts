@@ -1,7 +1,8 @@
 import { Router, Request, Response } from 'express';
 import { AppConfig } from '../shared/config';
 import {
-  verifyWebhookSignature,
+  parseWebhookSecrets,
+  verifyWebhookSignatureAny,
   handleWebhookEvent,
   InMemoryWebhookRepository,
   WebhookRepository,
@@ -149,6 +150,12 @@ export interface WebhookRouterDeps {
    * fakes that don't track users).
    */
   pool?: import('pg').Pool;
+  /**
+   * Stripe webhook signing secret(s). Accepts a COMMA-SEPARATED list so both
+   * the platform and connected-accounts endpoints (each with its own Stripe
+   * secret) can be verified; a single value behaves as before. Parsed by
+   * `parseWebhookSecrets`.
+   */
   stripeWebhookSecret?: string;
   queue?: Queue;
   appBaseUrl?: string;
@@ -861,8 +868,12 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
    *   checkout.session.completed → recordPayment() to mark invoice paid
    */
   router.post('/stripe', async (req: Request, res: Response) => {
-    const secret = deps.stripeWebhookSecret;
-    if (!secret) {
+    // STRIPE_WEBHOOK_SECRET may hold MULTIPLE secrets (comma-separated) — one
+    // per Stripe endpoint. Full Connect coverage needs a platform-scoped and a
+    // connected-accounts-scoped endpoint, and Stripe issues a distinct secret
+    // per endpoint, so we verify against each. A single value is unchanged.
+    const secrets = parseWebhookSecrets(deps.stripeWebhookSecret);
+    if (secrets.length === 0) {
       logger.warn('STRIPE_WEBHOOK_SECRET not configured — rejecting Stripe webhook');
       return res.status(500).json({ error: 'Stripe webhook not configured' });
     }
@@ -879,9 +890,10 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
       ? req.body.toString('utf8')
       : (() => { throw new Error('Body pre-parsed; mount /webhooks/stripe before express.json()'); })();
 
-    // Re-use the existing verifyWebhookSignature() utility — handles timing-safe
-    // comparison and the 5-minute timestamp tolerance.
-    if (!verifyWebhookSignature(rawBodyStr, signatureHeader, secret)) {
+    // Re-use the existing verify utility — handles timing-safe comparison and
+    // the 5-minute timestamp tolerance — trying each configured secret so an
+    // event from either the platform or connected-accounts endpoint verifies.
+    if (!verifyWebhookSignatureAny(rawBodyStr, signatureHeader, secrets)) {
       logger.warn('Stripe webhook signature verification failed');
       return res.status(401).json({ error: 'Invalid signature' });
     }

@@ -68,11 +68,11 @@ describe('P0-009 — Async job processing with SQS', () => {
     };
 
     const result = await processMessage(msg, handler, logger);
-    expect(result).toBe(true);
+    expect(result).toEqual({ success: true });
     expect(handled).toEqual(['value']);
   });
 
-  it('validation — processMessage returns false for type mismatch', async () => {
+  it('validation — processMessage returns {success: false, error} for type mismatch', async () => {
     const handler: WorkerHandler = {
       type: 'other.type',
       async handle() {},
@@ -89,14 +89,15 @@ describe('P0-009 — Async job processing with SQS', () => {
     };
 
     const result = await processMessage(msg, handler, logger);
-    expect(result).toBe(false);
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/type mismatch/i);
   });
 
-  it('validation — processMessage handles handler errors', async () => {
+  it('T4-F10 / Codex P2 — the DURABLE error is classification + fingerprint only, never the thrown message text', async () => {
     const handler: WorkerHandler = {
       type: 'test.job',
       async handle() {
-        throw new Error('handler error');
+        throw new Error('handler error with a +15551234567 phone number');
       },
     };
 
@@ -111,7 +112,60 @@ describe('P0-009 — Async job processing with SQS', () => {
     };
 
     const result = await processMessage(msg, handler, logger);
-    expect(result).toBe(false);
+    expect(result.success).toBe(false);
+    // Only the error class + a sha256 fingerprint — the message (which here
+    // carries PII) is never persisted to last_error / the DLQ.
+    expect(result.error).toBe(`Error [sha256:${result.error!.match(/[0-9a-f]{16}/)![0]}]`);
+    expect(result.error).not.toContain('handler error');
+    expect(result.error).not.toContain('+15551234567');
+  });
+
+  it('T4-F10 / Codex P2 — appends a short enum-like error code to the classification (e.g. ECONNRESET) but still no message', async () => {
+    const handler: WorkerHandler = {
+      type: 'test.job',
+      async handle() {
+        const err = new Error('connect ECONNRESET 10.0.0.1:5432') as Error & { code?: string };
+        err.code = 'ECONNRESET';
+        throw err;
+      },
+    };
+    const msg: QueueMessage = {
+      id: '1',
+      type: 'test.job',
+      payload: {},
+      attempts: 1,
+      maxAttempts: 3,
+      idempotencyKey: 'idem-1',
+      createdAt: new Date().toISOString(),
+    };
+
+    const result = await processMessage(msg, handler, logger);
+    expect(result.error).toMatch(/^Error:ECONNRESET \[sha256:[0-9a-f]{16}\]$/);
+    expect(result.error).not.toContain('10.0.0.1');
+  });
+
+  it('T4-F10 / Codex P2 — a huge (potentially sensitive) message is never persisted, verbatim or as an excerpt', async () => {
+    const longMessage = 'x'.repeat(500);
+    const handler: WorkerHandler = {
+      type: 'test.job',
+      async handle() {
+        throw new Error(longMessage);
+      },
+    };
+    const msg: QueueMessage = {
+      id: '1',
+      type: 'test.job',
+      payload: {},
+      attempts: 1,
+      maxAttempts: 3,
+      idempotencyKey: 'idem-1',
+      createdAt: new Date().toISOString(),
+    };
+
+    const result = await processMessage(msg, handler, logger);
+    // No excerpt at all — just the classification + fingerprint.
+    expect(result.error!).toMatch(/^Error \[sha256:[0-9a-f]{16}\]$/);
+    expect(result.error).not.toContain('xxxx');
   });
 
   it('happy path — idempotency key is set', async () => {
@@ -218,6 +272,34 @@ describe('P0-009 — Async job processing with SQS', () => {
       'boom',
     );
     expect((await queue.depth()).deadLetter).toBe(1);
+  });
+
+  describe('T4-F10 — recordFailure (InMemoryQueue parity)', () => {
+    it('stores the last error, retrievable via getLastError', async () => {
+      await queue.recordFailure('msg-a', 'boom');
+      expect(queue.getLastError('msg-a')).toBe('boom');
+    });
+
+    it('is cleared on delete()', async () => {
+      await queue.recordFailure('msg-b', 'boom');
+      await queue.delete('msg-b');
+      expect(queue.getLastError('msg-b')).toBeUndefined();
+    });
+
+    it('is cleared once the message moves to the DLQ', async () => {
+      const msg: QueueMessage = {
+        id: 'msg-c',
+        type: 'test.job',
+        payload: {},
+        attempts: 3,
+        maxAttempts: 3,
+        idempotencyKey: 'idem-c',
+        createdAt: new Date().toISOString(),
+      };
+      await queue.recordFailure('msg-c', 'boom');
+      await queue.moveToDeadLetter(msg, 'boom');
+      expect(queue.getLastError('msg-c')).toBeUndefined();
+    });
   });
 
   describe('WS15 — stalePendingCount (queue-staleness SLO feed)', () => {

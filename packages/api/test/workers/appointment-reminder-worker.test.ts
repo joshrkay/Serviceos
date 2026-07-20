@@ -95,6 +95,8 @@ describe('appointment-reminder-worker', () => {
       customerRepo,
       settingsRepo,
       invoiceRepo: new InMemoryInvoiceRepository(),
+      pool: null,
+      logger: createLogger({ service: 'test', environment: 'test', level: 'error' }),
     });
 
     const result = await runAppointmentReminderSweep({
@@ -186,6 +188,8 @@ describe('appointment-reminder-worker', () => {
       customerRepo,
       settingsRepo,
       invoiceRepo: new InMemoryInvoiceRepository(),
+      pool: null,
+      logger: createLogger({ service: 'test', environment: 'test', level: 'error' }),
     });
     const logger = createLogger({ service: 'test', environment: 'test', level: 'error' });
     const sweepDeps = {

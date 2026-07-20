@@ -16,6 +16,10 @@ import {
   InMemoryProposalRepository,
   CreateProposalInput,
 } from '../../src/proposals/proposal';
+import { InMemoryAppointmentRepository, createAppointment } from '../../src/appointments/appointment';
+import { FeasibilityDependencies } from '../../src/scheduling/feasibility-types';
+import { StubSkillMatcher } from '../../src/scheduling/skill-matcher';
+import { HaversineFallbackProvider } from '../../src/scheduling/travel-time/haversine-fallback';
 import { AuthenticatedRequest } from '../../src/auth/clerk';
 import type { Role } from '../../src/auth/rbac';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
@@ -43,6 +47,51 @@ function buildAppWithRole(role: Role): { app: Express; proposalRepo: InMemoryPro
   const proposalRepo = new InMemoryProposalRepository();
   app.use('/api/proposals', createProposalsRouter(proposalRepo));
   return { app, proposalRepo };
+}
+
+// T4-F05 / T4-F04 — shared fixture for POST /api/proposals/ tests: creation
+// must be denied to technician (proposals:view only) and allowed to
+// owner/dispatcher, mirroring the wiring test in
+// test/proposals/scheduling-create.test.ts. Full feasibilityDeps so a
+// permitted request reaches the 200 branch, not SCHEDULING_DEPS_UNCONFIGURED.
+async function buildSchedulingAppWithRole(role: Role) {
+  const proposalRepo = new InMemoryProposalRepository();
+  const appointmentRepo = new InMemoryAppointmentRepository();
+  const tenantId = TEST_TENANT_ID;
+  const appointment = await createAppointment(
+    {
+      tenantId,
+      jobId: 'job-1',
+      scheduledStart: new Date('2026-05-17T10:00:00Z'),
+      scheduledEnd: new Date('2026-05-17T11:00:00Z'),
+      timezone: 'UTC',
+      createdBy: TEST_USER_ID,
+    },
+    appointmentRepo,
+  );
+  const feasibilityDeps: FeasibilityDependencies = {
+    assignmentRepo: { findByTechnician: async () => [], findByAppointment: async () => [] } as any,
+    appointmentRepo,
+    jobRepo: { findById: async () => null } as any,
+    locationRepo: { findById: async () => null } as any,
+    workingHoursRepo: { findByTechnicianAndDay: async () => null } as any,
+    unavailableBlockRepo: { findByTechnicianAndDateRange: async () => [] } as any,
+    travelTimeProvider: new HaversineFallbackProvider(),
+    skillMatcher: new StubSkillMatcher(),
+  };
+  const app = express();
+  app.use(express.json());
+  app.use((req: Request, _res: Response, next: NextFunction) => {
+    (req as AuthenticatedRequest).auth = {
+      userId: TEST_USER_ID,
+      sessionId: 'session-create-perm',
+      tenantId,
+      role,
+    };
+    next();
+  });
+  app.use('/api/proposals', createProposalsRouter(proposalRepo, appointmentRepo, undefined, feasibilityDeps));
+  return { app, proposalRepo, appointmentRepo, appointment };
 }
 
 describe('GET /api/proposals', () => {
@@ -105,6 +154,142 @@ describe('GET /api/proposals', () => {
     // This test confirms the middleware chain is engaged (either 200 or 403
     // depending on role config — assert not 500).
     expect([200, 403]).toContain(res.status);
+  });
+});
+
+describe('POST /api/proposals/ — proposals:create permission gating', () => {
+  it('technician role → 200: the day-view reschedule flow must keep working (techs propose, owners approve)', async () => {
+    // Regression pin for the TechnicianDayView.saveAppointmentTimes flow:
+    // technicians lack appointments:update BY DESIGN and route edits through
+    // this human-approval-gated proposal path — the permission gate must not
+    // cut off the low-privilege action it exists to channel people into.
+    const { app, proposalRepo, appointment } = await buildSchedulingAppWithRole('technician' as Role);
+
+    const res = await request(app)
+      .post('/api/proposals')
+      .set('If-Match', appointment.updatedAt.toISOString())
+      .send({
+        proposalType: 'reschedule_appointment',
+        payload: {
+          appointmentId: appointment.id,
+          newScheduledStart: '2026-05-17T12:00:00Z',
+          newScheduledEnd: '2026-05-17T13:00:00Z',
+        },
+        summary: 'reschedule via test',
+      });
+
+    expect(res.status).toBe(200);
+    expect((await proposalRepo.findByStatus(TEST_TENANT_ID, 'draft')).length).toBe(1);
+  });
+
+  it('technician role → 403 on a non-reschedule type (reassign): the create grant is reschedule-scoped for techs', async () => {
+    const { app, proposalRepo, appointment } = await buildSchedulingAppWithRole('technician' as Role);
+
+    const res = await request(app)
+      .post('/api/proposals')
+      .set('If-Match', appointment.updatedAt.toISOString())
+      .send({
+        proposalType: 'reassign_appointment',
+        payload: {
+          appointmentId: appointment.id,
+          toTechnicianId: '11111111-1111-1111-1111-111111111111',
+        },
+        summary: 'reassign via test',
+      });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('FORBIDDEN');
+    expect((await proposalRepo.findByStatus(TEST_TENANT_ID, 'draft')).length).toBe(0);
+  });
+
+  it('dispatcher role → 200 with created proposal', async () => {
+    const { app, appointment } = await buildSchedulingAppWithRole('dispatcher' as Role);
+
+    const res = await request(app)
+      .post('/api/proposals')
+      .set('If-Match', appointment.updatedAt.toISOString())
+      .send({
+        proposalType: 'reassign_appointment',
+        payload: {
+          appointmentId: appointment.id,
+          toTechnicianId: '11111111-1111-1111-1111-111111111111',
+        },
+        summary: 'reassign via test',
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.id).toBeDefined();
+  });
+
+  it('owner role → 200 with created proposal', async () => {
+    const { app, appointment } = await buildSchedulingAppWithRole('owner' as Role);
+
+    const res = await request(app)
+      .post('/api/proposals')
+      .set('If-Match', appointment.updatedAt.toISOString())
+      .send({
+        proposalType: 'reassign_appointment',
+        payload: {
+          appointmentId: appointment.id,
+          toTechnicianId: '11111111-1111-1111-1111-111111111111',
+        },
+        summary: 'reassign via test',
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.id).toBeDefined();
+  });
+});
+
+describe('POST /api/proposals/ — payload Zod validation (T4-F04)', () => {
+  it('reassign_appointment missing required toTechnicianId → 400 VALIDATION_ERROR, proposal not created', async () => {
+    const { app, proposalRepo, appointment } = await buildSchedulingAppWithRole('dispatcher' as Role);
+
+    const res = await request(app)
+      .post('/api/proposals')
+      .set('If-Match', appointment.updatedAt.toISOString())
+      .send({
+        proposalType: 'reassign_appointment',
+        payload: { appointmentId: appointment.id }, // toTechnicianId omitted
+        summary: 'reassign via test',
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+    expect(JSON.stringify(res.body)).toMatch(/toTechnicianId/);
+    expect((await proposalRepo.findByStatus(TEST_TENANT_ID, 'draft')).length).toBe(0);
+  });
+
+  it('well-formed reschedule_appointment payload still succeeds (regression)', async () => {
+    const { app, appointment } = await buildSchedulingAppWithRole('dispatcher' as Role);
+
+    const res = await request(app)
+      .post('/api/proposals')
+      .set('If-Match', appointment.updatedAt.toISOString())
+      .send({
+        proposalType: 'reschedule_appointment',
+        payload: {
+          appointmentId: appointment.id,
+          newScheduledStart: '2026-05-17T12:00:00Z',
+          newScheduledEnd: '2026-05-17T13:00:00Z',
+        },
+        summary: 'reschedule via test',
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.id).toBeDefined();
+  });
+
+  it('unsupported proposalType still 400s UNSUPPORTED_PROPOSAL_TYPE before schema validation runs', async () => {
+    const { app, appointment } = await buildSchedulingAppWithRole('dispatcher' as Role);
+
+    const res = await request(app)
+      .post('/api/proposals')
+      .set('If-Match', appointment.updatedAt.toISOString())
+      .send({ proposalType: 'draft_estimate', payload: {} });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('UNSUPPORTED_PROPOSAL_TYPE');
   });
 });
 

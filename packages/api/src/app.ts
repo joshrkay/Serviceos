@@ -836,9 +836,15 @@ export function createApp(): AppWithLifecycle {
   // In dev mode, use a much higher limit to allow QA testing
   const isDev = process.env.NODE_ENV === 'dev' || process.env.NODE_ENV === 'development';
   const redisUrl = process.env.REDIS_URL;
+  // T4-F02: this per-IP limiter is a DoS guard, not the fairness control — a
+  // shared-NAT office can exhaust a low per-IP cap with normal multi-user
+  // traffic. The per-tenant limiter below (API_TENANT_RATE_LIMIT_MAX,
+  // :4372-4384) is the actual fairness/abuse control. Env-configurable so the
+  // ceiling can be tightened without a code change if abuse patterns emerge.
+  const ipRateMax = Math.max(1, Number(process.env.API_IP_RATE_LIMIT_MAX) || 2000);
   app.use('/api', rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
-    max: isDev ? 10000 : 100, // per IP — relaxed in dev for QA testing
+    max: isDev ? 10000 : ipRateMax, // per IP — relaxed in dev for QA testing
     standardHeaders: true,
     legacyHeaders: false,
     skip: () => isDev && process.env.DEV_AUTH_BYPASS === 'true',
@@ -846,9 +852,46 @@ export function createApp(): AppWithLifecycle {
     // replicas = N× the limit). undefined ⇒ default per-process MemoryStore.
     store: createRateLimitStore(redisUrl, 'api:'),
   }));
+  // T4-F02: the six signature-verified provider webhook prefixes need
+  // materially higher throughput than unknown/junk /webhooks/* paths — this
+  // limiter must stay in sync with the raw-body parsers above (:760-790); a
+  // seventh provider added there without a matching prefix here just falls
+  // back to the general /webhooks limit below (fails safe, not open).
+  // Mounted BEFORE the general /webhooks limiter so legitimate provider
+  // bursts aren't 429'd ahead of signature verification (webhook router,
+  // mounted later) at realistic callback volume.
+  const webhookProviderPrefixes = [
+    '/webhooks/stripe',
+    '/webhooks/clerk',
+    '/webhooks/vapi',
+    '/webhooks/twilio',
+    '/webhooks/wisetack',
+    '/webhooks/sendgrid',
+  ];
+  // Segment-boundary match on the SAME string Express used for mount
+  // matching (req.baseUrl + req.path — no query string, same non-
+  // normalization of dot-segments), so "skipped by the general limiter"
+  // and "covered by the provider limiter above" can never diverge:
+  // '/webhooks/stripefake' is neither, '/webhooks/stripe/../x' is both.
+  const isProviderWebhookPath = (url: string) =>
+    webhookProviderPrefixes.some(
+      (prefix) => url === prefix || url.startsWith(`${prefix}/`),
+    );
+  const webhookProviderRateMax = Math.max(1, Number(process.env.WEBHOOK_PROVIDER_RATE_LIMIT_MAX) || 600);
+  app.use(webhookProviderPrefixes, rateLimit({
+    windowMs: 60 * 1000,      // 1 minute
+    max: webhookProviderRateMax,
+    store: createRateLimitStore(redisUrl, 'webhooks-provider:'),
+  }));
   app.use('/webhooks', rateLimit({
     windowMs: 60 * 1000,      // 1 minute
     max: 30,
+    // Only governs unknown/junk /webhooks/* paths — the six provider
+    // prefixes are already rate-limited (at higher throughput) above.
+    // NB: req.path is relative to this middleware's '/webhooks' mount point
+    // (e.g. '/stripe'); baseUrl + path reconstructs the full mount-matched
+    // path without the query string.
+    skip: (req) => isProviderWebhookPath(req.baseUrl + req.path),
     store: createRateLimitStore(redisUrl, 'webhooks:'),
   }));
   // Public invoice/estimate pages are unauthenticated but token-gated.
@@ -1905,6 +1948,10 @@ export function createApp(): AppWithLifecycle {
   const dispatchAnalyticsRepo = pool
     ? new PgDispatchAnalyticsRepository(pool)
     : new InMemoryDispatchAnalyticsRepository();
+  const transactionalCommsLogger = createLogger({
+    service: 'transactional-comms',
+    environment: process.env.NODE_ENV || 'development',
+  });
   const transactionalComms = messageDelivery
     ? new TransactionalCommsService({
         delivery: messageDelivery,
@@ -1914,6 +1961,9 @@ export function createApp(): AppWithLifecycle {
         settingsRepo,
         invoiceRepo,
         dispatchRepo,
+        // T4-F01 — claim-before-send pool for sendCustomerMessage's gate.
+        pool: pool ?? null,
+        logger: transactionalCommsLogger,
       })
     : undefined;
   if (transactionalComms) {
@@ -2015,6 +2065,9 @@ export function createApp(): AppWithLifecycle {
     // RV-086 — send_estimate_nudge: re-send via the unified SendService
     // path; message_dispatches backs the 48h cooldown.
     ...(sendService ? { sendService } : {}),
+    // T4-F01 — claim-before-send pool for send_estimate_nudge's
+    // dispatchEstimateNudge call (see estimates/estimate-nudge.ts).
+    pool: pool ?? null,
     dispatchRepo,
     // UB-A2 — create_standing_instruction inserts via the UB-A1 repo
     // (in-memory fallback when no pool, same as the routes above).
@@ -2667,16 +2720,25 @@ export function createApp(): AppWithLifecycle {
         await queue.delete(message.id);
         return;
       }
-      const processed = await processMessage(message, handler, workerLogger);
-      if (processed) {
+      const result = await processMessage(message, handler, workerLogger);
+      if (result.success) {
         await queue.delete(message.id);
-      } else if (message.attempts >= message.maxAttempts) {
-        await queue.moveToDeadLetter(message, 'max attempts exceeded');
-        workerLogger.error('Message moved to DLQ', {
-          messageId: message.id,
-          type: message.type,
-          attempts: message.attempts,
-        });
+      } else {
+        // T4-F10 — persist the real failure reason on every failed attempt
+        // (not only the final one), so an operator inspecting a still-retrying
+        // message can see why without digging through logs.
+        await queue.recordFailure(message.id, result.error ?? 'unknown error');
+        if (message.attempts >= message.maxAttempts) {
+          // Fallback string should not normally trigger — processMessage
+          // always populates `error` on a failure — but guards moveToDeadLetter
+          // against ever receiving undefined.
+          await queue.moveToDeadLetter(message, result.error ?? 'max attempts exceeded');
+          workerLogger.error('Message moved to DLQ', {
+            messageId: message.id,
+            type: message.type,
+            attempts: message.attempts,
+          });
+        }
       }
     } catch (err) {
       workerLogger.error('Queue message processing failed', {
@@ -2822,6 +2884,9 @@ export function createApp(): AppWithLifecycle {
             customerMessageDeps: {
               delivery: messageDelivery,
               dispatchRepo,
+              // T4-F01 — claim-before-send pool for the apology SMS.
+              pool: pool ?? null,
+              logger: transactionalCommsLogger,
             },
           }
         : {}),
@@ -4199,6 +4264,14 @@ export function createApp(): AppWithLifecycle {
             // for non-hangup terminations.
             finalizeOnClose: (session, reason, sideEffects) =>
               twilioAdapter.finalizeTerminatedSession(session, sideEffects, reason),
+            // Codex P2 (PR #702) — T2-F05 silence-timer parity with the
+            // Gather/WS-finals pending-approval (RV-071) / SMS-consent
+            // (WS18) handling: a silent caller mid-dialogue gets
+            // keep-pending / fail-closed semantics instead of being
+            // reprompted and (on a second silence) escalated+end-sessioned
+            // with the dialogue stranded.
+            handlePendingDialogueSilence: (session, tenantId) =>
+              twilioAdapter.handlePendingDialogueSilence(session, tenantId),
             // WS upgrades don't carry AccountSid; fall back to the master
             // token. Per-tenant subaccount auth for media streams is a
             // future-phase change (auth at first `start` message).
@@ -6024,6 +6097,7 @@ export function createApp(): AppWithLifecycle {
           estimateRepo,
           sendService,
           auditRepo,
+          pool: pool ?? null,
           listTenantIds: async () => {
             if (!pool) return [];
             const r = await pool.query('SELECT id FROM tenants');

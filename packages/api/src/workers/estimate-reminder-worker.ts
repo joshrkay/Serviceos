@@ -17,6 +17,7 @@
  * The sweep cadence is owned by app.ts (a setInterval driver). Tests
  * exercise this function directly with in-memory repos and a fixed clock.
  */
+import type { Pool } from 'pg';
 import { Logger } from '../logging/logger';
 import { EstimateRepository } from '../estimates/estimate';
 import { AuditRepository } from '../audit/audit';
@@ -28,6 +29,13 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 export interface EstimateReminderWorkerDeps {
   estimateRepo: EstimateRepository;
   sendService: SendService;
+  /**
+   * T4-F01 claim ledger pool, threaded into dispatchEstimateNudge's
+   * claim-before-send gate. Null in dev/test without a DB (the claim
+   * wrapper no-ops and the send proceeds directly, same posture as
+   * thank-you-sms-worker.ts).
+   */
+  pool: Pool | null;
   /** Returns the list of tenant IDs to sweep. */
   listTenantIds: () => Promise<string[]>;
   logger: Logger;
@@ -112,6 +120,7 @@ export async function runEstimateReminderSweep(
           {
             estimateRepo: deps.estimateRepo,
             sendService: deps.sendService,
+            pool: deps.pool,
             ...(deps.auditRepo ? { auditRepo: deps.auditRepo } : {}),
           },
           {

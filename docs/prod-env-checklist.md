@@ -13,7 +13,8 @@
 | `CLERK_WEBHOOK_SECRET` | Always prod/staging | `validateProductionConfig`; writes `public_metadata.tenant_id` + `role` for JWT template |
 | `AI_PROVIDER_API_KEY` | Always prod/staging | `validateProductionConfig` |
 | `CORS_ORIGIN` | Always prod/staging | Explicit origin, not wildcard |
-| `STRIPE_SECRET_KEY` or `STRIPE_API_KEY` | Always prod/staging | `createPaymentLinkProvider` forbids mock |
+| `STRIPE_SECRET_KEY` or `STRIPE_API_KEY` | Always prod/staging | `createPaymentLinkProvider` forbids mock (`payments/payment-link-provider.ts`; pinned by `test/payments/payment-link-provider.test.ts`) |
+| `STRIPE_WEBHOOK_SECRET` | Always prod/staging (SEC-43) | `validateProductionConfig` (`shared/config.ts`); pinned by `test/shared/config.test.ts` "SEC-43". Without it the Stripe webhook handler 400s/503s on the first real event — **the customer is charged but the invoice never settles**. Fail-fast at boot instead. **Accepts a comma-separated list** (one secret per Stripe endpoint — platform + connected accounts). Go-live gate: `docs/runbooks/stripe-go-live.md` |
 | `RLS_RUNTIME_ROLE=true` | Always prod/staging (SEC-01; no opt-out) | `validateFeatureRequiredConfig`; boot probe `verifyRlsRuntimeRole` also fails fast if `rls_app_runtime` (migration 217) is unprovisioned. See `docs/runbooks/rls-runtime-role-rollout.md` |
 | `TWILIO_ACCOUNT_SID` | Unless `TELEPHONY_ENABLED=false` and `EMAIL_ENABLED=false` | `validateFeatureRequiredConfig` |
 | `TWILIO_AUTH_TOKEN` | Same | Feature gate |
@@ -30,7 +31,8 @@
 | Variable | Behavior if missing |
 |----------|---------------------|
 | JWT template `serviceos` (Clerk dashboard) | Web `getToken({ template: 'serviceos' })` returns null → auth abort / login loop. See `docs/runbooks/clerk-setup.md` |
-| `STRIPE_WEBHOOK_SECRET` | Stripe webhooks return 500 |
+| Stripe webhook **destinations** (Dashboard) | Not an env var — a Dashboard step, and the #1 silent money-loop failure. Connect direct charges live on the connected account, so you need **two** event destinations (platform + connected accounts), configured separately in Test and Live, both hitting `POST /webhooks/stripe`. Missing the connected-accounts destination ⇒ customer pays, money lands in the tenant's Stripe balance, but the Rivet invoice never flips to `paid`. See `docs/ops/stripe-connect-webhooks.md` and the go-live gate `docs/runbooks/stripe-go-live.md` |
+| Per-tenant Stripe **Connect onboarding** | Not an env var — per-tenant state. A tenant whose Connect account is not `charges_enabled` has its customers' charges fall back to the **platform** account with no automatic payout to the tenant. Verified via `GET /api/billing/connect`. See `docs/runbooks/stripe-go-live.md` |
 | `METRICS_TOKEN` | `/metrics` returns 503 in prod/staging |
 | `TRANSCRIPT_ENCRYPTION_KEY` | Falls back to `TENANT_ENCRYPTION_KEY`; if neither set, raw transcripts not retained |
 | `TENANT_ENCRYPTION_KEY` | Fallback for transcript encryption |
@@ -146,6 +148,7 @@ For full Playwright journeys (see `docs/launch/ci-gating.md`):
 3. Trigger deliberate test error → event appears in Sentry (`SENTRY_DSN`).
 4. `npm run qa:doctor` with matrix secrets → all probes `[OK]`.
 5. Stripe test webhook → 200 (not 500 missing secret).
+6. **Money-loop go-live:** run the full gate in `docs/runbooks/stripe-go-live.md` before onboarding the first paying tenant — env vars, both webhook destinations (Test + Live), per-tenant Connect onboarding, and an end-to-end paid-invoice smoke.
 
 ## Durable webhook wiring
 

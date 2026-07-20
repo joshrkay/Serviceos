@@ -17,7 +17,7 @@ Customer charges may be **Connect direct charges** (`Stripe-Account`). Those obj
    ```
 3. Create **two** destinations (or equivalent scope), both hitting the same URL if desired:
    - **Your account** — SaaS subscriptions, platform fallback charges, `account.updated` from the platform perspective as applicable.
-   - **Connected accounts** — payment intents, checkout sessions, setup intents, refunds, disputes on Express accounts.
+   - **Connected accounts** — payment intents, checkout sessions, setup intents, refunds, disputes, and each tenant's `account.updated` (onboarding completion → `charges_enabled`, delivered with a top-level `account: acct_…`) on Express accounts.
 4. Enable at least:
    - `payment_intent.processing`
    - `payment_intent.succeeded`
@@ -32,7 +32,11 @@ Customer charges may be **Connect direct charges** (`Stripe-Account`). Those obj
    - `customer.subscription.created`
    - `customer.subscription.updated`
    - `customer.subscription.deleted`
-5. Copy the signing secret into `STRIPE_WEBHOOK_SECRET` (per environment).
+5. Copy **both destinations' signing secrets** into `STRIPE_WEBHOOK_SECRET` as a
+   **comma-separated list** (`whsec_platform,whsec_connected`), per environment.
+   Stripe issues a distinct secret per endpoint and the handler verifies each
+   request against every secret in the list; setting only one would 401 the
+   other endpoint's events. (A single value still works for a single endpoint.)
 6. Smoke: pay a Connect-routed test invoice → Dashboard shows the PI on the connected account → Rivet invoice flips to `paid`.
 
 ## Notes

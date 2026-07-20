@@ -75,12 +75,28 @@ export class TransactionalCommsService implements SchedulingConfirmationNotifier
     );
   }
 
-  async notifyRescheduled(tenantId: string, appointmentId: string): Promise<void> {
+  /**
+   * Codex P1 #1 follow-up — an appointment can legitimately be rescheduled
+   * more than once over its lifetime (same `appointmentId` each time), so an
+   * `appointmentId`-only claim key would tombstone this notice after the
+   * FIRST reschedule and silently suppress it on every later one.
+   * `occurrenceToken` makes the claim key per-occurrence. Callers must pass a
+   * token unique to each reschedule ACTION — the reschedule handler passes the
+   * approving `proposal.id`. The destination `scheduledStart` is NOT safe: an
+   * appointment moved to slot B, then elsewhere, then back to B would reuse the
+   * same `appt-reschedule:{id}:B` claim and drop the final notification as a
+   * duplicate (Codex P2, PR #705).
+   */
+  async notifyRescheduled(
+    tenantId: string,
+    appointmentId: string,
+    occurrenceToken: string,
+  ): Promise<void> {
     await this.sendAppointmentNotice(
       tenantId,
       appointmentId,
       'appointment_reschedule',
-      `appt-reschedule:${appointmentId}`,
+      `appt-reschedule:${appointmentId}:${occurrenceToken}`,
       renderAppointmentRescheduleSms,
     );
   }
@@ -141,10 +157,19 @@ export class TransactionalCommsService implements SchedulingConfirmationNotifier
     );
   }
 
+  /**
+   * Codex P1 #1 — `paymentId` makes the claim key per-OCCURRENCE
+   * (`payment-receipt:{invoiceId}:{paymentId}`), not per-invoice. An
+   * invoice-scoped-only key would permanently tombstone this entity/prefix
+   * pair after the FIRST payment, silently suppressing the receipt for a
+   * second (or third) partial payment on the same invoice — a legitimate,
+   * recurring send, not a duplicate.
+   */
   async notifyPaymentReceived(
     tenantId: string,
     invoiceId: string,
     amountCents: number,
+    paymentId: string,
   ): Promise<void> {
     const invoice = await this.deps.invoiceRepo.findById(tenantId, invoiceId);
     if (!invoice) return;
@@ -178,11 +203,28 @@ export class TransactionalCommsService implements SchedulingConfirmationNotifier
       smsBody: sms.body,
       emailSubject: tn('email.payment_receipt.subject', language, { business: businessName }),
       emailText: sms.body,
-      idempotencyKeyPrefix: `payment-receipt:${invoiceId}`,
+      idempotencyKeyPrefix: `payment-receipt:${invoiceId}:${paymentId}`,
     });
   }
 
-  async notifyInvoiceOverdue(tenantId: string, invoiceId: string): Promise<void> {
+  /**
+   * Codex P1 #1 — `occurrenceToken` makes the claim key per dunning-cadence
+   * step (`invoice-overdue:{invoiceId}:{occurrenceToken}`), not per-invoice.
+   * An invoice-scoped-only key would permanently tombstone this entity/prefix
+   * pair after the FIRST reminder, silently suppressing every later step of
+   * the collections cadence (send-payment-reminder-handler.ts legitimately
+   * permits a next reminder after a 72h cooldown) — a series of deliberately
+   * repeatable sends, not duplicates. Callers should pass a token that is
+   * stable for a given occurrence and distinct across occurrences — e.g. the
+   * dunning ledger's `stepKey` (`'<offsetDays>:<channel>'`, see
+   * invoices/dunning-config.ts's `reminderStepKey`) for a cadence step, or
+   * `'manual'` for an owner-initiated one-off reminder.
+   */
+  async notifyInvoiceOverdue(
+    tenantId: string,
+    invoiceId: string,
+    occurrenceToken: string,
+  ): Promise<void> {
     const invoice = await this.deps.invoiceRepo.findById(tenantId, invoiceId);
     if (!invoice) return;
 
@@ -216,7 +258,7 @@ export class TransactionalCommsService implements SchedulingConfirmationNotifier
       smsBody: sms.body,
       emailSubject: tn('email.invoice_overdue.subject', language, { business: businessName }),
       emailText: sms.body,
-      idempotencyKeyPrefix: `invoice-overdue:${invoiceId}`,
+      idempotencyKeyPrefix: `invoice-overdue:${invoiceId}:${occurrenceToken}`,
     });
   }
 

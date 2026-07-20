@@ -36,6 +36,31 @@ function sanitizePayloadSnapshot(input: unknown): unknown {
   return out;
 }
 
+/**
+ * Build the durable error record persisted to `_queue_messages.last_error`
+ * and the DLQ. Stores ONLY a non-sensitive classification — the error's
+ * constructor name plus a short enum-like `code` when present — and a sha256
+ * fingerprint of the full message+stack. It NEVER persists the message text:
+ * a handler exception can embed a provider response body, an auth token, or
+ * customer PII (e.g. a Twilio error echoing the destination phone number), and
+ * even a 160-char excerpt would leak the leading bytes of that verbatim
+ * (Codex P2, PR #705). The full error is still written to the real-time worker
+ * log sink for live debugging; the fingerprint lets operators correlate
+ * recurring failures and cross-reference that log.
+ */
+function classifyErrorForSink(error: Error, rawText: string): string {
+  const name = error.name.slice(0, 60);
+  const code = (error as { code?: unknown }).code;
+  // Append a code ONLY when it is short and enum-like (Node syscall codes like
+  // ECONNRESET, Postgres SQLSTATE, provider numeric codes) — never a free-form
+  // value that could itself carry sensitive text.
+  const codeSuffix =
+    (typeof code === 'string' || typeof code === 'number') && /^[\w.-]{1,40}$/.test(String(code))
+      ? `:${code}`
+      : '';
+  return `${name}${codeSuffix} [sha256:${hashString(rawText)}]`;
+}
+
 export function toEnvelopeMeta(message: QueueMessage<unknown>): Record<string, unknown> {
   const payload = (message.payload ?? {}) as Record<string, unknown>;
   const tenantId = typeof payload.tenantId === 'string' ? payload.tenantId : undefined;
@@ -114,6 +139,12 @@ export interface Queue {
    */
   receiveBatch<T>(max: number): Promise<QueueMessage<T>[]>;
   delete(messageId: string): Promise<void>;
+  /**
+   * T4-F10 — persist the real handler failure reason on a still-retrying
+   * message (before it exhausts attempts and moves to the DLQ), so operators
+   * can see WHY a message keeps retrying without digging through logs.
+   */
+  recordFailure(messageId: string, error: string): Promise<void>;
   moveToDeadLetter(message: QueueMessage, error: string): Promise<void>;
   listDeadLetter(): Promise<DeadLetterEntry[]>;
   /**
@@ -163,6 +194,10 @@ export class InMemoryQueue implements Queue {
   private dlq: DeadLetterEntry[] = [];
   private config: QueueConfig;
   private receiving = false;
+  // T4-F10 — mirrors PgQueue's _queue_messages.last_error column for test
+  // parity. Keyed by message id; survives past receive()/delete() only for
+  // as long as the message row itself would (deleted on delete()).
+  private lastErrors = new Map<string, string>();
 
   constructor(config?: Partial<QueueConfig>) {
     this.config = {
@@ -232,8 +267,19 @@ export class InMemoryQueue implements Queue {
     }
   }
 
-  async delete(_messageId: string): Promise<void> {
+  async delete(messageId: string): Promise<void> {
     // Message already removed on receive in-memory
+    this.lastErrors.delete(messageId);
+  }
+
+  /** T4-F10 — see the Queue interface doc. */
+  async recordFailure(messageId: string, error: string): Promise<void> {
+    this.lastErrors.set(messageId, error);
+  }
+
+  /** Test-only introspection, mirrors size()/dlqSize() below. */
+  getLastError(messageId: string): string | undefined {
+    return this.lastErrors.get(messageId);
   }
 
   async moveToDeadLetter(message: QueueMessage, error: string): Promise<void> {
@@ -254,6 +300,7 @@ export class InMemoryQueue implements Queue {
       failedAt: new Date().toISOString(),
       diagnostics: (diagnostics as Record<string, unknown>) ?? {},
     });
+    this.lastErrors.delete(message.id);
   }
 
   async listDeadLetter(): Promise<DeadLetterEntry[]> {
@@ -288,11 +335,18 @@ export interface WorkerHandler<T = unknown> {
   handle(message: QueueMessage<T>, logger: Logger): Promise<void>;
 }
 
+/** T4-F10 — processMessage's outcome, carrying the real failure reason. */
+export interface ProcessMessageResult {
+  success: boolean;
+  /** Redacted (bounded-truncated) failure reason. Present iff !success. */
+  error?: string;
+}
+
 export async function processMessage<T>(
   message: QueueMessage<T>,
   handler: WorkerHandler<T>,
   logger: Logger
-): Promise<boolean> {
+): Promise<ProcessMessageResult> {
   const envelopeMeta = toEnvelopeMeta(message as QueueMessage<unknown>);
   const boundedDebugMode = parseBoundedDebugMode();
   const log = logger.child({
@@ -302,7 +356,10 @@ export async function processMessage<T>(
 
   if (message.type !== handler.type) {
     log.warn('Message type mismatch', { expected: handler.type, actual: message.type });
-    return false;
+    return {
+      success: false,
+      error: `Message type mismatch: expected '${handler.type}', got '${message.type}'`,
+    };
   }
 
   try {
@@ -311,7 +368,7 @@ export async function processMessage<T>(
     });
     await handler.handle(message, log);
     log.info('Message processed successfully');
-    return true;
+    return { success: true };
   } catch (err) {
     const error = err instanceof Error ? err : new Error(String(err));
     log.error('Message processing failed', {
@@ -323,6 +380,16 @@ export async function processMessage<T>(
     if (message.attempts >= message.maxAttempts) {
       log.error('Message exceeded max attempts, sending to DLQ');
     }
-    return false;
+
+    // T4-F10 — the DURABLE record (last_error / DLQ) carries only a
+    // non-sensitive classification + a fingerprint of the full message+stack;
+    // the readable error is in the worker log sink above. The fingerprint is
+    // computed over message + a few stack frames (skip the stack's own leading
+    // "Error: <message>" line, which duplicates error.message) so the same
+    // failure at the same site correlates across occurrences.
+    const stackFrames = error.stack ? error.stack.split('\n').slice(1, 4) : [];
+    const rawError = [error.message, ...stackFrames].join('\n');
+    const redactedError = classifyErrorForSink(error, rawError);
+    return { success: false, error: redactedError };
   }
 }

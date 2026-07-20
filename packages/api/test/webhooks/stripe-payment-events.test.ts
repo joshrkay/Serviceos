@@ -59,10 +59,24 @@ function makeOpenInvoice(totalCents = 10000): Invoice {
   };
 }
 
-function piSucceeded(opts: { piId: string; amount: number; methodType?: string }) {
+function piSucceeded(opts: {
+  piId: string;
+  amount: number;
+  methodType?: string;
+  /**
+   * Top-level `account` on the event envelope, as Stripe delivers it from a
+   * "Connected accounts" webhook destination for a Connect direct charge. The
+   * settlement path keys off data.object.metadata, so this must be inert to
+   * routing — that origin-agnosticism is exactly what the Connect-scoped tests
+   * below assert.
+   */
+  account?: string;
+  eventId?: string;
+}) {
   return {
-    id: `evt_${uuidv4()}`,
+    id: opts.eventId ?? `evt_${uuidv4()}`,
     type: 'payment_intent.succeeded',
+    ...(opts.account ? { account: opts.account } : {}),
     data: {
       object: {
         id: opts.piId,
@@ -188,6 +202,79 @@ describe('payment_intent.succeeded — async (ACH/bank) settlement', () => {
     expect(res.status).toBe(200);
     expect(res.body.skipped).toBe(true);
     expect(await paymentRepo.findByInvoice(TENANT, INVOICE_ID)).toHaveLength(0);
+  });
+});
+
+// U6 — Connect direct charges settle through the SAME webhook ledger.
+//
+// The primary customer path is an Elements PaymentIntent on the tenant's
+// connected account (a Stripe "direct charge"). Stripe delivers the resulting
+// `payment_intent.succeeded` from the *connected-accounts* destination, so the
+// event envelope carries a top-level `account: acct_…`. The settlement branch
+// in routes.ts routes purely off `data.object.metadata` (tenant_id/invoice_id)
+// and never reads `event.account` for payment settlement, so a connected-origin
+// event must settle the invoice identically to a platform one. These tests pin
+// that origin-agnosticism — the premise of "Connect direct charges settle
+// through the existing ledger" (prd-stripe-trades-payments §acceptance, plan U6).
+describe('payment_intent.succeeded — Connect direct charge (connected-account delivery)', () => {
+  const CONNECTED_ACCOUNT = 'acct_connect_w1_2';
+  let invoiceRepo: InMemoryInvoiceRepository;
+  let paymentRepo: InMemoryPaymentRepository;
+  let auditRepo: InMemoryAuditRepository;
+  let app: express.Express;
+
+  beforeEach(async () => {
+    invoiceRepo = new InMemoryInvoiceRepository();
+    paymentRepo = new InMemoryPaymentRepository();
+    auditRepo = new InMemoryAuditRepository();
+    await invoiceRepo.create(makeOpenInvoice());
+    app = buildApp({
+      invoiceRepo,
+      paymentRepo,
+      auditRepo,
+      stripeWebhookSecret: STRIPE_SECRET,
+    });
+  });
+
+  it('settles an open invoice from a connected-account card charge (event.account present)', async () => {
+    const res = await postSigned(
+      app,
+      piSucceeded({ piId: 'pi_connect_card_1', amount: 10000, methodType: 'card', account: CONNECTED_ACCOUNT }),
+    );
+    expect(res.status).toBe(200);
+
+    const inv = await invoiceRepo.findById(TENANT, INVOICE_ID);
+    expect(inv?.status).toBe('paid');
+    expect(inv?.amountDueCents).toBe(0);
+
+    const payments = await paymentRepo.findByInvoice(TENANT, INVOICE_ID);
+    expect(payments).toHaveLength(1);
+    // Card-on-Connect settles as a card payment, not ACH — proves the method
+    // mapping still reads data.object, unaffected by the connected origin.
+    expect(payments[0].method).toBe('credit_card');
+    expect(payments[0].providerReference).toBe('pi_connect_card_1');
+  });
+
+  it('is idempotent on a re-delivered connected-account event id', async () => {
+    const event = piSucceeded({
+      piId: 'pi_connect_idem',
+      amount: 10000,
+      methodType: 'card',
+      account: CONNECTED_ACCOUNT,
+      eventId: 'evt_connect_idem',
+    });
+
+    const first = await postSigned(app, event);
+    expect(first.status).toBe(200);
+
+    const second = await postSigned(app, event);
+    expect(second.status).toBe(200);
+    expect(second.body.duplicate).toBe(true);
+
+    const inv = await invoiceRepo.findById(TENANT, INVOICE_ID);
+    expect(inv?.status).toBe('paid');
+    expect(inv?.amountPaidCents).toBe(10000);
+    expect(await paymentRepo.findByInvoice(TENANT, INVOICE_ID)).toHaveLength(1);
   });
 });
 

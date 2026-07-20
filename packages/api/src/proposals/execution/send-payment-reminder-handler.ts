@@ -79,9 +79,18 @@ export class SendPaymentReminderExecutionHandler implements ExecutionHandler {
     // stepKey and their ledger row was written by the sweep at raise time, so
     // they are neither gated nor re-recorded here. No ledger wired → legacy.
     const isManual = stepKey === MANUAL_REMINDER_PAYLOAD_STEP_KEY;
+    // Per-occurrence claim token for notifyInvoiceOverdue's send-claim key.
+    // Manual reminders MUST use the per-proposal key ('manual:<proposalId>'),
+    // never the bare 'manual' payload discriminator: 'manual' is invoice-
+    // scoped, so the send-claim ledger would tombstone `invoice-overdue:
+    // {invoiceId}:manual` after the first send and silently suppress every
+    // later manual reminder (each a distinct approved proposal, legitimately
+    // allowed after the 72h cooldown) while still reporting success. Cadence
+    // steps already carry a per-step '<offsetDays>:<channel>' key.
+    const occurrenceToken = isManual ? manualReminderStepKey(proposal.id) : stepKey;
     if (this.dunningEventRepo && isManual) {
       const asOf = this.now();
-      const ownStepKey = manualReminderStepKey(proposal.id);
+      const ownStepKey = occurrenceToken;
       const cooldownFloor = asOf.getTime() - PAYMENT_REMINDER_COOLDOWN_MS;
 
       const priorReminders = (
@@ -134,7 +143,17 @@ export class SendPaymentReminderExecutionHandler implements ExecutionHandler {
     }
 
     try {
-      await this.transactionalComms.notifyInvoiceOverdue(context.tenantId, invoiceId);
+      // occurrenceToken ('<offsetDays>:<channel>' for a cadence step, or
+      // 'manual:<proposalId>' for a manual send — never the bare 'manual'
+      // discriminator, see above) is the per-occurrence claim token: each
+      // dunning step and each manual proposal is a legitimately distinct send,
+      // so the send-claim ledger must not tombstone the invoice after the
+      // first reminder.
+      await this.transactionalComms.notifyInvoiceOverdue(
+        context.tenantId,
+        invoiceId,
+        occurrenceToken,
+      );
     } catch (err) {
       return {
         success: false,
