@@ -435,6 +435,10 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // to any environment yet) to widen the status CHECK with a third state,
   // 'sending', closing the post-send crash window; hash regenerated.
   ['258_send_claims', '60e4d9f4b7fb85c5f3feecb518d1cc2df16cb72d2c8b4b6e9ace1fb0f4b981b5'],
+  // U3 (iOS blueprint) — E-lane answer back-channel: nullable answer_status
+  // (CHECK-guarded routed-outcome enum) + answer JSONB on voice_recordings.
+  // New migration, additive no-op for existing rows.
+  ['259_voice_recordings_answer', '11e20969ea0f4802487fd9ecadd779cce909e9251d18b61b8b0611665228e0d7'],
 ];
 
 function hashMigration(value: string): string {

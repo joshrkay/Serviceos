@@ -81,6 +81,13 @@ import {
   COMPLAINT_HIGH_SEVERITY_REASON,
 } from '../ai/tasks/complaint-task';
 import { NegotiationGuardrailTaskHandler } from '../ai/tasks/negotiation-task';
+import type { VoiceAnswerStatus, VoiceLookupAnswer } from '@ai-service-os/shared';
+import type { VoiceRepository } from '../voice/voice-service';
+import {
+  executeLookupAnswer,
+  OWNER_GRADE_LOOKUP_INTENTS,
+  type VoiceLookupAnswerDeps,
+} from './voice-lookup-answer';
 
 // Re-export for callers that import these from this module (e.g. router tests).
 export { complaintSeverity, COMPLAINT_HIGH_SEVERITY_REASON };
@@ -389,6 +396,24 @@ export interface VoiceActionRouterDeps {
    * Optional; absent → drafts with no dedup check (pre-B8 behavior).
    */
   customerRepo?: CustomerRepository;
+  /**
+   * U3 (E-lane answers) — routed-outcome back-channel for the recorded-memo
+   * path. When wired, the worker stamps `voice_recordings.answer_status`
+   * (pending → answered | proposal | clarification | skipped | failed) at
+   * the end of each recording-scoped message so the mobile client's bounded
+   * second poll phase can render the outcome. `findById` also resolves the
+   * memo creator (`created_by`) for the owner-grade lookup authorization
+   * gate — the enqueue payload's userId can be 'system' on this path.
+   * Optional: absent → no stamping (pre-U3 behavior; tests unaffected).
+   */
+  voiceRepo?: Pick<VoiceRepository, 'findById' | 'recordAnswer'>;
+  /**
+   * U3 — lookup-skill execution deps for E-lane answers (per-skill adapter
+   * in workers/voice-lookup-answer.ts). Absent → lookup intents keep the
+   * read-only skip on every surface. Requires `voiceRepo` to be useful:
+   * an executed answer with nowhere to persist would be dropped.
+   */
+  lookupAnswers?: VoiceLookupAnswerDeps;
 }
 
 // P11-001: lookup_* intents are READ-ONLY and never produce a
@@ -1117,9 +1142,19 @@ type SegmentOutcome =
   // was emitted in its place (single path) or should be (chain path; see
   // processChain). `classification` is returned so the caller can decide.
   | { kind: 'clarified'; classification: IntentClassification }
-  // A real intent with no proposal mapping (lookup_* etc.) — nothing to
-  // do for this worker.
-  | { kind: 'skipped'; classification: IntentClassification };
+  // A real intent with no proposal mapping and no answer surface — nothing
+  // to do for this worker.
+  | { kind: 'skipped'; classification: IntentClassification }
+  // U3 — a lookup intent executed on the recorded-memo path. `answered`
+  // carries the structured answer; `failed` means the skill errored and
+  // the client may offer retry. Persistence happens in handle() so the
+  // stamp sits next to the other outcome stamps.
+  | {
+      kind: 'answered';
+      classification: IntentClassification;
+      answerStatus: Extract<VoiceAnswerStatus, 'answered' | 'failed'>;
+      answer?: VoiceLookupAnswer;
+    };
 
 /**
  * Classify a single (sub-)utterance and build its proposal WITHOUT
@@ -1220,20 +1255,145 @@ async function processSegment(
     return { kind: 'clarified', classification };
   }
 
-  // P11-001 / RV-010 — lookup_* intents are READ-ONLY and never produce a
-  // proposal. The voice adapters (twilio-adapter / text-mode-driver)
-  // dispatch them to the lookup-skill family (lookup-day-overview and
-  // siblings in src/ai/skills) and speak the returned summary; this worker
-  // processes recorded memos with no voice back-channel, so its only
-  // correct move is to skip. Previously this fell out of the
-  // INTENT_TO_PROPOSAL_TYPE map by omission (a warn log); the explicit
-  // guard makes the read-only invariant loud, exactly like the RV-071
-  // approval-intent gate below.
+  // P11-001 / RV-010 / U3 — lookup_* intents are READ-ONLY and never
+  // produce a proposal. The voice adapters (twilio-adapter /
+  // text-mode-driver) dispatch them to the lookup-skill family and speak
+  // the returned summary. U3 gives the RECORDED-MEMO path its own answer
+  // surface: the single-action path (applyDedup, recordingId present)
+  // executes the skill via the per-skill adapter and hands the answer to
+  // handle() for persistence on the recording row. Every other surface —
+  // synthetic messages with no recordingId (eval harness / in-app text),
+  // chain segments (one recording, many proposals — no single answer
+  // slot), or deployments without the U3 deps — keeps the skip, exactly
+  // like the RV-071 approval-intent gate below.
   if (isLookupIntent(classification.intentType)) {
-    log.info('voice-action-router: read-only lookup intent — no proposal to draft', {
+    const lookupDeps = deps.lookupAnswers;
+    if (!params.applyDedup || !recordingId || !lookupDeps || !deps.voiceRepo) {
+      log.info('voice-action-router: read-only lookup intent — no answer surface on this path', {
+        intent: classification.intentType,
+      });
+      return { kind: 'skipped', classification };
+    }
+
+    // Customer-scoped skills need a concrete customerId the memo payload
+    // doesn't carry — resolve the classifier's spoken references through
+    // the entity resolver first. Ambiguity mints the SAME
+    // voice_clarification the drafting path uses (never a silent guess);
+    // not-found falls through and the adapter answers "nothing found".
+    const lookupAnnotation = await annotateResolvedEntities(
+      deps.entityResolver,
+      {
+        tenantId,
+        entities: classification.extractedEntities,
+        ...(customerId ? { verifiedCustomerId: customerId } : {}),
+        ...(jobId ? { verifiedJobId: jobId } : {}),
+      },
+      log,
+    );
+    if (lookupAnnotation.kind === 'ambiguous') {
+      await emitClarification(
+        deps,
+        {
+          tenantId,
+          userId,
+          transcript: segmentText,
+          classification,
+          conversationId,
+          recordingId,
+          entityAmbiguity: {
+            entityKind: lookupAnnotation.entityKind,
+            reference: lookupAnnotation.reference,
+            candidates: lookupAnnotation.candidates,
+            ...(lookupAnnotation.additionalAmbiguities
+              ? { additionalAmbiguities: lookupAnnotation.additionalAmbiguities }
+              : {}),
+          },
+          ...(params.applyDedup && recordingId
+            ? { idempotencyKey: voiceProposalIdempotencyKey(recordingId) }
+            : {}),
+        },
+        log,
+      );
+      return { kind: 'clarified', classification };
+    }
+
+    // Tenant timezone for spoken/rendered dates (best-effort, like the
+    // scheduling resolution on the drafting path below).
+    const lookupScheduling = deps.tenantSchedulingResolver
+      ? await deps.tenantSchedulingResolver(tenantId).catch(() => undefined)
+      : undefined;
+
+    // The memo creator (voice_recordings.created_by) is the authoritative
+    // identity for the owner-grade authorization gate — the enqueue
+    // payload's userId can be 'system' on this path. Resolved only for
+    // owner-grade intents; a read failure falls through to the adapter's
+    // fail-closed refusal.
+    let memoCreatorId: string | undefined;
+    if (OWNER_GRADE_LOOKUP_INTENTS.has(classification.intentType)) {
+      try {
+        const recording = await deps.voiceRepo.findById(tenantId, recordingId);
+        memoCreatorId = recording?.createdBy;
+      } catch (err) {
+        log.warn('voice-action-router: memo creator lookup failed — owner-grade ask will refuse', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    const execution = await executeLookupAnswer(
+      {
+        tenantId,
+        recordingId,
+        intent: classification.intentType,
+        ...(memoCreatorId ? { memoCreatorId } : {}),
+        ...(customerId ?? lookupAnnotation.resolved.customerId
+          ? { customerId: customerId ?? lookupAnnotation.resolved.customerId }
+          : {}),
+        ...(jobId ?? lookupAnnotation.resolved.jobId
+          ? { jobId: jobId ?? lookupAnnotation.resolved.jobId }
+          : {}),
+        ...(classification.extractedEntities?.customerName
+          ? { customerReference: classification.extractedEntities.customerName }
+          : {}),
+        ...(classification.extractedEntities?.jobReference
+          ? { jobReference: classification.extractedEntities.jobReference }
+          : {}),
+        ...(lookupScheduling?.timezone ? { timezone: lookupScheduling.timezone } : {}),
+        now: deps.now ? deps.now() : new Date(),
+      },
+      lookupDeps,
+      {
+        jobRepo: deps.jobRepo,
+        appointmentRepo: deps.appointmentRepo,
+        customerRepo: deps.customerRepo,
+        proposalRepo: deps.proposalRepo,
+        availabilityFinder: deps.availabilityFinder,
+      },
+    );
+
+    if (execution.kind === 'unsupported') {
+      log.info('voice-action-router: lookup intent without an answer adapter — skipped', {
+        intent: classification.intentType,
+      });
+      return { kind: 'skipped', classification };
+    }
+    if (execution.kind === 'failed') {
+      log.warn('voice-action-router: lookup answer execution failed', {
+        intent: classification.intentType,
+        error: execution.error,
+      });
+      return { kind: 'answered', classification, answerStatus: 'failed' };
+    }
+    log.info('voice-action-router: lookup answered on the memo path', {
       intent: classification.intentType,
+      result: execution.answer.result,
     });
-    return { kind: 'skipped', classification };
+    return {
+      kind: 'answered',
+      classification,
+      answerStatus: 'answered',
+      answer: execution.answer,
+    };
   }
 
   // RV-071 / RV-225 — HARD routing gate: the owner approval AND edit
@@ -1804,12 +1964,37 @@ export function createVoiceActionRouterWorker(
       const log = logger.child({ tenantId, recordingId, transcriptLen: transcript.length });
       log.info('voice-action-router: classifying transcript');
 
+      // U3 — persist the routed outcome on the recording so the client's
+      // bounded second poll phase (after `status='completed'`) can render
+      // it. Best-effort AND write-once (the repo's pending-guard makes a
+      // redelivered stamp a no-op): an outcome-stamp failure must never
+      // fail an already-processed message.
+      const stampAnswer = async (
+        answerStatus: VoiceAnswerStatus,
+        answer?: VoiceLookupAnswer,
+      ): Promise<void> => {
+        if (!recordingId || !deps.voiceRepo?.recordAnswer) return;
+        try {
+          await deps.voiceRepo.recordAnswer(tenantId, recordingId, {
+            answerStatus,
+            ...(answer ? { answer } : {}),
+          });
+        } catch (err) {
+          log.warn('voice-action-router: recording answer stamp failed', {
+            recordingId,
+            answerStatus,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      };
+
       // Empty/whitespace transcripts carry no intent and nothing for
       // the operator to clarify — skip silently. Upstream voice
       // recording validation already rejects <500ms audio and
       // surfaces that to the UI.
       if (!transcript || transcript.trim().length === 0) {
         log.info('voice-action-router: empty transcript, skipping');
+        await stampAnswer('skipped');
         return;
       }
 
@@ -1827,6 +2012,10 @@ export function createVoiceActionRouterWorker(
           recordingId,
           existingProposalId: alreadyProcessedId,
         });
+        // The prior delivery produced a proposal (that's the only way this
+        // guard matches). Re-stamp in case it crashed between persist and
+        // stamp — the write-once guard makes this a no-op otherwise.
+        await stampAnswer('proposal');
         return;
       }
 
@@ -1966,6 +2155,10 @@ export function createVoiceActionRouterWorker(
             recordVoiceError({ errorKind: 'action_router_failed', channel: 'worker', tenantId });
             throw err;
           }
+          // U3 — chain members land in the review queue; the client routes
+          // 'proposal' and 'clarification' identically (to approvals), so
+          // one stamp covers a chain regardless of its member mix.
+          await stampAnswer('proposal');
           return;
         }
       }
@@ -2024,6 +2217,10 @@ export function createVoiceActionRouterWorker(
           classifierConfidence: outcome.classification.confidence,
           proposalConfidence: outcome.proposal.confidenceScore,
         });
+
+        // U3 — stamp before the (potentially slow) unsupervised SMS routing
+        // below so the polling client sees the outcome promptly.
+        await stampAnswer('proposal');
 
         // P12-004 — unsupervised routing. The proposal just queued with no
         // supervisor on the wall: apply the tenant-configured routing
@@ -2176,6 +2373,44 @@ export function createVoiceActionRouterWorker(
             });
           }
         }
+      } else if (outcome.kind === 'clarified') {
+        // U3 — clarification minted (unknown intent, non-opted extended
+        // intent, or an ambiguous entity reference): the client routes to
+        // approvals, same as a proposal.
+        await stampAnswer('clarification');
+      } else if (outcome.kind === 'answered') {
+        // U3 — E-lane answer (or a failed lookup execution): persist it on
+        // the recording and audit the system write, mirroring the
+        // best-effort lane-evaluation audit above (never blocks the message).
+        await stampAnswer(outcome.answerStatus, outcome.answer);
+        if (deps.auditRepo && recordingId) {
+          try {
+            await deps.auditRepo.create(
+              createAuditEvent({
+                tenantId,
+                actorId: userId,
+                actorRole: 'system',
+                eventType: 'voice_lookup_answered',
+                entityType: 'voice_recording',
+                entityId: recordingId,
+                metadata: {
+                  intent: outcome.classification.intentType,
+                  answerStatus: outcome.answerStatus,
+                  ...(outcome.answer ? { result: outcome.answer.result } : {}),
+                },
+              }),
+            );
+          } catch (err) {
+            log.warn('voice-action-router: lookup answer audit failed', {
+              recordingId,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
+      } else {
+        // U3 — nothing actionable on this message (unsupported intent /
+        // no answer surface): release the client's second poll promptly.
+        await stampAnswer('skipped');
       }
     },
     {

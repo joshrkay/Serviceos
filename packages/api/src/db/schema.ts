@@ -6282,6 +6282,29 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_send_claims ON send_claims
       USING (tenant_id = current_setting('app.current_tenant_id', true)::UUID);
   `,
+
+  // U3 (iOS blueprint) — E-lane answer back-channel on voice_recordings.
+  // The transcription worker flips status='completed' BEFORE the
+  // voice-action-router job enqueues and both mobile + web polls exit on
+  // 'completed', so the routed outcome needs its OWN state machine:
+  //   answer_status: pending → answered | proposal | clarification |
+  //                  skipped | failed
+  //   answer:        the structured lookup answer (shared Zod contract
+  //                  voiceLookupAnswerSchema — validated before write),
+  //                  present only for answer_status='answered'.
+  // Both NULLABLE with no DEFAULT: additive no-op for every existing row
+  // (legacy + telephony rows read NULL = "no routed-outcome lifecycle"),
+  // so the web VoiceBar's poll response stays additive. Tenant scoping /
+  // RLS ride the existing voice_recordings policy (migration 007). The
+  // CHECK guards shape only and admits NULL, mirroring 255.
+  '259_voice_recordings_answer': `
+    ALTER TABLE voice_recordings
+      ADD COLUMN IF NOT EXISTS answer_status TEXT
+        CHECK (answer_status IS NULL
+               OR answer_status IN ('pending','answered','proposal','clarification','skipped','failed'));
+    ALTER TABLE voice_recordings
+      ADD COLUMN IF NOT EXISTS answer JSONB;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

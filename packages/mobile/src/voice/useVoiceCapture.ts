@@ -8,7 +8,11 @@ import * as FileSystem from 'expo-file-system';
 import { useCallback, useRef, useState } from 'react';
 import { useApiClient } from '../lib/useApiClient';
 import { makeIdempotencyKey, uploadFile } from './nativeVoiceDeps';
-import { uploadAndTranscribe, type AudioClip } from './uploadAndTranscribe';
+import {
+  uploadAndTranscribe,
+  type AudioClip,
+  type VoiceRoutedOutcome,
+} from './uploadAndTranscribe';
 import { MIC_PERMISSION_COPY } from '../lib/errorCopy';
 
 export type VoicePhase = 'idle' | 'listening' | 'transcribing' | 'transcript' | 'error';
@@ -16,6 +20,8 @@ export type VoicePhase = 'idle' | 'listening' | 'transcribing' | 'transcript' | 
 export interface UseVoiceCaptureResult {
   phase: VoicePhase;
   transcript: string;
+  /** U3 — routed outcome from the bounded second poll; null until landed. */
+  outcome: VoiceRoutedOutcome | null;
   error: string | null;
   /** Begin recording (press-in on the mic). */
   startRecording: () => Promise<void>;
@@ -40,6 +46,7 @@ export function useVoiceCapture(jobId?: string): UseVoiceCaptureResult {
   const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
   const [phase, setPhase] = useState<VoicePhase>('idle');
   const [transcript, setTranscript] = useState('');
+  const [outcome, setOutcome] = useState<VoiceRoutedOutcome | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const recStateRef = useRef<'idle' | 'starting' | 'recording'>('idle');
@@ -55,14 +62,15 @@ export function useVoiceCapture(jobId?: string): UseVoiceCaptureResult {
         if (!sizeBytes) throw new Error('No audio captured. Please retry.');
 
         const clip: AudioClip = { fileUri: uri, contentType: 'audio/mp4', sizeBytes };
-        const text = await uploadAndTranscribe(
+        const result = await uploadAndTranscribe(
           clip,
           { api, uploadFile, makeIdempotencyKey },
           jobId,
         );
-        if (!text) throw new Error('No transcript was returned. Please retry.');
+        if (!result.transcript) throw new Error('No transcript was returned. Please retry.');
 
-        setTranscript(text);
+        setTranscript(result.transcript);
+        setOutcome(result.outcome);
         setPhase('transcript');
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Transcription failed.');
@@ -88,6 +96,7 @@ export function useVoiceCapture(jobId?: string): UseVoiceCaptureResult {
     stopRequestedRef.current = false;
     setError(null);
     setTranscript('');
+    setOutcome(null);
     try {
       const permission = await AudioModule.requestRecordingPermissionsAsync();
       if (!permission.granted) {
@@ -148,8 +157,9 @@ export function useVoiceCapture(jobId?: string): UseVoiceCaptureResult {
     }
     setPhase('idle');
     setTranscript('');
+    setOutcome(null);
     setError(null);
   }, [recorder]);
 
-  return { phase, transcript, error, startRecording, stopAndTranscribe, reset };
+  return { phase, transcript, outcome, error, startRecording, stopAndTranscribe, reset };
 }
