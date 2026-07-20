@@ -1,61 +1,181 @@
-# Live AI restore (operator voice)
+# Live AI restore — Railway configuration fixes
 
-**Status:** RCA confirmed 2026-07-20  
-**Related:** `docs/verification-runs/operator-voice-50-live-2026-07-20.md`,  
-`docs/plans/2026-07-20-002-fix-live-ai-provider-operator-voice-plan.md`,  
-`docs/runbooks/openrouter-ai-provider.md`
+**Status:** RCA confirmed 2026-07-20 · config playbook  
+**Code PR:** [#714](https://github.com/joshrkay/Serviceos/pull/714) (`AI_DEFAULT_MODEL` tenant fallthrough + completion probe)  
+**Related:** `docs/runbooks/openrouter-ai-provider.md`, `docs/prod-env-checklist.md`
 
-## Confirmed root cause
+This runbook is the **configuration** fix only. Apply these Railway variables
+even if #714 is not merged yet — wrong models on OpenAI fail with or without
+the code fix; after #714, `AI_DEFAULT_MODEL=gpt-4o-mini` is enough for OpenAI.
 
-On `serviceosapi-development.up.railway.app`:
+---
 
-| Signal | Value |
-|--------|--------|
-| `/api/health/ai` | `api.openai.com`, breaker `closed` (looks healthy) |
-| Prometheus | `gateway_requests_total{provider="api.openai.com",model="claude-haiku-4-5-20251001",outcome="error"}` and same for `claude-sonnet-4-6` — **zero successes** |
-| Causal | One authenticated `POST /api/assistant/chat` increments those Claude→OpenAI error counters and returns `fallbackStage: "error-envelope"` |
+## Current live state (measured)
 
-**Why:** Two stacked bugs:
+| Service (Railway / hostname) | `/health` `environment` | `/api/health/ai` | Completions |
+|------------------------------|-------------------------|------------------|-------------|
+| `@serviceos/api` **Development** → `serviceosapi-development.up.railway.app` | `development` | `api.openai.com` closed | **Fail** — Claude model ids → OpenAI |
+| `@serviceos/api` **production** → `serviceosapi-production.up.railway.app` | `development` | `providers: []` | **Dead** — no `AI_PROVIDER_API_KEY` |
+| Web `serviceosweb-*` | n/a | n/a | Confirm `VITE_API_URL` → go-live API |
 
-1. **Provider/model mismatch** — host is OpenAI; routed model ids were Claude defaults from `DEFAULT_AI_ROUTING_CONFIG` (main).
-2. **`AI_DEFAULT_MODEL` ignored for real tenants** — factory wired `AI_DEFAULT_MODEL` only under `tenantOverrides[system]`. Tenant traffic never saw `gpt-4o-mini` (the Zod default). Fixed in PR #714: system override falls through to any tenant without its own override.
+Prometheus proof (dev): only  
+`gateway_requests_total{provider="api.openai.com",model="claude-*",outcome="error"}`  
+(zero successes).
 
-On `serviceosapi-production.up.railway.app`: `/api/health/ai` → `providers: []` (no `AI_PROVIDER_API_KEY` / hermetic mock). Both hosts report `environment: "development"`.
+---
 
-## Host inventory (ops)
+## Profile A — Stay on OpenAI (immediate fix)
 
-| Host | Role | AI key | health/ai | Notes |
-|------|------|--------|-----------|--------|
-| `serviceosapi-development` | canary / probe host | present (OpenAI) | openai, closed | Completions failed until model/default-model fix + align env |
-| `serviceosapi-production` | intended go-live | absent (`providers: []`) | empty | Needs key + models; HMAC auth off (`CLERK_DEV_HMAC_TOKENS` not enabled) |
-| `serviceosweb-*` | SPA | n/a | n/a | Confirm `VITE_API_URL` points at the go-live API |
+Use this **now** on both API environments. Matches today’s OpenAI key.
 
-## Immediate fix (stay on OpenAI)
+### Variables to SET
 
-On the API service that has the OpenAI key:
+| Variable | Value | Dev | Prod |
+|----------|-------|:---:|:----:|
+| `AI_PROVIDER_BASE_URL` | `https://api.openai.com/v1` | ✓ | ✓ |
+| `AI_PROVIDER_API_KEY` | working `sk-…` OpenAI key | already set | **must set** (copy from Dev or new key) |
+| `AI_DEFAULT_MODEL` | `gpt-4o-mini` | ✓ | ✓ |
+| `AI_LIGHTWEIGHT_MODEL` | `gpt-4o-mini` | ✓ | ✓ |
+| `AI_STANDARD_MODEL` | `gpt-4o-mini` | ✓ | ✓ |
+| `AI_COMPLEX_MODEL` | `gpt-4o` | ✓ | ✓ |
+
+Setting **all three** tier vars is deliberate: it overrides any Claude/Llama
+code defaults and avoids partial-tier traps.
+
+### Variables to UNSET (or delete) if present
+
+| Variable | Why |
+|----------|-----|
+| `AI_LIGHTWEIGHT_MODEL=claude-*` | Forces Claude onto OpenAI |
+| `AI_STANDARD_MODEL=claude-*` | same |
+| `AI_COMPLEX_MODEL=claude-*` | same |
+| `AI_*=meta-llama/*` or `qwen/*` while base URL is OpenAI | same class of mismatch |
+| OpenRouter-only leftovers while on OpenAI | confusion / wrong host |
+
+### Railway click-path
+
+1. Railway → project **serviceos** → service **`@serviceos/api`**
+2. Environment **Development** → Variables → set table above → **Redeploy**
+3. Environment **production** → Variables → set table above (incl. key) → **Redeploy**
+4. Do **not** flip `NODE_ENV=production` until smoke is green (see below)
+
+### Verify (Development first)
 
 ```bash
-AI_PROVIDER_BASE_URL=https://api.openai.com/v1
-AI_PROVIDER_API_KEY=sk-...   # working OpenAI key
-AI_DEFAULT_MODEL=gpt-4o-mini
-# Optional explicit tiers (overrides DEFAULT_AI_ROUTING_CONFIG):
-# AI_LIGHTWEIGHT_MODEL=gpt-4o-mini
-# AI_STANDARD_MODEL=gpt-4o-mini
-# AI_COMPLEX_MODEL=gpt-4o
+# Breaker list (not sufficient alone)
+curl -sS https://serviceosapi-development.up.railway.app/api/health/ai
+
+# Completion probe (dev: open if METRICS_TOKEN unset; prod: Bearer METRICS_TOKEN)
+curl -sS https://serviceosapi-development.up.railway.app/api/health/ai/completion
+
+# Metrics must show gpt-* success, not only claude-* errors
+curl -sS https://serviceosapi-development.up.railway.app/metrics \
+  | rg 'gateway_requests_total'
 ```
 
-Redeploy/restart. Then:
+Authenticated assistant chat must **not** return `fallbackStage: "error-envelope"`.
 
-1. `GET /api/health/ai` → openai present  
-2. `GET /api/health/ai/completion` (Bearer `METRICS_TOKEN` in prod) → `completionProbe.ok: true`  
-3. Authenticated assistant chat → **not** `error-envelope`
+Local static check (no network):
 
-## Preferred go-live (Option A — OpenRouter)
+```bash
+cd packages/api
+AI_PROVIDER_BASE_URL=https://api.openai.com/v1 \
+AI_PROVIDER_API_KEY=sk-dummy \
+AI_DEFAULT_MODEL=gpt-4o-mini \
+AI_LIGHTWEIGHT_MODEL=gpt-4o-mini \
+AI_STANDARD_MODEL=gpt-4o-mini \
+AI_COMPLEX_MODEL=gpt-4o \
+npm run check:ai-provider-config
+```
 
-See `docs/runbooks/openrouter-ai-provider.md`. Set base URL + `sk-or-…` + Llama/Qwen tier models.
+---
 
-## After AI is green
+## Profile B — OpenRouter Option A (preferred next)
 
-1. Set `NODE_ENV=production` on the go-live API (boot will require AI key).  
-2. Re-run top-50 operator probe.  
-3. Merge/deploy PR #714 handler gates (`send_estimate`, etc.).
+After OpenAI smoke is green (or instead of A if you have `sk-or-…` ready).
+
+| Variable | Value |
+|----------|-------|
+| `AI_PROVIDER_BASE_URL` | `https://openrouter.ai/api/v1` |
+| `AI_PROVIDER_API_KEY` | `sk-or-…` |
+| `AI_LIGHTWEIGHT_MODEL` | `meta-llama/llama-3.1-8b-instruct` |
+| `AI_STANDARD_MODEL` | `meta-llama/llama-3.3-70b-instruct` |
+| `AI_COMPLEX_MODEL` | `qwen/qwen2.5-vl-72b-instruct` |
+| `AI_DEFAULT_MODEL` | unset **or** same as standard (optional) |
+
+Full notes: `docs/runbooks/openrouter-ai-provider.md`.
+
+**Unset** OpenAI-only model names (`gpt-4o*`) when switching, or leave
+`AI_DEFAULT_MODEL` unset so per-tier OpenRouter ids win.
+
+---
+
+## Production hardening (after AI smoke green)
+
+Apply on the **go-live** API environment only (usually **production**):
+
+| Variable | Value | Notes |
+|----------|-------|-------|
+| `NODE_ENV` | `production` | Enables `validateProductionConfig` — missing AI key fails boot |
+| `CLERK_DEV_HMAC_TOKENS` | unset or `false` | Forbidden when `NODE_ENV=production` |
+| `METRICS_TOKEN` | long random secret | Gates `/metrics` and `/api/health/ai/completion` |
+| Clerk keys | `pk_live_` / `sk_live_` | Or `ALLOW_CLERK_TEST_KEYS=true` only for staging |
+
+Confirm:
+
+```bash
+curl -sS https://serviceosapi-production.up.railway.app/health
+# → "environment":"production"
+curl -sS https://serviceosapi-production.up.railway.app/api/health/ai
+# → non-empty providers
+```
+
+---
+
+## Web configuration
+
+On **web** Railway services (`@serviceos/web` / `serviceosweb-*`):
+
+| Variable | Value |
+|----------|-------|
+| `VITE_API_URL` | Go-live API origin, e.g. `https://serviceosapi-production.up.railway.app` (no trailing slash) |
+| `VITE_CLERK_PUBLISHABLE_KEY` | Same Clerk instance as API |
+
+Wrong `VITE_API_URL` → UI looks fine, AI hits the dead host.
+
+---
+
+## Worker / voice services (if split)
+
+If `PROCESS_ROLE=worker` or `voice` services exist, they share the same AI
+gateway for background jobs. Set the **same** AI_* block on those services
+(or rely on shared Railway variable groups). Missing key there → silent hermetic
+mock on workers only.
+
+---
+
+## Ordered rollout checklist
+
+- [ ] **Dev API** — Profile A (or B) variables set; redeployed
+- [ ] Dev `/api/health/ai` shows correct host (`api.openai.com` or `openrouter.ai`)
+- [ ] Dev `/api/health/ai/completion` → `completionProbe.ok: true`
+- [ ] Dev assistant chat → not `error-envelope`; proposal or real reply
+- [ ] Dev metrics show `outcome="success"` for intended model ids
+- [ ] **Prod API** — same AI_* block + key present; redeployed
+- [ ] Prod health/ai non-empty; completion probe ok
+- [ ] Web `VITE_API_URL` → prod API
+- [ ] Merge/deploy [#714](https://github.com/joshrkay/Serviceos/pull/714) if not already on the running image
+- [ ] `NODE_ENV=production` on go-live API
+- [ ] Re-run top-50 operator probe (`docs/verification-runs/…`)
+
+---
+
+## What not to trust
+
+| Signal | Meaning |
+|--------|---------|
+| `/api/health/ai` breaker `closed` | Gateway exists; **not** proof completions work |
+| `/health` `status: ok` | Process up; AI may still be mock/broken |
+| Railway “OpenAI configured” | Base URL/key only — model ids may still be Claude |
+
+Use `/api/health/ai/completion` or a real assistant turn.

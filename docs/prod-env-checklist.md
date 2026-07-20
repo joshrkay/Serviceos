@@ -11,9 +11,10 @@
 | `CLERK_SECRET_KEY` | Always prod/staging | `validateProductionConfig`; live keys (`sk_live_`) required when `NODE_ENV=production` unless `ALLOW_CLERK_TEST_KEYS=true` |
 | `CLERK_PUBLISHABLE_KEY` | Always prod/staging | `validateProductionConfig`; must match web `VITE_CLERK_PUBLISHABLE_KEY` instance; `pk_live_` in prod |
 | `CLERK_WEBHOOK_SECRET` | Always prod/staging | `validateProductionConfig`; writes `public_metadata.tenant_id` + `role` for JWT template |
-| `AI_PROVIDER_API_KEY` | Always prod/staging | `validateProductionConfig`. Recommended: OpenRouter `sk-or-...` — see `docs/runbooks/openrouter-ai-provider.md` |
-| `AI_PROVIDER_BASE_URL` | Recommended always | OpenRouter: `https://openrouter.ai/api/v1` |
-| `AI_LIGHTWEIGHT_MODEL` / `AI_STANDARD_MODEL` / `AI_COMPLEX_MODEL` | Recommended always | OpenRouter defaults: `meta-llama/llama-3.1-8b-instruct` / `meta-llama/llama-3.3-70b-instruct` / `qwen/qwen2.5-vl-72b-instruct` |
+| `AI_PROVIDER_API_KEY` | Always prod/staging | `validateProductionConfig`. Empty ⇒ hermetic mock / `providers: []`. Profiles: `docs/runbooks/live-ai-restore.md` |
+| `AI_PROVIDER_BASE_URL` | Recommended always | Must match model ids. Profile B: `https://openrouter.ai/api/v1`. Profile A: `https://api.openai.com/v1` |
+| `AI_LIGHTWEIGHT_MODEL` / `AI_STANDARD_MODEL` / `AI_COMPLEX_MODEL` | Recommended always | Profile B: `meta-llama/llama-3.1-8b-instruct` / `meta-llama/llama-3.3-70b-instruct` / `qwen/qwen2.5-vl-72b-instruct`. Profile A (OpenAI): `gpt-4o-mini` / `gpt-4o-mini` / `gpt-4o` — never Claude/Llama on OpenAI |
+| `AI_DEFAULT_MODEL` | Optional | OpenAI Profile A fallback (`gpt-4o-mini`). Ignored when all three tier vars are set. After PR #714 applies to all tenants via system override |
 | `CORS_ORIGIN` | Always prod/staging | Explicit origin, not wildcard |
 | `STRIPE_SECRET_KEY` or `STRIPE_API_KEY` | Always prod/staging | `createPaymentLinkProvider` forbids mock (`payments/payment-link-provider.ts`; pinned by `test/payments/payment-link-provider.test.ts`) |
 | `STRIPE_WEBHOOK_SECRET` | Always prod/staging (SEC-43) | `validateProductionConfig` (`shared/config.ts`); pinned by `test/shared/config.test.ts` "SEC-43". Without it the Stripe webhook handler 400s/503s on the first real event — **the customer is charged but the invoice never settles**. Fail-fast at boot instead. **Accepts a comma-separated list** (one secret per Stripe endpoint — platform + connected accounts). Go-live gate: `docs/runbooks/stripe-go-live.md` |
@@ -35,7 +36,7 @@
 | JWT template `serviceos` (Clerk dashboard) | Web `getToken({ template: 'serviceos' })` returns null → auth abort / login loop. See `docs/runbooks/clerk-setup.md` |
 | Stripe webhook **destinations** (Dashboard) | Not an env var — a Dashboard step, and the #1 silent money-loop failure. Connect direct charges live on the connected account, so you need **two** event destinations (platform + connected accounts), configured separately in Test and Live, both hitting `POST /webhooks/stripe`. Missing the connected-accounts destination ⇒ customer pays, money lands in the tenant's Stripe balance, but the Rivet invoice never flips to `paid`. See `docs/ops/stripe-connect-webhooks.md` and the go-live gate `docs/runbooks/stripe-go-live.md` |
 | Per-tenant Stripe **Connect onboarding** | Not an env var — per-tenant state. A tenant whose Connect account is not `charges_enabled` has its customers' charges fall back to the **platform** account with no automatic payout to the tenant. Verified via `GET /api/billing/connect`. See `docs/runbooks/stripe-go-live.md` |
-| `METRICS_TOKEN` | `/metrics` returns 503 in prod/staging |
+| `METRICS_TOKEN` | `/metrics` and `GET /api/health/ai/completion` return 503 in prod/staging without Bearer token |
 | `TRANSCRIPT_ENCRYPTION_KEY` | Falls back to `TENANT_ENCRYPTION_KEY`; if neither set, raw transcripts not retained |
 | `TENANT_ENCRYPTION_KEY` | Fallback for transcript encryption |
 
@@ -147,10 +148,11 @@ For full Playwright journeys (see `docs/launch/ci-gating.md`):
 
 1. Deploy prod with all boot-fail vars set → service starts without crash.
 2. `GET /health` → 200; `GET /ready` → 200 when DB reachable.
-3. Trigger deliberate test error → event appears in Sentry (`SENTRY_DSN`).
-4. `npm run qa:doctor` with matrix secrets → all probes `[OK]`.
-5. Stripe test webhook → 200 (not 500 missing secret).
-6. **Money-loop go-live:** run the full gate in `docs/runbooks/stripe-go-live.md` before onboarding the first paying tenant — env vars, both webhook destinations (Test + Live), per-tenant Connect onboarding, and an end-to-end paid-invoice smoke.
+3. AI config: `cd packages/api && npm run check:ai-provider-config` against exported Railway vars; live `GET /api/health/ai/completion` → `completionProbe.ok: true` (see `docs/runbooks/live-ai-restore.md`).
+4. Trigger deliberate test error → event appears in Sentry (`SENTRY_DSN`).
+5. `npm run qa:doctor` with matrix secrets → all probes `[OK]`.
+6. Stripe test webhook → 200 (not 500 missing secret).
+7. **Money-loop go-live:** run the full gate in `docs/runbooks/stripe-go-live.md` before onboarding the first paying tenant — env vars, both webhook destinations (Test + Live), per-tenant Connect onboarding, and an end-to-end paid-invoice smoke.
 
 ## Durable webhook wiring
 

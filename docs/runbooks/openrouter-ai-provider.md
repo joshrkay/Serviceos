@@ -64,19 +64,29 @@ rates diverge (never guess in code).
    (`docs/verification-runs/operator-voice-50-live-2026-07-20.md` pattern).
 4. Then merge/deploy PR #714 handler gates.
 
-## Rollback
+## Rollback (Profile A — OpenAI)
 
-Point back at OpenAI (or any other OpenAI-compatible host):
+Full Railway variable table: `docs/runbooks/live-ai-restore.md`.
 
 ```bash
 AI_PROVIDER_BASE_URL=https://api.openai.com/v1
 AI_PROVIDER_API_KEY=sk-...
 AI_DEFAULT_MODEL=gpt-4o-mini
-# unset or override the per-tier Llama/Qwen vars as needed
+AI_LIGHTWEIGHT_MODEL=gpt-4o-mini
+AI_STANDARD_MODEL=gpt-4o-mini
+AI_COMPLEX_MODEL=gpt-4o
+# Delete any meta-llama/* / qwen/* / claude-* tier leftovers
+```
+
+Static check before/after:
+
+```bash
+cd packages/api && npm run check:ai-provider-config
 ```
 
 ## Related
 
+- Live AI restore (Railway config fixes): `docs/runbooks/live-ai-restore.md`
 - Live AI restore plan: `docs/plans/2026-07-20-002-fix-live-ai-provider-operator-voice-plan.md`
 - Env templates: `packages/api/.env.example`, `.env.production.example`
 - Checklist: `docs/prod-env-checklist.md`
