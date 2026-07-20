@@ -80,9 +80,9 @@ function billingPortalStripeFailure(context: string, status: number, rawBody: st
   let stripeMessage: string | undefined;
   let stripeCode: string | undefined;
   try {
-    const parsed = JSON.parse(rawBody) as { error?: { message?: string; code?: string } };
-    stripeMessage = parsed.error?.message?.trim() || undefined;
-    stripeCode = parsed.error?.code?.trim() || undefined;
+    const parsed = JSON.parse(rawBody) as { error?: { message?: string; code?: string } } | null;
+    stripeMessage = parsed?.error?.message?.trim() || undefined;
+    stripeCode = parsed?.error?.code?.trim() || undefined;
   } catch {
     /* Stripe normally returns JSON; keep the raw body for the log below. */
   }
