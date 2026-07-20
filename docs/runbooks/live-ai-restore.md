@@ -24,14 +24,34 @@ Prometheus proof (dev): only
 
 ---
 
+## Mandatory: Development **and** production
+
+Apply the **same** AI profile to **both** Railway environments. Do not stop
+after Dev.
+
+| Railway environment | Service | Public host |
+|---------------------|---------|-------------|
+| `Development` | `@serviceos/api` | `https://serviceosapi-development.up.railway.app` |
+| `production` | `@serviceos/api` | `https://serviceosapi-production.up.railway.app` |
+
+Names match `.github/workflows/deploy.yml` (`--environment Development` /
+`--environment production`).
+
+**Live state as of last probe (still broken until vars applied):**
+
+- Development: `providers: [api.openai.com]` but completions use Claude ids → fail
+- production: `providers: []` → no `AI_PROVIDER_API_KEY`
+
+---
+
 ## Profile A — Stay on OpenAI (immediate fix)
 
-Use this **now** on both API environments. Matches today’s OpenAI key.
+Use this **now** on **both** API environments. Matches today’s OpenAI key.
 
-### Variables to SET
+### Variables to SET (identical on Dev + Prod)
 
-| Variable | Value | Dev | Prod |
-|----------|-------|:---:|:----:|
+| Variable | Value | Development | production |
+|----------|-------|:-----------:|:----------:|
 | `AI_PROVIDER_BASE_URL` | `https://api.openai.com/v1` | ✓ | ✓ |
 | `AI_PROVIDER_API_KEY` | working `sk-…` OpenAI key | already set | **must set** (copy from Dev or new key) |
 | `AI_DEFAULT_MODEL` | `gpt-4o-mini` | ✓ | ✓ |
@@ -42,7 +62,7 @@ Use this **now** on both API environments. Matches today’s OpenAI key.
 Setting **all three** tier vars is deliberate: it overrides any Claude/Llama
 code defaults and avoids partial-tier traps.
 
-### Variables to UNSET (or delete) if present
+### Variables to UNSET (or delete) if present — on **both** envs
 
 | Variable | Why |
 |----------|-----|
@@ -52,28 +72,50 @@ code defaults and avoids partial-tier traps.
 | `AI_*=meta-llama/*` or `qwen/*` while base URL is OpenAI | same class of mismatch |
 | OpenRouter-only leftovers while on OpenAI | confusion / wrong host |
 
-### Railway click-path
+### Apply via CLI (both environments in one shot)
 
-1. Railway → project **serviceos** → service **`@serviceos/api`**
-2. Environment **Development** → Variables → set table above → **Redeploy**
-3. Environment **production** → Variables → set table above (incl. key) → **Redeploy**
-4. Do **not** flip `NODE_ENV=production` until smoke is green (see below)
-
-### Verify (Development first)
+Requires `RAILWAY_TOKEN` (or `railway login`) + project linked + the OpenAI key:
 
 ```bash
-# Breaker list (not sufficient alone)
-curl -sS https://serviceosapi-development.up.railway.app/api/health/ai
+export AI_PROVIDER_API_KEY='sk-...'   # real OpenAI key — never commit
+./scripts/apply-railway-ai-profile.sh a
+# sets AI_* on @serviceos/api for Development AND production
 
-# Completion probe (dev: open if METRICS_TOKEN unset; prod: Bearer METRICS_TOKEN)
-curl -sS https://serviceosapi-development.up.railway.app/api/health/ai/completion
-
-# Metrics must show gpt-* success, not only claude-* errors
-curl -sS https://serviceosapi-development.up.railway.app/metrics \
-  | rg 'gateway_requests_total'
+# Optional: also worker services
+# ALSO_WORKER=1 ./scripts/apply-railway-ai-profile.sh a
 ```
 
-Authenticated assistant chat must **not** return `fallbackStage: "error-envelope"`.
+Dry-run first:
+
+```bash
+DRY_RUN=1 AI_PROVIDER_API_KEY=sk-dummy ./scripts/apply-railway-ai-profile.sh a
+```
+
+### Railway click-path (same vars twice)
+
+1. Railway → project → service **`@serviceos/api`**
+2. Environment **Development** → Variables → set table above → **Redeploy**
+3. Environment **production** → Variables → set **the same table** (incl. key) → **Redeploy**
+4. Do **not** flip `NODE_ENV=production` until smoke is green on **both**
+
+### Verify both hosts
+
+```bash
+./scripts/verify-live-ai-envs.sh
+# With gated probe:
+# METRICS_TOKEN=… ./scripts/verify-live-ai-envs.sh
+```
+
+Manual:
+
+```bash
+curl -sS https://serviceosapi-development.up.railway.app/api/health/ai
+curl -sS https://serviceosapi-production.up.railway.app/api/health/ai
+# production must NOT show "providers":[]
+```
+
+Authenticated assistant chat on each env must **not** return
+`fallbackStage: "error-envelope"`.
 
 Local static check (no network):
 
@@ -93,6 +135,7 @@ npm run check:ai-provider-config
 ## Profile B — OpenRouter Option A (preferred next)
 
 After OpenAI smoke is green (or instead of A if you have `sk-or-…` ready).
+Apply to **both** `Development` and `production` (same script, profile `b`).
 
 | Variable | Value |
 |----------|-------|
@@ -102,6 +145,12 @@ After OpenAI smoke is green (or instead of A if you have `sk-or-…` ready).
 | `AI_STANDARD_MODEL` | `meta-llama/llama-3.3-70b-instruct` |
 | `AI_COMPLEX_MODEL` | `qwen/qwen2.5-vl-72b-instruct` |
 | `AI_DEFAULT_MODEL` | unset **or** same as standard (optional) |
+
+```bash
+export AI_PROVIDER_API_KEY='sk-or-...'
+./scripts/apply-railway-ai-profile.sh b
+./scripts/verify-live-ai-envs.sh
+```
 
 Full notes: `docs/runbooks/openrouter-ai-provider.md`.
 
@@ -156,16 +205,16 @@ mock on workers only.
 
 ## Ordered rollout checklist
 
-- [ ] **Dev API** — Profile A (or B) variables set; redeployed
+- [ ] `./scripts/apply-railway-ai-profile.sh a` (or `b`) — **both** `Development` + `production`
+- [ ] `./scripts/verify-live-ai-envs.sh` green (or manual curls on both hosts)
 - [ ] Dev `/api/health/ai` shows correct host (`api.openai.com` or `openrouter.ai`)
-- [ ] Dev `/api/health/ai/completion` → `completionProbe.ok: true`
-- [ ] Dev assistant chat → not `error-envelope`; proposal or real reply
-- [ ] Dev metrics show `outcome="success"` for intended model ids
-- [ ] **Prod API** — same AI_* block + key present; redeployed
-- [ ] Prod health/ai non-empty; completion probe ok
-- [ ] Web `VITE_API_URL` → prod API
+- [ ] **Prod** `/api/health/ai` non-empty (not `providers: []`)
+- [ ] Dev `/api/health/ai/completion` → `completionProbe.ok: true` (after #714 deploy)
+- [ ] Prod completion probe ok
+- [ ] Dev + Prod assistant chat → not `error-envelope`
+- [ ] Web `VITE_API_URL` → go-live API (usually production host)
 - [ ] Merge/deploy [#714](https://github.com/joshrkay/Serviceos/pull/714) if not already on the running image
-- [ ] `NODE_ENV=production` on go-live API
+- [ ] `NODE_ENV=production` on go-live API only (after smoke green)
 - [ ] Re-run top-50 operator probe (`docs/verification-runs/…`)
 
 ---

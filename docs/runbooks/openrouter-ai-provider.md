@@ -13,19 +13,23 @@ model IDs (`meta-llama/…`, `qwen/…`). Switching providers is env-only.
 
 1. Create an account at [openrouter.ai](https://openrouter.ai) and mint an API key (`sk-or-…`).
 2. Add credits (pay-per-token; no GPU commitment).
-3. On the **go-live Railway API service**, set:
+3. On **both** Railway API environments (`Development` and `production`), set
+   the same block on `@serviceos/api` (do not leave production with an empty
+   key — that yields `providers: []`):
 
 ```bash
-AI_PROVIDER_BASE_URL=https://openrouter.ai/api/v1
-AI_PROVIDER_API_KEY=sk-or-...
-AI_LIGHTWEIGHT_MODEL=meta-llama/llama-3.1-8b-instruct
-AI_STANDARD_MODEL=meta-llama/llama-3.3-70b-instruct
-AI_COMPLEX_MODEL=qwen/qwen2.5-vl-72b-instruct
+export AI_PROVIDER_API_KEY='sk-or-...'
+./scripts/apply-railway-ai-profile.sh b
+# equivalent manual vars:
+# AI_PROVIDER_BASE_URL=https://openrouter.ai/api/v1
+# AI_LIGHTWEIGHT_MODEL=meta-llama/llama-3.1-8b-instruct
+# AI_STANDARD_MODEL=meta-llama/llama-3.3-70b-instruct
+# AI_COMPLEX_MODEL=qwen/qwen2.5-vl-72b-instruct
 ```
 
-4. Redeploy (or restart) the API so `createLLMGateway` rebuilds with a real key.
-5. Smoke one completion (assistant chat or a tiny `classify_intent` path).
-6. Confirm `/api/health/ai` shows a non-empty `providers` list (breaker registry).
+4. Redeploy (or restart) both APIs so `createLLMGateway` rebuilds with a real key.
+5. Smoke both hosts: `./scripts/verify-live-ai-envs.sh`
+6. Confirm `/api/health/ai` shows a non-empty `providers` list on **Dev and Prod**.
    Note: that endpoint does **not** prove completions work — only that a
    gateway was created. Use `GET /api/health/ai/completion` (METRICS_TOKEN)
    or a real chat turn for proof.
