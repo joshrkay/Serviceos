@@ -47,14 +47,19 @@ HTTP path."* For these four, the client mints and the item lands in the
 approvals inbox.
 
 **3. Neither → the action is AI/voice-only by design. Do NOT add a route
-to force a button.** Money- and comms-class proposal types
-(`apply_late_fee`, `send_payment_reminder`, `request_feedback`,
-`log_expense`, `review_response_proposal`, …) have **no** direct route and
-are **not** on the whitelist. They are *meant* to originate only from
-voice/AI or a background worker (dunning sweep, review-request sweep,
-recurring agreement worker) — each carrying a human-approval gate. The
-right affordance is a **voice hint** ("say it — it'll land in Approvals"),
-not a synthesized button.
+to force a button.** Membership here is defined by "**no direct route AND
+not on the mint whitelist**" — it is *not* an action-class property. Most
+of these are comms/money types (`apply_late_fee`, `send_payment_reminder`,
+`request_feedback`, `review_response_proposal`, …), but a **capture-class**
+type lands here too: `log_expense` is `capture` in
+`actionClassForProposalType`, yet has no direct route and isn't
+whitelisted, so it is just as voice-only as the rest. They are *meant* to
+originate only from voice/AI or a background worker (dunning sweep,
+review-request sweep, recurring agreement worker) — each carrying a
+human-approval gate. The right affordance is a **voice hint** ("say it —
+it'll land in Approvals"), not a synthesized button. (Do not assume the
+inverse either: being capture-class does **not** make a type client-mintable
+— the whitelist is the only gate for `POST /api/proposals`.)
 
 The confirming signal for bucket 3: there is usually **no RBAC permission**
 for the direct action either (e.g. no `expenses:*` permission — every
