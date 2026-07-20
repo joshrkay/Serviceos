@@ -119,10 +119,10 @@ describe('P2-028 — gateway model routing integration', () => {
     await gateway.complete(makeRequest({ taskType: 'draft_estimate' }));
 
     const lastRequest = stub.getLastRequest();
-    expect(lastRequest?.model).toBe(process.env.AI_COMPLEX_MODEL ?? 'qwen/qwen-2.5-72b-instruct');
+    expect(lastRequest?.model).toBe(process.env.AI_COMPLEX_MODEL ?? 'qwen/qwen2.5-vl-72b-instruct');
   });
 
-  it('routes mms_estimate to the complex tier (U1)', async () => {
+  it('routes mms_estimate to a vision-capable complex model (U1)', async () => {
     const providers = makeStubProviders();
     const stub = providers.get('stub') as StubProvider;
     const gateway = makeGateway(providers);
@@ -130,33 +130,7 @@ describe('P2-028 — gateway model routing integration', () => {
     await gateway.complete(makeRequest({ taskType: 'mms_estimate' }));
 
     const model = stub.getLastRequest()?.model;
-    // Default complex is text Qwen (operator drafting). MMS photo estimates
-    // need AI_COMPLEX_MODEL=qwen/qwen2.5-vl-72b-instruct — see next test.
-    expect(model).toBe(process.env.AI_COMPLEX_MODEL ?? 'qwen/qwen-2.5-72b-instruct');
-  });
-
-  it('mms_estimate resolves vision-capable when complex tier is an open VL model', async () => {
-    const providers = makeStubProviders();
-    const stub = providers.get('stub') as StubProvider;
-    const visionModel = 'qwen/qwen2.5-vl-72b-instruct';
-    const gateway = makeGateway(providers, {
-      tenantOverrides: {
-        'tenant-mms': {
-          tiers: {
-            lightweight: { model: 'meta-llama/llama-3.1-8b-instruct' },
-            standard: { model: 'meta-llama/llama-3.3-70b-instruct' },
-            complex: { model: visionModel },
-          },
-        },
-      },
-    });
-
-    await gateway.complete(
-      makeRequest({ taskType: 'mms_estimate', tenantId: 'tenant-mms' }),
-    );
-
-    const model = stub.getLastRequest()?.model;
-    expect(model).toBe(visionModel);
+    expect(model).toBe(process.env.AI_COMPLEX_MODEL ?? 'qwen/qwen2.5-vl-72b-instruct');
     expect(isVisionCapableModel(model ?? '')).toBe(true);
   });
 

@@ -20,14 +20,15 @@ AI_PROVIDER_BASE_URL=https://openrouter.ai/api/v1
 AI_PROVIDER_API_KEY=sk-or-...
 AI_LIGHTWEIGHT_MODEL=meta-llama/llama-3.1-8b-instruct
 AI_STANDARD_MODEL=meta-llama/llama-3.3-70b-instruct
-AI_COMPLEX_MODEL=qwen/qwen-2.5-72b-instruct
+AI_COMPLEX_MODEL=qwen/qwen2.5-vl-72b-instruct
 ```
 
 4. Redeploy (or restart) the API so `createLLMGateway` rebuilds with a real key.
 5. Smoke one completion (assistant chat or a tiny `classify_intent` path).
 6. Confirm `/api/health/ai` shows a non-empty `providers` list (breaker registry).
    Note: that endpoint does **not** prove completions work — only that a
-   gateway was created. Use a real chat turn for proof.
+   gateway was created. Use `GET /api/health/ai/completion` (METRICS_TOKEN)
+   or a real chat turn for proof.
 
 ## Model tiers
 
@@ -35,18 +36,17 @@ AI_COMPLEX_MODEL=qwen/qwen-2.5-72b-instruct
 |------|----------------------|----------|
 | lightweight | `meta-llama/llama-3.1-8b-instruct` | `classify_intent`, graders, supervisor review |
 | standard | `meta-llama/llama-3.3-70b-instruct` | create/update customer/job, send_*, assistant chat |
-| complex | `qwen/qwen-2.5-72b-instruct` | `draft_estimate`, `draft_invoice`, updates |
+| complex | `qwen/qwen2.5-vl-72b-instruct` | `draft_estimate`, `draft_invoice`, `mms_estimate` |
 
-### MMS photo estimates
+### Cheaper text-only complex (optional)
 
-Default complex is **text-only**. For `mms_estimate` with images, set:
+If MMS photo estimates are unused, you can set:
 
 ```bash
-AI_COMPLEX_MODEL=qwen/qwen2.5-vl-72b-instruct
+AI_COMPLEX_MODEL=qwen/qwen-2.5-72b-instruct
 ```
 
-(`qwen2.5-vl-72b-instruct` is in the default vision-capable set in
-`packages/api/src/config/ai-routing.ts`.)
+(text-only — image `mms_estimate` will fail vision capability check.)
 
 ## Cost accounting
 

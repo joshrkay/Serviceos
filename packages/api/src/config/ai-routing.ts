@@ -27,15 +27,16 @@ export interface AIRoutingConfig {
 //   AI_PROVIDER_API_KEY=sk-or-...
 // See docs/runbooks/openrouter-ai-provider.md.
 //
-// Complex default is text-only (draft_estimate / draft_invoice). For MMS
-// photo estimates set AI_COMPLEX_MODEL=qwen/qwen2.5-vl-72b-instruct (and
-// ensure it is listed in AI_VISION_CAPABLE_MODELS / the defaults below).
+// Complex default is the open VL model so mms_estimate (image) and text
+// drafting (draft_estimate / draft_invoice) share one complex tier without
+// a vision mismatch. Override with qwen/qwen-2.5-72b-instruct for cheaper
+// text-only drafting if MMS is unused.
 const lightweightModel =
   process.env.AI_LIGHTWEIGHT_MODEL || 'meta-llama/llama-3.1-8b-instruct';
 const standardModel =
   process.env.AI_STANDARD_MODEL || 'meta-llama/llama-3.3-70b-instruct';
 const complexModel =
-  process.env.AI_COMPLEX_MODEL || 'qwen/qwen-2.5-72b-instruct';
+  process.env.AI_COMPLEX_MODEL || 'qwen/qwen2.5-vl-72b-instruct';
 
 /** Parse a positive-integer env var (ms), falling back on unset/invalid input. */
 function parsePositiveIntEnv(raw: string | undefined, fallback: number): number {

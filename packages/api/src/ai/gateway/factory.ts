@@ -32,7 +32,7 @@ import { DEFAULT_AI_ROUTING_CONFIG } from '../../config/ai-routing';
  *     AI_PROVIDER_API_KEY=sk-or-...
  *     AI_LIGHTWEIGHT_MODEL=meta-llama/llama-3.1-8b-instruct
  *     AI_STANDARD_MODEL=meta-llama/llama-3.3-70b-instruct
- *     AI_COMPLEX_MODEL=qwen/qwen-2.5-72b-instruct
+ *     AI_COMPLEX_MODEL=qwen/qwen2.5-vl-72b-instruct
  *     See docs/runbooks/openrouter-ai-provider.md
  *
  *   OpenAI:

@@ -28,10 +28,10 @@ describe('P2-028 — Task-complexity-based model routing', () => {
     expect(tierConfig.temperature).toBe(0.3);
   });
 
-  it('happy path — complex task routes to qwen 72b with higher tokens', () => {
+  it('happy path — complex task routes to qwen VL 72b with higher tokens', () => {
     const tierConfig = resolveModelForTask('draft_estimate');
 
-    expect(tierConfig.model).toBe('qwen/qwen-2.5-72b-instruct');
+    expect(tierConfig.model).toBe('qwen/qwen2.5-vl-72b-instruct');
     expect(tierConfig.maxTokens).toBe(8192);
     expect(tierConfig.temperature).toBe(0.5);
   });

@@ -13,7 +13,7 @@
 | `CLERK_WEBHOOK_SECRET` | Always prod/staging | `validateProductionConfig`; writes `public_metadata.tenant_id` + `role` for JWT template |
 | `AI_PROVIDER_API_KEY` | Always prod/staging | `validateProductionConfig`. Recommended: OpenRouter `sk-or-...` — see `docs/runbooks/openrouter-ai-provider.md` |
 | `AI_PROVIDER_BASE_URL` | Recommended always | OpenRouter: `https://openrouter.ai/api/v1` |
-| `AI_LIGHTWEIGHT_MODEL` / `AI_STANDARD_MODEL` / `AI_COMPLEX_MODEL` | Recommended always | OpenRouter defaults: `meta-llama/llama-3.1-8b-instruct` / `meta-llama/llama-3.3-70b-instruct` / `qwen/qwen-2.5-72b-instruct`. MMS: set complex to `qwen/qwen2.5-vl-72b-instruct` |
+| `AI_LIGHTWEIGHT_MODEL` / `AI_STANDARD_MODEL` / `AI_COMPLEX_MODEL` | Recommended always | OpenRouter defaults: `meta-llama/llama-3.1-8b-instruct` / `meta-llama/llama-3.3-70b-instruct` / `qwen/qwen2.5-vl-72b-instruct` |
 | `CORS_ORIGIN` | Always prod/staging | Explicit origin, not wildcard |
 | `STRIPE_SECRET_KEY` or `STRIPE_API_KEY` | Always prod/staging | `createPaymentLinkProvider` forbids mock (`payments/payment-link-provider.ts`; pinned by `test/payments/payment-link-provider.test.ts`) |
 | `STRIPE_WEBHOOK_SECRET` | Always prod/staging (SEC-43) | `validateProductionConfig` (`shared/config.ts`); pinned by `test/shared/config.test.ts` "SEC-43". Without it the Stripe webhook handler 400s/503s on the first real event — **the customer is charged but the invoice never settles**. Fail-fast at boot instead. **Accepts a comma-separated list** (one secret per Stripe endpoint — platform + connected accounts). Go-live gate: `docs/runbooks/stripe-go-live.md` |

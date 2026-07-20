@@ -12,10 +12,9 @@
  * `MMS_VISION_SMOKE_IMAGE` (default `test/fixtures/mms-smoke.jpg`) — a tiny
  * synthetic image yields no line items and would (correctly) fail the assert.
  *
- * `mms_estimate` routes to the COMPLEX tier. Default complex is text-only
- * (`qwen/qwen-2.5-72b-instruct` via OpenRouter). Set `AI_COMPLEX_MODEL` to a
- * vision-capable model for this smoke (e.g. `qwen/qwen2.5-vl-72b-instruct` on
- * OpenRouter, or `gpt-4o` on OpenAI).
+ * `mms_estimate` routes to the COMPLEX tier. Default complex is
+ * `qwen/qwen2.5-vl-72b-instruct` (OpenRouter). Override with any
+ * vision-capable model for your provider (e.g. `gpt-4o` on OpenAI).
  */
 import { describe, it, expect } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
