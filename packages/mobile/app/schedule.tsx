@@ -1,4 +1,6 @@
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { Pressable, Text } from 'react-native';
+import { AppointmentActionSheet, type ActionableAppointment } from '../src/components/AppointmentActionSheet';
 import { EntityList } from '../src/components/EntityList';
 import { useListQuery } from '../src/hooks/useListQuery';
 import { useMe } from '../src/hooks/useMe';
@@ -11,6 +13,8 @@ interface Appointment {
   scheduledStart?: string;
   status?: string;
   appointmentType?: string;
+  /** Optimistic-concurrency token for reschedule/reassign/crew mints. */
+  updatedAt?: string;
 }
 
 function titleCase(value?: string): string | undefined {
@@ -23,7 +27,9 @@ function titleCase(value?: string): string | undefined {
 
 /**
  * Supervisor schedule list. Technician accounts redirect to Today — the
- * assigned day spine — instead of the tenant-wide appointments list.
+ * assigned day spine — instead of the tenant-wide appointments list. Tapping a
+ * row opens the per-appointment action sheet (confirm / reschedule / reassign /
+ * crew / cancel); the header "Book" opens manual booking.
  */
 export default function Schedule() {
   const router = useRouter();
@@ -49,6 +55,8 @@ export default function Schedule() {
     enabled: !technicianOnly && Boolean(me),
   });
 
+  const [active, setActive] = useState<ActionableAppointment | null>(null);
+
   const sorted = useMemo(
     () =>
       [...data].sort((a, b) =>
@@ -62,18 +70,47 @@ export default function Schedule() {
   }
 
   return (
-    <EntityList
-      title="Schedule"
-      data={sorted}
-      isLoading={isLoading}
-      error={error}
-      onRefresh={() => void refetch()}
-      keyOf={(a) => a.id}
-      renderRow={(a) => ({
-        primary: a.scheduledStart ? formatShortDate(a.scheduledStart, me?.timezone) : 'Appointment',
-        secondary: [titleCase(a.appointmentType), titleCase(a.status)].filter(Boolean).join(' · '),
-      })}
-      emptyText="Nothing scheduled."
-    />
+    <>
+      <EntityList
+        title="Schedule"
+        data={sorted}
+        isLoading={isLoading}
+        error={error}
+        onRefresh={() => void refetch()}
+        keyOf={(a) => a.id}
+        headerAction={
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Book appointment"
+            onPress={() => router.push('/appointments/new')}
+            className="min-h-11 items-center justify-center rounded-md bg-primary px-4 py-2"
+          >
+            <Text className="text-base font-semibold text-primaryForeground">Book</Text>
+          </Pressable>
+        }
+        onPressRow={(a) =>
+          setActive({
+            id: a.id,
+            updatedAt: a.updatedAt,
+            scheduledStart: a.scheduledStart,
+            status: a.status,
+          })
+        }
+        renderRow={(a) => ({
+          primary: a.scheduledStart ? formatShortDate(a.scheduledStart, me?.timezone) : 'Appointment',
+          secondary: [titleCase(a.appointmentType), titleCase(a.status)].filter(Boolean).join(' · '),
+        })}
+        emptyText="Nothing scheduled."
+      />
+      {active ? (
+        <AppointmentActionSheet
+          visible
+          appointment={active}
+          timezone={me?.timezone}
+          onClose={() => setActive(null)}
+          onDone={() => void refetch()}
+        />
+      ) : null}
+    </>
   );
 }

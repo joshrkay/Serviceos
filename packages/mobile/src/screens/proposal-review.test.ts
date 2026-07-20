@@ -38,6 +38,21 @@ vi.mock('expo-router', () => ({
 vi.mock('../lib/useApiClient', () => ({
   useApiClient: () => vi.fn().mockResolvedValue({ ok: true, json: async () => ({ items: [] }) }),
 }));
+vi.mock('../hooks/useMe', () => ({
+  useMe: () => ({ me: { timezone: 'America/New_York' }, isLoading: false, error: null, switchMode: vi.fn(), refetch: vi.fn() }),
+}));
+// Stub the reschedule picker so this screen test asserts wiring (which type gets
+// the picker, and that a pick edits the proposal); the picker's slot fetching +
+// tz rendering are covered by SlotPicker/slotPicker unit tests. Host element
+// only — no dynamic import() (tsc rejects it, TS1323).
+vi.mock('../components/RescheduleReviewPicker', () => ({
+  RescheduleReviewPicker: ({ onPick }: { onPick: (s: { start: string; end: string }) => void }) =>
+    createElement(
+      'button',
+      { onClick: () => onPick({ start: '2026-06-25T13:00:00.000Z', end: '2026-06-25T14:00:00.000Z' }) },
+      'reschedule-picker',
+    ),
+}));
 vi.mock('../hooks/useProposalReview', () => ({
   useProposalReview: () => ({
     proposal: h.proposal,
@@ -174,6 +189,30 @@ describe('Proposal review screen', () => {
     expect(getByText('Premium valve')).toBeTruthy();
     fireEvent.click(getByText('Premium valve').closest('button')!);
     expect(h.resolveLine).toHaveBeenCalledWith(0, 'cat-b');
+  });
+
+  it('B2: reschedule proposals render the slot picker (not generic rows) and a pick edits the time', () => {
+    h.proposal = {
+      id: 'p-resched',
+      proposalType: 'reschedule_appointment',
+      status: 'ready_for_review',
+      summary: 'Move Miller to Thursday 2pm',
+      payload: {
+        appointmentId: '11111111-1111-1111-1111-111111111111',
+        newScheduledStart: '2026-06-24T18:00:00.000Z',
+        newScheduledEnd: '2026-06-24T19:00:00.000Z',
+      },
+      approvedAt: null,
+    };
+    const { getByText, queryByText } = render(createElement(ProposalReviewScreen));
+    expect(getByText('reschedule-picker')).toBeTruthy();
+    // Generic scalar rows are suppressed in favor of the picker.
+    expect(queryByText('New Scheduled Start')).toBeNull();
+    fireEvent.click(getByText('reschedule-picker').closest('button')!);
+    expect(h.edit).toHaveBeenCalledWith({
+      newScheduledStart: '2026-06-25T13:00:00.000Z',
+      newScheduledEnd: '2026-06-25T14:00:00.000Z',
+    });
   });
 
   // U1 — lane-aware confirm gates. Capture one-taps (covered by the first

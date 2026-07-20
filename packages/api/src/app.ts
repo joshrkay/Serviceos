@@ -5378,7 +5378,7 @@ export function createApp(): AppWithLifecycle {
     }),
   );
   // D2-1c — audit-log proposal approve / reject / edit / undo.
-  app.use('/api/dispatch', createSchedulingRouter(feasibilityDeps, userRepo));
+  app.use('/api/dispatch', createSchedulingRouter(feasibilityDeps, userRepo, settingsRepo ?? undefined));
   app.use(
     '/api/proposals',
     createProposalsRouter(

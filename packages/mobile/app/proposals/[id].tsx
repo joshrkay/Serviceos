@@ -11,6 +11,8 @@ import {
 import { ClarifyPicker } from '../../src/components/ClarifyPicker';
 import { ErrorState } from '../../src/components/ErrorState';
 import { ProposalEditPanel } from '../../src/components/ProposalEditPanel';
+import { RescheduleReviewPicker } from '../../src/components/RescheduleReviewPicker';
+import { useMe } from '../../src/hooks/useMe';
 import { useProposalReview } from '../../src/hooks/useProposalReview';
 import { formatMoneyCents } from '../../src/lib/format';
 import { approveGateFor } from '../../src/proposals/approveGate';
@@ -29,6 +31,7 @@ export default function ProposalReviewScreen() {
   const params = useLocalSearchParams<{ id: string }>();
   const id = Array.isArray(params.id) ? params.id[0] : (params.id ?? '');
   const router = useRouter();
+  const { me } = useMe();
   const { proposal, phase, error, secondsLeft, approve, reject, resolveLine, resolveEntity, edit, undo, reload } =
     useProposalReview(id);
   const [showRejectForm, setShowRejectForm] = useState(false);
@@ -73,6 +76,16 @@ export default function ProposalReviewScreen() {
     proposal?.proposalType === 'draft_estimate' || proposal?.proposalType === 'update_estimate';
   const tierView = isEstimateProposal ? estimateTierView(proposal?.payload) : null;
 
+  // B2 — a reschedule proposal shows a slot picker (preloaded with the AI's
+  // proposed slot) instead of flat rows; picking a different open slot edits the
+  // proposal's time in place before approval (nothing executes until approved).
+  const isReschedule = proposal?.proposalType === 'reschedule_appointment';
+  async function pickRescheduleSlot(slot: { start: string; end: string }) {
+    setSavingEdit(true);
+    await edit({ newScheduledStart: slot.start, newScheduledEnd: slot.end });
+    setSavingEdit(false);
+  }
+
   async function confirmReject() {
     const reason = rejectReason.trim();
     if (!reason) return;
@@ -110,7 +123,14 @@ export default function ProposalReviewScreen() {
               <Text className="mt-3 text-base text-mutedForeground">{proposal.explanation}</Text>
             ) : null}
 
-            {reviewRows(proposal.payload).length > 0 ? (
+            {isReschedule && phase === 'review' ? (
+              <RescheduleReviewPicker
+                payload={proposal.payload}
+                timezone={me?.timezone}
+                onPick={pickRescheduleSlot}
+                saving={savingEdit}
+              />
+            ) : reviewRows(proposal.payload).length > 0 ? (
               <View className="mt-5 rounded-lg border border-border">
                 {reviewRows(proposal.payload).map((row) => (
                   <View
