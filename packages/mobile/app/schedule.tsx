@@ -1,4 +1,5 @@
 import { useEffect, useMemo } from 'react';
+import { Pressable, Text } from 'react-native';
 import { EntityList } from '../src/components/EntityList';
 import { useListQuery } from '../src/hooks/useListQuery';
 import { useMe } from '../src/hooks/useMe';
@@ -74,6 +75,16 @@ export default function Schedule() {
         secondary: [titleCase(a.appointmentType), titleCase(a.status)].filter(Boolean).join(' · '),
       })}
       emptyText="Nothing scheduled."
+      headerAction={
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Book a visit"
+          onPress={() => router.push('/schedule/book')}
+          className="min-h-11 items-center justify-center rounded-md bg-primary px-4 py-2"
+        >
+          <Text className="text-base font-semibold text-primaryForeground">Book</Text>
+        </Pressable>
+      }
     />
   );
 }
