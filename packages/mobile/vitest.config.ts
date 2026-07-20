@@ -36,6 +36,8 @@ export default defineConfig({
       exclude: [
         '**/*.test.ts',
         'src/voice/nativeVoiceDeps.ts',
+        'src/offline/nativeOfflineDeps.ts',
+        'src/assistant/nativeAssistantDeps.ts',
         'src/push/nativePushDeps.ts',
         'src/push/nativeNotificationDeps.ts',
         'src/jobs/nativeJobPhotoDeps.ts',

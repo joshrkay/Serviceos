@@ -11,7 +11,14 @@ export interface PersonaNavInput {
 
 export interface PersonaQuickLink {
   label: string;
-  route: '/messages' | '/schedule' | '/estimates' | '/invoices' | '/approvals' | '/jobs';
+  route:
+    | '/messages'
+    | '/schedule'
+    | '/estimates'
+    | '/invoices'
+    | '/approvals'
+    | '/jobs'
+    | '/assistant';
 }
 
 export interface PersonaNavModel {
@@ -19,6 +26,12 @@ export interface PersonaNavModel {
   landingTab: 'index' | 'today';
   visibleTabs: readonly TabName[];
   showModeToggle: boolean;
+  /**
+   * U13 — the conversational assistant needs the `ai:run` permission, which
+   * technicians don't hold; the entry is hidden for the tech persona and the
+   * screen itself redirects (app/assistant.tsx, same pattern as schedule).
+   */
+  showAssistant: boolean;
   home: {
     showToday: boolean;
     showVoice: boolean;
@@ -29,6 +42,7 @@ export interface PersonaNavModel {
 }
 
 const SUPERVISOR_LINKS: readonly PersonaQuickLink[] = [
+  { label: 'Assistant', route: '/assistant' },
   { label: 'Messages', route: '/messages' },
   { label: 'Schedule', route: '/schedule' },
   { label: 'Estimates', route: '/estimates' },
@@ -37,6 +51,7 @@ const SUPERVISOR_LINKS: readonly PersonaQuickLink[] = [
 ];
 
 const BOTH_LINKS: readonly PersonaQuickLink[] = [
+  { label: 'Assistant', route: '/assistant' },
   { label: 'Messages', route: '/messages' },
   { label: 'Schedule', route: '/schedule' },
   { label: 'Approvals', route: '/approvals' },
@@ -65,6 +80,7 @@ export function navModelFor(input: PersonaNavInput): PersonaNavModel {
       landingTab: 'today',
       visibleTabs: ['today', 'customers', 'jobs'],
       showModeToggle,
+      showAssistant: false,
       home: {
         showToday: true,
         showVoice: false,
@@ -81,6 +97,7 @@ export function navModelFor(input: PersonaNavInput): PersonaNavModel {
       landingTab: 'today',
       visibleTabs: ['today', 'index', 'voice', 'jobs', 'settings'],
       showModeToggle,
+      showAssistant: true,
       home: {
         showToday: true,
         showVoice: true,
@@ -96,6 +113,7 @@ export function navModelFor(input: PersonaNavInput): PersonaNavModel {
     landingTab: 'index',
     visibleTabs: ['index', 'voice', 'customers', 'jobs', 'settings'],
     showModeToggle,
+    showAssistant: true,
     home: {
       showToday: false,
       showVoice: true,

@@ -21,6 +21,9 @@ describe('navModelFor', () => {
     });
     expect(nav.quickLinks.map((link) => link.route)).not.toContain('/invoices');
     expect(nav.visibleTabs).not.toContain('settings');
+    // U13 — technicians lack ai:run; the assistant entry stays hidden.
+    expect(nav.showAssistant).toBe(false);
+    expect(nav.quickLinks.map((link) => link.route)).not.toContain('/assistant');
   });
 
   it('emphasizes voice, approvals, and money in supervisor mode', () => {
@@ -40,6 +43,9 @@ describe('navModelFor', () => {
     });
     expect(nav.visibleTabs).toEqual(['index', 'voice', 'customers', 'jobs', 'settings']);
     expect(nav.showModeToggle).toBe(true);
+    // U13 — supervisors get the conversational assistant entry.
+    expect(nav.showAssistant).toBe(true);
+    expect(nav.quickLinks.map((link) => link.route)).toContain('/assistant');
   });
 
   it('blends Today and approvals in both mode', () => {
@@ -59,6 +65,8 @@ describe('navModelFor', () => {
     });
     expect(nav.visibleTabs).toEqual(['today', 'index', 'voice', 'jobs', 'settings']);
     expect(nav.quickLinks.map((link) => link.route)).toContain('/approvals');
+    expect(nav.quickLinks.map((link) => link.route)).toContain('/assistant');
+    expect(nav.showAssistant).toBe(true);
     expect(nav.showModeToggle).toBe(true);
   });
 

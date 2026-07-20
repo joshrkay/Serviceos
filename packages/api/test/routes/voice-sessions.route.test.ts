@@ -123,6 +123,43 @@ describe('voice-sessions routes', () => {
     expect(res.status).toBe(404);
   });
 
+  it('answers 410 GONE for input to an ended session (mobile assistant relies on it)', async () => {
+    const app = buildApp('tenant-a', 'user-a', store, adapter);
+    const startRes = await request(app).post('/api/voice/sessions').send({});
+    const id = startRes.body.sessionId;
+    store.peek(id)!.ended = true;
+
+    const res = await request(app)
+      .post(`/api/voice/sessions/${id}/input`)
+      .send({ text: 'anyone there?' });
+
+    expect(res.status).toBe(410);
+    expect(res.body.error).toBe('GONE');
+  });
+
+  it('rejects every session route without header auth — a ?token= query never authenticates', async () => {
+    // U13 — the mobile assistant streams SSE with the Clerk token in the
+    // Authorization header. The `?token=` query fallback was deliberately
+    // removed server-side (tokens leak into URL logs / referers); this pins
+    // that it never comes back.
+    const startedApp = buildApp('tenant-a', 'user-a', store, adapter);
+    const startRes = await request(startedApp).post('/api/voice/sessions').send({});
+    const id = startRes.body.sessionId;
+
+    const unauthApp = express();
+    unauthApp.use(express.json());
+    unauthApp.use('/api/voice/sessions', createVoiceSessionsRouter({ adapter, store }));
+
+    const sse = await request(unauthApp).get(`/api/voice/sessions/${id}/events?token=leaked-jwt`);
+    expect(sse.status).toBe(401);
+    const input = await request(unauthApp)
+      .post(`/api/voice/sessions/${id}/input?token=leaked-jwt`)
+      .send({ text: 'hi' });
+    expect(input.status).toBe(401);
+    const start = await request(unauthApp).post('/api/voice/sessions?token=leaked-jwt').send({});
+    expect(start.status).toBe(401);
+  });
+
   it('DELETE removes the session and returns 204', async () => {
     const app = buildApp('tenant-a', 'user-a', store, adapter);
     const startRes = await request(app).post('/api/voice/sessions').send({});
