@@ -6,6 +6,7 @@ import { useToast } from '../src/components/Toast';
 import { usePendingProposals } from '../src/hooks/usePendingProposals';
 import { ErrorState } from '../src/components/ErrorState';
 import { ProposalCard } from '../src/components/ProposalCard';
+import { requestOfflineFlush } from '../src/offline/flushSignal';
 import { isBatchEligible } from '../src/proposals/proposalEvents';
 import { useApproveBatch } from '../src/proposals/useApproveBatch';
 
@@ -64,7 +65,17 @@ export default function Approvals() {
       <FlatList
         data={proposals}
         keyExtractor={(item) => item.id}
-        refreshControl={<RefreshControl refreshing={isLoading} onRefresh={() => void refresh()} />}
+        refreshControl={
+          <RefreshControl
+            refreshing={isLoading}
+            onRefresh={() => {
+              // U12 — pull-to-refresh doubles as the offline queue's manual
+              // retry: drain anything still journaled, then re-fetch.
+              requestOfflineFlush();
+              void refresh();
+            }}
+          />
+        }
         ListEmptyComponent={
           isLoading ? (
             <ActivityIndicator />

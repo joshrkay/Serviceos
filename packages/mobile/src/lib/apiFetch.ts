@@ -74,11 +74,6 @@ export function makeTerminalAuthError(): Error {
   return err;
 }
 
-/** True for the tagged terminal auth failure above. */
-export function isTerminalAuthError(err: unknown): boolean {
-  return err instanceof Error && err.name === 'TerminalAuthError';
-}
-
 /** Default per-request timeout — a hung socket rejects instead of hanging the UI. */
 export const DEFAULT_TIMEOUT_MS = 15_000;
 

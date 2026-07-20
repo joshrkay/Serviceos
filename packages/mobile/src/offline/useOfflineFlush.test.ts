@@ -32,7 +32,8 @@ vi.mock('./flush', async (importOriginal) => ({
 vi.mock('./queueInstance', () => ({ getOfflineQueue: () => h.queue }));
 
 // eslint-disable-next-line import/first
-import { useOfflineFlush, requestOfflineFlush } from './useOfflineFlush';
+import { useOfflineFlush } from './useOfflineFlush';
+import { requestOfflineFlush } from './flushSignal';
 
 async function settle() {
   await act(async () => {

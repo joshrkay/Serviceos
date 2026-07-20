@@ -9,14 +9,9 @@ import { uploadFile } from '../voice/nativeVoiceDeps';
 import { deleteQueuedAudio } from './audioRelocation';
 import { nativeAudioRelocationDeps } from './nativeOfflineDeps';
 import { flushQueue } from './flush';
+import { onOfflineFlushRequested } from './flushSignal';
 import { getOfflineQueue } from './queueInstance';
 import type { OfflineQueueItem } from './queue';
-
-/** Manual-retry trigger (e.g. a future banner affordance) — fans into the mounted hook. */
-const manualFlushListeners = new Set<() => void>();
-export function requestOfflineFlush(): void {
-  for (const l of manualFlushListeners) l();
-}
 
 export interface UseOfflineFlushOptions {
   /** Gate on auth — flushing needs a signed-in session for tokens. */
@@ -135,11 +130,11 @@ export function useOfflineFlush(options: UseOfflineFlushOptions): void {
     const appStateSub = AppState.addEventListener('change', (state) => {
       if (state === 'active') trigger();
     });
-    manualFlushListeners.add(trigger);
+    const offManual = onOfflineFlushRequested(trigger);
     return () => {
       offReconnect();
       appStateSub.remove();
-      manualFlushListeners.delete(trigger);
+      offManual();
       if (retryTimerRef.current) {
         clearTimeout(retryTimerRef.current);
         retryTimerRef.current = null;
