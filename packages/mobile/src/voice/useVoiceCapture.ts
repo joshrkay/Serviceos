@@ -7,6 +7,8 @@ import {
 import * as FileSystem from 'expo-file-system';
 import { useCallback, useRef, useState } from 'react';
 import { useApiClient } from '../lib/useApiClient';
+import { isCurrentlyOnline } from '../lib/connectivity';
+import { getOfflineQueue } from '../offline/offlineQueue';
 import { makeIdempotencyKey, uploadFile } from './nativeVoiceDeps';
 import {
   uploadAndTranscribe,
@@ -15,7 +17,14 @@ import {
 } from './uploadAndTranscribe';
 import { MIC_PERMISSION_COPY } from '../lib/errorCopy';
 
-export type VoicePhase = 'idle' | 'listening' | 'transcribing' | 'transcript' | 'error';
+export type VoicePhase =
+  | 'idle'
+  | 'listening'
+  | 'transcribing'
+  | 'transcript'
+  // U12 — captured offline: the clip was journaled and will upload on reconnect.
+  | 'queued'
+  | 'error';
 
 export interface UseVoiceCaptureResult {
   phase: VoicePhase;
@@ -62,6 +71,21 @@ export function useVoiceCapture(jobId?: string): UseVoiceCaptureResult {
         if (!sizeBytes) throw new Error('No audio captured. Please retry.');
 
         const clip: AudioClip = { fileUri: uri, contentType: 'audio/mp4', sizeBytes };
+
+        // U12 — offline: journal the clip (moving it out of the evictable cache
+        // dir) and let the flush machine upload it on reconnect. No proposal
+        // round-trip now; the owner sees a "saved, will send" state.
+        if (!isCurrentlyOnline()) {
+          await getOfflineQueue().enqueueVoice({
+            sourceUri: uri,
+            contentType: clip.contentType,
+            sizeBytes,
+            ...(jobId ? { jobId } : {}),
+          });
+          setPhase('queued');
+          return;
+        }
+
         const result = await uploadAndTranscribe(
           clip,
           { api, uploadFile, makeIdempotencyKey },

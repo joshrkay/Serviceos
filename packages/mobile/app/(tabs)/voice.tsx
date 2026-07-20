@@ -28,7 +28,22 @@ export default function VoiceScreen() {
       </Text>
 
       <View className="flex-1 items-center justify-center">
-        {phase === 'transcript' ? (
+        {phase === 'queued' ? (
+          <View className="w-full items-center">
+            <Text className="text-lg font-semibold text-foreground">Saved offline</Text>
+            <Text className="mt-2 text-center text-base text-mutedForeground">
+              You're offline — we saved this and will send it for approval when you
+              reconnect.
+            </Text>
+            <Pressable
+              accessibilityRole="button"
+              onPress={reset}
+              className="mt-6 min-h-11 items-center justify-center rounded-md border border-border px-4 py-3"
+            >
+              <Text className="text-base text-foreground">Speak again</Text>
+            </Pressable>
+          </View>
+        ) : phase === 'transcript' ? (
           <View className="w-full">
             <Text className="mb-2 text-base text-mutedForeground">Heard</Text>
             <Text className="text-lg text-foreground">{transcript}</Text>

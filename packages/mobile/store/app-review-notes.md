@@ -47,8 +47,10 @@ technician field updates are visible end-to-end.
   supported (`supportsTablet: false`).
 - **Android:** API 26+ (`minSdkVersion` 26). Physical device for Bluetooth
   Terminal readers and reliable push.
-- **Network:** voice capture and job photos require a connection. Offline
-  shows a reconnect banner — there is **no** offline recording queue in v1.
+- **Network:** job photos require a connection. Offline shows a reconnect
+  banner. Voice recordings and capture-class approvals captured offline are
+  **queued on-device** and flush automatically on reconnect (the banner shows
+  "N actions waiting"); other actions still require a connection.
 - **Stripe Terminal / Tap to Pay:** optional for review. Location +
   Bluetooth prompts are for Terminal and (on technician) field GPS. Deny
   is OK if not testing payments; core voice/approvals/Today still work.
@@ -90,8 +92,9 @@ Confirm in App Store Connect and Play Console:
    (foreground only; no iOS background location).
 5. Grant **camera** — attach a **job photo** while online.
 6. Grant **microphone** — capture a **voice note** while online.
-7. Toggle airplane mode briefly — confirm the **reconnect banner**; voice
-   and photos need a connection (no offline queue).
+7. Toggle airplane mode briefly — confirm the **reconnect banner**. A voice
+   note captured offline is **saved and queued** ("N actions waiting") and
+   uploads automatically on reconnect; job photos still need a connection.
 
 ---
 

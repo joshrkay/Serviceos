@@ -36,6 +36,12 @@ export default defineConfig({
       exclude: [
         '**/*.test.ts',
         'src/voice/nativeVoiceDeps.ts',
+        // U12 — native/RN-only offline wiring (adapter + singleton + AppState/
+        // Clerk host). The queue + flush LOGIC (queue.ts, flush.ts) is fully
+        // unit-tested; these only bind it to the device.
+        'src/offline/nativeOfflineDeps.ts',
+        'src/offline/offlineQueue.ts',
+        'src/offline/useOfflineSync.ts',
         'src/push/nativePushDeps.ts',
         'src/push/nativeNotificationDeps.ts',
         'src/jobs/nativeJobPhotoDeps.ts',
@@ -84,6 +90,7 @@ export default defineConfig({
       // mocked per test, so alias them to resolve-time stubs.
       'expo-audio': path.resolve(__dirname, './test/stubs/expo-audio.ts'),
       'expo-camera': path.resolve(__dirname, './test/stubs/expo-camera.ts'),
+      'expo-crypto': path.resolve(__dirname, './test/stubs/expo-crypto.ts'),
       'expo-file-system': path.resolve(__dirname, './test/stubs/expo-file-system.ts'),
       'expo-secure-store': path.resolve(__dirname, './test/stubs/expo-secure-store.ts'),
       '@clerk/clerk-expo': path.resolve(__dirname, './test/stubs/clerk-clerk-expo.ts'),

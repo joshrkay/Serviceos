@@ -43,6 +43,28 @@ export interface UploadAndTranscribeDeps {
   timeoutMs?: number;
   /** Budget for the U3 second poll phase (routed outcome). */
   answerTimeoutMs?: number;
+  /**
+   * U12 offline resume — when set, skip createSignedAudioUpload + verify (the
+   * audio is already uploaded) and go straight to POST /recordings. Persisted
+   * on the queue item after a prior successful upload+verify.
+   */
+  checkpoint?: { fileId: string; audioUrl: string };
+  /**
+   * U12 — called after a successful upload+verify with the checkpoint, so the
+   * offline queue can persist it BEFORE the POST /recordings attempt.
+   */
+  onCheckpoint?: (checkpoint: { fileId: string; audioUrl: string }) => Promise<void> | void;
+}
+
+/** An Error tagged with the failing HTTP status so callers can classify it. */
+interface HttpStatusError extends Error {
+  status?: number;
+}
+
+function httpError(message: string, status?: number): HttpStatusError {
+  const err = new Error(message) as HttpStatusError;
+  if (typeof status === 'number') err.status = status;
+  return err;
 }
 
 /**
@@ -84,7 +106,7 @@ async function createSignedAudioUpload(
 
   let res = await requestSigned('/api/files/upload-url');
   if (!res.ok) res = await requestSigned('/api/files/upload');
-  if (!res.ok) throw new Error('Unable to get a signed upload URL.');
+  if (!res.ok) throw httpError('Unable to get a signed upload URL.', res.status);
 
   const payload = (await res.json()) as {
     fileId?: string;
@@ -100,9 +122,60 @@ async function createSignedAudioUpload(
   if (!fileId || !uploadUrl) throw new Error('Upload URL response is missing required fields.');
 
   const put = await deps.uploadFile(uploadUrl, clip.fileUri, clip.contentType);
-  if (!put.ok) throw new Error('Audio upload failed. Please retry.');
+  if (!put.ok) throw httpError('Audio upload failed. Please retry.', put.status);
 
   return { fileId, audioUrl: downloadUrl ?? uploadUrl.split('?')[0] };
+}
+
+/**
+ * Upload + verify a clip, returning the durable `{fileId, audioUrl}`. When a
+ * checkpoint is supplied (U12 resume) the upload is skipped entirely. On a
+ * fresh upload the checkpoint is reported via `onCheckpoint` after verify, so
+ * the caller can persist it before attempting POST /recordings.
+ */
+async function uploadAndVerify(
+  clip: AudioClip,
+  deps: UploadAndTranscribeDeps,
+): Promise<{ fileId: string; audioUrl: string }> {
+  if (deps.checkpoint) return deps.checkpoint;
+  const signed = await createSignedAudioUpload(clip, deps);
+  const verifyRes = await deps.api(`/api/files/${signed.fileId}/verify`, { method: 'POST' });
+  if (!verifyRes.ok) throw httpError('Upload verification failed.', verifyRes.status);
+  await deps.onCheckpoint?.(signed);
+  return signed;
+}
+
+/**
+ * Deliver a recording: (resume-aware) upload+verify → POST /api/voice/recordings,
+ * returning the created recording id. Shared by the foreground pipeline
+ * ({@link uploadAndTranscribe}) and the offline flush machine, which stops here
+ * — once the recording is created + enqueued the offline job is delivered, and
+ * a replay with the same idempotencyKey is safe server-side (U11).
+ */
+export async function deliverRecording(
+  clip: AudioClip,
+  deps: UploadAndTranscribeDeps,
+  jobId?: string,
+): Promise<{ recordingId: string; fileId: string; audioUrl: string }> {
+  const { fileId, audioUrl } = await uploadAndVerify(clip, deps);
+
+  const createRes = await deps.api('/api/voice/recordings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      fileId,
+      audioUrl,
+      idempotencyKey: deps.makeIdempotencyKey(),
+      ...(jobId ? { jobId } : {}),
+    }),
+  });
+  if (!createRes.ok) throw httpError('Unable to start transcription.', createRes.status);
+
+  const created = (await createRes.json()) as { recording?: { id?: string } };
+  const recordingId = created.recording?.id;
+  if (!recordingId) throw new Error('Missing recording id from API.');
+
+  return { recordingId, fileId, audioUrl };
 }
 
 interface RecordingStatusBody {
@@ -207,27 +280,7 @@ export async function uploadAndTranscribe(
   deps: UploadAndTranscribeDeps,
   jobId?: string,
 ): Promise<UploadAndTranscribeResult> {
-  const { fileId, audioUrl } = await createSignedAudioUpload(clip, deps);
-
-  const verifyRes = await deps.api(`/api/files/${fileId}/verify`, { method: 'POST' });
-  if (!verifyRes.ok) throw new Error('Upload verification failed.');
-
-  const createRes = await deps.api('/api/voice/recordings', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      fileId,
-      audioUrl,
-      idempotencyKey: deps.makeIdempotencyKey(),
-      ...(jobId ? { jobId } : {}),
-    }),
-  });
-  if (!createRes.ok) throw new Error('Unable to start transcription.');
-
-  const created = (await createRes.json()) as { recording?: { id?: string } };
-  const recordingId = created.recording?.id;
-  if (!recordingId) throw new Error('Missing recording id from API.');
-
+  const { recordingId } = await deliverRecording(clip, deps, jobId);
   const completed = await pollRecordingUntilDone(recordingId, deps);
   const outcome = await pollRoutedOutcome(recordingId, completed, deps);
   return { transcript: (completed.transcript ?? '').trim(), outcome };

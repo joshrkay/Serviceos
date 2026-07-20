@@ -38,7 +38,7 @@ export default function ProposalReviewScreen() {
   const id = Array.isArray(params.id) ? params.id[0] : (params.id ?? '');
   const router = useRouter();
   const { me } = useMe();
-  const { proposal, phase, error, secondsLeft, approve, reject, resolveLine, resolveEntity, edit, undo, reload } =
+  const { proposal, phase, error, secondsLeft, approve, cancelQueued, reject, resolveLine, resolveEntity, edit, undo, reload } =
     useProposalReview(id);
   const [showRejectForm, setShowRejectForm] = useState(false);
   const [rejectReason, setRejectReason] = useState('');
@@ -505,6 +505,27 @@ export default function ProposalReviewScreen() {
                     </View>
                   </View>
                 )}
+              </View>
+            ) : null}
+
+            {/* U12 — queued offline (capture-class). No fake countdown: the
+                real 5s undo anchors on the server approvedAt at flush time.
+                Cancellable until the flush machine picks it up. */}
+            {phase === 'queued' ? (
+              <View className="mt-8">
+                <Text className="text-base text-foreground">Will approve when back online</Text>
+                <Text className="mt-1 text-base text-mutedForeground">
+                  You&apos;re offline — we saved this approval and will send it the moment you
+                  reconnect.
+                </Text>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Cancel queued approval"
+                  onPress={() => void cancelQueued()}
+                  className="mt-4 min-h-11 items-center justify-center rounded-md border border-border px-4 py-3"
+                >
+                  <Text className="text-base text-foreground">Cancel</Text>
+                </Pressable>
               </View>
             ) : null}
 
