@@ -20,6 +20,7 @@ import { uploadFile } from '../voice/nativeVoiceDeps';
 import { createFlushController } from './flush';
 import { getOfflineQueue, loadQueue } from './offlineQueue';
 import type { QueueItem } from './queue';
+import { subscribeOfflineFlushRequests } from './flushSignal';
 
 export function useOfflineSync(enabled: boolean, refreshInbox?: () => void): void {
   const { getToken } = useAuth();
@@ -68,15 +69,23 @@ export function useOfflineSync(enabled: boolean, refreshInbox?: () => void): voi
     const appStateSub = AppState.addEventListener('change', (state) => {
       if (state === 'active') void controller.flush();
     });
+    // Manual retry (approvals pull-to-refresh) — reactivate poison-parked items
+    // and drain. This is the only user-driven path back off `parked`.
+    // Return the promise so requestOfflineFlush() can await the drain (the
+    // approvals pull-to-refresh re-fetches the inbox only after it settles).
+    const stopFlushRequests = subscribeOfflineFlushRequests(() => controller.retry());
 
     void loadQueue().then(() => {
-      if (!cancelled) void controller.flush();
+      // On a fresh launch, recover anything that poison-parked in a prior
+      // session (retry, not plain flush) — conditions have plausibly changed.
+      if (!cancelled) void controller.retry();
     });
 
     return () => {
       cancelled = true;
       stopReconnect();
       appStateSub.remove();
+      stopFlushRequests();
     };
   }, [enabled, getToken, showToast, refreshInbox]);
 }

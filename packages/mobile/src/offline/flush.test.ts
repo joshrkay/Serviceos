@@ -279,6 +279,103 @@ describe('flush — backoff + poison-park', () => {
   });
 });
 
+describe('flush — poison-park recovery (retry + reconnect)', () => {
+  it('retry() reactivates a poison-parked item and drains it once conditions recover', async () => {
+    const { fs } = memFs();
+    const q = await makeLoadedQueue(fs);
+    await q.enqueueApproval({ proposalId: 'p1', proposalType: 'add_note', summary: 's' });
+
+    // First: a persistent 5xx storm parks the item.
+    let down = true;
+    const sleep = vi.fn(async () => {});
+    const { api, calls } = makeApi({
+      'POST /api/proposals/p1/approve': () =>
+        down ? jsonRes({ error: 'INTERNAL_ERROR' }, 500) : jsonRes({ id: 'p1', status: 'approved' }),
+    });
+    const controller = createFlushController(baseDeps(q, api, { sleep, maxAttempts: 3 }));
+    await controller.flush();
+    expect(q.snapshot()[0].status).toBe('parked');
+
+    // A plain flush must NOT rescue a parked item (nextRunnable skips it).
+    const callsAfterPark = calls.length;
+    await controller.flush();
+    expect(calls.length).toBe(callsAfterPark);
+
+    // Server recovers; the user pulls to refresh → retry() reactivates + drains.
+    down = false;
+    await controller.retry();
+    expect(calls.filter((c) => c.path === '/api/proposals/p1/approve').length).toBeGreaterThan(
+      callsAfterPark,
+    );
+    expect(q.snapshot()).toHaveLength(0); // delivered, removed from the journal
+  });
+
+  it('reconnect edge reactivates a poison-parked item (network-caused park)', async () => {
+    const { fs } = memFs();
+    const q = await makeLoadedQueue(fs);
+    await q.enqueueApproval({ proposalId: 'p1', proposalType: 'add_note', summary: 's' });
+
+    let online = false;
+    const sleep = vi.fn(async () => {});
+    const { api } = makeApi({
+      'POST /api/proposals/p1/approve': () =>
+        online ? jsonRes({ id: 'p1', status: 'approved' }) : jsonRes({ error: 'NETWORK' }, 503),
+    });
+    const controller = createFlushController(baseDeps(q, api, { sleep, maxAttempts: 3 }));
+    await controller.flush(); // fails 3x → parked
+    expect(q.snapshot()[0].status).toBe('parked');
+
+    // Network returns: the reconnect edge must retry (reactivate + drain).
+    online = true;
+    const stop = controller.start();
+    __emitNetInfoForTests({ isConnected: false, isInternetReachable: false });
+    __emitNetInfoForTests({ isConnected: true, isInternetReachable: true });
+    for (let i = 0; i < 30; i++) await Promise.resolve();
+    stop();
+
+    expect(q.snapshot()).toHaveLength(0); // recovered and delivered
+  });
+
+  it('holds the single-flight guard across reactivate + drain (concurrent retry is a no-op)', async () => {
+    const { fs } = memFs();
+    const q = await makeLoadedQueue(fs);
+    await q.enqueueApproval({ proposalId: 'p1', proposalType: 'add_note', summary: 's' });
+    await q.markParked((q.snapshot()[0]).id); // pre-parked item awaiting recovery
+
+    // A deferred approve response holds the first drain open mid-flight.
+    let releaseApprove!: () => void;
+    const approveGate = new Promise<void>((r) => {
+      releaseApprove = r;
+    });
+    let approveCalls = 0;
+    const api: ApiFetch = async (path) => {
+      if (path === '/api/proposals/p1/approve') {
+        approveCalls += 1;
+        await approveGate;
+        return jsonRes({ id: 'p1', status: 'approved' });
+      }
+      throw new Error(`unexpected ${path}`);
+    };
+    const controller = createFlushController(baseDeps(q, api));
+    const reactivateSpy = vi.spyOn(q, 'reactivateParked');
+
+    const first = controller.retry(); // enters guard: reactivates, drains, awaits approve
+    // Let the first drain reach (and block on) the approve call.
+    for (let i = 0; i < 100 && approveCalls === 0; i++) await Promise.resolve();
+    expect(approveCalls).toBe(1);
+    // Second retry while the first drain is in flight must return immediately —
+    // no second reactivation, no second approve — so it can't resurrect the row.
+    await controller.retry();
+    expect(reactivateSpy).toHaveBeenCalledTimes(1);
+    expect(approveCalls).toBe(1);
+
+    releaseApprove();
+    await first;
+    expect(approveCalls).toBe(1); // delivered exactly once
+    expect(q.snapshot()).toHaveLength(0);
+  });
+});
+
 describe('flush — voice idempotency + checkpoint resume', () => {
   it('sends the IDENTICAL idempotency key on two flush attempts of one voice item', async () => {
     const { fs, files } = memFs();
