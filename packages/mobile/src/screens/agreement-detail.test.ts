@@ -129,7 +129,10 @@ describe('Agreement detail screen', () => {
       ],
     });
     const { getByText } = render(createElement(AgreementDetailScreen));
-    fireEvent.click(getByText('View invoice ›').closest('button')!);
+    const runRow = getByText('View invoice ›').closest('button')!;
+    // Tap-target contract: the run row is ≥44px tall (min-h-11).
+    expect(runRow.className).toMatch(/\bmin-h-11\b/);
+    fireEvent.click(runRow);
     expect(h.push).toHaveBeenCalledWith('/invoices/inv-77');
   });
 });

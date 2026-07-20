@@ -44,6 +44,7 @@ function RunRow({ run, timezone, onOpenInvoice }: { run: AgreementRun; timezone?
         accessibilityRole="button"
         accessibilityLabel={`Open invoice from ${formatShortDate(run.scheduledFor, timezone)} run`}
         onPress={() => onOpenInvoice(run.generatedInvoiceId!)}
+        className="min-h-11 justify-center"
       >
         {body}
       </Pressable>

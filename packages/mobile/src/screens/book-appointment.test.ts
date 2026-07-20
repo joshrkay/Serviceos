@@ -71,7 +71,10 @@ describe('Book appointment screen', () => {
     expect(range.from).toMatch(/^\d{4}-\d{2}-\d{2}$/);
 
     // Slots render as tenant-zone wall-clock labels (18:00Z → 2:00 PM EDT).
-    fireEvent.click(await findByText('2:00 PM'));
+    const slot = await findByText('2:00 PM');
+    // Tap-target contract: the slot control is ≥44px tall (min-h-11).
+    expect(slot.closest('button')!.className).toMatch(/\bmin-h-11\b/);
+    fireEvent.click(slot);
     fireEvent.click(getByText('Book visit'));
 
     await waitFor(() => expect(h.createAppointment).toHaveBeenCalled());
