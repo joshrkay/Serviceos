@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import type { VoiceLookupAnswer } from '@ai-service-os/shared';
 import {
   uploadAndTranscribe,
   type AudioClip,
@@ -6,6 +7,15 @@ import {
 } from './uploadAndTranscribe';
 
 const clip: AudioClip = { fileUri: 'file:///clip.m4a', contentType: 'audio/mp4', sizeBytes: 1234 };
+
+const ANSWER: VoiceLookupAnswer = {
+  version: 1,
+  intent: 'lookup_balance',
+  result: 'found',
+  summary: 'Your current balance is $123.00.',
+  rows: [{ kind: 'money', label: 'Outstanding balance', amountCents: 12300 }],
+  entityRef: { kind: 'customer', id: '3b6cbf1a-bd8a-45f7-8b84-ce6b43a231d1' },
+};
 
 function jsonRes(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -51,9 +61,12 @@ const HAPPY_ROUTES = {
 describe('uploadAndTranscribe', () => {
   it('runs upload-url → PUT → verify → recordings → poll and returns the trimmed transcript', async () => {
     const deps = makeDeps(HAPPY_ROUTES);
-    const text = await uploadAndTranscribe(clip, deps);
+    const { transcript: text, outcome } = await uploadAndTranscribe(clip, deps);
 
     expect(text).toBe('bill Rodriguez');
+    // No answerStatus on the completed payload (older server / non-memo
+    // surface) → no second poll, outcome degrades to 'skipped'.
+    expect(outcome).toEqual({ kind: 'skipped' });
     expect(deps.uploadFile).toHaveBeenCalledWith('https://s3/put?sig=x', clip.fileUri, 'audio/mp4');
     // idempotencyKey is sent on POST /recordings
     const recCall = (deps.api as ReturnType<typeof vi.fn>).mock.calls.find(
@@ -106,7 +119,7 @@ describe('uploadAndTranscribe', () => {
       'POST /api/voice/recordings': () => jsonRes({ recording: { id: 'r1' } }, 202),
       'GET /api/voice/recordings/r1': () => jsonRes({ status: 'completed', transcript: 'ok' }),
     });
-    await expect(uploadAndTranscribe(clip, deps)).resolves.toBe('ok');
+    await expect(uploadAndTranscribe(clip, deps)).resolves.toMatchObject({ transcript: 'ok' });
   });
 
   it('throws when the upload PUT fails', async () => {
@@ -140,5 +153,101 @@ describe('uploadAndTranscribe', () => {
       'GET /api/voice/recordings/r1': () => jsonRes({ status: 'processing' }),
     });
     await expect(uploadAndTranscribe(clip, deps)).rejects.toThrow(/timed out/);
+  });
+});
+
+// U3 — the bounded second poll phase: after `status='completed'` the router
+// outcome (`answerStatus`) is still landing, so the client keeps polling the
+// same route under a small separate budget.
+describe('uploadAndTranscribe second poll phase (routed outcome)', () => {
+  /** Sequence the GET responses: first `completed` payload, then outcome polls. */
+  function sequencedDeps(bodies: unknown[], over: Partial<UploadAndTranscribeDeps> = {}) {
+    let i = 0;
+    return makeDeps(
+      {
+        ...HAPPY_ROUTES,
+        'GET /api/voice/recordings/r1': () =>
+          jsonRes(bodies[Math.min(i++, bodies.length - 1)]),
+      },
+      { answerTimeoutMs: 10, ...over },
+    );
+  }
+
+  it('polls past pending and renders the answered outcome with its parsed answer', async () => {
+    const deps = sequencedDeps([
+      { status: 'completed', transcript: 'what is my balance', answerStatus: 'pending' },
+      { status: 'completed', answerStatus: 'pending' },
+      { status: 'completed', answerStatus: 'answered', answer: ANSWER },
+    ]);
+    const { outcome } = await uploadAndTranscribe(clip, deps);
+    expect(outcome).toEqual({ kind: 'answered', answer: ANSWER });
+  });
+
+  it('maps proposal / clarification / failed terminal statuses onto the outcome', async () => {
+    for (const [answerStatus, kind] of [
+      ['proposal', 'proposal'],
+      ['clarification', 'clarification'],
+      ['failed', 'failed'],
+      ['skipped', 'skipped'],
+    ] as const) {
+      const deps = sequencedDeps([
+        { status: 'completed', transcript: 't', answerStatus: 'pending' },
+        { status: 'completed', answerStatus },
+      ]);
+      const { outcome } = await uploadAndTranscribe(clip, deps);
+      expect(outcome).toEqual({ kind });
+    }
+  });
+
+  it('resolves immediately (no second poll) when the completed payload is already terminal', async () => {
+    const deps = sequencedDeps([
+      { status: 'completed', transcript: 't', answerStatus: 'proposal' },
+    ]);
+    const { outcome } = await uploadAndTranscribe(clip, deps);
+    expect(outcome).toEqual({ kind: 'proposal' });
+    // one GET for phase 1, zero for phase 2
+    const gets = (deps.api as ReturnType<typeof vi.fn>).mock.calls.filter(
+      (c) => c[0] === '/api/voice/recordings/r1',
+    );
+    expect(gets).toHaveLength(1);
+  });
+
+  it('gives up after the bounded answer budget and degrades to timeout (today\'s behavior)', async () => {
+    const deps = sequencedDeps(
+      [{ status: 'completed', transcript: 't', answerStatus: 'pending' }],
+      { answerTimeoutMs: 5, intervalMs: 1 },
+    );
+    const { transcript, outcome } = await uploadAndTranscribe(clip, deps);
+    expect(transcript).toBe('t');
+    expect(outcome).toEqual({ kind: 'timeout' });
+  });
+
+  it('degrades a malformed answered payload to skipped instead of crashing', async () => {
+    const deps = sequencedDeps([
+      { status: 'completed', transcript: 't', answerStatus: 'pending' },
+      { status: 'completed', answerStatus: 'answered', answer: { bogus: true } },
+    ]);
+    const { outcome } = await uploadAndTranscribe(clip, deps);
+    expect(outcome).toEqual({ kind: 'skipped' });
+  });
+
+  it('degrades a second-phase poll error to timeout — the transcript is already safe', async () => {
+    let calls = 0;
+    const deps = makeDeps(
+      {
+        ...HAPPY_ROUTES,
+        'GET /api/voice/recordings/r1': () => {
+          calls++;
+          if (calls === 1) {
+            return jsonRes({ status: 'completed', transcript: 't', answerStatus: 'pending' });
+          }
+          return jsonRes({}, 500);
+        },
+      },
+      { answerTimeoutMs: 10 },
+    );
+    const { transcript, outcome } = await uploadAndTranscribe(clip, deps);
+    expect(transcript).toBe('t');
+    expect(outcome).toEqual({ kind: 'timeout' });
   });
 });

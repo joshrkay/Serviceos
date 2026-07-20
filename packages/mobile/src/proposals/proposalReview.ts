@@ -2,6 +2,7 @@
 // formatting the payload into review rows and the undo-window countdown math.
 // Kept pure so it unit-tests without a renderer.
 import { formatMoneyCents } from '../lib/format';
+import { humanizeRecurrence } from '../api/agreements';
 
 /** The 5s human-approval undo window — mirrors the API's UNDO_WINDOW_MS. */
 export const UNDO_WINDOW_MS = 5000;
@@ -13,10 +14,15 @@ const TYPE_LABEL: Record<string, string> = {
   record_payment: 'Payment',
   draft_estimate: 'Estimate',
   send_estimate: 'Send estimate',
+  send_estimate_nudge: 'Estimate nudge',
+  send_payment_reminder: 'Payment reminder',
+  apply_late_fee: 'Late fee',
   create_appointment: 'Appointment',
   reschedule_appointment: 'Reschedule',
   create_customer: 'Customer',
   voice_clarification: 'Clarify',
+  review_response_proposal: 'Review response',
+  request_feedback: 'Feedback request',
 };
 
 /** Friendly label for a proposal type (falls back to the de-underscored type). */
@@ -34,6 +40,9 @@ export interface ReviewProposal {
   payload?: Record<string, unknown>;
   sourceContext?: Record<string, unknown>;
   approvedAt?: string | null;
+  /** Record-level target (e.g. 'customer'), when the server stamps one. */
+  targetEntityType?: string;
+  targetEntityId?: string;
 }
 
 export interface EntityCandidate {
@@ -108,6 +117,391 @@ export function ambiguousCatalogLines(
   return lines;
 }
 
+/**
+ * A5 — good-better-best tier surfacing for the operator review card. A tiered
+ * `draft_estimate`/`update_estimate` proposal carries its tiers as grouped line
+ * items (items sharing a non-null `groupKey` are mutually-exclusive tiers;
+ * `isOptional` lines without a group are standalone add-ons). This mirrors the
+ * shipped web operator card grouping
+ * (packages/web/src/components/shared/AIProposalCard.tsx) and the customer page
+ * (EstimateApprovalPage.tsx) so the operator reviews the actual menu, not a flat
+ * list. Read-only — the operator approves the menu; the customer selects a tier.
+ */
+export interface TierOption {
+  lineIndex: number;
+  description: string;
+  /** Per-tier total in integer cents (unit price × quantity). */
+  totalCents: number;
+  isDefault: boolean;
+}
+
+export interface TierGroup {
+  key: string;
+  label: string;
+  options: TierOption[];
+}
+
+export interface EstimateTierView {
+  /** True when the payload carries a real tier group (≥2 options) or any add-on. */
+  isTiered: boolean;
+  groups: TierGroup[];
+  addOns: TierOption[];
+}
+
+/**
+ * Per-line total in integer cents. Estimate proposal payloads carry the price in
+ * `unitPrice` (integer cents, despite the name); invoice-shaped lines use
+ * `unitPriceCents`. Normalize both, defaulting quantity to 1. See
+ * docs/solutions/conventions/line-item-price-field-estimate-vs-invoice.md.
+ */
+function lineTotalCents(li: Record<string, unknown>): number {
+  const cents =
+    typeof li.unitPriceCents === 'number'
+      ? li.unitPriceCents
+      : typeof li.unitPrice === 'number'
+        ? li.unitPrice
+        : 0;
+  const qty = typeof li.quantity === 'number' ? li.quantity : 1;
+  return Math.round(cents * qty);
+}
+
+/**
+ * Extract the tier groups + add-ons from a proposal payload's `lineItems`.
+ * Malformed payloads (no array, non-object rows, missing fields) degrade to an
+ * empty, non-tiered view. Group order and per-tier line indices follow the
+ * payload order so the operator sees Good→Better→Best as drafted.
+ */
+export function estimateTierView(
+  payload: Record<string, unknown> | undefined,
+): EstimateTierView {
+  const lineItems = payload?.lineItems;
+  if (!Array.isArray(lineItems)) return { isTiered: false, groups: [], addOns: [] };
+
+  const groupMap = new Map<string, TierGroup>();
+  const groupOrder: string[] = [];
+  const addOns: TierOption[] = [];
+
+  for (let idx = 0; idx < lineItems.length; idx++) {
+    const li = lineItems[idx];
+    if (!isRecord(li)) continue;
+    const groupKey =
+      typeof li.groupKey === 'string' && li.groupKey.length > 0 ? li.groupKey : undefined;
+    const description =
+      typeof li.description === 'string' && li.description.length > 0
+        ? li.description
+        : `Line ${idx + 1}`;
+    const option: TierOption = {
+      lineIndex: idx,
+      description,
+      totalCents: lineTotalCents(li),
+      isDefault: li.isDefaultSelected === true,
+    };
+    if (groupKey) {
+      let group = groupMap.get(groupKey);
+      if (!group) {
+        group = {
+          key: groupKey,
+          label:
+            typeof li.groupLabel === 'string' && li.groupLabel.length > 0
+              ? li.groupLabel
+              : 'Options',
+          options: [],
+        };
+        groupMap.set(groupKey, group);
+        groupOrder.push(groupKey);
+      }
+      group.options.push(option);
+    } else if (li.isOptional === true) {
+      addOns.push(option);
+    }
+  }
+
+  const groups = groupOrder.map((k) => groupMap.get(k)!);
+  const isTiered = groups.some((g) => g.options.length >= 2) || addOns.length > 0;
+  return { isTiered, groups, addOns };
+}
+
+// ── C7/C8 — complaint + negotiation guardrail render helpers ────────────────
+// Complaint and negotiation intents mint no new proposal types: a complaint
+// produces an `add_note` (body prefixed '[COMPLAINT]') + a companion `callback`;
+// a negotiation produces a `callback` (± a discount `voice_clarification`). These
+// arrive in the inbox from the voice/AI path already. The helpers below read the
+// ACTUAL payload fields those tasks emit (packages/api/src/ai/tasks/
+// complaint-task.ts + negotiation-task.ts) so the review screen renders the
+// pinned marker, the severity, and a tap-to-call affordance instead of a flat
+// key/value dump. All are pure and malformed-safe.
+
+/** The add_note contract has no pin flag, so the body carries this stand-in. */
+export const COMPLAINT_PREFIX = '[COMPLAINT]';
+const COMPLAINT_PREFIX_RE = /^\s*\[COMPLAINT\]\s*/i;
+
+/** High-severity marker reason stamped on _meta.markers by the complaint task. */
+export const COMPLAINT_HIGH_SEVERITY_REASON = 'complaint_high_severity';
+/** Marker reason stamped on a negotiation ALLOW callback (discount in policy). */
+export const NEGOTIATION_WITHIN_POLICY_REASON = 'negotiation_discount_within_policy';
+
+export type ProposalSeverity = 'high' | 'normal';
+
+/**
+ * The `reason` strings on `_meta.markers[*]` — the deterministic, auditable
+ * flags the AI tasks attach (never an LLM mood read). Malformed `_meta` → [].
+ */
+export function proposalMarkerReasons(
+  payload: Record<string, unknown> | undefined,
+): string[] {
+  const meta = payload?._meta;
+  if (!isRecord(meta)) return [];
+  const markers = meta.markers;
+  if (!Array.isArray(markers)) return [];
+  const out: string[] = [];
+  for (const m of markers) {
+    if (isRecord(m) && typeof m.reason === 'string') out.push(m.reason);
+  }
+  return out;
+}
+
+export interface ComplaintNoteView {
+  /** The '[COMPLAINT]' prefix is the pinned-note stand-in (no pin flag exists). */
+  pinned: boolean;
+  severity: ProposalSeverity;
+  /** The complaint text with the '[COMPLAINT]' marker stripped. */
+  body: string;
+}
+
+/**
+ * View for a complaint `add_note` proposal — the pinned [COMPLAINT] marker, the
+ * severity (from `_meta.markers`), and the cleaned body. Returns null for any
+ * non-complaint proposal (wrong type, or an add_note without the prefix).
+ */
+export function complaintNoteView(
+  proposal: Pick<ReviewProposal, 'proposalType' | 'payload'> | undefined | null,
+): ComplaintNoteView | null {
+  if (!proposal || proposal.proposalType !== 'add_note') return null;
+  const body = typeof proposal.payload?.body === 'string' ? proposal.payload.body : '';
+  if (!COMPLAINT_PREFIX_RE.test(body)) return null;
+  return {
+    pinned: true,
+    severity: proposalMarkerReasons(proposal.payload).includes(COMPLAINT_HIGH_SEVERITY_REASON)
+      ? 'high'
+      : 'normal',
+    body: body.replace(COMPLAINT_PREFIX_RE, '').trim(),
+  };
+}
+
+export type CallbackKind = 'complaint' | 'negotiation' | 'discount_within_policy' | 'generic';
+
+export interface CallbackView {
+  kind: CallbackKind;
+  severity: ProposalSeverity;
+  /** Owner-facing one-liner explaining why to call back and the AI's stance. */
+  framing: string;
+  /** Negotiation-only: the deterministic owner recommendation. */
+  recommendation?: string;
+  /** Negotiation-only: the customer's ask, verbatim. */
+  askText?: string;
+  /**
+   * Resolved customer for tap-to-call, when the proposal carries one. Today's
+   * complaint/negotiation callback payloads do NOT include a customer id (the
+   * companion note carries the target, not the callback), so this is usually
+   * undefined and the screen falls back to opening the customer record. Read
+   * from payload.customerId → record targetEntity → sourceContext.customerId so
+   * it lights up automatically if the server starts stamping one.
+   */
+  customerId?: string;
+}
+
+function callbackCustomerId(proposal: ReviewProposal): string | undefined {
+  const p = proposal.payload ?? {};
+  if (typeof p.customerId === 'string' && p.customerId) return p.customerId;
+  if (
+    proposal.targetEntityType === 'customer' &&
+    typeof proposal.targetEntityId === 'string' &&
+    proposal.targetEntityId
+  ) {
+    return proposal.targetEntityId;
+  }
+  const sc = proposal.sourceContext ?? {};
+  if (typeof sc.customerId === 'string' && sc.customerId) return sc.customerId;
+  return undefined;
+}
+
+/**
+ * View for a `callback` proposal — the follow-up framing keyed off the payload
+ * `reason` the tasks emit ('customer_complaint_followup' /
+ * 'customer_negotiation_followup'), the severity, and (for negotiation) the
+ * recommendation + ask. The negotiation framing states plainly that the AI did
+ * NOT concede — it only flagged the pushback for the owner. Returns null for any
+ * non-callback proposal.
+ */
+export function callbackView(
+  proposal: ReviewProposal | undefined | null,
+): CallbackView | null {
+  if (!proposal || proposal.proposalType !== 'callback') return null;
+  const p = proposal.payload ?? {};
+  const reasons = proposalMarkerReasons(p);
+  const severity: ProposalSeverity = reasons.includes(COMPLAINT_HIGH_SEVERITY_REASON)
+    ? 'high'
+    : 'normal';
+  const reason = typeof p.reason === 'string' ? p.reason : '';
+  const recommendation = typeof p.recommendation === 'string' ? p.recommendation : undefined;
+  const askText = typeof p.askText === 'string' ? p.askText : undefined;
+  const customerId = callbackCustomerId(proposal);
+
+  let kind: CallbackKind = 'generic';
+  let framing = 'Owner follow-up — call the customer back.';
+  if (reason === 'customer_complaint_followup') {
+    kind = 'complaint';
+    framing =
+      severity === 'high'
+        ? 'High-severity complaint — call the customer back as soon as you can.'
+        : 'Complaint follow-up — call the customer back.';
+  } else if (reason === 'customer_negotiation_followup') {
+    if (reasons.includes(NEGOTIATION_WITHIN_POLICY_REASON)) {
+      kind = 'discount_within_policy';
+      framing =
+        'Discount within your policy — the AI did NOT apply it. Review and call back to confirm on your terms.';
+    } else {
+      kind = 'negotiation';
+      framing =
+        'Price/scope pushback — the AI did NOT negotiate or concede. Call back and decide on your terms.';
+    }
+  }
+
+  return {
+    kind,
+    severity,
+    framing,
+    ...(recommendation ? { recommendation } : {}),
+    ...(askText ? { askText } : {}),
+    ...(customerId ? { customerId } : {}),
+  };
+}
+
+// ── E9 — review_response + recurring/agreement render helpers ───────────────
+// Both proposal shapes arrive in the inbox from the voice/AI/worker paths
+// already (a review_response_proposal from the google-reviews poller or the
+// respond_to_review voice on-ramp; agreement-related proposals when a worker
+// stamps one). These pure helpers read the ACTUAL emitted fields so the review
+// screen renders the drafted reply / the named agreement instead of a flat
+// key/value dump. Malformed-safe; RN-free so they unit-test without a renderer.
+
+export interface ReviewResponseView {
+  /**
+   * The drafted PUBLIC reply text — this posts publicly to Google Business
+   * Profile, so the screen shows it prominently before the (comms-lane) confirm.
+   * (payload.publicResponse.text — see
+   * packages/shared/src/contracts/review-response-proposal.ts.)
+   */
+  publicReply: string;
+  classification?: string;
+  /** Optional 1:1 follow-up to the matched customer (email/SMS). */
+  privateFollowUp?: { channel: string; body: string };
+  /** Optional service credit in integer cents. */
+  serviceCreditCents?: number;
+}
+
+/**
+ * View for a `review_response_proposal` — surfaces the drafted public reply
+ * (and any private follow-up / service credit) so the owner reviews the exact
+ * words that will be posted publicly. Returns null for any other proposal type,
+ * or when the payload carries no reply text.
+ */
+export function reviewResponseView(
+  proposal: Pick<ReviewProposal, 'proposalType' | 'payload'> | undefined | null,
+): ReviewResponseView | null {
+  if (!proposal || proposal.proposalType !== 'review_response_proposal') return null;
+  const p = proposal.payload ?? {};
+  const pub = isRecord(p.publicResponse) ? p.publicResponse : undefined;
+  const publicReply = typeof pub?.text === 'string' ? pub.text.trim() : '';
+  if (!publicReply) return null;
+
+  const view: ReviewResponseView = { publicReply };
+
+  if (typeof p.classification === 'string') view.classification = p.classification;
+
+  const priv = isRecord(p.privateFollowUp) ? p.privateFollowUp : undefined;
+  if (priv && typeof priv.body === 'string' && priv.body.trim()) {
+    view.privateFollowUp = {
+      channel: typeof priv.channel === 'string' ? priv.channel : 'message',
+      body: priv.body.trim(),
+    };
+  }
+
+  const credit = isRecord(p.serviceCredit) ? p.serviceCredit : undefined;
+  if (credit && typeof credit.amountCents === 'number' && credit.amountCents > 0) {
+    view.serviceCreditCents = credit.amountCents;
+  }
+
+  return view;
+}
+
+export interface AgreementProposalView {
+  /** Resolved agreement id, when the proposal carries one (deep-link target). */
+  agreementId?: string;
+  /** Human agreement name, when stamped ("Quarterly HVAC Tune-up"). */
+  name?: string;
+  /** Humanized cadence from a raw RRULE on the payload, when present. */
+  cadence?: string;
+}
+
+/** Read the agreement id from payload → record target → sourceContext. */
+function agreementIdOf(proposal: ReviewProposal): string | undefined {
+  const p = proposal.payload ?? {};
+  if (typeof p.agreementId === 'string' && p.agreementId) return p.agreementId;
+  if (
+    proposal.targetEntityType === 'agreement' &&
+    typeof proposal.targetEntityId === 'string' &&
+    proposal.targetEntityId
+  ) {
+    return proposal.targetEntityId;
+  }
+  const sc = proposal.sourceContext ?? {};
+  if (typeof sc.agreementId === 'string' && sc.agreementId) return sc.agreementId;
+  return undefined;
+}
+
+/**
+ * View for a recurring/agreement-related proposal — names the agreement (id +
+ * label) and its cadence so an approval clearly references WHICH recurring
+ * plan, not a bare payload dump. Gated on a real agreement signal (an
+ * agreementId or a recurrenceRule) so it never false-positives on the many
+ * proposals that carry an unrelated `name`. Returns null otherwise. Mirrors the
+ * callbackCustomerId pattern: reads several locations so it lights up
+ * automatically once the server starts stamping the fields.
+ */
+export function agreementProposalView(
+  proposal: ReviewProposal | undefined | null,
+): AgreementProposalView | null {
+  if (!proposal) return null;
+  const p = proposal.payload ?? {};
+  const sc = proposal.sourceContext ?? {};
+
+  const agreementId = agreementIdOf(proposal);
+  const rawRule =
+    typeof p.recurrenceRule === 'string'
+      ? p.recurrenceRule
+      : typeof sc.recurrenceRule === 'string'
+        ? sc.recurrenceRule
+        : undefined;
+
+  // No agreement signal → not an agreement proposal (avoid `name` false hits).
+  if (!agreementId && !rawRule) return null;
+
+  const name =
+    typeof p.agreementName === 'string' && p.agreementName
+      ? p.agreementName
+      : typeof sc.agreementName === 'string' && sc.agreementName
+        ? sc.agreementName
+        : undefined;
+  const cadence = rawRule ? humanizeRecurrence(rawRule) : undefined;
+
+  return {
+    ...(agreementId ? { agreementId } : {}),
+    ...(name ? { name } : {}),
+    ...(cadence ? { cadence } : {}),
+  };
+}
+
 export interface ReviewRow {
   label: string;
   value: string;
@@ -126,7 +520,8 @@ export function humanizeKey(key: string): string {
 /** Money is stored in integer cents; render it as dollars, never float math. */
 export { formatMoneyCents as formatCents } from '../lib/format';
 
-function isCentsKey(key: string): boolean {
+/** True for integer-cents payload keys (amountCents, unitPriceCents, …). */
+export function isCentsKey(key: string): boolean {
   return /cents$/i.test(key);
 }
 

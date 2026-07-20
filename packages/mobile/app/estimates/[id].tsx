@@ -10,6 +10,7 @@ import { useDetailQuery } from '../../src/hooks/useDetailQuery';
 import { useSavePhase } from '../../src/hooks/useSavePhase';
 import { useApiClient } from '../../src/lib/useApiClient';
 import { formatMoneyCents, formatShortDate } from '../../src/lib/format';
+import { useApiClient } from '../../src/lib/useApiClient';
 
 interface EstimateDetail {
   id: string;
@@ -91,6 +92,14 @@ export default function EstimateDetailScreen() {
     id ? `/api/estimates/${id}` : null,
   );
   const sendPhase = useSavePhase();
+
+  // A7 — estimate nudge. Only a SENT estimate that the customer hasn't yet
+  // accepted/rejected/expired can be nudged; those terminal states get no
+  // forward action. The nudge is a comms-lane action, so it sits behind the
+  // same explicit confirm as the invoice Send (U1/U5 pattern).
+  const [nudging, setNudging] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const title = data?.estimateNumber ?? (id ? `Estimate ${id.slice(0, 8)}` : 'Estimate');
   const grouped = groupEstimateTiers(data?.lineItems);

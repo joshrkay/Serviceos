@@ -153,6 +153,66 @@ describe('New estimate screen — job selection', () => {
     );
   });
 
+  it('builds a two-tier (good-better-best) estimate as a mutually-exclusive group', async () => {
+    const { getByText } = render(createElement(NewEstimate));
+    pickCustomerThenJob(getByText);
+    fireEvent.click(getByText(/Fix sink/).closest('button')!);
+    fireEvent.click(getByText('Next: line items').closest('button')!);
+
+    // Turn on tier mode, then fill the Good and Better tiers via the catalog sheet.
+    fireEvent.click(getByText('Offer good / better / best options').closest('button')!);
+    fireEvent.click(getByText('Add Good item').closest('button')!);
+    fireEvent.click(getByText('Stub add line'));
+    fireEvent.click(getByText('Better').closest('button')!);
+    fireEvent.click(getByText('Add Better item').closest('button')!);
+    fireEvent.click(getByText('Stub add line'));
+
+    fireEvent.click(getByText('Review').closest('button')!);
+    fireEvent.click(getByText('Create & send').closest('button')!);
+
+    await waitFor(() => expect(h.createEstimate).toHaveBeenCalled());
+    const [, input] = h.createEstimate.mock.calls[0] as [
+      unknown,
+      { jobId: string; lineItems: Array<Record<string, unknown>> },
+    ];
+    expect(input.jobId).toBe('job-1');
+    expect(input.lineItems).toHaveLength(2);
+    // Both tiers share the group key and are selectable options...
+    for (const li of input.lineItems) {
+      expect(li.groupKey).toBe('tier');
+      expect(li.isOptional).toBe(true);
+    }
+    // ...with exactly one default (the first/Good tier).
+    expect(input.lineItems.filter((li) => li.isDefaultSelected === true)).toHaveLength(1);
+    expect(input.lineItems[0].isDefaultSelected).toBe(true);
+    await waitFor(() => expect(h.sendEstimate).toHaveBeenCalledWith(h.api, 'est-new'));
+  });
+
+  it('keeps Review disabled until at least two tiers are filled', () => {
+    const { getByText } = render(createElement(NewEstimate));
+    pickCustomerThenJob(getByText);
+    fireEvent.click(getByText(/Fix sink/).closest('button')!);
+    fireEvent.click(getByText('Next: line items').closest('button')!);
+    fireEvent.click(getByText('Offer good / better / best options').closest('button')!);
+    // No tiers filled yet → Review blocked.
+    expect(getByText('Review').closest('button')!.disabled).toBe(true);
+    fireEvent.click(getByText('Add Good item').closest('button')!);
+    fireEvent.click(getByText('Stub add line'));
+    // One tier filled is still not a group → still blocked.
+    expect(getByText('Review').closest('button')!.disabled).toBe(true);
+  });
+
+  it('renders tier tabs as >=44px tap targets', () => {
+    const { getByText } = render(createElement(NewEstimate));
+    pickCustomerThenJob(getByText);
+    fireEvent.click(getByText(/Fix sink/).closest('button')!);
+    fireEvent.click(getByText('Next: line items').closest('button')!);
+    fireEvent.click(getByText('Offer good / better / best options').closest('button')!);
+    for (const label of ['Good', 'Better', 'Best']) {
+      expect(getByText(label).closest('button')!.className).toMatch(/\bmin-h-11\b/);
+    }
+  });
+
   it('surfaces a create error on the save button', () => {
     h.phase = 'error';
     h.error = 'createEstimate: 400';

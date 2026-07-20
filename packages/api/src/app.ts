@@ -2538,6 +2538,41 @@ export function createApp(): AppWithLifecycle {
     appointmentRepo,
     assignmentRepo,
   });
+  // Owner-scoped revenue lookup (voice `lookup_revenue`) shares the same
+  // money-dashboard repo the /api/reports router uses below. Constructed
+  // here (rather than next to the telephony wiring) because the U3 memo
+  // answer path needs it in the worker deps a few lines down.
+  const moneyDashboardRepo = new PgMoneyDashboardRepository(
+    invoiceRepo,
+    paymentRepo,
+    expenseRepo,
+  );
+  // RV-062 — shared by the digest worker (writes) and the /api/digests
+  // web-view router (reads). Created once here so both wire to the same
+  // instance (Pg-backed in prod, in-memory in dev where the sweep no-ops).
+  const dailyDigestRepo = pool
+    ? new PgDailyDigestRepository(pool)
+    : new InMemoryDailyDigestRepository();
+  // U3 — DB-authoritative role of a memo's creator for the owner-grade
+  // lookup gate (revenue / job profit / pending items / digest). The
+  // recording's created_by is the Clerk subject, so the Pg path reuses the
+  // SAME membership lookup resolveAuthorization gates requests with; the
+  // in-memory dev path matches the users roster by clerk id or row id.
+  // A null / inactive membership fails closed to a refusal in the adapter.
+  const voiceMemoMembershipLoader = pool ? createAuthorizationLoader(pool) : undefined;
+  const resolveVoiceMemberRole = async (
+    tenantId: string,
+    userId: string,
+  ): Promise<string | null> => {
+    if (voiceMemoMembershipLoader) {
+      const membership = await voiceMemoMembershipLoader(userId, tenantId);
+      if (!membership || membership.deleted || membership.status !== 'active') return null;
+      return membership.role;
+    }
+    const users = await userRepo.findByTenant(tenantId);
+    const user = users.find((u) => u.clerkUserId === userId || u.id === userId);
+    return user?.role ?? null;
+  };
   const voiceActionRouterWorker = createVoiceActionRouterWorker({
     gateway: llmGateway,
     proposalRepo,
@@ -2647,6 +2682,26 @@ export function createApp(): AppWithLifecycle {
       // P2-034 — persist each outbound render so inbound Y/N/EDIT replies
       // can resolve which proposal the owner is answering.
       recordSmsEvent: recordProposalSmsRender,
+    },
+    // U3 — E-lane answers on the recorded-memo path: the routed outcome
+    // (answer_status) is stamped on the recording row, and lookup intents
+    // execute their skill instead of skipping. `voiceRepo` doubles as the
+    // memo-creator resolver for the owner-grade authorization gate.
+    voiceRepo,
+    lookupAnswers: {
+      invoiceRepo,
+      estimateRepo,
+      agreementRepo,
+      moneyDashboardRepo,
+      dailyDigestRepo,
+      dunningConfigRepo,
+      timeEntryRepo,
+      expenseRepo,
+      settingsRepo,
+      // Mirrors the telephony adapter wiring: the memo path now writes the
+      // same lookup_events analytics rows (keyed by recordingId).
+      lookupEvents: lookupEventService,
+      resolveMemberRole: resolveVoiceMemberRole,
     },
   });
   workerRegistry.set(
@@ -3180,19 +3235,9 @@ export function createApp(): AppWithLifecycle {
     return sharedRichPackByType.get(base)?.repairTemplates ?? [];
   };
   const telephonyCallControl = new DefaultTwilioCallControl();
-  // Owner-scoped revenue lookup (voice `lookup_revenue`) shares the same
-  // money-dashboard repo the /api/reports router uses below.
-  const moneyDashboardRepo = new PgMoneyDashboardRepository(
-    invoiceRepo,
-    paymentRepo,
-    expenseRepo,
-  );
-  // RV-062 — shared by the digest worker (writes) and the /api/digests
-  // web-view router (reads). Created once here so both wire to the same
-  // instance (Pg-backed in prod, in-memory in dev where the sweep no-ops).
-  const dailyDigestRepo = pool
-    ? new PgDailyDigestRepository(pool)
-    : new InMemoryDailyDigestRepository();
+  // moneyDashboardRepo / dailyDigestRepo are constructed further up (U3 —
+  // the voice-action-router worker's E-lane answer deps need them before
+  // this telephony wiring block).
   // RV-115/RV-116 — durable dropped-call recovery: the scheduler persists
   // the FSM context snapshot at termination; the resume handler picks the
   // thread back up when the caller replies to the recovery SMS.
@@ -5333,7 +5378,7 @@ export function createApp(): AppWithLifecycle {
     }),
   );
   // D2-1c — audit-log proposal approve / reject / edit / undo.
-  app.use('/api/dispatch', createSchedulingRouter(feasibilityDeps, userRepo));
+  app.use('/api/dispatch', createSchedulingRouter(feasibilityDeps, userRepo, settingsRepo ?? undefined));
   app.use(
     '/api/proposals',
     createProposalsRouter(

@@ -136,6 +136,17 @@ export async function approveProposalsBatch(
 
   for (const id of proposalIds) {
     try {
+      // U1 lane backstop — batch approval is the bulk lane and must only ever
+      // sweep capture-class proposals. Comms / money / irreversible types
+      // require individual review (CLAUDE.md "Never auto-execute"), so a
+      // non-capture id fails per-id here instead of relying on the client
+      // filter alone. The single-approve path is deliberately untouched: an
+      // owner can still explicitly approve a money proposal one at a time.
+      const existing = await proposalRepo.findById(tenantId, id);
+      if (existing && actionClassForProposalType(existing.proposalType) !== 'capture') {
+        failed.push({ id, reason: 'BATCH_NON_CAPTURE' });
+        continue;
+      }
       await approveProposal(proposalRepo, tenantId, id, actorId, actorRole, auditRepo, channel);
       approved.push(id);
     } catch (err) {

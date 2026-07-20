@@ -435,6 +435,15 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // to any environment yet) to widen the status CHECK with a third state,
   // 'sending', closing the post-send crash window; hash regenerated.
   ['258_send_claims', '60e4d9f4b7fb85c5f3feecb518d1cc2df16cb72d2c8b4b6e9ace1fb0f4b981b5'],
+  // U3 (iOS blueprint) — E-lane answer back-channel: nullable answer_status
+  // (CHECK-guarded routed-outcome enum) + answer JSONB on voice_recordings.
+  // New migration, additive no-op for existing rows.
+  ['259_voice_recordings_answer', '11e20969ea0f4802487fd9ecadd779cce909e9251d18b61b8b0611665228e0d7'],
+  // U11 (iOS blueprint) — client idempotency key on the in-app voice-note
+  // create path: nullable idempotency_key column + partial unique index
+  // (tenant_id, idempotency_key) WHERE NOT NULL. New migration, additive
+  // no-op for existing rows.
+  ['260_voice_recordings_idempotency_key', '4d3a00f1a88309a306ca3dfdcba5b09da74493b3a4170e6a8824c4f846349c53'],
 ];
 
 function hashMigration(value: string): string {

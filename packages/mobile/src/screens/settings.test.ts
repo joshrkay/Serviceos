@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const h = vi.hoisted(() => ({
   back: vi.fn(),
+  push: vi.fn(),
   signOut: vi.fn(),
   me: {
     user_id: 'u',
@@ -24,7 +25,7 @@ const h = vi.hoisted(() => ({
 }));
 
 vi.mock('expo-router', () => ({
-  useRouter: () => ({ back: h.back, push: vi.fn(), replace: vi.fn() }),
+  useRouter: () => ({ back: h.back, push: h.push, replace: vi.fn() }),
 }));
 vi.mock('../hooks/useMe', () => ({
   useMe: () => ({ me: h.me, isLoading: h.isLoading, error: h.error, switchMode: vi.fn(), refetch: vi.fn() }),
@@ -97,5 +98,14 @@ describe('Settings screen', () => {
     fireEvent.change(getByPlaceholderText('+1 555 123 4567'), { target: { value: 'nope' } });
     fireEvent.click(getByText('Save callback number').closest('button')!);
     expect(await findByText('Enter a valid phone number.')).toBeTruthy();
+  });
+
+  // U4 — mode stays read-only here; the interactive toggle lives on Home.
+  it('links "switch mode" back to the Home toggle instead of editing here', () => {
+    const { getByText } = render(createElement(Settings));
+    const link = getByText('Switch mode on the Home screen →').closest('button')!;
+    expect(link.className).toMatch(/\bmin-h-11\b/);
+    fireEvent.click(link);
+    expect(h.push).toHaveBeenCalledWith('/');
   });
 });

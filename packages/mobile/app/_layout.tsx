@@ -21,6 +21,7 @@ import { tokenCache } from '../src/lib/tokenCache';
 import { usePushRegistration } from '../src/hooks/usePushRegistration';
 import { usePendingProposals } from '../src/hooks/usePendingProposals';
 import { useNotificationRouter } from '../src/push/useNotificationRouter';
+import { useOfflineSync } from '../src/offline/useOfflineSync';
 import { ErrorBoundary } from '../src/components/ErrorBoundary';
 import { ToastProvider } from '../src/components/Toast';
 import { OfflineBanner } from '../src/components/OfflineBanner';
@@ -36,6 +37,9 @@ function AuthGate() {
     enabled: Boolean(isSignedIn),
   });
   useNotificationRouter(refreshPendingProposals);
+  // U12 — drain the offline queue (voice + capture-class approvals) on
+  // reconnect/foreground; a permanent-drop re-fetches the inbox.
+  useOfflineSync(Boolean(isSignedIn), refreshPendingProposals);
 
   useEffect(() => {
     if (!isLoaded) return;

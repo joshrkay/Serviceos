@@ -12,6 +12,8 @@ interface Appointment {
   scheduledStart?: string;
   status?: string;
   appointmentType?: string;
+  /** Optimistic-concurrency token for reschedule/reassign/crew mints. */
+  updatedAt?: string;
 }
 
 function titleCase(value?: string): string | undefined {
@@ -24,7 +26,9 @@ function titleCase(value?: string): string | undefined {
 
 /**
  * Supervisor schedule list. Technician accounts redirect to Today — the
- * assigned day spine — instead of the tenant-wide appointments list.
+ * assigned day spine — instead of the tenant-wide appointments list. Tapping a
+ * row opens the per-appointment action sheet (confirm / reschedule / reassign /
+ * crew / cancel); the header "Book" opens manual booking.
  */
 export default function Schedule() {
   const router = useRouter();
@@ -49,6 +53,8 @@ export default function Schedule() {
     params: { paginated: 'true' },
     enabled: !technicianOnly && Boolean(me),
   });
+
+  const [active, setActive] = useState<ActionableAppointment | null>(null);
 
   const sorted = useMemo(
     () =>

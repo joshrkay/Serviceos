@@ -170,6 +170,36 @@ describe('voice-sessions routes', () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }, 10_000);
 
+  // U13 — the mobile assistant streams SSE with the Clerk token in the
+  // Authorization header (`expo/fetch`). The server's `?token=` query fallback
+  // was removed on purpose (it leaked tokens into URL logs / referer). This
+  // pins that: with no header-based auth populated, a `?token=` query is
+  // ignored and the SSE route rejects with 401 — it is header-auth-only.
+  function buildUnauthedApp(s: VoiceSessionStore, a: InAppVoiceAdapter) {
+    const app = express();
+    app.use(express.json());
+    // No auth-injecting middleware — only the router's own requireAuth runs.
+    app.use('/api/voice/sessions', createVoiceSessionsRouter({ adapter: a, store: s }));
+    return app;
+  }
+
+  it('SSE GET /:id/events is header-auth-only — a ?token= query is not honored', async () => {
+    const app = buildUnauthedApp(store, adapter);
+    const res = await request(app).get(
+      '/api/voice/sessions/any-session/events?token=fake-jwt',
+    );
+    expect(res.status).toBe(401);
+    expect(res.body.error).toBe('UNAUTHORIZED');
+  });
+
+  it('POST /:id/input likewise ignores a ?token= query (header-auth-only)', async () => {
+    const app = buildUnauthedApp(store, adapter);
+    const res = await request(app)
+      .post('/api/voice/sessions/any-session/input?token=fake-jwt')
+      .send({ text: 'hi' });
+    expect(res.status).toBe(401);
+  });
+
   it('GET /active returns only the calling tenant\'s non-ended sessions', async () => {
     const appA = buildApp('tenant-a', 'user-a', store, adapter);
     const appB = buildApp('tenant-b', 'user-b', store, adapter);

@@ -65,6 +65,20 @@ export const TextInput = ({ onChangeText, value, className, placeholder, accessi
       typeof onChangeText === 'function' ? (onChangeText as (t: string) => void)(e.target.value) : undefined,
   });
 
+// Maps an RN <Switch value onValueChange/> to a checkbox so screen tests can
+// assert (and drive) a boolean toggle — e.g. the customer note "pin to top".
+export const Switch = ({ value, onValueChange, accessibilityLabel, className }: Props) =>
+  createElement('input', {
+    type: 'checkbox',
+    className,
+    'aria-label': accessibilityLabel as string,
+    checked: Boolean(value),
+    onChange: (e: { target: { checked: boolean } }) =>
+      typeof onValueChange === 'function'
+        ? (onValueChange as (v: boolean) => void)(e.target.checked)
+        : undefined,
+  });
+
 export const Pressable = ({ children, onPress, onPressIn, onPressOut, disabled, className }: Props) => {
   const resolved =
     typeof children === 'function'

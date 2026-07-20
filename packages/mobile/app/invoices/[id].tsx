@@ -16,6 +16,7 @@ import { useDetailQuery } from '../../src/hooks/useDetailQuery';
 import { useSavePhase } from '../../src/hooks/useSavePhase';
 import { useApiClient } from '../../src/lib/useApiClient';
 import { formatMoneyCents, formatShortDate } from '../../src/lib/format';
+import { useApiClient } from '../../src/lib/useApiClient';
 
 interface InvoiceDetail {
   id: string;
@@ -42,6 +43,14 @@ function customerName(inv?: InvoiceDetail): string | undefined {
 
 const PAYABLE = new Set(['open', 'partially_paid']);
 
+// A2/A3 — the two direct, human-initiated invoice actions. Both mirror the U1
+// proposal-review confirm pattern (packages/mobile/app/proposals/[id].tsx): an
+// explicit, action-naming sheet before anything fires. Issue moves the invoice
+// into the money-owing state (money lane); Send messages the customer (comms
+// lane). Late-fee / payment-reminder are deliberately NOT here — see the U5 note
+// below the action row.
+type PendingAction = 'issue' | 'send';
+
 export default function InvoiceDetailScreen() {
   const params = useLocalSearchParams<{ id: string }>();
   const id = Array.isArray(params.id) ? params.id[0] : (params.id ?? '');
@@ -55,6 +64,9 @@ export default function InvoiceDetailScreen() {
   const linkPhase = useSavePhase();
   const [payLinkUrl, setPayLinkUrl] = useState<string | null>(null);
   const [recordOpen, setRecordOpen] = useState(false);
+  const [pending, setPending] = useState<PendingAction | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const title = data?.invoiceNumber ?? (id ? `Invoice ${id.slice(0, 8)}` : 'Invoice');
   const status = data?.status ?? '';

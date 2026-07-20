@@ -6,6 +6,8 @@ import { createElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MeResponse } from '@ai-service-os/shared';
 import type { MoneySummary } from '../hooks/useMoneyDashboard';
+// eslint-disable-next-line import/order
+import { __resetEmergencyForTests, currentEmergency, raiseEmergency } from '../push/emergencyBanner';
 
 const h = vi.hoisted(() => ({
   push: vi.fn(),
@@ -29,6 +31,8 @@ const h = vi.hoisted(() => ({
   moneyLoading: false,
   moneyError: null as string | null,
   notConfigured: false,
+  // U4 — executed-proposal feed
+  executed: [] as unknown[],
 }));
 
 vi.mock('expo-router', () => ({
@@ -46,6 +50,15 @@ vi.mock('../hooks/useMe', () => ({
     error: h.error,
     switchMode: h.switchMode,
     refetch: h.refetch,
+  }),
+}));
+vi.mock('../hooks/useListQuery', () => ({
+  useListQuery: () => ({
+    data: h.executed,
+    total: (h.executed as unknown[]).length,
+    isLoading: false,
+    error: null,
+    refetch: vi.fn(),
   }),
 }));
 vi.mock('../hooks/usePendingProposals', () => ({
@@ -98,6 +111,8 @@ beforeEach(() => {
   h.moneyLoading = false;
   h.moneyError = null;
   h.notConfigured = false;
+  h.executed = [];
+  __resetEmergencyForTests();
 });
 
 afterEach(() => cleanup());
@@ -234,5 +249,46 @@ describe('Home / Today dashboard', () => {
     const { getByText } = render(createElement(Home));
     fireEvent.click(getByText('tech').closest('button')!);
     await waitFor(() => expect(h.showErrorToast).toHaveBeenCalledWith(failure));
+  });
+
+  // U4 — recent activity feed (executed proposals).
+  it('renders recent activity rows for executed proposals with relative times', () => {
+    h.executed = [
+      { id: 'e1', summary: 'Invoice sent · Rodriguez', proposalType: 'send_invoice', updatedAt: new Date(Date.now() - 120_000).toISOString() },
+      { id: 'e2', summary: 'Appt booked · 123 Oak St', proposalType: 'create_appointment', updatedAt: new Date(Date.now() - 18 * 60_000).toISOString() },
+    ];
+    const { getByText } = render(createElement(Home));
+    expect(getByText('Recent activity')).toBeTruthy();
+    expect(getByText('✓ Invoice sent · Rodriguez')).toBeTruthy();
+    expect(getByText('2m')).toBeTruthy();
+    expect(getByText('18m')).toBeTruthy();
+  });
+
+  it('hides the recent-activity section entirely when nothing has executed', () => {
+    h.executed = [];
+    const { queryByText } = render(createElement(Home));
+    expect(queryByText('Recent activity')).toBeNull();
+  });
+
+  // U4 (B7) — emergency banner.
+  it('renders the emergency banner while raised; View deep-links and clears it', () => {
+    raiseEmergency({ type: 'emergency', screen: '/approvals' });
+    const { getByText } = render(createElement(Home));
+    expect(getByText('⚠ Emergency')).toBeTruthy();
+    const view = getByText('View').closest('button')!;
+    expect(view.className).toMatch(/\bmin-h-11\b/);
+    fireEvent.click(view);
+    expect(h.push).toHaveBeenCalledWith('/approvals');
+    expect(currentEmergency()).toBeNull();
+  });
+
+  it('Dismiss acknowledges the emergency without navigating', () => {
+    raiseEmergency({ type: 'escalation' });
+    const { getByText, queryByText } = render(createElement(Home));
+    expect(getByText('⚠ Needs you now')).toBeTruthy();
+    fireEvent.click(getByText('Dismiss').closest('button')!);
+    expect(queryByText('⚠ Needs you now')).toBeNull();
+    expect(h.push).not.toHaveBeenCalled();
+    expect(currentEmergency()).toBeNull();
   });
 });

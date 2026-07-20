@@ -7,12 +7,14 @@ import { ConvertLeadSheet } from '../../src/components/ConvertLeadSheet';
 import { ErrorState } from '../../src/components/ErrorState';
 import { LabelValueTable } from '../../src/components/LabelValueTable';
 import { ScreenShell } from '../../src/components/ScreenShell';
+import { useToast } from '../../src/components/Toast';
 import { useDetailQuery } from '../../src/hooks/useDetailQuery';
 import { useMe } from '../../src/hooks/useMe';
 import { useSavePhase } from '../../src/hooks/useSavePhase';
 import { useApiClient } from '../../src/lib/useApiClient';
 import { formatMoneyCents } from '../../src/lib/format';
 import { buildMailtoUrl, buildSmsUrl, buildTelUrl } from '../../src/lib/deviceLinks';
+import { convertLead, markLeadLost } from '../../src/api/leads';
 
 interface LeadDetail {
   id: string;
@@ -32,6 +34,7 @@ interface LeadDetail {
   state?: string;
   postalCode?: string;
   accessNotes?: string;
+  convertedCustomerId?: string;
 }
 
 function leadName(l?: LeadDetail): string {
@@ -54,6 +57,8 @@ export default function LeadDetailScreen() {
   const router = useRouter();
   const client = useApiClient();
   const { me } = useMe();
+  const api = useApiClient();
+  const { showToast } = useToast();
   const { data, isLoading, error, refetch } = useDetailQuery<LeadDetail>(
     id ? `/api/leads/${id}` : null,
   );
@@ -143,6 +148,126 @@ export default function LeadDetailScreen() {
               <Text className="text-base text-foreground">Email</Text>
             </Pressable>
           </View>
+
+          {/* C4 / C5 — lifecycle actions. Convert is a capture confirm; mark-lost
+              mirrors the reject-reason form (a required reason field). */}
+          {canConvert || canLose ? (
+            <View className="mb-4 gap-2">
+              {actionError ? (
+                <Text className="text-base text-destructive">{actionError}</Text>
+              ) : null}
+
+              {canConvert && !showConvertConfirm && !showLostForm ? (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Convert to customer"
+                  onPress={() => {
+                    setActionError(null);
+                    setShowConvertConfirm(true);
+                  }}
+                  className="min-h-11 items-center justify-center rounded-md bg-primary px-4 py-3"
+                >
+                  <Text className="text-base font-semibold text-primaryForeground">
+                    Convert to customer
+                  </Text>
+                </Pressable>
+              ) : null}
+
+              {showConvertConfirm ? (
+                <View className="rounded-lg border border-border bg-card p-4">
+                  <Text className="text-base font-medium text-foreground">
+                    Convert this lead to a customer?
+                  </Text>
+                  <Text className="mt-2 text-base text-mutedForeground">
+                    Creates a customer and service location from this lead and moves any jobs over.
+                  </Text>
+                  <View className="mt-3 flex-row gap-3">
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel="Cancel convert"
+                      onPress={() => setShowConvertConfirm(false)}
+                      disabled={converting}
+                      className="min-h-11 flex-1 items-center justify-center rounded-md border border-border px-4 py-3"
+                    >
+                      <Text className="text-base text-foreground">Cancel</Text>
+                    </Pressable>
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel="Confirm convert"
+                      onPress={() => void onConfirmConvert()}
+                      disabled={converting}
+                      className="min-h-11 flex-1 items-center justify-center rounded-md bg-primary px-4 py-3"
+                    >
+                      {converting ? (
+                        <ActivityIndicator color="#ffffff" />
+                      ) : (
+                        <Text className="text-base font-semibold text-primaryForeground">
+                          Convert
+                        </Text>
+                      )}
+                    </Pressable>
+                  </View>
+                </View>
+              ) : null}
+
+              {canLose && !showConvertConfirm && !showLostForm ? (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Mark lost"
+                  onPress={() => {
+                    setActionError(null);
+                    setShowLostForm(true);
+                  }}
+                  className="min-h-11 items-center justify-center rounded-md border border-border px-4 py-3"
+                >
+                  <Text className="text-base font-semibold text-foreground">Mark lost</Text>
+                </Pressable>
+              ) : null}
+
+              {showLostForm ? (
+                <View className="rounded-lg border border-border bg-card p-4">
+                  <Text className="text-base font-medium text-foreground">Why was it lost?</Text>
+                  <TextInput
+                    accessibilityLabel="Lost reason"
+                    value={lostReason}
+                    onChangeText={setLostReason}
+                    placeholder="e.g. went with a competitor"
+                    placeholderTextColor="#94a3b8"
+                    className="mt-3 min-h-11 rounded-md border border-border px-4 py-3 text-base text-foreground"
+                  />
+                  <View className="mt-3 flex-row gap-3">
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel="Cancel mark lost"
+                      onPress={() => {
+                        setShowLostForm(false);
+                        setLostReason('');
+                      }}
+                      disabled={losing}
+                      className="min-h-11 flex-1 items-center justify-center rounded-md border border-border px-4 py-3"
+                    >
+                      <Text className="text-base text-foreground">Cancel</Text>
+                    </Pressable>
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel="Confirm mark lost"
+                      onPress={() => void onConfirmLost()}
+                      disabled={!lostReason.trim() || losing}
+                      className="min-h-11 flex-1 items-center justify-center rounded-md bg-destructive px-4 py-3"
+                    >
+                      {losing ? (
+                        <ActivityIndicator color="#ffffff" />
+                      ) : (
+                        <Text className="text-base font-semibold text-destructiveForeground">
+                          Mark lost
+                        </Text>
+                      )}
+                    </Pressable>
+                  </View>
+                </View>
+              ) : null}
+            </View>
+          ) : null}
 
           <LabelValueTable
             rows={[
