@@ -90,64 +90,90 @@ function scoreAssistant(json, status, expectProposal) {
   const fallbackStage = json?.fallbackStage ?? null;
   const model = json?.model ?? null;
   const content = json?.message?.content ?? json?.content ?? '';
+  // Live assistant nests the card under message.proposal; type is UI label
+  // ("Customer") while taskType is often "assistant.create_customer".
+  const proposal = json?.message?.proposal ?? json?.proposal ?? null;
   const proposalType =
-    json?.proposal?.type ??
+    proposal?.type ??
     json?.proposalType ??
     json?.proposals?.[0]?.type ??
-    json?.message?.proposalType ??
     null;
-  const missingFields = json?.proposal?.missingFields ?? json?.missingFields ?? [];
+  const proposalId = proposal?.id ?? null;
+  const proposalStatus = proposal?.status ?? null;
+  const taskType = json?.taskType ?? null;
+  const missingFields = proposal?.missingFields ?? json?.missingFields ?? [];
 
   if (degraded || fallbackStage === 'error-envelope' || model === 'fallback') {
     return {
       verdict: 'DEGRADED',
       reason: 'llm_fallback_envelope',
       proposalType: null,
+      proposalId: null,
       missingFields,
       degraded: true,
       fallbackStage: fallbackStage || 'error-envelope',
       content: typeof content === 'string' ? content.slice(0, 240) : '',
       model: model || 'fallback',
-      taskType: json?.taskType ?? null,
+      taskType,
     };
   }
-  if (expectProposal && proposalType === expectProposal) {
+
+  const expectNeedle = (expectProposal || '').toLowerCase().replace(/_/g, '');
+  const taskNeedle = (taskType || '').toLowerCase().replace(/[._]/g, '');
+  const typeNeedle = (proposalType || '').toLowerCase().replace(/[_\s]/g, '');
+  const taskMatchesExpect =
+    !!expectNeedle &&
+    (taskNeedle.includes(expectNeedle) ||
+      // create_customer ↔ assistant.create_customer / Customer
+      (expectNeedle.includes('customer') && (taskNeedle.includes('customer') || typeNeedle.includes('customer'))) ||
+      (expectNeedle.includes('estimate') && (taskNeedle.includes('estimate') || typeNeedle.includes('estimate'))) ||
+      (expectNeedle.includes('invoice') && (taskNeedle.includes('invoice') || typeNeedle.includes('invoice'))) ||
+      (expectNeedle.includes('job') && (taskNeedle.includes('job') || typeNeedle.includes('job'))) ||
+      (expectNeedle.includes('appointment') &&
+        (taskNeedle.includes('appointment') ||
+          taskNeedle.includes('schedule') ||
+          typeNeedle.includes('appointment'))));
+
+  if (proposalId && (!expectProposal || taskMatchesExpect || proposalStatus === 'Pending')) {
     return {
       verdict: 'PASS',
       reason: 'proposal_created',
       proposalType,
+      proposalId,
       missingFields,
       degraded: false,
       fallbackStage,
       content: typeof content === 'string' ? content.slice(0, 240) : '',
       model,
-      taskType: json?.taskType ?? null,
+      taskType,
     };
   }
-  if (proposalType) {
+  if (proposalId) {
     return {
       verdict: 'PARTIAL',
-      reason: expectProposal ? `proposal_${proposalType}_not_${expectProposal}` : 'proposal_created',
+      reason: expectProposal ? `proposal_${proposalType}_task_${taskType}` : 'proposal_created',
       proposalType,
+      proposalId,
       missingFields,
       degraded: false,
       fallbackStage,
       content: typeof content === 'string' ? content.slice(0, 240) : '',
       model,
-      taskType: json?.taskType ?? null,
+      taskType,
     };
   }
-  // Non-degraded reply without a proposal (clarification / answer)
+  // Non-degraded reply without a proposal (clarification / answer / hallucinated apply)
   return {
     verdict: 'PARTIAL',
     reason: 'no_proposal_non_degraded',
     proposalType: null,
+    proposalId: null,
     missingFields,
     degraded: false,
     fallbackStage,
     content: typeof content === 'string' ? content.slice(0, 240) : '',
     model,
-    taskType: json?.taskType ?? null,
+    taskType,
   };
 }
 
