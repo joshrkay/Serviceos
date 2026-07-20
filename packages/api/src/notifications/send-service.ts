@@ -54,6 +54,8 @@ const UNSENDABLE_INVOICE_STATUSES: ReadonlySet<InvoiceStatus> = new Set([
   'void',
   'canceled',
 ]);
+
+/**
  * Codex P1 #2 follow-up. Callers that wrap `sendEstimate`/`sendInvoice` in
  * `withSendClaim` (see estimates/estimate-nudge.ts) thread `withSendClaim`'s
  * `markProviderAccepted` signal in as `onProviderAccepted`. This method calls
