@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createInvoice, sendInvoice } from './invoices';
+import {
+  createInvoice,
+  createInvoicePaymentLink,
+  issueInvoice,
+  recordInvoicePayment,
+  sendInvoice,
+} from './invoices';
 
 const lineItems = [
   { description: 'Service call', quantity: 1, unitPriceCents: 9900, catalogItemId: 'cat-2' },
@@ -78,9 +84,97 @@ describe('sendInvoice', () => {
     expect(init.method).toBe('POST');
   });
 
-  it('throws on a non-ok response', async () => {
-    const client = vi.fn().mockResolvedValue(new Response(null, { status: 404 }));
+  it('surfaces the server message on a non-ok response', async () => {
+    const client = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ error: 'CONFLICT', message: 'No contact on file' }), { status: 409 }),
+    );
 
-    await expect(sendInvoice(client, 'missing')).rejects.toThrow(/sendInvoice: 404/);
+    await expect(sendInvoice(client, 'missing')).rejects.toThrow(/No contact on file/);
+  });
+});
+
+describe('issueInvoice', () => {
+  it('POSTs /api/invoices/:id/issue with an empty body when no term is given', async () => {
+    const client = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
+
+    await expect(issueInvoice(client, 'inv-1')).resolves.toBeUndefined();
+
+    const [path, init] = client.mock.calls[0] as [string, RequestInit];
+    expect(path).toBe('/api/invoices/inv-1/issue');
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(init.body as string)).toEqual({});
+  });
+
+  it('forwards paymentTermDays when provided', async () => {
+    const client = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
+
+    await issueInvoice(client, 'inv-1', 15);
+
+    const [, init] = client.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual({ paymentTermDays: 15 });
+  });
+
+  it('surfaces the server message on a non-ok response', async () => {
+    const client = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ error: 'VALIDATION_ERROR', message: 'Invalid transition from open to open' }), {
+        status: 400,
+      }),
+    );
+
+    await expect(issueInvoice(client, 'inv-1')).rejects.toThrow(/Invalid transition/);
+  });
+});
+
+describe('createInvoicePaymentLink', () => {
+  it('POSTs /api/invoices/:id/payment-link and returns the url', async () => {
+    const client = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ url: 'https://pay.test/abc', expiresAt: null }), { status: 200 }),
+    );
+
+    const result = await createInvoicePaymentLink(client, 'inv-1');
+
+    const [path, init] = client.mock.calls[0] as [string, RequestInit];
+    expect(path).toBe('/api/invoices/inv-1/payment-link');
+    expect(init.method).toBe('POST');
+    expect(result).toEqual({ url: 'https://pay.test/abc', expiresAt: null });
+  });
+
+  it('surfaces the conflict message when the invoice is not payable', async () => {
+    const client = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ error: 'CONFLICT', message: 'Invoice must be open to create a link' }), {
+        status: 409,
+      }),
+    );
+
+    await expect(createInvoicePaymentLink(client, 'inv-1')).rejects.toThrow(/must be open/);
+  });
+});
+
+describe('recordInvoicePayment', () => {
+  it('POSTs /api/invoices/:id/payment with integer-cents amount + method', async () => {
+    const client = vi.fn().mockResolvedValue(new Response(JSON.stringify({}), { status: 201 }));
+
+    await recordInvoicePayment(client, 'inv-1', { amountCents: 124000, method: 'check', note: 'ck #42' });
+
+    const [path, init] = client.mock.calls[0] as [string, RequestInit];
+    expect(path).toBe('/api/invoices/inv-1/payment');
+    expect(init.method).toBe('POST');
+    const body = JSON.parse(init.body as string) as Record<string, unknown>;
+    expect(body.amountCents).toBe(124000);
+    expect(body.method).toBe('check');
+    expect(body.note).toBe('ck #42');
+  });
+
+  it('surfaces the over-balance server message', async () => {
+    const client = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({ error: 'VALIDATION_ERROR', message: 'Payment exceeds amount due' }),
+        { status: 400 },
+      ),
+    );
+
+    await expect(
+      recordInvoicePayment(client, 'inv-1', { amountCents: 999999, method: 'cash' }),
+    ).rejects.toThrow(/exceeds amount due/);
   });
 });

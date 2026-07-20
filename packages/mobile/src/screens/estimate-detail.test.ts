@@ -1,13 +1,15 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render } from '@testing-library/react';
+import { cleanup, fireEvent, render, waitFor } from '@testing-library/react';
 import { createElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { TierLineInput } from '../estimates/tierGroups';
 
 interface EstimateDetail {
   id: string;
   estimateNumber?: string;
   status?: string;
   validUntil?: string;
+  lineItems?: TierLineInput[];
   totals?: { totalCents?: number; subtotalCents?: number; taxCents?: number };
   customer?: { displayName?: string; firstName?: string; lastName?: string; email?: string };
 }
@@ -18,6 +20,7 @@ const h = vi.hoisted(() => ({
   isLoading: false,
   error: null as string | null,
   endpoint: null as string | null,
+  sendEstimate: vi.fn(),
 }));
 
 vi.mock('expo-router', () => ({
@@ -30,6 +33,10 @@ vi.mock('../hooks/useDetailQuery', () => ({
     return { data: h.data, isLoading: h.isLoading, error: h.error, refetch: h.refetch };
   },
 }));
+vi.mock('../lib/useApiClient', () => ({ useApiClient: () => vi.fn() }));
+vi.mock('../api/estimates', () => ({
+  sendEstimate: (...args: unknown[]) => h.sendEstimate(...args),
+}));
 
 // eslint-disable-next-line import/first
 import EstimateDetailScreen from '../../app/estimates/[id]';
@@ -40,6 +47,7 @@ beforeEach(() => {
   h.isLoading = false;
   h.error = null;
   h.endpoint = null;
+  h.sendEstimate.mockResolvedValue(undefined);
 });
 
 afterEach(() => cleanup());
@@ -93,5 +101,48 @@ describe('Estimate detail screen', () => {
     } as EstimateDetail;
     const { getByText } = render(createElement(EstimateDetailScreen));
     expect(getByText('Jane Doe')).toBeTruthy();
+  });
+
+  it('renders good-better-best tiers with the recommended option and add-ons', () => {
+    h.data = {
+      id: 'est-1',
+      estimateNumber: 'EST-T',
+      status: 'draft',
+      totals: { totalCents: 700000 },
+      lineItems: [
+        { id: 'base', description: 'Service call', unitPriceCents: 9900, totalCents: 9900 },
+        { id: 'good', description: 'Good unit', groupKey: 'sys', groupLabel: 'System', unitPriceCents: 500000, totalCents: 500000 },
+        { id: 'better', description: 'Better unit', groupKey: 'sys', groupLabel: 'System', unitPriceCents: 700000, totalCents: 700000, isDefaultSelected: true },
+        { id: 'addon', description: 'Surge protector', isOptional: true, unitPriceCents: 12000, totalCents: 12000 },
+      ],
+    };
+    const { getByText, getAllByText } = render(createElement(EstimateDetailScreen));
+    expect(getByText('System — choose one')).toBeTruthy();
+    expect(getByText('Optional add-ons')).toBeTruthy();
+    expect(getByText('Good unit')).toBeTruthy();
+    expect(getByText('Better unit')).toBeTruthy();
+    // The default-selected tier is flagged "Recommended".
+    expect(getAllByText('Recommended').length).toBeGreaterThan(0);
+    expect(getByText('Surge protector')).toBeTruthy();
+  });
+
+  it('sends a draft estimate', async () => {
+    h.data = { id: 'est-1', status: 'draft', totals: { totalCents: 1000 } };
+    const { getByText } = render(createElement(EstimateDetailScreen));
+    fireEvent.click(getByText('Send estimate'));
+    await waitFor(() => expect(h.sendEstimate).toHaveBeenCalled());
+    expect(h.refetch).toHaveBeenCalled();
+  });
+
+  it('labels send as Resend for a sent estimate and hides it once accepted', () => {
+    h.data = { id: 'est-1', status: 'sent', totals: { totalCents: 1000 } };
+    const sent = render(createElement(EstimateDetailScreen));
+    expect(sent.getByText('Resend estimate')).toBeTruthy();
+    cleanup();
+
+    h.data = { id: 'est-1', status: 'accepted', totals: { totalCents: 1000 } };
+    const accepted = render(createElement(EstimateDetailScreen));
+    expect(accepted.queryByText('Send estimate')).toBeNull();
+    expect(accepted.queryByText('Resend estimate')).toBeNull();
   });
 });

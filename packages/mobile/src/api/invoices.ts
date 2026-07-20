@@ -1,5 +1,6 @@
 import type { LineItem } from '../components/LineItemSheet';
 import { toServerLineItems } from './lineItems';
+import { decodeError } from '../lib/appError';
 import type { AuthedFetch } from './me';
 
 export interface CreateInvoiceInput {
@@ -30,5 +31,78 @@ export async function createInvoice(client: AuthedFetch, input: CreateInvoiceInp
 
 export async function sendInvoice(client: AuthedFetch, id: string): Promise<void> {
   const res = await client(`/api/invoices/${id}/send`, { method: 'POST' });
-  if (!res.ok) throw new Error(`sendInvoice: ${res.status}`);
+  // Surface the server's reason verbatim (matches issue/payment-link below).
+  if (!res.ok) throw new Error((await decodeError(res)).message);
+}
+
+/**
+ * POST /api/invoices/:id/issue — transition a draft invoice to `open`, stamping
+ * `issuedAt` and a `dueDate` `paymentTermDays` out (server default 30). Only
+ * `draft → open` is valid; issuing a non-draft 400s. On failure we surface the
+ * server's human message (e.g. the invalid-transition reason) verbatim so the
+ * action button can show why, instead of a bare status code.
+ */
+export async function issueInvoice(
+  client: AuthedFetch,
+  id: string,
+  paymentTermDays?: number,
+): Promise<void> {
+  const res = await client(`/api/invoices/${id}/issue`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(paymentTermDays === undefined ? {} : { paymentTermDays }),
+  });
+  if (!res.ok) throw new Error((await decodeError(res)).message);
+}
+
+/**
+ * POST /api/invoices/:id/payment-link — create (or return the existing) Stripe
+ * payment link for an `open`/`partially_paid` invoice. Idempotent server-side.
+ * A `draft` invoice (or one with no balance) 409/400s — surfaced verbatim.
+ */
+export async function createInvoicePaymentLink(
+  client: AuthedFetch,
+  id: string,
+): Promise<{ url: string; expiresAt: string | null }> {
+  const res = await client(`/api/invoices/${id}/payment-link`, { method: 'POST' });
+  if (!res.ok) throw new Error((await decodeError(res)).message);
+  return (await res.json()) as { url: string; expiresAt: string | null };
+}
+
+export type InvoicePaymentMethod =
+  | 'cash'
+  | 'check'
+  | 'credit_card'
+  | 'bank_transfer'
+  | 'other';
+
+export interface RecordPaymentInput {
+  amountCents: number;
+  method: InvoicePaymentMethod;
+  providerReference?: string;
+  note?: string;
+}
+
+/**
+ * POST /api/invoices/:id/payment — record a manual (off-Stripe) payment. The
+ * server credits atomically and flips the invoice to `paid`/`partially_paid`.
+ * Rejects amounts over `amountDueCents` and non-payable statuses (surfaced
+ * verbatim). Money is integer cents end to end — no float math on the client.
+ */
+export async function recordInvoicePayment(
+  client: AuthedFetch,
+  id: string,
+  input: RecordPaymentInput,
+): Promise<void> {
+  const res = await client(`/api/invoices/${id}/payment`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      amountCents: input.amountCents,
+      method: input.method,
+      providerReference: input.providerReference,
+      note: input.note,
+    }),
+  });
+  if (!res.ok) throw new Error((await decodeError(res)).message);
 }

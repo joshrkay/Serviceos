@@ -1,5 +1,6 @@
 import type { LineItem } from '../components/LineItemSheet';
 import { toServerLineItems } from './lineItems';
+import { decodeError } from '../lib/appError';
 import type { AuthedFetch } from './me';
 
 export interface CreateEstimateInput {
@@ -102,5 +103,7 @@ export async function createEstimate(client: AuthedFetch, input: CreateEstimateI
 
 export async function sendEstimate(client: AuthedFetch, id: string): Promise<void> {
   const res = await client(`/api/estimates/${id}/send`, { method: 'POST' });
-  if (!res.ok) throw new Error(`sendEstimate: ${res.status}`);
+  // Surface the server's reason (e.g. "no contact on file", a state conflict)
+  // verbatim so the Send button can show why instead of a bare status code.
+  if (!res.ok) throw new Error((await decodeError(res)).message);
 }

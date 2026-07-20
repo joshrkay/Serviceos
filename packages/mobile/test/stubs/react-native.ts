@@ -21,6 +21,12 @@ export const ScrollView = host('div');
 export const ActivityIndicator = host('div');
 export const RefreshControl = host('div');
 
+// Bottom-sheet primitive: render children only while `visible` so a sheet's
+// contents are queryable when open and absent when closed — enough for the
+// capture-sheet contract tests (the native slide animation isn't exercised).
+export const Modal = ({ visible, children }: Props) =>
+  visible ? createElement('div', { role: 'dialog' }, children as ReactNode) : null;
+
 // Maps an RN <Image source={{ uri }}/> to an <img src> so screen tests can
 // assert the persisted gallery renders the server download URL.
 export const Image = ({ source, accessibilityLabel, className }: Props) => {

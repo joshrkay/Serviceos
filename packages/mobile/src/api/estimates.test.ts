@@ -76,10 +76,14 @@ describe('sendEstimate', () => {
     expect(init.method).toBe('POST');
   });
 
-  it('throws on a non-ok response', async () => {
-    const client = vi.fn().mockResolvedValue(new Response(null, { status: 404 }));
+  it('surfaces the server message on a non-ok response', async () => {
+    const client = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ error: 'VALIDATION_ERROR', message: 'No contact on file' }), {
+        status: 400,
+      }),
+    );
 
-    await expect(sendEstimate(client, 'missing')).rejects.toThrow(/sendEstimate: 404/);
+    await expect(sendEstimate(client, 'missing')).rejects.toThrow(/No contact on file/);
   });
 });
 
