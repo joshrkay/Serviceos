@@ -9,9 +9,11 @@ const h = vi.hoisted(() => ({
   reject: vi.fn().mockResolvedValue(undefined),
   resolveLine: vi.fn().mockResolvedValue(undefined),
   resolveEntity: vi.fn().mockResolvedValue(undefined),
+  edit: vi.fn().mockResolvedValue(true),
   undo: vi.fn(),
   reload: vi.fn(),
   back: vi.fn(),
+  startCall: vi.fn(),
   phase: 'review' as ReviewPhase,
   secondsLeft: 0,
   error: null as string | null,
@@ -30,6 +32,33 @@ const h = vi.hoisted(() => ({
 vi.mock('expo-router', () => ({
   useLocalSearchParams: () => ({ id: 'p1' }),
   useRouter: () => ({ back: h.back, push: vi.fn(), replace: vi.fn() }),
+  usePathname: () => '/proposals/p1',
+}));
+// ProposalEditPanel renders LineItemSheet, whose catalog search runs through
+// the real api client hook — stub it so edit-mode renders don't need auth.
+vi.mock('../lib/useApiClient', () => ({
+  useApiClient: () => vi.fn().mockResolvedValue({ ok: true, json: async () => ({ items: [] }) }),
+}));
+vi.mock('../hooks/useMe', () => ({
+  useMe: () => ({ me: { timezone: 'America/New_York' }, isLoading: false, error: null, switchMode: vi.fn(), refetch: vi.fn() }),
+}));
+// useStartCall pulls in expo-secure-store (native) via callbackStorage — stub it
+// so importing the screen doesn't drag a native binding into jsdom. The callback
+// tap-to-call wiring is asserted against this mock.
+vi.mock('../calls/useStartCall', () => ({
+  useStartCall: () => ({ startCall: h.startCall, isCalling: false, error: null }),
+}));
+// Stub the reschedule picker so this screen test asserts wiring (which type gets
+// the picker, and that a pick edits the proposal); the picker's slot fetching +
+// tz rendering are covered by SlotPicker/slotPicker unit tests. Host element
+// only — no dynamic import() (tsc rejects it, TS1323).
+vi.mock('../components/RescheduleReviewPicker', () => ({
+  RescheduleReviewPicker: ({ onPick }: { onPick: (s: { start: string; end: string }) => void }) =>
+    createElement(
+      'button',
+      { onClick: () => onPick({ start: '2026-06-25T13:00:00.000Z', end: '2026-06-25T14:00:00.000Z' }) },
+      'reschedule-picker',
+    ),
 }));
 vi.mock('../hooks/useProposalReview', () => ({
   useProposalReview: () => ({
@@ -41,6 +70,7 @@ vi.mock('../hooks/useProposalReview', () => ({
     reject: h.reject,
     resolveLine: h.resolveLine,
     resolveEntity: h.resolveEntity,
+    edit: h.edit,
     undo: h.undo,
     reload: h.reload,
   }),
@@ -166,5 +196,216 @@ describe('Proposal review screen', () => {
     expect(getByText('Premium valve')).toBeTruthy();
     fireEvent.click(getByText('Premium valve').closest('button')!);
     expect(h.resolveLine).toHaveBeenCalledWith(0, 'cat-b');
+  });
+
+  it('B2: reschedule proposals render the slot picker (not generic rows) and a pick edits the time', () => {
+    h.proposal = {
+      id: 'p-resched',
+      proposalType: 'reschedule_appointment',
+      status: 'ready_for_review',
+      summary: 'Move Miller to Thursday 2pm',
+      payload: {
+        appointmentId: '11111111-1111-1111-1111-111111111111',
+        newScheduledStart: '2026-06-24T18:00:00.000Z',
+        newScheduledEnd: '2026-06-24T19:00:00.000Z',
+      },
+      approvedAt: null,
+    };
+    const { getByText, queryByText } = render(createElement(ProposalReviewScreen));
+    expect(getByText('reschedule-picker')).toBeTruthy();
+    // Generic scalar rows are suppressed in favor of the picker.
+    expect(queryByText('New Scheduled Start')).toBeNull();
+    fireEvent.click(getByText('reschedule-picker').closest('button')!);
+    expect(h.edit).toHaveBeenCalledWith({
+      newScheduledStart: '2026-06-25T13:00:00.000Z',
+      newScheduledEnd: '2026-06-25T14:00:00.000Z',
+    });
+  });
+
+  // U1 — lane-aware confirm gates. Capture one-taps (covered by the first
+  // test); money/comms/irreversible/unknown require an explicit confirm.
+  function setProposal(proposalType: string, summary = 'Summary line') {
+    h.proposal = {
+      id: 'p-gate',
+      proposalType,
+      status: 'ready_for_review',
+      summary,
+      payload: {},
+      approvedAt: null,
+    };
+  }
+
+  it('money lane: Approve opens a confirm sheet; Confirm approves', () => {
+    setProposal('issue_invoice', 'Issue INV-42 for $1,240');
+    const { getByText } = render(createElement(ProposalReviewScreen));
+    fireEvent.click(getByText('Approve').closest('button')!);
+    expect(h.approve).not.toHaveBeenCalled();
+    expect(getByText('Issue invoice — this moves money.')).toBeTruthy();
+    const confirm = getByText('Confirm').closest('button')!;
+    expect(confirm.className).toMatch(/\bmin-h-11\b/);
+    fireEvent.click(confirm);
+    expect(h.approve).toHaveBeenCalledTimes(1);
+  });
+
+  it('comms lane: Cancel dismisses the sheet without approving', () => {
+    setProposal('send_invoice', 'Send invoice to Rodriguez');
+    const { getByText, queryByText } = render(createElement(ProposalReviewScreen));
+    fireEvent.click(getByText('Approve').closest('button')!);
+    expect(getByText('Send invoice — this messages your customer.')).toBeTruthy();
+    const cancel = getByText('Cancel').closest('button')!;
+    expect(cancel.className).toMatch(/\bmin-h-11\b/);
+    fireEvent.click(cancel);
+    expect(h.approve).not.toHaveBeenCalled();
+    expect(queryByText('Send invoice — this messages your customer.')).toBeNull();
+    expect(getByText('Approve')).toBeTruthy(); // main button is back
+  });
+
+  it('irreversible lane: destructive confirm styling', () => {
+    setProposal('cancel_appointment', 'Cancel Tuesday visit');
+    const { getByText } = render(createElement(ProposalReviewScreen));
+    fireEvent.click(getByText('Approve').closest('button')!);
+    expect(getByText(/can't be undone/)).toBeTruthy();
+    const confirm = getByText('Yes, do it').closest('button')!;
+    expect(confirm.className).toMatch(/\bbg-destructive\b/);
+    fireEvent.click(confirm);
+    expect(h.approve).toHaveBeenCalledTimes(1);
+  });
+
+  it('unknown proposal type fails closed to an explicit confirm — never one-tap', () => {
+    setProposal('some_future_type', 'Mystery action');
+    const { getByText } = render(createElement(ProposalReviewScreen));
+    fireEvent.click(getByText('Approve').closest('button')!);
+    expect(h.approve).not.toHaveBeenCalled();
+    expect(getByText(/review carefully before approving/)).toBeTruthy();
+  });
+
+  // U2 (F4) — edit before approving.
+  it('Edit opens the panel; editing a cents field saves parsed integer cents', async () => {
+    h.proposal = {
+      id: 'p-edit',
+      proposalType: 'draft_invoice',
+      status: 'draft',
+      summary: 'Invoice Acme',
+      payload: { customerName: 'Acme', amountCents: 12345 },
+      approvedAt: null,
+    };
+    const { getByText, getByDisplayValue, findByText } = render(
+      createElement(ProposalReviewScreen),
+    );
+    const editBtn = getByText('Edit').closest('button')!;
+    expect(editBtn.className).toMatch(/\bmin-h-11\b/);
+    fireEvent.click(editBtn);
+    expect(getByText('Edit before approving')).toBeTruthy();
+
+    // The cents field renders as bare dollars ("123.45") ready to edit.
+    fireEvent.change(getByDisplayValue('123.45'), { target: { value: '$1,299.50' } });
+    fireEvent.click(getByText('Save').closest('button')!);
+    await findByText('Edit'); // panel closes back to the action row
+    expect(h.edit).toHaveBeenCalledWith({ amountCents: 129950 });
+  });
+
+  it('Cancel leaves edit mode without saving; no-op save just closes', () => {
+    setProposal('draft_invoice', 'Invoice Acme');
+    const { getByText, queryByText } = render(createElement(ProposalReviewScreen));
+    fireEvent.click(getByText('Edit').closest('button')!);
+    fireEvent.click(getByText('Cancel').closest('button')!);
+    expect(h.edit).not.toHaveBeenCalled();
+    expect(queryByText('Edit before approving')).toBeNull();
+  });
+
+  it('line-item payloads offer the grounded editor (remove + add from price book)', () => {
+    h.proposal = {
+      id: 'p-li',
+      proposalType: 'draft_estimate',
+      status: 'draft',
+      summary: 'Estimate heater',
+      payload: {
+        lineItems: [
+          { catalogItemId: 'c1', description: 'Heater', quantity: 1, unitPriceCents: 72000 },
+        ],
+      },
+      approvedAt: null,
+    };
+    const { getByText } = render(createElement(ProposalReviewScreen));
+    fireEvent.click(getByText('Edit').closest('button')!);
+    expect(getByText('Heater')).toBeTruthy();
+    expect(getByText('Remove')).toBeTruthy();
+    expect(getByText('+ Add from price book')).toBeTruthy();
+    // Removing the row and saving sends the new lineItems array.
+    fireEvent.click(getByText('Remove').closest('button')!);
+    fireEvent.click(getByText('Save').closest('button')!);
+    expect(h.edit).toHaveBeenCalledWith({ lineItems: [] });
+  });
+
+  it('clarifications offer no Edit (they resolve via chips)', () => {
+    h.proposal = {
+      id: 'p-cl',
+      proposalType: 'voice_clarification',
+      status: 'draft',
+      summary: 'Which Bob?',
+      payload: { reason: 'ambiguous_entity', entityCandidates: [{ id: 'c1', label: 'Bob' }] },
+      approvedAt: null,
+    };
+    const { queryByText } = render(createElement(ProposalReviewScreen));
+    expect(queryByText('Edit')).toBeNull();
+  });
+
+  // C7 — complaint add_note renders the pinned marker + severity.
+  it('renders a complaint note with the pinned [COMPLAINT] marker and high-severity flag', () => {
+    h.proposal = {
+      id: 'p-comp',
+      proposalType: 'add_note',
+      status: 'ready_for_review',
+      summary: 'HIGH-SEVERITY complaint from the customer',
+      payload: {
+        body: '[COMPLAINT] We were overcharged and want a refund',
+        _meta: { markers: [{ path: 'body', reason: 'complaint_high_severity' }] },
+      },
+      approvedAt: null,
+    };
+    const { getByText } = render(createElement(ProposalReviewScreen));
+    expect(getByText('Pinned · [COMPLAINT]')).toBeTruthy();
+    expect(getByText('High severity')).toBeTruthy();
+    expect(getByText('We were overcharged and want a refund')).toBeTruthy();
+  });
+
+  // C7 — complaint follow-up callback with a resolved customer shows a wired call button.
+  it('renders a callback with a tap-to-call button wired to the customer', () => {
+    h.proposal = {
+      id: 'p-cb',
+      proposalType: 'callback',
+      status: 'ready_for_review',
+      summary: 'Complaint follow-up — call the customer back',
+      payload: { reason: 'customer_complaint_followup', customerId: 'c1' },
+      approvedAt: null,
+    };
+    const { getByText } = render(createElement(ProposalReviewScreen));
+    const call = getByText('Call customer back').closest('button')!;
+    expect(call.className).toMatch(/\bmin-h-11\b/);
+    fireEvent.click(call);
+    expect(h.startCall).toHaveBeenCalledWith('c1');
+  });
+
+  // C8 — negotiation callback states the AI did not concede; no customer id ⇒
+  // fall back to opening the customer record (no wired call button).
+  it('renders a negotiation callback framing without conceding and falls back when no customer id', () => {
+    h.proposal = {
+      id: 'p-neg',
+      proposalType: 'callback',
+      status: 'ready_for_review',
+      summary: "Discount request — AI didn't negotiate; call back",
+      payload: {
+        reason: 'customer_negotiation_followup',
+        askText: 'Can you do 10% off?',
+        recommendation: 'Hold your price.',
+        _meta: { markers: [{ path: 'recommendation', reason: 'negotiation_guardrail' }] },
+      },
+      approvedAt: null,
+    };
+    const { getByText, queryByText } = render(createElement(ProposalReviewScreen));
+    expect(getByText(/did NOT negotiate or concede/)).toBeTruthy();
+    expect(getByText('They asked: Can you do 10% off?')).toBeTruthy();
+    expect(queryByText('Call customer back')).toBeNull();
+    expect(getByText('Open the customer record to call them back.')).toBeTruthy();
   });
 });

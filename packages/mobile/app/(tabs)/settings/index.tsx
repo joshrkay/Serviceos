@@ -10,6 +10,10 @@ import { NotificationPreferences } from '../../../src/components/NotificationPre
 import { LabelValueTable } from '../../../src/components/LabelValueTable';
 import { PrimaryButton } from '../../../src/components/Buttons';
 
+// U4 hygiene note: the former brand-voice / voice settings screens were
+// unreachable placeholder stubs ("will be configurable here") — deleted per
+// the CLAUDE.md dead-code rule rather than linked (admin stays web-first,
+// D-021). The screens test pins their absence.
 const LINKS: Array<{ label: string; route: Href; subtitle?: string }> = [
   { label: 'Team & roles', route: '/settings/team', subtitle: 'Invite and manage your crew' },
   { label: 'Message templates', route: '/settings/templates', subtitle: 'Reusable SMS replies' },
@@ -59,6 +63,16 @@ export default function SettingsHub() {
             { label: 'Field-capable', value: me ? (me.can_field_serve ? 'Yes' : 'No') : undefined },
           ]}
         />
+        {/* U4 — mode is read-only here by design; the interactive toggle lives
+            on Home (field-friendly, one screen from anywhere). */}
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Switch mode on Home"
+          onPress={() => router.push('/')}
+          className="mt-2 min-h-11 justify-center"
+        >
+          <Text className="text-sm text-primary">Switch mode on the Home screen →</Text>
+        </Pressable>
 
         <Text className="mb-2 mt-8 text-xs font-medium uppercase tracking-wide text-mutedForeground">
           Configuration

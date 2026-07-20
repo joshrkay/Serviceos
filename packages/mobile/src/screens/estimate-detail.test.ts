@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render } from '@testing-library/react';
+import { cleanup, fireEvent, render, waitFor } from '@testing-library/react';
 import { createElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -14,6 +14,8 @@ interface EstimateDetail {
 
 const h = vi.hoisted(() => ({
   refetch: vi.fn(),
+  api: vi.fn(),
+  send: vi.fn(),
   data: null as EstimateDetail | null,
   isLoading: false,
   error: null as string | null,
@@ -23,6 +25,10 @@ const h = vi.hoisted(() => ({
 vi.mock('expo-router', () => ({
   useLocalSearchParams: () => ({ id: 'est-1' }),
   useRouter: () => ({ back: vi.fn(), push: vi.fn(), replace: vi.fn() }),
+}));
+vi.mock('../lib/useApiClient', () => ({ useApiClient: () => h.api }));
+vi.mock('../api/estimates', () => ({
+  sendEstimate: (...args: unknown[]) => h.send(...args),
 }));
 vi.mock('../hooks/useDetailQuery', () => ({
   useDetailQuery: (endpoint: string | null) => {
@@ -40,6 +46,7 @@ beforeEach(() => {
   h.isLoading = false;
   h.error = null;
   h.endpoint = null;
+  h.send.mockResolvedValue(undefined);
 });
 
 afterEach(() => cleanup());
@@ -93,5 +100,58 @@ describe('Estimate detail screen', () => {
     } as EstimateDetail;
     const { getByText } = render(createElement(EstimateDetailScreen));
     expect(getByText('Jane Doe')).toBeTruthy();
+  });
+});
+
+describe('Estimate detail — A7 nudge affordance', () => {
+  it('offers the nudge on a sent (unaccepted) estimate', () => {
+    h.data = { id: 'est-1', estimateNumber: 'EST-1', status: 'sent' };
+    const { getByText } = render(createElement(EstimateDetailScreen));
+    expect(getByText('Nudge customer')).toBeTruthy();
+  });
+
+  it('hides the nudge for accepted / expired / rejected / draft estimates', () => {
+    for (const status of ['accepted', 'expired', 'rejected', 'draft']) {
+      h.data = { id: 'est-1', status };
+      const { queryByText, unmount } = render(createElement(EstimateDetailScreen));
+      expect(queryByText('Nudge customer')).toBeNull();
+      unmount();
+    }
+  });
+
+  it('renders the nudge control as a >=44px tap target', () => {
+    h.data = { id: 'est-1', status: 'sent' };
+    const { getByText } = render(createElement(EstimateDetailScreen));
+    expect(getByText('Nudge customer').closest('button')!.className).toMatch(/\bmin-h-11\b/);
+  });
+
+  it('requires a comms confirm — sendEstimate fires only after confirmation', async () => {
+    h.data = {
+      id: 'est-1',
+      status: 'sent',
+      customer: { displayName: 'Acme Co' },
+    };
+    const { getByText, queryByText } = render(createElement(EstimateDetailScreen));
+
+    // Tapping Nudge opens the confirm; nothing is sent yet.
+    fireEvent.click(getByText('Nudge customer').closest('button')!);
+    expect(getByText(/re-send the estimate link/)).toBeTruthy();
+    expect(h.send).not.toHaveBeenCalled();
+
+    // Confirming re-sends via the /send route (existing client fn) and re-reads.
+    fireEvent.click(getByText('Send reminder').closest('button')!);
+    await waitFor(() => expect(h.send).toHaveBeenCalledWith(h.api, 'est-1'));
+    await waitFor(() => expect(h.refetch).toHaveBeenCalled());
+    // Confirm sheet disappears afterward.
+    await waitFor(() => expect(queryByText(/re-send the estimate link/)).toBeNull());
+  });
+
+  it('cancels the confirm without sending', () => {
+    h.data = { id: 'est-1', status: 'sent' };
+    const { getByText, queryByText } = render(createElement(EstimateDetailScreen));
+    fireEvent.click(getByText('Nudge customer').closest('button')!);
+    fireEvent.click(getByText('Cancel').closest('button')!);
+    expect(queryByText(/re-send the estimate link/)).toBeNull();
+    expect(h.send).not.toHaveBeenCalled();
   });
 });

@@ -26,6 +26,10 @@ vi.mock('expo-router', () => ({
   useRouter: () => ({ push: h.push, back: h.back, replace: vi.fn() }),
 }));
 vi.mock('../lib/useApiClient', () => ({ useApiClient: () => h.api }));
+// LeadDetail now raises toasts for its convert/mark-lost actions (U8/C4–C5).
+vi.mock('../components/Toast', () => ({
+  useToast: () => ({ showToast: vi.fn(), showErrorToast: vi.fn(), hideToast: vi.fn() }),
+}));
 vi.mock('../hooks/useDetailQuery', () => ({
   useDetailQuery: (endpoint: string | null) => {
     h.endpoint = endpoint;

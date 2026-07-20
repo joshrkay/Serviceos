@@ -6282,6 +6282,49 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_send_claims ON send_claims
       USING (tenant_id = current_setting('app.current_tenant_id', true)::UUID);
   `,
+
+  // U3 (iOS blueprint) — E-lane answer back-channel on voice_recordings.
+  // The transcription worker flips status='completed' BEFORE the
+  // voice-action-router job enqueues and both mobile + web polls exit on
+  // 'completed', so the routed outcome needs its OWN state machine:
+  //   answer_status: pending → answered | proposal | clarification |
+  //                  skipped | failed
+  //   answer:        the structured lookup answer (shared Zod contract
+  //                  voiceLookupAnswerSchema — validated before write),
+  //                  present only for answer_status='answered'.
+  // Both NULLABLE with no DEFAULT: additive no-op for every existing row
+  // (legacy + telephony rows read NULL = "no routed-outcome lifecycle"),
+  // so the web VoiceBar's poll response stays additive. Tenant scoping /
+  // RLS ride the existing voice_recordings policy (migration 007). The
+  // CHECK guards shape only and admits NULL, mirroring 255.
+  '259_voice_recordings_answer': `
+    ALTER TABLE voice_recordings
+      ADD COLUMN IF NOT EXISTS answer_status TEXT
+        CHECK (answer_status IS NULL
+               OR answer_status IN ('pending','answered','proposal','clarification','skipped','failed'));
+    ALTER TABLE voice_recordings
+      ADD COLUMN IF NOT EXISTS answer JSONB;
+  `,
+
+  // U11 (iOS blueprint, offline prerequisite) — client idempotency key on the
+  // in-app voice-note create path. The mobile client already sends
+  // `idempotencyKey` in POST /api/voice/recordings; the server persists it here
+  // so a replayed create (offline flush / retry) resolves to the ORIGINAL
+  // recording instead of minting a duplicate + duplicate transcription job.
+  //
+  // Additive nullable column (no DEFAULT): every existing/legacy row and the
+  // telephony path read NULL = "no client idempotency lifecycle". The partial
+  // unique index scopes uniqueness to (tenant_id, idempotency_key) and EXCLUDES
+  // NULL rows (WHERE idempotency_key IS NOT NULL) so legacy/telephony NULLs
+  // never collide with each other. Tenant scoping / RLS ride the existing
+  // voice_recordings policy (migration 007).
+  '260_voice_recordings_idempotency_key': `
+    ALTER TABLE voice_recordings
+      ADD COLUMN IF NOT EXISTS idempotency_key TEXT;
+    CREATE UNIQUE INDEX IF NOT EXISTS voice_recordings_tenant_idempotency_key_uq
+      ON voice_recordings (tenant_id, idempotency_key)
+      WHERE idempotency_key IS NOT NULL;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

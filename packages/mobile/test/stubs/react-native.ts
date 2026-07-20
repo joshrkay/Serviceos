@@ -46,6 +46,11 @@ export const Platform = {
   OS: 'ios' as 'ios' | 'android' | 'web',
 };
 
+// Renders children only while `visible` — enough for sheet/dialog flows
+// (LineItemSheet) to be exercised as plain DOM in screen tests.
+export const Modal = ({ children, visible }: Props) =>
+  visible ? createElement('div', { 'data-modal': 'true' }, children as ReactNode) : null;
+
 export const TextInput = ({ onChangeText, value, className, placeholder }: Props) =>
   createElement('input', {
     className,
@@ -53,6 +58,20 @@ export const TextInput = ({ onChangeText, value, className, placeholder }: Props
     value: value ?? '',
     onChange: (e: { target: { value: string } }) =>
       typeof onChangeText === 'function' ? (onChangeText as (t: string) => void)(e.target.value) : undefined,
+  });
+
+// Maps an RN <Switch value onValueChange/> to a checkbox so screen tests can
+// assert (and drive) a boolean toggle — e.g. the customer note "pin to top".
+export const Switch = ({ value, onValueChange, accessibilityLabel, className }: Props) =>
+  createElement('input', {
+    type: 'checkbox',
+    className,
+    'aria-label': accessibilityLabel as string,
+    checked: Boolean(value),
+    onChange: (e: { target: { checked: boolean } }) =>
+      typeof onValueChange === 'function'
+        ? (onValueChange as (v: boolean) => void)(e.target.checked)
+        : undefined,
   });
 
 export const Pressable = ({ children, onPress, onPressIn, onPressOut, disabled, className }: Props) => {

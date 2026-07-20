@@ -136,4 +136,72 @@ describe('Customer detail screen', () => {
       }),
     );
   });
+
+  // C3 — add service location.
+  it('adds a service location, POSTing the customer-scoped address to /api/locations', async () => {
+    h.data = { id: 'c1', displayName: 'Acme Plumbing' };
+    h.api.mockResolvedValue(new Response(JSON.stringify({ id: 'loc1' }), { status: 201 }));
+    const { getByText, getByPlaceholderText } = render(createElement(CustomerDetail));
+
+    fireEvent.click(getByText('Add location').closest('button')!);
+    fireEvent.change(getByPlaceholderText('Street address'), { target: { value: '1 Main St' } });
+    fireEvent.change(getByPlaceholderText('City'), { target: { value: 'Austin' } });
+    fireEvent.change(getByPlaceholderText('State'), { target: { value: 'TX' } });
+    fireEvent.change(getByPlaceholderText('ZIP'), { target: { value: '78701' } });
+    fireEvent.click(getByText('Save').closest('button')!);
+
+    await waitFor(() => {
+      const call = h.api.mock.calls.find((c: unknown[]) => c[0] === '/api/locations');
+      expect(call).toBeTruthy();
+      expect(JSON.parse((call![1] as RequestInit).body as string)).toEqual({
+        customerId: 'c1',
+        street1: '1 Main St',
+        city: 'Austin',
+        state: 'TX',
+        postalCode: '78701',
+      });
+    });
+  });
+
+  it('shows an inline validation error and does not POST when location fields are missing', () => {
+    h.data = { id: 'c1', displayName: 'Acme Plumbing' };
+    const { getByText } = render(createElement(CustomerDetail));
+    fireEvent.click(getByText('Add location').closest('button')!);
+    fireEvent.click(getByText('Save').closest('button')!);
+    expect(getByText('Street, city, state, and ZIP are all required.')).toBeTruthy();
+    expect(h.api).not.toHaveBeenCalled();
+  });
+
+  // C6 — manual note composer.
+  it('adds a manual note, POSTing entityType customer to /api/notes', async () => {
+    h.data = { id: 'c1', displayName: 'Acme Plumbing' };
+    h.api.mockResolvedValue(new Response(JSON.stringify({ id: 'n1' }), { status: 201 }));
+    const { getByText, getByPlaceholderText } = render(createElement(CustomerDetail));
+
+    fireEvent.click(getByText('Add note').closest('button')!);
+    fireEvent.change(getByPlaceholderText('Add a note about this customer'), {
+      target: { value: 'Called back, resolved' },
+    });
+    fireEvent.click(getByText('Save').closest('button')!);
+
+    await waitFor(() => {
+      const call = h.api.mock.calls.find((c: unknown[]) => c[0] === '/api/notes');
+      expect(call).toBeTruthy();
+      expect(JSON.parse((call![1] as RequestInit).body as string)).toEqual({
+        entityType: 'customer',
+        entityId: 'c1',
+        content: 'Called back, resolved',
+        isPinned: false,
+      });
+    });
+  });
+
+  it('blocks an empty note with an inline message', () => {
+    h.data = { id: 'c1', displayName: 'Acme Plumbing' };
+    const { getByText } = render(createElement(CustomerDetail));
+    fireEvent.click(getByText('Add note').closest('button')!);
+    fireEvent.click(getByText('Save').closest('button')!);
+    expect(getByText('Write something before saving.')).toBeTruthy();
+    expect(h.api).not.toHaveBeenCalled();
+  });
 });

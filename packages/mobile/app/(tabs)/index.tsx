@@ -5,11 +5,15 @@ import { useMoneyDashboard } from '../../src/hooks/useMoneyDashboard';
 import { usePendingProposals } from '../../src/hooks/usePendingProposals';
 import { formatMoneyShort, formatWeekdayDate } from '../../src/lib/format';
 import { greetingForDate } from '../../src/lib/greeting';
+import { EmergencyBanner } from '../../src/components/EmergencyBanner';
 import { ErrorState } from '../../src/components/ErrorState';
 import { PushDeniedNotice } from '../../src/components/PushDeniedNotice';
 import { useToast } from '../../src/components/Toast';
+import { useListQuery } from '../../src/hooks/useListQuery';
+import { formatRelativeTime } from '../../src/lib/format';
 import { useReconnectRetry } from '../../src/lib/useReconnectRetry';
 import { navModelFor } from '../../src/navigation/personaNav';
+import { typeLabel } from '../../src/proposals/proposalReview';
 
 const MODES: Mode[] = ['supervisor', 'both', 'tech'];
 
@@ -86,6 +90,51 @@ function MoneyCard() {
   );
 }
 
+interface ExecutedProposalRow {
+  id: string;
+  summary: string;
+  proposalType: string;
+  updatedAt?: string;
+  createdAt?: string;
+}
+
+// U4 — the executed-proposal feed from the spec's Home wireframe ("Recent
+// activity"): what the AI just finished on the owner's behalf. Hidden while
+// empty so a quiet morning keeps a calm Home.
+function RecentActivity({ timezone }: { timezone?: string }) {
+  const { data } = useListQuery<ExecutedProposalRow>('/api/proposals', {
+    params: { status: 'executed', limit: '5' },
+  });
+  if (data.length === 0) return null;
+
+  return (
+    <>
+      <Text className="mb-2 mt-7 text-xs font-medium uppercase tracking-wide text-mutedForeground">
+        Recent activity
+      </Text>
+      <View className="w-full max-w-full rounded-lg border border-border bg-card">
+        {data.map((p, i) => (
+          <View
+            key={p.id}
+            className={`flex-row items-center justify-between px-4 py-3 ${
+              i > 0 ? 'border-t border-border' : ''
+            }`}
+          >
+            <View className="min-w-0 flex-1 pr-3">
+              <Text className="text-base text-foreground" numberOfLines={1}>
+                ✓ {p.summary || typeLabel(p.proposalType)}
+              </Text>
+            </View>
+            <Text className="text-sm text-mutedForeground">
+              {formatRelativeTime(p.updatedAt ?? p.createdAt, Date.now(), timezone)}
+            </Text>
+          </View>
+        ))}
+      </View>
+    </>
+  );
+}
+
 export default function Home() {
   const router = useRouter();
   const { me, isLoading, error, switchMode, refetch } = useMe();
@@ -135,6 +184,9 @@ export default function Home() {
         {formatWeekdayDate(new Date(), me?.timezone)}
       </Text>
 
+      {/* U4 (B7) — escalation/emergency banner; renders only while raised. */}
+      <EmergencyBanner />
+
       {nav.home.showToday ? (
         <Pressable
           accessibilityRole="button"
@@ -171,6 +223,8 @@ export default function Home() {
           {nav.home.showMoney ? <MoneyCard /> : null}
         </>
       ) : null}
+
+      <RecentActivity timezone={me?.timezone} />
 
       {nav.showModeToggle ? (
         <>

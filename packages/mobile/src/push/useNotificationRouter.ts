@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { useRouter } from 'expo-router';
-import { routeForNotification } from './notificationRouting';
+import { isEmergencyNotification, routeForNotification } from './notificationRouting';
+import { raiseEmergency } from './emergencyBanner';
 import {
   addForegroundListener,
   addResponseListener,
@@ -32,7 +33,11 @@ export function useNotificationRouter(onForeground?: () => void): void {
       router.push(routeForNotification(data));
     });
 
-    const foregroundSub = addForegroundListener(() => {
+    const foregroundSub = addForegroundListener((data) => {
+      // U4 (B7) — an escalation/emergency arriving while the app is open would
+      // otherwise be swallowed by foreground OS-banner suppression; raise the
+      // Home emergency banner so it cannot be missed.
+      if (isEmergencyNotification(data)) raiseEmergency(data as Record<string, unknown>);
       onForeground?.();
     });
 

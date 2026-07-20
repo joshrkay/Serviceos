@@ -8,14 +8,16 @@ const h = vi.hoisted(() => ({
   stopAndTranscribe: vi.fn(),
   reset: vi.fn(),
   captureJobId: vi.fn(),
+  push: vi.fn(),
   jobId: undefined as string | string[] | undefined,
   phase: 'idle' as 'idle' | 'listening' | 'transcribing' | 'transcript' | 'error',
   transcript: '',
+  outcome: null as unknown,
   error: null as string | null,
 }));
 
 vi.mock('expo-router', () => ({
-  useRouter: () => ({ push: vi.fn(), back: vi.fn(), replace: vi.fn() }),
+  useRouter: () => ({ push: h.push, back: vi.fn(), replace: vi.fn() }),
   useLocalSearchParams: () => ({ jobId: h.jobId }),
 }));
 vi.mock('../voice/useVoiceCapture', () => ({
@@ -24,6 +26,7 @@ vi.mock('../voice/useVoiceCapture', () => ({
     return {
       phase: h.phase,
       transcript: h.transcript,
+      outcome: h.outcome,
       error: h.error,
       startRecording: h.startRecording,
       stopAndTranscribe: h.stopAndTranscribe,
@@ -39,6 +42,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   h.phase = 'idle';
   h.transcript = '';
+  h.outcome = null;
   h.error = null;
   h.jobId = undefined;
 });
@@ -102,6 +106,74 @@ describe('Voice screen', () => {
     h.error = 'Microphone permission is required to record.';
     const { getByText } = render(createElement(VoiceScreen));
     expect(getByText('Microphone permission is required to record.')).toBeTruthy();
+    const retry = getByText('Try again').closest('button')!;
+    expect(retry.className).toMatch(/\bmin-h-11\b/);
+    fireEvent.click(retry);
+    expect(h.reset).toHaveBeenCalledTimes(1);
+  });
+});
+
+// U3 — routed-outcome branches after capture.
+describe('Voice screen routed outcomes', () => {
+  const answer = {
+    version: 1,
+    intent: 'lookup_balance',
+    result: 'found',
+    summary: 'Your current balance is $123.45.',
+    rows: [{ kind: 'money', label: 'Outstanding balance', amountCents: 12345 }],
+    entityRef: { kind: 'customer', id: '3b6cbf1a-bd8a-45f7-8b84-ce6b43a231d1' },
+  };
+
+  it("renders an AnswerCard for the 'answered' outcome — no approvals routing", () => {
+    h.phase = 'transcript';
+    h.transcript = 'what is my balance';
+    h.outcome = { kind: 'answered', answer };
+    const { getByText, queryByText } = render(createElement(VoiceScreen));
+
+    expect(getByText('Your current balance is $123.45.')).toBeTruthy();
+    expect(getByText('$123.45')).toBeTruthy();
+    expect(queryByText('View approvals')).toBeNull();
+    // Deep link comes from the AnswerCard; Speak again stays available.
+    expect(getByText('View customer')).toBeTruthy();
+    expect(getByText('Speak again')).toBeTruthy();
+  });
+
+  it("keeps today's approvals routing for 'proposal' and 'clarification' outcomes", () => {
+    for (const kind of ['proposal', 'clarification'] as const) {
+      h.phase = 'transcript';
+      h.transcript = 'invoice the Hendersons';
+      h.outcome = { kind };
+      const { getByText, unmount } = render(createElement(VoiceScreen));
+      expect(getByText(/proposals will appear in approvals/)).toBeTruthy();
+      const btn = getByText('View approvals').closest('button')!;
+      fireEvent.click(btn);
+      expect(h.reset).toHaveBeenCalled();
+      expect(h.push).toHaveBeenCalledWith('/approvals');
+      unmount();
+      vi.clearAllMocks();
+    }
+  });
+
+  it("keeps today's behavior for 'skipped' and 'timeout' (and a null outcome)", () => {
+    for (const outcome of [{ kind: 'skipped' }, { kind: 'timeout' }, null]) {
+      h.phase = 'transcript';
+      h.transcript = 'note for the file';
+      h.outcome = outcome;
+      const { getByText, unmount } = render(createElement(VoiceScreen));
+      expect(getByText(/proposals will appear in approvals/)).toBeTruthy();
+      expect(getByText('Speak again')).toBeTruthy();
+      unmount();
+    }
+  });
+
+  it("offers a retry affordance for the 'failed' outcome", () => {
+    h.phase = 'transcript';
+    h.transcript = 'what is my balance';
+    h.outcome = { kind: 'failed' };
+    const { getByText, queryByText } = render(createElement(VoiceScreen));
+
+    expect(getByText(/Couldn't get that answer/)).toBeTruthy();
+    expect(queryByText('View approvals')).toBeNull();
     const retry = getByText('Try again').closest('button')!;
     expect(retry.className).toMatch(/\bmin-h-11\b/);
     fireEvent.click(retry);
