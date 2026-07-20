@@ -26,9 +26,14 @@ vi.mock('expo-router', () => ({
   useRouter: () => ({ push: h.push, back: h.back, replace: vi.fn() }),
 }));
 vi.mock('../lib/useApiClient', () => ({ useApiClient: () => h.api }));
+// JobDetail/LeadDetail read permissions from useMe; keep it deterministic and
+// money-less so the job-cost card and lead actions stay hidden here.
+vi.mock('../hooks/useMe', () => ({ useMe: () => ({ me: { permissions: [] as string[] } }) }));
 vi.mock('../hooks/useDetailQuery', () => ({
   useDetailQuery: (endpoint: string | null) => {
-    h.endpoint = endpoint;
+    // Ignore the null endpoint from a disabled JobCostCard so the primary
+    // entity endpoint (asserted below) isn't clobbered by the second call.
+    if (endpoint) h.endpoint = endpoint;
     return { data: h.data, isLoading: h.isLoading, error: h.error, refetch: vi.fn() };
   },
 }));

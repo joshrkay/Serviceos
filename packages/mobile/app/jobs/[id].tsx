@@ -1,9 +1,11 @@
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { ActivityIndicator, Linking, Platform, Pressable, Text, View } from 'react-native';
 import { ErrorState } from '../../src/components/ErrorState';
+import { JobCostCard } from '../../src/components/JobCostCard';
 import { ScreenShell } from '../../src/components/ScreenShell';
 import { LabelValueTable } from '../../src/components/LabelValueTable';
 import { useDetailQuery } from '../../src/hooks/useDetailQuery';
+import { useMe } from '../../src/hooks/useMe';
 import { jobRowText } from '../../src/lib/jobRow';
 import { buildMapsUrl, buildSmsUrl, type DevicePlatform } from '../../src/lib/deviceLinks';
 
@@ -47,9 +49,12 @@ export default function JobDetailScreen() {
   const params = useLocalSearchParams<{ id: string }>();
   const id = Array.isArray(params.id) ? params.id[0] : (params.id ?? '');
   const router = useRouter();
+  const { me } = useMe();
   const { data, isLoading, error, refetch } = useDetailQuery<JobDetail>(
     id ? `/api/jobs/${id}` : null,
   );
+  // Job money (revenue/expenses/margin) is owner/dispatcher-only server-side.
+  const canViewMoney = (me?.permissions ?? []).includes('invoices:view');
 
   const headline = data ? jobRowText(data).primary : 'Job';
   const locationLine = jobAddress(data);
@@ -98,6 +103,8 @@ export default function JobDetailScreen() {
               { label: 'Summary', value: data.summary },
             ]}
           />
+
+          <JobCostCard jobId={id} enabled={canViewMoney} />
 
           <Text className="mb-2 mt-6 text-xs font-medium uppercase tracking-wide text-mutedForeground">
             Job tools
