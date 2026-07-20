@@ -123,3 +123,39 @@ describe('createLLMGateway — AI_DEFAULT_MODEL wiring', () => {
     expect(log).toBeUndefined();
   });
 });
+
+describe('LLMGateway — AI_DEFAULT_MODEL applies to real tenants (2026-07-20 fix)', () => {
+  it('system-tenant AI_DEFAULT_MODEL override is used for a normal tenantId', async () => {
+    const { LLMGateway, SYSTEM_TENANT_ID: sys } = await import(
+      '../../../src/ai/gateway/gateway'
+    );
+    const { StubProvider } = await import('../../../src/ai/gateway/providers');
+
+    const stub = new StubProvider('stub');
+    stub.setResponse({ content: 'ok', tokenUsage: { input: 1, output: 1, total: 2 } });
+    const gateway = new LLMGateway(
+      {
+        defaultProvider: 'stub',
+        tenantOverrides: {
+          [sys]: {
+            tiers: {
+              lightweight: { model: 'gpt-4o-mini' },
+              standard: { model: 'gpt-4o-mini' },
+              complex: { model: 'gpt-4o-mini' },
+            },
+          },
+        },
+      },
+      new Map([['stub', stub]]),
+    );
+
+    await gateway.complete({
+      taskType: 'create_customer',
+      tenantId: 'tenant-real',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+
+    expect(stub.getLastRequest()?.model).toBe('gpt-4o-mini');
+  });
+});
+
