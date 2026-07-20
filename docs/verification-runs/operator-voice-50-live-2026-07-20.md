@@ -185,7 +185,7 @@ The handlers for all 10 core ops (and most of the 50) exist in code and pass the
 
 ---
 
-## 7. Root blocker (single choke point)
+## 7. Root blocker (single choke point) — **CONFIRMED 2026-07-20**
 
 **LLM completions fail on the live API**, so:
 
@@ -193,7 +193,20 @@ The handlers for all 10 core ops (and most of the 50) exist in code and pass the
 2. Voice classifier returns `score: 0` → reprompt loop.
 3. No proposal is ever drafted → inbox stays empty → nothing to approve/send.
 
-`/api/health/ai` saying OpenAI is “available” only means the circuit breaker host check passed — **not** that a keyed completion succeeds. Railway logs for `assistant/chat: LLM completion failed` will have the real error (key missing/invalid, wrong base URL, model deny, etc.).
+### Confirmed mechanism (metrics, not logs)
+
+On `serviceosapi-development`, Prometheus shows **only** errors of the form:
+
+```
+gateway_requests_total{model="claude-haiku-4-5-20251001",provider="api.openai.com",outcome="error"}
+gateway_requests_total{model="claude-sonnet-4-6",provider="api.openai.com",outcome="error"}
+```
+
+Zero success outcomes. A single authenticated assistant chat increments those counters (+1 haiku, +1 sonnet) and returns `error-envelope`.
+
+**Cause:** OpenAI host + Claude model ids. Compounded by a code bug: `AI_DEFAULT_MODEL` (Zod default `gpt-4o-mini`) was applied only to `tenantId=system`, so real tenant traffic used Claude defaults from `DEFAULT_AI_ROUTING_CONFIG`. See `docs/runbooks/live-ai-restore.md`.
+
+`/api/health/ai` saying OpenAI is “available” only means the circuit breaker host check passed — **not** that a keyed completion succeeds.
 
 Secondary blockers for a true “production” re-run:
 

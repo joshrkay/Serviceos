@@ -77,6 +77,10 @@ deploy. REST CRUD still works; AI drafting does not.
   Qwen 2.5 72B). Keep ServiceOS on Railway; do not self-host 70B there.
   Runbook: `docs/runbooks/openrouter-ai-provider.md`. Code defaults and env
   templates now match this stack.
+- **RCA confirmed (metrics):** Claude model ids → `api.openai.com` (100%
+  `gateway_requests_total` errors). Also: `AI_DEFAULT_MODEL` only applied to
+  `tenantId=system` — fixed so it falls through to all tenants. Ops runbook:
+  `docs/runbooks/live-ai-restore.md`.
 
 ## Scope Boundaries
 
