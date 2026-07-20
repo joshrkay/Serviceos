@@ -71,9 +71,9 @@ export function useOfflineSync(enabled: boolean, refreshInbox?: () => void): voi
     });
     // Manual retry (approvals pull-to-refresh) — reactivate poison-parked items
     // and drain. This is the only user-driven path back off `parked`.
-    const stopFlushRequests = subscribeOfflineFlushRequests(() => {
-      void controller.retry();
-    });
+    // Return the promise so requestOfflineFlush() can await the drain (the
+    // approvals pull-to-refresh re-fetches the inbox only after it settles).
+    const stopFlushRequests = subscribeOfflineFlushRequests(() => controller.retry());
 
     void loadQueue().then(() => {
       // On a fresh launch, recover anything that poison-parked in a prior

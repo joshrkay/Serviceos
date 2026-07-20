@@ -8,13 +8,29 @@
  * expo-file-system. `useOfflineSync` subscribes and runs the controller's
  * `retry()` (reactivate poison-parked items + drain) on each request.
  */
-type FlushRequestListener = () => void;
+type FlushRequestListener = () => Promise<void> | void;
 
 const listeners = new Set<FlushRequestListener>();
 
-/** Ask the mounted flush controller to reactivate parked items and drain now. */
-export function requestOfflineFlush(): void {
-  for (const l of listeners) l();
+/**
+ * Ask the mounted flush controller to reactivate parked items and drain now.
+ * Resolves once every subscriber has settled, so a caller (the approvals
+ * pull-to-refresh) can await the drain before re-fetching the inbox — otherwise
+ * a concurrent inbox GET can race ahead of the queued approve POSTs and briefly
+ * show a just-approved item as still pending. `allSettled` so one listener's
+ * failure (a flush that threw) never rejects the request for the others.
+ */
+export async function requestOfflineFlush(): Promise<void> {
+  const pending: Array<Promise<void>> = [];
+  for (const l of listeners) {
+    try {
+      const res = l();
+      if (res) pending.push(res);
+    } catch {
+      // A listener that throws synchronously must not block the others.
+    }
+  }
+  await Promise.allSettled(pending);
 }
 
 /** Subscribe to manual flush requests; returns an unsubscribe. */

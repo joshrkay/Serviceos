@@ -190,23 +190,32 @@ export function createFlushController(deps: FlushDeps): FlushController {
     }
   }
 
-  async function flush(): Promise<void> {
+  // Single critical section for both plain and reactivating drains. Holding the
+  // `flushing` guard across reactivateParked() AND the drain is load-bearing:
+  // if reactivation ran outside the guard, two concurrent retries (manual
+  // signal + reconnect/fresh-launch) could interleave so one persists a
+  // reactivated `pending` snapshot while the other has already `markDone`d the
+  // item — the stale persist lands last and resurrects a delivered approval.
+  async function runGuarded(reactivate: boolean): Promise<void> {
     if (flushing) return;
     if (!isCurrentlyOnline()) return;
     flushing = true;
     try {
+      // reactivateParked is a no-op (no persist) when nothing is parked, so a
+      // reactivating drain is as cheap as a plain one on the common path.
+      if (reactivate) await deps.queue.reactivateParked();
       await drain();
     } finally {
       flushing = false;
     }
   }
 
+  async function flush(): Promise<void> {
+    await runGuarded(false);
+  }
+
   async function retry(): Promise<void> {
-    // Reactivate first so the reactivated items are `pending` before the drain
-    // scans for `nextRunnable`. reactivateParked is a no-op (no persist) when
-    // nothing is parked, so this is cheap on the common path.
-    await deps.queue.reactivateParked();
-    await flush();
+    await runGuarded(true);
   }
 
   function start(): () => void {

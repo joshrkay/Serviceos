@@ -69,11 +69,13 @@ export default function Approvals() {
           <RefreshControl
             refreshing={isLoading}
             onRefresh={() => {
-              // Re-fetch the inbox AND retry the offline queue (reactivating any
-              // poison-parked voice notes / approvals) — pull-to-refresh is the
-              // owner's "try my waiting actions again" gesture.
+              // Pull-to-refresh is the owner's "try my waiting actions again"
+              // gesture: retry the offline queue (reactivating any poison-parked
+              // voice notes / approvals) AND re-fetch the inbox. Refresh once
+              // immediately for responsiveness, then again after the drain
+              // settles so a just-flushed approval doesn't linger as "pending".
               void refresh();
-              requestOfflineFlush();
+              void requestOfflineFlush().then(() => refresh());
             }}
           />
         }

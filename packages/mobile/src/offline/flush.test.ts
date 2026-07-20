@@ -335,6 +335,45 @@ describe('flush — poison-park recovery (retry + reconnect)', () => {
 
     expect(q.snapshot()).toHaveLength(0); // recovered and delivered
   });
+
+  it('holds the single-flight guard across reactivate + drain (concurrent retry is a no-op)', async () => {
+    const { fs } = memFs();
+    const q = await makeLoadedQueue(fs);
+    await q.enqueueApproval({ proposalId: 'p1', proposalType: 'add_note', summary: 's' });
+    await q.markParked((q.snapshot()[0]).id); // pre-parked item awaiting recovery
+
+    // A deferred approve response holds the first drain open mid-flight.
+    let releaseApprove!: () => void;
+    const approveGate = new Promise<void>((r) => {
+      releaseApprove = r;
+    });
+    let approveCalls = 0;
+    const api: ApiFetch = async (path) => {
+      if (path === '/api/proposals/p1/approve') {
+        approveCalls += 1;
+        await approveGate;
+        return jsonRes({ id: 'p1', status: 'approved' });
+      }
+      throw new Error(`unexpected ${path}`);
+    };
+    const controller = createFlushController(baseDeps(q, api));
+    const reactivateSpy = vi.spyOn(q, 'reactivateParked');
+
+    const first = controller.retry(); // enters guard: reactivates, drains, awaits approve
+    // Let the first drain reach (and block on) the approve call.
+    for (let i = 0; i < 100 && approveCalls === 0; i++) await Promise.resolve();
+    expect(approveCalls).toBe(1);
+    // Second retry while the first drain is in flight must return immediately —
+    // no second reactivation, no second approve — so it can't resurrect the row.
+    await controller.retry();
+    expect(reactivateSpy).toHaveBeenCalledTimes(1);
+    expect(approveCalls).toBe(1);
+
+    releaseApprove();
+    await first;
+    expect(approveCalls).toBe(1); // delivered exactly once
+    expect(q.snapshot()).toHaveLength(0);
+  });
 });
 
 describe('flush — voice idempotency + checkpoint resume', () => {
