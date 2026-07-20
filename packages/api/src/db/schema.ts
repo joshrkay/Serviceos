@@ -6282,6 +6282,21 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_send_claims ON send_claims
       USING (tenant_id = current_setting('app.current_tenant_id', true)::UUID);
   `,
+
+  // U11 (mobile offline prerequisite) — client-supplied idempotency key on
+  // in-app voice-note uploads. The mobile offline queue replays
+  // POST /api/voice/recordings with the same key after a network failure or
+  // app relaunch; the partial unique index makes the replay resolve to the
+  // original row instead of minting a duplicate recording (and, downstream,
+  // a duplicate proposal). Tenant-scoped: different tenants may reuse a key
+  // value. NULL keys (web VoiceBar, retries of pre-U11 clients) stay exempt.
+  '259_voice_recordings_idempotency_key': `
+    ALTER TABLE voice_recordings
+      ADD COLUMN IF NOT EXISTS idempotency_key TEXT;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_voice_recordings_tenant_idempotency
+      ON voice_recordings (tenant_id, idempotency_key)
+      WHERE idempotency_key IS NOT NULL;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

@@ -17,6 +17,7 @@ function mapRow(row: Record<string, unknown>): VoiceRecording {
     outcome: (row.outcome as CallOutcome | null) ?? undefined,
     detectedLanguage: (row.detected_language as string | null) ?? undefined,
     purgedAt: row.purged_at ? new Date(row.purged_at as string) : undefined,
+    idempotencyKey: (row.idempotency_key as string | null) ?? undefined,
     createdBy: row.created_by as string,
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
@@ -31,8 +32,8 @@ export class PgVoiceRepository extends PgBaseRepository implements VoiceReposito
   async create(recording: VoiceRecording): Promise<VoiceRecording> {
     return this.withTenant(recording.tenantId, async (client) => {
       const result = await client.query(
-        `INSERT INTO voice_recordings (id, tenant_id, file_id, conversation_id, status, transcript, transcript_metadata, duration_seconds, error_message, created_by, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        `INSERT INTO voice_recordings (id, tenant_id, file_id, conversation_id, status, transcript, transcript_metadata, duration_seconds, error_message, idempotency_key, created_by, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
          RETURNING *`,
         [
           recording.id,
@@ -44,6 +45,7 @@ export class PgVoiceRepository extends PgBaseRepository implements VoiceReposito
           recording.transcriptMetadata ? JSON.stringify(recording.transcriptMetadata) : null,
           recording.durationSeconds ?? null,
           recording.errorMessage ?? null,
+          recording.idempotencyKey ?? null,
           recording.createdBy,
           recording.createdAt,
           recording.updatedAt,
@@ -58,6 +60,20 @@ export class PgVoiceRepository extends PgBaseRepository implements VoiceReposito
       const result = await client.query(
         `SELECT * FROM voice_recordings WHERE id = $1 AND tenant_id = $2`,
         [id, tenantId]
+      );
+      if (result.rows.length === 0) return null;
+      return mapRow(result.rows[0]);
+    });
+  }
+
+  async findByIdempotencyKey(
+    tenantId: string,
+    idempotencyKey: string,
+  ): Promise<VoiceRecording | null> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT * FROM voice_recordings WHERE tenant_id = $1 AND idempotency_key = $2`,
+        [tenantId, idempotencyKey]
       );
       if (result.rows.length === 0) return null;
       return mapRow(result.rows[0]);

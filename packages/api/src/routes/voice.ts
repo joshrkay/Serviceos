@@ -14,6 +14,7 @@ import {
 import {
   createVoiceRecording,
   validateVoiceIngest,
+  VoiceRecording,
   VoiceRepository,
   TranscribeAudioFn,
 } from '../voice/voice-service';
@@ -33,6 +34,12 @@ interface CreateVoiceRecordingBody {
   conversationId?: string;
   audioUrl: string;
   jobId?: string;
+  /**
+   * U11 — client replay key (mobile mints a UUID per captured clip; the
+   * offline queue re-sends the same key on every flush attempt). Optional:
+   * web VoiceBar and older clients omit it and keep create-always semantics.
+   */
+  idempotencyKey?: string;
 }
 
 interface RetryTranscriptionBody {
@@ -41,6 +48,14 @@ interface RetryTranscriptionBody {
 
 const MAX_AUDIO_SIZE = 25 * 1024 * 1024; // 25 MB
 const JOB_ID_SCHEMA = z.string().uuid();
+// Loose bounds on purpose: the mobile client sends Crypto.randomUUID() (36
+// chars) but the contract only requires a collision-resistant opaque string.
+const IDEMPOTENCY_KEY_SCHEMA = z.string().min(8).max(200);
+
+/** PG unique_violation — the tenant-scoped partial index on idempotency_key. */
+function isUniqueViolation(err: unknown): boolean {
+  return (err as { code?: string } | null)?.code === '23505';
+}
 
 const ALLOWED_MIME_TYPES = new Set([
   'audio/webm', 'audio/ogg', 'audio/wav', 'audio/mpeg',
@@ -396,6 +411,19 @@ export function createVoiceRouter(
         return;
       }
 
+      let idempotencyKey: string | undefined;
+      if (body.idempotencyKey !== undefined) {
+        const parsedKey = IDEMPOTENCY_KEY_SCHEMA.safeParse(body.idempotencyKey);
+        if (!parsedKey.success) {
+          res.status(400).json({
+            error: 'VALIDATION_ERROR',
+            message: 'idempotencyKey must be a string of 8-200 characters',
+          });
+          return;
+        }
+        idempotencyKey = parsedKey.data;
+      }
+
       let verifiedJobId: string | undefined;
       if (body.jobId !== undefined) {
         const parsedJobId = JOB_ID_SCHEMA.safeParse(body.jobId);
@@ -421,25 +449,78 @@ export function createVoiceRouter(
         verifiedJobId = parsedJobId.data;
       }
 
-      const recording = await voiceRepo.create(
-        createVoiceRecording({
-          tenantId: req.auth!.tenantId,
-          fileId: body.fileId,
-          conversationId: body.conversationId,
-          createdBy: req.auth!.userId,
-        })
-      );
+      const tenantId = req.auth!.tenantId;
+
+      // U11 replay path: answer with the original row in the same 202
+      // envelope the create path uses, so a retrying client can't tell the
+      // difference. Re-issue the queue send only while the recording is
+      // still 'pending' — if the original request died between
+      // voiceRepo.create and queue.send, the recording would otherwise be
+      // stranded pending forever (the client's 90s poll would time out);
+      // the queue's ON CONFLICT (idempotency_key) dedupe absorbs the
+      // re-send when the original job is still enqueued. Once the recording
+      // has left 'pending' the job provably ran — the completed job's queue
+      // row is deleted, so a re-send then would re-transcribe a finished
+      // recording and duplicate its downstream proposals.
+      const respondWithExisting = async (existing: VoiceRecording) => {
+        let queueMessageId: string | null = null;
+        if (existing.status === 'pending') {
+          queueMessageId = await queue.send(
+            'transcription',
+            {
+              tenantId,
+              recordingId: existing.id,
+              audioUrl: body.audioUrl,
+              conversationId: existing.conversationId,
+              ...(verifiedJobId ? { jobId: verifiedJobId } : {}),
+            },
+            `${tenantId}:${existing.id}:transcription:create`
+          );
+        }
+        res.status(202).json({ recording: existing, queueMessageId });
+      };
+
+      if (idempotencyKey && voiceRepo.findByIdempotencyKey) {
+        const existing = await voiceRepo.findByIdempotencyKey(tenantId, idempotencyKey);
+        if (existing) {
+          await respondWithExisting(existing);
+          return;
+        }
+      }
+
+      let recording: VoiceRecording;
+      try {
+        recording = await voiceRepo.create(
+          createVoiceRecording({
+            tenantId,
+            fileId: body.fileId,
+            conversationId: body.conversationId,
+            createdBy: req.auth!.userId,
+            idempotencyKey,
+          })
+        );
+      } catch (err) {
+        // Concurrent replay lost the insert race — surface the winner's row.
+        if (idempotencyKey && isUniqueViolation(err) && voiceRepo.findByIdempotencyKey) {
+          const existing = await voiceRepo.findByIdempotencyKey(tenantId, idempotencyKey);
+          if (existing) {
+            await respondWithExisting(existing);
+            return;
+          }
+        }
+        throw err;
+      }
 
       const queueMessageId = await queue.send(
         'transcription',
         {
-          tenantId: req.auth!.tenantId,
+          tenantId,
           recordingId: recording.id,
           audioUrl: body.audioUrl,
           conversationId: body.conversationId,
           ...(verifiedJobId ? { jobId: verifiedJobId } : {}),
         },
-        `${req.auth!.tenantId}:${recording.id}:transcription:create`
+        `${tenantId}:${recording.id}:transcription:create`
       );
 
       res.status(202).json({

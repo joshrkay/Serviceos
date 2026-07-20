@@ -56,6 +56,14 @@ export interface VoiceRecording {
    * answer 410 instead of handing out a URL to a deleted S3 object.
    */
   purgedAt?: Date;
+  /**
+   * U11 — client-supplied replay key, unique per tenant (partial index,
+   * migration 259). The mobile offline queue replays the ingest POST with
+   * the same key after a network failure; the route resolves the replay to
+   * this row instead of minting a duplicate. Absent for web uploads and
+   * telephony recordings.
+   */
+  idempotencyKey?: string;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;
@@ -66,11 +74,18 @@ export interface IngestVoiceInput {
   fileId: string;
   conversationId?: string;
   createdBy: string;
+  idempotencyKey?: string;
 }
 
 export interface VoiceRepository {
   create(recording: VoiceRecording): Promise<VoiceRecording>;
   findById(tenantId: string, id: string): Promise<VoiceRecording | null>;
+  /**
+   * U11 — resolve a client replay key to its original recording. Optional
+   * so older repo implementations still satisfy the type; the ingest route
+   * only offers replay semantics when the repo supports it.
+   */
+  findByIdempotencyKey?(tenantId: string, idempotencyKey: string): Promise<VoiceRecording | null>;
   updateStatus(
     tenantId: string,
     id: string,
@@ -135,6 +150,7 @@ export function createVoiceRecording(input: IngestVoiceInput): VoiceRecording {
     fileId: input.fileId ?? undefined,
     conversationId: input.conversationId,
     status: 'pending',
+    idempotencyKey: input.idempotencyKey,
     createdBy: input.createdBy,
     createdAt: new Date(),
     updatedAt: new Date(),
@@ -208,6 +224,22 @@ export class InMemoryVoiceRepository implements VoiceRepository {
   private recordings: Map<string, VoiceRecording> = new Map();
 
   async create(recording: VoiceRecording): Promise<VoiceRecording> {
+    // Mirror migration 259's tenant-scoped partial unique index so route
+    // logic exercised against this repo sees the same 23505 shape PG raises.
+    if (recording.idempotencyKey) {
+      for (const existing of this.recordings.values()) {
+        if (
+          existing.tenantId === recording.tenantId &&
+          existing.idempotencyKey === recording.idempotencyKey
+        ) {
+          const err = new Error(
+            'duplicate key value violates unique constraint "idx_voice_recordings_tenant_idempotency"',
+          ) as Error & { code: string };
+          err.code = '23505';
+          throw err;
+        }
+      }
+    }
     this.recordings.set(recording.id, { ...recording });
     return recording;
   }
@@ -216,6 +248,18 @@ export class InMemoryVoiceRepository implements VoiceRepository {
     const rec = this.recordings.get(id);
     if (!rec || rec.tenantId !== tenantId) return null;
     return { ...rec };
+  }
+
+  async findByIdempotencyKey(
+    tenantId: string,
+    idempotencyKey: string,
+  ): Promise<VoiceRecording | null> {
+    for (const rec of this.recordings.values()) {
+      if (rec.tenantId === tenantId && rec.idempotencyKey === idempotencyKey) {
+        return { ...rec };
+      }
+    }
+    return null;
   }
 
   async updateStatus(

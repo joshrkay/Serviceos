@@ -435,6 +435,9 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // to any environment yet) to widen the status CHECK with a third state,
   // 'sending', closing the post-send crash window; hash regenerated.
   ['258_send_claims', '60e4d9f4b7fb85c5f3feecb518d1cc2df16cb72d2c8b4b6e9ace1fb0f4b981b5'],
+  // U11 — voice_recordings.idempotency_key + tenant-scoped partial unique
+  // index (mobile offline-queue replay safety).
+  ['259_voice_recordings_idempotency_key', '5e4cfb99d4721afc4a3320293d56ad80fbb8cb20f4d5c76659fb40af74d6ffd2'],
 ];
 
 function hashMigration(value: string): string {
