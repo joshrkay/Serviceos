@@ -139,13 +139,19 @@ describe('Today technician screen', () => {
     expect(getByText('Repair upstairs air conditioner')).toBeTruthy();
     expect(getByText('Sharing location for Rivera Family')).toBeTruthy();
 
+    // En route + three running-late chips (10/20/30) + Open job + Maps.
     const buttons = Array.from(container.querySelectorAll('button'));
-    expect(buttons).toHaveLength(4);
+    expect(buttons).toHaveLength(6);
     for (const button of buttons) {
       expect(button.className).toMatch(/\bmin-h-11\b/);
       expect(button.className).not.toMatch(/\bmin-w-\[/);
     }
     expect(container.firstElementChild?.className).toMatch(/\bmax-w-full\b/);
+    // The chip row names the action + recipient; each chip names its duration.
+    expect(getByText('Running late? Let Rivera Family know how far behind you are:')).toBeTruthy();
+    expect(getByText('10 min')).toBeTruthy();
+    expect(getByText('20 min')).toBeTruthy();
+    expect(getByText('30 min')).toBeTruthy();
   });
 
   it('attaches GPS pings to the active / next appointment id', async () => {
@@ -241,14 +247,39 @@ describe('Today technician screen', () => {
     );
   });
 
-  it('sends a 20-minute running-late notice and toasts action failures', async () => {
+  it('sends only the explicitly chosen running-late duration (no default fires)', async () => {
+    const { getByText } = render(createElement(Today));
+    await waitFor(() => expect(getByText('Rivera Family')).toBeTruthy());
+
+    // Rendering the picker must not send anything on its own.
+    expect(h.runningLate).not.toHaveBeenCalled();
+
+    fireEvent.click(getByText('30 min').closest('button')!);
+    await waitFor(() =>
+      expect(h.runningLate).toHaveBeenCalledWith(expect.any(Function), APPOINTMENT.id, 30),
+    );
+    // Exactly one notice, carrying only the tapped duration — no 20m default.
+    expect(h.runningLate).toHaveBeenCalledTimes(1);
+    expect(h.runningLate).not.toHaveBeenCalledWith(expect.any(Function), APPOINTMENT.id, 20);
+    await waitFor(() =>
+      expect(h.showToast).toHaveBeenCalledWith({
+        title: 'Delay sent',
+        body: 'The customer was told you are running 30 minutes late.',
+        tone: 'info',
+      }),
+    );
+  });
+
+  it('sends each chip’s own duration and toasts action failures', async () => {
     const failure = new Error('Could not notify');
     h.runningLate.mockRejectedValueOnce(failure);
     const { getByText } = render(createElement(Today));
     await waitFor(() => expect(getByText('Rivera Family')).toBeTruthy());
 
-    fireEvent.click(getByText('Running 20m late').closest('button')!);
-    await waitFor(() => expect(h.runningLate).toHaveBeenCalledWith(expect.any(Function), APPOINTMENT.id, 20));
+    fireEvent.click(getByText('10 min').closest('button')!);
+    await waitFor(() =>
+      expect(h.runningLate).toHaveBeenCalledWith(expect.any(Function), APPOINTMENT.id, 10),
+    );
     expect(h.showErrorToast).toHaveBeenCalledWith(failure);
   });
 });

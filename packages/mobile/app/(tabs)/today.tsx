@@ -32,6 +32,14 @@ import { navModelFor } from '../../src/navigation/personaNav';
 
 type AppointmentAction = 'en-route' | 'running-late';
 
+// B6 — running-late duration choices (minutes). The chip picker replaces the
+// old single hardcoded 20m tap. Per workflows.md §3 (comms lane "always
+// confirm") the chip row itself IS the confirm: it names the action, the
+// recipient, and the duration, and a notice sends only on an explicit chip
+// tap — no default ever fires. Values match the running-late body schema
+// (positive int minutes; routes/appointments.ts).
+const RUNNING_LATE_OPTIONS = [10, 20, 30] as const;
+
 function trackingCopy(
   status: ReturnType<typeof useForegroundLocationTracker>['status'],
   enabled: boolean,
@@ -54,7 +62,8 @@ function AppointmentCard({
   timezone,
   disabled,
   isNext,
-  onAction,
+  onEnRoute,
+  onRunningLate,
   onOpenJob,
   onOpenMaps,
 }: {
@@ -62,10 +71,12 @@ function AppointmentCard({
   timezone?: string;
   disabled: boolean;
   isNext: boolean;
-  onAction: (action: AppointmentAction) => void;
+  onEnRoute: () => void;
+  onRunningLate: (minutes: number) => void;
   onOpenJob: () => void;
   onOpenMaps: (() => void) | null;
 }) {
+  const who = appointment.customerName || 'customer';
   return (
     <View
       className={`mb-4 w-full max-w-full rounded-xl border bg-card p-4 ${
@@ -107,28 +118,41 @@ function AppointmentCard({
       <View className="mt-4 w-full max-w-full flex-row gap-2">
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel={`En route to ${appointment.customerName || 'customer'}`}
+          accessibilityLabel={`En route to ${who}`}
           disabled={disabled}
-          onPress={() => onAction('en-route')}
+          onPress={onEnRoute}
           className={`min-h-11 min-w-0 flex-1 items-center justify-center rounded-md bg-primary px-2 py-3 ${
             disabled ? 'opacity-50' : ''
           }`}
         >
           <Text className="text-sm font-semibold text-primaryForeground">En route</Text>
         </Pressable>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={`Running 20 minutes late to ${appointment.customerName || 'customer'}`}
-          disabled={disabled}
-          onPress={() => onAction('running-late')}
-          className={`min-h-11 min-w-0 flex-1 items-center justify-center rounded-md bg-secondary px-2 py-3 ${
-            disabled ? 'opacity-50' : ''
-          }`}
-        >
-          <Text className="text-center text-sm font-semibold text-secondaryForeground">
-            Running 20m late
-          </Text>
-        </Pressable>
+      </View>
+
+      {/* B6 — running-late duration picker. The label names the action +
+          recipient; each chip names its own duration and sends only on an
+          explicit tap. No chip is pre-selected, so a single tap never fires a
+          default (workflows.md §3 comms-lane confirm). */}
+      <Text className="mt-3 text-sm text-mutedForeground">
+        Running late? Let {who} know how far behind you are:
+      </Text>
+      <View className="mt-2 w-full max-w-full flex-row gap-2">
+        {RUNNING_LATE_OPTIONS.map((minutes) => (
+          <Pressable
+            key={minutes}
+            accessibilityRole="button"
+            accessibilityLabel={`Tell ${who} you are running ${minutes} minutes late`}
+            disabled={disabled}
+            onPress={() => onRunningLate(minutes)}
+            className={`min-h-11 min-w-0 flex-1 items-center justify-center rounded-md bg-secondary px-2 py-3 ${
+              disabled ? 'opacity-50' : ''
+            }`}
+          >
+            <Text className="text-center text-sm font-semibold text-secondaryForeground">
+              {minutes} min
+            </Text>
+          </Pressable>
+        ))}
       </View>
 
       <View className="mt-2 w-full max-w-full flex-row gap-2">
@@ -233,6 +257,7 @@ export default function Today() {
   const runAction = async (
     appointment: TechnicianDayAppointment,
     action: AppointmentAction,
+    delayMinutes = 20,
   ): Promise<void> => {
     if (actionInFlightRef.current) return;
     actionInFlightRef.current = true;
@@ -250,10 +275,10 @@ export default function Today() {
           tone: 'info',
         });
       } else {
-        await postRunningLate(client, appointment.id, 20);
+        await postRunningLate(client, appointment.id, delayMinutes);
         showToast({
           title: 'Delay sent',
-          body: 'The customer was told you are running 20 minutes late.',
+          body: `The customer was told you are running ${delayMinutes} minutes late.`,
           tone: 'info',
         });
       }
@@ -371,7 +396,10 @@ export default function Today() {
                 timezone={me?.timezone}
                 disabled={pendingAction !== null}
                 isNext={activeAppointment?.id === appointment.id}
-                onAction={(action) => void runAction(appointment, action)}
+                onEnRoute={() => void runAction(appointment, 'en-route')}
+                onRunningLate={(minutes) =>
+                  void runAction(appointment, 'running-late', minutes)
+                }
                 onOpenJob={() => router.push(`/jobs/${appointment.jobId}`)}
                 onOpenMaps={
                   mapsAvailable ? () => void openMaps(appointment) : null

@@ -128,6 +128,14 @@ export default function JobDetailScreen() {
             <Text className="text-base font-medium text-foreground">Time</Text>
             <Text className="mt-0.5 text-sm text-mutedForeground">Clock in and out on site</Text>
           </Pressable>
+          <Pressable
+            accessibilityRole="button"
+            onPress={() => router.push(`/jobs/${id}/expenses`)}
+            className="mb-2 min-h-11 rounded-lg border border-border bg-card px-4 py-3"
+          >
+            <Text className="text-base font-medium text-foreground">Expenses</Text>
+            <Text className="mt-0.5 text-sm text-mutedForeground">Log materials and costs</Text>
+          </Pressable>
         </View>
       ) : null}
     </ScreenShell>
