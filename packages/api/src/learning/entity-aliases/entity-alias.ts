@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { v4 as uuidv4 } from 'uuid';
 import type { EntityKind } from '../../ai/resolution/entity-resolver';
 import { ValidationError } from '../../shared/errors';
 
@@ -38,4 +39,73 @@ export interface EntityAliasCandidate {
   source: EntityAliasSource;
   sourceProposalId: string;
   createdBy: string;
+}
+
+export interface TenantEntityAlias extends EntityAliasCandidate {
+  id: string;
+  normalizedAlias: string;
+  active: boolean;
+  createdAt: Date;
+  updatedAt: Date;
+  deactivatedAt: Date | null;
+  deactivatedBy: string | null;
+}
+
+export interface EntityAliasRepository {
+  activate(candidate: EntityAliasCandidate): Promise<TenantEntityAlias>;
+  findActive(
+    tenantId: string,
+    entityKind: EntityKind,
+    alias: string,
+  ): Promise<TenantEntityAlias | null>;
+  deactivate(
+    tenantId: string,
+    entityKind: EntityKind,
+    alias: string,
+    actorId: string,
+  ): Promise<TenantEntityAlias | null>;
+}
+
+export class InMemoryEntityAliasRepository implements EntityAliasRepository {
+  private readonly aliases: TenantEntityAlias[] = [];
+
+  async activate(candidate: EntityAliasCandidate): Promise<TenantEntityAlias> {
+    const normalizedAlias = normalizeEntityAlias(candidate.alias);
+    const existing = await this.findActive(candidate.tenantId, candidate.entityKind, normalizedAlias);
+    if (existing) return existing;
+    const now = new Date();
+    const alias: TenantEntityAlias = {
+      ...candidate,
+      id: uuidv4(),
+      normalizedAlias,
+      active: true,
+      createdAt: now,
+      updatedAt: now,
+      deactivatedAt: null,
+      deactivatedBy: null,
+    };
+    this.aliases.push(alias);
+    return alias;
+  }
+
+  async findActive(tenantId: string, entityKind: EntityKind, alias: string): Promise<TenantEntityAlias | null> {
+    const normalizedAlias = normalizeEntityAlias(alias);
+    return this.aliases.find(
+      (entry) =>
+        entry.active &&
+        entry.tenantId === tenantId &&
+        entry.entityKind === entityKind &&
+        entry.normalizedAlias === normalizedAlias,
+    ) ?? null;
+  }
+
+  async deactivate(tenantId: string, entityKind: EntityKind, alias: string, actorId: string): Promise<TenantEntityAlias | null> {
+    const entry = await this.findActive(tenantId, entityKind, alias);
+    if (!entry) return null;
+    entry.active = false;
+    entry.deactivatedAt = new Date();
+    entry.deactivatedBy = actorId;
+    entry.updatedAt = entry.deactivatedAt;
+    return entry;
+  }
 }
