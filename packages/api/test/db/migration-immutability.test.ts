@@ -444,6 +444,9 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // (tenant_id, idempotency_key) WHERE NOT NULL. New migration, additive
   // no-op for existing rows.
   ['260_voice_recordings_idempotency_key', '4d3a00f1a88309a306ca3dfdcba5b09da74493b3a4170e6a8824c4f846349c53'],
+  // Tenant-scoped, RLS-enforced learned entity aliases. New table with no
+  // dependency on pre-existing tenant rows beyond normal foreign keys.
+  ['261_create_tenant_entity_aliases', 'f355ecfc94bf9a067c28ba86988832801bc2357a0ab1b2b5db5e3baa3d04bfe0'],
 ];
 
 function hashMigration(value: string): string {
