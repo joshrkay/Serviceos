@@ -27,6 +27,7 @@ import { ExtractedEntities } from '../orchestration/intent-classifier';
 import type { AppointmentRepository } from '../../appointments/appointment';
 import type { JobRepository } from '../../jobs/job';
 import type { InvoiceRepository } from '../../invoices/invoice';
+import type { EstimateRepository } from '../../estimates/estimate';
 import type { LLMGateway } from '../gateway/gateway';
 import { resolveDateTime, DEFAULT_TENANT_TIMEZONE } from '../scheduling/resolve-datetime';
 import { findJobsRequiringInvoicing, InvoicingQueueDeps } from '../../invoices/invoicing-queue';
@@ -562,12 +563,32 @@ export class SendInvoiceTaskHandler implements TaskHandler {
 
 // ───────────── send_estimate ─────────────
 //
-// Comms class — never auto-approves. Mirrors SendInvoiceTaskHandler:
-// the classifier only has a free-text reference at this point, so the
-// proposal carries estimateReference and flags estimateId as missing;
-// the operator resolves it in the review card before approval.
+// Comms class — never auto-approves. Mirrors SendInvoiceTaskHandler
+// EXACTLY: SendEstimateExecutionHandler requires payload.estimateId to
+// ALREADY be a UUID and never reads estimateReference — there is no
+// resolution step between drafting and execution. A free-text reference
+// ("the Khan estimate", "EST-0042") must ALWAYS land with
+// missingFields: ['estimateId'] so approveProposal blocks until the
+// review card resolves it. The previous implementation only gated when
+// NO reference was extracted, leaving "send the Khan estimate"
+// approvable and doomed at execution — the same bug fixed for
+// send_invoice (see class comment above).
+export interface SendEstimateTaskDeps {
+  /**
+   * B2 — optional. When present, a gated free-text estimateReference is
+   * searched (candidatesForReference) so the review card can offer a
+   * one-tap AmbiguityPicker. Candidates NEVER lift the missingFields gate.
+   */
+  estimateRepo?: Pick<EstimateRepository, 'findByTenant'>;
+}
+
 export class SendEstimateTaskHandler implements TaskHandler {
   readonly taskType = 'send_estimate' as const;
+  private readonly deps: SendEstimateTaskDeps;
+
+  constructor(deps: SendEstimateTaskDeps = {}) {
+    this.deps = deps;
+  }
 
   async handle(context: TaskContext): Promise<TaskResult> {
     const ee = entitiesFrom(context);
@@ -575,13 +596,38 @@ export class SendEstimateTaskHandler implements TaskHandler {
       channel: ee.sendChannel ?? 'email',
     };
     const missing: string[] = [];
+    let extraSourceContext: Record<string, unknown> | undefined;
 
-    if (ee.jobReference) payload.estimateReference = ee.jobReference;
-    else if (ee.customerName) payload.estimateReference = ee.customerName;
-    else missing.push('estimateId');
+    const reference = ee.jobReference ?? ee.customerName;
+    if (isUuid(reference)) {
+      // Already a resolved id — the execution handler can use it directly.
+      payload.estimateId = reference;
+    } else {
+      if (reference) payload.estimateReference = reference;
+      missing.push('estimateId');
+
+      const searchReference = ee.jobReference ?? ee.customerName;
+      if (typeof searchReference === 'string' && searchReference.trim().length > 0) {
+        const candidates = await candidatesForReference({
+          tenantId: context.tenantId,
+          reference: searchReference,
+          kind: 'estimate',
+          estimateRepo: this.deps.estimateRepo,
+        });
+        if (candidates.length > 0) {
+          extraSourceContext = {
+            entityCandidates: candidates,
+            entityKind: 'estimate',
+            entityReference: searchReference,
+          };
+        }
+      }
+    }
 
     return {
-      proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      proposal: createProposal(
+        inputFor(context, this.taskType, payload, missing, { sourceContext: extraSourceContext }),
+      ),
       taskType: this.taskType,
     };
   }

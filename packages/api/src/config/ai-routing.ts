@@ -21,10 +21,22 @@ export interface AIRoutingConfig {
 }
 
 // Model identifiers are read from environment variables so they can be
-// updated without a code deploy. Defaults use Anthropic Claude models.
-const lightweightModel = process.env.AI_LIGHTWEIGHT_MODEL || 'claude-haiku-4-5-20251001';
-const standardModel = process.env.AI_STANDARD_MODEL || 'claude-sonnet-4-6';
-const complexModel = process.env.AI_COMPLEX_MODEL || 'claude-sonnet-4-6';
+// updated without a code deploy. Defaults target OpenRouter-hosted open
+// models (Option A — managed inference). Pair with:
+//   AI_PROVIDER_BASE_URL=https://openrouter.ai/api/v1
+//   AI_PROVIDER_API_KEY=sk-or-...
+// See docs/runbooks/openrouter-ai-provider.md.
+//
+// Complex default is the open VL model so mms_estimate (image) and text
+// drafting (draft_estimate / draft_invoice) share one complex tier without
+// a vision mismatch. Override with qwen/qwen-2.5-72b-instruct for cheaper
+// text-only drafting if MMS is unused.
+const lightweightModel =
+  process.env.AI_LIGHTWEIGHT_MODEL || 'meta-llama/llama-3.1-8b-instruct';
+const standardModel =
+  process.env.AI_STANDARD_MODEL || 'meta-llama/llama-3.3-70b-instruct';
+const complexModel =
+  process.env.AI_COMPLEX_MODEL || 'qwen/qwen2.5-vl-72b-instruct';
 
 /** Parse a positive-integer env var (ms), falling back on unset/invalid input. */
 function parsePositiveIntEnv(raw: string | undefined, fallback: number): number {
@@ -201,6 +213,8 @@ const DEFAULT_VISION_CAPABLE_MODELS: readonly string[] = [
   'claude-haiku-4-5-20251001',
   'gpt-4o',
   'gpt-4o-mini',
+  // OpenRouter open VL — set AI_COMPLEX_MODEL to this for mms_estimate.
+  'qwen/qwen2.5-vl-72b-instruct',
 ];
 
 function visionCapableModelSet(): string[] {

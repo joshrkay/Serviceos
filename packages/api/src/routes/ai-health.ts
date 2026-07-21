@@ -2,16 +2,20 @@
  * P2-029 — GET /api/health/ai
  *
  * Returns per-provider health state derived from the circuit-breaker registry.
- * Reads cached state only — no active probing.
+ * Reads cached state only — no active probing on the public listing route.
  *
  * Response shape:
  *   { providers: [{ name, available, breakerState, lastError?, lastSuccessAt? }] }
  *
- * Public endpoint (no auth required) — health endpoints are conventionally
- * open so monitoring infrastructure can reach them without credentials.
+ * U4 — GET /api/health/ai/completion (METRICS_TOKEN / same gate as /metrics)
+ * runs a cheap classify_intent completion so ops can see real provider
+ * failures that leave the breaker closed (bad key, model/host mismatch).
  */
 import { Router, Request, Response } from 'express';
 import { CircuitBreakerRegistry, type BreakerKeyParts } from '../ai/gateway/breaker';
+import type { LLMGateway } from '../ai/gateway/gateway';
+import { probeAiCompletion } from '../ai/gateway/readiness';
+import { checkMetricsAuth } from '../bootstrap/metrics-auth';
 
 export interface ProviderHealthEntry {
   name: string;
@@ -35,6 +39,11 @@ export interface ProviderHealthDescriptor {
   breakerKeyParts?: BreakerKeyParts;
 }
 
+export interface AiHealthRouterOptions {
+  /** When set, enables GET /ai/completion (gated like /metrics). */
+  gateway?: Pick<LLMGateway, 'complete'>;
+}
+
 /**
  * Create the Express router for AI health checks.
  *
@@ -51,10 +60,12 @@ export interface ProviderHealthDescriptor {
  *                          lastSuccessAt; descriptor wins for `available`).
  *                          Pass an empty array (or omit) to rely solely on
  *                          registry iteration.
+ * @param options         - Optional completion-probe wiring.
  */
 export function createAiHealthRouter(
   breakerRegistry: CircuitBreakerRegistry,
   providers: ProviderHealthDescriptor[] = [],
+  options: AiHealthRouterOptions = {},
 ): Router {
   const router = Router();
 
@@ -124,6 +135,32 @@ export function createAiHealthRouter(
     );
 
     res.status(200).json({ providers: [...providerEntries, ...extraEntries] });
+  });
+
+  router.get('/ai/completion', async (req: Request, res: Response) => {
+    const auth = checkMetricsAuth(
+      req.headers.authorization,
+      process.env.METRICS_TOKEN,
+      process.env.NODE_ENV,
+    );
+    if (!auth.ok) {
+      if (auth.headers) {
+        for (const [k, v] of Object.entries(auth.headers)) res.setHeader(k, v);
+      }
+      res.status(auth.status).json(auth.body);
+      return;
+    }
+
+    if (!options.gateway) {
+      res.status(503).json({
+        error: 'AI_GATEWAY_UNAVAILABLE',
+        message: 'LLM gateway is not configured (AI_PROVIDER_API_KEY missing).',
+      });
+      return;
+    }
+
+    const completionProbe = await probeAiCompletion(options.gateway);
+    res.status(200).json({ completionProbe });
   });
 
   return router;

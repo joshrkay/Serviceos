@@ -12,26 +12,26 @@ function makeRequest(overrides: Partial<LLMRequest> = {}): LLMRequest {
 }
 
 describe('P2-028 — Task-complexity-based model routing', () => {
-  it('happy path — lightweight task routes to haiku', () => {
+  it('happy path — lightweight task routes to llama 8b', () => {
     const tierConfig = resolveModelForTask('intent_classification');
 
-    expect(tierConfig.model).toBe('claude-haiku-4-5-20251001');
+    expect(tierConfig.model).toBe('meta-llama/llama-3.1-8b-instruct');
     expect(tierConfig.maxTokens).toBe(1024);
     expect(tierConfig.temperature).toBe(0);
   });
 
-  it('happy path — standard task routes to sonnet', () => {
+  it('happy path — standard task routes to llama 70b', () => {
     const tierConfig = resolveModelForTask('create_appointment');
 
-    expect(tierConfig.model).toBe('claude-sonnet-4-6');
+    expect(tierConfig.model).toBe('meta-llama/llama-3.3-70b-instruct');
     expect(tierConfig.maxTokens).toBe(4096);
     expect(tierConfig.temperature).toBe(0.3);
   });
 
-  it('happy path — complex task routes to sonnet with higher tokens', () => {
+  it('happy path — complex task routes to qwen VL 72b with higher tokens', () => {
     const tierConfig = resolveModelForTask('draft_estimate');
 
-    expect(tierConfig.model).toBe('claude-sonnet-4-6');
+    expect(tierConfig.model).toBe('qwen/qwen2.5-vl-72b-instruct');
     expect(tierConfig.maxTokens).toBe(8192);
     expect(tierConfig.temperature).toBe(0.5);
   });
@@ -41,7 +41,7 @@ describe('P2-028 — Task-complexity-based model routing', () => {
     expect(tier).toBe('standard');
 
     const tierConfig = resolveModelForTask('unknown_task_type');
-    expect(tierConfig.model).toBe('claude-sonnet-4-6');
+    expect(tierConfig.model).toBe('meta-llama/llama-3.3-70b-instruct');
     expect(tierConfig.maxTokens).toBe(4096);
     expect(tierConfig.temperature).toBe(0.3);
   });
@@ -72,7 +72,7 @@ describe('P2-028 — Task-complexity-based model routing', () => {
     const request = makeRequest({ taskType: 'classify_intent' });
     const enriched = enrichRequestWithRouting(request);
 
-    expect(enriched.model).toBe('claude-haiku-4-5-20251001');
+    expect(enriched.model).toBe('meta-llama/llama-3.1-8b-instruct');
     expect(enriched.maxTokens).toBe(1024);
     expect(enriched.temperature).toBe(0);
     // Original request fields preserved

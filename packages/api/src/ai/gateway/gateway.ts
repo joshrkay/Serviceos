@@ -391,8 +391,17 @@ export class LLMGateway {
     }
 
     const tenantId = request.tenantId ?? SYSTEM_TENANT_ID;
+    // AI_DEFAULT_MODEL is wired by createLLMGateway as a SYSTEM_TENANT_ID
+    // override (factory.ts). That override must apply to every tenant that
+    // has no explicit override — otherwise real traffic silently uses
+    // DEFAULT_AI_ROUTING_CONFIG (Claude/Llama defaults) while ops believe
+    // AI_DEFAULT_MODEL=gpt-4o-mini is in effect. Live incident 2026-07-20:
+    // OpenAI host + Claude model ids → 100% gateway errors.
     const tenantOverride = this.config.tenantOverrides
-      ? this.config.tenantOverrides[tenantId]
+      ? (this.config.tenantOverrides[tenantId] ??
+        (tenantId !== SYSTEM_TENANT_ID
+          ? this.config.tenantOverrides[SYSTEM_TENANT_ID]
+          : undefined))
       : undefined;
 
     // resolveRouting merges tenant config exactly once and also sets wasUnmapped
