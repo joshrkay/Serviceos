@@ -520,6 +520,7 @@ export class LLMGateway {
         model: resolvedModel,
         provider: providerName,
         outcome: result.degraded ? 'degraded' : 'success',
+        task_type: request.taskType,
       };
       gatewayRequestsTotal.inc(labels);
       gatewayRequestLatencyMs.observe(labels, latencyMs);
@@ -595,6 +596,7 @@ export class LLMGateway {
         model: resolvedModel,
         provider: providerName,
         outcome: 'error',
+        task_type: request.taskType,
       });
       gatewayRequestLatencyMs.observe(
         {
@@ -602,6 +604,7 @@ export class LLMGateway {
           model: resolvedModel,
           provider: providerName,
           outcome: 'error',
+          task_type: request.taskType,
         },
         latencyMs,
       );
