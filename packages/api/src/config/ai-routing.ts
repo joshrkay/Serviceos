@@ -55,6 +55,16 @@ const standardDeadlineMs = parsePositiveIntEnv(process.env.AI_STANDARD_DEADLINE_
 const complexDeadlineMs = parsePositiveIntEnv(process.env.AI_COMPLEX_DEADLINE_MS, 8_000);
 
 /**
+ * Classifier prompts carry the full intent taxonomy and can exceed the
+ * lightweight tier's turn-SLO deadline. Keep the lightweight model/cost tier,
+ * but give classification a separate end-to-end budget. Operators can tune it
+ * without changing other low-latency tasks.
+ */
+export function resolveClassifyIntentDeadlineMs(): number {
+  return parsePositiveIntEnv(process.env.AI_CLASSIFY_INTENT_DEADLINE_MS, 4_000);
+}
+
+/**
  * Canonical set of gateway taskTypes — every value passed to
  * `gateway.complete({ taskType })`. This array is the single source of truth:
  * `TaskType` is derived from it, and `DEFAULT_TASK_TIER_MAPPING` is keyed by it
