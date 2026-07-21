@@ -314,9 +314,18 @@ function buildGatewayConfig(
       tenantOverrides: {
         [SYSTEM_TENANT_ID]: {
           tiers: {
-            lightweight: { model: defaultModel! },
-            standard: { model: defaultModel! },
-            complex: { model: defaultModel! },
+            lightweight: {
+              ...DEFAULT_AI_ROUTING_CONFIG.tiers.lightweight,
+              model: defaultModel!,
+            },
+            standard: {
+              ...DEFAULT_AI_ROUTING_CONFIG.tiers.standard,
+              model: defaultModel!,
+            },
+            complex: {
+              ...DEFAULT_AI_ROUTING_CONFIG.tiers.complex,
+              model: defaultModel!,
+            },
           },
         },
       },

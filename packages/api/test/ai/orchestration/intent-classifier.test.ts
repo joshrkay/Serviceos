@@ -246,6 +246,17 @@ describe('intent-classifier — classifyIntent', () => {
     expect(call.metadata).toEqual({ tenantId: 'tenant-xyz' });
   });
 
+  it('uses the dedicated voice-safe classifier deadline instead of the lightweight tier deadline', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({ intentType: 'create_invoice', confidence: 0.9 })
+    );
+
+    await classifyIntent('create an invoice', { tenantId: 'tenant-xyz' }, gateway);
+
+    const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(call.deadlineMs).toBe(4_000);
+  });
+
   // P0 scaling bug regression: the resilience wrappers (ProviderTenantQuotaWrapper /
   // CachingGatewayWrapper) read request.tenantId at the TOP LEVEL of the LLMRequest,
   // not metadata.tenantId. Nesting it only in metadata collapsed every tenant's

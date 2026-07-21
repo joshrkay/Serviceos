@@ -1,4 +1,5 @@
 import { LLMGateway } from '../gateway/gateway';
+import { resolveClassifyIntentDeadlineMs } from '../../config/ai-routing';
 
 /**
  * Voice-to-action intent classifier.
@@ -1541,6 +1542,10 @@ async function classifyIntentRaw(
 
   const response = await gateway.complete({
     taskType: 'classify_intent',
+    // The taxonomy prompt is substantially larger than typical lightweight
+    // requests. A dedicated budget prevents the in-app voice FSM from
+    // misreporting a provider abort as low audio confidence.
+    deadlineMs: resolveClassifyIntentDeadlineMs(),
     messages: [
       ...systemMessages,
       { role: 'user', content: transcript },

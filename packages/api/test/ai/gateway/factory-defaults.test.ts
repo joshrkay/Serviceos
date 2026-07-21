@@ -11,6 +11,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import type { AppConfig } from '../../../src/shared/config';
 import type { LLMGatewayLogger } from '../../../src/ai/gateway/gateway';
 import { SYSTEM_TENANT_ID } from '../../../src/ai/gateway/gateway';
+import { DEFAULT_AI_ROUTING_CONFIG } from '../../../src/config/ai-routing';
 
 function cfg(overrides: Partial<AppConfig> = {}): AppConfig {
   return {
@@ -83,6 +84,26 @@ describe('createLLMGateway — AI_DEFAULT_MODEL wiring', () => {
     const log = entries.find((e) => e.message.includes('AI_DEFAULT_MODEL'));
     expect(log).toBeDefined();
     expect(log?.message).toContain('gpt-4o-mini');
+  });
+
+  it('preserves tier deadlines when AI_DEFAULT_MODEL overrides the models', async () => {
+    const { createLLMGateway } = await import('../../../src/ai/gateway/factory');
+    const { logger } = makeCapturingLogger();
+
+    const gateway = createLLMGateway(cfg({ AI_DEFAULT_MODEL: 'gpt-4o-mini' }), { logger });
+    const internalConfig = (gateway as unknown as {
+      config: {
+        tenantOverrides?: Record<
+          string,
+          { tiers: Record<string, { model: string; deadlineMs?: number }> }
+        >;
+      };
+    }).config;
+    const tiers = internalConfig.tenantOverrides?.[SYSTEM_TENANT_ID]?.tiers;
+
+    expect(tiers?.lightweight.deadlineMs).toBe(DEFAULT_AI_ROUTING_CONFIG.tiers.lightweight.deadlineMs);
+    expect(tiers?.standard.deadlineMs).toBe(DEFAULT_AI_ROUTING_CONFIG.tiers.standard.deadlineMs);
+    expect(tiers?.complex.deadlineMs).toBe(DEFAULT_AI_ROUTING_CONFIG.tiers.complex.deadlineMs);
   });
 
   it('per-tier env vars win when all three are set, even if AI_DEFAULT_MODEL is also set', async () => {
