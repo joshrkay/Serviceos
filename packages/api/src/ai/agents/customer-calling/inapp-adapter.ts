@@ -442,11 +442,11 @@ export class InAppVoiceAdapter {
     const greetedEffects = session.machine.dispatch({ type: 'greeted_ok' });
     await this.executeSideEffects(session, greetedEffects);
 
-    const callerKnownEffects = session.machine.dispatch({
-      type: 'caller_known',
-      customerId: userId,
-    });
-    await this.executeSideEffects(session, callerKnownEffects);
+    // An authenticated operator is the proposal actor, not a CRM caller.
+    // Treating their Clerk user id as customerId poisoned downstream entity
+    // resolution and caller-plan lookups for every in-app session.
+    const operatorSessionEffects = session.machine.dispatch({ type: 'operator_session' });
+    await this.executeSideEffects(session, operatorSessionEffects);
 
     // B1 — resolve per-tenant voice persona (best-effort).
     let persona: VoicePersona | null | undefined;

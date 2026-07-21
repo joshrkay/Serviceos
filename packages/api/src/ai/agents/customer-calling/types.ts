@@ -96,6 +96,8 @@ export type CallingAgentEvent =
   | { type: 'compliance_violation_detected'; rule: string }
   | { type: 'greeted_ok' }
   | { type: 'caller_known'; customerId: string }
+  /** Authenticated in-app operator; not a CRM customer identity. */
+  | { type: 'operator_session' }
   | { type: 'unknown_caller' }
   | { type: 'caller_identification_failed'; reason: string }
   | { type: 'system_failure'; reason: string }

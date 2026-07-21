@@ -482,6 +482,17 @@ function transitionIdentifying(
   event: CallingAgentEvent,
   context: CallingAgentContext
 ): TransitionResult {
+  if (event.type === 'operator_session') {
+    return {
+      nextState: 'intent_capture',
+      sideEffects: [
+        auditLog(context, 'identifying', 'intent_capture', 'operator_session'),
+        ttsPlay('How can I help you today?'),
+      ],
+      updatedContext: context,
+    };
+  }
+
   if (event.type === 'caller_known') {
     const updatedContext: CallingAgentContext = {
       ...context,

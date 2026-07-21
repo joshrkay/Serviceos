@@ -71,6 +71,24 @@ describe('InAppVoiceAdapter', () => {
     expect(result.greetingAudio).toBeInstanceOf(Buffer);
   });
 
+  it('does not use the authenticated operator id as a caller customer id', async () => {
+    const callerPlanResolver = vi.fn(async () => undefined);
+    const adapter = new InAppVoiceAdapter({
+      store,
+      gateway: scriptedGateway([]),
+      proposalRepo,
+      auditRepo,
+      onCallRepo,
+      callerPlanResolver,
+    });
+
+    const { sessionId } = await adapter.startSession(TENANT, USER);
+    const session = store.peek(sessionId);
+
+    expect(session?.machine.currentContext.customerId).toBeUndefined();
+    expect(callerPlanResolver).not.toHaveBeenCalled();
+  });
+
   it('happy path: high-confidence intent creates a proposal and closes', async () => {
     const gateway = scriptedGateway([
       JSON.stringify({
