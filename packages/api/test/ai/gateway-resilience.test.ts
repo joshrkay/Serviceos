@@ -24,6 +24,7 @@ import {
   TenantConcurrencyExceededError,
   DEFAULT_TIER_CONFIG,
 } from '../../src/ai/gateway/tenant-quota';
+import type { QuotaStore } from '../../src/ai/gateway/tenant-quota';
 import {
   createDeadlineContext,
   DeadlineExceededError,
@@ -429,6 +430,28 @@ describe('ProviderTenantQuotaWrapper', () => {
     await expect(wrapped.complete(req)).rejects.toThrow('boom');
     // After failure, lease should be released — second call should be allowed
     await expect(wrapped.complete(req)).rejects.toThrow('boom');
+  });
+
+  it('isolates full-taxonomy classification from ordinary tenant traffic', async () => {
+    const inner = new AlwaysSuccessProvider();
+    const acquire = vi.fn(async () => ({ release: vi.fn(async () => undefined) }));
+    const quota: QuotaStore = { acquire };
+    const wrapped = new ProviderTenantQuotaWrapper(inner, quota);
+
+    await wrapped.complete(
+      makeRequest({
+        taskType: 'classify_intent',
+        tenantId: 'tenant-voice',
+        tenantTier: 'standard',
+      }),
+    );
+
+    expect(acquire).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tenantId: 'tenant-voice:classify_intent',
+        tenantTier: 'classifier_standard',
+      }),
+    );
   });
 });
 

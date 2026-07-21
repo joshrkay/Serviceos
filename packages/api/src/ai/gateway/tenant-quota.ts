@@ -41,6 +41,27 @@ export const DEFAULT_TIER_CONFIG: Record<TenantTier, TenantQuotaTierConfig> = {
     refillTokensPerSec: 500,
     hardUpperBoundTokens: 1_000_000,
   },
+  // Classifier calls carry the full intent taxonomy (~9k input tokens). They
+  // use an isolated, bounded bucket so a valid operator burst cannot drain
+  // the ordinary task budget (or vice versa). See ProviderTenantQuotaWrapper.
+  classifier_free: {
+    maxConcurrency: 1,
+    bucketCapacity: 150_000,
+    refillTokensPerSec: 250,
+    hardUpperBoundTokens: 300_000,
+  },
+  classifier_standard: {
+    maxConcurrency: 2,
+    bucketCapacity: 600_000,
+    refillTokensPerSec: 1_000,
+    hardUpperBoundTokens: 1_200_000,
+  },
+  classifier_premium: {
+    maxConcurrency: 4,
+    bucketCapacity: 1_200_000,
+    refillTokensPerSec: 4_000,
+    hardUpperBoundTokens: 4_000_000,
+  },
   premium: {
     maxConcurrency: 32,
     bucketCapacity: 1_000_000,
