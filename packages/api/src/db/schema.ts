@@ -6325,6 +6325,38 @@ export const MIGRATIONS = {
       ON voice_recordings (tenant_id, idempotency_key)
       WHERE idempotency_key IS NOT NULL;
   `,
+
+  '261_create_tenant_entity_aliases': `
+    CREATE TABLE IF NOT EXISTS tenant_entity_aliases (
+      id UUID PRIMARY KEY,
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      entity_kind TEXT NOT NULL,
+      entity_id UUID NOT NULL,
+      normalized_alias TEXT NOT NULL,
+      source_alias TEXT NOT NULL,
+      source TEXT NOT NULL CHECK (source IN ('entity_picker', 'proposal_edit')),
+      source_proposal_id UUID REFERENCES proposals(id) ON DELETE SET NULL,
+      active BOOLEAN NOT NULL DEFAULT true,
+      created_by UUID NOT NULL REFERENCES users(id),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      deactivated_at TIMESTAMPTZ,
+      deactivated_by UUID REFERENCES users(id),
+      CHECK (char_length(normalized_alias) BETWEEN 1 AND 120)
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS tenant_entity_aliases_active_unique
+      ON tenant_entity_aliases (tenant_id, entity_kind, normalized_alias)
+      WHERE active = true;
+    CREATE INDEX IF NOT EXISTS idx_tenant_entity_aliases_lookup
+      ON tenant_entity_aliases (tenant_id, entity_kind, normalized_alias)
+      WHERE active = true;
+    ALTER TABLE tenant_entity_aliases ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE tenant_entity_aliases FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_tenant_entity_aliases ON tenant_entity_aliases;
+    CREATE POLICY tenant_isolation_tenant_entity_aliases ON tenant_entity_aliases
+      USING (tenant_id = current_setting('app.current_tenant_id', true)::UUID)
+      WITH CHECK (tenant_id = current_setting('app.current_tenant_id', true)::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

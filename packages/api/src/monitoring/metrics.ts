@@ -22,7 +22,7 @@ collectDefaultMetrics({ register: metricsRegistry });
 export const gatewayRequestsTotal = new Counter({
   name: 'gateway_requests_total',
   help: 'LLM gateway requests, partitioned by outcome',
-  labelNames: ['tenant_tier', 'model', 'provider', 'outcome'],
+  labelNames: ['tenant_tier', 'model', 'provider', 'outcome', 'task_type'],
   registers: [metricsRegistry],
 });
 
@@ -57,7 +57,7 @@ export const voiceBlocksTotal = new Counter({
 export const gatewayRequestLatencyMs = new Histogram({
   name: 'gateway_request_latency_ms',
   help: 'End-to-end LLM gateway request latency in ms',
-  labelNames: ['tenant_tier', 'model', 'provider', 'outcome'],
+  labelNames: ['tenant_tier', 'model', 'provider', 'outcome', 'task_type'],
   buckets: [50, 100, 250, 500, 1000, 2500, 5000, 10_000, 25_000, 60_000],
   registers: [metricsRegistry],
 });
