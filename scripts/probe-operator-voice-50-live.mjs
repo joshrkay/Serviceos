@@ -289,6 +289,8 @@ async function main() {
 
     const sess = await api('POST', '/api/voice/sessions', { token, body: {} });
     let voice;
+    let voiceFirstTurn;
+    let voiceConfirmationTurn;
     if (sess.status !== 201 || !sess.json?.sessionId) {
       voice = {
         verdict: sess.status === 401 || sess.status === 403 ? 'BLOCKED' : 'FAIL',
@@ -296,11 +298,26 @@ async function main() {
         httpStatus: sess.status,
       };
     } else {
-      const inp = await api('POST', `/api/voice/sessions/${sess.json.sessionId}/input`, {
+      voiceFirstTurn = await api('POST', `/api/voice/sessions/${sess.json.sessionId}/input`, {
         token,
         body: { text: c.utterance },
       });
-      voice = scoreVoice(inp.json, inp.status);
+      // The in-app voice FSM deliberately requires confirmation before it
+      // drafts a mutation proposal. A one-turn probe therefore cannot score a
+      // valid classified action as PASS. Confirm only when the server asks.
+      if (voiceFirstTurn.json?.state === 'intent_confirm') {
+        voiceConfirmationTurn = await api(
+          'POST',
+          `/api/voice/sessions/${sess.json.sessionId}/input`,
+          { token, body: { text: 'yes' } },
+        );
+      }
+      const finalVoiceTurn = voiceConfirmationTurn ?? voiceFirstTurn;
+      voice = {
+        ...scoreVoice(finalVoiceTurn.json, finalVoiceTurn.status),
+        firstTurnState: voiceFirstTurn.json?.state ?? null,
+        confirmationSent: Boolean(voiceConfirmationTurn),
+      };
     }
     bump(voiceCounts, voice.verdict);
 
@@ -312,6 +329,15 @@ async function main() {
       expectProposal: c.expectProposal,
       assistant,
       voice,
+      voiceFirstTurn: voiceFirstTurn
+        ? { httpStatus: voiceFirstTurn.status, state: voiceFirstTurn.json?.state ?? null }
+        : undefined,
+      voiceConfirmationTurn: voiceConfirmationTurn
+        ? {
+            httpStatus: voiceConfirmationTurn.status,
+            state: voiceConfirmationTurn.json?.state ?? null,
+          }
+        : undefined,
     });
     console.log(`A=${assistant.verdict} V=${voice.verdict}`);
   }

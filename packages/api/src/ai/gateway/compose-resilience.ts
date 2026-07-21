@@ -262,6 +262,14 @@ export class ProviderTenantQuotaWrapper implements LLMProvider {
   async complete(request: LLMRequest): Promise<LLMResponse> {
     const tenantId = request.tenantId ?? 'system';
     const tenantTier: TenantTier = request.tenantTier ?? 'standard';
+    const classifierRequest = request.taskType === 'classify_intent';
+    // The taxonomy classifier has a much larger prompt than ordinary
+    // lightweight tasks. Isolate its bounded quota state so an operator burst
+    // cannot starve proposal drafting, while preserving per-tenant limits.
+    const quotaTenantId = classifierRequest ? `${tenantId}:classify_intent` : tenantId;
+    const quotaTenantTier: TenantTier = classifierRequest
+      ? `classifier_${tenantTier}`
+      : tenantTier;
 
     // Estimate tokens from message text
     const estimatedTokens = request.messages.reduce(
@@ -269,7 +277,11 @@ export class ProviderTenantQuotaWrapper implements LLMProvider {
       0,
     );
 
-    const lease = await this.registry.acquire({ tenantId, tenantTier, estimatedTokens });
+    const lease = await this.registry.acquire({
+      tenantId: quotaTenantId,
+      tenantTier: quotaTenantTier,
+      estimatedTokens,
+    });
     try {
       const response = await this.inner.complete(request);
       await lease.release(response.tokenUsage.input, response.tokenUsage.output);
