@@ -98,8 +98,13 @@ export const IRREVERSIBLE_PROPOSAL_TYPES: ReadonlySet<string> = new Set<string>(
   ProposalType.EMERGENCY_DISPATCH,
 ]);
 
+/** Owner-only learning/config proposals — never auto-executed or batch-approved. */
+export const MANUAL_PROPOSAL_TYPES: ReadonlySet<string> = new Set<string>([
+  ProposalType.ADOPT_ENTITY_ALIAS,
+]);
+
 /** Mirrors the API's ActionClass union (packages/api/src/proposals/proposal.ts). */
-export type ActionClass = 'capture' | 'comms' | 'money' | 'irreversible';
+export type ActionClass = 'capture' | 'comms' | 'money' | 'irreversible' | 'manual';
 
 /**
  * Total classifier over raw type strings. Returns 'unknown' for any type this
@@ -112,5 +117,6 @@ export function actionClassForProposalType(type: string): ActionClass | 'unknown
   if (COMMS_PROPOSAL_TYPES.has(type)) return 'comms';
   if (MONEY_PROPOSAL_TYPES.has(type)) return 'money';
   if (IRREVERSIBLE_PROPOSAL_TYPES.has(type)) return 'irreversible';
+  if (MANUAL_PROPOSAL_TYPES.has(type)) return 'manual';
   return 'unknown';
 }

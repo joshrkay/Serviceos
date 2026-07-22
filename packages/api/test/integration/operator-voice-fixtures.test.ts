@@ -73,7 +73,7 @@ describe('Postgres integration — operator voice QA fixtures', () => {
 
   it('persists the exact catalog through production domain/repository paths with provenance audits', async () => {
     expect(result.tenantId).toBe(tenant.tenantId);
-    expect(Object.keys(result.records)).toHaveLength(28);
+    expect(Object.keys(result.records)).toHaveLength(27);
 
     const expectedCounts: Record<string, number> = {
       customers: 6,
@@ -104,8 +104,8 @@ describe('Postgres integration — operator voice QA fixtures', () => {
           AND correlation_id LIKE $2`,
       [tenant.tenantId, `${OPERATOR_VOICE_FIXTURE_PROVENANCE_PREFIX}%`],
     );
-    expect(audits.rows).toHaveLength(28);
-    expect(new Set(audits.rows.map((row) => row.correlation_id)).size).toBe(28);
+    expect(audits.rows).toHaveLength(27);
+    expect(new Set(audits.rows.map((row) => row.correlation_id)).size).toBe(27);
     for (const audit of audits.rows) {
       expect(audit.tenant_id).toBe(tenant.tenantId);
       expect(audit.actor_id).toBe(tenant.userId);
@@ -183,7 +183,7 @@ describe('Postgres integration — operator voice QA fixtures', () => {
     }
   });
 
-  it('pins EST-0042 and Greenfield while documenting unsupported resolver kinds', async () => {
+  it('pins EST-0042 estimate resolution and Greenfield lead', async () => {
     const estimateRepo = new PgEstimateRepository(pool);
     const estimates = await estimateRepo.findByTenant(tenant.tenantId, { search: 'EST-0042' });
     expect(estimates).toHaveLength(1);
@@ -194,7 +194,10 @@ describe('Postgres integration — operator voice QA fixtures', () => {
       reference: 'EST-0042',
       kind: 'estimate',
     });
-    expect(estimateResolution).toEqual({ kind: 'skipped' });
+    expect(estimateResolution.kind).toBe('resolved');
+    if (estimateResolution.kind === 'resolved') {
+      expect(estimateResolution.candidate.id).toBe(result.records['estimate.explicit-0042'].id);
+    }
 
     const leadRepo = new PgLeadRepository(pool);
     const leads = await leadRepo.findByTenant(tenant.tenantId);

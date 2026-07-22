@@ -216,6 +216,8 @@ export enum ProposalType {
   // N times; on approval the execution handler updates the catalog item's
   // unit price. Config/capture-class, reversible, never auto-executed (D-004).
   UPDATE_CATALOG_ITEM = 'update_catalog_item',
+  // U4 — owner-approved tenant alias activation after voice entity correction.
+  ADOPT_ENTITY_ALIAS = 'adopt_entity_alias',
 }
 
 export enum RejectionCategory {

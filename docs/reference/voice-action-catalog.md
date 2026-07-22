@@ -132,6 +132,7 @@ migration).
 |---|---|---|---|
 | "Book this caller for Thursday" | `create_booking` | capture | deferred (customer-call FSM path) |
 | _(none — system-generated, not spoken)_ | `update_catalog_item` | capture | WS20: the correction loop emits this after N same-SKU price corrections; intentionally never voice-reachable (no on-ramp by design) |
+| _(none — minted after entity resolution, not spoken)_ | `adopt_entity_alias` | manual | U4: alias-learning lifecycle mints this when an operator resolves an ambiguous reference; owner-only approval, never voice-reachable |
 
 (`create_invoice_schedule` and `review_response_proposal` graduated to
 section A in taxonomy 1.2.0 — U2/U3 of the agent build wave.)
@@ -203,7 +204,8 @@ approves by screen/SMS tap).
   ],
   "handlerNoOnramp": [
     "create_booking",
-    "update_catalog_item"
+    "update_catalog_item",
+    "adopt_entity_alias"
   ],
   "gated": ["approve_proposal", "reject_proposal", "edit_proposal"]
 }
