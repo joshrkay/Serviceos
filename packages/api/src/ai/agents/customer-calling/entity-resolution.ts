@@ -534,6 +534,20 @@ function extractStreetNumber(text: string): string | undefined {
   return match?.[1];
 }
 
+/** Prefer the service-address segment of an enriched candidate hint over phone digits. */
+function hintAddressPortion(hint: string | undefined): string {
+  if (!hint) return '';
+  const segments = hint.split('·').map((segment) => segment.trim()).filter(Boolean);
+  if (segments.length <= 1) return '';
+  return segments.slice(1).join(' ').trim();
+}
+
+function phoneTailMatchesStreetNumber(hint: string | undefined, streetNumber: string): boolean {
+  const digits = extractDigits(hint ?? '');
+  if (!digits || !streetNumber) return false;
+  return digits.endsWith(streetNumber) || digits.endsWith(`0${streetNumber}`);
+}
+
 function parseOrdinalIndex(normalized: string, candidateCount: number): number | undefined {
   const compact = normalized
     .replace(/^the\s+/, '')
@@ -606,19 +620,25 @@ export function matchDisambiguationFollowUp(
   const hintMatches: string[] = [];
 
   for (const candidate of pending.candidates) {
-    const haystack = `${candidate.name} ${candidate.hint ?? ''}`.toLowerCase();
-    if (followDigits.length >= 4) {
-      const hintDigits = extractDigits(candidate.hint ?? '');
-      if (
-        hintDigits.length >= 4 &&
-        (followDigits.includes(hintDigits) || hintDigits.includes(followDigits))
-      ) {
+    const addressHay = hintAddressPortion(candidate.hint).toLowerCase();
+    if (streetNumber) {
+      if (addressHay.length > 0 && addressHay.includes(streetNumber)) {
+        hintMatches.push(candidate.id);
+        continue;
+      }
+      if (phoneTailMatchesStreetNumber(candidate.hint, streetNumber)) {
         hintMatches.push(candidate.id);
         continue;
       }
     }
-    if (streetNumber && haystack.includes(streetNumber)) {
-      hintMatches.push(candidate.id);
+    if (followDigits.length >= 7) {
+      const hintDigits = extractDigits(candidate.hint ?? '');
+      if (
+        hintDigits.length >= 7 &&
+        (followDigits.includes(hintDigits) || hintDigits.includes(followDigits))
+      ) {
+        hintMatches.push(candidate.id);
+      }
     }
   }
 
@@ -631,7 +651,7 @@ export function matchDisambiguationFollowUp(
   if (streetNumber) {
     const tokens = normalized.split(/\s+/).filter((token) => token.length > 2);
     const tokenMatches = pending.candidates.filter((candidate) => {
-      const haystack = `${candidate.name} ${candidate.hint ?? ''}`.toLowerCase();
+      const haystack = `${hintAddressPortion(candidate.hint)} ${candidate.name}`.toLowerCase();
       return haystack.includes(streetNumber) || tokens.every((token) => haystack.includes(token));
     });
     if (tokenMatches.length === 1) {

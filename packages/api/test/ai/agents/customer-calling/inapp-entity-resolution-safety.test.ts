@@ -235,6 +235,43 @@ describe('InAppVoiceAdapter — entity-resolution voice safety', () => {
     );
   });
 
+  it('does not call the classifier again on an entity_resolution disambiguation follow-up', async () => {
+    const gateway = scriptedGateway([SCHEDULING_CLASSIFIER]);
+    const resolver = stubResolver({
+      kind: 'ambiguous',
+      candidates: [
+        {
+          id: 'bob-old',
+          kind: 'customer',
+          label: 'Bob Smith',
+          hint: '555-0001 · 104 QA Cedar Avenue',
+          score: 0.91,
+        },
+        {
+          id: 'bob-new',
+          kind: 'customer',
+          label: 'Bob Smith',
+          hint: '555-0002 · 105 QA Cedar Avenue',
+          score: 0.9,
+        },
+      ],
+    });
+    const adapter = new InAppVoiceAdapter({
+      store,
+      gateway,
+      proposalRepo,
+      auditRepo,
+      onCallRepo,
+      entityResolver: resolver,
+    });
+    const { sessionId } = await adapter.startSession(TENANT, USER);
+
+    await adapter.handleInput(sessionId, 'book Bob Smith for tomorrow at 2pm');
+    await adapter.handleInput(sessionId, '104 Cedar');
+
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+  });
+
   // ── (c) zero matches → entity_resolved → intent_confirm (no escalation) ───
   it('zero matches → entity_resolved → intent_confirm readback without on-call escalation', async () => {
     const resolver = stubResolver({ kind: 'not_found', reference: 'Bob Smith' });

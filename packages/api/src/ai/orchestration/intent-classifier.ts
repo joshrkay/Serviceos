@@ -1215,6 +1215,30 @@ const OWNER_OPERATOR_COMMAND_PATTERNS: ReadonlyArray<OwnerOperatorCommandPattern
       lineItemDescriptions: [match[1].trim().replace(/^(?:a|an|the)\s+/i, '')],
     }),
   },
+  {
+    intentType: 'draft_estimate',
+    pattern:
+      /^\s*quote\s+([a-z][a-z .'-]{0,58}?)\s+for\s+(?:a\s+)?(.{3,120}?)\s*[.!?]?\s*$/i,
+    extract: (match) => ({
+      customerName: match[1].trim(),
+      jobReference: match[2].trim(),
+    }),
+  },
+  {
+    intentType: 'update_invoice',
+    pattern:
+      /^\s*(?:add\s+)?(?:a\s+)?line\s+item\s+(.{3,80}?)\s+on\s+([a-z][a-z .'-]{0,58}?)['’]s\s+bill\s*[.!?]?\s*$/i,
+    extract: (match) => ({
+      customerName: match[2].trim(),
+      lineItemDescriptions: [match[1].trim()],
+    }),
+  },
+  {
+    intentType: 'send_invoice',
+    pattern:
+      /^\s*(?:sms|text)\s+([a-z][a-z .'-]{0,58}?)\s+(?:the\s+)?invoice\s+link\s*[.!?]?\s*$/i,
+    extract: (match) => ({ customerName: match[1].trim() }),
+  },
 ];
 
 function matchOwnerOperatorCommand(transcript: string): IntentClassification | null {

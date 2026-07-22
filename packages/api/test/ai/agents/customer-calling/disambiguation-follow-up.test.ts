@@ -33,6 +33,20 @@ describe('matchDisambiguationFollowUp', () => {
     expect(result).toEqual({ status: 'resolved', candidateId: 'smith-a' });
   });
 
+  it('matches phone-tail street numbers when only phone hints are present', () => {
+    const pending: PendingEntityAmbiguity = {
+      ...SMITH_PENDING,
+      candidates: [
+        { id: 'smith-a', name: 'Smith', score: 0.91, hint: '+14805550104' },
+        { id: 'smith-b', name: 'Smith', score: 0.9, hint: '+14805550105' },
+      ],
+    };
+    expect(matchDisambiguationFollowUp('104 Cedar', pending)).toEqual({
+      status: 'resolved',
+      candidateId: 'smith-a',
+    });
+  });
+
   it('matches ordinals within the candidate list', () => {
     const result = matchDisambiguationFollowUp('the second one', SMITH_PENDING);
     expect(result).toEqual({ status: 'resolved', candidateId: 'smith-b' });
