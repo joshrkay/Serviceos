@@ -111,6 +111,13 @@ describe('planVoiceEntityLookups — intent-conditioned operator references', ()
     ]);
   });
 
+  it('resolves Henderson customer name for lookup_balance', () => {
+    const lookups = planVoiceEntityLookups('lookup_balance', { customerName: 'Henderson' });
+    expect(lookups).toEqual([
+      { kind: 'customer', reference: 'Henderson', refKey: 'customerId' },
+    ]);
+  });
+
   it('resolves Garcia Tuesday appointment reference for reschedule_appointment', () => {
     const lookups = planVoiceEntityLookups('reschedule_appointment', {
       appointmentReference: 'Tuesday',

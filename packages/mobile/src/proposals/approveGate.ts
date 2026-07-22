@@ -8,7 +8,7 @@
 import { actionClassForProposalType } from '@ai-service-os/shared';
 import { typeLabel } from './proposalReview';
 
-export type ConfirmLane = 'comms' | 'money' | 'irreversible' | 'unknown';
+export type ConfirmLane = 'comms' | 'money' | 'irreversible' | 'manual' | 'unknown';
 
 export type ApproveGate =
   | { kind: 'one_tap' }
@@ -27,6 +27,7 @@ const LANE_COPY: Record<ConfirmLane, { suffix: string; confirmLabel: string; des
   comms: { suffix: 'this messages your customer.', confirmLabel: 'Send it', destructive: false },
   money: { suffix: 'this moves money.', confirmLabel: 'Confirm', destructive: false },
   irreversible: { suffix: "this can't be undone.", confirmLabel: 'Yes, do it', destructive: true },
+  manual: { suffix: 'this updates how names are learned.', confirmLabel: 'Confirm', destructive: false },
   // Fail closed: a type this build has not classified gets a neutral explicit
   // confirm — never a one-tap (and shared's isCaptureProposalType already
   // keeps unknowns out of batch).

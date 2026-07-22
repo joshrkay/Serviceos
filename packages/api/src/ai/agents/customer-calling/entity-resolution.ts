@@ -34,7 +34,15 @@ const GENERIC_CUSTOMER_REFS = new Set([
 const SKIP_CUSTOMER_RESOLUTION_INTENTS = new Set(['create_customer']);
 
 const CUSTOMER_REF_INTENTS = new Set([
+  // Customer-scoped lookup_* intents (mirror CUSTOMER_SCOPED_LOOKUP_INTENTS).
+  'lookup_balance',
   'lookup_customer',
+  'lookup_jobs',
+  'lookup_invoices',
+  'lookup_estimates',
+  'lookup_agreements',
+  'lookup_account_summary',
+  'lookup_appointments',
   'update_customer',
   'create_job',
   'create_invoice',
@@ -200,6 +208,21 @@ export function planVoiceEntityLookups(
 ): VoiceEntityLookup[] {
   const lookups: VoiceEntityLookup[] = [];
 
+  // Ambiguity/clarification order: customer → job → technician → appointment.
+  // Customer-first keeps "Invoice Bob for the water heater job" from stalling
+  // on a job picker before the operator picks WHICH Bob; technician-before-
+  // appointment keeps reassign flows from surfacing the appointment picker
+  // before the operator picks WHICH Carlos.
+  const customerName = trimReference(entities.customerName);
+  if (
+    customerName &&
+    !SKIP_CUSTOMER_RESOLUTION_INTENTS.has(intent) &&
+    CUSTOMER_REF_INTENTS.has(intent) &&
+    !GENERIC_CUSTOMER_REFS.has(customerName.toLowerCase())
+  ) {
+    lookups.push({ kind: 'customer', reference: customerName, refKey: 'customerId' });
+  }
+
   const jobReference = trimReference(entities.jobReference);
   if (jobReference) {
     const documentKind = documentKindForReference(intent, jobReference);
@@ -211,14 +234,13 @@ export function planVoiceEntityLookups(
     }
   }
 
-  const customerName = trimReference(entities.customerName);
-  if (
-    customerName &&
-    !SKIP_CUSTOMER_RESOLUTION_INTENTS.has(intent) &&
-    CUSTOMER_REF_INTENTS.has(intent) &&
-    !GENERIC_CUSTOMER_REFS.has(customerName.toLowerCase())
-  ) {
-    lookups.push({ kind: 'customer', reference: customerName, refKey: 'customerId' });
+  const targetTechnicianName = trimReference(entities.targetTechnicianName);
+  if (targetTechnicianName && TECHNICIAN_REF_INTENTS.has(intent)) {
+    lookups.push({
+      kind: 'technician',
+      reference: targetTechnicianName,
+      refKey: 'technicianId',
+    });
   }
 
   const appointmentReference = trimReference(entities.appointmentReference);
@@ -227,15 +249,6 @@ export function planVoiceEntityLookups(
       kind: 'appointment',
       reference: appointmentReference,
       refKey: 'appointmentId',
-    });
-  }
-
-  const targetTechnicianName = trimReference(entities.targetTechnicianName);
-  if (targetTechnicianName && TECHNICIAN_REF_INTENTS.has(intent)) {
-    lookups.push({
-      kind: 'technician',
-      reference: targetTechnicianName,
-      refKey: 'technicianId',
     });
   }
 

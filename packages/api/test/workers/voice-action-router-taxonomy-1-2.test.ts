@@ -179,6 +179,7 @@ describe('U1: router technician resolution', () => {
     expect(missingFieldsFor(proposals[0])).toContain('toTechnicianId');
     expect((proposals[0].sourceContext as Record<string, unknown>).pendingReference).toEqual([
       { kind: 'technician', reference: 'Carlos' },
+      { kind: 'appointment', reference: "Tuesday's Davis job" },
     ]);
   });
 });
