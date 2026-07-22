@@ -9,6 +9,7 @@ import { z } from 'zod';
 import type { RepairTemplate } from '../../../verticals/registry';
 import type { EscalationSummary } from './escalation-summary-builder';
 import type { QuoteReadbackLine } from '../../voice-turn/quote-readback';
+import type { PendingEntityAmbiguity } from './entity-resolution';
 
 // ─── States ──────────────────────────────────────────────────────────────────
 
@@ -48,7 +49,16 @@ export type CallingAgentEvent =
   // Internal events (produced by skills, consumed by the state machine)
   | { type: 'intent_classified'; intentType: string; entities: Record<string, unknown>; confidence: number; aiRunId?: string }
   | { type: 'entity_resolved'; refs: Record<string, string> }
-  | { type: 'entity_ambiguous'; candidates: Array<{ id: string; name: string; score: number }> }
+  | {
+      type: 'entity_ambiguous';
+      candidates: Array<{ id: string; name: string; score: number; hint?: string }>;
+      entityKind: string;
+      reference: string;
+      refKey: string;
+      partialRefs: Record<string, string>;
+      /** True when the caller's follow-up did not resolve the ambiguity. */
+      retry?: boolean;
+    }
   | { type: 'entity_not_found' }
   | { type: 'confidence_low'; threshold: number; score: number }
   // WS5 — `utterance` carries the grounded quote read-back computed by the
@@ -150,6 +160,12 @@ export interface CallingAgentContext {
   customerName?: string;
   currentIntent?: string;
   extractedEntities?: Record<string, unknown>;
+  /**
+   * Set when a free-text entity reference matched more than one record. The
+   * next caller turn is interpreted as a disambiguation answer (address,
+   * ordinal, phone hint) rather than a fresh intent classification.
+   */
+  pendingEntityAmbiguity?: PendingEntityAmbiguity;
   pendingProposalId?: string;
   retryCount: number;
   /**

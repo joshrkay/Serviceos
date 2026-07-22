@@ -6,6 +6,8 @@ import { fileURLToPath } from 'node:url';
 import {
   loadProbeCases,
   probeCasesMeta,
+  resolveProbeDisambiguationFollowUp,
+  runVoiceSessionProbe,
   scoreVoice,
 } from '../probe-operator-voice-50-live.mjs';
 
@@ -118,4 +120,40 @@ test('scores semantic low confidence as a reprompt', () => {
 
   assert.equal(result.verdict, 'DEGRADED');
   assert.equal(result.reason, 'voice_reprompt_low_confidence');
+});
+
+test('resolveProbeDisambiguationFollowUp defaults ambiguous-name cases to 104 Cedar', () => {
+  assert.equal(
+    resolveProbeDisambiguationFollowUp({ tags: ['ambiguous-name'] }),
+    '104 Cedar',
+  );
+  assert.equal(
+    resolveProbeDisambiguationFollowUp({
+      tags: ['ambiguous-name'],
+      disambiguationFollowUp: '105 QA Cedar Avenue',
+    }),
+    '105 QA Cedar Avenue',
+  );
+  assert.equal(resolveProbeDisambiguationFollowUp({ tags: [] }), null);
+});
+
+test('runVoiceSessionProbe sends disambiguation then confirmation turns', async () => {
+  const calls = [];
+  const apiFn = async (method, path, { body }) => {
+    calls.push({ method, path, body });
+    if (body.text === '104 Cedar') {
+      return { status: 200, json: { state: 'intent_confirm', proposalIds: [] } };
+    }
+    return { status: 200, json: { state: 'closing', proposalIds: ['p1'] } };
+  };
+
+  const firstTurn = { status: 200, json: { state: 'entity_resolution', proposalIds: [] } };
+  const result = await runVoiceSessionProbe(apiFn, 'token', 'sess-1', {
+    tags: ['ambiguous-name'],
+  }, firstTurn);
+
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].body.text, '104 Cedar');
+  assert.equal(calls[1].body.text, 'yes');
+  assert.equal(result.finalVoiceTurn.json.proposalIds[0], 'p1');
 });

@@ -490,3 +490,210 @@ export async function resolveVoiceEntityReferences(
 
   return ok;
 }
+
+// ─── Disambiguation follow-up (in-app voice turn 2+) ─────────────────────────
+
+/** Hard cap on consecutive unmatched disambiguation answers before proceeding. */
+export const MAX_DISAMBIGUATION_ATTEMPTS = 2;
+
+export interface PendingEntityAmbiguityCandidate {
+  id: string;
+  name: string;
+  score: number;
+  hint?: string;
+}
+
+export interface PendingEntityAmbiguity {
+  entityKind: EntityKind;
+  reference: string;
+  refKey: string;
+  candidates: PendingEntityAmbiguityCandidate[];
+  partialRefs: Record<string, string>;
+  attemptCount: number;
+}
+
+export type DisambiguationFollowUpResult =
+  | { status: 'resolved'; candidateId: string }
+  | { status: 'unmatched' }
+  | { status: 'still_ambiguous' };
+
+export function refKeyForEntityKind(kind: EntityKind): string | undefined {
+  return REF_KEY_BY_KIND[kind];
+}
+
+function normalizeFollowUp(text: string): string {
+  return text.trim().toLowerCase().replace(/[.!?,]+$/g, '').trim();
+}
+
+function extractDigits(text: string): string {
+  return text.replace(/\D/g, '');
+}
+
+function extractStreetNumber(text: string): string | undefined {
+  const match = text.match(/\b(\d{1,5})\b/);
+  return match?.[1];
+}
+
+function parseOrdinalIndex(normalized: string, candidateCount: number): number | undefined {
+  const compact = normalized
+    .replace(/^the\s+/, '')
+    .replace(/\s+one$/, '')
+    .trim();
+  const ordinalMap: Array<[RegExp, number]> = [
+    [/^(first|1|one|option\s+1|primero?)$/, 0],
+    [/^(second|2|two|option\s+2|segundo)$/, 1],
+    [/^(third|3|three|option\s+3|tercero)$/, 2],
+  ];
+  for (const [pattern, index] of ordinalMap) {
+    if (pattern.test(compact) && index < candidateCount) return index;
+  }
+  return undefined;
+}
+
+function intersectResolverResult(
+  result: EntityResolverResult,
+  candidateIds: Set<string>,
+): DisambiguationFollowUpResult | undefined {
+  if (result.kind === 'resolved' && candidateIds.has(result.candidate.id)) {
+    return { status: 'resolved', candidateId: result.candidate.id };
+  }
+  if (result.kind === 'ambiguous') {
+    const intersection = result.candidates.filter((c) => candidateIds.has(c.id));
+    if (intersection.length === 1) {
+      return { status: 'resolved', candidateId: intersection[0].id };
+    }
+    if (intersection.length > 1) return { status: 'still_ambiguous' };
+  }
+  return undefined;
+}
+
+/**
+ * Deterministic follow-up parsing against a bounded candidate set. Never picks
+ * outside the pending list — ordinals, phone hints, and street numbers only.
+ */
+export function matchDisambiguationFollowUp(
+  followUp: string,
+  pending: PendingEntityAmbiguity,
+): DisambiguationFollowUpResult {
+  const normalized = normalizeFollowUp(followUp);
+  if (!normalized) return { status: 'unmatched' };
+
+  for (const candidate of pending.candidates) {
+    if (candidate.id.toLowerCase() === normalized) {
+      return { status: 'resolved', candidateId: candidate.id };
+    }
+  }
+
+  const ordinalIndex = parseOrdinalIndex(normalized, pending.candidates.length);
+  if (ordinalIndex !== undefined) {
+    return { status: 'resolved', candidateId: pending.candidates[ordinalIndex].id };
+  }
+
+  const distinctLabels = [...new Set(pending.candidates.map((c) => c.name.trim().toLowerCase()))];
+  if (distinctLabels.length >= 2) {
+    const labelMatches = pending.candidates.filter((candidate) => {
+      const label = candidate.name.trim().toLowerCase();
+      return normalized.includes(label) || label.includes(normalized);
+    });
+    if (labelMatches.length === 1) {
+      return { status: 'resolved', candidateId: labelMatches[0].id };
+    }
+    if (labelMatches.length > 1) return { status: 'still_ambiguous' };
+  }
+
+  const followDigits = extractDigits(normalized);
+  const streetNumber = extractStreetNumber(normalized);
+  const hintMatches: string[] = [];
+
+  for (const candidate of pending.candidates) {
+    const haystack = `${candidate.name} ${candidate.hint ?? ''}`.toLowerCase();
+    if (followDigits.length >= 4) {
+      const hintDigits = extractDigits(candidate.hint ?? '');
+      if (
+        hintDigits.length >= 4 &&
+        (followDigits.includes(hintDigits) || hintDigits.includes(followDigits))
+      ) {
+        hintMatches.push(candidate.id);
+        continue;
+      }
+    }
+    if (streetNumber && haystack.includes(streetNumber)) {
+      hintMatches.push(candidate.id);
+    }
+  }
+
+  const uniqueHintMatches = [...new Set(hintMatches)];
+  if (uniqueHintMatches.length === 1) {
+    return { status: 'resolved', candidateId: uniqueHintMatches[0] };
+  }
+  if (uniqueHintMatches.length > 1) return { status: 'still_ambiguous' };
+
+  if (streetNumber) {
+    const tokens = normalized.split(/\s+/).filter((token) => token.length > 2);
+    const tokenMatches = pending.candidates.filter((candidate) => {
+      const haystack = `${candidate.name} ${candidate.hint ?? ''}`.toLowerCase();
+      return haystack.includes(streetNumber) || tokens.every((token) => haystack.includes(token));
+    });
+    if (tokenMatches.length === 1) {
+      return { status: 'resolved', candidateId: tokenMatches[0].id };
+    }
+    if (tokenMatches.length > 1) return { status: 'still_ambiguous' };
+  }
+
+  return { status: 'unmatched' };
+}
+
+/**
+ * Parse a caller's disambiguation answer. Tries deterministic matching first,
+ * then re-resolves through the tenant resolver and intersects with the pending
+ * candidate set (never accepts an id outside that set).
+ */
+export async function resolveDisambiguationFollowUp(
+  resolver: EntityResolver | undefined,
+  tenantId: string,
+  followUp: string,
+  pending: PendingEntityAmbiguity,
+): Promise<DisambiguationFollowUpResult> {
+  const direct = matchDisambiguationFollowUp(followUp, pending);
+  if (direct.status === 'resolved' || direct.status === 'still_ambiguous') {
+    return direct;
+  }
+  if (!resolver) return { status: 'unmatched' };
+
+  const candidateIds = new Set(pending.candidates.map((candidate) => candidate.id));
+
+  try {
+    const primary = await resolver.resolve({
+      tenantId,
+      reference: followUp,
+      kind: pending.entityKind,
+    });
+    const primaryMatch = intersectResolverResult(primary, candidateIds);
+    if (primaryMatch) return primaryMatch;
+
+    if (pending.entityKind === 'customer' && extractStreetNumber(followUp)) {
+      const jobResult = await resolver.resolve({
+        tenantId,
+        reference: followUp,
+        kind: 'job',
+      });
+      if (jobResult.kind === 'resolved') {
+        const streetNumber = extractStreetNumber(followUp);
+        const jobLabel = jobResult.candidate.label.toLowerCase();
+        if (streetNumber && jobLabel.includes(streetNumber)) {
+          const addressMatches = pending.candidates.filter((candidate) =>
+            `${candidate.name} ${candidate.hint ?? ''}`.toLowerCase().includes(streetNumber),
+          );
+          if (addressMatches.length === 1) {
+            return { status: 'resolved', candidateId: addressMatches[0].id };
+          }
+          if (addressMatches.length > 1) return { status: 'still_ambiguous' };
+        }
+      }
+    }
+  } catch {
+    return { status: 'unmatched' };
+  }
+
+  return { status: 'unmatched' };
+}

@@ -256,6 +256,57 @@ function bump(counts, verdict) {
   counts[verdict] = (counts[verdict] || 0) + 1;
 }
 
+/** Default Smith fixture follow-up when a case is tagged ambiguous-name. */
+export const DEFAULT_AMBIGUOUS_NAME_FOLLOW_UP = '104 Cedar';
+
+/**
+ * Resolve the follow-up utterance for an ambiguous entity-resolution turn.
+ * Explicit `disambiguationFollowUp` on the case wins; ambiguous-name tags fall
+ * back to the QA Smith fixture address hint.
+ */
+export function resolveProbeDisambiguationFollowUp(probeCase) {
+  if (typeof probeCase.disambiguationFollowUp === 'string') {
+    return probeCase.disambiguationFollowUp;
+  }
+  if (Array.isArray(probeCase.tags) && probeCase.tags.includes('ambiguous-name')) {
+    return DEFAULT_AMBIGUOUS_NAME_FOLLOW_UP;
+  }
+  return null;
+}
+
+/**
+ * Drive the in-app voice session through disambiguation and intent confirmation
+ * turns when the FSM requires them.
+ */
+export async function runVoiceSessionProbe(apiFn, token, sessionId, probeCase, firstTurn) {
+  let voiceDisambiguationTurn;
+  let voiceConfirmationTurn;
+
+  const followUp = resolveProbeDisambiguationFollowUp(probeCase);
+  if (firstTurn.json?.state === 'entity_resolution' && followUp) {
+    voiceDisambiguationTurn = await apiFn('POST', `/api/voice/sessions/${sessionId}/input`, {
+      token,
+      body: { text: followUp },
+    });
+  }
+
+  const afterDisambiguation = voiceDisambiguationTurn ?? firstTurn;
+  if (afterDisambiguation.json?.state === 'intent_confirm') {
+    voiceConfirmationTurn = await apiFn('POST', `/api/voice/sessions/${sessionId}/input`, {
+      token,
+      body: { text: 'yes' },
+    });
+  }
+
+  const finalVoiceTurn = voiceConfirmationTurn ?? afterDisambiguation;
+  return {
+    finalVoiceTurn,
+    voiceDisambiguationTurn,
+    voiceConfirmationTurn,
+    disambiguationFollowUp: followUp,
+  };
+}
+
 /**
  * Normalize probe input from either the v2 cases file ({ cases: [...] }) or a
  * legacy results artifact ({ results: [...] }).
@@ -285,6 +336,9 @@ export function loadProbeCases(source) {
       expectProposal: row.expectProposal ?? null,
       ...(Array.isArray(row.fixtureRefs) ? { fixtureRefs: row.fixtureRefs } : {}),
       ...(Array.isArray(row.tags) ? { tags: row.tags } : {}),
+      ...(typeof row.disambiguationFollowUp === 'string'
+        ? { disambiguationFollowUp: row.disambiguationFollowUp }
+        : {}),
     };
   });
 }
@@ -354,6 +408,7 @@ async function main() {
     let voice;
     let voiceFirstTurn;
     let voiceConfirmationTurn;
+    let voiceDisambiguationTurn;
     if (sess.status !== 201 || !sess.json?.sessionId) {
       voice = {
         verdict: sess.status === 401 || sess.status === 403 ? 'BLOCKED' : 'FAIL',
@@ -365,21 +420,22 @@ async function main() {
         token,
         body: { text: c.utterance },
       });
-      // The in-app voice FSM deliberately requires confirmation before it
-      // drafts a mutation proposal. A one-turn probe therefore cannot score a
-      // valid classified action as PASS. Confirm only when the server asks.
-      if (voiceFirstTurn.json?.state === 'intent_confirm') {
-        voiceConfirmationTurn = await api(
-          'POST',
-          `/api/voice/sessions/${sess.json.sessionId}/input`,
-          { token, body: { text: 'yes' } },
-        );
-      }
-      const finalVoiceTurn = voiceConfirmationTurn ?? voiceFirstTurn;
+      const voiceTurns = await runVoiceSessionProbe(
+        api,
+        token,
+        sess.json.sessionId,
+        c,
+        voiceFirstTurn,
+      );
+      voiceConfirmationTurn = voiceTurns.voiceConfirmationTurn;
+      voiceDisambiguationTurn = voiceTurns.voiceDisambiguationTurn;
+      const finalVoiceTurn = voiceTurns.finalVoiceTurn;
       voice = {
         ...scoreVoice(finalVoiceTurn.json, finalVoiceTurn.status),
         firstTurnState: voiceFirstTurn.json?.state ?? null,
         confirmationSent: Boolean(voiceConfirmationTurn),
+        disambiguationSent: Boolean(voiceDisambiguationTurn),
+        disambiguationFollowUp: voiceTurns.disambiguationFollowUp,
       };
     }
     bump(voiceCounts, voice.verdict);
@@ -399,6 +455,12 @@ async function main() {
         ? {
             httpStatus: voiceConfirmationTurn.status,
             state: voiceConfirmationTurn.json?.state ?? null,
+          }
+        : undefined,
+      voiceDisambiguationTurn: voiceDisambiguationTurn
+        ? {
+            httpStatus: voiceDisambiguationTurn.status,
+            state: voiceDisambiguationTurn.json?.state ?? null,
           }
         : undefined,
     });
