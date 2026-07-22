@@ -27,6 +27,16 @@ function scriptedGateway(responses: string[]): LLMGateway {
   } as unknown as LLMGateway;
 }
 
+function throwingGateway(code?: string): LLMGateway {
+  return {
+    complete: vi.fn(async () => {
+      const error = new Error('sensitive provider detail must not escape');
+      if (code) Object.assign(error, { code });
+      throw error;
+    }),
+  } as unknown as LLMGateway;
+}
+
 function noopTts(): TtsProvider {
   return {
     synthesize: vi.fn(async (input) => ({
@@ -137,6 +147,119 @@ describe('InAppVoiceAdapter', () => {
     // FSM reprompts on first low-confidence event (retry < max).
     expect(result.state).toBe('intent_capture');
     expect(result.proposalIds.length).toBe(0);
+    expect(
+      result.sideEffects.some((effect) =>
+        String(effect.payload.eventType).startsWith('classifier_')),
+    ).toBe(false);
+  });
+
+  describe('classifier failure classes', () => {
+    it('returns and persists a safe parse-failure audit side effect', async () => {
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway: scriptedGateway(['malformed sensitive classifier output']),
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+
+      const result = await adapter.handleInput(
+        sessionId,
+        'private customer transcript',
+      );
+
+      const failure = result.sideEffects.find(
+        (effect) => effect.payload.eventType === 'classifier_parse_failure',
+      );
+      expect(failure?.payload).toEqual({
+        eventType: 'classifier_parse_failure',
+        failureClass: 'parse_failed',
+      });
+      const audit = auditRepo.getAll().find(
+        (event) => event.eventType === 'classifier_parse_failure',
+      );
+      expect(audit?.metadata).toEqual(failure?.payload);
+      expect(JSON.stringify({ failure, audit })).not.toContain('private customer transcript');
+      expect(JSON.stringify({ failure, audit })).not.toContain('malformed sensitive');
+    });
+
+    it.each([
+      ['deadline', 'DEADLINE_EXCEEDED', 'classifier_deadline_failure', 'deadline'],
+      [
+        'concurrency quota',
+        'TENANT_CONCURRENCY_EXCEEDED',
+        'classifier_quota_failure',
+        'quota',
+      ],
+      [
+        'token quota',
+        'TENANT_TOKEN_BUDGET_EXCEEDED',
+        'classifier_quota_failure',
+        'quota',
+      ],
+    ])(
+      'returns and persists a safe %s audit side effect',
+      async (_label, code, eventType, failureClass) => {
+        const adapter = new InAppVoiceAdapter({
+          store,
+          gateway: throwingGateway(code),
+          proposalRepo,
+          auditRepo,
+          onCallRepo,
+        });
+        const { sessionId } = await adapter.startSession(TENANT, USER);
+
+        const result = await adapter.handleInput(
+          sessionId,
+          'private customer transcript',
+        );
+
+        const failure = result.sideEffects.find(
+          (effect) => effect.payload.eventType === eventType,
+        );
+        expect(failure?.payload).toEqual({
+          eventType,
+          failureClass,
+          errorCode: code,
+        });
+        const audit = auditRepo.getAll().find((event) => event.eventType === eventType);
+        expect(audit?.metadata).toEqual(failure?.payload);
+        expect(JSON.stringify({ failure, audit })).not.toContain('private customer transcript');
+        expect(JSON.stringify({ failure, audit })).not.toContain('sensitive provider detail');
+      },
+    );
+
+    it('uses a provider fallback class without exposing unknown error details', async () => {
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway: throwingGateway('UNSAFE_PROVIDER_DETAIL'),
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+
+      const result = await adapter.handleInput(
+        sessionId,
+        'private customer transcript',
+      );
+
+      const failure = result.sideEffects.find(
+        (effect) => effect.payload.eventType === 'classifier_provider_failure',
+      );
+      expect(failure?.payload).toEqual({
+        eventType: 'classifier_provider_failure',
+        failureClass: 'provider',
+      });
+      const audit = auditRepo.getAll().find(
+        (event) => event.eventType === 'classifier_provider_failure',
+      );
+      expect(audit?.metadata).toEqual(failure?.payload);
+      expect(JSON.stringify({ failure, audit })).not.toContain('private customer transcript');
+      expect(JSON.stringify({ failure, audit })).not.toContain('sensitive provider detail');
+      expect(JSON.stringify({ failure, audit })).not.toContain('UNSAFE_PROVIDER_DETAIL');
+    });
   });
 
   it('emergency_dispatch fast-paths to escalating', async () => {

@@ -184,6 +184,53 @@ export interface HandleInputResult {
 
 const DEFAULT_GREETING_INAPP = 'Hi, this is your assistant. How can I help today?';
 
+type ClassifierFailureClass = 'parse_failed' | 'deadline' | 'quota' | 'provider';
+
+const CLASSIFIER_FAILURE_EVENT: Record<ClassifierFailureClass, string> = {
+  parse_failed: 'classifier_parse_failure',
+  deadline: 'classifier_deadline_failure',
+  quota: 'classifier_quota_failure',
+  provider: 'classifier_provider_failure',
+};
+
+const CLASSIFIER_QUOTA_CODES = new Set([
+  'TENANT_CONCURRENCY_EXCEEDED',
+  'TENANT_TOKEN_BUDGET_EXCEEDED',
+]);
+
+function classifierErrorCode(error: unknown): string | undefined {
+  if (typeof error !== 'object' || error === null) return undefined;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === 'string' ? code : undefined;
+}
+
+function classifierFailureFromError(
+  error: unknown,
+): { failureClass: ClassifierFailureClass; errorCode?: string } {
+  const code = classifierErrorCode(error);
+  if (code === 'DEADLINE_EXCEEDED') {
+    return { failureClass: 'deadline', errorCode: code };
+  }
+  if (code && CLASSIFIER_QUOTA_CODES.has(code)) {
+    return { failureClass: 'quota', errorCode: code };
+  }
+  return { failureClass: 'provider' };
+}
+
+function classifierFailureAuditEffect(
+  failureClass: ClassifierFailureClass,
+  errorCode?: string,
+): SideEffect {
+  return {
+    type: 'audit_log',
+    payload: {
+      eventType: CLASSIFIER_FAILURE_EVENT[failureClass],
+      failureClass,
+      ...(errorCode ? { errorCode } : {}),
+    },
+  };
+}
+
 export function buildInappGreeting(persona?: VoicePersona | null): string {
   if (persona?.greeting) return persona.greeting;
   if (persona?.agentName) return `Hi, I'm ${persona.agentName}. How can I help today?`;
@@ -529,6 +576,7 @@ export class InAppVoiceAdapter {
     //  B) Any other state — classify the utterance as an intent.
     const stateBeforeTurn: string = session.machine.currentState;
     let fsmEvent: CallingAgentEvent;
+    let classifierFailureEffect: SideEffect | undefined;
 
     if (stateBeforeTurn === 'intent_confirm') {
       fsmEvent = isAffirmation(text)
@@ -580,6 +628,9 @@ export class InAppVoiceAdapter {
         classifierUsage = classification.tokenUsage
           ? { input: classification.tokenUsage.input, output: classification.tokenUsage.output }
           : undefined;
+        if (classification.unknownReason === 'parse_failed') {
+          classifierFailureEffect = classifierFailureAuditEffect('parse_failed');
+        }
         // VQ-003: announce the classifier outcome on the session bus so
         // the harness can grade intent-recognition independently of the
         // FSM transition that follows.
@@ -596,7 +647,12 @@ export class InAppVoiceAdapter {
           classification.confidence,
           classification.extractedEntities as Record<string, unknown> | undefined
         );
-      } catch {
+      } catch (error) {
+        const failure = classifierFailureFromError(error);
+        classifierFailureEffect = classifierFailureAuditEffect(
+          failure.failureClass,
+          failure.errorCode,
+        );
         fsmEvent = { type: 'confidence_low', threshold: CLASSIFIER_CONFIDENCE_THRESHOLD, score: 0 };
       }
 
@@ -630,6 +686,10 @@ export class InAppVoiceAdapter {
     }
 
     const allSideEffects: SideEffect[] = [];
+    if (classifierFailureEffect) {
+      allSideEffects.push(classifierFailureEffect);
+      await this.executeSideEffects(session, [classifierFailureEffect]);
+    }
 
     // Dispatch the primary event (classifier-derived, or the confirm/correct
     // event from the intent_confirm branch).

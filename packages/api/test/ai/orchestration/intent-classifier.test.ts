@@ -22,6 +22,7 @@ import { LLMGateway, LLMResponse } from '../../../src/ai/gateway/gateway';
 import { formatVerticalForCallerPrompt } from '../../../src/verticals/context-assembly';
 import { createHvacPack } from '../../../src/verticals/packs/hvac';
 import { createPlumbingPack } from '../../../src/verticals/packs/plumbing';
+import { TAU_INT } from '../../../src/ai/agents/customer-calling/transitions';
 
 function mockGateway(jsonContent: string): LLMGateway {
   const gateway = {
@@ -597,6 +598,109 @@ describe('intent-classifier — classifyIntent', () => {
     await expect(
       classifyIntent('create an invoice', { tenantId }, gateway)
     ).rejects.toThrow(/upstream 502/);
+  });
+});
+
+describe('U2 — deterministic owner operator commands', () => {
+  const tenantId = 'tenant-1';
+  const sinkResponse = JSON.stringify({ intentType: 'unknown', confidence: 0.9 });
+  const cases: Array<{
+    transcript: string;
+    intentType: IntentType;
+    entities: Record<string, unknown>;
+  }> = [
+    {
+      transcript: 'New customer Maria Alvarez, phone 480-555-0102',
+      intentType: 'create_customer',
+      entities: { displayName: 'Maria Alvarez', phone: '480-555-0102' },
+    },
+    {
+      transcript: 'Add customer James Patel, email james@patel.co',
+      intentType: 'create_customer',
+      entities: { displayName: 'James Patel', email: 'james@patel.co' },
+    },
+    {
+      transcript: "Update Alvarez's phone number to 480-555-0199",
+      intentType: 'update_customer',
+      entities: { customerName: 'Alvarez', updatedPhone: '480-555-0199' },
+    },
+    {
+      transcript: "Fix Mrs Lee's address to 88 Palm Court",
+      intentType: 'update_customer',
+      entities: { customerName: 'Mrs Lee', updatedAddress: '88 Palm Court' },
+    },
+    {
+      transcript: 'Look up the Khan account',
+      intentType: 'lookup_customer',
+      entities: { customerName: 'Khan' },
+    },
+    {
+      transcript: 'Convert the Greenfield lead to a customer',
+      intentType: 'convert_lead',
+      entities: { leadReference: 'Greenfield' },
+    },
+    {
+      transcript: 'Open a job for Alvarez, no AC',
+      intentType: 'create_job',
+      entities: { customerName: 'Alvarez', jobTitle: 'no AC' },
+    },
+    {
+      transcript: 'Add a trip fee to invoice INV-0042',
+      intentType: 'update_invoice',
+      entities: {
+        jobReference: 'INV-0042',
+        lineItemDescriptions: ['trip fee'],
+      },
+    },
+  ];
+
+  for (const testCase of cases) {
+    it(`short-circuits "${testCase.transcript}" with downstream references`, async () => {
+      const gateway = mockGateway(sinkResponse);
+
+      const result = await classifyIntent(
+        testCase.transcript,
+        { tenantId, ownerSession: true },
+        gateway,
+      );
+
+      expect(result.intentType).toBe(testCase.intentType);
+      expect(result.confidence).toBeGreaterThan(TAU_INT);
+      expect(result.extractedEntities).toMatchObject(testCase.entities);
+      expect(gateway.complete).not.toHaveBeenCalled();
+    });
+  }
+
+  it.each([
+    ['appointment setup', 'Set up an account for my appointment tomorrow at 2pm', 'create_appointment'],
+    ['generic add', 'Add Jordan', 'unknown'],
+    ['invoice creation', 'Create an invoice for Alvarez', 'create_invoice'],
+  ])('does not capture owner input for %s', async (_label, transcript, modelIntent) => {
+    const gateway = mockGateway(
+      JSON.stringify({ intentType: modelIntent, confidence: 0.9 }),
+    );
+
+    const result = await classifyIntent(
+      transcript,
+      { tenantId, ownerSession: true },
+      gateway,
+    );
+
+    expect(result.intentType).toBe(modelIntent);
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not capture the operator job command outside an owner session', async () => {
+    const gateway = mockGateway(sinkResponse);
+
+    const result = await classifyIntent(
+      'Open a job for Alvarez, no AC',
+      { tenantId, ownerSession: false },
+      gateway,
+    );
+
+    expect(result.intentType).toBe('unknown');
+    expect(gateway.complete).toHaveBeenCalledTimes(1);
   });
 });
 
