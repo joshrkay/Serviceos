@@ -48,6 +48,7 @@ import {
   refKeyForEntityKind,
   resolveDisambiguationFollowUp,
 } from './entity-resolution';
+import type { PendingEntityAmbiguity } from './entity-resolution';
 import { withTenantConnection } from '../../../db/tenant-transaction';
 import { PgEntityResolver } from '../../resolution/pg-entity-resolver';
 import type { EntityCandidate, EntityResolver } from '../../resolution/entity-resolver';
@@ -515,6 +516,67 @@ export class InAppVoiceAdapter {
   }
 
   /**
+   * Rehydrate pending ambiguity from the parked intent + entities when the FSM
+   * is still in entity_resolution (e.g. session context dropped between HTTP
+   * turns). Never guesses — re-runs the same resolver lookups as turn 1.
+   */
+  private async resolvePendingForDisambiguation(
+    tenantId: string,
+    context: CallingAgentContext,
+  ): Promise<PendingEntityAmbiguity | undefined> {
+    if (context.pendingEntityAmbiguity) {
+      return context.pendingEntityAmbiguity;
+    }
+    const intent = context.currentIntent;
+    const entities = context.extractedEntities;
+    if (!intent || !entities || typeof entities !== 'object') {
+      return undefined;
+    }
+
+    const resolution = await this.resolveEntities(
+      tenantId,
+      intent,
+      entities as Record<string, unknown>,
+    );
+    if (resolution.status !== 'ambiguous' || !resolution.ambiguous) {
+      return undefined;
+    }
+
+    const refKey = refKeyForEntityKind(resolution.ambiguous.entityKind);
+    if (!refKey) return undefined;
+
+    const candidates = await this.enrichCandidatesForDisambiguation(
+      tenantId,
+      resolution.ambiguous.entityKind,
+      resolution.ambiguous.candidates,
+    );
+
+    return {
+      entityKind: resolution.ambiguous.entityKind,
+      reference: resolution.ambiguous.reference,
+      refKey,
+      candidates,
+      partialRefs: resolution.refs,
+      attemptCount: 0,
+    };
+  }
+
+  private async classifyIntentWithRetry(
+    text: string,
+    context: Parameters<typeof classifyIntent>[1],
+  ): Promise<Awaited<ReturnType<typeof classifyIntent>>> {
+    try {
+      return await classifyIntent(text, context, this.deps.gateway);
+    } catch (error) {
+      const failure = classifierFailureFromError(error);
+      if (failure.failureClass !== 'provider') {
+        throw error;
+      }
+      return classifyIntent(text, context, this.deps.gateway);
+    }
+  }
+
+  /**
    * Open a new in-app session. Drives the FSM through the
    * idle → greeting → identifying transitions and synthesizes the
    * greeting audio if a TTS provider is wired.
@@ -648,13 +710,10 @@ export class InAppVoiceAdapter {
       session.language = 'en';
     }
 
-    // Decide the primary FSM event for this turn. Two shapes:
-    //  A) The FSM is at `intent_confirm` — the caller is answering the
-    //     readback ("...Is that right?"). Their words are a yes/no
-    //     confirmation, NOT a new intent, so we do NOT run the intent
-    //     classifier. Affirmation → `confirmed`; anything else → `correction`
-    //     (safe default: re-capture rather than queue a wrong proposal).
-    //  B) Any other state — classify the utterance as an intent.
+    // Decide the primary FSM event for this turn:
+    //  A) intent_confirm — yes/no readback answer (no classifier).
+    //  B) entity_resolution — disambiguation follow-up (no classifier).
+    //  C) everything else — classify the utterance as an intent.
     const stateBeforeTurn: string = session.machine.currentState;
     let fsmEvent: CallingAgentEvent;
     let classifierFailureEffect: SideEffect | undefined;
@@ -663,29 +722,33 @@ export class InAppVoiceAdapter {
       fsmEvent = isAffirmation(text)
         ? { type: 'confirmed' }
         : { type: 'correction', newTranscript: text };
-    } else if (
-      stateBeforeTurn === 'entity_resolution' &&
-      session.machine.currentContext.pendingEntityAmbiguity
-    ) {
-      const pending = session.machine.currentContext.pendingEntityAmbiguity;
-      const match = await resolveDisambiguationFollowUp(
-        this.getEntityResolver(),
+    } else if (stateBeforeTurn === 'entity_resolution') {
+      const pending = await this.resolvePendingForDisambiguation(
         session.tenantId,
-        text,
-        pending,
+        session.machine.currentContext,
       );
-      if (match.status === 'resolved') {
-        fsmEvent = {
-          type: 'entity_resolved',
-          refs: {
-            ...pending.partialRefs,
-            [pending.refKey]: match.candidateId,
-          },
-        };
-      } else if (pending.attemptCount >= MAX_DISAMBIGUATION_ATTEMPTS) {
-        fsmEvent = { type: 'entity_resolved', refs: pending.partialRefs };
+      if (!pending) {
+        fsmEvent = { type: 'correction', newTranscript: text };
       } else {
-        fsmEvent = this.buildDisambiguationRetryEvent(pending);
+        const match = await resolveDisambiguationFollowUp(
+          this.getEntityResolver(),
+          session.tenantId,
+          text,
+          pending,
+        );
+        if (match.status === 'resolved') {
+          fsmEvent = {
+            type: 'entity_resolved',
+            refs: {
+              ...pending.partialRefs,
+              [pending.refKey]: match.candidateId,
+            },
+          };
+        } else if (pending.attemptCount >= MAX_DISAMBIGUATION_ATTEMPTS) {
+          fsmEvent = { type: 'entity_resolved', refs: pending.partialRefs };
+        } else {
+          fsmEvent = this.buildDisambiguationRetryEvent(pending);
+        }
       }
     } else {
       // §3B + §3D: vertical + intake-question prompt section.
@@ -719,7 +782,7 @@ export class InAppVoiceAdapter {
       // prompt) instead of silently dropping the turn.
       let classifierUsage: { input: number; output: number } | undefined;
       try {
-        const classification = await classifyIntent(
+        const classification = await this.classifyIntentWithRetry(
           text,
           {
             tenantId: session.tenantId,
@@ -728,7 +791,6 @@ export class InAppVoiceAdapter {
             ...(session.machine.currentContext.ownerSession ? { ownerSession: true } : {}),
             ...(session.machine.currentContext.extendedIntents ? { extendedIntents: true } : {}),
           },
-          this.deps.gateway
         );
         classifierUsage = classification.tokenUsage
           ? { input: classification.tokenUsage.input, output: classification.tokenUsage.output }
