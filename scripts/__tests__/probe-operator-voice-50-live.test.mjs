@@ -12,6 +12,7 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '../..');
 const V2_CASES = path.join(ROOT, 'fixtures/voice/operator-voice-top-50-v2-cases.json');
+const V3_CASES = path.join(ROOT, 'fixtures/voice/operator-voice-top-50-v3-cases.json');
 const LEGACY = path.join(
   ROOT,
   'docs/verification-runs/operator-voice-50-live-2026-07-20.results.json',
@@ -48,6 +49,26 @@ test('v2 utterances are all distinct from the 2026-07-20 baseline', () => {
       `v2 case #${row.id} duplicates v1 utterance`,
     );
   }
+});
+
+test('v3 utterances are distinct from v1 and v2', () => {
+  const v3 = loadProbeCases(JSON.parse(fs.readFileSync(V3_CASES, 'utf8')));
+  const prior = new Set([
+    ...loadProbeCases(JSON.parse(fs.readFileSync(LEGACY, 'utf8'))).map((c) =>
+      c.utterance.trim().toLowerCase(),
+    ),
+    ...loadProbeCases(JSON.parse(fs.readFileSync(V2_CASES, 'utf8'))).map((c) =>
+      c.utterance.trim().toLowerCase(),
+    ),
+  ]);
+  for (const row of v3) {
+    assert.equal(
+      prior.has(row.utterance.trim().toLowerCase()),
+      false,
+      `v3 case #${row.id} duplicates a prior corpus utterance`,
+    );
+  }
+  assert.equal(probeCasesMeta(JSON.parse(fs.readFileSync(V3_CASES, 'utf8')), V3_CASES).version, 'v3');
 });
 
 test('scores an audited emergency on-call dispatch without a proposal', () => {
