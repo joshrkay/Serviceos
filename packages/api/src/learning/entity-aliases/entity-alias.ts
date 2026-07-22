@@ -1,13 +1,18 @@
-import { z } from 'zod';
+import {
+  ENTITY_ALIAS_MAX_LENGTH,
+  entityAliasTextSchema,
+  type EntityAliasEntityKind,
+  type EntityAliasSource,
+} from '@ai-service-os/shared';
+import type { Role } from '../../auth/rbac';
 import type { EntityKind } from '../../ai/resolution/entity-resolver';
 import { ValidationError } from '../../shared/errors';
 
-export const ENTITY_ALIAS_MAX_LENGTH = 120;
+export { ENTITY_ALIAS_MAX_LENGTH };
+export type { EntityAliasSource };
 
-const aliasInputSchema = z
-  .string()
-  .max(ENTITY_ALIAS_MAX_LENGTH)
-  .refine((value) => !/[\u0000-\u001F\u007F]/.test(value), 'Alias contains control characters');
+type ExistingEntityKind<T extends EntityKind> = T;
+export type EntityAliasKind = ExistingEntityKind<EntityAliasEntityKind>;
 
 /**
  * Canonical lookup key for an approved tenant entity alias. This is deliberately
@@ -15,27 +20,70 @@ const aliasInputSchema = z
  * uses a bounded, Unicode-normalized key.
  */
 export function normalizeEntityAlias(alias: string): string {
-  const parsed = aliasInputSchema.safeParse(alias);
+  const parsed = entityAliasTextSchema.safeParse(alias);
   if (!parsed.success) {
     throw new ValidationError('Invalid entity alias', {
       errors: parsed.error.issues.map((issue) => issue.message),
     });
   }
-  const normalized = parsed.data.normalize('NFKC').trim().replace(/\s+/g, ' ').toLocaleLowerCase();
+  const normalized = parsed.data.normalize('NFKC').trim().replace(/\s+/gu, ' ').toLowerCase();
   if (!normalized) {
     throw new ValidationError('Invalid entity alias', { errors: ['Alias cannot be empty'] });
   }
   return normalized;
 }
 
-export type EntityAliasSource = 'entity_picker' | 'proposal_edit';
-
 export interface EntityAliasCandidate {
   tenantId: string;
-  entityKind: EntityKind;
+  entityKind: EntityAliasKind;
   entityId: string;
   alias: string;
   source: EntityAliasSource;
   sourceProposalId: string;
   createdBy: string;
+}
+
+export type EntityAliasActorRole = Role | 'system';
+
+export interface EntityAlias {
+  id: string;
+  tenantId: string;
+  entityKind: EntityAliasKind;
+  entityId: string;
+  normalizedAlias: string;
+  sourceAlias: string;
+  source: EntityAliasSource;
+  sourceProposalId: string | null;
+  active: boolean;
+  createdBy: string;
+  createdAt: Date;
+  updatedAt: Date;
+  deactivatedAt: Date | null;
+  deactivatedBy: string | null;
+}
+
+export interface ActivateEntityAliasInput {
+  tenantId: string;
+  approvalProposalId: string;
+  activatedBy: string;
+  actorRole: EntityAliasActorRole;
+}
+
+export interface FindActiveEntityAliasInput {
+  tenantId: string;
+  entityKind: EntityAliasKind;
+  alias: string;
+}
+
+export interface DeactivateEntityAliasInput {
+  tenantId: string;
+  aliasId: string;
+  deactivatedBy: string;
+  actorRole: EntityAliasActorRole;
+}
+
+export interface EntityAliasRepository {
+  findActiveByAlias(input: FindActiveEntityAliasInput): Promise<EntityAlias | null>;
+  activateFromApprovedProposal(input: ActivateEntityAliasInput): Promise<EntityAlias>;
+  deactivate(input: DeactivateEntityAliasInput): Promise<EntityAlias | null>;
 }

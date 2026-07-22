@@ -64,6 +64,7 @@ import type { TaskContext } from '../ai/tasks/task-handlers';
 import { entitiesForProposal } from '../workers/voice-action-router';
 import type { RedraftHandlerFactory } from './redraft-handler-factory';
 import { clearSatisfiedMissingFields } from './missing-fields';
+import type { EntityAliasCandidateCapture } from '../learning/entity-aliases/candidate-service';
 
 interface EntityCandidate {
   id: string;
@@ -93,6 +94,12 @@ export interface ResolveEntityDeps {
    * unit tests of the bare grounding gate) keep the annotate-only behavior.
    */
   redraftHandlerFactory?: RedraftHandlerFactory;
+  /**
+   * Tenant learning loop — after a grounded picker selection, emit a deduped
+   * adopt_entity_alias review proposal. Failure-soft: resolution still succeeds
+   * if capture throws.
+   */
+  entityAliasCandidateCapture?: EntityAliasCandidateCapture;
 }
 
 /** The structured original-intent context the producer stamps for re-draft. */
@@ -249,6 +256,35 @@ function readOriginalIntent(sourceContext: Record<string, unknown>): OriginalInt
   };
 }
 
+async function captureEntityPickerAlias(
+  deps: ResolveEntityDeps,
+  input: {
+    tenantId: string;
+    actorId: string;
+    actorRole: Role;
+    groundingProposal: Proposal;
+    selectedEntityId: string;
+  },
+): Promise<void> {
+  if (!deps.entityAliasCandidateCapture) return;
+  try {
+    await deps.entityAliasCandidateCapture.capture({
+      source: 'entity_picker',
+      tenantId: input.tenantId,
+      actorId: input.actorId,
+      actorRole: input.actorRole,
+      groundingProposal: input.groundingProposal,
+      selectedEntityId: input.selectedEntityId,
+    });
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error('resolveProposalEntity: alias candidate capture failed', {
+      proposalId: input.groundingProposal.id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
 export async function resolveProposalEntity(
   input: ResolveEntityInput,
   deps: ResolveEntityDeps,
@@ -347,6 +383,13 @@ export async function resolveProposalEntity(
   const pending = readPendingAmbiguities(sourceContext);
   if (pending.length > 0) {
     const [next, ...rest] = pending;
+    await captureEntityPickerAlias(deps, {
+      tenantId,
+      actorId,
+      actorRole,
+      groundingProposal: proposal,
+      selectedEntityId: candidateId,
+    });
     return advanceToNextAmbiguity({
       tenantId,
       proposalId,
@@ -488,6 +531,14 @@ export async function resolveProposalEntity(
       }),
     );
   }
+
+  await captureEntityPickerAlias(deps, {
+    tenantId,
+    actorId,
+    actorRole,
+    groundingProposal: proposal,
+    selectedEntityId: candidateId,
+  });
 
   // Re-read so the response reflects the payload patch AND any status
   // transition.
@@ -687,6 +738,14 @@ async function redraftResolvedProposal(args: {
       }),
     );
   }
+
+  await captureEntityPickerAlias(deps, {
+    tenantId,
+    actorId,
+    actorRole,
+    groundingProposal: proposal,
+    selectedEntityId: candidateId,
+  });
 
   const fresh = await deps.proposalRepo.findById(tenantId, proposalId);
   return fresh ?? proposal;

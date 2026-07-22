@@ -57,6 +57,35 @@ describe('P2-005 — Approve / reject / edit interactions', () => {
     expect(result.status).toBe('approved');
   });
 
+  it('adopt_entity_alias approval is owner-only and preserves the owner actor for execution', async () => {
+    const repo = makeRepo();
+    const proposal = await createReadyProposal(repo, {
+      proposalType: 'adopt_entity_alias',
+      payload: {
+        alias: 'Khan',
+        entityKind: 'customer',
+        entityId: '550e8400-e29b-41d4-a716-446655440000',
+        source: 'entity_picker',
+        groundedProposalId: '660e8400-e29b-41d4-a716-446655440000',
+      },
+    });
+
+    await expect(
+      approveProposal(repo, tenantId, proposal.id, 'dispatcher-1', 'dispatcher'),
+    ).rejects.toThrow(ForbiddenError);
+    expect((await repo.findById(tenantId, proposal.id))?.status).toBe('ready_for_review');
+
+    const approved = await approveProposal(
+      repo,
+      tenantId,
+      proposal.id,
+      actorId,
+      'owner',
+    );
+    expect(approved.status).toBe('approved');
+    expect(approved.executedBy).toBe(actorId);
+  });
+
   it('approves a draft directly (inbox surfaces drafts)', async () => {
     const repo = makeRepo();
     const proposal = createProposal(baseInput); // lands in 'draft'
@@ -277,6 +306,82 @@ describe('P2-005 — Approve / reject / edit interactions', () => {
 
       const editEvent = auditRepo.getAll().find((e) => e.eventType === 'proposal.edited');
       expect(editEvent?.metadata).toMatchObject({ clearedMissingFields: ['invoiceId'] });
+    });
+
+    it('clears a documented pendingReference and emits a proposal-edit alias signal', async () => {
+      const repo = makeRepo();
+      const proposal = createProposal({
+        ...baseInput,
+        proposalType: 'send_invoice',
+        payload: { invoiceReference: 'invoice forty two', channel: 'email' },
+        sourceContext: {
+          pendingReference: [{ kind: 'invoice', reference: 'invoice forty two' }],
+        },
+      });
+      await repo.create(proposal);
+      const captures: unknown[] = [];
+
+      const { proposal: updated } = await editProposal(
+        repo,
+        tenantId,
+        proposal.id,
+        actorId,
+        'owner',
+        { invoiceId: '550e8400-e29b-41d4-a716-446655440000' },
+        undefined,
+        undefined,
+        {
+          capture: async (input) => {
+            captures.push(input);
+            return [];
+          },
+        },
+      );
+
+      expect(updated.sourceContext).not.toHaveProperty('pendingReference');
+      expect(captures).toHaveLength(1);
+      expect(captures[0]).toMatchObject({
+        source: 'proposal_edit',
+        tenantId,
+        actorId,
+        editedFields: ['invoiceId'],
+        groundingProposal: { id: proposal.id },
+        updatedProposal: { id: proposal.id },
+      });
+    });
+
+    it('keeps candidate capture failure-soft after a successful pending-reference edit', async () => {
+      const repo = makeRepo();
+      const proposal = createProposal({
+        ...baseInput,
+        proposalType: 'send_invoice',
+        payload: { invoiceReference: 'invoice forty two', channel: 'email' },
+        sourceContext: {
+          pendingReference: [{ kind: 'invoice', reference: 'invoice forty two' }],
+        },
+      });
+      await repo.create(proposal);
+
+      const result = await editProposal(
+        repo,
+        tenantId,
+        proposal.id,
+        actorId,
+        'owner',
+        { invoiceId: '550e8400-e29b-41d4-a716-446655440000' },
+        undefined,
+        undefined,
+        {
+          capture: async () => {
+            throw new Error('candidate capture unavailable');
+          },
+        },
+      );
+
+      expect(result.proposal.payload.invoiceId).toBe(
+        '550e8400-e29b-41d4-a716-446655440000',
+      );
+      expect(result.proposal.sourceContext).not.toHaveProperty('pendingReference');
     });
 
     it('omits clearedMissingFields from audit metadata when nothing was cleared', async () => {

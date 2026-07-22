@@ -11,7 +11,8 @@
  *       (readback) — it is NOT auto-confirmed;
  *   (b) two candidates → entity_ambiguous is dispatched WITH the candidate
  *       set (a disambiguation question), NOT a silent pick + proposal;
- *   (c) zero matches → entity_not_found → the FSM escalates;
+ *   (c) zero matches → entity_resolved → intent_confirm readback (no on-call
+ *       escalation; proposal surfaces pendingReference for operator review);
  *   (d) the auto-confirm no longer fires — the proposal is created only after
  *       a REAL caller "yes" event on a later turn.
  *
@@ -181,19 +182,22 @@ describe('InAppVoiceAdapter — entity-resolution voice safety', () => {
     expect(ambiguous?.metadata?.candidateCount).toBe(2);
   });
 
-  // ── (c) zero matches → entity_not_found → escalate ─────────────────────────
-  it('zero matches → entity_not_found → FSM escalates to a human (no guessed target)', async () => {
+  // ── (c) zero matches → entity_resolved → intent_confirm (no escalation) ───
+  it('zero matches → entity_resolved → intent_confirm readback without on-call escalation', async () => {
     const resolver = stubResolver({ kind: 'not_found', reference: 'Bob Smith' });
     const adapter = makeAdapter(resolver);
     const { sessionId } = await adapter.startSession(TENANT, USER);
 
     const turn1 = await adapter.handleInput(sessionId, 'book Bob Smith for tomorrow at 2pm');
 
-    expect(turn1.state).toBe('escalating');
+    expect(turn1.state).toBe('intent_confirm');
     expect(turn1.proposalIds.length).toBe(0);
     expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(0);
-    expect(turn1.sideEffects.some((e) => e.type === 'notify_oncall')).toBe(true);
+    expect(turn1.sideEffects.some((e) => e.type === 'notify_oncall')).toBe(false);
     expect(auditRepo.getAll().map((e) => e.eventType)).toContain(
+      'agent.calling.entity_resolution.entity_resolved',
+    );
+    expect(auditRepo.getAll().map((e) => e.eventType)).not.toContain(
       'agent.calling.entity_resolution.entity_not_found',
     );
   });

@@ -59,6 +59,7 @@ import {
   EntityKind,
   EntityResolver,
 } from '../ai/resolution/entity-resolver';
+import { resolveVoiceEntityReferences } from '../ai/agents/customer-calling/entity-resolution';
 import { TaskHandler, TaskContext, TaskResult } from '../ai/tasks/task-handlers';
 import type { StandingInstruction } from '../instructions/standing-instructions';
 import { selectInjectedStandingInstructions } from '../ai/standing-instructions-context';
@@ -662,7 +663,14 @@ export function entitiesForProposal(
 /** Resolved-entity annotation for one utterance (see annotateResolvedEntities). */
 interface EntityAnnotation {
   kind: 'ok';
-  resolved: { customerId?: string; jobId?: string; technicianId?: string };
+  resolved: {
+    customerId?: string;
+    jobId?: string;
+    invoiceId?: string;
+    estimateId?: string;
+    appointmentId?: string;
+    technicianId?: string;
+  };
   pendingReferences: Array<{ kind: EntityKind; reference: string }>;
 }
 /** A single ambiguous reference — one free-text mention that matched several
@@ -706,103 +714,23 @@ async function annotateResolvedEntities(
   resolver: EntityResolver | undefined,
   params: {
     tenantId: string;
+    intent: IntentType;
     entities: ExtractedEntities | undefined;
     verifiedCustomerId?: string;
     verifiedJobId?: string;
   },
   log: Logger,
 ): Promise<EntityAnnotation | EntityAmbiguity> {
-  const ok: EntityAnnotation = { kind: 'ok', resolved: {}, pendingReferences: [] };
-  if (!resolver || !params.entities) return ok;
-
-  const lookups: Array<{ kind: 'customer' | 'job' | 'technician'; reference: string }> = [];
-  if (params.entities.customerName && !params.verifiedCustomerId) {
-    lookups.push({ kind: 'customer', reference: params.entities.customerName });
+  try {
+    return await resolveVoiceEntityReferences(resolver, params);
+  } catch (err) {
+    const error = err instanceof Error ? err : new Error(String(err));
+    log.warn('voice-action-router: entity resolver failed, continuing unresolved', {
+      intent: params.intent,
+      error: error.message,
+    });
+    return { kind: 'ok', resolved: {}, pendingReferences: [] };
   }
-  if (params.entities.jobReference && !params.verifiedJobId) {
-    lookups.push({ kind: 'job', reference: params.entities.jobReference });
-  }
-  // U1 — spoken technician names on reassign / add-crew / remove-crew
-  // resolve against the tenant's team members ("give it to Carlos"), so
-  // those proposals carry a verified UUID instead of stalling in draft.
-  if (params.entities.targetTechnicianName) {
-    lookups.push({ kind: 'technician', reference: params.entities.targetTechnicianName });
-  }
-
-  // The lookups are independent of one another (each hits the resolver
-  // with a different free-text reference/kind), so resolve them all
-  // concurrently instead of one at a time. Promise.all preserves the
-  // array's order in its results regardless of which settles first, so
-  // downstream processing below still iterates in the original,
-  // deterministic reference order. Each lookup keeps its EXACT
-  // pre-existing failure behavior (log.warn + treat as unresolved) by
-  // catching inside the mapped promise rather than letting a rejection
-  // reach Promise.all.
-  const results = await Promise.all(
-    lookups.map(async (lookup) => {
-      try {
-        return await resolver.resolve({
-          tenantId: params.tenantId,
-          reference: lookup.reference,
-          kind: lookup.kind,
-        });
-      } catch (err) {
-        const error = err instanceof Error ? err : new Error(String(err));
-        log.warn('voice-action-router: entity resolver failed, continuing unresolved', {
-          entityKind: lookup.kind,
-          error: error.message,
-        });
-        return undefined;
-      }
-    }),
-  );
-
-  // P8/U-multi — collect EVERY ambiguous reference, never just the first.
-  // A prior version returned as soon as it hit one ambiguity, which
-  // silently skipped resolving any references after it (they never even
-  // reached 'not_found' — they were simply never looked at). Ambiguity on
-  // a voice path must always become a clarification, never a guess or a
-  // silent drop, so every ambiguous lookup is recorded here.
-  const ambiguities: SingleEntityAmbiguity[] = [];
-  for (let i = 0; i < lookups.length; i++) {
-    const lookup = lookups[i];
-    const result = results[i];
-    if (!result) continue; // resolver failure — already logged above
-    switch (result.kind) {
-      case 'resolved':
-        if (lookup.kind === 'customer') ok.resolved.customerId = result.candidate.id;
-        else if (lookup.kind === 'technician') ok.resolved.technicianId = result.candidate.id;
-        else ok.resolved.jobId = result.candidate.id;
-        break;
-      case 'ambiguous':
-        ambiguities.push({
-          entityKind: lookup.kind,
-          reference: lookup.reference,
-          candidates: result.candidates,
-        });
-        break;
-      case 'not_found':
-        ok.pendingReferences.push({ kind: lookup.kind, reference: lookup.reference });
-        break;
-      case 'skipped':
-        break;
-    }
-  }
-
-  if (ambiguities.length > 0) {
-    // The payload contract carries one entity's candidates per
-    // clarification (see EntityAmbiguity doc comment above), so the
-    // first ambiguity is what gets surfaced as the clarification;
-    // anything past it rides in `additionalAmbiguities` so it is
-    // persisted (see emitClarification) rather than lost.
-    const [first, ...rest] = ambiguities;
-    return {
-      kind: 'ambiguous',
-      ...first,
-      ...(rest.length > 0 ? { additionalAmbiguities: rest } : {}),
-    };
-  }
-  return ok;
 }
 
 /**
@@ -1284,6 +1212,7 @@ async function processSegment(
       deps.entityResolver,
       {
         tenantId,
+        intent: classification.intentType,
         entities: classification.extractedEntities,
         ...(customerId ? { verifiedCustomerId: customerId } : {}),
         ...(jobId ? { verifiedJobId: jobId } : {}),
@@ -1450,6 +1379,7 @@ async function processSegment(
     deps.entityResolver,
     {
       tenantId,
+      intent: classification.intentType,
       entities: classification.extractedEntities,
       ...(customerId ? { verifiedCustomerId: customerId } : {}),
       ...(jobId ? { verifiedJobId: jobId } : {}),
@@ -1570,6 +1500,11 @@ async function processSegment(
       // (and passthrough handlers) get verified UUIDs instead of free text.
       ...(annotation.resolved.customerId ? { customerId: annotation.resolved.customerId } : {}),
       ...(annotation.resolved.jobId ? { jobId: annotation.resolved.jobId } : {}),
+      ...(annotation.resolved.invoiceId ? { invoiceId: annotation.resolved.invoiceId } : {}),
+      ...(annotation.resolved.estimateId ? { estimateId: annotation.resolved.estimateId } : {}),
+      ...(annotation.resolved.appointmentId
+        ? { appointmentId: annotation.resolved.appointmentId }
+        : {}),
       // U1 — verified technician UUID for reassign / add-crew / remove-crew.
       ...(annotation.resolved.technicianId
         ? { technicianId: annotation.resolved.technicianId }

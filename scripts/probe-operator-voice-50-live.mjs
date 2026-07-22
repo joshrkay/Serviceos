@@ -36,13 +36,7 @@ const CLERK_USER_ID =
   process.env.CLERK_USER_ID || 'user_3GZQEdOUZSzhUNn7pb57fW5jKyg';
 const ROLE = process.env.ROLE || 'owner';
 
-const secret = process.env.CLERK_SECRET_KEY;
-if (!secret) {
-  console.error('FAIL: CLERK_SECRET_KEY is required');
-  process.exit(2);
-}
-
-function mintHmacToken() {
+function mintHmacToken(secret) {
   const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
   const now = Math.floor(Date.now() / 1000);
   const body = Buffer.from(
@@ -79,7 +73,7 @@ async function api(method, p, { token, body } = {}) {
   return { status: res.status, json };
 }
 
-function scoreAssistant(json, status, expectProposal) {
+export function scoreAssistant(json, status, expectProposal) {
   if (status === 401 || status === 403) {
     return { verdict: 'BLOCKED', reason: `auth_${status}`, proposalType: null };
   }
@@ -177,7 +171,7 @@ function scoreAssistant(json, status, expectProposal) {
   };
 }
 
-function scoreVoice(json, status) {
+export function scoreVoice(json, status) {
   if (status === 401 || status === 403) {
     return { verdict: 'BLOCKED', reason: `auth_${status}` };
   }
@@ -195,11 +189,37 @@ function scoreVoice(json, status) {
     '';
   const proposalIds = json?.proposalIds ?? [];
   const state = json?.state ?? null;
+  const emergencyAudit = typeof eventType === 'string' && eventType.includes('emergency_dispatch');
+  const emergencyOnCall = types.includes('notify_oncall');
+  const infrastructureFailure = ['provider', 'quota', 'deadline', 'parse']
+    .find((kind) => typeof eventType === 'string' && eventType.includes(kind));
 
+  if (infrastructureFailure) {
+    return {
+      verdict: 'DEGRADED',
+      reason: `voice_classifier_${infrastructureFailure}`,
+      state,
+      spoken: typeof spoken === 'string' ? spoken.slice(0, 240) : '',
+      sideEffectTypes: types,
+      httpStatus: status,
+      rawSideEffects: sideEffects.slice(0, 6),
+    };
+  }
+  if (emergencyAudit && emergencyOnCall) {
+    return {
+      verdict: 'PASS',
+      reason: 'voice_emergency_oncall',
+      state,
+      spoken: typeof spoken === 'string' ? spoken.slice(0, 240) : '',
+      sideEffectTypes: types,
+      httpStatus: status,
+      emergencyEvidence: { auditEventType: eventType, onCallNotified: true },
+    };
+  }
   if (eventType.includes('reprompt') || score === 0) {
     return {
       verdict: 'DEGRADED',
-      reason: 'voice_reprompt_no_classify',
+      reason: 'voice_reprompt_low_confidence',
       state,
       spoken: typeof spoken === 'string' ? spoken.slice(0, 240) : '',
       sideEffectTypes: types,
@@ -233,6 +253,10 @@ function bump(counts, verdict) {
 }
 
 async function main() {
+  const secret = process.env.CLERK_SECRET_KEY;
+  if (!secret) {
+    throw new Error('CLERK_SECRET_KEY is required');
+  }
   fs.mkdirSync(OUT_DIR, { recursive: true });
   const prior = JSON.parse(fs.readFileSync(CASES_PATH, 'utf8'));
   const cases = prior.results.map((r) => ({
@@ -244,7 +268,7 @@ async function main() {
   }));
 
   const started = new Date().toISOString();
-  const token = mintHmacToken();
+  const token = mintHmacToken(secret);
 
   const platform = {};
   for (const [label, url] of [
@@ -398,7 +422,9 @@ Raw: \`${resultsPath}\`
   }
 }
 
-main().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  main().catch((e) => {
+    console.error(e);
+    process.exit(1);
+  });
+}

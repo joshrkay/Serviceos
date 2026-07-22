@@ -288,6 +288,22 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
     });
   }
 
+  async findByIdempotencyKey(
+    tenantId: string,
+    idempotencyKey: string,
+  ): Promise<Proposal | null> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT *
+           FROM proposals
+          WHERE tenant_id = $1 AND idempotency_key = $2
+          LIMIT 1`,
+        [tenantId, idempotencyKey],
+      );
+      return result.rows.length > 0 ? mapRow(result.rows[0]) : null;
+    });
+  }
+
   async findByRecordingId(
     tenantId: string,
     recordingId: string,

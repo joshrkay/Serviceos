@@ -1150,6 +1150,87 @@ Notes:
   price is "negotiation".
 - Do not change the JSON output schema.`;
 
+interface OwnerOperatorCommandPattern {
+  intentType: IntentType;
+  pattern: RegExp;
+  extract: (match: RegExpExecArray) => ExtractedEntities;
+}
+
+/**
+ * U2 — narrow, deterministic coverage for the operator corpus commands that
+ * repeatedly fail closed when the provider is degraded. These patterns are
+ * consulted only on an authenticated owner session. They are anchored and
+ * entity-bounded so nearby appointment, account-setup, generic "add", and
+ * invoice-creation language still reaches the normal classifier.
+ */
+const OWNER_OPERATOR_COMMAND_PATTERNS: ReadonlyArray<OwnerOperatorCommandPattern> = [
+  {
+    intentType: 'create_customer',
+    pattern:
+      /^\s*(?:new\s+customer|add\s+(?:a\s+)?customer)\s+([a-z][a-z.'-]*(?:\s+[a-z][a-z.'-]*){0,3})\s*,\s*phone(?:\s+number)?\s*(?::|is)?\s*(\+?[\d(][\d\s().-]{5,20}\d)\s*[.!?]?\s*$/i,
+    extract: (match) => ({ displayName: match[1].trim(), phone: match[2].trim() }),
+  },
+  {
+    intentType: 'create_customer',
+    pattern:
+      /^\s*(?:new\s+customer|add\s+(?:a\s+)?customer)\s+([a-z][a-z.'-]*(?:\s+[a-z][a-z.'-]*){0,3})\s*,\s*email\s*(?::|is)?\s*([a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,})\s*[.!?]?\s*$/i,
+    extract: (match) => ({ displayName: match[1].trim(), email: match[2].trim() }),
+  },
+  {
+    intentType: 'update_customer',
+    pattern:
+      /^\s*(?:update|change|fix)\s+([a-z][a-z .'-]{0,58}?)['’]s\s+phone(?:\s+number)?\s+(?:to|as)\s+(\+?[\d(][\d\s().-]{5,20}\d)\s*[.!?]?\s*$/i,
+    extract: (match) => ({ customerName: match[1].trim(), updatedPhone: match[2].trim() }),
+  },
+  {
+    intentType: 'update_customer',
+    pattern:
+      /^\s*(?:update|change|fix)\s+([a-z][a-z .'-]{0,58}?)['’]s\s+address\s+(?:to|as)\s+(.{3,120}?)\s*[.!?]?\s*$/i,
+    extract: (match) => ({ customerName: match[1].trim(), updatedAddress: match[2].trim() }),
+  },
+  {
+    intentType: 'lookup_customer',
+    pattern:
+      /^\s*(?:look\s+up|lookup)\s+(?:the\s+)?([a-z][a-z .'-]{0,58}?)\s+account\s*[.!?]?\s*$/i,
+    extract: (match) => ({ customerName: match[1].trim() }),
+  },
+  {
+    intentType: 'convert_lead',
+    pattern:
+      /^\s*convert\s+(?:the\s+)?([a-z][a-z .'-]{0,58}?)\s+lead\s+(?:to|into)\s+(?:a\s+)?customer\s*[.!?]?\s*$/i,
+    extract: (match) => ({ leadReference: match[1].trim() }),
+  },
+  {
+    intentType: 'create_job',
+    pattern:
+      /^\s*(?:open|create|start)\s+(?:a\s+)?(?:new\s+)?job\s+for\s+([^,\n]{1,60}?)\s*,\s*([^.!?\n]{2,100}?)\s*[.!?]?\s*$/i,
+    extract: (match) => ({ customerName: match[1].trim(), jobTitle: match[2].trim() }),
+  },
+  {
+    intentType: 'update_invoice',
+    pattern:
+      /^\s*add\s+([a-z0-9][a-z0-9 /&.'-]{0,98}?)\s+to\s+(?:the\s+)?invoice\s+(INV-\d{1,12})\s*[.!?]?\s*$/i,
+    extract: (match) => ({
+      jobReference: match[2].toUpperCase(),
+      lineItemDescriptions: [match[1].trim().replace(/^(?:a|an|the)\s+/i, '')],
+    }),
+  },
+];
+
+function matchOwnerOperatorCommand(transcript: string): IntentClassification | null {
+  for (const entry of OWNER_OPERATOR_COMMAND_PATTERNS) {
+    const match = entry.pattern.exec(transcript);
+    if (!match) continue;
+    return {
+      intentType: entry.intentType,
+      confidence: 0.95,
+      reasoning: 'matched deterministic owner operator command',
+      extractedEntities: entry.extract(match),
+    };
+  }
+  return null;
+}
+
 /**
  * Deterministic short-circuit for the stereotyped extended-intent
  * phrasings (the P18-001 signup-override pattern). Consulted ONLY when
@@ -1488,6 +1569,11 @@ async function classifyIntentRaw(
   // Cheap short-circuit: empty / whitespace transcripts never trigger an LLM call.
   if (!transcript || transcript.trim().length === 0) {
     return unknownResult('empty transcript', 'empty_transcript');
+  }
+
+  if (context.ownerSession === true) {
+    const matched = matchOwnerOperatorCommand(transcript);
+    if (matched) return matched;
   }
 
   // Phase-2 Track A — deterministic extended-intent phrasings. Only on

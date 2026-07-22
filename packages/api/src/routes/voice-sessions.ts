@@ -68,7 +68,8 @@ export function createVoiceSessionsRouter(deps: VoiceSessionsRouterDeps): Router
       const result = await deps.adapter.startSession(
         req.auth!.tenantId,
         req.auth!.userId,
-        parsed.conversationId
+        parsed.conversationId,
+        req.auth!.role,
       );
       res.status(201).json({
         sessionId: result.sessionId,

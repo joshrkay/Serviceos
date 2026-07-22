@@ -150,6 +150,67 @@ describe('U8 — resolveProposalEntity', () => {
     expect(result.status).toBe('ready_for_review');
     expect((result.payload as Record<string, unknown>).customerId).toBe('cust-a');
   });
+
+  it('captures a grounded picker alias only after a successful manual selection', async () => {
+    await repo.create(ambiguousEntityProposal());
+    const captures: unknown[] = [];
+
+    const result = await resolveProposalEntity(
+      {
+        tenantId: TENANT,
+        proposalId: PROPOSAL,
+        candidateId: 'cust-b',
+        actorId: OWNER,
+        actorRole: 'owner',
+      },
+      {
+        proposalRepo: repo,
+        auditRepo,
+        entityAliasCandidateCapture: {
+          capture: async (input) => {
+            captures.push(input);
+            return [];
+          },
+        },
+      },
+    );
+
+    expect(result.status).toBe('ready_for_review');
+    expect(captures).toHaveLength(1);
+    expect(captures[0]).toMatchObject({
+      source: 'entity_picker',
+      tenantId: TENANT,
+      actorId: OWNER,
+      selectedEntityId: 'cust-b',
+      groundingProposal: { id: PROPOSAL },
+    });
+  });
+
+  it('swallows candidate capture failure without changing the resolved source result', async () => {
+    await repo.create(ambiguousEntityProposal());
+
+    const result = await resolveProposalEntity(
+      {
+        tenantId: TENANT,
+        proposalId: PROPOSAL,
+        candidateId: 'cust-a',
+        actorId: OWNER,
+        actorRole: 'owner',
+      },
+      {
+        proposalRepo: repo,
+        auditRepo,
+        entityAliasCandidateCapture: {
+          capture: async () => {
+            throw new Error('candidate capture unavailable');
+          },
+        },
+      },
+    );
+
+    expect(result.status).toBe('ready_for_review');
+    expect(result.payload.customerId).toBe('cust-a');
+  });
 });
 
 // ── U1 (E9) re-draft: resolving makes the proposal EXECUTABLE ───────────────

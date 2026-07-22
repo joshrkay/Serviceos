@@ -1,7 +1,11 @@
+import { describe, it, expect, vi } from 'vitest';
 import {
   parseNaturalDatetime,
+  planVoiceEntityLookups,
   resolveSchedulingEntities,
+  resolveVoiceEntityReferences,
 } from '../../../../src/ai/agents/customer-calling/entity-resolution';
+import type { EntityResolver, EntityResolverResult } from '../../../../src/ai/resolution/entity-resolver';
 
 // VOX-52 regression (PR #665 review): the resolver rewrite must still carry the
 // classifier's free-text fields (reason, assigneeName, noteText, …) into refs —
@@ -82,5 +86,124 @@ describe('parseNaturalDatetime', () => {
     expect(new Date(noon.scheduledStart).getUTCHours()).toBe(12);
     const midnight = parseNaturalDatetime('tomorrow at 12 am', now)!;
     expect(new Date(midnight.scheduledStart).getUTCHours()).toBe(0);
+  });
+});
+
+describe('planVoiceEntityLookups — intent-conditioned operator references', () => {
+  it('routes INV-0042 jobReference to invoice lookup for update_invoice', () => {
+    const lookups = planVoiceEntityLookups('update_invoice', { jobReference: 'INV-0042' });
+    expect(lookups).toEqual([
+      { kind: 'invoice', reference: 'INV-0042', refKey: 'invoiceId' },
+    ]);
+  });
+
+  it('routes EST-0042 jobReference to estimate lookup for update_estimate', () => {
+    const lookups = planVoiceEntityLookups('update_estimate', { jobReference: 'EST-0042' });
+    expect(lookups).toEqual([
+      { kind: 'estimate', reference: 'EST-0042', refKey: 'estimateId' },
+    ]);
+  });
+
+  it('resolves Khan customer name for lookup_customer', () => {
+    const lookups = planVoiceEntityLookups('lookup_customer', { customerName: 'Khan' });
+    expect(lookups).toEqual([
+      { kind: 'customer', reference: 'Khan', refKey: 'customerId' },
+    ]);
+  });
+
+  it('resolves Garcia Tuesday appointment reference for reschedule_appointment', () => {
+    const lookups = planVoiceEntityLookups('reschedule_appointment', {
+      appointmentReference: 'Tuesday',
+    });
+    expect(lookups).toEqual([
+      { kind: 'appointment', reference: 'Tuesday', refKey: 'appointmentId' },
+    ]);
+  });
+
+  it('resolves Carlos technician name for reassign_appointment', () => {
+    const lookups = planVoiceEntityLookups('reassign_appointment', {
+      targetTechnicianName: 'Carlos',
+    });
+    expect(lookups).toEqual([
+      { kind: 'technician', reference: 'Carlos', refKey: 'technicianId' },
+    ]);
+  });
+
+  it('create_customer never pre-resolves a customer name', () => {
+    const lookups = planVoiceEntityLookups('create_customer', {
+      customerName: 'New Person',
+      displayName: 'New Person',
+    });
+    expect(lookups).toEqual([]);
+  });
+});
+
+describe('resolveVoiceEntityReferences — router annotation folding', () => {
+  const TID = 'tenant-voice';
+
+  function resolverWith(results: Record<string, EntityResolverResult>): EntityResolver {
+    return {
+      resolve: vi.fn(async (input) => {
+        const key = `${input.kind}:${input.reference}`;
+        return results[key] ?? { kind: 'not_found', reference: input.reference };
+      }),
+    };
+  }
+
+  it('unique invoice match stamps invoiceId on the annotation', async () => {
+    const resolver = resolverWith({
+      'invoice:INV-0042': {
+        kind: 'resolved',
+        candidate: { id: 'inv-42', kind: 'invoice', label: 'INV-0042', score: 1 },
+      },
+    });
+    const result = await resolveVoiceEntityReferences(resolver, {
+      tenantId: TID,
+      intent: 'update_invoice',
+      entities: { jobReference: 'INV-0042' },
+    });
+    expect(result.kind).toBe('ok');
+    if (result.kind === 'ok') {
+      expect(result.resolved.invoiceId).toBe('inv-42');
+      expect(result.pendingReferences).toEqual([]);
+    }
+  });
+
+  it('two Smith-like customer matches → ambiguous clarification', async () => {
+    const resolver = resolverWith({
+      'customer:Smith': {
+        kind: 'ambiguous',
+        candidates: [
+          { id: 'smith-a', kind: 'customer', label: 'John Smith', score: 0.9 },
+          { id: 'smith-b', kind: 'customer', label: 'Jane Smith', score: 0.88 },
+        ],
+      },
+    });
+    const result = await resolveVoiceEntityReferences(resolver, {
+      tenantId: TID,
+      intent: 'create_invoice',
+      entities: { customerName: 'Smith' },
+    });
+    expect(result.kind).toBe('ambiguous');
+    if (result.kind === 'ambiguous') {
+      expect(result.entityKind).toBe('customer');
+      expect(result.candidates).toHaveLength(2);
+    }
+  });
+
+  it('unknown customer becomes pendingReference instead of blocking', async () => {
+    const resolver = resolverWith({});
+    const result = await resolveVoiceEntityReferences(resolver, {
+      tenantId: TID,
+      intent: 'create_invoice',
+      entities: { customerName: 'Ghost Customer' },
+    });
+    expect(result.kind).toBe('ok');
+    if (result.kind === 'ok') {
+      expect(result.resolved.customerId).toBeUndefined();
+      expect(result.pendingReferences).toEqual([
+        { kind: 'customer', reference: 'Ghost Customer' },
+      ]);
+    }
   });
 });

@@ -75,7 +75,10 @@ async function runExecutionSweepInner(deps: ExecutionWorkerDeps): Promise<{
       }
       await deps.executor.execute(claimed, {
         tenantId: proposal.tenantId,
-        executedBy: proposal.createdBy,
+        executedBy:
+          proposal.proposalType === 'adopt_entity_alias'
+            ? proposal.executedBy ?? proposal.createdBy
+            : proposal.createdBy,
       });
       executed++;
       deps.logger.info('Execution sweep: proposal executed', {

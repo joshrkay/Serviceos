@@ -163,6 +163,7 @@ export interface InAppAdapterDeps {
    * (legacy behavior), so existing fixtures keep working unchanged.
    */
   supportedLanguagesResolver?: (tenantId: string) => Promise<Language[] | undefined>;
+  extendedIntentsEnabled?: (tenantId: string) => Promise<boolean>;
 }
 
 export interface StartSessionResult {
@@ -182,6 +183,53 @@ export interface HandleInputResult {
 }
 
 const DEFAULT_GREETING_INAPP = 'Hi, this is your assistant. How can I help today?';
+
+type ClassifierFailureClass = 'parse_failed' | 'deadline' | 'quota' | 'provider';
+
+const CLASSIFIER_FAILURE_EVENT: Record<ClassifierFailureClass, string> = {
+  parse_failed: 'classifier_parse_failure',
+  deadline: 'classifier_deadline_failure',
+  quota: 'classifier_quota_failure',
+  provider: 'classifier_provider_failure',
+};
+
+const CLASSIFIER_QUOTA_CODES = new Set([
+  'TENANT_CONCURRENCY_EXCEEDED',
+  'TENANT_TOKEN_BUDGET_EXCEEDED',
+]);
+
+function classifierErrorCode(error: unknown): string | undefined {
+  if (typeof error !== 'object' || error === null) return undefined;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === 'string' ? code : undefined;
+}
+
+function classifierFailureFromError(
+  error: unknown,
+): { failureClass: ClassifierFailureClass; errorCode?: string } {
+  const code = classifierErrorCode(error);
+  if (code === 'DEADLINE_EXCEEDED') {
+    return { failureClass: 'deadline', errorCode: code };
+  }
+  if (code && CLASSIFIER_QUOTA_CODES.has(code)) {
+    return { failureClass: 'quota', errorCode: code };
+  }
+  return { failureClass: 'provider' };
+}
+
+function classifierFailureAuditEffect(
+  failureClass: ClassifierFailureClass,
+  errorCode?: string,
+): SideEffect {
+  return {
+    type: 'audit_log',
+    payload: {
+      eventType: CLASSIFIER_FAILURE_EVENT[failureClass],
+      failureClass,
+      ...(errorCode ? { errorCode } : {}),
+    },
+  };
+}
 
 export function buildInappGreeting(persona?: VoicePersona | null): string {
   if (persona?.greeting) return persona.greeting;
@@ -379,9 +427,9 @@ export class InAppVoiceAdapter {
         })),
       };
     }
-    if (resolution.status === 'not_found') {
-      return { type: 'entity_not_found' };
-    }
+    // Unknown non-emergency references proceed to intent_confirm with partial
+    // refs — the proposal surfaces pendingReference for operator review
+    // instead of escalating to on-call (matches voice-action-router policy).
     return { type: 'entity_resolved', refs: resolution.refs };
   }
 
@@ -393,12 +441,24 @@ export class InAppVoiceAdapter {
    * Recording disclosure is intentionally skipped for the inapp channel
    * (consent is captured at account creation; see disclose_recording).
    */
-  async startSession(tenantId: string, userId: string, conversationId?: string): Promise<StartSessionResult> {
+  async startSession(
+    tenantId: string,
+    userId: string,
+    conversationId?: string,
+    role?: string,
+  ): Promise<StartSessionResult> {
     const repairTemplates = this.deps.repairTemplatesResolver
       ? await this.deps.repairTemplatesResolver(tenantId).catch(() => [])
       : [];
+    const ownerSession = role === 'owner';
+    const extendedIntents =
+      ownerSession && this.deps.extendedIntentsEnabled
+        ? await this.deps.extendedIntentsEnabled(tenantId).catch(() => false)
+        : false;
     const session = this.deps.store.create(tenantId, 'inapp', {
       ...(repairTemplates.length > 0 ? { repairTemplates } : {}),
+      ...(ownerSession ? { ownerSession: true } : {}),
+      ...(extendedIntents ? { extendedIntents: true } : {}),
     });
     const convId = conversationId ?? session.id;
 
@@ -516,6 +576,7 @@ export class InAppVoiceAdapter {
     //  B) Any other state — classify the utterance as an intent.
     const stateBeforeTurn: string = session.machine.currentState;
     let fsmEvent: CallingAgentEvent;
+    let classifierFailureEffect: SideEffect | undefined;
 
     if (stateBeforeTurn === 'intent_confirm') {
       fsmEvent = isAffirmation(text)
@@ -559,12 +620,17 @@ export class InAppVoiceAdapter {
             tenantId: session.tenantId,
             verticalPromptSection,
             planPromptSection,
+            ...(session.machine.currentContext.ownerSession ? { ownerSession: true } : {}),
+            ...(session.machine.currentContext.extendedIntents ? { extendedIntents: true } : {}),
           },
           this.deps.gateway
         );
         classifierUsage = classification.tokenUsage
           ? { input: classification.tokenUsage.input, output: classification.tokenUsage.output }
           : undefined;
+        if (classification.unknownReason === 'parse_failed') {
+          classifierFailureEffect = classifierFailureAuditEffect('parse_failed');
+        }
         // VQ-003: announce the classifier outcome on the session bus so
         // the harness can grade intent-recognition independently of the
         // FSM transition that follows.
@@ -581,7 +647,12 @@ export class InAppVoiceAdapter {
           classification.confidence,
           classification.extractedEntities as Record<string, unknown> | undefined
         );
-      } catch {
+      } catch (error) {
+        const failure = classifierFailureFromError(error);
+        classifierFailureEffect = classifierFailureAuditEffect(
+          failure.failureClass,
+          failure.errorCode,
+        );
         fsmEvent = { type: 'confidence_low', threshold: CLASSIFIER_CONFIDENCE_THRESHOLD, score: 0 };
       }
 
@@ -615,6 +686,10 @@ export class InAppVoiceAdapter {
     }
 
     const allSideEffects: SideEffect[] = [];
+    if (classifierFailureEffect) {
+      allSideEffects.push(classifierFailureEffect);
+      await this.executeSideEffects(session, [classifierFailureEffect]);
+    }
 
     // Dispatch the primary event (classifier-derived, or the confirm/correct
     // event from the intent_confirm branch).
@@ -633,7 +708,8 @@ export class InAppVoiceAdapter {
     //   ambiguous → entity_ambiguous with the candidate set — the FSM asks a
     //               one-tap disambiguation question and stays in
     //               entity_resolution.
-    //   not_found → entity_not_found — the FSM escalates to a human.
+    //   not_found → entity_resolved with partial refs — intent_confirm readback;
+    //               the proposal carries pendingReference for operator review.
     if (
       session.machine.currentState === 'entity_resolution' &&
       fsmEvent.type === 'intent_classified'

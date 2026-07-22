@@ -25,6 +25,7 @@ import {
 import { resolveProposalLine } from '../proposals/resolve-line';
 import { resolveProposalEntity } from '../proposals/resolve-entity';
 import type { RedraftHandlerFactory } from '../proposals/redraft-handler-factory';
+import type { EntityAliasCandidateCapture } from '../learning/entity-aliases/candidate-service';
 import {
   proposalFilterSchema,
   rejectProposalBodySchema,
@@ -88,6 +89,9 @@ export function createProposalsRouter(
   // (non-executable) voice_clarification with the drafted, executable proposal.
   // Absent → resolution falls back to the annotate-only behavior.
   redraftHandlerFactory?: RedraftHandlerFactory,
+  // Tenant learning loop — grounded picker/edit flows emit deduped alias review
+  // proposals. Failure-soft inside the action layer.
+  entityAliasCandidateCapture?: EntityAliasCandidateCapture,
 ): Router {
   const router = Router();
 
@@ -377,6 +381,7 @@ export function createProposalsRouter(
           proposalRepo,
           ...(auditRepo ? { auditRepo } : {}),
           ...(redraftHandlerFactory ? { redraftHandlerFactory } : {}),
+          ...(entityAliasCandidateCapture ? { entityAliasCandidateCapture } : {}),
         },
       );
       res.json(result);
@@ -467,6 +472,7 @@ export function createProposalsRouter(
           parsed.edits,
           auditRepo,
           correctionRepo,
+          entityAliasCandidateCapture,
         );
         res.json(result);
       } catch (err) {

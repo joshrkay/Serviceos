@@ -26,6 +26,7 @@ interface MockRow {
   summary?: string;
   status?: string | null;
   invoice_number?: string;
+  doc_number?: string;
   scheduled_start?: string;
   score?: number;
 }
@@ -33,18 +34,28 @@ interface MockRow {
 function makeMockPool(rowsBySlot: Array<MockRow[] | undefined>) {
   const calls: CapturedCall[] = [];
   let releaseCount = 0;
+  let businessQueryIndex = 0;
 
   // Each resolve() runs in a transaction: BEGIN → set_config(tenant) →
-  // business SELECT → COMMIT (ROLLBACK on error). Slot 0 is the canned result
-  // for the RLS-context statements (always empty); slot 1 holds the business
-  // rows returned by the single data query.
+  // business SELECT(s) → COMMIT (ROLLBACK on error). Slot 0 is the canned result
+  // for the RLS-context statements (always empty); slots 1+ hold business rows
+  // returned in order (exact-match query, then trigram fallback, etc.).
   const isContextStatement = (sql: string) =>
     /^\s*(BEGIN|COMMIT|ROLLBACK|SET\b)/i.test(sql) || /set_config/i.test(sql);
+
+  const businessSlots = rowsBySlot.slice(1);
 
   const client: Partial<PoolClient> = {
     query: vi.fn(async (sql: string, params?: unknown[]) => {
       calls.push({ sql, params: params ?? [] });
-      const rows = (isContextStatement(sql) ? rowsBySlot[0] : rowsBySlot[1]) ?? [];
+      let rows: MockRow[];
+      if (isContextStatement(sql)) {
+        rows = rowsBySlot[0] ?? [];
+      } else {
+        const slot = businessSlots[businessQueryIndex] ?? businessSlots[businessSlots.length - 1];
+        businessQueryIndex += 1;
+        rows = slot ?? [];
+      }
       return {
         rows,
         rowCount: rows.length,
@@ -298,9 +309,34 @@ describe('PgEntityResolver — job', () => {
 // ---------------------------------------------------------------------------
 
 describe('PgEntityResolver — invoice', () => {
-  it('matching invoice number returns resolved', async () => {
+  it('exact invoice number match returns resolved before trigram', async () => {
     const { pool, calls } = makeMockPool([
       undefined,
+      [{ id: 'inv-exact', doc_number: 'INV-0042', status: 'sent' }],
+    ]);
+
+    const resolver = new PgEntityResolver(pool);
+    const result = await resolver.resolve({
+      tenantId: TENANT_ID,
+      reference: 'inv-0042',
+      kind: 'invoice',
+    });
+
+    expect(result.kind).toBe('resolved');
+    if (result.kind === 'resolved') {
+      expect(result.candidate.id).toBe('inv-exact');
+      expect(result.candidate.score).toBe(1.0);
+    }
+
+    const exactQuery = calls.find((c) => c.sql.includes('FROM invoices'));
+    expect(exactQuery!.sql).toMatch(/UPPER\(invoice_number\)\s*=\s*UPPER\(\$2\)/);
+    expect(exactQuery!.params[1]).toBe('inv-0042');
+  });
+
+  it('matching invoice number returns resolved via trigram when no exact row', async () => {
+    const { pool, calls } = makeMockPool([
+      undefined,
+      [], // exact match miss
       [{ id: 'inv-1', invoice_number: 'INV-0042', status: 'sent', score: 1.0 }],
     ]);
 
@@ -316,9 +352,12 @@ describe('PgEntityResolver — invoice', () => {
       expect(result.candidate.label).toBe('INV-0042');
     }
 
-    const businessQuery = calls.find((c) => c.sql.includes('FROM invoices'));
-    expect(businessQuery!.sql).toMatch(/tenant_id\s*=\s*\$1/);
-    expect(businessQuery!.params[0]).toBe(TENANT_ID);
+    const businessQueries = calls.filter((c) => c.sql.includes('FROM invoices'));
+    expect(businessQueries).toHaveLength(2);
+    expect(businessQueries[0]!.sql).toMatch(/UPPER\(invoice_number\)/);
+    expect(businessQueries[1]!.sql).toMatch(/similarity\(invoice_number/);
+    expect(businessQueries[1]!.sql).toMatch(/tenant_id\s*=\s*\$1/);
+    expect(businessQueries[1]!.params[0]).toBe(TENANT_ID);
   });
 
   it('two invoice candidates above τ_ent returns ambiguous', async () => {
@@ -439,17 +478,43 @@ describe('PgEntityResolver — appointment', () => {
 // ---------------------------------------------------------------------------
 
 describe('PgEntityResolver — estimate', () => {
-  it('estimate kind always returns skipped', async () => {
-    const { pool } = makeMockPool([]);
+  it('exact estimate number returns resolved with score 1.0', async () => {
+    const { pool, calls } = makeMockPool([
+      undefined,
+      [{ id: 'est-1', doc_number: 'EST-0042', status: 'draft' }],
+    ]);
+
+    const resolver = new PgEntityResolver(pool);
+    const result = await resolver.resolve({
+      tenantId: TENANT_ID,
+      reference: 'EST-0042',
+      kind: 'estimate',
+    });
+
+    expect(result.kind).toBe('resolved');
+    if (result.kind === 'resolved') {
+      expect(result.candidate.id).toBe('est-1');
+      expect(result.candidate.label).toBe('EST-0042');
+      expect(result.candidate.score).toBe(1.0);
+    }
+
+    const businessQuery = calls.find((c) => c.sql.includes('FROM estimates'));
+    expect(businessQuery!.sql).toMatch(/tenant_id\s*=\s*\$1/);
+    expect(businessQuery!.sql).toMatch(/UPPER\(estimate_number\)\s*=\s*UPPER\(\$2\)/);
+    expect(businessQuery!.params[0]).toBe(TENANT_ID);
+  });
+
+  it('unknown estimate number returns not_found', async () => {
+    const { pool } = makeMockPool([undefined, []]);
     const resolver = new PgEntityResolver(pool);
 
     const result = await resolver.resolve({
       tenantId: TENANT_ID,
-      reference: 'EST-001',
+      reference: 'EST-9999',
       kind: 'estimate',
     });
 
-    expect(result.kind).toBe('skipped');
+    expect(result.kind).toBe('not_found');
   });
 });
 
