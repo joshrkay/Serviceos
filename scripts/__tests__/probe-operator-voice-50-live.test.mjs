@@ -15,6 +15,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '../..');
 const V2_CASES = path.join(ROOT, 'fixtures/voice/operator-voice-top-50-v2-cases.json');
 const V3_CASES = path.join(ROOT, 'fixtures/voice/operator-voice-top-50-v3-cases.json');
+const V4_CASES = path.join(ROOT, 'fixtures/voice/operator-voice-top-50-v4-cases.json');
+const V5_CASES = path.join(ROOT, 'fixtures/voice/operator-voice-top-50-v5-cases.json');
+const V6_CASES = path.join(ROOT, 'fixtures/voice/operator-voice-top-50-v6-cases.json');
 const LEGACY = path.join(
   ROOT,
   'docs/verification-runs/operator-voice-50-live-2026-07-20.results.json',
@@ -72,6 +75,45 @@ test('v3 utterances are distinct from v1 and v2', () => {
   }
   assert.equal(probeCasesMeta(JSON.parse(fs.readFileSync(V3_CASES, 'utf8')), V3_CASES).version, 'v3');
 });
+
+function loadAllPriorUtterances(extraPaths = []) {
+  const paths = [LEGACY, V2_CASES, V3_CASES, ...extraPaths];
+  const prior = new Set();
+  for (const casesPath of paths) {
+    if (!fs.existsSync(casesPath)) continue;
+    for (const row of loadProbeCases(JSON.parse(fs.readFileSync(casesPath, 'utf8')))) {
+      prior.add(row.utterance.trim().toLowerCase());
+    }
+  }
+  return prior;
+}
+
+for (const [version, casesPath] of [
+  ['v4', V4_CASES],
+  ['v5', V5_CASES],
+  ['v6', V6_CASES],
+]) {
+  test(`${version} utterances are distinct from all prior corpora`, () => {
+    const priorPaths =
+      version === 'v4'
+        ? []
+        : version === 'v5'
+          ? [V4_CASES]
+          : [V4_CASES, V5_CASES];
+    const prior = loadAllPriorUtterances(priorPaths);
+    const rows = loadProbeCases(JSON.parse(fs.readFileSync(casesPath, 'utf8')));
+    assert.equal(rows.length, 50);
+    for (const row of rows) {
+      assert.equal(
+        prior.has(row.utterance.trim().toLowerCase()),
+        false,
+        `${version} case #${row.id} duplicates a prior corpus utterance`,
+      );
+      prior.add(row.utterance.trim().toLowerCase());
+    }
+    assert.equal(probeCasesMeta(JSON.parse(fs.readFileSync(casesPath, 'utf8')), casesPath).version, version);
+  });
+}
 
 test('scores an audited emergency on-call dispatch without a proposal', () => {
   const result = scoreVoice(
