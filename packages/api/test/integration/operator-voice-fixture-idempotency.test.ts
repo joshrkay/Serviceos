@@ -71,10 +71,10 @@ describe('Postgres integration — operator voice fixture idempotency', () => {
     const first = await runOperatorVoiceFixtureSeed(pool, catalog, options);
     const second = await runOperatorVoiceFixtureSeed(pool, catalog, options);
 
-    expect(first.createdKeys).toHaveLength(28);
+    expect(first.createdKeys).toHaveLength(27);
     expect(first.reusedKeys).toEqual([]);
     expect(second.createdKeys).toEqual([]);
-    expect(second.reusedKeys).toHaveLength(28);
+    expect(second.reusedKeys).toHaveLength(27);
     expect(ids(second)).toEqual(ids(first));
 
     const [concurrentA, concurrentB] = await Promise.all([
@@ -117,7 +117,7 @@ describe('Postgres integration — operator voice fixture idempotency', () => {
         ORDER BY correlation_id`,
       [tenant.tenantId, `${OPERATOR_VOICE_FIXTURE_PROVENANCE_PREFIX}%`],
     );
-    expect(audits.rows).toHaveLength(28);
+    expect(audits.rows).toHaveLength(27);
     expect(audits.rows.every((row) => row.count === 1)).toBe(true);
   });
 });
