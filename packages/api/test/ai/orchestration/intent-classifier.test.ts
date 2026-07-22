@@ -652,6 +652,27 @@ describe('U2 — deterministic owner operator commands', () => {
         lineItemDescriptions: ['trip fee'],
       },
     },
+    {
+      transcript: 'Quote Khan for a three-ton condenser replacement',
+      intentType: 'draft_estimate',
+      entities: {
+        customerName: 'Khan',
+        jobReference: 'three-ton condenser replacement',
+      },
+    },
+    {
+      transcript: "Line item ninety dollar contactor on Smith's bill",
+      intentType: 'update_invoice',
+      entities: {
+        customerName: 'Smith',
+        lineItemDescriptions: ['ninety dollar contactor'],
+      },
+    },
+    {
+      transcript: 'SMS Smith the invoice link',
+      intentType: 'send_invoice',
+      entities: { customerName: 'Smith' },
+    },
   ];
 
   for (const testCase of cases) {
