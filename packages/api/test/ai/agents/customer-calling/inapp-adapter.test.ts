@@ -117,6 +117,7 @@ describe('InAppVoiceAdapter', () => {
     const proposals = await proposalRepo.findByTenant(TENANT);
     expect(proposals.length).toBe(1);
     expect(proposals[0].proposalType).toBe('draft_invoice');
+    expect(proposals[0].status).toBe('ready_for_review');
   });
 
   it('low confidence reprompts and stays in intent_capture', async () => {

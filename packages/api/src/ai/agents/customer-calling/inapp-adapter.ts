@@ -989,6 +989,7 @@ export class InAppVoiceAdapter {
         sourceContext: {
           source: 'calling-agent',
           channel: session.channel,
+          voiceMutation: true,
           sessionId: session.id,
         },
         // QA-2026-06-04: do NOT fabricate an aiRunId. proposals.ai_run_id has

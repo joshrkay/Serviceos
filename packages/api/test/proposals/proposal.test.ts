@@ -565,6 +565,22 @@ describe('createProposal — D3 trust-tier integration', () => {
     expect(proposal.status).toBe('approved');
   });
 
+  it('never auto-approves a voice-originated mutation from conversational confirmation', () => {
+    const proposal = createProposal({
+      tenantId: 'tenant-1',
+      proposalType: 'create_customer',
+      payload: { name: 'QA Browser Validation Customer' },
+      summary: 'Create QA customer from in-app voice',
+      sourceTrustTier: 'autonomous',
+      confidenceScore: 0.99,
+      sourceContext: { voiceMutation: true, channel: 'inapp_voice' },
+      createdBy: 'agent-voice',
+    });
+
+    expect(proposal.status).toBe('draft');
+    expect(proposal.approvedAt).toBeUndefined();
+  });
+
   it('forwards supervisorPresent=false: autonomous + capture + 0.95 → ready_for_review, not approved', () => {
     // Regression for the P0 launch blocker: createProposal used to DROP
     // supervisorPresent before calling decideInitialStatus, so the
