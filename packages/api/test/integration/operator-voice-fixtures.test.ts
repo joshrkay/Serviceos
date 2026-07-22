@@ -183,7 +183,7 @@ describe('Postgres integration — operator voice QA fixtures', () => {
     }
   });
 
-  it('pins EST-0042 and Greenfield while documenting unsupported resolver kinds', async () => {
+  it('pins EST-0042 estimate resolution and Greenfield lead', async () => {
     const estimateRepo = new PgEstimateRepository(pool);
     const estimates = await estimateRepo.findByTenant(tenant.tenantId, { search: 'EST-0042' });
     expect(estimates).toHaveLength(1);
