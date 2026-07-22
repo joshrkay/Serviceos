@@ -17,6 +17,7 @@ import { sendPaymentReminderPayloadSchema } from './contracts/send-payment-remin
 import { applyLateFeePayloadSchema } from './contracts/apply-late-fee';
 import { createStandingInstructionPayloadSchema } from './contracts/standing-instruction';
 import { updateCatalogItemPayloadSchema } from './contracts/update-catalog-item';
+import { adoptEntityAliasPayloadSchema } from './contracts/adopt-entity-alias';
 import {
   onboardingTenantSettingsPayloadSchema,
   onboardingServiceCategoryPayloadSchema,
@@ -607,7 +608,9 @@ export const voiceClarificationPayloadSchema = z.object({
     .optional(),
 });
 
-export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
+type RegisteredProposalContractType = ProposalType | 'adopt_entity_alias';
+
+export const PROPOSAL_TYPE_SCHEMAS: Record<RegisteredProposalContractType, z.ZodSchema> = {
   create_customer: createCustomerPayloadSchema,
   update_customer: updateCustomerPayloadSchema,
   create_job: createJobPayloadSchema,
@@ -666,13 +669,14 @@ export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
   apply_late_fee: applyLateFeePayloadSchema,
   create_standing_instruction: createStandingInstructionPayloadSchema,
   update_catalog_item: updateCatalogItemPayloadSchema,
+  adopt_entity_alias: adoptEntityAliasPayloadSchema,
 };
 
 export function validateProposalPayload(
   proposalType: string,
   payload: unknown
 ): { valid: boolean; errors?: string[] } {
-  const schema = PROPOSAL_TYPE_SCHEMAS[proposalType as ProposalType];
+  const schema = PROPOSAL_TYPE_SCHEMAS[proposalType as RegisteredProposalContractType];
   if (!schema) {
     return { valid: false, errors: [`Unknown proposal type: ${proposalType}`] };
   }
