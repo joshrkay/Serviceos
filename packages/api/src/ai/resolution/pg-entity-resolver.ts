@@ -52,8 +52,7 @@ export class PgEntityResolver implements EntityResolver {
       case 'appointment':
         return this.resolveAppointment(tenantId, reference);
       case 'estimate':
-        // No trigram index defined for estimates in migration 051; skip.
-        return { kind: 'skipped' };
+        return this.resolveEstimate(tenantId, reference);
       case 'technician':
         return this.resolveTechnician(tenantId, reference);
       default:
@@ -143,6 +142,15 @@ export class PgEntityResolver implements EntityResolver {
     tenantId: string,
     reference: string,
   ): Promise<EntityResolverResult> {
+    const exact = await this.resolveExactDocumentNumber(
+      tenantId,
+      reference,
+      'invoice',
+      'invoices',
+      'invoice_number',
+    );
+    if (exact) return exact;
+
     const rows = await withTenantConnection(this.pool, tenantId, (client) =>
       client
         .query<{
@@ -171,6 +179,69 @@ export class PgEntityResolver implements EntityResolver {
     }));
 
     return this.toResult(candidates, reference);
+  }
+
+  private async resolveEstimate(
+    tenantId: string,
+    reference: string,
+  ): Promise<EntityResolverResult> {
+    const exact = await this.resolveExactDocumentNumber(
+      tenantId,
+      reference,
+      'estimate',
+      'estimates',
+      'estimate_number',
+      { excludeDeleted: true },
+    );
+    if (exact) return exact;
+    return { kind: 'not_found', reference };
+  }
+
+  /**
+   * Exact document-number match (INV-0042, EST-0042) before fuzzy trigram.
+   * Returns null when no rows match so callers can fall through to similarity.
+   */
+  private async resolveExactDocumentNumber(
+    tenantId: string,
+    reference: string,
+    kind: 'invoice' | 'estimate',
+    table: 'invoices' | 'estimates',
+    numberColumn: 'invoice_number' | 'estimate_number',
+    opts: { excludeDeleted?: boolean } = {},
+  ): Promise<EntityResolverResult | null> {
+    const deletedFilter = opts.excludeDeleted ? ' AND deleted_at IS NULL' : '';
+    const rows = await withTenantConnection(this.pool, tenantId, (client) =>
+      client
+        .query<{
+          id: string;
+          doc_number: string;
+          status: string | null;
+        }>(
+          `SELECT id, ${numberColumn} AS doc_number, status
+             FROM ${table}
+            WHERE tenant_id = $1
+              AND UPPER(${numberColumn}) = UPPER($2)${deletedFilter}
+            ORDER BY created_at DESC
+            LIMIT 5`,
+          [tenantId, reference],
+        )
+        .then((r) => r.rows),
+    );
+
+    if (rows.length === 0) return null;
+
+    const candidates: EntityCandidate[] = rows.map((row) => ({
+      id: row.id,
+      kind,
+      label: row.doc_number,
+      hint: row.status ?? undefined,
+      score: 1.0,
+    }));
+
+    if (candidates.length === 1) {
+      return { kind: 'resolved', candidate: candidates[0] };
+    }
+    return { kind: 'ambiguous', candidates };
   }
 
   private async resolveAppointment(

@@ -427,9 +427,9 @@ export class InAppVoiceAdapter {
         })),
       };
     }
-    if (resolution.status === 'not_found') {
-      return { type: 'entity_not_found' };
-    }
+    // Unknown non-emergency references proceed to intent_confirm with partial
+    // refs — the proposal surfaces pendingReference for operator review
+    // instead of escalating to on-call (matches voice-action-router policy).
     return { type: 'entity_resolved', refs: resolution.refs };
   }
 
@@ -708,7 +708,8 @@ export class InAppVoiceAdapter {
     //   ambiguous → entity_ambiguous with the candidate set — the FSM asks a
     //               one-tap disambiguation question and stays in
     //               entity_resolution.
-    //   not_found → entity_not_found — the FSM escalates to a human.
+    //   not_found → entity_resolved with partial refs — intent_confirm readback;
+    //               the proposal carries pendingReference for operator review.
     if (
       session.machine.currentState === 'entity_resolution' &&
       fsmEvent.type === 'intent_classified'

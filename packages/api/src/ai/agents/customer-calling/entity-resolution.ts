@@ -1,35 +1,14 @@
 /**
- * Voice-safety entity resolution for the calling agent.
+ * Voice-safety entity resolution for the calling agent and voice-action-router.
  *
  * P0 invariant (CLAUDE.md): "All free-text entity references on voice paths
  * are resolved via the entity resolver; ambiguity becomes a one-tap
  * voice_clarification, never a silent guess."
  *
- * This module used to hand-roll customer/job/appointment lookups with
- * `display_name ILIKE '%name%' ORDER BY created_at DESC LIMIT 1` and recency
- * heuristics ("most recent active job", "next upcoming appointment"). Those
- * were SILENT GUESSES: two customers named "Bob Smith" → the newest was
- * picked and the caller/FSM/operator never saw an ambiguity signal. That
- * directly violated the invariant above.
- *
- * Now every free-text reference is resolved through the shared, tenant-scoped
- * `EntityResolver` (production: `PgEntityResolver`, pg_trgm similarity with
- * τ_ent=0.80). The resolver reports one of three outcomes per reference:
- *
- *   - resolved  → a single confident match; its id is threaded into refs.
- *   - ambiguous → 2+ matches above τ_ent; we surface the candidate list so
- *     the FSM can ask a one-tap disambiguation question (never a guess).
- *   - not_found → 0 matches; the FSM escalates to a human rather than
- *     inventing a target.
- *
- * The first reference that comes back ambiguous / not_found short-circuits
- * (one clarification/escalation at a time — the router pattern in
- * `workers/voice-action-router.ts`). Deterministic natural-language datetime
- * parsing stays inline: it is a PARSE, not an identity guess.
- *
- * When no resolver is configured (dev/no-DB), resolution is skipped
- * entirely — references pass through unresolved and the proposal surfaces
- * for operator review (HITL safety net). We never fabricate an id.
+ * Intent-conditioned lookups route invoice/estimate document numbers, customer
+ * names, jobs, appointments, and technician names through the shared
+ * tenant-scoped EntityResolver (production: AliasFirstEntityResolver →
+ * PgEntityResolver, pg_trgm + exact document-number match, τ_ent=0.80).
  */
 
 import type {
@@ -38,8 +17,11 @@ import type {
   EntityCandidate,
   EntityKind,
 } from '../../resolution/entity-resolver';
+import type { ExtractedEntities } from '../../orchestration/intent-classifier';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const INV_NUMBER_RE = /^INV-\d+$/i;
+const EST_NUMBER_RE = /^EST-\d+$/i;
 
 const WEEKDAYS: Record<string, number> = {
   sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6,
@@ -48,6 +30,90 @@ const WEEKDAYS: Record<string, number> = {
 const GENERIC_CUSTOMER_REFS = new Set([
   'our customer', 'the customer', 'a customer', 'customer', 'them', 'that customer', 'this customer',
 ]);
+
+const SKIP_CUSTOMER_RESOLUTION_INTENTS = new Set(['create_customer']);
+
+const CUSTOMER_REF_INTENTS = new Set([
+  'lookup_customer',
+  'update_customer',
+  'create_job',
+  'create_invoice',
+  'draft_estimate',
+  'create_appointment',
+  'create_booking',
+  'send_invoice',
+  'send_estimate',
+  'update_invoice',
+  'update_estimate',
+  'issue_invoice',
+  'record_payment',
+  'apply_late_fee',
+  'send_payment_reminder',
+  'convert_lead',
+  'add_note',
+  'request_feedback',
+  'notify_delay',
+  'log_expense',
+  'add_service_location',
+  'mark_lead_lost',
+  'confirm_appointment',
+]);
+
+const INVOICE_DOC_INTENTS = new Set([
+  'update_invoice',
+  'send_invoice',
+  'record_payment',
+  'apply_late_fee',
+  'issue_invoice',
+  'send_payment_reminder',
+]);
+
+const ESTIMATE_DOC_INTENTS = new Set([
+  'update_estimate',
+  'send_estimate',
+  'send_estimate_nudge',
+]);
+
+const JOB_REF_INTENTS = new Set([
+  'update_job',
+  'log_time_entry',
+  'create_invoice',
+  'draft_estimate',
+  'add_note',
+  'notify_delay',
+  'request_feedback',
+]);
+
+const SCHEDULING_CREATE_INTENTS = new Set(['create_appointment', 'create_booking']);
+
+const APPOINTMENT_REF_INTENTS = new Set([
+  'cancel_appointment',
+  'reschedule_appointment',
+  'confirm_appointment',
+  'reassign_appointment',
+]);
+
+const TECHNICIAN_REF_INTENTS = new Set([
+  'reassign_appointment',
+  'add_crew_member',
+  'remove_crew_member',
+]);
+
+const REF_KEY_BY_KIND: Record<EntityKind, string | undefined> = {
+  customer: 'customerId',
+  job: 'jobId',
+  invoice: 'invoiceId',
+  estimate: 'estimateId',
+  appointment: 'appointmentId',
+  technician: 'technicianId',
+  pending_proposal: undefined,
+};
+
+export interface VoiceEntityLookup {
+  kind: EntityKind;
+  reference: string;
+  refKey: string;
+}
 
 export interface ParsedWindow {
   scheduledStart: string;
@@ -71,8 +137,6 @@ export function parseNaturalDatetime(desc: string, now: Date = new Date(), durat
       const target = WEEKDAYS[wd];
       const current = now.getUTCDay();
       let ahead = (target - current + 7) % 7;
-      // Bare/this/next weekday: always the NEXT occurrence (never today —
-      // a dispatcher saying "Tuesday" on a Tuesday means next week).
       if (ahead === 0) ahead = 7;
       dayOffset = ahead;
     }
@@ -81,7 +145,7 @@ export function parseNaturalDatetime(desc: string, now: Date = new Date(), durat
   const timeMatch = text.match(/\bat\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b/);
   if (dayOffset === undefined && !timeMatch) return undefined;
 
-  let hour = 9; // default morning slot when only a day was given
+  let hour = 9;
   let minute = 0;
   if (timeMatch) {
     hour = parseInt(timeMatch[1], 10);
@@ -101,46 +165,83 @@ export function parseNaturalDatetime(desc: string, now: Date = new Date(), durat
   return { scheduledStart: start.toISOString(), scheduledEnd: end.toISOString() };
 }
 
-const SCHEDULING_CREATE_INTENTS = new Set(['create_appointment', 'create_booking']);
-const APPOINTMENT_REF_INTENTS = new Set([
-  'cancel_appointment', 'reschedule_appointment', 'confirm_appointment', 'reassign_appointment',
-]);
-
-/**
- * Outcome of resolving the scheduling references on one classified turn.
- *
- *  - `resolved`  → every reference that needed resolving was uniquely
- *    matched (or absent / skipped); `refs` carries the concrete
- *    ids/timestamps to thread into the proposal.
- *  - `ambiguous` → a reference matched 2+ candidates above τ_ent; `ambiguous`
- *    carries the candidate set so the FSM can ask ONE disambiguation
- *    question. No id is guessed.
- *  - `not_found` → a reference matched 0 candidates; the FSM escalates.
- */
 export interface SchedulingEntityResolution {
   status: 'resolved' | 'ambiguous' | 'not_found';
-  /** Concrete resolved refs (customerId/jobId/appointmentId/times/reason). */
   refs: Record<string, string>;
-  /** Present only when status === 'ambiguous'. */
   ambiguous?: {
     entityKind: EntityKind;
     reference: string;
     candidates: EntityCandidate[];
   };
-  /** Present only when status === 'not_found'. */
   notFound?: {
     entityKind: EntityKind;
     reference: string;
   };
 }
 
+function trimReference(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function documentKindForReference(intent: string, reference: string): 'invoice' | 'estimate' | null {
+  if (INVOICE_DOC_INTENTS.has(intent) || INV_NUMBER_RE.test(reference)) return 'invoice';
+  if (ESTIMATE_DOC_INTENTS.has(intent) || EST_NUMBER_RE.test(reference)) return 'estimate';
+  return null;
+}
+
 /**
- * Fold a single resolver result into the running refs. Returns a terminal
- * SchedulingEntityResolution (ambiguous / not_found) when the reference could
- * not be uniquely resolved — the caller short-circuits on it so the FSM
- * surfaces exactly one clarification/escalation. Returns undefined when the
- * reference was uniquely resolved or skipped and processing should continue.
+ * Build the ordered resolver lookups for one classified intent. Only emits
+ * references the intent family actually needs — create_customer never
+ * pre-resolves a customer, and document numbers route to invoice/estimate kinds.
  */
+export function planVoiceEntityLookups(
+  intent: string,
+  entities: Record<string, unknown>,
+): VoiceEntityLookup[] {
+  const lookups: VoiceEntityLookup[] = [];
+
+  const jobReference = trimReference(entities.jobReference);
+  if (jobReference) {
+    const documentKind = documentKindForReference(intent, jobReference);
+    if (documentKind) {
+      const refKey = REF_KEY_BY_KIND[documentKind];
+      if (refKey) lookups.push({ kind: documentKind, reference: jobReference, refKey });
+    } else if (JOB_REF_INTENTS.has(intent) || SCHEDULING_CREATE_INTENTS.has(intent)) {
+      lookups.push({ kind: 'job', reference: jobReference, refKey: 'jobId' });
+    }
+  }
+
+  const customerName = trimReference(entities.customerName);
+  if (
+    customerName &&
+    !SKIP_CUSTOMER_RESOLUTION_INTENTS.has(intent) &&
+    CUSTOMER_REF_INTENTS.has(intent) &&
+    !GENERIC_CUSTOMER_REFS.has(customerName.toLowerCase())
+  ) {
+    lookups.push({ kind: 'customer', reference: customerName, refKey: 'customerId' });
+  }
+
+  const appointmentReference = trimReference(entities.appointmentReference);
+  if (appointmentReference && APPOINTMENT_REF_INTENTS.has(intent)) {
+    lookups.push({
+      kind: 'appointment',
+      reference: appointmentReference,
+      refKey: 'appointmentId',
+    });
+  }
+
+  const targetTechnicianName = trimReference(entities.targetTechnicianName);
+  if (targetTechnicianName && TECHNICIAN_REF_INTENTS.has(intent)) {
+    lookups.push({
+      kind: 'technician',
+      reference: targetTechnicianName,
+      refKey: 'technicianId',
+    });
+  }
+
+  return lookups;
+}
+
 function foldResolution(
   result: EntityResolverResult,
   entityKind: EntityKind,
@@ -165,10 +266,33 @@ function foldResolution(
         notFound: { entityKind, reference },
       };
     case 'skipped':
-      // Kind unsupported / empty reference — nothing to resolve, and NOT a
-      // guess. Leave the ref absent; the proposal surfaces for operator review.
       return undefined;
   }
+}
+
+async function resolvePlannedLookups(
+  resolver: EntityResolver | undefined,
+  tenantId: string,
+  lookups: readonly VoiceEntityLookup[],
+  refs: Record<string, string>,
+): Promise<SchedulingEntityResolution | undefined> {
+  if (!resolver) return undefined;
+  for (const lookup of lookups) {
+    const result = await resolver.resolve({
+      tenantId,
+      reference: lookup.reference,
+      kind: lookup.kind,
+    });
+    const terminal = foldResolution(
+      result,
+      lookup.kind,
+      lookup.reference,
+      refs,
+      lookup.refKey,
+    );
+    if (terminal) return terminal;
+  }
+  return undefined;
 }
 
 export async function resolveSchedulingEntities(
@@ -179,20 +303,18 @@ export async function resolveSchedulingEntities(
 ): Promise<SchedulingEntityResolution> {
   const refs: Record<string, string> = {};
 
-  // Carry through the classifier's free-text fields (custom cancellation
-  // `reason`, `assigneeName`, `noteText`, `customerName`, etc.) that downstream
-  // task handlers consume. The VOX-52 rewrite narrowed this to only the resolved
-  // outputs, silently dropping those fields — a regression this restores. EXCLUDE
-  // the identity keys (customerId/jobId/appointmentId): those are the resolver's
-  // authority and must never be trusted raw from the classifier (the core VOX-52
-  // invariant); the resolution logic below overlays them.
-  const IDENTITY_KEYS = new Set(['customerId', 'jobId', 'appointmentId']);
+  const IDENTITY_KEYS = new Set([
+    'customerId',
+    'jobId',
+    'appointmentId',
+    'invoiceId',
+    'estimateId',
+    'technicianId',
+  ]);
   for (const [k, v] of Object.entries(entities)) {
     if (typeof v === 'string' && !IDENTITY_KEYS.has(k)) refs[k] = v;
   }
 
-  // Deterministic natural-language datetime → concrete UTC window. This is a
-  // PARSE of the caller's own words, not an identity guess, so it stays inline.
   const dt = typeof entities.dateTimeDescription === 'string'
     ? entities.dateTimeDescription
     : typeof entities.datetime === 'string' ? entities.datetime : undefined;
@@ -204,72 +326,154 @@ export async function resolveSchedulingEntities(
     }
   }
 
-  // ── Customer ────────────────────────────────────────────────────────────
-  // Explicit uuid wins; otherwise resolve the free-text name through the
-  // resolver. Generic references ("our customer") carry no identity and are
-  // never resolved.
   const explicitCustomerId =
     typeof entities.customerId === 'string' && UUID_RE.test(entities.customerId)
       ? entities.customerId
       : undefined;
   if (explicitCustomerId) {
     refs.customerId = explicitCustomerId;
-  } else {
-    const name = typeof entities.customerName === 'string' ? entities.customerName.trim() : undefined;
-    if (resolver && name && !GENERIC_CUSTOMER_REFS.has(name.toLowerCase())) {
-      const result = await resolver.resolve({ tenantId, reference: name, kind: 'customer' });
-      const terminal = foldResolution(result, 'customer', name, refs, 'customerId');
-      if (terminal) return terminal;
+  }
+
+  for (const key of ['jobId', 'appointmentId', 'invoiceId', 'estimateId', 'technicianId'] as const) {
+    const value = entities[key];
+    if (typeof value === 'string' && UUID_RE.test(value)) {
+      refs[key] = value;
     }
   }
 
-  // ── Job (create intents) ─────────────────────────────────────────────────
-  if (SCHEDULING_CREATE_INTENTS.has(intent)) {
-    const explicitJobId =
-      typeof entities.jobId === 'string' && UUID_RE.test(entities.jobId) ? entities.jobId : undefined;
-    if (explicitJobId) {
-      refs.jobId = explicitJobId;
-    } else {
-      const jobRef = typeof entities.jobReference === 'string' ? entities.jobReference.trim() : undefined;
-      if (resolver && jobRef) {
-        const result = await resolver.resolve({ tenantId, reference: jobRef, kind: 'job' });
-        const terminal = foldResolution(result, 'job', jobRef, refs, 'jobId');
-        if (terminal) return terminal;
-      }
-      // No jobReference → nothing to resolve. We do NOT fall back to "most
-      // recent active job" — that was a silent guess. jobId stays absent and
-      // the proposal surfaces for operator review.
-    }
-  }
+  const planned = planVoiceEntityLookups(intent, entities).filter((lookup) => {
+    if (lookup.refKey === 'customerId' && refs.customerId) return false;
+    if (lookup.refKey === 'jobId' && refs.jobId) return false;
+    if (lookup.refKey === 'appointmentId' && refs.appointmentId) return false;
+    if (lookup.refKey === 'invoiceId' && refs.invoiceId) return false;
+    if (lookup.refKey === 'estimateId' && refs.estimateId) return false;
+    if (lookup.refKey === 'technicianId' && refs.technicianId) return false;
+    return true;
+  });
 
-  // ── Appointment (cancel / reschedule / confirm / reassign) ───────────────
-  if (APPOINTMENT_REF_INTENTS.has(intent)) {
-    const explicitApptId =
-      typeof entities.appointmentId === 'string' && UUID_RE.test(entities.appointmentId)
-        ? entities.appointmentId
-        : undefined;
-    if (explicitApptId) {
-      refs.appointmentId = explicitApptId;
-    } else {
-      const apptRef = typeof entities.appointmentReference === 'string'
-        ? entities.appointmentReference.trim()
-        : undefined;
-      if (resolver && apptRef) {
-        const result = await resolver.resolve({ tenantId, reference: apptRef, kind: 'appointment' });
-        const terminal = foldResolution(result, 'appointment', apptRef, refs, 'appointmentId');
-        if (terminal) return terminal;
-      }
-      // No appointmentReference → nothing to resolve. We do NOT fall back to
-      // "next upcoming / most recent appointment" — that was a silent guess.
-    }
-    // The cancellation handler requires a reason. Use the classifier's when
-    // present; otherwise record the channel — the operator sees the full
-    // summary at approval time. (A default reason string is not an identity
-    // guess.)
-    if (intent === 'cancel_appointment' && typeof entities.reason !== 'string') {
-      refs.reason = 'Requested by caller via voice session';
-    }
+  const terminal = await resolvePlannedLookups(resolver, tenantId, planned, refs);
+  if (terminal) return terminal;
+
+  if (intent === 'cancel_appointment' && typeof entities.reason !== 'string') {
+    refs.reason = 'Requested by caller via voice session';
   }
 
   return { status: 'resolved', refs };
+}
+
+/** Router annotation shape — mirrors resolveSchedulingEntities outcomes. */
+export interface VoiceEntityAnnotation {
+  kind: 'ok';
+  resolved: {
+    customerId?: string;
+    jobId?: string;
+    invoiceId?: string;
+    estimateId?: string;
+    appointmentId?: string;
+    technicianId?: string;
+  };
+  pendingReferences: Array<{ kind: EntityKind; reference: string }>;
+}
+
+export interface VoiceEntityAmbiguity {
+  kind: 'ambiguous';
+  entityKind: EntityKind;
+  reference: string;
+  candidates: EntityCandidate[];
+  additionalAmbiguities?: Array<{
+    entityKind: EntityKind;
+    reference: string;
+    candidates: EntityCandidate[];
+  }>;
+}
+
+export type VoiceEntityResolution = VoiceEntityAnnotation | VoiceEntityAmbiguity;
+
+/**
+ * Intent-conditioned entity resolution for the voice-action-router. Resolves
+ * every planned reference; the first ambiguity short-circuits. Unresolved
+ * references become pendingReference entries for operator review — never a
+ * silent guess.
+ */
+export async function resolveVoiceEntityReferences(
+  resolver: EntityResolver | undefined,
+  input: {
+    tenantId: string;
+    intent: string;
+    entities: ExtractedEntities | Record<string, unknown> | undefined;
+    verifiedCustomerId?: string;
+    verifiedJobId?: string;
+  },
+): Promise<VoiceEntityResolution> {
+  const ok: VoiceEntityAnnotation = { kind: 'ok', resolved: {}, pendingReferences: [] };
+  if (!resolver || !input.entities) return ok;
+
+  const entities: Record<string, unknown> = { ...input.entities };
+  if (input.verifiedCustomerId) delete entities.customerName;
+  if (input.verifiedJobId) delete entities.jobReference;
+
+  const planned = planVoiceEntityLookups(input.intent, entities);
+  if (planned.length === 0) return ok;
+
+  const results = await Promise.all(
+    planned.map(async (lookup) => {
+      try {
+        return {
+          lookup,
+          result: await resolver.resolve({
+            tenantId: input.tenantId,
+            reference: lookup.reference,
+            kind: lookup.kind,
+          }),
+        };
+      } catch {
+        return { lookup, result: undefined };
+      }
+    }),
+  );
+
+  const ambiguities: Array<{
+    entityKind: EntityKind;
+    reference: string;
+    candidates: EntityCandidate[];
+  }> = [];
+
+  for (const entry of results) {
+    if (!entry.result) continue;
+    switch (entry.result.kind) {
+      case 'resolved':
+        ok.resolved[entry.lookup.refKey as keyof VoiceEntityAnnotation['resolved']] =
+          entry.result.candidate.id;
+        break;
+      case 'ambiguous':
+        ambiguities.push({
+          entityKind: entry.lookup.kind,
+          reference: entry.lookup.reference,
+          candidates: entry.result.candidates,
+        });
+        break;
+      case 'not_found':
+        ok.pendingReferences.push({
+          kind: entry.lookup.kind,
+          reference: entry.lookup.reference,
+        });
+        break;
+      case 'skipped':
+        break;
+    }
+  }
+
+  if (ambiguities.length > 0) {
+    const [first, ...rest] = ambiguities;
+    return {
+      kind: 'ambiguous',
+      ...first,
+      ...(rest.length > 0 ? { additionalAmbiguities: rest } : {}),
+    };
+  }
+
+  if (input.verifiedCustomerId) ok.resolved.customerId = input.verifiedCustomerId;
+  if (input.verifiedJobId) ok.resolved.jobId = input.verifiedJobId;
+
+  return ok;
 }
