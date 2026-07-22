@@ -740,6 +740,17 @@ export function validateProposalInput(input: CreateProposalInput): string[] {
 
 export function createProposal(input: CreateProposalInput): Proposal {
   const now = new Date();
+  const voiceMutation =
+    input.sourceContext?.voiceMutation === true ||
+    input.sourceContext?.channel === 'inapp_voice' ||
+    input.sourceContext?.channel === 'telephony_voice';
+  // A conversational readback confirms interpretation, never authorization.
+  // The only voice-originated exception is the separately gated autonomous
+  // booking lane, whose evaluation is explicit and auditable.
+  const effectiveTrustTier =
+    voiceMutation && !input.autonomousLane?.eligible
+      ? undefined
+      : input.sourceTrustTier;
   // Rivet P2 F-1 — Supervisor Agent v1 hook point. Evaluated BEFORE the
   // trust-tier decision so the deterministic tenant policy (budget caps,
   // blocked types) sees every proposal at creation. The hook is a
@@ -763,7 +774,7 @@ export function createProposal(input: CreateProposalInput): Proposal {
   // exactly as before — every existing test and AI task is unchanged.
   const baselineStatus = decideInitialStatus({
     proposalType: input.proposalType,
-    sourceTrustTier: input.sourceTrustTier,
+    sourceTrustTier: effectiveTrustTier,
     confidenceScore: input.confidenceScore,
     missingFields: input.missingFields,
     // Phase 12: forward the supervisor-gating signals. Previously these
