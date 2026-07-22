@@ -163,6 +163,7 @@ export interface InAppAdapterDeps {
    * (legacy behavior), so existing fixtures keep working unchanged.
    */
   supportedLanguagesResolver?: (tenantId: string) => Promise<Language[] | undefined>;
+  extendedIntentsEnabled?: (tenantId: string) => Promise<boolean>;
 }
 
 export interface StartSessionResult {
@@ -393,12 +394,24 @@ export class InAppVoiceAdapter {
    * Recording disclosure is intentionally skipped for the inapp channel
    * (consent is captured at account creation; see disclose_recording).
    */
-  async startSession(tenantId: string, userId: string, conversationId?: string): Promise<StartSessionResult> {
+  async startSession(
+    tenantId: string,
+    userId: string,
+    conversationId?: string,
+    role?: string,
+  ): Promise<StartSessionResult> {
     const repairTemplates = this.deps.repairTemplatesResolver
       ? await this.deps.repairTemplatesResolver(tenantId).catch(() => [])
       : [];
+    const ownerSession = role === 'owner';
+    const extendedIntents =
+      ownerSession && this.deps.extendedIntentsEnabled
+        ? await this.deps.extendedIntentsEnabled(tenantId).catch(() => false)
+        : false;
     const session = this.deps.store.create(tenantId, 'inapp', {
       ...(repairTemplates.length > 0 ? { repairTemplates } : {}),
+      ...(ownerSession ? { ownerSession: true } : {}),
+      ...(extendedIntents ? { extendedIntents: true } : {}),
     });
     const convId = conversationId ?? session.id;
 
@@ -559,6 +572,8 @@ export class InAppVoiceAdapter {
             tenantId: session.tenantId,
             verticalPromptSection,
             planPromptSection,
+            ...(session.machine.currentContext.ownerSession ? { ownerSession: true } : {}),
+            ...(session.machine.currentContext.extendedIntents ? { extendedIntents: true } : {}),
           },
           this.deps.gateway
         );

@@ -6445,6 +6445,7 @@ export function createApp(): AppWithLifecycle {
       const s = await settingsRepo.findByTenant(tenantId);
       return s?.supportedLanguages;
     },
+    extendedIntentsEnabled: voiceExtendedIntentsFlagShim,
   });
   app.use(
     '/api/voice/sessions',
