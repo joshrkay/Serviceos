@@ -73,7 +73,7 @@ async function api(method, p, { token, body } = {}) {
   return { status: res.status, json };
 }
 
-export function scoreAssistant(json, status, expectProposal) {
+export function scoreAssistant(json, status, expectProposal, readOnlyOp = false) {
   if (status === 401 || status === 403) {
     return { verdict: 'BLOCKED', reason: `auth_${status}`, proposalType: null };
   }
@@ -108,6 +108,22 @@ export function scoreAssistant(json, status, expectProposal) {
       fallbackStage: fallbackStage || 'error-envelope',
       content: typeof content === 'string' ? content.slice(0, 240) : '',
       model: model || 'fallback',
+      taskType,
+    };
+  }
+
+  // Read-only lookup intents never require a proposal card on assistant chat.
+  if (readOnlyOp && typeof content === 'string' && content.trim().length > 0) {
+    return {
+      verdict: 'PASS',
+      reason: 'read_only_answer',
+      proposalType: null,
+      proposalId: null,
+      missingFields,
+      degraded: false,
+      fallbackStage,
+      content: content.slice(0, 240),
+      model,
       taskType,
     };
   }
@@ -252,6 +268,8 @@ function bump(counts, verdict) {
   counts[verdict] = (counts[verdict] || 0) + 1;
 }
 
+const READ_ONLY_OPS = new Set(['lookup', 'lookup_balance', 'lookup_revenue']);
+
 async function main() {
   const secret = process.env.CLERK_SECRET_KEY;
   if (!secret) {
@@ -307,7 +325,12 @@ async function main() {
     });
     const assistant = {
       httpStatus: chat.status,
-      ...scoreAssistant(chat.json, chat.status, c.expectProposal),
+      ...scoreAssistant(
+        chat.json,
+        chat.status,
+        c.expectProposal,
+        READ_ONLY_OPS.has(c.op),
+      ),
     };
     bump(assistantCounts, assistant.verdict);
 

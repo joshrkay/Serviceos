@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { scoreVoice } from '../probe-operator-voice-50-live.mjs';
+import { scoreAssistant, scoreVoice } from '../probe-operator-voice-50-live.mjs';
 
 test('scores an audited emergency on-call dispatch without a proposal', () => {
   const result = scoreVoice(
@@ -49,4 +49,38 @@ test('scores semantic low confidence as a reprompt', () => {
 
   assert.equal(result.verdict, 'DEGRADED');
   assert.equal(result.reason, 'voice_reprompt_low_confidence');
+});
+
+test('accepts read-only lookup assistant answers without a proposal', () => {
+  const result = scoreAssistant(
+    {
+      message: { content: 'Smith owes $450 on invoice INV-0041.' },
+      model: 'gpt-4o-mini-2024-07-18',
+      taskType: 'assistant.lookup_balance',
+    },
+    200,
+    null,
+    true,
+  );
+
+  assert.equal(result.verdict, 'PASS');
+  assert.equal(result.reason, 'read_only_answer');
+  assert.equal(result.proposalId, null);
+});
+
+test('still degrades read-only ops when the assistant envelope is fallback', () => {
+  const result = scoreAssistant(
+    {
+      message: { content: 'fallback text' },
+      degraded: true,
+      fallbackStage: 'error-envelope',
+      model: 'fallback',
+    },
+    200,
+    null,
+    true,
+  );
+
+  assert.equal(result.verdict, 'DEGRADED');
+  assert.equal(result.reason, 'llm_fallback_envelope');
 });

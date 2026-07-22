@@ -127,3 +127,49 @@ export CLERK_SECRET_KEY='sk_…'
 ```
 
 Expected lift after seed + U5 deploy: voice PASS should move sharply above 28/50 on entity-heavy cases (#4, 6, 7, 10, 15–18, 23–27, 34–38, 47, 49).
+
+---
+
+## Continuation log (2026-07-22 afternoon)
+
+### U5 deploy check — **NOT LIVE on Dev yet**
+
+API spot-check (first turn only):
+
+| Command | State | Expected after U5 |
+|---------|-------|-------------------|
+| Look up the Khan account | `escalating` | `intent_confirm` or read-only answer (with seed) |
+| Change the Khan email to office@khan.com | `escalating` | `intent_confirm` + pendingReference |
+| Send the Johnson invoice | `escalating` | `intent_confirm` + pendingReference |
+
+Merge to `main` alone is insufficient until Railway Development deploy completes with U5.
+
+### Fixture seed — **blocked**
+
+`DATABASE_URL` is not available in the cloud agent environment. Seed must be run locally or by adding `DATABASE_URL` (Railway `DATABASE_PUBLIC_URL`) to the agent secrets:
+
+```bash
+export DATABASE_URL='postgres://…@shinkansen.proxy.rlwy.net:…/railway'
+QA_TENANT_ID=b8e2dc0f-04c2-4ba0-9385-0ebcf3168052 \
+QA_ACTOR_ID=25abab01-4303-4626-9672-af9a19bf6a64 \
+NODE_ENV=development \
+npx tsx packages/api/scripts/seed-operator-voice-fixtures.ts
+```
+
+### Probe scorer fix — read-only assistant lookups
+
+`scripts/probe-operator-voice-50-live.mjs` now PASSes assistant chat for `lookup`, `lookup_balance`, and `lookup_revenue` when the model returns a non-degraded answer (no proposal required).
+
+| Run | Assistant PASS | Voice PASS |
+|-----|---------------:|-----------:|
+| Post-merge (20260722-152627) | 30 | 28 |
+| After read-only scorer (20260722-164440) | **34** (+4) | 28 |
+
+Raw: `/opt/cursor/artifacts/operator-voice-50-scorer-fix-20260722/results.json`
+
+### Remaining blockers (ordered)
+
+1. Deploy U5 to Development (21 voice `escalating` cases)
+2. Seed fixtures on Dev DB (~20 entity references)
+3. Classifier tuning (#26 INV-0042 trip fee — flaky reprompt)
+4. Assistant PARTIAL on non-lookup mutating chat (#3, 4, 6, 8, 17, 20, 21, 33, 34, 41–43, 44, 47, 48) — mix of seed, deploy, and chat-path gaps
