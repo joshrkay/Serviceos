@@ -16,6 +16,10 @@ import { createLogger } from '../logging/logger';
 import { computeCorrections } from './corrections/correction';
 import type { CorrectionRepository } from './corrections/correction';
 import { clearSatisfiedMissingFields } from './missing-fields';
+import {
+  clearPendingReferencesForEdit,
+  type EntityAliasCandidateCapture,
+} from '../learning/entity-aliases/candidate-service';
 
 const logger = createLogger({
   service: 'proposals.actions',
@@ -183,6 +187,9 @@ export async function approveProposal(
   if (!proposal) {
     throw new NotFoundError('Proposal', proposalId);
   }
+  if (proposal.proposalType === 'adopt_entity_alias' && actorRole !== 'owner') {
+    throw new ForbiddenError('Only an owner may approve an entity alias');
+  }
 
   // §5.5 — a schedule proposal's 48h window is enforced by an HOURLY sweep, so
   // there is a window after expiresAt but before the sweep where the row still
@@ -218,6 +225,14 @@ export async function approveProposal(
   // executor and undoProposal can agree on when the window opened.
   const updated = await proposalRepo.updateStatus(tenantId, proposalId, 'approved', {
     approvedAt: transitioned.approvedAt,
+    // The execution worker normally attributes work to proposal.createdBy.
+    // Alias candidates may be raised by a dispatcher, but activation must use
+    // the canonical OWNER who approved. Carry that actor through the existing
+    // execution attribution field until the executor writes the same value on
+    // completion.
+    ...(proposal.proposalType === 'adopt_entity_alias'
+      ? { executedBy: actorId }
+      : {}),
   });
   if (!updated) {
     throw new NotFoundError('Proposal', proposalId);
@@ -574,6 +589,7 @@ export async function editProposal(
   // table (intent + field + before/after) as the training signal for prompt/
   // routing improvement. Capture is failure-soft (see below).
   correctionRepo?: CorrectionRepository,
+  entityAliasCandidateCapture?: EntityAliasCandidateCapture,
 ): Promise<{ proposal: Proposal; editedFields: string[] }> {
   if (!hasPermission(actorRole, 'proposals:edit')) {
     throw new ForbiddenError();
@@ -604,7 +620,7 @@ export async function editProposal(
   // missing-fields.ts for why this is not a full schema recompute.
   const currentMissingFields = missingFieldsFor(proposal);
   let clearedMissingFields: string[] = [];
-  let sourceContextUpdate: Record<string, unknown> | undefined;
+  let nextSourceContext: Record<string, unknown> = { ...(proposal.sourceContext ?? {}) };
   if (currentMissingFields.length > 0) {
     const remainingMissingFields = clearSatisfiedMissingFields(
       currentMissingFields,
@@ -615,12 +631,23 @@ export async function editProposal(
       (field) => !remainingMissingFields.includes(field),
     );
     if (clearedMissingFields.length > 0) {
-      sourceContextUpdate = {
-        ...(proposal.sourceContext ?? {}),
-        missingFields: remainingMissingFields,
-      };
+      nextSourceContext.missingFields = remainingMissingFields;
     }
   }
+
+  const pendingReferenceClear = clearPendingReferencesForEdit(
+    nextSourceContext,
+    editedFields,
+    updatedPayload,
+  );
+  if (pendingReferenceClear.cleared) {
+    nextSourceContext = pendingReferenceClear.sourceContext;
+  }
+
+  const sourceContextUpdate =
+    clearedMissingFields.length > 0 || pendingReferenceClear.cleared
+      ? nextSourceContext
+      : undefined;
 
   const updated = await proposalRepo.update(tenantId, proposalId, {
     payload: updatedPayload,
@@ -677,6 +704,26 @@ export async function editProposal(
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error('editProposal: correction capture failed', {
+        proposalId: updated.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  if (entityAliasCandidateCapture && pendingReferenceClear.cleared) {
+    try {
+      await entityAliasCandidateCapture.capture({
+        source: 'proposal_edit',
+        tenantId,
+        actorId,
+        actorRole,
+        groundingProposal: proposal,
+        updatedProposal: updated,
+        editedFields,
+      });
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error('editProposal: alias candidate capture failed', {
         proposalId: updated.id,
         error: err instanceof Error ? err.message : String(err),
       });

@@ -324,6 +324,11 @@ describe('actionClassForProposalType — D3 action-class registry', () => {
   it('classifies apply_late_fee as money (raises amount due)', () => {
     expect(actionClassForProposalType('apply_late_fee')).toBe('money');
   });
+
+  it('classifies adopt_entity_alias as manual and registers it as a proposal type', () => {
+    expect(VALID_PROPOSAL_TYPES).toContain('adopt_entity_alias');
+    expect(actionClassForProposalType('adopt_entity_alias')).toBe('manual');
+  });
 });
 
 describe('decideInitialStatus — D3 trust-tier decision', () => {
@@ -409,6 +414,16 @@ describe('decideInitialStatus — D3 trust-tier decision', () => {
         sourceTrustTier: 'autonomous',
         confidenceScore: 0.99,
       })
+    ).toBe('draft');
+  });
+
+  it('adopt_entity_alias can never auto-approve even at autonomous trust and maximum confidence', () => {
+    expect(
+      decideInitialStatus({
+        proposalType: 'adopt_entity_alias',
+        sourceTrustTier: 'autonomous',
+        confidenceScore: 1,
+      }),
     ).toBe('draft');
   });
 

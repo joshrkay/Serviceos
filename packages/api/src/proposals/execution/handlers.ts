@@ -95,6 +95,8 @@ import { CreateStandingInstructionExecutionHandler } from './standing-instructio
 import { UpdateCatalogItemExecutionHandler } from './update-catalog-item-handler';
 import { CatalogItemRepository } from '../../catalog/catalog-item';
 import type { StandingInstructionRepository } from '../../instructions/standing-instructions';
+import type { EntityAliasRepository } from '../../learning/entity-aliases/entity-alias';
+import { EntityAliasExecutionHandler } from './entity-alias-handler';
 
 export interface ExecutionContext {
   tenantId: string;
@@ -1004,6 +1006,9 @@ export function createExecutionHandlerRegistry(deps?: {
   // WS20 — update_catalog_item writes the new SKU price via the catalog repo.
   // Absent → the handler degrades to a synthetic passthrough.
   catalogRepo?: CatalogItemRepository;
+  // Tenant entity aliases activate only through an owner-approved proposal.
+  // Absent fails closed inside the handler.
+  entityAliasRepo?: EntityAliasRepository;
   // WS3 — voice update_customer consent parity. When wired, a spoken smsConsent
   // toggle appends to the consent ledger (kind 'sms', source 'manual') in the
   // SAME transaction as the customer update + audit event.
@@ -1152,6 +1157,7 @@ export function createExecutionHandlerRegistry(deps?: {
     // but the correction loop creates it with no trust tier, so it only ever
     // runs after a human tap.
     new UpdateCatalogItemExecutionHandler(deps?.catalogRepo, deps?.auditRepo),
+    new EntityAliasExecutionHandler(deps?.entityAliasRepo),
   ];
 
   // Handlers that mutate existing entities take a repo dep. Registered

@@ -509,6 +509,10 @@ import { InMemoryCallTranscriptTurnRepository } from './voice/call-transcript-tu
 import type { EmbeddingProvider } from './ai/providers/openai-compatible';
 import { createVoiceActionRouterWorker, VoiceActionRouterPayload, INTENT_TO_PROPOSAL_TYPE } from './workers/voice-action-router';
 import { PgEntityResolver } from './ai/resolution/pg-entity-resolver';
+import { AliasFirstEntityResolver } from './ai/resolution/alias-first-entity-resolver';
+import { PgEntityAliasRepository } from './learning/entity-aliases/pg-entity-alias';
+import { createEntityAliasCandidateService } from './learning/entity-aliases/candidate-service';
+import { createEntityAliasesRouter } from './routes/entity-aliases';
 import { DefaultSlotConflictChecker } from './ai/tasks/slot-conflict-checker';
 import { DefaultAvailabilityFinder } from './ai/tasks/availability-finder';
 import { runExecutionSweep } from './workers/execution-worker';
@@ -1189,6 +1193,7 @@ export function createApp(): AppWithLifecycle {
   const standingInstructionRepo = pool
     ? new PgStandingInstructionRepository(pool)
     : new InMemoryStandingInstructionRepository();
+  const entityAliasRepo = pool ? new PgEntityAliasRepository(pool) : undefined;
   // Story 4.6 — customer merge. Pg re-parents child rows + archives the loser
   // in one transaction; the no-DB dev path only archives (no child tables).
   const customerMergeRepo = pool
@@ -2085,6 +2090,7 @@ export function createApp(): AppWithLifecycle {
     standingInstructionRepo,
     // WS20 — update_catalog_item writes the owner-ratified SKU price.
     catalogRepo,
+    entityAliasRepo,
     // WS3 — voice update_customer consent parity: a spoken smsConsent toggle
     // appends to the consent ledger in the same transaction as the customer
     // update + audit event (matching the authenticated route path).
@@ -2637,7 +2643,17 @@ export function createApp(): AppWithLifecycle {
     // verified tenant IDs (pg_trgm) before drafting; ambiguous matches
     // become one-tap clarifications. In-memory mode (no pool) skips
     // resolution, same as before.
-    ...(pool ? { entityResolver: new PgEntityResolver(pool) } : {}),
+    ...(pool
+      ? {
+          entityResolver: entityAliasRepo
+            ? new AliasFirstEntityResolver(
+                entityAliasRepo,
+                new PgEntityResolver(pool),
+                pool,
+              )
+            : new PgEntityResolver(pool),
+        }
+      : {}),
     // Lets reschedule/cancel/confirm scope appointment resolution to the
     // verified caller's own appointments (appointment → job → customerId).
     jobRepo,
@@ -5390,6 +5406,10 @@ export function createApp(): AppWithLifecycle {
   );
   // D2-1c — audit-log proposal approve / reject / edit / undo.
   app.use('/api/dispatch', createSchedulingRouter(feasibilityDeps, userRepo, settingsRepo ?? undefined));
+  const entityAliasCandidateCapture =
+    entityAliasRepo && auditRepo
+      ? createEntityAliasCandidateService({ proposalRepo, auditRepo })
+      : undefined;
   app.use(
     '/api/proposals',
     createProposalsRouter(
@@ -5411,8 +5431,12 @@ export function createApp(): AppWithLifecycle {
       // with the drafted, executable proposal. Same gateway + catalog the voice
       // router uses, so grounding/summary/confidence stay identical.
       createRedraftHandlerFactory({ gateway: llmGateway, catalogRepo }),
+      entityAliasCandidateCapture,
     ),
   );
+  if (entityAliasRepo) {
+    app.use('/api/entity-aliases', createEntityAliasesRouter(entityAliasRepo));
+  }
   if (pool) {
     app.use('/api/interactions', createInteractionsRouter({ pool, dispatchRepo }));
   }

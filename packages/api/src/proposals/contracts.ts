@@ -608,9 +608,7 @@ export const voiceClarificationPayloadSchema = z.object({
     .optional(),
 });
 
-type RegisteredProposalContractType = ProposalType | 'adopt_entity_alias';
-
-export const PROPOSAL_TYPE_SCHEMAS: Record<RegisteredProposalContractType, z.ZodSchema> = {
+export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
   create_customer: createCustomerPayloadSchema,
   update_customer: updateCustomerPayloadSchema,
   create_job: createJobPayloadSchema,
@@ -676,7 +674,7 @@ export function validateProposalPayload(
   proposalType: string,
   payload: unknown
 ): { valid: boolean; errors?: string[] } {
-  const schema = PROPOSAL_TYPE_SCHEMAS[proposalType as RegisteredProposalContractType];
+  const schema = PROPOSAL_TYPE_SCHEMAS[proposalType as ProposalType];
   if (!schema) {
     return { valid: false, errors: [`Unknown proposal type: ${proposalType}`] };
   }

@@ -99,6 +99,8 @@ const TYPE_PRIORITY: Record<ProposalType, number> = {
   // WS20 — correction-repetition catalog update is back-office config capture;
   // it gates no same-day work. Same low tier as notes / standing instructions.
   update_catalog_item: 5,
+  // Tenant alias learning is reversible back-office config — never same-day critical.
+  adopt_entity_alias: 5,
 };
 
 export function getUrgency(proposal: Proposal): { urgency: PrioritizedProposal['urgency']; reason: string } {

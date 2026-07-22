@@ -26,7 +26,7 @@ export type ProposalStatus =
   // or re-executed. If the operator wants to proceed after undoing,
   // they draft a new proposal. Decision 9 ("5-second undo window").
   | 'undone';
-export type ProposalType = 'create_customer' | 'update_customer' | 'create_job' | 'update_job' | 'create_appointment' | 'create_booking' | 'callback' | 'draft_estimate' | 'update_estimate' | 'draft_invoice' | 'update_invoice' | 'issue_invoice' | 'create_invoice_schedule' | 'batch_invoice' | 'reassign_appointment' | 'reschedule_appointment' | 'add_crew_member' | 'remove_crew_member' | 'cancel_appointment' | 'voice_clarification' | 'add_note' | 'send_invoice' | 'send_estimate' | 'send_estimate_nudge' | 'record_payment' | 'log_expense' | 'convert_lead' | 'confirm_appointment' | 'mark_lead_lost' | 'add_service_location' | 'log_time_entry' | 'notify_delay' | 'request_feedback' | 'emergency_dispatch' | 'onboarding_tenant_settings' | 'onboarding_service_category' | 'onboarding_estimate_template' | 'onboarding_team_member' | 'onboarding_schedule' | 'review_response_proposal' | 'send_payment_reminder' | 'apply_late_fee' | 'create_standing_instruction' | 'update_catalog_item';
+export type ProposalType = 'create_customer' | 'update_customer' | 'create_job' | 'update_job' | 'create_appointment' | 'create_booking' | 'callback' | 'draft_estimate' | 'update_estimate' | 'draft_invoice' | 'update_invoice' | 'issue_invoice' | 'create_invoice_schedule' | 'batch_invoice' | 'reassign_appointment' | 'reschedule_appointment' | 'add_crew_member' | 'remove_crew_member' | 'cancel_appointment' | 'voice_clarification' | 'add_note' | 'send_invoice' | 'send_estimate' | 'send_estimate_nudge' | 'record_payment' | 'log_expense' | 'convert_lead' | 'confirm_appointment' | 'mark_lead_lost' | 'add_service_location' | 'log_time_entry' | 'notify_delay' | 'request_feedback' | 'emergency_dispatch' | 'onboarding_tenant_settings' | 'onboarding_service_category' | 'onboarding_estimate_template' | 'onboarding_team_member' | 'onboarding_schedule' | 'review_response_proposal' | 'send_payment_reminder' | 'apply_late_fee' | 'create_standing_instruction' | 'update_catalog_item' | 'adopt_entity_alias';
 
 export const VALID_PROPOSAL_TYPES: ProposalType[] = [
   'create_customer',
@@ -73,6 +73,7 @@ export const VALID_PROPOSAL_TYPES: ProposalType[] = [
   'apply_late_fee',
   'create_standing_instruction',
   'update_catalog_item',
+  'adopt_entity_alias',
 ];
 
 /**
@@ -266,7 +267,7 @@ export function missingFieldsFor(proposal: Proposal): string[] {
 // `decideInitialStatus` is the SINGLE place where (action class, trust
 // tier, confidence) maps to an initial proposal status.
 
-export type ActionClass = 'capture' | 'comms' | 'money' | 'irreversible';
+export type ActionClass = 'capture' | 'comms' | 'money' | 'irreversible' | 'manual';
 export type TrustTier =
   | 'autonomous'
   | 'graduates_fast'
@@ -409,6 +410,11 @@ export function actionClassForProposalType(type: ProposalType): ActionClass {
     // before any fee is charged.
     case 'apply_late_fee':
       return 'money';
+    // Tenant learning changes future resolver behavior. It is reversible, but
+    // never eligible for trust-tier graduation or one-tap capture batching:
+    // only an explicit owner approval may activate it.
+    case 'adopt_entity_alias':
+      return 'manual';
   }
 }
 
@@ -627,6 +633,15 @@ export interface ProposalRepository {
     limit?: number,
   ): Promise<Proposal[]>;
   findByAiRun(tenantId: string, aiRunId: string): Promise<Proposal[]>;
+  /**
+   * Indexed lookup for deterministic producer deduplication. Optional so
+   * narrow legacy fakes remain source-compatible; both production repositories
+   * implement it.
+   */
+  findByIdempotencyKey?(
+    tenantId: string,
+    idempotencyKey: string,
+  ): Promise<Proposal | null>;
   /**
    * Indexed lookup for voice redelivery dedup (P1). Returns the most recent
    * proposal whose idempotencyKey === `idempotencyKey` (single-action path) OR
@@ -1047,6 +1062,18 @@ export class InMemoryProposalRepository implements ProposalRepository {
     return Array.from(this.proposals.values())
       .filter((p) => p.tenantId === tenantId && p.aiRunId === aiRunId)
       .map((p) => ({ ...p }));
+  }
+
+  async findByIdempotencyKey(
+    tenantId: string,
+    idempotencyKey: string,
+  ): Promise<Proposal | null> {
+    const proposal = Array.from(this.proposals.values()).find(
+      (candidate) =>
+        candidate.tenantId === tenantId &&
+        candidate.idempotencyKey === idempotencyKey,
+    );
+    return proposal ? { ...proposal } : null;
   }
 
   async findByRecordingId(
