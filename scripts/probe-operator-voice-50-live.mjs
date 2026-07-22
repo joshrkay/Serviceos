@@ -1,15 +1,19 @@
 #!/usr/bin/env node
 /**
- * Re-run the live operator top-50 probe (same cases as
- * docs/verification-runs/operator-voice-50-live-2026-07-20.results.json).
+ * Re-run the operator top-50 live probe against Development.
+ *
+ * Case sources (CASES_PATH):
+ *   - fixtures/voice/operator-voice-top-50-v2-cases.json  (cases[] — v2 corpus)
+ *   - docs/verification-runs/operator-voice-50-live-2026-07-20.results.json (legacy results[])
  *
  * Auth: HMAC Clerk token (requires CLERK_DEV_HMAC_TOKENS=true on the target
  * host — works on serviceosapi-development today; production rejects HMAC).
  *
  * Usage:
  *   CLERK_SECRET_KEY=sk_… node scripts/probe-operator-voice-50-live.mjs
- *   API_URL=https://serviceosapi-development.up.railway.app \
- *     OUT_DIR=/opt/cursor/artifacts/prod-voice-50-rerun \
+ *   CASES_PATH=fixtures/voice/operator-voice-top-50-v2-cases.json \
+ *     API_URL=https://serviceosapi-development.up.railway.app \
+ *     OUT_DIR=/opt/cursor/artifacts/operator-voice-50-v2 \
  *     node scripts/probe-operator-voice-50-live.mjs
  */
 import crypto from 'node:crypto';
@@ -252,20 +256,55 @@ function bump(counts, verdict) {
   counts[verdict] = (counts[verdict] || 0) + 1;
 }
 
+/**
+ * Normalize probe input from either the v2 cases file ({ cases: [...] }) or a
+ * legacy results artifact ({ results: [...] }).
+ */
+export function loadProbeCases(source) {
+  const rows = Array.isArray(source?.cases)
+    ? source.cases
+    : Array.isArray(source?.results)
+      ? source.results
+      : null;
+  if (!rows) {
+    throw new Error('CASES_PATH must contain a top-level "cases" or "results" array');
+  }
+  if (rows.length !== 50) {
+    throw new Error(`Expected exactly 50 probe cases, got ${rows.length}`);
+  }
+  return rows.map((row, index) => {
+    const id = row.id ?? index + 1;
+    if (typeof row.utterance !== 'string' || row.utterance.trim().length === 0) {
+      throw new Error(`Case #${id} is missing utterance`);
+    }
+    return {
+      id,
+      cat: row.cat ?? 'unknown',
+      op: row.op ?? 'unknown',
+      utterance: row.utterance,
+      expectProposal: row.expectProposal ?? null,
+      ...(Array.isArray(row.fixtureRefs) ? { fixtureRefs: row.fixtureRefs } : {}),
+      ...(Array.isArray(row.tags) ? { tags: row.tags } : {}),
+    };
+  });
+}
+
+export function probeCasesMeta(source, casesPath) {
+  if (source?.version && source?.label) {
+    return { version: source.version, label: source.label, casesPath };
+  }
+  return { version: 'v1-legacy', label: '2026-07-20 results artifact', casesPath };
+}
+
 async function main() {
   const secret = process.env.CLERK_SECRET_KEY;
   if (!secret) {
     throw new Error('CLERK_SECRET_KEY is required');
   }
   fs.mkdirSync(OUT_DIR, { recursive: true });
-  const prior = JSON.parse(fs.readFileSync(CASES_PATH, 'utf8'));
-  const cases = prior.results.map((r) => ({
-    id: r.id,
-    cat: r.cat,
-    op: r.op,
-    utterance: r.utterance,
-    expectProposal: r.expectProposal ?? null,
-  }));
+  const source = JSON.parse(fs.readFileSync(CASES_PATH, 'utf8'));
+  const cases = loadProbeCases(source);
+  const corpus = probeCasesMeta(source, CASES_PATH);
 
   const started = new Date().toISOString();
   const token = mintHmacToken(secret);
@@ -370,10 +409,10 @@ async function main() {
   const out = {
     started,
     finished,
+    corpus,
     targets: {
       api_probe: API_URL,
-      note:
-        'Re-run of 2026-07-20 top-50; same cases + QA Mobile HMAC auth on Development host',
+      note: `${corpus.label} (${corpus.version}) via ${path.relative(ROOT, CASES_PATH)}`,
     },
     tenant: {
       id: TENANT_ID,
@@ -396,7 +435,8 @@ async function main() {
 
 **When:** ${started} → ${finished}  
 **Host:** ${API_URL}  
-**Cases:** same 50 utterances as 2026-07-20 probe
+**Corpus:** ${corpus.label} (${corpus.version})  
+**Cases file:** \`${path.relative(ROOT, CASES_PATH)}\`
 
 ## Scoreboard
 
@@ -407,8 +447,6 @@ async function main() {
 
 **Assistant AI path:** **${aPass}/50** PASS  
 **Voice AI path:** **${vPass}/50** PASS  
-
-Prior run (2026-07-20): 0/50 assistant, 0/50 voice (all DEGRADED).
 
 Raw: \`${resultsPath}\`
 `;
