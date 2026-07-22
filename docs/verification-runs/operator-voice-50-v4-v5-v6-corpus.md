@@ -38,6 +38,16 @@ done
 
 Requires `CLERK_SECRET_KEY`. Target after PR #727: **50/50 voice PASS** per corpus.
 
+## Live results (2026-07-22)
+
+See `docs/verification-runs/operator-voice-50-v4-v5-v6-live-2026-07-22.md`.
+
+| Corpus | Voice PASS | Notes |
+|--------|----------:|-------|
+| v4 | **49/50** | Valid; one transient `voice_classifier_provider` on #13 |
+| v5 | — | Re-probe needed (OpenAI breaker unstable during run) |
+| v6 | — | Re-probe needed (same) |
+
 ## Unit checks
 
 ```bash
