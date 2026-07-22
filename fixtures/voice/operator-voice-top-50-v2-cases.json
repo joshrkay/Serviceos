@@ -1,0 +1,431 @@
+{
+  "version": "v2",
+  "label": "Operator Voice Top-50 — fresh utterances",
+  "created": "2026-07-22",
+  "description": "Brand-new 50-workflow acceptance corpus. Same workflow coverage as the 2026-07-20 baseline, with different phrasing, explicit fixture references, and seed-gap tags where QA data is intentionally absent.",
+  "fixtureCatalog": "fixtures/voice/operator-voice-fixture-catalog.json",
+  "cases": [
+    {
+      "id": 1,
+      "cat": "client",
+      "op": "create_client",
+      "utterance": "Create a customer record for Sofia Chen, mobile 602-555-0144",
+      "expectProposal": "create_customer",
+      "fixtureRefs": [],
+      "tags": ["net-new-entity"]
+    },
+    {
+      "id": 2,
+      "cat": "client",
+      "op": "create_client",
+      "utterance": "Register David Ortiz as a client — email david.ortiz@example.com",
+      "expectProposal": "create_customer",
+      "fixtureRefs": [],
+      "tags": ["net-new-entity"]
+    },
+    {
+      "id": 3,
+      "cat": "client",
+      "op": "edit_client",
+      "utterance": "Change Maria Alvarez's phone to 602-555-0188",
+      "expectProposal": "update_customer",
+      "fixtureRefs": [],
+      "tags": ["seed-gap"]
+    },
+    {
+      "id": 4,
+      "cat": "client",
+      "op": "edit_client",
+      "utterance": "Set Khan's billing email to office@khan.com",
+      "expectProposal": "update_customer",
+      "fixtureRefs": ["customer.khan"]
+    },
+    {
+      "id": 5,
+      "cat": "client",
+      "op": "create_client",
+      "utterance": "Add Greenfield Property Management to my customer roster",
+      "expectProposal": "create_customer",
+      "fixtureRefs": ["lead.greenfield"],
+      "tags": ["lead-adjacent"]
+    },
+    {
+      "id": 6,
+      "cat": "client",
+      "op": "edit_client",
+      "utterance": "Update Mrs Lee's service address to 12 Desert Willow Lane",
+      "expectProposal": "update_customer",
+      "fixtureRefs": ["customer.mrs-lee", "location.mrs-lee"]
+    },
+    {
+      "id": 7,
+      "cat": "client",
+      "op": "lookup",
+      "utterance": "Pull up everything we have on Khan",
+      "expectProposal": null,
+      "fixtureRefs": ["customer.khan"],
+      "tags": ["read-only"]
+    },
+    {
+      "id": 8,
+      "cat": "client",
+      "op": "convert_lead",
+      "utterance": "Convert the Greenfield lead into a customer account",
+      "expectProposal": "convert_lead",
+      "fixtureRefs": ["lead.greenfield"]
+    },
+    {
+      "id": 9,
+      "cat": "job",
+      "op": "create_job",
+      "utterance": "Open a service ticket for Alvarez — AC not cooling",
+      "expectProposal": "create_job",
+      "fixtureRefs": [],
+      "tags": ["seed-gap"]
+    },
+    {
+      "id": 10,
+      "cat": "job",
+      "op": "create_job",
+      "utterance": "Start a new job for Khan, kitchen drain replacement",
+      "expectProposal": "create_job",
+      "fixtureRefs": ["customer.khan"]
+    },
+    {
+      "id": 11,
+      "cat": "job",
+      "op": "edit_job",
+      "utterance": "Move the Johnson water heater job to in progress",
+      "expectProposal": "update_job",
+      "fixtureRefs": ["customer.johnson", "job.johnson-water-heater"]
+    },
+    {
+      "id": 12,
+      "cat": "job",
+      "op": "edit_job",
+      "utterance": "Mark the Garcia HVAC install as urgent priority",
+      "expectProposal": "update_job",
+      "fixtureRefs": ["customer.garcia", "job.garcia-install"]
+    },
+    {
+      "id": 13,
+      "cat": "job",
+      "op": "edit_job",
+      "utterance": "Close out job twelve as completed",
+      "expectProposal": "update_job",
+      "fixtureRefs": [],
+      "tags": ["doc-number-gap"]
+    },
+    {
+      "id": 14,
+      "cat": "job",
+      "op": "lookup",
+      "utterance": "What open jobs do I have today?",
+      "expectProposal": null,
+      "fixtureRefs": [],
+      "tags": ["read-only"]
+    },
+    {
+      "id": 15,
+      "cat": "estimate",
+      "op": "create_estimate",
+      "utterance": "Build a quote for Khan's three-ton condenser install",
+      "expectProposal": "draft_estimate",
+      "fixtureRefs": ["customer.khan", "job.khan-install"]
+    },
+    {
+      "id": 16,
+      "cat": "estimate",
+      "op": "create_estimate",
+      "utterance": "Write an estimate for the Johnson water heater swap",
+      "expectProposal": "draft_estimate",
+      "fixtureRefs": ["customer.johnson", "job.johnson-water-heater"]
+    },
+    {
+      "id": 17,
+      "cat": "estimate",
+      "op": "edit_estimate",
+      "utterance": "Revise the Khan quote to a three-ton unit",
+      "expectProposal": "update_estimate",
+      "fixtureRefs": ["customer.khan", "estimate.khan"]
+    },
+    {
+      "id": 18,
+      "cat": "estimate",
+      "op": "edit_estimate",
+      "utterance": "Include duct-sealing labor on Khan's estimate",
+      "expectProposal": "update_estimate",
+      "fixtureRefs": ["customer.khan", "estimate.khan"]
+    },
+    {
+      "id": 19,
+      "cat": "estimate",
+      "op": "edit_estimate",
+      "utterance": "Add a fifty dollar dispatch fee to estimate EST-0001",
+      "expectProposal": "update_estimate",
+      "fixtureRefs": ["estimate.khan"]
+    },
+    {
+      "id": 20,
+      "cat": "estimate",
+      "op": "send_estimate",
+      "utterance": "Send Khan their estimate for approval",
+      "expectProposal": "send_estimate",
+      "fixtureRefs": ["customer.khan", "estimate.khan"]
+    },
+    {
+      "id": 21,
+      "cat": "estimate",
+      "op": "send_estimate",
+      "utterance": "Email estimate EST-0042 to Garcia",
+      "expectProposal": "send_estimate",
+      "fixtureRefs": ["estimate.explicit-0042", "customer.garcia"]
+    },
+    {
+      "id": 22,
+      "cat": "estimate",
+      "op": "send_estimate_nudge",
+      "utterance": "Follow up on the Khan estimate again",
+      "expectProposal": "send_estimate_nudge",
+      "fixtureRefs": ["customer.khan", "estimate.khan"]
+    },
+    {
+      "id": 23,
+      "cat": "invoice",
+      "op": "create_invoice",
+      "utterance": "Bill Johnson four fifty for the capacitor and labor",
+      "expectProposal": "draft_invoice",
+      "fixtureRefs": ["customer.johnson", "job.johnson-water-heater"]
+    },
+    {
+      "id": 24,
+      "cat": "invoice",
+      "op": "create_invoice",
+      "utterance": "Invoice Mrs Lee four hundred fifty dollars for the cash call",
+      "expectProposal": "draft_invoice",
+      "fixtureRefs": ["customer.mrs-lee", "job.mrs-lee-service"]
+    },
+    {
+      "id": 25,
+      "cat": "invoice",
+      "op": "edit_invoice",
+      "utterance": "Add a ninety dollar contactor line to Smith's invoice",
+      "expectProposal": "update_invoice",
+      "fixtureRefs": ["customer.smith-a", "invoice.smith-a"],
+      "tags": ["ambiguous-name"]
+    },
+    {
+      "id": 26,
+      "cat": "invoice",
+      "op": "edit_invoice",
+      "utterance": "Add a twenty-five dollar trip charge to invoice INV-0042",
+      "expectProposal": "update_invoice",
+      "fixtureRefs": ["invoice.johnson"]
+    },
+    {
+      "id": 27,
+      "cat": "invoice",
+      "op": "send_invoice",
+      "utterance": "Send Johnson their invoice now",
+      "expectProposal": "send_invoice",
+      "fixtureRefs": ["customer.johnson", "invoice.johnson"]
+    },
+    {
+      "id": 28,
+      "cat": "invoice",
+      "op": "send_invoice",
+      "utterance": "Email invoice INV-0042 to the customer",
+      "expectProposal": "send_invoice",
+      "fixtureRefs": ["invoice.johnson"]
+    },
+    {
+      "id": 29,
+      "cat": "invoice",
+      "op": "send_invoice",
+      "utterance": "Text Smith their outstanding invoice",
+      "expectProposal": "send_invoice",
+      "fixtureRefs": ["customer.smith-a", "invoice.smith-a"],
+      "tags": ["ambiguous-name"]
+    },
+    {
+      "id": 30,
+      "cat": "invoice",
+      "op": "issue_invoice",
+      "utterance": "Finalize and issue Garcia's invoice",
+      "expectProposal": "issue_invoice",
+      "fixtureRefs": ["customer.garcia", "invoice.garcia"]
+    },
+    {
+      "id": 31,
+      "cat": "invoice",
+      "op": "record_payment",
+      "utterance": "Record four fifty cash on the Jones invoice",
+      "expectProposal": "record_payment",
+      "fixtureRefs": [],
+      "tags": ["seed-gap"]
+    },
+    {
+      "id": 32,
+      "cat": "invoice",
+      "op": "payment_reminder",
+      "utterance": "Send a payment reminder for Smith's overdue balance",
+      "expectProposal": "send_payment_reminder",
+      "fixtureRefs": ["customer.smith-a", "invoice.smith-a"],
+      "tags": ["ambiguous-name"]
+    },
+    {
+      "id": 33,
+      "cat": "schedule",
+      "op": "create_appointment",
+      "utterance": "Book Carlos at Garcia's place Tuesday at two PM",
+      "expectProposal": "create_appointment",
+      "fixtureRefs": ["technician.carlos", "customer.garcia", "location.garcia"]
+    },
+    {
+      "id": 34,
+      "cat": "schedule",
+      "op": "create_appointment",
+      "utterance": "Schedule a furnace tune-up at Smith's Tuesday at two in the afternoon",
+      "expectProposal": "create_appointment",
+      "fixtureRefs": ["customer.smith-a", "location.smith-a"],
+      "tags": ["ambiguous-name"]
+    },
+    {
+      "id": 35,
+      "cat": "schedule",
+      "op": "reschedule",
+      "utterance": "Move Garcia's Tuesday appointment to Thursday at ten AM",
+      "expectProposal": "reschedule_appointment",
+      "fixtureRefs": ["appointment.garcia-tuesday", "customer.garcia"]
+    },
+    {
+      "id": 36,
+      "cat": "schedule",
+      "op": "cancel",
+      "utterance": "Cancel Garcia's Tuesday visit",
+      "expectProposal": "cancel_appointment",
+      "fixtureRefs": ["appointment.garcia-tuesday", "customer.garcia"]
+    },
+    {
+      "id": 37,
+      "cat": "schedule",
+      "op": "reassign",
+      "utterance": "Reassign Garcia's Tuesday job to Carlos instead of me",
+      "expectProposal": "reassign_appointment",
+      "fixtureRefs": ["technician.carlos", "appointment.garcia-tuesday", "customer.garcia"]
+    },
+    {
+      "id": 38,
+      "cat": "schedule",
+      "op": "confirm",
+      "utterance": "Mark Garcia's Tuesday slot as confirmed",
+      "expectProposal": "confirm_appointment",
+      "fixtureRefs": ["appointment.garcia-tuesday", "customer.garcia"]
+    },
+    {
+      "id": 39,
+      "cat": "schedule",
+      "op": "notify_delay",
+      "utterance": "Tell Garcia I'm running twenty minutes late",
+      "expectProposal": "notify_delay",
+      "fixtureRefs": ["customer.garcia", "job.garcia-install"]
+    },
+    {
+      "id": 40,
+      "cat": "schedule",
+      "op": "lookup",
+      "utterance": "What's on my calendar tomorrow?",
+      "expectProposal": null,
+      "fixtureRefs": [],
+      "tags": ["read-only"]
+    },
+    {
+      "id": 41,
+      "cat": "ops",
+      "op": "add_note",
+      "utterance": "Note on the Patel job: customer prefers morning visits",
+      "expectProposal": "add_note",
+      "fixtureRefs": [],
+      "tags": ["seed-gap"]
+    },
+    {
+      "id": 42,
+      "cat": "ops",
+      "op": "log_expense",
+      "utterance": "Log sixty dollars in parts on the Patel job",
+      "expectProposal": "log_expense",
+      "fixtureRefs": [],
+      "tags": ["seed-gap"]
+    },
+    {
+      "id": 43,
+      "cat": "ops",
+      "op": "log_time",
+      "utterance": "Clock two hours on the Patel job",
+      "expectProposal": "log_time_entry",
+      "fixtureRefs": [],
+      "tags": ["seed-gap"]
+    },
+    {
+      "id": 44,
+      "cat": "ops",
+      "op": "emergency",
+      "utterance": "Emergency — no heat at the Hayes place, page the on-call now",
+      "expectProposal": "emergency_dispatch",
+      "fixtureRefs": [],
+      "tags": ["emergency", "seed-gap"]
+    },
+    {
+      "id": 45,
+      "cat": "ops",
+      "op": "batch_invoice",
+      "utterance": "Generate invoices for every completed job",
+      "expectProposal": "batch_invoice",
+      "fixtureRefs": []
+    },
+    {
+      "id": 46,
+      "cat": "ops",
+      "op": "late_fee",
+      "utterance": "Charge Smith a twenty-five dollar late fee",
+      "expectProposal": "apply_late_fee",
+      "fixtureRefs": ["customer.smith-a", "invoice.smith-a"],
+      "tags": ["ambiguous-name"]
+    },
+    {
+      "id": 47,
+      "cat": "ops",
+      "op": "feedback",
+      "utterance": "Ask Smith for a Google review",
+      "expectProposal": "request_feedback",
+      "fixtureRefs": ["customer.smith-a", "job.smith-a-service"],
+      "tags": ["ambiguous-name"]
+    },
+    {
+      "id": 48,
+      "cat": "ops",
+      "op": "standing_instruction",
+      "utterance": "From now on always add a seventy-nine dollar diagnostic fee to AC calls",
+      "expectProposal": "create_standing_instruction",
+      "fixtureRefs": []
+    },
+    {
+      "id": 49,
+      "cat": "ops",
+      "op": "lookup_balance",
+      "utterance": "How much does Smith still owe us?",
+      "expectProposal": null,
+      "fixtureRefs": ["customer.smith-a"],
+      "tags": ["read-only", "ambiguous-name"]
+    },
+    {
+      "id": 50,
+      "cat": "ops",
+      "op": "lookup_revenue",
+      "utterance": "What's our revenue for today?",
+      "expectProposal": null,
+      "fixtureRefs": [],
+      "tags": ["read-only", "owner-grade"]
+    }
+  ]
+}
