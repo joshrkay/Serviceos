@@ -14,6 +14,7 @@ import type {
   TransitionResult,
   SideEffect,
 } from './types';
+import type { EntityKind } from '../../resolution/entity-resolver';
 import { selectRepairTemplate } from './repair-templates';
 import { EMERGENCY_SAFETY_LINE } from './emergency-detector';
 
@@ -782,24 +783,40 @@ function transitionEntityResolution(
         auditLog(context, 'entity_resolution', 'intent_confirm', 'entity_resolved'),
         ttsPlay('intent_confirm', { template: 'confirm_intent', intent: context.currentIntent }),
       ],
-      updatedContext: { ...context, extractedEntities: { ...context.extractedEntities, ...event.refs } },
+      updatedContext: {
+        ...context,
+        extractedEntities: { ...context.extractedEntities, ...event.refs },
+        pendingEntityAmbiguity: undefined,
+      },
     };
   }
 
   // entity_ambiguous → ask disambiguation question (stay in entity_resolution)
   if (event.type === 'entity_ambiguous') {
+    const priorAttempt = context.pendingEntityAmbiguity?.attemptCount ?? 0;
     return {
       nextState: 'entity_resolution',
       sideEffects: [
         auditLog(context, 'entity_resolution', 'entity_resolution', 'entity_ambiguous', {
           candidateCount: event.candidates.length,
+          ...(event.retry ? { retryAttempt: priorAttempt + 1 } : {}),
         }),
         ttsPlay('entity_disambiguate', {
           template: 'disambiguate',
           candidates: event.candidates,
         }),
       ],
-      updatedContext: context,
+      updatedContext: {
+        ...context,
+        pendingEntityAmbiguity: {
+          entityKind: event.entityKind as EntityKind,
+          reference: event.reference,
+          refKey: event.refKey,
+          candidates: event.candidates,
+          partialRefs: event.partialRefs,
+          attemptCount: event.retry ? priorAttempt + 1 : 0,
+        },
+      },
     };
   }
 

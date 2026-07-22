@@ -148,8 +148,20 @@ describe('InAppVoiceAdapter — entity-resolution voice safety', () => {
     const resolver = stubResolver({
       kind: 'ambiguous',
       candidates: [
-        { id: 'bob-old', kind: 'customer', label: 'Bob Smith', hint: '555-0001', score: 0.91 },
-        { id: 'bob-new', kind: 'customer', label: 'Bob Smith', hint: '555-0002', score: 0.9 },
+        {
+          id: 'bob-old',
+          kind: 'customer',
+          label: 'Bob Smith',
+          hint: '555-0001 · 104 QA Cedar Avenue',
+          score: 0.91,
+        },
+        {
+          id: 'bob-new',
+          kind: 'customer',
+          label: 'Bob Smith',
+          hint: '555-0002 · 105 QA Cedar Avenue',
+          score: 0.9,
+        },
       ],
     });
     const adapter = makeAdapter(resolver);
@@ -180,6 +192,47 @@ describe('InAppVoiceAdapter — entity-resolution voice safety', () => {
     );
     expect(ambiguous).toBeDefined();
     expect(ambiguous?.metadata?.candidateCount).toBe(2);
+  });
+
+  it('address follow-up resolves ambiguity, then confirmation drafts the proposal', async () => {
+    const resolver = stubResolver({
+      kind: 'ambiguous',
+      candidates: [
+        {
+          id: 'bob-old',
+          kind: 'customer',
+          label: 'Bob Smith',
+          hint: '555-0001 · 104 QA Cedar Avenue',
+          score: 0.91,
+        },
+        {
+          id: 'bob-new',
+          kind: 'customer',
+          label: 'Bob Smith',
+          hint: '555-0002 · 105 QA Cedar Avenue',
+          score: 0.9,
+        },
+      ],
+    });
+    const adapter = makeAdapter(resolver);
+    const { sessionId } = await adapter.startSession(TENANT, USER);
+
+    const turn1 = await adapter.handleInput(sessionId, 'book Bob Smith for tomorrow at 2pm');
+    expect(turn1.state).toBe('entity_resolution');
+
+    const turn2 = await adapter.handleInput(sessionId, '104 Cedar');
+    expect(turn2.state).toBe('intent_confirm');
+    expect(turn2.proposalIds.length).toBe(0);
+
+    const turn3 = await adapter.handleInput(sessionId, 'yes');
+    expect(turn3.state).toBe('closing');
+    expect(turn3.proposalIds.length).toBe(1);
+    const proposals = await proposalRepo.findByTenant(TENANT);
+    expect(proposals).toHaveLength(1);
+    expect((proposals[0].payload.entities as Record<string, unknown>).customerId).toBe('bob-old');
+    expect(auditRepo.getAll().map((e) => e.eventType)).toContain(
+      'agent.calling.entity_resolution.entity_resolved',
+    );
   });
 
   // ── (c) zero matches → entity_resolved → intent_confirm (no escalation) ───

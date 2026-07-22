@@ -36,15 +36,21 @@ import {
   sessionTerminatedEvent,
 } from '../../voice-quality/events';
 import { TAU_INT } from './transitions';
-import type { CallingAgentEvent, SideEffect } from './types';
+import type { CallingAgentContext, CallingAgentEvent, SideEffect } from './types';
 import type { VoiceSession, VoiceSessionStore } from './voice-session-store';
 import type { VoiceSessionRepository } from '../../../voice/voice-session';
 import type { CallOutcome } from '../../../voice/voice-service';
 import { deriveCallOutcome } from './outcome-mapper';
 import { resolveSchedulingEntities } from './entity-resolution';
 import type { SchedulingEntityResolution } from './entity-resolution';
+import {
+  MAX_DISAMBIGUATION_ATTEMPTS,
+  refKeyForEntityKind,
+  resolveDisambiguationFollowUp,
+} from './entity-resolution';
+import { withTenantConnection } from '../../../db/tenant-transaction';
 import { PgEntityResolver } from '../../resolution/pg-entity-resolver';
-import type { EntityResolver } from '../../resolution/entity-resolver';
+import type { EntityCandidate, EntityResolver } from '../../resolution/entity-resolver';
 import { detectLanguage, renderTtsText } from './tts-copy';
 import type { Language } from '../../i18n/i18n';
 import { isLanguageSupported } from '../../orchestration/language-detector';
@@ -416,21 +422,96 @@ export class InAppVoiceAdapter {
    * candidates shaped `{ id, name, score }`, so the resolver's EntityCandidate
    * `label` is mapped to `name`.
    */
-  private toResolutionEvent(resolution: SchedulingEntityResolution): CallingAgentEvent {
+  private async toResolutionEvent(
+    tenantId: string,
+    resolution: SchedulingEntityResolution,
+  ): Promise<CallingAgentEvent> {
     if (resolution.status === 'ambiguous' && resolution.ambiguous) {
+      const refKey = refKeyForEntityKind(resolution.ambiguous.entityKind);
+      if (!refKey) {
+        return { type: 'entity_resolved', refs: resolution.refs };
+      }
+      const candidates = await this.enrichCandidatesForDisambiguation(
+        tenantId,
+        resolution.ambiguous.entityKind,
+        resolution.ambiguous.candidates,
+      );
       return {
         type: 'entity_ambiguous',
-        candidates: resolution.ambiguous.candidates.map((c) => ({
-          id: c.id,
-          name: c.label,
-          score: c.score,
-        })),
+        candidates,
+        entityKind: resolution.ambiguous.entityKind,
+        reference: resolution.ambiguous.reference,
+        refKey,
+        partialRefs: resolution.refs,
       };
     }
     // Unknown non-emergency references proceed to intent_confirm with partial
     // refs — the proposal surfaces pendingReference for operator review
     // instead of escalating to on-call (matches voice-action-router policy).
     return { type: 'entity_resolved', refs: resolution.refs };
+  }
+
+  /**
+   * Attach service-location addresses to customer candidates so address-style
+   * follow-ups ("104 Cedar") can be matched deterministically.
+   */
+  private async enrichCandidatesForDisambiguation(
+    tenantId: string,
+    entityKind: EntityCandidate['kind'],
+    candidates: EntityCandidate[],
+  ): Promise<Array<{ id: string; name: string; score: number; hint?: string }>> {
+    if (entityKind !== 'customer' || !this.deps.pool || candidates.length === 0) {
+      return candidates.map((candidate) => ({
+        id: candidate.id,
+        name: candidate.label,
+        score: candidate.score,
+        hint: candidate.hint,
+      }));
+    }
+
+    const customerIds = candidates.map((candidate) => candidate.id);
+    const rows = await withTenantConnection(this.deps.pool, tenantId, (client) =>
+      client
+        .query<{ customer_id: string; street1: string; city: string }>(
+          `SELECT customer_id, street1, city
+             FROM service_locations
+            WHERE tenant_id = $1
+              AND customer_id = ANY($2::uuid[])
+              AND is_archived = false`,
+          [tenantId, customerIds],
+        )
+        .then((result) => result.rows),
+    );
+    const addressByCustomer = new Map(
+      rows.map((row) => [row.customer_id, `${row.street1}, ${row.city}`]),
+    );
+
+    return candidates.map((candidate) => {
+      const address = addressByCustomer.get(candidate.id);
+      const hintParts = [candidate.hint, address].filter(
+        (part): part is string => typeof part === 'string' && part.length > 0,
+      );
+      return {
+        id: candidate.id,
+        name: candidate.label,
+        score: candidate.score,
+        hint: hintParts.length > 0 ? hintParts.join(' · ') : undefined,
+      };
+    });
+  }
+
+  private buildDisambiguationRetryEvent(
+    pending: NonNullable<CallingAgentContext['pendingEntityAmbiguity']>,
+  ): CallingAgentEvent {
+    return {
+      type: 'entity_ambiguous',
+      candidates: pending.candidates,
+      entityKind: pending.entityKind,
+      reference: pending.reference,
+      refKey: pending.refKey,
+      partialRefs: pending.partialRefs,
+      retry: true,
+    };
   }
 
   /**
@@ -582,6 +663,30 @@ export class InAppVoiceAdapter {
       fsmEvent = isAffirmation(text)
         ? { type: 'confirmed' }
         : { type: 'correction', newTranscript: text };
+    } else if (
+      stateBeforeTurn === 'entity_resolution' &&
+      session.machine.currentContext.pendingEntityAmbiguity
+    ) {
+      const pending = session.machine.currentContext.pendingEntityAmbiguity;
+      const match = await resolveDisambiguationFollowUp(
+        this.getEntityResolver(),
+        session.tenantId,
+        text,
+        pending,
+      );
+      if (match.status === 'resolved') {
+        fsmEvent = {
+          type: 'entity_resolved',
+          refs: {
+            ...pending.partialRefs,
+            [pending.refKey]: match.candidateId,
+          },
+        };
+      } else if (pending.attemptCount >= MAX_DISAMBIGUATION_ATTEMPTS) {
+        fsmEvent = { type: 'entity_resolved', refs: pending.partialRefs };
+      } else {
+        fsmEvent = this.buildDisambiguationRetryEvent(pending);
+      }
     } else {
       // §3B + §3D: vertical + intake-question prompt section.
       // §3C: caller-plan prompt section (only when caller is identified).
@@ -719,7 +824,7 @@ export class InAppVoiceAdapter {
         fsmEvent.intentType,
         fsmEvent.entities,
       );
-      const resolutionEvent = this.toResolutionEvent(resolution);
+      const resolutionEvent = await this.toResolutionEvent(session.tenantId, resolution);
       const effects2 = session.machine.dispatch(resolutionEvent);
       allSideEffects.push(...effects2);
       const aggregate2 = await this.executeSideEffects(session, effects2);
