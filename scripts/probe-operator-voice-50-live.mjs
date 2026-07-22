@@ -4,6 +4,10 @@
  *
  * Case sources (CASES_PATH):
  *   - fixtures/voice/operator-voice-top-50-v2-cases.json  (cases[] — v2 corpus)
+ *   - fixtures/voice/operator-voice-top-50-v3-cases.json  (cases[] — v3 corpus)
+ *   - fixtures/voice/operator-voice-top-50-v4-cases.json  (cases[] — v4 corpus)
+ *   - fixtures/voice/operator-voice-top-50-v5-cases.json  (cases[] — v5 corpus)
+ *   - fixtures/voice/operator-voice-top-50-v6-cases.json  (cases[] — v6 corpus)
  *   - docs/verification-runs/operator-voice-50-live-2026-07-20.results.json (legacy results[])
  *
  * Auth: HMAC Clerk token (requires CLERK_DEV_HMAC_TOKENS=true on the target
