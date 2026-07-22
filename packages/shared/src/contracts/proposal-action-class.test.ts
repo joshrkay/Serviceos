@@ -8,6 +8,7 @@ import {
   COMMS_PROPOSAL_TYPES,
   MONEY_PROPOSAL_TYPES,
   IRREVERSIBLE_PROPOSAL_TYPES,
+  MANUAL_PROPOSAL_TYPES,
   actionClassForProposalType,
   isCaptureProposalType,
 } from './proposal-action-class.js';
@@ -61,6 +62,7 @@ const SHARED_SETS: Record<string, ReadonlySet<string>> = {
   comms: COMMS_PROPOSAL_TYPES,
   money: MONEY_PROPOSAL_TYPES,
   irreversible: IRREVERSIBLE_PROPOSAL_TYPES,
+  manual: MANUAL_PROPOSAL_TYPES,
 };
 
 describe('CAPTURE_PROPOSAL_TYPES ↔ API actionClassForProposalType parity', () => {
@@ -95,14 +97,14 @@ describe('isCaptureProposalType', () => {
   });
 });
 
-describe('all four lanes ↔ API actionClassForProposalType parity (U1)', () => {
+describe('all five lanes ↔ API actionClassForProposalType parity (U1)', () => {
   it('parses every lane from the API switch', () => {
-    for (const cls of ['capture', 'comms', 'money', 'irreversible']) {
+    for (const cls of ['capture', 'comms', 'money', 'irreversible', 'manual']) {
       expect(apiByClass[cls]?.size ?? 0, `no '${cls}' arm parsed`).toBeGreaterThan(0);
     }
   });
 
-  it.each(['capture', 'comms', 'money', 'irreversible'])(
+  it.each(['capture', 'comms', 'money', 'irreversible', 'manual'])(
     "shared '%s' set exactly matches the API switch",
     (cls) => {
       const shared = SHARED_SETS[cls];
