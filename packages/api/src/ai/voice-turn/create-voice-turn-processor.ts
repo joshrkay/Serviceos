@@ -2709,10 +2709,19 @@ export function createVoiceTurnProcessor(
             ...(classification.aiRunId ? { aiRunId: classification.aiRunId } : {}),
           };
         } else {
+          // Low / unknown intent → intent_classified so FSM uses
+          // low_intent_confidence repair (not low_audio / "trouble hearing").
           classifierEvent = {
-            type: 'confidence_low',
-            threshold: TAU_INT,
-            score: classification.confidence,
+            type: 'intent_classified',
+            intentType:
+              classification.intentType === 'unknown'
+                ? 'unknown'
+                : classification.intentType,
+            entities: (classification.extractedEntities ?? {}) as Record<
+              string,
+              unknown
+            >,
+            confidence: classification.confidence,
           };
         }
       } catch (err) {
@@ -2720,7 +2729,12 @@ export function createVoiceTurnProcessor(
           error: err instanceof Error ? err.message : String(err),
           sessionId: session.id,
         });
-        classifierEvent = { type: 'confidence_low', threshold: TAU_INT, score: 0 };
+        classifierEvent = {
+          type: 'intent_classified',
+          intentType: 'unknown',
+          entities: {},
+          confidence: 0,
+        };
       }
 
       // RV-071 — owner voice approval. Routed OUTSIDE the FSM (the

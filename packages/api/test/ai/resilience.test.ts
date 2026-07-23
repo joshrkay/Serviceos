@@ -51,6 +51,12 @@ describe('retry classifyError', () => {
   it('treats DeadlineExceededError as timeout', () => {
     expect(classifyError(new DeadlineExceededError(100))).toBe('timeout');
   });
+  it('treats OpenAI Request-was-aborted as timeout (deadline signal)', () => {
+    expect(classifyError(new Error('Request was aborted.'))).toBe('timeout');
+    const abortErr = new Error('The operation was aborted');
+    abortErr.name = 'AbortError';
+    expect(classifyError(abortErr)).toBe('timeout');
+  });
 });
 
 describe('retry backoffDelayMs', () => {

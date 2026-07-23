@@ -136,6 +136,26 @@ describe('ProviderBreakerWrapper', () => {
     await expect(wrapped.complete(req)).rejects.toBeInstanceOf(BreakerOpenError);
   });
 
+  it('skips breaker enforcement for SYSTEM_TENANT_ID readiness probes', async () => {
+    const failErr = new Error('Request was aborted.');
+    const inner = new AlwaysFailProvider('p', failErr);
+    const reg = new CircuitBreakerRegistry({
+      ...DEFAULT_BREAKER,
+      consecutiveFailureThreshold: 2,
+      countThreshold: 100,
+      cooldownMs: 50,
+    });
+    const wrapped = new ProviderBreakerWrapper(inner, reg);
+    const req = { ...makeRequest(), tenantId: 'system' };
+
+    for (let i = 0; i < 10; i++) {
+      await expect(wrapped.complete(req)).rejects.toThrow('Request was aborted.');
+    }
+    // Still the original error — breaker never opened on system probes.
+    await expect(wrapped.complete(req)).rejects.toThrow('Request was aborted.');
+    await expect(wrapped.complete(req)).rejects.not.toBeInstanceOf(BreakerOpenError);
+  });
+
   it('does NOT count 4xx errors toward breaker open', async () => {
     const clientErr = Object.assign(new Error('bad request'), { status: 400 });
     const inner = new AlwaysFailProvider('p', clientErr);

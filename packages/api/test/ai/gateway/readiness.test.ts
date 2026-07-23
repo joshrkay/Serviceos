@@ -1,13 +1,34 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   clearAiCompletionProbeCache,
   probeAiCompletion,
+  resolveCompletionProbeTimeoutMs,
 } from '../../../src/ai/gateway/readiness';
 import type { LLMRequest, LLMResponse } from '../../../src/ai/gateway/gateway';
 
 describe('probeAiCompletion', () => {
+  const prevProbeTimeout = process.env.AI_COMPLETION_PROBE_TIMEOUT_MS;
+  const prevClassifyDeadline = process.env.AI_CLASSIFY_INTENT_DEADLINE_MS;
+
   beforeEach(() => {
     clearAiCompletionProbeCache();
+    delete process.env.AI_COMPLETION_PROBE_TIMEOUT_MS;
+    delete process.env.AI_CLASSIFY_INTENT_DEADLINE_MS;
+  });
+
+  afterEach(() => {
+    if (prevProbeTimeout === undefined) delete process.env.AI_COMPLETION_PROBE_TIMEOUT_MS;
+    else process.env.AI_COMPLETION_PROBE_TIMEOUT_MS = prevProbeTimeout;
+    if (prevClassifyDeadline === undefined) delete process.env.AI_CLASSIFY_INTENT_DEADLINE_MS;
+    else process.env.AI_CLASSIFY_INTENT_DEADLINE_MS = prevClassifyDeadline;
+  });
+
+  it('default timeout is at least 10s and tracks classify deadline', () => {
+    expect(resolveCompletionProbeTimeoutMs()).toBeGreaterThanOrEqual(10_000);
+    process.env.AI_CLASSIFY_INTENT_DEADLINE_MS = '12000';
+    expect(resolveCompletionProbeTimeoutMs()).toBe(12_000);
+    process.env.AI_COMPLETION_PROBE_TIMEOUT_MS = '15000';
+    expect(resolveCompletionProbeTimeoutMs()).toBe(15_000);
   });
 
   it('happy path — ok true with model and latency', async () => {
@@ -26,6 +47,8 @@ describe('probeAiCompletion', () => {
     expect(complete).toHaveBeenCalledTimes(1);
     expect(complete.mock.calls[0][0].taskType).toBe('classify_intent');
     expect(complete.mock.calls[0][0].tenantId).toBe('system');
+    expect(complete.mock.calls[0][0].signal).toBeInstanceOf(AbortSignal);
+    expect(complete.mock.calls[0][0].deadlineMs).toBeGreaterThanOrEqual(10_000);
   });
 
   it('error path — ok false with stable errorCode', async () => {

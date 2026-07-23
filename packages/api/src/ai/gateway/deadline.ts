@@ -116,10 +116,20 @@ export class DeadlineExceededError extends Error {
   }
 }
 
+/**
+ * True when the error is our typed deadline, or an AbortError / aborted
+ * fetch that the OpenAI SDK surfaces as `Request was aborted.` after the
+ * resilience layer's AbortSignal fires. Without the message/name check,
+ * those aborts were audited as `provider` failures and tripped the wrong
+ * repair path ("trouble hearing you" on a text classify).
+ */
 export function isDeadlineExceeded(err: unknown): boolean {
   if (err instanceof DeadlineExceededError) return true;
-  if (err instanceof Error && (err as { code?: string }).code === 'DEADLINE_EXCEEDED') {
-    return true;
-  }
-  return false;
+  if (typeof err !== 'object' || err === null) return false;
+  const code = (err as { code?: unknown }).code;
+  if (code === 'DEADLINE_EXCEEDED') return true;
+  if (!(err instanceof Error)) return false;
+  if (err.name === 'AbortError' || err.name === 'TimeoutError') return true;
+  const lower = err.message.toLowerCase();
+  return lower.includes('aborted') || lower.includes('deadline') || lower.includes('timeout');
 }

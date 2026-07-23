@@ -54,7 +54,12 @@ import {
   gatewayRetryAttemptsTotal,
   gatewayFailoverTotal,
 } from '../../monitoring/metrics';
-import type { LLMProvider, LLMRequest, LLMResponse } from './gateway';
+import {
+  SYSTEM_TENANT_ID,
+  type LLMProvider,
+  type LLMRequest,
+  type LLMResponse,
+} from './gateway';
 
 // ─── Helper: classify whether an error should trigger failover ────────────────
 
@@ -143,6 +148,13 @@ export class ProviderBreakerWrapper implements LLMProvider {
   }
 
   async complete(request: LLMRequest): Promise<LLMResponse> {
+    // Readiness / platform probes use SYSTEM_TENANT_ID. Counting their
+    // deadline aborts toward the shared provider breaker was opening the
+    // circuit for real tenant voice traffic after health scrape loops.
+    if (request.tenantId === SYSTEM_TENANT_ID) {
+      return this.inner.complete(request);
+    }
+
     const modelFamily = (request.model ?? 'unknown').split(/[/-]/, 1)[0] || 'unknown';
     const parts: BreakerKeyParts = this.cellKeyOverride
       ? {

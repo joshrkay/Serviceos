@@ -69,19 +69,34 @@ Default `classify_intent` budget (4s) was aborting Railway→OpenAI calls and op
 
 Clerk Production `sk_live_` → active session → `POST /sessions/{id}/tokens/serviceos` → `.tmp-prod-serviceos.jwt` with 25s refresh. `/api/me` **200**.
 
-## Remaining production gap (why not 50/50)
+## Code hardening (this PR — deploy before next re-run)
 
-1. **Railway→OpenAI still aborts intermittently** (`Request was aborted`), which opens the circuit breaker. When the breaker is open/half-open at probe start, the first ~14 cases degrade; when it recovers mid-run, pass rate jumps (26/36 on the late window).
-2. **`/api/health/ai/completion` probe** uses a hard **5s** race (code default) and can itself contribute abort noise — prefer not to scrape it in a tight loop.
-3. **Assistant PASS** lags voice (fallback envelopes) even when voice proposals succeed.
-4. Optional: OpenRouter Profile B failover, or raise OpenAI tier / add a second provider for true failover.
+Shipped to stop abort noise from poisoning voice traffic and to stop
+mis-labeling classifier failures as “trouble hearing you”:
+
+1. **`isDeadlineExceeded`** recognizes `Request was aborted.` / `AbortError` →
+   audit `classifier_deadline_failure` (not `classifier_provider_failure`).
+2. **Classifier miss / throw** emits `intent_classified`/`unknown` so FSM uses
+   `low_intent_confidence` repair — not `low_audio_confidence`.
+3. **Completion probe** default timeout tracks classify deadline (min 10s),
+   overridable via `AI_COMPLETION_PROBE_TIMEOUT_MS`, and cancels via AbortSignal
+   (no orphaned 5s race).
+4. **System-tenant readiness probes skip the circuit breaker** so health scrapes
+   cannot open the provider breaker for real tenant voice calls.
+5. **Adapter retries once** on provider *and* deadline aborts (fresh budget).
+
+### Remaining production gap after deploy
+1. Live Railway→OpenAI latency can still abort individual classify calls; the
+   breaker should no longer be tripped by `/ai/completion` scrapes.
+2. **Assistant PASS** may still lag voice (fallback envelopes).
+3. Optional: OpenRouter Profile B failover (`docs/runbooks/live-ai-restore.md`).
 
 ### Recommended next ops steps
-1. Keep deadline env vars; avoid hammering `/ai/completion`.
-2. Redeploy (or wait for closed breaker) → immediately run top-50 without health scrape loops.
-3. Consider OpenRouter Profile B (`docs/runbooks/live-ai-restore.md`) as failover.
-4. After sustained completionProbe ok + closed breaker for hours: set `NODE_ENV=production`.
-5. Re-run for target **50/50**.
+1. Deploy this PR to production API; keep deadline env vars.
+2. Wait until `/api/health/ai` shows `available:true` / `closed` (avoid tight
+   `/ai/completion` scrape loops).
+3. Re-run top-50 for target **50/50**.
+4. After sustained green: set `NODE_ENV=production`.
 
 ## Related
 
