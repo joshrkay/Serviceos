@@ -1,6 +1,6 @@
 # Operator voice top-50 v3 — production — 2026-07-23
 
-**Latest clean evidence:** 2026-07-23T17:41:40Z (deadline-tuned + seeded)  
+**Latest clean evidence:** 2026-07-23T22:20Z (#734 + `AI_CLASSIFY_INTENT_DEADLINE_MS=12000` restored)  
 **API:** `https://serviceosapi-production.up.railway.app`  
 **Web:** `https://app.therivetapp.com`  
 **Corpus:** `fixtures/voice/operator-voice-top-50-v3-cases.json`  
@@ -23,12 +23,14 @@
 | #734 voice-only retry | 21:28 | 10/50 | 0/50 (skipped) | breaker closed end-to-end |
 | **#734 full B** | **21:35** | **15/50** | **11/50** | improves vs post-#732 8/50; breaker closed; assistant 11 vs 1 |
 | #734 voice-only r2 | 21:55 | 11/50 | 0/50 (skipped) | breaker closed; completion probe flaky timeout |
+| **Deadline restored + voice-only** | **22:20** | **30/50** | 0/50 (skipped) | Railway `AI_CLASSIFY_INTENT_DEADLINE_MS` was **empty** (code default 4s); set back to **12000**; breaker closed |
+| **Deadline restored + full** | **22:29** | **28/50** | **21/50** | no cascade; assistant 21 vs post-#732 1 |
 
-**Best voice PASS today: 26/50** (pre-#732 deadline-tuned).  
-**Best post-#734 voice-only: 17/50.** Best post-#734 full: **15/50** voice / **11/50** assistant.  
+**Best voice PASS today: 30/50** (post-#734 + deadline restore). Prior best was 26/50.  
+**Best full: 28/50** voice / **21/50** assistant.  
 Artifacts:
-- `/opt/cursor/artifacts/operator-voice-50-v3-prod-20260723-voice-only-2121/`
-- `/opt/cursor/artifacts/operator-voice-50-v3-prod-20260723-full-2135/`
+- `/opt/cursor/artifacts/operator-voice-50-v3-prod-20260723-voice-only-deadline12-2220/`
+- `/opt/cursor/artifacts/operator-voice-50-v3-prod-20260723-full-deadline12-2229/`
 
 Dev baseline (seeded QA): **50/50**.
 
@@ -55,6 +57,9 @@ Default `classify_intent` budget (4s) was aborting Railway→OpenAI calls and op
 | `AI_LIGHTWEIGHT_DEADLINE_MS` | **6000** |
 | `AI_STANDARD_DEADLINE_MS` | **10000** |
 | `AI_COMPLEX_DEADLINE_MS` | **20000** |
+
+**Regression found 2026-07-23 ~22:05 UTC (Railway desktop):**
+`AI_CLASSIFY_INTENT_DEADLINE_MS` had become an **empty string**, so production fell back to the code default **4000ms**. Restored to **12000** and redeployed `@serviceos/api`. Other deadlines were still set; no OpenRouter/fallback vars present; `NODE_ENV` left as `development` (intentional).
 
 ### OpenAI billing
 - Usage Tier 1 (500 RPM gpt-4o-mini)
@@ -153,16 +158,16 @@ single-provider failover wrapping a local deadline/abort as
 correctly does not count the abort toward breaker health). Completion
 probe often ~9–17s (`breakerBypassed:true`).
 
-**Success criteria vs plan:**
-- Voice-only ≥ prior best 26/50 — **not met** (best 17/50)
-- Full improves vs post-#732 8/50 + no whole-run cascade — **met** (15/50, breaker closed)
-- Failures not dominated by breaker-open from abort counting — **met for breaker**; label noise remains via failover wrap
+**Success criteria vs plan (after deadline restore):**
+- Voice-only ≥ prior best 26/50 — **met (30/50)**
+- Full improves vs post-#732 8/50 + no whole-run cascade — **met (28/50 voice, 21/50 assistant)**
+- Failures not dominated by breaker-open from abort counting — **met** (breaker closed; residual ~20 `LLM_PROVIDER_UNAVAILABLE` without cascade)
 
 ### Recommended next ops steps
-1. Keep deadline env vars; do **not** flip `NODE_ENV` yet.
-2. FM-03: add OpenRouter Profile B (or second provider) so aborts failover instead of exhausting to UNAVAILABLE.
-3. Consider surfacing “last error was abort” under a deadline audit even when failover emits `LLM_PROVIDER_UNAVAILABLE`.
-4. Re-run voice-only when OpenAI latency p95 is comfortably under `AI_CLASSIFY_INTENT_DEADLINE_MS` (12s).
+1. Keep `AI_CLASSIFY_INTENT_DEADLINE_MS=12000` — do not leave empty (falls back to 4s).
+2. Do **not** flip `NODE_ENV` yet until closer to 50/50 sustained.
+3. FM-03: add OpenRouter Profile B (or second provider) for remaining UNAVAILABLE noise.
+4. Optional: set `AI_COMPLETION_PROBE_TIMEOUT_MS=20000` (completion probe still times out ~17s occasionally).
 
 ## Related
 

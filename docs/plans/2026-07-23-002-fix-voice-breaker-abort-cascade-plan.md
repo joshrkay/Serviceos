@@ -89,15 +89,15 @@ Run and record:
 
 1. [x] Unit pack (all new tests) — 98 passed incl. cascade A–D
 2. [x] `tsc --project tsconfig.build.json --noEmit`
-3. [x] Live prod: voice-only v3 (after closed) — **17/50** best (`…/voice-only-2121/`); breaker stayed closed (retries 10/50, 11/50)
-4. [x] Live prod: full assistant+voice v3 (after closed) — **15/50** voice / **11/50** assistant (`…/full-2135/`); no whole-run cascade
+3. [x] Live prod: voice-only v3 (after closed) — first wave 17/50 with empty classify deadline; after restoring `AI_CLASSIFY_INTENT_DEADLINE_MS=12000`: **30/50** (`…/voice-only-deadline12-2220/`); breaker stayed closed
+4. [x] Live prod: full assistant+voice v3 (after closed) — first wave 15/50; after deadline restore: **28/50** voice / **21/50** assistant (`…/full-deadline12-2229/`); no whole-run cascade
 5. [ ] Optional: v4 corpus voice-only smoke (first 10) if time
 
 Success criteria:
 
 - Unit: aborts never open breaker; 503 still does; classify cell isolated — **met**
-- Live voice-only: voice PASS ≥ previous best (26/50) — **not met (17/50)**; no mid-run breaker open — **met**; residual is failover-wrapped abort/`LLM_PROVIDER_UNAVAILABLE` with breaker closed (FM-03 / latency)
-- Live full: voice PASS improves vs post-#732 8/50; breaker stays closed without cascading whole run — **met (15/50)**
+- Live voice-only: voice PASS ≥ previous best (26/50) — **met (30/50)** after Railway deadline restore; no mid-run breaker open — **met**
+- Live full: voice PASS improves vs post-#732 8/50; breaker stays closed without cascading whole run — **met (28/50)**
 
 ### Task 7 — Ship
 
