@@ -19,9 +19,16 @@
 | Post-redeploy “clean” | ~17:56 | 10/50 | 0/50 | started half-open again |
 | **#732 deployed** | **19:07** | **8/50** | **1/50** | fix live; correct intent repair; breaker reopened mid-run (`LLM_PROVIDER_UNAVAILABLE`) |
 | Postfix retry | 19:18 | 5/50 | 1/50 | started closed; collapsed after early PASSes |
+| **#734 voice-only A** | **21:21** | **17/50** | 0/50 (skipped) | breaker **stayed closed**; interleaved PASSes; no whole-run cascade |
+| #734 voice-only retry | 21:28 | 10/50 | 0/50 (skipped) | breaker closed end-to-end |
+| **#734 full B** | **21:35** | **15/50** | **11/50** | improves vs post-#732 8/50; breaker closed; assistant 11 vs 1 |
+| #734 voice-only r2 | 21:55 | 11/50 | 0/50 (skipped) | breaker closed; completion probe flaky timeout |
 
-**Best voice PASS: 26/50** (pre-#732). Post-#732 deploy: **8/50**.  
-Artifact: `/opt/cursor/artifacts/operator-voice-50-v3-prod-20260723-1741-deadlines/`
+**Best voice PASS today: 26/50** (pre-#732 deadline-tuned).  
+**Best post-#734 voice-only: 17/50.** Best post-#734 full: **15/50** voice / **11/50** assistant.  
+Artifacts:
+- `/opt/cursor/artifacts/operator-voice-50-v3-prod-20260723-voice-only-2121/`
+- `/opt/cursor/artifacts/operator-voice-50-v3-prod-20260723-full-2135/`
 
 Dev baseline (seeded QA): **50/50**.
 
@@ -118,20 +125,48 @@ Plan: `docs/plans/2026-07-23-002-fix-voice-breaker-abort-cascade-plan.md`
 | FM-07 | Unavailable mislabeled deadline | Keep provider class (already on branch) |
 | FM-03 | No failover provider | Follow-up: OpenRouter Profile B (ops) |
 
-Unit multi-variation gate: **98 passed** (incl. cascade A–D). Live prod re-run after this PR deploys:
-```
-./scripts/run-production-operator-voice-50.sh v3 --jwt-file .tmp-prod-serviceos.jwt --wait-closed --voice-only
-./scripts/run-production-operator-voice-50.sh v3 --jwt-file .tmp-prod-serviceos.jwt --wait-closed
-```
+Unit multi-variation gate: **98 passed** (incl. cascade A–D).
+
+### Post-#734 live probes (2026-07-23 ~21:21–22:01 UTC)
+
+Deploy: [Deploy #30043016334](https://github.com/joshrkay/Serviceos/actions/runs/30043016334) **success**
+(`deploy-railway-prod` after merge of #734 @ `5edf7920`).
+
+| Gate | Result | Artifact |
+|------|--------|----------|
+| `/api/health/ai` pre-run | `available:true`, `breakerState:closed` | — |
+| Variation A voice-only | **17/50** voice (best of 3) | `…/voice-only-2121/` |
+| Variation B full | **15/50** voice, **11/50** assistant | `…/full-2135/` |
+| Breaker during/after runs | **closed** every sample; `lastSuccessAt` advances | — |
+
+**Cascade verdict:** #734 **stopped the abort→breaker→whole-run collapse**.
+PASSes stay interleaved through the suite (e.g. full seq
+`DPDDPDDDDDDDPDPDPDDPDDPDPDDPPDDDDPDDDDDPPDPDDPDDDD`). Post-#732 pattern
+(early PASSes then total DEGRADED from open breaker) did **not** recur.
+
+**Residual (not cascade):** DEGRADED still dominated by audit
+`classifier_provider_failure` / `LLM_PROVIDER_UNAVAILABLE` while the
+provider breaker remains **closed**. Single warm classify turns (~14s)
+reproduce the same audit with breaker still closed — consistent with
+single-provider failover wrapping a local deadline/abort as
+`LLM_PROVIDER_UNAVAILABLE` (FM-07 keeps that code as provider; FM-01
+correctly does not count the abort toward breaker health). Completion
+probe often ~9–17s (`breakerBypassed:true`).
+
+**Success criteria vs plan:**
+- Voice-only ≥ prior best 26/50 — **not met** (best 17/50)
+- Full improves vs post-#732 8/50 + no whole-run cascade — **met** (15/50, breaker closed)
+- Failures not dominated by breaker-open from abort counting — **met for breaker**; label noise remains via failover wrap
 
 ### Recommended next ops steps
-1. Merge/deploy breaker-cascade PR; keep deadline env vars.
-2. Re-run voice-only then full top-50 with `--wait-closed`.
-3. Optional: OpenRouter Profile B failover.
-4. After sustained green: set `NODE_ENV=production`.
+1. Keep deadline env vars; do **not** flip `NODE_ENV` yet.
+2. FM-03: add OpenRouter Profile B (or second provider) so aborts failover instead of exhausting to UNAVAILABLE.
+3. Consider surfacing “last error was abort” under a deadline audit even when failover emits `LLM_PROVIDER_UNAVAILABLE`.
+4. Re-run voice-only when OpenAI latency p95 is comfortably under `AI_CLASSIFY_INTENT_DEADLINE_MS` (12s).
 
 ## Related
 
 - Runbook: `docs/runbooks/operator-voice-top-50-production-rerun.md`
 - AI restore: `docs/runbooks/live-ai-restore.md`
-- Fix PR (merged): https://github.com/joshrkay/Serviceos/pull/732
+- Breaker-cascade plan: `docs/plans/2026-07-23-002-fix-voice-breaker-abort-cascade-plan.md`
+- Fix PRs: [#732](https://github.com/joshrkay/Serviceos/pull/732), [#734](https://github.com/joshrkay/Serviceos/pull/734)

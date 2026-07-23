@@ -81,7 +81,7 @@ breaker-open/unavailable. Gate and vary the live probe.
 
 - [x] `--voice-only` skips assistant chat per case
 - [x] Wait until `/api/health/ai` `available:true` before starting (env/flag)
-- [ ] Document variation matrix in verification run
+- [x] Document variation matrix in verification run
 
 ### Task 6 — Multi-variation validation gate
 
@@ -89,19 +89,21 @@ Run and record:
 
 1. [x] Unit pack (all new tests) — 98 passed incl. cascade A–D
 2. [x] `tsc --project tsconfig.build.json --noEmit`
-3. [ ] Live prod: voice-only v3 (after closed) — **blocked on merge/deploy** (PR Checks green; Railway PR preview `serviceosapi-serviceos-pr-734` returns 502)
-4. [ ] Live prod: full assistant+voice v3 (after closed) — blocked on merge/deploy
+3. [x] Live prod: voice-only v3 (after closed) — **17/50** best (`…/voice-only-2121/`); breaker stayed closed (retries 10/50, 11/50)
+4. [x] Live prod: full assistant+voice v3 (after closed) — **15/50** voice / **11/50** assistant (`…/full-2135/`); no whole-run cascade
 5. [ ] Optional: v4 corpus voice-only smoke (first 10) if time
 
 Success criteria:
 
-- Unit: aborts never open breaker; 503 still does; classify cell isolated
-- Live voice-only: voice PASS ≥ previous best (26/50) and no mid-run breaker open lasting >1 cooldown, OR clear residual attributed only to true provider 5xx
-- Live full: voice PASS improves vs post-#732 8/50; breaker stays closed or recovers without cascading whole run
+- Unit: aborts never open breaker; 503 still does; classify cell isolated — **met**
+- Live voice-only: voice PASS ≥ previous best (26/50) — **not met (17/50)**; no mid-run breaker open — **met**; residual is failover-wrapped abort/`LLM_PROVIDER_UNAVAILABLE` with breaker closed (FM-03 / latency)
+- Live full: voice PASS improves vs post-#732 8/50; breaker stays closed without cascading whole run — **met (15/50)**
 
 ### Task 7 — Ship
 
-- [ ] Commit(s), push, PR, update `docs/verification-runs/operator-voice-50-v3-prod-2026-07-23.md`
+- [x] #734 merged + production Deploy success
+- [x] Update `docs/verification-runs/operator-voice-50-v3-prod-2026-07-23.md` with live scores
+- [ ] Scoreboard docs PR
 
 ## Out of scope (explicit)
 
