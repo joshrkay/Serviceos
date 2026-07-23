@@ -159,7 +159,15 @@ export function createAiHealthRouter(
       return;
     }
 
-    const completionProbe = await probeAiCompletion(options.gateway);
+    const completionProbe = await probeAiCompletion(options.gateway, {
+      providersSnapshot: () =>
+        breakerRegistry.getProviderStates().map((state) => ({
+          name: state.provider,
+          available: state.breakerState === 'closed',
+          breakerState: state.breakerState,
+          ...(state.lastError !== undefined ? { lastError: state.lastError } : {}),
+        })),
+    });
     res.status(200).json({ completionProbe });
   });
 

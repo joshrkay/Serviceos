@@ -156,16 +156,21 @@ export class ProviderBreakerWrapper implements LLMProvider {
     }
 
     const modelFamily = (request.model ?? 'unknown').split(/[/-]/, 1)[0] || 'unknown';
+    // Isolate classify_intent so assistant chat load cannot open the
+    // breaker that voice classification needs (FM-02).
+    const taskClass = request.taskType === 'classify_intent' ? 'classify' : 'default';
     const parts: BreakerKeyParts = this.cellKeyOverride
       ? {
           provider: this.cellKeyOverride,
           modelFamily,
           tenantTier: request.tenantTier,
+          taskClass,
         }
       : {
           provider: this.inner.name,
           modelFamily,
           tenantTier: request.tenantTier,
+          taskClass,
         };
 
     return this.registry.run(parts, () => this.inner.complete(request));

@@ -122,8 +122,25 @@ export class DeadlineExceededError extends Error {
  * resilience layer's AbortSignal fires. Without the message/name check,
  * those aborts were audited as `provider` failures and tripped the wrong
  * repair path ("trouble hearing you" on a text classify).
+ *
+ * Broader than {@link isLocalDeadlineOrAbort}: also matches generic
+ * "timeout" strings for retry/audit classification.
  */
 export function isDeadlineExceeded(err: unknown): boolean {
+  if (isLocalDeadlineOrAbort(err)) return true;
+  if (!(err instanceof Error)) return false;
+  const lower = err.message.toLowerCase();
+  return lower.includes('deadline') || lower.includes('timeout');
+}
+
+/**
+ * Local cancellation from our AbortSignal / DeadlineExceededError only.
+ * Used by the circuit breaker so Railway→OpenAI SLO aborts fail the turn
+ * without opening the shared provider breaker (FM-01). Intentionally
+ * narrower than {@link isDeadlineExceeded} — network `ETIMEDOUT` still
+ * counts as provider-health signal.
+ */
+export function isLocalDeadlineOrAbort(err: unknown): boolean {
   if (err instanceof DeadlineExceededError) return true;
   if (typeof err !== 'object' || err === null) return false;
   const code = (err as { code?: unknown }).code;
@@ -131,5 +148,10 @@ export function isDeadlineExceeded(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
   if (err.name === 'AbortError' || err.name === 'TimeoutError') return true;
   const lower = err.message.toLowerCase();
-  return lower.includes('aborted') || lower.includes('deadline') || lower.includes('timeout');
+  return (
+    lower.includes('request was aborted') ||
+    lower === 'aborted' ||
+    lower.includes('the operation was aborted') ||
+    lower.includes('deadline exceeded')
+  );
 }

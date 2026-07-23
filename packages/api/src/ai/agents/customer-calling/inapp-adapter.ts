@@ -216,11 +216,19 @@ function classifierFailureFromError(
   error: unknown,
 ): { failureClass: ClassifierFailureClass; errorCode?: string } {
   const code = classifierErrorCode(error);
-  if (code === 'DEADLINE_EXCEEDED' || isDeadlineExceeded(error)) {
-    return { failureClass: 'deadline', errorCode: code ?? 'DEADLINE_EXCEEDED' };
+  if (code === 'DEADLINE_EXCEEDED') {
+    return { failureClass: 'deadline', errorCode: code };
   }
   if (code && CLASSIFIER_QUOTA_CODES.has(code)) {
     return { failureClass: 'quota', errorCode: code };
+  }
+  // Breaker / failover exhaustion can wrap a prior abort message
+  // ("Last error: Request was aborted.") — keep those as provider, not deadline.
+  if (code === 'BREAKER_OPEN' || code === 'LLM_PROVIDER_UNAVAILABLE') {
+    return { failureClass: 'provider', errorCode: code };
+  }
+  if (isDeadlineExceeded(error)) {
+    return { failureClass: 'deadline', errorCode: code ?? 'DEADLINE_EXCEEDED' };
   }
   return { failureClass: 'provider' };
 }
@@ -569,11 +577,17 @@ export class InAppVoiceAdapter {
       return await classifyIntent(text, context, this.deps.gateway);
     } catch (error) {
       const failure = classifierFailureFromError(error);
-      // One fresh-budget retry for transient provider/deadline aborts.
-      // Quota failures are not retryable at the adapter layer.
-      if (failure.failureClass === 'quota') {
+      const code = failure.errorCode;
+      // Quota / breaker-open / failover exhaustion: retrying burns load and
+      // cannot succeed until the cell recovers (FM-06).
+      if (
+        failure.failureClass === 'quota' ||
+        code === 'BREAKER_OPEN' ||
+        code === 'LLM_PROVIDER_UNAVAILABLE'
+      ) {
         throw error;
       }
+      // One fresh-budget retry for transient provider/deadline aborts.
       return classifyIntent(text, context, this.deps.gateway);
     }
   }

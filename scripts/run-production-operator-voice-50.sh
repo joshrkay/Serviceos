@@ -19,12 +19,29 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CORPUS="${1:-v3}"
 JWT_FILE=""
 MODE=""
+EXTRA_ARGS=()
 
-if [[ "${2:-}" == "--jwt-file" ]]; then
-  JWT_FILE="${3:-.tmp-prod-serviceos.jwt}"
-elif [[ "${2:-}" == "--seed" ]]; then
-  MODE="--seed"
-fi
+shift || true
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --jwt-file)
+      JWT_FILE="${2:-.tmp-prod-serviceos.jwt}"
+      shift 2 || true
+      ;;
+    --seed)
+      MODE="--seed"
+      shift
+      ;;
+    --voice-only|--wait-closed)
+      EXTRA_ARGS+=("$1")
+      shift
+      ;;
+    *)
+      echo "Unknown arg: $1" >&2
+      exit 1
+      ;;
+  esac
+done
 
 if [[ -f "$ROOT/.env.production.local" ]]; then
   set -a
@@ -65,10 +82,10 @@ if [[ "$MODE" == "--seed" ]]; then
   )
 fi
 
-echo "Running operator voice top-50 (${CORPUS}) on ${API_URL}…"
+echo "Running operator voice top-50 (${CORPUS}) on ${API_URL}… ${EXTRA_ARGS[*]:-}"
 export API_URL OUT_DIR
 if [[ -n "$JWT_FILE" ]]; then
-  exec node "$ROOT/scripts/production-retest.mjs" --probe "$CORPUS" --jwt-file "$JWT_FILE"
+  exec node "$ROOT/scripts/production-retest.mjs" --probe "$CORPUS" --jwt-file "$JWT_FILE" "${EXTRA_ARGS[@]}"
 fi
 export CLERK_SECRET_KEY="$CLERK_SECRET"
-exec node "$ROOT/scripts/production-retest.mjs" --probe "$CORPUS"
+exec node "$ROOT/scripts/production-retest.mjs" --probe "$CORPUS" "${EXTRA_ARGS[@]}"
