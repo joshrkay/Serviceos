@@ -1,5 +1,6 @@
 # Production retest — 2026-07-23
 
+**Latest attempt:** 2026-07-23T02:41:25Z — voice top-50 **still blocked** (agent has `sk_test_` only)  
 **When:** 2026-07-23T02:36:08Z  
 **API:** `https://serviceosapi-production.up.railway.app`  
 **Web:** `https://serviceosweb-production.up.railway.app` / `https://app.therivetapp.com`  
@@ -67,10 +68,12 @@ To complete production voice retest:
 ```bash
 CLERK_SECRET_KEY=sk_live_… \
 CLERK_USER_ID=user_… \
-TENANT_ID=… \
-API_URL=https://serviceosapi-production.up.railway.app \
-OUT_DIR=/opt/cursor/artifacts/operator-voice-50-v3-prod-$(date -u +%Y%m%d-%H%M) \
-node scripts/production-retest.mjs --probe v3
+./scripts/run-production-operator-voice-50.sh v3
+
+# One-time fixture seed (needs PROD_DATABASE_URL + tenant/actor UUIDs):
+PROD_DATABASE_URL=postgres://… \
+QA_TENANT_ID=… QA_ACTOR_ID=… \
+./scripts/run-production-operator-voice-50.sh v3 --seed
 ```
 
 ---
