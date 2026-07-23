@@ -14,6 +14,13 @@ import type { LLMGateway, LLMRequest } from './gateway';
 import { SYSTEM_TENANT_ID } from './gateway';
 import { resolveClassifyIntentDeadlineMs } from '../../config/ai-routing';
 
+export interface AiCompletionProbeProviderSnapshot {
+  name: string;
+  available: boolean;
+  breakerState: 'closed' | 'open' | 'half-open';
+  lastError?: string;
+}
+
 export interface AiCompletionProbeResult {
   ok: boolean;
   latencyMs: number;
@@ -22,6 +29,13 @@ export interface AiCompletionProbeResult {
   model?: string;
   checkedAt: string;
   cached: boolean;
+  /**
+   * Always true for this probe — it uses SYSTEM_TENANT_ID and bypasses the
+   * tenant breaker (FM-05). A green probe does NOT mean tenant voice is healthy.
+   */
+  breakerBypassed: boolean;
+  /** Tenant-facing breaker snapshot at probe time (when supplied by the route). */
+  providers?: AiCompletionProbeProviderSnapshot[];
 }
 
 export interface ProbeAiCompletionOptions {
@@ -31,6 +45,8 @@ export interface ProbeAiCompletionOptions {
   cacheTtlMs?: number;
   /** Override clock (tests). */
   now?: () => number;
+  /** Optional tenant breaker snapshot for honesty alongside the system probe. */
+  providersSnapshot?: () => AiCompletionProbeProviderSnapshot[];
 }
 
 interface CacheEntry {
@@ -121,6 +137,8 @@ export async function probeAiCompletion(
     messages: [{ role: 'user', content: 'ping' }],
   };
 
+  const providers = opts.providersSnapshot?.();
+
   try {
     const response = await gateway.complete(request);
     const latencyMs = Math.max(0, now() - started);
@@ -130,6 +148,8 @@ export async function probeAiCompletion(
       model: response.model,
       checkedAt: new Date(now()).toISOString(),
       cached: false,
+      breakerBypassed: true,
+      ...(providers ? { providers } : {}),
     };
     cache = { result, expiresAt: now() + cacheTtlMs };
     return result;
@@ -141,6 +161,8 @@ export async function probeAiCompletion(
       errorCode: classifyError(err),
       checkedAt: new Date(now()).toISOString(),
       cached: false,
+      breakerBypassed: true,
+      ...(providers ? { providers } : {}),
     };
     cache = { result, expiresAt: now() + cacheTtlMs };
     return result;

@@ -27,7 +27,9 @@ import {
   createDeadlineContext,
   DeadlineExceededError,
   isDeadlineExceeded,
+  isLocalDeadlineOrAbort,
 } from '../../src/ai/gateway/deadline';
+import { isBreakerHealthFailure } from '../../src/ai/gateway/breaker';
 
 describe('retry classifyError', () => {
   it('treats 429 as rate_limited', () => {
@@ -56,6 +58,28 @@ describe('retry classifyError', () => {
     const abortErr = new Error('The operation was aborted');
     abortErr.name = 'AbortError';
     expect(classifyError(abortErr)).toBe('timeout');
+  });
+});
+
+describe('local deadline vs breaker health (FM-01)', () => {
+  it('isLocalDeadlineOrAbort matches AbortSignal surfaces but not ETIMEDOUT', () => {
+    expect(isLocalDeadlineOrAbort(new Error('Request was aborted.'))).toBe(true);
+    expect(isLocalDeadlineOrAbort(new DeadlineExceededError(50))).toBe(true);
+    expect(isLocalDeadlineOrAbort(new Error('connect ETIMEDOUT'))).toBe(false);
+    // Broad timeout strings still count as deadline for retry classification;
+    // ETIMEDOUT is handled as transient network in classifyError separately.
+    expect(isDeadlineExceeded(new Error('socket timeout'))).toBe(true);
+    expect(isDeadlineExceeded(new Error('connect ETIMEDOUT'))).toBe(false);
+  });
+
+  it('isBreakerHealthFailure excludes local aborts and 4xx', () => {
+    expect(isBreakerHealthFailure(new Error('Request was aborted.'))).toBe(false);
+    expect(
+      isBreakerHealthFailure(Object.assign(new Error('bad'), { status: 400 })),
+    ).toBe(false);
+    expect(
+      isBreakerHealthFailure(Object.assign(new Error('upstream'), { status: 503 })),
+    ).toBe(true);
   });
 });
 

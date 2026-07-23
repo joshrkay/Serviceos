@@ -28,6 +28,8 @@ const probeArg = process.argv.includes('--probe') ? process.argv[process.argv.in
 const jwtFileArg = process.argv.includes('--jwt-file')
   ? process.argv[process.argv.indexOf('--jwt-file') + 1]
   : process.env.SERVICEOS_JWT_FILE || null;
+const voiceOnly = process.argv.includes('--voice-only') || process.env.VOICE_ONLY === '1';
+const waitClosed = process.argv.includes('--wait-closed') || process.env.WAIT_AI_CLOSED === '1';
 const CORPUS_PATH = probeArg
   ? path.join(ROOT, `fixtures/voice/operator-voice-top-50-${probeArg}-cases.json`)
   : null;
@@ -114,6 +116,25 @@ async function api(base, method, p, { token, body } = {}) {
  * @param {string | (() => string)} tokenOrGetter
  *   Static JWT, or a getter re-read before each case (60s serviceos template).
  */
+async function waitForAiClosed(baseUrl, { timeoutMs = 180_000, pollMs = 5_000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const res = await fetchJson(`${baseUrl}/api/health/ai`);
+    const providers = res.json?.providers ?? [];
+    const allClosed =
+      providers.length > 0 && providers.every((p) => p.available === true && p.breakerState === 'closed');
+    if (allClosed) {
+      console.log(`AI breaker closed on ${baseUrl}`);
+      return true;
+    }
+    const summary = providers.map((p) => `${p.name}:${p.breakerState}`).join(',') || 'none';
+    console.log(`waiting for AI closed… (${summary})`);
+    await new Promise((r) => setTimeout(r, pollMs));
+  }
+  console.warn(`AI breaker not closed within ${timeoutMs}ms — continuing anyway`);
+  return false;
+}
+
 async function runVoiceProbe(tokenOrGetter, casesPath) {
   const source = JSON.parse(fs.readFileSync(casesPath, 'utf8'));
   const cases = loadProbeCases(source);
@@ -123,16 +144,34 @@ async function runVoiceProbe(tokenOrGetter, casesPath) {
   const results = [];
   const resolveToken = typeof tokenOrGetter === 'function' ? tokenOrGetter : () => tokenOrGetter;
 
+  if (waitClosed) {
+    await waitForAiClosed(API_URL);
+  }
+
   for (const c of cases) {
     const token = resolveToken();
     const apiBound = (method, p, opts) => api(API_URL, method, p, { ...opts, token });
 
     process.stdout.write(`#${c.id} ${c.op}… `);
-    const chat = await apiBound('POST', '/api/assistant/chat', {
-      body: { messages: [{ role: 'user', content: c.utterance }], inputMode: 'text' },
-    });
-    const assistant = { httpStatus: chat.status, ...scoreAssistant(chat.json, chat.status, c.expectProposal) };
-    assistantCounts[assistant.verdict] = (assistantCounts[assistant.verdict] ?? 0) + 1;
+    let assistant;
+    if (voiceOnly) {
+      assistant = {
+        httpStatus: 0,
+        verdict: 'BLOCKED',
+        reason: 'voice_only_skipped',
+        proposalType: null,
+        proposalId: null,
+        missingFields: [],
+        degraded: false,
+      };
+      assistantCounts.BLOCKED = (assistantCounts.BLOCKED ?? 0) + 1;
+    } else {
+      const chat = await apiBound('POST', '/api/assistant/chat', {
+        body: { messages: [{ role: 'user', content: c.utterance }], inputMode: 'text' },
+      });
+      assistant = { httpStatus: chat.status, ...scoreAssistant(chat.json, chat.status, c.expectProposal) };
+      assistantCounts[assistant.verdict] = (assistantCounts[assistant.verdict] ?? 0) + 1;
+    }
 
     const sess = await apiBound('POST', '/api/voice/sessions', { body: {} });
     let voice;
@@ -158,7 +197,7 @@ async function runVoiceProbe(tokenOrGetter, casesPath) {
     console.log(`A=${assistant.verdict} V=${voice.verdict}`);
   }
 
-  return { corpus, assistantCounts, voiceCounts, results };
+  return { corpus, assistantCounts, voiceCounts, results, voiceOnly, waitClosed };
 }
 
 async function runAuthenticatedProbe(jwt, report) {

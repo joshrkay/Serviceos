@@ -577,11 +577,17 @@ export class InAppVoiceAdapter {
       return await classifyIntent(text, context, this.deps.gateway);
     } catch (error) {
       const failure = classifierFailureFromError(error);
-      // One fresh-budget retry for transient provider/deadline aborts.
-      // Quota failures are not retryable at the adapter layer.
-      if (failure.failureClass === 'quota') {
+      const code = failure.errorCode;
+      // Quota / breaker-open / failover exhaustion: retrying burns load and
+      // cannot succeed until the cell recovers (FM-06).
+      if (
+        failure.failureClass === 'quota' ||
+        code === 'BREAKER_OPEN' ||
+        code === 'LLM_PROVIDER_UNAVAILABLE'
+      ) {
         throw error;
       }
+      // One fresh-budget retry for transient provider/deadline aborts.
       return classifyIntent(text, context, this.deps.gateway);
     }
   }

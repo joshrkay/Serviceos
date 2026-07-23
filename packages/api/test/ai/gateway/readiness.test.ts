@@ -49,6 +49,35 @@ describe('probeAiCompletion', () => {
     expect(complete.mock.calls[0][0].tenantId).toBe('system');
     expect(complete.mock.calls[0][0].signal).toBeInstanceOf(AbortSignal);
     expect(complete.mock.calls[0][0].deadlineMs).toBeGreaterThanOrEqual(10_000);
+    expect(result.breakerBypassed).toBe(true);
+  });
+
+  it('includes tenant breaker snapshot when supplied (FM-05)', async () => {
+    const complete = vi.fn(async (): Promise<LLMResponse> => ({
+      content: 'ok',
+      model: 'gpt-4o-mini',
+      tokenUsage: { input: 1, output: 1, total: 2 },
+    }));
+    const result = await probeAiCompletion(
+      { complete },
+      {
+        providersSnapshot: () => [
+          {
+            name: 'api.openai.com',
+            available: false,
+            breakerState: 'open',
+            lastError: 'Request was aborted.',
+          },
+        ],
+      },
+    );
+    expect(result.ok).toBe(true);
+    expect(result.breakerBypassed).toBe(true);
+    expect(result.providers?.[0]).toMatchObject({
+      name: 'api.openai.com',
+      available: false,
+      breakerState: 'open',
+    });
   });
 
   it('error path — ok false with stable errorCode', async () => {

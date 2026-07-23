@@ -288,6 +288,8 @@ describe('InAppVoiceAdapter', () => {
         failureClass: 'provider',
         errorCode: 'LLM_PROVIDER_UNAVAILABLE',
       });
+      // FM-06: do not adapter-retry breaker/failover exhaustion.
+      expect(gateway.complete).toHaveBeenCalledTimes(1);
     });
 
     it('maps Request-was-aborted to classifier_deadline_failure (not provider)', async () => {

@@ -27,6 +27,7 @@ import {
   breakerOpenSecondsTotal,
   breakerHalfOpenProbeSuccessRatio,
 } from '../../monitoring/metrics';
+import { isLocalDeadlineOrAbort } from './deadline';
 
 export type BreakerStateName = 'closed' | 'open' | 'half-open';
 
@@ -320,6 +321,11 @@ export interface BreakerKeyParts {
   modelFamily: string;
   region?: string;
   tenantTier?: string;
+  /**
+   * Isolates latency-critical voice classify traffic from assistant chat
+   * so one path cannot open the breaker for the other (FM-02).
+   */
+  taskClass?: string;
 }
 
 export function breakerKey(parts: BreakerKeyParts): string {
@@ -328,6 +334,7 @@ export function breakerKey(parts: BreakerKeyParts): string {
     parts.modelFamily,
     parts.region ?? 'default',
     parts.tenantTier ?? 'default',
+    parts.taskClass ?? 'default',
   ].join('|');
 }
 
@@ -412,9 +419,11 @@ export class CircuitBreakerRegistry {
   /**
    * Wrap an op with breaker enforcement. Throws BreakerOpenError when open.
    *
-   * Permanent client errors (4xx other than 429) are NOT counted as
-   * failures: they reflect bad input, not provider health. Counting them
-   * would let a poison-pill caller trip the breaker for everyone else.
+   * Errors that do NOT reflect provider health are not counted:
+   *   - permanent client errors (4xx other than 429)
+   *   - local deadline / AbortSignal cancellations (FM-01)
+   * Counting those would let SLO aborts or poison-pill callers trip the
+   * breaker for everyone else.
    */
   async run<T>(parts: BreakerKeyParts, op: () => Promise<T>): Promise<T> {
     const cell = this.cell(parts);
@@ -422,7 +431,7 @@ export class CircuitBreakerRegistry {
     // half-open caller see `probes < N` and pass at once, stampeding a
     // still-recovering provider. The reservation is returned by onResult()
     // on either outcome, or by releaseReservation() on the
-    // permanent-client-error path below.
+    // non-health-failure path below.
     if (!cell.tryReserve()) {
       throw new BreakerOpenError(breakerKey(parts), cell.retryAfterMs());
     }
@@ -431,11 +440,11 @@ export class CircuitBreakerRegistry {
       cell.onResult(true);
       return result;
     } catch (err) {
-      if (!isPermanentClientError(err)) {
+      if (isBreakerHealthFailure(err)) {
         cell.onResult(false, err);
       } else {
-        // Permanent client error doesn't reflect provider health.
-        // Release the half-open reservation so the slot doesn't leak.
+        // Non-health failure: release the half-open reservation so the
+        // slot doesn't leak, but do not open/reopen the breaker.
         cell.releaseReservation();
       }
       throw err;
@@ -451,4 +460,11 @@ function isPermanentClientError(err: unknown): boolean {
   if (typeof status !== 'number') return false;
   // 4xx except 429 (rate limits are transient health signals).
   return status >= 400 && status < 500 && status !== 429;
+}
+
+/** True when the error should move the breaker toward open. */
+export function isBreakerHealthFailure(err: unknown): boolean {
+  if (isPermanentClientError(err)) return false;
+  if (isLocalDeadlineOrAbort(err)) return false;
+  return true;
 }
