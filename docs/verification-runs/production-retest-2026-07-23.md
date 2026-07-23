@@ -91,3 +91,20 @@ QA_TENANT_ID=… QA_ACTOR_ID=… \
 - Operator voice top-50 PASS rate (not authenticated / not probed)
 - Parity with Development 50/50 v3 results (#725/#727 fixes unverified on prod)
 - True `NODE_ENV=production` hardening (still reports development)
+
+---
+
+## Production key audit (browser follow-up, 2026-07-23)
+
+Verified via Railway + Clerk dashboards — **no production key changes were required**:
+
+| Check | Result |
+|-------|--------|
+| Railway `@serviceos/api` `CLERK_SECRET_KEY` | Already `sk_live_…` — **unchanged** |
+| Railway `@serviceos/api` `CLERK_PUBLISHABLE_KEY` | Already `pk_live_…` — **unchanged** |
+| Clerk production API keys vs Railway | **Match** — no rotation needed |
+| Web `/env.js` Clerk mode | `pk_live_` (therivetapp) |
+
+**Reverted (not a key change):** `serviceos` JWT template lifetime was briefly raised to 3600s for a long probe run; restored to **60s** default in Clerk production.
+
+**Local only (gitignored):** `.env.production.local` may hold `sk_live_` for manual probes when the cloud agent only injects `sk_test_`. Does not modify deployed production config.
