@@ -261,6 +261,35 @@ describe('InAppVoiceAdapter', () => {
       expect(JSON.stringify({ failure, audit })).not.toContain('UNSAFE_PROVIDER_DETAIL');
     });
 
+    it('maps LLM_PROVIDER_UNAVAILABLE (breaker cascade) to provider, not deadline', async () => {
+      const gateway = {
+        complete: vi.fn(async () => {
+          const error = new Error(
+            'All providers failed. Last error: Request was aborted.',
+          );
+          Object.assign(error, { code: 'LLM_PROVIDER_UNAVAILABLE' });
+          throw error;
+        }),
+      } as unknown as LLMGateway;
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const result = await adapter.handleInput(sessionId, 'schedule a visit');
+      const failure = result.sideEffects.find(
+        (effect) => effect.payload.eventType === 'classifier_provider_failure',
+      );
+      expect(failure?.payload).toEqual({
+        eventType: 'classifier_provider_failure',
+        failureClass: 'provider',
+        errorCode: 'LLM_PROVIDER_UNAVAILABLE',
+      });
+    });
+
     it('maps Request-was-aborted to classifier_deadline_failure (not provider)', async () => {
       const gateway = {
         complete: vi.fn(async () => {

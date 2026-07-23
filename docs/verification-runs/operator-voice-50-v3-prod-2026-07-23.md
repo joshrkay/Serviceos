@@ -17,8 +17,10 @@
 | Seeded fixtures | ~17:08 | **7/50** | 2/50 | fixtures OK; AI flaky |
 | **Deadlines raised** | **17:41** | **26/50** | **5/50** | best — early 0/14 while breaker open, late **26/36** |
 | Post-redeploy “clean” | ~17:56 | 10/50 | 0/50 | started half-open again |
+| **#732 deployed** | **19:07** | **8/50** | **1/50** | fix live; correct intent repair; breaker reopened mid-run (`LLM_PROVIDER_UNAVAILABLE`) |
+| Postfix retry | 19:18 | 5/50 | 1/50 | started closed; collapsed after early PASSes |
 
-**Best voice PASS: 26/50**  
+**Best voice PASS: 26/50** (pre-#732). Post-#732 deploy: **8/50**.  
 Artifact: `/opt/cursor/artifacts/operator-voice-50-v3-prod-20260723-1741-deadlines/`
 
 Dev baseline (seeded QA): **50/50**.
@@ -85,21 +87,37 @@ mis-labeling classifier failures as “trouble hearing you”:
    cannot open the provider breaker for real tenant voice calls.
 5. **Adapter retries once** on provider *and* deadline aborts (fresh budget).
 
-### Remaining production gap after deploy
-1. Live Railway→OpenAI latency can still abort individual classify calls; the
-   breaker should no longer be tripped by `/ai/completion` scrapes.
-2. **Assistant PASS** may still lag voice (fallback envelopes).
-3. Optional: OpenRouter Profile B failover (`docs/runbooks/live-ai-restore.md`).
+### Post-deploy verification (2026-07-23 ~19:07–19:18 UTC)
+
+Deploy workflow for #732 **succeeded**. Code fix is live:
+- Failures audit as `classifier_deadline_failure` (not provider)
+- Spoken repair is `low_intent_confidence` (“scheduling a visit…”) — not “trouble hearing you”
+- `/ai/completion` can be ok while tenant breaker is open (system probes skip breaker)
+
+**Voice PASS after deploy: 8/50** (retry 5/50). Best remains **26/50** from pre-fix deadline tuning.
+
+Dominant DEGRADED reason once the tenant breaker opens: `LLM_PROVIDER_UNAVAILABLE`
+(failover exhaustion). Probe load (assistant + voice per case) re-trips the breaker
+after a few early PASSes. Artifacts:
+- `/opt/cursor/artifacts/operator-voice-50-v3-prod-20260723-1907-postfix/`
+- `/opt/cursor/artifacts/operator-voice-50-v3-prod-20260723-1918-postfix2/`
+
+Follow-up in this branch: do not classify `LLM_PROVIDER_UNAVAILABLE` /
+`BREAKER_OPEN` as deadline just because the wrapped message mentions abort.
+
+### Remaining production gap
+1. Railway→OpenAI abort rate under probe load still opens the **tenant** breaker.
+2. Need failover (OpenRouter Profile B) and/or breaker tuning so aborts don’t cascade the whole run.
+3. Assistant PASS still lags (fallback envelopes).
 
 ### Recommended next ops steps
-1. Deploy this PR to production API; keep deadline env vars.
-2. Wait until `/api/health/ai` shows `available:true` / `closed` (avoid tight
-   `/ai/completion` scrape loops).
-3. Re-run top-50 for target **50/50**.
+1. Merge/deploy breaker-code classification follow-up; keep deadline env vars.
+2. Add OpenRouter Profile B failover (`docs/runbooks/live-ai-restore.md`).
+3. Wait `/api/health/ai` → `available:true` / `closed`, then re-run top-50.
 4. After sustained green: set `NODE_ENV=production`.
 
 ## Related
 
 - Runbook: `docs/runbooks/operator-voice-top-50-production-rerun.md`
 - AI restore: `docs/runbooks/live-ai-restore.md`
-- PR: https://github.com/joshrkay/Serviceos/pull/731
+- Fix PR (merged): https://github.com/joshrkay/Serviceos/pull/732
