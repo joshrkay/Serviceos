@@ -45,6 +45,15 @@ function parsePositiveIntEnv(raw: string | undefined, fallback: number): number 
   return Number.isInteger(n) && n > 0 ? n : fallback;
 }
 
+/**
+ * True when an env var is present in `process.env` but blank/whitespace.
+ * Railway "cleared" vars sometimes remain as `""`, which used to silently
+ * collapse classify deadline to the 4s default (ops regression).
+ */
+export function isEnvPresentButBlank(name: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  return Object.prototype.hasOwnProperty.call(env, name) && String(env[name] ?? '').trim() === '';
+}
+
 // VOX-34: per-tier default deadlines (ms), env-overridable without a deploy.
 // Lightweight is the voice hot path (classify_intent etc.) — kept close to the
 // turn SLO. Standard/complex get progressively larger budgets. The retry layer
@@ -61,7 +70,18 @@ const complexDeadlineMs = parsePositiveIntEnv(process.env.AI_COMPLEX_DEADLINE_MS
  * without changing other low-latency tasks.
  */
 export function resolveClassifyIntentDeadlineMs(): number {
-  return parsePositiveIntEnv(process.env.AI_CLASSIFY_INTENT_DEADLINE_MS, 4_000);
+  const raw = process.env.AI_CLASSIFY_INTENT_DEADLINE_MS;
+  // Present-but-empty must not silently look "configured". Warn loudly and
+  // fall through to the documented default (check-ai-provider-config fails
+  // hard for the same case on prod checklists).
+  if (isEnvPresentButBlank('AI_CLASSIFY_INTENT_DEADLINE_MS')) {
+    process.stderr.write(
+      '[WARN] AI_CLASSIFY_INTENT_DEADLINE_MS is set but empty; using default 4000ms. ' +
+        'Set a positive integer (production: 12000) or unset the variable.\n',
+    );
+    return 4_000;
+  }
+  return parsePositiveIntEnv(raw, 4_000);
 }
 
 /**
