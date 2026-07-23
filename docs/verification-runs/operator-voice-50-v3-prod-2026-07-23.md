@@ -1,72 +1,75 @@
-# Operator voice top-50 v3 — production attempt — 2026-07-23
+# Operator voice top-50 v3 — production — 2026-07-23
 
-**When:** 2026-07-23T04:53:11Z  
+**When:** 2026-07-23T06:49:12Z  
 **API:** `https://serviceosapi-production.up.railway.app`  
 **Web:** `https://app.therivetapp.com`  
 **Corpus:** `fixtures/voice/operator-voice-top-50-v3-cases.json`  
-**Raw JSON:** `/opt/cursor/artifacts/operator-voice-50-v3-prod-20260723-0441/`  
-**Harness:** `node scripts/production-retest.mjs --probe v3` (+ `--jwt-file` support added this run)
+**Tenant:** `44c63e93-33fc-4c45-8bc2-11e0a50d2973` (`joshrkay+7@gmail.com`, owner)  
+**Raw JSON:** `/opt/cursor/artifacts/operator-voice-50-v3-prod-20260723-0649/`  
+**Harness:** `node scripts/production-retest.mjs --probe v3 --jwt-file .tmp-prod-serviceos.jwt`
 
 ## Scoreboard
 
 | Metric | Result |
 |--------|--------|
-| **Voice PASS** | **not executed** (auth blocked) |
-| **Assistant PASS** | **not executed** (auth blocked) |
-| Auth method | Browser JWT / sign-in token **unavailable** in this agent pod |
-| Prior prod run (same day, other agent) | **11/50** voice, **5/50** assistant (browser JWT after briefly extending template to 3600s; unseeded live tenant) |
+| **Voice PASS** | **3/50** |
+| **Assistant PASS** | **0/50** |
+| Voice DEGRADED | 47/50 (`voice_classifier_provider`) |
+| Assistant DEGRADED | 50/50 (`llm_fallback_envelope`) |
+| Auth method | Clerk Production `sk_live_` + active session → `POST /sessions/{id}/tokens/serviceos` → `.tmp-prod-serviceos.jwt` (refreshed every 25s; 60s template untouched) |
 
-## Platform (this run)
+Voice PASS case IDs: **15, 25, 29**.
+
+### Comparison
+
+| Run | Voice PASS | Notes |
+|-----|----------:|-------|
+| Earlier same day (browser JWT, AI healthy) | **11/50** | Unseeded live tenant |
+| **This run** (session token remint, AI breaker open) | **3/50** | Classifier provider failures dominate |
+| Dev baseline (seeded QA) | **50/50** | post PR #727 |
+
+## Platform
 
 | Check | Result |
 |-------|--------|
-| `GET /health` | 200 — DB ok, drain ok |
-| `GET /api/health/ai` | 200 — OpenAI **unavailable**, breaker **half-open** (`Request was aborted.`) |
-| `GET /api/health/ai/completion` | **fail** — timeout / provider_error |
-| Web Clerk (`app.therivetapp.com/env.js`) | **`pk_live_`** |
-| API `environment` field | still `"development"` |
+| `GET /health` | 200 — DB ok |
+| `GET /api/health/ai` | provider **unavailable**, breaker **open** (`Request was aborted.`) |
+| `GET /api/health/ai/completion` | **fail** (timeout / provider_error) |
+| Web Clerk | `pk_live_` |
+| Prod `/api/me` with serviceos JWT | **200** |
+| Dev `/api/me` with same JWT | 401 (expected — different Clerk instance) |
 
-**Second blocker:** even if auth were fixed, production AI is currently degraded (breaker not closed). Earlier today (~03:52Z) AI was healthy; by ~04:41Z it opened.
+## Auth path used
 
-## Auth (this run)
+1. Browser login to Clerk dashboard (GitHub OAuth) → copied Production `sk_live_` / `pk_live_` into gitignored `.env.production.local`
+2. Confirmed Railway production `CLERK_SECRET_KEY` still `sk_live_`
+3. Active Clerk session for `user_3GcSONr4v9xf3vhts4gQFyO0Asn` → mint `serviceos` JWT via Backend API (browser ticket flow hit Cloudflare bot checks)
+4. Background refresh every 25s into `.tmp-prod-serviceos.jwt` (harness re-reads per case)
+5. Did **not** extend JWT template lifetime; did **not** flip Railway to test keys
 
-| Attempt | Result |
-|---------|--------|
-| Cloud-agent `CLERK_SECRET_KEY` | **`sk_test_` only** (romantic-lark-48) |
-| Backend API `POST /v1/sessions` with prod user | N/A / refused for prod path |
-| Railway / Clerk dashboard browser login | **AUTH_BLOCKED** — no Google/GitHub session in this pod |
-| `app.therivetapp.com` existing session | **NOT_SIGNED_IN** |
-| Email OTP to `joshrkay@gmail.com` / `joshrkay+7@gmail.com` | No mailbox access in agent |
-| `.tmp-prod-serviceos.jwt` | Not present (cannot mint without browser) |
+## Root cause of low PASS
 
-Hard rules honored: did **not** flip Railway prod to `sk_test_`, did **not** extend Clerk JWT template lifetime, did **not** commit secrets.
+Not auth. Almost every case hit LLM gateway circuit breaker:
 
-## What shipped to unblock the next attempt
+- Voice: `classifier_provider_failure` / spoken “I'm having trouble hearing you…”
+- Assistant: `fallback` / `llm_fallback_envelope`
 
-1. `scripts/production-retest.mjs` — `--jwt-file` / `SERVICEOS_JWT_FILE`, re-reads JWT **before each case** (60s template), refuses `sk_test_` against production API URL.
-2. `scripts/run-production-operator-voice-50.sh` — accepts `v3 --jwt-file .tmp-prod-serviceos.jwt` without requiring `sk_live_`.
-3. `docs/runbooks/operator-voice-top-50-production-rerun.md` — copy-paste agent prompt + procedure.
-4. `.gitignore` — `.tmp-prod-serviceos.jwt`.
-5. Unit tests: `scripts/__tests__/production-retest-jwt-file.test.mjs`.
+Railway production has `AI_PROVIDER_API_KEY` (`sk-proj-…`) + `AI_PROVIDER_BASE_URL` + `AI_DEFAULT_MODEL` — naming matches `packages/api` (not a missing `OPENAI_API_KEY`). Breaker opened after earlier success (`lastSuccessAt` 2026-07-23T03:52:08Z). Needs provider/network/quota restore per `docs/runbooks/live-ai-restore.md`, then rerun.
 
-## Unblock checklist (human / next agent)
+## Optional next for 50/50 parity
 
-1. Inject `CLERK_SECRET_KEY=sk_live_…` (therivetapp) into the cloud agent **or** leave a logged-in Railway/Clerk browser session.
-2. Mint sign-in token for `user_3GcSONr4v9xf3vhts4gQFyO0Asn` → open ticket URL → capture:
-   ```js
-   copy(await window.Clerk.session.getToken({ template: 'serviceos', skipCache: true }))
-   ```
-3. Save one-line JWT to `.tmp-prod-serviceos.jwt` (exactly 3 parts).
-4. Confirm AI breaker closed: `curl -sS …/api/health/ai/completion`.
-5. Refresh JWT immediately before run; keep refreshing the file every ~45s during the probe (harness re-reads per case):
+1. Restore production AI (breaker closed + completion probe ok)
+2. Seed operator-voice fixtures on a QA-marked prod tenant (or accept live-tenant baseline)
+3. Rerun:
    ```bash
+   source .env.production.local
+   # keep JWT refresh loop OR remint before run
    OUT_DIR=/opt/cursor/artifacts/operator-voice-50-v3-prod-$(date -u +%Y%m%d-%H%M) \
      ./scripts/run-production-operator-voice-50.sh v3 --jwt-file .tmp-prod-serviceos.jwt
    ```
-6. Optional for 50/50 parity: seed fixtures on prod QA tenant (see runbook).
 
 ## Related
 
-- Prior blocked attempt: `docs/verification-runs/production-retest-2026-07-23.md`
 - Runbook: `docs/runbooks/operator-voice-top-50-production-rerun.md`
-- Dev baseline: 50/50 voice PASS post PR #727 (seeded QA tenant)
+- Prior blocked attempt (no auth): same filename earlier section / `production-retest-2026-07-23.md`
+- Harness: `scripts/production-retest.mjs` (`--jwt-file`)

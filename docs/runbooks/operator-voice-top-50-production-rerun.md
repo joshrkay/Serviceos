@@ -248,13 +248,15 @@ See `docs/runbooks/operator-voice-fixture-seed.md` for catalog contents (Khan, J
 |-----|------|----------:|-------|
 | 1 | Browser JWT, 60s template | 0/50 (49 BLOCKED) | JWT expired mid-probe |
 | 2 | Browser JWT, after template briefly 3600s | **11/50** | Live tenant, no fixture seed |
-| 3 | None (this agent — no Railway/Clerk session, `sk_test_` only) | **not executed** | AI breaker also half-open; see `docs/verification-runs/operator-voice-50-v3-prod-2026-07-23.md` |
+| 3 | None (earlier agent — no Railway/Clerk session) | **not executed** | auth blocked |
+| 4 | `sk_live_` + session `tokens/serviceos` + `--jwt-file` refresh | **3/50** | AI breaker open (`voice_classifier_provider`); see verification-run |
 | Dev baseline | HMAC + seeded QA | **50/50** | post PR #727 |
 
 Artifacts:
 
 - `/opt/cursor/artifacts/operator-voice-50-v3-prod-20260723-0347/production-retest.json` (run 2)
-- `/opt/cursor/artifacts/operator-voice-50-v3-prod-20260723-0441/` (run 3 — platform + auth blocker)
+- `/opt/cursor/artifacts/operator-voice-50-v3-prod-20260723-0441/` (run 3 — auth blocker)
+- `/opt/cursor/artifacts/operator-voice-50-v3-prod-20260723-0649/` (run 4 — **3/50** voice)
 
 ---
 
