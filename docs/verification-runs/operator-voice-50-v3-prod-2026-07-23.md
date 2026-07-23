@@ -105,15 +105,29 @@ after a few early PASSes. Artifacts:
 Follow-up in this branch: do not classify `LLM_PROVIDER_UNAVAILABLE` /
 `BREAKER_OPEN` as deadline just because the wrapped message mentions abort.
 
-### Remaining production gap
-1. Railway→OpenAI abort rate under probe load still opens the **tenant** breaker.
-2. Need failover (OpenRouter Profile B) and/or breaker tuning so aborts don’t cascade the whole run.
-3. Assistant PASS still lags (fallback envelopes).
+### Remaining production gap (addressed in breaker-cascade plan)
+Plan: `docs/plans/2026-07-23-002-fix-voice-breaker-abort-cascade-plan.md`
+
+| FM | Break | Fix in cascade PR |
+|----|-------|-------------------|
+| FM-01 | Abort counted as provider health | Local deadline/abort **not** counted toward breaker |
+| FM-02 | Assistant poisons voice cell | `taskClass=classify` isolates `classify_intent` |
+| FM-04 | Half-open reopen on abort | Abort no longer reopens half-open |
+| FM-05 | Green completion while tenant open | `breakerBypassed` + providers on completion probe |
+| FM-06 | Adapter retry on unavailable | No retry for `BREAKER_OPEN` / `LLM_PROVIDER_UNAVAILABLE` |
+| FM-07 | Unavailable mislabeled deadline | Keep provider class (already on branch) |
+| FM-03 | No failover provider | Follow-up: OpenRouter Profile B (ops) |
+
+Unit multi-variation gate: **98 passed** (incl. cascade A–D). Live prod re-run after this PR deploys:
+```
+./scripts/run-production-operator-voice-50.sh v3 --jwt-file .tmp-prod-serviceos.jwt --wait-closed --voice-only
+./scripts/run-production-operator-voice-50.sh v3 --jwt-file .tmp-prod-serviceos.jwt --wait-closed
+```
 
 ### Recommended next ops steps
-1. Merge/deploy breaker-code classification follow-up; keep deadline env vars.
-2. Add OpenRouter Profile B failover (`docs/runbooks/live-ai-restore.md`).
-3. Wait `/api/health/ai` → `available:true` / `closed`, then re-run top-50.
+1. Merge/deploy breaker-cascade PR; keep deadline env vars.
+2. Re-run voice-only then full top-50 with `--wait-closed`.
+3. Optional: OpenRouter Profile B failover.
 4. After sustained green: set `NODE_ENV=production`.
 
 ## Related
