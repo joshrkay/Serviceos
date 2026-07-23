@@ -17,6 +17,7 @@
  * See docs/runbooks/live-ai-restore.md (Profile A / Profile B).
  */
 import { findProviderModelMismatch } from '../src/ai/gateway/provider-model-compat';
+import { validateClassifyIntentDeadlineEnv } from '../src/config/ai-routing';
 
 function env(name: string): string | undefined {
   const v = process.env[name];
@@ -65,6 +66,42 @@ if (mismatch) {
   console.error('\nFix: Profile A (OpenAI + gpt-*) or Profile B (OpenRouter + vendor/model ids).');
   console.error('See docs/runbooks/live-ai-restore.md');
   process.exit(1);
+}
+
+const classifyDeadline = validateClassifyIntentDeadlineEnv(process.env);
+const classifyRaw = process.env.AI_CLASSIFY_INTENT_DEADLINE_MS;
+console.log(
+  `${'AI_CLASSIFY_INTENT_DEADLINE_MS'.padEnd(22)} = ${
+    classifyRaw === undefined ? '(unset → 4000)' : JSON.stringify(classifyRaw)
+  }`,
+);
+if (!classifyDeadline.ok) {
+  console.error(`\nFAIL: ${classifyDeadline.reason}`);
+  process.exit(1);
+}
+
+// Dual-provider failover: both key+URL required; partial config is a footgun.
+const fbKey = env('AI_FALLBACK_PROVIDER_API_KEY');
+const fbUrl = env('AI_FALLBACK_PROVIDER_BASE_URL');
+if ((fbKey && !fbUrl) || (!fbKey && fbUrl)) {
+  console.error(
+    '\nFAIL: AI_FALLBACK_PROVIDER_* partially set — need both API_KEY and BASE_URL (or neither).',
+  );
+  process.exit(1);
+}
+if (fbKey && fbUrl) {
+  const fbMismatch = findProviderModelMismatch(fbUrl, [
+    env('AI_FALLBACK_LIGHTWEIGHT_MODEL') ?? 'meta-llama/llama-3.1-8b-instruct',
+    env('AI_FALLBACK_STANDARD_MODEL') ?? env('AI_FALLBACK_LIGHTWEIGHT_MODEL') ?? 'meta-llama/llama-3.1-8b-instruct',
+    env('AI_FALLBACK_COMPLEX_MODEL') ?? env('AI_FALLBACK_LIGHTWEIGHT_MODEL') ?? 'meta-llama/llama-3.1-8b-instruct',
+  ]);
+  if (fbMismatch) {
+    console.error(`\nFAIL (fallback): ${fbMismatch.reason}`);
+    process.exit(1);
+  }
+  console.log('AI_FALLBACK_PROVIDER     = wired (dual-provider failover)');
+} else {
+  console.log('AI_FALLBACK_PROVIDER     = (unset — single provider)');
 }
 
 console.log('\nOK: provider host and model IDs are compatible (static check).');

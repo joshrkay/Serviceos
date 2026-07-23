@@ -45,6 +45,53 @@ function parsePositiveIntEnv(raw: string | undefined, fallback: number): number 
   return Number.isInteger(n) && n > 0 ? n : fallback;
 }
 
+/**
+ * True when the env var is present but blank/whitespace.
+ * Railway "empty string" regressions look like this — `!raw` alone treats them
+ * as unset and silently falls back to the code default (4s for classify).
+ */
+export function isPresentButBlankEnv(
+  env: NodeJS.ProcessEnv,
+  name: string,
+): boolean {
+  if (!Object.prototype.hasOwnProperty.call(env, name)) return false;
+  const v = env[name];
+  return typeof v === 'string' && v.trim() === '';
+}
+
+/**
+ * Validate classify-deadline env for ops check scripts.
+ * - unset → ok (runtime uses default 4000)
+ * - positive int → ok
+ * - present-but-blank / 0 / non-positive → error message
+ */
+export function validateClassifyIntentDeadlineEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): { ok: true; valueMs: number } | { ok: false; reason: string } {
+  const name = 'AI_CLASSIFY_INTENT_DEADLINE_MS';
+  if (isPresentButBlankEnv(env, name)) {
+    return {
+      ok: false,
+      reason:
+        `${name} is set to an empty string — production falls back to the 4s ` +
+        'code default and voice classify aborts. Set a positive ms value ' +
+        '(prod tuned: 12000) or unset the variable entirely.',
+    };
+  }
+  const raw = env[name];
+  if (raw === undefined) {
+    return { ok: true, valueMs: 4_000 };
+  }
+  const n = Number(raw.trim());
+  if (!Number.isInteger(n) || n <= 0) {
+    return {
+      ok: false,
+      reason: `${name}=${JSON.stringify(raw)} is not a positive integer (ms).`,
+    };
+  }
+  return { ok: true, valueMs: n };
+}
+
 // VOX-34: per-tier default deadlines (ms), env-overridable without a deploy.
 // Lightweight is the voice hot path (classify_intent etc.) — kept close to the
 // turn SLO. Standard/complex get progressively larger budgets. The retry layer
@@ -60,8 +107,18 @@ const complexDeadlineMs = parsePositiveIntEnv(process.env.AI_COMPLEX_DEADLINE_MS
  * but give classification a separate end-to-end budget. Operators can tune it
  * without changing other low-latency tasks.
  */
-export function resolveClassifyIntentDeadlineMs(): number {
-  return parsePositiveIntEnv(process.env.AI_CLASSIFY_INTENT_DEADLINE_MS, 4_000);
+export function resolveClassifyIntentDeadlineMs(
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  if (isPresentButBlankEnv(env, 'AI_CLASSIFY_INTENT_DEADLINE_MS')) {
+    // Loud stderr so Railway logs show the regression that previously
+    // silently dropped classify to 4s and collapsed voice PASS.
+    process.stderr.write(
+      '[WARN] AI_CLASSIFY_INTENT_DEADLINE_MS is empty — using default 4000ms. ' +
+        'Set to 12000 on production (see docs/runbooks/live-ai-restore.md).\n',
+    );
+  }
+  return parsePositiveIntEnv(env.AI_CLASSIFY_INTENT_DEADLINE_MS, 4_000);
 }
 
 /**

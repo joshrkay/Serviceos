@@ -15,6 +15,9 @@
 | `AI_PROVIDER_BASE_URL` | Recommended always | Must match model ids. Profile B: `https://openrouter.ai/api/v1`. Profile A: `https://api.openai.com/v1` |
 | `AI_LIGHTWEIGHT_MODEL` / `AI_STANDARD_MODEL` / `AI_COMPLEX_MODEL` | Recommended always | Profile B: `meta-llama/llama-3.1-8b-instruct` / `meta-llama/llama-3.3-70b-instruct` / `qwen/qwen2.5-vl-72b-instruct`. Profile A (OpenAI): `gpt-4o-mini` / `gpt-4o-mini` / `gpt-4o` — never Claude/Llama on OpenAI |
 | `AI_DEFAULT_MODEL` | Optional | OpenAI Profile A fallback (`gpt-4o-mini`). Ignored when all three tier vars are set. After PR #714 applies to all tenants via system override |
+| `AI_CLASSIFY_INTENT_DEADLINE_MS` | Recommended prod | **12000** on production. Never leave as empty string (silent 4s default). `npm run check:ai-provider-config` fails on blank. |
+| `AI_FALLBACK_PROVIDER_API_KEY` + `AI_FALLBACK_PROVIDER_BASE_URL` | Recommended for voice 50/50 | Dual-provider failover (FM-03). Both required or neither. Keep Profile A primary; OpenRouter as fallback. `./scripts/apply-railway-ai-fallback.sh` |
+| `AI_FALLBACK_LIGHTWEIGHT_MODEL` (optional standard/complex) | With fallback | Defaults: Llama 8B / 70B / Qwen VL — rewritten onto failover requests |
 | `CORS_ORIGIN` | Always prod/staging | Explicit origin, not wildcard |
 | `STRIPE_SECRET_KEY` or `STRIPE_API_KEY` | Always prod/staging | `createPaymentLinkProvider` forbids mock (`payments/payment-link-provider.ts`; pinned by `test/payments/payment-link-provider.test.ts`) |
 | `STRIPE_WEBHOOK_SECRET` | Always prod/staging (SEC-43) | `validateProductionConfig` (`shared/config.ts`); pinned by `test/shared/config.test.ts` "SEC-43". Without it the Stripe webhook handler 400s/503s on the first real event — **the customer is charged but the invoice never settles**. Fail-fast at boot instead. **Accepts a comma-separated list** (one secret per Stripe endpoint — platform + connected accounts). Go-live gate: `docs/runbooks/stripe-go-live.md` |

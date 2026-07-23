@@ -4,6 +4,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  buildFailureTaxonomy,
+  classifyVoiceFailureBucket,
   loadProbeCases,
   probeCasesMeta,
   resolveProbeDisambiguationFollowUp,
@@ -198,4 +200,77 @@ test('runVoiceSessionProbe sends disambiguation then confirmation turns', async 
   assert.equal(calls[0].body.text, '104 Cedar');
   assert.equal(calls[1].body.text, 'yes');
   assert.equal(result.finalVoiceTurn.json.proposalIds[0], 'p1');
+});
+
+test('classifyVoiceFailureBucket tags classifier_provider as infra A', () => {
+  const voice = scoreVoice(
+    {
+      state: 'intent_capture',
+      proposalIds: [],
+      sideEffects: [
+        {
+          type: 'audit_log',
+          payload: {
+            eventType: 'classifier_provider_failure',
+            failureClass: 'provider',
+            errorCode: 'LLM_PROVIDER_UNAVAILABLE',
+          },
+        },
+      ],
+    },
+    200,
+  );
+  const bucket = classifyVoiceFailureBucket(voice);
+  assert.equal(bucket.bucket, 'A');
+  assert.equal(bucket.errorCode, 'LLM_PROVIDER_UNAVAILABLE');
+});
+
+test('classifyVoiceFailureBucket tags voice_no_proposal as product B', () => {
+  const voice = {
+    verdict: 'PARTIAL',
+    reason: 'voice_no_proposal',
+    rawSideEffects: [
+      { type: 'audit_log', payload: { eventType: 'agent.calling.intent_capture.intent_classified' } },
+    ],
+  };
+  const bucket = classifyVoiceFailureBucket(voice);
+  assert.equal(bucket.bucket, 'B');
+});
+
+test('classifyVoiceFailureBucket returns null for PASS', () => {
+  assert.equal(
+    classifyVoiceFailureBucket({ verdict: 'PASS', reason: 'voice_proposal' }),
+    null,
+  );
+});
+
+test('buildFailureTaxonomy counts A and B', () => {
+  const taxonomy = buildFailureTaxonomy([
+    {
+      id: 1,
+      op: 'create_client',
+      voice: {
+        verdict: 'DEGRADED',
+        reason: 'voice_classifier_provider',
+        rawSideEffects: [
+          {
+            type: 'audit_log',
+            payload: {
+              eventType: 'classifier_provider_failure',
+              errorCode: 'LLM_PROVIDER_UNAVAILABLE',
+            },
+          },
+        ],
+      },
+    },
+    {
+      id: 2,
+      op: 'lookup',
+      voice: { verdict: 'PARTIAL', reason: 'voice_no_proposal', rawSideEffects: [] },
+    },
+    { id: 3, op: 'ok', voice: { verdict: 'PASS', reason: 'voice_proposal' } },
+  ]);
+  assert.equal(taxonomy.A, 1);
+  assert.equal(taxonomy.B, 1);
+  assert.equal(taxonomy.cases.length, 2);
 });

@@ -332,8 +332,8 @@ export interface ResilienceStackOptions {
 
   /**
    * Additional fallback providers tried in order after the primary fails.
-   * For P2-029 this is always empty — the failover *wiring* is in place for
-   * when a real second provider is provisioned in a follow-up.
+   * Populated by createLLMGateway() when AI_FALLBACK_PROVIDER_API_KEY +
+   * AI_FALLBACK_PROVIDER_BASE_URL are both set (FM-03 dual-provider).
    */
   fallbackProviders?: LLMProvider[];
 
