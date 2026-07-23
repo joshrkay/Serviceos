@@ -1,75 +1,90 @@
 # Operator voice top-50 v3 — production — 2026-07-23
 
-**When:** 2026-07-23T06:49:12Z  
+**Latest clean evidence:** 2026-07-23T17:41:40Z (deadline-tuned + seeded)  
 **API:** `https://serviceosapi-production.up.railway.app`  
 **Web:** `https://app.therivetapp.com`  
 **Corpus:** `fixtures/voice/operator-voice-top-50-v3-cases.json`  
-**Tenant:** `44c63e93-33fc-4c45-8bc2-11e0a50d2973` (`joshrkay+7@gmail.com`, owner)  
-**Raw JSON:** `/opt/cursor/artifacts/operator-voice-50-v3-prod-20260723-0649/`  
+**Tenant:** `44c63e93-33fc-4c45-8bc2-11e0a50d2973` (`joshrkay+7 QA Organization`)  
 **Harness:** `node scripts/production-retest.mjs --probe v3 --jwt-file .tmp-prod-serviceos.jwt`
 
-## Scoreboard
+## Scoreboard (progression today)
 
-| Metric | Result |
-|--------|--------|
-| **Voice PASS** | **3/50** |
-| **Assistant PASS** | **0/50** |
-| Voice DEGRADED | 47/50 (`voice_classifier_provider`) |
-| Assistant DEGRADED | 50/50 (`llm_fallback_envelope`) |
-| Auth method | Clerk Production `sk_live_` + active session → `POST /sessions/{id}/tokens/serviceos` → `.tmp-prod-serviceos.jwt` (refreshed every 25s; 60s template untouched) |
+| Run | When (UTC) | Voice PASS | Assistant PASS | Notes |
+|-----|------------|----------:|---------------:|-------|
+| Auth blocked | ~04:53 | n/a | n/a | `sk_test_` only |
+| Broken OpenAI key | ~06:49 | **3/50** | 0/50 | breaker open |
+| Key fixed, unseeded | ~16:39 | **7/50** | 5/50 | still classifier aborts |
+| Seeded fixtures | ~17:08 | **7/50** | 2/50 | fixtures OK; AI flaky |
+| **Deadlines raised** | **17:41** | **26/50** | **5/50** | best — early 0/14 while breaker open, late **26/36** |
+| Post-redeploy “clean” | ~17:56 | 10/50 | 0/50 | started half-open again |
 
-Voice PASS case IDs: **15, 25, 29**.
+**Best voice PASS: 26/50**  
+Artifact: `/opt/cursor/artifacts/operator-voice-50-v3-prod-20260723-1741-deadlines/`
 
-### Comparison
+Dev baseline (seeded QA): **50/50**.
 
-| Run | Voice PASS | Notes |
-|-----|----------:|-------|
-| Earlier same day (browser JWT, AI healthy) | **11/50** | Unseeded live tenant |
-| **This run** (session token remint, AI breaker open) | **3/50** | Classifier provider failures dominate |
-| Dev baseline (seeded QA) | **50/50** | post PR #727 |
+## Production changes applied (Railway)
 
-## Platform
+### AI Profile A (OpenAI)
+| Variable | Value |
+|----------|--------|
+| `AI_PROVIDER_BASE_URL` | `https://api.openai.com/v1` |
+| `AI_PROVIDER_API_KEY` | New valid `sk-proj-…` (old key was **401 invalid**) |
+| `AI_DEFAULT_MODEL` | `gpt-4o-mini` |
+| `AI_LIGHTWEIGHT_MODEL` | `gpt-4o-mini` |
+| `AI_STANDARD_MODEL` | `gpt-4o-mini` |
+| `AI_COMPLEX_MODEL` | `gpt-4o` |
 
-| Check | Result |
-|-------|--------|
-| `GET /health` | 200 — DB ok |
-| `GET /api/health/ai` | provider **unavailable**, breaker **open** (`Request was aborted.`) |
-| `GET /api/health/ai/completion` | **fail** (timeout / provider_error) |
-| Web Clerk | `pk_live_` |
-| Prod `/api/me` with serviceos JWT | **200** |
-| Dev `/api/me` with same JWT | 401 (expected — different Clerk instance) |
+Same model + deadline block also applied on **Development**.
 
-## Auth path used
+### Deadline tuning (critical)
+Default `classify_intent` budget (4s) was aborting Railway→OpenAI calls and opening the breaker.
 
-1. Browser login to Clerk dashboard (GitHub OAuth) → copied Production `sk_live_` / `pk_live_` into gitignored `.env.production.local`
-2. Confirmed Railway production `CLERK_SECRET_KEY` still `sk_live_`
-3. Active Clerk session for `user_3GcSONr4v9xf3vhts4gQFyO0Asn` → mint `serviceos` JWT via Backend API (browser ticket flow hit Cloudflare bot checks)
-4. Background refresh every 25s into `.tmp-prod-serviceos.jwt` (harness re-reads per case)
-5. Did **not** extend JWT template lifetime; did **not** flip Railway to test keys
+| Variable | Value |
+|----------|------:|
+| `AI_CLASSIFY_INTENT_DEADLINE_MS` | **12000** |
+| `AI_LIGHTWEIGHT_DEADLINE_MS` | **6000** |
+| `AI_STANDARD_DEADLINE_MS` | **10000** |
+| `AI_COMPLEX_DEADLINE_MS` | **20000** |
 
-## Root cause of low PASS
+### OpenAI billing
+- Usage Tier 1 (500 RPM gpt-4o-mini)
+- Payment on file; **auto-recharge enabled**
 
-Not auth. Almost every case hit LLM gateway circuit breaker:
+### Not changed (intentional)
+- Clerk stays `pk_live_` / `sk_live_` (no test keys)
+- `serviceos` JWT template lifetime left at 60s
+- `NODE_ENV` still `"development"` — do **not** flip until AI is stably green
 
-- Voice: `classifier_provider_failure` / spoken “I'm having trouble hearing you…”
-- Assistant: `fallback` / `llm_fallback_envelope`
+## Fixture seed (production QA tenant)
 
-Railway production has `AI_PROVIDER_API_KEY` (`sk-proj-…`) + `AI_PROVIDER_BASE_URL` + `AI_DEFAULT_MODEL` — naming matches `packages/api` (not a missing `OPENAI_API_KEY`). Breaker opened after earlier success (`lastSuccessAt` 2026-07-23T03:52:08Z). Needs provider/network/quota restore per `docs/runbooks/live-ai-restore.md`, then rerun.
+| Item | Value |
+|------|--------|
+| Tenant renamed | `joshrkay+7 QA Organization` |
+| Carlos technician | `users` row `Carlos` (empty last name) for catalog match |
+| Seed result | **27 records** (9 created / 18 reused) |
+| DB | `hopper.proxy.rlwy.net` (production — not shinkansen) |
 
-## Optional next for 50/50 parity
+## Auth path (probe)
 
-1. Restore production AI (breaker closed + completion probe ok)
-2. Seed operator-voice fixtures on a QA-marked prod tenant (or accept live-tenant baseline)
-3. Rerun:
-   ```bash
-   source .env.production.local
-   # keep JWT refresh loop OR remint before run
-   OUT_DIR=/opt/cursor/artifacts/operator-voice-50-v3-prod-$(date -u +%Y%m%d-%H%M) \
-     ./scripts/run-production-operator-voice-50.sh v3 --jwt-file .tmp-prod-serviceos.jwt
-   ```
+Clerk Production `sk_live_` → active session → `POST /sessions/{id}/tokens/serviceos` → `.tmp-prod-serviceos.jwt` with 25s refresh. `/api/me` **200**.
+
+## Remaining production gap (why not 50/50)
+
+1. **Railway→OpenAI still aborts intermittently** (`Request was aborted`), which opens the circuit breaker. When the breaker is open/half-open at probe start, the first ~14 cases degrade; when it recovers mid-run, pass rate jumps (26/36 on the late window).
+2. **`/api/health/ai/completion` probe** uses a hard **5s** race (code default) and can itself contribute abort noise — prefer not to scrape it in a tight loop.
+3. **Assistant PASS** lags voice (fallback envelopes) even when voice proposals succeed.
+4. Optional: OpenRouter Profile B failover, or raise OpenAI tier / add a second provider for true failover.
+
+### Recommended next ops steps
+1. Keep deadline env vars; avoid hammering `/ai/completion`.
+2. Redeploy (or wait for closed breaker) → immediately run top-50 without health scrape loops.
+3. Consider OpenRouter Profile B (`docs/runbooks/live-ai-restore.md`) as failover.
+4. After sustained completionProbe ok + closed breaker for hours: set `NODE_ENV=production`.
+5. Re-run for target **50/50**.
 
 ## Related
 
 - Runbook: `docs/runbooks/operator-voice-top-50-production-rerun.md`
-- Prior blocked attempt (no auth): same filename earlier section / `production-retest-2026-07-23.md`
-- Harness: `scripts/production-retest.mjs` (`--jwt-file`)
+- AI restore: `docs/runbooks/live-ai-restore.md`
+- PR: https://github.com/joshrkay/Serviceos/pull/731
