@@ -21,24 +21,31 @@ import {
 import { createRedisCacheStore } from './redis-cache-store';
 import { findProviderModelMismatch } from './provider-model-compat';
 import { DEFAULT_AI_ROUTING_CONFIG } from '../../config/ai-routing';
+import {
+  FallbackModelMapProvider,
+  resolveFallbackTierModelsFromEnv,
+} from './fallback-model-map';
 
 /**
  * Create the LLM gateway from application config.
  *
  * Switching providers is purely a .env change.
  *
- *   Recommended (Option A — OpenRouter managed open models):
- *     AI_PROVIDER_BASE_URL=https://openrouter.ai/api/v1
- *     AI_PROVIDER_API_KEY=sk-or-...
- *     AI_LIGHTWEIGHT_MODEL=meta-llama/llama-3.1-8b-instruct
- *     AI_STANDARD_MODEL=meta-llama/llama-3.3-70b-instruct
- *     AI_COMPLEX_MODEL=qwen/qwen2.5-vl-72b-instruct
- *     See docs/runbooks/openrouter-ai-provider.md
- *
- *   OpenAI:
+ *   OpenAI primary (Profile A — production default):
  *     AI_PROVIDER_BASE_URL=https://api.openai.com/v1
  *     AI_PROVIDER_API_KEY=sk-...
  *     AI_DEFAULT_MODEL=gpt-4o-mini
+ *
+ *   Optional OpenRouter fallback (dual-provider — NOT a Profile B swap):
+ *     AI_FALLBACK_PROVIDER_BASE_URL=https://openrouter.ai/api/v1
+ *     AI_FALLBACK_PROVIDER_API_KEY=sk-or-...
+ *     AI_FALLBACK_LIGHTWEIGHT_MODEL=meta-llama/llama-3.1-8b-instruct
+ *     See docs/runbooks/live-ai-restore.md ("Profile A + OpenRouter fallback")
+ *
+ *   OpenRouter-only primary (Profile B swap — different from failover):
+ *     AI_PROVIDER_BASE_URL=https://openrouter.ai/api/v1
+ *     AI_PROVIDER_API_KEY=sk-or-...
+ *     See docs/runbooks/openrouter-ai-provider.md
  *
  *   Any other OpenAI-compatible endpoint works the same way.
  */
@@ -173,10 +180,19 @@ export function createLLMGateway(
   // Publish the breaker registry for the health endpoint.
   sharedBreakerRegistry = breakerRegistry;
 
+  // FM-03 — dual-provider failover. When both AI_FALLBACK_PROVIDER_* vars
+  // are set, primary abort/5xx advances to OpenRouter (or any second host)
+  // instead of sole-provider LLM_PROVIDER_UNAVAILABLE. Missing either var
+  // keeps today's single-provider behavior (staged rollout safe).
+  const fallbackProviders =
+    opts.resilience?.fallbackProviders ??
+    buildFallbackProvidersFromEnv(opts.logger);
+
   const resilientProvider = composeResilienceStack(shadowWrappedProvider, {
     ...opts.resilience,
     breakers: breakerRegistry,
     quota: quotaRegistry,
+    fallbackProviders,
   });
 
   const providers = new Map<string, LLMProvider>([[resilientProvider.name, resilientProvider]]);
@@ -346,6 +362,61 @@ function buildGatewayConfig(
   }
 
   return { defaultProvider: providerName };
+}
+
+/**
+ * Build zero-or-one fallback providers from env. Exported for unit tests.
+ * Requires BOTH key and base URL; partial config is ignored (no boot crash).
+ */
+export function buildFallbackProvidersFromEnv(
+  logger?: LLMGatewayLogger,
+  env: NodeJS.ProcessEnv = process.env,
+): LLMProvider[] {
+  const apiKey = env.AI_FALLBACK_PROVIDER_API_KEY?.trim();
+  const baseURL = env.AI_FALLBACK_PROVIDER_BASE_URL?.trim();
+  if (!apiKey || !baseURL) {
+    if ((apiKey && !baseURL) || (!apiKey && baseURL)) {
+      logger?.info(
+        'AI_FALLBACK_PROVIDER_* partially set — ignoring fallback (need both API_KEY and BASE_URL)',
+        {
+          hasKey: Boolean(apiKey),
+          hasBaseURL: Boolean(baseURL),
+        },
+      );
+    }
+    return [];
+  }
+
+  let parsedHost = 'fallback';
+  try {
+    parsedHost = new URL(baseURL).hostname;
+  } catch {
+    logger?.error('AI_FALLBACK_PROVIDER_BASE_URL is not a valid URL — ignoring fallback', {
+      baseURL,
+    });
+    return [];
+  }
+
+  const raw = new OpenAICompatibleProvider({
+    apiKey,
+    baseURL,
+    defaultHeaders: baseURL.includes('openrouter.ai')
+      ? {
+          'HTTP-Referer': 'https://rivet.ai',
+          'X-Title': 'Rivet',
+        }
+      : undefined,
+  });
+
+  const tiers = resolveFallbackTierModelsFromEnv(env);
+  logger?.info('AI fallback provider wired', {
+    host: parsedHost,
+    lightweightModel: tiers.lightweight,
+    standardModel: tiers.standard,
+    complexModel: tiers.complex,
+  });
+
+  return [new FallbackModelMapProvider(raw, tiers)];
 }
 
 function maybeWrapWithShadow(
