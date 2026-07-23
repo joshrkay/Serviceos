@@ -19,6 +19,9 @@ voice-load-report.json
 !.env.example
 !.env.qa.example
 !.env.production.example
+
+# Browser-captured production Clerk serviceos JWT (60s; never commit)
+.tmp-prod-serviceos.jwt
 *.tsbuildinfo
 coverage/
 

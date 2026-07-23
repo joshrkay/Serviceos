@@ -1,15 +1,12 @@
 #!/usr/bin/env bash
 # Run operator voice top-50 against production API (RS256 Clerk serviceos JWT).
 #
-# Prerequisites (one-time on production):
-#   1. CLERK_SECRET_KEY=sk_live_… (therivetapp production Clerk instance)
-#   2. CLERK_USER_ID=user_… with public_metadata { tenant_id, role } + users row
-#   3. Operator voice fixtures seeded on that tenant (see seed block below)
-#
-# Usage:
-#   CLERK_SECRET_KEY=sk_live_… \
-#   CLERK_USER_ID=user_… \
-#   ./scripts/run-production-operator-voice-50.sh v3
+# Production Clerk blocks Backend API session minting (dev-only). Two paths:
+#   A) Browser JWT (recommended):
+#      Sign in on app.therivetapp.com → copy serviceos JWT → .tmp-prod-serviceos.jwt
+#      ./scripts/run-production-operator-voice-50.sh v3 --jwt-file .tmp-prod-serviceos.jwt
+#   B) sk_live_ secret (auth probe only — session mint fails on production):
+#      CLERK_SECRET_KEY=sk_live_… ./scripts/run-production-operator-voice-50.sh v3
 #
 # Optional fixture seed (requires production Postgres):
 #   PROD_DATABASE_URL=postgres://… \
@@ -20,25 +17,39 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CORPUS="${1:-v3}"
-SEED="${2:-}"
+JWT_FILE=""
+MODE=""
+
+if [[ "${2:-}" == "--jwt-file" ]]; then
+  JWT_FILE="${3:-.tmp-prod-serviceos.jwt}"
+elif [[ "${2:-}" == "--seed" ]]; then
+  MODE="--seed"
+fi
+
+if [[ -f "$ROOT/.env.production.local" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  . "$ROOT/.env.production.local"
+  set +a
+fi
 
 API_URL="${API_URL:-https://serviceosapi-production.up.railway.app}"
 OUT_DIR="${OUT_DIR:-/opt/cursor/artifacts/operator-voice-50-${CORPUS}-prod-$(date -u +%Y%m%d-%H%M)}"
-CLERK_SECRET="${CLERK_SECRET_KEY:-${E2E_CLERK_SECRET_KEY:-}}"
+CLERK_SECRET="${PROD_CLERK_SECRET_KEY:-${CLERK_SECRET_KEY:-}}"
 
-if [[ -z "$CLERK_SECRET" ]]; then
-  echo "ERROR: CLERK_SECRET_KEY (sk_live_…) is required for production probes." >&2
-  echo "Production API verifies therivetapp live Clerk JWKS; sk_test_ tokens return 401." >&2
-  exit 1
+if [[ -z "$JWT_FILE" ]]; then
+  if [[ -z "$CLERK_SECRET" ]]; then
+    echo "ERROR: use --jwt-file .tmp-prod-serviceos.jwt or set CLERK_SECRET_KEY=sk_live_…" >&2
+    exit 1
+  fi
+  if [[ "$CLERK_SECRET" != sk_live_* ]]; then
+    echo "ERROR: CLERK_SECRET_KEY must be sk_live_… (got ${CLERK_SECRET:0:8}…)." >&2
+    echo "       Do not use cloud-agent sk_test_ keys against production." >&2
+    exit 1
+  fi
 fi
 
-if [[ "$CLERK_SECRET" != sk_live_* ]]; then
-  echo "ERROR: CLERK_SECRET_KEY must be sk_live_… (got ${CLERK_SECRET:0:8}…)." >&2
-  echo "Inject the production Clerk secret into this agent environment, then re-run." >&2
-  exit 1
-fi
-
-if [[ "$SEED" == "--seed" ]]; then
+if [[ "$MODE" == "--seed" ]]; then
   : "${PROD_DATABASE_URL:?PROD_DATABASE_URL required for --seed}"
   : "${QA_TENANT_ID:?QA_TENANT_ID required for --seed}"
   : "${QA_ACTOR_ID:?QA_ACTOR_ID required for --seed}"
@@ -55,5 +66,9 @@ if [[ "$SEED" == "--seed" ]]; then
 fi
 
 echo "Running operator voice top-50 (${CORPUS}) on ${API_URL}…"
-export API_URL OUT_DIR CLERK_SECRET_KEY="$CLERK_SECRET"
+export API_URL OUT_DIR
+if [[ -n "$JWT_FILE" ]]; then
+  exec node "$ROOT/scripts/production-retest.mjs" --probe "$CORPUS" --jwt-file "$JWT_FILE"
+fi
+export CLERK_SECRET_KEY="$CLERK_SECRET"
 exec node "$ROOT/scripts/production-retest.mjs" --probe "$CORPUS"
