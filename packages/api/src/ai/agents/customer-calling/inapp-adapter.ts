@@ -25,7 +25,8 @@ import type { ProposalType } from '../../../proposals/proposal';
 import type { AuditRepository } from '../../../audit/audit';
 import { createAuditEvent } from '../../../audit/audit';
 import type { OnCallRepository } from '../../../oncall/rotation';
-import { classifyIntent, CLASSIFIER_CONFIDENCE_THRESHOLD } from '../../orchestration/intent-classifier';
+import { classifyIntent } from '../../orchestration/intent-classifier';
+import { isDeadlineExceeded } from '../../gateway/deadline';
 import { escalateToHuman } from '../../skills/escalate-to-human';
 import type { EscalationReason } from '../../skills/escalate-to-human';
 import { summarizeSession } from '../../skills/summarize-session';
@@ -215,8 +216,8 @@ function classifierFailureFromError(
   error: unknown,
 ): { failureClass: ClassifierFailureClass; errorCode?: string } {
   const code = classifierErrorCode(error);
-  if (code === 'DEADLINE_EXCEEDED') {
-    return { failureClass: 'deadline', errorCode: code };
+  if (code === 'DEADLINE_EXCEEDED' || isDeadlineExceeded(error)) {
+    return { failureClass: 'deadline', errorCode: code ?? 'DEADLINE_EXCEEDED' };
   }
   if (code && CLASSIFIER_QUOTA_CODES.has(code)) {
     return { failureClass: 'quota', errorCode: code };
@@ -247,23 +248,22 @@ export function buildInappGreeting(persona?: VoicePersona | null): string {
 /**
  * Map a classifier intent + entities into the FSM event shape.
  *
- * Two thresholds in play here on purpose:
- *  - CLASSIFIER_CONFIDENCE_THRESHOLD (0.6) — below this the classifier
- *    has already coerced intentType to 'unknown'; the threshold value
- *    is reported back to the FSM only for audit/log purposes.
- *  - TAU_INT (0.75) — the FSM's "act on this intent" gate, applied
- *    in transitionIntentCapture. Confidence in the [0.6, 0.75) band
- *    will be classified but reprompted by the FSM. Both adapters
- *    rely on this same FSM gate, so behavior is now consistent.
+ * Always emits `intent_classified` (including unknown) so the FSM uses the
+ * `low_intent_confidence` repair path. STT/empty-speech paths emit
+ * `confidence_low` separately for `low_audio_confidence` copy.
+ *
+ * TAU_INT (0.75) is the FSM's "act on this intent" gate in
+ * transitionIntentCapture — confidence below that band is reprompted.
  */
 export function classifierToFsmEvent(
   intentType: string,
   confidence: number,
   entities: Record<string, unknown> | undefined
 ): CallingAgentEvent {
-  if (intentType === 'unknown') {
-    return { type: 'confidence_low', threshold: CLASSIFIER_CONFIDENCE_THRESHOLD, score: confidence };
-  }
+  // Unknown / below-threshold intent stays on the intent_classified path so
+  // the FSM fires `low_intent_confidence` repair copy — not
+  // `low_audio_confidence` ("trouble hearing you"), which is reserved for
+  // STT/empty-speech `confidence_low` events.
   return {
     type: 'intent_classified',
     intentType,
@@ -569,7 +569,9 @@ export class InAppVoiceAdapter {
       return await classifyIntent(text, context, this.deps.gateway);
     } catch (error) {
       const failure = classifierFailureFromError(error);
-      if (failure.failureClass !== 'provider') {
+      // One fresh-budget retry for transient provider/deadline aborts.
+      // Quota failures are not retryable at the adapter layer.
+      if (failure.failureClass === 'quota') {
         throw error;
       }
       return classifyIntent(text, context, this.deps.gateway);
@@ -820,7 +822,14 @@ export class InAppVoiceAdapter {
           failure.failureClass,
           failure.errorCode,
         );
-        fsmEvent = { type: 'confidence_low', threshold: CLASSIFIER_CONFIDENCE_THRESHOLD, score: 0 };
+        // Prefer intent_classified/unknown over confidence_low so repair
+        // templates use low_intent_confidence (text path), not low_audio.
+        fsmEvent = {
+          type: 'intent_classified',
+          intentType: 'unknown',
+          entities: {},
+          confidence: 0,
+        };
       }
 
       // Wire the classifier's token usage into the cost tracker. If the

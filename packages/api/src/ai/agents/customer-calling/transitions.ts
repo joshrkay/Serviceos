@@ -612,8 +612,10 @@ function transitionIntentCapture(
     }
 
     // operator_request is handled by checkGlobalGuards and never reaches here.
-    // Confidence at or above threshold → entity_resolution
-    if (event.confidence >= TAU_INT) {
+    // Confidence at or above threshold → entity_resolution. Unknown never
+    // advances even with a high score — adapters may emit intent_classified
+    // with intentType 'unknown' after a classifier miss.
+    if (event.confidence >= TAU_INT && event.intentType !== 'unknown') {
       const updatedContext: CallingAgentContext = {
         ...context,
         currentIntent: event.intentType,

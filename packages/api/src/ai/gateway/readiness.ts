@@ -12,6 +12,7 @@
 
 import type { LLMGateway, LLMRequest } from './gateway';
 import { SYSTEM_TENANT_ID } from './gateway';
+import { resolveClassifyIntentDeadlineMs } from '../../config/ai-routing';
 
 export interface AiCompletionProbeResult {
   ok: boolean;
@@ -24,7 +25,7 @@ export interface AiCompletionProbeResult {
 }
 
 export interface ProbeAiCompletionOptions {
-  /** Hard timeout for the probe complete() call. Default 5000ms. */
+  /** Hard timeout for the probe complete() call. Default: classify deadline (min 10s). */
   timeoutMs?: number;
   /** Cache TTL. Default 30_000ms. */
   cacheTtlMs?: number;
@@ -42,6 +43,23 @@ let cache: CacheEntry | null = null;
 /** Test-only: clear the in-process probe cache. */
 export function clearAiCompletionProbeCache(): void {
   cache = null;
+}
+
+function parsePositiveIntEnv(raw: string | undefined): number | undefined {
+  if (!raw) return undefined;
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : undefined;
+}
+
+/**
+ * Probe budget must not undercut live `classify_intent` traffic. A 5s race
+ * against a 12s classify deadline was aborting mid-flight and opening the
+ * circuit breaker (`Request was aborted.`) during health scrapes.
+ */
+export function resolveCompletionProbeTimeoutMs(): number {
+  const fromEnv = parsePositiveIntEnv(process.env.AI_COMPLETION_PROBE_TIMEOUT_MS);
+  if (fromEnv !== undefined) return fromEnv;
+  return Math.max(resolveClassifyIntentDeadlineMs(), 10_000);
 }
 
 function classifyError(err: unknown): string {
@@ -71,13 +89,13 @@ function classifyError(err: unknown): string {
 /**
  * Run (or return cached) a tiny classify_intent completion against the live
  * gateway. Uses SYSTEM_TENANT_ID — readiness is a platform check, not a
- * tenant workflow.
+ * tenant workflow. Caller should keep scrape intervals ≥ cache TTL.
  */
 export async function probeAiCompletion(
   gateway: Pick<LLMGateway, 'complete'>,
   opts: ProbeAiCompletionOptions = {},
 ): Promise<AiCompletionProbeResult> {
-  const timeoutMs = opts.timeoutMs ?? 5_000;
+  const timeoutMs = opts.timeoutMs ?? resolveCompletionProbeTimeoutMs();
   const cacheTtlMs = opts.cacheTtlMs ?? 30_000;
   const now = opts.now ?? Date.now;
 
@@ -87,22 +105,24 @@ export async function probeAiCompletion(
   }
 
   const started = now();
+  const controller = new AbortController();
+  const timer = setTimeout(() => {
+    controller.abort(new Error('AI completion probe timeout'));
+  }, timeoutMs);
+  if (typeof timer.unref === 'function') timer.unref();
+
   const request: LLMRequest = {
     taskType: 'classify_intent',
     tenantId: SYSTEM_TENANT_ID,
     maxTokens: 16,
     temperature: 0,
     deadlineMs: timeoutMs,
+    signal: controller.signal,
     messages: [{ role: 'user', content: 'ping' }],
   };
 
   try {
-    const response = await Promise.race([
-      gateway.complete(request),
-      new Promise<never>((_, reject) => {
-        setTimeout(() => reject(new Error('AI completion probe timeout')), timeoutMs);
-      }),
-    ]);
+    const response = await gateway.complete(request);
     const latencyMs = Math.max(0, now() - started);
     const result: AiCompletionProbeResult = {
       ok: true,
@@ -124,5 +144,7 @@ export async function probeAiCompletion(
     };
     cache = { result, expiresAt: now() + cacheTtlMs };
     return result;
+  } finally {
+    clearTimeout(timer);
   }
 }

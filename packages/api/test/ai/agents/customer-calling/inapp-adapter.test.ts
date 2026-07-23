@@ -260,6 +260,45 @@ describe('InAppVoiceAdapter', () => {
       expect(JSON.stringify({ failure, audit })).not.toContain('sensitive provider detail');
       expect(JSON.stringify({ failure, audit })).not.toContain('UNSAFE_PROVIDER_DETAIL');
     });
+
+    it('maps Request-was-aborted to classifier_deadline_failure (not provider)', async () => {
+      const gateway = {
+        complete: vi.fn(async () => {
+          throw new Error('Request was aborted.');
+        }),
+      } as unknown as LLMGateway;
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+        repairTemplatesResolver: async () => [
+          {
+            trigger: 'low_intent_confidence',
+            text: 'Is this about scheduling a visit, or is something not working right now?',
+          },
+          {
+            trigger: 'low_audio_confidence',
+            text: "I'm having trouble hearing you — could you say that one more time?",
+          },
+        ],
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+
+      const result = await adapter.handleInput(sessionId, 'schedule a visit for tomorrow');
+
+      const failure = result.sideEffects.find(
+        (effect) => effect.payload.eventType === 'classifier_deadline_failure',
+      );
+      expect(failure?.payload).toEqual({
+        eventType: 'classifier_deadline_failure',
+        failureClass: 'deadline',
+        errorCode: 'DEADLINE_EXCEEDED',
+      });
+      expect(result.ttsText ?? '').toContain('scheduling a visit');
+      expect(result.ttsText ?? '').not.toContain('trouble hearing');
+    });
   });
 
   it('emergency_dispatch fast-paths to escalating', async () => {

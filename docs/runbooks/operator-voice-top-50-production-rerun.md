@@ -249,14 +249,17 @@ See `docs/runbooks/operator-voice-fixture-seed.md` for catalog contents (Khan, J
 | 1 | Browser JWT, 60s template | 0/50 (49 BLOCKED) | JWT expired mid-probe |
 | 2 | Browser JWT, after template briefly 3600s | **11/50** | Live tenant, no fixture seed |
 | 3 | None (earlier agent — no Railway/Clerk session) | **not executed** | auth blocked |
-| 4 | `sk_live_` + session `tokens/serviceos` + `--jwt-file` refresh | **3/50** | AI breaker open (`voice_classifier_provider`); see verification-run |
+| 4 | `sk_live_` + JWT file; invalid OpenAI key | **3/50** | breaker open |
+| 5 | New OpenAI key + Profile A models | **7/50** | still aborts |
+| 6 | + QA fixtures seeded (27 records) | **7/50** | fixtures OK |
+| 7 | + deadline envs (classify 12s) | **26/50** | best; late window 26/36 after breaker recovered |
 | Dev baseline | HMAC + seeded QA | **50/50** | post PR #727 |
 
 Artifacts:
 
-- `/opt/cursor/artifacts/operator-voice-50-v3-prod-20260723-0347/production-retest.json` (run 2)
-- `/opt/cursor/artifacts/operator-voice-50-v3-prod-20260723-0441/` (run 3 — auth blocker)
-- `/opt/cursor/artifacts/operator-voice-50-v3-prod-20260723-0649/` (run 4 — **3/50** voice)
+- `/opt/cursor/artifacts/operator-voice-50-v3-prod-20260723-0347/` (run 2)
+- `/opt/cursor/artifacts/operator-voice-50-v3-prod-20260723-0649/` (run 4 — 3/50)
+- `/opt/cursor/artifacts/operator-voice-50-v3-prod-20260723-1741-deadlines/` (run 7 — **26/50** best)
 
 ---
 
