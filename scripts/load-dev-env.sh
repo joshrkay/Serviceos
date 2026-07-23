@@ -37,6 +37,11 @@ if [ -f "$_dev_env_root/.env" ]; then
 fi
 set +a
 
+if [[ "${CLERK_SECRET_KEY:-}" == sk_live_* ]]; then
+  echo "WARNING: CLERK_SECRET_KEY is sk_live_ but load-dev-env is for Development only." >&2
+  echo "         Use: source scripts/load-prod-env.sh" >&2
+fi
+
 export BASE_URL="${BASE_URL:-$E2E_BASE_URL}"
 export API_URL="${API_URL:-$E2E_API_URL}"
 export DATABASE_URL="${DATABASE_URL:-$E2E_DB_URL_READWRITE}"

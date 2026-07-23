@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# sync-dev-env-from-cloud.sh — populate gitignored env files from cloud agent secrets.
+# sync-dev-env-from-cloud.sh — populate gitignored **Development** env files from cloud agent secrets.
 #
-# Requires in shell:
+# Requires in shell (must be sk_test_ / pk_test_ — never sk_live_):
 #   DATABASE_URL (or /opt/cursor/artifacts/railway-database-url.env)
 #   CLERK_SECRET_KEY
 #   VITE_CLERK_PUBLISHABLE_KEY (or CLERK_PUBLISHABLE_KEY)
@@ -9,6 +9,8 @@
 # Usage:
 #   source /opt/cursor/artifacts/railway-database-url.env  # optional
 #   bash scripts/sync-dev-env-from-cloud.sh
+#
+# Does NOT write .env.production.local or modify Railway production.
 
 set -euo pipefail
 
@@ -26,6 +28,13 @@ fi
 : "${CLERK_SECRET_KEY:?CLERK_SECRET_KEY required}"
 PK="${CLERK_PUBLISHABLE_KEY:-${VITE_CLERK_PUBLISHABLE_KEY:-}}"
 : "${PK:?CLERK_PUBLISHABLE_KEY or VITE_CLERK_PUBLISHABLE_KEY required}"
+
+if [[ "$CLERK_SECRET_KEY" == sk_live_* ]] || [[ "$PK" == pk_live_* ]]; then
+  echo "ERROR: sync-dev-env refuses live Clerk keys (sk_live_/pk_live_)." >&2
+  echo "       This script only writes Development local env files." >&2
+  echo "       For production probes use: source scripts/load-prod-env.sh" >&2
+  exit 1
+fi
 
 cat > .env.qa << EOF
 # Synced from Railway Development ($(date -u +%Y-%m-%dT%H:%M:%SZ))

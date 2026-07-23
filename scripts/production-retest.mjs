@@ -24,7 +24,23 @@ const PROD_WEB = (process.env.PROD_WEB_URL || 'https://serviceosweb-production.u
 const API_URL = (process.env.API_URL || PROD_API).replace(/\/$/, '');
 const OUT_DIR = process.env.OUT_DIR || `/opt/cursor/artifacts/production-retest-${new Date().toISOString().slice(0, 10)}`;
 const CLERK_USER_ID = process.env.CLERK_USER_ID || 'user_3GZQEdOUZSzhUNn7pb57fW5jKyg';
-const CLERK_SECRET = process.env.CLERK_SECRET_KEY || process.env.E2E_CLERK_SECRET_KEY || '';
+const CLERK_SECRET = process.env.PROD_CLERK_SECRET_KEY || process.env.CLERK_SECRET_KEY || '';
+
+function assertLiveClerkSecret(secret) {
+  if (!secret) {
+    throw new Error(
+      'CLERK_SECRET_KEY (sk_live_…) required for production retest — dev E2E keys are not used here',
+    );
+  }
+  if (secret.startsWith('sk_test_')) {
+    throw new Error(
+      'Refusing sk_test_ for production retest — use sk_live_ from therivetapp (source scripts/load-prod-env.sh)',
+    );
+  }
+  if (!secret.startsWith('sk_live_')) {
+    throw new Error(`CLERK_SECRET_KEY must be sk_live_… (got ${secret.slice(0, 8)}…)`);
+  }
+}
 
 const probeArg = process.argv.includes('--probe') ? process.argv[process.argv.indexOf('--probe') + 1] : null;
 const CORPUS_PATH = probeArg
@@ -170,9 +186,13 @@ async function main() {
 
   report.auth.agent_clerk_secret_prefix = CLERK_SECRET ? CLERK_SECRET.slice(0, 8) + '…' : 'missing';
 
-  if (!CLERK_SECRET) {
-    report.auth.error = 'CLERK_SECRET_KEY missing — cannot mint JWT';
-  } else {
+  try {
+    assertLiveClerkSecret(CLERK_SECRET);
+  } catch (err) {
+    report.auth.error = err instanceof Error ? err.message : String(err);
+  }
+
+  if (!report.auth.error) {
     try {
       const { jwt, sessionId } = await mintClerkServiceosJwt(CLERK_SECRET, CLERK_USER_ID);
       const claims = decodeJwtPayload(jwt);

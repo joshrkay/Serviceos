@@ -7,9 +7,10 @@
 #   3. Operator voice fixtures seeded on that tenant (see seed block below)
 #
 # Usage:
-#   CLERK_SECRET_KEY=sk_live_… \
-#   CLERK_USER_ID=user_… \
-#   ./scripts/run-production-operator-voice-50.sh v3
+#   source scripts/load-prod-env.sh   # sk_live_ from .env.production.local only
+#   CLERK_USER_ID=user_… ./scripts/run-production-operator-voice-50.sh v3
+#
+# Do NOT source scripts/load-dev-env.sh before this — dev sk_test_ keys are refused.
 #
 # Optional fixture seed (requires production Postgres):
 #   PROD_DATABASE_URL=postgres://… \
@@ -22,9 +23,17 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CORPUS="${1:-v3}"
 SEED="${2:-}"
 
+# Prefer production-only env file; never fall back to E2E/dev secrets.
+if [[ -f "$ROOT/.env.production.local" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  . "$ROOT/.env.production.local"
+  set +a
+fi
+
 API_URL="${API_URL:-https://serviceosapi-production.up.railway.app}"
 OUT_DIR="${OUT_DIR:-/opt/cursor/artifacts/operator-voice-50-${CORPUS}-prod-$(date -u +%Y%m%d-%H%M)}"
-CLERK_SECRET="${CLERK_SECRET_KEY:-${E2E_CLERK_SECRET_KEY:-}}"
+CLERK_SECRET="${PROD_CLERK_SECRET_KEY:-${CLERK_SECRET_KEY:-}}"
 
 if [[ -z "$CLERK_SECRET" ]]; then
   echo "ERROR: CLERK_SECRET_KEY (sk_live_…) is required for production probes." >&2
@@ -34,7 +43,7 @@ fi
 
 if [[ "$CLERK_SECRET" != sk_live_* ]]; then
   echo "ERROR: CLERK_SECRET_KEY must be sk_live_… (got ${CLERK_SECRET:0:8}…)." >&2
-  echo "Inject the production Clerk secret into this agent environment, then re-run." >&2
+  echo "       source scripts/load-prod-env.sh — do not use dev sk_test_ keys." >&2
   exit 1
 fi
 

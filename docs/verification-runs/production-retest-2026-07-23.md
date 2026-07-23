@@ -107,4 +107,4 @@ Verified via Railway + Clerk dashboards — **no production key changes were req
 
 **Reverted (not a key change):** `serviceos` JWT template lifetime was briefly raised to 3600s for a long probe run; restored to **60s** default in Clerk production.
 
-**Local only (gitignored):** `.env.production.local` may hold `sk_live_` for manual probes when the cloud agent only injects `sk_test_`. Does not modify deployed production config.
+**Local only (gitignored):** `.env.production.local` holds `sk_live_` for manual probes via `source scripts/load-prod-env.sh`. Dev sync scripts **refuse** live keys and never write this file. Deployed Railway production remains `sk_live_` / `pk_live_`.
