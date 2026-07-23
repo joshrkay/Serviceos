@@ -3,6 +3,7 @@ node_modules/
 dist/
 web-build/
 .e2e-web/
+.e2e-web-dev/
 .e2e-results/
 *.log
 .env
