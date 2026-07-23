@@ -34,6 +34,11 @@ const configSchema = z.object({
   AI_PROVIDER_API_KEY: z.string().min(1).optional(),
   AI_PROVIDER_BASE_URL: z.string().url().optional(),
   AI_DEFAULT_MODEL: z.string().default('gpt-4o-mini'),
+  // Dual-provider failover (OpenAI primary → OpenRouter fallback). Both key
+  // and base URL must be set together; either alone is ignored at factory time.
+  AI_FALLBACK_PROVIDER_API_KEY: z.string().min(1).optional(),
+  AI_FALLBACK_PROVIDER_BASE_URL: z.string().url().optional(),
+  AI_FALLBACK_LIGHTWEIGHT_MODEL: z.string().min(1).optional(),
   SENTRY_DSN: z.string().optional(),
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
   WEBHOOK_SIGNING_SECRET: z.string().optional(),

@@ -1,5 +1,11 @@
 import { LLMGateway, SYSTEM_TENANT_ID } from './gateway';
-import type { LLMProvider, LLMGatewayConfig, LLMGatewayLogger } from './gateway';
+import type {
+  LLMProvider,
+  LLMGatewayConfig,
+  LLMGatewayLogger,
+  LLMRequest,
+  LLMResponse,
+} from './gateway';
 import { OpenAICompatibleProvider } from '../providers/openai-compatible';
 import type { EmbeddingProvider } from '../providers/openai-compatible';
 import { MockLLMProvider } from '../providers/mock';
@@ -22,6 +28,9 @@ import { createRedisCacheStore } from './redis-cache-store';
 import { findProviderModelMismatch } from './provider-model-compat';
 import { DEFAULT_AI_ROUTING_CONFIG } from '../../config/ai-routing';
 
+/** Default classify/lightweight model when failing over to OpenRouter. */
+export const DEFAULT_FALLBACK_LIGHTWEIGHT_MODEL = 'meta-llama/llama-3.1-8b-instruct';
+
 /**
  * Create the LLM gateway from application config.
  *
@@ -40,8 +49,77 @@ import { DEFAULT_AI_ROUTING_CONFIG } from '../../config/ai-routing';
  *     AI_PROVIDER_API_KEY=sk-...
  *     AI_DEFAULT_MODEL=gpt-4o-mini
  *
+ *   Dual-provider failover (Profile A primary + OpenRouter fallback):
+ *     AI_FALLBACK_PROVIDER_API_KEY=sk-or-...
+ *     AI_FALLBACK_PROVIDER_BASE_URL=https://openrouter.ai/api/v1
+ *     AI_FALLBACK_LIGHTWEIGHT_MODEL=meta-llama/llama-3.1-8b-instruct  # optional
+ *
  *   Any other OpenAI-compatible endpoint works the same way.
  */
+
+/**
+ * Rewrites classify/lightweight model ids when the primary OpenAI model would
+ * be invalid or undesirable on the OpenRouter fallback host.
+ */
+export class FallbackModelOverrideProvider implements LLMProvider {
+  readonly name: string;
+
+  constructor(
+    private readonly inner: LLMProvider,
+    private readonly lightweightModel: string,
+  ) {
+    this.name = inner.name;
+  }
+
+  async complete(request: LLMRequest): Promise<LLMResponse> {
+    const overrideClassify = request.taskType === 'classify_intent';
+    const next = overrideClassify
+      ? { ...request, model: this.lightweightModel }
+      : request;
+    return this.inner.complete(next);
+  }
+
+  async isAvailable(): Promise<boolean> {
+    return this.inner.isAvailable();
+  }
+}
+
+function openRouterHeaders(baseURL: string): Record<string, string> | undefined {
+  return baseURL.includes('openrouter.ai')
+    ? {
+        'HTTP-Referer': 'https://rivet.ai',
+        'X-Title': 'Rivet',
+      }
+    : undefined;
+}
+
+/**
+ * Build fallback providers from AppConfig / env. Returns [] when either
+ * AI_FALLBACK_PROVIDER_API_KEY or AI_FALLBACK_PROVIDER_BASE_URL is missing
+ * (staged rollout — no boot failure).
+ */
+export function buildFallbackProviders(config: AppConfig): LLMProvider[] {
+  const apiKey =
+    config.AI_FALLBACK_PROVIDER_API_KEY?.trim() ||
+    process.env.AI_FALLBACK_PROVIDER_API_KEY?.trim();
+  const baseURL =
+    config.AI_FALLBACK_PROVIDER_BASE_URL?.trim() ||
+    process.env.AI_FALLBACK_PROVIDER_BASE_URL?.trim();
+  if (!apiKey || !baseURL) return [];
+
+  const lightweightModel =
+    config.AI_FALLBACK_LIGHTWEIGHT_MODEL?.trim() ||
+    process.env.AI_FALLBACK_LIGHTWEIGHT_MODEL?.trim() ||
+    DEFAULT_FALLBACK_LIGHTWEIGHT_MODEL;
+
+  const secondary = new OpenAICompatibleProvider({
+    apiKey,
+    baseURL,
+    defaultHeaders: openRouterHeaders(baseURL),
+  });
+
+  return [new FallbackModelOverrideProvider(secondary, lightweightModel)];
+}
 export interface CreateLLMGatewayOptions {
   /**
    * Optional P2-030 shadow-comparison store. When supplied together with
@@ -141,13 +219,7 @@ export function createLLMGateway(
   const primaryProvider = new OpenAICompatibleProvider({
     apiKey: config.AI_PROVIDER_API_KEY,
     baseURL,
-    defaultHeaders:
-      baseURL.includes('openrouter.ai')
-        ? {
-            'HTTP-Referer': 'https://rivet.ai',
-            'X-Title': 'Rivet',
-          }
-        : undefined,
+    defaultHeaders: openRouterHeaders(baseURL),
   });
 
   // P2-030 — optional shadow-comparison wrapper. Opt in by setting
@@ -173,10 +245,22 @@ export function createLLMGateway(
   // Publish the breaker registry for the health endpoint.
   sharedBreakerRegistry = breakerRegistry;
 
+  // FM-03 — dual-provider failover. Explicit resilience.fallbackProviders wins
+  // (tests); otherwise wire from AI_FALLBACK_PROVIDER_* when both are set.
+  const fallbackProviders =
+    opts.resilience?.fallbackProviders ?? buildFallbackProviders(config);
+  if (fallbackProviders.length > 0) {
+    opts.logger?.info('AI fallback provider wired', {
+      fallbackCount: fallbackProviders.length,
+      fallbackNames: fallbackProviders.map((p) => p.name),
+    });
+  }
+
   const resilientProvider = composeResilienceStack(shadowWrappedProvider, {
     ...opts.resilience,
     breakers: breakerRegistry,
     quota: quotaRegistry,
+    fallbackProviders,
   });
 
   const providers = new Map<string, LLMProvider>([[resilientProvider.name, resilientProvider]]);
