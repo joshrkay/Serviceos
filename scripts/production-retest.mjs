@@ -2,14 +2,12 @@
 /**
  * Production retest harness — public health + Clerk RS256 auth probe + optional voice top-50.
  *
- * Requires CLERK_SECRET_KEY for the **same Clerk instance** the target API verifies
- * (production API uses pk_live / therivetapp — needs sk_live, not sk_test).
+ * Production Clerk blocks Backend API session minting. Prefer a browser-captured
+ * `serviceos` JWT via `--jwt-file` (re-read before each case for the 60s template).
  *
  * Usage:
- *   CLERK_SECRET_KEY=sk_live_… node scripts/production-retest.mjs
- *   API_URL=https://serviceosapi-production.up.railway.app \
- *     CLERK_USER_ID=user_… \
- *     node scripts/production-retest.mjs --probe v3
+ *   node scripts/production-retest.mjs --probe v3 --jwt-file .tmp-prod-serviceos.jwt
+ *   CLERK_SECRET_KEY=sk_live_… CLERK_USER_ID=user_… node scripts/production-retest.mjs --probe v3
  */
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -27,9 +25,21 @@ const CLERK_USER_ID = process.env.CLERK_USER_ID || 'user_3GZQEdOUZSzhUNn7pb57fW5
 const CLERK_SECRET = process.env.CLERK_SECRET_KEY || process.env.E2E_CLERK_SECRET_KEY || '';
 
 const probeArg = process.argv.includes('--probe') ? process.argv[process.argv.indexOf('--probe') + 1] : null;
+const jwtFileArg = process.argv.includes('--jwt-file')
+  ? process.argv[process.argv.indexOf('--jwt-file') + 1]
+  : process.env.SERVICEOS_JWT_FILE || null;
 const CORPUS_PATH = probeArg
   ? path.join(ROOT, `fixtures/voice/operator-voice-top-50-${probeArg}-cases.json`)
   : null;
+
+export function loadServiceosJwtFromFile(jwtFile) {
+  const resolved = path.isAbsolute(jwtFile) ? jwtFile : path.join(ROOT, jwtFile);
+  const jwt = fs.readFileSync(resolved, 'utf8').trim().replace(/^["']|["']$/g, '');
+  if (jwt.split('.').length !== 3) {
+    throw new Error(`Invalid JWT in ${resolved} — expected 3 dot-separated parts`);
+  }
+  return jwt;
+}
 
 async function fetchJson(url, opts = {}) {
   const res = await fetch(url, opts);
@@ -100,16 +110,23 @@ async function api(base, method, p, { token, body } = {}) {
   return { status: res.status, json };
 }
 
-async function runVoiceProbe(token, casesPath) {
+/**
+ * @param {string | (() => string)} tokenOrGetter
+ *   Static JWT, or a getter re-read before each case (60s serviceos template).
+ */
+async function runVoiceProbe(tokenOrGetter, casesPath) {
   const source = JSON.parse(fs.readFileSync(casesPath, 'utf8'));
   const cases = loadProbeCases(source);
   const corpus = probeCasesMeta(source, casesPath);
   const assistantCounts = { PASS: 0, PARTIAL: 0, DEGRADED: 0, FAIL: 0, BLOCKED: 0 };
   const voiceCounts = { PASS: 0, PARTIAL: 0, DEGRADED: 0, FAIL: 0, BLOCKED: 0 };
   const results = [];
-  const apiBound = (method, p, opts) => api(API_URL, method, p, { ...opts, token });
+  const resolveToken = typeof tokenOrGetter === 'function' ? tokenOrGetter : () => tokenOrGetter;
 
   for (const c of cases) {
+    const token = resolveToken();
+    const apiBound = (method, p, opts) => api(API_URL, method, p, { ...opts, token });
+
     process.stdout.write(`#${c.id} ${c.op}… `);
     const chat = await apiBound('POST', '/api/assistant/chat', {
       body: { messages: [{ role: 'user', content: c.utterance }], inputMode: 'text' },
@@ -144,6 +161,32 @@ async function runVoiceProbe(token, casesPath) {
   return { corpus, assistantCounts, voiceCounts, results };
 }
 
+async function runAuthenticatedProbe(jwt, report) {
+  const claims = decodeJwtPayload(jwt);
+  report.auth.jwt_iss = claims.iss;
+  report.auth.jwt_sub = claims.sub;
+  report.auth.jwt_tenant_id = claims.tenant_id ?? claims.public_metadata?.tenant_id ?? null;
+  report.auth.jwt_role = claims.role ?? null;
+
+  for (const [label, base] of [
+    ['prod_me', PROD_API],
+    ['dev_me', DEV_API],
+  ]) {
+    const me = await api(base, 'GET', '/api/me', { token: jwt });
+    report.auth[label] = { status: me.status, body: me.json };
+  }
+
+  if (report.auth.prod_me.status === 200 && CORPUS_PATH && fs.existsSync(CORPUS_PATH)) {
+    console.log(`\nRunning voice probe on ${API_URL} corpus ${probeArg}…`);
+    const tokenOrGetter = jwtFileArg
+      ? () => loadServiceosJwtFromFile(jwtFileArg)
+      : jwt;
+    report.probe = await runVoiceProbe(tokenOrGetter, CORPUS_PATH);
+  } else if (CORPUS_PATH) {
+    report.probe = { skipped: true, reason: `auth blocked: prod /api/me ${report.auth.prod_me.status}` };
+  }
+}
+
 async function main() {
   fs.mkdirSync(OUT_DIR, { recursive: true });
   const started = new Date().toISOString();
@@ -162,45 +205,52 @@ async function main() {
     report.checks[label] = await fetchJson(url);
   }
 
-  // Web Clerk key mode
-  const envJs = await fetchJson(`${PROD_WEB}/env.js`);
+  // Web Clerk key mode — prefer app.therivetapp.com when probing production
+  const webEnvUrl = process.env.PROD_WEB_ENV_URL || 'https://app.therivetapp.com/env.js';
+  const envJs = await fetchJson(webEnvUrl);
   const pkMatch = envJs.text?.match(/VITE_CLERK_PUBLISHABLE_KEY:\s*"([^"]+)"/);
   report.checks.prod_web_clerk_pk = pkMatch?.[1] ? pkMatch[1].slice(0, 12) + '…' : null;
-  report.checks.prod_web_clerk_mode = pkMatch?.[1]?.startsWith('pk_live_') ? 'live' : pkMatch?.[1]?.startsWith('pk_test_') ? 'test' : 'unknown';
+  report.checks.prod_web_clerk_mode = pkMatch?.[1]?.startsWith('pk_live_')
+    ? 'live'
+    : pkMatch?.[1]?.startsWith('pk_test_')
+      ? 'test'
+      : 'unknown';
 
   report.auth.agent_clerk_secret_prefix = CLERK_SECRET ? CLERK_SECRET.slice(0, 8) + '…' : 'missing';
 
-  if (!CLERK_SECRET) {
-    report.auth.error = 'CLERK_SECRET_KEY missing — cannot mint JWT';
+  if (jwtFileArg) {
+    try {
+      const jwt = loadServiceosJwtFromFile(jwtFileArg);
+      report.auth.jwt_source = jwtFileArg;
+      await runAuthenticatedProbe(jwt, report);
+    } catch (err) {
+      report.auth.error = err instanceof Error ? err.message : String(err);
+    }
+  } else if (!CLERK_SECRET) {
+    report.auth.error = 'CLERK_SECRET_KEY missing — cannot mint JWT (use --jwt-file for production)';
+  } else if (CLERK_SECRET.startsWith('sk_test_') && API_URL.includes('production')) {
+    report.auth.error =
+      'CLERK_SECRET_KEY is sk_test_ but API_URL is production — use --jwt-file with a browser serviceos JWT (or sk_live_ + sign-in token flow). Refusing to mint.';
+    if (CORPUS_PATH) {
+      report.probe = { skipped: true, reason: 'auth blocked: sk_test_ cannot authenticate to production' };
+    }
   } else {
     try {
-      const { jwt, sessionId } = await mintClerkServiceosJwt(CLERK_SECRET, CLERK_USER_ID);
-      const claims = decodeJwtPayload(jwt);
-      report.auth.clerk_session = sessionId;
-      report.auth.jwt_iss = claims.iss;
-      report.auth.jwt_sub = claims.sub;
-      report.auth.jwt_tenant_id = claims.tenant_id ?? claims.public_metadata?.tenant_id ?? null;
-      report.auth.jwt_role = claims.role ?? null;
+      const minted = await mintClerkServiceosJwt(CLERK_SECRET, CLERK_USER_ID);
+      report.auth.clerk_session = minted.sessionId;
+      report.auth.jwt_source = 'clerk_backend_session_mint';
 
-      for (const [label, base] of [
-        ['prod_me', PROD_API],
-        ['dev_me', DEV_API],
-      ]) {
-        const me = await api(base, 'GET', '/api/me', { token: jwt });
-        report.auth[label] = { status: me.status, body: me.json };
-      }
-
-      // HMAC sanity on prod (expect 401)
-      const hmac = mintHmacToken(CLERK_SECRET, CLERK_USER_ID, claims.tenant_id || '00000000-0000-0000-0000-000000000000', 'owner');
+      const claims = decodeJwtPayload(minted.jwt);
+      const hmac = mintHmacToken(
+        CLERK_SECRET,
+        CLERK_USER_ID,
+        claims.tenant_id || '00000000-0000-0000-0000-000000000000',
+        'owner',
+      );
       const hmacMe = await api(PROD_API, 'GET', '/api/me', { token: hmac });
       report.auth.prod_me_hmac = { status: hmacMe.status, body: hmacMe.json };
 
-      if (report.auth.prod_me.status === 200 && CORPUS_PATH && fs.existsSync(CORPUS_PATH)) {
-        console.log(`\nRunning voice probe on ${API_URL} corpus ${probeArg}…`);
-        report.probe = await runVoiceProbe(jwt, CORPUS_PATH);
-      } else if (CORPUS_PATH) {
-        report.probe = { skipped: true, reason: `auth blocked: prod /api/me ${report.auth.prod_me.status}` };
-      }
+      await runAuthenticatedProbe(minted.jwt, report);
     } catch (err) {
       report.auth.error = err instanceof Error ? err.message : String(err);
     }
@@ -231,6 +281,7 @@ async function main() {
 | Path | Status |
 |------|--------|
 | Agent Clerk secret | ${report.auth.agent_clerk_secret_prefix} |
+| JWT source | ${report.auth.jwt_source ?? 'n/a'} |
 | Prod /api/me (RS256 serviceos JWT) | ${report.auth.prod_me?.status ?? 'n/a'} |
 | Dev /api/me (same JWT) | ${report.auth.dev_me?.status ?? 'n/a'} |
 | Prod /api/me (HMAC) | ${report.auth.prod_me_hmac?.status ?? 'n/a'} |
@@ -244,7 +295,14 @@ ${report.auth.error ? `\n**Auth error:** ${report.auth.error}` : ''}
   console.log('Wrote', outPath);
 }
 
-main().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+const isMain =
+  process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+
+if (isMain) {
+  main().catch((e) => {
+    console.error(e);
+    process.exit(1);
+  });
+}
+
+export { decodeJwtPayload, runVoiceProbe };
