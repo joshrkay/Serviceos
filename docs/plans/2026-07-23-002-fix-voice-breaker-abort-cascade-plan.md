@@ -81,7 +81,7 @@ breaker-open/unavailable. Gate and vary the live probe.
 
 - [x] `--voice-only` skips assistant chat per case
 - [x] Wait until `/api/health/ai` `available:true` before starting (env/flag)
-- [ ] Document variation matrix in verification run
+- [x] Document variation matrix in verification run
 
 ### Task 6 — Multi-variation validation gate
 
@@ -89,19 +89,21 @@ Run and record:
 
 1. [x] Unit pack (all new tests) — 98 passed incl. cascade A–D
 2. [x] `tsc --project tsconfig.build.json --noEmit`
-3. [ ] Live prod: voice-only v3 (after closed) — **blocked on merge/deploy** (PR Checks green; Railway PR preview `serviceosapi-serviceos-pr-734` returns 502)
-4. [ ] Live prod: full assistant+voice v3 (after closed) — blocked on merge/deploy
+3. [x] Live prod: voice-only v3 (after closed) — first wave 17/50 with empty classify deadline; after restoring `AI_CLASSIFY_INTENT_DEADLINE_MS=12000`: **30/50** (`…/voice-only-deadline12-2220/`); breaker stayed closed
+4. [x] Live prod: full assistant+voice v3 (after closed) — first wave 15/50; after deadline restore: **28/50** voice / **21/50** assistant (`…/full-deadline12-2229/`); no whole-run cascade
 5. [ ] Optional: v4 corpus voice-only smoke (first 10) if time
 
 Success criteria:
 
-- Unit: aborts never open breaker; 503 still does; classify cell isolated
-- Live voice-only: voice PASS ≥ previous best (26/50) and no mid-run breaker open lasting >1 cooldown, OR clear residual attributed only to true provider 5xx
-- Live full: voice PASS improves vs post-#732 8/50; breaker stays closed or recovers without cascading whole run
+- Unit: aborts never open breaker; 503 still does; classify cell isolated — **met**
+- Live voice-only: voice PASS ≥ previous best (26/50) — **met (30/50)** after Railway deadline restore; no mid-run breaker open — **met**
+- Live full: voice PASS improves vs post-#732 8/50; breaker stays closed without cascading whole run — **met (28/50)**
 
 ### Task 7 — Ship
 
-- [ ] Commit(s), push, PR, update `docs/verification-runs/operator-voice-50-v3-prod-2026-07-23.md`
+- [x] #734 merged + production Deploy success
+- [x] Update `docs/verification-runs/operator-voice-50-v3-prod-2026-07-23.md` with live scores
+- [x] Scoreboard docs PR (#735)
 
 ## Out of scope (explicit)
 
