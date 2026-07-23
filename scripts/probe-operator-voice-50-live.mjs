@@ -256,6 +256,100 @@ export function scoreVoice(json, status) {
   };
 }
 
+const INFRA_VOICE_REASONS = new Set([
+  'voice_classifier_provider',
+  'voice_classifier_deadline',
+  'voice_classifier_quota',
+  'voice_classifier_parse',
+]);
+
+const INFRA_ERROR_CODES = new Set([
+  'LLM_PROVIDER_UNAVAILABLE',
+  'BREAKER_OPEN',
+  'DEADLINE_EXCEEDED',
+  'PRIMARY_PROVIDER_UNAVAILABLE',
+  'ALL_PROVIDERS_FAILED',
+]);
+
+/**
+ * Bucket a non-PASS voice result into infra (A) vs product (B).
+ * PASS / BLOCKED-from-skip are not failures — callers should filter first.
+ */
+export function classifyVoiceFailureBucket(voiceResult) {
+  if (!voiceResult || voiceResult.verdict === 'PASS') return null;
+
+  const reason = voiceResult.reason ?? '';
+  const raw = voiceResult.rawSideEffects ?? [];
+  let errorCode;
+  let auditEventType;
+  let providerPath;
+  for (const effect of raw) {
+    const payload = effect?.payload ?? {};
+    if (payload.errorCode && !errorCode) errorCode = payload.errorCode;
+    if (payload.eventType && !auditEventType) auditEventType = payload.eventType;
+    if (Array.isArray(payload.providerPath) && !providerPath) {
+      providerPath = payload.providerPath;
+    }
+  }
+
+  const infraReason = INFRA_VOICE_REASONS.has(reason);
+  const infraCode = errorCode && INFRA_ERROR_CODES.has(errorCode);
+  const infraAudit =
+    typeof auditEventType === 'string' &&
+    (auditEventType.includes('classifier_provider') ||
+      auditEventType.includes('classifier_deadline') ||
+      auditEventType.includes('classifier_quota') ||
+      auditEventType.includes('classifier_parse'));
+  const authOrHttp =
+    reason.startsWith('auth_') ||
+    reason.startsWith('http_') ||
+    reason === 'session_create_401';
+
+  if (infraReason || infraCode || infraAudit || authOrHttp) {
+    return {
+      bucket: 'A',
+      reason,
+      errorCode: errorCode ?? null,
+      auditEventType: auditEventType ?? null,
+      providerPath: providerPath ?? null,
+    };
+  }
+
+  return {
+    bucket: 'B',
+    reason,
+    errorCode: errorCode ?? null,
+    auditEventType: auditEventType ?? null,
+    providerPath: providerPath ?? null,
+  };
+}
+
+/**
+ * Summarize probe results into infra (A) vs product (B) failure counts.
+ * @param {Array<{ id?: number, voice?: object }>} results
+ */
+export function buildFailureTaxonomy(results) {
+  const cases = [];
+  let A = 0;
+  let B = 0;
+  for (const row of results ?? []) {
+    const voice = row.voice;
+    if (!voice || voice.verdict === 'PASS') continue;
+    // voice_only_skipped assistant BLOCKED is irrelevant; taxonomy is voice-only
+    const classified = classifyVoiceFailureBucket(voice);
+    if (!classified) continue;
+    if (classified.bucket === 'A') A += 1;
+    else B += 1;
+    cases.push({
+      id: row.id,
+      op: row.op,
+      verdict: voice.verdict,
+      ...classified,
+    });
+  }
+  return { A, B, cases };
+}
+
 function bump(counts, verdict) {
   counts[verdict] = (counts[verdict] || 0) + 1;
 }
