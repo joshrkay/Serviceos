@@ -89,8 +89,8 @@ Run and record:
 
 1. [x] Unit pack (all new tests) — 98 passed incl. cascade A–D
 2. [x] `tsc --project tsconfig.build.json --noEmit`
-3. [ ] Live prod: voice-only v3 (after closed) — requires deploy of this PR
-4. [ ] Live prod: full assistant+voice v3 (after closed) — requires deploy of this PR
+3. [ ] Live prod: voice-only v3 (after closed) — **blocked on merge/deploy** (PR Checks green; Railway PR preview `serviceosapi-serviceos-pr-734` returns 502)
+4. [ ] Live prod: full assistant+voice v3 (after closed) — blocked on merge/deploy
 5. [ ] Optional: v4 corpus voice-only smoke (first 10) if time
 
 Success criteria:
