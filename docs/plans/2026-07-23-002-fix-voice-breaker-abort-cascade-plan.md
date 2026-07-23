@@ -103,7 +103,7 @@ Success criteria:
 
 - [x] #734 merged + production Deploy success
 - [x] Update `docs/verification-runs/operator-voice-50-v3-prod-2026-07-23.md` with live scores
-- [ ] Scoreboard docs PR
+- [x] Scoreboard docs PR (#735)
 
 ## Out of scope (explicit)
 
