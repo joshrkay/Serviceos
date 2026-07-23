@@ -256,6 +256,78 @@ export function scoreVoice(json, status) {
   };
 }
 
+const INFRA_ERROR_CODES = new Set([
+  'LLM_PROVIDER_UNAVAILABLE',
+  'BREAKER_OPEN',
+  'DEADLINE_EXCEEDED',
+]);
+
+/**
+ * Bucket a non-PASS voice score into infra (A) vs product (B).
+ *
+ * Bucket A: classifier provider/deadline/quota/parse, gateway codes, or a
+ * multi-hop providerPath that still failed.
+ * Bucket B: classify succeeded but proposal/entity/intent outcome missed.
+ *
+ * Returns null for PASS (and for skipped voice_only assistant rows).
+ */
+export function classifyVoiceFailureTaxonomy(voice, caseMeta = {}) {
+  if (!voice || voice.verdict === 'PASS') return null;
+  if (voice.reason === 'voice_only_skipped') return null;
+
+  const reason = typeof voice.reason === 'string' ? voice.reason : '';
+  const sideEffects = voice.rawSideEffects ?? [];
+  const audit = sideEffects.find((s) => s?.type === 'audit_log');
+  const eventType = audit?.payload?.eventType ?? '';
+  const errorCode =
+    voice.errorCode ??
+    audit?.payload?.errorCode ??
+    audit?.payload?.details?.errorCode ??
+    null;
+  const providerPath = voice.providerPath ?? audit?.payload?.providerPath ?? null;
+
+  const infraReason =
+    reason.startsWith('voice_classifier_') ||
+    reason.startsWith('session_create_') ||
+    reason.startsWith('http_') ||
+    reason.startsWith('auth_');
+  const infraAudit =
+    typeof eventType === 'string' &&
+    (eventType.includes('classifier_provider') ||
+      eventType.includes('classifier_deadline') ||
+      eventType.includes('classifier_quota') ||
+      eventType.includes('classifier_parse') ||
+      /classifier_.*_failure/.test(eventType));
+  const infraCode = typeof errorCode === 'string' && INFRA_ERROR_CODES.has(errorCode);
+  const infraPath = Array.isArray(providerPath) && providerPath.length >= 2 && voice.verdict !== 'PASS';
+
+  const bucket = infraReason || infraAudit || infraCode || infraPath ? 'A' : 'B';
+  return {
+    bucket,
+    caseId: caseMeta.id ?? null,
+    op: caseMeta.op ?? null,
+    verdict: voice.verdict,
+    reason,
+    errorCode,
+    eventType: eventType || null,
+    providerPath: Array.isArray(providerPath) ? providerPath : null,
+  };
+}
+
+/** Aggregate per-case taxonomy into `{ A, B, cases }` for reports. */
+export function buildFailureTaxonomy(results) {
+  const cases = [];
+  for (const row of results ?? []) {
+    const entry = classifyVoiceFailureTaxonomy(row.voice, row);
+    if (entry) cases.push(entry);
+  }
+  return {
+    A: cases.filter((c) => c.bucket === 'A').length,
+    B: cases.filter((c) => c.bucket === 'B').length,
+    cases,
+  };
+}
+
 function bump(counts, verdict) {
   counts[verdict] = (counts[verdict] || 0) + 1;
 }

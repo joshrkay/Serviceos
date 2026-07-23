@@ -4,6 +4,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  buildFailureTaxonomy,
+  classifyVoiceFailureTaxonomy,
   loadProbeCases,
   probeCasesMeta,
   resolveProbeDisambiguationFollowUp,
@@ -149,6 +151,72 @@ test('keeps provider failures distinct from low-confidence reprompts', () => {
 
   assert.equal(result.verdict, 'DEGRADED');
   assert.equal(result.reason, 'voice_classifier_provider');
+});
+
+test('taxonomy buckets classifier_provider_failure as infra A', () => {
+  const voice = scoreVoice(
+    {
+      state: 'intent_capture',
+      sideEffects: [
+        {
+          type: 'audit_log',
+          payload: {
+            eventType: 'classifier_provider_failure',
+            score: 0,
+            errorCode: 'LLM_PROVIDER_UNAVAILABLE',
+          },
+        },
+      ],
+    },
+    200,
+  );
+  const entry = classifyVoiceFailureTaxonomy(voice, { id: 7, op: 'create_job' });
+  assert.equal(entry.bucket, 'A');
+  assert.equal(entry.errorCode, 'LLM_PROVIDER_UNAVAILABLE');
+});
+
+test('taxonomy buckets PASS out of failure list', () => {
+  const voice = scoreVoice(
+    {
+      state: 'closing',
+      proposalIds: ['p1'],
+      sideEffects: [{ type: 'audit_log', payload: { eventType: 'intent_classified', score: 1 } }],
+    },
+    200,
+  );
+  assert.equal(voice.verdict, 'PASS');
+  assert.equal(classifyVoiceFailureTaxonomy(voice, { id: 1 }), null);
+});
+
+test('taxonomy buckets LLM_PROVIDER_UNAVAILABLE as A even when breaker closed', () => {
+  const entry = classifyVoiceFailureTaxonomy(
+    {
+      verdict: 'DEGRADED',
+      reason: 'voice_no_proposal',
+      errorCode: 'LLM_PROVIDER_UNAVAILABLE',
+      rawSideEffects: [],
+    },
+    { id: 9, op: 'reschedule' },
+  );
+  assert.equal(entry.bucket, 'A');
+});
+
+test('taxonomy buckets classified-but-no-proposal as product B', () => {
+  const voice = scoreVoice(
+    {
+      state: 'closing',
+      proposalIds: [],
+      sideEffects: [{ type: 'audit_log', payload: { eventType: 'intent_classified', score: 1 } }],
+    },
+    200,
+  );
+  assert.equal(voice.verdict, 'PARTIAL');
+  assert.equal(voice.reason, 'voice_no_proposal');
+  const entry = classifyVoiceFailureTaxonomy(voice, { id: 12, op: 'lookup' });
+  assert.equal(entry.bucket, 'B');
+  const summary = buildFailureTaxonomy([{ id: 12, op: 'lookup', voice }]);
+  assert.equal(summary.A, 0);
+  assert.equal(summary.B, 1);
 });
 
 test('scores semantic low confidence as a reprompt', () => {

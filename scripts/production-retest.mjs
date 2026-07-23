@@ -13,7 +13,14 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadProbeCases, probeCasesMeta, runVoiceSessionProbe, scoreAssistant, scoreVoice } from './probe-operator-voice-50-live.mjs';
+import {
+  buildFailureTaxonomy,
+  loadProbeCases,
+  probeCasesMeta,
+  runVoiceSessionProbe,
+  scoreAssistant,
+  scoreVoice,
+} from './probe-operator-voice-50-live.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PROD_API = (process.env.PROD_API_URL || 'https://serviceosapi-production.up.railway.app').replace(/\/$/, '');
@@ -197,7 +204,16 @@ async function runVoiceProbe(tokenOrGetter, casesPath) {
     console.log(`A=${assistant.verdict} V=${voice.verdict}`);
   }
 
-  return { corpus, assistantCounts, voiceCounts, results, voiceOnly, waitClosed };
+  const failureTaxonomy = buildFailureTaxonomy(results);
+  return {
+    corpus,
+    assistantCounts,
+    voiceCounts,
+    results,
+    voiceOnly,
+    waitClosed,
+    failureTaxonomy,
+  };
 }
 
 async function runAuthenticatedProbe(jwt, report) {
@@ -325,7 +341,7 @@ async function main() {
 | Dev /api/me (same JWT) | ${report.auth.dev_me?.status ?? 'n/a'} |
 | Prod /api/me (HMAC) | ${report.auth.prod_me_hmac?.status ?? 'n/a'} |
 
-${report.probe?.assistantCounts ? `## Voice probe (${probeArg})\n\nAssistant PASS: ${report.probe.assistantCounts.PASS}/50\nVoice PASS: ${report.probe.voiceCounts.PASS}/50` : report.probe?.skipped ? `## Voice probe\n\nSkipped: ${report.probe.reason}` : ''}
+${report.probe?.assistantCounts ? `## Voice probe (${probeArg})\n\nAssistant PASS: ${report.probe.assistantCounts.PASS}/50\nVoice PASS: ${report.probe.voiceCounts.PASS}/50\nFailure taxonomy: A(infra)=${report.probe.failureTaxonomy?.A ?? 0} B(product)=${report.probe.failureTaxonomy?.B ?? 0}` : report.probe?.skipped ? `## Voice probe\n\nSkipped: ${report.probe.reason}` : ''}
 
 ${report.auth.error ? `\n**Auth error:** ${report.auth.error}` : ''}
 `;
