@@ -269,10 +269,21 @@ export class InMemoryUserRepository implements UserRepository {
   ): Promise<User | null> {
     const u = this.users.get(id);
     if (!u || u.tenantId !== tenantId || !u.deletedAt) return null;
+    // Mirror Pg: access restoration never fails on the mobile number — if a
+    // teammate claimed the freed number meanwhile, restore without it.
+    const numberTaken =
+      mobileNumber !== null &&
+      Array.from(this.users.values()).some(
+        (other) =>
+          other.tenantId === tenantId &&
+          other.id !== id &&
+          other.mobileNumber === mobileNumber &&
+          !other.deletedAt,
+      );
     const next: User = {
       ...u,
       deletedAt: null,
-      mobileNumber: mobileNumber ?? undefined,
+      mobileNumber: numberTaken ? undefined : (mobileNumber ?? undefined),
       updatedAt: new Date(),
     };
     this.users.set(id, next);

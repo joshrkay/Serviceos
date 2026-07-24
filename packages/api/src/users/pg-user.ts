@@ -243,8 +243,15 @@ export class PgUserRepository extends PgBaseRepository implements UserRepository
     mobileNumber: string | null,
   ): Promise<User | null> {
     return this.withTenantTransaction(tenantId, async (client) => {
+      // Access restoration MUST NOT depend on the mobile number: the early
+      // durable commit released the users_mobile_unique slot, so a teammate
+      // may have claimed the number in the meantime. A single UPDATE that
+      // also set mobile_number would then 23505 and abandon the whole
+      // restore, leaving the caller locked out. Restore access first; then
+      // best-effort re-instate the number under a SAVEPOINT (on conflict
+      // the number is simply lost — re-enterable in Settings).
       const result = await client.query(
-        `UPDATE users SET deleted_at = NULL, mobile_number = $3, updated_at = NOW()
+        `UPDATE users SET deleted_at = NULL, updated_at = NOW()
          WHERE id = $1
            AND tenant_id = $2
            AND deleted_at IS NOT NULL
@@ -252,11 +259,32 @@ export class PgUserRepository extends PgBaseRepository implements UserRepository
                    COALESCE(can_field_serve, false) AS can_field_serve,
                    mobile_number,
                    created_at, updated_at`,
-        [id, tenantId, mobileNumber],
+        [id, tenantId],
       );
-      return result.rows.length > 0
-        ? mapRow(result.rows[0] as Record<string, unknown>)
-        : null;
+      if (result.rows.length === 0) return null;
+      let restored = mapRow(result.rows[0] as Record<string, unknown>);
+      if (mobileNumber !== null) {
+        await client.query('SAVEPOINT restore_mobile');
+        try {
+          const withNumber = await client.query(
+            `UPDATE users SET mobile_number = $1, updated_at = NOW()
+             WHERE id = $2 AND tenant_id = $3
+             RETURNING id, tenant_id, clerk_user_id, email, role, first_name, last_name,
+                       COALESCE(can_field_serve, false) AS can_field_serve,
+                       mobile_number,
+                       created_at, updated_at`,
+            [mobileNumber, id, tenantId],
+          );
+          await client.query('RELEASE SAVEPOINT restore_mobile');
+          if (withNumber.rows.length > 0) {
+            restored = mapRow(withNumber.rows[0] as Record<string, unknown>);
+          }
+        } catch {
+          await client.query('ROLLBACK TO SAVEPOINT restore_mobile');
+          await client.query('RELEASE SAVEPOINT restore_mobile').catch(() => undefined);
+        }
+      }
+      return restored;
     });
   }
 

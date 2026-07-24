@@ -356,11 +356,11 @@ describe('DELETE /api/users/me — in-app account deletion (guideline 5.1.1(v))'
     );
   });
 
-  it('aborts with 502 and restores the account when the Clerk delete fails', async () => {
+  it('restores the account on a DEFINITE Clerk failure (4xx) with 502', async () => {
     // Give the tech a mobile number so the compensation path is fully pinned:
     // softDeleteSelf clears it, restoreAccount must bring it back.
     await repo.setMobileNumber(TENANT, techId, '+15550002222');
-    const clerkFetch = vi.fn().mockResolvedValue({ ok: false, status: 500 });
+    const clerkFetch = vi.fn().mockResolvedValue({ ok: false, status: 403 });
     const app = buildDeleteApp('clerk_tech', 'technician', {
       clerkSecretKey: 'sk_test',
       clerkFetch: clerkFetch as unknown as typeof fetch,
@@ -368,6 +368,8 @@ describe('DELETE /api/users/me — in-app account deletion (guideline 5.1.1(v))'
     const res = await request(app).delete('/api/users/me');
     expect(res.status).toBe(502);
     expect(res.body.error).toBe('ACCOUNT_DELETE_FAILED');
+    // Definite 4xx → no verification GET needed, one Clerk call only.
+    expect(clerkFetch).toHaveBeenCalledTimes(1);
     // The account must remain intact and usable — including the mobile number.
     const restored = await repo.findById(TENANT, techId);
     expect(restored).not.toBeNull();
@@ -378,7 +380,51 @@ describe('DELETE /api/users/me — in-app account deletion (guideline 5.1.1(v))'
     expect(lastForceCommit).toBe(true);
   });
 
-  it('aborts with 502 and restores the account when the Clerk call throws (network)', async () => {
+  it('verifies via GET on an ambiguous failure and proceeds when Clerk shows 404', async () => {
+    // DELETE times out, but Clerk actually processed it — the verification
+    // GET finds the user gone, so the deletion completes successfully and
+    // no ghost account is restored.
+    const removeAllForUser = vi.fn().mockResolvedValue(1);
+    const clerkFetch = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('ETIMEDOUT'))
+      .mockResolvedValueOnce({ ok: false, status: 404 });
+    const app = buildDeleteApp('clerk_tech', 'technician', {
+      clerkSecretKey: 'sk_test',
+      clerkFetch: clerkFetch as unknown as typeof fetch,
+      deviceTokenRepo: { removeAllForUser },
+    });
+    const res = await request(app).delete('/api/users/me');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ deleted: true });
+    expect(clerkFetch).toHaveBeenCalledTimes(2);
+    // Second call is the verification GET, not another DELETE.
+    const [, checkOpts] = clerkFetch.mock.calls[1] as [string, { method?: string }];
+    expect(checkOpts.method).toBeUndefined();
+    expect(await repo.findById(TENANT, techId)).toBeNull();
+    expect(removeAllForUser).toHaveBeenCalledWith(TENANT, 'clerk_tech');
+  });
+
+  it('restores the account when the verification GET finds the Clerk user alive', async () => {
+    const clerkFetch = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: false, status: 500 })
+      .mockResolvedValueOnce({ ok: true, status: 200 });
+    const app = buildDeleteApp('clerk_tech', 'technician', {
+      clerkSecretKey: 'sk_test',
+      clerkFetch: clerkFetch as unknown as typeof fetch,
+    });
+    const res = await request(app).delete('/api/users/me');
+    expect(res.status).toBe(502);
+    expect(res.body.error).toBe('ACCOUNT_DELETE_FAILED');
+    expect(await repo.findById(TENANT, techId)).not.toBeNull();
+    expect(lastForceCommit).toBe(true);
+  });
+
+  it('leaves the account deactivated when Clerk state cannot be confirmed', async () => {
+    // Both the DELETE and the verification GET fail: restoring blindly
+    // could resurrect a ghost account whose Clerk identity is gone, so the
+    // durable stamp stays and the response directs the user to support.
     const clerkFetch = vi.fn().mockRejectedValue(new Error('ECONNRESET'));
     const app = buildDeleteApp('clerk_tech', 'technician', {
       clerkSecretKey: 'sk_test',
@@ -386,7 +432,10 @@ describe('DELETE /api/users/me — in-app account deletion (guideline 5.1.1(v))'
     });
     const res = await request(app).delete('/api/users/me');
     expect(res.status).toBe(502);
-    expect(await repo.findById(TENANT, techId)).not.toBeNull();
+    expect(res.body.error).toBe('ACCOUNT_DELETE_FAILED');
+    expect(res.body.message).toMatch(/contact support/);
+    expect(await repo.findById(TENANT, techId)).toBeNull();
+    expect(audited).toHaveLength(0);
   });
 
   it('reserves the local deletion BEFORE calling Clerk (serialization order)', async () => {

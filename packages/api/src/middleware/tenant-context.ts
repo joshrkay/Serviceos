@@ -326,6 +326,19 @@ export async function commitRequestTransactionAndBegin(): Promise<void> {
   );
 }
 
+/**
+ * Run `fn` OUTSIDE the request-scoped transaction context: repository calls
+ * inside it check out a fresh pool connection and self-commit, even when the
+ * caller is mid-request. For compensation writes that must not depend on the
+ * request client — e.g. after `commitRequestTransactionAndBegin` fails
+ * post-COMMIT and the request client may be unusable. Note the pool-size
+ * caveat: at DB_MAX_CONNECTIONS=1 (dev) a fresh checkout can wait on the
+ * request client — reserve this for rare failure paths, never routine flow.
+ */
+export async function runOutsideRequestTransaction<T>(fn: () => Promise<T>): Promise<T> {
+  return tenantContextStore.exit(fn);
+}
+
 let requestSavepointSeq = 0;
 
 /**

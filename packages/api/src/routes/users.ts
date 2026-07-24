@@ -4,6 +4,7 @@ import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import {
   commitRequestTransactionAndBegin,
+  runOutsideRequestTransaction,
   withRequestSavepoint,
 } from '../middleware/tenant-context';
 import { toErrorResponse, ValidationError } from '../shared/errors';
@@ -313,10 +314,13 @@ export function createUsersRouter(
    *      owner → 409; already-deleted row → idempotent 200.
    *   3. Delete the Clerk user (bounded to 10s like the Clerk calls in
    *      webhooks/routes.ts — a stalled upstream must not pin this
-   *      request's transaction/pool client). On failure, timeout, or
-   *      network error the local stamp is rolled back via restoreAccount
-   *      → 502, account fully usable again. Without CLERK_SECRET_KEY
-   *      (dev/tests) this step is skipped.
+   *      request's transaction/pool client). Outcome is three-way:
+   *      confirmed-deleted → proceed; confirmed-alive (definite 4xx, or a
+   *      verification GET finds the user) → restoreAccount + 502;
+   *      unconfirmable → the stamp STAYS (deactivated, support-reversible)
+   *      because blindly restoring a possibly-Clerk-deleted user would
+   *      create a ghost owner after its webhook already no-op'd. Without
+   *      CLERK_SECRET_KEY (dev/tests) this step is skipped.
    *   4. Purge the user's push tokens — the client's own sign-out cleanup
    *      can no longer authenticate, so the server must do it or the
    *      deleted user's device keeps receiving tenant pushes.
@@ -390,32 +394,81 @@ export function createUsersRouter(
         // lock — correctly: the guard was already evaluated under it
         // against committed state, and from here the stamp is permanent
         // unless we explicitly compensate below.
-        await commitRequestTransactionAndBegin();
+        try {
+          await commitRequestTransactionAndBegin();
+        } catch {
+          // Post-COMMIT failure (e.g. connection dropped at the COMMIT/BEGIN
+          // boundary): the stamp may already be durable while the request
+          // client is unusable — without compensation the caller would be
+          // locked out locally with their Clerk identity intact. Restore on
+          // a FRESH connection outside the request context.
+          try {
+            await runOutsideRequestTransaction(() =>
+              userRepo.restoreAccount(tenantId, actor.id, actor.mobileNumber ?? null),
+            );
+            res.status(502).json({
+              error: 'ACCOUNT_DELETE_FAILED',
+              message: 'Could not delete the account right now. Please try again.',
+            });
+          } catch {
+            res.status(500).json({
+              error: 'ACCOUNT_DELETE_INCONSISTENT',
+              message:
+                'Deletion could not be completed. Your account may be deactivated — please contact support.',
+            });
+          }
+          return;
+        }
 
         if (deps.clerkSecretKey && actor.clerkUserId) {
           const fetchFn = deps.clerkFetch ?? fetch;
-          let clerkRes: { ok: boolean; status: number } | null = null;
+          const clerkUrl = `https://api.clerk.com/v1/users/${encodeURIComponent(actor.clerkUserId)}`;
+          const clerkHeaders = { Authorization: `Bearer ${deps.clerkSecretKey}` };
+          let del: { ok: boolean; status: number } | null = null;
           try {
-            clerkRes = await fetchFn(
-              `https://api.clerk.com/v1/users/${encodeURIComponent(actor.clerkUserId)}`,
-              {
-                method: 'DELETE',
-                headers: { Authorization: `Bearer ${deps.clerkSecretKey}` },
-                // fetch has no default timeout; a stalled Clerk upstream
-                // would pin this request's transaction and pool client.
-                signal: AbortSignal.timeout(10_000),
-              },
-            );
+            del = await fetchFn(clerkUrl, {
+              method: 'DELETE',
+              headers: clerkHeaders,
+              // fetch has no default timeout; a stalled Clerk upstream
+              // would pin this request's transaction and pool client.
+              signal: AbortSignal.timeout(10_000),
+            });
           } catch {
-            clerkRes = null;
+            del = null;
           }
-          // 404 = already deleted in Clerk; local cleanup should proceed.
-          if (!clerkRes || (!clerkRes.ok && clerkRes.status !== 404)) {
+
+          // Three-way outcome. 'unknown' matters: on a timeout/network
+          // error/5xx Clerk may have PROCESSED the delete even though we
+          // never saw the response — restoring blindly would resurrect a
+          // ghost account whose user.deleted webhook no-op'd against our
+          // durable stamp, and whose live-looking owner row corrupts
+          // last-owner guards. Confirm actual state before deciding.
+          let outcome: 'deleted' | 'alive' | 'unknown';
+          if (del && (del.ok || del.status === 404)) {
+            outcome = 'deleted'; // 404 = already gone upstream
+          } else if (del && del.status < 500) {
+            outcome = 'alive'; // definite 4xx (auth/config) — nothing was deleted
+          } else {
+            outcome = 'unknown';
+            try {
+              const check = await fetchFn(clerkUrl, {
+                headers: clerkHeaders,
+                signal: AbortSignal.timeout(10_000),
+              });
+              if (check.status === 404) outcome = 'deleted';
+              else if (check.ok) outcome = 'alive';
+            } catch {
+              // stays unknown
+            }
+          }
+
+          if (outcome === 'alive') {
             // Compensate: the account must stay fully usable after a failed
-            // attempt (deleted_at un-stamped, mobile number re-instated).
-            // The stamp was committed durably above, so the restore must
-            // survive the >=400 response — forceCommit opts this request
-            // out of the middleware's rollback-on-error.
+            // attempt. The stamp was committed durably above, so the restore
+            // must survive the >=400 response — forceCommit opts this
+            // request out of the middleware's rollback-on-error. (If the
+            // freed mobile number was reclaimed meanwhile, restoreAccount
+            // still restores access and only drops the number.)
             await userRepo.restoreAccount(tenantId, actor.id, actor.mobileNumber ?? null);
             res.locals.forceCommit = true;
             res.status(502).json({
@@ -424,6 +477,21 @@ export function createUsersRouter(
             });
             return;
           }
+          if (outcome === 'unknown') {
+            // Tenant integrity over single-account availability: we could
+            // not confirm Clerk's state, so the durable stamp stays (a
+            // wrongly-restored ghost owner would corrupt owner guards).
+            // Support can restore the row if Clerk turns out to be intact.
+            res.locals.forceCommit = true;
+            res.status(502).json({
+              error: 'ACCOUNT_DELETE_FAILED',
+              message:
+                'We could not confirm the deletion with the sign-in provider. ' +
+                'Your account is deactivated; contact support to finish or reverse it.',
+            });
+            return;
+          }
+          // outcome === 'deleted' → proceed to cleanup + success.
         }
 
         // Push tokens must die with the account. Best-effort, and SAVEPOINT-

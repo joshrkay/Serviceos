@@ -107,6 +107,28 @@ describe('Postgres integration — PgUserRepository.softDeleteSelf', () => {
     expect(await repo.restoreAccount(tenantId, techId, null)).toBeNull();
   });
 
+  it('restoreAccount still restores access when the freed number was reclaimed (23505 path)', async () => {
+    const techId = await insertUser('technician');
+    await pool.query(
+      `UPDATE users SET mobile_number = $1 WHERE id = $2 AND tenant_id = $3`,
+      ['+15550006666', techId, tenantId],
+    );
+    expect(await repo.softDeleteSelf(tenantId, techId)).not.toBeNull();
+
+    // A teammate claims the freed number while the Clerk call is in flight.
+    const claimant = await insertUser('technician');
+    expect(await repo.setMobileNumber(tenantId, claimant, '+15550006666')).not.toBeNull();
+
+    // The compensating restore must NOT throw and must restore access; the
+    // number stays with the claimant.
+    const restored = await repo.restoreAccount(tenantId, techId, '+15550006666');
+    expect(restored).not.toBeNull();
+    expect(restored!.mobileNumber).toBeUndefined();
+    expect(await repo.findById(tenantId, techId)).not.toBeNull();
+    const claimantRow = await repo.findById(tenantId, claimant);
+    expect(claimantRow!.mobileNumber).toBe('+15550006666');
+  });
+
   it('is idempotent — a second delete of the same row returns null', async () => {
     const techId = await insertUser('technician');
     expect(await repo.softDeleteSelf(tenantId, techId)).not.toBeNull();
