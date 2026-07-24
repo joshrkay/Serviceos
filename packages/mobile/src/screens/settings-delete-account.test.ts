@@ -113,6 +113,23 @@ describe('Delete account screen (guideline 5.1.1(v))', () => {
     expect(h.replace).not.toHaveBeenCalled();
   });
 
+  it('reconciles a lost response: /api/me probe 500 → still ambiguous, retry copy (NOT sign-out)', async () => {
+    // A 429/5xx probe is a struggling server, not proof the account is
+    // gone — only 401/403 confirms the membership was rejected.
+    h.api
+      .mockRejectedValueOnce(new Error('network dropped mid-response'))
+      .mockResolvedValueOnce({ ok: false, status: 500, json: async () => ({}) });
+    const { getByText, findByText } = render(createElement(DeleteAccount));
+    fireEvent.click(getByText('Delete my account'));
+    fireEvent.click(getByText('Yes, permanently delete my account'));
+
+    expect(
+      await findByText('Could not delete your account right now. Please try again.'),
+    ).toBeTruthy();
+    expect(h.signOut).not.toHaveBeenCalled();
+    expect(h.replace).not.toHaveBeenCalled();
+  });
+
   it('reconciles a lost response: /api/me rejected → signs out instead of offering a doomed retry', async () => {
     h.api
       .mockRejectedValueOnce(new Error('network dropped mid-response'))

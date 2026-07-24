@@ -94,8 +94,10 @@ export default function DeleteAccount() {
       // Reconcile before advertising a retry that could only 401.
       try {
         const probe = await api('/api/me');
-        if (!probe.ok) {
-          // Membership rejected → the deletion landed. Sign out locally.
+        // ONLY an authentication rejection confirms the deletion landed —
+        // a 429/5xx probe is the server having a bad moment, not evidence
+        // the account is gone, and must keep the retry flow.
+        if (probe.status === 401 || probe.status === 403) {
           await completeSignOut();
           return;
         }
