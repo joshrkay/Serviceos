@@ -65,13 +65,41 @@ describe('Postgres integration — PgUserRepository.softDeleteSelf', () => {
     const listed = await repo.findByTenant(tenantId);
     expect(listed.map((u) => u.id)).not.toContain(techId);
 
-    // The row itself is retained (16D: never purge).
+    // The row itself is retained (16D: never purge) — but the mobile number
+    // is cleared so the users_mobile_unique slot is released.
     const raw = await pool.query(
-      `SELECT deleted_at FROM users WHERE id = $1 AND tenant_id = $2`,
+      `SELECT deleted_at, mobile_number FROM users WHERE id = $1 AND tenant_id = $2`,
       [techId, tenantId],
     );
     expect(raw.rows).toHaveLength(1);
     expect(raw.rows[0].deleted_at).not.toBeNull();
+    expect(raw.rows[0].mobile_number).toBeNull();
+
+    // A new teammate can claim the number without hitting the unique index.
+    const heirId = await insertUser('technician');
+    const heir = await repo.setMobileNumber(tenantId, heirId, '+15550001111');
+    expect(heir).not.toBeNull();
+    expect(heir!.mobileNumber).toBe('+15550001111');
+  });
+
+  it('restoreAccount un-stamps deleted_at and re-instates the mobile number', async () => {
+    const techId = await insertUser('technician');
+    await pool.query(
+      `UPDATE users SET mobile_number = $1 WHERE id = $2 AND tenant_id = $3`,
+      ['+15550004444', techId, tenantId],
+    );
+    expect(await repo.softDeleteSelf(tenantId, techId)).not.toBeNull();
+    expect(await repo.findById(tenantId, techId)).toBeNull();
+
+    const restored = await repo.restoreAccount(tenantId, techId, '+15550004444');
+    expect(restored).not.toBeNull();
+    expect(restored!.mobileNumber).toBe('+15550004444');
+    // Fully usable again.
+    const found = await repo.findById(tenantId, techId);
+    expect(found).not.toBeNull();
+    expect(found!.mobileNumber).toBe('+15550004444');
+    // Restore is a no-op on a live row.
+    expect(await repo.restoreAccount(tenantId, techId, null)).toBeNull();
   });
 
   it('is idempotent — a second delete of the same row returns null', async () => {

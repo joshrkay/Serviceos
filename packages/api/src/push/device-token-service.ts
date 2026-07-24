@@ -33,6 +33,14 @@ export interface DeviceTokenRepository {
   listByTenant(tenantId: string): Promise<DeviceToken[]>;
   /** Remove a token (on sign-out / token rotation). True when a row was deleted. */
   remove(tenantId: string, expoPushToken: string): Promise<boolean>;
+  /**
+   * Remove every token registered by a user (account deletion). The client
+   * can't do its own sign-out cleanup at that point — its credentials are
+   * already dead — so the server must purge, or the deleted user's device
+   * keeps receiving pushes. `userId` is the Clerk subject, matching what
+   * the devices route stores. Returns the number of rows deleted.
+   */
+  removeAllForUser(tenantId: string, userId: string): Promise<number>;
 }
 
 // Expo issues tokens shaped `ExponentPushToken[...]` (legacy) or
@@ -100,5 +108,16 @@ export class InMemoryDeviceTokenRepository implements DeviceTokenRepository {
 
   async remove(tenantId: string, expoPushToken: string): Promise<boolean> {
     return this.tokens.delete(this.key(tenantId, expoPushToken));
+  }
+
+  async removeAllForUser(tenantId: string, userId: string): Promise<number> {
+    let removed = 0;
+    for (const [k, t] of this.tokens) {
+      if (t.tenantId === tenantId && t.userId === userId) {
+        this.tokens.delete(k);
+        removed += 1;
+      }
+    }
+    return removed;
   }
 }

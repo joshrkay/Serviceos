@@ -46,6 +46,11 @@ export interface UsersRouteDeps {
   clerkFetch?: typeof fetch;
   /** Public web URL used as the redirect target after accept. */
   appBaseUrl?: string;
+  /**
+   * Account deletion purges the user's push tokens server-side — the
+   * client's own sign-out cleanup can't run once its credentials are dead.
+   */
+  deviceTokenRepo?: { removeAllForUser(tenantId: string, userId: string): Promise<number> };
 }
 
 /**
@@ -295,16 +300,20 @@ export function createUsersRouter(
    * the Clerk user.deleted webhook): revoke access, retain rows for audit
    * and billing, never purge tenant data or release the Twilio subaccount.
    *
-   * Order of operations:
-   *   1. Last-owner pre-check → clean 409 before anything is touched (the
-   *      repository re-enforces the guard atomically at UPDATE time).
-   *   2. Delete the Clerk user (authoritative — kills the session/token).
-   *      A Clerk failure aborts with 502 and NO local change. Clerk 404
-   *      (already gone) proceeds. Without CLERK_SECRET_KEY (dev/tests) the
-   *      local soft-delete still runs, matching the invitations pattern.
-   *   3. Local soft-delete. If a concurrent race blocks it, the Clerk
-   *      user.deleted webhook reconciles the stamp — still a success here.
-   *   4. Audit event (all mutations emit audit events).
+   * Order of operations (the LOCAL soft-delete is the serialization point —
+   * it must succeed BEFORE the irreversible Clerk delete, so two owners
+   * racing each other cannot both revoke their Clerk users and orphan the
+   * workspace; the atomic last-owner guard admits at most one of them):
+   *   1. Last-owner pre-check → clean 409 without touching anything.
+   *   2. Local soft-delete (atomic guard, authoritative). Guard-blocked
+   *      owner → 409; already-deleted row → idempotent 200.
+   *   3. Delete the Clerk user. On failure (non-404) the local stamp is
+   *      rolled back via restoreAccount → 502, account fully usable again.
+   *      Without CLERK_SECRET_KEY (dev/tests) this step is skipped.
+   *   4. Purge the user's push tokens — the client's own sign-out cleanup
+   *      can no longer authenticate, so the server must do it or the
+   *      deleted user's device keeps receiving tenant pushes.
+   *   5. Audit event (all mutations emit audit events).
    */
   router.delete(
     '/me',
@@ -334,17 +343,47 @@ export function createUsersRouter(
           }
         }
 
+        // Reserve the deletion locally FIRST. The atomic guard is the only
+        // serialization point: of two owners deleting concurrently, exactly
+        // one UPDATE passes the EXISTS check — the loser must NOT reach the
+        // irreversible Clerk delete below.
+        const stamped = await userRepo.softDeleteSelf(tenantId, actor.id);
+        if (!stamped) {
+          if (actor.role === 'owner') {
+            // Guard blocked between the pre-check and the UPDATE (raced
+            // with another owner's deletion) — same clean 409 as above.
+            res.status(409).json({
+              error: 'LAST_OWNER',
+              message:
+                'You are the only owner. Transfer ownership to a teammate first, ' +
+                'or contact support to close the whole workspace.',
+            });
+          } else {
+            // Row already deleted (double-tap) — idempotent success.
+            res.json({ deleted: true });
+          }
+          return;
+        }
+
         if (deps.clerkSecretKey && actor.clerkUserId) {
           const fetchFn = deps.clerkFetch ?? fetch;
-          const clerkRes = await fetchFn(
-            `https://api.clerk.com/v1/users/${encodeURIComponent(actor.clerkUserId)}`,
-            {
-              method: 'DELETE',
-              headers: { Authorization: `Bearer ${deps.clerkSecretKey}` },
-            },
-          );
+          let clerkRes: { ok: boolean; status: number } | null = null;
+          try {
+            clerkRes = await fetchFn(
+              `https://api.clerk.com/v1/users/${encodeURIComponent(actor.clerkUserId)}`,
+              {
+                method: 'DELETE',
+                headers: { Authorization: `Bearer ${deps.clerkSecretKey}` },
+              },
+            );
+          } catch {
+            clerkRes = null;
+          }
           // 404 = already deleted in Clerk; local cleanup should proceed.
-          if (!clerkRes.ok && clerkRes.status !== 404) {
+          if (!clerkRes || (!clerkRes.ok && clerkRes.status !== 404)) {
+            // Compensate: the account must stay fully usable after a failed
+            // attempt (deleted_at un-stamped, mobile number re-instated).
+            await userRepo.restoreAccount(tenantId, actor.id, actor.mobileNumber ?? null);
             res.status(502).json({
               error: 'ACCOUNT_DELETE_FAILED',
               message: 'Could not delete the account right now. Please try again.',
@@ -353,7 +392,16 @@ export function createUsersRouter(
           }
         }
 
-        await userRepo.softDeleteSelf(tenantId, actor.id);
+        // Push tokens must die with the account. Failure here is logged-and-
+        // swallowed: the deletion is already final on both sides, and a
+        // stale token is also displaced on the device's next register().
+        if (deps.deviceTokenRepo && actor.clerkUserId) {
+          try {
+            await deps.deviceTokenRepo.removeAllForUser(tenantId, actor.clerkUserId);
+          } catch {
+            // Best-effort — never turn a completed deletion into an error.
+          }
+        }
 
         if (auditRepo) {
           await auditRepo.create(

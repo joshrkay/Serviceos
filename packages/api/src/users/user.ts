@@ -113,6 +113,14 @@ export interface UserRepository {
    * the guard blocked the sole owner.
    */
   softDeleteSelf(tenantId: string, id: string): Promise<User | null>;
+  /**
+   * Compensating action for `softDeleteSelf` when the follow-up Clerk
+   * deletion fails: un-stamps `deleted_at` and re-instates the mobile
+   * number (`softDeleteSelf` clears it to release the
+   * `users_mobile_unique` slot). Only touches a row that is currently
+   * deleted. Returns the restored row or null if nothing matched.
+   */
+  restoreAccount(tenantId: string, id: string, mobileNumber: string | null): Promise<User | null>;
   /** Test/dev helper. Production user creation goes through the Clerk webhook. */
   create?(user: Omit<User, 'createdAt' | 'updatedAt'>): Promise<User>;
 }
@@ -242,7 +250,31 @@ export class InMemoryUserRepository implements UserRepository {
       );
       if (!anotherOwner) return null;
     }
-    const next: User = { ...u, deletedAt: new Date(), updatedAt: new Date() };
+    // Clear the mobile number so the `(tenant_id, mobile_number)` uniqueness
+    // slot is released for live accounts (mirrors the Pg implementation).
+    const next: User = {
+      ...u,
+      mobileNumber: undefined,
+      deletedAt: new Date(),
+      updatedAt: new Date(),
+    };
+    this.users.set(id, next);
+    return { ...next };
+  }
+
+  async restoreAccount(
+    tenantId: string,
+    id: string,
+    mobileNumber: string | null,
+  ): Promise<User | null> {
+    const u = this.users.get(id);
+    if (!u || u.tenantId !== tenantId || !u.deletedAt) return null;
+    const next: User = {
+      ...u,
+      deletedAt: null,
+      mobileNumber: mobileNumber ?? undefined,
+      updatedAt: new Date(),
+    };
     this.users.set(id, next);
     return { ...next };
   }

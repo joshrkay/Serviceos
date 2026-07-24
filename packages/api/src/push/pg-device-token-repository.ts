@@ -94,4 +94,14 @@ export class PgDeviceTokenRepository extends PgBaseRepository implements DeviceT
       return (res.rowCount ?? 0) > 0;
     });
   }
+
+  async removeAllForUser(tenantId: string, userId: string): Promise<number> {
+    return this.withTenant(tenantId, async (client) => {
+      const res = await client.query(
+        `DELETE FROM device_tokens WHERE tenant_id = $1 AND user_id = $2`,
+        [tenantId, userId],
+      );
+      return res.rowCount ?? 0;
+    });
+  }
 }

@@ -347,7 +347,10 @@ describe('DELETE /api/users/me — in-app account deletion (guideline 5.1.1(v))'
     );
   });
 
-  it('aborts with 502 and NO local change when the Clerk delete fails', async () => {
+  it('aborts with 502 and restores the account when the Clerk delete fails', async () => {
+    // Give the tech a mobile number so the compensation path is fully pinned:
+    // softDeleteSelf clears it, restoreAccount must bring it back.
+    await repo.setMobileNumber(TENANT, techId, '+15550002222');
     const clerkFetch = vi.fn().mockResolvedValue({ ok: false, status: 500 });
     const app = buildDeleteApp('clerk_tech', 'technician', {
       clerkSecretKey: 'sk_test',
@@ -356,9 +359,74 @@ describe('DELETE /api/users/me — in-app account deletion (guideline 5.1.1(v))'
     const res = await request(app).delete('/api/users/me');
     expect(res.status).toBe(502);
     expect(res.body.error).toBe('ACCOUNT_DELETE_FAILED');
-    // The account must remain intact and usable.
-    expect(await repo.findById(TENANT, techId)).not.toBeNull();
+    // The account must remain intact and usable — including the mobile number.
+    const restored = await repo.findById(TENANT, techId);
+    expect(restored).not.toBeNull();
+    expect(restored!.mobileNumber).toBe('+15550002222');
     expect(audited).toHaveLength(0);
+  });
+
+  it('aborts with 502 and restores the account when the Clerk call throws (network)', async () => {
+    const clerkFetch = vi.fn().mockRejectedValue(new Error('ECONNRESET'));
+    const app = buildDeleteApp('clerk_tech', 'technician', {
+      clerkSecretKey: 'sk_test',
+      clerkFetch: clerkFetch as unknown as typeof fetch,
+    });
+    const res = await request(app).delete('/api/users/me');
+    expect(res.status).toBe(502);
+    expect(await repo.findById(TENANT, techId)).not.toBeNull();
+  });
+
+  it('reserves the local deletion BEFORE calling Clerk (serialization order)', async () => {
+    // At the moment Clerk is called, the local row must already be stamped —
+    // this is what prevents two racing owners from both revoking Clerk users.
+    let deletedAtClerkCallTime: unknown = 'not-checked';
+    const clerkFetch = vi.fn().mockImplementation(async () => {
+      deletedAtClerkCallTime = await repo.findById(TENANT, techId);
+      return { ok: true, status: 200 };
+    });
+    const app = buildDeleteApp('clerk_tech', 'technician', {
+      clerkSecretKey: 'sk_test',
+      clerkFetch: clerkFetch as unknown as typeof fetch,
+    });
+    const res = await request(app).delete('/api/users/me');
+    expect(res.status).toBe(200);
+    expect(clerkFetch).toHaveBeenCalled();
+    expect(deletedAtClerkCallTime).toBeNull();
+  });
+
+  it('purges the user device tokens after a successful deletion', async () => {
+    const removeAllForUser = vi.fn().mockResolvedValue(2);
+    const app = buildDeleteApp('clerk_tech', 'technician', {
+      deviceTokenRepo: { removeAllForUser },
+    });
+    const res = await request(app).delete('/api/users/me');
+    expect(res.status).toBe(200);
+    expect(removeAllForUser).toHaveBeenCalledWith(TENANT, 'clerk_tech');
+  });
+
+  it('does NOT purge device tokens when the Clerk delete fails', async () => {
+    const removeAllForUser = vi.fn();
+    const clerkFetch = vi.fn().mockResolvedValue({ ok: false, status: 500 });
+    const app = buildDeleteApp('clerk_tech', 'technician', {
+      clerkSecretKey: 'sk_test',
+      clerkFetch: clerkFetch as unknown as typeof fetch,
+      deviceTokenRepo: { removeAllForUser },
+    });
+    const res = await request(app).delete('/api/users/me');
+    expect(res.status).toBe(502);
+    expect(removeAllForUser).not.toHaveBeenCalled();
+  });
+
+  it('clears the mobile number on deletion so the slot is reusable', async () => {
+    await repo.setMobileNumber(TENANT, techId, '+15550003333');
+    const app = buildDeleteApp('clerk_tech', 'technician');
+    const res = await request(app).delete('/api/users/me');
+    expect(res.status).toBe(200);
+    // The number is free for another teammate immediately.
+    const owner = await repo.setMobileNumber(TENANT, ownerId, '+15550003333');
+    expect(owner).not.toBeNull();
+    expect(owner!.mobileNumber).toBe('+15550003333');
   });
 
   it('proceeds locally when Clerk returns 404 (already deleted upstream)', async () => {

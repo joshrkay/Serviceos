@@ -187,8 +187,11 @@ export class PgUserRepository extends PgBaseRepository implements UserRepository
    */
   async softDeleteSelf(tenantId: string, id: string): Promise<User | null> {
     return this.withTenantTransaction(tenantId, async (client) => {
+      // mobile_number is cleared so the `users_mobile_unique` partial index
+      // slot is released — a soft-deleted row is invisible to reads, so a
+      // held number would otherwise 409 forever for the next teammate.
       const result = await client.query(
-        `UPDATE users SET deleted_at = NOW(), updated_at = NOW()
+        `UPDATE users SET deleted_at = NOW(), mobile_number = NULL, updated_at = NOW()
          WHERE id = $1
            AND tenant_id = $2
            AND deleted_at IS NULL
@@ -207,6 +210,29 @@ export class PgUserRepository extends PgBaseRepository implements UserRepository
                    mobile_number,
                    created_at, updated_at`,
         [id, tenantId],
+      );
+      return result.rows.length > 0
+        ? mapRow(result.rows[0] as Record<string, unknown>)
+        : null;
+    });
+  }
+
+  async restoreAccount(
+    tenantId: string,
+    id: string,
+    mobileNumber: string | null,
+  ): Promise<User | null> {
+    return this.withTenantTransaction(tenantId, async (client) => {
+      const result = await client.query(
+        `UPDATE users SET deleted_at = NULL, mobile_number = $3, updated_at = NOW()
+         WHERE id = $1
+           AND tenant_id = $2
+           AND deleted_at IS NOT NULL
+         RETURNING id, tenant_id, clerk_user_id, email, role, first_name, last_name,
+                   COALESCE(can_field_serve, false) AS can_field_serve,
+                   mobile_number,
+                   created_at, updated_at`,
+        [id, tenantId, mobileNumber],
       );
       return result.rows.length > 0
         ? mapRow(result.rows[0] as Record<string, unknown>)
