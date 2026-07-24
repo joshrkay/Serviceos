@@ -78,6 +78,27 @@ describe('Delete account screen (guideline 5.1.1(v))', () => {
     expect(h.replace).not.toHaveBeenCalled();
   });
 
+  it('surfaces the server support instruction on an unconfirmable-deletion 502', async () => {
+    // The account is left durably deactivated server-side; the server
+    // message carries the only recovery path and must not be replaced by
+    // generic retry copy (a retry cannot authenticate anymore).
+    h.api.mockResolvedValue({
+      ok: false,
+      status: 502,
+      json: async () => ({
+        error: 'ACCOUNT_DELETE_FAILED',
+        message:
+          'We could not confirm the deletion with the sign-in provider. Your account is deactivated; contact support to finish or reverse it.',
+      }),
+    });
+    const { getByText, findByText } = render(createElement(DeleteAccount));
+    fireEvent.click(getByText('Delete my account'));
+    fireEvent.click(getByText('Yes, permanently delete my account'));
+
+    expect(await findByText(/contact support to finish or reverse it/)).toBeTruthy();
+    expect(h.replace).not.toHaveBeenCalled();
+  });
+
   it('shows a retryable error on a server failure', async () => {
     h.api.mockResolvedValue({ ok: false, status: 502, json: async () => ({}) });
     const { getByText, findByText } = render(createElement(DeleteAccount));

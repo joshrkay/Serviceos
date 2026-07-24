@@ -347,12 +347,53 @@ export function createUsersRouter(
       try {
         const tenantId = req.auth!.tenantId;
         const clerkUserId = req.auth!.userId;
+
+        // If the mobile client disconnects during the long Clerk sequence,
+        // the /api middleware rolls back and RELEASES the request client on
+        // res 'close' while this handler keeps running — from that moment
+        // any write through the AsyncLocalStorage client would hit a
+        // released (possibly re-borrowed) connection. Writes that must
+        // survive the disconnect go through runDurable: fresh-connection
+        // path once closed, and a re-run if 'close' raced the in-flight
+        // in-transaction write (the write fns used here are idempotent).
+        let responseClosed = false;
+        res.once('close', () => {
+          responseClosed = true;
+        });
+        const runDurable = async (fn: () => Promise<unknown>): Promise<void> => {
+          if (responseClosed) {
+            await runOutsideRequestTransaction(fn);
+            return;
+          }
+          await fn();
+          if (responseClosed) {
+            await runOutsideRequestTransaction(fn);
+          }
+        };
+
         const users = await userRepo.findByTenant(tenantId);
         const actor = users.find((u) => u.clerkUserId === clerkUserId);
         if (!actor) {
           res.status(404).json({ error: 'NOT_FOUND', message: 'User not found' });
           return;
         }
+
+        // Purge the user's push tokens (best-effort, disconnect-safe). Used
+        // on every terminal-deactivation path — success AND unconfirmable —
+        // because the client can no longer authenticate its own device-token
+        // DELETE once the membership row is stamped.
+        const purgeTokens = async (): Promise<void> => {
+          if (!deps.deviceTokenRepo || !actor.clerkUserId) return;
+          const clerkId = actor.clerkUserId;
+          try {
+            await runDurable(() =>
+              withRequestSavepoint(() => deps.deviceTokenRepo!.removeAllForUser(tenantId, clerkId)),
+            );
+          } catch {
+            // Never turn a completed deactivation into an error; a stale
+            // token is also displaced on the device's next register().
+          }
+        };
 
         if (actor.role === 'owner') {
           const anotherOwner = users.some((u) => u.id !== actor.id && u.role === 'owner');
@@ -464,12 +505,16 @@ export function createUsersRouter(
 
           if (outcome === 'alive') {
             // Compensate: the account must stay fully usable after a failed
-            // attempt. The stamp was committed durably above, so the restore
-            // must survive the >=400 response — forceCommit opts this
-            // request out of the middleware's rollback-on-error. (If the
-            // freed mobile number was reclaimed meanwhile, restoreAccount
-            // still restores access and only drops the number.)
-            await userRepo.restoreAccount(tenantId, actor.id, actor.mobileNumber ?? null);
+            // attempt. Disconnect-safe (runDurable): if the client dropped
+            // during the Clerk sequence the request client is already
+            // released, so the restore self-commits on a fresh connection.
+            // Otherwise forceCommit opts the >=400 response out of the
+            // middleware's rollback-on-error. (If the freed mobile number
+            // was reclaimed meanwhile, restoreAccount still restores access
+            // and only drops the number.)
+            await runDurable(() =>
+              userRepo.restoreAccount(tenantId, actor.id, actor.mobileNumber ?? null),
+            );
             res.locals.forceCommit = true;
             res.status(502).json({
               error: 'ACCOUNT_DELETE_FAILED',
@@ -482,6 +527,9 @@ export function createUsersRouter(
             // not confirm Clerk's state, so the durable stamp stays (a
             // wrongly-restored ghost owner would corrupt owner guards).
             // Support can restore the row if Clerk turns out to be intact.
+            // This is a terminal deactivation — the device's push tokens
+            // must die here too, exactly like the success path.
+            await purgeTokens();
             res.locals.forceCommit = true;
             res.status(502).json({
               error: 'ACCOUNT_DELETE_FAILED',
@@ -494,22 +542,9 @@ export function createUsersRouter(
           // outcome === 'deleted' → proceed to cleanup + success.
         }
 
-        // Push tokens must die with the account. Best-effort, and SAVEPOINT-
-        // isolated: under the request-scoped transaction a raw Postgres
-        // statement error here would otherwise mark the whole transaction
-        // aborted — catching the JS rejection alone wouldn't stop the
-        // response-time COMMIT from becoming a ROLLBACK of the soft-delete.
-        if (deps.deviceTokenRepo && actor.clerkUserId) {
-          const clerkId = actor.clerkUserId;
-          try {
-            await withRequestSavepoint(() =>
-              deps.deviceTokenRepo!.removeAllForUser(tenantId, clerkId),
-            );
-          } catch {
-            // Never turn a completed deletion into an error; a stale token
-            // is also displaced on the device's next register().
-          }
-        }
+        // Push tokens must die with the account (best-effort, SAVEPOINT-
+        // isolated, disconnect-safe — see purgeTokens).
+        await purgeTokens();
 
         // Best-effort and SAVEPOINT-isolated like the token purge above: a
         // failed statement here must roll back only itself, not poison the

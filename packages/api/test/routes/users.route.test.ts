@@ -494,9 +494,9 @@ describe('DELETE /api/users/me — in-app account deletion (guideline 5.1.1(v))'
     expect(removeAllForUser).toHaveBeenCalledWith(TENANT, 'clerk_tech');
   });
 
-  it('does NOT purge device tokens when the Clerk delete fails', async () => {
+  it('does NOT purge device tokens when the account is restored (definite Clerk failure)', async () => {
     const removeAllForUser = vi.fn();
-    const clerkFetch = vi.fn().mockResolvedValue({ ok: false, status: 500 });
+    const clerkFetch = vi.fn().mockResolvedValue({ ok: false, status: 403 });
     const app = buildDeleteApp('clerk_tech', 'technician', {
       clerkSecretKey: 'sk_test',
       clerkFetch: clerkFetch as unknown as typeof fetch,
@@ -504,7 +504,25 @@ describe('DELETE /api/users/me — in-app account deletion (guideline 5.1.1(v))'
     });
     const res = await request(app).delete('/api/users/me');
     expect(res.status).toBe(502);
+    // Account restored and fully usable — its tokens must stay registered.
+    expect(await repo.findById(TENANT, techId)).not.toBeNull();
     expect(removeAllForUser).not.toHaveBeenCalled();
+  });
+
+  it('DOES purge device tokens on the unconfirmable terminal path', async () => {
+    // The account stays durably deactivated, so its device must stop
+    // receiving tenant pushes exactly like the success path.
+    const removeAllForUser = vi.fn().mockResolvedValue(1);
+    const clerkFetch = vi.fn().mockRejectedValue(new Error('ECONNRESET'));
+    const app = buildDeleteApp('clerk_tech', 'technician', {
+      clerkSecretKey: 'sk_test',
+      clerkFetch: clerkFetch as unknown as typeof fetch,
+      deviceTokenRepo: { removeAllForUser },
+    });
+    const res = await request(app).delete('/api/users/me');
+    expect(res.status).toBe(502);
+    expect(await repo.findById(TENANT, techId)).toBeNull();
+    expect(removeAllForUser).toHaveBeenCalledWith(TENANT, 'clerk_tech');
   });
 
   it('clears the mobile number on deletion so the slot is reusable', async () => {

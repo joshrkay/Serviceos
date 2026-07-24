@@ -4,13 +4,16 @@ import { ActivityIndicator, Pressable, ScrollView, Text, View } from 'react-nati
 import { useApiClient } from '../../../src/lib/useApiClient';
 import { useSignOut } from '../../../src/push/useSignOut';
 
-/** Map a DELETE /api/users/me failure to owner-friendly copy. */
+/**
+ * Map a DELETE /api/users/me failure to owner-friendly copy. The server's
+ * message is authoritative when present — for the unconfirmable-deletion
+ * 502 it carries the ONLY recovery instruction (contact support; a retry
+ * cannot work because the deactivated membership is rejected at auth).
+ */
 function deleteErrorMessage(status: number, serverMessage?: string): string {
+  if (serverMessage) return serverMessage;
   if (status === 409) {
-    return (
-      serverMessage ??
-      'You are the only owner. Transfer ownership to a teammate first, or contact support to close the whole workspace.'
-    );
+    return 'You are the only owner. Transfer ownership to a teammate first, or contact support to close the whole workspace.';
   }
   return 'Could not delete your account right now. Please try again.';
 }
