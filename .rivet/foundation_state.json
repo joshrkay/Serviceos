@@ -3,10 +3,11 @@
   "spec": "spec/RIVET_FOUNDATION_SPEC.md",
   "contracts": ".rivet/RIVET_OPERATION_CONTRACTS.md §5.10, §5.12",
   "scope": "registry #9, #11-13, #18(scheduling side), #37-43, #61-62, §5.10 settings, J1 onboarding",
-  "state_version": 2,
+  "state_version": 3,
   "updated": "2026-07-24",
   "iteration": 2,
-  "phase": "loop",
+  "phase": "halted",
+  "convergence": "HALT after iteration 2. F1/F3 (binary) passing and re-verified. F2 cannot advance further without the three decisions_needed below — service area, skills, and operator-override policy are product calls, and per the launch-orchestrator rule an unresolved decision is not a reason to guess. F4/F6/F7 hold pinned partial progress with enumerated remainders; F5's largest gap (10DLC) is an external-clock item already tracked at the launch level (G-EXT/D11). Full unit suite 11184 passing, 0 regressions, tsc build clean at halt.",
   "gates": {
     "F1": {
       "status": "passing",
