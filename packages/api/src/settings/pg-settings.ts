@@ -379,6 +379,10 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         discountNeverBelowCatalog: 'discount_never_below_catalog',
         // Tier 4 — migration 079.
         depositTimingPolicy: 'deposit_timing_policy',
+        // Foundation gate (I12/V17) — migration 148 stored it, onboarding
+        // wrote it, but the generic update path dropped it, so the travel
+        // buffer could never be changed from the settings surface.
+        jobBufferMinutes: 'job_buffer_minutes',
         // §9 — migration 098.
         hourlyRateCents: 'hourly_rate_cents',
         // P22-005 (U7) — migration 181.
@@ -447,6 +451,23 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         if (key === 'appointmentReminderOffsetsHours') {
           setClauses.push(`appointment_reminder_offsets_hours = $${paramIndex}::jsonb`);
           params.push(JSON.stringify(normalizeReminderOffsets(value)));
+          paramIndex++;
+          continue;
+        }
+        // Foundation gate (I12/V17) — business_hours is JSONB and was
+        // previously writable only through the onboarding identity route's
+        // raw SQL; the generic update silently DROPPED the key, so a
+        // settings-surface hours change never reached the scheduler. A
+        // cleared write ('{}' for undefined/empty/null) reads back as
+        // "not configured" and the scheduler falls back to defaults.
+        if (key === 'businessHours') {
+          setClauses.push(`business_hours = $${paramIndex}::jsonb`);
+          const v = value as Record<string, unknown> | undefined | null;
+          params.push(
+            v && typeof v === 'object' && Object.keys(v).length > 0
+              ? JSON.stringify(v)
+              : '{}',
+          );
           paramIndex++;
           continue;
         }

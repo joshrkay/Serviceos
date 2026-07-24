@@ -428,6 +428,25 @@ export const updateSettingsSchema = z.object({
   // explicit null clears the value; omit to leave untouched.
   ownerPhone: z.string().max(40).nullable().optional(),
   timezone: z.string().nullable().optional(),
+  // Foundation gate (I12/V17) — per-day booking hours and travel buffer.
+  // Previously writable only through the onboarding identity route; without
+  // these keys z.object STRIPS them, so a settings-surface write silently
+  // no-oped and the scheduler kept the stale values. Each day is
+  // { open: 'HH:MM', close: 'HH:MM' } or null (closed); {} / null clears
+  // back to "not configured" (scheduler falls back to defaults).
+  businessHours: z
+    .record(
+      z.enum(['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']),
+      z
+        .object({
+          open: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'expected HH:MM'),
+          close: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'expected HH:MM'),
+        })
+        .nullable(),
+    )
+    .nullable()
+    .optional(),
+  jobBufferMinutes: z.number().int().min(0).max(240).nullable().optional(),
   estimatePrefix: z.string().min(1).optional(),
   invoicePrefix: z.string().min(1).optional(),
   defaultPaymentTermDays: z.number().int().nonnegative().optional(),

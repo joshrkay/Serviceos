@@ -1,0 +1,79 @@
+{
+  "goal": "foundation — Company Setup & Scheduling",
+  "spec": "spec/RIVET_FOUNDATION_SPEC.md",
+  "contracts": ".rivet/RIVET_OPERATION_CONTRACTS.md §5.10, §5.12",
+  "scope": "registry #9, #11-13, #18(scheduling side), #37-43, #61-62, §5.10 settings, J1 onboarding",
+  "state_version": 3,
+  "updated": "2026-07-24",
+  "iteration": 2,
+  "phase": "halted",
+  "convergence": "HALT after iteration 2. F1/F3 (binary) passing and re-verified. F2 cannot advance further without the three decisions_needed below — service area, skills, and operator-override policy are product calls, and per the launch-orchestrator rule an unresolved decision is not a reason to guess. F4/F6/F7 hold pinned partial progress with enumerated remainders; F5's largest gap (10DLC) is an external-clock item already tracked at the launch level (G-EXT/D11). Full unit suite 11184 passing, 0 regressions, tsc build clean at halt.",
+  "gates": {
+    "F1": {
+      "status": "passing",
+      "detail": "Zero double-bookings under V16 contention. technician-double-booking-race.test.ts drives two genuinely concurrent assignTechnician calls (Promise.allSettled, distinct connections) into the no_double_booking EXCLUDE constraint: exactly one fulfilled, loser gets ConflictError; controls prove different-tech same-slot and same-tech adjacent-slot both succeed. Re-run green 2026-07-24."
+    },
+    "F2": {
+      "status": "failing",
+      "detail": "Remediated this iteration: slot finder now intersects per-day tenant business hours, tech working hours, tech time-off (PTO), and the tenant travel buffer; public-booking AND portal write paths validate slots against the same tenant hours (portal previously validated none). REMAINING: (a) service area checked nowhere in scheduling; (b) skill matcher is StubSkillMatcher in prod wiring (app.ts) — term 6 unenforced; (c) feasibility emits working-hours/PTO as warnings, not blockers — operator assignment can still land outside them (product decision needed: is operator override allowed?); (d) CLOSED iteration 2: voice lookup_availability on both production surfaces (twilio-adapter inbound, voice-lookup-answer operator worker) now routes through lookupBookableAvailability → findBookableSlots (tenant hours, buffer, tenant-tz TTS; previously raw calendar gaps that could offer 3am, spoken in server tz). The voice-quality text-mode-driver eval harness intentionally keeps the raw-finder path for fixture stability — prod/eval divergence recorded, parity is a next_iteration item; (e) recurring materialization (recurring-jobs/materialize.ts) places occurrences with no feasibility checks (no assignments created, so the DB constraint is not bypassed — conflicts surface as 409 at tech-assignment time)."
+    },
+    "F3": {
+      "status": "passing",
+      "detail": "EXCLUDE USING gist (tenant_id =, technician_id =, tstzrange &&) WHERE status NOT IN (canceled,no_show) on appointment_assignments — migration 131, schema.ts:3266. Presence pinned live by foundation-gates.test.ts (pg_constraint, contype='x'). 23P01 handled as ordinary 409 branch in ALL write paths: pg-assignment.ts:41 (mapAssignmentDbError), pg-appointment.ts:284 (sync-trigger path). CAVEAT closed this iteration: the bootstrap's silent RAISE-WARNING skip on legacy-overlap DBs is now surfaced loudly — findMissingCriticalConstraints (db/migrate.ts) runs after every migration and console.errors if the constraint is absent."
+    },
+    "F4": {
+      "status": "partial",
+      "detail": "Remediated this iteration: day windows computed with luxon wall-clock math (booking-availability.ts) — the old tzMidnight+hour*3600000 placed every window an hour off on DST transition days. Unit-pinned: spring-forward 2026-03-08 (08:00 EDT=12:00Z), fall-back 2026-11-01 (08:00 EST=13:00Z), America/Phoenix fixed offset on both dates, summer control. Pre-existing: timezone.test.ts 169h fall-back week; V17 integration test pins NY-vs-Phoenix instant shift. REMAINING: no integration test drives booking across a DST boundary end-to-end; resolve-datetime nonexistent/ambiguous local times (02:30 spring-forward) not explicitly pinned."
+    },
+    "F5": {
+      "status": "partial",
+      "detail": "7-step wizard (signup→identity→pack→phone→billing→ai_check→test_call) with completion DERIVED from live entities (derive-status.ts) — matches the spec's staged-not-gated posture. Stripe Connect KYC tracked first-class on tenants (status pending/active/restricted/disconnected, webhook-synced); payment links fall back to platform account pre-KYC (S-4 independent). GAPS: 10DLC (S-5) is a stubbed capability — initiateTenDlcBrandAndCampaign defined, called nowhere, no brand/campaign SID columns, partial_readiness never driven; no unified what's-unlocked surface (per-feature banners only); time-to-first-call unmeasured against the 15-minute target."
+    },
+    "F6": {
+      "status": "partial",
+      "detail": "FOUND AND FIXED an I12 violation this iteration: PgSettingsRepository.update fieldMap silently DROPPED businessHours and jobBufferMinutes (and updateSettingsSchema stripped them) — a settings-surface write of either succeeded, audited, and never landed; scheduler kept stale values. Both now writable + V17 integration-pinned (foundation-gates.test.ts): hours change moves windows, timezone change shifts instants (NY→Phoenix), buffer change alters adjacency around a booked visit. REMAINING Critical settings without propagation tests: price-book rate → next drafted line, tax rate → invoice total, voice greeting → inbound call, payment settings → link routing, messaging cadence; quiet hours have NO implementation to test."
+    },
+    "F7": {
+      "status": "partial",
+      "detail": "Remediated this iteration: GET /api/dispatch/availability now returns config provenance (timezoneSource/businessHoursSource/bufferSource + human-readable notes) so a cold tenant sees 'not configured — using default X' instead of silently receiving windows it never chose; unit-pinned in availability-route.test.ts. Baseline posture elsewhere is fail-open/lazy-seed: ensureTenantSettings seeds 'My Business'/ET defaults, checkBusinessHours fails open, public booking returns empty slot arrays indistinguishable from fully-booked. Onboarding routes 503 informatively (ONBOARDING/TWILIO/BILLING_NOT_CONFIGURED). The full 62-op cold-tenant sweep (V18) has not been run."
+    }
+  },
+  "vectors": {
+    "V15": "unit-pinned (booking-availability.test.ts DST suite; timezone.test.ts 169h week); integration partial (NY-vs-Phoenix instant shift)",
+    "V16": "passing — technician-double-booking-race.test.ts, real parallel contention, re-run this iteration",
+    "V17": "scheduling third pinned (hours/timezone/buffer, storage→consumption through the real repo seam); other Critical settings pending",
+    "V18": "dispatch availability route pinned; full 62-op sweep pending"
+  },
+  "evidence": {
+    "local_suites_2026_07_24": {
+      "tsc_build": "clean (tsconfig.build.json)",
+      "unit_scheduling": "79/79 (includes new booking-availability suite: DST, weekly hours, buffer, tech hours, PTO)",
+      "unit_portal_routes": "855/855",
+      "unit_settings_proposals_jobs": "308/308",
+      "integration_foundation_gates": "5/5 (F3 constraint presence, V17 hours/timezone/buffer propagation)",
+      "integration_race_dispatch": "technician-double-booking-race + dispatch-availability green",
+      "integration_settings_onboarding": "settings, settings-autonomous-booking, onboarding-identity, slot-conflict-checker 22/22",
+      "iteration2_voice": "telephony + voice-lookup-answer 409/409; lookup-availability skill 27/27 (incl. new hours-aware variant: never outside hours, closed-day skip, tenant-tz TTS, degrade-not-crash)"
+    },
+    "code_pins": {
+      "constraint": "packages/api/src/db/schema.ts:3266 (migration 131)",
+      "constraint_check": "packages/api/src/db/migrate.ts findMissingCriticalConstraints",
+      "exclusion_branch": "packages/api/src/appointments/pg-assignment.ts:41, pg-appointment.ts:284",
+      "availability": "packages/api/src/scheduling/booking-availability.ts (findBookableSlotsDetailed)",
+      "settings_seam": "schedulingConfigFromSettings (single settings→scheduling seam)",
+      "settings_write_fix": "packages/api/src/settings/pg-settings.ts fieldMap + businessHours JSONB handler; shared/contracts.ts updateSettingsSchema"
+    }
+  },
+  "decisions_needed": [
+    "Operator override policy: may a dispatcher deliberately assign outside tech working hours / PTO (feasibility warning), or is the six-way intersection hard for operators too? Blocks making feasibility working_hours/unavailable_block blocking (F2c).",
+    "Service-area model: geocode+radius vs zip allowlist — service_area_* columns exist (migration 148) but nothing enforces them (F2a).",
+    "Skills model: catalog of skills per service type + per tech, or drop term 6 from the gate until modeled (F2b)."
+  ],
+  "next_iteration": [
+    "Voice-quality text-mode-driver parity with the hours-aware adapter path (update fixtures alongside)",
+    "Recurring materialization: consult availability at placement or flag conflicted occurrences for dispatcher review (#18)",
+    "V17 for price-book rate and tax rate propagation",
+    "V18 cold-tenant sweep across the 62 registry ops",
+    "DST-boundary end-to-end booking integration test (F4)"
+  ]
+}

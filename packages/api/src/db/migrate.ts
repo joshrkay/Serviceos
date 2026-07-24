@@ -63,6 +63,31 @@ export async function withMigrationAdvisoryLock<T>(
   }
 }
 
+/**
+ * Constraints whose ABSENCE after a migration run is a deploy-blocking
+ * condition to surface, even though the migration itself "succeeded".
+ * `no_double_booking` (migration 131) deliberately skips itself with a
+ * RAISE WARNING when pre-existing overlapping assignments are found — a
+ * deploy-safety valve that must not stay silent, because without the
+ * constraint the double-booking guard is application-level only (F3).
+ */
+const CRITICAL_CONSTRAINTS = ['no_double_booking'] as const;
+
+/**
+ * Return the critical constraints missing from the database. Empty array
+ * means every DB-level guard the app assumes is actually in force.
+ */
+export async function findMissingCriticalConstraints(
+  client: PoolClient,
+): Promise<string[]> {
+  const result = await client.query<{ conname: string }>(
+    'SELECT conname FROM pg_constraint WHERE conname = ANY($1::text[])',
+    [[...CRITICAL_CONSTRAINTS]],
+  );
+  const present = new Set(result.rows.map((r) => r.conname));
+  return CRITICAL_CONSTRAINTS.filter((c) => !present.has(c));
+}
+
 /** Apply the full migration corpus on the given client. Exit-free + testable. */
 export async function applyMigrations(client: PoolClient): Promise<void> {
   // Prevent DDL lock waits from stalling startup: ALTER TABLE ENABLE RLS
@@ -71,6 +96,16 @@ export async function applyMigrations(client: PoolClient): Promise<void> {
   await client.query("SET lock_timeout = '5s'");
   await client.query("SET statement_timeout = '25s'");
   await client.query(getMigrationSQL());
+  // Non-fatal by design (the skip is a deliberate valve for legacy-overlap
+  // databases) but LOUD: an operator must know the DB-level guard is off.
+  const missing = await findMissingCriticalConstraints(client);
+  for (const conname of missing) {
+    console.error(
+      `[migrate] CRITICAL: constraint '${conname}' is ABSENT after migration. ` +
+        'Double-booking is NOT enforced at the database level. Reconcile ' +
+        'overlapping appointment_assignments rows and re-deploy.',
+    );
+  }
 }
 
 /**

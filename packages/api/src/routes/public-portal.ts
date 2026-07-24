@@ -36,6 +36,9 @@ import { ProposalRepository, createProposal } from '../proposals/proposal';
 import { createLead } from '../leads/lead-service';
 import {
   findBookableSlots,
+  isWithinBusinessHours,
+  WeeklyBusinessHours,
+  schedulingConfigFromSettings,
   isSlotFree,
   clampBookingHorizon,
   STANDARD_BOOKING_HORIZON_DAYS,
@@ -140,13 +143,31 @@ const rescheduleSchema = z.object({
   slotEnd: z.string().datetime(),
 });
 
-async function resolveTenantTimezone(
+interface ResolvedScheduling {
+  timezone: string;
+  weeklyHours: WeeklyBusinessHours | null;
+  bufferMinutes: number | null;
+}
+
+/**
+ * Load the tenant's scheduling configuration once per request: timezone,
+ * per-day business hours, and travel buffer. All three propagate into slot
+ * generation AND slot validation so a POST can only book what GET offers.
+ */
+async function resolveTenantScheduling(
   deps: PublicPortalDeps,
   tenantId: string,
-): Promise<string> {
-  if (!deps.settingsRepo) return DEFAULT_BOOKING_TIMEZONE;
+): Promise<ResolvedScheduling> {
+  if (!deps.settingsRepo) {
+    return { timezone: DEFAULT_BOOKING_TIMEZONE, weeklyHours: null, bufferMinutes: null };
+  }
   const settings = await deps.settingsRepo.findByTenant(tenantId);
-  return settings?.timezone || DEFAULT_BOOKING_TIMEZONE;
+  const config = schedulingConfigFromSettings(settings);
+  return {
+    timezone: config.timezone || DEFAULT_BOOKING_TIMEZONE,
+    weeklyHours: config.weeklyHours,
+    bufferMinutes: config.bufferMinutes,
+  };
 }
 
 /**
@@ -157,7 +178,13 @@ async function resolveTenantTimezone(
 async function respondSlotTaken(
   deps: PublicPortalDeps,
   res: Response,
-  args: { tenantId: string; slotStart: Date; slotEnd: Date; timezone: string; message: string },
+  args: {
+    tenantId: string;
+    slotStart: Date;
+    slotEnd: Date;
+    scheduling: ResolvedScheduling;
+    message: string;
+  },
 ): Promise<void> {
   const durationMin = Math.round((args.slotEnd.getTime() - args.slotStart.getTime()) / 60000);
   const alternatives = await findBookableSlots(
@@ -166,8 +193,10 @@ async function respondSlotTaken(
       tenantId: args.tenantId,
       fromDate: args.slotStart.toISOString().slice(0, 10),
       toDate: new Date(args.slotStart.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
-      timezone: args.timezone,
+      timezone: args.scheduling.timezone,
       durationMin,
+      weeklyHours: args.scheduling.weeklyHours,
+      bufferMinutes: args.scheduling.bufferMinutes,
     },
   );
   res.status(409).json({
@@ -246,7 +275,7 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
       // authed SPA does. Include it in the bootstrap response (resolved from
       // tenant settings, tenant-scoped) so every portal date renders in the
       // business's timezone per the "render in tenant timezone" core pattern.
-      const timezone = await resolveTenantTimezone(deps, tenantId);
+      const { timezone } = await resolveTenantScheduling(deps, tenantId);
       // Strip internal-only fields. The portal user only needs identity.
       res.json({
         id: customer.id,
@@ -500,7 +529,8 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
     try {
       const { tenantId, customerId } = req.portal!;
       const parsed = availabilityQuerySchema.parse(req.query);
-      const timezone = await resolveTenantTimezone(deps, tenantId);
+      const scheduling = await resolveTenantScheduling(deps, tenantId);
+      const timezone = scheduling.timezone;
 
       // Priority-booking members (#6) can book further out; everyone else is
       // capped at the standard horizon. Clamp the requested window so the
@@ -524,6 +554,8 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
               toDate: window.to,
               timezone,
               durationMin: parsed.durationMin,
+              weeklyHours: scheduling.weeklyHours,
+              bufferMinutes: scheduling.bufferMinutes,
             },
           )
         : [];
@@ -579,7 +611,16 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
       // Defense in depth: the availability GET already clamps the horizon, but
       // a client can POST any slot — re-check it against the customer's horizon
       // (priority members get the extended one) so it can't be bypassed.
-      const timezone = await resolveTenantTimezone(deps, tenantId);
+      const scheduling = await resolveTenantScheduling(deps, tenantId);
+      const timezone = scheduling.timezone;
+      // Same defense for business hours: only what GET would offer is bookable.
+      if (!isWithinBusinessHours(slotStart, slotEnd, timezone, scheduling.weeklyHours)) {
+        res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message: 'Selected time is outside booking hours',
+        });
+        return;
+      }
       const priorityBooking = await customerHasPriorityBooking(tenantId, customerId, deps.agreementRepo);
       const horizonDays = priorityBooking
         ? PRIORITY_BOOKING_HORIZON_DAYS
@@ -704,7 +745,7 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
           tenantId,
           slotStart,
           slotEnd,
-          timezone,
+          scheduling,
           message: 'That time was just booked. Here are the next available slots.',
         });
         return;
@@ -811,7 +852,17 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
         return;
       }
 
-      const timezone = await resolveTenantTimezone(deps, tenantId);
+      const scheduling = await resolveTenantScheduling(deps, tenantId);
+      const timezone = scheduling.timezone;
+      // A reschedule is a new commitment — hold it to the same business-hours
+      // discipline as a fresh booking.
+      if (!isWithinBusinessHours(slotStart, slotEnd, timezone, scheduling.weeklyHours)) {
+        res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message: 'Selected time is outside booking hours',
+        });
+        return;
+      }
       const finderDeps = { appointmentRepo: deps.appointmentRepo, assignmentRepo: deps.assignmentRepo };
       const free = await isSlotFree(finderDeps, { tenantId, start: slotStart, end: slotEnd });
       if (!free) {
@@ -819,7 +870,7 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
           tenantId,
           slotStart,
           slotEnd,
-          timezone,
+          scheduling,
           message: 'That time is no longer available. Here are other open times.',
         });
         return;
