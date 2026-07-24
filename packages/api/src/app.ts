@@ -4650,6 +4650,7 @@ export function createApp(): AppWithLifecycle {
     userRepo,
     invoiceRepo,
     auditRepo,
+    settingsRepo,
   }, {
     appointmentRepo,
     assignmentRepo,

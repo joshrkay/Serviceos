@@ -35,7 +35,12 @@ import {
 import { UserRepository, User } from '../users/user';
 import { InvoiceRepository } from '../invoices/invoice';
 import { RefreshJobMoneyStateDeps } from './job-money-state';
-import { findBookableSlots, isSlotFree } from '../scheduling/booking-availability';
+import {
+  findBookableSlots,
+  isSlotFree,
+  schedulingConfigFromSettings,
+} from '../scheduling/booking-availability';
+import { SettingsRepository } from '../settings/settings';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { NotFoundError, ConflictError, ValidationError } from '../shared/errors';
 import { isValidTenantId } from '../db/schema';
@@ -53,6 +58,11 @@ export interface ConvertEstimateToScheduledJobDeps {
   /** Needed to roll up job.money_state when the estimate is accepted. */
   invoiceRepo: InvoiceRepository;
   auditRepo?: AuditRepository;
+  /**
+   * When wired, tenant scheduling settings (timezone, business hours, travel
+   * buffer) constrain auto-picked slots instead of the hardcoded defaults.
+   */
+  settingsRepo?: SettingsRepository;
 }
 
 export interface ConvertEstimateToScheduledJobInput {
@@ -96,7 +106,11 @@ async function chooseTechnicianAndSlot(
 ): Promise<ChosenSlot> {
   const { tenantId } = input;
   const durationMin = input.durationMin ?? DEFAULT_DURATION_MIN;
-  const timezone = input.timezone ?? DEFAULT_TIMEZONE;
+  const settings = deps.settingsRepo
+    ? await deps.settingsRepo.findByTenant(tenantId).catch(() => null)
+    : null;
+  const schedulingConfig = schedulingConfigFromSettings(settings);
+  const timezone = input.timezone ?? schedulingConfig.timezone ?? DEFAULT_TIMEZONE;
   const now = input.now ?? new Date();
   const slotDeps = { appointmentRepo: deps.appointmentRepo, assignmentRepo: deps.assignmentRepo };
 
@@ -141,6 +155,8 @@ async function chooseTechnicianAndSlot(
   for (const tech of candidates) {
     const slots = await findBookableSlots(slotDeps, {
       tenantId, fromDate, toDate, timezone, durationMin, technicianId: tech.id, maxSlots: 1, now,
+      weeklyHours: schedulingConfig.weeklyHours,
+      bufferMinutes: schedulingConfig.bufferMinutes,
     });
     if (slots.length > 0) {
       return {

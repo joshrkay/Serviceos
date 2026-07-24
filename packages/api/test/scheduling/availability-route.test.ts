@@ -25,6 +25,7 @@ function makeApp(opts: {
   findByAppointment?: (tenantId: string, apptId: string) => Promise<{ technicianId: string }[]>;
   timezone?: string | null;
   tenantId?: string;
+  settings?: Record<string, unknown> | null;
 }) {
   const findByDateRange = vi.fn(opts.findByDateRange ?? (async () => []));
   const findByAppointment = vi.fn(opts.findByAppointment ?? (async () => []));
@@ -33,16 +34,25 @@ function makeApp(opts: {
     appointmentRepo: { findByDateRange } as any,
     jobRepo: {} as any,
     locationRepo: {} as any,
-    workingHoursRepo: {} as any,
-    unavailableBlockRepo: {} as any,
+    // The route threads these into findBookableSlotsDetailed when a
+    // technicianId is supplied — they must be callable, not bare `{}`.
+    workingHoursRepo: { findByTechnician: async () => [] } as any,
+    unavailableBlockRepo: { findByTechnicianAndDateRange: async () => [] } as any,
     travelTimeProvider: {} as any,
     skillMatcher: {} as any,
   };
   const userRepo = { findById: async () => null } as any;
   const settingsRepo =
-    opts.timezone === undefined
+    opts.timezone === undefined && opts.settings === undefined
       ? undefined
-      : ({ findByTenant: async () => (opts.timezone ? { timezone: opts.timezone } : null) } as any);
+      : ({
+          findByTenant: async () =>
+            opts.settings !== undefined
+              ? opts.settings
+              : opts.timezone
+                ? { timezone: opts.timezone }
+                : null,
+        } as any);
   const app = express();
   app.use(express.json());
   app.use(fakeAuth(opts.tenantId ?? 't-1'));
@@ -126,5 +136,41 @@ describe('GET /api/dispatch/availability', () => {
     });
     expect(res.status).toBe(200);
     expect(findByAppointment).toHaveBeenCalled();
+  });
+
+  // V18 — a cold tenant must be able to SEE that defaults are in play, not
+  // silently receive windows it never configured.
+  it('flags default config sources and explains them for a cold tenant', async () => {
+    const { app } = makeApp({ settings: null });
+    const res = await request(app)
+      .get('/api/dispatch/availability')
+      .query({ from: FUTURE_DAY, to: FUTURE_DAY });
+    expect(res.status).toBe(200);
+    expect(res.body.config.timezoneSource).toBe('default');
+    expect(res.body.config.businessHoursSource).toBe('default');
+    expect(res.body.config.bufferSource).toBe('default');
+    expect(res.body.config.notes.length).toBeGreaterThanOrEqual(3);
+    expect(res.body.config.notes.join(' ')).toMatch(/not configured/i);
+  });
+
+  // V17 — the tenant's configured hours and buffer must be marked as the
+  // source once set (the propagation itself is pinned in the unit and
+  // integration suites; this pins the route-level provenance report).
+  it('reports tenant config sources when settings carry hours and buffer', async () => {
+    const { app } = makeApp({
+      settings: {
+        timezone: 'America/New_York',
+        businessHours: { mon: { open: '09:00', close: '15:00' } },
+        jobBufferMinutes: 45,
+      },
+    });
+    const res = await request(app)
+      .get('/api/dispatch/availability')
+      .query({ from: FUTURE_DAY, to: FUTURE_DAY });
+    expect(res.status).toBe(200);
+    expect(res.body.config.timezoneSource).toBe('tenant');
+    expect(res.body.config.businessHoursSource).toBe('tenant');
+    expect(res.body.config.bufferSource).toBe('tenant');
+    expect(res.body.config.bufferMinutes).toBe(45);
   });
 });

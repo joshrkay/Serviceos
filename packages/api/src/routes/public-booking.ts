@@ -34,7 +34,13 @@ import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { SettingsRepository } from '../settings/settings';
 import { ProposalRepository, createProposal } from '../proposals/proposal';
 import { TenantRepository } from '../auth/clerk';
-import { findBookableSlots, isSlotFree, DEFAULT_BUSINESS_HOURS } from '../scheduling/booking-availability';
+import {
+  findBookableSlots,
+  isSlotFree,
+  isWithinBusinessHours,
+  WeeklyBusinessHours,
+  schedulingConfigFromSettings,
+} from '../scheduling/booking-availability';
 import { notifyDispatchBoardChanged } from '../dispatch/board-notify';
 import {
   TenantTransactionRunner,
@@ -46,40 +52,6 @@ const bookingLogger = createLogger({
   service: 'public-booking-route',
   environment: process.env.NODE_ENV || 'development',
 });
-
-/** Local wall-clock minutes-of-day + calendar date for an instant in `tz`. */
-function localMinutesOfDay(d: Date, tz: string): { minutes: number; ymd: string } {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: tz,
-    hour12: false,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  }).formatToParts(d);
-  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? '00';
-  let hour = parseInt(get('hour'), 10);
-  if (hour === 24) hour = 0; // some engines render midnight as 24:00
-  return {
-    minutes: hour * 60 + parseInt(get('minute'), 10),
-    ymd: `${get('year')}-${get('month')}-${get('day')}`,
-  };
-}
-
-/**
- * True when [start, end) falls inside the tenant's business hours on a single
- * local day. Uses DEFAULT_BUSINESS_HOURS — the same config findBookableSlots
- * uses for this flow — so the POST can only book what GET would offer.
- */
-function isWithinBusinessHours(start: Date, end: Date, tz: string): boolean {
-  const s = localMinutesOfDay(start, tz);
-  const e = localMinutesOfDay(end, tz);
-  if (s.ymd !== e.ymd) return false; // must not span local days
-  const openMin = DEFAULT_BUSINESS_HOURS.openHour * 60;
-  const closeMin = DEFAULT_BUSINESS_HOURS.closeHour * 60;
-  return s.minutes >= openMin && e.minutes <= closeMin && s.minutes < e.minutes;
-}
 
 export interface PublicBookingDeps {
   tenantRepo: TenantRepository;
@@ -135,20 +107,38 @@ const bookingSchema = z
     message: 'A primaryPhone or email is required so we can confirm your booking',
   });
 
-async function resolveTenantTimezone(
+interface ResolvedScheduling {
+  timezone: string;
+  weeklyHours: WeeklyBusinessHours | null;
+  bufferMinutes: number | null;
+}
+
+/**
+ * Load the tenant's scheduling configuration once per request: timezone,
+ * per-day business hours, and travel buffer. All three propagate into slot
+ * generation AND slot validation so the POST can only book what GET offers.
+ */
+async function resolveTenantScheduling(
   deps: PublicBookingDeps,
   tenantId: string,
-): Promise<string> {
-  if (!deps.settingsRepo) return DEFAULT_BOOKING_TIMEZONE;
+): Promise<ResolvedScheduling> {
+  if (!deps.settingsRepo) {
+    return { timezone: DEFAULT_BOOKING_TIMEZONE, weeklyHours: null, bufferMinutes: null };
+  }
   const settings = await deps.settingsRepo.findByTenant(tenantId);
-  return settings?.timezone || DEFAULT_BOOKING_TIMEZONE;
+  const config = schedulingConfigFromSettings(settings);
+  return {
+    timezone: config.timezone || DEFAULT_BOOKING_TIMEZONE,
+    weeklyHours: config.weeklyHours,
+    bufferMinutes: config.bufferMinutes,
+  };
 }
 
 /** 409 with the next open slots in a 7-day window — same shape as the portal. */
 async function respondSlotTaken(
   deps: PublicBookingDeps,
   res: Response,
-  args: { tenantId: string; slotStart: Date; slotEnd: Date; timezone: string },
+  args: { tenantId: string; slotStart: Date; slotEnd: Date; scheduling: ResolvedScheduling },
 ): Promise<void> {
   const durationMin = Math.round((args.slotEnd.getTime() - args.slotStart.getTime()) / 60000);
   const alternatives = await findBookableSlots(
@@ -159,8 +149,10 @@ async function respondSlotTaken(
       toDate: new Date(args.slotStart.getTime() + 7 * 24 * 60 * 60 * 1000)
         .toISOString()
         .slice(0, 10),
-      timezone: args.timezone,
+      timezone: args.scheduling.timezone,
       durationMin,
+      weeklyHours: args.scheduling.weeklyHours,
+      bufferMinutes: args.scheduling.bufferMinutes,
     },
   );
   res.status(409).json({
@@ -195,7 +187,8 @@ export function createPublicBookingRouter(deps: PublicBookingDeps): Router {
       }
 
       const q = availabilityQuerySchema.parse(req.query ?? {});
-      const timezone = await resolveTenantTimezone(deps, tenantId);
+      const scheduling = await resolveTenantScheduling(deps, tenantId);
+      const timezone = scheduling.timezone;
       const slots = await findBookableSlots(
         { appointmentRepo: deps.appointmentRepo, assignmentRepo: deps.assignmentRepo },
         {
@@ -204,6 +197,8 @@ export function createPublicBookingRouter(deps: PublicBookingDeps): Router {
           toDate: q.to,
           timezone,
           durationMin: q.durationMin,
+          weeklyHours: scheduling.weeklyHours,
+          bufferMinutes: scheduling.bufferMinutes,
         },
       );
 
@@ -263,14 +258,15 @@ export function createPublicBookingRouter(deps: PublicBookingDeps): Router {
         return;
       }
 
-      const timezone = await resolveTenantTimezone(deps, tenantId);
+      const scheduling = await resolveTenantScheduling(deps, tenantId);
+      const timezone = scheduling.timezone;
 
       // Re-validate the submitted window against the SAME business hours used to
       // generate availability, in the tenant timezone. A caller can POST any
       // future slot bypassing the UI; without this an out-of-hours request
       // (e.g. 02:00) would still create a held appointment that GET
       // /availability would never have offered.
-      if (!isWithinBusinessHours(slotStart, slotEnd, timezone)) {
+      if (!isWithinBusinessHours(slotStart, slotEnd, timezone, scheduling.weeklyHours)) {
         res.status(400).json({
           error: 'VALIDATION_ERROR',
           message: 'Selected time is outside booking hours',
@@ -408,7 +404,7 @@ export function createPublicBookingRouter(deps: PublicBookingDeps): Router {
       });
 
       if (!outcome.ok) {
-        await respondSlotTaken(deps, res, { tenantId, slotStart, slotEnd, timezone });
+        await respondSlotTaken(deps, res, { tenantId, slotStart, slotEnd, scheduling });
         return;
       }
 

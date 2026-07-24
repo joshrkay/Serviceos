@@ -96,6 +96,13 @@ export interface FindOpenSlotsInput {
    * (no buffer) for backward compatibility.
    */
   bufferMs?: number;
+  /**
+   * Additional busy intervals from sources other than appointments —
+   * technician time-off blocks, holds external to the calendar. Treated
+   * as hard-busy but WITHOUT the travel buffer: `bufferMs` models drive
+   * time between jobs, which doesn't apply to a PTO boundary.
+   */
+  extraBusy?: { start: Date; end: Date }[];
 }
 
 export interface AvailabilityFinder {
@@ -153,9 +160,6 @@ export class DefaultAvailabilityFinder implements AvailabilityFinder {
 
     if (input.durationMs <= 0) {
       return { ok: false, reason: 'durationMs must be positive' };
-    }
-    if (granularityMs <= 0) {
-      return { ok: false, reason: 'granularityMs must be positive' };
     }
     if (granularityMs <= 0) {
       // snapUp() reduces to NaN on a non-positive granularity, which
@@ -222,12 +226,16 @@ export class DefaultAvailabilityFinder implements AvailabilityFinder {
     }
 
     const bufferMs = Math.max(0, input.bufferMs ?? 0);
-    const busy = mergeIntervals(
-      blocking.map((a) => ({
+    const busy = mergeIntervals([
+      ...blocking.map((a) => ({
         start: a.scheduledStart.getTime() - bufferMs,
         end: a.scheduledEnd.getTime() + bufferMs,
       })),
-    );
+      ...(input.extraBusy ?? []).map((b) => ({
+        start: b.start.getTime(),
+        end: b.end.getTime(),
+      })),
+    ]);
 
     const windowStart = input.searchFrom.getTime();
     const windowEnd = input.searchTo.getTime();

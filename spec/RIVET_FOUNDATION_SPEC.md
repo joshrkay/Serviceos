@@ -10,7 +10,9 @@ defect resolves to a config value that was wrong weeks earlier and failed silent
 Verifying the scheduler against clean seed data measures the seed data, not the scheduler —
 so this spec verifies both ends of the pipe and, critically, the propagation between them.
 
-**Scope:** registry ops **#9, #11–13, #37–43, #61–62**, the **§5.10 settings surface**, and
+**Scope:** registry ops **#9, #11–13, #37–43, #61–62**, plus **#18 create_recurring** for
+its scheduling side only (materialized occurrences must reach the same constraint and
+availability discipline as directly booked ones — §5), the **§5.10 settings surface**, and
 **J1 onboarding** (self-serve: contractor completes minimum configuration and answers their
 first live call).
 
@@ -128,6 +130,9 @@ constraint (§5) is what makes the final booking safe.
 check closes it. The constraint:
 
 ```sql
+-- GiST cannot index UUID equality natively; btree_gist supplies the opclass.
+CREATE EXTENSION IF NOT EXISTS btree_gist;
+
 ALTER TABLE appointment_assignments
   ADD CONSTRAINT no_double_booking
   EXCLUDE USING gist (
@@ -176,6 +181,8 @@ proving a **downstream operation observes the change**:
 | price book rate | next drafted line item carries the new rate |
 | tax rate | next invoice total reflects the new rate |
 | quiet hours / cadence | FUP send suppressed/permitted across the boundary |
+| voice agent config (greeting, after-hours mode) | next inbound call carries the new greeting; after-hours routing flips |
+| payment settings (Stripe Connect status) | payment-link routing switches between Connect and platform account |
 
 Settings writes carry the I12 contract: audit with prior value, single-step revert,
 confirmation before commit for Critical rows.
@@ -263,7 +270,20 @@ is an artifact of low test concurrency, and every downstream result is noise.
 
 ## Appendix A — Code Pinning
 
-Populated by survey against the working tree; re-pin when files move.
+Populated by survey against the working tree (2026-07-24); re-pin when files move.
+Live gate status: `.rivet/foundation_state.json`.
 
-*(filled by the foundation loop — see `.rivet/foundation_state.json` `evidence` for the
-current pinning and test-suite mapping)*
+| Concern | Where |
+|---|---|
+| Exclusion constraint (F3) | `packages/api/src/db/schema.ts` migration 131 (`no_double_booking`, denorm + sync triggers); presence verified post-migration by `findMissingCriticalConstraints` in `packages/api/src/db/migrate.ts` |
+| 23P01 ordinary branch | `packages/api/src/appointments/pg-assignment.ts` (`mapAssignmentDbError`), `pg-appointment.ts` (sync-trigger path) — both → 409 `ConflictError` |
+| Availability intersection | `packages/api/src/scheduling/booking-availability.ts` — `findBookableSlotsDetailed` (per-day tenant hours, tech working hours, PTO via `extraBusy`, tenant buffer, luxon wall-clock windows) |
+| Settings→scheduling seam (V17) | `schedulingConfigFromSettings` — consumed by dispatch route, public booking, portal, from-estimate, emergency dispatch |
+| Write-side hours validation | `isWithinBusinessHours` (same module) — public booking POST, portal book + reschedule |
+| Tech constraints storage | `packages/api/src/availability/working-hours.ts`, `unavailable-block.ts` |
+| Onboarding staging (J1/F5) | `packages/api/src/onboarding/derive-status.ts` (derived from live entities), `load-facts.ts`, routes in `routes/onboarding.ts` |
+| Settings surface (§5.10) | `packages/api/src/settings/settings.ts`, `pg-settings.ts`, `routes/settings.ts`, `shared/contracts.ts` (`updateSettingsSchema`) |
+| Test pins | `test/scheduling/booking-availability.test.ts` (V15/V17-unit/F2), `test/integration/foundation-gates.test.ts` (F3/V17), `test/integration/technician-double-booking-race.test.ts` (F1/V16), `test/integration/dispatch-availability.test.ts`, `test/shared/timezone.test.ts` (169h week) |
+
+Known-open items and product decisions blocking full F2/F5/F6/F7 are tracked in
+`.rivet/foundation_state.json` (`decisions_needed`, `next_iteration`).
