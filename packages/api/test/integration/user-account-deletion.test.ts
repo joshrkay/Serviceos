@@ -150,6 +150,49 @@ describe('Postgres integration — PgUserRepository.softDeleteSelf', () => {
     }
   });
 
+  it('demoteOwnerIfAnotherExists takes the same tenant lock (serializes with deletions)', async () => {
+    const owner2 = await insertUser('owner');
+    const locker = await pool.connect();
+    try {
+      await locker.query('BEGIN');
+      await locker.query(`SELECT id FROM tenants WHERE id = $1 FOR UPDATE`, [tenantId]);
+
+      let settled = false;
+      const pending = repo
+        .demoteOwnerIfAnotherExists(tenantId, owner2, 'technician')
+        .then((r) => {
+          settled = true;
+          return r;
+        });
+      await new Promise((r) => setTimeout(r, 300));
+      expect(settled).toBe(false);
+
+      await locker.query('COMMIT');
+      const result = await pending;
+      expect(result).not.toBeNull();
+      expect(result!.role).toBe('technician');
+    } finally {
+      locker.release();
+    }
+  });
+
+  it('rejects writes to a soft-deleted row (phone + profile updates)', async () => {
+    const techId = await insertUser('technician');
+    expect(await repo.softDeleteSelf(tenantId, techId)).not.toBeNull();
+
+    // An explicit-UUID write racing the deletion must not repopulate the
+    // hidden row (it would re-block the users_mobile_unique slot).
+    expect(await repo.setMobileNumber(tenantId, techId, '+15550005555')).toBeNull();
+    expect(await repo.update(tenantId, techId, { firstName: 'Ghost' })).toBeNull();
+
+    const raw = await pool.query(
+      `SELECT mobile_number, first_name FROM users WHERE id = $1 AND tenant_id = $2`,
+      [techId, tenantId],
+    );
+    expect(raw.rows[0].mobile_number).toBeNull();
+    expect(raw.rows[0].first_name).toBeNull();
+  });
+
   it('never crosses tenants', async () => {
     const other = await createTestTenant(pool);
     const techId = await insertUser('technician');

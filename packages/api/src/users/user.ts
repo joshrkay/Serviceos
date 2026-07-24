@@ -285,7 +285,7 @@ export class InMemoryUserRepository implements UserRepository {
     e164: string | null,
   ): Promise<User | null> {
     const u = this.users.get(id);
-    if (!u || u.tenantId !== tenantId) return null;
+    if (!u || u.tenantId !== tenantId || u.deletedAt) return null;
     if (e164 !== null) {
       // Mirror the Pg `(tenant_id, mobile_number)` partial-unique index so a
       // second teammate can't claim a number already on file in this tenant.
@@ -308,7 +308,7 @@ export class InMemoryUserRepository implements UserRepository {
 
   async update(tenantId: string, id: string, updates: UpdateUserInput): Promise<User | null> {
     const u = this.users.get(id);
-    if (!u || u.tenantId !== tenantId) return null;
+    if (!u || u.tenantId !== tenantId || u.deletedAt) return null;
     const next: User = {
       ...u,
       role: updates.role ?? u.role,

@@ -123,10 +123,14 @@ export class PgUserRepository extends PgBaseRepository implements UserRepository
     e164: string | null,
   ): Promise<User | null> {
     return this.withTenantTransaction(tenantId, async (client) => {
+      // deleted_at IS NULL: a write must never land on a soft-deleted row —
+      // an explicit-UUID request racing a deletion could otherwise repopulate
+      // mobile_number on the hidden row and re-block the unique slot.
       const result = await client.query(
         `UPDATE users SET mobile_number = $1, updated_at = NOW()
          WHERE id = $2
            AND tenant_id = $3
+           AND deleted_at IS NULL
          RETURNING id, tenant_id, clerk_user_id, email, role, first_name, last_name,
                    COALESCE(can_field_serve, false) AS can_field_serve,
                    mobile_number,
@@ -154,11 +158,18 @@ export class PgUserRepository extends PgBaseRepository implements UserRepository
     newRole: 'dispatcher' | 'technician',
   ): Promise<User | null> {
     return this.withTenantTransaction(tenantId, async (client) => {
+      // Same serialization anchor as softDeleteSelf: EVERY owner-removing
+      // operation must take the tenant-row lock, or a demotion racing an
+      // account deletion could each observe the other's still-live owner
+      // row (their stamps are uncommitted until response-time COMMIT) and
+      // both commit — leaving the tenant ownerless.
+      await client.query(`SELECT id FROM tenants WHERE id = $1 FOR UPDATE`, [tenantId]);
       const result = await client.query(
         `UPDATE users SET role = $1, updated_at = NOW()
          WHERE id = $2
            AND tenant_id = $3
            AND role = 'owner'
+           AND deleted_at IS NULL
            AND EXISTS (
              SELECT 1 FROM users u2
              WHERE u2.tenant_id = $3
@@ -274,6 +285,7 @@ export class PgUserRepository extends PgBaseRepository implements UserRepository
       const result = await client.query(
         `UPDATE users SET ${setClauses.join(', ')}
          WHERE id = $${paramIndex}
+           AND deleted_at IS NULL
          RETURNING id, tenant_id, clerk_user_id, email, role, first_name, last_name,
                    COALESCE(can_field_serve, false) AS can_field_serve,
                    mobile_number,

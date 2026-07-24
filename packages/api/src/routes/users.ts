@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { z } from 'zod';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
+import { withRequestSavepoint } from '../middleware/tenant-context';
 import { toErrorResponse, ValidationError } from '../shared/errors';
 import {
   User,
@@ -407,39 +408,48 @@ export function createUsersRouter(
           }
         }
 
-        // Push tokens must die with the account. Failure here is logged-and-
-        // swallowed: the deletion is already final on both sides, and a
-        // stale token is also displaced on the device's next register().
+        // Push tokens must die with the account. Best-effort, and SAVEPOINT-
+        // isolated: under the request-scoped transaction a raw Postgres
+        // statement error here would otherwise mark the whole transaction
+        // aborted — catching the JS rejection alone wouldn't stop the
+        // response-time COMMIT from becoming a ROLLBACK of the soft-delete.
         if (deps.deviceTokenRepo && actor.clerkUserId) {
+          const clerkId = actor.clerkUserId;
           try {
-            await deps.deviceTokenRepo.removeAllForUser(tenantId, actor.clerkUserId);
+            await withRequestSavepoint(() =>
+              deps.deviceTokenRepo!.removeAllForUser(tenantId, clerkId),
+            );
           } catch {
-            // Best-effort — never turn a completed deletion into an error.
+            // Never turn a completed deletion into an error; a stale token
+            // is also displaced on the device's next register().
           }
         }
 
-        // Best-effort like the token purge above: a throw here would roll
-        // the request transaction (and the local stamp) back AFTER the
-        // irreversible Clerk delete. The Clerk user.deleted webhook writes
-        // its own audit row, covering the record if this one is lost.
+        // Best-effort and SAVEPOINT-isolated like the token purge above: a
+        // failed statement here must roll back only itself, not poison the
+        // request transaction after the irreversible Clerk delete. The Clerk
+        // user.deleted webhook writes its own audit row, covering the record
+        // if this one is lost.
         if (auditRepo) {
           try {
-            await auditRepo.create(
-              createAuditEvent({
-                tenantId,
-                actorId: clerkUserId,
-                actorRole: req.auth!.role,
-                eventType: 'user.account_deleted',
-                entityType: 'user',
-                entityId: actor.id,
-                metadata: {
-                  self: true,
-                  role: actor.role,
-                  note:
-                    'Self-service account deletion (guideline 5.1.1(v)). Row soft-deleted; ' +
-                    'tenant data retained per 16D.',
-                },
-              }),
+            await withRequestSavepoint(() =>
+              auditRepo.create(
+                createAuditEvent({
+                  tenantId,
+                  actorId: clerkUserId,
+                  actorRole: req.auth!.role,
+                  eventType: 'user.account_deleted',
+                  entityType: 'user',
+                  entityId: actor.id,
+                  metadata: {
+                    self: true,
+                    role: actor.role,
+                    note:
+                      'Self-service account deletion (guideline 5.1.1(v)). Row soft-deleted; ' +
+                      'tenant data retained per 16D.',
+                  },
+                }),
+              ),
             );
           } catch {
             // Never fail a completed deletion over the audit write.
