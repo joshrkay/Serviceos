@@ -205,14 +205,18 @@ async function runVoiceProbe(tokenOrGetter, casesPath) {
   }
 
   const failureTaxonomy = buildFailureTaxonomy(results);
+  console.log(
+    `Failure taxonomy: infra(A)=${failureTaxonomy.A} product(B)=${failureTaxonomy.B}`,
+  );
+
   return {
     corpus,
     assistantCounts,
     voiceCounts,
     results,
+    failureTaxonomy,
     voiceOnly,
     waitClosed,
-    failureTaxonomy,
   };
 }
 
@@ -341,7 +345,7 @@ async function main() {
 | Dev /api/me (same JWT) | ${report.auth.dev_me?.status ?? 'n/a'} |
 | Prod /api/me (HMAC) | ${report.auth.prod_me_hmac?.status ?? 'n/a'} |
 
-${report.probe?.assistantCounts ? `## Voice probe (${probeArg})\n\nAssistant PASS: ${report.probe.assistantCounts.PASS}/50\nVoice PASS: ${report.probe.voiceCounts.PASS}/50\nFailure taxonomy: A(infra)=${report.probe.failureTaxonomy?.A ?? 0} B(product)=${report.probe.failureTaxonomy?.B ?? 0}` : report.probe?.skipped ? `## Voice probe\n\nSkipped: ${report.probe.reason}` : ''}
+${report.probe?.assistantCounts ? `## Voice probe (${probeArg})\n\nAssistant PASS: ${report.probe.assistantCounts.PASS}/50\nVoice PASS: ${report.probe.voiceCounts.PASS}/50\nFailure taxonomy: infra(A)=${report.probe.failureTaxonomy?.A ?? 0} product(B)=${report.probe.failureTaxonomy?.B ?? 0}` : report.probe?.skipped ? `## Voice probe\n\nSkipped: ${report.probe.reason}` : ''}
 
 ${report.auth.error ? `\n**Auth error:** ${report.auth.error}` : ''}
 `;

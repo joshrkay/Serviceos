@@ -1,17 +1,20 @@
 /**
- * FM-03 — dual-provider failover wiring from AI_FALLBACK_PROVIDER_* env.
+ * FM-03 — factory wires AI_FALLBACK_PROVIDER_* into the resilience stack.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
+  buildFallbackProvidersFromEnv,
   createLLMGateway,
-  buildFallbackProviders,
-  FallbackModelOverrideProvider,
-  DEFAULT_FALLBACK_LIGHTWEIGHT_MODEL,
 } from '../../../src/ai/gateway/factory';
+import { FallbackModelMapProvider } from '../../../src/ai/gateway/fallback-model-map';
 import type { AppConfig } from '../../../src/shared/config';
 import type { LLMProvider, LLMRequest, LLMResponse } from '../../../src/ai/gateway/gateway';
+import { composeResilienceStack } from '../../../src/ai/gateway/compose-resilience';
+import { CircuitBreakerRegistry, DEFAULT_BREAKER } from '../../../src/ai/gateway/breaker';
+import { TenantQuotaRegistry } from '../../../src/ai/gateway/tenant-quota';
+import { AppError } from '../../../src/shared/errors';
 
-function cfg(overrides: Partial<AppConfig> = {}): AppConfig {
+function cfg(): AppConfig {
   return {
     NODE_ENV: 'test',
     PORT: 3000,
@@ -22,107 +25,184 @@ function cfg(overrides: Partial<AppConfig> = {}): AppConfig {
     AI_DEFAULT_MODEL: 'gpt-4o-mini',
     LOG_LEVEL: 'info',
     R2_BUCKET: 'serviceos-uploads',
-    ...overrides,
   } as unknown as AppConfig;
 }
 
-function failoverProviders(gateway: ReturnType<typeof createLLMGateway>): unknown[] {
-  // @ts-expect-error reach into internals for structural verification
-  const providers = gateway.providers as Map<string, unknown>;
-  const [outermost] = providers.values();
-  // TenantQuota → Failover
-  const tqw = outermost as { inner?: { providers?: unknown[] } };
-  return tqw.inner?.providers ?? [];
+class ScriptedProvider implements LLMProvider {
+  readonly name: string;
+  calls: LLMRequest[] = [];
+  constructor(
+    name: string,
+    private readonly impl: (req: LLMRequest) => Promise<LLMResponse>,
+  ) {
+    this.name = name;
+  }
+  async complete(req: LLMRequest): Promise<LLMResponse> {
+    this.calls.push(req);
+    return this.impl(req);
+  }
+  async isAvailable(): Promise<boolean> {
+    return true;
+  }
 }
 
-describe('buildFallbackProviders / createLLMGateway failover wiring', () => {
+describe('buildFallbackProvidersFromEnv', () => {
   const originalEnv = { ...process.env };
 
   beforeEach(() => {
     delete process.env.AI_FALLBACK_PROVIDER_API_KEY;
     delete process.env.AI_FALLBACK_PROVIDER_BASE_URL;
     delete process.env.AI_FALLBACK_LIGHTWEIGHT_MODEL;
-    delete process.env.SHADOW_LLM_ENABLED;
-    delete process.env.AI_CACHE_ENABLED;
   });
 
   afterEach(() => {
     process.env = { ...originalEnv };
   });
 
-  it('returns empty list when only one fallback env var is set', () => {
-    expect(
-      buildFallbackProviders(
-        cfg({ AI_FALLBACK_PROVIDER_API_KEY: 'sk-or-test' } as Partial<AppConfig>),
-      ),
-    ).toEqual([]);
-    process.env.AI_FALLBACK_PROVIDER_BASE_URL = 'https://openrouter.ai/api/v1';
-    expect(buildFallbackProviders(cfg())).toEqual([]);
+  it('returns empty when fallback env is unset', () => {
+    expect(buildFallbackProvidersFromEnv()).toEqual([]);
   });
 
-  it('builds one OpenRouter-backed fallback when both env vars are set', () => {
-    const providers = buildFallbackProviders(
-      cfg({
+  it('returns empty when only key is set', () => {
+    expect(
+      buildFallbackProvidersFromEnv(undefined, {
         AI_FALLBACK_PROVIDER_API_KEY: 'sk-or-test',
-        AI_FALLBACK_PROVIDER_BASE_URL: 'https://openrouter.ai/api/v1',
-      } as Partial<AppConfig>),
-    );
+      }),
+    ).toEqual([]);
+  });
+
+  it('returns one FallbackModelMapProvider when both key and URL are set', () => {
+    const providers = buildFallbackProvidersFromEnv(undefined, {
+      AI_FALLBACK_PROVIDER_API_KEY: 'sk-or-test',
+      AI_FALLBACK_PROVIDER_BASE_URL: 'https://openrouter.ai/api/v1',
+      AI_FALLBACK_LIGHTWEIGHT_MODEL: 'meta-llama/llama-3.1-8b-instruct',
+    });
     expect(providers).toHaveLength(1);
-    expect(providers[0]).toBeInstanceOf(FallbackModelOverrideProvider);
+    expect(providers[0]).toBeInstanceOf(FallbackModelMapProvider);
     expect(providers[0].name).toBe('openrouter.ai');
   });
+});
 
-  it('wires fallbackProviders into the failover wrapper when both vars set', () => {
-    const gateway = createLLMGateway(
-      cfg({
-        AI_FALLBACK_PROVIDER_API_KEY: 'sk-or-test',
-        AI_FALLBACK_PROVIDER_BASE_URL: 'https://openrouter.ai/api/v1',
-      } as Partial<AppConfig>),
-    );
-    const cells = failoverProviders(gateway);
-    expect(cells).toHaveLength(2);
-    expect((cells[0] as { name: string }).name).toBe('api.openai.com');
-    expect((cells[1] as { name: string }).name).toBe('openrouter.ai');
+describe('createLLMGateway — fallbackProviders wiring', () => {
+  const originalEnv = { ...process.env };
+
+  beforeEach(() => {
+    delete process.env.AI_FALLBACK_PROVIDER_API_KEY;
+    delete process.env.AI_FALLBACK_PROVIDER_BASE_URL;
+    delete process.env.SHADOW_LLM_ENABLED;
   });
 
-  it('keeps single-provider failover list when fallback env unset', () => {
-    const gateway = createLLMGateway(cfg());
-    expect(failoverProviders(gateway)).toHaveLength(1);
+  afterEach(() => {
+    process.env = { ...originalEnv };
   });
 
-  it('FallbackModelOverrideProvider rewrites classify_intent model', async () => {
-    let seenModel: string | undefined;
-    const inner: LLMProvider = {
-      name: 'openrouter.ai',
-      async complete(req: LLMRequest): Promise<LLMResponse> {
-        seenModel = req.model;
-        return {
-          content: '{}',
-          model: req.model ?? 'x',
-          provider: 'openrouter.ai',
-          tokenUsage: { input: 1, output: 1, total: 2 },
-          latencyMs: 1,
-        };
-      },
-      async isAvailable() {
-        return true;
-      },
+  function failoverProviderCount(gateway: ReturnType<typeof createLLMGateway>): number {
+    // TenantQuota → Failover → providers[]
+    // @ts-expect-error reach into internals
+    const outermost = [...gateway.providers.values()][0] as {
+      inner?: { providers?: unknown[] };
     };
-    const wrapped = new FallbackModelOverrideProvider(inner, DEFAULT_FALLBACK_LIGHTWEIGHT_MODEL);
+    return outermost.inner?.providers?.length ?? 0;
+  }
+
+  it('wires a single provider when fallback env is unset', () => {
+    const gateway = createLLMGateway(cfg());
+    expect(failoverProviderCount(gateway)).toBe(1);
+  });
+
+  it('wires two providers when AI_FALLBACK_PROVIDER_* both set', () => {
+    process.env.AI_FALLBACK_PROVIDER_API_KEY = 'sk-or-test';
+    process.env.AI_FALLBACK_PROVIDER_BASE_URL = 'https://openrouter.ai/api/v1';
+    const gateway = createLLMGateway(cfg());
+    expect(failoverProviderCount(gateway)).toBe(2);
+  });
+});
+
+describe('composeResilienceStack — primary abort fails over', () => {
+  it('returns fallback response when primary aborts', async () => {
+    const abortErr = Object.assign(new Error('Request was aborted.'), { name: 'AbortError' });
+    const primary = new ScriptedProvider('primary', async () => {
+      throw abortErr;
+    });
+    const fallback = new ScriptedProvider('fallback', async (req) => ({
+      content: 'ok-from-fallback',
+      model: req.model ?? 'fallback-model',
+      provider: 'fallback',
+      tokenUsage: { input: 1, output: 1, total: 2 },
+      latencyMs: 10,
+    }));
+
+    const composed = composeResilienceStack(primary, {
+      breakers: new CircuitBreakerRegistry(DEFAULT_BREAKER),
+      quota: new TenantQuotaRegistry(),
+      fallbackProviders: [fallback],
+    });
+
+    const result = await composed.complete({
+      taskType: 'classify_intent',
+      messages: [{ role: 'user', content: 'hi' }],
+      tenantId: 'tenant-1',
+      tenantTier: 'standard',
+      model: 'gpt-4o-mini',
+      deadlineMs: 5_000,
+    });
+
+    expect(result.content).toBe('ok-from-fallback');
+    expect(result.providerPath?.some((p) => p.includes('primary'))).toBe(true);
+    expect(result.providerPath?.some((p) => p.includes('fallback'))).toBe(true);
+  });
+
+  it('throws LLM_PROVIDER_UNAVAILABLE when primary and fallback both fail', async () => {
+    const err5xx = Object.assign(new Error('boom'), { status: 503 });
+    const primary = new ScriptedProvider('primary', async () => {
+      throw err5xx;
+    });
+    const fallback = new ScriptedProvider('fallback', async () => {
+      throw err5xx;
+    });
+
+    const composed = composeResilienceStack(primary, {
+      breakers: new CircuitBreakerRegistry(DEFAULT_BREAKER),
+      quota: new TenantQuotaRegistry(),
+      fallbackProviders: [fallback],
+    });
+
+    const err = await composed
+      .complete({
+        taskType: 'classify_intent',
+        messages: [{ role: 'user', content: 'hi' }],
+        tenantId: 'tenant-1',
+        model: 'gpt-4o-mini',
+      })
+      .catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(AppError);
+    expect((err as AppError).code).toBe('LLM_PROVIDER_UNAVAILABLE');
+  });
+});
+
+describe('FallbackModelMapProvider', () => {
+  it('rewrites classify_intent model to fallback lightweight id', async () => {
+    const inner = new ScriptedProvider('openrouter.ai', async (req) => ({
+      content: 'ok',
+      model: req.model ?? '',
+      provider: 'openrouter.ai',
+      tokenUsage: { input: 1, output: 1, total: 2 },
+      latencyMs: 1,
+    }));
+    const wrapped = new FallbackModelMapProvider(inner, {
+      lightweight: 'meta-llama/llama-3.1-8b-instruct',
+      standard: 'meta-llama/llama-3.3-70b-instruct',
+      complex: 'qwen/qwen2.5-vl-72b-instruct',
+    });
+
     await wrapped.complete({
       taskType: 'classify_intent',
+      messages: [{ role: 'user', content: 'x' }],
+      tenantId: 't1',
       model: 'gpt-4o-mini',
-      messages: [{ role: 'user', content: 'hi' }],
-      tenantId: 't1',
     });
-    expect(seenModel).toBe(DEFAULT_FALLBACK_LIGHTWEIGHT_MODEL);
 
-    await wrapped.complete({
-      taskType: 'draft_estimate',
-      model: 'gpt-4o',
-      messages: [{ role: 'user', content: 'hi' }],
-      tenantId: 't1',
-    });
-    expect(seenModel).toBe('gpt-4o');
+    expect(inner.calls[0].model).toBe('meta-llama/llama-3.1-8b-instruct');
   });
 });

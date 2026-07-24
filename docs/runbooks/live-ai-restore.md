@@ -163,10 +163,41 @@ This is **not** Profile B. Profile B replaces the primary host/models entirely.
 
 ---
 
-## Profile B — OpenRouter Option A (preferred next)
+## Profile A + OpenRouter fallback (FM-03 dual-provider — preferred for voice 50/50)
+
+Keep **OpenAI as primary** (Profile A). Add OpenRouter as a **fallback** so
+primary abort/5xx advances instead of sole-provider `LLM_PROVIDER_UNAVAILABLE`.
+This is **not** Profile B (which replaces the primary).
+
+Requires the factory wiring from `AI_FALLBACK_PROVIDER_*` (merged with the
+voice DEGRADED→50/50 plan). Partial config (key without URL) is ignored.
+
+| Variable | Value |
+|----------|-------|
+| Primary | unchanged Profile A (`api.openai.com` + `gpt-4o-mini` / `gpt-4o`) |
+| `AI_FALLBACK_PROVIDER_BASE_URL` | `https://openrouter.ai/api/v1` |
+| `AI_FALLBACK_PROVIDER_API_KEY` | `sk-or-…` |
+| `AI_FALLBACK_LIGHTWEIGHT_MODEL` | `meta-llama/llama-3.1-8b-instruct` |
+| `AI_FALLBACK_STANDARD_MODEL` | `meta-llama/llama-3.3-70b-instruct` (optional) |
+| `AI_FALLBACK_COMPLEX_MODEL` | `qwen/qwen2.5-vl-72b-instruct` (optional) |
+| `AI_CLASSIFY_INTENT_DEADLINE_MS` | **12000** (never leave empty — empty → 4s default) |
+
+```bash
+export AI_FALLBACK_PROVIDER_API_KEY='sk-or-...'
+./scripts/apply-railway-ai-fallback.sh
+# Or set the same vars in Railway desktop → production → @serviceos/api → Variables
+cd packages/api && npm run check:ai-provider-config
+./scripts/verify-live-ai-envs.sh
+```
+
+---
+
+## Profile B — OpenRouter Option A (primary swap — different from failover)
 
 After OpenAI smoke is green (or instead of A if you have `sk-or-…` ready).
 Apply to **both** `Development` and `production` (same script, profile `b`).
+**Do not use Profile B when you want dual-provider failover** — use the
+section above instead.
 
 | Variable | Value |
 |----------|-------|

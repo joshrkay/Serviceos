@@ -3,6 +3,18 @@
 **Status:** recommended go-live path (2026-07-20)  
 **Why:** Live Railway APIs had a dead LLM path (0/50 operator voice probe). Host 70B locally on Railway is out of scope; use managed OpenRouter inference and keep ServiceOS on Railway.
 
+## Two ways to use OpenRouter
+
+| Mode | Env | Effect |
+|------|-----|--------|
+| **Primary swap (Profile B)** | `AI_PROVIDER_*` → OpenRouter | Replaces OpenAI as the only provider |
+| **Fallback (FM-03 dual-provider)** | Keep Profile A primary; set `AI_FALLBACK_PROVIDER_*` | OpenAI first; OpenRouter on abort/5xx |
+
+For production voice 50/50 after #734, prefer **fallback** (see
+`docs/runbooks/live-ai-restore.md` → "Profile A + OpenRouter fallback" and
+`./scripts/apply-railway-ai-fallback.sh`). Profile B alone does **not** enable
+`ProviderFailoverWrapper` — that requires the fallback env pair.
+
 ## What this is
 
 ServiceOS talks to any OpenAI-compatible chat completions API via

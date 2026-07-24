@@ -26,15 +26,11 @@
  *   attempt. The FailoverProvider wraps an array of breaker-wrapped providers
  *   so each candidate is independently protected.
  *
- * Dual-provider scenario (FM-03):
- *   When `createLLMGateway` sees AI_FALLBACK_PROVIDER_API_KEY +
- *   AI_FALLBACK_PROVIDER_BASE_URL, `fallbackProviders` is a one-element list
- *   (typically OpenRouter). Primary abort/5xx advances to the fallback;
- *   local deadline aborts still do not count toward breaker health (FM-01).
- *
- * Single-provider scenario (default when fallback env vars are unset):
+ * Single-provider scenario (P2-029):
  *   ProviderFailoverWrapper is constructed with a single-element list.
  *   On 5xx it exhausts the list and throws LLM_PROVIDER_UNAVAILABLE immediately.
+ *   This is correct — the failover *ability* is wired; adding a second real
+ *   provider in a follow-up story is purely additive.
  */
 
 import { AppError } from '../../shared/errors';
@@ -336,7 +332,8 @@ export interface ResilienceStackOptions {
 
   /**
    * Additional fallback providers tried in order after the primary fails.
-   * Populated by `createLLMGateway` when AI_FALLBACK_PROVIDER_* env vars are set.
+   * Populated by createLLMGateway() when AI_FALLBACK_PROVIDER_API_KEY +
+   * AI_FALLBACK_PROVIDER_BASE_URL are both set (FM-03 dual-provider).
    */
   fallbackProviders?: LLMProvider[];
 
