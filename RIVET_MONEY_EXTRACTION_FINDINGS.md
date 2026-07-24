@@ -743,7 +743,7 @@ Flagged, not decided.
 | 2 | Estimate enforcement | **PARTIAL** — chokepoint bypassed by accept/decline/send |
 | 2 | Payment enforcement | **PARTIAL** — no transition table, but genuine SQL CAS |
 | 2 | Void → link invalidation | **BROKEN** (P0-1) |
-| 2 | Paid-invoice reject | **HOLDS** — racy, unlocked |
+| 2 | Paid-invoice reject | **BROKEN UNDER CONCURRENCY** (P0-6) — holds serially only; needs the L4 gate |
 | 2 | Estimate → invoice | **IDEMPOTENT** primary / **DOUBLE-CONVERTIBLE** via 2 secondary paths |
 | 3 | Idempotency mechanism | **EXISTS — DB constraint, not racy** |
 | 3 | Signature verification | **PARTIAL** — fail-closed but hand-rolled |
@@ -752,6 +752,8 @@ Flagged, not decided.
 | 4 | Refund initiation | **ABSENT** |
 | 4 | Refund recording + over-refund guard | **EXISTS** — cumulative, atomic, race-tested |
 | 4 | Refund → invoice write-back | **ABSENT by design** |
+| 4/5 | Balance convention across reconcilers | **BROKEN** (P0-7) — refund-net vs refund-inclusive; L3 is undefined until settled |
+| 5 | Balance-column write paths | **PARTIAL** — 3 writers; `applyDepositCredit` is a read-modify-write |
 | 4 | Tax storage / rounding / per-line taxable | **EXISTS** — stored, per-document round |
 | 4 | Tax jurisdiction / nexus / exemption | **ABSENT** — `taxExempt` is a phantom |
 | 5 | Ledger | **ABSENT** (double-entry) / **PARTIAL** (derived-balance surface) |
