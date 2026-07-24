@@ -18,6 +18,30 @@ export function isValidTimezone(timezone: string): timezone is SupportedTimezone
   return VALID_TIMEZONES.includes(timezone as SupportedTimezone);
 }
 
+const runtimeTzCache = new Map<string, boolean>();
+
+/**
+ * True when the runtime's Intl database recognizes `timezone`. Settings
+ * accept ANY runtime-valid IANA zone (settings.ts `isValidIanaTimezone` —
+ * America/Juneau, America/Adak, …), so scheduling math must too: gating on
+ * the curated `VALID_TIMEZONES` display list silently downgraded those
+ * tenants to UTC, shifting every working-hours/window check by the real
+ * offset. The curated list remains a UI/display concern only.
+ */
+export function isRuntimeTimezone(timezone: string): boolean {
+  const cached = runtimeTzCache.get(timezone);
+  if (cached !== undefined) return cached;
+  let ok = false;
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: timezone });
+    ok = true;
+  } catch {
+    ok = false;
+  }
+  runtimeTzCache.set(timezone, ok);
+  return ok;
+}
+
 const dateKeyFormatterCache = new Map<string, Intl.DateTimeFormat>();
 
 /**
@@ -28,7 +52,7 @@ const dateKeyFormatterCache = new Map<string, Intl.DateTimeFormat>();
  * to the UTC date for an unsupported tz, matching `addCalendarDays`.
  */
 export function localDateKey(instant: Date, tz: string): string {
-  if (!isValidTimezone(tz)) return instant.toISOString().slice(0, 10);
+  if (!isRuntimeTimezone(tz)) return instant.toISOString().slice(0, 10);
   let f = dateKeyFormatterCache.get(tz);
   if (!f) {
     // en-CA renders as 'YYYY-MM-DD'.
@@ -95,7 +119,7 @@ export function tzMidnight(yyyymmdd: string, tz: string): Date {
   if (!m) throw new Error(`tzMidnight: invalid date '${yyyymmdd}'`);
   const [y, mo, d] = [+m[1], +m[2], +m[3]];
   const probeUtc = Date.UTC(y, mo - 1, d, 0, 0, 0);
-  if (!isValidTimezone(tz)) return new Date(probeUtc);
+  if (!isRuntimeTimezone(tz)) return new Date(probeUtc);
   // Probe the offset by asking what wall-clock the probe represents in tz.
   const offsetMs = wallClockMs(new Date(probeUtc), tz) - probeUtc;
   return new Date(probeUtc - offsetMs);
@@ -108,7 +132,7 @@ export function tzMidnight(yyyymmdd: string, tz: string): Date {
  * may be 167 or 169 hours).
  */
 export function addCalendarDays(date: Date, days: number, tz: string): Date {
-  if (!isValidTimezone(tz)) {
+  if (!isRuntimeTimezone(tz)) {
     return new Date(date.getTime() + days * 86_400_000);
   }
   const fmt = new Intl.DateTimeFormat('en-CA', {

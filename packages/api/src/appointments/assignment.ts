@@ -10,7 +10,7 @@ import { WorkingHoursRepository } from '../availability/working-hours';
 import { UnavailableBlockRepository } from '../availability/unavailable-block';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { notifyTechnicianAssignmentChange } from './assignment-notifications';
-import { isValidTimezone, localDateKey } from '../shared/timezone';
+import { isRuntimeTimezone, localDateKey } from '../shared/timezone';
 
 /**
  * Optional dependencies for `assignTechnician`.
@@ -64,7 +64,7 @@ export async function assertTechnicianAvailability(
   window: { start: Date; end: Date; timezone: string },
   deps: Pick<AssignTechnicianDeps, 'workingHoursRepo' | 'unavailableBlockRepo'>,
 ): Promise<void> {
-  const tz = isValidTimezone(window.timezone) ? window.timezone : 'UTC';
+  const tz = isRuntimeTimezone(window.timezone) ? window.timezone : 'UTC';
   if (deps.workingHoursRepo) {
     const rows = (
       await deps.workingHoursRepo.findByTechnician(tenantId, technicianId)

@@ -411,3 +411,50 @@ describe('isSlotFree — trailing-buffer fetch horizon (Codex P1)', () => {
     expect(await freeWithBuffer(0)).toBe(true);
   });
 });
+
+describe('Codex round 4 — window overrun + non-curated IANA zones', () => {
+  it('never emits slots past close while walking toward a later-day time-off block', async () => {
+    const deps = makeDeps();
+    // Tech time-off on TUESDAY; search MONDAY with a duration so long that
+    // Monday has fewer than maxSlots valid starts. The fill loop walking
+    // toward the Tuesday block must still stop at Monday close.
+    await deps.unavailableBlockRepo.create({
+      id: 'blk-tue',
+      tenantId: TENANT,
+      technicianId: TECH,
+      startTime: new Date('2026-06-16T14:00:00Z'), // Tuesday
+      endTime: new Date('2026-06-16T20:00:00Z'),
+      createdBy: 'test',
+      createdAt: NOW,
+    });
+    const slots = await findBookableSlots(deps, {
+      tenantId: TENANT,
+      fromDate: '2026-06-15', // Monday only
+      toDate: '2026-06-15',
+      timezone: 'America/New_York',
+      durationMin: 480, // 8h service in an 8–17 day → exactly one valid start
+      technicianId: TECH,
+      now: NOW,
+      maxSlots: 10,
+    });
+    // Only 08:00–16:00 EDT fits; every slot must end by 17:00 EDT (21:00Z).
+    expect(slots.length).toBeGreaterThan(0);
+    for (const s of slots) {
+      expect(s.end.toISOString() <= '2026-06-15T21:00:00.000Z').toBe(true);
+    }
+  });
+
+  it('honors a valid IANA zone outside the curated list (America/Juneau, UTC-8 in June)', async () => {
+    const deps = makeDeps();
+    const slots = await findBookableSlots(deps, {
+      tenantId: TENANT,
+      fromDate: '2026-06-15',
+      toDate: '2026-06-15',
+      timezone: 'America/Juneau',
+      durationMin: 60,
+      now: NOW,
+    });
+    // 08:00 AKDT (UTC-8) = 16:00Z — NOT the 08:00Z a UTC fallback would give.
+    expect(slots[0].start.toISOString()).toBe('2026-06-15T16:00:00.000Z');
+  });
+});

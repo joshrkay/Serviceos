@@ -259,10 +259,15 @@ export class DefaultAvailabilityFinder implements AvailabilityFinder {
     let cursor = snapUp(windowStart, windowStart, granularityMs);
     for (const interval of busy) {
       if (cursor + input.durationMs <= interval.start) {
-        // There is at least one full slot before this busy interval.
+        // There is at least one full slot before this busy interval. Cap the
+        // fill at windowEnd as well: a busy interval can lie BEYOND the
+        // search window (a later-day time-off block in extraBusy, or an
+        // appointment fetched through the trailing buffer), and walking
+        // toward it must never emit slots past the window's close.
+        const fillEnd = Math.min(interval.start, windowEnd);
         let slotStart = cursor;
         while (
-          slotStart + input.durationMs <= interval.start &&
+          slotStart + input.durationMs <= fillEnd &&
           slots.length < count
         ) {
           slots.push({

@@ -44,6 +44,7 @@ import {
   STANDARD_BOOKING_HORIZON_DAYS,
   PRIORITY_BOOKING_HORIZON_DAYS,
 } from '../scheduling/booking-availability';
+import { checkServiceArea } from '../scheduling/service-area';
 import { customerHasPriorityBooking } from '../agreements/member-pricing';
 import { CustomerPaymentMethodRepository } from '../payments/customer-payment-method';
 import { createSetupIntent } from '../payments/stripe-saved-card';
@@ -147,6 +148,7 @@ interface ResolvedScheduling {
   timezone: string;
   weeklyHours: WeeklyBusinessHours | null;
   bufferMinutes: number | null;
+  serviceAreaZips: string[] | null;
 }
 
 /**
@@ -159,7 +161,12 @@ async function resolveTenantScheduling(
   tenantId: string,
 ): Promise<ResolvedScheduling> {
   if (!deps.settingsRepo) {
-    return { timezone: DEFAULT_BOOKING_TIMEZONE, weeklyHours: null, bufferMinutes: null };
+    return {
+      timezone: DEFAULT_BOOKING_TIMEZONE,
+      weeklyHours: null,
+      bufferMinutes: null,
+      serviceAreaZips: null,
+    };
   }
   const settings = await deps.settingsRepo.findByTenant(tenantId);
   const config = schedulingConfigFromSettings(settings);
@@ -167,6 +174,7 @@ async function resolveTenantScheduling(
     timezone: config.timezone || DEFAULT_BOOKING_TIMEZONE,
     weeklyHours: config.weeklyHours,
     bufferMinutes: config.bufferMinutes,
+    serviceAreaZips: settings?.serviceAreaZips ?? null,
   };
 }
 
@@ -648,6 +656,24 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
           .status(422)
           .json({ error: 'NO_LOCATION', message: 'No service location on file. Please contact us to book.' });
         return;
+      }
+
+      // Service area (F2 term 5) — same rule as public booking: when a ZIP
+      // allowlist is configured, the resolved location must be inside it. An
+      // existing customer's saved address can still be out of area (the list
+      // may have shrunk since they were added), and a held appointment the
+      // truck can't reach helps nobody.
+      if (scheduling.serviceAreaZips && scheduling.serviceAreaZips.length > 0 && deps.locationRepo) {
+        const location = await deps.locationRepo.findById(tenantId, locationId);
+        const postalCode = location?.postalCode ?? '';
+        if (!checkServiceArea(scheduling.serviceAreaZips, postalCode).inArea) {
+          res.status(400).json({
+            error: 'OUT_OF_SERVICE_AREA',
+            message:
+              'That address is outside our current service area. Call us and we may still be able to help.',
+          });
+          return;
+        }
       }
 
       const finderDeps = {

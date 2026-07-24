@@ -9,7 +9,7 @@ import {
   OpenSlot,
   DEFAULT_BUFFER_MS,
 } from '../ai/tasks/availability-finder';
-import { isValidTimezone } from '../shared/timezone';
+import { isRuntimeTimezone } from '../shared/timezone';
 
 /**
  * Customer-facing slot search. Wraps the AI `AvailabilityFinder` so the
@@ -74,7 +74,7 @@ export function clampBookingHorizon(
 
 /** Latest bookable calendar date (YYYY-MM-DD) = today-in-tz + horizonDays. */
 function maxBookableYmd(now: Date, horizonDays: number, timezone: string): string {
-  const tz = isValidTimezone(timezone) ? timezone : 'UTC';
+  const tz = isRuntimeTimezone(timezone) ? timezone : 'UTC';
   const [y, mo, d] = new Intl.DateTimeFormat('en-CA', {
     timeZone: tz,
     year: 'numeric',
@@ -204,7 +204,7 @@ export function isWithinBusinessHours(
   timezone: string,
   weeklyHours: WeeklyBusinessHours | null | undefined,
 ): boolean {
-  const tz = isValidTimezone(timezone) ? timezone : 'UTC';
+  const tz = isRuntimeTimezone(timezone) ? timezone : 'UTC';
   const s = localMinutesOfDay(start, tz);
   const e = localMinutesOfDay(end, tz);
   if (s.ymd !== e.ymd) return false; // must not span local days
@@ -299,7 +299,7 @@ export async function findBookableSlotsDetailed(
   deps: BookableSlotsDeps,
   input: FindBookableSlotsInput,
 ): Promise<FindBookableSlotsDetailedResult> {
-  const tz = isValidTimezone(input.timezone) ? input.timezone : 'UTC';
+  const tz = isRuntimeTimezone(input.timezone) ? input.timezone : 'UTC';
   const durationMs = input.durationMin * 60 * 1000;
   const weeklyConfigured = hasConfiguredWeeklyHours(input.weeklyHours);
   const pair = input.businessHours ?? DEFAULT_BUSINESS_HOURS;
