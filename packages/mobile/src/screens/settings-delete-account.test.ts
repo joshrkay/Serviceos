@@ -14,7 +14,9 @@ vi.mock('expo-router', () => ({
   useRouter: () => ({ back: h.back, push: vi.fn(), replace: h.replace }),
 }));
 vi.mock('../lib/useApiClient', () => ({ useApiClient: () => h.api }));
-vi.mock('../push/useSignOut', () => ({ useSignOut: () => h.signOut }));
+// The screen signs out via Clerk DIRECTLY — using useSignOut would fire an
+// authenticated device-token DELETE that the deleted membership can only 401.
+vi.mock('@clerk/clerk-expo', () => ({ useAuth: () => ({ signOut: h.signOut }) }));
 
 // eslint-disable-next-line import/first
 import DeleteAccount from '../../app/(tabs)/settings/delete-account';

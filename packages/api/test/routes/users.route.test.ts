@@ -435,7 +435,11 @@ describe('DELETE /api/users/me — in-app account deletion (guideline 5.1.1(v))'
     expect(res.body.error).toBe('ACCOUNT_DELETE_FAILED');
     expect(res.body.message).toMatch(/contact support/);
     expect(await repo.findById(TENANT, techId)).toBeNull();
-    expect(audited).toHaveLength(0);
+    // The terminal deactivation leaves an audit trail for support even
+    // though the webhook may never fire (and would no-op if it did).
+    expect(audited).toHaveLength(1);
+    expect(audited[0].eventType).toBe('user.account_deletion_unconfirmed');
+    expect(audited[0].entityId).toBe(techId);
   });
 
   it('reserves the local deletion BEFORE calling Clerk (serialization order)', async () => {

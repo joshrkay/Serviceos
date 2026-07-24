@@ -551,6 +551,40 @@ export function createUsersRouter(
             // This is a terminal deactivation — the device's push tokens
             // must die here too, exactly like the success path.
             await purgeTokens();
+            // Terminal deactivation needs its own audit record: the webhook
+            // may never fire in exactly this scenario, and even when it does
+            // its deleted_at IS NULL update no-ops against our stamp and
+            // writes nothing — support would otherwise be asked to reverse a
+            // deactivation with no trail. Best-effort + savepoint-isolated
+            // like every post-Clerk write.
+            if (auditRepo) {
+              try {
+                await runDurable(() =>
+                  withRequestSavepoint(() =>
+                    auditRepo.create(
+                      createAuditEvent({
+                        tenantId,
+                        actorId: clerkUserId,
+                        actorRole: req.auth!.role,
+                        eventType: 'user.account_deletion_unconfirmed',
+                        entityType: 'user',
+                        entityId: actor.id,
+                        metadata: {
+                          self: true,
+                          role: actor.role,
+                          note:
+                            'Deletion reserved locally but Clerk state unconfirmable ' +
+                            '(DELETE and verification GET both ambiguous). Account left ' +
+                            'deactivated; support may finish or reverse it.',
+                        },
+                      }),
+                    ),
+                  ),
+                );
+              } catch {
+                // Never fail the terminal response over the audit write.
+              }
+            }
             res.locals.forceCommit = true;
             res.status(502).json({
               error: 'ACCOUNT_DELETE_FAILED',

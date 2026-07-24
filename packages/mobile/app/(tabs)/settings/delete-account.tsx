@@ -1,8 +1,8 @@
+import { useAuth } from '@clerk/clerk-expo';
 import { useRouter } from 'expo-router';
 import { useState } from 'react';
 import { ActivityIndicator, Pressable, ScrollView, Text, View } from 'react-native';
 import { useApiClient } from '../../../src/lib/useApiClient';
-import { useSignOut } from '../../../src/push/useSignOut';
 
 /**
  * Map a DELETE /api/users/me failure to owner-friendly copy. The server's
@@ -26,7 +26,11 @@ function deleteErrorMessage(status: number, serverMessage?: string): string {
  */
 export default function DeleteAccount() {
   const api = useApiClient();
-  const signOut = useSignOut();
+  // Clerk's signOut directly — NOT useSignOut: that helper first sends an
+  // authenticated DELETE /api/devices, which the now-deactivated membership
+  // can only 401, flashing the session-expired toast/redirect over the
+  // deletion outcome. The server already purged the push tokens.
+  const { signOut } = useAuth();
   const router = useRouter();
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
