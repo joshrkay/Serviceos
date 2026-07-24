@@ -38,6 +38,7 @@ import { InMemoryPushDeliveryProvider } from '../../src/notifications/push-deliv
 import { InMemoryDeviceTokenRepository } from '../../src/push/device-token-service';
 import { setOwnerNotifications } from '../../src/notifications/owner-notifications-instance';
 import type { Pool } from 'pg';
+import { InMemoryConsentEventRepository } from '../../src/compliance/consent-events';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -2522,5 +2523,54 @@ describe('C5 buildTwiML: <Start><Record> placement', () => {
       recordingStatusCallback: 'https://api.test/recording',
     });
     expect(xml.indexOf('<Start><Record')).toBeLessThan(xml.indexOf('<Gather'));
+  });
+});
+
+// ─── C5 — parked consent-thunk lifetime ─────────────────────────────────────
+
+/**
+ * The deferred consent commit parks a closure per bootstrapped session. Paths
+ * that deliberately never commit — the `<Dial>` transfer short-circuit and
+ * every Media Streams fail-closed hang-up — would otherwise retain that
+ * closure forever, so a TTS outage or a run of transfer-at-bootstrap calls
+ * would grow the map without bound. Lifetime is instead bounded to sessions
+ * the store still has.
+ */
+describe('C5 — pending consent commits do not outlive their sessions', () => {
+  it('sweeps thunks for reaped sessions instead of retaining them forever', async () => {
+    const store = new VoiceSessionStore({ startInterval: false });
+    const consentEvents = new InMemoryConsentEventRepository();
+    const adapter = new TwilioGatherAdapter({
+      store,
+      gateway: makeGatewayReturning('{"intentType":"unknown","confidence":0,"reasoning":"x"}'),
+      businessName: 'Acme Plumbing',
+      publicBaseUrl: 'https://example.com',
+      consentEvents,
+    });
+
+    // Call 1 bootstraps and never commits — the Media Streams fail-closed
+    // shape, where the disclosure did not play so no row may be written.
+    await adapter.handleInboundForStream({
+      callSid: 'CA-leak-1',
+      from: '+15125550101',
+      tenantId: 't1',
+    });
+    await adapter.initializeStreamSession({ callSid: 'CA-leak-1', tenantId: 't1' });
+    expect(adapter._pendingConsentCommitSize).toBe(1);
+    expect(consentEvents.rows).toHaveLength(0);
+
+    // The store reaps the finished session.
+    store.reapIdle(Date.now() + 24 * 60 * 60 * 1000);
+    expect(store.get(store.findByCallSidIncludingEnded('CA-leak-1')?.id ?? 'gone')).toBeUndefined();
+
+    // Call 2 bootstraps: the sweep drops call 1's orphaned thunk, so the map
+    // tracks live sessions only rather than growing per undisclosed call.
+    await adapter.handleInboundForStream({
+      callSid: 'CA-leak-2',
+      from: '+15125550102',
+      tenantId: 't1',
+    });
+    await adapter.initializeStreamSession({ callSid: 'CA-leak-2', tenantId: 't1' });
+    expect(adapter._pendingConsentCommitSize).toBe(1);
   });
 });

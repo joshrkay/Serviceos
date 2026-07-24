@@ -775,10 +775,39 @@ export class TwilioGatherAdapter {
    * leaves NO row claiming a caller consented to a call we terminated
    * precisely because they were never told.
    *
-   * Same in-memory lifetime/leak posture as {@link callerIdBySession}: the
-   * entry is taken on commit, and dropped with the session on terminate.
+   * Lifetime is bounded to LIVE sessions, not to commits. Entries are taken
+   * on commit, but several paths deliberately never commit — the `<Dial>`
+   * transfer short-circuit (no disclosure rendered, no recording armed) and
+   * every Media Streams fail-closed branch (the whole point is that no row is
+   * written). Those would otherwise park a closure forever, so
+   * {@link sweepPendingConsentCommits} drops entries whose session the store
+   * no longer has. A TTS outage or a run of transfer-at-bootstrap calls
+   * therefore cannot grow this map without bound.
    */
   private readonly pendingConsentCommit = new Map<string, () => Promise<void>>();
+
+  /**
+   * Drop parked consent thunks for sessions the store has already reaped.
+   * Runs on each park, so the map stays bounded by concurrent live sessions —
+   * the same lifetime the store itself enforces — without needing a hook on
+   * every close path (`finalizeTerminatedSession` early-returns on an
+   * already-stamped outcome, so it is not a reliable single choke point).
+   */
+  private sweepPendingConsentCommits(): void {
+    for (const sessionId of this.pendingConsentCommit.keys()) {
+      if (!this.deps.store.get(sessionId)) {
+        this.pendingConsentCommit.delete(sessionId);
+      }
+    }
+  }
+
+  /**
+   * Test-only view of the parked-thunk count, so the leak regression can be
+   * asserted directly rather than inferred.
+   */
+  get _pendingConsentCommitSize(): number {
+    return this.pendingConsentCommit.size;
+  }
 
   /**
    * A3 — consecutive-low-Gather-`Confidence`-turn streak, keyed by
@@ -1161,7 +1190,10 @@ export class TwilioGatherAdapter {
     // not evidence the caller heard it, so the thunk is parked here and each
     // transport commits at its own point of evidence (see
     // {@link commitRecordingConsent}). Overwrites any prior entry for this
-    // session — a re-bootstrap supersedes an uncommitted thunk.
+    // session — a re-bootstrap supersedes an uncommitted thunk. Swept first so
+    // the never-committed paths (transfer short-circuit, fail-closed hang-ups)
+    // cannot accumulate closures across calls.
+    this.sweepPendingConsentCommits();
     this.pendingConsentCommit.set(session.id, disclosure.commitConsentLedger);
 
     // 2. Identify caller by phone number.
@@ -1850,12 +1882,22 @@ export class TwilioGatherAdapter {
 
     // C5 — Gather's point of evidence for the recording disclosure: the TwiML
     // we are about to return carries `<Say>` before `<Start><Record>`, so
-    // Twilio speaks the notice before it arms capture. Skipped on the transfer
-    // short-circuit — a `<Dial>` renders no disclosure and arms no recording,
-    // so ledgering implicit consent there would assert a notice that was
-    // never rendered.
-    if (!transferTwiml) {
-      await this.commitRecordingConsent({ callSid: opts.callSid });
+    // Twilio speaks the notice before it arms capture.
+    //
+    // NOT awaited: the ledger insert is explicitly best-effort, so blocking on
+    // it would let a slow or saturated database delay the disclosure response
+    // itself. `commitRecordingConsent` takes the entry from the map
+    // synchronously before awaiting the insert, so the fire-and-forget still
+    // releases the parked closure immediately.
+    if (transferTwiml) {
+      // A `<Dial>` renders no disclosure and arms no recording, so ledgering
+      // implicit consent here would assert a notice that was never rendered.
+      // Discard the parked thunk rather than leaving it for the sweep.
+      this.pendingConsentCommit.delete(session.id);
+    } else {
+      void this.commitRecordingConsent({ callSid: opts.callSid }).catch(() => {
+        /* swallow — the thunk already swallows; this guards the lookup */
+      });
     }
 
     // 8. If the FSM drove straight to 'terminated' (escalation chain

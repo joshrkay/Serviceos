@@ -1581,7 +1581,12 @@ describe('production-shaped wiring (app.ts hooks)', () => {
     });
 
     // RV-130 — the implicit recording-consent event landed in the ledger.
-    expect(consentEvents.rows).toHaveLength(1);
+    // C5 — the commit is deliberately NOT awaited on the capture critical
+    // path (a slow ledger must not hold capture closed past the disclosure),
+    // so poll rather than asserting synchronously.
+    await vi.waitFor(() => {
+      expect(consentEvents.rows).toHaveLength(1);
+    });
     expect(consentEvents.rows[0]).toMatchObject({
       kind: 'recording',
       state: 'implicit',

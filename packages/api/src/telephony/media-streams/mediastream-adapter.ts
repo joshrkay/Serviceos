@@ -1271,18 +1271,20 @@ export class TwilioMediaStreamAdapter {
           // C5 — point of evidence: the disclosure turn played to completion,
           // which is exactly what the ledger's `recording/implicit` asserts.
           // Only reachable here; every fail-closed branch above and below
-          // returns first, so a hang-up never ledgers consent. Best-effort —
-          // a ledger outage must not sink an otherwise-disclosed call, and it
-          // must not block arming capture below.
+          // returns first, so a hang-up never ledgers consent.
+          //
+          // NOT awaited: the insert is explicitly best-effort, and capture is
+          // armed immediately below. Blocking on it would let a slow or
+          // saturated database hold capture closed past the disclosure, so the
+          // caller's first words after the notice would be dropped — trading a
+          // compliance record for lost audio. Fire-and-forget, log on failure.
           if (this.deps.commitRecordingConsent) {
-            try {
-              await this.deps.commitRecordingConsent({ callSid });
-            } catch (err) {
+            void this.deps.commitRecordingConsent({ callSid }).catch((err: unknown) => {
               logger.warn('mediastream: recording-consent ledger commit failed', {
                 error: err instanceof Error ? err.message : String(err),
                 callSid,
               });
-            }
+            });
           }
           if (this.state.disclosureMarkAcked) {
             this.enableCapture('disclosure_played');
