@@ -134,12 +134,30 @@ export class ProposalExecutor {
         proposalType: proposal.proposalType,
         surface,
       });
-      throw new AppError(
-        'SURFACE_VIOLATION',
-        `Proposal type '${proposal.proposalType}' is not permitted on surface '${surface}' ` +
-          `(inbound caller sessions may only reach the S1 allowlist).`,
-        403
-      );
+      // Terminal outcome, not a throw: the sweep has already claimed the row
+      // (status 'executing'), and a bare throw would strand it there for the
+      // ~10-min stale reset and three pointless retries before a generic
+      // failure. A surface violation is an INTENTIONAL rejection — persist
+      // `execution_failed` with its audit row immediately (same shape as the
+      // chain cascade-fail above) so the proposal is done in one pass.
+      const blocked = transitionProposal(proposal, 'execution_failed', context.executedBy);
+      const blockedResult: ExecutionResult = {
+        success: false,
+        error:
+          `SURFACE_VIOLATION: proposal type '${proposal.proposalType}' is not permitted on ` +
+          `surface '${surface}' (inbound caller sessions may only reach the S1 allowlist).`,
+      };
+      await executeAudited({
+        client: null,
+        tenantId: blocked.tenantId,
+        auditRepo: this.auditRepo,
+        stateChange: () =>
+          this.proposalRepo.updateStatus(blocked.tenantId, blocked.id, blocked.status, {
+            executionError: blockedResult.error,
+          }),
+        audit: () => executionAuditInput(blocked, context, blockedResult),
+      });
+      return { proposal: blocked, result: blockedResult };
     }
 
     const handler = this.handlers.get(proposal.proposalType);

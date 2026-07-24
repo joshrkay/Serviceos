@@ -323,4 +323,148 @@ describe('P6-013 — Execution for reschedule proposals', () => {
     expect(result.warnings).toBeDefined();
     expect(result.warnings.some((w: any) => w.check === 'working_hours')).toBe(true);
   });
+
+  // ── RIVET P4 — S1 ownership binding ("reschedule OWN appointment" only) ──
+
+  function s1Proposal(payload: Record<string, unknown>, callerCustomerId?: string): Proposal {
+    return {
+      ...makeProposal(payload),
+      sourceContext: {
+        source: 'calling-agent',
+        channel: 'telephony',
+        surface: 'S1',
+        ...(callerCustomerId ? { callerCustomerId } : {}),
+      },
+    };
+  }
+
+  function feasibilityWithJobCustomer(customerId: string | null): FeasibilityDependencies {
+    return {
+      assignmentRepo: new InMemoryAssignmentRepository(),
+      appointmentRepo,
+      jobRepo: {
+        findById: async () =>
+          customerId ? ({ id: 'job-1', tenantId, customerId } as any) : null,
+      } as any,
+      locationRepo: { findById: async () => null } as any,
+      workingHoursRepo: { findByTechnicianAndDay: async () => null } as any,
+      unavailableBlockRepo: { findByTechnicianAndDateRange: async () => [] } as any,
+      travelTimeProvider: new HaversineFallbackProvider(),
+      skillMatcher: new StubSkillMatcher(),
+    };
+  }
+
+  const S1_TIMES = {
+    newScheduledStart: '2026-03-15T10:00:00Z',
+    newScheduledEnd: '2026-03-15T12:00:00Z',
+  };
+
+  it("S1: REFUSES to move an appointment that is not the caller's own", async () => {
+    const appt = await createAppointment({
+      tenantId, jobId: 'job-1',
+      scheduledStart: new Date('2026-03-14T09:00:00Z'),
+      scheduledEnd: new Date('2026-03-14T11:00:00Z'),
+      timezone: 'UTC', createdBy: 'user-1',
+    }, appointmentRepo);
+    const s1Handler = new RescheduleAppointmentExecutionHandler(
+      appointmentRepo, undefined, undefined, undefined,
+      feasibilityWithJobCustomer('cust-somebody-else'),
+    );
+
+    const result = await s1Handler.execute(
+      s1Proposal({ appointmentId: appt.id, ...S1_TIMES }, 'cust-caller'),
+      context,
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/does not belong to the caller/);
+    // The appointment did NOT move.
+    const unchanged = await appointmentRepo.findById(tenantId, appt.id);
+    expect(unchanged!.scheduledStart.toISOString()).toBe('2026-03-14T09:00:00.000Z');
+  });
+
+  it("S1: allows moving the caller's OWN appointment", async () => {
+    const appt = await createAppointment({
+      tenantId, jobId: 'job-1',
+      scheduledStart: new Date('2026-03-14T09:00:00Z'),
+      scheduledEnd: new Date('2026-03-14T11:00:00Z'),
+      timezone: 'UTC', createdBy: 'user-1',
+    }, appointmentRepo);
+    const s1Handler = new RescheduleAppointmentExecutionHandler(
+      appointmentRepo, undefined, undefined, undefined,
+      feasibilityWithJobCustomer('cust-caller'),
+    );
+
+    const result = await s1Handler.execute(
+      s1Proposal({ appointmentId: appt.id, ...S1_TIMES }, 'cust-caller'),
+      context,
+    );
+    expect(result.success).toBe(true);
+    const moved = await appointmentRepo.findById(tenantId, appt.id);
+    expect(moved!.scheduledStart.toISOString()).toBe('2026-03-15T10:00:00.000Z');
+  });
+
+  it('S1: fails closed when the caller was never identified (no callerCustomerId)', async () => {
+    const appt = await createAppointment({
+      tenantId, jobId: 'job-1',
+      scheduledStart: new Date('2026-03-14T09:00:00Z'),
+      scheduledEnd: new Date('2026-03-14T11:00:00Z'),
+      timezone: 'UTC', createdBy: 'user-1',
+    }, appointmentRepo);
+    const s1Handler = new RescheduleAppointmentExecutionHandler(
+      appointmentRepo, undefined, undefined, undefined,
+      feasibilityWithJobCustomer('cust-caller'),
+    );
+
+    const result = await s1Handler.execute(
+      s1Proposal({ appointmentId: appt.id, ...S1_TIMES }),
+      context,
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/identity was not verified/);
+  });
+
+  it('S1: fails closed when ownership cannot be verified (no job lookup / no job)', async () => {
+    const appt = await createAppointment({
+      tenantId, jobId: 'job-1',
+      scheduledStart: new Date('2026-03-14T09:00:00Z'),
+      scheduledEnd: new Date('2026-03-14T11:00:00Z'),
+      timezone: 'UTC', createdBy: 'user-1',
+    }, appointmentRepo);
+
+    // No feasibilityDeps at all → no jobRepo to verify with.
+    const noDeps = new RescheduleAppointmentExecutionHandler(appointmentRepo);
+    const r1 = await noDeps.execute(
+      s1Proposal({ appointmentId: appt.id, ...S1_TIMES }, 'cust-caller'),
+      context,
+    );
+    expect(r1.success).toBe(false);
+    expect(r1.error).toMatch(/Cannot verify appointment ownership/);
+
+    // jobRepo wired but the job row is missing → also refused.
+    const missingJob = new RescheduleAppointmentExecutionHandler(
+      appointmentRepo, undefined, undefined, undefined,
+      feasibilityWithJobCustomer(null),
+    );
+    const r2 = await missingJob.execute(
+      s1Proposal({ appointmentId: appt.id, ...S1_TIMES }, 'cust-caller'),
+      context,
+    );
+    expect(r2.success).toBe(false);
+    expect(r2.error).toMatch(/does not belong to the caller/);
+  });
+
+  it('S2/unstamped proposals are unaffected by the ownership guard', async () => {
+    const appt = await createAppointment({
+      tenantId, jobId: 'job-1',
+      scheduledStart: new Date('2026-03-14T09:00:00Z'),
+      scheduledEnd: new Date('2026-03-14T11:00:00Z'),
+      timezone: 'UTC', createdBy: 'user-1',
+    }, appointmentRepo);
+    // Plain handler with no feasibility deps — the pre-existing operator path.
+    const result = await handler.execute(
+      makeProposal({ appointmentId: appt.id, ...S1_TIMES }),
+      context,
+    );
+    expect(result.success).toBe(true);
+  });
 });

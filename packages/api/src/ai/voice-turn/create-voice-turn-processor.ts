@@ -1251,6 +1251,16 @@ export function createVoiceTurnProcessor(
           // RIVET P4 — the caller's surface travels with the proposal so the
           // execution boundary can re-check it (I6).
           surface,
+          // The IDENTIFIED caller's customer id (caller-ID match / self-signup
+          // — session identity, never transcript content). S1 self-service
+          // ops that target existing records (reschedule own appointment)
+          // verify ownership against this at execution; absent → those ops
+          // fail closed.
+          ...(typeof fx.payload.customerId === 'string' && fx.payload.customerId
+            ? { callerCustomerId: fx.payload.customerId }
+            : session.customerId
+              ? { callerCustomerId: session.customerId }
+              : {}),
           sessionId: session.id,
           // Ambiguous-line candidates for the review UI (same shape the
           // EstimateTaskHandler stores) — only present when a line was

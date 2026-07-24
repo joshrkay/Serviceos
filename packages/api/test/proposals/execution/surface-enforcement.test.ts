@@ -103,18 +103,23 @@ async function run(
 }
 
 describe('ProposalExecutor — RIVET P4 surface enforcement (I6)', () => {
-  it('BLOCKS an S1-stamped S2-only op (send_invoice) even when approved', async () => {
-    const { result, error, handler } = await run('send_invoice', 'S1');
-    expect(result).toBeNull();
+  it('BLOCKS an S1-stamped S2-only op (send_invoice) with a TERMINAL failed status', async () => {
+    const { result, handler } = await run('send_invoice', 'S1');
     expect(handler.invocations).toBe(0);
-    expect((error as { code?: string })?.code).toBe('SURFACE_VIOLATION');
-    expect((error as { statusCode?: number })?.statusCode).toBe(403);
+    // Terminal outcome, not a throw: the sweep claims rows before executing,
+    // so a throw would strand the proposal in 'executing' for the stale
+    // reset + retries. An intentional rejection finishes in one pass.
+    expect(result).not.toBeNull();
+    expect(result!.result.success).toBe(false);
+    expect(result!.result.error).toContain('SURFACE_VIOLATION');
+    expect(result!.proposal.status).toBe('execution_failed');
   });
 
   it('BLOCKS an S1-stamped money op (record_payment)', async () => {
     const { result, handler } = await run('record_payment', 'S1');
-    expect(result).toBeNull();
     expect(handler.invocations).toBe(0);
+    expect(result!.result.success).toBe(false);
+    expect(result!.proposal.status).toBe('execution_failed');
   });
 
   it('ALLOWS an S1-stamped allowlisted op (create_customer, self-signup)', async () => {
