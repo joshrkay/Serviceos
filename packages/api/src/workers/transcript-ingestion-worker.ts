@@ -10,6 +10,7 @@ import {
 } from '../ai/training/knowledge-chunks';
 import { EmbeddingProvider } from '../ai/providers/openai-compatible';
 import { KnownEntities, scrubPii } from '../ai/training/scrub';
+import { classifyTranscriptTurnProvenance } from '../ai/content-provenance';
 
 /**
  * transcript-ingestion-worker — Phase 4a-1 of the inbound-CSR RAG
@@ -249,6 +250,33 @@ export function createTranscriptIngestionWorker(
               error: error.message,
             });
           }
+        }
+      }
+
+      // ── Step 2c (RIVET I13): stamp transcript provenance ──────────────
+      // Compute 'caller' | 'mixed' | 'operator' from the REAL per-turn
+      // speaker distribution (never guessed from a joined string) and merge
+      // it into transcript_metadata so readers can classify the recording
+      // via classifyRecordingProvenance — which fails closed, so a missing
+      // stamp means untrusted. Failure-soft like the sibling stamps: a stamp
+      // error never fails the ingestion job.
+      if (turns.length > 0 && deps.voiceRepo.stampProvenance) {
+        const hasCaller = turns.some(
+          (t) => classifyTranscriptTurnProvenance(t) === 'untrusted',
+        );
+        const hasAgent = turns.some(
+          (t) => classifyTranscriptTurnProvenance(t) === 'trusted',
+        );
+        const provenance = hasCaller && hasAgent ? 'mixed' : hasCaller ? 'caller' : 'operator';
+        try {
+          await deps.voiceRepo.stampProvenance(tenantId, voiceRecordingId, provenance);
+        } catch (err) {
+          const error = err instanceof Error ? err : new Error(String(err));
+          logger.warn('stampProvenance failed', {
+            voiceRecordingId,
+            provenance,
+            error: error.message,
+          });
         }
       }
 

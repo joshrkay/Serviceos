@@ -10,6 +10,9 @@ function mapRow(row: Record<string, unknown>): VoiceRecording {
     fileId: (row.file_id as string | null) ?? undefined,
     conversationId: row.conversation_id as string | undefined,
     callSid: (row.call_sid as string | null) ?? undefined,
+    // RIVET I13 — recording origin (migration 054); consumed by
+    // classifyRecordingProvenance ('inbound_call' → untrusted).
+    source: (row.source as string | null) ?? undefined,
     status: row.status as TranscriptionStatus,
     transcript: row.transcript as string | undefined,
     transcriptMetadata: row.transcript_metadata as Record<string, unknown> | undefined,
@@ -173,6 +176,32 @@ export class PgVoiceRepository extends PgBaseRepository implements VoiceReposito
           WHERE id = $2 AND tenant_id = $3
           RETURNING *`,
         [language, id, tenantId],
+      );
+      if (result.rows.length === 0) return null;
+      return mapRow(result.rows[0]);
+    });
+  }
+
+  async stampProvenance(
+    tenantId: string,
+    id: string,
+    provenance: 'caller' | 'mixed' | 'operator',
+  ): Promise<VoiceRecording | null> {
+    return this.withTenant(tenantId, async (client) => {
+      // RIVET I13 — MERGE into transcript_metadata (jsonb `||`), never a
+      // full-column replace: the transcription worker writes a rich metadata
+      // object at completion (sanitization_version, raw_transcript_retention,
+      // …) and the ingestion worker stamps AFTER it; a replace would clobber
+      // that. COALESCE guards pre-default legacy rows where the column is
+      // NULL rather than '{}'.
+      const result = await client.query(
+        `UPDATE voice_recordings
+            SET transcript_metadata = COALESCE(transcript_metadata, '{}'::jsonb)
+                                      || jsonb_build_object('provenance', $1::text),
+                updated_at          = NOW()
+          WHERE id = $2 AND tenant_id = $3
+          RETURNING *`,
+        [provenance, id, tenantId],
       );
       if (result.rows.length === 0) return null;
       return mapRow(result.rows[0]);
