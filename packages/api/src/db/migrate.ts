@@ -80,26 +80,28 @@ const CRITICAL_CONSTRAINTS = [
 /**
  * Return the critical constraints missing from the database. Empty array
  * means every DB-level guard the app assumes is actually in force.
- * Constraint names are not database-global, so a bare pg_constraint name
- * match would accept a same-named constraint on any table (or of any type)
- * — the check requires the owning relation and constraint type too.
+ * Neither constraint nor relation names are database-global, so name
+ * matching alone would accept a same-named decoy on another table or in
+ * another schema. `to_regclass` resolves the relation the APPLICATION
+ * actually sees (via search_path); the constraint must hang off that
+ * exact relation OID and be the expected type.
  */
 export async function findMissingCriticalConstraints(
   client: PoolClient,
 ): Promise<string[]> {
-  const result = await client.query<{ conname: string; relname: string; contype: string }>(
-    `SELECT con.conname, rel.relname, con.contype
-       FROM pg_constraint con
-       JOIN pg_class rel ON rel.oid = con.conrelid
-      WHERE con.conname = ANY($1::text[])`,
-    [CRITICAL_CONSTRAINTS.map((c) => c.conname)],
-  );
-  return CRITICAL_CONSTRAINTS.filter(
-    (c) =>
-      !result.rows.some(
-        (r) => r.conname === c.conname && r.relname === c.relname && r.contype === c.contype,
-      ),
-  ).map((c) => c.conname);
+  const missing: string[] = [];
+  for (const c of CRITICAL_CONSTRAINTS) {
+    const result = await client.query(
+      `SELECT 1
+         FROM pg_constraint con
+        WHERE con.conname = $1
+          AND con.contype = $2
+          AND con.conrelid = to_regclass($3)::oid`,
+      [c.conname, c.contype, c.relname],
+    );
+    if (result.rows.length === 0) missing.push(c.conname);
+  }
+  return missing;
 }
 
 /**
