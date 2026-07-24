@@ -57,6 +57,8 @@
         "expo-location",
         {
           "isIosBackgroundLocationEnabled": false,
+          "locationAlwaysAndWhenInUsePermission": false,
+          "locationAlwaysPermission": false,
           "locationWhenInUsePermission": "Allow Rivet to use your location for field tracking while Today is open and to enable Tap to Pay and nearby card readers."
         }
       ],

@@ -4881,6 +4881,13 @@ export function createApp(): AppWithLifecycle {
     ),
   );
 
+  // Mobile push-token registration store (also consumed by account deletion
+  // below and the /api/devices router mounted later). Pg-backed when a DB is
+  // configured; in-memory otherwise.
+  const deviceTokenRepo = pool
+    ? new PgDeviceTokenRepository(pool)
+    : new InMemoryDeviceTokenRepository();
+
   // Tier 4 (Team members — PR 1+2+3). User roster, role editing, and
   // invitation flow. Tenant scoping is enforced by the route's
   // requireTenant + the repo's tenant context. Clerk integration is
@@ -4897,6 +4904,8 @@ export function createApp(): AppWithLifecycle {
         pendingInvitationRepo,
         clerkSecretKey: process.env.CLERK_SECRET_KEY,
         appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:3000',
+        // Account deletion purges the user's push tokens server-side.
+        deviceTokenRepo,
       },
       // D2-1c — audit-log user role / name edits + invitations.
       auditRepo,
@@ -5170,12 +5179,6 @@ export function createApp(): AppWithLifecycle {
     }),
   );
 
-  // Mobile push-token registration (POST/DELETE /api/devices). Pg-backed when
-  // a DB is configured; in-memory otherwise. Feeds the proposal-execution
-  // notify path.
-  const deviceTokenRepo = pool
-    ? new PgDeviceTokenRepository(pool)
-    : new InMemoryDeviceTokenRepository();
   app.use('/api/devices', createDevicesRouter(deviceTokenRepo, auditRepo));
 
   // U10 — per-user notification preferences (opt-out by category).

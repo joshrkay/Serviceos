@@ -5,7 +5,7 @@ Copy + metadata for the Google Play Console listing of the Rivet mobile app
 `docs/launch/2026-06-03-rivet-gtm-brief.md`.
 
 > **Billing note:** Account creation and the 14-day free trial happen on the
-> **web** (rivet.ai). The app signs into an existing account and sells
+> **web** (therivetapp.com). The app signs into an existing account and sells
 > nothing in-app, so Google Play Billing is not required for the
 > subscription. Keep the app free with no in-app products.
 
@@ -48,7 +48,7 @@ Rivet tells you the truth. Every evening you get one text: what got done,
 what got paid, and what Rivet wasn't sure about today. Nothing irreversible
 is ever sent to a customer without your approval.
 
-New to Rivet? Start your 14-day free trial at rivet.ai — setup takes about
+New to Rivet? Start your 14-day free trial at therivetapp.com — setup takes about
 15 minutes — then sign in here. Your account works on the web and the app.
 
 Built for the 1–3 truck shop with no office.
@@ -93,8 +93,11 @@ Declare:
 **Not collected on mobile:** product-analytics SDKs (no PostHog or similar
 in `packages/mobile`).
 
-No data sold. No data shared for third-party advertising. Users can request
-deletion via support@rivet.ai (link the Privacy Policy at /privacy).
+No data sold. No data shared for third-party advertising. Users can delete
+their account **in-app** (Settings → Delete account), which permanently
+revokes access; business records created for the workspace are retained for
+bookkeeping/audit per the Privacy Policy at /privacy. Support:
+support@rivet.ai.
 
 ## Permissions (binary)
 
@@ -110,9 +113,9 @@ Declared / requested via Expo plugins in `app.json`:
 
 | Field | Value |
 |---|---|
-| Website | https://rivet.ai |
+| Website | https://therivetapp.com |
 | Support email | support@rivet.ai |
-| Privacy Policy | https://rivet.ai/privacy |
+| Privacy Policy | https://therivetapp.com/privacy |
 
 ---
 

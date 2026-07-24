@@ -123,6 +123,16 @@ export default function SettingsHub() {
         >
           <Text className="text-base text-destructive">Sign out</Text>
         </Pressable>
+
+        {/* Guideline 5.1.1(v) — account deletion must be reachable in-app. */}
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Delete account"
+          onPress={() => router.push('/settings/delete-account')}
+          className="mt-3 min-h-11 items-center justify-center rounded-md px-4 py-3"
+        >
+          <Text className="text-sm text-mutedForeground">Delete account</Text>
+        </Pressable>
       </View>
     </ScrollView>
   );

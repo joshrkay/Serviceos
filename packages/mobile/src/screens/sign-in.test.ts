@@ -110,6 +110,124 @@ describe('Sign-in screen', () => {
     await waitFor(() => expect(h.setActive).toHaveBeenCalledWith({ session: 'sess_3' }));
   });
 
+  it('shows the code-entry step for a REAL account needing a first factor (never auto-sends 424242)', async () => {
+    h.create.mockResolvedValue({ status: 'needs_first_factor' });
+    h.supportedFirstFactors = [{ strategy: 'email_code', emailAddressId: 'idn_real' }];
+    const { container, getByPlaceholderText, findByText } = render(createElement(SignIn));
+    fireEvent.change(getByPlaceholderText('Email'), { target: { value: 'owner@shop.com' } });
+    fireEvent.change(getByPlaceholderText('Password'), { target: { value: 'pw' } });
+    fireEvent.click(container.querySelector('button')!);
+
+    await waitFor(() => expect(h.prepareFirstFactor).toHaveBeenCalled());
+    // The real emailed code must be typed by the user — no automatic attempt.
+    expect(h.attemptFirstFactor).not.toHaveBeenCalled();
+    expect(await findByText('Check your email')).toBeTruthy();
+    expect(getByPlaceholderText('One-time code')).toBeTruthy();
+  });
+
+  it('verifies the typed code and completes sign-in for a real account', async () => {
+    h.create.mockResolvedValue({ status: 'needs_first_factor' });
+    h.supportedFirstFactors = [{ strategy: 'email_code', emailAddressId: 'idn_real' }];
+    h.attemptFirstFactor.mockResolvedValue({ status: 'complete', createdSessionId: 'sess_9' });
+    const { container, getByPlaceholderText, findByText, getByText } = render(
+      createElement(SignIn),
+    );
+    fireEvent.change(getByPlaceholderText('Email'), { target: { value: 'owner@shop.com' } });
+    fireEvent.change(getByPlaceholderText('Password'), { target: { value: 'pw' } });
+    fireEvent.click(container.querySelector('button')!);
+    await findByText('Check your email');
+
+    fireEvent.change(getByPlaceholderText('One-time code'), { target: { value: ' 123456 ' } });
+    fireEvent.click(getByText('Verify code'));
+
+    await waitFor(() =>
+      expect(h.attemptFirstFactor).toHaveBeenCalledWith({
+        strategy: 'email_code',
+        code: '123456',
+      }),
+    );
+    await waitFor(() => expect(h.setActive).toHaveBeenCalledWith({ session: 'sess_9' }));
+    expect(h.replace).toHaveBeenCalledWith('/');
+  });
+
+  it('shows the code-entry step for a real account on Client Trust and verifies via second factor', async () => {
+    h.create.mockResolvedValue({ status: 'needs_client_trust' });
+    h.supportedSecondFactors = [{ strategy: 'email_code', emailAddressId: 'idn_real' }];
+    h.attemptSecondFactor.mockResolvedValue({ status: 'complete', createdSessionId: 'sess_10' });
+    const { container, getByPlaceholderText, findByText, getByText } = render(
+      createElement(SignIn),
+    );
+    fireEvent.change(getByPlaceholderText('Email'), { target: { value: 'owner@shop.com' } });
+    fireEvent.change(getByPlaceholderText('Password'), { target: { value: 'pw' } });
+    fireEvent.click(container.querySelector('button')!);
+
+    await waitFor(() => expect(h.prepareSecondFactor).toHaveBeenCalled());
+    expect(await findByText('Check your email')).toBeTruthy();
+
+    fireEvent.change(getByPlaceholderText('One-time code'), { target: { value: '654321' } });
+    fireEvent.click(getByText('Verify code'));
+
+    await waitFor(() =>
+      expect(h.attemptSecondFactor).toHaveBeenCalledWith({
+        strategy: 'email_code',
+        code: '654321',
+      }),
+    );
+    await waitFor(() => expect(h.setActive).toHaveBeenCalledWith({ session: 'sess_10' }));
+  });
+
+  it('surfaces a friendly error on a wrong code and stays on the code step', async () => {
+    h.create.mockResolvedValue({ status: 'needs_first_factor' });
+    h.supportedFirstFactors = [{ strategy: 'email_code', emailAddressId: 'idn_real' }];
+    h.attemptFirstFactor.mockRejectedValue({ errors: [{ message: 'Incorrect code.' }] });
+    const { container, getByPlaceholderText, findByText, getByText } = render(
+      createElement(SignIn),
+    );
+    fireEvent.change(getByPlaceholderText('Email'), { target: { value: 'owner@shop.com' } });
+    fireEvent.change(getByPlaceholderText('Password'), { target: { value: 'pw' } });
+    fireEvent.click(container.querySelector('button')!);
+    await findByText('Check your email');
+
+    fireEvent.change(getByPlaceholderText('One-time code'), { target: { value: '000000' } });
+    fireEvent.click(getByText('Verify code'));
+
+    expect(await findByText('Incorrect code.')).toBeTruthy();
+    expect(h.setActive).not.toHaveBeenCalled();
+    // Still on the code step — the input survives the failed attempt.
+    expect(getByPlaceholderText('One-time code')).toBeTruthy();
+  });
+
+  it('returns to the password step via Back to sign in', async () => {
+    h.create.mockResolvedValue({ status: 'needs_first_factor' });
+    h.supportedFirstFactors = [{ strategy: 'email_code', emailAddressId: 'idn_real' }];
+    const { container, getByPlaceholderText, findByText, getByText, queryByPlaceholderText } =
+      render(createElement(SignIn));
+    fireEvent.change(getByPlaceholderText('Email'), { target: { value: 'owner@shop.com' } });
+    fireEvent.change(getByPlaceholderText('Password'), { target: { value: 'pw' } });
+    fireEvent.click(container.querySelector('button')!);
+    await findByText('Check your email');
+
+    fireEvent.click(getByText('Back to sign in'));
+    expect(queryByPlaceholderText('One-time code')).toBeNull();
+    expect(getByPlaceholderText('Email')).toBeTruthy();
+  });
+
+  it('code-entry input and buttons meet the >=44px contract', async () => {
+    h.create.mockResolvedValue({ status: 'needs_first_factor' });
+    h.supportedFirstFactors = [{ strategy: 'email_code', emailAddressId: 'idn_real' }];
+    const { container, getByPlaceholderText, findByText } = render(createElement(SignIn));
+    fireEvent.change(getByPlaceholderText('Email'), { target: { value: 'owner@shop.com' } });
+    fireEvent.change(getByPlaceholderText('Password'), { target: { value: 'pw' } });
+    fireEvent.click(container.querySelector('button')!);
+    await findByText('Check your email');
+
+    const codeInput = getByPlaceholderText('One-time code');
+    expect((codeInput as HTMLElement).className).toMatch(/\bmin-h-11\b/);
+    for (const b of Array.from(container.querySelectorAll('button'))) {
+      expect(b.className).toMatch(/\bmin-h-11\b/);
+    }
+  });
+
   it('surfaces the Clerk error message on a failed attempt', async () => {
     h.create.mockRejectedValue({ errors: [{ message: 'Invalid password.' }] });
     const { container, findByText } = render(createElement(SignIn));

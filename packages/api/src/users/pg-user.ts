@@ -37,7 +37,8 @@ export class PgUserRepository extends PgBaseRepository implements UserRepository
       // RLS_RUNTIME_ROLE is enabled (see db/rls-runtime-role.ts), so the
       // tenant_id predicate — not withTenant's GUC — is what isolates tenants.
       const params: unknown[] = [tenantId];
-      let where = 'WHERE tenant_id = $1';
+      // Soft-deleted accounts (16D, migration 093) are invisible to reads.
+      let where = 'WHERE tenant_id = $1 AND deleted_at IS NULL';
       if (options?.role) {
         params.push(options.role);
         where += ` AND role = $${params.length}`;
@@ -70,7 +71,8 @@ export class PgUserRepository extends PgBaseRepository implements UserRepository
                 created_at, updated_at
          FROM users
          WHERE id = $1
-           AND tenant_id = $2`,
+           AND tenant_id = $2
+           AND deleted_at IS NULL`,
         [id, tenantId],
       );
       return result.rows.length > 0
@@ -99,7 +101,8 @@ export class PgUserRepository extends PgBaseRepository implements UserRepository
                 created_at, updated_at
          FROM users
          WHERE tenant_id = $1
-           AND mobile_number = $2`,
+           AND mobile_number = $2
+           AND deleted_at IS NULL`,
         [tenantId, e164],
       );
       return result.rows.length > 0
@@ -120,10 +123,14 @@ export class PgUserRepository extends PgBaseRepository implements UserRepository
     e164: string | null,
   ): Promise<User | null> {
     return this.withTenantTransaction(tenantId, async (client) => {
+      // deleted_at IS NULL: a write must never land on a soft-deleted row —
+      // an explicit-UUID request racing a deletion could otherwise repopulate
+      // mobile_number on the hidden row and re-block the unique slot.
       const result = await client.query(
         `UPDATE users SET mobile_number = $1, updated_at = NOW()
          WHERE id = $2
            AND tenant_id = $3
+           AND deleted_at IS NULL
          RETURNING id, tenant_id, clerk_user_id, email, role, first_name, last_name,
                    COALESCE(can_field_serve, false) AS can_field_serve,
                    mobile_number,
@@ -151,16 +158,25 @@ export class PgUserRepository extends PgBaseRepository implements UserRepository
     newRole: 'dispatcher' | 'technician',
   ): Promise<User | null> {
     return this.withTenantTransaction(tenantId, async (client) => {
+      // Same serialization anchor as softDeleteSelf: EVERY owner-removing
+      // operation must take the tenant-row lock, or a demotion racing an
+      // account deletion could each observe the other's still-live owner
+      // row (their stamps are uncommitted until response-time COMMIT) and
+      // both commit — leaving the tenant ownerless.
+      await client.query(`SELECT id FROM tenants WHERE id = $1 FOR UPDATE`, [tenantId]);
       const result = await client.query(
         `UPDATE users SET role = $1, updated_at = NOW()
          WHERE id = $2
            AND tenant_id = $3
            AND role = 'owner'
+           AND deleted_at IS NULL
            AND EXISTS (
              SELECT 1 FROM users u2
              WHERE u2.tenant_id = $3
                AND u2.role = 'owner'
                AND u2.id != $2
+               AND u2.deleted_at IS NULL
+               AND u2.status = 'active'
            )
          RETURNING id, tenant_id, clerk_user_id, email, role, first_name, last_name,
                    COALESCE(can_field_serve, false) AS can_field_serve,
@@ -171,6 +187,106 @@ export class PgUserRepository extends PgBaseRepository implements UserRepository
       return result.rows.length > 0
         ? mapRow(result.rows[0] as Record<string, unknown>)
         : null;
+    });
+  }
+
+  /**
+   * Guideline 5.1.1(v) — in-app account deletion (16D retention model:
+   * stamp `deleted_at`, never purge). Last-owner guard: an owner's
+   * self-deletion only succeeds when another non-deleted owner exists.
+   *
+   * Under the request-scoped `/api` transaction (app.ts withTenantTransaction
+   * middleware) an EXISTS guard alone is NOT sufficient: each request's
+   * stamp stays uncommitted until its response-time COMMIT, so two owners
+   * deleting concurrently would each see the other still live (READ
+   * COMMITTED) and both pass. The tenant-row lock below serializes account
+   * deletions per tenant across requests — the second request blocks until
+   * the first COMMITs, then its guard re-evaluates against committed state.
+   * `tenants` is RLS-exempt and nothing else locks it FOR UPDATE, so there
+   * is no lock-ordering conflict.
+   */
+  async softDeleteSelf(tenantId: string, id: string): Promise<User | null> {
+    return this.withTenantTransaction(tenantId, async (client) => {
+      await client.query(`SELECT id FROM tenants WHERE id = $1 FOR UPDATE`, [tenantId]);
+      // mobile_number is cleared so the `users_mobile_unique` partial index
+      // slot is released — a soft-deleted row is invisible to reads, so a
+      // held number would otherwise 409 forever for the next teammate.
+      const result = await client.query(
+        `UPDATE users SET deleted_at = NOW(), mobile_number = NULL, updated_at = NOW()
+         WHERE id = $1
+           AND tenant_id = $2
+           AND deleted_at IS NULL
+           AND (
+             role != 'owner'
+             OR EXISTS (
+               SELECT 1 FROM users u2
+               WHERE u2.tenant_id = $2
+                 AND u2.role = 'owner'
+                 AND u2.id != $1
+                 AND u2.deleted_at IS NULL
+                 AND u2.status = 'active'
+             )
+           )
+         RETURNING id, tenant_id, clerk_user_id, email, role, first_name, last_name,
+                   COALESCE(can_field_serve, false) AS can_field_serve,
+                   mobile_number,
+                   created_at, updated_at`,
+        [id, tenantId],
+      );
+      return result.rows.length > 0
+        ? mapRow(result.rows[0] as Record<string, unknown>)
+        : null;
+    });
+  }
+
+  async restoreAccount(
+    tenantId: string,
+    id: string,
+    mobileNumber: string | null,
+  ): Promise<User | null> {
+    return this.withTenantTransaction(tenantId, async (client) => {
+      // Access restoration MUST NOT depend on the mobile number: the early
+      // durable commit released the users_mobile_unique slot, so a teammate
+      // may have claimed the number in the meantime. A single UPDATE that
+      // also set mobile_number would then 23505 and abandon the whole
+      // restore, leaving the caller locked out. Restore access first; then
+      // best-effort re-instate the number under a SAVEPOINT (on conflict
+      // the number is simply lost — re-enterable in Settings).
+      const result = await client.query(
+        `UPDATE users SET deleted_at = NULL, updated_at = NOW()
+         WHERE id = $1
+           AND tenant_id = $2
+           AND deleted_at IS NOT NULL
+         RETURNING id, tenant_id, clerk_user_id, email, role, first_name, last_name,
+                   COALESCE(can_field_serve, false) AS can_field_serve,
+                   mobile_number,
+                   created_at, updated_at`,
+        [id, tenantId],
+      );
+      if (result.rows.length === 0) return null;
+      let restored = mapRow(result.rows[0] as Record<string, unknown>);
+      if (mobileNumber !== null) {
+        await client.query('SAVEPOINT restore_mobile');
+        try {
+          const withNumber = await client.query(
+            `UPDATE users SET mobile_number = $1, updated_at = NOW()
+             WHERE id = $2 AND tenant_id = $3
+             RETURNING id, tenant_id, clerk_user_id, email, role, first_name, last_name,
+                       COALESCE(can_field_serve, false) AS can_field_serve,
+                       mobile_number,
+                       created_at, updated_at`,
+            [mobileNumber, id, tenantId],
+          );
+          await client.query('RELEASE SAVEPOINT restore_mobile');
+          if (withNumber.rows.length > 0) {
+            restored = mapRow(withNumber.rows[0] as Record<string, unknown>);
+          }
+        } catch {
+          await client.query('ROLLBACK TO SAVEPOINT restore_mobile');
+          await client.query('RELEASE SAVEPOINT restore_mobile').catch(() => undefined);
+        }
+      }
+      return restored;
     });
   }
 
@@ -199,6 +315,7 @@ export class PgUserRepository extends PgBaseRepository implements UserRepository
       const result = await client.query(
         `UPDATE users SET ${setClauses.join(', ')}
          WHERE id = $${paramIndex}
+           AND deleted_at IS NULL
          RETURNING id, tenant_id, clerk_user_id, email, role, first_name, last_name,
                    COALESCE(can_field_serve, false) AS can_field_serve,
                    mobile_number,

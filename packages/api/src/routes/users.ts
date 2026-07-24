@@ -2,6 +2,12 @@ import { Router, Response } from 'express';
 import { z } from 'zod';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
+import {
+  commitRequestTransactionAndBegin,
+  runAfterCommit,
+  runOutsideRequestTransaction,
+  withRequestSavepoint,
+} from '../middleware/tenant-context';
 import { toErrorResponse, ValidationError } from '../shared/errors';
 import {
   User,
@@ -46,6 +52,11 @@ export interface UsersRouteDeps {
   clerkFetch?: typeof fetch;
   /** Public web URL used as the redirect target after accept. */
   appBaseUrl?: string;
+  /**
+   * Account deletion purges the user's push tokens server-side — the
+   * client's own sign-out cleanup can't run once its credentials are dead.
+   */
+  deviceTokenRepo?: { removeAllForUser(tenantId: string, userId: string): Promise<number> };
 }
 
 /**
@@ -279,6 +290,370 @@ export function createUsersRouter(
         }
 
         res.json(updated);
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
+  );
+
+  /**
+   * Guideline 5.1.1(v) — in-app account deletion, initiated from the mobile
+   * Settings screen. Self-only (`/me`): any authenticated member may delete
+   * their OWN account; nobody can delete a teammate through this route.
+   *
+   * Semantics follow the established 16D soft-delete model (migration 093 +
+   * the Clerk user.deleted webhook): revoke access, retain rows for audit
+   * and billing, never purge tenant data or release the Twilio subaccount.
+   *
+   * Order of operations (the LOCAL soft-delete is the serialization point —
+   * it must succeed BEFORE the irreversible Clerk delete, so two owners
+   * racing each other cannot both revoke their Clerk users and orphan the
+   * workspace; the atomic last-owner guard admits at most one of them):
+   *   1. Last-owner pre-check → clean 409 without touching anything.
+   *   2. Local soft-delete (atomic guard, authoritative). Guard-blocked
+   *      owner → 409; already-deleted row → idempotent 200.
+   *   3. Delete the Clerk user (bounded to 10s like the Clerk calls in
+   *      webhooks/routes.ts — a stalled upstream must not pin this
+   *      request's transaction/pool client). Outcome is three-way:
+   *      confirmed-deleted → proceed; confirmed-alive (definite 4xx, or a
+   *      verification GET finds the user) → restoreAccount + 502;
+   *      unconfirmable → the stamp STAYS (deactivated, support-reversible)
+   *      because blindly restoring a possibly-Clerk-deleted user would
+   *      create a ghost owner after its webhook already no-op'd. Without
+   *      CLERK_SECRET_KEY (dev/tests) this step is skipped.
+   *   4. Purge the user's push tokens — the client's own sign-out cleanup
+   *      can no longer authenticate, so the server must do it or the
+   *      deleted user's device keeps receiving tenant pushes.
+   *   5. Audit event (all mutations emit audit events).
+   *
+   * Durability: after the guarded soft-delete succeeds, the request
+   * transaction is COMMITTED EARLY (commitRequestTransactionAndBegin) so
+   * the reservation is durable BEFORE the irreversible Clerk call — a
+   * crash or failed response-time COMMIT after Clerk accepts can no
+   * longer roll the stamp back and let the deleted user transiently count
+   * as a live owner for someone else's demotion guard. The failure path
+   * compensates in the restarted transaction (restoreAccount) and sets
+   * res.locals.forceCommit so the 502 response still commits the restore.
+   * Steps 4-5 stay best-effort + SAVEPOINT-isolated; the Clerk
+   * user.deleted webhook remains a belt-and-braces reconciler (its
+   * unconditional stamp is now benign for this path — the local stamp is
+   * already durable whenever Clerk deletion succeeded).
+   */
+  router.delete(
+    '/me',
+    requireAuth,
+    requireTenant,
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const tenantId = req.auth!.tenantId;
+        const clerkUserId = req.auth!.userId;
+
+        // If the mobile client disconnects during the long Clerk sequence,
+        // the /api middleware rolls back and RELEASES the request client on
+        // res 'close' while this handler keeps running — from that moment
+        // any write through the AsyncLocalStorage client would hit a
+        // released (possibly re-borrowed) connection. Writes that must
+        // survive the disconnect go through runDurable: fresh-connection
+        // path once closed, and a re-run if 'close' raced the in-flight
+        // in-transaction write (the write fns used here are idempotent).
+        let responseClosed = false;
+        res.once('close', () => {
+          responseClosed = true;
+        });
+        const runDurable = async (fn: () => Promise<unknown>): Promise<void> => {
+          if (responseClosed) {
+            await runOutsideRequestTransaction(fn);
+            return;
+          }
+          try {
+            await fn();
+          } catch (err) {
+            // The close race can kill the request client MID-WRITE — the
+            // write's own rejection is then the disconnect signal, arriving
+            // before any retry listener exists. Re-run out-of-band. A
+            // rejection with the response still open is a genuine error and
+            // propagates to the caller's own handling.
+            if (responseClosed) {
+              await runOutsideRequestTransaction(fn);
+              return;
+            }
+            throw err;
+          }
+          if (responseClosed) {
+            await runOutsideRequestTransaction(fn);
+            return;
+          }
+          // The write above sits in the request transaction until the
+          // response-time COMMIT — which is asynchronous and can itself
+          // fail even after `finish` fires. Suppress the out-of-band retry
+          // only on CONFIRMED commit (runAfterCommit fires post-COMMIT
+          // only). On `close` without that confirmation — client
+          // disconnect, rollback, or a failed COMMIT — re-run the
+          // idempotent write on a fresh connection (the request client has
+          // been released by then, so the checkout cannot deadlock). A
+          // spurious re-run when the commit merely raced this listener is
+          // a harmless no-op for these write fns.
+          let committed = false;
+          runAfterCommit(res, () => {
+            committed = true;
+          });
+          res.once('close', () => {
+            if (!committed) {
+              void runOutsideRequestTransaction(fn).catch(() => undefined);
+            }
+          });
+        };
+
+        const users = await userRepo.findByTenant(tenantId);
+        const actor = users.find((u) => u.clerkUserId === clerkUserId);
+        if (!actor) {
+          res.status(404).json({ error: 'NOT_FOUND', message: 'User not found' });
+          return;
+        }
+
+        // Purge the user's push tokens (best-effort, disconnect-safe). Used
+        // on every terminal-deactivation path — success AND unconfirmable —
+        // because the client can no longer authenticate its own device-token
+        // DELETE once the membership row is stamped.
+        const purgeTokens = async (): Promise<void> => {
+          if (!deps.deviceTokenRepo || !actor.clerkUserId) return;
+          const clerkId = actor.clerkUserId;
+          try {
+            await runDurable(() =>
+              withRequestSavepoint(() => deps.deviceTokenRepo!.removeAllForUser(tenantId, clerkId)),
+            );
+          } catch {
+            // Never turn a completed deactivation into an error; a stale
+            // token is also displaced on the device's next register().
+          }
+        };
+
+        if (actor.role === 'owner') {
+          const anotherOwner = users.some((u) => u.id !== actor.id && u.role === 'owner');
+          if (!anotherOwner) {
+            res.status(409).json({
+              error: 'LAST_OWNER',
+              message:
+                'You are the only owner. Transfer ownership to a teammate first, ' +
+                'or contact support to close the whole workspace.',
+            });
+            return;
+          }
+        }
+
+        // Reserve the deletion locally FIRST. The atomic guard is the only
+        // serialization point: of two owners deleting concurrently, exactly
+        // one UPDATE passes the EXISTS check — the loser must NOT reach the
+        // irreversible Clerk delete below.
+        const stamped = await userRepo.softDeleteSelf(tenantId, actor.id);
+        if (!stamped) {
+          // A null result is ambiguous: either the last-owner guard blocked
+          // the UPDATE, or the row was ALREADY deleted (double-tap that
+          // loaded the actor before the first request's commit — for owners
+          // too, after waiting on the tenant lock). Disambiguate by
+          // re-reading: findById hides deleted rows, so null = the deletion
+          // already happened → idempotent success; a live row = the guard
+          // fired → 409.
+          const stillLive = await userRepo.findById(tenantId, actor.id);
+          if (stillLive) {
+            res.status(409).json({
+              error: 'LAST_OWNER',
+              message:
+                'You are the only owner. Transfer ownership to a teammate first, ' +
+                'or contact support to close the whole workspace.',
+            });
+          } else {
+            res.json({ deleted: true });
+          }
+          return;
+        }
+
+        // Make the reservation DURABLE before the irreversible external
+        // call (see the Durability note above). Also releases the tenant
+        // lock — correctly: the guard was already evaluated under it
+        // against committed state, and from here the stamp is permanent
+        // unless we explicitly compensate below.
+        try {
+          await commitRequestTransactionAndBegin();
+        } catch {
+          // Post-COMMIT failure (e.g. connection dropped at the COMMIT/BEGIN
+          // boundary): the stamp may already be durable while the request
+          // client is unusable — without compensation the caller would be
+          // locked out locally with their Clerk identity intact. Restore on
+          // a FRESH connection outside the request context.
+          try {
+            await runOutsideRequestTransaction(() =>
+              userRepo.restoreAccount(tenantId, actor.id, actor.mobileNumber ?? null),
+            );
+            res.status(502).json({
+              error: 'ACCOUNT_DELETE_FAILED',
+              message: 'Could not delete the account right now. Please try again.',
+            });
+          } catch {
+            res.status(500).json({
+              error: 'ACCOUNT_DELETE_INCONSISTENT',
+              message:
+                'Deletion could not be completed. Your account may be deactivated — please contact support.',
+            });
+          }
+          return;
+        }
+
+        if (deps.clerkSecretKey && actor.clerkUserId) {
+          const fetchFn = deps.clerkFetch ?? fetch;
+          const clerkUrl = `https://api.clerk.com/v1/users/${encodeURIComponent(actor.clerkUserId)}`;
+          const clerkHeaders = { Authorization: `Bearer ${deps.clerkSecretKey}` };
+          let del: { ok: boolean; status: number } | null = null;
+          try {
+            del = await fetchFn(clerkUrl, {
+              method: 'DELETE',
+              headers: clerkHeaders,
+              // fetch has no default timeout; a stalled Clerk upstream
+              // would pin this request's transaction and pool client.
+              signal: AbortSignal.timeout(10_000),
+            });
+          } catch {
+            del = null;
+          }
+
+          // Three-way outcome. 'unknown' matters: on a timeout/network
+          // error/5xx Clerk may have PROCESSED the delete even though we
+          // never saw the response — restoring blindly would resurrect a
+          // ghost account whose user.deleted webhook no-op'd against our
+          // durable stamp, and whose live-looking owner row corrupts
+          // last-owner guards. Confirm actual state before deciding.
+          let outcome: 'deleted' | 'alive' | 'unknown';
+          if (del && (del.ok || del.status === 404)) {
+            outcome = 'deleted'; // 404 = already gone upstream
+          } else if (del && del.status < 500) {
+            outcome = 'alive'; // definite 4xx (auth/config) — nothing was deleted
+          } else {
+            outcome = 'unknown';
+            try {
+              const check = await fetchFn(clerkUrl, {
+                headers: clerkHeaders,
+                signal: AbortSignal.timeout(10_000),
+              });
+              if (check.status === 404) outcome = 'deleted';
+              else if (check.ok) outcome = 'alive';
+            } catch {
+              // stays unknown
+            }
+          }
+
+          if (outcome === 'alive') {
+            // Compensate: the account must stay fully usable after a failed
+            // attempt. Disconnect-safe (runDurable): if the client dropped
+            // during the Clerk sequence the request client is already
+            // released, so the restore self-commits on a fresh connection.
+            // Otherwise forceCommit opts the >=400 response out of the
+            // middleware's rollback-on-error. (If the freed mobile number
+            // was reclaimed meanwhile, restoreAccount still restores access
+            // and only drops the number.)
+            await runDurable(() =>
+              userRepo.restoreAccount(tenantId, actor.id, actor.mobileNumber ?? null),
+            );
+            res.locals.forceCommit = true;
+            res.status(502).json({
+              error: 'ACCOUNT_DELETE_FAILED',
+              message: 'Could not delete the account right now. Please try again.',
+            });
+            return;
+          }
+          if (outcome === 'unknown') {
+            // Tenant integrity over single-account availability: we could
+            // not confirm Clerk's state, so the durable stamp stays (a
+            // wrongly-restored ghost owner would corrupt owner guards).
+            // Support can restore the row if Clerk turns out to be intact.
+            // This is a terminal deactivation — the device's push tokens
+            // must die here too, exactly like the success path.
+            await purgeTokens();
+            // Terminal deactivation needs its own audit record: the webhook
+            // may never fire in exactly this scenario, and even when it does
+            // its deleted_at IS NULL update no-ops against our stamp and
+            // writes nothing — support would otherwise be asked to reverse a
+            // deactivation with no trail. Best-effort + savepoint-isolated
+            // like every post-Clerk write.
+            if (auditRepo) {
+              // Created ONCE so a durable re-run inserts the SAME event id —
+              // a racing duplicate then 23505s on the PK (absorbed by the
+              // savepoint/catch) instead of writing a second record.
+              const unconfirmedEvent = createAuditEvent({
+                tenantId,
+                actorId: clerkUserId,
+                actorRole: req.auth!.role,
+                eventType: 'user.account_deletion_unconfirmed',
+                entityType: 'user',
+                entityId: actor.id,
+                metadata: {
+                  self: true,
+                  role: actor.role,
+                  note:
+                    'Deletion reserved locally but Clerk state unconfirmable ' +
+                    '(DELETE and verification GET both ambiguous). Account left ' +
+                    'deactivated; support may finish or reverse it.',
+                },
+              });
+              try {
+                await runDurable(() =>
+                  withRequestSavepoint(() => auditRepo.create(unconfirmedEvent)),
+                );
+              } catch {
+                // Never fail the terminal response over the audit write.
+              }
+            }
+            res.locals.forceCommit = true;
+            res.status(502).json({
+              error: 'ACCOUNT_DELETE_FAILED',
+              message:
+                'We could not confirm the deletion with the sign-in provider. ' +
+                'Your account is deactivated; contact support to finish or reverse it.',
+            });
+            return;
+          }
+          // outcome === 'deleted' → proceed to cleanup + success.
+        }
+
+        // Push tokens must die with the account (best-effort, SAVEPOINT-
+        // isolated, disconnect-safe — see purgeTokens).
+        await purgeTokens();
+
+        // Best-effort, SAVEPOINT-isolated, AND disconnect/commit-durable
+        // (runDurable) like the token purge: the deletion stamp committed
+        // early, so if this insert is lost to a disconnect rollback or a
+        // failed response-time COMMIT, the webhook's no-op stamp would never
+        // write a replacement record and the completed deletion would have
+        // no audit trail.
+        if (auditRepo) {
+          // Created ONCE so a durable re-run inserts the SAME event id — a
+          // racing duplicate then 23505s on the PK (absorbed by the
+          // savepoint/catch) instead of writing a second record.
+          const deletedEvent = createAuditEvent({
+            tenantId,
+            actorId: clerkUserId,
+            actorRole: req.auth!.role,
+            eventType: 'user.account_deleted',
+            entityType: 'user',
+            entityId: actor.id,
+            metadata: {
+              self: true,
+              role: actor.role,
+              note:
+                'Self-service account deletion (guideline 5.1.1(v)). Row soft-deleted; ' +
+                'tenant data retained per 16D.',
+            },
+          });
+          try {
+            await runDurable(() =>
+              withRequestSavepoint(() => auditRepo.create(deletedEvent)),
+            );
+          } catch {
+            // Never fail a completed deletion over the audit write.
+          }
+        }
+
+        res.json({ deleted: true });
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);

@@ -5,9 +5,8 @@ export default function SettingsLayout() {
     <Stack screenOptions={{ headerShown: false }}>
       <Stack.Screen name="index" />
       <Stack.Screen name="team" />
-      <Stack.Screen name="voice" />
-      <Stack.Screen name="brand-voice" />
       <Stack.Screen name="templates" />
+      <Stack.Screen name="delete-account" />
     </Stack>
   );
 }

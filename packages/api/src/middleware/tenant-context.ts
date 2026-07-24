@@ -293,6 +293,52 @@ export function currentTenantContext(): TenantContext | undefined {
   return tenantContextStore.getStore();
 }
 
+/**
+ * Durably COMMIT everything the request has written so far, then open a
+ * fresh transaction on the same request-scoped client (re-applying the
+ * tenant GUC / RLS role and the per-transaction timeouts, all SET LOCAL).
+ *
+ * For routes that must make a local reservation durable BEFORE an
+ * irreversible external call (e.g. account deletion's soft-delete stamp
+ * before the Clerk user delete): if the process dies or the response-time
+ * COMMIT fails after the external call, the reservation still holds —
+ * without this, the stamp would roll back and the externally-deleted user
+ * would transiently appear live, undermining guards that counted them.
+ *
+ * The middleware's response-time COMMIT/ROLLBACK then applies to the NEW
+ * transaction only. Note the trade-off: writes made before this call are
+ * permanent even if the request later fails — callers own that semantic
+ * (pair a failure path with an explicit compensating write and
+ * `res.locals.forceCommit` when responding >=400). Outside a request
+ * transaction this is a no-op (standalone repo calls already
+ * self-commit).
+ */
+export async function commitRequestTransactionAndBegin(): Promise<void> {
+  const ctx = tenantContextStore.getStore();
+  if (!ctx) return;
+  const { client, tenantId } = ctx;
+  await client.query('COMMIT');
+  await client.query('BEGIN');
+  await applyTenantContext(client, tenantId, { transactional: true });
+  await client.query(
+    "SELECT set_config('statement_timeout', $1, true), set_config('idle_in_transaction_session_timeout', $2, true)",
+    [String(REQUEST_STATEMENT_TIMEOUT_MS), String(REQUEST_IDLE_TX_TIMEOUT_MS)],
+  );
+}
+
+/**
+ * Run `fn` OUTSIDE the request-scoped transaction context: repository calls
+ * inside it check out a fresh pool connection and self-commit, even when the
+ * caller is mid-request. For compensation writes that must not depend on the
+ * request client — e.g. after `commitRequestTransactionAndBegin` fails
+ * post-COMMIT and the request client may be unusable. Note the pool-size
+ * caveat: at DB_MAX_CONNECTIONS=1 (dev) a fresh checkout can wait on the
+ * request client — reserve this for rare failure paths, never routine flow.
+ */
+export async function runOutsideRequestTransaction<T>(fn: () => Promise<T>): Promise<T> {
+  return tenantContextStore.exit(fn);
+}
+
 let requestSavepointSeq = 0;
 
 /**
