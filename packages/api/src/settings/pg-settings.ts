@@ -119,6 +119,7 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     // this mapper's convention.
     serviceAreaText: (row.service_area_text as string | null) ?? undefined,
     serviceAreaRadius: (row.service_area_radius as number | null) ?? undefined,
+    serviceAreaZips: (row.service_area_zips as string[] | null) ?? undefined,
     businessHours: (() => {
       const raw = row.business_hours as
         | Record<string, { open: string; close: string } | null>
@@ -379,6 +380,10 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         discountNeverBelowCatalog: 'discount_never_below_catalog',
         // Tier 4 — migration 079.
         depositTimingPolicy: 'deposit_timing_policy',
+        // Foundation gate (I12/V17) — migration 148 stored it, onboarding
+        // wrote it, but the generic update path dropped it, so the travel
+        // buffer could never be changed from the settings surface.
+        jobBufferMinutes: 'job_buffer_minutes',
         // §9 — migration 098.
         hourlyRateCents: 'hourly_rate_cents',
         // P22-005 (U7) — migration 181.
@@ -450,6 +455,23 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
           paramIndex++;
           continue;
         }
+        // Foundation gate (I12/V17) — business_hours is JSONB and was
+        // previously writable only through the onboarding identity route's
+        // raw SQL; the generic update silently DROPPED the key, so a
+        // settings-surface hours change never reached the scheduler. A
+        // cleared write ('{}' for undefined/empty/null) reads back as
+        // "not configured" and the scheduler falls back to defaults.
+        if (key === 'businessHours') {
+          setClauses.push(`business_hours = $${paramIndex}::jsonb`);
+          const v = value as Record<string, unknown> | undefined | null;
+          params.push(
+            v && typeof v === 'object' && Object.keys(v).length > 0
+              ? JSON.stringify(v)
+              : '{}',
+          );
+          paramIndex++;
+          continue;
+        }
         if (key === 'escalationSettings') {
           setClauses.push(`escalation_settings = $${paramIndex}::jsonb`);
           const v = value as Partial<EscalationSettings> | undefined | null;
@@ -494,6 +516,16 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
           setClauses.push(`supported_languages = $${paramIndex}::text[]`);
           const v = value as string[] | undefined | null;
           params.push(Array.isArray(v) && v.length > 0 ? v : ['en']);
+          paramIndex++;
+          continue;
+        }
+        // Foundation gate (F2 term 5 / V17) — service_area_zips is a native
+        // text[] (NOT NULL DEFAULT '{}'). Cleared (null / []) writes '{}' =
+        // unbounded area; previously writable only via onboarding raw SQL.
+        if (key === 'serviceAreaZips') {
+          setClauses.push(`service_area_zips = $${paramIndex}::text[]`);
+          const v = value as string[] | undefined | null;
+          params.push(Array.isArray(v) ? v : []);
           paramIndex++;
           continue;
         }

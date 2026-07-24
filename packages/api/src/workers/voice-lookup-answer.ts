@@ -57,7 +57,11 @@ import { lookupEstimates } from '../ai/skills/lookup-estimates';
 import { lookupAgreements } from '../ai/skills/lookup-agreements';
 import { lookupAccountSummary } from '../ai/skills/lookup-account-summary';
 import { lookupAppointments } from '../ai/skills/lookup-appointments';
-import { lookupAvailability } from '../ai/skills/lookup-availability';
+import {
+  lookupAvailability,
+  lookupBookableAvailability,
+} from '../ai/skills/lookup-availability';
+import { schedulingConfigFromSettings } from '../scheduling/booking-availability';
 import { lookupRevenue } from '../ai/skills/lookup-revenue';
 import { lookupJobProfit } from '../ai/skills/lookup-job-profit';
 import { lookupDayOverview } from '../ai/skills/lookup-day-overview';
@@ -460,17 +464,40 @@ export async function executeLookupAnswer(
       }
 
       case 'lookup_availability': {
-        if (!shared.availabilityFinder) return { kind: 'unsupported' };
-        const r = await lookupAvailability(
-          {
-            tenantId,
-            searchFrom: now,
-            searchTo: new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000),
-            durationMs: 2 * 60 * 60 * 1000,
-            ...(timezone ? { timezone } : {}),
-          },
-          shared.availabilityFinder,
-        );
+        let r;
+        if (shared.appointmentRepo) {
+          // Business-hours-aware path (F2): only speak slots the tenant
+          // could honor. Settings failures degrade to defaults.
+          const settings = deps.settingsRepo
+            ? await deps.settingsRepo.findByTenant(tenantId).catch(() => null)
+            : null;
+          const config = schedulingConfigFromSettings(settings);
+          r = await lookupBookableAvailability(
+            {
+              tenantId,
+              timezone: timezone ?? config.timezone ?? 'America/New_York',
+              searchFrom: now,
+              searchDays: 14,
+              durationMs: 2 * 60 * 60 * 1000,
+              weeklyHours: config.weeklyHours,
+              bufferMinutes: config.bufferMinutes,
+            },
+            { appointmentRepo: shared.appointmentRepo },
+          );
+        } else if (shared.availabilityFinder) {
+          r = await lookupAvailability(
+            {
+              tenantId,
+              searchFrom: now,
+              searchTo: new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000),
+              durationMs: 2 * 60 * 60 * 1000,
+              ...(timezone ? { timezone } : {}),
+            },
+            shared.availabilityFinder,
+          );
+        } else {
+          return { kind: 'unsupported' };
+        }
         if (r.status === 'unavailable') return { kind: 'failed', error: r.reason };
         const rows =
           r.status === 'ok'

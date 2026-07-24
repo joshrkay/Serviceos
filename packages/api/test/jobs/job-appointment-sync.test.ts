@@ -439,3 +439,77 @@ describe('U2 — syncJobSchedule', () => {
     expect(appt!.status).toBe('completed');
   });
 });
+
+// Foundation gate F2 / contract #12-#13 — a same-technician reschedule never
+// re-runs assignTechnician, so the retained tech must be validated against
+// the NEW window explicitly (Codex round-3 P1).
+describe('syncJobSchedule — retained-tech availability on reschedule', () => {
+  let jobRepo: InMemoryJobRepository;
+  let appointmentRepo: InMemoryAppointmentRepository;
+  let assignmentRepo: InMemoryAssignmentRepository;
+  let timelineRepo: InMemoryJobTimelineRepository;
+
+  beforeEach(() => {
+    jobRepo = new InMemoryJobRepository();
+    appointmentRepo = new InMemoryAppointmentRepository();
+    assignmentRepo = new InMemoryAssignmentRepository();
+    timelineRepo = new InMemoryJobTimelineRepository();
+  });
+
+  async function scheduleThenReschedule(newStartUtc: Date) {
+    const users = [tech(TECH_1)];
+    const deps: JobAppointmentSyncDeps = {
+      jobRepo,
+      appointmentRepo,
+      assignmentRepo,
+      timelineRepo,
+      userRepo: fakeUserRepo(users),
+      workingHoursRepo: {
+        // Mon-Fri 08:00-17:00 ET tech.
+        findByTechnician: async () => [1, 2, 3, 4, 5].map((d) => ({
+          id: `wh-${d}`, tenantId: TENANT, technicianId: TECH_1,
+          dayOfWeek: d, startTime: '08:00', endTime: '17:00', isActive: true,
+          createdAt: NOW, updatedAt: NOW,
+        })),
+      } as never,
+      unavailableBlockRepo: { findByTechnicianAndDateRange: async () => [] } as never,
+    };
+    const job = await createJob(
+      {
+        tenantId: TENANT, customerId: uuidv4(), locationId: uuidv4(),
+        summary: 'Retained-tech reschedule', createdBy: 'disp-1',
+      },
+      jobRepo,
+    );
+    // Tuesday 2030-07-02 15:00Z = 11:00 ET — inside hours.
+    await syncJobSchedule(deps, {
+      tenantId: TENANT, jobId: job.id, actorId: 'disp-1', actorRole: 'dispatcher',
+      operation: 'schedule',
+      scheduledStart: new Date('2030-07-02T15:00:00Z'),
+      durationMin: 60,
+      technicianId: TECH_1,
+      timezone: 'America/New_York',
+    });
+    return syncJobSchedule(deps, {
+      tenantId: TENANT, jobId: job.id, actorId: 'disp-1', actorRole: 'dispatcher',
+      operation: 'schedule',
+      scheduledStart: newStartUtc,
+      durationMin: 60,
+      // technicianId omitted — tech retained.
+      timezone: 'America/New_York',
+    });
+  }
+
+  it('rejects a same-tech reschedule onto a modeled day off', async () => {
+    // Saturday 2030-07-06 15:00Z — tech is Mon-Fri only.
+    await expect(scheduleThenReschedule(new Date('2030-07-06T15:00:00Z'))).rejects.toThrow(
+      /not scheduled to work/i,
+    );
+  });
+
+  it('allows a same-tech reschedule inside the modeled hours', async () => {
+    // Wednesday 2030-07-03 14:00Z = 10:00 ET.
+    const result = await scheduleThenReschedule(new Date('2030-07-03T14:00:00Z'));
+    expect(result.appointment?.scheduledStart.toISOString()).toBe('2030-07-03T14:00:00.000Z');
+  });
+});

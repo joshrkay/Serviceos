@@ -8,7 +8,10 @@ import { UserRepository } from '../users/user';
 import { SettingsRepository } from '../settings/settings';
 import { FeasibilityDependencies } from './feasibility-types';
 import { checkFeasibility } from './feasibility';
-import { findBookableSlots } from './booking-availability';
+import {
+  findBookableSlotsDetailed,
+  schedulingConfigFromSettings,
+} from './booking-availability';
 
 const bodySchema = z.object({
   appointmentId: z.string().min(1),
@@ -72,9 +75,15 @@ export function createSchedulingRouter(
 
         const settings = settingsRepo ? await settingsRepo.findByTenant(tenantId) : null;
         const timezone = settings?.timezone || deps.timezone || DEFAULT_TIMEZONE;
+        const tenantConfig = schedulingConfigFromSettings(settings);
 
-        const slots = await findBookableSlots(
-          { appointmentRepo: deps.appointmentRepo, assignmentRepo: deps.assignmentRepo },
+        const { slots, config } = await findBookableSlotsDetailed(
+          {
+            appointmentRepo: deps.appointmentRepo,
+            assignmentRepo: deps.assignmentRepo,
+            workingHoursRepo: deps.workingHoursRepo,
+            unavailableBlockRepo: deps.unavailableBlockRepo,
+          },
           {
             tenantId,
             fromDate: q.from,
@@ -82,13 +91,44 @@ export function createSchedulingRouter(
             timezone,
             durationMin: q.durationMin,
             technicianId: q.technicianId,
+            weeklyHours: tenantConfig.weeklyHours,
+            bufferMinutes: tenantConfig.bufferMinutes,
           },
         );
+
+        // Config provenance so a cold tenant sees "these are defaults,
+        // configure X" instead of windows it never chose (V18). Additive —
+        // existing clients that only read `slots` are unaffected.
+        const configNotes: string[] = [];
+        if (!settings?.timezone) {
+          configNotes.push(
+            `Timezone not configured — using ${timezone}. Set it in Settings → Business profile.`,
+          );
+        }
+        if (config.businessHoursSource === 'default') {
+          configNotes.push(
+            'Business hours not configured — using the 08:00–17:00 default. Set them in Settings → Business profile.',
+          );
+        }
+        if (config.bufferSource === 'default') {
+          configNotes.push(
+            `Travel buffer not configured — using the ${config.bufferMinutes}-minute default.`,
+          );
+        }
 
         res.status(200).json({
           timezone,
           durationMin: q.durationMin,
           slots: slots.map((s) => ({ start: s.start.toISOString(), end: s.end.toISOString() })),
+          config: {
+            timezoneSource: settings?.timezone ? 'tenant' : 'default',
+            businessHoursSource: config.businessHoursSource,
+            bufferSource: config.bufferSource,
+            bufferMinutes: config.bufferMinutes,
+            technicianHoursApplied: config.technicianHoursApplied,
+            technicianTimeOffApplied: config.technicianTimeOffApplied,
+            notes: configNotes,
+          },
         });
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);

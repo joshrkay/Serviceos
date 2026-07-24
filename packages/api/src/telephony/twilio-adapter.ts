@@ -42,7 +42,11 @@ import { lookupEstimates } from '../ai/skills/lookup-estimates';
 import { lookupLeads } from '../ai/skills/lookup-leads';
 import { lookupRevenue } from '../ai/skills/lookup-revenue';
 import { lookupCatalog } from '../ai/skills/lookup-catalog';
-import { lookupAvailability } from '../ai/skills/lookup-availability';
+import {
+  lookupAvailability,
+  lookupBookableAvailability,
+} from '../ai/skills/lookup-availability';
+import { schedulingConfigFromSettings } from '../scheduling/booking-availability';
 import { lookupDayOverview } from '../ai/skills/lookup-day-overview';
 import { lookupDigest } from '../ai/skills/lookup-digest';
 import { lookupPendingItems } from '../ai/skills/lookup-pending-items';
@@ -2645,19 +2649,43 @@ export class TwilioGatherAdapter {
           return result.summary;
         }
         case 'lookup_availability': {
-          if (!this.deps.availabilityFinder) {
+          const from = new Date();
+          let result;
+          if (this.deps.appointmentRepo) {
+            // Business-hours-aware path (F2): only offer slots the tenant
+            // could honor, spoken in the tenant timezone. Settings failures
+            // degrade to defaults, never block the call.
+            const settings = this.deps.settingsRepo
+              ? await this.deps.settingsRepo.findByTenant(tenantId).catch(() => null)
+              : null;
+            const config = schedulingConfigFromSettings(settings);
+            result = await lookupBookableAvailability(
+              {
+                tenantId,
+                timezone: config.timezone ?? 'America/New_York',
+                searchFrom: from,
+                searchDays: 14,
+                durationMs: 2 * 60 * 60 * 1000,
+                weeklyHours: config.weeklyHours,
+                bufferMinutes: config.bufferMinutes,
+              },
+              { appointmentRepo: this.deps.appointmentRepo },
+            );
+          } else if (this.deps.availabilityFinder) {
+            // Legacy raw-finder fallback for wirings without an appointment
+            // repo (calendar-gap walk, no hours awareness).
+            result = await lookupAvailability(
+              {
+                tenantId,
+                searchFrom: from,
+                searchTo: new Date(from.getTime() + 14 * 24 * 60 * 60 * 1000),
+                durationMs: 2 * 60 * 60 * 1000,
+              },
+              this.deps.availabilityFinder,
+            );
+          } else {
             return this.lookupNotWiredFallback();
           }
-          const from = new Date();
-          const result = await lookupAvailability(
-            {
-              tenantId,
-              searchFrom: from,
-              searchTo: new Date(from.getTime() + 14 * 24 * 60 * 60 * 1000),
-              durationMs: 2 * 60 * 60 * 1000,
-            },
-            this.deps.availabilityFinder,
-          );
           session.events.emit(
             'voice-event',
             lookupExecutedEvent(intentType, Date.now() - startMs, true),

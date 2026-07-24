@@ -43,7 +43,10 @@ import type { SettingsRepository } from '../../settings/settings';
 import { AuditRepository, createAuditEvent } from '../../audit/audit';
 import { AppointmentRepository, createAppointment } from '../../appointments/appointment';
 import type { AssignmentRepository } from '../../appointments/assignment';
-import { findBookableSlots } from '../../scheduling/booking-availability';
+import {
+  findBookableSlots,
+  schedulingConfigFromSettings,
+} from '../../scheduling/booking-availability';
 import { isValidTimezone } from '../../shared/timezone';
 import { notifyOwner } from '../../notifications/owner-notifications-instance';
 
@@ -267,6 +270,7 @@ export class EmergencyDispatchExecutionHandler implements ExecutionHandler {
     if (jobId && this.appointmentRepo) {
       try {
         const now = new Date();
+        const schedulingConfig = schedulingConfigFromSettings(settings);
         const slots = await findBookableSlots(
           { appointmentRepo: this.appointmentRepo, assignmentRepo: this.assignmentRepo },
           {
@@ -279,6 +283,8 @@ export class EmergencyDispatchExecutionHandler implements ExecutionHandler {
               .slice(0, 10),
             timezone,
             durationMin: EMERGENCY_SLOT_DURATION_MIN,
+            weeklyHours: schedulingConfig.weeklyHours,
+            bufferMinutes: schedulingConfig.bufferMinutes,
             maxSlots: 1,
             now,
           },

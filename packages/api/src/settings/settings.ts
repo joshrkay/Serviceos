@@ -381,6 +381,12 @@ export interface TenantSettings {
    */
   serviceAreaText?: string | null;
   serviceAreaRadius?: number | null;
+  /**
+   * ZIP allowlist bounding the service area (migration 148). Empty/absent =
+   * unbounded. Consumed by scheduling/service-area.ts at booking intake —
+   * F2 term 5 (spec/RIVET_FOUNDATION_SPEC.md §4).
+   */
+  serviceAreaZips?: string[] | null;
   businessHours?: Record<string, { open: string; close: string } | null> | null;
   jobBufferMinutes?: number | null;
   /**
