@@ -256,4 +256,50 @@ describe('recording-consent ordering — disclosure precedes audio capture', () 
     if (session.send.mock.calls.length > 0) failOpen += 1;
     expect(session.send).not.toHaveBeenCalled();
   });
+
+  it('Path 3b (disclosure TTS produces no playback): fails closed — hangs up, does not arm', async () => {
+    const store = new VoiceSessionStore({ startInterval: false });
+    store.create('tenant-noplay', 'telephony', { callSid: 'CA-noplay' });
+
+    const { provider, session } = makeStreamingProvider();
+    const ws = new FakeWs();
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: provider,
+        // TTS that returns a compressed (non-PCM) format the media pipeline
+        // refuses to stream — so the greeting/disclosure turn produces NO audio
+        // frames and NO end-of-utterance completion mark. The caller heard no
+        // disclosure; capture must NOT open on the missing ACK.
+        ttsProvider: {
+          synthesize: vi.fn(async () => ({
+            audio: Buffer.from('ID3-fake-mp3'),
+            contentType: 'audio/mpeg',
+            provider: 'test',
+          })),
+        },
+        speechTurn: async () => [],
+        initializeSession: async () => [
+          { type: 'tts_play', payload: { text: 'This call may be recorded.' } },
+        ],
+      },
+      ws,
+    );
+    adapter.start();
+
+    ws.inboundJson(startFrame('CA-noplay', 'MZ-noplay'));
+    await flush();
+    await flush();
+
+    // A disclosure turn that produced no playback is a compliance failure —
+    // fail closed (hang up), never arm capture on an undisclosed caller.
+    if (!ws.closed) failOpen += 1;
+    expect(ws.closed).toBe(true);
+    expect(ws.closeReason).toBe('disclosure_init_failed');
+
+    ws.inboundJson(mediaFrame);
+    await flush();
+    if (session.send.mock.calls.length > 0) failOpen += 1;
+    expect(session.send).not.toHaveBeenCalled();
+  });
 });

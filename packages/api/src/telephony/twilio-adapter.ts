@@ -638,7 +638,8 @@ export function buildTwiML(
         opts.voiceOverride ?? (opts.language === 'es' ? GATHER_VOICE_ES : GATHER_VOICE_EN);
       parts.push(`<Say voice="${xmlEscape(voice)}">${xmlEscape(sayText)}</Say>`);
     } else if (fx.type === 'end_session') {
-      // The <Hangup/> is appended after the recording block below so a
+      // The <Hangup/> is appended below; the recording block is spliced in
+      // right after the first <Say> (see the comms C5 block), so a
       // recording-notice <Say> always precedes any <Start><Record>.
       ended = true;
     } else if (fx.type === 'notify_oncall') {
@@ -652,20 +653,6 @@ export function buildTwiML(
     // audit_log / create_proposal / start_transcription / emit_quality_event
     // → no TwiML (Gather path has no event bus; telemetry only fires when
     // Media Streams is active).
-  }
-
-  // P8-014 / consent ordering: emit the async recording block ONLY after the
-  // recording-notice <Say> verbs above, so the caller always hears the
-  // disclosure before Twilio arms `<Record>` and any audio is captured. Only
-  // present on the initial inbound TwiML (recordingStatusCallback set);
-  // subsequent <Gather> turns leave it undefined so a second concurrent
-  // recording is never started.
-  if (opts.recordingStatusCallback) {
-    parts.push(
-      `<Start><Record recordingStatusCallback="${xmlEscape(
-        opts.recordingStatusCallback,
-      )}" recordingStatusCallbackMethod="POST"/></Start>`,
-    );
   }
 
   if (ended) {
