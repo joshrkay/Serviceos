@@ -158,6 +158,37 @@ describe('Delete account screen (guideline 5.1.1(v))', () => {
     expect(h.replace).not.toHaveBeenCalled();
   });
 
+  it('a THROWN UnauthorizedError on the DELETE (real apiFetch behavior) transitions into sign-out', async () => {
+    // apiFetch never returns a persistent 401 — it throws a tagged error.
+    const unauthorized = Object.assign(new Error('unauthorized'), {
+      name: 'UnauthorizedError',
+      status: 401,
+    });
+    h.api.mockRejectedValue(unauthorized);
+    const { getByText } = render(createElement(DeleteAccount));
+    fireEvent.click(getByText('Delete my account'));
+    fireEvent.click(getByText('Yes, permanently delete my account'));
+
+    await waitFor(() => expect(h.signOut).toHaveBeenCalled());
+    await waitFor(() => expect(h.replace).toHaveBeenCalledWith('/sign-in'));
+  });
+
+  it('a thrown UnauthorizedError on the PROBE also transitions into sign-out', async () => {
+    const unauthorized = Object.assign(new Error('unauthorized'), {
+      name: 'UnauthorizedError',
+      status: 401,
+    });
+    h.api
+      .mockRejectedValueOnce(new Error('network dropped mid-response'))
+      .mockRejectedValueOnce(unauthorized);
+    const { getByText } = render(createElement(DeleteAccount));
+    fireEvent.click(getByText('Delete my account'));
+    fireEvent.click(getByText('Yes, permanently delete my account'));
+
+    await waitFor(() => expect(h.signOut).toHaveBeenCalled());
+    await waitFor(() => expect(h.replace).toHaveBeenCalledWith('/sign-in'));
+  });
+
   it('a 401 on the DELETE itself (retry after landed deletion) transitions into sign-out', async () => {
     h.api.mockResolvedValue({ ok: false, status: 401, json: async () => ({}) });
     const { getByText } = render(createElement(DeleteAccount));

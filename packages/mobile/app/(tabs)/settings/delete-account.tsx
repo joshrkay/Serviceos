@@ -10,6 +10,19 @@ import { useApiClient } from '../../../src/lib/useApiClient';
  * 502 it carries the ONLY recovery instruction (contact support; a retry
  * cannot work because the deactivated membership is rejected at auth).
  */
+/**
+ * The real client THROWS on a persistent 401 (apiFetch's tagged
+ * UnauthorizedError, after its refresh retry) — it never returns the 401
+ * response. Deletion reconciliation must therefore recognize the thrown
+ * shape too, not just `res.status`.
+ */
+function isUnauthorizedError(e: unknown): boolean {
+  return (
+    e instanceof Error &&
+    (e.name === 'UnauthorizedError' || (e as { status?: number }).status === 401)
+  );
+}
+
 function deleteErrorMessage(status: number, serverMessage?: string): string {
   if (serverMessage) return serverMessage;
   if (status === 409) {
@@ -88,7 +101,14 @@ export default function DeleteAccount() {
         return;
       }
       await completeSignOut();
-    } catch {
+    } catch (err) {
+      // The DELETE itself threw. A thrown UnauthorizedError means the
+      // membership is already deactivated (retry after a landed deletion,
+      // surfaced as a throw — see isUnauthorizedError) → sign out.
+      if (isUnauthorizedError(err)) {
+        await completeSignOut();
+        return;
+      }
       // Transport error — the DELETE may have reached the API and
       // deactivated the account even though the response was lost.
       // Reconcile before advertising a retry that could only 401.
@@ -101,10 +121,15 @@ export default function DeleteAccount() {
           await completeSignOut();
           return;
         }
-      } catch {
+      } catch (probeErr) {
+        // The probe's thrown 401 is the same confirmed-deactivated signal.
+        if (isUnauthorizedError(probeErr)) {
+          await completeSignOut();
+          return;
+        }
         // Still unreachable — genuinely ambiguous; the retry copy below is
-        // safe because a retry after a landed deletion hits the 401 branch
-        // above and transitions into sign-out.
+        // safe because a retry after a landed deletion lands in one of the
+        // unauthorized branches above and transitions into sign-out.
       }
       setError('Could not delete your account right now. Please try again.');
     } finally {
