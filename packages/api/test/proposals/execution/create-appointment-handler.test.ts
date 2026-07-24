@@ -310,3 +310,136 @@ describe('CreateAppointmentExecutionHandler', () => {
     expect(events[0].entityId).toBe(result.resultEntityId);
   });
 });
+
+// Foundation gate F2 / contract #12-#13 (Codex round 5) — the proposal path
+// was the one assignment surface that skipped the availability preconditions.
+describe('CreateAppointmentExecutionHandler — availability preconditions', () => {
+  const tenantId = '550e8400-e29b-41d4-a716-446655440000';
+  const techId = '660e8400-e29b-41d4-a716-446655440001';
+  const context = { tenantId, executedBy: 'user-1' };
+
+  function makeProposal(payload: Record<string, unknown>): Proposal {
+    return {
+      id: 'prop-av',
+      tenantId,
+      proposalType: 'create_appointment',
+      status: 'approved',
+      payload,
+      summary: 'Create appointment',
+      createdBy: 'user-1',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+  }
+
+  // Tuesday-only tech (dayOfWeek 2), 08:00-17:00.
+  const availabilityRepos = {
+    workingHoursRepo: {
+      findByTechnician: async () => [{
+        id: 'wh-2', tenantId, technicianId: techId,
+        dayOfWeek: 2, startTime: '08:00', endTime: '17:00', isActive: true,
+        createdAt: new Date(), updatedAt: new Date(),
+      }],
+    },
+    unavailableBlockRepo: { findByTechnicianAndDateRange: async () => [] },
+  } as never;
+
+  it('rejects a proposal window on a modeled day off, creating nothing', async () => {
+    const appointmentRepo = new InMemoryAppointmentRepository();
+    const assignmentRepo = new InMemoryAssignmentRepository();
+    const handler = new CreateAppointmentExecutionHandler(
+      appointmentRepo, assignmentRepo, { enqueue: async () => {} },
+      undefined, undefined, availabilityRepos,
+    );
+    // 2026-04-20 is a Monday — the tech is Tuesday-only.
+    const result = await handler.execute(
+      makeProposal({
+        jobId: '11111111-1111-4111-8111-111111111111',
+        scheduledStart: '2026-04-20T14:00:00Z',
+        scheduledEnd: '2026-04-20T15:00:00Z',
+        timezone: 'UTC',
+        technicianId: techId,
+      }),
+      context,
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/not scheduled to work/i);
+    // Early rejection — no orphan appointment was created and compensated.
+    const appts = await appointmentRepo.findByDateRange(
+      tenantId, new Date('2026-04-19T00:00:00Z'), new Date('2026-04-22T00:00:00Z'),
+    );
+    expect(appts).toHaveLength(0);
+  });
+
+  it('executes a proposal window inside the modeled hours', async () => {
+    const appointmentRepo = new InMemoryAppointmentRepository();
+    const assignmentRepo = new InMemoryAssignmentRepository();
+    const handler = new CreateAppointmentExecutionHandler(
+      appointmentRepo, assignmentRepo, { enqueue: async () => {} },
+      undefined, undefined, availabilityRepos,
+    );
+    // 2026-04-21 is a Tuesday, 14:00-15:00 UTC inside 08:00-17:00.
+    const result = await handler.execute(
+      makeProposal({
+        jobId: '11111111-1111-4111-8111-111111111111',
+        scheduledStart: '2026-04-21T14:00:00Z',
+        scheduledEnd: '2026-04-21T15:00:00Z',
+        timezone: 'UTC',
+        technicianId: techId,
+      }),
+      context,
+    );
+    expect(result.success).toBe(true);
+  });
+});
+
+// Codex (PR #741): a payload without `timezone` must resolve the TENANT zone
+// before the availability check — a UTC default evaluates the wrong local day
+// for non-UTC tenants.
+describe('CreateAppointmentExecutionHandler — tenant-timezone fallback', () => {
+  const tenantId = '550e8400-e29b-41d4-a716-446655440000';
+  const techId = '660e8400-e29b-41d4-a716-446655440001';
+  const context = { tenantId, executedBy: 'user-1' };
+
+  // Mon-Fri 08:00-17:00 EASTERN tech.
+  const availabilityRepos = {
+    workingHoursRepo: {
+      findByTechnician: async () => [1, 2, 3, 4, 5].map((d) => ({
+        id: `wh-${d}`, tenantId, technicianId: techId,
+        dayOfWeek: d, startTime: '08:00', endTime: '17:00', isActive: true,
+        createdAt: new Date(), updatedAt: new Date(),
+      })),
+    },
+    unavailableBlockRepo: { findByTechnicianAndDateRange: async () => [] },
+  } as never;
+  const settingsRepo = {
+    findByTenant: async () => ({ timezone: 'America/New_York' }),
+  } as never;
+
+  it('accepts an in-hours Eastern window that a UTC evaluation would reject', async () => {
+    const handler = new CreateAppointmentExecutionHandler(
+      new InMemoryAppointmentRepository(),
+      new InMemoryAssignmentRepository(),
+      { enqueue: async () => {} },
+      undefined, undefined, availabilityRepos, settingsRepo,
+    );
+    // Tue 2026-04-21 20:00-21:00Z = 16:00-17:00 EDT (inside hours).
+    // Evaluated as UTC it is 20:00-21:00 local — outside 08:00-17:00.
+    const result = await handler.execute(
+      {
+        id: 'prop-tz', tenantId, proposalType: 'create_appointment', status: 'approved',
+        payload: {
+          jobId: '11111111-1111-4111-8111-111111111111',
+          scheduledStart: '2026-04-21T20:00:00Z',
+          scheduledEnd: '2026-04-21T21:00:00Z',
+          technicianId: techId,
+          // no timezone in payload — must come from tenant settings
+        },
+        summary: 'Create appointment', createdBy: 'user-1',
+        createdAt: new Date(), updatedAt: new Date(),
+      } as Proposal,
+      context,
+    );
+    expect(result.success).toBe(true);
+  });
+});
