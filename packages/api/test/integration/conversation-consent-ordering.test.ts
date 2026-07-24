@@ -59,10 +59,12 @@ class FakeWs implements WsLike {
   closed = false;
   closeCode: number | undefined;
   closeReason: string | undefined;
+  /** Captured outbound frames — used to find the disclosure turn's completion mark. */
+  sent: Array<Record<string, unknown>> = [];
   private listeners: Record<string, Array<(...args: unknown[]) => void>> = {};
 
-  send(): void {
-    /* outbound frames are irrelevant to consent ordering */
+  send(data: string): void {
+    this.sent.push(JSON.parse(data) as Record<string, unknown>);
   }
 
   close(code?: number, reason?: string): void {
@@ -102,7 +104,29 @@ function makeStreamingProvider(): {
   return { provider, session };
 }
 
+/** Buffered PCM TTS so the greeting/disclosure turn enqueues audio + a completion mark. */
+function makeTtsProvider() {
+  return {
+    synthesize: vi.fn(async () => ({
+      audio: Buffer.alloc(640),
+      contentType: 'audio/pcm',
+      provider: 'test',
+    })),
+  };
+}
+
 const flush = () => new Promise((r) => setImmediate(r));
+
+/** Find the disclosure/greeting turn's end-of-utterance completion mark name. */
+function silenceArmMarkName(ws: FakeWs): string | undefined {
+  const frame = ws.sent.find(
+    (f) =>
+      f.event === 'mark' &&
+      typeof (f.mark as { name?: string } | undefined)?.name === 'string' &&
+      (f.mark as { name: string }).name.startsWith('silence-arm-'),
+  );
+  return (frame?.mark as { name: string } | undefined)?.name;
+}
 
 const startFrame = (callSid: string, streamSid: string) => ({
   event: 'start' as const,
@@ -137,15 +161,15 @@ describe('recording-consent ordering — disclosure precedes audio capture', () 
     expect(sayIdx).toBeLessThan(recordIdx);
   });
 
-  it('Path 2 (Media Streams): inbound audio is NOT consumed until disclosure completes', async () => {
+  it('Path 2 (Media Streams): inbound audio is NOT consumed until the disclosure has PLAYED', async () => {
     const store = new VoiceSessionStore({ startInterval: false });
     store.create('tenant-consent', 'telephony', { callSid: 'CA-consent' });
 
     // A deferred `initializeSession` lets us inject a media frame WHILE the
-    // disclosure is still in flight (the exact race the consent gate closes).
-    let resolveDisclosure!: () => void;
+    // disclosure is still in flight (the first race the consent gate closes).
+    let resolveDisclosure!: (fx: SideEffect[]) => void;
     const disclosureGate = new Promise<SideEffect[]>((resolve) => {
-      resolveDisclosure = () => resolve([]);
+      resolveDisclosure = resolve;
     });
 
     const { provider, session } = makeStreamingProvider();
@@ -154,6 +178,7 @@ describe('recording-consent ordering — disclosure precedes audio capture', () 
       {
         store,
         streamingProvider: provider,
+        ttsProvider: makeTtsProvider(),
         speechTurn: async () => [],
         initializeSession: () => disclosureGate,
       },
@@ -165,14 +190,32 @@ describe('recording-consent ordering — disclosure precedes audio capture', () 
     ws.inboundJson(startFrame('CA-consent', 'MZ-consent'));
     await flush();
 
-    // Caller audio arriving DURING the disclosure must be dropped, not sent.
+    // (a) Caller audio arriving while the disclosure step is still running must
+    // be dropped, not sent to STT.
     ws.inboundJson(mediaFrame);
     await flush();
     if (session.send.mock.calls.length > 0) armedBeforeDisclosure += 1;
     expect(session.send).not.toHaveBeenCalled();
 
-    // Disclosure completes → capture arms → subsequent audio flows to STT.
-    resolveDisclosure();
+    // The disclosure step resolves and its greeting audio is synthesized and
+    // enqueued — but Twilio has NOT yet acknowledged playback completion.
+    resolveDisclosure([{ type: 'tts_play', payload: { text: 'This call may be recorded.' } }]);
+    await flush();
+    await flush();
+
+    // (b) Caller audio arriving after the audio is ENQUEUED but before Twilio
+    // ACKs the end-of-utterance mark must STILL be dropped — the caller has not
+    // finished hearing the disclosure.
+    ws.inboundJson(mediaFrame);
+    await flush();
+    if (session.send.mock.calls.length > 0) armedBeforeDisclosure += 1;
+    expect(session.send).not.toHaveBeenCalled();
+
+    // Twilio ACKs the disclosure turn's end-of-utterance mark → playback
+    // complete → capture arms → subsequent audio flows to STT.
+    const markName = silenceArmMarkName(ws);
+    expect(markName).toBeDefined();
+    ws.inboundJson({ event: 'mark', streamSid: 'MZ-consent', mark: { name: markName } });
     await flush();
     ws.inboundJson(mediaFrame);
     await flush();

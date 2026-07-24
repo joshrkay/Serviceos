@@ -493,13 +493,17 @@ interface RuntimeState {
   ttsController: AbortController | null;
   closed: boolean;
   /**
-   * Consent gate — false until the recording disclosure has completed
-   * (initializeSession resolved, or no initializeSession is wired). While
-   * false, inbound `media` frames are NOT forwarded to Deepgram: caller audio
-   * is never consumed/transcribed before the caller has heard the recording
-   * notice. A disclosure-init FAILURE leaves this false and hangs up the leg
-   * (see handleStart's DISCLOSURE_INIT_FAILED branch), so audio is never
-   * captured on an undisclosed call. Init false in the constructor.
+   * Consent gate — false until the recording disclosure has been PLAYED to the
+   * caller. While false, inbound `media` frames are NOT forwarded to Deepgram:
+   * caller audio is never consumed/transcribed before the caller has heard the
+   * recording notice (parity with the Gather path's blocking <Say>). Arms on
+   * the disclosure/greeting turn's end-of-utterance `silence-arm-*` mark ACK
+   * (playback completion); when no audio turn was enqueued (no ttsProvider /
+   * empty greeting) or no initializeSession is wired, it arms immediately since
+   * there is nothing to play. A disclosure-init FAILURE leaves this false and
+   * hangs up the leg (see handleStart's DISCLOSURE_INIT_FAILED branch), so
+   * audio is never captured on an undisclosed call. Init false in the
+   * constructor.
    */
   audioCaptureArmed: boolean;
   /** Last time we received an inbound `media` frame. */
@@ -903,6 +907,13 @@ export class TwilioMediaStreamAdapter {
         ) {
           const turnId = this.state.pendingSilenceRepromptTurnId;
           this.state.pendingSilenceRepromptTurnId = null;
+          // Consent ordering — this end-of-utterance ACK means the caller has
+          // now HEARD the whole turn finish. For the disclosure/greeting turn
+          // (the only turn that plays before capture arms) that is the
+          // playback-completion signal, so arm audio capture here. Idempotent:
+          // on every later turn `audioCaptureArmed` is already true, so this is
+          // a no-op — the disclosure is only ever the first turn.
+          this.state.audioCaptureArmed = true;
           this.armSilenceRepromptTimer(turnId);
         }
         // Mark-ack is the cue to drain any backpressured outbound work.
@@ -1101,11 +1112,21 @@ export class TwilioMediaStreamAdapter {
           }),
         );
         await this.emitSideEffects(initEffects);
-        // Consent ordering — the recording disclosure has now completed, so
-        // arm audio capture: subsequent inbound `media` frames flow into
-        // Deepgram. Frames that arrived while the disclosure was playing were
-        // dropped by the handleMedia gate.
-        this.state.audioCaptureArmed = true;
+        // Consent ordering — arm audio capture only once the caller has
+        // actually HEARD the recording disclosure, matching the Gather path
+        // where a blocking <Say> fully plays before <Record> arms. When
+        // emitSideEffects enqueued the greeting/disclosure audio it left a
+        // pending end-of-utterance mark (`pendingSilenceRepromptTurnId`); its
+        // Twilio ACK is the playback-completion signal and arms capture in the
+        // 'mark' handler (see handleMessage). Until then inbound `media` frames
+        // are dropped by the handleMedia gate, so a caller speaking over the
+        // disclosure is never transcribed before consent playback finishes.
+        // When NO audio turn was enqueued (no ttsProvider / empty greeting)
+        // there is nothing to play and no ACK will come, so arm immediately
+        // rather than leave the call deaf.
+        if (this.state.pendingSilenceRepromptTurnId === null) {
+          this.state.audioCaptureArmed = true;
+        }
         // WS16a — establishment success is deliberately NOT recorded here. The
         // old recordSuccess() at this site reset the circuit's consecutive-
         // failure counter, so a call that established cleanly then died mid-call
