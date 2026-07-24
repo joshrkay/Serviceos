@@ -817,7 +817,33 @@
       "corpus_coverage": false
     }
   },
-  "proposed_reclassifications": [],
+  "proposed_reclassifications": [
+    {
+      "op": 19,
+      "field": "surfaces",
+      "current": [
+        "S2"
+      ],
+      "proposed": [
+        "S1_create_draft",
+        "S2"
+      ],
+      "direction": "surface WIDENING (S1 gains draft-estimate creation only \u2014 not edit/send)",
+      "status": "pending_human_ratification",
+      "rationale": "The shipped inbound receptionist intentionally quotes callers on live calls (WS5/WS17/WS18 grounded quoting; D-019 owner-approval close). draft_estimate is R1-reversible, catalog-grounded, born draft, and an operator must approve before anything external happens. Blocking it at the S1 allowlist breaks the designed close-the-sale flow and its test suites. Raised by Codex review on PR #739.",
+      "interim_behavior": "draft_estimate remains on the S1 creation/execution allowlist pending Josh's ratify call; if ratification rejects, remove it from S1_ALLOWED_PROPOSAL_TYPES (proposals/surface.ts) and rework the WS18 flow."
+    },
+    {
+      "op": 21,
+      "field": "surface_exception",
+      "current": "send_estimate strictly S2",
+      "proposed": "documented exception: D-019 owner-approval close chain may stamp its send_estimate member S2-by-execution-authority",
+      "direction": "narrow EXCEPTION, not a tier/surface change",
+      "status": "pending_human_ratification",
+      "rationale": "The chain member is authored by trusted server code (autonomous-close-execution.ts, actor system:autonomous-close), its payload is server-derived (recipient = the caller's own phone; estimate = the quote drafted on that call), it is born blocked, and only a human owner one-tap approval can release it. This is NOT approval promoting a caller-minted proposal: the S1 intent path cannot mint send_estimate at all (coerced to voice_clarification at creation). The S2 stamp asserts the authoring/execution authority, which a transcript cannot influence. Raised by Codex review on PR #739.",
+      "interim_behavior": "Stamp retained with justification comment; if ratification rejects, the alternative is an executor-level exception keyed on the D-019 autonomousCloseStamp evidence instead of a surface stamp."
+    }
+  ],
   "history": [],
   "reconciliation": {
     "method": "Explore agent walked packages/api voice intent surface (orchestration handler-registry, voice-turn processor, customer-calling agent, lookup skills) and reconciled each of the 62 registry ops; cross-checked against test-pinned docs/reference/voice-action-catalog.md.",
