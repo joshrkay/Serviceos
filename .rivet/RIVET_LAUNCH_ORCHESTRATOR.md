@@ -8,7 +8,12 @@
 - `RIVET_GOAL_SHIPGATE.md` — App Store gate and loop
 - `RIVET_GOAL_PRODUCTION_v2.md` — voice operation gate and loop
 - `RIVET_OPERATION_CONTRACTS.md` — 62 contracts, 13 invariants, 13 decisions
-- `operation_registry.json` — ratified registry, 62/62 contracted
+- `operation_registry.json` — registry of 62 voice ops, 62/62 contracted.
+  **Status: `provisional`, not yet ratified** — T0 reconciliation
+  (`production_state.json`) found 22 ops with no voice on-ramp, 8 partial,
+  and ~14 code-taxonomy ops with no registry id. Ratification is the
+  human-only freeze point (`RIVET_GOAL_PRODUCTION_v2.md` §7) and is a P1
+  prerequisite below — `/goal production` halts at INIT until it clears.
 
 **State:** `.rivet/launch_state.json`
 
@@ -72,9 +77,16 @@ P0  DECISIONS + EXTERNAL CLOCKS          [human; Fable tracks]
     ── do not proceed to P1 without D11/D13 answered
 
 P1  PARALLEL LOOPS                        [dispatched, not run by Fable]
-    ├─ /goal shipgate     → App Store submission
-    └─ /goal production   → 62 ops + non-voice surface
-    these are independent; run concurrently
+    ── PREREQUISITE for the production loop: the registry is RATIFIED.
+       It is `provisional` today; reconcile the extracted registry against
+       the code-pinned voice surface (docs/reference/voice-action-catalog.md,
+       pinned by voice-action-catalog.contract.test.ts) and get human
+       ratification first. `/goal production` halts at INIT otherwise, so
+       dispatching it before ratification cannot start G-PROD even after
+       D11/D13 clear. The shipgate loop has no such dependency.
+    ├─ /goal shipgate     → App Store submission (dispatch immediately)
+    └─ /goal production   → 62 ops + non-voice surface (dispatch AFTER ratify)
+    these are independent; run concurrently once each is unblocked
     conflicts arbitrate to Fable, not to whichever finished first
 
 P2  NON-VOICE SURFACE                     [Opus; runs inside P1]

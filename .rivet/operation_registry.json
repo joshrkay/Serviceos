@@ -1219,7 +1219,7 @@
       58
     ],
     "p1_uncontracted": [],
-    "next_action": "All 62 contracted. Open decisions D1-D13 gate implementation of several. D13 (PCI scope on #33) and D11 (10DLC) are the two that block rather than shape."
+    "next_action": "All 62 contracted, but registry status is PROVISIONAL (not ratified). T0 reconciliation (production_state.json) found 22 ops with no voice on-ramp, 8 partial, and ~14 code-taxonomy speakable ops with no registry id (docs/reference/voice-action-catalog.md). Reconcile + human-ratify before dispatching /goal production (it halts at INIT on an unratified registry). Separately, open decisions D1-D13 gate implementation of several ops; D13 (PCI scope on #33) and D11 (10DLC) block rather than shape."
   },
   "vector_sentinels": {
     "note": "Sentinels used in per-op `vectors` arrays. A verifier expands these to concrete vector IDs. Kept as tokens for readability; resolvable here.",
