@@ -58,6 +58,7 @@ function makeApproved(
   tenantId: string,
   proposalType: ProposalType,
   surface: 'S1' | 'S2' | undefined,
+  sourceContextExtra?: Record<string, unknown>,
 ): Proposal {
   let proposal = createProposal({
     tenantId,
@@ -67,8 +68,8 @@ function makeApproved(
     createdBy: 'user-1',
     idempotencyKey: `surface-${randomUUID()}`,
     sourceContext: surface
-      ? { source: 'calling-agent', channel: 'telephony', surface }
-      : undefined,
+      ? { source: 'calling-agent', channel: 'telephony', surface, ...sourceContextExtra }
+      : sourceContextExtra,
   });
   proposal = transitionProposal(proposal, 'ready_for_review', 'user-1');
   proposal = transitionProposal(proposal, 'approved', 'user-1');
@@ -78,6 +79,7 @@ function makeApproved(
 async function run(
   proposalType: ProposalType,
   surface: 'S1' | 'S2' | undefined,
+  sourceContextExtra?: Record<string, unknown>,
 ): Promise<{ result: Awaited<ReturnType<ProposalExecutor['execute']>> | null; error?: unknown; handler: RecordingHandler }> {
   const tenantId = randomUUID();
   const repo = new InMemoryProposalRepository();
@@ -91,7 +93,7 @@ async function run(
     new InMemoryAuditRepository(),
     { executionRepo },
   );
-  const proposal = makeApproved(tenantId, proposalType, surface);
+  const proposal = makeApproved(tenantId, proposalType, surface, sourceContextExtra);
   await repo.create(proposal);
   const ctx: ExecutionContext = { tenantId, executedBy: 'user-1' };
   try {
@@ -144,6 +146,28 @@ describe('ProposalExecutor — RIVET P4 surface enforcement (I6)', () => {
     const { result, handler } = await run('send_invoice', undefined);
     expect(result?.proposal.status).toBe('executed');
     expect(handler.invocations).toBe(1);
+  });
+
+  it('BLOCKS S1 emergency_dispatch WITHOUT the safety marker (transcript-classified path)', async () => {
+    const { result, handler } = await run('emergency_dispatch', 'S1');
+    expect(handler.invocations).toBe(0);
+    expect(result!.proposal.status).toBe('execution_failed');
+  });
+
+  it('ALLOWS S1 emergency_dispatch WITH the server-set safety marker (deterministic path)', async () => {
+    const { result, handler } = await run('emergency_dispatch', 'S1', {
+      systemDetectedSafety: true,
+    });
+    expect(result?.proposal.status).toBe('executed');
+    expect(handler.invocations).toBe(1);
+  });
+
+  it('the safety marker does NOT unlock a money op on S1', async () => {
+    const { result, handler } = await run('send_invoice', 'S1', {
+      systemDetectedSafety: true,
+    });
+    expect(handler.invocations).toBe(0);
+    expect(result!.proposal.status).toBe('execution_failed');
   });
 });
 

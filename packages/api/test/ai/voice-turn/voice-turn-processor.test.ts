@@ -609,6 +609,60 @@ describe('createVoiceTurnProcessor — S1 surface enforcement (P4)', () => {
     const audits = auditRepo.getAll();
     expect(audits.some((a) => a.eventType === 'voice.surface_violation_blocked')).toBe(false);
   });
+
+  it('does NOT coerce a system-detected emergency_dispatch on an S1 caller (Codex): mints the real proposal + safety marker', async () => {
+    const { processor, session, proposalRepo, auditRepo } = makeCtx({
+      gateway: makeGatewayReturning('{}'),
+      withRepos: true,
+    });
+    // Mirrors the deterministic emergency-keyword side effect (transitions.ts):
+    // systemDetected marks it as a server-side safety detection, not a
+    // transcript-classified operator action.
+    await processor.executeSideEffects(
+      session,
+      [
+        {
+          type: 'create_proposal',
+          payload: {
+            intent: 'emergency_dispatch',
+            systemDetected: true,
+            entities: { emergencyDescription: 'gas leak in the kitchen' },
+          },
+        },
+      ],
+      'tenant-abc',
+    );
+    const proposals = await proposalRepo.findByTenant('tenant-abc');
+    expect(proposals).toHaveLength(1);
+    // The emergency proposal is minted for real — NOT coerced to a
+    // non-executable clarification — so the dispatch handler can open the job.
+    expect(proposals[0]!.proposalType).toBe('emergency_dispatch');
+    const sc = proposals[0]!.sourceContext as Record<string, unknown>;
+    expect(sc.surface).toBe('S1');
+    // The safety marker travels to the executor so I6 honors the same exemption.
+    expect(sc.systemDetectedSafety).toBe(true);
+    const audits = auditRepo.getAll();
+    expect(audits.some((a) => a.eventType === 'voice.surface_violation_blocked')).toBe(false);
+  });
+
+  it('STILL coerces emergency_dispatch WITHOUT the systemDetected marker (transcript-classified) to a clarification', async () => {
+    const { processor, session, proposalRepo } = makeCtx({
+      gateway: makeGatewayReturning('{}'),
+      withRepos: true,
+    });
+    await processor.executeSideEffects(
+      session,
+      [
+        {
+          type: 'create_proposal',
+          payload: { intent: 'emergency_dispatch', entities: {} }, // no systemDetected
+        },
+      ],
+      'tenant-abc',
+    );
+    const proposals = await proposalRepo.findByTenant('tenant-abc');
+    expect(proposals[0]!.proposalType).toBe('voice_clarification');
+  });
 });
 
 // ─── recordCost ─────────────────────────────────────────────────────────────

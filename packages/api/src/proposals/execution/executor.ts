@@ -123,11 +123,15 @@ export class ProposalExecutor {
     // is approved, an S2-only op (send invoice, take payment, …) still cannot
     // execute from an S1 session. An absent/S2/S3 surface is unrestricted, so
     // every existing proposal and the operator/in-app paths are unaffected.
-    const surface = resolveSurface(
-      proposal.sourceContext as Record<string, unknown> | undefined,
-      proposal.createdBy,
-    );
-    if (!isProposalTypeAllowedOnSurface(surface, proposal.proposalType)) {
+    const proposalSourceContext = proposal.sourceContext as
+      | Record<string, unknown>
+      | undefined;
+    const surface = resolveSurface(proposalSourceContext, proposal.createdBy);
+    // Pass sourceContext so a server-set system-detected-safety proposal
+    // (deterministic emergency-dispatch path) keeps the same S1 exemption it
+    // was created with — the marker is never caller-forgeable and unlocks only
+    // the narrow safety-exempt types (surface.ts).
+    if (!isProposalTypeAllowedOnSurface(surface, proposal.proposalType, proposalSourceContext)) {
       logger.error('Blocked cross-surface proposal execution', {
         tenantId: proposal.tenantId,
         proposalId: proposal.id,

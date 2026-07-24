@@ -188,6 +188,10 @@ describe('RV-140/RV-142 — emergency_detected handler', () => {
     const proposal = result.sideEffects.find((fx) => fx.type === 'create_proposal');
     expect(proposal).toBeDefined();
     expect(proposal!.payload.intent).toBe('emergency_dispatch');
+    // RIVET P4 — the deterministic keyword path marks the proposal
+    // systemDetected so the S1 surface guard exempts it from coercion to a
+    // non-executable clarification (a real emergency must still open the job).
+    expect(proposal!.payload.systemDetected).toBe(true);
     const entities = proposal!.payload.entities as Record<string, unknown>;
     expect(entities.emergencyDescription).toBe(event.utterance);
     expect(entities.detectedKeywords).toEqual(['gas leak']);

@@ -52,19 +52,61 @@ export const S1_ALLOWED_PROPOSAL_TYPES: ReadonlySet<ProposalType> = new Set<Prop
 ]);
 
 /**
+ * System-safety proposal types that an S1 session may reach ONLY when the
+ * proposal was minted by the deterministic, server-side safety path (never by
+ * transcript classification). `emergency_dispatch` is the case: the inbound
+ * FSM's hardcoded emergency-keyword matcher (customer-calling/transitions.ts)
+ * emits it so the on-call dispatcher is paged and an urgent job opened — a
+ * caller in a genuine emergency SHOULD reach this. It stays OFF the general
+ * S1 allowlist so a transcript-CLASSIFIED `emergency_dispatch` (if the LLM
+ * ever produces one) is still coerced to a clarification; the exemption is
+ * unlocked only by the `systemDetectedSafety` provenance marker, which is
+ * written exclusively by trusted server code and is never derivable from
+ * caller-controlled transcript content. Even born-blocked, it requires human
+ * owner approval before the execution handler runs.
+ */
+const S1_SYSTEM_SAFETY_EXEMPT_TYPES: ReadonlySet<ProposalType> = new Set<ProposalType>([
+  'emergency_dispatch',
+]);
+
+/**
+ * True when a proposal's `sourceContext` carries the server-set
+ * system-detected-safety marker AND its type is one of the narrow safety
+ * exemptions. The marker is set only by the deterministic FSM safety path, so
+ * a caller cannot forge it, and it can never unlock anything outside
+ * `S1_SYSTEM_SAFETY_EXEMPT_TYPES` (no money/send op is in that set).
+ */
+export function isSystemSafetyExempt(
+  type: ProposalType,
+  sourceContext: Record<string, unknown> | undefined,
+): boolean {
+  return (
+    sourceContext?.systemDetectedSafety === true &&
+    S1_SYSTEM_SAFETY_EXEMPT_TYPES.has(type)
+  );
+}
+
+/**
  * True when `type` may be created/executed on `surface`. S2 and S3 are
  * unrestricted here (S3 has its own link-possession security model, not a
  * voice op set); only S1 is allowlisted. An absent surface is treated as
  * trusted (S2) for backward compatibility — every pre-existing proposal and
  * the operator memo / in-app paths carry no surface tag and must be
  * unaffected.
+ *
+ * `sourceContext` is optional: when supplied, a system-detected-safety
+ * proposal (see `isSystemSafetyExempt`) is permitted on S1 even though its
+ * type is not on the general allowlist. Callers that only have the type
+ * (legacy) omit it and get the strict allowlist check.
  */
 export function isProposalTypeAllowedOnSurface(
   surface: ProposalSurface | undefined,
   type: ProposalType,
+  sourceContext?: Record<string, unknown> | undefined,
 ): boolean {
   if (surface !== 'S1') return true;
-  return S1_ALLOWED_PROPOSAL_TYPES.has(type);
+  if (S1_ALLOWED_PROPOSAL_TYPES.has(type)) return true;
+  return isSystemSafetyExempt(type, sourceContext);
 }
 
 /** Read a stamped surface off a proposal's `sourceContext`, if present. */

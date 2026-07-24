@@ -1175,7 +1175,19 @@ export function createVoiceTurnProcessor(
       const surface: ProposalSurface =
         session.machine.currentContext.ownerSession === true ? 'S2' : 'S1';
       const requestedProposalType = intentToProposalType(intent);
-      const surfaceAllowed = isProposalTypeAllowedOnSurface(surface, requestedProposalType);
+      // The deterministic emergency-keyword path (transitions.ts) marks its
+      // side effect systemDetected — a server-side safety detection, not a
+      // transcript-classified intent — so it is exempt from the S1 coercion
+      // that guards operator-only actions. The marker travels onto the
+      // proposal's sourceContext (systemDetectedSafety) so the execution
+      // boundary (I6) honors the same exemption; it only unlocks the narrow
+      // safety-exempt types (surface.ts) and is never caller-forgeable.
+      const systemDetectedSafety = fx.payload.systemDetected === true;
+      const surfaceAllowed = isProposalTypeAllowedOnSurface(
+        surface,
+        requestedProposalType,
+        systemDetectedSafety ? { systemDetectedSafety: true } : undefined,
+      );
       if (!surfaceAllowed && deps.auditRepo) {
         try {
           await deps.auditRepo.create(
@@ -1262,6 +1274,11 @@ export function createVoiceTurnProcessor(
           // RIVET P4 — the caller's surface travels with the proposal so the
           // execution boundary can re-check it (I6).
           surface,
+          // Server-set safety provenance (deterministic emergency-keyword
+          // path). Travels to the executor so it honors the same S1 exemption
+          // isProposalTypeAllowedOnSurface applied at creation. Only ever set
+          // by trusted server code — never from transcript content.
+          ...(systemDetectedSafety ? { systemDetectedSafety: true } : {}),
           // The IDENTIFIED caller's customer id (caller-ID match / self-signup
           // — session identity, never transcript content). S1 self-service
           // ops that target existing records (reschedule own appointment)
