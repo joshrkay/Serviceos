@@ -1,7 +1,7 @@
 ---
 name: comms-extract
 description: Read-only discovery pass across the Rivet comms subsystem — data model/resolution reality, channel/threading integration, consent/retention/deletion, and test infra conventions. Dispatches four parallel tracks, synthesizes one findings doc. Precedes both the §8 migration and any goal-prompt rewrite; does not fix anything it finds.
-allowed-tools: Read, Grep, Glob
+allowed-tools: Read, Grep, Glob, Task, Write
 argument-hint: [track-name|all]
 ---
 
@@ -18,13 +18,26 @@ spec, and `RIVET_GOAL_COMMS.md`. This replaces guesswork in all three, not
 just the goal prompt. Do **not** rewrite the goal prompt or start the
 migration from this skill — those come after the findings doc lands.
 
-## Boundary (read-only, hard)
+## Boundary (read-only toward the subsystem, hard)
 
-`allowed-tools` is `Read, Grep, Glob` only. There is deliberately **no
-Bash** — this track needs zero execution, not even read-only shell
-commands, to stay honest about the read-only boundary. Report state; never
-fix. Every finding is `EXISTS` / `PARTIAL` / `ABSENT` with a `file:line`
-reference, never a proposed change.
+The read-only guarantee is about the **subsystem under review**: nothing in
+this pass may modify existing code or execute anything.
+
+- The four **track subagents** carry `tools: Read, Grep, Glob` only — they
+  inspect the codebase and report state; they cannot fix, write, or run
+  anything.
+- The **orchestrator** (this skill) adds exactly two capabilities on top of
+  read: `Task`, to dispatch those read-only subagents, and `Write`, to
+  produce the single findings artifact
+  (`RIVET_COMMS_EXTRACTION_FINDINGS.md`) that is this pass's whole point.
+- Deliberately **absent** from `allowed-tools`: `Edit` and `Bash`. The
+  orchestrator cannot mutate any existing file and needs zero execution —
+  not even read-only shell commands — to stay honest about the boundary.
+  `Write` is scoped to creating the one findings doc, never to touching
+  code under review.
+
+Report state; never fix. Every finding is `EXISTS` / `PARTIAL` / `ABSENT`
+with a `file:line` reference, never a proposed change.
 
 ## Arguments
 
