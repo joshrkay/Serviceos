@@ -4,6 +4,7 @@ import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import {
   commitRequestTransactionAndBegin,
+  runAfterCommit,
   runOutsideRequestTransaction,
   withRequestSavepoint,
 } from '../middleware/tenant-context';
@@ -371,18 +372,21 @@ export function createUsersRouter(
             return;
           }
           // The write above sits in the request transaction until the
-          // response-time COMMIT. If the connection closes BEFORE `finish`
-          // (any moment between here and the response flushing), the
-          // middleware rolls that transaction back — so arm a one-shot
-          // retry that re-runs the idempotent write out-of-band in exactly
-          // that case (the request client has been released by then, so a
-          // fresh checkout cannot deadlock the pool).
-          let finished = false;
-          res.once('finish', () => {
-            finished = true;
+          // response-time COMMIT — which is asynchronous and can itself
+          // fail even after `finish` fires. Suppress the out-of-band retry
+          // only on CONFIRMED commit (runAfterCommit fires post-COMMIT
+          // only). On `close` without that confirmation — client
+          // disconnect, rollback, or a failed COMMIT — re-run the
+          // idempotent write on a fresh connection (the request client has
+          // been released by then, so the checkout cannot deadlock). A
+          // spurious re-run when the commit merely raced this listener is
+          // a harmless no-op for these write fns.
+          let committed = false;
+          runAfterCommit(res, () => {
+            committed = true;
           });
           res.once('close', () => {
-            if (!finished) {
+            if (!committed) {
               void runOutsideRequestTransaction(fn).catch(() => undefined);
             }
           });
