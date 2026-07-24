@@ -71,21 +71,35 @@ export async function withMigrationAdvisoryLock<T>(
  * deploy-safety valve that must not stay silent, because without the
  * constraint the double-booking guard is application-level only (F3).
  */
-const CRITICAL_CONSTRAINTS = ['no_double_booking'] as const;
+const CRITICAL_CONSTRAINTS = [
+  // contype 'x' = exclusion constraint — the structural guarantee, matching
+  // the assertion in test/integration/foundation-gates.test.ts.
+  { conname: 'no_double_booking', relname: 'appointment_assignments', contype: 'x' },
+] as const;
 
 /**
  * Return the critical constraints missing from the database. Empty array
  * means every DB-level guard the app assumes is actually in force.
+ * Constraint names are not database-global, so a bare pg_constraint name
+ * match would accept a same-named constraint on any table (or of any type)
+ * — the check requires the owning relation and constraint type too.
  */
 export async function findMissingCriticalConstraints(
   client: PoolClient,
 ): Promise<string[]> {
-  const result = await client.query<{ conname: string }>(
-    'SELECT conname FROM pg_constraint WHERE conname = ANY($1::text[])',
-    [[...CRITICAL_CONSTRAINTS]],
+  const result = await client.query<{ conname: string; relname: string; contype: string }>(
+    `SELECT con.conname, rel.relname, con.contype
+       FROM pg_constraint con
+       JOIN pg_class rel ON rel.oid = con.conrelid
+      WHERE con.conname = ANY($1::text[])`,
+    [CRITICAL_CONSTRAINTS.map((c) => c.conname)],
   );
-  const present = new Set(result.rows.map((r) => r.conname));
-  return CRITICAL_CONSTRAINTS.filter((c) => !present.has(c));
+  return CRITICAL_CONSTRAINTS.filter(
+    (c) =>
+      !result.rows.some(
+        (r) => r.conname === c.conname && r.relname === c.relname && r.contype === c.contype,
+      ),
+  ).map((c) => c.conname);
 }
 
 /**

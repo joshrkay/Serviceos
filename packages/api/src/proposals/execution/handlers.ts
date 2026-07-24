@@ -349,6 +349,8 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
       workingHoursRepo?: import('../../availability/working-hours').WorkingHoursRepository;
       unavailableBlockRepo?: import('../../availability/unavailable-block').UnavailableBlockRepository;
     },
+    /** Tenant-timezone fallback for payloads that omit `timezone`. */
+    private readonly settingsRepo?: Pick<SettingsRepository, 'findByTenant'>,
   ) {}
 
   // Degrades to a synthetic-id passthrough (saves nothing) without the
@@ -406,7 +408,18 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
       return { success: false, error: 'Payload contains invalid appointment times' };
     }
 
-    const timezone = typeof payload.timezone === 'string' ? payload.timezone : 'UTC';
+    // Payload override → tenant settings → UTC. Voice/calling-agent proposal
+    // payloads routinely omit timezone; defaulting straight to UTC made the
+    // availability check evaluate the window in the wrong local day for
+    // non-UTC tenants (and stamped wrong display metadata on the row).
+    let timezone = typeof payload.timezone === 'string' ? payload.timezone : null;
+    if (!timezone && this.settingsRepo) {
+      const settings = await this.settingsRepo
+        .findByTenant(context.tenantId)
+        .catch(() => null);
+      timezone = settings?.timezone ?? null;
+    }
+    timezone = timezone ?? 'UTC';
 
     // Optional customer-facing arrival window (e.g. "we'll be there 8–12").
     const arrivalWindowStart =
@@ -1087,6 +1100,7 @@ export function createExecutionHandlerRegistry(deps?: {
       // feasibilityDeps carries the availability repos — the same wiring the
       // reassign/crew/reschedule handlers already consume.
       deps?.feasibilityDeps,
+      deps?.settingsRepo,
     ),
     new CreateBookingExecutionHandler(deps?.appointmentRepo, deps?.auditRepo),
     new DraftEstimateExecutionHandler(

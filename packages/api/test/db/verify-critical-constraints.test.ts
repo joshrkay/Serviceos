@@ -10,9 +10,17 @@ import type { PoolClient } from 'pg';
  * operator override. (The live-DB presence check is pinned in
  * test/integration/foundation-gates.test.ts.)
  */
-function clientReturning(rows: { conname: string }[]): PoolClient {
+function clientReturning(
+  rows: { conname: string; relname: string; contype: string }[],
+): PoolClient {
   return { query: async () => ({ rows }) } as never;
 }
+
+const REAL_CONSTRAINT = {
+  conname: 'no_double_booking',
+  relname: 'appointment_assignments',
+  contype: 'x',
+};
 
 describe('verifyCriticalConstraints', () => {
   afterEach(() => {
@@ -21,7 +29,7 @@ describe('verifyCriticalConstraints', () => {
 
   it('passes silently when every critical constraint is present', async () => {
     await expect(
-      verifyCriticalConstraints(clientReturning([{ conname: 'no_double_booking' }])),
+      verifyCriticalConstraints(clientReturning([REAL_CONSTRAINT])),
     ).resolves.toBeUndefined();
   });
 
@@ -29,6 +37,19 @@ describe('verifyCriticalConstraints', () => {
     await expect(verifyCriticalConstraints(clientReturning([]))).rejects.toThrow(
       /no_double_booking/,
     );
+  });
+
+  it('rejects a same-named constraint on another table or of another type', async () => {
+    // Constraint names are not database-global — a decoy elsewhere must not
+    // satisfy the deploy gate.
+    await expect(
+      verifyCriticalConstraints(
+        clientReturning([
+          { conname: 'no_double_booking', relname: 'some_other_table', contype: 'x' },
+          { conname: 'no_double_booking', relname: 'appointment_assignments', contype: 'c' },
+        ]),
+      ),
+    ).rejects.toThrow(/no_double_booking/);
   });
 
   it('does not throw under the explicit operator override', async () => {
