@@ -180,6 +180,16 @@ async function runMigrations(): Promise<void> {
   } catch (err) {
     if (isDuplicatePolicyError(err)) {
       console.warn('Migration warning: duplicate policy detected, continuing startup');
+      // The tolerated error aborted applyMigrations BEFORE its constraint
+      // verification ran — re-run it here, or this recovery branch becomes a
+      // bypass of the deploy-blocking gate on a DB that is also missing
+      // no_double_booking.
+      try {
+        await verifyCriticalConstraints(client);
+      } catch (verifyErr) {
+        console.error('Migration failed:', verifyErr);
+        process.exitCode = 1;
+      }
     } else {
       console.error('Migration failed:', err);
       process.exitCode = 1;
