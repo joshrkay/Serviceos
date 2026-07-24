@@ -362,4 +362,110 @@ describe('recording-consent ordering — disclosure precedes audio capture', () 
     if (session.send.mock.calls.length > 0) failOpen += 1;
     expect(session.send).not.toHaveBeenCalled();
   });
+
+  it('Path 3d (TRUNCATED disclosure): a partial notice is not consent — fails closed', async () => {
+    const store = new VoiceSessionStore({ startInterval: false });
+    store.create('tenant-trunc', 'telephony', { callSid: 'CA-trunc' });
+
+    const { provider, session } = makeStreamingProvider();
+    const ws = new FakeWs();
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: provider,
+        ttsProvider: {
+          // Buffered recovery also unusable (non-PCM), so the turn ends on a
+          // filler after a PARTIAL real chunk.
+          synthesize: vi.fn(async () => ({
+            audio: Buffer.from('ID3-fake-mp3'),
+            contentType: 'audio/mpeg',
+            provider: 'test',
+          })),
+          // Emits ONE real chunk (so real audio genuinely reached the caller)
+          // and then dies — the caller heard only the opening fragment of the
+          // recording notice. Per-frame tracking would call this "played".
+          synthesizeStream: vi.fn(async function* () {
+            yield { pcm: Buffer.alloc(640), isFinal: false };
+            throw new Error('TTS stream died after first chunk');
+          }),
+        },
+        fillerEngine: { selectNext: () => ({ id: 'f1', text: 'One moment…', approxDurationMs: 500 }) },
+        fillerCache: { get: () => Buffer.alloc(640) },
+        speechTurn: async () => [],
+        initializeSession: async () => [
+          { type: 'tts_play', payload: { text: 'This call may be recorded for quality and training.' } },
+        ],
+      },
+      ws,
+    );
+    adapter.start();
+
+    ws.inboundJson(startFrame('CA-trunc', 'MZ-trunc'));
+    await flush();
+    await flush();
+    await flush();
+
+    // Real audio DID stream, but the turn never completed — a truncated
+    // disclosure is not consent.
+    if (!ws.closed) failOpen += 1;
+    expect(ws.closed).toBe(true);
+    expect(ws.closeReason).toBe('disclosure_init_failed');
+
+    const markName = silenceArmMarkName(ws);
+    if (markName) {
+      ws.inboundJson({ event: 'mark', streamSid: 'MZ-trunc', mark: { name: markName } });
+      await flush();
+    }
+    ws.inboundJson(mediaFrame);
+    await flush();
+    if (session.send.mock.calls.length > 0) failOpen += 1;
+    expect(session.send).not.toHaveBeenCalled();
+  });
+
+  it('Path 3e (later prompt cannot mask a failed greeting): fails closed on the FIRST turn', async () => {
+    const store = new VoiceSessionStore({ startInterval: false });
+    store.create('tenant-mask', 'telephony', { callSid: 'CA-mask' });
+
+    const { provider, session } = makeStreamingProvider();
+    const ws = new FakeWs();
+    // The greeting (which carries the disclosure) fails to produce audio; a
+    // LATER prompt in the same init effects streams fine. The verdict must be
+    // bound to the greeting turn, so the healthy second turn cannot mask it.
+    let call = 0;
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: provider,
+        ttsProvider: {
+          synthesize: vi.fn(async () => {
+            call += 1;
+            return call === 1
+              ? { audio: Buffer.from('ID3-fake-mp3'), contentType: 'audio/mpeg', provider: 'test' }
+              : { audio: Buffer.alloc(640), contentType: 'audio/pcm', provider: 'test' };
+          }),
+        },
+        speechTurn: async () => [],
+        initializeSession: async () => [
+          { type: 'tts_play', payload: { text: 'This call may be recorded.' } },
+          { type: 'tts_play', payload: { text: 'Can I get your name?' } },
+        ],
+      },
+      ws,
+    );
+    adapter.start();
+
+    ws.inboundJson(startFrame('CA-mask', 'MZ-mask'));
+    await flush();
+    await flush();
+    await flush();
+
+    if (!ws.closed) failOpen += 1;
+    expect(ws.closed).toBe(true);
+    expect(ws.closeReason).toBe('disclosure_init_failed');
+
+    ws.inboundJson(mediaFrame);
+    await flush();
+    if (session.send.mock.calls.length > 0) failOpen += 1;
+    expect(session.send).not.toHaveBeenCalled();
+  });
 });

@@ -590,15 +590,33 @@ interface RuntimeState {
    */
   fillerActive: boolean;
   /**
-   * Consent ordering — set true whenever `streamPcmAsMedia` enqueues a REAL
-   * (non-filler) TTS media frame; false means only a filler clip (or nothing)
-   * played. `handleStart` resets it before the disclosure/greeting turn and
-   * reads it after: a disclosure turn that produced no real audio (its TTS
-   * stream failed and recovery fell back to a generic filler or dead air) must
-   * fail closed — a filler is NOT the recording notice, so its completion mark
-   * must never be mistaken for disclosure playback.
+   * Consent ordering — per-TURN completion flag. Set true ONLY where a turn
+   * finished playing its COMPLETE real (non-filler) TTS: the streaming loop
+   * running to its end, the buffered synth success, or the recovery path's
+   * buffered re-synth of the full text. Deliberately NOT set per audio frame:
+   * a stream that emitted one chunk and then died into filler/dead-air
+   * recovery played only a fragment, and must not count. Left false on the
+   * filler and dead-air paths — a filler clip is not the recording notice.
+   * Reset before each turn by `emitSideEffects`.
    */
-  realTtsAudioStreamed: boolean;
+  turnRealAudioComplete: boolean;
+  /**
+   * Consent ordering — true only while the establishment (disclosure/greeting)
+   * side effects are being emitted, so `emitSideEffects` records
+   * {@link disclosureTurnComplete} for THAT turn alone and never for a later
+   * prompt. Set around the init `emitSideEffects` call in `handleStart`.
+   */
+  awaitingDisclosureTurn: boolean;
+  /**
+   * Consent ordering — whether the turn carrying the recording disclosure
+   * played its complete real TTS. Captured from {@link turnRealAudioComplete}
+   * for the FIRST `tts_play` of the establishment effects (the greeting, into
+   * which `buildTelephonyGreeting` merges the disclosure copy) and never
+   * overwritten by a later prompt, so a fully-failed greeting can't be masked
+   * by a caller-identification line that streamed fine. `null` until that turn
+   * runs. `handleStart` fails closed on anything other than `true`.
+   */
+  disclosureTurnComplete: boolean | null;
   /**
    * @deprecated DO NOT USE — use `deps.setPendingTransferTwiml` to write
    * into the TwilioGatherAdapter's shared pendingTransferTwiml Map. This
@@ -841,7 +859,9 @@ export class TwilioMediaStreamAdapter {
       awaitingFirstAudioFrame: false,
       turnLatencyStartMs: null,
       fillerActive: false,
-      realTtsAudioStreamed: false,
+      turnRealAudioComplete: false,
+      awaitingDisclosureTurn: false,
+      disclosureTurnComplete: null,
       pendingTransferTwiml: null,
       resolvedEscalationSettings: null,
       interimEmergencyFired: false,
@@ -1135,22 +1155,27 @@ export class TwilioMediaStreamAdapter {
             tenantId: session.tenantId,
           }),
         );
-        // Scope the real-audio flag to the disclosure/greeting turn: reset it
-        // before, read it after, so it reflects ONLY what this turn played.
-        this.state.realTtsAudioStreamed = false;
-        await this.emitSideEffects(initEffects);
+        // Scope the disclosure verdict to the greeting turn: emitSideEffects
+        // records it for the FIRST tts_play only, while this window is open.
+        this.state.disclosureTurnComplete = null;
+        this.state.awaitingDisclosureTurn = true;
+        try {
+          await this.emitSideEffects(initEffects);
+        } finally {
+          this.state.awaitingDisclosureTurn = false;
+        }
         // Consent ordering — capture opens only once the caller has actually
-        // HEARD the recording disclosure, matching the Gather path where a
-        // blocking <Say> fully plays before <Record> arms.
-        if (this.disclosureWasSpoken(initEffects) && !this.state.realTtsAudioStreamed) {
+        // HEARD the COMPLETE recording disclosure, matching the Gather path
+        // where a blocking <Say> fully plays before <Record> arms.
+        if (this.disclosureWasSpoken(initEffects) && this.state.disclosureTurnComplete !== true) {
           // A disclosure turn WAS expected to play (ttsProvider wired + a
-          // non-empty greeting tts_play) but delivered NO real disclosure audio:
-          // its TTS stream failed and recovery fell back to a generic filler
-          // clip or dead air (a filler is not the recording notice), or the
-          // buffered synth returned non-PCM. A filler's completion mark must
-          // never be mistaken for disclosure playback — FAIL CLOSED (hang up),
-          // mirroring the initializeSession-threw branch below.
-          await this.failDisclosureClosed(callSid, session, 'disclosure_no_real_playback');
+          // non-empty greeting tts_play) but did not play to completion: its
+          // TTS stream died part-way and recovery fell back to a generic filler
+          // clip or dead air, or the buffered synth returned non-PCM. A partial
+          // notice is not a disclosure, and a filler's completion mark must
+          // never be mistaken for one — FAIL CLOSED (hang up), mirroring the
+          // initializeSession-threw branch below.
+          await this.failDisclosureClosed(callSid, session, 'disclosure_incomplete_playback');
           return;
         }
         if (this.state.pendingSilenceRepromptTurnId !== null) {
@@ -2226,6 +2251,8 @@ export class TwilioMediaStreamAdapter {
       const text = renderTtsText(rawText, renderPayload, lang);
       let turnId = ++this.state.outboundTurnId;
       this.state.agentSpeaking = true;
+      // Consent ordering — scope the completion flag to THIS turn.
+      this.state.turnRealAudioComplete = false;
       try {
         // runTurnWithFiller returns the final turnId — it may have been
         // bumped if a filler was preempted by the real TTS arrival.
@@ -2238,6 +2265,13 @@ export class TwilioMediaStreamAdapter {
         if (turnId === this.state.outboundTurnId) {
           this.state.agentSpeaking = false;
         }
+      }
+      // Consent ordering — bind the disclosure verdict to the FIRST spoken
+      // turn of establishment (the greeting, which carries the recording
+      // notice). Recorded once: a later prompt that streams fine must never
+      // mask a greeting that didn't play.
+      if (this.state.awaitingDisclosureTurn && this.state.disclosureTurnComplete === null) {
+        this.state.disclosureTurnComplete = this.state.turnRealAudioComplete;
       }
     }
   }
@@ -2467,6 +2501,10 @@ export class TwilioMediaStreamAdapter {
             }
             if (chunk.isFinal) break;
           }
+          // Consent ordering — the stream ran to completion, so the caller
+          // heard this turn's COMPLETE real TTS (reached only when the loop
+          // exits normally; a mid-stream throw jumps to the catch below).
+          this.state.turnRealAudioComplete = true;
           // T2-F05 — all of this turn's audio is now enqueued. Arm the
           // silence countdown on a single dedicated end-of-utterance mark,
           // not the per-chunk `turn-${turnId}` marks emitted inside
@@ -2527,6 +2565,9 @@ export class TwilioMediaStreamAdapter {
           );
         } else if (turnId === this.state.outboundTurnId && this.state.agentSpeaking) {
           await this.streamPcmAsMedia(result.audio, turnId);
+          // Consent ordering — the full buffered synth of this turn's text
+          // streamed, so the caller heard the COMPLETE real TTS.
+          this.state.turnRealAudioComplete = true;
           // T2-F05 — same single end-of-utterance arm as the streaming path,
           // for the buffered (non-streaming) TTS fallback.
           this.armSilenceOnTurnEnd(turnId);
@@ -2588,6 +2629,10 @@ export class TwilioMediaStreamAdapter {
       this.state.agentSpeaking
     ) {
       await this.streamPcmAsMedia(result.audio, turnId);
+      // Consent ordering — recovery re-synthesized and streamed the WHOLE
+      // turn text, so the caller heard the complete real TTS (after a hiccup).
+      // The filler fallback below deliberately does NOT set this.
+      this.state.turnRealAudioComplete = true;
       // T2-F05 — recovery still played a full agent turn, so a silent caller
       // after it must still get the bounded reprompt (handleMessage ignores
       // the per-chunk turn-* marks for arming).
@@ -2661,10 +2706,6 @@ export class TwilioMediaStreamAdapter {
         streamSid: this.state.streamSid,
         media: { payload },
       });
-      // Consent ordering — record that REAL (non-filler) TTS audio actually
-      // reached the caller. handleStart reads this after the disclosure turn to
-      // tell genuine disclosure playback apart from a filler-only recovery.
-      if (!isFiller) this.state.realTtsAudioStreamed = true;
       // VQ2-004: TTFA-stop. Emit `audio_frame_emitted` ONCE per turn,
       // on the first chunk that lands on the queue. The flag is armed
       // by `onTranscriptEvent` and disarmed here so subsequent chunks
