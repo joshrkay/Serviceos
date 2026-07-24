@@ -35,6 +35,11 @@ export default function DeleteAccount() {
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Deletion succeeded server-side but Clerk sign-out failed (e.g. offline).
+  // Navigating to /sign-in would bounce straight back: the root layout
+  // redirects any signed-in session out of the auth group, trapping the
+  // user in-app with a dead account. Show a terminal instruction instead.
+  const [signOutStuck, setSignOutStuck] = useState(false);
 
   const onDelete = async () => {
     if (busy) return;
@@ -53,12 +58,21 @@ export default function DeleteAccount() {
         setError(deleteErrorMessage(res.status, serverMessage));
         return;
       }
-      // Account is gone server-side; clear the local session. Sign-out
-      // failures are irrelevant at this point — the token is already dead.
-      try {
-        await signOut();
-      } catch {
-        // Ignore — Clerk already invalidated the session server-side.
+      // Account is gone server-side; clear the LOCAL session. This must
+      // actually succeed before navigating — with the cached session still
+      // active, /sign-in bounces back into the app (root-layout auth gate).
+      let signedOut = false;
+      for (let attempt = 0; attempt < 2 && !signedOut; attempt += 1) {
+        try {
+          await signOut();
+          signedOut = true;
+        } catch {
+          // Retry once — transient network blips are the common cause.
+        }
+      }
+      if (!signedOut) {
+        setSignOutStuck(true);
+        return;
       }
       router.replace('/sign-in');
     } catch {
@@ -67,6 +81,54 @@ export default function DeleteAccount() {
       setBusy(false);
     }
   };
+
+  const onRetrySignOut = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await signOut();
+      router.replace('/sign-in');
+    } catch {
+      // Still stuck — keep showing the instruction.
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (signOutStuck) {
+    return (
+      <ScrollView
+        className="flex-1 bg-background"
+        contentContainerStyle={{ paddingTop: 64, paddingBottom: 96 }}
+      >
+        <View className="px-6">
+          <Text className="font-heading text-2xl font-semibold text-foreground">
+            Account deleted
+          </Text>
+          <Text className="mt-3 text-base text-mutedForeground">
+            Your account was deleted, but we couldn&apos;t finish signing this
+            device out — you may be offline. Please close and reopen the app,
+            or try again below.
+          </Text>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Try signing out again"
+            onPress={() => void onRetrySignOut()}
+            disabled={busy}
+            className="mt-8 min-h-11 items-center justify-center rounded-md bg-primary px-4 py-3"
+          >
+            {busy ? (
+              <ActivityIndicator color="#ffffff" />
+            ) : (
+              <Text className="text-base font-semibold text-primaryForeground">
+                Try signing out again
+              </Text>
+            )}
+          </Pressable>
+        </View>
+      </ScrollView>
+    );
+  }
 
   return (
     <ScrollView

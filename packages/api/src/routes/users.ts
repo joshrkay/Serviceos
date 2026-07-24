@@ -601,30 +601,33 @@ export function createUsersRouter(
         // isolated, disconnect-safe — see purgeTokens).
         await purgeTokens();
 
-        // Best-effort and SAVEPOINT-isolated like the token purge above: a
-        // failed statement here must roll back only itself, not poison the
-        // request transaction after the irreversible Clerk delete. The Clerk
-        // user.deleted webhook writes its own audit row, covering the record
-        // if this one is lost.
+        // Best-effort, SAVEPOINT-isolated, AND disconnect/commit-durable
+        // (runDurable) like the token purge: the deletion stamp committed
+        // early, so if this insert is lost to a disconnect rollback or a
+        // failed response-time COMMIT, the webhook's no-op stamp would never
+        // write a replacement record and the completed deletion would have
+        // no audit trail.
         if (auditRepo) {
           try {
-            await withRequestSavepoint(() =>
-              auditRepo.create(
-                createAuditEvent({
-                  tenantId,
-                  actorId: clerkUserId,
-                  actorRole: req.auth!.role,
-                  eventType: 'user.account_deleted',
-                  entityType: 'user',
-                  entityId: actor.id,
-                  metadata: {
-                    self: true,
-                    role: actor.role,
-                    note:
-                      'Self-service account deletion (guideline 5.1.1(v)). Row soft-deleted; ' +
-                      'tenant data retained per 16D.',
-                  },
-                }),
+            await runDurable(() =>
+              withRequestSavepoint(() =>
+                auditRepo.create(
+                  createAuditEvent({
+                    tenantId,
+                    actorId: clerkUserId,
+                    actorRole: req.auth!.role,
+                    eventType: 'user.account_deleted',
+                    entityType: 'user',
+                    entityId: actor.id,
+                    metadata: {
+                      self: true,
+                      role: actor.role,
+                      note:
+                        'Self-service account deletion (guideline 5.1.1(v)). Row soft-deleted; ' +
+                        'tenant data retained per 16D.',
+                    },
+                  }),
+                ),
               ),
             );
           } catch {

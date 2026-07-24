@@ -113,6 +113,34 @@ describe('Delete account screen (guideline 5.1.1(v))', () => {
     expect(h.replace).not.toHaveBeenCalled();
   });
 
+  it('shows the restart instruction and does NOT navigate when sign-out keeps failing', async () => {
+    // Navigating to /sign-in with a live cached session bounces straight
+    // back into the app (root-layout auth gate) — the screen must hold.
+    h.api.mockResolvedValue({ ok: true, status: 200, json: async () => ({ deleted: true }) });
+    h.signOut.mockRejectedValue(new Error('offline'));
+    const { getByText, findByText } = render(createElement(DeleteAccount));
+    fireEvent.click(getByText('Delete my account'));
+    fireEvent.click(getByText('Yes, permanently delete my account'));
+
+    expect(await findByText(/couldn't finish signing this device out/)).toBeTruthy();
+    // Two attempts were made before giving up.
+    expect(h.signOut).toHaveBeenCalledTimes(2);
+    expect(h.replace).not.toHaveBeenCalled();
+  });
+
+  it('retry button completes the sign-out and then navigates', async () => {
+    h.api.mockResolvedValue({ ok: true, status: 200, json: async () => ({ deleted: true }) });
+    h.signOut.mockRejectedValue(new Error('offline'));
+    const { getByText, findByText } = render(createElement(DeleteAccount));
+    fireEvent.click(getByText('Delete my account'));
+    fireEvent.click(getByText('Yes, permanently delete my account'));
+    await findByText(/couldn't finish signing this device out/);
+
+    h.signOut.mockResolvedValue(undefined);
+    fireEvent.click(getByText('Try signing out again'));
+    await waitFor(() => expect(h.replace).toHaveBeenCalledWith('/sign-in'));
+  });
+
   it('all interactive elements meet the >=44px contract', () => {
     const { container, getByText } = render(createElement(DeleteAccount));
     for (const b of Array.from(container.querySelectorAll('button'))) {
