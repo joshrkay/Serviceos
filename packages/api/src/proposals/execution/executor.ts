@@ -125,6 +125,7 @@ export class ProposalExecutor {
     // every existing proposal and the operator/in-app paths are unaffected.
     const surface = resolveSurface(
       proposal.sourceContext as Record<string, unknown> | undefined,
+      proposal.createdBy,
     );
     if (!isProposalTypeAllowedOnSurface(surface, proposal.proposalType)) {
       logger.error('Blocked cross-surface proposal execution', {

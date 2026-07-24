@@ -328,18 +328,26 @@ describe('SuggestReplyTask — standing-instruction injection (text format)', ()
     });
 
     const messages = requests[0].messages;
-    expect(messages).toHaveLength(3);
+    // base system + SI system + RIVET I13 untrusted-content system + user.
+    expect(messages).toHaveLength(4);
     expect(messages[1].role).toBe('system');
     expect(messages[1].content).toContain('- [SI:si-1]');
     // Asking a text-format task to emit an id list would corrupt the draft.
     expect(messages[1].content).not.toContain('appliedStandingInstructions');
-    expect(messages[2].role).toBe('user');
+    // The customer thread rides its own untrusted-content system message.
+    expect(messages[2].role).toBe('system');
+    expect(messages[2].content).toContain('UNTRUSTED CALLER CONTENT');
+    expect(messages[3].role).toBe('user');
   });
 
-  it('keeps the prompt shape unchanged without instructions', async () => {
+  it('keeps the standing-instruction shape stable without instructions (base + I13 fence + user)', async () => {
     const { gateway, requests } = captureGateway('Sure thing.');
     await new SuggestReplyTask(gateway).suggest(input);
-    expect(requests[0].messages).toHaveLength(2);
+    // No standing instructions → base system + untrusted-content system + user.
+    const messages = requests[0].messages;
+    expect(messages).toHaveLength(3);
+    expect(messages.filter((m: { role: string }) => m.role === 'system')).toHaveLength(2);
+    expect(messages[messages.length - 1].role).toBe('user');
   });
 });
 

@@ -225,6 +225,26 @@ describe('send_payment_reminder — manual dedup guard', () => {
     expect(events.some((e) => e.eventType === 'invoice.reminder_sent')).toBe(false);
   });
 
+  it('I10 suppression also removes the CADENCE ledger claim (Codex) so a reopened invoice can re-raise', async () => {
+    // The overdue sweep (raiseDunningProposals) wrote the cadence row at raise
+    // time; the handler does not record-first for cadence. If the step is
+    // suppressed because the invoice is now paid, that pre-existing row must be
+    // deleted too, else selectDueReminderSteps treats the step as sent forever.
+    await seed({ stepKey: '3:sms', channel: 'sms', sentAt: NOW });
+    comms.suppressReason = 'paid';
+    const cadenceProposal = makeProposal({
+      id: 'cadence-suppressed',
+      payload: { invoiceId: INVOICE_ID, stepKey: '3:sms', offsetDays: 3, channel: 'sms' },
+    });
+
+    const result = await handlerWith(ledger).execute(cadenceProposal, ctx);
+
+    expect(result.success).toBe(true);
+    expect(comms.calls).toHaveLength(0);
+    const rows = await ledger.findByInvoice(TENANT, INVOICE_ID);
+    expect(rows.filter((r) => r.kind === 'reminder' && r.stepKey === '3:sms')).toHaveLength(0);
+  });
+
   it('re-executing the same manual proposal is idempotent — exactly one send total', async () => {
     const proposal = makeManualProposal('manual-prop-idem');
     const handler = handlerWith(ledger);

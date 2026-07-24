@@ -89,20 +89,32 @@ const INBOUND_TELEPHONY_CHANNELS: ReadonlySet<string> = new Set([
 
 /**
  * Resolve the surface to enforce at the execution boundary. An explicit stamp
- * always wins; absent that, fall back to a fail-safe **inference** from
- * provenance: an inbound-telephony channel with no stamp is treated as S1 so a
- * creation site that forgot to stamp cannot fail *open* into trusted execution.
- * Everything else (in-app, server workers, API routes) resolves to undefined =
- * unrestricted, preserving existing behavior. Authenticated voice/in-app paths
- * that legitimately run S2 ops must stamp `surface: 'S2'` explicitly.
+ * always wins; absent that, fall back to a narrow, fail-safe **inference**: an
+ * inbound-telephony channel whose proposal was authored by a *non-system*
+ * actor is treated as S1, so a caller-intent creation site that forgot to stamp
+ * cannot fail *open* into trusted execution.
+ *
+ * The `createdBy` guard is what keeps the inference precise. Server-generated
+ * proposals that merely *happen during a call* — e.g. the vulnerability-triage
+ * `update_customer`, which carries `channel: 'telephony'` but is authored by
+ * `system:vulnerability-triage` and owner-approved — are NOT caller intent and
+ * must stay trusted; a `system:`-prefixed actor is the same human-authority
+ * convention `lifecycle.ts` uses (a system actor can never approve). Everything
+ * else (in-app, workers, routes) resolves to undefined = unrestricted.
  */
 export function resolveSurface(
   sourceContext: Record<string, unknown> | undefined,
+  createdBy?: string,
 ): ProposalSurface | undefined {
   const explicit = surfaceFromSourceContext(sourceContext);
   if (explicit) return explicit;
   const channel = sourceContext?.channel;
-  if (typeof channel === 'string' && INBOUND_TELEPHONY_CHANNELS.has(channel)) {
+  const systemAuthored = typeof createdBy === 'string' && createdBy.startsWith('system:');
+  if (
+    !systemAuthored &&
+    typeof channel === 'string' &&
+    INBOUND_TELEPHONY_CHANNELS.has(channel)
+  ) {
     return 'S1';
   }
   return undefined;

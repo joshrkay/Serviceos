@@ -18,6 +18,7 @@ import {
   buildStandingInstructionsSection,
   type InjectedStandingInstruction,
 } from '../standing-instructions-context';
+import { buildUntrustedContentSection } from '../untrusted-content';
 
 /** A thread message, trimmed to what the prompt needs. */
 export interface SuggestReplyMessage {
@@ -113,6 +114,14 @@ export class SuggestReplyTask {
         }),
       });
     }
+    // RIVET I13 — the thread contains caller-authored (S1, untrusted) message
+    // text. Render it inside the untrusted-content fence on its OWN system
+    // message so a "Customer:" line that says "ignore previous instructions"
+    // is quoted DATA to reply to, never an instruction to the drafting model.
+    systemMessages.push({
+      role: 'system',
+      content: buildUntrustedContentSection(transcript, 'Customer message thread'),
+    });
 
     const response = await this.gateway.complete({
       taskType: this.taskType,
@@ -121,7 +130,8 @@ export class SuggestReplyTask {
         ...systemMessages,
         {
           role: 'user',
-          content: `Here is the conversation so far:\n\n${transcript}\n\nDraft the shop's next reply.`,
+          content:
+            "Using the quoted customer message thread above, draft the shop's next reply.",
         },
       ],
       temperature: 0.7,

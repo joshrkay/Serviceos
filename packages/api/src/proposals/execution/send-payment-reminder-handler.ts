@@ -169,7 +169,15 @@ export class SendPaymentReminderExecutionHandler implements ExecutionHandler {
     // suppression instead of a send. Idempotent re-execution is unaffected —
     // the row is only deleted on the same run that wrote it.
     if (outcome.status === 'suppressed') {
-      if (this.dunningEventRepo && isManual) {
+      // Undo the ledger claim for this occurrence so the suppressed step is not
+      // treated as sent forever. This covers BOTH on-ramps: a MANUAL reminder
+      // wrote its `manual:<proposalId>` row above (record-first), and a CADENCE
+      // step's `<offsetDays>:<channel>` row was written by the overdue sweep
+      // (raiseDunningProposals) at raise time — `occurrenceToken` is that row's
+      // stepKey in either case. Without this, a cadence step suppressed because
+      // the invoice was paid would leave selectDueReminderSteps unable to
+      // re-raise it if the payment is later reversed and the invoice reopens.
+      if (this.dunningEventRepo) {
         try {
           await this.dunningEventRepo.deleteByInvoiceStep(
             context.tenantId,

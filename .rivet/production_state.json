@@ -22,8 +22,8 @@
       "detail": "Interactive R2 (send/money) confirmation discipline holds structurally: every R2 proposal type is non-capture, decideInitialStatus only returns 'approved' for autonomous+capture, and voiceMutation/S1-surface strips trust. Readback restates resolved entities. Caveats fixed this PR: I10 paid-invoice send-time re-check added; dead voice channel clause replaced by voiceMutation + S1-surface guard. Residual: I11 recipient-timezone quiet-hours not enforced (documented gap)."
     },
     "P4": {
-      "status": "remediated_partial",
-      "detail": "Was FAIL (no S1 allowlist, no execution-time surface check, no I13 provenance). This PR adds: enumerated S1 allowlist (proposals/surface.ts), surface stamped at inbound proposal creation, S1 non-allowlisted intents coerced to voice_clarification + audited, and execution-boundary surface enforcement (I6) in ProposalExecutor. Remaining gap: I13 untrusted-content provenance on caller transcripts/messages is NOT implemented (larger change touching the transcript model + operator digest/summary readers) \u2014 tracked as a blocker."
+      "status": "remediated",
+      "detail": "Was FAIL (no S1 allowlist, no execution-time surface check, no I13 provenance). Now: enumerated S1 allowlist (proposals/surface.ts), surface stamped at inbound proposal creation, S1 non-allowlisted intents coerced to voice_clarification + audited, execution-boundary surface enforcement (I6) in ProposalExecutor (fail-safe S1 inference for non-system-authored inbound-telephony proposals), AND I13 untrusted-content provenance: caller-authored text is rendered into operator (S2) agent prompts only inside a hardened untrusted-content fence (ai/untrusted-content.ts) at the two highest-risk read-back sites (suggest-reply, summarize-session), with fence-breakout neutralization. Residual: extend the I13 fence to the remaining lower-risk read-back sites (context-builder recentMessages) and add an explicit untrusted column at the transcript/message ingest layer (currently derived from senderRole/speaker at read time)."
     },
     "P5": {
       "status": "partial",
@@ -915,10 +915,13 @@
     "P4: create-voice-turn-processor stamps surface (ownerSession -> S2 else S1) and coerces S1 non-allowlisted intents to voice_clarification + audits voice.surface_violation_blocked.",
     "P3: proposal.createProposal strips trust tier on S1 surface (in addition to voiceMutation); removed dead 'inapp_voice'/'telephony_voice' channel clause.",
     "P3/I10: transactional-comms notifyInvoiceOverdue suppresses reminders on paid/void/zero-balance invoices at send time.",
-    "Tests: surface-enforcement.test.ts, invoice-overdue-paid-suppression.test.ts, and S1-block cases in voice-turn-processor.test.ts."
+    "Tests: surface-enforcement.test.ts, invoice-overdue-paid-suppression.test.ts, and S1-block cases in voice-turn-processor.test.ts.",
+    "I13: ai/untrusted-content.ts renders caller-authored (S1) text into operator (S2) prompts inside a hardened BEGIN/END fence with a data-not-instruction hardening line and fence-breakout neutralization; applied at suggest-reply-task and summarize-session (their own system message).",
+    "P4 refinement: resolveSurface infers S1 only for NON-system-authored inbound-telephony proposals (system: actors \u2014 e.g. vulnerability-triage update_customer \u2014 stay trusted), fixing a false SURFACE_VIOLATION on server-generated proposals.",
+    "P3/I10: reminder suppression now deletes the dunning ledger claim for BOTH manual and cadence steps, so a suppressed step on a later-reopened invoice can be re-raised."
   ],
   "open_blockers": [
-    "I13 untrusted-content provenance: caller transcripts/messages carry no 'untrusted' flag and nothing prevents them entering an S2 agent context as instruction-eligible content (second-order injection). Not implemented.",
+    "I13 (partial): the untrusted-content fence is applied at the two highest-risk S2 read-back sites (suggest-reply, summarize-session). Extend it to context-builder.recentMessages (RAG query + prompt) and add an explicit `untrusted` provenance column at the transcript/message ingest layer (currently derived from senderRole/speaker at read time).",
     "Registry reconciliation + human re-ratification: registry is not a complete voice-surface inventory (P1 fail).",
     "22 registry ops have no voice on-ramp; 8 partial (P2).",
     "I11 recipient-timezone quiet-hours enforcement on customer sends.",

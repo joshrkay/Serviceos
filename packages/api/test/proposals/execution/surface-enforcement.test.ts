@@ -167,15 +167,27 @@ describe('resolveSurface — fail-safe inference (Codex: no unstamped-inbound tr
     expect(resolveSurface({ surface: 'S1', channel: 'inapp' })).toBe('S1');
   });
 
-  it('infers S1 from an inbound-telephony channel when no surface is stamped', () => {
+  it('infers S1 from an inbound-telephony channel for a non-system (caller) author', () => {
     for (const channel of ['telephony', 'telephony_voice', 'voice_inbound', 'media_streams']) {
-      expect(resolveSurface({ source: 'calling-agent', channel })).toBe('S1');
+      expect(resolveSurface({ source: 'calling-agent', channel }, 'calling-agent')).toBe('S1');
+      expect(resolveSurface({ source: 'calling-agent', channel }, 'cust-123')).toBe('S1');
     }
   });
 
-  it('does NOT infer S1 for in-app or server-origin proposals (unrestricted)', () => {
-    expect(resolveSurface({ source: 'calling-agent', channel: 'inapp' })).toBeUndefined();
-    expect(resolveSurface({ channel: 'sms' })).toBeUndefined();
-    expect(resolveSurface(undefined)).toBeUndefined();
+  it('does NOT infer S1 for a SYSTEM-authored telephony proposal (server-generated during a call)', () => {
+    // e.g. the vulnerability-triage update_customer: channel telephony, but
+    // authored by system:vulnerability-triage and owner-approved — trusted.
+    expect(
+      resolveSurface(
+        { source: 'calling-agent', channel: 'telephony', reason: 'vulnerability_triage' },
+        'system:vulnerability-triage',
+      ),
+    ).toBeUndefined();
+  });
+
+  it('does NOT infer S1 for in-app or non-telephony proposals (unrestricted)', () => {
+    expect(resolveSurface({ source: 'calling-agent', channel: 'inapp' }, 'cust-1')).toBeUndefined();
+    expect(resolveSurface({ channel: 'sms' }, 'cust-1')).toBeUndefined();
+    expect(resolveSurface(undefined, undefined)).toBeUndefined();
   });
 });
