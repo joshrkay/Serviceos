@@ -1,0 +1,41 @@
+{
+  "goal": "production",
+  "spec": ".rivet/RIVET_GOAL_PRODUCTION_v2.md",
+  "contracts": ".rivet/RIVET_OPERATION_CONTRACTS.md",
+  "registry": ".rivet/operation_registry.json",
+  "registry_status": "ratified",
+  "state_version": 1,
+  "updated": "2026-07-24",
+  "iteration": 1,
+  "phase": "T0_reconciliation",
+  "gates": {
+    "P1": { "status": "pending", "detail": "registry ratified (62 ops); codebase reconciliation in progress" },
+    "P2": { "status": "pending", "detail": "T1 atomic execution per op" },
+    "P3": { "status": "pending", "detail": "zero R2 executions without confirmation (binary)" },
+    "P4": { "status": "pending", "detail": "zero S1 sessions reaching S2 ops (binary)" },
+    "P5": { "status": "pending", "detail": "T2 resolution suite" },
+    "P6": { "status": "pending", "detail": "T3 composite chains" }
+  },
+  "tiers": {
+    "T0": { "status": "in_progress" },
+    "T1": { "status": "pending" },
+    "T2": { "status": "pending" },
+    "T3": { "status": "pending" },
+    "T4": { "status": "pending" }
+  },
+  "evidence": {
+    "local_suites_2026_07_24": {
+      "operator_ops_loop": "41/41 passed (test/voice/operator-ops-loop.test.ts)",
+      "voice_fixtures": "13/13 passed",
+      "voice_ai_dirs": "306 files / 3523 tests passed, 3 files skipped",
+      "tsc_build": "clean (tsconfig.build.json)"
+    },
+    "prior_production_probes": {
+      "operator_voice_50_v3_prod_2026_07_23": "best 30/50 voice-only, 28/50 full (env: AI_CLASSIFY_INTENT_DEADLINE_MS=12000); dev baseline 50/50",
+      "reference": "docs/verification-runs/operator-voice-50-v3-prod-2026-07-23.md"
+    }
+  },
+  "operations": {},
+  "proposed_reclassifications": [],
+  "history": []
+}

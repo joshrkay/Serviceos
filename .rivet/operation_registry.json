@@ -1,0 +1,1224 @@
+{
+  "version": 1,
+  "status": "ratified",
+  "count": 62,
+  "note": "Voice operations only. Non-voice verification surface (S3 payment page, Stripe webhook ingest, settings writes) is tracked separately in non_voice_surface below and is NOT part of the 62.",
+  "vector_assignment_rules": {
+    "all": [
+      "V1",
+      "V8"
+    ],
+    "has_ref_slot": [
+      "V2",
+      "V11"
+    ],
+    "requires_slots": [
+      "V3",
+      "V4"
+    ],
+    "tier_R2": [
+      "V5",
+      "V7"
+    ],
+    "surface_S1": [
+      "V6"
+    ],
+    "tech_facing": [
+      "V10"
+    ],
+    "has_preconditions": [
+      "V9"
+    ],
+    "priority_P1": [
+      "ALL"
+    ]
+  },
+  "operations": [
+    {
+      "id": 1,
+      "domain": "customer",
+      "verb": "create",
+      "tier": "R1",
+      "surfaces": [
+        "S1_self",
+        "S2"
+      ],
+      "priority": "P2",
+      "contract": "CUS-001",
+      "vectors": [
+        "V1",
+        "V2",
+        "V3",
+        "V4",
+        "V5",
+        "V6",
+        "V7",
+        "V8"
+      ],
+      "notes": "dedupe check mandatory"
+    },
+    {
+      "id": 2,
+      "domain": "customer",
+      "verb": "edit",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P3",
+      "contract": "CUS-002",
+      "vectors": [
+        "V1",
+        "V2",
+        "V3",
+        "V4",
+        "V5",
+        "V7",
+        "V8",
+        "V9"
+      ],
+      "notes": "phone edit elevates to R2"
+    },
+    {
+      "id": 3,
+      "domain": "customer",
+      "verb": "lookup",
+      "tier": "R0",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P2",
+      "contract": "5.12",
+      "vectors": [
+        "V1",
+        "V2",
+        "V8",
+        "V10",
+        "V11"
+      ]
+    },
+    {
+      "id": 4,
+      "domain": "customer",
+      "verb": "add_note",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P3",
+      "contract": "5.12",
+      "vectors": [
+        "V1",
+        "V2",
+        "V3",
+        "V8",
+        "V10",
+        "V11"
+      ],
+      "notes": "dictation, voice-native"
+    },
+    {
+      "id": 5,
+      "domain": "customer",
+      "verb": "view_history",
+      "tier": "R0",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P3",
+      "contract": "5.12",
+      "vectors": [
+        "V1",
+        "V2",
+        "V8",
+        "V11"
+      ],
+      "notes": "I9 reduction applies"
+    },
+    {
+      "id": 6,
+      "domain": "customer",
+      "verb": "merge_duplicates",
+      "tier": "R2",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P4",
+      "contract": "5.12",
+      "vectors": [
+        "V1",
+        "V2",
+        "V8"
+      ],
+      "notes": "TIER CORRECTED R1->R2: merge is destructive, not cleanly reversible. Voice-hostile; touch-primary."
+    },
+    {
+      "id": 7,
+      "domain": "customer",
+      "verb": "add_service_location",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P3",
+      "contract": "5.12",
+      "vectors": [
+        "V1",
+        "V2",
+        "V3",
+        "V8"
+      ]
+    },
+    {
+      "id": 8,
+      "domain": "job",
+      "verb": "create",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P2",
+      "contract": "JOB-001",
+      "vectors": [
+        "V1",
+        "V2",
+        "V3",
+        "V4",
+        "V5",
+        "V7",
+        "V8",
+        "V9",
+        "V10",
+        "V11"
+      ]
+    },
+    {
+      "id": 9,
+      "domain": "job",
+      "verb": "create_scheduled",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P1",
+      "contract": "JOB-002",
+      "vectors": [
+        "ALL_EXCEPT_V6"
+      ],
+      "notes": "double-book prevention is hard fail"
+    },
+    {
+      "id": 10,
+      "domain": "job",
+      "verb": "edit",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P3",
+      "contract": "JOB-003",
+      "vectors": [
+        "V1",
+        "V2",
+        "V3",
+        "V4",
+        "V5",
+        "V7",
+        "V8",
+        "V9",
+        "V10",
+        "V11"
+      ]
+    },
+    {
+      "id": 11,
+      "domain": "job",
+      "verb": "reschedule",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P1",
+      "contract": "5.12",
+      "vectors": [
+        "ALL_EXCEPT_V6"
+      ],
+      "notes": "customer-facing side effects, D3"
+    },
+    {
+      "id": 12,
+      "domain": "job",
+      "verb": "assign_tech",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P2",
+      "contract": "5.12",
+      "vectors": [
+        "V1",
+        "V2",
+        "V3",
+        "V8",
+        "V9",
+        "V10",
+        "V11"
+      ]
+    },
+    {
+      "id": 13,
+      "domain": "job",
+      "verb": "reassign_tech",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P2",
+      "contract": "5.12",
+      "vectors": [
+        "V1",
+        "V2",
+        "V3",
+        "V8",
+        "V9",
+        "V10",
+        "V11"
+      ],
+      "notes": "notification cascade"
+    },
+    {
+      "id": 14,
+      "domain": "job",
+      "verb": "cancel",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P3",
+      "contract": "5.12",
+      "vectors": [
+        "V1",
+        "V2",
+        "V8",
+        "V9",
+        "V10",
+        "V11"
+      ]
+    },
+    {
+      "id": 15,
+      "domain": "job",
+      "verb": "complete",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P2",
+      "contract": "5.12",
+      "vectors": [
+        "V1",
+        "V2",
+        "V8",
+        "V9",
+        "V10",
+        "V11"
+      ],
+      "notes": "hands-busy; triggers invoicing"
+    },
+    {
+      "id": 16,
+      "domain": "job",
+      "verb": "add_note",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P2",
+      "contract": "5.12",
+      "vectors": [
+        "V1",
+        "V2",
+        "V3",
+        "V8",
+        "V10",
+        "V11"
+      ],
+      "notes": "hands-busy; voice beats typing"
+    },
+    {
+      "id": 17,
+      "domain": "job",
+      "verb": "attach_photo",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P4",
+      "contract": "5.12",
+      "vectors": [
+        "V1",
+        "V8"
+      ],
+      "notes": "voice-initiated, visual act"
+    },
+    {
+      "id": 18,
+      "domain": "job",
+      "verb": "create_recurring",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P3",
+      "contract": "5.12",
+      "vectors": [
+        "V1",
+        "V2",
+        "V3",
+        "V4",
+        "V8",
+        "V9"
+      ]
+    },
+    {
+      "id": 19,
+      "domain": "estimate",
+      "verb": "create",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P2",
+      "contract": "EST-001",
+      "vectors": [
+        "V1",
+        "V2",
+        "V3",
+        "V4",
+        "V5",
+        "V7",
+        "V8"
+      ]
+    },
+    {
+      "id": 20,
+      "domain": "estimate",
+      "verb": "edit",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P3",
+      "contract": "EST-002",
+      "vectors": [
+        "V1",
+        "V2",
+        "V3",
+        "V4",
+        "V5",
+        "V7",
+        "V8",
+        "V9"
+      ]
+    },
+    {
+      "id": 21,
+      "domain": "estimate",
+      "verb": "send",
+      "tier": "R2",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P1",
+      "contract": "EST-003",
+      "vectors": [
+        "ALL"
+      ],
+      "notes": "readback: total + expiry"
+    },
+    {
+      "id": 22,
+      "domain": "estimate",
+      "verb": "convert_to_job",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P3",
+      "contract": "5.12",
+      "vectors": [
+        "V1",
+        "V2",
+        "V8",
+        "V9",
+        "V11"
+      ]
+    },
+    {
+      "id": 23,
+      "domain": "estimate",
+      "verb": "convert_to_invoice",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P3",
+      "contract": "5.12",
+      "vectors": [
+        "V1",
+        "V2",
+        "V8",
+        "V9",
+        "V11"
+      ]
+    },
+    {
+      "id": 24,
+      "domain": "estimate",
+      "verb": "follow_up",
+      "tier": "R2A",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P3",
+      "contract": "FUP-002",
+      "vectors": [
+        "V7",
+        "V8",
+        "V9",
+        "RACE"
+      ]
+    },
+    {
+      "id": 25,
+      "domain": "invoice",
+      "verb": "create",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P2",
+      "contract": "INV-001",
+      "vectors": [
+        "V1",
+        "V2",
+        "V3",
+        "V4",
+        "V5",
+        "V7",
+        "V8"
+      ]
+    },
+    {
+      "id": 26,
+      "domain": "invoice",
+      "verb": "edit",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P3",
+      "contract": "INV-002",
+      "vectors": [
+        "V1",
+        "V2",
+        "V3",
+        "V4",
+        "V5",
+        "V7",
+        "V8",
+        "V9"
+      ],
+      "notes": "Decision D1"
+    },
+    {
+      "id": 27,
+      "domain": "invoice",
+      "verb": "send",
+      "tier": "R2",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P1",
+      "contract": "INV-003",
+      "vectors": [
+        "ALL"
+      ]
+    },
+    {
+      "id": 28,
+      "domain": "invoice",
+      "verb": "void",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P3",
+      "contract": "5.12",
+      "vectors": [
+        "V1",
+        "V2",
+        "V8",
+        "V9",
+        "V11"
+      ],
+      "notes": "Must invalidate all outstanding payment links on void."
+    },
+    {
+      "id": 29,
+      "domain": "invoice",
+      "verb": "query_payment_status",
+      "tier": "R0",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P2",
+      "contract": "INV-004",
+      "vectors": [
+        "V1",
+        "V2",
+        "V3",
+        "V8",
+        "V10",
+        "V11"
+      ]
+    },
+    {
+      "id": 30,
+      "domain": "invoice",
+      "verb": "send_payment_reminder",
+      "tier": "R2A",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P2",
+      "contract": "FUP-001",
+      "vectors": [
+        "V7",
+        "V8",
+        "V9",
+        "RACE"
+      ],
+      "notes": "I10 \u2014 never remind on a paid invoice"
+    },
+    {
+      "id": 31,
+      "domain": "invoice",
+      "verb": "apply_discount",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P3",
+      "contract": "5.12",
+      "vectors": [
+        "V1",
+        "V2",
+        "V3",
+        "V5",
+        "V8",
+        "V9",
+        "V11"
+      ],
+      "notes": "money mutation"
+    },
+    {
+      "id": 32,
+      "domain": "invoice",
+      "verb": "record_manual_payment",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P2",
+      "contract": "PAY-004",
+      "vectors": [
+        "V1",
+        "V2",
+        "V3",
+        "V5",
+        "V7",
+        "V8",
+        "V9",
+        "V11"
+      ]
+    },
+    {
+      "id": 33,
+      "domain": "payment",
+      "verb": "take_card_payment",
+      "tier": "R2",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P1",
+      "contract": "5.12",
+      "vectors": [
+        "ALL"
+      ],
+      "notes": "SCOPE CORRECTED: charge stored method only. Raw PAN capture by voice forbidden (PCI). New card -> PAY-001 link. See D13."
+    },
+    {
+      "id": 34,
+      "domain": "payment",
+      "verb": "send_payment_link",
+      "tier": "R2",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P2",
+      "contract": "PAY-001",
+      "vectors": [
+        "ALL"
+      ]
+    },
+    {
+      "id": 35,
+      "domain": "payment",
+      "verb": "refund",
+      "tier": "R2",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P1",
+      "contract": "PAY-005",
+      "vectors": [
+        "ALL"
+      ],
+      "notes": "D7 defer-to-parked"
+    },
+    {
+      "id": 36,
+      "domain": "payment",
+      "verb": "query_outstanding_balance",
+      "tier": "R0",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P2",
+      "contract": "PAY-006",
+      "vectors": [
+        "V1",
+        "V2",
+        "V8",
+        "V10",
+        "V11"
+      ],
+      "notes": "must read reconciled state"
+    },
+    {
+      "id": 37,
+      "domain": "schedule",
+      "verb": "view_today",
+      "tier": "R0",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P2",
+      "contract": "5.12",
+      "vectors": [
+        "V1",
+        "V8",
+        "V10"
+      ],
+      "notes": "highest-frequency read; I9 critical"
+    },
+    {
+      "id": 38,
+      "domain": "schedule",
+      "verb": "view_week",
+      "tier": "R0",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P4",
+      "contract": "5.12",
+      "vectors": [
+        "V1",
+        "V8"
+      ],
+      "notes": "voice-hostile; I9 mandatory"
+    },
+    {
+      "id": 39,
+      "domain": "schedule",
+      "verb": "move_appointment",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P1",
+      "contract": "SCH-001",
+      "vectors": [
+        "ALL_EXCEPT_V6"
+      ],
+      "notes": "collision risk"
+    },
+    {
+      "id": 40,
+      "domain": "schedule",
+      "verb": "check_availability",
+      "tier": "R0",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P2",
+      "contract": "5.12",
+      "vectors": [
+        "V1",
+        "V2",
+        "V3",
+        "V8",
+        "V10"
+      ]
+    },
+    {
+      "id": 41,
+      "domain": "schedule",
+      "verb": "mark_en_route",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P2",
+      "contract": "5.12",
+      "vectors": [
+        "V1",
+        "V2",
+        "V7",
+        "V8",
+        "V10",
+        "V11"
+      ],
+      "notes": "hands-busy; triggers FUP-004"
+    },
+    {
+      "id": 42,
+      "domain": "schedule",
+      "verb": "mark_arrived",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P2",
+      "contract": "5.12",
+      "vectors": [
+        "V1",
+        "V2",
+        "V7",
+        "V8",
+        "V10",
+        "V11"
+      ],
+      "notes": "hands-busy"
+    },
+    {
+      "id": 43,
+      "domain": "schedule",
+      "verb": "optimize_route",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P4",
+      "contract": "5.12",
+      "vectors": [
+        "V1",
+        "V8"
+      ],
+      "notes": "voice-hostile; output is a map"
+    },
+    {
+      "id": 44,
+      "domain": "messaging",
+      "verb": "send_to_customer",
+      "tier": "R2",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P1",
+      "contract": "MSG-001",
+      "vectors": [
+        "ALL"
+      ],
+      "notes": "verbatim body readback"
+    },
+    {
+      "id": 45,
+      "domain": "messaging",
+      "verb": "respond_to_inbound",
+      "tier": "R2",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P1",
+      "contract": "MSG-002",
+      "vectors": [
+        "ALL"
+      ],
+      "notes": "thread misresolution is the likely error"
+    },
+    {
+      "id": 46,
+      "domain": "messaging",
+      "verb": "send_appointment_reminder",
+      "tier": "R2A",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P3",
+      "contract": "FUP-003",
+      "vectors": [
+        "V7",
+        "V8",
+        "V9",
+        "RACE"
+      ]
+    },
+    {
+      "id": 47,
+      "domain": "messaging",
+      "verb": "send_on_my_way",
+      "tier": "R2A",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P2",
+      "contract": "FUP-004",
+      "vectors": [
+        "V7",
+        "V8",
+        "V9",
+        "V10"
+      ],
+      "notes": "hands-busy trigger"
+    },
+    {
+      "id": 48,
+      "domain": "messaging",
+      "verb": "call_customer",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P3",
+      "contract": "5.12",
+      "vectors": [
+        "V1",
+        "V2",
+        "V8",
+        "V10",
+        "V11"
+      ]
+    },
+    {
+      "id": 49,
+      "domain": "pricebook",
+      "verb": "lookup_price",
+      "tier": "R0",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P2",
+      "contract": "5.12",
+      "vectors": [
+        "V1",
+        "V2",
+        "V5",
+        "V8",
+        "V10"
+      ],
+      "notes": "hands-busy, very high frequency"
+    },
+    {
+      "id": 50,
+      "domain": "pricebook",
+      "verb": "add_line_item",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P2",
+      "contract": "5.12",
+      "vectors": [
+        "V1",
+        "V2",
+        "V3",
+        "V4",
+        "V5",
+        "V8",
+        "V10",
+        "V11"
+      ],
+      "notes": "hands-busy"
+    },
+    {
+      "id": 51,
+      "domain": "pricebook",
+      "verb": "create_edit_service",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P4",
+      "contract": "5.12",
+      "vectors": [
+        "V1",
+        "V3",
+        "V5",
+        "V8"
+      ],
+      "notes": "admin; consider settings-only"
+    },
+    {
+      "id": 52,
+      "domain": "reporting",
+      "verb": "revenue_period",
+      "tier": "R0",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P3",
+      "contract": "5.12",
+      "vectors": [
+        "V1",
+        "V3",
+        "V8"
+      ]
+    },
+    {
+      "id": 53,
+      "domain": "reporting",
+      "verb": "outstanding_invoices",
+      "tier": "R0",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P2",
+      "contract": "5.12",
+      "vectors": [
+        "V1",
+        "V8",
+        "V10"
+      ],
+      "notes": "I9 reduction"
+    },
+    {
+      "id": 54,
+      "domain": "reporting",
+      "verb": "job_status_query",
+      "tier": "R0",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P2",
+      "contract": "5.12",
+      "vectors": [
+        "V1",
+        "V2",
+        "V8",
+        "V10",
+        "V11"
+      ]
+    },
+    {
+      "id": 55,
+      "domain": "reporting",
+      "verb": "tech_utilization",
+      "tier": "R0",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P4",
+      "contract": "5.12",
+      "vectors": [
+        "V1",
+        "V8"
+      ]
+    },
+    {
+      "id": 56,
+      "domain": "reporting",
+      "verb": "customer_balance",
+      "tier": "R0",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P3",
+      "contract": "5.12",
+      "vectors": [
+        "V1",
+        "V2",
+        "V8",
+        "V11"
+      ]
+    },
+    {
+      "id": 57,
+      "domain": "inbound",
+      "verb": "answer_identify_caller",
+      "tier": "R0",
+      "surfaces": [
+        "S1"
+      ],
+      "priority": "P1",
+      "contract": "INB-001",
+      "vectors": [
+        "V1",
+        "V6",
+        "V8"
+      ],
+      "notes": "tenant resolution"
+    },
+    {
+      "id": 58,
+      "domain": "inbound",
+      "verb": "auto_schedule",
+      "tier": "R1",
+      "surfaces": [
+        "S1"
+      ],
+      "priority": "P1",
+      "contract": "INB-002",
+      "vectors": [
+        "ALL"
+      ],
+      "notes": "only write on untrusted surface; V6 weighted heaviest"
+    },
+    {
+      "id": 59,
+      "domain": "inbound",
+      "verb": "take_message",
+      "tier": "R1",
+      "surfaces": [
+        "S1"
+      ],
+      "priority": "P2",
+      "contract": "5.12",
+      "vectors": [
+        "V1",
+        "V3",
+        "V6",
+        "V8"
+      ]
+    },
+    {
+      "id": 60,
+      "domain": "inbound",
+      "verb": "transfer_to_human",
+      "tier": "R0",
+      "surfaces": [
+        "S1"
+      ],
+      "priority": "P2",
+      "contract": "5.12",
+      "vectors": [
+        "V1",
+        "V6",
+        "V8",
+        "V9"
+      ]
+    },
+    {
+      "id": 61,
+      "domain": "team",
+      "verb": "clock_in_out",
+      "tier": "R1",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P3",
+      "contract": "5.12",
+      "vectors": [
+        "V1",
+        "V7",
+        "V8",
+        "V10"
+      ],
+      "notes": "hands-busy"
+    },
+    {
+      "id": 62,
+      "domain": "team",
+      "verb": "view_tech_schedule",
+      "tier": "R0",
+      "surfaces": [
+        "S2"
+      ],
+      "priority": "P3",
+      "contract": "5.12",
+      "vectors": [
+        "V1",
+        "V8",
+        "V10"
+      ],
+      "notes": "I9 reduction"
+    }
+  ],
+  "non_voice_surface": {
+    "note": "In scope for production readiness. NOT part of the 62. Verified on a separate track \u2014 these cannot pass or fail a voice vector.",
+    "items": [
+      {
+        "id": "NV-1",
+        "component": "S3 hosted payment page",
+        "contract": "PAY-002",
+        "risk": "high",
+        "notes": "link entropy, expiry, single-use, replay"
+      },
+      {
+        "id": "NV-2",
+        "component": "Stripe webhook ingest",
+        "contract": "PAY-003",
+        "risk": "critical",
+        "notes": "signature verification, idempotency on event ID, out-of-order tolerance, tenant routing"
+      },
+      {
+        "id": "NV-3",
+        "component": "Stripe Connect onboarding",
+        "contract": null,
+        "risk": "high",
+        "notes": "D9; gates J1 onboarding \u2014 tenant is live for everything except money until KYC clears"
+      },
+      {
+        "id": "NV-4",
+        "component": "Settings \u2014 critical rows",
+        "contract": "5.10",
+        "risk": "critical",
+        "notes": "propagation tests required, not just read-after-write"
+      },
+      {
+        "id": "NV-5",
+        "component": "S3 estimate approval",
+        "contract": null,
+        "risk": "medium",
+        "notes": "same link model as NV-1"
+      },
+      {
+        "id": "NV-6",
+        "component": "A2P 10DLC + consent/STOP",
+        "contract": null,
+        "risk": "critical",
+        "notes": "D11; carrier gate \u2014 unregistered traffic filters regardless of code"
+      }
+    ]
+  },
+  "coverage": {
+    "contracted": 62,
+    "uncontracted": 0,
+    "p1_operations": [
+      9,
+      11,
+      21,
+      27,
+      33,
+      35,
+      39,
+      44,
+      45,
+      57,
+      58
+    ],
+    "p1_uncontracted": [],
+    "next_action": "All 62 contracted. Open decisions D1-D13 gate implementation of several. D13 (PCI scope on #33) and D11 (10DLC) are the two that block rather than shape."
+  }
+}
