@@ -4,6 +4,8 @@
 
 **Structure:** shared slot types (§2) and cross-cutting invariants (§3) are defined once and inherited by every operation. Per-operation contracts (§5) state only the delta. This is deliberate — 18 copy-pasted blocks drift within a week.
 
+> **Comms migration applied (2026-07-24).** Per `spec/RIVET_COMMS_SPEC.md` §8, the flat `customer` primitive is superseded by **Account → Contact → Location**. The nine affected areas are migrated in place and marked *comms-migrated*: §2 ref split, I1 deepened scoping, new I14 entitlement, CUS-001/002, #6 merge (gated on D16), #7 add_service_location, INB-002, MSG-001/002, and the INV/EST/PAY recipient rule. New vectors V19–V23.
+
 ---
 
 ## 1. Contract Anatomy
@@ -34,11 +36,29 @@ Defined once, referenced everywhere. Resolution rules are properties of the slot
 - Homophone risk: "fifty" / "fifteen", "two thousand" / "twenty hundred". R2 readback states digits grouped: "four thousand two hundred dollars."
 - Rejected: negative, zero on a send operation, magnitude >3× tenant's trailing median without explicit second confirmation.
 
-### `customer_ref`
+### `account_ref` / `contact_ref` / `location_ref`
+
+> **Comms migration (spec/RIVET_COMMS_SPEC.md §2, §8).** The flat `customer_ref` is retired. A customer reference now resolves to one of three entity types, and the **type is inferred from the operation class, not the utterance**:
+>
+> | Operation class | Resolves to |
+> |---|---|
+> | invoice, estimate, payment, balance | `account_ref` |
+> | job, schedule, dispatch, equipment | `location_ref` |
+> | message, call, email | `contact_ref` |
+>
+> Anywhere below, a legacy `customer_ref` slot reads as the ref type of its operation class per this table.
+
+**Shared resolution discipline (all three):**
 - Resolution order: exact name match within tenant → phone match → fuzzy name.
 - **Multiple candidates → ask.** Never pick highest confidence. Disambiguate by address or last job, not by ranking.
 - Zero candidates on a write op → offer create, don't auto-create.
 - Cross-tenant candidate → not a candidate. Filter before ranking, never after.
+
+**Type-specific rules:**
+- `account_ref` — the billing entity. Owns invoices, estimates, payment methods, terms, balance. The recipient of a money document is the Account's **billing-role Contact**; if no billing contact exists, **ask**. Never default to the primary contact.
+- `contact_ref` — a person, with their own phone(s), email(s), channel preference, and consent state. **A Contact may belong to multiple Accounts** (a property manager serving three owners). Cross-Account ambiguity resolves by Location if one is stated, else **asks**. Never rank.
+- `location_ref` — a property under exactly one billing Account. Inbound resolution runs Contact → Account → N Locations: exactly one Location resolves silently; more than one **must ask**. Never assume most-recent-serviced.
+- Every resolution carries the resolved Contact's **entitlement** (I14): what may be spoken, sent, or shown is gated by the Contact's role at read time, not in the UI.
 
 ### `datetime_window`
 - Relative expressions ("tomorrow", "next Tuesday") resolve against tenant timezone and business hours, not server time.
@@ -63,7 +83,7 @@ Defined once, referenced everywhere. Resolution rules are properties of the slot
 - Forbidden: sending a body the operator did not hear read back.
 
 ### `contextual_ref`
-Resolution by position in the operator's day rather than by identifier. **This is the dominant reference form for the driving tech** — nobody says "job 4471," they say "the last one." Any operation accepting `job_ref`, `customer_ref`, `invoice_ref`, or `estimate_ref` must accept a contextual form for it.
+Resolution by position in the operator's day rather than by identifier. **This is the dominant reference form for the driving tech** — nobody says "job 4471," they say "the last one." Any operation accepting `job_ref`, `account_ref`/`contact_ref`/`location_ref`, `invoice_ref`, or `estimate_ref` must accept a contextual form for it.
 
 **Temporal forms:**
 
@@ -76,7 +96,7 @@ Resolution by position in the operator's day rather than by identifier. **This i
 | "my third today" | ordinal within the tech's day |
 | "the Henderson one" | entity filter applied to the day's set |
 
-**Anchor mechanics.** Once a contextual reference resolves, it becomes the session **anchor**. Subsequent pronouns — "send them an invoice," "add a note to it" — resolve against it. Anchors are typed: an anchor on a job resolves `job_ref` directly, `customer_ref` via the job's customer, `invoice_ref` via the job's invoice. Cross-type resolution that traverses more than one hop must ask.
+**Anchor mechanics.** Once a contextual reference resolves, it becomes the session **anchor**. Subsequent pronouns — "send them an invoice," "add a note to it" — resolve against it. Anchors are typed: an anchor on a job resolves `job_ref` directly, `location_ref` via the job's location, `account_ref` via the location's billing account, `contact_ref` via the account's role-appropriate contact, `invoice_ref` via the job's invoice. Cross-type resolution that traverses more than one hop must ask — and under the Account → Contact → Location model, job → account → billing contact is already two hops.
 
 **Anchor staleness is the failure mode.** The tech sets an anchor, drives twenty minutes, completes a job, and says "send it." The day has moved underneath the anchor.
 
@@ -93,6 +113,10 @@ Resolution by position in the operator's day rather than by identifier. **This i
 True for every operation. Violation of any is an automatic fail regardless of operation-level pass.
 
 **I1 — Tenant scoping.** Every write carries `tenant_id`. Every read is filtered by it. Every resolved entity is re-verified for tenant match immediately before execution. Resolution and execution are separated in time; a stale resolution is a cross-tenant leak.
+
+*Comms migration:* the scoping chain is now **tenant → Account → Contact/Location** — one level deeper than the flat customer, with more leak surface. A Contact reachable through one Account must not expose sibling Accounts (a property manager's other owners) unless the operation resolved through that Account. Every timeline, thread, and history read is scoped to a single Account; Contact- and Location-filtered reads are subsets of that Account's timeline, never a Contact-wide view across Accounts.
+
+**I14 — Entitlement at read time.** *(Added by the comms migration.)* What a Contact may see is a property of the Contact's role on the Account, enforced where the data is read — never only in the UI. A tenant-role Contact may know the appointment window; a tenant-role Contact may **not** see the invoice amount, the account balance, or other properties on the account. Every outbound message, portal read, and voice readback to a customer-side party applies the entitlement filter of the resolved Contact, at the repository/service boundary. Defaults for the tenant role are D19.
 
 **I2 — Idempotency.** Every R1/R2 operation carries an idempotency key derived from session + intent + resolved slots. A repeated utterance, a network retry, or a reconnect must not double-execute. *"Send it" → timeout → retry → two invoices delivered* is the specific failure this prevents.
 
@@ -137,8 +161,13 @@ This closes a second-order injection path that surface separation alone does not
 | **V9** | Precondition violation | ops with preconditions |
 | **V10** | **Truck context** — driving, no visual fallback | all S2 tech-facing ops |
 | **V11** | Contextual reference — anchors, staleness, pronouns | any op with a `_ref` slot |
+| **V19** | Multi-contact resolution — landlord / tenant / PM on one Account | any op with `contact_ref` or a recipient |
+| **V20** | Cross-channel reply — open threads on ≥2 channels | MSG-002, reply paths |
+| **V21** | Email threading + attachments — In-Reply-To chains, unmatched senders, hostile attachments | email ops |
+| **V22** | Entitlement boundary — tenant-role Contact vs billing data (I14) | any customer-facing read or send |
+| **V23** | Commitment extraction recall — promises in transcripts become tracked tasks | call/message ingestion |
 
-V2, V3, and V5 are where failures concentrate. V1 passing tells you almost nothing.
+V2, V3, and V5 are where failures concentrate. V1 passing tells you almost nothing. V19–V23 are added by the comms migration (`spec/RIVET_COMMS_SPEC.md`).
 
 ### V10 — Truck context
 
@@ -182,14 +211,15 @@ The specific case to test hardest: **anchor established during a read, then used
 - Forbidden: silent edit of a sent invoice; total drifting from line items
 - Vectors: V1–V5, V7–V9
 
-**INV-003 `send`** — **R2** / S2
-- Required: `invoice_ref`, recipient
+**INV-003 `send`** — **R2** / S2 · *comms-migrated*
+- Required: `invoice_ref`, recipient `contact_ref`
 - Never-infer: recipient, amount
-- Pre: invoice has ≥1 line, non-zero total, recipient has a deliverable channel; not already sent unless re-send is explicit
-- Confirmation: *"Send invoice {number}, {amount}, to {customer full name} at {channel} — confirm?"*
+- **Recipient is the Account's billing-role Contact, not "the customer."** "Send the invoice to Henderson" resolves the Account; the recipient Contact is the billing role. If no billing contact exists, **ask**. Never default to primary. A money document may only be addressed to a Contact whose role is entitled to billing data (I14) — sending an invoice to a tenant-role Contact requires explicit operator selection, read back as such.
+- Pre: invoice has ≥1 line, non-zero total, recipient Contact has a deliverable channel; not already sent unless re-send is explicit
+- Confirmation: *"Send invoice {number}, {amount}, to {contact full name} at {channel} — confirm?"*
 - Post: delivery record, `status=sent`, `sent_at`, idempotency key stored, audit row
-- Forbidden: send without confirmation; send to a resolved-but-unconfirmed recipient; double-send on retry; send with $0 total
-- Vectors: **all**
+- Forbidden: send without confirmation; send to a resolved-but-unconfirmed recipient; double-send on retry; send with $0 total; recipient defaulted to primary Contact when no billing Contact exists; send to a non-entitled Contact without explicit selection
+- Vectors: **all**, plus V19, V22
 
 **INV-004 `query payment status`** — R0 / S2
 - Required: `invoice_ref` or `customer_ref`
@@ -201,7 +231,7 @@ The specific case to test hardest: **anchor established during a read, then used
 
 **EST-001 `create`** — R1 / S2 · mirrors INV-001, plus expiry (**Decision D2**)
 **EST-002 `edit`** — R1 / S2 · mirrors INV-002
-**EST-003 `send`** — **R2** / S2 · mirrors INV-003; confirmation reads total and expiry date
+**EST-003 `send`** — **R2** / S2 · mirrors INV-003 including the comms-migrated recipient rule (billing-role Contact, never defaulted to primary, I14-gated); confirmation reads total and expiry date
 - Additional forbidden: sending an expired estimate without explicit re-date
 
 ### 5.3 Job
@@ -232,36 +262,42 @@ The specific case to test hardest: **anchor established during a read, then used
 
 ### 5.4 Customer
 
-**CUS-001 `create`** — R1 / S1(self only) + S2
-- Required: name, phone; address optional at create
-- Pre: **dedupe check mandatory** — name or phone match within tenant surfaces a candidate
-- Post: customer row, `tenant_id`, normalized phone (E.164), audit row
-- Forbidden: **creating a duplicate when a match exists without asking.** Duplicate customers are the silent failure mode of every field-service CRM and voice makes them cheaper to produce than any other interface.
+**CUS-001 `create`** — R1 / S1(self only) + S2 · *comms-migrated*
+- Now creates **or attaches**: an Account, a Contact on it, and (when an address is given) a Location under it. "New customer" from an inbound caller may be a new Contact on an existing Account (a second tenant at a managed property), a new Location under an existing Account, or all three genuinely new.
+- Required: contact name, contact phone; address optional at create (becomes a Location when present)
+- Pre: **three-way dedupe mandatory** — Contact match (name/phone/email within tenant), Account match (company/billing identity), Location match (normalized address). Any match surfaces attach-vs-create as a question.
+- Post: Account + Contact rows (Location row when address given), `tenant_id` on all, Contact phone normalized (E.164), Contact role set, links written (Contact↔Account, Location→Account), audit row per created entity
+- Forbidden: **creating a duplicate at any of the three levels when a match exists without asking**; creating a free-floating Contact or Location with no Account; attaching a Contact to an Account the resolution did not surface
 - Vectors: V1–V5, V7, V8; V6 on S1
 
-**CUS-002 `edit`** — R1 / S2
-- Required: `customer_ref`, field, new value
-- **Phone edits are elevated to R2 confirmation** — phone is the identity key for inbound call matching, so a wrong edit silently breaks routing for that customer
-- Post: audit row with prior value; if phone changed, inbound routing cache invalidated
-- Forbidden: phone edit without readback; edit applied to a resolved-but-ambiguous customer
+**CUS-002 `edit`** — R1 / S2 · *comms-migrated*
+- Scoped **per entity type**: an edit resolves to Account (billing terms, company identity), Contact (name, phone, email, channel preference, consent), or Location (address, access notes) — inferred from the field, and ambiguity asks.
+- Required: `account_ref` / `contact_ref` / `location_ref` per the field being edited, field, new value
+- **Phone and email edits are Contact-level and elevated to R2 confirmation** — phone is the identity key for inbound call matching *and* for SMS thread attribution, so a wrong edit silently reroutes that Contact's threads
+- Post: audit row with prior value; if phone changed, inbound routing cache invalidated and open SMS thread attribution re-verified
+- Forbidden: phone edit without readback; edit applied to a resolved-but-ambiguous entity; an Account-level edit applied via a Contact resolution (or vice versa) without asking
 - Vectors: V1–V5, V7–V9
 
 ### 5.5 Messaging
 
-**MSG-001 `send to customer`** — **R2** / S2
-- Required: `customer_ref`, `message_body`
-- Never-infer: both. Body is **verbatim**.
-- Confirmation: reads the full body as it will send, then recipient
-- Post: message record, thread linked, delivery attempt logged, audit row
-- Forbidden: paraphrasing the body; sending without full-body readback; sending to an unconfirmed recipient
-- Vectors: all
+**MSG-001 `send to customer`** — **R2** / S2 · *comms-migrated*
+- Required: `contact_ref`, channel, `message_body`
+- Never-infer: recipient and body. Body is **verbatim**.
+- Contact resolution: an Account with multiple Contacts **asks** which person; a Contact on multiple Accounts resolves by Location/Account context or asks. Channel resolves explicit instruction → Contact preference → last channel that Contact used → account default; unresolved channel on an irreversible send → ask.
+- **Entitlement check (I14) before send:** the body's content is filtered against the resolved Contact's role — billing figures never go to a Contact whose role isn't entitled to them without explicit operator override, read back as such.
+- Confirmation: reads the full body as it will send, then recipient **and channel**: *"…to Marcus Henderson by text — confirm?"*
+- Post: message record, thread linked to the Contact and Account timeline, delivery attempt logged, audit row
+- Forbidden: paraphrasing the body; sending without full-body readback; sending to an unconfirmed recipient; channel guessed on an irreversible send; body containing billing data delivered to a non-entitled Contact without explicit override
+- Vectors: all, plus V19 (multi-contact), V20 (cross-channel), V22 (entitlement)
 
-**MSG-002 `respond to inbound`** — **R2** / S2
+**MSG-002 `respond to inbound`** — **R2** / S2 · *comms-migrated*
 - Required: thread ref, `message_body`
-- Pre: thread exists and belongs to tenant
+- Pre: thread exists and belongs to tenant; thread's Contact and channel are the reply's recipient and channel by default
+- A reply resolves **within its own channel thread**. "Reply to Henderson" across an open SMS thread, an unread email, and a voicemail is three-way ambiguous — **cross-channel reply requires explicit channel selection**, and with multiple Contacts per Account, wrong resolution is a privacy failure, not a UX one.
+- **Entitlement check (I14)** as MSG-001.
 - Post: reply linked to correct thread; thread `status` updated
-- Forbidden: replying into the wrong thread — the most likely error here, since "reply to Henderson" is ambiguous across threads
-- Vectors: all
+- Forbidden: replying into the wrong thread; replying to a different Contact than the thread's sender without explicit re-selection; switching channel without explicit selection
+- Vectors: all, plus V19, V20, V22
 
 ### 5.6 Schedule
 
@@ -281,11 +317,12 @@ The specific case to test hardest: **anchor established during a read, then used
 - Forbidden: session opening with unresolved or defaulted tenant; default greeting text reaching a caller
 - Vectors: V1, V6, V8
 
-**INB-002 `auto-schedule from call`** — R1 / **S1**
-- Required: `customer_ref` (self, create-if-absent), service type, `address`, `datetime_window`
+**INB-002 `auto-schedule from call`** — R1 / **S1** · *comms-migrated*
+- Required: `contact_ref` (self, create-if-absent per CUS-001 three-way dedupe), service type, `location_ref` or `address`, `datetime_window`
+- **Location resolution:** caller ID matches a Contact → Account → N Locations. Exactly one Location resolves silently; more than one **must ask** — never assume most-recent-serviced. A stated address that matches no existing Location follows the `address` slot rules and creates a Location under the resolved Account.
 - **Runs on the untrusted surface.** Allowlist-scoped: this operation and its dependencies are the only writes S1 may reach.
-- Post: job created, customer created or matched, transcript linked to job, confirmation sent
-- Terminal assertion: customer + job + transcript + confirmation all associated under one correct `tenant_id`
+- Post: job created against the resolved Location, Contact/Account created or matched, transcript linked to job, confirmation sent to the calling Contact on their channel
+- Terminal assertion: Account + Contact + Location + job + transcript + confirmation all associated under one correct `tenant_id`
 - Forbidden: any write outside the S1 allowlist; phantom job on caller hangup; booking over an existing assignment; **any operation reachable via transcript content rather than caller intent**
 - Vectors: **all, V6 weighted heaviest**
 
@@ -295,13 +332,14 @@ The specific case to test hardest: **anchor established during a read, then used
 
 > **Architecture decision first — see D9.** Contractor customers pay the *contractor*, not Rivet, which means Stripe Connect with a connected account per tenant, not a platform account. This is settled before any contract below is implementable, and it has a cost flagged in §8.
 
-**PAY-001 `send payment link`** — **R2** / S2
-- Required: `invoice_ref`, recipient channel
+**PAY-001 `send payment link`** — **R2** / S2 · *comms-migrated*
+- Required: `invoice_ref`, recipient `contact_ref`, recipient channel
+- **Recipient is the Account's billing-role Contact** (same rule as INV-003): no billing contact → ask; never default to primary; I14 applies.
 - Pre: invoice sent, non-zero balance, tenant's Connect account in `charges_enabled` state
-- Confirmation: *"Payment link for invoice {n}, {amount}, to {customer} — confirm?"*
+- Confirmation: *"Payment link for invoice {n}, {amount}, to {contact} — confirm?"*
 - Post: link record with expiry, delivery record, idempotency key, audit row
-- Forbidden: link generated against a tenant that cannot accept charges; link with no expiry; link reachable after invoice is paid or voided
-- Vectors: all
+- Forbidden: link generated against a tenant that cannot accept charges; link with no expiry; link reachable after invoice is paid or voided; link delivered to a non-billing Contact without explicit selection
+- Vectors: all, plus V19, V22
 
 **PAY-002 `pay invoice`** — **S3**, customer-initiated
 - Not a voice operation. Hosted Stripe surface.
@@ -405,11 +443,12 @@ Two patterns cover most of the remaining surface. Operations below inherit one a
 
 **#5 `view_history`** — R0 · `R0-READ` · I9 does heavy lifting; a five-year customer has hundreds of records.
 
-**#6 `merge_duplicates`** — **tier correction: R1 → R2.** Merging is destructive and not cleanly reversible — losing the wrong record's phone number silently breaks inbound matching for that customer. It needs confirmation regardless of surface. Voice-hostile; recommend touch-primary with voice invocation only.
-- Confirmation: states which record survives and which fields are being overwritten
-- Forbidden: merge without explicit field-level disposition; merge across tenants; merge losing a record with attached payment history
+**#6 `merge_duplicates`** — **tier correction: R1 → R2.** · *comms-migrated* Merging is destructive and not cleanly reversible — losing the wrong record's phone number silently breaks inbound matching for that customer. It needs confirmation regardless of surface. Voice-hostile; recommend touch-primary with voice invocation only.
+- **Merge level must be explicit — see D16.** Under the Account → Contact → Location model, "merge these duplicates" is ambiguous between merging two Contacts (one person entered twice), two Accounts (one billing entity entered twice — cascades Contacts, Locations, and open documents), or both. Until D16 is decided, Contact-level merge is the only permitted form, and Account-level merge is **forbidden by voice**.
+- Confirmation: states the merge level, which record survives, and which fields are being overwritten
+- Forbidden: merge without explicit field-level disposition; merge across tenants; merge losing a record with attached payment history; Account-level merge invoked by voice; a Contact merge that silently detaches the losing Contact's other Accounts (cross-Account contacts merge their memberships, never drop them)
 
-**#7 `add_service_location`** — R1 · `address` slot rules apply in full; never-infer, must geocode. Forbidden: location added to wrong customer via stale anchor.
+**#7 `add_service_location`** — R1 · *comms-migrated* Creates a first-class **Location under an Account** (`account_ref` required), not an address field on a customer. `address` slot rules apply in full; never-infer, must geocode. Post: Location row linked to exactly one billing Account; optionally scoped to specific Contacts (a tenant at one of four properties). Forbidden: Location added to the wrong Account via stale anchor; Location created with no Account.
 
 #### Job
 

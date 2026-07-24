@@ -690,6 +690,25 @@ export function buildTwiML(
     );
   }
 
+  // P8-014 + comms C5: the async <Start><Record/></Start> block POSTs
+  // metadata to /api/telephony/recording on completion. Only emitted on the
+  // initial inbound TwiML — subsequent <Gather> turns must NOT re-emit it
+  // (would start a second concurrent recording). Placement is a consent
+  // requirement, not a style choice: the recording disclosure is merged
+  // into the first <Say> (buildTelephonyGreeting), and <Start> begins
+  // capture immediately while later verbs execute — so the record block
+  // goes AFTER the first <Say>, guaranteeing the announcement is spoken
+  // before any audio is captured. Caller ASR (<Gather>) already follows
+  // the greeting.
+  if (opts.recordingStatusCallback) {
+    const recordBlock = `<Start><Record recordingStatusCallback="${xmlEscape(
+      opts.recordingStatusCallback,
+    )}" recordingStatusCallbackMethod="POST"/></Start>`;
+    const firstSay = parts.findIndex((p) => p.startsWith('<Say'));
+    if (firstSay >= 0) parts.splice(firstSay + 1, 0, recordBlock);
+    else parts.unshift(recordBlock);
+  }
+
   return `<?xml version="1.0" encoding="UTF-8"?><Response>${parts.join('')}</Response>`;
 }
 

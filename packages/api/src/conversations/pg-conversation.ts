@@ -121,6 +121,31 @@ export class PgConversationRepository extends PgBaseRepository implements Conver
     });
   }
 
+  // Comms C3 — bounded newest-inbound-channel lookup so the reply path never
+  // scans a whole thread. Inbound messages are stamped
+  // metadata.direction='inbound' at capture; channel is metadata.channel
+  // falling back to source (same precedence as the reply-service scan).
+  async findLatestInboundChannel(
+    tenantId: string,
+    conversationId: string,
+  ): Promise<'sms' | 'email' | null> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT COALESCE(metadata->>'channel', source) AS channel
+           FROM messages
+          WHERE tenant_id = $1
+            AND conversation_id = $2
+            AND metadata->>'direction' = 'inbound'
+            AND COALESCE(metadata->>'channel', source) IN ('sms', 'email')
+          ORDER BY created_at DESC
+          LIMIT 1`,
+        [tenantId, conversationId],
+      );
+      const channel = result.rows[0]?.channel as string | undefined;
+      return channel === 'sms' || channel === 'email' ? channel : null;
+    });
+  }
+
   // Story 3.11 follow-up (U9) — atomically insert the conversation + its first
   // messages in ONE transaction so a failed message insert rolls back the
   // conversation too (no orphaned empty thread). Mirrors the column lists of

@@ -85,6 +85,9 @@ const REPLY_ERROR_STATUS: Record<ConversationReplyErrorCode, number> = {
   not_found: 404,
   empty_body: 400,
   no_recipient: 422,
+  // Comms C3 — cross-channel reply needs an explicit channel; the UI
+  // re-prompts with a channel picker rather than the send silently flipping.
+  channel_selection_required: 409,
   dnc_blocked: 403,
   delivery_failed: 502,
 };

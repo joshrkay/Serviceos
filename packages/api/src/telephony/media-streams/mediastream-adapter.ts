@@ -471,6 +471,20 @@ interface RuntimeState {
   ws: WsLike;
   streamSid: string | null;
   callSid: string | null;
+  /**
+   * Comms C5 — consent gate on the capture pipeline. Inbound media frames
+   * are NOT forwarded to ASR until the recording disclosure (spoken inside
+   * the greeting turn) has actually finished playing to the caller — the
+   * greeting turn's `silence-arm-` mark ack is that signal. Set true by:
+   * the greeting turn's end-of-utterance mark ack (normal path), the
+   * disclosure-failure path (call already continues undisclosed there —
+   * DISCLOSURE_INIT_FAILED is the alert), sessions with no
+   * `initializeSession` wired (no disclosure will ever play), and a safety
+   * timeout so a lost mark ack can't leave the agent permanently deaf.
+   */
+  captureEnabled: boolean;
+  /** C5 — safety timer backing `captureEnabled`; cleared once enabled. */
+  captureEnableTimer: NodeJS.Timeout | null;
   /** WS7 — Twilio AccountSid from the `start` frame, for the mid-call REST redirect. */
   accountSid: string | null;
   tenantId: string | null;
@@ -690,6 +704,14 @@ const TWILIO_QUEUE_MAX_BYTES = 4 * 1024 * 1024;
 const TWILIO_QUEUE_HIGH_WATERMARK = 0.7;
 /** Pause TTS pull when this many marks are unacked. */
 const TWILIO_MAX_UNACKED_MARKS = 3;
+
+/**
+ * C5 — lost-ack backstop for the capture consent gate. Sized well past the
+ * longest realistic greeting+disclosure playback (~20s of audio) so a fire
+ * can only mean the greeting turn's mark ack was lost, not that the
+ * disclosure is still mid-sentence.
+ */
+const CAPTURE_ENABLE_FALLBACK_MS = 30_000;
 /** Slow-consumer grace window before disconnect. */
 const TWILIO_SLOW_CONSUMER_GRACE_MS = 8_000;
 /** Slow-consumer EWMA send latency threshold. */
@@ -790,6 +812,8 @@ export class TwilioMediaStreamAdapter {
       ws,
       streamSid: null,
       callSid: null,
+      captureEnabled: false,
+      captureEnableTimer: null,
       accountSid: null,
       tenantId: null,
       session: null,
@@ -894,6 +918,12 @@ export class TwilioMediaStreamAdapter {
         // counter. Only decrement for the marks that incremented it.
         const isSilenceArmMark = frame.mark?.name?.startsWith('silence-arm-') ?? false;
         if (!isSilenceArmMark && this.state.unackedMarks > 0) this.state.unackedMarks--;
+        // C5 — the FIRST end-of-utterance ack is the greeting turn: the
+        // caller has now heard the full greeting INCLUDING the recording
+        // disclosure, so the capture pipeline may open.
+        if (isSilenceArmMark && !this.state.captureEnabled) {
+          this.enableCapture('disclosure_played');
+        }
         // The dedicated end-of-utterance mark's ack means the caller has
         // actually heard the whole agent turn finish — NOW start the
         // no-response countdown (T2-F05). This mark is emitted exactly once
@@ -1127,6 +1157,13 @@ export class TwilioMediaStreamAdapter {
         if (this.state.pendingSilenceRepromptTurnId === null) {
           this.state.audioCaptureArmed = true;
         }
+        // C5 — capture opens on the greeting turn's end-of-utterance mark
+        // ack (disclosure fully played). The timer is the lost-ack backstop:
+        // without it a dropped mark frame would leave the agent deaf for the
+        // whole call. A timeout fire is a consent-ordering gap only if the
+        // greeting is still playing, which CAPTURE_ENABLE_FALLBACK_MS is
+        // sized well past.
+        this.armCaptureEnableFallback();
         // WS16a — establishment success is deliberately NOT recorded here. The
         // old recordSuccess() at this site reset the circuit's consecutive-
         // failure counter, so a call that established cleanly then died mid-call
@@ -1171,6 +1208,40 @@ export class TwilioMediaStreamAdapter {
     // WS16a — the no-`initializeSession` branch no longer records success here
     // either: like the wired path, a clean session votes success only at close
     // time. Recording success at establishment is the establish-then-die trap.
+  }
+
+  /**
+   * C5 — open the capture pipeline (see RuntimeState.captureEnabled).
+   * Idempotent; clears the lost-ack fallback timer.
+   */
+  private enableCapture(reason: string): void {
+    if (this.state.captureEnableTimer) {
+      clearTimeout(this.state.captureEnableTimer);
+      this.state.captureEnableTimer = null;
+    }
+    if (this.state.captureEnabled) return;
+    this.state.captureEnabled = true;
+    logger.debug('mediastream: capture enabled', {
+      reason,
+      callSid: this.state.callSid,
+    });
+  }
+
+  /**
+   * C5 — lost-ack backstop for the capture gate. The greeting turn's
+   * `silence-arm-` mark ack is the normal enable signal; if that frame is
+   * never delivered, this timer opens capture after the greeting must have
+   * finished so the agent isn't deaf for the rest of the call.
+   */
+  private armCaptureEnableFallback(): void {
+    if (this.state.captureEnabled || this.state.captureEnableTimer) return;
+    this.state.captureEnableTimer = setTimeout(() => {
+      this.state.captureEnableTimer = null;
+      this.enableCapture('fallback_timeout');
+    }, CAPTURE_ENABLE_FALLBACK_MS);
+    if (typeof this.state.captureEnableTimer.unref === 'function') {
+      this.state.captureEnableTimer.unref();
+    }
   }
 
   /**
@@ -2780,6 +2851,11 @@ export class TwilioMediaStreamAdapter {
   private handleClose(reason: string): void {
     if (this.state.closed) return;
     this.state.closed = true;
+    // C5 — drop the capture-gate fallback timer with the leg.
+    if (this.state.captureEnableTimer) {
+      clearTimeout(this.state.captureEnableTimer);
+      this.state.captureEnableTimer = null;
+    }
     // WS16a — vote the realtime health circuit from the TERMINAL close outcome,
     // but ONLY for an ESTABLISHED session: state.session assigned AND at least
     // one Deepgram open attempted (deepgramGeneration > 0). Pre-establishment

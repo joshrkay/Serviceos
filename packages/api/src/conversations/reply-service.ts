@@ -45,6 +45,7 @@ export type ConversationReplyErrorCode =
   | 'not_found'
   | 'empty_body'
   | 'no_recipient'
+  | 'channel_selection_required'
   | 'dnc_blocked'
   | 'delivery_failed';
 
@@ -59,7 +60,10 @@ export class ConversationReplyError extends Error {
 }
 
 export interface ConversationReplyDeps {
-  conversationRepo: Pick<ConversationRepository, 'findById' | 'addMessage'>;
+  conversationRepo: Pick<
+    ConversationRepository,
+    'findById' | 'addMessage' | 'getMessages' | 'findLatestInboundChannel'
+  >;
   customerRepo: { findById(tenantId: string, id: string): Promise<Customer | null> };
   /** Lead lookup — required to reply to a lead-linked thread (unknown-caller
    *  captures). Optional: without it, lead threads resolve to no_recipient. */
@@ -79,7 +83,14 @@ export interface SendConversationReplyInput {
   body: string;
   actorId: string;
   actorRole: string;
-  /** Override the auto-resolved channel (else customer.preferredChannel). */
+  /**
+   * Explicit channel selection. Comms C3 (spec §3/§4): a reply resolves
+   * within its own channel thread — the default is the channel the customer
+   * last used in this conversation, and switching to the OTHER channel
+   * (cross-channel reply) requires this to be set explicitly. When the
+   * default is unresolvable and both channels are deliverable, the send
+   * fails with `channel_selection_required` rather than guessing.
+   */
   channel?: ReplyChannel;
 }
 
@@ -98,10 +109,125 @@ interface ResolvedTarget {
 }
 
 /**
- * Resolve which channel + address an outbound reply goes to. Customer threads
- * honour `preferredChannel` (falling back to the other channel if the preferred
- * one has no address on file); phone-keyed unmatched threads always reply by
- * SMS to the originating number (the conversation's entityId is the E.164).
+ * Comms C3 channel-selection discipline, shared by customer and lead
+ * threads. `defaultChannel` is what the thread/preference resolution
+ * produced; a cross-channel switch away from it is never silent.
+ */
+function pickReplyChannel(opts: {
+  explicit?: ReplyChannel;
+  defaultChannel?: ReplyChannel;
+  /**
+   * Where `defaultChannel` came from. 'thread' = the channel the customer
+   * last used in THIS conversation — switching away from it is a
+   * cross-channel reply and must be explicit. 'fallback' = a stored
+   * preference or capture-channel default — merely a tie-breaker, so when
+   * its address is missing the send may still fall through to the only
+   * deliverable channel (deterministic, not a guess).
+   */
+  defaultSource?: 'thread' | 'fallback';
+  phone?: string;
+  email?: string;
+  who: 'Customer' | 'Lead';
+}): ResolvedTarget {
+  const addressFor = (channel: ReplyChannel): string | undefined =>
+    channel === 'sms' ? opts.phone : opts.email;
+
+  if (opts.explicit) {
+    const recipient = addressFor(opts.explicit);
+    if (recipient) return { channel: opts.explicit, recipient };
+    throw new ConversationReplyError(
+      'no_recipient',
+      `${opts.who} has no ${opts.explicit === 'sms' ? 'phone' : 'email'} on file for the selected channel`,
+    );
+  }
+
+  const deliverable: ReplyChannel[] = [];
+  if (opts.phone) deliverable.push('sms');
+  if (opts.email) deliverable.push('email');
+
+  if (deliverable.length === 0) {
+    throw new ConversationReplyError(
+      'no_recipient',
+      `${opts.who} has no phone or email on file to reply to`,
+    );
+  }
+
+  if (opts.defaultChannel) {
+    const recipient = addressFor(opts.defaultChannel);
+    if (recipient) return { channel: opts.defaultChannel, recipient };
+    // The thread's own channel has no address on file — sending on the
+    // other channel is a cross-channel reply and requires explicit
+    // selection. Only thread-derived defaults get this hard stop; a
+    // preference/capture default with no address falls through to the
+    // single-deliverable resolution below.
+    if (opts.defaultSource === 'thread') {
+      throw new ConversationReplyError(
+        'channel_selection_required',
+        `The ${opts.defaultChannel === 'sms' ? 'text' : 'email'} channel this thread uses has no address on file — pick a channel explicitly to reply another way`,
+      );
+    }
+  }
+
+  // One deliverable channel is deterministic, not a guess; two with no
+  // usable default is ambiguous and must ask.
+  if (deliverable.length === 1) {
+    const channel = deliverable[0];
+    return { channel, recipient: addressFor(channel)! };
+  }
+  throw new ConversationReplyError(
+    'channel_selection_required',
+    `${opts.who} is reachable by both text and email and this thread has no prior channel — pick a channel explicitly`,
+  );
+}
+
+/**
+ * Comms C3 — the channel the customer last used in this conversation.
+ * Inbound messages are stamped `metadata.direction='inbound'` at capture
+ * (sms/inbound-capture.ts); the channel is `metadata.channel` falling back
+ * to `source`. Returns undefined for owner-initiated threads with no
+ * inbound traffic yet.
+ */
+async function lastInboundChannel(
+  deps: ConversationReplyDeps,
+  tenantId: string,
+  conversationId: string,
+): Promise<ReplyChannel | undefined> {
+  // Bounded repo lookup when available (Pg: ORDER BY … DESC LIMIT 1) — a
+  // long-running thread must not be fully scanned on every send. The
+  // getMessages scan below is the fallback for harnesses that stub only
+  // the minimal repo surface.
+  if (deps.conversationRepo.findLatestInboundChannel) {
+    return (
+      (await deps.conversationRepo.findLatestInboundChannel(tenantId, conversationId)) ??
+      undefined
+    );
+  }
+  const messages = await deps.conversationRepo.getMessages(tenantId, conversationId);
+  let latest: { at: number; channel: ReplyChannel } | undefined;
+  for (const m of messages) {
+    const meta = (m.metadata ?? {}) as Record<string, unknown>;
+    if (meta.direction !== 'inbound') continue;
+    const channel = (meta.channel as string | undefined) ?? m.source;
+    if (channel !== 'sms' && channel !== 'email') continue;
+    const at = m.createdAt instanceof Date ? m.createdAt.getTime() : 0;
+    if (!latest || at >= latest.at) latest = { at, channel };
+  }
+  return latest?.channel;
+}
+
+/**
+ * Resolve which channel + address an outbound reply goes to.
+ *
+ * Comms C3 (spec §3/§4) — a reply resolves within its own channel thread:
+ *   explicit operator selection → the channel the customer last used in this
+ *   conversation → the customer's preferred channel → the only deliverable
+ *   channel. A cross-channel flip is never silent: when the resolved default
+ *   channel has no address on file (or nothing resolves a default) and BOTH
+ *   channels are deliverable, the send fails with
+ *   `channel_selection_required` instead of guessing.
+ *
+ * Phone-keyed unmatched threads always reply by SMS to the originating
+ * number (the conversation's entityId is the E.164).
  */
 async function resolveTarget(
   input: SendConversationReplyInput,
@@ -126,17 +252,21 @@ async function resolveTarget(
     }
     const phone = lead.primaryPhone?.trim() || undefined;
     const email = lead.email?.trim() || undefined;
-    // Leads carry no channel preference; default to SMS (the capture channel),
-    // honouring an explicit override and falling back to whatever address exists.
-    const preferred: ReplyChannel = input.channel ?? 'sms';
-    if (preferred === 'email' && email) return { channel: 'email', recipient: email };
-    if (preferred === 'sms' && phone) return { channel: 'sms', recipient: phone };
-    if (phone) return { channel: 'sms', recipient: phone };
-    if (email) return { channel: 'email', recipient: email };
-    throw new ConversationReplyError(
-      'no_recipient',
-      'Lead has no phone or email on file to reply to',
+    // Leads carry no channel preference; the thread channel (last inbound)
+    // governs, defaulting to SMS — the capture channel.
+    const threadChannel = await lastInboundChannel(
+      deps,
+      input.tenantId,
+      input.conversationId,
     );
+    return pickReplyChannel({
+      explicit: input.channel,
+      defaultChannel: threadChannel ?? 'sms',
+      defaultSource: threadChannel ? 'thread' : 'fallback',
+      phone,
+      email,
+      who: 'Lead',
+    });
   }
 
   if (entityType === 'customer' && entityId) {
@@ -147,21 +277,32 @@ async function resolveTarget(
         'Conversation customer no longer exists',
       );
     }
-    const preferred: ReplyChannel =
-      input.channel ?? (customer.preferredChannel === 'email' ? 'email' : 'sms');
     const phone = customer.primaryPhone?.trim() || undefined;
     const email = customer.email?.trim() || undefined;
 
-    // Use the preferred channel when it has an address; otherwise fall back to
-    // the other channel rather than dead-ending the owner's reply.
-    if (preferred === 'email' && email) return { channel: 'email', recipient: email };
-    if (preferred === 'sms' && phone) return { channel: 'sms', recipient: phone };
-    if (phone) return { channel: 'sms', recipient: phone };
-    if (email) return { channel: 'email', recipient: email };
-    throw new ConversationReplyError(
-      'no_recipient',
-      'Customer has no phone or email on file to reply to',
+    // The thread's own channel (last inbound) governs; the stored channel
+    // preference only breaks the tie for owner-initiated threads with no
+    // inbound traffic yet. 'phone' preference maps to SMS for a typed reply;
+    // 'none' resolves nothing and asks when both channels are deliverable.
+    const threadChannel = await lastInboundChannel(
+      deps,
+      input.tenantId,
+      input.conversationId,
     );
+    const preferenceChannel: ReplyChannel | undefined =
+      customer.preferredChannel === 'email'
+        ? 'email'
+        : customer.preferredChannel === 'sms' || customer.preferredChannel === 'phone'
+          ? 'sms'
+          : undefined;
+    return pickReplyChannel({
+      explicit: input.channel,
+      defaultChannel: threadChannel ?? preferenceChannel,
+      defaultSource: threadChannel ? 'thread' : 'fallback',
+      phone,
+      email,
+      who: 'Customer',
+    });
   }
 
   throw new ConversationReplyError(
