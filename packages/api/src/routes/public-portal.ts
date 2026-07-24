@@ -676,6 +676,9 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
           tenantId,
           start: slotStart,
           end: slotEnd,
+          // Tenant travel buffer — a crafted POST must not land a slot the
+          // buffered availability (GET) would never have offered.
+          bufferMinutes: scheduling.bufferMinutes,
         });
         if (!stillFree) {
           return { ok: false as const };
@@ -864,7 +867,15 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
         return;
       }
       const finderDeps = { appointmentRepo: deps.appointmentRepo, assignmentRepo: deps.assignmentRepo };
-      const free = await isSlotFree(finderDeps, { tenantId, start: slotStart, end: slotEnd });
+      const free = await isSlotFree(finderDeps, {
+        tenantId,
+        start: slotStart,
+        end: slotEnd,
+        // Buffered like GET availability, but the appointment being moved
+        // must not block its own target slot.
+        bufferMinutes: scheduling.bufferMinutes,
+        excludeAppointmentIds: [owned.id],
+      });
       if (!free) {
         await respondSlotTaken(deps, res, {
           tenantId,

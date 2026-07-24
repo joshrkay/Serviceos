@@ -74,7 +74,7 @@ async function buildSchedulingAppWithRole(role: Role) {
     appointmentRepo,
     jobRepo: { findById: async () => null } as any,
     locationRepo: { findById: async () => null } as any,
-    workingHoursRepo: { findByTechnicianAndDay: async () => null } as any,
+    workingHoursRepo: { findByTechnician: async () => [] } as any,
     unavailableBlockRepo: { findByTechnicianAndDateRange: async () => [] } as any,
     travelTimeProvider: new HaversineFallbackProvider(),
     skillMatcher: new StubSkillMatcher(),

@@ -2,9 +2,15 @@ import { v4 as uuidv4 } from 'uuid';
 import { JobRepository } from '../jobs/job';
 import { ValidationError, ConflictError } from '../shared/errors';
 import { AppointmentRepository, AppointmentStatus } from './appointment';
-import { detectOverlappingAppointments } from '../dispatch/validation';
+import {
+  detectOverlappingAppointments,
+  detectAvailabilityConflicts,
+} from '../dispatch/validation';
+import { WorkingHoursRepository } from '../availability/working-hours';
+import { UnavailableBlockRepository } from '../availability/unavailable-block';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { notifyTechnicianAssignmentChange } from './assignment-notifications';
+import { isValidTimezone } from '../shared/timezone';
 
 /**
  * Optional dependencies for `assignTechnician`.
@@ -25,6 +31,23 @@ export interface AssignTechnicianDeps {
   appointmentRepo?: AppointmentRepository;
   auditRepo?: AuditRepository;
   actorRole?: string;
+  /**
+   * Foundation gate F2 (contract #12/#13: "tech available for full window").
+   * When supplied alongside `appointmentRepo`, the assignment is refused
+   * (ConflictError, 409) if the appointment window falls outside the tech's
+   * modeled working hours or overlaps a time-off block. Enforced only
+   * against what the tenant configured: a tech with zero active
+   * working-hours rows is unconstrained, and no blocks means no PTO
+   * conflict — so tenants that don't model availability see no change.
+   */
+  workingHoursRepo?: WorkingHoursRepository;
+  unavailableBlockRepo?: UnavailableBlockRepository;
+}
+
+/** Weekday (0=Sun..6=Sat) of an instant in an IANA timezone. */
+function dayOfWeekInTz(d: Date, timezone: string): number {
+  const name = new Intl.DateTimeFormat('en-US', { timeZone: timezone, weekday: 'short' }).format(d);
+  return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(name);
 }
 
 /** Optional dependencies for `unassignTechnician` (audit emission). */
@@ -137,6 +160,43 @@ export async function assignTechnician(
         throw new ConflictError(
           `Technician is already booked at this time: ${conflicts[0].message}`,
         );
+      }
+
+      // Availability preconditions (contract #12/#13) — see the deps doc.
+      const tz = isValidTimezone(target.timezone) ? target.timezone : 'UTC';
+      if (deps.workingHoursRepo) {
+        const rows = (
+          await deps.workingHoursRepo.findByTechnician(input.tenantId, input.technicianId)
+        ).filter((r) => r.isActive);
+        if (rows.length > 0) {
+          const dow = dayOfWeekInTz(target.scheduledStart, tz);
+          const dayRow = rows.find((r) => r.dayOfWeek === dow) ?? null;
+          if (!dayRow) {
+            throw new ConflictError('Technician is not scheduled to work on this day');
+          }
+          const hourIssues = detectAvailabilityConflicts(
+            target.scheduledStart,
+            target.scheduledEnd,
+            dayRow,
+            [],
+            tz,
+          );
+          if (hourIssues.length > 0) {
+            throw new ConflictError(hourIssues[0].message);
+          }
+        }
+      }
+      if (deps.unavailableBlockRepo) {
+        const blocks = await deps.unavailableBlockRepo.findByTechnicianAndDateRange(
+          input.tenantId,
+          input.technicianId,
+          target.scheduledStart,
+          target.scheduledEnd,
+        );
+        if (blocks.length > 0) {
+          const reason = blocks[0].reason ? ` (${blocks[0].reason})` : '';
+          throw new ConflictError(`Technician is unavailable during this window${reason}`);
+        }
       }
     }
   }

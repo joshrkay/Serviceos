@@ -56,9 +56,14 @@ async function availabilityIssues(
 ): Promise<FeasibilityIssue[]> {
   const timezone = deps.timezone ?? input.appointment.timezone ?? 'UTC';
   const dayOfWeek = getDayOfWeekInTimezone(input.proposedScheduledStart, timezone);
-  const wh = await deps.workingHoursRepo.findByTechnicianAndDay(
-    input.tenantId, input.proposedTechnicianId, dayOfWeek,
-  );
+  // All rows, not just this day's: a tech modeled Mon–Fri proposed for a
+  // Sunday slot has NO row that day — findByTechnicianAndDay returned null
+  // and the old code read that as "no conflict". Modeled-but-off-day is a
+  // working-hours violation (contract #12/#13: available for full window).
+  const allRows = (
+    await deps.workingHoursRepo.findByTechnician(input.tenantId, input.proposedTechnicianId)
+  ).filter((r) => r.isActive);
+  const wh = allRows.find((r) => r.dayOfWeek === dayOfWeek) ?? null;
   const blocks = await deps.unavailableBlockRepo.findByTechnicianAndDateRange(
     input.tenantId, input.proposedTechnicianId,
     input.proposedScheduledStart, input.proposedScheduledEnd,
@@ -67,12 +72,23 @@ async function availabilityIssues(
     input.proposedScheduledStart, input.proposedScheduledEnd,
     wh, blocks, timezone,
   );
-  return conflicts.map((c) => ({
+  // Contract #12/#13 preconditions ("tech available for full window") make
+  // these BLOCKING, not advisory. Enforced only against what the tenant
+  // modeled: zero working-hours rows = unconstrained; zero blocks = no PTO.
+  const issues: FeasibilityIssue[] = conflicts.map((c) => ({
     check: (c.type === 'outside_working_hours' ? 'working_hours' : 'unavailable_block') as FeasibilityIssue['check'],
-    severity: 'warning' as const,
+    severity: 'blocking' as const,
     message: c.message,
     conflictingEntityId: c.conflictingEntityId,
   }));
+  if (allRows.length > 0 && !wh) {
+    issues.push({
+      check: 'working_hours',
+      severity: 'blocking',
+      message: 'Technician is not scheduled to work on this day',
+    });
+  }
+  return issues;
 }
 
 async function locationCoordsFor(
@@ -99,9 +115,13 @@ async function skillMatchIssues(
   const held = await deps.skillMatcher.skillsForTechnician(input.tenantId, input.proposedTechnicianId);
   const missing = required.filter((s) => !held.includes(s));
   if (missing.length === 0) return [];
+  // Contract #12/#13: "holds required skill for service type if skills are
+  // modeled" is a precondition → blocking. Vacuously clean while the wired
+  // matcher is the stub (requiredSkillsForJob returns []); the moment a real
+  // skills model lands, this gate enforces it with no further change.
   return [{
     check: 'skill_match' as const,
-    severity: 'warning' as const,
+    severity: 'blocking' as const,
     message: `Technician is missing required skill(s): ${missing.join(', ')}`,
     metadata: { missingSkills: missing },
   }];

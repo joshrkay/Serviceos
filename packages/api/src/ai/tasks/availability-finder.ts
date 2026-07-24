@@ -103,6 +103,12 @@ export interface FindOpenSlotsInput {
    * time between jobs, which doesn't apply to a PTO boundary.
    */
   extraBusy?: { start: Date; end: Date }[];
+  /**
+   * Appointment ids to ignore when building busy intervals. A reschedule
+   * re-check must not let the appointment BEING MOVED block its own target
+   * slot — with a travel buffer that false-blocks every nearby window.
+   */
+  excludeAppointmentIds?: string[];
 }
 
 export interface AvailabilityFinder {
@@ -187,7 +193,9 @@ export class DefaultAvailabilityFinder implements AvailabilityFinder {
     }
 
     const now = Date.now();
+    const excluded = new Set(input.excludeAppointmentIds ?? []);
     let blocking = candidates.filter((a) => {
+      if (excluded.has(a.id)) return false;
       if (!ACTIVE_APPOINTMENT_STATUSES.has(a.status)) return false;
       // An expired hold has released its slot — treat it as free. A
       // live hold (or a non-hold appointment) still blocks.

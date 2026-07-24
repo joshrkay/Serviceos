@@ -4651,10 +4651,14 @@ export function createApp(): AppWithLifecycle {
     invoiceRepo,
     auditRepo,
     settingsRepo,
+    workingHoursRepo,
+    unavailableBlockRepo,
   }, {
     appointmentRepo,
     assignmentRepo,
     userRepo,
+    workingHoursRepo,
+    unavailableBlockRepo,
   }));
   app.use(
     '/api/jobs',

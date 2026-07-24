@@ -41,6 +41,7 @@ import {
   WeeklyBusinessHours,
   schedulingConfigFromSettings,
 } from '../scheduling/booking-availability';
+import { checkServiceArea } from '../scheduling/service-area';
 import { notifyDispatchBoardChanged } from '../dispatch/board-notify';
 import {
   TenantTransactionRunner,
@@ -111,6 +112,7 @@ interface ResolvedScheduling {
   timezone: string;
   weeklyHours: WeeklyBusinessHours | null;
   bufferMinutes: number | null;
+  serviceAreaZips: string[] | null;
 }
 
 /**
@@ -123,7 +125,12 @@ async function resolveTenantScheduling(
   tenantId: string,
 ): Promise<ResolvedScheduling> {
   if (!deps.settingsRepo) {
-    return { timezone: DEFAULT_BOOKING_TIMEZONE, weeklyHours: null, bufferMinutes: null };
+    return {
+      timezone: DEFAULT_BOOKING_TIMEZONE,
+      weeklyHours: null,
+      bufferMinutes: null,
+      serviceAreaZips: null,
+    };
   }
   const settings = await deps.settingsRepo.findByTenant(tenantId);
   const config = schedulingConfigFromSettings(settings);
@@ -131,6 +138,7 @@ async function resolveTenantScheduling(
     timezone: config.timezone || DEFAULT_BOOKING_TIMEZONE,
     weeklyHours: config.weeklyHours,
     bufferMinutes: config.bufferMinutes,
+    serviceAreaZips: settings?.serviceAreaZips ?? null,
   };
 }
 
@@ -274,6 +282,20 @@ export function createPublicBookingRouter(deps: PublicBookingDeps): Router {
         return;
       }
 
+      // Service area (F2 term 5) — enforced only when the tenant configured a
+      // ZIP allowlist; an unbounded area accepts every address. Informative,
+      // not silent: the prospect learns they're out of area at intake, not
+      // after a dispatcher declines the held appointment days later.
+      const areaVerdict = checkServiceArea(scheduling.serviceAreaZips, parsed.postalCode);
+      if (!areaVerdict.inArea) {
+        res.status(400).json({
+          error: 'OUT_OF_SERVICE_AREA',
+          message:
+            'That address is outside our service area. Call us and we may still be able to help.',
+        });
+        return;
+      }
+
       const createdBy = PUBLIC_BOOKING_ACTOR_ROLE;
       const finderDeps = {
         appointmentRepo: deps.appointmentRepo,
@@ -297,6 +319,9 @@ export function createPublicBookingRouter(deps: PublicBookingDeps): Router {
           tenantId,
           start: slotStart,
           end: slotEnd,
+          // Tenant travel buffer — a crafted POST must not land a slot the
+          // buffered availability (GET) would never have offered.
+          bufferMinutes: scheduling.bufferMinutes,
         });
         if (!stillFree) {
           return { ok: false as const };

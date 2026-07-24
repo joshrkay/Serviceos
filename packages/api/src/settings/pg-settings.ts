@@ -119,6 +119,7 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     // this mapper's convention.
     serviceAreaText: (row.service_area_text as string | null) ?? undefined,
     serviceAreaRadius: (row.service_area_radius as number | null) ?? undefined,
+    serviceAreaZips: (row.service_area_zips as string[] | null) ?? undefined,
     businessHours: (() => {
       const raw = row.business_hours as
         | Record<string, { open: string; close: string } | null>
@@ -515,6 +516,16 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
           setClauses.push(`supported_languages = $${paramIndex}::text[]`);
           const v = value as string[] | undefined | null;
           params.push(Array.isArray(v) && v.length > 0 ? v : ['en']);
+          paramIndex++;
+          continue;
+        }
+        // Foundation gate (F2 term 5 / V17) — service_area_zips is a native
+        // text[] (NOT NULL DEFAULT '{}'). Cleared (null / []) writes '{}' =
+        // unbounded area; previously writable only via onboarding raw SQL.
+        if (key === 'serviceAreaZips') {
+          setClauses.push(`service_area_zips = $${paramIndex}::text[]`);
+          const v = value as string[] | undefined | null;
+          params.push(Array.isArray(v) ? v : []);
           paramIndex++;
           continue;
         }

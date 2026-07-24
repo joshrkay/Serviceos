@@ -444,14 +444,24 @@ export async function findBookableSlotsDetailed(
  * Re-verify a specific slot is still open at book time. Guards against two
  * customers grabbing the same window between availability fetch and booking:
  * the first booking's hold makes the finder report the slot busy, so the
- * second `isSlotFree` returns false. Uses a zero buffer because we are
- * checking the literal slot the customer was already offered. This check is
- * advisory — the `no_double_booking` DB constraint is the authoritative
+ * second `isSlotFree` returns false. Pass the tenant's `bufferMinutes` so a
+ * stale or crafted client can't POST a slot the buffered availability would
+ * never have offered (a slot five minutes after an existing job despite a
+ * 60-minute buffer); omitting it checks the literal window only. This check
+ * is advisory — the `no_double_booking` DB constraint is the authoritative
  * guard once a technician is assigned.
  */
 export async function isSlotFree(
   deps: BookableSlotsDeps,
-  input: { tenantId: string; start: Date; end: Date; technicianId?: string },
+  input: {
+    tenantId: string;
+    start: Date;
+    end: Date;
+    technicianId?: string;
+    bufferMinutes?: number | null;
+    /** The appointment being moved (reschedule) — must not block its own target slot. */
+    excludeAppointmentIds?: string[];
+  },
 ): Promise<boolean> {
   const durationMs = input.end.getTime() - input.start.getTime();
   if (durationMs <= 0) return false;
@@ -463,7 +473,11 @@ export async function isSlotFree(
     durationMs,
     technicianId: input.technicianId,
     count: 1,
-    bufferMs: 0,
+    bufferMs:
+      input.bufferMinutes != null && input.bufferMinutes >= 0
+        ? input.bufferMinutes * 60 * 1000
+        : 0,
+    excludeAppointmentIds: input.excludeAppointmentIds,
   });
   return result.ok && result.slots.length > 0 && result.slots[0].start.getTime() === input.start.getTime();
 }

@@ -46,7 +46,7 @@ function depsWithNeighbor(opts: {
     } as any,
     jobRepo: { findById: async (_t: string, id: string) => jobs[id] ?? null } as any,
     locationRepo: { findById: async (_t: string, id: string) => locations[id] ?? null } as any,
-    workingHoursRepo: { findByTechnicianAndDay: async () => null } as any,
+    workingHoursRepo: { findByTechnician: async () => [] } as any,
     unavailableBlockRepo: { findByTechnicianAndDateRange: async () => [] } as any,
     travelTimeProvider: provider,
     skillMatcher: new StubSkillMatcher(),

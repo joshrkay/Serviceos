@@ -442,11 +442,22 @@ export const updateSettingsSchema = z.object({
           open: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'expected HH:MM'),
           close: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'expected HH:MM'),
         })
+        // An inverted window would persist fine and then read as "closed all
+        // day" downstream — reject it at the boundary instead. HH:MM compares
+        // correctly as a string.
+        .refine((w) => w.open < w.close, { message: 'open must be before close' })
         .nullable(),
     )
     .nullable()
     .optional(),
   jobBufferMinutes: z.number().int().min(0).max(240).nullable().optional(),
+  // F2 term 5 — ZIP allowlist bounding the service area. [] or null clears
+  // to unbounded (the explicit "no restriction" state, never a guess).
+  serviceAreaZips: z
+    .array(z.string().regex(/^\d{5}$/, 'expected a 5-digit ZIP'))
+    .max(100)
+    .nullable()
+    .optional(),
   estimatePrefix: z.string().min(1).optional(),
   invoicePrefix: z.string().min(1).optional(),
   defaultPaymentTermDays: z.number().int().nonnegative().optional(),

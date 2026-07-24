@@ -36,6 +36,8 @@ import {
   unassignTechnician,
 } from '../appointments/assignment';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { WorkingHoursRepository } from '../availability/working-hours';
+import { UnavailableBlockRepository } from '../availability/unavailable-block';
 import { ConflictError, NotFoundError, ValidationError } from '../shared/errors';
 import { UserRepository } from '../users/user';
 import { Job, JobRepository, getJob } from './job';
@@ -78,6 +80,13 @@ export interface JobAppointmentSyncDeps {
   userRepo: UserRepository;
   timelineRepo: JobTimelineRepository;
   auditRepo?: AuditRepository;
+  /**
+   * Foundation gate F2 — when wired, assignments are refused outside the
+   * tech's modeled working hours / during time-off (contract #12/#13).
+   * Tenants that don't model tech availability are unaffected.
+   */
+  workingHoursRepo?: WorkingHoursRepository;
+  unavailableBlockRepo?: UnavailableBlockRepository;
 }
 
 interface BaseInput {
@@ -219,7 +228,13 @@ async function ensurePrimaryTechnician(
       assignedBy: actorId,
     },
     deps.assignmentRepo,
-    { appointmentRepo: deps.appointmentRepo, auditRepo: deps.auditRepo, actorRole },
+    {
+      appointmentRepo: deps.appointmentRepo,
+      auditRepo: deps.auditRepo,
+      actorRole,
+      workingHoursRepo: deps.workingHoursRepo,
+      unavailableBlockRepo: deps.unavailableBlockRepo,
+    },
   );
 }
 

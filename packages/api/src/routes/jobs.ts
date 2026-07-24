@@ -14,6 +14,8 @@ import { notifyDispatchBoardChanged } from '../dispatch/board-notify';
 import { runAfterCommit } from '../middleware/tenant-context';
 import { AppointmentRepository } from '../appointments/appointment';
 import { AssignmentRepository } from '../appointments/assignment';
+import { WorkingHoursRepository } from '../availability/working-hours';
+import { UnavailableBlockRepository } from '../availability/unavailable-block';
 import { UserRepository } from '../users/user';
 import {
   convertEstimateToScheduledJob,
@@ -82,6 +84,9 @@ export function createJobRouter(
     appointmentRepo: AppointmentRepository;
     assignmentRepo: AssignmentRepository;
     userRepo: UserRepository;
+    /** F2 — assignment refuses windows outside modeled tech hours / during time-off. */
+    workingHoursRepo?: WorkingHoursRepository;
+    unavailableBlockRepo?: UnavailableBlockRepository;
   },
 ): Router {
   const router = Router();
@@ -96,6 +101,8 @@ export function createJobRouter(
       appointmentRepo: scheduleSyncDeps.appointmentRepo,
       assignmentRepo: scheduleSyncDeps.assignmentRepo,
       userRepo: scheduleSyncDeps.userRepo,
+      workingHoursRepo: scheduleSyncDeps.workingHoursRepo,
+      unavailableBlockRepo: scheduleSyncDeps.unavailableBlockRepo,
     };
   };
 

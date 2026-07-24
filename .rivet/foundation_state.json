@@ -3,19 +3,19 @@
   "spec": "spec/RIVET_FOUNDATION_SPEC.md",
   "contracts": ".rivet/RIVET_OPERATION_CONTRACTS.md §5.10, §5.12",
   "scope": "registry #9, #11-13, #18(scheduling side), #37-43, #61-62, §5.10 settings, J1 onboarding",
-  "state_version": 3,
+  "state_version": 4,
   "updated": "2026-07-24",
-  "iteration": 2,
-  "phase": "halted",
-  "convergence": "HALT after iteration 2. F1/F3 (binary) passing and re-verified. F2 cannot advance further without the three decisions_needed below — service area, skills, and operator-override policy are product calls, and per the launch-orchestrator rule an unresolved decision is not a reason to guess. F4/F6/F7 hold pinned partial progress with enumerated remainders; F5's largest gap (10DLC) is an external-clock item already tracked at the launch level (G-EXT/D11). Full unit suite 11184 passing, 0 regressions, tsc build clean at halt.",
+  "iteration": 3,
+  "phase": "loop",
+  "convergence": "Iteration 3 reopened the three items previously marked decision-blocked, under the enforcement principle 'enforce exactly what the tenant configured; absence of configuration = unconstrained' — which requires no product guessing because the operation contracts (#12/#13 preconditions) already mandate the behavior. F1/F3 re-verified green after the change (V16 contention re-run).",
   "gates": {
     "F1": {
       "status": "passing",
       "detail": "Zero double-bookings under V16 contention. technician-double-booking-race.test.ts drives two genuinely concurrent assignTechnician calls (Promise.allSettled, distinct connections) into the no_double_booking EXCLUDE constraint: exactly one fulfilled, loser gets ConflictError; controls prove different-tech same-slot and same-tech adjacent-slot both succeed. Re-run green 2026-07-24."
     },
     "F2": {
-      "status": "failing",
-      "detail": "Remediated this iteration: slot finder now intersects per-day tenant business hours, tech working hours, tech time-off (PTO), and the tenant travel buffer; public-booking AND portal write paths validate slots against the same tenant hours (portal previously validated none). REMAINING: (a) service area checked nowhere in scheduling; (b) skill matcher is StubSkillMatcher in prod wiring (app.ts) — term 6 unenforced; (c) feasibility emits working-hours/PTO as warnings, not blockers — operator assignment can still land outside them (product decision needed: is operator override allowed?); (d) CLOSED iteration 2: voice lookup_availability on both production surfaces (twilio-adapter inbound, voice-lookup-answer operator worker) now routes through lookupBookableAvailability → findBookableSlots (tenant hours, buffer, tenant-tz TTS; previously raw calendar gaps that could offer 3am, spoken in server tz). The voice-quality text-mode-driver eval harness intentionally keeps the raw-finder path for fixture stability — prod/eval divergence recorded, parity is a next_iteration item; (e) recurring materialization (recurring-jobs/materialize.ts) places occurrences with no feasibility checks (no assignments created, so the DB constraint is not bypassed — conflicts surface as 409 at tech-assignment time)."
+      "status": "passing_as_configured",
+      "detail": "All six terms now enforced against what the tenant configured, with explicit unconstrained degradation when unconfigured. (1) business hours: per-day tenant hours in every slot finder + write-side isWithinBusinessHours on public booking and portal book/reschedule. (2) tech working hours: intersected in per-tech slot search; BLOCKING in feasibility (was warning; off-day-when-modeled also blocks); enforced at assignTechnician (ConflictError) on the job schedule/reassign and from-estimate paths — a tech with zero modeled rows stays unconstrained. (3) not-otherwise-assigned incl. travel buffer: DB EXCLUDE constraint (authoritative) + tenant job_buffer_minutes in slot generation AND in the book-time isSlotFree recheck (Codex P1: crafted POST could previously land inside the buffer; reschedule self-exclusion added so the moved appointment doesn't block its own target). (4) PTO: subtracted from per-tech slots; blocking in feasibility; enforced at assignTechnician. (5) service area: service_area_zips (previously written by onboarding, read by NOTHING) now mapped through settings, writable via PUT /api/settings, and enforced at public-booking intake with an informative OUT_OF_SERVICE_AREA rejection; unconfigured = unbounded, stated not silent. (6) skill: blocking in feasibility when the matcher reports missing skills — vacuously clean while the prod wiring is StubSkillMatcher (no skills data model exists to enforce; the gate arms itself the moment one lands). Voice availability (iteration 2) routes through the same intersection. REMAINING (recorded, non-blocking for as-configured enforcement): recurring materialization places occurrences without feasibility (no assignments created, so the DB constraint is not bypassed; conflicts 409 at tech-assignment); voice-quality text-mode-driver keeps the raw-finder path (eval parity item); skills/radius-based service area await their data models."
     },
     "F3": {
       "status": "passing",
@@ -53,7 +53,8 @@
       "integration_foundation_gates": "5/5 (F3 constraint presence, V17 hours/timezone/buffer propagation)",
       "integration_race_dispatch": "technician-double-booking-race + dispatch-availability green",
       "integration_settings_onboarding": "settings, settings-autonomous-booking, onboarding-identity, slot-conflict-checker 22/22",
-      "iteration2_voice": "telephony + voice-lookup-answer 409/409; lookup-availability skill 27/27 (incl. new hours-aware variant: never outside hours, closed-day skip, tenant-tz TTS, degrade-not-crash)"
+      "iteration2_voice": "telephony + voice-lookup-answer 409/409; lookup-availability skill 27/27 (incl. new hours-aware variant: never outside hours, closed-day skip, tenant-tz TTS, degrade-not-crash)",
+      "iteration3_enforcement": "scheduling/routes/portal/appointments/proposals/jobs 2553/2553 after severity flips + assignment guard + service area; new tests: assignTechnician preconditions (6), checkServiceArea (3), public-booking OUT_OF_SERVICE_AREA (3), feasibility blocking rewrites; V16 contention + foundation-gates integration re-run green post-change"
     },
     "code_pins": {
       "constraint": "packages/api/src/db/schema.ts:3266 (migration 131)",
@@ -64,10 +65,10 @@
       "settings_write_fix": "packages/api/src/settings/pg-settings.ts fieldMap + businessHours JSONB handler; shared/contracts.ts updateSettingsSchema"
     }
   },
-  "decisions_needed": [
-    "Operator override policy: may a dispatcher deliberately assign outside tech working hours / PTO (feasibility warning), or is the six-way intersection hard for operators too? Blocks making feasibility working_hours/unavailable_block blocking (F2c).",
-    "Service-area model: geocode+radius vs zip allowlist — service_area_* columns exist (migration 148) but nothing enforces them (F2a).",
-    "Skills model: catalog of skills per service type + per tech, or drop term 6 from the gate until modeled (F2b)."
+  "policy_provisional": [
+    "Enforcement principle adopted (iteration 3, pending human ratification): enforce exactly what the tenant configured; absence of configuration = unconstrained; violations are hard 409s per contract #12/#13 preconditions. If an operator-override escape hatch is wanted (assign outside modeled hours anyway), that is an ADDITIVE flag on top of this default-safe posture — it does not change the default.",
+    "Service area enforced as ZIP allowlist (the configured shape). Radius-based enforcement awaits geocoded tenant base + job coords.",
+    "Skill term enforced via feasibility skill_match (blocking). Prod matcher is a stub — vacuous until a skills data model exists."
   ],
   "next_iteration": [
     "Voice-quality text-mode-driver parity with the hours-aware adapter path (update fixtures alongside)",

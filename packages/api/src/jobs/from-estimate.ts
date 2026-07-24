@@ -41,6 +41,8 @@ import {
   schedulingConfigFromSettings,
 } from '../scheduling/booking-availability';
 import { SettingsRepository } from '../settings/settings';
+import { WorkingHoursRepository } from '../availability/working-hours';
+import { UnavailableBlockRepository } from '../availability/unavailable-block';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { NotFoundError, ConflictError, ValidationError } from '../shared/errors';
 import { isValidTenantId } from '../db/schema';
@@ -63,6 +65,9 @@ export interface ConvertEstimateToScheduledJobDeps {
    * buffer) constrain auto-picked slots instead of the hardcoded defaults.
    */
   settingsRepo?: SettingsRepository;
+  /** F2 — assignment refuses windows outside modeled tech hours / during time-off. */
+  workingHoursRepo?: WorkingHoursRepository;
+  unavailableBlockRepo?: UnavailableBlockRepository;
 }
 
 export interface ConvertEstimateToScheduledJobInput {
@@ -141,6 +146,7 @@ async function chooseTechnicianAndSlot(
     for (const tech of candidates) {
       const free = await isSlotFree(slotDeps, {
         tenantId, start: scheduledStart, end: scheduledEnd, technicianId: tech.id,
+        bufferMinutes: schedulingConfig.bufferMinutes,
       });
       if (free) {
         return { technicianId: tech.id, technicianRole: tech.role, scheduledStart, scheduledEnd };
@@ -340,7 +346,13 @@ export async function convertEstimateToScheduledJob(
         assignedBy: actorId,
       },
       deps.assignmentRepo,
-      { appointmentRepo: deps.appointmentRepo, auditRepo: deps.auditRepo, actorRole: input.actorRole },
+      {
+        appointmentRepo: deps.appointmentRepo,
+        auditRepo: deps.auditRepo,
+        actorRole: input.actorRole,
+        workingHoursRepo: deps.workingHoursRepo,
+        unavailableBlockRepo: deps.unavailableBlockRepo,
+      },
     );
   } catch (err) {
     // Compensate ONLY when we created a fresh appointment (no prior assignments);

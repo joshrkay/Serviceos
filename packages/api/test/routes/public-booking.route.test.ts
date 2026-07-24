@@ -269,4 +269,36 @@ describe('public-booking route', () => {
       expect(res.status).toBe(404);
     });
   });
+
+  // Foundation gate F2 term 5 — service area enforced only as configured.
+  describe('service area (F2 term 5)', () => {
+    it('rejects an out-of-area postal code when a ZIP allowlist is configured', async () => {
+      await settingsRepo.update(tenantId, { serviceAreaZips: ['90001', '90002'] });
+      const slot = await firstSlot();
+      const res = await request(app)
+        .post(`/api/public/booking/${tenantId}`)
+        .send(validBooking(slot.start, slot.end)); // postalCode 85001
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('OUT_OF_SERVICE_AREA');
+      // Nothing was created for an out-of-area prospect.
+      expect(await customerRepo.findByTenant(tenantId)).toHaveLength(0);
+    });
+
+    it('accepts an in-area postal code against the configured allowlist', async () => {
+      await settingsRepo.update(tenantId, { serviceAreaZips: ['85001'] });
+      const slot = await firstSlot();
+      const res = await request(app)
+        .post(`/api/public/booking/${tenantId}`)
+        .send(validBooking(slot.start, slot.end));
+      expect(res.status).toBe(201);
+    });
+
+    it('accepts any postal code when no allowlist is configured (unbounded area)', async () => {
+      const slot = await firstSlot();
+      const res = await request(app)
+        .post(`/api/public/booking/${tenantId}`)
+        .send(validBooking(slot.start, slot.end));
+      expect(res.status).toBe(201);
+    });
+  });
 });

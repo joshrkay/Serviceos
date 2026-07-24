@@ -264,7 +264,7 @@ describe('P6-012 — Execution for reassignment proposals', () => {
       assignmentRepo: localAssignmentRepo, appointmentRepo,
       jobRepo: { findById: async () => null } as any,
       locationRepo: { findById: async () => null } as any,
-      workingHoursRepo: { findByTechnicianAndDay: async () => null } as any,
+      workingHoursRepo: { findByTechnician: async () => [] } as any,
       unavailableBlockRepo: { findByTechnicianAndDateRange: async () => [] } as any,
       travelTimeProvider: new HaversineFallbackProvider(),
       skillMatcher: new StubSkillMatcher(),
@@ -283,7 +283,9 @@ describe('P6-012 — Execution for reassignment proposals', () => {
     expect(result.error).toMatch(/Overlaps with/);
   });
 
-  it('passes feasibility (warnings only) and surfaces them on the result', async () => {
+  // Foundation gate F2 / contract #12-#13: out-of-hours is a PRECONDITION
+  // violation, so it now blocks the reassignment instead of warning.
+  it('rejects when the target tech is outside modeled working hours', async () => {
     const localAssignmentRepo = new InMemoryAssignmentRepository();
     const appt = await createAppointment({
       tenantId, jobId: 'job-1',
@@ -296,13 +298,14 @@ describe('P6-012 — Execution for reassignment proposals', () => {
       technicianId: techA, isPrimary: true, assignedBy: 'user-1', assignedAt: new Date(),
     });
 
-    // Inject a working-hours mock that triggers an "outside working hours" warning for techB.
+    // Working-hours row for the appointment's weekday (2026-05-17 is a
+    // Sunday, dayOfWeek 0) whose window excludes the 10:00 UTC proposal.
     const workingHoursRepo: any = {
-      findByTechnicianAndDay: async () => ({
+      findByTechnician: async () => [{
         id: 'wh', tenantId, technicianId: techB,
         dayOfWeek: 0, startTime: '14:00', endTime: '17:00', isActive: true,
         createdAt: new Date(), updatedAt: new Date(),
-      }),
+      }],
     };
     const feasibilityDeps: FeasibilityDependencies = {
       assignmentRepo: localAssignmentRepo, appointmentRepo,
@@ -323,8 +326,7 @@ describe('P6-012 — Execution for reassignment proposals', () => {
       toTechnicianId: techB,
     });
     const result = await handlerWithFeasibility.execute(proposal, context) as any;
-    expect(result.success).toBe(true);
-    expect(result.warnings).toBeDefined();
-    expect(result.warnings.some((w: any) => w.check === 'working_hours')).toBe(true);
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/working hours/i);
   });
 });

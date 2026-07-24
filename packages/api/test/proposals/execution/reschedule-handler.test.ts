@@ -258,7 +258,7 @@ describe('P6-013 — Execution for reschedule proposals', () => {
       assignmentRepo, appointmentRepo,
       jobRepo: { findById: async () => null } as any,
       locationRepo: { findById: async () => null } as any,
-      workingHoursRepo: { findByTechnicianAndDay: async () => null } as any,
+      workingHoursRepo: { findByTechnician: async () => [] } as any,
       unavailableBlockRepo: { findByTechnicianAndDateRange: async () => [] } as any,
       travelTimeProvider: new HaversineFallbackProvider(),
       skillMatcher: new StubSkillMatcher(),
@@ -278,7 +278,9 @@ describe('P6-013 — Execution for reschedule proposals', () => {
     expect(result.error).toMatch(/Overlaps with/);
   });
 
-  it('passes feasibility (warnings only) and surfaces them on the result', async () => {
+  // Foundation gate F2 / contract #12-#13: out-of-hours is a PRECONDITION
+  // violation, so it now blocks the reschedule instead of warning.
+  it('rejects a reschedule outside the modeled working hours', async () => {
     const assignmentRepo = new InMemoryAssignmentRepository();
     const appt = await createAppointment({
       tenantId, jobId: 'job-1',
@@ -291,13 +293,14 @@ describe('P6-013 — Execution for reschedule proposals', () => {
       technicianId: 'tech-1', isPrimary: true, assignedBy: 'user-1', assignedAt: new Date(),
     });
 
-    // Inject a working-hours mock that triggers an "outside working hours" warning.
+    // Working-hours row for the target weekday (2026-05-17 is a Sunday,
+    // dayOfWeek 0) whose window excludes the proposed 12:00 UTC slot.
     const workingHoursRepo: any = {
-      findByTechnicianAndDay: async () => ({
+      findByTechnician: async () => [{
         id: 'wh', tenantId, technicianId: 'tech-1',
         dayOfWeek: 0, startTime: '14:00', endTime: '17:00', isActive: true,
         createdAt: new Date(), updatedAt: new Date(),
-      }),
+      }],
     };
     const feasibilityDeps: FeasibilityDependencies = {
       assignmentRepo, appointmentRepo,
@@ -319,9 +322,8 @@ describe('P6-013 — Execution for reschedule proposals', () => {
     });
     // No sourceContext on proposal so freshness passes automatically.
     const result = await handler.execute(proposal, context) as any;
-    expect(result.success).toBe(true);
-    expect(result.warnings).toBeDefined();
-    expect(result.warnings.some((w: any) => w.check === 'working_hours')).toBe(true);
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/working hours/i);
   });
 
   // ── RIVET P4 — S1 ownership binding ("reschedule OWN appointment" only) ──
@@ -347,7 +349,7 @@ describe('P6-013 — Execution for reschedule proposals', () => {
           customerId ? ({ id: 'job-1', tenantId, customerId } as any) : null,
       } as any,
       locationRepo: { findById: async () => null } as any,
-      workingHoursRepo: { findByTechnicianAndDay: async () => null } as any,
+      workingHoursRepo: { findByTechnician: async () => [] } as any,
       unavailableBlockRepo: { findByTechnicianAndDateRange: async () => [] } as any,
       travelTimeProvider: new HaversineFallbackProvider(),
       skillMatcher: new StubSkillMatcher(),
