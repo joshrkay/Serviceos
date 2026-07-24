@@ -422,6 +422,125 @@ describe('recording-consent ordering — disclosure precedes audio capture', () 
     expect(session.send).not.toHaveBeenCalled();
   });
 
+  it('Path 3f (premature stream close, no isFinal): incomplete notice — fails closed', async () => {
+    const store = new VoiceSessionStore({ startInterval: false });
+    store.create('tenant-nofinal', 'telephony', { callSid: 'CA-nofinal' });
+
+    const { provider, session } = makeStreamingProvider();
+    const ws = new FakeWs();
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: provider,
+        ttsProvider: {
+          synthesize: vi.fn(async () => ({
+            audio: Buffer.from('ID3-fake-mp3'),
+            contentType: 'audio/mpeg',
+            provider: 'test',
+          })),
+          // Yields audio then ENDS CLEANLY without ever emitting isFinal —
+          // exactly what the ElevenLabs iterator does when its WebSocket closes
+          // early (its `close` listener calls finish() unconditionally). The
+          // loop exits normally, so this is not an error path; the turn is
+          // nonetheless truncated and must not count as a played disclosure.
+          synthesizeStream: vi.fn(async function* () {
+            yield { pcm: Buffer.alloc(640), isFinal: false };
+          }),
+        },
+        speechTurn: async () => [],
+        initializeSession: async () => [
+          { type: 'tts_play', payload: { text: 'This call may be recorded for quality and training.' } },
+        ],
+      },
+      ws,
+    );
+    adapter.start();
+
+    ws.inboundJson(startFrame('CA-nofinal', 'MZ-nofinal'));
+    await flush();
+    await flush();
+    await flush();
+
+    if (!ws.closed) failOpen += 1;
+    expect(ws.closed).toBe(true);
+    expect(ws.closeReason).toBe('disclosure_init_failed');
+
+    const markName = silenceArmMarkName(ws);
+    if (markName) {
+      ws.inboundJson({ event: 'mark', streamSid: 'MZ-nofinal', mark: { name: markName } });
+      await flush();
+    }
+    ws.inboundJson(mediaFrame);
+    await flush();
+    if (session.send.mock.calls.length > 0) failOpen += 1;
+    expect(session.send).not.toHaveBeenCalled();
+  });
+
+  it('Path 3g (foreign mark ACK mid-disclosure): only the validated disclosure turn opens capture', async () => {
+    const store = new VoiceSessionStore({ startInterval: false });
+    store.create('tenant-race', 'telephony', { callSid: 'CA-race' });
+
+    // WS frames are handled concurrently with handleStart's validation, so a
+    // `silence-arm-*` ACK can land while the disclosure is still in flight —
+    // a filler's mark, a later prompt's, or a stale one. Only the validated
+    // disclosure turn's own mark may open capture; anything else must be
+    // ignored. Held open on a deferred initializeSession so the leg is still
+    // ALIVE during the window (once a leg closes, handleClose nulls the
+    // Deepgram session and media is dropped for an unrelated reason, which
+    // would mask the bug rather than expose it).
+    let resolveDisclosure!: (fx: SideEffect[]) => void;
+    const disclosureGate = new Promise<SideEffect[]>((resolve) => {
+      resolveDisclosure = resolve;
+    });
+
+    const { provider, session } = makeStreamingProvider();
+    const ws = new FakeWs();
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: provider,
+        ttsProvider: makeTtsProvider(),
+        speechTurn: async () => [],
+        initializeSession: () => disclosureGate,
+      },
+      ws,
+    );
+    adapter.start();
+
+    ws.inboundJson(startFrame('CA-race', 'MZ-race'));
+    await flush();
+
+    // Foreign completion marks ACK while the disclosure is still pending. The
+    // leg is open and Deepgram is live, so the ONLY thing standing between
+    // these frames and the ASR is the consent latch.
+    for (const name of ['silence-arm-0', 'silence-arm-1', 'silence-arm-99']) {
+      ws.inboundJson({ event: 'mark', streamSid: 'MZ-race', mark: { name } });
+      ws.inboundJson(mediaFrame);
+      await flush();
+    }
+    if (session.send.mock.calls.length > 0) armedBeforeDisclosure += 1;
+    expect(session.send).not.toHaveBeenCalled();
+
+    // The real disclosure now completes; its own mark is what opens capture.
+    resolveDisclosure([{ type: 'tts_play', payload: { text: 'This call may be recorded.' } }]);
+    await flush();
+    await flush();
+
+    // Still shut until that specific mark is ACKed.
+    ws.inboundJson(mediaFrame);
+    await flush();
+    if (session.send.mock.calls.length > 0) armedBeforeDisclosure += 1;
+    expect(session.send).not.toHaveBeenCalled();
+
+    const markName = silenceArmMarkName(ws);
+    expect(markName).toBeDefined();
+    ws.inboundJson({ event: 'mark', streamSid: 'MZ-race', mark: { name: markName } });
+    await flush();
+    ws.inboundJson(mediaFrame);
+    await flush();
+    expect(session.send).toHaveBeenCalledTimes(1);
+  });
+
   it('Path 3e (later prompt cannot mask a failed greeting): fails closed on the FIRST turn', async () => {
     const store = new VoiceSessionStore({ startInterval: false });
     store.create('tenant-mask', 'telephony', { callSid: 'CA-mask' });

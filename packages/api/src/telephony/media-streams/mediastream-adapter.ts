@@ -618,6 +618,28 @@ interface RuntimeState {
    */
   disclosureTurnComplete: boolean | null;
   /**
+   * Consent ordering — the outbound turn id of the disclosure turn, so the
+   * mark handler can recognise THAT turn's `silence-arm-` ack specifically. A
+   * filler's mark, or a later prompt's mark, must never open capture.
+   */
+  disclosureTurnId: number | null;
+  /**
+   * Consent ordering — set when the disclosure turn's own `silence-arm-` mark
+   * is acked by Twilio. WS frames are handled concurrently with `handleStart`,
+   * so the ack can land BEFORE validation finishes; recording it lets
+   * `handleStart` open capture itself once it has validated, closing the race
+   * in both directions.
+   */
+  disclosureMarkAcked: boolean;
+  /**
+   * Consent ordering — the latch. False until `handleStart` has confirmed the
+   * disclosure turn played to completion. While false the mark handler will
+   * NOT open capture for any ack, so a filler mark (or a healthy follow-up
+   * prompt's mark) landing mid-validation — or during the async audit/close of
+   * a FAILED disclosure — cannot let inbound media reach the ASR.
+   */
+  disclosureValidated: boolean;
+  /**
    * @deprecated DO NOT USE — use `deps.setPendingTransferTwiml` to write
    * into the TwilioGatherAdapter's shared pendingTransferTwiml Map. This
    * field is never read by any route handler; it exists only as a fallback
@@ -862,6 +884,9 @@ export class TwilioMediaStreamAdapter {
       turnRealAudioComplete: false,
       awaitingDisclosureTurn: false,
       disclosureTurnComplete: null,
+      disclosureTurnId: null,
+      disclosureMarkAcked: false,
+      disclosureValidated: false,
       pendingTransferTwiml: null,
       resolvedEscalationSettings: null,
       interimEmergencyFired: false,
@@ -936,11 +961,23 @@ export class TwilioMediaStreamAdapter {
         // counter. Only decrement for the marks that incremented it.
         const isSilenceArmMark = frame.mark?.name?.startsWith('silence-arm-') ?? false;
         if (!isSilenceArmMark && this.state.unackedMarks > 0) this.state.unackedMarks--;
-        // C5 — the FIRST end-of-utterance ack is the greeting turn: the
-        // caller has now heard the full greeting INCLUDING the recording
-        // disclosure, so the capture pipeline may open.
-        if (isSilenceArmMark && !this.state.captureEnabled) {
-          this.enableCapture('disclosure_played');
+        // C5 / consent ordering — capture may open ONLY on the disclosure
+        // turn's own end-of-utterance ack, and only once handleStart has
+        // validated that the turn played to completion. Any other mark (a
+        // filler's, or a healthy follow-up prompt's) is ignored here, and an
+        // ack that races ahead of validation just records itself — handleStart
+        // opens capture when it validates. Both directions of the race are
+        // covered, and a FAILED disclosure never opens capture at all because
+        // `disclosureValidated` stays false through its async audit + close.
+        if (
+          isSilenceArmMark &&
+          this.state.disclosureTurnId !== null &&
+          frame.mark?.name === `silence-arm-${this.state.disclosureTurnId}`
+        ) {
+          this.state.disclosureMarkAcked = true;
+          if (this.state.disclosureValidated) {
+            this.enableCapture('disclosure_played');
+          }
         }
         // The dedicated end-of-utterance mark's ack means the caller has
         // actually heard the whole agent turn finish — NOW start the
@@ -1167,24 +1204,32 @@ export class TwilioMediaStreamAdapter {
         // Consent ordering — capture opens only once the caller has actually
         // HEARD the COMPLETE recording disclosure, matching the Gather path
         // where a blocking <Say> fully plays before <Record> arms.
-        if (this.disclosureWasSpoken(initEffects) && this.state.disclosureTurnComplete !== true) {
-          // A disclosure turn WAS expected to play (ttsProvider wired + a
-          // non-empty greeting tts_play) but did not play to completion: its
-          // TTS stream died part-way and recovery fell back to a generic filler
-          // clip or dead air, or the buffered synth returned non-PCM. A partial
-          // notice is not a disclosure, and a filler's completion mark must
-          // never be mistaken for one — FAIL CLOSED (hang up), mirroring the
-          // initializeSession-threw branch below.
-          await this.failDisclosureClosed(callSid, session, 'disclosure_incomplete_playback');
-          return;
-        }
-        if (this.state.pendingSilenceRepromptTurnId !== null) {
-          // Real disclosure audio streamed and armed a pending end-of-utterance
-          // mark. Its Twilio ACK is the playback-completion signal and opens
-          // capture in the 'mark' handler (enableCapture('disclosure_played'));
-          // armCaptureEnableFallback is the lost-ack backstop so a dropped mark
-          // frame can't leave the agent deaf for the whole call.
-          this.armCaptureEnableFallback();
+        if (this.disclosureWasSpoken(initEffects)) {
+          if (this.state.disclosureTurnComplete !== true) {
+            // A disclosure turn WAS expected to play (ttsProvider wired + a
+            // non-empty greeting tts_play) but did not play to completion: the
+            // stream died part-way or closed prematurely without a final chunk,
+            // recovery fell back to a generic filler clip or dead air, or the
+            // buffered synth returned non-PCM. A partial notice is not a
+            // disclosure — FAIL CLOSED (hang up), mirroring the
+            // initializeSession-threw branch below. `disclosureValidated` stays
+            // false, so no mark acked during the async audit/close below can
+            // open capture behind us.
+            await this.failDisclosureClosed(callSid, session, 'disclosure_incomplete_playback');
+            return;
+          }
+          // Validated: the disclosure turn played in full, so its (and only
+          // its) end-of-utterance ack may open capture. The ack may already
+          // have landed while we were validating — WS frames are handled
+          // concurrently — in which case open now; otherwise the mark handler
+          // opens it, with armCaptureEnableFallback as the lost-ack backstop so
+          // a dropped mark frame can't leave the agent deaf for the whole call.
+          this.state.disclosureValidated = true;
+          if (this.state.disclosureMarkAcked) {
+            this.enableCapture('disclosure_played');
+          } else {
+            this.armCaptureEnableFallback();
+          }
         } else {
           // Nothing to play (no ttsProvider / empty greeting) — no disclosure
           // audio to gate on, so open capture immediately rather than wait for
@@ -2272,6 +2317,10 @@ export class TwilioMediaStreamAdapter {
       // mask a greeting that didn't play.
       if (this.state.awaitingDisclosureTurn && this.state.disclosureTurnComplete === null) {
         this.state.disclosureTurnComplete = this.state.turnRealAudioComplete;
+        // Pin the turn id the disclosure's end-of-utterance mark carries (the
+        // post-runTurnWithFiller value, which a preempted filler may have
+        // bumped) so the mark handler can recognise that ack and only that one.
+        this.state.disclosureTurnId = turnId;
       }
     }
   }
@@ -2482,6 +2531,14 @@ export class TwilioMediaStreamAdapter {
             language: lang,
           });
           let first = true;
+          // Consent ordering — a normally-completing iterator is NOT proof the
+          // utterance finished: the ElevenLabs stream's `close` listener calls
+          // finish() unconditionally, so a premature WS close ends the loop
+          // cleanly without ever yielding `isFinal`. Require BOTH an explicit
+          // final chunk and at least one non-empty PCM frame before treating
+          // the turn as complete.
+          let sawFinalChunk = false;
+          let streamedRealAudio = false;
           for await (const chunk of stream) {
             if (turnId !== this.state.outboundTurnId || !this.state.agentSpeaking) {
               controller.abort();
@@ -2497,14 +2554,22 @@ export class TwilioMediaStreamAdapter {
               first = false;
             }
             if (chunk.pcm.length > 0) {
+              streamedRealAudio = true;
               await this.streamPcmAsMedia(chunk.pcm, turnId);
             }
-            if (chunk.isFinal) break;
+            if (chunk.isFinal) {
+              sawFinalChunk = true;
+              break;
+            }
           }
-          // Consent ordering — the stream ran to completion, so the caller
-          // heard this turn's COMPLETE real TTS (reached only when the loop
-          // exits normally; a mid-stream throw jumps to the catch below).
-          this.state.turnRealAudioComplete = true;
+          // Consent ordering — complete ONLY when the provider explicitly
+          // signalled the end of the utterance AND real audio actually
+          // streamed. A clean-but-premature close (no isFinal) or an
+          // isFinal-only stream carrying zero PCM is a truncated/absent turn,
+          // so the flag stays false and the disclosure gate fails closed.
+          if (sawFinalChunk && streamedRealAudio) {
+            this.state.turnRealAudioComplete = true;
+          }
           // T2-F05 — all of this turn's audio is now enqueued. Arm the
           // silence countdown on a single dedicated end-of-utterance mark,
           // not the per-chunk `turn-${turnId}` marks emitted inside
