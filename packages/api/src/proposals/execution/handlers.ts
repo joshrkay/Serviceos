@@ -43,7 +43,11 @@ import { JobCompletionEffectsDeps } from '../../jobs/completion-effects';
 import { TimeEntryRepository } from '../../time-tracking/time-entry';
 import { RefreshJobMoneyStateDeps } from '../../jobs/job-money-state';
 import { AppointmentRepository, createAppointment } from '../../appointments/appointment';
-import { AssignmentRepository, assignTechnician } from '../../appointments/assignment';
+import {
+  AssignmentRepository,
+  assignTechnician,
+  assertTechnicianAvailability,
+} from '../../appointments/assignment';
 import { InvoiceRepository } from '../../invoices/invoice';
 import { DunningEventRepository } from '../../invoices/dunning-config';
 import {
@@ -334,6 +338,17 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
     // RV-081 — revisit linkage: validates payload.linkedJobId exists
     // (tenant-scoped) before attaching the appointment to it.
     private readonly jobRepo?: JobRepository,
+    /**
+     * Foundation gate F2 (contract #12/#13) — when wired, a technician on
+     * the payload is validated against modeled working hours / time-off
+     * BEFORE the appointment is created, and again inside assignTechnician.
+     * Without this the voice/proposal path was the one assignment surface
+     * that skipped the availability preconditions.
+     */
+    private readonly availabilityRepos?: {
+      workingHoursRepo?: import('../../availability/working-hours').WorkingHoursRepository;
+      unavailableBlockRepo?: import('../../availability/unavailable-block').UnavailableBlockRepository;
+    },
   ) {}
 
   // Degrades to a synthetic-id passthrough (saves nothing) without the
@@ -423,6 +438,23 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
       if (blocking) {
         return { success: false, error: blocking.message };
       }
+      // Availability preconditions (contract #12/#13) BEFORE creating the
+      // appointment — a cheap early rejection beats create-then-compensate.
+      if (this.availabilityRepos) {
+        try {
+          await assertTechnicianAvailability(
+            context.tenantId,
+            payload.technicianId,
+            { start: scheduledStart, end: scheduledEnd, timezone },
+            this.availabilityRepos,
+          );
+        } catch (err) {
+          return {
+            success: false,
+            error: err instanceof Error ? err.message : String(err),
+          };
+        }
+      }
     }
 
     const appointment = await createAppointment({
@@ -462,7 +494,12 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
           technicianId: payload.technicianId,
           technicianRole: 'technician',
           assignedBy: context.executedBy,
-        }, this.assignmentRepo, { appointmentRepo: this.appointmentRepo, auditRepo: this.auditRepo });
+        }, this.assignmentRepo, {
+          appointmentRepo: this.appointmentRepo,
+          auditRepo: this.auditRepo,
+          workingHoursRepo: this.availabilityRepos?.workingHoursRepo,
+          unavailableBlockRepo: this.availabilityRepos?.unavailableBlockRepo,
+        });
       } catch (err) {
         // Atomicity guard: the pre-flight feasibility check above is subject
         // to a TOCTOU race; the authoritative protection is the DB EXCLUDE
@@ -1041,7 +1078,16 @@ export function createExecutionHandlerRegistry(deps?: {
     new CreateCustomerVoiceExecutionHandler(deps?.customerRepo, deps?.auditRepo),
     new UpdateCustomerExecutionHandler(deps?.customerRepo, requiredAuditRepo, deps?.consentEventRepo),
     new CreateJobExecutionHandler(deps?.jobRepo, deps?.locationRepo, deps?.auditRepo),
-    new CreateAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.schedulingNotifier, deps?.auditRepo, deps?.jobRepo),
+    new CreateAppointmentExecutionHandler(
+      deps?.appointmentRepo,
+      deps?.assignmentRepo,
+      deps?.schedulingNotifier,
+      deps?.auditRepo,
+      deps?.jobRepo,
+      // feasibilityDeps carries the availability repos — the same wiring the
+      // reassign/crew/reschedule handlers already consume.
+      deps?.feasibilityDeps,
+    ),
     new CreateBookingExecutionHandler(deps?.appointmentRepo, deps?.auditRepo),
     new DraftEstimateExecutionHandler(
       deps?.estimateRepo,

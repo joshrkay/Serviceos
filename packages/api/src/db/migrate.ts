@@ -88,6 +88,40 @@ export async function findMissingCriticalConstraints(
   return CRITICAL_CONSTRAINTS.filter((c) => !present.has(c));
 }
 
+/**
+ * Enforce the critical-constraint postcondition: report every missing
+ * constraint, then FAIL the migration (F3 is binary — without the exclusion
+ * constraint the product runs in exactly the mode the foundation spec
+ * forbids, and a warn-and-continue exit 0 let the deploy proceed anyway).
+ * Failing here blocks only the NEW deploy; the previous one keeps serving.
+ * `ALLOW_MISSING_CRITICAL_CONSTRAINTS=true` is the deliberate operator
+ * override for an emergency deploy while overlaps are being reconciled —
+ * it keeps the loud report but skips the throw.
+ */
+export async function verifyCriticalConstraints(client: PoolClient): Promise<void> {
+  const missing = await findMissingCriticalConstraints(client);
+  if (missing.length === 0) return;
+  for (const conname of missing) {
+    console.error(
+      `[migrate] CRITICAL: constraint '${conname}' is ABSENT after migration. ` +
+        'Double-booking is NOT enforced at the database level. Reconcile ' +
+        'overlapping appointment_assignments rows and re-deploy.',
+    );
+  }
+  if (process.env.ALLOW_MISSING_CRITICAL_CONSTRAINTS === 'true') {
+    console.error(
+      '[migrate] ALLOW_MISSING_CRITICAL_CONSTRAINTS=true — continuing WITHOUT ' +
+        'the DB-level double-booking guard. Unset after reconciling.',
+    );
+    return;
+  }
+  throw new Error(
+    `Missing critical constraint(s) after migration: ${missing.join(', ')}. ` +
+      'Reconcile overlapping appointment_assignments rows and re-deploy ' +
+      '(or set ALLOW_MISSING_CRITICAL_CONSTRAINTS=true for a deliberate emergency deploy).',
+  );
+}
+
 /** Apply the full migration corpus on the given client. Exit-free + testable. */
 export async function applyMigrations(client: PoolClient): Promise<void> {
   // Prevent DDL lock waits from stalling startup: ALTER TABLE ENABLE RLS
@@ -96,16 +130,7 @@ export async function applyMigrations(client: PoolClient): Promise<void> {
   await client.query("SET lock_timeout = '5s'");
   await client.query("SET statement_timeout = '25s'");
   await client.query(getMigrationSQL());
-  // Non-fatal by design (the skip is a deliberate valve for legacy-overlap
-  // databases) but LOUD: an operator must know the DB-level guard is off.
-  const missing = await findMissingCriticalConstraints(client);
-  for (const conname of missing) {
-    console.error(
-      `[migrate] CRITICAL: constraint '${conname}' is ABSENT after migration. ` +
-        'Double-booking is NOT enforced at the database level. Reconcile ' +
-        'overlapping appointment_assignments rows and re-deploy.',
-    );
-  }
+  await verifyCriticalConstraints(client);
 }
 
 /**

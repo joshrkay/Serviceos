@@ -310,3 +310,85 @@ describe('CreateAppointmentExecutionHandler', () => {
     expect(events[0].entityId).toBe(result.resultEntityId);
   });
 });
+
+// Foundation gate F2 / contract #12-#13 (Codex round 5) — the proposal path
+// was the one assignment surface that skipped the availability preconditions.
+describe('CreateAppointmentExecutionHandler — availability preconditions', () => {
+  const tenantId = '550e8400-e29b-41d4-a716-446655440000';
+  const techId = '660e8400-e29b-41d4-a716-446655440001';
+  const context = { tenantId, executedBy: 'user-1' };
+
+  function makeProposal(payload: Record<string, unknown>): Proposal {
+    return {
+      id: 'prop-av',
+      tenantId,
+      proposalType: 'create_appointment',
+      status: 'approved',
+      payload,
+      summary: 'Create appointment',
+      createdBy: 'user-1',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+  }
+
+  // Tuesday-only tech (dayOfWeek 2), 08:00-17:00.
+  const availabilityRepos = {
+    workingHoursRepo: {
+      findByTechnician: async () => [{
+        id: 'wh-2', tenantId, technicianId: techId,
+        dayOfWeek: 2, startTime: '08:00', endTime: '17:00', isActive: true,
+        createdAt: new Date(), updatedAt: new Date(),
+      }],
+    },
+    unavailableBlockRepo: { findByTechnicianAndDateRange: async () => [] },
+  } as never;
+
+  it('rejects a proposal window on a modeled day off, creating nothing', async () => {
+    const appointmentRepo = new InMemoryAppointmentRepository();
+    const assignmentRepo = new InMemoryAssignmentRepository();
+    const handler = new CreateAppointmentExecutionHandler(
+      appointmentRepo, assignmentRepo, { enqueue: async () => {} },
+      undefined, undefined, availabilityRepos,
+    );
+    // 2026-04-20 is a Monday — the tech is Tuesday-only.
+    const result = await handler.execute(
+      makeProposal({
+        jobId: '11111111-1111-4111-8111-111111111111',
+        scheduledStart: '2026-04-20T14:00:00Z',
+        scheduledEnd: '2026-04-20T15:00:00Z',
+        timezone: 'UTC',
+        technicianId: techId,
+      }),
+      context,
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/not scheduled to work/i);
+    // Early rejection — no orphan appointment was created and compensated.
+    const appts = await appointmentRepo.findByDateRange(
+      tenantId, new Date('2026-04-19T00:00:00Z'), new Date('2026-04-22T00:00:00Z'),
+    );
+    expect(appts).toHaveLength(0);
+  });
+
+  it('executes a proposal window inside the modeled hours', async () => {
+    const appointmentRepo = new InMemoryAppointmentRepository();
+    const assignmentRepo = new InMemoryAssignmentRepository();
+    const handler = new CreateAppointmentExecutionHandler(
+      appointmentRepo, assignmentRepo, { enqueue: async () => {} },
+      undefined, undefined, availabilityRepos,
+    );
+    // 2026-04-21 is a Tuesday, 14:00-15:00 UTC inside 08:00-17:00.
+    const result = await handler.execute(
+      makeProposal({
+        jobId: '11111111-1111-4111-8111-111111111111',
+        scheduledStart: '2026-04-21T14:00:00Z',
+        scheduledEnd: '2026-04-21T15:00:00Z',
+        timezone: 'UTC',
+        technicianId: techId,
+      }),
+      context,
+    );
+    expect(result.success).toBe(true);
+  });
+});
