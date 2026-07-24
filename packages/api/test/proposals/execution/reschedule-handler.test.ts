@@ -453,6 +453,36 @@ describe('P6-013 — Execution for reschedule proposals', () => {
     expect(r2.error).toMatch(/does not belong to the caller/);
   });
 
+  it('INFERRED S1 (unstamped telephony + non-system author) is ownership-checked too (Codex)', async () => {
+    // A legacy/unstamped inbound proposal: channel telephony, created by a
+    // customer id, NO surface stamp. The executor's fail-safe inference
+    // treats it as S1 and lets reschedule_appointment through the allowlist —
+    // so the ownership guard must key on the SAME inference, not just the
+    // explicit stamp, or this path bypasses every ownership check.
+    const appt = await createAppointment({
+      tenantId, jobId: 'job-1',
+      scheduledStart: new Date('2026-03-14T09:00:00Z'),
+      scheduledEnd: new Date('2026-03-14T11:00:00Z'),
+      timezone: 'UTC', createdBy: 'user-1',
+    }, appointmentRepo);
+    const s1Handler = new RescheduleAppointmentExecutionHandler(
+      appointmentRepo, undefined, undefined, undefined,
+      feasibilityWithJobCustomer('cust-somebody-else'),
+    );
+
+    const inferred: Proposal = {
+      ...makeProposal({ appointmentId: appt.id, ...S1_TIMES }),
+      createdBy: 'cust-caller',
+      sourceContext: { source: 'calling-agent', channel: 'telephony' }, // no surface stamp
+    };
+    const result = await s1Handler.execute(inferred, context);
+    expect(result.success).toBe(false);
+    // No callerCustomerId on a legacy row → fails closed on identity.
+    expect(result.error).toMatch(/identity was not verified/);
+    const unchanged = await appointmentRepo.findById(tenantId, appt.id);
+    expect(unchanged!.scheduledStart.toISOString()).toBe('2026-03-14T09:00:00.000Z');
+  });
+
   it('S2/unstamped proposals are unaffected by the ownership guard', async () => {
     const appt = await createAppointment({
       tenantId, jobId: 'job-1',

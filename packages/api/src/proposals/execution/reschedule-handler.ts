@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { Proposal, ProposalType } from '../proposal';
+import { resolveSurface } from '../surface';
 import { ExecutionHandler, ExecutionContext, ExecutionResult } from './handlers';
 import { AppointmentRepository, updateAppointment } from '../../appointments/appointment';
 import { AssignmentRepository } from '../../appointments/assignment';
@@ -77,9 +78,17 @@ export class RescheduleAppointmentExecutionHandler implements ExecutionHandler {
     // look routine in the owner's queue, and move a stranger's visit on
     // approval. Enforce OWN here, at execution, against the identity the
     // session stamped (caller-ID / self-signup — never transcript content).
-    // Fail closed: an S1 reschedule with no verifiable caller identity, or
-    // without the repos needed to verify, is refused for manual handling.
-    const isS1 = proposal.sourceContext?.surface === 'S1';
+    // Uses the SAME resolveSurface the executor enforces with — explicit
+    // stamp OR the fail-safe inference (unstamped telephony + non-system
+    // author) — so a legacy/unstamped inbound proposal cannot slip past the
+    // ownership check that the executor's inference let through the
+    // allowlist. Fail closed: an S1 reschedule with no verifiable caller
+    // identity, or without the repos needed to verify, is refused.
+    const isS1 =
+      resolveSurface(
+        proposal.sourceContext as Record<string, unknown> | undefined,
+        proposal.createdBy,
+      ) === 'S1';
     const callerCustomerId = proposal.sourceContext?.callerCustomerId;
     if (isS1 && (typeof callerCustomerId !== 'string' || callerCustomerId.length === 0)) {
       return {

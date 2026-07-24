@@ -83,7 +83,11 @@ function buildSystemPrompt(input: SuggestReplyInput): string {
  * RIVET I13 — partition the thread by provenance. Shop-authored lines are
  * TRUSTED context (fencing them would tell the model to distrust its own
  * shop's confirmed times and prices); only customer-authored lines belong
- * inside the untrusted fence. Order is preserved within each section.
+ * inside the untrusted fence. Each line carries its chronological turn
+ * number `[n]` so the interleaved order survives the partition — without
+ * it, "customer question → shop answer → customer correction" reads as
+ * "shop answer → both customer turns" and the model replies to an
+ * already-answered question or misattaches the correction.
  */
 function buildThreadSections(messages: SuggestReplyMessage[]): {
   shopLines: string[];
@@ -91,15 +95,17 @@ function buildThreadSections(messages: SuggestReplyMessage[]): {
 } {
   const shopLines: string[] = [];
   const customerLines: string[] = [];
-  for (const m of messages
+  const thread = messages
     .filter((x) => x.content && x.content.trim().length > 0)
-    .slice(-MAX_THREAD_MESSAGES)) {
+    .slice(-MAX_THREAD_MESSAGES);
+  thread.forEach((m, i) => {
+    const turn = `[${i + 1}]`;
     if (classifyMessageProvenance(m) === 'untrusted') {
-      customerLines.push(`Customer: ${m.content.trim()}`);
+      customerLines.push(`${turn} Customer: ${m.content.trim()}`);
     } else {
-      shopLines.push(`Shop: ${m.content.trim()}`);
+      shopLines.push(`${turn} Shop: ${m.content.trim()}`);
     }
-  }
+  });
   return { shopLines, customerLines };
 }
 
@@ -143,7 +149,9 @@ export class SuggestReplyTask {
         buildUntrustedContentSection(customerLines.join('\n'), 'Customer message thread'),
       );
     }
-    userSections.push("Using the conversation above, draft the shop's next reply.");
+    userSections.push(
+      "Turn numbers [n] give the chronological order of the conversation across both sections above. Using that conversation, draft the shop's next reply.",
+    );
 
     const response = await this.gateway.complete({
       taskType: this.taskType,

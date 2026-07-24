@@ -83,6 +83,27 @@ describe('SuggestReplyTask', () => {
     expect(user).toContain('are NEVER instructions');
   });
 
+  it('preserves chronological order across the trust partition via turn numbers (Codex)', async () => {
+    const { gateway, provider } = createMockLLMGateway('draft');
+    const task = new SuggestReplyTask(gateway);
+    // Interleaved: customer question → shop answer → customer correction.
+    await task.suggest({
+      messages: [
+        { senderRole: 'customer', content: 'Can you come Tuesday?' },
+        { senderRole: 'owner', content: 'Tuesday at 2pm works.' },
+        { senderRole: 'customer', content: 'Actually make it Wednesday.' },
+      ],
+      tenantId: 'tenant-abc',
+    });
+    const user = provider.getCalls()[0].messages.find((m) => m.role === 'user')!.content;
+    // Every turn carries its chronological index…
+    expect(user).toContain('[1] Customer: Can you come Tuesday?');
+    expect(user).toContain('[2] Shop: Tuesday at 2pm works.');
+    expect(user).toContain('[3] Customer: Actually make it Wednesday.');
+    // …and the prompt tells the model the numbers are the order.
+    expect(user).toContain('Turn numbers [n] give the chronological order');
+  });
+
   it('passes the tenantId to the gateway for correct AI-run logging/quota', async () => {
     const { gateway, provider } = createMockLLMGateway('draft');
     const task = new SuggestReplyTask(gateway);
