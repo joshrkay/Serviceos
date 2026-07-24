@@ -30,6 +30,7 @@ import {
   AppointmentAssignment,
   AssignmentRepository,
   assignTechnician,
+  assertTechnicianAvailability,
   syncJobAssignment,
 } from '../appointments/assignment';
 import { UserRepository, User } from '../users/user';
@@ -164,9 +165,22 @@ async function chooseTechnicianAndSlot(
         tenantId, start: scheduledStart, end: scheduledEnd, technicianId: tech.id,
         bufferMinutes: schedulingConfig.bufferMinutes,
       });
-      if (free) {
-        return { technicianId: tech.id, technicianRole: tech.role, scheduledStart, scheduledEnd, timezone };
+      if (!free) continue;
+      // isSlotFree covers calendar conflicts only — screen the candidate's
+      // modeled working hours / time off with the SAME rule the assignment
+      // guard applies, so an off-duty tech is skipped here instead of
+      // failing the whole conversion at assignTechnician.
+      try {
+        await assertTechnicianAvailability(
+          tenantId,
+          tech.id,
+          { start: scheduledStart, end: scheduledEnd, timezone },
+          { workingHoursRepo: deps.workingHoursRepo, unavailableBlockRepo: deps.unavailableBlockRepo },
+        );
+      } catch {
+        continue;
       }
+      return { technicianId: tech.id, technicianRole: tech.role, scheduledStart, scheduledEnd, timezone };
     }
     throw new ConflictError('Requested start time is not available for any technician');
   }

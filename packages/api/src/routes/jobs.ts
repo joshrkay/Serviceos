@@ -87,6 +87,8 @@ export function createJobRouter(
     /** F2 — assignment refuses windows outside modeled tech hours / during time-off. */
     workingHoursRepo?: WorkingHoursRepository;
     unavailableBlockRepo?: UnavailableBlockRepository;
+    /** Tenant-timezone fallback for schedule calls that omit `timezone`. */
+    settingsRepo?: JobAppointmentSyncDeps['settingsRepo'];
   },
 ): Router {
   const router = Router();
@@ -103,6 +105,7 @@ export function createJobRouter(
       userRepo: scheduleSyncDeps.userRepo,
       workingHoursRepo: scheduleSyncDeps.workingHoursRepo,
       unavailableBlockRepo: scheduleSyncDeps.unavailableBlockRepo,
+      settingsRepo: scheduleSyncDeps.settingsRepo,
     };
   };
 

@@ -4659,6 +4659,7 @@ export function createApp(): AppWithLifecycle {
     userRepo,
     workingHoursRepo,
     unavailableBlockRepo,
+    settingsRepo,
   }));
   app.use(
     '/api/jobs',

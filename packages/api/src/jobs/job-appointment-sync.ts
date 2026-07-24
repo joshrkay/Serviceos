@@ -32,12 +32,14 @@ import { validateAppointmentTimes } from '../appointments/validation';
 import {
   AssignmentRepository,
   assignTechnician,
+  assertTechnicianAvailability,
   syncJobAssignment,
   unassignTechnician,
 } from '../appointments/assignment';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { WorkingHoursRepository } from '../availability/working-hours';
 import { UnavailableBlockRepository } from '../availability/unavailable-block';
+import { SettingsRepository } from '../settings/settings';
 import { ConflictError, NotFoundError, ValidationError } from '../shared/errors';
 import { UserRepository } from '../users/user';
 import { Job, JobRepository, getJob } from './job';
@@ -87,6 +89,12 @@ export interface JobAppointmentSyncDeps {
    */
   workingHoursRepo?: WorkingHoursRepository;
   unavailableBlockRepo?: UnavailableBlockRepository;
+  /**
+   * Resolves the tenant timezone when the caller omits one. Without it a
+   * timezone-less schedule stores UTC, and the working-hours guard then
+   * evaluates the window in the wrong local day for non-UTC tenants.
+   */
+  settingsRepo?: Pick<SettingsRepository, 'findByTenant'>;
 }
 
 interface BaseInput {
@@ -281,7 +289,16 @@ export async function syncJobSchedule(
       throw new ConflictError(`Cannot schedule a ${job.status} job`);
     }
 
-    const timezone = input.timezone ?? DEFAULT_TIMEZONE;
+    // Caller override → tenant settings → UTC. The stored zone drives the
+    // working-hours guard's local-day math, so defaulting straight to UTC
+    // for a non-UTC tenant would reject valid local slots (and accept
+    // off-hours ones).
+    const tenantTimezone = input.timezone
+      ? null
+      : deps.settingsRepo
+        ? (await deps.settingsRepo.findByTenant(tenantId).catch(() => null))?.timezone ?? null
+        : null;
+    const timezone = input.timezone ?? tenantTimezone ?? DEFAULT_TIMEZONE;
     const scheduledStart = input.scheduledStart;
 
     let appointment: Appointment;
@@ -334,6 +351,19 @@ export async function syncJobSchedule(
           appointmentId: existing.id,
           technicianId: currentPrimary.technicianId,
         });
+      }
+
+      // A RETAINED technician never re-runs assignTechnician (the no-op path
+      // in ensurePrimaryTechnician), so validate them against the NEW window
+      // here — otherwise a same-tech reschedule lands on a modeled day off
+      // or inside a time-off block that a fresh assignment would refuse.
+      if (!changingTech && currentPrimary) {
+        await assertTechnicianAvailability(
+          tenantId,
+          currentPrimary.technicianId,
+          { start: scheduledStart, end: scheduledEnd, timezone: existing.timezone },
+          deps,
+        );
       }
 
       const updated = await deps.appointmentRepo.update(tenantId, existing.id, {
