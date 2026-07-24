@@ -37,7 +37,8 @@ export class PgUserRepository extends PgBaseRepository implements UserRepository
       // RLS_RUNTIME_ROLE is enabled (see db/rls-runtime-role.ts), so the
       // tenant_id predicate — not withTenant's GUC — is what isolates tenants.
       const params: unknown[] = [tenantId];
-      let where = 'WHERE tenant_id = $1';
+      // Soft-deleted accounts (16D, migration 093) are invisible to reads.
+      let where = 'WHERE tenant_id = $1 AND deleted_at IS NULL';
       if (options?.role) {
         params.push(options.role);
         where += ` AND role = $${params.length}`;
@@ -70,7 +71,8 @@ export class PgUserRepository extends PgBaseRepository implements UserRepository
                 created_at, updated_at
          FROM users
          WHERE id = $1
-           AND tenant_id = $2`,
+           AND tenant_id = $2
+           AND deleted_at IS NULL`,
         [id, tenantId],
       );
       return result.rows.length > 0
@@ -99,7 +101,8 @@ export class PgUserRepository extends PgBaseRepository implements UserRepository
                 created_at, updated_at
          FROM users
          WHERE tenant_id = $1
-           AND mobile_number = $2`,
+           AND mobile_number = $2
+           AND deleted_at IS NULL`,
         [tenantId, e164],
       );
       return result.rows.length > 0
@@ -161,12 +164,49 @@ export class PgUserRepository extends PgBaseRepository implements UserRepository
              WHERE u2.tenant_id = $3
                AND u2.role = 'owner'
                AND u2.id != $2
+               AND u2.deleted_at IS NULL
            )
          RETURNING id, tenant_id, clerk_user_id, email, role, first_name, last_name,
                    COALESCE(can_field_serve, false) AS can_field_serve,
                    mobile_number,
                    created_at, updated_at`,
         [newRole, id, tenantId],
+      );
+      return result.rows.length > 0
+        ? mapRow(result.rows[0] as Record<string, unknown>)
+        : null;
+    });
+  }
+
+  /**
+   * Guideline 5.1.1(v) — in-app account deletion (16D retention model:
+   * stamp `deleted_at`, never purge). Single-statement last-owner guard,
+   * mirroring `demoteOwnerIfAnotherExists`: an owner's self-deletion only
+   * succeeds when another non-deleted owner exists at UPDATE time, so two
+   * concurrent owner deletions can't leave the tenant ownerless.
+   */
+  async softDeleteSelf(tenantId: string, id: string): Promise<User | null> {
+    return this.withTenantTransaction(tenantId, async (client) => {
+      const result = await client.query(
+        `UPDATE users SET deleted_at = NOW(), updated_at = NOW()
+         WHERE id = $1
+           AND tenant_id = $2
+           AND deleted_at IS NULL
+           AND (
+             role != 'owner'
+             OR EXISTS (
+               SELECT 1 FROM users u2
+               WHERE u2.tenant_id = $2
+                 AND u2.role = 'owner'
+                 AND u2.id != $1
+                 AND u2.deleted_at IS NULL
+             )
+           )
+         RETURNING id, tenant_id, clerk_user_id, email, role, first_name, last_name,
+                   COALESCE(can_field_serve, false) AS can_field_serve,
+                   mobile_number,
+                   created_at, updated_at`,
+        [id, tenantId],
       );
       return result.rows.length > 0
         ? mapRow(result.rows[0] as Record<string, unknown>)

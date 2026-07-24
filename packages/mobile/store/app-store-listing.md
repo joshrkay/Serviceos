@@ -7,7 +7,7 @@ brief, the brief wins.
 
 > **Positioning note (App Store guideline 3.1.1):** The Rivet app is a
 > companion to the web service. Account creation and the 14-day free trial
-> happen on the **web** (rivet.ai); the app signs you into an existing
+> happen on the **web** (therivetapp.com); the app signs you into an existing
 > account. The app does **not** sell subscriptions through an external
 > mechanism, so it does not need — and must not add — in-app purchase for
 > the subscription. Keep the listing free-to-download with no in-app
@@ -57,7 +57,7 @@ Rivet tells you the truth. Every evening you get one text: what got done,
 what got paid, and what Rivet wasn't sure about today. Nothing irreversible
 is ever sent to a customer without your approval.
 
-New to Rivet? Start your 14-day free trial at rivet.ai — setup takes about
+New to Rivet? Start your 14-day free trial at therivetapp.com — setup takes about
 15 minutes — then sign in here. Your account works on the web and the app.
 
 Built for the 1–3 truck shop with no office. Not for you if you've already
@@ -71,9 +71,9 @@ got a dedicated office manager and a 20-truck fleet.
 
 | Field | Value |
 |---|---|
-| Marketing URL | https://rivet.ai |
-| Support URL | https://rivet.ai/download |
-| Privacy Policy URL | https://rivet.ai/privacy |
+| Marketing URL | https://therivetapp.com |
+| Support URL | https://therivetapp.com/download |
+| Privacy Policy URL | https://therivetapp.com/privacy |
 
 ## App Privacy ("nutrition label") — data collected and linked to the user
 

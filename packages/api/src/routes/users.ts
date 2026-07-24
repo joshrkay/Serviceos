@@ -287,6 +287,103 @@ export function createUsersRouter(
   );
 
   /**
+   * Guideline 5.1.1(v) — in-app account deletion, initiated from the mobile
+   * Settings screen. Self-only (`/me`): any authenticated member may delete
+   * their OWN account; nobody can delete a teammate through this route.
+   *
+   * Semantics follow the established 16D soft-delete model (migration 093 +
+   * the Clerk user.deleted webhook): revoke access, retain rows for audit
+   * and billing, never purge tenant data or release the Twilio subaccount.
+   *
+   * Order of operations:
+   *   1. Last-owner pre-check → clean 409 before anything is touched (the
+   *      repository re-enforces the guard atomically at UPDATE time).
+   *   2. Delete the Clerk user (authoritative — kills the session/token).
+   *      A Clerk failure aborts with 502 and NO local change. Clerk 404
+   *      (already gone) proceeds. Without CLERK_SECRET_KEY (dev/tests) the
+   *      local soft-delete still runs, matching the invitations pattern.
+   *   3. Local soft-delete. If a concurrent race blocks it, the Clerk
+   *      user.deleted webhook reconciles the stamp — still a success here.
+   *   4. Audit event (all mutations emit audit events).
+   */
+  router.delete(
+    '/me',
+    requireAuth,
+    requireTenant,
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const tenantId = req.auth!.tenantId;
+        const clerkUserId = req.auth!.userId;
+        const users = await userRepo.findByTenant(tenantId);
+        const actor = users.find((u) => u.clerkUserId === clerkUserId);
+        if (!actor) {
+          res.status(404).json({ error: 'NOT_FOUND', message: 'User not found' });
+          return;
+        }
+
+        if (actor.role === 'owner') {
+          const anotherOwner = users.some((u) => u.id !== actor.id && u.role === 'owner');
+          if (!anotherOwner) {
+            res.status(409).json({
+              error: 'LAST_OWNER',
+              message:
+                'You are the only owner. Transfer ownership to a teammate first, ' +
+                'or contact support to close the whole workspace.',
+            });
+            return;
+          }
+        }
+
+        if (deps.clerkSecretKey && actor.clerkUserId) {
+          const fetchFn = deps.clerkFetch ?? fetch;
+          const clerkRes = await fetchFn(
+            `https://api.clerk.com/v1/users/${encodeURIComponent(actor.clerkUserId)}`,
+            {
+              method: 'DELETE',
+              headers: { Authorization: `Bearer ${deps.clerkSecretKey}` },
+            },
+          );
+          // 404 = already deleted in Clerk; local cleanup should proceed.
+          if (!clerkRes.ok && clerkRes.status !== 404) {
+            res.status(502).json({
+              error: 'ACCOUNT_DELETE_FAILED',
+              message: 'Could not delete the account right now. Please try again.',
+            });
+            return;
+          }
+        }
+
+        await userRepo.softDeleteSelf(tenantId, actor.id);
+
+        if (auditRepo) {
+          await auditRepo.create(
+            createAuditEvent({
+              tenantId,
+              actorId: clerkUserId,
+              actorRole: req.auth!.role,
+              eventType: 'user.account_deleted',
+              entityType: 'user',
+              entityId: actor.id,
+              metadata: {
+                self: true,
+                role: actor.role,
+                note:
+                  'Self-service account deletion (guideline 5.1.1(v)). Row soft-deleted; ' +
+                  'tenant data retained per 16D.',
+              },
+            }),
+          );
+        }
+
+        res.json({ deleted: true });
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
+  );
+
+  /**
    * Tier 4 (Team members — PR 3). List pending invitations for the
    * Settings → Team members sheet. Read-only; returns the same
    * `{ data: [...] }` envelope used by the user list above.

@@ -39,6 +39,12 @@ export interface User {
    * existing rows have no mobile on file.
    */
   mobileNumber?: string;
+  /**
+   * 16D soft-delete stamp (migration 093). Non-null means the account is
+   * deleted: auth rejects it (authorization-loader) and repository reads
+   * exclude it. Rows are retained — never purged — for audit and billing.
+   */
+  deletedAt?: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -97,6 +103,16 @@ export interface UserRepository {
     id: string,
     newRole: 'dispatcher' | 'technician',
   ): Promise<User | null>;
+  /**
+   * Guideline 5.1.1(v) — in-app account deletion. Soft-deletes the user's own
+   * row (stamps `deleted_at`, per the 16D retention model: data is kept for
+   * audit/billing, access is revoked). Atomic last-owner guard: when the
+   * target is an owner, the update only succeeds if ANOTHER non-deleted owner
+   * exists in the tenant — a tenant must never become ownerless. Returns the
+   * deleted row, or null when the row wasn't found, was already deleted, or
+   * the guard blocked the sole owner.
+   */
+  softDeleteSelf(tenantId: string, id: string): Promise<User | null>;
   /** Test/dev helper. Production user creation goes through the Clerk webhook. */
   create?(user: Omit<User, 'createdAt' | 'updatedAt'>): Promise<User>;
 }
@@ -187,7 +203,11 @@ export class InMemoryUserRepository implements UserRepository {
   private users: Map<string, User> = new Map();
 
   async findByTenant(tenantId: string, options?: UserListOptions): Promise<User[]> {
-    const all = Array.from(this.users.values()).filter((u) => u.tenantId === tenantId);
+    // Deleted accounts are invisible to reads (mirrors `deleted_at IS NULL`
+    // in the Pg implementation).
+    const all = Array.from(this.users.values()).filter(
+      (u) => u.tenantId === tenantId && !u.deletedAt,
+    );
     const filtered = options?.role ? all.filter((u) => u.role === options.role) : all;
     // Stable order — must match the pg implementation's `ORDER BY created_at
     // ASC` so a SQL `LIMIT` window and this in-memory `.slice` agree.
@@ -198,15 +218,33 @@ export class InMemoryUserRepository implements UserRepository {
 
   async findById(tenantId: string, id: string): Promise<User | null> {
     const u = this.users.get(id);
-    if (!u || u.tenantId !== tenantId) return null;
+    if (!u || u.tenantId !== tenantId || u.deletedAt) return null;
     return { ...u };
   }
 
   async findByMobileNumber(tenantId: string, e164: string): Promise<User | null> {
     const match = Array.from(this.users.values()).find(
-      (u) => u.tenantId === tenantId && u.mobileNumber === e164,
+      (u) => u.tenantId === tenantId && u.mobileNumber === e164 && !u.deletedAt,
     );
     return match ? { ...match } : null;
+  }
+
+  async softDeleteSelf(tenantId: string, id: string): Promise<User | null> {
+    const u = this.users.get(id);
+    if (!u || u.tenantId !== tenantId || u.deletedAt) return null;
+    if (u.role === 'owner') {
+      const anotherOwner = Array.from(this.users.values()).some(
+        (other) =>
+          other.tenantId === tenantId &&
+          other.id !== id &&
+          other.role === 'owner' &&
+          !other.deletedAt,
+      );
+      if (!anotherOwner) return null;
+    }
+    const next: User = { ...u, deletedAt: new Date(), updatedAt: new Date() };
+    this.users.set(id, next);
+    return { ...next };
   }
 
   async setMobileNumber(

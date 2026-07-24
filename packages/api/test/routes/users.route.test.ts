@@ -270,3 +270,136 @@ describe('POST/GET /api/users/invitations — Tier 4 Team members (PR 3)', () =>
     expect(res.body.data).toEqual([]);
   });
 });
+
+describe('DELETE /api/users/me — in-app account deletion (guideline 5.1.1(v))', () => {
+  let repo: InMemoryUserRepository;
+  let ownerId: string;
+  let techId: string;
+  const audited: Array<{ eventType: string; entityId: string; metadata?: unknown }> = [];
+  const auditRepo = {
+    create: async (e: { eventType: string; entityId: string; metadata?: unknown }) => {
+      audited.push(e);
+      return e as never;
+    },
+  };
+
+  function buildDeleteApp(
+    clerkUserId: string,
+    role: 'owner' | 'dispatcher' | 'technician',
+    deps: UsersRouteDeps = {},
+  ) {
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: clerkUserId,
+        sessionId: 'sess-1',
+        tenantId: TENANT,
+        role,
+      };
+      next();
+    });
+    app.use('/api/users', createUsersRouter(repo, deps, auditRepo as never));
+    return app;
+  }
+
+  beforeEach(async () => {
+    repo = new InMemoryUserRepository();
+    audited.length = 0;
+    ownerId = uuidv4();
+    techId = uuidv4();
+    await repo.create!({
+      id: ownerId, tenantId: TENANT, email: 'owner@example.com',
+      role: 'owner', canFieldServe: true, clerkUserId: 'clerk_owner',
+    });
+    await repo.create!({
+      id: techId, tenantId: TENANT, email: 'tech@example.com',
+      role: 'technician', canFieldServe: false, clerkUserId: 'clerk_tech',
+    });
+  });
+
+  it('soft-deletes the caller, hides them from reads, and emits an audit event', async () => {
+    const app = buildDeleteApp('clerk_tech', 'technician');
+    const res = await request(app).delete('/api/users/me');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ deleted: true });
+
+    const remaining = await repo.findByTenant(TENANT);
+    expect(remaining.map((u) => u.id)).toEqual([ownerId]);
+    expect(await repo.findById(TENANT, techId)).toBeNull();
+
+    expect(audited).toHaveLength(1);
+    expect(audited[0].eventType).toBe('user.account_deleted');
+    expect(audited[0].entityId).toBe(techId);
+  });
+
+  it('deletes the Clerk user first when a secret key is configured', async () => {
+    const clerkFetch = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    const app = buildDeleteApp('clerk_tech', 'technician', {
+      clerkSecretKey: 'sk_test',
+      clerkFetch: clerkFetch as unknown as typeof fetch,
+    });
+    const res = await request(app).delete('/api/users/me');
+    expect(res.status).toBe(200);
+    expect(clerkFetch).toHaveBeenCalledWith(
+      'https://api.clerk.com/v1/users/clerk_tech',
+      expect.objectContaining({ method: 'DELETE' }),
+    );
+  });
+
+  it('aborts with 502 and NO local change when the Clerk delete fails', async () => {
+    const clerkFetch = vi.fn().mockResolvedValue({ ok: false, status: 500 });
+    const app = buildDeleteApp('clerk_tech', 'technician', {
+      clerkSecretKey: 'sk_test',
+      clerkFetch: clerkFetch as unknown as typeof fetch,
+    });
+    const res = await request(app).delete('/api/users/me');
+    expect(res.status).toBe(502);
+    expect(res.body.error).toBe('ACCOUNT_DELETE_FAILED');
+    // The account must remain intact and usable.
+    expect(await repo.findById(TENANT, techId)).not.toBeNull();
+    expect(audited).toHaveLength(0);
+  });
+
+  it('proceeds locally when Clerk returns 404 (already deleted upstream)', async () => {
+    const clerkFetch = vi.fn().mockResolvedValue({ ok: false, status: 404 });
+    const app = buildDeleteApp('clerk_tech', 'technician', {
+      clerkSecretKey: 'sk_test',
+      clerkFetch: clerkFetch as unknown as typeof fetch,
+    });
+    const res = await request(app).delete('/api/users/me');
+    expect(res.status).toBe(200);
+    expect(await repo.findById(TENANT, techId)).toBeNull();
+  });
+
+  it('blocks the last owner with 409 and touches nothing', async () => {
+    const clerkFetch = vi.fn();
+    const app = buildDeleteApp('clerk_owner', 'owner', {
+      clerkSecretKey: 'sk_test',
+      clerkFetch: clerkFetch as unknown as typeof fetch,
+    });
+    const res = await request(app).delete('/api/users/me');
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('LAST_OWNER');
+    expect(clerkFetch).not.toHaveBeenCalled();
+    expect(await repo.findById(TENANT, ownerId)).not.toBeNull();
+    expect(audited).toHaveLength(0);
+  });
+
+  it('lets an owner delete their account when another owner exists', async () => {
+    await repo.create!({
+      id: uuidv4(), tenantId: TENANT, email: 'owner2@example.com',
+      role: 'owner', canFieldServe: true, clerkUserId: 'clerk_owner2',
+    });
+    const app = buildDeleteApp('clerk_owner', 'owner');
+    const res = await request(app).delete('/api/users/me');
+    expect(res.status).toBe(200);
+    expect(await repo.findById(TENANT, ownerId)).toBeNull();
+  });
+
+  it('404s when the caller has no membership row in this tenant', async () => {
+    const app = buildDeleteApp('clerk_stranger', 'technician');
+    const res = await request(app).delete('/api/users/me');
+    expect(res.status).toBe(404);
+  });
+});
