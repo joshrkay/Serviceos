@@ -41,6 +41,26 @@ export default function DeleteAccount() {
   // user in-app with a dead account. Show a terminal instruction instead.
   const [signOutStuck, setSignOutStuck] = useState(false);
 
+  // Clear the LOCAL session and leave. Must actually succeed before
+  // navigating — with the cached session still active, /sign-in bounces
+  // back into the app (root-layout auth gate).
+  const completeSignOut = async () => {
+    let signedOut = false;
+    for (let attempt = 0; attempt < 2 && !signedOut; attempt += 1) {
+      try {
+        await signOut();
+        signedOut = true;
+      } catch {
+        // Retry once — transient network blips are the common cause.
+      }
+    }
+    if (!signedOut) {
+      setSignOutStuck(true);
+      return;
+    }
+    router.replace('/sign-in');
+  };
+
   const onDelete = async () => {
     if (busy) return;
     setBusy(true);
@@ -48,6 +68,15 @@ export default function DeleteAccount() {
     try {
       const res = await api('/api/users/me', { method: 'DELETE' });
       if (!res.ok) {
+        // A 401/403 here means the membership is ALREADY deactivated — the
+        // classic case is a retry after a first attempt whose success
+        // response was lost. Offering another retry would trap the user
+        // (every authed call 401s, the cached session bounces /sign-in
+        // back into the app) — finish the local sign-out instead.
+        if (res.status === 401 || res.status === 403) {
+          await completeSignOut();
+          return;
+        }
         let serverMessage: string | undefined;
         try {
           const body = (await res.json()) as { message?: string };
@@ -58,24 +87,23 @@ export default function DeleteAccount() {
         setError(deleteErrorMessage(res.status, serverMessage));
         return;
       }
-      // Account is gone server-side; clear the LOCAL session. This must
-      // actually succeed before navigating — with the cached session still
-      // active, /sign-in bounces back into the app (root-layout auth gate).
-      let signedOut = false;
-      for (let attempt = 0; attempt < 2 && !signedOut; attempt += 1) {
-        try {
-          await signOut();
-          signedOut = true;
-        } catch {
-          // Retry once — transient network blips are the common cause.
-        }
-      }
-      if (!signedOut) {
-        setSignOutStuck(true);
-        return;
-      }
-      router.replace('/sign-in');
+      await completeSignOut();
     } catch {
+      // Transport error — the DELETE may have reached the API and
+      // deactivated the account even though the response was lost.
+      // Reconcile before advertising a retry that could only 401.
+      try {
+        const probe = await api('/api/me');
+        if (!probe.ok) {
+          // Membership rejected → the deletion landed. Sign out locally.
+          await completeSignOut();
+          return;
+        }
+      } catch {
+        // Still unreachable — genuinely ambiguous; the retry copy below is
+        // safe because a retry after a landed deletion hits the 401 branch
+        // above and transitions into sign-out.
+      }
       setError('Could not delete your account right now. Please try again.');
     } finally {
       setBusy(false);

@@ -551,6 +551,28 @@ describe('DELETE /api/users/me — in-app account deletion (guideline 5.1.1(v))'
     expect(await repo.findById(TENANT, techId)).toBeNull();
   });
 
+  it('returns idempotent 200 when an OWNER double-tap raced the first deletion', async () => {
+    // Both requests loaded the actor before the first commit; the second
+    // gets null from softDeleteSelf because the row is ALREADY deleted —
+    // that must not be misread as the last-owner guard (409).
+    await repo.create!({
+      id: uuidv4(), tenantId: TENANT, email: 'owner2@example.com',
+      role: 'owner', canFieldServe: true, clerkUserId: 'clerk_owner2',
+    });
+    const staleRoster = await repo.findByTenant(TENANT);
+    // First request's deletion commits.
+    expect(await repo.softDeleteSelf(TENANT, ownerId)).not.toBeNull();
+    // Second request sees the stale roster (actor still listed as live).
+    const findByTenantSpy = vi
+      .spyOn(repo, 'findByTenant')
+      .mockResolvedValueOnce(staleRoster);
+    const app = buildDeleteApp('clerk_owner', 'owner');
+    const res = await request(app).delete('/api/users/me');
+    findByTenantSpy.mockRestore();
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ deleted: true });
+  });
+
   it('blocks the last owner with 409 and touches nothing', async () => {
     const clerkFetch = vi.fn();
     const app = buildDeleteApp('clerk_owner', 'owner', {

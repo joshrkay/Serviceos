@@ -435,9 +435,15 @@ export function createUsersRouter(
         // irreversible Clerk delete below.
         const stamped = await userRepo.softDeleteSelf(tenantId, actor.id);
         if (!stamped) {
-          if (actor.role === 'owner') {
-            // Guard blocked between the pre-check and the UPDATE (raced
-            // with another owner's deletion) — same clean 409 as above.
+          // A null result is ambiguous: either the last-owner guard blocked
+          // the UPDATE, or the row was ALREADY deleted (double-tap that
+          // loaded the actor before the first request's commit — for owners
+          // too, after waiting on the tenant lock). Disambiguate by
+          // re-reading: findById hides deleted rows, so null = the deletion
+          // already happened → idempotent success; a live row = the guard
+          // fired → 409.
+          const stillLive = await userRepo.findById(tenantId, actor.id);
+          if (stillLive) {
             res.status(409).json({
               error: 'LAST_OWNER',
               message:
@@ -445,7 +451,6 @@ export function createUsersRouter(
                 'or contact support to close the whole workspace.',
             });
           } else {
-            // Row already deleted (double-tap) — idempotent success.
             res.json({ deleted: true });
           }
           return;

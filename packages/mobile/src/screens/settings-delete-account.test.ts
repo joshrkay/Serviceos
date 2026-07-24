@@ -113,6 +113,44 @@ describe('Delete account screen (guideline 5.1.1(v))', () => {
     expect(h.replace).not.toHaveBeenCalled();
   });
 
+  it('reconciles a lost response: /api/me rejected → signs out instead of offering a doomed retry', async () => {
+    h.api
+      .mockRejectedValueOnce(new Error('network dropped mid-response'))
+      .mockResolvedValueOnce({ ok: false, status: 401, json: async () => ({}) });
+    const { getByText } = render(createElement(DeleteAccount));
+    fireEvent.click(getByText('Delete my account'));
+    fireEvent.click(getByText('Yes, permanently delete my account'));
+
+    await waitFor(() => expect(h.api).toHaveBeenCalledWith('/api/me'));
+    await waitFor(() => expect(h.signOut).toHaveBeenCalled());
+    await waitFor(() => expect(h.replace).toHaveBeenCalledWith('/sign-in'));
+  });
+
+  it('reconciles a lost response: /api/me still ok → account alive, retry copy shown', async () => {
+    h.api
+      .mockRejectedValueOnce(new Error('network dropped mid-response'))
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({}) });
+    const { getByText, findByText } = render(createElement(DeleteAccount));
+    fireEvent.click(getByText('Delete my account'));
+    fireEvent.click(getByText('Yes, permanently delete my account'));
+
+    expect(
+      await findByText('Could not delete your account right now. Please try again.'),
+    ).toBeTruthy();
+    expect(h.signOut).not.toHaveBeenCalled();
+    expect(h.replace).not.toHaveBeenCalled();
+  });
+
+  it('a 401 on the DELETE itself (retry after landed deletion) transitions into sign-out', async () => {
+    h.api.mockResolvedValue({ ok: false, status: 401, json: async () => ({}) });
+    const { getByText } = render(createElement(DeleteAccount));
+    fireEvent.click(getByText('Delete my account'));
+    fireEvent.click(getByText('Yes, permanently delete my account'));
+
+    await waitFor(() => expect(h.signOut).toHaveBeenCalled());
+    await waitFor(() => expect(h.replace).toHaveBeenCalledWith('/sign-in'));
+  });
+
   it('shows the restart instruction and does NOT navigate when sign-out keeps failing', async () => {
     // Navigating to /sign-in with a live cached session bounces straight
     // back into the app (root-layout auth gate) — the screen must hold.
