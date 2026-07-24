@@ -118,6 +118,24 @@ one hits `23505` on a different invoice → `recordPayment` throws `ValidationEr
 (`routes.ts:1185-1220`) does not match that message → rethrow → 500 → **Stripe retries
 forever**.
 
+### P0-6 · Concurrent payments overpay an invoice; no guard rejects the second
+**Track 2.** `packages/api/src/invoices/pg-invoice.ts:320-333`, `invoices/payment.ts:470-480`
+
+Same missing predicate as P0-3, different victim. `recordPayment`'s two guards — payable status
+(`payment.ts:473-476`) and `amountCents > amountDueCents` (`:478-480`) — both evaluate an
+in-memory invoice read at `:470`. The UPDATE they gate is keyed `WHERE id = $2 AND tenant_id = $1`
+only, with **neither a payable-status nor a remaining-balance predicate**.
+
+Two full-balance payments starting concurrently on one open invoice — a double-clicked pay button,
+or a payment link and a Terminal charge landing together — both pass both checks, both insert a
+payment row, and both credits apply, because the UPDATE derives from the row's own current value by
+design (`:316-318`). Result: `amount_paid_cents` at 2× `total_cents`, `amount_due_cents` clamped to
+0 by `GREATEST` (`:323`) so the overpayment is invisible on the invoice, status `paid`. **The
+customer is charged twice and every existing test passes.**
+
+Not caught by L3: both payment rows exist and sum to the inflated column, so the balance invariant
+still agrees. The assertion that catches it is L4 (`amount_paid_cents <= total_cents`).
+
 ---
 
 ## Track 1 — Money type end to end
@@ -234,12 +252,26 @@ schema-parity test** (`shared/contracts/status.test.ts:49`).
 
 **Void → link invalidation: BROKEN.** See P0-1.
 
-**Paid-invoice reject: HOLDS** at the app layer on both paths — `recordPayment` rejects anything
-outside `['open','partially_paid']` (`invoices/payment.ts:473-476`); the webhook paths
-(`routes.ts:1167`, `:1387`) route through the same guard and swallow the ValidationError as
-idempotent success (`:1212-1214`, `:1410-1416`). A paid invoice is never credited twice.
-Pinned by `test/invoices/payment.test.ts:451-462`. **Weakened by** the racy check-then-write of
-P0-3 and the unguarded `reconcileInvoiceFromPayments`.
+**Paid-invoice reject: HOLDS SERIALLY, BROKEN UNDER CONCURRENCY.** At the app layer on both paths
+`recordPayment` rejects anything outside `['open','partially_paid']` (`invoices/payment.ts:473-476`)
+and rejects `amountCents > amountDueCents` (`:478-480`); the webhook paths (`routes.ts:1167`,
+`:1387`) route through the same guard and swallow the ValidationError as idempotent success
+(`:1212-1214`, `:1410-1416`). Serially, a paid invoice is never credited twice — pinned by
+`test/invoices/payment.test.ts:451-462`.
+
+**But both guards are check-then-act against a stale in-memory read, and the write they gate carries
+no matching predicate.** `incrementAmountPaidAtomic`'s UPDATE is keyed `WHERE id = $2 AND
+tenant_id = $1` only (`pg-invoice.ts:330`) — no payable-status predicate, no remaining-balance
+predicate. Two full-balance payments starting concurrently on one open invoice both read the same
+balance, both pass both checks, both insert a payment row, and both credits apply: the UPDATE
+derives from the row's own current value by design (`:316-318`), so nothing is lost and nothing is
+rejected. `amount_paid_cents` ends at 2× `total_cents`, `amount_due_cents` clamps to 0 via
+`GREATEST` (`:323`) and hides the overpayment, and status flips to `paid`.
+
+**This is a distinct defect from P0-3, and L3 does not catch it.** Both payment rows exist and sum
+to the inflated column, so `amount_paid_cents == Σ(active payments)` still holds — the invariant
+that breaks is `amount_paid_cents <= total_cents`, which is why the ladder below needs an L4. Also
+weakened by the unguarded `reconcileInvoiceFromPayments`.
 
 Dead payability predicates: `isPayableInvoice` (`invoice-payment-link.ts:75-77`) and
 `assessPaymentReadiness` (`payment-readiness.ts:5`) have **no production callers**; every real
@@ -576,7 +608,13 @@ L2  invoice.subtotal_cents  == Σ(line.total_cents)
     invoice.total_cents     == subtotal − discount + tax + processing_fee
 L3  invoice.amount_paid_cents == Σ(active payments.amount_cents)   ← refund-inclusive, by design
     invoice.amount_due_cents  == max(0, total_cents − amount_paid_cents)
+L4  invoice.amount_paid_cents <= invoice.total_cents               ← BROKEN under concurrency
 ```
+
+**L4 is not redundant with L3 — it is the layer L3 is blind to.** Concurrent full-balance credits
+inflate `amount_paid_cents` *and* write matching payment rows, so the sum still agrees and L3 passes
+while the invoice is overpaid. Any sweep built only on L3 would report clean on exactly the
+double-credit case it was meant to catch.
 
 **L3 is the money equivalent of comms's RLS sweep.** It is the codebase's own stated invariant
 (`payment-service.ts:234-237`), it is currently maintained by a stateful counter rather than a SUM,
@@ -588,8 +626,15 @@ So `/goal money` **can** assert:
 
 - **L1/L2/L3 arithmetic reconciliation** across every invoice and estimate. L1 will fail today —
   that is the P0-2 proof.
-- **No payment survives a void** — and, given P0-1, also *no live payment link survives a void*,
-  which is the stronger and more important form.
+- **No payment is credited *after* a void** — and, given P0-1, also *no live payment link survives
+  a void*, which is the stronger and more important form. **The invariant must be scoped to
+  post-void credits, not to payments-on-void-invoices.** `partially_paid → void` is an allowed
+  transition (`invoice.ts:172`) and `transitionInvoiceStatus` writes only status, so a legitimately
+  voided partially-paid invoice keeps its completed pre-void payment rows — that is valid history,
+  not a defect. The unscoped form would fail it. Scoping requires a void timestamp to compare
+  `payments.received_at` against, and **there is no `voided_at` column** (the void path writes
+  `status` and `updated_at` only, per P0-1), so the gate must either read the void audit event or
+  assert on live link state instead.
 - **State-machine invariants** at the DB level: no invoice in `paid` that has a void/canceled
   history; no estimate with two live invoices via `estimate_id`.
 - **Webhook idempotency** under redelivery and concurrency — there is a real DB constraint to
