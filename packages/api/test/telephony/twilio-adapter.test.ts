@@ -2492,3 +2492,35 @@ describe('RV-130 — "stop recording" objection in the shared safety scan', () =
     expect(session.machine.currentState).toBe('escalating');
   });
 });
+
+// ─── Comms C5 — consent announcement precedes capture (Gather transport) ─────
+
+describe('C5 buildTwiML: <Start><Record> placement', () => {
+  it('emits the record block AFTER the first <Say> so the disclosure is spoken before capture', () => {
+    const xml = buildTwiML(
+      [
+        { type: 'tts_play', payload: { text: 'Greeting with disclosure inside' } },
+        { type: 'tts_play', payload: { text: 'Second line' } },
+      ],
+      {
+        gatherActionUrl: '/g',
+        recordingStatusCallback: 'https://api.test/api/telephony/recording',
+      },
+    );
+    const firstSay = xml.indexOf('<Say');
+    const record = xml.indexOf('<Start><Record');
+    const firstSayClose = xml.indexOf('</Say>');
+    expect(firstSay).toBeGreaterThanOrEqual(0);
+    expect(record).toBeGreaterThan(firstSayClose);
+    // ASR (<Gather>) also comes after the disclosure.
+    expect(xml.indexOf('<Gather')).toBeGreaterThan(firstSayClose);
+  });
+
+  it('with no <Say> at all the record block leads the document (nothing to disclose first)', () => {
+    const xml = buildTwiML([], {
+      gatherActionUrl: '/g',
+      recordingStatusCallback: 'https://api.test/recording',
+    });
+    expect(xml.indexOf('<Start><Record')).toBeLessThan(xml.indexOf('<Gather'));
+  });
+});
