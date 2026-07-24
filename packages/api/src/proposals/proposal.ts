@@ -755,11 +755,17 @@ export function validateProposalInput(input: CreateProposalInput): string[] {
 
 export function createProposal(input: CreateProposalInput): Proposal {
   const now = new Date();
+  // The load-bearing signal is the explicit `voiceMutation` flag every voice
+  // call site sets — a conversational readback confirms interpretation, never
+  // authorization. RIVET P4: an S1 (inbound, unauthenticated caller) surface
+  // is treated the same way — a stranger's transcript can never carry an
+  // autonomous trust tier into an auto-approve. (The previous
+  // `'inapp_voice'`/`'telephony_voice'` channel comparisons were dead — real
+  // channels are `'telephony'`/`'inapp'` — so the `voiceMutation` flag and the
+  // surface stamp are the two real guards, not a channel string.)
   const voiceMutation =
     input.sourceContext?.voiceMutation === true ||
-    input.sourceContext?.channel === 'inapp_voice' ||
-    input.sourceContext?.channel === 'telephony_voice';
-  // A conversational readback confirms interpretation, never authorization.
+    input.sourceContext?.surface === 'S1';
   // The only voice-originated exception is the separately gated autonomous
   // booking lane, whose evaluation is explicit and auditable.
   const effectiveTrustTier =

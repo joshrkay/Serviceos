@@ -228,6 +228,17 @@ export class TransactionalCommsService implements SchedulingConfirmationNotifier
     const invoice = await this.deps.invoiceRepo.findById(tenantId, invoiceId);
     if (!invoice) return;
 
+    // RIVET invariant I10 — send-time state re-evaluation. An overdue reminder
+    // is scheduled/raised against the state at sweep time, but payment can land
+    // in the interim (the customer pays, or a webhook reconciles). Re-check the
+    // live invoice here, at the moment of firing: a paid or zero-balance
+    // invoice must NEVER receive a payment reminder. "The contractor's customer
+    // is being dunned for money they already sent" costs more trust than an
+    // outage. This closes the payment-lands-between-raise-and-fire race for
+    // both the automated dunning sweep and an owner-approved reminder proposal.
+    if (invoice.status === 'paid' || invoice.status === 'void') return;
+    if (typeof invoice.amountDueCents === 'number' && invoice.amountDueCents <= 0) return;
+
     const job = await this.deps.jobRepo.findById(tenantId, invoice.jobId);
     if (!job) return;
 

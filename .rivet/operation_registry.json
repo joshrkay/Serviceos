@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "status": "ratified",
+  "status": "provisional",
   "count": 62,
   "note": "Voice operations only. Non-voice verification surface (S3 payment page, Stripe webhook ingest, settings writes) is tracked separately in non_voice_surface below and is NOT part of the 62.",
   "vector_assignment_rules": {
@@ -476,7 +476,7 @@
       "id": 24,
       "domain": "estimate",
       "verb": "follow_up",
-      "tier": "R2A",
+      "tier": "R2-A",
       "surfaces": [
         "S2"
       ],
@@ -587,7 +587,7 @@
       "id": 30,
       "domain": "invoice",
       "verb": "send_payment_reminder",
-      "tier": "R2A",
+      "tier": "R2-A",
       "surfaces": [
         "S2"
       ],
@@ -862,7 +862,7 @@
       "id": 46,
       "domain": "messaging",
       "verb": "send_appointment_reminder",
-      "tier": "R2A",
+      "tier": "R2-A",
       "surfaces": [
         "S2"
       ],
@@ -879,7 +879,7 @@
       "id": 47,
       "domain": "messaging",
       "verb": "send_on_my_way",
-      "tier": "R2A",
+      "tier": "R2-A",
       "surfaces": [
         "S2"
       ],
@@ -1220,5 +1220,34 @@
     ],
     "p1_uncontracted": [],
     "next_action": "All 62 contracted. Open decisions D1-D13 gate implementation of several. D13 (PCI scope on #33) and D11 (10DLC) are the two that block rather than shape."
-  }
+  },
+  "vector_sentinels": {
+    "note": "Sentinels used in per-op `vectors` arrays. A verifier expands these to concrete vector IDs. Kept as tokens for readability; resolvable here.",
+    "ALL": [
+      "V1",
+      "V2",
+      "V3",
+      "V4",
+      "V5",
+      "V6",
+      "V7",
+      "V8",
+      "V9",
+      "V10",
+      "V11"
+    ],
+    "ALL_EXCEPT_V6": [
+      "V1",
+      "V2",
+      "V3",
+      "V4",
+      "V5",
+      "V7",
+      "V8",
+      "V9",
+      "V10",
+      "V11"
+    ]
+  },
+  "ratification_note": "Marked provisional (was 'ratified'): T0 reconciliation found 22/62 ops have no voice on-ramp and the code-pinned voice-action-catalog.md carries ~14 speakable ops with no registry id. Per spec \u00a77, (re-)ratification is human-only. No operation tier or surface was changed here \u2014 see .rivet/production_state.json reconciliation. Serialization normalized: R2A->R2-A; vector sentinels declared."
 }

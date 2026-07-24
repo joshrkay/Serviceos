@@ -101,10 +101,16 @@ function invoiceFlowGateway(lineItemDescriptions: string[]): LLMGateway {
 function makeEstimateCtx(opts: {
   gateway: LLMGateway;
   catalogRepo?: CatalogItemRepository;
+  /** Owner (surface S2) session — required for operator-only intents such as
+   *  draft_invoice/record_payment, which the P4 S1 allowlist reserves for S2. */
+  ownerSession?: boolean;
 }) {
   const store = new VoiceSessionStore({ startInterval: false });
   const proposalRepo = new InMemoryProposalRepository();
-  const session = store.create('tenant-abc', 'telephony', { callSid: 'CA-est' });
+  const session = store.create('tenant-abc', 'telephony', {
+    callSid: 'CA-est',
+    ...(opts.ownerSession ? { ownerSession: true } : {}),
+  });
   session.machine.dispatch({
     type: 'incoming_call',
     callSid: 'CA-est',
@@ -284,6 +290,7 @@ describe('WS5 — grounded estimate at handleCreateProposal', () => {
     const ctx = makeEstimateCtx({
       gateway: invoiceFlowGateway(['water heater replacement']),
       catalogRepo: stubCatalogRepo(),
+      ownerSession: true, // draft_invoice is an S2-only op (P4 allowlist)
     });
     const sideEffects = await runConfirmFlow(ctx);
 
@@ -314,7 +321,11 @@ describe('WS5 — grounded estimate at handleCreateProposal', () => {
   it('WS17 I3 — a NON-extended type (record_payment) keeps the fixed generic line', async () => {
     const store = new VoiceSessionStore({ startInterval: false });
     const proposalRepo = new InMemoryProposalRepository();
-    const session = store.create('tenant-abc', 'telephony', { callSid: 'CA-pay' });
+    // record_payment is an S2-only op (P4 allowlist) — owner session.
+    const session = store.create('tenant-abc', 'telephony', {
+      callSid: 'CA-pay',
+      ownerSession: true,
+    });
     session.machine.dispatch({
       type: 'incoming_call',
       callSid: 'CA-pay',

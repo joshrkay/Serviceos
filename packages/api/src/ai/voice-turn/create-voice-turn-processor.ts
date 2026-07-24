@@ -135,6 +135,10 @@ import type {
 } from '../../proposals/proposal';
 import { createProposal as buildProposal } from '../../proposals/proposal';
 import {
+  isProposalTypeAllowedOnSurface,
+  type ProposalSurface,
+} from '../../proposals/surface';
+import {
   buildNegotiationCallbackContent,
   evaluateNegotiationDiscount,
 } from '../../proposals/guardrails/negotiation-guardrail';
@@ -1123,6 +1127,12 @@ export function createVoiceTurnProcessor(
           sourceContext: {
             source: 'calling-agent',
             channel: 'telephony',
+            // RIVET P4 — negotiation always routes to a human `callback` /
+            // clarification (both S1-safe), but the surface still travels with
+            // the proposal for audit + the execution-boundary re-check.
+            surface: (session.machine.currentContext.ownerSession === true
+              ? 'S2'
+              : 'S1') as ProposalSurface,
             sessionId: session.id,
           },
           // proposals.ai_run_id has an FK to ai_runs(id). Use the REAL run id
@@ -1153,16 +1163,50 @@ export function createVoiceTurnProcessor(
       // estimates use `unitPrice`, invoices `unitPriceCents` (+ recomputed
       // totalCents) — see the convention doc. Undefined for every other intent
       // / a quote with no line items — the generic path then runs unchanged.
+      // RIVET P4 / spec §2 — the inbound voice-turn processor drives the live
+      // caller FSM. A verified owner calling in carries `ownerSession`
+      // (RV-070, from caller-ID identity, never transcript content); everyone
+      // else is an unauthenticated S1 caller. Derive the surface from that
+      // session identity and enforce the S1 allowlist at creation: an intent
+      // that maps to a non-allowlisted (S2-only) proposal type is coerced to a
+      // `voice_clarification` so no actionable S2 proposal is ever minted from
+      // a caller's transcript. The execution boundary re-checks the stamped
+      // surface (I6) as defense-in-depth.
+      const surface: ProposalSurface =
+        session.machine.currentContext.ownerSession === true ? 'S2' : 'S1';
+      const requestedProposalType = intentToProposalType(intent);
+      const surfaceAllowed = isProposalTypeAllowedOnSurface(surface, requestedProposalType);
+      if (!surfaceAllowed && deps.auditRepo) {
+        try {
+          await deps.auditRepo.create(
+            createAuditEvent({
+              tenantId,
+              actorId: deps.systemActorId ?? 'calling-agent',
+              actorRole: 'system',
+              eventType: 'voice.surface_violation_blocked',
+              entityType: 'voice_session',
+              entityId: session.id,
+              metadata: { intent: intent ?? null, requestedProposalType, surface },
+            }),
+          );
+        } catch {
+          /* audit is best-effort */
+        }
+      }
+      const effectiveProposalType: ProposalType = surfaceAllowed
+        ? requestedProposalType
+        : 'voice_clarification';
+
       const estimateQuote =
-        intent === 'draft_estimate'
+        surfaceAllowed && intent === 'draft_estimate'
           ? await groundVoiceQuote(session, entities, fx, 'unitPrice')
-          : intent === 'create_invoice'
+          : surfaceAllowed && intent === 'create_invoice'
             ? await groundVoiceQuote(session, entities, fx, 'unitPriceCents')
             : undefined;
 
       const proposal = buildProposal({
         tenantId,
-        proposalType: intentToProposalType(intent),
+        proposalType: effectiveProposalType,
         payload: {
           intent,
           entities,
@@ -1178,6 +1222,9 @@ export function createVoiceTurnProcessor(
         sourceContext: {
           source: 'calling-agent',
           channel: 'telephony',
+          // RIVET P4 — the caller's surface travels with the proposal so the
+          // execution boundary can re-check it (I6).
+          surface,
           sessionId: session.id,
           // Ambiguous-line candidates for the review UI (same shape the
           // EstimateTaskHandler stores) — only present when a line was

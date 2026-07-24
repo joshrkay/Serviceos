@@ -6,6 +6,7 @@ import { ProposalType } from '../proposal';
 import { AppError } from '../../shared/errors';
 import { ProposalExecutionRepository } from '../proposal-execution';
 import { resolveChainReferences } from './chain-resolution';
+import { isProposalTypeAllowedOnSurface, surfaceFromSourceContext } from '../surface';
 import { createLogger } from '../../logging/logger';
 import { executeAudited } from '../../commands/command-runner';
 import { AuditEventInput, AuditRepository } from '../../audit/audit';
@@ -110,6 +111,33 @@ export class ProposalExecutor {
         `Proposal is still in the 5-second undo window (${remaining}ms remaining). ` +
           `Retry after the window closes, or call undoProposal to cancel.`,
         409
+      );
+    }
+
+    // RIVET P4 / invariant I6 — surface enforcement at the EXECUTION boundary,
+    // not at intent-parse time. A proposal stamped with the S1 (inbound,
+    // unauthenticated caller) surface may only execute if its type is on the
+    // S1 allowlist. This is defense-in-depth behind the creation-time
+    // allowlist in the voice-turn processor: even if a mis-stamped or
+    // maliciously-shaped S1 proposal reaches an operator's approval queue and
+    // is approved, an S2-only op (send invoice, take payment, …) still cannot
+    // execute from an S1 session. An absent/S2/S3 surface is unrestricted, so
+    // every existing proposal and the operator/in-app paths are unaffected.
+    const surface = surfaceFromSourceContext(
+      proposal.sourceContext as Record<string, unknown> | undefined,
+    );
+    if (!isProposalTypeAllowedOnSurface(surface, proposal.proposalType)) {
+      logger.error('Blocked cross-surface proposal execution', {
+        tenantId: proposal.tenantId,
+        proposalId: proposal.id,
+        proposalType: proposal.proposalType,
+        surface,
+      });
+      throw new AppError(
+        'SURFACE_VIOLATION',
+        `Proposal type '${proposal.proposalType}' is not permitted on surface '${surface}' ` +
+          `(inbound caller sessions may only reach the S1 allowlist).`,
+        403
       );
     }
 
