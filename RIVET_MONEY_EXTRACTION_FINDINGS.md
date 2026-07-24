@@ -136,6 +136,32 @@ customer is charged twice and every existing test passes.**
 Not caught by L3: both payment rows exist and sum to the inflated column, so the balance invariant
 still agrees. The assertion that catches it is L4 (`amount_paid_cents <= total_cents`).
 
+### P0-7 · The two reconcilers disagree on whether refunds subtract — L3 has two definitions
+**Track 3/4.** `packages/api/src/invoices/payment.ts:38-40` vs `payments/payment-service.ts:234-237`
+
+The codebase states `amount_paid == Σ(active payment amount_cents)` **refund-inclusive**
+(`payment-service.ts:234-237`), and `reconcileInvoiceAfterReversal` honors it. But the *other*
+reconciler computes the balance **refund-net**:
+
+```
+paidCents = payments
+  .filter(completed|processing, !reversedAt)
+  .reduce((sum, p) => sum + (p.amountCents - (p.refundedAmountCents ?? 0)), 0)   // payment.ts:38-40
+```
+
+**Same column, two different definitions.** The interleave that fires it: payment row commits →
+invoice credit fails (separate transactions, per P0-3's note) → a refund is recorded → duplicate
+checkout delivery invokes the repair path. The `paidCents <= invoice.amountPaidCents` guard
+(`:46-48`) does **not** short-circuit here, because the failed credit left `amountPaidCents` stale-low
+— so the net figure exceeds it and is written. A 100-cent payment refunded 30 leaves
+`amount_paid_cents = 70` while `Σ(active payments.amount_cents) = 100`.
+
+**This breaks L3 directly**, and it is self-acknowledged: the function's own docstring concedes the
+guard holds "even if a credit type is undercounted here" (`:24-27`). Note the divergence is an
+inconsistency, not a clear loss — net-70 is arguably the economically right number; what makes it a
+defect is that every other path uses the inclusive convention. Whichever convention wins, **both
+reconcilers must implement the same one before L3 can be swept.**
+
 ---
 
 ## Track 1 — Money type end to end
@@ -524,7 +550,8 @@ strengthens rather than weakens the case for L3 as the sweep spine. Note the in-
 with `recordPayment`) — the lost update described here is not that one and is not flagged in code.
 
 The only reconciliation that exists is **narrow, one-directional, and crash-recovery-only**:
-`reconcileInvoiceFromPayments` (increase-only, `payment.ts:29-59`) fires solely on a webhook
+`reconcileInvoiceFromPayments` (increase-only, **and refund-net — see P0-7**, `payment.ts:29-59`)
+fires solely on a webhook
 duplicate-insert retry (`:531-538`); `reconcileInvoiceAfterReversal` (decrease-only,
 `payment-service.ts:239-273`) solely when a reversal redelivery finds the payment already flipped
 (`:325-334`). **Neither runs as a scheduled job** — no reconciliation or ledger-sweep worker exists
@@ -631,10 +658,16 @@ So `/goal money` **can** assert:
   post-void credits, not to payments-on-void-invoices.** `partially_paid → void` is an allowed
   transition (`invoice.ts:172`) and `transitionInvoiceStatus` writes only status, so a legitimately
   voided partially-paid invoice keeps its completed pre-void payment rows — that is valid history,
-  not a defect. The unscoped form would fail it. Scoping requires a void timestamp to compare
-  `payments.received_at` against, and **there is no `voided_at` column** (the void path writes
-  `status` and `updated_at` only, per P0-1), so the gate must either read the void audit event or
-  assert on live link state instead.
+  not a defect. The unscoped form would fail it.
+
+  **Scoping this gate is currently blocked, and that is a prerequisite finding rather than a
+  detail.** It needs a durable void time to compare `payments.received_at` against, and none
+  exists: there is no `voided_at` column, `transitionInvoiceStatus` writes only `status` and
+  `updated_at` (`invoice.ts:420-423`), `updated_at` is overwritten by any later mutation, and the
+  status route emits **no audit event at all** (`routes/invoices.ts:556-567`). So there is no void
+  audit event for a gate to read. **A void timestamp or a void audit event must be added before
+  either this gate or the "paid with void history" assertion below can be evaluated** — asserting
+  on live payment-link state is the only form available without new writes.
 - **State-machine invariants** at the DB level: no invoice in `paid` that has a void/canceled
   history; no estimate with two live invoices via `estimate_id`.
 - **Webhook idempotency** under redelivery and concurrency — there is a real DB constraint to
@@ -649,6 +682,14 @@ So `/goal money` **can** assert:
   `amount_paid` is refund-inclusive by design. A sweep asserting "fully refunded ⇒ not paid" would
   contradict the intended invariant, not catch a bug. **This must be encoded as a documented
   exception, or the design decision must change first.**
+
+  **Caveat — the "by design" is not uniformly implemented.** Per P0-7, `reconcileInvoiceFromPayments`
+  writes the refund-**net** balance while the stated invariant and the reversal reconciler are
+  refund-**inclusive**. So the convention is contradicted by a live repair path, and that
+  contradiction *is* assertable even though the refund-adjustment question itself is a design
+  decision. **Gate it:** the two reconcilers must agree before L3 is swept, and the sweep should
+  fail on any invoice where the two definitions disagree. This belongs in the loop, not in the
+  can't-assert list.
 - **Cross-system reconciliation against Stripe's balance** — no stored Stripe-side aggregate to
   compare to, and P0-1 means Stripe can hold captures the DB has no row for. This is precisely
   the discrepancy class the extraction was written to anticipate.
