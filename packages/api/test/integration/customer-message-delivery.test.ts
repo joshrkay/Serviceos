@@ -189,7 +189,7 @@ describe('sendCustomerMessage (integration) — claim-before-send against real P
           idempotencyKeyPrefix: prefix,
         },
       ),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({ eligibilitySuppressed: false });
 
     expect(warn).toHaveBeenCalled();
     expect(await dispatchRepo.findByEntity(tenantId, 'estimate', entityId)).toHaveLength(0);

@@ -163,4 +163,35 @@ describe('notifyInvoiceOverdue — I10 send-time re-evaluation', () => {
     // At least one channel delivered (consent is on for the seeded customer).
     expect(h.delivery.sentSms.length + h.delivery.sentEmails.length).toBeGreaterThan(0);
   });
+
+  it('SUPPRESSES at the send boundary when payment lands AFTER the entry read (Codex): no SMS, no false "sent"', async () => {
+    const invoice = await h.invoiceRepo.create(makeInvoice(h.jobId, 'open', 420000));
+    // Simulate the payment-during-send race: the invoice is open when
+    // notifyInvoiceOverdue's entry/`fresh` reads run, then a webhook settles it
+    // in the async window before the provider dispatch. The eligibilityCheck
+    // (which runs inside the claim, right before send) reloads and must catch
+    // it. We trip the mutation on the provider call itself.
+    // Mutate the invoice to paid on the eligibilityCheck's read (the 3rd read:
+    // entry + `fresh` both saw OPEN), then have the payment STICK for all
+    // subsequent reads (email channel included), mirroring a real webhook.
+    const realFindById = h.invoiceRepo.findById.bind(h.invoiceRepo);
+    let reads = 0;
+    let paid = false;
+    h.invoiceRepo.findById = (async (t: string, id: string) => {
+      const row = await realFindById(t, id);
+      reads++;
+      if (id === invoice.id && reads >= 3) paid = true;
+      if (paid && row && id === invoice.id) {
+        return { ...row, status: 'paid' as InvoiceStatus, amountDueCents: 0, amountPaidCents: 420000 };
+      }
+      return row;
+    }) as typeof realFindById;
+
+    const outcome = await h.comms.notifyInvoiceOverdue(TENANT, invoice.id, 'manual');
+
+    // Nothing was dunned, and the outcome is suppression — NOT a false "sent".
+    expect(h.delivery.sentSms).toHaveLength(0);
+    expect(h.delivery.sentEmails).toHaveLength(0);
+    expect(outcome).toEqual({ status: 'suppressed', reason: 'paid' });
+  });
 });

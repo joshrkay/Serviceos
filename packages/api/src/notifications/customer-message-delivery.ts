@@ -25,6 +25,20 @@ export interface CustomerMessageDeliveryDeps {
   logger: Logger;
 }
 
+/**
+ * Thrown by an `eligibilityCheck` that fires inside the claimed critical
+ * section (RIVET I10). Treated as a benign suppression by `sendOneChannel`
+ * (info log, no dispatch row, claim released) — never a failure. Neutrally
+ * named because it guards both SMS and email, unlike the consent/DNC
+ * `SmsSuppressedError`.
+ */
+export class EligibilitySuppressedError extends Error {
+  constructor(public readonly reason: string) {
+    super(`send suppressed by eligibility recheck: ${reason}`);
+    this.name = 'EligibilitySuppressedError';
+  }
+}
+
 export interface SendCustomerMessageInput {
   tenantId: string;
   customer: Customer;
@@ -36,6 +50,28 @@ export interface SendCustomerMessageInput {
   emailText?: string;
   emailHtml?: string;
   idempotencyKeyPrefix: string;
+  /**
+   * RIVET I10 — last-moment eligibility recheck. Runs INSIDE the send claim,
+   * immediately before EACH channel's provider dispatch (so email is
+   * re-checked after SMS, and the check reflects state live at the actual
+   * send, not at caller entry). Return a suppression reason to abort that
+   * channel's send (throws EligibilitySuppressedError → claim released, no
+   * dispatch row, so the occurrence can still fire later if the condition
+   * that justified suppression reverses), or null to proceed. The window this
+   * closes: a payment webhook settling the invoice between the caller's
+   * pre-send read and the provider call — a paid invoice must never be dunned.
+   */
+  eligibilityCheck?: () => Promise<string | null>;
+}
+
+/** Aggregate outcome of a customer-message send across its channels. */
+export interface SendCustomerMessageResult {
+  /** True iff the eligibilityCheck suppressed every channel that would have
+   * otherwise dispatched — i.e. NOTHING went to a provider. Callers that gate
+   * on live state (dunning reminders) use this to record suppression, not a
+   * false "sent". */
+  eligibilitySuppressed: boolean;
+  eligibilityReason?: string;
 }
 
 /**
@@ -72,36 +108,72 @@ export interface SendCustomerMessageInput {
 export async function sendCustomerMessage(
   deps: CustomerMessageDeliveryDeps,
   input: SendCustomerMessageInput,
-): Promise<void> {
+): Promise<SendCustomerMessageResult> {
   const { customer, tenantId, channels } = input;
+
+  // Per-channel eligibility recheck (RIVET I10), run INSIDE the claim right
+  // before the provider call. Suppressing a channel throws
+  // EligibilitySuppressedError, which sendOneChannel treats as benign and
+  // reports back here; a channel that never attempts a send (no recipient /
+  // body) is not a suppression.
+  const runEligibility = input.eligibilityCheck;
+  const guard = async (): Promise<void> => {
+    if (!runEligibility) return;
+    const reason = await runEligibility();
+    if (reason) throw new EligibilitySuppressedError(reason);
+  };
+  let attempted = 0;
+  let suppressed = 0;
+  let eligibilityReason: string | undefined;
 
   if (channels.includes('sms') && input.smsBody && customer.primaryPhone) {
     const recipient = customer.primaryPhone;
-    await sendOneChannel(deps, input, 'sms', recipient, (idempotencyKey) =>
-      deps.delivery.sendSms({
+    attempted++;
+    const r = await sendOneChannel(deps, input, 'sms', recipient, async (idempotencyKey) => {
+      await guard();
+      return deps.delivery.sendSms({
         to: recipient,
         body: input.smsBody as string,
         tenantId,
         idempotencyKey,
         recipientClass: 'customer',
         consent: { smsConsent: customer.smsConsent === true, customerId: customer.id },
-      }),
-    );
+      });
+    });
+    if (r?.eligibilitySuppressed) {
+      suppressed++;
+      eligibilityReason ??= r.eligibilityReason;
+    }
   }
 
   if (channels.includes('email') && input.emailSubject && input.emailText && customer.email) {
     const recipient = customer.email;
-    await sendOneChannel(deps, input, 'email', recipient, (idempotencyKey) =>
-      deps.delivery.sendEmail({
+    attempted++;
+    const r = await sendOneChannel(deps, input, 'email', recipient, async (idempotencyKey) => {
+      await guard();
+      return deps.delivery.sendEmail({
         to: recipient,
         subject: input.emailSubject as string,
         text: input.emailText as string,
         html: input.emailHtml,
         tenantId,
         idempotencyKey,
-      }),
-    );
+      });
+    });
+    if (r?.eligibilitySuppressed) {
+      suppressed++;
+      eligibilityReason ??= r.eligibilityReason;
+    }
   }
+
+  // Suppressed only when EVERY attempted channel was eligibility-suppressed
+  // (nothing reached a provider). If SMS went out before payment landed and
+  // only the later email was suppressed, the customer WAS contacted — not a
+  // suppression from the caller's perspective.
+  return {
+    eligibilitySuppressed: attempted > 0 && suppressed === attempted,
+    ...(eligibilityReason ? { eligibilityReason } : {}),
+  };
 }
 
 async function sendOneChannel(
@@ -109,9 +181,11 @@ async function sendOneChannel(
   input: SendCustomerMessageInput,
   channel: CustomerMessageChannel,
   recipient: string,
-  /** ONLY the provider call — no bookkeeping. See module doc (Codex P1 #2). */
+  /** The eligibility recheck + provider call — no bookkeeping. See module doc
+   * (Codex P1 #2). The recheck throws EligibilitySuppressedError BEFORE the
+   * provider dispatch, so the claim is released (never tombstoned 'sent'). */
   send: (idempotencyKey: string) => Promise<DeliveryResult>,
-): Promise<void> {
+): Promise<{ eligibilitySuppressed: boolean; eligibilityReason?: string }> {
   const claimKey = `${input.idempotencyKeyPrefix}:${channel}`;
   try {
     let result: DeliveryResult | undefined;
@@ -159,7 +233,7 @@ async function sendOneChannel(
             );
           }
         }
-        return;
+        return { eligibilitySuppressed: false };
       }
       result = outcome.result;
     } else {
@@ -167,9 +241,25 @@ async function sendOneChannel(
     }
 
     await recordDispatch(deps, input, channel, recipient, claimKey, result);
+    return { eligibilitySuppressed: false };
   } catch (err) {
     // Best-effort (includes central gate suppression) — never propagate, per
     // this function's documented contract. R5: no longer silent, though.
+    if (err instanceof EligibilitySuppressedError) {
+      // RIVET I10 — the last-moment recheck aborted this channel's send
+      // (e.g. the invoice was paid between caller entry and dispatch). The
+      // claim was released (thrown before the provider call), so a later
+      // legitimate occurrence can still fire. Report it so the caller records
+      // suppression, not a false "sent".
+      deps.logger.info('Customer message suppressed by send-time eligibility recheck', {
+        tenantId: input.tenantId,
+        entityType: input.entityType,
+        entityId: input.entityId,
+        channel,
+        reason: err.reason,
+      });
+      return { eligibilitySuppressed: true, eligibilityReason: err.reason };
+    }
     if (err instanceof SmsSuppressedError) {
       deps.logger.info('Customer SMS suppressed by the consent/DNC gate', {
         tenantId: input.tenantId,
@@ -178,7 +268,7 @@ async function sendOneChannel(
         channel,
         reason: err.reason,
       });
-      return;
+      return { eligibilitySuppressed: false };
     }
     deps.logger.warn('Customer message send failed', {
       tenantId: input.tenantId,
@@ -187,6 +277,7 @@ async function sendOneChannel(
       channel,
       error: err instanceof Error ? err.message : String(err),
     });
+    return { eligibilitySuppressed: false };
   }
 }
 

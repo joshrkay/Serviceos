@@ -228,13 +228,15 @@ describe('sendCustomerMessage — no-longer-silent failure path (R5)', () => {
     const deps = makeDeps();
     vi.spyOn(deps.delivery, 'sendSms').mockRejectedValueOnce(new Error('Twilio 500'));
 
+    // A provider error is caught (never blocks the caller); the result reports
+    // no eligibility suppression (this was a send FAILURE, not a suppression).
     await expect(
       sendCustomerMessage(deps.sendDeps, {
         ...baseInput,
         customer: makeCustomer(),
         channels: ['sms'],
       }),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({ eligibilitySuppressed: false });
 
     expect(deps.logger.warn).toHaveBeenCalledWith(
       'Customer message send failed',

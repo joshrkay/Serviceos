@@ -298,7 +298,13 @@ export class TransactionalCommsService implements SchedulingConfirmationNotifier
       language,
     });
 
-    await sendCustomerMessage(this.deps, {
+    // RIVET I10 — the authoritative send-time guard runs INSIDE the claim,
+    // immediately before each provider dispatch (the `fresh` reread above only
+    // narrows, it does not close, the payment-during-send window: a webhook can
+    // still settle the invoice while withSendClaim/the provider call are
+    // awaited, and email dispatches after SMS). This recheck reloads the
+    // invoice at the actual send boundary and suppresses a now-ineligible send.
+    const sendResult = await sendCustomerMessage(this.deps, {
       tenantId,
       customer,
       entityType: 'invoice_overdue',
@@ -308,7 +314,21 @@ export class TransactionalCommsService implements SchedulingConfirmationNotifier
       emailSubject: tn('email.invoice_overdue.subject', language, { business: businessName }),
       emailText: sms.body,
       idempotencyKeyPrefix: `invoice-overdue:${invoiceId}:${occurrenceToken}`,
+      eligibilityCheck: async () => {
+        const live = await this.deps.invoiceRepo.findById(tenantId, invoiceId);
+        if (!live) return 'not_found';
+        return reminderSuppressionReason(live);
+      },
     });
+    // If the boundary recheck suppressed every channel, nothing was dunned —
+    // report suppression so the handler records it instead of a false "sent".
+    // The eligibilityCheck only ever yields a ReminderSuppressionReason (or
+    // null), so the reported reason is always a valid union member; 'paid' is
+    // a type-safety fallback that in practice never applies.
+    if (sendResult.eligibilitySuppressed) {
+      const reason = (sendResult.eligibilityReason as ReminderSuppressionReason | undefined) ?? 'paid';
+      return { status: 'suppressed', reason };
+    }
     return { status: 'sent' };
   }
 
