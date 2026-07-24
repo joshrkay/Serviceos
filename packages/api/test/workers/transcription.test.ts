@@ -248,3 +248,46 @@ describe('createTranscriptionWorker — correction pass wiring', () => {
     expect(request.messages[1].content).toContain(raw);
   });
 });
+
+describe('createTranscriptionWorker — RIVET I13 provenance stamp (Codex)', () => {
+  function repoWith(source: string | undefined): VoiceRepository & {
+    stampProvenance: ReturnType<typeof vi.fn>;
+  } {
+    return {
+      create: vi.fn(),
+      findById: vi.fn().mockResolvedValue(source ? { id: 'rec-1', source } : { id: 'rec-1' }),
+      updateStatus: vi.fn().mockResolvedValue(null),
+      stampProvenance: vi.fn().mockResolvedValue(null),
+    } as unknown as VoiceRepository & { stampProvenance: ReturnType<typeof vi.fn> };
+  }
+  const provider: TranscriptionProvider = {
+    transcribe: vi.fn().mockResolvedValue({ transcript: 'note to self, order the capacitor', metadata: {} }),
+  };
+
+  it("stamps 'operator' for an authenticated in-app memo (source='inapp_voice')", async () => {
+    const voiceRepo = repoWith('inapp_voice');
+    await createTranscriptionWorker(voiceRepo, provider).handle(makeMessage(), logger);
+    expect(voiceRepo.stampProvenance).toHaveBeenCalledWith('tenant-1', 'rec-1', 'operator');
+  });
+
+  it("does NOT stamp 'operator' for a non-in-app recording (telephony/batch go elsewhere)", async () => {
+    const voiceRepo = repoWith('inbound_call');
+    await createTranscriptionWorker(voiceRepo, provider).handle(makeMessage(), logger);
+    expect(voiceRepo.stampProvenance).not.toHaveBeenCalled();
+  });
+
+  it('is failure-soft: a stamp error never fails transcription', async () => {
+    const voiceRepo = repoWith('inapp_voice');
+    voiceRepo.stampProvenance.mockRejectedValueOnce(new Error('db down'));
+    await expect(
+      createTranscriptionWorker(voiceRepo, provider).handle(makeMessage(), logger),
+    ).resolves.not.toThrow();
+    // Transcription still completed.
+    expect(voiceRepo.updateStatus).toHaveBeenCalledWith(
+      'tenant-1',
+      'rec-1',
+      'completed',
+      expect.anything(),
+    );
+  });
+});

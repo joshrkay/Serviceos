@@ -267,4 +267,40 @@ describe('sendCustomerMessage (integration) — claim-before-send against real P
     );
     expect(delivery.sentSms).toHaveLength(1);
   });
+
+  it('mixed case (Codex): SMS fails, payment lands, email eligibility-suppressed → reports suppressed (nothing delivered)', async () => {
+    const { tenantId } = await createTestTenant(pool);
+    const delivery = new InMemoryDeliveryProvider();
+    // SMS provider errors; the eligibility recheck then suppresses email.
+    vi.spyOn(delivery, 'sendSms').mockRejectedValueOnce(new Error('Twilio 500'));
+    const emailSpy = vi.spyOn(delivery, 'sendEmail');
+    const customer = makeCustomer(tenantId);
+    const entityId = crypto.randomUUID();
+    const prefix = `invoice-overdue:${entityId}:manual`;
+    const warn = vi.fn();
+
+    const result = await sendCustomerMessage(
+      { delivery, dispatchRepo, pool, logger: { ...logger, warn } },
+      {
+        tenantId,
+        customer,
+        entityType: 'invoice_overdue',
+        entityId,
+        channels: ['sms', 'email'],
+        smsBody: 'You have an overdue invoice',
+        emailSubject: 'Overdue invoice',
+        emailText: 'You have an overdue invoice',
+        idempotencyKeyPrefix: prefix,
+        eligibilityCheck: async () => 'paid',
+      },
+    );
+
+    // Nothing reached a provider (SMS failed, email suppressed), and the
+    // reason was an eligibility suppression → suppressed, NOT a false "sent".
+    // Previously `suppressed === attempted` was false (1 !== 2) and this
+    // returned eligibilitySuppressed:false.
+    expect(result).toEqual({ eligibilitySuppressed: true, eligibilityReason: 'paid' });
+    expect(emailSpy).not.toHaveBeenCalled();
+    expect(delivery.sentEmails).toHaveLength(0);
+  });
 });
