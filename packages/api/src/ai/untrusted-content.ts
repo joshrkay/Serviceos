@@ -16,8 +16,10 @@
  * operator agent that reads them. Provenance therefore travels with the
  * content, not the session.
  *
- * This module is the single place that renders caller-authored text into an
- * operator-facing prompt. It mirrors the standing-instructions injection
+ * This module is the single place that RENDERS caller-authored text into an
+ * operator-facing prompt; its matched pair `content-provenance.ts` is the
+ * single place that DECIDES whether stored content is caller-authored.
+ * It mirrors the standing-instructions injection
  * pattern (`standing-instructions-context.ts`): an explicit BEGIN/END fence
  * plus a hardening line that tells the model the fenced lines are DATA to be
  * summarized / replied to, never instructions — injected as its own system

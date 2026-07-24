@@ -19,6 +19,7 @@ import {
   type InjectedStandingInstruction,
 } from '../standing-instructions-context';
 import { buildUntrustedContentSection } from '../untrusted-content';
+import { classifyMessageProvenance } from '../content-provenance';
 
 /** A thread message, trimmed to what the prompt needs. */
 export interface SuggestReplyMessage {
@@ -51,10 +52,6 @@ export interface SuggestReplyResult {
 const DEFAULT_MAX_CHARS = 320;
 const MAX_THREAD_MESSAGES = 20;
 
-function isCustomer(senderRole: string): boolean {
-  return senderRole.trim().toLowerCase() === 'customer';
-}
-
 /** Build the brand-voice system prompt from the tenant's settings. */
 function buildSystemPrompt(input: SuggestReplyInput): string {
   const bv = input.brandVoice ?? {};
@@ -86,7 +83,10 @@ function buildTranscript(messages: SuggestReplyMessage[]): string {
   return messages
     .filter((m) => m.content && m.content.trim().length > 0)
     .slice(-MAX_THREAD_MESSAGES)
-    .map((m) => `${isCustomer(m.senderRole) ? 'Customer' : 'Shop'}: ${m.content.trim()}`)
+    .map(
+      (m) =>
+        `${classifyMessageProvenance(m) === 'untrusted' ? 'Customer' : 'Shop'}: ${m.content.trim()}`,
+    )
     .join('\n');
 }
 
@@ -115,13 +115,16 @@ export class SuggestReplyTask {
       });
     }
     // RIVET I13 — the thread contains caller-authored (S1, untrusted) message
-    // text. Render it inside the untrusted-content fence on its OWN system
-    // message so a "Customer:" line that says "ignore previous instructions"
-    // is quoted DATA to reply to, never an instruction to the drafting model.
-    systemMessages.push({
-      role: 'system',
-      content: buildUntrustedContentSection(transcript, 'Customer message thread'),
-    });
+    // text. Render it inside the untrusted-content fence, and keep it in the
+    // LOWEST-authority slot: the fenced block rides in the user message, never
+    // a system message (system role carries higher instruction priority —
+    // promoting caller text there would raise the very authority the fence
+    // exists to deny). A "Customer:" line that says "ignore previous
+    // instructions" is quoted DATA to reply to, never an instruction.
+    const fencedThread = buildUntrustedContentSection(
+      transcript,
+      'Customer message thread',
+    );
 
     const response = await this.gateway.complete({
       taskType: this.taskType,
@@ -130,8 +133,7 @@ export class SuggestReplyTask {
         ...systemMessages,
         {
           role: 'user',
-          content:
-            "Using the quoted customer message thread above, draft the shop's next reply.",
+          content: `${fencedThread}\n\nUsing the quoted customer message thread above, draft the shop's next reply.`,
         },
       ],
       temperature: 0.7,

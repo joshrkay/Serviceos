@@ -1204,21 +1204,47 @@ export function createVoiceTurnProcessor(
             ? await groundVoiceQuote(session, entities, fx, 'unitPriceCents')
             : undefined;
 
+      // A blocked S1 request must persist as a CANONICAL clarification —
+      // voiceClarificationPayloadSchema requires `transcript` + `reason`, and
+      // clarifications have no execution handler, so a generic
+      // {intent, entities} payload would be a malformed, approve-to-fail card.
+      // The caller's words are preserved for the operator; the intent that was
+      // refused rides alongside for the review UI.
+      const blockedTranscript =
+        typeof entities.transcript === 'string' && entities.transcript.trim().length > 0
+          ? entities.transcript.trim()
+          : `Caller asked for '${intent ?? 'unknown'}' — an operator-only action.`;
+      const payload: Record<string, unknown> = surfaceAllowed
+        ? {
+            intent,
+            entities,
+            // WS5 — grounded line items + confidence meta ride alongside the
+            // raw entities so the operator-side draft shows exactly what was
+            // quoted.
+            ...(estimateQuote
+              ? { lineItems: estimateQuote.lineItems, _meta: estimateQuote.meta }
+              : {}),
+            sessionId: session.id,
+            callSid: session.callSid,
+          }
+        : {
+            transcript: blockedTranscript,
+            reason: 'surface_restricted',
+            ...(intent ? { suggestedIntents: [intent] } : {}),
+            requestedProposalType,
+            sessionId: session.id,
+            callSid: session.callSid,
+          };
+
       const proposal = buildProposal({
         tenantId,
         proposalType: effectiveProposalType,
-        payload: {
-          intent,
-          entities,
-          // WS5 — grounded line items + confidence meta ride alongside the raw
-          // entities so the operator-side draft shows exactly what was quoted.
-          ...(estimateQuote
-            ? { lineItems: estimateQuote.lineItems, _meta: estimateQuote.meta }
-            : {}),
-          sessionId: session.id,
-          callSid: session.callSid,
-        },
-        summary: intent ? `Voice intent: ${intent}` : 'Voice clarification needed',
+        payload,
+        summary: surfaceAllowed
+          ? intent
+            ? `Voice intent: ${intent}`
+            : 'Voice clarification needed'
+          : `Caller requested an operator-only action (${intent ?? 'unknown'})`,
         sourceContext: {
           source: 'calling-agent',
           channel: 'telephony',

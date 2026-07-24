@@ -567,6 +567,14 @@ describe('createVoiceTurnProcessor — S1 surface enforcement (P4)', () => {
     expect(proposals).toHaveLength(1);
     // The S2-only send is neutralized to a non-actionable clarification…
     expect(proposals[0]!.proposalType).toBe('voice_clarification');
+    // …whose payload is CANONICAL (voiceClarificationPayloadSchema requires
+    // transcript + reason — a generic {intent, entities} payload would be a
+    // malformed, approve-to-fail card since clarifications have no handler).
+    const payload = proposals[0]!.payload as Record<string, unknown>;
+    expect(typeof payload.transcript).toBe('string');
+    expect((payload.transcript as string).length).toBeGreaterThan(0);
+    expect(payload.reason).toBe('surface_restricted');
+    expect(payload.requestedProposalType).toBe('send_invoice');
     // …and stamped with the S1 surface so the execution boundary re-checks it.
     expect((proposals[0]!.sourceContext as Record<string, unknown>).surface).toBe('S1');
     // …and the block is audited.
