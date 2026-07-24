@@ -21,6 +21,7 @@ import {
 import {
   S1_ALLOWED_PROPOSAL_TYPES,
   isProposalTypeAllowedOnSurface,
+  resolveSurface,
 } from '../../../src/proposals/surface';
 
 /**
@@ -157,5 +158,24 @@ describe('S1 allowlist (RIVET spec §2) — allowlist, not denylist', () => {
     expect(isProposalTypeAllowedOnSurface('S2', 'send_invoice')).toBe(true);
     expect(isProposalTypeAllowedOnSurface('S3', 'send_invoice')).toBe(true);
     expect(isProposalTypeAllowedOnSurface(undefined, 'send_invoice')).toBe(true);
+  });
+});
+
+describe('resolveSurface — fail-safe inference (Codex: no unstamped-inbound trust)', () => {
+  it('honors an explicit surface stamp over any inference', () => {
+    expect(resolveSurface({ surface: 'S2', channel: 'telephony' })).toBe('S2');
+    expect(resolveSurface({ surface: 'S1', channel: 'inapp' })).toBe('S1');
+  });
+
+  it('infers S1 from an inbound-telephony channel when no surface is stamped', () => {
+    for (const channel of ['telephony', 'telephony_voice', 'voice_inbound', 'media_streams']) {
+      expect(resolveSurface({ source: 'calling-agent', channel })).toBe('S1');
+    }
+  });
+
+  it('does NOT infer S1 for in-app or server-origin proposals (unrestricted)', () => {
+    expect(resolveSurface({ source: 'calling-agent', channel: 'inapp' })).toBeUndefined();
+    expect(resolveSurface({ channel: 'sms' })).toBeUndefined();
+    expect(resolveSurface(undefined)).toBeUndefined();
   });
 });

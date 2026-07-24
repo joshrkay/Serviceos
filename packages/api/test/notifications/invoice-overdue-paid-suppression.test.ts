@@ -137,7 +137,8 @@ describe('notifyInvoiceOverdue — I10 send-time re-evaluation', () => {
 
   it('SUPPRESSES the reminder when the invoice is already paid', async () => {
     const invoice = await h.invoiceRepo.create(makeInvoice(h.jobId, 'paid', 0));
-    await h.comms.notifyInvoiceOverdue(TENANT, invoice.id, 'manual');
+    const outcome = await h.comms.notifyInvoiceOverdue(TENANT, invoice.id, 'manual');
+    expect(outcome).toEqual({ status: 'suppressed', reason: 'paid' });
     expect(h.delivery.sentSms).toHaveLength(0);
     expect(h.delivery.sentEmails).toHaveLength(0);
   });

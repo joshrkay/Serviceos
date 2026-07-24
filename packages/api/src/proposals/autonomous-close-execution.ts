@@ -29,6 +29,7 @@ import {
   type ProposalRepository,
 } from './proposal';
 import { applyChainMetadata } from './chain';
+import type { ProposalSurface } from './surface';
 import {
   autonomousCloseStamp,
   type AutonomousCloseEvaluation,
@@ -134,6 +135,15 @@ export async function queueCloseFallbackChain(
     sourceContext: {
       source: 'calling-agent',
       channel: 'telephony',
+      // RIVET P4 — surface S2. This is the D-019 owner-approval close chain:
+      // the send_estimate is born blocked and can ONLY execute after the owner
+      // explicitly one-tap approves the chain (approveChainSet, a human actor),
+      // and its recipient is server-derived from the call (the caller's own
+      // phone), never from transcript content. Its execution authority is the
+      // owner's, so it is stamped S2 rather than inferred S1 from the telephony
+      // channel — otherwise the executor's fail-safe would block a legitimate
+      // owner-approved send.
+      surface: 'S2' as ProposalSurface,
       sessionId: args.sessionId,
       ...stamp,
     },
@@ -163,6 +173,9 @@ export async function queueCloseFallbackChain(
       sourceContext: {
         source: 'calling-agent',
         channel: 'telephony',
+        // Owner-approval close chain member (see send_estimate above). S2 by
+        // execution authority; create_booking is S1-allowlisted regardless.
+        surface: 'S2' as ProposalSurface,
         sessionId: args.sessionId,
         chainId,
         chainIndex: 2,

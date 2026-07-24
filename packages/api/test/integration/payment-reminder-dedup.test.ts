@@ -45,8 +45,12 @@ import { TransactionalCommsService } from '../../src/notifications/transactional
 /** Records every outbound reminder send so we can assert exactly-once. */
 class RecordingComms {
   sends: Array<{ tenantId: string; invoiceId: string }> = [];
-  async notifyInvoiceOverdue(tenantId: string, invoiceId: string): Promise<void> {
+  async notifyInvoiceOverdue(
+    tenantId: string,
+    invoiceId: string,
+  ): Promise<{ status: 'sent' }> {
     this.sends.push({ tenantId, invoiceId });
+    return { status: 'sent' };
   }
 }
 

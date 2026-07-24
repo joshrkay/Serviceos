@@ -74,3 +74,36 @@ export function surfaceFromSourceContext(
   const s = sourceContext?.surface;
   return s === 'S1' || s === 'S2' || s === 'S3' ? s : undefined;
 }
+
+/**
+ * Channel values that denote an inbound telephone call — the unauthenticated
+ * S1 surface. In-app operator voice (`'inapp'`) is deliberately excluded: it is
+ * an authenticated S2 session and stamps its own surface explicitly.
+ */
+const INBOUND_TELEPHONY_CHANNELS: ReadonlySet<string> = new Set([
+  'telephony',
+  'telephony_voice',
+  'voice_inbound',
+  'media_streams',
+]);
+
+/**
+ * Resolve the surface to enforce at the execution boundary. An explicit stamp
+ * always wins; absent that, fall back to a fail-safe **inference** from
+ * provenance: an inbound-telephony channel with no stamp is treated as S1 so a
+ * creation site that forgot to stamp cannot fail *open* into trusted execution.
+ * Everything else (in-app, server workers, API routes) resolves to undefined =
+ * unrestricted, preserving existing behavior. Authenticated voice/in-app paths
+ * that legitimately run S2 ops must stamp `surface: 'S2'` explicitly.
+ */
+export function resolveSurface(
+  sourceContext: Record<string, unknown> | undefined,
+): ProposalSurface | undefined {
+  const explicit = surfaceFromSourceContext(sourceContext);
+  if (explicit) return explicit;
+  const channel = sourceContext?.channel;
+  if (typeof channel === 'string' && INBOUND_TELEPHONY_CHANNELS.has(channel)) {
+    return 'S1';
+  }
+  return undefined;
+}

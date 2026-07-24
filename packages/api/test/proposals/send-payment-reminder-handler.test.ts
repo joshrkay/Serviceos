@@ -27,14 +27,18 @@ class FakeComms {
   /** Optional hook fired synchronously inside the send — lets a test observe
    *  the ledger state AT the moment of send (proves record-before-send). */
   onSend?: (tenantId: string, invoiceId: string) => Promise<void> | void;
+  /** Set to suppress delivery (I10 — invoice paid/void/zero at fire time). */
+  suppressReason?: 'paid' | 'void' | 'zero_balance' | 'not_found';
   async notifyInvoiceOverdue(
     tenantId: string,
     invoiceId: string,
     occurrenceToken: string,
-  ): Promise<void> {
+  ): Promise<{ status: 'sent' } | { status: 'suppressed'; reason: string }> {
     if (this.shouldThrow) throw new Error('delivery failed');
     if (this.onSend) await this.onSend(tenantId, invoiceId);
+    if (this.suppressReason) return { status: 'suppressed', reason: this.suppressReason };
     this.calls.push({ tenantId, invoiceId, occurrenceToken });
+    return { status: 'sent' };
   }
 }
 
@@ -198,6 +202,27 @@ describe('send_payment_reminder — manual dedup guard', () => {
     const rows = await ledger.findByInvoice(TENANT, INVOICE_ID);
     expect(rows.filter((r) => r.kind === 'reminder')).toHaveLength(1);
     expect(rows[0].channel).toBe('sms');
+  });
+
+  it('I10 suppression: a paid-at-fire-time reminder leaves NO ledger row and NO reminder_sent (Codex)', async () => {
+    // Payment settled between raise and execute → comms suppresses the send.
+    // The record-first ledger row must be undone (else its false send-history
+    // blocks a later legitimate reminder), and the audit must reflect
+    // suppression, not a send.
+    comms.suppressReason = 'paid';
+    const proposal = makeManualProposal('manual-prop-suppressed');
+
+    const result = await handlerWith(ledger).execute(proposal, ctx);
+
+    expect(result.success).toBe(true); // execution succeeded — it correctly sent nothing
+    expect(comms.calls).toHaveLength(0);
+    // The record-first row was deleted — no false "sent" history remains.
+    const rows = await ledger.findByInvoice(TENANT, INVOICE_ID);
+    expect(rows.filter((r) => r.kind === 'reminder')).toHaveLength(0);
+    // Audited as suppressed, never as sent.
+    const events = await auditRepo.findByEntity(TENANT, 'invoice', INVOICE_ID);
+    expect(events.some((e) => e.eventType === 'invoice.reminder_suppressed')).toBe(true);
+    expect(events.some((e) => e.eventType === 'invoice.reminder_sent')).toBe(false);
   });
 
   it('re-executing the same manual proposal is idempotent — exactly one send total', async () => {

@@ -142,6 +142,7 @@ export class SendPaymentReminderExecutionHandler implements ExecutionHandler {
       }
     }
 
+    let outcome;
     try {
       // occurrenceToken ('<offsetDays>:<channel>' for a cadence step, or
       // 'manual:<proposalId>' for a manual send — never the bare 'manual'
@@ -149,7 +150,7 @@ export class SendPaymentReminderExecutionHandler implements ExecutionHandler {
       // dunning step and each manual proposal is a legitimately distinct send,
       // so the send-claim ledger must not tombstone the invoice after the
       // first reminder.
-      await this.transactionalComms.notifyInvoiceOverdue(
+      outcome = await this.transactionalComms.notifyInvoiceOverdue(
         context.tenantId,
         invoiceId,
         occurrenceToken,
@@ -159,6 +160,53 @@ export class SendPaymentReminderExecutionHandler implements ExecutionHandler {
         success: false,
         error: err instanceof Error ? err.message : 'Failed to send payment reminder',
       };
+    }
+
+    // I10 send-time suppression (invoice paid/void/zero-balance at fire time).
+    // Nothing was delivered, so we must NOT leave a "reminder_sent" trace: undo
+    // the record-first ledger row we wrote above (else its false send-history
+    // blocks a later legitimate reminder inside the 72h cooldown) and audit the
+    // suppression instead of a send. Idempotent re-execution is unaffected —
+    // the row is only deleted on the same run that wrote it.
+    if (outcome.status === 'suppressed') {
+      if (this.dunningEventRepo && isManual) {
+        try {
+          await this.dunningEventRepo.deleteByInvoiceStep(
+            context.tenantId,
+            invoiceId,
+            'reminder',
+            occurrenceToken,
+          );
+        } catch {
+          // best-effort cleanup — a stray ledger row is far less harmful than
+          // failing an execution that correctly sent nothing.
+        }
+      }
+      if (this.auditRepo) {
+        try {
+          await this.auditRepo.create(
+            createAuditEvent({
+              tenantId: context.tenantId,
+              actorId: context.executedBy,
+              actorRole: 'system',
+              eventType: 'invoice.reminder_suppressed',
+              entityType: 'invoice',
+              entityId: invoiceId,
+              metadata: {
+                proposalId: proposal.id,
+                proposalType: 'send_payment_reminder',
+                reason: outcome.reason,
+                stepKey,
+                offsetDays,
+                channel,
+              },
+            }),
+          );
+        } catch {
+          // swallow — audit must never fail the execution
+        }
+      }
+      return { success: true, resultEntityId: invoiceId };
     }
 
     // Audit emission is failure-soft: a logging failure never unwinds a

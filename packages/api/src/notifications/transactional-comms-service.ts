@@ -32,6 +32,36 @@ export interface TransactionalCommsServiceDeps extends CustomerMessageDeliveryDe
   invoiceRepo: InvoiceRepository;
 }
 
+/** Why an overdue-reminder send was suppressed at fire time (RIVET I10). */
+export type ReminderSuppressionReason = 'not_found' | 'paid' | 'void' | 'zero_balance';
+
+/**
+ * Outcome of an overdue-reminder attempt. `suppressed` means the live invoice
+ * state at send time did not warrant a reminder — the caller must NOT record a
+ * reminder-sent state for it (invoice-scoped dunning history would otherwise
+ * carry a false send and block a later legitimate reminder).
+ */
+export type ReminderDeliveryOutcome =
+  | { status: 'sent' }
+  | { status: 'suppressed'; reason: ReminderSuppressionReason };
+
+/**
+ * I10 predicate: a paid, void, or zero-balance invoice must never be dunned.
+ * Pure — evaluated against whatever invoice snapshot the caller loaded, so it
+ * can be applied both on entry and again at the delivery boundary.
+ */
+function reminderSuppressionReason(invoice: {
+  status: string;
+  amountDueCents?: number;
+}): Exclude<ReminderSuppressionReason, 'not_found'> | null {
+  if (invoice.status === 'paid') return 'paid';
+  if (invoice.status === 'void') return 'void';
+  if (typeof invoice.amountDueCents === 'number' && invoice.amountDueCents <= 0) {
+    return 'zero_balance';
+  }
+  return null;
+}
+
 function formatAppointmentDate(date: Date, timezone: string, language: Language = 'en'): string {
   // Match the notification copy's language so a Spanish notice doesn't carry
   // English weekday/month names.
@@ -224,26 +254,24 @@ export class TransactionalCommsService implements SchedulingConfirmationNotifier
     tenantId: string,
     invoiceId: string,
     occurrenceToken: string,
-  ): Promise<void> {
+  ): Promise<ReminderDeliveryOutcome> {
     const invoice = await this.deps.invoiceRepo.findById(tenantId, invoiceId);
-    if (!invoice) return;
+    if (!invoice) return { status: 'suppressed', reason: 'not_found' };
 
     // RIVET invariant I10 — send-time state re-evaluation. An overdue reminder
     // is scheduled/raised against the state at sweep time, but payment can land
-    // in the interim (the customer pays, or a webhook reconciles). Re-check the
-    // live invoice here, at the moment of firing: a paid or zero-balance
-    // invoice must NEVER receive a payment reminder. "The contractor's customer
-    // is being dunned for money they already sent" costs more trust than an
-    // outage. This closes the payment-lands-between-raise-and-fire race for
-    // both the automated dunning sweep and an owner-approved reminder proposal.
-    if (invoice.status === 'paid' || invoice.status === 'void') return;
-    if (typeof invoice.amountDueCents === 'number' && invoice.amountDueCents <= 0) return;
+    // in the interim (the customer pays, or a webhook reconciles): a paid or
+    // zero-balance invoice must NEVER receive a payment reminder. "The
+    // contractor's customer is being dunned for money they already sent" costs
+    // more trust than an outage.
+    const earlyGuard = reminderSuppressionReason(invoice);
+    if (earlyGuard) return { status: 'suppressed', reason: earlyGuard };
 
     const job = await this.deps.jobRepo.findById(tenantId, invoice.jobId);
-    if (!job) return;
+    if (!job) return { status: 'suppressed', reason: 'not_found' };
 
     const customer = await this.deps.customerRepo.findById(tenantId, job.customerId);
-    if (!customer) return;
+    if (!customer) return { status: 'suppressed', reason: 'not_found' };
 
     const settings = await this.deps.settingsRepo.findByTenant(tenantId);
     const businessName = settings?.businessName ?? 'Your service team';
@@ -251,12 +279,22 @@ export class TransactionalCommsService implements SchedulingConfirmationNotifier
       customerPreferredLanguage: customer.preferredLanguage,
       tenantDefaultLanguage: settings?.defaultLanguage,
     });
+
+    // Delivery-boundary re-read (Codex): the job/customer/settings lookups above
+    // are an async window in which a payment webhook can settle the invoice.
+    // Reload immediately before rendering + sending and re-check, so the guard
+    // holds against the state that is live at the actual send, not at entry.
+    const fresh = await this.deps.invoiceRepo.findById(tenantId, invoiceId);
+    if (!fresh) return { status: 'suppressed', reason: 'not_found' };
+    const boundaryGuard = reminderSuppressionReason(fresh);
+    if (boundaryGuard) return { status: 'suppressed', reason: boundaryGuard };
+
     const sms = renderInvoiceOverdueSms({
       customerName: customerDisplayName(customer),
       businessName,
-      invoiceNumber: invoice.invoiceNumber,
-      amountDueCents: invoice.amountDueCents,
-      dueDateIso: invoice.dueDate?.toISOString(),
+      invoiceNumber: fresh.invoiceNumber,
+      amountDueCents: fresh.amountDueCents,
+      dueDateIso: fresh.dueDate?.toISOString(),
       language,
     });
 
@@ -271,6 +309,7 @@ export class TransactionalCommsService implements SchedulingConfirmationNotifier
       emailText: sms.body,
       idempotencyKeyPrefix: `invoice-overdue:${invoiceId}:${occurrenceToken}`,
     });
+    return { status: 'sent' };
   }
 
   private async sendAppointmentNotice(

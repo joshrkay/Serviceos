@@ -6,7 +6,7 @@ import { ProposalType } from '../proposal';
 import { AppError } from '../../shared/errors';
 import { ProposalExecutionRepository } from '../proposal-execution';
 import { resolveChainReferences } from './chain-resolution';
-import { isProposalTypeAllowedOnSurface, surfaceFromSourceContext } from '../surface';
+import { isProposalTypeAllowedOnSurface, resolveSurface } from '../surface';
 import { createLogger } from '../../logging/logger';
 import { executeAudited } from '../../commands/command-runner';
 import { AuditEventInput, AuditRepository } from '../../audit/audit';
@@ -123,7 +123,7 @@ export class ProposalExecutor {
     // is approved, an S2-only op (send invoice, take payment, …) still cannot
     // execute from an S1 session. An absent/S2/S3 surface is unrestricted, so
     // every existing proposal and the operator/in-app paths are unaffected.
-    const surface = surfaceFromSourceContext(
+    const surface = resolveSurface(
       proposal.sourceContext as Record<string, unknown> | undefined,
     );
     if (!isProposalTypeAllowedOnSurface(surface, proposal.proposalType)) {
