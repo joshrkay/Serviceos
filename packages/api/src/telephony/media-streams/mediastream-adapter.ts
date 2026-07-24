@@ -2631,8 +2631,10 @@ export class TwilioMediaStreamAdapter {
         } else if (turnId === this.state.outboundTurnId && this.state.agentSpeaking) {
           await this.streamPcmAsMedia(result.audio, turnId);
           // Consent ordering — the full buffered synth of this turn's text
-          // streamed, so the caller heard the COMPLETE real TTS.
-          this.state.turnRealAudioComplete = true;
+          // streamed, so the caller heard the COMPLETE real TTS. A zero-length
+          // buffer emits no media frames at all (streamPcmAsMedia loops zero
+          // times), so it is silence, not a played turn.
+          if (result.audio.length > 0) this.state.turnRealAudioComplete = true;
           // T2-F05 — same single end-of-utterance arm as the streaming path,
           // for the buffered (non-streaming) TTS fallback.
           this.armSilenceOnTurnEnd(turnId);
@@ -2696,8 +2698,9 @@ export class TwilioMediaStreamAdapter {
       await this.streamPcmAsMedia(result.audio, turnId);
       // Consent ordering — recovery re-synthesized and streamed the WHOLE
       // turn text, so the caller heard the complete real TTS (after a hiccup).
-      // The filler fallback below deliberately does NOT set this.
-      this.state.turnRealAudioComplete = true;
+      // A zero-length buffer emits no media frames, so it is silence rather
+      // than a played turn. The filler fallback below never sets this at all.
+      if (result.audio.length > 0) this.state.turnRealAudioComplete = true;
       // T2-F05 — recovery still played a full agent turn, so a silent caller
       // after it must still get the bounded reprompt (handleMessage ignores
       // the per-chunk turn-* marks for arming).

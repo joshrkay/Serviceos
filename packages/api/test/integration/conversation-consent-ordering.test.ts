@@ -476,6 +476,55 @@ describe('recording-consent ordering — disclosure precedes audio capture', () 
     expect(session.send).not.toHaveBeenCalled();
   });
 
+  it('Path 3h (buffered PCM but zero-length audio): silence is not a disclosure — fails closed', async () => {
+    const store = new VoiceSessionStore({ startInterval: false });
+    store.create('tenant-empty', 'telephony', { callSid: 'CA-empty' });
+
+    const { provider, session } = makeStreamingProvider();
+    const ws = new FakeWs();
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: provider,
+        // Well-formed PCM content type but an EMPTY buffer: streamPcmAsMedia
+        // loops zero times and emits no media, yet the turn still reaches its
+        // end-of-utterance mark. The caller heard nothing.
+        ttsProvider: {
+          synthesize: vi.fn(async () => ({
+            audio: Buffer.alloc(0),
+            contentType: 'audio/pcm',
+            provider: 'test',
+          })),
+        },
+        speechTurn: async () => [],
+        initializeSession: async () => [
+          { type: 'tts_play', payload: { text: 'This call may be recorded.' } },
+        ],
+      },
+      ws,
+    );
+    adapter.start();
+
+    ws.inboundJson(startFrame('CA-empty', 'MZ-empty'));
+    await flush();
+    await flush();
+    await flush();
+
+    if (!ws.closed) failOpen += 1;
+    expect(ws.closed).toBe(true);
+    expect(ws.closeReason).toBe('disclosure_init_failed');
+
+    const markName = silenceArmMarkName(ws);
+    if (markName) {
+      ws.inboundJson({ event: 'mark', streamSid: 'MZ-empty', mark: { name: markName } });
+      await flush();
+    }
+    ws.inboundJson(mediaFrame);
+    await flush();
+    if (session.send.mock.calls.length > 0) failOpen += 1;
+    expect(session.send).not.toHaveBeenCalled();
+  });
+
   it('Path 3g (foreign mark ACK mid-disclosure): only the validated disclosure turn opens capture', async () => {
     const store = new VoiceSessionStore({ startInterval: false });
     store.create('tenant-race', 'telephony', { callSid: 'CA-race' });
