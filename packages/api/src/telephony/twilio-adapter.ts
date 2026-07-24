@@ -765,6 +765,22 @@ export class TwilioGatherAdapter {
   private readonly callerIdBySession = new Map<string, string>();
 
   /**
+   * RV-130 / C5 — pending implicit recording-consent ledger writes, keyed by
+   * sessionId. `bootstrapCallEstablishment` generates the disclosure copy but
+   * no longer ledgers it on the spot: the ledger's `recording/implicit` means
+   * "the disclosure PLAYED and the caller stayed on the line", which is not
+   * yet true when the copy is generated. Each transport commits at its own
+   * point of evidence via {@link commitRecordingConsent} — so a fail-closed
+   * hang-up (truncated / non-PCM / zero-length / filler-only disclosure)
+   * leaves NO row claiming a caller consented to a call we terminated
+   * precisely because they were never told.
+   *
+   * Same in-memory lifetime/leak posture as {@link callerIdBySession}: the
+   * entry is taken on commit, and dropped with the session on terminate.
+   */
+  private readonly pendingConsentCommit = new Map<string, () => Promise<void>>();
+
+  /**
    * A3 — consecutive-low-Gather-`Confidence`-turn streak, keyed by
    * sessionId. Each `/gather` POST is a stateless HTTP request, so this
    * can't live on the request; `VoiceSession` (the DB-backed session
@@ -1141,6 +1157,12 @@ export class TwilioGatherAdapter {
       ...(from ? { callerPhone: from } : {}),
       voiceSessionId: session.id,
     });
+    // C5 — the ledger write is DEFERRED, not skipped. Generating the copy is
+    // not evidence the caller heard it, so the thunk is parked here and each
+    // transport commits at its own point of evidence (see
+    // {@link commitRecordingConsent}). Overwrites any prior entry for this
+    // session — a re-bootstrap supersedes an uncommitted thunk.
+    this.pendingConsentCommit.set(session.id, disclosure.commitConsentLedger);
 
     // 2. Identify caller by phone number.
     // WS16c (divergence #3, CONVERGED) — identify-guard parity: BOTH transports
@@ -1299,6 +1321,37 @@ export class TwilioGatherAdapter {
     // notify_oncall) against the wired repos.
     await this.processor.executeSideEffects(session, expanded, opts.tenantId);
     return expanded;
+  }
+
+  /**
+   * C5 — commit the implicit recording-consent ledger row parked by
+   * `bootstrapCallEstablishment`, at the transport's point of evidence that
+   * the caller actually HEARD the notice.
+   *
+   * The ledger defines `recording/implicit` as "the disclosure PLAYED and the
+   * caller stayed on the line" (consent-events.ts). Committing at disclosure-
+   * GENERATION time asserted that before any audio went out, so a fail-closed
+   * hang-up left a row saying the caller consented to a call we terminated
+   * precisely because they were never told. Callers:
+   *
+   *   - Gather/PSTN — `handleInbound`, once the TwiML carrying `<Say>` before
+   *     `<Start><Record>` is built; the ordering is structural in that
+   *     document, and it is the strongest signal that transport offers.
+   *   - Media Streams — the WS adapter, once the disclosure TURN is validated
+   *     as played to completion. Every fail-closed branch returns WITHOUT
+   *     calling this, so no row is written.
+   *
+   * Taking the thunk makes the commit single-shot; the underlying thunk is
+   * itself idempotent and never rejects. A session with nothing parked (no
+   * ledger wired, blocked caller-id, in-app) is a silent no-op.
+   */
+  async commitRecordingConsent(opts: { callSid: string }): Promise<void> {
+    const session = this.deps.store.findByCallSid(opts.callSid);
+    if (!session) return;
+    const commit = this.pendingConsentCommit.get(session.id);
+    if (!commit) return;
+    this.pendingConsentCommit.delete(session.id);
+    await commit();
   }
 
   /**
@@ -1794,6 +1847,16 @@ export class TwilioGatherAdapter {
           : {}),
         ...(inboundHints ? { hints: inboundHints } : {}),
       });
+
+    // C5 — Gather's point of evidence for the recording disclosure: the TwiML
+    // we are about to return carries `<Say>` before `<Start><Record>`, so
+    // Twilio speaks the notice before it arms capture. Skipped on the transfer
+    // short-circuit — a `<Dial>` renders no disclosure and arms no recording,
+    // so ledgering implicit consent there would assert a notice that was
+    // never rendered.
+    if (!transferTwiml) {
+      await this.commitRecordingConsent({ callSid: opts.callSid });
+    }
 
     // 8. If the FSM drove straight to 'terminated' (escalation chain
     //    that emits end_session), kick off the summary so call_summaries

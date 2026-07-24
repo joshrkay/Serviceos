@@ -1526,6 +1526,12 @@ describe('production-shaped wiring (app.ts hooks)', () => {
           }),
         initializeSession: ({ callSid, tenantId }) =>
           gatherAdapter.initializeStreamSession({ callSid, tenantId }),
+        // C5 — mirrors app.ts: the implicit recording-consent write is split
+        // out of initializeSession so it lands only once the disclosure turn
+        // is validated as played. Without this hook a streaming call ledgers
+        // nothing, so the harness must wire it to stay production-shaped.
+        commitRecordingConsent: ({ callSid }) =>
+          gatherAdapter.commitRecordingConsent({ callSid }),
         interimEmergencyScan: ({ session, speechResult, tenantId }) =>
           gatherAdapter.scanInterimForEmergency({
             sessionId: session.id,

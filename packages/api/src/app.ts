@@ -4321,12 +4321,17 @@ export function createApp(): AppWithLifecycle {
               }),
             // RV-130 (CRITICAL) — greeting + recording-disclosure bootstrap
             // once Deepgram opens. initializeStreamSession speaks the
-            // greeting/disclosure via the stream TTS path AND appends the
-            // implicit recording-consent event to the ledger (the gather
-            // adapter carries consentEvents). Without this hook wired,
-            // flag-enabled streaming calls start silent and ledger nothing.
+            // greeting/disclosure via the stream TTS path. Without this hook
+            // wired, flag-enabled streaming calls start silent.
             initializeSession: ({ callSid, tenantId }) =>
               twilioAdapter.initializeStreamSession({ callSid, tenantId }),
+            // C5 — the implicit recording-consent ledger write, split out of
+            // initializeSession so it lands only once the caller has actually
+            // HEARD the disclosure. The gather adapter carries consentEvents
+            // and parks the write; this adapter decides whether it happened.
+            // Without this hook wired, streaming calls ledger nothing.
+            commitRecordingConsent: ({ callSid }) =>
+              twilioAdapter.commitRecordingConsent({ callSid }),
             // RV-140 (interim) — emergency keywords escalate on interim
             // transcripts (keywords only; objection scan stays finals-only).
             interimEmergencyScan: ({ session, speechResult, tenantId }) =>

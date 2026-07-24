@@ -112,10 +112,14 @@ export interface DisclosureInput {
   language?: Language;
   /**
    * RV-130 — append-only consent ledger. When wired (with a caller phone),
-   * a telephony disclosure appends `{ kind: 'recording', state: 'implicit',
+   * `commitConsentLedger()` appends `{ kind: 'recording', state: 'implicit',
    * source: 'voice' }` tied to the session — "disclosure played; the caller
    * staying on the line is implicit consent". Best-effort: a ledger failure
    * never blocks the disclosure (the call must proceed).
+   *
+   * The write is DEFERRED to the returned thunk rather than performed here —
+   * generating the copy is not evidence the caller heard it. See
+   * {@link DisclosureResult.commitConsentLedger}.
    */
   consentLedger?: ConsentEventRepository;
   /** Caller E.164 for the ledger row. Without it, no event is written. */
@@ -135,14 +139,42 @@ export interface DisclosureResult {
   requiresTwoPartyConsent: boolean;
   /** Audio buffer if ttsProvider was supplied and synthesis succeeded; undefined otherwise. */
   audioBuffer?: Buffer;
+  /**
+   * Appends the implicit recording-consent ledger event. The CALLER decides
+   * when — this skill only generates copy, and generating copy is not evidence
+   * the caller heard anything.
+   *
+   * The ledger's contract (consent-events.ts) defines `recording/implicit` as
+   * "the disclosure PLAYED and the caller stayed on the line". Writing it at
+   * disclosure-generation time asserted that before a single byte of audio had
+   * gone out, so every fail-closed hang-up (truncated / non-PCM / zero-length /
+   * filler-only playback) left a row claiming a caller consented to a call we
+   * terminated precisely because they were never told.
+   *
+   * Each transport commits at its own point of evidence:
+   *   - Gather/PSTN — once the TwiML carrying `<Say>` before `<Start><Record>`
+   *     is handed to Twilio; the ordering is structural in that document.
+   *   - Media Streams — once the disclosure TURN is validated as played to
+   *     completion (`disclosureTurnComplete`), never on a fail-closed path.
+   *
+   * Idempotent (a second call is a no-op) and best-effort: resolves even when
+   * the append throws, and is a no-op for in-app or when no ledger/phone was
+   * supplied. Never rejects.
+   */
+  commitConsentLedger: () => Promise<void>;
 }
+
+/** Shared no-op commit for the paths that never ledger (in-app, no ledger wired). */
+const NO_CONSENT_LEDGER = async (): Promise<void> => {};
 
 /**
  * Generates the appropriate recording disclosure for the call channel and
  * caller's US state. Optionally synthesizes the spoken text to audio.
  *
  * Never throws — TTS failures are swallowed so the disclosure is always
- * returned with at minimum the text copy.
+ * returned with at minimum the text copy. Does NOT write to the consent
+ * ledger; call `result.commitConsentLedger()` once the caller has actually
+ * heard the notice.
  */
 export async function discloseRecording(
   input: DisclosureInput
@@ -155,6 +187,7 @@ export async function discloseRecording(
       disclosed: true,
       disclosureText: '',
       requiresTwoPartyConsent: false,
+      commitConsentLedger: NO_CONSENT_LEDGER,
     };
   }
 
@@ -162,24 +195,33 @@ export async function discloseRecording(
   const lang: Language = input.language ?? 'en';
   const disclosure = buildDisclosureText(callerState, businessName, lang);
 
-  // RV-130 — ledger the implicit recording consent. Best-effort and awaited
-  // (one fast insert) so tests are deterministic; failures are swallowed —
-  // the disclosure itself must never be blocked by a ledger write.
-  if (input.consentLedger && input.callerPhone) {
-    try {
-      await input.consentLedger.append({
-        tenantId: input.tenantId,
-        customerId: input.customerId ?? null,
-        phone: input.callerPhone,
-        kind: 'recording',
-        state: 'implicit',
-        source: 'voice',
-        voiceSessionId: input.voiceSessionId ?? null,
-      });
-    } catch {
-      // Swallow — see above.
-    }
-  }
+  // RV-130 — the implicit recording-consent write, DEFERRED to the caller (see
+  // DisclosureResult.commitConsentLedger). Awaited when invoked (one fast
+  // insert) so tests stay deterministic; failures are swallowed — the call
+  // must never be blocked by a ledger write.
+  const ledger = input.consentLedger;
+  const callerPhone = input.callerPhone;
+  let committed = false;
+  const commitConsentLedger =
+    ledger && callerPhone
+      ? async (): Promise<void> => {
+          if (committed) return;
+          committed = true;
+          try {
+            await ledger.append({
+              tenantId: input.tenantId,
+              customerId: input.customerId ?? null,
+              phone: callerPhone,
+              kind: 'recording',
+              state: 'implicit',
+              source: 'voice',
+              voiceSessionId: input.voiceSessionId ?? null,
+            });
+          } catch {
+            // Swallow — see above.
+          }
+        }
+      : NO_CONSENT_LEDGER;
 
   let audioBuffer: Buffer | undefined;
 
@@ -200,6 +242,7 @@ export async function discloseRecording(
     disclosed: true,
     disclosureText: disclosure.spoken,
     requiresTwoPartyConsent: disclosure.requiresTwoPartyConsent,
+    commitConsentLedger,
     ...(audioBuffer !== undefined ? { audioBuffer } : {}),
   };
 }

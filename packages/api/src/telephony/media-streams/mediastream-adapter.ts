@@ -161,6 +161,20 @@ export interface MediaStreamAdapterDeps {
     tenantId: string;
   }) => Promise<SideEffect[]>;
   /**
+   * C5 — commit the implicit recording-consent ledger row for this call.
+   * `initializeSession` GENERATES the disclosure copy but deliberately does
+   * not ledger it: the ledger's `recording/implicit` means "the disclosure
+   * PLAYED and the caller stayed on the line", which is not yet true when the
+   * copy is generated. This adapter is the only component that knows whether
+   * the caller actually heard it, so it owns the commit — invoked exactly
+   * once, at the point the disclosure TURN is validated as played to
+   * completion. Every fail-closed branch returns without calling it, so a
+   * hang-up leaves no row claiming consent. Best-effort: never rejects, and
+   * a ledger outage must not sink an otherwise-disclosed call.
+   * Wired in production to `TwilioGatherAdapter.commitRecordingConsent`.
+   */
+  commitRecordingConsent?: (opts: { callSid: string }) => Promise<void>;
+  /**
    * RV-140 (interim) — emergency-keyword scan over INTERIM transcripts so a
    * caller saying "gas leak" escalates the moment the words are recognized,
    * not seconds later when Deepgram finalizes the utterance. Keywords ONLY —
@@ -1254,6 +1268,22 @@ export class TwilioMediaStreamAdapter {
           // opens it, with armCaptureEnableFallback as the lost-ack backstop so
           // a dropped mark frame can't leave the agent deaf for the whole call.
           this.state.disclosureValidated = true;
+          // C5 — point of evidence: the disclosure turn played to completion,
+          // which is exactly what the ledger's `recording/implicit` asserts.
+          // Only reachable here; every fail-closed branch above and below
+          // returns first, so a hang-up never ledgers consent. Best-effort —
+          // a ledger outage must not sink an otherwise-disclosed call, and it
+          // must not block arming capture below.
+          if (this.deps.commitRecordingConsent) {
+            try {
+              await this.deps.commitRecordingConsent({ callSid });
+            } catch (err) {
+              logger.warn('mediastream: recording-consent ledger commit failed', {
+                error: err instanceof Error ? err.message : String(err),
+                callSid,
+              });
+            }
+          }
           if (this.state.disclosureMarkAcked) {
             this.enableCapture('disclosure_played');
           } else {
