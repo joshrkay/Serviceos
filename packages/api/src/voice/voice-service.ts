@@ -46,6 +46,13 @@ export interface VoiceRecording {
   source?: string;
   status: TranscriptionStatus;
   transcript?: string;
+  /**
+   * Provider + pipeline metadata for the transcript (JSONB). Carries the
+   * RIVET I13 marker `provenance: 'caller' | 'mixed' | 'operator'` (stamped
+   * by the transcript-ingestion worker via `stampProvenance`). Check it via
+   * `classifyRecordingProvenance` (ai/content-provenance.ts) — which fails
+   * closed — before quoting `transcript` into any operator-facing prompt.
+   */
   transcriptMetadata?: Record<string, unknown>;
   durationSeconds?: number;
   errorMessage?: string;

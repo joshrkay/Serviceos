@@ -3,6 +3,8 @@ import { VerticalType } from '../../shared/vertical-types';
 import type { KnowledgeChunkSourceType } from '../training/knowledge-chunks';
 import type { RetrieveContextResult } from '../skills/retrieve-context';
 import { createLogger } from '../../logging/logger';
+import { classifyMessageProvenance } from '../content-provenance';
+import { buildUntrustedContentSection } from '../untrusted-content';
 
 const logger = createLogger({
   service: 'ai.orchestration.context-builder',
@@ -202,6 +204,53 @@ export async function buildSourceContext(
 }
 
 /**
+ * RIVET I13 — turn `SourceContext.conversation.recentMessages` into prompt
+ * sections with the customer-authored lines fenced.
+ *
+ * `recentMessages` is a STRUCTURED field (UI, tests, and non-prompt code read
+ * `content` verbatim), so fencing never happens inside `buildSourceContext`
+ * itself. Instead, every prompt-assembly consumer of the thread calls this
+ * one helper: trusted (tenant/system-authored) lines come back as plain
+ * `Role: content` strings for the consumer to format freely, and ALL
+ * customer-authored lines come back as a single ready-to-inject block
+ * rendered through `buildUntrustedContentSection` — quoted DATA, never
+ * instructions. `untrustedBlock` is absent when no customer messages exist so
+ * consumers can spread it conditionally and stay byte-identical.
+ *
+ * Inject the block into the LOWEST-authority prompt slot (inside the user
+ * message — never a system message, which would raise the caller text's
+ * instruction priority). Hand-rolling thread formatting at a consumer instead
+ * of calling this is exactly the "forget the fence" failure mode I13 exists
+ * to prevent.
+ */
+export function buildRecentMessagesPromptSections(
+  recentMessages: ReadonlyArray<{ role: string; content: string }>,
+): { trustedLines: string[]; untrustedBlock?: string } {
+  const trustedLines: string[] = [];
+  const untrusted: string[] = [];
+  for (const m of recentMessages) {
+    const content = m.content?.trim();
+    if (!content) continue;
+    if (classifyMessageProvenance({ senderRole: m.role }) === 'untrusted') {
+      untrusted.push(`Customer: ${content}`);
+    } else {
+      trustedLines.push(`${m.role}: ${content}`);
+    }
+  }
+  return {
+    trustedLines,
+    ...(untrusted.length > 0
+      ? {
+          untrustedBlock: buildUntrustedContentSection(
+            untrusted.join('\n'),
+            'Customer messages in this conversation',
+          ),
+        }
+      : {}),
+  };
+}
+
+/**
  * Roles whose latest message is treated as the retrieval query.
  * Allow-list (not exclude-list of agent/assistant) so that future
  * roles like 'system' or 'tool' don't accidentally drive retrieval.
@@ -209,12 +258,29 @@ export async function buildSourceContext(
  */
 const QUERY_ROLES: ReadonlySet<string> = new Set(['customer', 'user']);
 
+/**
+ * Bound on the embedding-query length. Defense against a pathologically long
+ * customer message becoming the retrieval query (embedding cost/latency) —
+ * NOT an injection control; see the I13 note on `resolveQueryText`.
+ */
+export const MAX_QUERY_CHARS = 512;
+
+/**
+ * RIVET I13 — deliberately UNFENCED. The returned text reaches ONLY
+ * `EmbeddingProvider.createEmbedding()` (nearest-neighbor retrieval); it is
+ * never rendered into a chat-completion prompt slot, so it has no
+ * instruction-eligible exposure. Wrapping it in the untrusted-content fence
+ * would let the ~400-char hardening sentence dominate a short query's
+ * embedding and silently degrade retrieval tenant-wide. If this text is ever
+ * reused in an LLM prompt (e.g. a query-rewrite step), it MUST go through
+ * `buildUntrustedContentSection` at that new call site.
+ */
 function resolveQueryText(
   entityRefs: EntityRefs,
   context: SourceContext,
 ): string | undefined {
   const explicit = entityRefs.queryText?.trim();
-  if (explicit && explicit.length > 0) return explicit;
+  if (explicit && explicit.length > 0) return explicit.slice(0, MAX_QUERY_CHARS);
   const messages = context.conversation?.recentMessages;
   if (!messages || messages.length === 0) return undefined;
   // Walk from newest to oldest, picking the latest message from a
@@ -223,7 +289,7 @@ function resolveQueryText(
     const m = messages[i];
     if (QUERY_ROLES.has(m.role)) {
       const text = m.content?.trim();
-      if (text && text.length > 0) return text;
+      if (text && text.length > 0) return text.slice(0, MAX_QUERY_CHARS);
     }
   }
   return undefined;
