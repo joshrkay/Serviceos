@@ -558,28 +558,28 @@ export function createUsersRouter(
             // deactivation with no trail. Best-effort + savepoint-isolated
             // like every post-Clerk write.
             if (auditRepo) {
+              // Created ONCE so a durable re-run inserts the SAME event id —
+              // a racing duplicate then 23505s on the PK (absorbed by the
+              // savepoint/catch) instead of writing a second record.
+              const unconfirmedEvent = createAuditEvent({
+                tenantId,
+                actorId: clerkUserId,
+                actorRole: req.auth!.role,
+                eventType: 'user.account_deletion_unconfirmed',
+                entityType: 'user',
+                entityId: actor.id,
+                metadata: {
+                  self: true,
+                  role: actor.role,
+                  note:
+                    'Deletion reserved locally but Clerk state unconfirmable ' +
+                    '(DELETE and verification GET both ambiguous). Account left ' +
+                    'deactivated; support may finish or reverse it.',
+                },
+              });
               try {
                 await runDurable(() =>
-                  withRequestSavepoint(() =>
-                    auditRepo.create(
-                      createAuditEvent({
-                        tenantId,
-                        actorId: clerkUserId,
-                        actorRole: req.auth!.role,
-                        eventType: 'user.account_deletion_unconfirmed',
-                        entityType: 'user',
-                        entityId: actor.id,
-                        metadata: {
-                          self: true,
-                          role: actor.role,
-                          note:
-                            'Deletion reserved locally but Clerk state unconfirmable ' +
-                            '(DELETE and verification GET both ambiguous). Account left ' +
-                            'deactivated; support may finish or reverse it.',
-                        },
-                      }),
-                    ),
-                  ),
+                  withRequestSavepoint(() => auditRepo.create(unconfirmedEvent)),
                 );
               } catch {
                 // Never fail the terminal response over the audit write.
@@ -608,27 +608,27 @@ export function createUsersRouter(
         // write a replacement record and the completed deletion would have
         // no audit trail.
         if (auditRepo) {
+          // Created ONCE so a durable re-run inserts the SAME event id — a
+          // racing duplicate then 23505s on the PK (absorbed by the
+          // savepoint/catch) instead of writing a second record.
+          const deletedEvent = createAuditEvent({
+            tenantId,
+            actorId: clerkUserId,
+            actorRole: req.auth!.role,
+            eventType: 'user.account_deleted',
+            entityType: 'user',
+            entityId: actor.id,
+            metadata: {
+              self: true,
+              role: actor.role,
+              note:
+                'Self-service account deletion (guideline 5.1.1(v)). Row soft-deleted; ' +
+                'tenant data retained per 16D.',
+            },
+          });
           try {
             await runDurable(() =>
-              withRequestSavepoint(() =>
-                auditRepo.create(
-                  createAuditEvent({
-                    tenantId,
-                    actorId: clerkUserId,
-                    actorRole: req.auth!.role,
-                    eventType: 'user.account_deleted',
-                    entityType: 'user',
-                    entityId: actor.id,
-                    metadata: {
-                      self: true,
-                      role: actor.role,
-                      note:
-                        'Self-service account deletion (guideline 5.1.1(v)). Row soft-deleted; ' +
-                        'tenant data retained per 16D.',
-                    },
-                  }),
-                ),
-              ),
+              withRequestSavepoint(() => auditRepo.create(deletedEvent)),
             );
           } catch {
             // Never fail a completed deletion over the audit write.
