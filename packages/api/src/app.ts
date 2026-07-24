@@ -2756,7 +2756,12 @@ export function createApp(): AppWithLifecycle {
       provisionTwilioWorker as import('./queues/queue').WorkerHandler<unknown>
     );
 
-    const deprovisionTenantWorker = createDeprovisionTenantWorker({ pool });
+    const deprovisionTenantWorker = createDeprovisionTenantWorker({
+      pool,
+      // C6 — the purge also deletes the tenant's stored objects (recording
+      // audio, photos) instead of orphaning them in S3.
+      storage: storageProvider,
+    });
     workerRegistry.set(
       deprovisionTenantWorker.type,
       deprovisionTenantWorker as import('./queues/queue').WorkerHandler<unknown>

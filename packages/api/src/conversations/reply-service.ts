@@ -62,7 +62,7 @@ export class ConversationReplyError extends Error {
 export interface ConversationReplyDeps {
   conversationRepo: Pick<
     ConversationRepository,
-    'findById' | 'addMessage' | 'getMessages'
+    'findById' | 'addMessage' | 'getMessages' | 'findLatestInboundChannel'
   >;
   customerRepo: { findById(tenantId: string, id: string): Promise<Customer | null> };
   /** Lead lookup — required to reply to a lead-linked thread (unknown-caller
@@ -116,6 +116,15 @@ interface ResolvedTarget {
 function pickReplyChannel(opts: {
   explicit?: ReplyChannel;
   defaultChannel?: ReplyChannel;
+  /**
+   * Where `defaultChannel` came from. 'thread' = the channel the customer
+   * last used in THIS conversation — switching away from it is a
+   * cross-channel reply and must be explicit. 'fallback' = a stored
+   * preference or capture-channel default — merely a tie-breaker, so when
+   * its address is missing the send may still fall through to the only
+   * deliverable channel (deterministic, not a guess).
+   */
+  defaultSource?: 'thread' | 'fallback';
   phone?: string;
   email?: string;
   who: 'Customer' | 'Lead';
@@ -146,16 +155,21 @@ function pickReplyChannel(opts: {
   if (opts.defaultChannel) {
     const recipient = addressFor(opts.defaultChannel);
     if (recipient) return { channel: opts.defaultChannel, recipient };
-    // The thread's channel has no address on file — sending on the other
-    // channel is a cross-channel reply and requires explicit selection.
-    throw new ConversationReplyError(
-      'channel_selection_required',
-      `The ${opts.defaultChannel === 'sms' ? 'text' : 'email'} channel this thread uses has no address on file — pick a channel explicitly to reply another way`,
-    );
+    // The thread's own channel has no address on file — sending on the
+    // other channel is a cross-channel reply and requires explicit
+    // selection. Only thread-derived defaults get this hard stop; a
+    // preference/capture default with no address falls through to the
+    // single-deliverable resolution below.
+    if (opts.defaultSource === 'thread') {
+      throw new ConversationReplyError(
+        'channel_selection_required',
+        `The ${opts.defaultChannel === 'sms' ? 'text' : 'email'} channel this thread uses has no address on file — pick a channel explicitly to reply another way`,
+      );
+    }
   }
 
-  // No thread channel and no usable preference. One deliverable channel is
-  // deterministic, not a guess; two is ambiguous and must ask.
+  // One deliverable channel is deterministic, not a guess; two with no
+  // usable default is ambiguous and must ask.
   if (deliverable.length === 1) {
     const channel = deliverable[0];
     return { channel, recipient: addressFor(channel)! };
@@ -178,6 +192,16 @@ async function lastInboundChannel(
   tenantId: string,
   conversationId: string,
 ): Promise<ReplyChannel | undefined> {
+  // Bounded repo lookup when available (Pg: ORDER BY … DESC LIMIT 1) — a
+  // long-running thread must not be fully scanned on every send. The
+  // getMessages scan below is the fallback for harnesses that stub only
+  // the minimal repo surface.
+  if (deps.conversationRepo.findLatestInboundChannel) {
+    return (
+      (await deps.conversationRepo.findLatestInboundChannel(tenantId, conversationId)) ??
+      undefined
+    );
+  }
   const messages = await deps.conversationRepo.getMessages(tenantId, conversationId);
   let latest: { at: number; channel: ReplyChannel } | undefined;
   for (const m of messages) {
@@ -238,6 +262,7 @@ async function resolveTarget(
     return pickReplyChannel({
       explicit: input.channel,
       defaultChannel: threadChannel ?? 'sms',
+      defaultSource: threadChannel ? 'thread' : 'fallback',
       phone,
       email,
       who: 'Lead',
@@ -273,6 +298,7 @@ async function resolveTarget(
     return pickReplyChannel({
       explicit: input.channel,
       defaultChannel: threadChannel ?? preferenceChannel,
+      defaultSource: threadChannel ? 'thread' : 'fallback',
       phone,
       email,
       who: 'Customer',
