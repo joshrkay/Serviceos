@@ -795,9 +795,13 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             // We use the system-level pattern (no SET LOCAL) with an explicit
             // WHERE on clerk_user_id. The UPDATE only touches the matched row,
             // so cross-tenant leakage is not possible.
+            // mobile_number is cleared for the same reason softDeleteSelf
+            // (pg-user.ts) clears it: deleted rows are hidden from reads and
+            // rejected by writes, so a retained number would hold its
+            // users_mobile_unique slot forever with no API escape hatch.
             const result = await deps.pool.query<{ id: string; tenant_id: string }>(
               `UPDATE users
-               SET deleted_at = NOW(), updated_at = NOW()
+               SET deleted_at = NOW(), mobile_number = NULL, updated_at = NOW()
                WHERE clerk_user_id = $1 AND deleted_at IS NULL
                RETURNING id, tenant_id`,
               [userId],

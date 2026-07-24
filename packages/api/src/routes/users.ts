@@ -368,7 +368,24 @@ export function createUsersRouter(
           await fn();
           if (responseClosed) {
             await runOutsideRequestTransaction(fn);
+            return;
           }
+          // The write above sits in the request transaction until the
+          // response-time COMMIT. If the connection closes BEFORE `finish`
+          // (any moment between here and the response flushing), the
+          // middleware rolls that transaction back — so arm a one-shot
+          // retry that re-runs the idempotent write out-of-band in exactly
+          // that case (the request client has been released by then, so a
+          // fresh checkout cannot deadlock the pool).
+          let finished = false;
+          res.once('finish', () => {
+            finished = true;
+          });
+          res.once('close', () => {
+            if (!finished) {
+              void runOutsideRequestTransaction(fn).catch(() => undefined);
+            }
+          });
         };
 
         const users = await userRepo.findByTenant(tenantId);
