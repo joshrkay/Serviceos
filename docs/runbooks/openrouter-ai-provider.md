@@ -21,17 +21,6 @@ ServiceOS talks to any OpenAI-compatible chat completions API via
 `packages/api/src/ai/gateway/factory.ts`. OpenRouter is that API with open
 model IDs (`meta-llama/…`, `qwen/…`). Switching providers is env-only.
 
-### Failover vs primary-swap
-
-| Mode | How | When |
-|------|-----|------|
-| **Profile B primary-swap** | `AI_PROVIDER_*` → OpenRouter (`apply-railway-ai-profile.sh b`) | Full move off OpenAI |
-| **Dual-provider failover** | Keep Profile A OpenAI primary; set `AI_FALLBACK_PROVIDER_*` (`apply-railway-ai-fallback.sh`) | Voice 50/50 residual after OpenAI primary already works |
-
-Failover is **not** Profile B. The factory only populates `fallbackProviders`
-when **both** `AI_FALLBACK_PROVIDER_API_KEY` and `AI_FALLBACK_PROVIDER_BASE_URL`
-are set. See `docs/runbooks/live-ai-restore.md` (“Profile A + OpenRouter fallback”).
-
 ## One-time setup
 
 1. Create an account at [openrouter.ai](https://openrouter.ai) and mint an API key (`sk-or-…`).

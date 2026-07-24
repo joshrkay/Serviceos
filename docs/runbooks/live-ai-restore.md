@@ -130,37 +130,6 @@ AI_COMPLEX_MODEL=gpt-4o \
 npm run check:ai-provider-config
 ```
 
-### Profile A + OpenRouter fallback (dual-provider, preferred for voice 50/50)
-
-Keep **Profile A OpenAI as primary**. Wire OpenRouter as a **failover only** —
-do **not** run Profile B as a wholesale primary swap when the goal is to close
-operator-voice residual DEGRADED after a working OpenAI primary.
-
-Requires factory support for `AI_FALLBACK_PROVIDER_*` (FM-03). Both vars must
-be set together; either alone is ignored at boot.
-
-| Variable | Value |
-|----------|-------|
-| (all Profile A vars above) | unchanged |
-| `AI_CLASSIFY_INTENT_DEADLINE_MS` | `12000` (**never** empty string) |
-| `AI_FALLBACK_PROVIDER_API_KEY` | `sk-or-…` OpenRouter key |
-| `AI_FALLBACK_PROVIDER_BASE_URL` | `https://openrouter.ai/api/v1` |
-| `AI_FALLBACK_LIGHTWEIGHT_MODEL` | `meta-llama/llama-3.1-8b-instruct` (optional; default) |
-
-```bash
-export AI_FALLBACK_PROVIDER_API_KEY='sk-or-...'
-# optional override:
-# export AI_FALLBACK_LIGHTWEIGHT_MODEL='meta-llama/llama-3.1-8b-instruct'
-./scripts/apply-railway-ai-fallback.sh
-# Dry-run:
-# DRY_RUN=1 AI_FALLBACK_PROVIDER_API_KEY=sk-or-dummy ./scripts/apply-railway-ai-fallback.sh
-```
-
-After redeploy: `GET /api/health/ai` should stay `closed`; warm a classify turn
-before a `--voice-only` top-50. Completion probe alone is not the green light.
-
-This is **not** Profile B. Profile B replaces the primary host/models entirely.
-
 ---
 
 ## Profile A + OpenRouter fallback (FM-03 dual-provider — preferred for voice 50/50)
