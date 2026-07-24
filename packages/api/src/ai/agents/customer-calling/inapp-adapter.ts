@@ -1353,6 +1353,10 @@ export class InAppVoiceAdapter {
         gateway: this.deps.gateway,
         ...(intentDetected ? { intentDetected } : {}),
         ...(this.deps.pool ? { pool: this.deps.pool } : {}),
+        // RIVET I13 — this is an authenticated in-app OPERATOR session. The
+        // adapter stores the operator's own turns with a `caller:` prefix, so
+        // they must NOT be fenced as untrusted caller content.
+        inboundCallerSession: false,
       });
     } catch {
       // Summary is best-effort — the call still ended successfully.

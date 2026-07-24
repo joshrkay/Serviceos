@@ -3232,6 +3232,9 @@ export class TwilioGatherAdapter {
             gateway: this.deps.gateway,
             ...(intentDetected ? { intentDetected } : {}),
             ...(this.deps.pool ? { pool: this.deps.pool } : {}),
+            // RIVET I13 — inbound telephony: the caller is an unauthenticated
+            // homeowner (S1); their turns are fenced as untrusted.
+            inboundCallerSession: true,
           });
           lastErr = null;
           break;

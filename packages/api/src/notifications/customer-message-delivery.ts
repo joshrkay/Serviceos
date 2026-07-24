@@ -129,17 +129,27 @@ export async function sendCustomerMessage(
   if (channels.includes('sms') && input.smsBody && customer.primaryPhone) {
     const recipient = customer.primaryPhone;
     attempted++;
-    const r = await sendOneChannel(deps, input, 'sms', recipient, async (idempotencyKey) => {
-      await guard();
-      return deps.delivery.sendSms({
-        to: recipient,
-        body: input.smsBody as string,
-        tenantId,
-        idempotencyKey,
-        recipientClass: 'customer',
-        consent: { smsConsent: customer.smsConsent === true, customerId: customer.id },
-      });
-    });
+    const r = await sendOneChannel(
+      deps,
+      input,
+      'sms',
+      recipient,
+      async (idempotencyKey, markProviderStarting) => {
+        await guard();
+        // Advance the claim to 'sending' only now — eligibility passed and the
+        // provider call is next (a crash during guard() above left it
+        // reclaimable).
+        await markProviderStarting();
+        return deps.delivery.sendSms({
+          to: recipient,
+          body: input.smsBody as string,
+          tenantId,
+          idempotencyKey,
+          recipientClass: 'customer',
+          consent: { smsConsent: customer.smsConsent === true, customerId: customer.id },
+        });
+      },
+    );
     if (r?.eligibilitySuppressed) {
       suppressed++;
       eligibilityReason ??= r.eligibilityReason;
@@ -149,17 +159,24 @@ export async function sendCustomerMessage(
   if (channels.includes('email') && input.emailSubject && input.emailText && customer.email) {
     const recipient = customer.email;
     attempted++;
-    const r = await sendOneChannel(deps, input, 'email', recipient, async (idempotencyKey) => {
-      await guard();
-      return deps.delivery.sendEmail({
-        to: recipient,
-        subject: input.emailSubject as string,
-        text: input.emailText as string,
-        html: input.emailHtml,
-        tenantId,
-        idempotencyKey,
-      });
-    });
+    const r = await sendOneChannel(
+      deps,
+      input,
+      'email',
+      recipient,
+      async (idempotencyKey, markProviderStarting) => {
+        await guard();
+        await markProviderStarting();
+        return deps.delivery.sendEmail({
+          to: recipient,
+          subject: input.emailSubject as string,
+          text: input.emailText as string,
+          html: input.emailHtml,
+          tenantId,
+          idempotencyKey,
+        });
+      },
+    );
     if (r?.eligibilitySuppressed) {
       suppressed++;
       eligibilityReason ??= r.eligibilityReason;
@@ -182,16 +199,32 @@ async function sendOneChannel(
   channel: CustomerMessageChannel,
   recipient: string,
   /** The eligibility recheck + provider call — no bookkeeping. See module doc
-   * (Codex P1 #2). The recheck throws EligibilitySuppressedError BEFORE the
-   * provider dispatch, so the claim is released (never tombstoned 'sent'). */
-  send: (idempotencyKey: string) => Promise<DeliveryResult>,
+   * (Codex P1 #2). `markProviderStarting` advances the claim to the
+   * never-reclaimed 'sending' state; the closure MUST call it only AFTER the
+   * eligibility recheck passes and immediately before the provider dispatch,
+   * so a crash during the recheck leaves a reclaimable 'claimed' row rather
+   * than permanently stranding the occurrence. The recheck throws
+   * EligibilitySuppressedError BEFORE that, so the claim is released. */
+  send: (
+    idempotencyKey: string,
+    markProviderStarting: () => Promise<void>,
+  ) => Promise<DeliveryResult>,
 ): Promise<{ eligibilitySuppressed: boolean; eligibilityReason?: string }> {
   const claimKey = `${input.idempotencyKeyPrefix}:${channel}`;
   try {
     let result: DeliveryResult | undefined;
     if (deps.pool) {
-      const outcome = await withSendClaim(deps.pool, input.tenantId, claimKey, () =>
-        send(claimKey),
+      // Deferred mode (Codex P2): keep the claim reclaimable through the
+      // eligibility recheck's pre-provider prep — the CAS to 'sending' runs
+      // only when the closure calls markProviderStarting(), right before the
+      // provider call.
+      const outcome = await withSendClaim(
+        deps.pool,
+        input.tenantId,
+        claimKey,
+        (_markProviderAccepted, markProviderStarting) => send(claimKey, markProviderStarting),
+        undefined,
+        { deferSendingUntilProviderStart: true },
       );
       if (outcome.outcome === 'duplicate') {
         // Only a 'sent' tombstone with NO dispatch row is inconsistent
@@ -237,7 +270,9 @@ async function sendOneChannel(
       }
       result = outcome.result;
     } else {
-      result = await send(claimKey);
+      // No claim ledger (dev/test without a DB) — markProviderStarting is a
+      // no-op; the eligibility recheck inside `send` still runs.
+      result = await send(claimKey, async () => {});
     }
 
     await recordDispatch(deps, input, channel, recipient, claimKey, result);

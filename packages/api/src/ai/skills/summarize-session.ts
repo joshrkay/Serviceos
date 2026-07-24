@@ -41,6 +41,17 @@ export interface SummarizeSessionInput {
   gateway: LLMGateway;
   /** When provided, a row is inserted into call_summaries; omit to skip persistence. */
   pool?: Pool;
+  /**
+   * RIVET I13 provenance. True/undefined = an inbound UNAUTHENTICATED caller
+   * session (S1): the `caller:` turns are untrusted homeowner content and are
+   * fenced; `agent:` turns stay trusted. False = an authenticated in-app
+   * OPERATOR session (S2) — the in-app adapter stores the operator's own turns
+   * with a `caller:` prefix, so those turns are actually trusted and must NOT
+   * be fenced (fencing the owner's own pricing/decisions would corrupt the
+   * summary). Fails CLOSED: unset behaves like an inbound caller session and
+   * fences, so a forgetful caller can never leak untrusted content unfenced.
+   */
+  inboundCallerSession?: boolean;
 }
 
 export interface SummarizeSessionResult {
@@ -141,13 +152,19 @@ export async function summarizeSession(
   // prices, quoted times, and approvals, corrupting the persisted summary.
   // Each turn keeps its chronological number [n] so the interleaved order
   // survives the partition. Unprefixed turns FAIL CLOSED to caller (untrusted).
+  //
+  // An authenticated in-app OPERATOR session (inboundCallerSession === false)
+  // has NO untrusted caller — the in-app adapter stores the operator's own
+  // turns with a `caller:` prefix, so trusting the prefix here would wrongly
+  // fence the owner's own commands. In that case every turn is trusted.
+  const operatorSession = input.inboundCallerSession === false;
   const agentLines: string[] = [];
   const callerLines: string[] = [];
   transcriptForPrompt.forEach((raw, i) => {
     const line = raw.trim();
     if (line.length === 0) return;
-    const isAgent = /^agent\s*:/i.test(line);
-    (isAgent ? agentLines : callerLines).push(`[${i + 1}] ${line}`);
+    const isTrusted = operatorSession || /^agent\s*:/i.test(line);
+    (isTrusted ? agentLines : callerLines).push(`[${i + 1}] ${line}`);
   });
 
   const prompt = `Summarize the customer service call in the quoted transcript in 3 sentences or fewer.
