@@ -590,6 +590,16 @@ interface RuntimeState {
    */
   fillerActive: boolean;
   /**
+   * Consent ordering — set true whenever `streamPcmAsMedia` enqueues a REAL
+   * (non-filler) TTS media frame; false means only a filler clip (or nothing)
+   * played. `handleStart` resets it before the disclosure/greeting turn and
+   * reads it after: a disclosure turn that produced no real audio (its TTS
+   * stream failed and recovery fell back to a generic filler or dead air) must
+   * fail closed — a filler is NOT the recording notice, so its completion mark
+   * must never be mistaken for disclosure playback.
+   */
+  realTtsAudioStreamed: boolean;
+  /**
    * @deprecated DO NOT USE — use `deps.setPendingTransferTwiml` to write
    * into the TwilioGatherAdapter's shared pendingTransferTwiml Map. This
    * field is never read by any route handler; it exists only as a fallback
@@ -831,6 +841,7 @@ export class TwilioMediaStreamAdapter {
       awaitingFirstAudioFrame: false,
       turnLatencyStartMs: null,
       fillerActive: false,
+      realTtsAudioStreamed: false,
       pendingTransferTwiml: null,
       resolvedEscalationSettings: null,
       interimEmergencyFired: false,
@@ -1124,27 +1135,31 @@ export class TwilioMediaStreamAdapter {
             tenantId: session.tenantId,
           }),
         );
+        // Scope the real-audio flag to the disclosure/greeting turn: reset it
+        // before, read it after, so it reflects ONLY what this turn played.
+        this.state.realTtsAudioStreamed = false;
         await this.emitSideEffects(initEffects);
         // Consent ordering — capture opens only once the caller has actually
         // HEARD the recording disclosure, matching the Gather path where a
         // blocking <Say> fully plays before <Record> arms.
-        if (this.state.pendingSilenceRepromptTurnId !== null) {
-          // emitSideEffects enqueued the greeting/disclosure audio and left a
-          // pending end-of-utterance mark. Its Twilio ACK is the
-          // playback-completion signal and opens capture in the 'mark' handler
-          // (enableCapture('disclosure_played')); armCaptureEnableFallback is
-          // the lost-ack backstop so a dropped mark frame can't leave the agent
-          // deaf for the whole call.
-          this.armCaptureEnableFallback();
-        } else if (this.disclosureWasSpoken(initEffects)) {
+        if (this.disclosureWasSpoken(initEffects) && !this.state.realTtsAudioStreamed) {
           // A disclosure turn WAS expected to play (ttsProvider wired + a
-          // non-empty greeting tts_play) but produced no completion mark: its
-          // TTS synthesis/stream failed and recovery delivered no audio, so the
-          // caller never (fully) heard the disclosure. FAIL CLOSED — hang up
-          // rather than open capture on an undisclosed call, mirroring the
-          // initializeSession-threw branch below.
-          await this.failDisclosureClosed(callSid, session, 'disclosure_tts_no_playback');
+          // non-empty greeting tts_play) but delivered NO real disclosure audio:
+          // its TTS stream failed and recovery fell back to a generic filler
+          // clip or dead air (a filler is not the recording notice), or the
+          // buffered synth returned non-PCM. A filler's completion mark must
+          // never be mistaken for disclosure playback — FAIL CLOSED (hang up),
+          // mirroring the initializeSession-threw branch below.
+          await this.failDisclosureClosed(callSid, session, 'disclosure_no_real_playback');
           return;
+        }
+        if (this.state.pendingSilenceRepromptTurnId !== null) {
+          // Real disclosure audio streamed and armed a pending end-of-utterance
+          // mark. Its Twilio ACK is the playback-completion signal and opens
+          // capture in the 'mark' handler (enableCapture('disclosure_played'));
+          // armCaptureEnableFallback is the lost-ack backstop so a dropped mark
+          // frame can't leave the agent deaf for the whole call.
+          this.armCaptureEnableFallback();
         } else {
           // Nothing to play (no ttsProvider / empty greeting) — no disclosure
           // audio to gate on, so open capture immediately rather than wait for
@@ -2646,6 +2661,10 @@ export class TwilioMediaStreamAdapter {
         streamSid: this.state.streamSid,
         media: { payload },
       });
+      // Consent ordering — record that REAL (non-filler) TTS audio actually
+      // reached the caller. handleStart reads this after the disclosure turn to
+      // tell genuine disclosure playback apart from a filler-only recovery.
+      if (!isFiller) this.state.realTtsAudioStreamed = true;
       // VQ2-004: TTFA-stop. Emit `audio_frame_emitted` ONCE per turn,
       // on the first chunk that lands on the queue. The flag is armed
       // by `onTranscriptEvent` and disarmed here so subsequent chunks

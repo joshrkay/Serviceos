@@ -302,4 +302,64 @@ describe('recording-consent ordering — disclosure precedes audio capture', () 
     if (session.send.mock.calls.length > 0) failOpen += 1;
     expect(session.send).not.toHaveBeenCalled();
   });
+
+  it('Path 3c (filler-only recovery): a filler clip is not the disclosure — fails closed', async () => {
+    const store = new VoiceSessionStore({ startInterval: false });
+    store.create('tenant-filler', 'telephony', { callSid: 'CA-filler' });
+
+    const { provider, session } = makeStreamingProvider();
+    const ws = new FakeWs();
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: provider,
+        // Streaming TTS fails, and the buffered fallback returns non-PCM — so
+        // recoverTurnAfterStreamFailure falls through to a generic FILLER clip
+        // and arms an end-of-utterance mark. That mark must NOT be accepted as
+        // disclosure playback: the caller heard an apology filler, not the
+        // recording notice.
+        ttsProvider: {
+          synthesize: vi.fn(async () => ({
+            audio: Buffer.from('ID3-fake-mp3'),
+            contentType: 'audio/mpeg',
+            provider: 'test',
+          })),
+          // eslint-disable-next-line require-yield
+          synthesizeStream: vi.fn(async function* () {
+            throw new Error('TTS stream died mid-turn');
+          }),
+        },
+        fillerEngine: { selectNext: () => ({ id: 'f1', text: 'One moment…', approxDurationMs: 500 }) },
+        fillerCache: { get: () => Buffer.alloc(640) },
+        speechTurn: async () => [],
+        initializeSession: async () => [
+          { type: 'tts_play', payload: { text: 'This call may be recorded.' } },
+        ],
+      },
+      ws,
+    );
+    adapter.start();
+
+    ws.inboundJson(startFrame('CA-filler', 'MZ-filler'));
+    await flush();
+    await flush();
+    await flush();
+
+    // Filler-only playback is NOT consent — fail closed.
+    if (!ws.closed) failOpen += 1;
+    expect(ws.closed).toBe(true);
+    expect(ws.closeReason).toBe('disclosure_init_failed');
+
+    // Even if Twilio ACKs the filler turn's completion mark, capture must stay
+    // shut — the mark belongs to a filler, not the disclosure.
+    const markName = silenceArmMarkName(ws);
+    if (markName) {
+      ws.inboundJson({ event: 'mark', streamSid: 'MZ-filler', mark: { name: markName } });
+      await flush();
+    }
+    ws.inboundJson(mediaFrame);
+    await flush();
+    if (session.send.mock.calls.length > 0) failOpen += 1;
+    expect(session.send).not.toHaveBeenCalled();
+  });
 });
