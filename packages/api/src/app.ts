@@ -2756,7 +2756,12 @@ export function createApp(): AppWithLifecycle {
       provisionTwilioWorker as import('./queues/queue').WorkerHandler<unknown>
     );
 
-    const deprovisionTenantWorker = createDeprovisionTenantWorker({ pool });
+    const deprovisionTenantWorker = createDeprovisionTenantWorker({
+      pool,
+      // C6 — the purge also deletes the tenant's stored objects (recording
+      // audio, photos) instead of orphaning them in S3.
+      storage: storageProvider,
+    });
     workerRegistry.set(
       deprovisionTenantWorker.type,
       deprovisionTenantWorker as import('./queues/queue').WorkerHandler<unknown>
@@ -3023,6 +3028,9 @@ export function createApp(): AppWithLifecycle {
     createPublicPortalRouter({
       portalRepo: portalSessionRepo,
       customerRepo,
+      // C2/I14 — contact-bound sessions derive entitlement from the
+      // contact's current role at token resolution.
+      contactRepo: customerContactRepo,
       estimateRepo,
       invoiceRepo,
       jobRepo,
@@ -4630,7 +4638,12 @@ export function createApp(): AppWithLifecycle {
     '/api/portal-sessions',
     // D2-1d: portal tokens are bearer credentials; both mint and
     // revoke emit portal_session.{created,revoked} via auditRepo.
-    createPortalRouter({ portalRepo: portalSessionRepo, customerRepo, auditRepo }),
+    createPortalRouter({
+      portalRepo: portalSessionRepo,
+      customerRepo,
+      contactRepo: customerContactRepo,
+      auditRepo,
+    }),
   );
   app.use('/api/leads', createLeadsRouter(leadRepo, customerRepo, auditRepo, locationRepo));
   app.use('/api/locations', createLocationRouter(locationRepo, ownership, auditRepo));

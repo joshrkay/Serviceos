@@ -375,3 +375,114 @@ describe('U6 — sendConversationReply', () => {
     ).rejects.toMatchObject({ code: 'empty_body' });
   });
 });
+
+// ─── Comms C3 — reply resolves within its own channel thread ─────────────────
+
+describe('C3 channel selection', () => {
+  async function inbound(
+    repo: InMemoryConversationRepository,
+    conversationId: string,
+    channel: 'sms' | 'email',
+    at: Date,
+  ): Promise<void> {
+    await repo.addMessage({
+      tenantId: TENANT,
+      conversationId,
+      messageType: 'text',
+      content: 'inbound',
+      senderId: 'cust-1',
+      senderRole: 'customer',
+      source: channel,
+      metadata: { direction: 'inbound', channel, createdAtOverride: at.toISOString() },
+    });
+  }
+
+  const input = (conversationId: string, channel?: 'sms' | 'email') => ({
+    tenantId: TENANT,
+    conversationId,
+    body: 'On my way',
+    actorId: 'user-1',
+    actorRole: 'owner',
+    ...(channel ? { channel } : {}),
+  });
+
+  it('defaults to the thread channel (customer texted in) even when preference says email', async () => {
+    const h = harness({ customer: customer({ preferredChannel: 'email' }) });
+    const convId = await customerThread(h.conversationRepo, {
+      entityType: 'customer',
+      entityId: 'cust-1',
+    });
+    await inbound(h.conversationRepo, convId, 'sms', new Date('2026-06-17T11:00:00Z'));
+    const result = await sendConversationReply(h.deps, input(convId));
+    expect(result.channel).toBe('sms');
+    expect(h.delivery.sendSms).toHaveBeenCalledTimes(1);
+    expect(h.delivery.sendEmail).not.toHaveBeenCalled();
+  });
+
+  it('thread-derived channel with no address on file asks — never silently flips', async () => {
+    // Customer emailed in, but the email has since been removed from the record.
+    const h = harness({ customer: customer({ email: undefined }) });
+    const convId = await customerThread(h.conversationRepo, {
+      entityType: 'customer',
+      entityId: 'cust-1',
+    });
+    await inbound(h.conversationRepo, convId, 'email', new Date('2026-06-17T11:00:00Z'));
+    await expect(sendConversationReply(h.deps, input(convId))).rejects.toMatchObject({
+      code: 'channel_selection_required',
+    });
+    expect(h.delivery.sendSms).not.toHaveBeenCalled();
+    expect(h.delivery.sendEmail).not.toHaveBeenCalled();
+  });
+
+  it('preference-derived default with no address falls through to the sole deliverable channel', async () => {
+    // Preference says email but only a phone exists and the thread has no
+    // inbound traffic — one deliverable channel is deterministic, not a guess.
+    const h = harness({
+      customer: customer({ preferredChannel: 'email', email: undefined }),
+    });
+    const convId = await customerThread(h.conversationRepo, {
+      entityType: 'customer',
+      entityId: 'cust-1',
+    });
+    const result = await sendConversationReply(h.deps, input(convId));
+    expect(result.channel).toBe('sms');
+    expect(h.delivery.sendSms).toHaveBeenCalledTimes(1);
+  });
+
+  it('both channels deliverable with no thread channel and no usable preference asks', async () => {
+    const h = harness({ customer: customer({ preferredChannel: 'none' }) });
+    const convId = await customerThread(h.conversationRepo, {
+      entityType: 'customer',
+      entityId: 'cust-1',
+    });
+    await expect(sendConversationReply(h.deps, input(convId))).rejects.toMatchObject({
+      code: 'channel_selection_required',
+    });
+  });
+
+  it('explicit channel selection performs a cross-channel reply', async () => {
+    const h = harness();
+    const convId = await customerThread(h.conversationRepo, {
+      entityType: 'customer',
+      entityId: 'cust-1',
+    });
+    await inbound(h.conversationRepo, convId, 'sms', new Date('2026-06-17T11:00:00Z'));
+    const result = await sendConversationReply(h.deps, input(convId, 'email'));
+    expect(result.channel).toBe('email');
+    expect(h.delivery.sendEmail).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses the bounded findLatestInboundChannel lookup instead of scanning getMessages', async () => {
+    const h = harness();
+    const convId = await customerThread(h.conversationRepo, {
+      entityType: 'customer',
+      entityId: 'cust-1',
+    });
+    await inbound(h.conversationRepo, convId, 'sms', new Date('2026-06-17T11:00:00Z'));
+    const bounded = vi.spyOn(h.conversationRepo, 'findLatestInboundChannel');
+    const scan = vi.spyOn(h.conversationRepo, 'getMessages');
+    await sendConversationReply(h.deps, input(convId));
+    expect(bounded).toHaveBeenCalledTimes(1);
+    expect(scan).not.toHaveBeenCalled();
+  });
+});

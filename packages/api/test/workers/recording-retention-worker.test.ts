@@ -184,3 +184,51 @@ describe('RV-132 — recording retention sweep', () => {
     expect(repo.rows[0].purgedAt).toEqual(NOW);
   });
 });
+
+// ─── Comms C6 — the sweep reaches all four data classes ──────────────────────
+
+describe('C6 derived-data purge', () => {
+  it('purges derived data BEFORE the tombstone and audits the per-class counts', async () => {
+    const repo = new InMemoryRecordingRetentionRepository([row('rec-1')]);
+    repo.derivedCounts.set('rec-1', {
+      transcriptTurns: 12,
+      callSummaries: 1,
+      knowledgeChunks: 5,
+    });
+    const auditRepo = { create: vi.fn().mockResolvedValue(undefined) };
+    const storage = { deleteObject: vi.fn(async () => undefined) } as unknown as StorageProvider;
+    const result = await runRecordingRetentionSweep({
+      repo,
+      storage,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      auditRepo: auditRepo as any,
+      logger: noopLogger,
+      now: () => NOW,
+    });
+    expect(result).toEqual({ due: 1, purged: 1, failed: 0 });
+    expect(repo.derivedPurged).toEqual([{ tenantId: 't1', id: 'rec-1' }]);
+    expect(repo.rows[0].purgedAt).toEqual(NOW);
+    const audit = auditRepo.create.mock.calls[0][0];
+    expect(audit.metadata.derivedPurged).toEqual({
+      transcriptTurns: 12,
+      callSummaries: 1,
+      knowledgeChunks: 5,
+    });
+  });
+
+  it('a failed derived purge leaves the row un-tombstoned for the next sweep', async () => {
+    const repo = new InMemoryRecordingRetentionRepository([row('rec-2')]);
+    repo.purgeDerived = async () => {
+      throw new Error('kaboom');
+    };
+    const storage = { deleteObject: vi.fn(async () => undefined) } as unknown as StorageProvider;
+    const result = await runRecordingRetentionSweep({
+      repo,
+      storage,
+      logger: noopLogger,
+      now: () => NOW,
+    });
+    expect(result).toEqual({ due: 1, purged: 0, failed: 1 });
+    expect(repo.rows[0].purgedAt).toBeFalsy();
+  });
+});

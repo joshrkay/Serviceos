@@ -1,5 +1,6 @@
 import type { Pool } from 'pg';
 import type { Logger } from '../logging/logger';
+import type { StorageProvider } from '../files/file-service';
 import { decrypt } from '../integrations/crypto';
 import {
   releasePhoneNumber as realReleasePhoneNumber,
@@ -34,11 +35,21 @@ export interface DeprovisionResult {
   twilioReleased: boolean;
   twilioError?: string;
   rowsDeletedByTable: Record<string, number>;
+  /** Comms C6 — stored objects (recordings, photos, …) deleted from S3. */
+  storageObjectsDeleted: number;
+  /** C6 — objects whose delete failed (logged; DB purge already durable). */
+  storageObjectErrors: number;
 }
 
 export interface DeprovisionDeps {
   pool: Pool;
   logger: Logger;
+  /**
+   * Comms C6 — deletes the tenant's stored objects (call-recording audio,
+   * photos) so a purge doesn't orphan PII in S3. Optional: when absent the
+   * DB purge proceeds and the orphaned-object count is logged as a warning.
+   */
+  storage?: StorageProvider;
   // Injectable for testing; defaults to the real Twilio helpers.
   twilio?: {
     releasePhoneNumber: typeof realReleasePhoneNumber;
@@ -121,7 +132,14 @@ export async function deprovisionTenant(
   const existsRes = await pool.query('SELECT id FROM tenants WHERE id = $1', [tenantId]);
   if (existsRes.rowCount === 0) {
     logger.info('Deprovision no-op — tenant already gone', { tenantId });
-    return { tenantId, alreadyPurged: true, twilioReleased: false, rowsDeletedByTable: {} };
+    return {
+      tenantId,
+      alreadyPurged: true,
+      twilioReleased: false,
+      rowsDeletedByTable: {},
+      storageObjectsDeleted: 0,
+      storageObjectErrors: 0,
+    };
   }
 
   // 1 — Release Twilio FIRST, before the SID is destroyed by the purge.
@@ -159,12 +177,27 @@ export async function deprovisionTenant(
   }
 
   // 2 — Purge every tenant-scoped table, then the tenant row, in one
-  // transaction with FK triggers + RLS disabled.
+  // transaction with FK triggers + RLS disabled. C6: the tenant's stored
+  // object keys are captured FIRST (inside the same transaction, before the
+  // files rows are deleted) so the S3 cleanup in step 2b has something to
+  // work from — a DB purge that orphans recording audio in S3 is not a
+  // deletion (spec/RIVET_COMMS_SPEC.md §6).
   const rowsDeletedByTable: Record<string, number> = {};
+  const storedObjects: Array<{ bucket: string; key: string }> = [];
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     await client.query("SET LOCAL session_replication_role = 'replica'");
+
+    const filesRes = await client.query<{ s3_bucket: string; s3_key: string }>(
+      `SELECT s3_bucket, s3_key FROM files WHERE tenant_id = $1`,
+      [tenantId],
+    );
+    for (const row of filesRes.rows) {
+      if (row.s3_bucket && row.s3_key) {
+        storedObjects.push({ bucket: row.s3_bucket, key: row.s3_key });
+      }
+    }
 
     const tablesRes = await client.query<{ table_name: string }>(
       `SELECT table_name FROM information_schema.columns
@@ -194,6 +227,37 @@ export async function deprovisionTenant(
     client.release();
   }
 
+  // 2b — C6: delete the stored objects now that the DB purge is durable.
+  // Best-effort per object: a failed delete is logged and counted, never
+  // fatal (the rows are already gone; retrying the whole deprovision would
+  // no-op on alreadyPurged, so the log line is the operational signal).
+  let storageObjectsDeleted = 0;
+  let storageObjectErrors = 0;
+  if (storedObjects.length > 0) {
+    if (!deps.storage) {
+      logger.warn('Deprovision: no storage provider wired — stored objects orphaned', {
+        tenantId,
+        orphanedObjects: storedObjects.length,
+      });
+      storageObjectErrors = storedObjects.length;
+    } else {
+      for (const obj of storedObjects) {
+        try {
+          await deps.storage.deleteObject(obj.bucket, obj.key);
+          storageObjectsDeleted++;
+        } catch (err) {
+          storageObjectErrors++;
+          logger.warn('Deprovision: stored-object delete failed', {
+            tenantId,
+            bucket: obj.bucket,
+            key: obj.key,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    }
+  }
+
   // 3 — Durable record (survives the purge: no tenant FK, no RLS).
   await pool.query(
     `INSERT INTO platform_deprovision_log
@@ -218,7 +282,17 @@ export async function deprovisionTenant(
     twilioReleased,
     twilioError,
     totalRowsDeleted: totalRows,
+    storageObjectsDeleted,
+    storageObjectErrors,
   });
 
-  return { tenantId, alreadyPurged: false, twilioReleased, twilioError, rowsDeletedByTable };
+  return {
+    tenantId,
+    alreadyPurged: false,
+    twilioReleased,
+    twilioError,
+    rowsDeletedByTable,
+    storageObjectsDeleted,
+    storageObjectErrors,
+  };
 }

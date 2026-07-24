@@ -447,6 +447,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // Tenant-scoped, RLS-enforced learned entity aliases. New table with no
   // dependency on pre-existing tenant rows beyond normal foreign keys.
   ['261_create_tenant_entity_aliases', 'f355ecfc94bf9a067c28ba86988832801bc2357a0ab1b2b5db5e3baa3d04bfe0'],
+  ['262_portal_sessions_contact_id', '31af90200a435cb285e39c6c180da71a09f82562759fb28844641dc47409b85b'],
 ];
 
 function hashMigration(value: string): string {

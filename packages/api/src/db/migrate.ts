@@ -71,21 +71,71 @@ export async function withMigrationAdvisoryLock<T>(
  * deploy-safety valve that must not stay silent, because without the
  * constraint the double-booking guard is application-level only (F3).
  */
-const CRITICAL_CONSTRAINTS = ['no_double_booking'] as const;
+const CRITICAL_CONSTRAINTS = [
+  // contype 'x' = exclusion constraint — the structural guarantee, matching
+  // the assertion in test/integration/foundation-gates.test.ts.
+  { conname: 'no_double_booking', relname: 'appointment_assignments', contype: 'x' },
+] as const;
 
 /**
  * Return the critical constraints missing from the database. Empty array
  * means every DB-level guard the app assumes is actually in force.
+ * Neither constraint nor relation names are database-global, so name
+ * matching alone would accept a same-named decoy on another table or in
+ * another schema. `to_regclass` resolves the relation the APPLICATION
+ * actually sees (via search_path); the constraint must hang off that
+ * exact relation OID and be the expected type.
  */
 export async function findMissingCriticalConstraints(
   client: PoolClient,
 ): Promise<string[]> {
-  const result = await client.query<{ conname: string }>(
-    'SELECT conname FROM pg_constraint WHERE conname = ANY($1::text[])',
-    [[...CRITICAL_CONSTRAINTS]],
+  const missing: string[] = [];
+  for (const c of CRITICAL_CONSTRAINTS) {
+    const result = await client.query(
+      `SELECT 1
+         FROM pg_constraint con
+        WHERE con.conname = $1
+          AND con.contype = $2
+          AND con.conrelid = to_regclass($3)::oid`,
+      [c.conname, c.contype, c.relname],
+    );
+    if (result.rows.length === 0) missing.push(c.conname);
+  }
+  return missing;
+}
+
+/**
+ * Enforce the critical-constraint postcondition: report every missing
+ * constraint, then FAIL the migration (F3 is binary — without the exclusion
+ * constraint the product runs in exactly the mode the foundation spec
+ * forbids, and a warn-and-continue exit 0 let the deploy proceed anyway).
+ * Failing here blocks only the NEW deploy; the previous one keeps serving.
+ * `ALLOW_MISSING_CRITICAL_CONSTRAINTS=true` is the deliberate operator
+ * override for an emergency deploy while overlaps are being reconciled —
+ * it keeps the loud report but skips the throw.
+ */
+export async function verifyCriticalConstraints(client: PoolClient): Promise<void> {
+  const missing = await findMissingCriticalConstraints(client);
+  if (missing.length === 0) return;
+  for (const conname of missing) {
+    console.error(
+      `[migrate] CRITICAL: constraint '${conname}' is ABSENT after migration. ` +
+        'Double-booking is NOT enforced at the database level. Reconcile ' +
+        'overlapping appointment_assignments rows and re-deploy.',
+    );
+  }
+  if (process.env.ALLOW_MISSING_CRITICAL_CONSTRAINTS === 'true') {
+    console.error(
+      '[migrate] ALLOW_MISSING_CRITICAL_CONSTRAINTS=true — continuing WITHOUT ' +
+        'the DB-level double-booking guard. Unset after reconciling.',
+    );
+    return;
+  }
+  throw new Error(
+    `Missing critical constraint(s) after migration: ${missing.join(', ')}. ` +
+      'Reconcile overlapping appointment_assignments rows and re-deploy ' +
+      '(or set ALLOW_MISSING_CRITICAL_CONSTRAINTS=true for a deliberate emergency deploy).',
   );
-  const present = new Set(result.rows.map((r) => r.conname));
-  return CRITICAL_CONSTRAINTS.filter((c) => !present.has(c));
 }
 
 /** Apply the full migration corpus on the given client. Exit-free + testable. */
@@ -96,16 +146,7 @@ export async function applyMigrations(client: PoolClient): Promise<void> {
   await client.query("SET lock_timeout = '5s'");
   await client.query("SET statement_timeout = '25s'");
   await client.query(getMigrationSQL());
-  // Non-fatal by design (the skip is a deliberate valve for legacy-overlap
-  // databases) but LOUD: an operator must know the DB-level guard is off.
-  const missing = await findMissingCriticalConstraints(client);
-  for (const conname of missing) {
-    console.error(
-      `[migrate] CRITICAL: constraint '${conname}' is ABSENT after migration. ` +
-        'Double-booking is NOT enforced at the database level. Reconcile ' +
-        'overlapping appointment_assignments rows and re-deploy.',
-    );
-  }
+  await verifyCriticalConstraints(client);
 }
 
 /**
@@ -141,6 +182,16 @@ async function runMigrations(): Promise<void> {
   } catch (err) {
     if (isDuplicatePolicyError(err)) {
       console.warn('Migration warning: duplicate policy detected, continuing startup');
+      // The tolerated error aborted applyMigrations BEFORE its constraint
+      // verification ran — re-run it here, or this recovery branch becomes a
+      // bypass of the deploy-blocking gate on a DB that is also missing
+      // no_double_booking.
+      try {
+        await verifyCriticalConstraints(client);
+      } catch (verifyErr) {
+        console.error('Migration failed:', verifyErr);
+        process.exitCode = 1;
+      }
     } else {
       console.error('Migration failed:', err);
       process.exitCode = 1;

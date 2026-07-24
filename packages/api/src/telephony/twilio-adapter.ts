@@ -624,19 +624,6 @@ export function buildTwiML(
   const parts: string[] = [];
   let ended = false;
 
-  // P8-014: when present, prepend a <Start><Record/></Start> block so
-  // Twilio records the entire call asynchronously and POSTs metadata to
-  // /api/telephony/recording on completion. Only emitted on the initial
-  // inbound TwiML — subsequent <Gather> turns must NOT re-emit it (would
-  // start a second concurrent recording).
-  if (opts.recordingStatusCallback) {
-    parts.push(
-      `<Start><Record recordingStatusCallback="${xmlEscape(
-        opts.recordingStatusCallback,
-      )}" recordingStatusCallbackMethod="POST"/></Start>`,
-    );
-  }
-
   for (const fx of sideEffects) {
     if (fx.type === 'tts_play') {
       const text = typeof fx.payload.text === 'string' ? fx.payload.text : '';
@@ -651,7 +638,9 @@ export function buildTwiML(
         opts.voiceOverride ?? (opts.language === 'es' ? GATHER_VOICE_ES : GATHER_VOICE_EN);
       parts.push(`<Say voice="${xmlEscape(voice)}">${xmlEscape(sayText)}</Say>`);
     } else if (fx.type === 'end_session') {
-      parts.push('<Hangup/>');
+      // The <Hangup/> is appended below; the recording block is spliced in
+      // right after the first <Say> (see the comms C5 block), so a
+      // recording-notice <Say> always precedes any <Start><Record>.
       ended = true;
     } else if (fx.type === 'notify_oncall') {
       // P8-013: the adapter's `handleNotifyOncall` consumes this side
@@ -666,7 +655,9 @@ export function buildTwiML(
     // Media Streams is active).
   }
 
-  if (!ended) {
+  if (ended) {
+    parts.push('<Hangup/>');
+  } else {
     // Loop back to <Gather> so the caller can speak the next turn.
     // P11-002: thread the session language to Twilio's built-in STT so
     // Spanish callers don't get transcribed against the English model.
@@ -684,6 +675,25 @@ export function buildTwiML(
         opts.gatherActionUrl
       )}" method="POST" actionOnEmptyResult="true"/>`
     );
+  }
+
+  // P8-014 + comms C5: the async <Start><Record/></Start> block POSTs
+  // metadata to /api/telephony/recording on completion. Only emitted on the
+  // initial inbound TwiML — subsequent <Gather> turns must NOT re-emit it
+  // (would start a second concurrent recording). Placement is a consent
+  // requirement, not a style choice: the recording disclosure is merged
+  // into the first <Say> (buildTelephonyGreeting), and <Start> begins
+  // capture immediately while later verbs execute — so the record block
+  // goes AFTER the first <Say>, guaranteeing the announcement is spoken
+  // before any audio is captured. Caller ASR (<Gather>) already follows
+  // the greeting.
+  if (opts.recordingStatusCallback) {
+    const recordBlock = `<Start><Record recordingStatusCallback="${xmlEscape(
+      opts.recordingStatusCallback,
+    )}" recordingStatusCallbackMethod="POST"/></Start>`;
+    const firstSay = parts.findIndex((p) => p.startsWith('<Say'));
+    if (firstSay >= 0) parts.splice(firstSay + 1, 0, recordBlock);
+    else parts.unshift(recordBlock);
   }
 
   return `<?xml version="1.0" encoding="UTF-8"?><Response>${parts.join('')}</Response>`;

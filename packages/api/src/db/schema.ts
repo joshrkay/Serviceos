@@ -6357,6 +6357,19 @@ export const MIGRATIONS = {
       USING (tenant_id = current_setting('app.current_tenant_id', true)::UUID)
       WITH CHECK (tenant_id = current_setting('app.current_tenant_id', true)::UUID);
   `,
+
+  // Comms C2 (spec/RIVET_COMMS_SPEC.md §1, I14) — portal sessions may be
+  // bound to a specific customer contact. Entitlement is derived from the
+  // contact's CURRENT role at token-resolution time (read time), never
+  // snapshotted here; the column only records who the grant was issued to.
+  // NULL = legacy account-holder session (full customer access).
+  '262_portal_sessions_contact_id': `
+    ALTER TABLE portal_sessions
+      ADD COLUMN IF NOT EXISTS contact_id UUID;
+    CREATE INDEX IF NOT EXISTS idx_portal_sessions_contact
+      ON portal_sessions (tenant_id, contact_id)
+      WHERE contact_id IS NOT NULL;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
