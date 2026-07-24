@@ -492,6 +492,16 @@ interface RuntimeState {
   /** Active TTS turn's AbortController so barge-in can immediately cancel a pending WS read. */
   ttsController: AbortController | null;
   closed: boolean;
+  /**
+   * Consent gate — false until the recording disclosure has completed
+   * (initializeSession resolved, or no initializeSession is wired). While
+   * false, inbound `media` frames are NOT forwarded to Deepgram: caller audio
+   * is never consumed/transcribed before the caller has heard the recording
+   * notice. A disclosure-init FAILURE leaves this false and hangs up the leg
+   * (see handleStart's DISCLOSURE_INIT_FAILED branch), so audio is never
+   * captured on an undisclosed call. Init false in the constructor.
+   */
+  audioCaptureArmed: boolean;
   /** Last time we received an inbound `media` frame. */
   lastMediaAt: number;
   audioIdleTimer: NodeJS.Timeout | null;
@@ -784,6 +794,7 @@ export class TwilioMediaStreamAdapter {
       outboundTurnId: 0,
       ttsController: null,
       closed: false,
+      audioCaptureArmed: false,
       lastMediaAt: Date.now(),
       audioIdleTimer: null,
       silenceRepromptTimer: null,
@@ -1090,6 +1101,11 @@ export class TwilioMediaStreamAdapter {
           }),
         );
         await this.emitSideEffects(initEffects);
+        // Consent ordering — the recording disclosure has now completed, so
+        // arm audio capture: subsequent inbound `media` frames flow into
+        // Deepgram. Frames that arrived while the disclosure was playing were
+        // dropped by the handleMedia gate.
+        this.state.audioCaptureArmed = true;
         // WS16a — establishment success is deliberately NOT recorded here. The
         // old recordSuccess() at this site reset the circuit's consecutive-
         // failure counter, so a call that established cleanly then died mid-call
@@ -1103,14 +1119,13 @@ export class TwilioMediaStreamAdapter {
           error: err instanceof Error ? err.message : String(err),
           callSid,
         });
-        // DISCLOSURE_INIT_FAILED — the call continues but the caller was never
-        // given the recording-consent disclosure and the session is unledgered.
-        // WS3 — undisclosed recording is a compliance stop signal: emit an
-        // alertable audit event and trip the realtime health circuit so
-        // repeated disclosure failures steer subsequent calls to Gather. We do
-        // NOT hang up a live customer — the call continues (Twilio is already
-        // recording per the <Start><Stream> TwiML), the disclosure gap is now
-        // countable rather than a log scrape.
+        // DISCLOSURE_INIT_FAILED — the caller was never given the recording-
+        // consent disclosure and the session is unledgered. Capturing/recording
+        // an undisclosed caller is a compliance violation, so we HANG UP rather
+        // than continue: `audioCaptureArmed` stays false (handleMedia drops any
+        // frames) and we close the WS. WS3 — still emit the alertable audit
+        // event and trip the realtime health circuit so repeated disclosure
+        // failures are countable and steer subsequent calls to Gather.
         logger.error('DISCLOSURE_INIT_FAILED', {
           callSid,
           tenantId: session.tenantId,
@@ -1122,7 +1137,15 @@ export class TwilioMediaStreamAdapter {
           tenantId: session.tenantId,
           reason: 'disclosure_init_failed',
         });
+        this.closeWs(1011, 'disclosure_init_failed');
+        return;
       }
+    } else {
+      // No initializeSession wired (test/dev): there is no disclosure step to
+      // gate on, so audio capture arms immediately — preserving the pre-consent-
+      // gate behavior where the adapter starts listening right after Deepgram
+      // opens and waits for the first utterance.
+      this.state.audioCaptureArmed = true;
     }
     // WS16a — the no-`initializeSession` branch no longer records success here
     // either: like the wired path, a clean session votes success only at close
@@ -1223,6 +1246,12 @@ export class TwilioMediaStreamAdapter {
     if (!this.state.deepgram) return;
     this.state.lastMediaAt = Date.now();
     this.armIdleTimer();
+    // Consent gate: never feed caller audio into STT until the recording
+    // disclosure has completed. Frames arriving while the disclosure is still
+    // playing (or after a disclosure-init failure that hangs up the leg) are
+    // dropped rather than transcribed — the idle-timer bookkeeping above still
+    // runs so a slow disclosure can't trip the inactivity teardown.
+    if (!this.state.audioCaptureArmed) return;
     try {
       const pcm16 = decodeTwilioInboundFrame(frame.media.payload);
       this.state.deepgram.send(pcm16);

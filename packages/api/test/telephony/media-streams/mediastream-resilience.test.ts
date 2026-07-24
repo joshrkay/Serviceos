@@ -6,7 +6,8 @@
  *     audit + WS closed 1011 (Twilio ends the call). No REST redirect is
  *     wired (floor-only; see the WS3 report).
  *   - Disclosure/greeting bootstrap failure → circuit failure +
- *     `voice.disclosure.init_failed` audit + the call CONTINUES (WS not closed).
+ *     `voice.disclosure.init_failed` audit + WS closed 1011 (an undisclosed
+ *     recording is a compliance stop signal — the leg is hung up).
  *   - Clean establishment → circuit success, no failure, no resilience audit.
  */
 
@@ -567,7 +568,7 @@ describe('WS7 mediastream resilience — mid-call degrade to Gather (REST redire
 });
 
 describe('WS3 mediastream resilience — disclosure/greeting bootstrap failure', () => {
-  it('trips the circuit, emits voice.disclosure.init_failed, and CONTINUES the call', async () => {
+  it('trips the circuit, emits voice.disclosure.init_failed, and HANGS UP the call', async () => {
     store.create('tenant-disc', 'telephony', { callSid: 'CA-disc' });
     const ws = new FakeWs();
     const circuit = makeCircuit();
@@ -590,8 +591,9 @@ describe('WS3 mediastream resilience — disclosure/greeting bootstrap failure',
     ws.inboundJson(START_FRAME('CA-disc', 'MZ-disc'));
     await flush();
 
-    // Call continues — a live customer is NOT hung up.
-    expect(ws.closed).toBe(false);
+    // Undisclosed recording is a compliance stop signal — the leg is hung up.
+    expect(ws.closed).toBe(true);
+    expect(ws.closeReason).toBe('disclosure_init_failed');
     expect(circuit.recordFailure).toHaveBeenCalledWith('disclosure_init_failed');
     expect(circuit.recordSuccess).not.toHaveBeenCalled();
     expect(createSpy).toHaveBeenCalledTimes(1);
@@ -761,7 +763,7 @@ describe('WS16a mediastream resilience — circuit fed by real call outcomes', (
     expect(circuit.recordFailure).toHaveBeenCalledTimes(1);
     expect(circuit.recordFailure).toHaveBeenCalledWith('disclosure_init_failed');
 
-    // The call continued; caller later hangs up cleanly. The clean stop must
+    // The leg was hung up on the disclosure failure. A late stop frame must
     // NOT overwrite the establishment failure vote (that would revive the trap).
     ws.inboundJson(STOP_FRAME('MZ-disc-stop'));
     await flush();

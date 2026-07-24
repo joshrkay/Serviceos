@@ -624,19 +624,6 @@ export function buildTwiML(
   const parts: string[] = [];
   let ended = false;
 
-  // P8-014: when present, prepend a <Start><Record/></Start> block so
-  // Twilio records the entire call asynchronously and POSTs metadata to
-  // /api/telephony/recording on completion. Only emitted on the initial
-  // inbound TwiML — subsequent <Gather> turns must NOT re-emit it (would
-  // start a second concurrent recording).
-  if (opts.recordingStatusCallback) {
-    parts.push(
-      `<Start><Record recordingStatusCallback="${xmlEscape(
-        opts.recordingStatusCallback,
-      )}" recordingStatusCallbackMethod="POST"/></Start>`,
-    );
-  }
-
   for (const fx of sideEffects) {
     if (fx.type === 'tts_play') {
       const text = typeof fx.payload.text === 'string' ? fx.payload.text : '';
@@ -651,7 +638,8 @@ export function buildTwiML(
         opts.voiceOverride ?? (opts.language === 'es' ? GATHER_VOICE_ES : GATHER_VOICE_EN);
       parts.push(`<Say voice="${xmlEscape(voice)}">${xmlEscape(sayText)}</Say>`);
     } else if (fx.type === 'end_session') {
-      parts.push('<Hangup/>');
+      // The <Hangup/> is appended after the recording block below so a
+      // recording-notice <Say> always precedes any <Start><Record>.
       ended = true;
     } else if (fx.type === 'notify_oncall') {
       // P8-013: the adapter's `handleNotifyOncall` consumes this side
@@ -666,7 +654,23 @@ export function buildTwiML(
     // Media Streams is active).
   }
 
-  if (!ended) {
+  // P8-014 / consent ordering: emit the async recording block ONLY after the
+  // recording-notice <Say> verbs above, so the caller always hears the
+  // disclosure before Twilio arms `<Record>` and any audio is captured. Only
+  // present on the initial inbound TwiML (recordingStatusCallback set);
+  // subsequent <Gather> turns leave it undefined so a second concurrent
+  // recording is never started.
+  if (opts.recordingStatusCallback) {
+    parts.push(
+      `<Start><Record recordingStatusCallback="${xmlEscape(
+        opts.recordingStatusCallback,
+      )}" recordingStatusCallbackMethod="POST"/></Start>`,
+    );
+  }
+
+  if (ended) {
+    parts.push('<Hangup/>');
+  } else {
     // Loop back to <Gather> so the caller can speak the next turn.
     // P11-002: thread the session language to Twilio's built-in STT so
     // Spanish callers don't get transcribed against the English model.

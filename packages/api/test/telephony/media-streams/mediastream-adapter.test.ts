@@ -1671,9 +1671,11 @@ describe('production-shaped wiring (app.ts hooks)', () => {
     const errorOutput = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
     expect(errorOutput).toContain('CA-disclose-fail');
 
-    // The adapter must NOT have closed the WS — call continues undisclosed
-    // rather than dropping the caller.
-    expect(ws.closed).toBe(false);
+    // The adapter must HANG UP — recording an undisclosed caller is a
+    // compliance violation, so a disclosure-init failure ends the leg rather
+    // than continuing to capture audio.
+    expect(ws.closed).toBe(true);
+    expect(ws.closeReason).toBe('disclosure_init_failed');
 
     // Adapter variable is used above; reference it to satisfy unused-var lint.
     void adapter;
