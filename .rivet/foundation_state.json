@@ -3,9 +3,9 @@
   "spec": "spec/RIVET_FOUNDATION_SPEC.md",
   "contracts": ".rivet/RIVET_OPERATION_CONTRACTS.md §5.10, §5.12",
   "scope": "registry #9, #11-13, #18(scheduling side), #37-43, #61-62, §5.10 settings, J1 onboarding",
-  "state_version": 1,
+  "state_version": 2,
   "updated": "2026-07-24",
-  "iteration": 1,
+  "iteration": 2,
   "phase": "loop",
   "gates": {
     "F1": {
@@ -14,7 +14,7 @@
     },
     "F2": {
       "status": "failing",
-      "detail": "Remediated this iteration: slot finder now intersects per-day tenant business hours, tech working hours, tech time-off (PTO), and the tenant travel buffer; public-booking AND portal write paths validate slots against the same tenant hours (portal previously validated none). REMAINING: (a) service area checked nowhere in scheduling; (b) skill matcher is StubSkillMatcher in prod wiring (app.ts) — term 6 unenforced; (c) feasibility emits working-hours/PTO as warnings, not blockers — operator assignment can still land outside them (product decision needed: is operator override allowed?); (d) voice lookup_availability (twilio-adapter.ts ~2647, workers/voice-lookup-answer.ts) calls the raw finder with NO business hours and NO buffer — inbound agent can offer 3am slots; (e) recurring materialization (recurring-jobs/materialize.ts) places occurrences with no feasibility checks (no assignments created, so the DB constraint is not bypassed — conflicts surface as 409 at tech-assignment time)."
+      "detail": "Remediated this iteration: slot finder now intersects per-day tenant business hours, tech working hours, tech time-off (PTO), and the tenant travel buffer; public-booking AND portal write paths validate slots against the same tenant hours (portal previously validated none). REMAINING: (a) service area checked nowhere in scheduling; (b) skill matcher is StubSkillMatcher in prod wiring (app.ts) — term 6 unenforced; (c) feasibility emits working-hours/PTO as warnings, not blockers — operator assignment can still land outside them (product decision needed: is operator override allowed?); (d) CLOSED iteration 2: voice lookup_availability on both production surfaces (twilio-adapter inbound, voice-lookup-answer operator worker) now routes through lookupBookableAvailability → findBookableSlots (tenant hours, buffer, tenant-tz TTS; previously raw calendar gaps that could offer 3am, spoken in server tz). The voice-quality text-mode-driver eval harness intentionally keeps the raw-finder path for fixture stability — prod/eval divergence recorded, parity is a next_iteration item; (e) recurring materialization (recurring-jobs/materialize.ts) places occurrences with no feasibility checks (no assignments created, so the DB constraint is not bypassed — conflicts surface as 409 at tech-assignment time)."
     },
     "F3": {
       "status": "passing",
@@ -51,7 +51,8 @@
       "unit_settings_proposals_jobs": "308/308",
       "integration_foundation_gates": "5/5 (F3 constraint presence, V17 hours/timezone/buffer propagation)",
       "integration_race_dispatch": "technician-double-booking-race + dispatch-availability green",
-      "integration_settings_onboarding": "settings, settings-autonomous-booking, onboarding-identity, slot-conflict-checker 22/22"
+      "integration_settings_onboarding": "settings, settings-autonomous-booking, onboarding-identity, slot-conflict-checker 22/22",
+      "iteration2_voice": "telephony + voice-lookup-answer 409/409; lookup-availability skill 27/27 (incl. new hours-aware variant: never outside hours, closed-day skip, tenant-tz TTS, degrade-not-crash)"
     },
     "code_pins": {
       "constraint": "packages/api/src/db/schema.ts:3266 (migration 131)",
@@ -68,7 +69,7 @@
     "Skills model: catalog of skills per service type + per tech, or drop term 6 from the gate until modeled (F2b)."
   ],
   "next_iteration": [
-    "Wire tenant business hours + buffer into the voice lookup_availability path (twilio-adapter, voice-lookup-answer worker) — highest-visibility F2 gap",
+    "Voice-quality text-mode-driver parity with the hours-aware adapter path (update fixtures alongside)",
     "Recurring materialization: consult availability at placement or flag conflicted occurrences for dispatcher review (#18)",
     "V17 for price-book rate and tax rate propagation",
     "V18 cold-tenant sweep across the 62 registry ops",

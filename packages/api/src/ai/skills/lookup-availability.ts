@@ -2,6 +2,11 @@ import type {
   AvailabilityFinder,
   OpenSlot,
 } from '../tasks/availability-finder';
+import {
+  findBookableSlots,
+  BookableSlotsDeps,
+  WeeklyBusinessHours,
+} from '../../scheduling/booking-availability';
 
 /**
  * lookup-availability — skill the calling agent (and the dispatcher
@@ -91,6 +96,22 @@ export function describeSlots(slots: OpenSlot[], timezone?: string): string {
   return `${head}, or ${labels[labels.length - 1]}`;
 }
 
+/** Shared phrasing for both lookup variants — one-vs-many lead-in so the TTS doesn't sound robotic. */
+function slotsToResult(slots: OpenSlot[], timezone?: string): LookupAvailabilityResult {
+  if (slots.length === 0) {
+    return {
+      status: 'no_slots',
+      message: "I'm not seeing any open slots in that range — let me get a person to help.",
+    };
+  }
+  const summary = describeSlots(slots, timezone);
+  const message =
+    slots.length === 1
+      ? `I have ${summary} open — does that work?`
+      : `I have ${summary} open — which works for you?`;
+  return { status: 'ok', slots, message };
+}
+
 export async function lookupAvailability(
   input: LookupAvailabilityInput,
   finder: AvailabilityFinder,
@@ -109,20 +130,66 @@ export async function lookupAvailability(
     return { status: 'unavailable', reason: result.reason };
   }
 
-  if (result.slots.length === 0) {
-    return {
-      status: 'no_slots',
-      message: "I'm not seeing any open slots in that range — let me get a person to help.",
-    };
+  return slotsToResult(result.slots, input.timezone);
+}
+
+export interface LookupBookableAvailabilityInput {
+  tenantId: string;
+  /** Tenant IANA timezone — windows are defined in it and the summary renders in it. */
+  timezone: string;
+  searchFrom: Date;
+  /** Horizon in calendar days from `searchFrom`. */
+  searchDays: number;
+  durationMs: number;
+  technicianId?: string;
+  count?: number;
+  /** Tenant per-day hours (`tenant_settings.business_hours`). */
+  weeklyHours?: WeeklyBusinessHours | null;
+  /** Tenant travel buffer (`tenant_settings.job_buffer_minutes`). */
+  bufferMinutes?: number | null;
+}
+
+/**
+ * Business-hours-aware variant for voice surfaces. The raw-finder variant
+ * above walks calendar gaps with no notion of business hours, working hours,
+ * time-off, or the travel buffer — fine for a dispatcher told "the calendar
+ * is open", wrong for an inbound caller who would be offered 3 AM. This one
+ * routes through `findBookableSlots`, the same intersection every booking
+ * surface uses, so the agent only speaks slots the tenant could actually
+ * honor (F2 in spec/RIVET_FOUNDATION_SPEC.md).
+ */
+export async function lookupBookableAvailability(
+  input: LookupBookableAvailabilityInput,
+  deps: BookableSlotsDeps,
+): Promise<LookupAvailabilityResult> {
+  const ymdInTz = (d: Date) =>
+    new Intl.DateTimeFormat('en-CA', {
+      timeZone: input.timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(d);
+  try {
+    const fromDate = ymdInTz(input.searchFrom);
+    const toDate = ymdInTz(
+      new Date(input.searchFrom.getTime() + input.searchDays * 24 * 60 * 60 * 1000),
+    );
+    const slots = await findBookableSlots(deps, {
+      tenantId: input.tenantId,
+      fromDate,
+      toDate,
+      timezone: input.timezone,
+      durationMin: Math.round(input.durationMs / 60000),
+      technicianId: input.technicianId,
+      weeklyHours: input.weeklyHours,
+      bufferMinutes: input.bufferMinutes,
+      maxSlots: input.count ?? 3,
+      now: input.searchFrom,
+    });
+    return slotsToResult(slots, input.timezone);
+  } catch (err) {
+    // Same failure-open contract as the raw finder: callers degrade to the
+    // clarification path instead of crashing the call.
+    return { status: 'unavailable', reason: err instanceof Error ? err.message : String(err) };
   }
-
-  // Use a different lead-in for one-vs-many so the TTS doesn't sound
-  // robotic.
-  const summary = describeSlots(result.slots, input.timezone);
-  const message =
-    result.slots.length === 1
-      ? `I have ${summary} open — does that work?`
-      : `I have ${summary} open — which works for you?`;
-
-  return { status: 'ok', slots: result.slots, message };
 }
