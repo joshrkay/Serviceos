@@ -471,6 +471,26 @@ incrementally by atomic single-UPDATE, not derived by SUM on read**:
 Each is a single compare-and-derive UPDATE (not read-modify-write), so concurrent legitimate credits
 don't lose an update — **but it is a stateful counter, not a SUM.** That is the drift surface.
 
+**A third write path to the same two columns exists and is not atomic.** The generic
+`InvoiceRepository.update()` carries plain absolute setters — `amount_paid_cents = $N`,
+`amount_due_cents = $N` (`pg-invoice.ts:214-221`) — bypassing the increment helpers entirely. Three
+live callers write balance columns through it. Two are the crash-recovery reconciliations already
+described above (`payment.ts:52-55`, `payment-service.ts:266-270`), where an absolute write is
+correct by definition — reconciliation restates the value rather than adjusting it.
+
+The third is **`applyDepositCredit` (`deposit-credit.ts:122-132`), and it is a read-modify-write**:
+it computes `newAmountPaid = invoice.amountPaidCents + credit` from an invoice read earlier in the
+call (`:122`), then writes that value absolutely (`:129`). A concurrent credit landing via
+`incrementAmountPaidAtomic` between that read and that write is **silently overwritten** — the
+invoice under-credits the customer, and `amount_paid_cents` falls below `Σ(active payments)`.
+
+Mitigating: the path does insert a matching `payments` row first (`:119`, `amountCents: credit`,
+`providerReference: 'deposit_credit'`), so **L3 holds in the serial case** — this is a lost-update
+race, not a systematic violation. It is also precisely the drift L3 is built to catch, which
+strengthens rather than weakens the case for L3 as the sweep spine. Note the in-file comment at
+`:95-96` acknowledges a *different* adjacent risk (payment-write / invoice-update atomicity, shared
+with `recordPayment`) — the lost update described here is not that one and is not flagged in code.
+
 The only reconciliation that exists is **narrow, one-directional, and crash-recovery-only**:
 `reconcileInvoiceFromPayments` (increase-only, `payment.ts:29-59`) fires solely on a webhook
 duplicate-insert retry (`:531-538`); `reconcileInvoiceAfterReversal` (decrease-only,
