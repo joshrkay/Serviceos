@@ -638,7 +638,9 @@ export function buildTwiML(
         opts.voiceOverride ?? (opts.language === 'es' ? GATHER_VOICE_ES : GATHER_VOICE_EN);
       parts.push(`<Say voice="${xmlEscape(voice)}">${xmlEscape(sayText)}</Say>`);
     } else if (fx.type === 'end_session') {
-      parts.push('<Hangup/>');
+      // The <Hangup/> is appended below; the recording block is spliced in
+      // right after the first <Say> (see the comms C5 block), so a
+      // recording-notice <Say> always precedes any <Start><Record>.
       ended = true;
     } else if (fx.type === 'notify_oncall') {
       // P8-013: the adapter's `handleNotifyOncall` consumes this side
@@ -653,7 +655,9 @@ export function buildTwiML(
     // Media Streams is active).
   }
 
-  if (!ended) {
+  if (ended) {
+    parts.push('<Hangup/>');
+  } else {
     // Loop back to <Gather> so the caller can speak the next turn.
     // P11-002: thread the session language to Twilio's built-in STT so
     // Spanish callers don't get transcribed against the English model.
