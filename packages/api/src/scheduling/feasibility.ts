@@ -5,6 +5,7 @@ import {
 } from './feasibility-types';
 import { Appointment } from '../appointments/appointment';
 import { getDayOfWeekInTimezone } from '../appointments/time';
+import { localDateKey } from '../shared/timezone';
 import { LatLng } from './travel-time/provider';
 
 const WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -86,6 +87,20 @@ async function availabilityIssues(
       check: 'working_hours',
       severity: 'blocking',
       message: 'Technician is not scheduled to work on this day',
+    });
+  }
+  // detectAvailabilityConflicts compares minutes-of-day only, so a window
+  // crossing local midnight would slip past a single day's row. A modeled
+  // tech's shift never spans local days.
+  if (
+    allRows.length > 0 &&
+    localDateKey(input.proposedScheduledStart, timezone) !==
+      localDateKey(input.proposedScheduledEnd, timezone)
+  ) {
+    issues.push({
+      check: 'working_hours',
+      severity: 'blocking',
+      message: 'Proposed window spans multiple local days — outside working hours',
     });
   }
   return issues;

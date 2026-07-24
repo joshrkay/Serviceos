@@ -103,6 +103,13 @@ interface ChosenSlot {
   technicianRole: string;
   scheduledStart: Date;
   scheduledEnd: Date;
+  /**
+   * The timezone slot selection ran in (input override → tenant settings →
+   * UTC). The appointment MUST store this same zone: a divergent zone both
+   * persists wrong display metadata and makes the assignment-level
+   * working-hours guard interpret the instant in the wrong local day.
+   */
+  timezone: string;
 }
 
 async function chooseTechnicianAndSlot(
@@ -117,7 +124,16 @@ async function chooseTechnicianAndSlot(
   const schedulingConfig = schedulingConfigFromSettings(settings);
   const timezone = input.timezone ?? schedulingConfig.timezone ?? DEFAULT_TIMEZONE;
   const now = input.now ?? new Date();
-  const slotDeps = { appointmentRepo: deps.appointmentRepo, assignmentRepo: deps.assignmentRepo };
+  // Same repos the assignTechnician guard uses — slot selection and
+  // assignment must enforce identical constraints, or auto-pick chooses a
+  // slot the guard then rejects and the conversion fails instead of trying
+  // the next valid slot.
+  const slotDeps = {
+    appointmentRepo: deps.appointmentRepo,
+    assignmentRepo: deps.assignmentRepo,
+    workingHoursRepo: deps.workingHoursRepo,
+    unavailableBlockRepo: deps.unavailableBlockRepo,
+  };
 
   async function requireTechnician(id: string): Promise<User> {
     const user = await deps.userRepo.findById(tenantId, id);
@@ -149,7 +165,7 @@ async function chooseTechnicianAndSlot(
         bufferMinutes: schedulingConfig.bufferMinutes,
       });
       if (free) {
-        return { technicianId: tech.id, technicianRole: tech.role, scheduledStart, scheduledEnd };
+        return { technicianId: tech.id, technicianRole: tech.role, scheduledStart, scheduledEnd, timezone };
       }
     }
     throw new ConflictError('Requested start time is not available for any technician');
@@ -170,6 +186,7 @@ async function chooseTechnicianAndSlot(
         technicianRole: tech.role,
         scheduledStart: slots[0].start,
         scheduledEnd: slots[0].end,
+        timezone,
       };
     }
   }
@@ -184,7 +201,6 @@ export async function convertEstimateToScheduledJob(
   input: ConvertEstimateToScheduledJobInput,
 ): Promise<ConvertEstimateToScheduledJobResult> {
   const { tenantId, estimateId, actorId } = input;
-  const timezone = input.timezone ?? DEFAULT_TIMEZONE;
 
   // 0. Validate UUIDs up front so a malformed id can't reach a tenant-scoped
   //    query / setTenantContext (which casts to uuid) before failing.
@@ -288,7 +304,9 @@ export async function convertEstimateToScheduledJob(
     jobId: job.id,
     scheduledStart: chosen.scheduledStart,
     scheduledEnd: chosen.scheduledEnd,
-    timezone,
+    // The zone slot selection ran in — a divergent zone here would make the
+    // assignment guard evaluate the window in the wrong local day.
+    timezone: chosen.timezone,
     createdBy: actorId,
     idempotencyKey,
   };

@@ -183,10 +183,17 @@ export class DefaultAvailabilityFinder implements AvailabilityFinder {
     let candidates: Appointment[];
     try {
       const fetchFrom = new Date(input.searchFrom.getTime() - SEARCH_BUFFER_MS);
+      // Fetch through the trailing buffer too: an appointment starting just
+      // AFTER searchTo still pushes its buffered interval back into the
+      // window. Without this a slot ending five minutes before the next job
+      // passes a 60-minute buffer check because that job is never fetched.
+      const fetchTo = new Date(
+        input.searchTo.getTime() + Math.max(0, input.bufferMs ?? 0),
+      );
       candidates = await this.deps.appointmentRepo.findByDateRange(
         input.tenantId,
         fetchFrom,
-        input.searchTo,
+        fetchTo,
       );
     } catch (err) {
       return { ok: false, reason: err instanceof Error ? err.message : String(err) };

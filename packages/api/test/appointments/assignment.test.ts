@@ -442,3 +442,45 @@ describe('assignTechnician — working-hours + time-off preconditions', () => {
     expect(a.technicianId).toBe('tech-1');
   });
 });
+
+describe('assignTechnician — cross-midnight windows vs modeled hours (Codex P2)', () => {
+  it('refuses a window spanning local days for a modeled technician', async () => {
+    const assignmentRepo = new InMemoryAssignmentRepository();
+    const appointmentRepo = new InMemoryAppointmentRepository();
+    // Monday 16:00 PT → Tuesday 09:00 PT; minutes-of-day comparison alone
+    // would pass a Monday 08:00–17:00 row.
+    const appt = await createAppointment(
+      {
+        tenantId: 'tenant-1',
+        jobId: 'job-1',
+        scheduledStart: new Date('2026-06-15T23:00:00Z'), // Mon 16:00 PT
+        scheduledEnd: new Date('2026-06-16T16:00:00Z'), // Tue 09:00 PT
+        timezone: 'America/Los_Angeles',
+        createdBy: 'disp-1',
+      },
+      appointmentRepo,
+    );
+    await expect(
+      assignTechnician(
+        {
+          tenantId: 'tenant-1',
+          appointmentId: appt.id,
+          technicianId: 'tech-1',
+          technicianRole: 'technician',
+          assignedBy: 'disp-1',
+        },
+        assignmentRepo,
+        {
+          appointmentRepo,
+          workingHoursRepo: {
+            findByTechnician: async () => [{
+              id: 'wh-1', tenantId: 'tenant-1', technicianId: 'tech-1',
+              dayOfWeek: 1, startTime: '08:00', endTime: '17:00', isActive: true,
+              createdAt: new Date(), updatedAt: new Date(),
+            }],
+          } as never,
+        },
+      ),
+    ).rejects.toThrow(/spans multiple local days/i);
+  });
+});

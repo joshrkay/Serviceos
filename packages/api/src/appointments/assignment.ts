@@ -10,7 +10,7 @@ import { WorkingHoursRepository } from '../availability/working-hours';
 import { UnavailableBlockRepository } from '../availability/unavailable-block';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { notifyTechnicianAssignmentChange } from './assignment-notifications';
-import { isValidTimezone } from '../shared/timezone';
+import { isValidTimezone, localDateKey } from '../shared/timezone';
 
 /**
  * Optional dependencies for `assignTechnician`.
@@ -169,6 +169,15 @@ export async function assignTechnician(
           await deps.workingHoursRepo.findByTechnician(input.tenantId, input.technicianId)
         ).filter((r) => r.isActive);
         if (rows.length > 0) {
+          // detectAvailabilityConflicts compares minutes-of-day only, so a
+          // window crossing local midnight (Mon 16:00 → Tue 09:00) would
+          // slip past a single day's row. A modeled tech's shift never
+          // spans local days — reject the shape outright.
+          if (localDateKey(target.scheduledStart, tz) !== localDateKey(target.scheduledEnd, tz)) {
+            throw new ConflictError(
+              'Appointment spans multiple local days — outside the technician working hours',
+            );
+          }
           const dow = dayOfWeekInTz(target.scheduledStart, tz);
           const dayRow = rows.find((r) => r.dayOfWeek === dow) ?? null;
           if (!dayRow) {

@@ -383,3 +383,31 @@ describe('schedulingConfigFromSettings — the single settings→scheduling seam
     expect(config).toEqual({ timezone: null, weeklyHours: null, bufferMinutes: null });
   });
 });
+
+describe('isSlotFree — trailing-buffer fetch horizon (Codex P1)', () => {
+  async function freeWithBuffer(bufferMinutes: number) {
+    const deps = makeDeps();
+    // Existing job starts 5 minutes AFTER the requested slot ends.
+    await deps.appointmentRepo.create(
+      appt({
+        scheduledStart: new Date('2026-06-15T17:05:00Z'),
+        scheduledEnd: new Date('2026-06-15T18:05:00Z'),
+      }),
+    );
+    const { isSlotFree } = await import('../../src/scheduling/booking-availability');
+    return isSlotFree(deps, {
+      tenantId: TENANT,
+      start: new Date('2026-06-15T16:00:00Z'),
+      end: new Date('2026-06-15T17:00:00Z'),
+      bufferMinutes,
+    });
+  }
+
+  it('rejects a slot ending just before a later appointment when the buffer covers it', async () => {
+    expect(await freeWithBuffer(60)).toBe(false);
+  });
+
+  it('accepts the same slot with no buffer configured', async () => {
+    expect(await freeWithBuffer(0)).toBe(true);
+  });
+});

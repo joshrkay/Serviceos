@@ -450,7 +450,10 @@ export const updateSettingsSchema = z.object({
     )
     .nullable()
     .optional(),
-  jobBufferMinutes: z.number().int().min(0).max(240).nullable().optional(),
+  // No `.nullable()`: the column is NOT NULL DEFAULT 30 (migration 098), so a
+  // null write would bounce off Postgres as a 500 instead of clearing. "Back
+  // to default" is an explicit `30`.
+  jobBufferMinutes: z.number().int().min(0).max(240).optional(),
   // F2 term 5 — ZIP allowlist bounding the service area. [] or null clears
   // to unbounded (the explicit "no restriction" state, never a guess).
   serviceAreaZips: z
