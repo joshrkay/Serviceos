@@ -44,12 +44,10 @@ S3 but is never re-transcribed; the ingestion worker only reads the
 in-memory transcript. **Fix:** persist turns incrementally during the call,
 or add a re-transcribe-from-S3 fallback in `onPersisted`.
 
-## C-6 — No LLM cross-provider failover in default config
-`ai/gateway/factory.ts:187` — `fallbackProviders` is empty unless
-`AI_FALLBACK_PROVIDER_*` env vars are set (staged-rollout default OFF), so
-breaker-open/provider-hang dead-ends the turn at `LLM_PROVIDER_UNAVAILABLE`.
-Known-tracked as FM-03. **Fix:** ops config — enable the OpenRouter
-Profile B fallback; code path already wired.
+## C-6 — ~~No LLM cross-provider failover in default config~~ CLOSED
+Closed 2026-07-24 by PR #737 (merged into this branch via main):
+OpenAI→OpenRouter dual-provider failover wired (FM-03), empty classify
+deadline guarded, A+fallback ops documented.
 
 ## C-7 — `launch-quality-check.ts` H3 references a moved file
 The checker greps `src/payments/stripe-webhook-handler.ts`, which no longer
@@ -75,3 +73,29 @@ only if an estimate-list-by-status endpoint appears.
 ## C-10 — Soft-deleted users previously visible in reads (FIXED in shipgate PR)
 Historical note: repository reads didn't filter `deleted_at`; fixed alongside
 A-3 (in-app deletion). Kept here so the behavior change is discoverable.
+
+## C-11 — Multi-tenant Clerk subjects vs account deletion (NEEDS PRODUCT DECISION)
+Codex round-11 P1 (`routes/users.ts` DELETE /me): one Clerk subject can hold
+memberships in multiple tenants (non-unique `clerk_user_id`; invitation flow
+joins by email). In-app deletion runs the last-owner guard only in the
+CALLING tenant, then deletes the GLOBAL Clerk identity; the `user.deleted`
+webhook stamps every membership across tenants — so a sole-owner membership
+in another workspace is orphaned without its guard ever running.
+**Recommended design:** membership-scoped deletion — if the subject has live
+memberships in other tenants, soft-delete only the current membership and
+SKIP the Clerk delete (identity still needed elsewhere, Slack-style); delete
+the Clerk identity only when this was the last live membership. Needs a
+cross-tenant membership count (RLS plumbing: users has no system_lookup
+escape) and a product sign-off on the semantics. Until then the exposure
+requires a user who owns workspace A solely while deleting their account
+from workspace B — not reviewer-reachable (demo tenant is single-workspace).
+
+## C-12 — Durable retry/outbox for failed deletion compensation
+Codex round-11 P1: if the compensating restore itself fails on a transient
+DB error (after a definite Clerk failure), the account stays deactivated
+with Clerk alive and no automatic retry — the flow ends at the
+`ACCOUNT_DELETE_INCONSISTENT` 500 directing the user to support, and the
+`user.account_deletion_unconfirmed` /`account_deleted` audit rows are the
+support trail. A durable outbox/saga would auto-heal this; deliberately
+deferred twice as heavy for one endpoint. If more flows grow compensation
+logic, build the outbox once and migrate this onto it.
