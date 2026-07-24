@@ -601,6 +601,16 @@ interface RuntimeState {
    */
   turnRealAudioComplete: boolean;
   /**
+   * Consent ordering — real (non-filler) PCM bytes enqueued for the CURRENT
+   * turn. Reset per turn by `emitSideEffects` and snapshotted into
+   * {@link disclosureAudioBytes} for the disclosure turn, so the lost-ack
+   * backstop can wait out the audio's real playback duration instead of a
+   * constant that a long custom greeting could out-run.
+   */
+  turnAudioBytes: number;
+  /** Consent ordering — {@link turnAudioBytes} as of the disclosure turn. */
+  disclosureAudioBytes: number;
+  /**
    * Consent ordering — true only while the establishment (disclosure/greeting)
    * side effects are being emitted, so `emitSideEffects` records
    * {@link disclosureTurnComplete} for THAT turn alone and never for a later
@@ -744,12 +754,29 @@ const TWILIO_QUEUE_HIGH_WATERMARK = 0.7;
 const TWILIO_MAX_UNACKED_MARKS = 3;
 
 /**
- * C5 — lost-ack backstop for the capture consent gate. Sized well past the
- * longest realistic greeting+disclosure playback (~20s of audio) so a fire
- * can only mean the greeting turn's mark ack was lost, not that the
- * disclosure is still mid-sentence.
+ * C5 — FLOOR for the lost-ack backstop on the capture consent gate. This is a
+ * floor, never the whole story: a fixed timeout cannot establish playback
+ * completion, and a tenant custom greeting may be up to 500 chars
+ * (`VoiceConfigInputSchema`) with the disclosure appended AFTER it, which can
+ * out-run any constant. The effective delay is this floor or the DURATION OF
+ * THE AUDIO WE ACTUALLY ENQUEUED for the disclosure turn plus
+ * {@link CAPTURE_ENABLE_FALLBACK_MARGIN_MS}, whichever is longer — see
+ * `armCaptureEnableFallback`. So a fire means the mark ack was lost after the
+ * audio had time to play, not that the disclosure is still mid-sentence.
  */
 const CAPTURE_ENABLE_FALLBACK_MS = 30_000;
+/**
+ * Slack added on top of the enqueued disclosure audio's real playback duration
+ * before the lost-ack backstop may open capture, covering Twilio-side buffering
+ * and network jitter.
+ */
+const CAPTURE_ENABLE_FALLBACK_MARGIN_MS = 5_000;
+/**
+ * Outbound PCM16 @ 16 kHz mono → bytes per millisecond of playback
+ * (16000 samples/s × 2 bytes ÷ 1000). Used to convert the disclosure turn's
+ * enqueued byte count into how long that audio actually takes to play.
+ */
+const OUTBOUND_PCM_BYTES_PER_MS = 32;
 /** Slow-consumer grace window before disconnect. */
 const TWILIO_SLOW_CONSUMER_GRACE_MS = 8_000;
 /** Slow-consumer EWMA send latency threshold. */
@@ -882,6 +909,8 @@ export class TwilioMediaStreamAdapter {
       turnLatencyStartMs: null,
       fillerActive: false,
       turnRealAudioComplete: false,
+      turnAudioBytes: 0,
+      disclosureAudioBytes: 0,
       awaitingDisclosureTurn: false,
       disclosureTurnComplete: null,
       disclosureTurnId: null,
@@ -1343,10 +1372,20 @@ export class TwilioMediaStreamAdapter {
    */
   private armCaptureEnableFallback(): void {
     if (this.state.captureEnabled || this.state.captureEnableTimer) return;
+    // A constant cannot establish playback completion — a tenant custom
+    // greeting (up to 500 chars, with the disclosure appended after it) can
+    // out-run any fixed value. Wait at least as long as the audio we actually
+    // enqueued takes to play, plus margin, so the backstop can only fire once
+    // the disclosure has genuinely had time to be heard.
+    const playbackMs = Math.ceil(this.state.disclosureAudioBytes / OUTBOUND_PCM_BYTES_PER_MS);
+    const delayMs = Math.max(
+      CAPTURE_ENABLE_FALLBACK_MS,
+      playbackMs + CAPTURE_ENABLE_FALLBACK_MARGIN_MS,
+    );
     this.state.captureEnableTimer = setTimeout(() => {
       this.state.captureEnableTimer = null;
       this.enableCapture('fallback_timeout');
-    }, CAPTURE_ENABLE_FALLBACK_MS);
+    }, delayMs);
     if (typeof this.state.captureEnableTimer.unref === 'function') {
       this.state.captureEnableTimer.unref();
     }
@@ -2296,8 +2335,9 @@ export class TwilioMediaStreamAdapter {
       const text = renderTtsText(rawText, renderPayload, lang);
       let turnId = ++this.state.outboundTurnId;
       this.state.agentSpeaking = true;
-      // Consent ordering — scope the completion flag to THIS turn.
+      // Consent ordering — scope the completion flag + byte count to THIS turn.
       this.state.turnRealAudioComplete = false;
+      this.state.turnAudioBytes = 0;
       try {
         // runTurnWithFiller returns the final turnId — it may have been
         // bumped if a filler was preempted by the real TTS arrival.
@@ -2317,6 +2357,7 @@ export class TwilioMediaStreamAdapter {
       // mask a greeting that didn't play.
       if (this.state.awaitingDisclosureTurn && this.state.disclosureTurnComplete === null) {
         this.state.disclosureTurnComplete = this.state.turnRealAudioComplete;
+        this.state.disclosureAudioBytes = this.state.turnAudioBytes;
         // Pin the turn id the disclosure's end-of-utterance mark carries (the
         // post-runTurnWithFiller value, which a preempted filler may have
         // bumped) so the mark handler can recognise that ack and only that one.
@@ -2774,6 +2815,10 @@ export class TwilioMediaStreamAdapter {
         streamSid: this.state.streamSid,
         media: { payload },
       });
+      // Consent ordering — accumulate the real (non-filler) audio actually
+      // enqueued for this turn, so the lost-ack backstop can wait out its true
+      // playback duration rather than a fixed constant.
+      if (!isFiller) this.state.turnAudioBytes += chunk.length;
       // VQ2-004: TTFA-stop. Emit `audio_frame_emitted` ONCE per turn,
       // on the first chunk that lands on the queue. The flag is armed
       // by `onTranscriptEvent` and disarmed here so subsequent chunks

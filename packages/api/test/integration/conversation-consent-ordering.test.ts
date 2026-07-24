@@ -476,6 +476,77 @@ describe('recording-consent ordering — disclosure precedes audio capture', () 
     expect(session.send).not.toHaveBeenCalled();
   });
 
+  it('Path 3i (lost mark ACK, long greeting): the backstop waits out real playback, not a constant', async () => {
+    vi.useFakeTimers();
+    try {
+      const store = new VoiceSessionStore({ startInterval: false });
+      store.create('tenant-long', 'telephony', { callSid: 'CA-long' });
+
+      // ~40 s of PCM16 @ 16 kHz mono (32 bytes per ms) — a 500-char custom
+      // greeting with the disclosure appended after it, which out-runs the
+      // fixed 30 s backstop. Twilio never ACKs the COMPLETION mark.
+      const LONG_PCM_MS = 40_000;
+      const SIXTY_SECONDS_OF_PCM = LONG_PCM_MS * 32;
+      const { provider, session } = makeStreamingProvider();
+      const ws = new FakeWs();
+      const adapter = new TwilioMediaStreamAdapter(
+        {
+          store,
+          streamingProvider: provider,
+          ttsProvider: {
+            synthesize: vi.fn(async () => ({
+              audio: Buffer.alloc(SIXTY_SECONDS_OF_PCM),
+              contentType: 'audio/pcm',
+              provider: 'test',
+            })),
+          },
+          speechTurn: async () => [],
+          initializeSession: async () => [
+            { type: 'tts_play', payload: { text: 'Long custom greeting… This call may be recorded.' } },
+          ],
+        },
+        ws,
+      );
+      adapter.start();
+
+      ws.inboundJson(startFrame('CA-long', 'MZ-long'));
+
+      // Let the turn's audio drain, ACKing the per-chunk `turn-*` backpressure
+      // marks as Twilio would. The end-of-utterance `silence-arm-*` mark is
+      // deliberately NEVER acked — that is the lost ACK under test.
+      const acked = new Set<string>();
+      for (let i = 0; i < 40 && !silenceArmMarkName(ws); i += 1) {
+        for (const f of ws.sent) {
+          const name = (f.mark as { name?: string } | undefined)?.name;
+          if (f.event === 'mark' && name && !name.startsWith('silence-arm-') && !acked.has(name)) {
+            acked.add(name);
+            ws.inboundJson({ event: 'mark', streamSid: 'MZ-long', mark: { name } });
+          }
+        }
+        await vi.advanceTimersByTimeAsync(50);
+      }
+      // The whole turn is enqueued and its completion mark emitted (unacked).
+      expect(silenceArmMarkName(ws)).toBeDefined();
+
+      // The old fixed 30 s constant would open capture here — while ~40 s of
+      // greeting (and the disclosure appended after it) is still playing.
+      await vi.advanceTimersByTimeAsync(30_000);
+      ws.inboundJson(mediaFrame);
+      await vi.advanceTimersByTimeAsync(10);
+      if (session.send.mock.calls.length > 0) armedBeforeDisclosure += 1;
+      expect(session.send).not.toHaveBeenCalled();
+
+      // Past the real playback duration + margin, the lost-ACK backstop may
+      // finally open capture so a dropped mark can't leave the agent deaf.
+      await vi.advanceTimersByTimeAsync(LONG_PCM_MS);
+      ws.inboundJson(mediaFrame);
+      await vi.advanceTimersByTimeAsync(10);
+      expect(session.send).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('Path 3h (buffered PCM but zero-length audio): silence is not a disclosure — fails closed', async () => {
     const store = new VoiceSessionStore({ startInterval: false });
     store.create('tenant-empty', 'telephony', { callSid: 'CA-empty' });
