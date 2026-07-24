@@ -121,6 +121,35 @@ describe('Postgres integration — PgUserRepository.softDeleteSelf', () => {
     expect(blocked).toBeNull();
   });
 
+  it('serializes on the tenant row: softDeleteSelf blocks while another txn holds the lock', async () => {
+    // Pins the FOR UPDATE serialization anchor that makes the last-owner
+    // guard sound under the request-scoped /api transaction: a concurrent
+    // deletion in the same tenant must WAIT for the first one's COMMIT.
+    const techId = await insertUser('technician');
+    const locker = await pool.connect();
+    try {
+      await locker.query('BEGIN');
+      await locker.query(`SELECT id FROM tenants WHERE id = $1 FOR UPDATE`, [tenantId]);
+
+      let settled = false;
+      const pending = repo.softDeleteSelf(tenantId, techId).then((r) => {
+        settled = true;
+        return r;
+      });
+      // Give the blocked query ample time to have completed if it were NOT
+      // waiting on the tenant lock.
+      await new Promise((r) => setTimeout(r, 300));
+      expect(settled).toBe(false);
+
+      await locker.query('COMMIT');
+      const result = await pending;
+      expect(settled).toBe(true);
+      expect(result).not.toBeNull();
+    } finally {
+      locker.release();
+    }
+  });
+
   it('never crosses tenants', async () => {
     const other = await createTestTenant(pool);
     const techId = await insertUser('technician');

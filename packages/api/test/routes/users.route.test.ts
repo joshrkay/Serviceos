@@ -395,6 +395,34 @@ describe('DELETE /api/users/me — in-app account deletion (guideline 5.1.1(v))'
     expect(deletedAtClerkCallTime).toBeNull();
   });
 
+  it('bounds the Clerk delete with an abort signal (stalled upstream must not pin the request)', async () => {
+    const clerkFetch = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    const app = buildDeleteApp('clerk_tech', 'technician', {
+      clerkSecretKey: 'sk_test',
+      clerkFetch: clerkFetch as unknown as typeof fetch,
+    });
+    const res = await request(app).delete('/api/users/me');
+    expect(res.status).toBe(200);
+    const [, options] = clerkFetch.mock.calls[0] as [string, { signal?: unknown }];
+    expect(options.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('does not fail a completed deletion when the audit write throws', async () => {
+    const app = buildDeleteApp('clerk_tech', 'technician');
+    const originalCreate = auditRepo.create;
+    auditRepo.create = async () => {
+      throw new Error('audit store down');
+    };
+    try {
+      const res = await request(app).delete('/api/users/me');
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ deleted: true });
+      expect(await repo.findById(TENANT, techId)).toBeNull();
+    } finally {
+      auditRepo.create = originalCreate;
+    }
+  });
+
   it('purges the user device tokens after a successful deletion', async () => {
     const removeAllForUser = vi.fn().mockResolvedValue(2);
     const app = buildDeleteApp('clerk_tech', 'technician', {

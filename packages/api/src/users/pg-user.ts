@@ -180,13 +180,22 @@ export class PgUserRepository extends PgBaseRepository implements UserRepository
 
   /**
    * Guideline 5.1.1(v) — in-app account deletion (16D retention model:
-   * stamp `deleted_at`, never purge). Single-statement last-owner guard,
-   * mirroring `demoteOwnerIfAnotherExists`: an owner's self-deletion only
-   * succeeds when another non-deleted owner exists at UPDATE time, so two
-   * concurrent owner deletions can't leave the tenant ownerless.
+   * stamp `deleted_at`, never purge). Last-owner guard: an owner's
+   * self-deletion only succeeds when another non-deleted owner exists.
+   *
+   * Under the request-scoped `/api` transaction (app.ts withTenantTransaction
+   * middleware) an EXISTS guard alone is NOT sufficient: each request's
+   * stamp stays uncommitted until its response-time COMMIT, so two owners
+   * deleting concurrently would each see the other still live (READ
+   * COMMITTED) and both pass. The tenant-row lock below serializes account
+   * deletions per tenant across requests — the second request blocks until
+   * the first COMMITs, then its guard re-evaluates against committed state.
+   * `tenants` is RLS-exempt and nothing else locks it FOR UPDATE, so there
+   * is no lock-ordering conflict.
    */
   async softDeleteSelf(tenantId: string, id: string): Promise<User | null> {
     return this.withTenantTransaction(tenantId, async (client) => {
+      await client.query(`SELECT id FROM tenants WHERE id = $1 FOR UPDATE`, [tenantId]);
       // mobile_number is cleared so the `users_mobile_unique` partial index
       // slot is released — a soft-deleted row is invisible to reads, so a
       // held number would otherwise 409 forever for the next teammate.

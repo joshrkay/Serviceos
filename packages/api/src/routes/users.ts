@@ -307,13 +307,25 @@ export function createUsersRouter(
    *   1. Last-owner pre-check → clean 409 without touching anything.
    *   2. Local soft-delete (atomic guard, authoritative). Guard-blocked
    *      owner → 409; already-deleted row → idempotent 200.
-   *   3. Delete the Clerk user. On failure (non-404) the local stamp is
-   *      rolled back via restoreAccount → 502, account fully usable again.
-   *      Without CLERK_SECRET_KEY (dev/tests) this step is skipped.
+   *   3. Delete the Clerk user (bounded to 10s like the Clerk calls in
+   *      webhooks/routes.ts — a stalled upstream must not pin this
+   *      request's transaction/pool client). On failure, timeout, or
+   *      network error the local stamp is rolled back via restoreAccount
+   *      → 502, account fully usable again. Without CLERK_SECRET_KEY
+   *      (dev/tests) this step is skipped.
    *   4. Purge the user's push tokens — the client's own sign-out cleanup
    *      can no longer authenticate, so the server must do it or the
    *      deleted user's device keeps receiving tenant pushes.
    *   5. Audit event (all mutations emit audit events).
+   *
+   * Durability: this handler runs inside the request-scoped `/api`
+   * transaction, so the local stamp COMMITs only at response time. Steps
+   * 4-5 are therefore best-effort (they must never throw a rollback after
+   * the irreversible Clerk delete), and for the residual window — COMMIT
+   * failure or a crash after step 3 — the Clerk `user.deleted` webhook is
+   * the durable reconciler that re-stamps `deleted_at`. Cross-request
+   * races are serialized by softDeleteSelf's tenant-row lock, held to
+   * COMMIT, so the guard is evaluated against committed state.
    */
   router.delete(
     '/me',
@@ -374,6 +386,9 @@ export function createUsersRouter(
               {
                 method: 'DELETE',
                 headers: { Authorization: `Bearer ${deps.clerkSecretKey}` },
+                // fetch has no default timeout; a stalled Clerk upstream
+                // would pin this request's transaction and pool client.
+                signal: AbortSignal.timeout(10_000),
               },
             );
           } catch {
@@ -403,24 +418,32 @@ export function createUsersRouter(
           }
         }
 
+        // Best-effort like the token purge above: a throw here would roll
+        // the request transaction (and the local stamp) back AFTER the
+        // irreversible Clerk delete. The Clerk user.deleted webhook writes
+        // its own audit row, covering the record if this one is lost.
         if (auditRepo) {
-          await auditRepo.create(
-            createAuditEvent({
-              tenantId,
-              actorId: clerkUserId,
-              actorRole: req.auth!.role,
-              eventType: 'user.account_deleted',
-              entityType: 'user',
-              entityId: actor.id,
-              metadata: {
-                self: true,
-                role: actor.role,
-                note:
-                  'Self-service account deletion (guideline 5.1.1(v)). Row soft-deleted; ' +
-                  'tenant data retained per 16D.',
-              },
-            }),
-          );
+          try {
+            await auditRepo.create(
+              createAuditEvent({
+                tenantId,
+                actorId: clerkUserId,
+                actorRole: req.auth!.role,
+                eventType: 'user.account_deleted',
+                entityType: 'user',
+                entityId: actor.id,
+                metadata: {
+                  self: true,
+                  role: actor.role,
+                  note:
+                    'Self-service account deletion (guideline 5.1.1(v)). Row soft-deleted; ' +
+                    'tenant data retained per 16D.',
+                },
+              }),
+            );
+          } catch {
+            // Never fail a completed deletion over the audit write.
+          }
         }
 
         res.json({ deleted: true });
