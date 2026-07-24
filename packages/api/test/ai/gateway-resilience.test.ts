@@ -493,6 +493,19 @@ describe('ProviderFailoverWrapper', () => {
     expect(result.providerPath?.length).toBeGreaterThanOrEqual(1);
   });
 
+  it('fails over to next provider on local abort (dual-provider path)', async () => {
+    const abortErr = Object.assign(new Error('Request was aborted.'), { name: 'AbortError' });
+    const primary = new AlwaysFailProvider('primary', abortErr);
+    const fallback = new AlwaysSuccessProvider();
+    const wrapped = new ProviderFailoverWrapper([primary, fallback]);
+    const result = await wrapped.complete(makeRequest());
+    expect(result.provider).toBe('always-success');
+    expect(result.providerPath).toEqual([
+      'primary:undefined',
+      'always-success:undefined',
+    ]);
+  });
+
   it('does NOT fail over on 4xx errors — throws original error', async () => {
     const err4xx = Object.assign(new Error('bad request'), { status: 400 });
     const primary = new AlwaysFailProvider('primary', err4xx);
@@ -743,6 +756,36 @@ describe('composeResilienceStack', () => {
     expect(err).toBeInstanceOf(AppError);
     expect((err as AppError).code).toBe('LLM_PROVIDER_UNAVAILABLE');
     expect((err as AppError).statusCode).toBe(503);
+  });
+
+  it('dual-provider abort then success does not open the primary breaker', async () => {
+    const abortErr = Object.assign(new Error('Request was aborted.'), { name: 'AbortError' });
+    const primary = new AlwaysFailProvider('primary', abortErr);
+    const fallback = new AlwaysSuccessProvider();
+    const breakerReg = new CircuitBreakerRegistry({
+      ...DEFAULT_BREAKER,
+      consecutiveFailureThreshold: 3,
+      countThreshold: 3,
+    });
+    const quotaReg = new TenantQuotaRegistry();
+
+    const composed = composeResilienceStack(primary, {
+      breakers: breakerReg,
+      quota: quotaReg,
+      fallbackProviders: [fallback],
+    });
+
+    for (let i = 0; i < 5; i++) {
+      const result = await composed.complete(makeRequest({ model: 'gpt-4o-mini' }));
+      expect(result.provider).toBe('always-success');
+      expect(result.providerPath?.length).toBeGreaterThanOrEqual(2);
+    }
+
+    const states = breakerReg.getProviderStates();
+    expect(states.length).toBeGreaterThan(0);
+    for (const cell of states) {
+      expect(cell.breakerState).toBe('closed');
+    }
   });
 
   it('does NOT propagate LLM_PROVIDER_UNAVAILABLE for 4xx', async () => {
