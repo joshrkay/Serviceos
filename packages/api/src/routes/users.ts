@@ -366,7 +366,20 @@ export function createUsersRouter(
             await runOutsideRequestTransaction(fn);
             return;
           }
-          await fn();
+          try {
+            await fn();
+          } catch (err) {
+            // The close race can kill the request client MID-WRITE — the
+            // write's own rejection is then the disconnect signal, arriving
+            // before any retry listener exists. Re-run out-of-band. A
+            // rejection with the response still open is a genuine error and
+            // propagates to the caller's own handling.
+            if (responseClosed) {
+              await runOutsideRequestTransaction(fn);
+              return;
+            }
+            throw err;
+          }
           if (responseClosed) {
             await runOutsideRequestTransaction(fn);
             return;
