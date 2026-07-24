@@ -8,8 +8,13 @@ Date: 2026-07-24 · Base: `1d5c7e5` · Branch: `claude/rivet-money-extraction-u5
 **Headline:** the money path is far stronger than the comms surface was at the
 same stage — every money column is integer cents, the Stripe boundary is clean,
 RLS is complete across all money tables, and idempotency is enforced by a real DB
-unique index. The defects are not structural sloppiness; they are five specific
-holes, two of which lose or misstate real money silently.
+unique index. The defects are not structural sloppiness; they are seven specific
+holes, four of which lose or misstate real money silently.
+
+**Revision note.** P0-6 and P0-7, and the L4 layer, were added during review after
+the first synthesis asserted invariants the code does not hold. Both concern
+concurrency and both were invisible to the original single-path tracing — a
+reminder that this surface's defects live in interleavings, not in any one file.
 
 ---
 
