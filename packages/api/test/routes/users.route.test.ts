@@ -283,6 +283,11 @@ describe('DELETE /api/users/me — in-app account deletion (guideline 5.1.1(v))'
     },
   };
 
+  // Captures res.locals.forceCommit at response time — the middleware's
+  // rollback-on->=400 contract keys off it, so the 502 compensation path
+  // must set it or the restore would be rolled back in production.
+  let lastForceCommit: unknown;
+
   function buildDeleteApp(
     clerkUserId: string,
     role: 'owner' | 'dispatcher' | 'technician',
@@ -290,13 +295,16 @@ describe('DELETE /api/users/me — in-app account deletion (guideline 5.1.1(v))'
   ) {
     const app = express();
     app.use(express.json());
-    app.use((req: Request, _res: Response, next: NextFunction) => {
+    app.use((req: Request, res: Response, next: NextFunction) => {
       (req as AuthenticatedRequest).auth = {
         userId: clerkUserId,
         sessionId: 'sess-1',
         tenantId: TENANT,
         role,
       };
+      res.on('finish', () => {
+        lastForceCommit = res.locals.forceCommit;
+      });
       next();
     });
     app.use('/api/users', createUsersRouter(repo, deps, auditRepo as never));
@@ -306,6 +314,7 @@ describe('DELETE /api/users/me — in-app account deletion (guideline 5.1.1(v))'
   beforeEach(async () => {
     repo = new InMemoryUserRepository();
     audited.length = 0;
+    lastForceCommit = undefined;
     ownerId = uuidv4();
     techId = uuidv4();
     await repo.create!({
@@ -364,6 +373,9 @@ describe('DELETE /api/users/me — in-app account deletion (guideline 5.1.1(v))'
     expect(restored).not.toBeNull();
     expect(restored!.mobileNumber).toBe('+15550002222');
     expect(audited).toHaveLength(0);
+    // The stamp was durably committed before Clerk, so the compensating
+    // restore must survive the >=400 response under the /api middleware.
+    expect(lastForceCommit).toBe(true);
   });
 
   it('aborts with 502 and restores the account when the Clerk call throws (network)', async () => {

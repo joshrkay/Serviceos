@@ -2,7 +2,10 @@ import { Router, Response } from 'express';
 import { z } from 'zod';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
-import { withRequestSavepoint } from '../middleware/tenant-context';
+import {
+  commitRequestTransactionAndBegin,
+  withRequestSavepoint,
+} from '../middleware/tenant-context';
 import { toErrorResponse, ValidationError } from '../shared/errors';
 import {
   User,
@@ -319,14 +322,18 @@ export function createUsersRouter(
    *      deleted user's device keeps receiving tenant pushes.
    *   5. Audit event (all mutations emit audit events).
    *
-   * Durability: this handler runs inside the request-scoped `/api`
-   * transaction, so the local stamp COMMITs only at response time. Steps
-   * 4-5 are therefore best-effort (they must never throw a rollback after
-   * the irreversible Clerk delete), and for the residual window — COMMIT
-   * failure or a crash after step 3 — the Clerk `user.deleted` webhook is
-   * the durable reconciler that re-stamps `deleted_at`. Cross-request
-   * races are serialized by softDeleteSelf's tenant-row lock, held to
-   * COMMIT, so the guard is evaluated against committed state.
+   * Durability: after the guarded soft-delete succeeds, the request
+   * transaction is COMMITTED EARLY (commitRequestTransactionAndBegin) so
+   * the reservation is durable BEFORE the irreversible Clerk call — a
+   * crash or failed response-time COMMIT after Clerk accepts can no
+   * longer roll the stamp back and let the deleted user transiently count
+   * as a live owner for someone else's demotion guard. The failure path
+   * compensates in the restarted transaction (restoreAccount) and sets
+   * res.locals.forceCommit so the 502 response still commits the restore.
+   * Steps 4-5 stay best-effort + SAVEPOINT-isolated; the Clerk
+   * user.deleted webhook remains a belt-and-braces reconciler (its
+   * unconditional stamp is now benign for this path — the local stamp is
+   * already durable whenever Clerk deletion succeeded).
    */
   router.delete(
     '/me',
@@ -378,6 +385,13 @@ export function createUsersRouter(
           return;
         }
 
+        // Make the reservation DURABLE before the irreversible external
+        // call (see the Durability note above). Also releases the tenant
+        // lock — correctly: the guard was already evaluated under it
+        // against committed state, and from here the stamp is permanent
+        // unless we explicitly compensate below.
+        await commitRequestTransactionAndBegin();
+
         if (deps.clerkSecretKey && actor.clerkUserId) {
           const fetchFn = deps.clerkFetch ?? fetch;
           let clerkRes: { ok: boolean; status: number } | null = null;
@@ -399,7 +413,11 @@ export function createUsersRouter(
           if (!clerkRes || (!clerkRes.ok && clerkRes.status !== 404)) {
             // Compensate: the account must stay fully usable after a failed
             // attempt (deleted_at un-stamped, mobile number re-instated).
+            // The stamp was committed durably above, so the restore must
+            // survive the >=400 response — forceCommit opts this request
+            // out of the middleware's rollback-on-error.
             await userRepo.restoreAccount(tenantId, actor.id, actor.mobileNumber ?? null);
+            res.locals.forceCommit = true;
             res.status(502).json({
               error: 'ACCOUNT_DELETE_FAILED',
               message: 'Could not delete the account right now. Please try again.',

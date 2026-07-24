@@ -12,6 +12,11 @@ import crypto from 'crypto';
 import type { Pool } from 'pg';
 import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
 import { PgUserRepository } from '../../src/users/pg-user';
+import {
+  commitRequestTransactionAndBegin,
+  tenantContextStore,
+} from '../../src/middleware/tenant-context';
+import { applyTenantContext } from '../../src/db/rls-runtime-role';
 
 describe('Postgres integration — PgUserRepository.softDeleteSelf', () => {
   let pool: Pool;
@@ -191,6 +196,40 @@ describe('Postgres integration — PgUserRepository.softDeleteSelf', () => {
     );
     expect(raw.rows[0].mobile_number).toBeNull();
     expect(raw.rows[0].first_name).toBeNull();
+  });
+
+  it('commitRequestTransactionAndBegin makes the stamp durable mid-request', async () => {
+    // Simulates the /api request-scoped transaction: the stamp must become
+    // visible to OTHER connections after the early commit (durable before
+    // the Clerk call), while the request client keeps a usable transaction
+    // for the compensation path.
+    const techId = await insertUser('technician');
+    const reqClient = await pool.connect();
+    try {
+      await reqClient.query('BEGIN');
+      await applyTenantContext(reqClient, tenantId, { transactional: true });
+
+      await tenantContextStore.run({ client: reqClient, tenantId }, async () => {
+        const stamped = await repo.softDeleteSelf(tenantId, techId);
+        expect(stamped).not.toBeNull();
+        await commitRequestTransactionAndBegin();
+      });
+
+      // Independent connection (outside the request context): the deletion
+      // is already durable even though the "request" hasn't finished.
+      expect(await repo.findById(tenantId, techId)).toBeNull();
+
+      // The request client is in a fresh, usable transaction — the
+      // compensation path can still write through it.
+      await tenantContextStore.run({ client: reqClient, tenantId }, async () => {
+        const restored = await repo.restoreAccount(tenantId, techId, null);
+        expect(restored).not.toBeNull();
+      });
+      await reqClient.query('COMMIT');
+      expect(await repo.findById(tenantId, techId)).not.toBeNull();
+    } finally {
+      reqClient.release();
+    }
   });
 
   it('never crosses tenants', async () => {
