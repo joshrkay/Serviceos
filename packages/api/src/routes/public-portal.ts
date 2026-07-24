@@ -63,12 +63,20 @@ import { PortalSessionRepository } from '../portal/portal-session';
 import {
   PortalRequest,
   createPortalTokenMiddleware,
+  requirePortalEntitlement,
   PortalTokenMiddlewareOptions,
 } from '../portal/portal-token-middleware';
+import { ContactRepository } from '../customers/contact';
 
 export interface PublicPortalDeps {
   portalRepo: PortalSessionRepository;
   customerRepo: CustomerRepository;
+  /**
+   * C2/I14 — resolves contact-bound sessions to their current role so
+   * entitlement is derived at read time. Without it, contact-bound tokens
+   * fail closed (401); legacy account-holder tokens are unaffected.
+   */
+  contactRepo?: ContactRepository;
   estimateRepo: EstimateRepository;
   invoiceRepo: InvoiceRepository;
   jobRepo: JobRepository;
@@ -227,10 +235,10 @@ function ensurePortal(req: PortalRequest, res: Response): boolean {
 
 export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
   const router = Router({ mergeParams: true });
-  const tokenMw = createPortalTokenMiddleware(
-    deps.portalRepo,
-    deps.middlewareOptions,
-  );
+  const tokenMw = createPortalTokenMiddleware(deps.portalRepo, {
+    ...deps.middlewareOptions,
+    contactRepo: deps.middlewareOptions?.contactRepo ?? deps.contactRepo,
+  });
 
   // Active-customer guard: a valid token alone isn't enough — the customer
   // it points at must still be reachable. Archiving the customer (or
@@ -305,6 +313,7 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
 
   router.get('/:token/estimates', async (req: PortalRequest, res: Response) => {
     if (!ensurePortal(req, res)) return;
+    if (!requirePortalEntitlement(req, res, 'billing')) return;
     try {
       const { tenantId, customerId } = req.portal!;
       const jobs = await deps.jobRepo.findByTenant(tenantId, { customerId });
@@ -361,6 +370,7 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
 
   router.get('/:token/invoices', async (req: PortalRequest, res: Response) => {
     if (!ensurePortal(req, res)) return;
+    if (!requirePortalEntitlement(req, res, 'billing')) return;
     try {
       const { tenantId, customerId } = req.portal!;
       const jobs = await deps.jobRepo.findByTenant(tenantId, { customerId });
@@ -412,6 +422,7 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
 
   router.get('/:token/agreements', async (req: PortalRequest, res: Response) => {
     if (!ensurePortal(req, res)) return;
+    if (!requirePortalEntitlement(req, res, 'billing')) return;
     try {
       const { tenantId, customerId } = req.portal!;
       const agreements = await deps.agreementRepo.findByTenant(tenantId, { customerId });
@@ -960,6 +971,7 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
    */
   router.post('/:token/payment-methods/setup', async (req: PortalRequest, res: Response) => {
     if (!ensurePortal(req, res)) return;
+    if (!requirePortalEntitlement(req, res, 'billing')) return;
     try {
       const { tenantId, customerId } = req.portal!;
       if (!deps.customerPaymentMethodRepo || !deps.stripeConfig) {
@@ -1004,6 +1016,7 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
    */
   router.get('/:token/payment-methods', async (req: PortalRequest, res: Response) => {
     if (!ensurePortal(req, res)) return;
+    if (!requirePortalEntitlement(req, res, 'billing')) return;
     try {
       const { tenantId, customerId } = req.portal!;
       if (!deps.customerPaymentMethodRepo) {
