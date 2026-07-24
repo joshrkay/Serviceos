@@ -176,6 +176,7 @@ export class PgUserRepository extends PgBaseRepository implements UserRepository
                AND u2.role = 'owner'
                AND u2.id != $2
                AND u2.deleted_at IS NULL
+               AND u2.status = 'active'
            )
          RETURNING id, tenant_id, clerk_user_id, email, role, first_name, last_name,
                    COALESCE(can_field_serve, false) AS can_field_serve,
@@ -223,6 +224,7 @@ export class PgUserRepository extends PgBaseRepository implements UserRepository
                  AND u2.role = 'owner'
                  AND u2.id != $1
                  AND u2.deleted_at IS NULL
+                 AND u2.status = 'active'
              )
            )
          RETURNING id, tenant_id, clerk_user_id, email, role, first_name, last_name,

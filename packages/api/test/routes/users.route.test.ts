@@ -587,6 +587,21 @@ describe('DELETE /api/users/me — in-app account deletion (guideline 5.1.1(v))'
     expect(audited).toHaveLength(0);
   });
 
+  it('blocks deletion when the only other owner is SUSPENDED (cannot act)', async () => {
+    // resolveAuthorization rejects non-active memberships, so a suspended
+    // owner must not satisfy the last-owner guard.
+    await repo.create!({
+      id: uuidv4(), tenantId: TENANT, email: 'owner2@example.com',
+      role: 'owner', canFieldServe: true, clerkUserId: 'clerk_owner2',
+      status: 'suspended',
+    });
+    const app = buildDeleteApp('clerk_owner', 'owner');
+    const res = await request(app).delete('/api/users/me');
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('LAST_OWNER');
+    expect(await repo.findById(TENANT, ownerId)).not.toBeNull();
+  });
+
   it('lets an owner delete their account when another owner exists', async () => {
     await repo.create!({
       id: uuidv4(), tenantId: TENANT, email: 'owner2@example.com',

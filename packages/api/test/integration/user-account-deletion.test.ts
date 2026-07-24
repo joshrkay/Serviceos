@@ -254,6 +254,25 @@ describe('Postgres integration — PgUserRepository.softDeleteSelf', () => {
     }
   });
 
+  it('a SUSPENDED owner does not satisfy the last-owner guard (real status column)', async () => {
+    const t = await createTestTenant(pool);
+    const localRepo = repo;
+    const owner2 = crypto.randomUUID();
+    await pool.query(
+      `INSERT INTO users (id, tenant_id, clerk_user_id, email, role, status)
+       VALUES ($1, $2, $3, $4, 'owner', 'suspended')`,
+      [owner2, t.tenantId, `user_${owner2}`, `${owner2}@example.com`],
+    );
+    // Suspended second owner → the active owner is effectively the last one.
+    expect(await localRepo.softDeleteSelf(t.tenantId, t.userId)).toBeNull();
+    // Re-activate → deletion proceeds.
+    await pool.query(
+      `UPDATE users SET status = 'active' WHERE id = $1 AND tenant_id = $2`,
+      [owner2, t.tenantId],
+    );
+    expect(await localRepo.softDeleteSelf(t.tenantId, t.userId)).not.toBeNull();
+  });
+
   it('never crosses tenants', async () => {
     const other = await createTestTenant(pool);
     const techId = await insertUser('technician');

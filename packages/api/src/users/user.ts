@@ -45,6 +45,13 @@ export interface User {
    * exclude it. Rows are retained — never purged — for audit and billing.
    */
   deletedAt?: Date | null;
+  /**
+   * Access state (migration 248). `resolveAuthorization` grants access only
+   * to 'active' memberships, so owner-counting guards must not count a
+   * suspended owner as one who can act. Undefined ⇒ 'active' (the column
+   * default; Pg reads may omit it).
+   */
+  status?: 'active' | 'suspended';
   createdAt: Date;
   updatedAt: Date;
 }
@@ -241,12 +248,15 @@ export class InMemoryUserRepository implements UserRepository {
     const u = this.users.get(id);
     if (!u || u.tenantId !== tenantId || u.deletedAt) return null;
     if (u.role === 'owner') {
+      // A suspended owner cannot act (resolveAuthorization rejects
+      // non-active memberships), so they must not satisfy the guard.
       const anotherOwner = Array.from(this.users.values()).some(
         (other) =>
           other.tenantId === tenantId &&
           other.id !== id &&
           other.role === 'owner' &&
-          !other.deletedAt,
+          !other.deletedAt &&
+          (other.status ?? 'active') === 'active',
       );
       if (!anotherOwner) return null;
     }
