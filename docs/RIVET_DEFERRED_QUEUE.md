@@ -90,12 +90,24 @@ escape) and a product sign-off on the semantics. Until then the exposure
 requires a user who owns workspace A solely while deleting their account
 from workspace B — not reviewer-reachable (demo tenant is single-workspace).
 
-## C-12 — Durable retry/outbox for failed deletion compensation
-Codex round-11 P1: if the compensating restore itself fails on a transient
-DB error (after a definite Clerk failure), the account stays deactivated
-with Clerk alive and no automatic retry — the flow ends at the
-`ACCOUNT_DELETE_INCONSISTENT` 500 directing the user to support, and the
-`user.account_deletion_unconfirmed` /`account_deleted` audit rows are the
-support trail. A durable outbox/saga would auto-heal this; deliberately
-deferred twice as heavy for one endpoint. If more flows grow compensation
-logic, build the outbox once and migrate this onto it.
+## C-12 — Durable outbox / resumable deletion job (accumulating scenarios)
+A durable outbox/saga for account deletion would auto-heal three related
+tail states; deliberately deferred (rounds 11 and 13) as heavy machinery
+for one endpoint. All three are visible, non-tenant-corrupting, and
+support-recoverable; build the outbox once if more flows grow
+compensation logic, and migrate all of these onto it.
+1. (round 11) Compensating restore fails on a transient DB error after a
+   definite Clerk failure → deactivated with Clerk alive; terminal
+   `ACCOUNT_DELETE_INCONSISTENT` 500 + audit rows are the support trail.
+2. (round 13) Process exits between the early COMMIT and the Clerk
+   DELETE → durably deactivated locally, Clerk identity live, no webhook
+   to reconcile and no resume. User-visible effect (access revoked)
+   matches their intent; the lingering Clerk identity is hygiene support
+   can finish.
+3. (round 13) A raced double-tap observes the first request's committed
+   reservation and reports `deleted: true` while the first request's
+   Clerk outcome is still in flight — if that outcome is
+   confirmed-alive, the account is restored after the second client was
+   told success. Same-user race; self-healing (they can sign back in);
+   an honest fix needs deletion-in-progress state the outbox would
+   provide.
