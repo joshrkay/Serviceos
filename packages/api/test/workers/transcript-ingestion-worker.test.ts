@@ -258,6 +258,113 @@ describe('transcript-ingestion-worker', () => {
     expect(stamped?.outcome).toBe('escalated_to_human');
   });
 
+  // ── RIVET I13 — Step 2c transcript provenance stamp ──────────────────────
+
+  it('stamps provenance=mixed for a two-way call, from the real per-turn speakers', async () => {
+    const callTranscriptTurnRepo = new InMemoryCallTranscriptTurnRepository();
+    const voiceRepo = new InMemoryVoiceRepository();
+    const knowledgeChunkRepo = new InMemoryKnowledgeChunkRepository();
+    const recordingId = await seedRecording(voiceRepo);
+    const stampSpy = vi.spyOn(voiceRepo, 'stampProvenance');
+
+    const worker = createTranscriptIngestionWorker({
+      callTranscriptTurnRepo,
+      voiceRepo,
+      knowledgeChunkRepo,
+      embeddings: stubEmbedder(),
+    });
+    await worker.handle(
+      buildMessage({
+        tenantId: TENANT_A,
+        voiceRecordingId: recordingId,
+        transcript: ['agent: hi how can I help', 'caller: my AC is broken'],
+      }),
+      logger,
+    );
+
+    // Explicit called-with assertion — never rely on absence checks here.
+    expect(stampSpy).toHaveBeenCalledWith(TENANT_A, recordingId, 'mixed');
+    const stamped = await voiceRepo.findById(TENANT_A, recordingId);
+    expect((stamped?.transcriptMetadata as Record<string, unknown>)?.provenance).toBe('mixed');
+  });
+
+  it('stamps provenance=caller for caller-only turns and operator for agent-only', async () => {
+    for (const [transcript, expected] of [
+      [['caller: hello? anyone there?'], 'caller'],
+      [['agent: note to self, order the capacitor'], 'operator'],
+    ] as const) {
+      const callTranscriptTurnRepo = new InMemoryCallTranscriptTurnRepository();
+      const voiceRepo = new InMemoryVoiceRepository();
+      const recordingId = await seedRecording(voiceRepo);
+      const worker = createTranscriptIngestionWorker({
+        callTranscriptTurnRepo,
+        voiceRepo,
+        knowledgeChunkRepo: new InMemoryKnowledgeChunkRepository(),
+        embeddings: stubEmbedder(),
+      });
+      await worker.handle(
+        buildMessage({
+          tenantId: TENANT_A,
+          voiceRecordingId: recordingId,
+          transcript: [...transcript],
+        }),
+        logger,
+      );
+      const stamped = await voiceRepo.findById(TENANT_A, recordingId);
+      expect((stamped?.transcriptMetadata as Record<string, unknown>)?.provenance).toBe(expected);
+    }
+  });
+
+  it('provenance stamp is failure-soft: a throwing repo never fails the job', async () => {
+    const callTranscriptTurnRepo = new InMemoryCallTranscriptTurnRepository();
+    const voiceRepo = new InMemoryVoiceRepository();
+    const recordingId = await seedRecording(voiceRepo);
+    vi.spyOn(voiceRepo, 'stampProvenance').mockRejectedValue(new Error('db down'));
+
+    const worker = createTranscriptIngestionWorker({
+      callTranscriptTurnRepo,
+      voiceRepo,
+      knowledgeChunkRepo: new InMemoryKnowledgeChunkRepository(),
+      embeddings: stubEmbedder(),
+    });
+    await expect(
+      worker.handle(
+        buildMessage({
+          tenantId: TENANT_A,
+          voiceRecordingId: recordingId,
+          transcript: ['agent: hi', 'caller: hello'],
+        }),
+        logger,
+      ),
+    ).resolves.not.toThrow();
+    // The per-turn rows still landed despite the failed stamp.
+    const turns = await callTranscriptTurnRepo.listByRecording(TENANT_A, recordingId);
+    expect(turns.length).toBe(2);
+  });
+
+  it('skips the provenance stamp when there are no parseable turns', async () => {
+    const callTranscriptTurnRepo = new InMemoryCallTranscriptTurnRepository();
+    const voiceRepo = new InMemoryVoiceRepository();
+    const recordingId = await seedRecording(voiceRepo);
+    const stampSpy = vi.spyOn(voiceRepo, 'stampProvenance');
+
+    const worker = createTranscriptIngestionWorker({
+      callTranscriptTurnRepo,
+      voiceRepo,
+      knowledgeChunkRepo: new InMemoryKnowledgeChunkRepository(),
+      embeddings: stubEmbedder(),
+    });
+    await worker.handle(
+      buildMessage({
+        tenantId: TENANT_A,
+        voiceRecordingId: recordingId,
+        transcript: ['   ', ''],
+      }),
+      logger,
+    );
+    expect(stampSpy).not.toHaveBeenCalled();
+  });
+
   it('emits a per-call-summary chunk when summary/intent/outcome are present', async () => {
     const callTranscriptTurnRepo = new InMemoryCallTranscriptTurnRepository();
     const voiceRepo = new InMemoryVoiceRepository();

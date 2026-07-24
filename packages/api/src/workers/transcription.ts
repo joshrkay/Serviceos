@@ -314,6 +314,28 @@ export function createTranscriptionWorker(
           },
         });
 
+        // RIVET I13 — stamp provenance for the AUTHENTICATED in-app path.
+        // This worker is the only place operator memos (source='inapp_voice',
+        // created by the authenticated POST /voice/recordings routes) get
+        // transcribed; the telephony path runs through transcript-ingestion-
+        // worker, which stamps caller/mixed/operator from per-turn speakers.
+        // Without this, an operator memo's row stays unstamped and
+        // classifyRecordingProvenance (fail-closed) would treat the operator's
+        // own recording as untrusted. Guarded on source + failure-soft.
+        if (voiceRepository.stampProvenance) {
+          try {
+            const rec = await voiceRepository.findById(tenantId, recordingId);
+            if (rec?.source === 'inapp_voice') {
+              await voiceRepository.stampProvenance(tenantId, recordingId, 'operator');
+            }
+          } catch (err) {
+            logger.warn('stampProvenance (transcription) failed', {
+              recordingId,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
+
         logger.info('Transcription completed', {
           recordingId,
           correctionApplied: correctionMetadata.correctionApplied ?? false,

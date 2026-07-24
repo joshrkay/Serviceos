@@ -587,6 +587,11 @@ export const voiceClarificationPayloadSchema = z.object({
     // amount couldn't be parsed ("knock some off"); the discount evaluator
     // emits this instead of silently guessing a discount.
     'ambiguous_discount_target',
+    // RIVET P4 — an unauthenticated (S1) caller's intent resolved to an
+    // operator-only proposal type ("send me the Henderson invoice"). The
+    // request is preserved for the operator as a non-actionable
+    // clarification; the S2 op itself is never minted from an S1 session.
+    'surface_restricted',
   ]),
   suggestedIntents: z.array(z.string()).optional(),
   classifierReasoning: z.string().optional(),

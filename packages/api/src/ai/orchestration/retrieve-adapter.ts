@@ -55,6 +55,16 @@ export interface CreateRetrieveAdapterOptions {
   languageDetector?: LanguageDetector;
 }
 
+/**
+ * RIVET I13 note on `input.queryText`: it is often customer-authored (the
+ * latest customer message drives retrieval) and is deliberately NOT wrapped
+ * in the untrusted-content fence — it reaches only the embedding provider,
+ * never a chat-completion prompt slot, so it has no instruction-eligible
+ * exposure, and fence text would dominate a short query's embedding. Any
+ * future reuse of this text inside an LLM prompt (query rewriting,
+ * summarizing the query, …) must go through `buildUntrustedContentSection`
+ * at that call site.
+ */
 export function createRetrieveAdapter(
   opts: CreateRetrieveAdapterOptions,
 ): RetrieveAdapter {

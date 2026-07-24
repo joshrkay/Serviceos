@@ -6,6 +6,7 @@ import { ProposalType } from '../proposal';
 import { AppError } from '../../shared/errors';
 import { ProposalExecutionRepository } from '../proposal-execution';
 import { resolveChainReferences } from './chain-resolution';
+import { isProposalTypeAllowedOnSurface, resolveSurface } from '../surface';
 import { createLogger } from '../../logging/logger';
 import { executeAudited } from '../../commands/command-runner';
 import { AuditEventInput, AuditRepository } from '../../audit/audit';
@@ -111,6 +112,56 @@ export class ProposalExecutor {
           `Retry after the window closes, or call undoProposal to cancel.`,
         409
       );
+    }
+
+    // RIVET P4 / invariant I6 — surface enforcement at the EXECUTION boundary,
+    // not at intent-parse time. A proposal stamped with the S1 (inbound,
+    // unauthenticated caller) surface may only execute if its type is on the
+    // S1 allowlist. This is defense-in-depth behind the creation-time
+    // allowlist in the voice-turn processor: even if a mis-stamped or
+    // maliciously-shaped S1 proposal reaches an operator's approval queue and
+    // is approved, an S2-only op (send invoice, take payment, …) still cannot
+    // execute from an S1 session. An absent/S2/S3 surface is unrestricted, so
+    // every existing proposal and the operator/in-app paths are unaffected.
+    const proposalSourceContext = proposal.sourceContext as
+      | Record<string, unknown>
+      | undefined;
+    const surface = resolveSurface(proposalSourceContext, proposal.createdBy);
+    // Pass sourceContext so a server-set system-detected-safety proposal
+    // (deterministic emergency-dispatch path) keeps the same S1 exemption it
+    // was created with — the marker is never caller-forgeable and unlocks only
+    // the narrow safety-exempt types (surface.ts).
+    if (!isProposalTypeAllowedOnSurface(surface, proposal.proposalType, proposalSourceContext)) {
+      logger.error('Blocked cross-surface proposal execution', {
+        tenantId: proposal.tenantId,
+        proposalId: proposal.id,
+        proposalType: proposal.proposalType,
+        surface,
+      });
+      // Terminal outcome, not a throw: the sweep has already claimed the row
+      // (status 'executing'), and a bare throw would strand it there for the
+      // ~10-min stale reset and three pointless retries before a generic
+      // failure. A surface violation is an INTENTIONAL rejection — persist
+      // `execution_failed` with its audit row immediately (same shape as the
+      // chain cascade-fail above) so the proposal is done in one pass.
+      const blocked = transitionProposal(proposal, 'execution_failed', context.executedBy);
+      const blockedResult: ExecutionResult = {
+        success: false,
+        error:
+          `SURFACE_VIOLATION: proposal type '${proposal.proposalType}' is not permitted on ` +
+          `surface '${surface}' (inbound caller sessions may only reach the S1 allowlist).`,
+      };
+      await executeAudited({
+        client: null,
+        tenantId: blocked.tenantId,
+        auditRepo: this.auditRepo,
+        stateChange: () =>
+          this.proposalRepo.updateStatus(blocked.tenantId, blocked.id, blocked.status, {
+            executionError: blockedResult.error,
+          }),
+        audit: () => executionAuditInput(blocked, context, blockedResult),
+      });
+      return { proposal: blocked, result: blockedResult };
     }
 
     const handler = this.handlers.get(proposal.proposalType);

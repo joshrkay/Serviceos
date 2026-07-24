@@ -22,6 +22,7 @@ import type { TtsProvider } from '../../tts/tts-provider';
 import type { ProposalRepository } from '../../../proposals/proposal';
 import { createProposal as buildProposal } from '../../../proposals/proposal';
 import type { ProposalType } from '../../../proposals/proposal';
+import type { ProposalSurface } from '../../../proposals/surface';
 import type { AuditRepository } from '../../../audit/audit';
 import { createAuditEvent } from '../../../audit/audit';
 import type { OnCallRepository } from '../../../oncall/rotation';
@@ -1256,6 +1257,9 @@ export class InAppVoiceAdapter {
           source: 'calling-agent',
           channel: session.channel,
           voiceMutation: true,
+          // RIVET P4 — in-app voice is an AUTHENTICATED operator (surface S2);
+          // stamp it explicitly so the execution boundary never has to infer.
+          surface: 'S2' as ProposalSurface,
           sessionId: session.id,
         },
         // QA-2026-06-04: do NOT fabricate an aiRunId. proposals.ai_run_id has
@@ -1349,6 +1353,10 @@ export class InAppVoiceAdapter {
         gateway: this.deps.gateway,
         ...(intentDetected ? { intentDetected } : {}),
         ...(this.deps.pool ? { pool: this.deps.pool } : {}),
+        // RIVET I13 — this is an authenticated in-app OPERATOR session. The
+        // adapter stores the operator's own turns with a `caller:` prefix, so
+        // they must NOT be fenced as untrusted caller content.
+        inboundCallerSession: false,
       });
     } catch {
       // Summary is best-effort — the call still ended successfully.

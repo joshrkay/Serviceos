@@ -18,6 +18,8 @@ import {
   buildStandingInstructionsSection,
   type InjectedStandingInstruction,
 } from '../standing-instructions-context';
+import { buildUntrustedContentSection } from '../untrusted-content';
+import { classifyMessageProvenance } from '../content-provenance';
 
 /** A thread message, trimmed to what the prompt needs. */
 export interface SuggestReplyMessage {
@@ -50,10 +52,6 @@ export interface SuggestReplyResult {
 const DEFAULT_MAX_CHARS = 320;
 const MAX_THREAD_MESSAGES = 20;
 
-function isCustomer(senderRole: string): boolean {
-  return senderRole.trim().toLowerCase() === 'customer';
-}
-
 /** Build the brand-voice system prompt from the tenant's settings. */
 function buildSystemPrompt(input: SuggestReplyInput): string {
   const bv = input.brandVoice ?? {};
@@ -81,12 +79,34 @@ function buildSystemPrompt(input: SuggestReplyInput): string {
   ].join('\n');
 }
 
-function buildTranscript(messages: SuggestReplyMessage[]): string {
-  return messages
-    .filter((m) => m.content && m.content.trim().length > 0)
-    .slice(-MAX_THREAD_MESSAGES)
-    .map((m) => `${isCustomer(m.senderRole) ? 'Customer' : 'Shop'}: ${m.content.trim()}`)
-    .join('\n');
+/**
+ * RIVET I13 — partition the thread by provenance. Shop-authored lines are
+ * TRUSTED context (fencing them would tell the model to distrust its own
+ * shop's confirmed times and prices); only customer-authored lines belong
+ * inside the untrusted fence. Each line carries its chronological turn
+ * number `[n]` so the interleaved order survives the partition — without
+ * it, "customer question → shop answer → customer correction" reads as
+ * "shop answer → both customer turns" and the model replies to an
+ * already-answered question or misattaches the correction.
+ */
+function buildThreadSections(messages: SuggestReplyMessage[]): {
+  shopLines: string[];
+  customerLines: string[];
+} {
+  const shopLines: string[] = [];
+  const customerLines: string[] = [];
+  const thread = messages
+    .filter((x) => x.content && x.content.trim().length > 0)
+    .slice(-MAX_THREAD_MESSAGES);
+  thread.forEach((m, i) => {
+    const turn = `[${i + 1}]`;
+    if (classifyMessageProvenance(m) === 'untrusted') {
+      customerLines.push(`${turn} Customer: ${m.content.trim()}`);
+    } else {
+      shopLines.push(`${turn} Shop: ${m.content.trim()}`);
+    }
+  });
+  return { shopLines, customerLines };
 }
 
 export class SuggestReplyTask {
@@ -95,8 +115,8 @@ export class SuggestReplyTask {
   constructor(private readonly gateway: LLMGateway) {}
 
   async suggest(input: SuggestReplyInput): Promise<SuggestReplyResult> {
-    const transcript = buildTranscript(input.messages);
-    if (transcript.length === 0) {
+    const { shopLines, customerLines } = buildThreadSections(input.messages);
+    if (shopLines.length + customerLines.length === 0) {
       throw new Error('No conversation content to reply to');
     }
 
@@ -113,6 +133,25 @@ export class SuggestReplyTask {
         }),
       });
     }
+    // RIVET I13 — ONLY the customer-authored lines ride inside the untrusted
+    // fence; the shop's own prior messages are trusted context (fencing them
+    // would tell the model to distrust the shop's confirmed times/prices).
+    // Everything stays in the LOWEST-authority slot — the user message, never
+    // a system message, whose higher instruction priority is the very thing
+    // the fence exists to deny caller text. A "Customer:" line that says
+    // "ignore previous instructions" is quoted DATA to reply to.
+    const userSections: string[] = [];
+    if (shopLines.length > 0) {
+      userSections.push(`The shop's own messages in this conversation:\n${shopLines.join('\n')}`);
+    }
+    if (customerLines.length > 0) {
+      userSections.push(
+        buildUntrustedContentSection(customerLines.join('\n'), 'Customer message thread'),
+      );
+    }
+    userSections.push(
+      "Turn numbers [n] give the chronological order of the conversation across both sections above. Using that conversation, draft the shop's next reply.",
+    );
 
     const response = await this.gateway.complete({
       taskType: this.taskType,
@@ -121,7 +160,7 @@ export class SuggestReplyTask {
         ...systemMessages,
         {
           role: 'user',
-          content: `Here is the conversation so far:\n\n${transcript}\n\nDraft the shop's next reply.`,
+          content: userSections.join('\n\n'),
         },
       ],
       temperature: 0.7,

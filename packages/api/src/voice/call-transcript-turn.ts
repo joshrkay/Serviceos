@@ -6,11 +6,13 @@
  * spoken turn — agent or caller — keyed to the parent voice_recording
  * by an ordered turn_index.
  *
- * Phase 2 of the inbound-CSR training-data architecture: write surface
- * exists but no caller in main writes it yet. The transcript-ingestion-
- * worker (Phase 4a) will hook the FSM `end_session` side effect to
- * flush turns here, and the per-call-summary + rolling-window chunks
- * built by that worker will read from this table.
+ * Written in production by the transcript-ingestion-worker (Phase 4a,
+ * registered in app.ts whenever an embedding provider is configured),
+ * which hooks the FSM `end_session` side effect to flush turns here;
+ * the per-call-summary + rolling-window chunks built by that worker
+ * read from this table. `speaker='caller'` rows are RIVET I13 untrusted
+ * content — classify via ai/content-provenance.ts before quoting turn
+ * text into any operator-facing prompt.
  *
  * Idempotency: (voice_recording_id, turn_index) is UNIQUE in the
  * schema. Re-emission of the same turn (e.g., worker retry) collides

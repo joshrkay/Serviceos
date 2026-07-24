@@ -135,6 +135,10 @@ import type {
 } from '../../proposals/proposal';
 import { createProposal as buildProposal } from '../../proposals/proposal';
 import {
+  isProposalTypeAllowedOnSurface,
+  type ProposalSurface,
+} from '../../proposals/surface';
+import {
   buildNegotiationCallbackContent,
   evaluateNegotiationDiscount,
 } from '../../proposals/guardrails/negotiation-guardrail';
@@ -1123,6 +1127,12 @@ export function createVoiceTurnProcessor(
           sourceContext: {
             source: 'calling-agent',
             channel: 'telephony',
+            // RIVET P4 — negotiation always routes to a human `callback` /
+            // clarification (both S1-safe), but the surface still travels with
+            // the proposal for audit + the execution-boundary re-check.
+            surface: (session.machine.currentContext.ownerSession === true
+              ? 'S2'
+              : 'S1') as ProposalSurface,
             sessionId: session.id,
           },
           // proposals.ai_run_id has an FK to ai_runs(id). Use the REAL run id
@@ -1153,31 +1163,132 @@ export function createVoiceTurnProcessor(
       // estimates use `unitPrice`, invoices `unitPriceCents` (+ recomputed
       // totalCents) — see the convention doc. Undefined for every other intent
       // / a quote with no line items — the generic path then runs unchanged.
+      // RIVET P4 / spec §2 — the inbound voice-turn processor drives the live
+      // caller FSM. A verified owner calling in carries `ownerSession`
+      // (RV-070, from caller-ID identity, never transcript content); everyone
+      // else is an unauthenticated S1 caller. Derive the surface from that
+      // session identity and enforce the S1 allowlist at creation: an intent
+      // that maps to a non-allowlisted (S2-only) proposal type is coerced to a
+      // `voice_clarification` so no actionable S2 proposal is ever minted from
+      // a caller's transcript. The execution boundary re-checks the stamped
+      // surface (I6) as defense-in-depth.
+      const surface: ProposalSurface =
+        session.machine.currentContext.ownerSession === true ? 'S2' : 'S1';
+      const requestedProposalType = intentToProposalType(intent);
+      // The deterministic emergency-keyword path (transitions.ts) marks its
+      // side effect systemDetected — a server-side safety detection, not a
+      // transcript-classified intent — so it is exempt from the S1 coercion
+      // that guards operator-only actions. The marker travels onto the
+      // proposal's sourceContext (systemDetectedSafety) so the execution
+      // boundary (I6) honors the same exemption; it only unlocks the narrow
+      // safety-exempt types (surface.ts) and is never caller-forgeable.
+      const systemDetectedSafety = fx.payload.systemDetected === true;
+      const surfaceAllowed = isProposalTypeAllowedOnSurface(
+        surface,
+        requestedProposalType,
+        systemDetectedSafety ? { systemDetectedSafety: true } : undefined,
+      );
+      if (!surfaceAllowed && deps.auditRepo) {
+        try {
+          await deps.auditRepo.create(
+            createAuditEvent({
+              tenantId,
+              actorId: deps.systemActorId ?? 'calling-agent',
+              actorRole: 'system',
+              eventType: 'voice.surface_violation_blocked',
+              entityType: 'voice_session',
+              entityId: session.id,
+              metadata: { intent: intent ?? null, requestedProposalType, surface },
+            }),
+          );
+        } catch {
+          /* audit is best-effort */
+        }
+      }
+      const effectiveProposalType: ProposalType = surfaceAllowed
+        ? requestedProposalType
+        : 'voice_clarification';
+
       const estimateQuote =
-        intent === 'draft_estimate'
+        surfaceAllowed && intent === 'draft_estimate'
           ? await groundVoiceQuote(session, entities, fx, 'unitPrice')
-          : intent === 'create_invoice'
+          : surfaceAllowed && intent === 'create_invoice'
             ? await groundVoiceQuote(session, entities, fx, 'unitPriceCents')
             : undefined;
 
+      // A blocked S1 request must persist as a CANONICAL clarification —
+      // voiceClarificationPayloadSchema requires `transcript` + `reason`, and
+      // clarifications have no execution handler, so a generic
+      // {intent, entities} payload would be a malformed, approve-to-fail card.
+      // The classifier usually supplies STRUCTURED entities (invoice ref,
+      // channel, …) rather than entities.transcript, so both are preserved:
+      // the caller's words (or an entity-derived summary) as `transcript`, and
+      // the raw entities as `requestedEntities` — otherwise the operator's
+      // card says only "caller asked for send_invoice" with no way to tell
+      // WHICH invoice or channel was asked for. Caller-derived data is fine to
+      // STORE and display (I13) — it just never becomes instructions.
+      const entityDetails = Object.entries(entities)
+        .filter(([, v]) => typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean')
+        .map(([k, v]) => `${k}=${String(v)}`)
+        .join(', ');
+      const blockedTranscript =
+        typeof entities.transcript === 'string' && entities.transcript.trim().length > 0
+          ? entities.transcript.trim()
+          : `Caller asked for '${intent ?? 'unknown'}' — an operator-only action.` +
+            (entityDetails ? ` Details heard: ${entityDetails}.` : '');
+      const payload: Record<string, unknown> = surfaceAllowed
+        ? {
+            intent,
+            entities,
+            // WS5 — grounded line items + confidence meta ride alongside the
+            // raw entities so the operator-side draft shows exactly what was
+            // quoted.
+            ...(estimateQuote
+              ? { lineItems: estimateQuote.lineItems, _meta: estimateQuote.meta }
+              : {}),
+            sessionId: session.id,
+            callSid: session.callSid,
+          }
+        : {
+            transcript: blockedTranscript,
+            reason: 'surface_restricted',
+            ...(intent ? { suggestedIntents: [intent] } : {}),
+            requestedProposalType,
+            ...(Object.keys(entities).length > 0 ? { requestedEntities: entities } : {}),
+            sessionId: session.id,
+            callSid: session.callSid,
+          };
+
       const proposal = buildProposal({
         tenantId,
-        proposalType: intentToProposalType(intent),
-        payload: {
-          intent,
-          entities,
-          // WS5 — grounded line items + confidence meta ride alongside the raw
-          // entities so the operator-side draft shows exactly what was quoted.
-          ...(estimateQuote
-            ? { lineItems: estimateQuote.lineItems, _meta: estimateQuote.meta }
-            : {}),
-          sessionId: session.id,
-          callSid: session.callSid,
-        },
-        summary: intent ? `Voice intent: ${intent}` : 'Voice clarification needed',
+        proposalType: effectiveProposalType,
+        payload,
+        summary: surfaceAllowed
+          ? intent
+            ? `Voice intent: ${intent}`
+            : 'Voice clarification needed'
+          : `Caller requested an operator-only action (${intent ?? 'unknown'})`,
         sourceContext: {
           source: 'calling-agent',
           channel: 'telephony',
+          // RIVET P4 — the caller's surface travels with the proposal so the
+          // execution boundary can re-check it (I6).
+          surface,
+          // Server-set safety provenance (deterministic emergency-keyword
+          // path). Travels to the executor so it honors the same S1 exemption
+          // isProposalTypeAllowedOnSurface applied at creation. Only ever set
+          // by trusted server code — never from transcript content.
+          ...(systemDetectedSafety ? { systemDetectedSafety: true } : {}),
+          // The IDENTIFIED caller's customer id (caller-ID match / self-signup
+          // — session identity, never transcript content). S1 self-service
+          // ops that target existing records (reschedule own appointment)
+          // verify ownership against this at execution; absent → those ops
+          // fail closed.
+          ...(typeof fx.payload.customerId === 'string' && fx.payload.customerId
+            ? { callerCustomerId: fx.payload.customerId }
+            : session.customerId
+              ? { callerCustomerId: session.customerId }
+              : {}),
           sessionId: session.id,
           // Ambiguous-line candidates for the review UI (same shape the
           // EstimateTaskHandler stores) — only present when a line was

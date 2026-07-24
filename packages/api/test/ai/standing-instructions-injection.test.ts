@@ -328,18 +328,26 @@ describe('SuggestReplyTask — standing-instruction injection (text format)', ()
     });
 
     const messages = requests[0].messages;
+    // base system + SI system + user (the I13 fence rides INSIDE the user
+    // message — caller text never gets system-role authority).
     expect(messages).toHaveLength(3);
     expect(messages[1].role).toBe('system');
     expect(messages[1].content).toContain('- [SI:si-1]');
     // Asking a text-format task to emit an id list would corrupt the draft.
     expect(messages[1].content).not.toContain('appliedStandingInstructions');
     expect(messages[2].role).toBe('user');
+    expect(messages[2].content).toContain('UNTRUSTED CALLER CONTENT');
   });
 
   it('keeps the prompt shape unchanged without instructions', async () => {
     const { gateway, requests } = captureGateway('Sure thing.');
     await new SuggestReplyTask(gateway).suggest(input);
-    expect(requests[0].messages).toHaveLength(2);
+    // No standing instructions → base system + user (fenced thread inside).
+    const messages = requests[0].messages;
+    expect(messages).toHaveLength(2);
+    expect(messages[0].role).toBe('system');
+    expect(messages[1].role).toBe('user');
+    expect(messages[1].content).toContain('UNTRUSTED CALLER CONTENT');
   });
 });
 

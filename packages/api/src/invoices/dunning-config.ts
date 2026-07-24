@@ -171,6 +171,19 @@ export interface DunningEventRepository {
    */
   create(event: DunningEvent): Promise<DunningEvent>;
   findByInvoice(tenantId: string, invoiceId: string): Promise<DunningEvent[]>;
+  /**
+   * Remove a specific ledger row by its natural key. Used to undo a
+   * record-first reminder write when the send was suppressed at fire time
+   * (I10 — the invoice was paid/void/zero-balance), so a suppressed reminder
+   * never leaves a false "sent" row that would block a later legitimate
+   * reminder inside the 72h cooldown. A no-op when no matching row exists.
+   */
+  deleteByInvoiceStep(
+    tenantId: string,
+    invoiceId: string,
+    kind: DunningEvent['kind'],
+    stepKey: string,
+  ): Promise<void>;
 }
 
 export class InMemoryDunningConfigRepository implements DunningConfigRepository {
@@ -218,6 +231,24 @@ export class InMemoryDunningEventRepository implements DunningEventRepository {
       .filter((r) => r.tenantId === tenantId && r.invoiceId === invoiceId)
       .sort((a, b) => a.sentAt.getTime() - b.sentAt.getTime())
       .map((r) => this.clone(r));
+  }
+
+  async deleteByInvoiceStep(
+    tenantId: string,
+    invoiceId: string,
+    kind: DunningEvent['kind'],
+    stepKey: string,
+  ): Promise<void> {
+    for (const [id, r] of this.rows) {
+      if (
+        r.tenantId === tenantId &&
+        r.invoiceId === invoiceId &&
+        r.kind === kind &&
+        r.stepKey === stepKey
+      ) {
+        this.rows.delete(id);
+      }
+    }
   }
 
   /** Deep-copy including the sentAt Date so stored state can't be mutated via a returned reference. */

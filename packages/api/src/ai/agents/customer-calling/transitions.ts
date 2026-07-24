@@ -354,6 +354,14 @@ function checkGlobalGuards(
           payload: {
             tenantId: updatedContext.tenantId,
             intent: 'emergency_dispatch',
+            // RIVET P4 — this is the DETERMINISTIC emergency-keyword path
+            // (server-side matcher), not a transcript-classified intent, so it
+            // is exempt from the S1→clarification coercion that guards
+            // operator-only actions. The marker is honored only for the narrow
+            // safety-exempt types (surface.ts isSystemSafetyExempt) and is
+            // never derivable from caller-controlled transcript content. Still
+            // born blocked → human owner approval before dispatch executes.
+            systemDetected: true,
             entities: {
               ...updatedContext.extractedEntities,
               emergencyDescription: event.utterance,

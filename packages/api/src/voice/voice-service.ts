@@ -37,8 +37,22 @@ export interface VoiceRecording {
   conversationId?: string;
   /** Twilio CallSid — set for inbound call recordings, absent for uploads. */
   callSid?: string;
+  /**
+   * Origin of the recording (`voice_recordings.source`, migration 054):
+   * 'inbound_call' | 'inapp_voice' | 'batch_upload'. Load-bearing for
+   * RIVET I13 — `classifyRecordingProvenance` treats 'inbound_call' as
+   * untrusted unconditionally (caller audio is on the recording).
+   */
+  source?: string;
   status: TranscriptionStatus;
   transcript?: string;
+  /**
+   * Provider + pipeline metadata for the transcript (JSONB). Carries the
+   * RIVET I13 marker `provenance: 'caller' | 'mixed' | 'operator'` (stamped
+   * by the transcript-ingestion worker via `stampProvenance`). Check it via
+   * `classifyRecordingProvenance` (ai/content-provenance.ts) — which fails
+   * closed — before quoting `transcript` into any operator-facing prompt.
+   */
   transcriptMetadata?: Record<string, unknown>;
   durationSeconds?: number;
   errorMessage?: string;
@@ -160,6 +174,22 @@ export interface VoiceRepository {
     tenantId: string,
     id: string,
     outcome: { answerStatus: VoiceAnswerStatus; answer?: VoiceLookupAnswer },
+  ): Promise<VoiceRecording | null>;
+  /**
+   * RIVET I13 — stamp the speaker provenance of the recording's transcript
+   * into `transcript_metadata.provenance` ('caller' | 'mixed' | 'operator'),
+   * computed by the transcript-ingestion worker from the real per-turn
+   * speaker distribution. MERGE semantics, never replace: the transcription
+   * worker writes a rich transcriptMetadata object at completion and
+   * ingestion runs after it, so a full-replace would clobber it. Readers
+   * classify via `classifyRecordingProvenance` (ai/content-provenance.ts),
+   * which FAILS CLOSED — an unstamped row is untrusted. Optional for
+   * repo-interface backwards compatibility (mirrors stampOutcome).
+   */
+  stampProvenance?(
+    tenantId: string,
+    id: string,
+    provenance: 'caller' | 'mixed' | 'operator',
   ): Promise<VoiceRecording | null>;
 }
 
@@ -327,6 +357,21 @@ export class InMemoryVoiceRepository implements VoiceRepository {
     const rec = this.recordings.get(id);
     if (!rec || rec.tenantId !== tenantId) return null;
     rec.detectedLanguage = language;
+    rec.updatedAt = new Date();
+    this.recordings.set(id, rec);
+    return { ...rec };
+  }
+
+  async stampProvenance(
+    tenantId: string,
+    id: string,
+    provenance: 'caller' | 'mixed' | 'operator',
+  ): Promise<VoiceRecording | null> {
+    const rec = this.recordings.get(id);
+    if (!rec || rec.tenantId !== tenantId) return null;
+    // Merge — never replace — mirroring the pg `||` semantics: the
+    // transcription worker's rich metadata must survive the stamp.
+    rec.transcriptMetadata = { ...(rec.transcriptMetadata ?? {}), provenance };
     rec.updatedAt = new Date();
     this.recordings.set(id, rec);
     return { ...rec };

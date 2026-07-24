@@ -153,4 +153,19 @@ export class PgDunningEventRepository
       return result.rows.map(mapEvent);
     });
   }
+
+  async deleteByInvoiceStep(
+    tenantId: string,
+    invoiceId: string,
+    kind: DunningEvent['kind'],
+    stepKey: string,
+  ): Promise<void> {
+    await this.withTenant(tenantId, async (client) => {
+      await client.query(
+        `DELETE FROM invoice_dunning_events
+         WHERE tenant_id = $1 AND invoice_id = $2 AND kind = $3 AND step_key = $4`,
+        [tenantId, invoiceId, kind, stepKey],
+      );
+    });
+  }
 }

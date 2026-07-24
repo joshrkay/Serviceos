@@ -102,7 +102,13 @@ describe('Postgres integration — voice proposal links to a real ai_runs row (P
     const aiRunRepo = new PgAiRunRepository(pool);
     const gateway = buildGateway();
 
-    const session = store.create(tenant.tenantId, 'telephony', { callSid: 'CA-intg' });
+    // Owner (surface S2) session — create_invoice/draft_invoice is an
+    // operator-grade op the P4 S1 allowlist reserves for S2; this FK-linkage
+    // regression must exercise the real draft_invoice path.
+    const session = store.create(tenant.tenantId, 'telephony', {
+      callSid: 'CA-intg',
+      ownerSession: true,
+    });
     // Drive the FSM straight to intent_capture where speechTurn classifies.
     session.machine.dispatch({
       type: 'incoming_call',

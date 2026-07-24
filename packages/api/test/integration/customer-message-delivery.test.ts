@@ -189,7 +189,7 @@ describe('sendCustomerMessage (integration) — claim-before-send against real P
           idempotencyKeyPrefix: prefix,
         },
       ),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({ eligibilitySuppressed: false });
 
     expect(warn).toHaveBeenCalled();
     expect(await dispatchRepo.findByEntity(tenantId, 'estimate', entityId)).toHaveLength(0);
@@ -208,5 +208,99 @@ describe('sendCustomerMessage (integration) — claim-before-send against real P
       },
     );
     expect(delivery.sentSms).toHaveLength(1);
+  });
+
+  it('eligibility suppression leaves the claim RECLAIMABLE (Codex P2): no provider call, no stranded "sending" row', async () => {
+    const { tenantId } = await createTestTenant(pool);
+    const delivery = new InMemoryDeliveryProvider();
+    const smsSpy = vi.spyOn(delivery, 'sendSms');
+    const customer = makeCustomer(tenantId);
+    const entityId = crypto.randomUUID();
+    const prefix = `invoice-overdue:${entityId}:manual`;
+
+    const result = await sendCustomerMessage(
+      { delivery, dispatchRepo, pool, logger },
+      {
+        tenantId,
+        customer,
+        entityType: 'invoice_overdue',
+        entityId,
+        channels: ['sms'],
+        smsBody: 'You have an overdue invoice',
+        idempotencyKeyPrefix: prefix,
+        // Suppress at the boundary — simulates the invoice being paid.
+        eligibilityCheck: async () => 'paid',
+      },
+    );
+
+    expect(result).toEqual({ eligibilitySuppressed: true, eligibilityReason: 'paid' });
+    // The provider was never called…
+    expect(smsSpy).not.toHaveBeenCalled();
+    expect(delivery.sentSms).toHaveLength(0);
+    expect(await dispatchRepo.findByEntity(tenantId, 'invoice_overdue', entityId)).toHaveLength(0);
+    // …and the claim is NOT stuck in the never-reclaimed 'sending' state:
+    // deferred mode kept it 'claimed' through the recheck, then the
+    // suppression throw released it. A row that is absent (released) or still
+    // 'claimed' is reclaimable; a 'sending' or 'sent' row would strand the
+    // occurrence forever.
+    const claim = await pool.query(
+      `SELECT status FROM send_claims WHERE tenant_id = $1 AND claim_key = $2`,
+      [tenantId, `${prefix}:sms`],
+    );
+    if (claim.rows.length > 0) {
+      expect(claim.rows[0].status).toBe('claimed');
+    }
+
+    // Proof it is reclaimable: the invoice reopens, the reminder can fire.
+    await sendCustomerMessage(
+      { delivery, dispatchRepo, pool, logger },
+      {
+        tenantId,
+        customer,
+        entityType: 'invoice_overdue',
+        entityId,
+        channels: ['sms'],
+        smsBody: 'You have an overdue invoice',
+        idempotencyKeyPrefix: prefix,
+        eligibilityCheck: async () => null,
+      },
+    );
+    expect(delivery.sentSms).toHaveLength(1);
+  });
+
+  it('mixed case (Codex): SMS fails, payment lands, email eligibility-suppressed → reports suppressed (nothing delivered)', async () => {
+    const { tenantId } = await createTestTenant(pool);
+    const delivery = new InMemoryDeliveryProvider();
+    // SMS provider errors; the eligibility recheck then suppresses email.
+    vi.spyOn(delivery, 'sendSms').mockRejectedValueOnce(new Error('Twilio 500'));
+    const emailSpy = vi.spyOn(delivery, 'sendEmail');
+    const customer = makeCustomer(tenantId);
+    const entityId = crypto.randomUUID();
+    const prefix = `invoice-overdue:${entityId}:manual`;
+    const warn = vi.fn();
+
+    const result = await sendCustomerMessage(
+      { delivery, dispatchRepo, pool, logger: { ...logger, warn } },
+      {
+        tenantId,
+        customer,
+        entityType: 'invoice_overdue',
+        entityId,
+        channels: ['sms', 'email'],
+        smsBody: 'You have an overdue invoice',
+        emailSubject: 'Overdue invoice',
+        emailText: 'You have an overdue invoice',
+        idempotencyKeyPrefix: prefix,
+        eligibilityCheck: async () => 'paid',
+      },
+    );
+
+    // Nothing reached a provider (SMS failed, email suppressed), and the
+    // reason was an eligibility suppression → suppressed, NOT a false "sent".
+    // Previously `suppressed === attempted` was false (1 !== 2) and this
+    // returned eligibilitySuppressed:false.
+    expect(result).toEqual({ eligibilitySuppressed: true, eligibilityReason: 'paid' });
+    expect(emailSpy).not.toHaveBeenCalled();
+    expect(delivery.sentEmails).toHaveLength(0);
   });
 });
