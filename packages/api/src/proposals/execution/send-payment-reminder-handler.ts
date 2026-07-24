@@ -163,21 +163,34 @@ export class SendPaymentReminderExecutionHandler implements ExecutionHandler {
     }
 
     // I10 send-time suppression (invoice paid/void/zero-balance at fire time).
-    // Nothing was delivered, so we must NOT leave a "reminder_sent" trace: undo
-    // the record-first ledger row we wrote above (else its false send-history
-    // blocks a later legitimate reminder inside the 72h cooldown) and audit the
-    // suppression instead of a send. Idempotent re-execution is unaffected —
-    // the row is only deleted on the same run that wrote it.
+    // Nothing was delivered on THIS run, so no "reminder_sent" trace is
+    // recorded — the suppression is audited instead.
     if (outcome.status === 'suppressed') {
-      // Undo the ledger claim for this occurrence so the suppressed step is not
-      // treated as sent forever. This covers BOTH on-ramps: a MANUAL reminder
-      // wrote its `manual:<proposalId>` row above (record-first), and a CADENCE
-      // step's `<offsetDays>:<channel>` row was written by the overdue sweep
-      // (raiseDunningProposals) at raise time — `occurrenceToken` is that row's
-      // stepKey in either case. Without this, a cadence step suppressed because
-      // the invoice was paid would leave selectDueReminderSteps unable to
-      // re-raise it if the payment is later reversed and the invoice reopens.
-      if (this.dunningEventRepo) {
+      // Ledger cleanup is MANUAL-ONLY, deliberately asymmetric:
+      //
+      //  - MANUAL: the `manual:<proposalId>` row was record-first-written by
+      //    THIS execution moments ago, and a retry of a manual proposal whose
+      //    earlier run actually delivered returns at the own-row idempotency
+      //    check ABOVE — before comms ever runs — so reaching suppression
+      //    proves nothing was delivered for this occurrence. Deleting the row
+      //    is safe and keeps a phantom claim from blocking a later legitimate
+      //    manual reminder inside the 72h cooldown.
+      //
+      //  - CADENCE: the `<offsetDays>:<channel>` row was written by the
+      //    overdue sweep at RAISE time and this handler has no pre-comms
+      //    delivered-already check for it — if a prior run delivered and
+      //    crashed before its status transaction committed, the retry lands
+      //    here with `suppressed` (invoice since paid) and deleting the row
+      //    would erase a REAL send: a later payment reversal would then
+      //    re-raise the same step and the customer would be dunned twice for
+      //    one occurrence. A duplicate dunning message costs more trust than
+      //    the accepted alternative — a suppressed step staying "claimed" so
+      //    a reopened invoice skips it (later cadence steps still fire, and
+      //    the `invoice.reminder_suppressed` audit below keeps the owner
+      //    informed). Distinguishing claim-only from delivered needs a ledger
+      //    status column (migration) or a send-claim lookup — follow-up, not
+      //    a silent delete.
+      if (this.dunningEventRepo && isManual) {
         try {
           await this.dunningEventRepo.deleteByInvoiceStep(
             context.tenantId,

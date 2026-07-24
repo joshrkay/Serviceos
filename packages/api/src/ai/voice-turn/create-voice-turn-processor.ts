@@ -1208,12 +1208,22 @@ export function createVoiceTurnProcessor(
       // voiceClarificationPayloadSchema requires `transcript` + `reason`, and
       // clarifications have no execution handler, so a generic
       // {intent, entities} payload would be a malformed, approve-to-fail card.
-      // The caller's words are preserved for the operator; the intent that was
-      // refused rides alongside for the review UI.
+      // The classifier usually supplies STRUCTURED entities (invoice ref,
+      // channel, …) rather than entities.transcript, so both are preserved:
+      // the caller's words (or an entity-derived summary) as `transcript`, and
+      // the raw entities as `requestedEntities` — otherwise the operator's
+      // card says only "caller asked for send_invoice" with no way to tell
+      // WHICH invoice or channel was asked for. Caller-derived data is fine to
+      // STORE and display (I13) — it just never becomes instructions.
+      const entityDetails = Object.entries(entities)
+        .filter(([, v]) => typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean')
+        .map(([k, v]) => `${k}=${String(v)}`)
+        .join(', ');
       const blockedTranscript =
         typeof entities.transcript === 'string' && entities.transcript.trim().length > 0
           ? entities.transcript.trim()
-          : `Caller asked for '${intent ?? 'unknown'}' — an operator-only action.`;
+          : `Caller asked for '${intent ?? 'unknown'}' — an operator-only action.` +
+            (entityDetails ? ` Details heard: ${entityDetails}.` : '');
       const payload: Record<string, unknown> = surfaceAllowed
         ? {
             intent,
@@ -1232,6 +1242,7 @@ export function createVoiceTurnProcessor(
             reason: 'surface_restricted',
             ...(intent ? { suggestedIntents: [intent] } : {}),
             requestedProposalType,
+            ...(Object.keys(entities).length > 0 ? { requestedEntities: entities } : {}),
             sessionId: session.id,
             callSid: session.callSid,
           };

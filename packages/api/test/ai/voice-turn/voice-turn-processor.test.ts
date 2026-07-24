@@ -575,6 +575,11 @@ describe('createVoiceTurnProcessor — S1 surface enforcement (P4)', () => {
     expect((payload.transcript as string).length).toBeGreaterThan(0);
     expect(payload.reason).toBe('surface_restricted');
     expect(payload.requestedProposalType).toBe('send_invoice');
+    // The classifier's structured entities survive (Codex): the operator can
+    // see WHICH invoice the caller asked to have sent — the fallback
+    // transcript carries the details and the raw entities ride alongside.
+    expect(payload.transcript as string).toContain('invoiceNumber=1043');
+    expect((payload.requestedEntities as Record<string, unknown>).invoiceNumber).toBe('1043');
     // …and stamped with the S1 surface so the execution boundary re-checks it.
     expect((proposals[0]!.sourceContext as Record<string, unknown>).surface).toBe('S1');
     // …and the block is audited.

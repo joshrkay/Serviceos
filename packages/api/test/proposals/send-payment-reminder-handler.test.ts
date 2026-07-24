@@ -225,11 +225,16 @@ describe('send_payment_reminder — manual dedup guard', () => {
     expect(events.some((e) => e.eventType === 'invoice.reminder_sent')).toBe(false);
   });
 
-  it('I10 suppression also removes the CADENCE ledger claim (Codex) so a reopened invoice can re-raise', async () => {
-    // The overdue sweep (raiseDunningProposals) wrote the cadence row at raise
-    // time; the handler does not record-first for cadence. If the step is
-    // suppressed because the invoice is now paid, that pre-existing row must be
-    // deleted too, else selectDueReminderSteps treats the step as sent forever.
+  it('I10 suppression KEEPS the CADENCE ledger claim (Codex round 2): a crash-retry after a real delivery must never erase sent history', async () => {
+    // The cadence row is written by the overdue sweep at RAISE time, and this
+    // handler cannot tell a claim-only row from one whose occurrence was
+    // actually delivered on a prior run that crashed before committing. If
+    // suppression deleted it, a later payment reversal would re-raise the
+    // same step and the customer would be dunned twice for one occurrence —
+    // costlier than the accepted alternative (a suppressed step staying
+    // claimed on a reopened invoice). Manual rows are different: they are
+    // record-first-written by the same run, so their deletion is safe (see
+    // the paid-at-fire-time test above).
     await seed({ stepKey: '3:sms', channel: 'sms', sentAt: NOW });
     comms.suppressReason = 'paid';
     const cadenceProposal = makeProposal({
@@ -241,8 +246,13 @@ describe('send_payment_reminder — manual dedup guard', () => {
 
     expect(result.success).toBe(true);
     expect(comms.calls).toHaveLength(0);
+    // The raise-time cadence claim survives…
     const rows = await ledger.findByInvoice(TENANT, INVOICE_ID);
-    expect(rows.filter((r) => r.kind === 'reminder' && r.stepKey === '3:sms')).toHaveLength(0);
+    expect(rows.filter((r) => r.kind === 'reminder' && r.stepKey === '3:sms')).toHaveLength(1);
+    // …and the suppression (not a send) is what got audited.
+    const events = await auditRepo.findByEntity(TENANT, 'invoice', INVOICE_ID);
+    expect(events.some((e) => e.eventType === 'invoice.reminder_suppressed')).toBe(true);
+    expect(events.some((e) => e.eventType === 'invoice.reminder_sent')).toBe(false);
   });
 
   it('re-executing the same manual proposal is idempotent — exactly one send total', async () => {
