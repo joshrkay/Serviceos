@@ -1,7 +1,7 @@
 ---
 name: money-extract
 description: Read-only discovery across the Rivet money surface — money-storage type end to end, invoice/estimate/payment state machines, Stripe webhook idempotency, refund path, tax computation, and whether a ledger or double-entry layer exists. Dispatches five parallel tracks, synthesizes one findings doc. Precedes /goal money; fixes nothing.
-allowed-tools: Read, Grep, Glob
+allowed-tools: Read, Grep, Glob, Task, Agent, Write
 argument-hint: "[track-name|all]"
 ---
 
@@ -21,8 +21,11 @@ below.
 P0**, flagged first regardless of what else is found — the same standing RLS
 gaps have in the comms extraction.
 
-No `Bash` in `allowed-tools`: this pass needs zero execution to stay honest
-about read-only.
+No `Bash` in `allowed-tools`: this pass needs zero execution to stay honest about
+read-only. The read-only guarantee lives in the **track agents**, whose `tools:`
+are `Read, Grep, Glob` — they are what actually touch the codebase. The
+orchestrator needs subagent dispatch plus a single `Write` for the findings doc,
+and nothing else.
 
 ## Why money needs its own extraction
 
@@ -82,7 +85,10 @@ Refund: EXISTS/PARTIAL/ABSENT · over-refund guard: [yes/no] · partial: [yes/no
 Tax: stored/recomputed · rounding point · flat vs nexus-assuming
 
 ## Track 5 — Ledger & infra
-Ledger: EXISTS/PARTIAL/ABSENT — [if absent, /goal money asserts row correctness, not reconciliation]
+Ledger: EXISTS/PARTIAL/ABSENT — [if ABSENT as a double-entry construct, state what
+ derived-balance surface exists instead (denormalized balance columns, SUM-on-read,
+ or nothing) and whether it is maintained incrementally or derived on read. That,
+ not the ledger question alone, decides what the sweep can assert.]
 Money-table RLS: [clean / gaps at file:line]
 Test convention: [confirmed pattern] · existing money test files
 
@@ -96,13 +102,21 @@ Test convention: [confirmed pattern] · existing money test files
 
 ## After this runs
 
-The findings decide the one thing the spec can't guess: whether `/goal money`'s
-invariant sweep is a **reconciliation check** or **row-level correctness**.
+The findings decide the one thing the spec can't guess: **what invariant the
+`/goal money` sweep recomputes every iteration.**
+
+This is not the binary it looks like — the first run proved it. Do not treat
+"no ledger" as "row-level correctness only":
 
 - **Ledger exists** → the sweep asserts balances reconcile every iteration, the
   money equivalent of comms's RLS sweep.
-- **No ledger** → the sweep asserts sum-of-line-items equals invoice total to the
-  cent and no payment survives a void. Weaker, but still catches the silent class.
+- **No ledger, but a derived-balance surface exists** → still a reconciliation.
+  Balance columns maintained by incremental UPDATE can be recomputed from their
+  source rows and compared. The 2026-07 run found exactly this: no double-entry
+  construct, but a three-layer reconciliation (line total → document totals →
+  `amount_paid == Σ active payments`) whose deepest layer was the codebase's own
+  stated invariant that nothing verified.
+- **Neither** → then, and only then, the sweep is row-level correctness only.
 
-Either way the gate is grounded in what's there. Do not write `/goal money`
+Report which holds and name the invariant explicitly. Do not write `/goal money`
 until this comes back.
