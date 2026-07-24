@@ -3,11 +3,17 @@
   "spec": "spec/RIVET_FOUNDATION_SPEC.md",
   "contracts": ".rivet/RIVET_OPERATION_CONTRACTS.md §5.10, §5.12",
   "scope": "registry #9, #11-13, #18(scheduling side), #37-43, #61-62, §5.10 settings, J1 onboarding",
-  "state_version": 4,
+  "state_version": 5,
   "updated": "2026-07-24",
   "iteration": 3,
-  "phase": "loop",
-  "convergence": "Iteration 3 reopened the three items previously marked decision-blocked, under the enforcement principle 'enforce exactly what the tenant configured; absence of configuration = unconstrained' — which requires no product guessing because the operation contracts (#12/#13 preconditions) already mandate the behavior. F1/F3 re-verified green after the change (V16 contention re-run).",
+  "phase": "halted_pending_ratification",
+  "convergence": "Iteration 3 reopened the three items previously marked decision-blocked, under the enforcement principle 'enforce exactly what the tenant configured; absence of configuration = unconstrained' — which requires no product guessing because the operation contracts (#12/#13 preconditions) already mandate the behavior. F1/F3 re-verified green after the change (V16 contention re-run). HALT: binary gates F1/F2(as-configured)/F3 hold; the sole outstanding act on them is human ratification of the provisional_policy block below (RIVET_GOAL_PRODUCTION_v2 §7 makes ratification human-only). F4-F7 remainders are queued engineering work in next_iteration, none blocking the binary gates.",
+  "provisional_policy": {
+    "note": "Implemented and shipped (PRs #740/#741) as provisional policy pending human ratification. Ratifying = confirming these three defaults; changing any of them is a scoped follow-up story, not a rework.",
+    "service_area": "ZIP allowlist (service_area_zips), enforced on customer self-serve surfaces (public booking intake + portal book) with informative OUT_OF_SERVICE_AREA; operator-side booking deliberately NOT blocked (operators know where the trucks go). Radius/geocode model deferred until a geocoding surface exists.",
+    "skills": "Term 6 armed but inert: feasibility blocks when the matcher reports missing skills, and the prod matcher is a stub because NO skills data model exists — no tenant can configure skills, so nothing is enforced or violated. Building the skills model (catalog + per-tech + per-service-type) is its own story; the gate arms automatically when it lands.",
+    "operator_override": "Hard block, no override flag: assignments/reschedules outside a MODELED tech's working hours or during time-off are refused (409) on every path (direct schedule, reassign, from-estimate, same-tech reschedule, voice/proposal execution). The escape hatch is explicit and audited: edit the tech's hours or remove the time-off block. Techs with zero modeled rows remain unconstrained."
+  },
   "gates": {
     "F1": {
       "status": "passing",
