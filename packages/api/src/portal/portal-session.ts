@@ -19,6 +19,13 @@ export interface PortalSession {
   id: string;
   tenantId: string;
   customerId: string;
+  /**
+   * Comms C2 / I14 — when set, this session is bound to a specific customer
+   * contact and its entitlement is derived from that contact's CURRENT role
+   * at token-resolution time (see `portal-entitlement.ts`). Unset = legacy
+   * account-holder session with the full customer view.
+   */
+  contactId?: string;
   /** sha256 hex of the plaintext token. Never store the plaintext. */
   tokenHash: string;
   expiresAt: Date;

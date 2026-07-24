@@ -3295,3 +3295,78 @@ describe('T2-F05 caller-silence reprompt timer', () => {
     expect(ws.closed).toBe(false);
   });
 });
+
+// ─── Comms C5 — consent gate on the capture pipeline (stream transport) ──────
+
+describe('C5 capture gate', () => {
+  it('drops inbound media until the greeting turn (disclosure) mark is acked, then forwards', async () => {
+    store.create('tenant-c5', 'telephony', { callSid: 'CA-c5' });
+    const ws = new FakeWs();
+    const { provider } = makeStreamingProvider();
+    const tts = makeTtsProvider();
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: provider,
+        speechTurn: async () => [],
+        ttsProvider: tts,
+        initializeSession: async () => [
+          { type: 'tts_play', payload: { text: 'Greeting including the recording disclosure.' } },
+        ],
+      },
+      ws,
+    );
+    adapter.start();
+
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-c5',
+      start: { callSid: 'CA-c5', accountSid: 'AC', streamSid: 'MZ-c5', tracks: ['inbound'] },
+    });
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+
+    const deepgramSession = (provider.openSession as ReturnType<typeof vi.fn>).mock.results[0]
+      .value as Promise<StreamingSession>;
+    const session = await deepgramSession;
+
+    // Caller audio during the greeting/disclosure: dropped, never forwarded.
+    ws.inboundJson({ event: 'media', media: { payload: 'AAAA' } });
+    expect(session.send).not.toHaveBeenCalled();
+
+    // The greeting turn's end-of-utterance mark ack = disclosure fully played.
+    const markFrame = ws.sent.find(
+      (m) =>
+        (m as { event?: string }).event === 'mark' &&
+        String((m as { mark?: { name?: string } }).mark?.name ?? '').startsWith('silence-arm-'),
+    ) as { mark: { name: string } } | undefined;
+    expect(markFrame).toBeDefined();
+    ws.inboundJson({ event: 'mark', mark: { name: markFrame!.mark.name } });
+    await new Promise((r) => setImmediate(r));
+
+    ws.inboundJson({ event: 'media', media: { payload: 'AAAA' } });
+    expect(session.send).toHaveBeenCalledTimes(1);
+  });
+
+  it('capture opens immediately when no initializeSession is wired (no disclosure will play)', async () => {
+    store.create('tenant-c5b', 'telephony', { callSid: 'CA-c5b' });
+    const ws = new FakeWs();
+    const { provider } = makeStreamingProvider();
+    const adapter = new TwilioMediaStreamAdapter(
+      { store, streamingProvider: provider, speechTurn: async () => [] },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-c5b',
+      start: { callSid: 'CA-c5b', accountSid: 'AC', streamSid: 'MZ-c5b', tracks: ['inbound'] },
+    });
+    await new Promise((r) => setImmediate(r));
+
+    const session = await ((provider.openSession as ReturnType<typeof vi.fn>).mock.results[0]
+      .value as Promise<StreamingSession>);
+    ws.inboundJson({ event: 'media', media: { payload: 'AAAA' } });
+    expect(session.send).toHaveBeenCalledTimes(1);
+  });
+});

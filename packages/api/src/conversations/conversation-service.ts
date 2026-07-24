@@ -108,6 +108,16 @@ export interface ConversationRepository {
   findByEntity(tenantId: string, entityType: string, entityId: string): Promise<Conversation[]>;
   addMessage(input: CreateMessageInput): Promise<Message>;
   getMessages(tenantId: string, conversationId: string): Promise<Message[]>;
+  /**
+   * Comms C3 — the channel ('sms' | 'email') of the newest inbound message
+   * in the thread, or null when the thread has no inbound traffic. Bounded
+   * (LIMIT 1 in Pg) so reply sends don't scan whole histories. Optional:
+   * reply-service falls back to a getMessages scan when absent.
+   */
+  findLatestInboundChannel?(
+    tenantId: string,
+    conversationId: string,
+  ): Promise<'sms' | 'email' | null>;
   updateMessageMetadata(tenantId: string, messageId: string, metadata: Record<string, unknown>): Promise<Message | null>;
   /** U5 — list comms threads (customer + unmatched) for the inbox surface. */
   listInboxThreads(
@@ -414,6 +424,25 @@ export class InMemoryConversationRepository implements ConversationRepository {
     return this.messages.filter(
       (m) => m.tenantId === tenantId && m.conversationId === conversationId
     );
+  }
+
+  // Comms C3 — in-memory mirror of the Pg bounded lookup (same precedence:
+  // metadata.channel falls back to source; inbound-direction rows only).
+  async findLatestInboundChannel(
+    tenantId: string,
+    conversationId: string,
+  ): Promise<'sms' | 'email' | null> {
+    let latest: { at: number; channel: 'sms' | 'email' } | undefined;
+    for (const m of this.messages) {
+      if (m.tenantId !== tenantId || m.conversationId !== conversationId) continue;
+      const meta = (m.metadata ?? {}) as Record<string, unknown>;
+      if (meta.direction !== 'inbound') continue;
+      const channel = (meta.channel as string | undefined) ?? m.source;
+      if (channel !== 'sms' && channel !== 'email') continue;
+      const at = m.createdAt instanceof Date ? m.createdAt.getTime() : 0;
+      if (!latest || at >= latest.at) latest = { at, channel };
+    }
+    return latest?.channel ?? null;
   }
 
   async updateMessageMetadata(

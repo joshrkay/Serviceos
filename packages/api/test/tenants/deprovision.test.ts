@@ -177,3 +177,77 @@ describe('deprovisionTenant', () => {
     expect(pool.logInserts[0].params[5]).toMatch(/twilio 500/); // twilio_error
   });
 });
+
+// ─── Comms C6 — the purge deletes stored objects instead of orphaning them ───
+
+describe('C6 stored-object cleanup', () => {
+  function poolWithFiles(files: Array<{ s3_bucket: string; s3_key: string }>) {
+    const route = async (sql: string) => {
+      if (/SELECT id FROM tenants WHERE id/.test(sql)) return { rowCount: 1, rows: [{ id: TENANT }] };
+      if (/^\s*(BEGIN|COMMIT|ROLLBACK)/.test(sql) || /set_config|SET LOCAL/.test(sql)) {
+        return { rowCount: 0, rows: [] };
+      }
+      if (/SELECT subaccount_sid/.test(sql)) return { rowCount: 0, rows: [] };
+      if (/SELECT s3_bucket, s3_key FROM files/.test(sql)) {
+        return { rowCount: files.length, rows: files };
+      }
+      if (/information_schema\.columns/.test(sql)) {
+        return { rowCount: 1, rows: [{ table_name: 'files' }] };
+      }
+      if (/DELETE FROM/.test(sql)) return { rowCount: files.length, rows: [] };
+      if (/INSERT INTO platform_deprovision_log/.test(sql)) return { rowCount: 1, rows: [] };
+      return { rowCount: 0, rows: [] };
+    };
+    return {
+      query: vi.fn(route),
+      connect: vi.fn(async () => ({ query: vi.fn(route), release: vi.fn() })),
+    };
+  }
+
+  it('captures file keys pre-purge and deletes each object post-commit', async () => {
+    const pool = poolWithFiles([
+      { s3_bucket: 'bkt', s3_key: 't/rec-1.mp3' },
+      { s3_bucket: 'bkt', s3_key: 't/photo-1.jpg' },
+    ]);
+    const deleteObject = vi.fn(async () => undefined);
+    const result = await deprovisionTenant(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      { pool: pool as any, logger, storage: { deleteObject } as any },
+      { tenantId: TENANT, reason: 'manual_admin', actorId: 'admin-1' },
+    );
+    expect(deleteObject).toHaveBeenCalledTimes(2);
+    expect(deleteObject).toHaveBeenCalledWith('bkt', 't/rec-1.mp3');
+    expect(deleteObject).toHaveBeenCalledWith('bkt', 't/photo-1.jpg');
+    expect(result.storageObjectsDeleted).toBe(2);
+    expect(result.storageObjectErrors).toBe(0);
+  });
+
+  it('counts orphaned objects and continues when no storage provider is wired', async () => {
+    const pool = poolWithFiles([{ s3_bucket: 'bkt', s3_key: 't/rec-2.mp3' }]);
+    const result = await deprovisionTenant(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      { pool: pool as any, logger },
+      { tenantId: TENANT, reason: 'manual_admin', actorId: 'admin-1' },
+    );
+    expect(result.alreadyPurged).toBe(false);
+    expect(result.storageObjectsDeleted).toBe(0);
+    expect(result.storageObjectErrors).toBe(1);
+  });
+
+  it('a failed object delete is counted, logged, and non-fatal', async () => {
+    const pool = poolWithFiles([
+      { s3_bucket: 'bkt', s3_key: 'ok.mp3' },
+      { s3_bucket: 'bkt', s3_key: 'boom.mp3' },
+    ]);
+    const deleteObject = vi.fn(async (_b: string, key: string) => {
+      if (key === 'boom.mp3') throw new Error('s3 down');
+    });
+    const result = await deprovisionTenant(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      { pool: pool as any, logger, storage: { deleteObject } as any },
+      { tenantId: TENANT, reason: 'manual_admin', actorId: 'admin-1' },
+    );
+    expect(result.storageObjectsDeleted).toBe(1);
+    expect(result.storageObjectErrors).toBe(1);
+  });
+});

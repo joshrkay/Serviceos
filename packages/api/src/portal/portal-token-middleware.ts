@@ -16,6 +16,8 @@ import {
   ResolvedPortalSession,
   resolvePortalToken,
 } from './portal-service';
+import type { ContactRepository } from '../customers/contact';
+import { PortalEntitlement, entitlementAllows } from './portal-entitlement';
 
 export interface PortalRequest extends Request {
   portal?: ResolvedPortalSession;
@@ -87,6 +89,12 @@ export interface PortalTokenMiddlewareOptions {
   rateLimit?: PortalRateLimitOptions;
   /** Override the clock for tests. Returns ms since epoch. */
   now?: () => number;
+  /**
+   * C2/I14 — required to resolve contact-bound sessions. Without it,
+   * tokens whose session carries a `contactId` fail closed (401); legacy
+   * account-holder sessions are unaffected.
+   */
+  contactRepo?: ContactRepository;
 }
 
 export function createPortalTokenMiddleware(
@@ -128,7 +136,12 @@ export function createPortalTokenMiddleware(
     }
 
     try {
-      const resolved = await resolvePortalToken(token, repo, new Date(now()));
+      const resolved = await resolvePortalToken(
+        token,
+        repo,
+        new Date(now()),
+        options.contactRepo,
+      );
       if (!resolved) {
         res.status(401).json({ error: 'UNAUTHORIZED', message: 'Invalid or expired portal token' });
         return;
@@ -149,4 +162,35 @@ const PORTAL_TOKEN_RE = /^[0-9a-f]{64}$/i;
 
 function isValidTokenShape(token: string): boolean {
   return PORTAL_TOKEN_RE.test(token);
+}
+
+/**
+ * C2/I14 — route guard for the billing surface. Responds 403 and returns
+ * `false` when the resolved session's entitlement does not cover
+ * `required`. Enforcement lives here, at the data-access boundary of the
+ * portal routes, so a service-entitled (site/tenant-role) contact can
+ * never read invoices, balances, agreement pricing, or payment methods
+ * regardless of what the UI shows.
+ */
+export function requirePortalEntitlement(
+  req: PortalRequest,
+  res: Response,
+  required: PortalEntitlement,
+): boolean {
+  const portal = req.portal;
+  if (!portal) {
+    res.status(500).json({
+      error: 'INTERNAL_ERROR',
+      message: 'Portal context missing — middleware misconfigured',
+    });
+    return false;
+  }
+  if (!entitlementAllows(portal.entitlement, required)) {
+    res.status(403).json({
+      error: 'FORBIDDEN',
+      message: 'This portal link does not include access to billing information',
+    });
+    return false;
+  }
+  return true;
 }

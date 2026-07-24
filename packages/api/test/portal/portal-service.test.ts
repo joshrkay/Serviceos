@@ -145,3 +145,138 @@ describe('P10-001 portal-service: revokePortalSession', () => {
     expect(revoked).toBeNull();
   });
 });
+
+// ─── Comms C2 / I14 — contact-bound sessions + read-time entitlement ─────────
+
+import { InMemoryContactRepository } from '../../src/customers/contact';
+import type { CustomerContact, CustomerContactRole } from '../../src/customers/contact';
+import {
+  entitlementAllows,
+  entitlementForRole,
+} from '../../src/portal/portal-entitlement';
+
+function makeContact(overrides: Partial<CustomerContact> = {}): CustomerContact {
+  return {
+    id: uuidv4(),
+    tenantId: TENANT,
+    customerId: CUSTOMER,
+    name: 'Terry Tenant',
+    role: 'site',
+    isPrimary: false,
+    isArchived: false,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+    ...overrides,
+  };
+}
+
+describe('C2 portal-entitlement: role mapping', () => {
+  it.each([
+    ['primary', 'billing'],
+    ['billing', 'billing'],
+    ['site', 'service'],
+    ['other', 'service'],
+  ] as Array<[CustomerContactRole, string]>)(
+    'role %s → %s surface',
+    (role, expected) => {
+      expect(entitlementForRole(role)).toBe(expected);
+    },
+  );
+
+  it('unknown future roles fail safe to the service surface', () => {
+    expect(entitlementForRole('landlord_liaison' as CustomerContactRole)).toBe('service');
+  });
+
+  it('billing subsumes service; service never reads billing', () => {
+    expect(entitlementAllows('billing', 'billing')).toBe(true);
+    expect(entitlementAllows('billing', 'service')).toBe(true);
+    expect(entitlementAllows('service', 'service')).toBe(true);
+    expect(entitlementAllows('service', 'billing')).toBe(false);
+  });
+});
+
+describe('C2 resolvePortalToken: contact-bound sessions', () => {
+  async function mintBound(
+    contactRepo: InMemoryContactRepository,
+    contact: CustomerContact,
+  ) {
+    await contactRepo.create(contact);
+    const repo = new InMemoryPortalSessionRepository();
+    const created = await createPortalSession(
+      TENANT, CUSTOMER, ACTOR, repo, 7, undefined, undefined,
+      { contactId: contact.id },
+    );
+    return { repo, created };
+  }
+
+  it('account-holder session (no contact) keeps the billing surface', async () => {
+    const repo = new InMemoryPortalSessionRepository();
+    const created = await createPortalSession(TENANT, CUSTOMER, ACTOR, repo, 7);
+    const resolved = await resolvePortalToken(created.token, repo);
+    expect(resolved!.entitlement).toBe('billing');
+    expect(resolved!.contactId).toBeUndefined();
+  });
+
+  it('site-role contact resolves to the service surface', async () => {
+    const contacts = new InMemoryContactRepository();
+    const contact = makeContact({ role: 'site' });
+    const { repo, created } = await mintBound(contacts, contact);
+    const resolved = await resolvePortalToken(created.token, repo, new Date(), contacts);
+    expect(resolved).not.toBeNull();
+    expect(resolved!.contactId).toBe(contact.id);
+    expect(resolved!.entitlement).toBe('service');
+  });
+
+  it('billing-role contact resolves to the billing surface', async () => {
+    const contacts = new InMemoryContactRepository();
+    const contact = makeContact({ role: 'billing' });
+    const { repo, created } = await mintBound(contacts, contact);
+    const resolved = await resolvePortalToken(created.token, repo, new Date(), contacts);
+    expect(resolved!.entitlement).toBe('billing');
+  });
+
+  it('entitlement follows the contact CURRENT role, not mint-time state', async () => {
+    const contacts = new InMemoryContactRepository();
+    const contact = makeContact({ role: 'billing' });
+    const { repo, created } = await mintBound(contacts, contact);
+    // Role demoted after the token was minted — the next read must see it.
+    await contacts.update(TENANT, contact.id, { role: 'site' });
+    const resolved = await resolvePortalToken(created.token, repo, new Date(), contacts);
+    expect(resolved!.entitlement).toBe('service');
+  });
+
+  it('fails closed (null) when the bound contact is archived', async () => {
+    const contacts = new InMemoryContactRepository();
+    const contact = makeContact({ role: 'site' });
+    const { repo, created } = await mintBound(contacts, contact);
+    await contacts.update(TENANT, contact.id, { isArchived: true, archivedAt: new Date() });
+    expect(await resolvePortalToken(created.token, repo, new Date(), contacts)).toBeNull();
+  });
+
+  it('fails closed (null) when the bound contact no longer exists', async () => {
+    const contacts = new InMemoryContactRepository();
+    const contact = makeContact();
+    const { repo, created } = await mintBound(new InMemoryContactRepository(), contact);
+    // Resolve against an EMPTY contact repo — the contact is gone.
+    expect(await resolvePortalToken(created.token, repo, new Date(), contacts)).toBeNull();
+  });
+
+  it('fails closed (null) when the contact belongs to a different customer', async () => {
+    const contacts = new InMemoryContactRepository();
+    const contact = makeContact({ customerId: uuidv4() });
+    await contacts.create(contact);
+    const repo = new InMemoryPortalSessionRepository();
+    const created = await createPortalSession(
+      TENANT, CUSTOMER, ACTOR, repo, 7, undefined, undefined,
+      { contactId: contact.id },
+    );
+    expect(await resolvePortalToken(created.token, repo, new Date(), contacts)).toBeNull();
+  });
+
+  it('fails closed (null) when no contactRepo is wired for a contact-bound session', async () => {
+    const contacts = new InMemoryContactRepository();
+    const contact = makeContact();
+    const { repo, created } = await mintBound(contacts, contact);
+    expect(await resolvePortalToken(created.token, repo, new Date())).toBeNull();
+  });
+});
