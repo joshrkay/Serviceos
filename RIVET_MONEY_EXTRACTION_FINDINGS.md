@@ -631,14 +631,14 @@ which holds `amount_cents`) both stub the `pg` Pool with **no integration counte
 There is no ledger, so a **double-entry reconciliation invariant does not exist and cannot be
 swept.** But the answer is not "row-level correctness only" either. The codebase states its own
 balance invariant explicitly, and it is assertable — this is a **derived-balance reconciliation**,
-three layers deep:
+four layers deep:
 
 ```
 L1  line.total_cents        == round(line.quantity × line.unit_price_cents)   ← BROKEN (P0-2)
 L2  invoice.subtotal_cents  == Σ(line.total_cents)
     invoice.tax_cents       == round((taxable_subtotal − discount) × tax_rate_bps / 10000)
     invoice.total_cents     == subtotal − discount + tax + processing_fee
-L3  invoice.amount_paid_cents == Σ(active payments.amount_cents)   ← refund-inclusive, by design
+L3  invoice.amount_paid_cents == Σ(active payments.amount_cents)   ← TWO LIVE DEFINITIONS (P0-7)
     invoice.amount_due_cents  == max(0, total_cents − amount_paid_cents)
 L4  invoice.amount_paid_cents <= invoice.total_cents               ← BROKEN under concurrency
 ```
@@ -656,8 +656,12 @@ iteration is exactly the invariant this architecture lacks and can support witho
 
 So `/goal money` **can** assert:
 
-- **L1/L2/L3 arithmetic reconciliation** across every invoice and estimate. L1 will fail today —
-  that is the P0-2 proof.
+- **L1/L2/L4 arithmetic reconciliation** across every invoice and estimate, today. L1 will fail —
+  that is the P0-2 proof — and L4 will fail on any invoice that hit the P0-6 race.
+- **L3 only once P0-7 is settled.** It is the intended spine, but two live code paths implement
+  different versions of it (refund-net vs refund-inclusive), so sweeping it now would assert a
+  convention the codebase does not uniformly hold. **Picking the convention is a prerequisite,
+  and it is a product decision rather than a fix.**
 - **No payment is credited *after* a void** — and, given P0-1, also *no live payment link survives
   a void*, which is the stronger and more important form. **The invariant must be scoped to
   post-void credits, not to payments-on-void-invoices.** `partially_paid → void` is an allowed
