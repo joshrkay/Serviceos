@@ -1,0 +1,425 @@
+USE /  [query]
+USE /  [expressInit]
+USE /webhooks/stripe  [rawParser]
+USE /webhooks/clerk  [rawParser]
+USE /webhooks/vapi  [rawParser]
+USE /webhooks/twilio  [urlencodedParser]
+USE /webhooks/wisetack  [rawParser]
+USE /webhooks/sendgrid  [rawParser]
+USE /  [jsonParser]
+USE /  [serveStatic]
+USE /api-docs  [swaggerInitFn]
+USE /api-docs  [serveStatic]
+USE /api-docs  [<anonymous>]
+USE /  [helmetMiddleware]
+USE /  [corsMiddleware]
+USE /api  [<anonymous>]
+USE /webhooks/stripe , /webhooks/clerk , /webhooks/vapi , /webhooks/twilio , /webhooks/wisetack , /webhooks/sendgrid  [<anonymous>]
+USE /webhooks  [<anonymous>]
+USE /public  [<anonymous>]
+USE /  [<anonymous>]
+GET /health
+GET /ready
+USE /api/health  [<anonymous>]
+GET /metrics
+POST /webhooks/clerk
+POST /webhooks/stripe
+POST /webhooks/twilio/voice/:tenantId
+POST /webhooks/twilio/sms/:tenantId
+POST /webhooks/twilio/status/:tenantId
+POST /webhooks/vapi/:tenantId
+POST /webhooks/sendgrid/:tenantId
+PUT /storage-dev/*
+GET /storage-dev/*
+GET /public/feedback/:token
+POST /public/feedback/:token
+USE /public/intake  [<anonymous>]
+POST /public/intake/:tenantId/leads
+GET /public/intake/:tenantId
+GET /public/estimates/:token
+POST /public/estimates/:token/view
+POST /public/estimates/:token/approve
+POST /public/estimates/:token/deposit-checkout
+POST /public/estimates/:token/decline
+GET /public/proposals/one-tap-approve
+POST /public/proposals/one-tap-approve
+GET /public/proposals/one-tap-undo
+POST /public/proposals/one-tap-undo
+GET /public/invoices/:token
+POST /public/invoices/:token/view
+POST /public/invoices/:token/checkout
+  USE /api/public/portal/:token  [<anonymous>]
+  USE /api/public/portal/:token  [ensureActiveCustomer]
+GET /api/public/portal/:token/customer
+GET /api/public/portal/:token/estimates
+GET /api/public/portal/:token/invoices
+GET /api/public/portal/:token/jobs
+GET /api/public/portal/:token/agreements
+GET /api/public/portal/:token/appointments
+POST /api/public/portal/:token/request-service
+GET /api/public/portal/:token/availability
+POST /api/public/portal/:token/book
+POST /api/public/portal/:token/appointments/:id/cancel
+POST /api/public/portal/:token/appointments/:id/reschedule
+POST /api/public/portal/:token/payment-methods/setup
+GET /api/public/portal/:token/payment-methods
+USE /api/public/booking  [<anonymous>]
+GET /api/public/booking/:tenantId/availability
+POST /api/public/booking/:tenantId
+POST /api/public-payments/create-payment-intent
+GET /api/public-payments/status/:invoiceId
+GET /api/calendar-integrations/google/callback
+GET /api/integrations/quickbooks/callback
+GET /api/telephony/health
+    USE /api/telephony  [urlencodedParser]
+    USE /api/telephony  [<anonymous>]
+POST /api/telephony/voicemail-status
+    USE /api/telephony  [urlencodedParser]
+    USE /api/telephony  [<anonymous>]
+POST /api/telephony/recording
+  USE /api/telephony  [urlencodedParser]
+  USE /api/telephony  [<anonymous>]
+POST /api/telephony/voice
+POST /api/telephony/voice/gather-fallback
+POST /api/telephony/gather
+POST /api/telephony/dial-result
+POST /api/telephony/callback-message
+USE /api/telephony  [<anonymous>]
+GET /api/telephony/whisper/:escalationId
+POST /api/calls/bridge
+USE /api  [<anonymous>]
+USE /api  [requireAuth]
+USE /api  [resolveAuthorization]
+USE /api  [<anonymous>]
+USE /api  [<anonymous>]
+POST /api/customers
+GET /api/customers
+GET /api/customers/:id
+PUT /api/customers/:id
+POST /api/customers/:id/archive
+POST /api/customers/:id/merge
+GET /api/customers/:id/timeline
+GET /api/customers/:id/contacts
+POST /api/customers/:id/contacts
+PUT /api/customers/:id/contacts/:contactId
+POST /api/customers/:id/contacts/:contactId/archive
+GET /api/customers/:id/tags
+POST /api/customers/:id/tags
+DELETE /api/customers/:id/tags/:tag
+GET /api/customers/:id/custom-fields
+PUT /api/customers/:id/custom-fields/:fieldDefId
+GET /api/customer-custom-fields
+POST /api/customer-custom-fields
+POST /api/customer-custom-fields/:fieldDefId/archive
+GET /api/job-forms/templates
+GET /api/job-forms/templates/:id
+POST /api/job-forms/templates
+PATCH /api/job-forms/templates/:id
+POST /api/job-forms/templates/:id/archive
+GET /api/job-forms/jobs/:jobId/submissions
+POST /api/job-forms/jobs/:jobId/submissions
+GET /api/job-forms/submissions/:id
+PATCH /api/job-forms/submissions/:id
+GET /api/job-custom-fields/defs
+POST /api/job-custom-fields/defs
+POST /api/job-custom-fields/defs/:fieldDefId/archive
+GET /api/job-custom-fields/jobs/:jobId
+PUT /api/job-custom-fields/jobs/:jobId/values/:fieldDefId
+GET /api/customer-groups
+POST /api/customer-groups
+PATCH /api/customer-groups/:id
+POST /api/customer-groups/:id/archive
+GET /api/customer-groups/for-customer/:customerId
+GET /api/customer-groups/:id/members
+PUT /api/customer-groups/:id/members/:customerId
+DELETE /api/customer-groups/:id/members/:customerId
+GET /api/standing-instructions
+POST /api/standing-instructions
+PATCH /api/standing-instructions/:id/deactivate
+GET /api/marketing/campaigns
+POST /api/marketing/campaigns
+POST /api/marketing/campaigns/:id/send
+POST /api/financing/invoices/:invoiceId/offer
+GET /api/financing/invoices/:invoiceId
+GET /api/financing/:id
+POST /webhooks/wisetack
+GET /api/recurring-jobs
+POST /api/recurring-jobs
+GET /api/recurring-jobs/:id
+GET /api/recurring-jobs/:id/occurrences
+PATCH /api/recurring-jobs/:id
+POST /api/recurring-jobs/:id/archive
+POST /api/recurring-jobs/:id/generate
+POST /api/time-entries/clock-in
+POST /api/time-entries/clock-out
+GET /api/time-entries/active
+GET /api/time-entries
+  USE /api/portal-sessions  [requireAuth]
+  USE /api/portal-sessions  [requireTenant]
+POST /api/portal-sessions
+DELETE /api/portal-sessions/:id
+POST /api/leads
+GET /api/leads
+GET /api/leads/:id
+PATCH /api/leads/:id
+POST /api/leads/:id/convert
+POST /api/leads/:id/lose
+POST /api/locations
+GET /api/locations
+GET /api/locations/:id
+PUT /api/locations/:id
+POST /api/locations/:id/archive
+POST /api/locations/:id/set-primary
+POST /api/jobs
+POST /api/jobs/from-estimate/:estimateId
+POST /api/jobs/:id/schedule
+POST /api/jobs/:id/reassign
+POST /api/jobs/:id/unschedule
+GET /api/jobs
+GET /api/jobs/:id
+PUT /api/jobs/:id
+POST /api/jobs/:id/transition
+POST /api/jobs/:id/files/upload-url
+POST /api/jobs/:id/files/upload
+GET /api/jobs/:id/files
+DELETE /api/jobs/:id/files/:fileId
+POST /api/jobs/:id/photos/presign-upload
+POST /api/jobs/:id/photos
+GET /api/jobs/:id/photos
+DELETE /api/jobs/:id/photos/:photoId
+POST /api/attachments/presign
+POST /api/attachments
+GET /api/attachments
+POST /api/attachments/:id/archive
+POST /api/attachments/:id/visibility
+POST /api/attachments/:id/pair
+POST /api/appointments
+GET /api/appointments
+GET /api/appointments/:id
+PUT /api/appointments/:id
+POST /api/appointments/:id/running-late
+POST /api/appointments/:id/delay-ack
+GET /api/dispatch/board
+GET /api/dispatch/board/events
+PUT /api/dispatch/presence
+DELETE /api/dispatch/presence
+GET /api/dispatch/technician/:id/appointments
+POST /api/dispatch/appointments/:id/en-route
+POST /api/dispatch/delay-prompt-audits
+POST /api/dispatch/delay-escalations
+POST /api/estimates
+GET /api/estimates
+GET /api/estimates/:id
+GET /api/estimates/:id/history
+PUT /api/estimates/:id
+PATCH /api/estimates/:id
+POST /api/estimates/:id/revise
+DELETE /api/estimates/:id
+POST /api/estimates/:id/clone
+POST /api/estimates/:id/save-as-template
+POST /api/estimates/:id/convert-to-invoice
+POST /api/estimates/:id/transition
+POST /api/estimates/suggest
+POST /api/estimates/:id/send
+POST /api/invoices
+GET /api/invoices
+GET /api/invoices/:id
+PUT /api/invoices/:id
+PATCH /api/invoices/:id
+POST /api/invoices/:id/payment-link
+POST /api/invoices/:id/issue
+POST /api/invoices/:id/payment
+POST /api/invoices/:id/transition
+POST /api/invoices/:id/send
+GET /api/users
+PATCH /api/users/:id
+GET /api/users/:id/phone
+PUT /api/users/:id/phone
+DELETE /api/users/me
+GET /api/users/invitations
+POST /api/users/invitations
+GET /api/calendar-integrations
+POST /api/calendar-integrations/google/connect
+DELETE /api/calendar-integrations/google
+POST /api/calendar-integrations/google/test-push
+GET /api/integrations
+POST /api/integrations/quickbooks/connect
+POST /api/integrations/quickbooks/disconnect
+GET /api/integrations/quickbooks/status
+POST /api/integrations/quickbooks/sync
+GET /api/billing/subscription
+POST /api/billing/portal-session
+GET /api/billing/connect
+POST /api/billing/connect/onboarding
+DELETE /api/billing/connect
+POST /api/billing/end-trial-now
+GET /api/reports/revenue-by-source
+GET /api/reports/money-dashboard
+GET /api/reports/tax-export
+GET /api/reports/hfcr
+GET /api/reports/time-given-back
+GET /api/reports/job-profit/:jobId
+GET /api/reports/customer-profit/:customerId
+GET /api/reports/technician-profit/:technicianId
+GET /api/analytics/voice-roi
+GET /api/analytics/jobs-booked
+GET /api/analytics/activity
+GET /api/digests/:date
+POST /api/payments
+GET /api/payments
+POST /api/terminal/connection-token
+POST /api/terminal/payment-intents
+POST /api/notes
+GET /api/notes
+PUT /api/notes/:id
+DELETE /api/notes/:id
+GET /api/me
+POST /api/me/mode
+POST /api/devices
+DELETE /api/devices
+GET /api/notification-preferences
+PUT /api/notification-preferences
+GET /api/feedback/responses
+POST /api/conversations/customer/:customerId
+POST /api/conversations
+GET /api/conversations
+GET /api/conversations/search
+GET /api/conversations/:id
+POST /api/conversations/:id/messages
+GET /api/conversations/:id/messages
+POST /api/conversations/:id/suggest-reply
+POST /api/conversations/:id/reply
+GET /api/dnc
+POST /api/dnc
+DELETE /api/dnc/:phone
+POST /api/calls
+GET /api/settings
+GET /api/settings/language
+PATCH /api/settings/language
+PUT /api/settings
+PUT /api/settings/voice-approval-pin
+DELETE /api/settings/voice-approval-pin
+GET /api/settings/brand-voice
+GET /api/settings/brand-voice/versions
+PUT /api/settings/brand-voice
+POST /api/settings/brand-voice/rollback
+GET /api/settings/packs
+PUT /api/settings/packs/:packId/activate
+DELETE /api/settings/packs/:packId
+GET /api/verticals
+GET /api/verticals/:type
+GET /api/verticals/:type/categories
+GET /api/verticals/:type/terminology/:term
+  USE /api/vertical-training-assets  [requireAuth]
+  USE /api/vertical-training-assets  [requireTenant]
+GET /api/vertical-training-assets
+POST /api/vertical-training-assets
+POST /api/vertical-training-assets/:id/approve
+POST /api/vertical-training-assets/:id/activate
+POST /api/vertical-training-assets/:id/archive
+GET /api/templates
+GET /api/templates/:id
+POST /api/templates
+POST /api/templates/:id/instantiate
+PUT /api/templates/:id
+GET /api/message-templates
+GET /api/message-templates/:id
+POST /api/message-templates
+PUT /api/message-templates/:id
+DELETE /api/message-templates/:id
+POST /api/message-templates/:id/render
+GET /api/bundles
+GET /api/bundles/:id
+POST /api/bundles
+POST /api/bundles/match
+PUT /api/bundles/:id
+GET /api/quality/metrics
+GET /api/quality/beta-readiness
+GET /api/quality/metrics/:metricName
+GET /api/quality/vertical/:verticalType/metrics
+GET /api/quality/vertical/:verticalType/benchmark
+GET /api/evaluation/shadow-comparisons
+POST /api/voice/stream-token
+POST /api/voice/transcribe
+POST /api/voice/recordings
+GET /api/voice/recordings/:id
+GET /api/voice/recordings/:id/audio
+POST /api/voice/go-live
+POST /api/voice/pause
+POST /api/voice/recordings/:id/retry
+GET /api/onboarding/status
+PUT /api/onboarding/identity
+POST /api/onboarding/pack
+POST /api/onboarding/test-call/skip
+GET /api/onboarding/operator-hours
+PUT /api/onboarding/operator-hours
+POST /api/onboarding/phone/retry
+POST /api/onboarding/phone/available
+POST /api/onboarding/phone/claim
+POST /api/onboarding/ai-check/retry
+POST /api/onboarding/billing/checkout-session
+POST /api/onboarding/billing/cancel
+GET /api/onboarding/voice/presets
+PUT /api/onboarding/voice
+POST /api/onboarding/calendar/choose
+POST /api/onboarding/conversation/turn
+POST /api/technician-location
+GET /api/catalog/items
+POST /api/catalog/items
+PUT /api/catalog/items/:id
+DELETE /api/catalog/items/:id
+POST /api/files/upload-url
+POST /api/files/upload
+GET /api/files/:id
+POST /api/files/:id/verify
+POST /api/assistant/chat
+GET /api/dispatch/availability
+POST /api/dispatch/check-feasibility
+POST /api/proposals
+GET /api/proposals
+GET /api/proposals/inbox
+GET /api/proposals/:id
+POST /api/proposals/approve-batch
+POST /api/proposals/:id/approve
+POST /api/proposals/:id/resolve-line
+POST /api/proposals/:id/resolve-entity
+POST /api/proposals/:id/reject
+POST /api/proposals/:id/undo
+POST /api/proposals/:id/re-propose
+PUT /api/proposals/:id
+PATCH /api/entity-aliases/:id/deactivate
+GET /api/interactions
+GET /api/interactions/dispatches
+GET /api/interactions/:id
+POST /api/agreements
+GET /api/agreements
+GET /api/agreements/:id
+PATCH /api/agreements/:id
+POST /api/agreements/:id/pause
+POST /api/agreements/:id/resume
+POST /api/agreements/:id/cancel
+POST /api/agreements/:id/run-now
+GET /api/maintenance-contracts
+GET /api/maintenance-contracts/:id
+POST /api/maintenance-contracts
+GET /api/voice/sessions/active
+POST /api/voice/sessions
+POST /api/voice/sessions/:id/input
+GET /api/voice/sessions/:id/events
+DELETE /api/voice/sessions/:id
+POST /api/escalations/:escalationId/outcome
+GET /api/escalations/events
+GET /api/admin/feature-flags
+GET /api/admin/feature-flags/:name
+PUT /api/admin/feature-flags/:name
+DELETE /api/admin/feature-flags/:name
+POST /api/admin/tenants/:tenantId/deprovision
+USE /  [<anonymous>]
+USE /  [<anonymous>]
+GET /features
+GET /pricing
+GET /about
+GET /download
+GET /privacy
+GET /terms
+GET *
