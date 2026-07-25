@@ -13,8 +13,8 @@ This complements, and does not replace, the automated layers:
 - Automated route/business-flow coverage: [`e2e/qa-matrix`](../../e2e/qa-matrix) (matrix row IDs referenced below as `[MATRIX-ID]` — these are verified against `e2e/qa-matrix/matrix.ts` and, unless explicitly marked "proposed", resolve to a real row there; if you add a new matrix row or rename one, grep this file for its old ID and update it in the same change)
 - Platform-level workflow catalog + P0/P1 launch scoping: [`docs/superpowers/specs/2026-05-24-platform-assessment-and-e2e-qa-50-workflows.md`](../../docs/superpowers/specs/2026-05-24-platform-assessment-and-e2e-qa-50-workflows.md) (referenced below as `(WF-##)`)
 
-**Total workflows in this checklist: 107** (13 inbound-call, 4 voice/in-app,
-90 manual-click, several overlapping both), spanning 22 feature areas.
+**Total workflows in this checklist: 108** (13 inbound-call, 4 voice/in-app,
+91 manual-click, several overlapping both), spanning 22 feature areas.
 Sections 1–20 run once per tenant against **at least two tenants**;
 Section 21 runs once, comparing the two.
 
@@ -23,27 +23,36 @@ Section 21 runs once, comparing the two.
 1. **Use at least two tenants, not one.** A single-tenant pass cannot
    catch cross-tenant leaks, and every bug in `docs/qa-strategy.md`'s
    BUG-1..BUG-8 history that involved tenant scoping was invisible from
-   inside a single tenant. Set up **Tenant A** and **Tenant B** —
-   `e2e/qa-matrix/fixtures/seed.ts` has a ready-made pair, or run the
-   onboarding sections (§2) twice to create your own. Each has its own
-   Twilio number, price book, users, and customers.
-2. Run Sections 1–20 **once per tenant** (Tenant A fully, then Tenant B
-   fully — or interleave if that's faster). Section 21 (isolation) is
-   run **once, using both tenants together** — it specifically checks
-   that Tenant A and Tenant B cannot see or affect each other.
-3. For onboarding (§2), use a **third, fresh tenant** so you're not
-   re-onboarding an already-live Tenant A/B.
-4. Work top to bottom within a tenant pass, or cherry-pick a section
+   inside a single tenant. Create **Tenant A** and **Tenant B** by
+   actually running Sections 1–2 (sign up + onboarding) twice, once per
+   tenant. That's the only way to get a real Clerk browser session and
+   a real provisioned Twilio number for each tenant — both of which you
+   need for the rest of the checklist. Running onboarding this way also
+   *is* how you check off Section 2 for each tenant, so there's no
+   separate third tenant needed.
+   - `e2e/qa-matrix/fixtures/seed.ts` + `tokens.ts` are **not** a
+     substitute here — they insert tenant/customer/job rows directly in
+     Postgres and mint API-only HMAC JWTs for the automated
+     `e2e/qa-matrix` suite. They create no Clerk user, no browser
+     session, no Twilio number, and no price book/settings, so a tester
+     cannot sign in or run the phone/settings/isolation portions of this
+     checklist against them.
+2. Run Sections 1–20 **once per tenant** (Tenant A fully — including its
+   own onboarding pass — then Tenant B fully, or interleave if that's
+   faster). Section 21 (isolation) is run **once, using both tenants
+   together** — it specifically checks that Tenant A and Tenant B cannot
+   see or affect each other.
+3. Work top to bottom within a tenant pass, or cherry-pick a section
    after a change lands in that area.
-5. Check the box, and record Pass/Fail/Blocked with a one-line note in
+4. Check the box, and record Pass/Fail/Blocked with a one-line note in
    the **Run log** table at the bottom (copy the table per run date) —
    note which tenant each row was run against.
-6. Anything that fails gets a story file in `qa/backlog/BUG-NN-<slug>.md`
+5. Anything that fails gets a story file in `qa/backlog/BUG-NN-<slug>.md`
    the same day it's found (template: any existing file in that folder),
    even if the fix lands later. If a bug only reproduces on one of the
    two tenants, say so — that's a signal of a scoping bug, not
    flakiness.
-7. "Fixed" is a claim that needs a screenshot (🖱️ items) or a call
+6. "Fixed" is a claim that needs a screenshot (🖱️ items) or a call
    recording/transcript (☎️/🎙️ items) attached to the backlog file — not a
    green commit message.
 
@@ -96,7 +105,7 @@ Section 21 runs once, comparing the two.
 
 ## 5. Jobs
 
-- [ ] **QA-023** 🖱️ P0 — Create a job from a customer record. **Expect:** job appears on `/jobs` and on the customer timeline. (WF-17, `[SCH-01]`)
+- [ ] **QA-023** 🖱️ P0 — Create a job from a customer record. **Expect:** job appears on `/jobs` and on the customer timeline. (WF-17, `[JOB-01]`)
 - [ ] **QA-024** 🖱️ P0 — Walk a job through its full lifecycle: scheduled → in progress → complete. **Expect:** each transition is audit-logged; UI reflects status immediately. (WF-18)
 - [ ] **QA-025** 🖱️ P1 — Upload job photos (`/jobs/:id/photos`). **Expect:** photos upload, thumbnail renders, attached to the correct job.
 - [ ] **QA-026** 🖱️ P2 — Fill a custom job form and add a custom field. **Expect:** values save and re-render on reopen.
@@ -138,7 +147,7 @@ Section 21 runs once, comparing the two.
 - [ ] **QA-047** 🖱️ P0 — As the customer, pay the invoice on `/pay/:id` with a Stripe test card. **Expect:** `checkout.session.completed` webhook flips invoice to paid. (WF-33, `[PORT-02]`)
 - [ ] **QA-048** 🖱️ P1 — Make a partial payment, then pay the remainder. **Expect:** `partially_paid` → `paid` transitions correctly; overpayment is rejected. (WF-34, `[PAY-01]`)
 - [ ] **QA-049** 🖱️ P1 — Let an invoice go overdue (or seed one). **Expect:** overdue-invoice worker flags it; owner sees it on the money dashboard. (`[PAY-04]`)
-- [ ] **QA-050** 🖱️ P2 — Set up a recurring/scheduled invoice. **Expect:** future invoice generates on schedule (or on manual trigger in QA).
+- [ ] **QA-050** 🖱️ P2 — Set up a progress/milestone billing plan on a job (a `create_invoice_schedule` proposal — e.g. percent-on-accept, percent-on-completion, remainder-on-manual — approved from the inbox). **Expect:** the schedule persists with its milestones; each milestone's invoice drafts/fires on its configured trigger (`on_accept`, `on_completion`, or `manual`) — note there is no date/recurrence-based trigger today, only these three.
 - [ ] **QA-051** 🖱️ P2 — Run a batch invoice job across multiple jobs/customers. **Expect:** one invoice per eligible job, no duplicates, no cross-tenant leakage.
 - [ ] **QA-052** 🖱️ P1 — Export a tax/revenue report for a date range. **Expect:** totals reconcile against the money dashboard for the same range.
 
@@ -201,26 +210,27 @@ surface in the product; treat it as launch-gating (P0) per `docs/qa-strategy.md`
 
 ## 18. Public & customer self-service
 
-- [ ] **QA-085** 🖱️ P0 — Fill and submit the public booking page (`/book`). **Expect:** produces a lead/job proposal visible to the operator. (WF-48)
-- [ ] **QA-086** 🖱️ P0 — Open the customer portal with a valid token (`/portal/:token`). **Expect:** jobs/estimates/invoices tabs load, scoped strictly to that token's data. (WF-47 — the multi-tab `PortalShell` has no dedicated matrix row today; the closest existing coverage is the single-document token flows `[PORT-01]` estimate / `[PORT-02]` invoice)
-- [ ] **QA-087** 🖱️ P1 — Open the portal with an expired/garbage token. **Expect:** clean error, no data leak, no 500.
-- [ ] **QA-088** 🖱️ P1 — Submit the post-job feedback form (`/feedback/:token`). **Expect:** rating persists; Settings → Feedback dashboard chart updates. (WF-49)
-- [ ] **QA-089** 🖱️ P1 — Resubmit the same feedback token twice. **Expect:** second submission is rejected or treated as an edit — not double-counted.
+- [ ] **QA-085** 🖱️ P1 — Fill and submit the public booking page (`/book`, no token/login required). **Expect:** produces a held appointment + owner proposal, visible in the inbox. (Not in the WF-01–50 catalog — a newer public surface distinct from the token-gated portal booking below)
+- [ ] **QA-086** 🖱️ P1 — From inside the customer portal (`/portal/:token`), use the **Request service** tab (`PortalRequestService`) to submit a new request. **Expect:** request recorded and the operator is notified — this is the actual WF-48 flow (do not conflate with QA-085's public `/book`, which is a different, unauthenticated surface). (WF-48)
+- [ ] **QA-087** 🖱️ P0 — Open the customer portal with a valid token (`/portal/:token`). **Expect:** jobs/estimates/invoices tabs load, scoped strictly to that token's data. (WF-47 — the multi-tab `PortalShell` has no dedicated matrix row today; the closest existing coverage is the single-document token flows `[PORT-01]` estimate / `[PORT-02]` invoice)
+- [ ] **QA-088** 🖱️ P1 — Open the portal with an expired/garbage token. **Expect:** clean error, no data leak, no 500.
+- [ ] **QA-089** 🖱️ P1 — Submit the post-job feedback form (`/feedback/:token`). **Expect:** rating persists; Settings → Feedback dashboard chart updates. (WF-49)
+- [ ] **QA-090** 🖱️ P1 — Resubmit the same feedback token twice. **Expect:** second submission is rejected or treated as an edit — not double-counted.
 
 ## 19. Settings
 
-- [ ] **QA-090** 🖱️ P1 — Update company profile (name, branding, contact info). **Expect:** changes reflect immediately in customer-facing surfaces (estimate/invoice pages, portal).
-- [ ] **QA-091** 🖱️ P1 — Invite a team member and set their role. **Expect:** invite delivers; role gates the right UI/API access after they accept.
-- [ ] **QA-092** 🖱️ P0 — Connect/verify Stripe from Settings. **Expect:** Stripe Connect account status shows correctly; payments route to the right connected account.
-- [ ] **QA-093** 🖱️ P1 — Edit an SMS/email template. **Expect:** the edited copy is what customers actually receive on the next send.
-- [ ] **QA-094** 🖱️ P1 — Add/edit a price-book item and use it in a new estimate. **Expect:** the new price shows up as a selectable catalog line, and AI-drafted lines resolve against it.
-- [ ] **QA-095** 🖱️ P2 — Change language setting (`/settings/language`). **Expect:** UI (and voice persona, if wired) reflects the new language.
+- [ ] **QA-091** 🖱️ P1 — Update company profile (name, branding, contact info). **Expect:** changes reflect immediately in customer-facing surfaces (estimate/invoice pages, portal).
+- [ ] **QA-092** 🖱️ P1 — Invite a team member and set their role. **Expect:** invite delivers; role gates the right UI/API access after they accept.
+- [ ] **QA-093** 🖱️ P0 — Connect/verify Stripe from Settings. **Expect:** Stripe Connect account status shows correctly; payments route to the right connected account.
+- [ ] **QA-094** 🖱️ P1 — Edit an SMS/email template. **Expect:** the edited copy is what customers actually receive on the next send.
+- [ ] **QA-095** 🖱️ P1 — Add/edit a price-book item and use it in a new estimate. **Expect:** the new price shows up as a selectable catalog line, and AI-drafted lines resolve against it.
+- [ ] **QA-096** 🖱️ P2 — Change language setting (`/settings/language`). **Expect:** UI (and voice persona, if wired) reflects the new language.
 
 ## 20. Integrations — Google Calendar
 
-- [ ] **QA-096** 🖱️ P1 — Connect Google Calendar from Settings. **Expect:** OAuth completes, integration status shows connected. (WF-50)
-- [ ] **QA-097** 🖱️ P1 — Create/assign an appointment and confirm it pushes to Google Calendar. **Expect:** `appointment_calendar_events.status = 'synced'` with a real external event id; event visible in the actual Google Calendar. (proposed matrix row `CAL-01` — not yet added to `matrix.ts`; see the WF-50 appendix in the platform-assessment spec)
-- [ ] **QA-098** 🖱️ P2 — Disconnect Google Calendar. **Expect:** integration clears; no further pushes attempted; existing synced events aren't force-deleted from the customer's calendar.
+- [ ] **QA-097** 🖱️ P1 — Connect Google Calendar from Settings. **Expect:** OAuth completes, integration status shows connected. (WF-50)
+- [ ] **QA-098** 🖱️ P1 — Create/assign an appointment and confirm it pushes to Google Calendar. **Expect:** `appointment_calendar_events.status = 'synced'` with a real external event id; event visible in the actual Google Calendar. (proposed matrix row `CAL-01` — not yet added to `matrix.ts`; see the WF-50 appendix in the platform-assessment spec)
+- [ ] **QA-099** 🖱️ P2 — Disconnect Google Calendar. **Expect:** integration clears; no further pushes attempted; existing synced events aren't force-deleted from the customer's calendar.
 
 ## 21. Multi-tenant isolation & security
 
@@ -228,18 +238,18 @@ This section requires **both** tenants set up side by side (see "How to
 use this" above) and is the one section that is run once, comparing the
 two, rather than once per tenant.
 
-- [ ] **QA-099** 🖱️ P0 — Hit `/metrics` and other operational endpoints without an auth token. **Expect:** requires the configured secret, not open by default.
-- [ ] **QA-100** 🖱️ P0 — Hammer an authenticated endpoint past the configured rate limit. **Expect:** 429s kick in rather than the request silently succeeding forever.
-- [ ] **QA-101** 🖱️ P0 — As Tenant B, attempt to approve/reject a Tenant A proposal by guessing/incrementing its ID. **Expect:** rejected — proposal execution respects tenant scoping, not just list views.
-- [ ] **QA-102** 🖱️ P0 — As Tenant B, directly hit Tenant A's customer/job/estimate/invoice detail URLs by ID (repeat QA-005 with fresh IDs from §3–10 of your Tenant A pass). **Expect:** 403/404 on every entity type you touched, not just the ones already covered in §1.
-- [ ] **QA-103** 🖱️ P0 — Compare Tenant A's and Tenant B's price books, templates, and settings side by side. **Expect:** each tenant's catalog/templates are fully independent — editing one never mutates the other (regression risk from any shared-cache or shared-fixture bug).
-- [ ] **QA-104** ☎️ P0 — Call Tenant A's Twilio number and Tenant B's Twilio number back to back. **Expect:** each call is answered with that tenant's own greeting/persona and only surfaces that tenant's data (e.g. asking "what's my balance" on Tenant B's line never returns a Tenant A customer's numbers) — confirms `identify-caller` and the voice skills are scoped per-tenant, not per-phone-number-format.
-- [ ] **QA-105** 🖱️ P1 — Create an estimate/invoice on both tenants around the same time. **Expect:** numbering sequences (invoice #, estimate #) are independent per tenant — no shared counter, no collision.
-- [ ] **QA-106** 🖱️ P1 — Compare Tenant A's and Tenant B's Stripe Connect status and a payment made on each. **Expect:** each tenant's payments settle to its own connected Stripe account — a Tenant A customer's payment never appears on Tenant B's money dashboard.
+- [ ] **QA-100** 🖱️ P0 — Hit `/metrics` and other operational endpoints without an auth token. **Expect:** requires the configured secret, not open by default.
+- [ ] **QA-101** 🖱️ P0 — Hammer an authenticated endpoint past the configured rate limit. **Expect:** 429s kick in rather than the request silently succeeding forever.
+- [ ] **QA-102** 🖱️ P0 — As Tenant B, attempt to approve/reject a Tenant A proposal by guessing/incrementing its ID. **Expect:** rejected — proposal execution respects tenant scoping, not just list views.
+- [ ] **QA-103** 🖱️ P0 — As Tenant B, directly hit Tenant A's customer/job/estimate/invoice detail URLs by ID (repeat QA-005 with fresh IDs from §3–10 of your Tenant A pass). **Expect:** 403/404 on every entity type you touched, not just the ones already covered in §1.
+- [ ] **QA-104** 🖱️ P0 — Compare Tenant A's and Tenant B's price books, templates, and settings side by side. **Expect:** each tenant's catalog/templates are fully independent — editing one never mutates the other (regression risk from any shared-cache or shared-fixture bug).
+- [ ] **QA-105** ☎️ P0 — Call Tenant A's Twilio number and Tenant B's Twilio number back to back. **Expect:** each call is answered with that tenant's own greeting/persona and only surfaces that tenant's data (e.g. asking "what's my balance" on Tenant B's line never returns a Tenant A customer's numbers) — confirms `identify-caller` and the voice skills are scoped per-tenant, not per-phone-number-format.
+- [ ] **QA-106** 🖱️ P1 — Create an estimate/invoice on both tenants around the same time. **Expect:** numbering sequences (invoice #, estimate #) are independent per tenant — no shared counter, no collision.
+- [ ] **QA-107** 🖱️ P1 — Compare Tenant A's and Tenant B's Stripe Connect status and a payment made on each. **Expect:** each tenant's payments settle to its own connected Stripe account — a Tenant A customer's payment never appears on Tenant B's money dashboard.
 
 ## 22. Misc / internal
 
-- [ ] **QA-107** 🖱️ P2 — Open `/design` (internal design-system showcase). **Expect:** loads without error; not linked from customer-facing nav.
+- [ ] **QA-108** 🖱️ P2 — Open `/design` (internal design-system showcase). **Expect:** loads without error; not linked from customer-facing nav.
 
 ---
 
