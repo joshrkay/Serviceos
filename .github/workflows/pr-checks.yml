@@ -33,6 +33,41 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      # ESLint is REPORT-ONLY. This repo had no ESLint at all until
+      # eslint.config.mjs landed, so the first run reports thousands of
+      # findings — making it blocking today would wedge every PR. The report
+      # artifact is the input for deciding which rules can become blocking.
+      # See docs/quality/engineering-baseline-2026-07-25.md.
+      # Do NOT remove continue-on-error without first driving the relevant
+      # rule's count to zero.
+      - name: ESLint (report only)
+        id: eslint
+        continue-on-error: true
+        run: npm run lint:eslint:report
+
+      - name: Upload ESLint report
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: eslint-report
+          path: eslint-report.json
+          if-no-files-found: warn
+
+      # Records the measured quality baseline so later work diffs against an
+      # artifact instead of recollection. Cheap: reads files and the ESLint
+      # report above, never re-runs the linter.
+      - name: Collect quality metrics
+        if: always()
+        run: npm run quality:metrics -- --out quality-metrics.json
+
+      - name: Upload quality metrics
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: quality-metrics
+          path: quality-metrics.json
+          if-no-files-found: warn
+
       # infra/ (AWS CDK, D-001) was quarantined to experiments/infra (B9)
       # as not deployed/not in CI, then removed entirely in 2026-07 along
       # with the rest of experiments/. See docs/decisions.md D-016.
