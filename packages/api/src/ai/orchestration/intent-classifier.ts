@@ -1281,6 +1281,8 @@ const EXTENDED_INTENT_PHRASES: ReadonlyArray<{ intent: IntentType; patterns: Rea
       /\bwhat(?:'s| is| does)\s+my\s+day\s+look(?:ing)?\s+like\b/i,
       /\b(?:give me |what's )?my morning overview\b/i,
       /\bhow(?:'s| is)\s+my\s+day\s+looking\b/i,
+      /^\s*(?:what|which|show me|list)\s+(?:appointments?|jobs?)\s+(?:are\s+)?scheduled\s+(?:for\s+)?today\s*[?.!]?\s*$/i,
+      /^\s*(?:show me|what(?:'s| is))\s+today(?:'s)?\s+schedule\s*[?.!]?\s*$/i,
     ],
   },
   {
