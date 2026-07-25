@@ -1202,6 +1202,11 @@ export class TwilioGatherAdapter {
       persona,
       language,
     );
+    // Latch it on the session: the greeting carrying the disclosure is now
+    // committed to this call's TwiML / TTS side effects. Anything that later
+    // resumes capture on this leg (the realtime→Gather degrade) reads this
+    // instead of assuming establishment ran.
+    session.recordingDisclosed = true;
     const expanded = sideEffects.map((fx) =>
       fx.type === 'tts_play' && fx.payload.text === 'greeting'
         ? { ...fx, payload: { ...fx.payload, text: greetingText } }
@@ -1504,9 +1509,17 @@ export class TwilioGatherAdapter {
     keyword: string,
   ): Promise<void> {
     const callSid = session.callSid;
+    // Revoke capture on the session FIRST and unconditionally. This is what
+    // stops the realtime transport, where the capture is the STT socket and
+    // no REST pause call reaches it; it costs nothing on the Gather transport.
+    // Doing it before the awaits means a slow or failing provider call cannot
+    // leave frames flowing in the meantime.
+    session.captureRevoked = true;
+    let recordingPaused = false;
     if (this.deps.recordingControl && callSid) {
       try {
         await this.deps.recordingControl.pauseRecording(callSid);
+        recordingPaused = true;
       } catch (err) {
         logger.error('recording objection: pauseRecording failed', {
           tenantId,
@@ -1557,7 +1570,11 @@ export class TwilioGatherAdapter {
             entityType: 'voice_session',
             entityId: session.id,
             correlationId: session.id,
-            metadata: { keyword, paused: Boolean(this.deps.recordingControl && callSid) },
+            // `paused` records what actually happened, not what was wired: a
+            // pauseRecording that threw used to be audited as paused=true.
+            // `captureRevoked` is the transport-independent fact — the STT
+            // feed is cut regardless of whether a Twilio recording existed.
+            metadata: { keyword, paused: recordingPaused, captureRevoked: true },
           }),
         );
       } catch {
