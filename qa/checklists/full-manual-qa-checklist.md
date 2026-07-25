@@ -63,6 +63,7 @@ Section 21 runs once, comparing the two.
 | 🖱️ | Manual click | Drive the web app with a mouse/keyboard as a human would |
 | 🎙️ | Voice (in-app) | Use the in-app voice bar / assistant mic, or place a real phone call as **yourself** to test an outbound/owner-facing voice path |
 | ☎️ | Inbound call | Dial the tenant's live Twilio number **as a customer would**, from an external phone |
+| 🔧 | API-assisted | A real UI/browser step exists but the specific action has no UI control yet (e.g. no "custom amount" field, no "generate portal link" button) — complete it with an authenticated API call (devtools fetch, Postman with your session cookie, etc.) using your own signed-in session; noted inline where this applies, along with why |
 | P0 | — | Solo-launch blocker per WF catalog §4.0 — never skip |
 | P1 | — | Core loop or multi-tech/dispatch — required before wider rollout |
 | P2 | — | Deferrable / nice-to-have surface |
@@ -109,7 +110,7 @@ Section 21 runs once, comparing the two.
 - [ ] **QA-024** 🖱️ P0 — Walk a job through its full lifecycle: scheduled → in progress → complete. **Expect:** each transition is audit-logged; UI reflects status immediately. (WF-18)
 - [ ] **QA-025** 🖱️ P1 — Upload job photos (`/jobs/:id/photos`). **Expect:** photos upload, thumbnail renders, attached to the correct job.
 - [ ] **QA-026** 🖱️ P2 — Fill a custom job form and add a custom field. **Expect:** values save and re-render on reopen.
-- [ ] **QA-027** 🖱️ P1 — Create a job directly from an approved estimate (no re-key). **Expect:** line items/customer carry over untouched.
+- [ ] **QA-027** 🖱️ P1 — On an approved estimate, use "Convert to job" (`ConvertToJobSheet`). Note estimates are job-first — the estimate already belongs to an existing job, so this schedules/assigns *that* job (auto-picking a technician + slot, or your override) rather than creating a new one. **Expect:** the existing linked job gets scheduled/assigned with no duplicate job created, and the estimate flips to accepted.
 - [ ] **QA-028** 🖱️ P1 — Cancel a job mid-lifecycle. **Expect:** status reflects cancellation; any linked appointment is released.
 
 ## 6. Schedule & appointments
@@ -121,6 +122,11 @@ Section 21 runs once, comparing the two.
 - [ ] **QA-033** 🖱️ P2 — Switch calendar between day/week/month views. **Expect:** appointments render correctly in every view, no layout break.
 
 ## 7. Dispatch (multi-tech — P1, not launch-gated)
+
+**Prerequisite:** onboarding (§2) only creates the owner account — there is
+no team-member step in the wizard. Before running this section or §8, jump
+ahead and do QA-092 (Settings → invite a team member as `technician`) so
+there's an actual technician to assign, populate a lane, and sign in as.
 
 - [ ] **QA-034** 🖱️ P1 — Drag an unassigned job from the pool onto a technician lane on `/dispatch`. **Expect:** assignment proposal created or direct-assigns per config. (WF-23)
 - [ ] **QA-035** 🖱️ P1 — Trigger the feasibility preview before confirming an assignment. **Expect:** overlap/travel-time warnings surface when relevant. (WF-24)
@@ -145,7 +151,7 @@ Section 21 runs once, comparing the two.
 
 - [ ] **QA-046** 🖱️ P0 — Issue an invoice and confirm customer delivery (SMS/email link). **Expect:** issued timestamp set; customer receives a working link. (WF-32, `[INV-01]` for the issue transition; the delivery leg is exercised end-to-end by `[JRN-03]`)
 - [ ] **QA-047** 🖱️ P0 — As the customer, pay the invoice on `/pay/:id` with a Stripe test card. **Expect:** `checkout.session.completed` webhook flips invoice to paid. (WF-33, `[PORT-02]`)
-- [ ] **QA-048** 🖱️ P1 — Make a partial payment, then pay the remainder. **Expect:** `partially_paid` → `paid` transitions correctly; overpayment is rejected. (WF-34, `[PAY-01]`)
+- [ ] **QA-048** 🖱️/🔧 P1 — Make a partial payment, then pay the remainder. The shipped "Mark Paid" UI (`MarkPaidSheet`) only records the full `amountDueCents` — there's no UI control for a custom amount (`PaymentRecordForm` supports one but isn't wired into any page). Use an API-assisted step instead: as the signed-in owner, `POST /api/payments` with `{invoiceId, amountCents: <less than amountDueCents>, method, receivedDate}`, then repeat with the remainder. **Expect:** `partially_paid` → `paid` transitions correctly; a follow-up over-`amountDueCents` request is rejected. (WF-34, `[PAY-01]`)
 - [ ] **QA-049** 🖱️ P1 — Let an invoice go overdue (or seed one). **Expect:** overdue-invoice worker flags it; owner sees it on the money dashboard. (`[PAY-04]`)
 - [ ] **QA-050** 🖱️ P2 — Set up a progress/milestone billing plan on a job (a `create_invoice_schedule` proposal — e.g. percent-on-accept, percent-on-completion, remainder-on-manual — approved from the inbox). **Expect:** the schedule persists with its milestones; each milestone's invoice drafts/fires on its configured trigger (`on_accept`, `on_completion`, or `manual`) — note there is no date/recurrence-based trigger today, only these three.
 - [ ] **QA-051** 🖱️ P2 — Run a batch invoice job across multiple jobs/customers. **Expect:** one invoice per eligible job, no duplicates, no cross-tenant leakage.
@@ -211,9 +217,18 @@ surface in the product; treat it as launch-gating (P0) per `docs/qa-strategy.md`
 ## 18. Public & customer self-service
 
 - [ ] **QA-085** 🖱️ P1 — Fill and submit the public booking page (`/book`, no token/login required). **Expect:** produces a held appointment + owner proposal, visible in the inbox. (Not in the WF-01–50 catalog — a newer public surface distinct from the token-gated portal booking below)
-- [ ] **QA-086** 🖱️ P1 — From inside the customer portal (`/portal/:token`), use the **Request service** tab (`PortalRequestService`) to submit a new request. **Expect:** request recorded and the operator is notified — this is the actual WF-48 flow (do not conflate with QA-085's public `/book`, which is a different, unauthenticated surface). (WF-48)
-- [ ] **QA-087** 🖱️ P0 — Open the customer portal with a valid token (`/portal/:token`). **Expect:** jobs/estimates/invoices tabs load, scoped strictly to that token's data. (WF-47 — the multi-tab `PortalShell` has no dedicated matrix row today; the closest existing coverage is the single-document token flows `[PORT-01]` estimate / `[PORT-02]` invoice)
-- [ ] **QA-088** 🖱️ P1 — Open the portal with an expired/garbage token. **Expect:** clean error, no data leak, no 500.
+**Prerequisite for QA-086/087/088:** there is no UI button anywhere in the
+app to generate a `/portal/:token` link — the only thing that mints one is
+the authenticated `POST /api/portal-sessions` route (body
+`{customerId, contactId?, ttlDays?}`; the response includes the portal URL).
+As the signed-in owner, call it with devtools/Postman using a real
+`customerId` from your tenant to get a token before QA-087, and again with
+a short `ttlDays` (or a hand-edited token) to get an expired/garbage one for
+QA-088.
+
+- [ ] **QA-086** 🖱️/🔧 P1 — From inside the customer portal (`/portal/:token`), use the **Request service** tab (`PortalRequestService`) to submit a new request. **Expect:** request recorded and the operator is notified — this is the actual WF-48 flow (do not conflate with QA-085's public `/book`, which is a different, unauthenticated surface). (WF-48)
+- [ ] **QA-087** 🖱️/🔧 P0 — Open the customer portal with a valid token (`/portal/:token`). **Expect:** jobs/estimates/invoices tabs load, scoped strictly to that token's data. (WF-47 — the multi-tab `PortalShell` has no dedicated matrix row today; the closest existing coverage is the single-document token flows `[PORT-01]` estimate / `[PORT-02]` invoice)
+- [ ] **QA-088** 🖱️/🔧 P1 — Open the portal with an expired/garbage token. **Expect:** clean error, no data leak, no 500.
 - [ ] **QA-089** 🖱️ P1 — Submit the post-job feedback form (`/feedback/:token`). **Expect:** rating persists; Settings → Feedback dashboard chart updates. (WF-49)
 - [ ] **QA-090** 🖱️ P1 — Resubmit the same feedback token twice. **Expect:** second submission is rejected or treated as an edit — not double-counted.
 
