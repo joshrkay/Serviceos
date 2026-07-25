@@ -195,8 +195,8 @@ describe('P1-012 — Invoice numbering + due dates + statuses', () => {
   it('happy path — calculates due date correctly', () => {
     const issuedAt = new Date('2026-01-15');
     const dueDate = calculateDueDate(issuedAt, 30);
-    expect(dueDate.getDate()).toBe(14); // Feb 14
-    expect(dueDate.getMonth()).toBe(1); // February
+    expect(dueDate.getUTCDate()).toBe(14); // Feb 14
+    expect(dueDate.getUTCMonth()).toBe(1); // February
   });
 
   it('happy path — transitions open to void', async () => {
