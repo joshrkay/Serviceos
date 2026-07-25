@@ -91,9 +91,9 @@ as a comment-only change; no tests added, because these already pin it:
 | Extracted route modules | 70 | maintained | already done |
 | Route-manifest coverage | **120 layers pinned** | maintained | **done** |
 | ESLint config present | **yes** | yes, blocking | **report-only** |
-| ESLint errors | 1,221 | 0 | measured |
-| ESLint warnings | 2,155 | triaged | measured |
-| `eslint-disable` comments | 201 (181 provably dead) | <25 justified | measured |
+| ESLint errors | 1,213 | 0 | measured |
+| ESLint warnings | 2,154 | triaged | measured |
+| `eslint-disable` comments | 202 (180 provably dead) | <25 justified | measured |
 | Exactly-pinned Node environments | **20 of 20** | 20 of 20 | **done** |
 | Dependency audit gate | **present** | present | **done** |
 | High prod vulns outside exceptions | **0** (1 excepted) | 0 | **done** |
@@ -104,7 +104,7 @@ as a comment-only change; no tests added, because these already pin it:
 
 The repo had **no ESLint at all** — no config file and no dependency in any
 package. `npm run lint` is `scripts/check-log-safety.js` plus `tsc --noEmit`.
-Consequence: all 201 `eslint-disable` comments were inert, suppressing rules
+Consequence: all 202 `eslint-disable` comments were inert, suppressing rules
 from a linter that was never installed.
 
 Turning ESLint on makes them *actively* noisy, which is useful — it is the
@@ -112,11 +112,11 @@ cleanup inventory:
 
 | Category | Count |
 |---|---|
-| `Definition for rule … was not found` (references `eslint-plugin-import`, never installed) | **78** |
-| `Unused eslint-disable directive` (suppresses a rule that reports nothing) | **104** |
-| Total provably dead | **182 of 201** |
+| `Definition for rule … was not found` (references `eslint-plugin-import`, never installed) | **77** |
+| `Unused eslint-disable directive` (suppresses a rule that reports nothing) | **103** |
+| Total provably dead | **180 of 202** |
 
-Findings by rule, from the first full run (3,381 files):
+Findings by rule, over the 3,295 linted source files:
 
 | Rule | Count | Severity | Notes |
 |---|---|---|---|
@@ -125,15 +125,42 @@ Findings by rule, from the first full run (3,381 files):
 | `@typescript-eslint/no-misused-promises` | 718 | error | **needs triage** — async handlers passed where void expected |
 | `no-promise-executor-return` | 236 | error | mostly `new Promise(r => setTimeout(r, n))`, benign |
 | `@typescript-eslint/no-floating-promises` | **75** | error | **highest-value target** — unawaited promises |
-| `require-atomic-updates` | 64 | error | possible real race conditions |
+| `require-atomic-updates` | 63 | error | possible real race conditions |
 | `react-hooks/exhaustive-deps` | 19 | warn | stale-closure risk |
 | `no-fallthrough` | 12 | error | likely real switch bugs |
 | `@typescript-eslint/await-thenable` | 6 | error | `await` on a non-promise |
 
 **Recommended order for making rules blocking**, cheapest real signal first:
 `await-thenable` (6) → `no-fallthrough` (12) → `no-floating-promises` (75) →
-`require-atomic-updates` (64) → `no-misused-promises` (718). The two 900+
-warn-level rules should stay warnings until the errors are clear.
+`require-atomic-updates` (63). Those four total **156 findings** and are the
+realistic blocking set. `no-misused-promises` (718) is a separate project, and
+the two 900+ warn-level rules should stay warnings.
+
+### Cost, and the honest case against report-only
+
+A full type-aware run takes **178s**. That is ~3 minutes added to the
+critical-path `test` job on every PR, in exchange for a `continue-on-error`
+artifact containing 3,367 findings. Nobody reads a 3,367-finding report, so as
+configured this step costs real wall-clock and changes no behaviour.
+
+The defensible end state is the inverse of what shipped: block on the 156
+findings above, scoped to `packages/api/src` and `packages/web/src`, and never
+enable the high-volume rules at all. Report-only over everything was chosen to
+avoid wedging PRs on day one; it should not be the steady state. Treat the
+numbers in this section as the input to that decision, not as a result worth
+recomputing every PR.
+
+Two scoping notes, both found by measuring rather than assuming:
+
+- `projects/**` (stored audit-run artifacts) and `figma-export/**` (a design
+  export, 94 files, zero imports from `packages/`) were being linted despite
+  not being source. Ignoring them dropped the file count 3,384 → 3,295 and
+  eliminated the run's only genuine `Parsing error` — a top-level `return` in
+  `projects/serviceos-audit/run-1/discovery-workflow.js`, which is legal in the
+  async-wrapped executor those scripts are written for.
+- ESLint reports unused-disable directives with `ruleId: null`, which is easy to
+  mistake for a parse failure when grouping findings by rule. After the ignore
+  fix the run has **0** parse errors and **103** unused-disable directives.
 
 ESLint runs as `npm run lint:eslint` and as a `continue-on-error` CI step. It is
 deliberately **not** wired into `npm run lint`. Do not remove

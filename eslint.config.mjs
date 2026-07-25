@@ -105,6 +105,14 @@ export default tseslint.config(
       'docs/**',
       'data/**',
       '**/*.d.ts',
+      // Stored artifacts of past audit runs, not source. The workflow scripts
+      // in here are written for an async-wrapped executor, so a top-level
+      // `return` is legal there and a parse error to ESLint — the one genuine
+      // parse failure in the first full run came from this directory.
+      'projects/**',
+      // A design-tool export kept for reference. Zero imports from packages/;
+      // it is not built, shipped, or typechecked.
+      'figma-export/**',
     ],
   },
 
