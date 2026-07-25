@@ -1,4 +1,4 @@
-FROM node:20.20.2-alpine AS base
+FROM node:26.5.0-alpine AS base
 WORKDIR /app
 
 # Install dependencies. `--ignore-scripts` skips the prepare hook in
@@ -50,7 +50,7 @@ COPY packages/web/nginx.conf /etc/nginx/conf.d/default.conf
 EXPOSE 80
 
 # API production image — used by @serviceos/api (last stage = Railway default)
-FROM node:20.20.2-alpine AS api
+FROM node:26.5.0-alpine AS api
 WORKDIR /app
 ENV NODE_ENV=production
 COPY package.json package-lock.json ./
