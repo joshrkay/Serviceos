@@ -181,7 +181,7 @@ reordered middleware, or a route changing exposure class shows up as a diff
 rather than as a production incident.
 
 Layer counts pinned: 83 routers, 29 middleware, 8 direct routes —
-85 authenticated, 18 open, 9 webhook, 8 public-token.
+78 authenticated, 21 open, 12 public-token, 9 webhook.
 
 Writing it surfaced a security-relevant fact that nothing previously pinned:
 **ten `/api/*` routers are mounted ahead of `requireAuth`** and are therefore
@@ -198,10 +198,17 @@ asserted by the test, so adding an eleventh requires a deliberate decision:
 /api/calls
 ```
 
-Two consequences worth carrying forward:
+Three consequences worth carrying forward:
 
-- The manifest's exposure classifier must check `/api/public…` **before**
-  `/api`, or those customer-facing surfaces get misreported as authenticated.
+- The classifier must check `/api/public…` **before** `/api`, or those
+  customer-facing surfaces get misreported as authenticated.
+- The classifier must be **segment-aware**, not a string-prefix test.
+  `app.use('/api', …)` matches `/api` and `/api/…` but *not* `/api-docs` —
+  verified against Express 4, not assumed. A naive `startsWith('/api')`
+  labelled the Swagger UI as authenticated when it is mounted ahead of the
+  auth chain and reachable without a session. Caught in review of PR #748;
+  fixing it reclassified 7 of the 120 layers (3 `/api-docs` → open,
+  4 `/api/public*` → public-token).
 - Only `requireAuth` and `resolveAuthorization` are identifiable by layer name.
   `verifyClerkSession(secret)`, `devAuthBypass({…})`, and
   `withTenantTransaction(pool)` are closures returned from factories, so

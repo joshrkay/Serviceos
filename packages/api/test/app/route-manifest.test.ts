@@ -1,11 +1,11 @@
 /**
  * Route-manifest characterization test.
  *
- * createApp() is ~6,100 lines that mount 111 routers and construct 164
- * repositories. The planned decomposition of that wiring into per-domain
- * registration modules can silently drop a mount, reorder middleware, or move
- * a route from behind `requireAuth` to in front of it — none of which a type
- * check catches.
+ * createApp() is 6,143 lines that register 120 layers (83 mounted routers)
+ * and construct 223 repositories. The planned decomposition of that wiring
+ * into per-domain registration modules can silently drop a mount, reorder
+ * middleware, or move a route from behind `requireAuth` to in front of it —
+ * none of which a type check catches.
  *
  * This test pins the shape so those changes show up as a reviewable diff.
  * The committed snapshot is NOT an assertion that the current layout is
@@ -24,6 +24,7 @@ import {
   classifyExposure,
   decodeLayerPath,
   formatManifest,
+  mountCovers,
   type RouteManifest,
 } from '../../src/app-route-manifest';
 import { createApp, type AppWithLifecycle } from '../../src/app';
@@ -56,6 +57,21 @@ describe('decodeLayerPath', () => {
   });
 });
 
+describe('mountCovers', () => {
+  it('covers the prefix itself and anything below it', () => {
+    expect(mountCovers('/api', '/api')).toBe(true);
+    expect(mountCovers('/api', '/api/jobs')).toBe(true);
+    expect(mountCovers('/api', '/api/jobs/123')).toBe(true);
+  });
+
+  // The bug this function exists to prevent: app.use('/api', …) does NOT run
+  // for /api-docs, verified against Express 4.
+  it('does not cover a sibling that merely shares a string prefix', () => {
+    expect(mountCovers('/api', '/api-docs')).toBe(false);
+    expect(mountCovers('/public', '/publications')).toBe(false);
+  });
+});
+
 describe('classifyExposure', () => {
   it.each([
     ['/api/jobs', 'authenticated'],
@@ -63,9 +79,24 @@ describe('classifyExposure', () => {
     ['/webhooks/stripe', 'webhook'],
     ['/public/estimates', 'public-token'],
     ['/', 'open'],
-    ['/api-docs', 'authenticated'],
+    // Customer-facing token surfaces that live under /api and are mounted
+    // ahead of the Clerk chain.
+    ['/api/public/portal', 'public-token'],
+    ['/api/public/booking', 'public-token'],
+    ['/api/public-payments', 'public-token'],
   ] as const)('classifies %s as %s', (path, expected) => {
     expect(classifyExposure(path)).toBe(expected);
+  });
+
+  /**
+   * Regression (PR #748 review, Medium): a naive startsWith('/api') labelled
+   * the Swagger UI as authenticated. It is mounted before the auth chain and
+   * Express never routes it through app.use('/api', …), so it is open.
+   * Mislabelling an open surface as authenticated is precisely the failure
+   * this manifest exists to catch.
+   */
+  it('classifies /api-docs as open, not authenticated', () => {
+    expect(classifyExposure('/api-docs')).toBe('open');
   });
 });
 
@@ -165,7 +196,7 @@ describe('createApp route manifest', () => {
     const authAt = manifest.guardPositions.requireAuth[0];
     const preAuth = manifest.entries
       .filter(
-        (e, i) => e.kind === 'router' && e.path.startsWith('/api') && i < authAt,
+        (e, i) => e.kind === 'router' && mountCovers('/api', e.path) && i < authAt,
       )
       .map((e) => e.path);
     expect(preAuth).toEqual(EXPECTED_PRE_AUTH_API_ROUTERS);
@@ -174,7 +205,7 @@ describe('createApp route manifest', () => {
   it('mounts every other /api router behind requireAuth', () => {
     const authAt = manifest.guardPositions.requireAuth[0];
     const behind = manifest.entries.filter(
-      (e, i) => e.kind === 'router' && e.path.startsWith('/api') && i > authAt,
+      (e, i) => e.kind === 'router' && mountCovers('/api', e.path) && i > authAt,
     );
     // The bulk of the API — if this collapses, the extraction dropped mounts.
     expect(behind.length).toBeGreaterThan(60);
@@ -188,7 +219,7 @@ describe('createApp route manifest', () => {
     // links working without a Clerk session.
     const leaked = manifest.entries
       .filter((e) => e.exposure === 'webhook' && e.kind === 'router')
-      .filter((e) => e.path.startsWith('/api'))
+      .filter((e) => mountCovers('/api', e.path))
       .map((e) => e.path);
     expect(leaked).toEqual([]);
   });

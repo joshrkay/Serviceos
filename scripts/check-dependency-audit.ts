@@ -162,6 +162,36 @@ function matches(finding: Finding, e: Exception): boolean {
 }
 
 /**
+ * Whether every advisory on a finding is individually excepted.
+ *
+ * npm reports one entry per vulnerable package, and that entry can carry
+ * several advisory IDs. Matching on "some exception matches this finding"
+ * would let a single documented advisory exempt every other advisory on the
+ * same package — so a package with GHSA-A (reviewed, unreachable) and GHSA-B
+ * (never looked at) would pass the gate silently. Requiring full coverage
+ * means a new advisory against an already-excepted package blocks until
+ * someone judges it on its own.
+ *
+ * A finding with no advisory IDs at all cannot be excepted: there is nothing
+ * to attest to.
+ */
+export function exceptionsCovering(
+  finding: Finding,
+  usable: Exception[],
+): Exception[] | null {
+  if (finding.advisories.length === 0) return null;
+  const covering: Exception[] = [];
+  for (const advisory of finding.advisories) {
+    const hit = usable.find(
+      (e) => e.package === finding.package && e.advisory === advisory,
+    );
+    if (!hit) return null;
+    covering.push(hit);
+  }
+  return covering;
+}
+
+/**
  * Applies the policy. `today` is injected so the expiry behaviour is testable
  * without freezing clocks.
  */
@@ -188,9 +218,15 @@ export function evaluate(
       blocking.push(finding);
       continue;
     }
-    const hit = usable.find((e) => matches(finding, e));
-    if (hit) excepted.push({ finding, exception: hit });
-    else blocking.push(finding);
+    // Every advisory on the finding must be excepted, not just one of them.
+    const covering = exceptionsCovering(finding, usable);
+    if (covering) {
+      // Report against the soonest expiry, so the nearest deadline is visible.
+      const soonest = covering.reduce((a, b) => (a.expires <= b.expires ? a : b));
+      excepted.push({ finding, exception: soonest });
+    } else {
+      blocking.push(finding);
+    }
   }
 
   const unmatched = exceptions.filter(
@@ -254,14 +290,27 @@ function main(): void {
   );
 
   if (result.blocking.length > 0) {
+    const exceptions = loadExceptions();
     console.log('BLOCKING:');
     for (const f of result.blocking) {
-      const why = NON_EXCEPTABLE.includes(f.severity)
-        ? 'critical severity is never exceptable'
-        : 'no matching exception';
+      let why: string;
+      if (NON_EXCEPTABLE.includes(f.severity)) {
+        why = 'critical severity is never exceptable';
+      } else {
+        const uncovered = f.advisories.filter(
+          (a) => !exceptions.some((e) => e.package === f.package && e.advisory === a),
+        );
+        why =
+          uncovered.length === f.advisories.length
+            ? 'no matching exception'
+            : `partially excepted — no exception for ${uncovered.join(', ')}`;
+      }
       console.log(`  ✗ ${f.package} [${f.severity}] — ${why}`);
       console.log(`      ${f.title}`);
       console.log(`      ${f.url}  (vulnerable: ${f.range})`);
+      if (f.advisories.length > 1) {
+        console.log(`      advisories: ${f.advisories.join(', ')}`);
+      }
     }
     console.log('');
   }

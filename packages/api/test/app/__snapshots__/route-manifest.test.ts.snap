@@ -3,8 +3,8 @@
 exports[`createApp route manifest > matches the committed layer counts 1`] = `
 {
   "byExposure": {
-    "authenticated": 81,
-    "open": 18,
+    "authenticated": 78,
+    "open": 21,
     "public-token": 12,
     "webhook": 9,
   },
@@ -24,9 +24,9 @@ exports[`createApp route manifest > matches the committed route manifest 1`] = `
 005  webhook       use    /webhooks/sendgrid    [middleware: rawParser]
 006  open          use    /    [middleware: jsonParser]
 007  open          use    /    [middleware: serveStatic]
-008  authenticated use    /api-docs    [middleware: swaggerInitFn]
-009  authenticated use    /api-docs    [middleware: serveStatic]
-010  authenticated use    /api-docs    [middleware: <anonymous>]
+008  open          use    /api-docs    [middleware: swaggerInitFn]
+009  open          use    /api-docs    [middleware: serveStatic]
+010  open          use    /api-docs    [middleware: <anonymous>]
 011  open          use    /    [middleware: helmetMiddleware]
 012  open          use    /    [middleware: corsMiddleware]
 013  authenticated use    /api    [middleware: <anonymous>]

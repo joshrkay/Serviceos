@@ -105,7 +105,25 @@ export function decodeLayerPath(regexp: RegExp & { fast_slash?: boolean }): stri
 }
 
 /**
- * Classifies a mount by prefix.
+ * Whether `path` is covered by an `app.use(prefix, …)` mount.
+ *
+ * Mirrors Express's semantics exactly: a prefix matches itself and anything
+ * below it, but NOT a sibling that merely shares a string prefix.
+ * `app.use('/api', …)` runs for `/api` and `/api/jobs` but not for
+ * `/api-docs` — verified against Express 4 rather than assumed.
+ *
+ * A naive `startsWith('/api')` labelled the Swagger UI at `/api-docs` as
+ * `authenticated` even though it is mounted ahead of the auth chain and is
+ * reachable without a session. Hiding an open surface behind an
+ * authenticated label is the exact failure this manifest exists to prevent,
+ * so the comparison has to be segment-aware.
+ */
+export function mountCovers(prefix: string, path: string): boolean {
+  return path === prefix || path.startsWith(`${prefix}/`);
+}
+
+/**
+ * Classifies a mount by which guard chain actually covers it.
  *
  * `/api/public/…` and `/api/public-payments` are checked before the plain
  * `/api` prefix on purpose: they are customer-facing, token-authenticated
@@ -114,10 +132,12 @@ export function decodeLayerPath(regexp: RegExp & { fast_slash?: boolean }): stri
  * misreport the app's real exposure.
  */
 export function classifyExposure(path: string): ExposureClass {
-  if (path.startsWith('/public')) return 'public-token';
-  if (path.startsWith('/api/public')) return 'public-token';
-  if (path.startsWith('/webhooks')) return 'webhook';
-  if (path.startsWith('/api')) return 'authenticated';
+  if (mountCovers('/public', path)) return 'public-token';
+  if (mountCovers('/api/public', path)) return 'public-token';
+  // A distinct sibling mount, not a child of /api/public.
+  if (mountCovers('/api/public-payments', path)) return 'public-token';
+  if (mountCovers('/webhooks', path)) return 'webhook';
+  if (mountCovers('/api', path)) return 'authenticated';
   return 'open';
 }
 

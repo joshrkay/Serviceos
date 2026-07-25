@@ -28,13 +28,36 @@ a compromised build-time dependency is a real risk, but it is a supply-chain
 problem to address with lockfile review and provenance, not by making every
 release hostage to a `vitest` transitive advisory.
 
-Two further failure modes keep the file honest:
+Three further rules keep the file honest:
 
 - **An expired exception fails the build.** Exceptions are time-boxed, so they
   cannot become permanent by neglect.
 - **An exception matching no current finding fails the build.** Once an advisory
   is remediated its exception must be deleted, so the file never accumulates
   entries that imply risk that no longer exists.
+- **Every advisory on a package must be excepted individually.** npm reports one
+  entry per vulnerable package, and that entry can carry several advisory IDs.
+  A package is excepted only when *all* of its advisories have their own
+  unexpired entry. Without this, a single documented advisory would exempt every
+  other advisory on the same package, and a newly published GHSA against an
+  already-excepted package would pass silently. A finding that reports no
+  advisory ID at all can never be excepted — there is nothing to attest to.
+
+### Known scope gap: `packages/mobile`
+
+The gate audits the **root** tree only. `packages/mobile` is not a root
+workspace and carries its own lockfile, so it is not covered. Its production
+tree currently reports 22 high and 1 critical advisory, almost all transitive
+through the Expo SDK toolchain (`@expo/cli`, `@expo/config-plugins`,
+`expo-router`, `tar`, `ws`, …) — clearing them means moving the Expo SDK major,
+which per `.github/dependabot.yml` is treated as a migration rather than a
+dependency bump.
+
+Extending the gate to mobile is deliberately **not** done here: it would land
+red on arrival with ~23 entries that all resolve to one Expo upgrade, which is
+exactly the rubber-stamp exception list this policy is designed to avoid. Do it
+as part of that upgrade. Dependabot does watch `/packages/mobile`, so the
+advisories are not invisible.
 
 ## Adding an exception
 

@@ -8,6 +8,7 @@ import {
   type Exception,
   type Finding,
   evaluate,
+  exceptionsCovering,
   loadExceptions,
   parseAuditJson,
   todayIso,
@@ -183,6 +184,60 @@ describe('evaluate', () => {
     expect(r.blocking).toHaveLength(1);
   });
 
+  /**
+   * Regression (PR #748 review, High): npm reports one entry per vulnerable
+   * package, and that entry can carry several advisory IDs. The first
+   * implementation used `usable.find(some advisory matches)`, so a single
+   * documented advisory exempted every other advisory on the same package —
+   * an unreviewed GHSA-B rode in on GHSA-A's exception.
+   */
+  it('blocks when only some of a package’s advisories are excepted', () => {
+    const r = evaluate(
+      [finding({ advisories: ['GHSA-aaaa-bbbb-cccc', 'GHSA-dddd-eeee-ffff'] })],
+      [exception({ advisory: 'GHSA-aaaa-bbbb-cccc' })],
+      '2026-07-25',
+    );
+    expect(r.ok).toBe(false);
+    expect(r.blocking).toHaveLength(1);
+    expect(r.excepted).toHaveLength(0);
+  });
+
+  it('allows a multi-advisory finding when every advisory is excepted', () => {
+    const r = evaluate(
+      [finding({ advisories: ['GHSA-aaaa-bbbb-cccc', 'GHSA-dddd-eeee-ffff'] })],
+      [
+        exception({ advisory: 'GHSA-aaaa-bbbb-cccc', expires: '2026-12-01' }),
+        exception({ advisory: 'GHSA-dddd-eeee-ffff', expires: '2026-09-01' }),
+      ],
+      '2026-07-25',
+    );
+    expect(r.ok).toBe(true);
+    expect(r.excepted).toHaveLength(1);
+    // Reported against the soonest deadline, not whichever matched first.
+    expect(r.excepted[0].exception.expires).toBe('2026-09-01');
+  });
+
+  it('blocks a multi-advisory finding when one covering exception has expired', () => {
+    const r = evaluate(
+      [finding({ advisories: ['GHSA-aaaa-bbbb-cccc', 'GHSA-dddd-eeee-ffff'] })],
+      [
+        exception({ advisory: 'GHSA-aaaa-bbbb-cccc', expires: '2026-12-01' }),
+        exception({ advisory: 'GHSA-dddd-eeee-ffff', expires: '2026-07-01' }),
+      ],
+      '2026-07-25',
+    );
+    expect(r.ok).toBe(false);
+    expect(r.blocking).toHaveLength(1);
+    expect(r.expired).toHaveLength(1);
+  });
+
+  // Nothing to attest to, so nothing to except.
+  it('never excepts a finding that reports no advisory IDs', () => {
+    const r = evaluate([finding({ advisories: [] })], [exception()], '2026-07-25');
+    expect(r.ok).toBe(false);
+    expect(r.blocking).toHaveLength(1);
+  });
+
   it('does not apply an exception to a different package', () => {
     const r = evaluate([finding()], [exception({ package: 'other' })], '2026-07-25');
     expect(r.ok).toBe(false);
@@ -209,6 +264,30 @@ describe('evaluate', () => {
     const r = evaluate([finding()], [exception({ owner: '' })], '2026-07-25');
     expect(r.ok).toBe(false);
     expect(r.errors.join(' ')).toContain('owner');
+  });
+});
+
+describe('exceptionsCovering', () => {
+  it('returns the covering exceptions when every advisory is matched', () => {
+    const covering = exceptionsCovering(finding(), [exception()]);
+    expect(covering).toHaveLength(1);
+  });
+
+  it('returns null when any advisory is uncovered', () => {
+    expect(
+      exceptionsCovering(
+        finding({ advisories: ['GHSA-aaaa-bbbb-cccc', 'GHSA-dddd-eeee-ffff'] }),
+        [exception()],
+      ),
+    ).toBeNull();
+  });
+
+  it('returns null for a finding with no advisory IDs', () => {
+    expect(exceptionsCovering(finding({ advisories: [] }), [exception()])).toBeNull();
+  });
+
+  it('does not match an exception for a different package', () => {
+    expect(exceptionsCovering(finding(), [exception({ package: 'other' })])).toBeNull();
   });
 });
 
