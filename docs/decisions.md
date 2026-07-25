@@ -438,3 +438,37 @@ camera, microphone, location, and notification permissions must match actual use
 **Alternatives rejected:** Swift/SwiftUI (iOS-only rewrite plus separate Android
 client), Flutter (Dart rewrite with no direct shared-contract reuse), and a
 Capacitor/WebView wrapper (weaker field media, push, and payment integration).
+
+### D-022: The `app.ts` problem is dependency wiring, not route sprawl
+**Date:** 2026-07-25
+**Decision:** The `packages/api/src/app.ts` decomposition targets **dependency
+construction**, not route extraction. Measurement shows routes are already
+modular: 70 modules in `src/routes/`, 83 `createXxxRouter()` calls, 111
+`app.use()` mounts, and only 2 inline `app.get` handlers with zero inline
+post/put/patch/delete. What makes `createApp()` 6,143 lines (`app.ts:739–6881`)
+is 223 repository instantiations, 20 service instantiations, and 488 imports,
+handed to router factories as long positional argument lists. The target shape
+is therefore repository/service factory modules plus per-domain
+`registerXModule(app, deps)` functions; any plan sequenced by route group
+(health → reporting → customers → jobs → …) is sequencing work that is already
+done and must be rewritten before execution.
+**Rationale:** The earlier roadmap prescribed extracting route modules, which
+would have produced churn with no reduction in `app.ts` — the routers it names
+are already separate files. Sequencing by dependency cluster instead attacks the
+actual 6,143 lines. Doing this measurement first also revealed that
+`packages/api/test/app/route-manifest.test.ts` is the prerequisite safety net:
+the wiring order encodes an implicit security boundary (ten `/api/*` routers
+mount ahead of `requireAuth`) that no test pinned before, and that a wiring
+refactor could silently change.
+**Story:** Quality Sprint 1 — safety rails (Node pinning, doctor, dependency
+audit gate, ESLint report-only, route manifest, this baseline).
+**Constraints:** The route manifest snapshot must be regenerated and reviewed
+line-by-line in any commit that moves wiring, with particular attention to
+exposure-class changes and to the pre-`requireAuth` `/api` allowlist. The
+migration corpus (`db/schema.ts`, 265 migrations replayed per boot) is a
+separate workstream and must not be bundled into this one.
+**Alternatives rejected:** Extract by route group (the roadmap's ordering —
+targets files that are already extracted); extract by file size alone (would
+split `schema.ts` and `app.ts` in the same change, making the diff
+unreviewable); leave `app.ts` alone (the 488-import, 223-instantiation single
+function is the main obstacle to onboarding and to testing wiring in isolation).
