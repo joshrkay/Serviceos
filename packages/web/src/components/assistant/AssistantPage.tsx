@@ -11,7 +11,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { VoiceSessionPanel } from './VoiceSessionPanel';
-import { useSearchParams } from 'react-router';
+import { useNavigate, useSearchParams } from 'react-router';
 import type { Message, AIProposal } from '../../types/assistant-ui';
 import { AIProposalCard } from '../shared/AIProposalCard';
 import { UndoToast } from '../common/UndoToast';
@@ -22,6 +22,7 @@ import { useUndoableApproval, type StartUndoInput, type ApproveResponseLike } fr
 import { emitProposalsChanged } from '../../lib/proposal-events';
 import { reportError, toSafeErrorShape } from '../../lib/errorReporter';
 import { track } from '../../lib/analytics';
+import { matchVoiceCommand } from '../../hooks/useVoiceCommands';
 
 interface ApiMessage {
   id: string;
@@ -819,6 +820,7 @@ export function AssistantPage() {
   const endRef    = useRef<HTMLDivElement>(null);
   const inputRef  = useRef<HTMLTextAreaElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
 
   // Derive conversationId from URL param or localStorage
@@ -911,6 +913,19 @@ export function AssistantPage() {
     setInput('');
     setPendingAttachment([]);
     setFailedSend(null); // a fresh attempt clears any prior retry affordance
+
+    const command = opts?.attachments?.length ? null : matchVoiceCommand(text);
+    if (command) {
+      setMessages(prev => [...prev, {
+        id: uid(),
+        role: 'assistant',
+        content: `${command.label}.`,
+        time: now(),
+      }]);
+      navigate(command.route);
+      return;
+    }
+
     setTyping(true);
     setTypingReason('Thinking…');
 
@@ -967,7 +982,7 @@ export function AssistantPage() {
       setTyping(false);
       setTypingReason('');
     }
-  }, [conversationId, ttsEnabled, speak]);
+  }, [conversationId, navigate, ttsEnabled, speak]);
 
   // UB-B2 — conversational voice session: continuous STT, per-utterance
   // auto-submit through the SAME chat path as typed input (inputMode: 'voice'
