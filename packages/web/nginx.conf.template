@@ -3,6 +3,27 @@ server {
     root /usr/share/nginx/html;
     index index.html;
 
+    # Websocket auth is carried in the query string because browser WebSocket
+    # clients cannot set an Authorization header. The default nginx access log
+    # records the full request target, including that bearer token, so suppress
+    # access logging for this exact endpoint. Application telemetry records
+    # connection outcomes without credentials.
+    location = /api/ws {
+        access_log off;
+        proxy_pass ${API_URL};
+        proxy_http_version 1.1;
+        proxy_ssl_server_name on;
+        proxy_set_header Host $proxy_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_cache_bypass $http_upgrade;
+        proxy_buffering off;
+        proxy_read_timeout 3600s;
+    }
+
     location /api/ {
         proxy_pass ${API_URL};
         proxy_http_version 1.1;
