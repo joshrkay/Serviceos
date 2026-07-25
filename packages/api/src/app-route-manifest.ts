@@ -2,12 +2,12 @@
  * Route manifest — introspects a booted Express app into a stable, ordered
  * description of everything it will serve.
  *
- * Why this exists: createApp() is ~6,100 lines that mount 111 routers and
- * wire 164 repositories. Any refactor of that wiring — extracting per-domain
- * registration modules, hoisting repository construction into factories — can
- * silently drop a mount, reorder middleware, or move a route from behind
- * `requireAuth` to in front of it. None of those show up in a type check, and
- * only some show up in route tests.
+ * Why this exists: createApp() is 6,143 lines that register 120 layers (83 of
+ * them mounted routers) and wire 223 repositories. Any refactor of that
+ * wiring — extracting per-domain registration modules, hoisting repository
+ * construction into factories — can silently drop a mount, reorder
+ * middleware, or move a route from behind `requireAuth` to in front of it.
+ * None of those show up in a type check, and only some show up in route tests.
  *
  * The manifest captures the two things that matter and that a diff can check:
  *   1. Every mount, in registration order.
