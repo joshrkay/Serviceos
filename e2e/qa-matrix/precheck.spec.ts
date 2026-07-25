@@ -91,6 +91,7 @@ test('precheck — voice utterance generates proposal IDs (non-mock LLM path)', 
   // /utterances — the old path 404'd on every env. Keep this aligned with
   // e2e/qa-matrix/helpers/voice-flow.ts.
   const utter = await request.post(`${base}/api/voice/sessions/${sessionId}/input`, {
+    timeout: 30_000,
     headers: { Authorization: `Bearer ${t.token}` },
     data: {
       text: `Create an estimate proposal for job ${t.jobId} with diagnostic labor line item for $125 total.`,
@@ -119,6 +120,7 @@ test('precheck — approved proposal transitions to executed after undo window',
   // work). This test's purpose is the D9 contract: approved proposal →
   // executed after the undo window, i.e. execution-worker liveness.
   const draft = await request.post(`${base}/api/assistant/chat`, {
+    timeout: 30_000,
     headers: { Authorization: `Bearer ${t.token}` },
     data: {
       messages: [

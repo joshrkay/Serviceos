@@ -262,7 +262,17 @@ export function createConversationRouter(
     requireTenant,
     requirePermission('conversations:view'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      const result = await conversationRepo.getMessages(req.auth!.tenantId, req.params.id);
+      const tenantId = req.auth!.tenantId;
+      // An empty message list is ambiguous: it can mean either an empty
+      // in-tenant conversation or an ID owned by another tenant. Verify the
+      // parent first so cross-tenant IDs cannot be used as an existence
+      // oracle (and so this endpoint matches GET /:id).
+      const conversation = await conversationRepo.findById(tenantId, req.params.id);
+      if (!conversation) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Conversation not found' });
+        return;
+      }
+      const result = await conversationRepo.getMessages(tenantId, req.params.id);
       res.json(result);
     })
   );
