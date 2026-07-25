@@ -7,14 +7,18 @@ Date: 2026-07-24 · Base: `1d5c7e5` · Branch: `claude/rivet-money-extraction-u5
 
 **Headline:** the money path is far stronger than the comms surface was at the
 same stage — every money column is integer cents, the Stripe boundary is clean,
-RLS is complete across all money tables, and idempotency is enforced by a real DB
-unique index. The defects are not structural sloppiness; they are seven specific
-holes, four of which lose or misstate real money silently.
+RLS is complete across all money tables, and webhook **first-delivery** dedupe is
+enforced by a real DB unique index. The defects are not structural sloppiness;
+they are eight specific holes, five of which lose or misstate real money silently.
 
-**Revision note.** P0-6 and P0-7, and the L4 layer, were added during review after
-the first synthesis asserted invariants the code does not hold. Both concern
-concurrency and both were invisible to the original single-path tracing — a
-reminder that this surface's defects live in interleavings, not in any one file.
+**Revision note.** P0-6, P0-7 and P0-8, and the L4 layer, were all added during
+review — the first synthesis asserted invariants the code does not hold. **All
+three are concurrency defects, and all three were invisible to single-path
+tracing**, which is what the original sweep did. The per-file reads in this
+document held up unchanged; every correction was to an inferred invariant, not to
+a `file:line`. Treat that as the standing caution for `/goal money`: this
+surface's remaining defects live in interleavings, and reading each path in
+isolation will not find them.
 
 ---
 
@@ -166,6 +170,31 @@ guard holds "even if a credit type is undercounted here" (`:24-27`). Note the di
 inconsistency, not a clear loss — net-70 is arguably the economically right number; what makes it a
 defect is that every other path uses the inclusive convention. Whichever convention wins, **both
 reconcilers must implement the same one before L3 can be swept.**
+
+### P0-8 · Retry execution is unclaimed — two concurrent retries both run the handler
+**Track 3.** `packages/api/src/webhooks/webhook-handler.ts:142-151`, `:180-183`
+
+The `(source, idempotency_key)` unique index arbitrates **first delivery** correctly. It does
+nothing for retries. Once a row exists, `classifyExisting` is a **pure read** that returns
+`duplicate: false` for a `failed` row (`:146-148`) and for a stale `received`/`processing` row
+(`:149-150`) — and **nothing claims the row**: no compare-and-swap, no flip to `processing`, no
+`SELECT … FOR UPDATE`. Two concurrent retries of the same event both receive `duplicate: false`
+and **both execute the handler**.
+
+The index prevents duplicate *receipt rows*, not duplicate *execution*. Every per-handler
+idempotency guard downstream is therefore load-bearing on its own, and the ones that are
+check-then-act rather than compare-and-swap fail here.
+
+**This is a second, independent route to P0-4.** Concurrent retries of a refund event can both read
+`last_refund_stripe_id` before either `incrementRefundAtomic` commits, so the per-refund
+short-circuit is defeated **by timing** rather than by the latest-id-only flaw. The consequence for
+planning: the tracked D2-4a fix (a `payment_refunds` child table) closes the id-tracking route and
+**not** this one. The DB guard `refunded_amount_cents + $3 <= amount_cents` still bounds the loss
+but permits a double count within the bound.
+
+`/goal money` needs a **retry-concurrency** gate distinct from the redelivery gate — the redelivery
+gate asserts a second *delivery* is a no-op, this asserts a second *retry* is. Only the first holds
+today.
 
 ---
 
