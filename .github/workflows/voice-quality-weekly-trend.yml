@@ -42,7 +42,7 @@ jobs:
       VOICE_QUALITY_COST_CAP_CENTS: '1000'
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           # WS7 — pinned to 20 to match every other workflow, all Dockerfiles
           # (node:20-alpine), and the Railway runtime. This job was the lone
