@@ -13,22 +13,37 @@ This complements, and does not replace, the automated layers:
 - Automated route/business-flow coverage: [`e2e/qa-matrix`](../../e2e/qa-matrix) (matrix row IDs referenced below as `[MATRIX-ID]`)
 - Platform-level workflow catalog + P0/P1 launch scoping: [`docs/superpowers/specs/2026-05-24-platform-assessment-and-e2e-qa-50-workflows.md`](../../docs/superpowers/specs/2026-05-24-platform-assessment-and-e2e-qa-50-workflows.md) (referenced below as `(WF-##)`)
 
-**Total workflows in this checklist: 102** (12 inbound-call, 4 voice/in-app,
-86 manual-click, several overlapping both), spanning 22 feature areas.
+**Total workflows in this checklist: 107** (13 inbound-call, 4 voice/in-app,
+90 manual-click, several overlapping both), spanning 22 feature areas.
+Sections 1–20 run once per tenant against **at least two tenants**;
+Section 21 runs once, comparing the two.
 
 ## How to use this
 
-1. Pick a tenant (a fresh one for onboarding items, an established seeded
-   tenant for everything else — see `e2e/qa-matrix/fixtures/seed.ts` for a
-   ready-made Tenant A/B pair).
-2. Work top to bottom, or cherry-pick a section after a change lands in that
-   area.
-3. Check the box, and record Pass/Fail/Blocked with a one-line note in the
-   **Run log** table at the bottom (copy the table per run date).
-4. Anything that fails gets a story file in `qa/backlog/BUG-NN-<slug>.md`
+1. **Use at least two tenants, not one.** A single-tenant pass cannot
+   catch cross-tenant leaks, and every bug in `docs/qa-strategy.md`'s
+   BUG-1..BUG-8 history that involved tenant scoping was invisible from
+   inside a single tenant. Set up **Tenant A** and **Tenant B** —
+   `e2e/qa-matrix/fixtures/seed.ts` has a ready-made pair, or run the
+   onboarding sections (§2) twice to create your own. Each has its own
+   Twilio number, price book, users, and customers.
+2. Run Sections 1–20 **once per tenant** (Tenant A fully, then Tenant B
+   fully — or interleave if that's faster). Section 21 (isolation) is
+   run **once, using both tenants together** — it specifically checks
+   that Tenant A and Tenant B cannot see or affect each other.
+3. For onboarding (§2), use a **third, fresh tenant** so you're not
+   re-onboarding an already-live Tenant A/B.
+4. Work top to bottom within a tenant pass, or cherry-pick a section
+   after a change lands in that area.
+5. Check the box, and record Pass/Fail/Blocked with a one-line note in
+   the **Run log** table at the bottom (copy the table per run date) —
+   note which tenant each row was run against.
+6. Anything that fails gets a story file in `qa/backlog/BUG-NN-<slug>.md`
    the same day it's found (template: any existing file in that folder),
-   even if the fix lands later.
-5. "Fixed" is a claim that needs a screenshot (🖱️ items) or a call
+   even if the fix lands later. If a bug only reproduces on one of the
+   two tenants, say so — that's a signal of a scoping bug, not
+   flakiness.
+7. "Fixed" is a claim that needs a screenshot (🖱️ items) or a call
    recording/transcript (☎️/🎙️ items) attached to the backlog file — not a
    green commit message.
 
@@ -209,13 +224,22 @@ surface in the product; treat it as launch-gating (P0) per `docs/qa-strategy.md`
 
 ## 21. Multi-tenant isolation & security
 
+This section requires **both** tenants set up side by side (see "How to
+use this" above) and is the one section that is run once, comparing the
+two, rather than once per tenant.
+
 - [ ] **QA-099** 🖱️ P0 — Hit `/metrics` and other operational endpoints without an auth token. **Expect:** requires the configured secret, not open by default.
 - [ ] **QA-100** 🖱️ P0 — Hammer an authenticated endpoint past the configured rate limit. **Expect:** 429s kick in rather than the request silently succeeding forever.
 - [ ] **QA-101** 🖱️ P0 — As Tenant B, attempt to approve/reject a Tenant A proposal by guessing/incrementing its ID. **Expect:** rejected — proposal execution respects tenant scoping, not just list views.
+- [ ] **QA-102** 🖱️ P0 — As Tenant B, directly hit Tenant A's customer/job/estimate/invoice detail URLs by ID (repeat QA-005 with fresh IDs from §3–10 of your Tenant A pass). **Expect:** 403/404 on every entity type you touched, not just the ones already covered in §1.
+- [ ] **QA-103** 🖱️ P0 — Compare Tenant A's and Tenant B's price books, templates, and settings side by side. **Expect:** each tenant's catalog/templates are fully independent — editing one never mutates the other (regression risk from any shared-cache or shared-fixture bug).
+- [ ] **QA-104** ☎️ P0 — Call Tenant A's Twilio number and Tenant B's Twilio number back to back. **Expect:** each call is answered with that tenant's own greeting/persona and only surfaces that tenant's data (e.g. asking "what's my balance" on Tenant B's line never returns a Tenant A customer's numbers) — confirms `identify-caller` and the voice skills are scoped per-tenant, not per-phone-number-format.
+- [ ] **QA-105** 🖱️ P1 — Create an estimate/invoice on both tenants around the same time. **Expect:** numbering sequences (invoice #, estimate #) are independent per tenant — no shared counter, no collision.
+- [ ] **QA-106** 🖱️ P1 — Compare Tenant A's and Tenant B's Stripe Connect status and a payment made on each. **Expect:** each tenant's payments settle to its own connected Stripe account — a Tenant A customer's payment never appears on Tenant B's money dashboard.
 
 ## 22. Misc / internal
 
-- [ ] **QA-102** 🖱️ P2 — Open `/design` (internal design-system showcase). **Expect:** loads without error; not linked from customer-facing nav.
+- [ ] **QA-107** 🖱️ P2 — Open `/design` (internal design-system showcase). **Expect:** loads without error; not linked from customer-facing nav.
 
 ---
 
@@ -224,9 +248,12 @@ surface in the product; treat it as launch-gating (P0) per `docs/qa-strategy.md`
 Copy this table into a dated file under `qa/reports/<date>/` (or append a
 new block below) each time you run the sweep.
 
-| Date | Tester | Section(s) run | Pass | Fail | Blocked | Bugs filed |
-|------|--------|-----------------|------|------|---------|------------|
-| | | | | | | |
+| Date | Tester | Tenant | Section(s) run | Pass | Fail | Blocked | Bugs filed |
+|------|--------|--------|-----------------|------|------|---------|------------|
+| | | | | | | | |
+
+Log Tenant A and Tenant B as **separate rows** for Sections 1–20 (even on
+the same date), and a single row noting "A vs B" for Section 21.
 
 For each **Fail**, open `qa/backlog/BUG-NN-<slug>.md` the same day, following
 the shape of the existing files in that folder (what broke, repro steps,
