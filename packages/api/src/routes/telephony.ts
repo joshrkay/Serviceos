@@ -382,10 +382,19 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
 
     // §10 voice gates — subscription, go-live, trial caps. Voicemail on block.
     if (deps.voiceGate) {
+      // Point at /recording, NOT /voicemail-status. Only /recording actually
+      // persists: it downloads RecordingUrl, uploads to storage and inserts
+      // the files + voice_recordings rows, which is what makes the audio
+      // visible to the audit trail and reachable by deprovision's key harvest.
+      // /voicemail-status only mints a lead — and it resolves the tenant from
+      // store.findByCallSid, which finds nothing here because this gate
+      // returns before any voice session is created, so it would log "missing
+      // tenant" and drop the callback. /recording has a To/From tenant
+      // fallback for exactly this no-session case.
       const gateBase = (deps.publicBaseUrl ?? '').replace(/\/+$/, '');
       const gateCallback = gateBase
-        ? `${gateBase}/api/telephony/voicemail-status`
-        : '/api/telephony/voicemail-status';
+        ? `${gateBase}/api/telephony/recording`
+        : '/api/telephony/recording';
       try {
         const gate = await deps.voiceGate({ tenantId, callSid });
         if (!gate.allowed) {
