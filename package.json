@@ -7,16 +7,24 @@
     "packages/web",
     "packages/shared"
   ],
+  "engines": {
+    "node": "20.20.2",
+    "npm": "10.x"
+  },
   "scripts": {
+    "doctor": "tsx scripts/doctor.ts",
+    "verify": "npm run doctor && npm run typecheck && npm run lint && npm test",
     "build": "npm run build --workspaces",
     "test": "npm run test --workspaces",
     "test:integration": "npm run test:integration --workspace=packages/api",
     "test:rls": "npm run test:rls --workspace=packages/api",
     "test:voice-fixtures": "npm run test:voice-fixtures --workspace=packages/api",
     "test:coverage": "npm run test:coverage --workspaces --if-present",
-    "typecheck": "npm run typecheck:api && npm run typecheck:corpus",
+    "typecheck": "npm run typecheck:api && npm run typecheck:web && npm run typecheck:corpus",
     "typecheck:api": "cd packages/api && npx tsc --project tsconfig.build.json --noEmit",
+    "typecheck:web": "cd packages/web && npx tsc --noEmit",
     "typecheck:corpus": "tsc -p scripts/data-pipeline/tsconfig.json --noEmit",
+    "typecheck:mobile": "cd packages/mobile && npx tsc --noEmit",
     "lint": "npm run lint --workspaces",
     "corpus:fixtures": "tsx scripts/data-pipeline/build-edge-negatives.ts && tsx scripts/data-pipeline/build-slots.ts",
     "corpus:merge": "tsx scripts/data-pipeline/merge-corpus.ts",
