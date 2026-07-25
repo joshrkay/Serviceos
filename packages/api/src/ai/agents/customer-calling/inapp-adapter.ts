@@ -173,6 +173,15 @@ export interface InAppAdapterDeps {
    */
   supportedLanguagesResolver?: (tenantId: string) => Promise<Language[] | undefined>;
   extendedIntentsEnabled?: (tenantId: string) => Promise<boolean>;
+  /**
+   * Read-only owner/operator lookups bypass the mutation confirmation FSM.
+   * The authenticated in-app route supplies a tenant-scoped resolver.
+   */
+  ownerLookupResolver?: (
+    tenantId: string,
+    sessionId: string,
+    intentType: string,
+  ) => Promise<string | undefined>;
 }
 
 export interface StartSessionResult {
@@ -734,6 +743,7 @@ export class InAppVoiceAdapter {
     const stateBeforeTurn: string = session.machine.currentState;
     let fsmEvent: CallingAgentEvent;
     let classifierFailureEffect: SideEffect | undefined;
+    let ownerLookupText: string | undefined;
 
     if (stateBeforeTurn === 'intent_confirm') {
       fsmEvent = isAffirmation(text)
@@ -831,6 +841,18 @@ export class InAppVoiceAdapter {
           classification.confidence,
           classification.extractedEntities as Record<string, unknown> | undefined
         );
+        if (
+          classification.confidence >= TAU_INT &&
+          session.machine.currentContext.ownerSession === true &&
+          classification.intentType.startsWith('lookup_') &&
+          this.deps.ownerLookupResolver
+        ) {
+          ownerLookupText = await this.deps.ownerLookupResolver(
+            session.tenantId,
+            session.id,
+            classification.intentType,
+          );
+        }
       } catch (error) {
         const failure = classifierFailureFromError(error);
         classifierFailureEffect = classifierFailureAuditEffect(
@@ -884,7 +906,12 @@ export class InAppVoiceAdapter {
 
     // Dispatch the primary event (classifier-derived, or the confirm/correct
     // event from the intent_confirm branch).
-    const effects1 = session.machine.dispatch(fsmEvent);
+    // Read-only owner lookups answer immediately and leave the FSM ready for
+    // the next request. They must never enter intent_confirm, which is the
+    // safety gate for proposal-producing mutations.
+    const effects1: SideEffect[] = ownerLookupText
+      ? [{ type: 'tts_play', payload: { text: ownerLookupText } }]
+      : session.machine.dispatch(fsmEvent);
     allSideEffects.push(...effects1);
     const aggregate1 = await this.executeSideEffects(session, effects1);
     let lastProposalId = aggregate1.lastProposalId;

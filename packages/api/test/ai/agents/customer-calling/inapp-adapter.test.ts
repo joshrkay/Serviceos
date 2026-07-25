@@ -99,6 +99,33 @@ describe('InAppVoiceAdapter', () => {
     expect(callerPlanResolver).not.toHaveBeenCalled();
   });
 
+  it('answers an authenticated owner lookup without mutation confirmation', async () => {
+    const ownerLookupResolver = vi.fn(async () => 'You have two appointments today.');
+    const adapter = new InAppVoiceAdapter({
+      store,
+      gateway: scriptedGateway([
+        JSON.stringify({
+          intentType: 'lookup_day_overview',
+          confidence: 0.98,
+          extractedEntities: {},
+        }),
+      ]),
+      proposalRepo,
+      auditRepo,
+      onCallRepo,
+      extendedIntentsEnabled: async () => true,
+      ownerLookupResolver,
+    });
+
+    const { sessionId } = await adapter.startSession(TENANT, USER, undefined, 'owner');
+    const result = await adapter.handleInput(sessionId, 'What appointments are scheduled today?');
+
+    expect(result.state).toBe('intent_capture');
+    expect(result.ttsText).toBe('You have two appointments today.');
+    expect(result.proposalIds).toHaveLength(0);
+    expect(ownerLookupResolver).toHaveBeenCalledWith(TENANT, sessionId, 'lookup_day_overview');
+  });
+
   it('happy path: high-confidence intent creates a proposal and closes', async () => {
     const gateway = scriptedGateway([
       JSON.stringify({

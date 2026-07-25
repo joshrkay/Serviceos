@@ -532,6 +532,7 @@ import { PgShadowComparisonStore } from './ai/evaluation/pg-shadow-comparison';
 import { InMemoryShadowComparisonStore } from './ai/evaluation/shadow-comparison';
 import { createTtsProvider, assertTtsProviderSupportsMediaStreams } from './ai/tts/tts-provider';
 import { InAppVoiceAdapter } from './ai/agents/customer-calling/inapp-adapter';
+import { lookupDayOverview } from './ai/skills/lookup-day-overview';
 import { VoiceSessionStore } from './ai/agents/customer-calling/voice-session-store';
 import { createVoiceEventTransport } from './ai/agents/customer-calling/voice-event-transport';
 import { createVoiceSessionsRouter } from './routes/voice-sessions';
@@ -6506,6 +6507,19 @@ export function createApp(): AppWithLifecycle {
       return s?.supportedLanguages;
     },
     extendedIntentsEnabled: voiceExtendedIntentsFlagShim,
+    ownerLookupResolver: async (tenantId, sessionId, intentType) => {
+      if (intentType !== 'lookup_day_overview') return undefined;
+      const result = await lookupDayOverview(
+        { tenantId, sessionId },
+        {
+          appointmentRepo,
+          jobRepo,
+          proposalRepo,
+          userRepo,
+        },
+      );
+      return result.summary;
+    },
   });
   app.use(
     '/api/voice/sessions',
