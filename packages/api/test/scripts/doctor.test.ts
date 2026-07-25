@@ -10,6 +10,7 @@ import {
   checkNpmVersion,
   parseEnvExampleKeys,
   parseIntegrationFlag,
+  parseWarnOnlyFlag,
   readNvmrc,
 } from '../../../../scripts/doctor';
 
@@ -41,6 +42,27 @@ describe('parseIntegrationFlag', () => {
 
   it('defaults to false', () => {
     expect(parseIntegrationFlag(['node', 'doctor'])).toBe(false);
+  });
+});
+
+/**
+ * `npm run verify` passes --warn-only so that an environment mismatch reports
+ * without blocking typecheck/lint/test. Without it, a container whose Node
+ * differs from .nvmrc cannot run the correctness gate at all.
+ */
+describe('parseWarnOnlyFlag', () => {
+  it('detects --warn-only', () => {
+    expect(parseWarnOnlyFlag(['node', 'doctor', '--warn-only'])).toBe(true);
+  });
+
+  it('defaults to false, so a direct `npm run doctor` still fails hard', () => {
+    expect(parseWarnOnlyFlag(['node', 'doctor'])).toBe(false);
+  });
+
+  it('is independent of --integration', () => {
+    const argv = ['node', 'doctor', '--integration'];
+    expect(parseWarnOnlyFlag(argv)).toBe(false);
+    expect(parseIntegrationFlag(argv)).toBe(true);
   });
 });
 

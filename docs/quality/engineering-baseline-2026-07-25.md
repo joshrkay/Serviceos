@@ -94,7 +94,7 @@ as a comment-only change; no tests added, because these already pin it:
 | ESLint errors | 1,213 | 0 | measured |
 | ESLint warnings | 2,154 | triaged | measured |
 | `eslint-disable` comments | 202 (180 provably dead) | <25 justified | measured |
-| Exactly-pinned Node environments | **20 of 20** | 20 of 20 | **done** |
+| Node pin declared in one place | **`.nvmrc`, 20 of 20 sites resolve it** | single source | **done** |
 | Dependency audit gate | **present** | present | **done** |
 | High prod vulns outside exceptions | **0** (1 excepted) | 0 | **done** |
 | Migrations replayed per boot | 265 (all) | 0 when none pending | not started |
@@ -173,13 +173,33 @@ Dockerfile stages used `node:20-alpine`, and no `engines` field existed — so
 every environment resolved its own patch. This container was running Node
 **22.22.2** against a CI and deploy image on 20.
 
-After: `20.20.2` (Node 20 LTS "Iron") in `.nvmrc`, `engines.node`, all 18
-workflow sites, and both Dockerfile stages. `clean-install.yml` asserts the
-runner matches `.nvmrc` exactly and installs twice from scratch to catch a
-lockfile that only resolves with leftover state.
+After: `20.20.2` (Node 20 LTS "Iron") is declared **once**, in `.nvmrc`. All 20
+workflow sites resolve it via `node-version-file: '.nvmrc'`, and both Dockerfile
+stages pin the same patch. `clean-install.yml` asserts the runner matches
+`.nvmrc` exactly and installs twice from scratch to catch a lockfile that only
+resolves with leftover state.
 
 Staying on the 20 line is deliberate: 20 is what CI and the Railway image
 already run, so this removes drift without changing the production runtime.
+
+Two design points, both corrected after the first pass got them wrong:
+
+- **One source of truth, not twenty.** The first version hardcoded `20.20.2` at
+  18 workflow sites, which made a Node bump an 18-site edit — more drift
+  surface, not less, while claiming the opposite. `node-version-file` reads
+  `.nvmrc` directly, so the pin lives in exactly one place.
+- **`engines.node` is a range (`^20.20.0`), not an exact pin.** `engines`
+  conventionally expresses the *supported* range while `.nvmrc` expresses the
+  *canonical* version; the first version conflated them, so every contributor on
+  20.20.1 got an `EBADENGINE` warning for no reason.
+
+Relatedly, `verify` now runs `doctor --warn-only`. Doctor checks the
+environment; typecheck/lint/test check the code. Chaining them with `&&` meant a
+machine whose Node differs from `.nvmrc` could not run the correctness gate at
+all — which is the situation in the provided dev container, so `npm run verify`
+was unusable there. Advisory mode keeps the drift visible without blocking
+checks that do not depend on it; `npm run doctor` on its own still exits
+non-zero.
 
 ### Migration detail (highest remaining risk)
 

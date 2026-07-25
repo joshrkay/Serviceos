@@ -10,13 +10,18 @@
  *    removed — QUALITY-2026-07-12 WS1).
  *  - `packages/api/package.json` exposes the `voice-quality` script the
  *    CI jobs invoke via `npm run voice-quality --workspace=packages/api`.
- *  - Both workflow files specify Node 20 so the runner stays in lockstep
- *    with the rest of the pipeline.
+ *  - Both workflow files resolve to Node 20 so the runner stays in lockstep
+ *    with the rest of the pipeline. Checked via `expectEffectiveNode20`,
+ *    which accepts either an inline `node-version:` or a
+ *    `node-version-file: '.nvmrc'` and validates the version that actually
+ *    results — the repo standardised on the latter, and an assertion that
+ *    matched only the literal spelling failed the migration despite every
+ *    workflow still running Node 20.
  *
  * We deliberately use lightweight string assertions (not a full YAML
  * parser) to avoid pulling `js-yaml` into the API package's deps just
  * for a smoke test. The workflow files are short and the tokens we
- * pin are stable contract shapes — `name:`, `node-version:`,
+ * pin are stable contract shapes — `name:`, the Node pin,
  * `voice-quality:` job key, `npm run voice-quality`. A YAML structural
  * regression that broke the file would be caught by GitHub Actions on
  * the next PR; this test catches the higher-level contract drift
@@ -26,6 +31,7 @@
 import { describe, it, expect } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
+import { expectEffectiveNode20 } from '../helpers/workflow-node-version';
 
 const repoRoot = path.resolve(__dirname, '../../../..');
 const prChecksPath = path.join(repoRoot, '.github/workflows/pr-checks.yml');
@@ -82,13 +88,11 @@ describe('VQ-024 — CI workflow integration', () => {
     );
   });
 
-  it('VQ-024 — both workflow files specify Node 20', () => {
-    const prSrc = fs.readFileSync(prChecksPath, 'utf-8');
-    const nightlySrc = fs.readFileSync(nightlyPath, 'utf-8');
-    // `node-version: '20'` (pr-checks legacy form) or
-    // `node-version: 20` (inline form used in the new job) — either
-    // is acceptable; pin major version 20 only.
-    expect(prSrc).toMatch(/node-version:\s*['"]?20['"]?/);
-    expect(nightlySrc).toMatch(/node-version:\s*['"]?20['"]?/);
+  it('VQ-024 — both workflow files resolve to Node 20', () => {
+    expectEffectiveNode20(fs.readFileSync(prChecksPath, 'utf-8'), 'pr-checks.yml');
+    expectEffectiveNode20(
+      fs.readFileSync(nightlyPath, 'utf-8'),
+      'voice-quality-nightly.yml',
+    );
   });
 });

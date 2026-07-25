@@ -23,6 +23,7 @@
 import { describe, it, expect } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
+import { expectEffectiveNode20 } from '../helpers/workflow-node-version';
 
 const repoRoot = path.resolve(__dirname, '../../../..');
 const preDeployPath = path.join(
@@ -48,11 +49,8 @@ describe('VQ2-016 — Layer 2 pre-deploy CI workflow', () => {
     expect(src).toMatch(/^\s{2}layer2:\s*$/m);
   });
 
-  it('VQ2-016 — workflow uses Node 20', () => {
-    const src = readWorkflow();
-    // `node-version: '20'` (quoted) or `node-version: 20` (inline) —
-    // either is acceptable; pin major version 20.
-    expect(src).toMatch(/node-version:\s*['"]?20['"]?/);
+  it('VQ2-016 — workflow resolves to Node 20', () => {
+    expectEffectiveNode20(readWorkflow(), 'voice-quality-pre-deploy.yml');
   });
 
   it('VQ2-016 — workflow has timeout-minutes: 30', () => {

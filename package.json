@@ -8,12 +8,12 @@
     "packages/shared"
   ],
   "engines": {
-    "node": "20.20.2",
+    "node": "^20.20.0",
     "npm": "10.x"
   },
   "scripts": {
     "doctor": "tsx scripts/doctor.ts",
-    "verify": "npm run doctor && npm run typecheck && npm run lint && npm test",
+    "verify": "npm run doctor -- --warn-only && npm run typecheck && npm run lint && npm test",
     "check:dependency-audit": "tsx scripts/check-dependency-audit.ts",
     "check:dependency-audit:all": "tsx scripts/check-dependency-audit.ts --include-dev",
     "lint:eslint": "eslint .",

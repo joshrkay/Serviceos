@@ -55,6 +55,20 @@ export function parseIntegrationFlag(argv: string[] = process.argv): boolean {
   return argv.includes('--integration');
 }
 
+/**
+ * Whether to report problems without failing the process.
+ *
+ * `npm run verify` uses this. Doctor checks the *environment*; typecheck, lint,
+ * and test check the *code*. Chaining them with `&&` meant a machine whose Node
+ * differs from `.nvmrc` could not run the correctness gate at all — which is
+ * exactly the situation in the provided dev container, so `verify` was unusable
+ * there. Advisory mode keeps the drift visible without blocking the checks that
+ * do not depend on it. Invoked directly, `npm run doctor` still exits non-zero.
+ */
+export function parseWarnOnlyFlag(argv: string[] = process.argv): boolean {
+  return argv.includes('--warn-only');
+}
+
 /** Reads the pinned version from .nvmrc, tolerating a `v` prefix and whitespace. */
 export function readNvmrc(root: string = REPO_ROOT): string | null {
   const file = path.join(root, '.nvmrc');
@@ -357,6 +371,12 @@ async function main(): Promise<void> {
 
   if (failures.length > 0) {
     console.log('');
+    if (parseWarnOnlyFlag()) {
+      console.log(
+        'Environment is NOT aligned with CI (advisory: --warn-only, continuing).',
+      );
+      return;
+    }
     console.log('Environment is NOT aligned with CI. Fix the failures above.');
     process.exit(1);
   }
