@@ -4472,11 +4472,20 @@ export function createApp(): AppWithLifecycle {
   const clerkSecret = process.env.CLERK_SECRET_KEY ?? '';
   app.use('/api', verifyClerkSession(clerkSecret));
 
-  // DEV ONLY — hard-gated on NODE_ENV=dev + DEV_AUTH_BYPASS=true.
-  // Accepts Clerk tokens without RS256/JWKS verification and
-  // auto-bootstraps a tenant per Clerk user. Exists because
-  // verifyClerkSession uses HMAC-SHA256 (not Clerk's real signing
-  // algorithm) — tracked as a production bug. No-op in non-dev.
+  // DEV ONLY — hard-gated on NODE_ENV=dev + DEV_AUTH_BYPASS=true, and a
+  // no-op otherwise. Accepts a Clerk token without verifying its signature
+  // and auto-bootstraps a tenant per Clerk user, so a local frontend can
+  // authenticate without a Clerk instance.
+  //
+  // This is a convenience, NOT a workaround for missing verification:
+  // verifyClerkSession above authenticates production traffic via RS256 +
+  // JWKS (P0-033, see auth/clerk.ts). HMAC-SHA256 survives only as a
+  // dev/test fallback behind CLERK_DEV_HMAC_TOKENS=true, and is refused in
+  // production at both boot (shared/config.ts) and request time
+  // (isHmacDevModeEnabled in auth/clerk.ts).
+  //
+  // Both flags are rejected by validateEnvSchema when NODE_ENV is
+  // production/prod, so neither can reach a deployed environment.
   if (isDevAuthBypassEnabled()) {
     // BUG-2 — share the single tenantRepo constructed at the top of
     // this module. Previously this branch instantiated its own
