@@ -12,9 +12,11 @@ enforced by a real DB unique index. The defects are not structural sloppiness;
 they are nine specific holes, six of which lose or misstate real money silently.
 
 **The most actionable single finding is not a defect but a gate**: `webhook_events.payload` already
-stores every captured amount, so `payload.amount_total == Σ(payments for that reference)` is
-assertable today with no new schema, and it catches both paths where Stripe holds money the
-database has no row for (P0-1, P0-9). See "What `/goal money` can and cannot assert."
+stores every captured amount, so
+`payload->'object'->>'amount_total' == Σ(payments for that reference)` is assertable today with no
+new schema, and it catches both paths where Stripe holds money the database has no row for (P0-1,
+P0-9). **Note the nesting — the route persists `event.data`, not the event — and the join-key
+caveat below.** See "What `/goal money` can and cannot assert."
 
 **Revision note.** P0-6 through P0-9, and the L4 layer, were all added during
 review — the first synthesis asserted invariants the code does not hold. Two
@@ -234,10 +236,22 @@ records.
 
 **This is assertable today, and that changes a "cannot assert" conclusion below.**
 `webhook_events.payload` is `JSONB NOT NULL` (`schema.ts:269`), so the captured `amount_total` of
-every processed event is durably stored. The gate: for each processed `checkout.session.completed`,
-`payload.amount_total` must equal the sum of `payments.amount_cents` carrying that
-`provider_reference`. No new schema is required — the evidence is already persisted and simply
-never compared.
+every processed event is durably stored. No new schema is required — the evidence is already
+persisted and simply never compared.
+
+**Two implementation details the gate must get right, or it silently matches nothing:**
+
+1. **The payload is nested.** The route persists `event.data`, not the event
+   (`routes.ts:921-926`), so the stored JSON is `{ object: { amount_total, payment_intent, … } }`.
+   Read `payload->'object'->>'amount_total'`, not `payload->>'amount_total'` — the latter is NULL
+   on every row, so a naive sweep either skips every capture or fails all of them, and in both
+   cases detects nothing.
+2. **The join key is not always trustworthy.** Payments are keyed by `provider_reference =
+   paymentIntentRef`, derived from `payload->'object'->>'payment_intent'` — but when that field is
+   absent it falls back to the literal `'stripe_checkout'` (P0-5), which collides tenant-wide. On
+   those rows the join is ambiguous, so the sweep must treat a `'stripe_checkout'` reference as
+   **unverifiable rather than as a pass**. P0-5 therefore has to be fixed before this gate reaches
+   full coverage — it is a prerequisite for L5's completeness, not merely a defect alongside it.
 
 ---
 
@@ -721,7 +735,7 @@ which holds `amount_cents`) both stub the `pg` Pool with **no integration counte
 There is no ledger, so a **double-entry reconciliation invariant does not exist and cannot be
 swept.** But the answer is not "row-level correctness only" either. The codebase states its own
 balance invariant explicitly, and it is assertable — this is a **derived-balance reconciliation**,
-four layers deep:
+four layers deep, plus a fifth cross-system layer against the stored Stripe payloads:
 
 ```
 L1  line.total_cents        == round(line.quantity × line.unit_price_cents)   ← BROKEN (P0-2)
@@ -730,8 +744,16 @@ L2  invoice.subtotal_cents  == Σ(line.total_cents)
     invoice.total_cents     == subtotal − discount + tax + processing_fee
 L3  invoice.amount_paid_cents == Σ(active payments.amount_cents)   ← TWO LIVE DEFINITIONS (P0-7)
     invoice.amount_due_cents  == max(0, total_cents − amount_paid_cents)
-L4  invoice.amount_paid_cents <= invoice.total_cents               ← BROKEN under concurrency
+L4  invoice.amount_paid_cents <= invoice.total_cents               ← BROKEN under concurrency (P0-6)
+L5  payload->'object'->>'amount_total'
+      == Σ(payments.amount_cents WHERE provider_reference = :ref)  ← BROKEN (P0-1, P0-9)
 ```
+
+**L5 is the cross-system layer, and it is assertable today** — `webhook_events.payload` already
+stores every captured amount. It is the only layer that catches money Stripe holds and the database
+has no row for, which is the discrepancy class this extraction was written to anticipate. Two
+implementation caveats under P0-9: the payload is **nested** (`event.data` is what gets persisted),
+and a `'stripe_checkout'` join key (P0-5) makes a row **unverifiable rather than passing**.
 
 **L4 is not redundant with L3 — it is the layer L3 is blind to.** Concurrent full-balance credits
 inflate `amount_paid_cents` *and* write matching payment rows, so the sum still agrees and L3 passes
@@ -799,7 +821,9 @@ So `/goal money` **can** assert:
   **But per-event capture reconciliation IS assertable, and it is the single highest-value gate
   this extraction found.** `webhook_events.payload` is `JSONB NOT NULL` (`schema.ts:269`), so every
   processed event's captured amount is already durably stored. Asserting
-  `payload.amount_total == Σ(payments.amount_cents WHERE provider_reference = <ref>)` catches P0-9
+  `payload->'object'->>'amount_total' == Σ(payments.amount_cents WHERE provider_reference = :ref)`
+  — note the nesting (`event.data` is what is persisted) and the `'stripe_checkout'` join-key
+  caveat under P0-9 — catches P0-9
   and P0-1 — the two paths where Stripe holds money the database has no row for — with **no new
   schema**. This was previously listed as unassertable; that was wrong, and it is corrected here
   rather than left as a footnote, because it is the closest thing to the reconciliation invariant
