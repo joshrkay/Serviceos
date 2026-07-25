@@ -1,0 +1,64 @@
+name: Dependency Audit
+
+# Nothing scanned dependencies before this workflow: `npm run lint` is a
+# log-safety grep plus tsc, and pr-checks.yml never ran `npm audit`. A
+# high-severity advisory could sit in the production tree indefinitely.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'package.json'
+      - 'package-lock.json'
+      - 'packages/*/package.json'
+      - 'packages/mobile/package-lock.json'
+      - '.github/dependency-exceptions.json'
+      - '.github/workflows/dependency-audit.yml'
+      - 'scripts/check-dependency-audit.ts'
+  schedule:
+    # Daily, so a newly published advisory against unchanged code still
+    # surfaces. 07:15 UTC — offset off the hour to avoid the scheduler peak.
+    - cron: '15 7 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+      - run: npm ci
+
+      # The gate: critical always fails; high fails unless a matching,
+      # unexpired entry exists in .github/dependency-exceptions.json.
+      # Expired or no-longer-matching exceptions also fail, so the file
+      # cannot quietly rot. Policy: docs/quality/dependency-audit-policy.md
+      - name: Audit production dependencies (gate)
+        run: npm run check:dependency-audit
+
+      # Reported for visibility only. Dev-only advisories do not ship, so
+      # they must not be able to block a release.
+      - name: Audit all dependencies (report only)
+        if: always()
+        continue-on-error: true
+        run: npm run check:dependency-audit:all
+
+      - name: Write audit JSON for the artifact
+        if: always()
+        run: |
+          mkdir -p audit-report
+          npm audit --omit=dev --json > audit-report/audit-production.json || true
+          npm audit --json > audit-report/audit-all.json || true
+
+      - name: Upload audit report
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: dependency-audit-report
+          path: audit-report/
