@@ -55,7 +55,7 @@ jobs:
       - uses: actions/setup-node@v5
         if: steps.check.outputs.has_key == 'true'
         with:
-          node-version: '20'
+          node-version: '20.20.2'
           cache: 'npm'
       - name: Install deps
         if: steps.check.outputs.has_key == 'true'
