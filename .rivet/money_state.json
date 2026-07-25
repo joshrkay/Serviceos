@@ -1,0 +1,104 @@
+{
+  "goal": "money",
+  "spec": "spec/RIVET_MONEY_SPEC.md",
+  "findings": "RIVET_MONEY_EXTRACTION_FINDINGS.md",
+  "contracts": ".rivet/RIVET_OPERATION_CONTRACTS.md",
+  "state_version": 1,
+  "updated": "2026-07-25",
+  "iteration": 0,
+  "phase": "seeded_from_extraction_awaiting_first_run",
+  "seeding": {
+    "source": "RIVET_MONEY_EXTRACTION_FINDINGS.md",
+    "method": "read-only extraction pass (/money-extract), five parallel tracks, no fixes",
+    "base_commit": "1d5c7e5",
+    "detail": "Gate statuses below are seeded from the extraction rather than from a first loop run. No gate is marked pass on the basis of the spec alone; 'unverified' means the extraction found no defect but no sweep has recomputed the identity across rows."
+  },
+  "gates": {
+    "M1": {
+      "status": "fail",
+      "type": "binary",
+      "detail": "L1 arithmetic broken. Web write path computes line totals in float dollars (Math.round(qty * rate * 100)) and the server persists verbatim; contracts.ts:114 validates totalCents as an integer shape only and no REST path recomputes from quantity * unit_price_cents. Confirmed divergence: unitPriceCents=29, qty=0.5 -> server 15, clients 14. Three operation orderings coexist across the codebase. AI/voice path is unaffected (routes through buildLineItem). Expect historical rows to fail alongside the code defect - see Appendix B."
+    },
+    "M2": {
+      "status": "blocked",
+      "type": "binary",
+      "blocked_on": "D-M1",
+      "detail": "L3 has two live definitions of amount_paid_cents. reconcileInvoiceFromPayments (payment.ts:38-40) computes refund-net; the stated invariant (payment-service.ts:234-237) and reconcileInvoiceAfterReversal are refund-inclusive. The increase-only guard does not prevent divergence because the crash that triggers repair is the one that leaves the balance stale-low. Sweeping L3 before ratification asserts a rule the code does not uniformly hold. Report BLOCKED, never pass."
+    },
+    "M3": {
+      "status": "fail",
+      "type": "binary",
+      "detail": "L4 broken under concurrency. recordPayment's payable-status and amount-due guards both evaluate an in-memory read (payment.ts:470-480); incrementAmountPaidAtomic's UPDATE is keyed on id and tenant_id only, with neither predicate. Two full-balance payments starting together both credit; amount_paid_cents reaches 2x total_cents, amount_due_cents clamps to 0 via GREATEST and hides it, status flips to paid. Not caught by L3 - both payment rows exist and sum to the inflated column."
+    },
+    "M4": {
+      "status": "fail",
+      "type": "binary",
+      "detail": "L5 broken on two paths. (1) Post-void capture: the void path never clears stripe_payment_link_id, so a post-void payment is captured, rejected by recordPayment, swallowed by the message-matching catch, and ACKed 200 with no local record. (2) Stale-link capture, serial and needing no void: a link minted for the full balance is never re-priced when the balance drops by another route; the handler caps the credit to the current balance and discards the difference (routes.ts:1188-1207), or records nothing if already paid (:1189-1190). Coverage is additionally capped by the 'stripe_checkout' literal join key - those rows are unverifiable, not passing."
+    },
+    "M5": {
+      "status": "fail",
+      "type": "binary",
+      "detail": "Money type discipline holds on the server, at the Stripe boundary (all six outbound sites send String(<integer cents>) behind Number.isInteger guards), in API responses, and on mobile end to end. It is violated in the web write path, which round-trips money through float dollars. No float/real/double precision/money/decimal type exists on any money column. quantity is an unscaled NUMERIC but is a non-monetary multiplier whose product is immediately rounded - not a violation per the scoped rule."
+    },
+    "M6": {
+      "status": "fail",
+      "type": "quality",
+      "detail": "Void does not invalidate outstanding payment links (deactivateLink has three callers, none the void path). incrementAmountPaidAtomic can write 'paid' from any state including void, a transition INVOICE_STATUS_TRANSITIONS forbids; its sibling decrementAmountPaidAtomic does carry the guard. Estimate->invoice is idempotent on the primary path but double-convertible via POST /api/invoices and draft_invoice proposal execution, and the uniqueness index degrades to non-unique on tenants with pre-existing duplicates. Post-void scoping is additionally blocked on D-M2 - no voided_at column and no audit event on the status route."
+    },
+    "M7": {
+      "status": "fail",
+      "type": "quality",
+      "detail": "First-delivery dedupe is sound: DB unique index on (source, idempotency_key), ON CONFLICT DO NOTHING, plus an explicit lost-race guard. Retry execution is unclaimed: classifyExisting is a pure read returning duplicate:false for failed and stale rows with no CAS, no status flip, no FOR UPDATE, so two concurrent retries both execute the handler. The index prevents duplicate receipt rows, not duplicate execution. Needs a retry-concurrency assertion distinct from the redelivery one."
+    },
+    "M8": {
+      "status": "fail",
+      "type": "quality",
+      "detail": "The cumulative over-refund guard is correct and race-tested (incrementRefundAtomic checks refunded + new <= amount inside a single atomic UPDATE). Two independent double-apply routes remain: the latest-id-only short-circuit under failed-then-retry interleaving (tracked as D2-4a), and timing via M7 - concurrent retries both read last_refund_stripe_id before either increment commits. The D2-4a fix closes the first route only. Refund initiation is ABSENT product-wide; the system only records refunds issued from the Stripe dashboard."
+    },
+    "M9": {
+      "status": "fail",
+      "type": "quality",
+      "blocked_on": "D-M4",
+      "detail": "Tax is stored per document, never recomputed on read, so historical invoices do not drift. Rounding is Math.round applied once per document on the taxable base, not per line. Rate model is flat per document with no jurisdiction, nexus, or exemption modeling - the taxExempt flag exists but feeds only AI-supervisor routing and never reaches the billing engine. Open defect: a discount is subtracted in full from the taxable base and in full from the grand total, with no proportional split across taxable and non-taxable lines, which under-taxes mixed-taxability invoices."
+    },
+    "M10": {
+      "status": "partial",
+      "type": "quality",
+      "detail": "Money-table RLS is CLEAN - tenant_id NOT NULL plus tenant_isolation plus FORCE ROW LEVEL SECURITY on every money table, backed by two passing whole-database tests (static migration parser and runtime pg_catalog property test across ~116 tenant-scoped tables). The gate inherits this rather than re-proving it. Outstanding: two money-adjacent repositories are pinned only by mocked-Pool tests with no integration counterpart (pg-approval, pg-service-credit, the latter holding amount_cents)."
+    }
+  },
+  "decisions_needed": [
+    {
+      "id": "D-M1",
+      "question": "Refund convention: is amount_paid_cents refund-inclusive (current stated invariant) or refund-net (what reconcileInvoiceFromPayments implements)?",
+      "blocks": ["M2"],
+      "note": "Both are defensible - net is arguably the economically correct number, inclusive is what the rest of the system assumes. The defect is that both exist. Product decision, not a bug fix; the loop halts on it rather than choosing."
+    },
+    {
+      "id": "D-M2",
+      "question": "Add a voided_at column or a void audit event?",
+      "blocks": ["M6 post-void scoping"],
+      "note": "transitionInvoiceStatus writes only status and updatedAt, the status route emits no audit event, and updatedAt is overwritten by later writes. No post-void assertion is evaluable until durable void history exists. Asserting on live payment-link state is the only form available without new writes."
+    },
+    {
+      "id": "D-M3",
+      "question": "Should an over-payment / credit-balance concept exist?",
+      "blocks": ["M4 remediation"],
+      "note": "Capping the invoice credit is correct; the problem is the excess has nowhere to go and is discarded. Remediating M4 requires knowing where that money should land."
+    },
+    {
+      "id": "D-M4",
+      "question": "On a mixed-taxability invoice, should a discount reduce the taxable base in full (current) or proportionally?",
+      "blocks": ["M9"],
+      "note": "Current behavior under-taxes when a discount spans taxable and non-taxable lines."
+    }
+  ],
+  "next_iteration": [
+    "Ratify D-M1 before running any L3 sweep - M2 results are noise until then.",
+    "M1 first: it fails today and the code fix is mechanical (recompute line totals server-side from quantity * unit_price_cents rather than trusting the client). Separate the code remediation from the historical-row correction; they are two deliverables.",
+    "Build the V24 interleaving suite before attempting M3/M7/M8 - genuinely parallel, distinct connections, overlapping transactions. A sequential loop passes and proves nothing.",
+    "Build the V25 error-branch suite before attempting M4 - the capture-loss defect lives in a catch block, and the success path is correct.",
+    "Fix the 'stripe_checkout' literal provider reference before claiming M4 coverage; until then the sweep must report those rows as a coverage hole.",
+    "M10 needs no work beyond backfilling integration coverage for the two mocked-Pool repositories."
+  ]
+}
