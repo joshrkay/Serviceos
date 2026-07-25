@@ -2481,7 +2481,8 @@ export const MIGRATIONS = {
       DROP CONSTRAINT IF EXISTS message_dispatches_entity_type_check;
     ALTER TABLE message_dispatches
       ADD CONSTRAINT message_dispatches_entity_type_check
-        CHECK (entity_type IN ('estimate', 'invoice', 'appointment_confirmation', 'appointment_reminder', 'delay_notice'));
+        CHECK (entity_type IN ('estimate', 'invoice', 'appointment_confirmation', 'appointment_reminder', 'delay_notice'))
+        NOT VALID;
     CREATE INDEX IF NOT EXISTS idx_dispatches_tenant_sent_at
       ON message_dispatches (tenant_id, sent_at DESC);
   `,
@@ -3130,7 +3131,7 @@ export const MIGRATIONS = {
           'estimate', 'invoice', 'appointment_confirmation',
           'appointment_reschedule', 'appointment_cancel', 'appointment_reminder',
           'payment_receipt', 'invoice_overdue', 'delay_notice', 'appointment_en_route'
-        ));
+        )) NOT VALID;
   `,
 
   '125_estimates_deleted_at': `
@@ -4101,7 +4102,7 @@ export const MIGRATIONS = {
           'appointment_reschedule', 'appointment_cancel', 'appointment_reminder',
           'payment_receipt', 'invoice_overdue', 'delay_notice', 'appointment_en_route',
           'daily_digest'
-        ));
+        )) NOT VALID;
   `,
 
   // RV-074 review fix: widen the proposal_sms_events kind CHECK from 156 to
