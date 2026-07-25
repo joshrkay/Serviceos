@@ -382,10 +382,26 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
 
     // §10 voice gates — subscription, go-live, trial caps. Voicemail on block.
     if (deps.voiceGate) {
+      // Point at /recording, NOT /voicemail-status. Only /recording actually
+      // persists: it downloads RecordingUrl, uploads to storage and inserts
+      // the files + voice_recordings rows, which is what makes the audio
+      // visible to the audit trail and reachable by deprovision's key harvest.
+      // /voicemail-status only mints a lead — and it resolves the tenant from
+      // store.findByCallSid, which finds nothing here because this gate
+      // returns before any voice session is created, so it would log "missing
+      // tenant" and drop the callback. /recording has a To/From tenant
+      // fallback for exactly this no-session case.
+      const gateBase = (deps.publicBaseUrl ?? '').replace(/\/+$/, '');
+      const gateCallback = gateBase
+        ? `${gateBase}/api/telephony/recording`
+        : '/api/telephony/recording';
       try {
         const gate = await deps.voiceGate({ tenantId, callSid });
         if (!gate.allowed) {
-          res.status(200).type('text/xml').send(voicemailTwimlForGateReason(gate.reason));
+          res
+            .status(200)
+            .type('text/xml')
+            .send(voicemailTwimlForGateReason(gate.reason, gateCallback));
           return;
         }
       } catch (err) {
@@ -393,7 +409,10 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
           callSid,
           error: err instanceof Error ? err.message : String(err),
         });
-        res.status(200).type('text/xml').send(voicemailTwimlForGateReason('not_live'));
+        res
+          .status(200)
+          .type('text/xml')
+          .send(voicemailTwimlForGateReason('not_live', gateCallback));
         return;
       }
     }
@@ -482,16 +501,16 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
       const base = (deps.publicBaseUrl ?? '').replace(/\/+$/, '');
       const action = `${base}/api/telephony/gather?sid=${encodeURIComponent(session.id)}`;
       const lang: Language = session.language === 'es' ? 'es' : 'en';
+      if (!session.recordingDisclosed) {
+        logger.info('telephony/gather-fallback: disclosure spoken on undisclosed degrade', {
+          callSid,
+          sessionId: session.id,
+        });
+      }
       res
         .status(200)
         .type('text/xml')
-        .send(
-          buildCallbackGatherTwiml({
-            promptText: t('realtime.degraded_repair', lang),
-            actionUrl: action,
-            lang,
-          }),
-        );
+        .send(buildDegradeFallbackTwiml(session, action, lang));
       return;
     }
 
@@ -963,16 +982,59 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
  * `<Redirect>` re-POSTs to the same action on silence so a `call_me_back` task
  * is still scheduled (with an empty message) rather than dropping the caller.
  */
+/**
+ * TwiML that resumes a degraded realtime call on the Gather transport.
+ *
+ * The realtime transport can degrade BEFORE call establishment ever ran — the
+ * STT socket failing to open is exactly that case, and `<Connect><Stream>`
+ * speaks nothing, so the caller has heard silence up to this point. This
+ * document arms speech recognition, which makes it an audio-capture entry
+ * point in its own right: it must carry the recording disclosure itself
+ * whenever the session has never been disclosed, rather than assume an
+ * earlier turn covered it.
+ *
+ * Uses the two-party copy, matching the unknown-caller-state default in
+ * disclose-recording.ts (no caller state is available here). Latches
+ * `recordingDisclosed` so a caller who degrades more than once is not
+ * re-read the notice every turn.
+ */
+export function buildDegradeFallbackTwiml(
+  session: { recordingDisclosed?: boolean },
+  actionUrl: string,
+  lang: Language,
+): string {
+  // The disclosure must be a standalone <Say> BEFORE the <Gather>, not the
+  // Gather's nested prompt: `<Gather input="speech">` starts recognizing at
+  // the first millisecond, so a notice nested inside it plays while capture
+  // is already armed — the exact ordering this gate exists to prevent.
+  const preambleText = session.recordingDisclosed ? undefined : t('disclose.two_party', lang);
+  session.recordingDisclosed = true;
+  return buildCallbackGatherTwiml({
+    promptText: t('realtime.degraded_repair', lang),
+    actionUrl,
+    lang,
+    ...(preambleText ? { preambleText } : {}),
+  });
+}
+
 function buildCallbackGatherTwiml(opts: {
   promptText: string;
   actionUrl: string;
   lang: Language;
+  /**
+   * Spoken BEFORE the `<Gather>` opens, for copy that must finish playing
+   * while nothing is listening (the recording disclosure). Copy nested in the
+   * Gather's own `<Say>` plays with speech recognition already armed.
+   */
+  preambleText?: string;
 }): string {
   const locale = opts.lang === 'es' ? 'es-MX' : 'en-US';
   const action = xmlEscape(opts.actionUrl);
   const prompt = xmlEscape(opts.promptText);
+  const preamble = opts.preambleText ? `<Say>${xmlEscape(opts.preambleText)}</Say>` : '';
   return (
     `<?xml version="1.0" encoding="UTF-8"?><Response>` +
+    preamble +
     `<Gather input="speech" action="${action}" method="POST" speechTimeout="auto" language="${locale}">` +
     `<Say>${prompt}</Say>` +
     `</Gather>` +
@@ -1215,12 +1277,23 @@ async function resolveInboundTenantId(opts: {
 }
 
 /** Voicemail TwiML when inbound voice gates block AI routing. */
-export function voicemailTwimlForGateReason(reason: GateReason | undefined): string {
+export function voicemailTwimlForGateReason(
+  reason: GateReason | undefined,
+  recordingStatusCallback?: string,
+): string {
   const say =
     reason === 'not_live'
       ? "This line isn't using our AI assistant yet. Please leave a message after the tone."
       : reason === 'no_billing'
         ? "We're finishing account setup. Please leave a message after the tone."
         : 'This number is being set up. Please leave a message after the tone.';
-  return `<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="Polly.Joanna">${xmlEscape(say)}</Say><Record maxLength="120" playBeep="true"/><Hangup/></Response>`;
+  // The callback is what makes the recording EXIST for us: without it nothing
+  // reaches recording-webhook, so no files/voice_recordings row is created —
+  // and an object with no row is invisible to the audit trail and survives
+  // tenant deprovisioning, which harvests keys from `files`. Every sibling
+  // voicemail path passes one; this branch used to be the exception.
+  const callbackAttr = recordingStatusCallback
+    ? ` recordingStatusCallback="${xmlEscape(recordingStatusCallback)}" recordingStatusCallbackMethod="POST"`
+    : '';
+  return `<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="Polly.Joanna">${xmlEscape(say)}</Say><Record maxLength="120" playBeep="true"${callbackAttr}/><Hangup/></Response>`;
 }

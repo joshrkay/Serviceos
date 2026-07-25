@@ -161,7 +161,7 @@ import type { JobRepository } from '../../jobs/job';
 import type { AppointmentRepository } from '../../appointments/appointment';
 import type { InvoiceRepository } from '../../invoices/invoice';
 import type { AgreementRepository } from '../../agreements/agreement';
-import type { CustomerRepository } from '../../customers/customer';
+import type { Customer, CustomerRepository } from '../../customers/customer';
 import type { ConversationRepository } from '../../conversations/conversation-service';
 import { findOrCreateCustomerByPhone } from '../skills/find-or-create-customer';
 import { logInboundCallOnCustomerTimeline } from '../../telephony/inbound-call-log';
@@ -2552,6 +2552,65 @@ export function createVoiceTurnProcessor(
    * customerRepo + phone (or on failure) we fall back to the FSM's existing
    * `unknown_caller` retry/escalate path.
    */
+  /**
+   * The caller's number matched several accounts in this tenant. Surface the
+   * candidate list for a one-tap operator pick instead of ranking them — the
+   * same choice `identify-caller` makes on `status:'multiple'` and that
+   * customer-MMS intake makes on a multi-match photo. Candidates carry equal
+   * scores because there is genuinely no ordering to express: the underlying
+   * query has no ORDER BY. Best-effort — a failure here must not break the
+   * call, which continues down the unknown_caller path either way.
+   */
+  async function raiseCallerClarification(
+    session: VoiceSession,
+    tenantId: string,
+    callerPhone: string,
+    candidates: Customer[],
+  ): Promise<void> {
+    if (!deps.proposalRepo) return;
+    try {
+      const proposal = buildProposal({
+        tenantId,
+        proposalType: 'voice_clarification',
+        payload: {
+          transcript: `Inbound call from ${maskPhone(callerPhone)}`,
+          reason: 'ambiguous_entity',
+          entityReference: callerPhone,
+          entityCandidates: candidates.map((c) => ({
+            id: c.id,
+            label: c.displayName,
+            ...(c.primaryPhone ? { hint: c.primaryPhone } : {}),
+            score: 0,
+          })),
+        },
+        summary: `Caller ${maskPhone(callerPhone)} matched ${candidates.length} customers — pick which one before this call is attached.`,
+        createdBy: deps.systemActorId ?? 'system:inbound-call',
+        ...(session.callSid
+          ? { idempotencyKey: `voice-caller-clarify:${session.callSid}` }
+          : {}),
+      });
+      const stored = await deps.proposalRepo.create(proposal);
+      if (deps.auditRepo) {
+        await deps.auditRepo.create(
+          createAuditEvent({
+            tenantId,
+            actorId: deps.systemActorId ?? 'system:inbound-call',
+            actorRole: 'system',
+            eventType: 'voice.caller_clarification_raised',
+            entityType: 'proposal',
+            entityId: stored.id,
+            metadata: { candidateCount: candidates.length, sessionId: session.id },
+          }),
+        );
+      }
+    } catch (err) {
+      logger.error('ask_caller: ambiguous-caller clarification failed', {
+        error: err instanceof Error ? err.message : String(err),
+        sessionId: session.id,
+      });
+    }
+  }
+
   async function handleAskCaller(
     session: VoiceSession,
     tenantId: string,
@@ -2567,6 +2626,17 @@ export function createVoiceTurnProcessor(
           ...(deps.auditRepo ? { auditRepo: deps.auditRepo } : {}),
           systemActorId: deps.systemActorId ?? 'system:inbound-call',
         });
+        if (resolved.status === 'ambiguous') {
+          // This number belongs to several accounts in this tenant. Binding
+          // session.customerId here would scope every later balance/invoice
+          // lookup — and this call's timeline entry — to an arbitrary one of
+          // them, inside a single tenant where RLS cannot see the mistake.
+          // Raise a clarification and fall back to the FSM's existing
+          // unknown_caller retry/escalate path instead of guessing.
+          await raiseCallerClarification(session, tenantId, callerPhone, resolved.candidates);
+          out.push(...session.machine.dispatch({ type: 'unknown_caller' }));
+          return out;
+        }
         session.customerId = resolved.customerId;
         if (deps.conversationRepo) {
           try {

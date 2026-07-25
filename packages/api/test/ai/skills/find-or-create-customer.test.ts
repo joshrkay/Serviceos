@@ -102,6 +102,42 @@ describe('findOrCreateCustomerByPhone', () => {
     expect(res).toMatchObject({ status: 'found', customerId: 'new' });
   });
 
+  // Two same-status matches is the case that was unpinned, and the one that
+  // matters: the underlying query has no ORDER BY, so "first match" is an
+  // arbitrary row. Binding a voice session to it scopes that caller's balance
+  // and invoice lookups to the wrong account — same tenant, so RLS is blind
+  // to it. Contract: multiple candidates → ask, never rank.
+  it('reports ambiguous instead of guessing when two active customers share a phone', async () => {
+    const a = customer({ id: 'acct-a', primaryPhone: '+15125550100' });
+    const b = customer({ id: 'acct-b', primaryPhone: '+15125550100' });
+    const { repo, create } = makeRepo([a, b]);
+    const res = await findOrCreateCustomerByPhone({ ...input(), customerRepo: repo });
+    expect(res.status).toBe('ambiguous');
+    expect(res.status === 'ambiguous' && res.candidates.map((c) => c.id).sort()).toEqual([
+      'acct-a',
+      'acct-b',
+    ]);
+    // It must not paper over the ambiguity by minting a third record either.
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('archiving one duplicate resolves the ambiguity', async () => {
+    const a = customer({ id: 'acct-a', primaryPhone: '+15125550100', isArchived: true });
+    const b = customer({ id: 'acct-b', primaryPhone: '+15125550100' });
+    const { repo } = makeRepo([a, b]);
+    const res = await findOrCreateCustomerByPhone({ ...input(), customerRepo: repo });
+    expect(res).toMatchObject({ status: 'found', customerId: 'acct-b' });
+  });
+
+  it('two archived matches are still ambiguous — it does not fall through to create', async () => {
+    const a = customer({ id: 'acct-a', primaryPhone: '+15125550100', isArchived: true });
+    const b = customer({ id: 'acct-b', primaryPhone: '+15125550100', isArchived: true });
+    const { repo, create } = makeRepo([a, b]);
+    const res = await findOrCreateCustomerByPhone({ ...input(), customerRepo: repo });
+    expect(res.status).toBe('ambiguous');
+    expect(create).not.toHaveBeenCalled();
+  });
+
   it('creates without a lookup when the phone is too short to match reliably', async () => {
     const { repo, create } = makeRepo([]);
     const res = await findOrCreateCustomerByPhone({ ...input({ fromPhone: '123' }), customerRepo: repo });

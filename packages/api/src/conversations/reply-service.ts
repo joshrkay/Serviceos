@@ -36,6 +36,7 @@ import type { Lead } from '../leads/lead';
 import { UNMATCHED_SMS_ENTITY_TYPE } from '../sms/inbound-capture';
 import type {
   ConversationRepository,
+  LatestInbound,
   Message,
 } from './conversation-service';
 
@@ -62,7 +63,7 @@ export class ConversationReplyError extends Error {
 export interface ConversationReplyDeps {
   conversationRepo: Pick<
     ConversationRepository,
-    'findById' | 'addMessage' | 'getMessages' | 'findLatestInboundChannel'
+    'findById' | 'addMessage' | 'getMessages' | 'findLatestInbound'
   >;
   customerRepo: { findById(tenantId: string, id: string): Promise<Customer | null> };
   /** Lead lookup — required to reply to a lead-linked thread (unknown-caller
@@ -187,32 +188,35 @@ function pickReplyChannel(opts: {
  * to `source`. Returns undefined for owner-initiated threads with no
  * inbound traffic yet.
  */
-async function lastInboundChannel(
+async function lastInbound(
   deps: ConversationReplyDeps,
   tenantId: string,
   conversationId: string,
-): Promise<ReplyChannel | undefined> {
+): Promise<LatestInbound | undefined> {
   // Bounded repo lookup when available (Pg: ORDER BY … DESC LIMIT 1) — a
   // long-running thread must not be fully scanned on every send. The
   // getMessages scan below is the fallback for harnesses that stub only
   // the minimal repo surface.
-  if (deps.conversationRepo.findLatestInboundChannel) {
+  if (deps.conversationRepo.findLatestInbound) {
     return (
-      (await deps.conversationRepo.findLatestInboundChannel(tenantId, conversationId)) ??
-      undefined
+      (await deps.conversationRepo.findLatestInbound(tenantId, conversationId)) ?? undefined
     );
   }
   const messages = await deps.conversationRepo.getMessages(tenantId, conversationId);
-  let latest: { at: number; channel: ReplyChannel } | undefined;
+  let latest: { at: number; value: LatestInbound } | undefined;
   for (const m of messages) {
     const meta = (m.metadata ?? {}) as Record<string, unknown>;
     if (meta.direction !== 'inbound') continue;
     const channel = (meta.channel as string | undefined) ?? m.source;
     if (channel !== 'sms' && channel !== 'email') continue;
     const at = m.createdAt instanceof Date ? m.createdAt.getTime() : 0;
-    if (!latest || at >= latest.at) latest = { at, channel };
+    const senderE164 =
+      channel === 'sms'
+        ? (meta.fromE164 as string | undefined)?.trim() || m.senderId?.trim() || null
+        : null;
+    if (!latest || at >= latest.at) latest = { at, value: { channel, senderE164 } };
   }
-  return latest?.channel;
+  return latest?.value;
 }
 
 /**
@@ -253,12 +257,11 @@ async function resolveTarget(
     const phone = lead.primaryPhone?.trim() || undefined;
     const email = lead.email?.trim() || undefined;
     // Leads carry no channel preference; the thread channel (last inbound)
-    // governs, defaulting to SMS — the capture channel.
-    const threadChannel = await lastInboundChannel(
-      deps,
-      input.tenantId,
-      input.conversationId,
-    );
+    // governs, defaulting to SMS — the capture channel. A lead is a single
+    // person, so unlike the customer branch there is no account-vs-contact
+    // split here and the lead's own number is the right recipient.
+    const threadChannel = (await lastInbound(deps, input.tenantId, input.conversationId))
+      ?.channel;
     return pickReplyChannel({
       explicit: input.channel,
       defaultChannel: threadChannel ?? 'sms',
@@ -277,18 +280,29 @@ async function resolveTarget(
         'Conversation customer no longer exists',
       );
     }
-    const phone = customer.primaryPhone?.trim() || undefined;
-    const email = customer.email?.trim() || undefined;
-
     // The thread's own channel (last inbound) governs; the stored channel
     // preference only breaks the tie for owner-initiated threads with no
     // inbound traffic yet. 'phone' preference maps to SMS for a typed reply;
     // 'none' resolves nothing and asks when both channels are deliverable.
-    const threadChannel = await lastInboundChannel(
-      deps,
-      input.tenantId,
-      input.conversationId,
-    );
+    const inbound = await lastInbound(deps, input.tenantId, input.conversationId);
+    const threadChannel = inbound?.channel;
+
+    // Reply to the person who actually wrote, not to the account. The phone
+    // match that threaded the inbound message also matches secondary phones
+    // and `customer_contacts` rows, so on a multi-contact account the sender
+    // is routinely NOT `primaryPhone` — a landlord, tenant and property
+    // manager share one account with three numbers. Addressing the account
+    // sends the reply to a different human than the one who asked, which is
+    // a privacy failure, not a UX one (spec §4). Only applies when we stay
+    // on the thread's own channel: a deliberate cross-channel reply has no
+    // sender address to inherit and falls back to the account record.
+    const threadSender = inbound?.senderE164?.trim() || undefined;
+    const phone =
+      (threadChannel === 'sms' && threadSender ? threadSender : customer.primaryPhone?.trim()) ||
+      undefined;
+    // Email keeps the account address: there is no inbound email route yet
+    // (D14), so an email thread has no captured sender to reply to.
+    const email = customer.email?.trim() || undefined;
     const preferenceChannel: ReplyChannel | undefined =
       customer.preferredChannel === 'email'
         ? 'email'

@@ -6,6 +6,7 @@ import {
 } from '../../src/conversations/reply-service';
 import { InMemoryConversationRepository } from '../../src/conversations/conversation-service';
 import { UNMATCHED_SMS_ENTITY_TYPE } from '../../src/sms/inbound-capture';
+import { normalizePhone } from '../../src/compliance/dnc';
 import type { Customer } from '../../src/customers/customer';
 
 const TENANT = 'tenant-1';
@@ -472,14 +473,90 @@ describe('C3 channel selection', () => {
     expect(h.delivery.sendEmail).toHaveBeenCalledTimes(1);
   });
 
-  it('uses the bounded findLatestInboundChannel lookup instead of scanning getMessages', async () => {
+  // ─── The reply goes to the human who wrote, not to the account ───────────
+  // A customer's phone lookup also matches secondary phones and
+  // customer_contacts rows, so on a landlord/tenant/property-manager account
+  // the sender is routinely NOT primaryPhone. Replying to the account sends
+  // it to a different person (spec §4 — a privacy failure, not a UX one).
+
+  async function inboundFrom(
+    repo: InMemoryConversationRepository,
+    conversationId: string,
+    fromE164: string,
+    at: Date,
+  ): Promise<void> {
+    await repo.addMessage({
+      tenantId: TENANT,
+      conversationId,
+      messageType: 'text',
+      content: 'the tech never showed',
+      senderId: fromE164,
+      senderRole: 'customer',
+      source: 'sms',
+      metadata: {
+        direction: 'inbound',
+        channel: 'sms',
+        fromE164,
+        createdAtOverride: at.toISOString(),
+      },
+    });
+  }
+
+  it('replies to the contact number that texted, not the account primary phone', async () => {
+    const h = harness(); // primaryPhone is +15555550123 (the landlord)
+    const convId = await customerThread(h.conversationRepo, {
+      entityType: 'customer',
+      entityId: 'cust-1',
+    });
+    // A site contact on the same account texts from their own number.
+    await inboundFrom(h.conversationRepo, convId, '+15125550142', new Date('2026-06-17T11:00:00Z'));
+
+    const result = await sendConversationReply(h.deps, input(convId));
+
+    expect(result.channel).toBe('sms');
+    expect(h.delivery.sendSms).toHaveBeenCalledTimes(1);
+    expect(h.delivery.sendSms.mock.calls[0][0]).toMatchObject({ to: '+15125550142' });
+    expect(h.delivery.sendSms.mock.calls[0][0].to).not.toBe('+15555550123');
+  });
+
+  it('falls back to the account phone when the thread has no captured sender', async () => {
+    const h = harness();
+    const convId = await customerThread(h.conversationRepo, {
+      entityType: 'customer',
+      entityId: 'cust-1',
+    });
+    // Owner-initiated thread: no inbound message, so nothing to inherit.
+    const result = await sendConversationReply(h.deps, input(convId));
+    expect(result.channel).toBe('sms');
+    expect(h.delivery.sendSms.mock.calls[0][0]).toMatchObject({ to: '+15555550123' });
+  });
+
+  it('DNC is checked against the contact who texted, not the account primary', async () => {
+    const h = harness();
+    // The contact's own number is on the DNC list; the account primary is not.
+    h.dncRepo.isOnDnc.mockImplementation(async (_t: string, phone: string) =>
+      normalizePhone(phone) === normalizePhone('+15125550142'),
+    );
+    const convId = await customerThread(h.conversationRepo, {
+      entityType: 'customer',
+      entityId: 'cust-1',
+    });
+    await inboundFrom(h.conversationRepo, convId, '+15125550142', new Date('2026-06-17T11:00:00Z'));
+
+    await expect(sendConversationReply(h.deps, input(convId))).rejects.toMatchObject({
+      code: 'dnc_blocked',
+    });
+    expect(h.delivery.sendSms).not.toHaveBeenCalled();
+  });
+
+  it('uses the bounded findLatestInbound lookup instead of scanning getMessages', async () => {
     const h = harness();
     const convId = await customerThread(h.conversationRepo, {
       entityType: 'customer',
       entityId: 'cust-1',
     });
     await inbound(h.conversationRepo, convId, 'sms', new Date('2026-06-17T11:00:00Z'));
-    const bounded = vi.spyOn(h.conversationRepo, 'findLatestInboundChannel');
+    const bounded = vi.spyOn(h.conversationRepo, 'findLatestInbound');
     const scan = vi.spyOn(h.conversationRepo, 'getMessages');
     await sendConversationReply(h.deps, input(convId));
     expect(bounded).toHaveBeenCalledTimes(1);
