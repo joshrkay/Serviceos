@@ -1523,6 +1523,10 @@ export class TwilioMediaStreamAdapter {
     // the leg) are dropped rather than transcribed — the idle-timer bookkeeping
     // above still runs so a slow disclosure can't trip the inactivity teardown.
     if (!this.state.captureEnabled) return;
+    // The caller said "stop recording". Pausing the Twilio recording does
+    // nothing on this transport — the capture IS this socket — so honour the
+    // revocation here or the agent's "I've paused the recording" is a lie.
+    if (this.state.session?.captureRevoked) return;
     try {
       const pcm16 = decodeTwilioInboundFrame(frame.media.payload);
       this.state.deepgram.send(pcm16);

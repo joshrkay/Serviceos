@@ -23,7 +23,15 @@
  * a pure adapter-behavior check and does not touch Postgres.
  */
 import { describe, it, expect, afterAll, vi } from 'vitest';
-import { buildTwiML } from '../../src/telephony/twilio-adapter';
+import express from 'express';
+import request from 'supertest';
+import twilio from 'twilio';
+import { buildTwiML, TwilioGatherAdapter } from '../../src/telephony/twilio-adapter';
+import {
+  buildDegradeFallbackTwiml,
+  createTelephonyRouter,
+  voicemailTwimlForGateReason,
+} from '../../src/routes/telephony';
 import {
   TwilioMediaStreamAdapter,
   type WsLike,
@@ -134,6 +142,45 @@ function silenceArmMarkName(ws: FakeWs): string | undefined {
       (f.mark as { name: string }).name.startsWith('silence-arm-'),
   );
   return (frame?.mark as { name: string } | undefined)?.name;
+}
+
+/**
+ * Drive the REAL POST /voice route with a blocking gate and return its TwiML.
+ * The builder taking a callback argument proves nothing on its own — the
+ * defect this pins was in the WIRING: the route passed a URL for a handler
+ * that never persists anything.
+ */
+async function gateBlockedVoiceTwiml(): Promise<string> {
+  const AUTH_TOKEN = 'test-tw-token-consent-gate';
+  const PUBLIC_BASE_URL = 'https://api.test';
+  const store = new VoiceSessionStore({ startInterval: false });
+  const adapter = new TwilioGatherAdapter({
+    store,
+    gateway: { complete: vi.fn() } as never,
+    businessName: 'Test Co',
+    publicBaseUrl: PUBLIC_BASE_URL,
+  });
+  const app = express();
+  app.use(
+    '/api/telephony',
+    createTelephonyRouter({
+      adapter,
+      authTokenGetter: () => AUTH_TOKEN,
+      publicBaseUrl: PUBLIC_BASE_URL,
+      resolveTenantId: () => 'tenant-consent-gate',
+      voiceGate: async () => ({ allowed: false, reason: 'not_live' as const }),
+    }),
+  );
+
+  const params = { CallSid: 'CA-consent-gate', From: '+15125550100', To: '+15125550999' };
+  const path = '/api/telephony/voice';
+  const sig = twilio.getExpectedTwilioSignature(AUTH_TOKEN, `${PUBLIC_BASE_URL}${path}`, params);
+  const res = await request(app)
+    .post(path)
+    .set('X-Twilio-Signature', sig)
+    .type('form')
+    .send(params);
+  return res.text;
 }
 
 const startFrame = (callSid: string, streamSid: string) => ({

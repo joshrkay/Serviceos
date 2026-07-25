@@ -173,6 +173,26 @@ export interface VoiceSession {
   /** Set when `identifyCaller` matched an existing customer. */
   customerId?: string;
   /**
+   * True once the recording disclosure has actually been emitted to the caller
+   * on this call (set by `bootstrapCallEstablishment`, which is the only
+   * caller of `discloseRecording`). Any path that resumes or re-arms audio
+   * capture on a live call — notably the realtime→Gather degrade — must speak
+   * the disclosure first when this is falsy, rather than assume an earlier
+   * turn covered it. The realtime transport can degrade BEFORE establishment
+   * ever runs (e.g. the STT socket fails to open), leaving a session that
+   * exists but has heard nothing.
+   */
+  recordingDisclosed?: boolean;
+  /**
+   * Set when the caller objected to being recorded. The Twilio recording is
+   * paused via the REST API, but that only covers `<Start><Record>` — the
+   * realtime transport's capture is the STT socket, which no REST call
+   * touches. The media-streams frame gate reads this so "stop recording"
+   * actually stops capture on both transports rather than only on the one
+   * that happens to have a Twilio recording attached.
+   */
+  captureRevoked?: boolean;
+  /**
    * U4 — B2B priority routing context, assembled at caller identification when
    * the matched customer is a business / property-manager account (parent +
    * sub-accounts + priority + occupied-property awareness). Adapter-side state
