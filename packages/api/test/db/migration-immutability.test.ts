@@ -149,10 +149,9 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['089_drop_vertical_packs_type_check', 'dd41709b4300eb0ed03b2a477bdbe163440c76a557d5c07cdbe3e02910a803b8'],
   ['090_tenant_settings_voice_persona', '95805b86eb94d010c5c231ae4ab641e05debba20464a61888a42ac4809b0dcfb'],
   ['091_voice_session_outcome', '6fea1ddb8c3725191aff36013b7134fe7bf91af7392cc815da7f9c041fcfc59c'],
-  // 092_extend_dispatch_entity_types: added 'appointment_reminder' to the entity_type CHECK
-  // constraint — 11 rows in message_dispatches had this value, causing pg error 23514 on every
-  // deploy (runner re-runs all migrations on every boot, DROP+re-ADD re-validates all rows).
-  ['092_extend_dispatch_entity_types', 'cc5d07bbf11a26fb95ec6dc93a8344b24fa44472f89e167e4023bb60da603435'],
+  // 092_extend_dispatch_entity_types: replay-safe on populated databases; the intermediate
+  // CHECK constraint is added NOT VALID so rows permitted by later migrations do not block boot.
+  ['092_extend_dispatch_entity_types', 'd4d118f29fcb6ce2ba6b8dfe03681647cd4b1b77478d9081b14955662b311e28'],
   ['092_voice_session_transcript', 'f06ebad750ef6b1a8540d27aa14516f6db350b6debda0ec5cc444ad3a6e37f48'],
   ['093_users_deleted_at', '7d2ed611ca7751641c8cff049b55617e4af203b43257528e7c46c15bd80c127f'],
   ['094_add_held_appointment_fields', 'e71d08dc59d35a7c70c245572de551d7a4f48d4b7a5fcfd9164d39705a6f6607'],
@@ -186,7 +185,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['122_estimate_reminders', '5f6c29e7825508f8e4a1d62e889fc93d5dfca96af26e9d0a1f8ae613a56d0cd2'],
   ['123_platform_deprovision_log', 'c05fefacd43c39abd95305589cc12404e46f2a3c2a85b556a7ecd15dae283e3a'],
   ['124_tenant_settings_review_urls', '889419f461a2e292ff89c910528927715eee23435bf69e74c4fac832fe8ef3b2'],
-  ['125_dispatch_entity_en_route', '113fdf2a2aaba8da7250518612817363ffa77110f1d8c60ace32fcc255f55dc6'],
+  // Replay-safe on populated databases: the intermediate CHECK is added NOT VALID.
+  ['125_dispatch_entity_en_route', 'f65d91a77a4723a7bb7fb9bb1f77dc4399940d83848c1b1978e9ac3b6a406d7f'],
   ['125_estimates_deleted_at', '45ded6b32cd90fe40623332dafa7932ee33afbf6a8abb7df2afa117e04f72eec'],
   ['126_invoices_estimate_unique', 'b85be06a1ce1aa7d739ce2700e5a7fed6d08b757e6c58be92d136eea77846e44'],
   ['127_estimate_line_item_options', 'b6c373ef8aa306b24a1ea4c12f17fd5432446c00c3f1bd761050ff4dc7185ea5'],
@@ -235,7 +235,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['162_create_daily_digests', '2a55425f1609477624a0de73d215b33cff416a1aab7ad2e053619f41c76a702d'],
   // RV-063: per-tenant digest delivery settings (enabled/time/channel)
   ['163_tenant_settings_digest', '3fb34512c152ba262d2e21e4aa84608374156f89c07d5f71e3cd43d38b718836'],
-  ['164_dispatch_entity_daily_digest', '4d3ad093b4319cf786bfd047df3d5898720a4d6712e5037704c5a06fffc492e9'],
+  // Replay-safe on populated databases: the intermediate CHECK is added NOT VALID.
+  ['164_dispatch_entity_daily_digest', 'ec48142ffff3ffd510be3e05e7a21381ec2d8314a37056a29d758ea004ce5676'],
   // RV-074: widen proposal_sms_events kind CHECK for 'review_required_rendered'
   ['165_proposal_sms_events_review_required_kind', '0a1ccd582e840a57ec622344a0a41a690229bfd30b7b9e87b0265c255b1dff56'],
   // RV-120: per-call vulnerability triage outcomes (turn-batch grader log)
