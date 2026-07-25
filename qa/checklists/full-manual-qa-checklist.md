@@ -84,10 +84,10 @@ Section 21 runs once, comparing the two.
 - [ ] **QA-007** 🖱️ P0 — Identity step: enter business name, industry/vertical. **Expect:** advances, `wizard_step_business` fires. (WF-06)
 - [ ] **QA-008** 🖱️ P0 — Pack step: select a vertical pack (e.g. HVAC/plumbing). **Expect:** pack active under `/api/verticals`; price book pre-seeds from the pack.
 - [ ] **QA-009** 🖱️/☎️ P0 — Phone step: provision a Twilio number. **Expect:** number assigned within the async worker's window; number is dialable from an outside phone once provisioned. (WF-07)
-- [ ] **QA-010** 🖱️ P1 — Voice config panel: set the AI persona/greeting and (if enabled) a voice-approval PIN. **Expect:** persona text and PIN persist; PIN panel round-trips through settings.
-- [ ] **QA-011** 🖱️ P1 — Calendar choice panel: connect or skip Google Calendar. **Expect:** connect opens OAuth consent; skip advances without blocking.
-- [ ] **QA-012** 🖱️ P1 — Billing step: start trial or enter card. **Expect:** subscription/trial row created; billing portal session reachable. (WF-09)
-- [ ] **QA-013** ☎️ P0 — Test-call step: call the newly-provisioned number from an outside phone. **Expect:** AI agent answers, discloses it's an AI (per `disclose-ai-identity` skill) and that the call may be recorded (`disclose-recording`), completes a greeting, onboarding checklist flips this step to done. (WF-08)
+- [ ] **QA-010** 🖱️ P1 — Billing step: start trial or enter card. **Expect:** subscription/trial row created; billing portal session reachable. (WF-09)
+- [ ] **QA-011** 🖱️ P1 — AI check step's voice config panel: set the AI persona/greeting and (if enabled) a voice-approval PIN. **Expect:** persona text and PIN persist; PIN panel round-trips through settings.
+- [ ] **QA-012** 🖱️ P1 — On the test-call step's screen, use the calendar choice panel: connect or skip Google Calendar. **Expect:** connect opens OAuth consent; skip advances without blocking.
+- [ ] **QA-013** ☎️ P0 — Same screen, test-call step: call the newly-provisioned number from an outside phone. **Expect:** AI agent answers, discloses it's an AI (per `disclose-ai-identity` skill) and that the call may be recorded (`disclose-recording`), completes a greeting, onboarding checklist flips this step to done. (WF-08)
 - [ ] **QA-014** 🖱️ P1 — Resume onboarding after closing the tab mid-wizard. **Expect:** re-opening `/onboarding` restores the correct step, no data loss.
 
 ## 3. CRM — customers
@@ -103,7 +103,7 @@ Section 21 runs once, comparing the two.
 - [ ] **QA-020** 🖱️ P1 — Create a lead manually. **Expect:** appears on `/leads` kanban in the correct stage. (WF-14)
 - [ ] **QA-021** 🖱️ P1 — Drag a lead card across kanban stages (all 6). **Expect:** stage persists on reload.
 - [ ] **QA-022** 🖱️ P1 — Convert a lead to a customer. **Expect:** customer created/linked, lead marked won, no duplicate customer row. (WF-15)
-- [ ] **QA-023** 🖱️ P0 — Submit the public intake form (`/intake`) as a prospect. **Expect:** a lead or customer appears in the app within a few seconds. (WF-16)
+- [ ] **QA-023** 🖱️ P0 — Submit the public intake form as a prospect. Bare `/intake` resolves no tenant — use the link Settings copies for you (`/intake?t=<tenantId>`). **Expect:** a lead or customer appears in the app within a few seconds. (WF-16)
 
 ## 5. Jobs
 
@@ -160,7 +160,7 @@ target) and QA-037 (reassign between two lanes).
 - [ ] **QA-049** 🖱️/🔧 P1 — Make a partial payment, then pay the remainder. The shipped "Mark Paid" UI (`MarkPaidSheet`) only records the full `amountDueCents` — there's no UI control for a custom amount (`PaymentRecordForm` supports one but isn't wired into any page). Use an API-assisted step instead: as the signed-in owner, `POST /api/payments` with `{invoiceId, amountCents: <less than amountDueCents>, method, receivedDate}`, then repeat with the remainder. **Expect:** `partially_paid` → `paid` transitions correctly; a follow-up over-`amountDueCents` request is rejected. (WF-34, `[PAY-01]`)
 - [ ] **QA-050** 🖱️ P1 — Let an invoice go overdue (or seed one). **Expect:** overdue-invoice worker flags it; owner sees it on the money dashboard. (`[PAY-04]`)
 - [ ] **QA-051** 🖱️/🔧 P2 — Set up a progress/milestone billing plan on a job (a `create_invoice_schedule` proposal — e.g. percent-on-accept, percent-on-completion, remainder-on-manual — approved from the inbox). **Expect:** the schedule persists with its milestones; the `on_accept`/`manual` milestones draft/fire with no extra setup. The `on_completion` milestone is different: `mintCompletionMilestones` no-ops unless the tenant setting `milestoneBillingEnabled` is true, and there's no web UI toggle for it — before testing that trigger, enable it via an authenticated `PUT /api/settings` with `{milestoneBillingEnabled: true}`. There is no date/recurrence-based trigger today, only these three.
-- [ ] **QA-052** 🖱️ P2 — Run a batch invoice job across multiple jobs/customers. **Expect:** one invoice per eligible job, no duplicates, no cross-tenant leakage.
+- [ ] **QA-052** 🖱️/🔧 P2 — Run a batch invoice job across multiple jobs/customers. `batchInvoiceEnabled` defaults false with no web UI toggle, and `runBatchInvoiceSweep` only picks up opted-in tenants on its hourly tick. Prerequisite: `PUT /api/settings` with `{batchInvoiceEnabled: true}`, have several jobs in an eligible (completed, uninvoiced) state, then wait up to an hour for the sweep. **Expect:** one invoice per eligible job, no duplicates, no cross-tenant leakage.
 - [ ] **QA-053** 🖱️ P1 — Export a tax/revenue report for a date range. **Expect:** totals reconcile against the money dashboard for the same range.
 
 ## 11. Maintenance contracts
@@ -172,7 +172,7 @@ target) and QA-037 (reassign between two lanes).
 
 - [ ] **QA-056** 🖱️ P1 — Open the money dashboard (`/reports/money`). **Expect:** revenue reflects actual payments; no stale mock data. (`[PAY-03]`, `[PAY-04]`)
 - [ ] **QA-057** 🖱️ P2 — Open revenue-by-source (`/reports/revenue-by-source`). **Expect:** totals sum to the same figure as the money dashboard.
-- [ ] **QA-058** 🖱️ P1 — Open today's digest (`/digest`) and a past date (`/digest/:date`). **Expect:** digest content matches the day's actual jobs/revenue/leads.
+- [ ] **QA-058** 🖱️/🔧 P1 — Open today's digest (`/digest`) and a past date (`/digest/:date`). `digestEnabled` defaults false and `DigestPage` only ever renders a previously-computed snapshot — it never computes on demand. Prerequisite: `PUT /api/settings` with `{digestEnabled: true, digestTime: "<a few minutes from now, HH:MM tenant-local>"}`, then wait for the 15-minute sweep (`runDailyDigestSweep`) to cross that bucket. **Expect:** once computed, digest content matches the day's actual jobs/revenue/leads; a date with no computed snapshot correctly shows "No digest for this day" rather than an error.
 
 ## 13. Inbox & AI proposals
 
@@ -214,7 +214,7 @@ surface in the product; treat it as launch-gating (P0) per `docs/qa-strategy.md`
 
 ## 17. Notifications & compliance
 
-- [ ] **QA-081** 🖱️ P0 — Trigger a delay notice SMS (e.g. reschedule a same-day appointment). **Expect:** customer receives the SMS with correct new time.
+- [ ] **QA-081** 🖱️ P0 — Trigger a delay notice SMS: on the Schedule page, open a same-day appointment and use the **Notify delay** action (`Bell` icon) with a delay duration — an ordinary appointment reschedule does *not* send this SMS, "Notify delay" is a distinct virtual-status action (`isRunningBehind`/`delayMinutes`, does not change the appointment's stored status). **Expect:** customer receives the SMS with the delay noted; appointment status is unchanged. (`[SCH-05]`)
 - [ ] **QA-082** 🖱️ P1 — Trigger a post-job feedback SMS/email. **Expect:** customer receives a working feedback link.
 - [ ] **QA-083** ☎️/🖱️ P0 — Reply **STOP** to an SMS from the tenant number. **Expect:** the customer is marked opted-out and receives no further marketing/automated SMS; a direct reply confirming opt-out is sent once.
 - [ ] **QA-084** 🖱️ P2 — Trigger an overdue-invoice reminder. **Expect:** reminder sends once per cadence, not on every worker tick.
@@ -222,7 +222,7 @@ surface in the product; treat it as launch-gating (P0) per `docs/qa-strategy.md`
 
 ## 18. Public & customer self-service
 
-- [ ] **QA-086** 🖱️ P1 — Fill and submit the public booking page (`/book`, no token/login required). **Expect:** produces a held appointment + owner proposal, visible in the inbox. (Not in the WF-01–50 catalog — a newer public surface distinct from the token-gated portal booking below)
+- [ ] **QA-086** 🖱️ P1 — Fill and submit the public booking page (no token/login required, but bare `/book` reports "missing its business id" — use the link Settings copies for you (`/book?t=<tenantId>`)). **Expect:** produces a held appointment + owner proposal, visible in the inbox. (Not in the WF-01–50 catalog — a newer public surface distinct from the token-gated portal booking below)
 **Prerequisite for QA-087/087/088:** there is no UI button anywhere in the
 app to generate a `/portal/:token` link — the only thing that mints one is
 the authenticated `POST /api/portal-sessions` route (body
