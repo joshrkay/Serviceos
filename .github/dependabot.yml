@@ -1,0 +1,62 @@
+version: 2
+
+# Scheduled dependency updates, so the default route to clearing an advisory is
+# an upgrade rather than an entry in .github/dependency-exceptions.json.
+#
+# Grouped by risk rather than by package: a single "patch + minor for dev
+# tooling" PR is reviewable, whereas 40 individual PRs get rubber-stamped.
+# Major bumps stay ungrouped and individual — those need real review.
+updates:
+  - package-ecosystem: npm
+    directory: '/'
+    schedule:
+      interval: weekly
+      day: monday
+      time: '07:00'
+    open-pull-requests-limit: 5
+    groups:
+      dev-minor-patch:
+        applies-to: version-updates
+        dependency-type: development
+        update-types: ['minor', 'patch']
+      prod-patch:
+        applies-to: version-updates
+        dependency-type: production
+        update-types: ['patch']
+    ignore:
+      # Pinned to the Node line CI and the Railway image run (see .nvmrc);
+      # bumping the type definitions past the runtime major causes confusing
+      # type errors for APIs that are not actually available.
+      - dependency-name: '@types/node'
+        update-types: ['version-update:semver-major']
+
+  # packages/mobile is not a root workspace and carries its own lockfile, so
+  # the root entry above does not cover it.
+  - package-ecosystem: npm
+    directory: '/packages/mobile'
+    schedule:
+      interval: weekly
+      day: monday
+      time: '07:00'
+    open-pull-requests-limit: 3
+    groups:
+      mobile-minor-patch:
+        applies-to: version-updates
+        update-types: ['minor', 'patch']
+    ignore:
+      # Expo SDK majors move react-native, react, and the whole native module
+      # set together; they are migrations, not dependency bumps.
+      - dependency-name: 'expo'
+        update-types: ['version-update:semver-major']
+      - dependency-name: 'react-native'
+        update-types: ['version-update:semver-major']
+
+  - package-ecosystem: github-actions
+    directory: '/'
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+    groups:
+      actions:
+        applies-to: version-updates
+        update-types: ['minor', 'patch']
