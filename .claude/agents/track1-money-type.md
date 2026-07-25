@@ -16,7 +16,14 @@ Trace every representation of a monetary amount from the schema outward:
 
 Report `file:line` for every representation.
 
-Flag as **P0** any `float`, `double`, `numeric` without fixed scale,
-`parseFloat`, or arithmetic on a non-integer money value.
+Flag as **P0** any `float`, `double`, `real`, or `numeric` without fixed scale
+**on a monetary column**; any `parseFloat` on a monetary value; any monetary
+result left unrounded; and any money value that round-trips through a JS float.
+
+A **non-monetary** float multiplier (e.g. `quantity` as unscaled `NUMERIC`) that
+feeds a money computation is **PARTIAL, not P0**, when the product is immediately
+rounded to whole cents. Report it with its `file:line` and its rounding site, and
+escalate only if the rounding is absent, deferred, or inconsistent across call
+sites.
 
 Report EXISTS / PARTIAL / ABSENT per item. **Do not propose fixes.**

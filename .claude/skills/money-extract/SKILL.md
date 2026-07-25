@@ -17,9 +17,20 @@ Dispatch the five track subagents in parallel. Each reports
 Synthesize into `RIVET_MONEY_EXTRACTION_FINDINGS.md` using the output contract
 below.
 
-**Any float or floating-point type anywhere in a money path is an automatic
-P0**, flagged first regardless of what else is found — the same standing RLS
-gaps have in the comms extraction.
+**Any floating-point _monetary amount_ in a money path is an automatic P0**,
+flagged first regardless of what else is found — the same standing RLS gaps have
+in the comms extraction. That covers a money value stored, transported, or
+computed as a float, and any monetary result not rounded to whole cents at the
+point it is produced.
+
+**Scope note — do not auto-P0 non-monetary floats.** A non-monetary multiplier
+that participates in a money computation (a `quantity` held as unscaled `NUMERIC`
+or a JS number) is **not** an automatic P0 when its product is immediately
+rounded to cents. Report it PARTIAL with its `file:line` and its rounding site,
+and escalate only if the rounding is absent, deferred, or applied inconsistently
+across call sites. Without this distinction the rule fires on every ordinary
+fractional line item, and the pass contradicts its own findings — which is what
+the unscoped version did on the 2026-07 run.
 
 No `Bash` in `allowed-tools`: this pass needs zero execution to stay honest about
 read-only. The read-only guarantee lives in the **track agents**, whose `tools:`

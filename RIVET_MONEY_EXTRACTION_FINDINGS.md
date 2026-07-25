@@ -352,15 +352,33 @@ handled by one endpoint accepting a **comma-separated secret list**
 not two routes. The former `/api/webhooks/stripe` alias was deliberately removed for lacking
 raw-body middleware (`app.ts:1160-1168`).
 
-**Idempotency mechanism: DB CONSTRAINT — not racy.**
+**Idempotency mechanism: DB CONSTRAINT for first delivery — but RETRY EXECUTION IS UNCLAIMED.**
 `CREATE UNIQUE INDEX idx_webhook_idempotency ON webhook_events(source, idempotency_key)`
 (`db/schema.ts:275`, migration `012`). Insert is
 `INSERT ... ON CONFLICT (source, idempotency_key) DO NOTHING RETURNING *`
 (`webhooks/pg-webhook.ts:47-81`); on zero rows it re-SELECTs the existing row. The caller *is*
 SELECT-then-INSERT (`webhook-handler.ts:153-211`) but carries an explicit **lost-race guard** at
-`:206-208` (`if (created.id !== event.id) return classifyExisting(created)`). The DB constraint is
-the real arbiter, so concurrent redelivery is safe. Pinned by a real-Postgres integration test
-(`test/integration/webhooks.test.ts`).
+`:206-208` (`if (created.id !== event.id) return classifyExisting(created)`). For a **first**
+delivery the DB constraint is the real arbiter, and concurrent first deliveries are safe. Pinned by
+a real-Postgres integration test (`test/integration/webhooks.test.ts`).
+
+**The unique index prevents duplicate receipt rows, not duplicate execution.** Once a row exists,
+`classifyExisting` (`webhook-handler.ts:142-151`) is a **pure read** — it returns
+`duplicate: false` for a `failed` row (`:146-148`) and for a stale `received`/`processing` row
+(`:149-150`), and **nothing claims the row**: no compare-and-swap, no status flip to `processing`,
+no `SELECT … FOR UPDATE`. Two concurrent retries of the same `failed` or stale event therefore both
+receive `duplicate: false` and **both run the handler**.
+
+This compounds P0-4 rather than being separate from it: concurrent retries of a refund event can
+both read `last_refund_stripe_id` before either `incrementRefundAtomic` commits, so the per-refund
+short-circuit is bypassed by timing rather than by the id-tracking flaw. The DB guard
+`refunded_amount_cents + $3 <= amount_cents` bounds the loss but does not prevent a double count
+within that bound.
+
+**`/goal money` needs a retry-concurrency gate**, distinct from the redelivery gate. The redelivery
+gate asserts a second *delivery* is a no-op; this one asserts a second *retry* is. Only the first
+is currently true. A claim-on-retry (CAS the status to `processing` and proceed only on a row
+returned) is the shape that would close it, but that is a fix, not a finding.
 
 **Redelivery behavior** (`classifyExisting`, `webhook-handler.ts:142-151`; dispatch at `routes.ts:921-931`):
 
@@ -677,10 +695,14 @@ So `/goal money` **can** assert:
   audit event for a gate to read. **A void timestamp or a void audit event must be added before
   either this gate or the "paid with void history" assertion below can be evaluated** — asserting
   on live payment-link state is the only form available without new writes.
-- **State-machine invariants** at the DB level: no invoice in `paid` that has a void/canceled
-  history; no estimate with two live invoices via `estimate_id`.
-- **Webhook idempotency** under redelivery and concurrency — there is a real DB constraint to
-  assert against.
+- **State-machine invariants** at the DB level: no estimate with two live invoices via
+  `estimate_id`. **Not** "no invoice in `paid` with void/canceled history" — that assertion is
+  blocked by the same missing void history described above, since `updated_at` is overwritten by
+  later status writes and a swept invoice cannot be distinguished from one that was only ever paid.
+  It becomes available once a void timestamp or audit event exists.
+- **Webhook idempotency under redelivery** — a real DB unique constraint to assert against.
+  **Retry concurrency is a separate gate and currently fails**: nothing claims an existing
+  `failed`/stale row, so two concurrent retries both execute (see Track 3).
 - **RLS completeness** — already enforced by two passing whole-DB tests; the sweep inherits it
   rather than re-proving it.
 
@@ -749,7 +771,8 @@ Flagged, not decided.
 | 2 | Void → link invalidation | **BROKEN** (P0-1) |
 | 2 | Paid-invoice reject | **BROKEN UNDER CONCURRENCY** (P0-6) — holds serially only; needs the L4 gate |
 | 2 | Estimate → invoice | **IDEMPOTENT** primary / **DOUBLE-CONVERTIBLE** via 2 secondary paths |
-| 3 | Idempotency mechanism | **EXISTS — DB constraint, not racy** |
+| 3 | Idempotency — first delivery | **EXISTS** — DB unique constraint, concurrent first deliveries safe |
+| 3 | Idempotency — retry execution | **BROKEN** — no claim on `failed`/stale rows; two retries both execute |
 | 3 | Signature verification | **PARTIAL** — fail-closed but hand-rolled |
 | 3 | Event coverage | **PARTIAL** — refund events can double-count (P0-4) |
 | 3 | Transaction boundary | **ABSENT** — five separate commits per webhook |
