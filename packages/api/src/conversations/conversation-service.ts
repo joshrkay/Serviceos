@@ -31,6 +31,18 @@ export interface Message {
   createdAt: Date;
 }
 
+/** Newest inbound message on a thread: which channel, and who sent it. */
+export interface LatestInbound {
+  channel: 'sms' | 'email';
+  /**
+   * Originating E.164, for SMS only — `metadata.fromE164`, stamped by
+   * sms/inbound-capture. Null on email threads: there is no inbound email
+   * route yet (D14), so an "email" row's senderId is a synthetic actor id
+   * rather than a deliverable address, and must never be replied to.
+   */
+  senderE164: string | null;
+}
+
 export interface CreateConversationInput {
   tenantId: string;
   title?: string;
@@ -109,15 +121,20 @@ export interface ConversationRepository {
   addMessage(input: CreateMessageInput): Promise<Message>;
   getMessages(tenantId: string, conversationId: string): Promise<Message[]>;
   /**
-   * Comms C3 — the channel ('sms' | 'email') of the newest inbound message
-   * in the thread, or null when the thread has no inbound traffic. Bounded
-   * (LIMIT 1 in Pg) so reply sends don't scan whole histories. Optional:
-   * reply-service falls back to a getMessages scan when absent.
+   * Comms C3 — the channel AND originating address of the newest inbound
+   * message in the thread, or null when the thread has no inbound traffic.
+   * Bounded (LIMIT 1 in Pg) so reply sends don't scan whole histories.
+   * Optional: reply-service falls back to a getMessages scan when absent.
+   *
+   * The sender matters as much as the channel: a customer's phone lookup
+   * matches secondary phones and `customer_contacts` rows, so the human who
+   * texted is frequently NOT the account's primary phone. Replying to the
+   * account instead of the sender misdelivers to a different person.
    */
-  findLatestInboundChannel?(
+  findLatestInbound?(
     tenantId: string,
     conversationId: string,
-  ): Promise<'sms' | 'email' | null>;
+  ): Promise<LatestInbound | null>;
   updateMessageMetadata(tenantId: string, messageId: string, metadata: Record<string, unknown>): Promise<Message | null>;
   /** U5 — list comms threads (customer + unmatched) for the inbox surface. */
   listInboxThreads(
@@ -427,12 +444,13 @@ export class InMemoryConversationRepository implements ConversationRepository {
   }
 
   // Comms C3 — in-memory mirror of the Pg bounded lookup (same precedence:
-  // metadata.channel falls back to source; inbound-direction rows only).
-  async findLatestInboundChannel(
+  // metadata.channel falls back to source, metadata.fromE164 to sender_id;
+  // inbound-direction rows only).
+  async findLatestInbound(
     tenantId: string,
     conversationId: string,
-  ): Promise<'sms' | 'email' | null> {
-    let latest: { at: number; channel: 'sms' | 'email' } | undefined;
+  ): Promise<LatestInbound | null> {
+    let latest: { at: number; value: LatestInbound } | undefined;
     for (const m of this.messages) {
       if (m.tenantId !== tenantId || m.conversationId !== conversationId) continue;
       const meta = (m.metadata ?? {}) as Record<string, unknown>;
@@ -440,9 +458,13 @@ export class InMemoryConversationRepository implements ConversationRepository {
       const channel = (meta.channel as string | undefined) ?? m.source;
       if (channel !== 'sms' && channel !== 'email') continue;
       const at = m.createdAt instanceof Date ? m.createdAt.getTime() : 0;
-      if (!latest || at >= latest.at) latest = { at, channel };
+      const senderE164 =
+        channel === 'sms'
+          ? (meta.fromE164 as string | undefined)?.trim() || m.senderId?.trim() || null
+          : null;
+      if (!latest || at >= latest.at) latest = { at, value: { channel, senderE164 } };
     }
-    return latest?.channel ?? null;
+    return latest?.value ?? null;
   }
 
   async updateMessageMetadata(

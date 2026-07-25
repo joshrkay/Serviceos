@@ -181,14 +181,21 @@ describe('deprovisionTenant', () => {
 // ─── Comms C6 — the purge deletes stored objects instead of orphaning them ───
 
 describe('C6 stored-object cleanup', () => {
-  function poolWithFiles(files: Array<{ s3_bucket: string; s3_key: string }>) {
+  function poolWithFiles(
+    files: Array<{ s3_bucket: string; s3_key: string; thumbnail_s3_key?: string | null }>,
+  ) {
     const route = async (sql: string) => {
       if (/SELECT id FROM tenants WHERE id/.test(sql)) return { rowCount: 1, rows: [{ id: TENANT }] };
       if (/^\s*(BEGIN|COMMIT|ROLLBACK)/.test(sql) || /set_config|SET LOCAL/.test(sql)) {
         return { rowCount: 0, rows: [] };
       }
       if (/SELECT subaccount_sid/.test(sql)) return { rowCount: 0, rows: [] };
-      if (/SELECT s3_bucket, s3_key FROM files/.test(sql)) {
+      if (/FROM files/.test(sql)) {
+        // The harvest MUST read the thumbnail key too — an object whose only
+        // pointer row is deleted in the same transaction can never be
+        // rediscovered. Fail loudly here rather than silently returning rows
+        // the production query didn't ask for.
+        expect(sql).toMatch(/thumbnail_s3_key/);
         return { rowCount: files.length, rows: files };
       }
       if (/information_schema\.columns/.test(sql)) {
@@ -198,8 +205,16 @@ describe('C6 stored-object cleanup', () => {
       if (/INSERT INTO platform_deprovision_log/.test(sql)) return { rowCount: 1, rows: [] };
       return { rowCount: 0, rows: [] };
     };
+    const logInserts: Array<{ params: unknown[] }> = [];
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      if (/INSERT INTO platform_deprovision_log/.test(sql)) {
+        logInserts.push({ params: params ?? [] });
+      }
+      return route(sql);
+    });
     return {
-      query: vi.fn(route),
+      query,
+      logInserts,
       connect: vi.fn(async () => ({ query: vi.fn(route), release: vi.fn() })),
     };
   }
@@ -220,6 +235,42 @@ describe('C6 stored-object cleanup', () => {
     expect(deleteObject).toHaveBeenCalledWith('bkt', 't/photo-1.jpg');
     expect(result.storageObjectsDeleted).toBe(2);
     expect(result.storageObjectErrors).toBe(0);
+  });
+
+  it('deletes the derived thumbnail object as well as the original', async () => {
+    const pool = poolWithFiles([
+      { s3_bucket: 'bkt', s3_key: 't/photo-1.jpg', thumbnail_s3_key: 't/photo-1.jpg.thumb.jpg' },
+      // A row with no thumbnail (audio, documents) contributes one object only.
+      { s3_bucket: 'bkt', s3_key: 't/rec-1.mp3', thumbnail_s3_key: null },
+    ]);
+    const deleteObject = vi.fn(async () => undefined);
+    const result = await deprovisionTenant(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      { pool: pool as any, logger, storage: { deleteObject } as any },
+      { tenantId: TENANT, reason: 'manual_admin', actorId: 'admin-1' },
+    );
+    expect(deleteObject).toHaveBeenCalledWith('bkt', 't/photo-1.jpg');
+    expect(deleteObject).toHaveBeenCalledWith('bkt', 't/photo-1.jpg.thumb.jpg');
+    expect(deleteObject).toHaveBeenCalledWith('bkt', 't/rec-1.mp3');
+    expect(deleteObject).toHaveBeenCalledTimes(3);
+    expect(result.storageObjectsDeleted).toBe(3);
+    expect(result.storageObjectErrors).toBe(0);
+  });
+
+  it('records the keys of objects it failed to delete in the durable log', async () => {
+    const pool = poolWithFiles([{ s3_bucket: 'bkt', s3_key: 'boom.mp3' }]);
+    const deleteObject = vi.fn(async () => {
+      throw new Error('s3 down');
+    });
+    await deprovisionTenant(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      { pool: pool as any, logger, storage: { deleteObject } as any },
+      { tenantId: TENANT, reason: 'manual_admin', actorId: 'admin-1' },
+    );
+    // The files rows are already gone, so this log is the only thing that can
+    // point an operator at the leftover object.
+    const logged = JSON.parse(pool.logInserts[0].params[6] as string);
+    expect(logged.__storage_orphans).toEqual(['bkt/boom.mp3']);
   });
 
   it('counts orphaned objects and continues when no storage provider is wired', async () => {

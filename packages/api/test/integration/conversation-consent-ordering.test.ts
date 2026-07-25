@@ -23,7 +23,15 @@
  * a pure adapter-behavior check and does not touch Postgres.
  */
 import { describe, it, expect, afterAll, vi } from 'vitest';
-import { buildTwiML } from '../../src/telephony/twilio-adapter';
+import express from 'express';
+import request from 'supertest';
+import twilio from 'twilio';
+import { buildTwiML, TwilioGatherAdapter } from '../../src/telephony/twilio-adapter';
+import {
+  buildDegradeFallbackTwiml,
+  createTelephonyRouter,
+  voicemailTwimlForGateReason,
+} from '../../src/routes/telephony';
 import {
   TwilioMediaStreamAdapter,
   type WsLike,
@@ -126,6 +134,45 @@ function silenceArmMarkName(ws: FakeWs): string | undefined {
       (f.mark as { name: string }).name.startsWith('silence-arm-'),
   );
   return (frame?.mark as { name: string } | undefined)?.name;
+}
+
+/**
+ * Drive the REAL POST /voice route with a blocking gate and return its TwiML.
+ * The builder taking a callback argument proves nothing on its own — the
+ * defect this pins was in the WIRING: the route passed a URL for a handler
+ * that never persists anything.
+ */
+async function gateBlockedVoiceTwiml(): Promise<string> {
+  const AUTH_TOKEN = 'test-tw-token-consent-gate';
+  const PUBLIC_BASE_URL = 'https://api.test';
+  const store = new VoiceSessionStore({ startInterval: false });
+  const adapter = new TwilioGatherAdapter({
+    store,
+    gateway: { complete: vi.fn() } as never,
+    businessName: 'Test Co',
+    publicBaseUrl: PUBLIC_BASE_URL,
+  });
+  const app = express();
+  app.use(
+    '/api/telephony',
+    createTelephonyRouter({
+      adapter,
+      authTokenGetter: () => AUTH_TOKEN,
+      publicBaseUrl: PUBLIC_BASE_URL,
+      resolveTenantId: () => 'tenant-consent-gate',
+      voiceGate: async () => ({ allowed: false, reason: 'not_live' as const }),
+    }),
+  );
+
+  const params = { CallSid: 'CA-consent-gate', From: '+15125550100', To: '+15125550999' };
+  const path = '/api/telephony/voice';
+  const sig = twilio.getExpectedTwilioSignature(AUTH_TOKEN, `${PUBLIC_BASE_URL}${path}`, params);
+  const res = await request(app)
+    .post(path)
+    .set('X-Twilio-Signature', sig)
+    .type('form')
+    .send(params);
+  return res.text;
 }
 
 const startFrame = (callSid: string, streamSid: string) => ({
@@ -706,5 +753,110 @@ describe('recording-consent ordering — disclosure precedes audio capture', () 
     await flush();
     if (session.send.mock.calls.length > 0) failOpen += 1;
     expect(session.send).not.toHaveBeenCalled();
+  });
+
+  // ─── Paths 4-6: capture entry points OUTSIDE the greeting turn ────────────
+  // The three above all run through establishment. These do not, which is
+  // exactly why they regressed silently: nothing in this suite could observe
+  // them, and one of them (Path 4) was actively asserted as correct by a
+  // resilience test that never ran a disclosure.
+
+  it('Path 4 (realtime→Gather degrade): fallback TwiML carries the disclosure when the session was never disclosed', async () => {
+    const store = new VoiceSessionStore({ startInterval: false });
+    // A session that exists but has heard nothing — the shape produced when
+    // the STT socket fails to open, since `<Connect><Stream>` speaks nothing
+    // and establishment never ran.
+    const session = store.create('tenant-degrade', 'telephony', { callSid: 'CA-degrade' });
+    expect(session.recordingDisclosed).toBeFalsy();
+
+    const twiml = buildDegradeFallbackTwiml(session, 'https://x.test/api/telephony/gather', 'en');
+
+    // The Gather arms speech recognition, so the notice must precede it.
+    const disclosureAt = twiml.indexOf('may be recorded');
+    const gatherAt = twiml.indexOf('<Gather');
+    if (disclosureAt === -1 || disclosureAt > gatherAt) armedBeforeDisclosure += 1;
+    expect(disclosureAt).toBeGreaterThan(-1);
+    expect(disclosureAt).toBeLessThan(gatherAt);
+    // And it latches, so the caller isn't re-disclosed on every later turn.
+    expect(session.recordingDisclosed).toBe(true);
+
+    const second = buildDegradeFallbackTwiml(session, 'https://x.test/api/telephony/gather', 'en');
+    expect(second).not.toContain('may be recorded');
+  });
+
+  it('Path 5 (recording objection): revoking capture stops STT frames, not just the Twilio recording', async () => {
+    const store = new VoiceSessionStore({ startInterval: false });
+    const voiceSession = store.create('tenant-objection', 'telephony', {
+      callSid: 'CA-objection',
+    });
+
+    const { provider, session } = makeStreamingProvider();
+    const ws = new FakeWs();
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: provider,
+        ttsProvider: makeTtsProvider(),
+        speechTurn: async () => [],
+        initializeSession: async () => [
+          { type: 'tts_play', payload: { text: 'This call may be recorded.' } },
+        ],
+      },
+      ws,
+    );
+    adapter.start();
+
+    ws.inboundJson(startFrame('CA-objection', 'MZ-objection'));
+    await flush();
+    await flush();
+    const mark = silenceArmMarkName(ws);
+    if (mark) {
+      ws.inboundJson({ event: 'mark', streamSid: 'MZ-objection', mark: { name: mark } });
+      await flush();
+    }
+
+    // Capture is legitimately armed post-disclosure.
+    ws.inboundJson(mediaFrame);
+    await flush();
+    const framesBefore = session.send.mock.calls.length;
+    expect(framesBefore).toBeGreaterThan(0);
+
+    // Caller says "stop recording". On this transport the capture IS the STT
+    // socket — pausing a Twilio recording touches nothing — so the revocation
+    // has to cut the frame feed or the spoken acknowledgment is a lie.
+    voiceSession.captureRevoked = true;
+    ws.inboundJson(mediaFrame);
+    ws.inboundJson(mediaFrame);
+    await flush();
+    if (session.send.mock.calls.length > framesBefore) failOpen += 1;
+    expect(session.send.mock.calls.length).toBe(framesBefore);
+  });
+
+  it('Path 6 (gate-blocked voicemail): the notice precedes <Record> and the audio is ingestible', () => {
+    const twiml = voicemailTwimlForGateReason(
+      'not_live',
+      'https://x.test/api/telephony/recording',
+    );
+    const sayAt = twiml.indexOf('after the tone');
+    const recordAt = twiml.indexOf('<Record');
+    if (sayAt === -1 || sayAt > recordAt) armedBeforeDisclosure += 1;
+    expect(sayAt).toBeLessThan(recordAt);
+    // Without a callback nothing reaches recording-webhook, so no files row
+    // exists — and an object with no row survives tenant deprovisioning,
+    // which harvests keys from `files`.
+    expect(twiml).toContain('recordingStatusCallback=');
+  });
+
+  it('Path 6b: the gate-blocked callback targets the ingestion route, not voicemail-status', async () => {
+    // /voicemail-status only mints a lead and resolves its tenant from
+    // store.findByCallSid — which finds nothing here, because the gate
+    // answers before any voice session exists. Pointing there logs "missing
+    // tenant" and drops the recording, leaving it unpersisted and beyond
+    // deprovision's reach. Only /recording inserts files/voice_recordings.
+    const twiml = await gateBlockedVoiceTwiml();
+    const callback = /recordingStatusCallback="([^"]+)"/.exec(twiml)?.[1];
+    expect(callback).toBeDefined();
+    expect(callback).toMatch(/\/api\/telephony\/recording$/);
+    expect(callback).not.toMatch(/voicemail-status/);
   });
 });

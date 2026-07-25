@@ -189,13 +189,26 @@ export async function deprovisionTenant(
     await client.query('BEGIN');
     await client.query("SET LOCAL session_replication_role = 'replica'");
 
-    const filesRes = await client.query<{ s3_bucket: string; s3_key: string }>(
-      `SELECT s3_bucket, s3_key FROM files WHERE tenant_id = $1`,
+    // Both object keys per row: the original AND the derived thumbnail the
+    // image pipeline writes alongside it (`<key>.thumb.jpg`, a distinct key in
+    // the same bucket — see image-post-process-worker.ts). Harvesting only
+    // s3_key orphaned every thumbnail, and the row pointing at it is deleted
+    // in this same transaction, so nothing could ever rediscover it.
+    const filesRes = await client.query<{
+      s3_bucket: string;
+      s3_key: string;
+      thumbnail_s3_key: string | null;
+    }>(
+      `SELECT s3_bucket, s3_key, thumbnail_s3_key FROM files WHERE tenant_id = $1`,
       [tenantId],
     );
     for (const row of filesRes.rows) {
-      if (row.s3_bucket && row.s3_key) {
+      if (!row.s3_bucket) continue;
+      if (row.s3_key) {
         storedObjects.push({ bucket: row.s3_bucket, key: row.s3_key });
+      }
+      if (row.thumbnail_s3_key && row.thumbnail_s3_key !== row.s3_key) {
+        storedObjects.push({ bucket: row.s3_bucket, key: row.thumbnail_s3_key });
       }
     }
 
@@ -233,6 +246,7 @@ export async function deprovisionTenant(
   // no-op on alreadyPurged, so the log line is the operational signal).
   let storageObjectsDeleted = 0;
   let storageObjectErrors = 0;
+  const orphanedObjectKeys: string[] = [];
   if (storedObjects.length > 0) {
     if (!deps.storage) {
       logger.warn('Deprovision: no storage provider wired — stored objects orphaned', {
@@ -240,6 +254,7 @@ export async function deprovisionTenant(
         orphanedObjects: storedObjects.length,
       });
       storageObjectErrors = storedObjects.length;
+      orphanedObjectKeys.push(...storedObjects.map((o) => `${o.bucket}/${o.key}`));
     } else {
       for (const obj of storedObjects) {
         try {
@@ -247,6 +262,7 @@ export async function deprovisionTenant(
           storageObjectsDeleted++;
         } catch (err) {
           storageObjectErrors++;
+          orphanedObjectKeys.push(`${obj.bucket}/${obj.key}`);
           logger.warn('Deprovision: stored-object delete failed', {
             tenantId,
             bucket: obj.bucket,
@@ -259,6 +275,13 @@ export async function deprovisionTenant(
   }
 
   // 3 — Durable record (survives the purge: no tenant FK, no RLS).
+  // Any object we failed to delete is recorded here by key, not just counted:
+  // the files rows are already gone, so this log is the only thing that can
+  // point an operator at the leftover objects.
+  const deprovisionRecord: Record<string, unknown> = { ...rowsDeletedByTable };
+  if (orphanedObjectKeys.length > 0) {
+    deprovisionRecord['__storage_orphans'] = orphanedObjectKeys;
+  }
   await pool.query(
     `INSERT INTO platform_deprovision_log
        (tenant_id, reason, actor_id, twilio_released, twilio_subaccount_sid, twilio_error, rows_deleted)
@@ -270,7 +293,7 @@ export async function deprovisionTenant(
       twilioReleased,
       subaccountSid,
       twilioError ?? null,
-      JSON.stringify(rowsDeletedByTable),
+      JSON.stringify(deprovisionRecord),
     ],
   );
 
