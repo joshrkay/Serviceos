@@ -6,9 +6,26 @@ model: sonnet
 ---
 
 **Ledger**: search for any ledger, journal, double-entry, or balance-tracking
-structure. Report EXISTS / PARTIAL / ABSENT. If **absent**, state plainly that
-money state is invoice+payment rows only — which determines whether `/goal money`
-can assert a reconciliation invariant or only row-level correctness.
+structure. Report EXISTS / PARTIAL / ABSENT **as a double-entry construct**.
+
+**Absent is not the end of the question — do not collapse it into "row-level
+correctness only."** If there is no double-entry construct, inventory and classify
+the **derived-balance surfaces** instead, because those are what determine what a
+sweep can assert:
+
+- denormalized balance columns on invoices/jobs (`amount_paid`, `amount_due`,
+  `deposit_paid`, `refunded_amount` and the like) — for each, whether it is
+  maintained **incrementally** (a stateful counter, which drifts) or **derived on
+  read** by SUM (which cannot);
+- **every** write path to each such column, and whether each is an atomic
+  single-UPDATE, a compare-and-swap, or a read-modify-write;
+- any scheduled reconciliation job, and if none, which crash windows self-heal;
+- any durably stored external amount that a local total could be compared against
+  (e.g. a persisted webhook payload).
+
+Report those with `file:line`. A repository with no ledger but with recomputable
+balance columns **does** support a reconciliation invariant — reporting otherwise
+produces the exact false binary this pass exists to avoid.
 
 **RLS**: confirm `tenant_id NOT NULL` + `tenant_isolation` + `FORCE RLS` on every
 money table (invoices, estimates, payments, line items, tax, ledger if any) — the

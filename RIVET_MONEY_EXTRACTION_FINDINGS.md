@@ -9,16 +9,28 @@ Date: 2026-07-24 · Base: `1d5c7e5` · Branch: `claude/rivet-money-extraction-u5
 same stage — every money column is integer cents, the Stripe boundary is clean,
 RLS is complete across all money tables, and webhook **first-delivery** dedupe is
 enforced by a real DB unique index. The defects are not structural sloppiness;
-they are eight specific holes, five of which lose or misstate real money silently.
+they are nine specific holes, six of which lose or misstate real money silently.
 
-**Revision note.** P0-6, P0-7 and P0-8, and the L4 layer, were all added during
-review — the first synthesis asserted invariants the code does not hold. **All
-three are concurrency defects, and all three were invisible to single-path
-tracing**, which is what the original sweep did. The per-file reads in this
-document held up unchanged; every correction was to an inferred invariant, not to
-a `file:line`. Treat that as the standing caution for `/goal money`: this
-surface's remaining defects live in interleavings, and reading each path in
-isolation will not find them.
+**The most actionable single finding is not a defect but a gate**: `webhook_events.payload` already
+stores every captured amount, so `payload.amount_total == Σ(payments for that reference)` is
+assertable today with no new schema, and it catches both paths where Stripe holds money the
+database has no row for (P0-1, P0-9). See "What `/goal money` can and cannot assert."
+
+**Revision note.** P0-6 through P0-9, and the L4 layer, were all added during
+review — the first synthesis asserted invariants the code does not hold. Two
+distinct blind spots produced them, and `/goal money` should probe for both:
+
+- **Interleavings.** P0-6, P0-7 and P0-8 are all concurrency defects, invisible to
+  the single-path tracing the original sweep did. Reading each path in isolation
+  will not find this class.
+- **Error branches.** P0-9 is *not* a race — it fires in a fully serial flow, and
+  it was missed because the original trace followed the success path of a handler
+  whose `catch` block is where the money is dropped. The recovery branch is doing
+  the losing.
+
+Every per-file read in this document survived review unchanged; no `file:line` was
+wrong. What was wrong each time was the inferred invariant, and once — P0-9 — a
+defect sitting in a branch the trace never entered.
 
 ---
 
@@ -195,6 +207,37 @@ but permits a double count within the bound.
 `/goal money` needs a **retry-concurrency** gate distinct from the redelivery gate — the redelivery
 gate asserts a second *delivery* is a no-op, this asserts a second *retry* is. Only the first holds
 today.
+
+### P0-9 · A stale payment link captures its original amount; the excess is silently discarded
+**Track 3.** `packages/api/src/webhooks/routes.ts:1184-1221`
+
+**This is P0-1 generalized, and unlike P0-1 it needs no void and no race — it fires in a fully
+serial flow.** A payment link is minted for the full balance (`public-invoice-service.ts:215`,
+`String(invoice.amountDueCents)`). The balance then drops by any other route — a manual payment, a
+deposit credit, a Terminal charge. **The link is never re-priced and never deactivated**, so it
+still captures its *original* amount. Stripe takes the money. Then:
+
+- `recordPayment` is called with the full `amountTotal`, throws `'exceeds amount due'`
+  (`payment.ts:478-480`), and the handler **caps the credit to the current
+  `invoice.amountDueCents`** and records only that (`routes.ts:1188-1207`). **The difference is
+  discarded** — no payment row, no audit event, no credit balance, no alert. It appears only as a
+  log line (`:1208-1210`, `requested` vs `paid`).
+- If the invoice is already fully paid, `amountDueCents <= 0` short-circuits at `:1189-1190` and
+  **nothing at all is recorded** — the entire capture is dropped.
+- The `status` branch (`:1212-1214`) does the same for paid/void/canceled.
+
+In every branch the event is then marked `processed`. **Stripe holds money the database has no row
+for, and the system considers the event successfully handled.** Capping the *invoice credit* is
+defensible — over-crediting an invoice would be worse — but there is no over-payment or
+credit-balance concept anywhere, so the excess has nowhere to go and is simply lost from local
+records.
+
+**This is assertable today, and that changes a "cannot assert" conclusion below.**
+`webhook_events.payload` is `JSONB NOT NULL` (`schema.ts:269`), so the captured `amount_total` of
+every processed event is durably stored. The gate: for each processed `checkout.session.completed`,
+`payload.amount_total` must equal the sum of `payments.amount_cents` carrying that
+`provider_reference`. No new schema is required — the evidence is already persisted and simply
+never compared.
 
 ---
 
@@ -750,9 +793,17 @@ So `/goal money` **can** assert:
   decision. **Gate it:** the two reconcilers must agree before L3 is swept, and the sweep should
   fail on any invoice where the two definitions disagree. This belongs in the loop, not in the
   can't-assert list.
-- **Cross-system reconciliation against Stripe's balance** — no stored Stripe-side aggregate to
-  compare to, and P0-1 means Stripe can hold captures the DB has no row for. This is precisely
-  the discrepancy class the extraction was written to anticipate.
+- **Cross-system reconciliation against Stripe's *balance*** — there is no stored Stripe-side
+  account aggregate to compare a tenant total against.
+
+  **But per-event capture reconciliation IS assertable, and it is the single highest-value gate
+  this extraction found.** `webhook_events.payload` is `JSONB NOT NULL` (`schema.ts:269`), so every
+  processed event's captured amount is already durably stored. Asserting
+  `payload.amount_total == Σ(payments.amount_cents WHERE provider_reference = <ref>)` catches P0-9
+  and P0-1 — the two paths where Stripe holds money the database has no row for — with **no new
+  schema**. This was previously listed as unassertable; that was wrong, and it is corrected here
+  rather than left as a footnote, because it is the closest thing to the reconciliation invariant
+  the missing ledger would have provided.
 
 **Recommended spine:** L3 recomputation as the per-iteration sweep (comms's RLS-sweep analogue),
 with L1 as the first gate — it fails today and its fix is mechanical.
@@ -798,6 +849,8 @@ Flagged, not decided.
 | 2 | Estimate enforcement | **PARTIAL** — chokepoint bypassed by accept/decline/send |
 | 2 | Payment enforcement | **PARTIAL** — no transition table, but genuine SQL CAS |
 | 2 | Void → link invalidation | **BROKEN** (P0-1) |
+| 3 | Stale-link capture vs recorded total | **BROKEN** (P0-9) — excess discarded; serial, no race needed |
+| 3 | Capture-vs-recorded reconciliation | **ASSERTABLE TODAY** — `webhook_events.payload` (`schema.ts:269`), no new schema |
 | 2 | Paid-invoice reject | **BROKEN UNDER CONCURRENCY** (P0-6) — holds serially only; needs the L4 gate |
 | 2 | Estimate → invoice | **IDEMPOTENT** primary / **DOUBLE-CONVERTIBLE** via 2 secondary paths |
 | 3 | Idempotency — first delivery | **EXISTS** — DB unique constraint, concurrent first deliveries safe |
