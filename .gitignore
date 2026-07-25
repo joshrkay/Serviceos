@@ -45,6 +45,15 @@ e2e/fixtures/.journey-fixtures.env
 /qa/reports/*/
 !/qa/reports/.gitkeep
 
+# Full manual QA (107) — local secrets + recordings (redacted manifests may be committed)
+.env.qa.full.local
+.env.qa.full.tokens
+/qa/manual-107/fixture-manifest.json
+/qa-evidence/**/recording.mp4
+/qa-evidence/**/*.webm
+/qa-evidence/**/*secret*
+/qa-evidence/**/*token*
+
 # Voice Quality v1 corpus runner — generated JSON report (VQ-009)
 packages/api/voice-quality-report.json
 packages/api/voice-quality-vitest.json
@@ -74,3 +83,4 @@ data/corpus/utterances.generated.jsonl
 # record is docs/quality/engineering-baseline-2026-07-25.md.
 eslint-report.json
 quality-metrics.json
+/qa-evidence/QA-*/
