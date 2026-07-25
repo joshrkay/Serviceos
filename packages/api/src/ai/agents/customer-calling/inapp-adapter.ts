@@ -1103,6 +1103,12 @@ export class InAppVoiceAdapter {
         outcome,
         state: session.machine.currentState,
         channel: 'inapp_voice',
+        ...(session.transcript.length > 0
+          ? { transcript: [...session.transcript] }
+          : {}),
+        ...(session.customerId !== undefined
+          ? { customerId: session.customerId }
+          : {}),
       });
     } catch {
       /* swallow — outcome stamping is best-effort */
