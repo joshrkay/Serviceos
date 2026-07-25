@@ -10,7 +10,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with:
-          node-version: '20'
+          node-version-file: '.nvmrc'
           cache: 'npm'
       - run: npm ci
 
@@ -80,7 +80,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with:
-          node-version: '20'
+          node-version-file: '.nvmrc'
           cache: 'npm'
       - run: npm ci
       - name: Run voice quality Layer 1 suite (launch gate enforced)
@@ -104,7 +104,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with:
-          node-version: '20'
+          node-version-file: '.nvmrc'
           cache: 'npm'
       # npm ci is needed for the post-deploy smoke script (scripts/smoke-test.ts
       # runs via ts-node) — the health poll below only needs curl.
@@ -182,7 +182,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with:
-          node-version: '20'
+          node-version-file: '.nvmrc'
           cache: 'npm'
       - run: npm ci
       - name: Install Railway CLI
