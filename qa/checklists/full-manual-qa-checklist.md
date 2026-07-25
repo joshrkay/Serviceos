@@ -10,7 +10,7 @@ evidence that these pass; see the "Definition of verified" in
 
 This complements, and does not replace, the automated layers:
 
-- Automated route/business-flow coverage: [`e2e/qa-matrix`](../../e2e/qa-matrix) (matrix row IDs referenced below as `[MATRIX-ID]`)
+- Automated route/business-flow coverage: [`e2e/qa-matrix`](../../e2e/qa-matrix) (matrix row IDs referenced below as `[MATRIX-ID]` — these are verified against `e2e/qa-matrix/matrix.ts` and, unless explicitly marked "proposed", resolve to a real row there; if you add a new matrix row or rename one, grep this file for its old ID and update it in the same change)
 - Platform-level workflow catalog + P0/P1 launch scoping: [`docs/superpowers/specs/2026-05-24-platform-assessment-and-e2e-qa-50-workflows.md`](../../docs/superpowers/specs/2026-05-24-platform-assessment-and-e2e-qa-50-workflows.md) (referenced below as `(WF-##)`)
 
 **Total workflows in this checklist: 107** (13 inbound-call, 4 voice/in-app,
@@ -81,8 +81,8 @@ Section 21 runs once, comparing the two.
 
 ## 3. CRM — customers
 
-- [ ] **QA-014** 🖱️ P0 — Create a customer with a service location. **Expect:** appears in `/customers` list and in DB under the correct tenant. (WF-11, `[CUS-01]`)
-- [ ] **QA-015** 🖱️ P1 — Edit customer fields + service location; attempt a duplicate. **Expect:** edits persist; dedupe guard triggers or merges as designed. (WF-12, `[CUS-02]`)
+- [ ] **QA-014** 🖱️ P0 — Create a customer with a service location. **Expect:** appears in `/customers` list and in DB under the correct tenant. (WF-11, `[CUST-01]`)
+- [ ] **QA-015** 🖱️ P1 — Edit customer fields + service location; attempt a duplicate. **Expect:** edits persist; dedupe guard triggers or merges as designed. (WF-12 — no dedicated matrix row yet; closest existing coverage is `[CUST-01]` create + `[CUST-03]` archive)
 - [ ] **QA-016** 🖱️ P1 — Open a customer's timeline. **Expect:** jobs, estimates, invoices, and comms all show in one place with no 5xx. (WF-13)
 - [ ] **QA-017** 🖱️ P2 — Search customers by name, phone, and email. **Expect:** all three match; partial-match search returns results.
 - [ ] **QA-018** 🖱️ P1 — Add customer group / tag and filter customer list by it. **Expect:** filter narrows the list correctly.
@@ -130,11 +130,11 @@ Section 21 runs once, comparing the two.
 - [ ] **QA-042** 🖱️ P0 — Send the estimate to the customer (SMS and/or email). **Expect:** status flips to "sent"; dispatch log row created. (WF-29)
 - [ ] **QA-043** 🖱️ P0 — As the customer, open the estimate link (`/e/:id`) and approve it (with a deposit, if configured). **Expect:** status flips to accepted; deposit charge succeeds if required. (WF-30, `[PORT-01]`)
 - [ ] **QA-044** 🖱️ P1 — As the customer, open an **expired or invalid** estimate token. **Expect:** a clean error state — no leaked mock/placeholder data.
-- [ ] **QA-045** 🖱️ P0 — Convert an accepted estimate to an invoice. **Expect:** `estimate_id` link preserved, line items carry over unchanged, no re-key. (WF-31, `[BILL-01]`)
+- [ ] **QA-045** 🖱️ P0 — Convert an accepted estimate to an invoice. **Expect:** `estimate_id` link preserved, line items carry over unchanged, no re-key. (WF-31, `[EST-05]`)
 
 ## 10. Invoices & payments
 
-- [ ] **QA-046** 🖱️ P0 — Issue an invoice and confirm customer delivery (SMS/email link). **Expect:** issued timestamp set; customer receives a working link. (WF-32, `[BILL-02]`)
+- [ ] **QA-046** 🖱️ P0 — Issue an invoice and confirm customer delivery (SMS/email link). **Expect:** issued timestamp set; customer receives a working link. (WF-32, `[INV-01]` for the issue transition; the delivery leg is exercised end-to-end by `[JRN-03]`)
 - [ ] **QA-047** 🖱️ P0 — As the customer, pay the invoice on `/pay/:id` with a Stripe test card. **Expect:** `checkout.session.completed` webhook flips invoice to paid. (WF-33, `[PORT-02]`)
 - [ ] **QA-048** 🖱️ P1 — Make a partial payment, then pay the remainder. **Expect:** `partially_paid` → `paid` transitions correctly; overpayment is rejected. (WF-34, `[PAY-01]`)
 - [ ] **QA-049** 🖱️ P1 — Let an invoice go overdue (or seed one). **Expect:** overdue-invoice worker flags it; owner sees it on the money dashboard. (`[PAY-04]`)
@@ -188,7 +188,7 @@ surface in the product; treat it as launch-gating (P0) per `docs/qa-strategy.md`
 - [ ] **QA-075** ☎️ P1 — Ask a question outside the agent's scope (e.g. unrelated small talk, or a request requiring owner judgment). **Expect:** `patch-owner-through` or an equivalent graceful handoff/voicemail — never a hallucinated commitment.
 - [ ] **QA-076** ☎️ P1 — Deliberately go quiet or hang up mid-sentence (dropped-call simulation). **Expect:** the dropped-call recovery path (`detect-dropped`) either re-engages gracefully on redial or leaves a clean voicemail fallback — confirm the `dropped-call-worker` is actually wired into `app.ts` before signing this off, it has a known history of being built-but-unwired.
 - [ ] **QA-077** ☎️ P1 — Let a call ring through to voicemail (or call outside business hours). **Expect:** `voicemail-fallback` picks up cleanly; the message is captured and a transcript shows up on `/interactions`.
-- [ ] **QA-078** ☎️ P1 — After the call ends, check `/interactions` for the transcript and recording. **Expect:** transcript is complete and encrypted at rest (per the 2026-06-04 QA report's Blocker 12 fix); recording link works. (WF-44, `[VOICE-01]`)
+- [ ] **QA-078** ☎️ P1 — After the call ends, check `/interactions` for the transcript and recording. **Expect:** transcript is complete and encrypted at rest (per the 2026-06-04 QA report's Blocker 12 fix); recording link works. (WF-44, `[VOX-09]` session-in-timeline, `[VOX-10]` session artifact/DB linkage)
 - [ ] **QA-079** ☎️ P0 — Confirm any outbound call/SMS the AI initiates to a number on the tenant's Do-Not-Call list is blocked, and that no outbound call fires during tenant-configured quiet hours (9pm–8am local by default). This is the TCPA/DNC gate — verify it end-to-end, not just that the code path exists, since it was the one open blocker in the most recent comprehensive QA pass.
 
 ## 17. Notifications & compliance
@@ -202,7 +202,7 @@ surface in the product; treat it as launch-gating (P0) per `docs/qa-strategy.md`
 ## 18. Public & customer self-service
 
 - [ ] **QA-085** 🖱️ P0 — Fill and submit the public booking page (`/book`). **Expect:** produces a lead/job proposal visible to the operator. (WF-48)
-- [ ] **QA-086** 🖱️ P0 — Open the customer portal with a valid token (`/portal/:token`). **Expect:** jobs/estimates/invoices tabs load, scoped strictly to that token's data. (WF-47, `[PORTAL-01]`)
+- [ ] **QA-086** 🖱️ P0 — Open the customer portal with a valid token (`/portal/:token`). **Expect:** jobs/estimates/invoices tabs load, scoped strictly to that token's data. (WF-47 — the multi-tab `PortalShell` has no dedicated matrix row today; the closest existing coverage is the single-document token flows `[PORT-01]` estimate / `[PORT-02]` invoice)
 - [ ] **QA-087** 🖱️ P1 — Open the portal with an expired/garbage token. **Expect:** clean error, no data leak, no 500.
 - [ ] **QA-088** 🖱️ P1 — Submit the post-job feedback form (`/feedback/:token`). **Expect:** rating persists; Settings → Feedback dashboard chart updates. (WF-49)
 - [ ] **QA-089** 🖱️ P1 — Resubmit the same feedback token twice. **Expect:** second submission is rejected or treated as an edit — not double-counted.
@@ -219,7 +219,7 @@ surface in the product; treat it as launch-gating (P0) per `docs/qa-strategy.md`
 ## 20. Integrations — Google Calendar
 
 - [ ] **QA-096** 🖱️ P1 — Connect Google Calendar from Settings. **Expect:** OAuth completes, integration status shows connected. (WF-50)
-- [ ] **QA-097** 🖱️ P1 — Create/assign an appointment and confirm it pushes to Google Calendar. **Expect:** `appointment_calendar_events.status = 'synced'` with a real external event id; event visible in the actual Google Calendar. (`[CAL-01]`)
+- [ ] **QA-097** 🖱️ P1 — Create/assign an appointment and confirm it pushes to Google Calendar. **Expect:** `appointment_calendar_events.status = 'synced'` with a real external event id; event visible in the actual Google Calendar. (proposed matrix row `CAL-01` — not yet added to `matrix.ts`; see the WF-50 appendix in the platform-assessment spec)
 - [ ] **QA-098** 🖱️ P2 — Disconnect Google Calendar. **Expect:** integration clears; no further pushes attempted; existing synced events aren't force-deleted from the customer's calendar.
 
 ## 21. Multi-tenant isolation & security
