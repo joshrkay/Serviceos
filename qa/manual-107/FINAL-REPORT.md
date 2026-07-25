@@ -4,9 +4,9 @@
 
 | Metric | Value |
 |--------|-------|
-| PASS | 0 |
-| FAIL | 0 |
-| NOT_RUN | 107 |
+| PASS | 2 |
+| FAIL | 1 |
+| NOT_RUN | 104 |
 | BLOCKED | 0 |
 
 ## Verdict
@@ -21,6 +21,10 @@ Goal is **not** met. Evidence ledger does not yet show `PASS: 107 / FAIL: 0`.
 - [ ] All 107 manual workflows executed with recordings
 - [ ] Full repo verification green on final build
 - [ ] Final evidence manifest complete
+
+### Defects found
+
+- DEF-001 (QA-087): bare `/intake` infinite loading — fix in branch, awaiting deploy/retest
 
 ### Blockers preventing execution
 

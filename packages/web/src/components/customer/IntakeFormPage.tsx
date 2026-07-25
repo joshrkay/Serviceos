@@ -136,6 +136,11 @@ export function IntakeFormPage() {
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [tenantInfo, setTenantInfo] = useState<IntakeTenantInfo | null>(null);
+  // Distinguish missing ?t= from "still loading" so bare /intake does not
+  // spin forever on "Loading services…" (QA-087).
+  const [servicesLoadState, setServicesLoadState] = useState<
+    'loading' | 'missing_tenant' | 'ready' | 'error'
+  >('loading');
 
   // Service options = tenant packs from the API + optional local emoji/copy.
   const serviceOptions = (tenantInfo?.serviceTypes ?? []).map((st) => {
@@ -158,11 +163,19 @@ export function IntakeFormPage() {
   // failure — the form still submits; only the header/branding degrades.
   useEffect(() => {
     const tenantId = new URLSearchParams(window.location.search).get('t');
-    if (!tenantId) return;
+    if (!tenantId) {
+      setServicesLoadState('missing_tenant');
+      return;
+    }
+    setServicesLoadState('loading');
     fetchIntakeTenantInfo(tenantId)
-      .then(setTenantInfo)
+      .then((info) => {
+        setTenantInfo(info);
+        setServicesLoadState('ready');
+      })
       .catch(() => {
         /* branding is best-effort; submit path still reports a hard error */
+        setServicesLoadState('error');
       });
   }, []);
 
@@ -299,10 +312,23 @@ export function IntakeFormPage() {
               <p className="text-muted-foreground mt-1.5">Select the type of service you need</p>
             </div>
             <div className="flex flex-col gap-3">
-              {tenantInfo === null && (
-                <p className="text-sm text-muted-foreground">Loading services…</p>
+              {servicesLoadState === 'loading' && (
+                <p className="text-sm text-muted-foreground" data-testid="intake-services-loading">
+                  Loading services…
+                </p>
               )}
-              {tenantInfo !== null && serviceOptions.length === 0 && (
+              {servicesLoadState === 'missing_tenant' && (
+                <p className="text-sm text-destructive" data-testid="intake-missing-tenant">
+                  This intake link is missing its business id. Open the link from your service
+                  provider (it should include <code>?t=</code> in the URL).
+                </p>
+              )}
+              {servicesLoadState === 'error' && (
+                <p className="text-sm text-muted-foreground" data-testid="intake-services-error">
+                  Could not load services for this business. Please try again or call to book.
+                </p>
+              )}
+              {servicesLoadState === 'ready' && serviceOptions.length === 0 && (
                 <p className="text-sm text-muted-foreground">
                   This business hasn't set up online intake yet. Please call to book.
                 </p>

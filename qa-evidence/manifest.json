@@ -1,29 +1,35 @@
 {
   "title": "ServiceOS QA Evidence Manifest",
-  "updatedAt": "2026-07-25T14:03:31.123Z",
+  "updatedAt": "2026-07-25T14:27:09.046Z",
   "counts": {
-    "PASS": 0,
-    "FAIL": 0,
-    "NOT_RUN": 107,
+    "PASS": 2,
+    "FAIL": 1,
+    "NOT_RUN": 104,
     "BLOCKED": 0
   },
   "entries": [
     {
       "qaId": "QA-001",
       "testName": "Signup page loads with Rivet branding",
-      "status": "NOT_RUN",
+      "status": "PASS",
       "environment": "development",
       "tenant": "none",
       "userRole": "anonymous",
-      "startTimestamp": null,
-      "endTimestamp": null,
-      "recordingPath": null,
-      "supplementalEvidencePaths": [],
+      "startTimestamp": "2026-07-25T14:05:00Z",
+      "endTimestamp": "2026-07-25T14:06:30Z",
+      "recordingPath": "qa-evidence/QA-001/recording.mp4",
+      "supplementalEvidencePaths": [
+        "qa-evidence/QA-001/final-state.png",
+        "qa-evidence/QA-001/notes.md",
+        "qa-evidence/QA-001/http-status.txt"
+      ],
       "relatedEntityIds": {},
       "correlationIds": [],
-      "commitSha": null,
+      "commitSha": "45a331cd",
       "railwayDeploymentId": null,
-      "verificationNotes": ""
+      "verificationNotes": "Signup page 200; Rivet branding; no uncaught console errors.",
+      "startedAt": "2026-07-25T14:05:00Z",
+      "endedAt": "2026-07-25T14:06:30Z"
     },
     {
       "qaId": "QA-002",
@@ -79,19 +85,26 @@
     {
       "qaId": "QA-005",
       "testName": "Protected route redirects when logged out",
-      "status": "NOT_RUN",
+      "status": "PASS",
       "environment": "development",
       "tenant": "none",
       "userRole": "anonymous",
-      "startTimestamp": null,
-      "endTimestamp": null,
-      "recordingPath": null,
-      "supplementalEvidencePaths": [],
+      "startTimestamp": "2026-07-25T14:11:00Z",
+      "endTimestamp": "2026-07-25T14:12:30Z",
+      "recordingPath": "qa-evidence/QA-005/recording.mp4",
+      "supplementalEvidencePaths": [
+        "qa-evidence/QA-005/final-state.png",
+        "qa-evidence/QA-005/notes.md",
+        "qa-evidence/QA-005/http-status.txt",
+        "qa-evidence/QA-005/api-customers-unauth.json"
+      ],
       "relatedEntityIds": {},
       "correlationIds": [],
-      "commitSha": null,
+      "commitSha": "45a331cd",
       "railwayDeploymentId": null,
-      "verificationNotes": ""
+      "verificationNotes": "Protected /customers redirects to /login; API 401.",
+      "startedAt": "2026-07-25T14:11:00Z",
+      "endedAt": "2026-07-25T14:12:30Z"
     },
     {
       "qaId": "QA-006",
@@ -1473,19 +1486,24 @@
     {
       "qaId": "QA-087",
       "testName": "Intake form vertical fields",
-      "status": "NOT_RUN",
+      "status": "FAIL",
       "environment": "development",
       "tenant": "A",
       "userRole": "anonymous",
-      "startTimestamp": null,
-      "endTimestamp": null,
-      "recordingPath": null,
-      "supplementalEvidencePaths": [],
+      "startTimestamp": "2026-07-25T14:20:00Z",
+      "endTimestamp": "2026-07-25T14:26:00Z",
+      "recordingPath": "qa-evidence/QA-087/recording.mp4",
+      "supplementalEvidencePaths": [
+        "qa-evidence/QA-087/final-state.png",
+        "qa-evidence/QA-087/notes.md"
+      ],
       "relatedEntityIds": {},
       "correlationIds": [],
-      "commitSha": null,
+      "commitSha": "45a331cd",
       "railwayDeploymentId": null,
-      "verificationNotes": ""
+      "verificationNotes": "FAIL: bare /intake stuck Loading services; fix landed locally; awaiting deploy+retest with ?t=",
+      "startedAt": "2026-07-25T14:20:00Z",
+      "endedAt": "2026-07-25T14:26:00Z"
     },
     {
       "qaId": "QA-088",
