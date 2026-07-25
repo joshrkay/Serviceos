@@ -983,6 +983,17 @@ describe('Phase-2 Track A — extended operator intents', () => {
     expect(matchExtendedIntentPhrase('')).toBeNull();
   });
 
+  it('owner schedule questions bypass feature-flag and provider drift', async () => {
+    const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+    const result = await classifyIntent(
+      'What appointments are scheduled today?',
+      { ownerSession: true },
+      gateway,
+    );
+    expect(result.intentType).toBe('lookup_day_overview');
+    expect(result.confidence).toBeGreaterThanOrEqual(0.9);
+  });
+
   it('extendedIntents: deterministic phrase short-circuits WITHOUT an LLM call', async () => {
     const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
     const result = await classifyIntent(

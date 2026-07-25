@@ -1165,6 +1165,12 @@ interface OwnerOperatorCommandPattern {
  */
 const OWNER_OPERATOR_COMMAND_PATTERNS: ReadonlyArray<OwnerOperatorCommandPattern> = [
   {
+    intentType: 'lookup_day_overview',
+    pattern:
+      /^\s*(?:(?:what|which|show me|list)\s+(?:appointments?|jobs?)\s+(?:are\s+)?scheduled\s+(?:for\s+)?today|(?:show me|what(?:'s| is))\s+today(?:'s)?\s+schedule)\s*[?.!]?\s*$/i,
+    extract: () => ({}),
+  },
+  {
     intentType: 'create_customer',
     pattern:
       /^\s*(?:new\s+customer|add\s+(?:a\s+)?customer)\s+([a-z][a-z.'-]*(?:\s+[a-z][a-z.'-]*){0,3})\s*,\s*phone(?:\s+number)?\s*(?::|is)?\s*(\+?[\d(][\d\s().-]{5,20}\d)\s*[.!?]?\s*$/i,
