@@ -33,29 +33,30 @@ jobs:
       - name: Lint
         run: npm run lint
 
-      # ESLint is REPORT-ONLY. This repo had no ESLint at all until
-      # eslint.config.mjs landed, so the first run reports thousands of
-      # findings — making it blocking today would wedge every PR. The report
-      # artifact is the input for deciding which rules can become blocking.
-      # See docs/quality/engineering-baseline-2026-07-25.md.
-      # Do NOT remove continue-on-error without first driving the relevant
-      # rule's count to zero.
-      - name: ESLint (report only)
-        id: eslint
-        continue-on-error: true
-        run: npm run lint:eslint:report
-
-      - name: Upload ESLint report
-        if: always()
-        uses: actions/upload-artifact@v5
-        with:
-          name: eslint-report
-          path: eslint-report.json
-          if-no-files-found: warn
+      # ESLint deliberately does NOT run here.
+      #
+      # `eslint.config.mjs` and `npm run lint:eslint` exist and work locally.
+      # A full type-aware run takes 178s and reports 3,367 findings, and it was
+      # wired here as a `continue-on-error` step producing an artifact. Measured
+      # against what it bought: ~3 minutes on this job's critical path for every
+      # PR, in exchange for a report nobody reads and a step that cannot fail.
+      # It changed no behaviour, so it was removed.
+      #
+      # The path back is deliberate, not a re-enable: block on the four
+      # tractable rules — await-thenable (6), no-fallthrough (12),
+      # no-floating-promises (75), require-atomic-updates (63), 156 findings
+      # total — scoped to packages/api/src and packages/web/src, and leave the
+      # 900+-finding rules off entirely. Counts and rationale in
+      # docs/quality/engineering-baseline-2026-07-25.md. Re-adding a
+      # report-only pass over everything would recreate the same 3-minute
+      # no-op.
 
       # Records the measured quality baseline so later work diffs against an
-      # artifact instead of recollection. Cheap: reads files and the ESLint
-      # report above, never re-runs the linter.
+      # artifact instead of recollection. Cheap: reads files only, never runs a
+      # linter. With no ESLint report produced here, `staticAnalysis.eslint.*`
+      # is null while `eslintConfigPresent` / `suppressionComments` still
+      # populate — run `npm run lint:eslint:report` locally and pass
+      # `--eslint-report` to fill in the counts.
       - name: Collect quality metrics
         if: always()
         run: npm run quality:metrics -- --out quality-metrics.json

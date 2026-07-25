@@ -265,13 +265,19 @@ export function collect(eslintReportPath: string | null): Record<string, unknown
     reproducibility: nodePinAudit(),
 
     migrations: {
-      // Every migration is replayed on every boot: applyMigrations() issues
-      // getMigrationSQL() as one concatenated query under a 25s
-      // statement_timeout. There is no ledger table on the deploy path.
+      // Every migration is replayed on every DEPLOY — not every boot.
+      // applyMigrations() issues getMigrationSQL() as one concatenated query
+      // under a 25s statement_timeout, and railway.toml runs migrate.js as
+      // preDeployCommand (src/index.ts has no migration reference at all, and
+      // railway.worker.toml states the worker never migrates). An earlier
+      // version of this collector emitted `replaysAllOnBoot`, which was wrong
+      // and read as far more alarming than the truth: measured replay against
+      // an already-migrated database is ~210 ms, 0.8% of the 25s budget.
+      // See docs/quality/engineering-baseline-2026-07-25.md.
       migrationCount: countMigrations(),
       hasLedgerTable:
         (gitGrepCount('schema_migrations', ['packages/api/src/db/*.ts']) ?? 0) > 0,
-      replaysAllOnBoot:
+      replaysAllPerDeploy:
         (countMatches(
           'packages/api/src/db/migrate.ts',
           /client\.query\(getMigrationSQL\(\)\)/g,
