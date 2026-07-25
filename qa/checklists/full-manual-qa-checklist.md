@@ -13,8 +13,8 @@ This complements, and does not replace, the automated layers:
 - Automated route/business-flow coverage: [`e2e/qa-matrix`](../../e2e/qa-matrix) (matrix row IDs referenced below as `[MATRIX-ID]` — these are verified against `e2e/qa-matrix/matrix.ts` and, unless explicitly marked "proposed", resolve to a real row there; if you add a new matrix row or rename one, grep this file for its old ID and update it in the same change)
 - Platform-level workflow catalog + P0/P1 launch scoping: [`docs/superpowers/specs/2026-05-24-platform-assessment-and-e2e-qa-50-workflows.md`](../../docs/superpowers/specs/2026-05-24-platform-assessment-and-e2e-qa-50-workflows.md) (referenced below as `(WF-##)`)
 
-**Total workflows in this checklist: 108** (13 inbound-call, 4 voice/in-app,
-90 manual-click, several overlapping both), spanning 22 feature areas.
+**Total workflows in this checklist: 111** (13 inbound-call, 4 voice/in-app,
+93 manual-click, several overlapping both), spanning 22 feature areas.
 Sections 1–20 run once per tenant against **at least two tenants**;
 Section 21 runs once, comparing the two.
 
@@ -156,9 +156,9 @@ target) and QA-037 (reassign between two lanes).
 ## 10. Invoices & payments
 
 - [ ] **QA-047** 🖱️ P0 — Issue an invoice and confirm customer delivery (SMS/email link). **Expect:** issued timestamp set; customer receives a working link. (WF-32, `[INV-01]` for the issue transition; the delivery leg is exercised end-to-end by `[JRN-03]`)
-- [ ] **QA-048** 🖱️ P0 — As the customer, pay the invoice on `/pay/:id` with a Stripe test card. `InvoicePaymentPage` creates and confirms a PaymentIntent directly (Stripe Payment Element), not a Checkout Session. **Expect:** the `payment_intent.succeeded` webhook (not `checkout.session.completed`, which this path never emits) flips invoice to paid. (WF-33, `[PORT-02]`)
+- [ ] **QA-048** 🖱️ P0 — As the customer, pay the invoice on `/pay/:id` with a Stripe test card. `InvoicePaymentPage` creates and confirms a PaymentIntent directly (Stripe Payment Element), not a Checkout Session. **Expect:** the `payment_intent.succeeded` webhook (not `checkout.session.completed`, which this path never emits) flips invoice to paid. (WF-33 — no matrix row exercises this path today: `PORT-02` only hits `/public/invoices/:token/checkout`, a separate Checkout Session endpoint, never `/pay/:id`)
 - [ ] **QA-049** 🖱️/🔧 P1 — Make a partial payment, then pay the remainder. The shipped "Mark Paid" UI (`MarkPaidSheet`) only records the full `amountDueCents` — there's no UI control for a custom amount (`PaymentRecordForm` supports one but isn't wired into any page). Use an API-assisted step instead: as the signed-in owner, `POST /api/payments` with `{invoiceId, amountCents: <less than amountDueCents>, method, receivedDate}`, then repeat with the remainder. **Expect:** `partially_paid` → `paid` transitions correctly; a follow-up over-`amountDueCents` request is rejected. (WF-34, `[PAY-01]`)
-- [ ] **QA-050** 🖱️ P1 — Let an invoice go overdue (or seed one). **Expect:** overdue-invoice worker flags it; owner sees it on the money dashboard. (`[PAY-04]`)
+- [ ] **QA-050** 🖱️/🔧 P1 — Let an invoice go overdue. The `dueDate` field in `InvoiceForm` is display-only — it's never sent in the `POST /api/invoices` body — and the send flow always auto-issues with a fixed 30-day term, so a same-session invoice won't be overdue by default. Use an API-assisted step instead: `POST /api/invoices/:id/issue` with `{paymentTermDays: 0}` (accepts 0–365) to make it due immediately, then wait for the overdue-invoice sweep. **Expect:** overdue-invoice worker flags it; owner sees it on the money dashboard. (`[PAY-04]`)
 - [ ] **QA-051** 🖱️/🔧 P2 — Set up a progress/milestone billing plan on a job (a `create_invoice_schedule` proposal — e.g. percent-on-accept, percent-on-completion, remainder-on-manual — approved from the inbox). **Expect:** the schedule persists with its milestones; the `on_accept`/`manual` milestones draft/fire with no extra setup. The `on_completion` milestone is different: `mintCompletionMilestones` no-ops unless the tenant setting `milestoneBillingEnabled` is true, and there's no web UI toggle for it — before testing that trigger, enable it via an authenticated `PUT /api/settings` with `{milestoneBillingEnabled: true}`. There is no date/recurrence-based trigger today, only these three.
 - [ ] **QA-052** 🖱️/🔧 P2 — Run a batch invoice job across multiple jobs/customers. `batchInvoiceEnabled` defaults false with no web UI toggle, and `runBatchInvoiceSweep` only picks up opted-in tenants on its hourly tick. Prerequisite: `PUT /api/settings` with `{batchInvoiceEnabled: true}`, have several jobs in an eligible (completed, uninvoiced) state, then wait up to an hour for the sweep. The sweep itself doesn't create invoices — it drafts a single `batch_invoice` proposal summarizing the eligible jobs; you must find and approve that proposal in `/inbox` (which fans out one `draft_invoice` proposal per job) before invoices exist. **Expect:** after approving both the batch proposal and its fanned-out per-job proposals, one invoice per eligible job, no duplicates, no cross-tenant leakage.
 - [ ] **QA-053** 🖱️ P1 — Export a tax/revenue report for a date range. **Expect:** totals reconcile against the money dashboard for the same range.
@@ -179,7 +179,7 @@ target) and QA-037 (reassign between two lanes).
 - [ ] **QA-059** 🖱️ P0 — Reject a proposal. **Expect:** status rejected, no side effect (no entity created). (WF-37)
 - [ ] **QA-060** 🖱️ P1 — Edit a proposal's payload before approving (e.g. change a price or time). **Expect:** the edited value — not the original AI draft — is what gets executed. (WF-38)
 - [ ] **QA-061** 🖱️ P1 — Use "Approve all eligible" on a chain of proposals. **Expect:** every eligible member executes; ineligible ones are skipped, not silently dropped.
-- [ ] **QA-062** 🖱️ P1 — Click a proposal toast from elsewhere in the app. **Expect:** navigates straight into `/inbox` on the right item. (WF-41)
+- [ ] **QA-062** 🖱️ P1 — Click a proposal toast from elsewhere in the app. `Shell.handleNewProposal` calls `navigate('/inbox')` with no proposal ID or deep link — it opens the generic urgency-sorted inbox, it does not select the specific proposal for you. **Expect:** navigates to `/inbox`; you then find the toast's proposal yourself in the feed (this is *not* a proposal-specific deep link). (WF-41)
 
 ## 14. Comms inbox & interactions
 
@@ -244,13 +244,16 @@ for QA-088.
 - [ ] **QA-093** 🖱️ P0 — Connect/verify Stripe from Settings. **Expect:** Stripe Connect account status shows correctly; payments route to the right connected account.
 - [ ] **QA-094** 🖱️ P1 — On `/settings/templates`, edit an estimate template's customer-facing message (`defaultCustomerMessage`) — the surrounding template cards are AI-suggestion/mock UI, not a real dispatch-template editor; this field is the only one that's actually backend-persisted. **Expect:** the edited copy shows up on a newly created estimate using that template.
 - [ ] **QA-095** 🖱️ P1 — Add/edit a price-book item and use it in a new estimate. **Expect:** the new price shows up as a selectable catalog line, and AI-drafted lines resolve against it.
-- [ ] **QA-096** 🖱️/☎️ P2 — Change language setting (`/settings/language`) to Spanish and save. This page only controls the voice stack (`defaultLanguage`, TTS voice, caller auto-detect) — the web app has no i18n/translation layer, so the UI itself will **not** change language; that's expected, not a bug. **Expect:** the setting persists on reload, and a follow-up inbound call in Spanish (repeat a QA-070-style call speaking Spanish) gets a Spanish-language response.
+- [ ] **QA-096** 🖱️/☎️ P2 — On `/settings/language`, set default language to Spanish **and** check the separate **Enable Spanish** checkbox — the checkbox controls `supportedLanguages` (defaults to `['en']` only) independently of the default-language picker, and the inbound language resolver rejects Spanish entirely when `'es'` isn't in that list. This page only controls the voice stack (`defaultLanguage`, TTS voice, caller auto-detect) — the web app has no i18n/translation layer, so the UI itself will **not** change language; that's expected, not a bug. **Expect:** both settings persist on reload, and a follow-up inbound call in Spanish (repeat a QA-070-style call speaking Spanish) gets a Spanish-language response.
 
-## 20. Integrations — Google Calendar
+## 20. Integrations — Google Calendar & QuickBooks
 
 - [ ] **QA-097** 🖱️ P1 — Connect Google Calendar from Settings. **Expect:** OAuth completes, integration status shows connected. (WF-50)
 - [ ] **QA-098** 🖱️ P1 — Create/assign an appointment and confirm it pushes to Google Calendar. **Expect:** `appointment_calendar_events.status = 'synced'` with a real external event id; event visible in the actual Google Calendar. (proposed matrix row `CAL-01` — not yet added to `matrix.ts`; see the WF-50 appendix in the platform-assessment spec)
 - [ ] **QA-099** 🖱️ P2 — Disconnect Google Calendar. **Expect:** integration clears; no further pushes attempted; existing synced events aren't force-deleted from the customer's calendar.
+- [ ] **QA-100** 🖱️ P1 — Connect QuickBooks Online from Settings (`QuickBooksIntegrationSheet`). **Expect:** OAuth completes, integration status shows connected.
+- [ ] **QA-101** 🖱️ P1 — Pay an invoice, then trigger a manual sync from the QuickBooks sheet. **Expect:** the paid invoice appears in QuickBooks Online (per the sheet's "sync paid invoices" description); sync status reflects success in the UI.
+- [ ] **QA-102** 🖱️ P2 — Disconnect QuickBooks. **Expect:** integration clears; no further syncs attempted.
 
 ## 21. Multi-tenant isolation & security
 
@@ -258,18 +261,18 @@ This section requires **both** tenants set up side by side (see "How to
 use this" above) and is the one section that is run once, comparing the
 two, rather than once per tenant.
 
-- [ ] **QA-100** 🖱️ P0 — Hit `/metrics` and other operational endpoints without an auth token. **Expect:** requires the configured secret, not open by default.
-- [ ] **QA-101** 🖱️ P0 — Hammer an authenticated endpoint past the configured rate limit. **Expect:** 429s kick in rather than the request silently succeeding forever.
-- [ ] **QA-102** 🖱️ P0 — As Tenant B, attempt to approve/reject a Tenant A proposal by guessing/incrementing its ID. **Expect:** rejected — proposal execution respects tenant scoping, not just list views.
-- [ ] **QA-103** 🖱️ P0 — As Tenant B, directly hit Tenant A's customer/job/estimate/invoice detail URLs by ID (repeat QA-005 with fresh IDs from §3–10 of your Tenant A pass). **Expect:** 403/404 on every entity type you touched, not just the ones already covered in §1.
-- [ ] **QA-104** 🖱️ P0 — Compare Tenant A's and Tenant B's price books, templates, and settings side by side. **Expect:** each tenant's catalog/templates are fully independent — editing one never mutates the other (regression risk from any shared-cache or shared-fixture bug).
-- [ ] **QA-105** ☎️ P0 — Call Tenant A's Twilio number and Tenant B's Twilio number back to back. **Expect:** each call is answered with that tenant's own greeting/persona and only surfaces that tenant's data (e.g. asking "what's my balance" on Tenant B's line never returns a Tenant A customer's numbers) — confirms `identify-caller` and the voice skills are scoped per-tenant, not per-phone-number-format.
-- [ ] **QA-106** 🖱️ P1 — Create an estimate/invoice on both tenants around the same time. **Expect:** numbering sequences (invoice #, estimate #) are independent per tenant — no shared counter, no collision.
-- [ ] **QA-107** 🖱️ P1 — Compare Tenant A's and Tenant B's Stripe Connect status and a payment made on each. **Expect:** each tenant's payments settle to its own connected Stripe account — a Tenant A customer's payment never appears on Tenant B's money dashboard.
+- [ ] **QA-103** 🖱️ P0 — Hit `/metrics` and other operational endpoints without an auth token. **Expect:** requires the configured secret, not open by default.
+- [ ] **QA-104** 🖱️ P0 — Hammer an authenticated endpoint past the configured rate limit. **Expect:** 429s kick in rather than the request silently succeeding forever.
+- [ ] **QA-105** 🖱️ P0 — As Tenant B, attempt to approve/reject a Tenant A proposal by guessing/incrementing its ID. **Expect:** rejected — proposal execution respects tenant scoping, not just list views.
+- [ ] **QA-106** 🖱️ P0 — As Tenant B, directly hit Tenant A's customer/job/estimate/invoice detail URLs by ID (repeat QA-005 with fresh IDs from §3–10 of your Tenant A pass). **Expect:** 403/404 on every entity type you touched, not just the ones already covered in §1.
+- [ ] **QA-107** 🖱️ P0 — Compare Tenant A's and Tenant B's price books, templates, and settings side by side. **Expect:** each tenant's catalog/templates are fully independent — editing one never mutates the other (regression risk from any shared-cache or shared-fixture bug).
+- [ ] **QA-108** ☎️ P0 — Call Tenant A's Twilio number and Tenant B's Twilio number back to back. **Expect:** each call is answered with that tenant's own greeting/persona and only surfaces that tenant's data (e.g. asking "what's my balance" on Tenant B's line never returns a Tenant A customer's numbers) — confirms `identify-caller` and the voice skills are scoped per-tenant, not per-phone-number-format.
+- [ ] **QA-109** 🖱️ P1 — Create an estimate/invoice on both tenants around the same time. **Expect:** numbering sequences (invoice #, estimate #) are independent per tenant — no shared counter, no collision.
+- [ ] **QA-110** 🖱️ P1 — Compare Tenant A's and Tenant B's Stripe Connect status and a payment made on each. **Expect:** each tenant's payments settle to its own connected Stripe account — a Tenant A customer's payment never appears on Tenant B's money dashboard.
 
 ## 22. Misc / internal
 
-- [ ] **QA-108** 🖱️ P2 — Open `/design` (internal design-system showcase). **Expect:** loads without error; not linked from customer-facing nav.
+- [ ] **QA-111** 🖱️ P2 — Open `/design` (internal design-system showcase). **Expect:** loads without error; not linked from customer-facing nav.
 
 ---
 
