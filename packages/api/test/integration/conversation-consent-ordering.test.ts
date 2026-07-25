@@ -23,7 +23,15 @@
  * a pure adapter-behavior check and does not touch Postgres.
  */
 import { describe, it, expect, afterAll, vi } from 'vitest';
-import { buildTwiML } from '../../src/telephony/twilio-adapter';
+import express from 'express';
+import request from 'supertest';
+import twilio from 'twilio';
+import { buildTwiML, TwilioGatherAdapter } from '../../src/telephony/twilio-adapter';
+import {
+  buildDegradeFallbackTwiml,
+  createTelephonyRouter,
+  voicemailTwimlForGateReason,
+} from '../../src/routes/telephony';
 import {
   TwilioMediaStreamAdapter,
   type WsLike,
@@ -42,6 +50,13 @@ import type { SideEffect } from '../../src/ai/agents/customer-calling/types';
 let armedBeforeDisclosure = 0;
 /** Times a disclosure-init failure continued to record instead of hanging up. */
 let failOpen = 0;
+/**
+ * C5 (Codex P1) — times implicit recording consent was ledgered for a caller
+ * who never heard a complete disclosure. The ledger defines
+ * `recording/implicit` as "the disclosure PLAYED and the caller stayed on the
+ * line", so a row written on a fail-closed hang-up is false compliance data.
+ */
+let ledgeredUndisclosed = 0;
 
 afterAll(() => {
   // Single greppable gate line — printed passing or not so the harness can
@@ -49,7 +64,8 @@ afterAll(() => {
   // process.stdout (not console.log) so vitest's console interception doesn't
   // swallow output emitted from a hook after the tasks have finished.
   process.stdout.write(
-    `CONSENT-ORDER: ${armedBeforeDisclosure} armed-before-disclosure, ${failOpen} fail-open\n`,
+    `CONSENT-ORDER: ${armedBeforeDisclosure} armed-before-disclosure, ` +
+      `${failOpen} fail-open, ${ledgeredUndisclosed} ledgered-undisclosed\n`,
   );
 });
 
@@ -126,6 +142,45 @@ function silenceArmMarkName(ws: FakeWs): string | undefined {
       (f.mark as { name: string }).name.startsWith('silence-arm-'),
   );
   return (frame?.mark as { name: string } | undefined)?.name;
+}
+
+/**
+ * Drive the REAL POST /voice route with a blocking gate and return its TwiML.
+ * The builder taking a callback argument proves nothing on its own — the
+ * defect this pins was in the WIRING: the route passed a URL for a handler
+ * that never persists anything.
+ */
+async function gateBlockedVoiceTwiml(): Promise<string> {
+  const AUTH_TOKEN = 'test-tw-token-consent-gate';
+  const PUBLIC_BASE_URL = 'https://api.test';
+  const store = new VoiceSessionStore({ startInterval: false });
+  const adapter = new TwilioGatherAdapter({
+    store,
+    gateway: { complete: vi.fn() } as never,
+    businessName: 'Test Co',
+    publicBaseUrl: PUBLIC_BASE_URL,
+  });
+  const app = express();
+  app.use(
+    '/api/telephony',
+    createTelephonyRouter({
+      adapter,
+      authTokenGetter: () => AUTH_TOKEN,
+      publicBaseUrl: PUBLIC_BASE_URL,
+      resolveTenantId: () => 'tenant-consent-gate',
+      voiceGate: async () => ({ allowed: false, reason: 'not_live' as const }),
+    }),
+  );
+
+  const params = { CallSid: 'CA-consent-gate', From: '+15125550100', To: '+15125550999' };
+  const path = '/api/telephony/voice';
+  const sig = twilio.getExpectedTwilioSignature(AUTH_TOKEN, `${PUBLIC_BASE_URL}${path}`, params);
+  const res = await request(app)
+    .post(path)
+    .set('X-Twilio-Signature', sig)
+    .type('form')
+    .send(params);
+  return res.text;
 }
 
 const startFrame = (callSid: string, streamSid: string) => ({
@@ -706,5 +761,97 @@ describe('recording-consent ordering — disclosure precedes audio capture', () 
     await flush();
     if (session.send.mock.calls.length > 0) failOpen += 1;
     expect(session.send).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Path 4 (Codex P1) — the consent LEDGER must agree with what the caller
+   * actually heard.
+   *
+   * `initializeSession` generates the disclosure copy; committing the
+   * `recording/implicit` row at that moment asserted "the disclosure played
+   * and the caller stayed on the line" before a single byte of audio had gone
+   * out. Every fail-closed hang-up therefore left compliance data claiming a
+   * caller consented to a call we terminated precisely because they were
+   * never told. The write now lands only at the validated-playback point.
+   */
+  it('Path 4a (fail closed): a hang-up NEVER ledgers implicit recording consent', async () => {
+    const store = new VoiceSessionStore({ startInterval: false });
+    store.create('tenant-ledger-fail', 'telephony', { callSid: 'CA-ledger-fail' });
+
+    const { provider } = makeStreamingProvider();
+    const ws = new FakeWs();
+    const commitRecordingConsent = vi.fn(async () => {});
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: provider,
+        // Non-PCM: the pipeline refuses to stream it, so the disclosure turn
+        // produces no playback and the leg fails closed.
+        ttsProvider: {
+          synthesize: vi.fn(async () => ({
+            audio: Buffer.from('ID3-fake-mp3'),
+            contentType: 'audio/mpeg',
+            provider: 'test',
+          })),
+        },
+        speechTurn: async () => [],
+        initializeSession: async () => [
+          { type: 'tts_play', payload: { text: 'This call may be recorded.' } },
+        ],
+        commitRecordingConsent,
+      },
+      ws,
+    );
+    adapter.start();
+
+    ws.inboundJson(startFrame('CA-ledger-fail', 'MZ-ledger-fail'));
+    await flush();
+    await flush();
+
+    expect(ws.closed).toBe(true);
+    expect(ws.closeReason).toBe('disclosure_init_failed');
+    // The row must not exist: we hung up BECAUSE the caller was never told.
+    if (commitRecordingConsent.mock.calls.length > 0) ledgeredUndisclosed += 1;
+    expect(commitRecordingConsent).not.toHaveBeenCalled();
+  });
+
+  it('Path 4b (disclosure played): ledgers implicit consent exactly once', async () => {
+    const store = new VoiceSessionStore({ startInterval: false });
+    store.create('tenant-ledger-ok', 'telephony', { callSid: 'CA-ledger-ok' });
+
+    const { provider } = makeStreamingProvider();
+    const ws = new FakeWs();
+    const commitRecordingConsent = vi.fn(async () => {});
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: provider,
+        ttsProvider: makeTtsProvider(),
+        speechTurn: async () => [],
+        initializeSession: async () => [
+          { type: 'tts_play', payload: { text: 'This call may be recorded.' } },
+        ],
+        commitRecordingConsent,
+      },
+      ws,
+    );
+    adapter.start();
+
+    ws.inboundJson(startFrame('CA-ledger-ok', 'MZ-ledger-ok'));
+    await flush();
+    await flush();
+
+    // The disclosure turn played to completion — the ledger's own definition
+    // of implicit consent — so exactly one row is committed, and the leg lives.
+    expect(ws.closed).toBe(false);
+    expect(commitRecordingConsent).toHaveBeenCalledTimes(1);
+    expect(commitRecordingConsent).toHaveBeenCalledWith({ callSid: 'CA-ledger-ok' });
+
+    // And the mark ACK that opens capture must not re-commit.
+    const markName = silenceArmMarkName(ws);
+    expect(markName).toBeDefined();
+    ws.inboundJson({ event: 'mark', mark: { name: markName } });
+    await flush();
+    expect(commitRecordingConsent).toHaveBeenCalledTimes(1);
   });
 });

@@ -1,15 +1,24 @@
 import { createHash } from 'crypto';
 import type { Pool, PoolClient } from 'pg';
 import { tenantContextStore } from '../middleware/tenant-context';
+import { applyTenantContext } from './rls-runtime-role';
 
 /**
  * Run `fn` against a single pooled client inside a tenant-scoped transaction:
- * BEGIN, set the `app.current_tenant_id` GUC LOCAL (parameterized — never
- * interpolated), run `fn`, then COMMIT (or ROLLBACK on throw) and always
- * release the client. Use this for self-contained reads/writes that just need
- * RLS scoping and a rollback boundary, without the savepoint/advisory-lock
- * machinery of `PgTenantTransactionRunner`. The original error is re-thrown
- * after a best-effort ROLLBACK.
+ * BEGIN, establish tenant context LOCAL to it, run `fn`, then COMMIT (or
+ * ROLLBACK on throw) and always release the client. Use this for
+ * self-contained reads/writes that just need RLS scoping and a rollback
+ * boundary, without the savepoint/advisory-lock machinery of
+ * `PgTenantTransactionRunner`. The original error is re-thrown after a
+ * best-effort ROLLBACK.
+ *
+ * Context goes through `applyTenantContext`, which also drops to the
+ * RLS-subject role. Setting only the GUC leaves the policies inert, because
+ * the app connects as a privileged principal that FORCE RLS does not
+ * constrain — the filter would then be whatever the query itself remembered
+ * to write, with no database backstop underneath it. It also validates the
+ * tenant id, so a malformed one throws instead of quietly becoming a GUC
+ * string that matches no rows.
  */
 export async function withTenantConnection<T>(
   pool: Pool,
@@ -19,7 +28,7 @@ export async function withTenantConnection<T>(
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
+    await applyTenantContext(client, tenantId, { transactional: true });
     const result = await fn(client);
     await client.query('COMMIT');
     return result;
@@ -74,9 +83,15 @@ function advisoryKeyPair(key: string): [number, number] {
 }
 
 /**
- * Postgres-backed runner. Opens a transaction, sets the tenant GUC LOCAL to
- * it (parameterized to prevent injection), and runs `fn` inside the
- * AsyncLocalStorage scope so downstream `withTenant` calls reuse the client.
+ * Postgres-backed runner. Opens a transaction, establishes tenant context
+ * LOCAL to it, and runs `fn` inside the AsyncLocalStorage scope so downstream
+ * `withTenant` calls reuse the client.
+ *
+ * Context goes through `applyTenantContext` so the RLS-subject role is dropped
+ * to as well. This matters more here than anywhere else: every repository call
+ * made inside `fn` reuses THIS client via the AsyncLocalStorage handoff, so a
+ * missing role drop disarms the database backstop for the whole unit of work,
+ * not just one query.
  */
 export class PgTenantTransactionRunner implements TenantTransactionRunner {
   constructor(private readonly pool: Pool) {}
@@ -85,7 +100,7 @@ export class PgTenantTransactionRunner implements TenantTransactionRunner {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
-      await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
+      await applyTenantContext(client, tenantId, { transactional: true });
 
       let savepointSeq = 0;
       const scope: TransactionScope = {

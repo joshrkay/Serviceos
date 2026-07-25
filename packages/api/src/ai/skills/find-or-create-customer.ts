@@ -22,7 +22,13 @@ export interface FindOrCreateCustomerByPhoneInput {
 
 export type FindOrCreateCustomerByPhoneResult =
   | { status: 'found'; customerId: string; customer: Customer }
-  | { status: 'created'; customerId: string; customer: Customer };
+  | { status: 'created'; customerId: string; customer: Customer }
+  /**
+   * The phone matched more than one customer in this tenant. The caller must
+   * ask rather than rank — see the contract in RIVET_OPERATION_CONTRACTS.md
+   * ("Multiple candidates → ask. Never pick highest confidence.").
+   */
+  | { status: 'ambiguous'; candidates: Customer[] };
 
 /**
  * Display name for a customer minted from an inbound call: the spoken name if
@@ -47,10 +53,19 @@ export function callerDisplayName(input: {
  * to hang a booked appointment + the call record off of.
  *
  * Lookup uses the repo's tolerant `phone_normalized` tail match (same as
- * caller-ID identification); the newest non-archived match wins, falling back
- * to the newest match overall. Unlike leads, the customers table has no
- * unique phone constraint (duplicate phones are allowed by design), so this
- * does a plain find-then-create with no 23505 recovery.
+ * caller-ID identification), which also matches secondary phones and
+ * `customer_contacts` rows — so one number can legitimately hit several
+ * accounts (a property manager, a shared household line). Unlike leads, the
+ * customers table has no unique phone constraint (duplicate phones are
+ * allowed by design), so this does a plain find-then-create with no 23505
+ * recovery.
+ *
+ * On more than one match this returns `ambiguous` and the caller must ask.
+ * It deliberately does NOT rank: the underlying query carries no ORDER BY, so
+ * picking a "first" match is picking an arbitrary row — and that pick then
+ * scopes the caller's balance and invoice lookups to whichever account won.
+ * Same-tenant, so RLS cannot catch it. Non-archived matches are preferred
+ * over archived ones; ambiguity is judged within whichever set survives.
  */
 export async function findOrCreateCustomerByPhone(
   input: FindOrCreateCustomerByPhoneInput,
@@ -73,7 +88,12 @@ export async function findOrCreateCustomerByPhone(
   // call is captured, but skip the (false-positive-prone) tail lookup.
   if (normalized.length >= 7 && customerRepo.findByPhoneNormalized) {
     const matches = await customerRepo.findByPhoneNormalized(tenantId, normalized);
-    const existing = matches.find((c) => !c.isArchived) ?? matches[0];
+    // An active match beats an archived one; ambiguity is then judged inside
+    // whichever set we're left with, so archiving a duplicate resolves it.
+    const active = matches.filter((c) => !c.isArchived);
+    const candidates = active.length > 0 ? active : matches;
+    if (candidates.length > 1) return { status: 'ambiguous', candidates };
+    const existing = candidates[0];
     if (existing) return { status: 'found', customerId: existing.id, customer: existing };
   }
 
