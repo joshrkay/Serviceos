@@ -250,6 +250,12 @@ describe('AttachmentService', () => {
   });
 
   describe('listForEntity', () => {
+    it('rejects an entity that does not belong to the tenant', async () => {
+      await expect(
+        service.listForEntity(TENANT_A, 'job', 'another-tenant-job'),
+      ).rejects.toThrow('not found');
+    });
+
     it('returns attachments with presigned download URLs and file metadata', async () => {
       const file = await seedFile();
       await service.attach(TENANT_A, ACTOR, {

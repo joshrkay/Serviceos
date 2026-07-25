@@ -203,6 +203,12 @@ export class AttachmentService {
     entityId: string,
     options?: ListByEntityOptions
   ): Promise<AttachmentWithUrl[]> {
+    // Repositories correctly scope attachment rows by tenant, but an empty
+    // result alone cannot distinguish an empty in-tenant entity from an ID
+    // owned by another tenant. Validate the parent first so the listing
+    // endpoint cannot be used as a cross-tenant existence oracle.
+    await this.assertEntityExists(tenantId, entityType, entityId);
+
     // Fetch attachments and all files for this entity in two queries (not N+1).
     // findByEntity returns all file rows for the entity in a single query;
     // we build a lookup map so each attachment can resolve its file in O(1).

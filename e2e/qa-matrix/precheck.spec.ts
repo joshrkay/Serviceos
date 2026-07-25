@@ -99,11 +99,25 @@ test('precheck — voice utterance generates proposal IDs (non-mock LLM path)', 
   });
   expect(utter.status(), `Unexpected voice input status: ${utter.status()}`).toBe(200);
 
-  const utterBody = (await utter.json()) as {
+  let utterBody = (await utter.json()) as {
     proposalIds?: string[];
     proposals?: Array<{ id: string }>;
+    state?: string;
   };
-  const proposalIds = utterBody.proposalIds ?? utterBody.proposals?.map((p) => p.id) ?? [];
+  let proposalIds = utterBody.proposalIds ?? utterBody.proposals?.map((p) => p.id) ?? [];
+  // Mutating voice intents intentionally require a confirmation turn. Follow
+  // the live FSM contract instead of treating `intent_confirm` as a failed
+  // non-mock LLM signal.
+  if (proposalIds.length === 0 && utterBody.state === 'intent_confirm') {
+    const confirmed = await request.post(`${base}/api/voice/sessions/${sessionId}/input`, {
+      timeout: 30_000,
+      headers: { Authorization: `Bearer ${t.token}` },
+      data: { text: 'Yes, create that estimate proposal.' },
+    });
+    expect(confirmed.status(), `Unexpected voice confirmation status: ${confirmed.status()}`).toBe(200);
+    utterBody = await confirmed.json();
+    proposalIds = utterBody.proposalIds ?? utterBody.proposals?.map((p) => p.id) ?? [];
+  }
   expect(
     proposalIds.length,
     `Expected voice input to return at least one proposal id (non-mock LLM signal). Body=${JSON.stringify(utterBody)}`
