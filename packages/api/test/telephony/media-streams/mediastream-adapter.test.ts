@@ -1526,6 +1526,12 @@ describe('production-shaped wiring (app.ts hooks)', () => {
           }),
         initializeSession: ({ callSid, tenantId }) =>
           gatherAdapter.initializeStreamSession({ callSid, tenantId }),
+        // C5 — mirrors app.ts: the implicit recording-consent write is split
+        // out of initializeSession so it lands only once the disclosure turn
+        // is validated as played. Without this hook a streaming call ledgers
+        // nothing, so the harness must wire it to stay production-shaped.
+        commitRecordingConsent: ({ callSid }) =>
+          gatherAdapter.commitRecordingConsent({ callSid }),
         interimEmergencyScan: ({ session, speechResult, tenantId }) =>
           gatherAdapter.scanInterimForEmergency({
             sessionId: session.id,
@@ -1575,7 +1581,12 @@ describe('production-shaped wiring (app.ts hooks)', () => {
     });
 
     // RV-130 — the implicit recording-consent event landed in the ledger.
-    expect(consentEvents.rows).toHaveLength(1);
+    // C5 — the commit is deliberately NOT awaited on the capture critical
+    // path (a slow ledger must not hold capture closed past the disclosure),
+    // so poll rather than asserting synchronously.
+    await vi.waitFor(() => {
+      expect(consentEvents.rows).toHaveLength(1);
+    });
     expect(consentEvents.rows[0]).toMatchObject({
       kind: 'recording',
       state: 'implicit',

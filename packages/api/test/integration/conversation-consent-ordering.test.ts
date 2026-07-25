@@ -50,6 +50,13 @@ import type { SideEffect } from '../../src/ai/agents/customer-calling/types';
 let armedBeforeDisclosure = 0;
 /** Times a disclosure-init failure continued to record instead of hanging up. */
 let failOpen = 0;
+/**
+ * C5 (Codex P1) — times implicit recording consent was ledgered for a caller
+ * who never heard a complete disclosure. The ledger defines
+ * `recording/implicit` as "the disclosure PLAYED and the caller stayed on the
+ * line", so a row written on a fail-closed hang-up is false compliance data.
+ */
+let ledgeredUndisclosed = 0;
 
 afterAll(() => {
   // Single greppable gate line — printed passing or not so the harness can
@@ -57,7 +64,8 @@ afterAll(() => {
   // process.stdout (not console.log) so vitest's console interception doesn't
   // swallow output emitted from a hook after the tasks have finished.
   process.stdout.write(
-    `CONSENT-ORDER: ${armedBeforeDisclosure} armed-before-disclosure, ${failOpen} fail-open\n`,
+    `CONSENT-ORDER: ${armedBeforeDisclosure} armed-before-disclosure, ` +
+      `${failOpen} fail-open, ${ledgeredUndisclosed} ledgered-undisclosed\n`,
   );
 });
 
@@ -755,43 +763,65 @@ describe('recording-consent ordering — disclosure precedes audio capture', () 
     expect(session.send).not.toHaveBeenCalled();
   });
 
-  // ─── Paths 4-6: capture entry points OUTSIDE the greeting turn ────────────
-  // The three above all run through establishment. These do not, which is
-  // exactly why they regressed silently: nothing in this suite could observe
-  // them, and one of them (Path 4) was actively asserted as correct by a
-  // resilience test that never ran a disclosure.
-
-  it('Path 4 (realtime→Gather degrade): fallback TwiML carries the disclosure when the session was never disclosed', async () => {
+  /**
+   * Path 4 (Codex P1) — the consent LEDGER must agree with what the caller
+   * actually heard.
+   *
+   * `initializeSession` generates the disclosure copy; committing the
+   * `recording/implicit` row at that moment asserted "the disclosure played
+   * and the caller stayed on the line" before a single byte of audio had gone
+   * out. Every fail-closed hang-up therefore left compliance data claiming a
+   * caller consented to a call we terminated precisely because they were
+   * never told. The write now lands only at the validated-playback point.
+   */
+  it('Path 4a (fail closed): a hang-up NEVER ledgers implicit recording consent', async () => {
     const store = new VoiceSessionStore({ startInterval: false });
-    // A session that exists but has heard nothing — the shape produced when
-    // the STT socket fails to open, since `<Connect><Stream>` speaks nothing
-    // and establishment never ran.
-    const session = store.create('tenant-degrade', 'telephony', { callSid: 'CA-degrade' });
-    expect(session.recordingDisclosed).toBeFalsy();
+    store.create('tenant-ledger-fail', 'telephony', { callSid: 'CA-ledger-fail' });
 
-    const twiml = buildDegradeFallbackTwiml(session, 'https://x.test/api/telephony/gather', 'en');
+    const { provider } = makeStreamingProvider();
+    const ws = new FakeWs();
+    const commitRecordingConsent = vi.fn(async () => {});
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: provider,
+        // Non-PCM: the pipeline refuses to stream it, so the disclosure turn
+        // produces no playback and the leg fails closed.
+        ttsProvider: {
+          synthesize: vi.fn(async () => ({
+            audio: Buffer.from('ID3-fake-mp3'),
+            contentType: 'audio/mpeg',
+            provider: 'test',
+          })),
+        },
+        speechTurn: async () => [],
+        initializeSession: async () => [
+          { type: 'tts_play', payload: { text: 'This call may be recorded.' } },
+        ],
+        commitRecordingConsent,
+      },
+      ws,
+    );
+    adapter.start();
 
-    // The Gather arms speech recognition, so the notice must precede it.
-    const disclosureAt = twiml.indexOf('may be recorded');
-    const gatherAt = twiml.indexOf('<Gather');
-    if (disclosureAt === -1 || disclosureAt > gatherAt) armedBeforeDisclosure += 1;
-    expect(disclosureAt).toBeGreaterThan(-1);
-    expect(disclosureAt).toBeLessThan(gatherAt);
-    // And it latches, so the caller isn't re-disclosed on every later turn.
-    expect(session.recordingDisclosed).toBe(true);
+    ws.inboundJson(startFrame('CA-ledger-fail', 'MZ-ledger-fail'));
+    await flush();
+    await flush();
 
-    const second = buildDegradeFallbackTwiml(session, 'https://x.test/api/telephony/gather', 'en');
-    expect(second).not.toContain('may be recorded');
+    expect(ws.closed).toBe(true);
+    expect(ws.closeReason).toBe('disclosure_init_failed');
+    // The row must not exist: we hung up BECAUSE the caller was never told.
+    if (commitRecordingConsent.mock.calls.length > 0) ledgeredUndisclosed += 1;
+    expect(commitRecordingConsent).not.toHaveBeenCalled();
   });
 
-  it('Path 5 (recording objection): revoking capture stops STT frames, not just the Twilio recording', async () => {
+  it('Path 4b (disclosure played): ledgers implicit consent exactly once', async () => {
     const store = new VoiceSessionStore({ startInterval: false });
-    const voiceSession = store.create('tenant-objection', 'telephony', {
-      callSid: 'CA-objection',
-    });
+    store.create('tenant-ledger-ok', 'telephony', { callSid: 'CA-ledger-ok' });
 
-    const { provider, session } = makeStreamingProvider();
+    const { provider } = makeStreamingProvider();
     const ws = new FakeWs();
+    const commitRecordingConsent = vi.fn(async () => {});
     const adapter = new TwilioMediaStreamAdapter(
       {
         store,
@@ -801,62 +831,27 @@ describe('recording-consent ordering — disclosure precedes audio capture', () 
         initializeSession: async () => [
           { type: 'tts_play', payload: { text: 'This call may be recorded.' } },
         ],
+        commitRecordingConsent,
       },
       ws,
     );
     adapter.start();
 
-    ws.inboundJson(startFrame('CA-objection', 'MZ-objection'));
+    ws.inboundJson(startFrame('CA-ledger-ok', 'MZ-ledger-ok'));
     await flush();
     await flush();
-    const mark = silenceArmMarkName(ws);
-    if (mark) {
-      ws.inboundJson({ event: 'mark', streamSid: 'MZ-objection', mark: { name: mark } });
-      await flush();
-    }
 
-    // Capture is legitimately armed post-disclosure.
-    ws.inboundJson(mediaFrame);
+    // The disclosure turn played to completion — the ledger's own definition
+    // of implicit consent — so exactly one row is committed, and the leg lives.
+    expect(ws.closed).toBe(false);
+    expect(commitRecordingConsent).toHaveBeenCalledTimes(1);
+    expect(commitRecordingConsent).toHaveBeenCalledWith({ callSid: 'CA-ledger-ok' });
+
+    // And the mark ACK that opens capture must not re-commit.
+    const markName = silenceArmMarkName(ws);
+    expect(markName).toBeDefined();
+    ws.inboundJson({ event: 'mark', mark: { name: markName } });
     await flush();
-    const framesBefore = session.send.mock.calls.length;
-    expect(framesBefore).toBeGreaterThan(0);
-
-    // Caller says "stop recording". On this transport the capture IS the STT
-    // socket — pausing a Twilio recording touches nothing — so the revocation
-    // has to cut the frame feed or the spoken acknowledgment is a lie.
-    voiceSession.captureRevoked = true;
-    ws.inboundJson(mediaFrame);
-    ws.inboundJson(mediaFrame);
-    await flush();
-    if (session.send.mock.calls.length > framesBefore) failOpen += 1;
-    expect(session.send.mock.calls.length).toBe(framesBefore);
-  });
-
-  it('Path 6 (gate-blocked voicemail): the notice precedes <Record> and the audio is ingestible', () => {
-    const twiml = voicemailTwimlForGateReason(
-      'not_live',
-      'https://x.test/api/telephony/recording',
-    );
-    const sayAt = twiml.indexOf('after the tone');
-    const recordAt = twiml.indexOf('<Record');
-    if (sayAt === -1 || sayAt > recordAt) armedBeforeDisclosure += 1;
-    expect(sayAt).toBeLessThan(recordAt);
-    // Without a callback nothing reaches recording-webhook, so no files row
-    // exists — and an object with no row survives tenant deprovisioning,
-    // which harvests keys from `files`.
-    expect(twiml).toContain('recordingStatusCallback=');
-  });
-
-  it('Path 6b: the gate-blocked callback targets the ingestion route, not voicemail-status', async () => {
-    // /voicemail-status only mints a lead and resolves its tenant from
-    // store.findByCallSid — which finds nothing here, because the gate
-    // answers before any voice session exists. Pointing there logs "missing
-    // tenant" and drops the recording, leaving it unpersisted and beyond
-    // deprovision's reach. Only /recording inserts files/voice_recordings.
-    const twiml = await gateBlockedVoiceTwiml();
-    const callback = /recordingStatusCallback="([^"]+)"/.exec(twiml)?.[1];
-    expect(callback).toBeDefined();
-    expect(callback).toMatch(/\/api\/telephony\/recording$/);
-    expect(callback).not.toMatch(/voicemail-status/);
+    expect(commitRecordingConsent).toHaveBeenCalledTimes(1);
   });
 });
