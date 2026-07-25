@@ -35,7 +35,7 @@ jobs:
 
       # node-version-file rather than a literal: this job is the one that
       # should fail if .nvmrc and the rest of CI ever disagree again.
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           node-version-file: '.nvmrc'
           # No `cache:` on purpose — a cache hit would hide a lockfile that
