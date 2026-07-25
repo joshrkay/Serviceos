@@ -97,8 +97,9 @@ as a comment-only change; no tests added, because these already pin it:
 | Node pin declared in one place | **`.nvmrc`, 20 of 20 sites resolve it** | single source | **done** |
 | Dependency audit gate | **present** | present | **done** |
 | High prod vulns outside exceptions | **0** (1 excepted) | 0 | **done** |
-| Migrations replayed per boot | 265 (all) | 0 when none pending | not started |
+| Migrations replayed per deploy | 265 (all, 210 ms) | 0 when none pending | not started |
 | Migration ledger table | none | present | not started |
+| Replay headroom vs 25s cap | **24.8 s (0.8% used)** | maintained | measured |
 
 ### Static analysis detail
 
@@ -201,23 +202,67 @@ was unusable there. Advisory mode keeps the drift visible without blocking
 checks that do not depend on it; `npm run doctor` on its own still exits
 non-zero.
 
-### Migration detail (highest remaining risk)
+### Migration detail — measured, and much less severe than first claimed
 
-`migrate.ts:142-148` runs `client.query(getMigrationSQL())` — all **265**
-migrations concatenated into a single query, on **every boot**, under
-`statement_timeout = '25s'`. There is no ledger; `scripts/prod-schema-probe.sql:3`
-states outright that "there is no schema_migrations version table on the deploy
-path."
+An earlier revision of this document called the migration path "the clearest
+scaling cliff in the system" and said the corpus replays "on every boot".
+**Both claims were wrong.** They were written from a code read; measuring
+disproved them. The corrected picture:
 
-Re-runnability is achieved by rewriting DDL (`getMigrationSQL`'s
-`DROP CONSTRAINT IF EXISTS` rewriter). The advisory lock at `migrate.ts:43-60`
-(`withMigrationAdvisoryLock`) is genuinely valuable and must be preserved by any
-replacement.
+**It runs once per deploy, not per boot.** `railway.toml:13` invokes
+`migrate.js` as `preDeployCommand`; `startCommand` is `index.js`, and
+`src/index.ts` contains no migration reference at all.
+`railway.worker.toml:11` states explicitly that the worker has no
+`preDeployCommand` because "migrations run exactly once, on the web service."
+A crash-restart or a scale-up does not replay anything. The blast radius of a
+failure is therefore "the deploy aborts and the old version keeps serving",
+not "the fleet crash-loops".
 
-The 25s timeout against a linearly growing corpus is the clearest scaling
-cliff in the system. **This should be the next plan written** — it changes
-production startup, so it needs its own baselining strategy for existing
-databases, not an incremental commit.
+**Replay costs 210 ms — 0.8% of the 25s budget.** Measured against
+`pgvector/pgvector:pg16` via testcontainers, applying the real
+`getMigrationSQL()` output (265 migrations, 266,594 chars):
+
+| Pass | Wall clock |
+|---|---|
+| 1 — cold, empty database | 2,631 ms |
+| 2 — replay against migrated DB | 210 ms |
+| 3 — replay again | 187 ms |
+
+Replay is cheap because nearly every statement is a catalog no-op
+(`CREATE TABLE IF NOT EXISTS`, the `DROP POLICY IF EXISTS` / `DROP CONSTRAINT
+IF EXISTS` rewrites). Headroom against the 25s cap is **24.8 s**; at the
+measured 0.8 ms per migration the corpus would need roughly **31,500**
+migrations to approach the timeout. There is no cliff at 265.
+
+**What is actually true and worth fixing**, in order:
+
+1. **A few migrations do data work on every deploy.** 12 `UPDATE` backfills,
+   2 `DELETE`, 2 `INSERT`. All are self-limiting — guarded by predicates that
+   match nothing after the first run (`WHERE review_request_sent_at IS NULL`,
+   `WHERE NOT EXISTS (…)`) — so they write nothing on replay. But they still
+   *scan* to discover that, and those scans scale with production row count
+   rather than with migration count. `198` runs a `row_number()` window over
+   open customer conversations each deploy; `214` scans `jobs` for NULLs.
+   Modest today, and the only part of this that grows with the business.
+2. **Idempotency rests on regex rewriting.** `getMigrationSQL` makes DDL
+   re-runnable by string-substituting `CREATE POLICY` and `ADD CONSTRAINT`
+   into drop-then-create pairs. A future migration written in a shape those
+   two regexes do not match is silently non-idempotent, and the failure
+   surfaces on the *next* deploy rather than the one that introduced it.
+3. **No ledger means no record of what ran when.** That is a real diagnostic
+   gap — nothing in the database says which migrations have been applied — but
+   it is hygiene, not an outage risk.
+
+Checked and *not* a problem: the 50 `ADD COLUMN … NOT NULL DEFAULT` statements
+are metadata-only on PostgreSQL 11+ (this is PG16), so they do not rewrite
+tables. `253`'s `_user_dup_victims` is a genuine `TEMP` table and is dropped.
+
+The advisory lock at `migrate.ts:43-60` (`withMigrationAdvisoryLock`) is
+genuinely valuable and must be preserved by any replacement.
+
+**Revised priority: this is worth doing, but it is not the top risk and should
+not displace the `app.ts` work.** See
+`docs/plans/2026-07-25-001-migration-ledger-plan.md`.
 
 ## Route manifest
 
@@ -267,11 +312,13 @@ Three consequences worth carrying forward:
 - **`app.ts` decomposition** — blocked on nothing technically, but its plan
   needs rewriting first per Correction 1. The route manifest is now in place as
   the safety net.
-- **Migration ledger** — highest-risk change in the programme; needs its own
-  plan (see above).
+- **Migration ledger** — worth doing for diagnostics and deploy speed, but the
+  measurements above retired the urgency it was first assigned. Plan written at
+  `docs/plans/2026-07-25-001-migration-ledger-plan.md`; it should queue behind
+  the `app.ts` work, not ahead of it.
 - **Making ESLint blocking** — this sprint measures. The counts above decide
   what can be enforced and in what order.
-- **Deleting the 182 dead suppressions** — per-file, as each rule goes
+- **Deleting the 180 dead suppressions** — per-file, as each rule goes
   blocking. Deleting them in the same change that introduced the linter would
   conflate two things and make the diff unreviewable.
 
