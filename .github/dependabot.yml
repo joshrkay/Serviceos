@@ -60,3 +60,14 @@ updates:
       actions:
         applies-to: version-updates
         update-types: ['minor', 'patch']
+
+  # Base images in /Dockerfile. Both are digest-pinned, which is deterministic
+  # but does not self-update — an unwatched digest pin is how a service ends up
+  # on an unpatched nginx for a year. This is the update path that makes the pin
+  # safe to hold. Weekly rather than monthly: these carry OS-level CVEs, and a
+  # base-image bump is a one-line diff that CI fully covers.
+  - package-ecosystem: docker
+    directory: '/'
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3

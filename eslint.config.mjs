@@ -31,7 +31,15 @@ import globals from 'globals';
 /** Correctness rules that need no type information. */
 const untypedCorrectness = {
   'no-constant-condition': ['error', { checkLoops: false }],
-  'no-fallthrough': 'error',
+  // allowEmptyCase, because every finding the default produced in this repo was
+  // a false positive. Measured: 12 findings with the default, 0 with this option,
+  // and all 12 were grouped `case` labels with an explanatory comment between
+  // them (11 in proposals/proposal.ts's capture-class classifier, 1 in
+  // ai/skills/escalate-to-human.ts). A comment between labels makes the rule
+  // treat the case as non-empty and demand a `falls through` marker; the code is
+  // correct. This keeps the rule blocking on real fallthrough — a case with
+  // STATEMENTS that flows into the next — which is the bug worth catching.
+  'no-fallthrough': ['error', { allowEmptyCase: true }],
   'no-promise-executor-return': 'error',
   'no-unreachable': 'error',
   'no-unsafe-finally': 'error',

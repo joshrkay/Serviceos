@@ -68,6 +68,54 @@ function gitGrepCount(pattern: string, globs: string[]): number | null {
   }
 }
 
+/** A `FROM` base image in the Dockerfile, and whether it is deterministic. */
+export interface DockerBaseImage {
+  image: string;
+  exact: boolean;
+  reason: 'digest' | 'exact-tag' | 'floating-tag' | 'no-tag';
+}
+
+/**
+ * Classifies every EXTERNAL base image in a Dockerfile.
+ *
+ * Deliberately not scoped to `node:` images. The first version of this matched
+ * `/^FROM (node:[^\s]+)/` and reported `allExact: true` from that subset alone,
+ * which meant it structurally could not see the floating `nginx:alpine` serving
+ * the web SPA — the artifact asserted full exactness while a base image drifted.
+ * A metric that can only observe the pins that are already correct is worse than
+ * no metric, because it reads as coverage.
+ *
+ * Intra-file stage references (`FROM base AS api`) are not base images and are
+ * skipped; only stages declared EARLIER count as internal, matching Docker's own
+ * resolution order, so a `FROM` naming a not-yet-declared stage is still treated
+ * as external rather than silently ignored.
+ */
+export function auditDockerfileBaseImages(contents: string): DockerBaseImage[] {
+  const stages = new Set<string>();
+  const images: DockerBaseImage[] = [];
+
+  for (const line of contents.split('\n')) {
+    const m = /^FROM\s+(\S+)(?:\s+AS\s+(\S+))?/i.exec(line.trim());
+    if (!m) continue;
+    const [, image, stage] = m;
+
+    if (!stages.has(image.toLowerCase())) {
+      const reason: DockerBaseImage['reason'] = image.includes('@sha256:')
+        ? 'digest'
+        : /:\d+\.\d+\.\d+/.test(image)
+          ? 'exact-tag'
+          : image.includes(':')
+            ? 'floating-tag'
+            : 'no-tag';
+      images.push({ image, exact: reason === 'digest' || reason === 'exact-tag', reason });
+    }
+
+    if (stage) stages.add(stage.toLowerCase());
+  }
+
+  return images;
+}
+
 /** Counts `node-version:` pins in workflows that are NOT an exact patch. */
 function nodePinAudit(): {
   nvmrc: string | null;
@@ -75,6 +123,7 @@ function nodePinAudit(): {
   workflowPins: Record<string, number>;
   looseWorkflowPins: number;
   dockerfilePins: string[];
+  floatingBaseImages: string[];
   allExact: boolean;
 } {
   const nvmrcPath = path.join(REPO_ROOT, '.nvmrc');
@@ -105,21 +154,24 @@ function nodePinAudit(): {
   }
 
   const dockerfilePath = path.join(REPO_ROOT, 'Dockerfile');
-  const dockerfilePins = existsSync(dockerfilePath)
-    ? [...readFileSync(dockerfilePath, 'utf8').matchAll(/^FROM (node:[^\s]+)/gm)].map(
-        (m) => m[1],
-      )
+  const baseImages = existsSync(dockerfilePath)
+    ? auditDockerfileBaseImages(readFileSync(dockerfilePath, 'utf8'))
     : [];
 
   const exactNvmrc = nvmrc !== null && /^\d+\.\d+\.\d+$/.test(nvmrc);
-  const exactDocker = dockerfilePins.every((p) => /^node:\d+\.\d+\.\d+-/.test(p));
+  // An empty Dockerfile must not read as exact — `every` on [] is true, so the
+  // absence of any base image would otherwise satisfy the reproducibility claim.
+  const exactDocker = baseImages.length > 0 && baseImages.every((b) => b.exact);
 
   return {
     nvmrc,
     enginesNode: pkg.engines?.node ?? null,
     workflowPins,
     looseWorkflowPins: loose,
-    dockerfilePins,
+    dockerfilePins: baseImages.map((b) => b.image),
+    // Names what fails the claim, so `allExact: false` is actionable instead of
+    // sending the next reader back to the Dockerfile to diff it by eye.
+    floatingBaseImages: baseImages.filter((b) => !b.exact).map((b) => b.image),
     allExact: exactNvmrc && exactDocker && loose === 0,
   };
 }

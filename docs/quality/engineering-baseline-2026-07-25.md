@@ -95,6 +95,8 @@ as a comment-only change; no tests added, because these already pin it:
 | ESLint warnings | 2,154 | triaged | measured |
 | `eslint-disable` comments | 202 (180 provably dead) | <25 justified | measured |
 | Node pin declared in one place | **`.nvmrc`, 20 of 20 sites resolve it** | single source | **done** |
+| Dockerfile base images pinned | **3 of 3** (`nginx` by digest) | maintained | **done** |
+| GitHub Actions pinned by SHA | 0 of 57 | 57 of 57 | not started |
 | Dependency audit gate | **present** | present | **done** |
 | High prod vulns outside exceptions | **0** (1 excepted) | 0 | **done** |
 | Migrations replayed per deploy | 265 (all, 210 ms) | 0 when none pending | not started |
@@ -128,14 +130,61 @@ Findings by rule, over the 3,295 linted source files:
 | `@typescript-eslint/no-floating-promises` | **75** | error | **highest-value target** — unawaited promises |
 | `require-atomic-updates` | 63 | error | possible real race conditions |
 | `react-hooks/exhaustive-deps` | 19 | warn | stale-closure risk |
-| `no-fallthrough` | 12 | error | likely real switch bugs |
+| `no-fallthrough` | 12 | error | **all 12 false positives** — see below |
 | `@typescript-eslint/await-thenable` | 6 | error | `await` on a non-promise |
 
-**Recommended order for making rules blocking**, cheapest real signal first:
-`await-thenable` (6) → `no-fallthrough` (12) → `no-floating-promises` (75) →
-`require-atomic-updates` (63). Those four total **156 findings** and are the
-realistic blocking set. `no-misused-promises` (718) is a separate project, and
-the two 900+ warn-level rules should stay warnings.
+#### Correction: the "156 realistic blocking set" was wrong
+
+An earlier revision of this section recommended making four rules blocking in
+the order `await-thenable` (6) → `no-fallthrough` (12) → `no-floating-promises`
+(75) → `require-atomic-updates` (63), and called those **156 findings** "the
+realistic blocking set". That treated the four as equivalent signal without
+checking where the findings were. Bucketing them by directory — the measurement
+that should have come first — shows they are not:
+
+| Rule | Total | Where the findings actually are |
+|---|---|---|
+| `no-floating-promises` | 75 | **73 in `packages/web/src`**, 2 in the API |
+| `require-atomic-updates` | 63 | 21 `api/src` other, 22 web, 11 mobile, **8 on voice paths** |
+| `no-fallthrough` | 12 | **all 12 false positives** |
+| `await-thenable` | 6 | all 6 in `packages/web/src` |
+
+`packages/api/src/billing`, `.../voice`, and `.../webhooks` contain **zero**
+findings across all four rules. Any argument that this work protects the money
+or voice paths has to survive that fact: those paths are already clean of this
+bug class, and 73 of the 75 floating promises are in the client SPA, where an
+unhandled rejection is a UI-robustness bug rather than a lost write.
+
+**All 12 `no-fallthrough` findings were false positives.** Every one is a
+grouped `case` label with an explanatory comment between the labels — 11 in
+`proposals/proposal.ts:282–348` (the capture-class classifier: ~30 case labels
+sharing one `return 'capture'`, each addition justified by a comment) and 1 in
+`ai/skills/escalate-to-human.ts:105–109`. A comment between labels makes the
+rule treat the case as non-empty and demand a `falls through` marker; the code
+is correct. Measured: **12** findings with the rule's default options, **0** with
+`allowEmptyCase: true`, which `eslint.config.mjs` now sets. The rule still
+blocks on real fallthrough — a case with *statements* that flows into the next.
+
+So the set worth human attention is **~28 findings, not 156**: the 8
+`require-atomic-updates` on voice paths below, plus the ~21 elsewhere in
+`packages/api/src`. The 101 web findings are a client-robustness pass, not a
+correctness gate. `no-misused-promises` (718) remains its own project and the
+two 900+ warn-level rules should stay warnings.
+
+The 8 on voice paths are where this rule earns its keep — it flags
+read-modify-write across an `await`, the real race class:
+
+```
+ai/voice-turn/create-voice-turn-processor.ts:2080, 2206, 2570
+telephony/media-streams/mediastream-adapter.ts:1143
+ai/agents/customer-calling/entity-resolution.ts:371
+ai/tasks/invoice-edit-task.ts:241, 262
+ai/gateway/readiness.ts:154
+```
+
+`entity-resolution.ts` has form here: it is the module that shipped with
+nonexistent column names because its `Pool` was mocked. These 8 are worth
+reading before real callers arrive; the other ~148 are not.
 
 ### Cost, and the honest case against report-only
 
@@ -183,7 +232,7 @@ resolves with leftover state.
 Staying on the 20 line is deliberate: 20 is what CI and the Railway image
 already run, so this removes drift without changing the production runtime.
 
-Two design points, both corrected after the first pass got them wrong:
+Three design points, all corrected after the first pass got them wrong:
 
 - **One source of truth, not twenty.** The first version hardcoded `20.20.2` at
   18 workflow sites, which made a Node bump an 18-site edit — more drift
@@ -193,6 +242,33 @@ Two design points, both corrected after the first pass got them wrong:
   conventionally expresses the *supported* range while `.nvmrc` expresses the
   *canonical* version; the first version conflated them, so every contributor on
   20.20.1 got an `EBADENGINE` warning for no reason.
+- **`allExact: true` was measured from a subset that could only contain
+  successes.** The collector matched `/^FROM (node:[^\s]+)/`, so it computed
+  Dockerfile exactness from the Node stages alone and structurally could not see
+  `nginx:alpine` — the image serving the web SPA — floating at `Dockerfile:68`.
+  The artifact asserted full reproducibility while a base image drifted. A metric
+  that can only observe the pins already correct is worse than no metric, because
+  it reads as coverage. `auditDockerfileBaseImages()` now classifies every
+  external base image (stage-alias aware, so `FROM base AS api` is not counted as
+  a pull), reports a `floatingBaseImages` list so `allExact: false` says *which*,
+  and refuses to call an empty Dockerfile exact. Pinned by 8 cases in
+  `packages/api/test/scripts/collect-quality-metrics.test.ts`, one of which
+  asserts the real Dockerfile has no floating image.
+
+`nginx` is now pinned by digest —
+`nginx:1.31.3-alpine@sha256:4a73073b…` — not merely by version tag. At the time
+of pinning `alpine`, `1.31.3-alpine`, and `1.31.3-alpine3.24` all resolved to
+that digest, so this is the image that was already shipping; the change is
+determinism, not an upgrade. A digest pin does not self-update, which is how a
+service ends up on an unpatched nginx for a year, so `.github/dependabot.yml`
+gains a weekly `docker` ecosystem as the update path that makes the pin safe to
+hold.
+
+Still unpinned, and deliberately out of scope here: all **57** `uses:` in
+`.github/workflows` reference mutable tags rather than commit SHAs, and they are
+version-skewed (`checkout@v5` ×16 vs `@v4` ×4, `setup-node@v5` ×16 vs `@v4` ×4,
+`upload-artifact@v4` ×9 vs `@v5` ×6). That is supply-chain hygiene worth doing,
+but it does not gate launch.
 
 Relatedly, `verify` now runs `doctor --warn-only`. Doctor checks the
 environment; typecheck/lint/test check the code. Chaining them with `&&` meant a
