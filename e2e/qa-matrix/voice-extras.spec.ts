@@ -7,6 +7,8 @@ import { rwAvailable, rwExec } from './helpers/rw-db';
  * VOX-02 — Spanish / i18n voice response (real LLM, soft language check).
  * VOX-03 — DNC suppression of outbound SMS (RW-seeded DNC entry).
  * VOX-04 — documents the telephony-only cases not drivable in simulated mode.
+ * VOX-12 — callerPhone with no matching customer: regression guard (unresolved, unchanged).
+ * VOX-13 — callerPhone matching two customers: regression guard (unresolved, no guessing).
  */
 
 test.describe.configure({ mode: 'serial' });
@@ -168,4 +170,60 @@ matrixTest('VOX-04', 'Telephony-only edge cases (documented coverage gap)', asyn
   h.evidence.note('Session cost caps: the cap is a constructor arg (not API-configurable) and unlikely to trip in a short session.');
   h.evidence.na('Documented telephony-only / non-API edge cases — exercise on a live Twilio staging environment.');
   expect(true).toBe(true);
+});
+
+matrixTest('VOX-12', 'callerPhone with no matching customer falls through unchanged', async (h) => {
+  // QA-2026-07-26 — regression guard for the callerPhone resolution added to
+  // InAppVoiceAdapter.startSession (packages/api/src/ai/agents/customer-calling/
+  // inapp-adapter.ts). A phone that matches no tenant customer must leave the
+  // caller unresolved — same as before the fix — so "our customer" (a
+  // GENERIC_CUSTOMER_REFS phrase that skips name-based lookup entirely) still
+  // fails to produce a proposal. Not seeded anywhere; guaranteed to miss.
+  const noMatchPhone = '555-0399';
+  const sessionId = await startVoiceSession(h, h.tenantA.token, '12', noMatchPhone);
+  if (!sessionId) return void h.evidence.fail('Voice session could not be started.');
+
+  const res = await submit(
+    h,
+    sessionId,
+    'Schedule a furnace tune-up for our customer next Tuesday at 2 PM',
+    '12-input'
+  );
+  if (res.response.status !== 200) {
+    return void h.evidence.fail(`Voice input returned ${res.response.status}; AI pipeline not ready (Real-LLM-only).`);
+  }
+  const proposalIds = (res.response.body as { proposalIds?: string[] }).proposalIds ?? [];
+  if (proposalIds.length === 0) {
+    h.evidence.pass('No callerPhone match — caller left unresolved; "our customer" still failed to resolve (unchanged fallback).');
+  } else {
+    h.evidence.fail('A generic "our customer" utterance produced a proposal despite an unmatched callerPhone — unexpected guess.');
+  }
+});
+
+matrixTest('VOX-13', 'callerPhone matching two customers falls through unchanged', async (h) => {
+  // QA-2026-07-26 — companion regression guard: a callerPhone matching TWO
+  // customers on the same tenant (seeded by fixtures/seed.ts as
+  // `${slug}-ambiguous-1` / `${slug}-ambiguous-2`, both on '555-0200', kept
+  // distinct from the primary customer's '555-0100' used by SCH-02/SMS-01)
+  // must also leave the caller unresolved — the adapter never guesses among
+  // ambiguous matches (0 or 2+ matches take the same unresolved branch).
+  const ambiguousPhone = '555-0200';
+  const sessionId = await startVoiceSession(h, h.tenantA.token, '13', ambiguousPhone);
+  if (!sessionId) return void h.evidence.fail('Voice session could not be started.');
+
+  const res = await submit(
+    h,
+    sessionId,
+    'Schedule a furnace tune-up for our customer next Tuesday at 2 PM',
+    '13-input'
+  );
+  if (res.response.status !== 200) {
+    return void h.evidence.fail(`Voice input returned ${res.response.status}; AI pipeline not ready (Real-LLM-only).`);
+  }
+  const proposalIds = (res.response.body as { proposalIds?: string[] }).proposalIds ?? [];
+  if (proposalIds.length === 0) {
+    h.evidence.pass('Ambiguous callerPhone (2 matches) — caller left unresolved; "our customer" still failed to resolve (no guessing).');
+  } else {
+    h.evidence.fail('A generic "our customer" utterance produced a proposal despite an ambiguous callerPhone match — unexpected guess.');
+  }
 });

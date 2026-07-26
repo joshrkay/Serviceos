@@ -17,11 +17,16 @@ export interface ProposalOutcome {
   proposalType?: string;
 }
 
-export async function startVoiceSession(h: RowHarness, token: string, label: string): Promise<string | undefined> {
+export async function startVoiceSession(
+  h: RowHarness,
+  token: string,
+  label: string,
+  callerPhone?: string
+): Promise<string | undefined> {
   const res = await h.api.call({
     method: 'POST',
     path: '/api/voice/sessions',
-    body: {},
+    body: callerPhone ? { callerPhone } : {},
     token,
     label: `${label}-vstart`,
     expectStatus: [200, 201, 400, 403, 404],

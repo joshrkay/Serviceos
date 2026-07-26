@@ -71,7 +71,12 @@ matrixTest('SCH-01', 'Create + reschedule appointment (API)', async (h) => {
 
 matrixTest('SCH-02', 'Schedule appointment by voice', async (h) => {
   const { token, tenantId } = h.tenantA;
-  const sessionId = await startVoiceSession(h, token, '02');
+  // QA-2026-07-26 — pass the seeded customer's phone (fixtures/seed.ts:
+  // '555-0100', unique per tenant) as callerPhone so InAppVoiceAdapter
+  // resolves the caller identity up front via findByPhoneNormalized. Without
+  // this, the generic "our customer" phrase below has no name to fall back
+  // on and never resolves (GENERIC_CUSTOMER_REFS skips name-based lookup).
+  const sessionId = await startVoiceSession(h, token, '02', '555-0100');
   if (!sessionId) return void h.evidence.fail('Voice session could not be started.');
 
   const proposalIds = await voiceInput(

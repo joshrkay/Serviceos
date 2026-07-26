@@ -16,6 +16,13 @@
 import { Client } from 'pg';
 import { randomUUID } from 'node:crypto';
 
+/**
+ * Shared phone for the ambiguous-match pair seeded per tenant below (VOX-13).
+ * Must stay distinct from the primary customer's '555-0100' so that number
+ * keeps resolving to exactly one customer for SCH-02/SMS-01's callerPhone.
+ */
+const AMBIGUOUS_PHONE = '555-0200';
+
 async function main() {
   const connectionString = process.env.E2E_DB_URL_READWRITE;
   if (!connectionString) {
@@ -108,6 +115,29 @@ async function ensureTenantFixture(client: Client, slug: string): Promise<Fixtur
         [randomUUID(), tenantId, 'QA', slug, customerDisplay, '555-0100', systemUser]
       )
       .then((r) => r.rows[0].id));
+
+  // Ambiguous-phone pair (VOX-13): two customers on the SAME tenant sharing
+  // one phone number, distinct from the primary customer's '555-0100' above
+  // (that number must stay a single match for SCH-02/SMS-01's callerPhone
+  // resolution). Exercises the "0 or 2+ matches are left unresolved" branch
+  // of InAppVoiceAdapter.startSession — the adapter must never guess between
+  // them. display_name is the idempotency handle, same pattern as above.
+  for (const suffix of ['ambiguous-1', 'ambiguous-2']) {
+    const display = `${slug}-${suffix}`;
+    const existingAmbiguous = await client.query(
+      `SELECT id FROM customers WHERE tenant_id = $1 AND display_name = $2 LIMIT 1`,
+      [tenantId, display]
+    );
+    if (!existingAmbiguous.rows[0]) {
+      await client.query(
+        `INSERT INTO customers
+           (id, tenant_id, first_name, last_name, display_name, primary_phone, preferred_channel,
+            sms_consent, is_archived, created_by, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, 'none', false, false, $7, now(), now())`,
+        [randomUUID(), tenantId, 'QA', suffix, display, AMBIGUOUS_PHONE, systemUser]
+      );
+    }
+  }
 
   // Service location (jobs require a location_id).
   const locationLabel = `${slug}-location`;

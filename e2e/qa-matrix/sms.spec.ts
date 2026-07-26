@@ -112,7 +112,10 @@ matrixTest('SMS-01', 'Outbound SMS dispatch records + entity_type CHECK', async 
   // the tenant's most recent active job — that one — and execution fires the
   // confirmation through scheduling-notifications.
   await chain(h, true, '01');
-  const sessionId = await startVoiceSession(h, h.tenantA.token, '01');
+  // QA-2026-07-26 — callerPhone = the seeded customer's phone (fixtures/
+  // seed.ts: '555-0100') so InAppVoiceAdapter resolves the caller up front;
+  // otherwise "our customer" below has no name to fall back on.
+  const sessionId = await startVoiceSession(h, h.tenantA.token, '01', '555-0100');
   if (!sessionId) return void h.evidence.fail('Voice session could not be started.');
   const proposalIds = await voiceInput(
     h,
