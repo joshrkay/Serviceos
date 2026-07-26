@@ -39,8 +39,35 @@
  * keep their contracts: SendService catches it to write its `suppressed`
  * dispatch row + rethrow; the best-effort notifiers swallow it; the review
  * private-message adapter maps it to `{ suppressed, reason }`.
+ *
+ * ── Runtime outbound kill switch (per channel) ──────────────────────────────
+ *
+ * `TELEPHONY_ENABLED=false` stops every outbound SMS; `EMAIL_ENABLED=false`
+ * stops every outbound email. The two are independent, and BOTH are checked
+ * here — the single chokepoint every product send already flows through
+ * (app.ts wraps the one `rawMessageDelivery` object in this class, and every
+ * consumer takes the wrapped `messageDelivery`).
+ *
+ * Semantics, matching the existing comparison style in shared/config.ts:
+ *   - flag unset            → channel ENABLED (dev/QA/test behavior unchanged)
+ *   - flag === 'false'      → channel HARD OFF
+ *   - any other value       → channel ENABLED
+ *
+ * Unlike the consent gate, the kill switch is checked BEFORE the
+ * `recipientClass: 'owner'` bypass. That is deliberate: the promise is "no
+ * outbound traffic at all", not "no customer traffic". An owner digest is
+ * still an outbound message on a real carrier/ESP account.
+ *
+ * Observability: a disabled channel must not be indistinguishable from no
+ * traffic. Every suppression emits an info log with the greppable
+ * `reason: 'channel_disabled'` plus tenantId, channel, recipientClass and a
+ * REDACTED recipient (phone last-4 / email domain only — the same redaction
+ * shapes already used by the suppression audit below and by the signup funnel
+ * event in webhooks/routes.ts), and bumps an in-process counter readable via
+ * `killSwitchSuppressionCounts()`.
  */
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { createLogger, type Logger } from '../logging/logger';
 import { normalizePhone } from '../compliance/dnc';
 import {
   resolveOutboundConsent,
@@ -60,7 +87,32 @@ export type SmsSuppressionReason =
   | 'dnc'
   | 'missing_consent_context'
   /** WS12 — standing cross-channel (sms/marketing) revocation in the ledger. */
-  | 'revoked';
+  | 'revoked'
+  /** Runtime kill switch — TELEPHONY_ENABLED=false. Applies to owner sends too. */
+  | 'channel_disabled';
+
+/** The two outbound channels the kill switch gates, independently. */
+export type OutboundChannel = 'sms' | 'email';
+
+/** Env var that hard-disables each channel when set to the literal 'false'. */
+const KILL_SWITCH_ENV_VAR: Record<OutboundChannel, 'TELEPHONY_ENABLED' | 'EMAIL_ENABLED'> = {
+  sms: 'TELEPHONY_ENABLED',
+  email: 'EMAIL_ENABLED',
+};
+
+/**
+ * Unset (or anything other than the literal 'false') = ENABLED, so dev/QA/test
+ * behavior is byte-identical to before this switch existed. The `!== 'false'`
+ * comparison mirrors `validateFeatureRequiredConfig` in shared/config.ts, so
+ * the boot-time presence check and this runtime gate can never disagree about
+ * what "off" means.
+ */
+export function isOutboundChannelEnabled(
+  channel: OutboundChannel,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return env[KILL_SWITCH_ENV_VAR[channel]] !== 'false';
+}
 
 /** Narrow DNC seam — satisfied by DncRepository and test stubs. */
 export interface DncLookup {
@@ -84,6 +136,28 @@ export class SmsSuppressedError extends Error {
 }
 
 /**
+ * Email counterpart of `SmsSuppressedError`, thrown when the EMAIL_ENABLED
+ * kill switch is off.
+ *
+ * Email has no pre-existing suppression path, so this is a new type — but NOT
+ * a new caller contract. Every `sendEmail` call site already has to cope with
+ * a thrown error, because that is exactly how a SendGrid 4xx/5xx surfaces
+ * today (`DeliveryError` from TwilioDeliveryProvider). Sites either swallow it
+ * (best-effort notifiers, activation email, campaign send), record a failed
+ * dispatch row and re-surface it (SendService, conversation replies), or let a
+ * queued job retry (lifecycle emails, whose claim is rolled back first). So a
+ * suppressed email degrades exactly like an ESP outage: never a crash, never
+ * an unhandled rejection, never a silent false "delivered".
+ */
+export class EmailSuppressedError extends Error {
+  readonly suppressed = true;
+  constructor(readonly reason: 'channel_disabled' = 'channel_disabled') {
+    super(`Email suppressed: ${reason}`);
+    this.name = 'EmailSuppressedError';
+  }
+}
+
+/**
  * Narrow consent-ledger seam — satisfied by ConsentEventRepository and test
  * stubs. Rows must be newest first (the listByPhone contract).
  */
@@ -103,12 +177,60 @@ export interface GatedMessageDeliveryDeps {
    * the gate enforces only the per-channel flag + DNC (pre-WS12 semantics).
    */
   consentLedger?: ConsentLedgerLookup;
+  /**
+   * Sink for kill-switch suppression logs. Optional so existing construction
+   * sites and tests are unchanged; defaults to a module-scoped logger.
+   */
+  logger?: Pick<Logger, 'info'>;
+  /**
+   * Environment the kill switch reads. Test seam only — defaults to
+   * `process.env`, read per send so the switch is a runtime gate rather than a
+   * boot-time snapshot.
+   */
+  env?: NodeJS.ProcessEnv;
+}
+
+let fallbackLogger: Logger | undefined;
+function defaultKillSwitchLogger(): Pick<Logger, 'info'> {
+  fallbackLogger ??= createLogger({
+    service: 'outbound-kill-switch',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  return fallbackLogger;
 }
 
 export class GatedMessageDelivery implements MessageDeliveryProvider {
+  /**
+   * In-process tally of sends stopped by the kill switch, per channel. The
+   * ledger (`message_dispatches`) cannot hold these — see the note on
+   * `logKillSwitchSuppression` — so this counter plus the info log is the
+   * "what would have been sent" signal an operator gets before enabling a
+   * channel in production.
+   */
+  private readonly killSwitchSuppressions: Record<OutboundChannel, number> = {
+    sms: 0,
+    email: 0,
+  };
+
   constructor(private readonly deps: GatedMessageDeliveryDeps) {}
 
+  /** Snapshot of the per-channel kill-switch suppression counters. */
+  killSwitchSuppressionCounts(): Record<OutboundChannel, number> {
+    return { ...this.killSwitchSuppressions };
+  }
+
   async sendSms(message: SmsMessage): Promise<DeliveryResult> {
+    // Kill switch FIRST — deliberately ahead of the owner bypass below. The
+    // guarantee is "no outbound SMS at all", so an owner digest is stopped
+    // too; the consent gate's owner carve-out does not apply here.
+    if (!isOutboundChannelEnabled('sms', this.deps.env)) {
+      this.logKillSwitchSuppression('sms', message.tenantId, message.recipientClass, {
+        // Same redaction shape as the suppression audit below: last 4 only.
+        phoneLast4: normalizePhone(message.to).slice(-4),
+      });
+      throw new SmsSuppressedError('channel_disabled', message.recipientClass);
+    }
+
     // Owner / operator sends bypass the gate entirely.
     if (message.recipientClass === 'owner') {
       return this.deps.base.sendSms(message);
@@ -134,8 +256,58 @@ export class GatedMessageDelivery implements MessageDeliveryProvider {
     return this.deps.base.sendSms(message);
   }
 
-  sendEmail(message: EmailMessage): Promise<DeliveryResult> {
+  async sendEmail(message: EmailMessage): Promise<DeliveryResult> {
+    // Independent of the SMS switch: EMAIL_ENABLED=false stops email only.
+    // There is no consent gate on this channel (the TCPA gate is SMS-only),
+    // so the kill switch is the whole of the check here.
+    if (!isOutboundChannelEnabled('email', this.deps.env)) {
+      this.logKillSwitchSuppression(
+        'email',
+        message.tenantId,
+        // EmailMessage carries no audience tag — say so rather than guess.
+        'unspecified',
+        // Domain only, matching the signup funnel event in webhooks/routes.ts.
+        { emailDomain: message.to.split('@')[1] ?? null },
+      );
+      throw new EmailSuppressedError('channel_disabled');
+    }
     return this.deps.base.sendEmail(message);
+  }
+
+  /**
+   * Info-level, greppable on `channel_disabled`, with the recipient reduced to
+   * a non-identifying fragment (phone last-4 / email domain).
+   *
+   * Why not a `message_dispatches` row? Three hard blockers, all verified:
+   * `status` is CHECK-constrained to ('sent','delivered','failed','bounced')
+   * so a 'suppressed' value needs a DB migration; `entity_type` is likewise
+   * CHECK-constrained and `entity_id` is UUID NOT NULL, and neither
+   * `SmsMessage` nor `EmailMessage` carries either — the gate simply does not
+   * know which estimate/invoice/appointment a send belongs to; and the dunning
+   * logic plus the QA fixtures count rows in that table, so injecting
+   * gate-level rows would distort them. The layers that DO know the entity
+   * still record suppression there through the existing
+   * `provider: 'suppressed', status: 'failed'` convention (see
+   * notifications/send-service.ts) — this log is the catch-all for every other
+   * send site.
+   */
+  private logKillSwitchSuppression(
+    channel: OutboundChannel,
+    tenantId: string | undefined,
+    recipientClass: SmsMessage['recipientClass'] | 'unspecified',
+    redactedRecipient: Record<string, string | null>,
+  ): void {
+    this.killSwitchSuppressions[channel] += 1;
+    const logger = this.deps.logger ?? defaultKillSwitchLogger();
+    logger.info('Outbound message suppressed by the channel kill switch', {
+      reason: 'channel_disabled',
+      channel,
+      tenantId: tenantId ?? 'unknown',
+      recipientClass,
+      killSwitchEnvVar: KILL_SWITCH_ENV_VAR[channel],
+      suppressedCount: this.killSwitchSuppressions[channel],
+      ...redactedRecipient,
+    });
   }
 
   /**

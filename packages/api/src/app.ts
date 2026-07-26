@@ -1510,28 +1510,44 @@ export function createApp(): AppWithLifecycle {
   // 503 when sendService is undefined.
   const dispatchRepo = pool ? new PgDispatchRepository(pool) : new InMemoryDispatchRepository();
   let rawMessageDelivery: MessageDeliveryProvider | null;
-  if (
+  // The two credential legs are INDEPENDENT. Previously a single `if` required
+  // all five vars, so production — which has Twilio creds but no SendGrid creds
+  // — got `rawMessageDelivery = null` and NO SMS, purely for want of an email
+  // key. Each leg is now wired only if its own credentials are present, and
+  // TwilioDeliveryProvider fails loudly at send time on the unconfigured
+  // channel (see its config doc).
+  const smsCredsPresent = !!(
     process.env.TWILIO_ACCOUNT_SID &&
     process.env.TWILIO_AUTH_TOKEN &&
-    process.env.TWILIO_FROM_NUMBER &&
-    process.env.SENDGRID_API_KEY &&
-    process.env.SENDGRID_FROM_EMAIL
-  ) {
+    process.env.TWILIO_FROM_NUMBER
+  );
+  const emailCredsPresent = !!(
+    process.env.SENDGRID_API_KEY && process.env.SENDGRID_FROM_EMAIL
+  );
+  if (smsCredsPresent || emailCredsPresent) {
     // The global Twilio/SendGrid provider handles email and any send that
     // carries no tenantId; the global Twilio SMS creds also serve as the
     // dev/test fallback inside getTenantTwilioCreds.
     const baseDelivery = new TwilioDeliveryProvider({
-      sms: {
-        accountSid: process.env.TWILIO_ACCOUNT_SID,
-        authToken: process.env.TWILIO_AUTH_TOKEN,
-        fromNumber: process.env.TWILIO_FROM_NUMBER,
-      },
-      email: {
-        apiKey: process.env.SENDGRID_API_KEY,
-        fromEmail: process.env.SENDGRID_FROM_EMAIL,
-        fromName: process.env.SENDGRID_FROM_NAME,
-        replyToEmail: process.env.SENDGRID_REPLY_TO_EMAIL,
-      },
+      ...(smsCredsPresent
+        ? {
+            sms: {
+              accountSid: process.env.TWILIO_ACCOUNT_SID as string,
+              authToken: process.env.TWILIO_AUTH_TOKEN as string,
+              fromNumber: process.env.TWILIO_FROM_NUMBER as string,
+            },
+          }
+        : {}),
+      ...(emailCredsPresent
+        ? {
+            email: {
+              apiKey: process.env.SENDGRID_API_KEY as string,
+              fromEmail: process.env.SENDGRID_FROM_EMAIL as string,
+              fromName: process.env.SENDGRID_FROM_NAME,
+              replyToEmail: process.env.SENDGRID_REPLY_TO_EMAIL,
+            },
+          }
+        : {}),
     });
     // Feature 7 — when a Postgres pool is available, route per-tenant SMS
     // through each tenant's own Twilio subaccount (failing closed when a
