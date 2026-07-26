@@ -47,6 +47,24 @@ matrixTest('VOX-01', 'Emergency triage fast-path (voice)', async (h) => {
 });
 
 matrixTest('VOX-02', 'Spanish / i18n voice response', async (h) => {
+  // Spanish auto-detection is gated on the tenant's opt-in language stack
+  // (packages/api/src/ai/agents/customer-calling/inapp-adapter.ts, "Voice-
+  // parity (Feature 6)" — deliberate: without the gate, ANY caller uttering
+  // Spanish words would flip the whole call to Spanish regardless of the
+  // tenant's Settings toggle). Fresh QA tenants default to
+  // tenant_settings.supported_languages = {en} (see schema default), so a
+  // Spanish utterance is correctly ignored until the tenant opts in — that
+  // is the product working as designed, not a bug. Opt in here first so this
+  // row actually exercises the Spanish-response path.
+  await h.api.call({
+    method: 'PATCH',
+    path: '/api/settings/language',
+    body: { supportedLanguages: ['en', 'es'] },
+    token: h.tenantA.token,
+    label: '02-enable-es',
+    expectStatus: [200, 201],
+  });
+
   const sessionId = await startVoiceSession(h, h.tenantA.token, '02');
   if (!sessionId) return void h.evidence.fail('Voice session could not be started.');
 
