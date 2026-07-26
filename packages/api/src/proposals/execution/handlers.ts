@@ -1173,7 +1173,7 @@ export function createExecutionHandlerRegistry(deps?: {
       // customer-location lookup CreateJobExecutionHandler/DraftEstimateExecutionHandler use.
       deps?.locationRepo,
     ),
-    new CreateBookingExecutionHandler(deps?.appointmentRepo, deps?.auditRepo),
+    new CreateBookingExecutionHandler(deps?.appointmentRepo, deps?.auditRepo, deps?.transactionalComms),
     new DraftEstimateExecutionHandler(
       deps?.estimateRepo,
       deps?.settingsRepo,

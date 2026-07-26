@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { CreateBookingExecutionHandler } from '../../src/proposals/execution/create-booking-handler';
 import { InMemoryAppointmentRepository } from '../../src/appointments/in-memory-appointment';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
@@ -6,6 +6,7 @@ import { createAppointment, updateAppointment } from '../../src/appointments/app
 import type { Appointment } from '../../src/appointments/appointment';
 import { createProposal } from '../../src/proposals/proposal';
 import { getDispatchBoardEventBus } from '../../src/dispatch/board-event-bus';
+import type { SchedulingConfirmationNotifier } from '../../src/proposals/execution/scheduling-notifications';
 
 const tenantA = '00000000-0000-4000-8000-00000000000a';
 
@@ -193,5 +194,45 @@ describe('CreateBookingExecutionHandler', () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toMatch(/failed to confirm/i);
+  });
+
+  // SMS-01 — a wiring bug (createExecutionHandlerRegistry constructed this
+  // handler without its 3rd arg) meant confirmationNotifier was always
+  // undefined in production, so the customer confirmation SMS/email enqueue
+  // in execute() never ran even though the booking itself succeeded.
+  it('enqueues a customer confirmation via confirmationNotifier on successful booking (SMS-01)', async () => {
+    const enqueue = vi.fn().mockResolvedValue(undefined);
+    const confirmationNotifier: SchedulingConfirmationNotifier = { enqueue };
+    const notifyingHandler = new CreateBookingExecutionHandler(
+      appointmentRepo,
+      auditRepo,
+      confirmationNotifier,
+    );
+    const appt = await makeHeldAppointment(appointmentRepo, new Date('2099-01-01T00:00:00Z'));
+
+    const result = await notifyingHandler.execute(bookingProposal(appt.id), {
+      tenantId: tenantA,
+      executedBy: 'owner-1',
+    });
+
+    expect(result.success).toBe(true);
+    expect(enqueue).toHaveBeenCalledTimes(1);
+    expect(enqueue).toHaveBeenCalledWith({
+      tenantId: tenantA,
+      appointmentId: appt.id,
+      jobId: appt.jobId,
+      channels: ['sms', 'email'],
+    });
+  });
+
+  it('does not enqueue a confirmation when no confirmationNotifier is wired', async () => {
+    const appt = await makeHeldAppointment(appointmentRepo, new Date('2099-01-01T00:00:00Z'));
+    // `handler` (from beforeEach) has no confirmationNotifier — execute()
+    // must succeed without throwing even though the enqueue branch is skipped.
+    const result = await handler.execute(bookingProposal(appt.id), {
+      tenantId: tenantA,
+      executedBy: 'owner-1',
+    });
+    expect(result.success).toBe(true);
   });
 });
