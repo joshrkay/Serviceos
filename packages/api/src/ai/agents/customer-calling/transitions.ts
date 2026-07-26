@@ -954,7 +954,22 @@ function transitionIntentConfirm(
           payload: {
             tenantId: context.tenantId,
             intent: context.currentIntent,
-            entities: context.extractedEntities,
+            // QA-2026-07-26 — bridge the caller's sticky context.customerId
+            // (e.g. resolved at in-app session start from a phone-number
+            // match; see InAppVoiceAdapter.startSession) into `entities` so
+            // execution handlers see it: they read customerId EXCLUSIVELY
+            // off entities.customerId (via the flat-promotion in
+            // inapp-adapter.ts handleCreateProposal), never off this
+            // payload's top-level `customerId` below, which is reserved for
+            // `createdBy`. context.customerId is spread FIRST so a MORE
+            // SPECIFIC customerId already resolved this turn by entity
+            // resolution (folded into context.extractedEntities by
+            // transitionEntityResolution / transitionEntityConfirm) always
+            // wins over the generic phone-matched fallback.
+            entities: {
+              ...(context.customerId ? { customerId: context.customerId } : {}),
+              ...context.extractedEntities,
+            },
             sessionId: context.sessionId,
             callSid: context.callSid,
             conversationId: context.conversationId,

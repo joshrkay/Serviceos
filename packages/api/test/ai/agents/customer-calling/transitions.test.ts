@@ -687,3 +687,52 @@ describe('SCH-03 — no cross-call leakage: a fresh session context starts with 
     expect(freshCallBContext.jobId).toBeUndefined();
   });
 });
+
+describe('QA-2026-07-26 — transitionIntentConfirm bridges context.customerId into entities', () => {
+  it('confirmed: entities.customerId is populated from the sticky context.customerId when extractedEntities has none', () => {
+    const ctx: CallingAgentContext = {
+      ...baseContext,
+      customerId: 'cust-phone-matched',
+      currentIntent: 'create_invoice',
+      extractedEntities: { customerName: 'our customer', amount: 45000 },
+    };
+    const result = transition('intent_confirm', { type: 'confirmed' }, ctx);
+    const createProposal = result.sideEffects.find((fx) => fx.type === 'create_proposal');
+    expect(createProposal).toBeDefined();
+    const payload = createProposal!.payload as { entities: Record<string, unknown>; customerId: string };
+    // Bridged into entities so execution handlers (which read ONLY
+    // entities.customerId) see the phone-matched fallback.
+    expect(payload.entities.customerId).toBe('cust-phone-matched');
+    // Top-level customerId (used only for createdBy) is unchanged.
+    expect(payload.customerId).toBe('cust-phone-matched');
+  });
+
+  it('confirmed: a MORE SPECIFIC customerId already resolved into extractedEntities wins over the sticky context.customerId fallback', () => {
+    const ctx: CallingAgentContext = {
+      ...baseContext,
+      customerId: 'cust-phone-matched',
+      currentIntent: 'create_invoice',
+      // Simulates transitionEntityResolution having already merged a
+      // resolver-matched customerId into extractedEntities this turn.
+      extractedEntities: { customerName: 'Bob Smith', customerId: 'cust-named-specific', amount: 45000 },
+    };
+    const result = transition('intent_confirm', { type: 'confirmed' }, ctx);
+    const createProposal = result.sideEffects.find((fx) => fx.type === 'create_proposal');
+    expect(createProposal).toBeDefined();
+    const payload = createProposal!.payload as { entities: Record<string, unknown> };
+    expect(payload.entities.customerId).toBe('cust-named-specific');
+  });
+
+  it('confirmed: entities.customerId stays undefined when context.customerId is unset (unchanged behavior)', () => {
+    const ctx: CallingAgentContext = {
+      ...baseContext,
+      customerId: undefined,
+      currentIntent: 'create_invoice',
+      extractedEntities: { customerName: 'our customer', amount: 45000 },
+    };
+    const result = transition('intent_confirm', { type: 'confirmed' }, ctx);
+    const createProposal = result.sideEffects.find((fx) => fx.type === 'create_proposal');
+    const payload = createProposal!.payload as { entities: Record<string, unknown> };
+    expect(payload.entities.customerId).toBeUndefined();
+  });
+});

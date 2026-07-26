@@ -67,6 +67,8 @@ import type { VoicePersona, VoicePersonaResolver } from '../../../settings/voice
 import type { RepairTemplate } from '../../../verticals/registry';
 import type { DroppedCallScheduler } from '../../../sms/recovery/scheduler';
 import { buildRecoveryContext } from '../../../sms/recovery/scheduler';
+import type { CustomerRepository } from '../../../customers/customer';
+import { normalizePhone } from '../../../customers/dedup';
 
 export interface InAppAdapterDeps {
   store: VoiceSessionStore;
@@ -200,6 +202,18 @@ export interface InAppAdapterDeps {
    * rather than silently keeping an ungrounded guess.
    */
   catalogRepo?: CatalogItemRepository;
+  /**
+   * QA-2026-07-26 — tenant-scoped customer repository, consulted at
+   * `startSession` when the caller supplies a `callerPhone`: exactly one
+   * `findByPhoneNormalized` match resolves the session's caller identity the
+   * SAME way telephony/text-mode sessions do (see `TextModeDriver.startSession`
+   * and `TwilioGatherAdapter` caller-ID resolution) — via a `caller_known`
+   * FSM dispatch instead of `operator_session`. Optional: when absent (or when
+   * `callerPhone` is omitted, or the match count isn't exactly 1), the adapter
+   * falls back to the existing `operator_session` path unchanged. Never
+   * guesses — 0 or 2+ matches are left unresolved for the operator to specify.
+   */
+  customerRepo?: CustomerRepository;
 }
 
 export interface StartSessionResult {
@@ -662,6 +676,7 @@ export class InAppVoiceAdapter {
     userId: string,
     conversationId?: string,
     role?: string,
+    callerPhone?: string,
   ): Promise<StartSessionResult> {
     const repairTemplates = this.deps.repairTemplatesResolver
       ? await this.deps.repairTemplatesResolver(tenantId).catch(() => [])
@@ -718,11 +733,48 @@ export class InAppVoiceAdapter {
     const greetedEffects = session.machine.dispatch({ type: 'greeted_ok' });
     await this.executeSideEffects(session, greetedEffects);
 
-    // An authenticated operator is the proposal actor, not a CRM caller.
-    // Treating their Clerk user id as customerId poisoned downstream entity
-    // resolution and caller-plan lookups for every in-app session.
-    const operatorSessionEffects = session.machine.dispatch({ type: 'operator_session' });
-    await this.executeSideEffects(session, operatorSessionEffects);
+    // QA-2026-07-26 — when the caller supplies a phone number at session
+    // start (e.g. the operator is on a call with a customer and starts the
+    // assistant with that number in hand) and it matches EXACTLY ONE
+    // existing tenant customer, resolve it now via the same
+    // findByPhoneNormalized path telephony/text-mode sessions use for
+    // caller-ID identification (see TextModeDriver.startSession). This is
+    // NOT the operator-as-customerId antipattern the comment below warns
+    // about — it's a real, resolver-matched CRM customer — so a later
+    // generic reference like "our customer" (GENERIC_CUSTOMER_REFS in
+    // entity-resolution.ts skips ANY name-based lookup for these phrases)
+    // still attaches to the right customer via the transitionIntentConfirm
+    // entities bridge. 0 or 2+ matches are left unresolved — never guessed.
+    let resolvedCustomerId: string | undefined;
+    if (callerPhone && this.deps.customerRepo?.findByPhoneNormalized) {
+      try {
+        const matches = await this.deps.customerRepo.findByPhoneNormalized(
+          tenantId,
+          normalizePhone(callerPhone),
+        );
+        if (matches.length === 1) {
+          resolvedCustomerId = matches[0].id;
+        }
+      } catch {
+        resolvedCustomerId = undefined;
+      }
+    }
+
+    if (resolvedCustomerId) {
+      session.callerPhone = callerPhone;
+      session.customerId = resolvedCustomerId;
+      const callerKnownEffects = session.machine.dispatch({
+        type: 'caller_known',
+        customerId: resolvedCustomerId,
+      });
+      await this.executeSideEffects(session, callerKnownEffects);
+    } else {
+      // An authenticated operator is the proposal actor, not a CRM caller.
+      // Treating their Clerk user id as customerId poisoned downstream entity
+      // resolution and caller-plan lookups for every in-app session.
+      const operatorSessionEffects = session.machine.dispatch({ type: 'operator_session' });
+      await this.executeSideEffects(session, operatorSessionEffects);
+    }
 
     // B1 — resolve per-tenant voice persona (best-effort).
     let persona: VoicePersona | null | undefined;

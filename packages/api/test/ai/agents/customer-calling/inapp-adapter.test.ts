@@ -15,6 +15,9 @@ import type { CatalogPricingOutcome } from '../../../../src/ai/resolution/catalo
 import {
   DraftEstimateExecutionHandler,
 } from '../../../../src/proposals/execution/handlers';
+import { InMemoryCustomerRepository } from '../../../../src/customers/customer';
+import type { Customer } from '../../../../src/customers/customer';
+import type { EntityResolver } from '../../../../src/ai/resolution/entity-resolver';
 
 const TENANT = 'tenant-x';
 const USER = 'user-x';
@@ -1047,6 +1050,176 @@ describe('QA-2026-07-26 — voice-drafted estimate line items (lineItemDescripti
       expect(proposals[0].status).not.toBe('approved');
       expect(proposals[0].confidenceScore).toBeLessThanOrEqual(0.85);
     });
+  });
+});
+
+describe('QA-2026-07-26 — session-start callerPhone resolution', () => {
+  let store: VoiceSessionStore;
+  let proposalRepo: InMemoryProposalRepository;
+  let auditRepo: InMemoryAuditRepository;
+  let onCallRepo: InMemoryOnCallRepository;
+  let customerRepo: InMemoryCustomerRepository;
+
+  const CALLER_PHONE = '+15551234567';
+
+  function fixtureCustomer(overrides: Partial<Customer> = {}): Customer {
+    const now = new Date();
+    return {
+      id: 'cust-phone-1',
+      tenantId: TENANT,
+      firstName: 'Jane',
+      lastName: 'Doe',
+      displayName: 'Jane Doe',
+      preferredChannel: 'phone',
+      smsConsent: false,
+      isArchived: false,
+      primaryPhone: CALLER_PHONE,
+      createdBy: 'system',
+      createdAt: now,
+      updatedAt: now,
+      ...overrides,
+    };
+  }
+
+  beforeEach(() => {
+    store = new VoiceSessionStore({ startInterval: false });
+    proposalRepo = new InMemoryProposalRepository();
+    auditRepo = new InMemoryAuditRepository();
+    onCallRepo = new InMemoryOnCallRepository();
+    customerRepo = new InMemoryCustomerRepository();
+  });
+
+  afterEach(() => store.dispose());
+
+  it('1-match: resolves the caller to the matching customer and seeds context.customerId via caller_known', async () => {
+    await customerRepo.create(fixtureCustomer());
+    const adapter = new InAppVoiceAdapter({
+      store,
+      gateway: scriptedGateway([]),
+      proposalRepo,
+      auditRepo,
+      onCallRepo,
+      customerRepo,
+    });
+    const { sessionId } = await adapter.startSession(TENANT, USER, undefined, undefined, CALLER_PHONE);
+    const session = store.peek(sessionId);
+    expect(session?.customerId).toBe('cust-phone-1');
+    expect(session?.machine.currentContext.customerId).toBe('cust-phone-1');
+  });
+
+  it('0-match: leaves the caller unresolved and falls back to operator_session (unchanged)', async () => {
+    const adapter = new InAppVoiceAdapter({
+      store,
+      gateway: scriptedGateway([]),
+      proposalRepo,
+      auditRepo,
+      onCallRepo,
+      customerRepo,
+    });
+    const { sessionId } = await adapter.startSession(TENANT, USER, undefined, undefined, '+15559999999');
+    const session = store.peek(sessionId);
+    expect(session?.customerId).toBeUndefined();
+    expect(session?.machine.currentContext.customerId).toBeUndefined();
+  });
+
+  it('2+-match: never guesses — leaves the caller unresolved when the phone matches more than one customer', async () => {
+    await customerRepo.create(fixtureCustomer({ id: 'cust-phone-1' }));
+    await customerRepo.create(fixtureCustomer({ id: 'cust-phone-2' }));
+    const adapter = new InAppVoiceAdapter({
+      store,
+      gateway: scriptedGateway([]),
+      proposalRepo,
+      auditRepo,
+      onCallRepo,
+      customerRepo,
+    });
+    const { sessionId } = await adapter.startSession(TENANT, USER, undefined, undefined, CALLER_PHONE);
+    const session = store.peek(sessionId);
+    expect(session?.customerId).toBeUndefined();
+    expect(session?.machine.currentContext.customerId).toBeUndefined();
+  });
+
+  it('no callerPhone provided: unchanged operator_session path even when customerRepo is wired', async () => {
+    await customerRepo.create(fixtureCustomer());
+    const adapter = new InAppVoiceAdapter({
+      store,
+      gateway: scriptedGateway([]),
+      proposalRepo,
+      auditRepo,
+      onCallRepo,
+      customerRepo,
+    });
+    const { sessionId } = await adapter.startSession(TENANT, USER);
+    const session = store.peek(sessionId);
+    expect(session?.customerId).toBeUndefined();
+    expect(session?.machine.currentContext.customerId).toBeUndefined();
+  });
+
+  it('end-to-end: a generic "our customer" reference in a create_invoice turn resolves to the phone-matched customerId', async () => {
+    await customerRepo.create(fixtureCustomer());
+    const gateway = scriptedGateway([
+      JSON.stringify({
+        intentType: 'create_invoice',
+        confidence: 0.94,
+        extractedEntities: { customerName: 'our customer', amount: 45000 },
+      }),
+    ]);
+    const adapter = new InAppVoiceAdapter({
+      store,
+      gateway,
+      proposalRepo,
+      auditRepo,
+      onCallRepo,
+      customerRepo,
+    });
+    const { sessionId } = await adapter.startSession(TENANT, USER, undefined, undefined, CALLER_PHONE);
+    const readback = await adapter.handleInput(sessionId, 'invoice our customer for 450');
+    expect(readback.state).toBe('intent_confirm');
+    const result = await adapter.handleInput(sessionId, 'yes');
+    expect(result.state).toBe('closing');
+    expect(result.proposalIds).toHaveLength(1);
+    const proposals = await proposalRepo.findByTenant(TENANT);
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0].payload.customerId).toBe('cust-phone-1');
+    expect((proposals[0].payload.entities as Record<string, unknown>).customerId).toBe('cust-phone-1');
+  });
+
+  it('ordering: a MORE SPECIFIC customer resolved this turn wins over the generic phone-matched fallback', async () => {
+    await customerRepo.create(fixtureCustomer({ id: 'cust-phone-1' }));
+    const namedResolver: EntityResolver = {
+      resolve: vi.fn(async () => ({
+        kind: 'resolved' as const,
+        candidate: { id: 'cust-named-2', kind: 'customer' as const, label: 'Bob Smith', score: 0.95 },
+      })),
+    };
+    const gateway = scriptedGateway([
+      JSON.stringify({
+        intentType: 'create_invoice',
+        confidence: 0.94,
+        extractedEntities: { customerName: 'Bob Smith', amount: 45000 },
+      }),
+    ]);
+    const adapter = new InAppVoiceAdapter({
+      store,
+      gateway,
+      proposalRepo,
+      auditRepo,
+      onCallRepo,
+      customerRepo,
+      entityResolver: namedResolver,
+    });
+    const { sessionId } = await adapter.startSession(TENANT, USER, undefined, undefined, CALLER_PHONE);
+    // Sanity: the phone-matched fallback IS on the session/context.
+    expect(store.peek(sessionId)?.customerId).toBe('cust-phone-1');
+    const readback = await adapter.handleInput(sessionId, 'invoice Bob Smith for 450');
+    expect(readback.state).toBe('intent_confirm');
+    const result = await adapter.handleInput(sessionId, 'yes');
+    expect(result.state).toBe('closing');
+    const proposals = await proposalRepo.findByTenant(TENANT);
+    expect(proposals).toHaveLength(1);
+    // The specifically-resolved customer wins, NOT the phone-matched fallback.
+    expect(proposals[0].payload.customerId).toBe('cust-named-2');
+    expect((proposals[0].payload.entities as Record<string, unknown>).customerId).toBe('cust-named-2');
   });
 });
 

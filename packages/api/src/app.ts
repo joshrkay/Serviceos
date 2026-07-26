@@ -6498,6 +6498,10 @@ export function createApp(): AppWithLifecycle {
     // QA-2026-07-26 — grounds voice-drafted estimate line items
     // (entities.lineItemDescriptions) against the tenant's real catalog.
     catalogRepo,
+    // QA-2026-07-26 — resolves an optional session-start `callerPhone` to a
+    // CRM customer (exactly one findByPhoneNormalized match) so a later
+    // generic reference like "our customer" still attaches correctly.
+    customerRepo,
     // RV-115 — durable dropped-call recovery with the FSM context snapshot.
     // (In-app sessions rarely have a caller phone; the scheduler's own
     // detection rejects rows without a usable E.164.)
