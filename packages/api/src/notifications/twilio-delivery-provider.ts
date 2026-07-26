@@ -5,13 +5,22 @@ import {
   SmsMessage,
 } from "./delivery-provider";
 import { DeliveryError } from "./notification-errors";
+import {
+  TwilioEmailConfig,
+  TwilioEmailDeliveryProvider,
+} from "./twilio-email-delivery-provider";
 
 /**
  * Production message delivery via Twilio.
  *
  * SMS uses Twilio Programmable Messaging (the same API the existing
- * feedback dispatcher uses). Email uses Twilio SendGrid v3. Both
- * channels share account credentials via the parent Twilio billing
+ * feedback dispatcher uses). Email has TWO possible backends, selected
+ * by which credentials the deployment actually has:
+ *   - `twilioEmail` — Twilio's native Email API (comms.twilio.com), which
+ *     reuses the SMS Account SID + Auth Token. See
+ *     twilio-email-delivery-provider.ts.
+ *   - `email` — Twilio SendGrid v3, which needs its own `SG.` API key.
+ * Both channels share account credentials via the parent Twilio billing
  * relationship — operationally we want one vendor to manage, not two.
  *
  * The provider performs the HTTP calls directly with `fetch`. We
@@ -64,7 +73,15 @@ export interface SendGridConfig {
  */
 export interface TwilioDeliveryProviderConfig {
   sms?: TwilioSmsConfig;
+  /** SendGrid email leg. Needs its own `SG.` API key. */
   email?: SendGridConfig;
+  /**
+   * Twilio-native email leg (comms.twilio.com/v1/Emails). Reuses the SMS
+   * Account SID + Auth Token — no new credential. Takes precedence over
+   * `email` if both are somehow supplied; app.ts picks exactly one and logs
+   * the choice at boot, so this is only a deterministic tiebreak.
+   */
+  twilioEmail?: TwilioEmailConfig;
 }
 
 interface TwilioMessageResponse {
@@ -146,6 +163,8 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
     replyToEmail?: string;
     fetchImpl: typeof fetch;
   };
+  /** Twilio-native email leg. Mutually exclusive with `emailConfig` in practice. */
+  private readonly twilioEmailProvider?: TwilioEmailDeliveryProvider;
 
   constructor(config: TwilioDeliveryProviderConfig) {
     if (config.sms) {
@@ -178,7 +197,12 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
         fetchImpl: config.email.fetchImpl ?? fetch,
       };
     }
-    if (!this.smsConfig && !this.emailConfig) {
+    if (config.twilioEmail) {
+      // Throws on blank/partial creds — same misconfiguration-vs-opt-out rule
+      // the sms/email legs use.
+      this.twilioEmailProvider = new TwilioEmailDeliveryProvider(config.twilioEmail);
+    }
+    if (!this.smsConfig && !this.emailConfig && !this.twilioEmailProvider) {
       throw new Error(
         "TwilioDeliveryProvider: at least one of sms/email must be configured",
       );
@@ -187,7 +211,9 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
 
   /** True when this provider can actually send on the given channel. */
   supports(channel: "sms" | "email"): boolean {
-    return channel === "sms" ? !!this.smsConfig : !!this.emailConfig;
+    return channel === "sms"
+      ? !!this.smsConfig
+      : !!this.twilioEmailProvider || !!this.emailConfig;
   }
 
   async sendSms(message: SmsMessage): Promise<DeliveryResult> {
@@ -251,12 +277,19 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
   }
 
   async sendEmail(message: EmailMessage): Promise<DeliveryResult> {
+    // Twilio-native email wins deterministically when both legs are present.
+    // app.ts selects exactly one and logs it, so this only decides the
+    // pathological both-configured case.
+    if (this.twilioEmailProvider) {
+      return this.twilioEmailProvider.sendEmail(message);
+    }
     const email = this.emailConfig;
     if (!email) {
       // Loud, not silent — same rationale as sendSms above.
       throw new DeliveryError(
         "AUTH_FAILED",
-        "Email is not configured (SENDGRID_API_KEY / SENDGRID_FROM_EMAIL)",
+        "Email is not configured (set TWILIO_EMAIL_FROM_ADDRESS for Twilio-native email, " +
+          "or SENDGRID_API_KEY / SENDGRID_FROM_EMAIL for SendGrid)",
       );
     }
     const fromEmail = message.from ?? email.fromEmail;

@@ -391,6 +391,7 @@ import {
   InMemoryDeliveryProvider,
 } from './notifications/delivery-provider';
 import { TwilioDeliveryProvider } from './notifications/twilio-delivery-provider';
+import { selectEmailProvider } from './notifications/twilio-email-delivery-provider';
 import { PerTenantTwilioDeliveryProvider } from './notifications/per-tenant-twilio-delivery-provider';
 import { GatedMessageDelivery } from './notifications/gated-message-delivery';
 import { SendService } from './notifications/send-service';
@@ -1521,9 +1522,34 @@ export function createApp(): AppWithLifecycle {
     process.env.TWILIO_AUTH_TOKEN &&
     process.env.TWILIO_FROM_NUMBER
   );
-  const emailCredsPresent = !!(
-    process.env.SENDGRID_API_KEY && process.env.SENDGRID_FROM_EMAIL
-  );
+  // Email has TWO possible backends. Twilio-native email (comms.twilio.com,
+  // reusing TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN — no new secret) when
+  // TWILIO_EMAIL_FROM_ADDRESS is set; SendGrid when SENDGRID_API_KEY +
+  // SENDGRID_FROM_EMAIL are set; neither ⇒ email unconfigured, which
+  // TwilioDeliveryProvider surfaces as a loud DeliveryError at send time.
+  // `selectEmailProvider` is the single, unit-tested rule (Twilio-native wins
+  // deterministically if both are somehow complete).
+  const emailProvider = selectEmailProvider(process.env);
+  const emailCredsPresent = emailProvider !== 'none';
+  const emailProviderLogger = createLogger({
+    service: 'notifications-email-provider',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  if (emailCredsPresent) {
+    const sendgridAlsoConfigured = !!(
+      process.env.SENDGRID_API_KEY && process.env.SENDGRID_FROM_EMAIL
+    );
+    // Never let the choice be invisible: if both credential sets are present,
+    // say which one actually carries mail.
+    if (emailProvider === 'twilio-email' && sendgridAlsoConfigured) {
+      emailProviderLogger.warn(
+        'Both Twilio-native email and SendGrid are configured; using Twilio-native email',
+        { emailProvider }
+      );
+    } else {
+      emailProviderLogger.info('Email delivery provider selected', { emailProvider });
+    }
+  }
   if (smsCredsPresent || emailCredsPresent) {
     // The global Twilio/SendGrid provider handles email and any send that
     // carries no tenantId; the global Twilio SMS creds also serve as the
@@ -1538,7 +1564,17 @@ export function createApp(): AppWithLifecycle {
             },
           }
         : {}),
-      ...(emailCredsPresent
+      ...(emailProvider === 'twilio-email'
+        ? {
+            twilioEmail: {
+              accountSid: process.env.TWILIO_ACCOUNT_SID as string,
+              authToken: process.env.TWILIO_AUTH_TOKEN as string,
+              fromAddress: process.env.TWILIO_EMAIL_FROM_ADDRESS as string,
+              fromName: process.env.TWILIO_EMAIL_FROM_NAME,
+            },
+          }
+        : {}),
+      ...(emailProvider === 'sendgrid'
         ? {
             email: {
               apiKey: process.env.SENDGRID_API_KEY as string,
