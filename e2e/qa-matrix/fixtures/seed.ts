@@ -74,6 +74,22 @@ async function ensureTenantFixture(client: Client, slug: string): Promise<Fixtur
       )
       .then((r) => r.rows[0].id));
 
+  // QA identity — a `users` row for the HMAC-minted token's `sub` claim.
+  // Required since QUALITY-2026-07-12 WS4 added DB-authoritative authorization
+  // (packages/api/src/auth/authorization-loader.ts): a validly-signed JWT with
+  // a tenant_id claim is no longer sufficient by itself — the API requires a
+  // matching `users` row (tenant_id, clerk_user_id) with status='active', or
+  // every authenticated request 403s "No active membership for this tenant".
+  // e2e/qa-matrix/fixtures/tokens.ts mints `qa-matrix-user-${label}`; label is
+  // the slug's trailing A/B (e.g. "qa-matrix-A" -> "A").
+  const qaUserLabel = slug.slice(-1);
+  await client.query(
+    `INSERT INTO users (id, tenant_id, clerk_user_id, email, role, status, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, 'owner', 'active', now(), now())
+     ON CONFLICT (tenant_id, clerk_user_id) DO NOTHING`,
+    [randomUUID(), tenantId, `qa-matrix-user-${qaUserLabel}`, `${slug}-matrix-owner@qa.serviceos.local`]
+  );
+
   // Customer: display_name is the idempotency handle here.
   const customerDisplay = `${slug}-customer`;
   const existingCustomer = await client.query(
