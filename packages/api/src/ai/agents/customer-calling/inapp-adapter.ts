@@ -54,6 +54,12 @@ import type { PendingEntityAmbiguity } from './entity-resolution';
 import { withTenantConnection } from '../../../db/tenant-transaction';
 import { PgEntityResolver } from '../../resolution/pg-entity-resolver';
 import type { EntityCandidate, EntityResolver } from '../../resolution/entity-resolver';
+import {
+  groundLineItemPricing,
+  UNCATALOGUED_CONFIDENCE_CAP,
+} from '../../resolution/catalog-resolver';
+import type { CatalogPricingOutcome } from '../../resolution/catalog-resolver';
+import type { CatalogItemRepository } from '../../../catalog/catalog-item';
 import { detectLanguage, renderTtsText } from './tts-copy';
 import type { Language } from '../../i18n/i18n';
 import { isLanguageSupported } from '../../orchestration/language-detector';
@@ -182,6 +188,18 @@ export interface InAppAdapterDeps {
     sessionId: string,
     intentType: string,
   ) => Promise<string | undefined>;
+  /**
+   * QA-2026-07-26 — catalog item repository used to ground voice-drafted
+   * estimate line items (entities.lineItemDescriptions on a draft_estimate
+   * intent) against the tenant's real price book via the SAME
+   * `groundLineItemPricing` pass the non-voice draft_estimate task
+   * (ai/tasks/estimate-task.ts) already runs. Optional: when absent, the
+   * grounding call's `loadActiveCatalog` is `null`, which
+   * `groundLineItemPricing` treats identically to "catalog read failed" —
+   * every drafted line is stamped `uncatalogued` / `requiresReview: true`
+   * rather than silently keeping an ungrounded guess.
+   */
+  catalogRepo?: CatalogItemRepository;
 }
 
 export interface StartSessionResult {
@@ -1252,6 +1270,59 @@ export class InAppVoiceAdapter {
     }
   }
 
+  /**
+   * QA-2026-07-26 — build a draft line-items array from voice-classified
+   * `entities.lineItemDescriptions`, then ground it through the shared
+   * `groundLineItemPricing` pass (ai/resolution/catalog-resolver.ts) — the
+   * SAME function `ai/tasks/estimate-task.ts` already calls for the
+   * non-voice draft_estimate path — before it reaches the proposal payload.
+   *
+   * `amount` (when present) is `entities.amount`: the caller-quoted TOTAL
+   * across every drafted line (integer cents — see intent-classifier.ts
+   * `ExtractedEntities`), split evenly as each line's STARTING guess (the
+   * remainder folded into the last line so the guesses always sum back to
+   * the quoted total exactly). A catalog match still overwrites that guess
+   * outright; a >=10%-and->=$1 conflict between the guess and a catalog
+   * match surfaces as a one-tap "did you mean" instead of silently snapping
+   * (see catalog-resolver.ts `isPriceConflict`).
+   *
+   * When `amount` is absent there is no number to guess from, so the
+   * starting price is left UNSET rather than invented. `groundLineItemPricing`
+   * still resolves the real price when there's a catalog match (its
+   * exact/high tier sets `[priceField]` unconditionally); when there isn't,
+   * the line is stamped `uncatalogued` / folds into `requiresReview: true`
+   * instead of getting a fabricated number.
+   */
+  private async buildVoiceDraftLineItems(
+    tenantId: string,
+    descriptions: string[],
+    amount: unknown,
+  ): Promise<CatalogPricingOutcome> {
+    const totalCents =
+      typeof amount === 'number' && Number.isFinite(amount) && amount > 0
+        ? Math.round(amount)
+        : undefined;
+    const perItemCents =
+      totalCents !== undefined ? Math.floor(totalCents / descriptions.length) : undefined;
+    const draftLineItems: Array<Record<string, unknown>> = descriptions.map((description, idx) => ({
+      description,
+      quantity: 1,
+      ...(perItemCents !== undefined
+        ? {
+            unitPrice:
+              idx === descriptions.length - 1
+                ? totalCents! - perItemCents * (descriptions.length - 1)
+                : perItemCents,
+          }
+        : {}),
+    }));
+    return groundLineItemPricing(
+      draftLineItems,
+      'unitPrice',
+      this.deps.catalogRepo ? () => this.deps.catalogRepo!.listByTenant(tenantId) : null,
+    );
+  }
+
   private async handleCreateProposal(
     session: VoiceSession,
     effect: SideEffect
@@ -1320,6 +1391,47 @@ export class InAppVoiceAdapter {
       if (typeof entities.customerId === 'string' && entities.customerId.length > 0) {
         flat.customerId = entities.customerId;
       }
+      // QA-2026-07-26: draft_estimate entities carry lineItemDescriptions as
+      // a string[] (intent-classifier.ts ExtractedEntities), which the
+      // generic scalar-only loop above never promotes (it only lifts
+      // string|number|boolean values) — payload.lineItems was always
+      // undefined for the voice path, so EVERY voice-drafted estimate died
+      // at execution with "Payload must include at least one lineItem."
+      // Build a draft line-items array from the descriptions and ground it
+      // through groundLineItemPricing — the SAME function the non-voice
+      // draft_estimate task (ai/tasks/estimate-task.ts) already calls — so
+      // a catalog match sets the authoritative price and an uncatalogued
+      // line keeps its guessed price but is flagged for review, instead of
+      // either inventing an untracked number or dropping the line.
+      let voiceLineItemOutcome: CatalogPricingOutcome | undefined;
+      if (
+        proposalType === 'draft_estimate' &&
+        Array.isArray(entities.lineItemDescriptions) &&
+        entities.lineItemDescriptions.length > 0
+      ) {
+        const descriptions = entities.lineItemDescriptions.filter(
+          (d): d is string => typeof d === 'string' && d.trim().length > 0,
+        );
+        if (descriptions.length > 0) {
+          voiceLineItemOutcome = await this.buildVoiceDraftLineItems(
+            session.tenantId,
+            descriptions,
+            entities.amount,
+          );
+          flat.lineItems = voiceLineItemOutcome.lineItems;
+        }
+      }
+      // An uncatalogued (LLM/heuristic-priced) line must never ride the raw
+      // classifier confidence into auto-approval — cap it exactly like
+      // estimate-task.ts's UNCATALOGUED_CONFIDENCE_CAP, and stamp the RV-007
+      // `_meta.overallConfidence = 'low'` hard block (proposals/auto-approve.ts
+      // confidenceMetaBlocksAutoApprove) so decideInitialStatus can never
+      // return 'approved' for it, regardless of any tenant threshold override.
+      const rawConfidence = typeof payload.confidence === 'number' ? payload.confidence : undefined;
+      const confidenceScore =
+        voiceLineItemOutcome?.anyUncatalogued && rawConfidence !== undefined
+          ? Math.min(rawConfidence, UNCATALOGUED_CONFIDENCE_CAP)
+          : rawConfidence;
       const proposal = buildProposal({
         tenantId: session.tenantId,
         proposalType,
@@ -1329,6 +1441,9 @@ export class InAppVoiceAdapter {
           entities,
           sessionId: session.id,
           conversationId: typeof payload.conversationId === 'string' ? payload.conversationId : undefined,
+          ...(voiceLineItemOutcome?.anyUncatalogued
+            ? { _meta: { overallConfidence: 'low' as const } }
+            : {}),
         },
         summary,
         // QA-2026-06-04: mirror the AI task handlers (create-appointment-task
@@ -1336,7 +1451,14 @@ export class InAppVoiceAdapter {
         // autonomous tier with a real classifier confidence. Without these,
         // initialProposalStatus always returned 'draft', which the approval
         // guard correctly refuses to approve — voice proposals were stuck.
-        ...(typeof payload.confidence === 'number' ? { confidenceScore: payload.confidence } : {}),
+        ...(confidenceScore !== undefined ? { confidenceScore } : {}),
+        // Ambiguous catalog matches (two-plus plausible items, or a
+        // price-conflict "did you mean") require the operator to pick —
+        // forces 'draft' regardless of trust tier / confidence, same as
+        // estimate-task.ts.
+        ...(voiceLineItemOutcome && voiceLineItemOutcome.missingFields.length > 0
+          ? { missingFields: voiceLineItemOutcome.missingFields }
+          : {}),
         sourceTrustTier: 'autonomous',
         sourceContext: {
           source: 'calling-agent',

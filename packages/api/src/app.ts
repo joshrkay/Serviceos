@@ -6495,6 +6495,9 @@ export function createApp(): AppWithLifecycle {
     repairTemplatesResolver,
     voiceSessionRepo,
     voicePersonaResolver,
+    // QA-2026-07-26 — grounds voice-drafted estimate line items
+    // (entities.lineItemDescriptions) against the tenant's real catalog.
+    catalogRepo,
     // RV-115 — durable dropped-call recovery with the FSM context snapshot.
     // (In-app sessions rarely have a caller phone; the scheduler's own
     // detection rejects rows without a usable E.164.)

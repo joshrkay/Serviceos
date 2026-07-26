@@ -8,7 +8,13 @@ import { InMemoryVoiceSessionRepository } from '../../../../src/voice/voice-sess
 import type { LLMGateway, LLMResponse } from '../../../../src/ai/gateway/gateway';
 import type { TtsProvider } from '../../../../src/ai/tts/tts-provider';
 import type { SchedulingEntityResolution } from '../../../../src/ai/agents/customer-calling/entity-resolution';
-import type { CallingAgentEvent } from '../../../../src/ai/agents/customer-calling/types';
+import type { CallingAgentEvent, SideEffect } from '../../../../src/ai/agents/customer-calling/types';
+import type { VoiceSession } from '../../../../src/ai/agents/customer-calling/voice-session-store';
+import { InMemoryCatalogItemRepository, createCatalogItem } from '../../../../src/catalog/catalog-item';
+import type { CatalogPricingOutcome } from '../../../../src/ai/resolution/catalog-resolver';
+import {
+  DraftEstimateExecutionHandler,
+} from '../../../../src/proposals/execution/handlers';
 
 const TENANT = 'tenant-x';
 const USER = 'user-x';
@@ -776,6 +782,270 @@ describe('InAppVoiceAdapter', () => {
         voiceSessionRepo,
       });
       await expect(adapter.startSession(TENANT, USER)).resolves.toBeDefined();
+    });
+  });
+});
+
+describe('QA-2026-07-26 — voice-drafted estimate line items (lineItemDescriptions)', () => {
+  let store: VoiceSessionStore;
+  let proposalRepo: InMemoryProposalRepository;
+  let auditRepo: InMemoryAuditRepository;
+  let onCallRepo: InMemoryOnCallRepository;
+
+  beforeEach(() => {
+    store = new VoiceSessionStore({ startInterval: false });
+    proposalRepo = new InMemoryProposalRepository();
+    auditRepo = new InMemoryAuditRepository();
+    onCallRepo = new InMemoryOnCallRepository();
+  });
+
+  afterEach(() => {
+    store.dispose();
+  });
+
+  function buildAdapter(catalogRepo?: InMemoryCatalogItemRepository): InAppVoiceAdapter {
+    return new InAppVoiceAdapter({
+      store,
+      gateway: scriptedGateway([]),
+      proposalRepo,
+      auditRepo,
+      onCallRepo,
+      ...(catalogRepo ? { catalogRepo } : {}),
+    });
+  }
+
+  function callBuildVoiceDraftLineItems(
+    adapter: InAppVoiceAdapter,
+    tenantId: string,
+    descriptions: string[],
+    amount: unknown,
+  ): Promise<CatalogPricingOutcome> {
+    return (
+      adapter as unknown as {
+        buildVoiceDraftLineItems: (
+          t: string,
+          d: string[],
+          a: unknown,
+        ) => Promise<CatalogPricingOutcome>;
+      }
+    ).buildVoiceDraftLineItems(tenantId, descriptions, amount);
+  }
+
+  function callHandleCreateProposal(
+    adapter: InAppVoiceAdapter,
+    session: VoiceSession,
+    effect: SideEffect,
+  ): Promise<string | undefined> {
+    return (
+      adapter as unknown as {
+        handleCreateProposal: (s: VoiceSession, e: SideEffect) => Promise<string | undefined>;
+      }
+    ).handleCreateProposal(session, effect);
+  }
+
+  describe('buildVoiceDraftLineItems (unit)', () => {
+    it('single description + amount produces one correctly-priced item', async () => {
+      const outcome = await callBuildVoiceDraftLineItems(
+        buildAdapter(),
+        TENANT,
+        ['diagnostic labor'],
+        15000,
+      );
+      expect(outcome.lineItems).toHaveLength(1);
+      expect(outcome.lineItems[0].description).toBe('diagnostic labor');
+      expect(outcome.lineItems[0].quantity).toBe(1);
+      expect(outcome.lineItems[0].unitPrice).toBe(15000);
+      // No catalog wired — kept as the caller-quoted price but flagged for
+      // review rather than trusted outright.
+      expect(outcome.lineItems[0].pricingSource).toBe('uncatalogued');
+      expect(outcome.requiresReview).toBe(true);
+    });
+
+    it('multiple descriptions + amount evenly splits the total across lines', async () => {
+      const outcome = await callBuildVoiceDraftLineItems(
+        buildAdapter(),
+        TENANT,
+        ['diagnostic labor', 'replacement filter', 'disposal fee'],
+        30000,
+      );
+      expect(outcome.lineItems).toHaveLength(3);
+      const prices = outcome.lineItems.map((li) => li.unitPrice as number);
+      expect(prices).toEqual([10000, 10000, 10000]);
+      expect(prices.reduce((a, b) => a + b, 0)).toBe(30000);
+    });
+
+    it('an uneven split folds the remainder into the last line so the sum matches the quoted total exactly', async () => {
+      const outcome = await callBuildVoiceDraftLineItems(
+        buildAdapter(),
+        TENANT,
+        ['line a', 'line b', 'line c'],
+        10000,
+      );
+      const prices = outcome.lineItems.map((li) => li.unitPrice as number);
+      expect(prices.reduce((a, b) => a + b, 0)).toBe(10000);
+      expect(prices[0]).toBe(3333);
+      expect(prices[1]).toBe(3333);
+      expect(prices[2]).toBe(3334);
+    });
+
+    it('a description with a catalog match uses the catalog price and does not force review', async () => {
+      const catalogRepo = new InMemoryCatalogItemRepository();
+      await catalogRepo.create(
+        createCatalogItem({
+          tenantId: TENANT,
+          name: 'Diagnostic Labor',
+          category: 'Labor',
+          unit: 'each',
+          unitPriceCents: 15000,
+        }),
+      );
+      // No amount quoted at all — the catalog is the sole source of truth
+      // and should still price the line (see catalog-resolver.ts: a
+      // missing drafted price never trips the price-conflict check).
+      const outcome = await callBuildVoiceDraftLineItems(
+        buildAdapter(catalogRepo),
+        TENANT,
+        ['diagnostic labor'],
+        undefined,
+      );
+      expect(outcome.lineItems).toHaveLength(1);
+      expect(outcome.lineItems[0].unitPrice).toBe(15000);
+      expect(outcome.lineItems[0].pricingSource).toBe('catalog');
+      expect(outcome.anyUncatalogued).toBe(false);
+      expect(outcome.requiresReview).toBe(false);
+    });
+
+    it('a description with no catalog match keeps the guessed price but forces review', async () => {
+      const catalogRepo = new InMemoryCatalogItemRepository();
+      await catalogRepo.create(
+        createCatalogItem({
+          tenantId: TENANT,
+          name: 'Water Heater Install',
+          category: 'Labor',
+          unit: 'each',
+          unitPriceCents: 90000,
+        }),
+      );
+      const outcome = await callBuildVoiceDraftLineItems(
+        buildAdapter(catalogRepo),
+        TENANT,
+        ['exotic bespoke widget calibration'],
+        15000,
+      );
+      expect(outcome.lineItems).toHaveLength(1);
+      expect(outcome.lineItems[0].unitPrice).toBe(15000);
+      expect(outcome.lineItems[0].pricingSource).toBe('uncatalogued');
+      expect(outcome.anyUncatalogued).toBe(true);
+      expect(outcome.requiresReview).toBe(true);
+    });
+
+    it('no amount and no catalog leaves the line unpriced rather than inventing a number', async () => {
+      // groundLineItemPricing's markAllUncatalogued (catalog-resolver.ts)
+      // only stamps `uncatalogued`/requiresReview for lines that DO carry a
+      // numeric drafted price — "a line with no numeric price carries no
+      // money risk and is left untouched" (its own doc comment), since the
+      // execution handler's normalizeDraftLineItems (handlers.ts) reports a
+      // truly priceless line as malformed at approval time rather than
+      // letting it through silently. Confirm that's exactly what happens
+      // here: no fabricated number, and the execution handler surfaces an
+      // actionable "no usable unit price" error instead of the old opaque
+      // "must include at least one lineItem".
+      const outcome = await callBuildVoiceDraftLineItems(
+        buildAdapter(),
+        TENANT,
+        ['exotic bespoke widget calibration'],
+        undefined,
+      );
+      expect(outcome.lineItems).toHaveLength(1);
+      expect(outcome.lineItems[0].unitPrice).toBeUndefined();
+      expect(outcome.requiresReview).toBe(false);
+
+      const { normalizeDraftLineItems } = await import(
+        '../../../../src/proposals/execution/handlers'
+      );
+      const { malformed } = normalizeDraftLineItems(outcome.lineItems);
+      expect(malformed).toHaveLength(1);
+      expect(malformed[0]).toContain('no usable unit price');
+    });
+  });
+
+  describe('handleCreateProposal integration (regression for "Payload must include at least one lineItem")', () => {
+    it('a draft_estimate create_proposal effect with lineItemDescriptions produces a payload that DraftEstimateExecutionHandler executes successfully', async () => {
+      const catalogRepo = new InMemoryCatalogItemRepository();
+      await catalogRepo.create(
+        createCatalogItem({
+          tenantId: TENANT,
+          name: 'Diagnostic Labor',
+          category: 'Labor',
+          unit: 'each',
+          unitPriceCents: 15000,
+        }),
+      );
+      const adapter = buildAdapter(catalogRepo);
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const session = store.peek(sessionId);
+      if (!session) throw new Error('test session missing');
+
+      const proposalId = await callHandleCreateProposal(adapter, session, {
+        type: 'create_proposal',
+        payload: {
+          tenantId: TENANT,
+          intent: 'draft_estimate',
+          entities: {
+            customerId: 'cust-1',
+            lineItemDescriptions: ['diagnostic labor'],
+            amount: 15000,
+          },
+          sessionId: session.id,
+          confidence: 0.95,
+        },
+      });
+
+      expect(proposalId).toBeDefined();
+      const proposals = await proposalRepo.findByTenant(TENANT);
+      expect(proposals).toHaveLength(1);
+      const proposal = proposals[0];
+      expect(proposal.proposalType).toBe('draft_estimate');
+      expect(Array.isArray(proposal.payload.lineItems)).toBe(true);
+      expect((proposal.payload.lineItems as unknown[]).length).toBe(1);
+
+      // BEFORE this fix, payload.lineItems was always undefined here and
+      // execution failed with "Payload must include at least one lineItem."
+      const handler = new DraftEstimateExecutionHandler();
+      const result = await handler.execute(proposal, {
+        tenantId: TENANT,
+        executedBy: 'operator-1',
+      });
+      expect(result.success).toBe(true);
+    });
+
+    it('forces the proposal out of auto-approval when a drafted line has no catalog match, even at high classifier confidence', async () => {
+      const adapter = buildAdapter(); // no catalogRepo — every line is uncatalogued
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const session = store.peek(sessionId);
+      if (!session) throw new Error('test session missing');
+
+      await callHandleCreateProposal(adapter, session, {
+        type: 'create_proposal',
+        payload: {
+          tenantId: TENANT,
+          intent: 'draft_estimate',
+          entities: {
+            customerId: 'cust-1',
+            lineItemDescriptions: ['diagnostic labor'],
+            amount: 15000,
+          },
+          sessionId: session.id,
+          // High confidence would normally auto-approve a capture-class
+          // proposal — must be blocked by the uncatalogued price cap.
+          confidence: 0.99,
+        },
+      });
+
+      const proposals = await proposalRepo.findByTenant(TENANT);
+      expect(proposals).toHaveLength(1);
+      expect(proposals[0].status).not.toBe('approved');
+      expect(proposals[0].confidenceScore).toBeLessThanOrEqual(0.85);
     });
   });
 });
