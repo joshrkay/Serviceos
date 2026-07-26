@@ -31,7 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # node-version-file rather than a literal: this job is the one that
       # should fail if .nvmrc and the rest of CI ever disagree again.

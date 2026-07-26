@@ -40,7 +40,7 @@ jobs:
       # (no cache) and aborts before spending if the sample would exceed this.
       VOICE_EVAL_COST_CAP_CENTS: '500'   # $5 per script
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Check for API key (fork safety)
         id: check
         run: |
