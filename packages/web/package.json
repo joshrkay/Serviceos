@@ -14,7 +14,7 @@
   "dependencies": {
     "@ai-service-os/shared": "*",
     "@clerk/clerk-react": "^5.61.3",
-    "@stripe/react-stripe-js": "^3.10.0",
+    "@stripe/react-stripe-js": "^6.8.0",
     "@stripe/stripe-js": "^5.10.0",
     "clsx": "^2.1.1",
     "lucide-react": "^0.469.0",
