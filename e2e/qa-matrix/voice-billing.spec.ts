@@ -29,9 +29,16 @@ async function voiceProposal(
 
 matrixTest('VOX-05', 'Voice-triggered estimate draft creation', async (h) => {
   const { token, tenantId, jobId } = h.tenantA;
+  // Job entity resolution (packages/api/src/ai/resolution/pg-entity-resolver.ts
+  // resolveJob) is pg_trgm SIMILARITY against jobs.summary — there is no
+  // exact-id or job-number path for jobs (unlike invoices/estimates, which
+  // match an exact document number). A real caller never reads a job UUID
+  // aloud, so speaking the raw jobId here can never resolve; reference it the
+  // way a caller actually would — by the job's own summary text (seeded as
+  // "QA Matrix job for <slug>" in e2e/qa-matrix/fixtures/seed.ts).
   const flow = await voiceProposal(
     h,
-    `Draft an estimate for job ${jobId} with one diagnostic labor line for $150.`,
+    `Draft an estimate for the QA Matrix job with one diagnostic labor line for $150.`,
     '05',
   );
   if (!flow) return;
@@ -82,11 +89,15 @@ matrixTest('VOX-06', 'Voice-triggered estimate send transition', async (h) => {
     label: '06-seed-estimate',
     expectStatus: 201,
   });
-  const estimateId = (seed.response.body as { id: string }).id;
-
+  const seedBody = seed.response.body as { id: string; estimateNumber: string };
+  const estimateId = seedBody.id;
+  // resolveEstimate (pg-entity-resolver.ts) only matches the exact
+  // estimate_number document number (e.g. "EST-0094") — a real caller reads
+  // that off a document, never the internal UUID, so reference it the same
+  // way here.
   const flow = await voiceProposal(
     h,
-    `Please send estimate ${estimateId} to the customer by email.`,
+    `Please send estimate ${seedBody.estimateNumber} to the customer by email.`,
     '06',
   );
   if (!flow) return;
@@ -110,9 +121,11 @@ matrixTest('VOX-06', 'Voice-triggered estimate send transition', async (h) => {
 
 matrixTest('VOX-07', 'Voice-triggered invoice creation from sold work', async (h) => {
   const { token, tenantId, jobId } = h.tenantA;
+  // See VOX-05 — job resolution is fuzzy-matched against jobs.summary, not
+  // an id lookup, so reference the job the way a caller actually would.
   const flow = await voiceProposal(
     h,
-    `Create an invoice for job ${jobId} for the completed furnace repair, $350 total.`,
+    `Create an invoice for the QA Matrix job for the completed furnace repair, $350 total.`,
     '07',
   );
   if (!flow) return;
@@ -163,11 +176,13 @@ matrixTest('VOX-08', 'Voice-triggered invoice issue transition', async (h) => {
     label: '08-seed-invoice',
     expectStatus: 201,
   });
-  const invoiceId = (created.response.body as { id: string }).id;
-
+  const createdBody = created.response.body as { id: string; invoiceNumber: string };
+  const invoiceId = createdBody.id;
+  // See VOX-06 — invoice resolution matches the exact invoice_number document
+  // number (e.g. "INV-0042"), not the internal UUID.
   const flow = await voiceProposal(
     h,
-    `Issue invoice ${invoiceId} so the customer can pay.`,
+    `Issue invoice ${createdBody.invoiceNumber} so the customer can pay.`,
     '08',
   );
   if (!flow) return;
