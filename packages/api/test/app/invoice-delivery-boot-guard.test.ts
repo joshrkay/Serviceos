@@ -13,6 +13,10 @@ describe('invoice delivery boot guard (source)', () => {
     resolve(__dirname, '../../src/proposals/execution/invoice-delivery-factory.ts'),
     'utf8',
   );
+  const deliveryFactorySrc = readFileSync(
+    resolve(__dirname, '../../src/notifications/delivery-provider-factory.ts'),
+    'utf8',
+  );
 
   it('throws in prod/staging when SendService is not configured (unless noop opted in)', () => {
     expect(appSrc).toMatch(/resolveInvoiceDeliveryProvider/);
@@ -29,9 +33,11 @@ describe('invoice delivery boot guard (source)', () => {
     expect(factorySrc).toMatch(/SendService|delivery/i);
     expect(factorySrc).toMatch(/new NoopInvoiceDeliveryProvider\(\)/);
     expect(factorySrc).toMatch(/SendServiceInvoiceDeliveryProvider/);
-    // messageDelivery must not fall back to InMemory in prod/staging without creds
-    expect(appSrc).toMatch(
-      /messageDelivery[\s\S]*config\.NODE_ENV === 'prod' \|\| config\.NODE_ENV === 'staging'[\s\S]*\? null/,
-    );
+    // messageDelivery must not fall back to InMemory in prod/staging without
+    // creds. That decision moved into notifications/delivery-provider-factory.ts
+    // (app.ts now just calls it and passes the NORMALIZED config.NODE_ENV).
+    expect(appSrc).toMatch(/createMessageDeliveryProvider\(\{[\s\S]*nodeEnv:\s*config\.NODE_ENV/);
+    expect(deliveryFactorySrc).toMatch(/if \(deploymentEnv\)/);
+    expect(deliveryFactorySrc).toMatch(/provider: null,\s*\n\s*mode: 'none',/);
   });
 });

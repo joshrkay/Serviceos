@@ -386,13 +386,8 @@ import {
 import { PgFeedbackRequestRepository } from './feedback/pg-feedback-request';
 import { PgFeedbackResponseRepository } from './feedback/pg-feedback-response';
 import { NoopFeedbackDispatcher, MessageDeliveryFeedbackDispatcher } from './feedback/dispatcher';
-import {
-  MessageDeliveryProvider,
-  InMemoryDeliveryProvider,
-} from './notifications/delivery-provider';
-import { TwilioDeliveryProvider } from './notifications/twilio-delivery-provider';
-import { selectEmailProvider } from './notifications/twilio-email-delivery-provider';
-import { PerTenantTwilioDeliveryProvider } from './notifications/per-tenant-twilio-delivery-provider';
+import { MessageDeliveryProvider } from './notifications/delivery-provider';
+import { createMessageDeliveryProvider } from './notifications/delivery-provider-factory';
 import { GatedMessageDelivery } from './notifications/gated-message-delivery';
 import { SendService } from './notifications/send-service';
 import {
@@ -1505,98 +1500,29 @@ export function createApp(): AppWithLifecycle {
     : new InMemoryCallTranscriptTurnRepository();
 
   // Customer-facing message delivery for estimates and invoices.
-  // Production wires Twilio (SMS) + Twilio SendGrid (email). Without
-  // the env vars, falls back to InMemoryDeliveryProvider so the app
-  // boots in dev without delivery credentials. Send routes return
+  // prod/staging wire Twilio (SMS) + Twilio-native email or SendGrid; every
+  // other environment gets InMemoryDeliveryProvider so the app boots without
+  // delivery credentials AND cannot send real messages. Send routes return
   // 503 when sendService is undefined.
   const dispatchRepo = pool ? new PgDispatchRepository(pool) : new InMemoryDispatchRepository();
-  let rawMessageDelivery: MessageDeliveryProvider | null;
-  // The two credential legs are INDEPENDENT. Previously a single `if` required
-  // all five vars, so production — which has Twilio creds but no SendGrid creds
-  // — got `rawMessageDelivery = null` and NO SMS, purely for want of an email
-  // key. Each leg is now wired only if its own credentials are present, and
-  // TwilioDeliveryProvider fails loudly at send time on the unconfigured
-  // channel (see its config doc).
-  const smsCredsPresent = !!(
-    process.env.TWILIO_ACCOUNT_SID &&
-    process.env.TWILIO_AUTH_TOKEN &&
-    process.env.TWILIO_FROM_NUMBER
-  );
-  // Email has TWO possible backends. Twilio-native email (comms.twilio.com,
-  // reusing TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN — no new secret) when
-  // TWILIO_EMAIL_FROM_ADDRESS is set; SendGrid when SENDGRID_API_KEY +
-  // SENDGRID_FROM_EMAIL are set; neither ⇒ email unconfigured, which
-  // TwilioDeliveryProvider surfaces as a loud DeliveryError at send time.
-  // `selectEmailProvider` is the single, unit-tested rule (Twilio-native wins
-  // deterministically if both are somehow complete).
-  const emailProvider = selectEmailProvider(process.env);
-  const emailCredsPresent = emailProvider !== 'none';
-  const emailProviderLogger = createLogger({
-    service: 'notifications-email-provider',
-    environment: process.env.NODE_ENV || 'development',
+  // Provider selection lives in notifications/delivery-provider-factory.ts so
+  // it is unit-testable without booting createApp(). The invariant it enforces:
+  // ONLY prod/staging (or an explicit DELIVERY_ALLOW_REAL_PROVIDERS=true
+  // opt-in) may construct a real Twilio/SendGrid provider — a non-production
+  // environment is structurally incapable of sending, not merely flagged off.
+  // Inside prod/staging the SMS and email credential legs stay INDEPENDENT
+  // (36d30807), so SMS works with no email credentials at all. The chosen mode
+  // is logged at boot so a silent promotion can never happen unnoticed again.
+  const deliveryWiring = createMessageDeliveryProvider({
+    nodeEnv: config.NODE_ENV,
+    env: process.env,
+    pool,
+    logger: createLogger({
+      service: 'notifications-delivery',
+      environment: process.env.NODE_ENV || 'development',
+    }),
   });
-  if (emailCredsPresent) {
-    const sendgridAlsoConfigured = !!(
-      process.env.SENDGRID_API_KEY && process.env.SENDGRID_FROM_EMAIL
-    );
-    // Never let the choice be invisible: if both credential sets are present,
-    // say which one actually carries mail.
-    if (emailProvider === 'twilio-email' && sendgridAlsoConfigured) {
-      emailProviderLogger.warn(
-        'Both Twilio-native email and SendGrid are configured; using Twilio-native email',
-        { emailProvider }
-      );
-    } else {
-      emailProviderLogger.info('Email delivery provider selected', { emailProvider });
-    }
-  }
-  if (smsCredsPresent || emailCredsPresent) {
-    // The global Twilio/SendGrid provider handles email and any send that
-    // carries no tenantId; the global Twilio SMS creds also serve as the
-    // dev/test fallback inside getTenantTwilioCreds.
-    const baseDelivery = new TwilioDeliveryProvider({
-      ...(smsCredsPresent
-        ? {
-            sms: {
-              accountSid: process.env.TWILIO_ACCOUNT_SID as string,
-              authToken: process.env.TWILIO_AUTH_TOKEN as string,
-              fromNumber: process.env.TWILIO_FROM_NUMBER as string,
-            },
-          }
-        : {}),
-      ...(emailProvider === 'twilio-email'
-        ? {
-            twilioEmail: {
-              accountSid: process.env.TWILIO_ACCOUNT_SID as string,
-              authToken: process.env.TWILIO_AUTH_TOKEN as string,
-              fromAddress: process.env.TWILIO_EMAIL_FROM_ADDRESS as string,
-              fromName: process.env.TWILIO_EMAIL_FROM_NAME,
-            },
-          }
-        : {}),
-      ...(emailProvider === 'sendgrid'
-        ? {
-            email: {
-              apiKey: process.env.SENDGRID_API_KEY as string,
-              fromEmail: process.env.SENDGRID_FROM_EMAIL as string,
-              fromName: process.env.SENDGRID_FROM_NAME,
-              replyToEmail: process.env.SENDGRID_REPLY_TO_EMAIL,
-            },
-          }
-        : {}),
-    });
-    // Feature 7 — when a Postgres pool is available, route per-tenant SMS
-    // through each tenant's own Twilio subaccount (failing closed when a
-    // tenant has no credentials). Without a pool we cannot resolve per-tenant
-    // creds, so keep the global provider.
-    rawMessageDelivery = pool
-      ? new PerTenantTwilioDeliveryProvider({ pool, base: baseDelivery })
-      : baseDelivery;
-  } else if (config.NODE_ENV === 'prod' || config.NODE_ENV === 'staging') {
-    rawMessageDelivery = null;
-  } else {
-    rawMessageDelivery = new InMemoryDeliveryProvider();
-  }
+  const rawMessageDelivery: MessageDeliveryProvider | null = deliveryWiring.provider;
   // RV-130 — consent ledger (append-only consent_events). Constructed here —
   // before the SMS gate — because WS12 makes it the cross-channel source of
   // truth both outbound gates consult; the STOP/START keyword handlers and
