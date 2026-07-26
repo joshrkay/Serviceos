@@ -108,9 +108,12 @@ matrixTest('SMS-01', 'Outbound SMS dispatch records + entity_type CHECK', async 
 
   // QA-2026-06-05: drive the PROPOSAL path the confirmation notifier is
   // actually wired to (REST-created appointments don't notify by design).
-  // chain() seeds the consenting customer + job; the voice booking resolves
-  // the tenant's most recent active job — that one — and execution fires the
-  // confirmation through scheduling-notifications.
+  // chain() exercises the REST create path; the voice booking below is pinned
+  // to the RESOLVED CALLER's job by placeAppointmentHold's ownership guard
+  // (place-hold.ts rejects a job whose customerId != the resolved caller), so
+  // the confirmation is addressed to the seeded '555-0100' fixture customer —
+  // which is why fixtures/seed.ts seeds that row with sms_consent=true.
+  // Execution fires the confirmation through scheduling-notifications.
   await chain(h, true, '01');
   // QA-2026-07-26 — callerPhone = the seeded customer's phone (fixtures/
   // seed.ts: '555-0100') so InAppVoiceAdapter resolves the caller up front;

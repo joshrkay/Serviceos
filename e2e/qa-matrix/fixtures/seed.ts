@@ -98,6 +98,19 @@ async function ensureTenantFixture(client: Client, slug: string): Promise<Fixtur
   );
 
   // Customer: display_name is the idempotency handle here.
+  //
+  // QA-2026-07-26 — sms_consent MUST be true for this primary customer.
+  // SMS-01 drives the voice booking with callerPhone='555-0100', so
+  // InAppVoiceAdapter resolves the caller to THIS row, and placeAppointmentHold's
+  // ownership guard (packages/api/src/ai/scheduling/place-hold.ts) rejects any
+  // job whose customerId !== the resolved caller — pinning the booked
+  // appointment to this customer's job. The confirmation SMS is therefore
+  // necessarily addressed to this customer; with sms_consent=false the consent
+  // gate suppresses it and returns before recordDispatch(), so zero rows land in
+  // message_dispatches and SMS-01 can never pass. The negative case (SMS-02)
+  // does not depend on this row — it creates its own non-consenting customer
+  // via chain(h, false, '02'). The ambiguous pair below stays non-consenting;
+  // its consent is irrelevant to what it tests.
   const customerDisplay = `${slug}-customer`;
   const existingCustomer = await client.query(
     `SELECT id FROM customers WHERE tenant_id = $1 AND display_name = $2 LIMIT 1`,
@@ -110,7 +123,7 @@ async function ensureTenantFixture(client: Client, slug: string): Promise<Fixtur
         `INSERT INTO customers
            (id, tenant_id, first_name, last_name, display_name, primary_phone, preferred_channel,
             sms_consent, is_archived, created_by, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, 'none', false, false, $7, now(), now())
+         VALUES ($1, $2, $3, $4, $5, $6, 'none', true, false, $7, now(), now())
          RETURNING id`,
         [randomUUID(), tenantId, 'QA', slug, customerDisplay, '555-0100', systemUser]
       )
