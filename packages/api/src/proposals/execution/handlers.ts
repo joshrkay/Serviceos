@@ -351,6 +351,18 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
     },
     /** Tenant-timezone fallback for payloads that omit `timezone`. */
     private readonly settingsRepo?: Pick<SettingsRepository, 'findByTenant'>,
+    /**
+     * SCH-02 — auto-open-a-job fallback. A caller describing NEW work
+     * ("book an appointment for a furnace tune-up") is classified with
+     * entities.jobTitle and no resolvable jobId (see entity-resolution.ts's
+     * JOB_REF_INTENTS comment — jobTitle documents "title of new job",
+     * deliberately never fuzzy-searched as an existing-job reference for
+     * create_appointment). Mirrors DraftEstimateExecutionHandler /
+     * CreateJobExecutionHandler's own customer-location lookup so the new
+     * job lands somewhere real. Absent → the jobTitle fallback is skipped
+     * and the handler keeps its original hard-fail behavior.
+     */
+    private readonly locationRepo?: LocationRepository,
   ) {}
 
   // Degrades to a synthetic-id passthrough (saves nothing) without the
@@ -368,8 +380,64 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
       typeof payload.linkedJobId === 'string' && payload.linkedJobId.length > 0
         ? payload.linkedJobId
         : undefined;
-    const targetJobId =
+    let targetJobId =
       linkedJobId ?? (typeof payload.jobId === 'string' && payload.jobId.length > 0 ? payload.jobId : undefined);
+
+    // SCH-02 — a caller describing NEW work ("book an appointment for a
+    // furnace tune-up") is classified with entities.jobTitle (documented as
+    // "title of new job on create_job" — a NAME for work being CREATED, not
+    // a lookup target) and no resolvable jobId, because create_appointment
+    // is deliberately excluded from entity-resolution.ts's JOB_REF_INTENTS
+    // fuzzy job search. Without this fallback every such call hard-failed
+    // below. When a jobTitle is present alongside an already-resolved
+    // customerId, auto-open a new job (reusing the same createJob domain fn
+    // + customer-location lookup CreateJobExecutionHandler and
+    // DraftEstimateExecutionHandler already use) and book against it —
+    // matching how a human dispatcher would actually handle the call. A
+    // linkedJobId revisit never reaches here (targetJobId is already set).
+    if (!targetJobId) {
+      const jobTitle = typeof payload.jobTitle === 'string' ? payload.jobTitle.trim() : '';
+      const customerId =
+        typeof payload.customerId === 'string' && payload.customerId.length > 0
+          ? payload.customerId
+          : undefined;
+      if (jobTitle && customerId && this.jobRepo && this.locationRepo) {
+        const locations = await this.locationRepo.findByCustomer(context.tenantId, customerId);
+        const primary = locations.find((loc) => loc.isPrimary && !loc.isArchived);
+        const fallback = locations.find((loc) => !loc.isArchived);
+        const locationId = primary?.id ?? fallback?.id;
+        if (!locationId) {
+          return {
+            success: false,
+            error: 'Customer has no service location — add one before booking a new job',
+          };
+        }
+        try {
+          const job = await createJob(
+            {
+              tenantId: context.tenantId,
+              customerId,
+              locationId,
+              summary: jobTitle,
+              createdBy: context.executedBy,
+            },
+            this.jobRepo,
+            this.auditRepo,
+          );
+          targetJobId = job.id;
+        } catch (err) {
+          return {
+            success: false,
+            error: err instanceof Error ? err.message : String(err),
+          };
+        }
+      }
+    }
+
+    // customerId ALSO missing in the jobTitle-no-jobId scenario is a
+    // distinct, expected failure — can't open a job without a customer to
+    // own it. Falls through to the same original error as any other
+    // unresolved jobId so callers see one consistent message.
     if (!targetJobId) {
       return { success: false, error: 'Payload must include a valid jobId' };
     }
@@ -1101,6 +1169,9 @@ export function createExecutionHandlerRegistry(deps?: {
       // reassign/crew/reschedule handlers already consume.
       deps?.feasibilityDeps,
       deps?.settingsRepo,
+      // SCH-02 — jobTitle-no-jobId auto-open-a-job fallback needs the same
+      // customer-location lookup CreateJobExecutionHandler/DraftEstimateExecutionHandler use.
+      deps?.locationRepo,
     ),
     new CreateBookingExecutionHandler(deps?.appointmentRepo, deps?.auditRepo),
     new DraftEstimateExecutionHandler(
